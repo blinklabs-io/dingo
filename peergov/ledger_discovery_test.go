@@ -291,7 +291,7 @@ func TestLedgerPeerDeficit(t *testing.T) {
 		Address:           "44.0.0.3:3001",
 		NormalizedAddress: "44.0.0.3:3001",
 	})
-	pg.ledgerKnownAddrs["44.0.0.3:3001"] = struct{}{}
+	pg.ledgerKnownAddrs["44.0.0.3:3001"] = "44.0.0.3:3001"
 	pg.mu.Unlock()
 
 	assert.Equal(t, 2, pg.ledgerPeerDeficit())
@@ -343,8 +343,8 @@ func TestPruneLedgerKnownAddrsLocked_RemovesStaleEntries(t *testing.T) {
 	})
 	// "44.0.0.2:3001" was ledger-known but its peer already left p.peers
 	// (deny, capacity, or reconnect-failure eviction).
-	pg.ledgerKnownAddrs["44.0.0.1:3001"] = struct{}{}
-	pg.ledgerKnownAddrs["44.0.0.2:3001"] = struct{}{}
+	pg.ledgerKnownAddrs["44.0.0.1:3001"] = "44.0.0.1:3001"
+	pg.ledgerKnownAddrs["44.0.0.2:3001"] = "44.0.0.2:3001"
 
 	pg.pruneLedgerKnownAddrsLocked()
 
@@ -366,7 +366,7 @@ func TestPeerGovernor_Reconcile_PrunesStaleLedgerKnownAddr(t *testing.T) {
 	})
 
 	pg.mu.Lock()
-	pg.ledgerKnownAddrs["44.0.0.9:3001"] = struct{}{}
+	pg.ledgerKnownAddrs["44.0.0.9:3001"] = "44.0.0.9:3001"
 	pg.mu.Unlock()
 
 	pg.reconcile(t.Context())
@@ -435,6 +435,67 @@ func TestDiscoverLedgerPeers_ReconcilesAgainstCurrentRelaySet(t *testing.T) {
 		gossipPeerRetained,
 		"the peer itself must remain connected; only its ledger association is pruned",
 	)
+}
+
+// TestDiscoverLedgerPeers_ReconcilesEvenWhenTargetSatisfiedAndNotUrgent
+// verifies reconciliation runs on the discovery cadence even in the common,
+// healthy steady state: LedgerPeerTarget already satisfied and the node not
+// short of upstreams (ledgerPeersUrgent false). discoverLedgerPeersContext
+// used to return before ever fetching relays or reconciling in exactly this
+// case, so a delisted relay's stale association could never be reconciled
+// away as long as the target stayed satisfied — the association itself was
+// what kept it looking satisfied, permanently masking the real deficit left
+// behind. TestDiscoverLedgerPeers_ReconcilesAgainstCurrentRelaySet does not
+// catch this: its default MinHotPeers makes ledgerPeersUrgent true, which
+// bypassed the old early return for an unrelated reason.
+func TestDiscoverLedgerPeers_ReconcilesEvenWhenTargetSatisfiedAndNotUrgent(
+	t *testing.T,
+) {
+	provider := &mockLedgerPeerProvider{
+		relays: []PoolRelay{{Hostname: "44.0.0.9", Port: 3001}},
+	}
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		LedgerPeerProvider: provider,
+		LedgerPeerTarget:   1,
+		MinHotPeers:        1,
+		DisableOutbound:    true,
+	})
+	require.NoError(t, pg.AddPeer("44.0.0.9:3001", PeerSourceP2PGossip))
+	// Give the gossip peer a client connection so it counts as an eligible
+	// upstream, making ledgerPeersUrgent false without a real dial
+	// (DisableOutbound prevents one anyway).
+	pg.mu.Lock()
+	pg.peers[0].Connection = &PeerConnection{IsClient: true}
+	pg.mu.Unlock()
+
+	pg.discoverLedgerPeers()
+
+	require.False(t, pg.ledgerPeersUrgent(), "precondition: must not be urgent")
+	require.LessOrEqual(
+		t,
+		pg.ledgerPeerDeficit(),
+		0,
+		"precondition: target must already be satisfied",
+	)
+	pg.mu.Lock()
+	_, knownBefore := pg.ledgerKnownAddrs["44.0.0.9:3001"]
+	pg.mu.Unlock()
+	require.True(t, knownBefore)
+
+	// The pool moves its registration elsewhere. The target-satisfied,
+	// not-urgent state from above is exactly the condition that used to
+	// skip reconciliation entirely.
+	provider.relays = []PoolRelay{{Hostname: "44.0.0.99", Port: 3001}}
+	pg.lastLedgerPeerRefresh.Store(0) // force past the refresh-interval gate
+	pg.discoverLedgerPeers()
+
+	pg.mu.Lock()
+	_, stillKnown := pg.ledgerKnownAddrs["44.0.0.9:3001"]
+	pg.mu.Unlock()
+	assert.False(t, stillKnown,
+		"a delisted relay's association must be reconciled away even when "+
+			"the target is already satisfied and the node is not urgent")
 }
 
 // TestDiscoverLedgerPeers_ReAssociatesRelistedRelay is the replacement
@@ -506,7 +567,7 @@ func TestReconcileLedgerKnownAddrs_EmptyCandidatesIsNoop(t *testing.T) {
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	pg.mu.Lock()
-	pg.ledgerKnownAddrs["44.0.0.9:3001"] = struct{}{}
+	pg.ledgerKnownAddrs["44.0.0.9:3001"] = "44.0.0.9:3001"
 	pg.mu.Unlock()
 
 	pg.reconcileLedgerKnownAddrs(nil)
@@ -527,8 +588,8 @@ func TestReconcileLedgerKnownAddrs_RepeatedCallsAreIdempotent(t *testing.T) {
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	pg.mu.Lock()
-	pg.ledgerKnownAddrs["44.0.0.1:3001"] = struct{}{}
-	pg.ledgerKnownAddrs["44.0.0.2:3001"] = struct{}{}
+	pg.ledgerKnownAddrs["44.0.0.1:3001"] = "44.0.0.1:3001"
+	pg.ledgerKnownAddrs["44.0.0.2:3001"] = "44.0.0.2:3001"
 	pg.mu.Unlock()
 
 	candidates := []string{"44.0.0.1:3001", "44.0.0.2:3001"}
@@ -607,7 +668,7 @@ func TestCountLedgerPeersLocked(t *testing.T) {
 		{Source: PeerSourceTopologyLocalRoot},
 		{Source: PeerSourceP2PLedger},
 	}
-	pg.ledgerKnownAddrs["44.0.0.10:3001"] = struct{}{}
+	pg.ledgerKnownAddrs["44.0.0.10:3001"] = "44.0.0.10:3001"
 	count := pg.countLedgerPeersLocked()
 	pg.mu.Unlock()
 	assert.Equal(t, 4, count)

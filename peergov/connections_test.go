@@ -30,6 +30,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/protocol/handshake"
 )
@@ -356,7 +357,13 @@ func TestIsPermanentNetworkMagicMismatch(t *testing.T) {
 	}
 }
 
-func TestPermanentNetworkMagicMismatchDenialSuppressesRediscoveryUntilRestart(
+// TestNetworkMismatchDenialSurvivesTransientExpiryUntilDuration verifies the
+// network-mismatch denial is a distinct, longer-lived bound than the
+// ordinary transient deny list: it stays in effect after the transient
+// entry for the same address has already expired and been cleaned up, and
+// only clears early via an in-memory restart (TestNetworkMismatchDenialExpiresAfterDuration
+// covers it clearing on its own bound, without a restart).
+func TestNetworkMismatchDenialSurvivesTransientExpiryUntilDuration(
 	t *testing.T,
 ) {
 	const address = "44.0.0.10:3001"
@@ -395,19 +402,19 @@ func TestPermanentNetworkMagicMismatchDenialSuppressesRediscoveryUntilRestart(
 	}
 	if peerCount != 0 {
 		t.Fatalf(
-			"ledger peer count = %d, want 0 after permanent denial",
+			"ledger peer count = %d, want 0 after network-mismatch denial",
 			peerCount,
 		)
 	}
 
 	if pg.addLedgerPeer(address) {
-		t.Fatal("ledger discovery reported adding permanently denied peer")
+		t.Fatal("ledger discovery reported adding a still-denied peer")
 	}
 	pg.mu.Lock()
 	peerCount = len(pg.peers)
 	pg.mu.Unlock()
 	if peerCount != 0 {
-		t.Fatalf("ledger rediscovery re-added permanently denied peer")
+		t.Fatalf("ledger rediscovery re-added a still-denied peer")
 	}
 
 	restarted := NewPeerGovernor(PeerGovernorConfig{Logger: logger})
@@ -517,8 +524,8 @@ func TestNetworkMismatchDenialExpiresAfterDuration(t *testing.T) {
 
 // TestNetworkMismatchDenialAllowsRealRediscoveryAfterExpiry is the
 // end-to-end replacement counterpart to
-// TestPermanentNetworkMagicMismatchDenialSuppressesRediscoveryUntilRestart:
-// it proves that once NetworkMismatchDenyDuration elapses, ledger discovery
+// TestNetworkMismatchDenialSurvivesTransientExpiryUntilDuration: it proves
+// that once NetworkMismatchDenyDuration elapses, ledger discovery
 // can actually add a real peer back at the denied address, without needing
 // a process restart to get there. TestNetworkMismatchDenialExpiresAfterDuration
 // only checks the internal isDeniedLocked/cleanup bookkeeping; this checks
@@ -583,7 +590,7 @@ func TestNetworkMismatchDenialAllowsRealRediscoveryAfterExpiry(t *testing.T) {
 	}
 }
 
-func TestPermanentNetworkMagicMismatchDeniesPeerRemovedDuringHandshake(
+func TestNetworkMagicMismatchDeniesPeerRemovedDuringHandshake(
 	t *testing.T,
 ) {
 	const (
@@ -1298,6 +1305,90 @@ func TestHandleConnectionClosedEvent_CriticalHotPeerLogHasSingleComponent(
 			"component attribute appears %d times, want 1: %s",
 			got,
 			found,
+		)
+	}
+}
+
+// TestPeerGovernor_TestPeer_StaleProbeCompletionDoesNotCorruptReplacementPeer
+// covers a race between reconcile's isStaleTestOnlyPeerLocked (which prunes a
+// stale TestPeer-only probe entry) and a slow, outside-lock re-test still
+// running against that same address: TestPeer's completion re-finds its
+// target by address only, so if the probe entry is pruned and a real peer is
+// admitted at the same address while the test is in flight, the completion
+// must not silently overwrite that unrelated real peer's test result or deny
+// its address.
+func TestPeerGovernor_TestPeer_StaleProbeCompletionDoesNotCorruptReplacementPeer(
+	t *testing.T,
+) {
+	const address = "44.0.0.30:3001"
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		TestCooldown: time.Hour,
+		PeerTestFunc: func(addr string) error {
+			close(entered)
+			<-release
+			return errors.New("simulated failure")
+		},
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = pg.TestPeer(address)
+	}()
+
+	// Wait until the outside-lock test has actually started: the probe
+	// entry now exists with LastTestTime still zero.
+	testutil.RequireReceive(t, entered, time.Second, "test did not start")
+
+	// Simulate reconcile pruning this now-stale probe concurrently with the
+	// in-flight test above, and a real peer being admitted at the same
+	// address in between (the same replacement scenario
+	// TestPeerGovernor_Reconcile_PrunedTestPeerAllowsReplacement exercises,
+	// but here concurrently with a still-running test against the old entry).
+	pg.mu.Lock()
+	for i, existing := range pg.peers {
+		if existing != nil && existing.Address == address {
+			pg.peers = append(pg.peers[:i], pg.peers[i+1:]...)
+			break
+		}
+	}
+	pg.mu.Unlock()
+	if err := pg.AddPeer(address, PeerSourceP2PGossip); err != nil {
+		t.Fatalf("AddPeer failed: %v", err)
+	}
+
+	// Let the stale in-flight test complete, with a failure result.
+	close(release)
+	testutil.RequireReceive(t, done, time.Second, "TestPeer did not return")
+
+	// The real, replacement peer must be untouched by the stale probe's
+	// result: no LastTestResult/LastTestTime mutation, and its address must
+	// not have been denied.
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	idx := pg.peerIndexByAddress(address)
+	if idx == -1 {
+		t.Fatal("replacement peer is missing after the stale test completed")
+	}
+	peer := pg.peers[idx]
+	if peer.Source != PeerSourceP2PGossip {
+		t.Fatalf("replacement peer source changed to %v", peer.Source)
+	}
+	if peer.LastTestResult != TestResultUnknown {
+		t.Fatalf(
+			"replacement peer's LastTestResult was mutated to %v",
+			peer.LastTestResult,
+		)
+	}
+	if !peer.LastTestTime.IsZero() {
+		t.Fatal("replacement peer's LastTestTime was mutated")
+	}
+	if pg.isDeniedLocked(address) {
+		t.Fatal(
+			"stale probe's failure incorrectly denied the replacement peer's address",
 		)
 	}
 }

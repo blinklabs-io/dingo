@@ -1376,16 +1376,24 @@ func (p *PeerGovernor) TestPeer(address string) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Re-find peer in case slice changed
+	// Re-find peer in case slice changed, but only accept it if it is the
+	// exact entry (same pointer) this call started with, not merely the
+	// same address. reconcile's isStaleTestOnlyPeerLocked can prune a
+	// stale-but-not-yet-recooled TestPeer-only entry concurrently with a
+	// slow, outside-lock re-test still running against it (started before
+	// the entry aged past TestCooldown), and a real peer can be admitted at
+	// the same address in the interim — that is the whole point of pruning
+	// it. Matching by address alone would let this call's result and
+	// deny-list side effects land on that unrelated, newly admitted peer
+	// instead of the probe entry it actually tested.
 	idx := p.peerIndexByAddress(normalized)
-	if idx == -1 {
-		// Peer was removed during test, nothing to update
+	if idx == -1 || p.peers[idx] != peer {
+		// Peer was removed, or replaced by a different peer, during the test.
 		if testErr != nil {
 			return false, testErr
 		}
 		return true, nil
 	}
-	peer = p.peers[idx]
 
 	peer.LastTestTime = time.Now()
 	if testErr != nil {

@@ -179,8 +179,16 @@ type PeerGovernor struct {
 	networkMismatchDenyList map[string]time.Time // address -> expiry time (network-magic mismatch)
 	peers                   []*Peer
 	config                  PeerGovernorConfig
-	lastLedgerPeerRefresh   atomic.Int64        // UnixNano timestamp of last ledger peer discovery
-	ledgerKnownAddrs        map[string]struct{} // addresses seen from ledger discovery
+	lastLedgerPeerRefresh   atomic.Int64 // UnixNano timestamp of last ledger peer discovery
+	// ledgerKnownAddrs maps a retained peer's own normalizeAddress(peer.Address)
+	// key to the raw ledger-relay candidate string (pre-DNS form) it was most
+	// recently matched against. Keyed by the peer's own identity so counting
+	// (countLedgerPeersLocked) and peer-retention pruning
+	// (pruneLedgerKnownAddrsLocked) are self-consistent regardless of whether
+	// a peer's Address happens to be a hostname or an IP literal; the value
+	// is what lets reconcileLedgerKnownAddrs compare against a fresh on-chain
+	// candidate list without re-resolving every peer.
+	ledgerKnownAddrs map[string]string
 	// emergencyRefreshRounds counts consecutive emergency ledger-discovery
 	// rounds since the node last had enough upstreams. It drives the
 	// escalating emergency refresh interval and resets on recovery.
@@ -355,7 +363,7 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 	if cfg.DenyDuration == 0 {
 		cfg.DenyDuration = defaultDenyDuration
 	}
-	if cfg.NetworkMismatchDenyDuration == 0 {
+	if cfg.NetworkMismatchDenyDuration <= 0 {
 		cfg.NetworkMismatchDenyDuration = defaultNetworkMismatchDenyDuration
 	}
 	if cfg.LedgerPeerRefreshInterval == 0 {
@@ -474,7 +482,7 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 		peers:                   []*Peer{},
 		denyList:                make(map[string]time.Time),
 		networkMismatchDenyList: make(map[string]time.Time),
-		ledgerKnownAddrs:        make(map[string]struct{}),
+		ledgerKnownAddrs:        make(map[string]string),
 		negativeDNS:             make(map[string]time.Time),
 	}
 	if cfg.PromRegistry != nil {

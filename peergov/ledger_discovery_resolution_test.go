@@ -81,9 +81,11 @@ func TestAddLedgerPeer_KnownPeerSkipsDNSResolution(t *testing.T) {
 		"an already-known ledger relay must not be re-resolved")
 
 	pg.mu.Lock()
-	// ledgerKnownAddrs is keyed on the pre-DNS hostname-normalized candidate
-	// form, not the peer's resolved NormalizedAddress; see
-	// addLedgerPeerContext/countLedgerPeersLocked.
+	// ledgerKnownAddrs is keyed on normalizeAddress(peer.Address), not the
+	// peer's resolved NormalizedAddress; see
+	// addLedgerPeerContext/countLedgerPeersLocked. Here the peer's Address
+	// is exactly the candidate string, so the key happens to read the same
+	// either way.
 	_, known := pg.ledgerKnownAddrs["relay.example.com:3001"]
 	count := pg.countLedgerPeersLocked()
 	pg.mu.Unlock()
@@ -117,9 +119,11 @@ func TestAddLedgerPeer_KnownPeerMatchedCaseInsensitively(t *testing.T) {
 
 	pg.mu.Lock()
 	peerCount := len(pg.peers)
-	// ledgerKnownAddrs is keyed on the pre-DNS hostname-normalized candidate
-	// form, not the peer's resolved NormalizedAddress; see
-	// addLedgerPeerContext/countLedgerPeersLocked.
+	// ledgerKnownAddrs is keyed on normalizeAddress(peer.Address), not the
+	// peer's resolved NormalizedAddress; see
+	// addLedgerPeerContext/countLedgerPeersLocked. normalizeAddress only
+	// lowercases a hostname, so "Relay.Example.com:3001" and the candidate's
+	// "relay.example.com:3001" produce the same key here.
 	_, known := pg.ledgerKnownAddrs["relay.example.com:3001"]
 	count := pg.countLedgerPeersLocked()
 	pg.mu.Unlock()
@@ -277,4 +281,52 @@ func TestResolveLedgerDiscoveryAddress_FailureNotLoggedAtWarn(t *testing.T) {
 	assert.Contains(t, debugBuf.String(),
 		"failed to resolve ledger relay hostname",
 		"the failure must stay observable at debug level")
+}
+
+// TestAddLedgerPeer_HostnameCandidateCountsPeerAddedByIP covers a peer added
+// under its resolved IP (as topology config commonly does) later matched by
+// a ledger candidate published as a hostname that resolves to that same IP.
+// ledgerKnownAddrs must key on the retained peer's own address, not the
+// candidate's hostname form, or the peer silently stops counting toward
+// LedgerPeerTarget and reconcileLedgerKnownAddrs cannot find it either
+// (both derive their lookup key from peer.Address, which here is the IP,
+// never the hostname).
+func TestAddLedgerPeer_HostnameCandidateCountsPeerAddedByIP(t *testing.T) {
+	countingResolver(t, []net.IP{net.ParseIP("44.0.0.50")}, nil)
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		LedgerPeerTarget: 1,
+	})
+	require.NoError(t, pg.AddPeer("44.0.0.50:3001", PeerSourceP2PGossip))
+
+	added := pg.addLedgerPeer("relay.example.com:3001")
+	require.False(t, added, "existing peer must not be duplicated")
+
+	pg.mu.Lock()
+	count := pg.countLedgerPeersLocked()
+	peerKey := pg.normalizeAddress("44.0.0.50:3001")
+	pg.mu.Unlock()
+	assert.Equal(
+		t,
+		1,
+		count,
+		"a peer added under its IP must count when a hostname candidate resolves to it",
+	)
+
+	// The relay is still listed under its hostname form: reconciliation
+	// must not prune the association.
+	pg.reconcileLedgerKnownAddrs([]string{"relay.example.com:3001"})
+	pg.mu.Lock()
+	_, stillKnown := pg.ledgerKnownAddrs[peerKey]
+	pg.mu.Unlock()
+	assert.True(t, stillKnown,
+		"the association must survive reconciliation while still listed")
+
+	// The pool moves away from that hostname entirely.
+	pg.reconcileLedgerKnownAddrs([]string{"other.example.com:3001"})
+	pg.mu.Lock()
+	_, known := pg.ledgerKnownAddrs[peerKey]
+	pg.mu.Unlock()
+	assert.False(t, known,
+		"the association must be pruned once the hostname is delisted")
 }

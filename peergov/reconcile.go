@@ -883,8 +883,8 @@ func (p *PeerGovernor) pruneLedgerKnownAddrsLocked() {
 		if peer == nil {
 			continue
 		}
-		// ledgerKnownAddrs is keyed on the pre-DNS hostname-normalized form
-		// (see addLedgerPeerContext), not peer.NormalizedAddress.
+		// ledgerKnownAddrs is keyed on normalizeAddress(peer.Address) (see
+		// addLedgerPeerContext), not peer.NormalizedAddress.
 		live[p.normalizeAddress(peer.Address)] = struct{}{}
 	}
 	for addr := range p.ledgerKnownAddrs {
