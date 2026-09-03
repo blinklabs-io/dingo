@@ -34,6 +34,40 @@ func TestCandidateFragment_EmptyFragmentIsZeroValue(t *testing.T) {
 	assert.False(t, ok)
 }
 
+// TestCandidateFragment_AnchorAndHeadPointReturnDefensiveCopies ensures a
+// caller mutating the Hash returned by Anchor or HeadPoint cannot corrupt the
+// fragment's own backing bytes, which would otherwise change later Points()
+// and Intersect() results.
+func TestCandidateFragment_AnchorAndHeadPointReturnDefensiveCopies(
+	t *testing.T,
+) {
+	fragment := CandidateFragment{entries: []ochainsync.Tip{
+		{Point: ocommon.Point{Slot: 100, Hash: []byte("anchor-hash")}},
+		{Point: ocommon.Point{Slot: 200, Hash: []byte("head-hash")}},
+	}}
+
+	anchor := fragment.Anchor()
+	for i := range anchor.Hash {
+		anchor.Hash[i] = 0xff
+	}
+	head := fragment.HeadPoint()
+	for i := range head.Hash {
+		head.Hash[i] = 0xff
+	}
+
+	points := fragment.Points()
+	require.Len(t, points, 2)
+	assert.Equal(t, "anchor-hash", string(points[0].Hash))
+	assert.Equal(t, "head-hash", string(points[1].Hash))
+
+	other := CandidateFragment{entries: []ochainsync.Tip{
+		{Point: ocommon.Point{Slot: 100, Hash: []byte("anchor-hash")}},
+	}}
+	point, ok := fragment.Intersect(other)
+	require.True(t, ok)
+	assert.Equal(t, "anchor-hash", string(point.Hash))
+}
+
 func TestCandidateFragment_AnchorAndHeadPoint(t *testing.T) {
 	cs := NewChainSelector(ChainSelectorConfig{SecurityParam: 10})
 	connId := newTestConnectionId(1)

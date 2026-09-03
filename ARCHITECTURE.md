@@ -3025,10 +3025,12 @@ ChainSync intersection instead of making a density or rollback decision from
 an incomplete path.
 
 **Per-peer candidate chain fragments** (`chainselection.CandidateFragment`)
-materialize this rolling frontier as a first-class value — Dingo's analogue of
-the upstream consensus interface
-`readCandidateChains :: STM m (Map peer (AnchoredFragment header))`. Each
-tracked peer's `PeerChainTip` already records one delivered point per header
+materialize each peer's delivered-header history as a first-class value —
+Dingo's analogue of the upstream consensus interface
+`readCandidateChains :: STM m (Map peer (AnchoredFragment header))`. This is a
+separate structure from the density frontier above (`observedSlots`/
+`observedPoints`, bounded to the Genesis window): each tracked peer's
+`PeerChainTip` also records one delivered point per header
 (`recordObservedTipHistory`), bounded to `k+1` entries — enough that any valid
 rollback within `k` is representable — and trimmed on rollback
 (`PeerChainTip.ApplyRollback`); `CandidateFragment` snapshots that history into

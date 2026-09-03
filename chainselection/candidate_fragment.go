@@ -58,7 +58,7 @@ func (f CandidateFragment) Anchor() ocommon.Point {
 	if len(f.entries) == 0 {
 		return ocommon.Point{}
 	}
-	return f.entries[0].Point
+	return clonePoint(f.entries[0].Point)
 }
 
 // HeadPoint returns the fragment's most recently delivered point, or the
@@ -67,7 +67,7 @@ func (f CandidateFragment) HeadPoint() ocommon.Point {
 	if len(f.entries) == 0 {
 		return ocommon.Point{}
 	}
-	return f.entries[len(f.entries)-1].Point
+	return clonePoint(f.entries[len(f.entries)-1].Point)
 }
 
 // Points returns the fragment's retained points, including the anchor, in
@@ -141,10 +141,21 @@ func (p *PeerChainTip) CandidateFragment() CandidateFragment {
 }
 
 // CandidateFragments returns a snapshot of the candidate chain fragment
-// maintained for every currently tracked (chainsync-eligible) peer. This is
-// the Dingo equivalent of the upstream readCandidateChains query: a fragment
-// exists only while its peer's connection is tracked, and RemovePeer drops it
-// along with the rest of that peer's state.
+// maintained for every currently tracked peer. This is the Dingo equivalent
+// of the upstream readCandidateChains query: a fragment exists only while its
+// peer's connection is tracked (i.e. chainsync-eligible per peer governance,
+// the sole gate on entry into peerTips — see ouroboros/chainsync.go), and
+// RemovePeer drops it along with the rest of that peer's state.
+//
+// This intentionally does not consult the eligible map (SetConnectionEligible
+// / isConnectionEligible): that flag disqualifies a peer from being chosen as
+// best peer or counted as a corroboration witness, but it is not a disconnect
+// and does not stop the peer from chainsyncing or being tracked here, so
+// filtering on it would hide a still-connected candidate's fragment and would
+// make this accessor inconsistent with its sibling GetAllPeerTips, which does
+// not filter on it either. A future consumer that needs only
+// selection-eligible fragments can intersect this result with
+// isConnectionEligible/GetPeerTip itself.
 func (cs *ChainSelector) CandidateFragments() map[ouroboros.ConnectionId]CandidateFragment {
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
