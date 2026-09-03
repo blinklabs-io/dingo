@@ -2157,6 +2157,27 @@ because prior pot transitions cannot be repaired safely without replay.
 
 The `ledger/eras/` package provides era-specific validation rules for each Cardano era. The default active era table is Byron through Conway. Experimental Dijkstra support is added to the active table when Dingo starts on the `musashi` network (the IOG Leios prototype testnet, matched by network name or magic 164), with `runMode: "leios"`, or with `startEra: "dijkstra"` — see `Config.experimentalDijkstraEnabled`. Keying on the network lets `dingo -n musashi` follow the Musashi testnet past the Conway-to-Dijkstra hard fork without an explicit run mode. The Dijkstra descriptor uses `github.com/blinklabs-io/gouroboros/ledger/dijkstra`, including that release's generated CDDL shape for the nullable Leios/Peras certificate slots.
 
+Several eras replace or drop an upstream `UtxoValidationRules` entry so Dingo
+can run its own implementation — the reference-script-aware fee rule, local
+Plutus execution, and the credential-tag-preserving committee and voter rules.
+Each of those is located by the upstream rule's stable
+`common.UtxoValidationRuleId`, read from the era's
+`UtxoValidationRuleDescriptors()`, never by validation function identity or
+runtime function name. gouroboros composes the Alonzo, Babbage, and Conway
+lists with `common.ComposeUtxoValidationRules`, which replaces every
+phase-2-gated entry with an anonymous wrapper, and it moves shared rules
+between era packages across releases; both erase function identity while
+leaving the Id intact. `resolveUtxoValidationSkipIndex` panics at package
+initialization when an Id is absent, duplicated, or when the descriptor and
+rule lists diverge in length, so an upstream change fails loudly instead of
+silently leaving an upstream rule in place or removing the wrong one.
+
+`common.UtxoValidateCurrentTreasuryValue` is not skipped: Conway and Dijkstra
+validation enforces a declared `currentTreasuryValue` (transaction body key
+21) against `LedgerState.TreasuryValue`. The rule returns early when no
+transaction body declares the field, so it only reaches that provider for a
+transaction that supplies one.
+
 Validated Alonzo, Babbage, Conway, and Dijkstra block application runs phase 1
 for every transaction. Their phase-2 validators evaluate scripts independently
 of the declared validity flag, then reconcile the local execution result with

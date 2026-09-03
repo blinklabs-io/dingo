@@ -261,38 +261,29 @@ func conwayValidationRules(
 }
 
 func buildConwayValidationRules() []indexedUtxoValidationRule {
-	skips := []utxoValidationRuleSkip{
-		{
-			validationFunc: conway.
-				UtxoValidateConwayFeaturesWithPlutusV1V2,
-			name: "conway.UtxoValidateConwayFeaturesWithPlutusV1V2",
-		},
-		{
-			validationFunc: conway.UtxoValidateFeeTooSmallUtxo,
-			name:           "conway.UtxoValidateFeeTooSmallUtxo",
-		},
-		{
-			validationFunc: conway.UtxoValidatePlutusScripts,
-			name:           "conway.UtxoValidatePlutusScripts",
-		},
-		{
-			validationFunc: conway.UtxoValidateCommitteeCertificates,
-			name:           "conway.UtxoValidateCommitteeCertificates",
-		},
-		{
-			validationFunc: conway.UtxoValidateUnknownVoters,
-			name:           "conway.UtxoValidateUnknownVoters",
-		},
+	// Skips are resolved by upstream rule Id, never by validation function.
+	// conway.UtxoValidationRules is composed with
+	// common.ComposeUtxoValidationRules, so every phase-2-gated entry —
+	// committee-certificates and unknown-voters among them — is an anonymous
+	// wrapper closure with no trace of the original function.
+	skipRuleIds := []lcommon.UtxoValidationRuleId{
+		lcommon.UtxoValidationRuleConwayFeaturesWithPlutusV1V2,
+		lcommon.UtxoValidationRuleFeeTooSmall,
+		lcommon.UtxoValidationRulePlutusScripts,
+		lcommon.UtxoValidationRuleCommitteeCertificates,
+		lcommon.UtxoValidationRuleUnknownVoters,
 	}
-	indexes := make([]int, len(skips))
-	for i := range skips {
+	descriptors := conway.UtxoValidationRuleDescriptors()
+	indexes := make([]int, len(skipRuleIds))
+	for i := range skipRuleIds {
 		indexes[i] = resolveUtxoValidationSkipIndex(
-			conway.UtxoValidationRules, skips[i].validationFunc, skips[i].name,
+			descriptors, conway.UtxoValidationRules, skipRuleIds[i],
 		)
 	}
 	ret := buildIndexedUtxoValidationRulesWithSkips(
+		descriptors,
 		conway.UtxoValidationRules,
-		skips,
+		skipRuleIds,
 	)
 	ret = append(ret, indexedUtxoValidationRule{
 		index:          indexes[0],
