@@ -1023,6 +1023,65 @@ ORDER BY item.added_slot ASC, tx.block_index ASC, c.cert_index ASC`,
 	return registrations, retirements, nil
 }
 
+// GetPoolVrfKeyHashAtSlot returns the VRF key hash the pool had registered as
+// of slot, which is not necessarily the one it has registered now.
+//
+// A pool may rotate its VRF key, and a re-registration does not retroactively
+// change the key it was elected under: the leader schedule for an epoch is
+// built from a stake snapshot captured at an earlier boundary, and a block's
+// header carries the key registered at that capture. Validating a header
+// against the current registration rejects every block the pool makes for the
+// rest of the epoch it rotated in (issue #3842).
+//
+// The selection is the same latest-certificate-wins ordering
+// GetActivePoolKeyHashesAtSlot uses -- later added_slot, then later block
+// index, then later certificate index -- so the two agree on which
+// registration was in force.
+//
+// The bool reports whether any registration exists at or before slot. False
+// means the pool had not registered yet, which is a different answer from a
+// pool with no VRF key recorded.
+func (s *Store) GetPoolVrfKeyHashAtSlot(
+	poolKeyHash []byte,
+	slot uint64,
+	txn types.Txn,
+) ([]byte, bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, false, fmt.Errorf(
+			"GetPoolVrfKeyHashAtSlot: resolve db: %w",
+			err,
+		)
+	}
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, false, fmt.Errorf("GetPoolVrfKeyHashAtSlot: %w", err)
+	}
+	var vrfKeyHash []byte
+	err = db.QueryRowContext(ctx, `
+SELECT pr.vrf_key_hash
+FROM pool_registration pr
+JOIN pool p ON p.id = pr.pool_id
+LEFT JOIN certs c ON c.id = pr.certificate_id
+LEFT JOIN "transaction" t ON t.id = c.transaction_id
+WHERE p.pool_key_hash = ?
+  AND pr.added_slot <= ?
+ORDER BY pr.added_slot DESC,
+         COALESCE(t.block_index, 0) DESC,
+         COALESCE(c.cert_index, 0) DESC
+LIMIT 1`,
+		poolKeyHash,
+		slotValue,
+	).Scan(&vrfKeyHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("GetPoolVrfKeyHashAtSlot: %w", err)
+	}
+	return vrfKeyHash, true, nil
+}
+
 func (s *Store) GetActivePoolKeyHashesAtSlot(
 	slot uint64,
 	txn types.Txn,

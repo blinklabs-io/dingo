@@ -1357,6 +1357,101 @@ func (ls *LedgerState) shouldUseImportedActivePoolDistribution(
 	return epochId == mithrilEpoch.EpochId, nil
 }
 
+// electingVrfKeyHash returns the VRF key hash the producing pool had registered
+// when the snapshot that elected it was captured, which is not necessarily the
+// key it has registered now.
+//
+// A pool may rotate its VRF key, and doing so does not retroactively change the
+// key it was elected under: the leader schedule for an epoch is built from a
+// stake snapshot captured at an earlier boundary, and the producer signs with
+// the key registered at that capture. Comparing against the live registration
+// rejects every block the pool makes for the rest of the epoch it rotated in,
+// and the reject/rewind/refetch cycle does not converge (issue #3842).
+//
+// cardano-ledger avoids the question by carrying the key in the pool
+// distribution itself (IndividualPoolStake.individualPoolStakeVrf), captured
+// with the stake. pool_stake_snapshot has no such column -- it already freezes
+// the optional Leios voting key at this same boundary and for this same reason
+// -- so the key is resolved from registration history as of the snapshot's
+// captured slot instead, which is equivalent for a chain whose certificate
+// history is intact.
+//
+// Falling back to the live registration when no snapshot is available keeps the
+// previous behaviour rather than newly rejecting a header dingo cannot yet
+// place: header verification runs ahead of the apply cursor, so a missing
+// snapshot means "cannot answer yet", not "wrong key".
+func (ls *LedgerState) electingVrfKeyHash(
+	block ledger.Block,
+	poolKeyHash lcommon.PoolKeyHash,
+) (lcommon.Blake2b256, bool, error) {
+	capturedSlot, ok, err := ls.electingSnapshotCapturedSlot(
+		block,
+		poolKeyHash,
+	)
+	if err != nil {
+		return lcommon.Blake2b256{}, false, err
+	}
+	if ok {
+		vrfKeyHash, found, err := ls.db.Metadata().GetPoolVrfKeyHashAtSlot(
+			poolKeyHash[:],
+			capturedSlot,
+			nil,
+		)
+		if err != nil {
+			return lcommon.Blake2b256{}, false, err
+		}
+		if found && len(vrfKeyHash) == len(lcommon.Blake2b256{}) {
+			var hash lcommon.Blake2b256
+			copy(hash[:], vrfKeyHash)
+			return hash, true, nil
+		}
+	}
+	pool, err := ls.db.GetPool(poolKeyHash, true, nil)
+	if err != nil {
+		return lcommon.Blake2b256{}, false, err
+	}
+	hash, ok := registeredPoolVrfKeyHash(pool)
+	return hash, ok, nil
+}
+
+// electingSnapshotCapturedSlot reports the slot at which the stake snapshot
+// that elected this block's producer was captured, mirroring
+// leaderEligibilityStake's choice of snapshot so the VRF key and the stake are
+// read from the same capture.
+func (ls *LedgerState) electingSnapshotCapturedSlot(
+	block ledger.Block,
+	poolKeyHash lcommon.PoolKeyHash,
+) (uint64, bool, error) {
+	epoch, err := ls.epochForSlot(block.SlotNumber())
+	if err != nil {
+		return 0, false, err
+	}
+	epochId := epoch.EpochId
+	snapshotEpoch := praos.StakeSnapshotEpoch(epochId)
+	snapshotType := models.PoolStakeSnapshotTypeMark
+	useImportedActive, err := ls.shouldUseImportedActivePoolDistribution(
+		block,
+		epochId,
+	)
+	if err != nil {
+		return 0, false, err
+	}
+	if useImportedActive {
+		snapshotEpoch = epochId
+		snapshotType = models.PoolStakeSnapshotTypeActive
+	}
+	snapshot, err := ls.db.Metadata().GetPoolStakeSnapshot(
+		snapshotEpoch,
+		snapshotType,
+		poolKeyHash[:],
+		nil,
+	)
+	if err != nil || snapshot == nil || snapshot.CapturedSlot == 0 {
+		return 0, false, err
+	}
+	return snapshot.CapturedSlot, true, nil
+}
+
 // verifyRegisteredVrfKey rejects a block whose VRF verification key (carried in
 // the header body) is not the VRF key the producing pool registered on-chain.
 // The block's VRF proof is validated only against this embedded key, and the
@@ -1389,7 +1484,7 @@ func (ls *LedgerState) verifyRegisteredVrfKey(
 			block.SlotNumber(),
 		)
 	}
-	pool, err := ls.db.GetPool(poolKeyHash, true, nil)
+	registeredVrfKeyHash, ok, err := ls.electingVrfKeyHash(block, poolKeyHash)
 	if err != nil {
 		return fmt.Errorf(
 			"block header verification rejected at slot %d: "+
@@ -1399,7 +1494,6 @@ func (ls *LedgerState) verifyRegisteredVrfKey(
 			err,
 		)
 	}
-	registeredVrfKeyHash, ok := registeredPoolVrfKeyHash(pool)
 	if !ok {
 		return fmt.Errorf(
 			"block header verification rejected at slot %d: "+
