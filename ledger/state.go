@@ -5759,6 +5759,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							snapshotEra,
 							snapshotPParams,
 							snapshotPrevEraPParams,
+							snapshotEpoch.EpochId,
 						)
 						if err != nil {
 							deltaBatch.Release()
@@ -6061,6 +6062,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	currentEra eras.EraDesc,
 	pparams lcommon.ProtocolParameters,
 	prevEraPParams lcommon.ProtocolParameters,
+	committeeEpoch uint64,
 ) (*LedgerDelta, error) {
 	// Check that we're processing things in order
 	if len(expectedPrevHash) > 0 {
@@ -6344,12 +6346,12 @@ func (ls *LedgerState) ledgerProcessBlock(
 					prevEraPParams != nil {
 					pp = prevEraPParams
 				}
-				lv := &LedgerView{
+				lv := (&LedgerView{
 					txn:                  txn,
 					ls:                   ls,
 					intraBlockUtxos:      intraBlockUtxos,
 					skipPhase2Validation: skipPhase2Validation,
-				}
+				}).pinCommitteeState(committeeEpoch, pp)
 				err := validationEra.ValidateTxFunc(
 					tx,
 					point.Slot,
@@ -9179,10 +9181,18 @@ func (ls *LedgerState) NextSlotTime() (time.Time, error) {
 
 // NewView creates a new LedgerView for querying ledger state within a transaction.
 func (ls *LedgerState) NewView(txn *database.Txn) *LedgerView {
-	return &LedgerView{
+	view := &LedgerView{
 		ls:  ls,
 		txn: txn,
 	}
+	snapshot := ls.loadConsensusSnapshot()
+	if snapshot == nil {
+		return view
+	}
+	return view.pinCommitteeState(
+		snapshot.currentEpoch.EpochId,
+		snapshot.currentPParams,
+	)
 }
 
 // TransactionByHash returns a transaction record by its hash.
@@ -9479,6 +9489,7 @@ type txValidationSnapshot struct {
 	prevEraPParams lcommon.ProtocolParameters
 	eraList        []eras.EraDesc
 	referenceSlot  uint64
+	currentEpoch   uint64
 }
 
 func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
@@ -9506,6 +9517,7 @@ func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
 			currentSlot,
 			currentSlotErr,
 		),
+		currentEpoch: consensusState.currentEpoch.EpochId,
 	}
 }
 
@@ -9560,12 +9572,12 @@ func (ls *LedgerState) WithTxValidationSession(
 			err = validationEra.ValidateTxFunc(
 				tx,
 				snapshot.referenceSlot,
-				&LedgerView{
+				(&LedgerView{
 					txn:             txn,
 					ls:              ls,
 					intraBlockUtxos: createdUtxos,
 					consumedUtxos:   consumedUtxos,
-				},
+				}).pinCommitteeState(snapshot.currentEpoch, pp),
 				pp,
 			)
 			if err != nil {
@@ -9612,10 +9624,11 @@ func (ls *LedgerState) validateTxCore(
 		}
 		txn := ls.db.Transaction(false)
 		err := txn.Do(func(txn *database.Txn) error {
+			lv := buildLV(txn).pinCommitteeState(snapshot.currentEpoch, pp)
 			return validationEra.ValidateTxFunc(
 				tx,
 				snapshot.referenceSlot,
-				buildLV(txn),
+				lv,
 				pp,
 			)
 		})
@@ -9689,10 +9702,13 @@ func (ls *LedgerState) EvaluateTx(
 		}
 		txn := ls.db.Transaction(false)
 		err := txn.Do(func(txn *database.Txn) error {
-			lv := &LedgerView{
+			lv := (&LedgerView{
 				txn: txn,
 				ls:  ls,
-			}
+			}).pinCommitteeState(
+				consensusState.currentEpoch.EpochId,
+				pp,
+			)
 			var err error
 			fee, totalExUnits, redeemerExUnits, err = validationEra.EvaluateTxFunc(
 				tx,
