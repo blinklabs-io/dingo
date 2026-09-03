@@ -2157,6 +2157,27 @@ because prior pot transitions cannot be repaired safely without replay.
 
 The `ledger/eras/` package provides era-specific validation rules for each Cardano era. The default active era table is Byron through Conway. Experimental Dijkstra support is added to the active table when Dingo starts on the `musashi` network (the IOG Leios prototype testnet, matched by network name or magic 164), with `runMode: "leios"`, or with `startEra: "dijkstra"` — see `Config.experimentalDijkstraEnabled`. Keying on the network lets `dingo -n musashi` follow the Musashi testnet past the Conway-to-Dijkstra hard fork without an explicit run mode. The Dijkstra descriptor uses `github.com/blinklabs-io/gouroboros/ledger/dijkstra`, including that release's generated CDDL shape for the nullable Leios/Peras certificate slots.
 
+Several eras replace or drop an upstream `UtxoValidationRules` entry so Dingo
+can run its own implementation — the reference-script-aware fee rule, local
+Plutus execution, and the credential-tag-preserving committee and voter rules.
+Each of those is located by the upstream rule's stable
+`common.UtxoValidationRuleId`, read from the era's
+`UtxoValidationRuleDescriptors()`, never by validation function identity or
+runtime function name. gouroboros composes the Alonzo, Babbage, and Conway
+lists with `common.ComposeUtxoValidationRules`, which replaces every
+phase-2-gated entry with an anonymous wrapper, and it moves shared rules
+between era packages across releases; both erase function identity while
+leaving the Id intact. `resolveUtxoValidationSkipIndex` panics at package
+initialization when an Id is absent, duplicated, or when the descriptor and
+rule lists diverge in length, so an upstream change fails loudly instead of
+silently leaving an upstream rule in place or removing the wrong one.
+
+`common.UtxoValidateCurrentTreasuryValue` is not skipped: Conway and Dijkstra
+validation enforces a declared `currentTreasuryValue` (transaction body key
+21) against `LedgerState.TreasuryValue`. The rule returns early when no
+transaction body declares the field, so it only reaches that provider for a
+transaction that supplies one.
+
 Validated Alonzo, Babbage, Conway, and Dijkstra block application runs phase 1
 for every transaction. Their phase-2 validators evaluate scripts independently
 of the declared validity flag, then reconcile the local execution result with
@@ -2723,6 +2744,56 @@ and go stake are all zero are omitted; without a pool filter, the result
 contains the union of pools present in those snapshots and the corresponding
 totals.
 
+Query paths that retain database work per resolved item are bounded by
+`ledger.MaxLocalStateQueryItems` (currently 1000). This applies to
+`GetDRepState` and `GetStakeDelegDeposits`. Explicit oversized filters are
+rejected before database or consensus-state access. The empty `GetDRepState`
+form remains unrestricted: it loads active DReps once and obtains their
+delegators through chunked account reads instead of one read per DRep.
+`allDRepDelegators` (`ledger/queries.go`) additionally hydrates those
+account rows `allDRepDelegatorsBatchSize` (10,000) refs at a time, folding
+each batch's result down before hydrating the next. The active-credential
+list and the accumulated delegator result still grow with the chain's total
+active-account count, same as the per-DRep loop this replaced; only the
+temporary hydrated-`Account`-row memory — the `GetAccountsByCredential`
+result map, the larger share of retained memory since it holds full rows
+rather than the two fields (`Drep`, `DrepType`) actually read — is bounded
+to the batch size instead of the active-account count. Filtered
+`GetStakeSnapshots` and
+`GetFilteredVoteDelegatees` likewise use existing batch database operations,
+removing their per-item read
+amplification without a client-visible item limit. Existing result
+ordering and partial-result behavior remain unchanged.
+
+Both the empty `GetDRepState` form and `GetFilteredVoteDelegatees` batch
+through `MetadataStore.GetAccountsByCredential`, which groups the requested
+refs by `credential_tag` and queries each group as a single-column
+`staking_key IN (...)`, matching the unique index
+`idx_account_credential(credential_tag, staking_key)` so each chunk is one
+index range scan. A per-ref `(credential_tag = ? AND staking_key = ?) OR
+...` predicate is drivable from that same index too, through SQLite's
+multi-index OR optimization, but only once `sqlite_stat1` exists. With the
+`AND active = TRUE` conjunct `GetAccountsByCredential` adds for
+`includeInactive = false` and no statistics, the planner instead prefers
+`idx_account_active_pool_staking_key (active=?)` and evaluates the whole OR
+chain per row, so each chunk costs `O(active rows × refs)` and the
+"batched" read becomes slower than the per-item loop it replaced as the
+account table grows. `ANALYZE` only runs via `RunPlannerStats` at Mithril
+sync and before backfill, never as the table grows during a genesis sync,
+so that no-statistics state is what a long-running genesis-synced node is
+actually in — and even with statistics present, the grouped-IN form is
+still measurably cheaper. `GetStakeSnapshots`' pool-side primitive
+(`GetPoolStakeSnapshotsForPools`) does not share this hazard: a
+single-column `pool_key_hash IN (...)` against a matching unique index
+needs no statistics to plan well, which is the real distinction between the
+two primitives.
+
+In-process callers receive a `ledger.LocalStateQueryLimitError` that matches
+`ledger.ErrLocalStateQueryLimitExceeded`. LocalStateQuery has no query-level
+error response on the wire: as with other handler errors, gouroboros stops the
+protocol, so a node-to-client caller observes a closed connection and loses
+its acquired state snapshot.
+
 `GetChainDepState` and `GetPoolDistr2` back `cardano-cli query
 leadership-schedule`, which reads the epoch nonce from the first and the stake
 distribution from the second.
@@ -3052,6 +3123,31 @@ held. If a candidate fork path falls outside the retained suffix, recovery
 fails closed to a fresh
 ChainSync intersection instead of making a density or rollback decision from
 an incomplete path.
+
+**Per-peer candidate chain fragments** (`chainselection.CandidateFragment`)
+materialize each peer's delivered-header history as a first-class value —
+Dingo's analogue of the upstream consensus interface
+`readCandidateChains :: STM m (Map peer (AnchoredFragment header))`. This is a
+separate structure from the density frontier above (`observedSlots`/
+`observedPoints`, bounded to the Genesis window): each tracked peer's
+`PeerChainTip` also records one delivered point per header
+(`recordObservedTipHistory`), bounded to `k+1` entries — enough that any valid
+rollback within `k` is representable — and trimmed on rollback
+(`PeerChainTip.ApplyRollback`); `CandidateFragment` snapshots that history into
+an independently owned, ordered value with an explicit `Anchor` (its oldest
+retained point, which — per the upstream contract — need not intersect the
+primary chain or any other peer's fragment) and a `HeadPoint`. `ChainSelector`
+exposes the current set with `CandidateFragments()` (all tracked peers) and
+`GetCandidateFragment(connId)` (one peer), mirroring `GetAllPeerTips`/
+`GetPeerTip`. A fragment's lifetime is bound to its connection: it exists only
+while `ChainSelector.RemovePeer` has not yet dropped that peer's `PeerChainTip`,
+so a disconnect (or eviction under `maxTrackedPeers`) clears it, and a
+reconnect on a reused connection ID starts from an empty fragment rather than
+inheriting stale history. `CandidateFragment.Intersect` computes the highest
+point two fragments share by `(slot, hash)` — the primitive the Limit on
+Eagerness and the Genesis Density Disconnector need to find the intersection
+across candidate fragments and compare per-candidate density there; neither is
+implemented by this type.
 
 The trust problem Genesis solves for **biased fast-sync sources** — e.g. a
 local shallow peer or the Genesis Sync Accelerator (GSA), which serve blocks
