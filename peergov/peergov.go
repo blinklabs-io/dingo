@@ -181,8 +181,10 @@ type PeerGovernor struct {
 	config                  PeerGovernorConfig
 	lastLedgerPeerRefresh   atomic.Int64 // UnixNano timestamp of last ledger peer discovery
 	// ledgerKnownAddrs maps a retained peer's own normalizeAddress(peer.Address)
-	// key to the raw ledger-relay candidate string (pre-DNS form) it was most
-	// recently matched against. Keyed by the peer's own identity so counting
+	// key to the normalized, pre-DNS form of the ledger-relay candidate
+	// (lowercased hostname or normalized IP, not the verbatim candidate
+	// string) it was most recently matched against. Keyed by the peer's own
+	// identity so counting
 	// (countLedgerPeersLocked) and peer-retention pruning
 	// (pruneLedgerKnownAddrsLocked) are self-consistent regardless of whether
 	// a peer's Address happens to be a hostname or an IP literal; the value

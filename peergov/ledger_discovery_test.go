@@ -203,23 +203,24 @@ func TestDiscoverLedgerPeers_PartialRefill(t *testing.T) {
 }
 
 func TestDiscoverLedgerPeers_NegativeTargetDisables(t *testing.T) {
+	provider := &countingLedgerPeerProvider{}
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           newMockEventBus(),
 		UseLedgerAfterSlot: 0,
 		LedgerPeerTarget:   -1, // Explicitly disabled
-		LedgerPeerProvider: &mockLedgerPeerProvider{
-			relays: []PoolRelay{
-				{Hostname: "relay.example.com", Port: 3001},
-			},
-			currentSlot: 1000,
-		},
+		LedgerPeerProvider: provider,
 	})
 
 	pg.discoverLedgerPeers()
 
-	// With a negative target, deficit is 0, so no peers should be added
+	// With a negative target, deficit is 0, so no peers should be added.
 	assert.Len(t, pg.peers, 0)
+	// A negative target disables ledger discovery outright: it must return
+	// before ever calling the provider, not merely add zero peers after
+	// fetching and reconciling on every refresh interval for no benefit.
+	assert.Equal(t, int32(0), provider.calls.Load(),
+		"a disabled node must never call the ledger peer provider")
 }
 
 func TestDiscoverLedgerPeers_DefaultTarget(t *testing.T) {

@@ -42,6 +42,16 @@ func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 		)
 		return
 	}
+	// A negative LedgerPeerTarget disables ledger discovery outright (see
+	// its doc comment). This must return before any of the reconciliation
+	// logic below runs unconditionally, or a disabled node would still
+	// fetch and reconcile the full relay set on every refresh interval for
+	// no benefit: it adds no peers regardless (ledgerPeerDeficit is always
+	// 0 when disabled), so a negative target getting the same treatment as
+	// "nothing currently needed" would still leak into a real provider call.
+	if p.config.LedgerPeerTarget < 0 {
+		return
+	}
 	// Check UseLedgerAfterSlot threshold first (before claiming refresh)
 	if p.config.UseLedgerAfterSlot < 0 {
 		// Ledger peers are disabled
@@ -334,11 +344,14 @@ func (p *PeerGovernor) reconcileLedgerKnownAddrs(candidates []string) {
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	// Each entry's value is the raw candidate string the peer at that key
-	// was last matched against (see addLedgerPeerContext /
-	// ledgerPeerRejectedWithoutDNS); compare that value, not the key, since
-	// the key is the peer's own address and may differ syntactically from
-	// the ledger's candidate form for the same relay.
+	// Each entry's value is the normalized, pre-DNS form of the candidate
+	// the peer at that key was last matched against — hostnameNormalized in
+	// addLedgerPeerContext / ledgerPeerRejectedWithoutDNS (lowercased
+	// hostname or normalized IP), not the verbatim candidate string — which
+	// is exactly why it compares directly against current's own
+	// p.normalizeAddress(candidate) values below. Compare that value, not
+	// the key: the key is the peer's own address and may differ
+	// syntactically from the ledger's candidate form for the same relay.
 	for peerKey, matchedCandidate := range p.ledgerKnownAddrs {
 		if _, ok := current[matchedCandidate]; !ok {
 			delete(p.ledgerKnownAddrs, peerKey)
@@ -439,10 +452,11 @@ func (p *PeerGovernor) addLedgerPeerContext(
 		// (e.g. the peer was added under its resolved IP while the ledger
 		// lists a hostname for the same relay), and keying on the candidate
 		// would silently break both the counting lookup and peer-retention
-		// pruning for that peer. The value is the raw candidate string
-		// (pre-DNS form) so a later discovery round's
+		// pruning for that peer. The value is hostnameNormalized — the
+		// normalized, pre-DNS form of the candidate, not the verbatim
+		// candidate string — so a later discovery round's
 		// reconcileLedgerKnownAddrs can compare it against the ledger's
-		// fresh relay list, itself pre-resolution, without re-resolving
+		// fresh relay list (normalized the same way), without re-resolving
 		// every candidate.
 		p.ledgerKnownAddrs[p.normalizeAddress(existingPeer.Address)] = hostnameNormalized
 		p.mu.Unlock()
