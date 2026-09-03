@@ -215,9 +215,27 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 		cs.mode = SelectionModeGenesis
 	}
 	if cfg.EventBus != nil && !cfg.DisableEventSubscriptions {
-		cfg.EventBus.SubscribeFunc(
+		// SubscribeFuncStrict, not SubscribeFunc: HandlePeerRollbackEvent
+		// mutates chain-selection state machine state (per-peer observed
+		// history) from a monotonic rollback stream. A handler panic must
+		// not be absorbed and silently followed by the next rollback as if
+		// this one had actually been applied -- see onPeerRollbackPanic and
+		// event.EventBus.SubscribeFuncStrict.
+		//
+		// SubscriberBackpressureBlock, not the default Detach: this stream is
+		// ordering-critical, since a dropped rollback leaves a peer's tracked
+		// tip stale relative to its actual (rolled-back) chain, feeding
+		// selection from data the peer itself has already disavowed. Nothing
+		// here re-subscribes, so Detach would let ordinary backpressure alone
+		// (with no panic at all) silently and permanently stop rollback
+		// processing -- the same durable loss a panic causes, but far easier
+		// to trigger.
+		cfg.EventBus.SubscribeFuncStrict(
 			PeerRollbackEventType,
+			event.DefaultSubscriberBuffer,
+			event.SubscriberBackpressureBlock,
 			cs.HandlePeerRollbackEvent,
+			cs.onPeerRollbackPanic,
 		)
 	}
 	return cs
@@ -801,14 +819,16 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 // not an all-time high-water mark.
 func (cs *ChainSelector) SetLocalTip(tip ochainsync.Tip) {
 	shouldEvaluate := false
-	cs.mutex.Lock()
-	if tip.BlockNumber > cs.localTipProgressBlock {
-		cs.localTipProgressAt = cs.now()
-	}
-	cs.localTipProgressBlock = tip.BlockNumber
-	cs.localTip = tip
-	shouldEvaluate = cs.advanceSelectionModeLocked()
-	cs.mutex.Unlock()
+	func() {
+		cs.mutex.Lock()
+		defer cs.mutex.Unlock()
+		if tip.BlockNumber > cs.localTipProgressBlock {
+			cs.localTipProgressAt = cs.now()
+		}
+		cs.localTipProgressBlock = tip.BlockNumber
+		cs.localTip = tip
+		shouldEvaluate = cs.advanceSelectionModeLocked()
+	}()
 	if shouldEvaluate {
 		cs.EvaluateAndSwitch()
 	}
@@ -829,10 +849,12 @@ func (cs *ChainSelector) now() time.Time {
 // comparison.
 func (cs *ChainSelector) SetSecurityParam(k uint64) {
 	shouldEvaluate := false
-	cs.mutex.Lock()
-	cs.securityParam = k
-	shouldEvaluate = cs.advanceSelectionModeLocked()
-	cs.mutex.Unlock()
+	func() {
+		cs.mutex.Lock()
+		defer cs.mutex.Unlock()
+		cs.securityParam = k
+		shouldEvaluate = cs.advanceSelectionModeLocked()
+	}()
 	if shouldEvaluate {
 		cs.EvaluateAndSwitch()
 	}
@@ -902,6 +924,53 @@ func (cs *ChainSelector) GetPeerTip(
 		}
 	}
 	return &tipCopy
+}
+
+// GetPeerSyncTarget returns a peer's advertised head only after its delivered
+// frontier is close enough to corroborate that advertisement.
+func (cs *ChainSelector) GetPeerSyncTarget(
+	connId ouroboros.ConnectionId,
+) (ochainsync.Tip, bool) {
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	peerTip := cs.peerTips[connId]
+	if !cs.isPeerSelectableLocked(connId, peerTip, false) {
+		return ochainsync.Tip{}, false
+	}
+	observed := peerTip.SelectionTip()
+	advertised := peerTip.Tip
+	if safeAddUint64(
+		observed.Point.Slot,
+		cs.genesisWindowSlotsLocked(),
+	) < advertised.Point.Slot {
+		return observed, observed.Point.Slot != 0 || observed.BlockNumber != 0
+	}
+	if advertised.Point.Slot == 0 && advertised.BlockNumber == 0 {
+		return observed, observed.Point.Slot != 0 || observed.BlockNumber != 0
+	}
+	return advertised, true
+}
+
+// SyncTargetForPeerTipUpdate applies the bounded-target policy to the exact
+// observed/advertised pair carried by one chainsync event. It intentionally
+// does not read the mutable per-peer tip map.
+func (cs *ChainSelector) SyncTargetForPeerTipUpdate(
+	update PeerTipUpdateEvent,
+) (ochainsync.Tip, bool) {
+	cs.mutex.RLock()
+	window := cs.genesisWindowSlotsLocked()
+	cs.mutex.RUnlock()
+	observed := update.ObservedTip
+	if observed.Point.Slot == 0 && observed.BlockNumber == 0 {
+		return ochainsync.Tip{}, false
+	}
+	if safeAddUint64(observed.Point.Slot, window) < update.Tip.Point.Slot {
+		return observed, true
+	}
+	if update.Tip.Point.Slot == 0 && update.Tip.BlockNumber == 0 {
+		return observed, true
+	}
+	return update.Tip, true
 }
 
 // GetAllPeerTips returns a deep copy of all tracked peer tips.
@@ -1658,15 +1727,44 @@ func (cs *ChainSelector) HandlePeerRollbackEvent(evt event.Event) {
 	}
 
 	var shouldEvaluate bool
-	cs.mutex.Lock()
-	if peerTip, exists := cs.peerTips[e.ConnectionId]; exists {
-		peerTip.ApplyRollback(e.Point, e.Tip)
-		shouldEvaluate = true
-	}
-	cs.mutex.Unlock()
+	func() {
+		cs.mutex.Lock()
+		defer cs.mutex.Unlock()
+		if peerTip, exists := cs.peerTips[e.ConnectionId]; exists {
+			peerTip.ApplyRollback(e.Point, e.Tip)
+			shouldEvaluate = true
+		}
+	}()
 
 	if shouldEvaluate {
 		cs.EvaluateAndSwitch()
+	}
+}
+
+// onPeerRollbackPanic is the SubscribeFuncStrict onPanic hook for the
+// PeerRollbackEventType subscription registered in NewChainSelector. The
+// EventBus has already recovered and logged the panic and torn down the
+// subscription by the time this runs; it adds chain-selection-specific
+// context to the log and publishes PeerRollbackHandlerPanicEventType so an
+// operator or automated watcher has a durable signal that rollback handling
+// for this selector has stopped, rather than silently missing every
+// subsequent peer rollback with no trace beyond a generic log line.
+func (cs *ChainSelector) onPeerRollbackPanic(evt event.Event, r any) {
+	cs.config.Logger.Error(
+		"chain selector rollback handler panicked; rollback subscription stopped",
+		"event_type",
+		evt.Type,
+		"panic",
+		r,
+	)
+	if cs.config.EventBus != nil {
+		cs.config.EventBus.Publish(
+			PeerRollbackHandlerPanicEventType,
+			event.NewEvent(
+				PeerRollbackHandlerPanicEventType,
+				PeerRollbackHandlerPanicEvent{Panic: r},
+			),
+		)
 	}
 }
 
@@ -1686,31 +1784,104 @@ func (cs *ChainSelector) evaluationLoop() {
 	}
 }
 
-// runEvaluationTick runs one evaluation tick with panic recovery.
-// If a panic occurs, it's logged and the loop continues.
+// runEvaluationTick runs one evaluation tick with panic recovery. If a panic
+// occurs, recoverEvaluationPanic surfaces it and the ticker loop continues on
+// the next tick.
 func (cs *ChainSelector) runEvaluationTick() {
-	defer func() {
-		if r := recover(); r != nil {
-			cs.config.Logger.Error(
-				"panic in evaluation tick, continuing",
-				"panic", r,
-			)
-		}
-	}()
+	defer cs.recoverEvaluationPanic(false)
 	cs.cleanupStalePeers()
 	cs.EvaluateAndSwitch()
 }
 
 func (cs *ChainSelector) runTriggeredEvaluation() {
-	defer func() {
-		if r := recover(); r != nil {
-			cs.config.Logger.Error(
-				"panic in triggered evaluation, continuing",
-				"panic", r,
-			)
-		}
-	}()
+	defer cs.recoverEvaluationPanic(true)
 	cs.EvaluateAndSwitch()
+}
+
+// recoverEvaluationPanic recovers a panic from one evaluation tick or
+// triggered evaluation, logs it, and publishes EvaluationPanicEventType so
+// the dropped transition is surfaced to subscribers instead of vanishing
+// silently. The evaluation loop itself keeps running afterward -- both
+// runEvaluationTick and runTriggeredEvaluation return normally once this
+// defer completes, so evaluationLoop's for/select goes on to the next tick or
+// trigger. Stopping chain selection entirely for the whole node because one
+// evaluation panicked would be a worse outcome than the missed transition:
+// the periodic ticker is itself the recovery path, giving the selector
+// another chance on fresh peer/local-tip state a moment later.
+//
+// The logging and publish calls below run after this function's own
+// recover() has already consumed the evaluation panic, so nothing further up
+// the stack can catch a second one. Each is wrapped in its own nested
+// recovery: a misbehaving Logger or EventBus.Publish panicking here would
+// otherwise propagate out of this deferred call as a fresh, unrecovered
+// panic, which would stop runEvaluationTick/runTriggeredEvaluation from
+// returning at all and crash the entire process once it unwinds past
+// evaluationLoop's for/select with nothing left to catch it -- taking down
+// chain selection (and the node) over what should have been one dropped
+// transition.
+func (cs *ChainSelector) recoverEvaluationPanic(triggered bool) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	func() {
+		defer func() {
+			if r2 := recover(); r2 != nil {
+				// The configured Logger just proved unusable; fall back to
+				// the stdlib default rather than risk calling it again.
+				// safeLog, not a direct call: the fallback itself must not
+				// be the thing that finally lets a panic escape.
+				safeLog(
+					slog.Default(),
+					"panic while logging a chain selection evaluation panic",
+					"triggered", triggered,
+					"original_panic", r,
+					"logging_panic", r2,
+				)
+			}
+		}()
+		cs.config.Logger.Error(
+			"panic in chain selection evaluation; transition dropped",
+			"panic", r,
+			"triggered", triggered,
+		)
+	}()
+	if cs.config.EventBus == nil {
+		return
+	}
+	func() {
+		defer func() {
+			if r2 := recover(); r2 != nil {
+				safeLog(
+					slog.Default(),
+					"panic while publishing a chain selection evaluation "+
+						"panic event",
+					"triggered", triggered,
+					"original_panic", r,
+					"publish_panic", r2,
+				)
+			}
+		}()
+		cs.config.EventBus.Publish(
+			EvaluationPanicEventType,
+			event.NewEvent(
+				EvaluationPanicEventType,
+				EvaluationPanicEvent{Panic: r, Triggered: triggered},
+			),
+		)
+	}()
+}
+
+// safeLog calls logger.Error, discarding any panic instead of letting it
+// propagate. Used only as the last-resort step inside a panic-recovery path
+// that has nothing left above it to catch a further panic -- e.g. reporting
+// that the configured Logger itself panicked, via slog.Default() instead.
+// Even that fallback must not be the thing that finally lets a panic escape,
+// so this is the floor: it stops here, silently, rather than one level
+// deeper.
+func safeLog(logger *slog.Logger, msg string, args ...any) {
+	defer func() { _ = recover() }()
+	logger.Error(msg, args...)
 }
 
 func (cs *ChainSelector) cleanupStalePeers() {

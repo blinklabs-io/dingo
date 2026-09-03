@@ -581,12 +581,30 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		}
 		client := conn.LeiosFetch().Client
 		point := m.Point
+		declaredSize := m.Size
 		// The relay offers each endorser block on every connection. The
 		// manifest is content-addressed, so once any peer's copy is cached a
 		// refetch returns identical bytes: skip it instead of spending a fetch
 		// slot and the manifest's bandwidth once per connected peer. Mirrors
 		// the same guard on the txs offer below.
 		if _, ok := o.lookupLeiosEndorserBlock(point.Hash); ok {
+			return nil
+		}
+		// Reject an offer that already declares more than the cache's
+		// per-entry byte budget instead of spending a fetch on a body
+		// storeLeiosEndorserBlock would reject anyway.
+		// leiosEndorserBlockCacheMaxEntryBytes is a non-negative byte budget
+		// (16 MiB default; only tests lower it, always to a positive value).
+		if declaredSize > uint64(leiosEndorserBlockCacheMaxEntryBytes) { // #nosec G115
+			o.config.Logger.Debug(
+				"rejecting leios EB offer exceeding max entry size",
+				"component", "network",
+				"protocol", "leios-notify",
+				"connection_id", connId,
+				"slot", point.Slot,
+				"declared_size", declaredSize,
+				"max_size", leiosEndorserBlockCacheMaxEntryBytes,
+			)
 			return nil
 		}
 		// Fetch the manifest off the handler so a slow fetch cannot head-of-line
@@ -599,7 +617,12 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		// error must not tear down the shared connection.
 		o.dispatchLeiosFetch(ctx.ConnectionId, func() {
 			reqCtx, cancel := leiosFetchRequestContext(time.Time{})
-			resp, err := client.BlockRequest(reqCtx, point)
+			blockRaw, err := fetchAndValidateLeiosEbManifest(
+				reqCtx,
+				client,
+				point,
+				declaredSize,
+			)
 			cancel()
 			if err != nil {
 				o.config.Logger.Debug(
@@ -610,19 +633,9 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 				)
 				return
 			}
-			respBlock, ok := resp.(*leiosfetch.MsgBlock)
-			if !ok {
-				o.config.Logger.Debug(
-					"unexpected leios-fetch Block response type",
-					"type", fmt.Sprintf("%T", resp),
-					"connection_id", connId,
-					"slot", point.Slot,
-				)
-				return
-			}
 			if err := o.storeLeiosEndorserBlock(
 				point,
-				respBlock.BlockRaw,
+				blockRaw,
 				nil,
 			); err != nil {
 				o.config.Logger.Debug(
@@ -642,7 +655,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 					"fetched EB manifest %d.%x size %d txs %d",
 					point.Slot,
 					point.Hash,
-					len(respBlock.BlockRaw),
+					len(blockRaw),
 					txCount,
 				),
 				"component", "network",
@@ -833,6 +846,50 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		}
 	}
 	return nil
+}
+
+// leiosBlockRequester is the subset of the leios-fetch client used to fetch an
+// endorser block's manifest in response to a MsgBlockOffer. It mirrors
+// leiosBlockTxsRequester below so fetchAndValidateLeiosEbManifest can be
+// unit-tested without a live connection.
+type leiosBlockRequester interface {
+	BlockRequest(
+		ctx context.Context,
+		point ocommon.Point,
+	) (protocol.Message, error)
+}
+
+// fetchAndValidateLeiosEbManifest fetches the endorser-block manifest offered
+// by a MsgBlockOffer and binds the fetched body to the offer's declared size
+// before the caller stores it. A peer that offers one size and serves another
+// is a fetch/serving mismatch, not a cacheable result, so it is rejected here
+// rather than admitted under a byte budget the offer misrepresented (issue
+// #3512).
+func fetchAndValidateLeiosEbManifest(
+	ctx context.Context,
+	client leiosBlockRequester,
+	point ocommon.Point,
+	declaredSize uint64,
+) ([]byte, error) {
+	resp, err := client.BlockRequest(ctx, point)
+	if err != nil {
+		return nil, fmt.Errorf("leios-fetch block request: %w", err)
+	}
+	respBlock, ok := resp.(*leiosfetch.MsgBlock)
+	if !ok {
+		return nil, fmt.Errorf(
+			"unexpected leios-fetch Block response type: %T",
+			resp,
+		)
+	}
+	if actualSize := uint64(len(respBlock.BlockRaw)); actualSize != declaredSize {
+		return nil, fmt.Errorf(
+			"leios EB manifest size mismatch with offer: declared %d, got %d",
+			declaredSize,
+			actualSize,
+		)
+	}
+	return respBlock.BlockRaw, nil
 }
 
 // leiosBlockTxsRequester is the subset of the leios-fetch client used to fetch
@@ -1046,10 +1103,11 @@ func (o *Ouroboros) fetchLeiosEbTxsBatched(
 // per-attempt deadline. When deadline is non-zero the fetch abandons the attempt
 // and returns the contiguous prefix fetched so far (with a deadline error) once
 // it elapses, instead of continuing to re-request from a slow-but-alive relay
-// that keeps dribbling transactions within the leios-fetch protocol timeout (so
-// that timeout never fires) yet never promptly completes. The check is between
-// request rounds — each individual round is still bounded by the underlying
-// protocol timeout — so an attempt overshoots the deadline by at most one round;
+// that keeps dribbling transactions yet never promptly completes. The check is
+// between request rounds — each individual round is bounded by the request context from
+// leiosFetchRequestContext, not by a protocol state timeout (leios-fetch
+// deliberately has none for Block/BlockTxs) — so an attempt overshoots the
+// deadline by at most one round;
 // this lets the by-point backfill fail over to another connection rather than
 // parking the whole ledger apply loop on one peer (issue #2819). A zero deadline
 // disables the bound, preserving the tip-path behavior.
@@ -1158,6 +1216,16 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 		if !ok {
 			return leiosCollectTxs(result), fmt.Errorf(
 				"unexpected leios-fetch BlockTxs response type %T", resp,
+			)
+		}
+		if err := validateLeiosTxBitmap(txCount, respTxs.Bitmaps); err != nil {
+			// A relay-declared bitmap referencing an index beyond this
+			// endorser block's txCount is rejected before it is expanded: a
+			// small txCount must not license decoding a disproportionately
+			// large index list (issue #3523).
+			return leiosCollectTxs(result), fmt.Errorf(
+				"leios-fetch response bitmap: %w",
+				err,
 			)
 		}
 		served := leiosBitmapTxIndices(respTxs.Bitmaps)

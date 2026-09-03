@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"strconv"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -504,6 +505,84 @@ func (s *Store) LatestPoolOpCertSequences(
 	return ret, rows.Err()
 }
 
+// mithrilTrustBoundarySyncKey mirrors database.mithrilLedgerSlotSyncKey and
+// ledgerstate's writer of the same key. It is duplicated here for the reason
+// the database package duplicates it: nothing below the ledger may import the
+// package that writes it.
+const mithrilTrustBoundarySyncKey = "mithril_ledger_slot"
+
+// firstMintedBlockSlot raises startSlot past the Mithril trust boundary when
+// one is recorded, so a slot range asked about minted blocks never reaches
+// rows that are not blocks.
+//
+// pool_opcert_sequence carries two kinds of row. A block-apply writes one per
+// block minted (ledger.processBlockTransactions), which is what every block
+// count here means. A Mithril restore also writes one row per pool in the
+// certified HeaderState counter map, all at the snapshot's anchor slot
+// (ledgerstate.importOpCertCounters), so post-boundary validation has an
+// authoritative baseline to enforce counter monotonicity against. Those rows
+// record a counter the node was told about, not a block it saw: a bootstrap
+// applies no blocks at or below the anchor, and one slot cannot hold a block
+// from every pool in the set in any case.
+//
+// Counting them as blocks credits every pool holding a certified counter with
+// a block it never minted and inflates the epoch's block total by the size of
+// the pool set, which reaches pool reward performance
+// (ledger/reward_calculation.go), the reward_pool_input rows seeded at the
+// epoch boundary (ledger/snapshot/rotation.go), and Blockfrost's
+// blocks_minted. The boundary is the same discriminator
+// LedgerState.latestOpCertCounterForValidation already uses to tell an
+// observed counter from an imported one.
+//
+// A failed or malformed read is returned as an error rather than treated as
+// "no boundary": these callers distribute rewards from the result, and a
+// silent fallback would restore the very inflation this removes at exactly
+// the moment the boundary could not be confirmed.
+//
+// The bool reports whether any slot at all can be past the boundary. It is
+// false only when the recorded boundary is the largest representable slot,
+// where boundary+1 would wrap to zero and re-admit every row.
+func (s *Store) firstMintedBlockSlot(
+	db queryer,
+	ctx context.Context,
+	startSlot uint64,
+) (uint64, bool, error) {
+	value, err := s.operationalQueries(db).
+		GetSyncState(ctx, mithrilTrustBoundarySyncKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return startSlot, true, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("read Mithril trust boundary: %w", err)
+	}
+	if value == "" {
+		// sqlc's GetSyncState returns sql.ErrNoRows for an absent key, which
+		// the branch above already takes, so an empty string here is a row
+		// that exists and holds nothing. That is a malformed boundary, not
+		// the absence of one, and it gets the same treatment as an
+		// unparseable value rather than silently re-admitting every imported
+		// counter row.
+		return 0, false, fmt.Errorf(
+			"parse Mithril trust boundary %q: empty value", value,
+		)
+	}
+	boundary, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0, false, fmt.Errorf(
+			"parse Mithril trust boundary %q: %w",
+			value,
+			err,
+		)
+	}
+	if boundary < startSlot {
+		return startSlot, true, nil
+	}
+	if boundary == math.MaxUint64 {
+		return 0, false, nil
+	}
+	return boundary + 1, true, nil
+}
+
 func (s *Store) GetPoolBlockIssuersInSlotRange(
 	startSlot uint64,
 	endSlot uint64,
@@ -515,6 +594,13 @@ func (s *Store) GetPoolBlockIssuersInSlotRange(
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
+	}
+	startSlot, anyMinted, err := s.firstMintedBlockSlot(db, ctx, startSlot)
+	if err != nil {
+		return nil, err
+	}
+	if !anyMinted || endSlot < startSlot {
+		return nil, nil
 	}
 	rows, err := db.QueryContext(ctx, `
 SELECT pool_key_hash, id, slot, sequence
@@ -560,6 +646,13 @@ func (s *Store) CountPoolBlocksInSlotRange(
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, 0, err
+	}
+	startSlot, anyMinted, err := s.firstMintedBlockSlot(db, ctx, startSlot)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !anyMinted || endSlot < startSlot {
+		return counts, 0, nil
 	}
 	var total int64
 	if err := db.QueryRowContext(ctx, `
@@ -2032,23 +2125,37 @@ ORDER BY p.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
 	if err != nil {
 		return fmt.Errorf("load pool registrations query: %w", err)
 	}
+	// Collect every registration row and fully close this cursor before
+	// issuing any nested owner/relay query on the same queryer. On SQLite,
+	// concurrently open cursors on one connection are fine, but MySQL and
+	// PostgreSQL connections are strictly request/response: issuing a new
+	// query while this outer result set is still open corrupts the
+	// connection (observed as go-sql-driver/mysql's "busy buffer" /
+	// "unexpected sequence nr", and equivalent protocol-desync failures on
+	// PostgreSQL) once that connection is returned to the pool and reused
+	// -- see the conformance suite's real-backend investigation. Load
+	// children only after this cursor is closed, matching the safe
+	// collect-then-batch-load pattern loadPoolsAssociations already uses.
+	registrations := make([]*models.PoolRegistration, 0)
 	for rows.Next() {
 		registration, err := scanPoolRegistration(rows)
 		if err != nil {
 			rows.Close()
 			return err
 		}
-		if err := loadPoolRegistrationChildren(ctx, db, registration); err != nil {
-			rows.Close()
-			return err
-		}
-		pool.Registration = append(pool.Registration, *registration)
+		registrations = append(registrations, registration)
 	}
 	if err := rows.Close(); err != nil {
 		return err
 	}
 	if err := rows.Err(); err != nil {
 		return err
+	}
+	for _, registration := range registrations {
+		if err := loadPoolRegistrationChildren(ctx, db, registration); err != nil {
+			return err
+		}
+		pool.Registration = append(pool.Registration, *registration)
 	}
 	rows, err = db.QueryContext(ctx, `
 SELECT r.pool_key_hash, r.certificate_id, r.id, r.pool_id, r.epoch, r.added_slot

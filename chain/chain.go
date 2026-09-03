@@ -852,6 +852,34 @@ func (c *Chain) rollbackPointBlock(
 	)
 }
 
+// findQueuedHeader scans queued headers backward for the rollback point
+// without mutating them, and returns one of three outcomes:
+//   - (index, nil) if a queued header matches point exactly.
+//   - (-1, nil) if every queued header is strictly ahead of point, or if
+//     point's slot matches the oldest queued header's under a different
+//     hash — either way point is not a queued header, so rollback falls
+//     through to the block-committed chain.
+//   - (-1, models.ErrBlockNotFound) if point falls strictly between two
+//     queued headers, or beyond the newest one without matching it — a
+//     target that is not a valid rollback point.
+//
+// Callers must hold c.mutex.
+func (c *Chain) findQueuedHeader(point ocommon.Point) (int, error) {
+	for i, header := range slices.Backward(c.headers) {
+		if header.point.Slot > point.Slot {
+			continue
+		}
+		if header.point.Slot == point.Slot &&
+			bytes.Equal(header.point.Hash, point.Hash) {
+			return i, nil
+		}
+		if header.point.Slot < point.Slot {
+			return -1, models.ErrBlockNotFound
+		}
+	}
+	return -1, nil
+}
+
 // ValidateRollback verifies that Rollback(point) would be accepted without
 // mutating chain state. Callers can use this to avoid applying external
 // side effects before the chain's rollback pre-checks have run.
@@ -872,19 +900,12 @@ func (c *Chain) ValidateRollback(point ocommon.Point) error {
 	}
 	// Check headers for rollback point without mutating them
 	if len(c.headers) > 0 {
-		var header queuedHeader
-		for _, v := range slices.Backward(c.headers) {
-			header = v
-			if header.point.Slot > point.Slot {
-				continue
-			}
-			if header.point.Slot == point.Slot &&
-				bytes.Equal(header.point.Hash, point.Hash) {
-				return nil
-			}
-			if header.point.Slot < point.Slot {
-				return models.ErrBlockNotFound
-			}
+		idx, err := c.findQueuedHeader(point)
+		if err != nil {
+			return err
+		}
+		if idx >= 0 {
+			return nil
 		}
 	}
 	// Lookup block for rollback point
@@ -940,40 +961,21 @@ func (c *Chain) rollbackLocked(
 	if c.persistent && c.manager.securityParam <= 0 && !unbounded {
 		return nil, ErrSecurityParamNotConfigured
 	}
-	// Check headers for rollback point without mutating them yet: an
-	// over-K rejection below must leave the header queue exactly as it
-	// was, so the deletion this loop computes is only applied once the
-	// rollback is known to be accepted (issue #3516 review). headersEnd
-	// tracks the index, if any, from which headers[headersEnd:] must be
-	// dropped -- everything newer than the rollback point, found by
-	// walking backwards from the tip so each qualifying header's index
-	// is still valid when it is eventually deleted in one bulk pass.
-	headersEnd := -1
-	headersMatched := false
+	// Check headers for rollback point. The scan itself does not mutate
+	// c.headers, so a not-found error leaves the queue untouched; headers
+	// are only deleted once we know the rollback will actually apply
+	// (issue #3516 review; issue #3809).
 	if len(c.headers) > 0 {
-		var header queuedHeader
-		for i, v := range slices.Backward(c.headers) {
-			header = v
-			// Headers after the rollback slot must be dropped.
-			if header.point.Slot > point.Slot {
-				headersEnd = i
-				continue
-			}
-			if header.point.Slot == point.Slot &&
-				bytes.Equal(header.point.Hash, point.Hash) {
-				headersMatched = true
-				break
-			}
-			if header.point.Slot < point.Slot {
-				return nil, models.ErrBlockNotFound
-			}
+		idx, err := c.findQueuedHeader(point)
+		if err != nil {
+			return nil, err
 		}
-	}
-	if headersMatched {
-		if headersEnd >= 0 {
-			c.headers = slices.Delete(c.headers, headersEnd, len(c.headers))
+		if idx >= 0 {
+			// Rollback point is a queued header. Drop only the headers
+			// after it and leave the matched header itself queued.
+			c.headers = slices.Delete(c.headers, idx+1, len(c.headers))
+			return nil, nil
 		}
-		return nil, nil
 	}
 	// Lookup block for rollback point
 	var rollbackBlockIndex uint64
@@ -1011,11 +1013,6 @@ func (c *Chain) rollbackLocked(
 	// corrupt span fails the rollback whole rather than part-way through.
 	if err := c.checkEphemeralBufferSpan(); err != nil {
 		return nil, err
-	}
-	// The rollback is accepted: now it is safe to drop the headers found
-	// above to be newer than the rollback point.
-	if headersEnd >= 0 {
-		c.headers = slices.Delete(c.headers, headersEnd, len(c.headers))
 	}
 	// Capture old tip for fork event before we modify it
 	oldTip := c.currentTip
@@ -1211,7 +1208,9 @@ func (c *Chain) RecentPoints(count int) []ocommon.Point {
 //
 // Unlike RecentPoints, this performs one indexed lookup regardless of depth,
 // which is important for consensus reads at the security-parameter boundary.
-func (c *Chain) PointAtDepth(depth uint64) (point ocommon.Point, found bool, err error) {
+func (c *Chain) PointAtDepth(
+	depth uint64,
+) (point ocommon.Point, found bool, err error) {
 	if c == nil {
 		return ocommon.Point{}, false, errors.New("chain is nil")
 	}
@@ -1345,7 +1344,7 @@ func (c *Chain) firstHeaderMatchesPoint(
 }
 
 func (c *Chain) HeaderRange(count int) (ocommon.Point, ocommon.Point) {
-	if c == nil {
+	if c == nil || count <= 0 {
 		return ocommon.Point{}, ocommon.Point{}
 	}
 	c.mutex.RLock()

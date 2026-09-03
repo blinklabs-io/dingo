@@ -5,6 +5,10 @@ ROOT_DIR=$(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 # worktrees so sibling checkouts do not affect formatting or rebuild inputs.
 GO_FILES=$(shell find $(ROOT_DIR) -path '$(ROOT_DIR)/.worktrees' -prune -o -name '*.go' -print)
 
+# Gather every Go module directory. Nested modules have their own go.mod and
+# are therefore outside the root module's ./..., so they need their own run.
+GO_MODULE_DIRS=$(shell find $(ROOT_DIR) -path '$(ROOT_DIR)/.worktrees' -prune -o -path '$(ROOT_DIR)/.claude' -prune -o -path '$(ROOT_DIR)/.tools' -prune -o -name go.mod -print | xargs -n1 dirname)
+
 # Gather list of expected binaries
 BINARIES=$(shell cd $(ROOT_DIR)/cmd && ls -1 | grep -v ^common)
 
@@ -40,7 +44,7 @@ GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
 # run modernize only against hand-written packages to avoid generator drift.
 MODERNIZE_PACKAGES=$(shell go list $(GO_TAG_FLAGS) -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | grep -Ev '/database/plugin/(blob/(aws|gcs)|metadata/(mysql|postgres)|metadata/sqlstore/internal/query/(mysql|postgres|sqlite))$$|/midnight$$')
 
-.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity proto sql sql-check govulncheck gorm-check test test-live-lifecycle bench bench-ci bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
+.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity proto sql sql-check govulncheck test test-live-lifecycle bench bench-ci bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
 
 # Default target
 all: format build ## Format and build (default)
@@ -73,8 +77,16 @@ format: mod-tidy ## Run mod-tidy, then format code
 golines: ## Enforce 80-character line limit
 	golines -w --ignore-generated --chain-split-dots --max-len=80 --reformat-tags .
 
+# golangci-lint covers one module for one GOOS per run. The loop reaches every
+# nested module, and the GOOS=windows run reaches files behind
+# `//go:build windows`, which the host build excludes. CI runs the same scopes
+# in .github/workflows/golangci-lint.yml.
 lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and modernize
-	golangci-lint run ./...
+	@for dir in $(GO_MODULE_DIRS); do \
+		echo "golangci-lint run ./... ($$dir)"; \
+		(cd $$dir && golangci-lint run ./...) || exit 1; \
+	done
+	GOOS=windows golangci-lint run ./...
 	nilaway $(GO_TAG_FLAGS) ./...
 	modernize $(GO_TAG_FLAGS) $(MODERNIZE_PACKAGES)
 
@@ -106,17 +118,6 @@ sql-check: sql ## Run sql, then fail when checked-in sqlc output is stale
 govulncheck: ## Fail on known vulnerabilities reachable from source, including the Go toolchain/stdlib
 	$(GOVULNCHECK) $(GO_TAG_FLAGS) ./...
 
-gorm-check: ## Fail if the removed ORM returns to source or dependencies
-	@status=0; \
-	grep -RInE --exclude-dir=.git --exclude-dir=.worktrees \
-		--include='*.go' --include='go.mod' --include='go.sum' \
-		'gorm\.io|github.com/glebarez/sqlite|otelgorm' . || status=$$?; \
-	case "$$status" in \
-		0) echo 'gorm-check: forbidden ORM reference found' >&2; exit 1 ;; \
-		1) exit 0 ;; \
-		*) echo "gorm-check: scanner failed with status $$status" >&2; exit "$$status" ;; \
-	esac
-
 $(PROTOC):
 	mkdir -p $(TOOLS_BIN) $(PROTOC_DIR)
 	test -n "$(PROTOC_SHA256)"
@@ -128,8 +129,11 @@ $(PROTOC):
 	fi
 	unzip -q -o $(PROTOC_ZIP) -d $(PROTOC_DIR)
 
+# -timeout matches the race-enabled CI jobs (go-test.yml's go-test (Linux,
+# race) and publish.yml's release gate) so a local run and CI cannot disagree
+# about which slow package is a hang. ./ledger alone runs 9-13 minutes here.
 test: mod-tidy ## Run mod-tidy, then all tests with race detection
-	go test $(GO_TAG_FLAGS) -v -race -timeout 20m ./...
+	go test $(GO_TAG_FLAGS) -v -race -timeout 30m ./...
 
 test-live-lifecycle: ## Run the live two-node lifecycle integration tests with race detection
 	go test -tags "$(BUILD_TAGS) dingo_db_integration" -v -race -timeout 20m -count=1 -run '^TestLive.*UnderRealForgingAndNetworking$$' .

@@ -113,8 +113,12 @@ func TestTallyDRepVotesIncludesAlwaysNoConfidence(t *testing.T) {
 	assert.True(t, noConfidenceDecision.DRepApproved)
 
 	updateCommitteeDecision := ShouldRatify(RatifyInputs{
-		Tally:           updateCommitteeTally,
-		PParams:         pparams,
+		Tally:   updateCommitteeTally,
+		PParams: pparams,
+		GovAction: &lcommon.UpdateCommitteeGovAction{
+			Type:       uint(lcommon.GovActionTypeUpdateCommittee),
+			CredEpochs: map[*lcommon.Credential]uint{},
+		},
 		ActiveDRepCount: 0,
 		MajorVersion:    10,
 	})
@@ -314,13 +318,21 @@ func TestTallySPOVotesExplicitNoAndAbstainStakeOverflow(t *testing.T) {
 		}
 		t.Run("just below overflow succeeds", func(t *testing.T) {
 			tally := &ProposalTally{}
-			err := tallySPOVotes(&TallyContext{SPOState: newState(1)}, votes, tally)
+			err := tallySPOVotes(
+				&TallyContext{SPOState: newState(1)},
+				votes,
+				tally,
+			)
 			require.NoError(t, err)
 			assert.Equal(t, maxUint64, tally.SPONoStake)
 		})
 		t.Run("just above overflow fails", func(t *testing.T) {
 			tally := &ProposalTally{}
-			err := tallySPOVotes(&TallyContext{SPOState: newState(2)}, votes, tally)
+			err := tallySPOVotes(
+				&TallyContext{SPOState: newState(2)},
+				votes,
+				tally,
+			)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "overflows uint64")
 		})
@@ -333,13 +345,21 @@ func TestTallySPOVotesExplicitNoAndAbstainStakeOverflow(t *testing.T) {
 		}
 		t.Run("just below overflow succeeds", func(t *testing.T) {
 			tally := &ProposalTally{}
-			err := tallySPOVotes(&TallyContext{SPOState: newState(1)}, votes, tally)
+			err := tallySPOVotes(
+				&TallyContext{SPOState: newState(1)},
+				votes,
+				tally,
+			)
 			require.NoError(t, err)
 			assert.Equal(t, maxUint64, tally.SPOAbstainStake)
 		})
 		t.Run("just above overflow fails", func(t *testing.T) {
 			tally := &ProposalTally{}
-			err := tallySPOVotes(&TallyContext{SPOState: newState(2)}, votes, tally)
+			err := tallySPOVotes(
+				&TallyContext{SPOState: newState(2)},
+				votes,
+				tally,
+			)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "overflows uint64")
 		})
@@ -562,9 +582,17 @@ func TestLoadCommitteeVotingStateExcludesSeatedMembersWithoutHotAuth(
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, state.ActiveMemberCount)
-	assert.Equal(t, []string{string(hotA)}, state.MemberHotCredentials)
-	assert.Contains(t, state.HotCredentialPresence, string(hotA))
-	assert.NotContains(t, state.HotCredentialPresence, string(unseatedHot))
+	hotAKey := models.CommitteeCredential{
+		CredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+		Credential:    hotA,
+	}.Key()
+	unseatedHotKey := models.CommitteeCredential{
+		CredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+		Credential:    unseatedHot,
+	}.Key()
+	assert.Equal(t, []string{hotAKey}, state.MemberHotCredentials)
+	assert.Contains(t, state.HotCredentialPresence, hotAKey)
+	assert.NotContains(t, state.HotCredentialPresence, unseatedHotKey)
 }
 
 // TestLoadCommitteeVotingStateExcludesResignedMembers asserts that a
@@ -605,8 +633,16 @@ func TestLoadCommitteeVotingStateExcludesResignedMembers(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, state.ActiveMemberCount)
-	assert.Equal(t, []string{string(activeHot)}, state.MemberHotCredentials)
-	assert.NotContains(t, state.HotCredentialPresence, string(resignedHot))
+	activeHotKey := models.CommitteeCredential{
+		CredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+		Credential:    activeHot,
+	}.Key()
+	resignedHotKey := models.CommitteeCredential{
+		CredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+		Credential:    resignedHot,
+	}.Key()
+	assert.Equal(t, []string{activeHotKey}, state.MemberHotCredentials)
+	assert.NotContains(t, state.HotCredentialPresence, resignedHotKey)
 }
 
 // TestTallyCCVotesExcludesResignedFromDenominator asserts that a

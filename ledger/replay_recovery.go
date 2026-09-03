@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	shelley "github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -390,6 +391,12 @@ func isDeterministicTxValidationError(err error) bool {
 	if _, ok := errors.AsType[shelley.DuplicateInputError](err); ok {
 		return true
 	}
+	if _, ok := errors.AsType[conway.PlutusScriptFailedError](err); ok {
+		return true
+	}
+	if errors.Is(err, models.ErrRewardWithdrawalExceedsBalance) {
+		return true
+	}
 	_, ok := errors.AsType[eras.DuplicateInputByronError](err)
 	return ok
 }
@@ -464,8 +471,9 @@ func (ls *LedgerState) markDeterministicTxRecoveryResync(
 // separate from unresolved-input recovery: the latter is state-dependent and
 // still needs producer resolution and the security-parameter fallback.
 //
-// The rejection is never terminal. Rejecting the chain that contains a block
-// this node believes is invalid, and continuing to reject it, is the response
+// Structural rejection is normally not terminal. Rejecting the chain that
+// contains a block this node believes is invalid, and continuing to reject it,
+// is the response
 // tryRecoverFromHeaderValidationError already gives a block whose deferred
 // header checks fail (see header_validation_recovery.go): a local
 // false-positive verdict must leave the node able to follow a chain a peer
@@ -478,7 +486,9 @@ func (ls *LedgerState) markDeterministicTxRecoveryResync(
 // no-progress accounting (trackPipelineProgress / ledgerPipelineBackoff)
 // escalates and exports as dingo_ledger_pipeline_stuck. Whether a validation
 // failure should ever become terminal, and what terminal must report, is
-// issue #3261 rather than this path.
+// issue #3261 rather than this path. A repeated reward withdrawal mismatch is
+// the exception: it proves the persisted reward state cannot satisfy the
+// chain's transaction, so retrying the same state would wedge the pipeline.
 func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 	validationErr *txValidationError,
 ) (bool, error) {
@@ -493,15 +503,41 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 		validationErr,
 	)
 	ls.RUnlock()
+	if resyncSpent && errors.Is(
+		validationErr.Cause,
+		models.ErrRewardWithdrawalExceedsBalance,
+	) {
+		if ls.config.Logger != nil {
+			ls.config.Logger.Error(
+				"replay recovery found a repeated reward withdrawal mismatch; halting instead of retrying indefinitely",
+				"component",
+				"ledger",
+				"failing_block_slot",
+				validationErr.BlockPoint.Slot,
+				"error",
+				validationErr.Cause,
+				"hint",
+				"local reward-account state disagrees with the chain; repair or resync the node before restarting",
+			)
+		}
+		return false, fmt.Errorf(
+			"repeated reward withdrawal mismatch: %w",
+			errHaltLedgerPipeline,
+		)
+	}
 	rewindPoint := ledgerTip.Point
 	if rewindPoint.Slot >= validationErr.BlockPoint.Slot {
 		if ls.config.Logger != nil {
 			ls.config.Logger.Warn(
 				"deterministic transaction validation rejected a block at or behind the ledger tip; no rewind target precedes it",
-				"component", "ledger",
-				"failing_block_slot", validationErr.BlockPoint.Slot,
-				"ledger_tip_slot", rewindPoint.Slot,
-				"error", validationErr.Cause,
+				"component",
+				"ledger",
+				"failing_block_slot",
+				validationErr.BlockPoint.Slot,
+				"ledger_tip_slot",
+				rewindPoint.Slot,
+				"error",
+				validationErr.Cause,
 			)
 		}
 		return false, nil
@@ -518,10 +554,14 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 		if ls.config.Logger != nil {
 			ls.config.Logger.Warn(
 				"chain selection moved the primary chain off the deterministic transaction recovery point; the rejected block is already gone",
-				"component", "ledger",
-				"failing_block_slot", validationErr.BlockPoint.Slot,
-				"rewind_target_slot", rewindPoint.Slot,
-				"error", err,
+				"component",
+				"ledger",
+				"failing_block_slot",
+				validationErr.BlockPoint.Slot,
+				"rewind_target_slot",
+				rewindPoint.Slot,
+				"error",
+				err,
 			)
 		}
 		return true, nil
@@ -530,12 +570,18 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 	if ls.config.Logger != nil {
 		ls.config.Logger.Warn(
 			"deterministic transaction validation rejected a block on the primary chain; rewinding so chain selection can offer another candidate",
-			"component", "ledger",
-			"tx_hash", hex.EncodeToString(validationErr.TxHash),
-			"failing_block_slot", validationErr.BlockPoint.Slot,
-			"rewind_target_slot", rewindPoint.Slot,
-			"rewind_target_hash", hex.EncodeToString(rewindPoint.Hash),
-			"error", validationErr.Cause,
+			"component",
+			"ledger",
+			"tx_hash",
+			hex.EncodeToString(validationErr.TxHash),
+			"failing_block_slot",
+			validationErr.BlockPoint.Slot,
+			"rewind_target_slot",
+			rewindPoint.Slot,
+			"rewind_target_hash",
+			hex.EncodeToString(rewindPoint.Hash),
+			"error",
+			validationErr.Cause,
 		)
 	}
 	if err := ls.rollbackPrimaryChainInSecurityParamWindows(rewindPoint); err != nil {
@@ -557,11 +603,16 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 		if ls.config.Logger != nil {
 			ls.config.Logger.Warn(
 				"deterministic transaction validation rejected the same block again at the same applied tip; rejecting the branch without rotating peers",
-				"component", "ledger",
-				"tx_hash", hex.EncodeToString(validationErr.TxHash),
-				"failing_block_slot", validationErr.BlockPoint.Slot,
-				"ledger_tip_slot", rewindPoint.Slot,
-				"hint", "peers are serving a transaction this node rejects; the pipeline keeps rejecting it and reports no tip progress",
+				"component",
+				"ledger",
+				"tx_hash",
+				hex.EncodeToString(validationErr.TxHash),
+				"failing_block_slot",
+				validationErr.BlockPoint.Slot,
+				"ledger_tip_slot",
+				rewindPoint.Slot,
+				"hint",
+				"peers are serving a transaction this node rejects; the pipeline keeps rejecting it and reports no tip progress",
 			)
 		}
 		return true, nil
@@ -1245,12 +1296,16 @@ func (ls *LedgerState) findReplayRecoveryCandidate(
 			continue
 		}
 		seenInputs[inputKey] = struct{}{}
-		resolved, err := ls.resolveReplayRecoveryProducer(
+		resolved, present, err := ls.resolveReplayRecoveryProducer(
 			pending,
 			chainIndex,
 		)
 		if err != nil {
 			return nil, err
+		}
+		if present {
+			// Nothing to repair for this input; it is still in the UTxO set.
+			continue
 		}
 		if resolved == nil {
 			unresolvedInputs = append(unresolvedInputs, pending.Input)
@@ -1386,31 +1441,43 @@ func (ls *LedgerState) buildReplayRecoveryChainIndex(
 	return index, nil
 }
 
+// resolveReplayRecoveryProducer locates the block that produced pending.Input.
+//
+// The bool reports that the input is present in the UTxO set, which is a
+// different answer from a nil producer: present means nothing about this input
+// needs repairing, while a nil producer with present false means the input is
+// missing and its producer could not be found either.
 func (ls *LedgerState) resolveReplayRecoveryProducer(
 	pending replayRecoveryPendingInput,
 	chainIndex *replayRecoveryChainIndex,
-) (*replayRecoveryResolvedProducer, error) {
-	utxo, err := ls.db.UtxoByRef(
+) (*replayRecoveryResolvedProducer, bool, error) {
+	present, err := ls.db.UtxoExists(
 		pending.Input.Id().Bytes(),
 		pending.Input.Index(),
 		nil,
 	)
 	if err != nil && !errors.Is(err, database.ErrUtxoNotFound) {
-		return nil, fmt.Errorf(
+		return nil, false, fmt.Errorf(
 			"lookup validation input %s: %w",
 			pending.Input.String(),
 			err,
 		)
 	}
-	if utxo != nil {
-		return nil, nil
+	if present {
+		// The input is in the UTxO set, so there is no provenance gap here
+		// whatever the transaction failed on. Reported as present rather than
+		// as a nil producer so the caller does not fold it into
+		// unresolvedInputs, which is what let a failure with nothing missing
+		// -- a script data hash mismatch, say -- drive a rewind that could
+		// never fix it (dingo #3805).
+		return nil, true, nil
 	}
 	producerTx, err := ls.db.GetTransactionByHash(
 		pending.Input.Id().Bytes(),
 		nil,
 	)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, false, fmt.Errorf(
 			"lookup producer tx %s: %w",
 			pending.Input.Id().String(),
 			err,
@@ -1419,14 +1486,14 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 	if producerTx != nil && len(producerTx.BlockHash) > 0 {
 		producerBlock, err := database.BlockByHash(ls.db, producerTx.BlockHash)
 		if err != nil {
-			return nil, fmt.Errorf(
+			return nil, false, fmt.Errorf(
 				"lookup producer block %x: %w",
 				producerTx.BlockHash,
 				err,
 			)
 		}
 		if producerBlock.Slot >= pending.MaxSlot {
-			return nil, nil
+			return nil, false, nil
 		}
 		tx := ls.replayRecoveryResolveTxFromBlock(
 			producerBlock,
@@ -1439,17 +1506,17 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 			ProducerBlock: producerBlock,
 			Tx:            tx,
 			Strategy:      "metadata",
-		}, nil
+		}, false, nil
 	}
 	producerBlock, found, err := ls.replayRecoveryBlockFromTxBlob(
 		pending.Input.Id().Bytes(),
 	)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if found {
 		if producerBlock.Slot >= pending.MaxSlot {
-			return nil, nil
+			return nil, false, nil
 		}
 		tx := ls.replayRecoveryResolveTxFromBlock(
 			producerBlock,
@@ -1461,7 +1528,7 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 			ProducerBlock: producerBlock,
 			Tx:            tx,
 			Strategy:      "tx-blob",
-		}, nil
+		}, false, nil
 	}
 	if chainIndex != nil {
 		chainTx, ok := chainIndex.Txs[string(pending.Input.Id().Bytes())]
@@ -1471,10 +1538,10 @@ func (ls *LedgerState) resolveReplayRecoveryProducer(
 				ProducerBlock: chainTx.Block,
 				Tx:            chainTx.Tx,
 				Strategy:      "chain-scan",
-			}, nil
+			}, false, nil
 		}
 	}
-	return nil, nil
+	return nil, false, nil
 }
 
 func (ls *LedgerState) replayRecoveryResolveTxFromBlock(

@@ -185,7 +185,10 @@ func TestApplyRollbackDoesNotPromoteAdvertisedTipToObserved(t *testing.T) {
 	pt := NewPeerChainTip(connId, observedTip, nil)
 	rollbackPoint := ocommon.Point{Slot: 90, Hash: []byte("rollback")}
 	advertisedTip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: math.MaxUint64, Hash: []byte("network")},
+		Point: ocommon.Point{
+			Slot: math.MaxUint64,
+			Hash: []byte("network"),
+		},
 		BlockNumber: math.MaxUint64,
 	}
 

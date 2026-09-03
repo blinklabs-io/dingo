@@ -514,7 +514,8 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 	if mappings == 0 {
 		s.logger.Warn(
 			"token registry snapshot contained no usable mappings; keeping existing entries and retrying next interval",
-			"url", s.sourceURL,
+			"url",
+			s.sourceURL,
 		)
 		return 0, nil
 	}
@@ -528,8 +529,10 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 	if skipped > 0 {
 		s.logger.Warn(
 			"token registry snapshot had unusable mappings; deferring reconciliation so their stored metadata is not retired",
-			"skipped", skipped,
-			"url", s.sourceURL,
+			"skipped",
+			skipped,
+			"url",
+			s.sourceURL,
 		)
 		return written, nil
 	}
@@ -585,8 +588,10 @@ func (s *TokenRegistrySync) readPersistedStamp() (time.Time, error) {
 	if parseErr != nil {
 		s.logger.Warn(
 			"stored token registry sync stamp is unparsable; falling back to the wall clock",
-			"value", raw,
-			"error", parseErr,
+			"value",
+			raw,
+			"error",
+			parseErr,
 		)
 		return time.Time{}, nil
 	}
@@ -704,7 +709,10 @@ func (s *TokenRegistrySync) applySnapshot(
 				s.maxBytes,
 			)
 		}
-		return 0, mappings, skipped, fmt.Errorf("open token registry snapshot: %w", err)
+		return 0, mappings, skipped, fmt.Errorf(
+			"open token registry snapshot: %w",
+			err,
+		)
 	}
 	defer func() { _ = gzipReader.Close() }()
 
@@ -742,7 +750,10 @@ func (s *TokenRegistrySync) applySnapshot(
 					s.maxBytes,
 				)
 			}
-			return written, mappings, skipped, fmt.Errorf("read token registry snapshot: %w", err)
+			return written, mappings, skipped, fmt.Errorf(
+				"read token registry snapshot: %w",
+				err,
+			)
 		}
 		if !isTokenRegistryMapping(header) {
 			continue

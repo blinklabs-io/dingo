@@ -317,9 +317,10 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) bool {
 	if upper < minSendAmount {
 		upper = minSendAmount
 	}
-	sendAmount := uint64(
-		IntRange(int(minSendAmount), int(upper)),
-	) //nolint:gosec // IntRange always returns non-negative
+	// IntRange returns a value in [minSendAmount, upper], both of which are
+	// positive here, so the result is always non-negative.
+	//nolint:gosec
+	sendAmount := uint64(IntRange(int(minSendAmount), int(upper)))
 
 	required := sendAmount + MinFee
 	inputs, change, err := p.wallet.SelectCoins(required)
@@ -426,7 +427,6 @@ func (p *Pump) submitDelegation(client *NodeClient, batchSize int) bool {
 	stakeKeyHash, err := decodeConfiguredHash(
 		"TXPUMP_DELEGATION_STAKE_KEY_HASH",
 		p.cfg.DelegationStakeKeyHash,
-		28,
 	)
 	if err != nil {
 		p.logger.Error("invalid delegation stake key hash", "err", err)
@@ -435,7 +435,6 @@ func (p *Pump) submitDelegation(client *NodeClient, batchSize int) bool {
 	poolKeyHash, err := decodeConfiguredHash(
 		"TXPUMP_DELEGATION_POOL_KEY_HASH",
 		p.cfg.DelegationPoolKeyHash,
-		28,
 	)
 	if err != nil {
 		p.logger.Error("invalid delegation pool key hash", "err", err)

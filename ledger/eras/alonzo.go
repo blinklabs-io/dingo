@@ -212,10 +212,6 @@ func ValidateTxAlonzo(
 	); err != nil {
 		return err
 	}
-	// Skip script evaluation if TX is marked as not valid
-	if !tx.IsValid() {
-		return nil
-	}
 	if shouldSkipPhase2Validation(ls) {
 		return nil
 	}
@@ -267,6 +263,7 @@ func ValidateTxAlonzo(
 			ls,
 			tx,
 			slices.Concat(resolvedInputs, resolvedRefInputs),
+			script.StrictValidityUpperBoundForTransaction(tx),
 		)
 		if err != nil {
 			return err
@@ -316,25 +313,36 @@ func ValidateTxAlonzo(
 				evalContext,
 			)
 			if err != nil {
-				return err
+				return validatePlutusOutcome(
+					tx,
+					conway.PlutusScriptFailedError{
+						ScriptHash: tmpScript.Hash(),
+						Tag:        redeemer.Tag,
+						Index:      redeemer.Index,
+						Err:        err,
+					},
+				)
 			}
 			if usedBudget.Steps > redeemer.ExUnits.Steps || usedBudget.Memory > redeemer.ExUnits.Memory {
-				return conway.PlutusScriptFailedError{
-					ScriptHash: tmpScript.Hash(),
-					Tag:        redeemer.Tag,
-					Index:      redeemer.Index,
-					Err: fmt.Errorf(
-						"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
-						usedBudget.Steps, usedBudget.Memory,
-						redeemer.ExUnits.Steps, redeemer.ExUnits.Memory,
-					),
-				}
+				return validatePlutusOutcome(
+					tx,
+					conway.PlutusScriptFailedError{
+						ScriptHash: tmpScript.Hash(),
+						Tag:        redeemer.Tag,
+						Index:      redeemer.Index,
+						Err: fmt.Errorf(
+							"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+							usedBudget.Steps, usedBudget.Memory,
+							redeemer.ExUnits.Steps, redeemer.ExUnits.Memory,
+						),
+					},
+				)
 			}
 		default:
 			return fmt.Errorf("unimplemented script type: %T", tmpScript)
 		}
 	}
-	return nil
+	return validatePlutusOutcome(tx, nil)
 }
 
 var alonzoUtxoValidationRules = buildAlonzoValidationRules()
@@ -342,7 +350,6 @@ var alonzoUtxoValidationRules = buildAlonzoValidationRules()
 func buildAlonzoValidationRules() []indexedUtxoValidationRule {
 	return buildIndexedUtxoValidationRules(
 		alonzo.UtxoValidationRules,
-		alonzoUtxoValidatePlutusScriptsRuleIndex,
 		alonzo.UtxoValidatePlutusScripts,
 		"alonzo.UtxoValidatePlutusScripts",
 	)
@@ -408,6 +415,7 @@ func EvaluateTxAlonzo(
 			ls,
 			tx,
 			slices.Concat(resolvedInputs, resolvedRefInputs),
+			script.StrictValidityUpperBoundForTransaction(tx),
 		)
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, err

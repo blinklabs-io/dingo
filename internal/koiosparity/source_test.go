@@ -38,16 +38,16 @@ func newTestDatabaseSourceDB(t *testing.T) *database.Database {
 	return db
 }
 
-// sourceGormDB reaches into the metadata store's underlying SQLite file so
+// sourceSQLDB reaches into the metadata store's underlying SQLite file so
 // the test can seed rows directly via raw SQL, mirroring
 // ledger/snapshot/calculator_test.go's snapshotSQLDB helper. Post-#3054 (the
-// GORM metadata store rewrite to sqlc-generated sqlstore), the metadata
-// store no longer exposes a *gorm.DB, so this reaches through
+// metadata store rewrite to sqlc-generated sqlstore), the metadata store
+// no longer exposes an ORM handle, so this reaches through
 // dbtest.RawSQLiteMetadata instead and wraps it in the same testDB seeding
 // helper dingo_db_test.go uses. The name is kept (rather than renamed to
 // sourceSQLDB) to minimize churn in call sites that still read naturally as
 // "the test's handle for seeding the source's DB".
-func sourceGormDB(t *testing.T, db *database.Database) *testDB {
+func sourceSQLDB(t *testing.T, db *database.Database) *testDB {
 	t.Helper()
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
@@ -66,14 +66,14 @@ func TestNewDatabaseSourceRejectsNilDatabase(t *testing.T) {
 // second connection) and confirms every field lands exactly as committed.
 func TestDatabaseSourceGetEpochData(t *testing.T) {
 	db := newTestDatabaseSourceDB(t)
-	gormDB := sourceGormDB(t, db)
+	sqlDB := sourceSQLDB(t, db)
 
-	require.NoError(t, gormDB.Create(&models.EpochSummary{
+	require.NoError(t, sqlDB.Create(&models.EpochSummary{
 		Epoch:            5,
 		TotalActiveStake: types.Uint64(123_456_789),
 		SnapshotReady:    true,
 	}).Error)
-	require.NoError(t, gormDB.Create(&models.RewardAdaPots{
+	require.NoError(t, sqlDB.Create(&models.RewardAdaPots{
 		Epoch:    5,
 		Treasury: types.Uint64(1_000),
 		Reserves: types.Uint64(2_000),
@@ -101,7 +101,7 @@ func TestDatabaseSourceGetEpochData(t *testing.T) {
 // an error and never a spurious zero-value comparison.
 func TestDatabaseSourceGetEpochDataMissingOrNotReady(t *testing.T) {
 	db := newTestDatabaseSourceDB(t)
-	gormDB := sourceGormDB(t, db)
+	sqlDB := sourceSQLDB(t, db)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
 
@@ -109,7 +109,7 @@ func TestDatabaseSourceGetEpochDataMissingOrNotReady(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, data)
 
-	require.NoError(t, gormDB.Create(&models.EpochSummary{
+	require.NoError(t, sqlDB.Create(&models.EpochSummary{
 		Epoch:         9,
 		SnapshotReady: false,
 	}).Error)
@@ -126,8 +126,8 @@ func TestDatabaseSourceGetEpochDataMissingOrNotReady(t *testing.T) {
 // empty/zero pots.
 func TestDatabaseSourceGetEpochDataRewardAdaPotsAbsent(t *testing.T) {
 	db := newTestDatabaseSourceDB(t)
-	gormDB := sourceGormDB(t, db)
-	require.NoError(t, gormDB.Create(&models.EpochSummary{
+	sqlDB := sourceSQLDB(t, db)
+	require.NoError(t, sqlDB.Create(&models.EpochSummary{
 		Epoch:         3,
 		SnapshotReady: true,
 	}).Error)
@@ -149,11 +149,11 @@ func TestDatabaseSourceGetEpochDataRewardAdaPotsAbsent(t *testing.T) {
 // group's *Present flag reflects only whether its own row existed.
 func TestDatabaseSourceGetPoolEpochDataMap(t *testing.T) {
 	db := newTestDatabaseSourceDB(t)
-	gormDB := sourceGormDB(t, db)
+	sqlDB := sourceSQLDB(t, db)
 	poolKeyHash := []byte("POOLKEYHASH-28-BYTES-LONG!!!")
 	require.Len(t, poolKeyHash, 28)
 
-	require.NoError(t, gormDB.Create(&models.RewardPoolInput{
+	require.NoError(t, sqlDB.Create(&models.RewardPoolInput{
 		Epoch:          10,
 		PoolKeyHash:    poolKeyHash,
 		DelegatedStake: types.Uint64(500_000),
@@ -163,13 +163,13 @@ func TestDatabaseSourceGetPoolEpochDataMap(t *testing.T) {
 	blocksProduced := uint64(7)
 	// The param-epoch row owns blocks_produced only; its cost belongs to a
 	// later epoch and must not surface (dingo #3484).
-	require.NoError(t, gormDB.Create(&models.RewardPoolInput{
+	require.NoError(t, sqlDB.Create(&models.RewardPoolInput{
 		Epoch:          12,
 		PoolKeyHash:    poolKeyHash,
 		BlocksProduced: &blocksProduced,
 		Cost:           types.Uint64(999_000_000),
 	}).Error)
-	require.NoError(t, gormDB.Create(&models.RewardPoolOutput{
+	require.NoError(t, sqlDB.Create(&models.RewardPoolOutput{
 		Epoch:             10,
 		PoolKeyHash:       poolKeyHash,
 		MemberRewardTotal: types.Uint64(999_999),
@@ -208,11 +208,11 @@ func TestDatabaseSourceGetPoolEpochDataMap(t *testing.T) {
 // whether any row exists for the pool at all.
 func TestDatabaseSourceGetPoolEpochDataMapPartialPresence(t *testing.T) {
 	db := newTestDatabaseSourceDB(t)
-	gormDB := sourceGormDB(t, db)
+	sqlDB := sourceSQLDB(t, db)
 	poolKeyHash := []byte("POOLKEYHASH-28-BYTES-LONG!!!")
 	require.Len(t, poolKeyHash, 28)
 
-	require.NoError(t, gormDB.Create(&models.RewardPoolInput{
+	require.NoError(t, sqlDB.Create(&models.RewardPoolInput{
 		Epoch:          10,
 		PoolKeyHash:    poolKeyHash,
 		DelegatedStake: types.Uint64(500_000),
@@ -247,10 +247,10 @@ func TestDatabaseSourceGetLatestEpoch(t *testing.T) {
 	_, err = source.GetLatestEpoch(context.Background())
 	require.Error(t, err, "no epoch_summary rows yet")
 
-	gormDB := sourceGormDB(t, db)
-	require.NoError(t, gormDB.Create(&models.EpochSummary{Epoch: 2}).Error)
-	require.NoError(t, gormDB.Create(&models.EpochSummary{Epoch: 7}).Error)
-	require.NoError(t, gormDB.Create(&models.EpochSummary{Epoch: 4}).Error)
+	sqlDB := sourceSQLDB(t, db)
+	require.NoError(t, sqlDB.Create(&models.EpochSummary{Epoch: 2}).Error)
+	require.NoError(t, sqlDB.Create(&models.EpochSummary{Epoch: 7}).Error)
+	require.NoError(t, sqlDB.Create(&models.EpochSummary{Epoch: 4}).Error)
 
 	latest, err := source.GetLatestEpoch(context.Background())
 	require.NoError(t, err)
@@ -259,11 +259,11 @@ func TestDatabaseSourceGetLatestEpoch(t *testing.T) {
 
 func TestDatabaseSourceGetRewardAccountOutputs(t *testing.T) {
 	db := newTestDatabaseSourceDB(t)
-	gormDB := sourceGormDB(t, db)
+	sqlDB := sourceSQLDB(t, db)
 	stakingKey := []byte("STAKING-KEY-28-BYTES-LONG!!!")
 	require.Len(t, stakingKey, 28)
 	poolKeyHash := []byte("POOLKEYHASH-28-BYTES-LONG!!!")
-	require.NoError(t, gormDB.Create(&models.RewardAccountOutput{
+	require.NoError(t, sqlDB.Create(&models.RewardAccountOutput{
 		Epoch:       6,
 		StakingKey:  stakingKey,
 		PoolKeyHash: poolKeyHash,
@@ -299,12 +299,12 @@ func TestDatabaseSourceGetRewardAccountOutputs(t *testing.T) {
 // computed.
 func TestDatabaseSourceCoreModePruningTiming(t *testing.T) {
 	db := newTestDatabaseSourceDB(t)
-	gormDB := sourceGormDB(t, db)
+	sqlDB := sourceSQLDB(t, db)
 	poolKeyHash := []byte("POOLKEYHASH-28-BYTES-LONG!!!")
 	stakingKey := []byte("STAKING-KEY-28-BYTES-LONG!!!")
 
 	const epoch = 20
-	require.NoError(t, gormDB.Create(&models.RewardAccountOutput{
+	require.NoError(t, sqlDB.Create(&models.RewardAccountOutput{
 		Epoch:       epoch,
 		StakingKey:  stakingKey,
 		PoolKeyHash: poolKeyHash,

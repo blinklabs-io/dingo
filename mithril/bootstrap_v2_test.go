@@ -1017,7 +1017,9 @@ func TestVerifyAncillaryExtractionIsAboutTheInspectedTree(t *testing.T) {
 	cfg := BootstrapConfig{
 		VerifyCertificateChain:   true,
 		AncillaryVerificationKey: mithrilJSONHexKey(t, pub),
-		Logger:                   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
 	}
 
 	downloadDir := t.TempDir()

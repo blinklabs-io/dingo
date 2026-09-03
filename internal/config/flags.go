@@ -734,12 +734,6 @@ var flagSpecs = []flagSpec{
 		"",
 		"path to Cardano text-envelope BLS12-381 Leios vote signing key or legacy raw hex scalar",
 	),
-	stringToStringFlag(
-		"LeiosVoterPublicKeys",
-		"leios-voter-public-keys",
-		"Leios voter public key registry: pool key hash hex=public key hex",
-	),
-
 	// Mithril
 	boolFlag(
 		"Mithril.Enabled",
@@ -926,29 +920,6 @@ func stringSliceFlag(field, name, help string) flagSpec {
 				return nil
 			}
 			v, err := f.GetStringSlice(name)
-			if err != nil {
-				return err
-			}
-			targetValue(cfg, field).Set(reflect.ValueOf(v))
-			return nil
-		},
-	}
-}
-
-func stringToStringFlag(field, name, help string) flagSpec {
-	return flagSpec{
-		field: field,
-		name:  name,
-		register: func(f *pflag.FlagSet, defaults *Config) {
-			def, _ := defaultValue(defaults, field).
-				Interface().(map[string]string)
-			f.StringToString(name, def, help)
-		},
-		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
-			v, err := f.GetStringToString(name)
 			if err != nil {
 				return err
 			}

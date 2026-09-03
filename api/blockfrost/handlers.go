@@ -1191,6 +1191,23 @@ func (b *Blockfrost) handleTransaction(
 	})
 }
 
+// transactionRejectionReason returns the reason the mempool declined a
+// transaction. The typed rejection carries the cause as a separate error, so
+// a rejection wrapped with additional context still reports the mempool's
+// reason instead of the wrapper's text. Trimming the sentinel off the front
+// of the message is only a fallback for a BlockfrostNode that reports the
+// bare sentinel and so has no cause to read.
+func transactionRejectionReason(err error) string {
+	if rejected, ok := errors.AsType[*TransactionRejectedError](err); ok &&
+		rejected.Cause != nil {
+		return rejected.Cause.Error()
+	}
+	return strings.TrimPrefix(
+		err.Error(),
+		ErrTransactionRejected.Error()+": ",
+	)
+}
+
 // handleTransactionSubmit handles POST /api/v0/tx/submit and submits raw
 // signed transaction CBOR to the mempool.
 func (b *Blockfrost) handleTransactionSubmit(
@@ -1244,6 +1261,49 @@ func (b *Blockfrost) handleTransactionSubmit(
 
 	hash, err := b.node.TransactionSubmit(txCbor)
 	if err != nil {
+		// Classify node conditions before the rejection: admission runs
+		// ledger validation against storage, so a storage fault arrives on
+		// the same return as a verdict on the transaction, and answering it
+		// 400 would tell the caller to fix a transaction that was never
+		// judged.
+		if errors.Is(err, ErrLedgerUnavailable) {
+			b.logger.Error(
+				"transaction submit failed on ledger storage",
+				"error", err,
+			)
+			writeError(
+				w,
+				http.StatusServiceUnavailable,
+				"Service Unavailable",
+				"ledger state unavailable",
+			)
+			return
+		}
+		if errors.Is(err, ErrTransactionRejected) {
+			// The transaction decoded; the mempool declined it. Reporting
+			// that as malformed CBOR sends callers looking at their
+			// serialization instead of at the rejection, so name the
+			// reason. Blockfrost likewise passes the node's rejection
+			// through, and an off-chain SDK surfaces this message verbatim
+			// to whoever ran the transaction.
+			//
+			// A rejection is an ordinary client-side condition -- a fee too
+			// small, a validity interval that has not started, a script that
+			// failed -- so it is logged at Debug for the same reason
+			// handleEpochParams logs its expected answers there: at Error
+			// level a caller probing submissions fills the log with alerts.
+			b.logger.Debug(
+				"transaction rejected by the mempool",
+				"error", err,
+			)
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"Bad Request",
+				"Transaction rejected: "+transactionRejectionReason(err),
+			)
+			return
+		}
 		if errors.Is(err, ErrInvalidTransaction) {
 			writeError(
 				w,
@@ -1285,74 +1345,6 @@ func (b *Blockfrost) handleTransactionSubmit(
 	}
 
 	writeJSON(w, http.StatusOK, hash)
-}
-
-// handleTransactionEvaluate handles POST /api/v0/utils/txs/evaluate and
-// evaluates script execution units without submitting the transaction.
-func (b *Blockfrost) handleTransactionEvaluate(
-	w http.ResponseWriter,
-	r *http.Request,
-) {
-	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/cbor" {
-		writeError(
-			w,
-			http.StatusUnsupportedMediaType,
-			"Unsupported Media Type",
-			"Content-Type must be application/cbor.",
-		)
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxTxBodySize)
-	txCbor, err := io.ReadAll(r.Body)
-	if err != nil {
-		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-			writeError(
-				w,
-				http.StatusRequestEntityTooLarge,
-				"Request Entity Too Large",
-				"transaction body exceeds maximum allowed size",
-			)
-			return
-		}
-		writeError(
-			w,
-			http.StatusBadRequest,
-			"Bad Request",
-			"failed to read transaction body",
-		)
-		return
-	}
-	if len(txCbor) == 0 {
-		writeError(
-			w,
-			http.StatusBadRequest,
-			"Bad Request",
-			"transaction body is empty",
-		)
-		return
-	}
-	result, err := b.node.TransactionEvaluate(txCbor)
-	if err != nil {
-		if errors.Is(err, ErrInvalidTransaction) {
-			writeError(
-				w,
-				http.StatusBadRequest,
-				"Bad Request",
-				"Invalid transaction CBOR.",
-			)
-			return
-		}
-		b.logger.Error("failed to evaluate transaction", "error", err)
-		writeError(
-			w,
-			http.StatusInternalServerError,
-			"Internal Server Error",
-			"failed to evaluate transaction",
-		)
-		return
-	}
-	writeJSON(w, http.StatusOK, result)
 }
 
 // handleTransactionCBOR handles GET /api/v0/txs/{hash}/cbor and returns

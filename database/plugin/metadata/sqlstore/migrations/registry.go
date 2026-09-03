@@ -15,11 +15,13 @@
 package migrations
 
 import (
+	"context"
 	"embed"
 	"errors"
 	"fmt"
 	"io/fs"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -29,11 +31,15 @@ import (
 var migrationSQL embed.FS
 
 const (
-	initialSchemaRelease          = "v1alpha1"
-	leiosKeySchemaRelease         = "leios-key-registration"
-	tokenRegistrySchemaRelease    = "token-registry-metadata"
-	accountBaselineSchemaRelease  = "account-import-baseline"
-	leiosSnapshotKeySchemaRelease = "leios-snapshot-keys"
+	initialSchemaRelease                       = "v1alpha1"
+	leiosKeySchemaRelease                      = "leios-key-registration"
+	tokenRegistrySchemaRelease                 = "token-registry-metadata"
+	accountBaselineSchemaRelease               = "account-import-baseline"
+	leiosSnapshotKeySchemaRelease              = "leios-snapshot-keys"
+	governanceRatificationHistorySchemaRelease = "governance-ratification-history"
+	accountDepositSchemaRelease                = "account-import-deposit"
+	committeeCredentialTagsSchemaRelease       = "committee-credential-tags"
+	committeeTermStartPresenceSchemaRelease    = "committee-term-start-presence"
 )
 
 // schemaVersions names every migration in ascending version order.
@@ -47,6 +53,18 @@ var schemaVersions = []struct {
 	{Version: 3, Name: tokenRegistrySchemaRelease, Dir: "v3"},
 	{Version: 4, Name: accountBaselineSchemaRelease, Dir: "v4"},
 	{Version: 5, Name: leiosSnapshotKeySchemaRelease, Dir: "v5"},
+	{
+		Version: 6,
+		Name:    governanceRatificationHistorySchemaRelease,
+		Dir:     "v6",
+	},
+	{Version: 7, Name: accountDepositSchemaRelease, Dir: "v7"},
+	{Version: 8, Name: committeeCredentialTagsSchemaRelease, Dir: "v8"},
+	{
+		Version: 9,
+		Name:    committeeTermStartPresenceSchemaRelease,
+		Dir:     "v9",
+	},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -104,16 +122,74 @@ func registryForDialect(dialect string) ([]Migration, error) {
 				wholeSchema,
 			)
 		}
-		ret = append(ret, Migration{
+		migration := Migration{
 			Version:          version.Version,
 			Name:             version.Name,
 			BackfillRevision: "none",
 			SQL: map[string]SQL{
 				dialect: sqlForDialect,
 			},
-		})
+		}
+		if version.Name == committeeTermStartPresenceSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = committeeTermStartBackfill
+		}
+		ret = append(ret, migration)
 	}
 	return ret, nil
+}
+
+// committeeTermStartBackfill is deliberately data-driven rather than a
+// migration SQL statement. The expand phase can therefore be retried after a
+// process dies immediately after adding the column; rows are selected by ID
+// and each committed batch advances the durable migration cursor.
+func committeeTermStartBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	lastID := int64(0)
+	if batch.Cursor != "" {
+		parsed, err := strconv.ParseInt(batch.Cursor, 10, 64)
+		if err != nil {
+			return BatchResult{}, fmt.Errorf("parse committee backfill cursor: %w", err)
+		}
+		lastID = parsed
+	}
+	rows, err := batch.Tx.QueryContext(ctx,
+		batch.Rebind(
+			"SELECT id FROM committee_member WHERE id > ? AND NOT term_start_slot_set ORDER BY id LIMIT ?",
+		),
+		lastID, batch.Limit,
+	)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return BatchResult{}, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return BatchResult{}, err
+	}
+	if len(ids) == 0 {
+		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	for _, id := range ids {
+		if _, err := batch.Tx.ExecContext(ctx,
+			batch.Rebind(
+				"UPDATE committee_member SET term_start_slot_set = TRUE WHERE id = ?",
+			),
+			id,
+		); err != nil {
+			return BatchResult{}, err
+		}
+	}
+	return BatchResult{Cursor: strconv.FormatInt(ids[len(ids)-1], 10), Rows: int64(len(ids))}, nil
 }
 
 var (
@@ -216,6 +292,11 @@ func translateSchemaSQLInSchema(
 				value,
 				"CREATE UNIQUE INDEX IF NOT EXISTS",
 				"CREATE UNIQUE INDEX",
+			)
+			value = strings.ReplaceAll(
+				value,
+				"DROP INDEX IF EXISTS `idx_committee_member_cold_cred_hash`",
+				"DROP INDEX `idx_committee_member_cold_cred_hash` ON `committee_member`",
 			)
 			if strings.HasPrefix(strings.ToUpper(statement), "CREATE TABLE") {
 				for column := range mysqlForeignKeyColumns[schemaTableName(statement)] {

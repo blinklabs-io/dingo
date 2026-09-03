@@ -94,6 +94,7 @@ type mockNode struct {
 	transaction                   TransactionInfo
 	transactionSubmitHash         string
 	transactionEvaluation         TransactionEvaluationResponse
+	transactionEvaluateCbor       []byte
 	transactionCBOR               []byte
 	transactionMetadata           []TransactionMetadataInfo
 	transactionMetadataCBOR       []TransactionMetadataCBORInfo
@@ -337,8 +338,9 @@ func (m *mockNode) TransactionSubmit(
 }
 
 func (m *mockNode) TransactionEvaluate(
-	_ []byte,
+	txCbor []byte,
 ) (TransactionEvaluationResponse, error) {
+	m.transactionEvaluateCbor = txCbor
 	return m.transactionEvaluation, m.transactionEvaluationErr
 }
 
