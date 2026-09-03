@@ -45,9 +45,10 @@ type StakeDistributionProvider interface {
 	// (dingo #3815). The pair is returned by one method precisely so that
 	// no implementation can express the torn read.
 	//
-	// The denominator MUST come from the same accessor the header
-	// verification path uses, so that a node cannot forge against one
-	// denominator and validate against another (dingo #3814). See the
+	// The denominator MUST come from the same store accessor the header
+	// verification path resolves it through
+	// (Metadata().GetTotalActiveStake), so that a node cannot forge against
+	// one denominator and validate against another (dingo #3814). See the
 	// reference-rule commentary below this interface for what that value
 	// is and why it must not be re-derived per code path.
 	GetPoolAndTotalActiveStake(

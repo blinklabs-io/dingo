@@ -8109,11 +8109,25 @@ dist, err := ledgerView.GetStakeDistribution(epoch)
 // Get stake for a specific pool -- the sigma numerator
 poolStake, err := ledgerView.GetPoolStake(epoch, poolKeyHash)
 
-// Get total active stake -- the sigma denominator. This is the accessor both
-// header verification and the forging adapter resolve the denominator
-// through; it prefers epoch_summary.total_active_stake for "mark" queries.
+// Get total active stake -- the sigma denominator. Txn-scoped wrapper over
+// the shared store accessor Metadata().GetTotalActiveStake, pinned to the
+// "mark" snapshot type; that accessor prefers epoch_summary.total_active_stake
+// when the epoch's summary row is marked ready.
 totalStake, err := ledgerView.GetTotalActiveStake(epoch)
 ```
+
+Both consensus paths resolve the denominator through that one store accessor,
+`Metadata().GetTotalActiveStake`, but they reach it differently and the
+difference matters when reading this code:
+
+- The forging adapter calls `LedgerView.GetTotalActiveStake`, which passes the
+  view's transaction and pins `snapshotType` to `"mark"`.
+- `verify_header.go` calls `ls.db.Metadata().GetTotalActiveStake` directly with
+  a `nil` transaction and the `snapshotType` it resolved for the header under
+  check, which is `"mark"` on the normal Praos path but is not hardcoded.
+
+So "one accessor" holds at the store layer, which is what removes the second
+derivation. It is not a claim that verification goes through `LedgerView`.
 
 Leader election must take the two halves of sigma from ONE `LedgerView` inside
 ONE `db.MetadataTxn`. The forging adapter's

@@ -540,8 +540,13 @@ func (a *stakeDistributionAdapter) getStakeDistribution(
 // Two defects are fixed here, and both are load-bearing for consensus:
 //
 // dingo #3814 -- the denominator comes from LedgerView.GetTotalActiveStake,
-// the same accessor ledger/verify_header.go uses when it checks an incoming
-// header's leader eligibility. The previous implementation returned
+// a txn-scoped wrapper over Metadata().GetTotalActiveStake, which is the
+// same store accessor ledger/verify_header.go resolves the denominator
+// through when it checks an incoming header's leader eligibility.
+// Verification calls that store method directly rather than through a
+// LedgerView, with the snapshotType it resolved for the header under check;
+// the shared thing is the store accessor, not the call path. The previous
+// implementation returned
 // ledger.StakeDistribution.TotalStake, which LedgerView.GetStakeDistribution
 // accumulates by summing the mark rows itself, while verification reads
 // epoch_summary.total_active_stake. Those two agree only "by construction"
