@@ -330,6 +330,8 @@ if [[ "${MODE}" == "conformance" ]]; then
   export DEVNET_DINGO_ADDR="localhost:${DINGO_PORT}"
   export DEVNET_CARDANO_ADDR="localhost:${CARDANO_PORT}"
   export DEVNET_RELAY_ADDR="localhost:${RELAY_PORT}"
+  export DEVNET_DINGO_NTC_ADDR="${DEVNET_DINGO_NTC_ADDR:-localhost:${DEVNET_DINGO_NTC_PORT:-3030}}"
+  export DEVNET_CARDANO_NTC_ADDR="${DEVNET_CARDANO_NTC_ADDR:-localhost:${DEVNET_CARDANO_NTC_PORT:-3031}}"
 else
   export DEVNET_DINGO1_ADDR="localhost:${DEVNET_DINGO1_PORT:-3010}"
   export DEVNET_DINGO2_ADDR="localhost:${DEVNET_DINGO2_PORT:-3013}"

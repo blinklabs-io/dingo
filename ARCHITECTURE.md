@@ -2711,10 +2711,12 @@ from the database; proposal results reconstruct the on-wire proposal procedure
 from the persisted action CBOR, return address, deposit, anchor, and votes.
 Supported query leaves also include epoch number, current protocol parameters,
 Shelley genesis configuration, UTxO-by-address/transaction-input lookups,
-stake-delegation deposits, the ledger peer snapshot, stake pools, DRep state,
-and account state. `GetCBOR` is a query combinator: it re-runs the wrapped
-inner query through the same dispatch path and returns the result as a tag-24
-CBOR-in-CBOR `Serialised` value, matching cardano-node. `GetStakeSnapshots`
+the whole live UTxO set (`GetUTxOWhole`), stake-delegation deposits, the
+ledger peer snapshot, stake pools, DRep state, account state, and the
+unfiltered stake distribution (`GetStakeDistribution`). `GetCBOR` is a query
+combinator: it re-runs the wrapped inner query through the same dispatch path
+and returns the result as a tag-24 CBOR-in-CBOR `Serialised` value, matching
+cardano-node. `GetStakeSnapshots`
 returns the mark/set/go stake for each requested pool and the corresponding
 totals. For protocol version 11 and later, requested pools whose mark, set,
 and go stake are all zero are omitted; without a pool filter, the result
@@ -2787,6 +2789,25 @@ counter whose issuer key is not a pool key hash. Omitting a pool leaves the
 reported fractions summing to slightly under one, since its stake stays in
 `TotalActiveStake`; a caller checking its own leadership is unaffected, because
 its own fraction is its stake over that same unchanged total.
+
+`GetStakeDistribution` (`ledger/queries_stakedistribution.go`) and
+`GetUTxOWhole` (`ledger/queries_utxowhole.go`) are the two newest implemented
+leaves in `ledger/queries.go`'s query dispatcher; the `// TODO (#394)` block
+beside them lists the leaves that remain unimplemented. `GetStakeDistribution`
+reads the same
+`PoolStakeDistribution` helper as `GetPoolDistr2` with no pool filter (this
+query has none on the wire, unlike `GetPoolDistr2`), so it cannot report a
+different snapshot or VRF key for the same chain than `GetPoolDistr2` or the
+UTxO RPC `ReadState` handler. `GetUTxOWhole` iterates every live row via
+`database.IterateLiveUtxos` and decodes each one's stored CBOR into the
+node-to-client reply shape; each row's CBOR buffer is defensively cloned
+before decoding, since `IterateLiveUtxos` documents that the buffer backing
+a row may be reused by the next callback invocation. Both queries exist to
+support cross-node ledger-state comparison in the devnet conformance
+harness (`internal/test/devnet`, see its README's "LocalStateQuery in
+conformance mode" section) rather than as an operator-facing query aimed at
+a mainnet-scale chain — a whole-UTxO dump is, as with `cardano-cli query
+utxo --whole-utxo`, only practical against a small network.
 
 ## Chain Management
 
@@ -6542,6 +6563,149 @@ every one of #3097's own tests passes unmodified.
   (`DINGO_KOIOS_PARITY_ACCOUNT_CHUNK_SIZE`/`_MAX_BYTES`) for the in-process
   observer. 0 for either (the default) selects the package default —
   existing `--accounts` behavior is unchanged unless explicitly tuned.
+
+### Node Parity (`cmd/node-parity/`, `internal/nodeparity/`)
+
+An operator tool that compares Dingo's and a reference cardano-node's ledger
+state (protocol parameters, stake distribution, whole UTxO set) over their
+node-to-client LocalStateQuery interfaces, on preview or preprod
+(blinklabs-io/dingo#1900). Unlike the Koios Parity Tracker above (which reads
+both sides from a database, after the fact), this tool talks Ouroboros NtC
+directly to two live, independently-running node processes it does not
+start, stop, or otherwise manage.
+
+**Architecture:**
+
+```text
+internal/nodeparity/       # shared library, untagged and importable
+  dial.go                  # Dial: NtC connection by address (leading "/" = Unix socket, else TCP)
+  tip.go                   # Tip, ReadTip: one-shot ChainSync GetCurrentTip, not a subscription
+  snapshot.go               # Snapshot, QuerySnapshot, SnapshotAtTip: one LocalStateQuery session's worth of state
+  diff.go                   # Diff, DiffSnapshots: per-field comparison result
+  check.go                  # CheckResult, Check, sandwichOK: the tip-sandwich orchestration
+  watch.go                  # Watcher, WatchBlocks: persistent per-node ChainSync subscription with reconnect
+
+cmd/node-parity/           # thin Cobra CLI wrapper: only 'check' and 'watch' are subcommands
+  main.go                  # root command (default action: one check, same as 'check')
+  check.go                  # one-shot subcommand
+  watch.go                  # block-triggered subcommand, --fallback-interval as a backstop
+  metrics.go                # not a subcommand -- Prometheus counters plus the /metrics HTTP
+                             # server 'watch' starts when --metrics-addr is set; 'check' never
+                             # serves metrics, since a one-shot invocation has nothing ongoing
+                             # to expose them for
+```
+
+**Usage:** neither node is started or managed by this tool -- point it at
+two already-running, already-synced NtC listeners.
+
+```shell
+# One-shot: run a single comparison cycle and exit non-zero on divergence
+# or a discarded cycle.
+node-parity check \
+  --network preview \
+  --dingo-addr localhost:3002 \
+  --cardano-addr /path/to/cardano-node.socket
+
+# Continuous: react to each node's tip changes, with a periodic backstop
+# check (--fallback-interval, normally 2m) in case a watcher's subscription
+# silently stalls. Serves Prometheus metrics on --metrics-addr (commonly
+# :9464).
+node-parity watch \
+  --network preprod \
+  --dingo-addr localhost:3002 \
+  --cardano-addr /path/to/cardano-node.socket \
+  --fallback-interval 2m \
+  --metrics-addr :9464
+```
+
+`--dingo-addr`/`--cardano-addr` accept either a `host:port` TCP address or a
+leading-`/` Unix socket path (a real cardano-node's own NtC endpoint is
+normally a socket). `--network` is `preview` or `preprod` only. Running
+`node-parity` with no subcommand is equivalent to `check`. See
+`docs/dashboards/prometheus.yaml`/`alerts.yaml` for the accompanying scrape
+config and alert rules.
+
+**Design: on-demand `check`, plus block-triggered `watch`.** `check` runs one
+comparison cycle and exits non-zero on divergence or a discarded cycle. `watch`
+originally polled on a fixed `--interval` matching `cmd/koios-parity`'s own
+shape, but that meant a 15-minute gap left roughly 45 blocks (at ~20s each)
+completely unchecked between cycles — acceptable for koios-parity, whose
+epoch-closed reward data only changes once an epoch, but not for block-level
+ledger state, which changes every block. `watch` now follows both nodes' live
+chains instead (`nodeparity.Watcher`, one persistent ChainSync session per
+node) and runs a `Check` the moment either one's tip changes, so it reacts
+within a fraction of a second of a new block landing rather than missing
+everything produced between clock ticks. `--fallback-interval` (default 2m)
+still runs a check on a fixed schedule regardless, purely as a backstop in
+case a watcher's subscription silently stalls without erroring. Comparing the
+full UTxO set on every block is tractable on preview/preprod's much smaller
+UTxO set than mainnet's (see `ledger/queries_utxowhole.go`'s own doc comment
+on `GetUTxOWhole`'s cost, which is specifically about mainnet scale); this has
+not been measured against a real live node in development, only reasoned from
+that scale difference.
+
+Block-triggering narrows, but does not eliminate, the tip-sandwich's race: a
+check still has to finish before the *next* block lands, it just now starts
+immediately after the previous one instead of at a random point up to an
+interval later. A `Watcher` reconnects on its own (bounded exponential
+backoff, matching `internal/test/devnet/observer.go`'s pattern) if its
+session drops, so a node restart does not require the operator to do
+anything. The only way to remove the race entirely — guaranteeing every
+block gets compared, not just attempted — would be embedding this logic
+inside Dingo itself (reading its own ledger state synchronously as each
+block applies, no network round trip to race) paired with cardano-node's own
+working `Acquire(point)`; that is a materially different architecture (see
+below) and is not what this tool does.
+
+**The tip-sandwich, and why:** Dingo's LocalStateQuery `Acquire`
+(`ouroboros/localstatequery.go`) always answers at its live tip regardless
+of the requested point (blinklabs-io/dingo#382 is still open), so there is
+no way to pin "ledger state as of exactly block N" on the Dingo side today.
+Each `Check` cycle instead reads both nodes' tips (`ReadTip`, a one-shot
+ChainSync `GetCurrentTip`), runs the LocalStateQuery session against both
+only if they agree, and re-reads both tips afterward — discarding
+(`CheckResult.Skipped`, not failing) the cycle if either moved during the
+round trip, since the two halves of a comparison spanning a tip change would
+not describe the same block. `sandwichOK` is this decision as a pure
+function, unit-tested without a live node; `Check` is the I/O around it,
+using one already-dialed connection per node for the whole cycle so the
+ChainSync and LocalStateQuery reads share a single session per node. This
+only catches a tip that moved and stayed moved: a tip that advances to a
+fork and rolls back to the exact same (slot, hash) within the round trip
+passes `sandwichOK` unchanged, even though the query may have executed
+against the discarded fork's transient state -- a known, documented
+residual gap (see `sandwichOK`'s doc comment), not attempted here.
+
+`Check` takes a `context.Context` and threads it into `Dial`, which closes
+its connection the instant the context is cancelled (SIGINT/SIGTERM via
+`cmd/node-parity`'s `signal.NotifyContext`): `ouroboros.New` performs the
+NtC handshake synchronously with no context or per-call timeout of its own,
+and neither do `ReadTip`/`QuerySnapshot`'s later synchronous protocol
+calls, so without this a peer that accepts a connection and then never
+responds would otherwise leave `Check` (and so `watch`'s shutdown) blocked
+indefinitely. `internal/nodeparity/watch.go`'s `watchSession` applies the
+same pattern independently for its own persistent ChainSync connections.
+
+**Metrics:** `node_parity_checks_total`, `node_parity_checks_skipped_total{reason}`
+(`reason`: `tip_mismatch`/`tip_advanced`),
+`node_parity_divergence_total{field}` (`field`: `protocol_params`/
+`stake_distribution`/`utxo`), and `node_parity_check_errors_total` (a Check
+call that failed outright -- a dial or query error -- as opposed to a
+completed or skipped cycle; counted separately so a persistently
+misconfigured address, which never increments the other two counters
+either, is distinguishable from the tool itself being stuck --
+`NodeParityCheckErrors` alerts on it directly), registered under a registry
+wrapped with a
+`network` const label the same way the real node's own
+`configWrapPromRegistry` (root `config.go`) labels `cardano_node_metrics_*` —
+see `docs/dashboards/prometheus.yaml`'s `node-parity`/`cardano-node-reference`
+jobs and `docs/dashboards/alerts.yaml`'s `node-parity` rule group. No
+Slack/webhook/PagerDuty integration; Prometheus/Grafana is the alerting
+surface for this tool, matching the rest of this repo's operator tooling.
+Unlike `internal/koiosparity`'s `FatalFunc`/`strict` precedent, there is no
+mode that kills a node on mismatch: live cross-node disagreement is often
+transient (propagation delay, short forks) rather than a confirmed bug, so
+the standalone tool only ever reports and retries on the next cycle.
 
 ### Bark (`bark/`)
 
