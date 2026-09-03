@@ -338,8 +338,7 @@ func validateConwayFeaturesWithNeededPlutusV1V2(
 		return nil
 	}
 
-	if treasury := tx.CurrentTreasuryValue(); treasury != nil &&
-		treasury.Sign() > 0 {
+	if conwayCurrentTreasuryValuePresent(tx) {
 		return conway.CurrentTreasuryValueWithPlutusV1V2Error{
 			PlutusVersion: plutusVersion,
 		}
@@ -388,6 +387,57 @@ func validateConwayFeaturesWithNeededPlutusV1V2(
 	}
 
 	return nil
+}
+
+// conwayCurrentTreasuryValuePresent reports whether transaction-body key 21
+// is present, preserving the distinction between an absent value and an
+// explicitly encoded zero. A declared zero is a real assertion about the
+// treasury and must reach validation; collapsing it into "absent" would let a
+// transaction assert a zero treasury for free.
+//
+// Maintained gouroboros exposes the distinction through a nil value and the
+// CurrentTreasuryValuePresent capability. The pinned release stores key 21 in
+// an int64 with omitempty and returns a non-nil zero for both cases, so
+// decoded or constructed Conway transactions fall back to inspecting the
+// transaction-body map. The fallback treats an undecodable body as present:
+// this rule only rejects, so failing closed cannot admit a transaction.
+func conwayCurrentTreasuryValuePresent(tx lcommon.Transaction) bool {
+	if tx == nil {
+		return false
+	}
+	treasury := tx.CurrentTreasuryValue()
+	if treasury == nil {
+		return false
+	}
+	if treasury.Sign() != 0 {
+		return true
+	}
+	conwayTx, ok := tx.(*conway.ConwayTransaction)
+	if !ok || conwayTx == nil {
+		// CurrentTreasuryValue's nil/non-nil contract is authoritative for
+		// implementations that do not need the pinned-release compatibility
+		// path.
+		return true
+	}
+	if presence, ok := any(&conwayTx.Body).(interface {
+		CurrentTreasuryValuePresent() bool
+	}); ok {
+		return presence.CurrentTreasuryValuePresent()
+	}
+	bodyCbor := conwayTx.Body.Cbor()
+	if len(bodyCbor) == 0 {
+		var err error
+		bodyCbor, err = cbor.Encode(&conwayTx.Body)
+		if err != nil {
+			return true
+		}
+	}
+	var fields map[uint]cbor.RawMessage
+	if _, err := cbor.Decode(bodyCbor, &fields); err != nil {
+		return true
+	}
+	_, ok = fields[21]
+	return ok
 }
 
 func neededPlutusV1V2Version(view script.TxScriptView) string {

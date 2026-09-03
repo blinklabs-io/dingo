@@ -2690,6 +2690,14 @@ The `LedgerView` interface provides query access to ledger state:
   no registration certificate exists in local history. Unknown legacy baseline
   deposits remain nil; the current protocol parameter is never substituted for
   an unavailable historical value.
+- `TreasuryValue` reads the latest slot-keyed `NetworkState` through the same
+  metadata transaction held by the validation view. A boundary block therefore
+  observes reward, MIR, pool-retirement, governance-withdrawal, and donation
+  changes committed by its epoch rollover, while a mempool or forging session
+  keeps one repeatable-read value for the whole candidate. Genesis and Mithril
+  bootstrap seed the same history; restart preserves it, and rollback deletion
+  reveals the prior surviving row. A missing row or storage failure is returned
+  as an error rather than treating an unknown treasury as zero.
 
 ### Local State Query
 
