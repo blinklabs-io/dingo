@@ -263,6 +263,7 @@ func ValidateTxAlonzo(
 			ls,
 			tx,
 			slices.Concat(resolvedInputs, resolvedRefInputs),
+			script.StrictValidityUpperBoundForTransaction(tx),
 		)
 		if err != nil {
 			return err
@@ -414,6 +415,7 @@ func EvaluateTxAlonzo(
 			ls,
 			tx,
 			slices.Concat(resolvedInputs, resolvedRefInputs),
+			script.StrictValidityUpperBoundForTransaction(tx),
 		)
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, err

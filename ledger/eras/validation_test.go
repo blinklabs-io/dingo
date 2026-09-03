@@ -1396,7 +1396,12 @@ func TestTxInfoV2ContextSortsInputs(t *testing.T) {
 		{Id: bodySecond, Output: newTestOutput(1_000_000)},
 	}
 
-	txInfo, err := script.NewTxInfoV2FromTransaction(ls, tx, resolved)
+	txInfo, err := script.NewTxInfoV2FromTransaction(
+		ls,
+		tx,
+		resolved,
+		script.StrictValidityUpperBoundForTransaction(tx),
+	)
 
 	require.NoError(t, err)
 	require.Len(t, txInfo.Inputs, 2)
