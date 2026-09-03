@@ -830,8 +830,8 @@ func (p *blockfetchServerPeer) readResponse(
 	return &muxer.Segment{SegmentHeader: header, Payload: payload}
 }
 
-// TestBlockfetchServerRequestRange_RepeatedInvertedRangeClosesStuckPeer is
-// issue #3428: an inverted range (start after end) sent NoBlocks without
+// TestBlockfetchServerRequestRange_RepeatedInvertedRangeReachesCloseThreshold
+// is issue #3428: an inverted range (start after end) sent NoBlocks without
 // calling blockfetchRecordNoBlocksAndMaybeClose, the same valve oversized and
 // missing-point rejections use, so a peer repeating an inverted request never
 // counted toward blockfetchMaxConsecutiveNoBlocks and was never closed.
@@ -840,8 +840,14 @@ func (p *blockfetchServerPeer) readResponse(
 // muxer pair -- unlike TestBlockfetchServerRequestRange_StartAfterEnd above,
 // which only proves the check is reached before its NoBlocks call panics on a
 // nil Server -- so the shared valve's close-eligible WARN log fires for real
-// once the configured threshold is reached.
-func TestBlockfetchServerRequestRange_RepeatedInvertedRangeClosesStuckPeer(
+// once the configured threshold is reached. o.connManager is nil, so this
+// only proves the inverted-range branch now feeds the valve and the valve
+// reaches its close-eligible state; it does not assert an actual connection
+// close, which blockfetchRecordNoBlocksAndMaybeClose only attempts when
+// connManager is non-nil. closeBlockfetchConnection's Close() call is already
+// covered generically by TestBlockfetchServerSendBatch_ClosesConnectionWhenSendDrainStalls
+// and TestReportBlockfetchServerAsyncError_ClosesConnection above.
+func TestBlockfetchServerRequestRange_RepeatedInvertedRangeReachesCloseThreshold(
 	t *testing.T,
 ) {
 	const closeWarnMsg = "closing stuck peer after repeated inverted range requests"
