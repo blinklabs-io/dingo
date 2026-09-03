@@ -4132,6 +4132,57 @@ func (ls *LedgerState) ledgerReadChain(
 					}
 					return
 				}
+				if errors.Is(reconcileErr, ErrRollbackExceedsMithrilBoundary) {
+					// The common ancestor sits at or below the local
+					// Mithril trust boundary: the same rejection
+					// reconcilePrimaryChainTipWithLedgerTip's own
+					// pre-check now declines before ever emitting an
+					// undo (Cubic review, PR #3611), and the same
+					// boundary a peer-driven rollback is refused for in
+					// handleEventChainsyncRollback. Surface it through
+					// the matching ChainsyncResyncReasonRollbackExceedsMithril
+					// reason rather than only a generic error log, so
+					// connection management gets the same signal to
+					// negotiate a fresh intersection. Unlike
+					// handleEventChainsyncRollback this reader has no
+					// peer or advertised tip to distinguish "peer merely
+					// behind" from "genuinely diverges below the
+					// boundary", so it always reports the latter, the
+					// safer default.
+					ls.config.Logger.Error(
+						"missing chain iterator start point requires a "+
+							"rewind at or below the Mithril trust "+
+							"boundary, requesting a fresh chainsync "+
+							"intersection",
+						"start_slot", startPoint.Slot,
+						"start_hash", hex.EncodeToString(startPoint.Hash),
+					)
+					if ls.config.EventBus != nil {
+						ls.config.EventBus.PublishAsync(
+							event.ChainsyncResyncEventType,
+							event.NewEvent(
+								event.ChainsyncResyncEventType,
+								event.ChainsyncResyncEvent{
+									Reason: event.ChainsyncResyncReasonRollbackExceedsMithril,
+									Point:  startPoint,
+								},
+							),
+						)
+					}
+					// See the matching comment on the over-K branch
+					// above for why this reports the failure through
+					// resultCh rather than just returning.
+					select {
+					case resultCh <- readChainResult{
+						err: fmt.Errorf(
+							"reconcile primary chain tip with ledger tip: %w",
+							reconcileErr,
+						),
+					}:
+					case <-ctx.Done():
+					}
+					return
+				}
 				ls.config.Logger.Error(
 					"failed to recover missing chain iterator start point",
 					"error", reconcileErr,

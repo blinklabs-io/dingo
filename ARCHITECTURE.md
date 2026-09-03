@@ -1488,7 +1488,15 @@ reconciliation and can hit the same over-K rejection — a case
 bound at all. Unlike `reconcileLivePrimaryChainLedgerDivergence`'s callers,
 this reader has no `ChainsyncEvent`/connection to fall back on, so on an
 over-K rejection it publishes the same `ChainsyncResyncEventType`/
-`ChainsyncResyncReasonRollbackExceedsK` those callers use directly.
+`ChainsyncResyncReasonRollbackExceedsK` those callers use directly. It
+handles a rewind below the Mithril trust boundary
+(`ErrRollbackExceedsMithrilBoundary`) the same way, publishing
+`ChainsyncResyncReasonRollbackExceedsMithril` — the reason
+`handleEventChainsyncRollback` uses for a peer-driven rollback that hits
+the same boundary (Cubic review, PR #3611). This reader has no peer or
+advertised tip to distinguish "peer merely behind the boundary" from
+"genuinely diverges below it" the way that handler's own Mithril branch
+does, so it always reports the latter, the safer default.
 
 Every other give-up path in `ledgerReadChain`/`ledgerReadChainIterator`
 returns without ever sending a `readChainResult` on `resultCh`, which
@@ -1498,20 +1506,38 @@ branch then exits its retry loop for good, and since `ledgerProcessBlocks`
 is started once, from `Start`, with no supervisor restarting it, this
 permanently and silently stops all ledger block processing. That is a
 pre-existing pattern spanning multiple give-up paths, tracked separately in
-issue #3776 rather than fixed here. This over-K branch is different: this
-PR is what makes it reachable at all, so it does not join that deferred
-list. Instead it sends a non-nil `readChainResult` (wrapping
-`ErrRollbackExceedsSecurityParam`) on `resultCh` before returning.
-`tryRecoverFromHeaderValidationError` declines it (it isn't a
+issue #3776 rather than fixed here. These two branches are different: this
+PR is what makes them reachable at all, so neither joins that deferred
+list. Instead each sends a non-nil `readChainResult` (wrapping the
+originating error) on `resultCh` before returning.
+`tryRecoverFromHeaderValidationError` declines it (neither is a
 `*headerValidationError`), so `ledgerProcessBlocksFromSource` returns it as
 a real error, and `ledgerProcessBlocksWithAttempt` treats it like any other
 recoverable read-chain failure: back off (`ledgerPipelineBackoff`) and start
 a fresh reader attempt, rather than exiting for good. Each retry
 re-reconciles from the (possibly by-then-advanced) tip; until connection
 management acts on the resync event and the primary chain is rewound within
-K, every retry fails the same way and backs off further like any other
-deterministic no-progress restart, surfacing the existing stuck-pipeline
-signal instead of a silent halt.
+K and above the Mithril boundary, every retry fails the same way and backs
+off further like any other deterministic no-progress restart, surfacing
+the existing stuck-pipeline signal instead of a silent halt.
+
+The shared `reconcileLivePrimaryChainLedgerDivergence` helper
+(`handleEventChainsyncRollback`'s and `tryResolveFork`'s own reconciler
+call, plus the plateau watchdog) only special-cases
+`ErrRollbackExceedsSecurityParam` the same deliberate way — returning
+`(false, nil)` so the caller's own existing over-K resync handling fires,
+rather than a generic propagated error a caller's classification does not
+expect. It does not yet special-case `ErrRollbackExceedsMithrilBoundary`
+the same way: doing so naively would misclassify it through that same
+over-K fallthrough (the caller's over-K branch publishes
+`ChainsyncResyncReasonRollbackExceedsK` unconditionally once reconciliation
+declines), reproducing the exact reason-misclassification class issue
+#3035 already fixed elsewhere. The error is not silently lost there
+either way — it still propagates as a real error to log and to the
+plateau watchdog's own connection-recycling fallback — just with a less
+granular resync reason than the over-K case gets. Left as a follow-up
+requiring its own dedicated look rather than a hasty copy of the over-K
+pattern.
 
 Ordering the commits is not sufficient on its own: a commit is not durable.
 SQLite fsyncs at WAL checkpoints while Badger buffers committed writes in a

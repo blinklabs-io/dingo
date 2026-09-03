@@ -496,6 +496,77 @@ func TestLedgerReadChainRequestsResyncOnOverKReconcile(t *testing.T) {
 	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
 }
 
+// TestLedgerReadChainRequestsResyncOnMithrilBoundaryReconcile covers a
+// Cubic finding on PR #3611: reconcilePrimaryChainTipWithLedgerTip's new
+// Mithril-boundary pre-check (added the same round, to stop it emitting an
+// undo for a rollback ls.rollback would then deterministically reject) can
+// now return ErrRollbackExceedsMithrilBoundary to ledgerReadChain's retry
+// loop -- a case that loop did not classify, unlike the sibling
+// over-K/ErrRollbackExceedsSecurityParam case it already handles. It must
+// surface the same ChainsyncResyncEventType/
+// ChainsyncResyncReasonRollbackExceedsMithril handleEventChainsyncRollback
+// uses for a peer-driven Mithril-boundary rejection, not just a generic
+// error log.
+func TestLedgerReadChainRequestsResyncOnMithrilBoundaryReconcile(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+
+	// Diverge to a fork well within K (forkDepth 1, K is 2), so this
+	// reaches the Mithril pre-check rather than the over-K decline --
+	// unlike putPrimaryChainOnForkBeyondK's setup above.
+	forkHash := testHashBytes("ledger-read-chain-mithril-resync")
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, fixture.ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        forkHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+	fixture.ls.mithrilLedgerSlot = fixture.ancestorTip.Point.Slot + 1
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+
+	resyncCh := subscribeChainsyncResync(t, bus)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resultCh := make(chan readChainResult, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fixture.ls.ledgerReadChain(ctx, resultCh)
+	}()
+
+	testutil.RequireReceive(
+		t, done, 2*time.Second,
+		"ledgerReadChain should give up and return, not hang, on an "+
+			"unreconcilable Mithril-boundary divergence",
+	)
+
+	e := testutil.RequireReceive(
+		t, resyncCh, time.Second,
+		"expected a Mithril-boundary resync event from ledgerReadChain",
+	)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonRollbackExceedsMithril,
+		e.Reason,
+	)
+	assert.Equal(t, fixture.currentTip.Point.Slot, e.Point.Slot)
+	assert.Equal(t, fixture.currentTip.Point.Hash, e.Point.Hash)
+
+	// The reader must not have silently rewound the ledger tip below the
+	// Mithril boundary either.
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+}
+
 // TestLedgerProcessBlocksRetriesInsteadOfHaltingOnOverKReconcile is the
 // pipeline-level regression a wolf31o2 review on PR #3611 required.
 // TestLedgerReadChainRequestsResyncOnOverKReconcile above only proves
