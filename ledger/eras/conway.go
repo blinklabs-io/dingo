@@ -1017,6 +1017,7 @@ func (c *conwayTxInfoCache) v1() (script.TxInfoV1, error) {
 			c.ls,
 			c.tx,
 			c.resolvedInputs,
+			script.StrictValidityUpperBoundForTransaction(c.tx),
 		)
 		if err != nil {
 			return script.TxInfoV1{}, conway.ScriptContextConstructionError{
@@ -1035,6 +1036,7 @@ func (c *conwayTxInfoCache) v2() (script.TxInfoV2, error) {
 			c.ls,
 			c.tx,
 			c.resolvedInputs,
+			script.StrictValidityUpperBoundForTransaction(c.tx),
 		)
 		if err != nil {
 			return script.TxInfoV2{}, conway.ScriptContextConstructionError{

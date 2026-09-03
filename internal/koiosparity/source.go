@@ -331,6 +331,52 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 			uint64(out.MemberRewardTotal),
 			10,
 		)
+		data.PoolUnspendable = uint64(out.Unspendable)
+	}
+
+	// The comparable member-reward quantity, formed the same way DingoDB
+	// forms it — see DingoDB.addSpendableMemberRewards for why
+	// reward_pool_output.member_reward_total is not it, and why presence is
+	// established epoch-wide rather than per pool.
+	accountOutputs, err := meta.GetRewardAccountOutputs(
+		stakeEpoch,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"reward_account_output epoch %d: %w",
+			stakeEpoch,
+			err,
+		)
+	}
+	if len(accountOutputs) > 0 {
+		totals := make(map[string]uint64, len(m))
+		for _, out := range accountOutputs {
+			if out == nil || out.RewardType != rewardTypeMember {
+				continue
+			}
+			// applyStakeRewards credits a reward only when it is spendable
+			// and not guarded by CIP-0163 expiry; anything else was computed
+			// and withheld, and Koios never reports it.
+			if !out.Spendable || out.Guarded {
+				continue
+			}
+			totals[hex.EncodeToString(out.PoolKeyHash)] += uint64(out.Amount)
+		}
+		for key, total := range totals {
+			data, ok := m[key]
+			if !ok {
+				data = &DingoPoolEpochData{}
+				m[key] = data
+			}
+			data.SpendableMemberRewardTotal = strconv.FormatUint(total, 10)
+		}
+		for _, data := range m {
+			data.SpendableMemberRewardPresent = true
+			if data.SpendableMemberRewardTotal == "" {
+				data.SpendableMemberRewardTotal = "0"
+			}
+		}
 	}
 	return m, nil
 }
