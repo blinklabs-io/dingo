@@ -94,7 +94,13 @@ groups:
         # specific root cause an operator can act on directly (check
         # --dingo-addr/--cardano-addr and both nodes' health) rather than
         # treating it as the whole tool being stuck.
-        expr: increase(node_parity_check_errors_total{network=~".+"}[10m]) > 0
+        #
+        # rate() over a [5m] window, not increase() over [10m]: the window
+        # must not exceed "for" below, or a single transient error stays
+        # visible in the window for the rest of its full length regardless
+        # of "for", so the alert would still fire 5 minutes after checks
+        # had already recovered from one isolated blip.
+        expr: rate(node_parity_check_errors_total{network=~".+"}[5m]) > 0
         for: 5m
         labels:
           severity: warning

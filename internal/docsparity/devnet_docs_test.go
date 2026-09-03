@@ -59,12 +59,14 @@ type portMapping struct {
 }
 
 var (
-	// portRe matches compose's [HOST_IP:]HOST_PORT:CONTAINER_PORT syntax. The
-	// optional HOST_IP prefix (e.g. "127.0.0.1:") is skipped, not captured,
-	// so group numbering stays the same whether or not a mapping binds to a
-	// specific interface.
+	// portRe matches compose's [HOST_IP:]HOST_PORT:CONTAINER_PORT syntax,
+	// including a bracketed IPv6 host address (e.g. "[::1]:"), the form
+	// compose itself requires for IPv6 so the address's own colons don't
+	// get parsed as field separators. The optional HOST_IP prefix is
+	// skipped, not captured, so group numbering stays the same whether or
+	// not a mapping binds to a specific interface.
 	portRe = regexp.MustCompile(
-		`^(?:\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:)?(?:\$\{([A-Za-z0-9_]+):-(\d+)\}|(\d+)):(\d+)$`,
+		`^(?:(?:\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[[0-9a-fA-F:]+\]):)?(?:\$\{([A-Za-z0-9_]+):-(\d+)\}|(\d+)):(\d+)$`,
 	)
 	composeProfilesRe = regexp.MustCompile(
 		`(?m)^COMPOSE_PROFILES=(\S+)`,
@@ -128,6 +130,42 @@ func (s composeService) ports() []portMapping {
 		})
 	}
 	return out
+}
+
+// TestComposeServicePorts_ParsesEveryHostIPForm covers compose's
+// [HOST_IP:]HOST_PORT:CONTAINER_PORT syntax across every host-address form
+// this repo's compose files use or could plausibly need: no host IP at
+// all, a literal IPv4 address, a bracketed IPv6 address (which needs its
+// own bracket handling since the address's own colons would otherwise be
+// parsed as field separators), and the ${VAR:-default} form with an IPv4
+// prefix. A mapping portRe fails to match is silently dropped from
+// ports()/hostPorts(), which would make the docs-parity checks that
+// consume them pass vacuously instead of catching a real mismatch -- so
+// this asserts each spec produces a mapping, not just that parsing doesn't
+// panic.
+func TestComposeServicePorts_ParsesEveryHostIPForm(t *testing.T) {
+	svc := composeService{Ports: []string{
+		"3010:3001",
+		"127.0.0.1:3030:3002",
+		"[::1]:6001:6001",
+		"${DEVNET_DINGO_NTC_PORT:-3030}:3002",
+		"127.0.0.1:${DEVNET_DINGO_NTC_PORT:-3030}:3002",
+	}}
+	mappings := svc.ports()
+	if len(mappings) != len(svc.Ports) {
+		t.Fatalf(
+			"every spec is a valid compose port mapping and must produce one: got %d mappings from %d specs: %+v",
+			len(mappings),
+			len(svc.Ports),
+			mappings,
+		)
+	}
+
+	want := []string{"3010", "3030", "6001", "3030", "3030"}
+	got := svc.hostPorts()
+	if !slices.Equal(got, want) {
+		t.Errorf("hostPorts() = %v, want %v", got, want)
+	}
 }
 
 // hostPorts returns every default host port a service publishes.

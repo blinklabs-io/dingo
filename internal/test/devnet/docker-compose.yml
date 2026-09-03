@@ -305,6 +305,13 @@ services:
       - dingo-producer-ipc:/ipc
     ports:
       - "${DEVNET_DINGO_PORT:-3010}:3001"
+      # Bound to loopback deliberately: this NtC endpoint has no auth and is
+      # not meant to be reachable off the Docker host. DEVNET_DINGO_NTC_ADDR
+      # (endpoints_conformance.go) can still point a test at a different
+      # *port* on this same host; reaching a genuinely different host would
+      # mean editing this binding directly, not something a test-side env
+      # var should make easy for what's an internal, unauthenticated
+      # protocol.
       - "127.0.0.1:${DEVNET_DINGO_NTC_PORT:-3030}:3002"
     networks:
       devnet:

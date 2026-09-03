@@ -16,6 +16,7 @@ package nodeparity
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -68,6 +69,17 @@ type testChainSyncServer struct {
 	// event count sends on release once per expected event, keeping
 	// exactly one reply in flight at a time.
 	release chan struct{}
+	// stopped is closed when the test that created this server ends.
+	// requestNext selects on it alongside release so a session's final
+	// RequestNext call (issued after the test has stopped calling
+	// allowNext) unblocks and returns an error instead of leaking the
+	// whole per-connection goroutine set (recvLoop, sendLoop, stateLoop,
+	// and this callback itself -- recvLoop cannot even check its own
+	// shutdown signal until handleMessage, which is blocked waiting for
+	// this callback, returns) for the rest of the test binary's run.
+	// Verified: without this, a single WatchBlocks test leaks 5 goroutines
+	// (confirmed via a goroutine-stack dump).
+	stopped chan struct{}
 }
 
 // allowNext permits testChainSyncServer's next RequestNext reply to
@@ -93,7 +105,13 @@ func newTestChainSyncServer(
 	t.Helper()
 	chain, err := csmock.BuildChain(1, common.Blake2b256{}, 0, 20, blockCount)
 	require.NoError(t, err)
-	return &testChainSyncServer{chain: chain, release: make(chan struct{})}
+	s := &testChainSyncServer{
+		chain:   chain,
+		release: make(chan struct{}),
+		stopped: make(chan struct{}),
+	}
+	t.Cleanup(func() { close(s.stopped) })
+	return s
 }
 
 // findIntersect always intersects at origin and serves the whole chain from
@@ -119,7 +137,11 @@ func (s *testChainSyncServer) findIntersect(
 func (s *testChainSyncServer) requestNext(
 	ctx chainsync.CallbackContext,
 ) error {
-	<-s.release
+	select {
+	case <-s.release:
+	case <-s.stopped:
+		return errors.New("test server stopped")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.rolledBack {
