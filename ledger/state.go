@@ -7902,10 +7902,12 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 				currentLedgerTip.BlockNumber,
 			)
 			// See the matching comment on the common-ancestor branch's
-			// own emit below for why this runs before ls.rollback
-			// rather than after or from inside it (Cubic review, PR
-			// #3611): the inconsistency window a failing ls.rollback
-			// would leave here is bounded the same way -- the next
+			// own emit below for the full reasoning (Cubic and
+			// wolf31o2 review, PR #3611; issue #3817 tracks the real
+			// fix): the inconsistency window a failing ls.rollback
+			// would leave here is bounded the same way, matches the
+			// pre-existing rollbackChainAndState/
+			// validateAndEmitRollbackUndo contract, and the next
 			// reconciliation attempt lands right back in this same
 			// branch and retries both.
 			ls.emitRollbackTransactionEvents(undoBlocks)
@@ -8105,21 +8107,39 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		// narrow inconsistency window if that separate call then fails:
 		// subscribers have already been told these blocks are undone,
 		// while ls.currentTip -- updated only by ls.rollback -- still
-		// durably shows them applied (Cubic review, PR #3611). Closing
-		// that outright would mean either running ls.rollback here,
-		// still holding transactionEventMutex -- risking the same
-		// reentrancy emitRollbackTransactionEvents's own placement
-		// above already avoids, since ls.rollback can itself publish
-		// ChainsyncResyncEventType synchronously via EventBus.Publish
-		// -- or deferring this emit until after ls.rollback returns,
-		// which would let a concurrent forward apply's ledger.tx event
-		// land first on the same ordered lane, reopening exactly what
-		// holding transactionEventMutex across this emit prevents. The
-		// window is bounded rather than permanent: ls.rollback failing
-		// only on a genuine DB error, and the next reconciliation
-		// attempt lands in the "ledger tip ahead of primary chain tip"
-		// branch below, which retries both the (idempotent) undo
-		// notification and this same rollback.
+		// durably shows them applied (Cubic and wolf31o2 review, PR
+		// #3611). This is not a shape unique to this function:
+		// rollbackChainAndState -- the pre-existing, far-more-frequently
+		// exercised peer-driven rollback path -- has the identical
+		// structure (validateAndEmitRollbackUndo's emit inside
+		// transactionEventMutex, ls.rollback as a separate call
+		// afterward that can fail), and validateAndEmitRollbackUndo's
+		// own doc comment already accepts this exact class of window:
+		// "an I/O failure mid-truncation is not predictable at all ...
+		// leaves the chain needing recovery regardless." Closing it here
+		// alone, differently from that canonical path, would leave the
+		// two rollback contracts inconsistent for no benefit. Closing it
+		// outright would also mean either running ls.rollback here,
+		// still holding transactionEventMutex -- risking a real
+		// reentrancy hazard emitRollbackTransactionEvents's own
+		// placement above already avoids: ls.rollback can itself publish
+		// ChainsyncResyncEventType/ChainsyncResyncReasonLocalLedgerRollback
+		// synchronously via EventBus.Publish, and
+		// Ouroboros.SubscribeChainsyncResync subscribes to exactly that
+		// reason and calls the substantial RecoverAfterLocalRollback,
+		// whose own locking has not been audited for this -- or
+		// deferring this emit until after ls.rollback returns, which
+		// would let a concurrent forward apply's ledger.tx event land
+		// first on the same ordered lane, reopening exactly what holding
+		// transactionEventMutex across this emit prevents. The window is
+		// bounded rather than permanent here: ls.rollback failing only
+		// on a genuine DB error, and the next reconciliation attempt
+		// lands in the "ledger tip ahead of primary chain tip" branch
+		// below, which retries both the (idempotent) undo notification
+		// and this same rollback (proven by
+		// TestReconcilePrimaryChainTipWithLedgerTipRetriesAfterRollbackFailure).
+		// A true durable, atomic handoff across every rollback path --
+		// not just this one -- is tracked as issue #3817.
 		ls.emitRollbackTransactionEvents(undoBlocks)
 		return nil
 	}(); err != nil {

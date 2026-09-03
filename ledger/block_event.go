@@ -222,7 +222,11 @@ func (ls *LedgerState) publishBlockEvent(
 // It does not close the window completely: the chain can still grow between
 // this validation and the rollback and push the rollback past the security
 // parameter, and an I/O failure mid-truncation is not predictable at all.
-// Both leave the chain needing recovery regardless.
+// Both leave the chain needing recovery regardless. The same shape --
+// LedgerState.rollback as a separate call after the emit, which can itself
+// fail -- exists in reconcilePrimaryChainTipWithLedgerTip (issue #3516); a
+// true durable, atomic handoff across every rollback path is tracked as
+// issue #3817, not fixed piecemeal per call site.
 func (ls *LedgerState) validateAndEmitRollbackUndo(
 	point ocommon.Point,
 ) error {

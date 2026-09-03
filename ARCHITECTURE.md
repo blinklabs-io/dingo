@@ -9011,21 +9011,40 @@ The emit still runs before `ls.rollback` — the separate call, made outside
 this closure, that durably updates `ls.currentTip` and the ledger's own
 metadata — so a failure in that later call leaves a narrow inconsistency:
 subscribers already believe these blocks are undone while durable ledger
-metadata still shows them applied (Cubic review, PR #3611). Neither
-alternative ordering is free of its own hazard: running `ls.rollback`
-inside this closure, before the emit, would risk the same reentrancy the
-placement above already avoids, since `ls.rollback` can itself publish
-`ChainsyncResyncEventType` synchronously via `EventBus.Publish`; deferring
-the emit until after `ls.rollback` returns (outside `transactionEventMutex`)
-would let a concurrent forward apply's `ledger.tx` event land first on the
-same ordered lane, reopening exactly what holding `transactionEventMutex`
-across the emit prevents. The window is bounded, not permanent: `ls.rollback`
-fails only on a genuine DB error, logged at ERROR with this exact
-inconsistency called out, and the next reconciliation attempt lands in the
-"ledger tip ahead of primary chain tip" branch below (see its own doc
-comment), which retries both the (idempotent) undo notification and this
-same rollback — the same self-healing property that branch's own identical
-emit-then-`ls.rollback` ordering relies on.
+metadata still shows them applied (Cubic and wolf31o2 review, PR #3611).
+This is not a shape unique to this reconciler: `rollbackChainAndState` —
+the pre-existing, far-more-frequently exercised peer-driven rollback path
+— has the identical structure (`validateAndEmitRollbackUndo`'s emit inside
+`transactionEventMutex`, `ls.rollback` as a separate call afterward that
+can fail), and `validateAndEmitRollbackUndo`'s own doc comment already
+accepts this exact class of window: "an I/O failure mid-truncation is not
+predictable at all ... leaves the chain needing recovery regardless."
+Closing it here alone, differently from that canonical path, would leave
+the two rollback contracts inconsistent for no benefit.
+
+Neither alternative ordering is free of its own hazard, either: running
+`ls.rollback` inside this closure, before the emit, would risk a real
+reentrancy hazard the placement above already avoids — `ls.rollback` can
+publish `ChainsyncResyncEventType`/`ChainsyncResyncReasonLocalLedgerRollback`
+synchronously via `EventBus.Publish`, and `Ouroboros.SubscribeChainsyncResync`
+(`ouroboros/chainsync.go`) subscribes to exactly that reason and calls the
+substantial `LedgerState.RecoverAfterLocalRollback`, whose own locking has
+not been audited for safety under `transactionEventMutex` — while
+deferring the emit until after `ls.rollback` returns (outside
+`transactionEventMutex`) would let a concurrent forward apply's
+`ledger.tx` event land first on the same ordered lane, reopening exactly
+what holding `transactionEventMutex` across the emit prevents.
+
+The window is bounded, not permanent: `ls.rollback` fails only on a
+genuine DB error, logged at ERROR with this exact inconsistency called
+out, and the next reconciliation attempt lands in the "ledger tip ahead of
+primary chain tip" branch below (see its own doc comment), which retries
+both the (idempotent) undo notification and this same rollback — proven by
+`TestReconcilePrimaryChainTipWithLedgerTipRetriesAfterRollbackFailure`,
+which forces a real `ls.rollback` failure and confirms the next attempt
+completes it. A true durable, atomic handoff across every rollback path in
+this file, not a fix scoped to this one reconciler, is tracked as issue
+#3817.
 
 That resolution is also where the reconciler's undo events diverge from
 `blocksAboveSlot`'s: by the time this rewind runs, chain selection has
