@@ -3587,7 +3587,9 @@ after validation already accepted the amount against that same balance, so the
 two layers disagree about local state rather than about the block: the first
 occurrence rejects the branch and spends the one fresh intersection, and a
 redelivery at the same applied tip returns `errHaltLedgerPipeline` with the
-underlying mismatch attached.
+underlying mismatch attached once apply errors reach this path as
+`*txValidationError`; plain apply errors otherwise use the generic restart
+path.
 
 The continuation audit is run only after a fetched body is accepted by the
 queued primary chain, so late bodies from an abandoned fetch cannot seed its
