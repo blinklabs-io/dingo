@@ -4326,12 +4326,35 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 	}()
 }
 
+// blockfetchBatchSuperseded reports whether the primary chain has rolled back
+// since the batch that produced the buffered blocks was requested.
+//
+// rollbackChain publishes the new generation before it changes the chain, so a
+// caller that has already observed a chain change caused by that rollback is
+// guaranteed to observe the new generation here.
+func (ls *LedgerState) blockfetchBatchSuperseded() bool {
+	return ls.blockfetchBatchChainGeneration !=
+		ls.chainRollbackGeneration.Load()
+}
+
+// logDiscardedBlockfetchBlocks records how many buffered blocks were dropped
+// because the batch that fetched them was superseded.
+func (ls *LedgerState) logDiscardedBlockfetchBlocks(discarded int) {
+	ls.config.Logger.Debug(
+		"discarding blockfetch blocks for superseded chain",
+		"component", "ledger",
+		"discarded_blocks", discarded,
+		"batch_chain_generation", ls.blockfetchBatchChainGeneration,
+		"chain_generation", ls.chainRollbackGeneration.Load(),
+	)
+}
+
 func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
 	if len(ls.pendingBlockfetchEvents) == 0 {
 		return nil
 	}
-	if ls.blockfetchBatchChainGeneration != ls.chainRollbackGeneration.Load() {
-		// The chain tip moved after this batch was requested, so these blocks
+	if ls.blockfetchBatchSuperseded() {
+		// The chain moved after this batch was requested, so these blocks
 		// continue a chain the node has abandoned. They cannot be applied, and
 		// handing them to Chain.addBlockLocked is not merely futile: fork
 		// resolution rolls back, re-queues the winning peer's header path and
@@ -4341,13 +4364,7 @@ func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
 		// and let the restarted batch fetch the current continuation instead.
 		discarded := len(ls.pendingBlockfetchEvents)
 		ls.pendingBlockfetchEvents = ls.pendingBlockfetchEvents[:0]
-		ls.config.Logger.Debug(
-			"discarding blockfetch blocks for superseded chain",
-			"component", "ledger",
-			"discarded_blocks", discarded,
-			"batch_chain_generation", ls.blockfetchBatchChainGeneration,
-			"chain_generation", ls.chainRollbackGeneration.Load(),
-		)
+		ls.logDiscardedBlockfetchBlocks(discarded)
 		return nil
 	}
 	pending := ls.pendingBlockfetchEvents
@@ -4356,7 +4373,15 @@ func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
 	// is used immediately by fork detection, so batching blob writes behind an
 	// already-advanced in-memory tip can strand the node on a fork when ancestor
 	// lookups hit uncommitted state.
-	for _, pendingEvent := range pending {
+	for i, pendingEvent := range pending {
+		// The rollback paths run under chainsyncMutex, not the mutex this
+		// flush holds, so a rollback can land between two blocks of the same
+		// batch. Re-read before every insertion rather than trusting the
+		// check above for the whole loop.
+		if ls.blockfetchBatchSuperseded() {
+			ls.logDiscardedBlockfetchBlocks(len(pending) - i)
+			break
+		}
 		addBlockErr := ls.chain.AddBlockWithPoint(
 			pendingEvent.Block,
 			pendingEvent.Point,
@@ -4404,7 +4429,16 @@ func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
 			),
 		)
 		if errors.As(addBlockErr, &notMatchErr) {
-			ls.clearQueuedHeaders()
+			// Dropping the queue is only right when the queue this batch was
+			// fetching is still the one in place. A rollback that lands
+			// between this insertion and the check publishes its generation
+			// before it touches the chain, so a mismatch caused by a
+			// replacement queue is always observed here as a generation that
+			// has already moved -- and clearing then would wipe exactly the
+			// headers fork resolution just queued (issue #3771).
+			if !ls.blockfetchBatchSuperseded() {
+				ls.clearQueuedHeaders()
+			}
 		}
 		ls.checkSlotBattle(pendingEvent, addBlockErr)
 	}
