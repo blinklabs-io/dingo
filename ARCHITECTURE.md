@@ -2433,9 +2433,9 @@ only when the block carrying the certificate is *applied*
 (`transaction_certificates.go`). During catch-up the header chain runs ahead of
 the applied tip, so at header-verification time the reassignment row can be
 absent — `activeGenesisDelegationForSlot` then falls back to the Shelley-genesis
-default delegate — while at apply time the row is present and names the new
+delegate — while at apply time the row is present and names the new
 delegate. A block legitimately produced by the reassigned delegate would be
-*rejected at header time* (issuer ≠ genesis-default delegate) but *accepted at
+*rejected at header time* (issuer ≠ the static genesis delegate) but *accepted at
 apply* (issuer == reassigned delegate), exactly as cardano-node accepts it, so
 deferring the `d=1` overlay decision until apply is what keeps dingo from
 recycling an honest peer over a valid block. This is why the current premise is
