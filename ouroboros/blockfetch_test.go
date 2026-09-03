@@ -16,25 +16,59 @@ package ouroboros
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
 	ouroboros_conn "github.com/blinklabs-io/gouroboros/connection"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/muxer"
+	"github.com/blinklabs-io/gouroboros/protocol"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
+
+// syncLogBuffer is a mutex-guarded log sink. The blockfetch server processes
+// requests on its own recvLoop goroutine, which logs concurrently with the
+// test goroutine reading those logs back -- a plain bytes.Buffer would race.
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncLogBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncLogBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+func (s *syncLogBuffer) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.buf.Reset()
+}
 
 // testConnId creates a ConnectionId with valid net.Addr values for testing.
 func testConnId() ouroboros_conn.ConnectionId {
@@ -716,6 +750,188 @@ func TestBlockfetchRecordNoBlocks_CleanupResetsCounter(t *testing.T) {
 		o.blockfetchRecordNoBlocks(connId, start),
 		"should trigger again after reset",
 	)
+}
+
+// blockfetchServerPeer drives Dingo's real blockfetch server config
+// (blockfetchServerConnOpts, instrumentation wrappers included) over a real
+// muxer, so requests reach blockfetchServerRequestRange exactly as a real
+// peer's would and NoBlocks() actually goes out on the wire instead of
+// panicking on a nil CallbackContext.Server the way the direct-call tests
+// above do.
+type blockfetchServerPeer struct {
+	peerConn net.Conn
+	errChan  chan error
+}
+
+func newBlockfetchServerPeer(
+	t *testing.T,
+	o *Ouroboros,
+) *blockfetchServerPeer {
+	t.Helper()
+	serverConn, peerConn := net.Pipe()
+	m := muxer.New(serverConn)
+	errChan := make(chan error, 4)
+	cfg, err := blockfetch.NewConfig(o.blockfetchServerConnOpts()...)
+	require.NoError(t, err)
+	server := blockfetch.NewServer(
+		protocol.ProtocolOptions{
+			ConnectionId: ouroboros_conn.ConnectionId{
+				LocalAddr:  serverConn.LocalAddr(),
+				RemoteAddr: serverConn.RemoteAddr(),
+			},
+			ErrorChan: errChan,
+			Muxer:     m,
+			Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+		&cfg,
+	)
+	server.Start()
+	m.Start()
+	t.Cleanup(func() {
+		server.Protocol.Stop()
+		m.Stop()
+		_ = serverConn.Close()
+		_ = peerConn.Close()
+	})
+	return &blockfetchServerPeer{peerConn: peerConn, errChan: errChan}
+}
+
+// send writes msg to the server as a block-fetch request segment.
+func (p *blockfetchServerPeer) send(t *testing.T, msg protocol.Message) {
+	t.Helper()
+	data, err := cbor.Encode(msg)
+	require.NoError(t, err)
+	segment := muxer.NewSegment(blockfetch.ProtocolId, data, false)
+	require.NotNil(t, segment)
+	buf := &bytes.Buffer{}
+	require.NoError(
+		t,
+		binary.Write(buf, binary.BigEndian, segment.SegmentHeader),
+	)
+	_, err = buf.Write(segment.Payload)
+	require.NoError(t, err)
+	_, err = p.peerConn.Write(buf.Bytes())
+	require.NoError(t, err)
+}
+
+// readResponse reads one response segment, bounded by timeout so a request
+// the server leaves pending fails the test instead of hanging it.
+func (p *blockfetchServerPeer) readResponse(
+	t *testing.T,
+	timeout time.Duration,
+) *muxer.Segment {
+	t.Helper()
+	require.NoError(t, p.peerConn.SetReadDeadline(time.Now().Add(timeout)))
+	header := muxer.SegmentHeader{}
+	require.NoError(t, binary.Read(p.peerConn, binary.BigEndian, &header))
+	payload := make([]byte, header.PayloadLength)
+	_, err := io.ReadFull(p.peerConn, payload)
+	require.NoError(t, err)
+	return &muxer.Segment{SegmentHeader: header, Payload: payload}
+}
+
+// TestBlockfetchServerRequestRange_RepeatedInvertedRangeClosesStuckPeer is
+// issue #3428: an inverted range (start after end) sent NoBlocks without
+// calling blockfetchRecordNoBlocksAndMaybeClose, the same valve oversized and
+// missing-point rejections use, so a peer repeating an inverted request never
+// counted toward blockfetchMaxConsecutiveNoBlocks and was never closed.
+//
+// This drives real MsgRequestRange traffic over a real blockfetch.Server/
+// muxer pair -- unlike TestBlockfetchServerRequestRange_StartAfterEnd above,
+// which only proves the check is reached before its NoBlocks call panics on a
+// nil Server -- so the shared valve's close-eligible WARN log fires for real
+// once the configured threshold is reached.
+func TestBlockfetchServerRequestRange_RepeatedInvertedRangeClosesStuckPeer(
+	t *testing.T,
+) {
+	const closeWarnMsg = "closing stuck peer after repeated inverted range requests"
+
+	logBuf := &syncLogBuffer{}
+	logger := slog.New(slog.NewJSONHandler(logBuf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+	o := newOuroboros(OuroborosConfig{
+		Logger:   logger,
+		EventBus: event.NewEventBus(nil, logger),
+	})
+	peer := newBlockfetchServerPeer(t, o)
+
+	start := ocommon.NewPoint(100, []byte{0x01})
+	end := ocommon.NewPoint(50, []byte{0x02})
+
+	for i := 1; i <= blockfetchMaxConsecutiveNoBlocks; i++ {
+		logBuf.Reset()
+		peer.send(t, blockfetch.NewMsgRequestRange(start, end))
+
+		segment := peer.readResponse(t, 5*time.Second)
+		assert.Equal(t, blockfetch.ProtocolId, segment.GetProtocolId())
+		assert.Equal(
+			t,
+			[]byte{0x81, blockfetch.MessageTypeNoBlocks},
+			segment.Payload,
+			"request %d should be answered with NoBlocks",
+			i,
+		)
+
+		if i < blockfetchMaxConsecutiveNoBlocks {
+			// Below threshold, blockfetchRecordNoBlocksAndMaybeClose logs
+			// nothing at all -- the only log line for this request is the
+			// "start after end" one written before NoBlocks() was even
+			// enqueued, which readResponse above already happened-before.
+			assert.False(
+				t,
+				strings.Contains(logBuf.String(), closeWarnMsg),
+				"request %d should not yet reach the close threshold",
+				i,
+			)
+		} else {
+			// At threshold, the close-eligible WARN is logged after NoBlocks()
+			// is enqueued, on the server's own goroutine, with no ordering
+			// guarantee relative to the wire bytes readResponse observed --
+			// poll instead of asserting immediately.
+			testutil.WaitForCondition(
+				t,
+				func() bool {
+					return strings.Contains(logBuf.String(), closeWarnMsg)
+				},
+				2*time.Second,
+				"expected close-eligible WARN once the threshold is reached",
+			)
+		}
+	}
+}
+
+// TestBlockfetchServerRequestRange_RepeatedValidRangeNeverClosesPeer is the
+// control for the fix above: a valid (non-inverted, in-limit) range must
+// never be treated as an inverted-range rejection, however many times it is
+// repeated for the same connection and start point. LedgerState is nil, so a
+// valid range reaches GetChainFromPoint and panics there -- proving it passed
+// both the inverted-range and oversized-range checks without either
+// rejecting it.
+func TestBlockfetchServerRequestRange_RepeatedValidRangeNeverClosesPeer(
+	t *testing.T,
+) {
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+	o := newOuroboros(OuroborosConfig{
+		Logger:   logger,
+		EventBus: event.NewEventBus(nil, logger),
+	})
+	start := ocommon.NewPoint(100, []byte{0x01})
+	end := ocommon.NewPoint(150, []byte{0x02})
+	ctx := blockfetch.CallbackContext{ConnectionId: testConnId()}
+
+	for range blockfetchMaxConsecutiveNoBlocks {
+		assert.Panics(t, func() {
+			_ = o.blockfetchServerRequestRange(ctx, start, end)
+		}, "valid range should reach LedgerState call, not get rejected")
+	}
+
+	logOutput := logBuf.String()
+	assert.NotContains(t, logOutput, "start after end")
+	assert.NotContains(t, logOutput, "inverted range")
 }
 
 func BenchmarkBlockfetchClientBlockMetrics(b *testing.B) {
