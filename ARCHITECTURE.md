@@ -6432,6 +6432,36 @@ cmd/node-parity/           # thin Cobra CLI wrapper: only 'check' and 'watch' ar
                              # to expose them for
 ```
 
+**Usage:** neither node is started or managed by this tool -- point it at
+two already-running, already-synced NtC listeners.
+
+```shell
+# One-shot: run a single comparison cycle and exit non-zero on divergence
+# or a discarded cycle.
+node-parity check \
+  --network preview \
+  --dingo-addr localhost:3002 \
+  --cardano-addr /path/to/cardano-node.socket
+
+# Continuous: react to each node's tip changes, with a periodic backstop
+# check (--fallback-interval, normally 2m) in case a watcher's subscription
+# silently stalls. Serves Prometheus metrics on --metrics-addr (commonly
+# :9464).
+node-parity watch \
+  --network preprod \
+  --dingo-addr localhost:3002 \
+  --cardano-addr /path/to/cardano-node.socket \
+  --fallback-interval 2m \
+  --metrics-addr :9464
+```
+
+`--dingo-addr`/`--cardano-addr` accept either a `host:port` TCP address or a
+leading-`/` Unix socket path (a real cardano-node's own NtC endpoint is
+normally a socket). `--network` is `preview` or `preprod` only. Running
+`node-parity` with no subcommand is equivalent to `check`. See
+`docs/dashboards/prometheus.yaml`/`alerts.yaml` for the accompanying scrape
+config and alert rules.
+
 **Design: on-demand `check`, plus block-triggered `watch`.** `check` runs one
 comparison cycle and exits non-zero on divergence or a discarded cycle. `watch`
 originally polled on a fixed `--interval` matching `cmd/koios-parity`'s own
