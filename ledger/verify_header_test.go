@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
 	"io"
@@ -2962,9 +2963,9 @@ func TestVerifyBlockLeaderEligibility_ImportedActivePoolAbsentStaysHardRejection
 
 // seedLiveStakeCredential seeds one stake credential holding totalStake in a
 // live UTxO, delegated to poolKeyHash. A nil poolKeyHash leaves the account
-// undelegated. Unlike seedLiveDelegatedPoolStake it registers no pool, so the
-// caller controls whether the delegation target exists, is registered, or is
-// retired at the snapshot slot.
+// registered but undelegated. Unlike seedLiveDelegatedPoolStake it registers
+// no pool, so the caller controls the delegation target independently of the
+// pool set.
 func seedLiveStakeCredential(
 	t *testing.T,
 	db *database.Database,
@@ -2976,36 +2977,37 @@ func seedLiveStakeCredential(
 ) {
 	t.Helper()
 	require.Len(t, stakingKey, 28)
-	err := db.Metadata().CreateAccount(nil, &models.Account{
+	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
 		StakingKey: stakingKey,
 		Pool:       poolKeyHash,
 		AddedSlot:  slot,
 		Active:     true,
-	})
-	require.NoError(t, err)
+	}))
 
 	txId := make([]byte, 32)
 	copy(txId, stakingKey)
 	txId[28] = discriminator
 	txId[31] = discriminator + 1
-	err = db.Metadata().CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.Metadata().CreateUtxo(nil, &models.Utxo{
 		TxId:       txId,
 		OutputIdx:  uint32(discriminator),
 		StakingKey: stakingKey,
 		Amount:     types.Uint64(totalStake),
 		AddedSlot:  slot,
-	})
-	require.NoError(t, err)
+	}))
 }
 
 // eligibilityDenominatorFixture is the shared shape for the mark-snapshot
-// denominator-composition tests below. The producer holds a small stake and
-// each ineligible bucket holds a stake four orders of magnitude larger, so a
-// denominator that admits any one bucket drives the producer's sigma to
-// ~1e-12 and its VRF threshold to essentially zero.
+// denominator tests below. The producer holds a small stake and each other
+// bucket holds a stake eleven orders of magnitude larger, so a denominator
+// that admits one bucket drives the producer's sigma to ~1e-12 and its VRF
+// threshold to essentially zero. The epoch layout puts the block in epoch 5,
+// so leader election reads mark[praos.StakeSnapshotEpoch(5)] = mark[4],
+// captured at epoch 4's boundary minus one.
 type eligibilityDenominatorFixture struct {
 	ls            *LedgerState
 	db            *database.Database
+	raw           *sql.DB
 	block         *testBlockResult
 	producer      []byte
 	snapshotEpoch uint64
@@ -3021,14 +3023,15 @@ func newEligibilityDenominatorFixture(
 	t.Helper()
 	tb := createTestBlock(t, [32]byte{seed}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
 	ls.epochCache = []models.Epoch{
 		{EpochId: 3, StartSlot: 300, LengthInSlots: 100, Nonce: tb.epochNonce},
 		{EpochId: 4, StartSlot: 400, LengthInSlots: 100, Nonce: tb.epochNonce},
 		{EpochId: 5, StartSlot: 500, LengthInSlots: 100, Nonce: tb.epochNonce},
 	}
 	// Past the mark capture slot, so the mark reads as live-computed rather
-	// than Mithril-reconstructed and the threshold check is enforced instead
-	// of skipped.
+	// than Mithril-reconstructed and the threshold is enforced, not skipped.
 	ls.mithrilLedgerSlot = ls.epochCache[1].StartSlot + 50
 	tb.block.slot = ls.epochCache[2].StartSlot + 50
 	seedEligibilityEpochs(t, db, append([]models.Epoch{
@@ -3036,9 +3039,10 @@ func newEligibilityDenominatorFixture(
 	}, ls.epochCache...))
 
 	producer := tb.block.IssuerVkey().Hash()
-	fixture := &eligibilityDenominatorFixture{
+	f := &eligibilityDenominatorFixture{
 		ls:            ls,
 		db:            db,
+		raw:           raw,
 		block:         tb,
 		producer:      producer[:],
 		snapshotEpoch: 4,
@@ -3046,17 +3050,16 @@ func newEligibilityDenominatorFixture(
 		snapshotSlot:  ls.epochCache[1].StartSlot - 1,
 		producerStake: 1_000_000,
 	}
-	// The whole eligible stake: the producer's own delegator.
+	// The whole legitimately eligible stake: the producer's own delegator.
 	seedLiveDelegatedPoolStake(
-		t, db, fixture.producer, fixture.producerStake,
-		fixture.snapshotSlot, 1,
+		t, db, f.producer, f.producerStake, f.snapshotSlot, 1,
 	)
-	return fixture
+	return f
 }
 
 // capture runs the real epoch-boundary snapshot manager over the seeded live
-// state, so the mark rows and epoch_summary.total_active_stake the leadership
-// check divides by are computed rather than injected.
+// state, so the mark rows and the epoch_summary.total_active_stake that
+// GetTotalActiveStake prefers are computed rather than injected.
 func (f *eligibilityDenominatorFixture) capture(t *testing.T) {
 	t.Helper()
 	captureLiveMarkSnapshot(
@@ -3072,7 +3075,7 @@ func (f *eligibilityDenominatorFixture) capture(t *testing.T) {
 	require.NotNil(t, snapshot)
 	require.False(t, f.ls.shouldSkipPostMithrilMarkEligibility(
 		snapshot, f.snapshotEpoch,
-	), "mark must be enforced, not skipped, for this test to mean anything")
+	), "the mark must be enforced for this test to mean anything")
 	f.ls.publishSnapshotsLocked()
 }
 
@@ -3089,89 +3092,134 @@ func (f *eligibilityDenominatorFixture) totalActiveStake(
 	return total
 }
 
-// TestVerifyBlockLeaderEligibility_DenominatorExcludesIneligibleStake pins the
-// composition of the leader-threshold denominator through the real leadership
-// path. cardano-ledger's sumAllStakeCompact sums the snapshot stake map, which
-// holds only stake delegated to a registered, non-retired pool; dingo derives
-// the same total from reward_live_stake rows filtered by the active pool set at
-// the snapshot slot.
+// TestVerifyBlockLeaderEligibility_DenominatorExcludesUndelegatedStake pins
+// the delegation half of the leader-threshold denominator through the real
+// leadership path.
 //
-// Three kinds of stake must stay out of it:
+// cardano-ledger's ssTotalActiveStake sums ssActiveStake, which
+// resolveActiveInstantStakeCredentials builds from registered credentials whose
+// stake-pool delegation is Just a pool id. A registered credential with no
+// delegation contributes nothing, so its stake must stay out of the
+// denominator; counting it would shrink every pool's sigma and reject canonical
+// blocks at a thin margin.
 //
-//   - stake delegated to nothing (account.pool NULL),
-//   - stake delegated to a pool retired at or before the snapshot slot,
-//   - stake delegated to a pool key hash that was never registered.
-//
-// Admitting any one of them inflates the denominator, shrinks every honest
-// pool's sigma, and rejects canonical blocks at a thin margin. That is the
-// wedge in #3626/#3794: a reaped pool's delegations survived POOLREAP and
-// rejoined the distribution when the pool re-registered, putting 0.285% of
-// extra stake in the epoch-19 mark total and rejecting a canonical Preview
-// block at slot 1730450 by a margin of -0.000565555.
-func TestVerifyBlockLeaderEligibility_DenominatorExcludesIneligibleStake(
+// Note this is a delegation test, not a pool-liveness test: the reference does
+// not require the delegated-to pool to be registered, so a dangling delegation
+// is deliberately not asserted here.
+func TestVerifyBlockLeaderEligibility_DenominatorExcludesUndelegatedStake(
 	t *testing.T,
 ) {
-	const ineligibleStake = uint64(400_000_000_000_000_000)
+	const undelegatedStake = uint64(400_000_000_000_000_000)
 	f := newEligibilityDenominatorFixture(t, 60)
 
-	// Ineligible bucket 1: registered, active credential with no delegation.
 	seedLiveStakeCredential(
-		t, f.db, eligibilityCred28(0x71), nil, ineligibleStake,
+		t, f.db, eligibilityCred28(0x71), nil, undelegatedStake,
 		f.snapshotSlot, 2,
-	)
-
-	// Ineligible bucket 2: delegated to a pool retired before the snapshot
-	// slot. Registered at slot 100, retirement recorded at slot 200 for epoch
-	// 3, which is the epoch containing the snapshot slot, so
-	// GetActivePoolKeyHashesAtSlot must not report it.
-	retired := eligibilityCred28(0x72)
-	seedLiveDelegatedPoolStake(
-		t, f.db, retired, ineligibleStake, 100, 3,
-	)
-	require.NoError(t, f.db.Metadata().RetirePools(
-		nil, [][]byte{retired}, 3, 200,
-	))
-
-	// Ineligible bucket 3: delegated to a pool key hash with no registration
-	// of any kind.
-	seedLiveStakeCredential(
-		t, f.db, eligibilityCred28(0x73), eligibilityCred28(0x74),
-		ineligibleStake, f.snapshotSlot, 4,
 	)
 
 	f.capture(t)
 
 	assert.Equal(t, f.producerStake, f.totalActiveStake(t),
-		"denominator must sum only stake delegated to a registered, "+
-			"non-retired pool")
+		"a registered credential with no delegation must not be counted")
 
 	require.NoError(t, f.ls.verifyBlockLeaderEligibility(f.block.block, 5),
-		"a canonical block from the only eligible pool must be accepted")
+		"a canonical block from the only delegated-to pool must be accepted")
+}
+
+// TestVerifyBlockLeaderEligibility_DenominatorExcludesReapedDelegation is
+// #3626/#3794 in a unit test.
+//
+// cardano-ledger's POOLREAP domain-restricts the delegation map by the reaped
+// pools (delegations ⋫ retired, Shelley spec Fig. 41), so a reaped pool's
+// delegators end up with no delegation at all and drop out of ssActiveStake.
+// Dingo refunded the deposit and left the delegations in place. That stays
+// invisible while the pool is absent from the query-derived active pool set,
+// and surfaces the moment the same pool re-registers: the stale rows rejoin the
+// distribution, the total active stake exceeds the network's, and every other
+// pool's threshold comes out too small.
+//
+// On Preview that put 1001812732483 lovelace — one delegator Koios reports as
+// delegated_pool: null — into the epoch-19 mark total, 0.285% too much, and
+// rejected the canonical block at slot 1730450 by a margin of -0.000565555.
+//
+// The re-registration is what makes this observable, so the test performs it:
+// at the snapshot slot the reaped pool is registered and active again, and the
+// only question left is whether its pre-reap delegation survived.
+func TestVerifyBlockLeaderEligibility_DenominatorExcludesReapedDelegation(
+	t *testing.T,
+) {
+	const staleStake = uint64(400_000_000_000_000_000)
+	f := newEligibilityDenominatorFixture(t, 61)
+
+	// Registered at slot 100, retiring at epoch 3 (recorded at slot 200).
+	// The reward account is left unregistered so the deposit refund cannot
+	// land in an account that feeds the denominator.
+	reaped := eligibilityCred28(0x72)
+	seedRetiringPool(
+		t, f.raw, reaped, eligibilityCred28(0x73), 500, 100, 3, 200,
+	)
+	// The delegator that POOLREAP must detach.
+	seedLiveStakeCredential(
+		t, f.db, eligibilityCred28(0x74), reaped, staleStake, 150, 3,
+	)
+	require.NoError(t, f.db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
+
+	// The epoch-3 boundary: POOLREAP reaps the pool and must clear the
+	// delegation with it.
+	runApplyPoolRetirements(t, f.ls, f.db, 3, f.ls.epochCache[0].StartSlot)
+
+	// The pool re-registers after the reap and is active again at the
+	// snapshot slot, so nothing but a cleared delegation keeps its former
+	// delegator out of the mark total.
+	var poolID int64
+	require.NoError(t, f.raw.QueryRow(
+		`SELECT id FROM pool WHERE pool_key_hash = ?`, reaped,
+	).Scan(&poolID))
+	_, err := f.raw.Exec(`
+INSERT INTO pool_registration (
+    pool_id, pool_key_hash, reward_account, deposit_amount, added_slot
+) VALUES (?, ?, ?, ?, ?)`,
+		poolID, reaped, eligibilityCred28(0x73), "500", 320,
+	)
+	require.NoError(t, err)
+	active, err := f.db.Metadata().GetActivePoolKeyHashesAtSlot(
+		f.snapshotSlot, nil,
+	)
+	require.NoError(t, err)
+	require.Contains(t, hexPoolSet(active), hex.EncodeToString(reaped),
+		"the re-registered pool must be active again, or this test proves nothing")
+
+	f.capture(t)
+
+	assert.Equal(t, f.producerStake, f.totalActiveStake(t),
+		"a delegation cleared by POOLREAP must not return with the pool")
+
+	require.NoError(t, f.ls.verifyBlockLeaderEligibility(f.block.block, 5),
+		"the canonical block must be accepted once the stale stake is gone")
 }
 
 // TestVerifyBlockLeaderEligibility_DenominatorIncludesEligibleStake is the
-// negative half of the test above: the same fixture, with the ineligible stake
-// replaced by stake delegated to a registered, non-retired pool. That stake
-// belongs in the denominator, so the producer genuinely holds a negligible
-// share and its block must still be rejected.
+// negative half of the two tests above: the same fixture, with the stake
+// delegated to a registered, non-retired pool instead. That stake belongs in
+// the denominator, so the producer genuinely holds a negligible share and its
+// block must still be rejected.
 //
-// Without this case the test above would pass on a denominator that excluded
+// Without this case both tests above would pass on a denominator that excluded
 // everything, including stake it must count.
 func TestVerifyBlockLeaderEligibility_DenominatorIncludesEligibleStake(
 	t *testing.T,
 ) {
 	const eligibleStake = uint64(400_000_000_000_000_000)
-	f := newEligibilityDenominatorFixture(t, 61)
+	f := newEligibilityDenominatorFixture(t, 62)
 
-	other := eligibilityCred28(0x75)
 	seedLiveDelegatedPoolStake(
-		t, f.db, other, eligibleStake, f.snapshotSlot, 5,
+		t, f.db, eligibilityCred28(0x75), eligibleStake, f.snapshotSlot, 5,
 	)
 
 	f.capture(t)
 
 	assert.Equal(t, f.producerStake+eligibleStake, f.totalActiveStake(t),
-		"stake delegated to a registered, non-retired pool must be counted")
+		"stake delegated to a registered pool must be counted")
 
 	err := f.ls.verifyBlockLeaderEligibility(f.block.block, 5)
 	require.Error(t, err, "an ineligible producer must still be rejected")
@@ -3186,6 +3234,14 @@ func eligibilityCred28(b byte) []byte {
 	out := make([]byte, 28)
 	for i := range out {
 		out[i] = b
+	}
+	return out
+}
+
+func hexPoolSet(hashes [][]byte) []string {
+	out := make([]string, 0, len(hashes))
+	for _, h := range hashes {
+		out = append(out, hex.EncodeToString(h))
 	}
 	return out
 }
