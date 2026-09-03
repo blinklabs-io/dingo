@@ -167,6 +167,43 @@ func (c *SlotTimeConverter) SlotToTime(slot uint64) (time.Time, error) {
 	return when, nil
 }
 
+// SlotToTimeInEra converts a slot without the forecast horizon, using the
+// current era's parameters when the bounded Summary refuses the slot.
+//
+// Transaction validation needs this. Building a Plutus script context converts
+// the transaction's validity interval to POSIX time, and a legal validity bound
+// may sit well past the horizon: on Preview a canonical block at slot 3516512
+// carries a bound of 3593399, 50999 slots beyond it. Refusing the conversion
+// fails the transaction, so its outputs are never created, the next block that
+// spends them trips missing-input recovery, and the replay fails the same way --
+// the node cannot follow a chain the reference implementation follows
+// (issue #3844).
+//
+// The horizon is the right bound for *forecasting* across a possible era change,
+// which is why header validation and the NtC era-history query keep using
+// SlotToTime. It is the wrong bound for a slot inside a block already being
+// applied: epoch length and slot length are constant within an era, so the
+// projection is exact rather than a guess.
+func (c *SlotTimeConverter) SlotToTimeInEra(slot uint64) (time.Time, error) {
+	when, err := c.SlotToTime(slot)
+	if err == nil {
+		return when, nil
+	}
+	if !errors.Is(err, hardfork.ErrPastHorizon) {
+		return time.Time{}, err
+	}
+	sum, sumErr := c.hardForkSummary()
+	if sumErr != nil {
+		return time.Time{}, sumErr
+	}
+	if extrapolated, ok := currentEraTimeAtSlot(sum, slot); ok {
+		return extrapolated, nil
+	}
+	// Before the current era's start, or beyond time.Duration's range: the
+	// era's parameters cannot answer, so the horizon error stands.
+	return time.Time{}, err
+}
+
 // TimeToSlot returns the slot containing the given wall-clock time.
 //
 // Returns ErrBeforeGenesis when t is before SystemStart. Near-now calls used by

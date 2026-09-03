@@ -310,3 +310,56 @@ func TestSlotTimeConverter_TimeToSlotNearNowUsesInjectedClock(t *testing.T) {
 		"the near-now fallback must derive its slot from the injected clock, "+
 			"not the real wall clock")
 }
+
+// TestSlotTimeConverter_SlotToTimeInEraIgnoresHorizon is the dingo #3844
+// regression. A canonical Preview block at slot 3516512 carries a Plutus
+// transaction whose validity upper bound is 3593399 — 50999 slots past the
+// forecast horizon. Building the script context has to convert that bound, and
+// refusing it fails the transaction, so the node cannot apply a block the
+// reference implementation applied.
+//
+// Within an era the epoch and slot lengths are constant, so the conversion is
+// exact at any slot in that era; the horizon bounds forecasting across a
+// possible era change, which the script context is not doing.
+func TestSlotTimeConverter_SlotToTimeInEraIgnoresHorizon(t *testing.T) {
+	genesis := testShelleyGenesis(t)
+	const slotLength = time.Second
+	const epochSize = 100
+	const endSlot = 500
+	sum := boundedEraSummary(
+		genesis.SystemStart,
+		slotLength,
+		epochSize,
+		endSlot,
+	)
+
+	conv := NewSlotTimeConverter(SlotTimeConverterDeps{
+		ShelleyGenesis:  func() *shelley.ShelleyGenesis { return genesis },
+		HardForkSummary: func() (*hardfork.Summary, error) { return sum, nil },
+	})
+	// Fixed far from the horizon so no near-now extrapolation can apply and
+	// the result is attributable to the in-era conversion alone.
+	conv.nowFunc = func() time.Time { return genesis.SystemStart }
+
+	const farSlot = endSlot + 1_000_000
+
+	// The bounded path stays bounded: this is what header validation and the
+	// NtC era-history query keep using.
+	_, err := conv.SlotToTime(farSlot)
+	require.ErrorIs(t, err, hardfork.ErrPastHorizon,
+		"the forecast horizon must still bound the general converter")
+
+	// The validation path resolves it exactly.
+	when, err := conv.SlotToTimeInEra(farSlot)
+	require.NoError(t, err)
+	assert.Equal(t, genesis.SystemStart.Add(farSlot*slotLength), when,
+		"a slot inside the current era converts exactly, horizon or not")
+
+	// A slot inside the horizon is unchanged by the in-era path.
+	inside, err := conv.SlotToTimeInEra(endSlot - 1)
+	require.NoError(t, err)
+	bounded, err := conv.SlotToTime(endSlot - 1)
+	require.NoError(t, err)
+	assert.Equal(t, bounded, inside,
+		"below the horizon both paths must agree")
+}

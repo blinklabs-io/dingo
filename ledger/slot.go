@@ -63,6 +63,12 @@ func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 	return ls.timeConv().SlotToTime(slot)
 }
 
+// SlotToTimeInEra returns the wall-clock start time of the given slot without
+// applying the forecast horizon. See SlotTimeConverter.SlotToTimeInEra.
+func (ls *LedgerState) SlotToTimeInEra(slot uint64) (time.Time, error) {
+	return ls.timeConv().SlotToTimeInEra(slot)
+}
+
 // TimeToSlot returns the slot containing the given wall-clock time. See
 // SlotTimeConverter.TimeToSlot for details.
 func (ls *LedgerState) TimeToSlot(t time.Time) (uint64, error) {

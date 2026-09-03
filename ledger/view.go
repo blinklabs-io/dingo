@@ -443,9 +443,14 @@ func (lv *LedgerView) IsVrfKeyInUse(
 	), nil
 }
 
-// SlotToTime returns the current time for a given slot based on known epochs
+// SlotToTime returns the current time for a given slot based on known epochs.
+//
+// This is the converter transaction validation sees, so it resolves slots
+// inside the current era regardless of the forecast horizon: a Plutus script
+// context must convert the transaction's validity interval, whose upper bound
+// may legally sit past that horizon (issue #3844).
 func (lv *LedgerView) SlotToTime(slot uint64) (time.Time, error) {
-	return lv.ls.SlotToTime(slot)
+	return lv.ls.SlotToTimeInEra(slot)
 }
 
 // TimeToSlot returns the slot number for a given time based on known epochs
