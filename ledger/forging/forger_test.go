@@ -431,7 +431,12 @@ func TestCheckAndForgeProductionRejectsIdentityReloadDuringSelection(
 	go func() {
 		forgeDone <- forger.checkAndForgeProduction(context.Background())
 	}()
-	dingotestutil.RequireReceive(t, leader.entered, time.Second, "leader entered")
+	dingotestutil.RequireReceive(
+		t,
+		leader.entered,
+		time.Second,
+		"leader entered",
+	)
 
 	alternateVRFPath := createAlternateTestVRFKey(t)
 	reloadDone := make(chan error, 1)
@@ -541,7 +546,11 @@ func TestCheckAndForgeProductionRejectsReentrantBuilderReload(t *testing.T) {
 	require.ErrorContains(t, forgeErr, "credential generation changed")
 	require.NoError(t, builder.callbackErr)
 	require.Equal(t, 1, builder.calls)
-	require.Zero(t, broadcaster.calls, "stale builder output must not be adopted")
+	require.Zero(
+		t,
+		broadcaster.calls,
+		"stale builder output must not be adopted",
+	)
 }
 
 func TestCheckAndForgeProductionRejectsReentrantLeiosRevalidation(
@@ -593,7 +602,11 @@ func TestCheckAndForgeProductionRejectsReentrantLeiosRevalidation(
 	require.NoError(t, leiosChecker.callbackErr)
 	require.Equal(t, 1, leiosChecker.calls)
 	require.Zero(t, builder.calls, "stale Leios attempt must not build")
-	require.Zero(t, broadcaster.calls, "stale Leios attempt must not be adopted")
+	require.Zero(
+		t,
+		broadcaster.calls,
+		"stale Leios attempt must not be adopted",
+	)
 }
 
 func TestCheckAndForgeProductionFailsClosedAfterKESRevalidation(t *testing.T) {
@@ -992,10 +1005,12 @@ func (p forgerTestMempoolProvider) Transactions() []MempoolTransaction {
 }
 
 type forgerTestLeiosCerts struct {
-	eligible   []LeiosCertifiedEndorserBlock
-	txHashes   []string
-	txHashesOK bool
-	marked     []lcommon.Blake2b256
+	eligible       []LeiosCertifiedEndorserBlock
+	txHashes       []string
+	txHashesOK     bool
+	marked         []lcommon.Blake2b256
+	gotEbSlot      uint64
+	gotEbSlotCalls int
 }
 
 func (p *forgerTestLeiosCerts) EligibleCertifiedEndorserBlocks() []LeiosCertifiedEndorserBlock {
@@ -1003,8 +1018,11 @@ func (p *forgerTestLeiosCerts) EligibleCertifiedEndorserBlocks() []LeiosCertifie
 }
 
 func (p *forgerTestLeiosCerts) CertifiedEndorserBlockTxHashes(
-	lcommon.Blake2b256,
+	_ lcommon.Blake2b256,
+	ebSlot uint64,
 ) ([]string, bool) {
+	p.gotEbSlot = ebSlot
+	p.gotEbSlotCalls++
 	return p.txHashes, p.txHashesOK
 }
 
@@ -1531,6 +1549,14 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 			}
 			require.Equal(t, []lcommon.Blake2b256{ebHash}, leiosCerts.marked)
 			require.Equal(t, 1, parent.calls)
+			// CertifiedEndorserBlockTxHashes must be called with the
+			// eligible certificate's own slot (9, from eb.SlotNo above), not
+			// the forged ranking block's slot (10) or zero: the manifest is
+			// content-addressed, so the same hash could be a distinct,
+			// unrelated occurrence at another slot, and the wrong slot here
+			// would resolve the wrong occurrence (issue #3513 review).
+			require.Equal(t, 1, leiosCerts.gotEbSlotCalls)
+			require.Equal(t, uint64(9), leiosCerts.gotEbSlot)
 		})
 	}
 }

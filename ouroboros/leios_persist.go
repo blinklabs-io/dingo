@@ -66,10 +66,13 @@ type leiosPersistJob struct {
 
 // enqueueLeiosPersist queues an endorser block for asynchronous blob-store
 // persistence (historical serving) instead of writing it synchronously on the
-// leios-fetch hot path. Jobs coalesce by hash: a complete job (carrying txs)
-// supersedes a manifest-only one for the same hash, so the backfiller's
-// manifest-only-then-complete pair collapses to a single write. Best-effort: a
-// full queue drops the write; no error is surfaced to the caller.
+// leios-fetch hot path. Jobs coalesce by (slot, hash), not hash alone: a
+// complete job (carrying txs) supersedes a manifest-only one for the same
+// occurrence, so the backfiller's manifest-only-then-complete pair collapses
+// to a single write, but two live occurrences of the same content-addressed
+// hash at different slots persist independently rather than one overwriting
+// the other (issue #3513 review). Best-effort: a full queue drops the write;
+// no error is surfaced to the caller.
 func (o *Ouroboros) enqueueLeiosPersist(
 	point ocommon.Point,
 	blockRaw []byte,
@@ -87,7 +90,7 @@ func (o *Ouroboros) enqueueLeiosPersist(
 	if data != nil && data.completeTxCache() && data.txCount > 0 {
 		job.txsRaw = cloneRawMessages(data.txsRaw)
 	}
-	key := string(job.hash)
+	key := leiosBlockKey(job.slot, job.hash)
 	o.leiosPersistMu.Lock()
 	// Reject work once the writer is stopping. The shutdown drain runs only
 	// after leiosPersistStop is closed and reads the pending map under this same

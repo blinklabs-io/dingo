@@ -196,6 +196,12 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 				err,
 			)
 		}
+		o.blockfetchRecordNoBlocksAndMaybeClose(
+			ctx.ConnectionId,
+			start,
+			"blockfetch: closing stuck peer after repeated inverted range requests",
+			"blockfetch: peer stuck on inverted range",
+		)
 		return nil
 	}
 	// Validate that the requested slot range is not too large
