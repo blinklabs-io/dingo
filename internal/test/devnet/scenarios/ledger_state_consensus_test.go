@@ -171,7 +171,7 @@ func sampleLedgerStateAtStableTip(
 			return false
 		}
 
-		ds, err := nodeparity.SnapshotAtTip(dingoNtc, magic)
+		ds, err := nodeparity.SnapshotAtTip(t.Context(), dingoNtc, magic)
 		if err != nil {
 			t.Logf(
 				"sampleLedgerStateAtStableTip: attempt %d: dingo-producer"+
@@ -179,7 +179,7 @@ func sampleLedgerStateAtStableTip(
 			)
 			return false
 		}
-		cs, err := nodeparity.SnapshotAtTip(cardanoNtc, magic)
+		cs, err := nodeparity.SnapshotAtTip(t.Context(), cardanoNtc, magic)
 		if err != nil {
 			t.Logf(
 				"sampleLedgerStateAtStableTip: attempt %d: cardano-producer"+

@@ -63,20 +63,41 @@ groups:
         # watch is block-triggered (a check fires the moment either node's
         # tip changes), with --fallback-interval (default 2m) as a backstop
         # if a watcher's subscription silently stalls -- so real activity
-        # (completed or skipped) is expected roughly every block, and never
-        # less often than the fallback interval. Sums checks_total
-        # (completed) and checks_skipped_total (discarded, e.g. because the
-        # two nodes didn't hold a stable common tip) rather than just
-        # checks_total alone: a run of legitimate skips during a noisy
-        # stretch must not look identical to a dead tool.
+        # (completed, skipped, or outright failed) is expected roughly every
+        # block, and never less often than the fallback interval. Sums all
+        # three counters rather than just checks_total alone: a run of
+        # legitimate skips during a noisy stretch, or a run of check errors
+        # from a misconfigured address (which never increments checks_total
+        # or checks_skipped_total either), must not look identical to the
+        # tool itself being stuck. NodeParityCheckErrors below is the
+        # dedicated signal for "attempting but failing"; this alert is only
+        # for "not attempting at all."
         expr: |
           (
             rate(node_parity_checks_total{network=~".+"}[10m])
             + sum without (reason) (rate(node_parity_checks_skipped_total{network=~".+"}[10m]))
+            + rate(node_parity_check_errors_total{network=~".+"}[10m])
           ) == 0
         for: 5m
         labels:
           severity: warning
         annotations:
           summary: "node-parity has not attempted a check on {{ $labels.network }}"
-          description: "{{ $labels.instance }} (job node-parity) has recorded neither a completed nor a skipped check in the last 10 minutes, well past its --fallback-interval -- the tool itself is stuck (its watchers are not attempting anything at all), not merely discarding cycles."
+          description: "{{ $labels.instance }} (job node-parity) has recorded no completed, skipped, or failed check in the last 10 minutes, well past its --fallback-interval -- the tool itself is stuck (its watchers are not attempting anything at all), not merely discarding cycles or failing them."
+
+      - alert: NodeParityCheckErrors
+        # Distinguishes "attempting checks but every one fails outright" (a
+        # dial or query error -- e.g. a misconfigured address, or a node
+        # that's down) from NodeParityNotChecking's "not attempting
+        # anything at all": both leave checks_total and
+        # checks_skipped_total at zero, but this is a different, more
+        # specific root cause an operator can act on directly (check
+        # --dingo-addr/--cardano-addr and both nodes' health) rather than
+        # treating it as the whole tool being stuck.
+        expr: increase(node_parity_check_errors_total{network=~".+"}[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "node-parity checks are failing on {{ $labels.network }}"
+          description: "{{ $labels.instance }} (job node-parity) has logged check errors (dial or query failures) for 5+ minutes -- verify --dingo-addr/--cardano-addr and that both nodes are reachable."

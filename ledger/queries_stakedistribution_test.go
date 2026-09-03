@@ -111,6 +111,71 @@ func TestQueryShelleyStakeDistribution_ReportsFractionAndVrf(t *testing.T) {
 	assert.Equal(t, vrfB, entryB.VrfHash[:])
 }
 
+// stakeDistributionCborQuery wraps the leaf query in GetCBOR (Shelley
+// sub-query 9, ShelleyCborQuery), matching poolDistr2CborQuery in
+// queries_pooldistr2_test.go.
+func stakeDistributionCborQuery() *olocalstatequery.BlockQuery {
+	return &olocalstatequery.BlockQuery{
+		Query: &olocalstatequery.ShelleyQuery{
+			Query: &olocalstatequery.ShelleyCborQuery{
+				Query: &olocalstatequery.ShelleyStakeDistributionQuery{},
+			},
+		},
+	}
+}
+
+// TestQueryShelleyStakeDistribution_ViaGetCBOR covers GetStakeDistribution
+// wrapped in the GetCBOR combinator (queryShelleyCbor), mirroring
+// TestQueryShelleyPoolDistr2_ViaGetCBOR. StakeDistributionResult is a
+// one-field cbor.StructAsArray struct (unlike PoolDistr2Result's two
+// fields), which is exactly the shape queryShelleyCbor's own doc comment
+// says it treats differently (unwrapping a single-element inner result
+// rather than keeping it as a one-element array) -- this proves whether
+// that special case is actually correct for a genuine one-field
+// StructAsArray result, or whether it strips a wrapping layer the real
+// client-side type still expects.
+func TestQueryShelleyStakeDistribution_ViaGetCBOR(t *testing.T) {
+	db := newTestDB(t)
+
+	vrfA := make([]byte, 32)
+	for i := range vrfA {
+		vrfA[i] = 0xAA
+	}
+	poolA := make([]byte, 28)
+	for i := range poolA {
+		poolA[i] = 0x11
+	}
+	const snapshotEpoch = 0
+	pkhA := seedPoolDistr2Fixture(t, db, poolA, vrfA, 3_000_000, snapshotEpoch)
+
+	ls := newPoolDistr2Ledger(t, db)
+
+	result, err := ls.Query(stakeDistributionCborQuery())
+	require.NoError(t, err, "GetCBOR-wrapped GetStakeDistribution must not error")
+
+	arr, ok := result.([]any)
+	require.True(t, ok, "expected the []any result wrapper")
+	require.Len(t, arr, 1)
+	tag, ok := arr[0].(cbor.Tag)
+	require.True(t, ok, "expected a tag-24 CBOR.Tag, got %T", arr[0])
+	assert.EqualValues(t, cbor.CborTagCbor, tag.Number)
+
+	content, ok := tag.Content.([]byte)
+	require.True(t, ok, "tag content must be raw CBOR bytes, got %T", tag.Content)
+
+	// The tag-24 content must decode via the same real client-side type a
+	// direct (non-GetCBOR) GetStakeDistribution reply does: proof that
+	// GetCBOR carries the identical value, just CBOR-in-CBOR encoded.
+	var dist olocalstatequery.StakeDistributionResult
+	_, err = cbor.Decode(content, &dist)
+	require.NoError(t, err, "tag-24 content must decode as a StakeDistributionResult")
+
+	entryA, ok := dist.Results[lcommon.PoolId(pkhA)]
+	require.True(t, ok, "pool missing from the GetCBOR-wrapped distribution")
+	require.NotNil(t, entryA.StakeFraction)
+	assert.Equal(t, vrfA, entryA.VrfHash[:])
+}
+
 // TestQueryShelleyStakeDistribution_EmptySnapshot covers a chain with no
 // stake snapshot yet: the query must return an empty, non-nil map rather
 // than failing.

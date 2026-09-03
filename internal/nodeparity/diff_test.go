@@ -126,6 +126,60 @@ func TestDiffSnapshots_UTxOSetDiffers(t *testing.T) {
 	assert.Zero(t, d.TruncatedUTxO)
 }
 
+// TestDiff_CountIncludesTruncatedEntries covers Count()'s reason for
+// existing: Lines() rolls every UTxO divergence beyond maxUTxODiffLines
+// into one summary line, so len(Lines()) understates the real number of
+// divergences whenever TruncatedUTxO is nonzero. Count() must report the
+// true total instead.
+func TestDiff_CountIncludesTruncatedEntries(t *testing.T) {
+	d := Diff{
+		ProtocolParamsDiff: "protocol parameters differ",
+		StakeDistribution:  []string{"pool a differs"},
+		UTxO:               []string{"utxo a differs", "utxo b differs"},
+		TruncatedUTxO:      5,
+	}
+	// Lines(): 1 (params) + 1 (stake) + 2 (utxo) + 1 (summary) = 5.
+	assert.Len(t, d.Lines(), 5)
+	// Count(): 1 (params) + 1 (stake) + 2 (utxo) + 5 (truncated) = 9.
+	assert.Equal(t, 9, d.Count())
+}
+
+// TestDiffSnapshots_OrderIsDeterministic covers a divergence in both stake
+// distribution and UTxO across enough entries that live Go map iteration
+// order would very likely vary between calls if DiffSnapshots iterated the
+// maps directly (Go deliberately randomizes map iteration order per run).
+// Running the same comparison repeatedly must produce byte-identical
+// output every time, and -- since the UTxO side exceeds maxUTxODiffLines --
+// the same entries must be the ones kept vs. truncated each time too, not
+// merely the same count: an operator diffing two runs' logs, or the
+// capped sample itself, must never see something that looks like it
+// changed when the underlying snapshots did not.
+func TestDiffSnapshots_OrderIsDeterministic(t *testing.T) {
+	a := emptySnapshot()
+	b := emptySnapshot()
+
+	for i := range 30 {
+		pool := poolID(byte(i))
+		a.StakeDistribution[pool] = big.NewRat(1, 2)
+		b.StakeDistribution[pool] = big.NewRat(1, 3) // every pool differs
+	}
+	for i := range maxUTxODiffLines + 10 {
+		key := fmt.Sprintf("tx%d#0", i)
+		a.UTxOEntries[key] = "addr|1"
+		b.UTxOEntries[key] = "addr|2"
+	}
+
+	first := DiffSnapshots(a, b).Lines()
+	for range 10 {
+		got := DiffSnapshots(a, b).Lines()
+		require.Equal(
+			t, first, got,
+			"DiffSnapshots must report the same order (and the same "+
+				"truncated-vs-kept entries) every time for the same input",
+		)
+	}
+}
+
 // TestDiffSnapshots_UTxODiffCapped covers a badly-diverged UTxO set:
 // DiffSnapshots must cap the concrete UTxO diff lines at maxUTxODiffLines
 // (so a caller isn't flooded) while still reporting the true count of

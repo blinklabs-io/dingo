@@ -36,8 +36,12 @@ func testLogger() (*slog.Logger, *bytes.Buffer) {
 
 // TestHandleCheckResult_Error covers a Check call that itself failed (a
 // dial or query error, not a discarded cycle): handleCheckResult must log
-// it as a warning and record neither a completed check nor a skip --
-// nodeparity.Check never returned a result to record anything about.
+// it as a warning, record neither a completed check nor a skip --
+// nodeparity.Check never returned a result to record anything about -- and
+// record it via checkErrorsTotal instead, so a run of persistent check
+// errors (e.g. a misconfigured address) is distinguishable from the tool
+// simply not attempting anything (see NodeParityCheckErrors in
+// docs/dashboards/alerts.yaml).
 func TestHandleCheckResult_Error(t *testing.T) {
 	metrics, _ := newTestParityMetrics(t)
 	logger, buf := testLogger()
@@ -52,6 +56,9 @@ func TestHandleCheckResult_Error(t *testing.T) {
 	assert.Contains(t, buf.String(), "check error")
 	assert.Contains(t, buf.String(), "connection refused")
 	assert.Equal(t, float64(0), promtestutil.ToFloat64(metrics.checksTotal))
+	assert.Equal(
+		t, float64(1), promtestutil.ToFloat64(metrics.checkErrorsTotal),
+	)
 }
 
 // TestHandleCheckResult_Skipped covers a discarded cycle (the two nodes
@@ -81,6 +88,10 @@ func TestHandleCheckResult_Skipped(t *testing.T) {
 			),
 		),
 	)
+	assert.Equal(
+		t, float64(0), promtestutil.ToFloat64(metrics.checkErrorsTotal),
+		"a skipped cycle is not a check error",
+	)
 }
 
 // TestHandleCheckResult_Matched covers a completed, clean comparison:
@@ -106,6 +117,10 @@ func TestHandleCheckResult_Matched(t *testing.T) {
 				nodeparity.SkipTipAdvanced,
 			),
 		),
+	)
+	assert.Equal(
+		t, float64(0), promtestutil.ToFloat64(metrics.checkErrorsTotal),
+		"a clean match is not a check error",
 	)
 }
 

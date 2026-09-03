@@ -2723,9 +2723,10 @@ reported fractions summing to slightly under one, since its stake stays in
 its own fraction is its stake over that same unchanged total.
 
 `GetStakeDistribution` (`ledger/queries_stakedistribution.go`) and
-`GetUTxOWhole` (`ledger/queries_utxowhole.go`) close out two entries of the
-`// TODO (#394)` block in `ledger/queries.go`'s query dispatcher; the rest of
-that block remains unimplemented. `GetStakeDistribution` reads the same
+`GetUTxOWhole` (`ledger/queries_utxowhole.go`) are the two newest implemented
+leaves in `ledger/queries.go`'s query dispatcher; the `// TODO (#394)` block
+beside them lists the leaves that remain unimplemented. `GetStakeDistribution`
+reads the same
 `PoolStakeDistribution` helper as `GetPoolDistr2` with no pool filter (this
 query has none on the wire, unlike `GetPoolDistr2`), so it cannot report a
 different snapshot or VRF key for the same chain than `GetPoolDistr2` or the
@@ -6472,12 +6473,33 @@ round trip, since the two halves of a comparison spanning a tip change would
 not describe the same block. `sandwichOK` is this decision as a pure
 function, unit-tested without a live node; `Check` is the I/O around it,
 using one already-dialed connection per node for the whole cycle so the
-ChainSync and LocalStateQuery reads share a single session per node.
+ChainSync and LocalStateQuery reads share a single session per node. This
+only catches a tip that moved and stayed moved: a tip that advances to a
+fork and rolls back to the exact same (slot, hash) within the round trip
+passes `sandwichOK` unchanged, even though the query may have executed
+against the discarded fork's transient state -- a known, documented
+residual gap (see `sandwichOK`'s doc comment), not attempted here.
+
+`Check` takes a `context.Context` and threads it into `Dial`, which closes
+its connection the instant the context is cancelled (SIGINT/SIGTERM via
+`cmd/node-parity`'s `signal.NotifyContext`): `ouroboros.New` performs the
+NtC handshake synchronously with no context or per-call timeout of its own,
+and neither do `ReadTip`/`QuerySnapshot`'s later synchronous protocol
+calls, so without this a peer that accepts a connection and then never
+responds would otherwise leave `Check` (and so `watch`'s shutdown) blocked
+indefinitely. `internal/nodeparity/watch.go`'s `watchSession` applies the
+same pattern independently for its own persistent ChainSync connections.
 
 **Metrics:** `node_parity_checks_total`, `node_parity_checks_skipped_total{reason}`
-(`reason`: `tip_mismatch`/`tip_advanced`), and
+(`reason`: `tip_mismatch`/`tip_advanced`),
 `node_parity_divergence_total{field}` (`field`: `protocol_params`/
-`stake_distribution`/`utxo`), registered under a registry wrapped with a
+`stake_distribution`/`utxo`), and `node_parity_check_errors_total` (a Check
+call that failed outright -- a dial or query error -- as opposed to a
+completed or skipped cycle; counted separately so a persistently
+misconfigured address, which never increments the other two counters
+either, is distinguishable from the tool itself being stuck --
+`NodeParityCheckErrors` alerts on it directly), registered under a registry
+wrapped with a
 `network` const label the same way the real node's own
 `configWrapPromRegistry` (root `config.go`) labels `cardano_node_metrics_*` —
 see `docs/dashboards/prometheus.yaml`'s `node-parity`/`cardano-node-reference`

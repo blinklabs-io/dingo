@@ -15,9 +15,15 @@
 package main
 
 import (
+	"context"
+	"log/slog"
+	"net"
+	"net/http"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/internal/nodeparity"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
@@ -44,29 +50,35 @@ func newTestParityMetrics(t *testing.T) (*parityMetrics, *prometheus.Registry) {
 func TestNewParityMetricsIn_LabelsWithNetwork(t *testing.T) {
 	metrics, registry := newTestParityMetrics(t)
 	metrics.checksTotal.Inc()
+	metrics.recordSkip(nodeparity.SkipTipMismatch)
+	metrics.recordCheck(nodeparity.Diff{ProtocolParamsDiff: "differs"})
+	metrics.recordCheckError()
 
 	families, err := registry.Gather()
 	require.NoError(t, err)
 
-	found := false
-	for _, fam := range families {
-		if fam.GetName() != "node_parity_checks_total" {
-			continue
-		}
-		for _, m := range fam.GetMetric() {
-			for _, label := range m.GetLabel() {
-				if label.GetName() == "network" &&
-					label.GetValue() == "preview" {
-					found = true
+	for _, name := range []string{
+		"node_parity_checks_total",
+		"node_parity_checks_skipped_total",
+		"node_parity_divergence_total",
+		"node_parity_check_errors_total",
+	} {
+		found := false
+		for _, fam := range families {
+			if fam.GetName() != name {
+				continue
+			}
+			for _, m := range fam.GetMetric() {
+				for _, label := range m.GetLabel() {
+					if label.GetName() == "network" &&
+						label.GetValue() == "preview" {
+						found = true
+					}
 				}
 			}
 		}
+		assert.True(t, found, "%s must carry network=\"preview\"", name)
 	}
-	assert.True(
-		t,
-		found,
-		"node_parity_checks_total must carry network=\"preview\"",
-	)
 }
 
 // TestParityMetrics_RecordCheck_MatchIncrementsOnlyChecksTotal covers a
@@ -133,6 +145,41 @@ func TestParityMetrics_RecordCheck_DivergenceIncrementsOnlyAffectedFields(
 	)
 	assert.Equal(
 		t, float64(1),
+		promtestutil.ToFloat64(metrics.divergenceTotal.WithLabelValues("utxo")),
+	)
+}
+
+// TestParityMetrics_RecordCheck_StakeDistributionDivergenceIncrements
+// covers the one divergence field the other recordCheck tests never
+// exercise on the positive path (both only assert it stays 0): a
+// stake-distribution-only diff must increment
+// node_parity_divergence_total{field="stake_distribution"} without
+// touching the other two fields.
+func TestParityMetrics_RecordCheck_StakeDistributionDivergenceIncrements(
+	t *testing.T,
+) {
+	metrics, _ := newTestParityMetrics(t)
+	metrics.recordCheck(nodeparity.Diff{
+		StakeDistribution: []string{"pool abc fraction differs"},
+	})
+
+	assert.Equal(t, float64(1), promtestutil.ToFloat64(metrics.checksTotal))
+	assert.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(
+			metrics.divergenceTotal.WithLabelValues("stake_distribution"),
+		),
+	)
+	assert.Equal(
+		t,
+		float64(0),
+		promtestutil.ToFloat64(
+			metrics.divergenceTotal.WithLabelValues("protocol_params"),
+		),
+	)
+	assert.Equal(
+		t, float64(0),
 		promtestutil.ToFloat64(metrics.divergenceTotal.WithLabelValues("utxo")),
 	)
 }
@@ -209,6 +256,72 @@ func TestNewParityMetricsIn_PreMaterializesZeroSeries(t *testing.T) {
 		assert.True(t, ok, "field %q must already be exposed", field)
 		assert.Equal(t, float64(0), value, "field %q must start at 0", field)
 	}
+}
+
+// discardLogger returns a logger that writes nowhere, for tests that only
+// care about serveMetrics's return value.
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(discardWriter{}, nil))
+}
+
+type discardWriter struct{}
+
+func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+// TestServeMetrics_BindFailureReturnsError covers the fix for a metrics
+// server that silently failed to bind: serveMetrics must return the bind
+// error synchronously (net.Listen happens before the background goroutine
+// starts) rather than only ever logging it from that goroutine while
+// watchRun carries on as if --metrics-addr were actually serving. Occupies
+// the address first so the second bind genuinely fails on "address already
+// in use", not a made-up error.
+func TestServeMetrics_BindFailureReturnsError(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer occupied.Close()
+
+	_, err = serveMetrics(occupied.Addr().String(), discardLogger())
+	require.Error(t, err)
+}
+
+// TestServeMetrics_SucceedsAndServesMetrics covers the ordinary path:
+// serveMetrics must return a working server whose /metrics endpoint
+// actually responds, not only ever be exercised through its failure path.
+func TestServeMetrics_SucceedsAndServesMetrics(t *testing.T) {
+	srv, err := serveMetrics("127.0.0.1:0", discardLogger())
+	require.NoError(t, err)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	}()
+
+	var resp *http.Response
+	testutil.WaitForCondition(t, func() bool {
+		var getErr error
+		resp, getErr = http.Get("http://" + srv.Addr + "/metrics")
+		return getErr == nil
+	}, 2*time.Second, "metrics server never became reachable")
+	require.NotNil(t, resp)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+// TestParityMetrics_RecordCheckError_Increments covers the dedicated
+// check-error counter (see NodeParityCheckErrors in
+// docs/dashboards/alerts.yaml): recordCheckError must increment
+// checkErrorsTotal without touching checksTotal or checksSkippedTotal, so
+// a run of persistent check errors (e.g. a misconfigured address) is
+// distinguishable both from a completed cycle and from a skipped one.
+func TestParityMetrics_RecordCheckError_Increments(t *testing.T) {
+	metrics, _ := newTestParityMetrics(t)
+	metrics.recordCheckError()
+	metrics.recordCheckError()
+
+	assert.Equal(
+		t, float64(2), promtestutil.ToFloat64(metrics.checkErrorsTotal),
+	)
+	assert.Equal(t, float64(0), promtestutil.ToFloat64(metrics.checksTotal))
 }
 
 // TestParityMetrics_RecordSkip_IncrementsByReason covers that skipped

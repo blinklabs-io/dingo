@@ -16,7 +16,9 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -41,6 +43,16 @@ type parityMetrics struct {
 	// divergenceTotal's "field" is closed to the three fields
 	// nodeparity.Diff reports: protocol_params, stake_distribution, utxo.
 	divergenceTotal *prometheus.CounterVec
+	// checkErrorsTotal counts Check calls that failed outright (a dial or
+	// query error), as opposed to a completed cycle that found a
+	// divergence or a discarded (skipped) cycle. Counted separately so
+	// NodeParityNotChecking's "is the tool doing anything at all" signal
+	// stays true even when every cycle is failing -- a persistently
+	// misconfigured address (wrong port, node down) makes checksTotal and
+	// checksSkippedTotal both stay at zero forever, which looks
+	// indistinguishable from the tool itself being stuck unless something
+	// else confirms it is actually attempting and failing.
+	checkErrorsTotal prometheus.Counter
 }
 
 // newParityMetrics registers this process's counters under a registry
@@ -100,12 +112,22 @@ func newParityMetricsIn(
 		}),
 		checksSkippedTotal: checksSkippedTotal,
 		divergenceTotal:    divergenceTotal,
+		checkErrorsTotal: factory.NewCounter(prometheus.CounterOpts{
+			Name: "node_parity_check_errors_total",
+			Help: "Check calls that failed outright (a dial or query error), as opposed to a completed or skipped cycle.",
+		}),
 	}
 }
 
 // recordSkip increments checksSkippedTotal for a discarded cycle.
 func (m *parityMetrics) recordSkip(reason string) {
 	m.checksSkippedTotal.WithLabelValues(reason).Inc()
+}
+
+// recordCheckError increments checkErrorsTotal for a Check call that failed
+// outright (a dial or query error).
+func (m *parityMetrics) recordCheckError() {
+	m.checkErrorsTotal.Inc()
 }
 
 // recordCheck increments checksTotal and, for each field the diff actually
@@ -123,18 +145,30 @@ func (m *parityMetrics) recordCheck(diff nodeparity.Diff) {
 	}
 }
 
-// serveMetrics starts a Prometheus /metrics HTTP server on addr in the
-// background and returns it so the caller can Shutdown it on exit. A
-// dedicated mux (rather than http.DefaultServeMux) keeps this from ever
-// exposing anything but /metrics, matching internal/node/node.go's own
-// metrics-listener convention. It serves the process-wide default gatherer
+// serveMetrics binds addr and starts a Prometheus /metrics HTTP server on it
+// in the background, returning the server so the caller can Shutdown it on
+// exit. The bind itself (net.Listen) happens synchronously so a bad address
+// or an already-occupied port is returned to the caller immediately, rather
+// than only ever appearing as a background log line while watchRun carries
+// on as if monitoring were up. A dedicated mux (rather than
+// http.DefaultServeMux) keeps this from ever exposing anything but
+// /metrics, matching internal/node/node.go's own metrics-listener
+// convention. It serves the process-wide default gatherer
 // (promhttp.Handler()), which sees newParityMetrics's counters regardless of
 // the network-label wrapping used to register them.
-func serveMetrics(addr string, logger *slog.Logger) *http.Server {
+func serveMetrics(addr string, logger *slog.Logger) (*http.Server, error) {
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("metrics listen %s: %w", addr, err)
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	srv := &http.Server{
-		Addr:              addr,
+		// The actual bound address, not the possibly-":0"/wildcard addr
+		// argument: a caller (or a test) reading srv.Addr back after this
+		// returns needs the real port the OS assigned, not what was asked
+		// for.
+		Addr:              listener.Addr().String(),
 		Handler:           mux,
 		ReadHeaderTimeout: 60 * time.Second,
 		// ReadTimeout bounds the whole request, not just headers:
@@ -147,11 +181,11 @@ func serveMetrics(addr string, logger *slog.Logger) *http.Server {
 		IdleTimeout:  120 * time.Second,
 	}
 	go func() {
-		logger.Info("serving prometheus metrics", "addr", addr)
-		if err := srv.ListenAndServe(); err != nil &&
+		logger.Info("serving prometheus metrics", "addr", srv.Addr)
+		if err := srv.Serve(listener); err != nil &&
 			!errors.Is(err, http.ErrServerClosed) {
 			logger.Error("metrics server error", "err", err)
 		}
 	}()
-	return srv
+	return srv, nil
 }

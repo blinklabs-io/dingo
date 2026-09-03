@@ -14,7 +14,10 @@
 
 package nodeparity
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // Skip reason codes: stable, low-cardinality values suitable for a
 // Prometheus label, as opposed to SkipDetail's free-text message (which
@@ -56,14 +59,21 @@ type CheckResult struct {
 // re-reads both tips afterward -- discarding the cycle (Skipped) if either
 // node advanced during the round trip, rather than reporting a comparison
 // whose two halves may not describe the same block.
-func Check(dingoAddr, cardanoAddr string, magic uint32) (*CheckResult, error) {
-	dingoConn, err := Dial(dingoAddr, magic)
+//
+// ctx bounds the whole cycle: every query below is a synchronous protocol
+// call with no timeout of its own, so cancelling ctx (e.g. on SIGINT) is
+// what lets a caller stuck against an unresponsive peer actually return,
+// rather than the process hanging until forcibly killed. See Dial.
+func Check(
+	ctx context.Context, dingoAddr, cardanoAddr string, magic uint32,
+) (*CheckResult, error) {
+	dingoConn, err := Dial(ctx, dingoAddr, magic)
 	if err != nil {
 		return nil, fmt.Errorf("dial dingo %s: %w", dingoAddr, err)
 	}
 	defer dingoConn.Close() //nolint:errcheck
 
-	cardanoConn, err := Dial(cardanoAddr, magic)
+	cardanoConn, err := Dial(ctx, cardanoAddr, magic)
 	if err != nil {
 		return nil, fmt.Errorf("dial cardano-node %s: %w", cardanoAddr, err)
 	}
@@ -124,6 +134,19 @@ func Check(dingoAddr, cardanoAddr string, magic uint32) (*CheckResult, error) {
 // second read. Split out from Check as a pure function so this decision is
 // unit-testable without a live node. reason is a stable Skip* code suitable
 // for a metric label; detail is a human-readable message for logs.
+//
+// Known residual gap: this only compares the two endpoint reads, not
+// everything in between. If a node's tip advances to a fork and then rolls
+// back to exactly the same (slot, hash) it started at -- an ordinary short
+// fork resolving, not a bug -- before1.Equal(after1) still holds, so this
+// reports ok even though the LocalStateQuery session may have executed
+// against the now-discarded fork's transient state (since Dingo's Acquire
+// cannot pin a specific point yet, blinklabs-io/dingo#382, the query always
+// answers whatever the live tip was at the instant it ran). Detecting this
+// would require tracking every intermediate tip change via a concurrent
+// ChainSync subscription during the query window, not just two point-in-time
+// reads -- a real feature, not a bug fix, and not attempted here.
+
 func sandwichOK(
 	before1, before2, after1, after2 Tip,
 ) (ok bool, reason, detail string) {

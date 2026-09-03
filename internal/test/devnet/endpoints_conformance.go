@@ -63,7 +63,11 @@ func DingoProducerNtcAddr() string {
 	if v := os.Getenv("DEVNET_DINGO_NTC_ADDR"); v != "" {
 		return v
 	}
-	return "localhost:3030"
+	port := os.Getenv("DEVNET_DINGO_NTC_PORT")
+	if port == "" {
+		port = "3030"
+	}
+	return "localhost:" + port
 }
 
 // CardanoProducerNtcAddr returns cardano-producer's host TCP address for
@@ -76,5 +80,9 @@ func CardanoProducerNtcAddr() string {
 	if v := os.Getenv("DEVNET_CARDANO_NTC_ADDR"); v != "" {
 		return v
 	}
-	return "localhost:3031"
+	port := os.Getenv("DEVNET_CARDANO_NTC_PORT")
+	if port == "" {
+		port = "3031"
+	}
+	return "localhost:" + port
 }

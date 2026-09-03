@@ -31,6 +31,7 @@ both nodes' tips, and if they agree, compares protocol parameters, stake
 distribution, and the whole UTxO set. Exits nonzero if the two diverged, or
 if the cycle had to be discarded because the nodes never held a stable
 common tip -- a caller must not read a discarded cycle as a clean match.`,
+		Args: cobra.NoArgs,
 		RunE: checkRun,
 	}
 }
@@ -49,7 +50,7 @@ func checkRun(cmd *cobra.Command, _ []string) error {
 	}
 
 	result, err := nodeparity.Check(
-		globalFlags.dingoAddr, globalFlags.cardanoAddr, magic,
+		cmd.Context(), globalFlags.dingoAddr, globalFlags.cardanoAddr, magic,
 	)
 	if err != nil {
 		return err
@@ -74,15 +75,16 @@ func reportResult(result *nodeparity.CheckResult) error {
 		return nil
 	}
 	lines := result.Diff.Lines()
+	count := result.Diff.Count()
 	fmt.Printf(
 		"check complete: DIVERGED at slot %d (block %d), %d difference(s):\n%s\n",
 		result.Tip.Slot,
 		result.Tip.BlockNumber,
-		len(lines),
+		count,
 		strings.Join(lines, "\n"),
 	)
 	return fmt.Errorf(
 		"ledger state diverged at slot %d (block %d): %d difference(s)",
-		result.Tip.Slot, result.Tip.BlockNumber, len(lines),
+		result.Tip.Slot, result.Tip.BlockNumber, count,
 	)
 }

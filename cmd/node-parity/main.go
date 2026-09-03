@@ -21,9 +21,10 @@
 // already-running, already-synced NtC listeners with --dingo-addr and
 // --cardano-addr (a host:port for a TCP-exposed endpoint, or a leading-"/"
 // Unix socket path for a real cardano-node). `check` runs one comparison
-// cycle; `watch` repeats it on an interval, matching cmd/koios-parity's
-// on-demand-check-plus-polling-watch shape rather than a persistent,
-// block-reactive stream.
+// cycle; `watch` follows both nodes' ChainSync feeds and runs a check the
+// moment either one's tip changes, with --fallback-interval as a backstop
+// safety net in case a watcher's subscription silently stalls, rather than
+// polling on a fixed clock alone.
 package main
 
 import (
@@ -84,6 +85,7 @@ This tool never pins a specific historical block: Dingo's LocalStateQuery
 Acquire always answers at its live tip (blinklabs-io/dingo#382), so every
 check instead confirms both nodes agree on a tip before and after the
 query, discarding (not failing) the cycle if they don't.`,
+		Args: cobra.NoArgs,
 		RunE: checkRun,
 		// This tool logs structured JSON via slog; cobra's own plain-text
 		// "Error: ..." plus a full usage dump on every runtime failure (as

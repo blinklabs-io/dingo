@@ -59,6 +59,7 @@ func seedBabbageUtxo(
 
 	txId := bytes.Repeat([]byte{txIdSeed}, 32)
 	txn := db.Transaction(true)
+	defer txn.Release()
 	require.NoError(t, db.CreateUtxo(txn, &models.Utxo{
 		TxId:      txId,
 		OutputIdx: outputIdx,

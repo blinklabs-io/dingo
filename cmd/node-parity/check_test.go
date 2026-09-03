@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/nodeparity"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -53,4 +54,41 @@ func TestReportResult_ExitCodeSignaling(t *testing.T) {
 		}
 		require.Error(t, reportResult(result))
 	})
+}
+
+// TestCheckCommand_RejectsPositionalArgs covers a typo after 'check' (e.g.
+// 'node-parity check now'): checkCommand must reject any positional
+// argument up front via Cobra's own validation, rather than silently
+// ignoring the typo and running a full comparison cycle against two live
+// nodes as if nothing were wrong.
+func TestCheckCommand_RejectsPositionalArgs(t *testing.T) {
+	cmd := checkCommand()
+	require.Error(t, cmd.Args(cmd, []string{"now"}))
+	require.NoError(t, cmd.Args(cmd, nil))
+}
+
+// TestReportResult_DivergedErrorReportsTrueCountNotLineCount covers a
+// truncated UTxO diff: Diff.Lines() rolls every UTxO entry beyond the cap
+// into a single "... N more omitted" summary line, so len(lines) undercounts
+// the real number of divergences whenever TruncatedUTxO is nonzero. The
+// error reportResult returns must state the true total (StakeDistribution +
+// UTxO + TruncatedUTxO, +1 if protocol params also differ), not the number
+// of printed lines, so an operator reading only the exit-code/error message
+// (not the full report) is not misled into thinking fewer things diverged
+// than actually did.
+func TestReportResult_DivergedErrorReportsTrueCountNotLineCount(t *testing.T) {
+	result := &nodeparity.CheckResult{
+		Tip: nodeparity.Tip{Slot: 100, Hash: "aa"},
+		Diff: nodeparity.Diff{
+			ProtocolParamsDiff: "protocol parameters differ",
+			UTxO:               []string{"utxo a differs", "utxo b differs"},
+			TruncatedUTxO:      5,
+		},
+	}
+	// Lines(): 1 (protocol params) + 2 (UTxO) + 1 (summary) = 4 lines, but
+	// the true count is 1 + 2 + 5 = 8 divergences.
+	err := reportResult(result)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "8 difference(s)")
+	assert.NotContains(t, err.Error(), "4 difference(s)")
 }

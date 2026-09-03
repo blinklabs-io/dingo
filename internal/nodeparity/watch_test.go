@@ -163,6 +163,58 @@ func TestWatchBlocks_CloseStopsPromptly(t *testing.T) {
 	}
 }
 
+// TestWatchBlocks_CloseStopsPromptlyAgainstUnresponsivePeer covers a peer
+// that accepts the TCP connection but never sends a byte -- a stalled
+// handshake or a dead node that still holds the socket open, as opposed to
+// TestWatchBlocks_CloseStopsPromptly's "nothing is listening at all" case.
+// GetCurrentTip and Sync are synchronous protocol calls with no per-call
+// timeout of their own: each blocks until the peer replies or the
+// connection is closed out from under it. Without watchSession closing the
+// connection the instant its context is cancelled, Close would block for
+// as long as the peer keeps the socket open (in production, indefinitely),
+// rather than returning promptly.
+func TestWatchBlocks_CloseStopsPromptlyAgainstUnresponsivePeer(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		// Accept and hold the connection open without ever writing to it,
+		// simulating a peer stuck mid-handshake (or simply dead but not
+		// yet timed out at the TCP level).
+		accepted <- conn
+	}()
+
+	w := WatchBlocks(context.Background(), listener.Addr().String(), 42, nil)
+
+	select {
+	case conn := <-accepted:
+		t.Cleanup(func() { _ = conn.Close() })
+	case <-time.After(5 * time.Second):
+		t.Fatal("server never observed the watcher's connection attempt")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		w.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal(
+			"Watcher.Close did not return promptly against a peer that " +
+				"accepted the connection and then never responded",
+		)
+	}
+}
+
 // TestWatchBlocks_RetriesOnUnreachableAddr covers the actual retry
 // behavior end to end (short of a real ChainSync server, which would
 // require new shared mock infrastructure this package does not add

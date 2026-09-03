@@ -16,7 +16,9 @@ package nodeparity
 
 import (
 	"fmt"
+	"sort"
 
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
@@ -42,6 +44,18 @@ func (d Diff) Empty() bool {
 	return d.ProtocolParamsDiff == "" &&
 		len(d.StakeDistribution) == 0 &&
 		len(d.UTxO) == 0
+}
+
+// Count returns the true total number of individual divergences, including
+// UTxO entries beyond maxUTxODiffLines that Lines() only reports as a
+// single rolled-up summary line -- so a caller reporting "N difference(s)"
+// reports the real count rather than the number of printed lines.
+func (d Diff) Count() int {
+	count := len(d.StakeDistribution) + len(d.UTxO) + d.TruncatedUTxO
+	if d.ProtocolParamsDiff != "" {
+		count++
+	}
+	return count
 }
 
 // Lines renders the diff as the flat, human-readable report a `check`
@@ -76,7 +90,8 @@ func DiffSnapshots(a, b *Snapshot) Diff {
 		)
 	}
 
-	for poolID, aFrac := range a.StakeDistribution {
+	for _, poolID := range sortedPoolIDs(a.StakeDistribution) {
+		aFrac := a.StakeDistribution[poolID]
 		bFrac, ok := b.StakeDistribution[poolID]
 		switch {
 		case !ok:
@@ -93,13 +108,17 @@ func DiffSnapshots(a, b *Snapshot) Diff {
 			))
 		}
 	}
+	bOnlyPools := make(map[lcommon.PoolId]struct{})
 	for poolID := range b.StakeDistribution {
 		if _, ok := a.StakeDistribution[poolID]; !ok {
-			d.StakeDistribution = append(d.StakeDistribution, fmt.Sprintf(
-				"stake distribution: pool %s present in b, missing in a",
-				poolID,
-			))
+			bOnlyPools[poolID] = struct{}{}
 		}
+	}
+	for _, poolID := range sortedPoolIDs(bOnlyPools) {
+		d.StakeDistribution = append(d.StakeDistribution, fmt.Sprintf(
+			"stake distribution: pool %s present in b, missing in a",
+			poolID,
+		))
 	}
 
 	utxoDiffCount := 0
@@ -109,7 +128,8 @@ func DiffSnapshots(a, b *Snapshot) Diff {
 			d.UTxO = append(d.UTxO, fmt.Sprintf(format, args...))
 		}
 	}
-	for key, aVal := range a.UTxOEntries {
+	for _, key := range sortedStringKeys(a.UTxOEntries) {
+		aVal := a.UTxOEntries[key]
 		bVal, ok := b.UTxOEntries[key]
 		switch {
 		case !ok:
@@ -118,14 +138,45 @@ func DiffSnapshots(a, b *Snapshot) Diff {
 			report("utxo %s differs: %s (a) vs %s (b)", key, aVal, bVal)
 		}
 	}
+	bOnlyUTxO := make(map[string]string)
 	for key, bVal := range b.UTxOEntries {
 		if _, ok := a.UTxOEntries[key]; !ok {
-			report("utxo %s present in b, missing in a: %s", key, bVal)
+			bOnlyUTxO[key] = bVal
 		}
+	}
+	for _, key := range sortedStringKeys(bOnlyUTxO) {
+		report("utxo %s present in b, missing in a: %s", key, bOnlyUTxO[key])
 	}
 	if utxoDiffCount > maxUTxODiffLines {
 		d.TruncatedUTxO = utxoDiffCount - maxUTxODiffLines
 	}
 
 	return d
+}
+
+// sortedPoolIDs returns m's keys in a stable, deterministic order.
+// DiffSnapshots runs against live map iteration order otherwise, which
+// would make its report order -- and, past maxUTxODiffLines, which
+// specific differences get truncated out of the report -- nondeterministic
+// between two runs over the same divergent snapshots.
+func sortedPoolIDs[V any](m map[lcommon.PoolId]V) []lcommon.PoolId {
+	ids := make([]lcommon.PoolId, 0, len(m))
+	for id := range m {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		return ids[i].String() < ids[j].String()
+	})
+	return ids
+}
+
+// sortedStringKeys returns m's keys in a stable, deterministic order; see
+// sortedPoolIDs.
+func sortedStringKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }

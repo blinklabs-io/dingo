@@ -16,6 +16,7 @@ package nodeparity
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -119,9 +120,9 @@ func QuerySnapshot(conn *ouroboros.Connection) (*Snapshot, error) {
 // SnapshotAtTip dials addr and calls QuerySnapshot in one step, closing the
 // connection before returning. Use this for a one-off look at a single
 // node; Check manages its own connections directly so it can interleave tip
-// reads around the query.
-func SnapshotAtTip(addr string, magic uint32) (*Snapshot, error) {
-	conn, err := Dial(addr, magic)
+// reads around the query. See Dial for ctx's role.
+func SnapshotAtTip(ctx context.Context, addr string, magic uint32) (*Snapshot, error) {
+	conn, err := Dial(ctx, addr, magic)
 	if err != nil {
 		return nil, err
 	}

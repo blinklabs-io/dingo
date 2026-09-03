@@ -652,13 +652,13 @@ harness and the compose port mappings always agree.
 | `run-tests.sh`               | Full native-Linux bring-up → test → tear-down runner; accepts `--conformance`, `--keep-up`, and forwards other flags to `go test` |
 | `../antithesis/Dockerfile.txpump`, `../antithesis/cmd/txpump/` | Source for the `txpump` load generator image |
 | `harness.go`                 | Go test harness: Ouroboros NtN client, tip queries, consensus checks, the `WaitForChainStart` genesis gate, and per-scenario failure capture (build tag `devnet`) |
-| `config.go`                  | `testnet*.yaml` loader, derived timings, and spec validation (**no build tag** — its tests run in the ordinary `go test ./...`) |
-| `chainstate.go`              | Observed-chain state machine: applies RollForward/RollBackward, tracks tip and retained headers, and exposes cross-node agreement helpers and bounded-context conditions (**no build tag**) |
-| `timeline.go`                | `ScenarioPlan`: derives the accelerated scenario's phases, deadlines, outage length, and hard timeout from the network spec (**no build tag**) |
+| `config.go`                  | `testnet*.yaml` loader, derived timings, and spec validation (`linux`) |
+| `chainstate.go`              | Observed-chain state machine: applies RollForward/RollBackward, tracks tip and retained headers, and exposes cross-node agreement helpers and bounded-context conditions (`linux`) |
+| `timeline.go`                | `ScenarioPlan`: derives the accelerated scenario's phases, deadlines, outage length, and hard timeout from the network spec (`linux`) |
 | `observer.go`                | Persistent per-node ChainSync sessions feeding `chainstate.go`, with automatic reconnect across container restarts (build tag `devnet`) |
 | `nodectl.go`                 | Stops/starts compose services for the disruption phases and supplies the Docker side of failure capture (build tag `devnet`) |
-| `artifacts.go`               | What a failed scenario preserves and where: capture planning and artifact writing (**no build tag** — its tests run in the ordinary `go test ./...`) |
-| `endpoints.go`               | The `NodeEndpoint` description shared by the harness, observers, and failure capture (**no build tag**) |
+| `artifacts.go`               | What a failed scenario preserves and where: capture planning and artifact writing (`linux`) |
+| `endpoints.go`               | The `NodeEndpoint` description shared by the harness, observers, and failure capture (`linux`) |
 | `endpoints_dingo.go`         | Dingo-mode node endpoints and NtC addresses (`//go:build devnet && !devnet_conformance`) |
 | `endpoints_conformance.go`   | Conformance-mode node endpoints, plus `DingoProducerNtcAddr()` / `CardanoProducerNtcAddr()` (`//go:build devnet && devnet_conformance`) |
 | `lsq.go`                     | `RewardAccountsByNtc` / `RewardAccountsByNtcForCreds`: LocalStateQuery over NtC TCP (build tag `devnet`) |

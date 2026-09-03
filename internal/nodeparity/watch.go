@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -165,7 +166,29 @@ func watchSession(
 	notify func(),
 ) (established bool, err error) {
 	proto := protoFromAddr(addr)
+
+	// A context-aware dial, rather than Connection.DialTimeout (which wraps
+	// a plain net.DialTimeout with no way to interrupt it early): the
+	// caller cancelling ctx while a dial is in flight against a
+	// slow/blackholed address should abort immediately, not wait out the
+	// rest of dialTimeout.
+	dialCtx, cancelDial := context.WithTimeout(ctx, dialTimeout)
+	defer cancelDial()
+	rawConn, dialErr := (&net.Dialer{}).DialContext(dialCtx, proto, addr)
+	if dialErr != nil {
+		return false, fmt.Errorf("dial %s %s: %w", proto, addr, dialErr)
+	}
+
+	// ouroboros.New performs the handshake synchronously and takes no
+	// context of its own: if the peer accepts the connection and then
+	// stalls the handshake, New would otherwise block until the peer
+	// responds (or never return at all). We hold rawConn independently of
+	// whatever New does with it, so closing it ourselves on cancellation
+	// makes the muxer's blocked read fail immediately, which New already
+	// treats as a shutdown signal internally and returns an error for.
+	stopDialCancel := context.AfterFunc(ctx, func() { rawConn.Close() }) //nolint:errcheck
 	conn, connErr := ouroboros.New(
+		ouroboros.WithConnection(rawConn),
 		ouroboros.WithNetworkMagic(magic),
 		ouroboros.WithNodeToNode(false),
 		ouroboros.WithChainSyncConfig(chainsync.NewConfig(
@@ -187,14 +210,22 @@ func watchSession(
 			),
 		)),
 	)
+	stopDialCancel()
 	if connErr != nil {
+		rawConn.Close() //nolint:errcheck
 		return false, fmt.Errorf("ouroboros.New: %w", connErr)
 	}
 	defer conn.Close() //nolint:errcheck
 
-	if dialErr := conn.DialTimeout(proto, addr, dialTimeout); dialErr != nil {
-		return false, fmt.Errorf("dial %s %s: %w", proto, addr, dialErr)
-	}
+	// GetCurrentTip and Sync below are synchronous protocol calls with no
+	// per-call timeout of their own: each blocks until the peer replies or
+	// the connection closes. Without this, a peer that accepts the
+	// connection and then stops responding would leave this function (and
+	// so Watcher.Close, which waits for it) blocked indefinitely. Closing
+	// conn the instant ctx is cancelled unblocks whichever call is in
+	// flight immediately.
+	stopOnCancel := context.AfterFunc(ctx, func() { conn.Close() }) //nolint:errcheck
+	defer stopOnCancel()
 
 	cs := conn.ChainSync()
 	if cs == nil || cs.Client == nil {

@@ -49,6 +49,7 @@ stalls without erroring.
 Logs each cycle's outcome and, when --metrics-addr is set, exposes
 Prometheus counters for completed cycles, skipped cycles, and per-field
 divergences.`,
+		Args: cobra.NoArgs,
 		RunE: watchRun,
 	}
 	cmd.Flags().Duration(
@@ -80,7 +81,10 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 
 	metrics := newParityMetrics(network)
 	if globalFlags.metricsAddr != "" {
-		metricsServer := serveMetrics(globalFlags.metricsAddr, logger)
+		metricsServer, err := serveMetrics(globalFlags.metricsAddr, logger)
+		if err != nil {
+			return err
+		}
 		defer func() {
 			shutdownCtx, cancel := context.WithTimeout(
 				context.Background(), 5*time.Second,
@@ -114,6 +118,7 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 
 	for {
 		runWatchCycle(
+			ctx,
 			globalFlags.dingoAddr,
 			globalFlags.cardanoAddr,
 			magic,
@@ -144,12 +149,13 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 // Splitting the network call from the outcome-handling logic keeps the
 // latter unit-testable without a live node.
 func runWatchCycle(
+	ctx context.Context,
 	dingoAddr, cardanoAddr string,
 	magic uint32,
 	logger *slog.Logger,
 	metrics *parityMetrics,
 ) {
-	result, err := nodeparity.Check(dingoAddr, cardanoAddr, magic)
+	result, err := nodeparity.Check(ctx, dingoAddr, cardanoAddr, magic)
 	handleCheckResult(result, err, logger, metrics)
 }
 
@@ -168,6 +174,7 @@ func handleCheckResult(
 	// the two equivalent in practice, but nil-checking the pointer that
 	// actually gets used is what a static nil-flow check can verify.
 	if result == nil {
+		metrics.recordCheckError()
 		logger.Warn("node-parity: check error", "error", err)
 		return
 	}
