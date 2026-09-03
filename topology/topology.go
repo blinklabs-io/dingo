@@ -190,9 +190,9 @@ func validateRootValencies(
 	valency uint,
 	accessPointCount int,
 ) error {
-	if warmValency > 0 && valency > warmValency {
+	if warmValency > valency {
 		return fmt.Errorf(
-			"%s.valency must be <= %s.warmValency when warmValency is set",
+			"%s.warmValency must be <= %s.valency",
 			fieldPrefix,
 			fieldPrefix,
 		)

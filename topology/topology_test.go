@@ -386,12 +386,24 @@ func TestNewTopologyConfigFromReader_ValidationErrors(t *testing.T) {
   "localRoots": [
     {
       "accessPoints": [{"address": "127.0.0.1", "port": 3001}],
+			"valency": 1,
+			"warmValency": 2
+    }
+  ]
+}`,
+			wantErr: "localRoots[0].warmValency must be <= localRoots[0].valency",
+		},
+		{
+			name: "local root warm valency below valency",
+			json: `{
+  "localRoots": [
+    {
+      "accessPoints": [{"address": "127.0.0.1", "port": 3001}],
 			"valency": 2,
 			"warmValency": 1
     }
   ]
 }`,
-			wantErr: "localRoots[0].valency must be <= localRoots[0].warmValency when warmValency is set",
 		},
 		{
 			name: "local root valency exceeds access points",
@@ -435,12 +447,12 @@ func TestNewTopologyConfigFromReader_ValidationErrors(t *testing.T) {
   "publicRoots": [
     {
       "accessPoints": [{"address": "public.example.com", "port": 3001}],
-			"valency": 2,
-			"warmValency": 1
+			"valency": 1,
+			"warmValency": 2
     }
   ]
 }`,
-			wantErr: "publicRoots[0].valency must be <= publicRoots[0].warmValency when warmValency is set",
+			wantErr: "publicRoots[0].warmValency must be <= publicRoots[0].valency",
 		},
 		{
 			name: "public root valency exceeds access points",
