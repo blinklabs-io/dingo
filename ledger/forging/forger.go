@@ -107,6 +107,13 @@ type BlockForger struct {
 	wg      sync.WaitGroup
 }
 
+// ForgeFenceStore persists the highest slot this node has committed to
+// forging so a restart cannot sign a second block for a used slot.
+type ForgeFenceStore interface {
+	LoadLastForgedSlot() (uint64, bool, error)
+	StoreLastForgedSlot(slot uint64) error
+}
+
 // LeaderChecker determines if the pool should produce a block for a given slot.
 type LeaderChecker interface {
 	// ShouldProduceBlock returns true if this pool is the leader for the slot.
