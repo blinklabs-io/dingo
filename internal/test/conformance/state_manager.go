@@ -705,8 +705,13 @@ func (m *DingoStateManager) certDepositsFor(
 // meaning the recorded deposit is unknown, which correctly sends value
 // conservation back to its KeyDeposit fallback rather than inventing a zero.
 func (m *DingoStateManager) initialStakeDepositLocked() *types.Uint64 {
+	// A typed-nil *conway.ConwayProtocolParameters satisfies the assertion,
+	// so guard the pointer as well -- the same "!ok || nil" shape
+	// ledger/eras uses before dereferencing era parameters. Reporting nil
+	// here is the correct answer anyway: with no usable parameters the
+	// deposit is unknown.
 	conwayPP, ok := m.protocolParams.(*conway.ConwayProtocolParameters)
-	if !ok {
+	if !ok || conwayPP == nil {
 		return nil
 	}
 	deposit := types.Uint64(conwayPP.KeyDeposit)

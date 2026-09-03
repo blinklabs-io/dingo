@@ -163,8 +163,17 @@ func requireValueConserved(
 	tx *conway.ConwayTransaction,
 ) {
 	t.Helper()
-	err := eras.ValidateTxConway(tx, 200, lv, stakeRefundTestPparams())
-	if err != nil {
+	pp := stakeRefundTestPparams()
+	// Invoke the rule directly first. This assertion cannot pass vacuously:
+	// a nil error means value conservation actually ran and balanced, rather
+	// than merely that the substring was absent because some unrelated rule
+	// failed first and short-circuited the message.
+	require.NoError(
+		t,
+		conway.UtxoValidateValueNotConservedUtxo(tx, 200, lv, pp),
+	)
+	// Then assert the same outcome through the production path.
+	if err := eras.ValidateTxConway(tx, 200, lv, pp); err != nil {
 		require.NotContains(t, err.Error(), valueNotConservedSubstring)
 	}
 }
@@ -175,7 +184,15 @@ func requireValueNotConserved(
 	tx *conway.ConwayTransaction,
 ) {
 	t.Helper()
-	err := eras.ValidateTxConway(tx, 200, lv, stakeRefundTestPparams())
+	pp := stakeRefundTestPparams()
+	// The rule itself must reject, so the rejection is attributable to value
+	// conservation rather than to any other rule the production path joins.
+	require.ErrorContains(
+		t,
+		conway.UtxoValidateValueNotConservedUtxo(tx, 200, lv, pp),
+		valueNotConservedSubstring,
+	)
+	err := eras.ValidateTxConway(tx, 200, lv, pp)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), valueNotConservedSubstring)
 }
