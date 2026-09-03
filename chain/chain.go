@@ -836,10 +836,14 @@ func (c *Chain) rollbackPointBlock(
 }
 
 // findQueuedHeader scans queued headers backward for the rollback point
-// without mutating them. It returns the index of the header matching point
-// exactly, or -1 if point is not found among the queued headers (either
-// because every queued header is ahead of point, or because
-// models.ErrBlockNotFound is returned for a point that predates them).
+// without mutating them, and returns one of three outcomes:
+//   - (index, nil) if a queued header matches point exactly.
+//   - (-1, nil) if every queued header is ahead of point, meaning point
+//     predates the queue and rollback must fall through to the
+//     block-committed chain.
+//   - (-1, models.ErrBlockNotFound) if point falls strictly between two
+//     queued headers, or beyond the newest one without matching it — a
+//     target that is not a valid rollback point.
 //
 // Callers must hold c.mutex.
 func (c *Chain) findQueuedHeader(point ocommon.Point) (int, error) {
