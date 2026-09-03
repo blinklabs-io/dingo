@@ -295,9 +295,11 @@ func (r *servingBlockTxsRequester) BlockTxsRequest(
 // tiny transaction count yet returns a disproportionately large bitmap
 // (issue #3523).
 type oversizedBitmapRequester struct {
-	// extraWindow, when non-zero, is set (with all 64 bits) in the response
-	// bitmap in addition to the legitimately served windows.
+	// extraWindow, when non-zero, is set to extraMask in the response bitmap
+	// in addition to the legitimately served windows. extraMask has no effect
+	// when extraWindow is zero.
 	extraWindow uint16
+	extraMask   uint64
 }
 
 func (r *oversizedBitmapRequester) BlockTxsRequest(
@@ -318,7 +320,7 @@ func (r *oversizedBitmapRequester) BlockTxsRequest(
 		txs = append(txs, cbor.RawMessage(enc))
 	}
 	if r.extraWindow != 0 {
-		served[r.extraWindow] = math.MaxUint64
+		served[r.extraWindow] = r.extraMask
 	}
 	return leiosfetch.NewMsgBlockTxsFull(point, served, txs), nil
 }
@@ -333,9 +335,13 @@ func (r *oversizedBitmapRequester) BlockTxsRequest(
 func TestFetchLeiosEbTxsBatchedRejectsOversizedResponseBitmap(t *testing.T) {
 	o := &Ouroboros{}
 	point := ocommon.Point{Slot: 1, Hash: []byte{0x09}}
-	// txCount 1 fits entirely in window 0; the relay also sets window 1000,
-	// referencing indices far beyond the single requested transaction.
-	requester := &oversizedBitmapRequester{extraWindow: 1000}
+	// txCount 1 fits entirely in window 0; the relay also sets every bit of
+	// window 1000, referencing indices far beyond the single requested
+	// transaction.
+	requester := &oversizedBitmapRequester{
+		extraWindow: 1000,
+		extraMask:   math.MaxUint64,
+	}
 	txs, err := o.fetchLeiosEbTxsBatched(requester, point, 1, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "leios-fetch response bitmap")
@@ -344,17 +350,22 @@ func TestFetchLeiosEbTxsBatchedRejectsOversizedResponseBitmap(t *testing.T) {
 
 // TestFetchLeiosEbTxsBatchedRejectsResponseBitmapPastBoundary simulates a
 // relay for a 64-transaction endorser block (which fills window 0 exactly,
-// indices 0..63) that also sets just the single lowest bit of window 1 —
-// index 64, the very first index past the last one this block can have. Even
-// this smallest possible one-past-the-end violation must be rejected, proving
-// the bound check is exact rather than merely "roughly close enough".
+// indices 0..63) that also sets a single bit of window 1 — offset 0 of that
+// window, i.e. index 64, the very first index past the last one this block
+// can have. Even this smallest possible one-past-the-end violation must be
+// rejected, proving the bound check is exact rather than merely "roughly
+// close enough".
 func TestFetchLeiosEbTxsBatchedRejectsResponseBitmapPastBoundary(t *testing.T) {
 	o := &Ouroboros{}
 	point := ocommon.Point{Slot: 1, Hash: []byte{0x09}}
 	// txCount 64 exactly fills window 0 (indices 0..63); window 1 has no valid
-	// indices at all, so setting even its lowest bit (index 64) must be
-	// rejected as one past the exact boundary.
-	requester := &oversizedBitmapRequester{extraWindow: 1}
+	// indices at all, so setting just its offset-0 bit (bit 63, MSB-first —
+	// see leiosWindowNeededMask — i.e. index 64) must be rejected as one past
+	// the exact boundary.
+	requester := &oversizedBitmapRequester{
+		extraWindow: 1,
+		extraMask:   1 << 63,
+	}
 	txs, err := o.fetchLeiosEbTxsBatched(requester, point, 64, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "leios-fetch response bitmap")
