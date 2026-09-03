@@ -6,6 +6,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -119,4 +120,19 @@ func TestElectingVrfKeyHashLagsPoolParamsByOneEpoch(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, newKey, gotKey.Bytes(),
 		"epoch 40 is elected by parameters in force through the end of epoch 37")
+}
+
+// blockEpochId resolves the epoch a block falls in, the way
+// verifyBlockHeaderState resolves it before calling verifyRegisteredVrfKey.
+// Tests use it rather than a literal so they keep matching the harness's epoch
+// cache if that changes.
+func blockEpochId(
+	t *testing.T,
+	ls *LedgerState,
+	block gledger.Block,
+) uint64 {
+	t.Helper()
+	epoch, err := ls.epochForSlot(block.SlotNumber())
+	require.NoError(t, err)
+	return epoch.EpochId
 }

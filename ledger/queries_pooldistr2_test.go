@@ -513,7 +513,7 @@ func TestQueryShelleyPoolDistr2_VrfKeyMatchesHeaderValidation(t *testing.T) {
 
 	// The premise: this block passes the validator. Whatever key that took is
 	// the key an operator's schedule has to be computed against.
-	require.NoError(t, ls.verifyRegisteredVrfKey(tb.block, 5),
+	require.NoError(t, ls.verifyRegisteredVrfKey(tb.block, blockEpochId(t, ls, tb.block)),
 		"fixture must be a block the validator accepts")
 
 	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
