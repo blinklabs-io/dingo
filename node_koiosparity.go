@@ -89,6 +89,7 @@ func (n *Node) startKoiosParityObserver() error {
 		Network:              network,
 		CachePath:            cachePath,
 		APIKey:               cfg.APIKey,
+		BaseURL:              cfg.BaseURL,
 		Source:               source,
 		Strict:               cfg.Strict,
 		AccountsEnabled:      accountsEnabled,

@@ -415,6 +415,12 @@ var flagSpecs = []flagSpec{
 		"",
 		"Koios Bearer token for rate-limited access",
 	),
+	stringFlag(
+		"KoiosParity.BaseURL",
+		"koios-parity-base-url",
+		"",
+		"Koios v1 API root override for a self-hosted instance (default: the public host for --koios-parity-network)",
+	),
 	boolFlag(
 		"KoiosParity.Strict",
 		"koios-parity-strict",

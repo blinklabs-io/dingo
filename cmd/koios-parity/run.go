@@ -30,6 +30,7 @@ func addRunFlags(cmd *cobra.Command) {
 	addDingoDBFlags(cmd)
 	cmd.Flags().String("api-key", "",
 		"Koios Bearer token (or KOIOS_API_KEY)")
+	addKoiosURLFlag(cmd)
 	cmd.Flags().String("report-dir", "",
 		"directory for JSON report (default: {dingo-data}/.koios/)")
 	cmd.Flags().Int("concurrency", 5, "Koios fetch worker count")
@@ -94,6 +95,7 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 		fetchResult, fetchErr := koiosparity.Fetch(ctx, koiosparity.FetchConfig{
 			Network:              network,
 			APIKey:               koiosAPIKey(cmd),
+			BaseURL:              koiosBaseURL(cmd),
 			CachePath:            cachePath,
 			Concurrency:          concurrency,
 			AccountsEnabled:      accounts,

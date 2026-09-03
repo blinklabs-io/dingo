@@ -295,6 +295,12 @@ type KoiosParityConfig struct {
 	// APIKey is the Koios Bearer token for higher-rate-limit access. Empty
 	// uses Koios's unauthenticated rate limit.
 	APIKey string `yaml:"apiKey"               envconfig:"DINGO_KOIOS_PARITY_API_KEY"`
+	// BaseURL overrides the public koios.rest host for the network, for a
+	// self-hosted or mirrored Koios instance. Full v1 API root, e.g.
+	// "https://preview-koios.example.com/api/v1". Empty selects the public
+	// host. A custom host is not subject to the public tier's burst cap; see
+	// koiosparity.NewKoiosClient.
+	BaseURL string `yaml:"baseUrl"              envconfig:"DINGO_KOIOS_PARITY_BASE_URL"`
 	// Strict stops/cancels the node on the first Koios/tool error or exact
 	// parity mismatch, rather than logging it and continuing normal node
 	// operation.

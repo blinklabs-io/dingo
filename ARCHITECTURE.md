@@ -6136,6 +6136,18 @@ never the reverse.
   long crawl is distinguishable from a stalled one; the logger is a parameter
   rather than a client field because the same client serves the concurrent
   chunk fetchers.
+- **Koios host.** `koiosBaseURLs` maps the network to the public
+  `*.koios.rest` v1 root, and `KoiosParityConfig.BaseURL`
+  (`--koios-parity-base-url`, `DINGO_KOIOS_PARITY_BASE_URL`, and `--koios-url`
+  / `KOIOS_URL` on the standalone CLI) overrides it for a self-hosted or
+  mirrored instance. A custom host also drops the burst cap:
+  `koiosBurstLimitSafe` describes koios.rest's own published Public/Free
+  window and says nothing about another deployment, so applying it there would
+  throttle against a limit that does not exist. Per-request retry, timeout and
+  429 backoff are unchanged, so a host that *does* rate-limit still behaves
+  correctly. Network validation still applies — `StakeAddressFromCredential`
+  hardcodes the testnet address network ID, so an override cannot be used to
+  reach an unsupported network.
 - **Koios endpoint.** `/account_rewards` is deprecated; `/account_reward_
   history` is the replacement (`KoiosClient.GetAccountRewardHistory`), taking
   the same `stake_addresses_with_epoch_no` POST body shape via a new `post()`

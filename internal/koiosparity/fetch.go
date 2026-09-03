@@ -28,8 +28,11 @@ import (
 
 // FetchConfig holds parameters for a Koios fetch run.
 type FetchConfig struct {
-	Network      string
-	APIKey       string
+	Network string
+	APIKey  string
+	// BaseURL overrides the public koios.rest host for the network; see
+	// NewKoiosClient. Empty selects the public host.
+	BaseURL      string
 	CachePath    string
 	Concurrency  int
 	FromEpoch    uint64 // 0 = resume from last cached + 1
@@ -132,7 +135,7 @@ func Fetch(
 	}
 	defer cache.Close() //nolint:errcheck
 
-	koios, err := NewKoiosClient(cfg.Network, cfg.APIKey)
+	koios, err := NewKoiosClient(cfg.Network, cfg.APIKey, cfg.BaseURL)
 	if err != nil {
 		return nil, err
 	}

@@ -53,6 +53,9 @@ type ObserverConfig struct {
 	// APIKey is the Koios Bearer token for higher-rate-limit access. Empty
 	// uses Koios's unauthenticated rate limit.
 	APIKey string
+	// BaseURL overrides the public koios.rest host for the network; see
+	// NewKoiosClient. Empty selects the public host.
+	BaseURL string
 	// Source is the narrow, Dingo-supplied reward-parity source the
 	// observer compares against — typically a *DatabaseSource wrapping the
 	// live, in-process *database.Database.
@@ -192,7 +195,7 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open koios parity cache: %w", err)
 	}
-	koios, err := NewKoiosClient(cfg.Network, cfg.APIKey)
+	koios, err := NewKoiosClient(cfg.Network, cfg.APIKey, cfg.BaseURL)
 	if err != nil {
 		_ = cache.Close()
 		return nil, fmt.Errorf("create koios client: %w", err)

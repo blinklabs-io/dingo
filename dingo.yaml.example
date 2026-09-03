@@ -352,6 +352,13 @@ koiosParity:
   # Can be overridden with DINGO_KOIOS_PARITY_API_KEY
   # CLI: --koios-parity-api-key
   apiKey: ""
+  # Koios v1 API root override, for a self-hosted or mirrored instance.
+  # Empty selects the public host for the network above. A custom host is not
+  # subject to the public tier's burst cap, since that ceiling describes
+  # koios.rest's own published tiers.
+  # Can be overridden with DINGO_KOIOS_PARITY_BASE_URL
+  # CLI: --koios-parity-base-url
+  baseUrl: ""
   # Stop/cancel the node on the first Koios/tool error or exact parity
   # mismatch instead of logging it and continuing normal operation.
   # Can be overridden with DINGO_KOIOS_PARITY_STRICT

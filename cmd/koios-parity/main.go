@@ -423,6 +423,23 @@ func koiosAPIKey(cmd *cobra.Command) string {
 	return os.Getenv("KOIOS_API_KEY")
 }
 
+// koiosBaseURL returns the Koios v1 API root override from flag or
+// environment. Empty selects the public host for the network.
+func koiosBaseURL(cmd *cobra.Command) string {
+	if url, _ := cmd.Flags().GetString("koios-url"); url != "" {
+		return url
+	}
+	return os.Getenv("KOIOS_URL")
+}
+
+// addKoiosURLFlag registers the self-hosted-instance override, shared by
+// fetch/run/watch. See koiosparity.NewKoiosClient for why a custom host is not
+// subject to the public tier's burst cap.
+func addKoiosURLFlag(cmd *cobra.Command) {
+	cmd.Flags().String("koios-url", "",
+		"Koios v1 API root for a self-hosted instance, e.g. https://host/api/v1 (or KOIOS_URL); default is the public host for --network")
+}
+
 // addAccountsFlag registers the #3097 per-account exact-parity opt-in flag,
 // shared by fetch/check/run/watch. Per-account fetching/checking issues far
 // more Koios requests than pool-level work (a chunked request set covering

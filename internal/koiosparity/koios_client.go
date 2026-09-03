@@ -224,11 +224,27 @@ func validateKoiosNetwork(network string) error {
 }
 
 // NewKoiosClient creates a client for the given network.
-func NewKoiosClient(network, apiKey string) (*KoiosClient, error) {
+//
+// baseURL overrides the public koios.rest host for the network, for a
+// self-hosted or mirrored Koios instance. It is the full v1 API root, e.g.
+// "https://preview-koios.example.com/api/v1"; a trailing slash is trimmed so
+// the caller does not have to care. Empty selects the public host.
+//
+// A custom host also drops the burst cap. koiosBurstLimitSafe describes
+// koios.rest's own published Public/Free tier window and says nothing about
+// another deployment, so applying it there would throttle against a limit that
+// does not exist. The per-request retry and timeout handling is unchanged, so a
+// host that does rate-limit still backs off correctly on 429.
+func NewKoiosClient(network, apiKey, baseURL string) (*KoiosClient, error) {
 	if err := validateKoiosNetwork(network); err != nil {
 		return nil, err
 	}
 	base := koiosBaseURLs[network]
+	burstLimit := koiosBurstLimitSafe
+	if trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/"); trimmed != "" {
+		base = trimmed
+		burstLimit = 0
+	}
 	return &KoiosClient{
 		baseURL: base,
 		apiKey:  apiKey,
@@ -237,8 +253,8 @@ func NewKoiosClient(network, apiKey string) (*KoiosClient, error) {
 		},
 		// Public and Free tiers share the 100/10s burst cap; Pro/Premium are
 		// higher, but we don't learn the tier from the key alone, so stay at
-		// the Free-safe ceiling for every client.
-		limiter: newBurstLimiter(koiosBurstLimitSafe, koiosBurstWindow),
+		// the Free-safe ceiling for every client on the public host.
+		limiter: newBurstLimiter(burstLimit, koiosBurstWindow),
 	}, nil
 }
 
