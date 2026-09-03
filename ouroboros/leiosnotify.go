@@ -1218,6 +1218,16 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 				"unexpected leios-fetch BlockTxs response type %T", resp,
 			)
 		}
+		if err := validateLeiosTxBitmap(txCount, respTxs.Bitmaps); err != nil {
+			// A relay-declared bitmap referencing an index beyond this
+			// endorser block's txCount is rejected before it is expanded: a
+			// small txCount must not license decoding a disproportionately
+			// large index list (issue #3523).
+			return leiosCollectTxs(result), fmt.Errorf(
+				"leios-fetch response bitmap: %w",
+				err,
+			)
+		}
 		served := leiosBitmapTxIndices(respTxs.Bitmaps)
 		if len(served) != len(respTxs.TxsRaw) {
 			// Response omitted bitmaps: assume the relay served a prefix of the
