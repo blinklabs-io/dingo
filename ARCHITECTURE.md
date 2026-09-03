@@ -3074,6 +3074,31 @@ fails closed to a fresh
 ChainSync intersection instead of making a density or rollback decision from
 an incomplete path.
 
+**Per-peer candidate chain fragments** (`chainselection.CandidateFragment`)
+materialize each peer's delivered-header history as a first-class value —
+Dingo's analogue of the upstream consensus interface
+`readCandidateChains :: STM m (Map peer (AnchoredFragment header))`. This is a
+separate structure from the density frontier above (`observedSlots`/
+`observedPoints`, bounded to the Genesis window): each tracked peer's
+`PeerChainTip` also records one delivered point per header
+(`recordObservedTipHistory`), bounded to `k+1` entries — enough that any valid
+rollback within `k` is representable — and trimmed on rollback
+(`PeerChainTip.ApplyRollback`); `CandidateFragment` snapshots that history into
+an independently owned, ordered value with an explicit `Anchor` (its oldest
+retained point, which — per the upstream contract — need not intersect the
+primary chain or any other peer's fragment) and a `HeadPoint`. `ChainSelector`
+exposes the current set with `CandidateFragments()` (all tracked peers) and
+`GetCandidateFragment(connId)` (one peer), mirroring `GetAllPeerTips`/
+`GetPeerTip`. A fragment's lifetime is bound to its connection: it exists only
+while `ChainSelector.RemovePeer` has not yet dropped that peer's `PeerChainTip`,
+so a disconnect (or eviction under `maxTrackedPeers`) clears it, and a
+reconnect on a reused connection ID starts from an empty fragment rather than
+inheriting stale history. `CandidateFragment.Intersect` computes the highest
+point two fragments share by `(slot, hash)` — the primitive the Limit on
+Eagerness and the Genesis Density Disconnector need to find the intersection
+across candidate fragments and compare per-candidate density there; neither is
+implemented by this type.
+
 The trust problem Genesis solves for **biased fast-sync sources** — e.g. a
 local shallow peer or the Genesis Sync Accelerator (GSA), which serve blocks
 quickly but are not themselves trustworthy — is that the densest/longest source
