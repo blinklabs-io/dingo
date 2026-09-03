@@ -681,12 +681,20 @@ type LedgerStateConfig struct {
 	BlockPipelineValidateEnabled bool
 }
 
-// EndorserBlockProviderFunc returns the slot and the complete set of standalone
-// transaction CBORs of the Leios endorser block identified by ebHash, when it
-// has been fetched and fully cached; ok is false otherwise. It is used to apply
-// an endorser block's transactions to the ledger when the referencing Dijkstra
-// ranking block is processed.
-type EndorserBlockProviderFunc func(ebHash []byte) (ebSlot uint64, txs []cbor.RawMessage, ok bool)
+// EndorserBlockProviderFunc returns the complete set of standalone
+// transaction CBORs of the Leios endorser block identified by (ebHash,
+// ebSlot), when exactly that occurrence has been fetched and fully cached;
+// ok is false otherwise. ebSlot is required, not merely advisory: the
+// manifest is content-addressed, so the same hash can be a live,
+// independently required occurrence at more than one slot at once, and the
+// provider must resolve exactly the occurrence the caller's own reference
+// names rather than whichever one happens to be cached for the hash (issue
+// #3513 review). It is used to apply an endorser block's transactions to the
+// ledger when the referencing Dijkstra ranking block is processed.
+type EndorserBlockProviderFunc func(
+	ebHash []byte,
+	ebSlot uint64,
+) (txs []cbor.RawMessage, ok bool)
 
 // EndorserBlockFetcherFunc actively fetches the endorser block identified by
 // (ebSlot, ebHash) over leios-fetch (manifest plus all transaction bodies) and
@@ -6179,7 +6187,9 @@ func (ls *LedgerState) ledgerProcessBlock(
 				}
 			}
 		} else {
-			ebHash, ebSize, referenced, refErr := ls.leiosEndorserBlockForApply(block)
+			ebHash, ebSlot, ebSize, referenced, refErr := ls.leiosEndorserBlockForApply(
+				block,
+			)
 			switch {
 			case refErr != nil:
 				if !ls.config.LeiosApplyEndorserBlockTxs {
@@ -6197,9 +6207,20 @@ func (ls *LedgerState) ledgerProcessBlock(
 					"error", refErr,
 				)
 			case referenced:
-				if ebSlot, ebTxs, ok := ls.config.EndorserBlockProvider(
+				// ebSlot is the expected slot leiosEndorserBlockForApply
+				// derived structurally (the endorser block shares its
+				// announcing ranking block's slot), passed to the provider
+				// as a required input rather than checked against its
+				// output: the manifest is content-addressed, so the same
+				// hash can be a live, independently required occurrence at
+				// more than one slot at once, and the provider resolves
+				// exactly this occurrence rather than whichever one happens
+				// to be cached for the hash (issue #3513 review).
+				ebTxs, ok := ls.config.EndorserBlockProvider(
 					ebHash.Bytes(),
-				); ok {
+					ebSlot,
+				)
+				if ok {
 					var donation uint64
 					applied, donation, err := ls.applyEndorserBlock(
 						txn,

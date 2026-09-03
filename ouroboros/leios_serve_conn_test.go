@@ -74,7 +74,12 @@ func TestLeiosServeWaitReleasedByRealPeerDisconnect(t *testing.T) {
 	}
 	results := make(chan result, 1)
 	go func() {
-		cbor, err := f.o.serveLeiosCertRbWithWait(block, ebHash, f.conn.Id())
+		cbor, err := f.o.serveLeiosCertRbWithWait(
+			block,
+			ebHash,
+			block.Slot,
+			f.conn.Id(),
+		)
 		results <- result{cbor: cbor, err: err}
 	}()
 
@@ -117,7 +122,12 @@ func TestLeiosServeWaitStillBoundedByTimeout(t *testing.T) {
 	ebHash[0] = 0xa2
 	block := models.Block{Cbor: certRB, Slot: 81, Hash: []byte{0x81}}
 
-	got, err := f.o.serveLeiosCertRbWithWait(block, ebHash, f.conn.Id())
+	got, err := f.o.serveLeiosCertRbWithWait(
+		block,
+		ebHash,
+		block.Slot,
+		f.conn.Id(),
+	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, errLeiosClosureUnresolved)
 	require.Nil(t, got)
@@ -157,7 +167,12 @@ func TestLeiosServeWaiterNotRegisteredForClosedConnection(t *testing.T) {
 	}
 	results := make(chan result, 1)
 	go func() {
-		cbor, err := f.o.serveLeiosCertRbWithWait(block, ebHash, connId)
+		cbor, err := f.o.serveLeiosCertRbWithWait(
+			block,
+			ebHash,
+			block.Slot,
+			connId,
+		)
 		results <- result{cbor: cbor, err: err}
 	}()
 

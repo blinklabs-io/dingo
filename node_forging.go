@@ -701,7 +701,7 @@ func (a *slotClockAdapter) UpstreamSyncStatus() (uint64, bool) {
 type leiosPipelineAdapter struct {
 	mgr                   *leios.PipelineManager
 	chain                 leiosParentChain
-	endorserBlockTxHashes func([]byte) ([]string, bool)
+	endorserBlockTxHashes func(ebHash []byte, ebSlot uint64) ([]string, bool)
 }
 
 type leiosParentChain interface {
@@ -735,11 +735,12 @@ func (a *leiosPipelineAdapter) EligibleCertifiedEndorserBlocks() []forging.Leios
 
 func (a *leiosPipelineAdapter) CertifiedEndorserBlockTxHashes(
 	ebHash lcommon.Blake2b256,
+	ebSlot uint64,
 ) ([]string, bool) {
 	if a.endorserBlockTxHashes == nil {
 		return nil, false
 	}
-	return a.endorserBlockTxHashes(ebHash.Bytes())
+	return a.endorserBlockTxHashes(ebHash.Bytes(), ebSlot)
 }
 
 func (a *leiosPipelineAdapter) MarkEndorserBlockEmbedded(
