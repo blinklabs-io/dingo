@@ -408,9 +408,10 @@ func rawDeliveryOfUnrepresentableBlockSupported(t *testing.T) bool {
 }
 
 // requireRawDeliverySupport skips when the linked gouroboros still fails the
-// request before BlockRawFunc. Dingo pins a released tag, and the fix landed
-// on gouroboros main after v0.202.5, so this is a real state of the module
-// graph rather than a test defect. Dingo's own dispatch stays covered without
+// request before BlockRawFunc. The fix is in gouroboros v0.202.6, after the
+// v0.202.5 this module pins, so the skip is a real state of the module graph
+// rather than a test defect: verified skipping on v0.202.5 and passing on
+// v0.202.6. Dingo's own dispatch stays covered without
 // it: TestDecodeBlockfetchBlockMusashiWireTypes asserts the type-7 and type-8
 // decode unconditionally.
 func requireRawDeliverySupport(t *testing.T) {
@@ -635,6 +636,14 @@ func TestDecodeBlockfetchBlockType8NeedsNoMusashiScope(t *testing.T) {
 // protocol version 12 (Dijkstra), so the header is the accurate one. This is a
 // gouroboros representability limit, not a dispatch choice Dingo can make
 // differently, and it is pinned here so a change to either path is visible.
+//
+// The disagreement is latent rather than a live defect, and is tracked in
+// #3828: the ledger does not gate on a block-derived era. ls.currentEra comes
+// from protocol-version pparams and is passed into ledgerProcessBlock, so on
+// Musashi at protocol version 12 those gates see Dijkstra whatever the block
+// decodes as, and Leios endorser-block application and the Dijkstra
+// transaction-validation bypasses are unaffected. The trap is a future gate
+// keying on the block's own era, which would disagree with them.
 func TestMusashiDispatchEraAgreement(t *testing.T) {
 	o := newMusashiOuroboros(t, nil)
 	for _, tc := range []struct {
