@@ -4065,6 +4065,11 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 	ls.shadowBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.shadowBlockReceivedHashes = nil
 	ls.batchBlocksReceived = 0
+	ls.batchBlocksApplied = 0
+	// Bind this batch to the chain it is being requested for. A rollback that
+	// moves the tip after this point invalidates everything the peer streams
+	// for it; see flushPendingBlockfetchBlocks (issue #3771).
+	ls.blockfetchBatchChainGeneration = ls.chainRollbackGeneration.Load()
 	ls.activeBlockfetchStart = time.Now()
 	ls.firstBlockReceived = false
 	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
@@ -4323,6 +4328,26 @@ func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
 	if len(ls.pendingBlockfetchEvents) == 0 {
 		return nil
 	}
+	if ls.blockfetchBatchChainGeneration != ls.chainRollbackGeneration.Load() {
+		// The chain tip moved after this batch was requested, so these blocks
+		// continue a chain the node has abandoned. They cannot be applied, and
+		// handing them to Chain.addBlockLocked is not merely futile: fork
+		// resolution rolls back, re-queues the winning peer's header path and
+		// only then restarts blockfetch, so the first stale block would be
+		// rejected as not matching that replacement queue and would clear it,
+		// leaving nothing queued and nothing fetching (issue #3771). Drop them
+		// and let the restarted batch fetch the current continuation instead.
+		discarded := len(ls.pendingBlockfetchEvents)
+		ls.pendingBlockfetchEvents = ls.pendingBlockfetchEvents[:0]
+		ls.config.Logger.Debug(
+			"discarding blockfetch blocks for superseded chain",
+			"component", "ledger",
+			"discarded_blocks", discarded,
+			"batch_chain_generation", ls.blockfetchBatchChainGeneration,
+			"chain_generation", ls.chainRollbackGeneration.Load(),
+		)
+		return nil
+	}
 	pending := ls.pendingBlockfetchEvents
 	ls.pendingBlockfetchEvents = ls.pendingBlockfetchEvents[:0]
 	// Commit each block before exposing it on the primary chain. The chain tip
@@ -4336,6 +4361,7 @@ func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
 			nil,
 		)
 		if addBlockErr == nil {
+			ls.batchBlocksApplied++
 			// Audit only after the body has extended the queued chain. A body
 			// from an abandoned fetch may still be delivered after a fork
 			// restart; auditing it here would poison producedTxs with stale
@@ -6441,6 +6467,7 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 		return err
 	}
+	appliedBlockCount := ls.batchBlocksApplied
 	// Continue fetching as long as there are queued headers
 	remainingHeaders := ls.chain.HeaderCount()
 	if remainingHeaders > 0 {
@@ -6450,23 +6477,33 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 			"remaining_headers", remainingHeaders,
 		)
 	}
-	// A batch that completed without delivering a block while headers stayed
+	// A batch that completed without extending the chain while headers stayed
 	// queued is one of the two shapes of "could not obtain the queued range"
 	// (the other is a NoBlocks reply, recorded in
 	// startQueuedBlockfetchLocked). Both feed the same streak.
-	if receivedBlockCount == 0 && remainingHeaders > 0 {
+	//
+	// The count that matters is blocks *applied*, not blocks received. A batch
+	// whose blocks all arrive and are then rejected -- as not fitting the
+	// current tip, or as not matching the queued header -- leaves the queue
+	// exactly where it was, so gating this on delivery alone let the same
+	// range be re-requested without bound while every reply was discarded
+	// (issue #3771). Applied is what makes the streak observable and bounded.
+	if appliedBlockCount == 0 && remainingHeaders > 0 {
 		batchStart, _ := ls.chain.HeaderRange(blockfetchBatchSize)
 		if ls.noteBlockfetchRangeUnavailable(
 			e.ConnectionId,
 			batchStart,
-			"batch completed without delivering a block",
+			fmt.Sprintf(
+				"batch completed without extending the chain (%d block(s) received)",
+				receivedBlockCount,
+			),
 			pending,
 		) {
 			return nil
 		}
 	}
 	upstreamTipSlot := ls.UpstreamTipSlot()
-	if receivedBlockCount == 0 &&
+	if appliedBlockCount == 0 &&
 		remainingHeaders > 0 &&
 		upstreamTipSlot > ls.Tip().Point.Slot &&
 		upstreamTipSlot-ls.Tip().Point.Slot >= blockfetchMinBatchGapSlots {
@@ -6475,7 +6512,7 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 		if connIdKey(retryConnId) != "" &&
 			!sameConnectionId(retryConnId, e.ConnectionId) {
 			ls.config.Logger.Warn(
-				"blockfetch batch returned no blocks, retrying queued range on alternate connection",
+				"blockfetch batch extended nothing, retrying queued range on alternate connection",
 				"component",
 				"ledger",
 				"previous_connection_id",
@@ -6495,14 +6532,14 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 		ls.clearQueuedHeaders()
 		ls.config.Logger.Warn(
-			"blockfetch batch returned no blocks, requesting chainsync re-sync",
+			"blockfetch batch extended nothing, requesting chainsync re-sync",
 			"component", "ledger",
 			"connection_id", e.ConnectionId.String(),
 			"remaining_headers", remainingHeaders,
 		)
 		ls.requestChainsyncResync(
 			e.ConnectionId,
-			"empty blockfetch batch",
+			"blockfetch batch extended nothing",
 			pending,
 		)
 		return nil

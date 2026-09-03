@@ -1484,6 +1484,32 @@ func (c *Chain) BlockBeforeSlot(slotNumber uint64) (models.Block, error) {
 	return result, nil
 }
 
+// HoldsPoint reports whether point identifies a block that is on this chain
+// right now. It resolves the point exactly the way a forward iterator start
+// point is resolved (Chain.BlockByPoint plus the holdsBlockAtIndex membership
+// check that rejects a point the manager only retains in its rolled-back
+// block cache), so a caller can validate a point without allocating an
+// iterator or walking the chain.
+//
+// The origin point is not a block and is reported as absent.
+func (c *Chain) HoldsPoint(point ocommon.Point) bool {
+	if c == nil || c.manager == nil {
+		return false
+	}
+	if point.Slot == 0 && len(point.Hash) == 0 {
+		return false
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	// Same lock order as newChainIteratorWithContext, which runs this pair
+	// under c.mutex: chain -> primary -> manager.
+	tmpBlock, err := c.manager.BlockByPoint(point, nil)
+	if err != nil {
+		return false
+	}
+	return c.holdsBlockAtIndex(tmpBlock.ID, point.Hash)
+}
+
 // holdsBlockAtIndex reports whether this chain currently has the block with
 // the given hash at the given index. It distinguishes a point that is still
 // part of the chain from one that merely remains resolvable through the

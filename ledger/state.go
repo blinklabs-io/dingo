@@ -886,6 +886,20 @@ type LedgerState struct {
 	firstBlockReceived            bool                // true after latency sample recorded for this batch
 	shadowBlockReceivedHashes     map[string]struct{} // blocks delivered this batch (dedup shadow vs primary)
 	batchBlocksReceived           int                 // total blocks received in current blockfetch batch (including mid-batch flushes)
+	batchBlocksApplied            int                 // blocks from the current batch actually added to the chain (including mid-batch flushes)
+	// blockfetchBatchChainGeneration is the value chainRollbackGeneration
+	// held when the current batch was requested. A batch is fetched for the
+	// header queue that existed at request time; a rollback that moves the
+	// chain tip replaces both that queue and the continuation point, so every
+	// block still arriving for the older generation belongs to a chain the
+	// node has abandoned and must be discarded rather than applied. Guarded by
+	// chainsyncBlockfetchMutex, like the rest of the per-batch state.
+	blockfetchBatchChainGeneration uint64
+	// chainRollbackGeneration counts primary-chain rollbacks that actually
+	// moved the chain tip. Written under chainsyncMutex by the rollback paths
+	// and read under chainsyncBlockfetchMutex by the blockfetch paths, so it
+	// is atomic rather than mutex-guarded.
+	chainRollbackGeneration atomic.Uint64
 	// Failures to obtain one specific queued header range, keyed by its
 	// start point and counting both a NoBlocks reply (a synchronous
 	// GetBlockRange error) and a batch that completed without delivering a
@@ -3244,6 +3258,33 @@ func (ls *LedgerState) drainBlockPipelineBeforeRollback(
 	)
 }
 
+// rollbackChain rolls the primary chain back to point and, when that actually
+// moved the chain tip, invalidates the blockfetch batch in flight.
+//
+// A batch is requested for the header queue that existed when it started, and
+// Chain.rollbackLocked discards that queue whenever it rewinds past it. Blocks
+// the peer is still streaming for the old queue therefore chain onto a tip the
+// node no longer has: applying them is impossible, and letting them reach
+// Chain.addBlockLocked against a queue that fork resolution has meanwhile
+// refilled makes the first of them clear those replacement headers (issue
+// #3771). Bumping the generation here lets flushPendingBlockfetchBlocks drop
+// them instead.
+//
+// A rollback that resolves to a queued header leaves the tip (and the blocks
+// already requested for it) alone, so the generation only moves when the tip
+// itself did.
+func (ls *LedgerState) rollbackChain(point ocommon.Point) error {
+	before := ls.chain.Tip().Point
+	if err := ls.chain.Rollback(point); err != nil {
+		return err
+	}
+	after := ls.chain.Tip().Point
+	if after.Slot != before.Slot || !bytes.Equal(after.Hash, before.Hash) {
+		ls.chainRollbackGeneration.Add(1)
+	}
+	return nil
+}
+
 // rollbackChainAndState rewinds the primary chain and then synchronizes the
 // metadata-backed ledger state to the same point.
 func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
@@ -3307,7 +3348,7 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 		if err := ls.validateAndEmitRollbackUndo(point); err != nil {
 			return err
 		}
-		return ls.chain.Rollback(point)
+		return ls.rollbackChain(point)
 	}()
 	if err != nil {
 		return err
@@ -8476,6 +8517,14 @@ func (ls *LedgerState) GetChainFromPoint(
 	inclusive bool,
 ) (*chain.ChainIterator, error) {
 	return ls.chain.FromPoint(point, inclusive)
+}
+
+// ChainHoldsPoint reports whether point is a block on the primary chain right
+// now. It resolves the point the same way GetChainFromPoint resolves its start
+// point, minus the iterator allocation, so a caller that only needs to
+// validate a point does not pay for a chain walk.
+func (ls *LedgerState) ChainHoldsPoint(point ocommon.Point) bool {
+	return ls.chain.HoldsPoint(point)
 }
 
 // GetChainFromPointContext returns a ChainIterator that inherits cancellation

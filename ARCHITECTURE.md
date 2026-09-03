@@ -527,7 +527,14 @@ The BlockFetch server path mirrors the retrieval flow for downstream peers:
 when a peer requests a range, `ouroboros/blockfetch.go` validates the bounds,
 opens a chain iterator at the requested start point, sends `StartBatch`, then
 streams `Block` messages until the requested end or local tip before
-`BatchDone`. The range sender is asynchronous so the mini-protocol callback can
+`BatchDone`. Validating the bounds means both of them: the start point through
+the iterator constructor below, and the end point through
+`LedgerState.ChainHoldsPoint` (`Chain.HoldsPoint`), which applies the same
+resolve-and-membership check without allocating an iterator. Checking only the
+end *slot* let a peer name an end point the server does not hold and receive a
+slot-bounded prefix of the server's own chain in its place; an end point that
+does not resolve now takes the same `NoBlocks` and stuck-peer accounting as
+the other invalid-range rejections. The range sender is asynchronous so the mini-protocol callback can
 return promptly, but it applies backpressure between messages by waiting for
 the underlying gouroboros protocol send queue to drain. This keeps large Leios
 catch-up ranges from filling the mux pending-message queue and turning a slow
@@ -540,6 +547,17 @@ instead of retaining the rest of a large decoded range. The subsequent chain
 reader likewise decodes at most one 50-block metadata transaction batch at a
 time. These bounds matter for Dijkstra bodies, whose nested canonical-CBOR
 views make a live decoded block substantially larger than its wire bytes.
+
+A batch is fetched for the header queue that existed when it was requested, so
+`LedgerState` binds each batch to a chain-rollback generation. A rollback that
+moves the chain tip discards that header queue, so bodies still arriving for
+the older generation are dropped instead of being handed to chain insertion:
+fork resolution rolls back, re-queues the winning peer's header path and only
+then restarts blockfetch, and a body from the losing fork reaching insertion
+against that replacement queue would clear it. A batch that ends without
+extending the chain, while headers stay queued, feeds the same bounded
+same-range failure streak a `NoBlocks` reply feeds, so an unobtainable
+continuation is dropped and re-intersected rather than re-requested forever.
 
 Opening that iterator is also what decides whether the range is servable at
 all, so `chain`'s forward and reverse iterator constructors require the start
