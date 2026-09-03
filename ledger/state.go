@@ -2894,14 +2894,12 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		sameSlotCompetitor = len(tipNonce) > 0
 	}
 	if sameSlotCompetitor {
-		if point.Slot == 0 {
-			return fmt.Errorf(
-				"rollback to same-slot competitor at slot 0: %w",
-				ErrNoAppliedAncestorBelowContestedSlot,
-			)
-		}
+		// latestLedgerPrimaryChainAncestor searches block nonces over the
+		// half-open range [start, point.Slot), so passing point already means
+		// "strictly below the contested slot". Passing point.Slot-1 would skip
+		// an applied ancestor sitting at exactly point.Slot-1.
 		ancestor, ok, ancestorErr := ls.latestLedgerPrimaryChainAncestor(
-			ocommon.NewPoint(point.Slot-1, nil),
+			point,
 			false,
 		)
 		if ancestorErr != nil {

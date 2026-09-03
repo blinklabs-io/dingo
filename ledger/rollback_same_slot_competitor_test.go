@@ -31,7 +31,9 @@ import (
 )
 
 const (
-	sameSlotAncestorSlot  = 10
+	// Deliberately contestedSlot-1: the ancestor search range is half-open, so
+	// an ancestor immediately below the contested slot is the boundary case.
+	sameSlotAncestorSlot  = 19
 	sameSlotContestedSlot = 20
 )
 
