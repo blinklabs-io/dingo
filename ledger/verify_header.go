@@ -1071,17 +1071,23 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 	)
 	ls.metrics.observeLeaderThresholdMargin(margin)
 	if !belowThreshold {
-		// dingo's leadership stake is delegated UTxO only; staking rewards are
-		// not yet computed, so reward-account balances are missing from the
-		// stake distribution. On the prototype network the dominant pool's
-		// reward accrual pushes its true relative stake above the UTxO-only
-		// figure, so this UTxO-only threshold spuriously rejects its eligible
-		// blocks. Trust the block there (all cryptographic header checks above
-		// still passed) rather than wedge the chain; enforce elsewhere. See
+		// The leadership stake includes reward-account balances:
+		// refreshRewardLiveStakeAggregate stores total_stake =
+		// utxo_stake + reward_stake (reward_stake from account.reward) and
+		// GetLiveStakeInputsForPools selects total_stake; the historical
+		// reconstruction adds the same term in getStakeByPoolsAtSlot. An
+		// earlier comment here claimed the stake was delegated UTxO only.
+		// That was stale, and #3165 was diagnosed from it rather than from
+		// the code.
+		//
+		// On the concentrated prototype topology this check still rejected
+		// the dominant pool's eligible blocks and wedged the chain, so it is
+		// downgraded to a warning there; all cryptographic header checks
+		// above still passed. See
 		// LedgerStateConfig.SkipLeaderStakeThresholdCheck.
 		if ls.config.SkipLeaderStakeThresholdCheck {
 			ls.config.Logger.Warn(
-				"leader eligibility below stake-derived threshold; trusting block (leadership stake omits reward balances)",
+				"leader eligibility below stake-derived threshold; trusting block (prototype trust bypass)",
 				"slot",
 				block.SlotNumber(),
 				"pool",

@@ -2471,7 +2471,7 @@ func TestVerifyBlockHeaderCrypto_SkipLeaderStakeThresholdCheckWarnsAndAccepts(
 		logs,
 		"leader eligibility below stake-derived threshold; trusting block",
 	)
-	assert.Contains(t, logs, "leadership stake omits reward balances")
+	assert.Contains(t, logs, "prototype trust bypass")
 }
 
 func TestVerifyBlockHeaderCrypto_EmptyMarkSnapshotDiagnostic(t *testing.T) {
