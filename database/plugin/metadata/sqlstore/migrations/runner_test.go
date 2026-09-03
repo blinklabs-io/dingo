@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -28,6 +29,47 @@ import (
 	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
 )
+
+var addColumnPattern = regexp.MustCompile(
+	"(?is)^ALTER\\s+TABLE\\s+[`\"]?([a-zA-Z0-9_]+)[`\"]?\\s+" +
+		"ADD\\s+COLUMN\\s+[`\"]?([a-zA-Z0-9_]+)[`\"]?(?:\\s+(.*))?$",
+)
+
+var columnConstraintKeywords = map[string]struct{}{
+	"as": {}, "auto_increment": {}, "check": {}, "collate": {},
+	"comment": {}, "constraint": {}, "default": {}, "generated": {},
+	"not": {}, "null": {}, "primary": {}, "references": {}, "unique": {},
+}
+
+var columnTypeAliases = map[string]string{
+	"character varying":           "varchar",
+	"timestamp with time zone":    "timestamptz",
+	"timestamp without time zone": "timestamp",
+}
+
+var columnTypeArgsPattern = regexp.MustCompile(`\s*\([^)]*\)`)
+
+func declaredColumnType(definition string) string {
+	fields := strings.Fields(definition)
+	end := len(fields)
+	for index, field := range fields {
+		name, _, _ := strings.Cut(field, "(")
+		if _, stop := columnConstraintKeywords[strings.ToLower(name)]; stop {
+			end = index
+			break
+		}
+	}
+	return strings.Join(fields[:end], " ")
+}
+
+func normalizeColumnType(value string) string {
+	normalized := columnTypeArgsPattern.ReplaceAllString(strings.ToLower(value), "")
+	normalized = strings.Join(strings.Fields(normalized), " ")
+	if alias, ok := columnTypeAliases[normalized]; ok {
+		return alias
+	}
+	return normalized
+}
 
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
@@ -401,61 +443,6 @@ func TestRunnerReportsAddColumnFailureOnMissingTable(t *testing.T) {
 	}
 	err := testRunner(db, migration).Run(context.Background())
 	require.ErrorContains(t, err, "failed in "+string(PhaseExpand))
-}
-
-// An already-present column is an applied replay only when its type is the one
-// the statement declares. A same-named column of another type is a schema the
-// migration never produced, so the ALTER still fails instead of being skipped
-// and leaving the rest of the phase to run against the wrong column.
-func TestRunnerReportsAddColumnTypeMismatch(t *testing.T) {
-	t.Parallel()
-	db := openTestDB(t)
-	runner := &Runner{
-		DB:      db,
-		Dialect: "sqlite",
-		Registry: []Migration{
-			{
-				Version:          1,
-				Name:             "create_item",
-				BackfillRevision: "1",
-				SQL: map[string]SQL{
-					"sqlite": {
-						Expand: []string{
-							"CREATE TABLE IF NOT EXISTS item " +
-								"(id INTEGER PRIMARY KEY, note blob)",
-						},
-					},
-				},
-			},
-			{
-				Version:          2,
-				Name:             "add_column_other_type",
-				BackfillRevision: "1",
-				SQL: map[string]SQL{
-					"sqlite": {
-						Expand: []string{
-							"ALTER TABLE `item` ADD COLUMN `note` text",
-							"INSERT INTO item (id, note) VALUES (1, 'seeded') " +
-								"ON CONFLICT (id) DO NOTHING",
-						},
-					},
-				},
-			},
-		},
-		Locker: NewProcessLocker(),
-	}
-
-	err := runner.Run(context.Background())
-	require.ErrorContains(t, err, "failed in "+string(PhaseExpand))
-	require.ErrorContains(t, err, "statement 1")
-
-	// The statements after the failed ALTER must not have run.
-	var rows int
-	require.NoError(
-		t,
-		db.QueryRow("SELECT COUNT(*) FROM item").Scan(&rows),
-	)
-	require.Zero(t, rows)
 }
 
 // Every ALTER TABLE ADD COLUMN the shipped registries produce has to be

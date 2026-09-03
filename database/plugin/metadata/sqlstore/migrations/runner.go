@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"strings"
 	"time"
 )
@@ -643,47 +642,6 @@ func execDDL(
 		}
 	}
 	return nil
-}
-
-var addColumnPattern = regexp.MustCompile(
-	"(?is)^ALTER\\s+TABLE\\s+[`\"]?([a-zA-Z0-9_]+)[`\"]?\\s+" +
-		"ADD\\s+COLUMN\\s+[`\"]?([a-zA-Z0-9_]+)[`\"]?(?:\\s+(.*))?$",
-)
-
-var columnConstraintKeywords = map[string]struct{}{
-	"as": {}, "auto_increment": {}, "check": {}, "collate": {},
-	"comment": {}, "constraint": {}, "default": {}, "generated": {},
-	"not": {}, "null": {}, "primary": {}, "references": {}, "unique": {},
-}
-
-var columnTypeAliases = map[string]string{
-	"character varying":           "varchar",
-	"timestamp with time zone":    "timestamptz",
-	"timestamp without time zone": "timestamp",
-}
-
-var columnTypeArgsPattern = regexp.MustCompile(`\s*\([^)]*\)`)
-
-func declaredColumnType(definition string) string {
-	fields := strings.Fields(definition)
-	end := len(fields)
-	for index, field := range fields {
-		name, _, _ := strings.Cut(field, "(")
-		if _, stop := columnConstraintKeywords[strings.ToLower(name)]; stop {
-			end = index
-			break
-		}
-	}
-	return strings.Join(fields[:end], " ")
-}
-
-func normalizeColumnType(value string) string {
-	normalized := columnTypeArgsPattern.ReplaceAllString(strings.ToLower(value), "")
-	normalized = strings.Join(strings.Fields(normalized), " ")
-	if alias, ok := columnTypeAliases[normalized]; ok {
-		return alias
-	}
-	return normalized
 }
 
 // parseAddColumnStatement extracts the table and column named by an
