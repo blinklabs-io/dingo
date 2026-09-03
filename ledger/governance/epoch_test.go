@@ -26,9 +26,19 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestProcessEpochSkipsPreConwayProtocolParameters(t *testing.T) {
+	out, err := ProcessEpoch(&EpochInput{
+		PParams: &shelley.ShelleyProtocolParameters{},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, out)
+	assert.IsType(t, &shelley.ShelleyProtocolParameters{}, out.UpdatedPParams)
+}
 
 func TestRefundProposalDepositCreditsRewardAccount(t *testing.T) {
 	db, store := newTallyTestDB(t)
