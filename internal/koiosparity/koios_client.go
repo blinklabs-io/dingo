@@ -282,7 +282,10 @@ func isPublicKoiosHost(rawURL string) bool {
 		// than losing it.
 		return true
 	}
-	host := strings.ToLower(parsed.Hostname())
+	// A single terminal dot is a valid DNS spelling of the same name, so
+	// "preview.koios.rest." must not read as a different, non-public host and
+	// lose the cap.
+	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
 	return host == "koios.rest" || strings.HasSuffix(host, ".koios.rest")
 }
 
@@ -317,7 +320,10 @@ func validateKoiosBaseURL(rawURL string, allowInsecureHTTP bool) error {
 			"koios base URL must not carry a query string; give the bare v1 API root, e.g. https://host/api/v1",
 		)
 	}
-	if parsed.Fragment != "" {
+	// url.URL has no ForceFragment counterpart to ForceQuery, so a bare "#"
+	// parses to an empty Fragment and would otherwise be accepted — and the
+	// appended endpoint path would still land after the delimiter.
+	if parsed.Fragment != "" || strings.Contains(rawURL, "#") {
 		return errors.New(
 			"koios base URL must not carry a fragment; give the bare v1 API root, e.g. https://host/api/v1",
 		)

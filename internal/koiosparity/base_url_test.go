@@ -212,3 +212,28 @@ func TestValidateKoiosBaseURLErrorsOmitTheURL(t *testing.T) {
 			"validation error must not echo the URL's credentials")
 	}
 }
+
+// TestNewKoiosClientPublicHostSpellings covers DNS spellings of the public host
+// that must keep its published burst cap. A single terminal dot is a valid,
+// fully-qualified spelling of the same name.
+func TestNewKoiosClientPublicHostSpellings(t *testing.T) {
+	for _, raw := range []string{
+		"https://preview.koios.rest./api/v1",
+		"https://PREVIEW.KOIOS.REST./api/v1",
+	} {
+		client, err := NewKoiosClient("preview", "", raw, false)
+		require.NoError(t, err)
+		assert.Equal(t, koiosBurstLimitSafe, client.limiter.limit,
+			"%q is the public host and keeps its cap", raw)
+	}
+}
+
+// TestNewKoiosClientRejectsBareFragment covers a root ending in "#". url.URL
+// has no ForceFragment counterpart to ForceQuery, so it parses to an empty
+// Fragment — but get and post would still append the endpoint path after the
+// delimiter and reach the base path instead.
+func TestNewKoiosClientRejectsBareFragment(t *testing.T) {
+	_, err := NewKoiosClient("preview", "", "https://host.example/api/v1#", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fragment")
+}

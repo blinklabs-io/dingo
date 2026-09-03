@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -391,14 +392,40 @@ func TestKoiosParityConfigForwardsEveryField(t *testing.T) {
 		if _, ok := dst.FieldByName(name); !ok {
 			continue // not part of the node-facing config
 		}
-		if !strings.Contains(nodeSourceForKoiosParity(t), name+":") {
+		// Match the assignment, not just the field name: checking only that
+		// the name appears would accept a cross-wiring such as
+		// "AccountChunkSize: cfg.KoiosParity.AccountChunkMaxBytes".
+		assign := regexp.MustCompile(
+			`\b` + regexp.QuoteMeta(name) +
+				`:\s*&?cfg\.KoiosParity\.` + regexp.QuoteMeta(name) + `\b`,
+		)
+		if !assign.MatchString(nodeSourceForKoiosParity(t)) {
 			t.Errorf(
-				"internal/config KoiosParityConfig.%s is not forwarded in "+
-					"WithKoiosParity; the operator's setting would be "+
-					"silently ignored",
-				name,
+				"internal/config KoiosParityConfig.%s is not forwarded from "+
+					"cfg.KoiosParity.%s in WithKoiosParity; the operator's "+
+					"setting would be silently ignored or cross-wired",
+				name, name,
 			)
 		}
+	}
+}
+
+// TestKoiosParityForwardingGuardCatchesCrossWiring proves the guard checks the
+// assignment rather than the field name. Matching only the name would accept a
+// field wired from the wrong source, which fails exactly as silently as a field
+// left out entirely.
+func TestKoiosParityForwardingGuardCatchesCrossWiring(t *testing.T) {
+	crossWired := `dingo.WithKoiosParity(dingo.KoiosParityConfig{
+		AccountChunkSize: cfg.KoiosParity.AccountChunkMaxBytes,
+	`
+	assign := regexp.MustCompile(
+		`\bAccountChunkSize:\s*&?cfg\.KoiosParity\.AccountChunkSize\b`,
+	)
+	if assign.MatchString(crossWired) {
+		t.Error("guard accepted a cross-wired assignment")
+	}
+	if !strings.Contains(crossWired, "AccountChunkSize:") {
+		t.Error("the weaker name-only check would have accepted it")
 	}
 }
 
