@@ -8116,9 +8116,12 @@ poolStake, err := ledgerView.GetPoolStake(epoch, poolKeyHash)
 totalStake, err := ledgerView.GetTotalActiveStake(epoch)
 ```
 
-Both consensus paths resolve the denominator through that one store accessor,
-`Metadata().GetTotalActiveStake`, but they reach it differently and the
-difference matters when reading this code:
+The normal Praos/mark paths resolve the denominator through that one store
+accessor, `Metadata().GetTotalActiveStake`, but they reach it differently and
+the difference matters when reading this code. Header verification that uses
+an imported active distribution is the exception: it uses the denominator
+carried by that imported snapshot rather than resolving a mark value from
+metadata:
 
 - The forging adapter calls `LedgerView.GetTotalActiveStake`, which passes the
   view's transaction and pins `snapshotType` to `"mark"`.
