@@ -437,12 +437,8 @@ var babbageUtxoValidationRules = buildBabbageValidationRules()
 func buildBabbageValidationRules() []indexedUtxoValidationRule {
 	return buildIndexedUtxoValidationRules(
 		babbage.UtxoValidationRules,
-		utxoValidationRuleReplacement{
-			id: utxoValidationRulePlutusScripts,
-			classifier: unsupportedPlutusUtxoValidationRuleClassifier(
-				&babbage.BabbageProtocolParameters{},
-			),
-		},
+		babbage.UtxoValidatePlutusScripts,
+		"babbage.UtxoValidatePlutusScripts",
 	)
 }
 

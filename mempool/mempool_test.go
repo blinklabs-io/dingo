@@ -4084,6 +4084,16 @@ func TestRebuildOverlayReturnsErrorOnNilValidator(t *testing.T) {
 	require.ErrorIs(t, err, ErrNilValidator)
 }
 
+// TestAddTransactionReturnsErrNilValidator pins that admission reports the
+// missing validator with the package sentinel, matching rebuildOverlay and
+// the constructor. A bare error here is indistinguishable from a rejected
+// transaction, and the API surfaces have to answer the two differently.
+func TestAddTransactionReturnsErrNilValidator(t *testing.T) {
+	m := &Mempool{}
+	err := m.AddTransaction(0, nil)
+	require.ErrorIs(t, err, ErrNilValidator)
+}
+
 // TestNewMempool_RejectsNilValidator pins that the constructor returns
 // ErrNilValidator rather than panicking when the validator is missing.
 func TestNewMempool_RejectsNilValidator(t *testing.T) {

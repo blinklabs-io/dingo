@@ -261,26 +261,57 @@ func conwayValidationRules(
 }
 
 func buildConwayValidationRules() []indexedUtxoValidationRule {
-	return buildIndexedUtxoValidationRules(
+	skips := []utxoValidationRuleSkip{
+		{
+			validationFunc: conway.
+				UtxoValidateConwayFeaturesWithPlutusV1V2,
+			name: "conway.UtxoValidateConwayFeaturesWithPlutusV1V2",
+		},
+		{
+			validationFunc: conway.UtxoValidateFeeTooSmallUtxo,
+			name:           "conway.UtxoValidateFeeTooSmallUtxo",
+		},
+		{
+			validationFunc: conway.UtxoValidatePlutusScripts,
+			name:           "conway.UtxoValidatePlutusScripts",
+		},
+		{
+			validationFunc: conway.UtxoValidateCommitteeCertificates,
+			name:           "conway.UtxoValidateCommitteeCertificates",
+		},
+		{
+			validationFunc: conway.UtxoValidateUnknownVoters,
+			name:           "conway.UtxoValidateUnknownVoters",
+		},
+	}
+	indexes := make([]int, len(skips))
+	for i := range skips {
+		indexes[i] = resolveUtxoValidationSkipIndex(
+			conway.UtxoValidationRules, skips[i].validationFunc, skips[i].name,
+		)
+	}
+	ret := buildIndexedUtxoValidationRulesWithSkips(
 		conway.UtxoValidationRules,
-		utxoValidationRuleReplacement{
-			id:              utxoValidationRuleConwayFeaturesWithPlutusV1V2,
-			classifier:      conwayFeaturesUtxoValidationRuleClassifier(),
-			replacementFunc: validateConwayFeaturesWithNeededPlutusV1V2,
+		skips,
+	)
+	ret = append(ret, indexedUtxoValidationRule{
+		index:          indexes[0],
+		validationFunc: validateConwayFeaturesWithNeededPlutusV1V2,
+	})
+	ret = append(ret,
+		indexedUtxoValidationRule{
+			index:          indexes[3],
+			validationFunc: validateCommitteeCertificates,
 		},
-		utxoValidationRuleReplacement{
-			id: utxoValidationRuleFeeTooSmall,
-			classifier: feeTooSmallUtxoValidationRuleClassifier(
-				&conway.ConwayProtocolParameters{MinFeeB: 1},
-			),
-		},
-		utxoValidationRuleReplacement{
-			id: utxoValidationRulePlutusScripts,
-			classifier: conwayPlutusUtxoValidationRuleClassifier(
-				&conway.ConwayProtocolParameters{},
-			),
+		indexedUtxoValidationRule{
+			index:          indexes[4],
+			validationFunc: validateUnknownVoters,
 		},
 	)
+	slices.SortFunc(ret, func(a, b indexedUtxoValidationRule) int {
+		return a.index - b.index
+	})
+	return ret
 }
 
 // validateConwayFeaturesWithNeededPlutusV1V2 rejects Conway-only transaction
@@ -358,12 +389,18 @@ func validateConwayFeaturesWithNeededPlutusV1V2(
 	return nil
 }
 
-// conwayCurrentTreasuryValuePresent preserves the distinction between an
-// absent key 21 and an explicitly encoded zero across supported gouroboros
-// versions. Maintained gouroboros exposes that distinction through a nil value
-// and CurrentTreasuryValuePresent. The pinned version returns a non-nil zero
-// for both cases, so decoded or constructed concrete transactions fall back to
-// checking the transaction-body map.
+// conwayCurrentTreasuryValuePresent reports whether transaction-body key 21
+// is present, preserving the distinction between an absent value and an
+// explicitly encoded zero. A declared zero is a real assertion about the
+// treasury and must reach validation; collapsing it into "absent" would let a
+// transaction assert a zero treasury for free.
+//
+// Maintained gouroboros exposes the distinction through a nil value and the
+// CurrentTreasuryValuePresent capability. The pinned release stores key 21 in
+// an int64 with omitempty and returns a non-nil zero for both cases, so
+// decoded or constructed Conway transactions fall back to inspecting the
+// transaction-body map. The fallback treats an undecodable body as present:
+// this rule only rejects, so failing closed cannot admit a transaction.
 func conwayCurrentTreasuryValuePresent(tx lcommon.Transaction) bool {
 	if tx == nil {
 		return false
@@ -378,7 +415,7 @@ func conwayCurrentTreasuryValuePresent(tx lcommon.Transaction) bool {
 	conwayTx, ok := tx.(*conway.ConwayTransaction)
 	if !ok || conwayTx == nil {
 		// CurrentTreasuryValue's nil/non-nil contract is authoritative for
-		// implementations that do not need the pinned-version compatibility
+		// implementations that do not need the pinned-release compatibility
 		// path.
 		return true
 	}

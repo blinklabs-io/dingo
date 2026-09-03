@@ -537,6 +537,22 @@ func checkEpoch(
 	// disagrees -- leaves membership unproven and keeps the stricter
 	// dingo_db_missing classification (dingo #3485).
 	var paramEpochPools map[string]struct{}
+	var declaredParamPools uint64
+	paramSummary, sErr := dingo.GetEpochData(ctx, paramEpoch)
+	switch {
+	case sErr != nil:
+		logger.Debug(
+			"koiosparity: could not resolve param-epoch pool count",
+			"network", network,
+			"epoch", epoch,
+			"param_epoch", paramEpoch,
+			"error", sErr,
+		)
+	case paramSummary == nil:
+		// No ready summary, so no declared count to verify against.
+	default:
+		declaredParamPools = paramSummary.TotalPoolCount
+	}
 	members, membersErr := dingo.GetPoolStakeSnapshotMembers(ctx, paramEpoch)
 	switch {
 	case membersErr != nil:
@@ -548,31 +564,54 @@ func checkEpoch(
 			"error", membersErr,
 		)
 	case len(members) == 0:
-		// Cannot distinguish "captured, no pools" from "not captured".
+		// Cannot distinguish "captured, no pools" from "not captured", and
+		// retention deletes the rows outright — see the reward-input fallback
+		// below.
+	case declaredParamPools == 0:
+		// No ready summary, or no declared count to verify against.
+	case uint64(len(members)) != declaredParamPools:
+		logger.Debug(
+			"koiosparity: param-epoch pool set is incomplete",
+			"network", network,
+			"epoch", epoch,
+			"param_epoch", paramEpoch,
+			"members", len(members),
+			"declared", declaredParamPools,
+		)
 	default:
-		paramSummary, sErr := dingo.GetEpochData(ctx, paramEpoch)
-		switch {
-		case sErr != nil:
+		paramEpochPools = members
+	}
+	// pool_stake_snapshot is pruned to currentEpoch-3 by
+	// Manager.cleanupOldSnapshots (ledger/snapshot/rotation.go), so an observer
+	// running behind the node loses that evidence for every epoch it checks
+	// and every departed pool becomes a strict-mode halt. epoch_summary and
+	// reward_pool_input are both retained for the life of the database, and
+	// the same completeness argument applies to them: a K+1 reward-input set
+	// whose size equals the K+1 summary's declared pool count accounts for
+	// every pool in that pool set, so absence from it is departure. Anything
+	// short of an exact match — a degraded pool omitted from reward_pool_input
+	// while it stays in the pool set, a skipped bundle, an unread pool map —
+	// leaves membership unproven and keeps the stricter classification
+	// (dingo #3795, preserving #3485's direction).
+	if paramEpochPools == nil && declaredParamPools > 0 && dingoPoolErr == nil {
+		paramInputs := make(map[string]struct{}, len(dingoPoolMap))
+		for keyHex, dingoPool := range dingoPoolMap {
+			if dingoPool != nil && dingoPool.ParamsPresent {
+				paramInputs[keyHex] = struct{}{}
+			}
+		}
+		if uint64(len(paramInputs)) == declaredParamPools {
+			paramEpochPools = paramInputs
+		} else {
 			logger.Debug(
-				"koiosparity: could not resolve param-epoch pool count",
+				"koiosparity: param-epoch reward-input set does not account "+
+					"for the declared pool set",
 				"network", network,
 				"epoch", epoch,
 				"param_epoch", paramEpoch,
-				"error", sErr,
+				"reward_inputs", len(paramInputs),
+				"declared", declaredParamPools,
 			)
-		case paramSummary == nil || paramSummary.TotalPoolCount == 0:
-			// No ready summary, or no declared count to verify against.
-		case uint64(len(members)) != paramSummary.TotalPoolCount:
-			logger.Debug(
-				"koiosparity: param-epoch pool set is incomplete",
-				"network", network,
-				"epoch", epoch,
-				"param_epoch", paramEpoch,
-				"members", len(members),
-				"declared", paramSummary.TotalPoolCount,
-			)
-		default:
-			paramEpochPools = members
 		}
 	}
 	if dingoPoolErr != nil {

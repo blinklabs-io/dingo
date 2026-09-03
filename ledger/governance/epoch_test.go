@@ -1164,6 +1164,42 @@ func buildInfoProposal(
 	}
 }
 
+func buildNoConfidenceProposal(
+	t *testing.T,
+	txHash []byte,
+	actionIndex uint32,
+	expiresEpoch uint64,
+	deposit uint64,
+	returnAddress []byte,
+	addedSlot uint64,
+	parentTxHash []byte,
+	parentActionIdx *uint32,
+	ratifiedEpoch *uint64,
+	ratifiedSlot *uint64,
+) *models.GovernanceProposal {
+	t.Helper()
+	proposal := buildInfoProposal(
+		t,
+		txHash,
+		actionIndex,
+		expiresEpoch,
+		deposit,
+		returnAddress,
+		addedSlot,
+		parentTxHash,
+		parentActionIdx,
+		ratifiedEpoch,
+		ratifiedSlot,
+	)
+	encoded, err := cbor.Encode(&lcommon.NoConfidenceGovAction{
+		Type: uint(lcommon.GovActionTypeNoConfidence),
+	})
+	require.NoError(t, err)
+	proposal.ActionType = uint8(lcommon.GovActionTypeNoConfidence)
+	proposal.GovActionCbor = encoded
+	return proposal
+}
+
 // buildRewardAddr returns a reward address byte slice for the given stake
 // credential for use in proposal return-address fields.
 func buildRewardAddr(t *testing.T, stakeCred []byte) []byte {
@@ -1180,11 +1216,9 @@ func buildRewardAddr(t *testing.T, stakeCred []byte) []byte {
 	return b
 }
 
-// TestProcessEpochOrphanedChildRemovedAndRefunded verifies that when a
-// ratified proposal is enacted, an active proposal that references it as
-// parent is orphaned: its deposit is returned to the registered reward
-// account and it is marked expired at the boundary slot.
-func TestProcessEpochOrphanedChildRemovedAndRefunded(t *testing.T) {
+// TestProcessEpochEnactedChildPreserved verifies that enactment advances the
+// purpose root without removing descendants that can validly follow it.
+func TestProcessEpochEnactedChildPreserved(t *testing.T) {
 	db, store := newTallyTestDB(t)
 
 	stakeCred := testBytes(28, 50)
@@ -1202,12 +1236,12 @@ func TestProcessEpochOrphanedChildRemovedAndRefunded(t *testing.T) {
 	parentIdx := uint32(0)
 
 	require.NoError(t, db.SetGovernanceProposal(
-		buildInfoProposal(t, parentHash, 0, 10, 30, returnAddr, 100,
+		buildNoConfidenceProposal(t, parentHash, 0, 10, 30, returnAddr, 100,
 			nil, nil, &ratifiedEpoch, &ratifiedSlot),
 		nil,
 	))
 	require.NoError(t, db.SetGovernanceProposal(
-		buildInfoProposal(t, childHash, 0, 12, 15, returnAddr, 101,
+		buildNoConfidenceProposal(t, childHash, 0, 12, 15, returnAddr, 101,
 			parentHash, &parentIdx, nil, nil),
 		nil,
 	))
@@ -1229,26 +1263,24 @@ func TestProcessEpochOrphanedChildRemovedAndRefunded(t *testing.T) {
 	require.NoError(t, txn.Commit())
 
 	assert.Equal(t, 1, out.EnactedCount)
-	assert.Equal(t, 1, out.OrphanedCount)
+	assert.Equal(t, 0, out.OrphanedCount)
 
 	child, err := db.GetGovernanceProposal(childHash, 0, nil)
 	require.NoError(t, err)
-	require.NotNil(t, child.ExpiredEpoch)
-	require.NotNil(t, child.ExpiredSlot)
-	assert.Equal(t, uint64(5), *child.ExpiredEpoch)
-	assert.Equal(t, uint64(500), *child.ExpiredSlot)
+	require.Nil(t, child.ExpiredEpoch)
+	require.Nil(t, child.ExpiredSlot)
 
-	// Enacted parent's deposit (30) + orphaned child's deposit (15) = 45.
+	// Only the enacted parent's deposit is returned; the child remains active.
 	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
-	assert.Equal(t, uint64(45), uint64(account.Reward))
+	assert.Equal(t, uint64(30), uint64(account.Reward))
 }
 
-// TestProcessEpochOrphanedChildMissingReturnAccountGoesToTreasury checks
+// TestProcessEpochOrphanedSiblingMissingReturnAccountGoesToTreasury checks
 // that when an orphaned proposal's return reward account is not registered,
 // its deposit is routed to the treasury rather than credited to the account.
-func TestProcessEpochOrphanedChildMissingReturnAccountGoesToTreasury(
+func TestProcessEpochOrphanedSiblingMissingReturnAccountGoesToTreasury(
 	t *testing.T,
 ) {
 	db, store := newTallyTestDB(t)
@@ -1269,16 +1301,15 @@ func TestProcessEpochOrphanedChildMissingReturnAccountGoesToTreasury(
 	ratifiedSlot := uint64(400)
 	parentHash := testBytes(32, 55)
 	childHash := testBytes(32, 56)
-	parentIdx := uint32(0)
 
 	require.NoError(t, db.SetGovernanceProposal(
-		buildInfoProposal(t, parentHash, 0, 10, 30, parentReturnAddr, 100,
+		buildNoConfidenceProposal(t, parentHash, 0, 10, 30, parentReturnAddr, 100,
 			nil, nil, &ratifiedEpoch, &ratifiedSlot),
 		nil,
 	))
 	require.NoError(t, db.SetGovernanceProposal(
-		buildInfoProposal(t, childHash, 0, 12, 25, missingReturnAddr, 101,
-			parentHash, &parentIdx, nil, nil),
+		buildNoConfidenceProposal(t, childHash, 0, 12, 25, missingReturnAddr, 101,
+			nil, nil, nil, nil),
 		nil,
 	))
 
@@ -1320,8 +1351,8 @@ func TestProcessEpochOrphanedChildMissingReturnAccountGoesToTreasury(
 }
 
 // TestProcessEpochTransitiveOrphanRemoval verifies that orphan sweeps
-// cascade: when the direct child of an enacted proposal is orphaned, its own
-// children are also swept and refunded in the same tick.
+// cascade: when a competing root-level sibling of an enacted proposal is
+// orphaned, its own children are also swept and refunded in the same tick.
 func TestProcessEpochTransitiveOrphanRemoval(t *testing.T) {
 	db, store := newTallyTestDB(t)
 
@@ -1341,17 +1372,17 @@ func TestProcessEpochTransitiveOrphanRemoval(t *testing.T) {
 	parentIdx := uint32(0)
 
 	require.NoError(t, db.SetGovernanceProposal(
-		buildInfoProposal(t, parentHash, 0, 10, 10, returnAddr, 100,
+		buildNoConfidenceProposal(t, parentHash, 0, 10, 10, returnAddr, 100,
 			nil, nil, &ratifiedEpoch, &ratifiedSlot),
 		nil,
 	))
 	require.NoError(t, db.SetGovernanceProposal(
-		buildInfoProposal(t, childHash, 0, 12, 20, returnAddr, 101,
-			parentHash, &parentIdx, nil, nil),
+		buildNoConfidenceProposal(t, childHash, 0, 12, 20, returnAddr, 101,
+			nil, nil, nil, nil),
 		nil,
 	))
 	require.NoError(t, db.SetGovernanceProposal(
-		buildInfoProposal(t, grandchildHash, 0, 14, 30, returnAddr, 102,
+		buildNoConfidenceProposal(t, grandchildHash, 0, 14, 30, returnAddr, 102,
 			childHash, &parentIdx, nil, nil),
 		nil,
 	))
@@ -1408,16 +1439,15 @@ func TestProcessEpochOrphanExcludedFromActiveProposals(t *testing.T) {
 	ratifiedSlot := uint64(400)
 	parentHash := testBytes(32, 62)
 	childHash := testBytes(32, 63)
-	parentIdx := uint32(0)
 
 	require.NoError(t, db.SetGovernanceProposal(
-		buildInfoProposal(t, parentHash, 0, 10, 5, returnAddr, 100,
+		buildNoConfidenceProposal(t, parentHash, 0, 10, 5, returnAddr, 100,
 			nil, nil, &ratifiedEpoch, &ratifiedSlot),
 		nil,
 	))
 	require.NoError(t, db.SetGovernanceProposal(
-		buildInfoProposal(t, childHash, 0, 12, 5, returnAddr, 101,
-			parentHash, &parentIdx, nil, nil),
+		buildNoConfidenceProposal(t, childHash, 0, 12, 5, returnAddr, 101,
+			nil, nil, nil, nil),
 		nil,
 	))
 
@@ -1445,10 +1475,10 @@ func TestProcessEpochOrphanExcludedFromActiveProposals(t *testing.T) {
 	}
 }
 
-// TestProcessEpochOrphanedChildRestoredOnRollback verifies that rolling
+// TestProcessEpochOrphanedSiblingRestoredOnRollback verifies that rolling
 // back to a slot before the boundary slot restores orphaned proposals
 // (clears their expired_epoch/expired_slot) and reverses the reward credit.
-func TestProcessEpochOrphanedChildRestoredOnRollback(t *testing.T) {
+func TestProcessEpochOrphanedSiblingRestoredOnRollback(t *testing.T) {
 	db, store := newTallyTestDB(t)
 
 	stakeCred := testBytes(28, 64)
@@ -1463,16 +1493,15 @@ func TestProcessEpochOrphanedChildRestoredOnRollback(t *testing.T) {
 	ratifiedSlot := uint64(400)
 	parentHash := testBytes(32, 65)
 	childHash := testBytes(32, 66)
-	parentIdx := uint32(0)
 
 	require.NoError(t, db.SetGovernanceProposal(
-		buildInfoProposal(t, parentHash, 0, 10, 10, returnAddr, 100,
+		buildNoConfidenceProposal(t, parentHash, 0, 10, 10, returnAddr, 100,
 			nil, nil, &ratifiedEpoch, &ratifiedSlot),
 		nil,
 	))
 	require.NoError(t, db.SetGovernanceProposal(
-		buildInfoProposal(t, childHash, 0, 12, 20, returnAddr, 101,
-			parentHash, &parentIdx, nil, nil),
+		buildNoConfidenceProposal(t, childHash, 0, 12, 20, returnAddr, 101,
+			nil, nil, nil, nil),
 		nil,
 	))
 

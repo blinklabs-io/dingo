@@ -61,7 +61,6 @@ func TestLedgerViewUnimplementedMethodsReturnSentinelError(t *testing.T) {
 
 	err = lv.UpdateAdaPots(lcommon.AdaPots{})
 	require.ErrorIs(t, err, ErrNotImplemented)
-
 }
 
 func TestLedgerViewRewardAccountBalance(t *testing.T) {

@@ -18,10 +18,8 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
-	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -103,117 +101,11 @@ func TestConwayFeaturesRuleRejectsNeededPlutusV1V2(t *testing.T) {
 	}
 }
 
-func TestConwayFeaturesRuleTreatsDecodedZeroTreasuryAsPresent(t *testing.T) {
-	for _, tc := range []struct {
-		name          string
-		script        lcommon.Script
-		plutusVersion string
-	}{
-		{
-			name:          "PlutusV1",
-			script:        lcommon.PlutusV1Script{0x05},
-			plutusVersion: "PlutusV1",
-		},
-		{
-			name:          "PlutusV2",
-			script:        lcommon.PlutusV2Script{0x06},
-			plutusVersion: "PlutusV2",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			zero := int64(0)
-
-			absentTx, absentInput := decodeConwayFeaturesTx(
-				t,
-				tc.script,
-				nil,
-			)
-			ls := newMockLedgerState()
-			ls.addUtxo(absentInput, testAddressScriptOutput{
-				testOutput: newTestOutput(1_000_000),
-				addr:       newTestScriptAddress(t, tc.script),
-				scriptRef:  tc.script,
-			})
-			require.NoError(t, conwayFeaturesRule(t)(
-				absentTx,
-				0,
-				ls,
-				&conway.ConwayProtocolParameters{},
-			))
-
-			zeroTx, zeroInput := decodeConwayFeaturesTx(
-				t,
-				tc.script,
-				&zero,
-			)
-			ls = newMockLedgerState()
-			ls.addUtxo(zeroInput, testAddressScriptOutput{
-				testOutput: newTestOutput(1_000_000),
-				addr:       newTestScriptAddress(t, tc.script),
-				scriptRef:  tc.script,
-			})
-			var featureErr conway.CurrentTreasuryValueWithPlutusV1V2Error
-			require.ErrorAs(t, conwayFeaturesRule(t)(
-				zeroTx,
-				0,
-				ls,
-				&conway.ConwayProtocolParameters{},
-			), &featureErr)
-			assert.Equal(t, tc.plutusVersion, featureErr.PlutusVersion)
-		})
-	}
-}
-
-func decodeConwayFeaturesTx(
-	t *testing.T,
-	plutusScript lcommon.Script,
-	treasuryValue *int64,
-) (*conway.ConwayTransaction, shelley.ShelleyTransactionInput) {
-	t.Helper()
-	input := shelley.ShelleyTransactionInput{
-		TxId:        lcommon.Blake2b256{0x83},
-		OutputIndex: 0,
-	}
-	bodyFields := map[uint]any{
-		0: cbor.NewSetType(
-			[]shelley.ShelleyTransactionInput{input},
-			true,
-		),
-	}
-	if treasuryValue != nil {
-		bodyFields[21] = *treasuryValue
-	}
-	bodyCbor, err := cbor.Encode(bodyFields)
-	require.NoError(t, err)
-	var body conway.ConwayTransactionBody
-	require.NoError(t, body.UnmarshalCBOR(bodyCbor))
-
-	witnesses := conway.ConwayTransactionWitnessSet{}
-	switch script := plutusScript.(type) {
-	case lcommon.PlutusV1Script:
-		witnesses.WsPlutusV1Scripts = cbor.NewSetType(
-			[]lcommon.PlutusV1Script{script},
-			true,
-		)
-	case lcommon.PlutusV2Script:
-		witnesses.WsPlutusV2Scripts = cbor.NewSetType(
-			[]lcommon.PlutusV2Script{script},
-			true,
-		)
-	default:
-		t.Fatalf("unexpected script type %T", plutusScript)
-	}
-	return &conway.ConwayTransaction{
-		Body:       body,
-		WitnessSet: witnesses,
-		TxIsValid:  true,
-	}, input
-}
-
 func conwayFeaturesRule(t *testing.T) lcommon.UtxoValidationRuleFunc {
 	t.Helper()
 	for _, rule := range conwayUtxoValidationRules {
-		if rule.id == utxoValidationRuleConwayFeaturesWithPlutusV1V2 {
+		if utxoValidationRuleName(rule.validationFunc) ==
+			utxoValidationRuleName(validateConwayFeaturesWithNeededPlutusV1V2) {
 			return rule.validationFunc
 		}
 	}

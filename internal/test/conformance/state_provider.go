@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
@@ -401,33 +402,172 @@ func (p *DingoStateProvider) RewardAccountBalance(
 // let a backend that drops or cannot read a committee_member row still
 // report the vector as passing. A member proposed by a pending (not yet
 // enacted) UpdateCommittee action is the one case with no real
-// committee_member row to read yet, so that alone still falls back to the
-// govState mirror.
+// committee_member row to read yet, so that case resolves the persisted
+// proposal directly.
 func (p *DingoStateProvider) CommitteeMember(
 	coldKey common.Blake2b224,
 ) (*common.CommitteeMember, error) {
-	member, err := p.realCommitteeMember(coldKey)
+	resolve := func(
+		credential common.Credential,
+	) (*common.CommitteeMember, error) {
+		member, err := p.legacyCommitteeMember(credential)
+		if err != nil {
+			return nil, err
+		}
+		if member != nil {
+			return member, nil
+		}
+		return p.proposedCommitteeMember(credential)
+	}
+	keyMember, err := resolve(common.Credential{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: coldKey,
+	})
+	if err != nil {
+		return nil, err
+	}
+	scriptMember, err := resolve(common.Credential{
+		CredType:   common.CredentialTypeScriptHash,
+		Credential: coldKey,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if keyMember != nil && scriptMember != nil {
+		return nil, nil
+	}
+	if keyMember != nil {
+		return keyMember, nil
+	}
+	return scriptMember, nil
+}
+
+// CommitteeStateAvailable reports that the harness can answer committee
+// queries authoritatively whenever its backend is reachable.
+//
+// This deliberately differs from LedgerView.CommitteeStateAvailable, which
+// derives authority from the seated member set. The two providers have
+// different knowledge. A conformance vector declares its complete initial
+// committee, and seedGovernanceState writes exactly that set, so zero rows
+// here means the vector declared an empty committee -- authoritatively empty,
+// which must still reject a non-member's certificate. Deriving availability
+// from row count would instead report unavailable and decline to reject,
+// failing any vector that expects NotCommitteeMemberError against an empty
+// committee.
+//
+// Production instead derives authority from the include-deleted member set,
+// which distinguishes a committee emptied by NoConfidence (soft-deleted rows,
+// authoritative) from one never populated (no rows, ambiguous because Dingo
+// never persists the Conway genesis committee, blinklabs-io/dingo#3785). The
+// harness needs no such inference: it has no genesis-sync path, so reachable
+// already implies complete. Once #3785 lands the two answers converge.
+func (p *DingoStateProvider) CommitteeStateAvailable() (bool, error) {
+	return p != nil && p.manager != nil && p.manager.db != nil, nil
+}
+
+func (p *DingoStateProvider) CommitteeCredentialMember(
+	coldCredential common.Credential,
+) (*common.CommitteeMember, error) {
+	member, err := p.realCommitteeMember(coldCredential)
+	if err != nil {
+		return member, err
+	}
+	if member != nil && !member.Resigned {
+		return member, nil
+	}
+	resignedMember := member
+	member, err = p.proposedCommitteeMember(coldCredential)
+	if err != nil {
+		return nil, err
+	}
+	if member == nil {
+		return resignedMember, nil
+	}
+	return member, nil
+}
+
+// proposedCommitteeMember resolves a member named by a pending, not yet
+// enacted UpdateCommittee proposal.
+func (p *DingoStateProvider) proposedCommitteeMember(
+	coldCredential common.Credential,
+) (*common.CommitteeMember, error) {
+	proposals, err := withBadConnRetry(
+		func() ([]*models.GovernanceProposal, error) {
+			return p.manager.db.GetActiveGovernanceProposals(
+				p.manager.currentEpoch,
+				nil,
+			)
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("lookup pending committee proposals: %w", err)
+	}
+	// Mirrors the production committee-root lookup: NoConfidence and
+	// UpdateCommittee share the committee root, so the root is the latest
+	// enacted member of the pair.
+	root, err := p.manager.db.GetLastEnactedGovernanceProposal(
+		[]uint8{
+			uint8(common.GovActionTypeNoConfidence),
+			uint8(common.GovActionTypeUpdateCommittee),
+		}, nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("lookup committee proposal root: %w", err)
+	}
+	member, termStart, err := governance.ResolveCommitteeProposal(
+		proposals, root, coldCredential, p.manager.protocolParams,
+	)
 	if err != nil {
 		return nil, err
 	}
 	if member != nil {
-		return member, nil
-	}
-
-	// Check if member is proposed in a pending UpdateCommittee action
-	if p.manager.govState.IsProposedCommitteeMember(coldKey) {
-		for _, proposal := range p.manager.govState.Proposals {
-			if proposal.ActionType == common.GovActionTypeUpdateCommittee {
-				if expiry, ok := proposal.ProposedMembers[coldKey]; ok {
-					return &common.CommitteeMember{
-						ColdKey:     coldKey,
-						ExpiryEpoch: expiry,
-					}, nil
-				}
-			}
+		if err := p.populateCommitteeMemberStatus(
+			coldCredential,
+			termStart,
+			member,
+			true,
+		); err != nil {
+			return nil, err
 		}
 	}
+	return member, nil
+}
 
+// legacyCommitteeMember mirrors ledger.LedgerView.legacyCommitteeCredentialMember:
+// the first seated term for a tagged credential, returned even when resigned,
+// with no pending-successor resolution.
+func (p *DingoStateProvider) legacyCommitteeMember(
+	coldCredential common.Credential,
+) (*common.CommitteeMember, error) {
+	coldTag, err := models.CredentialTagFromUint(coldCredential.CredType)
+	if err != nil {
+		return nil, fmt.Errorf("invalid committee cold credential: %w", err)
+	}
+	members, err := withBadConnRetry(func() ([]*models.CommitteeMember, error) {
+		return p.manager.db.GetCommitteeMembers(nil)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("lookup committee members: %w", err)
+	}
+	for _, member := range members {
+		if member.ColdCredentialTag != coldTag ||
+			common.NewBlake2b224(member.ColdCredHash) != coldCredential.Credential {
+			continue
+		}
+		result := &common.CommitteeMember{
+			ColdKey:     coldCredential.Credential,
+			ExpiryEpoch: member.ExpiresEpoch,
+		}
+		if err := p.populateCommitteeMemberStatus(
+			coldCredential,
+			member.TermStartSlot,
+			result,
+			false,
+		); err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
 	return nil, nil
 }
 
@@ -435,8 +575,12 @@ func (p *DingoStateProvider) CommitteeMember(
 // (expiry epoch, hot-key authorization, resignation) by joining the real
 // committee_member and auth_committee_hot rows.
 func (p *DingoStateProvider) realCommitteeMember(
-	coldKey common.Blake2b224,
+	coldCredential common.Credential,
 ) (*common.CommitteeMember, error) {
+	coldTag, err := models.CredentialTagFromUint(coldCredential.CredType)
+	if err != nil {
+		return nil, fmt.Errorf("invalid committee cold credential: %w", err)
+	}
 	members, err := withBadConnRetry(func() ([]*models.CommitteeMember, error) {
 		return p.manager.db.GetCommitteeMembers(nil)
 	})
@@ -444,12 +588,23 @@ func (p *DingoStateProvider) realCommitteeMember(
 		return nil, fmt.Errorf("lookup committee members: %w", err)
 	}
 	var expiryEpoch uint64
+	var termStartSlot uint64
+	var addedSlot uint64
+	var memberID uint
 	found := false
 	for _, member := range members {
-		if common.NewBlake2b224(member.ColdCredHash) == coldKey {
+		if member.ColdCredentialTag == coldTag &&
+			common.NewBlake2b224(member.ColdCredHash) == coldCredential.Credential {
+			if found && (member.TermStartSlot < termStartSlot ||
+				(member.TermStartSlot == termStartSlot && member.AddedSlot < addedSlot) ||
+				(member.TermStartSlot == termStartSlot && member.AddedSlot == addedSlot && member.ID < memberID)) {
+				continue
+			}
 			expiryEpoch = member.ExpiresEpoch
+			termStartSlot = member.TermStartSlot
+			addedSlot = member.AddedSlot
+			memberID = member.ID
 			found = true
-			break
 		}
 	}
 	if !found {
@@ -457,33 +612,71 @@ func (p *DingoStateProvider) realCommitteeMember(
 	}
 
 	result := &common.CommitteeMember{
-		ColdKey:     coldKey,
+		ColdKey:     coldCredential.Credential,
 		ExpiryEpoch: expiryEpoch,
 	}
+	if err := p.populateCommitteeMemberStatus(
+		coldCredential,
+		termStartSlot,
+		result,
+		false,
+	); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
 
+// populateCommitteeMemberStatus mirrors ledger.LedgerView's helper, including
+// its pending-term rule: a pending term's start is the proposal's own added
+// slot, so the resignation of the term it replaces sits at or after it. Skip
+// the lookup rather than clearing its result afterwards, which would drop the
+// hot authorization production keeps.
+func (p *DingoStateProvider) populateCommitteeMemberStatus(
+	coldCredential common.Credential,
+	termStartSlot uint64,
+	result *common.CommitteeMember,
+	pending bool,
+) error {
+	coldTag, err := models.CredentialTagFromUint(coldCredential.CredType)
+	if err != nil {
+		return fmt.Errorf("invalid committee cold credential: %w", err)
+	}
 	auth, err := withBadConnRetry(func() (*models.AuthCommitteeHot, error) {
-		return p.manager.db.GetCommitteeMember(coldKey[:], nil)
+		return p.manager.db.GetCommitteeMember(
+			coldTag,
+			coldCredential.Credential[:],
+			termStartSlot,
+			nil,
+		)
 	})
 	if err != nil && !errors.Is(err, models.ErrCommitteeMemberNotFound) {
-		return nil, fmt.Errorf("lookup committee hot key: %w", err)
+		return fmt.Errorf("lookup committee hot key: %w", err)
 	}
 	if auth != nil {
 		hotKey := common.NewBlake2b224(auth.HotCredential)
 		result.HotKey = &hotKey
 	}
 
+	if pending {
+		return nil
+	}
 	resigned, err := withBadConnRetry(func() (bool, error) {
-		return p.manager.db.IsCommitteeMemberResigned(coldKey[:], nil)
+		return p.manager.db.IsCommitteeMemberResigned(
+			coldTag,
+			coldCredential.Credential[:],
+			termStartSlot,
+			nil,
+		)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("lookup committee resignation: %w", err)
+		return fmt.Errorf("lookup committee resignation: %w", err)
 	}
 	result.Resigned = resigned
 	if resigned {
 		result.HotKey = nil
 	}
 
-	return result, nil
+	return nil
 }
 
 // CommitteeMembers returns every enacted committee member -- including the
@@ -506,38 +699,94 @@ func (p *DingoStateProvider) CommitteeMembers() ([]common.CommitteeMember, error
 	if err != nil {
 		return nil, fmt.Errorf("lookup committee members: %w", err)
 	}
+	// A credential is (tag, hash), and several rows for one credential are its
+	// successive terms. Counting hashes alone dropped a re-elected member, and
+	// conflated a key credential with a script credential of the same hash.
+	// CommitteeCredentialMember already resolves a credential to its latest
+	// term, so resolve once per unique credential.
+	type credentialKey struct {
+		tag  uint8
+		hash string
+	}
+	tagsByHash := make(map[string]map[uint8]struct{}, len(realMembers))
+	seen := make(map[credentialKey]struct{}, len(realMembers))
+	order := make([]credentialKey, 0, len(realMembers))
 	for _, dbMember := range realMembers {
-		coldKey := common.NewBlake2b224(dbMember.ColdCredHash)
-		member := common.CommitteeMember{
-			ColdKey:     coldKey,
-			ExpiryEpoch: dbMember.ExpiresEpoch,
+		key := credentialKey{
+			tag:  dbMember.ColdCredentialTag,
+			hash: string(dbMember.ColdCredHash),
 		}
-		auth, err := withBadConnRetry(func() (*models.AuthCommitteeHot, error) {
-			return p.manager.db.GetCommitteeMember(dbMember.ColdCredHash, nil)
-		})
-		if err != nil && !errors.Is(err, models.ErrCommitteeMemberNotFound) {
-			return nil, fmt.Errorf("lookup committee hot key: %w", err)
+		if tagsByHash[key.hash] == nil {
+			tagsByHash[key.hash] = make(map[uint8]struct{}, 1)
 		}
-		if auth != nil {
-			hotKey := common.NewBlake2b224(auth.HotCredential)
-			member.HotKey = &hotKey
+		tagsByHash[key.hash][key.tag] = struct{}{}
+		if _, ok := seen[key]; ok {
+			continue
 		}
-		resigned, err := withBadConnRetry(func() (bool, error) {
-			return p.manager.db.IsCommitteeMemberResigned(
-				dbMember.ColdCredHash, nil,
-			)
+		seen[key] = struct{}{}
+		order = append(order, key)
+	}
+	for _, key := range order {
+		// The legacy list shape cannot carry a credential tag, so a hash
+		// seated under both tags stays ambiguous and is omitted.
+		if len(tagsByHash[key.hash]) != 1 {
+			continue
+		}
+		member, err := p.CommitteeCredentialMember(common.Credential{
+			CredType:   uint(key.tag),
+			Credential: common.NewBlake2b224([]byte(key.hash)),
 		})
 		if err != nil {
-			return nil, fmt.Errorf("lookup committee resignation: %w", err)
+			return nil, err
 		}
-		member.Resigned = resigned
-		if resigned {
-			member.HotKey = nil
+		if member != nil {
+			members = append(members, *member)
 		}
-		members = append(members, member)
 	}
 
 	return members, nil
+}
+
+func (p *DingoStateProvider) CommitteeHotCredentialMember(
+	hotCredential common.Credential,
+) (*common.CommitteeMember, error) {
+	// Converted before the authorizations load so an unsupported tag is
+	// rejected even when the committee has no active authorizations, matching
+	// the production ordering in LedgerView.CommitteeHotCredentialMember.
+	hotTag, err := models.CredentialTagFromUint(hotCredential.CredType)
+	if err != nil {
+		return nil, fmt.Errorf("invalid committee hot credential: %w", err)
+	}
+	authorizations, err := withBadConnRetry(
+		func() ([]*models.AuthCommitteeHot, error) {
+			return p.manager.db.GetActiveCommitteeMembers(nil)
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("lookup active committee hot credentials: %w", err)
+	}
+	for _, authorization := range authorizations {
+		if authorization.HotCredentialTag != hotTag ||
+			common.NewBlake2b224(authorization.HotCredential) !=
+				hotCredential.Credential {
+			continue
+		}
+		member, err := p.CommitteeCredentialMember(common.Credential{
+			CredType:   uint(authorization.ColdCredentialTag),
+			Credential: common.NewBlake2b224(authorization.ColdCredential),
+		})
+		if err != nil {
+			return nil, err
+		}
+		// Not filtered by term expiry, matching
+		// LedgerView.CommitteeHotCredentialMember and the Conway GOV rule,
+		// which applies expiry only in the RATIFY tally.
+		if member == nil || member.Resigned {
+			continue
+		}
+		return member, nil
+	}
+	return nil, nil
 }
 
 // DRepRegistration looks up a DRep registration by credential hash. The
@@ -752,6 +1001,10 @@ func extractCostModels(
 
 // Compile-time interface check
 var _ conformance.StateProvider = (*DingoStateProvider)(nil)
+
+// Keep the conformance provider on the same credential-aware committee
+// capability as the production LedgerView.
+var _ eras.CommitteeCredentialState = (*DingoStateProvider)(nil)
 
 // conformance.StateProvider does not include DRepDelegationState: the Conway
 // reward-withdrawal rule discovers it with a runtime type assertion instead.

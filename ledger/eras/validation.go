@@ -17,9 +17,10 @@ package eras
 import (
 	"errors"
 	"fmt"
-	"iter"
 	"math"
 	"math/big"
+	"reflect"
+	"runtime"
 
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -46,6 +47,29 @@ type phase2ValidationSkipper interface {
 // CIP-23 pool-margin-floor certificate rule at runtime.
 type MinPoolMarginProvider interface {
 	MinPoolMargin() *big.Rat
+}
+
+// CommitteeCredentialState is the optional ledger-state capability used by
+// Dingo's Conway and Dijkstra validation compositions to preserve key/script
+// credential tags. The legacy hash-only LedgerState committee methods cannot
+// distinguish credentials that share a hash.
+//
+// The method set is identical to gouroboros
+// ledger/common.CommitteeCredentialState, so the compile-time assertions
+// against this interface (ledger.LedgerView, conformance DingoStateProvider)
+// also prove those types satisfy the upstream capability. Keep the two in
+// sync: the upstream Conway rules type-assert for it and fail closed when the
+// assertion misses, so a signature drift here would silently disable committee
+// validation rather than fail to build. Once the gouroboros pin exports it,
+// alias this to the upstream type instead of redeclaring it.
+type CommitteeCredentialState interface {
+	CommitteeStateAvailable() (bool, error)
+	CommitteeCredentialMember(
+		lcommon.Credential,
+	) (*lcommon.CommitteeMember, error)
+	CommitteeHotCredentialMember(
+		lcommon.Credential,
+	) (*lcommon.CommitteeMember, error)
 }
 
 // minPoolMarginFromLedgerState returns the CIP-23 minimum pool margin the ledger
@@ -95,165 +119,209 @@ func checkPoolMarginFloor(
 
 type indexedUtxoValidationRule struct {
 	index          int
-	id             utxoValidationRuleId
 	validationFunc lcommon.UtxoValidationRuleFunc
 }
 
-type utxoValidationRuleId string
+type utxoValidationRuleSkip struct {
+	validationFunc lcommon.UtxoValidationRuleFunc
+	name           string
+}
 
 const (
-	utxoValidationRuleConwayFeaturesWithPlutusV1V2 utxoValidationRuleId = "conway-features-with-plutus-v1-v2"
-	utxoValidationRuleFeeTooSmall                  utxoValidationRuleId = "fee-too-small"
-	utxoValidationRuleMaxTxSize                    utxoValidationRuleId = "max-tx-size"
-	utxoValidationRulePlutusScripts                utxoValidationRuleId = "plutus-scripts"
+	noUtxoValidationRuleIndex = -1
+
+	conwayRefScriptCostStride = 25_600
 )
-
-type utxoValidationRuleClassifier func(
-	lcommon.UtxoValidationRuleFunc,
-) bool
-
-type utxoValidationRuleReplacement struct {
-	id              utxoValidationRuleId
-	classifier      utxoValidationRuleClassifier
-	replacementFunc lcommon.UtxoValidationRuleFunc
-}
-
-type utxoValidationRuleProbe struct {
-	tx lcommon.Transaction
-	ls lcommon.LedgerState
-	pp lcommon.ProtocolParameters
-}
-
-type utxoValidationRuleProbeTx struct {
-	lcommon.Transaction
-	cbor                 []byte
-	fee                  *big.Int
-	isValid              bool
-	witnesses            lcommon.TransactionWitnessSet
-	currentTreasuryValue *big.Int
-}
-
-func (t *utxoValidationRuleProbeTx) Cbor() []byte {
-	return t.cbor
-}
-
-func (*utxoValidationRuleProbeTx) Type() int {
-	return 0
-}
-
-func (t *utxoValidationRuleProbeTx) Fee() *big.Int {
-	return t.fee
-}
-
-func (t *utxoValidationRuleProbeTx) IsValid() bool {
-	return t.isValid
-}
-
-func (t *utxoValidationRuleProbeTx) Witnesses() lcommon.TransactionWitnessSet {
-	return t.witnesses
-}
-
-func (*utxoValidationRuleProbeTx) Inputs() []lcommon.TransactionInput {
-	return nil
-}
-
-func (*utxoValidationRuleProbeTx) ReferenceInputs() []lcommon.TransactionInput {
-	return nil
-}
-
-func (*utxoValidationRuleProbeTx) Certificates() []lcommon.Certificate {
-	return nil
-}
-
-func (*utxoValidationRuleProbeTx) Withdrawals() map[*lcommon.Address]*big.Int {
-	return nil
-}
-
-func (*utxoValidationRuleProbeTx) AssetMint() *lcommon.MultiAsset[lcommon.MultiAssetTypeMint] {
-	return nil
-}
-
-func (*utxoValidationRuleProbeTx) VotingProcedures() lcommon.VotingProcedures {
-	return nil
-}
-
-func (*utxoValidationRuleProbeTx) ProposalProcedures() []lcommon.ProposalProcedure {
-	return nil
-}
-
-func (t *utxoValidationRuleProbeTx) CurrentTreasuryValue() *big.Int {
-	return t.currentTreasuryValue
-}
-
-type utxoValidationRuleProbeWitnesses struct {
-	redeemers       lcommon.TransactionWitnessRedeemers
-	plutusV1Scripts []lcommon.PlutusV1Script
-}
-
-func (*utxoValidationRuleProbeWitnesses) Vkey() []lcommon.VkeyWitness {
-	return nil
-}
-
-func (*utxoValidationRuleProbeWitnesses) NativeScripts() []lcommon.NativeScript {
-	return nil
-}
-
-func (*utxoValidationRuleProbeWitnesses) Bootstrap() []lcommon.BootstrapWitness {
-	return nil
-}
-
-func (*utxoValidationRuleProbeWitnesses) PlutusData() []lcommon.Datum {
-	return nil
-}
-
-func (w *utxoValidationRuleProbeWitnesses) PlutusV1Scripts() []lcommon.PlutusV1Script {
-	return w.plutusV1Scripts
-}
-
-func (*utxoValidationRuleProbeWitnesses) PlutusV2Scripts() []lcommon.PlutusV2Script {
-	return nil
-}
-
-func (*utxoValidationRuleProbeWitnesses) PlutusV3Scripts() []lcommon.PlutusV3Script {
-	return nil
-}
-
-func (w *utxoValidationRuleProbeWitnesses) Redeemers() lcommon.TransactionWitnessRedeemers {
-	return w.redeemers
-}
-
-type utxoValidationRuleProbeRedeemers struct{}
-
-func (utxoValidationRuleProbeRedeemers) Indexes(lcommon.RedeemerTag) []uint {
-	return nil
-}
-
-func (utxoValidationRuleProbeRedeemers) Value(
-	uint,
-	lcommon.RedeemerTag,
-) lcommon.RedeemerValue {
-	return lcommon.RedeemerValue{}
-}
-
-func (utxoValidationRuleProbeRedeemers) Iter() iter.Seq2[
-	lcommon.RedeemerKey,
-	lcommon.RedeemerValue,
-] {
-	return func(yield func(lcommon.RedeemerKey, lcommon.RedeemerValue) bool) {
-		yield(
-			lcommon.RedeemerKey{Tag: lcommon.RedeemerTagSpend},
-			lcommon.RedeemerValue{},
-		)
-	}
-}
-
-const conwayRefScriptCostStride = 25_600
 
 func shouldSkipPhase2Validation(
 	ls lcommon.LedgerState,
 ) bool {
 	skipper, ok := ls.(phase2ValidationSkipper)
 	return ok && skipper.SkipPhase2Validation()
+}
+
+// validateCommitteeCertificates preserves the full cold credential identity
+// when the ledger state exposes Dingo's tag-aware capability. Other state
+// implementations retain the upstream hash-only behavior.
+func validateCommitteeCertificates(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) error {
+	// Committee certificates belong to the CERTS state transition. A
+	// phase-2-invalid transaction only applies its collateral effects, so it
+	// must not inspect or reject against committee state.
+	if !tx.IsValid() {
+		return nil
+	}
+	state, ok := ls.(CommitteeCredentialState)
+	if !ok {
+		return conway.UtxoValidateCommitteeCertificates(tx, slot, ls, pp)
+	}
+	// Availability is resolved on the first lookup rather than up front, so a
+	// transaction carrying no committee certificate never pays for the query.
+	// The second result reports whether the answer is authoritative; a nil
+	// member is only non-membership when it is.
+	var availabilityKnown, available bool
+	committeeMember := func(
+		coldCredential lcommon.Credential,
+	) (*lcommon.CommitteeMember, bool, error) {
+		if !availabilityKnown {
+			resolved, err := state.CommitteeStateAvailable()
+			if err != nil {
+				return nil, false, err
+			}
+			available, availabilityKnown = resolved, true
+		}
+		if !available {
+			return nil, false, nil
+		}
+		member, err := state.CommitteeCredentialMember(coldCredential)
+		return member, true, err
+	}
+	for _, cert := range tx.Certificates() {
+		var (
+			credential lcommon.Credential
+			operation  string
+			authorize  bool
+		)
+		switch c := cert.(type) {
+		case *lcommon.AuthCommitteeHotCertificate:
+			credential = c.ColdCredential
+			operation = "authorize hot key"
+			authorize = true
+		case *lcommon.ResignCommitteeColdCertificate:
+			credential = c.ColdCredential
+			operation = "resign"
+		default:
+			continue
+		}
+		member, authoritative, err := committeeMember(credential)
+		if err != nil {
+			// A failed lookup is never authorization: fail closed.
+			return conway.CommitteeMemberLookupError{
+				Credential: credential.Credential,
+				Err:        err,
+			}
+		}
+		if member == nil {
+			if !authoritative {
+				// Dingo holds no committee state for this snapshot, so
+				// non-membership cannot be established. Rejecting here would
+				// reject a real genesis committee member, because Dingo does
+				// not seed the Conway genesis committee
+				// (blinklabs-io/dingo#3785). See
+				// LedgerView.CommitteeStateAvailable.
+				continue
+			}
+			return conway.NotCommitteeMemberError{
+				Credential: credential.Credential,
+				Operation:  operation,
+			}
+		}
+		if authorize && member.Resigned {
+			return conway.ResignedCommitteeMemberHotKeyError{
+				ColdKey: credential.Credential,
+			}
+		}
+	}
+	return nil
+}
+
+// validateUnknownVoters preserves the full hot credential identity for
+// committee voters. DRep and stake-pool checks intentionally mirror the
+// upstream rule so replacing it does not change their behavior.
+func validateUnknownVoters(
+	tx lcommon.Transaction,
+	slot uint64,
+	ls lcommon.LedgerState,
+	pp lcommon.ProtocolParameters,
+) error {
+	// Votes belong to the GOV state transition, which a phase-2-invalid
+	// transaction does not apply.
+	if !tx.IsValid() {
+		return nil
+	}
+	state, ok := ls.(CommitteeCredentialState)
+	if !ok {
+		return conway.UtxoValidateUnknownVoters(tx, slot, ls, pp)
+	}
+	votes := tx.VotingProcedures()
+	if len(votes) == 0 {
+		return nil
+	}
+	// Resolved on the first committee voter rather than up front, so a
+	// transaction with only DRep or pool votes never pays for the query. The
+	// second result reports whether the answer is authoritative.
+	var availabilityKnown, available bool
+	committeeHotMember := func(
+		hotCredential lcommon.Credential,
+	) (*lcommon.CommitteeMember, bool, error) {
+		if !availabilityKnown {
+			resolved, err := state.CommitteeStateAvailable()
+			if err != nil {
+				return nil, false, err
+			}
+			available, availabilityKnown = resolved, true
+		}
+		if !available {
+			return nil, false, nil
+		}
+		member, err := state.CommitteeHotCredentialMember(hotCredential)
+		return member, true, err
+	}
+	for voter := range votes {
+		if voter == nil {
+			continue
+		}
+		switch voter.Type {
+		case lcommon.VoterTypeDRepKeyHash,
+			lcommon.VoterTypeDRepScriptHash:
+			registration, err := ls.DRepRegistration(
+				lcommon.Blake2b224(voter.Hash),
+			)
+			if err != nil {
+				return err
+			}
+			if registration == nil {
+				return conway.UnknownVoterError{Voter: *voter}
+			}
+		case lcommon.VoterTypeStakingPoolKeyHash:
+			if !ls.IsPoolRegistered(lcommon.PoolKeyHash(voter.Hash)) {
+				return conway.UnknownVoterError{Voter: *voter}
+			}
+		case lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+			lcommon.VoterTypeConstitutionalCommitteeHotScriptHash:
+			credentialType := uint(lcommon.CredentialTypeAddrKeyHash)
+			if voter.Type ==
+				lcommon.VoterTypeConstitutionalCommitteeHotScriptHash {
+				credentialType = uint(lcommon.CredentialTypeScriptHash)
+			}
+			hotCredential := lcommon.Credential{
+				CredType:   credentialType,
+				Credential: lcommon.Blake2b224(voter.Hash),
+			}
+			member, authoritative, err := committeeHotMember(hotCredential)
+			if err != nil {
+				// A failed lookup is never a known voter: fail closed.
+				return conway.CommitteeMemberLookupError{
+					Credential: hotCredential.Credential,
+					Err:        err,
+				}
+			}
+			// An unauthoritative nil member cannot establish an unknown
+			// voter (blinklabs-io/dingo#3785). See
+			// LedgerView.CommitteeStateAvailable.
+			if (member == nil && authoritative) ||
+				(member != nil && member.Resigned) {
+				return conway.UnknownVoterError{Voter: *voter}
+			}
+		default:
+			return conway.UnknownVoterError{Voter: *voter}
+		}
+	}
+	return nil
 }
 
 // validatePlutusOutcome requires the locally evaluated phase-2 result to
@@ -307,215 +375,88 @@ func txHasRedeemers(tx lcommon.Transaction) bool {
 	return false
 }
 
-// utxoValidationRuleErrorClassifier identifies a rule by the concrete error
-// it returns for a controlled transaction. Unrelated rules can require ledger
-// state or transaction fields that a probe intentionally does not provide, so
-// a panic means only that the rule did not match this classifier.
-func utxoValidationRuleErrorClassifier[E error](
-	probe utxoValidationRuleProbe,
-) utxoValidationRuleClassifier {
-	return func(rule lcommon.UtxoValidationRuleFunc) (matched bool) {
-		defer func() {
-			if recover() != nil {
-				matched = false
-			}
-		}()
-		err := rule(probe.tx, 0, probe.ls, probe.pp)
-		_, matched = errors.AsType[E](err)
-		return matched
-	}
-}
-
-func feeTooSmallUtxoValidationRuleClassifier(
-	pp lcommon.ProtocolParameters,
-) utxoValidationRuleClassifier {
-	return utxoValidationRuleErrorClassifier[shelley.FeeTooSmallUtxoError](
-		utxoValidationRuleProbe{
-			tx: &utxoValidationRuleProbeTx{
-				cbor: []byte{0x80},
-				fee:  new(big.Int),
-			},
-			pp: pp,
-		},
-	)
-}
-
-func maxTxSizeUtxoValidationRuleClassifier(
-	pp lcommon.ProtocolParameters,
-) utxoValidationRuleClassifier {
-	return utxoValidationRuleErrorClassifier[shelley.MaxTxSizeUtxoError](
-		utxoValidationRuleProbe{
-			tx: &utxoValidationRuleProbeTx{
-				cbor: []byte{0x80},
-				fee:  new(big.Int),
-			},
-			pp: pp,
-		},
-	)
-}
-
-// unsupportedPlutusUtxoValidationRuleClassifier probes for the rule that
-// rejects phase-2 execution in an era that does not implement it. That rule
-// keys off the presence of a redeemer, so the redeemer alone identifies it. The
-// probe also carries a Plutus script so it stays a representative phase-2
-// witness set: an unmatched replacement panics during package initialisation,
-// so the probe should not depend on the rule ignoring the script.
-func unsupportedPlutusUtxoValidationRuleClassifier(
-	pp lcommon.ProtocolParameters,
-) utxoValidationRuleClassifier {
-	return utxoValidationRuleErrorClassifier[lcommon.PlutusScriptValidationUnsupportedError](utxoValidationRuleProbe{
-		tx: &utxoValidationRuleProbeTx{
-			isValid: true,
-			witnesses: &utxoValidationRuleProbeWitnesses{
-				redeemers:       utxoValidationRuleProbeRedeemers{},
-				plutusV1Scripts: []lcommon.PlutusV1Script{{0x01}},
-			},
-		},
-		pp: pp,
-	})
-}
-
-func conwayPlutusUtxoValidationRuleClassifier(
-	pp lcommon.ProtocolParameters,
-) utxoValidationRuleClassifier {
-	witnesses := &utxoValidationRuleProbeWitnesses{
-		redeemers: utxoValidationRuleProbeRedeemers{},
-	}
-	return func(rule lcommon.UtxoValidationRuleFunc) (matched bool) {
-		defer func() {
-			if recover() != nil {
-				matched = false
-			}
-		}()
-		validErr := rule(
-			&utxoValidationRuleProbeTx{
-				isValid:   true,
-				witnesses: witnesses,
-			},
-			0,
-			nil,
-			pp,
-		)
-		if _, ok := errors.AsType[conway.ExtraRedeemerError](validErr); !ok {
-			return false
-		}
-		// Phase-2 execution is skipped when a block producer declares the
-		// transaction invalid. The phase-1 extraneous-redeemer rule returns
-		// the same concrete error for the valid probe but still runs here.
-		return rule(
-			&utxoValidationRuleProbeTx{witnesses: witnesses},
-			0,
-			nil,
-			pp,
-		) == nil
-	}
-}
-
-func conwayFeaturesUtxoValidationRuleClassifier() utxoValidationRuleClassifier {
-	return utxoValidationRuleErrorClassifier[conway.CurrentTreasuryValueWithPlutusV1V2Error](utxoValidationRuleProbe{
-		tx: &utxoValidationRuleProbeTx{
-			witnesses: &utxoValidationRuleProbeWitnesses{
-				plutusV1Scripts: []lcommon.PlutusV1Script{{0x01}},
-			},
-			currentTreasuryValue: big.NewInt(1),
-		},
-		pp: &conway.ConwayProtocolParameters{},
-	})
-}
-
-// buildIndexedUtxoValidationRules finds each target by stable validation
-// behavior and preserves the target's original upstream position. A nil
-// replacement removes the target; a non-nil replacement substitutes it in
-// place. Invalid, ambiguous, duplicate, or missing metadata fails closed.
 func buildIndexedUtxoValidationRules(
 	rules []lcommon.UtxoValidationRuleFunc,
-	replacements ...utxoValidationRuleReplacement,
+	skipValidationFunc lcommon.UtxoValidationRuleFunc,
+	skipRuleName string,
 ) []indexedUtxoValidationRule {
-	for idx, rule := range rules {
-		if rule == nil {
-			panic(fmt.Sprintf(
-				"UTxO validation rule at index %d is nil",
-				idx,
-			))
-		}
-	}
+	return buildIndexedUtxoValidationRulesWithSkips(rules, []utxoValidationRuleSkip{{
+		validationFunc: skipValidationFunc,
+		name:           skipRuleName,
+	}})
+}
 
-	replacementIndexById := make(
-		map[utxoValidationRuleId]int,
-		len(replacements),
-	)
-	for idx, replacement := range replacements {
-		if replacement.id == "" {
-			panic("UTxO validation rule replacement has an empty ID")
-		}
-		if replacement.classifier == nil {
-			panic(fmt.Sprintf(
-				"UTxO validation rule replacement ID %q has a nil classifier",
-				replacement.id,
-			))
-		}
-		if _, ok := replacementIndexById[replacement.id]; ok {
-			panic(fmt.Sprintf(
-				"UTxO validation rule replacement ID %q is configured more than once",
-				replacement.id,
-			))
-		}
-		replacementIndexById[replacement.id] = idx
+func buildIndexedUtxoValidationRulesWithSkips(
+	rules []lcommon.UtxoValidationRuleFunc,
+	skips []utxoValidationRuleSkip,
+) []indexedUtxoValidationRule {
+	skipIndexes := map[int]struct{}{}
+	for _, skip := range skips {
+		resolvedIndex := resolveUtxoValidationSkipIndex(
+			rules,
+			skip.validationFunc,
+			skip.name,
+		)
+		skipIndexes[resolvedIndex] = struct{}{}
 	}
-
-	matchedRuleIndexById := make(map[utxoValidationRuleId]int, len(replacements))
 	ret := make([]indexedUtxoValidationRule, 0, len(rules))
 	for idx, validationFunc := range rules {
-		var matchedReplacement utxoValidationRuleReplacement
-		matchedReplacementFound := false
-		for _, replacement := range replacements {
-			if !replacement.classifier(validationFunc) {
-				continue
-			}
-			if matchedReplacementFound {
-				panic(fmt.Sprintf(
-					"UTxO validation rule at index %d matches replacement IDs %q and %q",
-					idx,
-					matchedReplacement.id,
-					replacement.id,
-				))
-			}
-			if previousIdx, ok := matchedRuleIndexById[replacement.id]; ok {
-				panic(fmt.Sprintf(
-					"UTxO validation rule replacement ID %q matches upstream rules at indexes %d and %d",
-					replacement.id,
-					previousIdx,
-					idx,
-				))
-			}
-			matchedReplacement = replacement
-			matchedReplacementFound = true
-		}
-
-		var ruleId utxoValidationRuleId
-		if matchedReplacementFound {
-			matchedRuleIndexById[matchedReplacement.id] = idx
-			ruleId = matchedReplacement.id
-			validationFunc = matchedReplacement.replacementFunc
-			if validationFunc == nil {
-				continue
-			}
+		if _, ok := skipIndexes[idx]; ok {
+			continue
 		}
 		ret = append(ret, indexedUtxoValidationRule{
 			index:          idx,
-			id:             ruleId,
 			validationFunc: validationFunc,
 		})
 	}
-	for _, replacement := range replacements {
-		if _, ok := matchedRuleIndexById[replacement.id]; !ok {
+	return ret
+}
+
+func resolveUtxoValidationSkipIndex(
+	rules []lcommon.UtxoValidationRuleFunc,
+	skipValidationFunc lcommon.UtxoValidationRuleFunc,
+	skipRuleName string,
+) int {
+	if skipRuleName == "" {
+		skipRuleName = "UTxO validation skip rule"
+	}
+	if skipValidationFunc == nil {
+		panic(skipRuleName + " expected validation function is nil")
+	}
+	targetName := utxoValidationRuleName(skipValidationFunc)
+	found := noUtxoValidationRuleIndex
+	for index, rule := range rules {
+		if utxoValidationRuleName(rule) != targetName {
+			continue
+		}
+		if found != noUtxoValidationRuleIndex {
 			panic(fmt.Sprintf(
-				"UTxO validation rule replacement ID %q was not found in upstream rules",
-				replacement.id,
+				"%s resolves to multiple upstream rule indexes %d and %d",
+				skipRuleName,
+				found,
+				index,
 			))
 		}
+		found = index
 	}
-	return ret
+	if found == noUtxoValidationRuleIndex {
+		panic(
+			skipRuleName +
+				" expected function is absent from upstream validation rules",
+		)
+	}
+	return found
+}
+
+func utxoValidationRuleName(fn lcommon.UtxoValidationRuleFunc) string {
+	if fn == nil {
+		return ""
+	}
+	pc := reflect.ValueOf(fn).Pointer()
+	if runtimeFn := runtime.FuncForPC(pc); runtimeFn != nil {
+		return runtimeFn.Name()
+	}
+	return fmt.Sprintf("%x", pc)
 }
 
 // SafeAddExUnits adds two ExUnits values with
@@ -657,7 +598,7 @@ func preAlonzoRebuiltWireSize(tx lcommon.Transaction) (uint64, bool) {
 
 // validatePreAlonzoTx runs a pre-Alonzo era's UTxO validation rules and then
 // applies Dingo's size and fee checks in place of the upstream fee and
-// max-size rules that buildIndexedUtxoValidationRules removed.
+// max-size rules that buildIndexedUtxoValidationRulesWithSkips removed.
 //
 // Both replacements derive their size from TxSizeForFee. Keeping both checks
 // on TxSizeForFee makes the local validation path explicit and consistent with

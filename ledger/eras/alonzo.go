@@ -349,12 +349,8 @@ var alonzoUtxoValidationRules = buildAlonzoValidationRules()
 func buildAlonzoValidationRules() []indexedUtxoValidationRule {
 	return buildIndexedUtxoValidationRules(
 		alonzo.UtxoValidationRules,
-		utxoValidationRuleReplacement{
-			id: utxoValidationRulePlutusScripts,
-			classifier: unsupportedPlutusUtxoValidationRuleClassifier(
-				&alonzo.AlonzoProtocolParameters{},
-			),
-		},
+		alonzo.UtxoValidatePlutusScripts,
+		"alonzo.UtxoValidatePlutusScripts",
 	)
 }
 
