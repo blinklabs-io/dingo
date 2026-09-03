@@ -704,7 +704,9 @@ func TestConwayCommitteeCertificateRulePreservesCredentialTag(t *testing.T) {
 			TxCertificates: []lcommon.CertificateWrapper{{
 				Type: uint(lcommon.CertificateTypeAuthCommitteeHot),
 				Certificate: &lcommon.AuthCommitteeHotCertificate{
-					CertType:       uint(lcommon.CertificateTypeAuthCommitteeHot),
+					CertType: uint(
+						lcommon.CertificateTypeAuthCommitteeHot,
+					),
 					ColdCredential: scriptCredential,
 				},
 			}},
@@ -1412,21 +1414,36 @@ func TestTxInfoV2ContextSortsInputs(t *testing.T) {
 	)
 }
 
-// TestBuildIndexedUtxoValidationRulesResolvesByRuleId reorders the upstream
-// list and confirms the skip follows the rule Id to its new position rather
-// than staying pinned to a fixed index.
+// TestBuildIndexedUtxoValidationRulesResolvesByRuleId moves the plutus-scripts
+// rule to the front of the upstream list and gates it behind
+// common.Phase2ValidUtxoValidationRules, so the skip is only resolvable
+// through the descriptor Id: a fixed index points at the wrong rule and a
+// function-keyed lookup cannot see past the wrapper.
 func TestBuildIndexedUtxoValidationRulesResolvesByRuleId(t *testing.T) {
 	descriptors := alonzo.UtxoValidationRuleDescriptors()
-	rules := append(
-		[]lcommon.UtxoValidationRuleFunc(nil),
-		alonzo.UtxoValidationRules...,
-	)
 	originalIndex := resolveUtxoValidationSkipIndex(
-		descriptors, rules, lcommon.UtxoValidationRulePlutusScripts,
+		descriptors,
+		alonzo.UtxoValidationRules,
+		lcommon.UtxoValidationRulePlutusScripts,
 	)
 	require.NotZero(t, originalIndex)
 	descriptors[0], descriptors[originalIndex] = descriptors[originalIndex], descriptors[0]
-	rules[0], rules[originalIndex] = rules[originalIndex], rules[0]
+	rest := make([]lcommon.UtxoValidationRuleFunc, 0, len(descriptors)-1)
+	for _, descriptor := range descriptors[1:] {
+		rest = append(rest, descriptor.Validator)
+	}
+	rules := lcommon.ComposeUtxoValidationRules(
+		lcommon.Phase2ValidUtxoValidationRules(descriptors[0].Validator),
+		lcommon.AlwaysUtxoValidationRules(rest...),
+	)
+	require.Len(t, rules, len(descriptors))
+	require.NotEqual(
+		t,
+		utxoValidationRuleName(descriptors[0].Validator),
+		utxoValidationRuleName(rules[0]),
+		"the moved rule must be wrapped so no function name can match it",
+	)
+
 	require.Zero(t, resolveUtxoValidationSkipIndex(
 		descriptors, rules, lcommon.UtxoValidationRulePlutusScripts,
 	))
@@ -3924,7 +3941,9 @@ func TestConwayCommitteeCertificateRuleDoesNotRejectWhenStateUnavailable(
 			TxCertificates: []lcommon.CertificateWrapper{{
 				Type: uint(lcommon.CertificateTypeAuthCommitteeHot),
 				Certificate: &lcommon.AuthCommitteeHotCertificate{
-					CertType:       uint(lcommon.CertificateTypeAuthCommitteeHot),
+					CertType: uint(
+						lcommon.CertificateTypeAuthCommitteeHot,
+					),
 					ColdCredential: credential,
 				},
 			}},
@@ -4037,7 +4056,9 @@ func TestConwayCommitteeRulesSkipPhase2InvalidTransaction(t *testing.T) {
 			TxCertificates: []lcommon.CertificateWrapper{{
 				Type: uint(lcommon.CertificateTypeAuthCommitteeHot),
 				Certificate: &lcommon.AuthCommitteeHotCertificate{
-					CertType:       uint(lcommon.CertificateTypeAuthCommitteeHot),
+					CertType: uint(
+						lcommon.CertificateTypeAuthCommitteeHot,
+					),
 					ColdCredential: credential,
 				},
 			}},
@@ -4147,7 +4168,9 @@ func TestConwayCommitteeRulesFailClosedOnLookupError(t *testing.T) {
 			TxCertificates: []lcommon.CertificateWrapper{{
 				Type: uint(lcommon.CertificateTypeAuthCommitteeHot),
 				Certificate: &lcommon.AuthCommitteeHotCertificate{
-					CertType:       uint(lcommon.CertificateTypeAuthCommitteeHot),
+					CertType: uint(
+						lcommon.CertificateTypeAuthCommitteeHot,
+					),
 					ColdCredential: credential,
 				},
 			}},

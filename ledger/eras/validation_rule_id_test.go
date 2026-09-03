@@ -17,12 +17,12 @@ package eras
 import (
 	"errors"
 	"fmt"
-	"math/big"
 	"reflect"
 	"runtime"
 	"slices"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -369,7 +369,9 @@ func TestEraUtxoValidationRuleCompositions(t *testing.T) {
 				require.Equal(
 					t,
 					wantFuncName,
-					shortUtxoValidationRuleName(era.descriptors[index].Validator),
+					shortUtxoValidationRuleName(
+						era.descriptors[index].Validator,
+					),
 					"upstream rule %s is no longer implemented by %s",
 					id,
 					wantFuncName,
@@ -480,6 +482,22 @@ func (s *treasuryUnavailableLedgerState) TreasuryValue() (uint64, error) {
 	return 0, errors.New("not implemented")
 }
 
+// newConwayTreasuryTx decodes a Conway transaction body from a CBOR key map so
+// the presence of transaction-body key 21 comes from the real decoder rather
+// than from a hand-set field. An absent key and an explicitly declared zero are
+// different states and only the decoder distinguishes them.
+func newConwayTreasuryTx(
+	t *testing.T,
+	body map[int]any,
+) *conway.ConwayTransaction {
+	t.Helper()
+	cborData, err := cbor.Encode(body)
+	require.NoError(t, err)
+	tx := &conway.ConwayTransaction{TxIsValid: true}
+	require.NoError(t, tx.Body.UnmarshalCBOR(cborData))
+	return tx
+}
+
 // TestCurrentTreasuryValueRuleGuardsOnDeclaredValue pins the guard the
 // gouroboros v0.202.6 bump depends on.
 //
@@ -488,27 +506,42 @@ func (s *treasuryUnavailableLedgerState) TreasuryValue() (uint64, error) {
 // LedgerState.TreasuryValue only for a transaction that declares
 // currentTreasuryValue (transaction body key 21). Dingo's provider still
 // returns an error, so this rule must stay unreachable for ordinary traffic
-// until #3687 lands. If upstream drops the guard, this test fails instead of
-// the node rejecting every transaction.
+// until blinklabs-io/dingo#3687 lands. If upstream drops the guard, or stops
+// distinguishing an absent key 21 from a declared zero, this test fails
+// instead of the node rejecting ordinary transactions.
 func TestCurrentTreasuryValueRuleGuardsOnDeclaredValue(t *testing.T) {
 	pp := &conway.ConwayProtocolParameters{}
 	for _, tc := range []struct {
 		name       string
-		declared   *big.Int
+		body       map[int]any
 		wantCalls  int
 		wantErrors bool
 	}{
-		{name: "no declared treasury value", declared: nil},
 		{
-			name:       "declared treasury value",
-			declared:   big.NewInt(1),
+			name: "key 21 absent",
+			body: map[int]any{2: uint64(100)},
+		},
+		{
+			name:       "key 21 declared zero",
+			body:       map[int]any{2: uint64(100), 21: 0},
+			wantCalls:  1,
+			wantErrors: true,
+		},
+		{
+			name:       "key 21 declared non-zero",
+			body:       map[int]any{2: uint64(100), 21: 7},
 			wantCalls:  1,
 			wantErrors: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tx := newConwayFeaturesTestTx(newTestInput(0x91, 0))
-			tx.currentTreasuryValue = tc.declared
+			tx := newConwayTreasuryTx(t, tc.body)
+			require.Equal(
+				t,
+				tc.wantCalls > 0,
+				lcommon.TransactionCurrentTreasuryValuePresent(tx),
+				"decoded key 21 presence must match the case under test",
+			)
 			ls := &treasuryUnavailableLedgerState{
 				mockLedgerState: newMockLedgerState(),
 			}
