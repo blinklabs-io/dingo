@@ -16,7 +16,6 @@ package ouroboros
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
@@ -26,11 +25,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/gouroboros/cbor"
 	ouroboros_conn "github.com/blinklabs-io/gouroboros/connection"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/gouroboros/muxer"
-	"github.com/blinklabs-io/gouroboros/protocol"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -752,82 +748,20 @@ func TestBlockfetchRecordNoBlocks_CleanupResetsCounter(t *testing.T) {
 	)
 }
 
-// blockfetchServerPeer drives Dingo's real blockfetch server config
-// (blockfetchServerConnOpts, instrumentation wrappers included) over a real
-// muxer, so requests reach blockfetchServerRequestRange exactly as a real
-// peer's would and NoBlocks() actually goes out on the wire instead of
-// panicking on a nil CallbackContext.Server the way the direct-call tests
-// above do.
-type blockfetchServerPeer struct {
-	peerConn net.Conn
-	errChan  chan error
-}
-
-func newBlockfetchServerPeer(
-	t *testing.T,
-	o *Ouroboros,
-) *blockfetchServerPeer {
+// newBlockfetchServerPeer builds a muxerServerPeer driving Dingo's real
+// blockfetch server config (blockfetchServerConnOpts, instrumentation
+// wrappers included), so requests reach blockfetchServerRequestRange exactly
+// as a real peer's would and NoBlocks() actually goes out on the wire
+// instead of panicking on a nil CallbackContext.Server the way the
+// direct-call tests above do.
+func newBlockfetchServerPeer(t *testing.T, o *Ouroboros) *muxerServerPeer {
 	t.Helper()
-	serverConn, peerConn := net.Pipe()
-	m := muxer.New(serverConn)
-	errChan := make(chan error, 4)
+	opts, peer := newMuxerServerPeer(t)
 	cfg, err := blockfetch.NewConfig(o.blockfetchServerConnOpts()...)
 	require.NoError(t, err)
-	server := blockfetch.NewServer(
-		protocol.ProtocolOptions{
-			ConnectionId: ouroboros_conn.ConnectionId{
-				LocalAddr:  serverConn.LocalAddr(),
-				RemoteAddr: serverConn.RemoteAddr(),
-			},
-			ErrorChan: errChan,
-			Muxer:     m,
-			Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-		&cfg,
-	)
-	server.Start()
-	m.Start()
-	t.Cleanup(func() {
-		server.Protocol.Stop()
-		m.Stop()
-		_ = serverConn.Close()
-		_ = peerConn.Close()
-	})
-	return &blockfetchServerPeer{peerConn: peerConn, errChan: errChan}
-}
-
-// send writes msg to the server as a block-fetch request segment.
-func (p *blockfetchServerPeer) send(t *testing.T, msg protocol.Message) {
-	t.Helper()
-	data, err := cbor.Encode(msg)
-	require.NoError(t, err)
-	segment := muxer.NewSegment(blockfetch.ProtocolId, data, false)
-	require.NotNil(t, segment)
-	buf := &bytes.Buffer{}
-	require.NoError(
-		t,
-		binary.Write(buf, binary.BigEndian, segment.SegmentHeader),
-	)
-	_, err = buf.Write(segment.Payload)
-	require.NoError(t, err)
-	_, err = p.peerConn.Write(buf.Bytes())
-	require.NoError(t, err)
-}
-
-// readResponse reads one response segment, bounded by timeout so a request
-// the server leaves pending fails the test instead of hanging it.
-func (p *blockfetchServerPeer) readResponse(
-	t *testing.T,
-	timeout time.Duration,
-) *muxer.Segment {
-	t.Helper()
-	require.NoError(t, p.peerConn.SetReadDeadline(time.Now().Add(timeout)))
-	header := muxer.SegmentHeader{}
-	require.NoError(t, binary.Read(p.peerConn, binary.BigEndian, &header))
-	payload := make([]byte, header.PayloadLength)
-	_, err := io.ReadFull(p.peerConn, payload)
-	require.NoError(t, err)
-	return &muxer.Segment{SegmentHeader: header, Payload: payload}
+	server := blockfetch.NewServer(opts, &cfg)
+	peer.start(t, server)
+	return peer
 }
 
 // TestBlockfetchServerRequestRange_RepeatedInvertedRangeReachesCloseThreshold
@@ -867,7 +801,11 @@ func TestBlockfetchServerRequestRange_RepeatedInvertedRangeReachesCloseThreshold
 
 	for i := 1; i <= blockfetchMaxConsecutiveNoBlocks; i++ {
 		logBuf.Reset()
-		peer.send(t, blockfetch.NewMsgRequestRange(start, end))
+		peer.send(
+			t,
+			blockfetch.ProtocolId,
+			blockfetch.NewMsgRequestRange(start, end),
+		)
 
 		segment := peer.readResponse(t, 5*time.Second)
 		assert.Equal(t, blockfetch.ProtocolId, segment.GetProtocolId())
