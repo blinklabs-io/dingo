@@ -2959,3 +2959,233 @@ func TestVerifyBlockLeaderEligibility_ImportedActivePoolAbsentStaysHardRejection
 	assert.Contains(t, err.Error(), "missing from active pool distribution")
 	assert.NotErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
 }
+
+// seedLiveStakeCredential seeds one stake credential holding totalStake in a
+// live UTxO, delegated to poolKeyHash. A nil poolKeyHash leaves the account
+// undelegated. Unlike seedLiveDelegatedPoolStake it registers no pool, so the
+// caller controls whether the delegation target exists, is registered, or is
+// retired at the snapshot slot.
+func seedLiveStakeCredential(
+	t *testing.T,
+	db *database.Database,
+	stakingKey []byte,
+	poolKeyHash []byte,
+	totalStake uint64,
+	slot uint64,
+	discriminator byte,
+) {
+	t.Helper()
+	require.Len(t, stakingKey, 28)
+	err := db.Metadata().CreateAccount(nil, &models.Account{
+		StakingKey: stakingKey,
+		Pool:       poolKeyHash,
+		AddedSlot:  slot,
+		Active:     true,
+	})
+	require.NoError(t, err)
+
+	txId := make([]byte, 32)
+	copy(txId, stakingKey)
+	txId[28] = discriminator
+	txId[31] = discriminator + 1
+	err = db.Metadata().CreateUtxo(nil, &models.Utxo{
+		TxId:       txId,
+		OutputIdx:  uint32(discriminator),
+		StakingKey: stakingKey,
+		Amount:     types.Uint64(totalStake),
+		AddedSlot:  slot,
+	})
+	require.NoError(t, err)
+}
+
+// eligibilityDenominatorFixture is the shared shape for the mark-snapshot
+// denominator-composition tests below. The producer holds a small stake and
+// each ineligible bucket holds a stake four orders of magnitude larger, so a
+// denominator that admits any one bucket drives the producer's sigma to
+// ~1e-12 and its VRF threshold to essentially zero.
+type eligibilityDenominatorFixture struct {
+	ls            *LedgerState
+	db            *database.Database
+	block         *testBlockResult
+	producer      []byte
+	snapshotEpoch uint64
+	boundarySlot  uint64
+	snapshotSlot  uint64
+	producerStake uint64
+}
+
+func newEligibilityDenominatorFixture(
+	t *testing.T,
+	seed byte,
+) *eligibilityDenominatorFixture {
+	t.Helper()
+	tb := createTestBlock(t, [32]byte{seed}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.epochCache = []models.Epoch{
+		{EpochId: 3, StartSlot: 300, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{EpochId: 4, StartSlot: 400, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{EpochId: 5, StartSlot: 500, LengthInSlots: 100, Nonce: tb.epochNonce},
+	}
+	// Past the mark capture slot, so the mark reads as live-computed rather
+	// than Mithril-reconstructed and the threshold check is enforced instead
+	// of skipped.
+	ls.mithrilLedgerSlot = ls.epochCache[1].StartSlot + 50
+	tb.block.slot = ls.epochCache[2].StartSlot + 50
+	seedEligibilityEpochs(t, db, append([]models.Epoch{
+		{EpochId: 2, StartSlot: 200, LengthInSlots: 100},
+	}, ls.epochCache...))
+
+	producer := tb.block.IssuerVkey().Hash()
+	fixture := &eligibilityDenominatorFixture{
+		ls:            ls,
+		db:            db,
+		block:         tb,
+		producer:      producer[:],
+		snapshotEpoch: 4,
+		boundarySlot:  ls.epochCache[1].StartSlot,
+		snapshotSlot:  ls.epochCache[1].StartSlot - 1,
+		producerStake: 1_000_000,
+	}
+	// The whole eligible stake: the producer's own delegator.
+	seedLiveDelegatedPoolStake(
+		t, db, fixture.producer, fixture.producerStake,
+		fixture.snapshotSlot, 1,
+	)
+	return fixture
+}
+
+// capture runs the real epoch-boundary snapshot manager over the seeded live
+// state, so the mark rows and epoch_summary.total_active_stake the leadership
+// check divides by are computed rather than injected.
+func (f *eligibilityDenominatorFixture) capture(t *testing.T) {
+	t.Helper()
+	captureLiveMarkSnapshot(
+		t, f.db, f.snapshotEpoch, f.boundarySlot, f.snapshotSlot, f.producer,
+	)
+	snapshot, err := f.db.Metadata().GetPoolStakeSnapshot(
+		f.snapshotEpoch,
+		models.PoolStakeSnapshotTypeMark,
+		f.producer,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, snapshot)
+	require.False(t, f.ls.shouldSkipPostMithrilMarkEligibility(
+		snapshot, f.snapshotEpoch,
+	), "mark must be enforced, not skipped, for this test to mean anything")
+	f.ls.publishSnapshotsLocked()
+}
+
+func (f *eligibilityDenominatorFixture) totalActiveStake(
+	t *testing.T,
+) uint64 {
+	t.Helper()
+	total, err := f.db.Metadata().GetTotalActiveStake(
+		f.snapshotEpoch,
+		models.PoolStakeSnapshotTypeMark,
+		nil,
+	)
+	require.NoError(t, err)
+	return total
+}
+
+// TestVerifyBlockLeaderEligibility_DenominatorExcludesIneligibleStake pins the
+// composition of the leader-threshold denominator through the real leadership
+// path. cardano-ledger's sumAllStakeCompact sums the snapshot stake map, which
+// holds only stake delegated to a registered, non-retired pool; dingo derives
+// the same total from reward_live_stake rows filtered by the active pool set at
+// the snapshot slot.
+//
+// Three kinds of stake must stay out of it:
+//
+//   - stake delegated to nothing (account.pool NULL),
+//   - stake delegated to a pool retired at or before the snapshot slot,
+//   - stake delegated to a pool key hash that was never registered.
+//
+// Admitting any one of them inflates the denominator, shrinks every honest
+// pool's sigma, and rejects canonical blocks at a thin margin. That is the
+// wedge in #3626/#3794: a reaped pool's delegations survived POOLREAP and
+// rejoined the distribution when the pool re-registered, putting 0.285% of
+// extra stake in the epoch-19 mark total and rejecting a canonical Preview
+// block at slot 1730450 by a margin of -0.000565555.
+func TestVerifyBlockLeaderEligibility_DenominatorExcludesIneligibleStake(
+	t *testing.T,
+) {
+	const ineligibleStake = uint64(400_000_000_000_000_000)
+	f := newEligibilityDenominatorFixture(t, 60)
+
+	// Ineligible bucket 1: registered, active credential with no delegation.
+	seedLiveStakeCredential(
+		t, f.db, eligibilityCred28(0x71), nil, ineligibleStake,
+		f.snapshotSlot, 2,
+	)
+
+	// Ineligible bucket 2: delegated to a pool retired before the snapshot
+	// slot. Registered at slot 100, retirement recorded at slot 200 for epoch
+	// 3, which is the epoch containing the snapshot slot, so
+	// GetActivePoolKeyHashesAtSlot must not report it.
+	retired := eligibilityCred28(0x72)
+	seedLiveDelegatedPoolStake(
+		t, f.db, retired, ineligibleStake, 100, 3,
+	)
+	require.NoError(t, f.db.Metadata().RetirePools(
+		nil, [][]byte{retired}, 3, 200,
+	))
+
+	// Ineligible bucket 3: delegated to a pool key hash with no registration
+	// of any kind.
+	seedLiveStakeCredential(
+		t, f.db, eligibilityCred28(0x73), eligibilityCred28(0x74),
+		ineligibleStake, f.snapshotSlot, 4,
+	)
+
+	f.capture(t)
+
+	assert.Equal(t, f.producerStake, f.totalActiveStake(t),
+		"denominator must sum only stake delegated to a registered, "+
+			"non-retired pool")
+
+	require.NoError(t, f.ls.verifyBlockLeaderEligibility(f.block.block, 5),
+		"a canonical block from the only eligible pool must be accepted")
+}
+
+// TestVerifyBlockLeaderEligibility_DenominatorIncludesEligibleStake is the
+// negative half of the test above: the same fixture, with the ineligible stake
+// replaced by stake delegated to a registered, non-retired pool. That stake
+// belongs in the denominator, so the producer genuinely holds a negligible
+// share and its block must still be rejected.
+//
+// Without this case the test above would pass on a denominator that excluded
+// everything, including stake it must count.
+func TestVerifyBlockLeaderEligibility_DenominatorIncludesEligibleStake(
+	t *testing.T,
+) {
+	const eligibleStake = uint64(400_000_000_000_000_000)
+	f := newEligibilityDenominatorFixture(t, 61)
+
+	other := eligibilityCred28(0x75)
+	seedLiveDelegatedPoolStake(
+		t, f.db, other, eligibleStake, f.snapshotSlot, 5,
+	)
+
+	f.capture(t)
+
+	assert.Equal(t, f.producerStake+eligibleStake, f.totalActiveStake(t),
+		"stake delegated to a registered, non-retired pool must be counted")
+
+	err := f.ls.verifyBlockLeaderEligibility(f.block.block, 5)
+	require.Error(t, err, "an ineligible producer must still be rejected")
+	assert.Contains(
+		t,
+		err.Error(),
+		"VRF leader value exceeds stake-derived threshold",
+	)
+}
+
+func eligibilityCred28(b byte) []byte {
+	out := make([]byte, 28)
+	for i := range out {
+		out[i] = b
+	}
+	return out
+}
