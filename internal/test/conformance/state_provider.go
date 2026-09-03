@@ -650,9 +650,30 @@ func (p *DingoStateProvider) Constitution() (*common.Constitution, error) {
 	return governance.ConstitutionFromModel(stored)
 }
 
-// TreasuryValue returns the current treasury value
+// TreasuryValue returns the treasury value from the real backend, in the same
+// shape production's ledger.LedgerView.TreasuryValue reports.
+//
+// It never answers a synthetic zero. The harness does not seed treasury/pot
+// accounting (see DingoStateManager.persistEnactment), so an unseeded backend
+// has no network-state row at all. Returning 0 for that would make a provider
+// that cannot answer look healthy: the upstream current-treasury-value rule
+// only queries this method once a transaction body actually carries key 21,
+// and it compares for equality, so a synthetic zero silently rejects every
+// vector that declares a non-zero value and silently accepts one declaring
+// zero. Failing closed reports the missing harness state instead.
 func (p *DingoStateProvider) TreasuryValue() (uint64, error) {
-	return 0, nil
+	state, err := withBadConnRetry(func() (*models.NetworkState, error) {
+		return p.manager.db.Metadata().GetNetworkState(nil)
+	})
+	if err != nil {
+		return 0, fmt.Errorf("lookup treasury network state: %w", err)
+	}
+	if state == nil {
+		return 0, errors.New(
+			"treasury network state is unavailable: conformance harness does not seed treasury state",
+		)
+	}
+	return uint64(state.Treasury), nil
 }
 
 // GovActionById looks up a governance action by its ID against the real
