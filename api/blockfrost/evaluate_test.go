@@ -9,11 +9,16 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -321,4 +326,236 @@ func TestDecodeTransactionPayload(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+}
+
+// TestHandleTransactionSubmitRejectedIsNotReportedAsMalformed covers a
+// transaction the mempool declines. Both that and a genuinely undecodable body
+// used to be wrapped in ErrInvalidTransaction, so a well-formed transaction
+// rejected for, say, a script data hash mismatch came back as
+// "Invalid transaction CBOR." with nothing logged. That sends the caller to
+// inspect their serialization instead of the rejection, which is the one thing
+// the response could have told them.
+func TestHandleTransactionSubmitRejectedIsNotReportedAsMalformed(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{
+		transactionSubmitErr: fmt.Errorf(
+			"%w: validate transaction: script data hash mismatch",
+			ErrTransactionRejected,
+		),
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v0/tx/submit",
+		strings.NewReader("\x84\x00"),
+	)
+	req.Header.Set("Content-Type", "application/cbor")
+	w := httptest.NewRecorder()
+	b.handleTransactionSubmit(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, "Bad Request", resp.Error)
+	assert.NotEqual(
+		t,
+		"Invalid transaction CBOR.",
+		resp.Message,
+		"a rejected transaction is not malformed CBOR",
+	)
+	assert.Equal(
+		t,
+		"Transaction rejected: validate transaction: script data hash mismatch",
+		resp.Message,
+		"the rejection reason is what the caller needs",
+	)
+}
+
+// TestHandleTransactionSubmitStillReportsMalformedCbor pins the other side of
+// that split: a body that genuinely cannot be decoded keeps its message.
+func TestHandleTransactionSubmitStillReportsMalformedCbor(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{
+		transactionSubmitErr: fmt.Errorf(
+			"%w: determine transaction type",
+			ErrInvalidTransaction,
+		),
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v0/tx/submit",
+		strings.NewReader("\x84\x00"),
+	)
+	req.Header.Set("Content-Type", "application/cbor")
+	w := httptest.NewRecorder()
+	b.handleTransactionSubmit(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, "Invalid transaction CBOR.", resp.Message)
+}
+
+// TestHandleTransactionEvaluateFailureIsNotReportedAsMalformed is the same
+// split on the evaluation endpoints: a transaction that decoded but could not
+// be evaluated is not malformed CBOR.
+func TestHandleTransactionEvaluateFailureIsNotReportedAsMalformed(t *testing.T) {
+	node := evaluateTestNode()
+	node.transactionEvaluationErr = fmt.Errorf(
+		"%w: resolve inputs",
+		ErrTransactionEvaluation,
+	)
+	b := newTestBlockfrost(node)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v0/utils/txs/evaluate",
+		strings.NewReader("\x84\x00"),
+	)
+	req.Header.Set("Content-Type", "application/cbor")
+	w := httptest.NewRecorder()
+	b.handleTransactionEvaluate(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, "Transaction could not be evaluated.", resp.Message)
+}
+
+// stubEvaluator stands in for the ledger at the evaluation boundary, so a
+// single EvaluateTx result can be classified in isolation.
+type stubEvaluator struct {
+	exUnits map[lcommon.RedeemerKey]lcommon.ExUnits
+	err     error
+	calls   int
+}
+
+func (s *stubEvaluator) EvaluateTx(tx lcommon.Transaction) (
+	uint64,
+	lcommon.ExUnits,
+	map[lcommon.RedeemerKey]lcommon.ExUnits,
+	error,
+) {
+	s.calls++
+	return 0, lcommon.ExUnits{}, s.exUnits, s.err
+}
+
+// TestTransactionEvaluateStorageFailureIsNotAnEvaluationFailure pins that a
+// node that cannot read its own UTxO set does not report the caller's
+// transaction as unevaluable. Labelled ErrTransactionEvaluation it answers
+// 400, which tells the caller to change a transaction that was never
+// evaluated and hides the outage from anything deciding whether to retry.
+func TestTransactionEvaluateStorageFailureIsNotAnEvaluationFailure(
+	t *testing.T,
+) {
+	for name, cause := range map[string]error{
+		"blob store unavailable": dbtypes.ErrBlobStoreUnavailable,
+		"utxo cbor unavailable":  database.ErrUtxoCborUnavailable,
+	} {
+		t.Run(name, func(t *testing.T) {
+			evaluator := &stubEvaluator{
+				err: fmt.Errorf(
+					"TX abcd failed evaluation: %w",
+					cause,
+				),
+			}
+			adapter := &NodeAdapter{evaluator: evaluator}
+
+			result, err := adapter.TransactionEvaluate(submitTestTxCbor(t))
+
+			require.Error(t, err)
+			assert.Nil(t, result)
+			assert.Equal(t, 1, evaluator.calls)
+			assert.ErrorIs(t, err, ErrLedgerUnavailable)
+			assert.NotErrorIs(
+				t,
+				err,
+				ErrTransactionEvaluation,
+				"the transaction was never evaluated",
+			)
+			assert.ErrorIs(t, err, cause, "the cause is preserved")
+		})
+	}
+}
+
+// TestTransactionEvaluateScriptFailureStaysAnEvaluationFailure is the control
+// for that split. Without it, mapping every EvaluateTx error to
+// ErrLedgerUnavailable would satisfy the test above.
+func TestTransactionEvaluateScriptFailureStaysAnEvaluationFailure(
+	t *testing.T,
+) {
+	evalErr := errors.New(
+		"TX abcd failed evaluation: the machine terminated part way " +
+			"through evaluation due to overspending the budget",
+	)
+	evaluator := &stubEvaluator{err: evalErr}
+	adapter := &NodeAdapter{evaluator: evaluator}
+
+	_, err := adapter.TransactionEvaluate(submitTestTxCbor(t))
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrTransactionEvaluation)
+	assert.NotErrorIs(t, err, ErrLedgerUnavailable)
+	assert.ErrorIs(t, err, evalErr)
+}
+
+// TestTransactionEvaluateReturnsExecutionUnits pins that the classification
+// does not swallow the success path, and that the evaluator seam is the one
+// the execution units come from.
+func TestTransactionEvaluateReturnsExecutionUnits(t *testing.T) {
+	evaluator := &stubEvaluator{
+		exUnits: map[lcommon.RedeemerKey]lcommon.ExUnits{
+			{Tag: lcommon.RedeemerTagSpend, Index: 0}: {
+				Memory: 1700,
+				Steps:  476468,
+			},
+		},
+	}
+	adapter := &NodeAdapter{evaluator: evaluator}
+
+	result, err := adapter.TransactionEvaluate(submitTestTxCbor(t))
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, evaluator.calls)
+	assert.Equal(t, TransactionEvaluationResponse{
+		"spend:0": {Memory: 1700, Steps: 476468},
+	}, result)
+}
+
+// TestTransactionEvaluateWithoutEvaluatorIsUnavailable covers the adapter
+// built without a ledger, the evaluation counterpart of the nil submitter.
+func TestTransactionEvaluateWithoutEvaluatorIsUnavailable(t *testing.T) {
+	adapter := &NodeAdapter{}
+
+	_, err := adapter.TransactionEvaluate(submitTestTxCbor(t))
+
+	require.ErrorIs(t, err, ErrLedgerUnavailable)
+}
+
+// TestNewNodeAdapterWiresEvaluator pins that the production constructor fills
+// the seam, so the branch above is not reachable from a real node.
+func TestNewNodeAdapterWiresEvaluator(t *testing.T) {
+	adapter, _, _ := newDBBackedAdapter(t)
+
+	assert.NotNil(t, adapter.evaluator)
+}
+
+// TestHandleTransactionEvaluateStorageFailureReturns503 carries the
+// classification through the HTTP layer.
+func TestHandleTransactionEvaluateStorageFailureReturns503(t *testing.T) {
+	node := evaluateTestNode()
+	node.transactionEvaluationErr = fmt.Errorf(
+		"%w: %w",
+		ErrLedgerUnavailable,
+		dbtypes.ErrBlobStoreUnavailable,
+	)
+	w := postEvaluate(
+		t,
+		node,
+		"/api/v0/utils/txs/evaluate",
+		"application/cbor",
+		hex.EncodeToString(rawEvaluateTxCbor),
+	)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, "Service Unavailable", resp.Error)
+	assert.Equal(t, "ledger state unavailable", resp.Message)
 }

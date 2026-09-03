@@ -67,6 +67,19 @@ var (
 // inside its data directory.
 const metadataTemplateFile = "metadata.sqlite"
 
+// metadataTemplateDirPrefix is the os.MkdirTemp prefix for the scratch
+// directory a template build owns.
+//
+// The process ID scopes it. os.MkdirTemp places the directory directly in the
+// shared temp directory, which every test binary that imports this package
+// builds into, so an unscoped prefix leaves a leaked directory unattributable
+// and makes the shared directory's contents useless as evidence about any one
+// build: a sibling binary's build in flight under `go test ./...` is
+// indistinguishable from this binary's leak.
+func metadataTemplateDirPrefix() string {
+	return fmt.Sprintf("dingo-dbtest-metadata-template-%d-", os.Getpid())
+}
+
 // migratedMetadataTemplate returns the bytes of a fully migrated SQLite
 // metadata database, running the migration exactly once per process.
 func migratedMetadataTemplate() ([]byte, error) {
@@ -104,7 +117,7 @@ func templateCleanupError(err error, dir string, removeErr error) error {
 // closes cleanly; reading a live database would capture a torn page or leave
 // the content in a companion -wal file this template does not carry.
 func buildMetadataTemplate() (_ []byte, err error) {
-	dir, err := os.MkdirTemp("", "dingo-dbtest-metadata-template-")
+	dir, err := os.MkdirTemp("", metadataTemplateDirPrefix())
 	if err != nil {
 		return nil, fmt.Errorf("create metadata template dir: %w", err)
 	}

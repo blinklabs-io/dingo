@@ -94,6 +94,12 @@ const (
 	SubscriberBackpressureBlock
 )
 
+// EventPanicHandler is invoked by SubscribeFuncStrict, on the subscription's
+// own dispatch goroutine, after a handler panic has been recovered and
+// logged. It receives the event that was being processed and the recovered
+// panic value.
+type EventPanicHandler func(Event, any)
+
 type Event struct {
 	Timestamp time.Time
 	Data      any
@@ -764,7 +770,95 @@ func (e *EventBus) SubscribeFuncWithBufferPolicy(
 			if e.terminalClosing.Load() {
 				return
 			}
-			e.safeHandlerCall(handlerFunc, evt)
+			e.safeHandlerCall(handlerFunc, evt, nil)
+		}
+	}(
+		chSub.ch,
+		handlerFunc,
+		chSub.done,
+	)
+	return subId
+}
+
+// SubscribeFuncStrict is like SubscribeFuncWithBufferPolicy, but for handlers
+// that implement state-machine logic where silently continuing past a failed
+// event is unsafe -- e.g. a handler that mutates state derived from a
+// monotonic stream of chain events, where the next event's correctness
+// depends on the previous one having actually been applied. A handler panic
+// is never absorbed the way it is for a plain SubscribeFunc handler:
+//
+//   - it is still recovered and logged, so it cannot crash the node;
+//   - onPanic (if non-nil) is invoked with the event and the recovered panic
+//     value, on the subscription's own dispatch goroutine, so the owning
+//     component can react (log with its own context, alert, mark itself
+//     degraded);
+//   - the subscription is then torn down and its dispatch goroutine exits,
+//     so no further event is delivered into (and silently dropped by) a
+//     handler that just proved its state may be inconsistent.
+//
+// backpressurePolicy is independent of the panic behavior above and must be
+// chosen deliberately: SubscriberBackpressureDetach can silently drop this
+// subscription on ordinary backpressure alone, with the same permanent loss
+// of future events as a panic would cause, since nothing here re-subscribes.
+// Use SubscriberBackpressureBlock for an ordering-critical stream whose
+// omission would leave the owning component's state stale in a way it cannot
+// safely recover from -- chainselection.NewChainSelector's PeerRollbackEvent
+// subscription is the concrete example.
+//
+// Use SubscribeFunc/SubscribeFuncWithBuffer instead for handlers that are
+// safe to keep retrying on the next event -- internal/dblifecycle.Manager is
+// the concrete example this distinction exists for: a panic in one epoch's
+// snapshot attempt must not stop automatic snapshots for every later epoch,
+// so it deliberately relies on the plain SubscribeFunc behavior instead.
+func (e *EventBus) SubscribeFuncStrict(
+	eventType EventType,
+	buffer int,
+	backpressurePolicy SubscriberBackpressurePolicy,
+	handlerFunc EventHandlerFunc,
+	onPanic EventPanicHandler,
+) EventSubscriberId {
+	e.stopMu.RLock()
+	if e.stopped || e.closed {
+		e.stopMu.RUnlock()
+		return 0
+	}
+	subId, chSub := e.subscribeInternal(
+		eventType,
+		buffer,
+		true,
+		backpressurePolicy,
+	)
+	e.subscriberWg.Add(1)
+	e.stopMu.RUnlock()
+
+	go func(evtCh <-chan Event, handlerFunc EventHandlerFunc, done chan struct{}) {
+		defer close(done)
+		defer e.subscriberWg.Done()
+		// Self-cleans its own channelSubsById entry for the same reason
+		// SubscribeFuncWithBufferPolicy's dispatch goroutine does -- see its
+		// matching comment above. The panic path below additionally calls
+		// Unsubscribe itself, which removes the e.subscribers/snapshot
+		// entries immediately; this defer only ever needs to cover the
+		// channelSubsById bookkeeping unsubscribe() defers to it.
+		defer func() {
+			e.mu.Lock()
+			delete(e.channelSubsById, subId)
+			e.mu.Unlock()
+		}()
+		for {
+			evt, ok := <-evtCh
+			if !ok {
+				return
+			}
+			if e.terminalClosing.Load() {
+				return
+			}
+			if e.safeHandlerCall(handlerFunc, evt, onPanic) {
+				// The handler panicked: stop delivering events to it rather
+				// than looping back for the next one as if nothing failed.
+				e.Unsubscribe(eventType, subId)
+				return
+			}
 		}
 	}(
 		chSub.ch,
@@ -775,25 +869,95 @@ func (e *EventBus) SubscribeFuncWithBufferPolicy(
 }
 
 // safeHandlerCall invokes a SubscribeFunc handler with panic recovery so that
-// a misbehaving handler cannot crash the node.
+// a misbehaving handler cannot crash the node. Returns true if the handler
+// panicked. onPanic, when non-nil, runs after the panic is recovered and
+// logged.
 func (e *EventBus) safeHandlerCall(
 	handlerFunc EventHandlerFunc,
 	evt Event,
-) {
+	onPanic EventPanicHandler,
+) (panicked bool) {
 	defer func() {
 		if r := recover(); r != nil {
-			logger := e.Logger
-			if logger == nil {
-				logger = slog.Default()
-			}
-			logger.Error(
-				"SubscribeFunc handler panicked",
-				"event_type", evt.Type,
-				"panic", r,
-			)
+			panicked = true
+			e.reportHandlerPanic(evt, r, onPanic)
 		}
 	}()
 	handlerFunc(evt)
+	return false
+}
+
+// reportHandlerPanic logs a recovered SubscribeFunc handler panic and invokes
+// onPanic, each under its own nested recovery. It always runs from inside
+// safeHandlerCall's deferred recover, which has already consumed the
+// handler's own panic -- nothing further up the call stack can catch a
+// second one. Without containing it here, a misbehaving Logger or onPanic
+// hook panicking would propagate out of safeHandlerCall as a brand new,
+// unrecovered panic: safeHandlerCall would never return at all (so
+// SubscribeFuncStrict never observes panicked=true and never tears the
+// subscription down), and the panic would keep unwinding past the dispatch
+// goroutine's remaining defers with nothing left to catch it, crashing the
+// entire process over what should have been a single bad event.
+func (e *EventBus) reportHandlerPanic(
+	evt Event,
+	r any,
+	onPanic EventPanicHandler,
+) {
+	func() {
+		defer func() {
+			if r2 := recover(); r2 != nil {
+				// The configured Logger just proved unusable; fall back to
+				// the stdlib default rather than risk calling it again.
+				// safeLog, not a direct call: the fallback itself must not
+				// be the thing that finally lets a panic escape.
+				safeLog(
+					slog.Default(),
+					"panic while logging a SubscribeFunc handler panic",
+					"event_type", evt.Type,
+					"original_panic", r,
+					"logging_panic", r2,
+				)
+			}
+		}()
+		logger := e.Logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Error(
+			"SubscribeFunc handler panicked",
+			"event_type", evt.Type,
+			"panic", r,
+		)
+	}()
+	if onPanic == nil {
+		return
+	}
+	func() {
+		defer func() {
+			if r2 := recover(); r2 != nil {
+				safeLog(
+					slog.Default(),
+					"panic in SubscribeFuncStrict onPanic hook",
+					"event_type", evt.Type,
+					"original_panic", r,
+					"hook_panic", r2,
+				)
+			}
+		}()
+		onPanic(evt, r)
+	}()
+}
+
+// safeLog calls logger.Error, discarding any panic instead of letting it
+// propagate. Used only as the last-resort step inside a panic-recovery path
+// that has nothing left above it to catch a further panic -- e.g. reporting
+// that the configured Logger itself panicked, via slog.Default() instead.
+// Even that fallback must not be the thing that finally lets a panic escape,
+// so this is the floor: it stops here, silently, rather than one level
+// deeper.
+func safeLog(logger *slog.Logger, msg string, args ...any) {
+	defer func() { _ = recover() }()
+	logger.Error(msg, args...)
 }
 
 // Unsubscribe stops delivery of events for a particular type for an existing subscriber
