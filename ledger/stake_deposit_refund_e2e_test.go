@@ -29,10 +29,11 @@ import (
 )
 
 // valueNotConservedSubstring is the message
-// shelley.ValueNotConservedUtxoError renders. Value conservation is rule 32 of
-// conway.UtxoValidationRules on the pinned gouroboros v0.202.5, but these
-// tests match on the message rather than the index because the index moves
-// whenever upstream reorders the slice.
+// shelley.ValueNotConservedUtxoError renders. These tests match on that
+// message and never on the rule index: the index is an offset into the
+// upstream gouroboros slice and moves whenever upstream inserts or reorders a
+// rule. It printed as 32 on v0.202.5 and prints as 33 on the currently pinned
+// v0.202.6, which inserted UtxoValidateCurrentTreasuryValue at index 0.
 const valueNotConservedSubstring = "value not conserved"
 
 const stakeRefundTestKeyDeposit = 2_000_000
