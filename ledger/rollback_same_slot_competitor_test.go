@@ -200,8 +200,11 @@ func newSameSlotCompetitorFixtureOpts(
 // Presence is judged on ErrUtxoNotFound rather than on a nil error: a row
 // seeded directly into metadata carries no blob CBOR (models.Utxo.Cbor is not
 // persisted by CreateUtxo), so the decode step of UtxoById cannot succeed for a
-// synthetic UTxO. ErrUtxoCborUnavailable and a decode failure both mean the row
-// IS in the live set, which is the question this test asks.
+// synthetic UTxO. Only ErrUtxoCborUnavailable, alongside a nil error, is read
+// as the row being in the live set. Any other error -- including a genuine
+// decode failure -- is a lookup failure rather than an answer about live-set
+// membership, and is returned so the test fails loudly instead of counting as
+// present.
 func (f *sameSlotCompetitorFixture) inputInLiveSet(t *testing.T) bool {
 	t.Helper()
 
