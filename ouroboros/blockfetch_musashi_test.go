@@ -245,32 +245,12 @@ func newBlockfetchPeerWithOpts(
 	}
 }
 
-func (p *musashiBlockfetchPeer) send(t *testing.T, msg protocol.Message) {
-	t.Helper()
-	data, err := cbor.Encode(msg)
-	require.NoError(t, err)
-	segment := muxer.NewSegment(oblockfetch.ProtocolId, data, true)
-	require.NotNil(t, segment)
-	buf := &bytes.Buffer{}
-	require.NoError(
-		t,
-		binary.Write(buf, binary.BigEndian, segment.SegmentHeader),
-	)
-	_, err = buf.Write(segment.Payload)
-	require.NoError(t, err)
-	require.NoError(
-		t,
-		p.peerConn.SetWriteDeadline(time.Now().Add(5*time.Second)),
-	)
-	_, err = p.peerConn.Write(buf.Bytes())
-	require.NoError(t, err)
-}
-
-// sendErr is send without the test-fatal assertions, for the capability
-// probe: its server half runs on its own goroutine and the connection is
-// expected to be torn down under it when the capability is absent, so a write
-// error there is an observation, not a test failure. require.NoError off the
-// test goroutine would instead call FailNow on a finished test.
+// sendErr transmits msg as the server half of the protocol, returning an
+// error rather than asserting. Every caller runs on its own goroutine, where
+// the connection may be torn down underneath it, so an I/O error is an
+// observation and not a test failure -- and require.NoError there would call
+// FailNow off the test goroutine, which testing forbids. There is deliberately
+// no assertion-based variant of this helper for a caller to reach for.
 func (p *musashiBlockfetchPeer) sendErr(msg protocol.Message) error {
 	data, err := cbor.Encode(msg)
 	if err != nil {
@@ -300,8 +280,9 @@ func (p *musashiBlockfetchPeer) sendErr(msg protocol.Message) error {
 	return err
 }
 
-// readRequestRangeErr is readRequestRange without the test-fatal assertions.
-// See sendErr.
+// readRequestRangeErr consumes the MsgRequestRange the client sends, so the
+// server half only replies to a request the client actually made. Returns an
+// error rather than asserting; see sendErr.
 func (p *musashiBlockfetchPeer) readRequestRangeErr() error {
 	if err := p.peerConn.SetReadDeadline(
 		time.Now().Add(5 * time.Second),
@@ -325,27 +306,6 @@ func (p *musashiBlockfetchPeer) readRequestRangeErr() error {
 		payload,
 	)
 	return err
-}
-
-// readRequestRange consumes the MsgRequestRange the client sends, so the
-// server half only replies to a request the client actually made.
-func (p *musashiBlockfetchPeer) readRequestRange(t *testing.T) {
-	t.Helper()
-	require.NoError(
-		t,
-		p.peerConn.SetReadDeadline(time.Now().Add(5*time.Second)),
-	)
-	header := muxer.SegmentHeader{}
-	require.NoError(t, binary.Read(p.peerConn, binary.BigEndian, &header))
-	payload := make([]byte, header.PayloadLength)
-	_, err := io.ReadFull(p.peerConn, payload)
-	require.NoError(t, err)
-	msg, err := oblockfetch.NewMsgFromCbor(
-		oblockfetch.MessageTypeRequestRange,
-		payload,
-	)
-	require.NoError(t, err)
-	require.IsType(t, &oblockfetch.MsgRequestRange{}, msg)
 }
 
 // rawDeliveryOfUnrepresentableBlockSupported reports whether the linked
@@ -499,13 +459,40 @@ func runMusashiBlockfetchClientDelivery(
 	})
 	require.NoError(t, err)
 
+	// The server half never touches t. testing requires FailNow to run on
+	// the test goroutine, and every exit below other than the happy path
+	// ends the test while a write may still be pending here: the client
+	// failing the request closes the pipe under this goroutine, so its I/O
+	// is expected to fail. Report through a channel and log it instead.
 	serverDone := make(chan struct{})
+	serverErr := make(chan error, 1)
 	go func() {
 		defer close(serverDone)
-		peer.readRequestRange(t)
-		peer.send(t, oblockfetch.NewMsgStartBatch())
-		peer.send(t, oblockfetch.NewMsgBlock(wrapped))
-		peer.send(t, oblockfetch.NewMsgBatchDone())
+		if err := peer.readRequestRangeErr(); err != nil {
+			serverErr <- err
+			return
+		}
+		for _, msg := range []protocol.Message{
+			oblockfetch.NewMsgStartBatch(),
+			oblockfetch.NewMsgBlock(wrapped),
+			oblockfetch.NewMsgBatchDone(),
+		} {
+			if err := peer.sendErr(msg); err != nil {
+				serverErr <- err
+				return
+			}
+		}
+	}()
+	// Drained on every path, t.Fatal's Goexit included, so the goroutine
+	// cannot outlive the test. Both helpers set deadlines, so this cannot
+	// block indefinitely.
+	defer func() {
+		<-serverDone
+		select {
+		case err := <-serverErr:
+			t.Logf("block-fetch test peer stopped: %v", err)
+		default:
+		}
 	}()
 
 	require.NoError(t, peer.client.GetBlockRange(point, point))
@@ -519,7 +506,6 @@ func runMusashiBlockfetchClientDelivery(
 			bfEvt.Block,
 			"block-fetch delivered a batch-done before the block",
 		)
-		<-serverDone
 		return bfEvt.Block, header, blockRaw
 	case err := <-peer.errChan:
 		t.Fatalf("block-fetch client failed the request: %v", err)
