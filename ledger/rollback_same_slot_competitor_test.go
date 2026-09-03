@@ -209,8 +209,20 @@ func (f *sameSlotCompetitorFixture) inputInLiveSet(t *testing.T) bool {
 	txn := f.db.Transaction(false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		_, err := f.db.UtxoByRef(f.spentTxId, 0, txn)
-		live = !errors.Is(err, database.ErrUtxoNotFound)
-		return nil
+		switch {
+		case err == nil,
+			errors.Is(err, database.ErrUtxoCborUnavailable):
+			live = true
+			return nil
+		case errors.Is(err, database.ErrUtxoNotFound):
+			live = false
+			return nil
+		default:
+			// Any other error is a real lookup failure, not an answer about
+			// live-set membership. Return it so the test fails instead of
+			// reading it as "present".
+			return err
+		}
 	}))
 	return live
 }
