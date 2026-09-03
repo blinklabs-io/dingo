@@ -2680,8 +2680,9 @@ list and the accumulated delegator result still grow with the chain's total
 active-account count, same as the per-DRep loop this replaced; only the
 temporary hydrated-`Account`-row memory — the `GetAccountsByCredential`
 result map, the larger share of retained memory since it holds full rows
-rather than the four fields actually read — is bounded to the batch size
-instead of the active-account count. Filtered `GetStakeSnapshots` and
+rather than the two fields (`Drep`, `DrepType`) actually read — is bounded
+to the batch size instead of the active-account count. Filtered
+`GetStakeSnapshots` and
 `GetFilteredVoteDelegatees` likewise use existing batch database operations,
 removing their per-item read
 amplification without a client-visible item limit. Existing result
