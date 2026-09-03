@@ -1989,19 +1989,36 @@ func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 
 	// The stuck worker goroutine is already running at this point, so it's
 	// part of the baseline count -- only a goroutine spawned by Shutdown
-	// itself would show up as growth below.
+	// itself would show up as growth below. GC first so a transient
+	// runtime/GC goroutine isn't baked into the baseline.
+	runtime.GC()
 	baseline := runtime.NumGoroutine()
 
 	err := pool.Shutdown(50 * time.Millisecond)
 	require.Error(t, err)
 
-	after := runtime.NumGoroutine()
-	assert.LessOrEqual(
-		t,
-		after,
-		baseline,
-		"Shutdown's timeout path must not leave behind a goroutine of its own",
-	)
+	// A single immediate snapshot is flaky: a short-lived runtime/GC
+	// goroutine can transiently push the count above baseline with no
+	// relation to Shutdown. Poll briefly instead, matching
+	// storagetest.AssertNoGoroutineLeak's pattern -- since a leaked waiter
+	// goroutine would persist for the stuck operation's full duration, it
+	// would still be caught well within this deadline.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		after := runtime.NumGoroutine()
+		if after <= baseline {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf(
+				"Shutdown's timeout path must not leave behind a goroutine "+
+					"of its own: baseline %d, now %d",
+				baseline,
+				after,
+			)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	// Unblock the stuck operation so it doesn't leak past the test.
 	close(blockUntil)
