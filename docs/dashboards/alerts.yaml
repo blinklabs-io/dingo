@@ -42,13 +42,38 @@ groups:
         # extrapolates through a reset rather than discarding what came
         # before it, so a divergence recorded shortly before a restart can
         # still contribute to increase() for up to an hour afterwards.
+        #
+        # severity: warning, and for: 5m rather than 0m, deliberately: this
+        # tool's own design (see ARCHITECTURE.md's Node Parity section) is
+        # that live cross-node disagreement is often transient (propagation
+        # delay, short forks, the documented tip-sandwich race) rather than
+        # a confirmed bug, and there is no fatal/strict mode precisely
+        # because of that -- paging critical on a single occurrence, before
+        # even one retry cycle has had a chance to self-correct it,
+        # contradicts that design. NodeParityRepeatedDivergence below is the
+        # higher-confidence critical signal for a divergence that keeps
+        # recurring rather than resolving on its own.
         expr: increase(node_parity_divergence_total{network=~".+"}[1h]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "node-parity found ledger-state divergence on {{ $labels.network }}"
+          description: "node-parity ({{ $labels.instance }}) reported a {{ $labels.field }} divergence between dingo and cardano-node on {{ $labels.network }} in the last hour."
+
+      - alert: NodeParityRepeatedDivergence
+        # A single divergence is common-enough noise (see NodeParityDivergence
+        # above) that it only warrants a warning; more than one within the
+        # same rolling hour is a much stronger signal of a persistent, real
+        # bug rather than one-off transient disagreement, and is worth
+        # paging critical for.
+        expr: increase(node_parity_divergence_total{network=~".+"}[1h]) > 1
         for: 0m
         labels:
           severity: critical
         annotations:
-          summary: "node-parity found ledger-state divergence on {{ $labels.network }}"
-          description: "node-parity ({{ $labels.instance }}) reported a {{ $labels.field }} divergence between dingo and cardano-node on {{ $labels.network }} in the last hour."
+          summary: "node-parity found repeated ledger-state divergence on {{ $labels.network }}"
+          description: "node-parity ({{ $labels.instance }}) reported more than one {{ $labels.field }} divergence between dingo and cardano-node on {{ $labels.network }} within the last hour -- unlikely to be transient noise."
 
       - alert: NodeParityDown
         expr: up{job="node-parity"} == 0
@@ -72,6 +97,17 @@ groups:
         # tool itself being stuck. NodeParityCheckErrors below is the
         # dedicated signal for "attempting but failing"; this alert is only
         # for "not attempting at all."
+        #
+        # The [10m] window is fixed at rule-authoring time; --fallback-interval
+        # is an operator-set runtime flag this file has no way to read. If
+        # --fallback-interval is configured well above 10m (the 2m default
+        # leaves a 5x margin), a perfectly healthy run can show zero activity
+        # within a trailing 10m window purely because its own configured
+        # cadence is slower than that, and this alert would misfire. Keep
+        # --fallback-interval comfortably under 10m (an order of magnitude,
+        # as with the default, is a safe margin), or widen this window and
+        # NodeParityDown's/NodeParityCheckErrors' for: durations to match if
+        # a longer interval is genuinely needed.
         expr: |
           (
             rate(node_parity_checks_total{network=~".+"}[10m])

@@ -6422,11 +6422,14 @@ internal/nodeparity/       # shared library, untagged and importable
   check.go                  # CheckResult, Check, sandwichOK: the tip-sandwich orchestration
   watch.go                  # Watcher, WatchBlocks: persistent per-node ChainSync subscription with reconnect
 
-cmd/node-parity/           # thin Cobra CLI wrapper
+cmd/node-parity/           # thin Cobra CLI wrapper: only 'check' and 'watch' are subcommands
   main.go                  # root command (default action: one check, same as 'check')
   check.go                  # one-shot subcommand
   watch.go                  # block-triggered subcommand, --fallback-interval as a backstop
-  metrics.go                # Prometheus counters, network-labeled like the real node's own
+  metrics.go                # not a subcommand -- Prometheus counters plus the /metrics HTTP
+                             # server 'watch' starts when --metrics-addr is set; 'check' never
+                             # serves metrics, since a one-shot invocation has nothing ongoing
+                             # to expose them for
 ```
 
 **Design: on-demand `check`, plus block-triggered `watch`.** `check` runs one

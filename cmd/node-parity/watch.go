@@ -48,7 +48,12 @@ stalls without erroring.
 
 Logs each cycle's outcome and, when --metrics-addr is set, exposes
 Prometheus counters for completed cycles, skipped cycles, and per-field
-divergences.`,
+divergences.
+
+docs/dashboards/alerts.yaml's NodeParityNotChecking rule assumes
+--fallback-interval stays comfortably under its own fixed 10m window (an
+order of magnitude, as with the 2m default, is a safe margin); a much
+larger value can make that alert misfire during an otherwise healthy run.`,
 		Args: cobra.NoArgs,
 		RunE: watchRun,
 	}
@@ -119,6 +124,7 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 	for {
 		runWatchCycle(
 			ctx,
+			fallbackInterval,
 			globalFlags.dingoAddr,
 			globalFlags.cardanoAddr,
 			magic,
@@ -126,13 +132,7 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 			metrics,
 		)
 
-		if !fallback.Stop() {
-			select {
-			case <-fallback.C:
-			default:
-			}
-		}
-		fallback.Reset(fallbackInterval)
+		resetFallbackTimer(fallback, fallbackInterval)
 
 		select {
 		case <-ctx.Done():
@@ -145,17 +145,52 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 	}
 }
 
-// runWatchCycle runs one Check and hands its outcome to handleCheckResult.
-// Splitting the network call from the outcome-handling logic keeps the
-// latter unit-testable without a live node.
+// resetFallbackTimer rearms fallback for the next cycle. If fallback had
+// already fired (Stop returns false) -- a check ran long enough to overrun
+// it -- the next one is scheduled immediately (Reset(0)) instead of a full
+// fresh interval, so an overrun cycle doesn't compound into "at least 2x
+// --fallback-interval between checks." Otherwise fallback was stopped
+// before firing, and a normal full-interval reset is correct.
+func resetFallbackTimer(fallback *time.Timer, interval time.Duration) {
+	if !fallback.Stop() {
+		select {
+		case <-fallback.C:
+		default:
+		}
+		fallback.Reset(0)
+		return
+	}
+	fallback.Reset(interval)
+}
+
+// runWatchCycle runs one Check, bounded by timeout, and hands its outcome
+// to handleCheckResult. Splitting the network call from the outcome-
+// handling logic keeps the latter unit-testable without a live node.
+//
+// Check's own context-cancellation handling (see internal/nodeparity's
+// Dial) only reacts to ctx itself being cancelled -- process shutdown via
+// signal.NotifyContext, in this CLI. Without a per-cycle bound, a peer
+// that accepts a connection and then stops responding mid-query would
+// block Check (and so this whole watch loop, which calls it synchronously)
+// indefinitely: the fallback timer that exists specifically to guarantee
+// activity within --fallback-interval can never fire again once the loop
+// itself is the thing stuck, since nothing schedules a fresh cycle until
+// this one returns. Bounding each cycle by timeout (the same
+// --fallback-interval) guarantees a stuck cycle self-aborts (recorded via
+// checkErrorsTotal, same as any other Check error) before the next
+// fallback tick would have fired anyway, rather than wedging the loop
+// forever.
 func runWatchCycle(
 	ctx context.Context,
+	timeout time.Duration,
 	dingoAddr, cardanoAddr string,
 	magic uint32,
 	logger *slog.Logger,
 	metrics *parityMetrics,
 ) {
-	result, err := nodeparity.Check(ctx, dingoAddr, cardanoAddr, magic)
+	cycleCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result, err := nodeparity.Check(cycleCtx, dingoAddr, cardanoAddr, magic)
 	handleCheckResult(result, err, logger, metrics)
 }
 

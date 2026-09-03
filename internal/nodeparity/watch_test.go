@@ -16,14 +16,19 @@ package nodeparity
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 // unreachableAddr binds a TCP listener on an OS-assigned free port and
@@ -164,39 +169,73 @@ func TestWatchBlocks_CloseStopsPromptly(t *testing.T) {
 }
 
 // TestWatchBlocks_CloseStopsPromptlyAgainstUnresponsivePeer covers a peer
-// that accepts the TCP connection but never sends a byte -- a stalled
-// handshake or a dead node that still holds the socket open, as opposed to
-// TestWatchBlocks_CloseStopsPromptly's "nothing is listening at all" case.
-// GetCurrentTip and Sync are synchronous protocol calls with no per-call
-// timeout of their own: each blocks until the peer replies or the
-// connection is closed out from under it. Without watchSession closing the
-// connection the instant its context is cancelled, Close would block for
-// as long as the peer keeps the socket open (in production, indefinitely),
-// rather than returning promptly.
+// that completes the real NtC handshake and then stalls before replying to
+// the first ChainSync request (GetCurrentTip's FindIntersect) -- a dead or
+// hung node, as opposed to TestWatchBlocks_CloseStopsPromptly's "nothing is
+// listening at all" case, and distinct from a peer that never completes
+// the handshake at all (that phase is bounded by dialTimeout, not this
+// path -- see TestDial_HandshakeStallIsBoundedByDialTimeout's watch.go
+// counterpart, watchSession's own dialCtx-scoped closer). GetCurrentTip and
+// Sync are synchronous protocol calls with no per-call timeout of their
+// own: each blocks until the peer replies or the connection is closed out
+// from under it. Without watchSession closing the connection the instant
+// its context is cancelled, Close would block for as long as the peer
+// keeps the socket open (in production, indefinitely), rather than
+// returning promptly. Using a fake peer that never completes the
+// handshake at all would only exercise the earlier dial-time closer, not
+// this one -- a regression that removed this later closer would still
+// pass such a test.
 func TestWatchBlocks_CloseStopsPromptlyAgainstUnresponsivePeer(t *testing.T) {
+	const magic = 42
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })
 
-	accepted := make(chan net.Conn, 1)
+	findIntersectCalled := make(chan struct{})
+	stall := make(chan struct{}) // never closed: FindIntersect never replies
 	go func() {
 		conn, err := listener.Accept()
 		if err != nil {
 			return
 		}
-		// Accept and hold the connection open without ever writing to it,
-		// simulating a peer stuck mid-handshake (or simply dead but not
-		// yet timed out at the TCP level).
-		accepted <- conn
+		oconn, err := ouroboros.New(
+			ouroboros.WithConnection(conn),
+			ouroboros.WithServer(true),
+			ouroboros.WithNetworkMagic(magic),
+			ouroboros.WithChainSyncConfig(chainsync.NewConfig(
+				chainsync.WithFindIntersectFunc(
+					func(
+						_ chainsync.CallbackContext, _ []pcommon.Point,
+					) (pcommon.Point, chainsync.Tip, error) {
+						close(findIntersectCalled)
+						<-stall
+						return pcommon.Point{}, chainsync.Tip{}, nil
+					},
+				),
+			)),
+		)
+		if err != nil {
+			return
+		}
+		defer oconn.Close() //nolint:errcheck
+		<-oconn.ErrorChan()
 	}()
 
-	w := WatchBlocks(context.Background(), listener.Addr().String(), 42, nil)
+	w := WatchBlocks(context.Background(), listener.Addr().String(), magic, nil)
 
+	// Wait for GetCurrentTip's FindIntersect to actually reach the server,
+	// not just for the handshake to finish: cancelling immediately after
+	// the handshake races the dial-time closer (stopDialCancel, scoped to
+	// dialCtx) against ouroboros.New's own return, since dialCtx is a
+	// child of this same ctx -- which can tear down the raw connection
+	// through that earlier closer instead of the later one (stopOnCancel)
+	// this test exists to cover, making the test pass even with
+	// stopOnCancel removed. Waiting for FindIntersect guarantees
+	// stopDialCancel has already deregistered by the time Close runs.
 	select {
-	case conn := <-accepted:
-		t.Cleanup(func() { _ = conn.Close() })
+	case <-findIntersectCalled:
 	case <-time.After(5 * time.Second):
-		t.Fatal("server never observed the watcher's connection attempt")
+		t.Fatal("server never observed the watcher's GetCurrentTip request")
 	}
 
 	done := make(chan struct{})
@@ -210,7 +249,7 @@ func TestWatchBlocks_CloseStopsPromptlyAgainstUnresponsivePeer(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal(
 			"Watcher.Close did not return promptly against a peer that " +
-				"accepted the connection and then never responded",
+				"completed the handshake and then never replied to GetCurrentTip",
 		)
 	}
 }
@@ -240,4 +279,47 @@ func TestWatchBlocks_RetriesOnUnreachableAddr(t *testing.T) {
 		defer mu.Unlock()
 		return attempts >= 2
 	}, 3*time.Second, "watcher must keep retrying a connection that never succeeds")
+}
+
+// TestWatchBlocks_StalledHandshakeTriggersReconnectWithinDialTimeout covers
+// a peer that accepts the connection and then never completes the NtC
+// handshake, with no external cancellation (matching a real Watcher, whose
+// ctx normally only cancels on process shutdown). watchSession's own
+// dialCtx-scoped closer must still bound this phase by dialTimeout, the
+// same as Dial's identical fix (TestDial_HandshakeStallIsBoundedByDialTimeout):
+// regression test for a bug where this closer was registered against the
+// long-lived watcher ctx instead, leaving a stalled handshake unbounded
+// except by the watcher's own eventual shutdown.
+func TestWatchBlocks_StalledHandshakeTriggersReconnectWithinDialTimeout(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		// Accept and hold the connection open without ever writing to it,
+		// so ouroboros.New blocks in the handshake indefinitely unless
+		// watchSession's dialCtx-scoped closer bounds it.
+		t.Cleanup(func() { _ = conn.Close() })
+	}()
+
+	var mu sync.Mutex
+	var logs []string
+	logf := func(format string, args ...any) {
+		mu.Lock()
+		logs = append(logs, fmt.Sprintf(format, args...))
+		mu.Unlock()
+	}
+
+	w := WatchBlocks(context.Background(), listener.Addr().String(), 42, logf)
+	defer w.Close()
+
+	testutil.WaitForCondition(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(logs) >= 1
+	}, dialTimeout+5*time.Second, "watcher must log a reconnect attempt within dialTimeout+margin against a stalled handshake, with no external cancellation")
 }

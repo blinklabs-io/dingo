@@ -186,7 +186,15 @@ func watchSession(
 	// whatever New does with it, so closing it ourselves on cancellation
 	// makes the muxer's blocked read fail immediately, which New already
 	// treats as a shutdown signal internally and returns an error for.
-	stopDialCancel := context.AfterFunc(ctx, func() { rawConn.Close() }) //nolint:errcheck
+	// Registered against dialCtx, not ctx: a stalled handshake must be
+	// bounded by dialTimeout here the same as a peer that never accepts
+	// the socket at all -- registering against the long-lived watcher ctx
+	// would leave this phase unbounded except by the watcher's own
+	// eventual cancellation, defeating dialTimeout for exactly the case it
+	// exists to cover (see internal/nodeparity/dial.go's identical fix).
+	stopDialCancel := context.AfterFunc(
+		dialCtx, func() { rawConn.Close() },
+	) //nolint:errcheck
 	conn, connErr := ouroboros.New(
 		ouroboros.WithConnection(rawConn),
 		ouroboros.WithNetworkMagic(magic),

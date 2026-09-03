@@ -86,7 +86,7 @@ func TestLedgerStateConsensus(t *testing.T) {
 
 		dingoState, cardanoState, tip := sampleLedgerStateAtStableTip(
 			t, h, dingoEP, cardanoEP, dingoNtc, cardanoNtc, cfg.NetworkMagic,
-			cfg.ExpectedBlockTime(),
+			sampleTimeout,
 		)
 
 		diff := nodeparity.DiffSnapshots(dingoState, cardanoState)
@@ -114,29 +114,37 @@ func TestLedgerStateConsensus(t *testing.T) {
 // sample is discarded and retried instead.
 //
 // Uses require.Eventually with harness.go's own 2*time.Second polling
-// interval (see e.g. WaitForNodeSlot), budgeting the overall timeout off
-// blockTime (cfg.ExpectedBlockTime()) rather than a fixed attempt count:
-// transient tip divergence between two independently forging producers
+// interval (see e.g. WaitForNodeSlot). timeout is the caller's own
+// sampleTimeout (the same budget already given to each WaitForNodeSlot call
+// before this runs), not an independently-derived value: this helper's own
+// retries share the same inter-sample time budget the outer loop already
+// committed to, rather than a separately-computed timeout that could run
+// longer than the gap between two sample points. If this helper were
+// allowed to retry past that gap, the next iteration's WaitForNodeSlot
+// would find its target slot already passed and return immediately,
+// silently clustering samples at whatever tip happened to be current
+// instead of the evenly-spaced points across the run the test intends.
+// Transient tip divergence between two independently forging producers
 // around block-adoption time is the normal case here, not a rare one, so a
 // tight fixed-count retry with no backoff could exhaust its budget in well
-// under one block interval on a legitimate run. Writing the result into
-// the enclosing closure's variables from inside the condition function,
-// then reading them only after require.Eventually returns, mirrors
-// existing harness helpers -- testify's Eventually never runs the
-// condition function twice concurrently (it waits for one tick's result
-// before scheduling the next), so this needs no additional locking.
+// under one block interval on a legitimate run -- hence a duration budget,
+// not an attempt count. Writing the result into the enclosing closure's
+// variables from inside the condition function, then reading them only
+// after require.Eventually returns, mirrors existing harness helpers --
+// testify's Eventually never runs the condition function twice concurrently
+// (it waits for one tick's result before scheduling the next), so this
+// needs no additional locking.
 func sampleLedgerStateAtStableTip(
 	t *testing.T,
 	h *devnet.TestHarness,
 	dingoEP, cardanoEP devnet.NodeEndpoint,
 	dingoNtc, cardanoNtc string,
 	magic uint32,
-	blockTime time.Duration,
+	timeout time.Duration,
 ) (dingoState, cardanoState *nodeparity.Snapshot, tip devnet.ChainTip) {
 	t.Helper()
 
 	const pollInterval = 2 * time.Second
-	timeout := blockTime * 20
 
 	var (
 		attempt                int

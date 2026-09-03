@@ -91,34 +91,41 @@ func DiffSnapshots(a, b *Snapshot) Diff {
 	}
 
 	for _, poolID := range sortedPoolIDs(a.StakeDistribution) {
-		aFrac := a.StakeDistribution[poolID]
-		bFrac, ok := b.StakeDistribution[poolID]
+		aEntry := a.StakeDistribution[poolID]
+		bEntry, ok := b.StakeDistribution[poolID]
 		switch {
 		case !ok:
 			d.StakeDistribution = append(d.StakeDistribution, fmt.Sprintf(
 				"stake distribution: pool %s present in a, missing in b",
 				poolID,
 			))
-		case aFrac.Cmp(bFrac) != 0:
+		case aEntry.StakeFraction.Cmp(bEntry.StakeFraction) != 0:
 			d.StakeDistribution = append(d.StakeDistribution, fmt.Sprintf(
 				"stake distribution: pool %s fraction differs: %s (a) vs %s (b)",
 				poolID,
-				aFrac.RatString(),
-				bFrac.RatString(),
+				aEntry.StakeFraction.RatString(),
+				bEntry.StakeFraction.RatString(),
+			))
+		// A pool's registered VRF key is a leader-election input distinct
+		// from its stake share: two nodes agreeing on every pool's
+		// fraction while disagreeing on a registered VRF key is a real
+		// divergence a fraction-only comparison would miss entirely.
+		case aEntry.VrfHash != bEntry.VrfHash:
+			d.StakeDistribution = append(d.StakeDistribution, fmt.Sprintf(
+				"stake distribution: pool %s VRF key differs: %s (a) vs %s (b)",
+				poolID,
+				aEntry.VrfHash.String(),
+				bEntry.VrfHash.String(),
 			))
 		}
 	}
-	bOnlyPools := make(map[lcommon.PoolId]struct{})
-	for poolID := range b.StakeDistribution {
+	for _, poolID := range sortedPoolIDs(b.StakeDistribution) {
 		if _, ok := a.StakeDistribution[poolID]; !ok {
-			bOnlyPools[poolID] = struct{}{}
+			d.StakeDistribution = append(d.StakeDistribution, fmt.Sprintf(
+				"stake distribution: pool %s present in b, missing in a",
+				poolID,
+			))
 		}
-	}
-	for _, poolID := range sortedPoolIDs(bOnlyPools) {
-		d.StakeDistribution = append(d.StakeDistribution, fmt.Sprintf(
-			"stake distribution: pool %s present in b, missing in a",
-			poolID,
-		))
 	}
 
 	utxoDiffCount := 0
@@ -138,14 +145,10 @@ func DiffSnapshots(a, b *Snapshot) Diff {
 			report("utxo %s differs: %s (a) vs %s (b)", key, aVal, bVal)
 		}
 	}
-	bOnlyUTxO := make(map[string]string)
-	for key, bVal := range b.UTxOEntries {
+	for _, key := range sortedStringKeys(b.UTxOEntries) {
 		if _, ok := a.UTxOEntries[key]; !ok {
-			bOnlyUTxO[key] = bVal
+			report("utxo %s present in b, missing in a: %s", key, b.UTxOEntries[key])
 		}
-	}
-	for _, key := range sortedStringKeys(bOnlyUTxO) {
-		report("utxo %s present in b, missing in a: %s", key, bOnlyUTxO[key])
 	}
 	if utxoDiffCount > maxUTxODiffLines {
 		d.TruncatedUTxO = utxoDiffCount - maxUTxODiffLines

@@ -19,7 +19,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/internal/nodeparity"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
@@ -170,4 +172,124 @@ func TestWatchCommand_FallbackIntervalMustBePositive(t *testing.T) {
 	err := watchRun(cmd, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--fallback-interval must be positive")
+}
+
+// TestResetFallbackTimer_NotYetFiredGetsFullInterval covers the ordinary
+// case: a cycle finishes well within --fallback-interval, so Stop()
+// successfully cancels the still-pending timer, and the next one is armed
+// for a full fresh interval.
+func TestResetFallbackTimer_NotYetFiredGetsFullInterval(t *testing.T) {
+	const interval = 200 * time.Millisecond
+	fallback := time.NewTimer(time.Hour) // won't fire during this test
+	t.Cleanup(func() { fallback.Stop() })
+
+	start := time.Now()
+	resetFallbackTimer(fallback, interval)
+
+	select {
+	case <-fallback.C:
+		elapsed := time.Since(start)
+		assert.InDelta(
+			t, interval, elapsed, float64(50*time.Millisecond),
+			"an unfired timer must be rearmed for the full interval",
+		)
+	case <-time.After(interval + time.Second):
+		t.Fatal("fallback timer never fired after being reset")
+	}
+}
+
+// TestResetFallbackTimer_AlreadyFiredSchedulesImmediately covers a check
+// that overran --fallback-interval: by the time resetFallbackTimer runs,
+// the timer has already fired on its own (Stop returns false). The next
+// cycle must be scheduled immediately (Reset(0)), not after another full
+// interval, so an overrun doesn't compound into "at least 2x
+// --fallback-interval between checks."
+func TestResetFallbackTimer_AlreadyFiredSchedulesImmediately(t *testing.T) {
+	const interval = time.Hour // would fail the test if used here by mistake
+	fallback := time.NewTimer(10 * time.Millisecond)
+	t.Cleanup(func() { fallback.Stop() })
+
+	// Wait for a genuine fire, observed via the channel: Stop() only
+	// reliably reports "already fired" (false) once the fire has actually
+	// been delivered, not merely once its deadline has passed in wall-clock
+	// terms -- Go's runtime doesn't necessarily process an idle timer's
+	// firing the instant its duration elapses (confirmed directly: a 10ms
+	// timer's Stop() still returned true, "not yet fired," after sleeping
+	// 50ms with nothing ever touching its channel). Draining the channel
+	// ourselves first, simulating a check that ran long enough to overrun
+	// the fallback, puts the timer in the same already-fired, drained
+	// state resetFallbackTimer must handle.
+	<-fallback.C
+
+	done := make(chan struct{})
+	go func() {
+		resetFallbackTimer(fallback, interval)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("resetFallbackTimer blocked draining an already-fired timer")
+	}
+
+	select {
+	case <-fallback.C:
+	case <-time.After(time.Second):
+		t.Fatal(
+			"an already-fired fallback timer must be rescheduled immediately, not after a full fresh interval",
+		)
+	}
+}
+
+// TestRunWatchCycle_BoundedByTimeoutAgainstStalledPeer covers the fix for a
+// stuck watch loop: without a per-cycle timeout, a peer that accepts a
+// connection and then never responds would block Check (and so this whole
+// loop, which calls it synchronously) indefinitely, since Check's own
+// context-cancellation handling only reacts to ctx itself being cancelled
+// (process shutdown), not a per-cycle bound -- silently defeating the
+// fallback timer's guarantee of activity within --fallback-interval, since
+// nothing schedules a fresh cycle until the stuck one returns.
+// runWatchCycle must self-abort within timeout+margin against a stalled
+// dingo-addr peer, recording it as a check error like any other Check
+// failure, rather than hanging until the caller's own ctx cancels.
+func TestRunWatchCycle_BoundedByTimeoutAgainstStalledPeer(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		// Accept and hold the connection open without ever writing to it,
+		// so the handshake never completes unless bounded by the cycle
+		// timeout below.
+		t.Cleanup(func() { _ = conn.Close() })
+	}()
+
+	metrics, _ := newTestParityMetrics(t)
+	logger, buf := testLogger()
+
+	const timeout = 500 * time.Millisecond
+	done := make(chan struct{})
+	go func() {
+		runWatchCycle(
+			context.Background(), timeout,
+			listener.Addr().String(), "127.0.0.1:1", 42,
+			logger, metrics,
+		)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(timeout + 5*time.Second):
+		t.Fatal(
+			"runWatchCycle did not return within timeout+margin against a stalled peer",
+		)
+	}
+	assert.Contains(t, buf.String(), "check error")
+	assert.Equal(
+		t, float64(1), promtestutil.ToFloat64(metrics.checkErrorsTotal),
+	)
 }

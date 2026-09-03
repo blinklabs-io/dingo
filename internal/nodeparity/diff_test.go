@@ -19,6 +19,7 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,7 +42,7 @@ func poolID(b byte) lcommon.PoolId {
 func emptySnapshot() *Snapshot {
 	return &Snapshot{
 		ProtocolParams:    &utxorpccardano.PParams{MaxTxSize: 16384},
-		StakeDistribution: map[lcommon.PoolId]*big.Rat{},
+		StakeDistribution: map[lcommon.PoolId]StakeDistributionEntry{},
 		UTxOEntries:       map[string]string{},
 	}
 }
@@ -88,10 +89,12 @@ func TestDiffSnapshots_StakeDistribution(t *testing.T) {
 	b := emptySnapshot()
 
 	poolA, poolB, poolC := poolID(0x11), poolID(0x22), poolID(0x33)
-	a.StakeDistribution[poolA] = big.NewRat(1, 2)
-	a.StakeDistribution[poolB] = big.NewRat(1, 2)
-	b.StakeDistribution[poolA] = big.NewRat(1, 3) // differs
-	b.StakeDistribution[poolC] = big.NewRat(2, 3) // only in b; poolB only in a
+	a.StakeDistribution[poolA] = StakeDistributionEntry{StakeFraction: big.NewRat(1, 2)}
+	a.StakeDistribution[poolB] = StakeDistributionEntry{StakeFraction: big.NewRat(1, 2)}
+	b.StakeDistribution[poolA] = StakeDistributionEntry{StakeFraction: big.NewRat(1, 3)} // differs
+	b.StakeDistribution[poolC] = StakeDistributionEntry{
+		StakeFraction: big.NewRat(2, 3),
+	} // only in b; poolB only in a
 
 	d := DiffSnapshots(a, b)
 	require.False(t, d.Empty())
@@ -104,6 +107,32 @@ func TestDiffSnapshots_StakeDistribution(t *testing.T) {
 	assert.Contains(t, joined, poolA.String())
 	assert.Contains(t, joined, poolB.String())
 	assert.Contains(t, joined, poolC.String())
+}
+
+// TestDiffSnapshots_StakeDistributionVrfKeyDiffers covers a pool whose
+// stake fraction matches on both sides but whose registered VRF key does
+// not: a fraction-only comparison would report this as identical, masking
+// a real leader-election-relevant divergence between the two nodes' views
+// of the same pool.
+func TestDiffSnapshots_StakeDistributionVrfKeyDiffers(t *testing.T) {
+	a := emptySnapshot()
+	b := emptySnapshot()
+
+	pool := poolID(0x11)
+	var vrfA, vrfB ledger.Blake2b256
+	vrfA[0] = 0xAA
+	vrfB[0] = 0xBB
+	a.StakeDistribution[pool] = StakeDistributionEntry{
+		StakeFraction: big.NewRat(1, 2), VrfHash: vrfA,
+	}
+	b.StakeDistribution[pool] = StakeDistributionEntry{
+		StakeFraction: big.NewRat(1, 2), VrfHash: vrfB,
+	}
+
+	d := DiffSnapshots(a, b)
+	require.False(t, d.Empty(), "a VRF key mismatch must not diff empty")
+	require.Len(t, d.StakeDistribution, 1)
+	assert.Contains(t, d.StakeDistribution[0], "VRF key differs")
 }
 
 // TestDiffSnapshots_UTxOSetDiffers is the UTxO-set equivalent of
@@ -160,8 +189,10 @@ func TestDiffSnapshots_OrderIsDeterministic(t *testing.T) {
 
 	for i := range 30 {
 		pool := poolID(byte(i))
-		a.StakeDistribution[pool] = big.NewRat(1, 2)
-		b.StakeDistribution[pool] = big.NewRat(1, 3) // every pool differs
+		a.StakeDistribution[pool] = StakeDistributionEntry{StakeFraction: big.NewRat(1, 2)}
+		b.StakeDistribution[pool] = StakeDistributionEntry{
+			StakeFraction: big.NewRat(1, 3),
+		} // every pool differs
 	}
 	for i := range maxUTxODiffLines + 10 {
 		key := fmt.Sprintf("tx%d#0", i)

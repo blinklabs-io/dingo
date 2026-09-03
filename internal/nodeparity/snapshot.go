@@ -45,15 +45,25 @@ type Snapshot struct {
 	// a comparison across every gouroboros *ProtocolParameters type.
 	ProtocolParams *utxorpccardano.PParams
 
-	// StakeDistribution maps pool ID to stake fraction, as reported by
-	// GetStakeDistribution.
-	StakeDistribution map[lcommon.PoolId]*big.Rat
+	// StakeDistribution maps pool ID to its stake fraction and registered
+	// VRF key hash, as reported by GetStakeDistribution -- both fields, so
+	// two nodes agreeing on every pool's stake share while disagreeing on
+	// a registered VRF key (a real, distinct leader-election divergence)
+	// is not masked by comparing the fraction alone.
+	StakeDistribution map[lcommon.PoolId]StakeDistributionEntry
 
 	// UTxOEntries maps "<txHash>#<outputIndex>" to a canonical string
 	// encoding of that output's address, lovelace amount, any
 	// multi-asset tokens (sorted by policy then asset name so the
 	// encoding is deterministic), datum, and reference script.
 	UTxOEntries map[string]string
+}
+
+// StakeDistributionEntry pairs a pool's stake fraction with its registered
+// VRF key hash, the two fields GetStakeDistribution reports per pool.
+type StakeDistributionEntry struct {
+	StakeFraction *big.Rat
+	VrfHash       ledger.Blake2b256
 }
 
 // QuerySnapshot acquires the volatile tip on an already-dialed connection
@@ -92,12 +102,15 @@ func QuerySnapshot(conn *ouroboros.Connection) (*Snapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("stake distribution query: %w", err)
 	}
-	stakeDist := make(map[lcommon.PoolId]*big.Rat, len(sd.Results))
+	stakeDist := make(map[lcommon.PoolId]StakeDistributionEntry, len(sd.Results))
 	for poolID, entry := range sd.Results {
 		if entry.StakeFraction == nil {
 			continue
 		}
-		stakeDist[poolID] = entry.StakeFraction.Rat
+		stakeDist[poolID] = StakeDistributionEntry{
+			StakeFraction: entry.StakeFraction.Rat,
+			VrfHash:       entry.VrfHash,
+		}
 	}
 
 	utxos, err := client.GetUTxOWhole()
@@ -172,13 +185,22 @@ func canonicalUTxOEntry(out ledger.TransactionOutput) string {
 		}
 	}
 
-	// DatumHash() covers both wire forms of a datum option: an explicit
-	// hash, or an inline datum (in which case DatumHash() returns the hash
-	// of that inline content). One field is enough; there is no case where
-	// a real hash mismatch would hide behind a matching inline datum or
-	// vice versa.
+	// DatumHash() alone covers a real content mismatch (different hash),
+	// but not a form mismatch: an explicit datum-hash reference and an
+	// inline datum carrying that same content hash to the same value here,
+	// even though they are different wire forms -- one node reporting a
+	// UTxO's datum as inline while the other reports only its hash would
+	// be a genuine indexing/decoding divergence between the two
+	// implementations, exactly what this tool exists to catch, and must
+	// not be masked by a matching hash. Datum() is non-nil only for the
+	// inline form, so folding that into the encoded form distinguishes it
+	// from a hash-only reference with the identical content hash.
 	if dh := out.DatumHash(); dh != nil {
-		fmt.Fprintf(&sb, "|datum=%s", dh.String())
+		form := "hash"
+		if out.Datum() != nil {
+			form = "inline"
+		}
+		fmt.Fprintf(&sb, "|datum=%s:%s", form, dh.String())
 	}
 	if sr := out.ScriptRef(); sr != nil {
 		fmt.Fprintf(&sb, "|scriptref=%s", sr.Hash().String())

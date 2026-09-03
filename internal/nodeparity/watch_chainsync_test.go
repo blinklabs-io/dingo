@@ -180,6 +180,7 @@ func (s *testChainSyncServer) serve(listener net.Listener, magic uint32) {
 					)),
 				)
 				if err != nil {
+					_ = conn.Close()
 					return
 				}
 				defer oconn.Close() //nolint:errcheck
