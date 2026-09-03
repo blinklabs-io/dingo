@@ -35,42 +35,6 @@ var addColumnPattern = regexp.MustCompile(
 		"ADD\\s+COLUMN\\s+[`\"]?([a-zA-Z0-9_]+)[`\"]?(?:\\s+(.*))?$",
 )
 
-var columnConstraintKeywords = map[string]struct{}{
-	"as": {}, "auto_increment": {}, "check": {}, "collate": {},
-	"comment": {}, "constraint": {}, "default": {}, "generated": {},
-	"not": {}, "null": {}, "primary": {}, "references": {}, "unique": {},
-}
-
-var columnTypeAliases = map[string]string{
-	"character varying":           "varchar",
-	"timestamp with time zone":    "timestamptz",
-	"timestamp without time zone": "timestamp",
-}
-
-var columnTypeArgsPattern = regexp.MustCompile(`\s*\([^)]*\)`)
-
-func declaredColumnType(definition string) string {
-	fields := strings.Fields(definition)
-	end := len(fields)
-	for index, field := range fields {
-		name, _, _ := strings.Cut(field, "(")
-		if _, stop := columnConstraintKeywords[strings.ToLower(name)]; stop {
-			end = index
-			break
-		}
-	}
-	return strings.Join(fields[:end], " ")
-}
-
-func normalizeColumnType(value string) string {
-	normalized := columnTypeArgsPattern.ReplaceAllString(strings.ToLower(value), "")
-	normalized = strings.Join(strings.Fields(normalized), " ")
-	if alias, ok := columnTypeAliases[normalized]; ok {
-		return alias
-	}
-	return normalized
-}
-
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := sql.Open(
@@ -443,6 +407,31 @@ func TestRunnerReportsAddColumnFailureOnMissingTable(t *testing.T) {
 	}
 	err := testRunner(db, migration).Run(context.Background())
 	require.ErrorContains(t, err, "failed in "+string(PhaseExpand))
+}
+
+func TestRunnerReportsAddColumnTypeMismatch(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	migration := Migration{
+		Version:          1,
+		Name:             "add_column_type_mismatch",
+		BackfillRevision: "1",
+		SQL: map[string]SQL{
+			"sqlite": {
+				Expand: []string{
+					"CREATE TABLE item (id INTEGER PRIMARY KEY, note blob)",
+					"ALTER TABLE item ADD COLUMN note text",
+					"INSERT INTO item (id, note) VALUES (1, 'unreachable')",
+				},
+			},
+		},
+	}
+	err := testRunner(db, migration).Run(context.Background())
+	require.ErrorContains(t, err, "failed in "+string(PhaseExpand))
+	require.ErrorContains(t, err, "statement 2")
+	var count int
+	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM item").Scan(&count))
+	require.Zero(t, count)
 }
 
 // Every ALTER TABLE ADD COLUMN the shipped registries produce has to be

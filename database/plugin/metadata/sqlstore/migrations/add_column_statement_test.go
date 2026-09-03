@@ -87,7 +87,7 @@ func TestParseAddColumnStatement(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			table, column, ok := parseAddColumnStatement(test.statement)
+			table, column, _, ok := parseAddColumnStatement(test.statement)
 			require.Equal(t, test.ok, ok)
 			if !test.ok {
 				return

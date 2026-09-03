@@ -105,16 +105,17 @@ func mysqlColumnAlreadyPresentDefault(
 	conn *sql.Conn,
 	statement string,
 ) bool {
-	table, column, ok := parseAddColumnStatement(statement)
+	table, column, definition, ok := parseAddColumnStatement(statement)
 	if !ok {
 		return false
 	}
-	var exists int
+	var reported sql.NullString
 	return conn.QueryRowContext(ctx, `
-SELECT 1
+SELECT data_type
 FROM information_schema.columns
 WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?
-LIMIT 1`, table, column).Scan(&exists) == nil && exists == 1
+LIMIT 1`, table, column).Scan(&reported) == nil &&
+		addColumnTypeMatches(reported, definition)
 }
 
 func mysqlIndexExistsDefault(
