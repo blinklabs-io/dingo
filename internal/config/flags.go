@@ -422,6 +422,11 @@ var flagSpecs = []flagSpec{
 		"Koios v1 API root override for a self-hosted instance (default: the public host for --koios-parity-network)",
 	),
 	boolFlag(
+		"KoiosParity.AllowInsecureHTTP",
+		"koios-parity-allow-insecure-http",
+		"allow a plain-HTTP --koios-parity-base-url (local dev/test only; the API key is sent as a Bearer token)",
+	),
+	boolFlag(
 		"KoiosParity.Strict",
 		"koios-parity-strict",
 		"stop/cancel the node on the first Koios/tool error or exact parity mismatch",

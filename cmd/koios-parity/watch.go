@@ -73,6 +73,7 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 	}
 	apiKey := koiosAPIKey(cmd)
 	baseURL := koiosBaseURL(cmd)
+	allowInsecure := koiosAllowInsecureHTTP(cmd)
 	accounts := accountsEnabled(cmd)
 
 	logger := slog.Default()
@@ -131,6 +132,7 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 					Network:              network,
 					APIKey:               apiKey,
 					BaseURL:              baseURL,
+					AllowInsecureHTTP:    allowInsecure,
 					CachePath:            cachePath,
 					Concurrency:          concurrency,
 					FromEpoch:            fromClosed,

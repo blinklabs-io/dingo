@@ -432,12 +432,22 @@ func koiosBaseURL(cmd *cobra.Command) string {
 	return os.Getenv("KOIOS_URL")
 }
 
+// koiosAllowInsecureHTTP reports whether a plain-HTTP --koios-url is permitted.
+func koiosAllowInsecureHTTP(cmd *cobra.Command) bool {
+	if ok, _ := cmd.Flags().GetBool("koios-allow-insecure-http"); ok {
+		return true
+	}
+	return strings.EqualFold(os.Getenv("KOIOS_ALLOW_INSECURE_HTTP"), "true")
+}
+
 // addKoiosURLFlag registers the self-hosted-instance override, shared by
 // fetch/run/watch. See koiosparity.NewKoiosClient for why a custom host is not
 // subject to the public tier's burst cap.
 func addKoiosURLFlag(cmd *cobra.Command) {
 	cmd.Flags().String("koios-url", "",
 		"Koios v1 API root for a self-hosted instance, e.g. https://host/api/v1 (or KOIOS_URL); default is the public host for --network")
+	cmd.Flags().Bool("koios-allow-insecure-http", false,
+		"allow a plain-HTTP --koios-url (local dev/test only; the API key is sent as a Bearer token; or KOIOS_ALLOW_INSECURE_HTTP=true)")
 }
 
 // addAccountsFlag registers the #3097 per-account exact-parity opt-in flag,

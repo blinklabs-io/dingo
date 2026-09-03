@@ -96,6 +96,7 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 			Network:              network,
 			APIKey:               koiosAPIKey(cmd),
 			BaseURL:              koiosBaseURL(cmd),
+			AllowInsecureHTTP:    koiosAllowInsecureHTTP(cmd),
 			CachePath:            cachePath,
 			Concurrency:          concurrency,
 			AccountsEnabled:      accounts,

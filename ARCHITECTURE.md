@@ -6145,9 +6145,18 @@ never the reverse.
   window and says nothing about another deployment, so applying it there would
   throttle against a limit that does not exist. Per-request retry, timeout and
   429 backoff are unchanged, so a host that *does* rate-limit still behaves
-  correctly. Network validation still applies — `StakeAddressFromCredential`
-  hardcodes the testnet address network ID, so an override cannot be used to
-  reach an unsupported network.
+  correctly. `NewKoiosClient` runs `validateKoiosNetwork` before it applies the
+  override, so an override cannot be used to reach a network the tool does not
+  support — that check is what keeps `StakeAddressFromCredential`, which
+  hardcodes the testnet address network ID, from being handed a network it
+  would silently generate wrong-network stake addresses for. The override
+  itself is validated too: a custom host must be `https`, since `get` and
+  `post` attach the API key as a Bearer token to every request and forged
+  reference data can make a comparison report a false PASS. `AllowInsecureHTTP`
+  (`--koios-parity-allow-insecure-http`) is the local dev/test escape hatch,
+  mirroring `Mithril.AllowInsecureHTTP`. `KoiosParity.BaseURL` is classified as
+  a URI field for logging (`logURIConfigFields`), not a plain one, because an
+  operator can embed credentials in it.
 - **Koios endpoint.** `/account_rewards` is deprecated; `/account_reward_
   history` is the replacement (`KoiosClient.GetAccountRewardHistory`), taking
   the same `stake_addresses_with_epoch_no` POST body shape via a new `post()`

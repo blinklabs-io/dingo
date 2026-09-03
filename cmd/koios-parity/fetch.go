@@ -103,6 +103,7 @@ func fetchRun(cmd *cobra.Command, _ []string) error {
 		Network:              network,
 		APIKey:               koiosAPIKey(cmd),
 		BaseURL:              koiosBaseURL(cmd),
+		AllowInsecureHTTP:    koiosAllowInsecureHTTP(cmd),
 		CachePath:            resolveCachePath(),
 		Concurrency:          concurrency,
 		FromEpoch:            fromEpoch,

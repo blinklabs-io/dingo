@@ -23,6 +23,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -235,13 +236,19 @@ func validateKoiosNetwork(network string) error {
 // another deployment, so applying it there would throttle against a limit that
 // does not exist. The per-request retry and timeout handling is unchanged, so a
 // host that does rate-limit still backs off correctly on 429.
-func NewKoiosClient(network, apiKey, baseURL string) (*KoiosClient, error) {
+func NewKoiosClient(
+	network, apiKey, baseURL string,
+	allowInsecureHTTP bool,
+) (*KoiosClient, error) {
 	if err := validateKoiosNetwork(network); err != nil {
 		return nil, err
 	}
 	base := koiosBaseURLs[network]
 	burstLimit := koiosBurstLimitSafe
 	if trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/"); trimmed != "" {
+		if err := validateKoiosBaseURL(trimmed, allowInsecureHTTP); err != nil {
+			return nil, err
+		}
 		base = trimmed
 		burstLimit = 0
 	}
@@ -256,6 +263,46 @@ func NewKoiosClient(network, apiKey, baseURL string) (*KoiosClient, error) {
 		// the Free-safe ceiling for every client on the public host.
 		limiter: newBurstLimiter(burstLimit, koiosBurstWindow),
 	}, nil
+}
+
+// validateKoiosBaseURL rejects a custom host this client must not send an API
+// key to, or trust reference data from.
+//
+// get and post attach APIKey as a Bearer token to every request, so plain HTTP
+// puts the token on the wire in cleartext. It also leaves the reference data
+// this tool compares Dingo against tamperable in flight, and a comparison
+// against forged reference data can report a false PASS -- the one outcome a
+// parity checker must never produce. allowInsecureHTTP is the local dev/test
+// escape hatch, mirroring Mithril.AllowInsecureHTTP.
+func validateKoiosBaseURL(rawURL string, allowInsecureHTTP bool) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("parse koios base URL %q: %w", rawURL, err)
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf(
+			"koios base URL %q has no host; give the full v1 API root, e.g. https://host/api/v1",
+			rawURL,
+		)
+	}
+	switch parsed.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if allowInsecureHTTP {
+			return nil
+		}
+		return fmt.Errorf(
+			"koios base URL %q uses plain HTTP, which would send the API key in cleartext and leave the reference data tamperable; use https or set allowInsecureHttp for local dev/test",
+			rawURL,
+		)
+	default:
+		return fmt.Errorf(
+			"koios base URL %q must use http or https, got scheme %q",
+			rawURL,
+			parsed.Scheme,
+		)
+	}
 }
 
 // burstLimiter enforces a sliding-window request budget matching Koios's

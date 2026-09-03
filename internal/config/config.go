@@ -301,6 +301,12 @@ type KoiosParityConfig struct {
 	// host. A custom host is not subject to the public tier's burst cap; see
 	// koiosparity.NewKoiosClient.
 	BaseURL string `yaml:"baseUrl"              envconfig:"DINGO_KOIOS_PARITY_BASE_URL"`
+	// AllowInsecureHTTP permits a plain-HTTP BaseURL. The client attaches the
+	// APIKey as a Bearer token to every request, so cleartext transport would
+	// expose it, and the reference data this tool compares against would be
+	// tamperable in flight -- a MITM could induce a false PASS. Local dev and
+	// test only, mirroring Mithril.AllowInsecureHTTP.
+	AllowInsecureHTTP bool `yaml:"allowInsecureHttp"    envconfig:"DINGO_KOIOS_PARITY_ALLOW_INSECURE_HTTP"`
 	// Strict stops/cancels the node on the first Koios/tool error or exact
 	// parity mismatch, rather than logging it and continuing normal node
 	// operation.

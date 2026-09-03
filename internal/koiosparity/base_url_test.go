@@ -18,6 +18,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -43,7 +44,9 @@ func TestNewKoiosClientBaseURLOverride(t *testing.T) {
 	)
 	defer srv.Close()
 
-	client, err := NewKoiosClient("preview", "", srv.URL+"/api/v1")
+	// httptest serves plain HTTP, so this is the one case that needs the
+	// insecure escape hatch.
+	client, err := NewKoiosClient("preview", "", srv.URL+"/api/v1", true)
 	require.NoError(t, err)
 
 	epoch, err := client.GetTipEpoch(context.Background())
@@ -56,11 +59,11 @@ func TestNewKoiosClientBaseURLOverride(t *testing.T) {
 // TestNewKoiosClientBaseURLTrimsTrailingSlash pins the ergonomics: an operator
 // pasting a root with a trailing slash must not produce doubled separators.
 func TestNewKoiosClientBaseURLTrimsTrailingSlash(t *testing.T) {
-	client, err := NewKoiosClient("preview", "", "https://host.example/api/v1/")
+	client, err := NewKoiosClient("preview", "", "https://host.example/api/v1/", false)
 	require.NoError(t, err)
 	assert.Equal(t, "https://host.example/api/v1", client.baseURL)
 
-	spaced, err := NewKoiosClient("preview", "", "  https://host.example/api/v1  ")
+	spaced, err := NewKoiosClient("preview", "", "  https://host.example/api/v1  ", false)
 	require.NoError(t, err)
 	assert.Equal(t, "https://host.example/api/v1", spaced.baseURL)
 }
@@ -68,7 +71,7 @@ func TestNewKoiosClientBaseURLTrimsTrailingSlash(t *testing.T) {
 // TestNewKoiosClientDefaultsToPublicHost pins that an empty override changes
 // nothing, including the burst cap that koios.rest's tiers require.
 func TestNewKoiosClientDefaultsToPublicHost(t *testing.T) {
-	client, err := NewKoiosClient("preview", "", "")
+	client, err := NewKoiosClient("preview", "", "", false)
 	require.NoError(t, err)
 	assert.Equal(t, koiosBaseURLs["preview"], client.baseURL)
 	require.NotNil(t, client.limiter)
@@ -81,7 +84,7 @@ func TestNewKoiosClientDefaultsToPublicHost(t *testing.T) {
 // says nothing about another deployment, so throttling a self-hosted instance
 // against it would enforce a limit that does not exist.
 func TestNewKoiosClientCustomHostDropsBurstCap(t *testing.T) {
-	client, err := NewKoiosClient("preview", "", "https://host.example/api/v1")
+	client, err := NewKoiosClient("preview", "", "https://host.example/api/v1", false)
 	require.NoError(t, err)
 	require.NotNil(t, client.limiter)
 	assert.LessOrEqual(t, client.limiter.limit, 0,
@@ -98,6 +101,54 @@ func TestNewKoiosClientCustomHostDropsBurstCap(t *testing.T) {
 // the testnet address network ID, so an unvalidated "mainnet" would silently
 // generate wrong-network stake addresses.
 func TestNewKoiosClientRejectsUnsupportedNetworkWithOverride(t *testing.T) {
-	_, err := NewKoiosClient("mainnet", "", "https://host.example/api/v1")
+	_, err := NewKoiosClient("mainnet", "", "https://host.example/api/v1", false)
 	require.Error(t, err)
+}
+
+// TestNewKoiosClientRejectsPlainHTTPByDefault covers the transport guard. get
+// and post attach the API key as a Bearer token to every request, so a
+// plain-HTTP host would put it on the wire in cleartext — and forged reference
+// data can make a parity comparison report a false PASS, the one outcome this
+// tool must never produce.
+func TestNewKoiosClientRejectsPlainHTTPByDefault(t *testing.T) {
+	_, err := NewKoiosClient(
+		"preview", "secret-token", "http://host.example/api/v1", false,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plain HTTP")
+	assert.NotContains(t, err.Error(), "secret-token",
+		"the error must not echo the API key")
+}
+
+// TestNewKoiosClientAllowsPlainHTTPWithEscapeHatch pins the local dev/test
+// opt-out, mirroring Mithril.AllowInsecureHTTP.
+func TestNewKoiosClientAllowsPlainHTTPWithEscapeHatch(t *testing.T) {
+	client, err := NewKoiosClient(
+		"preview", "", "http://host.example/api/v1", true,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "http://host.example/api/v1", client.baseURL)
+}
+
+// TestNewKoiosClientRejectsMalformedBaseURL covers the shapes an operator can
+// plausibly paste: a bare host with no scheme, and a scheme this client cannot
+// speak. Neither may fall through to the public host silently.
+func TestNewKoiosClientRejectsMalformedBaseURL(t *testing.T) {
+	for _, raw := range []string{
+		"preview-koios.example.com/api/v1",
+		"ftp://host.example/api/v1",
+		"://broken",
+	} {
+		_, err := NewKoiosClient("preview", "", raw, false)
+		require.Error(t, err, "base URL %q must be rejected", raw)
+	}
+}
+
+// TestNewKoiosClientPlainHTTPGuardDoesNotAffectPublicHost pins that the guard
+// only looks at a custom URL: the built-in hosts are https already, and an
+// empty override must not be able to trip it.
+func TestNewKoiosClientPlainHTTPGuardDoesNotAffectPublicHost(t *testing.T) {
+	client, err := NewKoiosClient("preview", "", "", false)
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(client.baseURL, "https://"))
 }
