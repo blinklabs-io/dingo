@@ -116,12 +116,6 @@ func (c *SlotTimeConverter) epochCache() []models.Epoch {
 	return c.deps.EpochCache()
 }
 
-// SlotToTime returns the wall-clock start time of the given slot.
-//
-// Slot 0 always maps to Shelley genesis SystemStart, regardless of whether
-// the epoch cache is populated. Other slots are resolved via the
-// hardfork.Summary built from the current epoch cache. The current era can be
-// projected only through its configured safe-zone horizon.
 // slotToTimePrelude applies the checks every slot-to-time conversion shares: a
 // slot outside time.Duration's range, a missing genesis, and slot 0, which is
 // SystemStart by definition and needs no summary. It reports whether it
@@ -143,6 +137,12 @@ func (c *SlotTimeConverter) slotToTimePrelude(
 	return time.Time{}, false, nil
 }
 
+// SlotToTime returns the wall-clock start time of the given slot.
+//
+// Slot 0 always maps to Shelley genesis SystemStart, regardless of whether
+// the epoch cache is populated. Other slots are resolved via the
+// hardfork.Summary built from the current epoch cache. The current era can be
+// projected only through its configured safe-zone horizon.
 func (c *SlotTimeConverter) SlotToTime(slot uint64) (time.Time, error) {
 	if when, handled, err := c.slotToTimePrelude(slot); handled {
 		return when, err
