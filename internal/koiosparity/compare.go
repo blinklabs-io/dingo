@@ -543,6 +543,9 @@ func ComparePoolEpoch(
 	// the grace window it may simply not be computed yet (reference_lag,
 	// ERROR); past it, it's a genuine gap in Dingo's own computation
 	// (dingo_db_missing, ERROR). Neither case can produce a PASS.
+	// RewardsPending is the chain-position form of the same timing check and
+	// takes precedence over the wall-clock grace window, including during
+	// replay where the epoch's close time may be years in the past.
 	if koiosPool.MemberRewards != "" {
 		switch {
 		case !dingoPool.MemberRewardPresent,
@@ -558,7 +561,9 @@ func ComparePoolEpoch(
 			// is a genuine gap in what Dingo can answer (dingo_db_missing,
 			// ERROR).
 			cat := CategoryDBMissing
-			if graceHours > 0 && !epochEndTime.IsZero() &&
+			if dingoPool.RewardsPending {
+				cat = CategoryReferenceLag
+			} else if graceHours > 0 && !epochEndTime.IsZero() &&
 				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
 				cat = CategoryReferenceLag
 			}
@@ -582,6 +587,10 @@ func ComparePoolEpoch(
 				dingoValue = dingoPool.MemberRewardTotal
 			}
 			if dingoValue != koiosPool.MemberRewards {
+				cat := CategoryValueMismatch
+				if dingoPool.RewardsPending {
+					cat = CategoryReferenceLag
+				}
 				out = append(out, CheckMismatch{
 					Network:    network,
 					Epoch:      epoch,
@@ -589,7 +598,7 @@ func ComparePoolEpoch(
 					Field:      "member_rewards",
 					DingoValue: dingoValue,
 					KoiosValue: koiosPool.MemberRewards,
-					Category:   CategoryValueMismatch,
+					Category:   cat,
 					CheckedAt:  now,
 				})
 			}
