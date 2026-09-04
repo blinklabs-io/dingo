@@ -334,6 +334,37 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 		data.PoolUnspendable = uint64(out.Unspendable)
 	}
 
+	// A missing reward_pool_output row is expected until the node reaches the
+	// applying boundary at stakeEpoch+3. If either the tip or that boundary
+	// cannot be established, leave RewardsPending false so the comparison stays
+	// fail closed.
+	if hasMissingMemberRewardRows(m) {
+		var tipSlot uint64
+		tipKnown := false
+		if tip, tipErr := s.db.GetTip(txn); tipErr == nil &&
+			len(tip.Point.Hash) > 0 {
+			tipSlot = tip.Point.Slot
+			tipKnown = true
+		}
+		if tipKnown {
+			if applyEpochID, ok := rewardApplicationEpoch(stakeEpoch); ok {
+				applyEpoch, epochErr := meta.GetEpoch(
+					applyEpochID,
+					txn.Metadata(),
+				)
+				switch {
+				case epochErr != nil:
+					// Boundary metadata is unreadable; stay strict.
+				case applyEpoch == nil:
+					// The node has not reached the applying epoch yet.
+					markMissingMemberRewardsPending(m)
+				case tipSlot < applyEpoch.StartSlot:
+					markMissingMemberRewardsPending(m)
+				}
+			}
+		}
+	}
+
 	// The comparable member-reward quantity, formed the same way DingoDB
 	// forms it — see DingoDB.addSpendableMemberRewards for why
 	// reward_pool_output.member_reward_total is not it, and why presence is

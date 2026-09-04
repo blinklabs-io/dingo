@@ -5790,7 +5790,9 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   per-pool map keyed by pool-key-hash — a pool may have an input row before
   its output row is computed), `epoch_summary` (total active stake, pool
   count, delegator count), `reward_ada_pots` (treasury, reserves, fees,
-  rewards — Dingo's full AdaPots).
+  rewards — Dingo's full AdaPots), `epoch` (applying-boundary start slots),
+  and `tip` (the current chain position used to distinguish replay lag from a
+  genuine missing reward row).
 
   **Coverage contract.** A `PASS` means only that every **exact-match** and
   **derived-match** field below matched. It does not claim parity for fields
@@ -5994,10 +5996,13 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   basis.
 
   An absent `reward_pool_output` row is never treated as "nothing to compare"
-  either: within `--grace-hours` of the epoch closing it is `reference_lag`
-  (reward calculation may simply not have finished yet); past that window it is
-  `dingo_db_missing` (a genuine gap in Dingo's own computation). Both are
-  `ERROR`, never a silent `PASS`. `ComparePoolEpoch` applies the identical
+  either: while the chain tip is before the applying boundary at epoch E+3,
+  where E is the stake epoch, it is `reference_lag` because reward calculation
+  may simply not have finished yet. The existing `--grace-hours` check against
+  the epoch close time remains an additional tip-time allowance. Once the
+  boundary has passed — or whenever the tip or boundary cannot be established
+  — it is `dingo_db_missing` (a genuine gap in Dingo's own computation). Both
+  are `ERROR`, never a silent `PASS`. `ComparePoolEpoch` applies the identical
   presence/grace split to `reward_pool_input`'s param-epoch field
   (`blocks_produced` alone, reported as `reward_pool_input_params` when
   absent) via `DingoPoolEpochData.ParamsPresent`, for the same reason: a
@@ -6066,8 +6071,9 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
 
 **Mismatch categories:** `value_mismatch`, `pool_only_dingo`, `pool_only_koios`,
 `dingo_db_missing` (epoch/pool row not yet computed by Dingo), `dingo_db_error`
-(DB query failed), `reference_lag` (epoch closed within --grace-hours; absence
-may be transient), `pool_departed` (informational: the pool left the pool set
+(DB query failed), `reference_lag` (the chain has not reached the reward
+applying boundary or the epoch closed within --grace-hours; absence may be
+transient), `pool_departed` (informational: the pool left the pool set
 at K+1, so its epoch-K block count has no row to live on), plus #3097's
 per-account categories: `acct_only_dingo`,
 `acct_only_koios`, `acct_duplicate` (a genuine duplicate (stake_address,

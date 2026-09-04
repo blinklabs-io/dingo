@@ -539,27 +539,24 @@ func ComparePoolEpoch(
 	// reflect Koios's own reporting approximation, not a real Dingo bug.
 	//
 	// A missing reward_pool_output row (MemberRewardPresent == false) is
-	// never treated as "nothing to compare" when Koios has a value: within
-	// the grace window it may simply not be computed yet (reference_lag,
-	// ERROR); past it, it's a genuine gap in Dingo's own computation
-	// (dingo_db_missing, ERROR). Neither case can produce a PASS.
+	// never treated as "nothing to compare" when Koios has a value: before the
+	// applying boundary, or within the wall-clock grace window, it may simply
+	// not be computed yet (reference_lag, ERROR); past both, it's a genuine gap
+	// in Dingo's own computation (dingo_db_missing, ERROR). Neither case can
+	// produce a PASS.
 	if koiosPool.MemberRewards != "" {
 		switch {
 		case !dingoPool.MemberRewardPresent,
 			!dingoPool.SpendableMemberRewardPresent &&
 				dingoPool.PoolUnspendable > 0:
 			// Either the reward calculation has not produced a
-			// reward_pool_output row for this pool/epoch, or it has and the
-			// per-account rows the comparable sum is formed from are gone
-			// while the row says something was withheld — so the two
-			// quantities provably differ and the comparison cannot be formed.
-			// Neither may read as a pass: within the grace window it may
-			// simply not be computed yet (reference_lag, ERROR); past it, it
-			// is a genuine gap in what Dingo can answer (dingo_db_missing,
-			// ERROR).
+			// reward_pool_output row for this pool/epoch, or the per-account
+			// rows needed for the comparable sum are gone while the row says
+			// something was withheld. Neither case can be compared safely.
 			cat := CategoryDBMissing
-			if graceHours > 0 && !epochEndTime.IsZero() &&
-				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
+			if (!dingoPool.MemberRewardPresent && dingoPool.RewardsPending) ||
+				graceHours > 0 && !epochEndTime.IsZero() &&
+					now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
 				cat = CategoryReferenceLag
 			}
 			out = append(out, CheckMismatch{

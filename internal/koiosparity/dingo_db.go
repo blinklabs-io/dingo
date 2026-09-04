@@ -177,12 +177,48 @@ type DingoPoolEpochData struct {
 	// would not be equivalent: that column accumulates unspendable leader
 	// rewards too.
 	SpendableMemberRewardTotal string
+
+	// RewardsPending reports that the node has not reached the boundary at
+	// which this stake epoch's reward row is expected to exist. The zero value
+	// is deliberately strict: a source must establish the chain position before
+	// it can downgrade a missing row to reference_lag.
+	RewardsPending bool
 }
 
 // rewardTypeMember is the reward_account_output.reward_type value Dingo writes
 // for a delegator's share of a pool reward, as opposed to the operator's
 // "leader" row. Matches Koios /account_reward_history's own "member" type.
 const rewardTypeMember = "member"
+
+const rewardApplicationEpochOffset uint64 = 3
+
+// rewardApplicationEpoch returns the epoch boundary that applies rewards from
+// stakeEpoch. The overflow guard keeps an invalid derived position strict.
+func rewardApplicationEpoch(stakeEpoch uint64) (uint64, bool) {
+	if stakeEpoch > ^uint64(0)-rewardApplicationEpochOffset {
+		return 0, false
+	}
+	return stakeEpoch + rewardApplicationEpochOffset, true
+}
+
+func hasMissingMemberRewardRows(
+	m map[string]*DingoPoolEpochData,
+) bool {
+	for _, data := range m {
+		if !data.MemberRewardPresent {
+			return true
+		}
+	}
+	return false
+}
+
+func markMissingMemberRewardsPending(m map[string]*DingoPoolEpochData) {
+	for _, data := range m {
+		if !data.MemberRewardPresent {
+			data.RewardsPending = true
+		}
+	}
+}
 
 // DingoDB reads reward state directly from Dingo's metadata database.
 // It supports all three backends Dingo supports: SQLite, PostgreSQL, MySQL.
@@ -500,6 +536,44 @@ func (d *DingoDB) GetPoolEpochDataMap(
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+
+	// A missing reward_pool_output row is expected until the node reaches the
+	// applying boundary at stakeEpoch+3. If either the tip or that boundary
+	// cannot be established, leave RewardsPending false so the comparison stays
+	// fail closed.
+	if hasMissingMemberRewardRows(m) {
+		var tipSlot uint64
+		tipKnown := false
+		if tipRow := d.queryRow(
+			ctx, `SELECT slot, hash FROM tip ORDER BY id DESC LIMIT 1`,
+		); tipRow != nil {
+			var slot sql.NullInt64
+			var hash []byte
+			if err := tipRow.Scan(&slot, &hash); err == nil &&
+				slot.Valid && slot.Int64 >= 0 && len(hash) > 0 {
+				tipSlot = uint64(slot.Int64)
+				tipKnown = true
+			}
+		}
+		if tipKnown {
+			if applyEpochID, ok := rewardApplicationEpoch(stakeEpoch); ok {
+				var startSlot sql.NullInt64
+				err := d.queryRow(
+					ctx,
+					`SELECT start_slot FROM epoch WHERE epoch_id = ?`,
+					applyEpochID,
+				).Scan(&startSlot)
+				switch {
+				case errors.Is(err, sql.ErrNoRows):
+					// The node has not reached the applying epoch yet.
+					markMissingMemberRewardsPending(m)
+				case err == nil && startSlot.Valid && startSlot.Int64 >= 0 &&
+					tipSlot < uint64(startSlot.Int64):
+					markMissingMemberRewardsPending(m)
+				}
+			}
+		}
 	}
 
 	if err := d.addSpendableMemberRewards(ctx, m, stakeEpoch); err != nil {
