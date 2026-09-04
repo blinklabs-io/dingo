@@ -680,6 +680,10 @@ type accountRewardKey struct {
 //
 // graceHours/epochEndTime/now/network/epoch all mirror ComparePoolEpoch's
 // identical parameters and meaning.
+// rewardsPending reports that Dingo has not yet computed this epoch's rewards,
+// in which case every account Koios has a reward for is absent on the Dingo side
+// for a reason that is not a divergence. See DingoPoolEpochData.RewardsPending;
+// this is the account-granularity half of the same guard (issue #3857).
 func CompareAccountEpoch(
 	network string,
 	epoch uint64,
@@ -688,6 +692,7 @@ func CompareAccountEpoch(
 	now time.Time,
 	graceHours int,
 	epochEndTime time.Time,
+	rewardsPending bool,
 ) []CheckMismatch {
 	var out []CheckMismatch
 
@@ -784,8 +789,14 @@ func CompareAccountEpoch(
 		dr, dingoOK := dingoByKey[k]
 		switch {
 		case koiosOK && !dingoOK:
+			// The chain-position form of the same question the grace window
+			// asks, and the one that survives a replay: an epoch Dingo has not
+			// computed yet makes every Koios reward look absent here, which is
+			// a statement about timing rather than a divergence (issue #3857).
 			cat := CategoryAcctOnlyKoios
-			if graceHours > 0 && !epochEndTime.IsZero() &&
+			if rewardsPending {
+				cat = CategoryReferenceLag
+			} else if graceHours > 0 && !epochEndTime.IsZero() &&
 				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
 				cat = CategoryReferenceLag
 			}

@@ -142,3 +142,56 @@ func TestComparePoolEpochMissingRewardsBeforeApplication(t *testing.T) {
 			"a recently closed epoch keeps the existing grace behaviour")
 	})
 }
+
+// TestCompareAccountEpochPendingRewardsAreALag is the account-granularity half
+// of dingo #3857.
+//
+// When Dingo has not computed an epoch's rewards yet, every account Koios
+// reports a reward for is absent on the Dingo side. That is timing, not
+// divergence, and at replay speed it dominates everything else: a Preview run
+// produced 15879 acct_only_koios entries, and the epochs carrying them were
+// exactly the epochs with no reward row.
+func TestCompareAccountEpochPendingRewardsAreALag(t *testing.T) {
+	koios := []KoiosAccountRewards{
+		{StakeAddress: "stake_test1a", RewardType: "member", Earned: "1000000"},
+		{StakeAddress: "stake_test1b", RewardType: "member", Earned: "2000000"},
+	}
+	now := time.Now()
+	// An epoch that closed long ago, as every epoch of a replay has, so the
+	// wall-clock grace window cannot fire.
+	longClosed := now.Add(-1388 * 24 * time.Hour)
+
+	categories := func(ms []CheckMismatch) []string {
+		var out []string
+		for _, m := range ms {
+			if m.Field == "account_reward_presence" {
+				out = append(out, m.Category)
+			}
+		}
+		return out
+	}
+
+	t.Run("not computed yet is a lag", func(t *testing.T) {
+		ms := CompareAccountEpoch(
+			"preview", 100, koios, nil, now, 24, longClosed, true,
+		)
+		got := categories(ms)
+		require.Len(t, got, 2)
+		for _, c := range got {
+			assert.Equal(t, CategoryReferenceLag, c,
+				"an epoch Dingo has not computed cannot be a divergence")
+		}
+	})
+
+	t.Run("computed and still absent is a real finding", func(t *testing.T) {
+		ms := CompareAccountEpoch(
+			"preview", 100, koios, nil, now, 24, longClosed, false,
+		)
+		got := categories(ms)
+		require.Len(t, got, 2)
+		for _, c := range got {
+			assert.Equal(t, CategoryAcctOnlyKoios, c,
+				"once Dingo has had its chance, absence is worth reporting")
+		}
+	})
+}

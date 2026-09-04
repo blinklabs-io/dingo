@@ -594,7 +594,7 @@ func TestCompareAccountEpochExactMatch(t *testing.T) {
 	dingo := []DingoAccountReward{
 		{StakeAddress: "stake1a", RewardType: "member", Amount: "1000000"},
 	}
-	ms := CompareAccountEpoch("preview", 100, koios, dingo, now, 0, time.Time{})
+	ms := CompareAccountEpoch("preview", 100, koios, dingo, now, 0, time.Time{}, false)
 	require.Empty(t, ms)
 	require.Equal(t, StatusPass, DetermineStatus(ms))
 }
@@ -607,7 +607,7 @@ func TestCompareAccountEpochZeroRewardBothSidesPasses(t *testing.T) {
 	dingo := []DingoAccountReward{
 		{StakeAddress: "stake1a", RewardType: "member", Amount: "0"},
 	}
-	ms := CompareAccountEpoch("preview", 100, koios, dingo, now, 0, time.Time{})
+	ms := CompareAccountEpoch("preview", 100, koios, dingo, now, 0, time.Time{}, false)
 	require.Empty(t, ms)
 }
 
@@ -616,7 +616,7 @@ func TestCompareAccountEpochMissingFromDingo(t *testing.T) {
 	koios := []KoiosAccountRewards{
 		{StakeAddress: "stake1a", RewardType: "member", Earned: "1000000"},
 	}
-	ms := CompareAccountEpoch("preview", 100, koios, nil, now, 0, time.Time{})
+	ms := CompareAccountEpoch("preview", 100, koios, nil, now, 0, time.Time{}, false)
 	require.Len(t, ms, 1)
 	require.Equal(t, CategoryAcctOnlyKoios, ms[0].Category)
 	require.Equal(t, "stake1a", ms[0].StakeAddress)
@@ -628,7 +628,7 @@ func TestCompareAccountEpochMissingFromKoios(t *testing.T) {
 	dingo := []DingoAccountReward{
 		{StakeAddress: "stake1a", RewardType: "member", Amount: "1000000"},
 	}
-	ms := CompareAccountEpoch("preview", 100, nil, dingo, now, 0, time.Time{})
+	ms := CompareAccountEpoch("preview", 100, nil, dingo, now, 0, time.Time{}, false)
 	require.Len(t, ms, 1)
 	require.Equal(t, CategoryAcctOnlyDingo, ms[0].Category)
 	require.Equal(t, StatusFail, DetermineStatus(ms))
@@ -642,7 +642,7 @@ func TestCompareAccountEpochMissingFromDingoWithinGraceIsReferenceLag(
 		{StakeAddress: "stake1a", RewardType: "member", Earned: "1000000"},
 	}
 	recentClose := now.Add(-time.Hour)
-	ms := CompareAccountEpoch("preview", 100, koios, nil, now, 24, recentClose)
+	ms := CompareAccountEpoch("preview", 100, koios, nil, now, 24, recentClose, false)
 	require.Len(t, ms, 1)
 	require.Equal(t, CategoryReferenceLag, ms[0].Category)
 	require.Equal(t, StatusError, DetermineStatus(ms))
@@ -664,7 +664,7 @@ func TestCompareAccountEpochMissingFromKoiosWithinGraceIsReferenceLag(
 		{StakeAddress: "stake1a", RewardType: "member", Amount: "1000000"},
 	}
 	recentClose := now.Add(-time.Hour)
-	ms := CompareAccountEpoch("preview", 100, nil, dingo, now, 24, recentClose)
+	ms := CompareAccountEpoch("preview", 100, nil, dingo, now, 24, recentClose, false)
 	require.Len(t, ms, 1)
 	require.Equal(t, CategoryReferenceLag, ms[0].Category)
 	require.Equal(t, StatusError, DetermineStatus(ms))
@@ -679,7 +679,7 @@ func TestCompareAccountEpochDuplicateInKoios(t *testing.T) {
 	dingo := []DingoAccountReward{
 		{StakeAddress: "stake1a", RewardType: "member", Amount: "1000000"},
 	}
-	ms := CompareAccountEpoch("preview", 100, koios, dingo, now, 0, time.Time{})
+	ms := CompareAccountEpoch("preview", 100, koios, dingo, now, 0, time.Time{}, false)
 	require.Len(t, ms, 1)
 	require.Equal(t, CategoryAcctDuplicate, ms[0].Category)
 	require.Equal(t, StatusFail, DetermineStatus(ms))
@@ -694,7 +694,7 @@ func TestCompareAccountEpochDuplicateInDingo(t *testing.T) {
 		{StakeAddress: "stake1a", RewardType: "member", Amount: "1000000"},
 		{StakeAddress: "stake1a", RewardType: "member", Amount: "1000000"},
 	}
-	ms := CompareAccountEpoch("preview", 100, koios, dingo, now, 0, time.Time{})
+	ms := CompareAccountEpoch("preview", 100, koios, dingo, now, 0, time.Time{}, false)
 	require.Len(t, ms, 1)
 	require.Equal(t, CategoryAcctDuplicate, ms[0].Category)
 	require.Equal(t, StatusFail, DetermineStatus(ms))
@@ -715,7 +715,7 @@ func TestCompareAccountEpochMemberAndLeaderIndependent(t *testing.T) {
 		// Leader amount differs by 1 lovelace.
 		{StakeAddress: "stake1owner", RewardType: "leader", Amount: "5000001"},
 	}
-	ms := CompareAccountEpoch("preview", 100, koios, dingo, now, 0, time.Time{})
+	ms := CompareAccountEpoch("preview", 100, koios, dingo, now, 0, time.Time{}, false)
 	require.Len(t, ms, 1)
 	require.Equal(t, CategoryValueMismatch, ms[0].Category)
 	require.Equal(t, "5000001", ms[0].DingoValue)
@@ -732,7 +732,7 @@ func TestCompareAccountEpochAmountMismatchByOneLovelace(t *testing.T) {
 	dingo := []DingoAccountReward{
 		{StakeAddress: "stake1a", RewardType: "member", Amount: "1000001"},
 	}
-	ms := CompareAccountEpoch("preview", 100, koios, dingo, now, 0, time.Time{})
+	ms := CompareAccountEpoch("preview", 100, koios, dingo, now, 0, time.Time{}, false)
 	require.Len(t, ms, 1)
 	require.Equal(t, CategoryValueMismatch, ms[0].Category)
 	require.Equal(t, "account_reward_amount", ms[0].Field)
@@ -748,7 +748,7 @@ func TestCompareAccountEpochOutOfScopeRewardTypesFiltered(t *testing.T) {
 		{StakeAddress: "stake1a", RewardType: "reserves", Earned: "1000000"},
 		{StakeAddress: "stake1a", RewardType: "refund", Earned: "1000000"},
 	}
-	ms := CompareAccountEpoch("preview", 100, koios, nil, now, 0, time.Time{})
+	ms := CompareAccountEpoch("preview", 100, koios, nil, now, 0, time.Time{}, false)
 	require.Empty(t, ms)
 }
 
