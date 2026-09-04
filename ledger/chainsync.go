@@ -5967,6 +5967,15 @@ func (ls *LedgerState) processEpochRollover(
 				"persist post-enactment pparams: %w", err,
 			)
 		}
+		// A real, on-chain-enacted PParamUpdate touched protocol params this
+		// epoch. If it set a PlutusV2 cost model, that is real governance
+		// data from here on -- clear the synthetic-default marker regardless
+		// of whether the enacted value happens to equal the default's (real
+		// governance re-affirming the same value is still real, not still a
+		// guess). See LedgerState.syntheticV2CostModel.
+		if _, hasV2 := extractRawCostModels(newPParams)[1]; hasV2 {
+			result.RealV2CostModelObserved = true
+		}
 	}
 	result.NewCurrentPParams = newPParams
 

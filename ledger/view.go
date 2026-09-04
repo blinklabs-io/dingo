@@ -638,6 +638,67 @@ func extractRawCostModels(
 	}
 }
 
+// withoutSyntheticV2CostModel returns pp unchanged unless synthetic is true,
+// in which case it returns a shallow copy with the PlutusV2 cost model (map
+// key 1) removed.
+//
+// See LedgerState.syntheticV2CostModel (blinklabs-io/dingo#3825): the real
+// struct backing pp always carries HardForkBabbage's fabricated PlutusV2
+// cost model once real data hasn't yet replaced it, because internal script
+// validation needs it (a real V2 script can arrive before a real update
+// does). This is called only at the LocalStateQuery reply boundary, so a
+// caller asking "what are the current protocol parameters" sees only what
+// the chain has actually committed to -- matching what a real cardano-node
+// reports during the same window -- without touching the live struct
+// internal validation still reads.
+//
+// The shallow copy (`modified := *p`) is safe: it produces a new struct
+// value referencing the original's other fields, then replaces only
+// CostModels with a freshly built map, so the original -- still reachable
+// from ls.currentPParams / the published snapshot -- is never mutated.
+func withoutSyntheticV2CostModel(
+	pp lcommon.ProtocolParameters,
+	synthetic bool,
+) lcommon.ProtocolParameters {
+	if !synthetic {
+		return pp
+	}
+	switch p := pp.(type) {
+	case *alonzo.AlonzoProtocolParameters:
+		modified := *p
+		modified.CostModels = withoutCostModelKey(p.CostModels, 1)
+		return &modified
+	case *babbage.BabbageProtocolParameters:
+		modified := *p
+		modified.CostModels = withoutCostModelKey(p.CostModels, 1)
+		return &modified
+	case *conway.ConwayProtocolParameters:
+		modified := *p
+		modified.CostModels = withoutCostModelKey(p.CostModels, 1)
+		return &modified
+	default:
+		return pp
+	}
+}
+
+// withoutCostModelKey returns a new map holding every entry of m except key.
+func withoutCostModelKey(
+	m map[uint][]int64,
+	key uint,
+) map[uint][]int64 {
+	if m == nil {
+		return nil
+	}
+	out := make(map[uint][]int64, len(m))
+	for k, v := range m {
+		if k == key {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
 // CommitteeStateAvailable reports whether this view can authoritatively answer
 // committee credential queries for its snapshot.
 //

@@ -483,7 +483,13 @@ func (ls *LedgerState) queryShelleyLeaf(query any) (any, error) {
 	case *olocalstatequery.ShelleyEpochNoQuery:
 		return []any{ls.loadConsensusSnapshot().currentEpoch.EpochId}, nil
 	case *olocalstatequery.ShelleyCurrentProtocolParamsQuery:
-		return []any{ls.loadConsensusSnapshot().currentPParams}, nil
+		snapshot := ls.loadConsensusSnapshot()
+		return []any{
+			withoutSyntheticV2CostModel(
+				snapshot.currentPParams,
+				snapshot.syntheticV2CostModelInEffect,
+			),
+		}, nil
 	case *olocalstatequery.ShelleyGenesisConfigQuery:
 		return ls.queryShelleyGenesisConfig()
 	case *olocalstatequery.ShelleyUtxoByAddressQuery:

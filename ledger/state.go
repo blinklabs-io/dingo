@@ -828,6 +828,9 @@ type consensusSnapshot struct {
 	prevEraPParams lcommon.ProtocolParameters
 	epochCache     []models.Epoch
 	transitionInfo hardfork.TransitionInfo
+	// syntheticV2CostModelInEffect mirrors LedgerState.syntheticV2CostModel;
+	// see that field's doc comment.
+	syntheticV2CostModelInEffect bool
 }
 
 // tipSnapshot contains the applied tip and the Praos block nonce belonging to
@@ -869,37 +872,52 @@ type LedgerState struct {
 	chainsyncBlockfetchTimerGeneration uint64      // generation counter to detect stale timer callbacks
 	currentPParams                     lcommon.ProtocolParameters
 	prevEraPParams                     lcommon.ProtocolParameters // pparams from the immediately previous era (for era-1 TX validation)
-	transitionInfo                     hardfork.TransitionInfo    // upcoming era boundary state (mirrors Haskell HFC TransitionInfo)
-	hfiEvalDoneEpoch                   uint64                     // currentEpoch.EpochId for which the HFI tally has been kicked off (held under ls.RWMutex)
-	hfiEvalGeneration                  atomic.Uint64              // bumped on rollback to invalidate any in-flight HFI tally
-	hfiStabilityEvalInFlight           atomic.Bool                // guard against overlapping async HFI tallies
-	rewardInputGeneration              atomic.Uint64              // bracketed around rollback to invalidate in-flight reward calculations
-	rewardInputRollbackActive          atomic.Int64               // non-zero while rollback can mutate reward calculation inputs
-	mempool                            MempoolProvider
-	timerCleanupConsumedUtxos          *time.Timer
-	cleanupConsumedUtxosRunning        atomic.Bool
-	Scheduler                          *Scheduler
-	chain                              *chain.Chain
-	db                                 *database.Database
-	chainsyncState                     ChainsyncState
-	currentTipBlockNonce               []byte
-	epochCache                         []models.Epoch
-	epochNonceHexCache                 map[uint64]string
-	checkpoints                        map[uint64]string // configured chain checkpoints keyed by block number (height)
-	slotsPerKESPeriod                  atomic.Uint64
-	forgedBlockChecker                 atomic.Pointer[forgedBlockCheckerHolder]
-	slotBattleRecorder                 atomic.Pointer[slotBattleRecorderHolder]
-	cachedShape                        atomic.Pointer[hardfork.Shape]                  // lazy-built from CardanoNodeConfig; immutable for the LedgerState's lifetime
-	epochSnapshotHook                  atomic.Pointer[epochBoundarySnapshotHookHolder] // optional authoritative epoch-boundary snapshot capture (nil = event-driven fallback only)
-	epochSnapshotStakeHook             atomic.Pointer[epochBoundarySnapshotHookHolder] // optional SNAP-point stake read for the authoritative capture (nil = read at persist time)
-	reachedTip                         atomic.Bool
-	currentTip                         ochainsync.Tip
-	byronPBFT                          byronPBFTCache
-	currentEpoch                       models.Epoch
-	dbWorkerPool                       *DatabaseWorkerPool
-	slotClock                          *SlotClock
-	slotTickChan                       <-chan SlotTick
-	ctx                                context.Context
+	// syntheticV2CostModel is true from the moment HardForkBabbage fabricates
+	// a PlutusV2 cost model (real mainnet/preview/preprod never had one in
+	// genesis -- PlutusV2 postdates the Alonzo genesis format entirely, so
+	// this always fires on the live hard fork) until a real governance
+	// enactment sets one via processEpochRollover. It is never reset back to
+	// true once cleared: once real data has been seen for this key, later
+	// eras carrying the same map forward must not be reinterpreted as
+	// synthetic again. See queryShelleyCurrentProtocolParams
+	// (blinklabs-io/dingo#3825) for why this exists: internal script
+	// validation must keep using the real default regardless (a genuine
+	// PlutusV2 script can arrive before the real update lands), but a
+	// LocalStateQuery caller asking "what are the current protocol
+	// parameters" should see only what the chain has actually committed to,
+	// matching what a real cardano-node reports during the same window.
+	syntheticV2CostModel        bool
+	transitionInfo              hardfork.TransitionInfo // upcoming era boundary state (mirrors Haskell HFC TransitionInfo)
+	hfiEvalDoneEpoch            uint64                  // currentEpoch.EpochId for which the HFI tally has been kicked off (held under ls.RWMutex)
+	hfiEvalGeneration           atomic.Uint64           // bumped on rollback to invalidate any in-flight HFI tally
+	hfiStabilityEvalInFlight    atomic.Bool             // guard against overlapping async HFI tallies
+	rewardInputGeneration       atomic.Uint64           // bracketed around rollback to invalidate in-flight reward calculations
+	rewardInputRollbackActive   atomic.Int64            // non-zero while rollback can mutate reward calculation inputs
+	mempool                     MempoolProvider
+	timerCleanupConsumedUtxos   *time.Timer
+	cleanupConsumedUtxosRunning atomic.Bool
+	Scheduler                   *Scheduler
+	chain                       *chain.Chain
+	db                          *database.Database
+	chainsyncState              ChainsyncState
+	currentTipBlockNonce        []byte
+	epochCache                  []models.Epoch
+	epochNonceHexCache          map[uint64]string
+	checkpoints                 map[uint64]string // configured chain checkpoints keyed by block number (height)
+	slotsPerKESPeriod           atomic.Uint64
+	forgedBlockChecker          atomic.Pointer[forgedBlockCheckerHolder]
+	slotBattleRecorder          atomic.Pointer[slotBattleRecorderHolder]
+	cachedShape                 atomic.Pointer[hardfork.Shape]                  // lazy-built from CardanoNodeConfig; immutable for the LedgerState's lifetime
+	epochSnapshotHook           atomic.Pointer[epochBoundarySnapshotHookHolder] // optional authoritative epoch-boundary snapshot capture (nil = event-driven fallback only)
+	epochSnapshotStakeHook      atomic.Pointer[epochBoundarySnapshotHookHolder] // optional SNAP-point stake read for the authoritative capture (nil = read at persist time)
+	reachedTip                  atomic.Bool
+	currentTip                  ochainsync.Tip
+	byronPBFT                   byronPBFTCache
+	currentEpoch                models.Epoch
+	dbWorkerPool                *DatabaseWorkerPool
+	slotClock                   *SlotClock
+	slotTickChan                <-chan SlotTick
+	ctx                         context.Context
 	// cleanupMu owns timerCleanupConsumedUtxos and serializes cleanup-run
 	// registration against Close. Deliberately not the LedgerState RWMutex:
 	// Close waits on cleanupWG while an in-flight run still needs RLock to
@@ -1209,6 +1227,11 @@ type upstreamSyncState struct {
 type EraTransitionResult struct {
 	NewPParams lcommon.ProtocolParameters
 	NewEra     eras.EraDesc
+	// InjectedSyntheticV2CostModel is true when this specific transition is
+	// the one that fabricated a PlutusV2 cost model (HardForkBabbage's
+	// default), as opposed to one carried forward from a real source. See
+	// LedgerState.syntheticV2CostModel.
+	InjectedSyntheticV2CostModel bool
 }
 
 // HardForkInfo holds details about a detected hard fork
@@ -1242,6 +1265,14 @@ type EpochRolloverResult struct {
 	// NewCurrentPParams. It stays false for the initial-epoch path, which never
 	// captures a mark snapshot.
 	BoundarySnapshotDeferred bool
+	// RealV2CostModelObserved is true when this rollover's governance
+	// enactment produced a PlutusV2 cost model from a real on-chain update
+	// (not a hard fork's own synthetic default). The caller uses this to
+	// clear LedgerState.syntheticV2CostModel once real data has actually
+	// been seen, regardless of whether the enacted value happens to match
+	// the synthetic default's -- real governance re-affirming the exact
+	// value Dingo already guessed is still real data, not still-synthetic.
+	RealV2CostModelObserved bool
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
@@ -1391,8 +1422,9 @@ func (ls *LedgerState) publishSnapshotsLocked() {
 		// element updates; its capped capacity also forces accidental appends to
 		// allocate. Tip-only publications can therefore safely reuse it instead
 		// of copying the full epoch history for every block.
-		epochCache:     ls.epochCache,
-		transitionInfo: ls.transitionInfo,
+		epochCache:                   ls.epochCache,
+		transitionInfo:               ls.transitionInfo,
+		syntheticV2CostModelInEffect: ls.syntheticV2CostModel,
 	})
 	ls.tip.Store(&tipSnapshot{
 		generation:           generation,
@@ -3652,6 +3684,10 @@ func (ls *LedgerState) transitionToEraFrom(
 			return nil, fmt.Errorf("hard fork failed: %w", err)
 		}
 		result.NewPParams = newPParams
+		result.InjectedSyntheticV2CostModel = injectedSyntheticV2CostModel(
+			currentPParams,
+			newPParams,
+		)
 		ls.config.Logger.Debug(
 			"updated protocol params",
 			"pparams",
@@ -3865,6 +3901,36 @@ func (ls *LedgerState) applyEraTransition(result *EraTransitionResult) {
 	ls.currentEra = result.NewEra
 	// Any pending TransitionKnown is consumed: the new era is now active.
 	ls.transitionInfo = hardfork.NewTransitionUnknown()
+	// Only ever set, never cleared here: a later era's own transition
+	// carrying the same CostModels map forward (e.g. Babbage->Conway) must
+	// not be read as "this transition re-synthesized it," which would be
+	// harmless today (still true) but wrong if a future era's HardForkFunc
+	// stops re-detecting it. Clearing happens only where real data is
+	// actually observed; see processEpochRollover's governance-enactment
+	// handling.
+	if result.InjectedSyntheticV2CostModel {
+		ls.syntheticV2CostModel = true
+	}
+}
+
+// injectedSyntheticV2CostModel reports whether this specific era transition
+// is the one that fabricated a PlutusV2 cost model rather than carrying one
+// forward from a real source (genesis or an earlier real update): before had
+// no key 1, after has key 1, and its value is exactly
+// eras.DefaultPlutusV2CostModel. See LedgerState.syntheticV2CostModel.
+func injectedSyntheticV2CostModel(
+	before, after lcommon.ProtocolParameters,
+) bool {
+	afterModels := extractRawCostModels(after)
+	afterV2, ok := afterModels[1]
+	if !ok {
+		return false
+	}
+	beforeModels := extractRawCostModels(before)
+	if _, hadV2 := beforeModels[1]; hadV2 {
+		return false
+	}
+	return slices.Equal(afterV2, eras.DefaultPlutusV2CostModel)
 }
 
 // IsAtTip reports whether the node has caught up to the chain tip at least
@@ -5300,6 +5366,9 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				ls.currentEpoch = rolloverResult.NewCurrentEpoch
 				ls.currentEra = rolloverResult.NewCurrentEra
 				ls.currentPParams = rolloverResult.NewCurrentPParams
+				if rolloverResult.RealV2CostModelObserved {
+					ls.syntheticV2CostModel = false
+				}
 				ls.checkpointWrittenForEpoch = rolloverResult.CheckpointWrittenForEpoch
 				ls.metrics.epochNum.Set(rolloverResult.NewEpochNum)
 				// New epoch: any TransitionImpossible set for the previous
@@ -7599,6 +7668,9 @@ func (ls *LedgerState) setEpochCache(
 	ls.currentEpoch = rolloverResult.NewCurrentEpoch
 	ls.currentEra = rolloverResult.NewCurrentEra
 	ls.currentPParams = rolloverResult.NewCurrentPParams
+	if rolloverResult.RealV2CostModelObserved {
+		ls.syntheticV2CostModel = false
+	}
 	ls.checkpointWrittenForEpoch = rolloverResult.CheckpointWrittenForEpoch
 	ls.metrics.epochNum.Set(rolloverResult.NewEpochNum)
 	return nil
