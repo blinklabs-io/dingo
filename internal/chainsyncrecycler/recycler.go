@@ -36,10 +36,10 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
 
-// catchUpMultiplier extends every recycling threshold while the node is behind
-// the chain tip. Connection recycling during bulk sync causes pipeline resets,
-// TIME_WAIT socket exhaustion, and dropped rollbacks that slow catch-up far
-// more than the stall itself.
+// catchUpMultiplier extends stalled-client grace and recycle cooldowns while the
+// node is behind the chain tip. Connection recycling during bulk sync causes
+// pipeline resets, TIME_WAIT socket exhaustion, and dropped rollbacks that
+// slow catch-up far more than the stall itself.
 const catchUpMultiplier = 5
 
 // defaultRestartDelay is how long the run loop waits before restarting after a
@@ -387,14 +387,17 @@ func (r *Recycler) tick(
 		st.lastProgressSlot = localTipSlot
 		st.lastProgressAt = now
 	}
-	// During catch-up, extend all recycling thresholds to avoid churning
-	// connections while the node is making progress.
+	// During catch-up, extend stalled-client grace and recycle cooldowns to
+	// avoid churning connections while the node is making progress. The local
+	// tip plateau threshold is intentionally not extended: this path only runs
+	// after the local tip stopped progressing, so catch-up is not evidence that
+	// the plateau is healthy.
 	multiplier := 1
 	if !live.Ledger.IsAtTip() {
 		multiplier = catchUpMultiplier
 	}
 	effectiveGrace := time.Duration(multiplier) * r.config.Grace
-	effectivePlateau := time.Duration(multiplier) * r.plateauRecovery
+	effectivePlateau := r.plateauRecovery
 	effectiveCooldown := time.Duration(multiplier) * r.config.Cooldown
 	live.ChainsyncState.CheckStalledClients()
 	// Rotate the round-robin header-ingress driver on the stall-check
