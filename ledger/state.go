@@ -1272,18 +1272,17 @@ type EpochRolloverResult struct {
 	// NewCurrentPParams. It stays false for the initial-epoch path, which never
 	// captures a mark snapshot.
 	BoundarySnapshotDeferred bool
-	// RealV2CostModelObserved is true when this rollover's governance
-	// enactment specifically wrote a new PlutusV2 cost model value (not
-	// just left the hard fork's own synthetic default carried forward
-	// unchanged). The caller uses this to clear
-	// LedgerState.syntheticV2CostModel once real data has actually been
-	// written. Real governance re-affirming the exact value Dingo already
-	// guessed is indistinguishable, from this signal alone, from an
-	// unrelated enactment that never touched the cost model at all -- both
-	// leave CostModels[1] unchanged -- so that case is conservatively left
-	// synthetic rather than risk clearing it too early. See
-	// blinklabs-io/dingo#3825's PR review for why "present after
-	// enactment" alone is not sufficient evidence.
+	// RealV2CostModelObserved is true when this rollover's enacted governance
+	// ParamUpdate explicitly carried a PlutusV2 cost model
+	// (governance.EnactmentResult.PlutusV2CostModelWritten), not merely
+	// whether the post-enactment pparams happen to contain one. Provenance
+	// is tracked from the enacted delta itself rather than by comparing
+	// before/after values, because DefaultPlutusV2CostModel is the real
+	// canonical mainnet value: real governance re-affirming it verbatim
+	// would be indistinguishable from "unchanged" under a value-comparison
+	// approach, which would then never clear
+	// LedgerState.syntheticV2CostModel on a real network. See
+	// blinklabs-io/dingo#3825's PR review.
 	RealV2CostModelObserved bool
 }
 
@@ -3721,6 +3720,16 @@ func (ls *LedgerState) transitionToEraFrom(
 		if err != nil {
 			return nil, fmt.Errorf("failed to set pparams: %w", err)
 		}
+		if result.InjectedSyntheticV2CostModel {
+			// Persisted in the same transaction as the pparams write
+			// above: writing it separately, after this transaction
+			// commits, would leave a window where a crash after the
+			// pparams commit but before the marker commit strands the
+			// marker stale, exposing the wrong thing on restart.
+			if err := ls.persistSyntheticV2CostModel(true, txn); err != nil {
+				return nil, err
+			}
+		}
 		if err := governance.TranslateRatifiedGovActions(
 			ls.db,
 			txn,
@@ -3921,9 +3930,13 @@ func (ls *LedgerState) applyEraTransition(result *EraTransitionResult) {
 	// stops re-detecting it. Clearing happens only where real data is
 	// actually observed; see processEpochRollover's governance-enactment
 	// handling.
+	//
+	// The durable marker itself is persisted earlier, transactionally,
+	// inside transitionToEraFrom (same transaction as the pparams write);
+	// this only updates the in-memory value that mirrors it, under the same
+	// lock that guards ls.currentPParams.
 	if result.InjectedSyntheticV2CostModel {
 		ls.syntheticV2CostModel = true
-		ls.persistSyntheticV2CostModel(true)
 	}
 }
 
@@ -3957,24 +3970,27 @@ func (ls *LedgerState) loadSyntheticV2CostModel() {
 
 // persistSyntheticV2CostModel durably records LedgerState.syntheticV2CostModel
 // so a restart reconstructs it correctly instead of defaulting to false; see
-// syntheticV2CostModelSyncKey. Best-effort: a write failure only means a
-// possible one-time regression back to exposing the synthetic default after
-// the next restart, not a correctness problem for the running process (which
-// already has the in-memory field set), so it is logged rather than
-// propagated as an error from the era-transition/rollover path calling it.
-func (ls *LedgerState) persistSyntheticV2CostModel(value bool) {
+// syntheticV2CostModelSyncKey. The caller supplies txn so this write commits
+// atomically with the protocol-parameter write it describes -- a nil txn
+// commits immediately as its own transaction, matching database.Txn's usual
+// convention. Errors are propagated rather than logged-and-swallowed: when
+// txn is a caller-managed transaction, a write failure here must abort that
+// transaction along with the pparams write it accompanies, not silently
+// leave the two inconsistent. See blinklabs-io/dingo#3825's PR review.
+func (ls *LedgerState) persistSyntheticV2CostModel(
+	value bool,
+	txn *database.Txn,
+) error {
 	v := "false"
 	if value {
 		v = "true"
 	}
-	if err := ls.db.SetSyncState(syntheticV2CostModelSyncKey, v, nil); err != nil {
-		ls.config.Logger.Warn(
-			"failed to persist synthetic PlutusV2 cost model marker",
-			"component", "ledger",
-			"value", value,
-			"error", err,
+	if err := ls.db.SetSyncState(syntheticV2CostModelSyncKey, v, txn); err != nil {
+		return fmt.Errorf(
+			"persist synthetic PlutusV2 cost model marker: %w", err,
 		)
 	}
+	return nil
 }
 
 // injectedSyntheticV2CostModel reports whether this specific era transition
@@ -3995,33 +4011,6 @@ func injectedSyntheticV2CostModel(
 		return false
 	}
 	return slices.Equal(afterV2, eras.DefaultPlutusV2CostModel)
-}
-
-// realV2CostModelWritten reports whether a governance enactment actually
-// wrote a PlutusV2 cost model, comparing against what the key held
-// immediately before enactment (preHadV2, pre) rather than merely checking
-// whether it is present in after. The synthetic default carries forward
-// through every epoch's pparams regardless of what an unrelated field's
-// enactment touches, so "present after enactment" alone is true whether or
-// not this specific update said anything about the cost model; only a real
-// change to the key is evidence of real data.
-//
-// Equal-to-before-and-still-present is deliberately NOT treated as a
-// change: from this signal alone there is no way to distinguish "governance
-// re-affirmed exactly this value" from "this enactment never touched the
-// key at all," so the safer read is to keep waiting for an unambiguous
-// write rather than risk clearing LedgerState.syntheticV2CostModel too
-// early. See blinklabs-io/dingo#3825's PR review.
-func realV2CostModelWritten(
-	preHadV2 bool,
-	pre []int64,
-	after lcommon.ProtocolParameters,
-) bool {
-	post, postHadV2 := extractRawCostModels(after)[1]
-	if !postHadV2 {
-		return false
-	}
-	return !preHadV2 || !slices.Equal(pre, post)
 }
 
 // IsAtTip reports whether the node has caught up to the chain tip at least
@@ -5457,9 +5446,12 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				ls.currentEpoch = rolloverResult.NewCurrentEpoch
 				ls.currentEra = rolloverResult.NewCurrentEra
 				ls.currentPParams = rolloverResult.NewCurrentPParams
+				// The durable marker itself was already persisted
+				// transactionally inside processEpochRollover; this only
+				// updates the in-memory mirror under the same lock that
+				// guards ls.currentPParams.
 				if rolloverResult.RealV2CostModelObserved {
 					ls.syntheticV2CostModel = false
-					ls.persistSyntheticV2CostModel(false)
 				}
 				ls.checkpointWrittenForEpoch = rolloverResult.CheckpointWrittenForEpoch
 				ls.metrics.epochNum.Set(rolloverResult.NewEpochNum)
@@ -7760,9 +7752,10 @@ func (ls *LedgerState) setEpochCache(
 	ls.currentEpoch = rolloverResult.NewCurrentEpoch
 	ls.currentEra = rolloverResult.NewCurrentEra
 	ls.currentPParams = rolloverResult.NewCurrentPParams
+	// The durable marker itself was already persisted transactionally
+	// inside processEpochRollover; this only updates the in-memory mirror.
 	if rolloverResult.RealV2CostModelObserved {
 		ls.syntheticV2CostModel = false
-		ls.persistSyntheticV2CostModel(false)
 	}
 	ls.checkpointWrittenForEpoch = rolloverResult.CheckpointWrittenForEpoch
 	ls.metrics.epochNum.Set(rolloverResult.NewEpochNum)

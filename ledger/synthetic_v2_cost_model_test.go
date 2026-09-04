@@ -45,7 +45,9 @@ func protocolParamsQuery() *olocalstatequery.BlockQuery {
 // era's params don't have one -- real for any Alonzo genesis, since the
 // AlonzoGenesisCostModels format predates PlutusV2 entirely and never has a
 // slot for it.
-func TestInjectedSyntheticV2CostModel_DetectsHardForkBabbagesDefault(t *testing.T) {
+func TestInjectedSyntheticV2CostModel_DetectsHardForkBabbagesDefault(
+	t *testing.T,
+) {
 	prev := &alonzo.AlonzoProtocolParameters{
 		CostModels: map[uint][]int64{0: {1, 2, 3}},
 	}
@@ -74,7 +76,9 @@ func TestInjectedSyntheticV2CostModel_FalseWhenAlreadyPresent(t *testing.T) {
 // a hypothetical newly-added key 1 whose value does not match
 // eras.DefaultPlutusV2CostModel -- only the exact known fabricated value
 // counts as synthetic, not "any new key 1."
-func TestInjectedSyntheticV2CostModel_FalseWhenValueIsNotTheKnownDefault(t *testing.T) {
+func TestInjectedSyntheticV2CostModel_FalseWhenValueIsNotTheKnownDefault(
+	t *testing.T,
+) {
 	before := &babbage.BabbageProtocolParameters{
 		CostModels: map[uint][]int64{0: {1, 2, 3}},
 	}
@@ -89,7 +93,9 @@ func TestInjectedSyntheticV2CostModel_FalseWhenValueIsNotTheKnownDefault(t *test
 // the query-boundary filter: when synthetic is true, the returned value
 // omits PlutusV2 while every other key survives, and the original pparams
 // (still reachable from internal validation state) is never mutated.
-func TestWithoutSyntheticV2CostModel_RemovesKeyWithoutMutatingOriginal(t *testing.T) {
+func TestWithoutSyntheticV2CostModel_RemovesKeyWithoutMutatingOriginal(
+	t *testing.T,
+) {
 	original := &conway.ConwayProtocolParameters{
 		CostModels: map[uint][]int64{
 			0: {1, 1, 1},
@@ -129,7 +135,9 @@ func TestWithoutSyntheticV2CostModel_CoversEveryEraType(t *testing.T) {
 		assert.Contains(t, pp.CostModels, uint(1), "original must be untouched")
 	})
 	t.Run("Babbage", func(t *testing.T) {
-		pp := &babbage.BabbageProtocolParameters{CostModels: cloneMap(costModels)}
+		pp := &babbage.BabbageProtocolParameters{
+			CostModels: cloneMap(costModels),
+		}
 		got := withoutSyntheticV2CostModel(pp, true)
 		fp, ok := got.(*babbage.BabbageProtocolParameters)
 		require.True(t, ok)
@@ -198,7 +206,9 @@ func TestWithoutSyntheticV2CostModel_NoOpWhenNotSynthetic(t *testing.T) {
 // carries HardForkBabbage's fabricated one, needed for real script
 // validation. The LocalStateQuery reply must match the real node's
 // observable behavior; internal validation must not be affected.
-func TestQueryShelleyCurrentProtocolParams_OmitsSyntheticV2CostModel(t *testing.T) {
+func TestQueryShelleyCurrentProtocolParams_OmitsSyntheticV2CostModel(
+	t *testing.T,
+) {
 	ls := newPoolDistr2Ledger(t, newTestDB(t))
 	ls.currentEra = eras.ConwayEraDesc
 	ls.currentPParams = &conway.ConwayProtocolParameters{
@@ -238,7 +248,9 @@ func TestQueryShelleyCurrentProtocolParams_OmitsSyntheticV2CostModel(t *testing.
 // whatever is actually in CostModels -- including a value that happens to
 // equal the known synthetic default, since real governance re-affirming
 // that exact value is still real data, not still a guess.
-func TestQueryShelleyCurrentProtocolParams_IncludesRealV2CostModel(t *testing.T) {
+func TestQueryShelleyCurrentProtocolParams_IncludesRealV2CostModel(
+	t *testing.T,
+) {
 	ls := newPoolDistr2Ledger(t, newTestDB(t))
 	ls.currentEra = eras.ConwayEraDesc
 	ls.currentPParams = &conway.ConwayProtocolParameters{
@@ -264,67 +276,6 @@ func TestQueryShelleyCurrentProtocolParams_IncludesRealV2CostModel(t *testing.T)
 	assert.Equal(t, eras.DefaultPlutusV2CostModel, pp.CostModels[1])
 }
 
-// TestRealV2CostModelWritten_FalseWhenUnrelatedEnactmentCarriesItForward
-// covers blinklabs-io/dingo#3825's PR review: an enactment that changes some
-// other field must not clear the synthetic marker just because the
-// synthetic default is still (unchanged) present afterward -- that is
-// exactly the shape of "unrelated update, cost model happens to carry
-// forward," not evidence of real data.
-func TestRealV2CostModelWritten_FalseWhenUnrelatedEnactmentCarriesItForward(
-	t *testing.T,
-) {
-	after := &conway.ConwayProtocolParameters{
-		CostModels: map[uint][]int64{
-			0: {1},
-			1: eras.DefaultPlutusV2CostModel, // unchanged from before
-		},
-	}
-
-	assert.False(t, realV2CostModelWritten(
-		true, eras.DefaultPlutusV2CostModel, after,
-	))
-}
-
-// TestRealV2CostModelWritten_TrueWhenValueActuallyChanges covers the real
-// case this exists for: an enactment that writes a genuinely different
-// PlutusV2 cost model value.
-func TestRealV2CostModelWritten_TrueWhenValueActuallyChanges(t *testing.T) {
-	after := &conway.ConwayProtocolParameters{
-		CostModels: map[uint][]int64{
-			0: {1},
-			1: {9, 9, 9},
-		},
-	}
-
-	assert.True(t, realV2CostModelWritten(
-		true, eras.DefaultPlutusV2CostModel, after,
-	))
-}
-
-// TestRealV2CostModelWritten_TrueWhenKeyNewlyAppears covers an enactment
-// that sets the cost model for the first time (preHadV2 false), the other
-// way real data can appear.
-func TestRealV2CostModelWritten_TrueWhenKeyNewlyAppears(t *testing.T) {
-	after := &conway.ConwayProtocolParameters{
-		CostModels: map[uint][]int64{
-			0: {1},
-			1: {9, 9, 9},
-		},
-	}
-
-	assert.True(t, realV2CostModelWritten(false, nil, after))
-}
-
-// TestRealV2CostModelWritten_FalseWhenStillAbsent covers an enactment that
-// leaves the cost model unset entirely.
-func TestRealV2CostModelWritten_FalseWhenStillAbsent(t *testing.T) {
-	after := &conway.ConwayProtocolParameters{
-		CostModels: map[uint][]int64{0: {1}},
-	}
-
-	assert.False(t, realV2CostModelWritten(false, nil, after))
-}
-
 // TestSyntheticV2CostModelPersistence_RoundTripsAcrossRestart covers
 // blinklabs-io/dingo#3825's PR review: LedgerState.syntheticV2CostModel must
 // survive a restart via persistSyntheticV2CostModel/loadSyntheticV2CostModel,
@@ -338,7 +289,7 @@ func TestSyntheticV2CostModelPersistence_RoundTripsAcrossRestart(t *testing.T) {
 	ls.loadSyntheticV2CostModel()
 	assert.False(t, ls.syntheticV2CostModel)
 
-	ls.persistSyntheticV2CostModel(true)
+	require.NoError(t, ls.persistSyntheticV2CostModel(true, nil))
 	// Simulate a restart: a fresh in-memory value, restored from the same
 	// database.
 	ls.syntheticV2CostModel = false
@@ -346,9 +297,68 @@ func TestSyntheticV2CostModelPersistence_RoundTripsAcrossRestart(t *testing.T) {
 	assert.True(t, ls.syntheticV2CostModel,
 		"restored value must survive the simulated restart")
 
-	ls.persistSyntheticV2CostModel(false)
+	require.NoError(t, ls.persistSyntheticV2CostModel(false, nil))
 	ls.syntheticV2CostModel = true
 	ls.loadSyntheticV2CostModel()
 	assert.False(t, ls.syntheticV2CostModel,
 		"a later persisted false must also survive the simulated restart")
+}
+
+// TestTransitionToEraFrom_PersistsSyntheticMarkerInSameTransactionAsPParams
+// covers blinklabs-io/dingo#3825's PR review (CodeRabbit round): the
+// synthetic-cost-model marker must be written in the SAME database
+// transaction as the pparams update it describes, not committed
+// separately afterward. If they were in different transactions, a crash
+// between the two commits could leave a stale marker on restart. This is
+// proven here by rolling the transaction back entirely: since both writes
+// share one transaction, rollback must undo both together, and a fresh
+// read must see neither.
+func TestTransitionToEraFrom_PersistsSyntheticMarkerInSameTransactionAsPParams(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+
+	prev := &alonzo.AlonzoProtocolParameters{
+		CostModels: map[uint][]int64{0: {1, 2, 3}},
+	}
+
+	txn := db.Transaction(true)
+	result, err := ls.transitionToEraFrom(
+		txn,
+		eras.BabbageEraDesc.Id,
+		1,
+		100,
+		prev,
+		eras.AlonzoEraDesc.Id,
+	)
+	require.NoError(t, err)
+	require.True(t, result.InjectedSyntheticV2CostModel)
+	require.NoError(t, txn.Rollback())
+
+	// Nothing must be durable: neither the pparams write nor the marker,
+	// since they shared one now-rolled-back transaction.
+	ls.syntheticV2CostModel = false
+	ls.loadSyntheticV2CostModel()
+	assert.False(t, ls.syntheticV2CostModel,
+		"a rolled-back transaction must not leave the marker persisted")
+
+	// The same sequence, committed instead, must persist both together.
+	txn = db.Transaction(true)
+	result, err = ls.transitionToEraFrom(
+		txn,
+		eras.BabbageEraDesc.Id,
+		1,
+		100,
+		prev,
+		eras.AlonzoEraDesc.Id,
+	)
+	require.NoError(t, err)
+	require.True(t, result.InjectedSyntheticV2CostModel)
+	require.NoError(t, txn.Commit())
+
+	ls.syntheticV2CostModel = false
+	ls.loadSyntheticV2CostModel()
+	assert.True(t, ls.syntheticV2CostModel,
+		"a committed transaction must persist the marker")
 }

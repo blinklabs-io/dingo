@@ -5923,13 +5923,6 @@ func (ls *LedgerState) processEpochRollover(
 	if ls.config.CardanoNodeConfig != nil {
 		conwayGenesis = ls.config.CardanoNodeConfig.ConwayGenesis()
 	}
-	// Captured before enactment so the synthetic-V2 detection below can tell
-	// "this enactment actually wrote CostModels[1]" apart from "CostModels[1]
-	// was already there (the synthetic default) and this update touched some
-	// unrelated field" -- newPParams carries the synthetic default forward
-	// through every epoch until a real update replaces it, so its mere
-	// presence in the post-enactment result is not evidence of anything.
-	preEnactmentV2, preEnactmentHadV2 := extractRawCostModels(newPParams)[1]
 	govOut, err := governance.ProcessEpoch(&governance.EpochInput{
 		DB:                    ls.db,
 		Txn:                   txn,
@@ -5974,9 +5967,17 @@ func (ls *LedgerState) processEpochRollover(
 				"persist post-enactment pparams: %w", err,
 			)
 		}
-		if realV2CostModelWritten(
-			preEnactmentHadV2, preEnactmentV2, newPParams,
-		) {
+		if govOut.PlutusV2CostModelWritten {
+			// Persisted in the SAME transaction as the pparams write above:
+			// writing it separately, after this transaction commits, would
+			// leave a window where a crash after the pparams commit but
+			// before the marker commit strands the marker stale, exposing
+			// the wrong thing on restart. See
+			// LedgerState.syntheticV2CostModel and blinklabs-io/dingo#3825's
+			// PR review.
+			if err := ls.persistSyntheticV2CostModel(false, txn); err != nil {
+				return nil, err
+			}
 			result.RealV2CostModelObserved = true
 		}
 	}
