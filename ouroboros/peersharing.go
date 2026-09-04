@@ -29,29 +29,21 @@ func (o *Ouroboros) peerSharingConfig() opeersharing.Config {
 	return opeersharing.NewConfig(o.peersharingConnOpts()...)
 }
 
+// peersharingConnOpts wires the single response-side callback the
+// PeerSharing protocol exposes: opeersharing.Config carries exactly one
+// ShareRequestFunc slot, which answers an incoming ShareRequest from a
+// remote peer. There is no separate outbound-request slot to configure here;
+// this node's own requests for peers are driven explicitly by the reconcile
+// loop via RequestPeersFromPeer, not through a protocol callback. Registering
+// WithShareRequestFunc more than once would silently make the last
+// registration win, so ownership of that single slot stays explicit here
+// rather than split across a client/server pair that both target it.
 func (o *Ouroboros) peersharingConnOpts() []opeersharing.PeerSharingOptionFunc {
-	opts := append(
-		[]opeersharing.PeerSharingOptionFunc{},
-		o.peersharingClientConnOpts()...,
-	)
-	opts = append(opts, o.peersharingServerConnOpts()...)
-	opts = append(opts, opeersharing.WithLocalDisabled(!o.config.PeerSharing))
-	return opts
-}
-
-func (o *Ouroboros) peersharingServerConnOpts() []opeersharing.PeerSharingOptionFunc {
 	return []opeersharing.PeerSharingOptionFunc{
 		opeersharing.WithShareRequestFunc(
 			o.instrumentPeersharingShareRequest(o.peersharingShareRequest),
 		),
-	}
-}
-
-func (o *Ouroboros) peersharingClientConnOpts() []opeersharing.PeerSharingOptionFunc {
-	return []opeersharing.PeerSharingOptionFunc{
-		opeersharing.WithShareRequestFunc(
-			o.instrumentPeersharingShareRequest(o.peersharingClientRequest),
-		),
+		opeersharing.WithLocalDisabled(!o.config.PeerSharing),
 	}
 }
 
@@ -67,16 +59,6 @@ func (o *Ouroboros) instrumentPeersharingShareRequest(
 		o.recordProtocolMessage("peersharing", err, time.Since(start))
 		return addrs, err
 	}
-}
-
-func (o *Ouroboros) peersharingClientRequest(
-	ctx opeersharing.CallbackContext,
-	amount int,
-) ([]opeersharing.PeerAddress, error) {
-	// This callback is intentionally a no-op stub.
-	// Peer requests are driven explicitly by the reconcile loop via RequestPeersFromPeer,
-	// not through the protocol's automatic peer sharing callbacks.
-	return []opeersharing.PeerAddress{}, nil
 }
 
 func (o *Ouroboros) peersharingShareRequest(

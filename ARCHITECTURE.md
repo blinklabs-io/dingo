@@ -4004,7 +4004,7 @@ cardano-node records the snapshot's own magic in the file, so a foreign
 snapshot is self-identifying. Left unchecked it costs the node both peer sets
 at once: its relays displace the configured bootstrap peers, and then every one
 of them is denied at the handshake for a network-magic mismatch
-(`permanentlyDenyNetworkMagicMismatch`), so the node ends up with no peers and
+(`denyNetworkMagicMismatch`), so the node ends up with no peers and
 no route back to the bootstrap list. The `added == 0` fallback above does not
 help, because the addresses were added successfully — they only fail later, at
 the handshake.
