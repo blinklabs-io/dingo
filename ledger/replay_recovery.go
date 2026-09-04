@@ -782,16 +782,23 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 	if securityParam <= 0 {
 		return chain.ErrSecurityParamNotConfigured
 	}
-	// Serialize every windowed rollback with blockfetch insertion. A queued
-	// batch must not pass its generation check between validation and rollback,
-	// or replacement headers can be followed by bodies from the superseded
-	// chain.
-	ls.chainsyncBlockfetchMutex.Lock()
-	defer ls.chainsyncBlockfetchMutex.Unlock()
 	// Keep every Undo enqueue and its corresponding chain truncation atomic
 	// with respect to a block-apply commit's AfterCommit Apply publication.
 	ls.transactionEventMutex.Lock()
 	defer ls.transactionEventMutex.Unlock()
+	rollbackWindow := func(rollbackPoint ocommon.Point) error {
+		// Serialize the generation publication and chain mutation with
+		// blockfetch insertion. Deferred chain events are published only after
+		// releasing the mutex because delivery may backpressure.
+		ls.chainsyncBlockfetchMutex.Lock()
+		ls.chainRollbackGeneration.Add(1)
+		_, err := ls.chain.RollbackDeferred(rollbackPoint)
+		ls.chainsyncBlockfetchMutex.Unlock()
+		if err == nil {
+			ls.chain.PublishPendingChainUpdates()
+		}
+		return err
+	}
 
 	targetIndex := uint64(0)
 	if point.Slot > 0 || len(point.Hash) > 0 {
@@ -844,8 +851,7 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 				err,
 			)
 		}
-		ls.chainRollbackGeneration.Add(1)
-		if err := ls.chain.Rollback(nextPoint); err != nil {
+		if err := rollbackWindow(nextPoint); err != nil {
 			return fmt.Errorf(
 				"rollback primary chain to intermediate point %d: %w",
 				nextIndex,
@@ -857,8 +863,7 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 	if err := ls.validateAndEmitRollbackUndo(point); err != nil {
 		return fmt.Errorf("rollback primary chain to recovery point: %w", err)
 	}
-	ls.chainRollbackGeneration.Add(1)
-	if err := ls.chain.Rollback(point); err != nil {
+	if err := rollbackWindow(point); err != nil {
 		return fmt.Errorf("rollback primary chain to recovery point: %w", err)
 	}
 	return nil
