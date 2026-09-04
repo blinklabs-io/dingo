@@ -4600,7 +4600,7 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 	}()
 }
 
-// flushPendingBlockfetchBlocksDeferred is flushPendingBlockfetchBlocks that
+// flushPendingBlockfetchBlocksDeferred flushes pending blockfetch events and
 // queues each committed block's chain.update onto pubs instead of letting the
 // chain publish it inline. The blockfetch drain runs under
 // chainsyncBlockfetchMutex; an inline, back-pressured chain.update publish

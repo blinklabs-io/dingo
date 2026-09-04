@@ -529,7 +529,7 @@ opens a chain iterator at the requested start point, sends `StartBatch`, then
 streams `Block` messages until the requested end or local tip before
 `BatchDone`. Validating the bounds means both of them: the start point through
 the iterator constructor below, and the end point through
-`LedgerState.ChainHoldsPoint` (`Chain.HoldsPoint`), which applies the same
+`Chain.HoldsPoint`, which applies the same
 resolve-and-membership check without allocating an iterator. Checking only the
 end *slot* let a peer name an end point the server does not hold and receive a
 slot-bounded prefix of the server's own chain in its place; an end point that
@@ -550,12 +550,13 @@ views make a live decoded block substantially larger than its wire bytes.
 
 A batch is fetched for the header queue that existed when it was requested, so
 `LedgerState` binds each batch to a chain-rollback generation, bumped before
-every primary-chain rollback. `rollbackChain` takes `chainsyncBlockfetchMutex`
-for the rollback, so it cannot interleave with a flush, and publishes the
-generation before the chain changes so the discard stays correct for a reader
-that does not hold that mutex. Callers must not already hold it: every rollback
-entry point takes `chainsyncMutex` first and leaves the blockfetch mutex to the
-restart that follows. Bodies still arriving for
+every primary-chain rollback. `rollbackChainAndStateDeferred` and the windowed
+replay-recovery rollback take `chainsyncBlockfetchMutex` across generation
+validation and chain mutation, so they cannot interleave with a flush, and
+publish the generation before the chain changes so the discard stays correct
+for a reader that does not hold that mutex. Callers must not already hold it:
+every rollback entry point takes `chainsyncMutex` first and leaves the
+blockfetch mutex to the restart that follows. Bodies still arriving for
 an older generation are dropped instead of being handed to chain insertion:
 fork resolution rolls back, re-queues the winning peer's header path and only
 then restarts blockfetch, and a body from the losing fork reaching insertion
