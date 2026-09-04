@@ -438,6 +438,77 @@ func TestSlotTimeConverter_SlotToTimeInEraUsesCachedCurrentEra(t *testing.T) {
 	)
 }
 
+// TestSlotTimeConverter_SnapshotMismatchFailsClosed models an era publication
+// between the independently resolved hard-fork summary and epoch cache. The
+// cache's current era does not exist in the older summary, so no extrapolation
+// can safely identify the current era. All fallback paths must preserve the
+// bounded Summary's ErrPastHorizon result instead of selecting an unrelated
+// era by position.
+func TestSlotTimeConverter_SnapshotMismatchFailsClosed(t *testing.T) {
+	genesis := testShelleyGenesis(t)
+	const slotLength = time.Second
+	const epochSize = 100
+	const endSlot = 500
+	sum := boundedEraSummary(
+		genesis.SystemStart,
+		slotLength,
+		epochSize,
+		endSlot,
+	)
+	conv := NewSlotTimeConverter(SlotTimeConverterDeps{
+		EpochCache: func() []models.Epoch {
+			return []models.Epoch{{
+				EpochId:       5,
+				StartSlot:     endSlot,
+				SlotLength:    2_000,
+				LengthInSlots: epochSize,
+				EraId:         5,
+			}}
+		},
+		ShelleyGenesis:  func() *shelley.ShelleyGenesis { return genesis },
+		HardForkSummary: func() (*hardfork.Summary, error) { return sum, nil },
+	})
+	boundaryTime := genesis.SystemStart.Add(endSlot * slotLength)
+	conv.nowFunc = func() time.Time { return boundaryTime }
+
+	tests := []struct {
+		name    string
+		convert func() error
+		message string
+	}{
+		{
+			name: "slot to time",
+			convert: func() error {
+				_, err := conv.SlotToTime(endSlot)
+				return err
+			},
+			message: "the operational path must remain horizon-bounded on a snapshot mismatch",
+		},
+		{
+			name: "slot to time in era",
+			convert: func() error {
+				_, err := conv.SlotToTimeInEra(endSlot)
+				return err
+			},
+			message: "the validation path must fail closed when the current era is unknown",
+		},
+		{
+			name: "time to slot",
+			convert: func() error {
+				_, err := conv.TimeToSlot(boundaryTime)
+				return err
+			},
+			message: "the inverse operational path must remain horizon-bounded on a snapshot mismatch",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require.ErrorIs(t, test.convert(), hardfork.ErrPastHorizon,
+				test.message)
+		})
+	}
+}
+
 // TestSlotTimeConverter_SlotToTimeInEraBuildsSummaryOnce pins the cost of the
 // past-horizon path. HardForkSummary walks the whole epoch cache and allocates
 // on every call, and this conversion runs per transaction, so resolving a slot

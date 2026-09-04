@@ -457,6 +457,13 @@ func currentEraSummary(
 				return &sum.Eras[index], true
 			}
 		}
+		// HardForkSummary and EpochCache are resolved independently. An era
+		// publication between those reads can pair an older summary with a
+		// newer cache. The summary then cannot identify the cache's current
+		// era, so selecting an era by position could extrapolate through a
+		// hard-fork boundary with the wrong slot length. Preserve the bounded
+		// Summary result until a coherent pair is observed on the next call.
+		return nil, false
 	}
 	return &sum.Eras[len(sum.Eras)-1], true
 }
