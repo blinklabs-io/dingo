@@ -2230,6 +2230,17 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 }
 
 func (ls *LedgerState) rollback(point ocommon.Point) error {
+	return ls.rollbackWithOptions(point, false)
+}
+
+// rollbackWithOptions restores metadata even when point is already the
+// in-memory ledger tip when repairSameTip is set. At-tip validation recovery
+// can leave consumed UTxOs above the durable tip (for example after Mithril
+// gap replay), so the usual same-point no-op must not skip UTxO restoration.
+func (ls *LedgerState) rollbackWithOptions(
+	point ocommon.Point,
+	repairSameTip bool,
+) error {
 	// Rolling back to the point we already sit at is a no-op. Skip
 	// it entirely so we don't publish a "local ledger rollback"
 	// resync event for a rollback that didn't move the ledger. That
@@ -2242,8 +2253,9 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	currentTip := ls.currentTip
 	mithrilLedgerSlot := ls.mithrilLedgerSlot
 	ls.RUnlock()
-	if currentTip.Point.Slot == point.Slot &&
-		bytes.Equal(currentTip.Point.Hash, point.Hash) {
+	sameTip := currentTip.Point.Slot == point.Slot &&
+		bytes.Equal(currentTip.Point.Hash, point.Hash)
+	if sameTip && !repairSameTip {
 		return ls.enforceDurableTipFloor()
 	}
 	if point.Slot > currentTip.Point.Slot {
@@ -2510,7 +2522,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	ls.updateTipMetrics(newTipDensity)
 	ls.publishSnapshotsLocked()
 	ls.Unlock()
-	if ls.config.EventBus != nil {
+	if ls.config.EventBus != nil && !sameTip {
 		ls.config.EventBus.Publish(
 			event.ChainsyncResyncEventType,
 			event.NewEvent(
@@ -3573,7 +3585,8 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 			// deterministic failure is not going to clear on its own, so it
 			// is an operator-actionable condition rather than another line
 			// in a repeating WARN.
-			if stuck && progress.consecutiveNoProgress == noProgressStuckThreshold {
+			if stuck &&
+				progress.consecutiveNoProgress == noProgressStuckThreshold {
 				ls.config.Logger.Error(
 					"ledger pipeline stuck: repeated restarts are not advancing the tip, so the failure is deterministic and will not clear on its own; the node is no longer following the chain",
 					"component",

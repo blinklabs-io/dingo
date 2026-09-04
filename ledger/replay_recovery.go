@@ -699,7 +699,7 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 	// (consumed 0)" again, looping the recovery indefinitely until
 	// process restart. Primary-chain rollback only touches the chain
 	// store — the matching ledger rollback must be explicit.
-	if err := ls.rollback(rewindPoint); err != nil {
+	if err := ls.rollbackWithOptions(rewindPoint, true); err != nil {
 		return false, fmt.Errorf(
 			"rollback ledger state after validation failure: %w",
 			err,

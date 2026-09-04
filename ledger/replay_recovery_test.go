@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -467,13 +468,18 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	ls.reachedTip.Store(true)
 	ls.publishSnapshotsLocked()
 
-	seedReplayRecoveryTransaction(
-		t,
-		db,
-		testHashBytes("producer-tx-live"),
-		producerBlock.Hash,
-		producerBlock.Slot,
-	)
+	producerTxHash := testHashBytes("producer-tx-live")
+	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+		TxId:      producerTxHash,
+		OutputIdx: 0,
+		AddedSlot: producerBlock.Slot,
+		Amount:    types.Uint64(100),
+	}))
+	require.NoError(t, db.MarkUtxosDeletedAtSlot(
+		nil,
+		[]types.UtxoKey{{TxId: producerTxHash, OutputIdx: 0}},
+		failingBlock.Slot,
+	))
 
 	validationErr := &txValidationError{
 		BlockPoint: ocommon.NewPoint(
@@ -495,7 +501,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	// and request chainsync resync. This is the simple case — peers
 	// may switch to a different fork that is compatible with our
 	// ledger.
-	recovered, err := ls.tryRecoverFromTxValidationError(validationErr)
+	recovered, err := ls.recoverAtTipFromTxValidationError(validationErr)
 	require.NoError(t, err)
 	require.True(t, recovered)
 
@@ -510,6 +516,10 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 		ocommon.NewPoint(failingBlock.Slot, failingBlock.Hash),
 	)
 	assert.ErrorIs(t, err, models.ErrBlockNotFound)
+	utxo, err := db.Metadata().GetUtxoIncludingSpent(producerTxHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, utxo)
+	assert.Zero(t, utxo.DeletedSlot, "at-tip recovery must restore spent UTxOs")
 
 	// Second and third attempts: same failing (slot, block, tx).
 	// The pipeline should keep recovering with progressively deeper
@@ -517,7 +527,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	// keep replaying the same losing fork and we need to expose a
 	// wider candidate set for chainselection.
 	for i := 2; i <= maxAtTipRecoveryAttempts; i++ {
-		recovered, err = ls.tryRecoverFromTxValidationError(validationErr)
+		recovered, err = ls.recoverAtTipFromTxValidationError(validationErr)
 		require.NoError(t, err, "attempt %d should still recover", i)
 		require.True(t, recovered, "attempt %d should still recover", i)
 	}
@@ -532,7 +542,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	// scheduled rewind. A persistent bad candidate chain is a peer/fork
 	// selection problem; the node should keep trying fresh ChainSync
 	// connections instead of halting the ledger pipeline.
-	recovered, err = ls.tryRecoverFromTxValidationError(validationErr)
+	recovered, err = ls.recoverAtTipFromTxValidationError(validationErr)
 	require.NoError(t, err)
 	require.True(t, recovered)
 	require.NotNil(t, ls.lastAtTipRecovery)
