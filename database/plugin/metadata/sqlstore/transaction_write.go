@@ -190,6 +190,16 @@ RETURNING id`,
 			producedStakeRefs := make([]models.StakeCredentialRef, 0)
 			for _, produced := range transaction.Produced() {
 				model := models.UtxoLedgerToModel(produced, point.Slot)
+				if err := setPointerAddressStakeCredential(
+					db,
+					produced.Output.Address(),
+					&model,
+				); err != nil {
+					return fmt.Errorf(
+						"resolve produced pointer address: %w",
+						err,
+					)
+				}
 				if collateralReturn != nil &&
 					produced.Output == collateralReturn {
 					id := uint(transactionID)
@@ -360,6 +370,16 @@ RETURNING id`,
 			stakeRefs := make([]models.StakeCredentialRef, 0)
 			for _, produced := range transaction.Produced() {
 				model := models.UtxoLedgerToModel(produced, point.Slot)
+				if err := setPointerAddressStakeCredential(
+					db,
+					produced.Output.Address(),
+					&model,
+				); err != nil {
+					return fmt.Errorf(
+						"resolve gap produced pointer address: %w",
+						err,
+					)
+				}
 				id := uint(transactionID)
 				if collateralReturn != nil &&
 					produced.Output == collateralReturn {
