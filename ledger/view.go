@@ -656,19 +656,19 @@ func withoutSyntheticV2CostModel(
 	switch p := pp.(type) {
 	case *alonzo.AlonzoProtocolParameters:
 		modified := *p
-		modified.CostModels = withoutCostModelKey(p.CostModels, 1)
+		modified.CostModels = withoutCostModelKey(p.CostModels)
 		return &modified
 	case *babbage.BabbageProtocolParameters:
 		modified := *p
-		modified.CostModels = withoutCostModelKey(p.CostModels, 1)
+		modified.CostModels = withoutCostModelKey(p.CostModels)
 		return &modified
 	case *conway.ConwayProtocolParameters:
 		modified := *p
-		modified.CostModels = withoutCostModelKey(p.CostModels, 1)
+		modified.CostModels = withoutCostModelKey(p.CostModels)
 		return &modified
 	case *dijkstra.DijkstraProtocolParameters:
 		modified := *p
-		modified.CostModels = withoutCostModelKey(p.CostModels, 1)
+		modified.CostModels = withoutCostModelKey(p.CostModels)
 		return &modified
 	default:
 		return pp
@@ -676,13 +676,13 @@ func withoutSyntheticV2CostModel(
 }
 
 // withoutCostModelKey returns a new map holding every entry except key.
-func withoutCostModelKey(m map[uint][]int64, key uint) map[uint][]int64 {
+func withoutCostModelKey(m map[uint][]int64) map[uint][]int64 {
 	if m == nil {
 		return nil
 	}
 	out := make(map[uint][]int64, len(m))
 	for k, v := range m {
-		if k != key {
+		if k != 1 {
 			out[k] = v
 		}
 	}
