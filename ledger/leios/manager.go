@@ -314,21 +314,12 @@ type epochEntry struct {
 	onChainKeys map[string]*bls12381.G2Affine
 }
 
-// committeeResult carries a committee computation's outcome directly to the
-// callers waiting on it, rather than having each of them re-read m.committees
-// after waking. handleRollback clears that map wholesale and can run between
-// the leader installing the memo and a descheduled waiter resuming, so a
-// waiter re-reading the map could observe a miss where the result it waited
-// for actually succeeded. Exactly one of entry/err is meaningful, matching
-// committeeAndParamsForEpoch's own contract.
 // committeeComputation is one epoch's in-flight committee computation. Waiters park
 // on done and read result once it closes; the close is the happens-before edge
 // that makes result safe to read without the manager lock.
 //
-// One channel per epoch, not one per waiter: a slice of per-waiter channels
-// grows with the number of concurrent callers and keeps every stopped waiter's
-// channel retained until the leader finishes, which is exactly the retention
-// this queue-bounding change exists to avoid.
+// There is one unbuffered done channel per epoch, not one channel per waiter;
+// completeCommitteeComputation closes it once for every waiter.
 type committeeComputation struct {
 	done   chan struct{}
 	result committeeResult
@@ -342,6 +333,10 @@ type committeeResult struct {
 	entry *epochEntry
 	err   error
 }
+
+// committeeResult carries a committee computation's outcome directly to the
+// callers waiting on it, rather than having each of them re-read m.committees
+// after waking. Exactly one of entry/err is meaningful.
 
 // VoteManager collects, validates, serves, and emits Leios votes. It
 // memoizes per-epoch voting committees from stake snapshots, tallies vote
@@ -1159,8 +1154,8 @@ func (m *VoteManager) committeeAndParamsForEpoch(
 			// stake or key provider -- a database read carrying no deadline of
 			// its own -- and a waiter must not hold a connection's protocol
 			// worker there across shutdown. The leader still runs to
-			// completion and still releases its claim; its send lands in this
-			// channel's buffer and is discarded with the channel.
+			// completion and still releases its claim; done is closed when the
+			// leader finishes, and the waiter returns here on stop.
 			return nil, ErrVoteManagerStopped
 		}
 	}

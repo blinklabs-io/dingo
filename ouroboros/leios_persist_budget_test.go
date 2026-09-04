@@ -133,7 +133,7 @@ func TestLeiosPersistQueueAdmitsEntryWithinByteBudget(t *testing.T) {
 		"an entry within budget must not be counted as a drop",
 	)
 
-	job := o.leiosPersistPending[string(point.Hash)]
+	job := o.leiosPersistPending[leiosBlockKey(point.Slot, point.Hash)]
 	require.NotNil(t, job)
 	require.Equal(t, []byte(blockRaw), job.manifestRaw)
 	require.Equal(t, data.txsRaw, job.txsRaw)
@@ -164,9 +164,9 @@ func TestLeiosPersistQueueRejectsEntryOverByteBudget(t *testing.T) {
 	)
 	require.Equal(t, firstSize, bytes)
 	require.Zero(t, reserved)
-	_, firstQueued := o.leiosPersistPending[string(firstPoint.Hash)]
+	_, firstQueued := o.leiosPersistPending[leiosBlockKey(firstPoint.Slot, firstPoint.Hash)]
 	require.True(t, firstQueued, "the admitted entry must be left in place")
-	_, secondQueued := o.leiosPersistPending[string(secondPoint.Hash)]
+	_, secondQueued := o.leiosPersistPending[leiosBlockKey(secondPoint.Slot, secondPoint.Hash)]
 	require.False(t, secondQueued)
 	require.Equal(t, uint64(1), o.leiosPersistDropped.Load())
 }
@@ -288,7 +288,7 @@ func TestLeiosPersistQueueReleasesReservationOnPop(t *testing.T) {
 
 	db := o.leiosDatabase()
 	require.NotNil(t, db)
-	_, manifest, err := db.GetLeiosEBManifest(firstPoint.Hash)
+	manifest, err := db.GetLeiosEBManifest(firstPoint.Hash, firstPoint.Slot)
 	require.NoError(t, err)
 	require.Equal(t, []byte(firstRaw), manifest)
 }
@@ -322,7 +322,7 @@ func TestLeiosPersistQueueReleasesReservationOnReplace(t *testing.T) {
 		"the superseded manifest-only job must release its reservation",
 	)
 	require.Zero(t, reserved)
-	job := o.leiosPersistPending[string(point.Hash)]
+	job := o.leiosPersistPending[leiosBlockKey(point.Slot, point.Hash)]
 	require.NotNil(t, job)
 	require.Equal(t, data.txsRaw, job.txsRaw, "the complete job must win")
 	require.Zero(t, o.leiosPersistDropped.Load())
@@ -350,7 +350,7 @@ func TestLeiosPersistQueueManifestBehindCompleteReservesNothing(t *testing.T) {
 	require.Equal(t, 1, queued)
 	require.Equal(t, completeSize, bytes)
 	require.Zero(t, reserved)
-	job := o.leiosPersistPending[string(point.Hash)]
+	job := o.leiosPersistPending[leiosBlockKey(point.Slot, point.Hash)]
 	require.NotNil(t, job)
 	require.Equal(
 		t, data.txsRaw, job.txsRaw,
@@ -379,7 +379,7 @@ func TestLeiosPersistQueueReleasesReservationWhenStopRacesInstall(
 	point, blockRaw, data, size := leiosPersistTestEntry(t, 47, 4, 512)
 	withLowerLeiosPersistQueueBudget(t, size)
 
-	key := string(point.Hash)
+	key := leiosBlockKey(point.Slot, point.Hash)
 	admitted, dropReason := o.reserveLeiosPersistBytes(key, size, true)
 	require.True(t, admitted)
 	require.Empty(t, dropReason)
@@ -438,7 +438,7 @@ func TestLeiosPersistWriterRestartResetsQueueAccounting(t *testing.T) {
 
 	db := o.leiosDatabase()
 	require.NotNil(t, db)
-	_, manifest, err := db.GetLeiosEBManifest(nextPoint.Hash)
+	manifest, err := db.GetLeiosEBManifest(nextPoint.Hash, nextPoint.Slot)
 	require.NoError(t, err)
 	require.Equal(t, []byte(nextRaw), manifest)
 }

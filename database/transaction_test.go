@@ -55,6 +55,12 @@ type mockBlobStore struct {
 	// failure (e.g. a corrupted or unreadable store) distinct from the
 	// ordinary "key was never written" case.
 	getErr error
+	// getErrs, when set, maps one specific key (as a string) to the error
+	// Get returns for exactly that key, taking precedence over getErr for
+	// that key only. Lets a test simulate a real failure reading one key
+	// (e.g. a fallback lookup) while a different key still misses with the
+	// ordinary types.ErrBlobKeyNotFound.
+	getErrs map[string]error
 }
 
 func (m *mockBlobStore) Sync() error {
@@ -89,7 +95,12 @@ func (m *mockBlobStore) NewTransaction(bool) types.Txn {
 	return txn
 }
 
-func (m *mockBlobStore) Get(types.Txn, []byte) ([]byte, error) {
+func (m *mockBlobStore) Get(_ types.Txn, key []byte) ([]byte, error) {
+	if m.getErrs != nil {
+		if err, ok := m.getErrs[string(key)]; ok {
+			return nil, err
+		}
+	}
 	if m.getErr != nil {
 		return nil, m.getErr
 	}

@@ -465,8 +465,9 @@ func (lv *LedgerView) CalculateRewards(
 }
 
 // GetAdaPots returns the current Ada pots.
-// TODO: implement Ada pots retrieval. Requires tracking of treasury, reserves,
-// fees, and rewards pots which are not yet stored in the database.
+// TODO: implement the complete Ada pots retrieval. Treasury and reserves are
+// tracked in network_state, but this interface also needs the current fee and
+// reward pots as one coherent validation snapshot.
 func (lv *LedgerView) GetAdaPots() lcommon.AdaPots {
 	panic(ErrNotImplemented)
 }
@@ -1189,12 +1190,33 @@ func (lv *LedgerView) Constitution() (*lcommon.Constitution, error) {
 	return governance.ConstitutionFromModel(constitution)
 }
 
-// TreasuryValue returns the current treasury value.
-// TODO: implement treasury value retrieval. Requires Ada pots tracking
-// which is not yet stored in the database. The treasury value is part of
-// the Ada pots (reserves, treasury, fees, rewards).
+// TreasuryValue returns the treasury value visible to this ledger view. A view
+// used for transaction validation carries the same database transaction as the
+// rest of that validation, so epoch-boundary pot changes and rollback are read
+// from one atomic ledger snapshot.
 func (lv *LedgerView) TreasuryValue() (uint64, error) {
-	return 0, ErrNotImplemented
+	if lv == nil || lv.ls == nil || lv.ls.db == nil {
+		return 0, errors.New(
+			"treasury network state is unavailable: ledger view is not initialized",
+		)
+	}
+
+	var (
+		state *models.NetworkState
+		err   error
+	)
+	if lv.txn == nil {
+		state, err = lv.ls.db.Metadata().GetNetworkState(nil)
+	} else {
+		state, err = lv.ls.db.Metadata().GetNetworkState(lv.txn.Metadata())
+	}
+	if err != nil {
+		return 0, fmt.Errorf("get treasury network state: %w", err)
+	}
+	if state == nil {
+		return 0, errors.New("treasury network state is unavailable")
+	}
+	return uint64(state.Treasury), nil
 }
 
 // GovActionById returns a governance action by its ID.

@@ -120,9 +120,10 @@ func leiosPersistJobSize(
 
 // enqueueLeiosPersist queues an endorser block for asynchronous blob-store
 // persistence (historical serving) instead of writing it synchronously on the
-// leios-fetch hot path. Jobs coalesce by hash: a complete job (carrying txs)
-// supersedes a manifest-only one for the same hash, so the backfiller's
-// manifest-only-then-complete pair collapses to a single write. Best-effort: a
+// leios-fetch hot path. Jobs coalesce by (slot, hash): a complete job (carrying
+// txs) supersedes a manifest-only one for the same occurrence, so the
+// backfiller's manifest-only-then-complete pair collapses to a single write.
+// Best-effort: a
 // full queue drops the write; no error is surfaced to the caller.
 //
 // Admission runs before any copying. The queue's aggregate byte reservation
@@ -147,7 +148,7 @@ func (o *Ouroboros) enqueueLeiosPersist(
 	if data != nil && data.completeTxCache() && data.txCount > 0 {
 		txsRaw = data.txsRaw
 	}
-	key := string(point.Hash)
+	key := leiosBlockKey(point.Slot, point.Hash)
 	size := leiosPersistJobSize(point.Hash, blockRaw, txsRaw)
 	admitted, dropReason := o.reserveLeiosPersistBytes(
 		key,

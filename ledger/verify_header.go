@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"math/big"
 	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -62,6 +64,17 @@ var (
 	errEpochCacheForecastBoundary = errors.New(
 		"epoch cache forecast crosses era boundary",
 	)
+	// errLeaderStakeSnapshotUnavailable marks a leader-stake snapshot that
+	// dingo cannot answer from: the epoch's mark/active distribution is
+	// missing, empty, or has no usable denominator. This is NEVER an
+	// authoritative statement that the producer pool is ineligible -- the
+	// reference node's nesPd is always populated, so an empty or absent
+	// snapshot is a dingo-side data gap (pruned below the retention window,
+	// unwritten during catch-up, or an incomplete import), not
+	// cardano-ledger's VRFKeyUnknown. Header verification classifies it as
+	// deferrable so the missing state is resolved rather than misreported as
+	// pool absence (issue #3727). A pool absent from a *populated* snapshot is
+	// a separate, authoritative rejection that never carries this sentinel.
 	errLeaderStakeSnapshotUnavailable = errors.New(
 		"leader stake snapshot unavailable",
 	)
@@ -525,6 +538,25 @@ func (ls *LedgerState) verifyBlockHeaderState(
 	}
 
 	if err := ls.verifyBlockLeaderEligibility(block, epochId); err != nil {
+		// Scope the deferral to the RECOVERABLE case only (issue #3727,
+		// finding 4 -- consensus-sensitive). A leader-stake snapshot reported
+		// unavailable (errLeaderStakeSnapshotUnavailable) means the epoch's
+		// distribution is missing/empty, which is only *recoverable* while the
+		// apply cursor is still behind this slot: the mark snapshot for the
+		// slot has not been computed yet and will exist once apply catches up,
+		// so defer. Once the cursor has caught up, a still-empty distribution
+		// is a genuine, permanent gap for that epoch -- a producer whose
+		// eligibility can never be established -- and MUST stay a hard
+		// rejection, exactly as before this change: deferring it forever would
+		// either adopt a block whose leader eligibility is never checked or
+		// loop. The #3727 retention pin is what makes the recoverable case
+		// actually resolve: it retains the mark snapshot a queued/deferred
+		// header needs so that, by the time the cursor reaches the slot, the
+		// snapshot is present and this path is not taken. Deferred headers on
+		// abandoned forks are released by the retention guard's eviction of
+		// entries the cursor has passed (see PrunePoolSnapshotsWithRetentionFloor),
+		// not by deferring their headers forever. A pool absent from a
+		// *populated* snapshot never carries this sentinel and hard-rejects.
 		if allowStateDefer &&
 			errors.Is(err, errLeaderStakeSnapshotUnavailable) &&
 			ls.ledgerTipBehindSlot(block.SlotNumber()) {
@@ -1518,13 +1550,23 @@ func (ls *LedgerState) blockPipelineEta0Provider(slot uint64) (string, error) {
 	return ls.epochNonceHex(epoch.EpochId, epoch.Nonce), nil
 }
 
-// epochForSlot searches an immutable epoch-cache snapshot for the epoch
-// containing the given slot.
+// epochForSlot searches the currently published epoch-cache snapshot for the
+// epoch containing the given slot.
 //
 // Returns the matching epoch or an error if no epoch covers the slot.
 func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
-	cache := ls.loadConsensusSnapshot().epochCache
+	return epochForSlotInCache(ls.loadConsensusSnapshot().epochCache, slot)
+}
 
+// epochForSlotInCache resolves a slot to its epoch against a caller-supplied
+// epoch-cache snapshot. Callers that resolve several slots and must see one
+// coherent view (e.g. computing a single retention floor) capture the cache
+// once and pass it here, so a concurrent epoch-cache publication or rollback
+// cannot interleave a different generation between lookups.
+func epochForSlotInCache(
+	cache []models.Epoch,
+	slot uint64,
+) (models.Epoch, error) {
 	if len(cache) == 0 {
 		return models.Epoch{}, errors.New("epoch cache is empty")
 	}
@@ -1566,6 +1608,176 @@ func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
 		len(cache),
 		lastValidEnd,
 	)
+}
+
+// OldestRequiredSnapshotEpoch returns the oldest pool-stake snapshot epoch that
+// a currently queued/deferred header still needs for leader-eligibility
+// validation, so snapshot pruning can retain it instead of removing it out from
+// under the deferred header (issue #3727). It locks the deferred-header set and
+// delegates to oldestRequiredSnapshotEpochLocked. Prefer
+// PrunePoolSnapshotsWithRetentionFloor for the prune path, which holds the lock
+// across both the floor read and the prune so admission cannot interleave; this
+// public method exists for observation and tests.
+func (ls *LedgerState) OldestRequiredSnapshotEpoch() (uint64, bool) {
+	ls.deferredHeaderValidationMu.Lock()
+	defer ls.deferredHeaderValidationMu.Unlock()
+	return ls.oldestRequiredSnapshotEpochLocked()
+}
+
+// oldestRequiredSnapshotEpochLocked computes the retention floor with
+// ls.deferredHeaderValidationMu already held. A header deferred at slot S
+// validates its producer's leader eligibility against the mark snapshot for
+// StakeSnapshotEpoch(epochOf(S)); the floor is the minimum of that quantity
+// over every outstanding deferred header.
+//
+// Return contract:
+//   - (_, false): no header is deferred, so the default retention window
+//     applies and nothing extra is pinned.
+//   - (0, true): at least one deferred slot cannot yet be mapped to an epoch
+//     (its epoch cache entry has not been published, or its key is malformed).
+//     We cannot name the snapshot epoch such a header will need, and once the
+//     cache catches up leaderEligibilityStake WILL need it, so we retain ALL
+//     pool snapshots (floor 0 prunes nothing) until every deferred slot is
+//     mappable. Skipping the slot instead would let cleanup prune the snapshot
+//     the header needs and drive it into a defer loop.
+//   - (min, true): every deferred slot mapped; pin at the minimum required
+//     snapshot epoch.
+func (ls *LedgerState) oldestRequiredSnapshotEpochLocked() (uint64, bool) {
+	if len(ls.deferredHeaderValidation) == 0 {
+		return 0, false
+	}
+	// Capture one epoch-cache generation and resolve every deferred slot
+	// against it. loadConsensusSnapshot returns whatever is published at each
+	// call, so calling epochForSlot per key could mix generations across a
+	// concurrent epoch-cache publication/rollback and compute the floor from an
+	// incoherent mapping. One snapshot for the whole loop keeps the decision
+	// coherent (issue #3727, finding: mixed cache generations in floor read).
+	cache := ls.loadConsensusSnapshot().epochCache
+	var floor uint64
+	have := false
+	for key := range ls.deferredHeaderValidation {
+		slot, err := slotFromHeaderValidationKey(key)
+		if err != nil {
+			// A key we cannot parse is a deferred header whose need we cannot
+			// bound. Retain everything until it is gone rather than risk
+			// pruning a snapshot it turns out to require.
+			return 0, true
+		}
+		epoch, err := epochForSlotInCache(cache, slot)
+		if err != nil {
+			// The slot is not yet covered by the published epoch cache, so we
+			// cannot name the snapshot epoch it needs. Retain ALL pool
+			// snapshots until it becomes mappable (see the return contract):
+			// pruning now would delete the snapshot leaderEligibilityStake
+			// will read once the cache advances, looping the header on defer.
+			return 0, true
+		}
+		snapshotEpoch := praos.StakeSnapshotEpoch(epoch.EpochId)
+		if !have || snapshotEpoch < floor {
+			floor = snapshotEpoch
+			have = true
+		}
+	}
+	return floor, have
+}
+
+// PrunePoolSnapshotsWithRetentionFloor is the snapshot manager's retention
+// guard (wired via Manager.SetPoolSnapshotRetentionGuard). Under the
+// deferred-header lock it evicts abandoned headers and computes the retention
+// floor as ONE atomic decision, RELEASES the lock, and only then runs the
+// caller's pool-snapshot prune. The prune must NOT run under the lock: it opens
+// the single sqlite write connection (SetMaxOpenConns(1)) via Transaction(true),
+// and block apply holds that connection before taking this same mutex through
+// consumeDeferredHeaderValidation. Holding the mutex across prune therefore
+// inverts the lock order (mutex→write-conn here vs. write-conn→mutex on apply)
+// and deadlocks the node on the single write connection (issue #3717). Under
+// the lock it, in order:
+//
+//  1. Evicts abandoned deferred headers that are beyond the rollback horizon
+//     (tip minus the stability window). A canonical deferred header is consumed
+//     when the cursor applies it, so one still present that deep is on a fork
+//     chain selection can no longer re-adopt and would otherwise pin its
+//     snapshot forever (finding 5). The horizon — rather than the bare tip — is
+//     what makes eviction safe: eviction also drops the durable marker, and a
+//     point evicted while still re-adoptable would apply with required == false
+//     and skip its stateful header check. Eviction lets the floor rise; the
+//     evicted markers' persisted rows are deleted after the lock is released
+//     (best effort — they cannot affect a resolved header).
+//  2. Computes the retention floor over the surviving deferred headers and
+//     lowers defaultBefore (cleanup's currentEpoch-3 pool boundary) to it when
+//     a header needs an older snapshot (or to 0 = retain everything while any
+//     deferred slot is unmappable).
+//  3. Clamps the boundary UP to minBefore, a hard backstop
+//     (currentEpoch - poolSnapshotRetentionMaxDepth) that bounds how many
+//     historical epochs the pin can ever hold, so a stuck header cannot pin
+//     pool snapshots without limit (finding 5).
+//
+// The eviction+floor read is atomic (one lock hold), so `before` reflects a
+// coherent view of the deferred set; a header admitted after the lock is
+// released — during or after prune — cannot corrupt this invocation's boundary.
+// A header admitted in that window that needs a below-floor snapshot is a
+// deeply lagged header (its need is < defaultBefore = currentEpoch-3); this
+// invocation may prune a snapshot it wants, but the retention floor is a
+// lower-watermark that is RE-COMPUTED every cleanup pass, so the next pass pins
+// at the lower floor and the header resolves then. This narrow re-admit window
+// is accepted in exchange for never inverting the lock order (issue #3717); it
+// replaces the prior design that held the lock across prune and deadlocked.
+//
+// prune must perform and COMMIT the pool-snapshot delete before returning; it
+// must not touch ledger locks or the deferred set.
+func (ls *LedgerState) PrunePoolSnapshotsWithRetentionFloor(
+	defaultBefore uint64,
+	minBefore uint64,
+	prune func(before uint64) error,
+) error {
+	// Read BEFORE taking deferredHeaderValidationMu: both of these take
+	// ls.RWMutex (calculateStabilityWindow reads ls.currentEra under RLock),
+	// and block apply holds the ls lock before taking
+	// deferredHeaderValidationMu via consumeDeferredHeaderValidation. Taking
+	// the ls lock under this mutex would invert that order.
+	tipSlot := ls.loadTipSnapshot().currentTip.Point.Slot
+	rollbackHorizon := ls.calculateStabilityWindow()
+	var evicted []string
+	var before uint64
+	func() {
+		ls.deferredHeaderValidationMu.Lock()
+		defer ls.deferredHeaderValidationMu.Unlock()
+		evicted = ls.evictStaleDeferredHeadersLocked(tipSlot, rollbackHorizon)
+		before = defaultBefore
+		if floor, ok := ls.oldestRequiredSnapshotEpochLocked(); ok &&
+			floor < before {
+			before = floor
+		}
+		if before < minBefore {
+			before = minBefore
+		}
+	}()
+	// Prune runs with the mutex RELEASED: it opens the single sqlite write
+	// connection, which block apply holds before taking this mutex, so running
+	// it under the lock deadlocks (issue #3717). See the doc comment.
+	err := prune(before)
+	// Delete the evicted headers' persisted markers; deletePersistedDeferredMarkers
+	// takes the deferred-header mutex only to test membership per key (releasing
+	// it before each DB delete, for the same lock-order reason) so it can skip
+	// any point re-deferred (and re-persisted) since eviction, keeping the
+	// sync_state table free of dead markers without dropping a marker that now
+	// backs a live pin. A restore failure for a point re-admitted during its
+	// delete is a lost DURABLE pin: it is joined onto the prune result so the
+	// retention guard's caller (cleanupOldSnapshots) surfaces the failed cleanup
+	// rather than continuing with a marker a restart would miss (issue #3717
+	// review).
+	cleanupErr := ls.deletePersistedDeferredMarkers(evicted)
+	return errors.Join(err, cleanupErr)
+}
+
+// slotFromHeaderValidationKey extracts the slot from a deferred-header map key,
+// which headerValidationPointKey formats as "<slot>:<hex-hash>".
+func slotFromHeaderValidationKey(key string) (uint64, error) {
+	sep := strings.IndexByte(key, ':')
+	if sep < 0 {
+		return 0, fmt.Errorf("malformed header validation key %q", key)
+	}
+	return strconv.ParseUint(key[:sep], 10, 64)
 }
 
 // ensureEpochForSlot advances the epoch cache until it covers the target
