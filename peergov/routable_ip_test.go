@@ -110,12 +110,21 @@ func TestIsRoutableIP(t *testing.T) {
 		// it globally reachable, so the /28 must not spill into it.
 		{"ipv6 orchidv2", "2001:20::1", true},
 
-		// Accepted pending the decision in #3792: not routed anywhere, and
-		// used as public stand-ins across ~19 files' fixtures.
-		{"ipv4 test-net-1", "192.0.2.1", true},
-		{"ipv4 test-net-2", "198.51.100.1", true},
-		{"ipv4 test-net-3", "203.0.113.1", true},
-		{"ipv6 documentation", "2001:db8::1", true},
+		// Documentation-only ranges are not valid peer candidates.
+		{"ipv4 test-net-1", "192.0.2.1", false},
+		{"ipv4 test-net-2", "198.51.100.1", false},
+		{"ipv4 test-net-3", "203.0.113.1", false},
+		{"ipv6 documentation", "2001:db8::1", false},
+
+		// The policy must stop at each documentation prefix boundary.
+		{"just below test-net-1", "192.0.1.255", true},
+		{"just above test-net-1", "192.0.3.0", true},
+		{"just below test-net-2", "198.51.99.255", true},
+		{"just above test-net-2", "198.51.101.0", true},
+		{"just below test-net-3", "203.0.112.255", true},
+		{"just above test-net-3", "203.0.114.0", true},
+		{"just below documentation", "2001:db7:ffff:ffff:ffff:ffff:ffff:ffff", true},
+		{"just above documentation", "2001:db9::1", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
