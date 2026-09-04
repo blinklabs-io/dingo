@@ -16,6 +16,7 @@ package koiosparity
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -186,6 +187,130 @@ func TestCommitAccountRewardsForEpoch(t *testing.T) {
 	cov, err = cache.GetAccountCoverage("preview", 100)
 	require.NoError(t, err)
 	require.False(t, cov.Complete)
+}
+
+// TestPruneAccountCoverageBoundsCheckpointRows proves the per-account
+// checkpoint tables are a rolling cache rather than a second copy of the
+// entire account history. The authoritative reward rows must survive
+// eviction so an old epoch still compares correctly after its resumability
+// state ages out.
+func TestPruneAccountCoverageBoundsCheckpointRows(t *testing.T) {
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	now := time.Now().UTC().Truncate(time.Second)
+	const firstEpoch = uint64(100)
+	const epochs = accountCheckpointRetentionEpochs + 3
+	for i := uint64(0); i < epochs; i++ {
+		epoch := firstEpoch + i
+		require.NoError(t, cache.SaveAccountFetchChunkProgress(
+			"preview", epoch, fmt.Sprintf("chunk-%d", epoch),
+			[]KoiosAccountRewards{{
+				StakeAddress: "stake1reward", RewardType: "member", Earned: "42",
+				FetchedAt: now,
+			}},
+			[]string{"stake1reward", "stake1zero", "stake1zero2"}, now,
+		))
+		require.NoError(t, cache.CommitAccountRewardsForEpoch(
+			"preview", epoch,
+			[]KoiosAccountRewards{{
+				StakeAddress: "stake1reward", RewardType: "member", Earned: "42",
+				FetchedAt: now,
+			}}, 3, true, now,
+		))
+	}
+
+	var checked, staged int
+	require.NoError(t, cache.db.QueryRow(
+		"SELECT COUNT(*) FROM koios_account_checked WHERE network = ?",
+		"preview",
+	).Scan(&checked))
+	require.NoError(t, cache.db.QueryRow(
+		"SELECT COUNT(*) FROM koios_account_fetch_staged_rows WHERE network = ?",
+		"preview",
+	).Scan(&staged))
+	require.LessOrEqual(t, checked, accountCheckpointRetentionEpochs*3)
+	require.LessOrEqual(t, staged, accountCheckpointRetentionEpochs)
+
+	oldEpoch := firstEpoch
+	cov, err := cache.GetAccountCoverage("preview", oldEpoch)
+	require.NoError(t, err)
+	require.True(t, cov.Complete)
+	oldRows, err := cache.GetAccountRewardsForEpoch("preview", oldEpoch)
+	require.NoError(t, err)
+	require.Len(t, oldRows, 1)
+	require.Empty(t, CompareAccountEpoch(
+		"preview", oldEpoch, oldRows,
+		[]DingoAccountReward{{StakeAddress: "stake1reward", RewardType: "member", Amount: "42"}},
+		now, 0, time.Time{},
+	))
+}
+
+// TestAccountCoveragePreservesBoundedZeroRewardSummary proves historical
+// lifecycle reporting retains its exact count and capped sample after the
+// per-address rows are evicted.
+func TestAccountCoveragePreservesBoundedZeroRewardSummary(t *testing.T) {
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	now := time.Now().UTC().Truncate(time.Second)
+	for epoch := uint64(100); epoch < 100+accountCheckpointRetentionEpochs+2; epoch++ {
+		require.NoError(t, cache.SaveAccountFetchChunkProgress(
+			"preview", epoch, fmt.Sprintf("chunk-%d", epoch), nil,
+			[]string{"stake1zero", "stake1zero2"}, now,
+		))
+		require.NoError(t, cache.CommitAccountRewardsForEpoch(
+			"preview", epoch, nil, 2, true, now,
+		))
+	}
+
+	summary, err := cache.GetZeroRewardSummary("preview", 100)
+	require.NoError(t, err)
+	require.Equal(t, 2, summary.Count)
+	require.Equal(t, []string{"stake1zero", "stake1zero2"}, summary.Sample)
+}
+
+// TestAccountCoverageSummaryMigrationBackfillsLegacyRows proves an existing
+// cache gets its bounded lifecycle summary before checkpoint eviction can
+// remove the legacy per-address evidence.
+func TestAccountCoverageSummaryMigrationBackfillsLegacyRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.db")
+	db, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE koios_account_coverage (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL,
+		epoch INTEGER NOT NULL, requested_count INTEGER NOT NULL DEFAULT 0,
+		fetched_count INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 0,
+		fetched_at DATETIME NOT NULL)`)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE koios_account_checked (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL,
+		epoch INTEGER NOT NULL, stake_address TEXT NOT NULL,
+		chunk_hash TEXT NOT NULL, reward_row_count INTEGER NOT NULL DEFAULT 0,
+		checked_at DATETIME NOT NULL)`)
+	require.NoError(t, err)
+	now := time.Now().UTC().Truncate(time.Second)
+	_, err = db.Exec(`INSERT INTO koios_account_coverage
+		(network, epoch, requested_count, fetched_count, complete, fetched_at)
+		VALUES (?, ?, ?, ?, 1, ?)`, "preview", 100, 2, 0, now)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO koios_account_checked
+		(network, epoch, stake_address, chunk_hash, reward_row_count, checked_at)
+		VALUES (?, ?, ?, ?, 0, ?), (?, ?, ?, ?, 0, ?)`,
+		"preview", 100, "stake1zero", "chunk", now,
+		"preview", 100, "stake1zero2", "chunk", now)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	cache, err := OpenCache(path, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+	summary, err := cache.GetZeroRewardSummary("preview", 100)
+	require.NoError(t, err)
+	require.Equal(t, 2, summary.Count)
+	require.Equal(t, []string{"stake1zero", "stake1zero2"}, summary.Sample)
 }
 
 // TestCommitAccountRewardsForEpochAllowsLiteralDuplicateKey proves

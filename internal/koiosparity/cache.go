@@ -27,6 +27,8 @@ import (
 	_ "github.com/glebarez/go-sqlite"
 )
 
+const accountCheckpointRetentionEpochs = 4
+
 // KoiosEpochInfo holds Koios reference data for a closed epoch.
 // Note: pool_cnt and delegator_cnt are not returned by preview/preprod Koios and are omitted.
 type KoiosEpochInfo struct {
@@ -179,6 +181,22 @@ type KoiosAccountCoverage struct {
 	FetchedCount int
 	Complete     bool
 	FetchedAt    time.Time
+	// ZeroRewardCount and ZeroRewardSample preserve the informational
+	// zero-reward result after the per-address checkpoint rows age out. The
+	// sample is intentionally capped; exact account comparison never consumes
+	// either field and continues to use koios_account_rewards.
+	ZeroRewardCount        int
+	ZeroRewardSample       []string
+	ZeroRewardSummaryReady bool
+}
+
+// KoiosAccountZeroRewardSummary is the bounded representation used by the
+// lifecycle report. Count is exact while Sample is capped at
+// maxAccountLifecycleSample, so checking a large epoch cannot materialize the
+// whole zero-reward address set in memory.
+type KoiosAccountZeroRewardSummary struct {
+	Count  int
+	Sample []string
 }
 
 // CheckEpochStatus stores the last check result for an epoch.
@@ -529,14 +547,84 @@ func (c *Cache) CommitAccountRewardsForEpoch(
 	if _, err = tx.Exec("DELETE FROM koios_account_coverage WHERE network = ? AND epoch = ?", network, epoch); err != nil {
 		return err
 	}
+	zeroReward, err := getZeroRewardSummary(tx, network, epoch)
+	if err != nil {
+		return fmt.Errorf("get zero-reward summary: %w", err)
+	}
+	zeroRewardSample, err := json.Marshal(zeroReward.Sample)
+	if err != nil {
+		return fmt.Errorf("encode zero-reward sample: %w", err)
+	}
 	if _, err = tx.Exec(`INSERT INTO koios_account_coverage
-		(network, epoch, requested_count, fetched_count, complete, fetched_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		network, epoch, requestedCount, len(rows), complete, fetchedAt); err != nil {
+		(network, epoch, requested_count, fetched_count, complete, fetched_at,
+		 zero_reward_count, zero_reward_sample, zero_reward_summary_ready)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+		network, epoch, requestedCount, len(rows), complete, fetchedAt,
+		zeroReward.Count, string(zeroRewardSample)); err != nil {
+		return err
+	}
+	if err = pruneCompletedAccountCoverageTx(tx, network, epoch); err != nil {
 		return err
 	}
 	err = tx.Commit()
 	return err
+}
+
+func pruneCompletedAccountCoverageTx(
+	tx *sql.Tx,
+	network string,
+	throughEpoch uint64,
+) error {
+	if throughEpoch < accountCheckpointRetentionEpochs {
+		return nil
+	}
+	cutoff := throughEpoch - accountCheckpointRetentionEpochs + 1
+	for _, table := range []string{
+		"koios_account_checked",
+		"koios_account_fetch_staged_rows",
+	} {
+		if _, err := tx.Exec("DELETE FROM "+table+
+			" WHERE network = ? AND epoch < ? AND EXISTS ("+
+			"SELECT 1 FROM koios_account_coverage "+
+			"WHERE network = ? AND epoch = "+table+".epoch AND complete = 1)",
+			network, cutoff, network); err != nil {
+			return fmt.Errorf("prune completed %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
+type sqlQueryer interface {
+	QueryRow(query string, args ...any) *sql.Row
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
+func getZeroRewardSummary(
+	db sqlQueryer,
+	network string,
+	epoch uint64,
+) (KoiosAccountZeroRewardSummary, error) {
+	var summary KoiosAccountZeroRewardSummary
+	if err := db.QueryRow(`SELECT COUNT(*) FROM koios_account_checked
+		WHERE network = ? AND epoch = ? AND reward_row_count = 0`, network, epoch).
+		Scan(&summary.Count); err != nil {
+		return KoiosAccountZeroRewardSummary{}, err
+	}
+	rows, err := db.Query(`SELECT stake_address FROM koios_account_checked
+		WHERE network = ? AND epoch = ? AND reward_row_count = 0
+		ORDER BY stake_address LIMIT ?`, network, epoch, maxAccountLifecycleSample)
+	if err != nil {
+		return KoiosAccountZeroRewardSummary{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var addr string
+		if err := rows.Scan(&addr); err != nil {
+			return KoiosAccountZeroRewardSummary{}, err
+		}
+		summary.Sample = append(summary.Sample, addr)
+	}
+	return summary, rows.Err()
 }
 
 // GetAccountRewardsForEpoch retrieves all cached Koios account-reward rows
@@ -577,11 +665,19 @@ func (c *Cache) GetAccountCoverage(
 	epoch uint64,
 ) (*KoiosAccountCoverage, error) {
 	var cov KoiosAccountCoverage
-	err := c.db.QueryRow(`SELECT network, epoch, requested_count, fetched_count, complete, fetched_at
+	var zeroRewardSample string
+	err := c.db.QueryRow(`SELECT network, epoch, requested_count, fetched_count, complete, fetched_at,
+		zero_reward_count, zero_reward_sample, zero_reward_summary_ready
 		FROM koios_account_coverage WHERE network = ? AND epoch = ?`, network, epoch).
-		Scan(&cov.Network, &cov.Epoch, &cov.RequestedCount, &cov.FetchedCount, &cov.Complete, &cov.FetchedAt)
+		Scan(&cov.Network, &cov.Epoch, &cov.RequestedCount, &cov.FetchedCount, &cov.Complete, &cov.FetchedAt,
+			&cov.ZeroRewardCount, &zeroRewardSample, &cov.ZeroRewardSummaryReady)
 	if err != nil {
 		return nil, err
+	}
+	if cov.ZeroRewardSummaryReady {
+		if err := json.Unmarshal([]byte(zeroRewardSample), &cov.ZeroRewardSample); err != nil {
+			return nil, fmt.Errorf("decode zero-reward sample: %w", err)
+		}
 	}
 	return &cov, nil
 }
@@ -899,6 +995,75 @@ func (c *Cache) GetZeroRewardAccountsForEpoch(
 		addrs = append(addrs, addr)
 	}
 	return addrs, rows.Err()
+}
+
+// GetZeroRewardSummary returns the exact zero-reward count and a bounded
+// address sample for (network, epoch). New coverage rows use the persisted
+// summary, so the query stays bounded even after the per-address checkpoint
+// rows are evicted. Older cache rows fall back to COUNT plus LIMIT against
+// koios_account_checked for compatibility.
+func (c *Cache) GetZeroRewardSummary(
+	network string,
+	epoch uint64,
+) (KoiosAccountZeroRewardSummary, error) {
+	var count int
+	var sampleJSON string
+	var ready bool
+	err := c.db.QueryRow(`SELECT zero_reward_count, zero_reward_sample,
+		zero_reward_summary_ready FROM koios_account_coverage
+		WHERE network = ? AND epoch = ?`, network, epoch).
+		Scan(&count, &sampleJSON, &ready)
+	if err == nil && ready {
+		var sample []string
+		if err := json.Unmarshal([]byte(sampleJSON), &sample); err != nil {
+			return KoiosAccountZeroRewardSummary{}, fmt.Errorf(
+				"decode zero-reward sample: %w", err,
+			)
+		}
+		return KoiosAccountZeroRewardSummary{Count: count, Sample: sample}, nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		// A missing coverage row is allowed for old callers/tests that inspect
+		// an in-progress chunk; every other storage error must be visible.
+		return KoiosAccountZeroRewardSummary{}, err
+	}
+	return getZeroRewardSummary(c.db, network, epoch)
+}
+
+// PruneAccountCoverage evicts per-address checkpoint rows older than the
+// rolling account checkpoint window. It deliberately leaves
+// koios_account_rewards and koios_account_coverage intact: exact parity and
+// the zero-reward count/sample remain available for historical checks.
+//
+// Callers must invoke this only after all account fetches for the run have
+// joined (Fetch does so after its worker group, and Observer does so after its
+// sequential epoch check). An evicted incomplete epoch is correct to restart
+// from scratch; retaining it indefinitely would let repeated failed backfills
+// defeat the bound.
+func (c *Cache) PruneAccountCoverage(network string, throughEpoch uint64) error {
+	if throughEpoch < accountCheckpointRetentionEpochs {
+		return nil
+	}
+	cutoff := throughEpoch - accountCheckpointRetentionEpochs + 1
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	for _, table := range []string{
+		"koios_account_checked",
+		"koios_account_fetch_staged_rows",
+	} {
+		if _, err = tx.Exec("DELETE FROM "+table+
+			" WHERE network = ? AND epoch < ?", network, cutoff); err != nil {
+			return fmt.Errorf("prune %s: %w", table, err)
+		}
+	}
+	return tx.Commit()
 }
 
 // GetAccountUniverseForEpoch returns the persisted set of addresses actually
@@ -1413,7 +1578,10 @@ func createCacheSchema(db *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS koios_account_coverage (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
 			requested_count INTEGER NOT NULL DEFAULT 0, fetched_count INTEGER NOT NULL DEFAULT 0,
-			complete INTEGER NOT NULL DEFAULT 0, fetched_at DATETIME NOT NULL)`,
+			complete INTEGER NOT NULL DEFAULT 0, fetched_at DATETIME NOT NULL,
+			zero_reward_count INTEGER NOT NULL DEFAULT 0,
+			zero_reward_sample TEXT NOT NULL DEFAULT '[]',
+			zero_reward_summary_ready INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_kac_net_epoch ON koios_account_coverage(network, epoch)`,
 
 		// dingo #3099: durable per-chunk checkpoint staging so a killed/restarted
@@ -1437,7 +1605,8 @@ func createCacheSchema(db *sql.DB) error {
 		// address and it earned nothing, distinct from never having been asked
 		// about at all), and (c) the persisted per-epoch address universe used
 		// to diff newly-registered/deregistered accounts between adjacent
-		// epochs.
+		// epochs. Checkpoint rows are retained only for a rolling four-epoch
+		// window; historical zero-reward reporting uses the coverage summary.
 		`CREATE TABLE IF NOT EXISTS koios_account_checked (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
 			stake_address TEXT NOT NULL, chunk_hash TEXT NOT NULL, reward_row_count INTEGER NOT NULL DEFAULT 0,
@@ -1539,6 +1708,22 @@ GROUP BY network`); err != nil {
 			)
 		}
 	}
+	for _, col := range [][2]string{
+		{"zero_reward_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"zero_reward_sample", "TEXT NOT NULL DEFAULT '[]'"},
+		{"zero_reward_summary_ready", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if err := addColumnIfMissing(db, "koios_account_coverage", col[0], col[1]); err != nil {
+			return fmt.Errorf(
+				"migrate koios_account_coverage: add column %s: %w",
+				col[0],
+				err,
+			)
+		}
+	}
+	if err := backfillZeroRewardSummaries(db); err != nil {
+		return fmt.Errorf("migrate koios_account_coverage summaries: %w", err)
+	}
 	// The pre-#3097 unique index only covered (network, epoch,
 	// stake_address); drop it now that reward_type is guaranteed to exist
 	// (old rows default to "" via the ADD COLUMN above, which is fine:
@@ -1572,6 +1757,50 @@ GROUP BY network`); err != nil {
 			"migrate koios_account_rewards: create widened index: %w",
 			err,
 		)
+	}
+	return nil
+}
+
+func backfillZeroRewardSummaries(db *sql.DB) error {
+	rows, err := db.Query(`SELECT network, epoch FROM koios_account_coverage
+		WHERE zero_reward_summary_ready = 0`)
+	if err != nil {
+		return err
+	}
+	var pending [][2]any
+	for rows.Next() {
+		var network string
+		var epoch uint64
+		if err := rows.Scan(&network, &epoch); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		pending = append(pending, [2]any{network, epoch})
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, item := range pending {
+		network, epoch := item[0].(string), item[1].(uint64)
+		summary, err := getZeroRewardSummary(db, network, epoch)
+		if err != nil {
+			return err
+		}
+		sample, err := json.Marshal(summary.Sample)
+		if err != nil {
+			return err
+		}
+		if _, err := db.Exec(`UPDATE koios_account_coverage
+			SET zero_reward_count = ?, zero_reward_sample = ?,
+			zero_reward_summary_ready = 1
+			WHERE network = ? AND epoch = ?`,
+			summary.Count, string(sample), network, epoch); err != nil {
+			return err
+		}
 	}
 	return nil
 }

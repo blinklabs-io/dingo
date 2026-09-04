@@ -962,7 +962,7 @@ func accountLifecycleMismatches(
 ) []CheckMismatch {
 	var out []CheckMismatch
 
-	zeroReward, err := cache.GetZeroRewardAccountsForEpoch(network, epoch)
+	zeroReward, err := cache.GetZeroRewardSummary(network, epoch)
 	if err != nil {
 		return append(out, CheckMismatch{
 			Network:    network,
@@ -973,13 +973,14 @@ func accountLifecycleMismatches(
 			CheckedAt:  now,
 		})
 	}
-	if len(zeroReward) > 0 {
-		out = append(out, aggregateAccountLifecycleMismatch(
+	if zeroReward.Count > 0 {
+		out = append(out, aggregateAccountLifecycleMismatchCount(
 			network,
 			epoch,
 			CategoryAcctZeroReward,
 			"account_zero_reward",
-			zeroReward,
+			zeroReward.Count,
+			zeroReward.Sample,
 			now,
 		))
 	}
@@ -1136,9 +1137,10 @@ func dingoRewardAddressSet(
 // account universe, and would drown out genuine mismatches in
 // CheckEpochStatus.MismatchCount. KoiosValue carries the total affected
 // count; DingoValue carries a capped, comma-joined sample of addresses for
-// debugging, not the full list — the persisted koios_account_checked/
-// koios_account_universe data remains queryable directly for anyone who
-// needs the complete list.
+// debugging, not the full list. The exact historical reward rows remain
+// queryable directly; per-address checkpoint rows are deliberately retained
+// only for a rolling window, while the coverage row preserves this count and
+// sample for older epochs.
 func aggregateAccountLifecycleMismatch(
 	network string,
 	epoch uint64,
@@ -1150,12 +1152,28 @@ func aggregateAccountLifecycleMismatch(
 	if len(sample) > maxAccountLifecycleSample {
 		sample = sample[:maxAccountLifecycleSample]
 	}
+	return aggregateAccountLifecycleMismatchCount(
+		network, epoch, category, field, len(addrs), sample, now,
+	)
+}
+
+func aggregateAccountLifecycleMismatchCount(
+	network string,
+	epoch uint64,
+	category, field string,
+	count int,
+	sample []string,
+	now time.Time,
+) CheckMismatch {
+	if len(sample) > maxAccountLifecycleSample {
+		sample = sample[:maxAccountLifecycleSample]
+	}
 	return CheckMismatch{
 		Network:    network,
 		Epoch:      epoch,
 		Field:      field,
 		DingoValue: "sample: " + strings.Join(sample, ","),
-		KoiosValue: strconv.Itoa(len(addrs)),
+		KoiosValue: strconv.Itoa(count),
 		Category:   category,
 		CheckedAt:  now,
 	}

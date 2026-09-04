@@ -251,6 +251,11 @@ func Fetch(
 	}
 
 	if len(epochs) == 0 {
+		if cfg.AccountsEnabled {
+			if err := cache.PruneAccountCoverage(cfg.Network, throughEpoch); err != nil {
+				return nil, fmt.Errorf("prune account coverage: %w", err)
+			}
+		}
 		logger.Info("koiosparity: fetch cache is up-to-date",
 			"network", cfg.Network,
 			"last_epoch", throughEpoch,
@@ -432,12 +437,21 @@ loop:
 	wg.Wait()
 	close(progressDone)
 	progressWg.Wait()
-
-	// Check cancellation before consuming errCh so a clean shutdown returns
-	// ctx.Err() rather than a mid-flight epoch error.
+	// Check cancellation before performing cache maintenance so a clean
+	// shutdown preserves Fetch's established ctx.Err() result.
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if cfg.AccountsEnabled {
+		// All per-epoch account workers have joined, so no account fetch can
+		// recreate checkpoint rows while this rolling-window eviction runs.
+		// Historical rewards/coverage remain available for exact comparisons
+		// and bounded lifecycle summaries.
+		if err := cache.PruneAccountCoverage(cfg.Network, throughEpoch); err != nil {
+			return nil, fmt.Errorf("prune account coverage: %w", err)
+		}
+	}
+
 	select {
 	case err := <-errCh:
 		return nil, err
