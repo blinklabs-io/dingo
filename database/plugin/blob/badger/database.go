@@ -265,6 +265,7 @@ type BlobStoreBadger struct {
 	runValueLogGC        func(float64) error
 	dataDir              string
 	gcWg                 sync.WaitGroup
+	gcMetrics            *badgerGCMetrics
 	closeOnce            sync.Once
 	closeDone            chan struct{}
 	closeErr             error
@@ -421,8 +422,25 @@ func (d *BlobStoreBadger) blobGc(
 			default:
 			}
 			for {
+				gcStarted := time.Now()
+				var beforeLSM, beforeVlog int64
+				if d.gcMetrics != nil {
+					d.gcMetrics.attempts.Inc()
+					beforeLSM, beforeVlog = d.DB().Size()
+				}
 				err := d.runValueLogGC(0.5)
+				if d.gcMetrics != nil {
+					d.gcMetrics.duration.Observe(time.Since(gcStarted).Seconds())
+				}
 				if err != nil {
+					if d.gcMetrics != nil {
+						if errors.Is(err, badger.ErrNoRewrite) {
+							d.gcMetrics.noRewrite.Inc()
+						} else {
+							d.gcMetrics.errors.Inc()
+						}
+						d.gcMetrics.consecutive.Set(0)
+					}
 					// Log any actual errors
 					if !errors.Is(err, badger.ErrNoRewrite) {
 						d.logger.Warn(
@@ -431,6 +449,21 @@ func (d *BlobStoreBadger) blobGc(
 						)
 					}
 					break
+				}
+				if d.gcMetrics != nil {
+					d.gcMetrics.successes.Inc()
+					afterLSM, afterVlog := d.DB().Size()
+					d.gcMetrics.lsmBytes.Set(float64(afterLSM))
+					d.gcMetrics.vlogBytes.Set(float64(afterVlog))
+					beforeSize := beforeLSM + beforeVlog
+					afterSize := afterLSM + afterVlog
+					if beforeSize > afterSize {
+						d.gcMetrics.reclaimedBytes.Set(float64(beforeSize - afterSize))
+					} else {
+						d.gcMetrics.reclaimedBytes.Set(0)
+					}
+					d.gcMetrics.consecutive.Inc()
+					d.gcMetrics.lastSuccess.SetToCurrentTime()
 				}
 				// A successful rewrite normally starts another pass. Check the
 				// stop signal first so shutdown bounds the cycle to the rewrite

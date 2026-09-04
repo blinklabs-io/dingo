@@ -21,6 +21,19 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 )
 
+type badgerGCMetrics struct {
+	attempts       prometheus.Counter
+	successes      prometheus.Counter
+	noRewrite      prometheus.Counter
+	errors         prometheus.Counter
+	duration       prometheus.Histogram
+	lsmBytes       prometheus.Gauge
+	vlogBytes      prometheus.Gauge
+	reclaimedBytes prometheus.Gauge
+	consecutive    prometheus.Gauge
+	lastSuccess    prometheus.Gauge
+}
+
 const (
 	badgerMetricNamePrefix = "database_blob_"
 )
@@ -37,6 +50,63 @@ func safeRegister(reg prometheus.Registerer, c prometheus.Collector) {
 }
 
 func (d *BlobStoreBadger) registerBlobMetrics() {
+	d.gcMetrics = &badgerGCMetrics{
+		attempts: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: badgerMetricNamePrefix + "gc_attempts_total",
+			Help: "Total Badger value-log GC attempts.",
+		}),
+		successes: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: badgerMetricNamePrefix + "gc_successes_total",
+			Help: "Total successful Badger value-log GC rewrites.",
+		}),
+		noRewrite: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: badgerMetricNamePrefix + "gc_no_rewrite_total",
+			Help: "Total Badger value-log GC attempts with no rewrite.",
+		}),
+		errors: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: badgerMetricNamePrefix + "gc_errors_total",
+			Help: "Total Badger value-log GC errors.",
+		}),
+		duration: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name: badgerMetricNamePrefix + "gc_duration_seconds",
+			Help: "Duration of Badger value-log GC attempts in seconds.",
+		}),
+		lsmBytes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "gc_lsm_bytes",
+			Help: "Badger LSM size after the last successful value-log GC rewrite.",
+		}),
+		vlogBytes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "gc_vlog_bytes",
+			Help: "Badger value-log size after the last successful GC rewrite.",
+		}),
+		reclaimedBytes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "gc_reclaimed_bytes",
+			Help: "Bytes reclaimed by the last successful Badger GC rewrite.",
+		}),
+		consecutive: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "gc_consecutive_successes",
+			Help: "Successful value-log GC rewrites in the current GC cycle.",
+		}),
+		lastSuccess: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "gc_last_success_timestamp_seconds",
+			Help: "Unix timestamp of the last successful value-log GC rewrite.",
+		}),
+	}
+	for _, collector := range []prometheus.Collector{
+		d.gcMetrics.attempts,
+		d.gcMetrics.successes,
+		d.gcMetrics.noRewrite,
+		d.gcMetrics.errors,
+		d.gcMetrics.duration,
+		d.gcMetrics.lsmBytes,
+		d.gcMetrics.vlogBytes,
+		d.gcMetrics.reclaimedBytes,
+		d.gcMetrics.consecutive,
+		d.gcMetrics.lastSuccess,
+	} {
+		safeRegister(d.promRegistry, collector)
+	}
+
 	// Badger exposes metrics via expvar, so we need to set up some translation
 	collector := collectors.NewExpvarCollector(
 		map[string]*prometheus.Desc{
