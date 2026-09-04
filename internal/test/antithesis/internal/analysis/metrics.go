@@ -65,6 +65,16 @@ type Metrics struct {
 	// MempoolTxCount is the cumulative number of EventMempoolAdd events.
 	MempoolTxCount int
 
+	// MempoolConfirmedCount is the number of transactions removed after
+	// confirmed-block processing.
+	MempoolConfirmedCount int
+
+	// SubmittedTxIDs contains successful txpump submissions keyed by ID.
+	SubmittedTxIDs map[string]int
+
+	// DuplicateSubmissions counts txpump IDs observed more than once.
+	DuplicateSubmissions int
+
 	// delegationsProcessed counts submitted delegation transactions from txpump logs.
 	delegationsProcessed int
 
@@ -82,6 +92,7 @@ func NewMetrics() *Metrics {
 		MaxSlotByNode:  make(map[string]uint64),
 		ChainTipByNode: make(map[string]uint64),
 		hashByNodeSlot: make(map[string]string),
+		SubmittedTxIDs: make(map[string]int),
 	}
 }
 
@@ -101,6 +112,8 @@ func (m *Metrics) RecordEvent(ev *BlockEvent) {
 		m.recordChainExtended(ev)
 	case EventMempoolAdd:
 		m.MempoolTxCount++
+	case EventTxConfirmed:
+		m.MempoolConfirmedCount++
 	case EventTxSubmitted:
 		m.recordTxSubmitted(ev)
 	case EventUnknown, EventBlockReceived:
@@ -147,6 +160,12 @@ func (m *Metrics) recordForgedBlock(ev *BlockEvent) {
 
 // recordTxSubmitted handles an EventTxSubmitted under the held lock.
 func (m *Metrics) recordTxSubmitted(ev *BlockEvent) {
+	if ev.TxID != "" {
+		m.SubmittedTxIDs[ev.TxID]++
+		if m.SubmittedTxIDs[ev.TxID] > 1 {
+			m.DuplicateSubmissions++
+		}
+	}
 	switch ev.TxType {
 	case "delegation":
 		m.delegationsProcessed++
@@ -168,16 +187,19 @@ func (m *Metrics) recordChainExtended(ev *BlockEvent) {
 // MetricsSnapshot is a point-in-time copy of Metrics values, safe to read
 // without holding any lock.
 type MetricsSnapshot struct {
-	TotalBlocksForged    int
-	BlocksByNode         map[string]int
-	MaxSlotByNode        map[string]uint64
-	ChainTipByNode       map[string]uint64
-	Equivocations        []Equivocation
-	SlotRegressions      []SlotRegression
-	MempoolTxCount       int
-	DelegationsProcessed int
-	GovernanceProcessed  int
-	PlutusProcessed      int
+	TotalBlocksForged     int
+	BlocksByNode          map[string]int
+	MaxSlotByNode         map[string]uint64
+	ChainTipByNode        map[string]uint64
+	Equivocations         []Equivocation
+	SlotRegressions       []SlotRegression
+	MempoolTxCount        int
+	DelegationsProcessed  int
+	GovernanceProcessed   int
+	PlutusProcessed       int
+	MempoolConfirmedCount int
+	DuplicateSubmissions  int
+	SubmittedTxIDs        map[string]int
 }
 
 // Snapshot returns a point-in-time copy of the metrics. The returned value
@@ -187,14 +209,17 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 	defer m.mu.Unlock()
 
 	snap := MetricsSnapshot{
-		TotalBlocksForged:    m.TotalBlocksForged,
-		BlocksByNode:         make(map[string]int, len(m.BlocksByNode)),
-		MaxSlotByNode:        make(map[string]uint64, len(m.MaxSlotByNode)),
-		ChainTipByNode:       make(map[string]uint64, len(m.ChainTipByNode)),
-		MempoolTxCount:       m.MempoolTxCount,
-		DelegationsProcessed: m.delegationsProcessed,
-		GovernanceProcessed:  m.governanceProcessed,
-		PlutusProcessed:      m.plutusProcessed,
+		TotalBlocksForged:     m.TotalBlocksForged,
+		BlocksByNode:          make(map[string]int, len(m.BlocksByNode)),
+		MaxSlotByNode:         make(map[string]uint64, len(m.MaxSlotByNode)),
+		ChainTipByNode:        make(map[string]uint64, len(m.ChainTipByNode)),
+		MempoolTxCount:        m.MempoolTxCount,
+		DelegationsProcessed:  m.delegationsProcessed,
+		GovernanceProcessed:   m.governanceProcessed,
+		PlutusProcessed:       m.plutusProcessed,
+		MempoolConfirmedCount: m.MempoolConfirmedCount,
+		DuplicateSubmissions:  m.DuplicateSubmissions,
+		SubmittedTxIDs:        make(map[string]int, len(m.SubmittedTxIDs)),
 	}
 	for k, v := range m.BlocksByNode {
 		snap.BlocksByNode[k] = v
@@ -204,6 +229,9 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 	}
 	for k, v := range m.ChainTipByNode {
 		snap.ChainTipByNode[k] = v
+	}
+	for k, v := range m.SubmittedTxIDs {
+		snap.SubmittedTxIDs[k] = v
 	}
 	snap.Equivocations = append(
 		snap.Equivocations, m.Equivocations...,
