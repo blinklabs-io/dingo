@@ -30,6 +30,11 @@ import (
 // anything else are rejected by the ledger's own reward-input validator.
 const credentialHashSize = 28
 
+const (
+	maxRewardSeedFailurePools       = 16
+	maxRewardSeedFailurePoolKeySize = 64
+)
+
 // rewardInputBundle is one epoch's reward-calculation basis, derived from a
 // single imported stake snapshot.
 type rewardInputBundle struct {
@@ -277,9 +282,9 @@ func (b *rewardInputBundle) validate() error {
 		missingRewardAccounts = append(
 			missingRewardAccounts,
 			fmt.Sprintf(
-				"derived pool input for %x has no reward account "+
+				"derived pool input for %s has no reward account "+
 					"(%d lovelace delegated stake)",
-				pool.PoolKeyHash,
+				diagnosticRewardPoolKey(pool.PoolKeyHash),
 				uint64(pool.DelegatedStake),
 			),
 		)
@@ -288,8 +293,7 @@ func (b *rewardInputBundle) validate() error {
 		// Parameter maps are unordered. A deterministic aggregate makes a
 		// repeated import report the same complete offender list and avoids
 		// hiding all but whichever pool happened to be visited first.
-		sort.Strings(missingRewardAccounts)
-		return errors.New(strings.Join(missingRewardAccounts, "; "))
+		return errors.New(boundRewardSeedFailureReasons(missingRewardAccounts))
 	}
 
 	poolStake := make(map[string]uint64, len(b.poolInputs))
@@ -675,8 +679,58 @@ func emptyRewardSeedFailureReason(snap *ParsedSnapShot) string {
 	if snap == nil {
 		return generic
 	}
-	referenced := make([]string, 0)
-	seen := make(map[string]struct{})
+	referenced := referencedRewardPools(snap)
+	if len(referenced) == 0 {
+		return generic
+	}
+	pools := make([]string, 0, len(referenced))
+	for pool := range referenced {
+		pools = append(pools, pool)
+	}
+	sort.Strings(pools)
+	reasons := make([]string, 0, len(pools))
+	for _, pool := range pools {
+		pool = boundRewardSeedFailurePoolKey(pool)
+		reasons = append(reasons, fmt.Sprintf("pool %s has no reward account", pool))
+	}
+	return generic + ": " + boundRewardSeedFailureReasons(reasons)
+}
+
+func boundRewardSeedFailureReasons(reasons []string) string {
+	sort.Strings(reasons)
+	shown := len(reasons)
+	if shown > maxRewardSeedFailurePools {
+		shown = maxRewardSeedFailurePools
+	}
+	bounded := append([]string(nil), reasons[:shown]...)
+	if omitted := len(reasons) - shown; omitted > 0 {
+		bounded = append(
+			bounded,
+			fmt.Sprintf("%d additional pools omitted", omitted),
+		)
+	}
+	return strings.Join(bounded, "; ")
+}
+
+func boundRewardSeedFailurePoolKey(pool string) string {
+	if len(pool) > maxRewardSeedFailurePoolKeySize {
+		return pool[:maxRewardSeedFailurePoolKeySize] + "..."
+	}
+	return pool
+}
+
+func diagnosticRewardPoolKey(poolKey []byte) string {
+	return boundRewardSeedFailurePoolKey(hex.EncodeToString(poolKey))
+}
+
+// referencedRewardPools returns the distinct pools with positive delegated
+// stake in a snapshot. Keeping this selection in one place prevents the
+// parameter resolver and diagnostics from drifting apart.
+func referencedRewardPools(snap *ParsedSnapShot) map[string]struct{} {
+	referenced := make(map[string]struct{})
+	if snap == nil {
+		return referenced
+	}
 	for credential, stake := range snap.Stake {
 		if stake == 0 {
 			continue
@@ -685,22 +739,9 @@ func emptyRewardSeedFailureReason(snap *ParsedSnapShot) string {
 		if len(poolKey) == 0 {
 			continue
 		}
-		poolHex := hex.EncodeToString(poolKey)
-		if _, ok := seen[poolHex]; ok {
-			continue
-		}
-		seen[poolHex] = struct{}{}
-		referenced = append(referenced, poolHex)
+		referenced[hex.EncodeToString(poolKey)] = struct{}{}
 	}
-	if len(referenced) == 0 {
-		return generic
-	}
-	sort.Strings(referenced)
-	reasons := make([]string, 0, len(referenced))
-	for _, pool := range referenced {
-		reasons = append(reasons, fmt.Sprintf("pool %s has no reward account", pool))
-	}
-	return generic + ": " + strings.Join(reasons, "; ")
+	return referenced
 }
 
 // errRewardParamsWindowUnknown marks an epoch whose parameter lookup window
@@ -816,17 +857,7 @@ func effectiveRewardPoolParams(
 	snap *ParsedSnapShot,
 	registered map[string]*ParsedPool,
 ) map[string]*ParsedPool {
-	referenced := make(map[string]struct{}, len(snap.Delegations))
-	for credential, stake := range snap.Stake {
-		if stake == 0 {
-			continue
-		}
-		poolKey := snap.Delegations[credential]
-		if len(poolKey) == 0 {
-			continue
-		}
-		referenced[hex.EncodeToString(poolKey)] = struct{}{}
-	}
+	referenced := referencedRewardPools(snap)
 
 	effective := make(map[string]*ParsedPool, len(referenced))
 	for key := range referenced {
