@@ -15,6 +15,7 @@
 package database
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -26,8 +27,134 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
+
+// TestSetGapBlockTransactionPersistsPositionedCertificates verifies that the
+// gap-block ingestion path writes the same certificate provenance consumed by
+// transaction hydration and account history readers. Both transactions share
+// a slot so the history query must use block_index as its tie-breaker, and the
+// second write is repeated to cover the certificate upsert path.
+func TestSetGapBlockTransactionPersistsPositionedCertificates(t *testing.T) {
+	db := openTestDB(t)
+
+	stakeKey := lcommon.NewBlake2b224(bytes.Repeat([]byte{0x31}, 28))
+	credential := lcommon.Credential{
+		CredType:   0,
+		Credential: stakeKey,
+	}
+
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress("addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd").
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
+
+	buildTransaction := func(seed byte, poolSeed byte) lcommon.Transaction {
+		t.Helper()
+		input, inputErr := mockledger.NewSimpleTransactionInput(
+			bytes.Repeat([]byte{seed + 0x10}, 32),
+			0,
+		)
+		require.NoError(t, inputErr)
+		poolKey := lcommon.PoolKeyHash(
+			lcommon.NewBlake2b224(bytes.Repeat([]byte{poolSeed}, 28)),
+		)
+		builder := mockledger.NewTransactionBuilder()
+		builder.WithId(bytes.Repeat([]byte{seed}, 32))
+		builder.WithInputs(input)
+		builder.WithOutputs(output)
+		builder.WithCertificates(&lcommon.StakeDelegationCertificate{
+			CertType:        uint(lcommon.CertificateTypeStakeDelegation),
+			StakeCredential: &credential,
+			PoolKeyHash:     poolKey,
+		})
+		transaction, buildErr := builder.Build()
+		require.NoError(t, buildErr)
+		return transaction
+	}
+
+	const slot = uint64(42_000)
+	point := ocommon.Point{
+		Slot: slot,
+		Hash: bytes.Repeat([]byte{0xA1}, 32),
+	}
+	late := buildTransaction(0x41, 0x51)
+	early := buildTransaction(0x42, 0x52)
+	seedInputs := make([]models.Utxo, 0, 2)
+	for _, transaction := range []lcommon.Transaction{late, early} {
+		input := transaction.Consumed()[0]
+		seedInputs = append(seedInputs, models.Utxo{
+			TxId:      input.Id().Bytes(),
+			OutputIdx: input.Index(),
+			AddedSlot: 1,
+			Amount:    1_000_000,
+		})
+	}
+	seedTxn := db.MetadataTxn(true)
+	require.NoError(t, seedTxn.Do(func(txn *Txn) error {
+		return db.Metadata().ImportUtxos(seedInputs, txn.Metadata())
+	}))
+	seedTxn.Release()
+
+	gapOffsets := func(transaction lcommon.Transaction) *BlockIngestionResult {
+		t.Helper()
+		var blockHash [32]byte
+		copy(blockHash[:], point.Hash)
+		var txHash [32]byte
+		copy(txHash[:], transaction.Hash().Bytes())
+		return &BlockIngestionResult{
+			TxOffsets: map[[32]byte]CborOffset{
+				txHash: {
+					BlockSlot:  slot,
+					BlockHash:  blockHash,
+					ByteLength: 1,
+				},
+			},
+			UtxoOffsets: map[UtxoRef]CborOffset{
+				{TxId: txHash, OutputIdx: 0}: {
+					BlockSlot:  slot,
+					BlockHash:  blockHash,
+					ByteLength: 1,
+				},
+			},
+		}
+	}
+
+	// Deliberately ingest the higher block index first. The reader's ordering
+	// must come from persisted transaction/certificate positions, not insertion
+	// order or SQLite row IDs.
+	require.NoError(t, db.SetGapBlockTransaction(
+		late, point, 5, gapOffsets(late), nil,
+	))
+	require.NoError(t, db.SetGapBlockTransaction(
+		early, point, 2, gapOffsets(early), nil,
+	))
+	// Reprocessing the same gap transaction must not duplicate its certificate.
+	require.NoError(t, db.SetGapBlockTransaction(
+		late, point, 5, gapOffsets(late), nil,
+	))
+
+	gotTx, err := db.Metadata().GetTransactionByHash(late.Hash().Bytes(), nil)
+	require.NoError(t, err)
+	require.NotNil(t, gotTx)
+	require.Len(t, gotTx.Certificates, 1)
+	require.Equal(t, uint(0), gotTx.Certificates[0].CertIndex)
+	require.Equal(t, uint(lcommon.CertificateTypeStakeDelegation), gotTx.Certificates[0].CertType)
+
+	history, err := db.GetAccountDelegationHistoryByCredential(
+		0, stakeKey.Bytes(), 0, 0, "asc", nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, history, 2)
+	require.Equal(t, uint32(2), history[0].BlockIndex)
+	require.Equal(t, uint32(5), history[1].BlockIndex)
+	require.Equal(t, uint32(0), history[0].CertIndex)
+	require.Equal(t, uint32(0), history[1].CertIndex)
+	require.Equal(t, slot, history[0].AddedSlot)
+	require.Equal(t, slot, history[1].AddedSlot)
+}
 
 type gapRollbackCandidate struct {
 	consumerBlock  models.Block

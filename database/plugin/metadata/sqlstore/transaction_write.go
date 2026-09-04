@@ -420,9 +420,11 @@ func (s *Store) SetGapBlockTransaction(
 	index uint32,
 	txn types.Txn,
 ) error {
-	// Gap ingestion intentionally has no available input state. Persisting only
-	// the transaction and produced outputs is equivalent to SetTransaction
-	// after suppressing the consumed-input update.
+	// Gap ingestion intentionally has no available input state. Persisting the
+	// transaction and produced outputs is equivalent to SetTransaction after
+	// suppressing the consumed-input update. Certificate rows still need the
+	// normal certificate writer so transaction hydration and history readers
+	// retain their block and certificate positions.
 	if transaction == nil {
 		return errors.New("set gap transaction: nil transaction")
 	}
@@ -460,8 +462,23 @@ RETURNING id`,
 			if err != nil {
 				return err
 			}
-			collateralReturn := transaction.CollateralReturn()
 			stakeRefs := make([]models.StakeCredentialRef, 0)
+			if transaction.IsValid() {
+				certificateRefs, err := s.applyTransactionCertificates(
+					ctx,
+					db,
+					transactionID,
+					transaction.Certificates(),
+					point,
+					index,
+					make(map[int]uint64),
+				)
+				if err != nil {
+					return err
+				}
+				stakeRefs = append(stakeRefs, certificateRefs...)
+			}
+			collateralReturn := transaction.CollateralReturn()
 			for _, produced := range transaction.Produced() {
 				model, err := models.UtxoLedgerToModel(produced, point.Slot)
 				if err != nil {
