@@ -222,6 +222,13 @@ without changing `term_start_slot`, including a valid zero. New writes persist
 the presence bit so slot zero remains distinct from a legacy caller that omits
 the term start and falls back to `added_slot`.
 
+Migration `v10` (`reward-seed-failure`, integer version 10) creates the
+`reward_seed_failure` table. An imported reward basis that cannot be persisted
+records its bounded failure reason and capture slot there, so the later reward
+boundary reports the durable import cause instead of guessing that the basis
+predates bootstrap. Successful seeding clears the marker, and rollback removes
+markers captured after its target slot.
+
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
 Unix-millisecond `started_at`/`updated_at`, and nullable `completed_at`.
