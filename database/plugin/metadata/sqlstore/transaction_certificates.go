@@ -115,12 +115,6 @@ RETURNING id`,
 		if value, found := deposits[certIndex]; found {
 			deposit = &value
 		}
-		if certificateRequiresDeposit(certificate) && deposits == nil {
-			return nil, fmt.Errorf(
-				"missing certDeposits for deposit-bearing certificate at index %d",
-				certIndex,
-			)
-		}
 		specializedID, ref, err := s.applySpecializedCertificate(
 			ctx,
 			db,
