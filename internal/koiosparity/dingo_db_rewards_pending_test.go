@@ -71,4 +71,24 @@ func TestGetPoolEpochDataMapReportsRewardsPending(t *testing.T) {
 		assert.False(t, d.RewardsPending,
 			"an unreadable tip must not downgrade a real divergence")
 	})
+
+	t.Run("a slot without a hash is not a tip", func(t *testing.T) {
+		db, gdb := openTestDingoDB(t)
+		require.NoError(t, gdb.Exec(
+			`INSERT INTO reward_pool_output
+			 (pool_key_hash, epoch, member_reward_total, unspendable, boundary_slot)
+			 VALUES (?, ?, ?, ?, ?)`,
+			pool, stakeEpoch, "4006269", "1857", boundarySlot,
+		).Error)
+		require.NoError(t, gdb.Exec(
+			`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
+			nil, boundarySlot-1, 1,
+		).Error)
+		m, err := db.GetPoolEpochDataMap(
+			context.Background(), stakeEpoch, paramEpoch,
+		)
+		require.NoError(t, err)
+		assert.False(t, find(t, m).RewardsPending,
+			"incomplete tip metadata must not downgrade a real divergence")
+	})
 }

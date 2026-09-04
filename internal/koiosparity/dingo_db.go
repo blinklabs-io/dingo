@@ -491,10 +491,16 @@ func (d *DingoDB) GetPoolEpochDataMap(
 	// downgrading a real divergence on incomplete information.
 	var tipSlot uint64
 	tipKnown := false
-	if tipRow := d.queryRow(ctx, `SELECT slot FROM tip ORDER BY id DESC LIMIT 1`); tipRow != nil {
+	if tipRow := d.queryRow(
+		ctx, `SELECT slot, hash FROM tip ORDER BY id DESC LIMIT 1`,
+	); tipRow != nil {
 		var slot sql.NullInt64
-		if err := tipRow.Scan(&slot); err == nil && slot.Valid &&
-			slot.Int64 > 0 {
+		var hash []byte
+		// A hash is required as well as a slot, matching DatabaseSource: a row
+		// carrying a slot but no hash is incomplete metadata, not a chain tip,
+		// and accepting it would let a real divergence read as a lag.
+		if err := tipRow.Scan(&slot, &hash); err == nil && slot.Valid &&
+			slot.Int64 > 0 && len(hash) > 0 {
 			tipSlot = uint64(slot.Int64)
 			tipKnown = true
 		}
