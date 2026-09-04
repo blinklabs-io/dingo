@@ -937,6 +937,89 @@ func TestCheckAccountsEndToEndExactMatchAndMismatch(t *testing.T) {
 	require.Equal(t, "2000001", acctMismatches[0].KoiosValue)
 }
 
+// TestCompareEpochAccountsSkipsWithheldAndAggregatesSharedAccounts covers the
+// raw reward_account_output boundary. Dingo stores one row per pool
+// contribution, including rewards that were computed but not credited;
+// Koios reports only credited rewards at the account/type level. The parity
+// comparison must therefore discard withheld rows and aggregate contributions
+// from different pools before matching the Koios total.
+func TestCompareEpochAccountsSkipsWithheldAndAggregatesSharedAccounts(t *testing.T) {
+	const network = "preview"
+	const koiosEpoch = uint64(100)
+	const stakeEpoch = uint64(99)
+
+	dingo, gdb := openTestDingoDB(t)
+	defer dingo.Close() //nolint:errcheck
+
+	stakingKey := testPoolKeyHash(t, 0x41)
+	poolOne := testPoolKeyHash(t, 0x01)
+	poolTwo := testPoolKeyHash(t, 0x02)
+	poolThree := testPoolKeyHash(t, 0x03)
+	poolFour := testPoolKeyHash(t, 0x04)
+	for _, row := range []*models.RewardAccountOutput{
+		{
+			Epoch: stakeEpoch, StakingKey: stakingKey, PoolKeyHash: poolOne,
+			RewardType: "member", Amount: types.Uint64(100), Spendable: true,
+		},
+		{
+			Epoch: stakeEpoch, StakingKey: stakingKey, PoolKeyHash: poolTwo,
+			RewardType: "member", Amount: types.Uint64(200), Spendable: true,
+		},
+		{
+			Epoch: stakeEpoch, StakingKey: stakingKey, PoolKeyHash: poolThree,
+			RewardType: "member", Amount: types.Uint64(50), Spendable: false,
+		},
+		{
+			Epoch: stakeEpoch, StakingKey: stakingKey, PoolKeyHash: poolFour,
+			RewardType: "member", Amount: types.Uint64(75), Spendable: true,
+			Guarded: true,
+		},
+	} {
+		require.NoError(t, gdb.Create(row).Error)
+	}
+
+	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	addr, err := StakeAddressFromCredential(stakingKey, 0)
+	require.NoError(t, err)
+	poolOneID, err := PoolKeyHashHexToBech32(hex.EncodeToString(poolOne))
+	require.NoError(t, err)
+	poolTwoID, err := PoolKeyHashHexToBech32(hex.EncodeToString(poolTwo))
+	require.NoError(t, err)
+	require.NoError(t, cache.CommitAccountRewardsForEpoch(
+		network,
+		koiosEpoch,
+		[]KoiosAccountRewards{
+			{StakeAddress: addr, RewardType: "member", Earned: "100", PoolIDBech32: poolOneID},
+			{StakeAddress: addr, RewardType: "member", Earned: "200", PoolIDBech32: poolTwoID},
+		},
+		1,
+		true,
+		time.Now(),
+	))
+
+	mismatches := compareEpochAccounts(
+		context.Background(),
+		cache,
+		dingo,
+		network,
+		koiosEpoch,
+		stakeEpoch,
+		time.Now(),
+		0,
+		time.Time{},
+		slog.New(slog.DiscardHandler),
+	)
+	require.Equal(t, StatusPass, DetermineStatus(mismatches))
+	for _, mismatch := range mismatches {
+		require.NotEqual(t, CategoryAcctOnlyDingo, mismatch.Category)
+		require.NotEqual(t, CategoryAcctOnlyKoios, mismatch.Category)
+		require.NotEqual(t, CategoryAcctDuplicate, mismatch.Category)
+	}
+}
+
 func TestEffectiveCheckOutcome(t *testing.T) {
 	statuses := []CheckEpochStatus{
 		{Epoch: 1, Status: StatusPass},

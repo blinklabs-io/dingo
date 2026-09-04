@@ -346,8 +346,8 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 	},
 
 	// /account_reward_history (#3097): CompareAccountEpoch compares every
-	// reference row against reward_account_output exactly, per
-	// (stake_address, type) — member/leader rows only, since
+	// reference row against reward_account_output exactly, per aggregated
+	// (stake_address, type) total — member/leader rows only, since
 	// koiosAccountRewardTypesOutOfScope filters out reward mechanisms
 	// (treasury/reserves MIR, refund) Dingo does not currently produce.
 	{
@@ -355,7 +355,7 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Field:      "stake_address",
 		Class:      CoverageExactMatch,
 		DingoField: "reward_account_output staking key, decoded to a bech32 stake address",
-		Reason:     "identifies the (stake_address, type) row pair CompareAccountEpoch matches on",
+		Reason:     "identifies the (stake_address, type) aggregate CompareAccountEpoch matches on",
 	},
 	{
 		Endpoint:   "/account_reward_history",
@@ -385,9 +385,10 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Reason:     "member/leader rows are matched exactly; treasury/reserves/refund rows are out of scope, see koiosAccountRewardTypesOutOfScope",
 	},
 	{
-		Endpoint: "/account_reward_history",
-		Field:    "pool_id_bech32",
-		Class:    CoverageUnsupported,
-		Reason:   "null for reward types with no associated pool; not part of the (stake_address, type) match key",
+		Endpoint:   "/account_reward_history",
+		Field:      "pool_id_bech32",
+		Class:      CoverageDerivedMatch,
+		DingoField: "reward_account_output.pool_key_hash converted to pool ID",
+		Reason:     "distinct pool contributions are aggregated; repeated same-pool rows remain duplicate failures",
 	},
 }
