@@ -117,7 +117,6 @@ func (c *badgerGCCollectorCache) get(
 		}
 	}
 	return nil
-
 }
 
 func (c *badgerGCCollectorCache) put(
