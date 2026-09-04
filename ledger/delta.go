@@ -176,13 +176,19 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			snapshot := ls.loadConsensusSnapshot()
 			if snapshot == nil {
 				certDepositsMapPool.Put(certDeposits)
-				return errors.New("calculate certificate deposit: consensus snapshot unavailable")
+				return errors.New(
+					"calculate certificate deposit: consensus snapshot unavailable",
+				)
 			}
 			pparams = snapshot.currentPParams
 			snapshotLoaded = true
 		}
 		for i, cert := range certs {
-			deposit, err := ls.calculateCertificateDeposit(cert, d.BlockEraId, pparams)
+			deposit, err := ls.calculateCertificateDeposit(
+				cert,
+				d.BlockEraId,
+				pparams,
+			)
 			if err != nil {
 				// Return the map to pool before returning error
 				certDepositsMapPool.Put(certDeposits)

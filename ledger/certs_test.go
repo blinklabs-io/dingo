@@ -33,7 +33,8 @@ func TestCalculateCertificateDepositUsesPublishedPParams(t *testing.T) {
 				shelley.EraIdShelley,
 				ls.loadConsensusSnapshot().currentPParams,
 			)
-			if err != nil || (deposit != firstDeposit && deposit != secondDeposit) {
+			if err != nil ||
+				(deposit != firstDeposit && deposit != secondDeposit) {
 				if err != nil {
 					errs <- err
 				} else {

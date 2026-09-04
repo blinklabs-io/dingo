@@ -16,8 +16,10 @@ package ledger
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -27,6 +29,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
@@ -97,6 +100,117 @@ func TestProcessGovernanceAcceptsDijkstraProtocolParameters(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(12), got.ProposedEpoch)
 	require.Equal(t, uint64(32), got.ExpiresEpoch)
+}
+
+func TestLedgerDeltaPersistsMultipleCertificateDepositsFromOneSnapshot(
+	t *testing.T,
+) {
+	const (
+		keyDeposit = uint64(2_000_000)
+		certCount  = 64
+	)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	ls := &LedgerState{
+		db: db,
+		currentPParams: &shelley.ShelleyProtocolParameters{
+			KeyDeposit: uint(keyDeposit),
+		},
+	}
+	ls.publishSnapshotsLocked()
+	secondPParams := &shelley.ShelleyProtocolParameters{KeyDeposit: 4_000_000}
+
+	certs := make([]lcommon.Certificate, certCount)
+	for i := range certs {
+		credential := bytes.Repeat([]byte{0}, lcommon.Blake2b224Size)
+		credential[0] = byte(i)
+		certs[i] = &lcommon.StakeRegistrationCertificate{
+			CertType: uint(lcommon.CertificateTypeStakeRegistration),
+			StakeCredential: lcommon.Credential{
+				CredType: lcommon.CredentialTypeAddrKeyHash,
+				Credential: lcommon.CredentialHash(
+					lcommon.NewBlake2b224(credential),
+				),
+			},
+		}
+	}
+	txBuilder := mockledger.NewTransactionBuilder()
+	txBuilder.WithId(bytes.Repeat([]byte{0x71}, lcommon.Blake2b256Size))
+	txBuilder.WithCertificates(certs...)
+	var tx lcommon.Transaction = txBuilder
+	txHash := tx.Hash()
+	var txHashArray [32]byte
+	copy(txHashArray[:], txHash.Bytes())
+	point := ocommon.Point{
+		Slot: 42,
+		Hash: bytes.Repeat([]byte{0x72}, lcommon.Blake2b256Size),
+	}
+	delta := NewLedgerDelta(point, uint(shelley.EraIdShelley), 1)
+	defer delta.Release()
+	delta.addTransaction(tx, 0)
+	delta.Offsets = &database.BlockIngestionResult{
+		TxOffsets: map[[32]byte]database.CborOffset{
+			txHashArray: {},
+		},
+		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+	}
+	stopPublisher := make(chan struct{})
+	var publisherWG sync.WaitGroup
+	publisherWG.Go(func() {
+		for i := 0; ; i++ {
+			select {
+			case <-stopPublisher:
+				return
+			default:
+			}
+			ls.Lock()
+			if i%2 == 0 {
+				ls.currentPParams = secondPParams
+			} else {
+				ls.currentPParams = &shelley.ShelleyProtocolParameters{
+					KeyDeposit: uint(keyDeposit),
+				}
+			}
+			ls.publishSnapshotsLocked()
+			ls.Unlock()
+		}
+	})
+	defer func() {
+		close(stopPublisher)
+		publisherWG.Wait()
+	}()
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return delta.apply(ls, txn)
+	}))
+
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	rows, err := raw.Query(`
+SELECT hex(c.block_hash), sr.deposit_amount
+FROM stake_registration sr
+JOIN certs c ON c.id = sr.certificate_id
+ORDER BY c.cert_index`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var deposits []string
+	for rows.Next() {
+		var blockHash string
+		var deposit string
+		require.NoError(t, rows.Scan(&blockHash, &deposit))
+		require.Equal(t, fmt.Sprintf("%X", point.Hash), blockHash)
+		deposits = append(deposits, deposit)
+	}
+	require.NoError(t, rows.Err())
+	require.Len(t, deposits, certCount)
+	firstDeposit := deposits[0]
+	require.Contains(t, []string{"2000000", "4000000"}, firstDeposit)
+	for i, deposit := range deposits {
+		require.Equal(t, firstDeposit, deposit, "certificate %d", i)
+	}
 }
 
 func TestProcessGovernanceRenewsDRepFromCertificateOnly(t *testing.T) {
