@@ -93,6 +93,18 @@ func (n *Node) shutdown() error {
 	// concurrently closing a component the startup stack is stopping.
 	n.startupLifecycleMu.Lock()
 	defer n.startupLifecycleMu.Unlock()
+	// Restore and Truncate hold both lifecycle gates while quiescing,
+	// closing, and rebuilding storage-dependent components. Snapshot holds
+	// snapshotMu while copying the database. Take the same gates before
+	// cancelling workers or closing storage so Stop cannot tear down a
+	// resource that one of those operations is still using.
+	//
+	// Restore and Truncate acquire these in this order, so keeping the order
+	// here avoids introducing a lock cycle with either operation.
+	n.liveLifecycleMu.Lock()
+	defer n.liveLifecycleMu.Unlock()
+	n.snapshotMu.Lock()
+	defer n.snapshotMu.Unlock()
 
 	shutdownStart := time.Now()
 	shutdownTimeout := n.configuredShutdownTimeout()

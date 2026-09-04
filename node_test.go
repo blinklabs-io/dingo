@@ -458,6 +458,70 @@ func TestStartupFailureCleanupCancelsBeforeAllowingShutdown(t *testing.T) {
 	require.NoError(t, <-shutdownDone)
 }
 
+// TestShutdownWaitsForLiveLifecycleOperations protects the shared storage
+// lifecycle boundary. Restore and Truncate hold liveLifecycleMu and
+// snapshotMu while they stop readers, close the old database, and rebuild its
+// dependents. Snapshot holds snapshotMu while it copies the database. A
+// concurrent Stop must wait for the gate owned by each operation before it
+// cancels readers or closes storage.
+func TestShutdownWaitsForLiveLifecycleOperations(t *testing.T) {
+	tests := []struct {
+		name   string
+		lock   func(*Node)
+		unlock func(*Node)
+	}{
+		{
+			name:   "restore or truncate",
+			lock:   func(n *Node) { n.liveLifecycleMu.Lock() },
+			unlock: func(n *Node) { n.liveLifecycleMu.Unlock() },
+		},
+		{
+			name:   "snapshot",
+			lock:   func(n *Node) { n.snapshotMu.Lock() },
+			unlock: func(n *Node) { n.snapshotMu.Unlock() },
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			phaseStarted := make(chan struct{}, 1)
+			n := &Node{
+				config: Config{
+					logger: slog.New(nodeTestLogSignalHandler{
+						message: "shutdown phase 1: stopping new work",
+						seen:    phaseStarted,
+					}),
+				},
+			}
+			test.lock(n)
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { test.unlock(n) }) }
+			t.Cleanup(release)
+
+			stopDone := make(chan error, 1)
+			go func() { stopDone <- n.Stop() }()
+
+			// Stop must not reach phase 1 while the live operation owns its
+			// storage lifecycle gate.
+			testutil.RequireNoReceive(
+				t,
+				phaseStarted,
+				50*time.Millisecond,
+				"shutdown must wait for the live lifecycle gate",
+			)
+
+			release()
+			testutil.RequireReceive(
+				t,
+				phaseStarted,
+				time.Second,
+				"shutdown phase 1 after the live lifecycle gate",
+			)
+			require.NoError(t, <-stopDone)
+		})
+	}
+}
+
 func TestShutdownClosesEventBusBeforeFinalCleanup(t *testing.T) {
 	const eventType event.EventType = "test.shutdown.order"
 
