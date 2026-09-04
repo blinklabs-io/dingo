@@ -895,10 +895,11 @@ type LedgerState struct {
 	// node has abandoned and must be discarded rather than applied. Guarded by
 	// chainsyncBlockfetchMutex, like the rest of the per-batch state.
 	blockfetchBatchChainGeneration uint64
-	// chainRollbackGeneration counts primary-chain rollbacks that actually
-	// moved the chain tip. Written under chainsyncMutex by the rollback paths
-	// and read under chainsyncBlockfetchMutex by the blockfetch paths, so it
-	// is atomic rather than mutex-guarded.
+	// chainRollbackGeneration counts attempted primary-chain rollbacks, including
+	// queued-header rollbacks that do not move the chain tip and rollbacks that
+	// fail. Written under chainsyncMutex by the rollback paths and read under
+	// chainsyncBlockfetchMutex by the blockfetch paths, so it is atomic rather
+	// than mutex-guarded.
 	chainRollbackGeneration atomic.Uint64
 	// Failures to obtain one specific queued header range, keyed by its
 	// start point and counting both a NoBlocks reply (a synchronous
