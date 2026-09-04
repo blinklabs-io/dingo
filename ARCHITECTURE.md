@@ -1561,11 +1561,28 @@ implemented in `midnight/server/service.go`:
   (`SlotTimer.TimeToSlot` + `database.BlockBeforeSlot`) instead of the live
   tip. `GetLatestStableBlock` looks the target block number up via
   `Database.BlockByIndex`, translating 0-based block number to the blob
-  store's 1-based index the same way `api/blockfrost` does.
+  store's 1-based index the same way `api/blockfrost` does. A client-supplied
+  `as_of_timestamp_unix_millis` above `int64` range (`resolveTipBlock`) is
+  rejected with `codes.InvalidArgument` rather than being converted with
+  `int64(v)`, which would silently wrap it into a negative timestamp and
+  resolve against a bogus slot.
 
 With both groups wired, every `MidnightState` RPC is implemented. A handler
 whose backend is nil (e.g. a server started for lifecycle/health only)
-returns a clean `codes.FailedPrecondition` rather than nil-panicking. TLS is
+returns a clean status rather than nil-panicking: the `Config.Database`/
+`Config.SlotTimer`-backed RPCs (`checkDatabase`/`checkBlockBackends` in
+service.go) return `codes.FailedPrecondition`, while the `Config.Metadata`-
+backed UTxO-event RPCs return `codes.Unimplemented` when `Metadata` is nil
+(`GetUtxoEvents` still returns `codes.FailedPrecondition` specifically for a
+missing `BlockNumberByHash` resolver when `end_block_hash` is set).
+Every narrowing conversion onto a wire field fixed at `uint32`/`int64`/
+`uint64` (block numbers, timestamps, tx/epoch counts) is bounds-checked
+before applying it; a stored value that doesn't fit fails the request with
+`codes.Internal` instead of silently wrapping. Every `codes.Internal`
+response is built by `internalError`, which logs the real error (which can
+carry driver-specific SQL text, file paths, or CBOR diagnostics) server-side
+and returns only a stable, generic message naming the failed operation, so
+internal detail never reaches the client. TLS is
 enabled when the shared `tlsCertFilePath`/`tlsKeyFilePath` are set. `Start`
 binds the listener synchronously (so bind/cert errors surface immediately)
 and serves in a goroutine; a context watcher performs a bounded
@@ -6979,7 +6996,14 @@ Once eligible to run, it subscribes to `ledger.block`
 
 - **cNIGHT create**: an output carrying the configured `cnight_policy_id` +
   `cnight_asset_name` token writes a `midnight_asset_creates` row and adds
-  the UTxO to an in-memory tracked set.
+  the UTxO to an in-memory tracked set. The quantity is checked against
+  `uint64` range before writing (`checkedCnightQuantity`, delegating to
+  `models.CheckedUint64FromBigInt`); a quantity that doesn't fit is not a
+  transient failure like the write errors below, so unlike them it does not
+  abort the block or reach `idx.fatal` (the indexer is optional -- see the
+  diagram above -- and the failure would reproduce identically on every
+  restart). Only that output's create is skipped, logged at `Error`, and the
+  rest of the block indexes normally.
 - **cNIGHT spend**: an input consuming a tracked cNIGHT UTxO writes a
   `midnight_asset_spends` row and removes the entry from the tracked set.
 - **Registration**: an output at `mapping_validator_address` carrying a token
