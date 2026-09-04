@@ -30,7 +30,7 @@ import (
 //
 // Cost and gating. A full per-input producer probe on every fetched body would
 // add a database round trip per input to the steady-state blockfetch path, so
-// the audit is armed only by a local rollback (rollbackChainAndState and the
+// the audit is armed only by a local rollback (rollbackChainAndStateDeferred and the
 // replay-recovery rewind) and then runs for a bounded number of blocks. That is
 // exactly the fork-churn / recovery regime where the splice appears.
 //

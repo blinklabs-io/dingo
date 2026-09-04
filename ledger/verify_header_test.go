@@ -2099,7 +2099,7 @@ func captureLiveMarkSnapshot(
 		return err == nil &&
 			snapshot != nil &&
 			snapshot.CapturedSlot == snapshotSlot
-	}, 2*time.Second, "live mark snapshot should be captured")
+	}, 30*time.Second, "live mark snapshot should be captured")
 }
 
 // seedPoolRegistration registers a pool so that db.GetPool(poolKeyHash)

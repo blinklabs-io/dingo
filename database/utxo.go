@@ -494,6 +494,32 @@ func (d *Database) UtxoByRef(
 	return utxo, nil
 }
 
+// UtxoExists reports whether a live UTxO is recorded for the reference, without
+// materializing its CBOR.
+//
+// UtxoByRef resolves the output's bytes from the blob store and, on a miss,
+// reconstructs them by decoding the producing block. A caller that only needs
+// to know whether the output is still there pays for all of that, and — worse —
+// turns a CBOR that cannot be recovered into a hard error about a UTxO that
+// demonstrably exists. Replay recovery asks exactly that question of every
+// referenced input of a failing transaction (see
+// LedgerState.findReplayRecoveryCandidate), so it uses this instead.
+func (d *Database) UtxoExists(
+	txId []byte,
+	outputIdx uint32,
+	txn *Txn,
+) (bool, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	utxo, err := d.utxoStore().GetUtxo(txId, outputIdx, txn.Metadata())
+	if err != nil {
+		return false, err
+	}
+	return utxo != nil, nil
+}
+
 // UtxosByRefs returns the live UTxOs matching the given references in a
 // single batch. Refs with no matching live UTxO are simply absent from the
 // result.
