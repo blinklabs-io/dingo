@@ -15,8 +15,14 @@
 package ouroboros
 
 import (
+	"io"
+	"log/slog"
+	"net"
+	"strconv"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/peergov"
+	opeersharing "github.com/blinklabs-io/gouroboros/protocol/peersharing"
 	"github.com/stretchr/testify/require"
 )
 
@@ -40,7 +46,7 @@ func TestPeerSharingConfigSetsLocalDisabledFromNodeConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			o := NewOuroboros(OuroborosConfig{
+			o := newOuroboros(OuroborosConfig{
 				PeerSharing: tt.peerSharing,
 			})
 
@@ -51,4 +57,139 @@ func TestPeerSharingConfigSetsLocalDisabledFromNodeConfig(t *testing.T) {
 			require.NotNil(t, cfg.ShareRequestFunc)
 		})
 	}
+}
+
+// TestPeerSharingShareRequestBoundsValidPeers verifies that malformed peers
+// are skipped without consuming the requested reply count and that every
+// returned peer has a valid IP address and port.
+func TestPeerSharingShareRequestBoundsValidPeers(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	peerGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+		Logger:          logger,
+		DisableOutbound: true,
+	})
+	// Unsharable peers must not appear in the response.
+	require.NoError(
+		t,
+		peerGov.AddPeer("10.0.0.1:3001", peergov.PeerSourceTopologyLocalRoot),
+	)
+	// Exercise every validation failure in the sharing adapter: an address
+	// without host:port structure, a split address whose host is not an IP,
+	// and a port outside the uint16 wire range.
+	require.NoError(t, peerGov.AddPeer("malformed", peergov.PeerSourceP2PGossip))
+	require.NoError(
+		t,
+		peerGov.AddPeer("[44.0.0.9%invalid]:3001", peergov.PeerSourceP2PGossip),
+	)
+	require.NoError(
+		t,
+		peerGov.AddPeer("44.0.0.9:70000", peergov.PeerSourceP2PGossip),
+	)
+	require.NoError(
+		t,
+		peerGov.AddPeer("44.0.0.1:3001", peergov.PeerSourceP2PGossip),
+	)
+	require.NoError(
+		t,
+		peerGov.AddPeer(
+			"[2001:4860:4860::8888]:3002",
+			peergov.PeerSourceP2PGossip,
+		),
+	)
+	require.NoError(
+		t,
+		peerGov.AddPeer("44.0.0.2:3003", peergov.PeerSourceP2PGossip),
+	)
+
+	o := newOuroboros(OuroborosConfig{Logger: logger})
+	o.peerGov = peerGov
+
+	tests := []struct {
+		name     string
+		amount   int
+		expected []string
+	}{
+		{name: "negative", amount: -1},
+		{name: "zero", amount: 0},
+		{name: "one", amount: 1, expected: []string{"44.0.0.1:3001"}},
+		{
+			name:   "exact available subset",
+			amount: 2,
+			expected: []string{
+				"44.0.0.1:3001",
+				"[2001:4860:4860::8888]:3002",
+			},
+		},
+		{
+			name:   "more than available",
+			amount: 10,
+			expected: []string{
+				"44.0.0.1:3001",
+				"[2001:4860:4860::8888]:3002",
+				"44.0.0.2:3003",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			peers, err := o.peersharingShareRequest(
+				opeersharing.CallbackContext{},
+				tt.amount,
+			)
+			require.NoError(t, err)
+			require.Len(t, peers, len(tt.expected))
+			for i, expected := range tt.expected {
+				host, port, err := net.SplitHostPort(expected)
+				require.NoError(t, err)
+				require.True(t, peers[i].IP.Equal(net.ParseIP(host)))
+				require.Equal(t, port, strconv.Itoa(int(peers[i].Port)))
+				_, err = peers[i].MarshalCBOR()
+				require.NoError(t, err, "every returned peer must serialize")
+			}
+		})
+	}
+}
+
+// TestPeerSharingConfigRegistersShareRequestFuncOnce verifies that
+// opeersharing.Config's single ShareRequestFunc slot is wired to the real
+// peer-sharing response handler regardless of internal wiring order:
+// invoking cfg.ShareRequestFunc against a populated peer governor must
+// return that governor's sharable peers, not an empty no-op result. This
+// guards against reintroducing a second WithShareRequestFunc registration
+// whose relative order would silently decide which callback answers
+// incoming ShareRequest messages.
+func TestPeerSharingConfigRegistersShareRequestFuncOnce(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	peerGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+		Logger:          logger,
+		DisableOutbound: true,
+	})
+	require.NoError(
+		t,
+		peerGov.AddPeer("44.0.0.1:3001", peergov.PeerSourceP2PGossip),
+	)
+
+	o := newOuroboros(OuroborosConfig{Logger: logger, PeerSharing: true})
+	o.peerGov = peerGov
+
+	cfg := o.peerSharingConfig()
+	require.NotNil(t, cfg.ShareRequestFunc)
+
+	peers, err := cfg.ShareRequestFunc(opeersharing.CallbackContext{}, 1)
+	require.NoError(t, err)
+	require.Len(t, peers, 1)
+	require.True(t, peers[0].IP.Equal(net.ParseIP("44.0.0.1")))
+}
+
+// TestPeerSharingShareRequestWithoutGovernor verifies that peer sharing is
+// safe during startup before the peer governor has been wired.
+func TestPeerSharingShareRequestWithoutGovernor(t *testing.T) {
+	o := newOuroboros(OuroborosConfig{})
+
+	peers, err := o.peersharingShareRequest(
+		opeersharing.CallbackContext{},
+		1,
+	)
+	require.NoError(t, err)
+	require.Empty(t, peers)
 }

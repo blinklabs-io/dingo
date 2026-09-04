@@ -50,16 +50,34 @@ const (
 	// application from uncorroborated peers is separately gated via
 	// ShouldApplyIngress; this event is for observability of the stall.
 	ChainSelectedNoneEventType event.EventType = "chainselection.selected_none"
+
+	// PeerRollbackHandlerPanicEventType is published when the
+	// PeerRollbackEvent handler registered in NewChainSelector panics. The
+	// EventBus subscription that delivers PeerRollbackEvent is torn down
+	// immediately afterward (see event.EventBus.SubscribeFuncStrict), so
+	// this is the durable signal that rollback handling for this selector
+	// has stopped rather than a swallowed panic followed by business as
+	// usual.
+	PeerRollbackHandlerPanicEventType event.EventType = "chainselection.peer_rollback_handler_panic"
+
+	// EvaluationPanicEventType is published when a background evaluation
+	// tick or triggered evaluation panics. The evaluation loop itself keeps
+	// running (see ChainSelector.recoverEvaluationPanic), but the specific
+	// best-peer transition that evaluation would have produced is dropped;
+	// this event is the only remaining signal that it happened.
+	EvaluationPanicEventType event.EventType = "chainselection.evaluation_panic"
 )
 
 // PeerTipUpdateEvent is published when a peer's chain tip is updated via
 // chainsync roll forward.
 type PeerTipUpdateEvent struct {
 	ConnectionId ouroboros.ConnectionId
-	Tip          ochainsync.Tip
-	ObservedTip  ochainsync.Tip
-	VRFOutput    []byte // VRF output from observed block header for tie-breaking
-	PraosView    PraosTiebreakerView
+	// Tip is the untrusted remote advertised tip.
+	Tip ochainsync.Tip
+	// ObservedTip is the header frontier actually delivered by the peer.
+	ObservedTip ochainsync.Tip
+	VRFOutput   []byte // VRF output from observed block header for tie-breaking
+	PraosView   PraosTiebreakerView
 }
 
 // PeerActivityEvent is published when a peer has recent protocol activity
@@ -84,8 +102,15 @@ type PeerRollbackEvent struct {
 // Fields:
 //   - PreviousConnectionId: The connection ID of the peer we were following.
 //   - NewConnectionId: The connection ID of the peer we are now following.
-//   - NewTip: The chain tip of the new peer.
-//   - PreviousTip: The chain tip of the previous peer at the time of the switch.
+//   - NewTip: The advertised chain tip of the new peer.
+//   - PreviousTip: The advertised chain tip of the previous peer at switch time.
+//   - NewObservedTip: The delivered frontier of the new peer. A zero value
+//     means the peer delivered nothing, which is distinct from absent.
+//   - NewObservedTipSet: Whether NewObservedTip was populated. Producers in
+//     this package always set it. Events built elsewhere (older producers,
+//     direct unit-test and integration constructors) leave it false, and only
+//     those fall back to the advertised NewTip.
+//   - PreviousObservedTip: The delivered frontier of the previous peer.
 //   - ComparisonResult: Why the new chain is better than the previous chain.
 //   - BlockDifference: NewTip.BlockNumber - PreviousTip.BlockNumber.
 type ChainSwitchEvent struct {
@@ -93,6 +118,9 @@ type ChainSwitchEvent struct {
 	NewConnectionId      ouroboros.ConnectionId
 	NewTip               ochainsync.Tip
 	PreviousTip          ochainsync.Tip
+	NewObservedTip       ochainsync.Tip
+	NewObservedTipSet    bool
+	PreviousObservedTip  ochainsync.Tip
 	ComparisonResult     ChainComparisonResult
 	BlockDifference      int64
 }
@@ -153,4 +181,28 @@ type GenesisModeExitedEvent struct {
 	LocalSlot          uint64
 	BestKnownSlot      uint64
 	GenesisWindowSlots uint64
+}
+
+// PeerRollbackHandlerPanicEvent is published when HandlePeerRollbackEvent
+// panics. Panic carries the recovered panic value for diagnostics.
+type PeerRollbackHandlerPanicEvent struct {
+	Panic any
+}
+
+// EvaluationPanicEvent is published when a background evaluation tick or
+// triggered evaluation panics.
+//
+// Fields:
+//   - Panic: the recovered panic value, for diagnostics.
+//   - Triggered: true when the panic occurred in runTriggeredEvaluation (the
+//     evaluationLoop select case draining evaluationTrigger, fed by
+//     SetConnectionEligible/SetConnectionPriority's triggerEvaluation calls);
+//     false for the periodic ticker tick (runEvaluationTick), which also
+//     runs cleanupStalePeers first. Panics from EvaluateAndSwitch called
+//     directly outside evaluationLoop (e.g. from UpdatePeerTip, RemovePeer,
+//     SetLocalTip, or an event handler) are not covered by this event --
+//     only the two evaluationLoop paths recover and surface panics here.
+type EvaluationPanicEvent struct {
+	Panic     any
+	Triggered bool
 }

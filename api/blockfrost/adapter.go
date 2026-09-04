@@ -54,24 +54,85 @@ import (
 )
 
 var (
-	ErrInvalidAddress      = errors.New("invalid address")
-	ErrAddressNotFound     = errors.New("address not found")
-	ErrInvalidBlockID      = errors.New("invalid block id")
-	ErrBlockNotFound       = errors.New("block not found")
-	ErrEpochNotFound       = errors.New("epoch not found")
-	ErrAssetNotFound       = errors.New("asset not found")
-	ErrDRepNotFound        = errors.New("drep not found")
-	ErrInvalidTransaction  = errors.New("invalid transaction")
+	ErrInvalidAddress     = errors.New("invalid address")
+	ErrAddressNotFound    = errors.New("address not found")
+	ErrInvalidBlockID     = errors.New("invalid block id")
+	ErrBlockNotFound      = errors.New("block not found")
+	ErrEpochNotFound      = errors.New("epoch not found")
+	ErrAssetNotFound      = errors.New("asset not found")
+	ErrDRepNotFound       = errors.New("drep not found")
+	ErrInvalidTransaction = errors.New("invalid transaction")
+	// ErrTransactionRejected reports a well-formed transaction the mempool
+	// declined, e.g. failing script validation or an unresolvable input. It
+	// is distinct from ErrInvalidTransaction so submission does not report a
+	// decodable transaction as malformed CBOR.
+	ErrTransactionRejected = errors.New("transaction rejected")
+	// ErrTransactionEvaluation reports a transaction that decoded cleanly but
+	// could not be evaluated, e.g. an input the ledger cannot resolve or a
+	// script that fails. It is deliberately distinct from
+	// ErrInvalidTransaction so the evaluation endpoints do not report a
+	// well-formed transaction as malformed CBOR.
+	ErrTransactionEvaluation = errors.New("transaction evaluation failed")
+	// ErrLedgerUnavailable reports a submission or evaluation that failed
+	// because the node's own storage could not answer, not because the
+	// transaction was at fault. It is the ledger-side counterpart of
+	// ErrMempoolUnavailable: both name a node condition the caller can
+	// retry rather than a transaction it must fix.
+	ErrLedgerUnavailable   = errors.New("ledger state unavailable")
 	ErrInvalidPoolID       = errors.New("invalid pool id")
 	ErrMempoolUnavailable  = errors.New("mempool unavailable")
 	ErrMempoolFull         = errors.New("mempool full")
 	ErrTransactionNotFound = errors.New("transaction not found")
 	ErrInvalidStakeAddress = errors.New("invalid stake address")
+	// ErrProtocolParamsUnavailable reports that no protocol parameters exist
+	// for the requested point. Byron carries no protocol-parameter CBOR, so a
+	// genuine Byron prefix reaches this during a from-genesis sync; it is an
+	// expected state rather than a node fault, and callers must not
+	// substitute Shelley-shaped defaults for it.
+	ErrProtocolParamsUnavailable = errors.New(
+		"protocol parameters not available",
+	)
 )
+
+// drepInactivityFromPParams reads the Conway-era drep_activity parameter from
+// pparams. The second return reports whether the era defines the parameter at
+// all, which a bare uint64 cannot express: a chain that genuinely configured
+// drep_activity to 0 and an era with no DRep semantics are different facts.
+func drepInactivityFromPParams(
+	pparams lcommon.ProtocolParameters,
+) (uint64, bool) {
+	// Dijkstra embeds ConwayProtocolParameters, but a type switch matches
+	// concrete types, so *Dijkstra never falls into the *Conway case and each
+	// era needs its own arm.
+	switch pp := pparams.(type) {
+	case *dijkstra.DijkstraProtocolParameters:
+		return pp.DRepInactivityPeriod, true
+	case *conway.ConwayProtocolParameters:
+		return pp.DRepInactivityPeriod, true
+	default:
+		// Byron has no protocol parameters at all, and every era before
+		// Conway has parameters but no DRep semantics. Neither can report a
+		// drep_activity value, and neither may borrow one.
+		return 0, false
+	}
+}
 
 // TransactionSubmitter accepts raw transaction CBOR for mempool admission.
 type TransactionSubmitter interface {
 	AddTransaction(txType uint, txBytes []byte) error
+}
+
+// transactionEvaluator evaluates a decoded transaction's scripts against the
+// ledger. It mirrors TransactionSubmitter on the submission path: the
+// evaluation endpoints depend only on this call, so how an evaluation failure
+// is classified can be exercised without a live ledger.
+type transactionEvaluator interface {
+	EvaluateTx(tx lcommon.Transaction) (
+		uint64,
+		lcommon.ExUnits,
+		map[lcommon.RedeemerKey]lcommon.ExUnits,
+		error,
+	)
 }
 
 // NodeAdapter wraps a real dingo Node's LedgerState to
@@ -79,6 +140,7 @@ type TransactionSubmitter interface {
 type NodeAdapter struct {
 	ledgerState *ledger.LedgerState
 	submitter   TransactionSubmitter
+	evaluator   transactionEvaluator
 }
 
 // NewNodeAdapter creates a NodeAdapter that queries the
@@ -95,6 +157,7 @@ func NewNodeAdapter(
 	return &NodeAdapter{
 		ledgerState: ls,
 		submitter:   submitter,
+		evaluator:   ls,
 	}, nil
 }
 
@@ -605,9 +668,10 @@ func (a *NodeAdapter) CurrentProtocolParams() (
 ) {
 	pparams := a.ledgerState.GetCurrentPParams()
 	if pparams == nil {
-		return ProtocolParamsInfo{}, errors.New(
-			"protocol parameters not available",
-		)
+		// A Byron prefix has no protocol-parameter CBOR to report. Surface
+		// the sentinel so the handler can answer "not found" rather than
+		// reporting a node fault for an expected stage of a genesis sync.
+		return ProtocolParamsInfo{}, ErrProtocolParamsUnavailable
 	}
 	info, err := protocolParamsInfoFromNative(
 		pparams,
@@ -674,10 +738,27 @@ func (a *NodeAdapter) EpochProtocolParams(
 		)
 	}
 	if len(pparamRows) == 0 {
+		// The epoch row resolved above, so the epoch itself exists; only
+		// its parameters do not. Byron is the era where that is the norm
+		// rather than a gap, and it stays reachable long after a sync
+		// completes via GET /epochs/0/parameters. Reporting "epoch not
+		// found" would tell the caller something false about what the node
+		// holds.
 		return ProtocolParamsInfo{}, fmt.Errorf(
 			"get protocol parameters for epoch %d: %w",
 			epoch,
-			ErrEpochNotFound,
+			ErrProtocolParamsUnavailable,
+		)
+	}
+	if era.DecodePParamsFunc == nil {
+		// ByronEraDesc defines no decoder because the era has no parameter
+		// CBOR to decode. Unreachable while the empty-rows check above
+		// runs first, but the nil call would panic if that ever reordered.
+		return ProtocolParamsInfo{}, fmt.Errorf(
+			"get protocol parameters for epoch %d: era %d: %w",
+			epoch,
+			era.Id,
+			ErrProtocolParamsUnavailable,
 		)
 	}
 	pparamRow := pparamRows[0]
@@ -977,6 +1058,15 @@ func (a *NodeAdapter) Asset(
 			return AssetInfo{}, err
 		}
 	}
+	// The CIP-26 off-chain registry is independent of the mint transaction,
+	// so this runs whether or not the asset has on-chain metadata.
+	if err := a.populateAssetRegistryMetadata(
+		&info,
+		policyID,
+		assetName,
+	); err != nil {
+		return AssetInfo{}, err
+	}
 	return info, nil
 }
 
@@ -1200,17 +1290,13 @@ func (a *NodeAdapter) predefinedDRep(
 }
 
 // drepInactivityPeriod returns the Conway-era drep_activity protocol
-// parameter (epochs of inactivity before a DRep expires), or 0 when it
-// is unavailable.
-func (a *NodeAdapter) drepInactivityPeriod() uint64 {
-	switch pp := a.ledgerState.GetCurrentPParams().(type) {
-	case *conway.ConwayProtocolParameters:
-		return pp.DRepInactivityPeriod
-	case *dijkstra.DijkstraProtocolParameters:
-		return pp.DRepInactivityPeriod
-	default:
-		return 0
-	}
+// parameter (epochs of inactivity before a DRep expires) from the current
+// ledger state. The second return reports whether a value was available; see
+// drepInactivityFromPParams.
+func (a *NodeAdapter) drepInactivityPeriod() (uint64, bool) {
+	return drepInactivityFromPParams(
+		a.ledgerState.GetCurrentPParams(),
+	)
 }
 
 // drepStatus derives the Blockfrost retirement/expiry view of a DRep
@@ -1224,17 +1310,31 @@ func drepStatus(
 	registrationEpoch uint64,
 	currentEpoch uint64,
 	inactivityPeriod uint64,
+	inactivityKnown bool,
 ) (retired bool, expired bool, lastActive uint64) {
 	retired = !active
 	lastActive = lastActivityEpoch
 	if lastActive == 0 {
 		lastActive = registrationEpoch
 	}
+	// Track whether an expiry is known separately from its value. A derived
+	// expiry of 0 is legitimate — drep_activity 0 on a DRep that last acted
+	// in epoch 0 — so testing the number for zero would read a real expiry as
+	// "none known" and report that DRep active forever.
+	//
+	// A stored expiry_epoch of 0 still means "not recorded": the column has
+	// no null, and that convention predates this function.
 	expiry := expiryEpoch
-	if expiry == 0 && inactivityPeriod > 0 {
+	expiryKnown := expiry > 0
+	// Derive an expiry only when the era actually reports drep_activity.
+	// Gating on "inactivityPeriod > 0" instead would conflate an era with no
+	// DRep semantics against a chain that set drep_activity to 0, where a
+	// DRep expires the epoch it last acted.
+	if !expiryKnown && inactivityKnown {
 		expiry = lastActive + inactivityPeriod
+		expiryKnown = true
 	}
-	expired = !retired && expiry > 0 && expiry <= currentEpoch
+	expired = !retired && expiryKnown && expiry <= currentEpoch
 	return retired, expired, lastActive
 }
 
@@ -1301,13 +1401,15 @@ func (a *NodeAdapter) drepByCredentialTag(
 		)
 	}
 
+	inactivityPeriod, inactivityKnown := a.drepInactivityPeriod()
 	retired, expired, lastActive := drepStatus(
 		drep.Active,
 		drep.LastActivityEpoch,
 		drep.ExpiryEpoch,
 		registrationEpoch.EpochId,
 		a.ledgerState.CurrentEpoch(),
-		a.drepInactivityPeriod(),
+		inactivityPeriod,
+		inactivityKnown,
 	)
 
 	// Echo the identifier form the caller used: CIP-129 inputs carry
@@ -1395,7 +1497,7 @@ func (a *NodeAdapter) DReps(
 	}
 
 	currentEpoch := a.ledgerState.CurrentEpoch()
-	inactivity := a.drepInactivityPeriod()
+	inactivity, inactivityKnown := a.drepInactivityPeriod()
 
 	type entry struct {
 		predefined *uint64
@@ -1427,6 +1529,7 @@ func (a *NodeAdapter) DReps(
 			epochForSlot(regSlot),
 			currentEpoch,
 			inactivity,
+			inactivityKnown,
 		)
 		entries = append(entries, entry{
 			credential: drep.Credential,
@@ -3235,10 +3338,24 @@ func (a *NodeAdapter) AddressUTXOs(
 	if err != nil {
 		return nil, 0, err
 	}
-	utxos, err := a.ledgerState.UtxosByAddressWithOrdering(
+	// Shared between the reference scan and the page fetch below so the
+	// total and the returned page describe the same snapshot: two
+	// separate (nil-txn) calls could otherwise straddle a concurrent
+	// commit and return a page inconsistent with the reported total.
+	txn := a.ledgerState.Database().Transaction(false)
+	defer txn.Release()
+
+	// Exact-address matching requires decoding output CBOR (see
+	// models.RequiresExactAddressFilter), so getting an accurate total
+	// requires visiting every coarse candidate either way. Fetch only
+	// references (no assets, no full rows) for that pass, and materialize
+	// full UTxO data via UtxosByRefs for just the requested page, instead
+	// of loading the address's entire UTxO history in full.
+	refs, err := a.ledgerState.Database().MatchingUtxoRefsByAddressWithOrdering(
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{pattern},
 		},
+		txn,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
@@ -3247,14 +3364,29 @@ func (a *NodeAdapter) AddressUTXOs(
 			err,
 		)
 	}
-	total := len(utxos)
+	total := len(refs)
+	start, end := paginationRange(total, params)
+	var pageRefs []models.UtxoId
 	if params.Order == PaginationOrderDesc {
-		for left, right := 0, len(utxos)-1; left < right; left, right = left+1, right-1 {
-			utxos[left], utxos[right] = utxos[right], utxos[left]
-		}
+		// Page N in descending order is ascending index range
+		// [total-end, total-start), reversed.
+		pageRefs = append(
+			[]models.UtxoId(nil),
+			refs[total-end:total-start]...,
+		)
+		slices.Reverse(pageRefs)
+	} else {
+		pageRefs = refs[start:end]
 	}
 
-	paged := paginateUtxos(utxos, params)
+	paged, err := a.orderedUtxosByRefs(pageRefs, txn)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"get address UTxOs for %q: %w",
+			address,
+			err,
+		)
+	}
 	txBlockHashes, err := a.addressUtxoBlockHashes(paged)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
@@ -3301,6 +3433,50 @@ func (a *NodeAdapter) AddressUTXOs(
 		})
 	}
 	return ret, total, nil
+}
+
+// orderedUtxosByRefs fetches full UTxO rows (including assets) for refs in
+// a single batch, within txn (pass the same transaction the caller
+// resolved refs from, so this reads the identical snapshot rather than a
+// later one that may have since spent one of them), and returns them in
+// refs' order. A ref whose UTxO was spent before txn's snapshot was taken
+// is simply omitted, the same "missing entries degrade" tolerance the
+// rest of this file applies to concurrently-changing chain state. The
+// returned ordering metadata (TxSlot, TxBlockIndex) is left zero-valued:
+// callers of this helper only need it for its embedded Utxo fields, which
+// UtxosByRefs already populates in full.
+func (a *NodeAdapter) orderedUtxosByRefs(
+	refs []models.UtxoId,
+	txn *database.Txn,
+) ([]models.UtxoWithOrdering, error) {
+	if len(refs) == 0 {
+		return []models.UtxoWithOrdering{}, nil
+	}
+	utxos, err := a.ledgerState.Database().UtxosByRefs(refs, txn)
+	if err != nil {
+		return nil, err
+	}
+	byRef := make(map[database.UtxoRef]models.Utxo, len(utxos))
+	for _, utxo := range utxos {
+		byRef[utxoRef(utxo)] = utxo
+	}
+	ret := make([]models.UtxoWithOrdering, 0, len(refs))
+	for _, ref := range refs {
+		utxo, ok := byRef[utxoIdRef(ref)]
+		if !ok {
+			continue
+		}
+		ret = append(ret, models.UtxoWithOrdering{Utxo: utxo})
+	}
+	return ret, nil
+}
+
+// utxoIdRef converts a models.UtxoId to the database.UtxoRef key shape
+// utxoRef uses, so results keyed by one can be looked up by the other.
+func utxoIdRef(id models.UtxoId) database.UtxoRef {
+	var txID [32]byte
+	copy(txID[:], id.Hash)
+	return database.UtxoRef{TxId: txID, OutputIdx: id.Idx}
 }
 
 // addressUtxoCbor resolves the raw output CBOR for the given UTxOs in a single
@@ -3606,6 +3782,46 @@ func (a *NodeAdapter) Transaction(
 	}, nil
 }
 
+// TransactionRejectedError reports a transaction the mempool judged and
+// declined, carrying the reason as a separate error rather than only inside
+// the message text. Handlers read Cause to report why the transaction was
+// rejected instead of recovering it from the formatted message, which only
+// works while the sentinel is the outermost prefix.
+type TransactionRejectedError struct {
+	Cause error
+}
+
+func (e *TransactionRejectedError) Error() string {
+	if e.Cause == nil {
+		return ErrTransactionRejected.Error()
+	}
+	return ErrTransactionRejected.Error() + ": " + e.Cause.Error()
+}
+
+// Unwrap exposes the sentinel and the cause together, so errors.Is matches
+// both ErrTransactionRejected and whatever the mempool returned.
+func (e *TransactionRejectedError) Unwrap() []error {
+	if e.Cause == nil {
+		return []error{ErrTransactionRejected}
+	}
+	return []error{ErrTransactionRejected, e.Cause}
+}
+
+// isLedgerStorageFailure reports whether err came from the node's own storage
+// rather than from the transaction being judged. Ledger validation and
+// evaluation resolve inputs through the database, so a storage fault returns
+// on the same path as a rule violation and would otherwise be reported to the
+// caller as a transaction it must fix.
+//
+// Only the sentinels the database layer raises for its own faults are listed.
+// The rule violations are an open, per-era set of gouroboros types with no
+// shared marker, so the complement cannot be enumerated instead, and an
+// unrecognized error stays a rejection.
+func isLedgerStorageFailure(err error) bool {
+	return errors.Is(err, dbtypes.ErrBlobStoreUnavailable) ||
+		errors.Is(err, database.ErrUtxoCborUnavailable)
+}
+
 // TransactionSubmit submits raw signed transaction CBOR to the mempool.
 func (a *NodeAdapter) TransactionSubmit(
 	txCbor []byte,
@@ -3637,13 +3853,95 @@ func (a *NodeAdapter) TransactionSubmit(
 				ErrMempoolFull,
 			)
 		}
-		return "", fmt.Errorf(
-			"submit transaction to mempool: %w: %w",
-			err,
-			ErrInvalidTransaction,
-		)
+		// A stopped mempool and a missing validator are both "the mempool
+		// cannot accept anything right now", the same condition the nil
+		// submitter above reports, so they answer 503 rather than telling the
+		// client its transaction was rejected. Everything remaining from
+		// AddTransaction is a real admission failure -- a validity interval
+		// that has not started, or ledger validation -- and stays a rejection.
+		if errors.Is(err, mempool.ErrMempoolStopped) ||
+			errors.Is(err, mempool.ErrNilValidator) {
+			return "", fmt.Errorf(
+				"%w: %w",
+				ErrMempoolUnavailable,
+				err,
+			)
+		}
+		// Admission runs ledger validation, which reads the UTxO set from
+		// storage. A storage fault there is a node condition rather than a
+		// verdict on the transaction, so it must not be reported as a
+		// rejection either.
+		if isLedgerStorageFailure(err) {
+			return "", fmt.Errorf(
+				"%w: %w",
+				ErrLedgerUnavailable,
+				err,
+			)
+		}
+		return "", &TransactionRejectedError{Cause: err}
 	}
 	return tx.Hash().String(), nil
+}
+
+// TransactionEvaluate evaluates script execution units for raw transaction
+// CBOR without submitting the transaction.
+func (a *NodeAdapter) TransactionEvaluate(
+	txCbor []byte,
+) (TransactionEvaluationResponse, error) {
+	txType, err := gledger.DetermineTransactionType(txCbor)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%w: determine transaction type: %w",
+			ErrInvalidTransaction,
+			err,
+		)
+	}
+	tx, err := gledger.NewTransactionFromCbor(txType, txCbor)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%w: decode transaction: %w",
+			ErrInvalidTransaction,
+			err,
+		)
+	}
+	if a.evaluator == nil {
+		return nil, ErrLedgerUnavailable
+	}
+	_, _, redeemerExUnits, err := a.evaluator.EvaluateTx(tx)
+	if err != nil {
+		// Evaluation resolves the transaction's inputs from storage, so the
+		// same return carries both "this transaction cannot be evaluated"
+		// and "this node cannot read its own UTxO set". Only the former is
+		// the caller's to fix.
+		if isLedgerStorageFailure(err) {
+			return nil, fmt.Errorf(
+				"%w: %w",
+				ErrLedgerUnavailable,
+				err,
+			)
+		}
+		return nil, fmt.Errorf(
+			"%w: %w",
+			ErrTransactionEvaluation,
+			err,
+		)
+	}
+	result := make(TransactionEvaluationResponse, len(redeemerExUnits))
+	for key, exUnits := range redeemerExUnits {
+		purpose := redeemerPurpose(key.Tag)
+		if purpose == "" {
+			return nil, fmt.Errorf(
+				"%w: unsupported redeemer tag %d",
+				ErrTransactionEvaluation,
+				key.Tag,
+			)
+		}
+		result[fmt.Sprintf("%s:%d", purpose, key.Index)] = ExecutionUnitsResponse{
+			Memory: uint64(exUnits.Memory), // nolint:gosec
+			Steps:  uint64(exUnits.Steps),  // nolint:gosec
+		}
+	}
+	return result, nil
 }
 
 // TransactionCBOR returns raw signed transaction CBOR bytes for the requested
@@ -4984,7 +5282,7 @@ func (a *NodeAdapter) protocolParamsForSlot(
 	if epoch == nil {
 		pparams := a.ledgerState.GetCurrentPParams()
 		if pparams == nil {
-			return nil, errors.New("protocol parameters not available")
+			return nil, ErrProtocolParamsUnavailable
 		}
 		return pparams, nil
 	}
@@ -5002,7 +5300,17 @@ func (a *NodeAdapter) protocolParamsForSlot(
 		return nil, err
 	}
 	if pparams == nil {
-		return nil, errors.New("decoded protocol parameters are nil")
+		// GetPParams reports (nil, nil) when the era recorded no
+		// protocol-parameter row. Byron is the era that does so by
+		// construction — it has no parameter CBOR and no decoder — so this
+		// carries the same sentinel as the no-epoch-row branch rather than
+		// an untyped error a caller cannot distinguish.
+		return nil, fmt.Errorf(
+			"epoch %d era %d: %w",
+			epoch.EpochId,
+			era.Id,
+			ErrProtocolParamsUnavailable,
+		)
 	}
 	return pparams, nil
 }
@@ -5056,17 +5364,6 @@ func bigIntString(v *big.Int) string {
 		return "0"
 	}
 	return v.String()
-}
-
-func paginateUtxos(
-	utxos []models.UtxoWithOrdering,
-	params PaginationParams,
-) []models.UtxoWithOrdering {
-	start, end := paginationRange(len(utxos), params)
-	if start >= end {
-		return []models.UtxoWithOrdering{}
-	}
-	return utxos[start:end]
 }
 
 func paginationRange(

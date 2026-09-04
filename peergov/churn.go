@@ -109,12 +109,18 @@ func (p *PeerGovernor) gossipChurn() {
 					peer.Connection.Id,
 				)
 				if conn != nil {
-					conn.Close()
+					closeConnAndLog(
+						p.config.Logger,
+						conn,
+						"gossip churn: error closing connection for demoted peer",
+						"address",
+						peer.Address,
+					)
 				}
 			}
 			peer.Connection = nil
 			p.config.Logger.Debug(
-				"gossip churn: closed connection for demoted peer",
+				"gossip churn: cleared connection for demoted peer",
 				"address", peer.Address,
 			)
 		}

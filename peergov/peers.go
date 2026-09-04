@@ -287,8 +287,8 @@ func (p *PeerGovernor) resolveAddress(address string) string {
 
 // resolveLedgerDiscoveryAddress resolves a ledger relay hostname at initial
 // discovery time, filtering the resolved records to the locally-supported
-// address families before picking one. This function performs blocking DNS
-// lookups and must NOT be called while holding locks.
+// address families before picking one. The lookup is bounded and honors ctx;
+// this function must NOT be called while holding locks.
 //
 // It is ledger-specific rather than a change to resolveAddress (shared by
 // every peer source — topology, gossip, inbound, TestPeer/DenyPeer lookups)
@@ -304,7 +304,10 @@ func (p *PeerGovernor) resolveAddress(address string) string {
 // unchanged, and a resolution failure or empty result falls back to the
 // lowercased hostname so the peer is still added (with routability decided
 // downstream) rather than dropped.
-func (p *PeerGovernor) resolveLedgerDiscoveryAddress(address string) string {
+func (p *PeerGovernor) resolveLedgerDiscoveryAddress(
+	ctx context.Context,
+	address string,
+) string {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
 		return strings.ToLower(address)
@@ -315,20 +318,89 @@ func (p *PeerGovernor) resolveLedgerDiscoveryAddress(address string) string {
 		return net.JoinHostPort(ip.String(), port)
 	}
 
-	ips, err := lookupIP(host)
+	lowerHost := strings.ToLower(host)
+	// A hostname that just failed to resolve is not retried until its
+	// negative-cache entry expires. Discovery re-offers the whole relay set
+	// every round, so without this a dead hostname costs a lookup (and, for
+	// a timing-out resolver, dialDNSResolveTimeout of the discovery loop) on
+	// every round for as long as the pool keeps publishing it.
+	if p.negativeDNSCached(lowerHost) {
+		return net.JoinHostPort(lowerHost, port)
+	}
+
+	lookupCtx, cancel := context.WithTimeout(ctx, dialDNSResolveTimeout)
+	defer cancel()
+	ips, err := lookupIPAddr(lookupCtx, host)
 	if err != nil || len(ips) == 0 {
-		p.config.Logger.Warn(
+		// Debug, not Warn: a pool publishing a dead relay hostname is a fact
+		// about the chain, not a fault in this node, and there is no
+		// operator action it implies.
+		p.config.Logger.Debug(
 			"failed to resolve ledger relay hostname",
 			"address", address,
 			"host", host,
 			"error", err,
 		)
-		return net.JoinHostPort(strings.ToLower(host), port)
+		// A cancellation from the caller's context says nothing about the
+		// hostname, only about this node's shutdown, so it must not poison
+		// the cache. A lookup that hit dialDNSResolveTimeout is a real
+		// resolution failure and is cached like any other.
+		if ctx.Err() == nil {
+			p.recordNegativeDNS(lowerHost)
+		}
+		return net.JoinHostPort(lowerHost, port)
 	}
 
 	hasV4, hasV6 := p.supportedDialFamilies()
 	ips = filterDialFamilies(ips, hasV4, hasV6)
 	return net.JoinHostPort(ips[0].String(), port)
+}
+
+// negativeDNSCached reports whether host has an unexpired negative-cache
+// entry, deleting the entry when it has expired. Deleting on read is what
+// lets a hostname that starts resolving again recover: the next lookup runs
+// for real, and a success simply writes nothing back.
+func (p *PeerGovernor) negativeDNSCached(host string) bool {
+	p.negativeDNSMu.Lock()
+	defer p.negativeDNSMu.Unlock()
+	expiry, ok := p.negativeDNS[host]
+	if !ok {
+		return false
+	}
+	if time.Now().Before(expiry) {
+		return true
+	}
+	delete(p.negativeDNS, host)
+	return false
+}
+
+// recordNegativeDNS caches a resolution failure for host. The cache is
+// bounded: expired entries are swept first, and if that does not free a slot
+// the entry closest to expiry is evicted, so untrusted on-chain relay
+// hostnames cannot grow the map without limit.
+func (p *PeerGovernor) recordNegativeDNS(host string) {
+	now := time.Now()
+	p.negativeDNSMu.Lock()
+	defer p.negativeDNSMu.Unlock()
+	if _, ok := p.negativeDNS[host]; !ok &&
+		len(p.negativeDNS) >= negativeDNSCacheMaxEntries {
+		for cached, expiry := range p.negativeDNS {
+			if !now.Before(expiry) {
+				delete(p.negativeDNS, cached)
+			}
+		}
+		if len(p.negativeDNS) >= negativeDNSCacheMaxEntries {
+			var oldestHost string
+			var oldestExpiry time.Time
+			for cached, expiry := range p.negativeDNS {
+				if oldestHost == "" || expiry.Before(oldestExpiry) {
+					oldestHost, oldestExpiry = cached, expiry
+				}
+			}
+			delete(p.negativeDNS, oldestHost)
+		}
+	}
+	p.negativeDNS[host] = now.Add(negativeDNSCacheTTL)
 }
 
 // resolveDialAddress returns the concrete transport target to dial for an

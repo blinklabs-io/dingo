@@ -15,9 +15,14 @@
 package chainselection
 
 import (
+	"bytes"
+	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"math"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,6 +33,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 func newTestConnectionId(n int) ouroboros.ConnectionId {
@@ -1803,6 +1809,150 @@ func TestUpdatePeerTipAcceptsDuringCatchUp(t *testing.T) {
 	)
 }
 
+func TestUpdatePeerTipAcceptsNextObservedBlockWhenAdvertisedTipIsFarAhead(
+	t *testing.T,
+) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 432, // preview k
+	})
+
+	localTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 118000000, Hash: []byte("local")},
+		BlockNumber: 4588334,
+	}
+	cs.SetLocalTip(localTip)
+
+	connId := newTestConnectionId(1)
+	staleAdvertisedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 110000000, Hash: []byte("stale")},
+		BlockNumber: 4260191,
+	}
+	require.True(t, cs.updatePeerTipObserved(
+		connId,
+		staleAdvertisedTip,
+		localTip,
+		nil,
+	))
+
+	advertisedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 118010000, Hash: []byte("network")},
+		BlockNumber: 4589660,
+	}
+	nextObservedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 118000020, Hash: []byte("next")},
+		BlockNumber: localTip.BlockNumber + 1,
+	}
+
+	require.True(
+		t,
+		cs.updatePeerTipObserved(
+			connId,
+			advertisedTip,
+			nextObservedTip,
+			nil,
+		),
+		"the next delivered block must not be rejected because the network tip is far ahead",
+	)
+	peerTip := cs.GetPeerTip(connId)
+	require.NotNil(t, peerTip)
+	assert.Equal(t, advertisedTip, peerTip.Tip)
+	assert.Equal(t, nextObservedTip, peerTip.ObservedTip)
+}
+
+func TestAdvertisedTipOutlierDoesNotSuppressObservedFrontier(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 10,
+	})
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 1000, Hash: []byte("local")},
+		BlockNumber: 1000,
+	})
+
+	outlierConn := newTestConnectionId(1)
+	require.True(t, cs.updatePeerTipObserved(
+		outlierConn,
+		ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: math.MaxUint64,
+				Hash: []byte("advertised-outlier"),
+			},
+			BlockNumber: math.MaxUint64,
+		},
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 1001, Hash: []byte("observed-1")},
+			BlockNumber: 1001,
+		},
+		nil,
+	))
+
+	honestConn := newTestConnectionId(2)
+	require.True(t, cs.updatePeerTipObserved(
+		honestConn,
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 1004, Hash: []byte("honest")},
+			BlockNumber: 1004,
+		},
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 1004, Hash: []byte("honest")},
+			BlockNumber: 1004,
+		},
+		nil,
+	))
+
+	bestPeer := cs.GetBestPeer()
+	require.NotNil(t, bestPeer)
+	assert.Equal(
+		t,
+		honestConn,
+		*bestPeer,
+		"an advertised outlier must not make a better delivered frontier unselectable",
+	)
+}
+
+func TestChainSwitchEventIncludesObservedFrontier(t *testing.T) {
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus:      eventBus,
+		SecurityParam: 10,
+	})
+	_, eventCh := eventBus.Subscribe(ChainSwitchEventType)
+
+	advertisedTip := ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: math.MaxUint64,
+			Hash: []byte("advertised-outlier"),
+		},
+		BlockNumber: math.MaxUint64,
+	}
+	observedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 1001, Hash: []byte("observed")},
+		BlockNumber: 1001,
+	}
+	require.True(t, cs.updatePeerTipObserved(
+		newTestConnectionId(1),
+		advertisedTip,
+		observedTip,
+		nil,
+	))
+
+	evt := testutil.RequireReceive(
+		t,
+		eventCh,
+		2*time.Second,
+		"chain switch event",
+	)
+	switchEvent, ok := evt.Data.(ChainSwitchEvent)
+	require.True(t, ok)
+	assert.Equal(t, advertisedTip, switchEvent.NewTip)
+	assert.Equal(t, observedTip, switchEvent.NewObservedTip)
+	assert.True(
+		t,
+		switchEvent.NewObservedTipSet,
+		"producers in this package always mark the frontier as present",
+	)
+}
+
 func TestUpdatePeerTipRejectsKnownPeerJumpFromZero(t *testing.T) {
 	// A known peer whose previous tip was at block 0 must still be
 	// checked. Without this, a malicious peer could send tip=0 first,
@@ -2305,4 +2455,301 @@ func TestSelectBestChainAllowsPlausiblyBehindPeer(t *testing.T) {
 	bestPeer := cs.SelectBestChain()
 	require.NotNil(t, bestPeer)
 	assert.Equal(t, behindConn, *bestPeer)
+}
+
+// TestOmittedObservedFrontierIsNotPromotedToAdvertisedTip asserts that a peer
+// tip update carrying no delivered frontier is recorded as having delivered
+// nothing, rather than being credited with its untrusted advertised tip. The
+// accompanying Praos view describes the absent delivered header, so promoting
+// the advertised tip would also leave the stored view and the stored frontier
+// on different slots, which UpdateTipWithObservedPraosView forbids.
+func TestOmittedObservedFrontierIsNotPromotedToAdvertisedTip(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{SecurityParam: 10})
+	cs.SetLocalTip(tip(99, 999, "local"))
+
+	// First peer: no reference frontier exists yet, so the plausibility bound
+	// cannot reject it. It advertises a tip far ahead but delivers no headers.
+	farConn := newTestConnectionId(1)
+	farAdvertised := tip(1_000_000, 5_000_000, "advertised-far")
+	farVRF := bytes.Repeat([]byte{0x01}, VRFOutputSize)
+	require.True(t, cs.updatePeerTipObservedPraosView(
+		farConn,
+		farAdvertised,
+		ochainsync.Tip{},
+		farVRF,
+		NewPraosTiebreakerViewFull(
+			ochainsync.Tip{},
+			[]byte("issuer-far"),
+			1,
+			farVRF,
+			PraosTiebreakerConfigBeforeConway(),
+		),
+	))
+
+	farTip := cs.GetPeerTip(farConn)
+	require.NotNil(t, farTip)
+	assert.Equal(
+		t,
+		ochainsync.Tip{},
+		farTip.SelectionTip(),
+		"an omitted delivered frontier must not be replaced by the advertised tip",
+	)
+
+	// A peer that actually delivered a header must outrank the peer that
+	// delivered nothing, and must not be measured for plausibility against the
+	// undelivered claim.
+	honestConn := newTestConnectionId(2)
+	honestTip := tip(100, 1000, "honest")
+	honestVRF := bytes.Repeat([]byte{0xff}, VRFOutputSize)
+	require.True(t, cs.updatePeerTipObservedPraosView(
+		honestConn,
+		honestTip,
+		honestTip,
+		honestVRF,
+		NewPraosTiebreakerViewFull(
+			honestTip,
+			[]byte("issuer-honest"),
+			1,
+			honestVRF,
+			PraosTiebreakerConfigBeforeConway(),
+		),
+	))
+
+	bestPeer := cs.GetBestPeer()
+	require.NotNil(t, bestPeer)
+	assert.Equal(
+		t,
+		honestConn,
+		*bestPeer,
+		"a peer that delivered no headers must not hold selection on its advertised tip",
+	)
+}
+
+// panicLogHandler is an slog.Handler that panics on every Handle call, used
+// to inject a deterministic panic into a locked section that logs. It
+// otherwise delegates to inner, including WithAttrs/WithGroup, so a wrapped
+// child logger (e.g. from Logger.With) still panics on Handle.
+type panicLogHandler struct {
+	inner slog.Handler
+}
+
+func (h *panicLogHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.inner.Enabled(ctx, level)
+}
+
+func (h *panicLogHandler) Handle(context.Context, slog.Record) error {
+	panic("intentional logger panic")
+}
+
+func (h *panicLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &panicLogHandler{inner: h.inner.WithAttrs(attrs)}
+}
+
+func (h *panicLogHandler) WithGroup(name string) slog.Handler {
+	return &panicLogHandler{inner: h.inner.WithGroup(name)}
+}
+
+// TestChainSelectorSetLocalTipUnlocksOnPanic is a regression test for a bug
+// where SetLocalTip (and SetSecurityParam, HandlePeerRollbackEvent) took
+// cs.mutex.Lock() and called cs.mutex.Unlock() as a bare statement after the
+// locked work instead of via defer. advanceSelectionModeLocked logs on a
+// Genesis-mode exit while the lock is held; if that log call panics (a
+// misbehaving Logger, but the same failure mode as any other panic in code
+// reachable from inside the lock), the bare Unlock() was skipped and
+// cs.mutex stayed locked forever -- deadlocking every future ChainSelector
+// call, not just dropping the one event. This test drives a real Genesis
+// exit with a Logger that panics on every Handle call and then verifies
+// cs.mutex is still acquirable afterward.
+func TestChainSelectorSetLocalTipUnlocksOnPanic(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: 10,
+	})
+
+	connId := newTestConnectionId(1)
+	cs.UpdatePeerTip(connId, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("peer-100")},
+		BlockNumber: 100,
+	}, nil)
+	require.Equal(t, SelectionModeGenesis, cs.SelectionMode())
+
+	// Installed under cs.mutex, after the setup UpdatePeerTip call above
+	// (which itself logs), matching how every production read of
+	// cs.config.Logger is itself guarded by cs.mutex.
+	cs.mutex.Lock()
+	cs.config.Logger = slog.New(
+		&panicLogHandler{inner: slog.NewTextHandler(io.Discard, nil)},
+	)
+	cs.mutex.Unlock()
+
+	func() {
+		defer func() {
+			require.NotNil(
+				t,
+				recover(),
+				"expected the Genesis-exit log call to panic",
+			)
+		}()
+		// Drives the local tip to within the Genesis window of the peer's
+		// advertised tip (100), triggering advanceSelectionModeLocked's
+		// Genesis-exit log call while cs.mutex is held.
+		cs.SetLocalTip(ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 75, Hash: []byte("local-75")},
+			BlockNumber: 75,
+		})
+	}()
+
+	// If SetLocalTip's locked section left cs.mutex locked, this blocks
+	// forever instead of closing unlocked.
+	unlocked := make(chan struct{})
+	go func() {
+		cs.mutex.Lock()
+		cs.mutex.Unlock()
+		close(unlocked)
+	}()
+	select {
+	case <-unlocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal(
+			"cs.mutex is still locked after the panic; " +
+				"SetLocalTip must unlock via defer",
+		)
+	}
+}
+
+// TestChainSelectorOnPeerRollbackPanicPublishesEvent verifies onPeerRollbackPanic,
+// the SubscribeFuncStrict onPanic hook NewChainSelector registers for
+// PeerRollbackEventType: it must publish PeerRollbackHandlerPanicEventType
+// carrying the recovered panic value, so a component that lost its rollback
+// subscription to a handler panic (event.EventBus.SubscribeFuncStrict tears
+// the subscription down) has a durable, observable signal instead of a
+// generic log line.
+func TestChainSelectorOnPeerRollbackPanicPublishesEvent(t *testing.T) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus:                  bus,
+		DisableEventSubscriptions: true,
+	})
+
+	var received atomic.Value
+	bus.SubscribeFunc(
+		PeerRollbackHandlerPanicEventType,
+		func(evt event.Event) {
+			received.Store(evt.Data)
+		},
+	)
+
+	cs.onPeerRollbackPanic(
+		event.NewEvent(PeerRollbackEventType, PeerRollbackEvent{
+			ConnectionId: newTestConnectionId(1),
+		}),
+		"intentional rollback handler panic",
+	)
+
+	require.Eventually(
+		t,
+		func() bool {
+			return received.Load() != nil
+		},
+		2*time.Second,
+		10*time.Millisecond,
+		"a rollback handler panic must publish PeerRollbackHandlerPanicEventType",
+	)
+	got, ok := received.Load().(PeerRollbackHandlerPanicEvent)
+	require.True(t, ok)
+	assert.Equal(t, "intentional rollback handler panic", got.Panic)
+}
+
+// TestChainSelectorEvaluationPanicSurfacedAndLoopContinues verifies that a
+// panic during a triggered evaluation is surfaced via
+// EvaluationPanicEventType instead of silently dropping the failed
+// transition, and that the evaluation loop remains usable for the next
+// evaluation afterward -- runTriggeredEvaluation is the same panic-recovery
+// wrapper the background evaluationLoop's triggered path uses, called
+// directly here to keep the test deterministic instead of racing a
+// ticker/channel.
+func TestChainSelectorEvaluationPanicSurfacedAndLoopContinues(t *testing.T) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	var received atomic.Value
+	bus.SubscribeFunc(EvaluationPanicEventType, func(evt event.Event) {
+		received.Store(evt.Data)
+	})
+
+	cs := NewChainSelector(ChainSelectorConfig{EventBus: bus})
+
+	tip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 10, Hash: []byte("slot-10")},
+		BlockNumber: 10,
+	}
+	connA := newTestConnectionId(1)
+	connB := newTestConnectionId(2)
+	cs.UpdatePeerTip(connA, tip, nil)
+	cs.UpdatePeerTip(connB, tip, nil)
+
+	// Installed under cs.mutex, matching comparePeerTipsPraos's locked read
+	// of cs.config.BlockfetchLatency. Reached only once both peers compare
+	// as the same chain (equal tip and priority), which the two identical
+	// UpdatePeerTip calls above set up.
+	cs.mutex.Lock()
+	cs.config.BlockfetchLatency = func(ouroboros.ConnectionId) (time.Duration, bool) {
+		panic("blockfetch latency boom")
+	}
+	cs.mutex.Unlock()
+
+	cs.runTriggeredEvaluation()
+
+	require.Eventually(t, func() bool {
+		return received.Load() != nil
+	}, 2*time.Second, 10*time.Millisecond,
+		"a panic during evaluation must publish EvaluationPanicEventType",
+	)
+	got, ok := received.Load().(EvaluationPanicEvent)
+	require.True(t, ok)
+	assert.Equal(t, "blockfetch latency boom", got.Panic)
+	assert.True(t, got.Triggered)
+
+	// The evaluation loop keeps running after a panic: clearing the
+	// panicking latency func and evaluating again must succeed normally
+	// rather than the earlier panic having wedged the selector.
+	cs.mutex.Lock()
+	cs.config.BlockfetchLatency = nil
+	cs.mutex.Unlock()
+	require.NotPanics(t, func() {
+		cs.runTriggeredEvaluation()
+	})
+	require.NotNil(t, cs.GetBestPeer())
+}
+
+// TestChainSelectorRecoverEvaluationPanicToleratesPanickingLogger is a
+// regression test for a bug where recoverEvaluationPanic's own logging call
+// was not panic-safe: it runs after this function's own recover() has
+// already consumed the evaluation panic, so nothing further up the stack
+// could catch a second one. A misbehaving Logger panicking there would
+// propagate out of the deferred call as a fresh, unrecovered panic --
+// runTriggeredEvaluation/runEvaluationTick would never return, crashing the
+// whole process once it unwound past evaluationLoop's for/select with
+// nothing left to catch it, over what should have been one dropped
+// transition. This drives a real evaluation panic with a Logger that panics
+// on every Handle call and verifies the panic is fully contained.
+func TestChainSelectorRecoverEvaluationPanicToleratesPanickingLogger(t *testing.T) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	cs := NewChainSelector(ChainSelectorConfig{EventBus: bus})
+	cs.mutex.Lock()
+	cs.config.Logger = slog.New(
+		&panicLogHandler{inner: slog.NewTextHandler(io.Discard, nil)},
+	)
+	cs.mutex.Unlock()
+
+	require.NotPanics(t, func() {
+		func() {
+			defer cs.recoverEvaluationPanic(true)
+			panic("evaluation boom")
+		}()
+	}, "a panicking Logger must not escape recoverEvaluationPanic")
 }

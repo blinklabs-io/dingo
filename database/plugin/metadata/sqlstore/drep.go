@@ -32,7 +32,7 @@ func (s *Store) CreateDrep(txn types.Txn, drep *models.Drep) error {
 	if drep == nil {
 		return errors.New("create drep: drep is nil")
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -42,7 +42,7 @@ func (s *Store) CreateDrep(txn types.Txn, drep *models.Drep) error {
 		return err
 	}
 	id, err := q.CreateDrep(
-		context.Background(),
+		ctx,
 		sqlitequery.CreateDrepParams(params),
 	)
 	if err != nil {
@@ -65,16 +65,15 @@ func (s *Store) ImportDrep(
 		return errors.New("import drep: registration is nil")
 	}
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			q := s.operationalQueries(db)
 			params, err := drepParams(drep)
 			if err != nil {
 				return err
 			}
 			id, err := q.ImportDrep(
-				context.Background(),
+				ctx,
 				sqlitequery.ImportDrepParams(params),
 			)
 			if err != nil {
@@ -88,7 +87,7 @@ func (s *Store) ImportDrep(
 				return err
 			}
 			registrationID, err := q.ImportDrepRegistration(
-				context.Background(),
+				ctx,
 				regParams,
 			)
 			if errors.Is(err, sql.ErrNoRows) {
@@ -108,10 +107,9 @@ func (s *Store) RestoreDrepStateAtSlot(
 	txn types.Txn,
 ) error {
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
-			if _, err := db.ExecContext(context.Background(), `
+		func(db queryer, ctx context.Context) error {
+			if _, err := db.ExecContext(ctx, `
 DELETE FROM drep
 WHERE added_slot > ?
   AND NOT EXISTS (
@@ -125,7 +123,7 @@ WHERE added_slot > ?
 			); err != nil {
 				return err
 			}
-			rows, err := db.QueryContext(context.Background(), `
+			rows, err := db.QueryContext(ctx, `
 SELECT credential_tag, credential, expiry_epoch, last_activity_epoch
 FROM drep WHERE added_slot > ?`,
 				slot,
@@ -161,6 +159,7 @@ FROM drep WHERE added_slot > ?`,
 			}
 			for _, item := range items {
 				registration, found, err := latestDrepEvent(
+					ctx,
 					db,
 					"registration_drep",
 					"drep_credential",
@@ -180,6 +179,7 @@ FROM drep WHERE added_slot > ?`,
 					)
 				}
 				deregistration, hasDeregistration, err := latestDrepEvent(
+					ctx,
 					db,
 					"deregistration_drep",
 					"drep_credential",
@@ -192,6 +192,7 @@ FROM drep WHERE added_slot > ?`,
 					return err
 				}
 				update, hasUpdate, err := latestDrepEvent(
+					ctx,
 					db,
 					"update_drep",
 					"credential",
@@ -226,7 +227,7 @@ FROM drep WHERE added_slot > ?`,
 					expiry = item.expiry
 					lastActivity = item.lastActivity
 				}
-				if _, err := db.ExecContext(context.Background(), `
+				if _, err := db.ExecContext(ctx, `
 UPDATE drep
 SET active = ?, anchor_url = ?, anchor_hash = ?, added_slot = ?,
     last_activity_epoch = ?, expiry_epoch = ?
@@ -255,6 +256,7 @@ type drepRestoreEvent struct {
 }
 
 func latestDrepEvent(
+	ctx context.Context,
 	db queryer,
 	table string,
 	credentialColumn string,
@@ -268,7 +270,7 @@ func latestDrepEvent(
 		anchorColumns = "event.anchor_url, event.anchor_hash"
 	}
 	var event drepRestoreEvent
-	err := db.QueryRowContext(context.Background(), `
+	err := db.QueryRowContext(ctx, `
 SELECT event.added_slot, COALESCE(tx.block_index, 0),
        COALESCE(certs.cert_index, 0), `+anchorColumns+`
 FROM `+table+` event
@@ -300,16 +302,16 @@ func (s *Store) GetDrep(
 	includeInactive bool,
 	txn types.Txn,
 ) (*models.Drep, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
 	q := s.operationalQueries(db)
 	var row sqlitequery.Drep
 	if includeInactive {
-		row, err = q.GetDrepByHash(context.Background(), credential)
+		row, err = q.GetDrepByHash(ctx, credential)
 	} else {
-		row, err = q.GetActiveDrepByHash(context.Background(), credential)
+		row, err = q.GetActiveDrepByHash(ctx, credential)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -326,7 +328,7 @@ func (s *Store) GetDrepByCredential(
 	includeInactive bool,
 	txn types.Txn,
 ) (*models.Drep, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -338,12 +340,12 @@ func (s *Store) GetDrepByCredential(
 	var row sqlitequery.Drep
 	if includeInactive {
 		row, err = q.GetDrepByCredential(
-			context.Background(),
+			ctx,
 			sqlitequery.GetDrepByCredentialParams(params),
 		)
 	} else {
 		row, err = q.GetActiveDrepByCredential(
-			context.Background(),
+			ctx,
 			params,
 		)
 	}
@@ -359,12 +361,12 @@ func (s *Store) GetDrepByCredential(
 func (s *Store) GetActiveDreps(
 	txn types.Txn,
 ) ([]*models.Drep, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
 	q := s.operationalQueries(db)
-	rows, err := q.GetActiveDreps(context.Background())
+	rows, err := q.GetActiveDreps(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -387,7 +389,7 @@ func (s *Store) SetDrep(
 	active bool,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -396,7 +398,7 @@ func (s *Store) SetDrep(
 	if err != nil {
 		return err
 	}
-	return q.SetDrep(context.Background(), sqlitequery.SetDrepParams{
+	return q.SetDrep(ctx, sqlitequery.SetDrepParams{
 		CredentialTag: int64(credentialTag),
 		Credential:    credential,
 		AddedSlot:     validInt64(slotValue),
@@ -415,7 +417,7 @@ func (s *Store) InsertDrepIfAbsent(
 	active bool,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -425,7 +427,7 @@ func (s *Store) InsertDrepIfAbsent(
 		return err
 	}
 	return q.InsertDrepIfAbsent(
-		context.Background(),
+		ctx,
 		sqlitequery.InsertDrepIfAbsentParams{
 			CredentialTag: int64(credentialTag),
 			Credential:    credential,
@@ -442,13 +444,13 @@ func (s *Store) GetDRepDelegators(
 	credential []byte,
 	txn types.Txn,
 ) ([]models.StakeCredentialRef, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
 	q := s.operationalQueries(db)
 	rows, err := q.GetDRepDelegators(
-		context.Background(),
+		ctx,
 		sqlitequery.GetDRepDelegatorsParams{
 			Drep:     credential,
 			DrepType: validInt64(int64(credentialTag)),
@@ -473,7 +475,7 @@ func (s *Store) GetDRepVotingPower(
 	expiryEpoch uint64,
 	txn types.Txn,
 ) (uint64, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
@@ -485,7 +487,7 @@ func (s *Store) GetDRepVotingPower(
 	)
 	var stake int64
 	if err := db.QueryRowContext(
-		context.Background(),
+		ctx,
 		s.dialect.Rebind(query),
 		args...,
 	).Scan(&stake); err != nil {
@@ -503,7 +505,7 @@ func (s *Store) GetDRepVotingPowerBatch(
 	if len(credentials) == 0 {
 		return ret, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -527,7 +529,7 @@ func (s *Store) GetDRepVotingPowerBatch(
 		)
 		args := drepCollectionArgs(chunk, expiryEpoch)
 		rows, err := db.QueryContext(
-			context.Background(),
+			ctx,
 			s.dialect.Rebind(query),
 			args...,
 		)
@@ -575,7 +577,7 @@ func (s *Store) GetDRepVotingPowerByType(
 	if err := models.ValidatePredefinedDrepTypes(drepTypes); err != nil {
 		return nil, err
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -585,7 +587,7 @@ func (s *Store) GetDRepVotingPowerByType(
 	)
 	args := drepCollectionArgs(drepTypes, expiryEpoch)
 	rows, err := db.QueryContext(
-		context.Background(),
+		ctx,
 		s.dialect.Rebind(query),
 		args...,
 	)
@@ -614,7 +616,32 @@ func (s *Store) UpdateDRepActivity(
 	inactivityPeriod uint64,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	// Existence is checked explicitly rather than inferred from the UPDATE's
+	// own affected-rows count: go-sql-driver/mysql reports the number of
+	// rows a plain UPDATE actually *changed*, not the number the WHERE
+	// clause *matched*, unless the connection sets the MySQL-specific
+	// CLIENT_FOUND_ROWS capability flag (which sqlite3/lib/pq don't need --
+	// both always report rows matched). A DRep voting again in the same
+	// epoch with the same resulting activity/expiry epoch is exactly the
+	// shape that trips this: the WHERE clause matches a real row, but
+	// nothing actually changes value, so MySQL's default semantics report
+	// affected == 0 -- indistinguishable, without this check, from the row
+	// genuinely not existing. This pre-check makes the not-found decision
+	// dialect-neutral instead of setting a connection-wide MySQL flag,
+	// which would also change affected-rows semantics for every other
+	// caller sharing that connection (several elsewhere in this package
+	// rely on the *current* semantics -- see EnsureOffchainMetadataPointers
+	// in offchain_metadata.go, which would silently over-count duplicates
+	// as newly created rows under CLIENT_FOUND_ROWS).
+	existing, err := s.GetDrepByCredential(credentialTag, credential, true, txn)
+	if err != nil {
+		return fmt.Errorf("check drep exists before activity update: %w", err)
+	}
+	if existing == nil {
+		return models.ErrDrepActivityNotUpdated
+	}
+
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return err
 	}
@@ -627,20 +654,16 @@ func (s *Store) UpdateDRepActivity(
 	if err != nil {
 		return err
 	}
-	affected, err := q.UpdateDRepActivity(
-		context.Background(),
+	if _, err := q.UpdateDRepActivity(
+		ctx,
 		sqlitequery.UpdateDRepActivityParams{
 			LastActivityEpoch: validInt64(activity),
 			ExpiryEpoch:       validInt64(expiry),
 			CredentialTag:     int64(credentialTag),
 			Credential:        credential,
 		},
-	)
-	if err != nil {
+	); err != nil {
 		return fmt.Errorf("update drep activity: %w", err)
-	}
-	if affected == 0 {
-		return models.ErrDrepActivityNotUpdated
 	}
 	return nil
 }
@@ -649,7 +672,7 @@ func (s *Store) GetExpiredDReps(
 	epoch uint64,
 	txn types.Txn,
 ) ([]*models.Drep, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -659,7 +682,7 @@ func (s *Store) GetExpiredDReps(
 		return nil, err
 	}
 	rows, err := q.GetExpiredDReps(
-		context.Background(),
+		ctx,
 		validInt64(epochValue),
 	)
 	if err != nil {
@@ -677,13 +700,13 @@ func (s *Store) GetDrepLastRegistrationSlot(
 	credential []byte,
 	txn types.Txn,
 ) (uint64, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
 	q := s.operationalQueries(db)
 	slot, err := q.GetDrepLastRegistrationSlot(
-		context.Background(),
+		ctx,
 		sqlitequery.GetDrepLastRegistrationSlotParams{
 			CredentialTag:  int64(credentialTag),
 			DrepCredential: credential,
@@ -698,7 +721,7 @@ func (s *Store) GetDrepLastRegistrationSlot(
 func (s *Store) GetDreps(
 	txn types.Txn,
 ) ([]models.DrepListRow, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -743,7 +766,7 @@ LEFT JOIN last_reg
   ON last_reg.cred = drep.credential
  AND last_reg.tag = drep.credential_tag
 ORDER BY COALESCE(first_seen.slot, drep.added_slot), drep.id`
-	rows, err := db.QueryContext(context.Background(), query)
+	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("get dreps: %w", err)
 	}
@@ -792,7 +815,7 @@ ORDER BY COALESCE(first_seen.slot, drep.added_slot), drep.id`
 func (s *Store) GetPredefinedDrepFirstSeenSlots(
 	txn types.Txn,
 ) (map[uint64]uint64, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -808,7 +831,7 @@ SELECT drep_type, MIN(slot) AS slot FROM (
     FROM stake_vote_registration_delegation
     WHERE drep_type >= 2 GROUP BY drep_type
 ) u GROUP BY drep_type`
-	rows, err := db.QueryContext(context.Background(), query)
+	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("get predefined drep first seen slots: %w", err)
 	}
@@ -832,7 +855,7 @@ func (s *Store) DeactivateDreps(
 	if len(credentials) == 0 {
 		return nil
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return fmt.Errorf("DeactivateDreps: resolve db: %w", err)
 	}
@@ -851,7 +874,7 @@ func (s *Store) DeactivateDreps(
 		query := "UPDATE drep SET active = FALSE WHERE " +
 			strings.Join(predicates, " OR ")
 		if _, err := db.ExecContext(
-			context.Background(),
+			ctx,
 			s.dialect.Rebind(query),
 			args...,
 		); err != nil {
@@ -865,7 +888,7 @@ func (s *Store) ClearDanglingDRepDelegations(
 	atSlot uint64,
 	txn types.Txn,
 ) (int, error) {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
@@ -873,7 +896,7 @@ func (s *Store) ClearDanglingDRepDelegations(
 	if err != nil {
 		return 0, err
 	}
-	result, err := db.ExecContext(context.Background(), `
+	result, err := db.ExecContext(ctx, `
 UPDATE account
 SET drep = NULL, drep_type = 0, added_slot = ?
 WHERE drep IS NOT NULL

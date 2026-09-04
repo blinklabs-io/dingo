@@ -104,6 +104,11 @@ func TestInsecureFileModeWindows(t *testing.T) {
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, ErrInsecureFileMode)
 	assert.Contains(t, err.Error(), "Everyone")
+	file, err := os.Open(testFile)
+	require.NoError(t, err)
+	defer file.Close()
+	err = checkOpenFilePermissions(file)
+	assert.ErrorIs(t, err, ErrInsecureFileMode)
 }
 
 func TestInsecureFileModeWindowsBuiltinUsers(t *testing.T) {
@@ -184,4 +189,181 @@ func TestSecureFileModeWindows(t *testing.T) {
 
 	err := checkFilePermissions(testFile)
 	assert.NoError(t, err)
+	file, err := os.Open(testFile)
+	require.NoError(t, err)
+	defer file.Close()
+	assert.NoError(t, checkOpenFilePermissions(file))
+}
+
+func TestAdministratorAccountACEAcceptedWindows(t *testing.T) {
+	tmpDir := t.TempDir()
+	testFile := filepath.Join(tmpDir, "test.skey")
+	require.NoError(t, os.WriteFile(testFile, []byte("test"), 0o600))
+
+	// Owned by the Administrators group with an ACE for the Administrator
+	// account, which is the combination GitHub's Windows runners produce and
+	// which a host administered that way also produces. Owner and trustee are
+	// then different principals, so the owner comparison does not cover it.
+	sd, err := windows.SecurityDescriptorFromString("O:BAD:P(A;;GA;;;LA)")
+	require.NoError(t, err)
+	dacl, _, err := sd.DACL()
+	require.NoError(t, err)
+	ownerSID, _, err := sd.Owner()
+	require.NoError(t, err)
+	// PROTECTED_DACL_SECURITY_INFORMATION, matching setOwnerOnlyDACL. Without
+	// it SetNamedSecurityInfo re-propagates inheritable ACEs from the parent of
+	// t.TempDir(), so the DACL validated below would not be the protected
+	// O:BAD:P(A;;GA;;;LA) written here. On a host whose test account is a named
+	// admin rather than the built-in Administrator, an inherited ACE carries
+	// that account's SID and this "accepted" case would fail for the wrong
+	// reason.
+	require.NoError(t, windows.SetNamedSecurityInfo(
+		testFile,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|
+			windows.DACL_SECURITY_INFORMATION|
+			windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		ownerSID, nil, dacl, nil,
+	))
+
+	file, err := os.Open(testFile)
+	require.NoError(t, err)
+	defer file.Close()
+	assert.NoError(t, checkOpenFilePermissions(file))
+}
+
+func TestAdministratorAccountACERejectedWhenOwnerIsNotAdministratorsWindows(
+	t *testing.T,
+) {
+	// The LA allowance is conditional on the owner being Built-in
+	// Administrators. A file owned by an ordinary principal must not gain an
+	// LA ace for free.
+	assert.ErrorIs(t, checkOpenDACL(
+		"test.skey",
+		"S-1-5-21-999999999-888888888-777777777-1001",
+		"(A;;GR;;;LA)",
+	), ErrInsecureFileMode)
+}
+
+// TestUnresolvableTrusteeDistinguishedFromForeignWindows pins the two error
+// branches this file distinguishes. Both inputs are host-independent: "@@" is
+// neither a SID string nor an SDDL constant, so no host resolves it, and the
+// two account SIDs below are literals no host owns.
+func TestUnresolvableTrusteeDistinguishedFromForeignWindows(t *testing.T) {
+	const owner = "S-1-5-21-1-2-3-1001"
+
+	unresolvable := checkOpenDACL("k.skey", owner, "(A;;FA;;;@@)")
+	require.ErrorIs(t, unresolvable, ErrInsecureFileMode)
+	assert.Contains(t, unresolvable.Error(), "could not be compared")
+	assert.NotContains(t, unresolvable.Error(), "unexpected trustee")
+
+	foreign := checkOpenDACL("k.skey", owner, "(A;;FA;;;S-1-5-21-1-2-3-1002)")
+	require.ErrorIs(t, foreign, ErrInsecureFileMode)
+	assert.Contains(t, foreign.Error(), "unexpected trustee")
+	assert.NotContains(t, foreign.Error(), "could not be compared")
+}
+
+// TestOwnerSIDParseFailureNotBlamedOnTrusteeWindows pins that an owner string
+// that does not parse is reported as such. The trustee here resolves fine, so
+// naming it as the unresolvable side would misdirect the diagnostic.
+func TestOwnerSIDParseFailureNotBlamedOnTrusteeWindows(t *testing.T) {
+	err := checkOpenDACL(
+		"k.skey", "not-a-sid", "(A;;FA;;;S-1-5-21-1-2-3-1002)",
+	)
+	require.ErrorIs(t, err, ErrInsecureFileMode)
+	assert.Contains(t, err.Error(), "parse owner SID")
+
+	// The cause must stay unwrappable rather than be flattened into the
+	// message by %v, so a caller can inspect it with errors.Is or errors.As.
+	var multi interface{ Unwrap() []error }
+	require.ErrorAs(t, err, &multi)
+	assert.Len(t, multi.Unwrap(), 2)
+}
+
+// TestAdministratorsOwnerRejectsForeignTrusteeWindows pins that the
+// conditional LA allowance stays narrow: a file owned by Built-in
+// Administrators admits the LA ace and nothing else new.
+func TestAdministratorsOwnerRejectsForeignTrusteeWindows(t *testing.T) {
+	sd, err := windows.SecurityDescriptorFromString("O:BA")
+	require.NoError(t, err)
+	administrators, _, err := sd.Owner()
+	require.NoError(t, err)
+	owner := administrators.String()
+
+	assert.NoError(t, checkOpenDACL("k.skey", owner, "(A;;GA;;;LA)"))
+	assert.ErrorIs(t, checkOpenDACL(
+		"k.skey", owner, "(A;;GA;;;S-1-5-21-1-2-3-1001)",
+	), ErrInsecureFileMode)
+}
+
+func TestNullDACLFileModeWindows(t *testing.T) {
+	tmpDir := t.TempDir()
+	testFile := filepath.Join(tmpDir, "test.skey")
+	require.NoError(t, os.WriteFile(testFile, []byte("test"), 0o600))
+	require.NoError(t, windows.SetNamedSecurityInfo(
+		testFile,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION,
+		nil, nil, nil, nil,
+	))
+
+	file, err := os.Open(testFile)
+	require.NoError(t, err)
+	defer file.Close()
+	assert.ErrorIs(t, checkOpenFilePermissions(file), ErrInsecureFileMode)
+}
+
+func TestAccessAllowedACEFormsWindows(t *testing.T) {
+	for _, aceType := range []string{"A", "OA", "XA", "ZA"} {
+		t.Run(aceType, func(t *testing.T) {
+			dacl := fmt.Sprintf("(%s;;GR;;;WD)", aceType)
+			err := checkOpenDACL("test.skey", "SY", dacl)
+			assert.ErrorIs(t, err, ErrInsecureFileMode)
+			assert.Contains(t, err.Error(), "WD")
+			assert.ErrorIs(
+				t,
+				checkSDDL("test.skey", "O:SYD:"+dacl),
+				ErrInsecureFileMode,
+			)
+		})
+	}
+}
+
+func TestUnsupportedACETypeFailsClosedWindows(t *testing.T) {
+	err := checkOpenDACL("test.skey", "SY", "(XX;;GR;;;SY)")
+	assert.ErrorIs(t, err, ErrInsecureFileMode)
+	assert.Contains(t, err.Error(), "unsupported DACL ACE type")
+
+	err = checkSDDL("test.skey", "D:(XX;;GR;;;SY)")
+	assert.ErrorIs(t, err, ErrInsecureFileMode)
+	assert.Contains(t, err.Error(), "unsupported DACL ACE type")
+}
+
+// TestOwnerAliasMatchesCanonicalOwnerWindows pins both halves of the alias
+// comparison: an alias ace must satisfy the owner it actually denotes on this
+// machine, and must not satisfy a different principal that merely shares its
+// RID.
+//
+// The owner is resolved here rather than written literally. An earlier version
+// asserted against a synthetic "...-500" SID, which passed only because the
+// comparison matched on the RID suffix — the hole this pins shut, since RID 500
+// is the built-in Administrator of every domain, so a domain Administrator
+// owner satisfied a local-administrator ace.
+func TestOwnerAliasMatchesCanonicalOwnerWindows(t *testing.T) {
+	sd, err := windows.SecurityDescriptorFromString("O:LA")
+	require.NoError(t, err)
+	localAdmin, _, err := sd.Owner()
+	require.NoError(t, err)
+
+	assert.NoError(t, checkOpenDACL(
+		"test.skey", localAdmin.String(), "(A;;GR;;;LA)",
+	))
+
+	// Same RID, different domain: not the same principal, so the ace must not
+	// be accepted as the owner's.
+	assert.ErrorIs(t, checkOpenDACL(
+		"test.skey",
+		"S-1-5-21-111111111-222222222-333333333-500",
+		"(A;;GR;;;LA)",
+	), ErrInsecureFileMode)
 }

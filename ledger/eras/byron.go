@@ -15,11 +15,13 @@
 package eras
 
 import (
+	"crypto/sha3"
 	"errors"
 	"fmt"
 	"math/big"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -31,6 +33,14 @@ var ByronEraDesc = EraDesc{
 	MaxMajorVersion: 1,
 	EpochLengthFunc: EpochLengthByron,
 	ValidateTxFunc:  ValidateTxByron,
+}
+
+// ByronProtocolMagicProvider supplies the protocol magic from the active
+// Byron genesis configuration. It must come from ledger state rather than
+// being inferred from the Shelley network ID because private networks can use
+// custom Byron protocol magic values.
+type ByronProtocolMagicProvider interface {
+	ByronProtocolMagic() (uint32, error)
 }
 
 func EpochLengthByron(
@@ -309,13 +319,339 @@ func byronValidateWitnesses(
 	if err := lcommon.ValidateVKeyWitnesses(tx); err != nil {
 		return err
 	}
+	// Byron redeem witnesses are constructor 2 values whose fields are
+	// wrapped in CBOR tag 24. Older gouroboros releases preserve these raw
+	// values but do not expose them through TransactionWitnessSet.
+	var redeemWitnesses []lcommon.VkeyWitness
+	var bootstrapWitnesses []byronBootstrapWitness
+	if byronTx, ok := tx.(*byron.ByronTransaction); ok {
+		redeemWitnesses = byronRedeemWitnesses(byronTx.Twit)
+		bootstrapWitnesses = byronBootstrapWitnesses(byronTx.Twit)
+		if len(redeemWitnesses) > 0 || len(bootstrapWitnesses) > 0 {
+			txHash := tx.Hash()
+			protocolMagicProvider, ok := ls.(ByronProtocolMagicProvider)
+			if !ok {
+				return errors.New(
+					"ledger state does not provide Byron protocol magic",
+				)
+			}
+			protocolMagic, err := protocolMagicProvider.ByronProtocolMagic()
+			if err != nil {
+				return fmt.Errorf("get Byron protocol magic: %w", err)
+			}
+			var redeemMessage []byte
+			if len(redeemWitnesses) > 0 {
+				redeemMessage, err = byronSignatureMessage(
+					0x02,
+					protocolMagic,
+					txHash,
+				)
+				if err != nil {
+					return err
+				}
+			}
+			var bootstrapMessage []byte
+			if len(bootstrapWitnesses) > 0 {
+				bootstrapMessage, err = byronSignatureMessage(
+					0x01,
+					protocolMagic,
+					txHash,
+				)
+				if err != nil {
+					return err
+				}
+			}
+			for _, witness := range redeemWitnesses {
+				if err := lcommon.VerifyVKeySignature(
+					witness.Vkey,
+					witness.Signature,
+					redeemMessage,
+				); err != nil {
+					return lcommon.NewValidationError(
+						lcommon.ValidationErrorTypeTransaction,
+						"invalid vkey signature",
+						map[string]any{"err": err.Error()},
+						err,
+					)
+				}
+			}
+			for _, witness := range bootstrapWitnesses {
+				if err := lcommon.VerifyVKeySignature(
+					witness.PublicKey,
+					witness.Signature,
+					bootstrapMessage,
+				); err != nil {
+					return lcommon.NewValidationError(
+						lcommon.ValidationErrorTypeTransaction,
+						"invalid bootstrap signature",
+						map[string]any{"err": err.Error()},
+						err,
+					)
+				}
+			}
+		}
+	}
 	// Verify bootstrap witness signatures
-	if err := lcommon.ValidateBootstrapWitnesses(tx); err != nil {
-		return err
+	if len(bootstrapWitnesses) == 0 {
+		if err := lcommon.ValidateBootstrapWitnesses(tx); err != nil {
+			return err
+		}
 	}
 	// Verify each input has a matching witness
-	if err := lcommon.ValidateInputVKeyWitnesses(tx, ls); err != nil {
-		return err
+	if len(redeemWitnesses) == 0 && len(bootstrapWitnesses) == 0 {
+		return lcommon.ValidateInputVKeyWitnesses(tx, ls)
+	}
+	return validateByronInputWitnesses(
+		tx,
+		ls,
+		redeemWitnesses,
+		bootstrapWitnesses,
+	)
+}
+
+func byronSignatureMessage(
+	tag byte,
+	protocolMagic uint32,
+	txHash lcommon.Blake2b256,
+) ([]byte, error) {
+	magicCbor, err := cbor.Encode(protocolMagic)
+	if err != nil {
+		return nil, fmt.Errorf("encode Byron protocol magic: %w", err)
+	}
+	// Byron signatures use a domain tag, the CBOR-encoded protocol magic, and
+	// the CBOR bytestring encoding of TxSigData (the transaction body hash).
+	message := append([]byte{tag}, magicCbor...)
+	message = append(message, 0x58, 0x20)
+	return append(message, txHash[:]...), nil
+}
+
+type byronBootstrapWitness struct {
+	PublicKey []byte
+	Signature []byte
+	ChainCode []byte
+}
+
+func byronWitnessPayloads(
+	witnesses []cbor.Value,
+	expectedConstructor uint64,
+) [][][]byte {
+	var ret [][][]byte
+	for _, witness := range witnesses {
+		fields, ok := witness.Value().([]any)
+		if !ok || len(fields) != 2 {
+			continue
+		}
+		ctor, ok := fields[0].(uint64)
+		if !ok || ctor != expectedConstructor {
+			continue
+		}
+		wrapped, ok := fields[1].(cbor.WrappedCbor)
+		if !ok {
+			continue
+		}
+		var witnessFields [][]byte
+		if _, err := cbor.Decode(wrapped.Bytes(), &witnessFields); err != nil {
+			continue
+		}
+		ret = append(ret, witnessFields)
+	}
+	return ret
+}
+
+func byronBootstrapWitnesses(
+	witnesses []cbor.Value,
+) []byronBootstrapWitness {
+	var ret []byronBootstrapWitness
+	for _, witnessFields := range byronWitnessPayloads(
+		witnesses,
+		lcommon.ByronAddressTypePubkey,
+	) {
+		if len(witnessFields) != 2 || len(witnessFields[0]) != 64 ||
+			len(witnessFields[1]) != 64 {
+			continue
+		}
+		ret = append(ret, byronBootstrapWitness{
+			PublicKey: witnessFields[0][:32],
+			ChainCode: witnessFields[0][32:],
+			Signature: witnessFields[1],
+		})
+	}
+	return ret
+}
+
+func byronRedeemWitnesses(
+	witnesses []cbor.Value,
+) []lcommon.VkeyWitness {
+	var ret []lcommon.VkeyWitness
+	for _, witnessFields := range byronWitnessPayloads(
+		witnesses,
+		lcommon.ByronAddressTypeRedeem,
+	) {
+		if len(witnessFields) != 2 {
+			continue
+		}
+		ret = append(ret, lcommon.VkeyWitness{
+			Vkey:      witnessFields[0],
+			Signature: witnessFields[1],
+		})
+	}
+	return ret
+}
+
+func validateByronInputWitnesses(
+	tx lcommon.Transaction,
+	ls lcommon.LedgerState,
+	redeemWitnesses []lcommon.VkeyWitness,
+	byronBootstrapWitnesses []byronBootstrapWitness,
+) error {
+	provided := make(map[lcommon.Blake2b224]struct{})
+	if witnesses := tx.Witnesses(); witnesses != nil {
+		for _, witness := range witnesses.Vkey() {
+			provided[lcommon.Blake2b224Hash(witness.Vkey)] = struct{}{}
+		}
+	}
+	for _, witness := range redeemWitnesses {
+		provided[lcommon.Blake2b224Hash(witness.Vkey)] = struct{}{}
+	}
+
+	var bootstrapWitnesses []lcommon.BootstrapWitness
+	if witnesses := tx.Witnesses(); witnesses != nil {
+		bootstrapWitnesses = witnesses.Bootstrap()
+	}
+	for _, input := range tx.Inputs() {
+		utxo, err := ls.UtxoById(input)
+		if err != nil || utxo.Output == nil {
+			continue
+		}
+		addr := utxo.Output.Address()
+		payload, ok := addr.PayloadPayload().(lcommon.AddressPayloadKeyHash)
+		if !ok {
+			continue
+		}
+		if _, ok := provided[payload.Hash]; ok {
+			continue
+		}
+		if addr.Type() == lcommon.AddressTypeByron {
+			if addr.ByronType() == lcommon.ByronAddressTypeRedeem {
+				matched := false
+				for _, witness := range redeemWitnesses {
+					redeemAddr, err := lcommon.NewByronAddressRedeem(
+						witness.Vkey,
+						addr.ByronAttr(),
+					)
+					if err == nil &&
+						redeemAddr.PaymentKeyHash() == payload.Hash {
+						matched = true
+						break
+					}
+				}
+				if matched {
+					continue
+				}
+			}
+			matched := false
+			for _, witness := range bootstrapWitnesses {
+				addrRoot, err := byronAddressRoot(witness)
+				if err == nil && addrRoot == payload.Hash {
+					matched = true
+					break
+				}
+			}
+			if matched {
+				continue
+			}
+			attrs, err := cbor.Encode(addr.ByronAttr())
+			if err != nil {
+				continue
+			}
+			for _, witness := range byronBootstrapWitnesses {
+				addrRoot, err := byronAddressRootForParts(
+					witness.PublicKey,
+					witness.ChainCode,
+					attrs,
+				)
+				if err == nil && addrRoot == payload.Hash {
+					matched = true
+					break
+				}
+			}
+			if matched {
+				continue
+			}
+			addressType := "bootstrap"
+			if addr.ByronType() == lcommon.ByronAddressTypeRedeem {
+				addressType = "redeem"
+			}
+			return lcommon.NewValidationError(
+				lcommon.ValidationErrorTypeTransaction,
+				fmt.Sprintf("missing %s witness for Byron input", addressType),
+				map[string]any{
+					"input":        input.String(),
+					"keyhash":      payload.Hash.String(),
+					"address_type": addressType,
+				},
+				nil,
+			)
+		}
+		return lcommon.NewValidationError(
+			lcommon.ValidationErrorTypeTransaction,
+			"missing vkey witness for input",
+			map[string]any{
+				"input":   input.String(),
+				"keyhash": payload.Hash.String(),
+			},
+			nil,
+		)
 	}
 	return nil
+}
+
+func byronAddressRoot(
+	witness lcommon.BootstrapWitness,
+) (lcommon.Blake2b224, error) {
+	return byronAddressRootForParts(
+		witness.PublicKey,
+		witness.ChainCode,
+		witness.Attributes,
+	)
+}
+
+func byronAddressRootForParts(
+	publicKey []byte,
+	chainCode []byte,
+	attributes []byte,
+) (lcommon.Blake2b224, error) {
+	if len(publicKey) != 32 {
+		return lcommon.Blake2b224{}, fmt.Errorf(
+			"invalid Byron pubkey size: expected 32 bytes, got %d",
+			len(publicKey),
+		)
+	}
+	if len(chainCode) != 32 {
+		return lcommon.Blake2b224{}, fmt.Errorf(
+			"invalid Byron chain code size: expected 32 bytes, got %d",
+			len(chainCode),
+		)
+	}
+	if len(attributes) == 0 {
+		attributes = []byte{0xa0}
+	}
+	// Encode the public-key address structure through its CBOR package so the
+	// Byron address-root shape stays explicit.
+	pubkey := make([]byte, 0, len(publicKey)+len(chainCode))
+	pubkey = append(pubkey, publicKey...)
+	pubkey = append(pubkey, chainCode...)
+	root, err := cbor.Encode([]any{
+		uint64(lcommon.ByronAddressTypePubkey),
+		[]any{uint64(lcommon.ByronAddressTypePubkey), pubkey},
+		cbor.RawMessage(attributes),
+	})
+	if err != nil {
+		return lcommon.Blake2b224{}, fmt.Errorf(
+			"encode Byron address root: %w",
+			err,
+		)
+	}
+	hash := sha3.Sum256(root)
+	return lcommon.Blake2b224Hash(hash[:]), nil
 }

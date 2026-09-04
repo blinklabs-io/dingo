@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -27,7 +29,44 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/protocol/handshake"
 )
+
+var networkMagicFieldPattern = regexp.MustCompile(
+	`\bunNetworkMagic\s*=\s*([0-9]+)\b`,
+)
+
+// isPermanentNetworkMagicMismatch reports whether err is a typed handshake
+// refusal whose Haskell version-data rendering proves the two peers use
+// different network magic values. Other version-data mismatches remain
+// transient because diffusion mode, peer sharing, and query mode can be
+// negotiated without changing networks.
+func isPermanentNetworkMagicMismatch(err error) bool {
+	var refusedErr *handshake.RefusedError
+	if !errors.As(err, &refusedErr) ||
+		!strings.Contains(
+			strings.ToLower(refusedErr.Message),
+			"version data mismatch",
+		) {
+		return false
+	}
+	matches := networkMagicFieldPattern.FindAllStringSubmatch(
+		refusedErr.Message,
+		-1,
+	)
+	if len(matches) != 2 {
+		return false
+	}
+	left, err := strconv.ParseUint(matches[0][1], 10, 32)
+	if err != nil {
+		return false
+	}
+	right, err := strconv.ParseUint(matches[1][1], 10, 32)
+	if err != nil {
+		return false
+	}
+	return left != right
+}
 
 func isConnectionCancellationError(err error) bool {
 	if err == nil {
@@ -47,8 +86,26 @@ func isExpectedNetworkDialError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// ENETUNREACH and EAFNOSUPPORT are siblings of the cases below: on a
+	// host with no IPv6 route, every AAAA relay record the ledger publishes
+	// produces one. They are facts about local reachability, not node
+	// faults, and logging them at ERROR buries the genuine ones. Matched by
+	// errno first, like isAddrInUseError, so a wrapped *os.SyscallError is
+	// classified without depending on the message text. The errno and
+	// message forms below both target Unix-like platforms, matching the
+	// existing classifiers in this file; Windows reports these as WSA codes
+	// with different message text and is not covered.
+	if errors.Is(err, syscall.ENETUNREACH) ||
+		errors.Is(err, syscall.EAFNOSUPPORT) {
+		return true
+	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "no such host") ||
+	return strings.Contains(msg, "network is unreachable") ||
+		strings.Contains(
+			msg,
+			"address family not supported by protocol family",
+		) ||
+		strings.Contains(msg, "no such host") ||
 		strings.Contains(msg, "server misbehaving") ||
 		strings.Contains(msg, "connect: connection refused") ||
 		strings.Contains(msg, "no route to host") ||
@@ -386,7 +443,12 @@ func (p *PeerGovernor) createOutboundConnection(
 			if peerIdx == -1 {
 				p.mu.Unlock()
 				// Peer was removed while connecting, close connection
-				conn.Close()
+				closeConnAndLog(
+					p.config.Logger,
+					conn,
+					"outbound: error closing connection for removed peer",
+					"address", peer.Address,
+				)
 				p.config.Logger.Debug(
 					"outbound: peer removed during connection, closing",
 					"address", peer.Address,
@@ -397,7 +459,12 @@ func (p *PeerGovernor) createOutboundConnection(
 			currentPeer := p.peers[peerIdx]
 			if p.isPeerDeniedLocked(currentPeer) {
 				p.mu.Unlock()
-				conn.Close()
+				closeConnAndLog(
+					p.config.Logger,
+					conn,
+					"outbound: error closing connection for denied peer",
+					"address", peer.Address,
+				)
 				p.config.Logger.Debug(
 					"outbound: peer denied during connection, closing",
 					"address", peer.Address,
@@ -479,6 +546,9 @@ func (p *PeerGovernor) createOutboundConnection(
 			case <-time.After(reconnectDelay):
 			}
 			continue
+		}
+		if p.denyNetworkMagicMismatch(peer, dialTarget, err) {
+			return
 		}
 		failMsg := fmt.Sprintf(
 			"outbound: failed to establish connection to %s: %s",
@@ -696,7 +766,13 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 					"address", address,
 					"connection_id", connId.String(),
 				)
-				conn.Close()
+				closeConnAndLog(
+					p.config.Logger,
+					conn,
+					"error closing denied inbound peer connection",
+					"address", address,
+					"connection_id", connId.String(),
+				)
 			}
 		}
 		return
@@ -935,7 +1011,6 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 							"hot peer pool critically low; capping reconnect backoff to replenish faster",
 							"address", peer.Address,
 							"capped_delay", peer.ReconnectDelay,
-							"component", "peergov",
 						)
 					} else {
 						p.config.Logger.Warn(
@@ -1026,6 +1101,14 @@ func (p *PeerGovernor) IsDenied(address string) bool {
 // isDeniedLocked checks if a peer is on the deny list.
 // This method assumes the mutex is already held by the caller.
 func (p *PeerGovernor) isDeniedLocked(address string) bool {
+	if expiry, exists := p.networkMismatchDenyList[address]; exists {
+		if time.Now().After(expiry) {
+			// Expired, remove from the network-mismatch deny list.
+			delete(p.networkMismatchDenyList, address)
+		} else {
+			return true
+		}
+	}
 	expiry, exists := p.denyList[address]
 	if !exists {
 		return false
@@ -1036,6 +1119,99 @@ func (p *PeerGovernor) isDeniedLocked(address string) bool {
 		return false
 	}
 	return true
+}
+
+// denyNetworkMagicMismatch records an address-scoped denial for a peer that
+// proved it belongs to another Cardano network. The denial is bounded by
+// NetworkMismatchDenyDuration (much longer than the ordinary DenyDuration,
+// since this signal is far stronger than a generic dial failure) rather than
+// held indefinitely, and is held only in PeerGovernor memory, so it also
+// clears early on a node restart.
+func (p *PeerGovernor) denyNetworkMagicMismatch(
+	peer *Peer,
+	dialTarget string,
+	err error,
+) bool {
+	if !isPermanentNetworkMagicMismatch(err) {
+		return false
+	}
+
+	p.mu.Lock()
+	if p.networkMismatchDenyList == nil {
+		p.networkMismatchDenyList = make(map[string]time.Time)
+	}
+	expiry := time.Now().Add(p.config.NetworkMismatchDenyDuration)
+	// The peer can be removed or replaced while its dial and handshake run.
+	// Record the immutable attempt identity first so that a stale completion
+	// still suppresses rediscovery of the proven wrong-network address.
+	p.addNetworkMismatchDenyKeysLocked(
+		peer,
+		expiry,
+		connmanager.NormalizePeerAddr(dialTarget),
+		p.normalizeAddress(dialTarget),
+	)
+	peerAddress := dialTarget
+	peerSource := PeerSource(PeerSourceUnknown)
+	if peer != nil {
+		peerAddress = peer.Address
+		peerSource = peer.Source
+	}
+	peerIdx := -1
+	if peer != nil {
+		peerIdx = p.peerIndexByAddress(peer.NormalizedAddress)
+	}
+	removed := false
+	if peerIdx != -1 && p.peers[peerIdx] != nil {
+		currentPeer := p.peers[peerIdx]
+		p.addNetworkMismatchDenyKeysLocked(currentPeer, expiry)
+		peerAddress = currentPeer.Address
+		peerSource = currentPeer.Source
+		removed = dropIfNeverConnected(peerSource)
+		if removed {
+			p.peers = append(p.peers[:peerIdx], p.peers[peerIdx+1:]...)
+			p.updatePeerMetrics()
+		}
+	}
+	p.mu.Unlock()
+
+	p.config.Logger.Info(
+		"outbound: denying peer on a different Cardano network",
+		"address", peerAddress,
+		"source", peerSource.String(),
+		"error", err,
+		"deny_duration", p.config.NetworkMismatchDenyDuration,
+	)
+	if removed {
+		p.publishEvent(
+			PeerRemovedEventType,
+			PeerStateChangeEvent{
+				Address: peerAddress,
+				Reason:  "network magic mismatch",
+			},
+		)
+	}
+	return true
+}
+
+func (p *PeerGovernor) addNetworkMismatchDenyKeysLocked(
+	peer *Peer,
+	expiry time.Time,
+	addresses ...string,
+) {
+	for _, address := range addresses {
+		if address != "" {
+			p.networkMismatchDenyList[address] = expiry
+		}
+	}
+	if peer == nil {
+		return
+	}
+	if peer.NormalizedAddress != "" {
+		p.networkMismatchDenyList[peer.NormalizedAddress] = expiry
+	}
+	if peer.Address != "" {
+		p.networkMismatchDenyList[p.normalizeAddress(peer.Address)] = expiry
+	}
 }
 
 func (p *PeerGovernor) peerIndexByConnectionRemoteAddressLocked(
@@ -1116,6 +1292,21 @@ func (p *PeerGovernor) cleanupDenyList() {
 	}
 }
 
+// cleanupNetworkMismatchDenyList removes expired entries from the
+// network-mismatch deny list. Kept separate from cleanupDenyList so the two
+// lifecycles (ordinary dial-failure denials vs. proven wrong-network
+// denials, bounded by two different, independently configured durations)
+// stay independently readable and testable.
+// This method assumes the mutex is already held by the caller.
+func (p *PeerGovernor) cleanupNetworkMismatchDenyList() {
+	now := time.Now()
+	for address, expiry := range p.networkMismatchDenyList {
+		if now.After(expiry) {
+			delete(p.networkMismatchDenyList, address)
+		}
+	}
+}
+
 // TestPeer tests a peer's suitability by attempting a connection and verifying
 // the Ouroboros protocol handshake succeeds. Returns true if the peer is
 // suitable, false otherwise. Results are cached to avoid excessive testing.
@@ -1172,8 +1363,10 @@ func (p *PeerGovernor) TestPeer(address string) (bool, error) {
 		if err != nil {
 			testErr = err
 		} else {
-			// Connection succeeded, close it since this is just a test
-			conn.Close()
+			// Connection succeeded, close it since this is just a test.
+			// Reachability is already established by the successful dial,
+			// so a close error here carries no diagnostic value.
+			_ = conn.Close()
 		}
 	} else {
 		testErr = errors.New("no test function or connection manager configured")
@@ -1183,16 +1376,24 @@ func (p *PeerGovernor) TestPeer(address string) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Re-find peer in case slice changed
+	// Re-find peer in case slice changed, but only accept it if it is the
+	// exact entry (same pointer) this call started with, not merely the
+	// same address. reconcile's isStaleTestOnlyPeerLocked can prune a
+	// stale-but-not-yet-recooled TestPeer-only entry concurrently with a
+	// slow, outside-lock re-test still running against it (started before
+	// the entry aged past TestCooldown), and a real peer can be admitted at
+	// the same address in the interim — that is the whole point of pruning
+	// it. Matching by address alone would let this call's result and
+	// deny-list side effects land on that unrelated, newly admitted peer
+	// instead of the probe entry it actually tested.
 	idx := p.peerIndexByAddress(normalized)
-	if idx == -1 {
-		// Peer was removed during test, nothing to update
+	if idx == -1 || p.peers[idx] != peer {
+		// Peer was removed, or replaced by a different peer, during the test.
 		if testErr != nil {
 			return false, testErr
 		}
 		return true, nil
 	}
-	peer = p.peers[idx]
 
 	peer.LastTestTime = time.Now()
 	if testErr != nil {

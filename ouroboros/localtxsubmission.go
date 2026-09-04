@@ -69,7 +69,7 @@ func (o *Ouroboros) localtxsubmissionServerSubmitTx(
 		)
 	}
 	// Add transaction to mempool
-	err := o.Mempool.AddTransaction(
+	err := o.mempool.AddTransaction(
 		uint(tx.EraId),
 		rawTx,
 	)

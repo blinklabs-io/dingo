@@ -19,9 +19,47 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
+
+type countingBlockReadStore struct {
+	blob.BlobStore
+	getBlockCalls int
+}
+
+func (s *countingBlockReadStore) GetBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) ([]byte, types.BlockMetadata, error) {
+	s.getBlockCalls++
+	return s.BlobStore.GetBlock(txn, slot, hash)
+}
+
+type localBlockReadStore struct {
+	blob.BlobStore
+	archiveFallbackCalls int
+}
+
+func (s *localBlockReadStore) GetBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) ([]byte, types.BlockMetadata, error) {
+	s.archiveFallbackCalls++
+	return s.BlobStore.GetBlock(txn, slot, hash)
+}
+
+func (s *localBlockReadStore) GetBlockLocal(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) ([]byte, types.BlockMetadata, error) {
+	return s.BlobStore.GetBlock(txn, slot, hash)
+}
 
 func testIndexedBlock(slot, id uint64, hashByte byte) models.Block {
 	return models.Block{
@@ -71,6 +109,81 @@ func TestBlockBySlotSkipsStaleSameSlotIndex(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, lowerIDBlock.ID, block.ID)
 	require.Equal(t, lowerIDBlock.Hash, block.Hash)
+}
+
+func TestBlockPointByIndexDoesNotReadBlockContent(t *testing.T) {
+	db := newTestDB(t)
+	block := testIndexedBlock(42, 7, 0x42)
+	require.NoError(t, db.BlockCreate(block, nil))
+
+	store := &countingBlockReadStore{BlobStore: db.blob}
+	db.blob = store
+
+	point, err := db.BlockPointByIndex(block.ID, nil)
+	require.NoError(t, err)
+	require.Equal(t, block.Slot, point.Slot)
+	require.Equal(t, block.Hash, point.Hash)
+	require.Zero(
+		t,
+		store.getBlockCalls,
+		"point-only lookup must not load block CBOR or trigger archive fallback",
+	)
+}
+
+func TestBlockIDByPointLocalBypassesArchiveFallback(t *testing.T) {
+	db := newTestDB(t)
+	block := testIndexedBlock(42, 7, 0x42)
+	require.NoError(t, db.BlockCreate(block, nil))
+
+	store := &localBlockReadStore{BlobStore: db.blob}
+	db.blob = store
+
+	blockID, err := BlockIDByPointLocal(
+		db,
+		ocommon.NewPoint(block.Slot, block.Hash),
+	)
+	require.NoError(t, err)
+	require.Equal(t, block.ID, blockID)
+	require.Zero(t, store.archiveFallbackCalls)
+
+	_, err = BlockIDByPointLocal(
+		db,
+		ocommon.NewPoint(block.Slot, bytes.Repeat([]byte{0xff}, 32)),
+	)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+	require.Zero(t, store.archiveFallbackCalls)
+
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *Txn) error {
+		return db.Blob().TombstoneBlock(
+			txn.Blob(), block.Slot, block.Hash,
+		)
+	}))
+	blockID, err = BlockIDByPointLocal(
+		db,
+		ocommon.NewPoint(block.Slot, block.Hash),
+	)
+	require.NoError(t, err)
+	require.Equal(t, block.ID, blockID)
+	require.Zero(t, store.archiveFallbackCalls)
+
+	// Older cloud tombstones did not retain metadata. They cannot recover a
+	// local ID and must remain a non-match instead of aliasing block ID zero.
+	txn = db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *Txn) error {
+		return db.Blob().Delete(
+			txn.Blob(),
+			types.BlockBlobMetadataKey(
+				types.BlockBlobKey(block.Slot, block.Hash),
+			),
+		)
+	}))
+	_, err = BlockIDByPointLocal(
+		db,
+		ocommon.NewPoint(block.Slot, block.Hash),
+	)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+	require.Zero(t, store.archiveFallbackCalls)
 }
 
 func TestBlockAtOrAfterIndexSkipsSparseIndexes(t *testing.T) {

@@ -105,7 +105,11 @@ func TestDeriveRewardInputsReconciles(t *testing.T) {
 	b := byPool[hex28(0xBB)]
 	require.NotNil(t, b)
 	require.Equal(t, uint64(7_000), b.delegated)
-	require.Zero(t, b.owner, "a pool with no owner delegating has no owner stake")
+	require.Zero(
+		t,
+		b.owner,
+		"a pool with no owner delegating has no owner stake",
+	)
 	require.Equal(t, uint64(1), b.delegators)
 }
 
@@ -150,8 +154,12 @@ func TestDeriveRewardInputsDropsZeroStake(t *testing.T) {
 // rejects it on read, and on that path a rejection fails the rollover.
 func TestDerivedRewardInputsGateRejectsBadMargin(t *testing.T) {
 	snap := twoPoolSnapshot()
-	snap.PoolParams[hex28(0xAA)].MarginNum = 3
-	snap.PoolParams[hex28(0xAA)].MarginDen = 2
+	pool := snap.PoolParams[hex28(0xAA)]
+	if pool == nil {
+		t.Fatal("fixture has no parameters for pool AA")
+	}
+	pool.MarginNum = 3
+	pool.MarginDen = 2
 
 	bundle := deriveRewardInputs(snap, nil, 1385, 1, 0)
 	require.NotNil(t, bundle)
@@ -161,7 +169,11 @@ func TestDerivedRewardInputsGateRejectsBadMargin(t *testing.T) {
 // A pool key of the wrong length is likewise refused rather than written.
 func TestDerivedRewardInputsGateRejectsBadPoolKey(t *testing.T) {
 	snap := twoPoolSnapshot()
-	snap.PoolParams[hex28(0xAA)].PoolKeyHash = []byte{0x01, 0x02}
+	pool := snap.PoolParams[hex28(0xAA)]
+	if pool == nil {
+		t.Fatal("fixture has no parameters for pool AA")
+	}
+	pool.PoolKeyHash = []byte{0x01, 0x02}
 
 	bundle := deriveRewardInputs(snap, nil, 1385, 1, 0)
 	require.NotNil(t, bundle)

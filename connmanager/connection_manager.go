@@ -30,8 +30,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-// ConnectionManagerConnClosedFunc is a function that takes a connection ID and an optional error
-type ConnectionManagerConnClosedFunc func(ouroboros.ConnectionId, error)
+// ConnectionManagerConnClosedFunc is a function that takes a connection ID,
+// whether the closed connection was node-to-client (local), and an optional
+// error. Unlike ConnectionClosedEventType, it fires for every closed
+// connection regardless of isNtC — see the call site below for why the
+// broad EventBus event stays NtN-only.
+type ConnectionManagerConnClosedFunc func(ouroboros.ConnectionId, bool, error)
 
 const (
 	// metricNamePrefix is the common prefix for all connection manager metrics
@@ -60,19 +64,27 @@ type ConnectionManager struct {
 	peerConnectivity map[string]peerConnectionSummary
 	metrics          *connectionManagerMetrics
 	listeners        []net.Listener
+	pendingConns     map[net.Conn]struct{}
 	config           ConnectionManagerConfig
-	connectionsMutex sync.Mutex
-	listenersMutex   sync.Mutex
-	closing          bool
-	goroutineWg      sync.WaitGroup // tracks spawned goroutines for clean shutdown
-	ipConns          map[string]int // IP key -> active connection count
-	ipConnsMutex     sync.Mutex
-	outboundCount    int
-	fullDuplexCount  int
-	unidirectional   int
-	duplexPeers      int
-	prunableConns    int
-	trackedConnCount int
+	// resolveDeferredOnce guards the one-time evaluation of
+	// ListenersProvider/OutboundConnOptsProvider. Using sync.Once also
+	// supplies the happens-before edge that lets the resolved slices be read
+	// from the listener and outbound-dial paths without further locking.
+	resolveDeferredOnce  sync.Once
+	listenerConfigs      []ListenerConfig
+	outboundConnOptsCfgs []ouroboros.ConnectionOptionFunc
+	connectionsMutex     sync.Mutex
+	listenersMutex       sync.Mutex
+	closing              bool
+	goroutineWg          sync.WaitGroup // tracks spawned goroutines for clean shutdown
+	ipConns              map[string]int // IP key -> active connection count
+	ipConnsMutex         sync.Mutex
+	outboundCount        int
+	fullDuplexCount      int
+	unidirectional       int
+	duplexPeers          int
+	prunableConns        int
+	trackedConnCount     int
 }
 
 // DefaultMaxConnectionsPerIP is the default maximum number of concurrent
@@ -80,14 +92,27 @@ type ConnectionManager struct {
 const DefaultMaxConnectionsPerIP = 5
 
 type ConnectionManagerConfig struct {
-	PromRegistry       prometheus.Registerer
-	Logger             *slog.Logger
-	EventBus           *event.EventBus
-	ConnClosedFunc     ConnectionManagerConnClosedFunc
-	Listeners          []ListenerConfig
-	OutboundConnOpts   []ouroboros.ConnectionOptionFunc
-	OutboundSourcePort uint
-	MaxInboundConns    int // 0 means use DefaultMaxInboundConnections
+	PromRegistry     prometheus.Registerer
+	Logger           *slog.Logger
+	EventBus         *event.EventBus
+	ConnClosedFunc   ConnectionManagerConnClosedFunc
+	Listeners        []ListenerConfig
+	OutboundConnOpts []ouroboros.ConnectionOptionFunc
+	// ListenersProvider and OutboundConnOptsProvider supply the two fields
+	// above lazily, on first use rather than at construction. They take
+	// precedence over the plain fields and are each invoked exactly once.
+	//
+	// They exist so a component that needs a ConnectionManager in order to
+	// produce its listener configs can still be constructed after it. The
+	// node uses this for ouroboros.Ouroboros, whose ConfigureListeners and
+	// OutboundConnOpts install protocol handlers bound to a fully-built
+	// instance: with these providers the ConnectionManager can be built
+	// first and the handlers resolved at Start, which is what lets Ouroboros
+	// take every dependency in its constructor.
+	ListenersProvider        func() []ListenerConfig
+	OutboundConnOptsProvider func() []ouroboros.ConnectionOptionFunc
+	OutboundSourcePort       uint
+	MaxInboundConns          int // 0 means use DefaultMaxInboundConnections
 	// MaxConnectionsPerIP limits the number of concurrent inbound
 	// connections from the same IP address. IPv6 addresses are grouped
 	// by /64 prefix. A value of 0 means use DefaultMaxConnectionsPerIP.
@@ -156,6 +181,7 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 		),
 		inboundPeerAddrs: make(map[string]int),
 		peerConnectivity: make(map[string]peerConnectionSummary),
+		pendingConns:     make(map[net.Conn]struct{}),
 		ipConns:          make(map[string]int),
 	}
 	if cfg.PromRegistry != nil {
@@ -419,6 +445,35 @@ func (c *ConnectionManager) rebuildConnectionMetricsLocked() {
 	c.trackedConnCount = len(c.connections)
 }
 
+// resolveDeferredConfig evaluates the lazy listener/outbound providers once.
+// Every read of the resolved values goes through the accessors below, so a
+// provider is invoked on first use whether that is Start, an outbound dial, or
+// ResolvedListeners.
+func (c *ConnectionManager) resolveDeferredConfig() {
+	c.resolveDeferredOnce.Do(func() {
+		c.listenerConfigs = c.config.Listeners
+		if c.config.ListenersProvider != nil {
+			c.listenerConfigs = c.config.ListenersProvider()
+		}
+		c.outboundConnOptsCfgs = c.config.OutboundConnOpts
+		if c.config.OutboundConnOptsProvider != nil {
+			c.outboundConnOptsCfgs = c.config.OutboundConnOptsProvider()
+		}
+	})
+}
+
+// listenerConfigList returns the resolved listener configs.
+func (c *ConnectionManager) listenerConfigList() []ListenerConfig {
+	c.resolveDeferredConfig()
+	return c.listenerConfigs
+}
+
+// outboundConnOptList returns the resolved outbound connection options.
+func (c *ConnectionManager) outboundConnOptList() []ouroboros.ConnectionOptionFunc {
+	c.resolveDeferredConfig()
+	return c.outboundConnOptsCfgs
+}
+
 func (c *ConnectionManager) Start(ctx context.Context) error {
 	if err := c.startListeners(ctx); err != nil {
 		return err
@@ -508,6 +563,11 @@ func (c *ConnectionManager) stopListeners() {
 		}
 	}
 	c.listeners = nil
+	pendingConns := make([]net.Conn, 0, len(c.pendingConns))
+	for conn := range c.pendingConns {
+		pendingConns = append(pendingConns, conn)
+	}
+	clear(c.pendingConns)
 	c.listenersMutex.Unlock()
 
 	for _, listener := range listeners {
@@ -517,6 +577,13 @@ func (c *ConnectionManager) stopListeners() {
 				"error", err,
 			)
 		}
+	}
+	for _, conn := range pendingConns {
+		closeConnAndLog(
+			c.config.Logger,
+			conn,
+			"error closing pending inbound connection",
+		)
 	}
 }
 
@@ -541,10 +608,14 @@ func (c *ConnectionManager) stopListeners() {
 // success -- silently leaving that listener deaf to new inbound
 // connections until the whole process restarted.
 func (c *ConnectionManager) ResolvedListeners() []ListenerConfig {
+	// Resolve before taking the lock. The provider is caller-supplied and may
+	// reach back into components that touch this ConnectionManager, so running
+	// it under listenersMutex would risk a re-entrant deadlock.
+	listenerCfgs := c.listenerConfigList()
 	c.listenersMutex.Lock()
 	defer c.listenersMutex.Unlock()
-	resolved := make([]ListenerConfig, len(c.config.Listeners))
-	for i, cfg := range c.config.Listeners {
+	resolved := make([]ListenerConfig, len(listenerCfgs))
+	for i, cfg := range listenerCfgs {
 		// Only rewrite an entry that came in with a caller-supplied
 		// Listener -- an already address-configured entry (Listener nil)
 		// already rebinds correctly on its own via ListenNetwork/
@@ -624,7 +695,12 @@ func (c *ConnectionManager) addConnectionImpl(
 		// Shutting down - release IP slot and close connection
 		c.releaseIPSlot(ipKey)
 		if conn != nil {
-			conn.Close()
+			closeConnAndLog(
+				c.config.Logger,
+				conn,
+				"error closing connection rejected during shutdown",
+				"peer_addr", peerAddr,
+			)
 		}
 		return false
 	}
@@ -651,7 +727,12 @@ func (c *ConnectionManager) addConnectionImpl(
 				"peer_addr",
 				peerAddr,
 			)
-			conn.Close()
+			closeConnAndLog(
+				c.config.Logger,
+				conn,
+				"error closing colliding inbound connection",
+				"peer_addr", peerAddr,
+			)
 			c.releaseIPSlot(ipKey)
 			c.goroutineWg.Done()
 			return false
@@ -677,16 +758,30 @@ func (c *ConnectionManager) addConnectionImpl(
 			}
 			c.updateConnectionMetricsLocked(existing, false)
 			existingConn := existing.conn
+			existingPeerAddr := existing.peerAddr
 			existingIPKey := existing.ipKey
+			existingIsNtC := existing.isNtC
 			// Remove the old entry so the evicted connection's
 			// error-watcher goroutine cannot double-decrement
 			// metrics via RemoveConnection.
 			delete(c.connections, connId)
 			c.connectionsMutex.Unlock()
-			existingConn.Close()
+			closeConnAndLog(
+				c.config.Logger,
+				existingConn,
+				"error closing evicted inbound connection",
+				"peer_addr", existingPeerAddr,
+			)
 			if existingIPKey != "" {
 				c.releaseIPSlot(existingIPKey)
 			}
+			// The evicted connection's own error-watcher goroutine cannot
+			// deliver this: by the time its ErrorChan fires, RemoveConnection
+			// finds either no entry or the replacement's entry for connId
+			// and returns false without calling ConnClosedFunc. Without this
+			// call, an evicted NtC connection's chainsync server-side client
+			// state (and its live chain iterator) would never be released.
+			c.notifyEvictedConnectionClosed(connId, existingIsNtC)
 			c.connectionsMutex.Lock()
 
 		default:
@@ -710,13 +805,21 @@ func (c *ConnectionManager) addConnectionImpl(
 			}
 			c.updateConnectionMetricsLocked(existing, false)
 			existingConn := existing.conn
+			existingPeerAddr := existing.peerAddr
 			existingIPKey := existing.ipKey
+			existingIsNtC := existing.isNtC
 			delete(c.connections, connId)
 			c.connectionsMutex.Unlock()
-			existingConn.Close()
+			closeConnAndLog(
+				c.config.Logger,
+				existingConn,
+				"error closing replaced connection",
+				"peer_addr", existingPeerAddr,
+			)
 			if existingIPKey != "" {
 				c.releaseIPSlot(existingIPKey)
 			}
+			c.notifyEvictedConnectionClosed(connId, existingIsNtC)
 			c.connectionsMutex.Lock()
 		}
 	}
@@ -768,12 +871,43 @@ func (c *ConnectionManager) addConnectionImpl(
 				),
 			)
 		}
-		// Call configured connection closed callback func
+		// Call configured connection closed callback func. Fires for both
+		// NtN and NtC closes -- unlike the EventBus event above, this is a
+		// direct per-connection call rather than a fan-out to multiple
+		// subscribers, so it carries no reconnect-storm risk. It is the
+		// only close notification an NtC connection gets.
 		if c.config.ConnClosedFunc != nil {
-			c.config.ConnClosedFunc(connId, err)
+			c.config.ConnClosedFunc(connId, isNtC, err)
 		}
 	}()
 	return true
+}
+
+// errConnectionReplaced is the error reported to ConnClosedFunc for a
+// connection evicted by a ConnectionId collision, rather than a closed
+// transport.
+var errConnectionReplaced = errors.New(
+	"connection replaced by a new connection with the same identity",
+)
+
+// notifyEvictedConnectionClosed calls ConnClosedFunc for a connection just
+// evicted by a ConnectionId collision (addConnectionImpl's replacement
+// branches). The evicted connection's own error-watcher goroutine cannot
+// deliver this itself: by the time its ErrorChan fires, RemoveConnection
+// finds either no entry or the replacement's entry for connId and returns
+// false without calling ConnClosedFunc, so without this call an evicted NtC
+// connection's chainsync server-side client state (and its live chain
+// iterator) would never be released. Called synchronously, before the
+// replacement connection is registered in c.connections, so it cannot race
+// the replacement's own state registration.
+func (c *ConnectionManager) notifyEvictedConnectionClosed(
+	connId ouroboros.ConnectionId,
+	isNtC bool,
+) {
+	if c.config.ConnClosedFunc == nil {
+		return
+	}
+	c.config.ConnClosedFunc(connId, isNtC, errConnectionReplaced)
 }
 
 func (c *ConnectionManager) RemoveConnection(

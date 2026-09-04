@@ -93,6 +93,7 @@ func TestSeedImportedRewardInputsResolvesParamsPerEpoch(t *testing.T) {
 		txn.Metadata(),
 		snapshots,
 		resolve,
+		nil,
 		state.Epoch,
 		state.Tip.Slot,
 		logger,
@@ -142,6 +143,7 @@ func TestSeedImportedRewardInputsPropagatesParamsError(t *testing.T) {
 		txn.Metadata(),
 		snapshots,
 		func(uint64) (map[string]*ParsedPool, error) { return nil, wantErr },
+		nil,
 		state.Epoch,
 		state.Tip.Slot,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -222,7 +224,11 @@ func TestImportSnapShotsPrefersSnapshotPoolParamsOverRegistrations(
 	))
 	require.NoError(t, txn.Commit())
 
-	wantCost := snapshots.Mark.PoolParams[targetKey].Cost
+	snapshotPool, ok := snapshots.Mark.PoolParams[targetKey]
+	if !ok || snapshotPool == nil {
+		t.Fatalf("mark snapshot has no parameters for pool %s", targetKey)
+	}
+	wantCost := snapshotPool.Cost
 	require.NotEqual(t, uint64(registrationCost), wantCost,
 		"the two sources must disagree, or this test cannot tell which one "+
 			"was used")
@@ -315,6 +321,7 @@ func TestSeedImportedRewardInputsSeedsWithoutAParamsWindow(t *testing.T) {
 				"%w: epoch %d", errRewardParamsWindowUnknown, epoch,
 			)
 		},
+		nil,
 		state.Epoch,
 		state.Tip.Slot,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -372,6 +379,7 @@ func TestSeedImportedRewardInputsSkipsEpochsWithNoParamsWindow(t *testing.T) {
 			}
 			return params, nil
 		},
+		nil,
 		state.Epoch,
 		state.Tip.Slot,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),

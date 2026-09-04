@@ -122,10 +122,14 @@ CREATE TABLE constitution (
 
 CREATE TABLE committee_member (
     id INTEGER PRIMARY KEY,
-    cold_cred_hash BLOB NOT NULL UNIQUE,
+    cold_credential_tag INTEGER NOT NULL DEFAULT 0,
+    cold_cred_hash BLOB NOT NULL,
     expires_epoch INTEGER NOT NULL,
+    term_start_slot INTEGER NOT NULL,
+    term_start_slot_set BOOLEAN NOT NULL DEFAULT FALSE,
     added_slot INTEGER NOT NULL,
-    deleted_slot INTEGER
+    deleted_slot INTEGER,
+    UNIQUE (cold_credential_tag, cold_cred_hash, added_slot)
 );
 
 CREATE TABLE committee_quorum (
@@ -143,6 +147,8 @@ CREATE TABLE pool_stake_snapshot (
     stake_denominator TEXT NOT NULL DEFAULT '0',
     delegator_count INTEGER NOT NULL,
     captured_slot INTEGER NOT NULL,
+    leios_key_public BLOB,
+    leios_key_possession_proof BLOB,
     calculation_version INTEGER NOT NULL DEFAULT 0,
     reward_account_auto_vote INTEGER NOT NULL DEFAULT 0,
     reward_account_auto_vote_resolved BOOLEAN NOT NULL DEFAULT FALSE,
@@ -365,6 +371,20 @@ CREATE TABLE offchain_metadata (
     fetch_attempts INTEGER,
     last_http_status INTEGER,
     UNIQUE (source_type, url, hash)
+);
+
+CREATE TABLE token_registry_entry (
+    created_at DATETIME,
+    updated_at DATETIME,
+    subject TEXT NOT NULL,
+    name TEXT,
+    ticker TEXT,
+    description TEXT,
+    url TEXT,
+    logo TEXT,
+    id INTEGER PRIMARY KEY,
+    decimals INTEGER,
+    UNIQUE (subject)
 );
 
 CREATE TABLE utxo (

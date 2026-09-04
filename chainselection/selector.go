@@ -215,9 +215,27 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 		cs.mode = SelectionModeGenesis
 	}
 	if cfg.EventBus != nil && !cfg.DisableEventSubscriptions {
-		cfg.EventBus.SubscribeFunc(
+		// SubscribeFuncStrict, not SubscribeFunc: HandlePeerRollbackEvent
+		// mutates chain-selection state machine state (per-peer observed
+		// history) from a monotonic rollback stream. A handler panic must
+		// not be absorbed and silently followed by the next rollback as if
+		// this one had actually been applied -- see onPeerRollbackPanic and
+		// event.EventBus.SubscribeFuncStrict.
+		//
+		// SubscriberBackpressureBlock, not the default Detach: this stream is
+		// ordering-critical, since a dropped rollback leaves a peer's tracked
+		// tip stale relative to its actual (rolled-back) chain, feeding
+		// selection from data the peer itself has already disavowed. Nothing
+		// here re-subscribes, so Detach would let ordinary backpressure alone
+		// (with no panic at all) silently and permanently stop rollback
+		// processing -- the same durable loss a panic causes, but far easier
+		// to trigger.
+		cfg.EventBus.SubscribeFuncStrict(
 			PeerRollbackEventType,
+			event.DefaultSubscriberBuffer,
+			event.SubscriberBackpressureBlock,
 			cs.HandlePeerRollbackEvent,
+			cs.onPeerRollbackPanic,
 		)
 	}
 	return cs
@@ -254,15 +272,13 @@ func (cs *ChainSelector) genesisWindowSlotsLocked() uint64 {
 // bestKnownGenesisSlotLocked returns the exit horizon: the network tip slot the
 // local tip must catch up to (within the window) before leaving Genesis mode.
 //
-// The advertised tip (pt.Tip) is untrusted and unbounded — the implausible-tip
-// check bounds the advertised BLOCK number but NOT the advertised slot, and the
-// first peer is accepted with no reference — so a peer can advertise a plausible
-// block with a slot near math.MaxUint64. Corroboration alone does not fix this:
-// it validates the DELIVERED headers (the observed frontier), not the advertised
-// claim, so a peer that delivers one shared early header (passing corroboration)
-// can still advertise an arbitrary tip. Using that raw advertised slot as the
-// horizon lets a single peer pin the node in Genesis mode indefinitely — a
-// liveness DoS.
+// The advertised tip (pt.Tip) is untrusted and unbounded. Plausibility checks
+// intentionally bound the DELIVERED header frontier instead, because an honest
+// advertised tip can be arbitrarily far ahead during catch-up. Corroboration
+// validates those delivered headers, not the advertised claim, so a peer that
+// delivers one shared early header (passing corroboration) can still advertise
+// an arbitrary tip. Using that raw advertised slot as the horizon lets a single
+// peer pin the node in Genesis mode indefinitely — a liveness DoS.
 //
 // The horizon is therefore bound to DELIVERED data: a peer's advertised tip
 // counts only when the peer is corroborated (selectable) AND it has actually
@@ -349,12 +365,14 @@ func (cs *ChainSelector) advanceSelectionModeLocked() bool {
 // tip block header, used for tie-breaking when chains have equal block number
 // and slot.
 //
-// Returns true if the tip was accepted, false if it was rejected as
-// implausible. A tip is considered implausible if it claims a block number
-// more than securityParam (k) blocks ahead of a reference point. For known
-// peers, the reference is the peer's own previous tip; for new peers, the
-// reference is the best known peer tip. This avoids rejecting legitimate
-// peers during sync (where the local tip is far behind).
+// Returns true if the tip was accepted, false if its delivered frontier was
+// rejected as implausible. The remote advertised tip is untrusted and may be
+// arbitrarily far ahead while the peer legitimately serves the next block the
+// node needs, so plausibility is checked against the locally observed header.
+// For known peers, the reference is the peer's previous observed frontier; for
+// new peers, it is the best observed peer frontier. This avoids rejecting
+// legitimate peers during sync while still bounding delivered block-number
+// jumps.
 func (cs *ChainSelector) UpdatePeerTip(
 	connId ouroboros.ConnectionId,
 	tip ochainsync.Tip,
@@ -408,34 +426,67 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
 
-		// Reject implausible tips that claim to be too far ahead of
-		// a reference point. Three cases:
+		// Reject implausible delivered frontiers that jump too far ahead of a
+		// trusted reference point. Before any local block has been applied,
+		// retain the advertised-tip bound as well: the first peer bootstraps the
+		// reference, and later peers cannot immediately inject a far claim. Once
+		// a local tip exists, the advertisement can legitimately be arbitrarily
+		// far ahead during catch-up; only its delivered frontier drives
+		// selection and must remain plausible. Three cases:
 		//  1. Known peer: compare against the peer's own previous
-		//     tip — chainsync advances incrementally so the delta
+		//     observed frontier — chainsync advances incrementally so the delta
 		//     is always small. Always checked (even if prev == 0).
 		//  2. New peer with existing peers: compare against the
-		//     best known peer tip to prevent a malicious newcomer
-		//     from spoofing an extremely high block number.
+		//     best observed peer frontier to prevent a malicious newcomer
+		//     from injecting an extremely high delivered block number.
 		//  3. First peer ever: no reference exists, accept to
 		//     allow bootstrap.
 		if cs.securityParam > 0 {
-			rejectTip := false
+			// Callers without a distinct delivered frontier pass the
+			// advertised tip for both values, as UpdatePeerTip does. An
+			// all-zero delivered frontier therefore means the peer has
+			// delivered nothing, and is bounded as block 0 rather than
+			// being credited with its untrusted advertisement.
+			observedBlock := observedTip.BlockNumber
+			observedReject := false
+			advertisedReject := false
+			hasReference := false
 			var referenceBlock uint64
+			var advertisedReferenceBlock uint64
+			var maxPlausibleBlock uint64
+			var maxPlausibleAdvertisedBlock uint64
 			if prevTip, exists := cs.peerTips[connId]; exists {
-				// Case 1: known peer — compare against the peer's
-				// own previous tip (chainsync advances incrementally).
-				referenceBlock = prevTip.Tip.BlockNumber
-				rejectTip = tip.BlockNumber >
-					safeAddUint64(referenceBlock, cs.securityParam)
+				// Case 1: known peer — compare against the peer's own
+				// previous delivered frontier.
+				hasReference = true
+				referenceBlock = prevTip.SelectionTip().BlockNumber
+				advertisedReferenceBlock = prevTip.Tip.BlockNumber
 			} else if len(cs.peerTips) > 0 {
-				// Case 2: new peer — check against best known
+				// Case 2: new peer — check against the best observed and
+				// advertised frontiers separately.
+				hasReference = true
 				for _, pt := range cs.peerTips {
-					if pt.Tip.BlockNumber > referenceBlock {
-						referenceBlock = pt.Tip.BlockNumber
+					blockNumber := pt.SelectionTip().BlockNumber
+					if blockNumber > referenceBlock {
+						referenceBlock = blockNumber
+					}
+					if pt.Tip.BlockNumber > advertisedReferenceBlock {
+						advertisedReferenceBlock = pt.Tip.BlockNumber
 					}
 				}
-				rejectTip = tip.BlockNumber >
-					safeAddUint64(referenceBlock, cs.securityParam)
+			}
+			if hasReference {
+				maxPlausibleBlock = safeAddUint64(
+					referenceBlock,
+					cs.securityParam,
+				)
+				observedReject = observedBlock > maxPlausibleBlock
+				maxPlausibleAdvertisedBlock = safeAddUint64(
+					advertisedReferenceBlock,
+					cs.securityParam,
+				)
+				advertisedReject = tip.BlockNumber >
+					maxPlausibleAdvertisedBlock
 			}
 			// Catch-up relaxation: after a stall, recorded peer tips
 			// go stale while the network advances. A peer whose
@@ -445,24 +496,30 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 			// AND the reference itself is stale (reference <=
 			// local tip, meaning the node hasn't updated peer
 			// records since the stall began).
-			if rejectTip && cs.localTip.BlockNumber > 0 &&
+			if observedReject && cs.localTip.BlockNumber > 0 &&
 				referenceBlock <= cs.localTip.BlockNumber {
-				rejectTip = tip.BlockNumber >
-					safeAddUint64(
-						cs.localTip.BlockNumber,
-						safeAddUint64(cs.securityParam, cs.securityParam),
-					)
+				maxPlausibleBlock = safeAddUint64(
+					cs.localTip.BlockNumber,
+					safeAddUint64(cs.securityParam, cs.securityParam),
+				)
+				observedReject = observedBlock > maxPlausibleBlock
 			}
 			// Case 3: len(peerTips)==0 && peer not known → bootstrap
-			if rejectTip {
+			if observedReject ||
+				(advertisedReject && cs.localTip.BlockNumber == 0) {
 				cs.config.Logger.Warn(
 					"rejecting implausible peer tip",
 					"connection_id", connId.String(),
 					"claimed_block", tip.BlockNumber,
+					"observed_block", observedBlock,
 					"reference_block", referenceBlock,
+					"advertised_reference_block",
+					advertisedReferenceBlock,
+					"local_block", cs.localTip.BlockNumber,
 					"security_param", cs.securityParam,
-					"max_plausible_block",
-					safeAddUint64(referenceBlock, cs.securityParam),
+					"max_plausible_block", maxPlausibleBlock,
+					"max_plausible_advertised_block",
+					maxPlausibleAdvertisedBlock,
 				)
 				accepted = false
 				return
@@ -482,6 +539,10 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 				cs.genesisWindowSlotsLocked(),
 				trackHashes,
 			)
+			peerTip.recordObservedTipHistory(
+				observedTip,
+				safeAddUint64(cs.securityParam, 1),
+			)
 		} else {
 			// Evict the least-recently-updated peer if at capacity
 			if len(cs.peerTips) >= cs.maxTrackedPeers {
@@ -498,17 +559,22 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 				}
 			}
 			peerTip := &PeerChainTip{
-				ConnectionId: connId,
-				Tip:          tip,
-				ObservedTip:  observedTip,
-				VRFOutput:    vrfOutput,
-				PraosView:    praosView,
-				LastUpdated:  time.Now(),
+				ConnectionId:   connId,
+				Tip:            tip,
+				ObservedTip:    observedTip,
+				observedTipSet: true,
+				VRFOutput:      vrfOutput,
+				PraosView:      praosView,
+				LastUpdated:    time.Now(),
 			}
 			peerTip.recordObservedPoint(
 				observedTip.Point,
 				cs.genesisWindowSlotsLocked(),
 				trackHashes,
+			)
+			peerTip.recordObservedTipHistory(
+				observedTip,
+				safeAddUint64(cs.securityParam, 1),
 			)
 			cs.peerTips[connId] = peerTip
 		}
@@ -620,7 +686,7 @@ func (cs *ChainSelector) evictLeastRecentPeerLocked() *ouroboros.ConnectionId {
 		if !found {
 			oldestConn = connId
 			oldestUpdated = peerTip.LastUpdated
-			oldestBlockNumber = peerTip.Tip.BlockNumber
+			oldestBlockNumber = peerTip.SelectionTip().BlockNumber
 			found = true
 			continue
 		}
@@ -628,20 +694,21 @@ func (cs *ChainSelector) evictLeastRecentPeerLocked() *ouroboros.ConnectionId {
 		if peerTip.LastUpdated.Before(oldestUpdated) {
 			oldestConn = connId
 			oldestUpdated = peerTip.LastUpdated
-			oldestBlockNumber = peerTip.Tip.BlockNumber
+			oldestBlockNumber = peerTip.SelectionTip().BlockNumber
 		} else if peerTip.LastUpdated.Equal(oldestUpdated) {
 			// Tie-break on block number: evict the peer with
 			// the lower block number (less useful chain)
-			if peerTip.Tip.BlockNumber < oldestBlockNumber {
+			peerBlockNumber := peerTip.SelectionTip().BlockNumber
+			if peerBlockNumber < oldestBlockNumber {
 				oldestConn = connId
 				oldestUpdated = peerTip.LastUpdated
-				oldestBlockNumber = peerTip.Tip.BlockNumber
-			} else if peerTip.Tip.BlockNumber == oldestBlockNumber {
+				oldestBlockNumber = peerBlockNumber
+			} else if peerBlockNumber == oldestBlockNumber {
 				// Final tie-break: deterministic by connection ID
 				if connId.String() < oldestConn.String() {
 					oldestConn = connId
 					oldestUpdated = peerTip.LastUpdated
-					oldestBlockNumber = peerTip.Tip.BlockNumber
+					oldestBlockNumber = peerBlockNumber
 				}
 			}
 		}
@@ -703,12 +770,15 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 				// Emit ChainSwitchEvent so subscribers know to switch connections
 				if cs.config.EventBus != nil {
 					newPeerTip := cs.peerTips[*newBest]
+					newSelectionTip := newPeerTip.SelectionTip()
 					evt := event.NewEvent(
 						ChainSwitchEventType,
 						ChainSwitchEvent{
 							PreviousConnectionId: previousBest,
 							NewConnectionId:      *newBest,
 							NewTip:               newPeerTip.Tip,
+							NewObservedTip:       newSelectionTip,
+							NewObservedTipSet:    true,
 							ComparisonResult:     ChainComparisonUnknown,
 							BlockDifference: safeUint64ToInt64(
 								newPeerTip.Tip.BlockNumber,
@@ -749,14 +819,16 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 // not an all-time high-water mark.
 func (cs *ChainSelector) SetLocalTip(tip ochainsync.Tip) {
 	shouldEvaluate := false
-	cs.mutex.Lock()
-	if tip.BlockNumber > cs.localTipProgressBlock {
-		cs.localTipProgressAt = cs.now()
-	}
-	cs.localTipProgressBlock = tip.BlockNumber
-	cs.localTip = tip
-	shouldEvaluate = cs.advanceSelectionModeLocked()
-	cs.mutex.Unlock()
+	func() {
+		cs.mutex.Lock()
+		defer cs.mutex.Unlock()
+		if tip.BlockNumber > cs.localTipProgressBlock {
+			cs.localTipProgressAt = cs.now()
+		}
+		cs.localTipProgressBlock = tip.BlockNumber
+		cs.localTip = tip
+		shouldEvaluate = cs.advanceSelectionModeLocked()
+	}()
 	if shouldEvaluate {
 		cs.EvaluateAndSwitch()
 	}
@@ -777,10 +849,12 @@ func (cs *ChainSelector) now() time.Time {
 // comparison.
 func (cs *ChainSelector) SetSecurityParam(k uint64) {
 	shouldEvaluate := false
-	cs.mutex.Lock()
-	cs.securityParam = k
-	shouldEvaluate = cs.advanceSelectionModeLocked()
-	cs.mutex.Unlock()
+	func() {
+		cs.mutex.Lock()
+		defer cs.mutex.Unlock()
+		cs.securityParam = k
+		shouldEvaluate = cs.advanceSelectionModeLocked()
+	}()
 	if shouldEvaluate {
 		cs.EvaluateAndSwitch()
 	}
@@ -840,7 +914,63 @@ func (cs *ChainSelector) GetPeerTip(
 		copy(tipCopy.observedSlots, pt.observedSlots)
 	}
 	tipCopy.observedPoints = cloneObservedPoints(pt.observedPoints)
+	if len(pt.observedTipHistory) > 0 {
+		tipCopy.observedTipHistory = make(
+			[]ochainsync.Tip,
+			len(pt.observedTipHistory),
+		)
+		for i, tip := range pt.observedTipHistory {
+			tipCopy.observedTipHistory[i] = cloneObservedTip(tip)
+		}
+	}
 	return &tipCopy
+}
+
+// GetPeerSyncTarget returns a peer's advertised head only after its delivered
+// frontier is close enough to corroborate that advertisement.
+func (cs *ChainSelector) GetPeerSyncTarget(
+	connId ouroboros.ConnectionId,
+) (ochainsync.Tip, bool) {
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	peerTip := cs.peerTips[connId]
+	if !cs.isPeerSelectableLocked(connId, peerTip, false) {
+		return ochainsync.Tip{}, false
+	}
+	observed := peerTip.SelectionTip()
+	advertised := peerTip.Tip
+	if safeAddUint64(
+		observed.Point.Slot,
+		cs.genesisWindowSlotsLocked(),
+	) < advertised.Point.Slot {
+		return observed, observed.Point.Slot != 0 || observed.BlockNumber != 0
+	}
+	if advertised.Point.Slot == 0 && advertised.BlockNumber == 0 {
+		return observed, observed.Point.Slot != 0 || observed.BlockNumber != 0
+	}
+	return advertised, true
+}
+
+// SyncTargetForPeerTipUpdate applies the bounded-target policy to the exact
+// observed/advertised pair carried by one chainsync event. It intentionally
+// does not read the mutable per-peer tip map.
+func (cs *ChainSelector) SyncTargetForPeerTipUpdate(
+	update PeerTipUpdateEvent,
+) (ochainsync.Tip, bool) {
+	cs.mutex.RLock()
+	window := cs.genesisWindowSlotsLocked()
+	cs.mutex.RUnlock()
+	observed := update.ObservedTip
+	if observed.Point.Slot == 0 && observed.BlockNumber == 0 {
+		return ochainsync.Tip{}, false
+	}
+	if safeAddUint64(observed.Point.Slot, window) < update.Tip.Point.Slot {
+		return observed, true
+	}
+	if update.Tip.Point.Slot == 0 && update.Tip.BlockNumber == 0 {
+		return observed, true
+	}
+	return update.Tip, true
 }
 
 // GetAllPeerTips returns a deep copy of all tracked peer tips.
@@ -863,6 +993,15 @@ func (cs *ChainSelector) GetAllPeerTips() map[ouroboros.ConnectionId]*PeerChainT
 			copy(tipCopy.observedSlots, v.observedSlots)
 		}
 		tipCopy.observedPoints = cloneObservedPoints(v.observedPoints)
+		if len(v.observedTipHistory) > 0 {
+			tipCopy.observedTipHistory = make(
+				[]ochainsync.Tip,
+				len(v.observedTipHistory),
+			)
+			for i, tip := range v.observedTipHistory {
+				tipCopy.observedTipHistory[i] = cloneObservedTip(tip)
+			}
+		}
 		result[k] = &tipCopy
 	}
 	return result
@@ -903,14 +1042,15 @@ func (cs *ChainSelector) isPeerSelectableLocked(
 		}
 		return false
 	}
+	selectionTip := peerTip.SelectionTip()
 	if cs.securityParam > 0 && cs.localTip.BlockNumber > 0 &&
-		safeAddUint64(peerTip.Tip.BlockNumber, cs.securityParam) <
+		safeAddUint64(selectionTip.BlockNumber, cs.securityParam) <
 			cs.localTip.BlockNumber {
 		if logSkip {
 			cs.config.Logger.Debug(
 				"skipping implausibly-behind peer",
 				"connection_id", connId.String(),
-				"peer_block_number", peerTip.Tip.BlockNumber,
+				"peer_block_number", selectionTip.BlockNumber,
 				"local_block_number", cs.localTip.BlockNumber,
 				"security_param", cs.securityParam,
 			)
@@ -927,14 +1067,14 @@ func (cs *ChainSelector) isPeerSelectableLocked(
 		bestBlock := cs.bestKnownBlockNumber()
 		if bestBlock > 0 &&
 			safeAddUint64(
-				peerTip.Tip.BlockNumber,
+				selectionTip.BlockNumber,
 				cs.securityParam,
 			) < bestBlock {
 			if logSkip {
 				cs.config.Logger.Debug(
 					"skipping peer behind best known tip",
 					"connection_id", connId.String(),
-					"peer_block_number", peerTip.Tip.BlockNumber,
+					"peer_block_number", selectionTip.BlockNumber,
 					"best_known_block", bestBlock,
 					"security_param", cs.securityParam,
 				)
@@ -999,19 +1139,20 @@ func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
 	return &bestConnId
 }
 
-// bestKnownBlockNumber returns the highest block number reported by any
+// bestKnownBlockNumber returns the highest block number delivered by any
 // eligible, non-stale peer. Used to skip peers that are far behind the
-// network tip during catch-up. Only considers peers that pass eligibility
-// and staleness checks to avoid letting an ineligible outlier suppress
-// valid peer selection.
+// observed frontier during catch-up. Advertised tips are untrusted and must
+// not suppress peers that have delivered valid headers. Only peers that pass
+// eligibility and staleness checks are considered.
 func (cs *ChainSelector) bestKnownBlockNumber() uint64 {
 	var best uint64
 	for connId, pt := range cs.peerTips {
 		if !cs.isConnectionEligible(connId) || cs.isPeerTipStale(pt) {
 			continue
 		}
-		if pt.Tip.BlockNumber > best {
-			best = pt.Tip.BlockNumber
+		blockNumber := pt.SelectionTip().BlockNumber
+		if blockNumber > best {
+			best = blockNumber
 		}
 	}
 	return best
@@ -1443,6 +1584,7 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 			return false, nil, nil, corroborationEvent
 		}
 		newTip := newPeerTip.Tip
+		newObservedTip := newPeerTip.SelectionTip()
 		cs.bestPeerConn = newBest
 		switchOccurred = true
 
@@ -1451,15 +1593,19 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 			"connection_id", newBest.String(),
 			"block_number", newTip.BlockNumber,
 			"slot", newTip.Point.Slot,
+			"observed_block_number", newObservedTip.BlockNumber,
+			"observed_slot", newObservedTip.Point.Slot,
 		)
 
 		if cs.config.EventBus != nil {
 			var previousTip ochainsync.Tip
+			var previousObservedTip ochainsync.Tip
 			var previousConnId ouroboros.ConnectionId
 			if previousBest != nil {
 				previousConnId = *previousBest
 				if pt, ok := cs.peerTips[*previousBest]; ok {
 					previousTip = pt.Tip
+					previousObservedTip = pt.SelectionTip()
 				}
 			}
 			// Compute comparison result and block difference
@@ -1485,6 +1631,9 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 					NewConnectionId:      *newBest,
 					NewTip:               newTip,
 					PreviousTip:          previousTip,
+					NewObservedTip:       newObservedTip,
+					NewObservedTipSet:    true,
+					PreviousObservedTip:  previousObservedTip,
 					ComparisonResult:     comparisonResult,
 					BlockDifference:      blockDiff,
 				},
@@ -1578,15 +1727,44 @@ func (cs *ChainSelector) HandlePeerRollbackEvent(evt event.Event) {
 	}
 
 	var shouldEvaluate bool
-	cs.mutex.Lock()
-	if peerTip, exists := cs.peerTips[e.ConnectionId]; exists {
-		peerTip.ApplyRollback(e.Point, e.Tip)
-		shouldEvaluate = true
-	}
-	cs.mutex.Unlock()
+	func() {
+		cs.mutex.Lock()
+		defer cs.mutex.Unlock()
+		if peerTip, exists := cs.peerTips[e.ConnectionId]; exists {
+			peerTip.ApplyRollback(e.Point, e.Tip)
+			shouldEvaluate = true
+		}
+	}()
 
 	if shouldEvaluate {
 		cs.EvaluateAndSwitch()
+	}
+}
+
+// onPeerRollbackPanic is the SubscribeFuncStrict onPanic hook for the
+// PeerRollbackEventType subscription registered in NewChainSelector. The
+// EventBus has already recovered and logged the panic and torn down the
+// subscription by the time this runs; it adds chain-selection-specific
+// context to the log and publishes PeerRollbackHandlerPanicEventType so an
+// operator or automated watcher has a durable signal that rollback handling
+// for this selector has stopped, rather than silently missing every
+// subsequent peer rollback with no trace beyond a generic log line.
+func (cs *ChainSelector) onPeerRollbackPanic(evt event.Event, r any) {
+	cs.config.Logger.Error(
+		"chain selector rollback handler panicked; rollback subscription stopped",
+		"event_type",
+		evt.Type,
+		"panic",
+		r,
+	)
+	if cs.config.EventBus != nil {
+		cs.config.EventBus.Publish(
+			PeerRollbackHandlerPanicEventType,
+			event.NewEvent(
+				PeerRollbackHandlerPanicEventType,
+				PeerRollbackHandlerPanicEvent{Panic: r},
+			),
+		)
 	}
 }
 
@@ -1606,31 +1784,104 @@ func (cs *ChainSelector) evaluationLoop() {
 	}
 }
 
-// runEvaluationTick runs one evaluation tick with panic recovery.
-// If a panic occurs, it's logged and the loop continues.
+// runEvaluationTick runs one evaluation tick with panic recovery. If a panic
+// occurs, recoverEvaluationPanic surfaces it and the ticker loop continues on
+// the next tick.
 func (cs *ChainSelector) runEvaluationTick() {
-	defer func() {
-		if r := recover(); r != nil {
-			cs.config.Logger.Error(
-				"panic in evaluation tick, continuing",
-				"panic", r,
-			)
-		}
-	}()
+	defer cs.recoverEvaluationPanic(false)
 	cs.cleanupStalePeers()
 	cs.EvaluateAndSwitch()
 }
 
 func (cs *ChainSelector) runTriggeredEvaluation() {
-	defer func() {
-		if r := recover(); r != nil {
-			cs.config.Logger.Error(
-				"panic in triggered evaluation, continuing",
-				"panic", r,
-			)
-		}
-	}()
+	defer cs.recoverEvaluationPanic(true)
 	cs.EvaluateAndSwitch()
+}
+
+// recoverEvaluationPanic recovers a panic from one evaluation tick or
+// triggered evaluation, logs it, and publishes EvaluationPanicEventType so
+// the dropped transition is surfaced to subscribers instead of vanishing
+// silently. The evaluation loop itself keeps running afterward -- both
+// runEvaluationTick and runTriggeredEvaluation return normally once this
+// defer completes, so evaluationLoop's for/select goes on to the next tick or
+// trigger. Stopping chain selection entirely for the whole node because one
+// evaluation panicked would be a worse outcome than the missed transition:
+// the periodic ticker is itself the recovery path, giving the selector
+// another chance on fresh peer/local-tip state a moment later.
+//
+// The logging and publish calls below run after this function's own
+// recover() has already consumed the evaluation panic, so nothing further up
+// the stack can catch a second one. Each is wrapped in its own nested
+// recovery: a misbehaving Logger or EventBus.Publish panicking here would
+// otherwise propagate out of this deferred call as a fresh, unrecovered
+// panic, which would stop runEvaluationTick/runTriggeredEvaluation from
+// returning at all and crash the entire process once it unwinds past
+// evaluationLoop's for/select with nothing left to catch it -- taking down
+// chain selection (and the node) over what should have been one dropped
+// transition.
+func (cs *ChainSelector) recoverEvaluationPanic(triggered bool) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	func() {
+		defer func() {
+			if r2 := recover(); r2 != nil {
+				// The configured Logger just proved unusable; fall back to
+				// the stdlib default rather than risk calling it again.
+				// safeLog, not a direct call: the fallback itself must not
+				// be the thing that finally lets a panic escape.
+				safeLog(
+					slog.Default(),
+					"panic while logging a chain selection evaluation panic",
+					"triggered", triggered,
+					"original_panic", r,
+					"logging_panic", r2,
+				)
+			}
+		}()
+		cs.config.Logger.Error(
+			"panic in chain selection evaluation; transition dropped",
+			"panic", r,
+			"triggered", triggered,
+		)
+	}()
+	if cs.config.EventBus == nil {
+		return
+	}
+	func() {
+		defer func() {
+			if r2 := recover(); r2 != nil {
+				safeLog(
+					slog.Default(),
+					"panic while publishing a chain selection evaluation "+
+						"panic event",
+					"triggered", triggered,
+					"original_panic", r,
+					"publish_panic", r2,
+				)
+			}
+		}()
+		cs.config.EventBus.Publish(
+			EvaluationPanicEventType,
+			event.NewEvent(
+				EvaluationPanicEventType,
+				EvaluationPanicEvent{Panic: r, Triggered: triggered},
+			),
+		)
+	}()
+}
+
+// safeLog calls logger.Error, discarding any panic instead of letting it
+// propagate. Used only as the last-resort step inside a panic-recovery path
+// that has nothing left above it to catch a further panic -- e.g. reporting
+// that the configured Logger itself panicked, via slog.Default() instead.
+// Even that fallback must not be the thing that finally lets a panic escape,
+// so this is the floor: it stops here, silently, rather than one level
+// deeper.
+func safeLog(logger *slog.Logger, msg string, args ...any) {
+	defer func() { _ = recover() }()
+	logger.Error(msg, args...)
 }
 
 func (cs *ChainSelector) cleanupStalePeers() {
@@ -1680,12 +1931,15 @@ func (cs *ChainSelector) cleanupStalePeers() {
 				// Emit ChainSwitchEvent so subscribers know to switch connections
 				if cs.config.EventBus != nil {
 					newPeerTip := cs.peerTips[*newBest]
+					newSelectionTip := newPeerTip.SelectionTip()
 					evt := event.NewEvent(
 						ChainSwitchEventType,
 						ChainSwitchEvent{
 							PreviousConnectionId: *previousBest,
 							NewConnectionId:      *newBest,
 							NewTip:               newPeerTip.Tip,
+							NewObservedTip:       newSelectionTip,
+							NewObservedTipSet:    true,
 							ComparisonResult:     ChainComparisonUnknown,
 							BlockDifference: safeUint64ToInt64(
 								newPeerTip.Tip.BlockNumber,

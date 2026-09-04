@@ -153,7 +153,9 @@ func New(cfg Config) *Recycler {
 // is missing or the tick interval is not positive.
 func (r *Recycler) Start(ctx context.Context) error {
 	if r.config.Components == nil {
-		return errors.New("chainsync stall recycler: components must not be nil")
+		return errors.New(
+			"chainsync stall recycler: components must not be nil",
+		)
 	}
 	if r.config.EventBus == nil {
 		return errors.New("chainsync stall recycler: event bus must not be nil")
@@ -463,7 +465,11 @@ func (r *Recycler) checkLocalTipPlateau(
 		return
 	}
 	bestPeerTip := live.ChainSelector.GetPeerTip(*bestPeer)
-	if bestPeerTip == nil || bestPeerTip.Tip.Point.Slot <= localTipSlot {
+	if bestPeerTip == nil {
+		return
+	}
+	bestPeerTipSlot := bestPeerTip.SelectionTip().Point.Slot
+	if bestPeerTipSlot <= localTipSlot {
 		return
 	}
 	targetConn := live.ChainsyncState.GetClientConnId()
@@ -481,7 +487,7 @@ func (r *Recycler) checkLocalTipPlateau(
 		now,
 		st.lastProgressAt,
 		localTipSlot,
-		bestPeerTip.Tip.Point.Slot,
+		bestPeerTipSlot,
 		lastRecycledAt,
 		effectiveCooldown,
 		effectivePlateau,
@@ -516,7 +522,7 @@ func (r *Recycler) checkLocalTipPlateau(
 			"local tip plateau resolved via ledger reconcile",
 			"connection_id", connKey,
 			"local_tip_slot", localTipSlot,
-			"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
+			"best_peer_tip_slot", bestPeerTipSlot,
 			"plateau_duration", now.Sub(st.lastProgressAt),
 		)
 		// Reset the plateau clock so we don't immediately re-trigger on the
@@ -541,7 +547,7 @@ func (r *Recycler) checkLocalTipPlateau(
 	if !reconcileFailed && isLedgerApplicationBacklog(
 		localTipSlot,
 		primaryChainTipSlot,
-		bestPeerTip.Tip.Point.Slot,
+		bestPeerTipSlot,
 	) {
 		// The header chain is already caught up to the peer; the plateau is
 		// the ledger pipeline draining a backlog of already-fetched blocks.
@@ -551,11 +557,16 @@ func (r *Recycler) checkLocalTipPlateau(
 		// being masked as a chainsync stall.
 		r.logger.Info(
 			"local tip plateau is a ledger-application backlog; header chain already caught up, not recycling chainsync",
-			"connection_id", connKey,
-			"applied_tip_slot", localTipSlot,
-			"primary_chain_tip_slot", primaryChainTipSlot,
-			"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
-			"plateau_duration", now.Sub(st.lastProgressAt),
+			"connection_id",
+			connKey,
+			"applied_tip_slot",
+			localTipSlot,
+			"primary_chain_tip_slot",
+			primaryChainTipSlot,
+			"best_peer_tip_slot",
+			bestPeerTipSlot,
+			"plateau_duration",
+			now.Sub(st.lastProgressAt),
 		)
 		// Reset the plateau clock so we re-evaluate only after another full
 		// plateau window instead of every tick while the ledger pipeline
@@ -584,7 +595,7 @@ func (r *Recycler) checkLocalTipPlateau(
 		"local tip plateau detected, resyncing chainsync client",
 		"connection_id", connKey,
 		"local_tip_slot", localTipSlot,
-		"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
+		"best_peer_tip_slot", bestPeerTipSlot,
 		"plateau_duration", now.Sub(st.lastProgressAt),
 		"eligible_peer_count", eligibleCount,
 	)
@@ -675,8 +686,10 @@ func (r *Recycler) processDueRecycles(
 		if eligibleCount <= 1 && !tracked.ObservabilityOnly {
 			r.logger.Warn(
 				"chainsync client stalled but is only eligible peer, skipping recycle",
-				"connection_id", connKey,
-				"stall_timeout", r.config.StallTimeout,
+				"connection_id",
+				connKey,
+				"stall_timeout",
+				r.config.StallTimeout,
 			)
 			st.recycleAt[connKey] = now.Add(r.config.Grace)
 			continue
@@ -688,10 +701,14 @@ func (r *Recycler) processDueRecycles(
 			// indefinite stalls.
 			r.logger.Warn(
 				"chainsync client stalled with no active selection, recycling connection",
-				"connection_id", connKey,
-				"stall_timeout", r.config.StallTimeout,
-				"grace_period", r.config.Grace,
-				"recycle_cooldown", r.config.Cooldown,
+				"connection_id",
+				connKey,
+				"stall_timeout",
+				r.config.StallTimeout,
+				"grace_period",
+				r.config.Grace,
+				"recycle_cooldown",
+				r.config.Cooldown,
 			)
 			r.publishConnectionRecycle(
 				connId,

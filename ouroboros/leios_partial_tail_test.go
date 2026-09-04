@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
@@ -75,15 +76,23 @@ func TestFetchLeiosEbTxsRetainsPartialTailOnIncompleteFetch(t *testing.T) {
 	const txCount = 100
 	const diffused = 40
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 7, txCount)
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
 
 	requester := &diffusingBlockTxsRequester{available: diffused}
-	txs, err := o.fetchLeiosEbTxsBatched(requester, point, txCount)
+	txs, err := o.fetchLeiosEbTxsBatched(requester, point, txCount, nil)
 	require.Error(t, err)
 	requireTxsInIndexOrder(t, txs, diffused)
 
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.False(t, data.completeTxCache())
 	require.Equal(
@@ -104,16 +113,24 @@ func TestFetchLeiosEbTxsCompletesPartialTailOnReoffer(t *testing.T) {
 	const txCount = 100
 	const diffused = 40
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 11, txCount)
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
 
 	first := &diffusingBlockTxsRequester{available: diffused}
-	_, err := o.fetchLeiosEbTxsBatched(first, point, txCount)
+	_, err := o.fetchLeiosEbTxsBatched(first, point, txCount, nil)
 	require.Error(t, err)
 
 	// The relay finished diffusing and re-offers the block.
 	second := &diffusingBlockTxsRequester{available: txCount}
-	txs, err := o.fetchLeiosEbTxsBatched(second, point, txCount)
+	txs, err := o.fetchLeiosEbTxsBatched(second, point, txCount, nil)
 	require.NoError(t, err)
 	requireTxsInIndexOrder(t, txs, txCount)
 
@@ -128,13 +145,20 @@ func TestFetchLeiosEbTxsCompletesPartialTailOnReoffer(t *testing.T) {
 
 	// Completing the block stores it through the unchanged path, so the
 	// existing tip gate applies it exactly as a single-attempt fetch would.
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, txs))
-	slot, gotTxs, ok := o.EndorserBlockTxsByHash(point.Hash)
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			txs,
+			leiosStoreAuthoritative,
+		),
+	)
+	gotTxs, ok := o.EndorserBlockTxsByHash(point.Hash, point.Slot)
 	require.True(t, ok)
-	require.Equal(t, point.Slot, slot)
 	requireTxsInIndexOrder(t, gotTxs, txCount)
 
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.True(t, data.completeTxCache())
 	require.Zero(
@@ -153,16 +177,32 @@ func TestStoreLeiosEndorserBlockManifestKeepsPartialTail(t *testing.T) {
 	const txCount = 100
 	const diffused = 40
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 13, txCount)
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
 
 	requester := &diffusingBlockTxsRequester{available: diffused}
-	_, err := o.fetchLeiosEbTxsBatched(requester, point, txCount)
+	_, err := o.fetchLeiosEbTxsBatched(requester, point, txCount, nil)
 	require.Error(t, err)
 
 	for range 3 {
-		require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
-		data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+		require.NoError(
+			t,
+			o.storeLeiosEndorserBlock(
+				point,
+				blockRaw,
+				nil,
+				leiosStoreAuthoritative,
+			),
+		)
+		data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 		require.True(t, ok)
 		require.Equal(
 			t,
@@ -179,8 +219,16 @@ func TestStoreLeiosEndorserBlockManifestKeepsPartialTail(t *testing.T) {
 func TestRetainLeiosPartialTxsUnionsAcrossAttempts(t *testing.T) {
 	const txCount = 100
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 17, txCount)
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
 
 	head := make([]cbor.RawMessage, txCount)
 	tail := make([]cbor.RawMessage, txCount)
@@ -194,33 +242,79 @@ func TestRetainLeiosPartialTxsUnionsAcrossAttempts(t *testing.T) {
 			tail[i] = cbor.RawMessage(enc)
 		}
 	}
-	o.retainLeiosPartialTxs(point.Hash, head)
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	o.retainLeiosPartialTxs(point.Slot, point.Hash, head, nil)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.Equal(t, 60, data.partialTxCount())
 
-	o.retainLeiosPartialTxs(point.Hash, tail)
-	data, ok = o.lookupLeiosEndorserBlock(point.Hash)
+	o.retainLeiosPartialTxs(point.Slot, point.Hash, tail, nil)
+	data, ok = o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.Equal(t, txCount, data.partialTxCount())
 
 	// A fetch seeded from the union needs no further transactions from the
 	// relay at all.
 	requester := &diffusingBlockTxsRequester{available: 0}
-	txs, err := o.fetchLeiosEbTxsBatched(requester, point, txCount)
+	txs, err := o.fetchLeiosEbTxsBatched(requester, point, txCount, nil)
 	require.NoError(t, err)
 	requireTxsInIndexOrder(t, txs, txCount)
 	require.Zero(t, requester.calls)
 }
 
+// Retention validation can invalidate bodies that were already cached. Even
+// when the current fetch contributes no replacement body, the sanitized union
+// must replace the old cache entry so a later fetch cannot reuse the invalid
+// body.
+func TestRetainLeiosPartialTxsPublishesSanitizedHeldEntries(t *testing.T) {
+	_, ref1 := testLeiosManifestTx(t, 1)
+	tx2, ref2 := testLeiosManifestTx(t, 2)
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref1, ref2},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(23, lcommon.Blake2b256Hash(manifestRaw).Bytes())
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			manifestRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
+
+	// Seed index 0 with the body for index 1. The validation callback below
+	// must clear it even though this attempt offers no replacement body.
+	o.retainLeiosPartialTxs(
+		point.Slot,
+		point.Hash,
+		[]cbor.RawMessage{tx2, nil},
+		nil,
+	)
+	validate, err := leiosEndorserBlockTxValidator(manifestRaw, 2)
+	require.NoError(t, err)
+	o.retainLeiosPartialTxs(
+		point.Slot,
+		point.Hash,
+		[]cbor.RawMessage{tx2, nil},
+		validate,
+	)
+
+	cached, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	require.True(t, ok)
+	require.Empty(t, cached.partialTxs)
+	require.Zero(t, cached.partialTxCount())
+}
+
 // Retention is scoped to endorser blocks dingo is actually tracking: a partial
 // for an unknown hash is dropped rather than growing the cache.
 func TestRetainLeiosPartialTxsIgnoresUnknownBlock(t *testing.T) {
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
-	o.retainLeiosPartialTxs([]byte{0xde, 0xad}, []cbor.RawMessage{
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	o.retainLeiosPartialTxs(99, []byte{0xde, 0xad}, []cbor.RawMessage{
 		mustCbor(t, "tx0"),
-	})
-	_, ok := o.lookupLeiosEndorserBlock([]byte{0xde, 0xad})
+	}, nil)
+	_, ok := o.lookupLeiosEndorserBlock(99, []byte{0xde, 0xad})
 	require.False(t, ok)
 }
 
@@ -235,16 +329,24 @@ func TestStoreLeiosEndorserBlockPartialDoesNotRefreshCacheTTL(t *testing.T) {
 	const txCount = 100
 	const diffused = 40
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 19, txCount)
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
 
 	requester := &diffusingBlockTxsRequester{available: diffused}
-	_, err := o.fetchLeiosEbTxsBatched(requester, point, txCount)
+	_, err := o.fetchLeiosEbTxsBatched(requester, point, txCount, nil)
 	require.Error(t, err)
 
 	// Age the entry to just short of its TTL, the window in which a re-offer
 	// would otherwise reset the clock before pruning can evict it.
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	aged := time.Now().Add(-leiosEndorserBlockCacheTTL + 2*time.Second)
 	o.leiosMu.Lock()
@@ -252,9 +354,17 @@ func TestStoreLeiosEndorserBlockPartialDoesNotRefreshCacheTTL(t *testing.T) {
 	o.leiosMu.Unlock()
 
 	for range 3 {
-		require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+		require.NoError(
+			t,
+			o.storeLeiosEndorserBlock(
+				point,
+				blockRaw,
+				nil,
+				leiosStoreAuthoritative,
+			),
+		)
 	}
-	data, ok = o.lookupLeiosEndorserBlock(point.Hash)
+	data, ok = o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.Equal(
 		t,
@@ -278,8 +388,16 @@ func TestStoreLeiosEndorserBlockPartialDoesNotRefreshCacheTTL(t *testing.T) {
 		require.NoError(t, err)
 		full[i] = cbor.RawMessage(enc)
 	}
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, full))
-	data, ok = o.lookupLeiosEndorserBlock(point.Hash)
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			full,
+			leiosStoreAuthoritative,
+		),
+	)
+	data, ok = o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.True(t, data.completeTxCache())
 	require.Zero(t, data.partialTxCount())

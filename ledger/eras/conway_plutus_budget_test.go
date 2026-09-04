@@ -46,10 +46,10 @@ import (
 // and so a three-argument program, whose cost nothing external pins.
 //
 // The declared budget is zero on purpose. Restrictive validation runs the
-// script against the enormous budget and compares afterwards, so the entire
-// measured cost appears in the overage — including the trailing batch the
-// Haskell machine flushes on a successful return. Under-reporting that batch
-// lowers these figures and fails this test.
+// script against the protocol transaction budget and compares afterwards, so
+// the entire measured cost appears in the overage — including the trailing
+// batch the Haskell machine flushes on a successful return. Under-reporting
+// that batch lowers these figures and fails this test.
 func TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 	program := &syn.Program[syn.DeBruijn]{
 		Version: lang.LanguageVersionV1,
@@ -119,6 +119,10 @@ func TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
 				Major: 9,
 			},
+			MaxTxExUnits: lcommon.ExUnits{
+				Steps:  1_000_000,
+				Memory: 1_000_000,
+			},
 		},
 	)
 	require.Error(t, err)
@@ -132,5 +136,27 @@ func TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 		t,
 		plutusErr.Err.Error(),
 		"script exceeded declared budget: used (112100 cpu, 800 mem)",
+	)
+
+	t.Run(
+		"restrictive evaluation is capped by protocol transaction budget",
+		func(t *testing.T) {
+			err := ValidateTxConway(
+				tx,
+				0,
+				newMockLedgerState(),
+				&conway.ConwayProtocolParameters{
+					ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+						Major: 9,
+					},
+					MaxTxExUnits: lcommon.ExUnits{
+						Steps:  1_000,
+						Memory: 100,
+					},
+				},
+			)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "out of budget")
+		},
 	)
 }

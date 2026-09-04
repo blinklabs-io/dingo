@@ -15,9 +15,12 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -116,6 +119,29 @@ func MusashiNetworkIdentityConflict(
 		}
 	}
 	return "", false
+}
+
+// PeerSnapshotNetworkMismatch reports whether a topology peer snapshot names a
+// different network than the node is configured for.
+//
+// cardano-node writes the snapshot's own NetworkMagic into the file, so a
+// snapshot taken on another network is self-identifying. It matters because
+// the snapshot's relays *replace* the configured bootstrap peers during
+// Genesis selection: accepting a foreign one aims the node at another
+// network's relays and throws away the only addresses that could have worked.
+// Every one of those relays is then denied at the handshake on a network-magic
+// mismatch, leaving the node with no peers and nothing to fall back to.
+//
+// A zero magic on either side is "unspecified" rather than a network -- no
+// real network uses magic 0, and a hand-written or older snapshot may omit the
+// field -- so it is not treated as a mismatch.
+func PeerSnapshotNetworkMismatch(
+	snapshotMagic uint32,
+	networkMagic uint32,
+) bool {
+	return snapshotMagic != 0 &&
+		networkMagic != 0 &&
+		snapshotMagic != networkMagic
 }
 
 // MusashiPrototypeNetwork reports whether network/networkMagic unambiguously
@@ -275,12 +301,14 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	apiListeners := serving &&
 		(effectiveMode == RunModeDev || c.RunMode.IsDevMode() ||
 			c.StorageMode == storageModeAPI)
+	midnightServer := apiListeners && c.Midnight.ServerEnabled
 	utxorpcPort := APIPluginPort(c.Plugins.API.Utxorpc)
 	blockfrostPort := APIPluginPort(c.Plugins.API.Blockfrost)
 	meshPort := APIPluginPort(c.Plugins.API.Mesh)
 	// Each entry's host is the bind address the listener actually uses
-	// at runtime: bindAddr for most, privateBindAddr for the private
-	// listener, midnight.host for Midnight, and BarkHost for bark.
+	// at runtime: bindAddr for public listeners, privateBindAddr for the
+	// private listener, debugBindAddr for pprof, midnight.host for Midnight,
+	// and BarkHost for bark.
 	ports := []struct {
 		setting  string
 		host     string
@@ -291,7 +319,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		{"port (relay/NtN)", c.BindAddr, c.RelayPort, serving, serving},
 		{"privatePort", c.PrivateBindAddr, c.PrivatePort, serving, serving},
 		{"metricsPort", c.BindAddr, c.MetricsPort, auxListeners, serving},
-		{"debugPort", c.BindAddr, c.DebugPort, auxListeners, false},
+		{"debugPort", c.DebugBindAddr, c.DebugPort, auxListeners, false},
 		{"barkPort", c.BarkHost, c.BarkPort, serving, false},
 		{
 			"plugins.api.utxorpc.config.port",
@@ -318,8 +346,8 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			"midnight.port",
 			c.Midnight.Host,
 			c.Midnight.Port,
-			apiListeners,
-			false,
+			midnightServer,
+			midnightServer,
 		},
 	}
 	// Two active listeners contending for a port only fails at bind
@@ -398,22 +426,43 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, err)
 	}
 
-	// Bark's DatabaseService mounts its destructive RPCs (CreateSnapshot/
-	// DeleteSnapshot/VerifySnapshot/Restore/Truncate/CancelOperation)
-	// whenever bark is enabled with a snapshot directory configured —
-	// exactly node.go's Run() gating for lifecycleEnabled. Those RPCs must
-	// never be reachable without a way to authenticate callers, regardless
-	// of bind address (BarkHost/effectiveBarkHost is a network control, not
-	// an identity one), so a client CA is required upfront here rather than
-	// left to fail deep inside bark.Bark.Start at startup.
+	// Bark's DatabaseService is mounted whenever bark is enabled with a snapshot
+	// directory configured. Every method must authenticate its caller, and its
+	// destructive methods additionally require explicit operator authorization.
+	// Validate both policies here rather than failing deep in Bark.Start.
 	if serving && c.BarkPort > 0 && c.DatabaseLifecycle.SnapshotDir != "" &&
 		c.BarkClientCAFilePath == "" {
 		errs = append(errs, errors.New(
 			"barkClientCaFilePath is required when bark is enabled "+
 				"(barkPort) alongside databaseLifecycle.snapshotDir: its "+
-				"destructive DatabaseService RPCs must not be mounted "+
-				"without a way to authenticate callers",
+				"DatabaseService RPCs must not be mounted without a way to "+
+				"authenticate callers",
 		))
+	}
+	if serving && c.BarkPort > 0 && c.DatabaseLifecycle.SnapshotDir != "" &&
+		len(c.BarkOperatorCertificateFingerprints) == 0 {
+		errs = append(errs, errors.New(
+			"barkOperatorCertificateFingerprints requires at least one SHA-256 "+
+				"client certificate fingerprint when bark is enabled (barkPort) "+
+				"alongside databaseLifecycle.snapshotDir: verified identity alone "+
+				"does not authorize destructive DatabaseService RPCs",
+		))
+	}
+	for idx, fingerprint := range c.BarkOperatorCertificateFingerprints {
+		normalized := strings.ReplaceAll(
+			strings.TrimSpace(fingerprint),
+			":",
+			"",
+		)
+		decoded, err := hex.DecodeString(normalized)
+		if err != nil || len(decoded) != sha256.Size {
+			errs = append(errs, fmt.Errorf(
+				"barkOperatorCertificateFingerprints[%d] must be a %d-byte "+
+					"SHA-256 certificate fingerprint encoded as hexadecimal",
+				idx,
+				sha256.Size,
+			))
+		}
 	}
 	// mTLS client verification also needs the server's own TLS pair --
 	// without it, bark.Bark.Start's own equivalent check (independent of
@@ -657,6 +706,33 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			storageModeAPI, c.StorageMode, storageModeAPI,
 		))
 	}
+	if c.Midnight.ServerEnabled && c.StorageMode != storageModeAPI &&
+		effectiveMode != RunModeDev && !c.RunMode.IsDevMode() {
+		errs = append(errs, fmt.Errorf(
+			"midnight.serverEnabled requires storageMode %q, got %q: "+
+				"set storageMode to %q or disable midnight.serverEnabled",
+			storageModeAPI, c.StorageMode, storageModeAPI,
+		))
+	}
+	if c.Midnight.ReflectionEnabled && !c.Midnight.ServerEnabled {
+		errs = append(errs, errors.New(
+			"midnight.reflectionEnabled requires midnight.serverEnabled",
+		))
+	}
+	// Plaintext is safe by default only on loopback. Wildcard, unspecified,
+	// hostname, and concrete remote addresses require either the configured
+	// TLS keypair or an explicit escape hatch acknowledging that transport
+	// security is supplied outside Dingo.
+	useMidnightTLS := c.TlsCertFilePath != "" && c.TlsKeyFilePath != ""
+	if midnightServer && !useMidnightTLS &&
+		!c.Midnight.AllowInsecureRemote &&
+		!isLoopbackAddr(c.Midnight.Host) {
+		errs = append(errs, fmt.Errorf(
+			"midnight.host %q is not loopback: configure TLS or set "+
+				"midnight.allowInsecureRemote to acknowledge plaintext exposure",
+			c.Midnight.Host,
+		))
+	}
 
 	if c.DatabaseLifecycle.SnapshotEnabled &&
 		c.DatabaseLifecycle.SnapshotDir == "" {
@@ -827,6 +903,18 @@ func isWildcardAddr(addr string) bool {
 	default:
 		return false
 	}
+}
+
+// isLoopbackAddr recognizes only explicit loopback literals and localhost.
+// It deliberately performs no DNS lookup: accepting an arbitrary hostname
+// based on a mutable resolution would turn startup validation into a TOCTOU
+// exposure check. Empty and wildcard addresses are therefore remote.
+func isLoopbackAddr(addr string) bool {
+	if strings.EqualFold(addr, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(addr, "[]"))
+	return ip != nil && ip.IsLoopback()
 }
 
 // checkDirWritable ensures dir exists (creating it if needed) and that this

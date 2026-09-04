@@ -17,15 +17,15 @@ package immutable
 import (
 	"encoding/binary"
 	"fmt"
-	"os"
 )
 
 const (
-	secondaryFileExtension = ".secondary"
+	secondaryFileExtension  = ".secondary"
+	secondaryIndexEntrySize = 56
 )
 
 type secondaryIndex struct {
-	file     *os.File
+	file     entryReader
 	primary  *primaryIndex
 	fileSize int64
 }
@@ -48,18 +48,22 @@ func newSecondaryIndex() *secondaryIndex {
 	return &secondaryIndex{}
 }
 
-func (s *secondaryIndex) Open(path string, primary *primaryIndex) error {
-	f, err := os.Open(path)
+// Open takes an already-open index file; see chunk.Open for why.
+func (s *secondaryIndex) Open(f entryReader, primary *primaryIndex) error {
+	s.file = f
+	s.primary = primary
+	size, err := f.Size()
 	if err != nil {
 		return err
 	}
-	s.file = f
-	s.primary = primary
-	if stat, err := f.Stat(); err != nil {
-		return err
-	} else {
-		s.fileSize = stat.Size()
+	if size%secondaryIndexEntrySize != 0 {
+		return fmt.Errorf(
+			"secondary index size %d is not aligned to %d-byte records",
+			size,
+			secondaryIndexEntrySize,
+		)
 	}
+	s.fileSize = size
 	return nil
 }
 
@@ -78,12 +82,20 @@ func (s *secondaryIndex) Next() (*secondaryIndexEntry, error) {
 	if nextOccupied == nil {
 		return nil, nil
 	}
+	secondaryOffset := int64(nextOccupied.SecondaryOffset)
 	// Look for final offset
-	if int64(nextOccupied.SecondaryOffset) == s.fileSize {
+	if secondaryOffset == s.fileSize {
 		return nil, nil
 	}
+	if secondaryOffset > s.fileSize {
+		return nil, fmt.Errorf(
+			"secondary index offset %d is beyond file size %d",
+			secondaryOffset,
+			s.fileSize,
+		)
+	}
 	// Seek to offset
-	if _, err := s.file.Seek(int64(nextOccupied.SecondaryOffset), 0); err != nil {
+	if _, err := s.file.Seek(secondaryOffset, 0); err != nil {
 		return nil, fmt.Errorf("failed while seeking: %w", err)
 	}
 	// Read entry

@@ -156,6 +156,8 @@ func TestStartListener_UnixSocket_ErrorOnNonSocketFile(t *testing.T) {
 		"Start should fail when socket path is a non-socket file",
 	)
 	assert.Contains(t, err.Error(), "exists and is not a unix socket")
+	_, statErr := os.Lstat(socketPath)
+	require.NoError(t, statErr, "regular file should not be removed")
 }
 
 // TestStartListener_UnixSocket_ErrorOnDirectory verifies that an error is
@@ -182,4 +184,124 @@ func TestStartListener_UnixSocket_ErrorOnDirectory(t *testing.T) {
 	err := cm.Start(ctx)
 	require.Error(t, err, "Start should fail when socket path is a directory")
 	assert.Contains(t, err.Error(), "exists and is not a unix socket")
+	fi, statErr := os.Lstat(socketPath)
+	require.NoError(t, statErr, "directory should not be removed")
+	assert.True(t, fi.IsDir())
+}
+
+// TestStartListener_UnixSocket_ErrorOnSymlink verifies that socket-path
+// inspection does not follow symlinks, even when the link target is itself a
+// Unix socket.
+func TestStartListener_UnixSocket_ErrorOnSymlink(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	tempDir := unixTestTempDir(t)
+	targetPath := filepath.Join(tempDir, "target.sock")
+	staleLn, err := net.Listen("unix", targetPath)
+	require.NoError(t, err)
+	staleLn.(*net.UnixListener).SetUnlinkOnClose(false)
+	require.NoError(t, staleLn.Close())
+
+	socketPath := filepath.Join(tempDir, "link.sock")
+	require.NoError(t, os.Symlink(targetPath, socketPath))
+
+	cfg := ConnectionManagerConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry: prometheus.NewRegistry(),
+		Listeners: []ListenerConfig{
+			{
+				ListenNetwork: "unix",
+				ListenAddress: socketPath,
+			},
+		},
+	}
+
+	cm := NewConnectionManager(cfg)
+	err = cm.Start(context.Background())
+	require.Error(t, err, "Start should fail when socket path is a symlink")
+	assert.Contains(t, err.Error(), "exists and is not a unix socket")
+	fi, statErr := os.Lstat(socketPath)
+	require.NoError(t, statErr, "symlink should not be removed")
+	assert.NotZero(t, fi.Mode()&os.ModeSymlink)
+	targetInfo, statErr := os.Lstat(targetPath)
+	require.NoError(t, statErr, "symlink target should not be removed")
+	assert.NotZero(t, targetInfo.Mode()&os.ModeSocket)
+}
+
+// TestStartListener_UnixSocket_ErrorOnLiveSocket verifies that startup does
+// not unlink and replace a socket owned by a running process.
+func TestStartListener_UnixSocket_ErrorOnLiveSocket(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	socketPath := filepath.Join(unixTestTempDir(t), "live.sock")
+	liveLn, err := net.Listen("unix", socketPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, liveLn.Close()) })
+
+	cfg := ConnectionManagerConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry: prometheus.NewRegistry(),
+		Listeners: []ListenerConfig{
+			{
+				ListenNetwork: "unix",
+				ListenAddress: socketPath,
+			},
+		},
+	}
+
+	cm := NewConnectionManager(cfg)
+	err = cm.Start(context.Background())
+	if err == nil {
+		stopCtx, cancel := context.WithTimeout(
+			context.Background(),
+			2*time.Second,
+		)
+		defer cancel()
+		require.NoError(t, cm.Stop(stopCtx))
+	}
+	require.Error(t, err, "Start should fail when socket path is live")
+	assert.Contains(t, err.Error(), "live unix socket")
+
+	conn, dialErr := net.DialTimeout("unix", socketPath, time.Second)
+	require.NoError(t, dialErr, "incumbent live socket should remain reachable")
+	require.NoError(t, conn.Close())
+}
+
+// TestStartListener_UnixSocket_PropagatesRemovalError verifies that a stale
+// socket is not treated as successfully removed when the parent directory
+// denies unlinking it.
+func TestStartListener_UnixSocket_PropagatesRemovalError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can unlink from a non-writable directory")
+	}
+	defer goleak.VerifyNone(t)
+
+	tempDir := unixTestTempDir(t)
+	socketPath := filepath.Join(tempDir, "stale.sock")
+	staleLn, err := net.Listen("unix", socketPath)
+	require.NoError(t, err)
+	staleLn.(*net.UnixListener).SetUnlinkOnClose(false)
+	require.NoError(t, staleLn.Close())
+
+	require.NoError(t, os.Chmod(tempDir, 0o500))
+	t.Cleanup(func() { require.NoError(t, os.Chmod(tempDir, 0o700)) })
+
+	cfg := ConnectionManagerConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry: prometheus.NewRegistry(),
+		Listeners: []ListenerConfig{
+			{
+				ListenNetwork: "unix",
+				ListenAddress: socketPath,
+			},
+		},
+	}
+
+	cm := NewConnectionManager(cfg)
+	err = cm.Start(context.Background())
+	require.Error(t, err, "Start should propagate stale-socket removal errors")
+	assert.Contains(t, err.Error(), "failed to remove existing socket file")
+	require.NoError(t, os.Chmod(tempDir, 0o700))
+	_, statErr := os.Lstat(socketPath)
+	require.NoError(t, statErr, "socket should remain when removal fails")
 }

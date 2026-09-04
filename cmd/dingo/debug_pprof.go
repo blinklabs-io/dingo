@@ -22,8 +22,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
-	"strconv"
 	"time"
+
+	"github.com/blinklabs-io/dingo/internal/config"
 )
 
 type debugPprofServer struct {
@@ -32,19 +33,9 @@ type debugPprofServer struct {
 	addr   string
 }
 
-func startDebugPprofServer(
-	logger *slog.Logger,
-	bindAddr string,
-	port uint,
-	component string,
-) (*debugPprofServer, error) {
-	if port == 0 {
-		return nil, nil
-	}
-	addr := net.JoinHostPort(bindAddr, strconv.FormatUint(uint64(port), 10))
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, fmt.Errorf("starting debug listener on %s: %w", addr, err)
+func newDebugPprofHTTPServer(cfg *config.Config) *http.Server {
+	if cfg.DebugPort == 0 {
+		return nil
 	}
 	debugMux := http.NewServeMux()
 	debugMux.HandleFunc("/debug/pprof/", pprof.Index)
@@ -52,17 +43,34 @@ func startDebugPprofServer(
 	debugMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 	debugMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	debugMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	return &http.Server{
+		Addr:              cfg.DebugListenAddress(),
+		Handler:           debugMux,
+		ReadHeaderTimeout: 60 * time.Second,
+	}
+}
+
+func startDebugPprofServer(
+	logger *slog.Logger,
+	cfg *config.Config,
+	component string,
+) (*debugPprofServer, error) {
+	server := newDebugPprofHTTPServer(cfg)
+	if server == nil {
+		return nil, nil
+	}
+	addr := server.Addr
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("starting debug listener on %s: %w", addr, err)
+	}
 
 	actualAddr := listener.Addr().String()
 	logger.Info(
 		"serving pprof debug endpoints on "+actualAddr,
 		"component", component,
 	)
-	server := &http.Server{
-		Addr:              actualAddr,
-		Handler:           debugMux,
-		ReadHeaderTimeout: 60 * time.Second,
-	}
+	server.Addr = actualAddr
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(errCh)

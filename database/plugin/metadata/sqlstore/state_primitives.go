@@ -31,12 +31,12 @@ func (s *Store) GetBackfillCheckpoint(
 	phase string,
 	txn types.Txn,
 ) (*models.BackfillCheckpoint, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf("get backfill checkpoint: %w", err)
 	}
 	queries := s.operationalQueries(db)
-	row, err := queries.GetBackfillCheckpoint(context.Background(), phase)
+	row, err := queries.GetBackfillCheckpoint(ctx, phase)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -61,7 +61,7 @@ func (s *Store) SetBackfillCheckpoint(
 	if checkpoint == nil {
 		return errors.New("set backfill checkpoint: checkpoint is nil")
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return fmt.Errorf("set backfill checkpoint: %w", err)
 	}
@@ -75,7 +75,7 @@ func (s *Store) SetBackfillCheckpoint(
 		return fmt.Errorf("set backfill checkpoint total slots: %w", err)
 	}
 	id, err := queries.SetBackfillCheckpoint(
-		context.Background(),
+		ctx,
 		sqlitequery.SetBackfillCheckpointParams{
 			Phase:      checkpoint.Phase,
 			LastSlot:   sql.NullInt64{Int64: lastSlot, Valid: true},
@@ -104,12 +104,12 @@ func (s *Store) SetBackfillCheckpoint(
 func (s *Store) GetConstitution(
 	txn types.Txn,
 ) (*models.Constitution, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf("get constitution: %w", err)
 	}
 	queries := s.operationalQueries(db)
-	row, err := queries.GetConstitution(context.Background())
+	row, err := queries.GetConstitution(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -126,7 +126,7 @@ func (s *Store) SetConstitution(
 	if constitution == nil {
 		return errors.New("set constitution: constitution is nil")
 	}
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return fmt.Errorf("set constitution: %w", err)
 	}
@@ -140,7 +140,7 @@ func (s *Store) SetConstitution(
 		return fmt.Errorf("set constitution deleted slot: %w", err)
 	}
 	id, err := queries.SetConstitution(
-		context.Background(),
+		ctx,
 		sqlitequery.SetConstitutionParams{
 			AnchorUrl:   constitution.AnchorURL,
 			AnchorHash:  constitution.AnchorHash,
@@ -165,18 +165,17 @@ func (s *Store) DeleteConstitutionsAfterSlot(
 		return fmt.Errorf("delete constitutions after slot: %w", err)
 	}
 	err = s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			queries := s.operationalQueries(db)
 			if err := queries.DeleteConstitutionsAddedAfterSlot(
-				context.Background(),
+				ctx,
 				sqlSlot,
 			); err != nil {
 				return err
 			}
 			return queries.RestoreConstitutionsDeletedAfterSlot(
-				context.Background(),
+				ctx,
 				sql.NullInt64{Int64: sqlSlot, Valid: true},
 			)
 		},
@@ -195,15 +194,24 @@ func (s *Store) SetCommitteeMembers(
 		return nil
 	}
 	err := s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			queries := s.operationalQueries(db)
 			for _, member := range members {
 				if member == nil {
 					return errors.New("committee member is nil")
 				}
 				expiresEpoch, err := checkedInt64(member.ExpiresEpoch)
+				if err != nil {
+					return err
+				}
+				termStartSlot := member.TermStartSlot
+				termStartSlotSet := member.TermStartSlotSet
+				if !termStartSlotSet {
+					termStartSlot = member.AddedSlot
+					termStartSlotSet = true
+				}
+				sqlTermStartSlot, err := checkedInt64(termStartSlot)
 				if err != nil {
 					return err
 				}
@@ -215,13 +223,29 @@ func (s *Store) SetCommitteeMembers(
 				if err != nil {
 					return err
 				}
+				if err := queries.SoftDeleteCommitteeMember(
+					ctx,
+					sqlitequery.SoftDeleteCommitteeMemberParams{
+						DeletedSlot: sql.NullInt64{
+							Int64: addedSlot,
+							Valid: true,
+						},
+						ColdCredentialTag: int64(member.ColdCredentialTag),
+						ColdCredHash:      member.ColdCredHash,
+					},
+				); err != nil {
+					return err
+				}
 				id, err := queries.SetCommitteeMember(
-					context.Background(),
+					ctx,
 					sqlitequery.SetCommitteeMemberParams{
-						ColdCredHash: member.ColdCredHash,
-						ExpiresEpoch: expiresEpoch,
-						AddedSlot:    addedSlot,
-						DeletedSlot:  deletedSlot,
+						ColdCredentialTag: int64(member.ColdCredentialTag),
+						ColdCredHash:      member.ColdCredHash,
+						ExpiresEpoch:      expiresEpoch,
+						TermStartSlot:     sqlTermStartSlot,
+						TermStartSlotSet:  termStartSlotSet,
+						AddedSlot:         addedSlot,
+						DeletedSlot:       deletedSlot,
 					},
 				)
 				if err != nil {
@@ -261,7 +285,7 @@ func (s *Store) setCommitteeQuorum(
 	slot uint64,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return fmt.Errorf("set committee quorum: %w", err)
 	}
@@ -271,7 +295,7 @@ func (s *Store) setCommitteeQuorum(
 		return fmt.Errorf("set committee quorum: %w", err)
 	}
 	if err := queries.SetCommitteeQuorum(
-		context.Background(),
+		ctx,
 		sqlitequery.SetCommitteeQuorumParams{
 			Quorum:    sql.NullString{String: quorum, Valid: true},
 			AddedSlot: sqlSlot,
@@ -285,12 +309,12 @@ func (s *Store) setCommitteeQuorum(
 func (s *Store) GetCommitteeQuorum(
 	txn types.Txn,
 ) (*types.Rat, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf("get committee quorum: %w", err)
 	}
 	queries := s.operationalQueries(db)
-	value, err := queries.GetCommitteeQuorum(context.Background())
+	value, err := queries.GetCommitteeQuorum(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -329,7 +353,7 @@ func (s *Store) getCommitteeMembers(
 	txn types.Txn,
 	includeDeleted bool,
 ) ([]*models.CommitteeMember, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf("get committee members: %w", err)
 	}
@@ -337,10 +361,10 @@ func (s *Store) getCommitteeMembers(
 	var rows []sqlitequery.CommitteeMember
 	if includeDeleted {
 		rows, err = queries.GetCommitteeMembersIncludeDeleted(
-			context.Background(),
+			ctx,
 		)
 	} else {
-		rows, err = queries.GetCommitteeMembers(context.Background())
+		rows, err = queries.GetCommitteeMembers(ctx)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get committee members: %w", err)
@@ -353,11 +377,11 @@ func (s *Store) getCommitteeMembers(
 }
 
 func (s *Store) SoftDeleteCommitteeMembers(
-	coldCredHashes [][]byte,
+	coldCredentials []models.CommitteeCredential,
 	slot uint64,
 	txn types.Txn,
 ) error {
-	if len(coldCredHashes) == 0 {
+	if len(coldCredentials) == 0 {
 		return nil
 	}
 	sqlSlot, err := checkedInt64(slot)
@@ -365,19 +389,19 @@ func (s *Store) SoftDeleteCommitteeMembers(
 		return fmt.Errorf("soft delete committee members: %w", err)
 	}
 	err = s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			queries := s.operationalQueries(db)
-			for _, hash := range coldCredHashes {
+			for _, credential := range coldCredentials {
 				if err := queries.SoftDeleteCommitteeMember(
-					context.Background(),
+					ctx,
 					sqlitequery.SoftDeleteCommitteeMemberParams{
 						DeletedSlot: sql.NullInt64{
 							Int64: sqlSlot,
 							Valid: true,
 						},
-						ColdCredHash: hash,
+						ColdCredentialTag: int64(credential.CredentialTag),
+						ColdCredHash:      credential.Credential,
 					},
 				); err != nil {
 					return err
@@ -396,7 +420,7 @@ func (s *Store) SoftDeleteAllCommitteeMembers(
 	slot uint64,
 	txn types.Txn,
 ) error {
-	db, err := s.dbFromTxn(txn)
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
 		return fmt.Errorf("soft delete all committee members: %w", err)
 	}
@@ -406,7 +430,7 @@ func (s *Store) SoftDeleteAllCommitteeMembers(
 		return fmt.Errorf("soft delete all committee members: %w", err)
 	}
 	if err := queries.SoftDeleteAllCommitteeMembers(
-		context.Background(),
+		ctx,
 		sql.NullInt64{Int64: sqlSlot, Valid: true},
 	); err != nil {
 		return fmt.Errorf("soft delete all committee members: %w", err)
@@ -423,24 +447,23 @@ func (s *Store) DeleteCommitteeMembersAfterSlot(
 		return fmt.Errorf("delete committee members after slot: %w", err)
 	}
 	err = s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			queries := s.operationalQueries(db)
 			if err := queries.DeleteCommitteeMembersAddedAfterSlot(
-				context.Background(),
+				ctx,
 				sqlSlot,
 			); err != nil {
 				return err
 			}
 			if err := queries.DeleteCommitteeQuorumsAfterSlot(
-				context.Background(),
+				ctx,
 				sqlSlot,
 			); err != nil {
 				return err
 			}
 			return queries.RestoreCommitteeMembersDeletedAfterSlot(
-				context.Background(),
+				ctx,
 				sql.NullInt64{Int64: sqlSlot, Valid: true},
 			)
 		},
@@ -468,11 +491,14 @@ func committeeMemberFromSQLite(
 	row sqlitequery.CommitteeMember,
 ) *models.CommitteeMember {
 	return &models.CommitteeMember{
-		ID:           uint(row.ID),
-		ColdCredHash: row.ColdCredHash,
-		ExpiresEpoch: uint64(row.ExpiresEpoch),
-		AddedSlot:    uint64(row.AddedSlot),
-		DeletedSlot:  uint64Pointer(row.DeletedSlot),
+		ID:                uint(row.ID),
+		ColdCredentialTag: uint8(row.ColdCredentialTag),
+		ColdCredHash:      row.ColdCredHash,
+		ExpiresEpoch:      uint64(row.ExpiresEpoch),
+		TermStartSlot:     uint64(row.TermStartSlot),
+		TermStartSlotSet:  row.TermStartSlotSet,
+		AddedSlot:         uint64(row.AddedSlot),
+		DeletedSlot:       uint64Pointer(row.DeletedSlot),
 	}
 }
 

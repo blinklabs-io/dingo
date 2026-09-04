@@ -1,4 +1,12 @@
-FROM ghcr.io/blinklabs-io/go:1.26.3-1 AS build
+# 1.26.3-1 is the newest published tag of this image, and it is behind the Go
+# patch releases that fix the standard-library advisories govulncheck finds
+# reachable from this module (the last of them fixed in 1.26.6). What actually
+# compiles the release binary is go.mod's `toolchain` floor, not this tag:
+# GOTOOLCHAIN is `auto` in this image, so the build fetches that toolchain and
+# uses it in place of the image's own go1.26.3. Advance this tag when
+# blinklabs-io/docker-go publishes a newer one; never lower the go.mod floor to
+# match it.
+FROM ghcr.io/blinklabs-io/go:1.26.7-1 AS build
 
 ARG VERSION
 ARG COMMIT_HASH
@@ -14,6 +22,7 @@ COPY . .
 RUN make build
 
 FROM build AS antithesis-build
+RUN apk add --no-cache bash
 RUN go get github.com/antithesishq/antithesis-sdk-go@latest
 RUN go install github.com/antithesishq/antithesis-sdk-go/tools/antithesis-go-instrumentor@latest
 RUN make mod-tidy
@@ -24,9 +33,9 @@ WORKDIR /antithesis/customer
 RUN make build
 
 FROM ghcr.io/blinklabs-io/cardano-cli:11.0.0.0-1 AS cardano-cli
-FROM ghcr.io/blinklabs-io/cardano-configs:20260817-1 AS cardano-configs
+FROM ghcr.io/blinklabs-io/cardano-configs:20260829-1 AS cardano-configs
 FROM ghcr.io/blinklabs-io/nview:0.15.0 AS nview
-FROM ghcr.io/blinklabs-io/txtop:0.15.0 AS txtop
+FROM ghcr.io/blinklabs-io/txtop:0.16.0 AS txtop
 
 FROM debian:bookworm-slim AS dingo
 # pg_dump/pg_restore version compatibility is asymmetric and narrower than
@@ -67,8 +76,8 @@ RUN apt-get update -y && \
     postgresql-client-16 \
     sqlite3 && \
   rm -rf /var/lib/apt/lists/*
-ENV LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"
-ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
+ENV LD_LIBRARY_PATH="/usr/local/lib"
+ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig"
 COPY --from=build /code/dingo /bin/
 COPY --from=cardano-cli /usr/local/bin/cardano-cli /usr/local/bin/
 COPY --from=cardano-cli /usr/local/include/ /usr/local/include/

@@ -185,6 +185,45 @@ func (d *Database) Metadata() metadata.MetadataStore {
 	return d.metadata
 }
 
+// The accessors below hand out the metadata store narrowed to one storage
+// domain. Facade methods go through the accessor for the domain they touch
+// rather than through d.metadata, so the compiler -- not review -- is what
+// keeps a UTxO method from reaching into governance state. A facade method
+// that genuinely spans two domains calls both accessors, which also makes
+// that span visible at the call site instead of hiding it behind the full
+// surface. d.metadata itself remains for the domains not yet extracted.
+
+// certificateStore narrows to on-chain certificates.
+func (d *Database) certificateStore() metadata.CertificateStore {
+	return d.metadata
+}
+
+// epochStore narrows to the epoch table.
+func (d *Database) epochStore() metadata.EpochStore {
+	return d.metadata
+}
+
+// governanceStore narrows to the Conway governance surface.
+func (d *Database) governanceStore() metadata.GovernanceStore {
+	return d.metadata
+}
+
+// stakeSnapshotStore narrows to epoch-boundary stake snapshots.
+func (d *Database) stakeSnapshotStore() metadata.StakeSnapshotStore {
+	return d.metadata
+}
+
+// transactionStore narrows to chain transactions. Note this is not
+// TxnStore: see the interface doc comments.
+func (d *Database) transactionStore() metadata.TransactionStore {
+	return d.metadata
+}
+
+// utxoStore narrows to the UTxO set.
+func (d *Database) utxoStore() metadata.UtxoStore {
+	return d.metadata
+}
+
 // Transaction starts a new database transaction and returns a handle to it
 func (d *Database) Transaction(readWrite bool) *Txn {
 	return NewTxn(d, readWrite)
@@ -275,6 +314,12 @@ func New(config *Config, stores Stores) (*Database, error) {
 		if err := db.cborCache.RegisterCASMetrics(configCopy.PromRegistry); err != nil {
 			configCopy.Logger.Warn(
 				"failed to register hot cache CAS metrics",
+				"error", err,
+			)
+		}
+		if err := RegisterBlobOrphanMetrics(configCopy.PromRegistry); err != nil {
+			configCopy.Logger.Warn(
+				"failed to register blob orphan metrics",
 				"error", err,
 			)
 		}

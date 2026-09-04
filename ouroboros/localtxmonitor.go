@@ -46,15 +46,15 @@ func (o *Ouroboros) instrumentLocaltxmonitorGetMempool(
 func (o *Ouroboros) localtxmonitorServerGetMempool(
 	ctx olocaltxmonitor.CallbackContext,
 ) (uint64, uint32, []olocaltxmonitor.TxAndEraId, error) {
-	tip := o.LedgerState.Tip()
-	capacity := o.Mempool.CapacityBytes()
+	tip := o.ledgerState.Tip()
+	capacity := o.mempool.CapacityBytes()
 	if capacity < 0 || capacity > math.MaxUint32 {
 		return 0, 0, nil, fmt.Errorf(
 			"mempool capacity %d cannot be represented by LocalTxMonitor",
 			capacity,
 		)
 	}
-	mempoolTxs := o.Mempool.Transactions()
+	mempoolTxs := o.mempool.Transactions()
 	retTxs := make([]olocaltxmonitor.TxAndEraId, len(mempoolTxs))
 	for i := range mempoolTxs {
 		retTxs[i] = olocaltxmonitor.TxAndEraId{

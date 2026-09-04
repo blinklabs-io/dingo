@@ -266,6 +266,34 @@ func TestContinuationAuditReportsUnresolvableProducer(t *testing.T) {
 	assert.Equal(t, "test rollback", report["fork_reason"])
 }
 
+// TestRollbackAheadOfLedgerDoesNotArmContinuationAudit covers genesis and
+// snapshot catch-up, where the primary chain may already contain blocks beyond
+// the applied ledger tip. A rollback to that primary-chain point does not move
+// the ledger, so the continuation audit must remain disarmed rather than
+// reporting unapplied history as missing producers.
+func TestRollbackAheadOfLedgerDoesNotArmContinuationAudit(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	ls.armContinuationAudit(fixture.ancestorTip.Point, "prior rollback")
+	require.NotNil(t, ls.continuationAudit.Load())
+
+	ls.Lock()
+	ls.currentTip = fixture.ancestorTip
+	ls.currentTipBlockNonce = append([]byte(nil), fixture.ancestorNonce...)
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+	require.NoError(t, ls.db.SetTip(fixture.ancestorTip, nil))
+
+	require.NoError(t, ls.rollbackChainAndStateDeferred(fixture.currentTip.Point, nil))
+
+	assert.Nil(
+		t,
+		ls.continuationAudit.Load(),
+		"a rollback ahead of the applied ledger must disarm any prior audit",
+	)
+	assert.Equal(t, fixture.ancestorTip, ls.currentTip)
+}
+
 // TestContinuationAuditAcceptsProducerInSameWindow guards the audit against
 // false positives: blockfetch runs ahead of ledger application, so a producer
 // delivered earlier in the same audit window is on the local chain even though
@@ -393,7 +421,7 @@ func TestContinuationAuditIgnoresAbandonedFetchedBodies(t *testing.T) {
 		Point:        ocommon.NewPoint(stale.slot, stale.hash.Bytes()),
 	}}
 
-	require.NoError(t, ls.flushPendingBlockfetchBlocks())
+	require.NoError(t, ls.flushPendingBlockfetchBlocksDeferred(nil))
 	window := ls.continuationAudit.Load()
 	require.NotNil(t, window)
 	assert.Equal(t, 0, window.blocksSeen)

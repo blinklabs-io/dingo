@@ -72,6 +72,26 @@ const (
 // manager is not running.
 var ErrVoteManagerStopped = errors.New("leios vote manager stopped")
 
+// VotingConfigurationStatus reports the outcome of configuring local Leios
+// vote emission.
+type VotingConfigurationStatus uint8
+
+const (
+	// VotingConfigurationFailed accompanies a non-nil configuration error.
+	VotingConfigurationFailed VotingConfigurationStatus = iota
+	// VotingConfigurationEnabled means local vote emission is active.
+	VotingConfigurationEnabled
+	// VotingConfigurationAwaitingKey means the configured pool has no usable
+	// on-chain voting key in the current snapshot yet.
+	VotingConfigurationAwaitingKey
+	// VotingConfigurationRetryPending means activation preparation failed but
+	// the configuration remains deferred for a later epoch-transition retry.
+	VotingConfigurationRetryPending
+	// VotingConfigurationSuperseded means a newer configuration or retry owns
+	// the voting state, so this request must not interpret that state as its own.
+	VotingConfigurationSuperseded
+)
+
 // StakeDistributionProvider supplies the active stake distribution for a
 // snapshot epoch: lowercase-hex pool key hash -> stake plus the total
 // active stake used as the quorum denominator.
@@ -89,18 +109,10 @@ type StakeDistributionProvider interface {
 // "keyless" committee seat: it still occupies a stake-weighted voter id,
 // but can never contribute a verified signature).
 //
-// This is a current-state lookup, not frozen to a snapshot epoch: it reads
-// whatever is registered against poolKeyHashes right now, the same
-// simplification already made for VRF key hash in PoolDistr2 (see
-// poolVrfKeyHashes). A key registered or rotated between when the epoch's
-// stake snapshot was captured and when this is called becomes visible
-// immediately. On a live network with one canonical current state this
-// distinction rarely matters, but two nodes computing the same epoch's
-// committee at different wall-clock times around a key rotation could
-// still cache different resolved keys for that epoch (committeeAndParamsForEpoch
-// memoizes per epoch on first use) -- acceptable for the current prototype,
-// worth revisiting if this needs to reproduce a specific historical epoch's
-// resolution exactly.
+// The lookup is frozen to snapshotEpoch: implementations must return the key
+// stored with the same historical stake snapshot used to select the committee.
+// A key registered or rotated after that boundary is not visible until a later
+// snapshot captures it.
 //
 // poolKeyHashes names exactly the epoch's committee members (the
 // stake-coverage prefix ComputeCommittee already selected from the
@@ -113,6 +125,7 @@ type StakeDistributionProvider interface {
 // trip on every new-epoch committee computation.
 type LeiosKeyProvider interface {
 	GetLeiosKeys(
+		snapshotEpoch uint64,
 		poolKeyHashes []string,
 	) (map[string]*lcommon.LeiosKey, error)
 }
@@ -149,15 +162,17 @@ type VoteManagerConfig struct {
 	StakeProvider  StakeDistributionProvider
 	EpochProvider  EpochProvider
 	ParamsProvider CommitteeParamsProvider
-	// KeyProvider supplies on-chain registered BLS keys per epoch. Nil
-	// disables on-chain key resolution entirely; committee members then
-	// resolve only through Registry (useful for tests and for local
-	// operator-configured override keys).
+	// KeyProvider supplies on-chain registered BLS keys per epoch. When
+	// non-nil it is the authoritative key source: a key absent from its
+	// PoP-verified result is a keyless seat and Registry is ignored. Nil
+	// explicitly selects the Registry-only private test/devnet seam.
 	KeyProvider LeiosKeyProvider
 	// SlotProvider enables the vote slot acceptance window. When nil
 	// the window check is disabled and votes for any resolvable slot
 	// are accepted.
 	SlotProvider SlotProvider
+	// Registry is a private test/devnet key source used only when KeyProvider
+	// is nil. Production composition always supplies KeyProvider.
 	Registry     *VoterRegistry
 	PromRegistry prometheus.Registerer
 	// VoteWindowSlots is the offset after an EB's produce slot at which
@@ -216,6 +231,17 @@ type announcementRecord struct {
 	seenAt time.Time
 }
 
+type readyAnnouncement struct {
+	rbHash lcommon.Blake2b256
+	record announcementRecord
+}
+
+type votingConfigurationSnapshot struct {
+	generation uint64
+	pool       []byte
+	key        *VoteSigningKey
+}
+
 type pendingPrototypeVote struct {
 	connKey string
 	vote    lcommon.LeiosPrototypeVote
@@ -252,8 +278,7 @@ type ebTally struct {
 // epochEntry memoizes the committee, quorum threshold, and resolved,
 // PoP-verified on-chain voter keys for an epoch. onChainKeys holds only
 // keys that passed VerifyLeiosKeyProofOfPossession; a committee member
-// absent from it has no usable on-chain key for the epoch (keyless,
-// pending a Registry override).
+// absent from it has no usable on-chain key for the epoch and is keyless.
 type epochEntry struct {
 	committee   *Committee
 	tau         *big.Rat
@@ -273,7 +298,7 @@ type VoteManager struct {
 	stakeProvider  StakeDistributionProvider
 	epochProvider  EpochProvider
 	paramsProvider CommitteeParamsProvider
-	keyProvider    LeiosKeyProvider // nil disables on-chain key resolution
+	keyProvider    LeiosKeyProvider // nil explicitly enables Registry-only mode
 	slotProvider   SlotProvider     // nil disables the slot window check
 	// voteWindowSlots is the past bound of the vote acceptance window: a
 	// vote whose slot is this many slots or more behind the current slot
@@ -284,6 +309,9 @@ type VoteManager struct {
 	metrics         *voteManagerMetrics
 	// now is the clock used for vote TTL expiry; tests may override it.
 	now func() time.Time
+	// signVote is the local vote signer; tests may override it to synchronize
+	// configuration changes with an in-flight signature.
+	signVote func(*VoteSigningKey, []byte) ([]byte, error)
 	// voteTTL, maxVotes, and maxRecords bound the vote stores; tests
 	// may lower them.
 	voteTTL    time.Duration
@@ -291,6 +319,9 @@ type VoteManager struct {
 	maxRecords int
 
 	mu sync.Mutex
+	// localEmissionMu keeps activation replay ahead of ordinary local emission
+	// without blocking rollback while a signature is being prepared.
+	localEmissionMu sync.Mutex
 	// prototypeEmissionMu linearizes local vote commit/publication with
 	// rollback pruning. This avoids holding mu while publishing an EventBus
 	// event, whose subscribers are outside the manager's lock hierarchy.
@@ -321,6 +352,21 @@ type VoteManager struct {
 
 	votingPool []byte // local pool key hash; nil disables voting
 	votingKey  *VoteSigningKey
+	// deferredVotingPool/deferredVotingKey retain an operator-configured
+	// signing key while the authoritative historical on-chain key snapshot is
+	// not available locally yet. They never participate in vote emission;
+	// retryDeferredVoting promotes them to votingPool/votingKey only after the
+	// key provider returns a PoP-verified matching public key.
+	deferredVotingPool []byte
+	deferredVotingKey  *VoteSigningKey
+	// deferredVotingAuthorized records that the current deferred generation's
+	// key matched its on-chain registration. Only replay preparation, not
+	// authorization, remains pending while this is true.
+	deferredVotingAuthorized bool
+	// votingLookupGeneration orders provider lookups for the deferred
+	// configuration. Every initial lookup or retry receives a generation when
+	// it starts; only the newest generation may change voting state.
+	votingLookupGeneration uint64
 }
 
 type managerSubscription struct {
@@ -369,6 +415,7 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 		voteWindowSlots:    voteWindowSlots,
 		registry:           registry,
 		now:                time.Now,
+		signVote:           SignVote,
 		voteTTL:            voteStoreTTL,
 		maxVotes:           voteStoreMaxEntries,
 		maxRecords:         voteRecordMaxEntries,
@@ -503,14 +550,10 @@ func (m *VoteManager) EnableVoting(
 	// epoch transition landing a key rotation between a caller's
 	// ValidateVotingKey check and this call.
 	//
-	// Only fall through to registering in the static registry when there
-	// is no on-chain key to compare against. Requiring a registry entry
-	// unconditionally would make an on-chain-only key that already passed
-	// ValidateVotingKey fail to enable voting anyway, on nothing more than
-	// a stale entry a peer or this operator never got around to updating
-	// in leiosVoterPublicKeys -- the on-chain key is already the stronger,
-	// PoP-verified trust source, so a conflict against a weaker one it has
-	// superseded is not a real problem.
+	// Registry is deliberately consulted only in the explicit private
+	// harness mode where no KeyProvider is wired. With a provider present,
+	// absence is authoritative: auto-registering key here would let this
+	// node emit a vote that reference-compatible peers reject.
 	onChain, onChainKnown, err := m.resolveOnChainKeyForPool(poolKeyHash[:])
 	if err != nil {
 		return fmt.Errorf(
@@ -519,18 +562,27 @@ func (m *VoteManager) EnableVoting(
 			err,
 		)
 	}
-	if onChainKnown && !onChain.Equal(key.PublicKey()) {
-		return fmt.Errorf(
-			"configured leios voting key does not match the on-chain registered key for pool %s",
-			poolKeyHash.String(),
-		)
+	if m.keyProvider != nil {
+		if !onChainKnown {
+			return fmt.Errorf(
+				"no usable on-chain leios voting key for pool %s",
+				poolKeyHash.String(),
+			)
+		}
+		if !onChain.Equal(key.PublicKey()) {
+			return fmt.Errorf(
+				"configured leios voting key does not match the on-chain registered key for pool %s",
+				poolKeyHash.String(),
+			)
+		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if onChainKnown {
+	if m.keyProvider != nil {
 		m.logger.Debug(
 			"leios voting key matches the on-chain registration, skipping static registry",
-			"pool", poolKeyHash.String(),
+			"pool",
+			poolKeyHash.String(),
 		)
 	} else if err := m.registry.RegisterPublicKey(poolKeyHash[:], key.PublicKey()); err != nil {
 		return fmt.Errorf("register local leios voting key: %w", err)
@@ -540,12 +592,377 @@ func (m *VoteManager) EnableVoting(
 	return nil
 }
 
+// ConfigureVoting configures local vote emission for a pool. Production
+// composition calls this during startup, when a node may still be behind the
+// snapshot containing its pool's on-chain Leios key registration. In that
+// case the signing key is retained only as deferred configuration and voting
+// remains disabled until an epoch transition makes a matching, PoP-verified
+// key resolvable. A key that is already resolvable but mismatches remains a
+// hard configuration error.
+//
+// The returned status distinguishes immediate activation, an on-chain key that
+// is not visible yet, a retryable activation-preparation failure, and a request
+// superseded by a newer configuration or retry. Private registry mode has no
+// chain state to catch up and therefore keeps the strict immediate EnableVoting
+// behavior.
+func (m *VoteManager) ConfigureVoting(
+	poolKeyHash lcommon.PoolKeyHash,
+	key *VoteSigningKey,
+) (VotingConfigurationStatus, error) {
+	if key == nil {
+		return VotingConfigurationFailed,
+			errors.New("nil leios vote signing key")
+	}
+	if m.keyProvider == nil {
+		if err := m.EnableVoting(poolKeyHash, key); err != nil {
+			return VotingConfigurationFailed, err
+		}
+		return VotingConfigurationEnabled, nil
+	}
+	m.mu.Lock()
+	m.votingPool = nil
+	m.votingKey = nil
+	m.deferredVotingPool = slices.Clone(poolKeyHash[:])
+	m.deferredVotingKey = key
+	m.deferredVotingAuthorized = false
+	m.votingLookupGeneration++
+	lookupGeneration := m.votingLookupGeneration
+	m.mu.Unlock()
+
+	currentEpoch := m.epochProvider.CurrentEpoch()
+	registered, ok, err := m.resolveOnChainKeyForPoolAtEpoch(
+		poolKeyHash[:],
+		currentEpoch,
+	)
+	m.localEmissionMu.Lock()
+	defer m.localEmissionMu.Unlock()
+
+	if err != nil {
+		if !m.clearDeferredVoting(
+			poolKeyHash[:],
+			key,
+			lookupGeneration,
+		) {
+			return m.currentVotingConfigurationStatus(
+				poolKeyHash[:],
+				key,
+				lookupGeneration,
+			), nil
+		}
+		return VotingConfigurationFailed, fmt.Errorf(
+			"resolve on-chain leios key for pool %s: %w",
+			poolKeyHash.String(),
+			err,
+		)
+	}
+	if !ok {
+		if !m.isCurrentVotingLookup(
+			poolKeyHash[:],
+			key,
+			lookupGeneration,
+		) {
+			return m.currentVotingConfigurationStatus(
+				poolKeyHash[:],
+				key,
+				lookupGeneration,
+			), nil
+		}
+		return VotingConfigurationAwaitingKey, nil
+	}
+	if !registered.Equal(key.PublicKey()) {
+		if !m.clearDeferredVoting(
+			poolKeyHash[:],
+			key,
+			lookupGeneration,
+		) {
+			return m.currentVotingConfigurationStatus(
+				poolKeyHash[:],
+				key,
+				lookupGeneration,
+			), nil
+		}
+		return VotingConfigurationFailed, fmt.Errorf(
+			"configured leios voting key does not match the on-chain registered key for pool %s",
+			poolKeyHash.String(),
+		)
+	}
+	enabled, err := m.activateDeferredVotingLocked(
+		poolKeyHash[:],
+		key,
+		currentEpoch,
+		lookupGeneration,
+	)
+	if err != nil {
+		status := m.currentVotingConfigurationStatus(
+			poolKeyHash[:],
+			key,
+			lookupGeneration,
+		)
+		m.logger.Error(
+			"cannot prepare leios voting activation; voting remains disabled",
+			"pool",
+			poolKeyHash.String(),
+			"error",
+			err,
+		)
+		return status, nil
+	}
+	if !enabled {
+		return m.currentVotingConfigurationStatus(
+			poolKeyHash[:],
+			key,
+			lookupGeneration,
+		), nil
+	}
+	return VotingConfigurationEnabled, nil
+}
+
+func (m *VoteManager) clearDeferredVoting(
+	poolKeyHash []byte,
+	key *VoteSigningKey,
+	lookupGeneration uint64,
+) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.votingLookupGeneration == lookupGeneration &&
+		m.deferredVotingKey == key &&
+		slices.Equal(m.deferredVotingPool, poolKeyHash) {
+		m.deferredVotingPool = nil
+		m.deferredVotingKey = nil
+		m.deferredVotingAuthorized = false
+		return true
+	}
+	return false
+}
+
+func (m *VoteManager) isCurrentVotingLookup(
+	poolKeyHash []byte,
+	key *VoteSigningKey,
+	lookupGeneration uint64,
+) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.votingLookupGeneration == lookupGeneration &&
+		m.deferredVotingKey == key &&
+		slices.Equal(m.deferredVotingPool, poolKeyHash)
+}
+
+func (m *VoteManager) currentVotingConfigurationStatus(
+	poolKeyHash []byte,
+	key *VoteSigningKey,
+	lookupGeneration uint64,
+) VotingConfigurationStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.votingLookupGeneration != lookupGeneration {
+		return VotingConfigurationSuperseded
+	}
+	if m.votingKey == key && slices.Equal(m.votingPool, poolKeyHash) {
+		return VotingConfigurationEnabled
+	}
+	if m.deferredVotingKey == key &&
+		slices.Equal(m.deferredVotingPool, poolKeyHash) {
+		if m.deferredVotingAuthorized {
+			return VotingConfigurationRetryPending
+		}
+		return VotingConfigurationAwaitingKey
+	}
+	return VotingConfigurationSuperseded
+}
+
+// activateDeferredVoting promotes a matching deferred configuration and
+// replays every ready current-epoch announcement before releasing ordinary
+// local emission. Any provider failure needed to prepare that replay leaves
+// voting disabled and the deferred configuration intact so a later epoch
+// transition can retry the complete activation.
+func (m *VoteManager) activateDeferredVoting(
+	poolKeyHash []byte,
+	key *VoteSigningKey,
+	currentEpoch uint64,
+	lookupGeneration uint64,
+) (bool, error) {
+	m.localEmissionMu.Lock()
+	defer m.localEmissionMu.Unlock()
+	return m.activateDeferredVotingLocked(
+		poolKeyHash,
+		key,
+		currentEpoch,
+		lookupGeneration,
+	)
+}
+
+// activateDeferredVotingLocked requires localEmissionMu to be held.
+func (m *VoteManager) activateDeferredVotingLocked(
+	poolKeyHash []byte,
+	key *VoteSigningKey,
+	currentEpoch uint64,
+	lookupGeneration uint64,
+) (bool, error) {
+	replayPrepared := false
+	var ready []readyAnnouncement
+	for {
+		m.mu.Lock()
+		if m.votingLookupGeneration != lookupGeneration ||
+			m.deferredVotingKey != key ||
+			!slices.Equal(m.deferredVotingPool, poolKeyHash) {
+			enabled := m.votingKey == key &&
+				slices.Equal(m.votingPool, poolKeyHash)
+			m.mu.Unlock()
+			return enabled, nil
+		}
+		m.deferredVotingAuthorized = true
+		ready = m.readyAnnouncementsForEpochLocked(currentEpoch)
+		if len(ready) == 0 || replayPrepared {
+			m.votingPool = slices.Clone(poolKeyHash)
+			m.votingKey = key
+			m.mu.Unlock()
+			break
+		}
+		m.mu.Unlock()
+
+		// Resolve and cache every provider-backed input emission will need
+		// before exposing the voting key. Failures are deliberately not
+		// cached by committeeAndParamsForEpoch, so the complete activation
+		// remains retryable.
+		if _, err := m.committeeAndParamsForEpoch(currentEpoch); err != nil {
+			return false, fmt.Errorf(
+				"prepare current-epoch announcement replay: %w",
+				err,
+			)
+		}
+		replayPrepared = true
+	}
+
+	sort.Slice(ready, func(i, j int) bool {
+		if ready[i].record.slot != ready[j].record.slot {
+			return ready[i].record.slot < ready[j].record.slot
+		}
+		return slices.Compare(ready[i].rbHash[:], ready[j].rbHash[:]) < 0
+	})
+	for _, item := range ready {
+		m.emitPrototypeVoteLocked(item.rbHash, item.record)
+	}
+
+	m.mu.Lock()
+	if m.votingLookupGeneration == lookupGeneration &&
+		m.deferredVotingKey == key &&
+		slices.Equal(m.deferredVotingPool, poolKeyHash) {
+		m.deferredVotingPool = nil
+		m.deferredVotingKey = nil
+		m.deferredVotingAuthorized = false
+	}
+	enabled := m.votingKey == key &&
+		slices.Equal(m.votingPool, poolKeyHash)
+	m.mu.Unlock()
+	return enabled, nil
+}
+
+func (m *VoteManager) readyAnnouncementsForEpochLocked(
+	currentEpoch uint64,
+) []readyAnnouncement {
+	ready := make([]readyAnnouncement, 0, len(m.announcements))
+	for rbHash, record := range m.announcements {
+		if record.epoch != currentEpoch {
+			continue
+		}
+		if _, acquired := m.acquiredEbs[record.ebHash]; !acquired {
+			continue
+		}
+		if _, voted := m.votedAnnouncements[rbHash]; voted {
+			continue
+		}
+		ready = append(ready, readyAnnouncement{
+			rbHash: rbHash,
+			record: record,
+		})
+	}
+	return ready
+}
+
+// retryDeferredVoting rechecks deferred startup configuration after an epoch
+// transition. Historical Leios keys are frozen into epoch snapshots, so these
+// boundaries are the only chain updates that can make an unavailable key
+// resolvable. Provider failures, invalid proofs, and mismatches leave voting
+// disabled and retain the configuration for a later snapshot.
+func (m *VoteManager) retryDeferredVoting(currentEpoch uint64) {
+	m.mu.Lock()
+	pool := slices.Clone(m.deferredVotingPool)
+	key := m.deferredVotingKey
+	if len(pool) == 0 || key == nil {
+		m.mu.Unlock()
+		return
+	}
+	m.votingLookupGeneration++
+	lookupGeneration := m.votingLookupGeneration
+	m.deferredVotingAuthorized = false
+	if m.votingKey == key && slices.Equal(m.votingPool, pool) {
+		m.votingPool = nil
+		m.votingKey = nil
+	}
+	m.mu.Unlock()
+
+	registered, ok, err := m.resolveOnChainKeyForPoolAtEpoch(
+		pool,
+		currentEpoch,
+	)
+	if !m.isCurrentVotingLookup(pool, key, lookupGeneration) {
+		return
+	}
+	if err != nil {
+		m.logger.Error(
+			"cannot resolve deferred leios voting key; voting remains disabled",
+			"pool", hex.EncodeToString(pool),
+			"error", err,
+		)
+		return
+	}
+	if !ok {
+		m.logger.Debug(
+			"deferred leios voting key is not available in the on-chain snapshot; voting remains disabled",
+			"pool",
+			hex.EncodeToString(pool),
+		)
+		return
+	}
+	if !registered.Equal(key.PublicKey()) {
+		m.logger.Error(
+			"configured leios voting key does not match the on-chain registered key; voting remains disabled",
+			"pool",
+			hex.EncodeToString(pool),
+		)
+		return
+	}
+
+	enabled, err := m.activateDeferredVoting(
+		pool,
+		key,
+		currentEpoch,
+		lookupGeneration,
+	)
+	if err != nil {
+		m.logger.Error(
+			"cannot replay deferred leios voting announcements; voting remains disabled",
+			"pool",
+			hex.EncodeToString(pool),
+			"error",
+			err,
+		)
+		return
+	}
+	if !enabled {
+		return
+	}
+	m.logger.Info(
+		"leios voting enabled after resolving the on-chain registration",
+		"pool", hex.EncodeToString(pool),
+	)
+}
+
 // ValidateVotingKey verifies that an operator-supplied voting key matches a
-// resolvable public key for the pool: its PoP-verified on-chain registered
-// key takes precedence, falling back to the static leiosVoterPublicKeys
-// registry. A pool with a valid on-chain registration therefore needs no
-// registry entry to enable voting -- requiring one here would defeat the
-// on-chain key rollout for every operator who registered for real.
+// resolvable public key for the pool. A configured KeyProvider is authoritative:
+// its PoP-verified on-chain registration must exist and match. Registry is
+// consulted only in the explicit private test/devnet mode where KeyProvider is
+// nil.
 //
 // Deliberately not scoped to the current epoch's committee: resolution
 // goes through resolveOnChainKeyForPool, not the epoch-cached (and, since
@@ -568,12 +985,18 @@ func (m *VoteManager) ValidateVotingKey(
 			err,
 		)
 	}
-	if !ok {
+	if !ok && m.keyProvider == nil {
 		registered, ok = m.registry.PublicKeyFor(poolKeyHash[:])
 	}
 	if !ok {
+		if m.keyProvider != nil {
+			return fmt.Errorf(
+				"no usable on-chain leios voting public key for pool %x",
+				poolKeyHash,
+			)
+		}
 		return fmt.Errorf(
-			"no resolvable leios voting public key for pool %x (checked the on-chain registration and leios-voter-public-keys)",
+			"no static leios voting public key for pool %x in private registry mode",
 			poolKeyHash,
 		)
 	}
@@ -701,8 +1124,8 @@ func (m *VoteManager) committeeAndParamsForEpoch(
 // resolveOnChainKeys fetches raw registered Leios keys from keyProvider for
 // a snapshot epoch and returns only those whose proof of possession
 // verifies. A nil keyProvider (no ledger wired, e.g. in tests) yields an
-// empty map with no error -- on-chain keys are an additive resolution
-// source on top of Registry, not a hard dependency of it. A provider error
+// empty map with no error -- this is the explicit Registry-only private
+// test/devnet mode. A provider error
 // is returned rather than swallowed into an empty map: the caller must not
 // cache an empty result for a transient failure, since that would make
 // every seat keyless for the rest of the epoch even after the store
@@ -715,7 +1138,7 @@ func (m *VoteManager) resolveOnChainKeys(
 	if m.keyProvider == nil {
 		return verified, nil
 	}
-	raw, err := m.keyProvider.GetLeiosKeys(poolKeyHashes)
+	raw, err := m.keyProvider.GetLeiosKeys(snapshotEpoch, poolKeyHashes)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"resolve on-chain leios keys for snapshot epoch %d: %w",
@@ -758,19 +1181,23 @@ func (m *VoteManager) resolveOnChainKeys(
 // validity of their key.
 //
 // A key-provider error is returned, not swallowed into "no on-chain key
-// found": callers resolve that case to "fall back to the static registry,"
-// and a transient lookup failure is not the same as a genuine absence.
-// Treating them the same would let EnableVoting register a possibly-stale
-// or wrong local key while the real on-chain key is momentarily
-// unreachable -- EnableVoting would then report success, but every
-// subsequent emission would still resolve the real on-chain key once the
-// failure clears and silently reject that stale key, so the operator would
-// have no signal anything is wrong until their pool never actually votes.
+// found": a transient lookup failure is not the same as a genuine absence,
+// and both must block production voting rather than consulting Registry.
 func (m *VoteManager) resolveOnChainKeyForPool(
 	poolKeyHash []byte,
 ) (*bls12381.G2Affine, bool, error) {
+	return m.resolveOnChainKeyForPoolAtEpoch(
+		poolKeyHash,
+		m.epochProvider.CurrentEpoch(),
+	)
+}
+
+func (m *VoteManager) resolveOnChainKeyForPoolAtEpoch(
+	poolKeyHash []byte,
+	currentEpoch uint64,
+) (*bls12381.G2Affine, bool, error) {
 	poolHashHex := hex.EncodeToString(poolKeyHash)
-	snapshotEpoch := CommitteeSnapshotEpoch(m.epochProvider.CurrentEpoch())
+	snapshotEpoch := CommitteeSnapshotEpoch(currentEpoch)
 	keys, err := m.resolveOnChainKeys(snapshotEpoch, []string{poolHashHex})
 	if err != nil {
 		return nil, false, err
@@ -779,12 +1206,10 @@ func (m *VoteManager) resolveOnChainKeyForPool(
 	return pub, ok, nil
 }
 
-// resolveVoterKey resolves a committee member's voting public key: the
-// epoch's PoP-verified on-chain key takes precedence, falling back to
-// Registry (a locally configured override, or the node's own key before it
-// is visible on-chain). A member resolving to neither is keyless for the
-// epoch -- membership is still valid, but its vote/signature can never be
-// verified.
+// resolveVoterKey resolves a committee member's voting public key. With a
+// KeyProvider, the epoch's PoP-verified on-chain result is authoritative and a
+// missing key is a keyless seat. Registry is used only when KeyProvider is nil,
+// the explicit private test/devnet seam.
 func (m *VoteManager) resolveVoterKey(
 	entry *epochEntry,
 	poolKeyHash []byte,
@@ -793,6 +1218,9 @@ func (m *VoteManager) resolveVoterKey(
 		if pub, ok := entry.onChainKeys[hex.EncodeToString(poolKeyHash)]; ok {
 			return pub, true
 		}
+	}
+	if m.keyProvider != nil {
+		return nil, false
 	}
 	return m.registry.PublicKeyFor(poolKeyHash)
 }
@@ -906,8 +1334,8 @@ func (m *VoteManager) HandleVote(
 		}
 		verified = true
 	} else {
-		// Keyless committee seat: the pool has no usable on-chain or
-		// locally-configured key, so the vote counts toward observed
+		// Keyless committee seat: the pool has no usable authoritative key,
+		// so the vote counts toward observed
 		// stake but cannot be verified or aggregated into a certificate.
 		m.logger.Debug(
 			"no registered voting key for leios voter, skipping signature verification",
@@ -924,6 +1352,7 @@ func (m *VoteManager) HandleVote(
 		verified,
 		entry.tau,
 		lcommon.Blake2b256{},
+		nil,
 	)
 	return nil
 }
@@ -1014,7 +1443,7 @@ func (m *VoteManager) handleResolvedPrototypeVote(
 		VoterId:           vote.VoterId,
 		VoteSignature:     vote.VoteSignature,
 	}
-	m.insertVote(
+	inserted := m.insertVote(
 		connKey,
 		resolved,
 		record.epoch,
@@ -1023,7 +1452,19 @@ func (m *VoteManager) handleResolvedPrototypeVote(
 		verified,
 		entry.tau,
 		vote.AnnouncingRbHash,
+		nil,
 	)
+	// Re-diffuse a newly accepted peer vote the same way a locally emitted
+	// one is diffused. insertVote's dedup/equivocation gate above means this
+	// fires exactly once per distinct vote, so a relay forwards it to its
+	// other peers instead of stopping it at the connection that delivered
+	// it, without re-broadcasting a resubmission or an equivocation attempt.
+	if inserted {
+		m.eventBus.Publish(VoteReceivedEventType, event.NewEvent(
+			VoteReceivedEventType,
+			VoteReceivedEvent{Vote: vote, OriginConnKey: connKey},
+		))
+	}
 	return nil
 }
 
@@ -1219,6 +1660,7 @@ func (m *VoteManager) insertVote(
 	verified bool,
 	tau *big.Rat,
 	announcingRbHash lcommon.Blake2b256,
+	expectedVoting *votingConfigurationSnapshot,
 ) bool {
 	raw, err := vote.MarshalCBOR()
 	if err != nil {
@@ -1232,6 +1674,13 @@ func (m *VoteManager) insertVote(
 	now := m.now()
 
 	m.mu.Lock()
+	if expectedVoting != nil &&
+		(m.votingLookupGeneration != expectedVoting.generation ||
+			m.votingKey != expectedVoting.key ||
+			!slices.Equal(m.votingPool, expectedVoting.pool)) {
+		m.mu.Unlock()
+		return false
+	}
 	if announcingRbHash != (lcommon.Blake2b256{}) {
 		current, ok := m.announcements[announcingRbHash]
 		if !ok || current.slot != vote.SlotNo || current.epoch != epoch ||
@@ -1649,9 +2098,19 @@ func (m *VoteManager) emitPrototypeVote(
 	rbHash lcommon.Blake2b256,
 	record announcementRecord,
 ) {
+	m.localEmissionMu.Lock()
+	defer m.localEmissionMu.Unlock()
+	m.emitPrototypeVoteLocked(rbHash, record)
+}
+
+func (m *VoteManager) emitPrototypeVoteLocked(
+	rbHash lcommon.Blake2b256,
+	record announcementRecord,
+) {
 	m.mu.Lock()
-	votingPool := m.votingPool
+	votingPool := slices.Clone(m.votingPool)
 	votingKey := m.votingKey
+	votingGeneration := m.votingLookupGeneration
 	_, alreadyVoted := m.votedAnnouncements[rbHash]
 	m.mu.Unlock()
 	if len(votingPool) == 0 || votingKey == nil || alreadyVoted {
@@ -1700,13 +2159,15 @@ func (m *VoteManager) emitPrototypeVote(
 	if !resolvedOK || !resolved.Equal(votingKey.PublicKey()) {
 		m.logger.Error(
 			"configured leios voting key no longer matches the resolved public key for this pool, not voting",
-			"slot", record.slot,
-			"voter_id", voterId,
+			"slot",
+			record.slot,
+			"voter_id",
+			voterId,
 		)
 		return
 	}
 	msg := PrototypeVoteMessageBytes(rbHash)
-	sig, err := SignVote(votingKey, msg)
+	sig, err := m.signVote(votingKey, msg)
 	if err != nil {
 		m.logger.Error(
 			"failed to sign leios vote",
@@ -1722,21 +2183,26 @@ func (m *VoteManager) emitPrototypeVote(
 		VoterId:           voterId,
 		VoteSignature:     sig,
 	}
-	if m.metrics != nil {
-		m.metrics.votesReceivedTotal.Inc()
-	}
-	m.logger.Info(
-		"emitting leios vote",
-		"slot", record.slot,
-		"voter_id", voterId,
-		"announcing_rb_hash", rbHash.String(),
-		"endorser_block_hash", record.ebHash.String(),
-	)
 	m.prototypeEmissionMu.Lock()
 	inserted := m.insertVote(
 		"", vote, record.epoch, committee, member, true, entry.tau, rbHash,
+		&votingConfigurationSnapshot{
+			generation: votingGeneration,
+			pool:       votingPool,
+			key:        votingKey,
+		},
 	)
 	if inserted {
+		if m.metrics != nil {
+			m.metrics.votesReceivedTotal.Inc()
+		}
+		m.logger.Info(
+			"emitting leios vote",
+			"slot", record.slot,
+			"voter_id", voterId,
+			"announcing_rb_hash", rbHash.String(),
+			"endorser_block_hash", record.ebHash.String(),
+		)
 		m.eventBus.Publish(VoteEmittedEventType, event.NewEvent(
 			VoteEmittedEventType,
 			VoteEmittedEvent{Vote: lcommon.LeiosPrototypeVote{
@@ -1773,6 +2239,7 @@ func (m *VoteManager) eventLoop(
 			}
 			if data, ok := evt.Data.(event.EpochTransitionEvent); ok {
 				m.handleEpochTransition(data)
+				m.retryDeferredVoting(data.NewEpoch)
 			}
 		case evt, ok := <-chainCh:
 			if !ok {

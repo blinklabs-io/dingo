@@ -135,19 +135,43 @@ func (o *Ouroboros) decodeBlockfetchBlock(
 }
 
 // blockfetchClientBlockRaw decodes the raw fetched block (via
-// decodeBlockfetchBlock) and forwards the decoded block to the shared block
-// handler.
+// decodeBlockfetchBlock, through the shared decode cache) and forwards the
+// decoded block to the shared block handler.
+//
+// Multiple connections routinely deliver byte-identical block bytes around
+// the same time (several peers relaying the same freshly-produced block), so
+// the decode is keyed by content hash and shared across connections: the
+// first connection to submit a given block's bytes decodes it, and every
+// other connection submitting the identical bytes -- concurrently or
+// afterward -- reuses that result instead of redoing the parse. See #489.
 func (o *Ouroboros) blockfetchClientBlockRaw(
 	ctx blockfetch.CallbackContext,
 	blockType uint,
 	blockData []byte,
 ) error {
-	block, err := o.decodeBlockfetchBlock(blockType, blockData)
+	key := hashDecodeInput(blockType, blockData)
+	block, err := decodeWithPanicSafeMetrics(
+		o.blockDecodeCache,
+		key,
+		func() (gledger.Block, error) {
+			return o.decodeBlockfetchBlock(blockType, blockData)
+		},
+		o.recordBlockDecodeCacheOutcome,
+	)
 	if err != nil {
 		return fmt.Errorf(
 			"decode block-fetch block (block type %d): %w",
 			blockType,
 			err,
+		)
+	}
+	if block == nil {
+		// decodeCache's contract is (nil value, non-nil err) on failure, but
+		// that is a convention on decodeFn, not something the generic cache
+		// itself enforces -- guard explicitly rather than trust it silently.
+		return fmt.Errorf(
+			"decode block-fetch block (block type %d): decoded nil block with no error",
+			blockType,
 		)
 	}
 	return o.blockfetchClientBlock(ctx, blockType, block)
@@ -172,6 +196,12 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 				err,
 			)
 		}
+		o.blockfetchRecordNoBlocksAndMaybeClose(
+			ctx.ConnectionId,
+			start,
+			"blockfetch: closing stuck peer after repeated inverted range requests",
+			"blockfetch: peer stuck on inverted range",
+		)
 		return nil
 	}
 	// Validate that the requested slot range is not too large
@@ -200,7 +230,7 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		return nil
 	}
 	// Validate that the start point exists in our chain (#397)
-	chainIter, err := o.LedgerState.GetChainFromPoint(start, true)
+	chainIter, err := o.ledgerState.GetChainFromPoint(start, true)
 	if err != nil {
 		o.config.Logger.Debug(
 			"blockfetch: start point not found in chain, sending NoBlocks",
@@ -225,7 +255,7 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 	o.blockfetchResetNoBlocks(ctx.ConnectionId)
 	// Start async process to send requested block range
 	go func() {
-		conn := o.ConnManager.GetConnectionById(ctx.ConnectionId)
+		conn := o.connManager.GetConnectionById(ctx.ConnectionId)
 		if conn == nil {
 			chainIter.Cancel()
 			return
@@ -473,10 +503,10 @@ func (o *Ouroboros) blockfetchRecordNoBlocksAndMaybeClose(
 		"connection_id", connId.String(),
 		"start_slot", start.Slot,
 	)
-	if o.ConnManager == nil {
+	if o.connManager == nil {
 		return
 	}
-	conn := o.ConnManager.GetConnectionById(connId)
+	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
 		return
 	}
@@ -517,10 +547,10 @@ func (o *Ouroboros) BlockfetchClientRequestRange(
 	start ocommon.Point,
 	end ocommon.Point,
 ) error {
-	if o.ConnManager == nil {
+	if o.connManager == nil {
 		return errors.New("ConnManager not initialized")
 	}
-	conn := o.ConnManager.GetConnectionById(connId)
+	conn := o.connManager.GetConnectionById(connId)
 	if conn == nil {
 		return fmt.Errorf("failed to lookup connection ID: %s", connId.String())
 	}
@@ -534,9 +564,9 @@ func (o *Ouroboros) BlockfetchClientRequestRange(
 		startTime, exists := o.blockFetchStarts[connId]
 		delete(o.blockFetchStarts, connId)
 		o.blockFetchMutex.Unlock()
-		if exists && o.PeerGov != nil {
+		if exists && o.peerGov != nil {
 			latencyMs := time.Since(startTime).Milliseconds()
-			o.PeerGov.UpdatePeerBlockFetchObservation(
+			o.peerGov.UpdatePeerBlockFetchObservation(
 				connId,
 				float64(latencyMs),
 				false,
@@ -562,11 +592,11 @@ func (o *Ouroboros) blockfetchClientBlock(
 		// Only publish block delay metrics after reaching tip once.
 		// During catch-up all blocks are naturally "late" relative to
 		// wall-clock time, which permanently poisons the CDF.
-		atTip := o.LedgerState != nil && o.LedgerState.IsAtTip()
+		atTip := o.ledgerState != nil && o.ledgerState.IsAtTip()
 		if atTip && o.blockfetchMetrics != nil {
 			// Calculate block delay as wallclock time minus block slot time (cardano-node compatible)
 			var delaySeconds float64
-			if blockSlotTime, err := o.LedgerState.SlotToTime(block.SlotNumber()); err == nil {
+			if blockSlotTime, err := o.ledgerState.SlotToTime(block.SlotNumber()); err == nil {
 				delaySeconds = time.Since(blockSlotTime).Seconds()
 			} else {
 				delaySeconds = fetchDuration.Seconds()
@@ -605,18 +635,18 @@ func (o *Ouroboros) blockfetchClientBlock(
 			}
 		}
 
-		if o.PeerGov != nil {
+		if o.peerGov != nil {
 			latencyMs := fetchDuration.Milliseconds()
-			o.PeerGov.UpdatePeerBlockFetchObservation(
+			o.peerGov.UpdatePeerBlockFetchObservation(
 				ctx.ConnectionId,
 				float64(latencyMs),
 				true,
 			)
 		}
 	}
-	if o.EventBus != nil &&
-		o.EventBus.HasSubscribers(ledger.BlockfetchEventType) {
-		o.EventBus.Publish(
+	if o.eventBus != nil &&
+		o.eventBus.HasSubscribers(ledger.BlockfetchEventType) {
+		o.eventBus.Publish(
 			ledger.BlockfetchEventType,
 			event.NewEvent(
 				ledger.BlockfetchEventType,
@@ -642,9 +672,9 @@ func (o *Ouroboros) blockfetchClientBatchDone(
 	o.blockFetchMutex.Lock()
 	delete(o.blockFetchStarts, ctx.ConnectionId)
 	o.blockFetchMutex.Unlock()
-	if o.EventBus != nil &&
-		o.EventBus.HasSubscribers(ledger.BlockfetchEventType) {
-		o.EventBus.Publish(
+	if o.eventBus != nil &&
+		o.eventBus.HasSubscribers(ledger.BlockfetchEventType) {
+		o.eventBus.Publish(
 			ledger.BlockfetchEventType,
 			event.NewEvent(
 				ledger.BlockfetchEventType,

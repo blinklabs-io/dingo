@@ -30,6 +30,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,7 +45,7 @@ import (
 )
 
 const (
-	defaultHost            = "0.0.0.0"
+	defaultHost            = "127.0.0.1"
 	defaultPort            = 50051
 	defaultShutdownTimeout = 30 * time.Second
 )
@@ -113,7 +114,7 @@ type Config struct {
 	// own (found=false for an unknown hash, not an error). Nil causes
 	// GetUtxoEvents to fail requests that set end_block_hash.
 	BlockNumberByHash func(hash []byte) (blockNumber uint64, found bool, err error)
-	// Host and Port are the gRPC listen address. Defaults to 0.0.0.0:50051.
+	// Host and Port are the gRPC listen address. Defaults to 127.0.0.1:50051.
 	Host string
 	Port uint
 	// TLSCertFilePath and TLSKeyFilePath enable TLS when both are set. When
@@ -121,6 +122,11 @@ type Config struct {
 	// error.
 	TLSCertFilePath string
 	TLSKeyFilePath  string
+	// AllowInsecureRemote permits plaintext on a non-loopback address when
+	// transport security is provided outside Dingo.
+	AllowInsecureRemote bool
+	// ReflectionEnabled exposes gRPC service discovery. It defaults off.
+	ReflectionEnabled bool
 	// ShutdownTimeout bounds GracefulStop before escalating to a hard Stop.
 	// Defaults to 30s.
 	ShutdownTimeout time.Duration
@@ -169,10 +175,25 @@ func New(cfg Config) (*Server, error) {
 			"midnight grpc: both tls cert and key must be specified",
 		)
 	}
+	useTLS := cfg.TLSCertFilePath != "" && cfg.TLSKeyFilePath != ""
+	if !useTLS && !cfg.AllowInsecureRemote && !isLoopbackHost(cfg.Host) {
+		return nil, fmt.Errorf(
+			"midnight grpc: host %q is not loopback: configure TLS or allow insecure remote plaintext",
+			cfg.Host,
+		)
+	}
 	return &Server{
 		config:  cfg,
 		metrics: newServerMetrics(cfg.PromRegistry),
 	}, nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
 }
 
 // Start binds the listener and serves the gRPC server in a background
@@ -223,6 +244,7 @@ func (s *Server) Start(ctx context.Context) error {
 		blockNumberByHash: s.config.BlockNumberByHash,
 		db:                s.config.Database,
 		slotTimer:         s.config.SlotTimer,
+		logger:            s.config.Logger,
 	})
 
 	// Health service reporting SERVING for the overall server ("") and the
@@ -235,8 +257,9 @@ func (s *Server) Start(ctx context.Context) error {
 		healthpb.HealthCheckResponse_SERVING,
 	)
 
-	// Reflection so grpcurl and similar tooling work out of the box.
-	reflection.Register(grpcServer)
+	if s.config.ReflectionEnabled {
+		reflection.Register(grpcServer)
+	}
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -356,4 +379,8 @@ type service struct {
 	blockNumberByHash func(hash []byte) (blockNumber uint64, found bool, err error)
 	db                MidnightDatabase
 	slotTimer         SlotTimer
+	// logger receives the diagnostic detail behind every codes.Internal
+	// response (see internalError in service.go); it is never nil, so
+	// handlers can log unconditionally.
+	logger *slog.Logger
 }

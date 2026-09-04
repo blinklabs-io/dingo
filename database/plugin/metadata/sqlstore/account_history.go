@@ -144,7 +144,7 @@ func (s *Store) GetAccountDelegationHistoryByCredential(
 	if len(stakingKey) == 0 {
 		return ret, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"resolve read DB for account delegation history: %w",
@@ -158,7 +158,7 @@ func (s *Store) GetAccountDelegationHistoryByCredential(
 		query += " ORDER BY added_slot DESC, block_index DESC, cert_index DESC, tx_hash DESC"
 	}
 	query, args = addLimitOffset(query, args, limit, offset)
-	rows, err := db.QueryContext(context.Background(), query, args...)
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query account delegation history: %w", err)
 	}
@@ -189,14 +189,14 @@ func (s *Store) CountAccountDelegationHistoryByCredential(
 	if len(stakingKey) == 0 {
 		return 0, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
 	query, args := accountDelegationHistoryQuery(credentialTag, stakingKey)
 	var count int
 	err = db.QueryRowContext(
-		context.Background(),
+		ctx,
 		"SELECT COUNT(*) FROM ("+query+") delegation_history",
 		args...,
 	).Scan(&count)
@@ -215,7 +215,7 @@ func (s *Store) GetAccountRegistrationHistoryByCredential(
 	if len(stakingKey) == 0 {
 		return ret, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"resolve read DB for account registration history: %w",
@@ -229,7 +229,7 @@ func (s *Store) GetAccountRegistrationHistoryByCredential(
 		query += " ORDER BY added_slot DESC, block_index DESC, cert_index DESC, tx_hash DESC, action DESC"
 	}
 	query, args = addLimitOffset(query, args, limit, offset)
-	rows, err := db.QueryContext(context.Background(), query, args...)
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query account registration history: %w", err)
 	}
@@ -269,14 +269,14 @@ func (s *Store) CountAccountRegistrationHistoryByCredential(
 	if len(stakingKey) == 0 {
 		return 0, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
 	query, args := accountRegistrationHistoryQuery(credentialTag, stakingKey)
 	var count int
 	err = db.QueryRowContext(
-		context.Background(),
+		ctx,
 		"SELECT COUNT(*) FROM ("+query+") registration_history",
 		args...,
 	).Scan(&count)
@@ -295,7 +295,7 @@ func (s *Store) GetAccountWithdrawalHistoryByCredential(
 	if len(stakingKey) == 0 {
 		return ret, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -307,7 +307,7 @@ func (s *Store) GetAccountWithdrawalHistoryByCredential(
 	}
 	query, args = addLimitOffset(query, args, limit, offset)
 	rows, err := db.QueryContext(
-		context.Background(),
+		ctx,
 		s.dialect.Rebind(query),
 		args...,
 	)
@@ -346,14 +346,14 @@ func (s *Store) CountAccountWithdrawalHistoryByCredential(
 	if len(stakingKey) == 0 {
 		return 0, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
 	query, args := withdrawalHistoryQuery(credentialTag, stakingKey)
 	var count int
 	err = db.QueryRowContext(
-		context.Background(),
+		ctx,
 		s.dialect.Rebind(
 			"SELECT COUNT(*) FROM ("+query+") withdrawal_history",
 		),
@@ -384,11 +384,11 @@ func (s *Store) GetStakeRegistrationsByCredential(
 	txn types.Txn,
 ) ([]lcommon.StakeRegistrationCertificate, error) {
 	ret := []lcommon.StakeRegistrationCertificate{}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return ret, err
 	}
-	rows, err := db.QueryContext(context.Background(), `
+	rows, err := db.QueryContext(ctx, `
 SELECT sr.credential_tag, sr.staking_key
 FROM stake_registration sr
 LEFT JOIN certs c ON c.id = sr.certificate_id
@@ -433,7 +433,7 @@ func (s *Store) AccountLastWitnessSlots(
 	if len(refs) == 0 {
 		return ret, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -454,6 +454,7 @@ func (s *Store) AccountLastWitnessSlots(
 		end := min(start+400, len(keys))
 		for _, table := range sources {
 			if err := mergeWitnessSlots(
+				ctx,
 				db,
 				table,
 				false,
@@ -466,6 +467,7 @@ func (s *Store) AccountLastWitnessSlots(
 			}
 		}
 		if err := mergeWitnessSlots(
+			ctx,
 			db,
 			"account_reward_delta",
 			true,
@@ -484,7 +486,7 @@ func (s *Store) AccountsWitnessedAfterSlot(
 	slot uint64,
 	txn types.Txn,
 ) ([]models.StakeCredentialRef, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -504,7 +506,7 @@ WHERE added_slot > ?`)
 SELECT credential_tag, staking_key FROM account_reward_delta
 WHERE withdrawal = TRUE AND added_slot > ?`)
 	args = append(args, slot)
-	rows, err := db.QueryContext(context.Background(), `
+	rows, err := db.QueryContext(ctx, `
 SELECT credential_tag, staking_key
 FROM (`+strings.Join(parts, " UNION ALL ")+`) witnesses
 GROUP BY credential_tag, staking_key`,
@@ -534,7 +536,7 @@ func (s *Store) GetAccountsActiveAtSlot(
 	if len(refs) == 0 {
 		return ret, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -559,6 +561,7 @@ func (s *Store) GetAccountsActiveAtSlot(
 		chunk := keys[start:end]
 		for _, table := range accountRegistrationStateTables {
 			if err := mergeAccountCertificatePositions(
+				ctx,
 				db,
 				table,
 				chunk,
@@ -571,6 +574,7 @@ func (s *Store) GetAccountsActiveAtSlot(
 		}
 		for _, table := range accountDeregistrationStateTables {
 			if err := mergeAccountCertificatePositions(
+				ctx,
 				db,
 				table,
 				chunk,
@@ -607,7 +611,7 @@ func (s *Store) GetAccountsActiveAtSlot(
 	for start := 0; start < len(fallback); start += 200 {
 		end := min(start+200, len(fallback))
 		predicate, args := credentialPredicate(fallback[start:end])
-		rows, err := db.QueryContext(context.Background(), `
+		rows, err := db.QueryContext(ctx, `
 SELECT credential_tag, staking_key, created_slot, active
 FROM account WHERE `+predicate,
 			args...,
@@ -640,7 +644,7 @@ FROM account WHERE `+predicate,
 			return nil, err
 		}
 		for _, table := range accountDeregistrationStateTables {
-			rows, err := db.QueryContext(context.Background(), `
+			rows, err := db.QueryContext(ctx, `
 SELECT credential_tag, staking_key FROM `+table+`
 WHERE `+predicate+`
 GROUP BY credential_tag, staking_key`,
@@ -768,6 +772,7 @@ func addLimitOffset(
 }
 
 func mergeWitnessSlots(
+	ctx context.Context,
 	db queryer,
 	table string,
 	withdrawalsOnly bool,
@@ -785,7 +790,7 @@ func mergeWitnessSlots(
 	if withdrawalsOnly {
 		withdrawal = "withdrawal = TRUE AND "
 	}
-	rows, err := db.QueryContext(context.Background(), `
+	rows, err := db.QueryContext(ctx, `
 SELECT credential_tag, staking_key, MAX(added_slot)
 FROM `+table+`
 WHERE `+withdrawal+`staking_key IN (`+bindPlaceholders(len(keys))+`)
@@ -816,6 +821,7 @@ GROUP BY credential_tag, staking_key`,
 }
 
 func mergeAccountCertificatePositions(
+	ctx context.Context,
 	db queryer,
 	table string,
 	keys [][]byte,
@@ -828,7 +834,7 @@ func mergeAccountCertificatePositions(
 		args = append(args, key)
 	}
 	args = append(args, slot)
-	rows, err := db.QueryContext(context.Background(), `
+	rows, err := db.QueryContext(ctx, `
 SELECT source.credential_tag, source.staking_key, source.added_slot,
        COALESCE(tx.block_index, 0), COALESCE(c.cert_index, 0)
 FROM `+table+` source

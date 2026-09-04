@@ -25,6 +25,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -68,22 +69,100 @@ func (txsubmissionTestValidator) ValidateTxWithOverlay(
 	return nil
 }
 
-// txsubmissionRejectingValidator rejects every transaction, so that
-// AddTransaction fails the way it would for a real mempool policy
-// violation (e.g. an invalid or already-spent UTxO), letting tests observe
-// how txsubmissionServerInit handles a mempool error during relay.
-type txsubmissionRejectingValidator struct{}
-
-func (txsubmissionRejectingValidator) ValidateTx(gledger.Transaction) error {
-	return errors.New("txsubmissionRejectingValidator: rejected")
+// txsubmissionSelectiveRejectingValidator rejects one transaction while
+// allowing later offers from the same peer to exercise the relay pump.
+type txsubmissionSelectiveRejectingValidator struct {
+	rejectedHash string
 }
 
-func (txsubmissionRejectingValidator) ValidateTxWithOverlay(
-	gledger.Transaction,
-	map[string]struct{},
-	map[string]lcommon.Utxo,
+func (v txsubmissionSelectiveRejectingValidator) ValidateTx(
+	tx gledger.Transaction,
 ) error {
-	return errors.New("txsubmissionRejectingValidator: rejected")
+	if tx.Hash().String() == v.rejectedHash {
+		return errors.New("txsubmissionSelectiveRejectingValidator: rejected")
+	}
+	return nil
+}
+
+func (v txsubmissionSelectiveRejectingValidator) ValidateTxWithOverlay(
+	tx gledger.Transaction,
+	_ map[string]struct{},
+	_ map[string]lcommon.Utxo,
+) error {
+	return v.ValidateTx(tx)
+}
+
+type txsubmissionCorruptingConsumer struct {
+	mempool.Consumer
+	corruptHash string
+	omitHash    string
+}
+
+func (c *txsubmissionCorruptingConsumer) GetTxFromCache(
+	hash string,
+) *mempool.MempoolTransaction {
+	if hash == c.omitHash {
+		return nil
+	}
+	tx := c.Consumer.GetTxFromCache(hash)
+	if tx == nil || hash != c.corruptHash {
+		return tx
+	}
+	corrupted := *tx
+	corrupted.Cbor = []byte{0xff}
+	return &corrupted
+}
+
+type txsubmissionCorruptingService struct {
+	mempool.Service
+	corruptHash string
+	omitHash    string
+	mu          sync.Mutex
+	consumers   map[ouroboros.ConnectionId]mempool.Consumer
+}
+
+// txsubmissionServiceWithoutHeadroom limits the wrapped service's method set
+// to mempool.Service so the relay pump uses its batched-request path.
+type txsubmissionServiceWithoutHeadroom struct {
+	mempool.Service
+}
+
+func (s *txsubmissionCorruptingService) NewConsumer(
+	connId ouroboros.ConnectionId,
+) mempool.Consumer {
+	consumer := s.Service.NewConsumer(connId)
+	if consumer == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing := s.consumers[connId]; existing != nil {
+		return existing
+	}
+	wrapped := &txsubmissionCorruptingConsumer{
+		Consumer:    consumer,
+		corruptHash: s.corruptHash,
+		omitHash:    s.omitHash,
+	}
+	s.consumers[connId] = wrapped
+	return wrapped
+}
+
+func (s *txsubmissionCorruptingService) FindConsumer(
+	connId ouroboros.ConnectionId,
+) mempool.Consumer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.consumers[connId]
+}
+
+func (s *txsubmissionCorruptingService) RemoveConsumer(
+	connId ouroboros.ConnectionId,
+) {
+	s.mu.Lock()
+	delete(s.consumers, connId)
+	s.mu.Unlock()
+	s.Service.RemoveConsumer(connId)
 }
 
 func TestRetryTxsubmissionAdmissionBoundsContention(t *testing.T) {
@@ -174,8 +253,8 @@ func TestTxSubmissionClientRequestTxIds(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Arrange a peer consumer with the test's available tx set.
 			o, connId := newTxSubmissionTestOuroboros(t)
-			o.Mempool.NewConsumer(connId)
-			addTxSubmissionTestFixtures(t, o.Mempool, fixtures[:tt.txCount]...)
+			o.mempool.NewConsumer(connId)
+			addTxSubmissionTestFixtures(t, o.mempool, fixtures[:tt.txCount]...)
 
 			// Ask the handler for at most the peer-requested number of TxIds.
 			ids, err := o.txsubmissionClientRequestTxIds(
@@ -215,8 +294,8 @@ func TestTxSubmissionClientRequestTxIdsClearsConsumerCacheOnAck(t *testing.T) {
 	// Arrange one cached transaction for a peer consumer.
 	fixture := txsubmissionTestFixtures(t)[0]
 	o, connId := newTxSubmissionTestOuroboros(t)
-	o.Mempool.NewConsumer(connId)
-	addTxSubmissionTestFixtures(t, o.Mempool, fixture)
+	o.mempool.NewConsumer(connId)
+	addTxSubmissionTestFixtures(t, o.mempool, fixture)
 	ctx := txsubmission.CallbackContext{ConnectionId: connId}
 
 	// First advertise the transaction so it is stored in the consumer cache.
@@ -237,15 +316,109 @@ func TestTxSubmissionClientRequestTxIdsClearsConsumerCacheOnAck(t *testing.T) {
 	require.Empty(t, bodies)
 }
 
+// TestTxSubmissionClientRequestTxIdsPartialAck verifies that acknowledging
+// part of a batch of offered transactions discards only the acknowledged
+// prefix, in the order the ids were offered, and preserves the bodies of ids
+// the peer has not yet acknowledged so they remain available to retry.
+// Regression test for
+// https://github.com/blinklabs-io/dingo/issues/3424, where any nonzero ack
+// cleared the entire offered cache and silently dropped unacknowledged
+// bodies.
+func TestTxSubmissionClientRequestTxIdsPartialAck(t *testing.T) {
+	// Arrange two cached transactions for a peer consumer.
+	fixtures := txsubmissionTestFixtures(t)[:2]
+	o, connId := newTxSubmissionTestOuroboros(t)
+	o.mempool.NewConsumer(connId)
+	addTxSubmissionTestFixtures(t, o.mempool, fixtures...)
+	ctx := txsubmission.CallbackContext{ConnectionId: connId}
+
+	// Advertise both transactions so both are stored in the consumer cache.
+	ids, err := o.txsubmissionClientRequestTxIds(ctx, false, 0, 2)
+	require.NoError(t, err)
+	require.Len(t, ids, 2)
+
+	// Acknowledge only the first (oldest) offered transaction; request no
+	// additional ids in the same call to isolate the ack's effect.
+	ids, err = o.txsubmissionClientRequestTxIds(ctx, false, 1, 0)
+	require.NoError(t, err)
+	require.Empty(t, ids)
+
+	// The acknowledged transaction body can no longer be served.
+	bodies, err := o.txsubmissionClientRequestTxs(ctx, []txsubmission.TxId{
+		fixtures[0].txId,
+	})
+	require.NoError(t, err)
+	require.Empty(t, bodies)
+
+	// The unacknowledged transaction body is still cached and can be served.
+	bodies, err = o.txsubmissionClientRequestTxs(ctx, []txsubmission.TxId{
+		fixtures[1].txId,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []txsubmission.TxBody{
+		{
+			EraId:  txsubmissionRelayTestEraId,
+			TxBody: fixtures[1].body,
+		},
+	}, bodies)
+}
+
+// TestTxSubmissionClientRequestTxIdsAckAcrossMixedBatches verifies that
+// acknowledgements accumulate correctly across multiple RequestTxIds calls
+// that mix acknowledging older offers with advertising new ones in the same
+// call, matching the sliding FIFO window the TxSubmission protocol uses.
+func TestTxSubmissionClientRequestTxIdsAckAcrossMixedBatches(t *testing.T) {
+	// Arrange three cached transactions for a peer consumer.
+	fixtures := txsubmissionTestFixtures(t)
+	o, connId := newTxSubmissionTestOuroboros(t)
+	o.mempool.NewConsumer(connId)
+	addTxSubmissionTestFixtures(t, o.mempool, fixtures...)
+	ctx := txsubmission.CallbackContext{ConnectionId: connId}
+
+	// Offer the first two transactions.
+	ids, err := o.txsubmissionClientRequestTxIds(ctx, false, 0, 2)
+	require.NoError(t, err)
+	require.Len(t, ids, 2)
+
+	// Acknowledge the first offer while requesting the third in the same
+	// call, mirroring a peer that both confirms and asks for more at once.
+	ids, err = o.txsubmissionClientRequestTxIds(ctx, false, 1, 1)
+	require.NoError(t, err)
+	require.Len(t, ids, 1)
+	require.Equal(
+		t,
+		fixtures[2].hash,
+		hex.EncodeToString(ids[0].TxId.TxId[:]),
+	)
+
+	// The first offer was acknowledged and its body is gone.
+	bodies, err := o.txsubmissionClientRequestTxs(ctx, []txsubmission.TxId{
+		fixtures[0].txId,
+	})
+	require.NoError(t, err)
+	require.Empty(t, bodies)
+
+	// The second and third offers are still unacknowledged and servable.
+	bodies, err = o.txsubmissionClientRequestTxs(ctx, []txsubmission.TxId{
+		fixtures[1].txId,
+		fixtures[2].txId,
+	})
+	require.NoError(t, err)
+	require.ElementsMatch(t, []txsubmission.TxBody{
+		{EraId: txsubmissionRelayTestEraId, TxBody: fixtures[1].body},
+		{EraId: txsubmissionRelayTestEraId, TxBody: fixtures[2].body},
+	}, bodies)
+}
+
 // TestTxSubmissionClientRequestTxs verifies that known cached TxIds return
 // bodies while unknown or already-served TxIds are ignored.
 func TestTxSubmissionClientRequestTxs(t *testing.T) {
 	// Arrange one known tx and one unknown tx id for the peer request.
 	fixture := txsubmissionTestFixtures(t)[0]
 	o, connId := newTxSubmissionTestOuroboros(t)
-	o.Mempool.NewConsumer(connId)
+	o.mempool.NewConsumer(connId)
 	unknownHash := txsubmissionTestHash(99)
-	addTxSubmissionTestFixtures(t, o.Mempool, fixture)
+	addTxSubmissionTestFixtures(t, o.mempool, fixture)
 	ctx := txsubmission.CallbackContext{ConnectionId: connId}
 
 	// Advertise the known tx first so RequestTxs can find it in cache.
@@ -299,7 +472,7 @@ func TestTxSubmissionClientRequestCallbacksMissingConsumer(t *testing.T) {
 func TestTxSubmissionClientRequestTxsUnknownZeroTxId(t *testing.T) {
 	// Arrange a valid consumer without advertising any txs to its cache.
 	o, connId := newTxSubmissionTestOuroboros(t)
-	o.Mempool.NewConsumer(connId)
+	o.mempool.NewConsumer(connId)
 
 	// Verify an all-zero TxId request is treated as a cache miss, not a panic.
 	require.NotPanics(t, func() {
@@ -318,8 +491,8 @@ func TestTxSubmissionClientRequestTxIdsZeroRequestDoesNotAdvance(t *testing.T) {
 	// Arrange one available tx for the peer consumer.
 	fixture := txsubmissionTestFixtures(t)[0]
 	o, connId := newTxSubmissionTestOuroboros(t)
-	o.Mempool.NewConsumer(connId)
-	addTxSubmissionTestFixtures(t, o.Mempool, fixture)
+	o.mempool.NewConsumer(connId)
+	addTxSubmissionTestFixtures(t, o.mempool, fixture)
 	ctx := txsubmission.CallbackContext{ConnectionId: connId}
 
 	// A zero-count request should return nothing.
@@ -358,7 +531,7 @@ func TestTxSubmissionClientStartMissingConnectionDoesNotAddConsumer(
 
 	require.Error(t, err)
 	require.ErrorContains(t, err, "failed to lookup connection ID")
-	require.Nil(t, o.Mempool.FindConsumer(connId))
+	require.Nil(t, o.mempool.FindConsumer(connId))
 }
 
 func TestTxSubmissionClientStartIsIdempotent(t *testing.T) {
@@ -379,7 +552,7 @@ func TestTxSubmissionClientStartIsIdempotent(t *testing.T) {
 func TestTxSubmissionConnectionClosedCleanup(t *testing.T) {
 	// Arrange per-peer mempool and rate-limiter state.
 	o, connId := newTxSubmissionTestOuroboros(t)
-	o.Mempool.NewConsumer(connId)
+	o.mempool.NewConsumer(connId)
 	o.txSubmissionRateLimiter = newTxSubmissionRateLimiter(1, 1)
 	require.True(t, o.txSubmissionRateLimiter.Allow(connId, 1))
 	require.False(t, o.txSubmissionRateLimiter.Allow(connId, 1))
@@ -393,7 +566,7 @@ func TestTxSubmissionConnectionClosedCleanup(t *testing.T) {
 	})
 
 	// Verify both txsubmission state holders have forgotten the peer.
-	require.Nil(t, o.Mempool.FindConsumer(connId))
+	require.Nil(t, o.mempool.FindConsumer(connId))
 	require.True(t, o.txSubmissionRateLimiter.Allow(connId, 1))
 }
 
@@ -427,13 +600,13 @@ func newTxSubmissionTestOuroboros(
 		require.NoError(t, m.Stop(context.Background()))
 	})
 
-	o := NewOuroboros(OuroborosConfig{Logger: logger})
-	o.ConnManager = connmanager.NewConnectionManager(
+	o := newOuroboros(OuroborosConfig{Logger: logger})
+	o.connManager = connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{
 			Logger: logger,
 		},
 	)
-	o.Mempool = &mempool.FIFO{Mempool: m}
+	o.mempool = &mempool.FIFO{Mempool: m}
 	return o, txsubmissionTestConnId(t)
 }
 
@@ -547,11 +720,14 @@ func newTxSubmissionRelayHarness(t *testing.T) *txSubmissionRelayHarness {
 // original behavior (a shared discard logger and permissive validators on
 // both nodes).
 type txSubmissionRelayHarnessOpts struct {
-	logger     *slog.Logger
-	validatorA mempool.TxValidator
-	validatorB mempool.TxValidator
-	capacityA  int64
-	dagA       bool
+	logger           *slog.Logger
+	validatorA       mempool.TxValidator
+	validatorB       mempool.TxValidator
+	capacityA        int64
+	dagA             bool
+	corruptOfferHash string
+	omitOfferHash    string
+	batchRequestsA   bool
 }
 
 func newTxSubmissionRelayHarnessWithOpts(
@@ -596,6 +772,11 @@ func newTxSubmissionRelayHarnessWithOpts(
 		require.NoError(t, err)
 		nodeAMempool = &mempool.FIFO{Mempool: mA}
 	}
+	if opts.batchRequestsA {
+		nodeAMempool = &txsubmissionServiceWithoutHeadroom{
+			Service: nodeAMempool,
+		}
+	}
 	mB, err := mempool.NewMempool(mempool.MempoolConfig{
 		Logger:          logger,
 		PromRegistry:    prometheus.NewRegistry(),
@@ -611,10 +792,21 @@ func newTxSubmissionRelayHarnessWithOpts(
 		connmanager.ConnectionManagerConfig{Logger: logger},
 	)
 
-	nodeA := NewOuroboros(OuroborosConfig{ConnManager: cmA, Logger: logger})
-	nodeA.Mempool = nodeAMempool
-	nodeB := NewOuroboros(OuroborosConfig{ConnManager: cmB, Logger: logger})
-	nodeB.Mempool = &mempool.FIFO{Mempool: mB}
+	nodeA := newOuroboros(OuroborosConfig{ConnManager: cmA, Logger: logger})
+	nodeA.mempool = nodeAMempool
+	nodeB := newOuroboros(OuroborosConfig{ConnManager: cmB, Logger: logger})
+	nodeBMempool := mempool.Service(&mempool.FIFO{Mempool: mB})
+	if opts.corruptOfferHash != "" || opts.omitOfferHash != "" {
+		nodeBMempool = &txsubmissionCorruptingService{
+			Service:     nodeBMempool,
+			corruptHash: opts.corruptOfferHash,
+			omitHash:    opts.omitOfferHash,
+			consumers: make(
+				map[ouroboros.ConnectionId]mempool.Consumer,
+			),
+		}
+	}
+	nodeB.mempool = nodeBMempool
 
 	serverPipe, clientPipe := net.Pipe()
 
@@ -846,13 +1038,13 @@ func TestTxSubmissionClientRequestTxsExpiredTransactionNotServed(t *testing.T) {
 			cfg.CleanupInterval = 10 * time.Millisecond
 		},
 	)
-	o.Mempool.NewConsumer(connId)
+	o.mempool.NewConsumer(connId)
 
 	txBytes, err := hex.DecodeString(txsubmissionRelayTestTxHex)
 	require.NoError(t, err)
 	require.NoError(
 		t,
-		o.Mempool.AddTransaction(txsubmissionRelayTestEraId, txBytes),
+		o.mempool.AddTransaction(txsubmissionRelayTestEraId, txBytes),
 	)
 	wantTx, err := gledger.NewTransactionFromCbor(
 		txsubmissionRelayTestEraId,
@@ -866,7 +1058,7 @@ func TestTxSubmissionClientRequestTxsExpiredTransactionNotServed(t *testing.T) {
 	require.Eventually(
 		t,
 		func() bool {
-			return len(o.Mempool.Transactions()) == 0
+			return len(o.mempool.Transactions()) == 0
 		},
 		5*time.Second,
 		10*time.Millisecond,
@@ -883,15 +1075,14 @@ func TestTxSubmissionClientRequestTxsExpiredTransactionNotServed(t *testing.T) {
 	require.Empty(t, bodies)
 }
 
-// TestTxSubmissionServerInitMempoolRejectionLogsAndStopsCleanly verifies
-// that a mempool error while admitting a relayed transaction -- e.g. a
-// validator rejection -- is logged and the relay goroutine returns cleanly
-// instead of panicking or wedging the connection. Node A's mempool rejects
-// every transaction so a real, well-formed relay reaches
-// Mempool.AddTransaction's error path inside txsubmissionServerInit.
-func TestTxSubmissionServerInitMempoolRejectionLogsAndStopsCleanly(
+// TestTxSubmissionServerInitContinuesAfterMempoolRejection verifies a rejected
+// transaction does not stop later offers on the same connection.
+func TestTxSubmissionServerInitContinuesAfterMempoolRejection(
 	t *testing.T,
 ) {
+	fixtures := txsubmissionTestFixtures(t)
+	rejected := fixtures[0]
+	accepted := fixtures[1]
 	logBuf := &lockedBuffer{}
 	logger := slog.New(
 		slog.NewJSONHandler(
@@ -901,14 +1092,14 @@ func TestTxSubmissionServerInitMempoolRejectionLogsAndStopsCleanly(
 	)
 
 	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
-		logger:     logger,
-		validatorA: txsubmissionRejectingValidator{},
+		logger: logger,
+		validatorA: txsubmissionSelectiveRejectingValidator{
+			rejectedHash: rejected.hash,
+		},
 	})
 	defer h.close(t)
 
-	txBytes, err := hex.DecodeString(txsubmissionRelayTestTxHex)
-	require.NoError(t, err)
-	require.NoError(t, h.mB.AddTransaction(txsubmissionRelayTestEraId, txBytes))
+	addTxSubmissionTestFixtures(t, h.mB, rejected)
 
 	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
 
@@ -921,10 +1112,123 @@ func TestTxSubmissionServerInitMempoolRejectionLogsAndStopsCleanly(
 		10*time.Millisecond,
 		"expected the mempool rejection to be logged",
 	)
+	require.Contains(t, logBuf.String(), rejected.hash)
+	require.Contains(t, logBuf.String(), h.connA.Id().String())
+	_, rejectedPresent := h.mA.GetTransaction(rejected.hash)
+	require.False(t, rejectedPresent)
 
-	require.Empty(
+	// Offer the valid transaction only after the rejected item completed its
+	// own round trip. This proves the same per-peer pump requests another batch
+	// instead of merely processing a later item from the first batch.
+	addTxSubmissionTestFixtures(t, h.mB, accepted)
+
+	require.Eventually(
 		t,
-		h.mA.Transactions(),
-		"rejected transaction must not be admitted to the mempool",
+		func() bool {
+			_, ok := h.mA.GetTransaction(accepted.hash)
+			return ok
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected a valid transaction after a rejection to be processed on the same connection",
 	)
+}
+
+// TestTxSubmissionServerInitContinuesAfterDecodeFailure verifies malformed
+// transaction CBOR does not stop later offers on the same connection.
+func TestTxSubmissionServerInitContinuesAfterDecodeFailure(t *testing.T) {
+	fixtures := txsubmissionTestFixtures(t)
+	malformed := fixtures[0]
+	accepted := fixtures[1]
+	logBuf := &lockedBuffer{}
+	logger := slog.New(
+		slog.NewJSONHandler(
+			logBuf,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		),
+	)
+
+	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
+		logger:           logger,
+		corruptOfferHash: malformed.hash,
+	})
+	defer h.close(t)
+
+	addTxSubmissionTestFixtures(t, h.mB, malformed)
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+
+	require.Eventually(
+		t,
+		func() bool {
+			return strings.Contains(
+				logBuf.String(),
+				"failed to parse transaction CBOR",
+			)
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected the malformed transaction to be logged",
+	)
+	require.Contains(t, logBuf.String(), malformed.hash)
+	require.Contains(t, logBuf.String(), h.connA.Id().String())
+
+	// Offer the valid transaction only after the malformed item completed its
+	// own round trip. This proves the same per-peer pump requests another batch.
+	addTxSubmissionTestFixtures(t, h.mB, accepted)
+
+	require.Eventually(
+		t,
+		func() bool {
+			_, ok := h.mA.GetTransaction(accepted.hash)
+			return ok
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected a valid transaction after malformed CBOR to be processed on the same connection",
+	)
+}
+
+// TestTxSubmissionServerInitDoesNotMislabelPartialMalformedResponse verifies
+// a body shifted forward by an earlier cache miss is not labeled with the
+// missing transaction's ID when its CBOR cannot be decoded.
+func TestTxSubmissionServerInitDoesNotMislabelPartialMalformedResponse(
+	t *testing.T,
+) {
+	fixtures := txsubmissionTestFixtures(t)
+	omitted := fixtures[0]
+	malformed := fixtures[1]
+	logBuf := &lockedBuffer{}
+	logger := slog.New(
+		slog.NewJSONHandler(
+			logBuf,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		),
+	)
+
+	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
+		logger:           logger,
+		corruptOfferHash: malformed.hash,
+		omitOfferHash:    omitted.hash,
+		batchRequestsA:   true,
+	})
+	defer h.close(t)
+
+	addTxSubmissionTestFixtures(t, h.mB, omitted, malformed)
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+
+	require.Eventually(
+		t,
+		func() bool {
+			return strings.Contains(
+				logBuf.String(),
+				"failed to parse transaction CBOR",
+			)
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected the partial malformed response to be logged",
+	)
+	logOutput := logBuf.String()
+	require.Contains(t, logOutput, `"tx_id":""`)
+	require.NotContains(t, logOutput, `"tx_id":"`+omitted.hash+`"`)
 }

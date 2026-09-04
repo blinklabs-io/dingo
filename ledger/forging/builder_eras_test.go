@@ -312,6 +312,54 @@ func TestBuildBlockDijkstraAnnouncesLeiosEndorserBlock(t *testing.T) {
 	assert.Equal(t, dblock.BlockBodyHash(), dblock.CalculatedBlockBodyHash())
 }
 
+func TestBuildBlockDijkstraDoesNotMixAnnouncedEndorserTransactions(
+	t *testing.T,
+) {
+	creds := setupTestCredentials(t)
+	ebTxCbor := makeMinimalTxCbor(t, 0x31, 0)
+	rankingTxCbor := makeMinimalTxCbor(t, 0x32, 0)
+	pparams := &dijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			MaxTxSize:        16384,
+			MaxBlockBodySize: 90112,
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: 12,
+			},
+			MaxBlockExUnits: lcommon.ExUnits{
+				Memory: 62000000,
+				Steps:  20000000000,
+			},
+		},
+	}
+	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+		Mempool: &mockMempool{transactions: []MempoolTransaction{
+			{Hash: "eb-tx", Cbor: ebTxCbor, Type: dijkstra.TxTypeDijkstra},
+			{
+				Hash: "ranking-tx",
+				Cbor: rankingTxCbor,
+				Type: dijkstra.TxTypeDijkstra,
+			},
+		}},
+		PParamsProvider: &mockPParamsProvider{pparams: pparams},
+		ChainTip: &mockChainTip{tip: ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 1000, Hash: make([]byte, 32)},
+			BlockNumber: 100,
+		}},
+		EpochNonce:  &mockEpochNonceProvider{epoch: 1, nonce: make([]byte, 32)},
+		Credentials: creds,
+	})
+	require.NoError(t, err)
+
+	block, _, err := builder.BuildBlockWithLeios(1001, 0, LeiosBlockData{
+		Announcement: &LeiosEndorserBlockAnnouncement{
+			Hash: lcommon.NewBlake2b256(make([]byte, lcommon.Blake2b256Size)),
+			Size: 1234,
+		},
+	})
+	require.NoError(t, err)
+	require.Empty(t, block.Transactions())
+}
+
 func TestBuildBlockDijkstraRejectsOversizeLeiosAnnouncement(t *testing.T) {
 	creds := setupTestCredentials(t)
 	pparams := &dijkstra.DijkstraProtocolParameters{

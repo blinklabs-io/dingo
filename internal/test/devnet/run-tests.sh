@@ -19,7 +19,7 @@
 # This script:
 #   1. Starts the DevNet (configurator + all nodes)
 #   2. Waits for all nodes to become healthy
-#   3. Runs the Go integration tests tagged with //go:build devnet
+#   3. Runs the Go integration tests tagged with //go:build linux && devnet
 #   4. Tears down the DevNet and reports results
 #
 # Usage:
@@ -42,6 +42,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.yml"
+# shellcheck source=compose-project.sh
+source "${SCRIPT_DIR}/compose-project.sh"
+devnet_compose_project
+devnet_render_topology
+devnet_ports
 
 # Parse arguments
 KEEP_UP=false
@@ -101,12 +106,14 @@ export DEVNET_TESTNET_YAML="${SCRIPT_DIR}/${ACTIVE_SPEC#./}"
 # The scenario stops and starts containers, and captures compose logs and
 # status on failure.
 export DEVNET_COMPOSE_FILE="${COMPOSE_FILE}"
+export DEVNET_COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME}"
 
 # Failure evidence goes here and is preserved when the run fails. A
 # caller-supplied directory is used as-is and never deleted; only one this
 # script created is cleaned up on success, so a passing run cannot destroy
 # a shared or pre-existing path.
 ARTIFACT_DIR_IS_OURS=false
+STAKE_KEYS_HOST_DIR_IS_OURS=false
 if [[ -z "${DEVNET_ARTIFACT_DIR:-}" ]]; then
   DEVNET_ARTIFACT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dingo-devnet-artifacts.XXXXXX")"
   ARTIFACT_DIR_IS_OURS=true
@@ -140,6 +147,7 @@ collect_failure_artifacts() {
   # volume; copy them out while the volume still exists.
   local configs_volume
   configs_volume="$(docker volume ls \
+    --filter label=com.docker.compose.project="${COMPOSE_PROJECT_NAME}" \
     --filter label=com.docker.compose.volume=p1-configs \
     --format '{{.Name}}' | head -n1)"
   if [[ -n "${configs_volume}" ]]; then
@@ -154,10 +162,15 @@ collect_failure_artifacts() {
 
 cleanup() {
   local exit_code=$?
+  # Cleanup is best-effort and must never replace the test result. Disable the
+  # trap before the explicit exit below, and disable errexit so one failed
+  # cleanup step cannot skip the rest of the teardown.
+  trap - EXIT
+  set +e
   if [[ "${KEEP_UP}" == "true" ]] && [[ ${exit_code} -eq 0 ]]; then
     log "Tests passed. DevNet left running (--keep-up)."
-    log "To stop:  docker compose -f ${COMPOSE_FILE} down -v"
-    return
+    log "To stop:  COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME} docker compose -f ${COMPOSE_FILE} down -v"
+    exit "${exit_code}"
   fi
   if [[ ${exit_code} -ne 0 ]]; then
     log "Collecting logs before teardown..."
@@ -168,9 +181,12 @@ cleanup() {
   fi
   log "Tearing down DevNet..."
   docker compose -f "${COMPOSE_FILE}" down -v 2>/dev/null || true
-  if [[ -n "${STAKE_KEYS_HOST_DIR:-}" ]]; then
+  rm -rf "${DEVNET_TOPOLOGY_DIR}"
+  if [[ "${STAKE_KEYS_HOST_DIR_IS_OURS}" == "true" ]] &&
+    [[ -n "${STAKE_KEYS_HOST_DIR:-}" ]]; then
     rm -rf "${STAKE_KEYS_HOST_DIR}"
   fi
+  exit "${exit_code}"
 }
 trap cleanup EXIT
 
@@ -191,6 +207,8 @@ fi
 # --------------------------------------------------------------------------- #
 
 log "Mode: ${MODE}$([[ "${ACCELERATED}" == "true" ]] && echo ' (accelerated)')"
+log "Compose project: ${COMPOSE_PROJECT_NAME}"
+log "Compose network: ${DEVNET_NET_BASE}.0/24"
 log "Network spec: ${ACTIVE_SPEC}"
 
 log "Building DevNet Docker images..."
@@ -199,7 +217,8 @@ log "Building DevNet Docker images..."
 docker compose -f "${COMPOSE_FILE}" build
 
 log "Starting DevNet containers..."
-docker compose -f "${COMPOSE_FILE}" up -d
+devnet_compose_up "${COMPOSE_FILE}"
+log "Compose network (final): ${DEVNET_NET_BASE}.0/24"
 
 # --------------------------------------------------------------------------- #
 # Wait for all nodes to become healthy
@@ -212,7 +231,8 @@ ELAPSED=0
 while [[ ${ELAPSED} -lt ${MAX_WAIT} ]]; do
   HEALTHY=0
   for svc in "${HEALTH_SERVICES[@]}"; do
-    status=$(docker inspect --format='{{.State.Health.Status}}' "${svc}" 2>/dev/null || echo "missing")
+    container_id=$(docker compose -f "${COMPOSE_FILE}" ps --quiet "${svc}" 2>/dev/null || true)
+    status=$(docker inspect --format='{{.State.Health.Status}}' "${container_id}" 2>/dev/null || echo "missing")
     if [[ "${status}" == "healthy" ]]; then
       HEALTHY=$((HEALTHY + 1))
     fi
@@ -256,18 +276,25 @@ log "txpump is running"
 
 if [[ "${MODE}" == "dingo" ]]; then
   log "Copying genesis stake keys from the utxo-keys volume..."
-  UTXO_KEYS_VOLUME="devnet_utxo-keys"
+  UTXO_KEYS_VOLUME="${COMPOSE_PROJECT_NAME}_utxo-keys"
   if ! docker volume inspect "${UTXO_KEYS_VOLUME}" &>/dev/null; then
     warn "Docker volume ${UTXO_KEYS_VOLUME} not found; discovering by compose label"
-    UTXO_KEYS_VOLUME=$(docker volume ls --filter label=com.docker.compose.volume=utxo-keys --format '{{.Name}}' | head -n1)
+    UTXO_KEYS_VOLUME=$(docker volume ls \
+      --filter label=com.docker.compose.project="${COMPOSE_PROJECT_NAME}" \
+      --filter label=com.docker.compose.volume=utxo-keys \
+      --format '{{.Name}}' | head -n1)
   fi
   STAKE_KEYS_HOST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dingo-devnet-stake-keys.XXXXXX")"
+  STAKE_KEYS_HOST_DIR_IS_OURS=true
   if [[ -z "${UTXO_KEYS_VOLUME}" ]]; then
     warn "Unable to locate the utxo-keys Docker volume; skipping stake-keys copy"
   else
     # Never let a copy failure abort the run. Missing stake keys are handled
     # below by disabling the opt-in CIP-50 scenario for this invocation.
+    # Match the host user so the runner can remove its own temporary tree.
+    # The source volume is world-readable by configurator.sh.
     docker run --rm \
+      --user "$(id -u):$(id -g)" \
       -v "${UTXO_KEYS_VOLUME}:/k:ro" \
       -v "${STAKE_KEYS_HOST_DIR}:/out" \
       alpine sh -c 'cp -r /k/stake /out/stake' 2>/dev/null || true
@@ -303,6 +330,8 @@ if [[ "${MODE}" == "conformance" ]]; then
   export DEVNET_DINGO_ADDR="localhost:${DINGO_PORT}"
   export DEVNET_CARDANO_ADDR="localhost:${CARDANO_PORT}"
   export DEVNET_RELAY_ADDR="localhost:${RELAY_PORT}"
+  export DEVNET_DINGO_NTC_ADDR="${DEVNET_DINGO_NTC_ADDR:-localhost:${DEVNET_DINGO_NTC_PORT:-3030}}"
+  export DEVNET_CARDANO_NTC_ADDR="${DEVNET_CARDANO_NTC_ADDR:-localhost:${DEVNET_CARDANO_NTC_PORT:-3031}}"
 else
   export DEVNET_DINGO1_ADDR="localhost:${DEVNET_DINGO1_PORT:-3010}"
   export DEVNET_DINGO2_ADDR="localhost:${DEVNET_DINGO2_PORT:-3013}"

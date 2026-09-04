@@ -24,6 +24,12 @@ import (
 type indexerMetrics struct {
 	blocksIndexed prometheus.Counter
 	eventsTotal   *prometheus.CounterVec
+	// Catch-up view. Unlike the counters above these are gauges describing
+	// where the indexer currently stands, so they are safe to read as an
+	// absolute position rather than a rate.
+	checkpointSlot     prometheus.Gauge
+	backfillTargetSlot prometheus.Gauge
+	backfillInProgress prometheus.Gauge
 }
 
 // newIndexerMetrics registers the indexer's counters against reg. reg may be
@@ -47,7 +53,44 @@ func newIndexerMetrics(reg prometheus.Registerer) *indexerMetrics {
 			Name: "dingo_midnight_events_total",
 			Help: "cumulative Midnight events committed, by type (create, spend, registration, deregistration); not decremented on chain-reorg rollback, and may include idempotent-replay recounts after a crash restart (see processTx/processOutput)",
 		}, []string{"type"}),
+		checkpointSlot: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "dingo_midnight_indexer_checkpoint_slot",
+			Help: "slot of the last block the Midnight indexer committed, from either the startup backfill or a live block event",
+		}),
+		backfillTargetSlot: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "dingo_midnight_backfill_target_slot",
+			Help: "applied ledger tip slot the Midnight startup backfill targets; subtract dingo_midnight_indexer_checkpoint_slot for remaining catch-up. 0 when no ledger-tip resolver is configured",
+		}),
+		backfillInProgress: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "dingo_midnight_backfill_in_progress",
+			Help: "1 while the Midnight startup backfill is scanning stored blocks, 0 otherwise",
+		}),
 	}
+}
+
+// setCheckpoint publishes the indexer's last committed slot. Called from
+// updateCheckpoint so backfill and live block events share one gauge:
+// subtracting it from backfillTargetSlot gives remaining catch-up.
+func (m *indexerMetrics) setCheckpoint(slot uint64) {
+	m.checkpointSlot.Set(float64(slot))
+}
+
+// setBackfillTarget publishes the resolved catch-up target. It is set even
+// when the node starts already caught up, so backfillTargetSlot minus
+// checkpointSlot is a meaningful remaining-catch-up figure at all times
+// rather than only during a sweep. Left in place afterwards so the range the
+// sweep covered stays visible.
+func (m *indexerMetrics) setBackfillTarget(slot uint64) {
+	m.backfillTargetSlot.Set(float64(slot))
+}
+
+// beginBackfill / endBackfill bracket the sweep itself.
+func (m *indexerMetrics) beginBackfill() {
+	m.backfillInProgress.Set(1)
+}
+
+func (m *indexerMetrics) endBackfill() {
+	m.backfillInProgress.Set(0)
 }
 
 // recordBlockEvents applies one committed block's tallies: one blocksIndexed

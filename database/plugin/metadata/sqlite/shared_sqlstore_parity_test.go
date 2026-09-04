@@ -15,6 +15,7 @@
 package sqlite
 
 import (
+	"context"
 	"math/big"
 	"testing"
 	"time"
@@ -28,7 +29,7 @@ import (
 )
 
 type operationalStore interface {
-	Transaction() types.Txn
+	Transaction(ctx context.Context) types.Txn
 	GetTip(types.Txn) (ochainsync.Tip, error)
 	SetTip(ochainsync.Tip, types.Txn) error
 	SetNetworkState(uint64, uint64, uint64, types.Txn) error
@@ -94,7 +95,11 @@ type operationalStore interface {
 	GetCommitteeMembersIncludeDeleted(
 		types.Txn,
 	) ([]*models.CommitteeMember, error)
-	SoftDeleteCommitteeMembers([][]byte, uint64, types.Txn) error
+	SoftDeleteCommitteeMembers(
+		[]models.CommitteeCredential,
+		uint64,
+		types.Txn,
+	) error
 	DeleteCommitteeMembersAfterSlot(uint64, types.Txn) error
 }
 
@@ -169,7 +174,7 @@ func exerciseOperationalStore(
 	updatedAt := startedAt.Add(time.Minute)
 	deletedAt := uint64(30)
 
-	txn := store.Transaction()
+	txn := store.Transaction(t.Context())
 	require.NoError(t, store.SetTip(ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 42, Hash: []byte("tip-hash")},
 		BlockNumber: 7,
@@ -344,7 +349,9 @@ func exerciseOperationalStore(
 	))
 	require.NoError(t, store.ClearCommitteeQuorum(50, txn))
 	require.NoError(t, store.SoftDeleteCommitteeMembers(
-		[][]byte{[]byte("committee-two")},
+		[]models.CommitteeCredential{{
+			Credential: []byte("committee-two"),
+		}},
 		60,
 		txn,
 	))
@@ -406,7 +413,7 @@ func exerciseOperationalStore(
 	)
 	require.NoError(t, err)
 
-	rollbackTxn := store.Transaction()
+	rollbackTxn := store.Transaction(t.Context())
 	require.NoError(t, store.DeleteNetworkStateAfterSlot(5, rollbackTxn))
 	require.NoError(t, store.DeleteEpochsAfterSlot(50, rollbackTxn))
 	require.NoError(t, store.DeleteBlockNoncesBeforeSlotWithoutCheckpoints(

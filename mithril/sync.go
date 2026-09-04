@@ -352,7 +352,10 @@ func markSyncInProgress(db *database.Database, storageMode string) error {
 // download + verify + extract a snapshot, import ledger state and immutable
 // blocks, close the volatile gap, backfill metadata, and mark the sync
 // complete. The resulting database is servable by dingo.Node.Run.
-func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
+func Sync(
+	ctx context.Context,
+	cfg SyncConfig,
+) (syncResult SyncResult, syncErr error) {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -499,28 +502,48 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	if copyChain == nil {
 		return SyncResult{}, errors.New("primary chain not available")
 	}
-	var pipeImm *immutable.ImmutableDb
 	var pipeLastChunk uint64
 	pipeCopied := false
 	const pipelineCopyChunkStride = 64
-	onChunkContiguous := func(immutableDir string, num uint64) error {
-		if pipeImm == nil {
-			var nerr error
-			if pipeImm, nerr = immutable.New(immutableDir); nerr != nil {
-				return fmt.Errorf(
-					"opening immutable DB for pipelined copy: %w", nerr,
-				)
-			}
-		}
+	onChunkContiguous := func(chunk ContiguousChunk) error {
 		// Throttle: copy every N contiguous chunks rather than on each one;
 		// the post-bootstrap copy finishes whatever remainder is left.
-		if pipeCopied && num < pipeLastChunk+pipelineCopyChunkStride {
+		if pipeCopied && chunk.Num < pipeLastChunk+pipelineCopyChunkStride {
 			return nil
 		}
-		maxSlot, ok, serr := pipeImm.LastSlotInChunk(num)
+		// Opened per call, and only usable from inside this callback: it is
+		// bound to the handle downloadImmutables holds open, which is closed
+		// when the download returns, and the sequencer drains before it does.
+		// Nothing after Bootstrap may read it — the post-bootstrap copy opens
+		// its own.
+		//
+		// Through the handle extraction is writing through, not through its
+		// name: the copy has to be reading the chunks this process just wrote,
+		// and only the handle says so. Verified against the same digests the
+		// pool checked, because the handle settles the directory and not the
+		// files in it.
+		//
+		// Bounded to the contiguous prefix, which is why it is rebuilt each
+		// call rather than kept. The pool writes chunks above the prefix out
+		// of order, so one of those may be present and half written; the bound
+		// keeps the reader from opening it at all, rather than opening it and
+		// refusing a file that is merely unfinished.
+		//
+		// The bound is the chunk's name rather than a count of chunks, and the
+		// lookup below is by number rather than by position, because the two
+		// coincide only for a range starting at chunk 0.
+		pipeImm, nerr := immutable.NewFromRootVerified(
+			chunk.Root, chunk.Digests, immutable.ChunkName(chunk.Num),
+		)
+		if nerr != nil {
+			return fmt.Errorf(
+				"opening immutable DB for pipelined copy: %w", nerr,
+			)
+		}
+		maxSlot, ok, serr := pipeImm.LastSlotInChunk(chunk.Num)
 		if serr != nil {
 			return fmt.Errorf(
-				"pipelined copy bound for chunk %d: %w", num, serr,
+				"pipelined copy bound for chunk %d: %w", chunk.Num, serr,
 			)
 		}
 		if !ok {
@@ -541,7 +564,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 				"pipelined copy to slot %d: %w", maxSlot, cerr,
 			)
 		}
-		pipeLastChunk = num
+		pipeLastChunk = chunk.Num
 		pipeCopied = true
 		return nil
 	}
@@ -556,7 +579,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	}
 
 	cfg.emit(SyncProgress{Phase: PhaseBootstrap, Active: true})
-	result, err := Bootstrap(
+	bootstrapResult, err := Bootstrap(
 		ctx,
 		BootstrapConfig{
 			OnChunkContiguous:      chunkHook,
@@ -629,6 +652,21 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		return SyncResult{}, fmt.Errorf("mithril bootstrap failed: %w", err)
 	}
 
+	// Every read of the bootstrapped ImmutableDB below goes through this one
+	// handle-bound open. Bootstrap vetted the directory and held the handle
+	// open; opening by pathname here would drop that, and read whatever holds
+	// the name by now.
+	//
+	// Released on the way out whether or not the extracted tree is cleaned up:
+	// a run that keeps the tree for a later sync still must not leak the
+	// descriptors. This runs after the import errgroup is joined, which is what
+	// makes clearing the fields safe against the goroutines that read them.
+	defer bootstrapResult.CloseHandles()
+	certifiedImmutable, err := openBootstrappedImmutable(bootstrapResult)
+	if err != nil {
+		return SyncResult{}, err
+	}
+
 	// Catch-up: confirm the local chain is an ancestor of the target artifact
 	// before mutating anything. A divergent database is left untouched and the
 	// operator is told to perform a full resync. This runs before
@@ -636,8 +674,8 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	// database incomplete.
 	if catchUp {
 		targetImmutable := uint64(0)
-		if result.Snapshot != nil {
-			targetImmutable = result.Snapshot.Beacon.ImmutableFileNumber
+		if bootstrapResult.Snapshot != nil {
+			targetImmutable = bootstrapResult.Snapshot.Beacon.ImmutableFileNumber
 		}
 		// A resuming run (sync_status still in_progress) never maps
 		// local-ahead to up-to-date: it must fall through to the import so the
@@ -646,7 +684,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		// early here would leave the node wedged (serve refuses to start on
 		// sync_status="in_progress" and every re-run would no-op).
 		upToDate, interErr := verifyCatchupBeforeImport(
-			db, result.ImmutableDir, targetImmutable,
+			db, certifiedImmutable, targetImmutable,
 			mode == syncModeResume, logger,
 		)
 		if interErr != nil {
@@ -654,7 +692,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		}
 		if upToDate {
 			if cfg.CleanupAfterLoad {
-				result.Cleanup(logger)
+				bootstrapResult.Cleanup(logger)
 			}
 			return SyncResult{}, nil
 		}
@@ -683,6 +721,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 				"sync did not complete; "+
 					"re-run 'dingo mithril sync' to resume",
 				"component", "mithril",
+				"error", syncErr,
 			)
 		}
 	}()
@@ -706,14 +745,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	// source node's volatile database. Select only a ledger state at or below
 	// the certified immutable tip; later blocks must go through normal ledger
 	// validation when the node starts.
-	immutableDB, err := immutable.New(result.ImmutableDir)
-	if err != nil {
-		return SyncResult{}, fmt.Errorf(
-			"opening certified ImmutableDB for trust-boundary selection: %w",
-			err,
-		)
-	}
-	certifiedTip, err := immutableDB.GetTip()
+	certifiedTip, err := certifiedImmutable.GetTip()
 	if err != nil {
 		return SyncResult{}, fmt.Errorf(
 			"reading certified ImmutableDB tip: %w",
@@ -738,7 +770,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		cfg.emit(SyncProgress{Phase: PhaseLedgerImport, Active: true})
 		defer cfg.emit(SyncProgress{Phase: PhaseLedgerImport, Active: false})
 		slot, hash, importErr := importLedgerState(
-			gctx, db, logger, nodeCfg, result, catchUp,
+			gctx, db, logger, nodeCfg, bootstrapResult, catchUp,
 			certifiedTip.Slot,
 			func(p ledgerstate.ImportProgress) {
 				cfg.emit(SyncProgress{
@@ -774,11 +806,12 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		logger.Info(
 			"loading ImmutableDB blocks into blob store",
 			"component", "mithril",
-			"immutable_dir", result.ImmutableDir,
+			"immutable_dir", bootstrapResult.ImmutableDir,
 		)
 		var loadErr error
 		loadResult, loadErr = node.LoadBlobsWithDB(
-			gctx, nil, logger, result.ImmutableDir, db,
+			gctx, nil, logger, bootstrapResult.ImmutableDir, db,
+			node.WithImmutableDB(certifiedImmutable),
 			node.WithLoadBlobsProgress(func(p node.LoadBlobsProgress) {
 				cfg.emit(SyncProgress{
 					Phase:          PhaseImmutableCopy,
@@ -929,10 +962,10 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		// the volatile fetch path below pull the remainder.
 		var validateErr error
 		if resumeGapEnd == ledgerStateSlot {
-			validateErr = validateStoredGapBlocks(
+			validateErr = validateCompleteGapBlocks(
 				storedGapBlocks,
-				immutableTip,
-				ledgerStateHash,
+				ocommon.NewPoint(immutableTip.Slot, immutableTip.Hash),
+				ocommon.NewPoint(ledgerStateSlot, ledgerStateHash),
 			)
 		} else {
 			validateErr = validateStoredGapContinuity(
@@ -1170,9 +1203,9 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	// skip already-present archives and anchor its intersection check. Written
 	// after updateMithrilReadyState clears sync_state, so it survives. Set on
 	// both bootstrap and catch-up. Non-fatal.
-	if result.Snapshot != nil {
+	if bootstrapResult.Snapshot != nil {
 		if markerErr := setImmutableImportMarker(
-			db, result.Snapshot.Beacon.ImmutableFileNumber,
+			db, bootstrapResult.Snapshot.Beacon.ImmutableFileNumber,
 		); markerErr != nil {
 			logger.Warn(
 				"failed to record Mithril immutable-import marker",
@@ -1185,20 +1218,25 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 
 	// Clean up temporary files after a successful complete load.
 	if cfg.CleanupAfterLoad {
-		result.Cleanup(logger)
+		bootstrapResult.Cleanup(logger)
 	}
 
 	logger.Info(
 		"Mithril bootstrap complete",
-		"component", "mithril",
-		"epoch", result.Snapshot.Beacon.Epoch,
-		"immutable_file_number", result.Snapshot.Beacon.ImmutableFileNumber,
-		"index_rebuild_elapsed", indexRebuildElapsed,
-		"lazy_index_rebuild_mode", "maintenance",
+		"component",
+		"mithril",
+		"epoch",
+		bootstrapResult.Snapshot.Beacon.Epoch,
+		"immutable_file_number",
+		bootstrapResult.Snapshot.Beacon.ImmutableFileNumber,
+		"index_rebuild_elapsed",
+		indexRebuildElapsed,
+		"lazy_index_rebuild_mode",
+		"maintenance",
 	)
 
 	return SyncResult{
-		Snapshot:   result.Snapshot,
+		Snapshot:   bootstrapResult.Snapshot,
 		LedgerSlot: ledgerStateSlot,
 	}, nil
 }

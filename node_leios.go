@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leios"
+	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
@@ -54,13 +55,14 @@ func (a *leiosStakeDistributionAdapter) GetStakeDistribution(
 // resolving registered Leios keys for exactly the pools the caller names
 // (the same set VoteManager already fetched a stake distribution for). It
 // returns raw (unverified) keys -- VoteManager itself checks proof of
-// possession before trusting one. This is a current-state lookup (see
-// leios.LeiosKeyProvider's doc comment), not frozen to a snapshot epoch.
+// possession before trusting one. Keys come from the same historical Mark
+// snapshot as the committee stake.
 type leiosKeyProviderAdapter struct {
 	ledgerState *ledger.LedgerState
 }
 
 func (a *leiosKeyProviderAdapter) GetLeiosKeys(
+	snapshotEpoch uint64,
 	poolKeyHashesHex []string,
 ) (_ map[string]*lcommon.LeiosKey, err error) {
 	if a.ledgerState == nil {
@@ -96,7 +98,10 @@ func (a *leiosKeyProviderAdapter) GetLeiosKeys(
 			)
 		}
 	}()
-	return a.ledgerState.NewView(txn).GetLeiosKeys(poolKeyHashes)
+	return a.ledgerState.NewView(txn).GetLeiosKeys(
+		snapshotEpoch,
+		poolKeyHashes,
+	)
 }
 
 // leiosCommitteeParamsAdapter adapts ledger.LedgerState to
@@ -185,13 +190,9 @@ func leiosCommitteeParamsFromPParams(
 }
 
 // initLeiosVoteManager builds and starts the Leios vote manager and wires
-// it into the ouroboros component's protocol handlers. Invalid voter
-// registry entries are fatal at startup.
+// it into the ouroboros component's protocol handlers. The ledger key provider
+// is authoritative; production composition does not install a static registry.
 func (n *Node) initLeiosVoteManager(ctx context.Context) error {
-	registry, err := leios.NewVoterRegistry(n.config.leiosVoterPublicKeys)
-	if err != nil {
-		return fmt.Errorf("invalid leios voter public keys: %w", err)
-	}
 	stakeAdapter := &leiosStakeDistributionAdapter{
 		inner: stakeDistributionAdapter{
 			ledgerState: n.ledgerState,
@@ -219,7 +220,6 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		// timing the pipeline manager uses, so the two components admit
 		// votes over the same window and cannot drift.
 		VoteWindowSlots: n.leiosPipelineTiming().VoteWindowSlots,
-		Registry:        registry,
 		PromRegistry:    n.config.promRegistry,
 	})
 	if err != nil {
@@ -229,7 +229,11 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		return fmt.Errorf("start leios vote manager: %w", err)
 	}
 	n.leiosVoteManager = mgr
-	n.ouroboros.LeiosVotes = mgr
+	// Deliberately not wired into ouroboros here. Run initializes the Leios
+	// managers before it constructs Ouroboros, so reaching for the instance
+	// at this point dereferences a nil pointer. attachLeiosHandlers installs
+	// them once an instance exists, on both the startup and live-restore
+	// paths.
 	// Captured (not discarded) so quiesceForLiveLifecycleOp can unsubscribe
 	// this handler before a live database restore/truncate rebuilds
 	// leiosVoteManager and calls initLeiosVoteManager again -- the
@@ -244,7 +248,25 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 			if !ok {
 				return
 			}
-			n.ouroboros.EnqueueLeiosPrototypeVote(data.Vote)
+			n.ouroboros().EnqueueLeiosPrototypeVote(data.Vote)
+		},
+	)
+	// Received votes are re-diffused the same way locally emitted ones are.
+	// Without this, a relay stores a peer's vote for its own tally but never
+	// forwards it, so a block producer behind that relay never observes
+	// quorum. Tracked and unsubscribed alongside leiosVoteEmittedSubId for
+	// the same live-lifecycle-reinit reason.
+	n.leiosVoteReceivedSubId = n.eventBus.SubscribeFunc(
+		leios.VoteReceivedEventType,
+		func(evt event.Event) {
+			data, ok := evt.Data.(leios.VoteReceivedEvent)
+			if !ok {
+				return
+			}
+			n.ouroboros().EnqueueLeiosPrototypeVoteFromPeer(
+				data.Vote,
+				data.OriginConnKey,
+			)
 		},
 	)
 	if n.config.leiosVoteSigningKeyFile != "" && !n.config.blockProducer {
@@ -290,7 +312,8 @@ func (n *Node) initLeiosPipelineManager(ctx context.Context) error {
 		return fmt.Errorf("start leios pipeline manager: %w", err)
 	}
 	n.leiosPipelineManager = mgr
-	n.ouroboros.LeiosPipeline = mgr
+	// See initLeiosVoteManager: attachLeiosHandlers does the wiring, once an
+	// Ouroboros instance exists.
 	return nil
 }
 
@@ -323,23 +346,78 @@ func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 	if err != nil {
 		return fmt.Errorf("load leios vote signing key: %w", err)
 	}
-	if err := n.leiosVoteManager.ValidateVotingKey(poolKeyHash, key); err != nil {
-		// ValidateVotingKey's own error already names which sources it
-		// checked (the on-chain registration and leiosVoterPublicKeys) and
-		// whether the problem was "not found" or "found but mismatched," so
-		// no remedy is added here: the on-chain key takes precedence over
-		// leiosVoterPublicKeys, so directing every failure at the static
-		// registry would be wrong advice whenever the real problem is a key
-		// that no longer matches the pool's on-chain registration.
+	status, err := n.leiosVoteManager.ConfigureVoting(poolKeyHash, key)
+	if err != nil {
 		return fmt.Errorf("validate configured leios vote signing key: %w", err)
 	}
-	if err := n.leiosVoteManager.EnableVoting(poolKeyHash, key); err != nil {
-		return fmt.Errorf("enable leios voting: %w", err)
+	switch status {
+	case leios.VotingConfigurationEnabled:
+		n.config.logger.Info(
+			"leios voting enabled",
+			"component", "node",
+			"pool_id", poolID.String(),
+		)
+	case leios.VotingConfigurationAwaitingKey:
+		n.config.logger.Info(
+			"leios voting deferred until the configured key is available in the on-chain snapshot",
+			"component",
+			"node",
+			"pool_id",
+			poolID.String(),
+		)
+	case leios.VotingConfigurationRetryPending:
+		n.config.logger.Warn(
+			"leios voting activation preparation failed; voting remains disabled until the next epoch-transition retry",
+			"component",
+			"node",
+			"pool_id",
+			poolID.String(),
+		)
+	case leios.VotingConfigurationSuperseded:
+		n.config.logger.Info(
+			"leios voting configuration was superseded by a newer configuration or retry",
+			"component",
+			"node",
+			"pool_id",
+			poolID.String(),
+		)
+	case leios.VotingConfigurationFailed:
+		return errors.New(
+			"leios voting configuration failed without an error",
+		)
+	default:
+		return fmt.Errorf(
+			"unexpected leios voting configuration status: %d",
+			status,
+		)
 	}
-	n.config.logger.Info(
-		"leios voting enabled",
-		"component", "node",
-		"pool_id", poolID.String(),
-	)
+	return nil
+}
+
+// attachLeiosHandlers installs the optional Leios prototype handlers onto an
+// Ouroboros instance.
+//
+// They are not OuroborosConfig fields because their managers start on their
+// own path, which runs before Ouroboros is constructed during startup and
+// again before Ouroboros is replaced during a live restore. Both paths call
+// this immediately after they have an instance, which is the only safe point:
+// earlier there is nothing to wire, and later protocol traffic could already
+// be arriving unhandled.
+//
+// A nil manager means Leios is disabled, and is skipped rather than an error.
+func (n *Node) attachLeiosHandlers(o *ouroborosPkg.Ouroboros) error {
+	if o == nil {
+		return errors.New("cannot attach leios handlers: ouroboros is nil")
+	}
+	if n.leiosVoteManager != nil {
+		if err := o.SetLeiosVotes(n.leiosVoteManager); err != nil {
+			return fmt.Errorf("wire leios vote manager: %w", err)
+		}
+	}
+	if n.leiosPipelineManager != nil {
+		if err := o.SetLeiosPipeline(n.leiosPipelineManager); err != nil {
+			return fmt.Errorf("wire leios pipeline manager: %w", err)
+		}
+	}
 	return nil
 }
