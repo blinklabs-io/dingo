@@ -275,7 +275,7 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 	var tipSlot uint64
 	tipKnown := false
 	if tip, tipErr := s.db.GetTip(txn); tipErr == nil &&
-		len(tip.Point.Hash) > 0 {
+		tip.Point.Slot > 0 && len(tip.Point.Hash) > 0 {
 		// GetTip reports sql.ErrNoRows as a zero Tip with a nil error, so a
 		// nil error alone would accept slot 0 as a real tip and mark every
 		// epoch pending. A genuine tip always carries a block hash.

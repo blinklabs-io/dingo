@@ -20,7 +20,7 @@ func TestGetPoolEpochDataMapReportsRewardsPending(t *testing.T) {
 	)
 	pool := testPoolKeyHash(t, 0x42)
 
-	seed := func(t *testing.T, tipSlot int64, withTipRow bool) map[string]*DingoPoolEpochData {
+	seed := func(t *testing.T, tipSlot int64, tipHash []byte) map[string]*DingoPoolEpochData {
 		t.Helper()
 		db, gdb := openTestDingoDB(t)
 		require.NoError(t, gdb.Exec(
@@ -29,10 +29,10 @@ func TestGetPoolEpochDataMapReportsRewardsPending(t *testing.T) {
 			 VALUES (?, ?, ?, ?, ?)`,
 			pool, stakeEpoch, "4006269", "1857", boundarySlot,
 		).Error)
-		if withTipRow {
+		if tipHash != nil {
 			require.NoError(t, gdb.Exec(
 				`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
-				[]byte{0x01}, tipSlot, 1,
+				tipHash, tipSlot, 1,
 			).Error)
 		}
 		m, err := db.GetPoolEpochDataMap(
@@ -54,20 +54,26 @@ func TestGetPoolEpochDataMapReportsRewardsPending(t *testing.T) {
 	}
 
 	t.Run("tip before the boundary is pending", func(t *testing.T) {
-		d := find(t, seed(t, boundarySlot-1, true))
+		d := find(t, seed(t, boundarySlot-1, []byte{0x01}))
 		assert.True(t, d.RewardsPending,
 			"rewards are not applied yet, so a difference is a lag")
 	})
 
 	t.Run("tip at the boundary is applied", func(t *testing.T) {
-		d := find(t, seed(t, boundarySlot, true))
+		d := find(t, seed(t, boundarySlot, []byte{0x01}))
 		assert.False(t, d.RewardsPending,
 			"at the boundary the spendable flags are final")
 	})
 
 	t.Run("no tip row compares strictly", func(t *testing.T) {
-		d := find(t, seed(t, 0, false))
+		d := find(t, seed(t, 0, nil))
 		assert.False(t, d.RewardsPending,
 			"an unreadable tip must not downgrade a real divergence")
+	})
+
+	t.Run("positive slot without hash compares strictly", func(t *testing.T) {
+		d := find(t, seed(t, boundarySlot-1, []byte{}))
+		assert.False(t, d.RewardsPending,
+			"an incomplete tip must not downgrade a real divergence")
 	})
 }
