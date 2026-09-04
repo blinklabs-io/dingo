@@ -5426,8 +5426,10 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 		}
 		if cachedNextBatch != nil {
 			// Use cached block batch — keep the original
-			// currentReadResultDone so the reader goroutine
-			// is signalled when all cached blocks are processed.
+			// currentReadResultDone (do not reset it below) so the reader
+			// goroutine is signalled only once cachedNextBatch is fully
+			// drained, at the completeReadResult() guard at the bottom of
+			// this loop.
 			nextBatch = cachedNextBatch
 			cachedNextBatch = nil
 		} else {
@@ -5997,7 +5999,15 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// Periodic sync progress reporting
 			ls.logSyncProgress(tipForLog.Point.Slot)
 		}
-		completeReadResult()
+		// An epoch/era boundary mid-batch defers the post-boundary remainder
+		// to cachedNextBatch for the next outer-loop pass (see the
+		// "cachedNextBatch != nil" branch above) instead of reading a fresh
+		// result. Only signal the reader goroutine once that remainder is
+		// nil too, so the signal represents the whole original result being
+		// processed, not just the pre-boundary chunk of it.
+		if cachedNextBatch == nil {
+			completeReadResult()
+		}
 	}
 }
 

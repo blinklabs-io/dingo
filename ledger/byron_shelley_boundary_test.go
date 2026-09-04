@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -420,6 +421,62 @@ func TestByronShelleyBoundaryProcessesFirstShelleyBlockWithPParams(
 	require.True(t, ok, "the first Shelley block must install Shelley pparams")
 	assert.Equal(t, uint(2), pparams.ProtocolMajor)
 	assert.Equal(t, firstShelley.SlotNumber(), ls.currentTip.Point.Slot)
+}
+
+// TestByronShelleyBoundaryDefersReadResultDoneUntilCachedBatchApplied is a
+// regression test for issue #3533: ledgerProcessBlocksFromSource must not
+// signal a readChainResult's done channel until the whole result has been
+// applied, including any post-boundary remainder deferred through
+// cachedNextBatch.
+//
+// firstShelley alone crosses the Byron/Shelley epoch boundary (see
+// newByronShelleyBoundaryLedger), so processing this one-block batch takes
+// two outer-loop passes: the first discovers the boundary and defers the
+// entire block to cachedNextBatch without applying it (blocksProcessed stays
+// 0); the second runs the epoch/era rollover and then actually applies
+// firstShelley. Signalling done at the end of the first pass -- before
+// firstShelley is ever applied -- previously told the reader goroutine this
+// result was fully consumed while the tip was still at the pre-boundary
+// block, letting it start gathering and decoding the next raw batch early.
+func TestByronShelleyBoundaryDefersReadResultDoneUntilCachedBatchApplied(
+	t *testing.T,
+) {
+	ls, _, firstShelley := newByronShelleyBoundaryLedger(t)
+	require.True(t, ls.validationEnabled)
+
+	results := make(chan readChainResult, 1)
+	done := make(chan struct{})
+	results <- readChainResult{
+		blocks: []gledger.Block{firstShelley},
+		done:   done,
+	}
+	close(results)
+
+	slotAtDone := make(chan uint64, 1)
+	go func() {
+		<-done
+		ls.RLock()
+		defer ls.RUnlock()
+		slotAtDone <- ls.currentTip.Point.Slot
+	}()
+
+	require.NoError(t, ls.ledgerProcessBlocksFromSource(
+		context.Background(),
+		results,
+	))
+
+	select {
+	case observed := <-slotAtDone:
+		assert.Equal(
+			t,
+			firstShelley.SlotNumber(),
+			observed,
+			"done must not fire until the deferred cached batch "+
+				"(firstShelley) is actually applied, not merely discovered",
+		)
+	case <-time.After(5 * time.Second):
+		t.Fatal("readChainResult.done was never closed")
+	}
 }
 
 // TestByronShelleyBoundarySeedsEpochNonceOnProductionPath pins the fix for
