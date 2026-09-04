@@ -173,6 +173,20 @@ func (d *Database) SetTransaction(
 	)
 }
 
+// producedOutputsDropped reports whether an empty Produced() set means the
+// transaction lost outputs it declared. Producing nothing is a legal shape:
+// a valid transaction can spend its whole input on deposits plus the fee and
+// return no change (issue #3932), and an invalid transaction without a
+// collateral return produces nothing either. Produced() is Outputs() for a
+// valid transaction and the collateral return for an invalid one, so an empty
+// set is unexpected only when the matching declaration is non-empty.
+func producedOutputsDropped(tx lcommon.Transaction) bool {
+	if tx.IsValid() {
+		return len(tx.Outputs()) > 0
+	}
+	return tx.CollateralReturn() != nil
+}
+
 // SetTransactionWithOpts is SetTransaction with control over UTxO ingest
 // behavior via opts. Leios endorser-block application on the Musashi/
 // Haskell-conformant path passes SkipConsumedInputRecovery so a transaction's
@@ -241,10 +255,12 @@ func (d *Database) SetTransactionWithOpts(
 	// transactions (collateral return at index len(Outputs()))
 	// UTxO offsets MUST be available - no fallback to full CBOR storage
 	produced := tx.Produced()
-	if len(produced) == 0 {
+	if len(produced) == 0 && producedOutputsDropped(tx) {
 		d.logger.Warn(
-			"transaction has no produced outputs",
+			"transaction produced no UTxOs despite declaring outputs",
 			"txHash", hex.EncodeToString(ledgerHashPrefix(txHash)),
+			"valid", tx.IsValid(),
+			"outputs", len(tx.Outputs()),
 			"slot", point.Slot,
 		)
 	}
