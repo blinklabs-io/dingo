@@ -485,9 +485,24 @@ func (d *DingoDB) GetPoolEpochDataMap(
 	}
 	_ = rows.Close() //nolint:sqlclosecheck
 
+	// The tip decides whether this stake epoch's rewards have been applied;
+	// see DingoPoolEpochData.RewardsPending. An unreadable or empty tip table
+	// leaves tipKnown false, which keeps the comparison strict rather than
+	// downgrading a real divergence on incomplete information.
+	var tipSlot uint64
+	tipKnown := false
+	if tipRow := d.queryRow(ctx, `SELECT slot FROM tip ORDER BY id DESC LIMIT 1`); tipRow != nil {
+		var slot sql.NullInt64
+		if err := tipRow.Scan(&slot); err == nil && slot.Valid &&
+			slot.Int64 > 0 {
+			tipSlot = uint64(slot.Int64)
+			tipKnown = true
+		}
+	}
+
 	rows, err = d.query(
 		ctx,
-		`SELECT pool_key_hash, member_reward_total, unspendable FROM reward_pool_output WHERE epoch = ?`,
+		`SELECT pool_key_hash, member_reward_total, unspendable, boundary_slot FROM reward_pool_output WHERE epoch = ?`,
 		stakeEpoch,
 	)
 	if err != nil {
@@ -502,7 +517,10 @@ func (d *DingoDB) GetPoolEpochDataMap(
 		var poolHash []byte
 		var reward types.Uint64
 		var unspendable types.Uint64
-		if err := rows.Scan(&poolHash, &reward, &unspendable); err != nil {
+		var boundarySlot uint64
+		if err := rows.Scan(
+			&poolHash, &reward, &unspendable, &boundarySlot,
+		); err != nil {
 			return nil, err
 		}
 		key := hex.EncodeToString(poolHash)
@@ -514,6 +532,7 @@ func (d *DingoDB) GetPoolEpochDataMap(
 		data.MemberRewardPresent = true
 		data.MemberRewardTotal = strconv.FormatUint(uint64(reward), 10)
 		data.PoolUnspendable = uint64(unspendable)
+		data.RewardsPending = tipKnown && tipSlot < boundarySlot
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
