@@ -731,7 +731,7 @@ SELECT %[1]s.added_slot AS added_slot,
        certs.cert_index AS cert_index,
        tx.hash AS tx_hash,
        ? AS action,
-       COALESCE(%[2]s, 0) AS deposit,
+       COALESCE(%[2]s, '0') AS deposit,
        tx.slot AS tx_slot,
        tx.block_hash AS block_hash
 FROM %[1]s
