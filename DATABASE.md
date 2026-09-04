@@ -1669,6 +1669,28 @@ WHERE u.deleted_slot = 0
   );
 ```
 
+### `SaveRewardAccountOutputs` ID resolution
+
+Resolving the generated IDs after a multi-row upsert into
+`reward_account_output` (multi-row upserts do not expose all generated IDs
+portably) pushes the lookup rows into a `UNION ALL`-of-literal-selects
+derived table and inner-joins it against `reward_account_output`, rather
+than an OR-chain of five-way `(epoch = ? AND credential_tag = ? AND
+staking_key = ? AND pool_key_hash = ? AND reward_type = ?)` predicates:
+`idx_reward_account_output_epoch_cred_pool_type` exists on exactly these
+five columns, but SQLite's query planner cannot reliably compile a long
+OR-chain over it into per-term index seeks, and this runs on every epoch
+boundary for every account earning a reward. The derived-table join, by
+contrast, is planned as an indexed seek per row via that index by SQLite,
+PostgreSQL, and MySQL alike. On PostgreSQL the derived-table row selects
+cast `epoch`/`credential_tag` to `BIGINT` and `staking_key`/`pool_key_hash`
+to `BYTEA`, since Postgres resolves an otherwise-untyped select-list
+parameter to `text` rather than inferring it from the joined column's real
+type, which fails the join with `operator does not exist: bytea = text`;
+`reward_type` (`VARCHAR`) needs no cast, since Postgres's untyped-parameter
+default of `text` already matches it. SQLite and MySQL infer the bound
+value's type from the join context instead and need no casts at all.
+
 ### `GetTransactionsByAddress` and `CountTransactionsByAddress`
 
 Recent transactions for an address key pair:

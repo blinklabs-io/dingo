@@ -713,10 +713,29 @@ boundary_slot = excluded.boundary_slot`
 	// Multi-row upserts do not expose all generated IDs portably. Resolve them
 	// by their natural key in one bounded query and assign IDs only after the
 	// write succeeds.
-	predicates := make([]string, len(params))
+	//
+	// Looked up via a join against a derived table of literal
+	// (epoch, credential_tag, staking_key, pool_key_hash, reward_type) rows,
+	// not an OR-chain of five-way equality predicates -- the same
+	// GetAccountsByCredential planner limitation applies here:
+	// idx_reward_account_output_epoch_cred_pool_type exists on exactly these
+	// five columns, but a long OR-chain over it is not reliably compiled into
+	// per-term index seeks, and this runs on every epoch boundary for every
+	// account earning a reward.
+	rowSelectTemplate := "SELECT ? AS epoch, ? AS credential_tag, ? AS staking_key, ? AS pool_key_hash, ? AS reward_type"
+	if s.dialect.Name() == "postgres" {
+		// See GetAccountsByCredential's identical cast for why: an otherwise
+		// untyped derived-table parameter resolves to text on Postgres rather
+		// than being inferred from the joined columns, which fails the join
+		// once compared against epoch/credential_tag (BIGINT) or
+		// staking_key/pool_key_hash (BYTEA). reward_type (VARCHAR) needs no
+		// cast: Postgres's text default already matches it.
+		rowSelectTemplate = "SELECT CAST(? AS BIGINT) AS epoch, CAST(? AS BIGINT) AS credential_tag, CAST(? AS BYTEA) AS staking_key, CAST(? AS BYTEA) AS pool_key_hash, ? AS reward_type"
+	}
+	rowSelects := make([]string, len(params))
 	lookupArgs := make([]any, 0, len(params)*5)
 	for index, value := range params {
-		predicates[index] = "(epoch = ? AND credential_tag = ? AND staking_key = ? AND pool_key_hash = ? AND reward_type = ?)"
+		rowSelects[index] = rowSelectTemplate
 		lookupArgs = append(
 			lookupArgs,
 			value.Epoch,
@@ -726,14 +745,14 @@ boundary_slot = excluded.boundary_slot`
 			value.RewardType,
 		)
 	}
-	rows, err := db.QueryContext(
-		ctx,
-		`SELECT id, epoch, credential_tag, staking_key, pool_key_hash, reward_type
-FROM reward_account_output WHERE `+strings.Join(
-			predicates,
-			" OR ",
-		),
-		lookupArgs...)
+	lookupQuery := s.dialect.Rebind(
+		`SELECT o.id, o.epoch, o.credential_tag, o.staking_key, o.pool_key_hash, o.reward_type
+FROM reward_account_output o JOIN (` + strings.Join(rowSelects, " UNION ALL ") + `) v
+ON o.epoch = v.epoch AND o.credential_tag = v.credential_tag AND
+   o.staking_key = v.staking_key AND o.pool_key_hash = v.pool_key_hash AND
+   o.reward_type = v.reward_type`,
+	)
+	rows, err := db.QueryContext(ctx, lookupQuery, lookupArgs...)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"lookup reward account output batch IDs: %w",
