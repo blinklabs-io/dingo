@@ -150,6 +150,37 @@ func TestPeerSharingShareRequestBoundsValidPeers(t *testing.T) {
 	}
 }
 
+// TestPeerSharingConfigRegistersShareRequestFuncOnce verifies that
+// opeersharing.Config's single ShareRequestFunc slot is wired to the real
+// peer-sharing response handler regardless of internal wiring order:
+// invoking cfg.ShareRequestFunc against a populated peer governor must
+// return that governor's sharable peers, not an empty no-op result. This
+// guards against reintroducing a second WithShareRequestFunc registration
+// whose relative order would silently decide which callback answers
+// incoming ShareRequest messages.
+func TestPeerSharingConfigRegistersShareRequestFuncOnce(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	peerGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+		Logger:          logger,
+		DisableOutbound: true,
+	})
+	require.NoError(
+		t,
+		peerGov.AddPeer("44.0.0.1:3001", peergov.PeerSourceP2PGossip),
+	)
+
+	o := newOuroboros(OuroborosConfig{Logger: logger, PeerSharing: true})
+	o.peerGov = peerGov
+
+	cfg := o.peerSharingConfig()
+	require.NotNil(t, cfg.ShareRequestFunc)
+
+	peers, err := cfg.ShareRequestFunc(opeersharing.CallbackContext{}, 1)
+	require.NoError(t, err)
+	require.Len(t, peers, 1)
+	require.True(t, peers[0].IP.Equal(net.ParseIP("44.0.0.1")))
+}
+
 // TestPeerSharingShareRequestWithoutGovernor verifies that peer sharing is
 // safe during startup before the peer governor has been wired.
 func TestPeerSharingShareRequestWithoutGovernor(t *testing.T) {

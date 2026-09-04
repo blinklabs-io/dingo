@@ -15,8 +15,11 @@
 package ledger
 
 import (
+	"math/big"
+	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -174,6 +177,79 @@ func TestQueryShelleyStakeDistribution_ViaGetCBOR(t *testing.T) {
 	require.True(t, ok, "pool missing from the GetCBOR-wrapped distribution")
 	require.NotNil(t, entryA.StakeFraction)
 	assert.Equal(t, vrfA, entryA.VrfHash[:])
+}
+
+// TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal
+// covers blinklabs-io/dingo#3824: a live devnet run against a real
+// cardano-node found GetStakeDistribution's reported fraction inflated 2x,
+// because it shared GetPoolDistr2's denominator (sum of delegated stake).
+// Confirmed with real cardano-node's own raw wire bytes (not just the
+// decoded fraction) that its GetStakeDistribution reply genuinely uses total
+// circulation instead -- a real, deliberate difference between the two
+// queries, not a bug in either one. GetPoolDistr2's own denominator is
+// correct as sum-of-delegated (matching real cardano-ledger's
+// calculatePoolDistr/SnapShot.ssTotalActiveStake) and must not change --
+// this test proves the two queries now correctly disagree on the same
+// underlying data, rather than being kept artificially consistent.
+func TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+
+	const snapshotEpoch = 0
+	pkhA := seedPoolDistr2Fixture(
+		t, db,
+		repeatedBytes(28, 0xAA), repeatedBytes(32, 0x01),
+		1_000_000, snapshotEpoch,
+	)
+	seedPoolDistr2Fixture(
+		t, db,
+		repeatedBytes(28, 0xBB), repeatedBytes(32, 0x02),
+		1_000_000, snapshotEpoch,
+	)
+
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: strings.Repeat("11", 32),
+	}
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+		"activeSlotsCoeff": 0.1,
+		"epochLength": 100,
+		"maxLovelaceSupply": 8000000,
+		"securityParam": 10,
+		"slotLength": 1,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`)))
+	// Half the genesis supply sits in reserves, undelegated: circulation is
+	// 8_000_000 - 4_000_000 = 4_000_000, twice the 2_000_000 the two pools
+	// hold delegated between them.
+	require.NoError(t, db.Metadata().SetNetworkState(0, 4_000_000, 1, nil))
+
+	ls := newPoolDistr2Ledger(t, db)
+	ls.config.CardanoNodeConfig = cfg
+
+	// GetPoolDistr2 must be unaffected: still sum-of-delegated (2_000_000),
+	// so each pool is 1/2.
+	poolDistr2Result, err := ls.Query(poolDistr2Query())
+	require.NoError(t, err)
+	poolDistr2 := decodePoolDistr2Result(t, poolDistr2Result)
+	entryA2, ok := poolDistr2.Pools[lcommon.PoolId(pkhA)]
+	require.True(t, ok)
+	assert.Equal(t, 0, entryA2.StakeFraction.Cmp(big.NewRat(1, 2)),
+		"GetPoolDistr2 must keep using sum-of-delegated stake as its total")
+	assert.Equal(t, uint64(2_000_000), poolDistr2.TotalActiveStake)
+
+	// GetStakeDistribution must use circulation (4_000_000) instead, so each
+	// pool is 1/4 -- not 1/2.
+	stakeDistResult, err := ls.Query(stakeDistributionQuery())
+	require.NoError(t, err)
+	stakeDist := decodeStakeDistributionResult(t, stakeDistResult)
+	entryA, ok := stakeDist.Results[lcommon.PoolId(pkhA)]
+	require.True(t, ok)
+	require.NotNil(t, entryA.StakeFraction)
+	assert.Equal(t, int64(1), entryA.StakeFraction.Num().Int64())
+	assert.Equal(t, int64(4), entryA.StakeFraction.Denom().Int64(),
+		"GetStakeDistribution must use total circulation, not "+
+			"GetPoolDistr2's sum-of-delegated total")
 }
 
 // TestQueryShelleyStakeDistribution_EmptySnapshot covers a chain with no
