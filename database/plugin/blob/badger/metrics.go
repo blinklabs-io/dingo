@@ -38,73 +38,79 @@ const (
 	badgerMetricNamePrefix = "database_blob_"
 )
 
-// safeRegister registers a collector, silently ignoring duplicates.
-func safeRegister(reg prometheus.Registerer, c prometheus.Collector) {
+// safeRegister registers a collector and returns the collector that is active
+// in the registry. Shared registries may already contain the metric, in which
+// case callers must use the existing collector rather than retaining the
+// unregistered duplicate.
+func safeRegister(
+	reg prometheus.Registerer,
+	c prometheus.Collector,
+) prometheus.Collector {
 	if err := reg.Register(c); err != nil {
-		// Ignore AlreadyRegisteredError — a second blob store instance
-		// (e.g. chain-manager store) shares the same default registry.
-		if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
-			panic(err)
+		var alreadyRegistered prometheus.AlreadyRegisteredError
+		if errors.As(err, &alreadyRegistered) {
+			return alreadyRegistered.ExistingCollector
 		}
+		// A second blob store instance (e.g. chain-manager store) shares the
+		// same default registry. Other registration failures are programming
+		// errors and must remain visible.
+		panic(err)
 	}
+	return c
 }
 
 func (d *BlobStoreBadger) registerBlobMetrics() {
+	attempts := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: badgerMetricNamePrefix + "gc_attempts_total",
+		Help: "Total Badger value-log GC attempts.",
+	})
+	successes := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: badgerMetricNamePrefix + "gc_successes_total",
+		Help: "Total successful Badger value-log GC rewrites.",
+	})
+	noRewrite := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: badgerMetricNamePrefix + "gc_no_rewrite_total",
+		Help: "Total Badger value-log GC attempts with no rewrite.",
+	})
+	gcErrors := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: badgerMetricNamePrefix + "gc_errors_total",
+		Help: "Total Badger value-log GC errors.",
+	})
+	duration := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name: badgerMetricNamePrefix + "gc_duration_seconds",
+		Help: "Duration of Badger value-log GC attempts in seconds.",
+	})
+	lsmBytes := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: badgerMetricNamePrefix + "gc_lsm_bytes",
+		Help: "Badger LSM size after the last successful value-log GC rewrite.",
+	})
+	vlogBytes := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: badgerMetricNamePrefix + "gc_vlog_bytes",
+		Help: "Badger value-log size after the last successful GC rewrite.",
+	})
+	reclaimedBytes := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: badgerMetricNamePrefix + "gc_reclaimed_bytes",
+		Help: "Bytes reclaimed by the last successful Badger GC rewrite.",
+	})
+	consecutive := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: badgerMetricNamePrefix + "gc_consecutive_successes",
+		Help: "Successful value-log GC rewrites in the current GC cycle.",
+	})
+	lastSuccess := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: badgerMetricNamePrefix + "gc_last_success_timestamp_seconds",
+		Help: "Unix timestamp of the last successful value-log GC rewrite.",
+	})
 	d.gcMetrics = &badgerGCMetrics{
-		attempts: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: badgerMetricNamePrefix + "gc_attempts_total",
-			Help: "Total Badger value-log GC attempts.",
-		}),
-		successes: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: badgerMetricNamePrefix + "gc_successes_total",
-			Help: "Total successful Badger value-log GC rewrites.",
-		}),
-		noRewrite: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: badgerMetricNamePrefix + "gc_no_rewrite_total",
-			Help: "Total Badger value-log GC attempts with no rewrite.",
-		}),
-		errors: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: badgerMetricNamePrefix + "gc_errors_total",
-			Help: "Total Badger value-log GC errors.",
-		}),
-		duration: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name: badgerMetricNamePrefix + "gc_duration_seconds",
-			Help: "Duration of Badger value-log GC attempts in seconds.",
-		}),
-		lsmBytes: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: badgerMetricNamePrefix + "gc_lsm_bytes",
-			Help: "Badger LSM size after the last successful value-log GC rewrite.",
-		}),
-		vlogBytes: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: badgerMetricNamePrefix + "gc_vlog_bytes",
-			Help: "Badger value-log size after the last successful GC rewrite.",
-		}),
-		reclaimedBytes: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: badgerMetricNamePrefix + "gc_reclaimed_bytes",
-			Help: "Bytes reclaimed by the last successful Badger GC rewrite.",
-		}),
-		consecutive: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: badgerMetricNamePrefix + "gc_consecutive_successes",
-			Help: "Successful value-log GC rewrites in the current GC cycle.",
-		}),
-		lastSuccess: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: badgerMetricNamePrefix + "gc_last_success_timestamp_seconds",
-			Help: "Unix timestamp of the last successful value-log GC rewrite.",
-		}),
-	}
-	for _, collector := range []prometheus.Collector{
-		d.gcMetrics.attempts,
-		d.gcMetrics.successes,
-		d.gcMetrics.noRewrite,
-		d.gcMetrics.errors,
-		d.gcMetrics.duration,
-		d.gcMetrics.lsmBytes,
-		d.gcMetrics.vlogBytes,
-		d.gcMetrics.reclaimedBytes,
-		d.gcMetrics.consecutive,
-		d.gcMetrics.lastSuccess,
-	} {
-		safeRegister(d.promRegistry, collector)
+		attempts:       safeRegister(d.promRegistry, attempts).(prometheus.Counter),
+		successes:      safeRegister(d.promRegistry, successes).(prometheus.Counter),
+		noRewrite:      safeRegister(d.promRegistry, noRewrite).(prometheus.Counter),
+		errors:         safeRegister(d.promRegistry, gcErrors).(prometheus.Counter),
+		duration:       safeRegister(d.promRegistry, duration).(prometheus.Histogram),
+		lsmBytes:       safeRegister(d.promRegistry, lsmBytes).(prometheus.Gauge),
+		vlogBytes:      safeRegister(d.promRegistry, vlogBytes).(prometheus.Gauge),
+		reclaimedBytes: safeRegister(d.promRegistry, reclaimedBytes).(prometheus.Gauge),
+		consecutive:    safeRegister(d.promRegistry, consecutive).(prometheus.Gauge),
+		lastSuccess:    safeRegister(d.promRegistry, lastSuccess).(prometheus.Gauge),
 	}
 
 	// Badger exposes metrics via expvar, so we need to set up some translation
