@@ -4863,13 +4863,6 @@ type pipelineProgress struct {
 	lastTipHash           []byte
 }
 
-// stuck reports whether the pipeline has restarted without progress often
-// enough that the failure should be treated as deterministic.
-func (p pipelineProgress) stuck() bool {
-	_, stuck := ledgerPipelineBackoff(p.consecutiveNoProgress)
-	return stuck
-}
-
 // trackPipelineProgress folds one pipeline restart into the no-progress
 // accounting. Shared by every failure path so none of them can quietly opt
 // out of stuck detection: an error class that retries on its own schedule is

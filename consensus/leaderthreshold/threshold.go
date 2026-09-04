@@ -119,14 +119,14 @@ func exactNthRoot(value *big.Int, degree uint64) (*big.Int, bool) {
 	if value.Sign() == 0 || value.Cmp(big.NewInt(1)) == 0 || degree == 1 {
 		return new(big.Int).Set(value), true
 	}
-	if degree > uint64(value.BitLen()) {
+	if degree > uint64(value.BitLen()) { //nolint:gosec // BitLen is non-negative.
 		return nil, false
 	}
 
 	low := big.NewInt(1)
 	high := new(big.Int).Lsh(
 		big.NewInt(1),
-		uint((uint64(value.BitLen())+degree-1)/degree),
+		uint((uint64(value.BitLen())+degree-1)/degree), //nolint:gosec // bounded by BitLen.
 	)
 	for low.Cmp(high) < 0 {
 		mid := new(big.Int).Add(low, high)
