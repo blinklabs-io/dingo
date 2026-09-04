@@ -4138,7 +4138,11 @@ still request (issue #3424). The protocol request window is far below the
 default limit, so this bounds an aggressive peer rather than affecting normal
 relay. Explicit cache removal and clearing preserve the same per-consumer
 semantics while preventing an idle connection from growing memory without
-limit.
+limit. If the underlying pool resurfaces the same hash at a later cursor
+position while an earlier offer of it is still outstanding -- a revalidation
+swap or a remove-then-readmit -- the consumer skips it rather than
+re-advertising it: a second entry for the same hash would create an
+ambiguous, duplicate slot in the peer's FIFO ack window.
 
 Mempool shutdown is terminal. `Stop` atomically marks the pool stopped before
 clearing transaction and consumer state; later transaction admission returns

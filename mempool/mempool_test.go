@@ -1338,6 +1338,52 @@ func TestMempoolConsumer_UnackedServedTxsCountTowardCacheLimit(t *testing.T) {
 	assert.Equal(t, txs[2].Hash, third.Hash)
 }
 
+// TestMempoolConsumer_ResurfacedHashNotDuplicateOffered verifies
+// that if a hash the consumer already offered (served but not yet
+// acknowledged) reappears at a later cursor position -- as a revalidation
+// swap or a remove-then-readmit could transiently produce -- the consumer
+// does not record a second offered slot for it. A duplicate slot would let a
+// later ack consume it and evict a different, still-unacknowledged body.
+func TestMempoolConsumer_ResurfacedHashNotDuplicateOffered(t *testing.T) {
+	m := newTestMempool(t)
+	defer m.Stop(context.Background())
+
+	dup := &MempoolTransaction{Hash: "dup-hash", Cbor: []byte("dup-body")}
+	other := &MempoolTransaction{Hash: "other-hash", Cbor: []byte("other")}
+	// Plant the same hash at two positions in the underlying FIFO order,
+	// as production code elsewhere guards against for the same reason (see
+	// the revalidation cursor-translation comment in mempool.go).
+	m.transactions = append(m.transactions, dup, other, dup)
+	consumer := mustAddConsumer(t, m, newTestConnectionId(0))
+
+	first := consumer.NextTx(false)
+	require.NotNil(t, first)
+	require.Equal(t, "dup-hash", first.Hash)
+	// Served but not yet acknowledged.
+	consumer.RemoveTxFromCache("dup-hash")
+
+	second := consumer.NextTx(false)
+	require.NotNil(t, second)
+	require.Equal(t, "other-hash", second.Hash)
+
+	// The resurfaced duplicate is skipped rather than re-offered: it is
+	// still outstanding, and resending it would create a second, ambiguous
+	// entry in the peer's FIFO ack window.
+	assert.Nil(
+		t,
+		consumer.NextTx(false),
+		"a resurfaced, still-outstanding hash must not be re-offered",
+	)
+	assert.Equal(t, []string{"dup-hash", "other-hash"}, consumer.offered,
+		"the resurfaced duplicate must not add a second offered slot")
+
+	// Acknowledging both real slots must not evict "other-hash" ahead of its
+	// own acknowledgement -- there is no third, phantom slot to consume
+	// first.
+	consumer.AcknowledgeOffered(1)
+	assert.NotNil(t, consumer.GetTxFromCache("other-hash"))
+}
+
 // TestMempoolConsumer_CacheIsBoundedByRetainedBytes verifies that temporary
 // per-consumer byte pressure preserves the cursor until retained bytes are
 // released, while keeping every advertised body available for retransmission.
