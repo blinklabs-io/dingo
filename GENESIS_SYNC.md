@@ -121,6 +121,12 @@ The `peerSnapshotFile` path is resolved relative to the topology file. If the
 snapshot yields no usable peers, startup falls back to topology `bootstrapPeers`
 (so keep a bootstrap-peer list configured as a safety net).
 
+Dingo accepts cardano-node's version 23 snapshot format. Its network magic must
+match the configured node, its block point must carry a 32-byte hexadecimal
+hash, and it must select exactly one of `bigLedgerPools` or `allLedgerPools`.
+Snapshot relays must have a host/IP address and an explicit TCP port from 1 to
+65535; portless SRV relays are not currently supported and fail startup.
+
 ## What you should observe
 
 - **Log at startup**: `Genesis chain selection enabled` with `genesis_window_slots`,

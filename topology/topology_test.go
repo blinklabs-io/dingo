@@ -223,7 +223,7 @@ func TestNewTopologyConfigFromFile_LoadsPeerSnapshot(t *testing.T) {
   "NetworkMagic": 1,
   "NodeToClientVersion": 23,
   "Point": {
-    "blockPointHash": "abc",
+    "blockPointHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "blockPointSlot": 42
   },
   "bigLedgerPools": [
@@ -252,6 +252,7 @@ func TestNewTopologyConfigFromFile_LoadsPeerSnapshot(t *testing.T) {
 		},
 		cfg.PeerSnapshot.RelayAccessPoints(),
 	)
+	require.NoError(t, cfg.PeerSnapshot.Validate(1))
 }
 
 func TestNewTopologyConfigFromFS_LoadsPeerSnapshot(t *testing.T) {
@@ -273,7 +274,7 @@ func TestNewTopologyConfigFromFS_LoadsPeerSnapshot(t *testing.T) {
   "NetworkMagic": 2,
   "NodeToClientVersion": 23,
   "Point": {
-    "blockPointHash": "def",
+    "blockPointHash": "def0000000000000000000000000000000000000000000000000000000000000",
     "blockPointSlot": 77
   },
   "bigLedgerPools": [
@@ -296,6 +297,7 @@ func TestNewTopologyConfigFromFS_LoadsPeerSnapshot(t *testing.T) {
 	require.NotNil(t, cfg.PeerSnapshot)
 	require.Equal(t, uint64(77), cfg.PeerSnapshot.Point.BlockPointSlot)
 	require.True(t, cfg.PeerSnapshot.HasRelays())
+	require.NoError(t, cfg.PeerSnapshot.Validate(2))
 }
 
 func TestNewTopologyConfigFromFile_NotFound(t *testing.T) {
@@ -316,4 +318,159 @@ func TestNewTopologyConfigFromReader_OversizedInput(t *testing.T) {
 		err.Error(),
 		"topology file exceeds maximum size",
 	)
+}
+
+// TestPeerSnapshotConfigValidate verifies that snapshot identity, format,
+// point, pool mode, and relay endpoints are accepted or rejected together.
+func TestPeerSnapshotConfigValidate(t *testing.T) {
+	valid := func() topology.PeerSnapshotConfig {
+		return topology.PeerSnapshotConfig{
+			NetworkMagic:        2,
+			NodeToClientVersion: 23,
+			Point: topology.PeerSnapshotPoint{
+				BlockPointHash: "d6792f8031323804b7ac44a67747de78ed70fd307bb5ffddc5147844d9363b30",
+				BlockPointSlot: 0,
+			},
+			BigLedgerPools: []topology.PeerSnapshotLedgerPool{{
+				Relays: []topology.TopologyConfigP2PAccessPoint{{
+					Address: "relay.example.com",
+					Port:    1,
+				}},
+			}},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*topology.PeerSnapshotConfig)
+		wantErr string
+	}{
+		{name: "valid minimum TCP port and slot zero"},
+		{
+			name: "valid maximum TCP port and all-pool mode",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.AllLedgerPools = s.BigLedgerPools
+				s.AllLedgerPools[0].Relays[0].Port = 65535
+				s.BigLedgerPools = nil
+			},
+		},
+		{
+			name: "network mismatch",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.NetworkMagic = 1
+			},
+			wantErr: "does not match configured network magic",
+		},
+		{
+			name: "missing network",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.NetworkMagic = 0
+			},
+			wantErr: "network magic must be specified",
+		},
+		{
+			name: "unsupported legacy version",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.NodeToClientVersion = 2
+			},
+			wantErr: "unsupported node-to-client version 2",
+		},
+		{
+			name: "missing version",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.NodeToClientVersion = 0
+			},
+			wantErr: "unsupported node-to-client version 0",
+		},
+		{
+			name: "short point hash",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.Point.BlockPointHash = "00"
+			},
+			wantErr: "64 hexadecimal characters",
+		},
+		{
+			name: "non-hex point hash",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.Point.BlockPointHash = strings.Repeat("z", 64)
+			},
+			wantErr: "is not hexadecimal",
+		},
+		{
+			name: "mixed pool modes",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.AllLedgerPools = []topology.PeerSnapshotLedgerPool{{
+					Relays: []topology.TopologyConfigP2PAccessPoint{{
+						Address: "other.example.com",
+						Port:    3001,
+					}},
+				}}
+			},
+			wantErr: "mutually exclusive",
+		},
+		{
+			name: "no pool mode",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools = nil
+			},
+			wantErr: "contains no ledger pools",
+		},
+		{
+			name: "pool without relays",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays = nil
+			},
+			wantErr: "contains no relays",
+		},
+		{
+			name: "empty relay address",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = ""
+			},
+			wantErr: "address must not be empty",
+		},
+		{
+			name: "unsupported SRV relay",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Port = 0
+			},
+			wantErr: "SRV relay mode is not supported",
+		},
+		{
+			name: "port above TCP range",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Port = 65536
+			},
+			wantErr: "outside the TCP port range",
+		},
+		{
+			name: "unspecified IPv4 relay",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "0.0.0.0"
+			},
+			wantErr: "is not a relay endpoint",
+		},
+		{
+			name: "unspecified IPv6 relay",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "::"
+			},
+			wantErr: "is not a relay endpoint",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snapshot := valid()
+			if tt.mutate != nil {
+				tt.mutate(&snapshot)
+			}
+			err := snapshot.Validate(2)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
 }
