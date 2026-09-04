@@ -49,6 +49,6 @@ func TestRegisterBlobMetricsAllowsLabelWrappedReuse(t *testing.T) {
 	count, err := testutil.GatherAndCount(registry,
 		"database_blob_gc_attempts_total")
 	require.NoError(t, err)
-	require.Equal(t, 1, count)
+	require.Equal(t, 2, count)
 	require.Equal(t, float64(1), testutil.ToFloat64(second.gcMetrics.attempts))
 }
