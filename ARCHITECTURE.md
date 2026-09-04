@@ -2494,6 +2494,55 @@ at a normal-boundary `d` decrease. Blockfetch still defers the stateful overlay
 decision until ledger apply when even the forecast cannot resolve it; full
 historical validation and the normal leader checks remain enabled.
 
+**Why deferring a `d=1` overlay header is a real fix, not a suppression.** With
+`d = 1` (full federation — every early Shelley epoch, and epoch 0 on every
+network) `classifyGenesisOverlaySlot` returns `genesisOverlayActive` or
+`genesisOverlayNonActive` for *every* slot, never `genesisOverlayNone`: with
+`position = ceil(relativeSlot·d) = relativeSlot`, the position always advances by
+one per slot, and `position % activeSlotCoeffInverse == 0` selects the active
+overlay slots. So under `d=1` the genesis-delegate path — not the Praos
+leader-eligibility path — is authoritative, and a header **not** issued by the
+overlay slot's assigned active genesis delegate is rejected (`genesis overlay
+slot assigned to delegate …, got issuer …`, or the non-active-slot rejection).
+There is therefore no reference-node case in which cardano-node *accepts* a
+non-genesis-delegate block at a `d=1` overlay slot, and the defer never makes
+dingo accept one either: `verifyGenesisDelegateHeader` defers only while
+`allowStateDefer && ledgerTipBehindSlot(slot)`, and at ledger apply
+`verifyDeferredBlockHeaderState` re-runs `verifyBlockHeaderStateWithEpochAdvance(
+block, /*epochCacheAdvance*/ true, /*allowStateDefer*/ false)` — with the defer
+switch off, so the stateful genesis-delegate check runs to an authoritative
+accept/reject verdict before the block can be adopted. The deferral moves *when*
+the verdict is computed, not *whether* it is enforced; the marker
+(`deferred_header_validation:<slot>:<hash>`, in memory and in `sync_state`) is
+what forces that apply-time recheck, so its retention is load-bearing (see the
+retention-floor, eviction-horizon, and marker-restore invariants below and in
+`DATABASE.md`).
+
+The concrete acceptance case the defer *does* exist for is a genesis-delegate
+**reassignment** that the apply cursor has not reached yet. A
+`GenesisKeyDelegationCertificate` rewrites a genesis key's active delegate/VRF
+hash; `Store.GetGenesisDelegationForSlot` returns the latest
+`genesis_delegation` row with `added_slot < blockSlot`, and that row is written
+only when the block carrying the certificate is *applied*
+(`transaction_certificates.go`). During catch-up the header chain runs ahead of
+the applied tip, so at header-verification time the reassignment row can be
+absent — `activeGenesisDelegationForSlot` then falls back to the Shelley-genesis
+delegate — while at apply time the row is present and names the new
+delegate. A block legitimately produced by the reassigned delegate would be
+*rejected at header time* (issuer ≠ the static genesis delegate) but *accepted at
+apply* (issuer == reassigned delegate), exactly as cardano-node accepts it, so
+deferring the `d=1` overlay decision until apply is what keeps dingo from
+recycling an honest peer over a valid block. This is why the current premise is
+keyed on the observable `ledgerTipBehindSlot(slot)` state rather than on
+`epoch == 0`: the stale state that motivates the defer is the unapplied
+genesis-key-delegation row, which is not epoch-0-specific. (Empirical note: this
+is substantiated from the certificate/overlay code paths and TPraos overlay
+semantics; a specific on-chain instance — network, slot, and the reassigning
+transaction — has not been pinned here and must not be invented. If a concrete
+witness is wanted for the PR record, it is the one open item for the author to
+supply; the safety argument above does not depend on it, because apply-time
+re-validation is authoritative regardless.)
+
 Slot/epoch query adapters preserve `hardfork.ErrPastHorizon` in their error
 chains so callers can defer until the ledger advances. `EpochInfo` serves an
 already materialized epoch directly from the immutable epoch cache before
@@ -7987,8 +8036,52 @@ full per-epoch and per-pool reward history stays queryable and a missing
 summary row keeps its diagnostic meaning of a boundary that was never
 captured. Because a retained snapshot can outlive its per-credential rows,
 `applyStakeRewards` skips an epoch whose snapshot claims delegators over an
-empty `RewardStakeInput` set rather than failing the rollover. See the
-retention section in `DATABASE.md` for the per-table detail.
+empty `RewardStakeInput` set rather than failing the rollover.
+
+`PoolStakeSnapshot` retention has one extra lower-watermark rule (issue #3727):
+it is the leader-eligibility basis a queued/deferred header validates against.
+`cleanupOldSnapshots` prunes `PoolStakeSnapshot` through a retention guard
+(`Manager.SetPoolSnapshotRetentionGuard`, wired to
+`LedgerState.PrunePoolSnapshotsWithRetentionFloor`) that, under one dedicated
+lock (`deferredHeaderValidationMu`) held across the eviction and floor read but
+released before the pool-snapshot delete: (1)
+evicts deferred headers beyond the rollback horizon (below
+`tip - calculateStabilityWindow()`) — abandoned, since a canonical one is
+consumed at apply and no fork that deep can be re-adopted — so they stop pinning
+their snapshots and their persisted markers are deleted. The horizon, rather than
+the bare tip, is what makes eviction safe: eviction also drops the durable
+marker, so a point evicted while still re-adoptable would later apply with
+`required == false` and be adopted with its stateful leader-eligibility check
+never run; (2) lowers the delete boundary to the floor
+(oldest `StakeSnapshotEpoch(epochOf(slot))` over the survivors) when it is below
+`current-3`, or to 0 while any deferred slot is not yet epoch-mappable; and (3)
+clamps that boundary up to a hard depth cap (`current - 24`) so a stuck header
+can never pin snapshots without bound. The eviction+floor read is atomic (one
+lock hold), so the boundary is a coherent read of the deferred set. The lock is
+released before `prune` (and before each `DeleteSyncState` in the evicted-marker
+cleanup, whose per-key delete then re-tests membership and re-persists the marker
+for a point re-deferred in that window, so releasing the lock cannot strand a
+live deferred header without its durable marker): `prune` opens the single SQLite
+write connection, and block apply holds
+that connection before taking this same mutex via `consumeDeferredHeaderValidation`,
+so holding the mutex across `prune` inverts the lock order and deadlocks the node
+on the single write connection (issue #3717). The hazard is not this lock's own
+I/O — it has none — but the apply path holding the write connection while waiting
+for this mutex; a header admitted after the lock is released is handled by the
+next pass, since the floor is a lower-watermark recomputed each cleanup. The pin
+moves only `PoolStakeSnapshot` — the reward
+window stays at `current-3` — never prunes more than the default, releases as
+headers resolve or are evicted, and is rebuilt from the persisted markers at
+startup (`repopulateDeferredHeaderValidation`) so it survives a restart. The pin
+is what makes a deferred header *resolve*: its snapshot is retained until the
+cursor reaches it. The classification in `verifyBlockHeaderState` is
+consensus-narrow: a leader-stake snapshot reported unavailable is deferred ONLY
+while the apply cursor is still behind the header's slot (not yet produced =
+recoverable); once the cursor has caught up a still-empty distribution is a
+genuine, permanent gap and stays a hard rejection, exactly as before, and a
+producer absent from a populated snapshot always hard-rejects. See the retention
+section in `DATABASE.md` for the per-table
+detail.
 
 A skipped reward round is never made up later, and that has consequences
 well beyond the reward figures. Applying the round at the boundary into N

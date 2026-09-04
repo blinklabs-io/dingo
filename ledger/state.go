@@ -894,12 +894,26 @@ type LedgerState struct {
 	// header that blocks local forging). Deliberately survives interleaved
 	// deliveries for other ranges and header-queue churn; discarded when
 	// the tracked range itself is delivered.
-	blockfetchRangeFailure    blockfetchRangeFailureState
-	deferredHeaderValidation  map[string]struct{} // block points whose stateful header checks wait for ledger apply
-	checkpointWrittenForEpoch bool
-	closed                    atomic.Bool
-	inRecovery                bool // guards against recursive recovery in SubmitAsyncDBTxn
-	lastAtTipRecovery         *atTipRecoveryAttempt
+	blockfetchRangeFailure blockfetchRangeFailureState
+	// deferredHeaderValidation holds block points whose stateful header checks
+	// wait for ledger apply. It is guarded by its own deferredHeaderValidationMu
+	// (NOT the main RWMutex) so the snapshot retention guard
+	// (PrunePoolSnapshotsWithRetentionFloor) can hold the set stable across the
+	// eviction and floor computation without contending the hot header-validation
+	// read path on the main lock (issue #3727). The guard must NOT hold this mutex
+	// across the pool-snapshot prune (nor deletePersistedDeferredMarkers across
+	// DeleteSyncState): those open the single SQLite write connection, and block
+	// apply holds that connection before taking this mutex via
+	// consumeDeferredHeaderValidation, so holding it across that write inverts the
+	// lock order and deadlocks the node (issue #3717). The eviction+floor read is
+	// atomic; a header admitted after the lock is released is handled by the next
+	// cleanup pass (the floor is a lower-watermark recomputed each pass).
+	deferredHeaderValidation   map[string]struct{}
+	deferredHeaderValidationMu sync.Mutex
+	checkpointWrittenForEpoch  bool
+	closed                     atomic.Bool
+	inRecovery                 bool // guards against recursive recovery in SubmitAsyncDBTxn
+	lastAtTipRecovery          *atTipRecoveryAttempt
 	// At-tip recovery non-convergence tracking (issue #2939). A descending
 	// series of *distinct* (block, tx) validation failures each resets the
 	// same-block escalation to attempt 1, so the escalate-and-cap logic in
@@ -1474,6 +1488,23 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	}
 
 	ls.loadMithrilTrustBoundary()
+	// Repopulate the in-memory deferred-header set from the persisted markers
+	// so the snapshot retention floor covers headers still awaiting apply from
+	// before the restart (issue #3727, finding 3): without this the first
+	// post-restart epoch cleanup could prune a pool-stake snapshot such a
+	// header needs. Runs here, before the database worker pool and cleanup
+	// timer start, because it only reads ls.db directly and must FAIL CLOSED:
+	// a scan failure that continued would leave the floor unpinned, and once
+	// the apply cursor passes a pre-restart deferred header its now-pruned
+	// snapshot is hard-rejected instead of deferred (the exact bug this PR
+	// fixes). Aborting before any resource starts means there is nothing to
+	// unwind on failure.
+	if err := ls.repopulateDeferredHeaderValidation(); err != nil {
+		return fmt.Errorf(
+			"failed to repopulate deferred-header validation set: %w",
+			err,
+		)
+	}
 
 	// Initialize database worker pool for async operations
 	if !ls.config.DatabaseWorkerPoolConfig.Disabled {
