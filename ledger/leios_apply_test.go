@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -669,6 +670,64 @@ func TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently(t *testing.T) {
 	mu.Lock()
 	require.ElementsMatch(t, []uint64{100, 200}, calls)
 	mu.Unlock()
+}
+
+// TestLeiosBackfillerFetchOnceDedupsWithSpawnInFlight verifies that the
+// mandatory retry path observes the best-effort fetch marker for the same
+// (slot, hash) reference instead of starting a redundant fetch.
+func TestLeiosBackfillerFetchOnceDedupsWithSpawnInFlight(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	fetchDone := make(chan struct{})
+
+	hash := lcommon.NewBlake2b256(leiosTestHash(0xEE))
+	r := leiosEbRef{slot: 100, hash: hash}
+	b := &leiosBackfiller{
+		fetch: func(_ context.Context, _ uint64, _ []byte) error {
+			mu.Lock()
+			calls++
+			mu.Unlock()
+			started <- struct{}{}
+			<-release
+			return nil
+		},
+		provider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
+			return nil, false
+		},
+		logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		sem:    make(chan struct{}, leiosBackfillConcurrency),
+	}
+
+	b.spawn(t.Context(), r)
+	testutil.RequireReceive(
+		t,
+		started,
+		time.Second,
+		"spawn fetch never started",
+	)
+	go func() {
+		defer close(fetchDone)
+		_ = b.fetchOnce(t.Context(), r, time.Millisecond)
+	}()
+	testutil.RequireNoReceive(
+		t,
+		started,
+		200*time.Millisecond,
+		"fetchOnce started a redundant fetch for spawn's in-flight reference",
+	)
+
+	mu.Lock()
+	require.Equal(t, 1, calls)
+	mu.Unlock()
+	close(release)
+	testutil.RequireReceive(
+		t,
+		fetchDone,
+		time.Second,
+		"fetchOnce did not finish",
+	)
 }
 
 // TestLeiosBackfillerAwaitFetchDoesNotSkipFastOnDifferentSlotCompletion is the

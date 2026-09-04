@@ -221,7 +221,7 @@ func TestLeiosBackfillFetchRequiredDedupsWithInFlightFetch(t *testing.T) {
 	}
 	// Claim the in-flight marker the way spawn does, then release it once the
 	// endorser block is available, as a completing fetch would.
-	key := string(r.hash.Bytes())
+	key := leiosEbRefKey(r)
 	ls.leiosBackfill.inflight.Store(key, struct{}{})
 	go func() {
 		probe.mu.Lock()

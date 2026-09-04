@@ -976,12 +976,6 @@ func newLeiosBackfiller(cfg LedgerStateConfig) *leiosBackfiller {
 
 // spawn starts a background by-point fetch of the endorser block referenced by
 // r unless it is already cached or a fetch is already in flight. It returns
-// immediately. Deduping by hash means overlapping callers never fetch the same
-// endorser block twice.
-//
-// ctx bounds the spawned fetch: it is the block-processing context, so a
-// shutdown or a pipeline restart stops the fetch instead of leaving it running
-// against a connection the node is tearing down.
 // immediately. Deduping by leiosEbRefKey (slot, hash) means the read-batch
 // prefetch and the per-chunk gate never fetch the same endorser-block
 // requirement twice, while two different slots requiring the same hash are
@@ -1134,15 +1128,16 @@ func (b *leiosBackfiller) fetchRequired(
 }
 
 // fetchOnce runs one by-point fetch attempt for r, or waits for an equivalent
-// fetch another caller already has in flight. Deduping by hash keeps a single
-// fetch per endorser block; the waiting branch is why a required endorser block
-// already being fetched by the best-effort spawn above is not fetched twice.
+// fetch another caller already has in flight. Deduping by leiosEbRefKey (slot,
+// hash) keeps a single fetch per endorser-block requirement; the waiting branch
+// is why a required endorser block already being fetched by the best-effort
+// spawn above is not fetched twice.
 func (b *leiosBackfiller) fetchOnce(
 	ctx context.Context,
 	r leiosEbRef,
 	poll time.Duration,
 ) error {
-	key := string(r.hash.Bytes())
+	key := leiosEbRefKey(r)
 	if _, loaded := b.inflight.LoadOrStore(key, struct{}{}); loaded {
 		// Another fetch for this endorser block is in flight; wait for it
 		// rather than starting a second one on the same connections.
