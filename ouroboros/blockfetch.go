@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"time"
@@ -342,6 +343,7 @@ func (o *Ouroboros) blockfetchServerSendBatch(
 	); err != nil {
 		return err
 	}
+	endReached := false
 Loop:
 	for {
 		select {
@@ -376,8 +378,8 @@ Loop:
 				// Serving it would stream a [0, null] block that a fetching
 				// peer decodes as a nil-header Byron EBB and crashes
 				// dereferencing it in SlotNumber(). Blockfetch has no
-				// rollback message, so end the batch cleanly; the client
-				// re-requests against its updated chain. Mirrors the
+				// rollback message, so abort the batch and close the transport;
+				// the client re-requests against its updated chain. Mirrors the
 				// next.Rollback handling in chainsync.
 				break Loop
 			}
@@ -421,10 +423,31 @@ Loop:
 				return err
 			}
 			// Make sure we don't hang waiting for the next block if we've already hit the end
-			if next.Block.Slot == end.Slot {
+			if next.Point.Slot == end.Slot &&
+				bytes.Equal(next.Point.Hash, end.Hash) {
+				endReached = true
 				break Loop
 			}
 		}
+	}
+	if !endReached {
+		// The end point was present when the request was validated, but the
+		// chain may have rolled back while the batch was streaming. A
+		// BatchDone here would make a weakly correlated client accept a
+		// truncated or wrong-fork range as complete. Once StartBatch has been
+		// sent, closing the transport is the only protocol-safe failure signal;
+		// the peer will retry on a fresh connection/range.
+		err := fmt.Errorf(
+			"blockfetch iterator ended before requested end point %d/%x",
+			end.Slot,
+			end.Hash,
+		)
+		o.closeBlockfetchConnection(
+			conn,
+			connectionID,
+			"blockfetch iterator ended before requested end point",
+		)
+		return err
 	}
 	// Signal batch completion
 	if err := server.BatchDone(); err != nil {
