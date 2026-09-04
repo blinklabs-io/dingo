@@ -49,6 +49,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -4713,6 +4714,14 @@ func (ls *LedgerState) ledgerProcessBlock(
 			parent,
 		); err != nil {
 			return nil, err
+		}
+		if block.Era().Id == byron.EraIdByron {
+			if err := validateByronBlockSizes(
+				block,
+				ls.config.CardanoNodeConfig,
+			); err != nil {
+				return nil, err
+			}
 		}
 		if err := ls.validateBlockHeaderProtocolVersion(
 			block.Header(), pparams,
