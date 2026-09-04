@@ -1377,13 +1377,14 @@ func TestMempoolConsumer_ResurfacedHashNotDuplicateOffered(t *testing.T) {
 	assert.Equal(t, []string{"dup-hash", "other-hash"}, consumer.offered,
 		"the resurfaced duplicate must not add a second offered slot")
 
-	// The phantom-slot guard is the offered-length assertion above; this
+	// The phantom-slot guard is the offered-length assertion above. This
 	// final check only confirms FIFO order: acknowledging a single (the
-	// oldest) slot evicts "dup-hash" and leaves "other-hash" -- offered
-	// second -- untouched.
+	// oldest) slot leaves "other-hash" -- offered second -- untouched.
+	// "dup-hash" was already evicted by RemoveTxFromCache above, so it
+	// cannot show ack-driven eviction; that path is covered separately by
+	// TestTxSubmissionClientRequestTxIdsClearsConsumerCacheOnAck.
 	consumer.AcknowledgeOffered(1)
 	assert.NotNil(t, consumer.GetTxFromCache("other-hash"))
-	assert.Nil(t, consumer.GetTxFromCache("dup-hash"))
 }
 
 // TestMempoolConsumer_CacheIsBoundedByRetainedBytes verifies that temporary
