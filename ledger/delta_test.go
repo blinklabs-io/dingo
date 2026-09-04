@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -175,6 +176,7 @@ func TestLedgerDeltaPersistsMultipleCertificateDepositsFromOneSnapshot(
 			}
 			ls.publishSnapshotsLocked()
 			ls.Unlock()
+			runtime.Gosched()
 		}
 	})
 	defer func() {
