@@ -246,34 +246,6 @@ func (ls *LedgerState) validateAndEmitRollbackUndo(
 	return nil
 }
 
-// blocksAboveSlot returns the blocks a rollback to slot would discard,
-// newest first, or nil when they cannot be read.
-//
-// The descending order matters: it is the reverse of the order the blocks
-// were applied in, which is the order their effects have to be undone in, and
-// it matches the order chain.rollbackLocked itself reports rolled-back blocks
-// (it walks the chain down from the tip). BlocksAfterSlotTxn returns ascending
-// slot order, so the result is reversed here.
-//
-// It must be called before the chain is truncated, while those blocks still
-// exist. The rollback preparation path uses readBlocksAboveSlot so a read
-// failure stops the mutation before it can lose the undo payload. This wrapper
-// retains the best-effort behavior for callers that only need the historical
-// lookup: it logs a read failure and returns no events.
-func (ls *LedgerState) blocksAboveSlot(slot uint64) []models.Block {
-	blocks, err := ls.readBlocksAboveSlot(slot)
-	if err != nil {
-		ls.config.Logger.Warn(
-			"failed to read rolled-back blocks for tx undo events",
-			"component", "ledger",
-			"error", err,
-			"slot", slot,
-		)
-		return nil
-	}
-	return blocks
-}
-
 // readBlocksAboveSlot returns the blocks a rollback to slot would discard,
 // newest first. Unlike blocksAboveSlot, it returns storage errors so the
 // caller can fail before mutating the chain without a durable undo payload.
