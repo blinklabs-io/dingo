@@ -1263,14 +1263,79 @@ func TestMempoolConsumer_CacheIsBounded(t *testing.T) {
 	assert.NotNil(t, consumer.GetTxFromCache(txs[0].Hash))
 	assert.NotNil(t, consumer.GetTxFromCache(txs[1].Hash))
 
-	// Serving (or the peer acknowledging) frees a slot and the window reopens,
-	// so the third tx is advertised rather than lost.
+	// Serving frees the body's bytes but not its offered slot: the id stays
+	// outstanding until the peer acknowledges it, so the window stays closed
+	// and the third tx is still declined.
 	consumer.RemoveTxFromCache(txs[0].Hash)
+	assert.Nil(
+		t,
+		consumer.NextTx(false),
+		"serving a body must not reopen the window on its own",
+	)
+
+	// Acknowledging the served tx frees its offered slot and the window
+	// reopens, so the third tx is advertised rather than lost.
+	consumer.AcknowledgeOffered(1)
 	third := consumer.NextTx(false)
 	require.NotNil(t, third)
 	assert.Equal(t, txs[2].Hash, third.Hash)
 	assert.NotNil(t, consumer.GetTxFromCache(txs[2].Hash))
 	assert.Len(t, consumer.cache, 2)
+}
+
+// TestMempoolConsumer_UnackedServedTxsCountTowardCacheLimit verifies that
+// serving a body does not, by itself, reopen its offered slot: a peer that
+// keeps fetching bodies without ever acknowledging them cannot grow the
+// per-connection offered-id tracking without bound.
+func TestMempoolConsumer_UnackedServedTxsCountTowardCacheLimit(t *testing.T) {
+	m, err := NewMempool(MempoolConfig{
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:          event.NewEventBus(nil, nil),
+		PromRegistry:      prometheus.NewRegistry(),
+		Validator:         newMockValidator(),
+		MempoolCapacity:   1024 * 1024,
+		ConsumerCacheSize: 2,
+	})
+	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cancel()
+		require.NoError(t, m.Stop(stopCtx))
+	})
+
+	txs := addMockTransactions(t, m, 3)
+	consumer := m.AddConsumer(newTestConnectionId(0))
+	require.NotNil(t, consumer)
+
+	// Offer and immediately serve both slots' worth of bodies, without ever
+	// acknowledging either.
+	first := consumer.NextTx(false)
+	require.NotNil(t, first)
+	consumer.RemoveTxFromCache(first.Hash)
+	second := consumer.NextTx(false)
+	require.NotNil(t, second)
+	consumer.RemoveTxFromCache(second.Hash)
+
+	// A third offer is still declined: both ids remain outstanding until
+	// acknowledged, even though their bodies were already served and freed
+	// from the resident cache.
+	assert.Nil(
+		t,
+		consumer.NextTx(false),
+		"unacknowledged served ids must still count toward the limit",
+	)
+	assert.Len(t, consumer.offered, 2)
+	assert.Empty(t, consumer.cache, "served bodies are not retained")
+
+	// Acknowledging both frees the tracking and the third tx is advertised.
+	consumer.AcknowledgeOffered(2)
+	third := consumer.NextTx(false)
+	require.NotNil(t, third)
+	assert.Equal(t, txs[2].Hash, third.Hash)
 }
 
 // TestMempoolConsumer_CacheIsBoundedByRetainedBytes verifies that temporary
@@ -1542,6 +1607,7 @@ func TestMempoolConsumer_NilReceiver(t *testing.T) {
 	// These should not panic
 	consumer.ClearCache()
 	consumer.RemoveTxFromCache("any")
+	consumer.AcknowledgeOffered(1)
 }
 
 func TestMempool_ConsumerAfterStop(t *testing.T) {
@@ -4184,10 +4250,19 @@ func TestMempoolConsumer_BlockingNextTxWaitsForCacheSlot(t *testing.T) {
 		"blocking NextTx must not answer while the cache is full",
 	)
 
-	// Serving the cached body frees the slot and releases the waiter.
+	// Serving the cached body frees its bytes but not its offered slot, so
+	// the waiter must stay parked: the id is still outstanding until acked.
 	consumer.RemoveTxFromCache(txs[0].Hash)
+	dingotestutil.RequireNoReceive(
+		t, got, 100*time.Millisecond,
+		"serving a body must not release a waiter on its own",
+	)
+
+	// Acknowledging the served tx frees its offered slot and releases the
+	// waiter.
+	consumer.AcknowledgeOffered(1)
 	second := dingotestutil.RequireReceive(
-		t, got, 2*time.Second, "blocking NextTx after a slot freed",
+		t, got, 2*time.Second, "blocking NextTx after an ack freed a slot",
 	)
 	require.NotNil(t, second)
 	assert.Equal(t, txs[1].Hash, second.Hash)

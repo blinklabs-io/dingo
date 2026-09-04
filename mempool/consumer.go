@@ -33,8 +33,13 @@ type MempoolConsumer struct {
 	cacheBytes      int64
 	cacheLimitBytes int64
 	nextTxIdx       int
-	cacheMutex      sync.Mutex
-	nextTxIdxMu     sync.Mutex
+	// offered is the FIFO of tx hashes advertised to the peer via ReplyTxIds
+	// and not yet acknowledged. TxSubmission acknowledges advertised ids in
+	// the order they were offered, so AcknowledgeOffered must forget exactly
+	// this prefix rather than the whole cache. Guarded by cacheMutex.
+	offered     []string
+	cacheMutex  sync.Mutex
+	nextTxIdxMu sync.Mutex
 	// onWaitForTx is a test-only hook invoked after a blocking NextTx has
 	// subscribed for additions and is ready to be cancelled.
 	onWaitForTx func()
@@ -226,7 +231,12 @@ func (m *MempoolConsumer) cacheTransaction(
 	if _, exists := m.cache[tx.Hash]; exists {
 		return true, nil
 	}
-	if len(m.cache) >= m.cacheLimit ||
+	// Gate on the offered count, not the resident cache count: a served body
+	// is evicted from cache immediately (freeing its bytes) but its hash
+	// stays in offered until the peer acknowledges it. Gating on the cache
+	// count alone would let a peer that keeps fetching bodies without ever
+	// acknowledging them grow offered without bound.
+	if len(m.offered) >= m.cacheLimit ||
 		size > m.cacheLimitBytes-m.cacheBytes {
 		return false, nil
 	}
@@ -236,6 +246,9 @@ func (m *MempoolConsumer) cacheTransaction(
 	}
 	m.cache[tx.Hash] = cloneMempoolTransaction(tx)
 	m.cacheBytes += size
+	// The tx is now advertised to the peer (returned from the RequestTxIds
+	// callback that drove this NextTx call); track it for AcknowledgeOffered.
+	m.offered = append(m.offered, tx.Hash)
 	return true, nil
 }
 
@@ -255,6 +268,7 @@ func (m *MempoolConsumer) ClearCache() {
 		released := m.cacheBytes
 		m.cache = make(map[string]*MempoolTransaction)
 		m.cacheBytes = 0
+		m.offered = nil
 		m.mempool.releaseRelayCacheBytes(released)
 		m.signalCacheSlotLocked()
 		m.cacheMutex.Unlock()
@@ -268,13 +282,47 @@ func (m *MempoolConsumer) RemoveTxFromCache(hash string) {
 	if m != nil {
 		m.cacheMutex.Lock()
 		defer m.cacheMutex.Unlock()
-		if tx, existed := m.cache[hash]; existed {
-			delete(m.cache, hash)
-			size := int64(len(tx.Cbor))
-			m.cacheBytes -= size
-			m.mempool.releaseRelayCacheBytes(size)
-			m.signalCacheSlotLocked()
-		}
+		m.removeFromCacheLocked(hash)
+	}
+}
+
+// AcknowledgeOffered forgets exactly the oldest count previously offered
+// transaction bodies, in the order they were advertised. TxSubmission acks
+// only the consumed prefix of the offered-id window; bodies for ids offered
+// after that prefix are still eligible for the peer to request and must be
+// preserved, so this must never clear the whole cache.
+func (m *MempoolConsumer) AcknowledgeOffered(count int) {
+	if m == nil || count <= 0 {
+		return
+	}
+	m.cacheMutex.Lock()
+	defer m.cacheMutex.Unlock()
+	if count > len(m.offered) {
+		count = len(m.offered)
+	}
+	for _, hash := range m.offered[:count] {
+		// removeFromCacheLocked no-ops (and so does not signal) for an
+		// already-served hash; freeing an offered slot can unblock a waiter
+		// on its own, so signal below regardless of cache membership.
+		m.removeFromCacheLocked(hash)
+	}
+	// Drop the acknowledged prefix; copy the remainder so the backing array
+	// of the retained slice isn't shared with the one about to be discarded.
+	remaining := make([]string, len(m.offered)-count)
+	copy(remaining, m.offered[count:])
+	m.offered = remaining
+	m.signalCacheSlotLocked()
+}
+
+// removeFromCacheLocked evicts a single cached tx body, if present, and
+// releases its reserved bytes. Caller must hold cacheMutex.
+func (m *MempoolConsumer) removeFromCacheLocked(hash string) {
+	if tx, existed := m.cache[hash]; existed {
+		delete(m.cache, hash)
+		size := int64(len(tx.Cbor))
+		m.cacheBytes -= size
+		m.mempool.releaseRelayCacheBytes(size)
+		m.signalCacheSlotLocked()
 	}
 }
 
