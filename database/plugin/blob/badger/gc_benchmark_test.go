@@ -9,11 +9,9 @@
 package badger
 
 import (
-	"errors"
 	"strconv"
 	"testing"
 
-	badgerdb "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 )
 
@@ -29,6 +27,7 @@ func BenchmarkValueLogGC(b *testing.B) {
 				WithDataDir(b.TempDir()),
 				WithGc(false),
 				WithValueThreshold(1),
+				WithValueLogFileSize(1<<20),
 			)
 			require.NoError(b, err)
 			b.Cleanup(func() { require.NoError(b, store.Close()) })
@@ -45,14 +44,19 @@ func BenchmarkValueLogGC(b *testing.B) {
 				}
 				require.NoError(b, txn.Commit())
 			}
-			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
+				b.StopTimer()
+				for j := 0; j < 64; j++ {
+					txn := store.NewTransaction(true)
+					key := []byte("benchmark-key-" + strconv.Itoa(j))
+					require.NoError(b, store.Set(txn, key, make([]byte, 4096)))
+					require.NoError(b, txn.Commit())
+				}
+				b.StartTimer()
 				before, err := store.DiskSize()
 				require.NoError(b, err)
 				err = store.DB().RunValueLogGC(ratio)
-				if err != nil && !errors.Is(err, badgerdb.ErrNoRewrite) {
-					b.Fatal(err)
-				}
+				require.NoError(b, err)
 				after, err := store.DiskSize()
 				require.NoError(b, err)
 				if before > after {

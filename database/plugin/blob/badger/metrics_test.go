@@ -25,12 +25,13 @@ func TestRegisterBlobMetricsReusesSharedGCCollectors(t *testing.T) {
 	second.registerBlobMetrics()
 
 	first.gcMetrics.attempts.Inc()
-	require.Same(t, first.gcMetrics.attempts, second.gcMetrics.attempts)
 	require.Equal(
 		t,
 		float64(1),
-		testutil.ToFloat64(second.gcMetrics.attempts),
+		testutil.ToFloat64(first.gcMetrics.attempts),
 	)
+	second.gcMetrics.attempts.Inc()
+	require.Equal(t, float64(1), testutil.ToFloat64(second.gcMetrics.attempts))
 }
 
 func TestRegisterBlobMetricsAllowsLabelWrappedReuse(t *testing.T) {
@@ -44,6 +45,10 @@ func TestRegisterBlobMetricsAllowsLabelWrappedReuse(t *testing.T) {
 
 	first.registerBlobMetrics()
 	require.NotPanics(t, second.registerBlobMetrics)
-	first.gcMetrics.attempts.Inc()
-	require.Equal(t, float64(1), testutil.ToFloat64(first.gcMetrics.attempts))
+	second.gcMetrics.attempts.Inc()
+	count, err := testutil.GatherAndCount(registry,
+		"database_blob_gc_attempts_total")
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+	require.Equal(t, float64(1), testutil.ToFloat64(second.gcMetrics.attempts))
 }
