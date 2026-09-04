@@ -71,6 +71,7 @@ func TestDatabaseSourceGetEpochData(t *testing.T) {
 	require.NoError(t, sqlDB.Create(&models.EpochSummary{
 		Epoch:            5,
 		TotalActiveStake: types.Uint64(123_456_789),
+		BoundarySlot:     4_320_000,
 		SnapshotReady:    true,
 	}).Error)
 	require.NoError(t, sqlDB.Create(&models.RewardAdaPots{
@@ -93,6 +94,7 @@ func TestDatabaseSourceGetEpochData(t *testing.T) {
 	require.Equal(t, "2000", data.Reserves)
 	require.Equal(t, "3000", data.Fees)
 	require.Equal(t, "4000", data.TotalRewards)
+	require.Equal(t, uint64(4_320_000), data.BoundarySlot)
 }
 
 // TestDatabaseSourceGetEpochDataMissingOrNotReady covers both "no row at
@@ -411,5 +413,63 @@ func TestDatabaseSourceGetPoolEpochDataMapTracksChangingPoolParams(
 		blocksAtParamEpoch,
 		data.BlocksProduced,
 		"blocks_produced still comes from the param epoch",
+	)
+}
+
+// TestDatabaseSourceGetPoolsRetiredByEpoch proves the in-process source
+// resolves departure the same way DingoDB's raw-SQL twin does, including the
+// case that makes "a retirement certificate exists" the wrong predicate: a
+// registration filed after the retirement puts the pool back. Both halves are
+// asserted from one seeding, so a query that simply returned every pool with
+// a retirement row would fail on the re-registered pool.
+func TestDatabaseSourceGetPoolsRetiredByEpoch(t *testing.T) {
+	const (
+		queryEpoch   = uint64(7)
+		boundarySlot = uint64(1_000)
+	)
+	db := newTestDatabaseSourceDB(t)
+	sqlDB := sourceSQLDB(t, db)
+
+	departed := testPoolKeyHash(t, 0x21)
+	reregistered := testPoolKeyHash(t, 0x22)
+	retiringLater := testPoolKeyHash(t, 0x23)
+
+	seed := func(keyHash []byte, regSlots []uint64, retSlot, retEpoch uint64) {
+		t.Helper()
+		raw, err := sqlDB.DB()
+		require.NoError(t, err)
+		res, err := raw.Exec(
+			`INSERT INTO pool (pool_key_hash) VALUES (?)`,
+			keyHash,
+		)
+		require.NoError(t, err)
+		poolID, err := res.LastInsertId()
+		require.NoError(t, err)
+		for _, slot := range regSlots {
+			require.NoError(t, sqlDB.Exec(`
+INSERT INTO pool_registration (pool_id, pool_key_hash, added_slot)
+VALUES (?, ?, ?)`, poolID, keyHash, slot).Error)
+		}
+		require.NoError(t, sqlDB.Exec(`
+INSERT INTO pool_retirement (pool_id, pool_key_hash, epoch, added_slot)
+VALUES (?, ?, ?, ?)`, poolID, keyHash, retEpoch, retSlot).Error)
+	}
+	seed(departed, []uint64{100}, 200, queryEpoch-2)
+	seed(reregistered, []uint64{100, 300}, 200, queryEpoch-2)
+	seed(retiringLater, []uint64{100}, 200, queryEpoch+1)
+
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	retired, err := source.GetPoolsRetiredByEpoch(
+		context.Background(),
+		queryEpoch,
+		boundarySlot,
+	)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		map[string]struct{}{hex.EncodeToString(departed): {}},
+		retired,
 	)
 }

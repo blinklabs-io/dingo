@@ -340,13 +340,30 @@ func koiosStakeEpoch(koiosEpoch uint64) (epoch uint64, ok bool) {
 // at this offset: a mark snapshot records the pool parameters as of its own
 // boundary, so Margin/FixedCost belong with the stake epoch (dingo #3484).
 // See koiosStakeEpoch's doc comment and ARCHITECTURE.md.
-// poolDepartedAtParamEpoch reports whether keyHex is provably absent from the
-// K+1 pool set. It is false whenever membership could not be established, so
-// an unresolved read never downgrades a missing reward-input row from ERROR.
+// poolDepartedAtParamEpoch reports whether keyHex provably left the pool set
+// by K+1, from either of two independent routes.
+//
+// retiredByParamEpoch is per-pool certificate evidence: the pool's latest
+// certificate as of the K+1 boundary is a retirement effective at or before
+// it. That is a positive fact about this pool alone, so unlike the pool-set
+// route it needs no argument that some set was completely recorded, and it
+// survives the snapshot retention window a trailing observer runs behind
+// (dingo #3925).
+//
+// paramEpochPools is the pool-set route: absence from a set already
+// established as complete. It is checked second because absence only means
+// anything once completeness holds.
+//
+// Both are false whenever the evidence could not be established, so an
+// unresolved read never downgrades a missing reward-input row from ERROR.
 func poolDepartedAtParamEpoch(
 	paramEpochPools map[string]struct{},
+	retiredByParamEpoch map[string]struct{},
 	keyHex string,
 ) bool {
+	if _, retired := retiredByParamEpoch[keyHex]; retired {
+		return true
+	}
 	if len(paramEpochPools) == 0 {
 		return false
 	}
@@ -538,6 +555,7 @@ func checkEpoch(
 	// dingo_db_missing classification (dingo #3485).
 	var paramEpochPools map[string]struct{}
 	var declaredParamPools uint64
+	var paramBoundarySlot uint64
 	paramSummary, sErr := dingo.GetEpochData(ctx, paramEpoch)
 	switch {
 	case sErr != nil:
@@ -552,6 +570,7 @@ func checkEpoch(
 		// No ready summary, so no declared count to verify against.
 	default:
 		declaredParamPools = paramSummary.TotalPoolCount
+		paramBoundarySlot = paramSummary.BoundarySlot
 	}
 	members, membersErr := dingo.GetPoolStakeSnapshotMembers(ctx, paramEpoch)
 	switch {
@@ -614,6 +633,39 @@ func checkEpoch(
 			)
 		}
 	}
+	// Both pool-set routes above reconstruct the whole K+1 pool set and read
+	// departure as absence from it, which is why each needs its own
+	// completeness argument and why both can be closed off at once: the mark
+	// rows are pruned to currentEpoch-3, and reward_pool_input is short of
+	// the declared count whenever a degraded active pool was omitted from it.
+	// Certificate history answers the same question per pool instead. A
+	// retirement effective at or before K+1 that no later registration
+	// cancelled is direct evidence this pool left, and
+	// pool_registration/pool_retirement are retained for the life of the
+	// database. Resolved once per epoch, and only against the K+1 summary's
+	// own boundary slot -- without one there is no point in the chain to
+	// resolve each pool's latest certificate as of, so the route stays
+	// closed and the stricter classification stands (dingo #3925).
+	var retiredByParamEpoch map[string]struct{}
+	if paramBoundarySlot > 0 {
+		retired, rErr := dingo.GetPoolsRetiredByEpoch(
+			ctx,
+			paramEpoch,
+			paramBoundarySlot,
+		)
+		if rErr != nil {
+			logger.Debug(
+				"koiosparity: could not resolve param-epoch retirements",
+				"network", network,
+				"epoch", epoch,
+				"param_epoch", paramEpoch,
+				"boundary_slot", paramBoundarySlot,
+				"error", rErr,
+			)
+		} else {
+			retiredByParamEpoch = retired
+		}
+	}
 	if dingoPoolErr != nil {
 		// Record the DB failure and skip all per-pool comparisons.
 		// Continuing with dingoPoolMap == nil would make every Koios pool appear
@@ -670,7 +722,11 @@ func checkEpoch(
 				now,
 				graceHours,
 				epochEndTime,
-				poolDepartedAtParamEpoch(paramEpochPools, keyHex),
+				poolDepartedAtParamEpoch(
+					paramEpochPools,
+					retiredByParamEpoch,
+					keyHex,
+				),
 			)
 			allMismatches = append(allMismatches, poolMismatches...)
 

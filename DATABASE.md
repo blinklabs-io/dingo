@@ -2535,6 +2535,75 @@ when that account is missing or inactive. Both writes are slot-keyed (the
 `account_reward_delta` journal and the boundary `network_state` row), so a
 rollback past the boundary reverts them and re-application is deterministic.
 
+### `GetPoolKeyHashesRetiredByEpoch`
+
+Key hashes of pools whose effective retirement had already taken effect by a
+given epoch. Same latest-certificate resolution and same cancellation rule as
+`GetPoolsRetiringAtEpoch` — a pool is included only when, as of the boundary
+slot, its latest certificate is a retirement and no later registration
+supersedes it — but the epoch comparison is `<=` rather than `=`, and no
+registration columns are selected because no deposit refund is being applied.
+
+The two queries answer different questions. `GetPoolsRetiringAtEpoch` asks
+which pools leave at one exact boundary, which is what POOLREAP needs. This one
+asks which pools had already left by an epoch, which is what the Koios parity
+checker needs when it reaches an epoch long after the node passed it. The
+distinction matters because a pool that retired effective epoch 243 is still
+departed at 244 and 245, and `= $epoch` matches none of those later epochs.
+
+`pool_registration` and `pool_retirement` are retained for the life of the
+database, while `pool_stake_snapshot` is pruned to `currentEpoch - 3` by
+`Manager.cleanupOldSnapshots`. That is why this query, and not a pool-set
+membership read, is the departure evidence available to an observer running
+behind the node. Backends differ only in identifier quoting (`"transaction"` on
+SQLite/Postgres, `` `transaction` `` on MySQL).
+
+```sql
+WITH latest_reg AS (
+  SELECT pr.pool_id, pr.added_slot,
+    COALESCE(t.block_index, 0) AS blk_idx,
+    COALESCE(c.cert_index, 0)  AS cert_idx,
+    ROW_NUMBER() OVER (
+      PARTITION BY pr.pool_id
+      ORDER BY pr.added_slot DESC, COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
+    ) AS rn
+  FROM pool_registration pr
+  LEFT JOIN certs c ON c.id = pr.certificate_id
+  LEFT JOIN "transaction" t ON t.id = c.transaction_id
+  WHERE pr.added_slot < $boundarySlot
+),
+latest_ret AS (
+  SELECT rt.pool_id, rt.added_slot, rt.epoch,
+    COALESCE(t.block_index, 0) AS blk_idx,
+    COALESCE(c.cert_index, 0)  AS cert_idx,
+    ROW_NUMBER() OVER (
+      PARTITION BY rt.pool_id
+      ORDER BY rt.added_slot DESC, COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
+    ) AS rn
+  FROM pool_retirement rt
+  LEFT JOIN certs c ON c.id = rt.certificate_id
+  LEFT JOIN "transaction" t ON t.id = c.transaction_id
+  WHERE rt.added_slot < $boundarySlot
+)
+SELECT p.pool_key_hash
+FROM pool p
+INNER JOIN latest_reg lr  ON lr.pool_id = p.id  AND lr.rn = 1
+INNER JOIN latest_ret lrt ON lrt.pool_id = p.id AND lrt.rn = 1
+WHERE lrt.epoch <= $epoch
+  AND NOT (
+    lrt.added_slot < lr.added_slot
+    OR (lrt.added_slot = lr.added_slot AND lrt.blk_idx < lr.blk_idx)
+    OR (lrt.added_slot = lr.added_slot AND lrt.blk_idx = lr.blk_idx AND lrt.cert_idx < lr.cert_idx)
+  );
+```
+
+The Koios parity checker reaches this through `RewardParitySource`, which has
+two implementations: `DatabaseSource` calls this store method directly, and the
+standalone-CLI `DingoDB` runs the same SQL against a separately synced metadata
+database. Both feed `poolDepartedAtParamEpoch`, which treats membership in this
+result as proof of departure and so downgrades a missing K+1 `reward_pool_input`
+row from `dingo_db_missing` to the informational `pool_departed`.
+
 ### `GetMIRCertsInSlotRange`
 
 MIR certificates for the epoch range `[startSlot, endSlot)`, applied at the epoch boundary as the Shelley INSTANT rule. Distribution certs (`other_pot = 0`) credit registered reward accounts and debit the source pot in `network_state`; pot-to-pot transfer certs (`other_pot > 0`) move that amount between treasury and reserves. Every cert in the range is aggregated before any is applied: distribution totals count only credentials with a registered, active account, transfers are folded into the available pot balances, and the boundary writes a single `network_state` row. If either pot cannot cover its total the boundary is a no-op rather than an error, so an over-budget cert cannot fail the epoch rollover on every retry. The `mir.id` value is retained by the processed effect as the per-MIR reward-credit discriminator so multiple MIR certs can credit the same account at one boundary without collapsing into one `account_reward_delta` row.

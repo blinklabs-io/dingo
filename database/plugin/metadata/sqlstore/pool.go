@@ -1911,6 +1911,90 @@ WHERE ret.epoch = ?
 	return ret, rows.Err()
 }
 
+// GetPoolKeyHashesRetiredByEpoch is GetPoolsRetiringAtEpoch's "at or before"
+// sibling: same latest-certificate resolution and same cancellation rule, but
+// it matches every retirement effective up to and including epoch rather than
+// only the one landing on it, and returns bare key hashes because no deposit
+// refund is being applied. See MetadataStore's doc comment for why the parity
+// checker needs the wider comparison (dingo #3925).
+func (s *Store) GetPoolKeyHashesRetiredByEpoch(
+	epoch uint64,
+	boundarySlot uint64,
+	txn types.Txn,
+) ([][]byte, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetPoolKeyHashesRetiredByEpoch: resolve db: %w",
+			err,
+		)
+	}
+	rows, err := db.QueryContext(ctx, `
+WITH latest_reg AS (
+    SELECT pr.pool_id, pr.added_slot,
+           COALESCE(t.block_index, 0) block_index,
+           COALESCE(c.cert_index, 0) cert_index,
+           ROW_NUMBER() OVER (
+               PARTITION BY pr.pool_id
+               ORDER BY pr.added_slot DESC,
+                        COALESCE(t.block_index, 0) DESC,
+                        COALESCE(c.cert_index, 0) DESC
+           ) rn
+    FROM pool_registration pr
+    LEFT JOIN certs c ON c.id = pr.certificate_id
+    LEFT JOIN "transaction" t ON t.id = c.transaction_id
+    WHERE pr.added_slot < ?
+),
+latest_ret AS (
+    SELECT rt.pool_id, rt.added_slot, rt.epoch,
+           COALESCE(t.block_index, 0) block_index,
+           COALESCE(c.cert_index, 0) cert_index,
+           ROW_NUMBER() OVER (
+               PARTITION BY rt.pool_id
+               ORDER BY rt.added_slot DESC,
+                        COALESCE(t.block_index, 0) DESC,
+                        COALESCE(c.cert_index, 0) DESC
+           ) rn
+    FROM pool_retirement rt
+    LEFT JOIN certs c ON c.id = rt.certificate_id
+    LEFT JOIN "transaction" t ON t.id = c.transaction_id
+    WHERE rt.added_slot < ?
+)
+SELECT p.pool_key_hash
+FROM pool p
+JOIN latest_reg reg ON reg.pool_id = p.id AND reg.rn = 1
+JOIN latest_ret ret ON ret.pool_id = p.id AND ret.rn = 1
+WHERE ret.epoch <= ?
+  AND NOT (
+      ret.added_slot < reg.added_slot
+      OR (ret.added_slot = reg.added_slot
+          AND ret.block_index < reg.block_index)
+      OR (ret.added_slot = reg.added_slot
+          AND ret.block_index = reg.block_index
+          AND ret.cert_index < reg.cert_index)
+  )`,
+		boundarySlot,
+		boundarySlot,
+		epoch,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetPoolKeyHashesRetiredByEpoch: query pools: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+	ret := [][]byte{}
+	for rows.Next() {
+		var poolKeyHash []byte
+		if err := rows.Scan(&poolKeyHash); err != nil {
+			return nil, err
+		}
+		ret = append(ret, poolKeyHash)
+	}
+	return ret, rows.Err()
+}
+
 func (s *Store) RestorePoolStateAtSlot(
 	slot uint64,
 	txn types.Txn,
