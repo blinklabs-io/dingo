@@ -1936,6 +1936,7 @@ func TestPrecomputedStakeRewardsFinalEligibilityDoesNotMergeCredentialTags(
 	)
 	poolKey := rewardCalcHash(0x4a)
 	sharedStakeHash := rewardCalcHash(0x77)
+	blocksProduced, totalBlocks := uint64(10), uint64(10)
 	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
@@ -1993,6 +1994,8 @@ WHERE epoch = ? AND snapshot_type = 'mark'`,
 			DelegatedStake:             1_000,
 			OwnerStake:                 0,
 			DelegatorCount:             1,
+			BlocksProduced:             &blocksProduced,
+			TotalBlocksInEpoch:         &totalBlocks,
 			CapturedSlot:               100,
 			BoundarySlot:               100,
 		},
