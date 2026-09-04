@@ -1424,7 +1424,7 @@ func (m *Mempool) removeExpiredTransactions() {
 	expiredHashes := make(map[string]struct{})
 	for _, tx := range m.transactions {
 		if now.Sub(tx.LastSeen) > m.transactionTTL {
-			m.logger.Debug(
+			m.logger.Info(
 				"removing expired transaction",
 				"component", "mempool",
 				"tx_hash", tx.Hash,
