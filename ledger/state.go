@@ -1062,6 +1062,14 @@ type LedgerState struct {
 	// production; tests use it to hold the exact post-commit/pre-publication
 	// window without relying on scheduler timing.
 	beforeTransactionApplyPublish func()
+	// beforeReadResultDoneSignal is a test-only hook called once per
+	// ledgerProcessBlocksFromSource outer-loop pass, immediately before that
+	// pass decides whether to signal the current readChainResult's done
+	// channel (see the cachedNextBatch handling there). Nil in production;
+	// tests use it to deterministically observe, at each pass boundary,
+	// that done has not yet been signalled -- without racing a separate
+	// goroutine against the pipeline's own progress.
+	beforeReadResultDoneSignal func()
 
 	// replayMu serializes replayWG.Add with Close's replayWG.Wait to
 	// prevent Add-after-Wait panics from the TOCTOU race between
@@ -5144,6 +5152,14 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				return nil
 			}, true)
 			if err != nil {
+				// This runs on the pass after a boundary-crossing batch
+				// deferred its remainder to cachedNextBatch, which (per the
+				// cachedNextBatch != nil branch below) leaves
+				// currentReadResultDone live rather than already closed.
+				// Without this, a rollover failure here would return
+				// without ever signalling the reader goroutine, which
+				// would then block on <-result.done forever.
+				completeReadResult()
 				return fmt.Errorf("process epoch rollover: %w", err)
 			}
 
@@ -6005,6 +6021,9 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 		// result. Only signal the reader goroutine once that remainder is
 		// nil too, so the signal represents the whole original result being
 		// processed, not just the pre-boundary chunk of it.
+		if ls.beforeReadResultDoneSignal != nil {
+			ls.beforeReadResultDoneSignal()
+		}
 		if cachedNextBatch == nil {
 			completeReadResult()
 		}

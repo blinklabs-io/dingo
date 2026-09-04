@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -438,6 +439,15 @@ func TestByronShelleyBoundaryProcessesFirstShelleyBlockWithPParams(
 // firstShelley is ever applied -- previously told the reader goroutine this
 // result was fully consumed while the tip was still at the pre-boundary
 // block, letting it start gathering and decoding the next raw batch early.
+//
+// firstShelley carries no transactions, so the existing
+// beforeTransactionApplyPublish hook (gated on having transaction events to
+// publish) never fires for it and can't be used to pin this timing. Instead
+// this test uses the dedicated beforeReadResultDoneSignal hook, which fires
+// unconditionally once per outer-loop pass, to deterministically pause the
+// pipeline goroutine at each pass boundary and assert on done's state there
+// -- rather than racing a separate observer goroutine against the
+// pipeline's own progress after done closes.
 func TestByronShelleyBoundaryDefersReadResultDoneUntilCachedBatchApplied(
 	t *testing.T,
 ) {
@@ -452,30 +462,149 @@ func TestByronShelleyBoundaryDefersReadResultDoneUntilCachedBatchApplied(
 	}
 	close(results)
 
-	slotAtDone := make(chan uint64, 1)
+	requireDoneNotYetClosed := func(msg string) {
+		t.Helper()
+		select {
+		case <-done:
+			t.Fatal(msg)
+		default:
+		}
+	}
+
+	// passReached/releasePass rendezvous with the pipeline goroutine inside
+	// beforeReadResultDoneSignal: once a receive on passReached completes,
+	// the pipeline goroutine's only next step is to block on releasePass
+	// (see beforeReadResultDoneSignal's body below), so it is guaranteed to
+	// not yet have run completeReadResult() for this pass.
+	passReached := make(chan struct{})
+	releasePass := make(chan struct{})
+	ls.beforeReadResultDoneSignal = func() {
+		passReached <- struct{}{}
+		<-releasePass
+	}
+
+	processDone := make(chan error, 1)
 	go func() {
-		<-done
-		ls.RLock()
-		defer ls.RUnlock()
-		slotAtDone <- ls.currentTip.Point.Slot
+		processDone <- ls.ledgerProcessBlocksFromSource(
+			context.Background(),
+			results,
+		)
 	}()
 
-	require.NoError(t, ls.ledgerProcessBlocksFromSource(
-		context.Background(),
-		results,
-	))
+	// Pass 1: discovers the epoch boundary and defers firstShelley into
+	// cachedNextBatch without applying it.
+	testutil.RequireReceive(
+		t, passReached, 2*time.Second,
+		"pass 1 (boundary discovery) never reached the done-signal hook",
+	)
+	requireDoneNotYetClosed(
+		"done must not fire after only the boundary-discovery pass",
+	)
+	releasePass <- struct{}{}
+
+	// Pass 2: runs the epoch/era rollover and then actually applies
+	// firstShelley.
+	testutil.RequireReceive(
+		t, passReached, 2*time.Second,
+		"pass 2 (cached-batch apply) never reached the done-signal hook",
+	)
+	ls.RLock()
+	appliedSlot := ls.currentTip.Point.Slot
+	ls.RUnlock()
+	require.Equal(
+		t,
+		firstShelley.SlotNumber(),
+		appliedSlot,
+		"firstShelley must already be applied by the time the second "+
+			"pass reaches the done-signal hook",
+	)
+	requireDoneNotYetClosed(
+		"done must not fire until the pass that actually applied the " +
+			"deferred block finishes",
+	)
+	releasePass <- struct{}{}
+
+	require.NoError(t, <-processDone)
 
 	select {
-	case observed := <-slotAtDone:
-		assert.Equal(
-			t,
-			firstShelley.SlotNumber(),
-			observed,
-			"done must not fire until the deferred cached batch "+
-				"(firstShelley) is actually applied, not merely discovered",
-		)
-	case <-time.After(5 * time.Second):
+	case <-done:
+	case <-time.After(2 * time.Second):
 		t.Fatal("readChainResult.done was never closed")
+	}
+}
+
+// TestByronShelleyBoundaryClosesReadResultDoneOnEpochRolloverFailure is a
+// regression test for a deadlock the cachedNextBatch fix above could
+// otherwise introduce: once a boundary-crossing batch defers its remainder
+// to cachedNextBatch, currentReadResultDone is deliberately left open (not
+// closed) across the pass boundary -- see the "cachedNextBatch != nil"
+// branch and the completeReadResult() guard in
+// ledgerProcessBlocksFromSource. If the epoch/era rollover that runs at the
+// top of the next pass then fails, the function returns before that guard
+// ever runs, and would leave the read-chain reader goroutine blocked on
+// <-result.done forever.
+//
+// This forces that exact rollover failure (by clearing CardanoNodeConfig,
+// which processEpochRollover checks first) after firstShelley's boundary
+// crossing has already deferred it to cachedNextBatch, and asserts that
+// ledgerProcessBlocksFromSource still signals done before returning its
+// error.
+func TestByronShelleyBoundaryClosesReadResultDoneOnEpochRolloverFailure(
+	t *testing.T,
+) {
+	ls, _, firstShelley := newByronShelleyBoundaryLedger(t)
+	require.True(t, ls.validationEnabled)
+
+	results := make(chan readChainResult, 1)
+	done := make(chan struct{})
+	results <- readChainResult{
+		blocks: []gledger.Block{firstShelley},
+		done:   done,
+	}
+	close(results)
+
+	passReached := make(chan struct{})
+	releasePass := make(chan struct{})
+	ls.beforeReadResultDoneSignal = func() {
+		passReached <- struct{}{}
+		<-releasePass
+	}
+
+	processDone := make(chan error, 1)
+	go func() {
+		processDone <- ls.ledgerProcessBlocksFromSource(
+			context.Background(),
+			results,
+		)
+	}()
+
+	// Pass 1: discovers the epoch boundary and defers firstShelley into
+	// cachedNextBatch. Break processEpochRollover for the pass that
+	// follows, right before releasing it -- ensureReferencedEndorserBlocks
+	// and the rest of pass 1 don't touch CardanoNodeConfig for this
+	// single-block batch, so clearing it here only affects pass 2.
+	testutil.RequireReceive(
+		t, passReached, 2*time.Second,
+		"pass 1 (boundary discovery) never reached the done-signal hook",
+	)
+	ls.config.CardanoNodeConfig = nil
+	releasePass <- struct{}{}
+
+	err := testutil.RequireReceive(
+		t, processDone, 2*time.Second,
+		"ledgerProcessBlocksFromSource never returned after the forced "+
+			"epoch-rollover failure",
+	)
+	require.ErrorContains(t, err, "process epoch rollover")
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal(
+			"readChainResult.done was left open after an epoch-rollover " +
+				"failure, which would block the read-chain reader goroutine " +
+				"forever",
+		)
 	}
 }
 
