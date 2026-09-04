@@ -409,3 +409,29 @@ func TestSeedImportedRewardInputsSkipsEpochsWithNoParamsWindow(t *testing.T) {
 			"epoch %d is derivable and must still be seeded", epoch)
 	}
 }
+
+func TestSeedImportedRewardInputsPreservesFailureForEmptyBundle(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+
+	txn := db.MetadataTxn(true)
+	require.NoError(t, seedImportedRewardInputs(
+		db.Metadata(),
+		txn.Metadata(),
+		&ParsedSnapShots{
+			Mark: ParsedSnapShot{},
+			Set:  ParsedSnapShot{},
+			Go:   ParsedSnapShot{},
+		},
+		nil,
+		nil,
+		2,
+		100,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	))
+	require.NoError(t, txn.Commit())
+
+	reason, err := db.Metadata().GetRewardSeedFailure(2, "mark", nil)
+	require.NoError(t, err)
+	require.Equal(t, "derived reward basis contains no pool inputs", reason)
+}

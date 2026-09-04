@@ -194,7 +194,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 9)
+	require.Len(t, registry, 10)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

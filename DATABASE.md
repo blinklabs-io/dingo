@@ -1011,7 +1011,7 @@ Pruned at `epoch < current-3`:
 
 Retained for the life of the database: `epoch`, `epoch_summary`,
 `reward_ada_pots`, `reward_snapshot`, `reward_seed_failure`, `reward_pool_input`, and
-`reward_pool_output`. The first four are one row per epoch and the last two are
+`reward_pool_output`. The first five are one row per epoch and the last two are
 roughly one row per pool per epoch, so full history is on the order of a few
 hundred thousand rows on a test network and a few million on mainnet. Only the
 two per-credential tables scale with delegator count — about 5k rows per epoch on

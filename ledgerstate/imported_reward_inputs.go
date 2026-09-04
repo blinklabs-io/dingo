@@ -459,14 +459,14 @@ func seedImportedRewardInputs(
 				c.epoch, err,
 			)
 		}
-		if err := store.DeleteRewardSeedFailure(c.epoch, "mark", txn); err != nil {
-			return fmt.Errorf(
-				"clearing prior reward seed failure for epoch %d: %w",
-				c.epoch,
-				err,
-			)
-		}
 		if existing != nil && existing.Authoritative {
+			if err := store.DeleteRewardSeedFailure(c.epoch, "mark", txn); err != nil {
+				return fmt.Errorf(
+					"clearing prior reward seed failure for epoch %d: %w",
+					c.epoch,
+					err,
+				)
+			}
 			if logger != nil {
 				logger.Info(
 					"not seeding reward inputs for an imported epoch because an authoritative basis already exists",
@@ -550,6 +550,25 @@ func seedImportedRewardInputs(
 			0,
 		)
 		if bundle == nil || len(bundle.poolInputs) == 0 {
+			const reason = "derived reward basis contains no pool inputs"
+			if saveErr := store.SaveRewardSeedFailure(
+				c.epoch, "mark", reason, capturedSlot, txn,
+			); saveErr != nil {
+				return fmt.Errorf(
+					"saving reward seed failure for epoch %d: %w",
+					c.epoch,
+					saveErr,
+				)
+			}
+			if logger != nil {
+				logger.Warn(
+					"not seeding reward inputs for an imported epoch: the derived basis contains no pool inputs, so that epoch's reward round will be skipped and its rewards never credited",
+					"component", "ledgerstate",
+					"epoch", c.epoch,
+					"snapshot", c.name,
+					"error", reason,
+				)
+			}
 			continue
 		}
 		if err := bundle.validate(); err != nil {
