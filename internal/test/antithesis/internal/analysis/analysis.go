@@ -399,7 +399,7 @@ func (a *Analyzer) reportSafetyAssertions(snap *MetricsSnapshot) {
 		len(snap.ChainTipByNode) >= 2 {
 		if minTip, maxTip, ok := chainTipRange(snap.ChainTipByNode); ok {
 			lag := maxTip - minTip
-			Always(lag <= uint64(a.cfg.MaxForkDepth), "chain-tip-lag", map[string]interface{}{
+			Always(lag <= uint64(a.cfg.MaxForkDepth), "chain-tip-lag", map[string]interface{}{ //nolint:gosec // LoadConfig validates MaxForkDepth as positive.
 				"min_tip":        minTip,
 				"max_tip":        maxTip,
 				"lag":            lag,
