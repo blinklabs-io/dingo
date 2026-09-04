@@ -658,7 +658,8 @@ func (s *Store) GetLastBlockNonceInRange(
 	return nonce, err
 }
 
-// GetLatestBlockNonce returns the highest-slot nonce row. The nonce is
+// GetLatestBlockNonce returns the highest-slot nonce row, using its ID to
+// preserve application order when multiple blocks share a slot. The nonce is
 // written in the same metadata transaction as the corresponding ledger
 // effects, so this row is the durable ledger-state high-water mark.
 func (s *Store) GetLatestBlockNonce(
@@ -671,7 +672,7 @@ func (s *Store) GetLatestBlockNonce(
 	row := db.QueryRowContext(ctx,
 		`SELECT hash, nonce, id, slot, is_checkpoint
 		 FROM block_nonce
-		 ORDER BY slot DESC, hash DESC
+		 ORDER BY slot DESC, id DESC
 		 LIMIT 1`,
 	)
 	var ret models.BlockNonce

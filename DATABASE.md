@@ -1362,16 +1362,18 @@ heal remains idempotent and uses the primary chain index so retained fork blobs
 and synthetic endorser blobs are never folded.
 
 `GetLatestBlockNonce` returns the single highest-slot `block_nonce` row
-(`ORDER BY slot DESC, hash DESC LIMIT 1`). Because a `block_nonce` row is written
-in the same metadata transaction as its block's UTxO/certificate deltas and the
-ledger tip (`ledgerProcessBlocks`) and is trimmed from below by retention pruning
-(and from above, including competing same-slot hashes, when rollback removes an
-abandoned fork), that maximum slot is the authoritative high-water mark of
-durably applied ledger state for the surviving chain. The ledger uses it as the
-"durable applied floor" to detect and repair a slot-based rollback that left the
-in-memory `currentTip` above the applied state, and to anchor replay-recovery
-rollbacks at or below that floor. The row's `nonce` bytes are ignored by that
-path — only `(slot, hash)` are consumed as a rollback point.
+(`ORDER BY slot DESC, id DESC LIMIT 1`). The `id` tie-break preserves the order
+in which same-slot blocks were applied; the block hash is content identity, not
+application order. Because a `block_nonce` row is written in the same metadata
+transaction as its block's UTxO/certificate deltas and the ledger tip
+(`ledgerProcessBlocks`) and is trimmed from below by retention pruning (and from
+above, including competing same-slot hashes, when rollback removes an abandoned
+fork), that latest row is the authoritative high-water mark of durably applied
+ledger state for the surviving chain. The ledger uses it as the "durable applied
+floor" to detect and repair a slot-based rollback that left the in-memory
+`currentTip` above the applied state, and to anchor replay-recovery rollbacks at
+or below that floor. The row's `nonce` bytes are ignored by that path — only
+`(slot, hash)` are consumed as a rollback point.
 
 Whether the decoded endorser transactions are then applied to the ledger is
 selected by `LedgerStateConfig.LeiosApplyEndorserBlockTxs` (see
