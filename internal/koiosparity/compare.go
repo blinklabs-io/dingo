@@ -816,6 +816,14 @@ func aggregateKoiosAccountRewards(
 		if koiosAccountRewardTypesOutOfScope[r.RewardType] {
 			continue
 		}
+		if r.RewardType != "member" && r.RewardType != "leader" {
+			out = append(out, CheckMismatch{
+				Network: network, Epoch: epoch, StakeAddress: r.StakeAddress,
+				Field: "account_reward_type", KoiosValue: r.RewardType,
+				Category: CategoryDBError, CheckedAt: now,
+			})
+			continue
+		}
 		poolID, ok := normalizeAccountPoolID(r.PoolIDBech32)
 		if !ok {
 			out = append(out, malformedAccountPoolMismatch(

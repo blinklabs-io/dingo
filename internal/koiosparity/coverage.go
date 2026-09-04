@@ -375,14 +375,14 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Field:      "amount",
 		Class:      CoverageExactMatch,
 		DingoField: "reward_account_output.amount",
-		Reason:     "exact integer lovelace equality via lovelaceEqual, no rounding/sampling/tolerance",
+		Reason:     "exact integer equality on parsed aggregated (stake_address, reward_type) totals; no rounding/sampling/tolerance",
 	},
 	{
 		Endpoint:   "/account_reward_history",
 		Field:      "type",
 		Class:      CoverageExactMatch,
 		DingoField: "reward_account_output.reward_type",
-		Reason:     "member/leader rows are matched exactly; treasury/reserves/refund rows are out of scope, see koiosAccountRewardTypesOutOfScope",
+		Reason:     "member/leader rows are matched exactly after aggregation; treasury/reserves/refund rows are out of scope",
 	},
 	{
 		Endpoint:   "/account_reward_history",
