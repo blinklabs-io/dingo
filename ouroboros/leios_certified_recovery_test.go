@@ -164,16 +164,19 @@ func TestLeiosBackfillConnOrderPutsDeadConnectionsLast(t *testing.T) {
 	dead := namedConnId("dead")
 	cooled := namedConnId("cooled")
 	fresh := namedConnId("fresh")
+	deadGuard := &leiosFetchGuard{}
+	cooledGuard := &leiosFetchGuard{}
+	freshGuard := &leiosFetchGuard{}
 	guards := map[gouroboros.ConnectionId]*leiosFetchGuard{
-		dead:   {},
-		cooled: {},
-		fresh:  {},
+		dead:   deadGuard,
+		cooled: cooledGuard,
+		fresh:  freshGuard,
 	}
 	guardFor := func(id gouroboros.ConnectionId) *leiosFetchGuard {
 		return guards[id]
 	}
-	guards[dead].markProtocolDead()
-	guards[cooled].markFetchFailed(now, leiosBackfillConnCooldown)
+	deadGuard.markProtocolDead()
+	cooledGuard.markFetchFailed(now, leiosBackfillConnCooldown)
 
 	order := leiosBackfillConnOrder(
 		[]gouroboros.ConnectionId{dead, cooled, fresh},

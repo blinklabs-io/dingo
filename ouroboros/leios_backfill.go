@@ -215,9 +215,7 @@ func leiosBackfillAttemptBudget(
 		candidatesLeft = 1
 	}
 	share := remaining / time.Duration(candidatesLeft)
-	if share < leiosBackfillPerAttemptTimeout {
-		share = leiosBackfillPerAttemptTimeout
-	}
+	share = max(share, leiosBackfillPerAttemptTimeout)
 	return min(share, remaining)
 }
 
@@ -385,8 +383,8 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 			lastErr = err
 			switch classifyLeiosFetchFailure(err) {
 			case leiosFetchFailureNone:
-				// A nil error cannot reach this block; keep the switch
-				// exhaustive if the failure taxonomy gains new callers.
+				// classifyLeiosFetchFailure returns None only for nil errors;
+				// keep the explicit arm for the repository's exhaustive-switch check.
 				continue
 			case leiosFetchFailureBusy:
 				// Not an attempt: the connection was serving another fetch, so
