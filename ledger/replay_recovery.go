@@ -782,23 +782,21 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 	if securityParam <= 0 {
 		return chain.ErrSecurityParamNotConfigured
 	}
-	// Keep every Undo enqueue and its corresponding chain truncation atomic
-	// with respect to a block-apply commit's AfterCommit Apply publication.
-	ls.transactionEventMutex.Lock()
-	defer ls.transactionEventMutex.Unlock()
-	rollbackWindow := func(rollbackPoint ocommon.Point) error {
-		// Serialize the generation publication and chain mutation with
-		// blockfetch insertion. Deferred chain events are published only after
-		// releasing the mutex because delivery may backpressure.
-		ls.chainsyncBlockfetchMutex.Lock()
-		ls.chainRollbackGeneration.Add(1)
-		_, err := ls.chain.RollbackDeferred(rollbackPoint)
-		ls.chainsyncBlockfetchMutex.Unlock()
-		if err == nil {
+	// Match rollbackChainAndStateDeferred's lock order. Hold both locks for the
+	// complete windowed operation so every Undo enqueue and chain truncation is
+	// ordered against block-apply AfterCommit callbacks, including between
+	// intermediate windows. Chain updates are published after both locks are
+	// released because delivery may backpressure or re-enter synchronization.
+	var pendingChainUpdates bool
+	defer func() {
+		if pendingChainUpdates {
 			ls.chain.PublishPendingChainUpdates()
 		}
-		return err
-	}
+	}()
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
+	ls.transactionEventMutex.Lock()
+	defer ls.transactionEventMutex.Unlock()
 
 	targetIndex := uint64(0)
 	if point.Slot > 0 || len(point.Hash) > 0 {
@@ -838,12 +836,7 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 			)
 		}
 		nextPoint := ocommon.NewPoint(nextBlock.Slot, nextBlock.Hash)
-		// Validate, then emit undo events, before each window's
-		// truncation. This function's own doc comment notes the chain can
-		// move between reading the tip and rewinding to it, so the
-		// rejection here is reachable, not theoretical: emitting without
-		// it would tell subscribers to undo blocks the failed rewind
-		// leaves applied. See validateAndEmitRollbackUndo.
+		ls.chainRollbackGeneration.Add(1)
 		if err := ls.validateAndEmitRollbackUndo(nextPoint); err != nil {
 			return fmt.Errorf(
 				"rollback primary chain to intermediate point %d: %w",
@@ -851,21 +844,24 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 				err,
 			)
 		}
-		if err := rollbackWindow(nextPoint); err != nil {
+		if _, err := ls.chain.RollbackDeferred(nextPoint); err != nil {
 			return fmt.Errorf(
 				"rollback primary chain to intermediate point %d: %w",
 				nextIndex,
 				err,
 			)
 		}
+		pendingChainUpdates = true
 		tipIndex = nextIndex
 	}
+	ls.chainRollbackGeneration.Add(1)
 	if err := ls.validateAndEmitRollbackUndo(point); err != nil {
 		return fmt.Errorf("rollback primary chain to recovery point: %w", err)
 	}
-	if err := rollbackWindow(point); err != nil {
+	if _, err := ls.chain.RollbackDeferred(point); err != nil {
 		return fmt.Errorf("rollback primary chain to recovery point: %w", err)
 	}
+	pendingChainUpdates = true
 	return nil
 }
 
