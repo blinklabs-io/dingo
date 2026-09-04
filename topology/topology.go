@@ -26,6 +26,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 )
 
 // TopologyConfig represents a cardano-node topology config
@@ -165,10 +166,47 @@ func validatePeerSnapshotRelay(relay TopologyConfigP2PAccessPoint) error {
 	if uint64(relay.Port) > math.MaxUint16 {
 		return fmt.Errorf("port %d is outside the TCP port range", relay.Port)
 	}
-	if ip := net.ParseIP(relay.Address); ip != nil && ip.IsUnspecified() {
-		return fmt.Errorf("unspecified IP address %q is not a relay endpoint", relay.Address)
+	if ip := net.ParseIP(relay.Address); ip != nil {
+		if ip.IsUnspecified() {
+			return fmt.Errorf(
+				"unspecified IP address %q is not a relay endpoint",
+				relay.Address,
+			)
+		}
+		return nil
+	}
+	if !validPeerSnapshotHostname(relay.Address) {
+		return fmt.Errorf("address %q is not a valid DNS hostname", relay.Address)
 	}
 	return nil
+}
+
+func validPeerSnapshotHostname(host string) bool {
+	// DNS permits a trailing root label, but relay addresses must otherwise be
+	// plain hostnames. In particular, ports and IPv6 brackets belong to the
+	// separate endpoint fields and must not be smuggled into the host value.
+	if host == "" || len(host) > 254 || strings.TrimSpace(host) != host {
+		return false
+	}
+	host = strings.TrimSuffix(host, ".")
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 ||
+			label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, char := range label {
+			if (char >= 'a' && char <= 'z') ||
+				(char >= 'A' && char <= 'Z') ||
+				(char >= '0' && char <= '9') || char == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }
 
 func NewTopologyConfigFromFile(path string) (*TopologyConfig, error) {

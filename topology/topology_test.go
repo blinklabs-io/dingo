@@ -457,6 +457,67 @@ func TestPeerSnapshotConfigValidate(t *testing.T) {
 			},
 			wantErr: "is not a relay endpoint",
 		},
+		{
+			name: "valid IPv4 relay",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "192.0.2.1"
+			},
+		},
+		{
+			name: "valid IPv6 relay",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "2001:db8::1"
+			},
+		},
+		{
+			name: "valid fully-qualified hostname",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "relay.example.com."
+			},
+		},
+		{
+			name: "hostname includes port",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "relay.example:3001"
+			},
+			wantErr: "is not a valid DNS hostname",
+		},
+		{
+			name: "bracketed IPv6",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "[2001:db8::1]"
+			},
+			wantErr: "is not a valid DNS hostname",
+		},
+		{
+			name: "whitespace hostname",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = " relay.example.com "
+			},
+			wantErr: "is not a valid DNS hostname",
+		},
+		{
+			name: "hostname with empty label",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "relay..example.com"
+			},
+			wantErr: "is not a valid DNS hostname",
+		},
+		{
+			name: "hostname label exceeds boundary",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address =
+					strings.Repeat("a", 64) + ".example.com"
+			},
+			wantErr: "is not a valid DNS hostname",
+		},
+		{
+			name: "hostname has invalid character",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "relay_name.example.com"
+			},
+			wantErr: "is not a valid DNS hostname",
+		},
 	}
 
 	for _, tt := range tests {
