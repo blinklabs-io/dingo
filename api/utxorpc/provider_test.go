@@ -74,7 +74,19 @@ func resolveOnFreePortWithConfig(
 	extra map[string]any,
 ) *Utxorpc {
 	t.Helper()
-	deps := providerDeps(t)
+	return resolveOnFreePortWithDeps(t, host, providerDeps(t), extra)
+}
+
+// resolveOnFreePortWithDeps is resolveOnFreePortWithConfig with the
+// provider dependencies supplied by the caller, for tests that need a
+// specific shared Host to resolve a per-provider override against.
+func resolveOnFreePortWithDeps(
+	t *testing.T,
+	host *plugin.Host,
+	deps ProviderDependencies,
+	extra map[string]any,
+) *Utxorpc {
+	t.Helper()
 	var lastErr error
 	for range testutil.BindAttempts {
 		cfg := map[string]any{"port": freeLoopbackPort(t)}
@@ -190,28 +202,9 @@ func TestProviderHostOverridesSharedDefault(t *testing.T) {
 	deps := providerDeps(t)
 	deps.Host = "0.0.0.0"
 
-	var srv *Utxorpc
-	var lastErr error
-	for range testutil.BindAttempts {
-		resolved, err := plugin.Resolve[*Utxorpc](
-			t.Context(),
-			host,
-			plugin.CapabilityAPIUtxorpc,
-			"builtin",
-			map[string]any{
-				"port": freeLoopbackPort(t),
-				"host": "127.0.0.1",
-			},
-			deps,
-		)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		srv = resolved
-		break
-	}
-	require.NotNil(t, srv, "resolve utxorpc provider: %v", lastErr)
+	srv := resolveOnFreePortWithDeps(
+		t, host, deps, map[string]any{"host": "127.0.0.1"},
+	)
 
 	require.Equal(t, "127.0.0.1", srv.config.Host)
 }

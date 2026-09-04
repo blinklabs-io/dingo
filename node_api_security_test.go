@@ -266,9 +266,12 @@ func TestAPIListenersDefaultToLoopback(t *testing.T) {
 // opt-out an operator fronting Dingo with a proxy or a container network
 // needs, and that it does not disturb bindAddr.
 func TestWithAPIBindAddrWidensOnlyTheAPIListeners(t *testing.T) {
-	cfg := NewConfig(WithAPIBindAddr("0.0.0.0"))
+	// A non-default API address, so the bindAddr assertion below cannot
+	// pass by coincidence: if WithAPIBindAddr wrote through to BindAddr,
+	// BindAddr would read 192.0.2.20 rather than its own default.
+	cfg := NewConfig(WithAPIBindAddr("192.0.2.20"))
 
-	assert.Equal(t, "0.0.0.0", cfg.APIBindAddr())
+	assert.Equal(t, "192.0.2.20", cfg.APIBindAddr())
 	assert.Equal(t, "0.0.0.0", cfg.BindAddr())
 
 	cfg = NewConfig(WithBindAddr("192.0.2.10"))

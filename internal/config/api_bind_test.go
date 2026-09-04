@@ -166,6 +166,40 @@ func TestCORSAllowedOriginsWildcardStaysExplicit(t *testing.T) {
 	)
 }
 
+// TestAPIPluginHostFromPluginEnvironment asserts the generic plugin
+// environment reaches a provider's host override, so one listener can be
+// widened without a config file. docker-compose.yml depends on this path.
+func TestAPIPluginHostFromPluginEnvironment(t *testing.T) {
+	resetGlobalConfig()
+	unsetDebugBindAddrEnv(t)
+	unsetAPIExposureEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_PLUGINS_API_UTXORPC_CONFIG_HOST", "0.0.0.0")
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	cfg.ApplyDefaults()
+
+	// Only the named provider is widened; the shared default and the
+	// other two listeners stay on loopback.
+	require.Equal(t, DefaultAPIBindAddr, cfg.APIBindAddr)
+	require.Equal(
+		t,
+		"0.0.0.0",
+		cfg.APIListenHost(cfg.Plugins.API.Utxorpc),
+	)
+	require.Equal(
+		t,
+		DefaultAPIBindAddr,
+		cfg.APIListenHost(cfg.Plugins.API.Blockfrost),
+	)
+	require.Equal(
+		t,
+		DefaultAPIBindAddr,
+		cfg.APIListenHost(cfg.Plugins.API.Mesh),
+	)
+}
+
 // TestAPIPluginHostPerProviderOverride asserts a per-plugin host beats
 // the shared apiBindAddr default, so one listener can be exposed without
 // widening the other two.

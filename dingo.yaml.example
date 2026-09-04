@@ -9,9 +9,10 @@ bindAddr: "0.0.0.0"
 
 # Bind address for the Blockfrost, Mesh, and UTxO RPC listeners. Deliberately
 # independent of bindAddr and loopback by default: these listeners have
-# authentication disabled unless api.auth is configured, so exposing one is an
-# explicit decision. Override a single listener instead with that provider's
-# own plugins.api.<name>.config.host.
+# authentication disabled unless api.auth -- or that listener's own
+# plugins.api.<name>.config.auth -- is configured, so exposing one is an
+# explicit decision. Widen a single listener instead with that provider's own
+# plugins.api.<name>.config.host.
 # CLI: --api-bind-addr  Env: DINGO_API_BIND_ADDR
 apiBindAddr: "127.0.0.1"
 

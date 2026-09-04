@@ -86,6 +86,7 @@ func unsetDebugBindAddrEnv(t *testing.T) {
 func TestLoad_CompareFullStruct(t *testing.T) {
 	resetGlobalConfig()
 	unsetDebugBindAddrEnv(t)
+	unsetAPIExposureEnv(t)
 	yamlContent := `
 plugins:
   mempool:
@@ -266,6 +267,7 @@ func TestLoad_DAGMempoolProvider(t *testing.T) {
 func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	resetGlobalConfig()
 	unsetDebugBindAddrEnv(t)
+	unsetAPIExposureEnv(t)
 
 	// Without Config file
 	cfg, err := LoadConfig("")
