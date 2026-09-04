@@ -363,7 +363,7 @@ func TestNonFittingBodyStillRejectedWhenTipDidNotMove(t *testing.T) {
 	require.Len(t, f.ls.pendingBlockfetchEvents, 1)
 
 	f.ls.chainsyncBlockfetchMutex.Lock()
-	err := f.ls.flushPendingBlockfetchBlocks()
+	err := f.ls.flushPendingBlockfetchBlocksDeferred(nil)
 	f.ls.chainsyncBlockfetchMutex.Unlock()
 	require.NoError(t, err)
 
@@ -437,7 +437,7 @@ func TestDiscardedBodyDoesNotCountAsRangeProgress(t *testing.T) {
 	f.deliverForkABody(t)
 
 	f.ls.chainsyncBlockfetchMutex.Lock()
-	err := f.ls.flushPendingBlockfetchBlocks()
+	err := f.ls.flushPendingBlockfetchBlocksDeferred(nil)
 	f.ls.chainsyncBlockfetchMutex.Unlock()
 	require.NoError(t, err)
 

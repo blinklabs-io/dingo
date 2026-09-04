@@ -3474,13 +3474,6 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	return nil
 }
 
-func (ls *LedgerState) rollbackChain(point ocommon.Point) error {
-	ls.chainsyncBlockfetchMutex.Lock()
-	defer ls.chainsyncBlockfetchMutex.Unlock()
-	ls.chainRollbackGeneration.Add(1)
-	return ls.chain.Rollback(point)
-}
-
 // processChainIteratorRollback applies a rollback emitted by the primary
 // chain iterator. Iterator rollbacks can lag behind live blockfetch/
 // chainsync activity: by the time this runs, the primary chain may have

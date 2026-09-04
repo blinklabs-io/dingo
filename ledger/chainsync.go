@@ -4690,10 +4690,6 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 	return nil
 }
 
-func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
-	return ls.flushPendingBlockfetchBlocksDeferred(nil)
-}
-
 // GenesisBlockHash returns the Byron genesis hash from config, which is used
 // as the block hash for the synthetic genesis block that holds genesis UTxO data.
 // This mirrors how the Shelley epoch nonce uses the Shelley genesis hash.
