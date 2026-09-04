@@ -260,8 +260,8 @@ func TestShouldPublishHeader_DivergenceKeepsForkHandling(t *testing.T) {
 
 // --- Failover does not strand ingestion ---
 
-// When the active/primary peer disconnects, the remaining eligible peer is
-// promoted and can drive ingestion (primary replays apply to the new active).
+// When the active/primary peer disconnects, an unselected remaining peer can
+// still publish a new header so ChainSelector can evaluate and select it.
 func TestShouldPublishHeader_PrimaryFailoverDoesNotStrand(t *testing.T) {
 	bus := newTestEventBus(t)
 	cfg := chainsync.DefaultConfig()
@@ -274,11 +274,11 @@ func TestShouldPublishHeader_PrimaryFailoverDoesNotStrand(t *testing.T) {
 	require.True(t, s.AddClientConnId(connB))
 	s.SetClientConnId(connA)
 
-	// The active peer disconnects; B should be promoted.
+	// The active peer disconnects; B remains unselected until ChainSelector has
+	// observed a tip from it.
 	s.RemoveClientConnId(connA)
 	active := s.GetClientConnId()
-	require.NotNil(t, active)
-	require.Equal(t, connB, *active)
+	require.Nil(t, active)
 
 	// Ingestion continues from the remaining peer.
 	point := ocommon.NewPoint(200, []byte("hash-2"))

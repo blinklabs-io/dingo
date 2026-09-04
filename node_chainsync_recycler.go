@@ -169,10 +169,31 @@ func (n *Node) handleChainSwitchEvent(evt event.Event) {
 	if n.chainsyncState == nil {
 		return
 	}
+	if n.chainSelector != nil {
+		best := n.chainSelector.GetBestPeer()
+		if best == nil || *best != e.NewConnectionId {
+			n.config.logger.Debug(
+				"ignoring stale chain switch superseded by selection",
+				"new_connection", e.NewConnectionId.String(),
+			)
+			return
+		}
+	}
 	prevConn := "(none)"
 	if e.PreviousConnectionId.LocalAddr != nil &&
 		e.PreviousConnectionId.RemoteAddr != nil {
 		prevConn = e.PreviousConnectionId.String()
+	}
+	// Peer switches only change which already-running chainsync stream feeds
+	// the ledger. Restarting chainsync here re-enters FindIntersect and can
+	// race the protocol state machine under load.
+	if !n.chainsyncState.TrySetClientConnId(e.NewConnectionId) {
+		n.config.logger.Debug(
+			"ignoring stale chain switch for unavailable connection",
+			"previous_connection", prevConn,
+			"new_connection", e.NewConnectionId.String(),
+		)
+		return
 	}
 	n.config.logger.Info(
 		"chain switch: updating active connection",
@@ -181,16 +202,11 @@ func (n *Node) handleChainSwitchEvent(evt event.Event) {
 		"new_tip_block", e.NewTip.BlockNumber,
 		"new_tip_slot", e.NewTip.Point.Slot,
 	)
-	// Peer switches only change which already-running chainsync stream feeds
-	// the ledger. Restarting chainsync here re-enters FindIntersect and can
-	// race the protocol state machine under load.
-	n.chainsyncState.SetClientConnId(e.NewConnectionId)
 }
 
-// handleChainSelectedNoneEvent logs a selected-to-none transition. Chain
-// selection has stalled with no eligible/corroborated peer; under Genesis
-// corroboration the stalled source's blocks are already withheld from the ledger
-// by the ChainsyncApplyEligible gate, so this is observability only.
+// handleChainSelectedNoneEvent clears the previous active connection after a
+// selected-to-none transition. This keeps ledger and blockfetch consumers on
+// the same tracked-tip and eligibility decision as ChainSelector.
 func (n *Node) handleChainSelectedNoneEvent(evt event.Event) {
 	e, ok := evt.Data.(chainselection.ChainSelectedNoneEvent)
 	if !ok {
@@ -201,11 +217,29 @@ func (n *Node) handleChainSelectedNoneEvent(evt event.Event) {
 		e.PreviousConnectionId.RemoteAddr != nil {
 		prevConn = e.PreviousConnectionId.String()
 	}
+	// Match handleChainSwitchEvent's live-lifecycle guard. Compare-and-clear
+	// only the selection named by the event so a delayed selected-to-none event
+	// cannot erase a newer switch.
+	if !n.liveLifecycleMu.TryLock() {
+		return
+	}
+	defer n.liveLifecycleMu.Unlock()
+	if n.chainsyncState == nil {
+		return
+	}
+	if n.chainSelector != nil && n.chainSelector.GetBestPeer() != nil {
+		n.config.logger.Debug(
+			"ignoring stale selected-to-none event superseded by selection",
+			"previous_connection", prevConn,
+		)
+		return
+	}
 	n.config.logger.Info(
 		"chain selection stalled: no selectable peer",
 		"previous_connection", prevConn,
 		"genesis_corroboration", e.GenesisCorroboration,
 	)
+	n.chainsyncState.ClearClientConnId(e.PreviousConnectionId)
 }
 
 // nodeRecyclerComponents adapts the node's swappable storage/networking

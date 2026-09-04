@@ -234,6 +234,139 @@ func TestHandleChainSwitchEventUpdatesActiveConnection(t *testing.T) {
 	assert.Equal(t, uint64(1), clientB.HeadersRecv)
 }
 
+func TestChainSelectionDoesNotPromoteUntrackedFallback(t *testing.T) {
+	for _, selectorFirst := range []bool{true, false} {
+		name := "state-removal-first"
+		if selectorFirst {
+			name = "selector-removal-first"
+		}
+		t.Run(name, func(t *testing.T) {
+			state := chainsync.NewStateWithConfig(
+				nil,
+				nil,
+				chainsync.DefaultConfig(),
+			)
+			selector := chainselection.NewChainSelector(
+				chainselection.ChainSelectorConfig{},
+			)
+			selected := newNodeTestConnId(3101)
+			fallback := newNodeTestConnId(3102)
+			require.True(t, state.AddClientConnId(selected))
+			require.True(t, state.AddClientConnId(fallback))
+
+			selectedPoint := ocommon.NewPoint(100, []byte("selected"))
+			selectedTip := ochainsync.Tip{
+				Point:       selectedPoint,
+				BlockNumber: 10,
+			}
+			state.UpdateClientTip(selected, selectedPoint, selectedTip)
+			require.True(t, selector.UpdatePeerTip(selected, selectedTip, nil))
+			state.SetClientConnId(selected)
+			best := selector.GetBestPeer()
+			require.NotNil(t, best)
+			require.Equal(t, selected, *best)
+			trackedFallback := state.GetTrackedClient(fallback)
+			require.NotNil(t, trackedFallback)
+			require.Zero(
+				t, trackedFallback.HeadersRecv,
+				"fallback must still be connected but untracked by ChainSync",
+			)
+
+			n := &Node{
+				config: Config{
+					logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+				},
+				chainsyncState: state,
+				chainSelector:  selector,
+			}
+			removeFromSelector := func() {
+				selector.RemovePeer(selected)
+				require.Nil(t, selector.GetBestPeer())
+				n.handleChainSelectedNoneEvent(event.NewEvent(
+					chainselection.ChainSelectedNoneEventType,
+					chainselection.ChainSelectedNoneEvent{
+						PreviousConnectionId: selected,
+					},
+				))
+			}
+			if selectorFirst {
+				removeFromSelector()
+				state.RemoveClientConnId(selected)
+			} else {
+				state.RemoveClientConnId(selected)
+				removeFromSelector()
+			}
+
+			require.Nil(
+				t,
+				state.GetClientConnId(),
+				"an untracked fallback must not become the ledger source",
+			)
+
+			fallbackPoint := ocommon.NewPoint(110, []byte("fallback"))
+			fallbackTip := ochainsync.Tip{
+				Point:       fallbackPoint,
+				BlockNumber: 11,
+			}
+			state.UpdateClientTip(fallback, fallbackPoint, fallbackTip)
+			require.True(t, selector.UpdatePeerTip(fallback, fallbackTip, nil))
+			best = selector.GetBestPeer()
+			require.NotNil(t, best)
+			require.Equal(t, fallback, *best)
+			n.handleChainSwitchEvent(event.NewEvent(
+				chainselection.ChainSwitchEventType,
+				chainselection.ChainSwitchEvent{
+					PreviousConnectionId: selected,
+					NewConnectionId:      fallback,
+					NewTip:               fallbackTip,
+				},
+			))
+			active := state.GetClientConnId()
+			require.NotNil(t, active)
+			require.Equal(t, fallback, *active)
+		})
+	}
+}
+
+func TestHandleChainSelectedNoneEventDoesNotClearReselectedConnection(
+	t *testing.T,
+) {
+	state := chainsync.NewStateWithConfig(
+		nil,
+		nil,
+		chainsync.DefaultConfig(),
+	)
+	selector := chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{},
+	)
+	conn := newNodeTestConnId(3103)
+	require.True(t, state.AddClientConnId(conn))
+	require.True(t, state.TrySetClientConnId(conn))
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(120, []byte("reselected")),
+		BlockNumber: 12,
+	}
+	require.True(t, selector.UpdatePeerTip(conn, tip, nil))
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		chainsyncState: state,
+		chainSelector:  selector,
+	}
+
+	n.handleChainSelectedNoneEvent(event.NewEvent(
+		chainselection.ChainSelectedNoneEventType,
+		chainselection.ChainSelectedNoneEvent{
+			PreviousConnectionId: conn,
+		},
+	))
+
+	active := state.GetClientConnId()
+	require.NotNil(t, active)
+	require.Equal(t, conn, *active)
+}
+
 // TestHandleChainSwitchEventNilChainsyncStateDoesNotPanic covers the window
 // during a live database restore/truncate where n.chainsyncState is nil
 // between closeStorageForLiveLifecycleOp and reinitializeNetworkingCore.
@@ -318,7 +451,8 @@ func TestLedgerStateConfigSkipsChainsyncReadDuringLiveLifecycleOp(
 		chainsync.DefaultConfig(),
 	)
 	connId := newNodeTestConnId(3001)
-	state.SetClientConnId(connId)
+	require.True(t, state.AddClientConnId(connId))
+	require.True(t, state.TrySetClientConnId(connId))
 	n := &Node{
 		chainsyncState: state,
 		config:         Config{cfg: &internalconfig.Config{}},

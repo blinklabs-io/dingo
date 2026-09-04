@@ -1438,8 +1438,7 @@ func TestRegisterTrackedChainsyncClient_ObservabilityOnlyDoesNotConsumePool(
 	require.Equal(t, 1, state.ClientConnCount())
 
 	active := state.GetClientConnId()
-	require.NotNil(t, active)
-	require.Equal(t, connEligible, *active)
+	require.Nil(t, active)
 }
 
 func TestRegisterTrackedChainsyncClient_PromotedObservedKeepsDirection(
@@ -1510,8 +1509,7 @@ func TestHandlePeerEligibilityChangedEvent_DemotesObservedIngress(
 	require.True(t, observabilityOnly)
 
 	active := state.GetClientConnId()
-	require.NotNil(t, active)
-	require.Equal(t, connB, *active)
+	require.Nil(t, active)
 }
 
 func TestChainsyncClientRollForward_UntrackedPeerDoesNotPublishToLedger(

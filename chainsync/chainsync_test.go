@@ -104,19 +104,24 @@ func TestAddAndRemoveClientConnId(t *testing.T) {
 	require.True(t, s.HasClientConnId(connB))
 	require.Equal(t, 2, s.ClientConnCount())
 
-	// First added should be active (primary)
+	// Registration alone cannot make a zero-tip client active.
 	active := s.GetClientConnId()
+	require.Nil(t, active)
+
+	// Chain selection chooses the active client after observing its tip.
+	require.True(t, s.TrySetClientConnId(connA))
+	active = s.GetClientConnId()
 	require.NotNil(t, active)
 	require.Equal(t, connA, *active)
 
-	// Remove first client; second should become active
+	// Removing the active client clears selection. The registry must not choose
+	// a replacement without ChainSelector's tracked-tip and eligibility checks.
 	s.RemoveClientConnId(connA)
 	require.False(t, s.HasClientConnId(connA))
 	require.Equal(t, 1, s.ClientConnCount())
 
 	active = s.GetClientConnId()
-	require.NotNil(t, active)
-	require.Equal(t, connB, *active)
+	require.Nil(t, active)
 }
 
 func TestTryAddClientConnId_LimitEnforced(t *testing.T) {
@@ -170,8 +175,7 @@ func TestTryAddObservedClientConnId_DoesNotConsumeEligibleLimit(
 	require.True(t, observabilityOnly)
 
 	active := s.GetClientConnId()
-	require.NotNil(t, active)
-	require.Equal(t, connEligible, *active)
+	require.Nil(t, active)
 }
 
 func TestSetClientObservabilityOnly_DemotesPrimary(t *testing.T) {
@@ -200,8 +204,7 @@ func TestSetClientObservabilityOnly_DemotesPrimary(t *testing.T) {
 	require.True(t, observabilityOnly)
 
 	active := s.GetClientConnId()
-	require.NotNil(t, active)
-	require.Equal(t, connB, *active)
+	require.Nil(t, active)
 }
 
 func TestSetClientObservabilityOnly_EligiblePromotionRespectsMaxClients(
@@ -286,7 +289,7 @@ func TestAddClientConnId_DuplicatePreservesState(
 	)
 }
 
-func TestPromoteBestClient_NoHealthyClients(t *testing.T) {
+func TestRemoveActiveClientDoesNotPromoteStalledFallback(t *testing.T) {
 	bus := newTestEventBus(t)
 	cfg := chainsync.Config{
 		MaxClients:   5,
@@ -330,19 +333,11 @@ func TestPromoteBestClient_NoHealthyClients(t *testing.T) {
 	)
 	require.Len(t, stalledSet, 2)
 
-	// Remove primary; only stalled clients remain so
-	// the most recently active stalled client is promoted
-	// as a fallback to prevent permanent nil-selection deadlock.
+	// Removing the primary must not promote a stalled peer independently of
+	// ChainSelector.
 	s.RemoveClientConnId(connA)
 	active := s.GetClientConnId()
-	require.NotNil(
-		t,
-		active,
-		"should promote stalled client as fallback when no healthy clients exist",
-	)
-	require.Equal(t, connB, *active,
-		"should promote the remaining stalled client",
-	)
+	require.Nil(t, active)
 }
 
 func TestGetClientConnIds(t *testing.T) {
@@ -370,15 +365,21 @@ func TestSetClientConnId(t *testing.T) {
 	s.AddClientConnId(connB)
 
 	// Override active client
-	s.SetClientConnId(connB)
+	require.True(t, s.TrySetClientConnId(connB))
 	active := s.GetClientConnId()
 	require.NotNil(t, active)
 	require.Equal(t, connB, *active)
+
+	// A delayed switch cannot reactivate a connection that is no longer in the
+	// eligible registry.
+	s.RemoveClientConnId(connA)
+	require.False(t, s.TrySetClientConnId(connA))
+	require.Equal(t, connB, *s.GetClientConnId())
 }
 
 // --- Failover tests ---
 
-func TestFailover_PrimaryDisconnects(t *testing.T) {
+func TestDisconnectClearsPrimaryForChainSelection(t *testing.T) {
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
 
@@ -401,13 +402,12 @@ func TestFailover_PrimaryDisconnects(t *testing.T) {
 	s.SetClientConnId(connA)
 	s.RemoveClientConnId(connA)
 
-	// B should be promoted (highest tip)
+	// Only ChainSelector may choose B using the full selection contract.
 	active := s.GetClientConnId()
-	require.NotNil(t, active)
-	require.Equal(t, connB, *active)
+	require.Nil(t, active)
 }
 
-func TestFailover_PromotesNonStalledClient(t *testing.T) {
+func TestDisconnectDoesNotPromoteNonStalledClient(t *testing.T) {
 	bus := newTestEventBus(t)
 	cfg := chainsync.Config{
 		MaxClients:   5,
@@ -466,10 +466,9 @@ func TestFailover_PromotesNonStalledClient(t *testing.T) {
 	// Remove A (primary)
 	s.RemoveClientConnId(connA)
 
-	// C should be promoted because B is stalled
+	// The local registry must not choose C independently of ChainSelector.
 	active := s.GetClientConnId()
-	require.NotNil(t, active)
-	require.Equal(t, connC, *active)
+	require.Nil(t, active)
 }
 
 // --- Header deduplication tests ---
@@ -734,7 +733,7 @@ func TestStallDetection_RecoveryOnActivity(t *testing.T) {
 	require.Equal(t, chainsync.ClientStatusSyncing, tc.Status)
 }
 
-func TestStallDetection_PrimaryFailover(t *testing.T) {
+func TestStallDetectionLeavesSelectionToChainSelector(t *testing.T) {
 	bus := newTestEventBus(t)
 	cfg := chainsync.Config{
 		MaxClients:   5,
@@ -781,7 +780,7 @@ func TestStallDetection_PrimaryFailover(t *testing.T) {
 
 	active := s.GetClientConnId()
 	require.NotNil(t, active)
-	require.Equal(t, connB, *active)
+	require.Equal(t, connA, *active)
 }
 
 func TestStallDetection_SkipsObservabilityOnlyClient(t *testing.T) {
@@ -890,6 +889,7 @@ func TestClientRemovedEvent(t *testing.T) {
 
 	conn := newTestConnId(1)
 	s.AddClientConnId(conn)
+	require.True(t, s.TrySetClientConnId(conn))
 	s.RemoveClientConnId(conn)
 
 	evt := testutil.RequireReceive(
@@ -908,9 +908,9 @@ func TestClientRemovedEvent_NonPrimary(t *testing.T) {
 
 	connA := newTestConnId(1)
 	connB := newTestConnId(2)
-	s.AddClientConnId(connA) // becomes primary
+	s.AddClientConnId(connA)
 	s.AddClientConnId(connB)
-	s.RemoveClientConnId(connB) // not primary
+	s.RemoveClientConnId(connB)
 
 	evt := testutil.RequireReceive(
 		t, ch, 2*time.Second, "expected client removed event",
@@ -1191,14 +1191,13 @@ func TestNewState_BackwardCompatible(t *testing.T) {
 	require.NotNil(t, s)
 	require.Equal(t, chainsync.DefaultMaxClients, s.MaxClients())
 
-	// Single client should work exactly as before
+	// Registration works without pre-selecting a zero-tip client.
 	conn := newTestConnId(1)
 	s.AddClientConnId(conn)
 	require.True(t, s.HasClientConnId(conn))
 
 	active := s.GetClientConnId()
-	require.NotNil(t, active)
-	require.Equal(t, conn, *active)
+	require.Nil(t, active)
 
 	s.RemoveClientConnId(conn)
 	require.False(t, s.HasClientConnId(conn))

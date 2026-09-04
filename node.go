@@ -1976,9 +1976,8 @@ func (n *Node) subscribeChainSelectorEvents() {
 		n.handleChainSwitchEvent,
 	)
 	// Subscribe to selected-to-none transitions (selection stalled, e.g. an
-	// uncorroborated Genesis fast source). Enforcement that the stalled source
-	// stops feeding the ledger is handled by the ChainsyncApplyEligible gate;
-	// this handler surfaces the stall for observability.
+	// uncorroborated Genesis fast source). The handler clears the ledger's active
+	// connection so it cannot retain a source ChainSelector no longer accepts.
 	n.eventBus.SubscribeFunc(
 		chainselection.ChainSelectedNoneEventType,
 		n.handleChainSelectedNoneEvent,
