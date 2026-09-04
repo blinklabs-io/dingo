@@ -305,7 +305,13 @@ func TestCreateOutboundConnection_LedgerPeerFallbackDialsExactRoutabilityChecked
 		Logger:   logger,
 		EventBus: newMockEventBus(),
 		ConnManager: connmanager.NewConnectionManager(
-			connmanager.ConnectionManagerConfig{Logger: logger},
+			connmanager.ConnectionManagerConfig{
+				Logger: logger,
+				OutboundDialer: func(_ context.Context, address string) (net.Conn, error) {
+					assert.Equal(t, resolvedAddr, address)
+					return nil, errors.New("controlled dial failure")
+				},
+			},
 		),
 		DenyDuration: 30 * time.Minute,
 	})

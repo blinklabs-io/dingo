@@ -23,9 +23,8 @@ import (
 
 // TestIsRoutableIP pins the routability policy shared by gossip, ledger, and
 // peer-sharing candidates. The accepted cases are as load-bearing as the
-// rejected ones: RFC 5737 and RFC 3849 addresses stay accepted pending #3792,
-// so a tightening that breaks the fixtures in ledger_dial_security_test.go and
-// elsewhere fails here first, with the reason and the tracking issue.
+// rejected ones: RFC 5737 and RFC 3849 documentation addresses are rejected,
+// so a policy regression breaks this test before it reaches the dial path.
 func TestIsRoutableIP(t *testing.T) {
 	tests := []struct {
 		name string
