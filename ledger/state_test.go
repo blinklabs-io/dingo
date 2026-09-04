@@ -5112,7 +5112,7 @@ func TestCloseStopsDecodePipelineBeforeWaitingForBlockProcessing(t *testing.T) {
 // Byron guard as a backstop rather than a redundancy.
 //
 // It is not covered by the currentPParams == nil check that follows it. The
-// reachable shape is a rollback into Byron: rollbackChainAndState sets
+// reachable shape is a rollback into Byron: rollbackChainAndStateDeferred sets
 // currentEra to Byron and then calls this function, and before the ppComputed
 // change it skipped the currentPParams assignment whenever the recomputed
 // value was nil -- which is exactly what Byron computes. That left a Shelley

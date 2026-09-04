@@ -509,7 +509,7 @@ full ordered lane regardless of whether a subscriber later drains or its
 lifecycle removes it.
 
 This is also the one deliberate exception to the publish-under-lock rule
-above. `rollbackChainAndState` runs under `chainsyncMutex` — it is reached
+above. `rollbackChainAndStateDeferred` runs under `chainsyncMutex` — it is reached
 through the `pendingPublishes` call chain — and emits undo events from there,
 because the ordering requires them to be enqueued before the truncation and
 the truncation happens under that same lock; deferring them to
@@ -1318,7 +1318,13 @@ All event types follow the `subsystem.snake_case_name` convention.
   a parent still holds either mutex. The invariant is checked by
   `TestNoEventBusPublishWhileHoldingChainsyncMutex` and
   `TestChainsyncResyncPublishPathsUnderLock` in
-  `ledger/publish_under_lock_test.go`. Register the flush with `defer`
+  `ledger/publish_under_lock_test.go`. The first test also treats a call to an
+  inline-publishing `chain.Chain` method as a publish
+  (`inlinePublishingChainMethods`: `AddBlock`, `AddLocalBlock`,
+  `AddBlockWithPoint` and siblings, plus `Rollback`), because those publish
+  `ChainUpdateEventType` / rollback events to the same bus from inside the
+  chain package — an `ls.chain.*` call under a guarded mutex is the same
+  deadlock as a direct `EventBus.Publish`. Register the flush with `defer`
   *before* taking the lock so LIFO order runs it last.
 - `ledger` also must not invoke an external `BlockfetchRequestRangeFunc` while
   holding `chainsyncBlockfetchMutex`. The blockfetch client can wait in
@@ -3788,7 +3794,7 @@ records are cleared from `rollbackHistory` on the successful cross
 rollback does not accumulate toward the threshold. Second, even when a point
 does reach the threshold, the detector only breaks the loop if the rollback is
 genuinely un-crossable: `rollbackIsAppliable` mirrors the pre-checks
-`rollbackChainAndState` uses (target block present and within the security
+`rollbackChainAndStateDeferred` uses (target block present and within the security
 parameter K via `chain.ValidateRollback`, and at/above the Mithril anchor),
 and a rollback that would succeed is applied even on the repeat rather than
 suppressed. Only a rollback the node cannot cross takes the skip path, which
@@ -3945,7 +3951,7 @@ That hold bounds the damage but cannot explain where an unresolvable producer
 came from, so a bounded diagnostic attributes it
 (`ledger/continuation_audit.go`). A local rollback that leaves the primary chain
 and applied ledger at the same point — chainsync rollback via
-`rollbackChainAndState`, or a replay-recovery rewind — arms a
+`rollbackChainAndStateDeferred`, or a replay-recovery rewind — arms a
 `continuationAuditWindow` there. A chainsync rollback point ahead of the applied
 ledger instead disarms any prior window because its fork point no longer
 describes the continuation being fetched. While armed, every body
@@ -9354,7 +9360,7 @@ not incremented in place from dingo's side.
 **Phase 5: rollback coordination.** `ledgerReadChainIterator` — the
 pipeline's only submitter — runs on its own goroutine, entirely decoupled
 from the goroutine that decides a rollback. That matters because
-`rollbackChainAndState` (`ledger/state.go`), which physically removes
+`rollbackChainAndStateDeferred` (`ledger/state.go`), which physically removes
 blocks from `ls.chain` and truncates ledger metadata, is reached from
 chainsync per-connection event handling (`handleEventChainsyncRollback`,
 `tryResolveFork` in `ledger/chainsync.go`) — never from `ledgerProcessBlocks`
@@ -9363,7 +9369,7 @@ goroutine has already gathered and submitted a batch of blocks — from that
 very fork — to the pipeline's decode/validate workers and is blocked
 draining `Results()` for it. `drainBlockPipelineBeforeRollback`
 (`ledger/state.go`) closes part of that window: called near the top of
-`rollbackChainAndState`, before `ls.chain.Rollback`, it waits (via
+`rollbackChainAndStateDeferred`, before `ls.chain.Rollback`, it waits (via
 `pipeline.BlockPipeline.WaitForDrain`/`PendingCount`, bounded by
 `BlockPipelineRollbackDrainTimeout`, default 5s) for `ls.blockPipeline`'s
 decode/validate backlog to empty before the physical rollback proceeds. A
@@ -9379,7 +9385,7 @@ rollback or otherwise, so nothing from that goroutine's own current attempt
 is still in flight when this runs; the wait there is expected to return
 immediately in practice.
 
-`rollbackChainAndState` sequences three steps in order, and the ordering is
+`rollbackChainAndStateDeferred` sequences three steps in order, and the ordering is
 load-bearing in both directions: `drainBlockPipelineBeforeRollback` first,
 then, while holding `transactionEventMutex`,
 `validateAndEmitRollbackUndo` (reject-then-emit-undo-events, from the
@@ -9412,7 +9418,7 @@ that returns real data, so the lock is never held across a call that is
 purely waiting for the chain to grow — doing so would deadlock a
 concurrent rollback's write-lock attempt against the very
 `ls.chain.Rollback` call that would otherwise wake the reader);
-`rollbackChainAndState` holds the write lock from before
+`rollbackChainAndStateDeferred` holds the write lock from before
 `drainBlockPipelineBeforeRollback` through `ls.chain.Rollback`, so no
 gather-then-submit cycle can start, and none already in flight can reach
 `Submit`, while a rollback is physically truncating the chain. Once
