@@ -869,20 +869,6 @@ func rationalsEqual(a, b string) bool {
 	return ra.Cmp(&rb) == 0
 }
 
-// DetermineStatus returns PASS, FAIL, or ERROR from a list of mismatches.
-//
-//   - FAIL: any value_mismatch, pool_only_dingo, pool_only_koios,
-//     acct_only_dingo, acct_only_koios, or acct_duplicate entry — a strict
-//     run cannot report PASS while any of these are present (#3097's
-//     acceptance criteria: a single missing, extra, duplicate, or differing
-//     account fails the whole epoch).
-//   - ERROR: only DB-level failures (dingo_db_error, dingo_db_missing),
-//     reference_lag (Koios data may be incomplete for a recent epoch), or
-//     acct_coverage_incomplete (the Koios account-reward fetch for this
-//     epoch never completed across every chunk, so there is no complete
-//     reference set to compare against yet).
-//   - PASS: no mismatches.
-//
 // mismatchSeverity classifies one mismatch category. DetermineStatus and
 // CountSignificant both read it, so a category added to one can never be
 // forgotten by the other — the failure the split invited was a count that did
@@ -937,6 +923,19 @@ func CountSignificant(mismatches []CheckMismatch) int {
 	return n
 }
 
+// DetermineStatus returns PASS, FAIL, or ERROR from a list of mismatches.
+//
+//   - FAIL: any value_mismatch, pool_only_dingo, pool_only_koios,
+//     acct_only_dingo, acct_only_koios, or acct_duplicate entry — a strict
+//     run cannot report PASS while any of these are present (#3097's
+//     acceptance criteria: a single missing, extra, duplicate, or differing
+//     account fails the whole epoch).
+//   - ERROR: only DB-level failures (dingo_db_error, dingo_db_missing),
+//     reference_lag (Koios data may be incomplete for a recent epoch), or
+//     acct_coverage_incomplete (the Koios account-reward fetch for this
+//     epoch never completed across every chunk, so there is no complete
+//     reference set to compare against yet).
+//   - PASS: no mismatches.
 func DetermineStatus(mismatches []CheckMismatch) string {
 	hasError := false
 	for _, m := range mismatches {
