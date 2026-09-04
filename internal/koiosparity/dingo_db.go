@@ -527,7 +527,9 @@ func (d *DingoDB) GetPoolEpochDataMap(
 			stakeEpoch+3,
 		).Scan(&startSlot)
 		switch {
-		case err != nil || !startSlot.Valid:
+		case err != nil || !startSlot.Valid || startSlot.Int64 < 0:
+			// A negative start slot is not representable and means the row
+			// cannot be trusted, which is the same position as not having it.
 			epochRewardsPending = true
 		default:
 			epochRewardsPending = tipSlot < uint64(startSlot.Int64)
