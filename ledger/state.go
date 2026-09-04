@@ -8813,7 +8813,13 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 	if currentPParams == nil || currentEpoch.LengthInSlots == 0 {
 		return currentPParams
 	}
+	// Epoch lengths can change at an era boundary. Resolve the target slot
+	// through the multi-era converter so a Byron prefix does not make a
+	// future Shelley slot appear to belong to an early epoch.
 	slotEpoch := slot / uint64(currentEpoch.LengthInSlots)
+	if slotInfo, err := ls.SlotToEpoch(slot); err == nil {
+		slotEpoch = slotInfo.EpochId
+	}
 	if slotEpoch <= currentEpoch.EpochId {
 		return currentPParams
 	}
