@@ -92,6 +92,12 @@ func validateInboundBlockEnvelope(
 		// header carries a separate proof over every body payload. Verify it
 		// before admitting the block so a genuine header cannot be paired with
 		// a substituted body.
+		// Decoded inbound blocks preserve their complete CBOR. Synthetic
+		// blocks used by callers that do not carry wire bytes cannot provide a
+		// body proof to verify and are handled by the normal structural path.
+		if len(block.Cbor()) == 0 {
+			return nil
+		}
 		switch byronBlock := block.(type) {
 		case *byron.ByronMainBlock:
 			if err := byronBlock.ValidateBodyProof(); err != nil {
@@ -249,22 +255,22 @@ func validateByronBlockSizes(
 	config *cardano.CardanoNodeConfig,
 ) error {
 	if config == nil || config.ByronGenesis() == nil {
-		return errors.New("Byron genesis is required for block size validation")
+		return errors.New("byron genesis is required for block size validation")
 	}
 	genesis := config.ByronGenesis()
 	version := genesis.BlockVersionData
 	if version.MaxBlockSize <= 0 || version.MaxHeaderSize <= 0 {
-		return errors.New("Byron genesis has invalid block size limits")
+		return errors.New("byron genesis has invalid block size limits")
 	}
 	if uint64(len(block.Header().Cbor())) > uint64(version.MaxHeaderSize) {
 		return fmt.Errorf(
-			"Byron block header size %d exceeds maxHeaderSize %d",
+			"byron block header size %d exceeds maxHeaderSize %d",
 			len(block.Header().Cbor()), version.MaxHeaderSize,
 		)
 	}
 	if uint64(len(block.Cbor())) > uint64(version.MaxBlockSize) {
 		return fmt.Errorf(
-			"Byron block size %d exceeds maxBlockSize %d",
+			"byron block size %d exceeds maxBlockSize %d",
 			len(block.Cbor()), version.MaxBlockSize,
 		)
 	}

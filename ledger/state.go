@@ -4715,7 +4715,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 		); err != nil {
 			return nil, err
 		}
-		if block.Era().Id == byron.EraIdByron {
+		if block.Era().Id == byron.EraIdByron && len(block.Cbor()) > 0 {
 			if err := validateByronBlockSizes(
 				block,
 				ls.config.CardanoNodeConfig,

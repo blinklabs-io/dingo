@@ -174,6 +174,12 @@ func TestValidateInboundBlockEnvelopeRejectsByronBodyProofMismatch(t *testing.T)
 	}
 	block.BlockHeader.SetCbor([]byte{0x80})
 	block.Body.SetCbor([]byte{0x84, 0x80, 0x80, 0x80, 0x80})
+	block.SetCbor(mustEnvelopeBlockCbor(
+		t,
+		[]byte{0x80},
+		cbor.RawMessage{0x84, 0x80, 0x80, 0x80, 0x80},
+		cbor.RawMessage{0x80},
+	))
 
 	err := validateInboundBlockEnvelope(
 		block,
