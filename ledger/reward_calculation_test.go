@@ -306,7 +306,7 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	require.Equal(t, int64(2), deltas)
 }
 
-func TestRewardPoolInputsHaveBlockCounts(t *testing.T) {
+func TestValidateRewardPoolInputBlockCounts(t *testing.T) {
 	t.Parallel()
 
 	blocks, total := uint64(2), uint64(10)
@@ -314,14 +314,17 @@ func TestRewardPoolInputsHaveBlockCounts(t *testing.T) {
 		BlocksProduced:     &blocks,
 		TotalBlocksInEpoch: &total,
 	}
-	require.True(t, rewardPoolInputsHaveBlockCounts([]*models.RewardPoolInput{complete}))
-	require.False(t, rewardPoolInputsHaveBlockCounts([]*models.RewardPoolInput{{
+	require.NoError(t, validateRewardPoolInputBlockCounts([]*models.RewardPoolInput{complete}))
+	err := validateRewardPoolInputBlockCounts([]*models.RewardPoolInput{{
 		BlocksProduced: &blocks,
-	}}))
-	require.False(t, rewardPoolInputsHaveBlockCounts([]*models.RewardPoolInput{{
+	}})
+	require.EqualError(t, err, "pool input 0 is missing block counts")
+	err = validateRewardPoolInputBlockCounts([]*models.RewardPoolInput{{
 		TotalBlocksInEpoch: &total,
-	}}))
-	require.False(t, rewardPoolInputsHaveBlockCounts([]*models.RewardPoolInput{nil}))
+	}})
+	require.EqualError(t, err, "pool input 0 is missing block counts")
+	err = validateRewardPoolInputBlockCounts([]*models.RewardPoolInput{nil})
+	require.EqualError(t, err, "pool input 0 is missing block counts")
 }
 
 // guardExpiredLeaderResult captures the post-application state a Task 10

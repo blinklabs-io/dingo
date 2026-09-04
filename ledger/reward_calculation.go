@@ -288,17 +288,12 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	// round with no credits and leave withdrawals inconsistent with the
 	// network state. The round can be retried only when a complete basis is
 	// available; an incomplete one must be skipped before calculation.
-	if !rewardPoolInputsHaveBlockCounts(poolInputs) {
-		ls.config.Logger.Warn(
-			"skipping stake rewards: reward pool inputs have no block production counts",
-			"component",
-			"ledger",
-			"new_epoch",
-			newEpoch,
-			"reward_snapshot_epoch",
+	if err := validateRewardPoolInputBlockCounts(poolInputs); err != nil {
+		return nil, false, fmt.Errorf(
+			"reward snapshot %d has incomplete block production counts: %w",
 			rewardSnapshotEpoch,
+			err,
 		)
-		return nil, false, nil
 	}
 
 	pparams, params, performanceDecentralization, err := ls.rewardParameters(
@@ -996,16 +991,16 @@ func precomputedRewardPoolOutputsMatchInputs(
 	return len(expectedOwnerStake) == 0
 }
 
-func rewardPoolInputsHaveBlockCounts(
+func validateRewardPoolInputBlockCounts(
 	poolInputs []*models.RewardPoolInput,
-) bool {
-	for _, input := range poolInputs {
+) error {
+	for i, input := range poolInputs {
 		if input == nil || input.BlocksProduced == nil ||
 			input.TotalBlocksInEpoch == nil {
-			return false
+			return fmt.Errorf("pool input %d is missing block counts", i)
 		}
 	}
-	return true
+	return nil
 }
 
 // precomputedRewardPoolRewardsMatchInputs re-derives each persisted pool's
