@@ -274,7 +274,7 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 	if tipErr != nil {
 		return nil, fmt.Errorf("tip lookup: %w", tipErr)
 	}
-	if len(tip.Point.Hash) > 0 {
+	if len(tip.Point.Hash) > 0 && tip.Point.Slot > 0 {
 		tipSlot = tip.Point.Slot
 		tipKnown = true
 	}

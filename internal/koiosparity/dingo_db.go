@@ -487,7 +487,7 @@ func (d *DingoDB) GetPoolEpochDataMap(
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("tip lookup: %w", err)
 		}
-		if err == nil && slot.Valid && slot.Int64 >= 0 && len(hash) > 0 {
+		if err == nil && slot.Valid && slot.Int64 > 0 && len(hash) > 0 {
 			tipSlot = uint64(slot.Int64)
 			tipKnown = true
 		}

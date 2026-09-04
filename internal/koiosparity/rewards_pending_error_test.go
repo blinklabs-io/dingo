@@ -101,6 +101,44 @@ func TestMissingApplyingEpochIsThePendingCase(t *testing.T) {
 	})
 }
 
+func TestPositiveSlotWithoutTipHashIsNotPending(t *testing.T) {
+	t.Run("standalone source", func(t *testing.T) {
+		db, gdb := openTestDingoDB(t)
+		pool := testPoolKeyHash(t, 0x45)
+		require.NoError(t, gdb.Exec(
+			`INSERT INTO reward_pool_input (pool_key_hash, epoch, delegated_stake, delegator_count)
+			 VALUES (?, ?, ?, ?)`, pool, 9, "1000", 1,
+		).Error)
+		require.NoError(t, gdb.Exec(
+			`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
+			[]byte{}, 100, 1,
+		).Error)
+
+		m, err := db.GetPoolEpochDataMap(context.Background(), 9, 10)
+		require.NoError(t, err)
+		require.False(t, m[hex.EncodeToString(pool)].RewardsPending)
+	})
+
+	t.Run("in-process source", func(t *testing.T) {
+		db := newTestDatabaseSourceDB(t)
+		sqlDB := sourceSQLDB(t, db)
+		pool := testPoolKeyHash(t, 0x46)
+		require.NoError(t, sqlDB.Create(&models.RewardPoolInput{
+			PoolKeyHash: pool, Epoch: 9, DelegatedStake: types.Uint64(1000), DelegatorCount: 1,
+		}).Error)
+		require.NoError(t, sqlDB.Exec(
+			`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
+			[]byte{}, 100, 1,
+		).Error)
+
+		source, err := NewDatabaseSource(db)
+		require.NoError(t, err)
+		m, err := source.GetPoolEpochDataMap(context.Background(), 9, 10)
+		require.NoError(t, err)
+		require.False(t, m[hex.EncodeToString(pool)].RewardsPending)
+	})
+}
+
 func TestComparePoolEpochUsesRewardsPending(t *testing.T) {
 	memberRewardMismatch := func(mismatches []CheckMismatch) CheckMismatch {
 		for _, mismatch := range mismatches {
