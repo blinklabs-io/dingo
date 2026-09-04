@@ -32,3 +32,18 @@ func TestRegisterBlobMetricsReusesSharedGCCollectors(t *testing.T) {
 		testutil.ToFloat64(second.gcMetrics.attempts),
 	)
 }
+
+func TestRegisterBlobMetricsAllowsLabelWrappedReuse(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	registerer := prometheus.WrapRegistererWith(
+		prometheus.Labels{"network": "preview"},
+		registry,
+	)
+	first := &BlobStoreBadger{promRegistry: registerer}
+	second := &BlobStoreBadger{promRegistry: registerer}
+
+	first.registerBlobMetrics()
+	require.NotPanics(t, second.registerBlobMetrics)
+	first.gcMetrics.attempts.Inc()
+	require.Equal(t, float64(1), testutil.ToFloat64(first.gcMetrics.attempts))
+}

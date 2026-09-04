@@ -39,9 +39,9 @@ const (
 )
 
 // safeRegister registers a collector and returns the collector that is active
-// in the registry. Shared registries may already contain the metric, in which
-// case callers must use the existing collector rather than retaining the
-// unregistered duplicate.
+// in the registry when its type is directly available. A label-wrapping
+// registerer returns a wrapper that cannot safely be asserted to the metric's
+// concrete interface; in that case the caller keeps its original collector.
 func safeRegister(
 	reg prometheus.Registerer,
 	c prometheus.Collector,
@@ -55,6 +55,17 @@ func safeRegister(
 		// same default registry. Other registration failures are programming
 		// errors and must remain visible.
 		panic(err)
+	}
+	return c
+}
+
+func registeredMetric[T prometheus.Collector](
+	reg prometheus.Registerer,
+	c T,
+) T {
+	registered := safeRegister(reg, c)
+	if metric, ok := registered.(T); ok {
+		return metric
 	}
 	return c
 }
@@ -101,16 +112,16 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 		Help: "Unix timestamp of the last successful value-log GC rewrite.",
 	})
 	d.gcMetrics = &badgerGCMetrics{
-		attempts:       safeRegister(d.promRegistry, attempts).(prometheus.Counter),
-		successes:      safeRegister(d.promRegistry, successes).(prometheus.Counter),
-		noRewrite:      safeRegister(d.promRegistry, noRewrite).(prometheus.Counter),
-		errors:         safeRegister(d.promRegistry, gcErrors).(prometheus.Counter),
-		duration:       safeRegister(d.promRegistry, duration).(prometheus.Histogram),
-		lsmBytes:       safeRegister(d.promRegistry, lsmBytes).(prometheus.Gauge),
-		vlogBytes:      safeRegister(d.promRegistry, vlogBytes).(prometheus.Gauge),
-		reclaimedBytes: safeRegister(d.promRegistry, reclaimedBytes).(prometheus.Gauge),
-		consecutive:    safeRegister(d.promRegistry, consecutive).(prometheus.Gauge),
-		lastSuccess:    safeRegister(d.promRegistry, lastSuccess).(prometheus.Gauge),
+		attempts:       registeredMetric(d.promRegistry, attempts),
+		successes:      registeredMetric(d.promRegistry, successes),
+		noRewrite:      registeredMetric(d.promRegistry, noRewrite),
+		errors:         registeredMetric(d.promRegistry, gcErrors),
+		duration:       registeredMetric(d.promRegistry, duration),
+		lsmBytes:       registeredMetric(d.promRegistry, lsmBytes),
+		vlogBytes:      registeredMetric(d.promRegistry, vlogBytes),
+		reclaimedBytes: registeredMetric(d.promRegistry, reclaimedBytes),
+		consecutive:    registeredMetric(d.promRegistry, consecutive),
+		lastSuccess:    registeredMetric(d.promRegistry, lastSuccess),
 	}
 
 	// Badger exposes metrics via expvar, so we need to set up some translation
