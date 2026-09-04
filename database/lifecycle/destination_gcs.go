@@ -296,7 +296,7 @@ func (d *gcsDestination) fetchManifest(
 		return Manifest{}, fmt.Errorf("open gcs object %q: %w", key, err)
 	}
 	defer r.Close()
-	data, err := io.ReadAll(r)
+	data, err := io.ReadAll(io.LimitReader(r, MaxManifestBytes+1))
 	if err != nil {
 		return Manifest{}, fmt.Errorf("read gcs object %q: %w", key, err)
 	}

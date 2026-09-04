@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -46,6 +47,11 @@ const ManifestFormatVersion = 1
 // ManifestFileName is the name of the manifest file inside a snapshot
 // directory.
 const ManifestFileName = "manifest.json"
+
+// MaxManifestBytes bounds manifest inputs before JSON decoding. Manifests are
+// small metadata files; accepting an arbitrarily large object here would let
+// a malformed local or cloud snapshot consume memory before validation.
+const MaxManifestBytes = 1 << 20
 
 // ErrManifestCorrupted marks a manifest that was found and read but failed
 // checksum validation — i.e. it (or the snapshot it belongs to) exists but
@@ -351,9 +357,20 @@ func WriteManifest(dir string, m Manifest) error {
 // format version is newer than this build understands.
 func ReadManifest(dir string) (Manifest, error) {
 	path := filepath.Join(dir, ManifestFileName)
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("read manifest %q: %w", path, err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, MaxManifestBytes+1))
+	if err != nil {
+		return Manifest{}, fmt.Errorf("read manifest %q: %w", path, err)
+	}
+	if len(data) > MaxManifestBytes {
+		return Manifest{}, fmt.Errorf(
+			"read manifest %q: size exceeds maximum %d bytes",
+			path, MaxManifestBytes,
+		)
 	}
 	m, err := ParseManifest(data)
 	if err != nil {
@@ -368,6 +385,12 @@ func ReadManifest(dir string) (Manifest, error) {
 // destination's ListSnapshots fetching a single remote manifest.json
 // object without downloading the whole snapshot).
 func ParseManifest(data []byte) (Manifest, error) {
+	if len(data) > MaxManifestBytes {
+		return Manifest{}, fmt.Errorf(
+			"manifest size %d exceeds maximum %d bytes",
+			len(data), MaxManifestBytes,
+		)
+	}
 	var m Manifest
 	if err := json.Unmarshal(data, &m); err != nil {
 		return Manifest{}, fmt.Errorf("parse manifest: %w", err)

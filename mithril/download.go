@@ -1061,6 +1061,12 @@ func downloadSnapshotOnce(
 }
 
 const (
+	// Keep decoder allocations bounded independently of klauspost/compress
+	// defaults. These limits are intentionally separate from extracted-file
+	// limits because a hostile frame can allocate before tar validation runs.
+	maxZstdWindowSize    = 512 << 20
+	maxZstdDecoderMemory = 1 << 30
+
 	// maxExtractFileSize is the maximum allowed size for a single
 	// extracted file (8 GiB). Must be large enough for mainnet
 	// ancillary ledger state files (UTxO tables can be multi-GB).
@@ -1123,8 +1129,9 @@ func extractArchiveFile(
 		"destination", destDir,
 	)
 
+	extractCfg := newExtractConfig(opts)
 	workDir, publish, cleanup, err := prepareExtractDestination(
-		destDir, newExtractConfig(opts),
+		destDir, extractCfg,
 	)
 	if err != nil {
 		return "", err
@@ -1140,8 +1147,14 @@ func extractArchiveFile(
 	}
 	countingFile := &countingReader{reader: file}
 
-	// Create zstd reader
-	zr, err := zstd.NewReader(countingFile)
+	// Bound decoder allocations explicitly. The library default is a protocol
+	// maximum rather than an application resource policy, and may change when
+	// the dependency is upgraded.
+	zr, err := zstd.NewReader(
+		countingFile,
+		zstd.WithDecoderMaxWindow(extractCfg.maxZstdWindowSize),
+		zstd.WithDecoderMaxMemory(extractCfg.maxZstdMemory),
+	)
 	if err != nil {
 		return "", fmt.Errorf(
 			"creating zstd reader: %w",
