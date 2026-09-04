@@ -369,8 +369,8 @@ func TestSlotTimeConverter_SlotToTimeInEraIgnoresHorizon(t *testing.T) {
 // on every call, and this conversion runs per transaction, so resolving a slot
 // must not build the summary twice.
 //
-// It also pins the guards SlotToTimeInEra duplicates from SlotToTime, since a
-// duplicate can drift from its original.
+// It also pins the shared prelude (slotToTimePrelude) through this entry point,
+// so a change there cannot silently alter the in-era path.
 func TestSlotTimeConverter_SlotToTimeInEraBuildsSummaryOnce(t *testing.T) {
 	genesis := testShelleyGenesis(t)
 	const slotLength = time.Second

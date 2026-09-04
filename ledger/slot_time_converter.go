@@ -122,16 +122,30 @@ func (c *SlotTimeConverter) epochCache() []models.Epoch {
 // the epoch cache is populated. Other slots are resolved via the
 // hardfork.Summary built from the current epoch cache. The current era can be
 // projected only through its configured safe-zone horizon.
-func (c *SlotTimeConverter) SlotToTime(slot uint64) (time.Time, error) {
+// slotToTimePrelude applies the checks every slot-to-time conversion shares: a
+// slot outside time.Duration's range, a missing genesis, and slot 0, which is
+// SystemStart by definition and needs no summary. It reports whether it
+// answered, so callers can proceed to the summary when it did not.
+func (c *SlotTimeConverter) slotToTimePrelude(
+	slot uint64,
+) (time.Time, bool, error) {
 	if slot > math.MaxInt64 {
-		return time.Time{}, errors.New("slot is larger than time.Duration")
+		return time.Time{}, true,
+			errors.New("slot is larger than time.Duration")
 	}
 	shelleyGenesis := c.shelleyGenesis()
 	if shelleyGenesis == nil {
-		return time.Time{}, errors.New("could not get genesis config")
+		return time.Time{}, true, errors.New("could not get genesis config")
 	}
 	if slot == 0 {
-		return shelleyGenesis.SystemStart, nil
+		return shelleyGenesis.SystemStart, true, nil
+	}
+	return time.Time{}, false, nil
+}
+
+func (c *SlotTimeConverter) SlotToTime(slot uint64) (time.Time, error) {
+	if when, handled, err := c.slotToTimePrelude(slot); handled {
+		return when, err
 	}
 	sum, err := c.hardForkSummary()
 	if err != nil {
@@ -184,20 +198,13 @@ func (c *SlotTimeConverter) SlotToTime(slot uint64) (time.Time, error) {
 // SlotToTime. It is the wrong bound for a slot inside a block already being
 // applied: epoch length and slot length are constant within an era, so the
 // projection is exact rather than a guess.
-// The guards below mirror SlotToTime rather than delegating to it: the summary
-// is rebuilt from the epoch cache on every hardForkSummary call, and delegating
-// would build it twice on the past-horizon path -- which is the common path
-// here, and runs per transaction.
+// This resolves the summary itself rather than delegating to SlotToTime: the
+// summary is rebuilt from the epoch cache on every hardForkSummary call, and
+// delegating would build it twice on the past-horizon path -- the common path
+// here, which runs per transaction.
 func (c *SlotTimeConverter) SlotToTimeInEra(slot uint64) (time.Time, error) {
-	if slot > math.MaxInt64 {
-		return time.Time{}, errors.New("slot is larger than time.Duration")
-	}
-	shelleyGenesis := c.shelleyGenesis()
-	if shelleyGenesis == nil {
-		return time.Time{}, errors.New("could not get genesis config")
-	}
-	if slot == 0 {
-		return shelleyGenesis.SystemStart, nil
+	if when, handled, err := c.slotToTimePrelude(slot); handled {
+		return when, err
 	}
 	sum, err := c.hardForkSummary()
 	if err != nil {
