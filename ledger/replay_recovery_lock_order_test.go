@@ -38,8 +38,20 @@ func TestReplayRecoveryRollbackLockOrder(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	var lockOrder []string
+	var rollbackBody *ast.BlockStmt
 	ast.Inspect(file, func(node ast.Node) bool {
+		function, ok := node.(*ast.FuncDecl)
+		if ok && function.Name.Name == "rollbackPrimaryChainInSecurityParamWindows" {
+			rollbackBody = function.Body
+			return false
+		}
+		return true
+	})
+	require.NotNil(t, rollbackBody,
+		"replay recovery rollback function must remain present")
+
+	var lockOrder []string
+	ast.Inspect(rollbackBody, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
 		if !ok {
 			return true
