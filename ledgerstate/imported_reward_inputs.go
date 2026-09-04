@@ -385,6 +385,8 @@ func (b *rewardInputBundle) validate() error {
 // rewardInputStore is the slice of the metadata store this seeding needs.
 type rewardInputStore interface {
 	GetRewardSnapshot(uint64, string, types.Txn) (*models.RewardSnapshot, error)
+	SaveRewardSeedFailure(uint64, string, string, uint64, types.Txn) error
+	DeleteRewardSeedFailure(uint64, string, types.Txn) error
 	SaveRewardSnapshot(*models.RewardSnapshot, types.Txn) error
 	DeleteProvisionalRewardSnapshot(uint64, string, types.Txn) error
 	SaveRewardPoolInputs([]*models.RewardPoolInput, types.Txn) error
@@ -455,6 +457,13 @@ func seedImportedRewardInputs(
 			return fmt.Errorf(
 				"checking existing reward snapshot for epoch %d: %w",
 				c.epoch, err,
+			)
+		}
+		if err := store.DeleteRewardSeedFailure(c.epoch, "mark", txn); err != nil {
+			return fmt.Errorf(
+				"clearing prior reward seed failure for epoch %d: %w",
+				c.epoch,
+				err,
 			)
 		}
 		if existing != nil && existing.Authoritative {
@@ -544,6 +553,15 @@ func seedImportedRewardInputs(
 			continue
 		}
 		if err := bundle.validate(); err != nil {
+			if saveErr := store.SaveRewardSeedFailure(
+				c.epoch, "mark", err.Error(), capturedSlot, txn,
+			); saveErr != nil {
+				return fmt.Errorf(
+					"saving reward seed failure for epoch %d: %w",
+					c.epoch,
+					saveErr,
+				)
+			}
 			if logger != nil {
 				logger.Warn(
 					"not seeding reward inputs for an imported epoch: the derived basis does not reconcile, so that epoch's reward round will be skipped and its rewards never credited",
@@ -566,6 +584,15 @@ func seedImportedRewardInputs(
 						"checking protocol parameters for imported reward epoch %d: %w",
 						c.epoch,
 						err,
+					)
+				}
+				if saveErr := store.SaveRewardSeedFailure(
+					c.epoch, "mark", err.Error(), capturedSlot, txn,
+				); saveErr != nil {
+					return fmt.Errorf(
+						"saving reward seed failure for epoch %d: %w",
+						c.epoch,
+						saveErr,
 					)
 				}
 				if logger != nil {
@@ -601,6 +628,13 @@ func seedImportedRewardInputs(
 		); err != nil {
 			return fmt.Errorf(
 				"seeding reward stake inputs for epoch %d: %w", c.epoch, err,
+			)
+		}
+		if err := store.DeleteRewardSeedFailure(c.epoch, "mark", txn); err != nil {
+			return fmt.Errorf(
+				"clearing reward seed failure for epoch %d: %w",
+				c.epoch,
+				err,
 			)
 		}
 		if logger != nil {
