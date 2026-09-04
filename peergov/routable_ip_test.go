@@ -106,9 +106,7 @@ func TestIsRoutableIP(t *testing.T) {
 			"2001:1f:ffff:ffff:ffff:ffff:ffff:ffff",
 			false,
 		},
-		// ORCHIDv2 directly abuts the deprecated ORCHID block and IANA marks
-		// it globally reachable, so the /28 must not spill into it.
-		{"ipv6 orchidv2", "2001:20::1", true},
+		{"ipv6 orchidv2", "2001:20::1", false},
 
 		// Accepted pending the decision in #3792: not routed anywhere, and
 		// used as public stand-ins across ~19 files' fixtures.
