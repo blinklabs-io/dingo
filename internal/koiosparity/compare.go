@@ -557,8 +557,16 @@ func ComparePoolEpoch(
 			// simply not be computed yet (reference_lag, ERROR); past it, it
 			// is a genuine gap in what Dingo can answer (dingo_db_missing,
 			// ERROR).
+			// RewardsPending is the chain-position form of the same question
+			// the grace window asks, and it is the one that survives a replay:
+			// the wall-clock window compares against the epoch's real close
+			// time, which for a from-genesis replay is years ago, so it can
+			// never fire and a row Dingo has not written yet reads as a hard
+			// gap (issue #3857).
 			cat := CategoryDBMissing
-			if graceHours > 0 && !epochEndTime.IsZero() &&
+			if dingoPool.RewardsPending {
+				cat = CategoryReferenceLag
+			} else if graceHours > 0 && !epochEndTime.IsZero() &&
 				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
 				cat = CategoryReferenceLag
 			}

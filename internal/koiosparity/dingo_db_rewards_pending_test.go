@@ -72,6 +72,31 @@ func TestGetPoolEpochDataMapReportsRewardsPending(t *testing.T) {
 			"an unreadable tip must not downgrade a real divergence")
 	})
 
+	t.Run("a missing reward row before the boundary is pending", func(t *testing.T) {
+		db, gdb := openTestDingoDB(t)
+		// A reward_pool_input row so the pool is in the map at all, but no
+		// reward_pool_output row: this is the not-yet-computed case.
+		require.NoError(t, gdb.Exec(
+			`INSERT INTO reward_pool_input (pool_key_hash, epoch, delegated_stake, delegator_count)
+			 VALUES (?, ?, ?, ?)`, pool, stakeEpoch, "1000", 1).Error)
+		require.NoError(t, gdb.Exec(
+			`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
+			[]byte{0x01}, 100, 1).Error)
+		// Epoch stakeEpoch+3 exists and starts well ahead of the tip.
+		require.NoError(t, gdb.Exec(
+			`INSERT INTO epoch (epoch_id, start_slot, length_in_slots) VALUES (?, ?, ?)`,
+			stakeEpoch+3, 500_000, 86_400).Error)
+
+		m, err := db.GetPoolEpochDataMap(
+			context.Background(), stakeEpoch, paramEpoch,
+		)
+		require.NoError(t, err)
+		d := find(t, m)
+		require.False(t, d.MemberRewardPresent, "fixture must have no output row")
+		assert.True(t, d.RewardsPending,
+			"a row Dingo has not computed yet is a lag, not a gap")
+	})
+
 	t.Run("a slot without a hash is not a tip", func(t *testing.T) {
 		db, gdb := openTestDingoDB(t)
 		require.NoError(t, gdb.Exec(

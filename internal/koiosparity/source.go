@@ -283,6 +283,21 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 		tipKnown = true
 	}
 
+	// Rewards for stake epoch E are applied at the boundary into E+3, so
+	// before the node reaches that slot their absence is expected rather than a
+	// gap. When that epoch is not in the table at all the node has plainly not
+	// reached it, which is the common case for an observer near the tip.
+	epochRewardsPending := false
+	if tipKnown {
+		applyEpoch, err := meta.GetEpoch(stakeEpoch+3, txn.Metadata())
+		switch {
+		case err != nil || applyEpoch == nil:
+			epochRewardsPending = true
+		default:
+			epochRewardsPending = tipSlot < applyEpoch.StartSlot
+		}
+	}
+
 	stakeInputs, err := meta.GetRewardPoolInputs(stakeEpoch, txn.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -347,6 +362,7 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 			10,
 		)
 		data.PoolUnspendable = uint64(out.Unspendable)
+		// The row exists, so its own boundary is authoritative.
 		data.RewardsPending = tipKnown && tipSlot < out.BoundarySlot
 	}
 
@@ -365,6 +381,16 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 			err,
 		)
 	}
+	// Entries with no reward_pool_output row keep the epoch-derived answer;
+	// the loop above has already overridden those that have one.
+	if epochRewardsPending {
+		for _, data := range m {
+			if !data.MemberRewardPresent {
+				data.RewardsPending = true
+			}
+		}
+	}
+
 	if len(accountOutputs) > 0 {
 		totals := make(map[string]uint64, len(m))
 		for _, out := range accountOutputs {

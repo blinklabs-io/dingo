@@ -82,3 +82,63 @@ func TestComparePoolEpochMemberRewardsBeforeApplication(t *testing.T) {
 		}
 	})
 }
+
+// TestComparePoolEpochMissingRewardsBeforeApplication is the dingo #3857
+// regression.
+//
+// A reward_pool_output row for a stake epoch is not written until well after
+// that epoch closes, so an observer running near the tip asks about epochs
+// Dingo has not computed yet. The grace window that exists for exactly this is
+// measured in wall-clock time against the epoch's real close time, so during a
+// from-genesis replay -- where every epoch closed years ago -- it can never
+// fire, and the absence was reported as dingo_db_missing against a node that
+// was simply not there yet.
+func TestComparePoolEpochMissingRewardsBeforeApplication(t *testing.T) {
+	koios := &KoiosPoolEpoch{
+		PoolBech32:    "pool1l5u4zh84na80xr56d342d32rsdw62qycwaw97hy9wwsc6axdwla",
+		MemberRewards: "4004412",
+	}
+	// No reward_pool_output row: MemberRewardPresent is false.
+	missing := func(pending bool) *DingoPoolEpochData {
+		return &DingoPoolEpochData{RewardsPending: pending}
+	}
+	now := time.Now()
+	// An epoch that closed long ago, as every epoch of a replay has.
+	longClosed := now.Add(-1388 * 24 * time.Hour)
+
+	find := func(t *testing.T, ms []CheckMismatch) CheckMismatch {
+		t.Helper()
+		for _, m := range ms {
+			if m.Field == "member_rewards" {
+				return m
+			}
+		}
+		require.FailNow(t, "no member_rewards mismatch produced")
+		return CheckMismatch{}
+	}
+
+	t.Run("not computed yet is a lag even long after the epoch closed", func(t *testing.T) {
+		m := find(t, ComparePoolEpoch(
+			"preview", 44, koios, missing(true), now, 24, longClosed, false,
+		))
+		assert.Equal(t, CategoryReferenceLag, m.Category,
+			"the wall-clock window cannot fire in a replay; chain position must")
+	})
+
+	t.Run("past the boundary a missing row is a real gap", func(t *testing.T) {
+		m := find(t, ComparePoolEpoch(
+			"preview", 44, koios, missing(false), now, 24, longClosed, false,
+		))
+		assert.Equal(t, CategoryDBMissing, m.Category,
+			"once Dingo has had its chance, absence is a genuine gap")
+	})
+
+	t.Run("the wall-clock window still works at the tip", func(t *testing.T) {
+		m := find(t, ComparePoolEpoch(
+			"preview", 44, koios, missing(false), now, 24,
+			now.Add(-1*time.Hour), false,
+		))
+		assert.Equal(t, CategoryReferenceLag, m.Category,
+			"a recently closed epoch keeps the existing grace behaviour")
+	})
+}

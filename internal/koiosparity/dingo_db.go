@@ -153,8 +153,17 @@ type DingoPoolEpochData struct {
 	PoolUnspendable uint64
 
 	// RewardsPending reports that the node has NOT yet reached the boundary at
-	// which this stake epoch's rewards are applied
-	// (reward_pool_output.boundary_slot, three epochs after the stake epoch).
+	// which this stake epoch's rewards are applied -- three epochs after the
+	// stake epoch, taken from reward_pool_output.boundary_slot when that row
+	// exists and derived from the epoch table when it does not.
+	//
+	// The derived form is what covers a *missing* row. A reward_pool_output row
+	// for stake epoch E is not written until well after E closes, so an
+	// observer running close to the tip asks about epochs Dingo has not
+	// computed yet. The wall-clock grace window cannot recognise that during a
+	// replay, where every epoch closed years ago, so the absence was reported
+	// as dingo_db_missing against a node that was simply not there yet
+	// (issue #3857).
 	//
 	// Before that boundary the per-account spendable flags are provisional: a
 	// reward computed for a credential that deregisters in the meantime is
@@ -506,6 +515,25 @@ func (d *DingoDB) GetPoolEpochDataMap(
 		}
 	}
 
+	// Rewards for stake epoch E are applied at the boundary into E+3, so before
+	// the node reaches that slot their absence is expected rather than a gap.
+	// An epoch missing from the table means the node has plainly not reached
+	// it. Mirrors DatabaseSource; see DingoPoolEpochData.RewardsPending.
+	epochRewardsPending := false
+	if tipKnown {
+		var startSlot sql.NullInt64
+		err := d.queryRow(
+			ctx, `SELECT start_slot FROM epoch WHERE epoch_id = ?`,
+			stakeEpoch+3,
+		).Scan(&startSlot)
+		switch {
+		case err != nil || !startSlot.Valid:
+			epochRewardsPending = true
+		default:
+			epochRewardsPending = tipSlot < uint64(startSlot.Int64)
+		}
+	}
+
 	rows, err = d.query(
 		ctx,
 		`SELECT pool_key_hash, member_reward_total, unspendable, boundary_slot FROM reward_pool_output WHERE epoch = ?`,
@@ -542,6 +570,16 @@ func (d *DingoDB) GetPoolEpochDataMap(
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+
+	// Entries with no reward_pool_output row keep the epoch-derived answer; the
+	// loop above has already set those that have one from their own boundary.
+	if epochRewardsPending {
+		for _, data := range m {
+			if !data.MemberRewardPresent {
+				data.RewardsPending = true
+			}
+		}
 	}
 
 	if err := d.addSpendableMemberRewards(ctx, m, stakeEpoch); err != nil {
