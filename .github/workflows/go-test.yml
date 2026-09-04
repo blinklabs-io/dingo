@@ -25,10 +25,22 @@ permissions:
   contents: read
 
 concurrency:
-  # A superseding push or force-push must not accumulate runners, on a branch
-  # or on main. A cancelled main run still leaves the newest commit validated,
-  # which costs bisect precision on a burst of merges but never coverage.
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Pull-request runs still supersede themselves: a new push to the branch
+  # cancels the run for the commit it replaced, so a force-push or a rapid
+  # series of pushes cannot accumulate runners.
+  #
+  # Main pushes must not supersede each other. The previous fallback to
+  # github.ref put every main push in one group, and merges land faster than
+  # this suite finishes, so each merge cancelled the run in flight: 8 of the
+  # 10 main runs before this change ended cancelled. cancel-in-progress: false
+  # would not have fixed it, because GitHub keeps at most one pending run per
+  # group and cancels the earlier pending one, so intermediate commits would
+  # have been skipped by superseding instead of by cancellation. github.run_id
+  # is unique per run and defined on every event, so each main push and each
+  # workflow_dispatch gets a group of its own and runs to completion. That is
+  # what makes the main run a backstop for every merged commit rather than
+  # only for whichever commit happens to be last in a burst.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:

@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -284,12 +285,45 @@ func ValidateTxDijkstra(
 	return validatePlutusOutcome(tx, phase2Err)
 }
 
-var dijkstraPhase1UtxoValidationRules = buildIndexedUtxoValidationRules(
-	gdijkstra.UtxoValidationRules,
-	dijkstraUtxoValidatePlutusScriptsRuleIndex,
-	gdijkstra.UtxoValidatePlutusScripts,
-	"dijkstra.UtxoValidatePlutusScripts",
-)
+var dijkstraPhase1UtxoValidationRules = buildDijkstraValidationRules()
+
+func buildDijkstraValidationRules() []indexedUtxoValidationRule {
+	// Skips are resolved by upstream rule Id, never by validation function.
+	// Dijkstra reimplements several rules that Conway owned in earlier
+	// releases, so the package a rule's function lives in is not stable
+	// either.
+	skipRuleIds := []lcommon.UtxoValidationRuleId{
+		lcommon.UtxoValidationRulePlutusScripts,
+		lcommon.UtxoValidationRuleCommitteeCertificates,
+		lcommon.UtxoValidationRuleUnknownVoters,
+	}
+	descriptors := gdijkstra.UtxoValidationRuleDescriptors()
+	indexes := make([]int, len(skipRuleIds))
+	for i := range skipRuleIds {
+		indexes[i] = resolveUtxoValidationSkipIndex(
+			descriptors, gdijkstra.UtxoValidationRules, skipRuleIds[i],
+		)
+	}
+	ret := buildIndexedUtxoValidationRulesWithSkips(
+		descriptors,
+		gdijkstra.UtxoValidationRules,
+		skipRuleIds,
+	)
+	ret = append(ret,
+		indexedUtxoValidationRule{
+			index:          indexes[1],
+			validationFunc: validateCommitteeCertificates,
+		},
+		indexedUtxoValidationRule{
+			index:          indexes[2],
+			validationFunc: validateUnknownVoters,
+		},
+	)
+	slices.SortFunc(ret, func(a, b indexedUtxoValidationRule) int {
+		return a.index - b.index
+	})
+	return ret
+}
 
 func dijkstraPhase1ValidationRules() []indexedUtxoValidationRule {
 	return dijkstraPhase1UtxoValidationRules

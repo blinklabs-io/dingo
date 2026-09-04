@@ -166,16 +166,22 @@ func writeAccountImportBaseline(
 	if err != nil {
 		return err
 	}
+	var deposit any
+	if account.ImportDeposit != nil {
+		deposit = decimalUint64(*account.ImportDeposit)
+	}
 	if _, err := db.ExecContext(ctx, `
 INSERT INTO account_import_baseline (
-    credential_tag, staking_key, pool, drep, drep_type, active, added_slot
-) VALUES (?, ?, ?, ?, ?, ?, ?)
+    credential_tag, staking_key, pool, drep, drep_type, active, added_slot,
+    deposit_amount
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
     pool = excluded.pool,
     drep = excluded.drep,
     drep_type = excluded.drep_type,
     active = excluded.active,
-    added_slot = excluded.added_slot`,
+    added_slot = excluded.added_slot,
+    deposit_amount = excluded.deposit_amount`,
 		account.CredentialTag,
 		account.StakingKey,
 		nullBytes(account.Pool),
@@ -183,10 +189,63 @@ ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
 		drepType,
 		account.Active,
 		addedSlot,
+		deposit,
 	); err != nil {
 		return fmt.Errorf("write account import baseline: %w", err)
 	}
 	return nil
+}
+
+// GetAccountImportRegistrationByCredential returns the virtual registration
+// established by an import or genesis baseline. A nil Deposit means the
+// baseline predates deposit preservation; callers must not substitute the
+// current protocol-parameter value for an unknown historical deposit.
+func (s *Store) GetAccountImportRegistrationByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	txn types.Txn,
+) (*models.AccountImportRegistration, error) {
+	if len(stakingKey) == 0 {
+		return nil, nil
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		active    bool
+		addedSlot int64
+		raw       sql.NullString
+	)
+	err = db.QueryRowContext(ctx, `
+SELECT active, added_slot, deposit_amount
+FROM account_import_baseline
+WHERE credential_tag = ? AND staking_key = ?`,
+		credentialTag,
+		stakingKey,
+	).Scan(&active, &addedSlot, &raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read account import registration: %w", err)
+	}
+	if !active {
+		return nil, nil
+	}
+	slot, err := checkedUint64(addedSlot)
+	if err != nil {
+		return nil, fmt.Errorf("read account import registration: %w", err)
+	}
+	ret := &models.AccountImportRegistration{AddedSlot: slot}
+	if raw.Valid {
+		deposit, err := parseUint64("account import deposit", raw.String)
+		if err != nil {
+			return nil, err
+		}
+		ret.Deposit = &deposit
+	}
+	return ret, nil
 }
 
 func readAccountImportBaseline(
@@ -290,6 +349,32 @@ func (s *Store) GetAccountByCredential(
 	return accountFromSQLite(row)
 }
 
+// accountsByCredentialChunkQuery builds the SELECT for one credential_tag
+// chunk of GetAccountsByCredential: a single-column staking_key IN (...)
+// predicate against idx_account_credential, never a per-ref
+// (credential_tag = ? AND staking_key = ?) OR ... predicate. Split out so a
+// test can pin the query's shape directly — an EXPLAIN QUERY PLAN assertion
+// is not durable here, since the chosen plan depends on table size and
+// whether ANALYZE has run, not on which of the two predicate forms is used.
+func accountsByCredentialChunkQuery(
+	tag uint8,
+	keys [][]byte,
+	includeInactive bool,
+) (string, []any) {
+	args := make([]any, 0, len(keys)+1)
+	args = append(args, tag)
+	for _, key := range keys {
+		args = append(args, key)
+	}
+	query := "SELECT " + sqliteAccountColumns +
+		" FROM account WHERE credential_tag = ? AND staking_key IN (" +
+		bindPlaceholders(len(keys)) + ")"
+	if !includeInactive {
+		query += " AND active = TRUE"
+	}
+	return query, args
+}
+
 func (s *Store) GetAccountsByCredential(
 	refs []models.StakeCredentialRef,
 	includeInactive bool,
@@ -303,54 +388,63 @@ func (s *Store) GetAccountsByCredential(
 	if err != nil {
 		return nil, err
 	}
-	chunkSize := s.dialect.ParameterLimit() / 2
-	for start := 0; start < len(refs); start += chunkSize {
-		end := min(start+chunkSize, len(refs))
-		chunk := refs[start:end]
-		predicates := make([]string, 0, len(chunk))
-		args := make([]any, 0, len(chunk)*2)
-		for _, ref := range chunk {
-			predicates = append(
-				predicates,
-				"(credential_tag = ? AND staking_key = ?)",
+	// Grouped by credential_tag and queried as a single-column staking_key IN
+	// (...), matching the unique index idx_account_credential(credential_tag,
+	// staking_key) so each chunk is a single index range scan.
+	//
+	// (credential_tag = ? AND staking_key = ?) OR ... per ref is drivable
+	// from the same index via SQLite's multi-index OR optimization, but only
+	// once sqlite_stat1 exists. Without statistics the AND active = TRUE
+	// conjunct leads the planner to idx_account_active_pool_staking_key
+	// (active=?) instead, and the whole OR chain is evaluated per row:
+	// O(active rows x refs) per chunk. ANALYZE only runs at Mithril sync and
+	// before backfill, so a genesis-synced node is in exactly that state.
+	byTag := make(map[uint8][][]byte)
+	for _, ref := range refs {
+		byTag[ref.Tag] = append(byTag[ref.Tag], ref.Key)
+	}
+	// One bound parameter is reserved for credential_tag; the rest of the
+	// chunk is the staking_key IN list.
+	chunkSize := max(1, s.dialect.ParameterLimit()-1)
+	for tag, keys := range byTag {
+		for start := 0; start < len(keys); start += chunkSize {
+			end := min(start+chunkSize, len(keys))
+			query, args := accountsByCredentialChunkQuery(
+				tag,
+				keys[start:end],
+				includeInactive,
 			)
-			args = append(args, ref.Tag, ref.Key)
-		}
-		query := "SELECT " + sqliteAccountColumns + " FROM account WHERE (" +
-			strings.Join(predicates, " OR ") + ")"
-		if !includeInactive {
-			query += " AND active = TRUE"
-		}
-		rows, err := db.QueryContext(
-			ctx,
-			s.dialect.Rebind(query),
-			args...,
-		)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			row, err := scanSQLiteAccount(rows)
+			rows, err := db.QueryContext(
+				ctx,
+				s.dialect.Rebind(query),
+				args...,
+			)
 			if err != nil {
-				rows.Close()
 				return nil, err
 			}
-			account, err := accountFromSQLite(row)
-			if err != nil {
-				rows.Close()
+			for rows.Next() {
+				row, err := scanSQLiteAccount(rows)
+				if err != nil {
+					rows.Close()
+					return nil, err
+				}
+				account, err := accountFromSQLite(row)
+				if err != nil {
+					rows.Close()
+					return nil, err
+				}
+				key := models.NewStakeCredentialRef(
+					account.CredentialTag,
+					account.StakingKey,
+				).MapKey()
+				ret[key] = account
+			}
+			if err := rows.Close(); err != nil {
 				return nil, err
 			}
-			key := models.NewStakeCredentialRef(
-				account.CredentialTag,
-				account.StakingKey,
-			).MapKey()
-			ret[key] = account
-		}
-		if err := rows.Close(); err != nil {
-			return nil, err
-		}
-		if err := rows.Err(); err != nil {
-			return nil, err
+			if err := rows.Err(); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return ret, nil
@@ -592,6 +686,80 @@ WHERE active = TRUE AND (`+predicate+")"),
 		return fmt.Errorf("clear account import baselines: %w", err)
 	}
 	return nil
+}
+
+// ClearDelegationsToRetiredPool removes every account delegation pointing at a
+// pool reaped at an epoch boundary, the delegation half of the Shelley POOLREAP
+// transition (domain-restrict the delegation map by the retired pools, Shelley
+// spec Fig. 41).
+//
+// Called from ledger.applyPoolRetirements with the same boundary slot the
+// deposit refund is written at. Stamping added_slot with that slot is what
+// makes the clear rollback-safe: RestoreAccountStateAtSlot only revisits
+// accounts whose added_slot is past the rollback target, and re-derives the
+// delegation from the certificates surviving there — so a rollback to before
+// the reap restores the delegation, and one to after it leaves the account
+// cleared. Without the stamp the account is never revisited and stays
+// un-delegated with no certificate saying so.
+//
+// The reward_live_stake aggregate carries the same attribution and is cleared
+// with it: it mirrors account.pool only when refreshRewardLiveStakeAggregate
+// runs for the credential, which a reap does not trigger, and it is what the
+// boundary snapshot actually reads.
+//
+// The import baseline is deliberately left alone. It records the delegation a
+// Mithril snapshot observed at its anchor, which is a statement about a slot
+// before this boundary; a rollback past the reap must restore exactly that.
+func (s *Store) ClearDelegationsToRetiredPool(
+	poolKeyHash []byte,
+	boundarySlot uint64,
+	txn types.Txn,
+) error {
+	if len(poolKeyHash) == 0 {
+		return nil
+	}
+	slotValue, err := checkedInt64(boundarySlot)
+	if err != nil {
+		return fmt.Errorf("clear delegations to retired pool: %w", err)
+	}
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			if _, err := db.ExecContext(ctx, `
+UPDATE account SET pool = NULL, added_slot = ?
+WHERE pool = ?`,
+				slotValue,
+				poolKeyHash,
+			); err != nil {
+				return fmt.Errorf(
+					"clear delegations to retired pool: %w",
+					err,
+				)
+			}
+			// reward_live_stake mirrors account.pool, but only when
+			// refreshRewardLiveStakeAggregate runs for the credential, and a
+			// reap triggers no such refresh. It is the aggregate the boundary
+			// snapshot reads (GetLiveStakeInputsForPools selects on
+			// pool_key_hash), so leaving it behind would keep feeding the
+			// stake distribution the delegation just removed. The values match
+			// what a refresh would compute for an account with no pool.
+			if _, err := db.ExecContext(ctx, `
+UPDATE reward_live_stake
+SET pool_key_hash = NULL, pool_delegation_slot = 0,
+    pool_delegation_block_index = 0, pool_delegation_cert_index = 0,
+    updated_slot = ?
+WHERE pool_key_hash = ?`,
+				slotValue,
+				poolKeyHash,
+			); err != nil {
+				return fmt.Errorf(
+					"clear live stake attribution to retired pool: %w",
+					err,
+				)
+			}
+			return nil
+		},
+	)
 }
 
 // DeactivateAccounts tombstones the given credentials and their import
@@ -885,6 +1053,29 @@ WHERE credential_tag = ? AND staking_key = ?`,
 							registration.position,
 							deregistration.position,
 						) > 0)
+				// A delegation certificate is not the last word on the
+				// delegation: POOLREAP removes the delegations pointing at a
+				// pool reaped at an epoch boundary and writes no certificate
+				// of its own, so a certificate predating a reap that still
+				// stands at the rollback slot must not put the account back on
+				// that pool. Rolling back past the reap is the other
+				// direction, and the boundary check below excludes it, so the
+				// certificate is authoritative again there.
+				if hasPool && len(pool.value) > 0 {
+					reaped, err := poolReapedAfterDelegation(
+						ctx,
+						db,
+						pool.value,
+						pool.position.slot,
+						slot,
+					)
+					if err != nil {
+						return err
+					}
+					if reaped {
+						pool.value = nil
+					}
+				}
 				// Only rewrite pool/drep when their value at the rollback slot
 				// is actually known: from a certificate, from the baseline, or
 				// from the account being deregistered.
@@ -959,6 +1150,94 @@ type accountRestoreEvent struct {
 	position  accountCertificatePosition
 	value     []byte
 	valueType uint64
+}
+
+// poolReapedAfterDelegation reports whether poolKeyHash was reaped at an epoch
+// boundary strictly after delegationSlot and at or before slot.
+//
+// A reap removes the delegations pointing at the pool (POOLREAP; see
+// ClearDelegationsToRetiredPool) but writes no certificate, so the certificate
+// derivation RestoreAccountStateAtSlot performs cannot see it: the pre-reap
+// delegation certificate is still the latest one at the rollback slot and would
+// put the account straight back on the reaped pool, returning the stake the
+// reap removed to the pool distribution.
+//
+// The reap boundary is the first slot of the retirement certificate's epoch,
+// and the certificate only takes effect there if it is the pool's latest
+// certificate before that boundary. Both a later retirement (which moves the
+// retirement out to its own epoch) and a later registration (which cancels it)
+// supersede it. That is the same rule GetPoolsRetiringAtEpoch encodes by
+// selecting the latest retirement and registration before the boundary and
+// requiring the retirement to win and to name that epoch: later added_slot
+// wins, then later block index, then later certificate index.
+//
+// Rows above the rollback slot are excluded, so this sees exactly the
+// certificate history that survives the rollback.
+func poolReapedAfterDelegation(
+	ctx context.Context,
+	db queryer,
+	poolKeyHash []byte,
+	delegationSlot uint64,
+	slot uint64,
+) (bool, error) {
+	if len(poolKeyHash) == 0 {
+		return false, nil
+	}
+	var reaped bool
+	if err := db.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1
+    FROM pool_retirement rt
+    JOIN pool p ON p.id = rt.pool_id
+    JOIN epoch e ON e.epoch_id = rt.epoch
+    LEFT JOIN certs c ON c.id = rt.certificate_id
+    LEFT JOIN "transaction" t ON t.id = c.transaction_id
+    WHERE p.pool_key_hash = ?
+      AND rt.added_slot <= ?
+      AND e.start_slot > ?
+      AND e.start_slot <= ?
+      AND NOT EXISTS (
+          SELECT 1
+          FROM pool_registration pr
+          LEFT JOIN certs c2 ON c2.id = pr.certificate_id
+          LEFT JOIN "transaction" t2 ON t2.id = c2.transaction_id
+          WHERE pr.pool_id = rt.pool_id
+            AND pr.added_slot < e.start_slot
+            AND (
+                pr.added_slot > rt.added_slot
+                OR (pr.added_slot = rt.added_slot
+                    AND COALESCE(t2.block_index, 0) > COALESCE(t.block_index, 0))
+                OR (pr.added_slot = rt.added_slot
+                    AND COALESCE(t2.block_index, 0) = COALESCE(t.block_index, 0)
+                    AND COALESCE(c2.cert_index, 0) > COALESCE(c.cert_index, 0))
+            )
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM pool_retirement rt2
+          LEFT JOIN certs c3 ON c3.id = rt2.certificate_id
+          LEFT JOIN "transaction" t3 ON t3.id = c3.transaction_id
+          WHERE rt2.pool_id = rt.pool_id
+            AND rt2.id <> rt.id
+            AND rt2.added_slot < e.start_slot
+            AND (
+                rt2.added_slot > rt.added_slot
+                OR (rt2.added_slot = rt.added_slot
+                    AND COALESCE(t3.block_index, 0) > COALESCE(t.block_index, 0))
+                OR (rt2.added_slot = rt.added_slot
+                    AND COALESCE(t3.block_index, 0) = COALESCE(t.block_index, 0)
+                    AND COALESCE(c3.cert_index, 0) > COALESCE(c.cert_index, 0))
+            )
+      )
+)`,
+		poolKeyHash,
+		slot,
+		delegationSlot,
+		slot,
+	).Scan(&reaped); err != nil {
+		return false, fmt.Errorf("check pool reaped after delegation: %w", err)
+	}
+	return reaped, nil
 }
 
 func latestAccountEvent(

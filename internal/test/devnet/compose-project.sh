@@ -166,6 +166,8 @@ _DEVNET_PORT_VARS=(
   DEVNET_DINGO_PORT
   DEVNET_CARDANO_PORT
   DEVNET_RELAY_PORT
+  DEVNET_DINGO_NTC_PORT
+  DEVNET_CARDANO_NTC_PORT
 )
 
 # True (exit 0) when nothing is listening on 127.0.0.1:<port>. Best-effort,

@@ -1552,6 +1552,85 @@ func TestPeerGovernor_TestPeer_NoConnManager(t *testing.T) {
 	assert.Contains(t, err.Error(), "no test function or connection manager")
 }
 
+// TestPeerGovernor_Reconcile_PrunesStaleTestOnlyPeer verifies that a
+// TestPeer-only probe entry (PeerSourceUnknown, never actually connected) is
+// removed once its cached result has outlived TestCooldown, and that a
+// fresh entry survives reconcile until then.
+func TestPeerGovernor_Reconcile_PrunesStaleTestOnlyPeer(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		TestCooldown: time.Minute,
+		PeerTestFunc: func(address string) error {
+			return nil
+		},
+	})
+
+	result, err := pg.TestPeer("44.0.0.1:3001")
+	assert.True(t, result)
+	assert.NoError(t, err)
+	assert.Len(t, pg.GetPeers(), 1)
+
+	// A test result still inside its cooldown window must survive
+	// reconcile; repeated passes must not misbehave either.
+	pg.reconcile(t.Context())
+	pg.reconcile(t.Context())
+	assert.Len(t, pg.GetPeers(), 1)
+
+	// Backdate the cached result past the cooldown (white-box: same
+	// package) instead of sleeping in the test.
+	pg.mu.Lock()
+	for _, peer := range pg.peers {
+		peer.LastTestTime = time.Now().Add(-2 * pg.config.TestCooldown)
+	}
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+	assert.Empty(t, pg.GetPeers())
+
+	// A second reconcile over an already-pruned list must stay stable.
+	pg.reconcile(t.Context())
+	assert.Empty(t, pg.GetPeers())
+}
+
+// TestPeerGovernor_Reconcile_PrunedTestPeerAllowsReplacement verifies the
+// concrete harm of the leak: while the stale PeerSourceUnknown probe entry
+// is retained, AddPeer's dedupe-by-address check matches it and silently
+// refuses to admit the same address under its real source. Pruning the
+// stale entry must let a subsequent, real discovery of that address replace
+// it.
+func TestPeerGovernor_Reconcile_PrunedTestPeerAllowsReplacement(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		TestCooldown: time.Minute,
+		PeerTestFunc: func(address string) error {
+			return nil
+		},
+	})
+
+	_, err := pg.TestPeer("44.0.0.1:3001")
+	require.NoError(t, err)
+	require.Len(t, pg.GetPeers(), 1)
+	require.EqualValues(t, PeerSourceUnknown, pg.GetPeers()[0].Source)
+
+	// Before the stale entry is pruned, real discovery of the same address
+	// is blocked.
+	require.NoError(t, pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip))
+	require.Len(t, pg.GetPeers(), 1)
+	require.EqualValues(t, PeerSourceUnknown, pg.GetPeers()[0].Source)
+
+	pg.mu.Lock()
+	for _, peer := range pg.peers {
+		peer.LastTestTime = time.Now().Add(-2 * pg.config.TestCooldown)
+	}
+	pg.mu.Unlock()
+	pg.reconcile(t.Context())
+	require.Empty(t, pg.GetPeers())
+
+	require.NoError(t, pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip))
+	require.Len(t, pg.GetPeers(), 1)
+	require.EqualValues(t, PeerSourceP2PGossip, pg.GetPeers()[0].Source)
+}
+
 func TestPeerGovernor_DenyPeer(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -7515,6 +7594,7 @@ func TestAddLedgerPeer_RejectsNonRoutable(t *testing.T) {
 	assert.False(t, added)
 
 	assert.Empty(t, pg.GetPeers())
+	assert.Empty(t, pg.ledgerKnownAddrs)
 }
 
 func TestAddLedgerPeer_AcceptsRoutable(t *testing.T) {
@@ -7525,6 +7605,8 @@ func TestAddLedgerPeer_AcceptsRoutable(t *testing.T) {
 	added := pg.addLedgerPeer("44.0.0.1:3001")
 	assert.True(t, added)
 	assert.Len(t, pg.GetPeers(), 1)
+	_, retained := pg.ledgerKnownAddrs["44.0.0.1:3001"]
+	assert.True(t, retained, "accepted ledger peer must be retained")
 }
 
 // --- Phase 2: inbound admission metadata & identity ---------------------

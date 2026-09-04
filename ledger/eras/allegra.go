@@ -161,18 +161,11 @@ var allegraUtxoValidationRules = buildAllegraValidationRules()
 // path, including for transactions rebuilt from block components.
 func buildAllegraValidationRules() []indexedUtxoValidationRule {
 	return buildIndexedUtxoValidationRulesWithSkips(
+		allegra.UtxoValidationRuleDescriptors(),
 		allegra.UtxoValidationRules,
-		[]utxoValidationRuleSkip{
-			{
-				index:          allegraUtxoValidateFeeTooSmallRuleIndex,
-				validationFunc: allegra.UtxoValidateFeeTooSmallUtxo,
-				name:           "allegra.UtxoValidateFeeTooSmallUtxo",
-			},
-			{
-				index:          allegraUtxoValidateMaxTxSizeRuleIndex,
-				validationFunc: allegra.UtxoValidateMaxTxSizeUtxo,
-				name:           "allegra.UtxoValidateMaxTxSizeUtxo",
-			},
+		[]lcommon.UtxoValidationRuleId{
+			lcommon.UtxoValidationRuleFeeTooSmall,
+			lcommon.UtxoValidationRuleMaxTxSize,
 		},
 	)
 }

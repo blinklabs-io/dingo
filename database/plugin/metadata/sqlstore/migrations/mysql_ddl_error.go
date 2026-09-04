@@ -45,13 +45,25 @@ func isMySQLDDLAlreadyAppliedOnConn(
 ) bool {
 	var mysqlErr *mysqldriver.MySQLError
 	if !errors.As(err, &mysqlErr) ||
-		(mysqlErr.Number != 1061 && mysqlErr.Number != 1826) {
+		(mysqlErr.Number != 1060 && mysqlErr.Number != 1061 &&
+			mysqlErr.Number != 1826) {
 		return false
 	}
 	if conn == nil {
 		// Without a connection the existing object cannot be inspected safely;
 		// never turn an unrelated duplicate-definition error into a no-op.
 		return false
+	}
+	// 1060 is a duplicate column, raised when an ADD COLUMN expand statement
+	// replays after a crash between the DDL and the phase advance.
+	if mysqlErr.Number == 1060 {
+		table, column, ok := parseAddColumnStatement(statement)
+		if !ok {
+			return false
+		}
+		var exists int
+		return conn.QueryRowContext(ctx, `SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ? LIMIT 1`, table, column).Scan(&exists) == nil &&
+			exists == 1
 	}
 	match := mysqlDDLObjectPattern.FindStringSubmatch(statement)
 	if len(match) != 3 {

@@ -225,6 +225,7 @@ type LeiosCertificateProvider interface {
 	EligibleCertifiedEndorserBlocks() []LeiosCertifiedEndorserBlock
 	CertifiedEndorserBlockTxHashes(
 		ebHash lcommon.Blake2b256,
+		ebSlot uint64,
 	) (hashes []string, ok bool)
 	MarkEndorserBlockEmbedded(ebHash lcommon.Blake2b256)
 }
@@ -765,11 +766,16 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		f.incCouldNotForge()
 		f.logger.Error(
 			"forge skip: operational certificate expired; rotate the operational certificate",
-			"slot", currentSlot,
-			"current_kes_period", kesPeriod,
-			"opcert_start_period", opCertStart,
-			"opcert_expiry_period", opCertExpiry,
-			"max_kes_evolutions", maxEvolutions,
+			"slot",
+			currentSlot,
+			"current_kes_period",
+			kesPeriod,
+			"opcert_start_period",
+			opCertStart,
+			"opcert_expiry_period",
+			opCertExpiry,
+			"max_kes_evolutions",
+			maxEvolutions,
 		)
 		return nil
 	}
@@ -805,9 +811,12 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		f.incCouldNotForge()
 		f.logger.Error(
 			"forge skip: credential generation became invalid during leader selection",
-			"slot", currentSlot,
-			"credential_generation", generation.id,
-			"error", err,
+			"slot",
+			currentSlot,
+			"credential_generation",
+			generation.id,
+			"error",
+			err,
 		)
 		return nil
 	}
@@ -831,13 +840,16 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return nil
 	}
 
-	leiosBlockData, embeddedEb := f.leiosBlockDataForSlot(currentSlot)
+	leiosBlockData, embeddedEb, embeddedEbSlot := f.leiosBlockDataForSlot(
+		currentSlot,
+	)
 	if f.leiosChecker != nil {
 		var excludedTxHashes map[string]struct{}
 		canAnnounce := true
 		if embeddedEb != nil {
 			hashes, ok := f.leiosCerts.CertifiedEndorserBlockTxHashes(
 				*embeddedEb,
+				embeddedEbSlot,
 			)
 			if !ok {
 				f.logger.Warn(
@@ -1032,9 +1044,9 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 
 func (f *BlockForger) leiosBlockDataForSlot(
 	slot uint64,
-) (LeiosBlockData, *lcommon.Blake2b256) {
+) (LeiosBlockData, *lcommon.Blake2b256, uint64) {
 	if f.leiosCerts == nil {
-		return LeiosBlockData{}, nil
+		return LeiosBlockData{}, nil, 0
 	}
 	parentRbHash, parentHash, ok, err := f.leiosParent.ParentLeiosAnnouncement()
 	if err != nil {
@@ -1045,7 +1057,7 @@ func (f *BlockForger) leiosBlockDataForSlot(
 			"error",
 			err,
 		)
-		return LeiosBlockData{}, nil
+		return LeiosBlockData{}, nil, 0
 	}
 	if !ok {
 		f.logger.Debug(
@@ -1053,7 +1065,7 @@ func (f *BlockForger) leiosBlockDataForSlot(
 			"slot",
 			slot,
 		)
-		return LeiosBlockData{}, nil
+		return LeiosBlockData{}, nil, 0
 	}
 	eligible := f.leiosCerts.EligibleCertifiedEndorserBlocks()
 	for _, eb := range eligible {
@@ -1072,9 +1084,9 @@ func (f *BlockForger) leiosBlockDataForSlot(
 			"eb_slot", eb.SlotNo,
 			"eb_hash", eb.EndorserBlockHash.String(),
 		)
-		return LeiosBlockData{Certificate: eb.Certificate}, &hash
+		return LeiosBlockData{Certificate: eb.Certificate}, &hash, eb.SlotNo
 	}
-	return LeiosBlockData{}, nil
+	return LeiosBlockData{}, nil, 0
 }
 
 func (f *BlockForger) buildBlock(
@@ -1504,15 +1516,22 @@ func buildLeiosEB(
 	// keeping body i aligned with reference i.
 	bodies = make([][]byte, 0, len(txs))
 	for _, tx := range txs {
-		raw, ok := validLeiosTransactionHash(tx.Hash)
-		if !ok || len(tx.Cbor) == 0 || len(tx.Cbor) > math.MaxUint16 {
+		// The manifest reference is content-addressed by (hash, size) over
+		// the FULL serialized transaction: TransactionSize is len(tx.Cbor),
+		// so TransactionHash must be the hash of that same full CBOR, not the
+		// Cardano tx-id / body hash. This matches the fetch-side validator
+		// (validateLeiosEndorserBlockTxs) and Haskell reference nodes, so a
+		// peer fetching a locally forged EB validates it instead of rejecting
+		// every tx (blinklabs-io/dingo#3641).
+		if !validLeiosTransactionHash(tx.Hash) ||
+			len(tx.Cbor) == 0 || len(tx.Cbor) > math.MaxUint16 {
 			continue
 		}
 		// Bounded above by the MaxUint16 check on len(tx.Cbor) above. Kept
 		// on one line so the directive stays attached to the conversion.
 		size := uint16(len(tx.Cbor)) // #nosec G115
 		refs = append(refs, lcommon.LeiosTransactionReference{
-			TransactionHash: lcommon.NewBlake2b256(raw),
+			TransactionHash: lcommon.Blake2b256Hash(tx.Cbor),
 			TransactionSize: size,
 		})
 		bodies = append(bodies, tx.Cbor)
@@ -1529,14 +1548,14 @@ func buildLeiosEB(
 	return ebCbor, h.Bytes(), bodies, nil
 }
 
-func validLeiosTransactionHash(hash string) ([]byte, bool) {
+func validLeiosTransactionHash(hash string) bool {
 	raw, err := hex.DecodeString(hash)
-	return raw, err == nil && len(raw) == 32
+	return err == nil && len(raw) == 32
 }
 
 func validLeiosTransactionReference(tx MempoolTransaction) bool {
-	_, hashOK := validLeiosTransactionHash(tx.Hash)
-	return hashOK && len(tx.Cbor) > 0 && len(tx.Cbor) <= math.MaxUint16
+	return validLeiosTransactionHash(tx.Hash) && len(tx.Cbor) > 0 &&
+		len(tx.Cbor) <= math.MaxUint16
 }
 
 // modeString returns a string representation of the forging mode.

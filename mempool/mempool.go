@@ -47,6 +47,16 @@ const (
 	DefaultCleanupInterval      = 1 * time.Minute
 	DefaultRevalidationDeltaCap = 64
 	DefaultConsumerCacheSize    = 1024
+	defaultConsumerCacheShare   = 4
+	// minConsumerCacheBytes floors the per-consumer relay cache budget derived
+	// from MempoolCapacity when ConsumerCacheBytes is left at zero. NextTx
+	// permanently skips any body whose size exceeds this budget, so an
+	// unfloored default derived from a small MempoolCapacity silently and
+	// permanently excludes ordinary transactions from relay to that consumer.
+	// 16 KiB comfortably holds a typical single transaction body without
+	// coupling the mempool package to a ledger protocol parameter. An
+	// operator's explicit ConsumerCacheBytes is left as configured.
+	minConsumerCacheBytes = 16 * 1024
 	// defaultRevalidationJournalCap bounds the mutation journal a revalidation
 	// pass may accumulate. A mempoolMutation is 40 bytes, so the backing slice
 	// tops out near 42 MiB, and each entry additionally pins the transaction it
@@ -79,6 +89,7 @@ type Consumer interface {
 	GetTxFromCache(string) *MempoolTransaction
 	ClearCache()
 	RemoveTxFromCache(string)
+	AcknowledgeOffered(count int)
 }
 
 // Service is the domain-owned mempool capability consumed by node wiring,
@@ -134,7 +145,10 @@ type MempoolConfig struct {
 	// ConsumerCacheSize bounds the number of transaction bodies retained per
 	// transaction-submission consumer. Zero uses DefaultConsumerCacheSize.
 	ConsumerCacheSize int
-	CurrentSlotFunc   func() uint64 // returns current slot for early TX rejection
+	// ConsumerCacheBytes bounds retained transaction body bytes per consumer.
+	// Zero uses one quarter of MempoolCapacity.
+	ConsumerCacheBytes int64
+	CurrentSlotFunc    func() uint64 // returns current slot for early TX rejection
 }
 
 type Mempool struct {
@@ -145,6 +159,11 @@ type Mempool struct {
 		txsEvicted      prometheus.Counter
 		txsExpired      prometheus.Counter
 		implementation  prometheus.Gauge
+		// consumerCacheBytesSkipped counts transaction bodies permanently
+		// skipped by a consumer's relay cursor for exceeding its per-consumer
+		// byte budget. A nonzero rate means relay to that consumer has gone
+		// silent for those transactions with no other visible symptom.
+		consumerCacheBytesSkipped prometheus.Counter
 	}
 	validator              TxValidator
 	implementation         Implementation
@@ -178,11 +197,14 @@ type Mempool struct {
 	// actually timed out rather than whichever caller happens to check it.
 	stopTimeoutErr atomic.Pointer[error]
 
-	workerWG        sync.WaitGroup
-	consumersMutex  sync.Mutex
-	overlay         *utxoOverlay
-	dag             *transactionDAG
-	headroomChanged chan struct{}
+	workerWG          sync.WaitGroup
+	consumersMutex    sync.Mutex
+	relayCacheMutex   sync.Mutex
+	relayCacheBytes   int64
+	relayCacheChanged chan struct{}
+	overlay           *utxoOverlay
+	dag               *transactionDAG
+	headroomChanged   chan struct{}
 
 	// rebuildMutex permits one double-buffer rebuild at a time. mutationSeq and
 	// mutationJournal are protected by mutationMutex and let that rebuild catch
@@ -588,6 +610,7 @@ func newMempool(
 		implementation:         implementation,
 		config:                 config,
 		done:                   make(chan struct{}),
+		relayCacheChanged:      make(chan struct{}),
 		transactionTTL:         transactionTTL,
 		cleanupInterval:        cleanupInterval,
 		evictionWatermark:      evictionWatermark,
@@ -648,6 +671,12 @@ func newMempool(
 			Help: "total transactions expired from mempool by TTL",
 		},
 	)
+	m.metrics.consumerCacheBytesSkipped = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_metrics_consumerCacheBytesSkippedNum_int",
+			Help: "total tx bodies skipped for exceeding a consumer's byte budget",
+		},
+	)
 	m.metrics.implementation = promautoFactory.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "dingo_metrics_mempool_info",
@@ -699,7 +728,11 @@ func (m *Mempool) AddConsumer(connId ouroboros.ConnectionId) *MempoolConsumer {
 	if consumer := m.consumers[connId]; consumer != nil {
 		return consumer
 	}
-	consumer := newConsumer(m, m.config.ConsumerCacheSize)
+	consumer := newConsumer(
+		m,
+		m.config.ConsumerCacheSize,
+		m.config.ConsumerCacheBytes,
+	)
 	m.consumers[connId] = consumer
 	return consumer
 }
@@ -721,7 +754,38 @@ func (m *Mempool) RemoveConsumer(connId ouroboros.ConnectionId) {
 	consumer := m.consumers[connId]
 	delete(m.consumers, connId)
 	m.consumersMutex.Unlock()
-	consumer.cancel()
+	if consumer != nil {
+		consumer.cancel()
+		consumer.ClearCache()
+	}
+}
+
+// reserveRelayCacheBytes charges retained transaction bytes across every
+// consumer. A consumer also applies this same limit independently, so neither
+// one connection nor all connections together can retain more transaction
+// body data than the configured mempool capacity.
+func (m *Mempool) reserveRelayCacheBytes(size int64) (bool, <-chan struct{}) {
+	m.relayCacheMutex.Lock()
+	defer m.relayCacheMutex.Unlock()
+	if size > m.config.MempoolCapacity-m.relayCacheBytes {
+		return false, m.relayCacheChanged
+	}
+	m.relayCacheBytes += size
+	return true, nil
+}
+
+func (m *Mempool) releaseRelayCacheBytes(size int64) {
+	if size <= 0 {
+		return
+	}
+	m.relayCacheMutex.Lock()
+	m.relayCacheBytes -= size
+	if m.relayCacheBytes < 0 {
+		m.relayCacheBytes = 0
+	}
+	close(m.relayCacheChanged)
+	m.relayCacheChanged = make(chan struct{})
+	m.relayCacheMutex.Unlock()
 }
 
 func (m *Mempool) Stop(ctx context.Context) error {
@@ -820,6 +884,10 @@ type ProviderConfig struct {
 	EvictionWatermark    float64 `yaml:"evictionWatermark"`
 	RejectionWatermark   float64 `yaml:"rejectionWatermark"`
 	RevalidationDeltaCap int     `yaml:"revalidationDeltaCap"`
+	// ConsumerCacheBytes bounds retained transaction body bytes per relay
+	// consumer. Zero uses one quarter of Capacity; see
+	// MempoolConfig.ConsumerCacheBytes.
+	ConsumerCacheBytes int64 `yaml:"consumerCacheBytes"`
 }
 
 // ProviderDependencies are runtime dependencies assembled after ledger and
@@ -877,6 +945,7 @@ func registerProvider(
 				EvictionWatermark:    cfg.EvictionWatermark,
 				RejectionWatermark:   cfg.RejectionWatermark,
 				RevalidationDeltaCap: cfg.RevalidationDeltaCap,
+				ConsumerCacheBytes:   cfg.ConsumerCacheBytes,
 				CurrentSlotFunc:      deps.CurrentSlotFunc,
 			}
 			var (
@@ -1428,7 +1497,12 @@ func (m *Mempool) removeExpiredTransactions() {
 
 func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 	if m.validator == nil {
-		return errors.New("mempool: validator is nil in AddTransaction")
+		// Wrap the package sentinel rather than building a fresh error, so
+		// callers can classify this the same way they classify the other
+		// operations that require a validator (newMempool and
+		// rebuildOverlay). It is an infrastructure fault, not a rejected
+		// transaction, and an API surface has to be able to tell them apart.
+		return fmt.Errorf("%w in AddTransaction", ErrNilValidator)
 	}
 	// Decode transaction outside the lock (CPU-bound, no shared state)
 	tmpTx, err := gledger.NewTransactionFromCbor(txType, txBytes)

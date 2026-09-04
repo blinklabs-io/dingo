@@ -61,10 +61,6 @@ func TestLedgerViewUnimplementedMethodsReturnSentinelError(t *testing.T) {
 
 	err = lv.UpdateAdaPots(lcommon.AdaPots{})
 	require.ErrorIs(t, err, ErrNotImplemented)
-
-	treasury, err := lv.TreasuryValue()
-	require.ErrorIs(t, err, ErrNotImplemented)
-	require.Zero(t, treasury)
 }
 
 func TestLedgerViewRewardAccountBalance(t *testing.T) {
@@ -138,6 +134,225 @@ func TestLedgerViewRewardAccountBalance(t *testing.T) {
 	require.NoError(t, dbtest.CloseDatabase(db))
 	_, err = lv.RewardAccountBalance(credential(0, key))
 	require.Error(t, err)
+}
+
+func TestLedgerViewStakeCredentialDeposit(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	sharedHash := bytes.Repeat([]byte{0xb1}, lcommon.AddressHashSize)
+	credential := func(tag uint, value []byte) lcommon.Credential {
+		return lcommon.Credential{
+			CredType:   tag,
+			Credential: lcommon.NewBlake2b224(value),
+		}
+	}
+	keyCredential := credential(lcommon.CredentialTypeAddrKeyHash, sharedHash)
+	scriptCredential := credential(lcommon.CredentialTypeScriptHash, sharedHash)
+	zeroCredential := credential(
+		lcommon.CredentialTypeAddrKeyHash,
+		bytes.Repeat([]byte{0xb6}, lcommon.AddressHashSize),
+	)
+	importedKeyCredential := credential(
+		lcommon.CredentialTypeAddrKeyHash,
+		bytes.Repeat([]byte{0xb8}, lcommon.AddressHashSize),
+	)
+	importedScriptCredential := credential(
+		lcommon.CredentialTypeScriptHash,
+		bytes.Repeat([]byte{0xb9}, lcommon.AddressHashSize),
+	)
+	importedThenRegisteredCredential := credential(
+		lcommon.CredentialTypeAddrKeyHash,
+		bytes.Repeat([]byte{0xbc}, lcommon.AddressHashSize),
+	)
+	persistViewStakeRegistration(t, db, keyCredential, 2_000_000, 100, 0xb2)
+	persistViewStakeRegistration(t, db, scriptCredential, 3_000_000, 101, 0xb3)
+	persistViewStakeRegistration(t, db, zeroCredential, 0, 102, 0xb7)
+	persistViewStakeRegistration(
+		t,
+		db,
+		importedKeyCredential,
+		1_000_000,
+		90,
+		0xba,
+	)
+	persistViewImportedStakeAccount(
+		t,
+		db,
+		importedKeyCredential,
+		4_000_000,
+		103,
+	)
+	persistViewImportedStakeAccount(
+		t,
+		db,
+		importedScriptCredential,
+		5_000_000,
+		104,
+	)
+	persistViewImportedStakeAccount(
+		t,
+		db,
+		importedThenRegisteredCredential,
+		4_500_000,
+		105,
+	)
+	persistViewStakeRegistration(
+		t,
+		db,
+		importedThenRegisteredCredential,
+		6_000_000,
+		106,
+		0xbd,
+	)
+
+	inactiveHash := bytes.Repeat([]byte{0xb4}, lcommon.AddressHashSize)
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey:    inactiveHash,
+		CredentialTag: 0,
+		Active:        false,
+	}))
+	lv := &LedgerView{
+		ls: &LedgerState{
+			db: db,
+			config: LedgerStateConfig{
+				Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			},
+		},
+	}
+
+	for _, tc := range []struct {
+		name string
+		cred lcommon.Credential
+		want *uint64
+	}{
+		{name: "key credential", cred: keyCredential, want: new(uint64(2_000_000))},
+		{name: "script credential", cred: scriptCredential, want: new(uint64(3_000_000))},
+		{name: "zero deposit", cred: zeroCredential, want: new(uint64(0))},
+		{
+			name: "imported key credential",
+			cred: importedKeyCredential,
+			want: new(uint64(4_000_000)),
+		},
+		{
+			name: "imported script credential",
+			cred: importedScriptCredential,
+			want: new(uint64(5_000_000)),
+		},
+		{
+			name: "newer registration supersedes import",
+			cred: importedThenRegisteredCredential,
+			want: new(uint64(6_000_000)),
+		},
+		{
+			name: "missing credential",
+			cred: credential(
+				lcommon.CredentialTypeAddrKeyHash,
+				bytes.Repeat([]byte{0xb5}, lcommon.AddressHashSize),
+			),
+		},
+		{
+			name: "inactive credential",
+			cred: credential(lcommon.CredentialTypeAddrKeyHash, inactiveHash),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := lv.StakeCredentialDeposit(tc.cred)
+			require.NoError(t, err)
+			if tc.want == nil {
+				require.Nil(t, got)
+				return
+			}
+			require.NotNil(t, got)
+			require.Equal(t, *tc.want, *got)
+		})
+	}
+
+	importHistory, err := db.GetAccountRegistrationHistoryByCredential(
+		1,
+		importedScriptCredential.Credential[:],
+		10,
+		0,
+		"desc",
+		nil,
+	)
+	require.NoError(t, err)
+	require.Empty(t, importHistory)
+
+	require.NoError(t, db.DeleteCertificatesAfterSlot(105, nil))
+	require.NoError(t, db.RestoreAccountStateAtSlot(105, nil))
+	depositAfterRollback, err := lv.StakeCredentialDeposit(
+		importedThenRegisteredCredential,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, depositAfterRollback)
+	require.Equal(t, uint64(4_500_000), *depositAfterRollback)
+
+	_, err = lv.StakeCredentialDeposit(lcommon.Credential{CredType: 2})
+	require.ErrorContains(t, err, "unsupported stake credential tag")
+
+	require.NoError(t, dbtest.CloseDatabase(db))
+	_, err = lv.StakeCredentialDeposit(keyCredential)
+	require.Error(t, err)
+}
+
+func persistViewImportedStakeAccount(
+	t *testing.T,
+	db *database.Database,
+	credential lcommon.Credential,
+	deposit uint64,
+	slot uint64,
+) {
+	t.Helper()
+	credentialTag, err := models.CredentialTagFromUint(credential.CredType)
+	require.NoError(t, err)
+	importDeposit := types.Uint64(deposit)
+	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+		StakingKey:    credential.Credential[:],
+		CredentialTag: credentialTag,
+		AddedSlot:     slot,
+		Active:        true,
+		ImportDeposit: &importDeposit,
+	}, nil))
+}
+
+func persistViewStakeRegistration(
+	t *testing.T,
+	db *database.Database,
+	credential lcommon.Credential,
+	deposit uint64,
+	slot uint64,
+	seed byte,
+) {
+	t.Helper()
+	builder := mockledger.NewTransactionBuilder()
+	builder.WithId(bytes.Repeat([]byte{seed}, 32))
+	builder.WithValid(true)
+	input, err := mockledger.NewSimpleTransactionInput(
+		bytes.Repeat([]byte{seed + 1}, 32),
+		0,
+	)
+	require.NoError(t, err)
+	builder.WithInputs(input)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress(
+			"addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd",
+		).
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
+	builder.WithOutputs(output)
+	builder.WithCertificates(&lcommon.StakeRegistrationCertificate{
+		StakeCredential: credential,
+	})
+	tx, err := builder.Build()
+	require.NoError(t, err)
+	require.NoError(t, db.SetTransactionMetadataOnly(
+		tx,
+		ocommon.NewPoint(slot, bytes.Repeat([]byte{seed + 2}, 32)),
+		0,
+		map[int]uint64{0: deposit},
+		nil,
+	))
 }
 
 // TestLedgerViewPoolCurrentStatePendingRetirement proves PoolCurrentState's

@@ -167,7 +167,7 @@ func TestFetchEndorserBlockOnConnSkipsBusyConnection(t *testing.T) {
 	// Keep the failure path safe: if a regression blocks until the test releases
 	// the guard, the awakened fetch can finish from this empty cached block
 	// without dereferencing the nil client below.
-	o.leiosEndorserBlocks[leiosBlockKey(point.Hash)] = &leiosEndorserBlockData{
+	o.leiosEndorserBlocks[leiosBlockKey(point.Slot, point.Hash)] = &leiosEndorserBlockData{
 		point:      point,
 		txCount:    0,
 		insertedAt: time.Now(),

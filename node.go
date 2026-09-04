@@ -455,6 +455,12 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	n.startupLifecycleMu.Lock()
 	startupGateHeld := true
 	var started []func()
+	// Set to false by the ledgerState.Close LIFO stop if it cannot confirm
+	// every background goroutine has exited. The db.Close and pluginHost.Stop
+	// LIFO stops registered below then skip closing storage a still-running
+	// goroutine may be using -- mirrors node_shutdown.go's shutdown()
+	// ledgerStateDrainConfirmed guard on the normal signal-driven path.
+	ledgerStateDrainConfirmed := true
 	defer func() {
 		if !startupGateHeld {
 			return
@@ -506,6 +512,19 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// the async-worker pool, leaking those goroutines.
 	started = append(started, func() { n.eventBus.Close() })
 	started = append(started, func() {
+		// Skipped on an unconfirmed ledger state drain for the same reason
+		// the db.Close LIFO stop above is: storage plugins can be backed by
+		// the same n.db a still-running background goroutine may be using.
+		// This closure is registered before (so stops after) both the
+		// ledgerState.Close and db.Close stops below, so it observes
+		// ledgerStateDrainConfirmed's final value -- mirrors
+		// node_shutdown.go's shutdown() phase 3 guard on pluginHost.Stop.
+		if !ledgerStateDrainConfirmed {
+			n.config.logger.Error(
+				"skipping plugin host shutdown during startup-failure cleanup because ledger state drain was not confirmed",
+			)
+			return
+		}
 		if err := n.pluginHost.Stop(context.Background()); err != nil {
 			n.config.logger.Error(
 				"failed to stop plugin host during cleanup",
@@ -586,7 +605,19 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return errors.New("empty database returned")
 	}
 	n.db = db
-	started = append(started, func() { n.db.Close() })
+	// ledgerStateDrainConfirmed (declared above) is set false by the
+	// ledgerState.Close LIFO stop below on an unconfirmed drain; this
+	// closure runs after that one in LIFO order (registered first, so
+	// stopped last), so it observes the flag's final value.
+	started = append(started, func() {
+		if !ledgerStateDrainConfirmed {
+			n.config.logger.Error(
+				"skipping database close during startup-failure cleanup because ledger state drain was not confirmed",
+			)
+			return
+		}
+		n.db.Close()
+	})
 	if err != nil {
 		if _, ok := errors.AsType[database.CommitTimestampError](err); !ok {
 			return fmt.Errorf("failed to open database: %w", err)
@@ -870,6 +901,14 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("configuring snapshot manager: %w", err)
 	}
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
+	// Prune pool snapshots through the deferred-header retention guard, so a
+	// snapshot a queued/deferred header still needs for leader validation is
+	// never pruned out from under it and misread as pool absence, and the
+	// floor selection is atomic with deferred-header admission (issue #3727).
+	// Set before Start; the pin is released automatically as headers resolve.
+	n.snapshotMgr.SetPoolSnapshotRetentionGuard(
+		n.ledgerState.PrunePoolSnapshotsWithRetentionFloor,
+	)
 	// Wire the authoritative epoch-boundary capture before block sync begins so
 	// each epoch rollover stages its mark snapshot atomically at the SNAP point.
 	// Set before CaptureGenesisSnapshot/sync; a nil hook (never set) would leave
@@ -919,7 +958,24 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start ledger: %w", err)
 	}
-	started = append(started, func() { n.ledgerState.Close() })
+	started = append(started, func() {
+		// Close returns a non-nil error only when a bounded wait
+		// (rollback-event goroutines, dbWorkerPool shutdown) could not
+		// confirm every background goroutine had actually exited before
+		// giving up -- unlike an ordinary cleanup failure, that means a
+		// goroutine may still be reading or writing n.db. Setting
+		// ledgerStateDrainConfirmed false makes the earlier-registered (so
+		// later-run) db.Close LIFO stop skip closing it out from under that
+		// goroutine, the same guard node_shutdown.go's shutdown() applies
+		// on the normal signal-driven path.
+		if err := n.ledgerState.Close(); err != nil {
+			ledgerStateDrainConfirmed = false
+			n.config.logger.Error(
+				"ledger state did not fully shut down; skipping database close because a background goroutine may still be using it",
+				"error", err,
+			)
+		}
+	})
 	// Register midnight indexer cleanup after LedgerState so it is torn down
 	// first (reverse order): midnight.Stop() → ledgerState.Close().
 	if n.midnightIndexer != nil {

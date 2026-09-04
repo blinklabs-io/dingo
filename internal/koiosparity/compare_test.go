@@ -895,3 +895,103 @@ func TestComparePoolEpochDepartedRequiresStakeEpochRow(t *testing.T) {
 	}
 	require.Equal(t, StatusError, DetermineStatus(ms))
 }
+
+// TestComparePoolEpochMemberRewardsExcludesUnspendable pins the quantity
+// member_rewards is compared on. Koios reports the rewards members actually
+// received; reward_pool_output.member_reward_total sums every member reward the
+// calculation produced, spendable or not. A pool with an unspendable member
+// reward — one computed for a credential the ledger correctly never credits —
+// used to fail against a node that was right (dingo #3797).
+func TestComparePoolEpochMemberRewardsExcludesUnspendable(t *testing.T) {
+	now := time.Now()
+	koios := &KoiosPoolEpoch{
+		PoolBech32:    "pool1test",
+		ActiveStake:   "1000",
+		BlockCnt:      2,
+		Delegators:    3,
+		FixedCost:     "340000000",
+		Margin:        "0.1",
+		MemberRewards: "327005332",
+	}
+	// The shape observed on Preview epoch 18: six spendable member rewards
+	// summing to Koios's figure, plus one unspendable 71328 the pool total
+	// still carries.
+	dingo := &DingoPoolEpochData{
+		StakePresent:                 true,
+		DelegatedStake:               "1000",
+		ParamsPresent:                true,
+		BlocksProduced:               2,
+		DelegatorCount:               3,
+		FixedCost:                    "340000000",
+		Margin:                       "1/10",
+		MemberRewardPresent:          true,
+		MemberRewardTotal:            "327076660",
+		SpendableMemberRewardPresent: true,
+		SpendableMemberRewardTotal:   "327005332",
+	}
+	require.Empty(t, ComparePoolEpoch(
+		"preview", 5, koios, dingo, now, 0, time.Time{}, false,
+	), "an unspendable member reward is not a divergence")
+
+	// A real disagreement in the spendable sum still fails, and reports the
+	// spendable figure rather than the pool total.
+	dingo.SpendableMemberRewardTotal = "327005333"
+	ms := ComparePoolEpoch(
+		"preview", 5, koios, dingo, now, 0, time.Time{}, false,
+	)
+	require.Len(t, ms, 1)
+	require.Equal(t, "member_rewards", ms[0].Field)
+	require.Equal(t, CategoryValueMismatch, ms[0].Category)
+	require.Equal(t, "327005333", ms[0].DingoValue)
+}
+
+// TestComparePoolEpochMemberRewardsWithoutAccountOutputs covers a node whose
+// reward_account_output rows for the epoch are gone — cleanupOldSnapshots
+// retains them without bound only in api storage mode.
+//
+// Falling back to reward_pool_output.member_reward_total is sound exactly when
+// the row says nothing was withheld, because the pool's member total is then
+// its spendable member total by construction. When something was withheld the
+// two provably differ, so the field is reported as a missing row rather than
+// compared on a basis that would fail a correct ledger.
+func TestComparePoolEpochMemberRewardsWithoutAccountOutputs(t *testing.T) {
+	now := time.Now()
+	koios := &KoiosPoolEpoch{
+		PoolBech32:    "pool1test",
+		ActiveStake:   "1000",
+		BlockCnt:      2,
+		Delegators:    3,
+		FixedCost:     "340000000",
+		Margin:        "0.1",
+		MemberRewards: "327005332",
+	}
+	dingo := &DingoPoolEpochData{
+		StakePresent:                 true,
+		DelegatedStake:               "1000",
+		ParamsPresent:                true,
+		BlocksProduced:               2,
+		DelegatorCount:               3,
+		FixedCost:                    "340000000",
+		Margin:                       "1/10",
+		MemberRewardPresent:          true,
+		MemberRewardTotal:            "327005332",
+		SpendableMemberRewardPresent: false,
+		PoolUnspendable:              0,
+	}
+	require.Empty(t, ComparePoolEpoch(
+		"preview", 5, koios, dingo, now, 0, time.Time{}, false,
+	), "with nothing withheld the pool total is the spendable total")
+
+	// The same missing rows, but the pool withheld something, so the pool
+	// total is known to overstate what members received.
+	dingo.PoolUnspendable = 71328
+	dingo.MemberRewardTotal = "327076660"
+	ms := ComparePoolEpoch(
+		"preview", 5, koios, dingo, now, 0, time.Time{}, false,
+	)
+	require.Len(t, ms, 1,
+		"an unformable comparison must not read as a pass")
+	require.Equal(t, "member_rewards", ms[0].Field)
+	require.Equal(t, CategoryDBMissing, ms[0].Category)
+	require.Equal(t, StatusError, DetermineStatus(ms))
+}

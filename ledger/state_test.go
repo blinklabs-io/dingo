@@ -24,6 +24,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1614,7 +1615,7 @@ func TestDatabaseWorkerPoolBasic(t *testing.T) {
 		t.Fatal("timeout waiting for operation result")
 	}
 
-	pool.Shutdown()
+	pool.Shutdown(5 * time.Second)
 }
 
 // TestDatabaseWorkerPoolInFlightOperations tests that shutdown waits for in-flight operations
@@ -1659,7 +1660,7 @@ func TestDatabaseWorkerPoolInFlightOperations(t *testing.T) {
 	}, 5*time.Second, 5*time.Millisecond, "at least one operation should start")
 
 	// Shutdown the pool - this should wait for all operations to complete
-	pool.Shutdown()
+	pool.Shutdown(5 * time.Second)
 
 	// Wait for all result handlers
 	wg.Wait()
@@ -1710,7 +1711,7 @@ func TestDatabaseWorkerPoolShutdownWithErrors(t *testing.T) {
 	}
 
 	// Shutdown should wait for all operations to complete
-	pool.Shutdown()
+	pool.Shutdown(5 * time.Second)
 
 	// Verify all operations completed even with errors
 	assert.Equal(
@@ -1746,7 +1747,7 @@ func TestDatabaseWorkerPoolQueueFull(t *testing.T) {
 	}
 
 	// Shutdown should complete successfully
-	pool.Shutdown()
+	pool.Shutdown(5 * time.Second)
 }
 
 // TestDatabaseWorkerPoolSubmitAfterShutdown tests that submitting after shutdown fails
@@ -1758,7 +1759,7 @@ func TestDatabaseWorkerPoolSubmitAfterShutdown(t *testing.T) {
 	pool := NewDatabaseWorkerPool(nil, config)
 
 	// Shutdown the pool
-	pool.Shutdown()
+	pool.Shutdown(5 * time.Second)
 
 	// Try to submit an operation after shutdown
 	resultChan := make(chan DatabaseResult, 1)
@@ -1820,7 +1821,7 @@ func TestDatabaseWorkerPoolShutdownDoesNotPanicWithInFlightOperations(
 
 	shutdownDone := make(chan struct{})
 	go func() {
-		pool.Shutdown()
+		pool.Shutdown(5 * time.Second)
 		close(shutdownDone)
 	}()
 
@@ -1863,7 +1864,7 @@ func TestDatabaseWorkerPoolConcurrency(t *testing.T) {
 	}
 
 	// Shutdown pool - should wait for all operations
-	pool.Shutdown()
+	pool.Shutdown(5 * time.Second)
 
 	// All operations should complete
 	assert.Equal(t, int32(numOperations), completedCount.Load())
@@ -1890,9 +1891,142 @@ func TestDatabaseWorkerPoolMultipleShutdowns(t *testing.T) {
 	<-resultChan
 
 	// Call shutdown multiple times - should be safe
-	pool.Shutdown()
-	pool.Shutdown() // Should not panic
-	pool.Shutdown() // Should not panic
+	pool.Shutdown(5 * time.Second)
+	pool.Shutdown(5 * time.Second) // Should not panic
+	pool.Shutdown(5 * time.Second) // Should not panic
+}
+
+// TestDatabaseWorkerPoolShutdownTimesOutOnSlowOperation tests that Shutdown
+// returns an error promptly at drainTimeout, rather than blocking
+// indefinitely, when an in-flight operation runs longer than the requested
+// drain timeout.
+func TestDatabaseWorkerPoolShutdownTimesOutOnSlowOperation(t *testing.T) {
+	config := DefaultDatabaseWorkerPoolConfig()
+	config.WorkerPoolSize = 1
+	config.TaskQueueSize = 5
+
+	pool := NewDatabaseWorkerPool(nil, config)
+
+	started := make(chan struct{})
+	blockUntil := make(chan struct{})
+	resultChan := make(chan DatabaseResult, 1)
+	pool.Submit(DatabaseOperation{
+		OpFunc: func(db *database.Database) error {
+			close(started)
+			<-blockUntil
+			return nil
+		},
+		ResultChan: resultChan,
+	})
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for operation to start")
+	}
+
+	shutdownStart := time.Now()
+	err := pool.Shutdown(50 * time.Millisecond)
+	elapsed := time.Since(shutdownStart)
+
+	require.Error(
+		t,
+		err,
+		"Shutdown should report an error when the drain timeout elapses before in-flight operations finish",
+	)
+	assert.Less(
+		t,
+		elapsed,
+		2*time.Second,
+		"Shutdown must return promptly at the drain timeout instead of blocking on the stuck operation",
+	)
+
+	// Unblock the stuck operation so it doesn't leak past the test.
+	close(blockUntil)
+	select {
+	case <-resultChan:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for stuck operation to finally complete")
+	}
+}
+
+// TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine guards against
+// Shutdown's drain-timeout bound being reimplemented as a goroutine bridging
+// a sync.WaitGroup to a timeout-selectable channel: WaitGroup.Wait can't be
+// interrupted, so that goroutine (and the worker still running the stuck
+// operation under it) would keep running for the operation's full remaining
+// duration after Shutdown times out and returns, merely relocating the
+// leaked goroutine cubic-dev-ai flagged on PR #3782 rather than removing it.
+// The current implementation tracks in-flight operations with a
+// mutex-guarded counter and a drained channel Shutdown selects directly, so
+// no goroutine is ever spawned by the timeout path.
+func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
+	t *testing.T,
+) {
+	config := DefaultDatabaseWorkerPoolConfig()
+	config.WorkerPoolSize = 1
+	config.TaskQueueSize = 5
+
+	pool := NewDatabaseWorkerPool(nil, config)
+
+	started := make(chan struct{})
+	blockUntil := make(chan struct{})
+	resultChan := make(chan DatabaseResult, 1)
+	pool.Submit(DatabaseOperation{
+		OpFunc: func(db *database.Database) error {
+			close(started)
+			<-blockUntil
+			return nil
+		},
+		ResultChan: resultChan,
+	})
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for operation to start")
+	}
+
+	// The stuck worker goroutine is already running at this point, so it's
+	// part of the baseline count -- only a goroutine spawned by Shutdown
+	// itself would show up as growth below. GC first so a transient
+	// runtime/GC goroutine isn't baked into the baseline.
+	runtime.GC()
+	baseline := runtime.NumGoroutine()
+
+	err := pool.Shutdown(50 * time.Millisecond)
+	require.Error(t, err)
+
+	// A single immediate snapshot is flaky: a short-lived runtime/GC
+	// goroutine can transiently push the count above baseline with no
+	// relation to Shutdown. Poll briefly instead, matching
+	// storagetest.AssertNoGoroutineLeak's pattern -- since a leaked waiter
+	// goroutine would persist for the stuck operation's full duration, it
+	// would still be caught well within this deadline.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		after := runtime.NumGoroutine()
+		if after <= baseline {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf(
+				"Shutdown's timeout path must not leave behind a goroutine "+
+					"of its own: baseline %d, now %d",
+				baseline,
+				after,
+			)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Unblock the stuck operation so it doesn't leak past the test.
+	close(blockUntil)
+	select {
+	case <-resultChan:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for stuck operation to finally complete")
+	}
 }
 
 // TestDatabaseWorkerPoolResultChannelFull tests handling of full result channels
@@ -1924,7 +2058,7 @@ func TestDatabaseWorkerPoolResultChannelFull(t *testing.T) {
 	}
 
 	// Shutdown should work
-	pool.Shutdown()
+	pool.Shutdown(5 * time.Second)
 
 	// All operations should complete
 	assert.Equal(t, int32(3), completedCount.Load())
@@ -4484,6 +4618,7 @@ func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
 			eras.BabbageEraDesc,
 			nil,
 			nil,
+			0,
 		)
 		return err
 	}))
@@ -4522,8 +4657,9 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			EndorserBlockProvider: func(
 				[]byte,
-			) (uint64, []cbor.RawMessage, bool) {
-				return 0, nil, false
+				uint64,
+			) ([]cbor.RawMessage, bool) {
+				return nil, false
 			},
 		},
 	}
@@ -4542,6 +4678,7 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 			eras.DijkstraEraDesc,
 			nil,
 			nil,
+			0,
 		)
 		return err
 	})
@@ -4626,6 +4763,7 @@ func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
 			eras.DijkstraEraDesc,
 			pparams,
 			nil,
+			0,
 		)
 		return err
 	})
@@ -4974,7 +5112,7 @@ func TestCloseStopsDecodePipelineBeforeWaitingForBlockProcessing(t *testing.T) {
 // Byron guard as a backstop rather than a redundancy.
 //
 // It is not covered by the currentPParams == nil check that follows it. The
-// reachable shape is a rollback into Byron: rollbackChainAndState sets
+// reachable shape is a rollback into Byron: rollbackChainAndStateDeferred sets
 // currentEra to Byron and then calls this function, and before the ppComputed
 // change it skipped the currentPParams assignment whenever the recomputed
 // value was nil -- which is exactly what Byron computes. That left a Shelley
