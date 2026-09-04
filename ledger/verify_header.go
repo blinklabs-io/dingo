@@ -65,6 +65,9 @@ var (
 	errLeaderStakeSnapshotUnavailable = errors.New(
 		"leader stake snapshot unavailable",
 	)
+	errVrfKeyRegistrationHistoryUnavailable = errors.New(
+		"VRF key registration history unavailable",
+	)
 	// errEpochNonceUnavailable marks an epoch-cache entry that covers the
 	// requested slot but has no published Praos nonce. Byron epochs always
 	// have this shape; a post-Byron entry can also have it transiently while
@@ -512,7 +515,8 @@ func (ls *LedgerState) verifyBlockHeaderState(
 	// check), so without this an attacker can grind VRF keys to win slots.
 	if err := ls.verifyRegisteredVrfKey(block, epochId); err != nil {
 		if allowStateDefer &&
-			errors.Is(err, models.ErrPoolNotFound) &&
+			(errors.Is(err, models.ErrPoolNotFound) ||
+				errors.Is(err, errVrfKeyRegistrationHistoryUnavailable)) &&
 			ls.ledgerTipBehindSlot(block.SlotNumber()) {
 			return fmt.Errorf(
 				"%w: registered VRF key state for slot %d is ahead of the ledger apply cursor: %w",
@@ -1376,10 +1380,10 @@ func (ls *LedgerState) shouldUseImportedActivePoolDistribution(
 // parameter cutoff instead (see electingPoolParamsCutoffSlot), which is
 // equivalent for a chain whose certificate history is intact.
 //
-// Falling back to the live registration when no snapshot is available keeps the
-// previous behaviour rather than newly rejecting a header dingo cannot yet
-// place: header verification runs ahead of the apply cursor, so a missing
-// snapshot means "cannot answer yet", not "wrong key".
+// Falling back to the live registration is safe only when no snapshot is
+// available. A present snapshot with no historical registration means the
+// database cannot answer the consensus-critical question; using the live key
+// would reintroduce the rotation wedge this lookup avoids.
 func (ls *LedgerState) electingVrfKeyHash(
 	block ledger.Block,
 	epochId uint64,
@@ -1407,6 +1411,12 @@ func (ls *LedgerState) electingVrfKeyHash(
 			copy(hash[:], vrfKeyHash)
 			return hash, true, nil
 		}
+		return lcommon.Blake2b256{}, false, fmt.Errorf(
+			"%w at cutoff slot %d for pool %x",
+			errVrfKeyRegistrationHistoryUnavailable,
+			cutoffSlot,
+			poolKeyHash[:],
+		)
 	}
 	pool, err := ls.db.GetPool(poolKeyHash, true, nil)
 	if err != nil {
@@ -1468,9 +1478,8 @@ func (ls *LedgerState) electingPoolParamsCutoffSlot(
 	if err != nil {
 		// The capture predates the epoch cache, so the parameter cutoff
 		// cannot be placed. Report unavailable rather than guessing; the
-		// caller falls back to the live registration. This is not a
-		// verification failure: an unplaceable capture means dingo cannot
-		// answer yet, the same as an absent snapshot above.
+		// caller falls back to the live registration only when no snapshot
+		// exists.
 		return 0, false, nil //nolint:nilerr // unplaceable capture is "unavailable", not an error
 	}
 	if capturedEpoch.StartSlot == 0 {

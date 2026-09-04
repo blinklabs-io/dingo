@@ -87,6 +87,54 @@ func TestVerifyRegisteredVrfKey_RejectsUnregisteredOrMismatchedKey(
 	assert.Contains(t, err.Error(), "registered VRF key hash unavailable")
 }
 
+// TestVerifyRegisteredVrfKeyDoesNotUseLiveKeyWhenSnapshotHistoryIsMissing
+// prevents a present electing snapshot from silently falling back to the live
+// registration. That fallback would accept the rotated key and reject a
+// canonical block carrying the key used by the electing snapshot.
+func TestVerifyRegisteredVrfKeyDoesNotUseLiveKeyWhenSnapshotHistoryIsMissing(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{76}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	blockSlot := tb.block.SlotNumber()
+	ls.epochCache = []models.Epoch{
+		{EpochId: 4, StartSlot: 0, LengthInSlots: uint(blockSlot)},
+		{EpochId: 5, StartSlot: blockSlot, LengthInSlots: 1_000_000},
+	}
+	ls.publishSnapshotsLocked()
+
+	vrfKey, ok, err := headerVrfKeyFromBodyCbor(tb.block.Header())
+	require.NoError(t, err)
+	require.True(t, ok)
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	require.NoError(t, db.Metadata().ImportPool(
+		&models.Pool{
+			PoolKeyHash: poolKeyHash[:],
+			VrfKeyHash:  lcommon.Blake2b256Hash(vrfKey).Bytes(),
+		},
+		&models.PoolRegistration{
+			PoolKeyHash: poolKeyHash[:],
+			VrfKeyHash:  lcommon.Blake2b256Hash(vrfKey).Bytes(),
+			AddedSlot:   blockSlot,
+		},
+		nil,
+	))
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:        4,
+			SnapshotType: models.PoolStakeSnapshotTypeMark,
+			PoolKeyHash:  poolKeyHash[:],
+			TotalStake:   1,
+			CapturedSlot: blockSlot,
+		},
+		nil,
+	))
+
+	err = ls.verifyRegisteredVrfKey(tb.block, 5)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "VRF key registration history unavailable")
+}
+
 // TestVerifyRegisteredVrfKey_AcceptsMatchingKeyRejectsMismatch is the
 // positive-and-mismatch counterpart to the unregistered-pool case: it proves
 // the binding accepts a block whose header VRF key hashes to the pool's
