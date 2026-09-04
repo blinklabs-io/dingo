@@ -4158,16 +4158,29 @@ dropping one already advertised would silently omit a transaction the peer
 legitimately requested. A body larger than the consumer's entire byte budget
 is skipped for that consumer because it can never become cacheable; this keeps
 it from permanently blocking the cursor and prevents it from starving later,
-relayable transactions. A non-blocking `NextTx` returns nil once the cache is
-full; a blocking one parks until a slot frees rather than answering empty, since
-the peer's pull loop has no backoff for an empty reply and would spin
-request/reply without pacing. Shutdown or connection cleanup releases a parked
-waiter. Serving a body or the peer acknowledging its ids frees slots and
-reopens the window. The
-protocol request window is far below the default limit, so this bounds an
-aggressive peer rather than affecting normal relay. Explicit cache removal and
-clearing preserve the same per-consumer semantics while preventing an idle
-connection from growing memory without limit.
+relayable transactions. The entry-count bound gates on advertised-but-not-yet-
+acknowledged ids, not on the resident cache alone: serving a body evicts it
+from the cache and frees its bytes immediately, but its id stays counted as
+outstanding until the peer's next RequestTxIds acknowledges it, so a peer that
+keeps fetching bodies without ever acknowledging them cannot force unbounded
+per-connection id tracking. A non-blocking `NextTx` returns nil once that
+count is reached; a blocking one parks until an id is acknowledged rather than
+answering empty, since the peer's pull loop has no backoff for an empty reply
+and would spin request/reply without pacing. Shutdown or connection cleanup
+releases a parked waiter. A peer acknowledgement frees only the acknowledged
+prefix: TxSubmission ids are offered and acknowledged in FIFO order, so the
+consumer tracks that offer order and, on ack, forgets exactly the oldest
+acknowledged count of bodies — never the whole cache — preserving bodies for
+ids offered after that prefix that the peer has not yet acknowledged and may
+still request (issue #3424). The protocol request window is far below the
+default limit, so this bounds an aggressive peer rather than affecting normal
+relay. Explicit cache removal and clearing preserve the same per-consumer
+semantics while preventing an idle connection from growing memory without
+limit. If the underlying pool resurfaces the same hash at a later cursor
+position while an earlier offer of it is still outstanding -- a revalidation
+swap or a remove-then-readmit -- the consumer skips it rather than
+re-advertising it: a second entry for the same hash would create an
+ambiguous, duplicate slot in the peer's FIFO ack window.
 
 Mempool shutdown is terminal. `Stop` atomically marks the pool stopped before
 clearing transaction and consumer state; later transaction admission returns

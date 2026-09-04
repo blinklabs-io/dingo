@@ -316,6 +316,100 @@ func TestTxSubmissionClientRequestTxIdsClearsConsumerCacheOnAck(t *testing.T) {
 	require.Empty(t, bodies)
 }
 
+// TestTxSubmissionClientRequestTxIdsPartialAck verifies that acknowledging
+// part of a batch of offered transactions discards only the acknowledged
+// prefix, in the order the ids were offered, and preserves the bodies of ids
+// the peer has not yet acknowledged so they remain available to retry.
+// Regression test for
+// https://github.com/blinklabs-io/dingo/issues/3424, where any nonzero ack
+// cleared the entire offered cache and silently dropped unacknowledged
+// bodies.
+func TestTxSubmissionClientRequestTxIdsPartialAck(t *testing.T) {
+	// Arrange two cached transactions for a peer consumer.
+	fixtures := txsubmissionTestFixtures(t)[:2]
+	o, connId := newTxSubmissionTestOuroboros(t)
+	o.mempool.NewConsumer(connId)
+	addTxSubmissionTestFixtures(t, o.mempool, fixtures...)
+	ctx := txsubmission.CallbackContext{ConnectionId: connId}
+
+	// Advertise both transactions so both are stored in the consumer cache.
+	ids, err := o.txsubmissionClientRequestTxIds(ctx, false, 0, 2)
+	require.NoError(t, err)
+	require.Len(t, ids, 2)
+
+	// Acknowledge only the first (oldest) offered transaction; request no
+	// additional ids in the same call to isolate the ack's effect.
+	ids, err = o.txsubmissionClientRequestTxIds(ctx, false, 1, 0)
+	require.NoError(t, err)
+	require.Empty(t, ids)
+
+	// The acknowledged transaction body can no longer be served.
+	bodies, err := o.txsubmissionClientRequestTxs(ctx, []txsubmission.TxId{
+		fixtures[0].txId,
+	})
+	require.NoError(t, err)
+	require.Empty(t, bodies)
+
+	// The unacknowledged transaction body is still cached and can be served.
+	bodies, err = o.txsubmissionClientRequestTxs(ctx, []txsubmission.TxId{
+		fixtures[1].txId,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []txsubmission.TxBody{
+		{
+			EraId:  txsubmissionRelayTestEraId,
+			TxBody: fixtures[1].body,
+		},
+	}, bodies)
+}
+
+// TestTxSubmissionClientRequestTxIdsAckAcrossMixedBatches verifies that
+// acknowledgements accumulate correctly across multiple RequestTxIds calls
+// that mix acknowledging older offers with advertising new ones in the same
+// call, matching the sliding FIFO window the TxSubmission protocol uses.
+func TestTxSubmissionClientRequestTxIdsAckAcrossMixedBatches(t *testing.T) {
+	// Arrange three cached transactions for a peer consumer.
+	fixtures := txsubmissionTestFixtures(t)
+	o, connId := newTxSubmissionTestOuroboros(t)
+	o.mempool.NewConsumer(connId)
+	addTxSubmissionTestFixtures(t, o.mempool, fixtures...)
+	ctx := txsubmission.CallbackContext{ConnectionId: connId}
+
+	// Offer the first two transactions.
+	ids, err := o.txsubmissionClientRequestTxIds(ctx, false, 0, 2)
+	require.NoError(t, err)
+	require.Len(t, ids, 2)
+
+	// Acknowledge the first offer while requesting the third in the same
+	// call, mirroring a peer that both confirms and asks for more at once.
+	ids, err = o.txsubmissionClientRequestTxIds(ctx, false, 1, 1)
+	require.NoError(t, err)
+	require.Len(t, ids, 1)
+	require.Equal(
+		t,
+		fixtures[2].hash,
+		hex.EncodeToString(ids[0].TxId.TxId[:]),
+	)
+
+	// The first offer was acknowledged and its body is gone.
+	bodies, err := o.txsubmissionClientRequestTxs(ctx, []txsubmission.TxId{
+		fixtures[0].txId,
+	})
+	require.NoError(t, err)
+	require.Empty(t, bodies)
+
+	// The second and third offers are still unacknowledged and servable.
+	bodies, err = o.txsubmissionClientRequestTxs(ctx, []txsubmission.TxId{
+		fixtures[1].txId,
+		fixtures[2].txId,
+	})
+	require.NoError(t, err)
+	require.ElementsMatch(t, []txsubmission.TxBody{
+		{EraId: txsubmissionRelayTestEraId, TxBody: fixtures[1].body},
+		{EraId: txsubmissionRelayTestEraId, TxBody: fixtures[2].body},
+	}, bodies)
+}
+
 // TestTxSubmissionClientRequestTxs verifies that known cached TxIds return
 // bodies while unknown or already-served TxIds are ignored.
 func TestTxSubmissionClientRequestTxs(t *testing.T) {
