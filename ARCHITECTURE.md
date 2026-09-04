@@ -8983,7 +8983,13 @@ reward application first, ADA-pot capture last) by
 Reward protocol parameters and block-production counts come from the delayed
 performance epoch, while epoch length comes from the RUPD calculation epoch —
 see "Blockchain State Management" above for the derivation from
-cardano-ledger's `startStep`. TPraos
+cardano-ledger's `startStep`. The global performance factor follows
+`createRUpd`: expected blocks are
+`floor((1-d) * activeSlotCoeff * slotsPerEpoch)` before actual blocks are
+divided by that integer (or performance is fixed at 1 while `d >= 0.8`). The
+floor is consensus-visible through monetary expansion; `rewards.Result` keeps
+the existing rational API field but always returns an integer-valued result.
+TPraos
 overlay slots are excluded while decentralization is non-zero. Pre-Babbage
 calculation resolves the reward prefilter from stake-account certificate
 history immediately before the first reward-update slot, using the RUPD
