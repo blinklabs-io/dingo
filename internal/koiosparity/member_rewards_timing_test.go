@@ -190,12 +190,18 @@ func TestCompareAccountEpochPendingRewardsAreALag(t *testing.T) {
 		ms := CompareAccountEpoch(
 			"preview", 100, koios[:1], dingoRows, now, 24, longClosed, true,
 		)
+		found := false
 		for _, m := range ms {
 			if m.Field == "account_reward_amount" {
+				found = true
 				assert.Equal(t, CategoryReferenceLag, m.Category,
 					"an amount that can still change is not a divergence")
 			}
 		}
+		// Without this the assertions above never run if the comparison stops
+		// emitting the mismatch at all, and the case passes vacuously.
+		require.True(t, found,
+			"the differing amount must still be reported, as a lag")
 	})
 
 	t.Run("a differing amount once applied is a mismatch", func(t *testing.T) {
