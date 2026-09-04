@@ -842,6 +842,17 @@ func CompareAccountEpoch(
 			})
 		default:
 			if !lovelaceEqual(dr.Amount, kr.Earned) {
+				// Guarded the same way the presence case above is, and the
+				// same way ComparePoolEpoch guards its own value comparison:
+				// before the applying boundary the amount can still change,
+				// so a difference is a statement about timing rather than a
+				// divergence (issue #3857). Leaving this strict while the
+				// presence check is not would report the same epoch as both
+				// a lag and a mismatch.
+				cat := CategoryValueMismatch
+				if rewardsPending {
+					cat = CategoryReferenceLag
+				}
 				out = append(out, CheckMismatch{
 					Network:      network,
 					Epoch:        epoch,
@@ -849,7 +860,7 @@ func CompareAccountEpoch(
 					Field:        "account_reward_amount",
 					DingoValue:   dr.Amount,
 					KoiosValue:   kr.Earned,
-					Category:     CategoryValueMismatch,
+					Category:     cat,
 					CheckedAt:    now,
 				})
 			}

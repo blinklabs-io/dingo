@@ -183,6 +183,38 @@ func TestCompareAccountEpochPendingRewardsAreALag(t *testing.T) {
 		}
 	})
 
+	t.Run("a differing amount while pending is also a lag", func(t *testing.T) {
+		dingoRows := []DingoAccountReward{
+			{StakeAddress: "stake_test1a", RewardType: "member", Amount: "999999"},
+		}
+		ms := CompareAccountEpoch(
+			"preview", 100, koios[:1], dingoRows, now, 24, longClosed, true,
+		)
+		for _, m := range ms {
+			if m.Field == "account_reward_amount" {
+				assert.Equal(t, CategoryReferenceLag, m.Category,
+					"an amount that can still change is not a divergence")
+			}
+		}
+	})
+
+	t.Run("a differing amount once applied is a mismatch", func(t *testing.T) {
+		dingoRows := []DingoAccountReward{
+			{StakeAddress: "stake_test1a", RewardType: "member", Amount: "999999"},
+		}
+		ms := CompareAccountEpoch(
+			"preview", 100, koios[:1], dingoRows, now, 24, longClosed, false,
+		)
+		found := false
+		for _, m := range ms {
+			if m.Field == "account_reward_amount" {
+				found = true
+				assert.Equal(t, CategoryValueMismatch, m.Category)
+			}
+		}
+		assert.True(t, found, "a differing amount must still be reported")
+	})
+
 	t.Run("computed and still absent is a real finding", func(t *testing.T) {
 		ms := CompareAccountEpoch(
 			"preview", 100, koios, nil, now, 24, longClosed, false,
