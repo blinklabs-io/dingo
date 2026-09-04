@@ -15,6 +15,7 @@
 package peergov
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net"
@@ -46,7 +47,7 @@ func TestLoadPeerSnapshotSeedsLedgerPeers(t *testing.T) {
 		LedgerPeerTarget: 2,
 	})
 
-	added := pg.LoadPeerSnapshot(snapshot)
+	added := pg.LoadPeerSnapshot(context.Background(), snapshot)
 
 	require.Equal(t, 2, added)
 	require.Len(t, pg.peers, 2)
@@ -202,23 +203,24 @@ func TestDiscoverLedgerPeers_PartialRefill(t *testing.T) {
 }
 
 func TestDiscoverLedgerPeers_NegativeTargetDisables(t *testing.T) {
+	provider := &countingLedgerPeerProvider{}
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           newMockEventBus(),
 		UseLedgerAfterSlot: 0,
 		LedgerPeerTarget:   -1, // Explicitly disabled
-		LedgerPeerProvider: &mockLedgerPeerProvider{
-			relays: []PoolRelay{
-				{Hostname: "relay.example.com", Port: 3001},
-			},
-			currentSlot: 1000,
-		},
+		LedgerPeerProvider: provider,
 	})
 
 	pg.discoverLedgerPeers()
 
-	// With a negative target, deficit is 0, so no peers should be added
+	// With a negative target, deficit is 0, so no peers should be added.
 	assert.Len(t, pg.peers, 0)
+	// A negative target disables ledger discovery outright: it must return
+	// before ever calling the provider, not merely add zero peers after
+	// fetching and reconciling on every refresh interval for no benefit.
+	assert.Equal(t, int32(0), provider.calls.Load(),
+		"a disabled node must never call the ledger peer provider")
 }
 
 func TestDiscoverLedgerPeers_DefaultTarget(t *testing.T) {
@@ -290,7 +292,7 @@ func TestLedgerPeerDeficit(t *testing.T) {
 		Address:           "44.0.0.3:3001",
 		NormalizedAddress: "44.0.0.3:3001",
 	})
-	pg.ledgerKnownAddrs["44.0.0.3:3001"] = struct{}{}
+	pg.ledgerKnownAddrs["44.0.0.3:3001"] = "44.0.0.3:3001"
 	pg.mu.Unlock()
 
 	assert.Equal(t, 2, pg.ledgerPeerDeficit())
@@ -322,6 +324,289 @@ func TestLedgerPeerDeficit_Satisfied(t *testing.T) {
 
 	// Already exceeds target, deficit should be 0
 	assert.Equal(t, 0, pg.ledgerPeerDeficit())
+}
+
+// TestPruneLedgerKnownAddrsLocked_RemovesStaleEntries verifies that an
+// address recorded in ledgerKnownAddrs is dropped once no retained peer
+// carries it any longer, so a relay that disappears from ledger state (or a
+// peer that leaves the peer list for any other reason) does not grow the map
+// forever across discovery rounds.
+func TestPruneLedgerKnownAddrsLocked_RemovesStaleEntries(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+
+	pg.mu.Lock()
+	pg.peers = append(pg.peers, &Peer{
+		Source:            PeerSourceP2PLedger,
+		Address:           "44.0.0.1:3001",
+		NormalizedAddress: "44.0.0.1:3001",
+	})
+	// "44.0.0.2:3001" was ledger-known but its peer already left p.peers
+	// (deny, capacity, or reconnect-failure eviction).
+	pg.ledgerKnownAddrs["44.0.0.1:3001"] = "44.0.0.1:3001"
+	pg.ledgerKnownAddrs["44.0.0.2:3001"] = "44.0.0.2:3001"
+
+	pg.pruneLedgerKnownAddrsLocked()
+
+	_, stillLive := pg.ledgerKnownAddrs["44.0.0.1:3001"]
+	_, stale := pg.ledgerKnownAddrs["44.0.0.2:3001"]
+	pg.mu.Unlock()
+
+	assert.True(t, stillLive, "address backed by a retained peer must survive")
+	assert.False(t, stale, "address with no retained peer must be pruned")
+}
+
+// TestPeerGovernor_Reconcile_PrunesStaleLedgerKnownAddr is the same
+// reconciliation exercised through the public reconcile loop rather than the
+// locked helper directly, and covers repeated reconcile passes settling on a
+// stable, pruned map instead of erroring or re-adding the stale entry.
+func TestPeerGovernor_Reconcile_PrunesStaleLedgerKnownAddr(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+
+	pg.mu.Lock()
+	pg.ledgerKnownAddrs["44.0.0.9:3001"] = "44.0.0.9:3001"
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+	pg.mu.Lock()
+	_, known := pg.ledgerKnownAddrs["44.0.0.9:3001"]
+	pg.mu.Unlock()
+	assert.False(t, known)
+
+	// Repeated reconcile passes over an already-pruned map must stay stable.
+	pg.reconcile(t.Context())
+	pg.mu.Lock()
+	assert.Empty(t, pg.ledgerKnownAddrs)
+	pg.mu.Unlock()
+}
+
+// TestDiscoverLedgerPeers_ReconcilesAgainstCurrentRelaySet verifies the
+// on-chain half of ledgerKnownAddrs reconciliation: an address whose pool
+// deregisters or rotates its relay must stop counting toward
+// LedgerPeerTarget once it is no longer part of the ledger provider's
+// current result, even though the peer that address originally matched
+// (added from a non-ledger source) stays connected. This is distinct from
+// pruneLedgerKnownAddrsLocked, which only reacts to the peer itself leaving
+// p.peers; reconcileLedgerKnownAddrs reacts to the chain's own relay list
+// changing while the peer is untouched.
+func TestDiscoverLedgerPeers_ReconcilesAgainstCurrentRelaySet(t *testing.T) {
+	provider := &mockLedgerPeerProvider{
+		relays: []PoolRelay{{Hostname: "44.0.0.9", Port: 3001}},
+	}
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		LedgerPeerProvider: provider,
+		LedgerPeerTarget:   1,
+		DisableOutbound:    true,
+	})
+	require.NoError(t, pg.AddPeer("44.0.0.9:3001", PeerSourceP2PGossip))
+
+	pg.discoverLedgerPeers()
+	pg.mu.Lock()
+	_, knownBefore := pg.ledgerKnownAddrs["44.0.0.9:3001"]
+	countBefore := pg.countLedgerPeersLocked()
+	pg.mu.Unlock()
+	require.True(t, knownBefore)
+	require.Equal(
+		t,
+		1,
+		countBefore,
+		"gossip peer matching a currently listed relay counts toward the ledger target",
+	)
+
+	// The pool moves its registration to a different relay: "44.0.0.9" is no
+	// longer part of the ledger's current relay set, even though the
+	// gossip-sourced peer at that address stays connected.
+	provider.relays = []PoolRelay{{Hostname: "44.0.0.99", Port: 3001}}
+	pg.lastLedgerPeerRefresh.Store(0) // force past the refresh-interval gate
+	pg.discoverLedgerPeers()
+
+	pg.mu.Lock()
+	_, stillKnown := pg.ledgerKnownAddrs["44.0.0.9:3001"]
+	gossipPeerRetained := pg.peerIndexByAddress("44.0.0.9:3001") != -1
+	pg.mu.Unlock()
+
+	assert.False(t, stillKnown,
+		"a delisted relay's association must be reconciled away")
+	assert.True(
+		t,
+		gossipPeerRetained,
+		"the peer itself must remain connected; only its ledger association is pruned",
+	)
+}
+
+// TestDiscoverLedgerPeers_ReconcilesEvenWhenTargetSatisfiedAndNotUrgent
+// verifies reconciliation runs on the discovery cadence even in the common,
+// healthy steady state: LedgerPeerTarget already satisfied and the node not
+// short of upstreams (ledgerPeersUrgent false). discoverLedgerPeersContext
+// used to return before ever fetching relays or reconciling in exactly this
+// case, so a delisted relay's stale association could never be reconciled
+// away as long as the target stayed satisfied — the association itself was
+// what kept it looking satisfied, permanently masking the real deficit left
+// behind. TestDiscoverLedgerPeers_ReconcilesAgainstCurrentRelaySet does not
+// catch this: its default MinHotPeers makes ledgerPeersUrgent true, which
+// bypassed the old early return for an unrelated reason.
+func TestDiscoverLedgerPeers_ReconcilesEvenWhenTargetSatisfiedAndNotUrgent(
+	t *testing.T,
+) {
+	provider := &mockLedgerPeerProvider{
+		relays: []PoolRelay{{Hostname: "44.0.0.9", Port: 3001}},
+	}
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		LedgerPeerProvider: provider,
+		LedgerPeerTarget:   1,
+		MinHotPeers:        1,
+		DisableOutbound:    true,
+	})
+	require.NoError(t, pg.AddPeer("44.0.0.9:3001", PeerSourceP2PGossip))
+	// Give the gossip peer a client connection so it counts as an eligible
+	// upstream, making ledgerPeersUrgent false without a real dial
+	// (DisableOutbound prevents one anyway).
+	pg.mu.Lock()
+	pg.peers[0].Connection = &PeerConnection{IsClient: true}
+	pg.mu.Unlock()
+
+	pg.discoverLedgerPeers()
+
+	require.False(t, pg.ledgerPeersUrgent(), "precondition: must not be urgent")
+	require.LessOrEqual(
+		t,
+		pg.ledgerPeerDeficit(),
+		0,
+		"precondition: target must already be satisfied",
+	)
+	pg.mu.Lock()
+	_, knownBefore := pg.ledgerKnownAddrs["44.0.0.9:3001"]
+	pg.mu.Unlock()
+	require.True(t, knownBefore)
+
+	// The pool moves its registration elsewhere. The target-satisfied,
+	// not-urgent state from above is exactly the condition that used to
+	// skip reconciliation entirely.
+	provider.relays = []PoolRelay{{Hostname: "44.0.0.99", Port: 3001}}
+	pg.lastLedgerPeerRefresh.Store(0) // force past the refresh-interval gate
+	pg.discoverLedgerPeers()
+
+	pg.mu.Lock()
+	_, stillKnown := pg.ledgerKnownAddrs["44.0.0.9:3001"]
+	pg.mu.Unlock()
+	assert.False(t, stillKnown,
+		"a delisted relay's association must be reconciled away even when "+
+			"the target is already satisfied and the node is not urgent")
+}
+
+// TestDiscoverLedgerPeers_ReAssociatesRelistedRelay is the replacement
+// counterpart to TestDiscoverLedgerPeers_ReconcilesAgainstCurrentRelaySet: a
+// relay that drops out of the ledger's relay set and later reappears in it
+// (a pool moving back, or simply being seen again on a later round) must
+// have its ledgerKnownAddrs association restored, not left permanently
+// stale from the round it was pruned.
+func TestDiscoverLedgerPeers_ReAssociatesRelistedRelay(t *testing.T) {
+	provider := &mockLedgerPeerProvider{
+		relays: []PoolRelay{{Hostname: "44.0.0.9", Port: 3001}},
+	}
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		LedgerPeerProvider: provider,
+		LedgerPeerTarget:   1,
+		DisableOutbound:    true,
+	})
+	require.NoError(t, pg.AddPeer("44.0.0.9:3001", PeerSourceP2PGossip))
+
+	// Round 1: relay is listed, gossip peer counts toward the target.
+	pg.discoverLedgerPeers()
+	pg.mu.Lock()
+	_, knownRound1 := pg.ledgerKnownAddrs["44.0.0.9:3001"]
+	pg.mu.Unlock()
+	require.True(t, knownRound1)
+
+	// Round 2: the pool moves its registration elsewhere; the association
+	// is pruned (covered by TestDiscoverLedgerPeers_ReconcilesAgainstCurrentRelaySet).
+	provider.relays = []PoolRelay{{Hostname: "44.0.0.99", Port: 3001}}
+	pg.lastLedgerPeerRefresh.Store(0)
+	pg.discoverLedgerPeers()
+	pg.mu.Lock()
+	_, knownRound2 := pg.ledgerKnownAddrs["44.0.0.9:3001"]
+	pg.mu.Unlock()
+	require.False(
+		t,
+		knownRound2,
+		"precondition: association must be pruned first",
+	)
+
+	// Round 3: the original relay reappears in the ledger's relay set
+	// alongside the other one. The still-connected gossip peer at that
+	// address must be re-associated, replacing the pruned entry.
+	provider.relays = []PoolRelay{
+		{Hostname: "44.0.0.9", Port: 3001},
+		{Hostname: "44.0.0.99", Port: 3001},
+	}
+	pg.lastLedgerPeerRefresh.Store(0)
+	pg.discoverLedgerPeers()
+
+	pg.mu.Lock()
+	_, knownRound3 := pg.ledgerKnownAddrs["44.0.0.9:3001"]
+	gossipPeerRetained := pg.peerIndexByAddress("44.0.0.9:3001") != -1
+	pg.mu.Unlock()
+	assert.True(t, knownRound3,
+		"a re-listed relay must be re-associated with its retained peer")
+	assert.True(t, gossipPeerRetained,
+		"the original gossip peer must still be the one holding the address")
+}
+
+// TestReconcileLedgerKnownAddrs_EmptyCandidatesIsNoop verifies that an empty
+// candidate set (GetPoolRelays returning zero addresses without an error)
+// leaves ledgerKnownAddrs untouched rather than wiping it: that response
+// shape is not expected on a live chain, so treating it as "every relay was
+// delisted" would be actively harmful for no benefit.
+func TestReconcileLedgerKnownAddrs_EmptyCandidatesIsNoop(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	pg.mu.Lock()
+	pg.ledgerKnownAddrs["44.0.0.9:3001"] = "44.0.0.9:3001"
+	pg.mu.Unlock()
+
+	pg.reconcileLedgerKnownAddrs(nil)
+
+	pg.mu.Lock()
+	_, known := pg.ledgerKnownAddrs["44.0.0.9:3001"]
+	pg.mu.Unlock()
+	assert.True(t, known)
+}
+
+// TestReconcileLedgerKnownAddrs_RepeatedCallsAreIdempotent covers the
+// repeated-operation case directly against reconcileLedgerKnownAddrs: running
+// the same candidate set through it twice must not change the outcome, and
+// a subsequent call with a shrunk candidate set must prune exactly the
+// addresses that dropped out.
+func TestReconcileLedgerKnownAddrs_RepeatedCallsAreIdempotent(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	pg.mu.Lock()
+	pg.ledgerKnownAddrs["44.0.0.1:3001"] = "44.0.0.1:3001"
+	pg.ledgerKnownAddrs["44.0.0.2:3001"] = "44.0.0.2:3001"
+	pg.mu.Unlock()
+
+	candidates := []string{"44.0.0.1:3001", "44.0.0.2:3001"}
+	pg.reconcileLedgerKnownAddrs(candidates)
+	pg.reconcileLedgerKnownAddrs(candidates)
+	pg.mu.Lock()
+	assert.Len(t, pg.ledgerKnownAddrs, 2)
+	pg.mu.Unlock()
+
+	pg.reconcileLedgerKnownAddrs([]string{"44.0.0.1:3001"})
+	pg.mu.Lock()
+	_, keptKnown := pg.ledgerKnownAddrs["44.0.0.1:3001"]
+	_, droppedKnown := pg.ledgerKnownAddrs["44.0.0.2:3001"]
+	pg.mu.Unlock()
+	assert.True(t, keptKnown)
+	assert.False(t, droppedKnown)
 }
 
 func TestFlattenRelayCandidates(t *testing.T) {
@@ -376,6 +661,7 @@ func TestCountLedgerPeersLocked(t *testing.T) {
 		{Source: PeerSourceP2PLedger},
 		{
 			Source:            PeerSourceP2PGossip,
+			Address:           "44.0.0.10:3001",
 			NormalizedAddress: "44.0.0.10:3001",
 		},
 		{Source: PeerSourceP2PLedger},
@@ -383,7 +669,7 @@ func TestCountLedgerPeersLocked(t *testing.T) {
 		{Source: PeerSourceTopologyLocalRoot},
 		{Source: PeerSourceP2PLedger},
 	}
-	pg.ledgerKnownAddrs["44.0.0.10:3001"] = struct{}{}
+	pg.ledgerKnownAddrs["44.0.0.10:3001"] = "44.0.0.10:3001"
 	count := pg.countLedgerPeersLocked()
 	pg.mu.Unlock()
 	assert.Equal(t, 4, count)

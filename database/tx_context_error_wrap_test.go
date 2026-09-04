@@ -54,6 +54,17 @@ func (e *erroringMetadata) SetTransaction(
 	return e.injectErr
 }
 
+func (e *erroringMetadata) SetTransactionLeiosClosure(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	idx uint32,
+	certDeposits map[int]uint64,
+	skipWithdrawalWitness bool,
+	txn types.Txn,
+) error {
+	return e.injectErr
+}
+
 func (e *erroringMetadata) SetTransactionBatched(
 	tx lcommon.Transaction,
 	point ocommon.Point,

@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"math"
 	"net/http"
 	"runtime"
@@ -106,6 +105,19 @@ type KoiosParityConfig struct {
 	// Dingo-side row is treated as reference/sync lag rather than a
 	// failure. 0 selects the default (24).
 	GraceHours int
+	// Accounts additionally runs #3097's per-account exact-parity fetch+check
+	// phase for every epoch the observer processes, alongside the existing
+	// epoch-aggregate/pool phases. A nil pointer defaults to true — see
+	// internalconfig.DefaultKoiosParityConfig — since a plain bool's zero
+	// value (false) can't be distinguished from an explicit opt-out. Pass a
+	// pointer to false to disable account-level checking explicitly.
+	Accounts *bool
+	// AccountChunkSize/AccountChunkMaxBytes (dingo #3099) bound each
+	// /account_reward_history request issued by the Accounts phase above, by
+	// both address count and encoded body size. 0 for either selects the
+	// package default. Unused when Accounts resolves to false.
+	AccountChunkSize     int
+	AccountChunkMaxBytes int
 }
 
 // OffchainMetadataConfig controls API-mode off-chain metadata fetching.
@@ -121,15 +133,37 @@ type OffchainMetadataConfig struct {
 	AllowPrivateAddresses bool
 }
 
+// TokenRegistryConfig controls the API-mode CIP-26 token registry sync, which
+// populates the `metadata` field of GET /assets/{asset}. Zero values use the
+// internal syncer defaults. Disabled unless Enabled is set: the mainnet
+// registry is a roughly 240MB download.
+type TokenRegistryConfig struct {
+	HTTPClient            *http.Client
+	SourceURL             string
+	UserAgent             string
+	Interval              time.Duration
+	RequestTimeout        time.Duration
+	MaxBytes              int64
+	MaxEntryBytes         int64
+	Enabled               bool
+	StoreLogos            bool
+	AllowPrivateAddresses bool
+}
+
 // MidnightConfig controls the Midnight indexer and optional gRPC listener.
 // Indexing is only active when Enabled is true AND Dingo is running in API
 // storage mode -- both are required, since the indexer depends on the
-// api-mode indexes to function. Port 0 disables the gRPC listener while
-// leaving indexing eligible to run.
+// api-mode indexes to function. ServerEnabled independently opts into the
+// listener so persisted Midnight data can be served without running the
+// indexer. Reflection and non-loopback plaintext exposure are separate,
+// default-off decisions.
 type MidnightConfig struct {
-	Enabled bool
-	Port    uint
-	Host    string
+	Enabled             bool
+	ServerEnabled       bool
+	ReflectionEnabled   bool
+	AllowInsecureRemote bool
+	Port                uint
+	Host                string
 
 	CNightPolicyID              string
 	CNightAssetName             string
@@ -164,6 +198,8 @@ type Config struct {
 	leiosPipelineTiming *leios.PipelineTiming
 	// Runtime-only, programmatic offchain metadata config (preserves HTTPClient)
 	offchainMetadata OffchainMetadataConfig
+	// Runtime-only, programmatic token registry config (preserves HTTPClient)
+	tokenRegistry TokenRegistryConfig
 	// Parsed duration for chainsync stall timeout (runtime convenience)
 	chainsyncStallTimeout time.Duration
 	// Compatibility mirrors used by the composition layer. cfg remains the
@@ -183,6 +219,7 @@ type Config struct {
 	barkBlockDownloadHosts                                                              []string
 	barkHost                                                                            string
 	barkClientCAFilePath                                                                string
+	barkOperatorCertificateFingerprints                                                 []string
 	databaseLifecycle                                                                   internalconfig.DatabaseLifecycleConfig
 	historyExpiry                                                                       HistoryExpiryConfig
 	koiosParity                                                                         KoiosParityConfig
@@ -194,6 +231,7 @@ type Config struct {
 	shutdownTimeout                                                                     time.Duration
 	DatabaseWorkerPoolConfig                                                            ledger.DatabaseWorkerPoolConfig
 	targetNumberOfKnownPeers, targetNumberOfEstablishedPeers, targetNumberOfActivePeers int
+	targetNumberOfRootPeers                                                             int
 	activePeersTopologyQuota, activePeersGossipQuota, activePeersLedgerQuota            int
 	minHotPeers                                                                         int
 	reconcileInterval, inactivityTimeout                                                time.Duration
@@ -212,6 +250,7 @@ type Config struct {
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	validateForgedBlock                                                                 bool
 	blockPipelineEnabled                                                                bool
+	blockPipelineValidateEnabled                                                        bool
 	minPoolMargin                                                                       uint
 	pledgeLeverageEnabled                                                               bool
 	pledgeLeverage                                                                      uint
@@ -219,7 +258,6 @@ type Config struct {
 	delegatorInactivityEnabled                                                          bool
 	delegatorInactivity                                                                 uint64
 	leiosVoteSigningKeyFile                                                             string
-	leiosVoterPublicKeys                                                                map[string]string
 	midnight                                                                            MidnightConfig
 	chainsyncMaxClients                                                                 int
 	chainsyncStrategy                                                                   chainsync.HeaderSyncStrategy
@@ -520,6 +558,20 @@ func (n *Node) configValidate() error {
 			ouroboros.NetworkCardanoMusashi.NetworkMagic,
 		)
 	}
+	// Peer snapshot relays replace the configured bootstrap peers during
+	// Genesis selection. Validate the snapshot as one contract before any of
+	// its endpoints can suppress those known-good peers.
+	if n.config.topologyConfig != nil &&
+		n.config.topologyConfig.PeerSnapshot != nil {
+		if err := n.config.topologyConfig.PeerSnapshot.Validate(
+			n.config.cfg.NetworkMagic,
+		); err != nil {
+			return fmt.Errorf(
+				"invalid peer snapshot: %w",
+				err,
+			)
+		}
+	}
 	// The block-decode pipeline's vendored decode stage
 	// (gouroboros/pipeline.DecodeStage) calls ledger.NewBlockFromCbor
 	// directly and has no hook for dingo's Leios-extended-header Conway
@@ -540,6 +592,14 @@ func (n *Node) configValidate() error {
 				"block would fail to decode and silently stall chain replay; " +
 				"disable --block-pipeline-enabled (blockPipelineEnabled) to " +
 				"sync Musashi",
+		)
+	}
+	if n.config.cfg.BlockPipelineValidateEnabled &&
+		!n.config.cfg.BlockPipelineEnabled {
+		return errors.New(
+			"block-pipeline-validate-enabled (blockPipelineValidateEnabled) " +
+				"requires block-pipeline-enabled (blockPipelineEnabled) to " +
+				"also be set",
 		)
 	}
 	if n.config.cfg.FullPotRewardsEnabled &&
@@ -667,6 +727,9 @@ func (c *Config) syncCompatFields() {
 	c.barkBaseUrl, c.barkPort, c.barkBlockDownloadHosts = c.cfg.BarkBaseUrl, c.cfg.BarkPort, c.cfg.BarkBlockDownloadHosts
 	c.barkHost = c.cfg.BarkHost
 	c.barkClientCAFilePath = c.cfg.BarkClientCAFilePath
+	c.barkOperatorCertificateFingerprints = slices.Clone(
+		c.cfg.BarkOperatorCertificateFingerprints,
+	)
 	c.databaseLifecycle = c.cfg.DatabaseLifecycle
 	c.corsAllowedOrigins, c.intersectTip = c.cfg.CORSAllowedOrigins, c.cfg.IntersectTip
 	c.peerSharing = c.cfg.PeerSharing != nil && *c.cfg.PeerSharing
@@ -688,16 +751,43 @@ func (c *Config) syncCompatFields() {
 		Enabled:   c.cfg.HistoryExpiry.Enabled,
 		Frequency: c.cfg.HistoryExpiry.Frequency,
 	}
+	// c.cfg.KoiosParity.Accounts is already a fully-resolved bool by this
+	// point (defaulted by WithKoiosParity or internal/config's LoadConfig),
+	// so the mirror always carries a non-nil pointer.
+	koiosParityAccounts := c.cfg.KoiosParity.Accounts
 	c.koiosParity = KoiosParityConfig{
-		Enabled:    c.cfg.KoiosParity.Enabled,
-		Network:    c.cfg.KoiosParity.Network,
-		CachePath:  c.cfg.KoiosParity.CachePath,
-		APIKey:     c.cfg.KoiosParity.APIKey,
-		Strict:     c.cfg.KoiosParity.Strict,
-		GraceHours: c.cfg.KoiosParity.GraceHours,
+		Enabled:              c.cfg.KoiosParity.Enabled,
+		Network:              c.cfg.KoiosParity.Network,
+		CachePath:            c.cfg.KoiosParity.CachePath,
+		APIKey:               c.cfg.KoiosParity.APIKey,
+		Strict:               c.cfg.KoiosParity.Strict,
+		GraceHours:           c.cfg.KoiosParity.GraceHours,
+		Accounts:             &koiosParityAccounts,
+		AccountChunkSize:     c.cfg.KoiosParity.AccountChunkSize,
+		AccountChunkMaxBytes: c.cfg.KoiosParity.AccountChunkMaxBytes,
+	}
+	// The token registry syncer reads this runtime mirror, so YAML, env, and
+	// CLI values -- which only ever land on c.cfg -- have to be carried
+	// across here. HTTPClient is runtime-only and has no internal-config
+	// counterpart, so it is preserved rather than overwritten:
+	// syncCompatFields runs after WithTokenRegistryConfig has applied.
+	c.tokenRegistry = TokenRegistryConfig{
+		HTTPClient:            c.tokenRegistry.HTTPClient,
+		SourceURL:             c.cfg.TokenRegistry.SourceURL,
+		UserAgent:             c.cfg.TokenRegistry.UserAgent,
+		Interval:              c.cfg.TokenRegistry.Interval,
+		RequestTimeout:        c.cfg.TokenRegistry.RequestTimeout,
+		MaxBytes:              c.cfg.TokenRegistry.MaxBytes,
+		MaxEntryBytes:         c.cfg.TokenRegistry.MaxEntryBytes,
+		Enabled:               c.cfg.TokenRegistry.Enabled,
+		StoreLogos:            c.cfg.TokenRegistry.StoreLogos,
+		AllowPrivateAddresses: c.cfg.TokenRegistry.AllowPrivateAddresses,
 	}
 	c.midnight = MidnightConfig{
 		Enabled:                     c.cfg.Midnight.Enabled,
+		ServerEnabled:               c.cfg.Midnight.ServerEnabled,
+		ReflectionEnabled:           c.cfg.Midnight.ReflectionEnabled,
+		AllowInsecureRemote:         c.cfg.Midnight.AllowInsecureRemote,
 		Port:                        c.cfg.Midnight.Port,
 		Host:                        c.cfg.Midnight.Host,
 		CNightPolicyID:              c.cfg.Midnight.CNightPolicyID,
@@ -725,6 +815,7 @@ func (c *Config) syncCompatFields() {
 		TaskQueueSize:  c.cfg.DatabaseQueueSize,
 	}
 	c.targetNumberOfKnownPeers, c.targetNumberOfEstablishedPeers, c.targetNumberOfActivePeers = c.cfg.TargetNumberOfKnownPeers, c.cfg.TargetNumberOfEstablishedPeers, c.cfg.TargetNumberOfActivePeers
+	c.targetNumberOfRootPeers = c.cfg.TargetNumberOfRootPeers
 	c.activePeersTopologyQuota, c.activePeersGossipQuota, c.activePeersLedgerQuota = c.cfg.ActivePeersTopologyQuota, c.cfg.ActivePeersGossipQuota, c.cfg.ActivePeersLedgerQuota
 	c.minHotPeers, c.reconcileInterval, c.inactivityTimeout = c.cfg.MinHotPeers, c.cfg.ReconcileInterval, c.cfg.InactivityTimeout
 	c.inboundWarmTarget, c.inboundHotQuota, c.inboundMinTenure = c.cfg.InboundWarmTarget, c.cfg.InboundHotQuota, c.cfg.InboundMinTenure
@@ -734,10 +825,11 @@ func (c *Config) syncCompatFields() {
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
+	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
-	c.leiosVoteSigningKeyFile, c.leiosVoterPublicKeys = c.cfg.LeiosVoteSigningKeyFile, c.cfg.LeiosVoterPublicKeys
+	c.leiosVoteSigningKeyFile = c.cfg.LeiosVoteSigningKeyFile
 	c.cacheBlockLRUEntries, c.cacheHotUtxoEntries, c.cacheHotTxEntries, c.cacheHotTxMaxBytes = c.cfg.Cache.BlockLRUEntries, c.cfg.Cache.HotUtxoEntries, c.cfg.Cache.HotTxEntries, c.cfg.Cache.HotTxMaxBytes
 	c.pluginSelections = map[hostplugin.Capability]hostplugin.Selection{
 		hostplugin.CapabilityStorageBlob: c.cfg.Plugins.Storage.Blob, hostplugin.CapabilityStorageMetadata: c.cfg.Plugins.Storage.Metadata,
@@ -1153,6 +1245,14 @@ func WithPeerTargets(
 	}
 }
 
+// WithRootPeerTarget specifies the target number of root peers from topology.
+// Use 0 to use the default target, or -1 for unlimited.
+func WithRootPeerTarget(targetRoot int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.TargetNumberOfRootPeers = targetRoot
+	}
+}
+
 // WithActivePeersQuotas specifies the per-source quotas for active peers.
 // Use 0 to use the default quota, or a negative value to disable enforcement.
 // Default quotas: topology=20, gossip=20, ledger=20
@@ -1329,18 +1429,6 @@ func WithLeiosVoteSigningKeyFile(path string) ConfigOptionFunc {
 	}
 }
 
-// WithLeiosVoterPublicKeys specifies the static Leios voter public key
-// registry (DINGO_LEIOS_VOTER_PUBLIC_KEYS): hex pool key hash to
-// hex-encoded BLS12-381 public key. Stands in for CIP-0164 key
-// registration, which is not yet specified. Experimental, leios runMode
-// only.
-func WithLeiosVoterPublicKeys(keys map[string]string) ConfigOptionFunc {
-	return func(c *Config) {
-		// Copy so later caller mutations cannot change live config
-		c.cfg.LeiosVoterPublicKeys = maps.Clone(keys)
-	}
-}
-
 // WithLeiosPipelineTiming overrides the provisional Leios pipeline stage
 // timing windows. CIP-0164 has not finalized these parameters, so they are
 // kept off-chain and overridable here rather than as protocol parameters.
@@ -1418,14 +1506,24 @@ func WithBarkHost(host string) ConfigOptionFunc {
 	}
 }
 
-// WithBarkClientCAFilePath sets the PEM CA bundle Bark verifies client
-// certificates (mTLS) against. Required whenever the database lifecycle
-// service is mounted — see BarkConfig.TlsClientCAFilePath's doc comment in
-// bark/bark.go for what this gates.
+// WithBarkClientCAFilePath sets the PEM CA bundle Bark uses to authenticate
+// every DatabaseService caller. Destructive methods additionally require an
+// allowlisted fingerprint set by WithBarkOperatorCertificateFingerprints.
 func WithBarkClientCAFilePath(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkClientCAFilePath = path
 		c.barkClientCAFilePath = path
+	}
+}
+
+// WithBarkOperatorCertificateFingerprints sets the SHA-256 client certificate
+// fingerprints authorized to invoke destructive DatabaseService RPCs.
+func WithBarkOperatorCertificateFingerprints(
+	fingerprints []string,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkOperatorCertificateFingerprints = slices.Clone(fingerprints)
+		c.barkOperatorCertificateFingerprints = slices.Clone(fingerprints)
 	}
 }
 
@@ -1448,13 +1546,25 @@ func WithHistoryExpiry(cfg HistoryExpiryConfig) ConfigOptionFunc {
 // synced Dingo instance.
 func WithKoiosParity(cfg KoiosParityConfig) ConfigOptionFunc {
 	return func(c *Config) {
+		// Accounts defaults to true (matching
+		// internalconfig.DefaultKoiosParityConfig) unless the caller
+		// explicitly opts out via a non-nil pointer to false — a plain bool
+		// field here would make an unset value indistinguishable from an
+		// explicit false, silently disabling #3097's per-account checking.
+		accounts := true
+		if cfg.Accounts != nil {
+			accounts = *cfg.Accounts
+		}
 		c.cfg.KoiosParity = internalconfig.KoiosParityConfig{
-			Enabled:    cfg.Enabled,
-			Network:    cfg.Network,
-			CachePath:  cfg.CachePath,
-			APIKey:     cfg.APIKey,
-			Strict:     cfg.Strict,
-			GraceHours: cfg.GraceHours,
+			Enabled:              cfg.Enabled,
+			Network:              cfg.Network,
+			CachePath:            cfg.CachePath,
+			APIKey:               cfg.APIKey,
+			Strict:               cfg.Strict,
+			GraceHours:           cfg.GraceHours,
+			Accounts:             accounts,
+			AccountChunkSize:     cfg.AccountChunkSize,
+			AccountChunkMaxBytes: cfg.AccountChunkMaxBytes,
 		}
 	}
 }
@@ -1486,6 +1596,26 @@ func WithOffchainMetadataConfig(cfg OffchainMetadataConfig) ConfigOptionFunc {
 	}
 }
 
+// WithTokenRegistryConfig configures the API-mode CIP-26 token registry sync.
+// Zero values use the syncer's internal defaults.
+func WithTokenRegistryConfig(cfg TokenRegistryConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		// Preserve the programmatic runtime-only HTTPClient and full cfg
+		c.tokenRegistry = cfg
+		c.cfg.TokenRegistry = internalconfig.TokenRegistryConfig{
+			Enabled:               cfg.Enabled,
+			SourceURL:             cfg.SourceURL,
+			Interval:              cfg.Interval,
+			RequestTimeout:        cfg.RequestTimeout,
+			UserAgent:             cfg.UserAgent,
+			MaxBytes:              cfg.MaxBytes,
+			MaxEntryBytes:         cfg.MaxEntryBytes,
+			StoreLogos:            cfg.StoreLogos,
+			AllowPrivateAddresses: cfg.AllowPrivateAddresses,
+		}
+	}
+}
+
 // WithMidnightConfig configures the Midnight indexer and optional gRPC API.
 func WithMidnightConfig(cfg MidnightConfig) ConfigOptionFunc {
 	return func(c *Config) {
@@ -1494,6 +1624,9 @@ func WithMidnightConfig(cfg MidnightConfig) ConfigOptionFunc {
 		}
 		c.cfg.Midnight = internalconfig.MidnightConfig{
 			Enabled:                     cfg.Enabled,
+			ServerEnabled:               cfg.ServerEnabled,
+			ReflectionEnabled:           cfg.ReflectionEnabled,
+			AllowInsecureRemote:         cfg.AllowInsecureRemote,
 			Port:                        cfg.Port,
 			Host:                        cfg.Host,
 			CNightPolicyID:              cfg.CNightPolicyID,
@@ -1687,6 +1820,12 @@ func (c *Config) BarkBlockDownloadHosts() []string {
 	return c.cfg.BarkBlockDownloadHosts
 }
 
+// BarkOperatorCertificateFingerprints returns the SHA-256 client certificate
+// fingerprints authorized to invoke destructive Bark DatabaseService RPCs.
+func (c *Config) BarkOperatorCertificateFingerprints() []string {
+	return slices.Clone(c.cfg.BarkOperatorCertificateFingerprints)
+}
+
 // TlsCertFilePath returns the path to the TLS certificate for gRPC APIs.
 func (c *Config) TlsCertFilePath() string {
 	return c.cfg.TlsCertFilePath
@@ -1868,6 +2007,11 @@ func (c *Config) SetTargetNumberOfActivePeers(n int) {
 	c.cfg.TargetNumberOfActivePeers = n
 }
 
+// TargetNumberOfRootPeers returns the target number of root peers.
+func (c *Config) TargetNumberOfRootPeers() int {
+	return c.cfg.TargetNumberOfRootPeers
+}
+
 // ActivePeersTopologyQuota returns the per-source quota for topology peers.
 func (c *Config) ActivePeersTopologyQuota() int {
 	return c.cfg.ActivePeersTopologyQuota
@@ -1981,6 +2125,11 @@ func (c *Config) OffchainMetadata() internalconfig.OffchainMetadataConfig {
 	return c.cfg.OffchainMetadata
 }
 
+// TokenRegistry returns the CIP-26 token registry sync configuration.
+func (c *Config) TokenRegistry() internalconfig.TokenRegistryConfig {
+	return c.cfg.TokenRegistry
+}
+
 // Logging returns the logging configuration.
 func (c *Config) Logging() internalconfig.LoggingConfig {
 	return c.cfg.Logging
@@ -2050,11 +2199,6 @@ func (c *Config) ValidateForgedBlock() bool {
 // LeiosVoteSigningKeyFile returns the path to the Leios vote signing key.
 func (c *Config) LeiosVoteSigningKeyFile() string {
 	return c.cfg.LeiosVoteSigningKeyFile
-}
-
-// LeiosVoterPublicKeys returns the Leios voter public key registry.
-func (c *Config) LeiosVoterPublicKeys() map[string]string {
-	return c.cfg.LeiosVoterPublicKeys
 }
 
 // PeerSharing returns the peer sharing configuration.

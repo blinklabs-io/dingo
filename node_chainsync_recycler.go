@@ -220,6 +220,22 @@ func (n *Node) recyclerComponents() chainsyncrecycler.ComponentProvider {
 	return nodeRecyclerComponents{node: n}
 }
 
+// withLiveChainsyncState runs fn while the chainsync state is stable across a
+// live database restore or truncate. Callers must tolerate a false result:
+// lifecycle work holds liveLifecycleMu while it discards and rebuilds the
+// state, and blocking a background ledger callback there can deadlock the
+// quiesce that waits for the callback's goroutine to exit.
+func (n *Node) withLiveChainsyncState(fn func(*chainsync.State)) {
+	if !n.liveLifecycleMu.TryLock() {
+		return
+	}
+	defer n.liveLifecycleMu.Unlock()
+	if n.chainsyncState == nil {
+		return
+	}
+	fn(n.chainsyncState)
+}
+
 // WithLiveComponents runs fn against the node's current ledger, chainsync
 // state, and chain selector while holding liveLifecycleMu, so a live database
 // restore/truncate cannot swap them mid-tick.

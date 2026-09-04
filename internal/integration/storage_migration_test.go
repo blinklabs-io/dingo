@@ -31,8 +31,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/mysql"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/postgres"
 	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/dingo/internal/test/conformance"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/storagetest"
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
 )
@@ -262,7 +262,7 @@ func seedMetadataMigrationDataset(
 		gateName:        "storagetest-migration-gate",
 		gateValue:       "enabled",
 	}
-	txn := store.Transaction()
+	txn := store.Transaction(t.Context())
 	require.NoError(t, store.SetCommitTimestamp(dataset.commitTimestamp, txn))
 	require.NoError(t, txn.Commit())
 	require.NoError(t, store.SetNodeSettings(&types.NodeSettings{
@@ -294,7 +294,7 @@ func migrateMetadataDataset(
 	gates, err := src.GetNodeSettingsGates()
 	require.NoError(t, err)
 
-	txn := dest.Transaction()
+	txn := dest.Transaction(t.Context())
 	require.NoError(t, dest.SetCommitTimestamp(timestamp, txn))
 	require.NoError(t, txn.Commit())
 	require.NoError(t, dest.SetNodeSettings(settings))
@@ -364,7 +364,7 @@ func TestMetadataStoreMigrationSQLiteToPostgres(t *testing.T) {
 		Metadata: dbtest.StorageProvider{
 			Name: "postgres",
 			Config: map[string]any{
-				"dsn": conformance.PostgresDSNWithSearchPath(dsn, schema),
+				"dsn": storagetest.PostgresDSNWithSearchPath(dsn, schema),
 			},
 			Register: postgres.RegisterProvider,
 		},
@@ -400,12 +400,12 @@ func postgresMigrationDSN() string {
 	if v := os.Getenv("POSTGRES_SSLMODE"); v != "" {
 		sslMode = v
 	}
-	return "host=" + conformance.EscapeLibpqValue(host) +
-		" port=" + conformance.EscapeLibpqValue(port) +
-		" user=" + conformance.EscapeLibpqValue(user) +
-		" password=" + conformance.EscapeLibpqValue(os.Getenv("POSTGRES_PASSWORD")) +
-		" dbname=" + conformance.EscapeLibpqValue(dbName) +
-		" sslmode=" + conformance.EscapeLibpqValue(sslMode)
+	return "host=" + storagetest.EscapeLibpqValue(host) +
+		" port=" + storagetest.EscapeLibpqValue(port) +
+		" user=" + storagetest.EscapeLibpqValue(user) +
+		" password=" + storagetest.EscapeLibpqValue(os.Getenv("POSTGRES_PASSWORD")) +
+		" dbname=" + storagetest.EscapeLibpqValue(dbName) +
+		" sslmode=" + storagetest.EscapeLibpqValue(sslMode)
 }
 
 // TestMetadataStoreMigrationSQLiteToMySQL migrates a small dataset from the

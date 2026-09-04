@@ -30,16 +30,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestDatabaseServiceRequiresClientCertForDestructiveRPCs is the wire-level
-// proof for bark#2988: an anonymous caller (no client cert) can still use
-// the DatabaseService's read-only RPCs but is rejected on a destructive one;
-// a caller presenting a certificate signed by a different, untrusted CA
-// never even completes the TLS handshake; and a caller presenting a
-// certificate signed by the configured CA gets past the auth check
-// entirely (it may still fail for an unrelated reason, e.g. an unknown
-// operation ID — the assertion here is specifically about authentication,
-// not about that RPC's own business logic succeeding).
-func TestDatabaseServiceRequiresClientCertForDestructiveRPCs(t *testing.T) {
+// TestDatabaseServiceAuthenticationAndOperatorAuthorization is the wire-level
+// proof of Bark's two-stage DatabaseService contract: every method requires a
+// verified client identity, while destructive methods additionally require an
+// explicitly allowed certificate fingerprint.
+func TestDatabaseServiceAuthenticationAndOperatorAuthorization(t *testing.T) {
 	block1 := testBlock(1, 0x01)
 
 	barkDataDir := t.TempDir()
@@ -74,6 +69,9 @@ func TestDatabaseServiceRequiresClientCertForDestructiveRPCs(t *testing.T) {
 	trustedClientCertPath, trustedClientKeyPath := writeTestClientCert(
 		t, trustedCA, trustedCAKey, "trusted-operator",
 	)
+	readerClientCertPath, readerClientKeyPath := writeTestClientCert(
+		t, trustedCA, trustedCAKey, "trusted-reader",
+	)
 
 	untrustedCA, untrustedCAKey, _ := writeTestCA(t)
 	untrustedClientCertPath, untrustedClientKeyPath := writeTestClientCert(
@@ -89,6 +87,9 @@ func TestDatabaseServiceRequiresClientCertForDestructiveRPCs(t *testing.T) {
 		TlsCertFilePath:     serverCertPath,
 		TlsKeyFilePath:      serverKeyPath,
 		TlsClientCAFilePath: trustedCACertPath,
+		OperatorCertificateFingerprints: []string{
+			testCertificateFingerprint(t, trustedClientCertPath),
+		},
 	})
 	require.NoError(t, err)
 	require.NoError(t, b.Start(t.Context()))
@@ -103,7 +104,7 @@ func TestDatabaseServiceRequiresClientCertForDestructiveRPCs(t *testing.T) {
 	}
 
 	t.Run(
-		"anonymous client: read-only succeeds, destructive is rejected",
+		"anonymous client is rejected from read-only and destructive RPCs",
 		func(t *testing.T) {
 			client := newClient("", "")
 
@@ -111,11 +112,8 @@ func TestDatabaseServiceRequiresClientCertForDestructiveRPCs(t *testing.T) {
 				context.Background(),
 				connect.NewRequest(&databasev1alpha1.GetDatabaseInfoRequest{}),
 			)
-			require.NoError(
-				t,
-				err,
-				"read-only RPCs must stay reachable without a client cert",
-			)
+			require.Error(t, err)
+			require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err))
 
 			_, err = client.CancelOperation(
 				context.Background(),
@@ -125,6 +123,28 @@ func TestDatabaseServiceRequiresClientCertForDestructiveRPCs(t *testing.T) {
 			)
 			require.Error(t, err)
 			require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err))
+		},
+	)
+
+	t.Run(
+		"authenticated reader cannot invoke destructive RPCs",
+		func(t *testing.T) {
+			client := newClient(readerClientCertPath, readerClientKeyPath)
+
+			_, err := client.GetDatabaseInfo(
+				context.Background(),
+				connect.NewRequest(&databasev1alpha1.GetDatabaseInfoRequest{}),
+			)
+			require.NoError(t, err)
+
+			_, err = client.CancelOperation(
+				context.Background(),
+				connect.NewRequest(&databasev1alpha1.CancelOperationRequest{
+					OperationId: "nonexistent",
+				}),
+			)
+			require.Error(t, err)
+			require.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
 		},
 	)
 
@@ -153,29 +173,20 @@ func TestDatabaseServiceRequiresClientCertForDestructiveRPCs(t *testing.T) {
 				connect.NewRequest(&databasev1alpha1.GetDatabaseInfoRequest{}),
 			)
 			if err != nil {
-				// The handshake was rejected outright — also an acceptable
-				// outcome, and nothing further to check on this connection.
+				// Either the TLS handshake rejected the untrusted chain or the
+				// DatabaseService interceptor rejected the resulting anonymous
+				// identity. Both enforce the authentication boundary.
 				return
 			}
-
-			_, err = client.CancelOperation(
-				context.Background(),
-				connect.NewRequest(&databasev1alpha1.CancelOperationRequest{
-					OperationId: "nonexistent",
-				}),
-			)
-			require.Error(t, err)
-			require.Equal(
+			require.Fail(
 				t,
-				connect.CodeUnauthenticated,
-				connect.CodeOf(err),
-				"an unverified cert must be rejected on a destructive RPC exactly like an anonymous caller",
+				"an untrusted certificate reached a read-only handler",
 			)
 		},
 	)
 
 	t.Run(
-		"cert signed by the configured CA passes the auth check",
+		"allowed operator certificate passes both stages",
 		func(t *testing.T) {
 			client := newClient(trustedClientCertPath, trustedClientKeyPath)
 

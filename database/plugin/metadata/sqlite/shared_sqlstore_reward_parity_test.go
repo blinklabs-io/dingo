@@ -15,6 +15,7 @@
 package sqlite
 
 import (
+	"context"
 	"math/big"
 	"testing"
 
@@ -24,7 +25,7 @@ import (
 )
 
 type rewardStore interface {
-	Transaction() types.Txn
+	Transaction(ctx context.Context) types.Txn
 	SaveRewardAdaPots(*models.RewardAdaPots, types.Txn) error
 	GetRewardAdaPots(uint64, types.Txn) (*models.RewardAdaPots, error)
 	SaveRewardSnapshot(*models.RewardSnapshot, types.Txn) error
@@ -176,7 +177,7 @@ func exerciseRewardStore(t *testing.T, store rewardStore) rewardState {
 	)
 	require.NoError(t, err)
 
-	guardTxn := store.Transaction()
+	guardTxn := store.Transaction(t.Context())
 	guardCreated, guardID, err := store.ClaimFallbackRewardSnapshotGuard(
 		7,
 		"mark",
@@ -196,7 +197,7 @@ func exerciseRewardStore(t *testing.T, store rewardStore) rewardState {
 		},
 		nil,
 	))
-	provisionalTxn := store.Transaction()
+	provisionalTxn := store.Transaction(t.Context())
 	provisionalGuard, provisionalGuardID, err :=
 		store.ClaimFallbackRewardSnapshotGuard(
 			8,
@@ -206,7 +207,7 @@ func exerciseRewardStore(t *testing.T, store rewardStore) rewardState {
 	require.NoError(t, err)
 	require.NoError(t, provisionalTxn.Commit())
 
-	authoritativeTxn := store.Transaction()
+	authoritativeTxn := store.Transaction(t.Context())
 	authoritativeGuard, _, err := store.ClaimFallbackRewardSnapshotGuard(
 		5,
 		"mark",

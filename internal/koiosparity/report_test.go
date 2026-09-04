@@ -15,6 +15,8 @@
 package koiosparity
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -34,4 +36,29 @@ func TestBuildStatusSummaryChecksEpochZero(t *testing.T) {
 	require.Equal(t, uint64(0), summary.CheckedMin,
 		"epoch 0 is a real checked epoch and must remain the reported minimum")
 	require.Equal(t, uint64(2), summary.CheckedMax)
+}
+
+func TestReportsMakeCoverageScopeExplicit(t *testing.T) {
+	report, err := BuildJSONReport("preview", "2026-08-17", nil, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, KoiosCoverageMatrix(), report.Coverage)
+	require.Contains(t, report.Coverage, KoiosFieldCoverage{
+		Endpoint: "/totals",
+		Field:    "reward",
+		Class:    CoverageIntentionallyIncomparable,
+		Reason:   "Koios exposes a lagged cumulative accumulator; Dingo stores a per-epoch reward flow",
+	})
+
+	var output bytes.Buffer
+	PrintStatus(&output, StatusSummary{Network: "preview"}, false, nil)
+	require.Contains(t, output.String(), "intentionally incomparable")
+	require.Contains(t, output.String(), "unsupported")
+
+	output.Reset()
+	require.NoError(t, WriteJSONReport(&output, report))
+	require.True(t, strings.Contains(output.String(), `"coverage"`))
+	require.True(
+		t,
+		strings.Contains(output.String(), `"intentionally-incomparable"`),
+	)
 }

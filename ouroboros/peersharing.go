@@ -29,29 +29,21 @@ func (o *Ouroboros) peerSharingConfig() opeersharing.Config {
 	return opeersharing.NewConfig(o.peersharingConnOpts()...)
 }
 
+// peersharingConnOpts wires the single response-side callback the
+// PeerSharing protocol exposes: opeersharing.Config carries exactly one
+// ShareRequestFunc slot, which answers an incoming ShareRequest from a
+// remote peer. There is no separate outbound-request slot to configure here;
+// this node's own requests for peers are driven explicitly by the reconcile
+// loop via RequestPeersFromPeer, not through a protocol callback. Registering
+// WithShareRequestFunc more than once would silently make the last
+// registration win, so ownership of that single slot stays explicit here
+// rather than split across a client/server pair that both target it.
 func (o *Ouroboros) peersharingConnOpts() []opeersharing.PeerSharingOptionFunc {
-	opts := append(
-		[]opeersharing.PeerSharingOptionFunc{},
-		o.peersharingClientConnOpts()...,
-	)
-	opts = append(opts, o.peersharingServerConnOpts()...)
-	opts = append(opts, opeersharing.WithLocalDisabled(!o.config.PeerSharing))
-	return opts
-}
-
-func (o *Ouroboros) peersharingServerConnOpts() []opeersharing.PeerSharingOptionFunc {
 	return []opeersharing.PeerSharingOptionFunc{
 		opeersharing.WithShareRequestFunc(
 			o.instrumentPeersharingShareRequest(o.peersharingShareRequest),
 		),
-	}
-}
-
-func (o *Ouroboros) peersharingClientConnOpts() []opeersharing.PeerSharingOptionFunc {
-	return []opeersharing.PeerSharingOptionFunc{
-		opeersharing.WithShareRequestFunc(
-			o.instrumentPeersharingShareRequest(o.peersharingClientRequest),
-		),
+		opeersharing.WithLocalDisabled(!o.config.PeerSharing),
 	}
 }
 
@@ -69,55 +61,64 @@ func (o *Ouroboros) instrumentPeersharingShareRequest(
 	}
 }
 
-func (o *Ouroboros) peersharingClientRequest(
-	ctx opeersharing.CallbackContext,
-	amount int,
-) ([]opeersharing.PeerAddress, error) {
-	// This callback is intentionally a no-op stub.
-	// Peer requests are driven explicitly by the reconcile loop via RequestPeersFromPeer,
-	// not through the protocol's automatic peer sharing callbacks.
-	return []opeersharing.PeerAddress{}, nil
-}
-
 func (o *Ouroboros) peersharingShareRequest(
 	ctx opeersharing.CallbackContext,
 	amount int,
 ) ([]opeersharing.PeerAddress, error) {
 	// If PeerGov isn't wired yet, don't share any peers rather than panic
-	if o.PeerGov == nil {
+	if o.peerGov == nil {
+		return []opeersharing.PeerAddress{}, nil
+	}
+	if amount <= 0 {
 		return []opeersharing.PeerAddress{}, nil
 	}
 
-	peers := []opeersharing.PeerAddress{}
-	shared := 0
-	for _, peer := range o.PeerGov.GetPeers() {
+	peers := make([]opeersharing.PeerAddress, 0, amount)
+	for _, peer := range o.peerGov.GetPeers() {
 		if !peer.Sharable {
 			continue
 		}
-		if shared >= amount {
+		if len(peers) >= amount {
 			break
 		}
-		host, port, err := net.SplitHostPort(peer.Address)
+		address := peer.NormalizedAddress
+		if address == "" {
+			address = peer.Address
+		}
+		host, port, err := net.SplitHostPort(address)
 		if err != nil {
-			// Skip on error
-			o.config.Logger.Debug("failed to split peer address, skipping")
+			o.config.Logger.Debug(
+				"failed to split peer address, skipping",
+				"address", address,
+				"error", err,
+			)
+			continue
+		}
+		ip := net.ParseIP(host)
+		if ip == nil {
+			o.config.Logger.Debug(
+				"peer address has no serializable IP, skipping",
+				"address", address,
+			)
 			continue
 		}
 		portNum, err := strconv.ParseUint(port, 10, 16)
 		if err != nil {
-			// Skip on error
-			o.config.Logger.Debug("failed to parse peer port, skipping")
+			o.config.Logger.Debug(
+				"failed to parse peer port, skipping",
+				"address", address,
+				"error", err,
+			)
 			continue
 		}
 		o.config.Logger.Debug(
 			"adding peer for sharing: " + peer.Address,
 		)
 		peers = append(peers, opeersharing.PeerAddress{
-			IP:   net.ParseIP(host),
+			IP:   ip,
 			Port: uint16(portNum),
 		},
 		)
-		shared++
 	}
 	return peers, nil
 }
@@ -126,11 +127,11 @@ func (o *Ouroboros) RequestPeersFromPeer(peer *peergov.Peer) []string {
 	if peer == nil || peer.Connection == nil {
 		return nil
 	}
-	if o.ConnManager == nil {
+	if o.connManager == nil {
 		o.config.Logger.Debug("ConnManager not available")
 		return nil
 	}
-	conn := o.ConnManager.GetConnectionById(peer.Connection.Id)
+	conn := o.connManager.GetConnectionById(peer.Connection.Id)
 	if conn == nil {
 		return nil
 	}

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"strconv"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -33,9 +34,14 @@ import (
 // (pool, slot) key after an idempotent INSERT ... DO NOTHING. Keeping this
 // lookup in one place ensures import and certificate paths preserve the
 // first-write-wins behavior consistently across dialects.
-func poolRegistrationID(db queryer, poolID int64, slot uint64) (int64, error) {
+func poolRegistrationID(
+	ctx context.Context,
+	db queryer,
+	poolID int64,
+	slot uint64,
+) (int64, error) {
 	var id int64
-	err := db.QueryRowContext(context.Background(), `
+	err := db.QueryRowContext(ctx, `
 SELECT id FROM pool_registration WHERE pool_id = ? AND added_slot = ?`,
 		poolID,
 		slot,
@@ -57,14 +63,15 @@ RETURNING id`
 // conflict semantics cannot diverge. Registrations are first-write-wins for
 // the unique (pool, slot) key; a duplicate returns the existing row ID.
 func insertPoolRegistration(
+	ctx context.Context,
 	db queryer,
 	values []any,
 	poolID int64,
 	slot uint64,
 ) (int64, error) {
-	id, err := queryReturnedID(db, poolRegistrationInsertSQL, values...)
+	id, err := queryReturnedID(ctx, db, poolRegistrationInsertSQL, values...)
 	if errors.Is(err, sql.ErrNoRows) {
-		return poolRegistrationID(db, poolID, slot)
+		return poolRegistrationID(ctx, db, poolID, slot)
 	}
 	return id, err
 }
@@ -81,11 +88,10 @@ func (s *Store) ImportPool(
 		return errors.New("import pool: registration is nil")
 	}
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			margin := nullableRat(pool.Margin)
-			id, err := queryReturnedID(db, `
+			id, err := queryReturnedID(ctx, db, `
 INSERT INTO pool (
     margin, pool_key_hash, vrf_key_hash, reward_account,
     latest_op_cert_sequence, reward_account_credential_tag, pledge, cost,
@@ -118,7 +124,7 @@ RETURNING id`,
 			}
 			pool.ID = uint(id)
 			registration.PoolID = pool.ID
-			registrationID, err := insertPoolRegistration(db, []any{
+			registrationID, err := insertPoolRegistration(ctx, db, []any{
 				nullableRat(registration.Margin),
 				registration.MetadataUrl,
 				registration.VrfKeyHash,
@@ -139,13 +145,13 @@ RETURNING id`,
 				return fmt.Errorf("import pool registration: %w", err)
 			}
 			registration.ID = uint(registrationID)
-			if _, err := db.ExecContext(context.Background(), `
+			if _, err := db.ExecContext(ctx, `
 DELETE FROM pool_registration_owner WHERE pool_registration_id = ?`,
 				registrationID,
 			); err != nil {
 				return err
 			}
-			if _, err := db.ExecContext(context.Background(), `
+			if _, err := db.ExecContext(ctx, `
 DELETE FROM pool_registration_relay WHERE pool_registration_id = ?`,
 				registrationID,
 			); err != nil {
@@ -155,7 +161,7 @@ DELETE FROM pool_registration_relay WHERE pool_registration_id = ?`,
 				owner := &registration.Owners[i]
 				owner.PoolID = pool.ID
 				owner.PoolRegistrationID = registration.ID
-				ownerID, err := queryReturnedID(db, `
+				ownerID, err := queryReturnedID(ctx, db, `
 INSERT INTO pool_registration_owner (
     key_hash, pool_registration_id, pool_id
 ) VALUES (?, ?, ?) RETURNING id`,
@@ -172,7 +178,7 @@ INSERT INTO pool_registration_owner (
 				relay := &registration.Relays[i]
 				relay.PoolID = pool.ID
 				relay.PoolRegistrationID = registration.ID
-				relayID, err := queryReturnedID(db, `
+				relayID, err := queryReturnedID(ctx, db, `
 INSERT INTO pool_registration_relay (
     ipv4, ipv6, hostname, pool_registration_id, pool_id, port
 ) VALUES (?, ?, ?, ?, ?, ?) RETURNING id`,
@@ -198,19 +204,19 @@ func (s *Store) GetPool(
 	includeInactive bool,
 	txn types.Txn,
 ) (*models.Pool, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
-	pool, err := queryPool(db, "pool_key_hash = ?", poolKeyHash.Bytes())
+	pool, err := queryPool(ctx, db, "pool_key_hash = ?", poolKeyHash.Bytes())
 	if err != nil || pool == nil {
 		return pool, err
 	}
-	if err := s.loadPoolAssociations(db, pool, true); err != nil {
+	if err := s.loadPoolAssociations(ctx, db, pool, true); err != nil {
 		return nil, err
 	}
 	if !includeInactive {
-		return s.activePoolOrNil(db, pool)
+		return s.activePoolOrNil(ctx, db, pool)
 	}
 	return pool, nil
 }
@@ -219,26 +225,27 @@ func (s *Store) GetPoolByVrfKeyHash(
 	vrfKeyHash []byte,
 	txn types.Txn,
 ) (*models.Pool, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
-	pool, err := queryPool(db, "vrf_key_hash = ?", vrfKeyHash)
+	pool, err := queryPool(ctx, db, "vrf_key_hash = ?", vrfKeyHash)
 	if err != nil || pool == nil {
 		return pool, err
 	}
-	if err := s.loadPoolAssociations(db, pool, true); err != nil {
+	if err := s.loadPoolAssociations(ctx, db, pool, true); err != nil {
 		return nil, err
 	}
 	// This method backs LedgerView.IsVrfKeyInUse, whose contract is to report
 	// only currently registered pools. Retired registrations remain in the
 	// history but must not reserve their old VRF key indefinitely.
-	return s.activePoolOrNil(db, pool)
+	return s.activePoolOrNil(ctx, db, pool)
 }
 
 // activePoolOrNil applies the same current-registration/retirement semantics
 // used by GetPool(..., false) to other lookups that expose active pools.
 func (s *Store) activePoolOrNil(
+	ctx context.Context,
 	db queryer,
 	pool *models.Pool,
 ) (*models.Pool, error) {
@@ -248,12 +255,12 @@ func (s *Store) activePoolOrNil(
 	if len(pool.Retirement) == 0 {
 		return pool, nil
 	}
-	current, ok, err := currentEpoch(db)
+	current, ok, err := currentEpoch(ctx, db)
 	if err != nil {
 		return nil, err
 	}
 	if ok && pool.Retirement[0].Epoch <= current {
-		retired, err := latestPoolEventIsRetirement(db, s.dialect, pool.ID)
+		retired, err := latestPoolEventIsRetirement(ctx, db, s.dialect, pool.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -272,7 +279,7 @@ func (s *Store) GetPools(
 	if len(poolKeyHashes) == 0 {
 		return ret, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -311,7 +318,7 @@ func (s *Store) GetPools(
 	// instead of degrading.
 	for start := 0; start < len(hashes); start += s.dialect.ParameterLimit() {
 		end := min(start+s.dialect.ParameterLimit(), len(hashes))
-		rows, err := db.QueryContext(context.Background(), `
+		rows, err := db.QueryContext(ctx, `
 SELECT margin, pool_key_hash, vrf_key_hash, reward_account,
        latest_op_cert_sequence, reward_account_credential_tag, id,
        pledge, cost, leios_key_public, leios_key_possession_proof
@@ -337,7 +344,7 @@ WHERE pool_key_hash IN (`+bindPlaceholders(end-start)+`)`,
 			return nil, err
 		}
 	}
-	if err := s.loadPoolsAssociations(db, ret); err != nil {
+	if err := s.loadPoolsAssociations(ctx, db, ret); err != nil {
 		return nil, err
 	}
 	return ret, nil
@@ -358,10 +365,9 @@ func (s *Store) UpdatePoolOpCertSequence(
 		return err
 	}
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
-			if _, err := db.ExecContext(context.Background(), `
+		func(db queryer, ctx context.Context) error {
+			if _, err := db.ExecContext(ctx, `
 INSERT INTO pool_opcert_sequence (pool_key_hash, slot, sequence)
 VALUES (?, ?, ?)
 ON CONFLICT (pool_key_hash, slot) DO UPDATE
@@ -372,7 +378,7 @@ SET sequence = excluded.sequence`,
 			); err != nil {
 				return err
 			}
-			_, err := db.ExecContext(context.Background(), `
+			_, err := db.ExecContext(ctx, `
 UPDATE pool SET latest_op_cert_sequence = ?
 WHERE pool_key_hash = ?
   AND latest_op_cert_sequence < ?`,
@@ -389,17 +395,66 @@ func (s *Store) LatestPoolOpCertSequence(
 	poolKeyHash lcommon.PoolKeyHash,
 	txn types.Txn,
 ) (uint64, bool, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, false, err
 	}
 	var sequence int64
 	var count int64
-	err = db.QueryRowContext(context.Background(), `
+	err = db.QueryRowContext(ctx, `
 SELECT COALESCE(MAX(sequence), 0), COUNT(*)
 FROM pool_opcert_sequence
 WHERE pool_key_hash = ?`,
 		poolKeyHash.Bytes(),
+	).Scan(&sequence, &count)
+	return uint64(sequence), count > 0, err
+}
+
+// LatestPoolOpCertSequenceAfter returns the highest sequence recorded for a
+// pool after afterSlot. A Mithril-restored ledger uses this to distinguish
+// replayed counter history from rows imported at its trust boundary.
+func (s *Store) LatestPoolOpCertSequenceAfter(
+	poolKeyHash lcommon.PoolKeyHash,
+	afterSlot uint64,
+	txn types.Txn,
+) (uint64, bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return 0, false, err
+	}
+	var sequence int64
+	var count int64
+	err = db.QueryRowContext(ctx, `
+SELECT COALESCE(MAX(sequence), 0), COUNT(*)
+FROM pool_opcert_sequence
+WHERE pool_key_hash = ? AND slot > ?`,
+		poolKeyHash.Bytes(),
+		afterSlot,
+	).Scan(&sequence, &count)
+	return uint64(sequence), count > 0, err
+}
+
+func (s *Store) LatestPoolOpCertSequenceAtOrBefore(
+	poolKeyHash lcommon.PoolKeyHash,
+	slot uint64,
+	txn types.Txn,
+) (uint64, bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return 0, false, err
+	}
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return 0, false, err
+	}
+	var sequence int64
+	var count int64
+	err = db.QueryRowContext(ctx, `
+SELECT COALESCE(MAX(sequence), 0), COUNT(*)
+FROM pool_opcert_sequence
+WHERE pool_key_hash = ? AND slot <= ?`,
+		poolKeyHash.Bytes(),
+		slotValue,
 	).Scan(&sequence, &count)
 	return uint64(sequence), count > 0, err
 }
@@ -426,12 +481,12 @@ GROUP BY pool_key_hash`
 func (s *Store) LatestPoolOpCertSequences(
 	txn types.Txn,
 ) (map[string]uint64, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
 	rows, err := db.QueryContext(
-		context.Background(),
+		ctx,
 		LatestPoolOpCertSequencesSQL,
 	)
 	if err != nil {
@@ -450,6 +505,84 @@ func (s *Store) LatestPoolOpCertSequences(
 	return ret, rows.Err()
 }
 
+// mithrilTrustBoundarySyncKey mirrors database.mithrilLedgerSlotSyncKey and
+// ledgerstate's writer of the same key. It is duplicated here for the reason
+// the database package duplicates it: nothing below the ledger may import the
+// package that writes it.
+const mithrilTrustBoundarySyncKey = "mithril_ledger_slot"
+
+// firstMintedBlockSlot raises startSlot past the Mithril trust boundary when
+// one is recorded, so a slot range asked about minted blocks never reaches
+// rows that are not blocks.
+//
+// pool_opcert_sequence carries two kinds of row. A block-apply writes one per
+// block minted (ledger.processBlockTransactions), which is what every block
+// count here means. A Mithril restore also writes one row per pool in the
+// certified HeaderState counter map, all at the snapshot's anchor slot
+// (ledgerstate.importOpCertCounters), so post-boundary validation has an
+// authoritative baseline to enforce counter monotonicity against. Those rows
+// record a counter the node was told about, not a block it saw: a bootstrap
+// applies no blocks at or below the anchor, and one slot cannot hold a block
+// from every pool in the set in any case.
+//
+// Counting them as blocks credits every pool holding a certified counter with
+// a block it never minted and inflates the epoch's block total by the size of
+// the pool set, which reaches pool reward performance
+// (ledger/reward_calculation.go), the reward_pool_input rows seeded at the
+// epoch boundary (ledger/snapshot/rotation.go), and Blockfrost's
+// blocks_minted. The boundary is the same discriminator
+// LedgerState.latestOpCertCounterForValidation already uses to tell an
+// observed counter from an imported one.
+//
+// A failed or malformed read is returned as an error rather than treated as
+// "no boundary": these callers distribute rewards from the result, and a
+// silent fallback would restore the very inflation this removes at exactly
+// the moment the boundary could not be confirmed.
+//
+// The bool reports whether any slot at all can be past the boundary. It is
+// false only when the recorded boundary is the largest representable slot,
+// where boundary+1 would wrap to zero and re-admit every row.
+func (s *Store) firstMintedBlockSlot(
+	db queryer,
+	ctx context.Context,
+	startSlot uint64,
+) (uint64, bool, error) {
+	value, err := s.operationalQueries(db).
+		GetSyncState(ctx, mithrilTrustBoundarySyncKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return startSlot, true, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("read Mithril trust boundary: %w", err)
+	}
+	if value == "" {
+		// sqlc's GetSyncState returns sql.ErrNoRows for an absent key, which
+		// the branch above already takes, so an empty string here is a row
+		// that exists and holds nothing. That is a malformed boundary, not
+		// the absence of one, and it gets the same treatment as an
+		// unparseable value rather than silently re-admitting every imported
+		// counter row.
+		return 0, false, fmt.Errorf(
+			"parse Mithril trust boundary %q: empty value", value,
+		)
+	}
+	boundary, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0, false, fmt.Errorf(
+			"parse Mithril trust boundary %q: %w",
+			value,
+			err,
+		)
+	}
+	if boundary < startSlot {
+		return startSlot, true, nil
+	}
+	if boundary == math.MaxUint64 {
+		return 0, false, nil
+	}
+	return boundary + 1, true, nil
+}
+
 func (s *Store) GetPoolBlockIssuersInSlotRange(
 	startSlot uint64,
 	endSlot uint64,
@@ -458,11 +591,18 @@ func (s *Store) GetPoolBlockIssuersInSlotRange(
 	if endSlot < startSlot {
 		return nil, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(context.Background(), `
+	startSlot, anyMinted, err := s.firstMintedBlockSlot(db, ctx, startSlot)
+	if err != nil {
+		return nil, err
+	}
+	if !anyMinted || endSlot < startSlot {
+		return nil, nil
+	}
+	rows, err := db.QueryContext(ctx, `
 SELECT pool_key_hash, id, slot, sequence
 FROM pool_opcert_sequence
 WHERE slot >= ? AND slot <= ?
@@ -503,12 +643,19 @@ func (s *Store) CountPoolBlocksInSlotRange(
 	if endSlot < startSlot {
 		return counts, 0, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, 0, err
 	}
+	startSlot, anyMinted, err := s.firstMintedBlockSlot(db, ctx, startSlot)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !anyMinted || endSlot < startSlot {
+		return counts, 0, nil
+	}
 	var total int64
-	if err := db.QueryRowContext(context.Background(), `
+	if err := db.QueryRowContext(ctx, `
 SELECT COUNT(*) FROM pool_opcert_sequence
 WHERE slot >= ? AND slot <= ?`,
 		startSlot,
@@ -524,7 +671,7 @@ WHERE slot >= ? AND slot <= ?`,
 	for _, poolKeyHash := range poolKeyHashes {
 		args = append(args, poolKeyHash.Bytes())
 	}
-	rows, err := db.QueryContext(context.Background(), `
+	rows, err := db.QueryContext(ctx, `
 SELECT pool_key_hash, COUNT(*)
 FROM pool_opcert_sequence
 WHERE slot >= ? AND slot <= ?
@@ -565,9 +712,8 @@ func (s *Store) RetirePools(
 		return err
 	}
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			for start := 0; start < len(poolKeyHashes); start += 400 {
 				end := min(start+400, len(poolKeyHashes))
 				chunk := poolKeyHashes[start:end]
@@ -575,7 +721,7 @@ func (s *Store) RetirePools(
 				for i := range chunk {
 					args[i] = chunk[i]
 				}
-				rows, err := db.QueryContext(context.Background(), `
+				rows, err := db.QueryContext(ctx, `
 SELECT id, pool_key_hash FROM pool
 WHERE pool_key_hash IN (`+bindPlaceholders(len(chunk))+`)`,
 					args...,
@@ -590,7 +736,7 @@ WHERE pool_key_hash IN (`+bindPlaceholders(len(chunk))+`)`,
 						rows.Close()
 						return err
 					}
-					if _, err := db.ExecContext(context.Background(), `
+					if _, err := db.ExecContext(ctx, `
 INSERT INTO pool_retirement (
     pool_key_hash, certificate_id, pool_id, epoch, added_slot
 )
@@ -628,11 +774,11 @@ func (s *Store) GetRetiringPools(
 	currentEpoch uint64,
 	txn types.Txn,
 ) ([]models.PoolRetiringRow, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(context.Background(), `
+	rows, err := db.QueryContext(ctx, `
 WITH latest_reg AS (
     SELECT pr.pool_key_hash, pr.added_slot,
            CASE WHEN pr.certificate_id = 0 THEN 1 ELSE 0 END synth,
@@ -696,18 +842,18 @@ ORDER BY r.epoch, r.added_slot, r.block_index, r.cert_index`,
 func (s *Store) GetActivePoolKeyHashes(
 	txn types.Txn,
 ) ([][]byte, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf("GetActivePoolKeyHashes: resolve db: %w", err)
 	}
-	slot, err := currentTipSlot(db)
+	slot, err := currentTipSlot(ctx, db)
 	if err != nil {
 		return nil, err
 	}
 	if slot == 0 {
 		var exists bool
 		if err := db.QueryRowContext(
-			context.Background(),
+			ctx,
 			"SELECT EXISTS(SELECT 1 FROM tip WHERE id = 1)",
 		).Scan(&exists); err != nil {
 			return nil, err
@@ -722,19 +868,19 @@ func (s *Store) GetActivePoolKeyHashes(
 func (s *Store) GetActivePoolKeyHashesOrdered(
 	txn types.Txn,
 ) ([][]byte, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"GetActivePoolKeyHashesOrdered: resolve db: %w",
 			err,
 		)
 	}
-	slot, err := currentTipSlot(db)
+	slot, err := currentTipSlot(ctx, db)
 	if err != nil {
 		return nil, err
 	}
 	var epochID, startSlot, length int64
-	err = db.QueryRowContext(context.Background(), `
+	err = db.QueryRowContext(ctx, `
 SELECT epoch_id, start_slot, length_in_slots
 FROM epoch
 WHERE start_slot <= ?
@@ -755,7 +901,7 @@ LIMIT 1`,
 			err,
 		)
 	}
-	rows, err := db.QueryContext(context.Background(), `
+	rows, err := db.QueryContext(ctx, `
 WITH reg_ranked AS (
     SELECT pr.pool_id, pr.added_slot,
            COALESCE(t.block_index, 0) AS blk_idx,
@@ -832,12 +978,12 @@ func (s *Store) GetPoolCertificateHistory(
 	pkh lcommon.PoolKeyHash,
 	txn types.Txn,
 ) ([][]byte, [][]byte, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, nil, err
 	}
 	query := func(table string) ([][]byte, error) {
-		rows, err := db.QueryContext(context.Background(), `
+		rows, err := db.QueryContext(ctx, `
 SELECT tx.hash
 FROM `+table+` item
 JOIN certs c ON c.id = item.certificate_id
@@ -881,7 +1027,7 @@ func (s *Store) GetActivePoolKeyHashesAtSlot(
 	slot uint64,
 	txn types.Txn,
 ) ([][]byte, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"GetActivePoolKeyHashesAtSlot: resolve db: %w",
@@ -891,7 +1037,7 @@ func (s *Store) GetActivePoolKeyHashesAtSlot(
 	var epochID sql.NullInt64
 	var startSlot sql.NullInt64
 	var length sql.NullInt64
-	err = db.QueryRowContext(context.Background(), `
+	err = db.QueryRowContext(ctx, `
 SELECT epoch_id, start_slot, length_in_slots
 FROM epoch
 WHERE start_slot <= ?
@@ -915,7 +1061,7 @@ LIMIT 1`,
 			types.ErrNoEpochData,
 		)
 	}
-	rows, err := db.QueryContext(context.Background(), `
+	rows, err := db.QueryContext(ctx, `
 WITH latest_reg AS (
     SELECT pr.pool_id, pr.added_slot,
            COALESCE(t.block_index, 0) blk_idx,
@@ -1000,12 +1146,13 @@ func (s *Store) GetStakeByPools(
 		stakes, delegators := emptyPoolStakeMaps(poolKeyHashes)
 		return stakes, delegators, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, nil, err
 	}
 	stakes, delegators := emptyPoolStakeMaps(poolKeyHashes)
 	complete, err := s.getStakeByPoolsFromLive(
+		ctx,
 		db,
 		poolKeyHashes,
 		stakes,
@@ -1034,6 +1181,7 @@ func emptyPoolStakeMaps(
 }
 
 func (s *Store) getStakeByPoolsFromLive(
+	ctx context.Context,
 	db queryer,
 	poolKeyHashes [][]byte,
 	stakes, delegators map[string]uint64,
@@ -1047,7 +1195,7 @@ func (s *Store) getStakeByPoolsFromLive(
 		for _, hash := range chunk {
 			args = append(args, hash)
 		}
-		rows, err := db.QueryContext(context.Background(), `
+		rows, err := db.QueryContext(ctx, `
 SELECT account.pool, reward_live_stake.utxo_stake
 FROM account
 LEFT JOIN reward_live_stake
@@ -1110,7 +1258,7 @@ func (s *Store) getStakeByPoolsDirect(
 	if len(poolKeyHashes) == 0 {
 		return stakes, delegators, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1122,7 +1270,7 @@ func (s *Store) getStakeByPoolsDirect(
 		for i := range chunk {
 			args[i] = chunk[i]
 		}
-		rows, err := db.QueryContext(context.Background(), `
+		rows, err := db.QueryContext(ctx, `
 SELECT pool, COUNT(*)
 FROM account
 WHERE active = TRUE AND pool IN (`+bindPlaceholders(len(chunk))+`)
@@ -1148,7 +1296,7 @@ GROUP BY pool`,
 		if err := rows.Close(); err != nil {
 			return nil, nil, err
 		}
-		rows, err = db.QueryContext(context.Background(), `
+		rows, err = db.QueryContext(ctx, `
 		SELECT account.pool, utxo.amount
 		FROM account
 JOIN utxo
@@ -1206,7 +1354,7 @@ func (s *Store) GetPoolRegistrationsAtSlot(
 	if len(poolKeyHashes) == 0 {
 		return ret, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -1217,7 +1365,7 @@ func (s *Store) GetPoolRegistrationsAtSlot(
 			args = append(args, poolKeyHash.Bytes())
 		}
 		args = append(args, slot)
-		rows, err := db.QueryContext(context.Background(), `
+		rows, err := db.QueryContext(ctx, `
 WITH ranked AS (
     SELECT pr.id,
            ROW_NUMBER() OVER (
@@ -1264,7 +1412,7 @@ WHERE r.rn = 1`,
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}
-		if err := loadPoolRegistrationChildrenBatch(db, batch); err != nil {
+		if err := loadPoolRegistrationChildrenBatch(ctx, db, batch); err != nil {
 			return nil, err
 		}
 		for _, registration := range batch {
@@ -1285,7 +1433,7 @@ func (s *Store) GetPoolRegistrationsEffectiveForEpoch(
 	if len(poolKeyHashes) == 0 {
 		return ret, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -1304,7 +1452,7 @@ func (s *Store) GetPoolRegistrationsEffectiveForEpoch(
 			args = append(args, hash)
 		}
 		args = append(args, epochStartSlot, endedEpoch)
-		rows, err := db.QueryContext(context.Background(), `
+		rows, err := db.QueryContext(ctx, `
 WITH events AS (
     SELECT registration.pool_key_hash, registration.id registration_id,
            0 is_retirement, registration.added_slot,
@@ -1389,7 +1537,7 @@ FROM ranked WHERE rn = 1`,
 			args = append(args, hash)
 		}
 		args = append(args, epochStartSlot, snapshotSlot)
-		rows, err := db.QueryContext(context.Background(), `
+		rows, err := db.QueryContext(ctx, `
 WITH ranked AS (
     SELECT registration.id,
            ROW_NUMBER() OVER (
@@ -1441,7 +1589,7 @@ SELECT id FROM ranked WHERE rn = 1`,
 		for i, id := range registrationIDs[start:end] {
 			args[i] = id
 		}
-		rows, err := db.QueryContext(context.Background(), `
+		rows, err := db.QueryContext(ctx, `
 SELECT p.margin, p.metadata_url, p.vrf_key_hash, p.pool_key_hash, p.reward_account,
        p.reward_account_credential_tag, p.metadata_hash, p.pledge, p.cost,
        p.certificate_id, p.id, p.pool_id, p.added_slot, p.deposit_amount,
@@ -1468,7 +1616,7 @@ WHERE p.id IN (`+bindPlaceholders(len(args))+`)`,
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}
-		if err := loadPoolRegistrationChildrenBatch(db, batch); err != nil {
+		if err := loadPoolRegistrationChildrenBatch(ctx, db, batch); err != nil {
 			return nil, err
 		}
 		for _, registration := range batch {
@@ -1483,11 +1631,11 @@ func (s *Store) GetPoolRegistrations(
 	poolKeyHash lcommon.PoolKeyHash,
 	txn types.Txn,
 ) ([]lcommon.PoolRegistrationCertificate, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(context.Background(), `
+	rows, err := db.QueryContext(ctx, `
 	SELECT p.margin, p.metadata_url, p.vrf_key_hash, p.pool_key_hash, p.reward_account,
 	       p.reward_account_credential_tag, p.metadata_hash, p.pledge, p.cost,
 	       p.certificate_id, p.id, p.pool_id, p.added_slot, p.deposit_amount,
@@ -1515,7 +1663,7 @@ ORDER BY p.id DESC`,
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if err := loadPoolRegistrationChildrenBatch(db, registrations); err != nil {
+	if err := loadPoolRegistrationChildrenBatch(ctx, db, registrations); err != nil {
 		return nil, err
 	}
 	ret := make([]lcommon.PoolRegistrationCertificate, 0, len(registrations))
@@ -1579,11 +1727,11 @@ ORDER BY p.id DESC`,
 func (s *Store) GetActivePoolRelays(
 	txn types.Txn,
 ) ([]models.PoolRegistrationRelay, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf("GetActivePoolRelays: resolve db: %w", err)
 	}
-	current, ok, err := currentEpoch(db)
+	current, ok, err := currentEpoch(ctx, db)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"GetActivePoolRelays: get current epoch: %w",
@@ -1593,7 +1741,7 @@ func (s *Store) GetActivePoolRelays(
 	if !ok {
 		return []models.PoolRegistrationRelay{}, nil
 	}
-	rows, err := db.QueryContext(context.Background(), `
+	rows, err := db.QueryContext(ctx, `
 WITH latest_reg AS (
     SELECT pr.id, pr.pool_id, pr.added_slot,
            COALESCE(t.block_index, 0) block_index,
@@ -1677,14 +1825,14 @@ func (s *Store) GetPoolsRetiringAtEpoch(
 	boundarySlot uint64,
 	txn types.Txn,
 ) ([]models.PoolRetirementRefund, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"GetPoolsRetiringAtEpoch: resolve db: %w",
 			err,
 		)
 	}
-	rows, err := db.QueryContext(context.Background(), `
+	rows, err := db.QueryContext(ctx, `
 WITH latest_reg AS (
     SELECT pr.pool_id, pr.added_slot, pr.reward_account,
            pr.reward_account_credential_tag, pr.deposit_amount,
@@ -1768,17 +1916,16 @@ func (s *Store) RestorePoolStateAtSlot(
 	txn types.Txn,
 ) error {
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			if _, err := db.ExecContext(
-				context.Background(),
+				ctx,
 				"DELETE FROM pool_opcert_sequence WHERE slot > ?",
 				slot,
 			); err != nil {
 				return err
 			}
-			if _, err := db.ExecContext(context.Background(), `
+			if _, err := db.ExecContext(ctx, `
 DELETE FROM pool
 WHERE NOT EXISTS (
     SELECT 1 FROM pool_registration registration
@@ -1789,7 +1936,7 @@ WHERE NOT EXISTS (
 			); err != nil {
 				return err
 			}
-			if _, err := db.ExecContext(context.Background(), `
+			if _, err := db.ExecContext(ctx, `
 WITH ranked AS (
     SELECT registration.pool_id, registration.pledge, registration.cost,
            registration.margin, registration.vrf_key_hash,
@@ -1839,7 +1986,7 @@ WHERE EXISTS (
 			); err != nil {
 				return err
 			}
-			_, err := db.ExecContext(context.Background(), `
+			_, err := db.ExecContext(ctx, `
 UPDATE pool
 SET latest_op_cert_sequence = COALESCE((
     SELECT MAX(sequence) FROM pool_opcert_sequence sequence
@@ -1887,11 +2034,12 @@ func ledgerPoolRelay(
 }
 
 func queryPool(
+	ctx context.Context,
 	db queryer,
 	predicate string,
 	args ...any,
 ) (*models.Pool, error) {
-	row := db.QueryRowContext(context.Background(), `
+	row := db.QueryRowContext(ctx, `
 SELECT margin, pool_key_hash, vrf_key_hash, reward_account,
        latest_op_cert_sequence, reward_account_credential_tag, id,
        pledge, cost, leios_key_public, leios_key_possession_proof
@@ -1952,6 +2100,7 @@ func scanPool(row rowScanner) (*models.Pool, error) {
 }
 
 func (s *Store) loadPoolAssociations(
+	ctx context.Context,
 	db queryer,
 	pool *models.Pool,
 	latestOnly bool,
@@ -1972,21 +2121,29 @@ ORDER BY p.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
 	if latestOnly {
 		query += " LIMIT 1"
 	}
-	rows, err := db.QueryContext(context.Background(), query, pool.ID)
+	rows, err := db.QueryContext(ctx, query, pool.ID)
 	if err != nil {
 		return fmt.Errorf("load pool registrations query: %w", err)
 	}
+	// Collect every registration row and fully close this cursor before
+	// issuing any nested owner/relay query on the same queryer. On SQLite,
+	// concurrently open cursors on one connection are fine, but MySQL and
+	// PostgreSQL connections are strictly request/response: issuing a new
+	// query while this outer result set is still open corrupts the
+	// connection (observed as go-sql-driver/mysql's "busy buffer" /
+	// "unexpected sequence nr", and equivalent protocol-desync failures on
+	// PostgreSQL) once that connection is returned to the pool and reused
+	// -- see the conformance suite's real-backend investigation. Load
+	// children only after this cursor is closed, matching the safe
+	// collect-then-batch-load pattern loadPoolsAssociations already uses.
+	registrations := make([]*models.PoolRegistration, 0)
 	for rows.Next() {
 		registration, err := scanPoolRegistration(rows)
 		if err != nil {
 			rows.Close()
 			return err
 		}
-		if err := loadPoolRegistrationChildren(db, registration); err != nil {
-			rows.Close()
-			return err
-		}
-		pool.Registration = append(pool.Registration, *registration)
+		registrations = append(registrations, registration)
 	}
 	if err := rows.Close(); err != nil {
 		return err
@@ -1994,7 +2151,13 @@ ORDER BY p.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	rows, err = db.QueryContext(context.Background(), `
+	for _, registration := range registrations {
+		if err := loadPoolRegistrationChildren(ctx, db, registration); err != nil {
+			return err
+		}
+		pool.Registration = append(pool.Registration, *registration)
+	}
+	rows, err = db.QueryContext(ctx, `
 SELECT r.pool_key_hash, r.certificate_id, r.id, r.pool_id, r.epoch, r.added_slot
 FROM pool_retirement r
 LEFT JOIN certs c ON c.id = r.certificate_id
@@ -2045,6 +2208,7 @@ ORDER BY r.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
 // while reducing the query count to one query per association table (per
 // parameter-limit chunk).
 func (s *Store) loadPoolsAssociations(
+	ctx context.Context,
 	db queryer,
 	pools []models.Pool,
 ) error {
@@ -2073,7 +2237,7 @@ WHERE p.pool_id IN (` + bindPlaceholders(end-start) + `)
 ORDER BY p.pool_id, p.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
          COALESCE(c.cert_index, 0) DESC, p.id DESC`
 		rows, err := db.QueryContext(
-			context.Background(),
+			ctx,
 			s.dialect.Rebind(query),
 			poolIDs[start:end]...,
 		)
@@ -2121,13 +2285,14 @@ ORDER BY p.pool_id, p.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
 			)
 		}
 	}
-	if err := loadPoolRegistrationChildrenBatch(db, registrations); err != nil {
+	if err := loadPoolRegistrationChildrenBatch(ctx, db, registrations); err != nil {
 		return err
 	}
-	return s.loadPoolRetirementsBatch(db, pools)
+	return s.loadPoolRetirementsBatch(ctx, db, pools)
 }
 
 func (s *Store) loadPoolRetirementsBatch(
+	ctx context.Context,
 	db queryer,
 	pools []models.Pool,
 ) error {
@@ -2149,7 +2314,7 @@ ORDER BY r.pool_id, r.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
          COALESCE(c.cert_index, 0) DESC,
          CASE WHEN r.certificate_id = 0 THEN 1 ELSE 0 END DESC, r.id DESC`
 		rows, err := db.QueryContext(
-			context.Background(),
+			ctx,
 			s.dialect.Rebind(query),
 			poolIDs[start:end]...)
 		if err != nil {
@@ -2255,10 +2420,11 @@ func scanPoolRegistration(
 }
 
 func loadPoolRegistrationChildren(
+	ctx context.Context,
 	db queryer,
 	registration *models.PoolRegistration,
 ) error {
-	rows, err := db.QueryContext(context.Background(), `
+	rows, err := db.QueryContext(ctx, `
 SELECT key_hash, id, pool_registration_id, pool_id
 FROM pool_registration_owner
 WHERE pool_registration_id = ?`,
@@ -2286,7 +2452,7 @@ WHERE pool_registration_id = ?`,
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	rows, err = db.QueryContext(context.Background(), `
+	rows, err = db.QueryContext(ctx, `
 SELECT ipv4, ipv6, hostname, id, pool_registration_id, pool_id, port
 FROM pool_registration_relay
 WHERE pool_registration_id = ?`,
@@ -2326,6 +2492,7 @@ WHERE pool_registration_id = ?`,
 // the grouping in memory avoids the per-registration N+1 query pattern used
 // by the legacy helper while preserving child insertion order.
 func loadPoolRegistrationChildrenBatch(
+	ctx context.Context,
 	db queryer,
 	registrations []*models.PoolRegistration,
 ) error {
@@ -2342,7 +2509,7 @@ func loadPoolRegistrationChildrenBatch(
 	}
 	for start := 0; start < len(ids); start += 400 {
 		end := min(start+400, len(ids))
-		rows, err := db.QueryContext(context.Background(), `
+		rows, err := db.QueryContext(ctx, `
 SELECT key_hash, id, pool_registration_id, pool_id
 FROM pool_registration_owner
 WHERE pool_registration_id IN (`+bindPlaceholders(end-start)+`)
@@ -2367,7 +2534,7 @@ ORDER BY id`, ids[start:end]...)
 		if err := rows.Close(); err != nil {
 			return err
 		}
-		rows, err = db.QueryContext(context.Background(), `
+		rows, err = db.QueryContext(ctx, `
 SELECT ipv4, ipv6, hostname, id, pool_registration_id, pool_id, port
 FROM pool_registration_relay
 WHERE pool_registration_id IN (`+bindPlaceholders(end-start)+`)
@@ -2400,12 +2567,13 @@ ORDER BY id`, ids[start:end]...)
 }
 
 func queryReturnedID(
+	ctx context.Context,
 	db queryer,
 	query string,
 	args ...any,
 ) (int64, error) {
 	var id int64
-	err := db.QueryRowContext(context.Background(), query, args...).Scan(&id)
+	err := db.QueryRowContext(ctx, query, args...).Scan(&id)
 	return id, err
 }
 
@@ -2415,12 +2583,13 @@ func queryReturnedID(
 // certificate index provide the remaining ordering, with retirement events
 // winning ties through the synthetic is_retirement component.
 func latestPoolEventIsRetirement(
+	ctx context.Context,
 	db queryer,
 	dialect Dialect,
 	poolID uint,
 ) (bool, error) {
 	var retirement bool
-	err := db.QueryRowContext(context.Background(), `
+	err := db.QueryRowContext(ctx, `
 WITH events AS (
     SELECT 0 AS is_retirement, p.added_slot,
            COALESCE(tx.block_index, 0) AS block_index,
@@ -2467,9 +2636,9 @@ func netIPPointer(value []byte) *net.IP {
 	return &ip
 }
 
-func currentEpoch(db queryer) (uint64, bool, error) {
+func currentEpoch(ctx context.Context, db queryer) (uint64, bool, error) {
 	var epoch sql.NullInt64
-	err := db.QueryRowContext(context.Background(), `
+	err := db.QueryRowContext(ctx, `
 SELECT epoch_id FROM epoch
 WHERE start_slot <= (SELECT slot FROM tip WHERE id = 1)
 ORDER BY start_slot DESC

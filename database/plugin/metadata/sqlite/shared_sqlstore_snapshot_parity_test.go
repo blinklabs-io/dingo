@@ -15,6 +15,7 @@
 package sqlite
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -23,7 +24,7 @@ import (
 )
 
 type snapshotStore interface {
-	Transaction() types.Txn
+	Transaction(ctx context.Context) types.Txn
 	SavePoolStakeSnapshot(*models.PoolStakeSnapshot, types.Txn) error
 	SavePoolStakeSnapshots([]*models.PoolStakeSnapshot, types.Txn) error
 	GetPoolStakeSnapshot(
@@ -68,7 +69,7 @@ func exerciseSnapshotStore(t *testing.T, store snapshotStore) snapshotState {
 	poolA := []byte("pool-a")
 	poolB := []byte("pool-b")
 
-	txn := store.Transaction()
+	txn := store.Transaction(t.Context())
 	require.NoError(t, store.SavePoolStakeSnapshot(
 		&models.PoolStakeSnapshot{
 			Epoch:            1,
@@ -202,7 +203,7 @@ func exerciseSnapshotStore(t *testing.T, store snapshotStore) snapshotState {
 	ret.summary, err = store.GetEpochSummary(1, nil)
 	require.NoError(t, err)
 
-	rollback := store.Transaction()
+	rollback := store.Transaction(t.Context())
 	require.NoError(t, store.DeletePoolStakeSnapshotsForEpoch(
 		1,
 		models.PoolStakeSnapshotTypeGo,

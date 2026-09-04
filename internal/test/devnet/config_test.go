@@ -1,3 +1,5 @@
+//go:build linux
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,10 +20,12 @@ import (
 	"os"
 	"regexp"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 // TestCheckedInSpecsAreValid parses every network spec in this directory
@@ -137,6 +141,134 @@ func TestScriptsAndComposeAgreeOnSpecFiles(t *testing.T) {
 		"start.sh and run-tests.sh must select the same accelerated specs;"+
 			" if they drift, the harness and the running network resolve"+
 			" different timings")
+}
+
+// TestComposeTxPumpCooldownUsesMilliseconds keeps the DevNet load profile in
+// agreement with txpump's millisecond-valued configuration contract and the
+// 5-15 second cadence documented in README.md. A value copied as seconds
+// makes txpump open a fresh NtC connection and submit each configured batch
+// every 5-15 milliseconds. That saturates the mempool and can starve the
+// persistent ChainSync observers which drive the accelerated scenario.
+func TestComposeTxPumpCooldownUsesMilliseconds(t *testing.T) {
+	environments := loadComposeTxPumpEnvironments(t)
+
+	for _, service := range []string{"txpump-dingo", "txpump"} {
+		t.Run(service, func(t *testing.T) {
+			environment := environments[service]
+			for _, tc := range []struct {
+				name string
+				want int
+			}{
+				{name: "MIN", want: 5_000},
+				{name: "MAX", want: 15_000},
+			} {
+				key := "TXPUMP_COOLDOWN_" + tc.name
+				requireComposeEnvInt(t, service, environment, key, tc.want,
+					"txpump cooldown values are milliseconds; the DevNet"+
+						" profile documents a 5-15 second cadence")
+			}
+		})
+	}
+}
+
+func requireComposeEnvInt(
+	t *testing.T,
+	service string,
+	environment map[string]string,
+	key string,
+	want int,
+	message string,
+) {
+	t.Helper()
+	raw, ok := environment[key]
+	require.True(t, ok, "Compose service %s must define %s", service, key)
+	got, err := strconv.Atoi(raw)
+	require.NoError(t, err,
+		"Compose service %s setting %s must be an integer", service, key)
+	require.Equal(t, want, got, message)
+}
+
+func loadComposeTxPumpEnvironments(t *testing.T) map[string]map[string]string {
+	t.Helper()
+	composeData, err := os.ReadFile("docker-compose.yml")
+	require.NoError(t, err)
+
+	var compose struct {
+		Services map[string]struct {
+			Environment map[string]string `yaml:"environment"`
+		} `yaml:"services"`
+	}
+	require.NoError(t, yaml.Unmarshal(composeData, &compose))
+
+	environments := make(map[string]map[string]string, 2)
+	for _, service := range []string{"txpump-dingo", "txpump"} {
+		definition, ok := compose.Services[service]
+		require.True(t, ok, "Compose service %s must exist", service)
+		require.NotNil(t, definition.Environment,
+			"Compose service %s must define an environment", service)
+		environments[service] = definition.Environment
+	}
+	return environments
+}
+
+// TestComposeTxPumpSubmitsOneTransactionPerBatch prevents the DevNet load
+// generator from immediately spending outputs created earlier in the same
+// batch. Those dependent transactions can become invalid when an early fork
+// removes their parent, leaving the accelerated scenario without a stable
+// transaction-bearing block.
+func TestComposeTxPumpSubmitsOneTransactionPerBatch(t *testing.T) {
+	environments := loadComposeTxPumpEnvironments(t)
+
+	for _, service := range []string{"txpump-dingo", "txpump"} {
+		t.Run(service, func(t *testing.T) {
+			environment := environments[service]
+			for _, bound := range []string{"MIN", "MAX"} {
+				key := "TXPUMP_TX_COUNT_" + bound
+				requireComposeEnvInt(
+					t,
+					service,
+					environment,
+					key,
+					1,
+					"DevNet txpump batches must not create unconfirmed dependency chains",
+				)
+			}
+			requireComposeEnvInt(t, service, environment,
+				"TXPUMP_CONFIRMATION_SLOTS", 600,
+				"submitted outputs must remain quarantined across early forks")
+		})
+	}
+}
+
+// TestComposeTxPumpWaitsForProfileReadiness verifies that each txpump service
+// starts only after every node in its active profile is healthy, preventing
+// genesis-backed transactions from being submitted during early convergence.
+func TestComposeTxPumpWaitsForProfileReadiness(t *testing.T) {
+	composeData, err := os.ReadFile("docker-compose.yml")
+	require.NoError(t, err)
+
+	var compose struct {
+		Services map[string]struct {
+			DependsOn map[string]struct {
+				Condition string `yaml:"condition"`
+			} `yaml:"depends_on"`
+		} `yaml:"services"`
+	}
+	require.NoError(t, yaml.Unmarshal(composeData, &compose))
+
+	for service, dependencies := range map[string][]string{
+		"txpump-dingo": {"dingo-1", "dingo-2", "dingo-3", "dingo-relay"},
+		"txpump":       {"dingo-producer", "cardano-producer", "cardano-relay"},
+	} {
+		t.Run(service, func(t *testing.T) {
+			for _, dependency := range dependencies {
+				condition, ok := compose.Services[service].DependsOn[dependency]
+				require.True(t, ok, "%s must depend on %s", service, dependency)
+				require.Equal(t, "service_healthy", condition.Condition,
+					"%s must wait for %s to be healthy", service, dependency)
+			}
+		})
+	}
 }
 
 func TestLoadDevNetConfigFromMissingFile(t *testing.T) {

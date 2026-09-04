@@ -26,7 +26,28 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
+
+// fixedFloorGuard builds a PoolSnapshotRetentionGuard that lowers the prune
+// boundary to a fixed floor, standing in for
+// LedgerState.PrunePoolSnapshotsWithRetentionFloor in snapshot-package tests.
+func fixedFloorGuard(floor uint64, ok bool) PoolSnapshotRetentionGuard {
+	return func(
+		defaultBefore uint64,
+		minBefore uint64,
+		prune func(before uint64) error,
+	) error {
+		before := defaultBefore
+		if ok && floor < before {
+			before = floor
+		}
+		if before < minBefore {
+			before = minBefore
+		}
+		return prune(before)
+	}
+}
 
 // seedRetentionRows writes one row per epoch in [0, throughEpoch] into every
 // table cleanupOldSnapshots touches, all describing the same pool, so a
@@ -317,5 +338,261 @@ func TestCleanupOldSnapshotsBelowWindowKeepsEverything(t *testing.T) {
 		)
 		require.NoError(t, err, "get pool stake snapshots %d", epoch)
 		require.Len(t, snapshots, 1, "pool_stake_snapshot %d retained", epoch)
+	}
+}
+
+// TestRotateSnapshotsPreservesCapturedLeiosKeyAcrossPoolRotation exercises the
+// production Mark->Set addressing path: epoch 9 uses mark[8], even after the
+// live pool row has rotated to a new key. The committee key must remain the one
+// frozen with mark[8], not whichever key the pool carries when it is queried.
+func TestRotateSnapshotsPreservesCapturedLeiosKeyAcrossPoolRotation(
+	t *testing.T,
+) {
+	db := setupTestDB(t)
+	seedEpochs(t, db, []models.Epoch{{
+		EpochId:       7,
+		StartSlot:     100,
+		LengthInSlots: 100,
+	}})
+
+	poolKeyHash := bytes.Repeat([]byte{0x41}, 28)
+	oldPublic := bytes.Repeat([]byte{0x51}, 96)
+	oldProof := bytes.Repeat([]byte{0x61}, 48)
+	importPool := func(slot uint64, public, proof []byte) {
+		t.Helper()
+		pool := &models.Pool{
+			PoolKeyHash:             append([]byte(nil), poolKeyHash...),
+			VrfKeyHash:              bytes.Repeat([]byte{0x71}, 32),
+			LeiosKeyPublic:          append([]byte(nil), public...),
+			LeiosKeyPossessionProof: append([]byte(nil), proof...),
+		}
+		registration := &models.PoolRegistration{
+			PoolKeyHash:             append([]byte(nil), poolKeyHash...),
+			VrfKeyHash:              bytes.Repeat([]byte{0x71}, 32),
+			AddedSlot:               slot,
+			LeiosKeyPublic:          append([]byte(nil), public...),
+			LeiosKeyPossessionProof: append([]byte(nil), proof...),
+		}
+		require.NoError(t, db.ImportPool(nil, pool, registration))
+	}
+	importPool(50, oldPublic, oldProof)
+
+	var poolHash lcommon.PoolKeyHash
+	copy(poolHash[:], poolKeyHash)
+	distribution := &StakeDistribution{
+		Slot:           199,
+		PoolStakes:     map[lcommon.PoolKeyHash]uint64{poolHash: 100},
+		DelegatorCount: map[lcommon.PoolKeyHash]uint64{poolHash: 1},
+		TotalStake:     100,
+		TotalPools:     1,
+	}
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	saved, err := mgr.saveSnapshot(
+		context.Background(),
+		8,
+		models.PoolStakeSnapshotTypeMark,
+		distribution,
+		event.EpochTransitionEvent{
+			PreviousEpoch: 7,
+			NewEpoch:      8,
+			BoundarySlot:  200,
+			SnapshotSlot:  199,
+		},
+		false,
+		false,
+		false,
+	)
+	require.NoError(t, err)
+	require.True(t, saved)
+
+	newPublic := bytes.Repeat([]byte{0x52}, 96)
+	newProof := bytes.Repeat([]byte{0x62}, 48)
+	importPool(250, newPublic, newProof)
+	current, err := db.Metadata().GetPools(
+		[]lcommon.PoolKeyHash{poolHash}, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, current, 1)
+	require.Equal(t, newPublic, current[0].LeiosKeyPublic)
+
+	// This is the production rotation path: Set/Go are addressed by older Mark
+	// epoch numbers instead of copying rows to new snapshot_type values.
+	mgr.rotateSnapshots(context.Background(), 9)
+	stored, err := db.Metadata().GetPoolStakeSnapshot(
+		8,
+		models.PoolStakeSnapshotTypeMark,
+		poolKeyHash,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, oldPublic, stored.LeiosKeyPublic,
+		"mark[8] must retain the key captured before the live rotation")
+	require.Equal(t, oldProof, stored.LeiosKeyPossessionProof)
+}
+
+// TestCleanupOldSnapshotsRetentionFloorRetainsDeferredHeaderEpochs is the
+// snapshot-side regression guard for issue #3727. When a queued/deferred header
+// still needs an older epoch's mark snapshot for leader validation, the
+// retention-floor provider reports that epoch and cleanupOldSnapshots must keep
+// the pool_stake_snapshot rows at/above it instead of pruning them at the
+// default currentEpoch-3 boundary — otherwise the deferred header would read
+// the pruned rows back as a zero-stake "pool absent" answer. The reward-state
+// retention window is unaffected: only pool snapshots are pinned.
+func TestCleanupOldSnapshotsRetentionFloorRetainsDeferredHeaderEpochs(
+	t *testing.T,
+) {
+	db := setupTestDB(t)
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	meta := db.Metadata()
+
+	const currentEpoch = uint64(28)
+	poolKeyHash := bytes.Repeat([]byte{0xaa}, 28)
+	seedRetentionRows(t, db, poolKeyHash, currentEpoch)
+
+	// A deferred header requires the epoch-10 mark snapshot (its producer's
+	// leader-eligibility basis). Pin retention there.
+	const pinnedEpoch = uint64(10)
+	mgr.SetPoolSnapshotRetentionGuard(fixedFloorGuard(pinnedEpoch, true))
+
+	require.NoError(
+		t,
+		mgr.cleanupOldSnapshots(context.Background(), currentEpoch),
+	)
+
+	// Pool snapshots from the pinned epoch up to current must survive, even
+	// though 10..24 are below the default currentEpoch-3 (25) window.
+	for epoch := pinnedEpoch; epoch <= currentEpoch; epoch++ {
+		snapshots, err := meta.GetPoolStakeSnapshotsByEpoch(
+			epoch, models.PoolStakeSnapshotTypeMark, nil,
+		)
+		require.NoError(t, err, "get pool stake snapshots %d", epoch)
+		require.Len(
+			t,
+			snapshots,
+			1,
+			"pinned pool_stake_snapshot for epoch %d must be retained",
+			epoch,
+		)
+	}
+
+	// Snapshots strictly below the pin are still pruned.
+	for epoch := range pinnedEpoch {
+		snapshots, err := meta.GetPoolStakeSnapshotsByEpoch(
+			epoch, models.PoolStakeSnapshotTypeMark, nil,
+		)
+		require.NoError(t, err, "get pool stake snapshots %d", epoch)
+		require.Empty(
+			t,
+			snapshots,
+			"pool_stake_snapshot below the pin (epoch %d) must be pruned",
+			epoch,
+		)
+	}
+
+	// The reward window is NOT widened by the pin: reward_stake_input keeps the
+	// default currentEpoch-3 retention, so an epoch below it (but at/above the
+	// pin) is still pruned there.
+	const firstRewardRetained = currentEpoch - 3
+	stakeInputs, err := meta.GetRewardStakeInputs(pinnedEpoch, nil)
+	require.NoError(t, err)
+	require.Empty(
+		t,
+		stakeInputs,
+		"reward_stake_input at the pinned epoch must still be pruned (pin covers pool snapshots only)",
+	)
+	retainedInputs, err := meta.GetRewardStakeInputs(firstRewardRetained, nil)
+	require.NoError(t, err)
+	require.Len(
+		t,
+		retainedInputs,
+		1,
+		"reward_stake_input inside the default window must be retained",
+	)
+}
+
+// TestCleanupOldSnapshotsRetentionFloorAboveWindowIsNoop verifies the pin only
+// ever widens retention: a floor at/above the default currentEpoch-3 boundary
+// changes nothing, and the default pruning still applies.
+func TestCleanupOldSnapshotsRetentionFloorAboveWindowIsNoop(t *testing.T) {
+	db := setupTestDB(t)
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	meta := db.Metadata()
+
+	const currentEpoch = uint64(10)
+	const firstRetainedEpoch = currentEpoch - 3
+	poolKeyHash := bytes.Repeat([]byte{0xaa}, 28)
+	seedRetentionRows(t, db, poolKeyHash, currentEpoch)
+
+	// Floor above the default window: must not resurrect pruning below it.
+	mgr.SetPoolSnapshotRetentionGuard(fixedFloorGuard(currentEpoch, true))
+
+	require.NoError(
+		t,
+		mgr.cleanupOldSnapshots(context.Background(), currentEpoch),
+	)
+
+	for epoch := range firstRetainedEpoch {
+		snapshots, err := meta.GetPoolStakeSnapshotsByEpoch(
+			epoch, models.PoolStakeSnapshotTypeMark, nil,
+		)
+		require.NoError(t, err, "get pool stake snapshots %d", epoch)
+		require.Empty(
+			t,
+			snapshots,
+			"epoch %d below the default window must still be pruned",
+			epoch,
+		)
+	}
+}
+
+// TestCleanupOldSnapshotsRetentionDepthCapBounds proves the hard backstop
+// (issue #3727, finding 5): even when the retention floor would pin a very old
+// epoch, cleanupOldSnapshots never retains more than poolSnapshotRetentionMaxDepth
+// epochs BELOW the current epoch of pool snapshots (the boundary epoch
+// current-MaxDepth is retained, so the retained span is MaxDepth+1 epochs
+// inclusive), so a stuck deferred header cannot pin them without bound.
+func TestCleanupOldSnapshotsRetentionDepthCapBounds(t *testing.T) {
+	db := setupTestDB(t)
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	meta := db.Metadata()
+
+	const currentEpoch = uint64(40)
+	poolKeyHash := bytes.Repeat([]byte{0xaa}, 28)
+	seedRetentionRows(t, db, poolKeyHash, currentEpoch)
+
+	// A floor far below the cap: without the backstop this would retain epoch
+	// 2 upward. The cap must clamp retention to currentEpoch - MaxDepth.
+	mgr.SetPoolSnapshotRetentionGuard(fixedFloorGuard(2, true))
+	require.NoError(
+		t,
+		mgr.cleanupOldSnapshots(context.Background(), currentEpoch),
+	)
+
+	firstRetained := currentEpoch - poolSnapshotRetentionMaxDepth
+	for epoch := uint64(0); epoch < firstRetained; epoch++ {
+		snaps, err := meta.GetPoolStakeSnapshotsByEpoch(
+			epoch, models.PoolStakeSnapshotTypeMark, nil,
+		)
+		require.NoError(t, err, "epoch %d", epoch)
+		require.Empty(
+			t,
+			snaps,
+			"epoch %d below the depth cap must be pruned despite the low floor",
+			epoch,
+		)
+	}
+	for epoch := firstRetained; epoch <= currentEpoch; epoch++ {
+		snaps, err := meta.GetPoolStakeSnapshotsByEpoch(
+			epoch, models.PoolStakeSnapshotTypeMark, nil,
+		)
+		require.NoError(t, err, "epoch %d", epoch)
+		require.Len(
+			t,
+			snaps,
+			1,
+			"epoch %d within the depth cap must be retained",
+			epoch,
+		)
 	}
 }

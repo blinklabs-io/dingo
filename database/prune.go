@@ -64,9 +64,9 @@ func (d *Database) PruneBlock(slot uint64, hash []byte) (int, error) {
 		err      error
 	)
 	if d.config.StorageMode == types.StorageModeAPI {
-		utxoRefs, err = d.metadata.GetUtxosBySlot(slot, mdTxn.Metadata())
+		utxoRefs, err = d.utxoStore().GetUtxosBySlot(slot, mdTxn.Metadata())
 	} else {
-		utxoRefs, err = d.metadata.GetLiveUtxosBySlot(slot, mdTxn.Metadata())
+		utxoRefs, err = d.utxoStore().GetLiveUtxosBySlot(slot, mdTxn.Metadata())
 	}
 	mdTxn.Release()
 	if err != nil {

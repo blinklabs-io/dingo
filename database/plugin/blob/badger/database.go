@@ -262,8 +262,12 @@ type BlobStoreBadger struct {
 	logger               *slog.Logger
 	gcTicker             *time.Ticker
 	gcStopCh             chan struct{}
+	runValueLogGC        func(float64) error
 	dataDir              string
 	gcWg                 sync.WaitGroup
+	closeOnce            sync.Once
+	closeDone            chan struct{}
+	closeErr             error
 	blockCacheSize       uint64
 	indexCacheSize       uint64
 	valueLogFileSize     int64
@@ -290,6 +294,7 @@ func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 		valueLogFileSize:   int64(DefaultValueLogFileSize),
 		memTableSize:       int64(DefaultMemTableSize),
 		valueThreshold:     int64(DefaultValueThreshold),
+		closeDone:          make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(db)
@@ -389,34 +394,52 @@ func (d *BlobStoreBadger) init() error {
 	if d.promRegistry != nil {
 		d.registerBlobMetrics()
 	}
+	if d.runValueLogGC == nil {
+		d.runValueLogGC = d.DB().RunValueLogGC
+	}
 	// Configure GC
 	if d.gcEnabled {
 		d.gcTicker = time.NewTicker(5 * time.Minute)
 		d.gcStopCh = make(chan struct{})
 		d.gcWg.Add(1)
-		go d.blobGc(d.gcTicker, d.gcStopCh)
+		go d.blobGc(d.gcTicker.C, d.gcStopCh)
 	}
 	return nil
 }
 
-func (d *BlobStoreBadger) blobGc(t *time.Ticker, stop <-chan struct{}) {
+func (d *BlobStoreBadger) blobGc(
+	ticks <-chan time.Time,
+	stop <-chan struct{},
+) {
 	defer d.gcWg.Done()
 	for {
 		select {
-		case <-t.C:
-		again:
-			err := d.DB().RunValueLogGC(0.5)
-			if err != nil {
-				// Log any actual errors
-				if !errors.Is(err, badger.ErrNoRewrite) {
-					d.logger.Warn(
-						fmt.Sprintf("blob DB: GC failure: %s", err),
-						"component", "database",
-					)
+		case <-ticks:
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			for {
+				err := d.runValueLogGC(0.5)
+				if err != nil {
+					// Log any actual errors
+					if !errors.Is(err, badger.ErrNoRewrite) {
+						d.logger.Warn(
+							fmt.Sprintf("blob DB: GC failure: %s", err),
+							"component", "database",
+						)
+					}
+					break
 				}
-			} else {
-				// Run it again if it just ran successfully
-				goto again
+				// A successful rewrite normally starts another pass. Check the
+				// stop signal first so shutdown bounds the cycle to the rewrite
+				// that was already in flight.
+				select {
+				case <-stop:
+					return
+				default:
+				}
 			}
 		case <-stop:
 			return
@@ -443,22 +466,39 @@ func (d *BlobStoreBadger) Stop() error {
 
 // Close gets the database handle from our BlobStore and closes it
 func (d *BlobStoreBadger) Close() error {
-	// Stop GC ticker if it exists
-	if d.gcTicker != nil {
-		d.gcTicker.Stop()
+	return d.CloseContext(context.Background())
+}
+
+// CloseContext stops background GC and closes the database. Badger does not
+// expose cancellation for an in-flight value-log rewrite, so a deadline may
+// return before cleanup finishes. The rewrite is allowed to drain and the
+// database is then closed by the same one-time cleanup in the background.
+func (d *BlobStoreBadger) CloseContext(ctx context.Context) error {
+	d.closeOnce.Do(func() {
+		if d.closeDone == nil {
+			d.closeDone = make(chan struct{})
+		}
+		if d.gcTicker != nil {
+			d.gcTicker.Stop()
+		}
 		if d.gcStopCh != nil {
 			close(d.gcStopCh)
-			d.gcStopCh = nil
 		}
-		// Wait for GC goroutine to finish
-		d.gcWg.Wait()
-		d.gcTicker = nil
+		go func() {
+			d.gcWg.Wait()
+			if db := d.DB(); db != nil {
+				d.closeErr = db.Close()
+			}
+			close(d.closeDone)
+		}()
+	})
+
+	select {
+	case <-d.closeDone:
+		return d.closeErr
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	db := d.DB()
-	if db == nil {
-		return nil
-	}
-	return db.Close()
 }
 
 // DB returns the database handle
@@ -495,9 +535,28 @@ func (d *BlobStoreBadger) Sync() error {
 	return nil
 }
 
-// NewTransaction creates a new badger transaction
+// NewTransaction creates a new badger transaction. A store that is closed or
+// not yet open yields a transaction reporting types.ErrBlobStoreUnavailable
+// from every operation, rather than one built from a closed *badger.DB.
+//
+// Building one from a closed DB can hang forever. badger.DB.NewTransaction
+// takes a read timestamp through oracle.readTs, which waits on the commit
+// watermark with context.Background(). Close stops that watermark's process
+// goroutine, and a Done mark still queued when the close signal arrives can
+// be dropped, because y/watermark.go selects between the mark channel and the
+// close signal and Go picks randomly when both are ready. doneUntil then
+// stays behind nextTxnTs-1 permanently and the wait has no context to cancel
+// it. See #3609.
+//
+// IsClosed narrows this window rather than eliminating it. A store closed
+// concurrently with this call already breaks the database.New contract, which
+// requires the stores to outlive Database.Close.
 func (d *BlobStoreBadger) NewTransaction(update bool) types.Txn {
-	return newBadgerTxn(d, d.DB().NewTransaction(update))
+	db := d.DB()
+	if db == nil || db.IsClosed() {
+		return newBadgerTxn(d, nil)
+	}
+	return newBadgerTxn(d, db.NewTransaction(update))
 }
 
 // Get retrieves a value from badger within a transaction

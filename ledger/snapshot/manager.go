@@ -58,6 +58,17 @@ type Manager struct {
 	loopWg         sync.WaitGroup
 	metrics        *managerMetrics
 
+	// retentionGuard, when set, runs the pool-stake snapshot prune under the
+	// deferred-header lock so the retention-floor selection and the prune are
+	// atomic with respect to deferred-header admission (issue #3727 race).
+	// cleanupOldSnapshots passes its default currentEpoch-3 boundary and a
+	// prune closure that deletes+commits pool snapshots below the boundary the
+	// guard hands back (lowered to keep snapshots a queued/deferred header
+	// still needs). A nil guard (the default) preserves the original pruning
+	// behaviour exactly. Guarded by mu; wired by the node to
+	// LedgerState.PrunePoolSnapshotsWithRetentionFloor.
+	retentionGuard PoolSnapshotRetentionGuard
+
 	// pendingBoundary holds the stake distribution computed at the SNAP point of
 	// an in-flight epoch rollover, waiting for the same rollover transaction to
 	// persist it once the new epoch row (nonce, boundary slot, protocol version)
@@ -219,6 +230,43 @@ func (m *Manager) SetPromRegistry(reg prometheus.Registerer) {
 	if m.metrics == nil {
 		m.metrics = initManagerMetrics(reg)
 	}
+}
+
+// PoolSnapshotRetentionGuard runs the caller's pool-snapshot prune with the
+// deferred-header set held stable, returning the boundary to prune below.
+// defaultBefore is cleanup's default currentEpoch-3 pool boundary; the guard
+// lowers it to the retention floor a queued/deferred header still requires
+// (or to 0 = retain everything while any deferred slot is unmappable), then
+// clamps it UP to minBefore, a hard backstop bounding how many historical
+// epochs the pin can ever hold. All of this — plus eviction of deferred
+// headers the apply cursor has passed — happens under one lock so admission
+// cannot interleave (issue #3727). prune must delete AND commit before
+// returning.
+type PoolSnapshotRetentionGuard func(
+	defaultBefore uint64,
+	minBefore uint64,
+	prune func(before uint64) error,
+) error
+
+// SetPoolSnapshotRetentionGuard installs the guard cleanupOldSnapshots uses to
+// prune pool snapshots atomically with the deferred-header retention floor, so
+// a snapshot a queued/deferred header still needs is retained beyond the
+// default currentEpoch-3 window until the header resolves (issue #3727). Pass
+// nil to clear it. It should be set before Start; a nil guard (the default)
+// preserves the original pruning behaviour exactly.
+func (m *Manager) SetPoolSnapshotRetentionGuard(g PoolSnapshotRetentionGuard) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.retentionGuard = g
+}
+
+// poolSnapshotRetentionGuard returns the installed guard, if any. Read under mu
+// so a guard installed via SetPoolSnapshotRetentionGuard races safely with the
+// manager's epoch-transition goroutine.
+func (m *Manager) poolSnapshotRetentionGuard() PoolSnapshotRetentionGuard {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.retentionGuard
 }
 
 // Start begins listening for epoch transitions and capturing
@@ -846,16 +894,33 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 	// Also remember the latest epoch so we can seed the Mark/Set/Go
 	// window below.
 	var currentEpochId uint64
+	// latestEpochKnown records that the lookup below actually determined the
+	// database's current epoch. currentEpochId's zero value is also a valid
+	// answer -- a fresh sync -- so it cannot itself distinguish "epoch 0"
+	// from "not determined", and the fresh-sync classification further down
+	// must not read a failed lookup as a stakeless genesis.
+	latestEpochKnown := false
 	if distribution.TotalPools == 0 {
 		epochs, epErr := m.db.GetEpochs(nil)
 		if epErr != nil {
-			m.logger.Warn(
-				"failed to load epochs for genesis stake fallback",
-				"component", "snapshot",
-				"error", epErr,
-				"total_pools", distribution.TotalPools,
+			// Returned rather than logged: the classification below decides
+			// whether to persist an epoch-0 mark snapshot, and doing that for
+			// a post-Mithril database would hand later reward calculation a
+			// fabricated basis. Every caller routes this through
+			// HandleGenesisSnapshotError, which is fatal for a block producer
+			// and a warning otherwise.
+			if m.metrics != nil {
+				m.metrics.captureFailureTotal.Inc()
+				m.metrics.captureDurationSeconds.Observe(
+					time.Since(start).Seconds(),
+				)
+			}
+			return fmt.Errorf(
+				"load epochs for genesis stake fallback: %w",
+				epErr,
 			)
 		} else if len(epochs) > 0 {
+			latestEpochKnown = true
 			lastEpoch := epochs[len(epochs)-1]
 			currentEpochId = lastEpoch.EpochId
 			m.logger.Debug(
@@ -882,7 +947,26 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 		}
 	}
 
-	if distribution.TotalPools == 0 {
+	// An empty distribution means two different things depending on where the
+	// chain actually is.
+	//
+	// Behind a later current epoch it means the pool data predates a Mithril
+	// import and is simply not visible at slot 0. There is no trustworthy
+	// epoch-0 basis to persist, so the capture is skipped as before.
+	//
+	// On a true fresh sync it means the network's Shelley genesis registers no
+	// pools and the first ones register on chain during epoch 0 -- preview is
+	// such a network. cardano-ledger's Go stake distribution is empty at
+	// genesis there, so the epoch-0 mark snapshot is empty rather than absent,
+	// and it is still persisted below: the reward rounds at the boundaries
+	// into epochs 1, 2 and 3 all resolve against snapshot epoch 0, and without
+	// the row every one of them skips for a missing reward snapshot and the
+	// ADA pots never move (dingo #3381).
+	//
+	// That branch is taken only when the lookup above positively determined
+	// the current epoch to be 0. An undetermined epoch is not a fresh sync.
+	freshSync := latestEpochKnown && currentEpochId == 0
+	if distribution.TotalPools == 0 && !freshSync {
 		if m.metrics != nil {
 			m.metrics.captureDurationSeconds.Observe(
 				time.Since(start).Seconds(),
@@ -894,6 +978,13 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 			"component", "snapshot",
 		)
 		return nil
+	}
+	if distribution.TotalPools == 0 {
+		m.logger.Info(
+			"no genesis pools; seeding an empty epoch 0 mark snapshot."+
+				" leader election is disabled until pool stake is registered",
+			"component", "snapshot",
+		)
 	}
 
 	m.logger.Info(

@@ -42,6 +42,8 @@ Does not replace manual 'run --all' after a ledger replay.`,
 	cmd.Flags().Int("grace-hours", defaultGraceHours,
 		"pools absent from Koios in recently-fetched epochs → reference_lag (not FAIL)")
 	addDingoDBFlags(cmd)
+	addAccountsFlag(cmd)
+	addAccountChunkFlags(cmd)
 
 	return cmd
 }
@@ -60,8 +62,16 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 	}
 	concurrency, _ := cmd.Flags().GetInt("concurrency")
 	workers, _ := cmd.Flags().GetInt("workers")
-	graceHours, _ := cmd.Flags().GetInt("grace-hours")
+	graceHours, err := resolveGraceHours(cmd)
+	if err != nil {
+		return err
+	}
+	accountChunkSize, accountChunkMaxBytes, err := resolveAccountChunkFlags(cmd)
+	if err != nil {
+		return err
+	}
 	apiKey := koiosAPIKey(cmd)
+	accounts := accountsEnabled(cmd)
 
 	logger := slog.Default()
 	ctx := cmd.Context()
@@ -116,12 +126,21 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 					"from", fromClosed, "through", toClosed)
 
 				fetchResult, fetchErr := koiosparity.Fetch(ctx, koiosparity.FetchConfig{
-					Network:      network,
-					APIKey:       apiKey,
-					CachePath:    cachePath,
-					Concurrency:  concurrency,
-					FromEpoch:    fromClosed,
-					ThroughEpoch: toClosed,
+					Network:              network,
+					APIKey:               apiKey,
+					CachePath:            cachePath,
+					Concurrency:          concurrency,
+					FromEpoch:            fromClosed,
+					ThroughEpoch:         toClosed,
+					AccountsEnabled:      accounts,
+					GraceHours:           graceHours,
+					AccountChunkSize:     accountChunkSize,
+					AccountChunkMaxBytes: accountChunkMaxBytes,
+					// Reuse the already-open, long-lived Dingo connection
+					// above (unused when accounts is false) rather than
+					// opening a second one — watch already keeps dingo open
+					// for the lifetime of the loop.
+					AccountsSource: dingo,
 				}, logger)
 				if fetchErr != nil {
 					logger.Warn("koios-parity: fetch error", "error", fetchErr)
@@ -139,13 +158,14 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 				}
 
 				result, checkErr := koiosparity.Check(ctx, koiosparity.CheckConfig{
-					Network:      network,
-					DingoDB:      dbCfg,
-					CachePath:    cachePath,
-					Workers:      workers,
-					FromEpoch:    fromClosed,
-					ThroughEpoch: toClosed,
-					GraceHours:   graceHours,
+					Network:         network,
+					DingoDB:         dbCfg,
+					CachePath:       cachePath,
+					Workers:         workers,
+					FromEpoch:       fromClosed,
+					ThroughEpoch:    toClosed,
+					GraceHours:      graceHours,
+					AccountsEnabled: accounts,
 				}, logger)
 				if checkErr != nil {
 					logger.Warn("koios-parity: check error", "error", checkErr)

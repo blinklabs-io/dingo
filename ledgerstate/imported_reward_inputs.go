@@ -18,8 +18,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"maps"
 	"math/big"
+	"sort"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -93,13 +94,13 @@ func deriveRewardInputs(
 		ownerStake uint64
 		delegators uint64
 	}
-	aggs := make(map[string]*poolAgg, len(params))
+	aggs := make(map[string]poolAgg, len(params))
 	owners := make(map[string]map[string]struct{}, len(params))
 	for poolHex, pool := range params {
 		if pool == nil {
 			continue
 		}
-		aggs[poolHex] = &poolAgg{}
+		aggs[poolHex] = poolAgg{}
 		set := make(map[string]struct{}, len(pool.Owners))
 		for _, owner := range pool.Owners {
 			set[hex.EncodeToString(owner)] = struct{}{}
@@ -169,6 +170,7 @@ func deriveRewardInputs(
 		if isOwner {
 			agg.ownerStake += stake
 		}
+		aggs[poolHex] = agg
 	}
 
 	poolInputs := make([]*models.RewardPoolInput, 0, len(aggs))
@@ -191,12 +193,14 @@ func deriveRewardInputs(
 					int64(den),            // #nosec G115 -- bounded
 				),
 			},
-			Pledge:                     types.Uint64(pool.Pledge),
-			Cost:                       types.Uint64(pool.Cost),
-			DelegatedStake:             types.Uint64(agg.delegated),
-			OwnerStake:                 types.Uint64(agg.ownerStake),
-			DelegatorCount:             agg.delegators,
-			RewardAccount:              append([]byte(nil), pool.RewardAccount...),
+			Pledge:         types.Uint64(pool.Pledge),
+			Cost:           types.Uint64(pool.Cost),
+			DelegatedStake: types.Uint64(agg.delegated),
+			OwnerStake:     types.Uint64(agg.ownerStake),
+			DelegatorCount: agg.delegators,
+			RewardAccount: append(
+				[]byte(nil),
+				pool.RewardAccount...),
 			RewardAccountCredentialTag: pool.RewardAccountCredentialTag,
 			CapturedSlot:               capturedSlot,
 			BoundarySlot:               boundarySlot,
@@ -265,6 +269,28 @@ func (b *rewardInputBundle) validate() error {
 			len(b.poolInputs), b.snapshot.TotalPoolCount,
 		)
 	}
+	missingRewardAccounts := make([]string, 0)
+	for _, pool := range b.poolInputs {
+		if pool == nil || len(pool.RewardAccount) != 0 {
+			continue
+		}
+		missingRewardAccounts = append(
+			missingRewardAccounts,
+			fmt.Sprintf(
+				"derived pool input for %x has no reward account "+
+					"(%d lovelace delegated stake)",
+				pool.PoolKeyHash,
+				uint64(pool.DelegatedStake),
+			),
+		)
+	}
+	if len(missingRewardAccounts) > 0 {
+		// Parameter maps are unordered. A deterministic aggregate makes a
+		// repeated import report the same complete offender list and avoids
+		// hiding all but whichever pool happened to be visited first.
+		sort.Strings(missingRewardAccounts)
+		return errors.New(strings.Join(missingRewardAccounts, "; "))
+	}
 
 	poolStake := make(map[string]uint64, len(b.poolInputs))
 	var totalStake, totalDelegators uint64
@@ -276,12 +302,6 @@ func (b *rewardInputBundle) validate() error {
 			return fmt.Errorf(
 				"derived pool input has %d-byte pool key hash",
 				len(pool.PoolKeyHash),
-			)
-		}
-		if len(pool.RewardAccount) == 0 {
-			return fmt.Errorf(
-				"derived pool input for %x has no reward account",
-				pool.PoolKeyHash,
 			)
 		}
 		if pool.Margin == nil || pool.Margin.Rat == nil {
@@ -364,10 +384,23 @@ func (b *rewardInputBundle) validate() error {
 
 // rewardInputStore is the slice of the metadata store this seeding needs.
 type rewardInputStore interface {
+	GetRewardSnapshot(uint64, string, types.Txn) (*models.RewardSnapshot, error)
 	SaveRewardSnapshot(*models.RewardSnapshot, types.Txn) error
+	DeleteProvisionalRewardSnapshot(uint64, string, types.Txn) error
 	SaveRewardPoolInputs([]*models.RewardPoolInput, types.Txn) error
 	SaveRewardStakeInputs([]*models.RewardStakeInput, types.Txn) error
+	DeleteRewardInputsForEpoch(uint64, types.Txn) error
+	DeleteRewardOutputsForEpoch(uint64, types.Txn) error
 }
+
+// rewardPParamsValidator checks that the protocol-parameter history needed to
+// consume one imported reward basis is available. An unavailable history is a
+// per-basis eligibility failure, not a failure of the whole import.
+type rewardPParamsValidator func(epoch uint64) error
+
+var errRewardPParamsUnavailable = errors.New(
+	"protocol parameters required by imported reward basis are unavailable",
+)
 
 // seedImportedRewardInputs writes the reward basis for the epochs an imported
 // snapshot covers.
@@ -389,6 +422,7 @@ func seedImportedRewardInputs(
 	txn types.Txn,
 	snapshots *ParsedSnapShots,
 	resolveParams rewardPoolParamsResolver,
+	validatePParams rewardPParamsValidator,
 	epoch uint64,
 	capturedSlot uint64,
 	logger rewardSeedLogger,
@@ -414,6 +448,52 @@ func seedImportedRewardInputs(
 	}
 
 	for _, c := range candidates {
+		existing, err := store.GetRewardSnapshot(
+			c.epoch, "mark", txn,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"checking existing reward snapshot for epoch %d: %w",
+				c.epoch, err,
+			)
+		}
+		if existing != nil && existing.Authoritative {
+			if logger != nil {
+				logger.Info(
+					"not seeding reward inputs for an imported epoch because an authoritative basis already exists",
+					"component",
+					"ledgerstate",
+					"epoch",
+					c.epoch,
+					"snapshot",
+					c.name,
+				)
+			}
+			continue
+		}
+		if existing != nil {
+			if err := store.DeleteRewardInputsForEpoch(c.epoch, txn); err != nil {
+				return fmt.Errorf(
+					"deleting provisional reward inputs for epoch %d: %w",
+					c.epoch, err,
+				)
+			}
+			if err := store.DeleteRewardOutputsForEpoch(c.epoch, txn); err != nil {
+				return fmt.Errorf(
+					"deleting provisional reward outputs for epoch %d: %w",
+					c.epoch, err,
+				)
+			}
+			if err := store.DeleteProvisionalRewardSnapshot(
+				c.epoch, "mark", txn,
+			); err != nil {
+				return fmt.Errorf(
+					"deleting provisional reward snapshot for epoch %d: %w",
+					c.epoch, err,
+				)
+			}
+		}
+
 		var params map[string]*ParsedPool
 		if resolveParams != nil {
 			resolved, err := resolveParams(c.epoch)
@@ -436,10 +516,14 @@ func seedImportedRewardInputs(
 				if logger != nil {
 					logger.Warn(
 						"no pool parameter window for an imported epoch, so the registration fallback is unavailable; the epoch is still seeded if its snapshot describes every pool it delegates to",
-						"component", "ledgerstate",
-						"epoch", c.epoch,
-						"snapshot", c.name,
-						"error", err.Error(),
+						"component",
+						"ledgerstate",
+						"epoch",
+						c.epoch,
+						"snapshot",
+						c.name,
+						"error",
+						err.Error(),
 					)
 				}
 			default:
@@ -463,13 +547,42 @@ func seedImportedRewardInputs(
 			if logger != nil {
 				logger.Warn(
 					"not seeding reward inputs for an imported epoch: the derived basis does not reconcile, so that epoch's reward round will be skipped and its rewards never credited",
-					"component", "ledgerstate",
-					"epoch", c.epoch,
-					"snapshot", c.name,
-					"error", err.Error(),
+					"component",
+					"ledgerstate",
+					"epoch",
+					c.epoch,
+					"snapshot",
+					c.name,
+					"error",
+					err.Error(),
 				)
 			}
 			continue
+		}
+		if validatePParams != nil {
+			if err := validatePParams(c.epoch); err != nil {
+				if !errors.Is(err, errRewardPParamsUnavailable) {
+					return fmt.Errorf(
+						"checking protocol parameters for imported reward epoch %d: %w",
+						c.epoch,
+						err,
+					)
+				}
+				if logger != nil {
+					logger.Warn(
+						"not seeding reward inputs for an imported epoch: required protocol parameters are unavailable, so that epoch's reward round will be skipped and its rewards never credited",
+						"component",
+						"ledgerstate",
+						"epoch",
+						c.epoch,
+						"snapshot",
+						c.name,
+						"error",
+						err.Error(),
+					)
+				}
+				continue
+			}
 		}
 		if err := store.SaveRewardSnapshot(bundle.snapshot, txn); err != nil {
 			return fmt.Errorf(
@@ -571,13 +684,17 @@ func rewardPoolParamsFromRegistrations(
 			owners = append(owners, append([]byte(nil), owner.KeyHash...))
 		}
 		params[hex.EncodeToString(pool.PoolKeyHash)] = &ParsedPool{
-			PoolKeyHash:                append([]byte(nil), pool.PoolKeyHash...),
-			VrfKeyHash:                 append([]byte(nil), pool.VrfKeyHash...),
-			Pledge:                     uint64(pool.Pledge),
-			Cost:                       uint64(pool.Cost),
-			MarginNum:                  num,
-			MarginDen:                  den,
-			RewardAccount:              append([]byte(nil), pool.RewardAccount...),
+			PoolKeyHash: append(
+				[]byte(nil),
+				pool.PoolKeyHash...),
+			VrfKeyHash: append([]byte(nil), pool.VrfKeyHash...),
+			Pledge:     uint64(pool.Pledge),
+			Cost:       uint64(pool.Cost),
+			MarginNum:  num,
+			MarginDen:  den,
+			RewardAccount: append(
+				[]byte(nil),
+				pool.RewardAccount...),
 			RewardAccountCredentialTag: pool.RewardAccountCredentialTag,
 			Owners:                     owners,
 		}
@@ -588,14 +705,21 @@ func rewardPoolParamsFromRegistrations(
 // effectiveRewardPoolParams picks, per pool, the parameters the reward round
 // for this epoch should be computed from.
 //
-// The snapshot's own parameters win wherever it has them. They are the ones
+// Parameters are first scoped to pools that have positive stake delegated to
+// them in this target snapshot. The registration resolver deliberately sees
+// the union of mark, set and go, but each snapshot describes a different
+// epoch. Letting a pool referenced only by set leak into mark or go creates a
+// zero-stake reward input there; a synthesized registration without historical
+// economics then makes an otherwise complete epoch fail validation.
+//
+// The snapshot's own parameters win within that scoped set. They are the ones
 // that were in force during the epoch it captured, which is what the round
 // needs, and -- the reason issue #3165 stayed open -- the snapshot describes
-// every pool that held stake then, including pools that have since retired.
-// A retired pool is gone from cert state and from the current pool
-// distribution, so nothing else in an imported database can describe it; its
-// delegators' stake could not be attributed, and the gate dropped that whole
-// epoch's basis rather than seed a partial one.
+// every pool that held stake then, including pools that have since retired. A
+// retired pool is gone from cert state and from the current pool distribution,
+// so nothing else in an imported database can describe it; its delegators'
+// stake could not be attributed, and the gate dropped that whole epoch's basis
+// rather than seed a partial one.
 //
 // Registration parameters remain the fallback, for a snapshot whose pool
 // entries are the compact shape carrying only a VRF key. Usability is decided
@@ -606,11 +730,28 @@ func effectiveRewardPoolParams(
 	snap *ParsedSnapShot,
 	registered map[string]*ParsedPool,
 ) map[string]*ParsedPool {
-	effective := make(
-		map[string]*ParsedPool, len(registered)+len(snap.PoolParams),
-	)
-	maps.Copy(effective, registered)
+	referenced := make(map[string]struct{}, len(snap.Delegations))
+	for credential, stake := range snap.Stake {
+		if stake == 0 {
+			continue
+		}
+		poolKey := snap.Delegations[credential]
+		if len(poolKey) == 0 {
+			continue
+		}
+		referenced[hex.EncodeToString(poolKey)] = struct{}{}
+	}
+
+	effective := make(map[string]*ParsedPool, len(referenced))
+	for key := range referenced {
+		if pool, ok := registered[key]; ok {
+			effective[key] = pool
+		}
+	}
 	for key, pool := range snap.PoolParams {
+		if _, ok := referenced[key]; !ok {
+			continue
+		}
 		if pool == nil || len(pool.RewardAccount) == 0 {
 			continue
 		}

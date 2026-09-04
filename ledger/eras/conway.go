@@ -19,7 +19,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math"
 	"math/big"
 	"slices"
 	"strings"
@@ -231,25 +230,20 @@ func ValidateTxConway(
 	); err != nil {
 		return fmt.Errorf("conway plutus redeemer validation: %w", err)
 	}
-	// Skip script evaluation (Phase-2) if TX is marked as not valid.
-	// These transactions failed script validation on-chain; collateral
-	// is consumed instead of regular inputs.
-	if !tx.IsValid() {
-		return nil
-	}
 	if shouldSkipPhase2Validation(ls) {
 		return nil
 	}
-	if err := validateTxPlutusConwayWithContext(
+	phase2Err := validateTxPlutusConwayWithContext(
 		tx,
 		ls,
 		tmpPparams,
 		plutusCtx,
 		false,
-	); err != nil {
-		return fmt.Errorf("conway plutus validation: %w", err)
+	)
+	if phase2Err != nil {
+		phase2Err = fmt.Errorf("conway plutus validation: %w", phase2Err)
 	}
-	return nil
+	return validatePlutusOutcome(tx, phase2Err)
 }
 
 var (
@@ -267,22 +261,191 @@ func conwayValidationRules(
 }
 
 func buildConwayValidationRules() []indexedUtxoValidationRule {
-	skips := []utxoValidationRuleSkip{
-		{
-			index:          conwayUtxoValidateFeeTooSmallRuleIndex,
-			validationFunc: conway.UtxoValidateFeeTooSmallUtxo,
-			name:           "conway.UtxoValidateFeeTooSmallUtxo",
-		},
-		{
-			index:          conwayUtxoValidatePlutusScriptsRuleIndex,
-			validationFunc: conway.UtxoValidatePlutusScripts,
-			name:           "conway.UtxoValidatePlutusScripts",
-		},
+	// Skips are resolved by upstream rule Id, never by validation function.
+	// conway.UtxoValidationRules is composed with
+	// common.ComposeUtxoValidationRules, so every phase-2-gated entry —
+	// committee-certificates and unknown-voters among them — is an anonymous
+	// wrapper closure with no trace of the original function.
+	skipRuleIds := []lcommon.UtxoValidationRuleId{
+		lcommon.UtxoValidationRuleConwayFeaturesWithPlutusV1V2,
+		lcommon.UtxoValidationRuleFeeTooSmall,
+		lcommon.UtxoValidationRulePlutusScripts,
+		lcommon.UtxoValidationRuleCommitteeCertificates,
+		lcommon.UtxoValidationRuleUnknownVoters,
 	}
-	return buildIndexedUtxoValidationRulesWithSkips(
+	descriptors := conway.UtxoValidationRuleDescriptors()
+	indexes := make([]int, len(skipRuleIds))
+	for i := range skipRuleIds {
+		indexes[i] = resolveUtxoValidationSkipIndex(
+			descriptors, conway.UtxoValidationRules, skipRuleIds[i],
+		)
+	}
+	ret := buildIndexedUtxoValidationRulesWithSkips(
+		descriptors,
 		conway.UtxoValidationRules,
-		skips,
+		skipRuleIds,
 	)
+	ret = append(ret, indexedUtxoValidationRule{
+		index:          indexes[0],
+		validationFunc: validateConwayFeaturesWithNeededPlutusV1V2,
+	})
+	ret = append(ret,
+		indexedUtxoValidationRule{
+			index:          indexes[3],
+			validationFunc: validateCommitteeCertificates,
+		},
+		indexedUtxoValidationRule{
+			index:          indexes[4],
+			validationFunc: validateUnknownVoters,
+		},
+	)
+	slices.SortFunc(ret, func(a, b indexedUtxoValidationRule) int {
+		return a.index - b.index
+	})
+	return ret
+}
+
+// validateConwayFeaturesWithNeededPlutusV1V2 rejects Conway-only transaction
+// features when a PlutusV1 or PlutusV2 script is required. The upstream rule
+// checks scripts that are merely available instead, so an unrelated reference
+// script can reject an otherwise valid transaction.
+func validateConwayFeaturesWithNeededPlutusV1V2(
+	tx lcommon.Transaction,
+	_ uint64,
+	ls lcommon.LedgerState,
+	_ lcommon.ProtocolParameters,
+) error {
+	view, err := script.NewTxScriptView(tx, ls)
+	if err != nil {
+		if isInputResolutionError(err) {
+			// UtxoValidateBadInputsUtxo owns input-resolution failures.
+			return nil
+		}
+		return err
+	}
+
+	plutusVersion := neededPlutusV1V2Version(view)
+	if plutusVersion == "" {
+		return nil
+	}
+
+	if conwayCurrentTreasuryValuePresent(tx) {
+		return conway.CurrentTreasuryValueWithPlutusV1V2Error{
+			PlutusVersion: plutusVersion,
+		}
+	}
+	if len(tx.ProposalProcedures()) > 0 {
+		return conway.ProposalProceduresWithPlutusV1V2Error{
+			PlutusVersion: plutusVersion,
+		}
+	}
+	if voting := tx.VotingProcedures(); len(voting) > 0 {
+		return conway.VotingProceduresWithPlutusV1V2Error{
+			PlutusVersion: plutusVersion,
+		}
+	}
+
+	for _, cert := range tx.Certificates() {
+		certType := ""
+		switch cert.(type) {
+		case *lcommon.AuthCommitteeHotCertificate:
+			certType = "AuthCommitteeHot"
+		case *lcommon.ResignCommitteeColdCertificate:
+			certType = "ResignCommitteeCold"
+		case *lcommon.RegistrationDrepCertificate:
+			certType = "DRepRegistration"
+		case *lcommon.DeregistrationDrepCertificate:
+			certType = "DRepDeregistration"
+		case *lcommon.UpdateDrepCertificate:
+			certType = "DRepUpdate"
+		case *lcommon.StakeVoteDelegationCertificate:
+			certType = "StakeVoteDelegation"
+		case *lcommon.StakeRegistrationDelegationCertificate:
+			certType = "StakeRegistrationDelegation"
+		case *lcommon.VoteDelegationCertificate:
+			certType = "VoteDelegation"
+		case *lcommon.VoteRegistrationDelegationCertificate:
+			certType = "VoteRegistrationDelegation"
+		case *lcommon.StakeVoteRegistrationDelegationCertificate:
+			certType = "StakeVoteRegistrationDelegation"
+		}
+		if certType != "" {
+			return conway.ConwayCertificateWithPlutusV1V2Error{
+				PlutusVersion:   plutusVersion,
+				CertificateType: certType,
+			}
+		}
+	}
+
+	return nil
+}
+
+// conwayCurrentTreasuryValuePresent reports whether transaction-body key 21
+// is present, preserving the distinction between an absent value and an
+// explicitly encoded zero. A declared zero is a real assertion about the
+// treasury and must reach validation; collapsing it into "absent" would let a
+// transaction assert a zero treasury for free.
+//
+// Maintained gouroboros exposes the distinction through a nil value and the
+// CurrentTreasuryValuePresent capability. The pinned release stores key 21 in
+// an int64 with omitempty and returns a non-nil zero for both cases, so
+// decoded or constructed Conway transactions fall back to inspecting the
+// transaction-body map. The fallback treats an undecodable body as present:
+// this rule only rejects, so failing closed cannot admit a transaction.
+func conwayCurrentTreasuryValuePresent(tx lcommon.Transaction) bool {
+	if tx == nil {
+		return false
+	}
+	treasury := tx.CurrentTreasuryValue()
+	if treasury == nil {
+		return false
+	}
+	if treasury.Sign() != 0 {
+		return true
+	}
+	conwayTx, ok := tx.(*conway.ConwayTransaction)
+	if !ok || conwayTx == nil {
+		// CurrentTreasuryValue's nil/non-nil contract is authoritative for
+		// implementations that do not need the pinned-release compatibility
+		// path.
+		return true
+	}
+	if presence, ok := any(&conwayTx.Body).(interface {
+		CurrentTreasuryValuePresent() bool
+	}); ok {
+		return presence.CurrentTreasuryValuePresent()
+	}
+	bodyCbor := conwayTx.Body.Cbor()
+	if len(bodyCbor) == 0 {
+		var err error
+		bodyCbor, err = cbor.Encode(&conwayTx.Body)
+		if err != nil {
+			return true
+		}
+	}
+	var fields map[uint]cbor.RawMessage
+	if _, err := cbor.Decode(bodyCbor, &fields); err != nil {
+		return true
+	}
+	_, ok = fields[21]
+	return ok
+}
+
+func neededPlutusV1V2Version(view script.TxScriptView) string {
+	needsV2 := false
+	for _, needed := range view.Needed {
+		switch needed.(type) {
+		case lcommon.PlutusV1Script:
+			// Match the upstream rule's V1-before-V2 error precedence.
+			return "PlutusV1"
+		case lcommon.PlutusV2Script:
+			needsV2 = true
+		}
+	}
+	if needsV2 {
+		return "PlutusV2"
+	}
+	return ""
 }
 
 func isInputResolutionError(err error) bool {
@@ -348,20 +511,18 @@ func validateTxPlutusConway(
 	pp *conway.ConwayProtocolParameters,
 	validateRequiredRedeemers bool,
 ) error {
-	if !tx.IsValid() {
-		return nil
-	}
 	plutusCtx, err := newConwayPlutusValidationContext(tx, ls)
 	if err != nil {
 		return err
 	}
-	return validateTxPlutusConwayWithContext(
+	phase2Err := validateTxPlutusConwayWithContext(
 		tx,
 		ls,
 		pp,
 		plutusCtx,
 		validateRequiredRedeemers,
 	)
+	return validatePlutusOutcome(tx, phase2Err)
 }
 
 func validateTxPlutusConwayWithContext(
@@ -599,7 +760,8 @@ func validateConwayRequiredPlutusRedeemers(
 	}
 	withdrawalAddrs := sortedConwayWithdrawalAddresses(tx.Withdrawals())
 	for idx, addr := range withdrawalAddrs {
-		if (addr.Type() & lcommon.AddressTypeScriptBit) == 0 {
+		stakeCredential, ok := addr.StakeCredential()
+		if !ok || stakeCredential.CredType != lcommon.CredentialTypeScriptHash {
 			continue
 		}
 		key := lcommon.RedeemerKey{
@@ -609,10 +771,7 @@ func validateConwayRequiredPlutusRedeemers(
 		if err := checkRequired(
 			key,
 			script.ScriptPurposeRewarding{
-				StakeCredential: lcommon.Credential{
-					CredType:   lcommon.CredentialTypeScriptHash,
-					Credential: addr.StakeKeyHash(),
-				},
+				StakeCredential: stakeCredential,
 			},
 		); err != nil {
 			return err
@@ -899,6 +1058,7 @@ func (c *conwayTxInfoCache) v1() (script.TxInfoV1, error) {
 			c.ls,
 			c.tx,
 			c.resolvedInputs,
+			script.StrictValidityUpperBoundForTransaction(c.tx),
 		)
 		if err != nil {
 			return script.TxInfoV1{}, conway.ScriptContextConstructionError{
@@ -917,6 +1077,7 @@ func (c *conwayTxInfoCache) v2() (script.TxInfoV2, error) {
 			c.ls,
 			c.tx,
 			c.resolvedInputs,
+			script.StrictValidityUpperBoundForTransaction(c.tx),
 		)
 		if err != nil {
 			return script.TxInfoV2{}, conway.ScriptContextConstructionError{
@@ -947,23 +1108,6 @@ func (c *conwayTxInfoCache) v3() (script.TxInfoV3, error) {
 	return c.txInfoV3, nil
 }
 
-// restrictiveEnormousBudget is used when evaluating Plutus scripts in
-// restrictive (phase-2 ledger validation) mode. Instead of limiting the CEK
-// machine to the declared redeemer budget during execution — which causes
-// intermediate slippage-batch flush failures — we run with a virtually
-// unlimited budget and compare the full consumed amount against the declared
-// budget after execution. This mirrors cardano-node's restrictingEnormous
-// semantics: the machine runs unconstrained, flushes its accumulated step
-// budget when evaluation succeeds, and then the complete usedBudget must fit
-// within the declared redeemer budget.
-//
-// math.MaxInt64/2 avoids overflow in ExBudget arithmetic (consumed = enormous - remaining).
-//
-// The Alonzo and Babbage phase-2 script validation helpers in this package use
-// the same value, so changing it changes script validation in every era from
-// Alonzo onward.
-const restrictiveEnormousBudget = int64(math.MaxInt64 / 2)
-
 func evaluateConwayPlutusScript(
 	plutusScript lcommon.Script,
 	purpose script.ScriptPurpose,
@@ -974,12 +1118,11 @@ func evaluateConwayPlutusScript(
 	txInfos *conwayTxInfoCache,
 	restrictive bool,
 ) (lcommon.ExUnits, error, error) {
-	// In restrictive mode, ignore the budget argument as a machine limit and
-	// pass an enormous budget to gouroboros/plutigo so intermediate
-	// slippage-batch flushes never exhaust the budget mid-execution. After
+	// In restrictive mode, use the protocol transaction budget as the machine
+	// limit so intermediate slippage-batch flushes do not reject a script just
+	// because they temporarily exceed its declared redeemer budget. After
 	// execution we compare the complete consumed amount, including the final
-	// accumulated step batch, against the budget argument. Callers set that
-	// argument to the declared redeemer budget.
+	// accumulated step batch, against the declared redeemer budget.
 	//
 	// In exact mode the caller-supplied budget argument is itself the machine
 	// limit, and no post-execution comparison is done. EvaluateTxConway uses
@@ -988,10 +1131,7 @@ func evaluateConwayPlutusScript(
 	// budget.
 	evalBudget := budget
 	if restrictive {
-		evalBudget = lcommon.ExUnits{
-			Steps:  restrictiveEnormousBudget,
-			Memory: restrictiveEnormousBudget,
-		}
+		evalBudget = pp.MaxTxExUnits
 	}
 	switch s := plutusScript.(type) {
 	case lcommon.PlutusV3Script:

@@ -48,15 +48,14 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 		return errors.New("create UTxO: UTxO is nil")
 	}
 	err := s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			q := s.operationalQueries(db)
 			params, err := createUtxoParams(utxo)
 			if err != nil {
 				return err
 			}
-			id, err := q.CreateUtxo(context.Background(), params)
+			id, err := q.CreateUtxo(ctx, params)
 			if err != nil {
 				return err
 			}
@@ -65,7 +64,7 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 				asset := &utxo.Assets[i]
 				asset.UtxoID = utxo.ID
 				assetID, err := q.CreateAsset(
-					context.Background(),
+					ctx,
 					sqlitequery.CreateAssetParams{
 						Name:        asset.Name,
 						NameHex:     asset.NameHex,
@@ -87,6 +86,7 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 				asset.ID = uint(assetID)
 			}
 			return s.refreshRewardLiveStakeAggregate(
+				ctx,
 				db,
 				models.NewStakeCredentialRef(
 					utxo.CredentialTag,
@@ -117,14 +117,13 @@ func (s *Store) DeleteUtxos(
 		return nil
 	}
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
-			slot, err := currentTipSlot(db)
+		func(db queryer, ctx context.Context) error {
+			slot, err := currentTipSlot(ctx, db)
 			if err != nil {
 				return err
 			}
-			refs, err := queryUtxoStakeRefs(db, utxoIDs, true)
+			refs, err := queryUtxoStakeRefs(ctx, db, utxoIDs, true)
 			if err != nil {
 				return err
 			}
@@ -133,14 +132,14 @@ func (s *Store) DeleteUtxos(
 				end := min(start+chunkSize, len(utxoIDs))
 				predicate, args := utxoIDPredicate(utxoIDs[start:end])
 				if _, err := db.ExecContext(
-					context.Background(),
+					ctx,
 					s.dialect.Rebind("DELETE FROM utxo WHERE "+predicate),
 					args...,
 				); err != nil {
 					return err
 				}
 			}
-			return s.refreshRewardLiveStakeRefs(db, refs, slot)
+			return s.refreshRewardLiveStakeRefs(ctx, db, refs, slot)
 		},
 	)
 }
@@ -154,10 +153,10 @@ func (s *Store) DeleteUtxosAfterSlot(
 		return err
 	}
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			refs, err := queryStakeRefs(
+				ctx,
 				db,
 				"SELECT DISTINCT credential_tag, staking_key FROM utxo "+
 					"WHERE added_slot > ?",
@@ -167,13 +166,13 @@ func (s *Store) DeleteUtxosAfterSlot(
 				return err
 			}
 			if _, err := db.ExecContext(
-				context.Background(),
+				ctx,
 				"DELETE FROM utxo WHERE added_slot > ?",
 				slotValue,
 			); err != nil {
 				return err
 			}
-			return s.refreshRewardLiveStakeRefs(db, refs, slot)
+			return s.refreshRewardLiveStakeRefs(ctx, db, refs, slot)
 		},
 	)
 }
@@ -191,10 +190,9 @@ func (s *Store) SetUtxoDeletedAtSlot(
 	txID := input.Id().Bytes()
 	outputIndex := input.Index()
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
-			result, err := db.ExecContext(context.Background(), `
+		func(db queryer, ctx context.Context) error {
+			result, err := db.ExecContext(ctx, `
 UPDATE utxo
 SET deleted_slot = ?, spent_at_tx_id = ?
 WHERE tx_id = ? AND output_idx = ?
@@ -215,7 +213,7 @@ WHERE tx_id = ? AND output_idx = ?
 			}
 			if affected != 1 {
 				var count int
-				if err := db.QueryRowContext(context.Background(), `
+				if err := db.QueryRowContext(ctx, `
 SELECT COUNT(*) FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 					txID,
 					outputIndex,
@@ -238,6 +236,7 @@ SELECT COUNT(*) FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 				)
 			}
 			refs, err := queryUtxoStakeRefs(
+				ctx,
 				db,
 				[]models.UtxoId{{Hash: txID, Idx: outputIndex}},
 				false,
@@ -245,7 +244,7 @@ SELECT COUNT(*) FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			if err != nil {
 				return err
 			}
-			return s.refreshRewardLiveStakeRefs(db, refs, slot)
+			return s.refreshRewardLiveStakeRefs(ctx, db, refs, slot)
 		},
 	)
 }
@@ -259,10 +258,10 @@ func (s *Store) SetUtxosNotDeletedAfterSlot(
 		return err
 	}
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			refs, err := queryStakeRefs(
+				ctx,
 				db,
 				"SELECT DISTINCT credential_tag, staking_key FROM utxo "+
 					"WHERE deleted_slot > ?",
@@ -271,7 +270,7 @@ func (s *Store) SetUtxosNotDeletedAfterSlot(
 			if err != nil {
 				return err
 			}
-			if _, err := db.ExecContext(context.Background(), `
+			if _, err := db.ExecContext(ctx, `
 UPDATE utxo
 SET deleted_slot = 0, spent_at_tx_id = NULL
 WHERE deleted_slot > ?`,
@@ -279,7 +278,7 @@ WHERE deleted_slot > ?`,
 			); err != nil {
 				return err
 			}
-			return s.refreshRewardLiveStakeRefs(db, refs, slot)
+			return s.refreshRewardLiveStakeRefs(ctx, db, refs, slot)
 		},
 	)
 }
@@ -304,10 +303,9 @@ func (s *Store) MarkUtxosDeletedAtSlot(
 		}
 	}
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
-			stakeRefs, err := queryUtxoStakeRefs(db, ids, false)
+		func(db queryer, ctx context.Context) error {
+			stakeRefs, err := queryUtxoStakeRefs(ctx, db, ids, false)
 			if err != nil {
 				return err
 			}
@@ -317,7 +315,7 @@ func (s *Store) MarkUtxosDeletedAtSlot(
 				predicate, args := utxoIDPredicate(ids[start:end])
 				args = append([]any{slot}, args...)
 				if _, err := db.ExecContext(
-					context.Background(),
+					ctx,
 					s.dialect.Rebind(
 						"UPDATE utxo SET deleted_slot = ? "+
 							"WHERE deleted_slot = 0 AND ("+predicate+")",
@@ -327,7 +325,7 @@ func (s *Store) MarkUtxosDeletedAtSlot(
 					return err
 				}
 			}
-			return s.refreshRewardLiveStakeRefs(db, stakeRefs, atSlot)
+			return s.refreshRewardLiveStakeRefs(ctx, db, stakeRefs, atSlot)
 		},
 	)
 }
@@ -341,7 +339,15 @@ func (s *Store) AddUtxos(
 	}
 	items := make([]models.Utxo, len(utxos))
 	for i := range utxos {
-		items[i] = models.UtxoLedgerToModel(utxos[i].Utxo, utxos[i].Slot)
+		item, err := models.UtxoLedgerToModel(utxos[i].Utxo, utxos[i].Slot)
+		if err != nil {
+			return fmt.Errorf(
+				"convert utxo %d: %w",
+				utxos[i].Utxo.Id.Index(),
+				err,
+			)
+		}
+		items[i] = item
 	}
 	return s.importUtxos(items, txn, false)
 }
@@ -359,7 +365,7 @@ func (s *Store) GetUtxoBalanceByAddress(
 	txn types.Txn,
 ) (models.AddressBalance, error) {
 	var ret models.AddressBalance
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return ret, fmt.Errorf(
 			"resolve DB for utxo balance by address: %w",
@@ -380,7 +386,7 @@ func (s *Store) GetUtxoBalanceByAddress(
 		return ret, nil
 	}
 	addressPredicate := "(" + strings.Join(predicates, " OR ") + ")"
-	rows, err := db.QueryContext(context.Background(), s.dialect.Rebind(`
+	rows, err := db.QueryContext(ctx, s.dialect.Rebind(`
 SELECT amount
 FROM utxo
 WHERE deleted_slot = 0 AND `+addressPredicate), args...)
@@ -419,7 +425,7 @@ WHERE deleted_slot = 0 AND `+addressPredicate), args...)
 		return ret, nil
 	}
 	rows, err = db.QueryContext(
-		context.Background(),
+		ctx,
 		s.dialect.Rebind(`
 SELECT asset.policy_id, asset.name, asset.amount
 FROM utxo
@@ -482,9 +488,8 @@ func (s *Store) importUtxos(
 		return nil
 	}
 	return s.withWriteTransaction(
-		context.Background(),
 		txn,
-		func(db queryer) error {
+		func(db queryer, ctx context.Context) error {
 			q := s.operationalQueries(db)
 			refs := make(map[string]models.StakeCredentialRef)
 			slots := make(map[string]uint64)
@@ -495,12 +500,12 @@ func (s *Store) importUtxos(
 					return err
 				}
 				id, err := q.CreateUtxoIfAbsent(
-					context.Background(),
+					ctx,
 					sqlitequery.CreateUtxoIfAbsentParams(params),
 				)
 				if errors.Is(err, sql.ErrNoRows) {
 					id, err = q.GetUtxoIDByRef(
-						context.Background(),
+						ctx,
 						sqlitequery.GetUtxoIDByRefParams{
 							TxID: item.TxId,
 							OutputIdx: validInt64(
@@ -516,6 +521,7 @@ func (s *Store) importUtxos(
 					}
 					if hydrateProvenance {
 						if err := hydrateImportedUtxo(
+							ctx,
 							db,
 							&item,
 						); err != nil {
@@ -528,7 +534,7 @@ func (s *Store) importUtxos(
 				for j := range item.Assets {
 					asset := item.Assets[j]
 					if err := q.ImportAsset(
-						context.Background(),
+						ctx,
 						sqlitequery.ImportAssetParams{
 							Name:        asset.Name,
 							NameHex:     asset.NameHex,
@@ -559,6 +565,7 @@ func (s *Store) importUtxos(
 			}
 			for key, ref := range refs {
 				if err := s.refreshRewardLiveStakeAggregate(
+					ctx,
 					db,
 					ref,
 					slots[key],
@@ -571,13 +578,17 @@ func (s *Store) importUtxos(
 	)
 }
 
-func hydrateImportedUtxo(db queryer, utxo *models.Utxo) error {
+func hydrateImportedUtxo(
+	ctx context.Context,
+	db queryer,
+	utxo *models.Utxo,
+) error {
 	addedSlot, err := checkedInt64(utxo.AddedSlot)
 	if err != nil {
 		return err
 	}
 	if utxo.TransactionID != nil {
-		if _, err := db.ExecContext(context.Background(), `
+		if _, err := db.ExecContext(ctx, `
 UPDATE utxo
 SET transaction_id = ?, added_slot = ?
 WHERE tx_id = ? AND output_idx = ? AND transaction_id IS NULL`,
@@ -590,7 +601,7 @@ WHERE tx_id = ? AND output_idx = ? AND transaction_id IS NULL`,
 		}
 	}
 	if utxo.CollateralReturnForTxID != nil {
-		if _, err := db.ExecContext(context.Background(), `
+		if _, err := db.ExecContext(ctx, `
 UPDATE utxo
 SET collateral_return_for_tx_id = ?, added_slot = ?
 WHERE tx_id = ? AND output_idx = ?
@@ -610,22 +621,23 @@ WHERE tx_id = ? AND output_idx = ?
 }
 
 func (s *Store) refreshRewardLiveStakeRefs(
+	ctx context.Context,
 	db queryer,
 	refs []models.StakeCredentialRef,
 	slot uint64,
 ) error {
 	for i := range refs {
-		if err := s.refreshRewardLiveStakeAggregate(db, refs[i], slot); err != nil {
+		if err := s.refreshRewardLiveStakeAggregate(ctx, db, refs[i], slot); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func currentTipSlot(db queryer) (uint64, error) {
+func currentTipSlot(ctx context.Context, db queryer) (uint64, error) {
 	var slot sql.NullInt64
 	err := db.QueryRowContext(
-		context.Background(),
+		ctx,
 		"SELECT slot FROM tip WHERE id = 1",
 	).Scan(&slot)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -638,6 +650,7 @@ func currentTipSlot(db queryer) (uint64, error) {
 }
 
 func queryUtxoStakeRefs(
+	ctx context.Context,
 	db queryer,
 	ids []models.UtxoId,
 	liveOnly bool,
@@ -657,7 +670,7 @@ func queryUtxoStakeRefs(
 		if liveOnly {
 			query += " AND deleted_slot = 0"
 		}
-		rows, err := queryStakeRefs(db, query, args...)
+		rows, err := queryStakeRefs(ctx, db, query, args...)
 		if err != nil {
 			return nil, err
 		}
@@ -673,11 +686,12 @@ func queryUtxoStakeRefs(
 }
 
 func queryStakeRefs(
+	ctx context.Context,
 	db queryer,
 	query string,
 	args ...any,
 ) ([]models.StakeCredentialRef, error) {
-	rows, err := db.QueryContext(context.Background(), query, args...)
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -729,7 +743,7 @@ func (s *Store) getUtxo(
 	txn types.Txn,
 	includeSpent bool,
 ) (*models.Utxo, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -744,11 +758,11 @@ func (s *Store) getUtxo(
 	var row sqlitequery.Utxo
 	if includeSpent {
 		row, err = q.GetUtxoIncludingSpent(
-			context.Background(),
+			ctx,
 			sqlitequery.GetUtxoIncludingSpentParams(params),
 		)
 	} else {
-		row, err = q.GetLiveUtxo(context.Background(), params)
+		row, err = q.GetLiveUtxo(ctx, params)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -760,7 +774,7 @@ func (s *Store) getUtxo(
 	if err != nil {
 		return nil, err
 	}
-	if err := s.loadUtxoAssets(db, []*models.Utxo{ret}); err != nil {
+	if err := s.loadUtxoAssets(ctx, db, []*models.Utxo{ret}); err != nil {
 		return nil, err
 	}
 	return ret, nil
@@ -815,7 +829,7 @@ func (s *Store) GetUtxosAddedAfterSlot(
 	slot uint64,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -825,7 +839,7 @@ func (s *Store) GetUtxosAddedAfterSlot(
 		return nil, err
 	}
 	rows, err := q.GetUtxosAddedAfterSlot(
-		context.Background(),
+		ctx,
 		sql.NullInt64{Int64: sqlSlot, Valid: true},
 	)
 	if err != nil {
@@ -853,7 +867,7 @@ func (s *Store) getUtxoRefsBySlot(
 	txn types.Txn,
 	liveOnly bool,
 ) ([]models.UtxoId, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -865,10 +879,10 @@ func (s *Store) getUtxoRefsBySlot(
 	arg := sql.NullInt64{Int64: sqlSlot, Valid: true}
 	var rows []sqlitequery.GetLiveUtxoRefsBySlotRow
 	if liveOnly {
-		rows, err = q.GetLiveUtxoRefsBySlot(context.Background(), arg)
+		rows, err = q.GetLiveUtxoRefsBySlot(ctx, arg)
 	} else {
 		var all []sqlitequery.GetUtxoRefsBySlotRow
-		all, err = q.GetUtxoRefsBySlot(context.Background(), arg)
+		all, err = q.GetUtxoRefsBySlot(ctx, arg)
 		rows = make([]sqlitequery.GetLiveUtxoRefsBySlotRow, len(all))
 		for i := range all {
 			rows[i] = sqlitequery.GetLiveUtxoRefsBySlotRow(all[i])
@@ -892,7 +906,7 @@ func (s *Store) GetUtxosDeletedBeforeSlot(
 	limit int,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -906,7 +920,7 @@ func (s *Store) GetUtxosDeletedBeforeSlot(
 		sqlLimit = int64(limit)
 	}
 	rows, err := q.GetUtxosDeletedBeforeSlot(
-		context.Background(),
+		ctx,
 		sqlitequery.GetUtxosDeletedBeforeSlotParams{
 			DeletedSlot: sql.NullInt64{Int64: sqlSlot, Valid: true},
 			Limit:       sqlLimit,
@@ -940,7 +954,7 @@ func (s *Store) GetUtxosByAddress(
 	if len(patterns) == 0 {
 		return nil, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -1005,26 +1019,19 @@ func (s *Store) GetUtxosByAddress(
 	for i := range ret {
 		pointers[i] = &ret[i]
 	}
-	if err := s.loadUtxoAssets(db, pointers); err != nil {
+	if err := s.loadUtxoAssets(ctx, db, pointers); err != nil {
 		return nil, err
 	}
 	return ret, nil
 }
 
-func (s *Store) GetUtxosByAddressWithOrdering(
+// utxoOrderingPredicate builds the WHERE predicate shared by
+// GetUtxosByAddressWithOrdering and CountUtxosByAddressWithOrdering. The
+// returned predicate excludes any keyset (query.After) bound, which only
+// GetUtxosByAddressWithOrdering applies.
+func utxoOrderingPredicate(
 	query *models.UtxoWithOrderingQuery,
-	txn types.Txn,
-) ([]models.UtxoWithOrdering, error) {
-	if query == nil {
-		return nil, fmt.Errorf(
-			"GetUtxosByAddressWithOrdering: %w",
-			models.ErrNilUtxoWithOrderingQuery,
-		)
-	}
-	db, err := s.readDBFromTxn(txn)
-	if err != nil {
-		return nil, err
-	}
+) (string, []any, error) {
 	predicate := "utxo.deleted_slot = 0"
 	args := []any{}
 	switch {
@@ -1039,10 +1046,7 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 				&args,
 				pattern,
 			); err != nil {
-				return nil, fmt.Errorf(
-					"GetUtxosByAddressWithOrdering: %w",
-					err,
-				)
+				return "", nil, err
 			}
 		}
 		if len(branches) == 0 {
@@ -1053,11 +1057,7 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 	}
 	if query.FilterByAsset {
 		if len(query.AssetPolicyID) == 0 {
-			return nil, fmt.Errorf(
-				"GetUtxosByAddressWithOrdering: "+
-					"asset filter requires non-empty policy id: %w",
-				models.ErrEmptyAssetPolicyID,
-			)
+			return "", nil, models.ErrEmptyAssetPolicyID
 		}
 		predicate += `
  AND EXISTS (
@@ -1069,6 +1069,46 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 			args = append(args, query.AssetName)
 		}
 		predicate += ")"
+	}
+	return predicate, args, nil
+}
+
+func (s *Store) GetUtxosByAddressWithOrdering(
+	query *models.UtxoWithOrderingQuery,
+	txn types.Txn,
+) ([]models.UtxoWithOrdering, error) {
+	if query == nil {
+		return nil, fmt.Errorf(
+			"GetUtxosByAddressWithOrdering: %w",
+			models.ErrNilUtxoWithOrderingQuery,
+		)
+	}
+	if query.After != nil && query.Descending {
+		return nil, fmt.Errorf(
+			"GetUtxosByAddressWithOrdering: %w",
+			models.ErrDescendingKeysetUnsupported,
+		)
+	}
+	if query.After != nil && query.Offset > 0 {
+		return nil, fmt.Errorf(
+			"GetUtxosByAddressWithOrdering: %w",
+			models.ErrOffsetKeysetUnsupported,
+		)
+	}
+	if query.Offset > 0 &&
+		models.RequiresExactAddressFilter(query.AddressPatterns) {
+		return nil, fmt.Errorf(
+			"GetUtxosByAddressWithOrdering: %w",
+			models.ErrOffsetRequiresCoarseMatch,
+		)
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	predicate, args, err := utxoOrderingPredicate(query)
+	if err != nil {
+		return nil, fmt.Errorf("GetUtxosByAddressWithOrdering: %w", err)
 	}
 	slotExpr := `COALESCE("transaction".slot, utxo.added_slot)`
 	blockIndexExpr := `COALESCE("transaction".block_index, 0)`
@@ -1096,20 +1136,21 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 			query.After.TxId,
 		)
 	}
+	orderDir := "ASC"
+	if query.Descending {
+		orderDir = "DESC"
+	}
 	statement := `
 SELECT ` + qualifiedSQLiteUtxoColumns + `,
        ` + slotExpr + `, ` + blockIndexExpr + `
 FROM utxo
 LEFT JOIN "transaction" ON utxo.transaction_id = "transaction".id
 WHERE ` + predicate + `
-ORDER BY ` + slotExpr + ` ASC, ` + blockIndexExpr + ` ASC,
-         utxo.output_idx ASC, utxo.tx_id ASC`
-	if query.Limit > 0 {
-		statement += " LIMIT ?"
-		args = append(args, query.Limit)
-	}
+ORDER BY ` + slotExpr + ` ` + orderDir + `, ` + blockIndexExpr + ` ` + orderDir + `,
+         utxo.output_idx ` + orderDir + `, utxo.tx_id ` + orderDir
+	statement, args = addLimitOffset(statement, args, query.Limit, query.Offset)
 	rows, err := db.QueryContext(
-		context.Background(),
+		ctx,
 		s.dialect.Rebind(statement),
 		args...,
 	)
@@ -1129,13 +1170,61 @@ ORDER BY ` + slotExpr + ` ASC, ` + blockIndexExpr + ` ASC,
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if query.SkipAssets {
+		return ret, nil
+	}
 	for i := range ret {
 		pointers = append(pointers, &ret[i].Utxo)
 	}
-	if err := s.loadUtxoAssets(db, pointers); err != nil {
+	if err := s.loadUtxoAssets(ctx, db, pointers); err != nil {
 		return nil, err
 	}
 	return ret, nil
+}
+
+// CountUtxosByAddressWithOrdering returns the number of live UTxOs matching
+// query's coarse SQL predicate (address patterns and asset filter), without
+// materializing rows. It rejects a query whose address patterns require
+// CBOR-based exact-address filtering (see RequiresExactAddressFilter):
+// the coarse predicate alone over-matches address forms that share a
+// payment/delegation credential (for example pointer addresses), so a count
+// against it would not equal the exact-match total.
+func (s *Store) CountUtxosByAddressWithOrdering(
+	query *models.UtxoWithOrderingQuery,
+	txn types.Txn,
+) (int, error) {
+	if query == nil {
+		return 0, fmt.Errorf(
+			"CountUtxosByAddressWithOrdering: %w",
+			models.ErrNilUtxoWithOrderingQuery,
+		)
+	}
+	if models.RequiresExactAddressFilter(query.AddressPatterns) {
+		return 0, fmt.Errorf(
+			"CountUtxosByAddressWithOrdering: %w",
+			models.ErrExactAddressRequiresCbor,
+		)
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return 0, err
+	}
+	predicate, args, err := utxoOrderingPredicate(query)
+	if err != nil {
+		return 0, fmt.Errorf("CountUtxosByAddressWithOrdering: %w", err)
+	}
+	var count int
+	err = db.QueryRowContext(
+		ctx,
+		s.dialect.Rebind(
+			"SELECT COUNT(*) FROM utxo WHERE "+predicate,
+		),
+		args...,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count utxos by address: %w", err)
+	}
+	return count, nil
 }
 
 func (s *Store) GetUtxosByAddressAtSlot(
@@ -1181,11 +1270,11 @@ func (s *Store) GetControlledAmountByCredential(
 	if len(stakingKey) == 0 {
 		return 0, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
-	return sumUint64Rows(db, s.dialect.Rebind(`
+	return sumUint64Rows(ctx, db, s.dialect.Rebind(`
 SELECT amount FROM utxo
 WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`), credentialTag, stakingKey)
 }
@@ -1200,7 +1289,7 @@ func (s *Store) GetUtxoPaymentScriptByCredential(
 	if len(stakingKey) == 0 || len(paymentKeys) == 0 {
 		return ret, nil
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"resolve read DB for payment script by stake credential: %w",
@@ -1219,7 +1308,7 @@ func (s *Store) GetUtxoPaymentScriptByCredential(
 				args = append(args, key)
 			}
 			rows, err := db.QueryContext(
-				context.Background(),
+				ctx,
 				s.dialect.Rebind(`
 SELECT DISTINCT payment_key, payment_script
 FROM utxo
@@ -1252,11 +1341,11 @@ WHERE credential_tag = ? AND staking_key = ?
 }
 
 func (s *Store) GetScriptLockedSupply(txn types.Txn) (uint64, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return 0, err
 	}
-	return sumUint64Rows(db, s.dialect.Rebind(`
+	return sumUint64Rows(ctx, db, s.dialect.Rebind(`
 SELECT amount FROM utxo
 WHERE payment_script = TRUE AND deleted_slot = 0`))
 }
@@ -1266,7 +1355,7 @@ func (s *Store) GetUtxosByAssets(
 	assetName []byte,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -1274,12 +1363,12 @@ func (s *Store) GetUtxosByAssets(
 	var rows []sqlitequery.Utxo
 	if assetName == nil {
 		rows, err = q.GetLiveUtxosByAssetPolicy(
-			context.Background(),
+			ctx,
 			policyID,
 		)
 	} else {
 		rows, err = q.GetLiveUtxosByAsset(
-			context.Background(),
+			ctx,
 			sqlitequery.GetLiveUtxosByAssetParams{
 				PolicyID: policyID,
 				Name:     assetName,
@@ -1297,7 +1386,7 @@ func (s *Store) GetUtxosByAssets(
 	for i := range ret {
 		pointers[i] = &ret[i]
 	}
-	if err := s.loadUtxoAssets(db, pointers); err != nil {
+	if err := s.loadUtxoAssets(ctx, db, pointers); err != nil {
 		return nil, err
 	}
 	return ret, nil
@@ -1310,12 +1399,12 @@ func (s *Store) IterateLiveUtxos(
 	if fn == nil {
 		return errors.New("iterate live UTxOs: callback is nil")
 	}
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return err
 	}
 	rows, err := db.QueryContext(
-		context.Background(),
+		ctx,
 		"SELECT "+sqliteUtxoColumns+" FROM utxo WHERE deleted_slot = 0",
 	)
 	if err != nil {
@@ -1349,7 +1438,7 @@ func (s *Store) queryUtxos(
 	args []any,
 	order string,
 ) ([]models.Utxo, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -1358,7 +1447,7 @@ func (s *Store) queryUtxos(
 		query += " ORDER BY " + order
 	}
 	rows, err := db.QueryContext(
-		context.Background(),
+		ctx,
 		s.dialect.Rebind(query),
 		args...,
 	)
@@ -1390,7 +1479,7 @@ func (s *Store) queryUtxosWithAssets(
 	args []any,
 	order string,
 ) ([]models.Utxo, error) {
-	db, err := s.readDBFromTxn(txn)
+	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
@@ -1402,23 +1491,25 @@ func (s *Store) queryUtxosWithAssets(
 	for i := range ret {
 		pointers[i] = &ret[i]
 	}
-	if err := s.loadUtxoAssets(db, pointers); err != nil {
+	if err := s.loadUtxoAssets(ctx, db, pointers); err != nil {
 		return nil, err
 	}
 	return ret, nil
 }
 
 func (s *Store) loadUtxoAssets(
+	ctx context.Context,
 	db queryer,
 	utxos []*models.Utxo,
 ) error {
 	if len(utxos) == 0 {
 		return nil
 	}
-	return s.loadUtxoAssetsPointers(db, utxos)
+	return s.loadUtxoAssetsPointers(ctx, db, utxos)
 }
 
 func (s *Store) loadUtxoAssetsBatch(
+	ctx context.Context,
 	db queryer,
 	groups ...map[string][]models.Utxo,
 ) error {
@@ -1430,10 +1521,14 @@ func (s *Store) loadUtxoAssetsBatch(
 			}
 		}
 	}
-	return s.loadUtxoAssetsPointers(db, pointers)
+	return s.loadUtxoAssetsPointers(ctx, db, pointers)
 }
 
-func (s *Store) loadUtxoAssetsPointers(db queryer, utxos []*models.Utxo) error {
+func (s *Store) loadUtxoAssetsPointers(
+	ctx context.Context,
+	db queryer,
+	utxos []*models.Utxo,
+) error {
 	if len(utxos) == 0 {
 		return nil
 	}
@@ -1459,7 +1554,7 @@ func (s *Store) loadUtxoAssetsPointers(db queryer, utxos []*models.Utxo) error {
 		for i, id := range ids[start:end] {
 			args[i] = id
 		}
-		rows, err := db.QueryContext(context.Background(), s.dialect.Rebind(
+		rows, err := db.QueryContext(ctx, s.dialect.Rebind(
 			"SELECT name, name_hex, policy_id, fingerprint, id, utxo_id, amount FROM asset WHERE utxo_id IN ("+bindPlaceholders(
 				end-start,
 			)+") ORDER BY id",

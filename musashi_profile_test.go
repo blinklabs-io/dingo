@@ -140,10 +140,26 @@ func TestPrototypeTrustBypassesEnabledOnlyForMusashi(t *testing.T) {
 		{name: "mainnet", network: "mainnet", networkMagic: 764824073},
 		{name: "devnet", network: "devnet", networkMagic: 42},
 		// Conflicting identities never enable the bypasses, even unvalidated.
-		{name: "preview with prototype magic", network: "preview", networkMagic: 164},
-		{name: "preprod with prototype magic", network: "preprod", networkMagic: 164},
-		{name: "musashi name with preview magic", network: "musashi", networkMagic: 2},
-		{name: "musashi name with preprod magic", network: "musashi", networkMagic: 1},
+		{
+			name:         "preview with prototype magic",
+			network:      "preview",
+			networkMagic: 164,
+		},
+		{
+			name:         "preprod with prototype magic",
+			network:      "preprod",
+			networkMagic: 164,
+		},
+		{
+			name:         "musashi name with preview magic",
+			network:      "musashi",
+			networkMagic: 2,
+		},
+		{
+			name:         "musashi name with preprod magic",
+			network:      "musashi",
+			networkMagic: 1,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -273,6 +289,58 @@ func TestBlockPipelineRejectedOnMusashi(t *testing.T) {
 				WithNetwork(tt.network),
 			)
 			cfg.cfg.BlockPipelineEnabled = tt.blockPipelineEnabled
+			n, err := New(cfg)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			// New starts the event bus' background goroutines; Stop releases them.
+			t.Cleanup(func() { _ = n.Stop() })
+		})
+	}
+}
+
+// TestBlockPipelineValidateRequiresPipelineEnabled proves a node cannot be
+// constructed with the block pipeline's VRF/KES validate stage (issue #1894
+// phase 3) enabled unless the block pipeline itself is also enabled -- see
+// configValidate's BlockPipelineValidateEnabled check.
+func TestBlockPipelineValidateRequiresPipelineEnabled(t *testing.T) {
+	tests := []struct {
+		name                         string
+		blockPipelineEnabled         bool
+		blockPipelineValidateEnabled bool
+		wantErr                      string
+	}{
+		{
+			name:                         "validate without pipeline is rejected",
+			blockPipelineEnabled:         false,
+			blockPipelineValidateEnabled: true,
+			wantErr:                      "requires block-pipeline-enabled",
+		},
+		{
+			name:                         "validate with pipeline is accepted",
+			blockPipelineEnabled:         true,
+			blockPipelineValidateEnabled: true,
+		},
+		{
+			name:                         "pipeline without validate is accepted",
+			blockPipelineEnabled:         true,
+			blockPipelineValidateEnabled: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := NewConfig(
+				WithPrometheusRegistry(prometheus.NewRegistry()),
+				WithListeners(ListenerConfig{
+					ListenNetwork: "tcp",
+					ListenAddress: "127.0.0.1:0",
+				}),
+				WithNetwork("preview"),
+			)
+			cfg.cfg.BlockPipelineEnabled = tt.blockPipelineEnabled
+			cfg.cfg.BlockPipelineValidateEnabled = tt.blockPipelineValidateEnabled
 			n, err := New(cfg)
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)

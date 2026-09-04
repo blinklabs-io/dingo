@@ -16,18 +16,15 @@ package blockfrost
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/apiauth"
+	"github.com/blinklabs-io/dingo/internal/apilistener"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
-	"github.com/blinklabs-io/dingo/internal/tlsutil"
 )
 
 // blockfrostProjectIDHeader is the header real Blockfrost clients send
@@ -39,12 +36,14 @@ const blockfrostProjectIDHeader = "project_id"
 
 // Blockfrost is the Blockfrost-compatible REST API server.
 type Blockfrost struct {
-	config     BlockfrostConfig
-	logger     *slog.Logger
-	node       BlockfrostNode
-	httpServer *http.Server
-	verifier   *apiauth.Verifier
-	mu         sync.Mutex
+	config BlockfrostConfig
+	logger *slog.Logger
+	node   BlockfrostNode
+	// listener owns the start/stop protocol, including releasing the
+	// listening socket as part of what Stop waits for -- see
+	// internal/apilistener.
+	listener *apilistener.Listener
+	verifier *apiauth.Verifier
 }
 
 // New creates a new Blockfrost API server instance.
@@ -63,9 +62,10 @@ func New(
 		cfg.ListenAddress = ":3000"
 	}
 	return &Blockfrost{
-		config: cfg,
-		logger: logger,
-		node:   node,
+		config:   cfg,
+		logger:   logger,
+		node:     node,
+		listener: apilistener.New("Blockfrost API", logger),
 	}
 }
 
@@ -177,6 +177,14 @@ func (b *Blockfrost) handler() http.Handler {
 	mux.HandleFunc(
 		"POST /api/v0/tx/submit",
 		b.handleTransactionSubmit,
+	)
+	mux.HandleFunc(
+		"POST /api/v0/utils/txs/evaluate",
+		b.handleTransactionEvaluate,
+	)
+	mux.HandleFunc(
+		"POST /api/v0/utils/txs/evaluate/utxos",
+		b.handleTransactionEvaluateUtxos,
 	)
 	mux.HandleFunc(
 		"GET /api/v0/txs/{hash}/cbor",
@@ -299,45 +307,33 @@ func (b *Blockfrost) Start(
 	if err != nil {
 		return fmt.Errorf("blockfrost: %w", err)
 	}
-	b.mu.Lock()
-	if b.httpServer != nil {
-		b.mu.Unlock()
-		return errors.New("server already started")
-	}
-	b.verifier = verifier
-
-	server := &http.Server{
-		Addr:              b.config.ListenAddress,
-		Handler:           b.handler(),
-		ReadHeaderTimeout: 60 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
-	}
-	b.httpServer = server
-	b.mu.Unlock()
-
-	// Start the server with deterministic error detection
-	if err := b.startServer(server); err != nil {
-		b.mu.Lock()
-		b.httpServer = nil
-		b.mu.Unlock()
+	// The verifier is installed inside the build callback so it is published
+	// with the server it belongs to: a second Start is rejected before the
+	// callback runs, and so cannot replace a running server's verifier.
+	server, bindDone, err := b.listener.Publish(func() *http.Server {
+		b.verifier = verifier
+		return &http.Server{
+			Addr:              b.config.ListenAddress,
+			Handler:           b.handler(),
+			ReadHeaderTimeout: 60 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}
+	})
+	if err != nil {
 		return err
 	}
 
-	b.logger.Info(
-		"Blockfrost API listener started on " +
-			b.config.ListenAddress,
-	)
-
-	// Monitor context for cancellation
+	// Launched before the bind so a context cancelled mid-bind still tears the
+	// server down: Take is what makes an in-flight bind close its own socket.
 	go func() { //nolint:gosec // G118: goroutine intentionally outlives ctx to perform graceful shutdown
 		<-ctx.Done()
-		b.mu.Lock()
-		srv := b.httpServer
-		b.httpServer = nil
-		b.mu.Unlock()
-
-		if srv != nil {
+		job, _ := b.listener.TakeIf(server)
+		// Nil when a concurrent Stop won the detach -- it owns the teardown
+		// and its caller is already waiting on it -- or when this server was
+		// already stopped and a restart published another one, which is not
+		// this monitor's to touch. Either way there is nothing to do here.
+		if job != nil {
 			b.logger.Debug(
 				"context cancelled, shutting down " +
 					"Blockfrost API server",
@@ -349,8 +345,8 @@ func (b *Blockfrost) Start(
 			)
 			defer cancel()
 			//nolint:contextcheck
-			if err := srv.Shutdown(
-				shutdownCtx,
+			if err := b.listener.Shutdown(
+				shutdownCtx, job, apilistener.Graceful,
 			); err != nil {
 				b.logger.Error(
 					"failed to shutdown Blockfrost "+
@@ -362,75 +358,38 @@ func (b *Blockfrost) Start(
 		}
 	}()
 
+	// Bound with deterministic error detection: the socket is opened
+	// synchronously so a port conflict surfaces here rather than in a log line
+	// from a goroutine nobody is watching.
+	served, err := b.listener.Bind(server, bindDone, b.config.TLS)
+	if err != nil {
+		b.listener.Unpublish(server)
+		return err
+	}
+	if !served {
+		// A concurrent Stop or context cancellation detached this server while
+		// it was binding, so Bind closed the socket rather than serving it.
+		// Saying the listener came up would be false.
+		return nil
+	}
+
+	b.logger.Info(
+		"Blockfrost API listener started on " +
+			b.config.ListenAddress,
+	)
+
 	return nil
 }
 
-// Stop gracefully shuts down the HTTP server.
+// Stop gracefully shuts down the HTTP server, and does not return until the
+// listening socket has been released -- see internal/apilistener.
 func (b *Blockfrost) Stop(
 	ctx context.Context,
 ) error {
-	b.mu.Lock()
-	srv := b.httpServer
-	b.httpServer = nil
-	b.mu.Unlock()
-
-	if srv != nil {
-		b.logger.Debug(
-			"shutting down Blockfrost API server",
-		)
-		if err := srv.Shutdown(ctx); err != nil {
-			return fmt.Errorf(
-				"failed to shutdown Blockfrost API "+
-					"server: %w",
-				err,
-			)
-		}
+	job, inFlight := b.listener.Take()
+	if job == nil {
+		return b.listener.AwaitTeardown(ctx, inFlight)
 	}
-	return nil
-}
-
-// startServer starts the HTTP server with deterministic
-// error detection. It binds the listening socket first so
-// port conflicts are detected immediately, then serves in
-// a background goroutine.
-func (b *Blockfrost) startServer(
-	server *http.Server,
-) error {
-	useTLS := b.config.TLS.Enabled
-	if useTLS {
-		if err := tlsutil.ConfigureServerTLS(
-			server,
-			b.config.TLS.CertFilePath,
-			b.config.TLS.KeyFilePath,
-		); err != nil {
-			return fmt.Errorf(
-				"failed to load TLS keypair for Blockfrost API server: %w",
-				err,
-			)
-		}
-	}
-	ln, err := net.Listen("tcp", server.Addr)
-	if err != nil {
-		return fmt.Errorf(
-			"failed to listen for Blockfrost API "+
-				"server: %w",
-			err,
-		)
-	}
-	go func() {
-		var serveErr error
-		if useTLS {
-			serveErr = server.ServeTLS(ln, "", "")
-		} else {
-			serveErr = server.Serve(ln)
-		}
-		if serveErr != nil &&
-			!errors.Is(serveErr, http.ErrServerClosed) {
-			b.logger.Error(
-				"Blockfrost API server error",
-				"error", serveErr,
-			)
-		}
-	}()
-	return nil
+	b.logger.Debug("shutting down Blockfrost API server")
+	return b.listener.Shutdown(ctx, job, apilistener.Graceful)
 }

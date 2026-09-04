@@ -15,6 +15,7 @@
 package governance
 
 import (
+	"fmt"
 	"math/big"
 	"testing"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -29,6 +31,18 @@ import (
 // newRat is a test helper that builds a cbor.Rat from num/denom.
 func newRat(num, denom int64) cbor.Rat {
 	return cbor.Rat{Rat: big.NewRat(num, denom)}
+}
+
+func conwayParameterChange(
+	update *conway.ConwayProtocolParameterUpdate,
+) lcommon.ParameterChangeGovAction {
+	if update == nil {
+		return nil
+	}
+	return &conway.ConwayParameterChangeGovAction{
+		Type:        uint(lcommon.GovActionTypeParameterChange),
+		ParamUpdate: *update,
+	}
 }
 
 // conwayPParamsFixture returns a ConwayProtocolParameters with the
@@ -70,9 +84,18 @@ func ratifyInputs(
 	majorVersion uint,
 	committeeNoConfidence bool,
 ) RatifyInputs {
+	var govAction lcommon.GovAction
+	if tally != nil && lcommon.GovActionType(tally.ActionType) ==
+		lcommon.GovActionTypeUpdateCommittee {
+		govAction = &lcommon.UpdateCommitteeGovAction{
+			Type:       uint(lcommon.GovActionTypeUpdateCommittee),
+			CredEpochs: map[*lcommon.Credential]uint{},
+		}
+	}
 	return RatifyInputs{
 		Tally:                 tally,
 		PParams:               pparams,
+		GovAction:             govAction,
 		ActiveDRepCount:       activeDReps,
 		ActiveCCCount:         activeCC,
 		CCQuorum:              ccQuorum,
@@ -81,24 +104,437 @@ func ratifyInputs(
 	}
 }
 
-func TestShouldRatify_BootstrapAnyYesPasses(t *testing.T) {
+func TestShouldRatify_BootstrapDRepOnlyDoesNotSubstituteForSPO(t *testing.T) {
 	pparams := conwayPParamsFixture(9)
 	tally := &ProposalTally{
-		ActionType:     uint8(lcommon.GovActionTypeParameterChange),
+		ActionType:     uint8(lcommon.GovActionTypeHardForkInitiation),
 		DRepYesStake:   1,
 		DRepTotalStake: 100,
 	}
-	d := ShouldRatify(ratifyInputs(tally, pparams, 5, 0, nil, 9, false))
-	assert.True(t, d.Ratified)
+	d := ShouldRatify(
+		ratifyInputs(tally, pparams, 5, 1, big.NewRat(2, 3), 9, false),
+	)
+	assert.False(t, d.Ratified)
 }
 
-func TestShouldRatify_BootstrapZeroYesFails(t *testing.T) {
+func TestShouldRatify_DijkstraOnlyParametersUseNetworkAndSecurityGroups(
+	t *testing.T,
+) {
+	maxBlock := uint32(2_000)
+	maxTx := uint32(1_000)
+	stride := uint32(128)
+	multiplier := &cbor.Rat{Rat: big.NewRat(7, 4)}
+	actions := []struct {
+		name   string
+		update gdijkstra.DijkstraProtocolParameterUpdate
+	}{
+		{
+			name: "key-34",
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				MaxRefScriptSizePerBlock: &maxBlock,
+			},
+		},
+		{
+			name: "key-35",
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				MaxRefScriptSizePerTx: &maxTx,
+			},
+		},
+		{
+			name: "key-36",
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				RefScriptCostStride: &stride,
+			},
+		},
+		{
+			name: "key-37",
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				RefScriptCostMultiplier: multiplier,
+			},
+		},
+	}
+	pparams := conwayPParamsFixture(gdijkstra.MinProtocolVersionDijkstra)
+	pparams.MinCommitteeSize = 1
+	pparams.DRepVotingThresholds.PpNetworkGroup = newRat(3, 4)
+	pparams.DRepVotingThresholds.PpGovGroup = newRat(1, 1)
+	pparams.PoolVotingThresholds.PpSecurityGroup = newRat(3, 4)
+
+	for _, test := range actions {
+		t.Run(test.name, func(t *testing.T) {
+			action := &gdijkstra.DijkstraParameterChangeGovAction{
+				Type:        uint(lcommon.GovActionTypeParameterChange),
+				ParamUpdate: test.update,
+			}
+			require.Equal(
+				t,
+				drepParameterGroupNetwork,
+				parameterChangeDRepGroups(action),
+			)
+			require.NotEmpty(t, action.SecurityGroupFields())
+			decision := ShouldRatify(RatifyInputs{
+				Tally: &ProposalTally{
+					ActionType:     uint8(lcommon.GovActionTypeParameterChange),
+					DRepYesStake:   75,
+					DRepTotalStake: 100,
+					SPOYesStake:    75,
+					SPOTotalStake:  100,
+					CCYesCount:     1,
+					CCTotalCount:   1,
+				},
+				PParams:         pparams,
+				ParameterChange: action,
+				ActiveDRepCount: 1,
+				ActiveCCCount:   1,
+				CCQuorum:        big.NewRat(1, 1),
+				MajorVersion:    gdijkstra.MinProtocolVersionDijkstra,
+			})
+			require.True(t, decision.Ratified)
+		})
+	}
+}
+
+func TestShouldRatify_BootstrapMissingCommitteeDoesNotRatify(t *testing.T) {
 	pparams := conwayPParamsFixture(9)
 	tally := &ProposalTally{
 		ActionType: uint8(lcommon.GovActionTypeParameterChange),
 	}
+	// Non-security parameter changes have no SPO gate and bootstrap waives
+	// the DRep threshold, but an absent committee still cannot approve a
+	// committee-gated action.
 	d := ShouldRatify(ratifyInputs(tally, pparams, 5, 0, nil, 9, false))
 	assert.False(t, d.Ratified)
+	assert.True(t, d.DRepApproved)
+	assert.True(t, d.SPOApproved)
+	assert.False(t, d.CCApproved)
+}
+
+func TestShouldRatify_BootstrapPerBodyRequirements(t *testing.T) {
+	pparams := conwayPParamsFixture(9)
+	quorum := big.NewRat(2, 3)
+	securityValue := uint(1)
+	securityUpdate := &conway.ConwayProtocolParameterUpdate{
+		MaxTxSize: &securityValue,
+	}
+
+	base := func(action lcommon.GovActionType) *ProposalTally {
+		return &ProposalTally{ActionType: uint8(action)}
+	}
+	withCC := func(tally *ProposalTally) *ProposalTally {
+		tally.CCYesCount = 2
+		tally.CCTotalCount = 3
+		return tally
+	}
+	withSPO := func(tally *ProposalTally) *ProposalTally {
+		tally.SPOYesStake = 51
+		tally.SPOTotalStake = 100
+		return tally
+	}
+
+	tests := []struct {
+		name       string
+		action     lcommon.GovActionType
+		tally      *ProposalTally
+		param      *conway.ConwayProtocolParameterUpdate
+		activeCC   int
+		wantRatify bool
+	}{
+		{
+			name:       "parameter change uses CC only",
+			action:     lcommon.GovActionTypeParameterChange,
+			tally:      withCC(base(lcommon.GovActionTypeParameterChange)),
+			activeCC:   2,
+			wantRatify: true,
+		},
+		{
+			name:   "security parameter change requires SPO",
+			action: lcommon.GovActionTypeParameterChange,
+			tally: withSPO(
+				withCC(base(lcommon.GovActionTypeParameterChange)),
+			),
+			param:      securityUpdate,
+			activeCC:   2,
+			wantRatify: true,
+		},
+		{
+			name:   "hard fork requires CC and SPO",
+			action: lcommon.GovActionTypeHardForkInitiation,
+			tally: withSPO(
+				withCC(base(lcommon.GovActionTypeHardForkInitiation)),
+			),
+			activeCC:   2,
+			wantRatify: true,
+		},
+		{
+			name:       "hard fork CC only fails",
+			action:     lcommon.GovActionTypeHardForkInitiation,
+			tally:      withCC(base(lcommon.GovActionTypeHardForkInitiation)),
+			activeCC:   2,
+			wantRatify: false,
+		},
+		{
+			name:       "hard fork SPO only fails",
+			action:     lcommon.GovActionTypeHardForkInitiation,
+			tally:      withSPO(base(lcommon.GovActionTypeHardForkInitiation)),
+			activeCC:   2,
+			wantRatify: false,
+		},
+		{
+			name:   "hard fork DRep only fails",
+			action: lcommon.GovActionTypeHardForkInitiation,
+			tally: &ProposalTally{
+				ActionType:     uint8(lcommon.GovActionTypeHardForkInitiation),
+				DRepYesStake:   100,
+				DRepTotalStake: 100,
+			},
+			activeCC:   2,
+			wantRatify: false,
+		},
+		{
+			name:       "info remains non-ratifiable",
+			action:     lcommon.GovActionTypeInfo,
+			tally:      withSPO(withCC(base(lcommon.GovActionTypeInfo))),
+			activeCC:   2,
+			wantRatify: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := ShouldRatify(RatifyInputs{
+				Tally:           tt.tally,
+				PParams:         pparams,
+				ParameterChange: conwayParameterChange(tt.param),
+				ActiveCCCount:   tt.activeCC,
+				CCQuorum:        quorum,
+				MajorVersion:    9,
+				ActiveDRepCount: 0,
+			})
+			assert.Equal(t, tt.wantRatify, d.Ratified)
+		})
+	}
+}
+
+func TestShouldRatify_BootstrapUnsupportedActionsDoNotRatify(t *testing.T) {
+	pparams := conwayPParamsFixture(9)
+	unsupported := []lcommon.GovActionType{
+		lcommon.GovActionTypeTreasuryWithdrawal,
+		lcommon.GovActionTypeNoConfidence,
+		lcommon.GovActionTypeUpdateCommittee,
+		lcommon.GovActionTypeNewConstitution,
+	}
+	for _, action := range unsupported {
+		t.Run(fmt.Sprintf("action-%d", action), func(t *testing.T) {
+			tally := &ProposalTally{
+				ActionType:     uint8(action),
+				DRepYesStake:   100,
+				DRepTotalStake: 100,
+				SPOYesStake:    100,
+				SPOTotalStake:  100,
+				CCYesCount:     3,
+				CCTotalCount:   3,
+			}
+			d := ShouldRatify(RatifyInputs{
+				Tally:         tally,
+				PParams:       pparams,
+				ActiveCCCount: 3,
+				CCQuorum:      big.NewRat(2, 3),
+				MajorVersion:  9,
+			})
+			assert.False(t, d.Ratified)
+		})
+	}
+}
+
+func TestShouldRatify_ActionBodyMatrixAcrossBootstrapBoundary(t *testing.T) {
+	securityValue := uint(1)
+	securityUpdate := &conway.ConwayProtocolParameterUpdate{
+		MaxTxSize: &securityValue,
+	}
+
+	type body uint8
+	const (
+		drepBody body = 1 << iota
+		spoBody
+		ccBody
+	)
+
+	makeTally := func(action lcommon.GovActionType, votes body) *ProposalTally {
+		tally := &ProposalTally{ActionType: uint8(action)}
+		if votes&drepBody != 0 {
+			tally.DRepYesStake, tally.DRepTotalStake = 100, 100
+		}
+		if votes&spoBody != 0 {
+			tally.SPOYesStake, tally.SPOTotalStake = 100, 100
+		}
+		if votes&ccBody != 0 {
+			tally.CCYesCount, tally.CCTotalCount = 2, 3
+		}
+		return tally
+	}
+
+	type actionCase struct {
+		name      string
+		action    lcommon.GovActionType
+		param     *conway.ConwayProtocolParameterUpdate
+		required  body
+		bootstrap bool
+	}
+
+	bootstrapCases := []actionCase{
+		{
+			name:      "parameter change",
+			action:    lcommon.GovActionTypeParameterChange,
+			required:  ccBody,
+			bootstrap: true,
+		},
+		{
+			name:      "security parameter change",
+			action:    lcommon.GovActionTypeParameterChange,
+			param:     securityUpdate,
+			required:  spoBody | ccBody,
+			bootstrap: true,
+		},
+		{
+			name:      "hard fork initiation",
+			action:    lcommon.GovActionTypeHardForkInitiation,
+			required:  spoBody | ccBody,
+			bootstrap: true,
+		},
+		{
+			name:      "info",
+			action:    lcommon.GovActionTypeInfo,
+			bootstrap: true,
+		},
+		{
+			name:      "treasury withdrawal",
+			action:    lcommon.GovActionTypeTreasuryWithdrawal,
+			bootstrap: true,
+		},
+		{
+			name:      "no confidence",
+			action:    lcommon.GovActionTypeNoConfidence,
+			bootstrap: true,
+		},
+		{
+			name:      "update committee",
+			action:    lcommon.GovActionTypeUpdateCommittee,
+			bootstrap: true,
+		},
+		{
+			name:      "new constitution",
+			action:    lcommon.GovActionTypeNewConstitution,
+			bootstrap: true,
+		},
+	}
+
+	postBootstrapCases := []actionCase{
+		{
+			name:     "parameter change",
+			action:   lcommon.GovActionTypeParameterChange,
+			required: drepBody | ccBody,
+		},
+		{
+			name:     "security parameter change",
+			action:   lcommon.GovActionTypeParameterChange,
+			param:    securityUpdate,
+			required: drepBody | spoBody | ccBody,
+		},
+		{
+			name:     "hard fork initiation",
+			action:   lcommon.GovActionTypeHardForkInitiation,
+			required: drepBody | spoBody | ccBody,
+		},
+		{
+			name:     "treasury withdrawal",
+			action:   lcommon.GovActionTypeTreasuryWithdrawal,
+			required: drepBody | ccBody,
+		},
+		{
+			name:     "no confidence",
+			action:   lcommon.GovActionTypeNoConfidence,
+			required: drepBody | spoBody,
+		},
+		{
+			name:     "update committee",
+			action:   lcommon.GovActionTypeUpdateCommittee,
+			required: drepBody | spoBody,
+		},
+		{
+			name:     "new constitution",
+			action:   lcommon.GovActionTypeNewConstitution,
+			required: drepBody | ccBody,
+		},
+		{
+			name:   "info",
+			action: lcommon.GovActionTypeInfo,
+		},
+	}
+
+	for _, tc := range append(bootstrapCases, postBootstrapCases...) {
+		major := uint(10)
+		if tc.bootstrap {
+			major = 9
+		}
+		pparams := conwayPParamsFixture(major)
+		for _, votes := range []body{0, drepBody, spoBody, ccBody,
+			drepBody | spoBody, drepBody | ccBody, spoBody | ccBody,
+			drepBody | spoBody | ccBody} {
+			name := fmt.Sprintf("PV%d/%s/votes-%d", major, tc.name, votes)
+			t.Run(name, func(t *testing.T) {
+				want := tc.required != 0 && votes&tc.required == tc.required
+				if tc.bootstrap &&
+					tc.action != lcommon.GovActionTypeParameterChange &&
+					tc.action != lcommon.GovActionTypeHardForkInitiation {
+					want = false
+				}
+				if tc.action == lcommon.GovActionTypeInfo {
+					want = false
+				}
+				var govAction lcommon.GovAction
+				if tc.action == lcommon.GovActionTypeUpdateCommittee {
+					govAction = &lcommon.UpdateCommitteeGovAction{
+						Type:       uint(tc.action),
+						CredEpochs: map[*lcommon.Credential]uint{},
+					}
+				}
+				d := ShouldRatify(RatifyInputs{
+					Tally:           makeTally(tc.action, votes),
+					PParams:         pparams,
+					ParameterChange: conwayParameterChange(tc.param),
+					GovAction:       govAction,
+					ActiveCCCount:   3,
+					CCQuorum:        big.NewRat(2, 3),
+					MajorVersion:    major,
+				})
+				assert.Equal(t, want, d.Ratified)
+			})
+		}
+	}
+}
+
+func TestShouldRatify_BootstrapCCChecksRemainRequired(t *testing.T) {
+	pparams := conwayPParamsFixture(9)
+	tally := &ProposalTally{
+		ActionType:    uint8(lcommon.GovActionTypeHardForkInitiation),
+		SPOYesStake:   100,
+		SPOTotalStake: 100,
+		CCYesCount:    3,
+		CCTotalCount:  3,
+	}
+	inputs := func(activeCC int, quorum *big.Rat) RatifyInputs {
+		return RatifyInputs{
+			Tally:         tally,
+			PParams:       pparams,
+			ActiveCCCount: activeCC,
+			CCQuorum:      quorum,
+			MajorVersion:  9,
+		}
+	}
+
+	assert.False(t, ShouldRatify(inputs(0, nil)).Ratified,
+		"bootstrap must not approve an action without a seated committee")
+	assert.False(t, ShouldRatify(inputs(1, nil)).Ratified,
+		"a seated committee still requires a quorum")
 }
 
 func TestShouldRatify_InfoActionCannotRatify(t *testing.T) {
@@ -348,7 +784,10 @@ func TestGetDRepThreshold_ParameterGroupSelection(t *testing.T) {
 		GovActionDeposit: &deposit,
 	}
 	got := getDRepThreshold(
-		lcommon.GovActionTypeParameterChange, pparams, update, false,
+		lcommon.GovActionTypeParameterChange,
+		pparams,
+		conwayParameterChange(update),
+		false,
 	)
 	// Gov group (75/100) > economic (67/100), so we expect 75/100.
 	assert.Equal(t, big.NewRat(75, 100), got)
@@ -400,7 +839,10 @@ func TestGetSPOThreshold_ParameterChangeSecurityGroup(t *testing.T) {
 	a0 := newRat(1, 100)
 	nonSecurity := &conway.ConwayProtocolParameterUpdate{A0: &a0}
 	assert.Nil(t, getSPOThreshold(
-		lcommon.GovActionTypeParameterChange, pparams, nonSecurity, false,
+		lcommon.GovActionTypeParameterChange,
+		pparams,
+		conwayParameterChange(nonSecurity),
+		false,
 	))
 	// An update that touches a security-group parameter (MaxTxSize)
 	// must return the security-group threshold.
@@ -409,25 +851,28 @@ func TestGetSPOThreshold_ParameterChangeSecurityGroup(t *testing.T) {
 		MaxTxSize: &maxTxSize,
 	}
 	got := getSPOThreshold(
-		lcommon.GovActionTypeParameterChange, pparams, securityUpdate, false,
+		lcommon.GovActionTypeParameterChange,
+		pparams,
+		conwayParameterChange(securityUpdate),
+		false,
 	)
 	assert.Equal(t, big.NewRat(51, 100), got)
 	adaPerUtxoByte := uint64(4310)
 	assert.Equal(t, big.NewRat(51, 100), getSPOThreshold(
 		lcommon.GovActionTypeParameterChange,
 		pparams,
-		&conway.ConwayProtocolParameterUpdate{
+		conwayParameterChange(&conway.ConwayProtocolParameterUpdate{
 			AdaPerUtxoByte: &adaPerUtxoByte,
-		},
+		}),
 		false,
 	))
 	govActionDeposit := uint64(1000000000)
 	assert.Equal(t, big.NewRat(51, 100), getSPOThreshold(
 		lcommon.GovActionTypeParameterChange,
 		pparams,
-		&conway.ConwayProtocolParameterUpdate{
+		conwayParameterChange(&conway.ConwayProtocolParameterUpdate{
 			GovActionDeposit: &govActionDeposit,
-		},
+		}),
 		false,
 	))
 	// No update at all means the caller cannot prove security-group

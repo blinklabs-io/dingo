@@ -15,6 +15,7 @@
 package eras
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -108,6 +109,64 @@ func TestValidateTxByron_ValidTransaction(t *testing.T) {
 	}
 	err := ValidateTxByron(tx, 0, nil, nil)
 	assert.NoError(t, err)
+}
+
+func TestValidateTxByron_MainnetRedeemWitness(t *testing.T) {
+	// This is the transaction that failed at Mainnet slot 3313. Its witness
+	// is a constructor-2 redeem witness with the [vkey, signature] payload
+	// wrapped in CBOR tag 24.
+	txCbor, err := hex.DecodeString(
+		"82839f8200d8185824825820a12a839c25a01fa5d118167db5acdbd9e38172ae8f00e5ac0a4997ef792a200700ff9f8282d818584283581c6c9982e7f2b6dcc5eaa880e8014568913c8868d9f0f86eb687b2633ca101581e581c010d876783fb2b4d0d17c86df29af8d35356ed3d1827bf4744f06700001a8dc672c11a000f4240ffa0818202d81858658258208c0bdedfbbab26a1308300512ffb1b220f068ee13f7612afb076c22de3fb764158406cc41635a9794234966629ccfa2a5b089a20ae392f0e92154ff97eda30ff7a082a65fc4b362c24cf58c27f30103b1f1345e15479cf4b80cd4134c0f9dca83109",
+	)
+	require.NoError(t, err)
+	redeemTx, err := byron.NewByronTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+	// v0.193.3 does not expose the tag-24-wrapped constructor-2 witness
+	// through TransactionWitnessSet; the ledger must retain and validate it
+	// from the raw Byron witness values.
+	assert.Empty(t, redeemTx.Witnesses().Vkey())
+
+	producerOutputCbor, err := hex.DecodeString(
+		"82582b82d818582183581c4041adf6b03851a9c85db3f028995504fb4ba48b50703ab1b9841350a0021ad658e71f1a000f4240",
+	)
+	require.NoError(t, err)
+	producerOutput, err := byron.NewByronTransactionOutputFromCbor(
+		producerOutputCbor,
+	)
+	require.NoError(t, err)
+
+	ls := newMockLedgerState()
+	ls.networkId = lcommon.AddressNetworkMainnet
+	ls.protocolMagic = byron.MainnetProtocolMagic
+	ls.addUtxo(redeemTx.Inputs()[0], producerOutput)
+	assert.NoError(t, ValidateTxByron(redeemTx, 3313, ls, nil))
+}
+
+func TestValidateTxByron_MainnetBootstrapWitness(t *testing.T) {
+	// This is the transaction immediately after the redeem-witness regression
+	// above. Its constructor-0 witness is a tag-24-wrapped [extended public
+	// key, signature] pair, which older gouroboros releases do not expose.
+	txCbor, err := hex.DecodeString(
+		"82839f8200d81858248258206497b33b10fa2619c6efbd9f874ecd1c91badb10bf70850732aab45b90524d9e00ff9f8282d818584283581c37f1f51e41efe8713f9755e78bb61af0bb822af6fb31788dba18e27ba101581e581c010d876783fb2b59f088db6d41359ae0a3868a0e411b4dde5713f870001a570841701a000b20128282d818584283581c5d4704fc22524e98ea5b9580ab2a29396b8ad2a92764d08ce23ea1e5a101581e581cd2c9d85d9e2ce454557363216e45b9f015e9b5c2617f0294ac5bc2d0001ae8c1444d1a000186a0ffa0818200d818588582584042a2100a4bce0f08ed211f980d7a848915fd48953be80b4b4fb3a9bbf8aea206cc8a84c83896f3d716fe0fc6ae8d5ae5554109c1fff5b6ca6c53cc74741dcad25840c26a80389d8bee813ed786d4cf395bbc304f43bef1b75eb5f989e915451cbe5610f8bf7dc843392070e4a470ebb7614da37f78c8a879da8eb0fc2f7f8ffd0107",
+	)
+	require.NoError(t, err)
+	bootstrapTx, err := byron.NewByronTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+
+	inputAddress, err := lcommon.NewAddress(
+		"DdzFFzCqrhsszHTvbjTmYje5hehGbadkT6WgWbaqCy5XNxNttsPNF13eAjjBHYT7JaLJz2XVxiucam1EvwBRPSTiCrT4TNCBas4hfzic",
+	)
+	require.NoError(t, err)
+	input := byron.ByronTransactionOutput{
+		OutputAddress: inputAddress,
+		OutputAmount:  3_000_000_000,
+	}
+
+	ls := newMockLedgerState()
+	ls.networkId = lcommon.AddressNetworkMainnet
+	ls.protocolMagic = byron.MainnetProtocolMagic
+	ls.addUtxo(bootstrapTx.Inputs()[0], input)
+	assert.NoError(t, ValidateTxByron(bootstrapTx, 3336, ls, nil))
 }
 
 func TestValidateTxByron_ValidMultipleInputsOutputs(
@@ -300,8 +359,12 @@ var errUtxoNotFound = errors.New("UTxO not found")
 type mockLedgerState struct {
 	utxos                map[string]lcommon.Utxo
 	networkId            uint
+	protocolMagic        uint32
 	skipPhase2Validation bool
 	utxoLookups          int
+	// slotToTime, when set, replaces the zero-time default so a test can
+	// supply a real network's slot-to-time mapping.
+	slotToTime func(uint64) (time.Time, error)
 }
 
 func newMockLedgerState() *mockLedgerState {
@@ -335,6 +398,10 @@ func (m *mockLedgerState) UtxoById(
 
 func (m *mockLedgerState) NetworkId() uint { return m.networkId }
 
+func (m *mockLedgerState) ByronProtocolMagic() (uint32, error) {
+	return m.protocolMagic, nil
+}
+
 func (m *mockLedgerState) SkipPhase2Validation() bool {
 	return m.skipPhase2Validation
 }
@@ -355,8 +422,11 @@ func (m *mockLedgerState) IsStakeCredentialRegistered(
 }
 
 func (m *mockLedgerState) SlotToTime(
-	_ uint64,
+	slot uint64,
 ) (time.Time, error) {
+	if m.slotToTime != nil {
+		return m.slotToTime(slot)
+	}
 	return time.Time{}, nil
 }
 

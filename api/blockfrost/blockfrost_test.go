@@ -93,6 +93,8 @@ type mockNode struct {
 	metadataCBOR                  []MetadataTransactionCBORInfo
 	transaction                   TransactionInfo
 	transactionSubmitHash         string
+	transactionEvaluation         TransactionEvaluationResponse
+	transactionEvaluateCbor       []byte
 	transactionCBOR               []byte
 	transactionMetadata           []TransactionMetadataInfo
 	transactionMetadataCBOR       []TransactionMetadataCBORInfo
@@ -143,6 +145,7 @@ type mockNode struct {
 	metadataCBORErr               error
 	transactionErr                error
 	transactionSubmitErr          error
+	transactionEvaluationErr      error
 	transactionCBORErr            error
 	transactionMetadataErr        error
 	transactionMetadataCBORErr    error
@@ -332,6 +335,13 @@ func (m *mockNode) TransactionSubmit(
 	_ []byte,
 ) (string, error) {
 	return m.transactionSubmitHash, m.transactionSubmitErr
+}
+
+func (m *mockNode) TransactionEvaluate(
+	txCbor []byte,
+) (TransactionEvaluationResponse, error) {
+	m.transactionEvaluateCbor = txCbor
+	return m.transactionEvaluation, m.transactionEvaluationErr
 }
 
 func (m *mockNode) TransactionCBOR(
@@ -563,9 +573,7 @@ func TestStartStop(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify server is running
-	b.mu.Lock()
-	assert.NotNil(t, b.httpServer)
-	b.mu.Unlock()
+	assert.NotNil(t, b.listener.Server())
 
 	// Stop the server
 	stopCtx, stopCancel := context.WithTimeout(
@@ -577,9 +585,7 @@ func TestStartStop(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify server is stopped
-	b.mu.Lock()
-	assert.Nil(t, b.httpServer)
-	b.mu.Unlock()
+	assert.Nil(t, b.listener.Server())
 }
 
 func TestStartAlreadyStarted(t *testing.T) {
@@ -3272,8 +3278,11 @@ func TestNodeAdapterAddressRejectsInvalidInput(t *testing.T) {
 		)
 		require.True(t, strings.HasPrefix(err.Error(), prefix),
 			"unexpected wrapper shape: %s", err)
-		assert.NotEmpty(t, strings.TrimSpace(strings.TrimPrefix(err.Error(), prefix)),
-			"the underlying parse error is retained, not discarded")
+		assert.NotEmpty(
+			t,
+			strings.TrimSpace(strings.TrimPrefix(err.Error(), prefix)),
+			"the underlying parse error is retained, not discarded",
+		)
 	})
 
 	t.Run("this network resolves to not found", func(t *testing.T) {

@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -50,11 +51,13 @@ type Config struct {
 	CooldownMin int
 	CooldownMax int
 
-	// ConfirmationSlots is reserved for future use. The payment flow currently
-	// returns outputs to the wallet immediately after submission (0 = immediate
-	// spend is intentional). Any non-zero value set via TXPUMP_CONFIRMATION_SLOTS
-	// is accepted but has no effect.
+	// ConfirmationSlots is the number of slots newly submitted outputs remain
+	// unavailable for coin selection. Zero permits immediate chained spending.
 	ConfirmationSlots uint64
+
+	// SlotLength is the wall-clock duration of one network slot. It is loaded
+	// from the genesis file and used with ConfirmationSlots.
+	SlotLength time.Duration
 
 	// Types is the set of transaction types to generate.
 	// Recognised values: "payment", "delegation", "governance", "plutus".
@@ -112,6 +115,7 @@ func LoadConfig() (*Config, error) {
 		CooldownMin:       500,
 		CooldownMax:       2000,
 		ConfirmationSlots: 30,
+		SlotLength:        time.Second,
 		Types: []string{
 			"payment",
 			"delegation",
@@ -217,11 +221,13 @@ func LoadConfig() (*Config, error) {
 			return nil, fmt.Errorf("TXPUMP_GENESIS_FILE: %w", loadErr)
 		}
 		if gcfg.EpochLength == 0 {
-			return nil, fmt.Errorf(
-				"TXPUMP_GENESIS_FILE: genesis has epochLength=0, which is invalid",
+			return nil, errors.New(
+				"TXPUMP_GENESIS_FILE: genesis has epochLength=0, " +
+					"which is invalid",
 			)
 		}
 		cfg.EpochLength = gcfg.EpochLength
+		cfg.SlotLength = time.Duration(gcfg.SlotLength * float64(time.Second))
 		cfg.SystemStartUnix = gcfg.SystemStartUnix
 		if os.Getenv("TXPUMP_NETWORK_MAGIC") == "" {
 			cfg.NetworkMagic = gcfg.NetworkMagic
@@ -233,6 +239,18 @@ func LoadConfig() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func (c *Config) confirmationDelay() time.Duration {
+	if c.ConfirmationSlots == 0 || c.SlotLength <= 0 {
+		return 0
+	}
+	slotNanos := uint64(c.SlotLength)
+	if c.ConfirmationSlots > uint64(math.MaxInt64)/slotNanos {
+		return time.Duration(math.MaxInt64)
+	}
+	// The guard above bounds the product at math.MaxInt64.
+	return time.Duration(c.ConfirmationSlots * slotNanos) //nolint:gosec
 }
 
 func parseStartupTimeout(value string) (time.Duration, error) {
@@ -291,14 +309,12 @@ func (c *Config) validate() error {
 		if _, err := decodeConfiguredHash(
 			"TXPUMP_DELEGATION_STAKE_KEY_HASH",
 			c.DelegationStakeKeyHash,
-			28,
 		); err != nil {
 			return err
 		}
 		if _, err := decodeConfiguredHash(
 			"TXPUMP_DELEGATION_POOL_KEY_HASH",
 			c.DelegationPoolKeyHash,
-			28,
 		); err != nil {
 			return err
 		}
@@ -335,19 +351,22 @@ func splitComma(s string) []string {
 	return out
 }
 
+// credentialHashLen is the length of a Cardano credential hash
+// (Blake2b-224), which is what every configured stake and pool key hash is.
+const credentialHashLen = 28
+
 func decodeConfiguredHash(
 	name string,
 	value string,
-	expectedLen int,
 ) ([]byte, error) {
 	decoded, err := hex.DecodeString(value)
 	if err != nil {
 		return nil, fmt.Errorf("%s: invalid hex %q: %w", name, value, err)
 	}
-	if len(decoded) != expectedLen {
+	if len(decoded) != credentialHashLen {
 		return nil, fmt.Errorf(
 			"%s: expected %d bytes, got %d",
-			name, expectedLen, len(decoded),
+			name, credentialHashLen, len(decoded),
 		)
 	}
 	return decoded, nil

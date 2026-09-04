@@ -161,13 +161,13 @@ func TestLeiosBackfillConnOrderPreservesRotation(t *testing.T) {
 // must not change the connection's cooldown state.
 func TestFetchEndorserBlockOnConnSkipsBusyConnection(t *testing.T) {
 	t.Parallel()
-	o := NewOuroboros(OuroborosConfig{})
+	o := newOuroboros(OuroborosConfig{})
 	connId := namedConnId("busy")
 	point := ocommon.Point{Slot: 100, Hash: []byte{0x03}}
 	// Keep the failure path safe: if a regression blocks until the test releases
 	// the guard, the awakened fetch can finish from this empty cached block
 	// without dereferencing the nil client below.
-	o.leiosEndorserBlocks[leiosBlockKey(point.Hash)] = &leiosEndorserBlockData{
+	o.leiosEndorserBlocks[leiosBlockKey(point.Slot, point.Hash)] = &leiosEndorserBlockData{
 		point:      point,
 		txCount:    0,
 		insertedAt: time.Now(),
@@ -210,6 +210,7 @@ func TestFetchLeiosEbTxsBatchedUntilPastDeadline(t *testing.T) {
 		requester,
 		point,
 		200,
+		nil,
 		time.Now().Add(-time.Second),
 	)
 	require.Error(t, err)
@@ -291,6 +292,7 @@ func TestFetchLeiosEbTxsBatchedUntilAbandonsSlowRelay(t *testing.T) {
 		requester,
 		point,
 		txCount,
+		nil,
 		time.Now().Add(60*time.Millisecond),
 	)
 	require.Error(t, err)
@@ -318,6 +320,7 @@ func TestFetchLeiosEbTxsBatchedNoDeadlineStillCompletes(t *testing.T) {
 		&cappingBlockTxsRequester{maxPerResp: 50, includeBitmaps: true},
 		point,
 		200,
+		nil,
 		time.Time{}, // zero deadline: no per-attempt bound
 	)
 	require.NoError(t, err)

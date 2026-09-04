@@ -216,28 +216,57 @@ func TestComparePoolEpochFixedCostAndMargin(t *testing.T) {
 	}
 	require.Empty(
 		t,
-		ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{}),
+		ComparePoolEpoch(
+			"preview",
+			5,
+			koios,
+			dingo,
+			now,
+			0,
+			time.Time{},
+			false,
+		),
 	)
 
 	dingo.FixedCost = "340000001"
-	ms := ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{})
+	ms := ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		dingo,
+		now,
+		0,
+		time.Time{},
+		false,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "fixed_cost", ms[0].Field)
 
 	dingo.FixedCost = "340000000"
 	dingo.Margin = "1/5"
-	ms = ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{})
+	ms = ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		dingo,
+		now,
+		0,
+		time.Time{},
+		false,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "margin", ms[0].Field)
 }
 
 // TestComparePoolEpochEmptyDingoSideIsFlagged guards against reintroducing an
-// asymmetry between the fixed_cost and margin guards: once ParamsPresent is
-// true (the reward_pool_input row at the param epoch genuinely exists — the
-// "not ready yet" case is already handled by the outer ParamsPresent check),
+// asymmetry between the fixed_cost and margin guards: once StakePresent is
+// true (the reward_pool_input row at the stake epoch genuinely exists — the
+// "not ready yet" case is already handled by the outer StakePresent check),
 // an unexpectedly empty dingoPool.FixedCost/Margin means a corrupted/partial
 // row, not a legitimate skip condition, and must be reported as a
 // value_mismatch like any other divergence rather than silently passed over.
+// Both fields are read at the stake epoch (dingo #3484), so StakePresent, not
+// ParamsPresent, is the flag that governs them.
 func TestComparePoolEpochEmptyDingoSideIsFlagged(t *testing.T) {
 	now := time.Now()
 	koios := &KoiosPoolEpoch{
@@ -260,14 +289,32 @@ func TestComparePoolEpochEmptyDingoSideIsFlagged(t *testing.T) {
 
 	dingo := *baseline
 	dingo.FixedCost = ""
-	ms := ComparePoolEpoch("preview", 5, koios, &dingo, now, 0, time.Time{})
+	ms := ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		&dingo,
+		now,
+		0,
+		time.Time{},
+		false,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "fixed_cost", ms[0].Field)
 	require.Equal(t, CategoryValueMismatch, ms[0].Category)
 
 	dingo = *baseline
 	dingo.Margin = ""
-	ms = ComparePoolEpoch("preview", 5, koios, &dingo, now, 0, time.Time{})
+	ms = ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		&dingo,
+		now,
+		0,
+		time.Time{},
+		false,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "margin", ms[0].Field)
 	require.Equal(t, CategoryValueMismatch, ms[0].Category)
@@ -289,15 +336,29 @@ func TestComparePoolEpochParamsNotPresent(t *testing.T) {
 		FixedCost:   "340000000",
 		Margin:      "0.1",
 	}
+	// FixedCost/Margin are stake-epoch fields (dingo #3484), so they are
+	// present here and match Koios: the only thing missing is the
+	// param-epoch row, and blocks_produced is the only field it still owns.
 	dingo := &DingoPoolEpochData{
 		StakePresent:   true,
 		DelegatedStake: "1000",
 		DelegatorCount: 3,
+		FixedCost:      "340000000",
+		Margin:         "1/10",
 		ParamsPresent:  false,
 	}
 
 	// Historical (outside grace, or no grace configured): dingo_db_missing.
-	ms := ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{})
+	ms := ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		dingo,
+		now,
+		0,
+		time.Time{},
+		false,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "reward_pool_input_params", ms[0].Field)
 	require.Equal(t, CategoryDBMissing, ms[0].Category)
@@ -305,7 +366,16 @@ func TestComparePoolEpochParamsNotPresent(t *testing.T) {
 
 	// Recent (epoch closed within the grace window): reference_lag, not PASS.
 	recentClose := now.Add(-time.Hour)
-	ms = ComparePoolEpoch("preview", 5, koios, dingo, now, 24, recentClose)
+	ms = ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		dingo,
+		now,
+		24,
+		recentClose,
+		false,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "reward_pool_input_params", ms[0].Field)
 	require.Equal(t, CategoryReferenceLag, ms[0].Category)
@@ -340,7 +410,16 @@ func TestComparePoolEpochStakeNotPresent(t *testing.T) {
 
 	// Historical (outside grace, or no grace configured): dingo_db_missing,
 	// never a value_mismatch against the zero-value stub.
-	ms := ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{})
+	ms := ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		dingo,
+		now,
+		0,
+		time.Time{},
+		false,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "reward_pool_input_stake", ms[0].Field)
 	require.Equal(t, CategoryDBMissing, ms[0].Category)
@@ -352,7 +431,16 @@ func TestComparePoolEpochStakeNotPresent(t *testing.T) {
 	// Recent (epoch closed within the grace window): reference_lag, not PASS
 	// and not a value_mismatch.
 	recentClose := now.Add(-time.Hour)
-	ms = ComparePoolEpoch("preview", 5, koios, dingo, now, 24, recentClose)
+	ms = ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		dingo,
+		now,
+		24,
+		recentClose,
+		false,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "reward_pool_input_stake", ms[0].Field)
 	require.Equal(t, CategoryReferenceLag, ms[0].Category)
@@ -383,7 +471,16 @@ func TestComparePoolEpochMemberRewards(t *testing.T) {
 	}
 	require.Empty(
 		t,
-		ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{}),
+		ComparePoolEpoch(
+			"preview",
+			5,
+			koios,
+			dingo,
+			now,
+			0,
+			time.Time{},
+			false,
+		),
 	)
 
 	// Reward calculation not yet finished for this pool/epoch: Dingo has no
@@ -392,7 +489,16 @@ func TestComparePoolEpochMemberRewards(t *testing.T) {
 	// (reference_lag) vs historical (dingo_db_missing) split this guards.
 	dingo.MemberRewardPresent = false
 	dingo.MemberRewardTotal = ""
-	ms := ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{})
+	ms := ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		dingo,
+		now,
+		0,
+		time.Time{},
+		false,
+	)
 	require.Len(
 		t,
 		ms,
@@ -405,7 +511,16 @@ func TestComparePoolEpochMemberRewards(t *testing.T) {
 	dingo.MemberRewardPresent = true
 
 	dingo.MemberRewardTotal = "1"
-	ms = ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{})
+	ms = ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		dingo,
+		now,
+		0,
+		time.Time{},
+		false,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "member_rewards", ms[0].Field)
 	require.Equal(t, CategoryValueMismatch, ms[0].Category)
@@ -437,7 +552,16 @@ func TestComparePoolEpochMemberRewardsNotPresent(t *testing.T) {
 
 	// Historical: outside the grace window (or no grace configured) — a
 	// genuine gap in Dingo's own computation.
-	ms := ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{})
+	ms := ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		dingo,
+		now,
+		0,
+		time.Time{},
+		false,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "member_rewards", ms[0].Field)
 	require.Equal(t, CategoryDBMissing, ms[0].Category)
@@ -446,9 +570,428 @@ func TestComparePoolEpochMemberRewardsNotPresent(t *testing.T) {
 	// Recent: epoch closed within the grace window — may simply not be
 	// computed yet, but still not a pass.
 	recentClose := now.Add(-time.Hour)
-	ms = ComparePoolEpoch("preview", 5, koios, dingo, now, 24, recentClose)
+	ms = ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		dingo,
+		now,
+		24,
+		recentClose,
+		false,
+	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "member_rewards", ms[0].Field)
 	require.Equal(t, CategoryReferenceLag, ms[0].Category)
 	require.NotEqual(t, StatusPass, DetermineStatus(ms))
+}
+
+func TestCompareAccountEpochExactMatch(t *testing.T) {
+	now := time.Now()
+	koios := []KoiosAccountRewards{
+		{StakeAddress: "stake1a", RewardType: "member", Earned: "1000000"},
+	}
+	dingo := []DingoAccountReward{
+		{StakeAddress: "stake1a", RewardType: "member", Amount: "1000000"},
+	}
+	ms := CompareAccountEpoch("preview", 100, koios, dingo, now, 0, time.Time{})
+	require.Empty(t, ms)
+	require.Equal(t, StatusPass, DetermineStatus(ms))
+}
+
+func TestCompareAccountEpochZeroRewardBothSidesPasses(t *testing.T) {
+	now := time.Now()
+	koios := []KoiosAccountRewards{
+		{StakeAddress: "stake1a", RewardType: "member", Earned: "0"},
+	}
+	dingo := []DingoAccountReward{
+		{StakeAddress: "stake1a", RewardType: "member", Amount: "0"},
+	}
+	ms := CompareAccountEpoch("preview", 100, koios, dingo, now, 0, time.Time{})
+	require.Empty(t, ms)
+}
+
+func TestCompareAccountEpochMissingFromDingo(t *testing.T) {
+	now := time.Now()
+	koios := []KoiosAccountRewards{
+		{StakeAddress: "stake1a", RewardType: "member", Earned: "1000000"},
+	}
+	ms := CompareAccountEpoch("preview", 100, koios, nil, now, 0, time.Time{})
+	require.Len(t, ms, 1)
+	require.Equal(t, CategoryAcctOnlyKoios, ms[0].Category)
+	require.Equal(t, "stake1a", ms[0].StakeAddress)
+	require.NotEqual(t, StatusPass, DetermineStatus(ms))
+}
+
+func TestCompareAccountEpochMissingFromKoios(t *testing.T) {
+	now := time.Now()
+	dingo := []DingoAccountReward{
+		{StakeAddress: "stake1a", RewardType: "member", Amount: "1000000"},
+	}
+	ms := CompareAccountEpoch("preview", 100, nil, dingo, now, 0, time.Time{})
+	require.Len(t, ms, 1)
+	require.Equal(t, CategoryAcctOnlyDingo, ms[0].Category)
+	require.Equal(t, StatusFail, DetermineStatus(ms))
+}
+
+func TestCompareAccountEpochMissingFromDingoWithinGraceIsReferenceLag(
+	t *testing.T,
+) {
+	now := time.Now()
+	koios := []KoiosAccountRewards{
+		{StakeAddress: "stake1a", RewardType: "member", Earned: "1000000"},
+	}
+	recentClose := now.Add(-time.Hour)
+	ms := CompareAccountEpoch("preview", 100, koios, nil, now, 24, recentClose)
+	require.Len(t, ms, 1)
+	require.Equal(t, CategoryReferenceLag, ms[0].Category)
+	require.Equal(t, StatusError, DetermineStatus(ms))
+}
+
+// TestCompareAccountEpochMissingFromKoiosWithinGraceIsReferenceLag mirrors
+// TestCompareAccountEpochMissingFromDingoWithinGraceIsReferenceLag for the
+// symmetric direction: an account Dingo has already committed a reward for,
+// but that Koios hasn't published /account_reward_history for yet, within
+// graceHours of epochEndTime, must be reported as CategoryReferenceLag
+// (StatusError) rather than CategoryAcctOnlyDingo (StatusFail) — Koios can
+// lag in publishing account rewards for a just-closed epoch the same way it
+// can lag on any other endpoint.
+func TestCompareAccountEpochMissingFromKoiosWithinGraceIsReferenceLag(
+	t *testing.T,
+) {
+	now := time.Now()
+	dingo := []DingoAccountReward{
+		{StakeAddress: "stake1a", RewardType: "member", Amount: "1000000"},
+	}
+	recentClose := now.Add(-time.Hour)
+	ms := CompareAccountEpoch("preview", 100, nil, dingo, now, 24, recentClose)
+	require.Len(t, ms, 1)
+	require.Equal(t, CategoryReferenceLag, ms[0].Category)
+	require.Equal(t, StatusError, DetermineStatus(ms))
+}
+
+func TestCompareAccountEpochDuplicateInKoios(t *testing.T) {
+	now := time.Now()
+	koios := []KoiosAccountRewards{
+		{StakeAddress: "stake1a", RewardType: "member", Earned: "1000000"},
+		{StakeAddress: "stake1a", RewardType: "member", Earned: "1000000"},
+	}
+	dingo := []DingoAccountReward{
+		{StakeAddress: "stake1a", RewardType: "member", Amount: "1000000"},
+	}
+	ms := CompareAccountEpoch("preview", 100, koios, dingo, now, 0, time.Time{})
+	require.Len(t, ms, 1)
+	require.Equal(t, CategoryAcctDuplicate, ms[0].Category)
+	require.Equal(t, StatusFail, DetermineStatus(ms))
+}
+
+func TestCompareAccountEpochDuplicateInDingo(t *testing.T) {
+	now := time.Now()
+	koios := []KoiosAccountRewards{
+		{StakeAddress: "stake1a", RewardType: "member", Earned: "1000000"},
+	}
+	dingo := []DingoAccountReward{
+		{StakeAddress: "stake1a", RewardType: "member", Amount: "1000000"},
+		{StakeAddress: "stake1a", RewardType: "member", Amount: "1000000"},
+	}
+	ms := CompareAccountEpoch("preview", 100, koios, dingo, now, 0, time.Time{})
+	require.Len(t, ms, 1)
+	require.Equal(t, CategoryAcctDuplicate, ms[0].Category)
+	require.Equal(t, StatusFail, DetermineStatus(ms))
+}
+
+// TestCompareAccountEpochMemberAndLeaderIndependent proves an account with
+// both a member and a leader row in the same epoch (a pool owner delegating
+// to their own pool) is checked independently per reward type, not merged or
+// summed — a mismatch on one type must not be masked by a match on the other.
+func TestCompareAccountEpochMemberAndLeaderIndependent(t *testing.T) {
+	now := time.Now()
+	koios := []KoiosAccountRewards{
+		{StakeAddress: "stake1owner", RewardType: "member", Earned: "1000000"},
+		{StakeAddress: "stake1owner", RewardType: "leader", Earned: "5000000"},
+	}
+	dingo := []DingoAccountReward{
+		{StakeAddress: "stake1owner", RewardType: "member", Amount: "1000000"},
+		// Leader amount differs by 1 lovelace.
+		{StakeAddress: "stake1owner", RewardType: "leader", Amount: "5000001"},
+	}
+	ms := CompareAccountEpoch("preview", 100, koios, dingo, now, 0, time.Time{})
+	require.Len(t, ms, 1)
+	require.Equal(t, CategoryValueMismatch, ms[0].Category)
+	require.Equal(t, "5000001", ms[0].DingoValue)
+	require.Equal(t, "5000000", ms[0].KoiosValue)
+}
+
+// TestCompareAccountEpochAmountMismatchByOneLovelace proves no tolerance:
+// even a 1-lovelace difference is a real mismatch.
+func TestCompareAccountEpochAmountMismatchByOneLovelace(t *testing.T) {
+	now := time.Now()
+	koios := []KoiosAccountRewards{
+		{StakeAddress: "stake1a", RewardType: "member", Earned: "1000000"},
+	}
+	dingo := []DingoAccountReward{
+		{StakeAddress: "stake1a", RewardType: "member", Amount: "1000001"},
+	}
+	ms := CompareAccountEpoch("preview", 100, koios, dingo, now, 0, time.Time{})
+	require.Len(t, ms, 1)
+	require.Equal(t, CategoryValueMismatch, ms[0].Category)
+	require.Equal(t, "account_reward_amount", ms[0].Field)
+}
+
+// TestCompareAccountEpochOutOfScopeRewardTypesFiltered proves treasury/
+// reserves/refund Koios reward rows never surface as acct_only_koios, since
+// Dingo's reward_account_output does not currently produce those types.
+func TestCompareAccountEpochOutOfScopeRewardTypesFiltered(t *testing.T) {
+	now := time.Now()
+	koios := []KoiosAccountRewards{
+		{StakeAddress: "stake1a", RewardType: "treasury", Earned: "1000000"},
+		{StakeAddress: "stake1a", RewardType: "reserves", Earned: "1000000"},
+		{StakeAddress: "stake1a", RewardType: "refund", Earned: "1000000"},
+	}
+	ms := CompareAccountEpoch("preview", 100, koios, nil, now, 0, time.Time{})
+	require.Empty(t, ms)
+}
+
+func TestLovelaceEqual(t *testing.T) {
+	require.True(t, lovelaceEqual("1000000", "1000000"))
+	require.True(t, lovelaceEqual("0", "0"))
+	require.False(t, lovelaceEqual("1000000", "1000001"))
+	require.False(t, lovelaceEqual("not-a-number", "1000000"))
+	require.False(t, lovelaceEqual("1000000", "not-a-number"))
+
+	// Numerically equal but textually different (leading zeros) must go
+	// through the big.Int Cmp() path, not a string-equality short-circuit —
+	// exercises the branch every other "equal" case above skips since they
+	// use byte-identical strings.
+	require.True(t, lovelaceEqual("01000000", "1000000"))
+	require.True(t, lovelaceEqual("0", "00"))
+
+	// A malformed or negative value must never compare equal to itself:
+	// lovelace amounts are never negative, and an identical-string fast
+	// path would otherwise report two invalid values as "equal" without
+	// ever validating them.
+	require.False(t, lovelaceEqual("not-a-number", "not-a-number"))
+	require.False(t, lovelaceEqual("-5", "-5"))
+	require.False(t, lovelaceEqual("-5", "5"))
+}
+
+// TestComparePoolEpochDepartedPoolIsInformational covers a pool that was in
+// epoch K's stake basis but is absent from the committed K+1 snapshot: it left
+// the pool set.
+//
+// blocks_produced for epoch K lives on the K+1 reward_pool_input row, which
+// therefore never exists, so that one field cannot be compared. Both sides
+// agree the pool departed — Koios has no pool_history row at K+1's reporting
+// epoch either — so this is a documented gap in coverage, not a divergence,
+// and it must not escalate to ERROR and halt a strict-mode node (dingo #3485).
+func TestComparePoolEpochDepartedPoolIsInformational(t *testing.T) {
+	now := time.Now()
+	koios := &KoiosPoolEpoch{
+		PoolBech32:  "pool1test",
+		ActiveStake: "1000",
+		BlockCnt:    15,
+		Delegators:  3,
+		FixedCost:   "340000000",
+		Margin:      "0.1",
+	}
+	dingo := &DingoPoolEpochData{
+		StakePresent:   true,
+		DelegatedStake: "1000",
+		DelegatorCount: 3,
+		FixedCost:      "340000000",
+		Margin:         "1/10",
+		ParamsPresent:  false,
+	}
+
+	// The K+1 snapshot is committed, so the absent row means the pool left
+	// the set rather than the snapshot being unwritten.
+	ms := ComparePoolEpoch(
+		"preview",
+		5,
+		koios,
+		dingo,
+		now,
+		0,
+		time.Time{},
+		true,
+	)
+	require.Len(t, ms, 1)
+	require.Equal(t, "reward_pool_input_params", ms[0].Field)
+	require.Equal(t, CategoryPoolDeparted, ms[0].Category)
+	require.Equal(
+		t,
+		StatusPass,
+		DetermineStatus(ms),
+		"a departed pool must not fail or error the epoch",
+	)
+
+	// Same shape inside the grace window: still a departure, not lag.
+	ms = ComparePoolEpoch(
+		"preview", 5, koios, dingo, now, 24, now.Add(-time.Hour), true,
+	)
+	require.Len(t, ms, 1)
+	require.Equal(t, CategoryPoolDeparted, ms[0].Category)
+	require.Equal(t, StatusPass, DetermineStatus(ms))
+}
+
+// TestComparePoolEpochUncapturedParamEpochStillErrors is the negative case: an
+// absent K+1 row with no committed K+1 snapshot is a genuine gap in Dingo's
+// own computation and must keep escalating, so the departure classification
+// cannot be widened into suppressing real missing data.
+func TestComparePoolEpochUncapturedParamEpochStillErrors(t *testing.T) {
+	now := time.Now()
+	koios := &KoiosPoolEpoch{
+		PoolBech32:  "pool1test",
+		ActiveStake: "1000",
+		BlockCnt:    15,
+		Delegators:  3,
+		FixedCost:   "340000000",
+		Margin:      "0.1",
+	}
+	dingo := &DingoPoolEpochData{
+		StakePresent:   true,
+		DelegatedStake: "1000",
+		DelegatorCount: 3,
+		FixedCost:      "340000000",
+		Margin:         "1/10",
+		ParamsPresent:  false,
+	}
+
+	ms := ComparePoolEpoch(
+		"preview", 5, koios, dingo, now, 0, time.Time{}, false,
+	)
+	require.Len(t, ms, 1)
+	require.Equal(t, CategoryDBMissing, ms[0].Category)
+	require.Equal(t, StatusError, DetermineStatus(ms))
+}
+
+// TestComparePoolEpochDepartedRequiresStakeEpochRow proves the departure
+// classification is anchored to the pool actually having been in epoch K's
+// stake basis. A pool absent from both reads is not a departure and keeps its
+// existing treatment.
+func TestComparePoolEpochDepartedRequiresStakeEpochRow(t *testing.T) {
+	now := time.Now()
+	koios := &KoiosPoolEpoch{
+		PoolBech32:  "pool1test",
+		ActiveStake: "1000",
+		BlockCnt:    15,
+		Delegators:  3,
+	}
+	dingo := &DingoPoolEpochData{
+		StakePresent:  false,
+		ParamsPresent: false,
+	}
+
+	ms := ComparePoolEpoch(
+		"preview", 5, koios, dingo, now, 0, time.Time{}, true,
+	)
+	for _, m := range ms {
+		require.NotEqual(
+			t,
+			CategoryPoolDeparted,
+			m.Category,
+			"a pool with no stake-epoch row never departed epoch 5's basis",
+		)
+	}
+	require.Equal(t, StatusError, DetermineStatus(ms))
+}
+
+// TestComparePoolEpochMemberRewardsExcludesUnspendable pins the quantity
+// member_rewards is compared on. Koios reports the rewards members actually
+// received; reward_pool_output.member_reward_total sums every member reward the
+// calculation produced, spendable or not. A pool with an unspendable member
+// reward — one computed for a credential the ledger correctly never credits —
+// used to fail against a node that was right (dingo #3797).
+func TestComparePoolEpochMemberRewardsExcludesUnspendable(t *testing.T) {
+	now := time.Now()
+	koios := &KoiosPoolEpoch{
+		PoolBech32:    "pool1test",
+		ActiveStake:   "1000",
+		BlockCnt:      2,
+		Delegators:    3,
+		FixedCost:     "340000000",
+		Margin:        "0.1",
+		MemberRewards: "327005332",
+	}
+	// The shape observed on Preview epoch 18: six spendable member rewards
+	// summing to Koios's figure, plus one unspendable 71328 the pool total
+	// still carries.
+	dingo := &DingoPoolEpochData{
+		StakePresent:                 true,
+		DelegatedStake:               "1000",
+		ParamsPresent:                true,
+		BlocksProduced:               2,
+		DelegatorCount:               3,
+		FixedCost:                    "340000000",
+		Margin:                       "1/10",
+		MemberRewardPresent:          true,
+		MemberRewardTotal:            "327076660",
+		SpendableMemberRewardPresent: true,
+		SpendableMemberRewardTotal:   "327005332",
+	}
+	require.Empty(t, ComparePoolEpoch(
+		"preview", 5, koios, dingo, now, 0, time.Time{}, false,
+	), "an unspendable member reward is not a divergence")
+
+	// A real disagreement in the spendable sum still fails, and reports the
+	// spendable figure rather than the pool total.
+	dingo.SpendableMemberRewardTotal = "327005333"
+	ms := ComparePoolEpoch(
+		"preview", 5, koios, dingo, now, 0, time.Time{}, false,
+	)
+	require.Len(t, ms, 1)
+	require.Equal(t, "member_rewards", ms[0].Field)
+	require.Equal(t, CategoryValueMismatch, ms[0].Category)
+	require.Equal(t, "327005333", ms[0].DingoValue)
+}
+
+// TestComparePoolEpochMemberRewardsWithoutAccountOutputs covers a node whose
+// reward_account_output rows for the epoch are gone — cleanupOldSnapshots
+// retains them without bound only in api storage mode.
+//
+// Falling back to reward_pool_output.member_reward_total is sound exactly when
+// the row says nothing was withheld, because the pool's member total is then
+// its spendable member total by construction. When something was withheld the
+// two provably differ, so the field is reported as a missing row rather than
+// compared on a basis that would fail a correct ledger.
+func TestComparePoolEpochMemberRewardsWithoutAccountOutputs(t *testing.T) {
+	now := time.Now()
+	koios := &KoiosPoolEpoch{
+		PoolBech32:    "pool1test",
+		ActiveStake:   "1000",
+		BlockCnt:      2,
+		Delegators:    3,
+		FixedCost:     "340000000",
+		Margin:        "0.1",
+		MemberRewards: "327005332",
+	}
+	dingo := &DingoPoolEpochData{
+		StakePresent:                 true,
+		DelegatedStake:               "1000",
+		ParamsPresent:                true,
+		BlocksProduced:               2,
+		DelegatorCount:               3,
+		FixedCost:                    "340000000",
+		Margin:                       "1/10",
+		MemberRewardPresent:          true,
+		MemberRewardTotal:            "327005332",
+		SpendableMemberRewardPresent: false,
+		PoolUnspendable:              0,
+	}
+	require.Empty(t, ComparePoolEpoch(
+		"preview", 5, koios, dingo, now, 0, time.Time{}, false,
+	), "with nothing withheld the pool total is the spendable total")
+
+	// The same missing rows, but the pool withheld something, so the pool
+	// total is known to overstate what members received.
+	dingo.PoolUnspendable = 71328
+	dingo.MemberRewardTotal = "327076660"
+	ms := ComparePoolEpoch(
+		"preview", 5, koios, dingo, now, 0, time.Time{}, false,
+	)
+	require.Len(t, ms, 1,
+		"an unformable comparison must not read as a pass")
+	require.Equal(t, "member_rewards", ms[0].Field)
+	require.Equal(t, CategoryDBMissing, ms[0].Category)
+	require.Equal(t, StatusError, DetermineStatus(ms))
 }

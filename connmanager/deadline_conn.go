@@ -16,10 +16,16 @@ package connmanager
 
 import (
 	"net"
+	"sync"
 	"time"
 )
 
 const socketIdleTimeout = 2 * time.Minute
+
+// handshakeTimeout bounds the unauthenticated period for an accepted
+// connection. It is intentionally shorter than the socket idle timeout: the
+// listener must not wait for a peer that never completes the handshake.
+const handshakeTimeout = 10 * time.Second
 
 // deadlineConn bounds how long a single socket write may block. Nothing below
 // the Ouroboros muxer sets a write deadline, so a peer that stops reading can
@@ -49,6 +55,40 @@ func (c *deadlineConn) Write(p []byte) (int, error) {
 // type — SO_LINGER via enableTCPLingerZero, Unix peer credentials — must reach
 // through this wrapper rather than silently no-op on the type assertion.
 func (c *deadlineConn) Unwrap() net.Conn { return c.Conn }
+
+// handshakeDeadlineConn keeps the listener's absolute handshake deadline in
+// force while the muxer installs its per-segment read deadline. Without this
+// cap, the muxer can replace a short handshake deadline with its much longer
+// slowloris deadline before the first read completes.
+type handshakeDeadlineConn struct {
+	net.Conn
+	mu       sync.Mutex
+	deadline time.Time
+}
+
+func withHandshakeDeadline(conn net.Conn) *handshakeDeadlineConn {
+	return &handshakeDeadlineConn{Conn: conn}
+}
+
+func (c *handshakeDeadlineConn) SetDeadline(deadline time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.deadline = deadline
+	return c.Conn.SetDeadline(deadline)
+}
+
+func (c *handshakeDeadlineConn) SetReadDeadline(deadline time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	handshakeDeadline := c.deadline
+	if !handshakeDeadline.IsZero() &&
+		(deadline.IsZero() || deadline.After(handshakeDeadline)) {
+		deadline = handshakeDeadline
+	}
+	return c.Conn.SetReadDeadline(deadline)
+}
+
+func (c *handshakeDeadlineConn) Unwrap() net.Conn { return c.Conn }
 
 // unwrapConn walks any chain of Unwrap-able wrappers down to the base
 // connection.

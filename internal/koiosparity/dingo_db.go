@@ -51,7 +51,15 @@ type DingoDBConfig struct {
 // DingoEpochData holds epoch-level aggregates read directly from Dingo's database.
 type DingoEpochData struct {
 	TotalActiveStake string // lovelace decimal string (matches Koios format)
-	Fees             string // lovelace decimal string; empty when reward_ada_pots row absent
+	// TotalPoolCount is epoch_summary.total_pool_count: the number of pools
+	// in the distribution the mark pool_stake_snapshot rows for this epoch
+	// were written from (rotation.go sets both from the same
+	// StakeDistribution), so it is how many of those rows must be readable
+	// for the set to be complete. Deliberately not RewardSnapshot's
+	// TotalPoolCount, which counts the reduced reward distribution with
+	// degraded pools already excluded.
+	TotalPoolCount uint64
+	Fees           string // lovelace decimal string; empty when reward_ada_pots row absent
 	// TotalRewards is reward_ada_pots.rewards for this epoch alone: a fresh
 	// per-epoch FLOW value (rewards.Result.TotalRewardPot, overwritten every
 	// epoch — see ledger/reward_calculation.go:389,1955 and
@@ -98,25 +106,30 @@ type DingoPoolEpochData struct {
 	// reporting the row as genuinely missing. See ComparePoolEpoch, which
 	// must never silently treat StakePresent == false as a comparison pass.
 	StakePresent bool
-	// DelegatedStake/DelegatorCount come from reward_pool_input at the "stake
-	// epoch" (Koios epoch K's K-1): the mark stake distribution Praos actually
-	// used as K's active-stake/reward-calculation basis.
+	// DelegatedStake/DelegatorCount/FixedCost/Margin come from
+	// reward_pool_input at the "stake epoch" (Koios epoch K's K-1): the mark
+	// stake distribution Praos actually used as K's active-stake/
+	// reward-calculation basis. A mark snapshot records the pool parameters
+	// as of its own boundary, and those are the ones in force for the epoch
+	// that snapshot is the basis for, so cost and margin align here rather
+	// than with BlocksProduced at the param epoch (dingo #3484).
 	DelegatedStake string // lovelace decimal string
 	DelegatorCount uint64
-
-	// ParamsPresent distinguishes "no reward_pool_input row yet at the
-	// 'param epoch' (K+1)" from "row exists with legitimately zero/empty
-	// BlocksProduced/FixedCost/Margin" — see ComparePoolEpoch, which must
-	// never silently treat the former as a comparison pass.
-	ParamsPresent bool
-	// BlocksProduced/FixedCost/Margin come from reward_pool_input at the
-	// "param epoch" (K+1): that row's BlocksProduced/pool-params fields
-	// describe the epoch immediately before it (K), because
-	// buildRewardStateInputs (ledger/snapshot/rotation.go) stamps them from
-	// evt.PreviousEpoch at capture time, not from the row's own Epoch.
-	BlocksProduced uint64
 	FixedCost      string // lovelace decimal string (reward_pool_input.cost)
 	Margin         string // rational string (e.g. "1/10"); empty when null
+
+	// ParamsPresent distinguishes "no reward_pool_input row yet at the
+	// 'param epoch' (K+1)" from "row exists with a legitimately zero
+	// BlocksProduced" — see ComparePoolEpoch, which must never silently
+	// treat the former as a comparison pass. It covers BlocksProduced only;
+	// FixedCost/Margin presence follows StakePresent.
+	ParamsPresent bool
+	// BlocksProduced comes from reward_pool_input at the "param epoch"
+	// (K+1): that row's BlocksProduced describes the epoch immediately
+	// before it (K), because buildRewardStateInputs
+	// (ledger/snapshot/rotation.go) stamps it from evt.PreviousEpoch at
+	// capture time, not from the row's own Epoch.
+	BlocksProduced uint64
 
 	// MemberRewardPresent distinguishes "no reward_pool_output row yet at the
 	// stake epoch (K-1)" — reward calculation not finished for this
@@ -131,7 +144,45 @@ type DingoPoolEpochData struct {
 	// stakeRewardEpochsForNewEpoch: both are read/written at
 	// epochs.snapshot).
 	MemberRewardTotal string
+	// PoolUnspendable is reward_pool_output.unspendable at the stake epoch:
+	// every reward the calculation attributed to this pool and the ledger
+	// then withheld, member and leader alike. Zero is the case that makes
+	// MemberRewardTotal usable as the comparable quantity on its own — with
+	// nothing withheld, the pool's member total is its spendable member total
+	// by construction.
+	PoolUnspendable uint64
+
+	// SpendableMemberRewardPresent reports that reward_account_output rows
+	// exist for the stake epoch at all, which is what makes a per-pool
+	// spendable sum meaningful: a pool with no rows then genuinely earned no
+	// spendable member reward, rather than the table having been pruned out
+	// from under the read (cleanupOldSnapshots retains reward_account_output
+	// without bound only in api storage mode).
+	SpendableMemberRewardPresent bool
+	// SpendableMemberRewardTotal is the sum of reward_account_output.amount
+	// over the stake epoch's member rows the ledger actually credits —
+	// spendable and not guarded by CIP-0163 expiry, the same pair
+	// applyStakeRewards tests before crediting — which is the quantity Koios
+	// pool_history.member_rewards reports.
+	//
+	// reward_pool_output.member_reward_total is deliberately not that
+	// quantity: Result.addReward (ledger/rewards/rewards.go) accumulates it
+	// from every member reward the calculation produced, spendable or not, so
+	// the two differ by exactly the pool's unspendable member rewards — a
+	// reward computed for a credential the ledger correctly never credits.
+	// Comparing it against Koios reported a value_mismatch for any pool
+	// holding one, against a ledger that was right (dingo #3797).
+	//
+	// Subtracting reward_pool_output.unspendable from member_reward_total
+	// would not be equivalent: that column accumulates unspendable leader
+	// rewards too.
+	SpendableMemberRewardTotal string
 }
+
+// rewardTypeMember is the reward_account_output.reward_type value Dingo writes
+// for a delegator's share of a pool reward, as opposed to the operator's
+// "leader" row. Matches Koios /account_reward_history's own "member" type.
+const rewardTypeMember = "member"
 
 // DingoDB reads reward state directly from Dingo's metadata database.
 // It supports all three backends Dingo supports: SQLite, PostgreSQL, MySQL.
@@ -237,6 +288,7 @@ func (d *DingoDB) GetEpochData(
 			uint64(summary.TotalActiveStake),
 			10,
 		),
+		TotalPoolCount: summary.TotalPoolCount,
 	}
 
 	var pots models.RewardAdaPots
@@ -267,15 +319,16 @@ func (d *DingoDB) GetEpochData(
 //
 //   - stakeEpoch (K-1): the mark stake distribution actually used as Praos's
 //     active-stake/reward-calculation basis for K. reward_pool_input's
-//     DelegatedStake/DelegatorCount and reward_pool_output's
-//     MemberRewardTotal are both read at this epoch — reward_calculation.go's
+//     DelegatedStake/DelegatorCount/Margin/FixedCost and
+//     reward_pool_output's MemberRewardTotal are all read at this epoch — reward_calculation.go's
 //     stakeRewardEpochsForNewEpoch computes both from the same
 //     epochs.snapshot value, so input and output always share one Epoch.
-//   - paramEpoch (K+1): reward_pool_input's BlocksProduced and pool
-//     Margin/FixedCost are captured onto the row for the epoch *after* the
-//     one they describe — see ledger/snapshot/rotation.go's
-//     buildRewardStateInputs, which stamps these from evt.PreviousEpoch, not
-//     from the row's own Epoch.
+//   - paramEpoch (K+1): reward_pool_input's BlocksProduced is captured onto
+//     the row for the epoch *after* the one it describes — see
+//     ledger/snapshot/rotation.go's buildRewardStateInputs, which stamps it
+//     from evt.PreviousEpoch, not from the row's own Epoch. Only
+//     BlocksProduced is read there; Margin/FixedCost are stake-epoch fields
+//     (dingo #3484).
 //
 // See koiosStakeEpoch/koiosParamEpoch in check.go and ARCHITECTURE.md's Koios
 // Parity Tracker "Epoch alignment" section for the full derivation.
@@ -289,13 +342,46 @@ func (d *DingoDB) GetEpochData(
 // "compared and equal". One bulk query per table per epoch (three total),
 // independent of pool count. ctx is forwarded to the DB driver so that a
 // cancelled context aborts the query.
+// GetPoolStakeSnapshotMembers implements RewardParitySource by reading the
+// mark pool_stake_snapshot rows for epoch. See the interface doc comment for
+// why this, and not epoch_summary.SnapshotReady, is the per-pool evidence of
+// pool-set membership.
+func (d *DingoDB) GetPoolStakeSnapshotMembers(
+	ctx context.Context,
+	epoch uint64,
+) (map[string]struct{}, error) {
+	rows, err := d.query(
+		ctx,
+		`SELECT pool_key_hash FROM pool_stake_snapshot WHERE epoch = ? AND snapshot_type = ?`,
+		epoch,
+		snapshotTypeMark,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"pool_stake_snapshot epoch %d: %w",
+			epoch,
+			err,
+		)
+	}
+	defer rows.Close()
+	members := make(map[string]struct{})
+	for rows.Next() {
+		var poolHash []byte
+		if err := rows.Scan(&poolHash); err != nil {
+			return nil, err
+		}
+		members[hex.EncodeToString(poolHash)] = struct{}{}
+	}
+	return members, rows.Err()
+}
+
 func (d *DingoDB) GetPoolEpochDataMap(
 	ctx context.Context,
 	stakeEpoch, paramEpoch uint64,
 ) (map[string]*DingoPoolEpochData, error) {
 	rows, err := d.query(
 		ctx,
-		`SELECT pool_key_hash, delegated_stake, delegator_count FROM reward_pool_input WHERE epoch = ?`,
+		`SELECT pool_key_hash, delegated_stake, delegator_count, cost, margin FROM reward_pool_input WHERE epoch = ?`,
 		stakeEpoch,
 	)
 	if err != nil {
@@ -311,14 +397,29 @@ func (d *DingoDB) GetPoolEpochDataMap(
 		var poolHash []byte
 		var stake types.Uint64
 		var delegators uint64
-		if err := rows.Scan(&poolHash, &stake, &delegators); err != nil {
+		var cost sql.NullInt64
+		var margin types.Rat
+		if err := rows.Scan(
+			&poolHash, &stake, &delegators, &cost, &margin,
+		); err != nil {
 			return nil, err
 		}
-		m[hex.EncodeToString(poolHash)] = &DingoPoolEpochData{
+		data := &DingoPoolEpochData{
 			StakePresent:   true,
 			DelegatedStake: strconv.FormatUint(uint64(stake), 10),
 			DelegatorCount: delegators,
 		}
+		if cost.Valid {
+			data.FixedCost = strconv.FormatUint(
+				//nolint:gosec // metadata values are non-negative
+				uint64(cost.Int64),
+				10,
+			)
+		}
+		if margin.Rat != nil {
+			data.Margin = margin.String()
+		}
+		m[hex.EncodeToString(poolHash)] = data
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -326,7 +427,7 @@ func (d *DingoDB) GetPoolEpochDataMap(
 
 	rows, err = d.query(
 		ctx,
-		`SELECT pool_key_hash, blocks_produced, cost, margin FROM reward_pool_input WHERE epoch = ?`,
+		`SELECT pool_key_hash, blocks_produced FROM reward_pool_input WHERE epoch = ?`,
 		paramEpoch,
 	)
 	if err != nil {
@@ -338,9 +439,8 @@ func (d *DingoDB) GetPoolEpochDataMap(
 	}
 	for rows.Next() {
 		var poolHash []byte
-		var blocks, cost sql.NullInt64
-		var margin types.Rat
-		if err := rows.Scan(&poolHash, &blocks, &cost, &margin); err != nil {
+		var blocks sql.NullInt64
+		if err := rows.Scan(&poolHash, &blocks); err != nil {
 			_ = rows.Close() //nolint:sqlclosecheck
 			return nil, err
 		}
@@ -361,18 +461,6 @@ func (d *DingoDB) GetPoolEpochDataMap(
 				blocks.Int64,
 			)
 		}
-		if cost.Valid {
-			data.FixedCost = strconv.FormatUint(
-				//nolint:gosec // metadata values are non-negative
-				uint64(
-					cost.Int64,
-				),
-				10,
-			)
-		}
-		if margin.Rat != nil {
-			data.Margin = margin.String()
-		}
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close() //nolint:sqlclosecheck
@@ -382,7 +470,7 @@ func (d *DingoDB) GetPoolEpochDataMap(
 
 	rows, err = d.query(
 		ctx,
-		`SELECT pool_key_hash, member_reward_total FROM reward_pool_output WHERE epoch = ?`,
+		`SELECT pool_key_hash, member_reward_total, unspendable FROM reward_pool_output WHERE epoch = ?`,
 		stakeEpoch,
 	)
 	if err != nil {
@@ -396,7 +484,8 @@ func (d *DingoDB) GetPoolEpochDataMap(
 	for rows.Next() {
 		var poolHash []byte
 		var reward types.Uint64
-		if err := rows.Scan(&poolHash, &reward); err != nil {
+		var unspendable types.Uint64
+		if err := rows.Scan(&poolHash, &reward, &unspendable); err != nil {
 			return nil, err
 		}
 		key := hex.EncodeToString(poolHash)
@@ -407,8 +496,103 @@ func (d *DingoDB) GetPoolEpochDataMap(
 		}
 		data.MemberRewardPresent = true
 		data.MemberRewardTotal = strconv.FormatUint(uint64(reward), 10)
+		data.PoolUnspendable = uint64(unspendable)
 	}
-	return m, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if err := d.addSpendableMemberRewards(ctx, m, stakeEpoch); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// addSpendableMemberRewards fills SpendableMemberRewardTotal/Present from the
+// stake epoch's reward_account_output rows — the sum Koios
+// pool_history.member_rewards reports, which reward_pool_output's own
+// member_reward_total is not (see DingoPoolEpochData).
+//
+// The predicate matches what the ledger actually credits: applyStakeRewards
+// (ledger/reward_calculation.go) skips a reward that is not spendable and one
+// whose reward account is guarded by CIP-0163 expiry, so both are excluded
+// from the sum — but not from the presence test, which asks only whether the
+// epoch's rows survive at all.
+//
+// The rows are summed in Go rather than by the database: amount is a decimal
+// TEXT column, and the cast a portable SUM would need differs across the three
+// backends DingoDB supports. Preview and preprod produce on the order of a
+// hundred rows per epoch, and the observer only runs on those two networks.
+//
+// Presence is epoch-level. A pool with no spendable member row legitimately
+// earned nothing, but only if the table holds the epoch at all —
+// cleanupOldSnapshots retains reward_account_output without bound in api
+// storage mode and prunes it in core, so an empty read must not be reported as
+// a pool-wide zero.
+func (d *DingoDB) addSpendableMemberRewards(
+	ctx context.Context,
+	m map[string]*DingoPoolEpochData,
+	stakeEpoch uint64,
+) error {
+	// Every row for the epoch is read and filtered here rather than in the
+	// WHERE clause, so presence means "the epoch's per-account rows exist"
+	// exactly as it does in DatabaseSource.GetPoolEpochDataMap. Filtering in
+	// SQL would make an epoch holding only leader or only withheld rows look
+	// like a pruned epoch in one implementation and a populated one in the
+	// other, and the two must not be able to disagree.
+	rows, err := d.query(
+		ctx,
+		`SELECT pool_key_hash, reward_type, amount, spendable, guarded
+FROM reward_account_output WHERE epoch = ?`,
+		stakeEpoch,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"reward_account_output epoch %d: %w",
+			stakeEpoch,
+			err,
+		)
+	}
+	defer rows.Close()
+	totals := make(map[string]uint64)
+	any := false
+	for rows.Next() {
+		var poolHash []byte
+		var rewardType string
+		var amount types.Uint64
+		var spendable, guarded bool
+		if err := rows.Scan(
+			&poolHash, &rewardType, &amount, &spendable, &guarded,
+		); err != nil {
+			return err
+		}
+		any = true
+		if rewardType != rewardTypeMember || !spendable || guarded {
+			continue
+		}
+		totals[hex.EncodeToString(poolHash)] += uint64(amount)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !any {
+		return nil
+	}
+	for key, total := range totals {
+		data, ok := m[key]
+		if !ok {
+			data = &DingoPoolEpochData{}
+			m[key] = data
+		}
+		data.SpendableMemberRewardTotal = strconv.FormatUint(total, 10)
+	}
+	for _, data := range m {
+		data.SpendableMemberRewardPresent = true
+		if data.SpendableMemberRewardTotal == "" {
+			data.SpendableMemberRewardTotal = "0"
+		}
+	}
+	return nil
 }
 
 func (d *DingoDB) query(
@@ -493,6 +677,52 @@ func (d *DingoDB) GetRewardAccountOutputs(
 		return nil, fmt.Errorf("reward_account_output epoch %d: %w", epoch, err)
 	}
 	return out, nil
+}
+
+// StakeAddressFromCredential converts a reward-account credential — as
+// stored on models.RewardAccountOutput/RewardStakeInput (StakingKey +
+// CredentialTag) — to its bech32 stake address ("stake1…"/"stake_test1…").
+// credentialTag must be one of models.CredentialTagFromUint64's two values:
+// 0 (key hash) or 1 (script hash); see that function's doc comment for the
+// 0/1 meaning.
+//
+// koios-parity only ever targets preview/preprod, both testnet networks, so
+// the address network ID is always lcommon.AddressNetworkTestnet — this
+// never needs a network parameter. This mirrors
+// api/blockfrost/adapter.go's stakeAddressFromCredential exactly (same
+// lcommon.NewAddressFromParts call with paymentAddr=nil), reimplemented here
+// rather than imported: the api package is a much larger dependency edge
+// (importing it would pull the whole Blockfrost adapter surface into
+// koiosparity) for one 12-line helper, and koios-parity must not gain an HTTP
+// client for the Dingo side of any comparison regardless of the underlying
+// address logic being identical — see this file's/ARCHITECTURE.md's "never
+// add an HTTP client for the Dingo side" invariant.
+func StakeAddressFromCredential(
+	stakingKey []byte,
+	credentialTag uint8,
+) (string, error) {
+	addrType := uint8(lcommon.AddressTypeNoneKey)
+	switch credentialTag {
+	case 0:
+		// key hash; addrType already set above.
+	case 1:
+		addrType = lcommon.AddressTypeNoneScript
+	default:
+		return "", fmt.Errorf(
+			"unsupported stake credential tag: %d",
+			credentialTag,
+		)
+	}
+	addr, err := lcommon.NewAddressFromParts(
+		addrType,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		stakingKey,
+	)
+	if err != nil {
+		return "", fmt.Errorf("build stake address: %w", err)
+	}
+	return addr.String(), nil
 }
 
 // PoolKeyHashHex converts a pool bech32 ID ("pool1…") to its lower-hex
