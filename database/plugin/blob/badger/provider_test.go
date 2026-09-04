@@ -230,12 +230,19 @@ func TestProviderStopDeadlineDuringValueLogGC(t *testing.T) {
 	)
 	defer cancel()
 	stopDone := make(chan error, 1)
+	stopStarted := time.Now()
 	go func() {
 		stopDone <- host.Stop(ctx)
 	}()
 	stopErr := testutil.RequireReceive(
 		t, stopDone, 5*time.Second,
 		"provider stop exceeded its context",
+	)
+	require.Less(
+		t,
+		time.Since(stopStarted),
+		250*time.Millisecond,
+		"provider stop did not honor its deadline promptly",
 	)
 
 	release()

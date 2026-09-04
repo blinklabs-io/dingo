@@ -46,7 +46,8 @@ When Prometheus metrics are configured, inspect:
 
 - `database_blob_gc_attempts_total`, `..._successes_total`,
   `..._no_rewrite_total`, and `..._errors_total`;
-- `database_blob_gc_duration_seconds`;
+- `database_blob_gc_duration_seconds` (time spent inside the Badger
+  `RunValueLogGC` call, excluding the pre-GC size snapshot);
 - `database_blob_gc_lsm_bytes`, `..._vlog_bytes`, and
   `..._reclaimed_bytes`;
 - `database_blob_gc_consecutive_successes` and
@@ -59,5 +60,5 @@ GC passes, waits for the current rewrite, and returns the caller's deadline
 error if that rewrite does not finish in time; the one-time cleanup then closes
 the database after the rewrite drains. The regression test
 `TestProviderStopDeadlineDuringValueLogGC` injects a blocked rewrite and proves
-that the stop call returns at its deadline, then the store closes after the
-rewrite is released.
+that the stop call returns promptly at its deadline, then the store closes
+after the rewrite is released.

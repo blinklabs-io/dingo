@@ -422,12 +422,12 @@ func (d *BlobStoreBadger) blobGc(
 			default:
 			}
 			for {
-				gcStarted := time.Now()
 				var beforeLSM, beforeVlog int64
 				if d.gcMetrics != nil {
 					d.gcMetrics.attempts.Inc()
 					beforeLSM, beforeVlog = d.DB().Size()
 				}
+				gcStarted := time.Now()
 				err := d.runValueLogGC(0.5)
 				if d.gcMetrics != nil {
 					d.gcMetrics.duration.Observe(time.Since(gcStarted).Seconds())
