@@ -3280,8 +3280,9 @@ func (ls *LedgerState) drainBlockPipelineBeforeRollback(
 // Callers must not already hold chainsyncBlockfetchMutex. Every rollback entry
 // point takes chainsyncMutex first and leaves the blockfetch mutex to the
 // restart that follows the rollback (tryResolveFork,
-// handleEventChainsyncBlockHeaderWithPending, RecoverAfterLocalRollback), so
-// the lock order stays chainsyncMutex -> chainsyncBlockfetchMutex.
+// handleEventChainsyncRollback, handleEventChainsyncBlockHeaderWithPending,
+// RecoverAfterLocalRollback), so the lock order stays chainsyncMutex ->
+// chainsyncBlockfetchMutex.
 //
 // It is bumped for every attempted rollback rather than only for one that
 // moved the block tip: a rollback onto a queued header truncates the queue

@@ -3002,13 +3002,14 @@ to back — timing-dependent enough that two identical DevNet runs differed by
 almost an order of magnitude in how often the recovery fired. The record
 therefore survives both interleaved deliveries for other ranges and
 header-queue churn;
-`clearQueuedHeaders` deliberately leaves it alone. It is discarded only when
-the tracked range itself is delivered (`noteBlockfetchRangeProgress` in
-`handleEventBlockfetchBlock`, matching on the block's point), so a peer that
-was briefly behind is never punished, and a miss against a different range
-starts its own count. After the bound fires the record restarts from zero, so
-a re-offered header must earn a fresh set of failures rather than being
-dropped on every later miss.
+`clearQueuedHeaders` deliberately leaves it alone. It is discarded only after
+the tracked range itself has been applied successfully in
+`flushPendingBlockfetchBlocks` (`noteBlockfetchRangeProgress`, matching on the
+block's point), so a peer that was briefly behind is never punished, and a
+received but rejected body retains the failure record. A miss against a
+different range starts its own count. After the bound fires the record
+restarts from zero, so a re-offered header must earn a fresh set of failures
+rather than being dropped on every later miss.
 
 The accounting lives in `startQueuedBlockfetchLocked`, the single point every
 queued-range request passes through, not in the callers. That placement is
