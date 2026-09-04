@@ -465,6 +465,8 @@ func TestProcessGapBlockTransactionsProcessesGovernance(
 		[]lcommon.Transaction{proposalTx, voteTx},
 		offsets,
 		100,
+		conway.EraIdConway,
+		testGapConwayProtocolParameters(),
 		testGapConwayProtocolParameters(),
 	)
 	require.NoError(t, err)

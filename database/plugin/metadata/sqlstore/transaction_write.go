@@ -418,6 +418,7 @@ func (s *Store) SetGapBlockTransaction(
 	transaction lcommon.Transaction,
 	point ocommon.Point,
 	index uint32,
+	certDeposits map[int]uint64,
 	txn types.Txn,
 ) error {
 	// Gap ingestion intentionally has no available input state. Persisting the
@@ -471,7 +472,7 @@ RETURNING id`,
 					transaction.Certificates(),
 					point,
 					index,
-					make(map[int]uint64),
+					certDeposits,
 				)
 				if err != nil {
 					return err

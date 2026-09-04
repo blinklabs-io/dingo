@@ -126,14 +126,14 @@ func TestSetGapBlockTransactionPersistsPositionedCertificates(t *testing.T) {
 	// must come from persisted transaction/certificate positions, not insertion
 	// order or SQLite row IDs.
 	require.NoError(t, db.SetGapBlockTransaction(
-		late, point, 5, gapOffsets(late), nil,
+		late, point, 5, nil, gapOffsets(late), nil,
 	))
 	require.NoError(t, db.SetGapBlockTransaction(
-		early, point, 2, gapOffsets(early), nil,
+		early, point, 2, nil, gapOffsets(early), nil,
 	))
 	// Reprocessing the same gap transaction must not duplicate its certificate.
 	require.NoError(t, db.SetGapBlockTransaction(
-		late, point, 5, gapOffsets(late), nil,
+		late, point, 5, nil, gapOffsets(late), nil,
 	))
 
 	gotTx, err := db.Metadata().GetTransactionByHash(late.Hash().Bytes(), nil)
@@ -215,6 +215,7 @@ func TestSetGapBlockTransactionRestoresConsumedInputsOnRollback(
 			candidate.consumerTx,
 			candidate.consumerPoint,
 			0,
+			map[int]uint64{0: 0},
 			mustBlockOffsets(t, candidate.consumerBlock),
 			nil,
 		),
@@ -984,6 +985,7 @@ func TestSetGapBlockTransactionSpendsLiveProducedInputs(t *testing.T) {
 				producer.tx,
 				producer.point,
 				0,
+				nil,
 				mustBlockOffsets(t, producer.block),
 				nil,
 			),
@@ -1026,6 +1028,7 @@ func TestSetGapBlockTransactionSpendsLiveProducedInputs(t *testing.T) {
 			candidate.consumerTx,
 			candidate.consumerPoint,
 			0,
+			map[int]uint64{0: 0},
 			mustBlockOffsets(t, candidate.consumerBlock),
 			nil,
 		),
