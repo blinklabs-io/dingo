@@ -740,6 +740,13 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 			err,
 		)
 	}
+	if err := validateRewardPoolInputBlockCounts(poolInputs); err != nil {
+		return nil, false, fmt.Errorf(
+			"precomputed reward snapshot %d has incomplete block production counts: %w",
+			epochs.snapshot,
+			err,
+		)
+	}
 	inputsMatchSnapshot, err := precomputedRewardPoolInputsMatchSnapshot(
 		rewardSnapshot,
 		poolInputs,
