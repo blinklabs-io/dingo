@@ -16,6 +16,7 @@ package immutable_test
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -121,6 +122,39 @@ func requireGetBlockError(
 	}
 }
 
+// requireGetBlockErrorIs is requireGetBlockError plus an errors.Is check
+// against target. Use it for failures chunk.Next wraps in a sentinel, so a
+// dropped %w is caught even though the message would still match wantSubstr.
+func requireGetBlockErrorIs(
+	t *testing.T,
+	fixture immutableIndexFixture,
+	target error,
+	wantSubstr string,
+) {
+	t.Helper()
+	imm, err := immutable.New(fixture.dir)
+	if err != nil {
+		t.Fatalf("open immutable DB: %s", err)
+	}
+	_, err, panicValue := getBlockRecoveringPanic(imm, ocommon.Point{})
+	if panicValue != nil {
+		t.Fatalf(
+			"GetBlock panicked instead of returning an error: %v",
+			panicValue,
+		)
+	}
+	if !errors.Is(err, target) {
+		t.Fatalf("GetBlock error = %v, want errors.Is match for %v", err, target)
+	}
+	if err == nil || !strings.Contains(err.Error(), wantSubstr) {
+		t.Fatalf(
+			"GetBlock error = %v, want an error containing %q",
+			err,
+			wantSubstr,
+		)
+	}
+}
+
 func TestImmutableIndexAcceptsValidSingleAndMultipleBlockChunks(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -202,7 +236,9 @@ func TestImmutableIndexRejectsLastBlockOffsetBeyondChunk(t *testing.T) {
 	fixture := writeImmutableIndexFixture(
 		t, 1, []uint32{0, secondaryIndexEntrySize}, []uint64{1000},
 	)
-	requireGetBlockError(t, fixture, "beyond chunk size")
+	requireGetBlockErrorIs(
+		t, fixture, immutable.ErrInvalidChunkOffset, "beyond chunk size",
+	)
 }
 
 func TestImmutableIndexRejectsDescendingBlockOffsets(t *testing.T) {
@@ -212,7 +248,12 @@ func TestImmutableIndexRejectsDescendingBlockOffsets(t *testing.T) {
 		[]uint32{0, secondaryIndexEntrySize, 2 * secondaryIndexEntrySize},
 		[]uint64{3, 0},
 	)
-	requireGetBlockError(t, fixture, "does not follow current block offset")
+	requireGetBlockErrorIs(
+		t,
+		fixture,
+		immutable.ErrInvalidChunkOffset,
+		"does not follow current block offset",
+	)
 }
 
 func TestImmutableIndexRejectsBlockOffsetOverflow(t *testing.T) {
@@ -242,7 +283,9 @@ func TestImmutableIndexRejectsBlockOffsetOverflow(t *testing.T) {
 			fixture := writeImmutableIndexFixture(
 				t, 1, primaryOffsets, test.blockOffsets,
 			)
-			requireGetBlockError(t, fixture, "overflows int64")
+			requireGetBlockErrorIs(
+				t, fixture, immutable.ErrInvalidChunkOffset, "overflows int64",
+			)
 		})
 	}
 }
