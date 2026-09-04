@@ -4839,6 +4839,18 @@ func ledgerPipelineBackoff(consecutiveNoProgress int) (time.Duration, bool) {
 	), true
 }
 
+// ledgerPipelineRetryDelay applies the common no-progress backoff while
+// retaining a caller's minimum delay for retry classes that need one. A
+// deterministic rejection therefore cannot remain at a fixed retry cadence,
+// but a transient class still keeps its required minimum spacing.
+func ledgerPipelineRetryDelay(
+	consecutiveNoProgress int,
+	minimum time.Duration,
+) (time.Duration, bool) {
+	backoff, stuck := ledgerPipelineBackoff(consecutiveNoProgress)
+	return max(backoff, minimum), stuck
+}
+
 // pipelineProgress is the ledger pipeline's view of whether restarts are
 // getting anywhere: how many consecutive ones have failed to move the tip,
 // and the tip they last saw. Kept as one value because the fields are only
@@ -4969,9 +4981,12 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 			// accounting entirely, so an endorser block that never becomes
 			// available wedged the pipeline without ever raising the stuck
 			// signal. Count it like any other failure to advance; the
-			// bespoke delay below still governs its pacing.
+			// bespoke minimum delay below still governs its pacing.
 			progress = ls.trackPipelineProgress(progress)
-			endorserStuck := progress.stuck()
+			endorserBackoff, endorserStuck := ledgerPipelineRetryDelay(
+				progress.consecutiveNoProgress,
+				certifiedEndorserBlockRetryDelay,
+			)
 			ls.metrics.setPipelineNoProgress(
 				progress.consecutiveNoProgress,
 				endorserStuck,
@@ -4992,7 +5007,7 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 					err,
 				)
 			}
-			timer := time.NewTimer(certifiedEndorserBlockRetryDelay)
+			timer := time.NewTimer(endorserBackoff)
 			select {
 			case <-ctx.Done():
 				timer.Stop()
