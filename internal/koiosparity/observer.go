@@ -477,9 +477,10 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 		o.cfg.OnResult(result)
 	}
 	if result.Status != StatusPass {
+		significant := CountSignificant(result.Mismatches)
 		o.fail(epoch, fmt.Errorf(
-			"parity %s at epoch %d (%d mismatch(es))",
-			result.Status, epoch, len(result.Mismatches),
+			"parity %s at epoch %d (%d significant of %d mismatch(es))",
+			result.Status, epoch, significant, len(result.Mismatches),
 		))
 		return
 	}
