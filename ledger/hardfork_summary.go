@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
@@ -118,10 +119,15 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 	past := eraSummaries[:len(eraSummaries)-1]
 
 	// Use the same configured safe-zone source as the NtC era-history query.
-	// Tests and early bootstrap callers may construct a LedgerState without a
-	// complete node configuration; in that case eraShape is unavailable and
-	// the legacy indefinite safe zone remains the only defensible answer.
-	shape := ls.eraShape()
+	// A missing shape or current-era entry cannot safely supply a forecast:
+	// the cache-derived current era has a zero safe zone and no end bound.
+	shape, err := ls.eraShapeWithError()
+	if err != nil {
+		return nil, fmt.Errorf(
+			"ledger: hard-fork forecast unavailable: %w",
+			err,
+		)
+	}
 	shapeEntry, shapeAvailable := shape.EraForID(current.EraID)
 	if shapeAvailable {
 		current.Params.SafeZoneSlots = shapeEntry.Params.SafeZoneSlots
@@ -131,11 +137,15 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 		}
 	}
 	if !shapeAvailable {
-		return &hardfork.Summary{
-			SystemStart: systemStart,
-			Eras:        append(past, current),
-			Transition:  transitionInfo,
-		}, nil
+		eraName := consensusState.currentEra.Name
+		if eraName == "" {
+			eraName = fmt.Sprintf("ID %d", current.EraID)
+		}
+		return nil, fmt.Errorf(
+			"ledger: hard-fork forecast unavailable: %s era is unavailable "+
+				"in the hard-fork shape",
+			eraName,
+		)
 	}
 
 	effectiveTransition := transitionInfo
