@@ -40,8 +40,11 @@ func (ls *LedgerState) calculateCertificateDeposit(
 		return 0, nil
 	}
 
-	// Use the block era's certificate deposit function with current protocol parameters
-	certDeposit, err := blockEra.CertDepositFunc(cert, ls.currentPParams)
+	// Use one published protocol-parameter snapshot for the complete
+	// calculation. Writers replace currentPParams while publishing a new
+	// snapshot, so reading the writer-owned field directly races with updates.
+	pparams := ls.loadConsensusSnapshot().currentPParams
+	certDeposit, err := blockEra.CertDepositFunc(cert, pparams)
 	if err != nil {
 		// Handle era type mismatch - this can happen when processing historical blocks
 		// with newer protocol parameters, or when the certificate type didn't exist
