@@ -890,6 +890,17 @@ func rationalsEqual(a, b string) bool {
 	return ra.Cmp(&rb) == 0
 }
 
+// isZeroRewardAmount reports whether a lovelace decimal string is zero.
+//
+// Parsed rather than compared to "0": the two sides format independently, and
+// a reward that is genuinely zero must be recognised as zero however it is
+// spelled. An unparseable amount is not zero — it is a real value the
+// comparison must keep reporting rather than quietly waive.
+func isZeroRewardAmount(amount string) bool {
+	v, err := strconv.ParseUint(strings.TrimSpace(amount), 10, 64)
+	return err == nil && v == 0
+}
+
 // DetermineStatus returns PASS, FAIL, or ERROR from a list of mismatches.
 //
 //   - FAIL: any value_mismatch, pool_only_dingo, pool_only_koios,
@@ -903,18 +914,6 @@ func rationalsEqual(a, b string) bool {
 //     epoch never completed across every chunk, so there is no complete
 //     reference set to compare against yet).
 //   - PASS: no mismatches.
-//
-// isZeroRewardAmount reports whether a lovelace decimal string is zero.
-//
-// Parsed rather than compared to "0": the two sides format independently, and
-// a reward that is genuinely zero must be recognised as zero however it is
-// spelled. An unparseable amount is not zero — it is a real value the
-// comparison must keep reporting rather than quietly waive.
-func isZeroRewardAmount(amount string) bool {
-	v, err := strconv.ParseUint(strings.TrimSpace(amount), 10, 64)
-	return err == nil && v == 0
-}
-
 func DetermineStatus(mismatches []CheckMismatch) string {
 	if len(mismatches) == 0 {
 		return StatusPass
