@@ -28,6 +28,7 @@ import (
 func (ls *LedgerState) calculateCertificateDeposit(
 	cert lcommon.Certificate,
 	blockEraId uint,
+	pparams lcommon.ProtocolParameters,
 ) (uint64, error) {
 	// Get the era descriptor for this block
 	blockEra := eras.GetEraById(blockEraId)
@@ -40,10 +41,6 @@ func (ls *LedgerState) calculateCertificateDeposit(
 		return 0, nil
 	}
 
-	// Use one published protocol-parameter snapshot for the complete
-	// calculation. Writers replace currentPParams while publishing a new
-	// snapshot, so reading the writer-owned field directly races with updates.
-	pparams := ls.loadConsensusSnapshot().currentPParams
 	certDeposit, err := blockEra.CertDepositFunc(cert, pparams)
 	if err != nil {
 		// Handle era type mismatch - this can happen when processing historical blocks

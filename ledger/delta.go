@@ -149,6 +149,10 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	txn *database.Txn,
 	recordDonations bool,
 ) error {
+	// Keep one immutable protocol-parameter snapshot for every certificate in
+	// this delta. A parameter publication between certificates must not mix
+	// deposit values in one database operation.
+	pparams := ls.loadConsensusSnapshot().currentPParams
 	appliedTxs := make([]bool, len(d.Transactions))
 	for i, tr := range d.Transactions {
 		if tr.Index < 0 || tr.Index > math.MaxUint32 {
@@ -166,7 +170,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			delete(certDeposits, k)
 		}
 		for i, cert := range certs {
-			deposit, err := ls.calculateCertificateDeposit(cert, d.BlockEraId)
+			deposit, err := ls.calculateCertificateDeposit(cert, d.BlockEraId, pparams)
 			if err != nil {
 				// Return the map to pool before returning error
 				certDepositsMapPool.Put(certDeposits)

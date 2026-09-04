@@ -28,7 +28,11 @@ func TestCalculateCertificateDepositUsesPublishedPParams(t *testing.T) {
 		defer wg.Done()
 		<-start
 		for i := 0; i < 10_000; i++ {
-			deposit, err := ls.calculateCertificateDeposit(cert, shelley.EraIdShelley)
+			deposit, err := ls.calculateCertificateDeposit(
+				cert,
+				shelley.EraIdShelley,
+				ls.loadConsensusSnapshot().currentPParams,
+			)
 			if err != nil || (deposit != firstDeposit && deposit != secondDeposit) {
 				if err != nil {
 					errs <- err
