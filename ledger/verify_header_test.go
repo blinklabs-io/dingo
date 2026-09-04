@@ -933,11 +933,21 @@ func newTestShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
+		"slotLength": 1,
+		"epochLength": 432000,
 		"slotsPerKESPeriod": 129600,
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	err := cfg.LoadShelleyGenesisFromReader(
+	byronGenesisJSON := `{
+		"blockVersionData": { "slotDuration": "20000" },
+		"protocolConsts": { "k": 432 }
+	}`
+	err := cfg.LoadByronGenesisFromReader(
+		strings.NewReader(byronGenesisJSON),
+	)
+	require.NoError(t, err)
+	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	)
 	require.NoError(t, err)
@@ -1504,11 +1514,16 @@ func newHighFreqShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.99,
 		"securityParam": 432,
+		"slotLength": 1,
+		"epochLength": 432000,
 		"slotsPerKESPeriod": 129600,
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	err := cfg.LoadShelleyGenesisFromReader(
+	byronGenesisJSON := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
+	err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON))
+	require.NoError(t, err)
+	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	)
 	require.NoError(t, err)
@@ -1539,6 +1554,8 @@ func newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": ` + activeSlotsCoeff + `,
 		"securityParam": 432,
+		"slotLength": 1,
+		"epochLength": 432000,
 		"slotsPerKESPeriod": 129600,
 		"systemStart": "2022-10-25T00:00:00Z",
 		"protocolParams": {
@@ -1552,7 +1569,10 @@ func newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
 		}
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	err := cfg.LoadShelleyGenesisFromReader(
+	byronGenesisJSON := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
+	err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON))
+	require.NoError(t, err)
+	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	)
 	require.NoError(t, err)
@@ -1604,7 +1624,9 @@ func newEligibilityTestLedger(
 			{
 				EpochId:       5,
 				StartSlot:     0,
+				SlotLength:    1000,
 				LengthInSlots: 1_000_000,
+				EraId:         1,
 				Nonce:         epochNonce,
 			},
 		},
