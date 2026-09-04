@@ -278,6 +278,11 @@ RETURNING id`,
 						err,
 					)
 				}
+				if err := s.resolvePointerStakeCredential(
+					ctx, db, produced.Output.Address(), &model,
+				); err != nil {
+					return err
+				}
 				if collateralReturn != nil &&
 					produced.Output == collateralReturn {
 					id := uint(transactionID)
@@ -470,6 +475,11 @@ RETURNING id`,
 						produced.Id.Index(),
 						err,
 					)
+				}
+				if err := s.resolvePointerStakeCredential(
+					ctx, db, produced.Output.Address(), &model,
+				); err != nil {
+					return err
 				}
 				id := uint(transactionID)
 				if collateralReturn != nil &&
