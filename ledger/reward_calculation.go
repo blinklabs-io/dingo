@@ -241,7 +241,7 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 				)
 			}
 			if failure != "" {
-				reason = "imported reward snapshot reconciliation failed: " + failure
+				reason = "imported reward basis seeding failed: " + failure
 			}
 			ls.reportSkippedStakeRewards(
 				newEpoch,

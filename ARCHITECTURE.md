@@ -8219,14 +8219,14 @@ read and a record that does not match degrades to the VRF-only reading rather
 than mapping a field onto the wrong parameter. Note that a snapshot's owner
 set lists only the owners holding stake in it, not every owner the
 registration names; the omitted ones contribute nothing to owner stake, so the
-reward basis is unaffected. If an imported basis fails the reconciliation
-gate, ledgerstate persists the failure reason in `reward_seed_failure` in the
-same metadata transaction as the import. A later reward boundary reads that
-marker when its reward snapshot is absent and reports an import
-reconciliation failure; a genuinely missing import has no marker and is
-reported as a missing basis. Successful seeding clears the marker, and
-rollback removes markers above its slot, so the message cannot outlive the
-imported state it describes.
+reward basis is unaffected. If an imported basis fails reconciliation or lacks
+the historical protocol parameters needed to consume it, ledgerstate persists
+the failure reason in `reward_seed_failure` in the same metadata transaction as
+the import. A later reward boundary reads that marker when its reward snapshot
+is absent and reports the imported seeding failure; a genuinely missing import
+has no marker and is reported as a missing basis. Successful seeding clears the
+marker, and rollback removes markers above its slot, so the message cannot
+outlive the imported state it describes.
 
 Registration history is the fallback, for a snapshot whose pool entries are
 the compact pool-distr shape carrying only a VRF key. It is resolved per epoch
