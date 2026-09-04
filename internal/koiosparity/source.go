@@ -268,6 +268,17 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 	defer txn.Release()
 	meta := s.db.Metadata()
 
+	// The tip decides whether this stake epoch's rewards have been applied
+	// yet; see DingoPoolEpochData.RewardsPending. When the tip cannot be read
+	// the flag is left unset, so the comparison stays strict rather than
+	// downgrading a possible divergence on incomplete information.
+	var tipSlot uint64
+	tipKnown := false
+	if tip, tipErr := s.db.GetTip(txn); tipErr == nil {
+		tipSlot = tip.Point.Slot
+		tipKnown = true
+	}
+
 	stakeInputs, err := meta.GetRewardPoolInputs(stakeEpoch, txn.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -332,6 +343,7 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 			10,
 		)
 		data.PoolUnspendable = uint64(out.Unspendable)
+		data.RewardsPending = tipKnown && tipSlot < out.BoundarySlot
 	}
 
 	// The comparable member-reward quantity, formed the same way DingoDB

@@ -336,7 +336,8 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Field:      "member_rewards",
 		Class:      CoverageDerivedMatch,
 		DingoField: "reward_pool_output.member_reward_total at K-1",
-		Reason:     "exact lovelace equality against Dingo's per-member aggregate",
+		Reason: "exact lovelace equality against Dingo's per-member spendable " +
+			"aggregate, once the epoch's rewards have been applied",
 	},
 	{
 		Endpoint: "/pool_history",

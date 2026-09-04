@@ -152,6 +152,23 @@ type DingoPoolEpochData struct {
 	// by construction.
 	PoolUnspendable uint64
 
+	// RewardsPending reports that the node has NOT yet reached the boundary at
+	// which this stake epoch's rewards are applied
+	// (reward_pool_output.boundary_slot, three epochs after the stake epoch).
+	//
+	// Before that boundary the per-account spendable flags are provisional: a
+	// reward computed for a credential that deregisters in the meantime is
+	// still marked spendable, and only the application flips it. Koios reports
+	// rewards that were actually distributed, so comparing earlier makes Dingo
+	// read high by exactly the forfeitures that have not happened yet
+	// (dingo #3852). A difference before the boundary is a statement about
+	// timing, not about correctness.
+	//
+	// The sense is deliberately negative so the zero value compares strictly.
+	// A source that cannot establish the boundary must not silently downgrade
+	// a real divergence to a lag; reporting a spurious mismatch is the safer
+	// failure for a verification tool than hiding a true one.
+	RewardsPending bool
 	// SpendableMemberRewardPresent reports that reward_account_output rows
 	// exist for the stake epoch at all, which is what makes a per-pool
 	// spendable sum meaningful: a pool with no rows then genuinely earned no
