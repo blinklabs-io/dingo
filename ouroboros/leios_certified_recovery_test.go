@@ -333,8 +333,8 @@ func TestFetchEndorserBlockByPointRecyclesDeadConnectionAndFailsOver(
 		EventBus:    bus,
 		EnableLeios: true,
 	})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil))
-	require.NoError(t, o.storeLeiosEndorserBlock(point2, manifestRaw2, nil))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil, leiosStoreAuthoritative))
+	require.NoError(t, o.storeLeiosEndorserBlock(point2, manifestRaw2, nil, leiosStoreAuthoritative))
 	poisonLeiosFetchBlockTxsSlot(t, deadConn, point, bitmap)
 
 	// Make the dead connection the first candidate, so the fetch cannot succeed
@@ -349,9 +349,8 @@ func TestFetchEndorserBlockByPointRecyclesDeadConnectionAndFailsOver(
 		),
 	)
 
-	slot, ledgerTxs, ok := o.EndorserBlockTxsByHash(point.Hash)
+	ledgerTxs, ok := o.EndorserBlockTxsByHash(point.Hash, point.Slot)
 	require.True(t, ok, "ledger provider still reports the EB unavailable")
-	require.Equal(t, point.Slot, slot)
 	require.Equal(t, []cbor.RawMessage{tx}, ledgerTxs)
 
 	evt := testutil.RequireReceive(
@@ -557,7 +556,7 @@ func TestFetchEndorserBlockByPointHonoursCallerBudget(t *testing.T) {
 	testutil.WaitForCondition(
 		t,
 		func() bool {
-			data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+			data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 			return ok && !data.completeTxCache()
 		},
 		2*time.Second,
@@ -615,7 +614,7 @@ func TestFetchEndorserBlockByPointTxsUnavailableIsNotAnAllPeerDecline(
 		ConnManager: cm,
 		EnableLeios: true,
 	})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil))
+	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil, leiosStoreAuthoritative))
 
 	err := o.FetchEndorserBlockByPoint(
 		context.Background(),

@@ -681,12 +681,20 @@ type LedgerStateConfig struct {
 	BlockPipelineValidateEnabled bool
 }
 
-// EndorserBlockProviderFunc returns the slot and the complete set of standalone
-// transaction CBORs of the Leios endorser block identified by ebHash, when it
-// has been fetched and fully cached; ok is false otherwise. It is used to apply
-// an endorser block's transactions to the ledger when the referencing Dijkstra
-// ranking block is processed.
-type EndorserBlockProviderFunc func(ebHash []byte) (ebSlot uint64, txs []cbor.RawMessage, ok bool)
+// EndorserBlockProviderFunc returns the complete set of standalone
+// transaction CBORs of the Leios endorser block identified by (ebHash,
+// ebSlot), when exactly that occurrence has been fetched and fully cached;
+// ok is false otherwise. ebSlot is required, not merely advisory: the
+// manifest is content-addressed, so the same hash can be a live,
+// independently required occurrence at more than one slot at once, and the
+// provider must resolve exactly the occurrence the caller's own reference
+// names rather than whichever one happens to be cached for the hash (issue
+// #3513 review). It is used to apply an endorser block's transactions to the
+// ledger when the referencing Dijkstra ranking block is processed.
+type EndorserBlockProviderFunc func(
+	ebHash []byte,
+	ebSlot uint64,
+) (txs []cbor.RawMessage, ok bool)
 
 // EndorserBlockFetcherFunc actively fetches the endorser block identified by
 // (ebSlot, ebHash) over leios-fetch (manifest plus all transaction bodies) and
@@ -894,12 +902,26 @@ type LedgerState struct {
 	// header that blocks local forging). Deliberately survives interleaved
 	// deliveries for other ranges and header-queue churn; discarded when
 	// the tracked range itself is delivered.
-	blockfetchRangeFailure    blockfetchRangeFailureState
-	deferredHeaderValidation  map[string]struct{} // block points whose stateful header checks wait for ledger apply
-	checkpointWrittenForEpoch bool
-	closed                    atomic.Bool
-	inRecovery                bool // guards against recursive recovery in SubmitAsyncDBTxn
-	lastAtTipRecovery         *atTipRecoveryAttempt
+	blockfetchRangeFailure blockfetchRangeFailureState
+	// deferredHeaderValidation holds block points whose stateful header checks
+	// wait for ledger apply. It is guarded by its own deferredHeaderValidationMu
+	// (NOT the main RWMutex) so the snapshot retention guard
+	// (PrunePoolSnapshotsWithRetentionFloor) can hold the set stable across the
+	// eviction and floor computation without contending the hot header-validation
+	// read path on the main lock (issue #3727). The guard must NOT hold this mutex
+	// across the pool-snapshot prune (nor deletePersistedDeferredMarkers across
+	// DeleteSyncState): those open the single SQLite write connection, and block
+	// apply holds that connection before taking this mutex via
+	// consumeDeferredHeaderValidation, so holding it across that write inverts the
+	// lock order and deadlocks the node (issue #3717). The eviction+floor read is
+	// atomic; a header admitted after the lock is released is handled by the next
+	// cleanup pass (the floor is a lower-watermark recomputed each pass).
+	deferredHeaderValidation   map[string]struct{}
+	deferredHeaderValidationMu sync.Mutex
+	checkpointWrittenForEpoch  bool
+	closed                     atomic.Bool
+	inRecovery                 bool // guards against recursive recovery in SubmitAsyncDBTxn
+	lastAtTipRecovery          *atTipRecoveryAttempt
 	// At-tip recovery non-convergence tracking (issue #2939). A descending
 	// series of *distinct* (block, tx) validation failures each resets the
 	// same-block escalation to attempt 1, so the escalate-and-cap logic in
@@ -1474,6 +1496,23 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	}
 
 	ls.loadMithrilTrustBoundary()
+	// Repopulate the in-memory deferred-header set from the persisted markers
+	// so the snapshot retention floor covers headers still awaiting apply from
+	// before the restart (issue #3727, finding 3): without this the first
+	// post-restart epoch cleanup could prune a pool-stake snapshot such a
+	// header needs. Runs here, before the database worker pool and cleanup
+	// timer start, because it only reads ls.db directly and must FAIL CLOSED:
+	// a scan failure that continued would leave the floor unpinned, and once
+	// the apply cursor passes a pre-restart deferred header its now-pruned
+	// snapshot is hard-rejected instead of deferred (the exact bug this PR
+	// fixes). Aborting before any resource starts means there is nothing to
+	// unwind on failure.
+	if err := ls.repopulateDeferredHeaderValidation(); err != nil {
+		return fmt.Errorf(
+			"failed to repopulate deferred-header validation set: %w",
+			err,
+		)
+	}
 
 	// Initialize database worker pool for async operations
 	if !ls.config.DatabaseWorkerPoolConfig.Disabled {
@@ -6081,6 +6120,13 @@ func (ls *LedgerState) trustDijkstraTxValidationError(eraId uint) bool {
 		ls.config.SkipDijkstraTxValidation
 }
 
+// dijkstraEraGate uses the pparams-derived active era. A Musashi block may
+// decode through the Conway wire type while carrying a Dijkstra header; block
+// and header era values are not authoritative for ledger-era gates.
+func dijkstraEraGate(currentEra eras.EraDesc) bool {
+	return currentEra.Id == dijkstra.EraIdDijkstra
+}
+
 func (ls *LedgerState) ledgerProcessBlock(
 	txn *database.Txn,
 	point ocommon.Point,
@@ -6197,7 +6243,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// resolution, availability, decode, and apply failures abort the block.
 	// Storage-phase failures always abort the DB transaction so a partial
 	// endorser-block application cannot be committed.
-	if currentEra.Id == dijkstra.EraIdDijkstra {
+	if dijkstraEraGate(currentEra) {
 		if ls.config.EndorserBlockProvider == nil {
 			if certifier, ok := block.Header().(leiosEndorserBlockCertifier); ok {
 				if certified, present := certifier.LeiosCertified(); present &&
@@ -6211,7 +6257,9 @@ func (ls *LedgerState) ledgerProcessBlock(
 				}
 			}
 		} else {
-			ebHash, ebSize, referenced, refErr := ls.leiosEndorserBlockForApply(block)
+			ebHash, ebSlot, ebSize, referenced, refErr := ls.leiosEndorserBlockForApply(
+				block,
+			)
 			switch {
 			case refErr != nil:
 				if !ls.config.LeiosApplyEndorserBlockTxs {
@@ -6229,9 +6277,20 @@ func (ls *LedgerState) ledgerProcessBlock(
 					"error", refErr,
 				)
 			case referenced:
-				if ebSlot, ebTxs, ok := ls.config.EndorserBlockProvider(
+				// ebSlot is the expected slot leiosEndorserBlockForApply
+				// derived structurally (the endorser block shares its
+				// announcing ranking block's slot), passed to the provider
+				// as a required input rather than checked against its
+				// output: the manifest is content-addressed, so the same
+				// hash can be a live, independently required occurrence at
+				// more than one slot at once, and the provider resolves
+				// exactly this occurrence rather than whichever one happens
+				// to be cached for the hash (issue #3513 review).
+				ebTxs, ok := ls.config.EndorserBlockProvider(
 					ebHash.Bytes(),
-				); ok {
+					ebSlot,
+				)
+				if ok {
 					var donation uint64
 					applied, donation, err := ls.applyEndorserBlock(
 						txn,
@@ -6502,6 +6561,17 @@ func (ls *LedgerState) ledgerProcessBlock(
 		if shouldValidate {
 			if err := delta.applyWithoutRecordingDonations(ls, txn); err != nil {
 				delta.Release()
+				if errors.Is(err, models.ErrRewardWithdrawalExceedsBalance) {
+					return nil, &txValidationError{
+						BlockPoint: point,
+						TxHash: append(
+							[]byte(nil),
+							tx.Hash().Bytes()...,
+						),
+						Inputs: collectReferencedInputs(tx),
+						Cause:  err,
+					}
+				}
 				return nil, err
 			}
 			var err error

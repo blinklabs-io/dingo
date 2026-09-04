@@ -63,10 +63,11 @@ func (p *leiosRecoveryProbe) fetch(
 
 func (p *leiosRecoveryProbe) provider(
 	[]byte,
-) (uint64, []cbor.RawMessage, bool) {
+	uint64,
+) ([]cbor.RawMessage, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return 100, nil, p.available
+	return nil, p.available
 }
 
 func (p *leiosRecoveryProbe) attemptCount() int {

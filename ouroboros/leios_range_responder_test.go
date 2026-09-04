@@ -15,99 +15,27 @@
 package ouroboros
 
 import (
-	"bytes"
-	"encoding/binary"
-	"io"
-	"log/slog"
-	"net"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
-	"github.com/blinklabs-io/gouroboros/cbor"
-	gconnection "github.com/blinklabs-io/gouroboros/connection"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/muxer"
-	"github.com/blinklabs-io/gouroboros/protocol"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 	"github.com/stretchr/testify/require"
 )
 
-// leiosFetchServerPeer drives Dingo's real leios-fetch server config
-// (leiosfetchServerConnOpts, instrumentation wrappers included) over a real
-// muxer, so the assertions are about what Dingo actually puts on the wire
-// rather than about what a callback returns.
-type leiosFetchServerPeer struct {
-	o        *Ouroboros
-	peerConn net.Conn
-	errChan  chan error
-}
-
-func newLeiosFetchServerPeer(
-	t *testing.T,
-	o *Ouroboros,
-) *leiosFetchServerPeer {
+// newLeiosFetchServerPeer builds a muxerServerPeer driving Dingo's real
+// leios-fetch server config (leiosfetchServerConnOpts, instrumentation
+// wrappers included), so the assertions are about what Dingo actually puts
+// on the wire rather than about what a callback returns.
+func newLeiosFetchServerPeer(t *testing.T, o *Ouroboros) *muxerServerPeer {
 	t.Helper()
-	serverConn, peerConn := net.Pipe()
-	m := muxer.New(serverConn)
-	errChan := make(chan error, 4)
+	opts, peer := newMuxerServerPeer(t)
 	cfg := oleiosfetch.NewConfig(o.leiosfetchServerConnOpts()...)
-	server := oleiosfetch.NewServer(
-		protocol.ProtocolOptions{
-			ConnectionId: gconnection.ConnectionId{
-				LocalAddr:  serverConn.LocalAddr(),
-				RemoteAddr: serverConn.RemoteAddr(),
-			},
-			ErrorChan: errChan,
-			Muxer:     m,
-			Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-		&cfg,
-	)
-	server.Start()
-	m.Start()
-	t.Cleanup(func() {
-		server.Protocol.Stop()
-		m.Stop()
-		_ = serverConn.Close()
-		_ = peerConn.Close()
-	})
-	return &leiosFetchServerPeer{o: o, peerConn: peerConn, errChan: errChan}
-}
-
-// send writes msg to the server as a leios-fetch request segment.
-func (p *leiosFetchServerPeer) send(t *testing.T, msg protocol.Message) {
-	t.Helper()
-	data, err := cbor.Encode(msg)
-	require.NoError(t, err)
-	segment := muxer.NewSegment(oleiosfetch.ProtocolId, data, false)
-	require.NotNil(t, segment)
-	buf := &bytes.Buffer{}
-	require.NoError(
-		t,
-		binary.Write(buf, binary.BigEndian, segment.SegmentHeader),
-	)
-	_, err = buf.Write(segment.Payload)
-	require.NoError(t, err)
-	_, err = p.peerConn.Write(buf.Bytes())
-	require.NoError(t, err)
-}
-
-// readResponse reads one response segment, bounded by timeout so a request
-// that the server leaves pending fails the test instead of hanging it.
-func (p *leiosFetchServerPeer) readResponse(
-	t *testing.T,
-	timeout time.Duration,
-) *muxer.Segment {
-	t.Helper()
-	require.NoError(t, p.peerConn.SetReadDeadline(time.Now().Add(timeout)))
-	header := muxer.SegmentHeader{}
-	require.NoError(t, binary.Read(p.peerConn, binary.BigEndian, &header))
-	payload := make([]byte, header.PayloadLength)
-	_, err := io.ReadFull(p.peerConn, payload)
-	require.NoError(t, err)
-	return &muxer.Segment{SegmentHeader: header, Payload: payload}
+	server := oleiosfetch.NewServer(opts, &cfg)
+	peer.start(t, server)
+	return peer
 }
 
 // TestLeiosFetchBlockRangeRequestIsDeclined is the Dingo-owned half of issue
@@ -129,7 +57,7 @@ func TestLeiosFetchBlockRangeRequestIsDeclined(t *testing.T) {
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	peer := newLeiosFetchServerPeer(t, o)
 
-	peer.send(t, oleiosfetch.NewMsgBlockRangeRequest(
+	peer.send(t, oleiosfetch.ProtocolId, oleiosfetch.NewMsgBlockRangeRequest(
 		ocommon.NewPoint(3623, []byte{0x01, 0x02}),
 		ocommon.NewPoint(3700, []byte{0x03, 0x04}),
 	))
@@ -155,7 +83,7 @@ func TestLeiosFetchUnavailableBlockTxsAnswersNoBlockTxs(t *testing.T) {
 
 	// No endorser block is stored, so the callback reports
 	// ErrBlockTxsNotFound and the server answers MsgNoBlockTxs.
-	peer.send(t, oleiosfetch.NewMsgBlockTxsRequest(
+	peer.send(t, oleiosfetch.ProtocolId, oleiosfetch.NewMsgBlockTxsRequest(
 		ocommon.NewPoint(3623, make([]byte, lcommon.Blake2b256Size)),
 		map[uint16]uint64{0: 1 << 63},
 	))

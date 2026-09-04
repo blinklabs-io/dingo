@@ -167,7 +167,12 @@ func TestStoreLeiosEndorserBlockEmptyManifestIsHashMismatch(t *testing.T) {
 	emptyManifest := []byte{0xa0}
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	err := o.storeLeiosEndorserBlock(point, emptyManifest, nil)
+	err := o.storeLeiosEndorserBlock(
+		point,
+		emptyManifest,
+		nil,
+		leiosStoreAuthoritative,
+	)
 	require.Error(t, err)
 	require.ErrorContains(
 		t,
@@ -183,7 +188,7 @@ func TestStoreLeiosEndorserBlockEmptyManifestIsHashMismatch(t *testing.T) {
 	)
 
 	// Nothing was cached for the point.
-	_, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	_, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.False(t, ok)
 }
 
@@ -202,14 +207,19 @@ func TestStoreLeiosEndorserBlockGenuinelyEmptyEbStillRejected(t *testing.T) {
 	pipeline := &recordingLeiosPipelineHandler{}
 	o.leiosVotes = votes
 	o.leiosPipeline = pipeline
-	err := o.storeLeiosEndorserBlock(point, emptyManifest, nil)
+	err := o.storeLeiosEndorserBlock(
+		point,
+		emptyManifest,
+		nil,
+		leiosStoreAuthoritative,
+	)
 	require.Error(t, err)
 	require.ErrorContains(
 		t,
 		err,
 		"must contain at least one transaction reference",
 	)
-	_, cached := o.lookupLeiosEndorserBlock(point.Hash)
+	_, cached := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.False(t, cached)
 	require.Empty(t, votes.ebs)
 	require.Zero(t, pipeline.observed)
@@ -222,9 +232,17 @@ func TestStoreLeiosEndorserBlockValidManifestStillStores(t *testing.T) {
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 15, 300)
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
 
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.Equal(t, 300, data.txCount)
 	require.Equal(t, []byte(cbor.RawMessage(blockRaw)), data.blockRaw)

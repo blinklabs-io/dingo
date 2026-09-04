@@ -275,8 +275,21 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if data, ok := o.lookupLeiosEndorserBlock(ebHash); ok &&
-		data.completeTxCache() {
+	// The caller's point comes from the ranking block being applied, so it is
+	// authoritative for this endorser block's slot. Reconcile any entry cached
+	// from a peer offer before an announcement corroborated it: a matching
+	// entry is promoted (and published) here, a contradicting one is evicted so
+	// the fetch below replaces it rather than serving a poisoned slot to the
+	// ledger (issue #3513).
+	if publish := o.bindLeiosEndorserBlockSlot(ebHash, ebSlot); publish != nil {
+		publish()
+	}
+	// The lookup is keyed by (slot, hash): loadLeiosEBFromDB's blob reload
+	// only satisfies this specific occurrence when its persisted slot
+	// actually matches ebSlot, so a stale reload of a different occurrence
+	// cannot satisfy this check (issue #3513 review).
+	if data, ok := o.lookupLeiosEndorserBlock(ebSlot, ebHash); ok &&
+		data.completeTxCache() && data.slotVerified {
 		return nil
 	}
 	if o.connManager == nil {
@@ -398,8 +411,8 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 			}
 			continue
 		}
-		if data, ok := o.lookupLeiosEndorserBlock(ebHash); ok &&
-			data.completeTxCache() {
+		if data, ok := o.lookupLeiosEndorserBlock(ebSlot, ebHash); ok &&
+			data.completeTxCache() && data.slotVerified {
 			return nil
 		}
 		attempted++
@@ -534,7 +547,11 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 			g.markFetchFailed(time.Now(), leiosBackfillConnCooldown)
 		}
 	}()
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	// Keyed by (slot, hash): a cached or blob-reloaded entry for a different
+	// occurrence of this hash lives under its own key and is simply not
+	// found here, so it cannot be mistaken for this attempt's authoritative
+	// point (issue #3513 review).
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	if !ok {
 		reqCtx, cancel := leiosFetchRequestContext(ctx, deadline)
 		resp, err := client.BlockRequest(reqCtx, point)
@@ -553,11 +570,31 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 			point,
 			blk.BlockRaw,
 			nil,
+			leiosStoreAuthoritative,
 		); err != nil {
 			return fmt.Errorf("store manifest: %w", err)
 		}
-		if data, ok = o.lookupLeiosEndorserBlock(point.Hash); !ok {
+		data, ok = o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+		if !ok || data == nil {
 			return errors.New("manifest stored but not found in cache")
+		}
+	} else if !data.slotVerified {
+		// The entry already exists -- e.g. cached from a peer offer that
+		// raced ahead of its announcement -- but was never bound to an
+		// authoritative slot. point is ledger-derived and authoritative for
+		// this hash, and the bytes are already held, so bind it in place
+		// rather than falling through: completeTxCache() below would
+		// otherwise return nil on every connection this backfill tries
+		// without any of them ever verifying the entry, since none would
+		// take the !ok branch above (issue #3513 review).
+		if publish := o.bindLeiosEndorserBlockSlot(point.Hash, point.Slot); publish != nil {
+			publish()
+		}
+		data, ok = o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+		if !ok || data == nil {
+			return errors.New(
+				"manifest evicted while binding to authoritative point",
+			)
 		}
 	}
 	if data.txCount == 0 || data.completeTxCache() {
@@ -582,7 +619,12 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 	if err := validateLeiosEndorserBlockTxs(data.blockRaw, txs); err != nil {
 		return fmt.Errorf("validate tx references: %w", err)
 	}
-	if err := o.storeLeiosEndorserBlock(point, data.blockRaw, txs); err != nil {
+	if err := o.storeLeiosEndorserBlock(
+		point,
+		data.blockRaw,
+		txs,
+		leiosStoreAuthoritative,
+	); err != nil {
 		return fmt.Errorf("store txs: %w", err)
 	}
 	return nil

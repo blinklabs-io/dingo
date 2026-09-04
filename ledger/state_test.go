@@ -4523,8 +4523,9 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			EndorserBlockProvider: func(
 				[]byte,
-			) (uint64, []cbor.RawMessage, bool) {
-				return 0, nil, false
+				uint64,
+			) ([]cbor.RawMessage, bool) {
+				return nil, false
 			},
 		},
 	}

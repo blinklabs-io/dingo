@@ -86,8 +86,9 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// BlockfetchRequestRangeFunc below.
 		EndorserBlockProvider: func(
 			ebHash []byte,
-		) (uint64, []cbor.RawMessage, bool) {
-			return n.ouroboros().EndorserBlockTxsByHash(ebHash)
+			ebSlot uint64,
+		) ([]cbor.RawMessage, bool) {
+			return n.ouroboros().EndorserBlockTxsByHash(ebHash, ebSlot)
 		},
 		// Actively fetches a referenced endorser block by point and caches
 		// it. Used during historical catch-up: the prototype relay serves

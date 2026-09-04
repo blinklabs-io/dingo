@@ -54,18 +54,23 @@ producer-to-producer sync. Network spec: `testnet-dingo.yaml` (3 pools,
 
 ## Topology — conformance mode (`--conformance`)
 
-| Service            | Role                                | Host port | Container IP  |
-|--------------------|-------------------------------------|-----------|----------------|
-| `configurator`     | One-shot: generates keys + genesis  | —         | —              |
-| `dingo-producer`   | Dingo, forging with pool 1 keys     | `3010`    | `172.20.0.10`  |
-| `cardano-producer` | `cardano-node`, forging with pool 2 | `3011`    | `172.20.0.11`  |
-| `cardano-relay`    | `cardano-node` relay (no forging)   | `3012`    | `172.20.0.12`  |
-| `txpump`           | Submits payment txs into Dingo      | —         | `172.20.0.20`  |
+| Service            | Role                                 | Container IP  | NtN host port | NtC (LocalStateQuery) host port |
+|--------------------|---------------------------------------|---------------|---------------|----------------------------------|
+| `configurator`     | One-shot: generates keys + genesis  | —             | —             | —                                 |
+| `dingo-producer`   | Dingo, forging with pool 1 keys     | `172.20.0.10` | `3010`        | `3030`                            |
+| `cardano-producer` | `cardano-node`, forging with pool 2 | `172.20.0.11` | `3011`        | `3031`                            |
+| `cardano-relay`    | `cardano-node` relay (no forging)   | `172.20.0.12` | `3012`        | —                                 |
+| `txpump`           | Submits payment txs into Dingo      | `172.20.0.20` | —             | —                                 |
 
 This is unchanged from the original two-pool network: pool 1 and pool 2 are
-wired into a ring topology, the relay peers with both producers, and
-`cardano-producer`/`cardano-relay` have no NtC host port mapped (conformance
-scenarios do not run LocalStateQuery). Network spec: `testnet.yaml`.
+wired into a ring topology, and the relay peers with both producers. Network
+spec: `testnet.yaml`.
+
+`dingo-producer` and `cardano-producer` — the two nodes that actually forge
+blocks — both have an NtC host port mapped, so the host test harness can run
+LocalStateQuery against each and compare ledger state (see
+`TestLedgerStateConsensus` under Test scenarios below). `cardano-relay` has no
+NtC host port mapped; it isn't part of that comparison.
 
 In both modes, `txpump` is a load generator: it talks Ouroboros NtC over the
 Dingo node's container-network TCP endpoint and submits one payment
@@ -461,8 +466,54 @@ healthcheck) stays on a named Docker volume, and the host harness talks NtC
 over TCP instead. There is no host socket bind mount and no
 `DEVNET_IPC_DIR` environment variable.
 
-Conformance mode does not expose an NtC host port and has no LocalStateQuery
-helper — conformance scenarios only check chain tip/growth, not ledger state.
+### LocalStateQuery in conformance mode
+
+Conformance mode exposes NtC for both producers, so ledger state (not just
+chain tip/growth) can be compared against the reference implementation
+(`TestLedgerStateConsensus`, blinklabs-io/dingo#1900):
+
+- `dingo-producer` (in `--conformance` mode) exposes NtC the same way dingo
+  mode's nodes do (`DINGO_PRIVATE_BIND_ADDR=0.0.0.0` on private port 3002),
+  mapped to host port `3030` unless overridden with `DEVNET_DINGO_NTC_ADDR`
+  or `DEVNET_DINGO_NTC_PORT`.
+- `cardano-producer` (in `--conformance` mode) has no built-in TCP NtC
+  support — cardano-node only serves LocalStateQuery over its unix socket.
+  The `ghcr.io/blinklabs-io/cardano-node` image's `run-node` entrypoint
+  bridges this: setting `SOCAT_PORT` spawns a background `socat
+  TCP-LISTEN:<port>,fork UNIX-CLIENT:<socket-path>` inside the container.
+  `docker-compose.yml` sets `SOCAT_PORT: "3002"` on `cardano-producer` (the
+  same private-port number Dingo uses, purely by convention — it has no
+  special meaning to cardano-node), mapped to host port `3031` unless
+  overridden with `DEVNET_CARDANO_NTC_ADDR` or `DEVNET_CARDANO_NTC_PORT`.
+
+`internal/test/devnet/endpoints_conformance.go`'s `DingoProducerNtcAddr()`
+and `CardanoProducerNtcAddr()` return these host addresses, and
+`internal/nodeparity`'s `SnapshotAtTip(addr, magic)` (shared with
+`cmd/node-parity`; this scenario is not the only caller) queries one node's
+current protocol parameters, stake distribution, and whole UTxO set
+(normalized into a comparable form) via a single acquired LocalStateQuery
+session; `DiffSnapshots(a, b)` reports every divergence between two such
+snapshots.
+
+`GetStakeDistribution` and `GetUTxOWhole` (the two queries `SnapshotAtTip`
+needs beyond the ones already used elsewhere in this harness) did not have
+server-side support in Dingo before this scenario — they were part of the
+`// TODO (#394)` block in `ledger/queries.go`'s query dispatcher. They are
+implemented in `ledger/queries_stakedistribution.go` and
+`ledger/queries_utxowhole.go`, closing out #394 for those two query types
+specifically (the rest of that TODO block is unrelated to this scenario and
+remains open).
+
+Dingo's LocalStateQuery server (`ouroboros/localstatequery.go`) does not yet
+implement point-specific ledger views: every `Acquire` — even
+`Acquire(point)` for a specific historical block — is answered against the
+node's live tip (tracked upstream as blinklabs-io/dingo#382). Until that
+lands, `SnapshotAtTip` only supports "acquire the current volatile tip",
+and comparing two nodes at the same point requires confirming via NtN
+chain-tip polling that both report an identical tip immediately before and
+after the LocalStateQuery round trip — see `TestLedgerStateConsensus` for
+the retry loop this requires. This is why the scenario samples ledger state
+periodically at settled common tips rather than replaying every block.
 
 ### Running the CIP-50 pledge-leverage scenario
 
@@ -528,6 +579,7 @@ Reference-conformance scenario
 | Test | What it verifies |
 |------|-------------------|
 | `TestCardanoProducerChainAdvances` | `cardano-producer`'s tip advances (sanity check on the reference node) |
+| `TestLedgerStateConsensus` | dingo-producer's and cardano-producer's ledger state (protocol parameters, stake distribution, whole UTxO set) match at several settled common-tip samples over the run; fails with a diagnostic naming every divergence found |
 
 Dingo-only feature scenario
 (`//go:build linux && devnet && !devnet_conformance`) runs only in the default
@@ -539,7 +591,7 @@ dingo mode — no `cardano-node` reference exists for this feature:
 
 ## Port and address overrides
 
-`start.sh`/`run-tests.sh` derive a worktree-specific block for all 11
+`start.sh`/`run-tests.sh` derive a worktree-specific block for all 13
 variables below by default (see `devnet_ports` in [Cleanup](#cleanup)), so
 the defaults in this table only apply to a bare `docker compose up` or a
 single-worktree run with `DEVNET_*_PORT` set explicitly. Set any one of them
@@ -565,11 +617,15 @@ Dingo mode:
 
 Conformance mode:
 
-| Variable              | Default | Used by                                |
-|-----------------------|---------|------------------------------------------|
-| `DEVNET_DINGO_PORT`   | `3010`  | docker-compose host port for Dingo     |
-| `DEVNET_CARDANO_PORT` | `3011`  | docker-compose host port for cardano  |
-| `DEVNET_RELAY_PORT`   | `3012`  | docker-compose host port for relay    |
+| Variable                 | Default | Used by                                     |
+|--------------------------|---------|-----------------------------------------------|
+| `DEVNET_DINGO_PORT`      | `3010`  | docker-compose host port for Dingo NtN      |
+| `DEVNET_CARDANO_PORT`    | `3011`  | docker-compose host port for cardano NtN   |
+| `DEVNET_RELAY_PORT`      | `3012`  | docker-compose host port for relay NtN     |
+| `DEVNET_DINGO_NTC_PORT`  | `3030`  | docker-compose host port for `dingo-producer` NtC |
+| `DEVNET_CARDANO_NTC_PORT`| `3031`  | docker-compose host port for `cardano-producer` NtC (bridged by socat) |
+| `DEVNET_DINGO_NTC_ADDR`  | `localhost:<port above>` | `DingoProducerNtcAddr()` override |
+| `DEVNET_CARDANO_NTC_ADDR`| `localhost:<port above>` | `CardanoProducerNtcAddr()` override |
 | `DINGO_PORT`          | falls back to `DEVNET_DINGO_PORT`   | `run-tests.sh` only |
 | `CARDANO_PORT`        | falls back to `DEVNET_CARDANO_PORT` | `run-tests.sh` only |
 | `RELAY_PORT`          | falls back to `DEVNET_RELAY_PORT`   | `run-tests.sh` only |
@@ -595,20 +651,20 @@ harness and the compose port mappings always agree.
 | `start.sh` / `stop.sh`       | Convenience wrappers around `docker compose up -d` / `down -v`; accept `--conformance` |
 | `run-tests.sh`               | Full native-Linux bring-up → test → tear-down runner; accepts `--conformance`, `--keep-up`, and forwards other flags to `go test` |
 | `../antithesis/Dockerfile.txpump`, `../antithesis/cmd/txpump/` | Source for the `txpump` load generator image |
-| `harness.go`                 | Go test harness: Ouroboros NtN client, tip queries, consensus checks, the `WaitForChainStart` genesis gate, and per-scenario failure capture (`linux && devnet`) |
-| `config.go`                  | `testnet*.yaml` loader, derived timings, and spec validation (`linux`; its tests run in the ordinary Linux `go test ./...`) |
+| `harness.go`                 | Go test harness: Ouroboros NtN client, tip queries, consensus checks, the `WaitForChainStart` genesis gate, and per-scenario failure capture (build tag `devnet`) |
+| `config.go`                  | `testnet*.yaml` loader, derived timings, and spec validation (`linux`) |
 | `chainstate.go`              | Observed-chain state machine: applies RollForward/RollBackward, tracks tip and retained headers, and exposes cross-node agreement helpers and bounded-context conditions (`linux`) |
 | `timeline.go`                | `ScenarioPlan`: derives the accelerated scenario's phases, deadlines, outage length, and hard timeout from the network spec (`linux`) |
-| `observer.go`                | Persistent per-node ChainSync sessions feeding `chainstate.go`, with automatic reconnect across container restarts (`linux && devnet`) |
-| `nodectl.go`                 | Stops/starts compose services for the disruption phases and supplies the Docker side of failure capture (`linux && devnet`) |
-| `artifacts.go`               | What a failed scenario preserves and where: capture planning and artifact writing (`linux`; its tests run in the ordinary Linux `go test ./...`) |
+| `observer.go`                | Persistent per-node ChainSync sessions feeding `chainstate.go`, with automatic reconnect across container restarts (build tag `devnet`) |
+| `nodectl.go`                 | Stops/starts compose services for the disruption phases and supplies the Docker side of failure capture (build tag `devnet`) |
+| `artifacts.go`               | What a failed scenario preserves and where: capture planning and artifact writing (`linux`) |
 | `endpoints.go`               | The `NodeEndpoint` description shared by the harness, observers, and failure capture (`linux`) |
-| `endpoints_dingo.go`         | Dingo-mode node endpoints and NtC addresses (`linux && devnet && !devnet_conformance`) |
-| `endpoints_conformance.go`   | Conformance-mode node endpoints (`linux && devnet && devnet_conformance`) |
-| `lsq.go`                     | `RewardAccountsByNtc` / `RewardAccountsByNtcForCreds`: LocalStateQuery over NtC TCP (`linux && devnet`) |
-| `credentials.go`             | Loads genesis stake credentials for the CIP-50 scenario (`linux && devnet`) |
-| `harness_test.go`, `credentials_test.go` | Tests for the harness/credential helpers themselves (`linux && devnet`) |
-| `scenarios/`                 | DevNet test scenarios (`linux` plus the scenario-specific constraints in the Test scenarios table above) |
+| `endpoints_dingo.go`         | Dingo-mode node endpoints and NtC addresses (`//go:build devnet && !devnet_conformance`) |
+| `endpoints_conformance.go`   | Conformance-mode node endpoints, plus `DingoProducerNtcAddr()` / `CardanoProducerNtcAddr()` (`//go:build devnet && devnet_conformance`) |
+| `lsq.go`                     | `RewardAccountsByNtc` / `RewardAccountsByNtcForCreds`: LocalStateQuery over NtC TCP (build tag `devnet`) |
+| `credentials.go`             | Loads genesis stake credentials for the CIP-50 scenario (build tag `devnet`) |
+| `harness_test.go`, `credentials_test.go` | Tests for the harness/credential helpers themselves (build tag `devnet`) |
+| `scenarios/`                 | Devnet test scenarios (one or more `Test*` per file, gated per the Test scenarios table above) |
 
 ## Cleanup
 
@@ -648,8 +704,9 @@ you'd set `COMPOSE_PROJECT_NAME`.
 
 Published host ports are a fourth axis Compose does not scope by project at
 all: two worktrees' default ports (3010/3013-3015, 3020-3023, and
-conformance's 3010-3012) collide outright with "port is already allocated".
-`devnet_ports` derives a worktree-specific block of 11 ports (one hash-based
+conformance's 3010-3012, 3030-3031) collide outright with "port is already
+allocated".
+`devnet_ports` derives a worktree-specific block of 13 ports (one hash-based
 starting point, actually checked against what's listening on
 `127.0.0.1` and shifted forward a whole block at a time until every port in
 it is free) and exports it as the `DEVNET_*_PORT` / `DEVNET_*_NTC_PORT`
