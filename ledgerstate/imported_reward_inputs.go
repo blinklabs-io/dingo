@@ -550,7 +550,7 @@ func seedImportedRewardInputs(
 			0,
 		)
 		if bundle == nil || len(bundle.poolInputs) == 0 {
-			const reason = "derived reward basis contains no pool inputs"
+			reason := emptyRewardSeedFailureReason(c.snap)
 			if saveErr := store.SaveRewardSeedFailure(
 				c.epoch, "mark", reason, capturedSlot, txn,
 			); saveErr != nil {
@@ -668,6 +668,39 @@ func seedImportedRewardInputs(
 		}
 	}
 	return nil
+}
+
+func emptyRewardSeedFailureReason(snap *ParsedSnapShot) string {
+	const generic = "derived reward basis contains no pool inputs"
+	if snap == nil {
+		return generic
+	}
+	referenced := make([]string, 0)
+	seen := make(map[string]struct{})
+	for credential, stake := range snap.Stake {
+		if stake == 0 {
+			continue
+		}
+		poolKey := snap.Delegations[credential]
+		if len(poolKey) == 0 {
+			continue
+		}
+		poolHex := hex.EncodeToString(poolKey)
+		if _, ok := seen[poolHex]; ok {
+			continue
+		}
+		seen[poolHex] = struct{}{}
+		referenced = append(referenced, poolHex)
+	}
+	if len(referenced) == 0 {
+		return generic
+	}
+	sort.Strings(referenced)
+	reasons := make([]string, 0, len(referenced))
+	for _, pool := range referenced {
+		reasons = append(reasons, fmt.Sprintf("pool %s has no reward account", pool))
+	}
+	return generic + ": " + strings.Join(reasons, "; ")
 }
 
 // errRewardParamsWindowUnknown marks an epoch whose parameter lookup window
