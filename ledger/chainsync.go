@@ -5923,6 +5923,13 @@ func (ls *LedgerState) processEpochRollover(
 	if ls.config.CardanoNodeConfig != nil {
 		conwayGenesis = ls.config.CardanoNodeConfig.ConwayGenesis()
 	}
+	// Captured before enactment so the synthetic-V2 detection below can tell
+	// "this enactment actually wrote CostModels[1]" apart from "CostModels[1]
+	// was already there (the synthetic default) and this update touched some
+	// unrelated field" -- newPParams carries the synthetic default forward
+	// through every epoch until a real update replaces it, so its mere
+	// presence in the post-enactment result is not evidence of anything.
+	preEnactmentV2, preEnactmentHadV2 := extractRawCostModels(newPParams)[1]
 	govOut, err := governance.ProcessEpoch(&governance.EpochInput{
 		DB:                    ls.db,
 		Txn:                   txn,
@@ -5967,13 +5974,9 @@ func (ls *LedgerState) processEpochRollover(
 				"persist post-enactment pparams: %w", err,
 			)
 		}
-		// A real, on-chain-enacted PParamUpdate touched protocol params this
-		// epoch. If it set a PlutusV2 cost model, that is real governance
-		// data from here on -- clear the synthetic-default marker regardless
-		// of whether the enacted value happens to equal the default's (real
-		// governance re-affirming the same value is still real, not still a
-		// guess). See LedgerState.syntheticV2CostModel.
-		if _, hasV2 := extractRawCostModels(newPParams)[1]; hasV2 {
+		if realV2CostModelWritten(
+			preEnactmentHadV2, preEnactmentV2, newPParams,
+		) {
 			result.RealV2CostModelObserved = true
 		}
 	}

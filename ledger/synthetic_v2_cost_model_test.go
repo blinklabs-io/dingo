@@ -20,7 +20,9 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -108,6 +110,67 @@ func TestWithoutSyntheticV2CostModel_RemovesKeyWithoutMutatingOriginal(t *testin
 	// snapshot for internal script validation, must be untouched.
 	assert.Contains(t, original.CostModels, uint(1))
 	assert.Equal(t, []int64{2, 2, 2}, original.CostModels[1])
+}
+
+// TestWithoutSyntheticV2CostModel_CoversEveryEraType covers
+// blinklabs-io/dingo#3825's PR review: the filter's type switch must handle
+// every era type ShelleyCurrentProtocolParamsQuery can actually return
+// (Alonzo, Babbage, Conway, Dijkstra), not just Conway -- a regression in
+// any branch would otherwise pass the suite silently.
+func TestWithoutSyntheticV2CostModel_CoversEveryEraType(t *testing.T) {
+	costModels := map[uint][]int64{0: {1}, 1: {2}, 2: {3}}
+
+	t.Run("Alonzo", func(t *testing.T) {
+		pp := &alonzo.AlonzoProtocolParameters{CostModels: cloneMap(costModels)}
+		got := withoutSyntheticV2CostModel(pp, true)
+		fp, ok := got.(*alonzo.AlonzoProtocolParameters)
+		require.True(t, ok)
+		assert.NotContains(t, fp.CostModels, uint(1))
+		assert.Contains(t, pp.CostModels, uint(1), "original must be untouched")
+	})
+	t.Run("Babbage", func(t *testing.T) {
+		pp := &babbage.BabbageProtocolParameters{CostModels: cloneMap(costModels)}
+		got := withoutSyntheticV2CostModel(pp, true)
+		fp, ok := got.(*babbage.BabbageProtocolParameters)
+		require.True(t, ok)
+		assert.NotContains(t, fp.CostModels, uint(1))
+		assert.Contains(t, pp.CostModels, uint(1), "original must be untouched")
+	})
+	t.Run("Dijkstra", func(t *testing.T) {
+		pp := &dijkstra.DijkstraProtocolParameters{
+			ConwayProtocolParameters: conway.ConwayProtocolParameters{
+				CostModels: cloneMap(costModels),
+			},
+		}
+		got := withoutSyntheticV2CostModel(pp, true)
+		fp, ok := got.(*dijkstra.DijkstraProtocolParameters)
+		require.True(t, ok)
+		assert.NotContains(t, fp.CostModels, uint(1))
+		assert.Contains(t, pp.CostModels, uint(1), "original must be untouched")
+	})
+}
+
+func cloneMap(m map[uint][]int64) map[uint][]int64 {
+	out := make(map[uint][]int64, len(m))
+	for k, v := range m {
+		out[k] = append([]int64(nil), v...)
+	}
+	return out
+}
+
+// TestWithoutSyntheticV2CostModel_NilPointerDoesNotPanic covers
+// blinklabs-io/dingo#3825's PR review: a concrete-typed nil pointer
+// (lcommon.ProtocolParameters holding e.g. a nil *conway.ConwayProtocolParameters)
+// still matches its type's case in the switch, so each case must guard
+// against nil before dereferencing rather than panicking.
+func TestWithoutSyntheticV2CostModel_NilPointerDoesNotPanic(t *testing.T) {
+	var nilConway *conway.ConwayProtocolParameters
+	var pp lcommon.ProtocolParameters = nilConway
+
+	require.NotPanics(t, func() {
+		got := withoutSyntheticV2CostModel(pp, true)
+		assert.Equal(t, pp, got)
+	})
 }
 
 // TestWithoutSyntheticV2CostModel_NoOpWhenNotSynthetic covers the common
@@ -199,4 +262,93 @@ func TestQueryShelleyCurrentProtocolParams_IncludesRealV2CostModel(t *testing.T)
 
 	assert.Contains(t, pp.CostModels, uint(1))
 	assert.Equal(t, eras.DefaultPlutusV2CostModel, pp.CostModels[1])
+}
+
+// TestRealV2CostModelWritten_FalseWhenUnrelatedEnactmentCarriesItForward
+// covers blinklabs-io/dingo#3825's PR review: an enactment that changes some
+// other field must not clear the synthetic marker just because the
+// synthetic default is still (unchanged) present afterward -- that is
+// exactly the shape of "unrelated update, cost model happens to carry
+// forward," not evidence of real data.
+func TestRealV2CostModelWritten_FalseWhenUnrelatedEnactmentCarriesItForward(
+	t *testing.T,
+) {
+	after := &conway.ConwayProtocolParameters{
+		CostModels: map[uint][]int64{
+			0: {1},
+			1: eras.DefaultPlutusV2CostModel, // unchanged from before
+		},
+	}
+
+	assert.False(t, realV2CostModelWritten(
+		true, eras.DefaultPlutusV2CostModel, after,
+	))
+}
+
+// TestRealV2CostModelWritten_TrueWhenValueActuallyChanges covers the real
+// case this exists for: an enactment that writes a genuinely different
+// PlutusV2 cost model value.
+func TestRealV2CostModelWritten_TrueWhenValueActuallyChanges(t *testing.T) {
+	after := &conway.ConwayProtocolParameters{
+		CostModels: map[uint][]int64{
+			0: {1},
+			1: {9, 9, 9},
+		},
+	}
+
+	assert.True(t, realV2CostModelWritten(
+		true, eras.DefaultPlutusV2CostModel, after,
+	))
+}
+
+// TestRealV2CostModelWritten_TrueWhenKeyNewlyAppears covers an enactment
+// that sets the cost model for the first time (preHadV2 false), the other
+// way real data can appear.
+func TestRealV2CostModelWritten_TrueWhenKeyNewlyAppears(t *testing.T) {
+	after := &conway.ConwayProtocolParameters{
+		CostModels: map[uint][]int64{
+			0: {1},
+			1: {9, 9, 9},
+		},
+	}
+
+	assert.True(t, realV2CostModelWritten(false, nil, after))
+}
+
+// TestRealV2CostModelWritten_FalseWhenStillAbsent covers an enactment that
+// leaves the cost model unset entirely.
+func TestRealV2CostModelWritten_FalseWhenStillAbsent(t *testing.T) {
+	after := &conway.ConwayProtocolParameters{
+		CostModels: map[uint][]int64{0: {1}},
+	}
+
+	assert.False(t, realV2CostModelWritten(false, nil, after))
+}
+
+// TestSyntheticV2CostModelPersistence_RoundTripsAcrossRestart covers
+// blinklabs-io/dingo#3825's PR review: LedgerState.syntheticV2CostModel must
+// survive a restart via persistSyntheticV2CostModel/loadSyntheticV2CostModel,
+// not silently reconstruct as false (the zero value) regardless of the
+// chain's real history.
+func TestSyntheticV2CostModelPersistence_RoundTripsAcrossRestart(t *testing.T) {
+	ls := newPoolDistr2Ledger(t, newTestDB(t))
+
+	// Not yet persisted: a fresh database reads back false, same as an
+	// explicit false would.
+	ls.loadSyntheticV2CostModel()
+	assert.False(t, ls.syntheticV2CostModel)
+
+	ls.persistSyntheticV2CostModel(true)
+	// Simulate a restart: a fresh in-memory value, restored from the same
+	// database.
+	ls.syntheticV2CostModel = false
+	ls.loadSyntheticV2CostModel()
+	assert.True(t, ls.syntheticV2CostModel,
+		"restored value must survive the simulated restart")
+
+	ls.persistSyntheticV2CostModel(false)
+	ls.syntheticV2CostModel = true
+	ls.loadSyntheticV2CostModel()
+	assert.False(t, ls.syntheticV2CostModel,
+		"a later persisted false must also survive the simulated restart")
 }

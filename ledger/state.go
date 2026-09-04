@@ -76,6 +76,13 @@ const (
 	firstBlockIndex              = 1
 	mithrilLedgerSlotSyncKey     = "mithril_ledger_slot"
 	mithrilLedgerHashSyncKey     = "mithril_ledger_hash"
+	// syntheticV2CostModelSyncKey persists LedgerState.syntheticV2CostModel
+	// across restarts. Without this, a restarted node would reconstruct it
+	// as false (the zero value) regardless of the chain's real history,
+	// since transitionToEraFrom's detection only runs at the moment of a
+	// live era transition -- not again for every era a chain merely started
+	// in past (blinklabs-io/dingo#3825).
+	syntheticV2CostModelSyncKey = "synthetic_v2_cost_model"
 	// blockPipelineDecodeWorkers is the fixed decode worker count for phase 1
 	// of the block-processing pipeline (issue #1894). Validation workers stay
 	// at 0 (disabled) unless LedgerStateConfig.BlockPipelineValidateEnabled
@@ -1266,12 +1273,17 @@ type EpochRolloverResult struct {
 	// captures a mark snapshot.
 	BoundarySnapshotDeferred bool
 	// RealV2CostModelObserved is true when this rollover's governance
-	// enactment produced a PlutusV2 cost model from a real on-chain update
-	// (not a hard fork's own synthetic default). The caller uses this to
-	// clear LedgerState.syntheticV2CostModel once real data has actually
-	// been seen, regardless of whether the enacted value happens to match
-	// the synthetic default's -- real governance re-affirming the exact
-	// value Dingo already guessed is still real data, not still-synthetic.
+	// enactment specifically wrote a new PlutusV2 cost model value (not
+	// just left the hard fork's own synthetic default carried forward
+	// unchanged). The caller uses this to clear
+	// LedgerState.syntheticV2CostModel once real data has actually been
+	// written. Real governance re-affirming the exact value Dingo already
+	// guessed is indistinguishable, from this signal alone, from an
+	// unrelated enactment that never touched the cost model at all -- both
+	// leave CostModels[1] unchanged -- so that case is conservatively left
+	// synthetic rather than risk clearing it too early. See
+	// blinklabs-io/dingo#3825's PR review for why "present after
+	// enactment" alone is not sufficient evidence.
 	RealV2CostModelObserved bool
 }
 
@@ -1625,6 +1637,7 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	if err := ls.loadPParams(); err != nil {
 		return fmt.Errorf("failed to load pparams: %w", err)
 	}
+	ls.loadSyntheticV2CostModel()
 	// Reconstruct TransitionInfo from loaded state.  After restart, the
 	// in-memory field is zero (TransitionUnknown), but if the node shut down
 	// while in the window between an epoch-boundary version bump and the first
@@ -3910,6 +3923,57 @@ func (ls *LedgerState) applyEraTransition(result *EraTransitionResult) {
 	// handling.
 	if result.InjectedSyntheticV2CostModel {
 		ls.syntheticV2CostModel = true
+		ls.persistSyntheticV2CostModel(true)
+	}
+}
+
+// loadSyntheticV2CostModel restores LedgerState.syntheticV2CostModel from the
+// database at startup, so a restart does not silently reconstruct it as
+// false (the zero value) regardless of the chain's real history -- see
+// syntheticV2CostModelSyncKey. Must run after loadPParams, which this
+// otherwise has no ordering dependency on.
+//
+// A node whose database predates this field (blinklabs-io/dingo#3825) reads
+// an empty value here and starts as false ("not synthetic"), same as if the
+// key were explicitly written false. That is the correct answer for the
+// case this matters in practice -- a real network that hard-forked into
+// Babbage and received its real PlutusV2 update long ago -- and only wrong
+// for a database that both predates this field AND has never received that
+// real update, which is realistically a devnet/test network carried across
+// a binary upgrade at exactly that moment rather than a production node.
+// Not retroactively reconstructed by scanning full transition history.
+func (ls *LedgerState) loadSyntheticV2CostModel() {
+	value, err := ls.db.GetSyncState(syntheticV2CostModelSyncKey, nil)
+	if err != nil {
+		ls.config.Logger.Warn(
+			"failed to read synthetic PlutusV2 cost model marker from database",
+			"component", "ledger",
+			"error", err,
+		)
+		return
+	}
+	ls.syntheticV2CostModel = value == "true"
+}
+
+// persistSyntheticV2CostModel durably records LedgerState.syntheticV2CostModel
+// so a restart reconstructs it correctly instead of defaulting to false; see
+// syntheticV2CostModelSyncKey. Best-effort: a write failure only means a
+// possible one-time regression back to exposing the synthetic default after
+// the next restart, not a correctness problem for the running process (which
+// already has the in-memory field set), so it is logged rather than
+// propagated as an error from the era-transition/rollover path calling it.
+func (ls *LedgerState) persistSyntheticV2CostModel(value bool) {
+	v := "false"
+	if value {
+		v = "true"
+	}
+	if err := ls.db.SetSyncState(syntheticV2CostModelSyncKey, v, nil); err != nil {
+		ls.config.Logger.Warn(
+			"failed to persist synthetic PlutusV2 cost model marker",
+			"component", "ledger",
+			"value", value,
+			"error", err,
+		)
 	}
 }
 
@@ -3931,6 +3995,33 @@ func injectedSyntheticV2CostModel(
 		return false
 	}
 	return slices.Equal(afterV2, eras.DefaultPlutusV2CostModel)
+}
+
+// realV2CostModelWritten reports whether a governance enactment actually
+// wrote a PlutusV2 cost model, comparing against what the key held
+// immediately before enactment (preHadV2, pre) rather than merely checking
+// whether it is present in after. The synthetic default carries forward
+// through every epoch's pparams regardless of what an unrelated field's
+// enactment touches, so "present after enactment" alone is true whether or
+// not this specific update said anything about the cost model; only a real
+// change to the key is evidence of real data.
+//
+// Equal-to-before-and-still-present is deliberately NOT treated as a
+// change: from this signal alone there is no way to distinguish "governance
+// re-affirmed exactly this value" from "this enactment never touched the
+// key at all," so the safer read is to keep waiting for an unambiguous
+// write rather than risk clearing LedgerState.syntheticV2CostModel too
+// early. See blinklabs-io/dingo#3825's PR review.
+func realV2CostModelWritten(
+	preHadV2 bool,
+	pre []int64,
+	after lcommon.ProtocolParameters,
+) bool {
+	post, postHadV2 := extractRawCostModels(after)[1]
+	if !postHadV2 {
+		return false
+	}
+	return !preHadV2 || !slices.Equal(pre, post)
 }
 
 // IsAtTip reports whether the node has caught up to the chain tip at least
@@ -5368,6 +5459,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				ls.currentPParams = rolloverResult.NewCurrentPParams
 				if rolloverResult.RealV2CostModelObserved {
 					ls.syntheticV2CostModel = false
+					ls.persistSyntheticV2CostModel(false)
 				}
 				ls.checkpointWrittenForEpoch = rolloverResult.CheckpointWrittenForEpoch
 				ls.metrics.epochNum.Set(rolloverResult.NewEpochNum)
@@ -7670,6 +7762,7 @@ func (ls *LedgerState) setEpochCache(
 	ls.currentPParams = rolloverResult.NewCurrentPParams
 	if rolloverResult.RealV2CostModelObserved {
 		ls.syntheticV2CostModel = false
+		ls.persistSyntheticV2CostModel(false)
 	}
 	ls.checkpointWrittenForEpoch = rolloverResult.CheckpointWrittenForEpoch
 	ls.metrics.epochNum.Set(rolloverResult.NewEpochNum)

@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
 // ErrNilDecodedOutput is returned when a decoded UTxO output is nil.
@@ -663,35 +664,55 @@ func withoutSyntheticV2CostModel(
 	if !synthetic {
 		return pp
 	}
+	// A concrete-typed nil (pp holding e.g. a nil *conway.ConwayProtocolParameters)
+	// still matches its type's case below; guard every case before
+	// dereferencing rather than relying on the interface-level pp == nil
+	// check callers already do elsewhere in this file.
 	switch p := pp.(type) {
 	case *alonzo.AlonzoProtocolParameters:
+		if p == nil {
+			return pp
+		}
 		modified := *p
-		modified.CostModels = withoutCostModelKey(p.CostModels, 1)
+		modified.CostModels = withoutV2CostModelKey(p.CostModels)
 		return &modified
 	case *babbage.BabbageProtocolParameters:
+		if p == nil {
+			return pp
+		}
 		modified := *p
-		modified.CostModels = withoutCostModelKey(p.CostModels, 1)
+		modified.CostModels = withoutV2CostModelKey(p.CostModels)
 		return &modified
 	case *conway.ConwayProtocolParameters:
+		if p == nil {
+			return pp
+		}
 		modified := *p
-		modified.CostModels = withoutCostModelKey(p.CostModels, 1)
+		modified.CostModels = withoutV2CostModelKey(p.CostModels)
+		return &modified
+	case *dijkstra.DijkstraProtocolParameters:
+		if p == nil {
+			return pp
+		}
+		modified := *p
+		modified.CostModels = withoutV2CostModelKey(p.CostModels)
 		return &modified
 	default:
 		return pp
 	}
 }
 
-// withoutCostModelKey returns a new map holding every entry of m except key.
-func withoutCostModelKey(
+// withoutV2CostModelKey returns a new map holding every entry of m except
+// the PlutusV2 key (1).
+func withoutV2CostModelKey(
 	m map[uint][]int64,
-	key uint,
 ) map[uint][]int64 {
 	if m == nil {
 		return nil
 	}
 	out := make(map[uint][]int64, len(m))
 	for k, v := range m {
-		if k == key {
+		if k == 1 {
 			continue
 		}
 		out[k] = v
