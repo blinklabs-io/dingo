@@ -721,7 +721,7 @@ func accountRegistrationHistoryQuery(
 	parts := make([]string, 0, len(accountRegistrationHistorySources))
 	args := make([]any, 0, len(accountRegistrationHistorySources)*4)
 	for _, source := range accountRegistrationHistorySources {
-		deposit := "0"
+		deposit := "'0'"
 		if source.depositColumn != "" {
 			deposit = source.table + "." + source.depositColumn
 		}
