@@ -3439,7 +3439,9 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 			return err
 		}
 		if err := ls.validateAndEmitRollbackUndo(point); err != nil {
-			_ = clearRollbackIntent(ls.db)
+			if clearErr := clearRollbackIntent(ls.db); clearErr != nil {
+				return errors.Join(err, fmt.Errorf("clear durable rollback intent: %w", clearErr))
+			}
 			return err
 		}
 		evts, rbErr := ls.chain.RollbackDeferred(point)
@@ -7976,12 +7978,12 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 			"ledger_tip_hash",
 			hex.EncodeToString(ledgerTip.Point.Hash),
 		)
+		ls.transactionEventMutex.Lock()
+		defer ls.transactionEventMutex.Unlock()
 		if err := persistRollbackIntent(ls.db, chainTip.Point); err != nil {
 			return fmt.Errorf("persist rollback intent: %w", err)
 		}
-		if err := ls.validateAndEmitRollbackUndo(chainTip.Point); err != nil {
-			return fmt.Errorf("prepare rollback undo events: %w", err)
-		}
+		ls.emitRollbackTransactionEvents(ls.blocksAboveSlot(chainTip.Point.Slot))
 		if err := ls.rollback(chainTip.Point); err != nil {
 			return fmt.Errorf(
 				"rollback ledger tip to primary chain tip: %w",
@@ -8060,25 +8062,17 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		"ancestor_hash",
 		hex.EncodeToString(ancestor.Hash),
 	)
+	ls.transactionEventMutex.Lock()
+	defer ls.transactionEventMutex.Unlock()
 	if err := persistRollbackIntent(ls.db, ancestor); err != nil {
 		return fmt.Errorf("persist rollback intent: %w", err)
 	}
-	if err := ls.validateAndEmitRollbackUndo(ancestor); err != nil {
-		return fmt.Errorf("prepare rollback undo events: %w", err)
-	}
-	if err := ls.config.ChainManager.RewindPrimaryChainToPoint(
-		ancestor,
-	); err != nil {
-		return fmt.Errorf(
-			"rewind primary chain to common primary-chain ancestor: %w",
-			err,
-		)
+	ls.emitRollbackTransactionEvents(ls.blocksAboveSlot(ancestor.Slot))
+	if err := ls.config.ChainManager.RewindPrimaryChainToPoint(ancestor); err != nil {
+		return fmt.Errorf("rewind primary chain to common primary-chain ancestor: %w", err)
 	}
 	if err := ls.rollback(ancestor); err != nil {
-		return fmt.Errorf(
-			"rollback ledger tip to common primary-chain ancestor: %w",
-			err,
-		)
+		return fmt.Errorf("rollback ledger tip to common primary-chain ancestor: %w", err)
 	}
 	if err := clearRollbackIntent(ls.db); err != nil {
 		return fmt.Errorf("clear durable rollback intent: %w", err)

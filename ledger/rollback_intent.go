@@ -15,7 +15,6 @@
 package ledger
 
 import (
-	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -27,17 +26,18 @@ import (
 const durableRollbackIntentSyncKey = "ledger.rollback.pending"
 
 type durableRollbackIntent struct {
-	Slot uint64 `json:"slot"`
-	Hash string `json:"hash"`
+	Slot *uint64 `json:"slot"`
+	Hash *string `json:"hash"`
 }
 
 func persistRollbackIntent(db *database.Database, point ocommon.Point) error {
 	if db == nil || db.Metadata() == nil {
 		return nil
 	}
+	hash := hex.EncodeToString(point.Hash)
 	data, err := json.Marshal(durableRollbackIntent{
-		Slot: point.Slot,
-		Hash: hex.EncodeToString(point.Hash),
+		Slot: &point.Slot,
+		Hash: &hash,
 	})
 	if err != nil {
 		return fmt.Errorf("encode rollback intent: %w", err)
@@ -70,11 +70,17 @@ func loadRollbackIntent(db *database.Database) (ocommon.Point, bool, error) {
 	if err := json.Unmarshal([]byte(raw), &intent); err != nil {
 		return ocommon.Point{}, false, fmt.Errorf("decode rollback intent: %w", err)
 	}
-	hash, err := hex.DecodeString(intent.Hash)
+	if intent.Slot == nil || intent.Hash == nil {
+		return ocommon.Point{}, false, fmt.Errorf("rollback intent is missing slot or hash")
+	}
+	if (*intent.Slot == 0) != (*intent.Hash == "") {
+		return ocommon.Point{}, false, fmt.Errorf("rollback intent has invalid origin point")
+	}
+	hash, err := hex.DecodeString(*intent.Hash)
 	if err != nil {
 		return ocommon.Point{}, false, fmt.Errorf("decode rollback intent hash: %w", err)
 	}
-	return ocommon.Point{Slot: intent.Slot, Hash: hash}, true, nil
+	return ocommon.Point{Slot: *intent.Slot, Hash: hash}, true, nil
 }
 
 func (ls *LedgerState) recoverRollbackIntent() error {
@@ -83,14 +89,25 @@ func (ls *LedgerState) recoverRollbackIntent() error {
 		return err
 	}
 	ls.config.Logger.Warn("recovering interrupted ledger rollback", "component", "ledger", "slot", point.Slot)
-	ls.RLock()
-	current := ls.currentTip.Point
-	ls.RUnlock()
-	if current.Slot > point.Slot ||
-		(current.Slot == point.Slot && !bytes.Equal(current.Hash, point.Hash)) {
-		if err := ls.rollback(point); err != nil {
-			return fmt.Errorf("recover rollback intent: %w", err)
+	ls.transactionEventMutex.Lock()
+	defer ls.transactionEventMutex.Unlock()
+	if point.Slot > 0 {
+		contains, err := ls.primaryChainContainsPoint(point)
+		if err != nil {
+			return fmt.Errorf("validate rollback intent point: %w", err)
 		}
+		if !contains {
+			return fmt.Errorf("rollback intent point is not on the primary chain")
+		}
+	}
+	if ls.config.ChainManager != nil {
+		if err := ls.config.ChainManager.RewindPrimaryChainToPoint(point); err != nil {
+			return fmt.Errorf("recover primary chain rollback: %w", err)
+		}
+	}
+	ls.emitRollbackTransactionEvents(ls.blocksAboveSlot(point.Slot))
+	if err := ls.rollback(point); err != nil {
+		return fmt.Errorf("recover rollback intent: %w", err)
 	}
 	return clearRollbackIntent(ls.db)
 }

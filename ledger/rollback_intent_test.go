@@ -17,7 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRollbackIntentSurvivesReload(t *testing.T) {
+func TestRollbackIntentRoundTrip(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	point := ocommon.Point{Slot: 42, Hash: []byte{1, 2, 3}}
@@ -36,7 +36,16 @@ func TestRollbackIntentSurvivesReload(t *testing.T) {
 func TestRollbackIntentRejectsCorruptRecord(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
-	require.NoError(t, db.SetSyncState(durableRollbackIntentSyncKey, "not-json", nil))
-	_, _, err = loadRollbackIntent(db)
-	require.Error(t, err)
+	for _, raw := range []string{
+		"not-json",
+		`{}`,
+		`{"slot": 0}`,
+		`{"slot": 0, "hash": "01"}`,
+		`{"slot": 42, "hash": ""}`,
+		`{"slot": 42, "hash": "zz"}`,
+	} {
+		require.NoError(t, db.SetSyncState(durableRollbackIntentSyncKey, raw, nil))
+		_, _, err = loadRollbackIntent(db)
+		require.Error(t, err, raw)
+	}
 }
