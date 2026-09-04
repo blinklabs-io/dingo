@@ -188,9 +188,6 @@ func validPeerSnapshotHostname(host string) bool {
 	// DNS permits a trailing root label, but relay addresses must otherwise be
 	// plain hostnames. In particular, ports and IPv6 brackets belong to the
 	// separate endpoint fields and must not be smuggled into the host value.
-	// An all-numeric name is not a hostname endpoint: treating a malformed
-	// dotted-decimal IP address as one would defer the same invalid endpoint to
-	// DNS and the dialer.
 	if host == "" || len(host) > 254 || strings.TrimSpace(host) != host {
 		return false
 	}
@@ -198,25 +195,34 @@ func validPeerSnapshotHostname(host string) bool {
 	if host == "" || len(host) > 253 {
 		return false
 	}
-	nonNumeric := false
-	for label := range strings.SplitSeq(host, ".") {
+	labels := strings.Split(host, ".")
+	allNumeric := true
+	for _, label := range labels {
 		if len(label) == 0 || len(label) > 63 ||
 			label[0] == '-' || label[len(label)-1] == '-' {
 			return false
 		}
 		for _, char := range label {
-			if (char >= 'a' && char <= 'z') ||
-				(char >= 'A' && char <= 'Z') || char == '-' {
-				nonNumeric = true
-				continue
+			switch {
+			case char >= 'a' && char <= 'z',
+				char >= 'A' && char <= 'Z',
+				char == '-':
+				allNumeric = false
+			case char >= '0' && char <= '9':
+			default:
+				return false
 			}
-			if char >= '0' && char <= '9' {
-				continue
-			}
-			return false
 		}
 	}
-	return nonNumeric
+	// A four-label, fully numeric host has the shape of a dotted-decimal
+	// IPv4 address. net.ParseIP already rejected it as invalid, so treating
+	// it as a hostname would defer the same malformed endpoint to DNS and
+	// the dialer instead of rejecting it here. Other all-numeric hosts (a
+	// lone numeric label, for example) are legitimate hostnames.
+	if allNumeric && len(labels) == 4 {
+		return false
+	}
+	return true
 }
 
 func NewTopologyConfigFromFile(path string) (*TopologyConfig, error) {

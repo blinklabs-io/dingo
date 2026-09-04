@@ -489,6 +489,12 @@ func TestPeerSnapshotConfigValidate(t *testing.T) {
 			},
 		},
 		{
+			name: "valid all-numeric hostname is not IPv4-shaped",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "12345"
+			},
+		},
+		{
 			name: "hostname includes port",
 			mutate: func(s *topology.PeerSnapshotConfig) {
 				s.BigLedgerPools[0].Relays[0].Address = "relay.example:3001"
