@@ -1395,6 +1395,13 @@ func TestValidateOpCertSequence(t *testing.T) {
 			candidate:    7,
 			enforceNoGap: false,
 		},
+		{
+			name:         "maximum counter accepted when unchanged",
+			stored:       math.MaxUint64,
+			found:        true,
+			candidate:    math.MaxUint64,
+			enforceNoGap: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

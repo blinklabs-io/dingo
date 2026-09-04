@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"reflect"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -1248,7 +1249,7 @@ func (f *BlockForger) checkOpCertSequence(
 		return fmt.Errorf("opcert sequence lookup: %w", err)
 	}
 	pparams := f.eraParams.ProtocolParamsForSlot(slot)
-	if pparams == nil {
+	if pparams == nil || (reflect.ValueOf(pparams).Kind() == reflect.Ptr && reflect.ValueOf(pparams).IsNil()) {
 		return fmt.Errorf(
 			"protocol parameters unavailable for slot %d",
 			slot,

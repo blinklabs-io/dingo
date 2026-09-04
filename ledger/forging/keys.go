@@ -1149,7 +1149,7 @@ func validateOpCertSequence(
 			stored,
 		)
 	}
-	if enforceNoGap && candidate > stored+1 {
+	if enforceNoGap && candidate > stored && candidate-stored > 1 {
 		return fmt.Errorf(
 			"opcert counter %d skips ahead of last seen %d (gapped rotation)",
 			candidate,
