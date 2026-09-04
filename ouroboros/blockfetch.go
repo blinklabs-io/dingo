@@ -237,12 +237,12 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 	// answer NoBlocks when it does not, matching the other invalid-range
 	// rejections in this function.
 	//
-	// ChainHoldsPoint resolves the point (block-by-point lookup plus the
+	// Chain.HoldsPoint resolves the point (block-by-point lookup plus the
 	// chain-membership check) without allocating an iterator, so this adds a
 	// point resolution per request, not a second chain walk. Whether the end
 	// point is reachable *from* start is still not checked: that is the walk,
 	// and the iterator loop below already stops at end.Slot.
-	if !o.ledgerState.ChainHoldsPoint(end) {
+	if !o.ledgerState.Chain().HoldsPoint(end) {
 		o.config.Logger.Debug(
 			"blockfetch: end point not found in chain, sending NoBlocks",
 			"connection_id", ctx.ConnectionId.String(),
