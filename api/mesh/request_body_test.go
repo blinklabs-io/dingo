@@ -39,6 +39,15 @@ import (
 // while staying far above the loopback round trip it measures against.
 const testBodyTimeout = 250 * time.Millisecond
 
+// respondWithin bounds how long a bounded handler may take to answer.
+// It has to clear loopback and CI scheduling noise, but it also has to
+// stay well under both listenerReadTimeout and any plausible
+// regression of the body deadline: an allowance of tens of seconds
+// would pass a deadline that had grown to seconds, or been dropped
+// onto the listener backstop, which is the regression these cases
+// exist to catch.
+const respondWithin = 20 * testBodyTimeout
+
 // withRequestBodyTimeout sets the per-request body deadline so a test
 // need not wait out the production default.
 func withRequestBodyTimeout(d time.Duration) serverOption {
@@ -134,14 +143,21 @@ func TestRequestBodyStalledClientIsBounded(t *testing.T) {
 	conn := dialTestServer(t, baseURL)
 	// Declares far more body than it sends, then goes quiet without
 	// closing: the connection stays open and silent indefinitely.
+	start := time.Now()
 	writePartialRequest(
 		t, conn, "/network/list", 4096,
 		`{"network_identifier":{"blockchain":"cardano"`,
 	)
 
-	resp, body := readMeshResponse(t, conn, 30*time.Second)
+	resp, body := readMeshResponse(t, conn, respondWithin)
+	elapsed := time.Since(start)
 
 	requireInvalidRequest(t, resp, body)
+	// The deadline is what ended this read. An answer arriving before
+	// it could not have come from waiting on the body, so it would
+	// mean the request failed for some other reason and the case was
+	// no longer exercising the bound it names.
+	require.GreaterOrEqual(t, elapsed, testBodyTimeout)
 }
 
 // TestRequestBodyTruncatedIsRejected covers a body shorter than its
@@ -162,7 +178,7 @@ func TestRequestBodyTruncatedIsRejected(t *testing.T) {
 	require.True(t, ok)
 	require.NoError(t, tcpConn.CloseWrite())
 
-	resp, body := readMeshResponse(t, conn, 30*time.Second)
+	resp, body := readMeshResponse(t, conn, respondWithin)
 
 	requireInvalidRequest(t, resp, body)
 }
