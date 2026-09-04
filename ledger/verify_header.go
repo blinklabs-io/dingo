@@ -78,6 +78,9 @@ var (
 	errLeaderStakeSnapshotUnavailable = errors.New(
 		"leader stake snapshot unavailable",
 	)
+	errVrfKeyRegistrationHistoryUnavailable = errors.New(
+		"VRF key registration history unavailable",
+	)
 	// errEpochNonceUnavailable marks an epoch-cache entry that covers the
 	// requested slot but has no published Praos nonce. Byron epochs always
 	// have this shape; a post-Byron entry can also have it transiently while
@@ -523,9 +526,10 @@ func (ls *LedgerState) verifyBlockHeaderState(
 	// The crypto path above verifies the VRF proof only against the key carried
 	// in the header (SkipStakePoolValidation skips gouroboros' registered-key
 	// check), so without this an attacker can grind VRF keys to win slots.
-	if err := ls.verifyRegisteredVrfKey(block); err != nil {
+	if err := ls.verifyRegisteredVrfKey(block, epochId); err != nil {
 		if allowStateDefer &&
-			errors.Is(err, models.ErrPoolNotFound) &&
+			(errors.Is(err, models.ErrPoolNotFound) ||
+				errors.Is(err, errVrfKeyRegistrationHistoryUnavailable)) &&
 			ls.ledgerTipBehindSlot(block.SlotNumber()) {
 			return fmt.Errorf(
 				"%w: registered VRF key state for slot %d is ahead of the ledger apply cursor: %w",
@@ -1389,6 +1393,110 @@ func (ls *LedgerState) shouldUseImportedActivePoolDistribution(
 	return epochId == mithrilEpoch.EpochId, nil
 }
 
+// electingVrfKeyHash returns the VRF key hash that was effective for the pool
+// parameters used by the stake snapshot that elected the block. A pool's live
+// registration is not sufficient because a re-registration does not alter an
+// already-created leader schedule.
+func (ls *LedgerState) electingVrfKeyHash(
+	block ledger.Block,
+	epochId uint64,
+	poolKeyHash lcommon.PoolKeyHash,
+) (lcommon.Blake2b256, bool, error) {
+	cutoffSlot, ok, err := ls.electingPoolParamsCutoffSlot(
+		block,
+		epochId,
+		poolKeyHash,
+	)
+	if err != nil {
+		return lcommon.Blake2b256{}, false, err
+	}
+	if ok {
+		vrfKeyHash, found, err := ls.db.Metadata().GetPoolVrfKeyHashAtSlot(
+			poolKeyHash[:],
+			cutoffSlot,
+			nil,
+		)
+		if err != nil {
+			return lcommon.Blake2b256{}, false, err
+		}
+		if found && len(vrfKeyHash) == len(lcommon.Blake2b256{}) {
+			var hash lcommon.Blake2b256
+			copy(hash[:], vrfKeyHash)
+			return hash, true, nil
+		}
+		return lcommon.Blake2b256{}, false, fmt.Errorf(
+			"%w at slot %d for pool %x",
+			errVrfKeyRegistrationHistoryUnavailable,
+			cutoffSlot,
+			poolKeyHash[:],
+		)
+	}
+
+	// No usable snapshot means header verification is ahead of the state needed
+	// to place this header. Preserve the live lookup for that existing path, but
+	// never use it to replace a present snapshot's missing history.
+	pool, err := ls.db.GetPool(poolKeyHash, true, nil)
+	if err != nil {
+		return lcommon.Blake2b256{}, false, err
+	}
+	hash, ok := registeredPoolVrfKeyHash(pool)
+	return hash, ok, nil
+}
+
+// electingPoolParamsCutoffSlot returns the last slot whose pool parameters were
+// effective for the snapshot that elected the block. The snapshot captures
+// stake at the end of one epoch, but Cardano's EPOCH rule applies SNAP before
+// promoting pool parameters submitted during that epoch. A registration in the
+// capture epoch therefore cannot affect the snapshot's electing parameters.
+//
+// The caller supplies the epoch already resolved by header validation so the
+// VRF and leader-eligibility checks use one epoch-cache decision. The bool is
+// true only when a usable, non-genesis snapshot exists; false preserves the
+// existing live lookup for headers whose snapshot state is not available yet.
+func (ls *LedgerState) electingPoolParamsCutoffSlot(
+	block ledger.Block,
+	epochId uint64,
+	poolKeyHash lcommon.PoolKeyHash,
+) (uint64, bool, error) {
+	snapshotEpoch := praos.StakeSnapshotEpoch(epochId)
+	snapshotType := models.PoolStakeSnapshotTypeMark
+	useImportedActive, err := ls.shouldUseImportedActivePoolDistribution(
+		block,
+		epochId,
+	)
+	if err != nil {
+		return 0, false, err
+	}
+	if useImportedActive {
+		snapshotEpoch = epochId
+		snapshotType = models.PoolStakeSnapshotTypeActive
+	}
+	snapshot, err := ls.db.Metadata().GetPoolStakeSnapshot(
+		snapshotEpoch,
+		snapshotType,
+		poolKeyHash[:],
+		nil,
+	)
+	if err != nil || snapshot == nil || snapshot.CapturedSlot == 0 {
+		return 0, false, err
+	}
+	capturedEpoch, err := ls.epochForSlot(snapshot.CapturedSlot)
+	if err != nil {
+		return 0, false, fmt.Errorf(
+			"%w at snapshot capture slot %d: %w",
+			errVrfKeyRegistrationHistoryUnavailable,
+			snapshot.CapturedSlot,
+			err,
+		)
+	}
+	if capturedEpoch.StartSlot == 0 {
+		// A positive capture in the first epoch still has a well-defined
+		// genesis-era parameter cutoff at slot zero.
+		return 0, true, nil
+	}
+	return capturedEpoch.StartSlot - 1, true, nil
+}
+
 // verifyRegisteredVrfKey rejects a block whose VRF verification key (carried in
 // the header body) is not the VRF key the producing pool registered on-chain.
 // The block's VRF proof is validated only against this embedded key, and the
@@ -1398,6 +1506,7 @@ func (ls *LedgerState) shouldUseImportedActivePoolDistribution(
 // dingo's crypto path skips via SkipStakePoolValidation.
 func (ls *LedgerState) verifyRegisteredVrfKey(
 	block ledger.Block,
+	epochId uint64,
 ) error {
 	// Byron (PBFT) blocks have no pool-registered VRF key.
 	if block.Era().Id == byron.EraIdByron {
@@ -1421,7 +1530,11 @@ func (ls *LedgerState) verifyRegisteredVrfKey(
 			block.SlotNumber(),
 		)
 	}
-	pool, err := ls.db.GetPool(poolKeyHash, true, nil)
+	registeredVrfKeyHash, ok, err := ls.electingVrfKeyHash(
+		block,
+		epochId,
+		poolKeyHash,
+	)
 	if err != nil {
 		return fmt.Errorf(
 			"block header verification rejected at slot %d: "+
@@ -1431,7 +1544,6 @@ func (ls *LedgerState) verifyRegisteredVrfKey(
 			err,
 		)
 	}
-	registeredVrfKeyHash, ok := registeredPoolVrfKeyHash(pool)
 	if !ok {
 		return fmt.Errorf(
 			"block header verification rejected at slot %d: "+

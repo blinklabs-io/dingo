@@ -1023,6 +1023,57 @@ ORDER BY item.added_slot ASC, tx.block_index ASC, c.cert_index ASC`,
 	return registrations, retirements, nil
 }
 
+// GetPoolVrfKeyHashAtSlot returns the VRF key hash from the latest pool
+// registration at or before slot. Pool parameters are effective for the
+// epoch after they are submitted, so callers use the boundary at which those
+// parameters were effective rather than the current pool row.
+//
+// The ordering matches GetPoolRegistrationsAtSlot and
+// GetActivePoolKeyHashesAtSlot: the latest slot wins, followed by transaction
+// and certificate position. The bool distinguishes a pool with no historical
+// registration from a registration whose VRF key is malformed or absent.
+func (s *Store) GetPoolVrfKeyHashAtSlot(
+	poolKeyHash []byte,
+	slot uint64,
+	txn types.Txn,
+) ([]byte, bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, false, fmt.Errorf(
+			"GetPoolVrfKeyHashAtSlot: resolve db: %w",
+			err,
+		)
+	}
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, false, fmt.Errorf("GetPoolVrfKeyHashAtSlot: %w", err)
+	}
+	var vrfKeyHash []byte
+	err = db.QueryRowContext(ctx, `
+SELECT pr.vrf_key_hash
+FROM pool_registration pr
+JOIN pool p ON p.id = pr.pool_id
+LEFT JOIN certs c ON c.id = pr.certificate_id
+LEFT JOIN "transaction" t ON t.id = c.transaction_id
+WHERE p.pool_key_hash = ?
+  AND pr.added_slot <= ?
+ORDER BY pr.added_slot DESC,
+         COALESCE(t.block_index, 0) DESC,
+         COALESCE(c.cert_index, 0) DESC,
+         pr.id DESC
+LIMIT 1`,
+		poolKeyHash,
+		slotValue,
+	).Scan(&vrfKeyHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("GetPoolVrfKeyHashAtSlot: %w", err)
+	}
+	return vrfKeyHash, true, nil
+}
+
 func (s *Store) GetActivePoolKeyHashesAtSlot(
 	slot uint64,
 	txn types.Txn,

@@ -1790,6 +1790,16 @@ type MetadataStore interface {
 	// for the requested slot. Callers should use errors.Is() to check.
 	GetActivePoolKeyHashesAtSlot(uint64, types.Txn) ([][]byte, error)
 
+	// GetPoolVrfKeyHashAtSlot returns the VRF key hash from the latest
+	// registration for a pool at or before the requested slot. The bool reports
+	// whether a registration exists; it is false for an unknown or not-yet-
+	// registered pool.
+	GetPoolVrfKeyHashAtSlot(
+		[]byte, // poolKeyHash
+		uint64, // slot
+		types.Txn,
+	) ([]byte, bool, error)
+
 	// GetPoolsRetiringAtEpoch returns the pools whose effective retirement
 	// (the latest retirement not cancelled by a later re-registration, as of
 	// the boundary slot) takes effect at the given epoch, along with the

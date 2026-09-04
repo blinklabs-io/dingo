@@ -42,7 +42,7 @@ func TestVerifyRegisteredVrfKey_RejectsUnregisteredOrMismatchedKey(
 
 	// No pool registration seeded for this block's issuer, so the header's VRF
 	// key is not bound to any registered VRF key.
-	err := ls.verifyRegisteredVrfKey(tb.block)
+	err := ls.verifyRegisteredVrfKey(tb.block, 5)
 	require.Error(
 		t,
 		err,
@@ -77,7 +77,7 @@ func TestVerifyRegisteredVrfKey_RejectsUnregisteredOrMismatchedKey(
 	)
 	require.NoError(t, err)
 
-	err = ls.verifyRegisteredVrfKey(tb.block)
+	err = ls.verifyRegisteredVrfKey(tb.block, 5)
 	require.Error(
 		t,
 		err,
@@ -116,7 +116,7 @@ func TestVerifyRegisteredVrfKey_AcceptsMatchingKeyRejectsMismatch(
 
 	require.NoError(
 		t,
-		ls.verifyRegisteredVrfKey(tbMatch.block),
+		ls.verifyRegisteredVrfKey(tbMatch.block, 5),
 		"block whose header VRF key hashes to the pool's registered "+
 			"VRF key hash must be accepted",
 	)
@@ -143,7 +143,7 @@ func TestVerifyRegisteredVrfKey_AcceptsMatchingKeyRejectsMismatch(
 	mismatchPoolKeyHash := tbMismatch.block.IssuerVkey().Hash()
 	seedPoolRegistration(t, db, mismatchPoolKeyHash[:], wrongVrfKeyHash)
 
-	err = ls.verifyRegisteredVrfKey(tbMismatch.block)
+	err = ls.verifyRegisteredVrfKey(tbMismatch.block, 5)
 	require.Error(
 		t,
 		err,
@@ -220,7 +220,7 @@ VALUES (?, ?, 2, 2)`,
 
 	require.NoError(
 		t,
-		ls.verifyRegisteredVrfKey(tb.block),
+		ls.verifyRegisteredVrfKey(tb.block, 5),
 		"registered VRF-key binding must not depend on current-tip "+
 			"active pool filtering",
 	)
@@ -261,7 +261,7 @@ func TestVerifyRegisteredVrfKey_UsesLatestRegistrationBeforePoolRowHash(
 
 	require.NoError(
 		t,
-		ls.verifyRegisteredVrfKey(tb.block),
+		ls.verifyRegisteredVrfKey(tb.block, 5),
 		"latest registration VRF hash should take precedence over stale "+
 			"denormalized pool VRF hash",
 	)
