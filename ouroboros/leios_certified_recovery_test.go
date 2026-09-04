@@ -211,10 +211,9 @@ func leiosCertifiedRecoveryFixture(
 
 // poisonLeiosFetchBlockTxsSlot leaves conn's leios-fetch block-txs request slot
 // permanently abandoned, exactly as a by-point attempt whose deadline expires
-// before the relay answers does. Every later request on that connection then
-// returns ErrRequestSlotAbandoned, for the life of the connection: this is the
-// state that made a from-genesis sync wedge on an unavailable certified endorser
-// block (dingo #3552).
+// before the relay answers does. Do not probe the slot here: the next request's
+// ErrRequestSlotAbandoned is what fails the connection, and the production path
+// under test must be the caller that observes and classifies it (dingo #3552).
 func poisonLeiosFetchBlockTxsSlot(
 	t *testing.T,
 	conn *gouroboros.Connection,
@@ -230,15 +229,6 @@ func poisonLeiosFetchBlockTxsSlot(
 	resp, err := conn.LeiosFetch().Client.BlockTxsRequest(ctx, point, bitmap)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Nil(t, resp)
-	// Confirm the slot really is stuck, so the test below cannot pass for any
-	// other reason.
-	resp, err = conn.LeiosFetch().Client.BlockTxsRequest(
-		context.Background(),
-		point,
-		bitmap,
-	)
-	require.ErrorIs(t, err, leiosfetch.ErrRequestSlotAbandoned)
-	require.Nil(t, resp)
 }
 
 // TestFetchEndorserBlockByPointRecyclesDeadConnectionAndFailsOver is the
@@ -249,16 +239,16 @@ func poisonLeiosFetchBlockTxsSlot(
 // to be replaced. This asserts the fetch (a) fails over to a healthy peer and
 // makes the endorser block available to the ledger provider, (b) diagnoses the
 // dead connection and asks the connection manager to recycle it so peer
-// governance dials a replacement, and (c) publishes exactly one recycle request
-// per connection however many fetches hit it.
+// governance dials a replacement, and (c) does not publish another recycle
+// request after that connection has been removed.
 func TestFetchEndorserBlockByPointRecyclesDeadConnectionAndFailsOver(
 	t *testing.T,
 ) {
 	tx, manifestRaw, point, bitmap := leiosCertifiedRecoveryFixture(t, 0x52, 376038)
 	// A second, still-incomplete endorser block, so the duplicate-recycle
-	// assertion below drives a real second fetch onto the dead connection. A
-	// re-fetch of the first block would return from the complete-cache fast
-	// path and prove only that a cache hit publishes nothing.
+	// assertion below drives a real second fetch after the dead connection is
+	// removed. A re-fetch of the first block would return from the complete-cache
+	// fast path and prove only that a cache hit publishes nothing.
 	_, manifestRaw2, point2, _ := leiosCertifiedRecoveryFixture(t, 0x62, 376138)
 
 	deadConn, deadDone := newLeiosFetchConversation(
@@ -339,6 +329,10 @@ func TestFetchEndorserBlockByPointRecyclesDeadConnectionAndFailsOver(
 	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil, leiosStoreAuthoritative))
 	require.NoError(t, o.storeLeiosEndorserBlock(point2, manifestRaw2, nil, leiosStoreAuthoritative))
 	poisonLeiosFetchBlockTxsSlot(t, deadConn, point, bitmap)
+	// Synchronize with the mock accepting the unanswered request. The slot is
+	// now abandoned, but the connection remains live until the production fetch
+	// below diagnoses it.
+	requireLeiosFetchConversationDone(t, deadDone)
 
 	// Make the dead connection the first candidate, so the fetch cannot succeed
 	// by simply preferring the healthy peer.
@@ -374,19 +368,25 @@ func TestFetchEndorserBlockByPointRecyclesDeadConnectionAndFailsOver(
 		o.leiosFetchGuardFor(healthyConn.Id()).isProtocolDead(),
 		"healthy connection was wrongly diagnosed as dead",
 	)
+	require.Eventually(
+		t,
+		func() bool { return cm.GetConnectionById(deadConn.Id()) == nil },
+		2*time.Second,
+		time.Millisecond,
+		"diagnosed connection was not removed",
+	)
 
-	// A second dead fetch must not raise a second recycle request for the same
-	// connection. This one is for a different, still-incomplete endorser block,
-	// so it cannot short-circuit on the cache: the healthy peer declines its
-	// transactions and the dead connection is attempted again, returning
-	// ErrRequestSlotAbandoned from its poisoned slot.
+	// A second fetch must not raise another recycle request after peer governance
+	// removes the diagnosed connection. This one is for a different,
+	// still-incomplete endorser block, so it cannot short-circuit on the cache:
+	// the remaining healthy peer answers that its transactions are unavailable.
 	err := o.FetchEndorserBlockByPoint(
 		context.Background(),
 		point2.Slot,
 		point2.Hash,
 	)
 	require.Error(t, err, "the second endorser block must not be servable")
-	require.ErrorIs(t, err, leiosfetch.ErrRequestSlotAbandoned)
+	require.ErrorIs(t, err, leiosfetch.ErrBlockTxsNotFound)
 	require.NotErrorIs(
 		t,
 		err,
@@ -400,7 +400,6 @@ func TestFetchEndorserBlockByPointRecyclesDeadConnectionAndFailsOver(
 		"recycle request repeated for an already-diagnosed connection",
 	)
 
-	requireLeiosFetchConversationDone(t, deadDone)
 	requireLeiosFetchConversationDone(t, healthyDone)
 }
 
