@@ -8816,7 +8816,16 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 	// Epoch lengths can change at an era boundary. Resolve the target slot
 	// through the multi-era converter so a Byron prefix does not make a
 	// future Shelley slot appear to belong to an early epoch.
-	slotEpoch := slot / uint64(currentEpoch.LengthInSlots)
+	slotEpoch := currentEpoch.EpochId
+	if slot >= currentEpoch.StartSlot {
+		slotEpoch += (slot - currentEpoch.StartSlot) /
+			uint64(currentEpoch.LengthInSlots)
+	} else {
+		// A historical slot cannot require forecasting beyond the current
+		// epoch. Keep the old absolute-slot estimate only as a conservative
+		// value for the comparison below.
+		slotEpoch = slot / uint64(currentEpoch.LengthInSlots)
+	}
 	if slotInfo, err := ls.SlotToEpoch(slot); err == nil {
 		slotEpoch = slotInfo.EpochId
 	}
