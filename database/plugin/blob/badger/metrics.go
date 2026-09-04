@@ -211,8 +211,10 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 			Help: "Total block cache hits",
 		},
 		func() float64 {
-			if m := d.DB().BlockCacheMetrics(); m != nil {
+			if db := d.DB(); db != nil {
+				if m := db.BlockCacheMetrics(); m != nil {
 				return float64(m.Hits())
+				}
 			}
 			return 0
 		},
@@ -223,8 +225,10 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 			Help: "Total block cache misses",
 		},
 		func() float64 {
-			if m := d.DB().BlockCacheMetrics(); m != nil {
+			if db := d.DB(); db != nil {
+				if m := db.BlockCacheMetrics(); m != nil {
 				return float64(m.Misses())
+				}
 			}
 			return 0
 		},
@@ -235,8 +239,10 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 			Help: "Block cache hit ratio (0.0-1.0)",
 		},
 		func() float64 {
-			if m := d.DB().BlockCacheMetrics(); m != nil {
+			if db := d.DB(); db != nil {
+				if m := db.BlockCacheMetrics(); m != nil {
 				return m.Ratio()
+				}
 			}
 			return 0
 		},
@@ -247,13 +253,15 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 			Help: "Current block cache cost in bytes (added - evicted)",
 		},
 		func() float64 {
-			if m := d.DB().BlockCacheMetrics(); m != nil {
+			if db := d.DB(); db != nil {
+				if m := db.BlockCacheMetrics(); m != nil {
 				added := m.CostAdded()
 				evicted := m.CostEvicted()
 				if added >= evicted {
 					return float64(added - evicted)
 				}
 				return 0
+				}
 			}
 			return 0
 		},
@@ -264,8 +272,10 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 			Help: "Total keys added to block cache",
 		},
 		func() float64 {
-			if m := d.DB().BlockCacheMetrics(); m != nil {
+			if db := d.DB(); db != nil {
+				if m := db.BlockCacheMetrics(); m != nil {
 				return float64(m.KeysAdded())
+				}
 			}
 			return 0
 		},
@@ -276,8 +286,10 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 			Help: "Total keys evicted from block cache",
 		},
 		func() float64 {
-			if m := d.DB().BlockCacheMetrics(); m != nil {
+			if db := d.DB(); db != nil {
+				if m := db.BlockCacheMetrics(); m != nil {
 				return float64(m.KeysEvicted())
+				}
 			}
 			return 0
 		},
@@ -288,8 +300,10 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 			Help: "Total index cache hits",
 		},
 		func() float64 {
-			if m := d.DB().IndexCacheMetrics(); m != nil {
+			if db := d.DB(); db != nil {
+				if m := db.IndexCacheMetrics(); m != nil {
 				return float64(m.Hits())
+				}
 			}
 			return 0
 		},
@@ -300,8 +314,10 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 			Help: "Total index cache misses",
 		},
 		func() float64 {
-			if m := d.DB().IndexCacheMetrics(); m != nil {
+			if db := d.DB(); db != nil {
+				if m := db.IndexCacheMetrics(); m != nil {
 				return float64(m.Misses())
+				}
 			}
 			return 0
 		},
@@ -312,8 +328,10 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 			Help: "Index cache hit ratio (0.0-1.0)",
 		},
 		func() float64 {
-			if m := d.DB().IndexCacheMetrics(); m != nil {
+			if db := d.DB(); db != nil {
+				if m := db.IndexCacheMetrics(); m != nil {
 				return m.Ratio()
+				}
 			}
 			return 0
 		},
