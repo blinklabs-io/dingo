@@ -743,18 +743,31 @@ SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			// output that already has a credential keeps it.
 			//
 			// credential_tag is NOT NULL, so it cannot be COALESCEd; it is set
-			// only when the stake key is being filled in. SQLite evaluates
-			// every SET expression against the pre-update row, so the CASE sees
+			// only when the stake key is being filled in. Every SET expression
+			// is evaluated against the pre-update row, so the guards see
 			// staking_key as it was before this statement.
+			//
+			// An absent credential is tested as "NULL or zero length" rather
+			// than NULL alone. Nothing observed writes a zero-length key -- a
+			// 1.3M-row database has none -- but a caller passing a non-nil
+			// empty slice would bind one, and it would then read as present and
+			// silently swallow the resolved stake. length() is used rather than
+			// a blob literal because this statement also runs on postgres and
+			// mysql.
 			_, err = db.ExecContext(ctx, `
 UPDATE utxo
 SET transaction_id = COALESCE(transaction_id, ?),
     collateral_return_for_tx_id = COALESCE(collateral_return_for_tx_id, ?),
     credential_tag = CASE
-        WHEN staking_key IS NULL AND ? IS NOT NULL THEN ?
+        WHEN (staking_key IS NULL OR length(staking_key) = 0)
+             AND ? IS NOT NULL THEN ?
         ELSE credential_tag
     END,
-    staking_key = COALESCE(staking_key, ?)
+    staking_key = CASE
+        WHEN staking_key IS NULL OR length(staking_key) = 0
+            THEN COALESCE(?, staking_key)
+        ELSE staking_key
+    END
 WHERE id = ?`,
 				params.TransactionID,
 				params.CollateralReturnForTxID,

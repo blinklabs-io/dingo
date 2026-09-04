@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -160,39 +161,32 @@ func TestResolvePointerStakeCredential(t *testing.T) {
 	})
 }
 
-// TestUtxoConflictRepairFillsStakeCredential covers the other half of #3854.
+// TestUtxoConflictRepairFillsStakeCredential covers the other half of #3854,
+// through insertUtxoModel itself rather than a copy of its SQL.
 //
 // Block application inserts produced outputs with ON CONFLICT DO NOTHING, so an
-// output that a snapshot import already created keeps whatever it was imported
-// with. An imported row carries no credential, and the resolution performed
-// when the producing transaction is applied would be discarded by the conflict,
-// leaving pointer stake unattributed on exactly the nodes that bootstrap from a
+// output a snapshot import already created keeps whatever it was imported with.
+// An imported row carries no credential, and the resolution performed when the
+// producing transaction is applied would be discarded by the conflict, leaving
+// pointer stake unattributed on exactly the nodes that bootstrap from a
 // snapshot.
-//
-// The repair is a COALESCE, so it fills an absent credential and never
-// overwrites one. credential_tag is NOT NULL and cannot be COALESCEd, so it is
-// gated on the stake key being absent -- which relies on SQLite evaluating
-// every SET expression against the pre-update row.
 func TestUtxoConflictRepairFillsStakeCredential(t *testing.T) {
-	const repair = `
-UPDATE utxo
-SET credential_tag = CASE
-        WHEN staking_key IS NULL AND ? IS NOT NULL THEN ?
-        ELSE credential_tag
-    END,
-    staking_key = COALESCE(staking_key, ?)
-WHERE id = ?`
-
 	newUtxoStore := func(t *testing.T) *Store {
 		t.Helper()
 		s := newTestStore(t)
-		_, err := s.writeDB.Exec(
-			`CREATE TABLE utxo (id INTEGER PRIMARY KEY AUTOINCREMENT,
-			 staking_key BLOB, credential_tag INTEGER NOT NULL DEFAULT 0)`,
-		)
+		_, err := s.writeDB.Exec(`CREATE TABLE utxo (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			transaction_id INTEGER, collateral_return_for_tx_id INTEGER,
+			tx_id BLOB, payment_key BLOB, staking_key BLOB,
+			credential_tag INTEGER NOT NULL DEFAULT 0, datum_hash BLOB,
+			spent_at_tx_id BLOB, referenced_by_tx_id BLOB,
+			collateral_by_tx_id BLOB, added_slot INTEGER, deleted_slot INTEGER,
+			amount TEXT, output_idx INTEGER, payment_script NUMERIC,
+			UNIQUE (tx_id, output_idx))`)
 		require.NoError(t, err)
 		return s
 	}
+	txID := []byte{0xAB, 0xCD}
 	resolved, err := hex.DecodeString(ptrCredHex)
 	require.NoError(t, err)
 	existing, err := hex.DecodeString(
@@ -200,57 +194,82 @@ WHERE id = ?`
 	)
 	require.NoError(t, err)
 
+	base := func(stakingKey []byte, tag uint8) *models.Utxo {
+		return &models.Utxo{
+			TxId: txID, OutputIdx: 0, PaymentKey: []byte{0x01},
+			StakingKey: stakingKey, CredentialTag: tag,
+			Amount: types.Uint64(1_000), AddedSlot: 10,
+		}
+	}
 	read := func(t *testing.T, s *Store) ([]byte, uint8) {
 		t.Helper()
 		var key []byte
 		var tag uint8
-		require.NoError(t,
-			s.writeDB.QueryRow(`SELECT staking_key, credential_tag FROM utxo WHERE id = 1`).
-				Scan(&key, &tag))
+		require.NoError(t, s.writeDB.QueryRow(
+			`SELECT staking_key, credential_tag FROM utxo WHERE tx_id = ? AND output_idx = 0`,
+			txID).Scan(&key, &tag))
 		return key, tag
 	}
+	ctx := context.Background()
 
-	t.Run("an imported row gains the resolved credential", func(t *testing.T) {
-		s := newUtxoStore(t)
-		_, err := s.writeDB.Exec(
-			`INSERT INTO utxo (id, staking_key, credential_tag) VALUES (1, NULL, 0)`)
-		require.NoError(t, err)
+	for _, tc := range []struct {
+		name        string
+		imported    []byte
+		importedTag uint8
+		resolvedKey []byte
+		wantKey     []byte
+		wantTag     uint8
+	}{
+		{
+			name:        "an imported row gains the resolved credential",
+			imported:    nil,
+			resolvedKey: resolved,
+			wantKey:     resolved,
+			wantTag:     1,
+		},
+		{
+			name:        "a zero-length key counts as absent",
+			imported:    []byte{},
+			resolvedKey: resolved,
+			wantKey:     resolved,
+			wantTag:     1,
+		},
+		{
+			name:        "an attributed row is not overwritten",
+			imported:    existing,
+			importedTag: 0,
+			resolvedKey: resolved,
+			wantKey:     existing,
+			wantTag:     0,
+		},
+		{
+			name:        "nothing to fill leaves the row alone",
+			imported:    nil,
+			resolvedKey: nil,
+			wantKey:     nil,
+			wantTag:     0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newUtxoStore(t)
+			// The snapshot import lands first.
+			imported := base(tc.imported, tc.importedTag)
+			require.NoError(t,
+				s.insertUtxoModel(ctx, s.writeDB, imported, true))
 
-		_, err = s.writeDB.Exec(repair, resolved, 1, resolved, 1)
-		require.NoError(t, err)
+			// Then the producing transaction is applied, carrying whatever the
+			// pointer resolution produced. This is the conflicting insert.
+			applied := base(tc.resolvedKey, 1)
+			require.NoError(t,
+				s.insertUtxoModel(ctx, s.writeDB, applied, true))
 
-		key, tag := read(t, s)
-		assert.Equal(t, resolved, key, "an absent credential must be filled")
-		assert.Equal(t, uint8(1), tag, "its tag must be filled with it")
-	})
-
-	t.Run("an attributed row is not overwritten", func(t *testing.T) {
-		s := newUtxoStore(t)
-		_, err := s.writeDB.Exec(
-			`INSERT INTO utxo (id, staking_key, credential_tag) VALUES (1, ?, 0)`,
-			existing)
-		require.NoError(t, err)
-
-		_, err = s.writeDB.Exec(repair, resolved, 1, resolved, 1)
-		require.NoError(t, err)
-
-		key, tag := read(t, s)
-		assert.Equal(t, existing, key, "an existing credential must survive")
-		assert.Equal(t, uint8(0), tag,
-			"and its tag with it, since the CASE reads the pre-update row")
-	})
-
-	t.Run("nothing to fill leaves the row alone", func(t *testing.T) {
-		s := newUtxoStore(t)
-		_, err := s.writeDB.Exec(
-			`INSERT INTO utxo (id, staking_key, credential_tag) VALUES (1, NULL, 0)`)
-		require.NoError(t, err)
-
-		_, err = s.writeDB.Exec(repair, nil, 1, nil, 1)
-		require.NoError(t, err)
-
-		key, tag := read(t, s)
-		assert.Nil(t, key)
-		assert.Equal(t, uint8(0), tag)
-	})
+			key, tag := read(t, s)
+			if tc.wantKey == nil {
+				assert.Empty(t, key)
+			} else {
+				assert.Equal(t, tc.wantKey, key)
+			}
+			assert.Equal(t, tc.wantTag, tag)
+		})
+	}
 }
