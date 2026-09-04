@@ -934,18 +934,29 @@ type LedgerState struct {
 	// schedules its next request on a worker. The worker must run outside the
 	// subscriber goroutine because GetBlockRange waits for BatchDone, which is
 	// delivered back through that same subscriber.
-	blockfetchContinuationPending  bool
-	blockfetchContinuationMu       sync.Mutex
-	blockfetchContinuationWG       sync.WaitGroup
-	headerPipelineConnId           ouroboros.ConnectionId // connection that currently owns the queued header/blockfetch pipeline
-	pendingBlockfetchEvents        []BlockfetchEvent
-	activeBlockfetchStart          time.Time           // when RequestRange was issued (for latency measurement)
-	firstBlockReceived             bool                // true after latency sample recorded for this batch
-	shadowBlockReceivedHashes      map[string]struct{} // blocks delivered this batch (dedup shadow vs primary)
-	batchBlocksReceived            int                 // total blocks received in current blockfetch batch (including mid-batch flushes)
-	batchBlocksApplied             int
+	blockfetchContinuationPending bool
+	blockfetchContinuationMu      sync.Mutex
+	blockfetchContinuationWG      sync.WaitGroup
+	headerPipelineConnId          ouroboros.ConnectionId // connection that currently owns the queued header/blockfetch pipeline
+	pendingBlockfetchEvents       []BlockfetchEvent
+	activeBlockfetchStart         time.Time           // when RequestRange was issued (for latency measurement)
+	firstBlockReceived            bool                // true after latency sample recorded for this batch
+	shadowBlockReceivedHashes     map[string]struct{} // blocks delivered this batch (dedup shadow vs primary)
+	batchBlocksReceived           int                 // total blocks received in current blockfetch batch (including mid-batch flushes)
+	batchBlocksApplied            int                 // blocks from the current batch that actually extended the chain
+	// blockfetchBatchChainGeneration is the value chainRollbackGeneration
+	// held when the current batch was requested. A batch is fetched for the
+	// header queue that existed at request time; a rollback replaces both that
+	// queue and the continuation point, so every block still arriving for the
+	// older generation belongs to a chain the node has abandoned and must be
+	// discarded rather than applied (issue #3771). Guarded by
+	// chainsyncBlockfetchMutex, like the rest of the per-batch state.
 	blockfetchBatchChainGeneration uint64
-	chainRollbackGeneration        atomic.Uint64
+	// chainRollbackGeneration counts primary-chain rollbacks. It is bumped
+	// before the chain is changed, so a reader that has observed a rollback's
+	// effect on the chain always observes the new value. Written by the
+	// rollback paths and read by the blockfetch paths, so it is atomic.
+	chainRollbackGeneration atomic.Uint64
 	// Failures to obtain one specific queued header range, keyed by its
 	// start point and counting both a NoBlocks reply (a synchronous
 	// GetBlockRange error) and a batch that completed without delivering a

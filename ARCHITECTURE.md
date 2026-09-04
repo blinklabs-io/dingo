@@ -556,8 +556,8 @@ with `chainsyncBlockfetchMutex`, so they cannot interleave with a flush, and
 publish deferred chain events only after releasing that mutex. Callers must
 not already hold it: every rollback entry point takes `chainsyncMutex` first
 and leaves the blockfetch mutex to the restart that follows. Bodies still
-arriving for
-an older generation are dropped instead of being handed to chain insertion:
+arriving for an older generation are dropped instead of being handed to chain
+insertion:
 fork resolution rolls back, re-queues the winning peer's header path and only
 then restarts blockfetch, and a body from the losing fork reaching insertion
 against that replacement queue would clear it. A batch that ends without
