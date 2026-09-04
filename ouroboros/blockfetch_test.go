@@ -845,16 +845,11 @@ func TestBlockfetchServerRequestRange_RepeatedInvertedRangeReachesCloseThreshold
 	}
 }
 
-// TestBlockfetchServerRequestRange_RepeatedValidRangeNeverClosesPeer is the
-// control for the fix above: a valid (non-inverted, in-limit) range must
-// never be treated as an inverted-range rejection, however many times it is
-// repeated for the same connection and start point. LedgerState is nil, so a
-// valid range reaches GetChainFromPoint and panics there -- proving it passed
-// both the inverted-range and oversized-range checks without either
-// rejecting it. Keep this as one call: repeatedly provoking a nil-pointer
-// panic is undefined test machinery on Windows and can crash the Go runtime
-// before the assertion completes.
-func TestBlockfetchServerRequestRange_RepeatedValidRangeNeverClosesPeer(
+// TestBlockfetchServerRequestRange_ValidRangeNotRejected is the control for
+// the fix above: a valid (non-inverted, in-limit) range reaches
+// GetChainFromPoint instead of either range-rejection path. LedgerState is nil,
+// so the expected panic proves validation completed before that call.
+func TestBlockfetchServerRequestRange_ValidRangeNotRejected(
 	t *testing.T,
 ) {
 	var logBuf bytes.Buffer
