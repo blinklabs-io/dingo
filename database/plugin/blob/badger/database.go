@@ -517,11 +517,11 @@ func (d *BlobStoreBadger) CloseContext(ctx context.Context) error {
 		if d.gcStopCh != nil {
 			close(d.gcStopCh)
 		}
-		if d.gcMetrics != nil && d.gcMetrics.cleanup != nil {
-			d.gcMetrics.cleanup()
-		}
 		go func() {
 			d.gcWg.Wait()
+			if d.gcMetrics != nil && d.gcMetrics.cleanup != nil {
+				d.gcMetrics.cleanup()
+			}
 			if db := d.DB(); db != nil {
 				d.closeErr = db.Close()
 			}

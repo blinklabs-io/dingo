@@ -63,11 +63,15 @@ func TestRegisterBlobMetricsRemovesClosedStoreSeries(t *testing.T) {
 	store := &BlobStoreBadger{promRegistry: registry}
 	store.registerBlobMetrics()
 	store.gcMetrics.attempts.Inc()
-	require.Equal(t, 1, testutil.GatherAndCount(registry,
-		"database_blob_gc_attempts_total"))
+	count, err := testutil.GatherAndCount(registry,
+		"database_blob_gc_attempts_total")
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
 	require.NoError(t, store.Close())
-	require.Equal(t, 0, testutil.GatherAndCount(registry,
-		"database_blob_gc_attempts_total"))
+	count, err = testutil.GatherAndCount(registry,
+		"database_blob_gc_attempts_total")
+	require.NoError(t, err)
+	require.Equal(t, 0, count)
 }
 
 func TestRegisterBlobMetricsAllowsNonComparableRegisterer(t *testing.T) {
@@ -78,4 +82,12 @@ func TestRegisterBlobMetricsAllowsNonComparableRegisterer(t *testing.T) {
 	}
 	store := &BlobStoreBadger{promRegistry: registerer}
 	require.NotPanics(t, store.registerBlobMetrics)
+	second := &BlobStoreBadger{promRegistry: registerer}
+	require.NotPanics(t, second.registerBlobMetrics)
+	second.gcMetrics.attempts.Inc()
+	count, err := testutil.GatherAndCount(registry,
+		"database_blob_gc_attempts_total")
+	require.NoError(t, err)
+	require.Equal(t, 2, count)
+	require.Equal(t, float64(1), testutil.ToFloat64(second.gcMetrics.attempts))
 }

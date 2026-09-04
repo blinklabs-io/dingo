@@ -54,7 +54,6 @@ func BenchmarkValueLogGC(b *testing.B) {
 					require.NoError(b, store.Set(txn, key, make([]byte, 4096)))
 					require.NoError(b, txn.Commit())
 				}
-				b.StopTimer()
 				before, err := store.DiskSize()
 				require.NoError(b, err)
 				b.StartTimer()

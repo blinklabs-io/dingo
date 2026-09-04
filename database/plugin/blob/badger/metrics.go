@@ -52,40 +52,97 @@ type badgerGCMetricCollectors struct {
 	lastSuccess    *prometheus.GaugeVec
 }
 
-var (
-	badgerGCCollectors sync.Map
-	nextBadgerStoreID  atomic.Uint64
-)
-
-func registererCacheKey(reg prometheus.Registerer) (string, bool) {
-	value := reflect.ValueOf(reg)
-	if !value.IsValid() || value.Kind() != reflect.Pointer {
-		return "", false
-	}
-	return fmt.Sprintf("%s:%x", value.Type(), value.Pointer()), true
+type badgerGCCollectorCacheEntry struct {
+	registerer prometheus.Registerer
+	collectors *badgerGCMetricCollectors
 }
+
+type badgerGCCollectorCache struct {
+	mu            sync.Mutex
+	comparable    map[prometheus.Registerer]*badgerGCMetricCollectors
+	nonComparable []badgerGCCollectorCacheEntry
+}
+
+var (
+	badgerGCCollectors = badgerGCCollectorCache{
+		comparable: make(map[prometheus.Registerer]*badgerGCMetricCollectors),
+	}
+	nextBadgerStoreID atomic.Uint64
+)
 
 const (
 	badgerMetricNamePrefix = "database_blob_"
 )
 
-func safeRegister(reg prometheus.Registerer, c prometheus.Collector) {
+func registerExistingOrNew(
+	reg prometheus.Registerer,
+	c prometheus.Collector,
+) prometheus.Collector {
 	if err := reg.Register(c); err != nil {
 		var alreadyRegistered prometheus.AlreadyRegisteredError
 		if !errors.As(err, &alreadyRegistered) {
 			panic(err)
 		}
+		return alreadyRegistered.ExistingCollector
 	}
+	return c
+}
+
+func registerCollector[T prometheus.Collector](
+	reg prometheus.Registerer,
+	c prometheus.Collector,
+) T {
+	registered := registerExistingOrNew(reg, c)
+	collector, ok := registered.(T)
+	if !ok {
+		panic(fmt.Sprintf("registered collector has unexpected type %T", registered))
+	}
+	return collector
+}
+
+func safeRegister(reg prometheus.Registerer, c prometheus.Collector) {
+	_ = registerExistingOrNew(reg, c)
+}
+
+func (c *badgerGCCollectorCache) get(
+	reg prometheus.Registerer,
+) *badgerGCMetricCollectors {
+	value := reflect.ValueOf(reg)
+	if value.IsValid() && value.Type().Comparable() {
+		return c.comparable[reg]
+	}
+	for _, entry := range c.nonComparable {
+		if reflect.DeepEqual(entry.registerer, reg) {
+			return entry.collectors
+		}
+	}
+	return nil
+
+}
+
+func (c *badgerGCCollectorCache) put(
+	reg prometheus.Registerer,
+	collectors *badgerGCMetricCollectors,
+) {
+	value := reflect.ValueOf(reg)
+	if value.IsValid() && value.Type().Comparable() {
+		c.comparable[reg] = collectors
+		return
+	}
+	c.nonComparable = append(c.nonComparable, badgerGCCollectorCacheEntry{
+		registerer: reg,
+		collectors: collectors,
+	})
 }
 
 func (d *BlobStoreBadger) registerBlobMetrics() {
+	badgerGCCollectors.mu.Lock()
+	defer badgerGCCollectors.mu.Unlock()
 	storeID := fmt.Sprintf("store-%d", nextBadgerStoreID.Add(1))
 	labels := []string{"store"}
-	gcCollectors := &badgerGCMetricCollectors{}
-	cacheKey, cacheable := registererCacheKey(d.promRegistry)
-	if existing, ok := badgerGCCollectors.Load(cacheKey); cacheable && ok {
-		gcCollectors = existing.(*badgerGCMetricCollectors)
-	} else {
+	gcCollectors := badgerGCCollectors.get(d.promRegistry)
+	if gcCollectors == nil {
+		gcCollectors = &badgerGCMetricCollectors{}
 		gcCollectors.attempts = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: badgerMetricNamePrefix + "gc_attempts_total", Help: "Total Badger value-log GC attempts.",
 		}, labels)
@@ -116,24 +173,17 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 		gcCollectors.lastSuccess = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: badgerMetricNamePrefix + "gc_last_success_timestamp_seconds", Help: "Unix timestamp of the last successful value-log GC rewrite.",
 		}, labels)
-		registerCollectors := true
-		if cacheable {
-			actual, loaded := badgerGCCollectors.LoadOrStore(cacheKey, gcCollectors)
-			if loaded {
-				gcCollectors = actual.(*badgerGCMetricCollectors)
-				registerCollectors = false
-			}
-		}
-		if registerCollectors {
-			for _, c := range []prometheus.Collector{
-				gcCollectors.attempts, gcCollectors.successes, gcCollectors.noRewrite,
-				gcCollectors.errors, gcCollectors.duration, gcCollectors.lsmBytes,
-				gcCollectors.vlogBytes, gcCollectors.reclaimedBytes, gcCollectors.consecutive,
-				gcCollectors.lastSuccess,
-			} {
-				safeRegister(d.promRegistry, c)
-			}
-		}
+		gcCollectors.attempts = registerCollector[*prometheus.CounterVec](d.promRegistry, gcCollectors.attempts)
+		gcCollectors.successes = registerCollector[*prometheus.CounterVec](d.promRegistry, gcCollectors.successes)
+		gcCollectors.noRewrite = registerCollector[*prometheus.CounterVec](d.promRegistry, gcCollectors.noRewrite)
+		gcCollectors.errors = registerCollector[*prometheus.CounterVec](d.promRegistry, gcCollectors.errors)
+		gcCollectors.duration = registerCollector[*prometheus.HistogramVec](d.promRegistry, gcCollectors.duration)
+		gcCollectors.lsmBytes = registerCollector[*prometheus.GaugeVec](d.promRegistry, gcCollectors.lsmBytes)
+		gcCollectors.vlogBytes = registerCollector[*prometheus.GaugeVec](d.promRegistry, gcCollectors.vlogBytes)
+		gcCollectors.reclaimedBytes = registerCollector[*prometheus.GaugeVec](d.promRegistry, gcCollectors.reclaimedBytes)
+		gcCollectors.consecutive = registerCollector[*prometheus.GaugeVec](d.promRegistry, gcCollectors.consecutive)
+		gcCollectors.lastSuccess = registerCollector[*prometheus.GaugeVec](d.promRegistry, gcCollectors.lastSuccess)
+		badgerGCCollectors.put(d.promRegistry, gcCollectors)
 	}
 	d.gcMetrics = &badgerGCMetrics{
 		attempts:       gcCollectors.attempts.WithLabelValues(storeID),
