@@ -17,6 +17,7 @@ package ledger
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -71,10 +72,10 @@ func loadRollbackIntent(db *database.Database) (ocommon.Point, bool, error) {
 		return ocommon.Point{}, false, fmt.Errorf("decode rollback intent: %w", err)
 	}
 	if intent.Slot == nil || intent.Hash == nil {
-		return ocommon.Point{}, false, fmt.Errorf("rollback intent is missing slot or hash")
+		return ocommon.Point{}, false, errors.New("rollback intent is missing slot or hash")
 	}
 	if (*intent.Slot == 0) != (*intent.Hash == "") {
-		return ocommon.Point{}, false, fmt.Errorf("rollback intent has invalid origin point")
+		return ocommon.Point{}, false, errors.New("rollback intent has invalid origin point")
 	}
 	hash, err := hex.DecodeString(*intent.Hash)
 	if err != nil {
@@ -97,7 +98,7 @@ func (ls *LedgerState) recoverRollbackIntent() error {
 			return fmt.Errorf("validate rollback intent point: %w", err)
 		}
 		if !contains {
-			return fmt.Errorf("rollback intent point is not on the primary chain")
+			return errors.New("rollback intent point is not on the primary chain")
 		}
 	}
 	if ls.config.ChainManager != nil {
