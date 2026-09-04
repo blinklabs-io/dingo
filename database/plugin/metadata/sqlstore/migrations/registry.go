@@ -40,7 +40,7 @@ const (
 	accountDepositSchemaRelease                = "account-import-deposit"
 	committeeCredentialTagsSchemaRelease       = "committee-credential-tags"
 	committeeTermStartPresenceSchemaRelease    = "committee-term-start-presence"
-	rewardSeedFailureSchemaRelease             = "reward-seed-failure"
+	rewardSeedFailureSchemaRelease              = "reward-seed-failure"
 )
 
 // schemaVersions names every migration in ascending version order.
