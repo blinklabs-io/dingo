@@ -180,6 +180,58 @@ func (p *DingoStateProvider) IsStakeCredentialRegistered(
 	return account.Active
 }
 
+// StakeCredentialDeposit returns the deposit recorded for the active stake
+// credential. Initial state and snapshot imports are represented by a virtual
+// registration baseline; certificate history supersedes that baseline once it
+// has been established later than the import boundary.
+func (p *DingoStateProvider) StakeCredentialDeposit(
+	cred common.Credential,
+) (*uint64, error) {
+	credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+	if err != nil {
+		return nil, err
+	}
+	account, err := withBadConnRetry(func() (*models.Account, error) {
+		return p.manager.db.GetAccountByCredential(
+			credentialTag, cred.Credential[:], false, nil,
+		)
+	})
+	if errors.Is(err, models.ErrAccountNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lookup stake credential deposit: %w", err)
+	}
+	if account == nil || !account.Active {
+		return nil, nil
+	}
+
+	history, err := withBadConnRetry(func() ([]models.AccountRegistrationHistoryRow, error) {
+		return p.manager.db.GetAccountRegistrationHistoryByCredential(
+			credentialTag, cred.Credential[:], 1, 0, "desc", nil,
+		)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("lookup stake registration history: %w", err)
+	}
+	importRegistration, err := withBadConnRetry(func() (*models.AccountImportRegistration, error) {
+		return p.manager.db.GetAccountImportRegistrationByCredential(
+			credentialTag, cred.Credential[:], nil,
+		)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("lookup stake import registration: %w", err)
+	}
+	if importRegistration != nil &&
+		(len(history) == 0 || importRegistration.AddedSlot >= history[0].AddedSlot) {
+		return importRegistration.Deposit, nil
+	}
+	if len(history) == 0 || history[0].Action != "registered" {
+		return nil, nil
+	}
+	return &history[0].Deposit, nil
+}
+
 // ========== common.SlotState ==========
 
 // SlotToTime converts a slot number to a time
@@ -1012,3 +1064,5 @@ var _ eras.CommitteeCredentialState = (*DingoStateProvider)(nil)
 // and stop exercising the protocol-version 10/11 withdrawal rule it exists to
 // cover, matching ledger.LedgerView's guard for the production path.
 var _ common.DRepDelegationState = (*DingoStateProvider)(nil)
+
+var _ common.StakeCredentialDepositState = (*DingoStateProvider)(nil)
