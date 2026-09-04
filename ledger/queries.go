@@ -846,6 +846,67 @@ func (ls *LedgerState) totalActiveStake(
 	return total, nil
 }
 
+// totalCirculatingSupply returns the total ADA in circulation, delegated or
+// not: MaxLovelaceSupply minus the live reserves pot, clamped to a minimum of
+// one for the same NonZero-decode reason totalActiveStake is (see its doc
+// comment).
+//
+// This is a genuinely different total from totalActiveStake, not an
+// alternative way to compute the same one. GetPoolDistr2's TotalActiveStake
+// really is the sum of delegated stake -- confirmed against the real
+// cardano-ledger source (calculatePoolDistr/SnapShot.ssTotalActiveStake,
+// IntersectMBO/cardano-ledger) -- and Dingo already gets that right; an
+// earlier attempt at blinklabs-io/dingo#3824 wrongly "fixed" GetPoolDistr2's
+// total to use this instead, which was reverted.
+//
+// GetStakeDistribution is a different, older query, and a real cardano-node
+// answers it with a genuinely different total: captured raw wire bytes
+// (not just the decoded Go value) show cardano-node's GetStakeDistribution
+// reply encoding each pool's StakeFraction as tag(30)[stake, circulation],
+// not tag(30)[stake, sum-of-delegated] -- verified against a live cardano-node
+// on a devnet whose genesis deliberately delegates only half its circulating
+// supply (a staked and an unstaked genesis address per pool; see
+// internal/test/devnet/testnet.yaml), where GetStakeSnapshots independently
+// confirmed both nodes agree exactly on the underlying per-pool and
+// sum-of-delegated numbers, isolating the divergence to this one query.
+//
+// Falls back to totalActiveStake's sum-of-delegated total when genesis
+// config or live network state is unavailable to read circulation from --
+// only true of a LedgerState a test builds by hand rather than one backing a
+// running node, which always has both.
+func (ls *LedgerState) totalCirculatingSupply(
+	epoch uint64,
+	exists bool,
+	txn types.Txn,
+) (uint64, error) {
+	fallback := func() (uint64, error) {
+		return ls.totalActiveStake(epoch, exists, txn)
+	}
+	if ls.config.CardanoNodeConfig == nil {
+		return fallback()
+	}
+	genesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil || genesis.MaxLovelaceSupply == 0 {
+		return fallback()
+	}
+	state, err := ls.db.Metadata().GetNetworkState(txn)
+	if err != nil {
+		return 0, err
+	}
+	if state == nil {
+		return fallback()
+	}
+	reserves := uint64(state.Reserves)
+	if reserves > genesis.MaxLovelaceSupply {
+		return fallback()
+	}
+	circulation := genesis.MaxLovelaceSupply - reserves
+	if circulation == 0 {
+		return 1, nil
+	}
+	return circulation, nil
+}
+
 func (ls *LedgerState) queryShelleyGenesisConfig() (any, error) {
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	return []any{shelleyGenesis}, nil
