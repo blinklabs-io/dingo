@@ -32,12 +32,13 @@ import (
 )
 
 func TestProcessEpochSkipsPreConwayProtocolParameters(t *testing.T) {
+	pparams := &shelley.ShelleyProtocolParameters{}
 	out, err := ProcessEpoch(&EpochInput{
-		PParams: &shelley.ShelleyProtocolParameters{},
+		PParams: pparams,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, out)
-	assert.IsType(t, &shelley.ShelleyProtocolParameters{}, out.UpdatedPParams)
+	assert.Same(t, pparams, out.UpdatedPParams)
 }
 
 func TestRefundProposalDepositCreditsRewardAccount(t *testing.T) {
