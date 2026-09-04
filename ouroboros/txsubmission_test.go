@@ -658,6 +658,85 @@ func txsubmissionTestFixtures(t *testing.T) []txsubmissionTestFixture {
 	return ret
 }
 
+func TestValidateTxsubmissionReply(t *testing.T) {
+	fixtures := txsubmissionTestFixtures(t)[:2]
+	requested := make([]txsubmission.TxIdAndSize, 0, len(fixtures))
+	returned := make([]txsubmission.TxBody, 0, len(fixtures))
+	for _, fixture := range fixtures {
+		requested = append(requested, txsubmission.TxIdAndSize{
+			TxId: fixture.txId,
+			Size: uint32(len(fixture.body)), // #nosec G115 -- test fixture
+		})
+		returned = append(returned, txsubmission.TxBody{
+			EraId:  fixture.txId.EraId,
+			TxBody: fixture.body,
+		})
+	}
+
+	t.Run("matching batch", func(t *testing.T) {
+		validated, err := validateTxsubmissionReply(requested, returned)
+		require.NoError(t, err)
+		require.Len(t, validated, len(returned))
+	})
+
+	tests := []struct {
+		name   string
+		mutate func([]txsubmission.TxIdAndSize, []txsubmission.TxBody)
+		match  string
+	}{
+		{
+			name: "count",
+			mutate: func(_ []txsubmission.TxIdAndSize, got []txsubmission.TxBody) {
+				got[1] = txsubmission.TxBody{}
+			},
+			match: "count mismatch",
+		},
+		{
+			name: "order",
+			mutate: func(want []txsubmission.TxIdAndSize, got []txsubmission.TxBody) {
+				got[0], got[1] = got[1], got[0]
+				want[0].Size, want[1].Size = want[1].Size, want[0].Size
+			},
+			match: "hash mismatch",
+		},
+		{
+			name: "era",
+			mutate: func(_ []txsubmission.TxIdAndSize, got []txsubmission.TxBody) {
+				got[0].EraId++
+			},
+			match: "era mismatch",
+		},
+		{
+			name: "size",
+			mutate: func(want []txsubmission.TxIdAndSize, _ []txsubmission.TxBody) {
+				want[0].Size--
+			},
+			match: "size mismatch",
+		},
+		{
+			name: "hash",
+			mutate: func(want []txsubmission.TxIdAndSize, _ []txsubmission.TxBody) {
+				want[0].TxId.TxId[0] ^= 0xff
+			},
+			match: "hash mismatch",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			want := slices.Clone(requested)
+			got := slices.Clone(returned)
+			if tt.name == "count" {
+				got = got[:1]
+			} else {
+				tt.mutate(want, got)
+			}
+			validated, err := validateTxsubmissionReply(want, got)
+			require.ErrorContains(t, err, tt.match)
+			require.Nil(t, validated)
+		})
+	}
+}
+
 func addTxSubmissionTestFixtures(
 	t *testing.T,
 	m mempool.Service,
@@ -1134,9 +1213,9 @@ func TestTxSubmissionServerInitContinuesAfterMempoolRejection(
 	)
 }
 
-// TestTxSubmissionServerInitContinuesAfterDecodeFailure verifies malformed
-// transaction CBOR does not stop later offers on the same connection.
-func TestTxSubmissionServerInitContinuesAfterDecodeFailure(t *testing.T) {
+// TestTxSubmissionServerInitRejectsMalformedReply verifies a mismatched reply
+// stops the pull loop before a later request could acknowledge it.
+func TestTxSubmissionServerInitRejectsMalformedReply(t *testing.T) {
 	fixtures := txsubmissionTestFixtures(t)
 	malformed := fixtures[0]
 	accepted := fixtures[1]
@@ -1162,36 +1241,34 @@ func TestTxSubmissionServerInitContinuesAfterDecodeFailure(t *testing.T) {
 		func() bool {
 			return strings.Contains(
 				logBuf.String(),
-				"failed to parse transaction CBOR",
+				"rejected mismatched txsubmission reply",
 			)
 		},
 		5*time.Second,
 		10*time.Millisecond,
 		"expected the malformed transaction to be logged",
 	)
-	require.Contains(t, logBuf.String(), malformed.hash)
+	require.Contains(t, logBuf.String(), "size mismatch")
 	require.Contains(t, logBuf.String(), h.connA.Id().String())
 
-	// Offer the valid transaction only after the malformed item completed its
-	// own round trip. This proves the same per-peer pump requests another batch.
+	// A subsequent offer must not be requested, because doing so would
+	// acknowledge and advance beyond the rejected reply.
 	addTxSubmissionTestFixtures(t, h.mB, accepted)
-
-	require.Eventually(
+	require.Never(
 		t,
 		func() bool {
 			_, ok := h.mA.GetTransaction(accepted.hash)
 			return ok
 		},
-		5*time.Second,
+		250*time.Millisecond,
 		10*time.Millisecond,
-		"expected a valid transaction after malformed CBOR to be processed on the same connection",
+		"pull loop advanced after rejecting a mismatched reply",
 	)
 }
 
-// TestTxSubmissionServerInitDoesNotMislabelPartialMalformedResponse verifies
-// a body shifted forward by an earlier cache miss is not labeled with the
-// missing transaction's ID when its CBOR cannot be decoded.
-func TestTxSubmissionServerInitDoesNotMislabelPartialMalformedResponse(
+// TestTxSubmissionServerInitRejectsBatchAtomically verifies a valid prefix is
+// not admitted when a later body in the same reply is mismatched.
+func TestTxSubmissionServerInitRejectsBatchAtomically(
 	t *testing.T,
 ) {
 	fixtures := txsubmissionTestFixtures(t)
@@ -1208,7 +1285,6 @@ func TestTxSubmissionServerInitDoesNotMislabelPartialMalformedResponse(
 	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
 		logger:           logger,
 		corruptOfferHash: malformed.hash,
-		omitOfferHash:    omitted.hash,
 		batchRequestsA:   true,
 	})
 	defer h.close(t)
@@ -1221,14 +1297,15 @@ func TestTxSubmissionServerInitDoesNotMislabelPartialMalformedResponse(
 		func() bool {
 			return strings.Contains(
 				logBuf.String(),
-				"failed to parse transaction CBOR",
+				"rejected mismatched txsubmission reply",
 			)
 		},
 		5*time.Second,
 		10*time.Millisecond,
-		"expected the partial malformed response to be logged",
+		"expected the mismatched batch to be rejected",
 	)
 	logOutput := logBuf.String()
-	require.Contains(t, logOutput, `"tx_id":""`)
-	require.NotContains(t, logOutput, `"tx_id":"`+omitted.hash+`"`)
+	require.Contains(t, logOutput, "size mismatch at index 1")
+	_, admitted := h.mA.GetTransaction(omitted.hash)
+	require.False(t, admitted, "valid prefix was partially admitted")
 }
