@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -46,7 +47,7 @@ func persistRollbackIntent(
 		return nil
 	}
 	hash := hex.EncodeToString(point.Hash)
-	data, err := json.Marshal(durableRollbackIntent{
+	data, err := json.Marshal(durableRollbackIntent{ //nolint:musttag // persisted envelope fields are tagged.
 		Slot:   &point.Slot,
 		Hash:   &hash,
 		Blocks: blocks,
@@ -106,20 +107,16 @@ func loadRollbackIntent(
 		return ocommon.Point{}, nil, false, nil
 	}
 	var intent durableRollbackIntent
-	if err := json.Unmarshal([]byte(raw), &intent); err != nil {
+	if err := json.Unmarshal([]byte(raw), &intent); err != nil { //nolint:musttag // persisted envelope fields are tagged.
 		return ocommon.Point{}, nil, false, fmt.Errorf(
 			"decode rollback intent: %w", err,
 		)
 	}
 	if intent.Slot == nil || intent.Hash == nil {
-		return ocommon.Point{}, nil, false, fmt.Errorf(
-			"rollback intent is missing slot or hash",
-		)
+		return ocommon.Point{}, nil, false, errors.New("rollback intent is missing slot or hash")
 	}
 	if (*intent.Slot == 0) != (*intent.Hash == "") {
-		return ocommon.Point{}, nil, false, fmt.Errorf(
-			"rollback intent has invalid origin point",
-		)
+		return ocommon.Point{}, nil, false, errors.New("rollback intent has invalid origin point")
 	}
 	hash, err := hex.DecodeString(*intent.Hash)
 	if err != nil {
@@ -128,9 +125,7 @@ func loadRollbackIntent(
 		)
 	}
 	if *intent.Slot > 0 && len(hash) == 0 {
-		return ocommon.Point{}, nil, false, fmt.Errorf(
-			"rollback intent has empty non-origin hash",
-		)
+		return ocommon.Point{}, nil, false, errors.New("rollback intent has empty non-origin hash")
 	}
 	return ocommon.Point{Slot: *intent.Slot, Hash: hash}, intent.Blocks, true, nil
 }
