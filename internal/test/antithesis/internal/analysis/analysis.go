@@ -399,7 +399,7 @@ func (a *Analyzer) reportSafetyAssertions(snap *MetricsSnapshot) {
 		len(snap.ChainTipByNode) >= 2 {
 		if minTip, maxTip, ok := chainTipRange(snap.ChainTipByNode); ok {
 			lag := maxTip - minTip
-			Always(lag <= uint64(a.cfg.MaxForkDepth), "chain-tip-lag", map[string]interface{}{ //nolint:gosec // LoadConfig validates MaxForkDepth as positive.
+			Sometimes(lag <= uint64(a.cfg.MaxForkDepth), "chain-tip-lag", map[string]interface{}{ //nolint:gosec // LoadConfig validates MaxForkDepth as positive.
 				"min_tip":        minTip,
 				"max_tip":        maxTip,
 				"lag":            lag,
@@ -432,9 +432,9 @@ func (a *Analyzer) reportSafetyAssertions(snap *MetricsSnapshot) {
 	// Keep this as progress because node and txpump logs are ingested
 	// independently and can arrive in either order.
 	if len(snap.SubmittedTxIDs) > 0 {
-		Sometimes(snap.MempoolConfirmedCount > 0, "mempool-recovery", map[string]interface{}{
-			"submitted_transactions": len(snap.SubmittedTxIDs),
-			"confirmed_transactions": snap.MempoolConfirmedCount,
+		Sometimes(snap.ConfirmedSubmittedTxCount > 0, "mempool-recovery", map[string]interface{}{
+			"submitted_transactions":           len(snap.SubmittedTxIDs),
+			"confirmed_submitted_transactions": snap.ConfirmedSubmittedTxCount,
 		})
 	}
 

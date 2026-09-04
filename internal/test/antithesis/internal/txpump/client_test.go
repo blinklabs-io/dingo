@@ -38,10 +38,9 @@ func TestProtoFromAddr_Unix(t *testing.T) {
 	}
 }
 
-// TestNewNodeClient_ConnectFailure verifies that NewNodeClient returns an
-// error when it cannot connect to the specified address. No socket bind is
-// needed, which keeps the test usable in restricted test sandboxes.
-func TestNewNodeClient_ConnectFailure(t *testing.T) {
+// TestNewNodeClient_InvalidTCPAddress verifies that NewNodeClient rejects a
+// malformed TCP address without requiring a socket bind.
+func TestNewNodeClient_InvalidTCPAddress(t *testing.T) {
 	_, err := NewNodeClient("127.0.0.1:not-a-port", 42, nil)
 	require.Error(t, err, "dial to an invalid TCP address should fail")
 }

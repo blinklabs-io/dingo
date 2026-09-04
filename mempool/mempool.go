@@ -817,7 +817,7 @@ func (m *Mempool) Stop(ctx context.Context) error {
 		select {
 		case <-workersDone:
 		case <-ctx.Done():
-			m.logger.Debug(
+			m.logger.Info(
 				"mempool stop cancelled before workers drained; "+
 					"skipping teardown",
 				"error", ctx.Err(),
