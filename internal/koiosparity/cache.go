@@ -583,11 +583,20 @@ func pruneCompletedAccountCoverageTx(
 		"koios_account_checked",
 		"koios_account_fetch_staged_rows",
 	} {
-		if _, err := tx.Exec("DELETE FROM "+table+
-			" WHERE network = ? AND epoch < ? AND EXISTS ("+
-			"SELECT 1 FROM koios_account_coverage "+
-			"WHERE network = ? AND epoch = "+table+".epoch AND complete = 1)",
-			network, cutoff, network); err != nil {
+		var query string
+		switch table {
+		case "koios_account_checked":
+			query = `DELETE FROM koios_account_checked
+				WHERE network = ? AND epoch < ? AND EXISTS (
+				SELECT 1 FROM koios_account_coverage
+				WHERE network = ? AND epoch = koios_account_checked.epoch AND complete = 1)`
+		case "koios_account_fetch_staged_rows":
+			query = `DELETE FROM koios_account_fetch_staged_rows
+				WHERE network = ? AND epoch < ? AND EXISTS (
+				SELECT 1 FROM koios_account_coverage
+				WHERE network = ? AND epoch = koios_account_fetch_staged_rows.epoch AND complete = 1)`
+		}
+		if _, err := tx.Exec(query, network, cutoff, network); err != nil {
 			return fmt.Errorf("prune completed %s: %w", table, err)
 		}
 	}
@@ -1058,8 +1067,14 @@ func (c *Cache) PruneAccountCoverage(network string, throughEpoch uint64) error 
 		"koios_account_checked",
 		"koios_account_fetch_staged_rows",
 	} {
-		if _, err = tx.Exec("DELETE FROM "+table+
-			" WHERE network = ? AND epoch < ?", network, cutoff); err != nil {
+		var query string
+		switch table {
+		case "koios_account_checked":
+			query = `DELETE FROM koios_account_checked WHERE network = ? AND epoch < ?`
+		case "koios_account_fetch_staged_rows":
+			query = `DELETE FROM koios_account_fetch_staged_rows WHERE network = ? AND epoch < ?`
+		}
+		if _, err = tx.Exec(query, network, cutoff); err != nil {
 			return fmt.Errorf("prune %s: %w", table, err)
 		}
 	}
@@ -1767,21 +1782,17 @@ func backfillZeroRewardSummaries(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
+	defer rows.Close()
 	var pending [][2]any
 	for rows.Next() {
 		var network string
 		var epoch uint64
 		if err := rows.Scan(&network, &epoch); err != nil {
-			_ = rows.Close()
 			return err
 		}
 		pending = append(pending, [2]any{network, epoch})
 	}
 	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return err
-	}
-	if err := rows.Close(); err != nil {
 		return err
 	}
 	for _, item := range pending {
