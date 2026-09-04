@@ -342,6 +342,12 @@ func TestTransitionToEraFrom_PersistsSyntheticMarkerInSameTransactionAsPParams(
 	ls.loadSyntheticV2CostModel()
 	assert.False(t, ls.syntheticV2CostModel,
 		"a rolled-back transaction must not leave the marker persisted")
+	rolledBackPParams, err := db.GetPParams(
+		1, eras.BabbageEraDesc.Id, eras.DecodePParamsBabbage, nil,
+	)
+	require.NoError(t, err)
+	assert.Nil(t, rolledBackPParams,
+		"a rolled-back transaction must not leave the pparams write persisted")
 
 	// The same sequence, committed instead, must persist both together.
 	txn = db.Transaction(true)
@@ -361,4 +367,10 @@ func TestTransitionToEraFrom_PersistsSyntheticMarkerInSameTransactionAsPParams(
 	ls.loadSyntheticV2CostModel()
 	assert.True(t, ls.syntheticV2CostModel,
 		"a committed transaction must persist the marker")
+	committedPParams, err := db.GetPParams(
+		1, eras.BabbageEraDesc.Id, eras.DecodePParamsBabbage, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, committedPParams,
+		"a committed transaction must persist the pparams write")
 }
