@@ -195,26 +195,30 @@ Cardano configuration files are bundled in the Docker image. For local builds, y
 Dingo's resource needs depend on the network, storage mode, and whether it is
 bootstrapping or serving near the chain tip. The following measurements were
 captured on September 4, 2026 from nine process samples at 30-second intervals
-(about four minutes) on otherwise shared 32 GiB hosts. They are observations,
-not capacity guarantees; the mainnet sample was on released `v0.70.5`, while
-the Preprod and Preview samples used an `origin/main` build.
+(about four minutes) on otherwise shared 32 GiB hosts. CPU values below are
+derived from the recorded process percentages (`%CPU / 100`) and represent
+core-equivalents, not a new sampling run. They are observations, not capacity
+guarantees; the mainnet sample was on released `v0.70.5`, while the Preprod
+and Preview samples used an `origin/main` build.
 
-| Network and mode | Average CPU | Peak CPU | Average RSS | Peak RSS |
+| Network and mode | Average CPU cores | Peak CPU cores | Average RSS | Peak RSS |
 | --- | ---: | ---: | ---: | ---: |
-| Mainnet, `core` | 86% | 86% | 4.3 GiB | 4.5 GiB |
-| Preprod, `core` | 55% | 55% | 1.5 GiB | 1.5 GiB |
-| Preview, `core` | 10% | 10% | 1.3 GiB | 1.4 GiB |
+| Mainnet, `core` | 0.863 | 0.864 | 4.3 GiB | 4.5 GiB |
+| Preprod, `core` | 0.545 | 0.547 | 1.5 GiB | 1.5 GiB |
+| Preview, `core` | 0.095 | 0.096 | 1.3 GiB | 1.4 GiB |
 
 For a practical starting point, provision at least 2 vCPUs and 8 GiB RAM for
-a `core` node. This leaves headroom above the observed mainnet RSS and allows
-for variation from peer activity, compaction, upgrades, and catch-up. A node
-that serves APIs or uses `storageMode: api` should use at least 4 vCPUs and 16
-GiB RAM until longer production-like measurements are available. Disk capacity
-must also cover the selected storage mode and its temporary bootstrap peak.
+a `core` node. This leaves CPU and memory headroom above the observed mainnet
+serve sample and allows for variation from peer activity, compaction, upgrades,
+and catch-up. A node that serves APIs or uses `storageMode: api` should use at
+least 4 vCPUs and 16 GiB RAM until longer production-like measurements are
+available. Disk capacity must also cover the selected storage mode and its
+temporary bootstrap peak.
 
 API-mode Mithril bootstrap is a separate workload and needs more resources than
-near-tip serving. An in-progress Preview sample averaged 93% CPU and grew from
-0.3 GiB to 3.0 GiB RSS in about four minutes while importing a snapshot; the
+near-tip serving. An in-progress Preview sample averaged 0.932 CPU cores
+(0.972 peak, derived from the recorded percentages) and grew from 0.3 GiB to
+3.0 GiB RSS in about four minutes while importing a snapshot; the
 run had reached 1.8% ledger/UTxO import, so its eventual peak was not measured.
 The same run used about 17.9 GB of host `/data` at the time of sampling. Treat
 these API bootstrap values as preliminary and leave substantial additional CPU,
