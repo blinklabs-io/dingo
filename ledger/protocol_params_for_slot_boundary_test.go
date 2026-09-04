@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -230,7 +231,8 @@ func TestProtocolParamsForSlot_FallbackProjectsFromCurrentEpoch(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 	_, err := ls.SlotToEpoch(targetSlot)
-	require.Error(t, err, "the target must exercise the bounded-summary fallback")
+	require.ErrorIs(t, err, hardfork.ErrPastHorizon,
+		"the target must exercise the bounded-summary fallback")
 
 	got, ok := ls.ProtocolParamsForSlot(targetSlot).(*shelley.ShelleyProtocolParameters)
 	require.True(t, ok)

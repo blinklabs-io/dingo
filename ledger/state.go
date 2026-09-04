@@ -8817,17 +8817,28 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 	// through the multi-era converter so a Byron prefix does not make a
 	// future Shelley slot appear to belong to an early epoch.
 	slotEpoch := currentEpoch.EpochId
-	if slot >= currentEpoch.StartSlot {
+	// Use the epoch cache from the same immutable snapshot as the other
+	// forecast inputs. Calling ls.SlotToEpoch here would load a second snapshot
+	// and could mix its epoch cache with currentEpoch/currentEra/currentPParams
+	// across a concurrent rollover or rollback.
+	for i := len(snapshot.epochCache) - 1; i >= 0; i-- {
+		epoch := snapshot.epochCache[i]
+		if slot < epoch.StartSlot {
+			continue
+		}
+		slotEpoch = epoch.EpochId
+		if epoch.LengthInSlots != 0 {
+			slotEpoch += (slot - epoch.StartSlot) /
+				uint64(epoch.LengthInSlots)
+		}
+		break
+	}
+	if len(snapshot.epochCache) == 0 && slot >= currentEpoch.StartSlot {
+		// With no cache, project from the captured current epoch. This retains
+		// the absolute epoch offset while preserving the existing bare-state
+		// forecast behavior.
 		slotEpoch += (slot - currentEpoch.StartSlot) /
 			uint64(currentEpoch.LengthInSlots)
-	} else {
-		// A historical slot cannot require forecasting beyond the current
-		// epoch. Keep the old absolute-slot estimate only as a conservative
-		// value for the comparison below.
-		slotEpoch = slot / uint64(currentEpoch.LengthInSlots)
-	}
-	if slotInfo, err := ls.SlotToEpoch(slot); err == nil {
-		slotEpoch = slotInfo.EpochId
 	}
 	if slotEpoch <= currentEpoch.EpochId {
 		return currentPParams
