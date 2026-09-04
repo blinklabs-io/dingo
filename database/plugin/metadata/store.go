@@ -2219,6 +2219,18 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.RewardSnapshot, error)
 
+	// SaveRewardSeedFailure records why an imported reward basis could not be
+	// persisted, allowing the later reward boundary to report the durable cause.
+	SaveRewardSeedFailure(uint64, string, string, uint64, types.Txn) error
+
+	// GetRewardSeedFailure returns the durable imported reward-basis failure,
+	// or an empty string when no failure was recorded.
+	GetRewardSeedFailure(uint64, string, types.Txn) (string, error)
+
+	// DeleteRewardSeedFailure clears a failure after successful seeding or when
+	// the corresponding imported snapshot is rolled back.
+	DeleteRewardSeedFailure(uint64, string, types.Txn) error
+
 	// DeleteProvisionalRewardSnapshot deletes a non-authoritative reward
 	// snapshot for an epoch and type. Authoritative boundary state is retained.
 	DeleteProvisionalRewardSnapshot(uint64, string, types.Txn) error
