@@ -4628,6 +4628,7 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 			nil,
 		)
 		if addBlockErr == nil {
+			ls.batchBlocksApplied++
 			// Defer this block's chain.update past chainsyncBlockfetchMutex
 			// rather than publishing inline. AddBlockWithPointDeferred has
 			// already enqueued evt on the chain's shared sequencer under
@@ -4678,6 +4679,12 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 	}
 	ls.chain.NotifyIterators()
 	return nil
+}
+
+// flushPendingBlockfetchBlocks preserves the synchronous test and recovery
+// path while normal chainsync handling defers publication past its mutex.
+func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
+	return ls.flushPendingBlockfetchBlocksDeferred(nil)
 }
 
 // GenesisBlockHash returns the Byron genesis hash from config, which is used

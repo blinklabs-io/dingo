@@ -838,7 +838,7 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 				err,
 			)
 		}
-		if err := ls.rollbackChain(nextPoint); err != nil {
+		if err := ls.chain.Rollback(nextPoint); err != nil {
 			return fmt.Errorf(
 				"rollback primary chain to intermediate point %d: %w",
 				nextIndex,
@@ -850,7 +850,7 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 	if err := ls.validateAndEmitRollbackUndo(point); err != nil {
 		return fmt.Errorf("rollback primary chain to recovery point: %w", err)
 	}
-	if err := ls.rollbackChain(point); err != nil {
+	if err := ls.chain.Rollback(point); err != nil {
 		return fmt.Errorf("rollback primary chain to recovery point: %w", err)
 	}
 	return nil
