@@ -2080,6 +2080,7 @@ var (
 	CloseProcessBlocksDrainTimeout = 20 * time.Second
 	CloseBlockPipelineDrainTimeout = 10 * time.Second
 	CloseBlockfetchDrainTimeout    = 10 * time.Second
+	CloseResultReplayTimeout       = 10 * time.Second
 	// BlockPipelineRollbackDrainTimeout bounds how long an asynchronous
 	// rollback (chainsync fork resolution or a peer-reported rollback --
 	// see rollbackChainAndStateDeferred) waits for ls.blockPipeline to drain
@@ -2101,7 +2102,11 @@ func (ls *LedgerState) Close() (retErr error) {
 	if ls.closeDone != nil {
 		done := ls.closeDone
 		ls.closeMu.Unlock()
-		<-done
+		select {
+		case <-done:
+		case <-time.After(CloseResultReplayTimeout):
+			return errors.New("previous ledger state close still in progress")
+		}
 		ls.closeMu.Lock()
 		retErr = ls.closeErr
 		ls.closeMu.Unlock()
