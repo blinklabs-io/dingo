@@ -73,21 +73,14 @@ func newMockStakeProvider() *mockStakeProvider {
 	}
 }
 
-func (m *mockStakeProvider) GetPoolStake(
-	epoch uint64,
+func (m *mockStakeProvider) GetPoolAndTotalActiveStake(
+	_ uint64,
 	poolKeyHash []byte,
-) (uint64, error) {
+) (uint64, uint64, error) {
 	if m.err != nil {
-		return 0, m.err
+		return 0, 0, m.err
 	}
-	return m.poolStakes[string(poolKeyHash)], nil
-}
-
-func (m *mockStakeProvider) GetTotalActiveStake(epoch uint64) (uint64, error) {
-	if m.err != nil {
-		return 0, m.err
-	}
-	return m.totalStake, nil
+	return m.poolStakes[string(poolKeyHash)], m.totalStake, nil
 }
 
 // mockEpochProvider implements EpochInfoProvider for testing
@@ -430,13 +423,13 @@ type blockingStakeProvider struct {
 	release   chan struct{}
 }
 
-func (b *blockingStakeProvider) GetPoolStake(
+func (b *blockingStakeProvider) GetPoolAndTotalActiveStake(
 	epoch uint64,
 	poolKeyHash []byte,
-) (uint64, error) {
+) (uint64, uint64, error) {
 	b.startOnce.Do(func() { close(b.started) })
 	<-b.release
-	return b.mockStakeProvider.GetPoolStake(epoch, poolKeyHash)
+	return b.mockStakeProvider.GetPoolAndTotalActiveStake(epoch, poolKeyHash)
 }
 
 // TestElectionStopWaitsForInFlightScheduleComputation guards a real bug:

@@ -8375,15 +8375,57 @@ Mithril case already refused above.
 The `LedgerView` provides stake distribution queries:
 
 ```go
-// Get full stake distribution for leader election
+// Get full stake distribution (Leios committee stake; note TotalStake here is
+// summed from the mark rows by GetStakeDistribution itself)
 dist, err := ledgerView.GetStakeDistribution(epoch)
 
-// Get stake for a specific pool
+// Get stake for a specific pool -- the sigma numerator
 poolStake, err := ledgerView.GetPoolStake(epoch, poolKeyHash)
 
-// Get total active stake
+// Get total active stake -- the sigma denominator. Txn-scoped wrapper over
+// the shared store accessor Metadata().GetTotalActiveStake, pinned to the
+// "mark" snapshot type; that accessor prefers epoch_summary.total_active_stake
+// when the epoch's summary row is marked ready.
 totalStake, err := ledgerView.GetTotalActiveStake(epoch)
 ```
+
+The normal Praos/mark paths resolve the denominator through that one store
+accessor, `Metadata().GetTotalActiveStake`, but they reach it differently and
+the difference matters when reading this code. Header verification that uses
+an imported active distribution is the exception: it uses the denominator
+carried by that imported snapshot rather than resolving a mark value from
+metadata:
+
+- The forging adapter calls `LedgerView.GetTotalActiveStake`, which passes the
+  view's transaction and pins `snapshotType` to `"mark"`.
+- `verify_header.go` calls `ls.db.Metadata().GetTotalActiveStake` directly with
+  a `nil` transaction and the `snapshotType` it resolved for the header under
+  check, which is `"mark"` on the normal Praos path but is not hardcoded.
+
+So "one accessor" holds at the store layer, which is what removes the second
+derivation. It is not a claim that verification goes through `LedgerView`.
+
+Leader election must take the two halves of sigma from ONE `LedgerView` inside
+ONE `db.MetadataTxn`. The forging adapter's
+`leader.StakeDistributionProvider` therefore exposes a single
+`GetPoolAndTotalActiveStake(epoch, poolKeyHash) (poolStake, totalActiveStake, error)`
+rather than separate accessors, so a torn read is not expressible:
+
+- Reading the halves through two transactions let a snapshot re-capture land
+  between them, producing a sigma reproducible from neither snapshot
+  (dingo #3815).
+- Deriving the denominator a second way -- by summing the mark rows, as
+  `GetStakeDistribution` does -- let the forge denominator drift from the
+  verify denominator, so a node could forge a block it would itself reject
+  (dingo #3814). Both paths now call `GetTotalActiveStake`.
+
+The reference rule for what that denominator contains, with
+`cardano-ledger` citations, is documented on
+`leader.StakeDistributionProvider` in `ledger/leader/election.go`. In short:
+it sums every registered credential delegated to any pool id, while
+numerators come only from registered pools -- and those two sets coincide
+only because POOLREAP clears a retiring pool's delegations in the same update
+that removes it (dingo mirrors this in `ledger/poolreap.go`).
 
 ### Boundary Capture And Events
 
