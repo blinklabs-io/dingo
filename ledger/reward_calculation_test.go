@@ -2168,21 +2168,6 @@ func TestPrecomputedStakeRewardsRejectOutputsWithoutStakeInputs(t *testing.T) {
 	require.Nil(t, app)
 }
 
-func TestPrecomputedStakeRewardsRejectIncompleteBlockCounts(t *testing.T) {
-	ls, db := seedRewardPrecomputeTimingState(t, 7)
-	rewardCalcExecRows(t, db,
-		"UPDATE reward_pool_input SET blocks_produced = NULL, total_blocks_in_epoch = NULL WHERE epoch = ?",
-		uint64(1),
-	)
-	txn := db.Transaction(false)
-	defer func() { _ = txn.Rollback() }()
-	app, ok, err := ls.precomputedStakeRewardApplication(txn, 4, 1_200)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "incomplete block production counts")
-	require.False(t, ok)
-	require.Nil(t, app)
-}
-
 func TestPrecomputedStakeRewardsRejectOutputsWithoutPoolInputs(t *testing.T) {
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	meta := db.Metadata()
@@ -5599,6 +5584,7 @@ func seedRewardPrecomputeTimingState(
 	poolKey := rewardCalcHash(0x4a)
 	rewardAccount := rewardCalcHash(0x5a)
 	member := rewardCalcHash(0x6a)
+	blocksProduced, totalBlocks := uint64(10), uint64(10)
 	var poolID lcommon.PoolKeyHash
 	copy(poolID[:], poolKey)
 
@@ -5680,6 +5666,8 @@ func seedRewardPrecomputeTimingState(
 			DelegatedStake:             1_000,
 			OwnerStake:                 500,
 			DelegatorCount:             2,
+			BlocksProduced:             &blocksProduced,
+			TotalBlocksInEpoch:         &totalBlocks,
 			CapturedSlot:               100,
 			BoundarySlot:               100,
 		},

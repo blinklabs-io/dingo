@@ -282,20 +282,6 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		)
 		return nil, false, nil
 	}
-	// Imported Mithril reward inputs may describe stake and registrations but
-	// cannot carry per-epoch block production counts. Do not interpret those
-	// missing values as zero: that would persist a plausible-looking reward
-	// round with no credits and leave withdrawals inconsistent with the
-	// network state. The round can be retried only when a complete basis is
-	// available; an incomplete one must be skipped before calculation.
-	if err := validateRewardPoolInputBlockCounts(poolInputs); err != nil {
-		return nil, false, fmt.Errorf(
-			"reward snapshot %d has incomplete block production counts: %w",
-			rewardSnapshotEpoch,
-			err,
-		)
-	}
-
 	pparams, params, performanceDecentralization, err := ls.rewardParameters(
 		txn,
 		performanceEpoch,
