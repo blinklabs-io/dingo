@@ -2367,6 +2367,49 @@ func TestReconcileLivePrimaryChainLedgerDivergenceExportedWrapperRecoversSubKFor
 	)
 }
 
+func TestReconcileLivePrimaryChainLedgerDivergenceRequestsMithrilResync(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	forkHash := testHashBytes("live-mithril-boundary-fork")
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, fixture.ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        forkHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+	fixture.ls.mithrilLedgerSlot = fixture.ancestorTip.Point.Slot + 1
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+	resyncCh := subscribeChainsyncResync(t, bus)
+
+	reconciled, err := fixture.ls.ReconcileLivePrimaryChainLedgerDivergence(
+		"local tip plateau",
+		fixture.connId,
+	)
+	require.NoError(t, err)
+	require.False(t, reconciled)
+	e := testutil.RequireReceive(
+		t,
+		resyncCh,
+		time.Second,
+		"expected live Mithril-boundary resync event",
+	)
+	require.Equal(
+		t,
+		event.ChainsyncResyncReasonRollbackExceedsMithril,
+		e.Reason,
+	)
+	require.Equal(t, fixture.connId, e.ConnectionId)
+}
+
 // TestReconcilePrimaryChainTipWithLedgerTipCatchesUpWhenAheadBeyondK covers the
 // old-Mithril-snapshot shape: the immutable primary chain is far ahead of the
 // ledger tip (more than k blocks), but the ledger tip is still a valid ancestor

@@ -2825,6 +2825,33 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 }
 
 func (ls *LedgerState) rollback(point ocommon.Point) error {
+	return ls.rollbackWithResync(point, true)
+}
+
+func (ls *LedgerState) rollbackWithoutResync(point ocommon.Point) error {
+	return ls.rollbackWithResync(point, false)
+}
+
+func (ls *LedgerState) publishLocalLedgerRollback(point ocommon.Point) {
+	if ls.config.EventBus == nil {
+		return
+	}
+	ls.config.EventBus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				Reason: event.ChainsyncResyncReasonLocalLedgerRollback,
+				Point:  point,
+			},
+		),
+	)
+}
+
+func (ls *LedgerState) rollbackWithResync(
+	point ocommon.Point,
+	publishResync bool,
+) error {
 	// Rolling back to the point we already sit at is a no-op. Skip
 	// it entirely so we don't publish a "local ledger rollback"
 	// resync event for a rollback that didn't move the ledger. That
@@ -2925,7 +2952,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		return err
 	}
 	// Notify subscribers that pool state has been restored (e.g., for cache invalidation)
-	if ls.config.EventBus != nil {
+	if publishResync && ls.config.EventBus != nil {
 		ls.config.EventBus.PublishAsync(
 			PoolStateRestoredEventType,
 			event.NewEvent(
@@ -3120,17 +3147,8 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	ls.updateTipMetrics(newTipDensity)
 	ls.publishSnapshotsLocked()
 	ls.Unlock()
-	if ls.config.EventBus != nil {
-		ls.config.EventBus.Publish(
-			event.ChainsyncResyncEventType,
-			event.NewEvent(
-				event.ChainsyncResyncEventType,
-				event.ChainsyncResyncEvent{
-					Reason: event.ChainsyncResyncReasonLocalLedgerRollback,
-					Point:  point,
-				},
-			),
-		)
+	if publishResync {
+		ls.publishLocalLedgerRollback(point)
 	}
 	var hash string
 	if point.Slot == 0 {
@@ -5935,19 +5953,21 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							isCheckpoint = true
 							localCheckpointWritten = true
 						}
-						// Store block nonce in the DB
+						// Store an applied point for every block. Byron blocks do
+						// not have an evolving nonce, but reconciliation still
+						// needs their durable point to build rollback notifications.
+						err = ls.db.SetBlockNonce(
+							tmpPoint.Hash,
+							tmpPoint.Slot,
+							blockNonce,
+							isCheckpoint,
+							txn,
+						)
+						if err != nil {
+							deltaBatch.Release()
+							return err
+						}
 						if len(blockNonce) > 0 {
-							err = ls.db.SetBlockNonce(
-								tmpPoint.Hash,
-								tmpPoint.Slot,
-								blockNonce,
-								isCheckpoint,
-								txn,
-							)
-							if err != nil {
-								deltaBatch.Release()
-								return err
-							}
 							// Track pending nonce (will be committed after txn succeeds)
 							pendingNonce = blockNonce
 						}
@@ -7941,7 +7961,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 			context.Background(),
 			"primary-chain/ledger reconciliation",
 		)
-		func() {
+		if err := func() error {
 			ls.transactionEventMutex.Lock()
 			defer ls.transactionEventMutex.Unlock()
 			ls.RLock()
@@ -7961,7 +7981,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 			// closing that fully).
 			if mithrilLedgerSlot > 0 &&
 				chainTip.Point.Slot < mithrilLedgerSlot {
-				return
+				return ErrRollbackExceedsMithrilBoundary
 			}
 			undoBlocks := ls.reconciliationUndoBlocks(
 				chainTip.Point,
@@ -7977,17 +7997,14 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 			// validateAndEmitRollbackUndo contract, and the next
 			// reconciliation attempt lands right back in this same
 			// branch and retries both.
+			if err := ls.rollbackWithoutResync(chainTip.Point); err != nil {
+				return err
+			}
 			ls.emitRollbackTransactionEvents(undoBlocks)
-		}()
-		if err := ls.rollback(chainTip.Point); err != nil {
+			return nil
+		}(); err != nil {
 			ls.config.Logger.Error(
-				"failed to roll back ledger metadata to primary chain "+
-					"tip after already publishing its undo events; "+
-					"ledger.tx subscribers now see these blocks as "+
-					"undone while durable ledger metadata still shows "+
-					"them applied -- self-healing, the next "+
-					"reconciliation attempt will retry both the undo "+
-					"notification and this rollback",
+				"failed to roll back ledger metadata to primary chain tip",
 				"component", "ledger",
 				"error", err,
 				"chain_tip_slot", chainTip.Point.Slot,
@@ -7998,6 +8015,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 				err,
 			)
 		}
+		ls.publishLocalLedgerRollback(chainTip.Point)
 		return nil
 	}
 	containsLedgerTip, err := ls.primaryChainContainsPoint(ledgerTip.Point)
@@ -8229,6 +8247,9 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		// TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewindAndEmit).
 		// A true durable, atomic handoff across every rollback path --
 		// not just this one -- is tracked as issue #3817.
+		if err := ls.rollbackWithoutResync(ancestor); err != nil {
+			return err
+		}
 		ls.emitRollbackTransactionEvents(undoBlocks)
 		return nil
 	}(); err != nil {
@@ -8237,24 +8258,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 			err,
 		)
 	}
-	if err := ls.rollback(ancestor); err != nil {
-		ls.config.Logger.Error(
-			"failed to roll back ledger metadata to common ancestor "+
-				"after already publishing its undo events; ledger.tx "+
-				"subscribers now see these blocks as undone while "+
-				"durable ledger metadata still shows them applied -- "+
-				"self-healing, the next reconciliation attempt will "+
-				"retry both the undo notification and this rollback",
-			"component", "ledger",
-			"error", err,
-			"ancestor_slot", ancestor.Slot,
-			"ancestor_hash", hex.EncodeToString(ancestor.Hash),
-		)
-		return fmt.Errorf(
-			"rollback ledger tip to common primary-chain ancestor: %w",
-			err,
-		)
-	}
+	ls.publishLocalLedgerRollback(ancestor)
 	return nil
 }
 
@@ -8325,6 +8329,27 @@ func (ls *LedgerState) reconcileLivePrimaryChainLedgerDivergence(
 		hex.EncodeToString(ledgerTip.Point.Hash),
 	)
 	if err := ls.reconcilePrimaryChainTipWithLedgerTip(); err != nil {
+		if errors.Is(err, ErrRollbackExceedsMithrilBoundary) {
+			// The plateau watchdog has no pending event batch or peer
+			// rollback handler to classify this local reconciliation failure.
+			// Publish the same resync reason here so the live caller does
+			// not merely log the boundary rejection and leave chainsync
+			// pinned on the divergent view.
+			if ls.config.EventBus != nil {
+				ls.config.EventBus.PublishAsync(
+					event.ChainsyncResyncEventType,
+					event.NewEvent(
+						event.ChainsyncResyncEventType,
+						event.ChainsyncResyncEvent{
+							ConnectionId: connId,
+							Reason:       event.ChainsyncResyncReasonRollbackExceedsMithril,
+							Point:        ledgerTip.Point,
+						},
+					),
+				)
+			}
+			return false, nil
+		}
 		if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
 			// The common ancestor sits more than K blocks behind the
 			// primary chain tip. Rewinding that far live is exactly what

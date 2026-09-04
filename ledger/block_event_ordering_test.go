@@ -808,6 +808,13 @@ func TestReconcilePrimaryChainTipWithLedgerTipEmitsUndoEventsBeforeTruncating(
 	// branch's block the ledger never applied at all.
 	require.Equal(t, fixture.currentTip.Point.Slot, le.Point.Slot)
 	require.Equal(t, fixture.currentTip.Point.Hash, le.Point.Hash)
+	// The undo notification is published only after the durable metadata
+	// rollback succeeds, so subscribers never observe an undo ahead of the
+	// ledger tip that records it.
+	require.Equal(t, fixture.ancestorTip, ls.currentTip)
+	dbTip, err := ls.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, fixture.ancestorTip, dbTip)
 	testutil.RequireNoReceive(
 		t, errCh, 250*time.Millisecond,
 		"expected exactly one undo decode error",
@@ -1080,8 +1087,8 @@ func TestReconciliationUndoBlocksDetectsMissingBlockNonceRecords(t *testing.T) {
 
 	// Extend the still-intact primary chain (no divergence here -- this
 	// test calls reconciliationUndoBlocks directly, not the full
-	// reconciler) with one more applied block that gets no block_nonce
-	// row at all, exactly as a Byron block never would.
+	// reconciler) with one more Byron-like applied block. Its durable
+	// applied-point row intentionally has no evolving nonce.
 	byronLikeHash := testHashBytes("byron-like-no-nonce-row")
 	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
 		{
@@ -1093,6 +1100,13 @@ func TestReconciliationUndoBlocksDetectsMissingBlockNonceRecords(t *testing.T) {
 			Cbor:        []byte{0x80},
 		},
 	}))
+	require.NoError(t, ls.db.SetBlockNonce(
+		byronLikeHash,
+		fixture.currentTip.Point.Slot+5,
+		nil,
+		false,
+		nil,
+	))
 
 	blocks := ls.reconciliationUndoBlocks(
 		fixture.ancestorTip.Point,
@@ -1100,18 +1114,17 @@ func TestReconciliationUndoBlocksDetectsMissingBlockNonceRecords(t *testing.T) {
 		fixture.currentTip.BlockNumber+1,
 	)
 
-	// Only fixture.currentTip resolves through a block_nonce row; the
-	// Byron-like block is not merely unresolvable, it was never a
-	// candidate at all, so it must not appear here either.
-	require.Len(t, blocks, 1)
-	require.Equal(t, fixture.currentTip.Point.Hash, blocks[0].Hash)
+	// Both applied points are candidates; the Byron-like row is retained
+	// even though its nonce is nil.
+	require.Len(t, blocks, 2)
+	require.Equal(t, byronLikeHash, blocks[0].Hash)
+	require.Equal(t, fixture.currentTip.Point.Hash, blocks[1].Hash)
 
 	require.Equal(
 		t,
-		float64(1),
+		float64(0),
 		promtestutil.ToFloat64(ls.metrics.reconciliationUndoMissingRecord),
-		"reconciliationUndoMissingRecord must count the block with no "+
-			"block_nonce row at all",
+		"a durable nil-nonce applied point must not be counted as missing",
 	)
 	require.Equal(
 		t,
