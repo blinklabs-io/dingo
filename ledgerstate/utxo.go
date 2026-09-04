@@ -520,7 +520,7 @@ func extractAddressKeys(addr []byte, result *ParsedUTxO) error {
 			result.StakingKey = bytes.Clone(addr[29:57])
 			result.CredentialTag = 1
 		}
-	case (addrType == 4 || addrType == 5) && len(addr) >= 29:
+	case addrType == 4 || addrType == 5:
 		// Pointer address: 1 header + 28 payment + three variable-length
 		// naturals. Validate the pointer through the canonical address
 		// decoder before storing even the payment credential; otherwise a
