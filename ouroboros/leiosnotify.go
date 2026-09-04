@@ -627,7 +627,10 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		// txs-offer below. Failures are best-effort: a transient manifest fetch
 		// error must not tear down the shared connection.
 		o.dispatchLeiosFetch(ctx.ConnectionId, func() {
-			reqCtx, cancel := leiosFetchRequestContext(time.Time{})
+			reqCtx, cancel := leiosFetchRequestContext(
+				context.Background(),
+				time.Time{},
+			)
 			blockRaw, err := fetchAndValidateLeiosEbManifest(
 				reqCtx,
 				client,
@@ -723,7 +726,10 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 			if !ok {
 				// Manifest not cached yet (txs offered before/without a block
 				// offer): fetch the manifest first to learn the tx count.
-				reqCtx, cancel := leiosFetchRequestContext(time.Time{})
+				reqCtx, cancel := leiosFetchRequestContext(
+					context.Background(),
+					time.Time{},
+				)
 				resp, err := client.BlockRequest(reqCtx, point)
 				cancel()
 				if err != nil {
@@ -1102,20 +1108,13 @@ func (o *Ouroboros) fetchLeiosEbTxsBatched(
 	txCount int,
 	manifestRaw []byte,
 ) ([]cbor.RawMessage, error) {
-	var validate func(int, cbor.RawMessage) error
-	if len(manifestRaw) > 0 {
-		var err error
-		validate, err = leiosEndorserBlockTxValidator(manifestRaw, txCount)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return o.fetchLeiosEbTxsBatchedUntilWithValidator(
+	return o.fetchLeiosEbTxsBatchedUntilWithContext(
+		context.Background(),
 		client,
 		point,
 		txCount,
+		manifestRaw,
 		time.Time{},
-		validate,
 	)
 }
 
@@ -1138,6 +1137,24 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
 	manifestRaw []byte,
 	deadline time.Time,
 ) ([]cbor.RawMessage, error) {
+	return o.fetchLeiosEbTxsBatchedUntilWithContext(
+		context.Background(),
+		client,
+		point,
+		txCount,
+		manifestRaw,
+		deadline,
+	)
+}
+
+func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithContext(
+	ctx context.Context,
+	client leiosBlockTxsRequester,
+	point ocommon.Point,
+	txCount int,
+	manifestRaw []byte,
+	deadline time.Time,
+) ([]cbor.RawMessage, error) {
 	var validate func(int, cbor.RawMessage) error
 	if len(manifestRaw) > 0 {
 		var err error
@@ -1147,6 +1164,7 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
 		}
 	}
 	return o.fetchLeiosEbTxsBatchedUntilWithValidator(
+		ctx,
 		client,
 		point,
 		txCount,
@@ -1156,12 +1174,16 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
 }
 
 func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
+	ctx context.Context,
 	client leiosBlockTxsRequester,
 	point ocommon.Point,
 	txCount int,
 	deadline time.Time,
 	validate func(int, cbor.RawMessage) error,
 ) ([]cbor.RawMessage, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if client == nil {
 		return nil, errors.New("leios-fetch client unavailable")
 	}
@@ -1226,7 +1248,7 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 				round,
 			)
 		}
-		reqCtx, cancel := leiosFetchRequestContext(deadline)
+		reqCtx, cancel := leiosFetchRequestContext(ctx, deadline)
 		resp, err := client.BlockTxsRequest(reqCtx, point, needed)
 		cancel()
 		if err != nil {
@@ -1290,7 +1312,13 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 					"leios-fetch served no new transactions within tail budget",
 				)
 			}
-			time.Sleep(leiosTxFetchTailPoll)
+			timer := time.NewTimer(leiosTxFetchTailPoll)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return leiosCollectTxs(result), ctx.Err()
+			case <-timer.C:
+			}
 			continue
 		}
 		tailStall = time.Time{}

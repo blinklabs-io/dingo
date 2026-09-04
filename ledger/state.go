@@ -759,7 +759,11 @@ type EndorserBlockProviderFunc func(
 // returns an error when no fetch connection is available or the relay does not
 // serve the block. The endorser block shares the slot of the ranking block that
 // references it (they are co-produced), so ebSlot is the ranking block's slot.
-type EndorserBlockFetcherFunc func(ebSlot uint64, ebHash []byte) error
+type EndorserBlockFetcherFunc func(
+	ctx context.Context,
+	ebSlot uint64,
+	ebHash []byte,
+) error
 
 // BlockfetchRequestRangeFunc describes a callback function used to start a blockfetch request for
 // a range of blocks

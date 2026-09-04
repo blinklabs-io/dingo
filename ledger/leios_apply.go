@@ -546,7 +546,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// the way a per-chunk barrier did.
 	if len(backfill) > 0 && ls.leiosBackfill != nil {
 		for _, r := range backfill {
-			ls.leiosBackfill.spawn(r)
+			ls.leiosBackfill.spawn(ctx, r)
 		}
 		for _, r := range backfill {
 			if endorserBlockAvailableAt(
@@ -577,6 +577,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 			r.slot,
 		) {
 			if err := ls.config.EndorserBlockFetcher(
+				ctx,
 				r.slot,
 				r.hash.Bytes(),
 			); err != nil {
@@ -926,7 +927,10 @@ func newLeiosBackfiller(cfg LedgerStateConfig) *leiosBackfiller {
 // and then let awaitFetch's "not in flight" skip-fast fire the moment the
 // *first* requirement's fetch cleared the (shared) key, even though the
 // second requirement's slot was never fetched at all (issue #3513 review).
-func (b *leiosBackfiller) spawn(r leiosEbRef) {
+func (b *leiosBackfiller) spawn(ctx context.Context, r leiosEbRef) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	key := leiosEbRefKey(r)
 	if _, loaded := b.inflight.LoadOrStore(key, struct{}{}); loaded {
 		return
@@ -936,7 +940,14 @@ func (b *leiosBackfiller) spawn(r leiosEbRef) {
 		return
 	}
 	go func() {
-		b.sem <- struct{}{}
+		fetchCtx, cancel := context.WithTimeout(ctx, leiosBackfillMaxWait)
+		defer cancel()
+		select {
+		case b.sem <- struct{}{}:
+		case <-fetchCtx.Done():
+			b.inflight.Delete(key)
+			return
+		}
 		defer func() {
 			<-b.sem
 			b.inflight.Delete(key)
@@ -944,7 +955,7 @@ func (b *leiosBackfiller) spawn(r leiosEbRef) {
 		if endorserBlockAvailableAt(b.provider, r.hash.Bytes(), r.slot) {
 			return
 		}
-		if err := b.fetch(r.slot, r.hash.Bytes()); err != nil {
+		if err := b.fetch(fetchCtx, r.slot, r.hash.Bytes()); err != nil {
 			b.logger.Debug(
 				"leios endorser block backfill failed",
 				"component", "ledger",

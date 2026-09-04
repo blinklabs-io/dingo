@@ -179,9 +179,11 @@ func TestFetchEndorserBlockOnConnSkipsBusyConnection(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- o.fetchEndorserBlockOnConn(
+			context.Background(),
 			connId,
 			nil,
 			point,
+			leiosBackfillPerAttemptTimeout,
 		)
 	}()
 	err := testutil.RequireReceive(

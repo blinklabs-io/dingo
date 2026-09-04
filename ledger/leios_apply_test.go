@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"io"
 	"log/slog"
@@ -624,7 +625,7 @@ func TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently(t *testing.T) {
 
 	hash := lcommon.NewBlake2b256(leiosTestHash(0xAB))
 	b := &leiosBackfiller{
-		fetch: func(slot uint64, _ []byte) error {
+		fetch: func(_ context.Context, slot uint64, _ []byte) error {
 			mu.Lock()
 			calls = append(calls, slot)
 			mu.Unlock()
@@ -647,7 +648,7 @@ func TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently(t *testing.T) {
 
 	// Slot 100's fetch starts and blocks inside fetch (simulating a live
 	// in-flight network request).
-	b.spawn(leiosEbRef{slot: 100, hash: hash})
+	b.spawn(context.Background(), leiosEbRef{slot: 100, hash: hash})
 	require.Eventually(
 		t,
 		func() bool { return callCount() == 1 },
@@ -657,7 +658,7 @@ func TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently(t *testing.T) {
 
 	// Slot 200 requires the same hash while slot 100's fetch is still in
 	// flight. It must be dispatched independently, not suppressed.
-	b.spawn(leiosEbRef{slot: 200, hash: hash})
+	b.spawn(context.Background(), leiosEbRef{slot: 200, hash: hash})
 	require.Eventually(
 		t,
 		func() bool { return callCount() == 2 },
@@ -668,6 +669,40 @@ func TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently(t *testing.T) {
 	mu.Lock()
 	require.ElementsMatch(t, []uint64{100, 200}, calls)
 	mu.Unlock()
+}
+
+// TestLeiosBackfillerSpawnCancelsFetch verifies that a backfill does not keep
+// running after the block-application context is cancelled. Before the fetch
+// callback accepted a context, a pipeline restart or node shutdown left the
+// network request alive and competing with the next apply attempt (dingo #3552).
+func TestLeiosBackfillerSpawnCancelsFetch(t *testing.T) {
+	started := make(chan struct{})
+	cancelled := make(chan error, 1)
+	hash := lcommon.NewBlake2b256(leiosTestHash(0xEF))
+	b := &leiosBackfiller{
+		fetch: func(ctx context.Context, _ uint64, _ []byte) error {
+			close(started)
+			<-ctx.Done()
+			cancelled <- ctx.Err()
+			return ctx.Err()
+		},
+		provider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
+			return nil, false
+		},
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		sem:    make(chan struct{}, leiosBackfillConcurrency),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	b.spawn(ctx, leiosEbRef{slot: 300, hash: hash})
+	<-started
+	cancel()
+
+	select {
+	case err := <-cancelled:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("backfill fetch did not observe cancellation")
+	}
 }
 
 // TestLeiosBackfillerAwaitFetchDoesNotSkipFastOnDifferentSlotCompletion is the
@@ -686,7 +721,7 @@ func TestLeiosBackfillerAwaitFetchDoesNotSkipFastOnDifferentSlotCompletion(
 	hash := lcommon.NewBlake2b256(leiosTestHash(0xCD))
 
 	b := &leiosBackfiller{
-		fetch: func(slot uint64, _ []byte) error {
+		fetch: func(_ context.Context, slot uint64, _ []byte) error {
 			switch slot {
 			case 100:
 				<-releaseA
@@ -711,8 +746,8 @@ func TestLeiosBackfillerAwaitFetchDoesNotSkipFastOnDifferentSlotCompletion(
 	}
 
 	// Both slots' fetches are genuinely in flight at once.
-	b.spawn(leiosEbRef{slot: 100, hash: hash})
-	b.spawn(leiosEbRef{slot: 200, hash: hash})
+	b.spawn(context.Background(), leiosEbRef{slot: 100, hash: hash})
+	b.spawn(context.Background(), leiosEbRef{slot: 200, hash: hash})
 
 	// Slot 100 finishes first, while slot 200 is still in flight.
 	close(releaseA)

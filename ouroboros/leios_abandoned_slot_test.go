@@ -179,7 +179,10 @@ func TestLeiosBlockTxsAbandonedSlotFailsOverAndBecomesAvailable(t *testing.T) {
 	// abandoned-slot error must cool it down (or retire the connection) and let
 	// the healthy peer complete.
 	o.leiosFetchGuardFor(abandonedConn.Id()).markFetchOK()
-	require.NoError(t, o.FetchEndorserBlockByPoint(point.Slot, point.Hash))
+	require.NoError(
+		t,
+		o.FetchEndorserBlockByPoint(context.Background(), point.Slot, point.Hash),
+	)
 	abandonedRetired := cm.GetConnectionById(abandonedConn.Id()) == nil
 	require.True(
 		t,

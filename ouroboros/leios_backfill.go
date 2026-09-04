@@ -36,13 +36,17 @@ import (
 // leiosFetchResponseTimeout. On expiry the request returns a normal error and
 // the caller fails over to another peer, leaving the shared connection intact.
 func leiosFetchRequestContext(
+	parent context.Context,
 	deadline time.Time,
 ) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
 	if !deadline.IsZero() {
-		return context.WithDeadline(context.Background(), deadline)
+		return context.WithDeadline(parent, deadline)
 	}
 	return context.WithTimeout(
-		context.Background(),
+		parent,
 		leiosFetchResponseTimeout,
 	)
 }
@@ -83,6 +87,13 @@ const leiosBackfillConnCooldownMaxShift = 5
 // cut short.
 const leiosBackfillPerAttemptTimeout = 30 * time.Second
 
+// leiosBackfillTotalBudget bounds one by-point fetch when its caller does not
+// provide a deadline. The ledger uses the same two-minute wait for a required
+// certified closure; keeping the network operation within that window prevents
+// a background fetch from surviving the apply attempt and contending with the
+// next one (dingo #3552).
+const leiosBackfillTotalBudget = 2 * time.Minute
+
 var errLeiosBackfillConnBusy = errors.New(
 	"leios backfill: connection fetch already in progress",
 )
@@ -108,9 +119,13 @@ const leiosBackfillAffinityWindow = 2 * time.Minute
 // than leaving the UTxO set incomplete and trusting the chain. It satisfies
 // ledger.EndorserBlockFetcherFunc.
 func (o *Ouroboros) FetchEndorserBlockByPoint(
+	ctx context.Context,
 	ebSlot uint64,
 	ebHash []byte,
 ) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// The caller's point comes from the ranking block being applied, so it is
 	// authoritative for this endorser block's slot. Reconcile any entry cached
 	// from a peer offer before an announcement corroborated it: a matching
@@ -135,6 +150,10 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	if len(connIds) == 0 {
 		return errors.New("leios backfill: no leios-fetch connection available")
 	}
+	deadline, hasDeadline := ctx.Deadline()
+	if !hasDeadline {
+		deadline = time.Now().Add(leiosBackfillTotalBudget)
+	}
 	point := ocommon.Point{Slot: ebSlot, Hash: ebHash}
 	//nolint:gosec // bounded by len(connIds), so it fits in int
 	start := int(leiosBackfillConnCursor.Add(1) % uint64(len(connIds)))
@@ -152,6 +171,9 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	)
 	var lastErr error
 	for _, connId := range order {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		conn := o.connManager.GetConnectionById(connId)
 		if conn == nil || conn.LeiosFetch() == nil ||
 			conn.LeiosFetch().Client == nil {
@@ -163,10 +185,19 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 		// their cooldown state in fetch-completion order. Doing it here, after
 		// the guard is released, would let a slow failure's mark land after a
 		// newer success's mark and wrongly cool down a healthy connection.
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return context.DeadlineExceeded
+		}
+		if remaining > leiosBackfillPerAttemptTimeout {
+			remaining = leiosBackfillPerAttemptTimeout
+		}
 		if err := o.fetchEndorserBlockOnConn(
+			ctx,
 			connId,
 			conn.LeiosFetch().Client,
 			point,
+			remaining,
 		); err != nil {
 			lastErr = err
 			continue
@@ -195,10 +226,15 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 // guard is still held, so backfill fetches on the same connection publish their
 // cooldown state in fetch-completion order rather than racing.
 func (o *Ouroboros) fetchEndorserBlockOnConn(
+	ctx context.Context,
 	connId ouroboros.ConnectionId,
 	client *oleiosfetch.Client,
 	point ocommon.Point,
+	budget time.Duration,
 ) (err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	g := o.leiosFetchGuardFor(connId)
 	// The strict leios-fetch client cannot accept a second request while a
 	// tip-driven or backfill fetch is in progress. Do not wait here: the
@@ -215,7 +251,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 	// moves on to the next connection. Busy connections are skipped above, so the
 	// deadline can cover only serving time without leaving lock acquisition
 	// unbounded.
-	deadline := time.Now().Add(leiosBackfillPerAttemptTimeout)
+	deadline := time.Now().Add(budget)
 	// Runs before the deferred Unlock above (LIFO), so the cooldown state is
 	// published while the guard is still held and stays ordered with the fetch.
 	defer func() {
@@ -234,7 +270,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 		data = nil
 	}
 	if data == nil {
-		reqCtx, cancel := leiosFetchRequestContext(deadline)
+		reqCtx, cancel := leiosFetchRequestContext(ctx, deadline)
 		resp, err := client.BlockRequest(reqCtx, point)
 		cancel()
 		if err != nil {
@@ -281,7 +317,8 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 	if data.txCount == 0 || data.completeTxCache() {
 		return nil
 	}
-	txs, err := o.fetchLeiosEbTxsBatchedUntil(
+	txs, err := o.fetchLeiosEbTxsBatchedUntilWithContext(
+		ctx,
 		client,
 		point,
 		data.txCount,

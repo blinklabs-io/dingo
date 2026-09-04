@@ -628,8 +628,9 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	n.chainManager = cm
 	// The contextcheck exemption below covers ledgerStateConfig's
 	// EndorserBlockFetcher callback: it is driven by the ledger's own later
-	// call, exactly as the method value it replaced was, and only defers
-	// resolving n.ouroboros() -- it does not inherit this function's ctx.
+	// call and receives that call's fetch context. The closure only defers
+	// resolving n.ouroboros() until the callback fires; it does not inherit this
+	// reinitialization function's ctx.
 	state, err := ledger.NewLedgerState(
 		n.ledgerStateConfig(), //nolint:contextcheck
 	)
