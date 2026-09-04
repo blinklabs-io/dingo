@@ -261,32 +261,44 @@ func conwayValidationRules(
 }
 
 func buildConwayValidationRules() []indexedUtxoValidationRule {
-	skips := []utxoValidationRuleSkip{
-		{
-			index: conwayUtxoValidateConwayFeaturesRuleIndex,
-			validationFunc: conway.
-				UtxoValidateConwayFeaturesWithPlutusV1V2,
-			name: "conway.UtxoValidateConwayFeaturesWithPlutusV1V2",
-		},
-		{
-			index:          conwayUtxoValidateFeeTooSmallRuleIndex,
-			validationFunc: conway.UtxoValidateFeeTooSmallUtxo,
-			name:           "conway.UtxoValidateFeeTooSmallUtxo",
-		},
-		{
-			index:          conwayUtxoValidatePlutusScriptsRuleIndex,
-			validationFunc: conway.UtxoValidatePlutusScripts,
-			name:           "conway.UtxoValidatePlutusScripts",
-		},
+	// Skips are resolved by upstream rule Id, never by validation function.
+	// conway.UtxoValidationRules is composed with
+	// common.ComposeUtxoValidationRules, so every phase-2-gated entry —
+	// committee-certificates and unknown-voters among them — is an anonymous
+	// wrapper closure with no trace of the original function.
+	skipRuleIds := []lcommon.UtxoValidationRuleId{
+		lcommon.UtxoValidationRuleConwayFeaturesWithPlutusV1V2,
+		lcommon.UtxoValidationRuleFeeTooSmall,
+		lcommon.UtxoValidationRulePlutusScripts,
+		lcommon.UtxoValidationRuleCommitteeCertificates,
+		lcommon.UtxoValidationRuleUnknownVoters,
+	}
+	descriptors := conway.UtxoValidationRuleDescriptors()
+	indexes := make([]int, len(skipRuleIds))
+	for i := range skipRuleIds {
+		indexes[i] = resolveUtxoValidationSkipIndex(
+			descriptors, conway.UtxoValidationRules, skipRuleIds[i],
+		)
 	}
 	ret := buildIndexedUtxoValidationRulesWithSkips(
+		descriptors,
 		conway.UtxoValidationRules,
-		skips,
+		skipRuleIds,
 	)
 	ret = append(ret, indexedUtxoValidationRule{
-		index:          conwayUtxoValidateConwayFeaturesRuleIndex,
+		index:          indexes[0],
 		validationFunc: validateConwayFeaturesWithNeededPlutusV1V2,
 	})
+	ret = append(ret,
+		indexedUtxoValidationRule{
+			index:          indexes[3],
+			validationFunc: validateCommitteeCertificates,
+		},
+		indexedUtxoValidationRule{
+			index:          indexes[4],
+			validationFunc: validateUnknownVoters,
+		},
+	)
 	slices.SortFunc(ret, func(a, b indexedUtxoValidationRule) int {
 		return a.index - b.index
 	})
@@ -317,8 +329,7 @@ func validateConwayFeaturesWithNeededPlutusV1V2(
 		return nil
 	}
 
-	if treasury := tx.CurrentTreasuryValue(); treasury != nil &&
-		treasury.Sign() > 0 {
+	if conwayCurrentTreasuryValuePresent(tx) {
 		return conway.CurrentTreasuryValueWithPlutusV1V2Error{
 			PlutusVersion: plutusVersion,
 		}
@@ -367,6 +378,57 @@ func validateConwayFeaturesWithNeededPlutusV1V2(
 	}
 
 	return nil
+}
+
+// conwayCurrentTreasuryValuePresent reports whether transaction-body key 21
+// is present, preserving the distinction between an absent value and an
+// explicitly encoded zero. A declared zero is a real assertion about the
+// treasury and must reach validation; collapsing it into "absent" would let a
+// transaction assert a zero treasury for free.
+//
+// Maintained gouroboros exposes the distinction through a nil value and the
+// CurrentTreasuryValuePresent capability. The pinned release stores key 21 in
+// an int64 with omitempty and returns a non-nil zero for both cases, so
+// decoded or constructed Conway transactions fall back to inspecting the
+// transaction-body map. The fallback treats an undecodable body as present:
+// this rule only rejects, so failing closed cannot admit a transaction.
+func conwayCurrentTreasuryValuePresent(tx lcommon.Transaction) bool {
+	if tx == nil {
+		return false
+	}
+	treasury := tx.CurrentTreasuryValue()
+	if treasury == nil {
+		return false
+	}
+	if treasury.Sign() != 0 {
+		return true
+	}
+	conwayTx, ok := tx.(*conway.ConwayTransaction)
+	if !ok || conwayTx == nil {
+		// CurrentTreasuryValue's nil/non-nil contract is authoritative for
+		// implementations that do not need the pinned-release compatibility
+		// path.
+		return true
+	}
+	if presence, ok := any(&conwayTx.Body).(interface {
+		CurrentTreasuryValuePresent() bool
+	}); ok {
+		return presence.CurrentTreasuryValuePresent()
+	}
+	bodyCbor := conwayTx.Body.Cbor()
+	if len(bodyCbor) == 0 {
+		var err error
+		bodyCbor, err = cbor.Encode(&conwayTx.Body)
+		if err != nil {
+			return true
+		}
+	}
+	var fields map[uint]cbor.RawMessage
+	if _, err := cbor.Decode(bodyCbor, &fields); err != nil {
+		return true
+	}
+	_, ok = fields[21]
+	return ok
 }
 
 func neededPlutusV1V2Version(view script.TxScriptView) string {
@@ -996,6 +1058,7 @@ func (c *conwayTxInfoCache) v1() (script.TxInfoV1, error) {
 			c.ls,
 			c.tx,
 			c.resolvedInputs,
+			script.StrictValidityUpperBoundForTransaction(c.tx),
 		)
 		if err != nil {
 			return script.TxInfoV1{}, conway.ScriptContextConstructionError{
@@ -1014,6 +1077,7 @@ func (c *conwayTxInfoCache) v2() (script.TxInfoV2, error) {
 			c.ls,
 			c.tx,
 			c.resolvedInputs,
+			script.StrictValidityUpperBoundForTransaction(c.tx),
 		)
 		if err != nil {
 			return script.TxInfoV2{}, conway.ScriptContextConstructionError{

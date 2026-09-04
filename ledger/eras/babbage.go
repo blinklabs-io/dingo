@@ -281,6 +281,7 @@ func ValidateTxBabbage(
 			ls,
 			tx,
 			slices.Concat(resolvedInputs, resolvedRefInputs),
+			script.StrictValidityUpperBoundForTransaction(tx),
 		)
 		if err != nil {
 			return err
@@ -306,6 +307,7 @@ func ValidateTxBabbage(
 				ls,
 				tx,
 				slices.Concat(resolvedInputs, resolvedRefInputs),
+				script.StrictValidityUpperBoundForTransaction(tx),
 			)
 			if err != nil {
 				return err
@@ -368,6 +370,7 @@ func ValidateTxBabbage(
 				ls,
 				tx,
 				slices.Concat(resolvedInputs, resolvedRefInputs),
+				script.StrictValidityUpperBoundForTransaction(tx),
 			)
 			if err != nil {
 				return err
@@ -436,10 +439,9 @@ var babbageUtxoValidationRules = buildBabbageValidationRules()
 
 func buildBabbageValidationRules() []indexedUtxoValidationRule {
 	return buildIndexedUtxoValidationRules(
+		babbage.UtxoValidationRuleDescriptors(),
 		babbage.UtxoValidationRules,
-		babbageUtxoValidatePlutusScriptsRuleIndex,
-		babbage.UtxoValidatePlutusScripts,
-		"babbage.UtxoValidatePlutusScripts",
+		lcommon.UtxoValidationRulePlutusScripts,
 	)
 }
 
@@ -507,6 +509,7 @@ func EvaluateTxBabbage(
 			ls,
 			tx,
 			slices.Concat(resolvedInputs, resolvedRefInputs),
+			script.StrictValidityUpperBoundForTransaction(tx),
 		)
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, err
@@ -533,6 +536,7 @@ func EvaluateTxBabbage(
 				ls,
 				tx,
 				slices.Concat(resolvedInputs, resolvedRefInputs),
+				script.StrictValidityUpperBoundForTransaction(tx),
 			)
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
@@ -575,6 +579,7 @@ func EvaluateTxBabbage(
 				ls,
 				tx,
 				slices.Concat(resolvedInputs, resolvedRefInputs),
+				script.StrictValidityUpperBoundForTransaction(tx),
 			)
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err

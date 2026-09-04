@@ -4618,6 +4618,7 @@ func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
 			eras.BabbageEraDesc,
 			nil,
 			nil,
+			0,
 		)
 		return err
 	}))
@@ -4656,8 +4657,9 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			EndorserBlockProvider: func(
 				[]byte,
-			) (uint64, []cbor.RawMessage, bool) {
-				return 0, nil, false
+				uint64,
+			) ([]cbor.RawMessage, bool) {
+				return nil, false
 			},
 		},
 	}
@@ -4676,6 +4678,7 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 			eras.DijkstraEraDesc,
 			nil,
 			nil,
+			0,
 		)
 		return err
 	})
@@ -4760,6 +4763,7 @@ func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
 			eras.DijkstraEraDesc,
 			pparams,
 			nil,
+			0,
 		)
 		return err
 	})

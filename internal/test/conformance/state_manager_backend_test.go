@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -26,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
@@ -280,11 +282,58 @@ func TestCommitteeMemberReadsRealBackendNotGovStateMirror(t *testing.T) {
 	)
 }
 
+func TestCommitteeMemberReadsPendingUpdateCommitteeProposal(t *testing.T) {
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	coldKey := testHash28(0x51)
+	coldCredential := common.Credential{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: coldKey,
+	}
+	action, err := common.NewUpdateCommitteeGovAction(
+		nil,
+		nil,
+		map[*common.Credential]uint{&coldCredential: 999},
+		cbor.Rat{Rat: big.NewRat(2, 3)},
+	)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(action)
+	require.NoError(t, err)
+	m.protocolParams = &conway.ConwayProtocolParameters{}
+	require.NoError(t, m.db.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        testHash32(0x50),
+			ActionType:    uint8(common.GovActionTypeUpdateCommittee),
+			ExpiresEpoch:  1000,
+			GovActionCbor: encoded,
+			AnchorURL:     "https://example.invalid/pending-committee",
+			AnchorHash:    testHash32(0x52),
+			ReturnAddress: bytes.Repeat([]byte{0x53}, 29),
+		},
+		nil,
+	))
+
+	provider := NewDingoStateProvider(m)
+	member, err := provider.CommitteeMember(coldKey)
+	require.NoError(t, err)
+	require.NotNil(t, member)
+	require.Equal(t, coldKey, member.ColdKey)
+	require.Equal(t, uint64(999), member.ExpiryEpoch)
+	require.Nil(t, member.HotKey)
+	require.False(t, member.Resigned)
+
+	members, err := provider.CommitteeMembers()
+	require.NoError(t, err)
+	require.Empty(t, members, "pending members are not seated members")
+}
+
 // TestCommitteeMemberResignationClearsHotKey proves an authorization that is
 // superseded by a later resignation is not exposed as active by either
-// committee-member provider method. A still-later authorization restores the
-// hot key and clears the resigned state.
-func TestCommitteeMemberResignationClearsHotKey(t *testing.T) {
+// committee-member provider method. A still-later authorization cannot clear
+// the permanent resignation.
+func TestCommitteeMemberResignationPermanentlyClearsHotKey(t *testing.T) {
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
@@ -344,7 +393,78 @@ func TestCommitteeMemberResignationClearsHotKey(t *testing.T) {
 	assertState(true, nil)
 
 	applyCert(3, "committee-reauthorize", authorization())
-	assertState(false, &hotKey)
+	assertState(true, nil)
+}
+
+func TestCommitteeHotCredentialSelectionUsesActiveMember(t *testing.T) {
+	tests := []struct {
+		name       string
+		expiries   []uint64
+		wantMember bool
+	}{
+		{
+			name:       "shared credential with seated member",
+			expiries:   []uint64{5, 6},
+			wantMember: true,
+		},
+		{
+			// Term expiry is deliberately not applied on this path, matching
+			// LedgerView.CommitteeHotCredentialMember. The Conway GOV rule
+			// resolves a committee voter against the authorization map, which
+			// excludes only resigned members, and applies expiry later in the
+			// RATIFY tally and the committeeMinSize active count. Resigned
+			// exclusion is covered by
+			// TestLedgerViewCommitteeHotCredentialSelection, since
+			// ParsedInitialState cannot express a resignation.
+			name:       "expired member still authorizes",
+			expiries:   []uint64{4},
+			wantMember: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			m, err := NewDingoStateManager()
+			require.NoError(t, err)
+			defer func() { require.NoError(t, m.Close()) }()
+
+			hot := testHash28(0x73)
+			state := &conformance.ParsedInitialState{
+				CurrentEpoch:         5,
+				CommitteeMembers:     make(map[common.Blake2b224]uint64),
+				HotKeyAuthorizations: make(map[common.Blake2b224]common.Blake2b224),
+			}
+			for i, expiry := range test.expiries {
+				cold := testHash28(byte(0x74 + i))
+				state.CommitteeMembers[cold] = expiry
+				state.HotKeyAuthorizations[cold] = hot
+			}
+			require.NoError(t, m.LoadInitialState(
+				state,
+				&conway.ConwayProtocolParameters{},
+			))
+
+			member, err := NewDingoStateProvider(m).CommitteeHotCredentialMember(
+				common.Credential{
+					CredType:   common.CredentialTypeAddrKeyHash,
+					Credential: hot,
+				},
+			)
+			require.NoError(t, err)
+			if test.wantMember {
+				require.NotNil(
+					t,
+					member,
+					"a seated matching member must authorize the hot credential",
+				)
+			} else {
+				require.Nil(
+					t,
+					member,
+					"a non-authorizing member must not resolve",
+				)
+			}
+		})
+	}
 }
 
 // TestPoolCurrentStatePendingRetirement proves PoolCurrentState's pending

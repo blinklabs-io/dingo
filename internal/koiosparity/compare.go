@@ -510,10 +510,20 @@ func ComparePoolEpoch(
 		}
 	}
 
-	// member_rewards — reward_pool_output.member_reward_total vs Koios
-	// pool_history.member_rewards. Both are a direct sum of per-delegator
-	// reward amounts (excluding the pool operator's own leader/margin cut),
-	// so, unlike pool_fees/deleg_rewards below, this is safe to compare 1:1.
+	// member_rewards — Dingo's spendable member reward sum vs Koios
+	// pool_history.member_rewards. Both are a direct sum of the per-delegator
+	// reward amounts actually credited (excluding the pool operator's own
+	// leader/margin cut), so, unlike pool_fees/deleg_rewards below, this is
+	// safe to compare 1:1.
+	//
+	// reward_pool_output.member_reward_total is deliberately not the Dingo
+	// side of this comparison. It sums every member reward the calculation
+	// produced, spendable or not, so it exceeds Koios's figure by exactly the
+	// pool's unspendable member rewards — amounts computed for a credential
+	// the ledger correctly never credits. Comparing it reported a
+	// value_mismatch for any pool holding one, against a node that was right
+	// (dingo #3797). The row's own unspendable column is not a usable
+	// correction either, since it accumulates unspendable leader rewards too.
 	//
 	// pool_fees and deleg_rewards are intentionally NOT compared against
 	// Dingo's LeaderReward/TotalReward: Koios's grest.get_pool_history_data_bulk
@@ -535,7 +545,18 @@ func ComparePoolEpoch(
 	// (dingo_db_missing, ERROR). Neither case can produce a PASS.
 	if koiosPool.MemberRewards != "" {
 		switch {
-		case !dingoPool.MemberRewardPresent:
+		case !dingoPool.MemberRewardPresent,
+			!dingoPool.SpendableMemberRewardPresent &&
+				dingoPool.PoolUnspendable > 0:
+			// Either the reward calculation has not produced a
+			// reward_pool_output row for this pool/epoch, or it has and the
+			// per-account rows the comparable sum is formed from are gone
+			// while the row says something was withheld — so the two
+			// quantities provably differ and the comparison cannot be formed.
+			// Neither may read as a pass: within the grace window it may
+			// simply not be computed yet (reference_lag, ERROR); past it, it
+			// is a genuine gap in what Dingo can answer (dingo_db_missing,
+			// ERROR).
 			cat := CategoryDBMissing
 			if graceHours > 0 && !epochEndTime.IsZero() &&
 				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
@@ -551,17 +572,27 @@ func ComparePoolEpoch(
 				Category:   cat,
 				CheckedAt:  now,
 			})
-		case dingoPool.MemberRewardTotal != koiosPool.MemberRewards:
-			out = append(out, CheckMismatch{
-				Network:    network,
-				Epoch:      epoch,
-				PoolBech32: koiosPool.PoolBech32,
-				Field:      "member_rewards",
-				DingoValue: dingoPool.MemberRewardTotal,
-				KoiosValue: koiosPool.MemberRewards,
-				Category:   CategoryValueMismatch,
-				CheckedAt:  now,
-			})
+		default:
+			// Prefer the per-account sum. Falling back to the pool total is
+			// only sound because PoolUnspendable is zero on this branch:
+			// nothing was withheld, so the pool's member total is its
+			// spendable member total by construction.
+			dingoValue := dingoPool.SpendableMemberRewardTotal
+			if !dingoPool.SpendableMemberRewardPresent {
+				dingoValue = dingoPool.MemberRewardTotal
+			}
+			if dingoValue != koiosPool.MemberRewards {
+				out = append(out, CheckMismatch{
+					Network:    network,
+					Epoch:      epoch,
+					PoolBech32: koiosPool.PoolBech32,
+					Field:      "member_rewards",
+					DingoValue: dingoValue,
+					KoiosValue: koiosPool.MemberRewards,
+					Category:   CategoryValueMismatch,
+					CheckedAt:  now,
+				})
+			}
 		}
 	}
 

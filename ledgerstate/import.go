@@ -17,6 +17,7 @@ package ledgerstate
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -202,10 +203,43 @@ type Credential struct {
 
 // ParsedCertState holds the parsed delegation, pool, and DRep state.
 type ParsedCertState struct {
-	Accounts []ParsedAccount
-	Pools    []ParsedPool
-	DReps    []ParsedDRep
+	Accounts              []ParsedAccount
+	Pools                 []ParsedPool
+	DReps                 []ParsedDRep
+	CommitteeHotKeys      []ParsedCommitteeHotKey
+	CommitteeResignations []Credential
 }
+
+type ParsedCommitteeHotKey struct {
+	Cold Credential
+	Hot  Credential
+}
+
+// importedCommitteeTransaction carries snapshot committee certificates through
+// the normal metadata certificate writer. Keeping this at the database
+// boundary preserves the same tagged credential and rollback semantics as
+// certificates received from the chain.
+type importedCommitteeTransaction struct {
+	lcommon.TransactionBodyBase
+	hash  lcommon.Blake2b256
+	certs []lcommon.Certificate
+}
+
+func (t importedCommitteeTransaction) Type() int                { return 0 }
+func (t importedCommitteeTransaction) Cbor() []byte             { return t.hash[:] }
+func (t importedCommitteeTransaction) Id() lcommon.Blake2b256   { return t.hash }
+func (t importedCommitteeTransaction) Hash() lcommon.Blake2b256 { return t.hash }
+func (t importedCommitteeTransaction) ProtocolParameterUpdates() (uint64, map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate) {
+	return 0, nil
+}
+func (t importedCommitteeTransaction) LeiosHash() lcommon.Blake2b256            { return t.hash }
+func (t importedCommitteeTransaction) Metadata() lcommon.TransactionMetadatum   { return nil }
+func (t importedCommitteeTransaction) AuxiliaryData() lcommon.AuxiliaryData     { return nil }
+func (t importedCommitteeTransaction) IsValid() bool                            { return true }
+func (t importedCommitteeTransaction) Certificates() []lcommon.Certificate      { return t.certs }
+func (t importedCommitteeTransaction) Consumed() []lcommon.TransactionInput     { return nil }
+func (t importedCommitteeTransaction) Produced() []lcommon.Utxo                 { return nil }
+func (t importedCommitteeTransaction) Witnesses() lcommon.TransactionWitnessSet { return nil }
 
 // ParsedAccount represents a stake account with its delegation.
 type ParsedAccount struct {
@@ -213,7 +247,7 @@ type ParsedAccount struct {
 	PoolKeyHash []byte     // 28-byte pool key hash (delegation target)
 	DRepCred    Credential // DRep credential (vote delegation)
 	Reward      uint64     // reward balance in lovelace
-	Deposit     uint64     // deposit in lovelace
+	Deposit     *uint64    // deposit in lovelace; nil when absent from the source
 	Active      bool
 }
 
@@ -1002,6 +1036,14 @@ func importCertState(
 			),
 		})
 	}
+	if err := persistImportedCommitteeCertificates(
+		cfg.Database,
+		certState,
+		snapshotEpochAnchorSlot(cfg, cfg.State.Epoch),
+		nil,
+	); err != nil {
+		return 0, fmt.Errorf("importing committee authorizations: %w", err)
+	}
 
 	return importedPools, nil
 }
@@ -1068,6 +1110,10 @@ func importAccounts(
 			AddedSlot:     slot,
 			Reward:        types.Uint64(acct.Reward),
 			Active:        acct.Active,
+		}
+		if acct.Deposit != nil {
+			deposit := types.Uint64(*acct.Deposit)
+			model.ImportDeposit = &deposit
 		}
 
 		if err := store.ImportAccount(
@@ -3043,10 +3089,21 @@ func importGovState(
 							i, len(cm.ColdCredential.Hash),
 						)
 					}
+					credentialTag, tagErr := models.CredentialTagFromUint64(
+						cm.ColdCredential.Type,
+					)
+					if tagErr != nil {
+						return fmt.Errorf(
+							"committee member %d: %w", i, tagErr,
+						)
+					}
 					members[i] = &models.CommitteeMember{
-						ColdCredHash: cm.ColdCredential.Hash,
-						ExpiresEpoch: cm.ExpiresEpoch,
-						AddedSlot:    currentEpochSlot,
+						ColdCredentialTag: credentialTag,
+						ColdCredHash:      cm.ColdCredential.Hash,
+						ExpiresEpoch:      cm.ExpiresEpoch,
+						TermStartSlot:     currentEpochSlot,
+						TermStartSlotSet:  true,
+						AddedSlot:         currentEpochSlot,
 					}
 				}
 				if err := store.SetCommitteeMembers(
@@ -3244,6 +3301,61 @@ func importGovState(
 	})
 
 	return nil
+}
+
+func persistImportedCommitteeCertificates(
+	db *database.Database,
+	certState *ParsedCertState,
+	slot uint64,
+	txn *database.Txn,
+) error {
+	if certState == nil ||
+		(len(certState.CommitteeHotKeys) == 0 && len(certState.CommitteeResignations) == 0) {
+		return nil
+	}
+	certs := make([]lcommon.Certificate, 0,
+		len(certState.CommitteeHotKeys)+len(certState.CommitteeResignations))
+	for _, authorization := range certState.CommitteeHotKeys {
+		cold, hot := authorization.Cold, authorization.Hot
+		if len(cold.Hash) != 28 || len(hot.Hash) != 28 {
+			return errors.New("committee authorization credentials must be 28 bytes")
+		}
+		var coldHash, hotHash lcommon.Blake2b224
+		copy(coldHash[:], cold.Hash)
+		copy(hotHash[:], hot.Hash)
+		certs = append(certs, &lcommon.AuthCommitteeHotCertificate{
+			CertType: uint(lcommon.CertificateTypeAuthCommitteeHot),
+			ColdCredential: lcommon.Credential{
+				CredType: uint(cold.Type), Credential: coldHash,
+			},
+			HotCredential: lcommon.Credential{
+				CredType: uint(hot.Type), Credential: hotHash,
+			},
+		})
+	}
+	for _, cold := range certState.CommitteeResignations {
+		if len(cold.Hash) != 28 {
+			return errors.New("committee resignation credential must be 28 bytes")
+		}
+		var coldHash lcommon.Blake2b224
+		copy(coldHash[:], cold.Hash)
+		certs = append(certs, &lcommon.ResignCommitteeColdCertificate{
+			CertType: uint(lcommon.CertificateTypeResignCommitteeCold),
+			ColdCredential: lcommon.Credential{
+				CredType: uint(cold.Type), Credential: coldHash,
+			},
+		})
+	}
+	slotBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(slotBytes, slot)
+	seed := append([]byte("mithril-committee"), slotBytes...)
+	// Transaction identities on Cardano are Blake2b-256. A SHA-256 digest here
+	// would hand consumers a hash that cannot be a transaction id.
+	hash := lcommon.Blake2b256Hash(seed)
+	tx := importedCommitteeTransaction{hash: hash, certs: certs}
+	return db.SetTransactionMetadataOnly(
+		&tx, ocommon.Point{Slot: slot, Hash: hash[:]}, 0, map[int]uint64{}, txn,
+	)
 }
 
 func ratifiedGovActionIdSet(

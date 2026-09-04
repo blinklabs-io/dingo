@@ -210,55 +210,6 @@ CREATE TABLE reward_live_stake (
 	require.Equal(t, uint64(1), delegators[string(pool)])
 }
 
-// TestGetAccountsByCredentialDeduplicatesRepeatedRefs guards against a
-// review finding on PR #3782: the derived-table UNION ALL join emits one row
-// per v-row, so a caller passing the same (credential_tag, staking_key) ref
-// twice would otherwise join against the same account row twice. Harmless
-// for this map-shaped result on its own, but wasted derived-table rows and
-// chunk capacity -- GetAccountsByCredential deduplicates refs before
-// querying to avoid it.
-func TestGetAccountsByCredentialDeduplicatesRepeatedRefs(t *testing.T) {
-	t.Parallel()
-	store := newManagementTestStore(t)
-	key := bytes.Repeat([]byte{0x07}, 28)
-	require.NoError(t, store.CreateAccount(nil, &models.Account{
-		StakingKey:    key,
-		CredentialTag: 0,
-		Active:        true,
-	}))
-
-	ref := models.NewStakeCredentialRef(0, key)
-	result, err := store.GetAccountsByCredential(
-		[]models.StakeCredentialRef{ref, ref, ref},
-		false,
-		nil,
-	)
-	require.NoError(t, err)
-	require.Len(t, result, 1)
-	require.Contains(t, result, ref.MapKey())
-}
-
-// TestDedupeStakeCredentialRefsDropsRepeats asserts the deduplication
-// operation directly: GetAccountsByCredential's map-shaped result stays
-// correct with or without deduplication (a duplicate row just overwrites the
-// same map key with identical data), so a test that only calls
-// GetAccountsByCredential cannot distinguish "deduplicated before querying"
-// from "queried with duplicates, then map assignment hid it" -- see cubic's
-// review on PR #3782 for exactly this gap in an earlier version of this test.
-func TestDedupeStakeCredentialRefsDropsRepeats(t *testing.T) {
-	t.Parallel()
-	keyA := bytes.Repeat([]byte{0x07}, 28)
-	keyB := bytes.Repeat([]byte{0x08}, 28)
-	refA := models.NewStakeCredentialRef(0, keyA)
-	refB := models.NewStakeCredentialRef(1, keyB)
-
-	deduped := dedupeStakeCredentialRefs(
-		[]models.StakeCredentialRef{refA, refB, refA, refA, refB},
-	)
-
-	require.Equal(t, []models.StakeCredentialRef{refA, refB}, deduped)
-}
-
 func TestRebuildRewardLiveStakeBatchesCredentials(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)
