@@ -4341,6 +4341,27 @@ The start, expiry, current-period, and remaining-period gauges use that same
 protocol lifetime; the KES key's `2^depth` cryptographic capacity remains a
 separate upper bound rather than an operational lifetime.
 
+Immediately after that gate, when `ForgerConfig.OpCertLedgerView` is wired
+(`NewBlockForger` requires `EraParams` alongside it), the runtime gate
+pre-flights the opcert's issue-number counter against
+`LedgerView.LatestOpCertSequence` using the same era-scoped rule block
+application enforces at apply time (`validateOpCertCounter` in
+`ledger/verify_opcert.go`, mirrored here as `validateOpCertSequence`): a
+counter behind the last value the ledger observed for this pool is always
+rejected (stale or stolen hot key), and one that skips ahead of it is
+additionally rejected in Praos eras (Babbage onward) but accepted in TPraos
+eras (Shelley-Alonzo). `EraParams.ProtocolParamsForSlot` resolves the era for
+the slot being forged. Startup validation and the KES-lifetime gate above
+cover genesis-derived evolution limits, which are fixed for the life of the
+chain; this covers the era-scoped counter rule and the on-chain observed
+counter, both of which can change after startup as blocks are applied (this
+node's own or a peer's for the same pool) or as the chain crosses an era
+boundary. Catching a rule block application would enforce anyway here, before
+leader selection and the forge-slot fence, means a bad key state costs a
+could-not-forge disposition instead of a burned leader slot and a rejected
+`AddLocalBlock` call. The check is opt-in: a nil `OpCertLedgerView` (dev mode,
+embedders without ledger wiring) skips it entirely, unchanged from before.
+
 Each production forge attempt takes an independently owned snapshot of one
 complete credential generation at the runtime gate. The snapshot deep-copies
 the VRF secret, KES secret, verification keys, opcert, and validated lifetime;

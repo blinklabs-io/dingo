@@ -373,6 +373,10 @@ func (n *Node) initBlockForger(
 		LeiosTxValidator:                n.ledgerState,
 		LeiosCertificateProvider:        leiosCerts,
 		LeiosParentAnnouncementProvider: leiosParent,
+		OpCertLedgerView: blockProducerLedgerView{
+			ls: n.ledgerState,
+		},
+		EraParams: n.ledgerState,
 	})
 	if err != nil {
 		// Stop election to prevent goroutine leak

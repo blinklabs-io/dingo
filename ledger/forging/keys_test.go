@@ -1322,3 +1322,110 @@ func bytes32(seed byte) []byte {
 	}
 	return b
 }
+
+// TestValidateOpCertSequence mirrors ledger/verify_opcert_test.go's
+// TestValidateOpCertCounter: the backward (stale) rule applies to every era,
+// while the no-gap (over-increment) rule is Praos-only, so the gapped cases
+// are split by enforceNoGap. The two functions must stay in agreement, since
+// this one pre-flights exactly the rule block application enforces.
+func TestValidateOpCertSequence(t *testing.T) {
+	tests := []struct {
+		name         string
+		stored       uint64
+		found        bool
+		candidate    uint64
+		enforceNoGap bool
+		wantErr      string
+	}{
+		{
+			name:         "first sighting accepts any counter",
+			found:        false,
+			candidate:    7,
+			enforceNoGap: true,
+		},
+		{
+			name:         "equal to last seen",
+			stored:       5,
+			found:        true,
+			candidate:    5,
+			enforceNoGap: true,
+		},
+		{
+			name:         "exactly one greater (boundary, praos)",
+			stored:       5,
+			found:        true,
+			candidate:    6,
+			enforceNoGap: true,
+		},
+		{
+			name:         "exactly one greater (boundary, tpraos)",
+			stored:       5,
+			found:        true,
+			candidate:    6,
+			enforceNoGap: false,
+		},
+		{
+			name:         "backward counter rejected (praos)",
+			stored:       5,
+			found:        true,
+			candidate:    4,
+			enforceNoGap: true,
+			wantErr:      "below last seen",
+		},
+		{
+			name:         "backward counter rejected (tpraos)",
+			stored:       5,
+			found:        true,
+			candidate:    4,
+			enforceNoGap: false,
+			wantErr:      "below last seen",
+		},
+		{
+			name:         "gapped counter rejected under praos (era change)",
+			stored:       5,
+			found:        true,
+			candidate:    7,
+			enforceNoGap: true,
+			wantErr:      "skips ahead",
+		},
+		{
+			name:         "gapped counter accepted under tpraos (era change)",
+			stored:       5,
+			found:        true,
+			candidate:    7,
+			enforceNoGap: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateOpCertSequence(
+				tt.stored,
+				tt.found,
+				tt.candidate,
+				tt.enforceNoGap,
+			)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf(
+						"validateOpCertSequence: unexpected error: %v",
+						err,
+					)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf(
+					"validateOpCertSequence: expected error containing %q, got nil",
+					tt.wantErr,
+				)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf(
+					"validateOpCertSequence: error %q does not contain %q",
+					err.Error(),
+					tt.wantErr,
+				)
+			}
+		})
+	}
+}

@@ -1116,3 +1116,45 @@ func (pc *PoolCredentials) ValidateAgainstLedger(
 	}
 	return true, vrfMatched, nil
 }
+
+// validateOpCertSequence enforces the same operational-certificate counter
+// rule block application applies (ledger/verify_opcert.go
+// validateOpCertCounter), so the forge loop can decline a leader slot for a
+// key state ledgerProcessBlock would reject, before spending the slot on
+// VRF/KES/Leios work or committing the duplicate-slot fence. The two must
+// stay in agreement: a candidate this accepts and block application rejects
+// wastes a leader slot; the reverse blocks a slot the chain would have
+// adopted.
+//
+// A counter below the last-seen value is always rejected (stale or stolen
+// hot key). A counter that skips ahead of it is rejected only when
+// enforceNoGap is set: the over-increment rule is Praos-only (Babbage
+// onward), while TPraos eras (Shelley-Alonzo) accept any candidate at or
+// above stored. When the ledger has no recorded counter for this pool
+// (found is false) there is no baseline to compare against, so the
+// candidate is accepted.
+func validateOpCertSequence(
+	stored uint64,
+	found bool,
+	candidate uint64,
+	enforceNoGap bool,
+) error {
+	if !found {
+		return nil
+	}
+	if candidate < stored {
+		return fmt.Errorf(
+			"opcert counter %d is below last seen %d (stale or stolen hot key)",
+			candidate,
+			stored,
+		)
+	}
+	if enforceNoGap && candidate > stored+1 {
+		return fmt.Errorf(
+			"opcert counter %d skips ahead of last seen %d (gapped rotation)",
+			candidate,
+			stored,
+		)
+	}
+	return nil
+}
