@@ -176,13 +176,15 @@ func TestLeiosBlockTxsAbandonedSlotFailsOverAndBecomesAvailable(t *testing.T) {
 	require.EqualError(t, err, abandonedLeiosFetchError)
 
 	// Make the poisoned connection the first backfill candidate. Its bounded
-	// abandoned-slot error must cool it down and let the healthy peer complete.
+	// abandoned-slot error must cool it down (or retire the connection) and let
+	// the healthy peer complete.
 	o.leiosFetchGuardFor(abandonedConn.Id()).markFetchOK()
 	require.NoError(t, o.FetchEndorserBlockByPoint(point.Slot, point.Hash))
+	abandonedRetired := cm.GetConnectionById(abandonedConn.Id()) == nil
 	require.True(
 		t,
-		o.leiosFetchGuardFor(abandonedConn.Id()).inCooldown(time.Now()),
-		"abandoned peer was not recorded as failed",
+		abandonedRetired || o.leiosFetchGuardFor(abandonedConn.Id()).inCooldown(time.Now()),
+		"abandoned peer was neither cooled down nor retired",
 	)
 	require.True(
 		t,

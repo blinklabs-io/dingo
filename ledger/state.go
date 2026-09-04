@@ -122,12 +122,13 @@ func DefaultDatabaseWorkerPoolConfig() DatabaseWorkerPoolConfig {
 
 // DatabaseWorkerPool manages a pool of workers for async database operations
 type DatabaseWorkerPool struct {
-	db          *database.Database
-	taskQueue   chan DatabaseOperation
-	workerWg    sync.WaitGroup // worker goroutine lifecycle
-	operationWg sync.WaitGroup // accepted operations until result is delivered
-	closed      atomic.Bool    // thread-safe without mutex in hot path
-	mu          sync.Mutex
+	db        *database.Database
+	taskQueue chan DatabaseOperation
+	workerWg  sync.WaitGroup // worker goroutine lifecycle
+	closed    atomic.Bool    // thread-safe without mutex in hot path
+	mu        sync.Mutex
+	opCount   int           // accepted operations until result is delivered, guarded by mu
+	drained   chan struct{} // closed exactly once, when closed is true and opCount reaches 0
 }
 
 // NewDatabaseWorkerPool creates a new database worker pool
@@ -146,6 +147,7 @@ func NewDatabaseWorkerPool(
 	pool := &DatabaseWorkerPool{
 		db:        db,
 		taskQueue: taskQ,
+		drained:   make(chan struct{}),
 		// closed is zero-valued (false) by default for atomic.Bool
 	}
 
@@ -168,7 +170,7 @@ func (p *DatabaseWorkerPool) worker() {
 }
 
 func (p *DatabaseWorkerPool) executeOperation(op DatabaseOperation) {
-	defer p.operationWg.Done()
+	defer p.operationDone()
 
 	result := DatabaseResult{}
 	defer func() {
@@ -208,19 +210,35 @@ func (p *DatabaseWorkerPool) Submit(op DatabaseOperation) {
 		return
 	}
 
-	p.operationWg.Add(1)
+	p.opCount++
 	select {
 	case p.taskQueue <- op:
 		p.mu.Unlock()
 		return
 	default:
-		p.operationWg.Done()
+		p.opCount--
 	}
 	p.mu.Unlock()
 	p.sendResult(
 		op,
 		DatabaseResult{Error: errors.New("database worker pool queue full")},
 	)
+}
+
+// operationDone records that an accepted operation has finished and, if the
+// pool is closed and this was the last outstanding one, closes drained so a
+// blocked Shutdown call's select wakes immediately. Guarding opCount and the
+// closed check with the same mutex Shutdown uses to flip closed makes the
+// zero-crossing observed here race-free against a concurrent Shutdown call,
+// so drained is closed exactly once.
+func (p *DatabaseWorkerPool) operationDone() {
+	p.mu.Lock()
+	p.opCount--
+	drained := p.closed.Load() && p.opCount == 0
+	p.mu.Unlock()
+	if drained {
+		close(p.drained)
+	}
 }
 
 // SubmitAsyncDBOperation submits a database operation for execution on the worker pool.
@@ -384,19 +402,58 @@ func (ls *LedgerState) SubmitAsyncDBReadTxn(
 	return ls.SubmitAsyncDBTxn(opFunc, false)
 }
 
-// Shutdown gracefully shuts down the worker pool
-func (p *DatabaseWorkerPool) Shutdown() {
+// Shutdown stops accepting new operations, then waits for every already
+// accepted one to finish and the worker goroutines to exit.
+//
+// The drain wait is bounded by drainTimeout -- callers pass
+// CloseDBWorkerPoolShutdownTimeout, the same budget LedgerState.Close's own
+// outer wait around the goroutine that calls Shutdown already uses. Close's
+// outer wait keeps Close itself from blocking past that budget regardless of
+// what Shutdown does, but a bound is still needed here: without one, a
+// caller of Shutdown that gives up (like that outer wait) leaves nothing
+// waiting on the drain at all, so a still-running worker's operation (and
+// the resources it holds, e.g. this pool's db) would never be observed
+// finishing -- and the fix could recur for any future operation slower than
+// expected, not just the O(n^2) query bug this once surfaced as (see the
+// account-lookup fix this guards against regressing).
+//
+// The wait itself selects the drained channel directly rather than spawning
+// a goroutine to block on a sync.WaitGroup: WaitGroup.Wait cannot be
+// selected against a timeout, so a wrapper goroutine bridging it to a
+// channel would still block for the slow operation's full remaining
+// duration after Shutdown times out and returns -- trading the caller's
+// leak for an internal one instead of removing it. drained is closed by
+// whichever of Shutdown or operationDone observes the closed-and-drained
+// transition first, so no goroutine is ever spawned here.
+//
+// drainTimeout is a parameter rather than a direct read of
+// CloseDBWorkerPoolShutdownTimeout so a test that mutates that var for
+// isolation (see state_test.go) cannot race this call: Close evaluates the
+// argument once, synchronously, before calling Shutdown.
+func (p *DatabaseWorkerPool) Shutdown(drainTimeout time.Duration) error {
 	p.mu.Lock()
 	if p.closed.Load() {
 		p.mu.Unlock()
-		return
+		return nil
 	}
 	p.closed.Store(true)
 	close(p.taskQueue)
+	alreadyDrained := p.opCount == 0
 	p.mu.Unlock()
+	if alreadyDrained {
+		close(p.drained)
+	}
 
-	p.operationWg.Wait()
+	select {
+	case <-p.drained:
+	case <-time.After(drainTimeout):
+		return fmt.Errorf(
+			"database worker pool: operation(s) still running after %s",
+			drainTimeout,
+		)
+	}
 	p.workerWg.Wait()
+	return nil
 }
 
 type ChainsyncState string
@@ -877,30 +934,18 @@ type LedgerState struct {
 	// schedules its next request on a worker. The worker must run outside the
 	// subscriber goroutine because GetBlockRange waits for BatchDone, which is
 	// delivered back through that same subscriber.
-	blockfetchContinuationPending bool
-	blockfetchContinuationMu      sync.Mutex
-	blockfetchContinuationWG      sync.WaitGroup
-	headerPipelineConnId          ouroboros.ConnectionId // connection that currently owns the queued header/blockfetch pipeline
-	pendingBlockfetchEvents       []BlockfetchEvent
-	activeBlockfetchStart         time.Time           // when RequestRange was issued (for latency measurement)
-	firstBlockReceived            bool                // true after latency sample recorded for this batch
-	shadowBlockReceivedHashes     map[string]struct{} // blocks delivered this batch (dedup shadow vs primary)
-	batchBlocksReceived           int                 // total blocks received in current blockfetch batch (including mid-batch flushes)
-	batchBlocksApplied            int                 // blocks from the current batch actually added to the chain (including mid-batch flushes)
-	// blockfetchBatchChainGeneration is the value chainRollbackGeneration
-	// held when the current batch was requested. A batch is fetched for the
-	// header queue that existed at request time; a rollback that moves the
-	// chain tip replaces both that queue and the continuation point, so every
-	// block still arriving for the older generation belongs to a chain the
-	// node has abandoned and must be discarded rather than applied. Guarded by
-	// chainsyncBlockfetchMutex, like the rest of the per-batch state.
+	blockfetchContinuationPending  bool
+	blockfetchContinuationMu       sync.Mutex
+	blockfetchContinuationWG       sync.WaitGroup
+	headerPipelineConnId           ouroboros.ConnectionId // connection that currently owns the queued header/blockfetch pipeline
+	pendingBlockfetchEvents        []BlockfetchEvent
+	activeBlockfetchStart          time.Time           // when RequestRange was issued (for latency measurement)
+	firstBlockReceived             bool                // true after latency sample recorded for this batch
+	shadowBlockReceivedHashes      map[string]struct{} // blocks delivered this batch (dedup shadow vs primary)
+	batchBlocksReceived            int                 // total blocks received in current blockfetch batch (including mid-batch flushes)
+	batchBlocksApplied             int
 	blockfetchBatchChainGeneration uint64
-	// chainRollbackGeneration counts attempted primary-chain rollbacks, including
-	// queued-header rollbacks that do not move the chain tip and rollbacks that
-	// fail. Written under chainsyncMutex by the rollback paths and read under
-	// chainsyncBlockfetchMutex by the blockfetch paths, so it is atomic rather
-	// than mutex-guarded.
-	chainRollbackGeneration atomic.Uint64
+	chainRollbackGeneration        atomic.Uint64
 	// Failures to obtain one specific queued header range, keyed by its
 	// start point and counting both a NoBlocks reply (a synchronous
 	// GetBlockRange error) and a batch that completed without delivering a
@@ -909,12 +954,26 @@ type LedgerState struct {
 	// header that blocks local forging). Deliberately survives interleaved
 	// deliveries for other ranges and header-queue churn; discarded when
 	// the tracked range itself is delivered.
-	blockfetchRangeFailure    blockfetchRangeFailureState
-	deferredHeaderValidation  map[string]struct{} // block points whose stateful header checks wait for ledger apply
-	checkpointWrittenForEpoch bool
-	closed                    atomic.Bool
-	inRecovery                bool // guards against recursive recovery in SubmitAsyncDBTxn
-	lastAtTipRecovery         *atTipRecoveryAttempt
+	blockfetchRangeFailure blockfetchRangeFailureState
+	// deferredHeaderValidation holds block points whose stateful header checks
+	// wait for ledger apply. It is guarded by its own deferredHeaderValidationMu
+	// (NOT the main RWMutex) so the snapshot retention guard
+	// (PrunePoolSnapshotsWithRetentionFloor) can hold the set stable across the
+	// eviction and floor computation without contending the hot header-validation
+	// read path on the main lock (issue #3727). The guard must NOT hold this mutex
+	// across the pool-snapshot prune (nor deletePersistedDeferredMarkers across
+	// DeleteSyncState): those open the single SQLite write connection, and block
+	// apply holds that connection before taking this mutex via
+	// consumeDeferredHeaderValidation, so holding it across that write inverts the
+	// lock order and deadlocks the node (issue #3717). The eviction+floor read is
+	// atomic; a header admitted after the lock is released is handled by the next
+	// cleanup pass (the floor is a lower-watermark recomputed each pass).
+	deferredHeaderValidation   map[string]struct{}
+	deferredHeaderValidationMu sync.Mutex
+	checkpointWrittenForEpoch  bool
+	closed                     atomic.Bool
+	inRecovery                 bool // guards against recursive recovery in SubmitAsyncDBTxn
+	lastAtTipRecovery          *atTipRecoveryAttempt
 	// At-tip recovery non-convergence tracking (issue #2939). A descending
 	// series of *distinct* (block, tx) validation failures each resets the
 	// same-block escalation to attempt 1, so the escalate-and-cap logic in
@@ -1020,7 +1079,7 @@ type LedgerState struct {
 	// gather-then-submit sequence (collecting raw blocks via iter.Next(),
 	// then handing them to decodeReadChainBatch, which -- when blockPipeline
 	// is non-nil -- Submits every one of them and drains their Results()
-	// before returning) against rollbackChainAndState's out-of-band
+	// before returning) against rollbackChainAndStateDeferred's out-of-band
 	// rollback path.
 	//
 	// drainBlockPipelineBeforeRollback alone is not enough for that path:
@@ -1031,13 +1090,13 @@ type LedgerState struct {
 	// WaitForDrain observes an empty pipeline and returns immediately, and
 	// the reader can then Submit and apply those raw blocks, from the very
 	// fork chain-selection just decided to abandon, after the rollback
-	// already believed it was safe to proceed. rollbackChainAndState
+	// already believed it was safe to proceed. rollbackChainAndStateDeferred
 	// (reached from chainsync per-connection handling, never from
 	// ledgerProcessBlocks) has no other way to learn the reader is
 	// mid-gather.
 	//
 	// The reader holds the read lock for exactly the gather-plus-submit
-	// span (see ledgerReadChainIterator); rollbackChainAndState holds the
+	// span (see ledgerReadChainIterator); rollbackChainAndStateDeferred holds the
 	// write lock from before it calls drainBlockPipelineBeforeRollback
 	// through ls.chain.Rollback, so no gather-then-submit cycle can start,
 	// and none already in flight can reach Submit, while a rollback is
@@ -1061,7 +1120,7 @@ type LedgerState struct {
 	// Undo publication, and primary-chain truncation. Without it, a rollback
 	// can observe a newly committed block before its AfterCommit callback has
 	// reached the ordered lane, publishing Undo before Apply. See
-	// submitBlockApplyDBTxn and rollbackChainAndState.
+	// submitBlockApplyDBTxn and rollbackChainAndStateDeferred.
 	transactionEventMutex sync.Mutex
 
 	// publishCtx is cancelled at the top of Close so a ledger.tx publish
@@ -1489,6 +1548,23 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	}
 
 	ls.loadMithrilTrustBoundary()
+	// Repopulate the in-memory deferred-header set from the persisted markers
+	// so the snapshot retention floor covers headers still awaiting apply from
+	// before the restart (issue #3727, finding 3): without this the first
+	// post-restart epoch cleanup could prune a pool-stake snapshot such a
+	// header needs. Runs here, before the database worker pool and cleanup
+	// timer start, because it only reads ls.db directly and must FAIL CLOSED:
+	// a scan failure that continued would leave the floor unpinned, and once
+	// the apply cursor passes a pre-restart deferred header its now-pruned
+	// snapshot is hard-rejected instead of deferred (the exact bug this PR
+	// fixes). Aborting before any resource starts means there is nothing to
+	// unwind on failure.
+	if err := ls.repopulateDeferredHeaderValidation(); err != nil {
+		return fmt.Errorf(
+			"failed to repopulate deferred-header validation set: %w",
+			err,
+		)
+	}
 
 	// Initialize database worker pool for async operations
 	if !ls.config.DatabaseWorkerPoolConfig.Disabled {
@@ -1998,7 +2074,7 @@ var (
 	CloseBlockfetchDrainTimeout    = 10 * time.Second
 	// BlockPipelineRollbackDrainTimeout bounds how long an asynchronous
 	// rollback (chainsync fork resolution or a peer-reported rollback --
-	// see rollbackChainAndState) waits for ls.blockPipeline to drain
+	// see rollbackChainAndStateDeferred) waits for ls.blockPipeline to drain
 	// in-flight decode/validate work before proceeding. See
 	// drainBlockPipelineBeforeRollback's doc comment for what this
 	// protects against and, just as importantly, what it does not.
@@ -2272,21 +2348,41 @@ func (ls *LedgerState) Close() error {
 		ls.config.Logger.Info("slot clock stopped")
 	}
 
-	// Shutdown database worker pool
+	// Shutdown database worker pool. Shutdown's own drain wait is bounded by
+	// the same CloseDBWorkerPoolShutdownTimeout this outer select uses (see
+	// its doc comment), so the two timeouts fire at approximately the same
+	// moment; the outer select still owns the definitive bound on Close
+	// itself, and still needs its own timer in case Shutdown is somehow
+	// slower to notice its own deadline than this goroutine is to notice
+	// Shutdown never returning at all.
 	if ls.dbWorkerPool != nil {
 		ls.config.Logger.Info("shutting down database worker pool")
 		poolStart := time.Now()
-		poolDone := make(chan struct{})
-		go func() {
-			ls.dbWorkerPool.Shutdown()
-			close(poolDone)
-		}()
+		poolDone := make(chan error, 1)
+		go func(drainTimeout time.Duration) {
+			poolDone <- ls.dbWorkerPool.Shutdown(drainTimeout)
+		}(CloseDBWorkerPoolShutdownTimeout)
 		select {
-		case <-poolDone:
-			ls.config.Logger.Info(
-				"database worker pool shut down",
-				"elapsed", time.Since(poolStart).Round(time.Millisecond),
-			)
+		case shutdownErr := <-poolDone:
+			if shutdownErr != nil {
+				ls.config.Logger.Warn(
+					"database worker pool did not fully shut down",
+					"elapsed", time.Since(poolStart).Round(time.Millisecond),
+					"error", shutdownErr,
+				)
+				err = errors.Join(
+					err,
+					fmt.Errorf(
+						"database worker pool shutdown: %w",
+						shutdownErr,
+					),
+				)
+			} else {
+				ls.config.Logger.Info(
+					"database worker pool shut down",
+					"elapsed", time.Since(poolStart).Round(time.Millisecond),
+				)
+			}
 		case <-time.After(CloseDBWorkerPoolShutdownTimeout):
 			ls.config.Logger.Warn(
 				"timed out waiting for database worker pool shutdown",
@@ -3179,7 +3275,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 //
 // Why this matters (issue #1894 phase 5): ledgerReadChainIterator -- the
 // pipeline's only submitter -- runs on its own goroutine, entirely
-// decoupled from the goroutine that decides a rollback. rollbackChainAndState
+// decoupled from the goroutine that decides a rollback. rollbackChainAndStateDeferred
 // in particular is reached from chainsync per-connection handling
 // (handleEventChainsyncRollback, tryResolveFork), never from
 // ledgerProcessBlocks itself. Chain-selection can decide to abandon a fork
@@ -3215,7 +3311,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 // cancellable context (e.g. processChainIteratorRollback, driven by
 // ledgerProcessBlocksFromSource's attempt context) does not block a
 // shutdown or restart on the fixed timeout. Callers with no context of
-// their own (rollbackChainAndState, reached from chainsync event handling
+// their own (rollbackChainAndStateDeferred, reached from chainsync event handling
 // with no ctx threaded through) pass context.Background(), matching
 // decodeReadChainBatch's identical, already-established choice for the
 // same reason.
@@ -3259,48 +3355,22 @@ func (ls *LedgerState) drainBlockPipelineBeforeRollback(
 	)
 }
 
-// rollbackChain rolls the primary chain back to point, invalidating the
-// blockfetch batch in flight.
-//
-// A batch is requested for the header queue that existed when it started, and
-// Chain.rollbackLocked discards or truncates that queue. Blocks the peer is
-// still streaming for the old queue therefore continue a chain the node has
-// abandoned: applying them is impossible, and letting them reach
-// Chain.addBlockLocked against a queue that fork resolution has meanwhile
-// refilled makes the first of them clear those replacement headers (issue
-// #3771). Bumping the generation here lets flushPendingBlockfetchBlocks drop
-// them instead.
-//
-// The rollback is serialized against blockfetch insertion by taking
-// chainsyncBlockfetchMutex for its duration, so it cannot land between two
-// insertions of the same flush. The generation is still published before the
-// chain changes rather than after: that ordering is what makes any chain
-// change a rollback caused observable as a moved generation to a reader that
-// does not hold the mutex, so the discard stays correct on its own terms.
-//
-// Callers must not already hold chainsyncBlockfetchMutex. Every rollback entry
-// point takes chainsyncMutex first and leaves the blockfetch mutex to the
-// restart that follows the rollback (tryResolveFork,
-// handleEventChainsyncRollback, handleEventChainsyncBlockHeaderWithPending,
-// RecoverAfterLocalRollback), so the lock order stays chainsyncMutex ->
-// chainsyncBlockfetchMutex.
-//
-// It is bumped for every attempted rollback rather than only for one that
-// moved the block tip: a rollback onto a queued header truncates the queue
-// without moving the tip, and a rollback that fails leaves the caller
-// requesting a chainsync resync, so in both cases discarding the in-flight
-// batch is at worst one re-fetch of a partially buffered batch.
-func (ls *LedgerState) rollbackChain(point ocommon.Point) error {
-	// Serialize rollback with blockfetch insertion; see the lock note above.
-	ls.chainsyncBlockfetchMutex.Lock()
-	defer ls.chainsyncBlockfetchMutex.Unlock()
-	ls.chainRollbackGeneration.Add(1)
-	return ls.chain.Rollback(point)
-}
-
-// rollbackChainAndState rewinds the primary chain and then synchronizes the
-// metadata-backed ledger state to the same point.
-func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
+// rollbackChainAndStateDeferred rewinds the primary chain and ledger state,
+// deferring the chain.update events the rewind produces rather than letting the
+// chain publish them inline. This method is reached from chainsync event
+// handling (handleEventChainsyncRollback, tryResolveFork) while chainsyncMutex
+// is held; an inline, back-pressured chain.update publish under that mutex is
+// the drain deadlock (see pendingPublishes). RollbackDeferred enqueues those
+// events on the chain's shared sequencer under c.mutex, so they are ordered
+// against concurrent blockfetch adds in true chain-mutation order (the
+// rollback-before-add guarantee is now chain-wide, not merely within this
+// handler's queue); registering the chain on pubs.chainDrains drains that
+// sequencer after the mutex is released. A nil pubs drains immediately
+// (unlocked / test path).
+func (ls *LedgerState) rollbackChainAndStateDeferred(
+	point ocommon.Point,
+	pubs *pendingPublishes,
+) error {
 	ls.RLock()
 	mithrilLedgerSlot := ls.mithrilLedgerSlot
 	ls.RUnlock()
@@ -3355,16 +3425,37 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 	// A database commit becomes visible before its AfterCommit callbacks run.
 	// Exclude that window so blocksAboveSlot can never publish an Undo for the
 	// new state before the matching Apply reaches the ordered lane.
+	var rollbackEvents []event.Event
 	err := func() error {
+		ls.chainsyncBlockfetchMutex.Lock()
+		defer ls.chainsyncBlockfetchMutex.Unlock()
+		ls.chainRollbackGeneration.Add(1)
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
 		if err := ls.validateAndEmitRollbackUndo(point); err != nil {
 			return err
 		}
-		return ls.rollbackChain(point)
+		evts, rbErr := ls.chain.RollbackDeferred(point)
+		if rbErr != nil {
+			return rbErr
+		}
+		rollbackEvents = evts
+		return nil
 	}()
 	if err != nil {
 		return err
+	}
+	// Publish the rollback's chain.update after chainsyncMutex is released.
+	// Under the mutex an inline back-pressured publish deadlocks the drain.
+	// RollbackDeferred has already enqueued these events on the chain's shared
+	// sequencer under c.mutex, so they are ordered against concurrent
+	// blockfetch adds in true chain-mutation order (rollback-before-add is no
+	// longer merely a within-handler property); registering the chain drains
+	// that sequencer once the mutex is released (a nil pubs drains
+	// immediately on the unlocked path). See
+	// chain.Chain.PublishPendingChainUpdates.
+	if len(rollbackEvents) > 0 {
+		pubs.drainChain(ls.chain)
 	}
 	if err := ls.rollback(point); err != nil {
 		return fmt.Errorf("synchronize ledger rollback state: %w", err)
@@ -3381,6 +3472,13 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 		ls.continuationAudit.Store(nil)
 	}
 	return nil
+}
+
+func (ls *LedgerState) rollbackChain(point ocommon.Point) error {
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
+	ls.chainRollbackGeneration.Add(1)
+	return ls.chain.Rollback(point)
 }
 
 // processChainIteratorRollback applies a rollback emitted by the primary
@@ -3438,7 +3536,7 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 // its doc comment), so nothing from *this* attempt is still in flight
 // here. The call is kept anyway as a defensive invariant guard -- issue
 // #1894 phase 5's actual cross-goroutine race is closed in
-// rollbackChainAndState instead, which is reached from chainsync handling
+// rollbackChainAndStateDeferred instead, which is reached from chainsync handling
 // on a different goroutine and has no equivalent synchronous guarantee.
 func (ls *LedgerState) processChainIteratorRollback(
 	ctx context.Context,
@@ -6111,6 +6209,13 @@ func (ls *LedgerState) trustDijkstraTxValidationError(eraId uint) bool {
 		ls.config.SkipDijkstraTxValidation
 }
 
+// dijkstraEraGate uses the pparams-derived active era. A Musashi block may
+// decode through the Conway wire type while carrying a Dijkstra header; block
+// and header era values are not authoritative for ledger-era gates.
+func dijkstraEraGate(currentEra eras.EraDesc) bool {
+	return currentEra.Id == dijkstra.EraIdDijkstra
+}
+
 func (ls *LedgerState) ledgerProcessBlock(
 	txn *database.Txn,
 	point ocommon.Point,
@@ -6227,7 +6332,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// resolution, availability, decode, and apply failures abort the block.
 	// Storage-phase failures always abort the DB transaction so a partial
 	// endorser-block application cannot be committed.
-	if currentEra.Id == dijkstra.EraIdDijkstra {
+	if dijkstraEraGate(currentEra) {
 		if ls.config.EndorserBlockProvider == nil {
 			if certifier, ok := block.Header().(leiosEndorserBlockCertifier); ok {
 				if certified, present := certifier.LeiosCertified(); present &&
@@ -6545,6 +6650,17 @@ func (ls *LedgerState) ledgerProcessBlock(
 		if shouldValidate {
 			if err := delta.applyWithoutRecordingDonations(ls, txn); err != nil {
 				delta.Release()
+				if errors.Is(err, models.ErrRewardWithdrawalExceedsBalance) {
+					return nil, &txValidationError{
+						BlockPoint: point,
+						TxHash: append(
+							[]byte(nil),
+							tx.Hash().Bytes()...,
+						),
+						Inputs: collectReferencedInputs(tx),
+						Cause:  err,
+					}
+				}
 				return nil, err
 			}
 			var err error
@@ -6775,7 +6891,7 @@ func (ls *LedgerState) reconstructTransitionInfo() {
 		// Shelley block on chain is what establishes the real boundary.
 		//
 		// This is not redundant with the currentPParams == nil check below.
-		// rollbackChainAndState calls this immediately after setting
+		// rollbackChainAndStateDeferred calls this immediately after setting
 		// currentEra, and until ppComputed replaced the old nil test there a
 		// rollback into Byron left currentPParams holding its Shelley value
 		// under a Byron era -- exactly the shape this guard rejects. The guard
@@ -8530,14 +8646,6 @@ func (ls *LedgerState) GetChainFromPoint(
 	inclusive bool,
 ) (*chain.ChainIterator, error) {
 	return ls.chain.FromPoint(point, inclusive)
-}
-
-// ChainHoldsPoint reports whether point is a block on the primary chain right
-// now. It resolves the point the same way GetChainFromPoint resolves its start
-// point, minus the iterator allocation, so a caller that only needs to
-// validate a point does not pay for a chain walk.
-func (ls *LedgerState) ChainHoldsPoint(point ocommon.Point) bool {
-	return ls.chain.HoldsPoint(point)
 }
 
 // GetChainFromPointContext returns a ChainIterator that inherits cancellation

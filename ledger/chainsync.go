@@ -382,8 +382,8 @@ func deferredHeaderValidationSyncStateKey(point ocommon.Point) string {
 }
 
 func (ls *LedgerState) markDeferredHeaderValidation(point ocommon.Point) {
-	ls.Lock()
-	defer ls.Unlock()
+	ls.deferredHeaderValidationMu.Lock()
+	defer ls.deferredHeaderValidationMu.Unlock()
 	if ls.deferredHeaderValidation == nil {
 		ls.deferredHeaderValidation = make(map[string]struct{})
 	}
@@ -391,22 +391,295 @@ func (ls *LedgerState) markDeferredHeaderValidation(point ocommon.Point) {
 }
 
 func (ls *LedgerState) clearDeferredHeaderValidation(point ocommon.Point) {
-	ls.Lock()
-	defer ls.Unlock()
+	ls.deferredHeaderValidationMu.Lock()
+	defer ls.deferredHeaderValidationMu.Unlock()
 	delete(ls.deferredHeaderValidation, headerValidationPointKey(point))
 }
 
 func (ls *LedgerState) consumeDeferredHeaderValidation(
 	point ocommon.Point,
 ) bool {
-	ls.Lock()
-	defer ls.Unlock()
+	ls.deferredHeaderValidationMu.Lock()
+	defer ls.deferredHeaderValidationMu.Unlock()
 	key := headerValidationPointKey(point)
 	if _, ok := ls.deferredHeaderValidation[key]; !ok {
 		return false
 	}
 	delete(ls.deferredHeaderValidation, key)
 	return true
+}
+
+// evictStaleDeferredHeadersLocked drops deferred-header entries that are
+// provably abandoned (issue #3727, finding 5). A canonical deferred header is
+// consumed by consumeDeferredHeaderValidation when its block is applied, so an
+// entry still present once the cursor has passed its slot is on a fork; keeping
+// it forever would pin its epoch's pool_stake_snapshot rows forever.
+//
+// Eviction is gated on the ROLLBACK HORIZON, not on the bare tip. Eviction
+// removes the durable sync_state marker as well as the in-memory entry, and
+// that marker is the only thing that makes deferredHeaderValidationRequired
+// return true at apply. If chain selection later rolls back and re-adopts a
+// fork containing an evicted point, its block applies with required == false,
+// so verifyDeferredBlockHeaderState returns nil and the block is adopted with
+// its stateful leader-eligibility check never run -- a validation bypass that
+// does not exist on main, where the entry and marker survive. Evicting only
+// below tipSlot-rollbackHorizon (the stability window, 3k/f slots, past which
+// chain selection cannot re-adopt a fork) makes "abandoned" mean unreachable
+// rather than merely behind the cursor, so no entry that a rollback could
+// resurrect is ever dropped (issue #3717 review: evicted-point re-adoption
+// skips the deferred header check).
+//
+// Entries with an unparseable key are dropped regardless of the horizon: they
+// can never be validated, so no re-adoption can make use of them. Returns the
+// evicted map keys so the caller can delete their persisted markers. The caller
+// must hold deferredHeaderValidationMu; tipSlot and rollbackHorizon are read by
+// the caller BEFORE taking it, because both ls.loadTipSnapshot's era-derived
+// window (calculateStabilityWindow) and the tip read take ls.RWMutex, and
+// taking that under deferredHeaderValidationMu would invert the order block
+// apply uses (ls lock -> deferredHeaderValidationMu).
+func (ls *LedgerState) evictStaleDeferredHeadersLocked(
+	tipSlot uint64,
+	rollbackHorizon uint64,
+) []string {
+	if len(ls.deferredHeaderValidation) == 0 {
+		return nil
+	}
+	// The whole chain is still inside the horizon, so nothing is unreachable
+	// yet. Unparseable keys are still evicted below.
+	var cutoff uint64
+	if tipSlot > rollbackHorizon {
+		cutoff = tipSlot - rollbackHorizon
+	}
+	var evicted []string
+	for key := range ls.deferredHeaderValidation {
+		slot, err := slotFromHeaderValidationKey(key)
+		// STRICTLY below the cutoff: a block that deep cannot be re-adopted,
+		// so an entry still present is abandoned and safe to forget. Anything
+		// at or above the cutoff keeps both its entry and its marker so a
+		// rollback-then-re-adopt still finds required == true at apply.
+		if err != nil || slot < cutoff {
+			evicted = append(evicted, key)
+			delete(ls.deferredHeaderValidation, key)
+		}
+	}
+	return evicted
+}
+
+// deletePersistedDeferredMarkers removes the sync_state markers for a set of
+// evicted deferred-header map keys. It runs after the in-memory eviction has
+// already released the retention pin, so a delete failure only leaves a dead
+// marker row to be re-cleaned on a later pass.
+//
+// It re-checks each key under deferredHeaderValidationMu and skips any that is
+// present in the in-memory set again: between eviction (which happens for a key
+// whose slot is below the rollback horizon) and this cleanup, that same point
+// can be re-deferred and re-persisted -- markDeferredHeaderValidation and
+// persistDeferredHeaderValidation run together on the chainsync path. Deleting
+// the marker for a currently-live entry would drop the durable pin for an
+// active deferred header, so on the next restart repopulate would miss it and
+// cleanup could prune the snapshot it needs (issue #3727, finding:
+// evicted-marker delete races a re-defer).
+//
+// The membership test alone cannot close that window, because the lock is
+// released before the delete (see below): a re-defer landing between the test
+// and the delete would have its fresh marker deleted, and a restart would then
+// find no marker, so deferredHeaderValidationRequired returns false and
+// verifyDeferredBlockHeaderState skips the stateful check for a header that is
+// still outstanding. So the delete is made effectively conditional by
+// re-testing membership AFTER it and RE-PERSISTING the marker for any key that
+// came back, rather than by holding the lock across the delete. Re-persisting
+// is idempotent (SetSyncState of the same key/value) and runs with no lock
+// held, so it closes the window without reintroducing the lock inversion
+// (issue #3717 review / cubic P1: re-admission after the live check).
+func (ls *LedgerState) deletePersistedDeferredMarkers(mapKeys []string) error {
+	if len(mapKeys) == 0 || ls.db == nil || ls.db.Metadata() == nil {
+		return nil
+	}
+	// The membership test is taken under the lock, but the lock is RELEASED
+	// before DeleteSyncState: that delete opens the single sqlite write
+	// connection (nil txn -> Transaction(true)), and block apply holds that
+	// connection before taking this mutex via consumeDeferredHeaderValidation.
+	// Holding the mutex across the delete inverts the lock order (mutex->write-
+	// conn here vs. write-conn->mutex on apply) and deadlocks the node on the
+	// single write connection -- the same inversion as the prune path (issue
+	// #3717). A point re-deferred (and re-persisted) between the membership test
+	// and the delete keeps its live pin in the in-memory set for the running
+	// process, so the retention floor still covers it; only its durable marker
+	// could be dropped, and solely if the re-defer lands in that narrow window
+	// AND the node then restarts before the next cleanup re-persists it. That
+	// residual is accepted in exchange for never inverting the lock order.
+	var cleanupErr error
+	for _, k := range mapKeys {
+		ls.deferredHeaderValidationMu.Lock()
+		_, live := ls.deferredHeaderValidation[k]
+		ls.deferredHeaderValidationMu.Unlock()
+		if live {
+			// Re-admitted since eviction: its marker is now backing a live pin.
+			continue
+		}
+		// A restore failure inside deleteDeferredMarkerUnlessReadmitted (a point
+		// re-admitted during its delete whose marker could not be re-persisted)
+		// is a LOST DURABLE PIN and must not be swallowed (issue #3717 review):
+		// it is joined and propagated so the caller
+		// (PrunePoolSnapshotsWithRetentionFloor -> the retention guard ->
+		// cleanupOldSnapshots) surfaces the failed cleanup instead of continuing
+		// with a marker that a restart would miss. Remaining keys are still
+		// processed so one failure does not leak the other stale markers.
+		if err := ls.deleteDeferredMarkerUnlessReadmitted(k); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+	}
+	return cleanupErr
+}
+
+// afterDeferredMarkerDeleteHook is a test seam. It is nil in production (a
+// single nil-check, zero cost) and, when set, runs inside
+// deleteDeferredMarkerUnlessReadmitted immediately AFTER DeleteSyncState returns
+// and BEFORE the membership re-test. It lets a test inject a re-admission
+// (markDeferredHeaderValidation) that lands DURING the delete window rather than
+// before the call, so the TOCTOU restore path is actually exercised: an
+// implementation that tested membership before deleting and skipped the delete
+// would not restore the marker and must fail such a test (issue #3717 review).
+var afterDeferredMarkerDeleteHook func()
+
+// deferredMarkerRestoreMaxAttempts bounds the retry on re-persisting the marker
+// for a point re-admitted during its delete. A handful of attempts rides out a
+// transient sqlite-busy without spinning; exhausting them is treated as a lost
+// durable pin and propagated.
+const deferredMarkerRestoreMaxAttempts = 3
+
+// deleteDeferredMarkerUnlessReadmitted deletes one evicted key's persisted
+// marker, then restores it if the key was re-admitted to the in-memory
+// deferred set while the delete was in flight.
+//
+// Neither DB call runs under deferredHeaderValidationMu (that would invert the
+// lock order against block apply — issue #3717), so the caller's membership
+// test cannot be atomic with the delete. The delete is instead made effectively
+// conditional after the fact: re-testing membership and re-persisting is
+// idempotent, and it leaves the durable marker present for exactly the keys
+// that are live when this returns. Without the restore, a point re-deferred in
+// that window keeps its in-memory entry but loses its marker, and after a
+// restart repopulateDeferredHeaderValidation misses it — so
+// deferredHeaderValidationRequired returns false and
+// verifyDeferredBlockHeaderState skips the stateful check for a header that is
+// still outstanding.
+//
+// A failed DeleteSyncState leaves the durable marker in place, so the retention
+// pin is NOT lost — the stale row is simply re-cleaned on a later pass — and is
+// logged best-effort. A failed RESTORE is different: it drops the durable pin
+// for a header that is live again in the in-memory set, so after a restart the
+// stateful check would be skipped. It is retried a bounded number of times and,
+// if it still fails, PROPAGATED to the caller (issue #3717 review: a restoration
+// failure must not pass silently). The in-memory entry survives regardless, so
+// the running process keeps the pin; propagation surfaces the lost DURABLE pin
+// so the node fails the cleanup rather than continuing toward a restart that
+// would lose it.
+func (ls *LedgerState) deleteDeferredMarkerUnlessReadmitted(k string) error {
+	syncKey := deferredHeaderValidationSyncStatePrefix + k
+	if err := ls.db.DeleteSyncState(syncKey, nil); err != nil {
+		ls.config.Logger.Warn(
+			"failed to delete stale deferred-header marker",
+			"key", syncKey,
+			"error", err,
+			"component", "ledger",
+		)
+		return nil
+	}
+	if hook := afterDeferredMarkerDeleteHook; hook != nil {
+		hook()
+	}
+	ls.deferredHeaderValidationMu.Lock()
+	_, readmitted := ls.deferredHeaderValidation[k]
+	ls.deferredHeaderValidationMu.Unlock()
+	if !readmitted {
+		return nil
+	}
+	var restoreErr error
+	for attempt := 1; attempt <= deferredMarkerRestoreMaxAttempts; attempt++ {
+		restoreErr = ls.db.SetSyncState(
+			syncKey,
+			deferredHeaderValidationSyncStateValue,
+			nil,
+		)
+		if restoreErr == nil {
+			return nil
+		}
+		ls.config.Logger.Warn(
+			"failed to restore re-deferred header marker; retrying",
+			"key", syncKey,
+			"attempt", attempt,
+			"error", restoreErr,
+			"component", "ledger",
+		)
+	}
+	return fmt.Errorf(
+		"restore re-deferred header marker %q after %d attempts: %w",
+		syncKey,
+		deferredMarkerRestoreMaxAttempts,
+		restoreErr,
+	)
+}
+
+// repopulateDeferredHeaderValidation rebuilds the in-memory deferred-header set
+// from the persisted markers at startup (issue #3727, finding 3), so the
+// snapshot retention floor (PrunePoolSnapshotsWithRetentionFloor) covers
+// headers still awaiting apply from before the restart -- otherwise the first
+// post-restart epoch cleanup could prune a pool-stake snapshot such a header
+// needs. Abandoned markers loaded here are harmless: the retention guard evicts
+// any whose slot the apply cursor has already passed on its next run.
+//
+// This MUST fail closed. A scan failure that is swallowed leaves the in-memory
+// set empty, so the retention floor does not cover pre-restart deferred headers
+// and the first post-restart cleanup can prune a snapshot one of them needs.
+// Once the apply cursor then passes that header, stateful verification finds
+// the snapshot gone and hard-rejects it instead of deferring -- the exact
+// misclassification this PR exists to prevent. Apply-time re-validation from
+// the per-point marker cannot save it: the snapshot is already gone. So a load
+// failure is surfaced to LedgerState.Start, which aborts startup; the operator
+// retries rather than running with an unpinned retention floor (issue #3727,
+// finding: swallowed marker-scan failure reopens the pruned-snapshot bug).
+func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
+	if ls.db == nil || ls.db.Metadata() == nil {
+		return nil
+	}
+	keys, err := ls.db.ListSyncStateKeysByPrefix(
+		deferredHeaderValidationSyncStatePrefix,
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"repopulate deferred-header set from persisted markers: %w",
+			err,
+		)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	ls.deferredHeaderValidationMu.Lock()
+	if ls.deferredHeaderValidation == nil {
+		ls.deferredHeaderValidation = make(map[string]struct{}, len(keys))
+	}
+	restored := 0
+	for _, syncKey := range keys {
+		mapKey := strings.TrimPrefix(
+			syncKey,
+			deferredHeaderValidationSyncStatePrefix,
+		)
+		if mapKey == "" || mapKey == syncKey {
+			continue
+		}
+		ls.deferredHeaderValidation[mapKey] = struct{}{}
+		restored++
+	}
+	ls.deferredHeaderValidationMu.Unlock()
+	if restored > 0 {
+		ls.config.Logger.Info(
+			"repopulated deferred-header set from persisted markers",
+			"count", restored,
+			"component", "ledger",
+		)
+	}
+	return nil
 }
 
 func (ls *LedgerState) persistDeferredHeaderValidation(
@@ -529,7 +802,7 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 			)
 		}
 	} else if e.Block != nil {
-		if err := ls.handleEventBlockfetchBlock(e); err != nil {
+		if err := ls.handleEventBlockfetchBlockDeferred(e, &pending); err != nil {
 			if strings.Contains(
 				err.Error(),
 				"block header crypto verification failed",
@@ -2000,7 +2273,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			),
 		)
 	}
-	if err := ls.rollbackChainAndState(e.Point); err != nil {
+	if err := ls.rollbackChainAndStateDeferred(e.Point, pending); err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			// Missing rollback point can happen when local state and peer
 			// chainsync cursor drift. Recover by forcing re-intersect.
@@ -2181,9 +2454,9 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 	return nil
 }
 
-// rollbackIsAppliable reports whether rollbackChainAndState(point) would
+// rollbackIsAppliable reports whether rollbackChainAndStateDeferred(point) would
 // succeed right now, without mutating any state. It mirrors the pre-checks
-// rollbackChainAndState relies on for its block-not-found / exceeds-K /
+// rollbackChainAndStateDeferred relies on for its block-not-found / exceeds-K /
 // exceeds-Mithril failures: the point must sit at or above the Mithril trust
 // anchor, and the chain must be able to roll back to it (target block present
 // and within the security parameter K, verified via chain.ValidateRollback).
@@ -3474,7 +3747,7 @@ func (ls *LedgerState) tryResolveFork(
 		"connection_id", e.ConnectionId.String(),
 	)
 
-	if err := ls.rollbackChainAndState(rollbackPoint); err != nil {
+	if err := ls.rollbackChainAndStateDeferred(rollbackPoint, pending); err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			// The ancestor resolved but the chain no longer holds it at that
 			// index, so rolling back would splice a continuation onto a parent
@@ -3620,8 +3893,15 @@ func (ls *LedgerState) tryResolveFork(
 	return true, nil
 }
 
-//nolint:unparam
-func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
+// handleEventBlockfetchBlockDeferred is handleEventBlockfetchBlock that threads
+// the caller's pendingPublishes queue into flushPendingBlockfetchBlocksDeferred,
+// so chain.update events emitted while chainsyncBlockfetchMutex is held are
+// published only after it is released. A nil pubs preserves the standalone
+// immediate-publish behaviour for test callers.
+func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
+	e BlockfetchEvent,
+	pubs *pendingPublishes,
+) error {
 	// Process blocks in small commit batches so they appear on the
 	// chain promptly without paying a full blob transaction cost for
 	// every single block. We still flush well before BatchDone to
@@ -3671,7 +3951,7 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 		)
 		if !headerAlreadyVerified &&
 			!ls.hasCachedEpochNonceForSlot(e.Point.Slot) {
-			if err := ls.flushPendingBlockfetchBlocks(); err != nil {
+			if err := ls.flushPendingBlockfetchBlocksDeferred(pubs); err != nil {
 				return err
 			}
 			headerAlreadyVerified = ls.chain.FirstVerifiedHeaderMatchesPoint(
@@ -3715,8 +3995,10 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	}
 	ls.pendingBlockfetchEvents = append(ls.pendingBlockfetchEvents, e)
 	ls.batchBlocksReceived++
+	// If this block is the one a tracked range was failing to obtain, that
+	// range is fetchable after all and its failure record is stale.
 	if len(ls.pendingBlockfetchEvents) >= blockfetchCommitBatchSize {
-		if err := ls.flushPendingBlockfetchBlocks(); err != nil {
+		if err := ls.flushPendingBlockfetchBlocksDeferred(pubs); err != nil {
 			return err
 		}
 	}
@@ -3767,7 +4049,7 @@ func (ls *LedgerState) restartQueuedBlockfetchAfterForkLocked(
 			ls.chainsyncBlockfetchReadyChan = nil
 		}
 		ls.chainsyncBlockfetchReadyMutex.Unlock()
-		if err := ls.flushPendingBlockfetchBlocks(); err != nil {
+		if err := ls.flushPendingBlockfetchBlocksDeferred(pending); err != nil {
 			ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 			ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
 			return fmt.Errorf(
@@ -3881,16 +4163,11 @@ func (s blockfetchRangeFailureState) matches(point ocommon.Point) bool {
 }
 
 // noteBlockfetchRangeProgress discards the failure record when the range it
-// was tracking has now extended the chain. Earlier misses against a range that
+// was tracking has now been delivered. Earlier misses against a range that
 // turned out to be fetchable must not combine with a later unrelated miss, so
-// a peer that was only briefly behind is never punished. Applications of any
+// a peer that was only briefly behind is never punished. Deliveries for any
 // other range leave the record alone: they say nothing about whether the stuck
 // range can be obtained.
-//
-// Callers must have applied the block, not merely received it. A body that is
-// delivered and then discarded or rejected has not obtained the range, and
-// clearing the record on arrival kept the failure streak at zero for exactly
-// the batches the bound exists to catch.
 func (ls *LedgerState) noteBlockfetchRangeProgress(point ocommon.Point) {
 	if ls.blockfetchRangeFailure.matches(point) {
 		ls.blockfetchRangeFailure = blockfetchRangeFailureState{}
@@ -4068,9 +4345,6 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 	ls.shadowBlockReceivedHashes = nil
 	ls.batchBlocksReceived = 0
 	ls.batchBlocksApplied = 0
-	// Bind this batch to the chain it is being requested for. A rollback that
-	// moves the tip after this point invalidates everything the peer streams
-	// for it; see flushPendingBlockfetchBlocks (issue #3771).
 	ls.blockfetchBatchChainGeneration = ls.chainRollbackGeneration.Load()
 	ls.activeBlockfetchStart = time.Now()
 	ls.firstBlockReceived = false
@@ -4326,79 +4600,55 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 	}()
 }
 
-// blockfetchBatchSuperseded reports whether the primary chain has rolled back
-// since the batch that produced the buffered blocks was requested.
-//
-// rollbackChain takes chainsyncBlockfetchMutex, so a rollback cannot interleave
-// with a flush that holds it, and it publishes the new generation before it
-// changes the chain. A reader that has observed a chain change caused by a
-// rollback therefore always observes the new generation here, whether it read
-// under that mutex or not.
-func (ls *LedgerState) blockfetchBatchSuperseded() bool {
-	return ls.blockfetchBatchChainGeneration !=
-		ls.chainRollbackGeneration.Load()
-}
-
-// logDiscardedBlockfetchBlocks records how many buffered blocks were dropped
-// because the batch that fetched them was superseded.
-func (ls *LedgerState) logDiscardedBlockfetchBlocks(discarded int) {
-	ls.config.Logger.Debug(
-		"discarding blockfetch blocks for superseded chain",
-		"component", "ledger",
-		"discarded_blocks", discarded,
-		"batch_chain_generation", ls.blockfetchBatchChainGeneration,
-		"chain_generation", ls.chainRollbackGeneration.Load(),
-	)
-}
-
-func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
+// flushPendingBlockfetchBlocksDeferred is flushPendingBlockfetchBlocks that
+// queues each committed block's chain.update onto pubs instead of letting the
+// chain publish it inline. The blockfetch drain runs under
+// chainsyncBlockfetchMutex; an inline, back-pressured chain.update publish
+// there can park the drain with the mutex held, which then blocks
+// handleEventChainsync on the same mutex and fills the ledger.chainsync buffer
+// -- the preview drain deadlock. Queueing on the caller's pendingPublishes
+// moves publication to after the mutex is released. A nil pubs publishes
+// immediately (the unlocked / test path), per pendingPublishes' nil-receiver
+// contract.
+func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
+	pubs *pendingPublishes,
+) error {
 	if len(ls.pendingBlockfetchEvents) == 0 {
-		return nil
-	}
-	if ls.blockfetchBatchSuperseded() {
-		// The chain moved after this batch was requested, so these blocks
-		// continue a chain the node has abandoned. They cannot be applied, and
-		// handing them to Chain.addBlockLocked is not merely futile: fork
-		// resolution rolls back, re-queues the winning peer's header path and
-		// only then restarts blockfetch, so the first stale block would be
-		// rejected as not matching that replacement queue and would clear it,
-		// leaving nothing queued and nothing fetching (issue #3771). Drop them
-		// and let the restarted batch fetch the current continuation instead.
-		discarded := len(ls.pendingBlockfetchEvents)
-		ls.pendingBlockfetchEvents = ls.pendingBlockfetchEvents[:0]
-		ls.logDiscardedBlockfetchBlocks(discarded)
 		return nil
 	}
 	pending := ls.pendingBlockfetchEvents
 	ls.pendingBlockfetchEvents = ls.pendingBlockfetchEvents[:0]
+	if ls.blockfetchBatchChainGeneration != ls.chainRollbackGeneration.Load() {
+		ls.config.Logger.Debug("discarding superseded blockfetch batch", "component", "ledger")
+		return nil
+	}
 	// Commit each block before exposing it on the primary chain. The chain tip
 	// is used immediately by fork detection, so batching blob writes behind an
 	// already-advanced in-memory tip can strand the node on a fork when ancestor
 	// lookups hit uncommitted state.
-	for i, pendingEvent := range pending {
-		// rollbackChain holds chainsyncBlockfetchMutex for the whole
-		// rollback, so it cannot land between two insertions of this loop
-		// while the flush holds the same mutex. Re-read anyway: the check is
-		// one atomic load, and it keeps the loop correct on its own terms
-		// rather than on a locking arrangement two files away.
-		if ls.blockfetchBatchSuperseded() {
-			ls.logDiscardedBlockfetchBlocks(len(pending) - i)
+	for _, pendingEvent := range pending {
+		if ls.blockfetchBatchChainGeneration != ls.chainRollbackGeneration.Load() {
 			break
 		}
-		addBlockErr := ls.chain.AddBlockWithPoint(
+		evt, addBlockErr := ls.chain.AddBlockWithPointDeferred(
 			pendingEvent.Block,
 			pendingEvent.Point,
 			nil,
 		)
 		if addBlockErr == nil {
 			ls.batchBlocksApplied++
-			// If this block is the one a tracked range was failing to
-			// obtain, that range is fetchable after all and its failure
-			// record is stale. Receipt is not enough: a body that is
-			// delivered and then discarded or rejected has not obtained the
-			// range, and clearing the record on arrival stopped the streak
-			// from ever reaching its bound.
 			ls.noteBlockfetchRangeProgress(pendingEvent.Point)
+			// Defer this block's chain.update past chainsyncBlockfetchMutex
+			// rather than publishing inline. AddBlockWithPointDeferred has
+			// already enqueued evt on the chain's shared sequencer under
+			// c.mutex (so it is ordered against a concurrent rollback in true
+			// mutation order); register the chain so the caller drains that
+			// sequencer once the mutex is released. See
+			// flushPendingBlockfetchBlocksDeferred, pendingPublishes and
+			// chain.Chain.PublishPendingChainUpdates.
+			if evt.Type != "" {
+				pubs.drainChain(ls.chain)
+			}
 			// Audit only after the body has extended the queued chain. A body
 			// from an abandoned fetch may still be delivered after a fork
 			// restart; auditing it here would poison producedTxs with stale
@@ -4432,21 +4682,16 @@ func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
 			),
 		)
 		if errors.As(addBlockErr, &notMatchErr) {
-			// Dropping the queue is only right when the queue this batch
-			// was fetching is still the one in place: clearing a
-			// replacement queue fork resolution has just filled is the
-			// #3771 wedge itself. rollbackChain publishes its generation
-			// before it touches the chain, so any mismatch a rollback
-			// caused is observed here as a generation that has already
-			// moved, with or without the mutex it holds.
-			if !ls.blockfetchBatchSuperseded() {
-				ls.clearQueuedHeaders()
-			}
+			ls.clearQueuedHeaders()
 		}
 		ls.checkSlotBattle(pendingEvent, addBlockErr)
 	}
 	ls.chain.NotifyIterators()
 	return nil
+}
+
+func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
+	return ls.flushPendingBlockfetchBlocksDeferred(nil)
 }
 
 // GenesisBlockHash returns the Byron genesis hash from config, which is used
@@ -6507,13 +6752,12 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 		ls.chainsyncBlockfetchTimeoutTimer = nil
 	}
 	ls.chainsyncBlockfetchTimerGeneration++
-	receivedBlockCount := ls.batchBlocksReceived
-	if err := ls.flushPendingBlockfetchBlocks(); err != nil {
+	if err := ls.flushPendingBlockfetchBlocksDeferred(pending); err != nil {
 		ls.blockfetchRequestRangeCleanup()
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 		return err
 	}
-	appliedBlockCount := ls.batchBlocksApplied
+	receivedBlockCount := ls.batchBlocksApplied
 	// Continue fetching as long as there are queued headers
 	remainingHeaders := ls.chain.HeaderCount()
 	if remainingHeaders > 0 {
@@ -6523,33 +6767,23 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 			"remaining_headers", remainingHeaders,
 		)
 	}
-	// A batch that completed without extending the chain while headers stayed
+	// A batch that completed without delivering a block while headers stayed
 	// queued is one of the two shapes of "could not obtain the queued range"
 	// (the other is a NoBlocks reply, recorded in
 	// startQueuedBlockfetchLocked). Both feed the same streak.
-	//
-	// The count that matters is blocks *applied*, not blocks received. A batch
-	// whose blocks all arrive and are then rejected -- as not fitting the
-	// current tip, or as not matching the queued header -- leaves the queue
-	// exactly where it was, so gating this on delivery alone let the same
-	// range be re-requested without bound while every reply was discarded
-	// (issue #3771). Applied is what makes the streak observable and bounded.
-	if appliedBlockCount == 0 && remainingHeaders > 0 {
+	if receivedBlockCount == 0 && remainingHeaders > 0 {
 		batchStart, _ := ls.chain.HeaderRange(blockfetchBatchSize)
 		if ls.noteBlockfetchRangeUnavailable(
 			e.ConnectionId,
 			batchStart,
-			fmt.Sprintf(
-				"batch completed without extending the chain (%d block(s) received)",
-				receivedBlockCount,
-			),
+			"batch completed without delivering a block",
 			pending,
 		) {
 			return nil
 		}
 	}
 	upstreamTipSlot := ls.UpstreamTipSlot()
-	if appliedBlockCount == 0 &&
+	if receivedBlockCount == 0 &&
 		remainingHeaders > 0 &&
 		upstreamTipSlot > ls.Tip().Point.Slot &&
 		upstreamTipSlot-ls.Tip().Point.Slot >= blockfetchMinBatchGapSlots {
@@ -6558,7 +6792,7 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 		if connIdKey(retryConnId) != "" &&
 			!sameConnectionId(retryConnId, e.ConnectionId) {
 			ls.config.Logger.Warn(
-				"blockfetch batch extended nothing, retrying queued range on alternate connection",
+				"blockfetch batch returned no blocks, retrying queued range on alternate connection",
 				"component",
 				"ledger",
 				"previous_connection_id",
@@ -6578,14 +6812,14 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 		ls.clearQueuedHeaders()
 		ls.config.Logger.Warn(
-			"blockfetch batch extended nothing, requesting chainsync re-sync",
+			"blockfetch batch returned no blocks, requesting chainsync re-sync",
 			"component", "ledger",
 			"connection_id", e.ConnectionId.String(),
 			"remaining_headers", remainingHeaders,
 		)
 		ls.requestChainsyncResync(
 			e.ConnectionId,
-			"blockfetch batch extended nothing",
+			"empty blockfetch batch",
 			pending,
 		)
 		return nil
