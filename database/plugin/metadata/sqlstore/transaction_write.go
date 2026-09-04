@@ -733,13 +733,34 @@ SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			// Snapshot imports can create an output before its producer
 			// transaction is replayed. Once that transaction is known, fill in
 			// the provenance without overwriting an already-linked output.
+			//
+			// The stake credential is filled the same way and for the same
+			// reason: a pointer address's credential is resolved when the
+			// producing transaction is applied, and an output imported before
+			// that carries none. Without this the resolution is discarded by
+			// the conflict and the row stays unattributed, which is the bug
+			// this path exists to avoid (dingo #3854). Both are COALESCE, so an
+			// output that already has a credential keeps it.
+			//
+			// credential_tag is NOT NULL, so it cannot be COALESCEd; it is set
+			// only when the stake key is being filled in. SQLite evaluates
+			// every SET expression against the pre-update row, so the CASE sees
+			// staking_key as it was before this statement.
 			_, err = db.ExecContext(ctx, `
 UPDATE utxo
 SET transaction_id = COALESCE(transaction_id, ?),
-    collateral_return_for_tx_id = COALESCE(collateral_return_for_tx_id, ?)
+    collateral_return_for_tx_id = COALESCE(collateral_return_for_tx_id, ?),
+    credential_tag = CASE
+        WHEN staking_key IS NULL AND ? IS NOT NULL THEN ?
+        ELSE credential_tag
+    END,
+    staking_key = COALESCE(staking_key, ?)
 WHERE id = ?`,
 				params.TransactionID,
 				params.CollateralReturnForTxID,
+				params.StakingKey,
+				params.CredentialTag,
+				params.StakingKey,
 				id,
 			)
 		}
