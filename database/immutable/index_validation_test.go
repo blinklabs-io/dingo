@@ -17,6 +17,7 @@ package immutable_test
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -212,6 +213,38 @@ func TestImmutableIndexRejectsDescendingBlockOffsets(t *testing.T) {
 		[]uint64{3, 0},
 	)
 	requireGetBlockError(t, fixture, "does not follow current block offset")
+}
+
+func TestImmutableIndexRejectsBlockOffsetOverflow(t *testing.T) {
+	tests := []struct {
+		name         string
+		blockOffsets []uint64
+	}{
+		{
+			// Exercises chunk.Next's last-entry branch, which sizes the
+			// block from the current offset and the file size.
+			name:         "last entry",
+			blockOffsets: []uint64{math.MaxUint64},
+		},
+		{
+			// Exercises chunk.Next's two-entry branch, which sizes the
+			// block from the current and next offsets.
+			name:         "next entry",
+			blockOffsets: []uint64{0, math.MaxUint64},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			primaryOffsets := make([]uint32, len(test.blockOffsets)+1)
+			for i := range primaryOffsets {
+				primaryOffsets[i] = uint32(i * secondaryIndexEntrySize)
+			}
+			fixture := writeImmutableIndexFixture(
+				t, 1, primaryOffsets, test.blockOffsets,
+			)
+			requireGetBlockError(t, fixture, "overflows int64")
+		})
+	}
 }
 
 func TestImmutableIndexRejectsMisalignedSecondaryFile(t *testing.T) {
