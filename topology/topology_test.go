@@ -464,6 +464,13 @@ func TestPeerSnapshotConfigValidate(t *testing.T) {
 			},
 		},
 		{
+			name: "malformed IPv4 is not a hostname",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "192.0.2.999"
+			},
+			wantErr: "is not a valid DNS hostname",
+		},
+		{
 			name: "valid IPv6 relay",
 			mutate: func(s *topology.PeerSnapshotConfig) {
 				s.BigLedgerPools[0].Relays[0].Address = "2001:db8::1"
@@ -473,6 +480,12 @@ func TestPeerSnapshotConfigValidate(t *testing.T) {
 			name: "valid fully-qualified hostname",
 			mutate: func(s *topology.PeerSnapshotConfig) {
 				s.BigLedgerPools[0].Relays[0].Address = "relay.example.com."
+			},
+		},
+		{
+			name: "valid hostname with numeric label",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "123.relay.example.com"
 			},
 		},
 		{

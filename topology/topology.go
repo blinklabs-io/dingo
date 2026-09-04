@@ -176,7 +176,10 @@ func validatePeerSnapshotRelay(relay TopologyConfigP2PAccessPoint) error {
 		return nil
 	}
 	if !validPeerSnapshotHostname(relay.Address) {
-		return fmt.Errorf("address %q is not a valid DNS hostname", relay.Address)
+		return fmt.Errorf(
+			"address %q is not a valid DNS hostname",
+			relay.Address,
+		)
 	}
 	return nil
 }
@@ -185,6 +188,9 @@ func validPeerSnapshotHostname(host string) bool {
 	// DNS permits a trailing root label, but relay addresses must otherwise be
 	// plain hostnames. In particular, ports and IPv6 brackets belong to the
 	// separate endpoint fields and must not be smuggled into the host value.
+	// An all-numeric name is not a hostname endpoint: treating a malformed
+	// dotted-decimal IP address as one would defer the same invalid endpoint to
+	// DNS and the dialer.
 	if host == "" || len(host) > 254 || strings.TrimSpace(host) != host {
 		return false
 	}
@@ -192,21 +198,25 @@ func validPeerSnapshotHostname(host string) bool {
 	if host == "" || len(host) > 253 {
 		return false
 	}
-	for _, label := range strings.Split(host, ".") {
+	nonNumeric := false
+	for label := range strings.SplitSeq(host, ".") {
 		if len(label) == 0 || len(label) > 63 ||
 			label[0] == '-' || label[len(label)-1] == '-' {
 			return false
 		}
 		for _, char := range label {
 			if (char >= 'a' && char <= 'z') ||
-				(char >= 'A' && char <= 'Z') ||
-				(char >= '0' && char <= '9') || char == '-' {
+				(char >= 'A' && char <= 'Z') || char == '-' {
+				nonNumeric = true
+				continue
+			}
+			if char >= '0' && char <= '9' {
 				continue
 			}
 			return false
 		}
 	}
-	return true
+	return nonNumeric
 }
 
 func NewTopologyConfigFromFile(path string) (*TopologyConfig, error) {
