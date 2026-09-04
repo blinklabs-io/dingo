@@ -158,6 +158,11 @@ func Fetch(
 	fromEpoch := cfg.FromEpoch
 
 	if fromEpoch > throughEpoch {
+		if cfg.AccountsEnabled {
+			if err := cache.PruneAccountCoverage(cfg.Network, throughEpoch); err != nil {
+				return nil, fmt.Errorf("prune account coverage: %w", err)
+			}
+		}
 		logger.Info("koiosparity: fetch cache is up-to-date",
 			"network", cfg.Network,
 			"last_epoch", throughEpoch,

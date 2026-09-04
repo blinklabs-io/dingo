@@ -473,14 +473,13 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 		o.reportError(epoch, fmt.Errorf("check: %w", err))
 		return
 	}
+	if o.cfg.OnResult != nil {
+		o.cfg.OnResult(result)
+	}
 	if o.cfg.AccountsEnabled {
 		if err := o.cache.PruneAccountCoverage(o.cfg.Network, epoch); err != nil {
 			o.reportError(epoch, fmt.Errorf("prune account coverage: %w", err))
-			return
 		}
-	}
-	if o.cfg.OnResult != nil {
-		o.cfg.OnResult(result)
 	}
 	if result.Status != StatusPass {
 		o.fail(epoch, fmt.Errorf(

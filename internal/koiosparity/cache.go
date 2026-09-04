@@ -563,9 +563,6 @@ func (c *Cache) CommitAccountRewardsForEpoch(
 		zeroReward.Count, string(zeroRewardSample)); err != nil {
 		return err
 	}
-	if err = pruneCompletedAccountCoverageTx(tx, network, epoch); err != nil {
-		return err
-	}
 	err = tx.Commit()
 	return err
 }

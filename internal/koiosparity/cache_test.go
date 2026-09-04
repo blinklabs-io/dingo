@@ -220,6 +220,7 @@ func TestPruneAccountCoverageBoundsCheckpointRows(t *testing.T) {
 			}}, 3, true, now,
 		))
 	}
+	require.NoError(t, cache.PruneAccountCoverage("preview", firstEpoch+epochs-1))
 
 	var checked, staged int
 	require.NoError(t, cache.db.QueryRow(
