@@ -16,27 +16,122 @@ package badger
 
 import (
 	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
+)
+
+type badgerGCMetrics struct {
+	attempts       prometheus.Counter
+	successes      prometheus.Counter
+	noRewrite      prometheus.Counter
+	errors         prometheus.Counter
+	duration       prometheus.Observer
+	lsmBytes       prometheus.Gauge
+	vlogBytes      prometheus.Gauge
+	reclaimedBytes prometheus.Gauge
+	consecutive    prometheus.Gauge
+	lastSuccess    prometheus.Gauge
+}
+
+type badgerGCMetricCollectors struct {
+	attempts       *prometheus.CounterVec
+	successes      *prometheus.CounterVec
+	noRewrite      *prometheus.CounterVec
+	errors         *prometheus.CounterVec
+	duration       *prometheus.HistogramVec
+	lsmBytes       *prometheus.GaugeVec
+	vlogBytes      *prometheus.GaugeVec
+	reclaimedBytes *prometheus.GaugeVec
+	consecutive    *prometheus.GaugeVec
+	lastSuccess    *prometheus.GaugeVec
+}
+
+var (
+	badgerGCCollectors sync.Map
+	nextBadgerStoreID  atomic.Uint64
 )
 
 const (
 	badgerMetricNamePrefix = "database_blob_"
 )
 
-// safeRegister registers a collector, silently ignoring duplicates.
 func safeRegister(reg prometheus.Registerer, c prometheus.Collector) {
 	if err := reg.Register(c); err != nil {
-		// Ignore AlreadyRegisteredError — a second blob store instance
-		// (e.g. chain-manager store) shares the same default registry.
-		if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
+		var alreadyRegistered prometheus.AlreadyRegisteredError
+		if !errors.As(err, &alreadyRegistered) {
 			panic(err)
 		}
 	}
 }
 
 func (d *BlobStoreBadger) registerBlobMetrics() {
+	storeID := fmt.Sprintf("store-%d", nextBadgerStoreID.Add(1))
+	labels := []string{"store"}
+	gcCollectors := &badgerGCMetricCollectors{}
+	if existing, ok := badgerGCCollectors.Load(d.promRegistry); ok {
+		gcCollectors = existing.(*badgerGCMetricCollectors)
+	} else {
+		gcCollectors.attempts = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: badgerMetricNamePrefix + "gc_attempts_total", Help: "Total Badger value-log GC attempts.",
+		}, labels)
+		gcCollectors.successes = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: badgerMetricNamePrefix + "gc_successes_total", Help: "Total successful Badger value-log GC rewrites.",
+		}, labels)
+		gcCollectors.noRewrite = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: badgerMetricNamePrefix + "gc_no_rewrite_total", Help: "Total Badger value-log GC attempts with no rewrite.",
+		}, labels)
+		gcCollectors.errors = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: badgerMetricNamePrefix + "gc_errors_total", Help: "Total Badger value-log GC errors.",
+		}, labels)
+		gcCollectors.duration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name: badgerMetricNamePrefix + "gc_duration_seconds", Help: "Duration of Badger value-log GC attempts in seconds.",
+		}, labels)
+		gcCollectors.lsmBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "gc_lsm_bytes", Help: "Badger LSM size after the last successful value-log GC rewrite.",
+		}, labels)
+		gcCollectors.vlogBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "gc_vlog_bytes", Help: "Badger value-log size after the last successful GC rewrite.",
+		}, labels)
+		gcCollectors.reclaimedBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "gc_reclaimed_bytes", Help: "Bytes reclaimed by the last successful Badger GC rewrite.",
+		}, labels)
+		gcCollectors.consecutive = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "gc_consecutive_successes", Help: "Successful value-log GC rewrites in the current GC cycle.",
+		}, labels)
+		gcCollectors.lastSuccess = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "gc_last_success_timestamp_seconds", Help: "Unix timestamp of the last successful value-log GC rewrite.",
+		}, labels)
+		actual, loaded := badgerGCCollectors.LoadOrStore(d.promRegistry, gcCollectors)
+		if loaded {
+			gcCollectors = actual.(*badgerGCMetricCollectors)
+		} else {
+			for _, c := range []prometheus.Collector{
+				gcCollectors.attempts, gcCollectors.successes, gcCollectors.noRewrite,
+				gcCollectors.errors, gcCollectors.duration, gcCollectors.lsmBytes,
+				gcCollectors.vlogBytes, gcCollectors.reclaimedBytes, gcCollectors.consecutive,
+				gcCollectors.lastSuccess,
+			} {
+				safeRegister(d.promRegistry, c)
+			}
+		}
+	}
+	d.gcMetrics = &badgerGCMetrics{
+		attempts:       gcCollectors.attempts.WithLabelValues(storeID),
+		successes:      gcCollectors.successes.WithLabelValues(storeID),
+		noRewrite:      gcCollectors.noRewrite.WithLabelValues(storeID),
+		errors:         gcCollectors.errors.WithLabelValues(storeID),
+		duration:       gcCollectors.duration.WithLabelValues(storeID),
+		lsmBytes:       gcCollectors.lsmBytes.WithLabelValues(storeID),
+		vlogBytes:      gcCollectors.vlogBytes.WithLabelValues(storeID),
+		reclaimedBytes: gcCollectors.reclaimedBytes.WithLabelValues(storeID),
+		consecutive:    gcCollectors.consecutive.WithLabelValues(storeID),
+		lastSuccess:    gcCollectors.lastSuccess.WithLabelValues(storeID),
+	}
+
 	// Badger exposes metrics via expvar, so we need to set up some translation
 	collector := collectors.NewExpvarCollector(
 		map[string]*prometheus.Desc{
