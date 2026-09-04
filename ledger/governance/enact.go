@@ -90,7 +90,7 @@ func EnactProposal(
 		}
 		result.UpdatedPParams = updated
 		result.PParamsChanged = true
-		result.CostModelsChanged = a.ParamUpdate.CostModels != nil
+		_, result.CostModelsChanged = a.ParamUpdate.CostModels[1]
 
 	case *gdijkstra.DijkstraParameterChangeGovAction:
 		updated, err := ctx.UpdateFn(ctx.PParams, a.ParamUpdate)
@@ -99,7 +99,7 @@ func EnactProposal(
 		}
 		result.UpdatedPParams = updated
 		result.PParamsChanged = true
-		result.CostModelsChanged = a.ParamUpdate.CostModels != nil
+		_, result.CostModelsChanged = a.ParamUpdate.CostModels[1]
 
 	case *lcommon.HardForkInitiationGovAction:
 		updated, err := setProtocolVersion(

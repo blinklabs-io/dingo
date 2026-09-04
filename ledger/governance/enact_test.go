@@ -105,6 +105,42 @@ func TestEnactProposal_DijkstraParameterChange(t *testing.T) {
 	require.Equal(t, uint(1234), pparams.MinFeeA)
 }
 
+func TestEnactProposal_CostModelsChangedOnlyForPlutusV2(t *testing.T) {
+	for name, costModels := range map[string]map[uint][]int64{
+		"plutus v1": {0: {1, 2, 3}},
+		"plutus v2": {1: {4, 5, 6}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			db, _ := newTallyTestDB(t)
+			action := &gdijkstra.DijkstraParameterChangeGovAction{
+				Type: uint(lcommon.GovActionTypeParameterChange),
+				ParamUpdate: gdijkstra.DijkstraProtocolParameterUpdate{
+					CostModels: costModels,
+				},
+			}
+			encoded, err := cbor.Encode(action)
+			require.NoError(t, err)
+			proposal := &models.GovernanceProposal{
+				TxHash:        testBytes(32, 0xD7),
+				ActionType:    uint8(lcommon.GovActionTypeParameterChange),
+				GovActionCbor: encoded,
+				AddedSlot:     500,
+				ExpiresEpoch:  100,
+				AnchorURL:     "https://example.invalid/cost-model",
+				AnchorHash:    testBytes(32, 0xD8),
+				ReturnAddress: testBytes(29, 0xD9),
+			}
+			pparams := &gdijkstra.DijkstraProtocolParameters{}
+			result, err := EnactProposal(&EnactmentContext{
+				DB: db, Slot: 2000, Epoch: 42, PParams: pparams,
+				UpdateFn: eras.PParamsUpdateDijkstra,
+			}, proposal)
+			require.NoError(t, err)
+			require.Equal(t, costModels[1] != nil, result.CostModelsChanged)
+		})
+	}
+}
+
 func TestDecodeGovAction_HardForkRoundtrip(t *testing.T) {
 	original := &lcommon.HardForkInitiationGovAction{Type: 1}
 	original.ProtocolVersion.Major = 10

@@ -5972,6 +5972,11 @@ func (ls *LedgerState) processEpochRollover(
 		// the same values as the fallback.
 		if govOut.CostModelsChanged {
 			result.RealV2CostModelObserved = true
+			if err := ls.db.SetSyncState(
+				syntheticV2CostModelSyncKey, "false", txn,
+			); err != nil {
+				return nil, fmt.Errorf("persist synthetic V2 marker: %w", err)
+			}
 		}
 	}
 	result.NewCurrentPParams = newPParams

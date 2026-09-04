@@ -105,7 +105,10 @@ func TestCurrentProtocolParamsQueryIncludesExistingV2(t *testing.T) {
 
 	result, err := ls.Query(currentProtocolParamsQuery())
 	require.NoError(t, err)
-	values := result.([]any)
-	replied := values[0].(*babbage.BabbageProtocolParameters)
+	values, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, values, 1)
+	replied, ok := values[0].(*babbage.BabbageProtocolParameters)
+	require.True(t, ok)
 	require.Equal(t, []int64{4, 5, 6}, replied.CostModels[1])
 }

@@ -656,27 +656,27 @@ func withoutSyntheticV2CostModel(
 	switch p := pp.(type) {
 	case *alonzo.AlonzoProtocolParameters:
 		modified := *p
-		modified.CostModels = withoutCostModelKey(p.CostModels)
+		modified.CostModels = withoutPlutusV2CostModel(p.CostModels)
 		return &modified
 	case *babbage.BabbageProtocolParameters:
 		modified := *p
-		modified.CostModels = withoutCostModelKey(p.CostModels)
+		modified.CostModels = withoutPlutusV2CostModel(p.CostModels)
 		return &modified
 	case *conway.ConwayProtocolParameters:
 		modified := *p
-		modified.CostModels = withoutCostModelKey(p.CostModels)
+		modified.CostModels = withoutPlutusV2CostModel(p.CostModels)
 		return &modified
 	case *dijkstra.DijkstraProtocolParameters:
 		modified := *p
-		modified.CostModels = withoutCostModelKey(p.CostModels)
+		modified.CostModels = withoutPlutusV2CostModel(p.CostModels)
 		return &modified
 	default:
 		return pp
 	}
 }
 
-// withoutCostModelKey returns a new map holding every entry except key.
-func withoutCostModelKey(m map[uint][]int64) map[uint][]int64 {
+// withoutPlutusV2CostModel returns a new map without the PlutusV2 entry.
+func withoutPlutusV2CostModel(m map[uint][]int64) map[uint][]int64 {
 	if m == nil {
 		return nil
 	}

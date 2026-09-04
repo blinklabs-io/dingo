@@ -74,6 +74,7 @@ const (
 	ledgerIntersectDenseCount    = 32
 	ledgerAncestorSearchWindow   = 10_000
 	firstBlockIndex              = 1
+	syntheticV2CostModelSyncKey  = "ledger.synthetic_v2_cost_model"
 	mithrilLedgerSlotSyncKey     = "mithril_ledger_slot"
 	mithrilLedgerHashSyncKey     = "mithril_ledger_hash"
 	// blockPipelineDecodeWorkers is the fixed decode worker count for phase 1
@@ -3211,6 +3212,16 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	if ppComputed {
 		ls.currentPParams = newPParams
 		ls.prevEraPParams = newPrevPParams
+		marker := "false"
+		if isSyntheticV2CostModel(newPParams, newPrevPParams) {
+			marker = "true"
+		}
+		if err := ls.db.SetSyncState(
+			syntheticV2CostModelSyncKey, marker, nil,
+		); err != nil {
+			ls.config.Logger.Warn("persist synthetic V2 marker after rollback", "error", err)
+		}
+		ls.syntheticV2CostModel = marker == "true"
 	}
 	ls.lastLocalRollbackSeq++
 	ls.lastLocalRollbackPoint = ocommon.Point{
@@ -3702,6 +3713,13 @@ func (ls *LedgerState) transitionToEraFrom(
 		if err != nil {
 			return nil, fmt.Errorf("failed to set pparams: %w", err)
 		}
+		if result.InjectedSyntheticV2CostModel {
+			if err := ls.db.SetSyncState(
+				syntheticV2CostModelSyncKey, "true", txn,
+			); err != nil {
+				return nil, fmt.Errorf("persist synthetic V2 marker: %w", err)
+			}
+		}
 		if err := governance.TranslateRatifiedGovActions(
 			ls.db,
 			txn,
@@ -3916,6 +3934,17 @@ func injectedSyntheticV2CostModel(
 		return false
 	}
 	return slices.Equal(afterV2, eras.DefaultPlutusV2CostModel)
+}
+
+func isSyntheticV2CostModel(
+	current, previous lcommon.ProtocolParameters,
+) bool {
+	currentV2, ok := extractRawCostModels(current)[1]
+	if !ok || !slices.Equal(currentV2, eras.DefaultPlutusV2CostModel) {
+		return false
+	}
+	_, hadPreviousV2 := extractRawCostModels(previous)[1]
+	return !hadPreviousV2
 }
 
 // IsAtTip reports whether the node has caught up to the chain tip at least
@@ -6929,6 +6958,17 @@ func (ls *LedgerState) loadPParams() error {
 	}
 	ls.currentPParams = pp
 	ls.prevEraPParams = prevPP
+	marker, markerErr := ls.db.GetSyncState(syntheticV2CostModelSyncKey, nil)
+	if markerErr != nil {
+		return fmt.Errorf("load synthetic V2 marker: %w", markerErr)
+	}
+	if marker == "" {
+		marker = "false"
+		if isSyntheticV2CostModel(pp, prevPP) {
+			marker = "true"
+		}
+	}
+	ls.syntheticV2CostModel = marker == "true"
 	ls.publishSnapshotsLocked()
 	return nil
 }
