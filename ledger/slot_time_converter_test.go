@@ -364,6 +364,80 @@ func TestSlotTimeConverter_SlotToTimeInEraIgnoresHorizon(t *testing.T) {
 		"below the horizon both paths must agree")
 }
 
+// TestSlotTimeConverter_SlotToTimeInEraUsesCachedCurrentEra guards against
+// using a forecast successor's parameters for validation-time extrapolation.
+// HardForkSummary may append that successor to bound header forecasting, but
+// the latest persisted epoch identifies the era whose parameters are current.
+func TestSlotTimeConverter_SlotToTimeInEraUsesCachedCurrentEra(t *testing.T) {
+	genesis := testShelleyGenesis(t)
+	currentSlotLength := time.Second
+	currentEraEnd := hardfork.Bound{
+		RelativeTime: 500 * currentSlotLength,
+		Slot:         500,
+		Epoch:        5,
+	}
+	forecastEnd := hardfork.Bound{
+		RelativeTime: 700 * currentSlotLength,
+		Slot:         600,
+		Epoch:        6,
+	}
+	sum := &hardfork.Summary{
+		SystemStart: genesis.SystemStart,
+		Eras: []hardfork.EraSummary{
+			{
+				EraID: 4,
+				Start: hardfork.Bound{},
+				End:   &currentEraEnd,
+				Params: hardfork.EraParams{
+					EpochSize:  100,
+					SlotLength: currentSlotLength,
+				},
+			},
+			{
+				EraID: 5,
+				Start: currentEraEnd,
+				End:   &forecastEnd,
+				Params: hardfork.EraParams{
+					EpochSize:  100,
+					SlotLength: 2 * currentSlotLength,
+				},
+			},
+		},
+	}
+	conv := NewSlotTimeConverter(SlotTimeConverterDeps{
+		EpochCache: func() []models.Epoch {
+			return []models.Epoch{{
+				EpochId:       4,
+				StartSlot:     400,
+				SlotLength:    1000,
+				LengthInSlots: 100,
+				EraId:         4,
+			}}
+		},
+		ShelleyGenesis:  func() *shelley.ShelleyGenesis { return genesis },
+		HardForkSummary: func() (*hardfork.Summary, error) { return sum, nil },
+	})
+	conv.nowFunc = func() time.Time { return genesis.SystemStart }
+
+	const pastSlot = 650
+	_, err := conv.SlotToTime(pastSlot)
+	require.ErrorIs(
+		t,
+		err,
+		hardfork.ErrPastHorizon,
+		"the bounded forecast conversion must still reject a genuinely past-horizon slot",
+	)
+
+	when, err := conv.SlotToTimeInEra(pastSlot)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		genesis.SystemStart.Add(pastSlot*currentSlotLength),
+		when,
+		"validation-time extrapolation must use the cached current-era slot length",
+	)
+}
+
 // TestSlotTimeConverter_SlotToTimeInEraBuildsSummaryOnce pins the cost of the
 // past-horizon path. HardForkSummary walks the whole epoch cache and allocates
 // on every call, and this conversion runs per transaction, so resolving a slot

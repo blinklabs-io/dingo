@@ -151,6 +151,7 @@ func (c *SlotTimeConverter) SlotToTime(slot uint64) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, err
 	}
+	epochCache := c.epochCache()
 	when, sumErr := sum.SlotToTime(slot)
 	if sumErr != nil {
 		// The operational slot clock converts the next wall-clock slot on
@@ -167,11 +168,15 @@ func (c *SlotTimeConverter) SlotToTime(slot uint64) (time.Time, error) {
 		// extrapolated time is near now qualifies, so arbitrary future slots
 		// and the bounded Summary used by header validation are unaffected.
 		if errors.Is(sumErr, hardfork.ErrPastHorizon) {
-			if extrapolated, ok := currentEraTimeAtSlot(sum, slot); ok &&
+			if extrapolated, ok := currentEraTimeAtSlot(
+				sum,
+				epochCache,
+				slot,
+			); ok &&
 				withinOperationalWindow(
 					c.now(),
 					extrapolated,
-					currentEraSlotLength(sum),
+					currentEraSlotLength(sum, epochCache),
 				) {
 				return extrapolated, nil
 			}
@@ -210,6 +215,7 @@ func (c *SlotTimeConverter) SlotToTimeInEra(slot uint64) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, err
 	}
+	epochCache := c.epochCache()
 	when, sumErr := sum.SlotToTime(slot)
 	if sumErr == nil {
 		return when, nil
@@ -217,7 +223,11 @@ func (c *SlotTimeConverter) SlotToTimeInEra(slot uint64) (time.Time, error) {
 	if errors.Is(sumErr, hardfork.ErrPastHorizon) {
 		// Unconditional, unlike SlotToTime's near-now gate: a slot inside the
 		// current era converts exactly, so there is nothing to guard against.
-		if extrapolated, ok := currentEraTimeAtSlot(sum, slot); ok {
+		if extrapolated, ok := currentEraTimeAtSlot(
+			sum,
+			epochCache,
+			slot,
+		); ok {
 			return extrapolated, nil
 		}
 	}
@@ -247,6 +257,7 @@ func (c *SlotTimeConverter) TimeToSlot(t time.Time) (uint64, error) {
 		}
 		return 0, fmt.Errorf("time not found in known epochs: %w", err)
 	}
+	epochCache := c.epochCache()
 	slot, sumErr := sum.TimeToSlot(t)
 	if sumErr != nil {
 		// CurrentSlot drives operational timing while a node catches up after
@@ -257,8 +268,16 @@ func (c *SlotTimeConverter) TimeToSlot(t time.Time) (uint64, error) {
 		// so a fixed tolerance here would reject the very boundary time
 		// SlotToTime just handed out on an era with slots longer than it.
 		if errors.Is(sumErr, hardfork.ErrPastHorizon) &&
-			withinOperationalWindow(c.now(), t, currentEraSlotLength(sum)) {
-			if currentSlot, ok := currentEraSlotAtTime(sum, t); ok {
+			withinOperationalWindow(
+				c.now(),
+				t,
+				currentEraSlotLength(sum, epochCache),
+			) {
+			if currentSlot, ok := currentEraSlotAtTime(
+				sum,
+				epochCache,
+				t,
+			); ok {
 				return currentSlot, nil
 			}
 		}
@@ -420,23 +439,50 @@ func withinOperationalWindow(
 	return d >= -tolerance && d < tolerance
 }
 
+// currentEraSummary returns the era currently represented by the latest
+// persisted epoch-cache entry. HardForkSummary may append a forecast
+// successor, so the last Summary era is not necessarily the current ledger
+// era.
+func currentEraSummary(
+	sum *hardfork.Summary,
+	epochCache []models.Epoch,
+) (*hardfork.EraSummary, bool) {
+	if sum == nil || len(sum.Eras) == 0 {
+		return nil, false
+	}
+	if len(epochCache) > 0 {
+		eraID := epochCache[len(epochCache)-1].EraId
+		for index := len(sum.Eras) - 1; index >= 0; index-- {
+			if sum.Eras[index].EraID == uint(eraID) {
+				return &sum.Eras[index], true
+			}
+		}
+	}
+	return &sum.Eras[len(sum.Eras)-1], true
+}
+
 // currentEraSlotLength returns the current era's slot length, or 0 when the
 // summary has no era to read it from.
-func currentEraSlotLength(sum *hardfork.Summary) time.Duration {
-	if sum == nil || len(sum.Eras) == 0 {
+func currentEraSlotLength(
+	sum *hardfork.Summary,
+	epochCache []models.Epoch,
+) time.Duration {
+	current, ok := currentEraSummary(sum, epochCache)
+	if !ok {
 		return 0
 	}
-	return sum.Eras[len(sum.Eras)-1].Params.SlotLength
+	return current.Params.SlotLength
 }
 
 func currentEraSlotAtTime(
 	sum *hardfork.Summary,
+	epochCache []models.Epoch,
 	t time.Time,
 ) (uint64, bool) {
-	if sum == nil || len(sum.Eras) == 0 {
+	current, ok := currentEraSummary(sum, epochCache)
+	if !ok {
 		return 0, false
 	}
-	current := sum.Eras[len(sum.Eras)-1]
 	relativeTime := t.Sub(sum.SystemStart)
 	if relativeTime < current.Start.RelativeTime ||
 		current.Params.SlotLength <= 0 {
@@ -459,12 +505,13 @@ func currentEraSlotAtTime(
 // horizon may in reality fall in a later era with a different slot length.
 func currentEraTimeAtSlot(
 	sum *hardfork.Summary,
+	epochCache []models.Epoch,
 	slot uint64,
 ) (time.Time, bool) {
-	if sum == nil || len(sum.Eras) == 0 {
+	current, ok := currentEraSummary(sum, epochCache)
+	if !ok {
 		return time.Time{}, false
 	}
-	current := sum.Eras[len(sum.Eras)-1]
 	if slot < current.Start.Slot || current.Params.SlotLength <= 0 {
 		return time.Time{}, false
 	}
