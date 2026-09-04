@@ -436,12 +436,12 @@ func (b *DefaultBlockBuilder) buildBlock(
 				continue
 			}
 
-			// Check for intra-block double-spends: if any input of
-			// this transaction was already consumed by an earlier
-			// transaction in this block candidate, skip it.
-			txInputKeys := make([]string, 0, len(fullTx.Inputs()))
+			// Check for intra-block double-spends using the consensus spent
+			// set. A phase-2-invalid transaction consumes collateral, not
+			// its regular inputs.
+			txInputKeys := make([]string, 0, len(fullTx.Consumed()))
 			doubleSpend := false
-			for _, input := range fullTx.Inputs() {
+			for _, input := range fullTx.Consumed() {
 				key := fmt.Sprintf(
 					"%s:%d",
 					input.Id().String(),

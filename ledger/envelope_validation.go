@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -90,7 +91,51 @@ func validateInboundBlockEnvelope(
 	if block.Era().Id == byron.EraIdByron {
 		return nil
 	}
-	return validateBlockSizes(block, pparams)
+	if err := validateBlockSizes(block, pparams); err != nil {
+		return err
+	}
+	return validateBlockExUnits(block, pparams)
+}
+
+// validateBlockExUnits enforces the aggregate execution-unit budget for all
+// transactions in an inbound block. Per-transaction validation checks
+// MaxTxExUnits, but the protocol also bounds the sum at MaxBlockExUnits.
+// This runs before ledger deltas are created or applied.
+func validateBlockExUnits(
+	block gledger.Block,
+	pparams lcommon.ProtocolParameters,
+) error {
+	maxBlockExUnits, ok := protocolBlockExUnitsLimit(pparams)
+	if !ok {
+		// Byron through Mary have no Plutus execution-unit budget.
+		return nil
+	}
+	var total lcommon.ExUnits
+	for index, tx := range block.Transactions() {
+		declared, err := eras.DeclaredExUnits(tx)
+		if err != nil {
+			return fmt.Errorf(
+				"transaction %d declared execution units: %w",
+				index,
+				err,
+			)
+		}
+		total, err = eras.SafeAddExUnits(total, declared)
+		if err != nil {
+			return fmt.Errorf("block declared execution units: %w", err)
+		}
+		if total.Memory > maxBlockExUnits.Memory ||
+			total.Steps > maxBlockExUnits.Steps {
+			return fmt.Errorf(
+				"block declared execution units %d memory/%d steps exceed maxBlockExUnits %d memory/%d steps",
+				total.Memory,
+				total.Steps,
+				maxBlockExUnits.Memory,
+				maxBlockExUnits.Steps,
+			)
+		}
+	}
+	return nil
 }
 
 func isNilBlockHeader(header lcommon.BlockHeader) bool {
@@ -298,5 +343,34 @@ func protocolBlockSizeLimits(
 		return uint64(pp.MaxBlockBodySize), uint64(pp.MaxBlockHeaderSize), true
 	default:
 		return 0, 0, false
+	}
+}
+
+func protocolBlockExUnitsLimit(
+	pparams lcommon.ProtocolParameters,
+) (lcommon.ExUnits, bool) {
+	switch pp := pparams.(type) {
+	case *alonzo.AlonzoProtocolParameters:
+		if pp == nil {
+			return lcommon.ExUnits{}, false
+		}
+		return pp.MaxBlockExUnits, true
+	case *babbage.BabbageProtocolParameters:
+		if pp == nil {
+			return lcommon.ExUnits{}, false
+		}
+		return pp.MaxBlockExUnits, true
+	case *conway.ConwayProtocolParameters:
+		if pp == nil {
+			return lcommon.ExUnits{}, false
+		}
+		return pp.MaxBlockExUnits, true
+	case *dijkstra.DijkstraProtocolParameters:
+		if pp == nil {
+			return lcommon.ExUnits{}, false
+		}
+		return pp.MaxBlockExUnits, true
+	default:
+		return lcommon.ExUnits{}, false
 	}
 }
