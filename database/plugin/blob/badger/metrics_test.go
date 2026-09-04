@@ -16,6 +16,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type nonComparableRegisterer struct {
+	prometheus.Registerer
+	labels []string
+}
+
 func TestRegisterBlobMetricsReusesSharedGCCollectors(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	first := &BlobStoreBadger{promRegistry: registry}
@@ -51,4 +56,26 @@ func TestRegisterBlobMetricsAllowsLabelWrappedReuse(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, count)
 	require.Equal(t, float64(1), testutil.ToFloat64(second.gcMetrics.attempts))
+}
+
+func TestRegisterBlobMetricsRemovesClosedStoreSeries(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	store := &BlobStoreBadger{promRegistry: registry}
+	store.registerBlobMetrics()
+	store.gcMetrics.attempts.Inc()
+	require.Equal(t, 1, testutil.GatherAndCount(registry,
+		"database_blob_gc_attempts_total"))
+	require.NoError(t, store.Close())
+	require.Equal(t, 0, testutil.GatherAndCount(registry,
+		"database_blob_gc_attempts_total"))
+}
+
+func TestRegisterBlobMetricsAllowsNonComparableRegisterer(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	registerer := nonComparableRegisterer{
+		Registerer: registry,
+		labels:     []string{"network"},
+	}
+	store := &BlobStoreBadger{promRegistry: registerer}
+	require.NotPanics(t, store.registerBlobMetrics)
 }

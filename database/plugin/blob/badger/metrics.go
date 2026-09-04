@@ -17,6 +17,7 @@ package badger
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"sync/atomic"
 
@@ -35,6 +36,7 @@ type badgerGCMetrics struct {
 	reclaimedBytes prometheus.Gauge
 	consecutive    prometheus.Gauge
 	lastSuccess    prometheus.Gauge
+	cleanup        func()
 }
 
 type badgerGCMetricCollectors struct {
@@ -55,6 +57,14 @@ var (
 	nextBadgerStoreID  atomic.Uint64
 )
 
+func registererCacheKey(reg prometheus.Registerer) (string, bool) {
+	value := reflect.ValueOf(reg)
+	if !value.IsValid() || value.Kind() != reflect.Pointer {
+		return "", false
+	}
+	return fmt.Sprintf("%s:%x", value.Type(), value.Pointer()), true
+}
+
 const (
 	badgerMetricNamePrefix = "database_blob_"
 )
@@ -72,7 +82,8 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 	storeID := fmt.Sprintf("store-%d", nextBadgerStoreID.Add(1))
 	labels := []string{"store"}
 	gcCollectors := &badgerGCMetricCollectors{}
-	if existing, ok := badgerGCCollectors.Load(d.promRegistry); ok {
+	cacheKey, cacheable := registererCacheKey(d.promRegistry)
+	if existing, ok := badgerGCCollectors.Load(cacheKey); cacheable && ok {
 		gcCollectors = existing.(*badgerGCMetricCollectors)
 	} else {
 		gcCollectors.attempts = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -105,10 +116,15 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 		gcCollectors.lastSuccess = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: badgerMetricNamePrefix + "gc_last_success_timestamp_seconds", Help: "Unix timestamp of the last successful value-log GC rewrite.",
 		}, labels)
-		actual, loaded := badgerGCCollectors.LoadOrStore(d.promRegistry, gcCollectors)
-		if loaded {
-			gcCollectors = actual.(*badgerGCMetricCollectors)
-		} else {
+		registerCollectors := true
+		if cacheable {
+			actual, loaded := badgerGCCollectors.LoadOrStore(cacheKey, gcCollectors)
+			if loaded {
+				gcCollectors = actual.(*badgerGCMetricCollectors)
+				registerCollectors = false
+			}
+		}
+		if registerCollectors {
 			for _, c := range []prometheus.Collector{
 				gcCollectors.attempts, gcCollectors.successes, gcCollectors.noRewrite,
 				gcCollectors.errors, gcCollectors.duration, gcCollectors.lsmBytes,
@@ -130,6 +146,18 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 		reclaimedBytes: gcCollectors.reclaimedBytes.WithLabelValues(storeID),
 		consecutive:    gcCollectors.consecutive.WithLabelValues(storeID),
 		lastSuccess:    gcCollectors.lastSuccess.WithLabelValues(storeID),
+		cleanup: func() {
+			gcCollectors.attempts.DeleteLabelValues(storeID)
+			gcCollectors.successes.DeleteLabelValues(storeID)
+			gcCollectors.noRewrite.DeleteLabelValues(storeID)
+			gcCollectors.errors.DeleteLabelValues(storeID)
+			gcCollectors.duration.DeleteLabelValues(storeID)
+			gcCollectors.lsmBytes.DeleteLabelValues(storeID)
+			gcCollectors.vlogBytes.DeleteLabelValues(storeID)
+			gcCollectors.reclaimedBytes.DeleteLabelValues(storeID)
+			gcCollectors.consecutive.DeleteLabelValues(storeID)
+			gcCollectors.lastSuccess.DeleteLabelValues(storeID)
+		},
 	}
 
 	// Badger exposes metrics via expvar, so we need to set up some translation
@@ -213,7 +241,7 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 		func() float64 {
 			if db := d.DB(); db != nil {
 				if m := db.BlockCacheMetrics(); m != nil {
-				return float64(m.Hits())
+					return float64(m.Hits())
 				}
 			}
 			return 0
@@ -227,7 +255,7 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 		func() float64 {
 			if db := d.DB(); db != nil {
 				if m := db.BlockCacheMetrics(); m != nil {
-				return float64(m.Misses())
+					return float64(m.Misses())
 				}
 			}
 			return 0
@@ -241,7 +269,7 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 		func() float64 {
 			if db := d.DB(); db != nil {
 				if m := db.BlockCacheMetrics(); m != nil {
-				return m.Ratio()
+					return m.Ratio()
 				}
 			}
 			return 0
@@ -255,12 +283,12 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 		func() float64 {
 			if db := d.DB(); db != nil {
 				if m := db.BlockCacheMetrics(); m != nil {
-				added := m.CostAdded()
-				evicted := m.CostEvicted()
-				if added >= evicted {
-					return float64(added - evicted)
-				}
-				return 0
+					added := m.CostAdded()
+					evicted := m.CostEvicted()
+					if added >= evicted {
+						return float64(added - evicted)
+					}
+					return 0
 				}
 			}
 			return 0
@@ -274,7 +302,7 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 		func() float64 {
 			if db := d.DB(); db != nil {
 				if m := db.BlockCacheMetrics(); m != nil {
-				return float64(m.KeysAdded())
+					return float64(m.KeysAdded())
 				}
 			}
 			return 0
@@ -288,7 +316,7 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 		func() float64 {
 			if db := d.DB(); db != nil {
 				if m := db.BlockCacheMetrics(); m != nil {
-				return float64(m.KeysEvicted())
+					return float64(m.KeysEvicted())
 				}
 			}
 			return 0
@@ -302,7 +330,7 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 		func() float64 {
 			if db := d.DB(); db != nil {
 				if m := db.IndexCacheMetrics(); m != nil {
-				return float64(m.Hits())
+					return float64(m.Hits())
 				}
 			}
 			return 0
@@ -316,7 +344,7 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 		func() float64 {
 			if db := d.DB(); db != nil {
 				if m := db.IndexCacheMetrics(); m != nil {
-				return float64(m.Misses())
+					return float64(m.Misses())
 				}
 			}
 			return 0
@@ -330,7 +358,7 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 		func() float64 {
 			if db := d.DB(); db != nil {
 				if m := db.IndexCacheMetrics(); m != nil {
-				return m.Ratio()
+					return m.Ratio()
 				}
 			}
 			return 0
