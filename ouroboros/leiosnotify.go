@@ -1099,9 +1099,7 @@ const leiosTxFetchMaxRoundsPerWindow = leiosTxFetchWindowSize
 // or a no-progress request it returns the contiguous prefix fetched so far,
 // letting callers treat the fetch as best-effort.
 //
-// This is the tip-driven entry point (no per-attempt deadline); the by-point
-// backfill path uses fetchLeiosEbTxsBatchedUntil to bound one connection's
-// attempt so it can fail over to another peer.
+// This is the tip-driven entry point (no per-attempt deadline).
 func (o *Ouroboros) fetchLeiosEbTxsBatched(
 	client leiosBlockTxsRequester,
 	point ocommon.Point,
@@ -1118,18 +1116,7 @@ func (o *Ouroboros) fetchLeiosEbTxsBatched(
 	)
 }
 
-// fetchLeiosEbTxsBatchedUntil is fetchLeiosEbTxsBatched with an optional
-// per-attempt deadline. When deadline is non-zero the fetch abandons the attempt
-// and returns the contiguous prefix fetched so far (with a deadline error) once
-// it elapses, instead of continuing to re-request from a slow-but-alive relay
-// that keeps dribbling transactions yet never promptly completes. The check is
-// between request rounds — each individual round is bounded by the request context from
-// leiosFetchRequestContext, not by a protocol state timeout (leios-fetch
-// deliberately has none for Block/BlockTxs) — so an attempt overshoots the
-// deadline by at most one round;
-// this lets the by-point backfill fail over to another connection rather than
-// parking the whole ledger apply loop on one peer (issue #2819). A zero deadline
-// disables the bound, preserving the tip-path behavior.
+//nolint:unused // exercised by package tests and retained as a deadline wrapper.
 func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
 	client leiosBlockTxsRequester,
 	point ocommon.Point,
