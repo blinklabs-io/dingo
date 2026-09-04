@@ -59,6 +59,7 @@ func TestLedgerProcessBlockAllowsSyntheticByronBlocksWithPlaceholderCbor(
 			eras.ByronEraDesc,
 			&shelley.ShelleyProtocolParameters{},
 			nil,
+			0,
 		)
 		return err
 	})
