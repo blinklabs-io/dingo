@@ -2947,6 +2947,7 @@ func TestDeclaredExUnits(t *testing.T) {
 							val lcommon.RedeemerValue
 						}{
 							{
+								key: lcommon.RedeemerKey{Index: 0},
 								val: lcommon.RedeemerValue{
 									ExUnits: lcommon.ExUnits{
 										Memory: 500000,
@@ -2983,6 +2984,7 @@ func TestDeclaredExUnits(t *testing.T) {
 								},
 							},
 							{
+								key: lcommon.RedeemerKey{Index: 1},
 								val: lcommon.RedeemerValue{
 									ExUnits: lcommon.ExUnits{
 										Memory: 200000,
@@ -2991,6 +2993,7 @@ func TestDeclaredExUnits(t *testing.T) {
 								},
 							},
 							{
+								key: lcommon.RedeemerKey{Index: 2},
 								val: lcommon.RedeemerValue{
 									ExUnits: lcommon.ExUnits{
 										Memory: 100000,
@@ -3019,6 +3022,7 @@ func TestDeclaredExUnits(t *testing.T) {
 							val lcommon.RedeemerValue
 						}{
 							{
+								key: lcommon.RedeemerKey{Index: 0},
 								val: lcommon.RedeemerValue{
 									ExUnits: lcommon.ExUnits{
 										Memory: math.MaxInt64,
@@ -3027,6 +3031,7 @@ func TestDeclaredExUnits(t *testing.T) {
 								},
 							},
 							{
+								key: lcommon.RedeemerKey{Index: 1},
 								val: lcommon.RedeemerValue{
 									ExUnits: lcommon.ExUnits{
 										Memory: 1,
@@ -3052,6 +3057,7 @@ func TestDeclaredExUnits(t *testing.T) {
 							val lcommon.RedeemerValue
 						}{
 							{
+								key: lcommon.RedeemerKey{Index: 0},
 								val: lcommon.RedeemerValue{
 									ExUnits: lcommon.ExUnits{
 										Memory: 100,
@@ -3060,6 +3066,7 @@ func TestDeclaredExUnits(t *testing.T) {
 								},
 							},
 							{
+								key: lcommon.RedeemerKey{Index: 1},
 								val: lcommon.RedeemerValue{
 									ExUnits: lcommon.ExUnits{
 										Memory: 100,

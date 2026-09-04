@@ -979,6 +979,7 @@ func referencedScriptUtxos(
 func DeclaredExUnits(
 	tx lcommon.Transaction,
 ) (lcommon.ExUnits, error) {
+	tx = normalizeDuplicateRedeemers(tx)
 	var total lcommon.ExUnits
 	wits := tx.Witnesses()
 	if wits == nil {

@@ -178,6 +178,7 @@ func ValidateTxAlonzo(
 		return fmt.Errorf("normalize script data hash CBOR: %w", err)
 	}
 	tx = normalizedTx
+	tx = normalizeDuplicateRedeemers(tx)
 	errs := []error{}
 	for _, validationRule := range alonzoUtxoValidationRules {
 		err = validationRule.validationFunc(tx, slot, ls, pp)
@@ -364,6 +365,7 @@ func EvaluateTxAlonzo(
 	if !ok {
 		return 0, lcommon.ExUnits{}, nil, ErrIncompatibleProtocolParams
 	}
+	tx = normalizeDuplicateRedeemers(tx)
 	// Resolve inputs
 	resolvedInputs := []lcommon.Utxo{}
 	for _, tmpInput := range tx.Inputs() {
