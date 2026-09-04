@@ -3,9 +3,22 @@
 # setting is left commented out to preserve a storage-mode-specific
 # runtime default.
 
-# Public bind address for the Dingo server
+# Public bind address for the relay/NtN and metrics listeners.
 # CLI: --bind-addr
 bindAddr: "0.0.0.0"
+
+# Bind address for the Blockfrost, Mesh, and UTxO RPC listeners. Deliberately
+# independent of bindAddr and loopback by default: these listeners have
+# authentication disabled unless api.auth is configured, so exposing one is an
+# explicit decision. Override a single listener instead with that provider's
+# own plugins.api.<name>.config.host.
+# CLI: --api-bind-addr  Env: DINGO_API_BIND_ADDR
+apiBindAddr: "127.0.0.1"
+
+# Browser CORS origins for the API listeners. An empty list (the default)
+# sends no CORS headers; ["*"] allows any origin.
+# CLI: --cors-allowed-origins  Env: DINGO_CORS_ALLOWED_ORIGINS
+corsAllowedOrigins: []
 
 # Path to the Cardano node configuration file
 #

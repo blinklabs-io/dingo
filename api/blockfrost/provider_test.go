@@ -164,3 +164,37 @@ func TestProviderPropagatesTLSAndAuth(t *testing.T) {
 	require.True(t, srv.config.Auth.Enabled)
 	require.Equal(t, "shared-secret", srv.config.Auth.Token)
 }
+
+// TestProviderHostOverridesSharedDefault asserts the per-plugin
+// `plugins.api.blockfrost.config.host` override wins over the shared API
+// bind address composition hands down (issue #3498).
+func TestProviderHostOverridesSharedDefault(t *testing.T) {
+	host := newProviderHost(t)
+
+	var srv *Blockfrost
+	var lastErr error
+	for range testutil.BindAttempts {
+		resolved, err := plugin.Resolve[*Blockfrost](
+			t.Context(),
+			host,
+			plugin.CapabilityAPIBlockfrost,
+			"builtin",
+			map[string]any{
+				"port": freeLoopbackPort(t),
+				"host": "127.0.0.1",
+			},
+			ProviderDependencies{Node: &mockNode{}, Host: "0.0.0.0"},
+		)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		srv = resolved
+		break
+	}
+	require.NotNil(t, srv, "resolve blockfrost provider: %v", lastErr)
+
+	hostPart, _, err := net.SplitHostPort(srv.config.ListenAddress)
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.1", hostPart)
+}

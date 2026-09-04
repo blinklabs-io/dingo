@@ -181,3 +181,37 @@ func TestProviderPropagatesTLSAndAuth(t *testing.T) {
 	require.True(t, srv.config.Auth.Enabled)
 	require.Equal(t, "shared-secret", srv.config.Auth.Token)
 }
+
+// TestProviderHostOverridesSharedDefault asserts the per-plugin
+// `plugins.api.utxorpc.config.host` override wins over the shared API
+// bind address composition hands down (issue #3498).
+func TestProviderHostOverridesSharedDefault(t *testing.T) {
+	host := newProviderHost(t)
+	deps := providerDeps(t)
+	deps.Host = "0.0.0.0"
+
+	var srv *Utxorpc
+	var lastErr error
+	for range testutil.BindAttempts {
+		resolved, err := plugin.Resolve[*Utxorpc](
+			t.Context(),
+			host,
+			plugin.CapabilityAPIUtxorpc,
+			"builtin",
+			map[string]any{
+				"port": freeLoopbackPort(t),
+				"host": "127.0.0.1",
+			},
+			deps,
+		)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		srv = resolved
+		break
+	}
+	require.NotNil(t, srv, "resolve utxorpc provider: %v", lastErr)
+
+	require.Equal(t, "127.0.0.1", srv.config.Host)
+}

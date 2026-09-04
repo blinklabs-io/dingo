@@ -21,6 +21,11 @@ services:
       - CARDANO_NETWORK=${CARDANO_NETWORK:-preview}
       - CARDANO_DATABASE_PATH=/data/db
       - DINGO_SOCKET_PATH=/ipc/dingo.socket
+      # API listeners (Blockfrost, Mesh, UTxO RPC) bind loopback by default,
+      # which a container port mapping cannot reach. The published ports below
+      # are bound to the host's own loopback, so the container-side wildcard
+      # is not itself an exposure.
+      - DINGO_API_BIND_ADDR=0.0.0.0
       # Uncomment to enable debug logging
       # - DINGO_DEBUG=1
       # Uncomment to bootstrap from Mithril snapshot on first run
