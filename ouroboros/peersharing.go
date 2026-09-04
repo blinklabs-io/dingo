@@ -102,12 +102,26 @@ func (o *Ouroboros) peersharingShareRequest(
 			)
 			continue
 		}
+		if !peergov.IsRoutableIP(ip) {
+			o.config.Logger.Debug(
+				"peer address is not globally routable, skipping",
+				"address", address,
+			)
+			continue
+		}
 		portNum, err := strconv.ParseUint(port, 10, 16)
 		if err != nil {
 			o.config.Logger.Debug(
 				"failed to parse peer port, skipping",
 				"address", address,
 				"error", err,
+			)
+			continue
+		}
+		if portNum == 0 {
+			o.config.Logger.Debug(
+				"peer address has no usable port, skipping",
+				"address", address,
 			)
 			continue
 		}
@@ -165,9 +179,47 @@ func (o *Ouroboros) RequestPeersFromPeer(peer *peergov.Peer) []string {
 		)
 		return nil
 	}
-	// Collect addresses
+	return o.peerSharingReplyAddresses(peers, defaultPeersToRequest)
+}
+
+// peerSharingReplyAddresses converts a peer-sharing reply into peer-governor
+// candidate addresses. The reply is bounded to the request so a remote cannot
+// amplify one request into unbounded peer-admission work. Invalid, private,
+// reserved, and zero-port addresses are discarded before they reach DNS or
+// peergov.
+func (o *Ouroboros) peerSharingReplyAddresses(
+	peers []opeersharing.PeerAddress,
+	requested int,
+) []string {
+	if requested <= 0 {
+		return nil
+	}
+	if len(peers) > requested {
+		peers = peers[:requested]
+	}
 	addrs := make([]string, 0, len(peers))
 	for _, p := range peers {
+		if p.IP.To16() == nil {
+			o.config.Logger.Debug(
+				"shared peer has no usable IP address, skipping",
+				"len", len(p.IP),
+			)
+			continue
+		}
+		if p.Port == 0 {
+			o.config.Logger.Debug(
+				"shared peer has no usable port, skipping",
+				"ip", p.IP.String(),
+			)
+			continue
+		}
+		if !peergov.IsRoutableIP(p.IP) {
+			o.config.Logger.Debug(
+				"shared peer address is not globally routable, skipping",
+				"ip", p.IP.String(),
+			)
+			continue
+		}
 		addr := net.JoinHostPort(p.IP.String(), strconv.Itoa(int(p.Port)))
 		addrs = append(addrs, addr)
 		o.config.Logger.Debug("collected peer from sharing", "addr", addr)

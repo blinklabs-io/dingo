@@ -19,6 +19,7 @@ import (
 	"errors"
 	"math/rand/v2"
 	"net"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -80,13 +81,55 @@ func (p *PeerGovernor) GetPeers() []Peer {
 }
 
 // ErrUnroutableAddress is returned when a peer address resolves to a
-// non-routable IP (private, loopback, link-local, multicast, or
-// unspecified).
+// non-routable or reserved IP.
 var ErrUnroutableAddress = errors.New("unroutable peer address")
 
+// unreachablePrefixes contains address space that net.IP's class predicates
+// otherwise report as globally-unicast but that is not a usable public peer
+// address. This includes shared, protocol-assigned, benchmarking, and
+// reserved/future-use space.
+var unreachablePrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),      // RFC 1122 this network
+	netip.MustParsePrefix("100.64.0.0/10"),  // RFC 6598 shared address space
+	netip.MustParsePrefix("192.0.0.0/24"),   // RFC 6890 IETF assignments
+	netip.MustParsePrefix("192.88.99.0/24"), // RFC 7526 deprecated 6to4
+	netip.MustParsePrefix("198.18.0.0/15"),  // RFC 2544 benchmarking
+	netip.MustParsePrefix("240.0.0.0/4"),    // RFC 1112 reserved
+	netip.MustParsePrefix("64:ff9b:1::/48"), // RFC 8215 local translation
+	netip.MustParsePrefix("100::/64"),       // RFC 6666 discard-only
+	netip.MustParsePrefix("2001:2::/48"),    // RFC 5180 benchmarking
+	netip.MustParsePrefix("2001:10::/28"),   // RFC 4843 ORCHID
+}
+
+// IsRoutableIP reports whether an IP address is usable as a peer candidate
+// learned from the network. It rejects private, loopback, link-local,
+// multicast, unspecified, and reserved address space. An address must be a
+// valid four- or sixteen-byte IP representation; malformed net.IP values are
+// never candidates.
+func IsRoutableIP(ip net.IP) bool {
+	if ip == nil || ip.To16() == nil {
+		return false
+	}
+	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return false
+	}
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	addr = addr.Unmap()
+	for _, prefix := range unreachablePrefixes {
+		if prefix.Contains(addr) {
+			return false
+		}
+	}
+	return true
+}
+
 // isRoutableAddr checks whether the host portion of an address is a
-// publicly-routable unicast IP. It returns false for private (RFC 1918 /
-// RFC 4193), loopback, link-local, multicast, and unspecified addresses.
+// publicly-routable unicast IP. It returns false for private, loopback,
+// link-local, multicast, unspecified, and reserved addresses.
 // If the host is not a valid IP (e.g. unresolved hostname), it is
 // considered routable so that DNS-based topology peers still work.
 func isRoutableAddr(address string) bool {
@@ -100,12 +143,7 @@ func isRoutableAddr(address string) bool {
 		// Not an IP literal (hostname) — allow it
 		return true
 	}
-	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsMulticast() ||
-		ip.IsUnspecified() {
-		return false
-	}
-	return true
+	return IsRoutableIP(ip)
 }
 
 func (p *PeerGovernor) AddPeer(

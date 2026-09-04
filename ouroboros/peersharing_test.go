@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/peergov"
+	"github.com/blinklabs-io/dingo/topology"
 	opeersharing "github.com/blinklabs-io/gouroboros/protocol/peersharing"
 	"github.com/stretchr/testify/require"
 )
@@ -192,4 +193,67 @@ func TestPeerSharingShareRequestWithoutGovernor(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Empty(t, peers)
+}
+
+func TestPeerSharingShareRequestFiltersNonRoutablePeers(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	peerGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+		Logger: logger,
+	})
+	peerGov.LoadTopologyConfig(&topology.TopologyConfig{
+		LocalRoots: []topology.TopologyConfigP2PLocalRoot{{
+			Advertise: true,
+			AccessPoints: []topology.TopologyConfigP2PAccessPoint{
+				{Address: "8.8.8.8", Port: 3001},
+				{Address: "10.0.0.1", Port: 3002},
+				{Address: "100.64.0.1", Port: 3003},
+				{Address: "240.0.0.1", Port: 3004},
+			},
+		}},
+	})
+
+	o := newOuroboros(OuroborosConfig{Logger: logger})
+	o.peerGov = peerGov
+
+	peers, err := o.peersharingShareRequest(
+		opeersharing.CallbackContext{},
+		10,
+	)
+	require.NoError(t, err)
+	require.Len(t, peers, 1)
+	require.True(t, peers[0].IP.Equal(net.ParseIP("8.8.8.8")))
+	require.Equal(t, uint16(3001), peers[0].Port)
+}
+
+func TestPeerSharingReplyAddressesFiltersInvalidPeers(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	o := newOuroboros(OuroborosConfig{Logger: logger})
+
+	addrs := o.peerSharingReplyAddresses([]opeersharing.PeerAddress{
+		{IP: net.ParseIP("8.8.8.8"), Port: 3001},
+		{IP: net.ParseIP("2001:4860:4860::8888"), Port: 3002},
+		{IP: net.ParseIP("10.0.0.1"), Port: 3003},
+		{IP: net.ParseIP("100.64.0.1"), Port: 3004},
+		{IP: net.ParseIP("240.0.0.1"), Port: 3005},
+		{IP: nil, Port: 3006},
+		{IP: net.IP{1, 2, 3}, Port: 3007},
+		{IP: net.ParseIP("8.8.4.4"), Port: 0},
+	}, 10)
+
+	require.Equal(t, []string{
+		"8.8.8.8:3001",
+		"[2001:4860:4860::8888]:3002",
+	}, addrs)
+}
+
+func TestPeerSharingReplyAddressesBoundsReply(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	o := newOuroboros(OuroborosConfig{Logger: logger})
+
+	addrs := o.peerSharingReplyAddresses([]opeersharing.PeerAddress{
+		{IP: net.ParseIP("8.8.8.8"), Port: 3001},
+		{IP: net.ParseIP("8.8.4.4"), Port: 3002},
+	}, 1)
+
+	require.Equal(t, []string{"8.8.8.8:3001"}, addrs)
 }
