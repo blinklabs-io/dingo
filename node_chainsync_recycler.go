@@ -221,9 +221,21 @@ func (n *Node) handleChainSelectedNoneEvent(evt event.Event) {
 	// only the selection named by the event so a delayed selected-to-none event
 	// cannot erase a newer switch.
 	if !n.liveLifecycleMu.TryLock() {
+		go func() {
+			n.liveLifecycleMu.Lock()
+			defer n.liveLifecycleMu.Unlock()
+			n.handleChainSelectedNoneEventLocked(e, prevConn)
+		}()
 		return
 	}
 	defer n.liveLifecycleMu.Unlock()
+	n.handleChainSelectedNoneEventLocked(e, prevConn)
+}
+
+func (n *Node) handleChainSelectedNoneEventLocked(
+	e chainselection.ChainSelectedNoneEvent,
+	prevConn string,
+) {
 	if n.chainsyncState == nil {
 		return
 	}

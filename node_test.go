@@ -196,13 +196,13 @@ func TestHandleChainSwitchEventUpdatesActiveConnection(t *testing.T) {
 	connB := newNodeTestConnId(3002)
 	state.AddClientConnId(connA)
 	state.AddClientConnId(connB)
-	state.SetClientConnId(connA)
 	pointA := ocommon.NewPoint(100, []byte("hash-a"))
 	pointB := ocommon.NewPoint(200, []byte("hash-b"))
 	tipA := ochainsync.Tip{Point: pointA, BlockNumber: 10}
 	tipB := ochainsync.Tip{Point: pointB, BlockNumber: 20}
 	state.UpdateClientTip(connA, pointA, tipA)
 	state.UpdateClientTip(connB, pointB, tipB)
+	state.SetClientConnId(connA)
 	n := &Node{
 		config: Config{
 			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -341,9 +341,11 @@ func TestHandleChainSelectedNoneEventDoesNotClearReselectedConnection(
 	)
 	conn := newNodeTestConnId(3103)
 	require.True(t, state.AddClientConnId(conn))
+	tipPoint := ocommon.NewPoint(120, []byte("reselected"))
+	state.UpdateClientTip(conn, tipPoint, ochainsync.Tip{Point: tipPoint})
 	require.True(t, state.TrySetClientConnId(conn))
 	tip := ochainsync.Tip{
-		Point:       ocommon.NewPoint(120, []byte("reselected")),
+		Point:       tipPoint,
 		BlockNumber: 12,
 	}
 	require.True(t, selector.UpdatePeerTip(conn, tip, nil))

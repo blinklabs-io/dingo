@@ -109,6 +109,8 @@ func TestAddAndRemoveClientConnId(t *testing.T) {
 	require.Nil(t, active)
 
 	// Chain selection chooses the active client after observing its tip.
+	tip := ocommon.NewPoint(1, []byte("tip"))
+	s.UpdateClientTip(connA, tip, ochainsync.Tip{Point: tip})
 	require.True(t, s.TrySetClientConnId(connA))
 	active = s.GetClientConnId()
 	require.NotNil(t, active)
@@ -365,6 +367,8 @@ func TestSetClientConnId(t *testing.T) {
 	s.AddClientConnId(connB)
 
 	// Override active client
+	tip := ocommon.NewPoint(1, []byte("tip"))
+	s.UpdateClientTip(connB, tip, ochainsync.Tip{Point: tip})
 	require.True(t, s.TrySetClientConnId(connB))
 	active := s.GetClientConnId()
 	require.NotNil(t, active)

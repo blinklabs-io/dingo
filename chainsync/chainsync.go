@@ -429,7 +429,7 @@ func (s *State) TrySetClientConnId(connId ouroboros.ConnectionId) bool {
 	s.clientConnIdMutex.Lock()
 	defer s.clientConnIdMutex.Unlock()
 	tc, exists := s.trackedClients[connId]
-	if !exists || tc == nil || tc.ObservabilityOnly {
+	if !exists || tc == nil || tc.ObservabilityOnly || tc.HeadersRecv == 0 {
 		return false
 	}
 	s.activeClientConnId = &connId
