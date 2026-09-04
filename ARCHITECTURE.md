@@ -1977,7 +1977,45 @@ the triggering `ctx.Err()` in a field (a local variable set inside
 `stopOnce.Do`'s closure would be invisible to any later or concurrent
 `Stop` call, since the closure only runs once) and returns it wrapped, so a
 worker still touching mempool state when storage closes is no longer
-reported as a successful stop. `handleChainSwitchEvent` is one of the
+reported as a successful stop. `DatabaseWorkerPool.Shutdown` had a related
+gap one level lower: it took no timeout of its own, so `Close`'s bounded
+wait around it (above) could return its timeout error while the goroutine
+`Close` launched to call `Shutdown` kept running unbounded in the
+background — observed in production as an hours-long abandoned goroutine
+downstream of a slow query in `rewardActiveAccounts` (see
+`GetAccountsByCredential` in DATABASE.md), well after `Close` itself had
+already returned. `Shutdown` now takes a `drainTimeout time.Duration` and
+bounds its own wait on in-flight operations, returning an error rather than
+blocking past it; `Close`'s launching goroutine passes
+`CloseDBWorkerPoolShutdownTimeout` as a function-literal argument rather
+than closing over the package variable, since the goroutine argument is
+evaluated synchronously in the calling goroutine before the new one starts —
+closing over the variable instead raced a test's `t.Cleanup` restoring it
+after the goroutine read it. The bound itself doesn't spawn a goroutine to
+bridge a `sync.WaitGroup` to a timeout-selectable channel (that goroutine
+would just relocate the same leak: `WaitGroup.Wait` can't be interrupted, so
+it would keep blocking, with the worker still running the slow operation
+under it, for the operation's full remaining duration after `Shutdown`
+itself had already timed out and returned). Instead `DatabaseWorkerPool`
+tracks in-flight operations as a mutex-guarded counter plus a `drained`
+channel that whichever of `Shutdown` or the last operation to finish closes,
+so `Shutdown` selects it directly with no goroutine of its own — timing out
+leaves nothing extra running beyond the worker still executing the slow
+operation, which was already going to keep running regardless. `Run()`'s own LIFO `started` stop for `n.ledgerState.Close()` used to
+discard this return value entirely, unlike its neighboring stops (e.g. the
+koios parity observer's), so a `Shutdown` timeout on the startup-failure
+rollback path (`cleanupFailedStartup`, reached when a later component --
+e.g. `dbLifecycleMgr.Start` -- fails to start) let the LIFO `n.db.Close()`
+and `n.pluginHost.Stop()` stops registered earlier (so run later) close
+storage a still-running background goroutine might be using, silently.
+This path can't refuse to run those later stops the way
+`closeStorageForLiveLifecycleOp` does on the live-restore/truncate path
+(nothing keeps running afterward there to protect), but it now mirrors
+`node_shutdown.go`'s `shutdown()` `ledgerStateDrainConfirmed` guard instead
+of skipping the fix entirely: a `Run()`-scoped `ledgerStateDrainConfirmed`
+flag, set false by the `ledgerState.Close` stop on a non-nil error, makes
+the `db.Close`/`pluginHost.Stop` stops log and skip rather than run.
+`handleChainSwitchEvent` is one of the
 "closure over `n` itself, self-healing" handlers `Run()`'s subscriber-ID
 doc comment describes as needing no tracked subscription — correct, since
 it reads `n.chainsyncState` fresh each call rather than a bound method
