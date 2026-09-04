@@ -443,6 +443,107 @@ func TestHandleEventChainsyncRollbackExceedsKDeclinesReconcilingDivergedLedgerTi
 	)
 }
 
+// TestHandleEventChainsyncRollbackReconcileFindsMithrilBoundaryAncestor
+// covers wolf31o2's review on PR #3611: when an over-K rollback triggers
+// reconcileLivePrimaryChainLedgerDivergence and the common ancestor that
+// reconciliation itself finds sits at or below the Mithril boundary,
+// reconcilePrimaryChainTipWithLedgerTip's own pre-check (added earlier
+// this round) returns ErrRollbackExceedsMithrilBoundary -- a case
+// handleEventChainsyncRollback's over-K branch did not classify, so it
+// propagated as a generic reconciliation error instead of the same
+// classified ChainsyncResyncReasonRollbackExceedsMithril resync a direct
+// rollback failure against that boundary already gets.
+func TestHandleEventChainsyncRollbackReconcileFindsMithrilBoundaryAncestor(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+
+	// A longer fork than putPrimaryChainOnForkBeyondK's: the rollback
+	// target below must itself be a real, on-chain point (rollbackPointBlock
+	// rejects a splice to a point this chain does not hold), several
+	// blocks behind the fork's own tip so rolling back to it exceeds K
+	// (2) on its own -- distinct from targeting origin, which would also
+	// trip ls.mithrilLedgerSlot's own pre-check in rollbackChainAndState
+	// before ever reaching reconciliation.
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+	prevHash := fixture.ancestorTip.Point.Hash
+	forkBlocks := make([]chain.RawBlock, 0, 5)
+	var rollbackTarget ocommon.Point
+	for idx := range 5 {
+		blockOffset := uint64(idx + 1)
+		hash := testHashBytes(
+			fmt.Sprintf("live-rollback-mithril-fork-%d", idx),
+		)
+		slot := fixture.ancestorTip.Point.Slot + blockOffset*5
+		forkBlocks = append(forkBlocks, chain.RawBlock{
+			Slot:        slot,
+			Hash:        hash,
+			BlockNumber: fixture.ancestorTip.BlockNumber + blockOffset,
+			Type:        1,
+			PrevHash:    prevHash,
+			Cbor:        []byte{0x80},
+		})
+		if idx == 0 {
+			// The first fork block: rolling back to it from the tip
+			// (5 blocks later) is a depth-4 rollback, exceeding K (2).
+			rollbackTarget = ocommon.NewPoint(slot, hash)
+		}
+		prevHash = hash
+	}
+	require.NoError(t, fixture.ls.chain.AddRawBlocks(forkBlocks))
+	require.NotEqual(t, fixture.currentTip, fixture.ls.chain.Tip())
+	require.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+
+	// The Mithril boundary sits above the common ancestor
+	// (fixture.ancestorTip, slot 10) reconciliation will find, but at or
+	// below the rollback target itself, so only the inner reconcile
+	// check -- not rollbackChainAndState's own outer pre-check -- can
+	// fire.
+	fixture.ls.mithrilLedgerSlot = fixture.ancestorTip.Point.Slot + 1
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+
+	resyncCh := subscribeChainsyncResync(t, bus)
+
+	txSubID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
+
+	preReconcileChainTip := fixture.ls.chain.Tip()
+
+	require.NoError(t, fixture.ls.handleEventChainsyncRollback(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point:        rollbackTarget,
+		},
+		nil,
+	))
+
+	// Nothing was rewound.
+	assert.Equal(t, preReconcileChainTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+
+	e := testutil.RequireReceive(
+		t,
+		resyncCh,
+		time.Second,
+		"expected a Mithril-boundary resync event, not a generic "+
+			"reconciliation-error propagation",
+	)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonRollbackExceedsMithril,
+		e.Reason,
+	)
+	assert.Equal(t, fixture.connId, e.ConnectionId)
+
+	testutil.RequireNoReceive(
+		t, txCh, 250*time.Millisecond,
+		"a declined reconciliation must not publish undo events",
+	)
+}
+
 // TestLedgerReadChainRequestsResyncOnOverKReconcile covers a Cubic finding
 // on PR #3611: unlike handleEventChainsyncRollback/tryResolveFork,
 // ledgerReadChain's own retry loop treated any reconcilePrimaryChainTipWithLedgerTip

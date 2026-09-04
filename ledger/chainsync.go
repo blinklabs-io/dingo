@@ -1809,6 +1809,89 @@ func (ls *LedgerState) discardBufferedPeerHeaders(
 	}
 }
 
+// handleMithrilBoundaryRollback rejects a rollback at or below the local
+// Mithril trust boundary and requests a fresh chainsync intersection.
+//
+// The Mithril snapshot is the local trust anchor. Blocks at or below its
+// boundary were certified as a single ledger state, so we cannot
+// reconstruct intermediate UTxO states for a replacement fork below that
+// point. Refuse the rollback and force a fresh intersection instead.
+//
+// The peer's reported tip (e.Tip.Point.Slot) distinguishes two situations
+// that both surface here as a rollback below the boundary:
+//   - tip below the boundary: the peer is simply behind (still syncing or
+//     stuck) and its FindIntersect matched an old rung of our intersect
+//     ladder — stale, not a competing fork;
+//   - tip at/above the boundary: the peer's chain does not contain our
+//     certified boundary block (always offered as an intersect point), so
+//     it genuinely diverges below the trust anchor.
+//
+// A zero tip means the peer's tip is unknown; treat it as divergent to
+// fail safe.
+//
+// Shared by handleEventChainsyncRollback's own direct rollback failure and
+// its over-K-then-reconcile path: reconcilePrimaryChainTipWithLedgerTip's
+// own Mithril pre-check (issue #3516) can return
+// ErrRollbackExceedsMithrilBoundary from reconcileLivePrimaryChainLedgerDivergence
+// just as directly as an ordinary chain.Rollback call can, and both must
+// resolve to the same classified resync, not a generic propagated error
+// (wolf31o2 review, PR #3611).
+func (ls *LedgerState) handleMithrilBoundaryRollback(
+	e ChainsyncEvent,
+	pending *pendingPublishes,
+) error {
+	mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
+	reason := event.ChainsyncResyncReasonRollbackExceedsMithril
+	peerTipSlot := e.Tip.Point.Slot
+	if peerTipSlot > 0 && peerTipSlot < mithrilLedgerSlot {
+		reason = event.ChainsyncResyncReasonPeerTipBehindMithril
+		ls.config.Logger.Warn(
+			"chainsync peer tip behind Mithril trust boundary, treating peer chain as stale",
+			"component",
+			"ledger",
+			"slot",
+			e.Point.Slot,
+			"hash",
+			hex.EncodeToString(e.Point.Hash),
+			"peer_tip_slot",
+			peerTipSlot,
+			"mithril_ledger_slot",
+			mithrilLedgerSlot,
+			"connection_id",
+			e.ConnectionId.String(),
+		)
+	} else {
+		ls.config.Logger.Error(
+			"chainsync rollback exceeds Mithril trust boundary, rejecting peer chain",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"hash", hex.EncodeToString(e.Point.Hash),
+			"peer_tip_slot", peerTipSlot,
+			"mithril_ledger_slot", mithrilLedgerSlot,
+			"connection_id", e.ConnectionId.String(),
+		)
+	}
+	ls.reportUnrecoverableRollbackIfStuck(
+		e.Point,
+		reason,
+		e.ConnectionId,
+	)
+	ls.resetChainsyncResyncState()
+	ls.setChainsyncState(SyncingChainsyncState)
+	pending.add(
+		ls.config.EventBus,
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				ConnectionId: e.ConnectionId,
+				Reason:       reason,
+			},
+		),
+	)
+	return nil
+}
+
 func (ls *LedgerState) handleEventChainsyncRollback(
 	e ChainsyncEvent,
 	pending *pendingPublishes,
@@ -2046,6 +2129,18 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 				e.ConnectionId,
 			)
 			if reconcileErr != nil {
+				if errors.Is(reconcileErr, ErrRollbackExceedsMithrilBoundary) {
+					// The common ancestor reconciliation found sits at
+					// or below the Mithril boundary: the same
+					// rejection a direct rollback attempt hits above,
+					// just discovered one level deeper (issue #3516
+					// review; wolf31o2 review, PR #3611). Route it
+					// through the identical classified resync instead
+					// of propagating a generic reconciliation error
+					// the caller's over-K fallthrough below is not
+					// equipped to interpret.
+					return ls.handleMithrilBoundaryRollback(e, pending)
+				}
 				return fmt.Errorf(
 					"reconcile primary chain and ledger after over-K rollback: %w",
 					reconcileErr,
@@ -2095,74 +2190,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			return nil
 		}
 		if errors.Is(err, ErrRollbackExceedsMithrilBoundary) {
-			// The Mithril snapshot is the local trust anchor. Blocks at
-			// or below its boundary were certified as a single ledger
-			// state, so we cannot reconstruct intermediate UTxO states
-			// for a replacement fork below that point. Refuse the
-			// rollback and force a fresh intersection instead.
-			//
-			// The peer's reported tip distinguishes two situations that
-			// both surface here as a rollback below the boundary:
-			//   - tip below the boundary: the peer is simply behind
-			//     (still syncing or stuck) and its FindIntersect matched
-			//     an old rung of our intersect ladder — stale, not a
-			//     competing fork;
-			//   - tip at/above the boundary: the peer's chain does not
-			//     contain our certified boundary block (always offered
-			//     as an intersect point), so it genuinely diverges below
-			//     the trust anchor.
-			// A zero tip means the peer's tip is unknown; treat it as
-			// divergent to fail safe.
-			mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
-			reason := event.ChainsyncResyncReasonRollbackExceedsMithril
-			peerTipSlot := e.Tip.Point.Slot
-			if peerTipSlot > 0 && peerTipSlot < mithrilLedgerSlot {
-				reason = event.ChainsyncResyncReasonPeerTipBehindMithril
-				ls.config.Logger.Warn(
-					"chainsync peer tip behind Mithril trust boundary, treating peer chain as stale",
-					"component",
-					"ledger",
-					"slot",
-					e.Point.Slot,
-					"hash",
-					hex.EncodeToString(e.Point.Hash),
-					"peer_tip_slot",
-					peerTipSlot,
-					"mithril_ledger_slot",
-					mithrilLedgerSlot,
-					"connection_id",
-					e.ConnectionId.String(),
-				)
-			} else {
-				ls.config.Logger.Error(
-					"chainsync rollback exceeds Mithril trust boundary, rejecting peer chain",
-					"component", "ledger",
-					"slot", e.Point.Slot,
-					"hash", hex.EncodeToString(e.Point.Hash),
-					"peer_tip_slot", peerTipSlot,
-					"mithril_ledger_slot", mithrilLedgerSlot,
-					"connection_id", e.ConnectionId.String(),
-				)
-			}
-			ls.reportUnrecoverableRollbackIfStuck(
-				e.Point,
-				reason,
-				e.ConnectionId,
-			)
-			ls.resetChainsyncResyncState()
-			ls.setChainsyncState(SyncingChainsyncState)
-			pending.add(
-				ls.config.EventBus,
-				event.ChainsyncResyncEventType,
-				event.NewEvent(
-					event.ChainsyncResyncEventType,
-					event.ChainsyncResyncEvent{
-						ConnectionId: e.ConnectionId,
-						Reason:       reason,
-					},
-				),
-			)
-			return nil
+			return ls.handleMithrilBoundaryRollback(e, pending)
 		}
 		return fmt.Errorf("chain rollback failed: %w", err)
 	}
@@ -3510,6 +3538,19 @@ func (ls *LedgerState) tryResolveFork(
 				e.ConnectionId,
 			)
 			if reconcileErr != nil {
+				if errors.Is(reconcileErr, ErrRollbackExceedsMithrilBoundary) {
+					// Same reasoning as handleEventChainsyncRollback's
+					// matching branch: the common ancestor
+					// reconciliation found here sits at or below the
+					// Mithril boundary, so route it through the
+					// identical classified resync rather than a
+					// generic reconciliation error (wolf31o2 review,
+					// PR #3611).
+					return true, ls.handleMithrilBoundaryRollback(
+						e,
+						pending,
+					)
+				}
 				return false, fmt.Errorf(
 					"reconcile primary chain and ledger after over-K fork resolution: %w",
 					reconcileErr,

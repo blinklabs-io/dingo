@@ -1524,20 +1524,30 @@ the existing stuck-pipeline signal instead of a silent halt.
 The shared `reconcileLivePrimaryChainLedgerDivergence` helper
 (`handleEventChainsyncRollback`'s and `tryResolveFork`'s own reconciler
 call, plus the plateau watchdog) only special-cases
-`ErrRollbackExceedsSecurityParam` the same deliberate way — returning
-`(false, nil)` so the caller's own existing over-K resync handling fires,
-rather than a generic propagated error a caller's classification does not
-expect. It does not yet special-case `ErrRollbackExceedsMithrilBoundary`
-the same way: doing so naively would misclassify it through that same
-over-K fallthrough (the caller's over-K branch publishes
+`ErrRollbackExceedsSecurityParam` — returning `(false, nil)` so the
+caller's own existing over-K resync handling fires, rather than a generic
+propagated error a caller's classification does not expect. A naive
+matching special-case for `ErrRollbackExceedsMithrilBoundary` — also
+returning `(false, nil)` — would misclassify it through that same over-K
+fallthrough, since the caller's over-K branch publishes
 `ChainsyncResyncReasonRollbackExceedsK` unconditionally once reconciliation
-declines), reproducing the exact reason-misclassification class issue
-#3035 already fixed elsewhere. The error is not silently lost there
-either way — it still propagates as a real error to log and to the
-plateau watchdog's own connection-recycling fallback — just with a less
-granular resync reason than the over-K case gets. Left as a follow-up
-requiring its own dedicated look rather than a hasty copy of the over-K
-pattern.
+declines, reproducing the exact reason-misclassification class issue #3035
+already fixed elsewhere (wolf31o2 review, PR #3611).
+
+Fixed instead at the two call sites that already have an established,
+reusable Mithril-boundary classification: `handleEventChainsyncRollback`
+and `tryResolveFork` each already handle a *direct* `ErrRollbackExceedsMithrilBoundary`
+(from their own initial rollback attempt) via the peer-tip-based
+`ChainsyncResyncReasonRollbackExceedsMithril`/`ChainsyncResyncReasonPeerTipBehindMithril`
+classification described above. That logic is now the shared
+`handleMithrilBoundaryRollback(e, pending)` helper, and each caller's
+over-K branch calls it too when `reconcileLivePrimaryChainLedgerDivergence`
+returns `ErrRollbackExceedsMithrilBoundary` — the identical resync as a
+direct rollback hitting the same boundary, instead of a generic
+propagated error. The plateau watchdog is unaffected: it has no
+over-K-specific fallthrough to misclassify through in the first place,
+treating any reconcile failure uniformly as a signal to fall back to
+connection recycling.
 
 Ordering the commits is not sufficient on its own: a commit is not durable.
 SQLite fsyncs at WAL checkpoints while Badger buffers committed writes in a
