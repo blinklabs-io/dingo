@@ -4056,19 +4056,24 @@ later ledger peer refreshes still query the live ledger/database provider.
 If the snapshot produces no usable peers, startup falls back to topology
 bootstrap peers.
 
-Because that replacement is what makes the snapshot useful, a snapshot from the
-wrong network is rejected at startup rather than loaded: `configValidate`
-refuses a configuration whose `peerSnapshotFile` carries a `NetworkMagic`
-different from the node's (`internal/config.PeerSnapshotNetworkMismatch`, and
-see the same function for why magic 0 counts as unspecified on either side).
-cardano-node records the snapshot's own magic in the file, so a foreign
-snapshot is self-identifying. Left unchecked it costs the node both peer sets
-at once: its relays displace the configured bootstrap peers, and then every one
-of them is denied at the handshake for a network-magic mismatch
-(`denyNetworkMagicMismatch`), so the node ends up with no peers and
-no route back to the bootstrap list. The `added == 0` fallback above does not
-help, because the addresses were added successfully — they only fail later, at
-the handshake.
+Because that replacement is what makes the snapshot useful, `configValidate`
+validates the complete snapshot before startup. Dingo accepts the cardano-node
+version 23 format with a 32-byte hexadecimal block point, a nonzero
+`NetworkMagic` matching the node, exactly one nonempty pool mode
+(`bigLedgerPools` or `allLedgerPools`), and host/IP relay entries carrying TCP
+ports in the range 1–65535. Legacy version 1/2 snapshots use a different
+`slotNo` point shape and are rejected. Portless SRV relay entries are also
+rejected because Dingo's snapshot-to-peer adapter does not implement the SRV
+lookup and prefixing required for that relay mode.
+
+These checks run as one contract because individually resolvable relays are not
+proof that the snapshot is usable. A foreign snapshot, for example, costs the
+node both peer sets at once: its relays displace the configured bootstrap peers,
+and then every one of them is denied at the handshake for a network-magic
+mismatch (`denyNetworkMagicMismatch`), so the node ends up with no peers and no
+route back to the bootstrap list. The `added == 0` fallback above does not help,
+because the addresses were added successfully — they only fail later, at the
+handshake.
 
 These snapshot-seeded ledger peers are the configured corroborators for the
 Genesis corroboration gate (see Chain Selection → Ouroboros Genesis trust
@@ -8983,7 +8988,13 @@ reward application first, ADA-pot capture last) by
 Reward protocol parameters and block-production counts come from the delayed
 performance epoch, while epoch length comes from the RUPD calculation epoch —
 see "Blockchain State Management" above for the derivation from
-cardano-ledger's `startStep`. TPraos
+cardano-ledger's `startStep`. The global performance factor follows
+`createRUpd`: expected blocks are
+`floor((1-d) * activeSlotCoeff * slotsPerEpoch)` before actual blocks are
+divided by that integer (or performance is fixed at 1 while `d >= 0.8`). The
+floor is consensus-visible through monetary expansion; `rewards.Result` keeps
+the existing rational API field but always returns an integer-valued result.
+TPraos
 overlay slots are excluded while decentralization is non-zero. Pre-Babbage
 calculation resolves the reward prefilter from stake-account certificate
 history immediately before the first reward-update slot, using the RUPD
