@@ -27,7 +27,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 9)
+	require.Len(t, registry, 10)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -97,6 +97,11 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Equal(t, "committee-term-start-presence", registry[8].Name)
 	require.Len(t, registry[8].SQL["sqlite"].Expand, 1)
 	require.NotNil(t, registry[8].Backfill)
+	require.Equal(t, 10, registry[9].Version)
+	require.Equal(t, "reward-seed-failure", registry[9].Name)
+	require.Len(t, registry[9].SQL["sqlite"].Expand, 1)
+	require.Contains(t, registry[9].SQL["sqlite"].Expand[0],
+		"CREATE TABLE IF NOT EXISTS `reward_seed_failure`")
 }
 
 func TestCommitteeCredentialMigrationTranslatesForProviders(t *testing.T) {
