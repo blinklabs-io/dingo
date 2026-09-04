@@ -5967,6 +5967,12 @@ func (ls *LedgerState) processEpochRollover(
 				"persist post-enactment pparams: %w", err,
 			)
 		}
+		// A real on-chain cost-model update takes precedence over the
+		// hard-fork fallback, including when governance happens to publish
+		// the same values as the fallback.
+		if govOut.CostModelsChanged {
+			result.RealV2CostModelObserved = true
+		}
 	}
 	result.NewCurrentPParams = newPParams
 

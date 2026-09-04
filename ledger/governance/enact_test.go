@@ -101,6 +101,7 @@ func TestEnactProposal_DijkstraParameterChange(t *testing.T) {
 	}, proposal)
 	require.NoError(t, err)
 	require.True(t, result.PParamsChanged)
+	require.False(t, result.CostModelsChanged)
 	require.Equal(t, uint(1234), pparams.MinFeeA)
 }
 
