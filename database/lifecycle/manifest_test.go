@@ -99,6 +99,15 @@ func TestManifestRejectsOversizedInput(t *testing.T) {
 	require.ErrorContains(t, err, "1048576")
 }
 
+func TestWriteManifestRejectsOversizedInput(t *testing.T) {
+	dir := t.TempDir()
+	m := testManifest()
+	m.Description = string(bytes.Repeat([]byte{'x'}, lifecycle.MaxManifestBytes))
+	err := lifecycle.WriteManifest(dir, m)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "exceeds maximum")
+}
+
 // TestManifestRejectsNewerFormatVersion verifies that a manifest whose
 // formatVersion exceeds what this build understands is rejected.
 func TestManifestRejectsNewerFormatVersion(t *testing.T) {

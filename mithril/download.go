@@ -1065,7 +1065,7 @@ const (
 	// defaults. These limits are intentionally separate from extracted-file
 	// limits because a hostile frame can allocate before tar validation runs.
 	maxZstdWindowSize    = 512 << 20
-	maxZstdDecoderMemory = 1 << 30
+	maxZstdDecoderMemory = 256 << 20
 
 	// maxExtractFileSize is the maximum allowed size for a single
 	// extracted file (8 GiB). Must be large enough for mainnet

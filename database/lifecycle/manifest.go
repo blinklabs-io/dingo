@@ -313,6 +313,12 @@ func WriteManifest(dir string, m Manifest) error {
 	if err != nil {
 		return fmt.Errorf("marshal manifest: %w", err)
 	}
+	if len(data) > MaxManifestBytes {
+		return fmt.Errorf(
+			"manifest size %d exceeds maximum %d bytes",
+			len(data), MaxManifestBytes,
+		)
+	}
 	path := filepath.Join(dir, ManifestFileName)
 
 	tmp, err := os.CreateTemp(dir, ManifestFileName+".tmp-*")
