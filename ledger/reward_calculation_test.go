@@ -306,6 +306,24 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	require.Equal(t, int64(2), deltas)
 }
 
+func TestRewardPoolInputsHaveBlockCounts(t *testing.T) {
+	t.Parallel()
+
+	blocks, total := uint64(2), uint64(10)
+	complete := &models.RewardPoolInput{
+		BlocksProduced:     &blocks,
+		TotalBlocksInEpoch: &total,
+	}
+	require.True(t, rewardPoolInputsHaveBlockCounts([]*models.RewardPoolInput{complete}))
+	require.False(t, rewardPoolInputsHaveBlockCounts([]*models.RewardPoolInput{{
+		BlocksProduced: &blocks,
+	}}))
+	require.False(t, rewardPoolInputsHaveBlockCounts([]*models.RewardPoolInput{{
+		TotalBlocksInEpoch: &total,
+	}}))
+	require.False(t, rewardPoolInputsHaveBlockCounts([]*models.RewardPoolInput{nil}))
+}
+
 // guardExpiredLeaderResult captures the post-application state a Task 10
 // scenario run produces, so gate-on and gate-off runs can be compared.
 type guardExpiredLeaderResult struct {

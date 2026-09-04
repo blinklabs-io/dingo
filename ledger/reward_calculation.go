@@ -282,6 +282,24 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		)
 		return nil, false, nil
 	}
+	// Imported Mithril reward inputs may describe stake and registrations but
+	// cannot carry per-epoch block production counts. Do not interpret those
+	// missing values as zero: that would persist a plausible-looking reward
+	// round with no credits and leave withdrawals inconsistent with the
+	// network state. The round can be retried only when a complete basis is
+	// available; an incomplete one must be skipped before calculation.
+	if !rewardPoolInputsHaveBlockCounts(poolInputs) {
+		ls.config.Logger.Warn(
+			"skipping stake rewards: reward pool inputs have no block production counts",
+			"component",
+			"ledger",
+			"new_epoch",
+			newEpoch,
+			"reward_snapshot_epoch",
+			rewardSnapshotEpoch,
+		)
+		return nil, false, nil
+	}
 
 	pparams, params, performanceDecentralization, err := ls.rewardParameters(
 		txn,
@@ -976,6 +994,18 @@ func precomputedRewardPoolOutputsMatchInputs(
 		delete(expectedOwnerStake, key)
 	}
 	return len(expectedOwnerStake) == 0
+}
+
+func rewardPoolInputsHaveBlockCounts(
+	poolInputs []*models.RewardPoolInput,
+) bool {
+	for _, input := range poolInputs {
+		if input == nil || input.BlocksProduced == nil ||
+			input.TotalBlocksInEpoch == nil {
+			return false
+		}
+	}
+	return true
 }
 
 // precomputedRewardPoolRewardsMatchInputs re-derives each persisted pool's
