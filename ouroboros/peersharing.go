@@ -194,10 +194,7 @@ func (o *Ouroboros) peerSharingReplyAddresses(
 	if requested <= 0 {
 		return nil
 	}
-	if len(peers) > requested {
-		peers = peers[:requested]
-	}
-	addrs := make([]string, 0, len(peers))
+	addrs := make([]string, 0, min(len(peers), requested))
 	for _, p := range peers {
 		if p.IP.To16() == nil {
 			o.config.Logger.Debug(
@@ -223,6 +220,9 @@ func (o *Ouroboros) peerSharingReplyAddresses(
 		addr := net.JoinHostPort(p.IP.String(), strconv.Itoa(int(p.Port)))
 		addrs = append(addrs, addr)
 		o.config.Logger.Debug("collected peer from sharing", "addr", addr)
+		if len(addrs) == requested {
+			break
+		}
 	}
 	return addrs
 }
