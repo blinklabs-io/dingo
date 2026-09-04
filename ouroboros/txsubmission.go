@@ -59,20 +59,56 @@ func validateTxsubmissionReply(
 	requested []txsubmission.TxIdAndSize,
 	returned []txsubmission.TxBody,
 ) ([]validatedTxsubmissionBody, error) {
-	if len(returned) != len(requested) {
+	if len(returned) > len(requested) {
 		return nil, fmt.Errorf(
-			"txsubmission reply count mismatch: requested %d, received %d",
+			"txsubmission reply count exceeds request: requested %d, received %d",
 			len(requested),
 			len(returned),
 		)
 	}
 	ret := make([]validatedTxsubmissionBody, 0, len(returned))
 	var requestedBytes uint64
+	for _, requestedTx := range requested {
+		requestedBytes += uint64(requestedTx.Size)
+	}
 	var returnedBytes uint64
+	nextRequested := 0
 	for i, txBody := range returned {
-		want := requested[i]
-		requestedBytes += uint64(want.Size)
 		returnedBytes += uint64(len(txBody.TxBody))
+		if returnedBytes > requestedBytes {
+			return nil, fmt.Errorf(
+				"txsubmission reply exceeds byte limit: requested %d, received at least %d",
+				requestedBytes,
+				returnedBytes,
+			)
+		}
+		tx, err := ledger.NewTransactionFromCbor(
+			uint(txBody.EraId),
+			txBody.TxBody,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"txsubmission reply transaction %d decode failed: %w",
+				i,
+				err,
+			)
+		}
+		txHash := tx.Hash()
+		matched := -1
+		for requestedIdx := nextRequested; requestedIdx < len(requested); requestedIdx++ {
+			if bytes.Equal(txHash[:], requested[requestedIdx].TxId.TxId[:]) {
+				matched = requestedIdx
+				break
+			}
+		}
+		if matched < 0 {
+			return nil, fmt.Errorf(
+				"txsubmission reply hash or order mismatch at index %d: received %x",
+				i,
+				txHash,
+			)
+		}
+		want := requested[matched]
 		if txBody.EraId != want.TxId.EraId {
 			return nil, fmt.Errorf(
 				"txsubmission reply era mismatch at index %d: requested %d, received %d",
@@ -89,34 +125,8 @@ func validateTxsubmissionReply(
 				len(txBody.TxBody),
 			)
 		}
-		tx, err := ledger.NewTransactionFromCbor(
-			uint(txBody.EraId),
-			txBody.TxBody,
-		)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"txsubmission reply transaction %d decode failed: %w",
-				i,
-				err,
-			)
-		}
-		txHash := tx.Hash()
-		if !bytes.Equal(txHash[:], want.TxId.TxId[:]) {
-			return nil, fmt.Errorf(
-				"txsubmission reply hash mismatch at index %d: requested %x, received %x",
-				i,
-				want.TxId.TxId,
-				txHash,
-			)
-		}
+		nextRequested = matched + 1
 		ret = append(ret, validatedTxsubmissionBody{body: txBody, tx: tx})
-	}
-	if returnedBytes != requestedBytes {
-		return nil, fmt.Errorf(
-			"txsubmission reply total size mismatch: requested %d, received %d",
-			requestedBytes,
-			returnedBytes,
-		)
 	}
 	return ret, nil
 }

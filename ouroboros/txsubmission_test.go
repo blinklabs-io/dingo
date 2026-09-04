@@ -678,6 +678,12 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, validated, len(returned))
 	})
+	t.Run("ordered subset", func(t *testing.T) {
+		validated, err := validateTxsubmissionReply(requested, returned[1:])
+		require.NoError(t, err)
+		require.Len(t, validated, 1)
+		require.Equal(t, returned[1], validated[0].body)
+	})
 
 	tests := []struct {
 		name   string
@@ -685,31 +691,28 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 		match  string
 	}{
 		{
-			name: "count",
-			mutate: func(_ []txsubmission.TxIdAndSize, got []txsubmission.TxBody) {
-				got[1] = txsubmission.TxBody{}
-			},
-			match: "count mismatch",
+			name:  "count",
+			match: "count exceeds request",
 		},
 		{
 			name: "order",
-			mutate: func(want []txsubmission.TxIdAndSize, got []txsubmission.TxBody) {
+			mutate: func(_ []txsubmission.TxIdAndSize, got []txsubmission.TxBody) {
 				got[0], got[1] = got[1], got[0]
-				want[0].Size, want[1].Size = want[1].Size, want[0].Size
 			},
-			match: "hash mismatch",
+			match: "hash or order mismatch",
 		},
 		{
 			name: "era",
-			mutate: func(_ []txsubmission.TxIdAndSize, got []txsubmission.TxBody) {
-				got[0].EraId++
+			mutate: func(want []txsubmission.TxIdAndSize, _ []txsubmission.TxBody) {
+				want[0].TxId.EraId++
 			},
 			match: "era mismatch",
 		},
 		{
 			name: "size",
 			mutate: func(want []txsubmission.TxIdAndSize, _ []txsubmission.TxBody) {
-				want[0].Size--
+				want[0].Size++
+				want[1].Size--
 			},
 			match: "size mismatch",
 		},
@@ -718,7 +721,7 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 			mutate: func(want []txsubmission.TxIdAndSize, _ []txsubmission.TxBody) {
 				want[0].TxId.TxId[0] ^= 0xff
 			},
-			match: "hash mismatch",
+			match: "hash or order mismatch",
 		},
 	}
 	for _, tt := range tests {
@@ -726,8 +729,9 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 			want := slices.Clone(requested)
 			got := slices.Clone(returned)
 			if tt.name == "count" {
-				got = got[:1]
-			} else {
+				got = append(got, returned[0])
+			}
+			if tt.mutate != nil {
 				tt.mutate(want, got)
 			}
 			validated, err := validateTxsubmissionReply(want, got)
@@ -1248,7 +1252,7 @@ func TestTxSubmissionServerInitRejectsMalformedReply(t *testing.T) {
 		10*time.Millisecond,
 		"expected the malformed transaction to be logged",
 	)
-	require.Contains(t, logBuf.String(), "size mismatch")
+	require.Contains(t, logBuf.String(), "decode failed")
 	require.Contains(t, logBuf.String(), h.connA.Id().String())
 
 	// A subsequent offer must not be requested, because doing so would
@@ -1305,7 +1309,37 @@ func TestTxSubmissionServerInitRejectsBatchAtomically(
 		"expected the mismatched batch to be rejected",
 	)
 	logOutput := logBuf.String()
-	require.Contains(t, logOutput, "size mismatch at index 1")
+	require.Contains(t, logOutput, "transaction 1 decode failed")
 	_, admitted := h.mA.GetTransaction(omitted.hash)
 	require.False(t, admitted, "valid prefix was partially admitted")
+}
+
+// TestTxSubmissionServerInitAcceptsOrderedSubset verifies a peer may omit a
+// transaction that disappeared after advertisement while still returning a
+// later requested transaction.
+func TestTxSubmissionServerInitAcceptsOrderedSubset(t *testing.T) {
+	fixtures := txsubmissionTestFixtures(t)
+	omitted := fixtures[0]
+	returned := fixtures[1]
+	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
+		omitOfferHash:  omitted.hash,
+		batchRequestsA: true,
+	})
+	defer h.close(t)
+
+	addTxSubmissionTestFixtures(t, h.mB, omitted, returned)
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+
+	require.Eventually(
+		t,
+		func() bool {
+			_, ok := h.mA.GetTransaction(returned.hash)
+			return ok
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected later transaction from an ordered subset to be admitted",
+	)
+	_, admitted := h.mA.GetTransaction(omitted.hash)
+	require.False(t, admitted)
 }
