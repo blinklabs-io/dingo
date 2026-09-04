@@ -3773,6 +3773,32 @@ gouroboros rule-applicability defect (blinklabs-io/gouroboros#1989); what
 recovery owes it is only that such a verdict cannot wedge the node
 permanently.
 
+A reward withdrawal mismatch is also classified here, in both of its reports:
+`models.ErrRewardWithdrawalExceedsBalance` from the withdrawal write, and
+`shelley.IncorrectWithdrawalAmountError` from the Shelley-family UTxO rule,
+which under the pre-Dijkstra exact-drain rule also fires for an amount below
+the recorded balance (issue #3628). A reward balance comes from epoch-boundary
+accounting rather than from the UTxO window replay rebuilds, so no local replay
+can change either verdict. Classification is all the two share.
+
+Only the state-specific report can become terminal
+(`isRewardWithdrawalStateDivergence`). The UTxO rule reads the same persisted
+balance the withdrawal write later reads, so
+`shelley.IncorrectWithdrawalAmountError` reports a block whose withdrawal
+amount is simply wrong exactly like a correct block this node's reward
+accounting disagrees with, and redelivery cannot separate them because a peer
+chooses what to redeliver. That verdict therefore keeps the ordinary
+deterministic disposition however many times it repeats. It never reaches
+`errHaltLedgerPipeline`, which no retry clears.
+`models.ErrRewardWithdrawalExceedsBalance` is raised by the withdrawal write
+after validation already accepted the amount against that same balance, so the
+two layers disagree about local state rather than about the block: the first
+occurrence rejects the branch and spends the one fresh intersection, and a
+redelivery at the same applied tip returns `errHaltLedgerPipeline` with the
+underlying mismatch attached once apply errors reach this path as
+`*txValidationError`; plain apply errors otherwise use the generic restart
+path.
+
 The continuation audit is run only after a fetched body is accepted by the
 queued primary chain, so late bodies from an abandoned fetch cannot seed its
 producer window. Its diagnostic database probes are also capped per block
