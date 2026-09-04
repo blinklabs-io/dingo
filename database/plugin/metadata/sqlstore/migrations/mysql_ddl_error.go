@@ -63,7 +63,7 @@ func isMySQLDDLAlreadyAppliedOnConn(
 		}
 		var reported sql.NullString
 		return conn.QueryRowContext(ctx, `SELECT data_type FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ? LIMIT 1`, table, column).Scan(&reported) == nil &&
-			addColumnTypeMatches(reported, definition)
+			mysqlColumnTypeMatches(reported, definition)
 	}
 	match := mysqlDDLObjectPattern.FindStringSubmatch(statement)
 	if len(match) != 3 {

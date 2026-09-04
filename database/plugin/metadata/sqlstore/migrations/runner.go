@@ -706,6 +706,18 @@ func addColumnTypeMatches(reported sql.NullString, definition string) bool {
 		normalizeColumnType(declaredColumnType(definition))
 }
 
+func mysqlColumnTypeMatches(reported sql.NullString, definition string) bool {
+	if !reported.Valid {
+		return false
+	}
+	actual := normalizeColumnType(reported.String)
+	declared := normalizeColumnType(declaredColumnType(definition))
+	if declared == "boolean" {
+		declared = "tinyint"
+	}
+	return actual == declared
+}
+
 // isPostgresDDLAlreadyAppliedOnConn reports whether an ADD COLUMN statement
 // failed only because a previous run of the same expand phase already added
 // the column.

@@ -554,6 +554,9 @@ func TestAddColumnPatternMatchesShippedMigrations(t *testing.T) {
 		)
 	}
 
+	require.True(t, mysqlColumnTypeMatches(sql.NullString{Valid: true, String: "tinyint"}, "BOOLEAN NOT NULL"))
+	require.False(t, mysqlColumnTypeMatches(sql.NullString{Valid: true, String: "varchar"}, "BOOLEAN NOT NULL"))
+
 	// The guard must not claim any other failing DDL, or a real failure would
 	// be skipped whenever the named column happens to exist.
 	for _, statement := range []string{

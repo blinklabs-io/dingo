@@ -28,39 +28,44 @@ func TestParseAddColumnStatement(t *testing.T) {
 	t.Parallel()
 
 	for _, test := range []struct {
-		name      string
-		statement string
-		table     string
-		column    string
-		ok        bool
+		name       string
+		statement  string
+		table      string
+		column     string
+		definition string
+		ok         bool
 	}{
 		{
-			name:      "backtick quoted",
-			statement: "ALTER TABLE `committee_member` ADD COLUMN `term_start_slot_set` boolean NOT NULL DEFAULT false",
-			table:     "committee_member",
-			column:    "term_start_slot_set",
-			ok:        true,
+			name:       "backtick quoted",
+			statement:  "ALTER TABLE `committee_member` ADD COLUMN `term_start_slot_set` boolean NOT NULL DEFAULT false",
+			table:      "committee_member",
+			column:     "term_start_slot_set",
+			definition: "boolean NOT NULL DEFAULT false",
+			ok:         true,
 		},
 		{
-			name:      "double quoted",
-			statement: `ALTER TABLE "committee_member" ADD COLUMN "cold_credential_tag" BIGINT NOT NULL DEFAULT 0`,
-			table:     "committee_member",
-			column:    "cold_credential_tag",
-			ok:        true,
+			name:       "double quoted",
+			statement:  `ALTER TABLE "committee_member" ADD COLUMN "cold_credential_tag" BIGINT NOT NULL DEFAULT 0`,
+			table:      "committee_member",
+			column:     "cold_credential_tag",
+			definition: "BIGINT NOT NULL DEFAULT 0",
+			ok:         true,
 		},
 		{
-			name:      "unquoted with trailing semicolon",
-			statement: "ALTER TABLE account_import_baseline ADD COLUMN deposit_amount text;",
-			table:     "account_import_baseline",
-			column:    "deposit_amount",
-			ok:        true,
+			name:       "unquoted with trailing semicolon",
+			statement:  "ALTER TABLE account_import_baseline ADD COLUMN deposit_amount text;",
+			table:      "account_import_baseline",
+			column:     "deposit_amount",
+			definition: "text",
+			ok:         true,
 		},
 		{
-			name:      "lowercase keywords",
-			statement: "alter table `t` add column `c` integer",
-			table:     "t",
-			column:    "c",
-			ok:        true,
+			name:       "lowercase keywords",
+			statement:  "alter table `t` add column `c` integer",
+			table:      "t",
+			column:     "c",
+			definition: "integer",
+			ok:         true,
 		},
 		{
 			// A same-named index is a different object; claiming it would let
@@ -87,13 +92,14 @@ func TestParseAddColumnStatement(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			table, column, _, ok := parseAddColumnStatement(test.statement)
+			table, column, definition, ok := parseAddColumnStatement(test.statement)
 			require.Equal(t, test.ok, ok)
 			if !test.ok {
 				return
 			}
 			require.Equal(t, test.table, table)
 			require.Equal(t, test.column, column)
+			require.Equal(t, test.definition, definition)
 		})
 	}
 }
