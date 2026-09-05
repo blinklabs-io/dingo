@@ -101,15 +101,9 @@ RETURNING id`,
 				err,
 			)
 		}
-		deposit, found := deposits[certIndex]
-		if certificateRequiresDeposit(certificate) && deposits == nil {
-			return nil, fmt.Errorf(
-				"missing certDeposits for deposit-bearing certificate at index %d",
-				certIndex,
-			)
-		}
-		if !found {
-			deposit = 0
+		var deposit *uint64
+		if value, found := deposits[certIndex]; found {
+			deposit = &value
 		}
 		specializedID, ref, err := s.applySpecializedCertificate(
 			ctx,
@@ -207,19 +201,13 @@ WHERE mir_id IN (
 	return nil
 }
 
-func certificateRequiresDeposit(certificate lcommon.Certificate) bool {
-	switch certificate.(type) {
-	case *lcommon.PoolRegistrationCertificate,
-		*lcommon.RegistrationCertificate,
-		*lcommon.RegistrationDrepCertificate,
-		*lcommon.StakeRegistrationCertificate,
-		*lcommon.StakeRegistrationDelegationCertificate,
-		*lcommon.StakeVoteRegistrationDelegationCertificate,
-		*lcommon.VoteRegistrationDelegationCertificate:
-		return true
-	default:
-		return false
+// nullableDecimalUint64 preserves unknown deposits as SQL NULL while keeping
+// an authoritative zero deposit distinct from an unknown value.
+func nullableDecimalUint64(value *uint64) any {
+	if value == nil {
+		return nil
 	}
+	return decimalUint64(types.Uint64(*value))
 }
 
 func certificateType(certificate lcommon.Certificate) (uint, error) {
@@ -278,7 +266,7 @@ func (s *Store) applySpecializedCertificate(
 	slot uint64,
 	blockIndex uint32,
 	certIndex uint,
-	deposit uint64,
+	deposit *uint64,
 ) (uint, *models.StakeCredentialRef, error) {
 	switch cert := certificate.(type) {
 	case *lcommon.PoolRegistrationCertificate:
@@ -327,13 +315,14 @@ RETURNING id`,
 		)
 		return id, nil, err
 	case *lcommon.DeregistrationDrepCertificate:
+		amount := uint64(cert.Amount)
 		id, err := applyDrepDeregistrationCertificate(
 			ctx,
 			db,
 			cert,
 			certificateID,
 			slot,
-			uint64(cert.Amount),
+			&amount,
 		)
 		return id, nil, err
 	case *lcommon.UpdateDrepCertificate:
@@ -428,7 +417,7 @@ func applyAccountCertificate(
 	certificate lcommon.Certificate,
 	certificateID uint,
 	slot uint64,
-	deposit uint64,
+	deposit *uint64,
 ) (uint, *models.StakeCredentialRef, error) {
 	var (
 		stakeCredential lcommon.Credential
@@ -537,7 +526,7 @@ func applyAccountCertificate(
 	switch cert := certificate.(type) {
 	case *lcommon.StakeRegistrationCertificate,
 		*lcommon.RegistrationCertificate:
-		args = []any{key, tag, slot, decimalUint64(types.Uint64(deposit)), certificateID}
+		args = []any{key, tag, slot, nullableDecimalUint64(deposit), certificateID}
 	case *lcommon.StakeDeregistrationCertificate:
 		args = []any{key, tag, slot, certificateID}
 	case *lcommon.DeregistrationCertificate:
@@ -545,13 +534,13 @@ func applyAccountCertificate(
 	case *lcommon.StakeDelegationCertificate:
 		args = []any{key, tag, state.pool, slot, certificateID}
 	case *lcommon.StakeRegistrationDelegationCertificate:
-		args = []any{key, tag, state.pool, slot, decimalUint64(types.Uint64(deposit)), certificateID}
+		args = []any{key, tag, state.pool, slot, nullableDecimalUint64(deposit), certificateID}
 	case *lcommon.StakeVoteDelegationCertificate:
 		args = []any{key, tag, state.pool, state.drep, state.drepType, slot, certificateID}
 	case *lcommon.StakeVoteRegistrationDelegationCertificate:
-		args = []any{key, tag, state.pool, state.drep, state.drepType, slot, decimalUint64(types.Uint64(deposit)), certificateID}
+		args = []any{key, tag, state.pool, state.drep, state.drepType, slot, nullableDecimalUint64(deposit), certificateID}
 	case *lcommon.VoteRegistrationDelegationCertificate:
-		args = []any{key, tag, state.drep, state.drepType, slot, decimalUint64(types.Uint64(deposit)), certificateID}
+		args = []any{key, tag, state.drep, state.drepType, slot, nullableDecimalUint64(deposit), certificateID}
 	case *lcommon.VoteDelegationCertificate:
 		args = []any{key, tag, state.drep, state.drepType, slot, certificateID}
 	}
@@ -659,7 +648,7 @@ func applyPoolRegistrationCertificate(
 	cert *lcommon.PoolRegistrationCertificate,
 	certificateID uint,
 	slot uint64,
-	deposit uint64,
+	deposit *uint64,
 ) (uint, error) {
 	rewardTag, rewardAccount, err := certutil.PoolRewardAccount(cert)
 	if err != nil {
@@ -728,7 +717,7 @@ RETURNING id`,
 		certificateID,
 		poolID,
 		slot,
-		decimalUint64(types.Uint64(deposit)),
+		nullableDecimalUint64(deposit),
 		nullBytes(leiosKeyPublic),
 		nullBytes(leiosKeyPoP),
 	}, poolID, slot)
@@ -824,7 +813,7 @@ func applyDrepRegistrationCertificate(
 	cert *lcommon.RegistrationDrepCertificate,
 	certificateID uint,
 	slot uint64,
-	deposit uint64,
+	deposit *uint64,
 ) (uint, error) {
 	tag, err := models.CredentialTagFromUint(
 		cert.DrepCredential.CredType,
@@ -868,7 +857,7 @@ RETURNING id`,
 		certificateID,
 		tag,
 		slot,
-		decimalUint64(types.Uint64(deposit)),
+		nullableDecimalUint64(deposit),
 	)
 }
 
@@ -878,7 +867,7 @@ func applyDrepDeregistrationCertificate(
 	cert *lcommon.DeregistrationDrepCertificate,
 	certificateID uint,
 	slot uint64,
-	deposit uint64,
+	deposit *uint64,
 ) (uint, error) {
 	tag, err := models.CredentialTagFromUint(
 		cert.DrepCredential.CredType,
@@ -909,7 +898,7 @@ RETURNING id`,
 		certificateID,
 		tag,
 		slot,
-		decimalUint64(types.Uint64(deposit)),
+		nullableDecimalUint64(deposit),
 	)
 }
 

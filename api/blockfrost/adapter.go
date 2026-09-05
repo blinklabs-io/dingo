@@ -2628,10 +2628,18 @@ func (a *NodeAdapter) AccountRegistrationHistory(
 		if err != nil {
 			return nil, 0, err
 		}
+		// This response has no representation for an unknown deposit, so a
+		// NULL keeps rendering as "0" rather than changing the Blockfrost
+		// wire format. The recorded-versus-unknown distinction matters to
+		// value conservation, not here.
+		var deposit uint64
+		if row.Deposit != nil {
+			deposit = *row.Deposit
+		}
 		ret = append(ret, AccountRegistrationHistoryInfo{
 			TxHash:      hex.EncodeToString(row.TxHash),
 			Action:      row.Action,
-			Deposit:     strconv.FormatUint(row.Deposit, 10),
+			Deposit:     strconv.FormatUint(deposit, 10),
 			TxSlot:      txSlot,
 			BlockTime:   blockTime,
 			BlockHeight: blockHeight,
