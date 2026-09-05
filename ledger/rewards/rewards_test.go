@@ -1485,7 +1485,7 @@ func TestCalculateRewardPotMatchesCFCalculatorEtaBoundaryVectors(t *testing.T) {
 	}
 }
 
-func TestCalculateKeepsFractionalExpectedBlocksExact(t *testing.T) {
+func TestCalculateFloorsExpectedBlocksPerShelleySpec(t *testing.T) {
 	params := testParams()
 	params.EpochLength = 10
 	params.ActiveSlotsCoeff = big.NewRat(1, 3)
@@ -1501,9 +1501,18 @@ func TestCalculateKeepsFractionalExpectedBlocksExact(t *testing.T) {
 		}},
 	}, params)
 	require.NoError(t, err)
-	require.Equal(t, big.NewRat(10, 3), result.ExpectedBlocks)
-	require.Equal(t, big.NewRat(3, 10), result.Efficiency)
-	require.Equal(t, uint64(30), result.Incentives)
+	require.Equal(t, big.NewRat(3, 1), result.ExpectedBlocks)
+	require.Equal(t, big.NewRat(1, 3), result.Efficiency)
+	require.Equal(t, uint64(33), result.Incentives)
+}
+
+func TestCalculateRejectsExpectedBlocksThatFloorToZero(t *testing.T) {
+	params := testParams()
+	params.EpochLength = 1
+	params.ActiveSlotsCoeff = big.NewRat(1, 2)
+
+	_, err := Calculate(Pots{Reserves: 100}, Snapshot{}, params)
+	require.ErrorIs(t, err, ErrInvalidParameters)
 }
 
 func TestCalculateRejectsInvalidUnitIntervals(t *testing.T) {
