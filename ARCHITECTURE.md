@@ -2441,6 +2441,17 @@ The experimental N2N Leios protocols (`Config.experimentalLeiosNetworkingEnabled
 
 For the current respun prototype, the notify vote dialect is specifically the three-field `(announcing_rb_hash, voter_id, signature)` form. The selected-chain `chain.update` path records an announcement only after its ranking block is adopted; merely observing an eligible ChainSync header cannot make a local vote eligible. A bounded TTL queue holds votes that race ahead of adoption and retains a bounded set of alternate signatures per voter, so an invalid first candidate cannot suppress a later valid vote. Local votes use that same LeiosNotify stream; each outbound response reserves its log entry and commits the per-peer cursor only after gouroboros reports a successful send. Failed or aborted sends release the reservation into a counted retry set retained across reconnects; a reconnect advances through every pending retry on its stream rather than clearing only the first failed entry. The transitional offered-ID and four-field forms remain decode-compatible only.
 
+Before header cryptography or body deltas run, the inbound consensus-envelope
+validator enforces the era's block body/header limits and, for Alonzo and later,
+the aggregate `MaxBlockExUnits` budget. The aggregate contains every declared
+redeemer budget in every transaction, including both the outer Dijkstra witness
+set and all Dijkstra subtransaction witness sets; phase-2-invalid transactions
+remain included because the block budget constrains declared execution, not the
+UTxO outcome. Negative values and checked-add overflow fail closed. The forging
+selector uses the same transaction-wide declared-budget helper, so it cannot
+construct a candidate that inbound envelope validation would reject on that
+block-wide budget.
+
 During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution is skipped only for blocks at or before the immutable tip (`tipBlockNo - securityParam`), where the block producer's `isValid` flag is treated as authoritative until the local Plutus VM is consensus-equivalent. Volatile block replay, local transaction validation for mempool submission, and forging continue to run Plutus execution.
 
 Restrictive Phase 2 validation runs the CEK machine against the protocol's
@@ -4123,6 +4134,15 @@ therefore exposed to forging and relay consumers in admission order. Duplicate
 submission refreshes `LastSeen` without changing position, and oldest entries
 are removed first when watermark eviction is active. FIFO is not a fee-density
 priority queue.
+
+Pending-transaction overlays in both mempool validation and forging apply the
+consensus UTxO outcome exposed by `Transaction.Consumed()` and
+`Transaction.Produced()`. A valid transaction therefore consumes its regular
+inputs and produces its normal outputs; a phase-2-invalid transaction consumes
+collateral instead, leaves its regular inputs available, and produces only its
+collateral return when present. Dependency and double-spend checks use that
+same outcome rather than treating the transaction body's regular input set as
+unconditionally spent.
 
 The DAG provider maintains nodes keyed by transaction hash, a pending-output
 producer index, explicit parent/child edges, and a cached transaction order. An
