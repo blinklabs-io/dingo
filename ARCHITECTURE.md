@@ -483,6 +483,23 @@ be read from the committed state. If rollback wins, truncation and the ledger
 rewind make the waiting block batch stale, and the tip recheck rejects it
 instead of publishing Apply after Undo.
 
+`LedgerState.rollback` will not accept a target that shares the applied tip's
+slot with a different hash. The UTxO and transaction predicates in
+`database.TruncateAfterSlot` are slot-only (`added_slot > slot`,
+`deleted_slot > slot`), unlike the block-nonce delete beside them, so such a
+target truncates nothing at the contested slot: the abandoned same-slot block's
+outputs stay live and the UTxOs it consumed stay soft-deleted with no row left
+to restore them, while the tip is reported as repaired. The next block that
+spends one of those inputs cannot resolve it, which Conway reports as bad
+inputs and, because value conservation sums consumed over only the inputs that
+resolved, as value not conserved in the same pass. `rollback` therefore
+redirects to the newest applied primary-chain ancestor strictly below the
+contested slot, so the existing predicates truncate that slot whole and the
+block at the target is re-applied; when no such ancestor exists it fails with
+`ErrNoAppliedAncestorBelowContestedSlot` rather than reporting the repair
+(issue #3678). `enforceDurableTipFloor` is the path that produces such a
+target.
+
 Getting this wrong is subtle, so the constraint is worth stating plainly:
 **the undo events must be emitted before the truncation, by the rollback
 path.** `handleEventChainUpdate` deliberately does *not* emit them, even

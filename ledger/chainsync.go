@@ -186,6 +186,15 @@ var ErrRollbackExceedsMithrilBoundary = errors.New(
 	"rollback exceeds Mithril trust boundary",
 )
 
+// ErrNoAppliedAncestorBelowContestedSlot reports that a rollback target shares
+// the applied tip's slot with a different hash and no applied ancestor below
+// that slot could be found to rewind to. The contested slot's effects cannot be
+// truncated in place, so the rollback fails loudly rather than reporting a
+// repair that left the UTxO set diverged.
+var ErrNoAppliedAncestorBelowContestedSlot = errors.New(
+	"no applied ancestor below contested slot",
+)
+
 type peerHeaderRecord struct {
 	// event carries only the metadata needed to reconstruct a ChainsyncEvent.
 	// Production records leave BlockHeader nil and decode headerCbor only when
