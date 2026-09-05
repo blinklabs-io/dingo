@@ -309,3 +309,26 @@ func TestHandlerStallSeriesExistsBeforeAnyStall(t *testing.T) {
 		),
 	)
 }
+
+// The watchdog samples on a ticker, and warnStuckHandler needs a full interval
+// to have elapsed, so the first report lands on the first sample at least one
+// interval after the handler stopped returning. Sampling once per interval
+// therefore puts it anywhere in (interval, 2*interval] -- 30s to 60s at the
+// production value, against the "within one and a half intervals" the
+// watchdog, event/doc.go and ARCHITECTURE.md state. Sampling at most twice per
+// interval is what makes that bound hold.
+func TestHandlerProgressSamplesTwicePerInterval(t *testing.T) {
+	for _, interval := range []time.Duration{
+		time.Millisecond,
+		20 * time.Millisecond,
+		handlerProgressWarnInterval,
+	} {
+		tick := handlerProgressTick(interval)
+		require.Positive(t, tick, "time.NewTicker panics on a non-positive period")
+		require.LessOrEqual(t, tick, interval/2,
+			"first report is bounded by interval+tick, so tick must not "+
+				"exceed half the interval for the documented 1.5*interval "+
+				"bound to hold (interval=%s)", interval,
+		)
+	}
+}

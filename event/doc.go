@@ -109,10 +109,15 @@
 // handler that has stopped returning is reported directly, by a
 // bus-wide watchdog, as an "event subscriber handler not making
 // progress" warning and the event_subscriber_handler_stalled_total
-// metric. Registering the first SubscribeFunc subscription for an
-// event type materializes that counter's series for the type at zero,
-// so "nothing has stalled" is distinguishable from "no handler was
-// ever registered for this type". The granularity is the event type,
+// metric. The watchdog samples twice per
+// handlerProgressWarnInterval, so the first report lands within one
+// and a half of those (45s at the 30s default) of the handler ceasing
+// to return, and repeats at most once per interval after that.
+//
+// Registering the first SubscribeFunc subscription for an event type
+// materializes that counter's series for the type at zero, so
+// "nothing has stalled" is distinguishable from "no handler was ever
+// registered for this type". The granularity is the event type,
 // not the subscription, and the series outlives an unsubscribe. See
 // handler_progress.go.
 //

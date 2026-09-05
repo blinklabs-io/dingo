@@ -16,9 +16,11 @@ package event
 
 import "time"
 
-// handlerProgressWarnInterval is how long a SubscribeFunc handler may stay
-// inside a single event before the subscription is reported as not making
-// progress, and how often that report repeats while it stays there.
+// handlerProgressWarnInterval is the stall threshold: how long a SubscribeFunc
+// handler may stay inside a single event before the subscription becomes
+// eligible to be reported as not making progress, and how often that report
+// repeats while it stays there. Reporting is driven by a sampler, so the first
+// report lands within one and a half of these -- see handlerProgressTick.
 // Overridden in tests.
 //
 // Each EventBus snapshots it once, in NewEventBus, into
@@ -26,6 +28,29 @@ import "time"
 // so re-reading a package variable on every tick would race any test that
 // overrides it against every bus an earlier test left running.
 var handlerProgressWarnInterval = 30 * time.Second
+
+// handlerProgressTick is how often handlerProgressWatchdog samples handlers,
+// given the interval a handler may be stuck for before it is reported.
+//
+// It is deliberately shorter than that interval. warnStuckHandler needs a full
+// interval to have elapsed, so sampling once per interval puts the first
+// report anywhere in (interval, 2*interval]: a handler that stops returning
+// just after a sample has been stuck for a hair under one interval at the next
+// one, is skipped, and waits a whole further period. Sampling twice per
+// interval bounds the first report at 1.5 intervals, which is what event/doc.go
+// and ARCHITECTURE.md state (wolf31o2 review).
+//
+// The repeat rate is unaffected: warnStuckHandler still suppresses a report
+// within one interval of the last one for the same invocation.
+func handlerProgressTick(interval time.Duration) time.Duration {
+	tick := interval / 2
+	if tick <= 0 {
+		// Only reachable for a sub-2ns interval, which no caller sets.
+		// time.NewTicker panics on a non-positive period.
+		return interval
+	}
+	return tick
+}
 
 // beginHandler records that this subscription's dispatch goroutine has entered
 // its handler. Called immediately before the handler runs, and paired with
@@ -167,16 +192,17 @@ func (e *EventBus) channelSubscriberSnapshot() []*channelSubscriber {
 // makes the time to first signal a function of the buffer size and the event
 // rate rather than of the fault: the chainselection.peer_activity handler in
 // blinklabs-io/dingo#3550 stopped returning 12h31m before its 1024-slot buffer
-// filled and said so. This watchdog observes the handler itself, so the report
-// arrives one interval after the handler stops making progress no matter how
-// much headroom the buffer has.
+// filled and said so. This watchdog observes the handler itself, so the first
+// report arrives within one and a half intervals of the handler ceasing to
+// make progress -- see handlerProgressTick -- no matter how much headroom the
+// buffer has.
 //
 // stopCh is passed in rather than read from e: a Stop/restart cycle swaps
 // e.stopCh, and this worker must watch the generation it was started under.
 func (e *EventBus) handlerProgressWatchdog(stopCh chan struct{}) {
 	defer e.asyncWg.Done()
 	interval := e.handlerProgressInterval
-	ticker := time.NewTicker(interval)
+	ticker := time.NewTicker(handlerProgressTick(interval))
 	defer ticker.Stop()
 	for {
 		select {

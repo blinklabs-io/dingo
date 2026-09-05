@@ -1326,10 +1326,12 @@ paths, where the point is to report before the goroutine unwinds.
   function of buffer size and event rate, not of the fault. One bus-wide
   goroutine additionally samples every `SubscribeFunc` dispatch goroutine and
   logs `event subscriber handler not making progress` (with `stuck_for`,
-  `queued`, `buffer`) once per `handlerProgressWarnInterval` (30s) for any
-  handler that has not returned, counting it in
-  `event_subscriber_handler_stalled_total`. Registering a `SubscribeFunc`
-  subscription materializes that counter's series for its event type at zero,
+  `queued`, `buffer`) for any handler that has not returned for
+  `handlerProgressWarnInterval` (30s), counting it in
+  `event_subscriber_handler_stalled_total` and repeating at most once per
+  interval while it stays there. Sampling runs twice per interval, so the
+  first report lands within 45s of the handler ceasing to return. Registering
+  a `SubscribeFunc` subscription materializes that counter's series at zero,
   so "nothing has stalled" is distinguishable from "no handler was ever
   registered for this type". `EventBus.StuckHandlerCount()` exposes the same
   condition programmatically
