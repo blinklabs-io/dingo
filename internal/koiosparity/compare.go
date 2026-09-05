@@ -321,15 +321,18 @@ func CompareEpochTotals(
 // epochEndTime is the actual epoch close time (from KoiosEpochInfo.EpochEndTime);
 // zero means unknown. graceHours: if the epoch closed within this many hours and
 // Dingo has no reward_pool_input row, emit reference_lag instead of pool_only_koios.
-// departedAtParamEpoch reports whether this pool is provably absent from the
-// K+1 pool set, established from the mark pool_stake_snapshot rather than from
-// epoch_summary.SnapshotReady. That distinction matters: the snapshot writer
-// commits the epoch summary on every transition regardless of reward-input
-// availability, and deliberately omits a degraded active pool from
-// reward_pool_input while keeping it in the pool-stake snapshot. Both are
-// missing input rather than departure, so only per-pool absence from the K+1
-// pool set may downgrade the finding. False whenever membership could not be
-// established, which keeps the stricter classification (dingo #3485).
+// departedAtParamEpoch reports whether this pool provably left the pool set by
+// K+1 — either because its own retirement certificate had taken effect by the
+// K+1 boundary and no later registration cancelled it, or because it is absent
+// from a K+1 pool set already established as complete. Both are per-pool
+// facts, which is the distinction that matters: epoch_summary.SnapshotReady is
+// not one. The snapshot writer commits the epoch summary on every transition
+// regardless of reward-input availability, and deliberately omits a degraded
+// active pool from reward_pool_input while keeping it in the pool set. Those
+// are missing input rather than departure, and an epoch-level flag would
+// downgrade both. False whenever neither route could establish departure,
+// which keeps the stricter classification (dingo #3485, #3925). See
+// poolDepartedAtParamEpoch in check.go.
 func ComparePoolEpoch(
 	network string,
 	epoch uint64,
