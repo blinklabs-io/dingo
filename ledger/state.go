@@ -2987,7 +2987,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			"rollback_hash", hex.EncodeToString(point.Hash),
 			"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
 		)
-		return nil
+		return clearRollbackIntent(ls.db)
 	}
 	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
 		return ErrRollbackExceedsMithrilBoundary
