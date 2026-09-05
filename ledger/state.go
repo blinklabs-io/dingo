@@ -943,6 +943,21 @@ type LedgerState struct {
 	firstBlockReceived            bool                // true after latency sample recorded for this batch
 	shadowBlockReceivedHashes     map[string]struct{} // blocks delivered this batch (dedup shadow vs primary)
 	batchBlocksReceived           int                 // total blocks received in current blockfetch batch (including mid-batch flushes)
+	batchBlocksApplied            int                 // blocks from the current batch that actually extended the chain
+	// blockfetchBatchChainGeneration is the value chainRollbackGeneration
+	// held when the current batch was requested. A batch is fetched for the
+	// header queue that existed at request time; a rollback replaces both that
+	// queue and the continuation point, so every block still arriving for the
+	// older generation belongs to a chain the node has abandoned and must be
+	// discarded rather than applied (issue #3771). Guarded by
+	// chainsyncBlockfetchMutex, like the rest of the per-batch state.
+	blockfetchBatchChainGeneration uint64
+	// chainRollbackGeneration counts attempted primary-chain rollbacks,
+	// including failed attempts. It is bumped before the chain is changed, so
+	// a reader that has observed a rollback's effect on the chain always
+	// observes the new value. Written by the rollback paths and read by the
+	// blockfetch paths, so it is atomic.
+	chainRollbackGeneration atomic.Uint64
 	// Failures to obtain one specific queued header range, keyed by its
 	// start point and counting both a NoBlocks reply (a synchronous
 	// GetBlockRange error) and a batch that completed without delivering a
@@ -3432,6 +3447,9 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	// new state before the matching Apply reaches the ordered lane.
 	var rollbackEvents []event.Event
 	err := func() error {
+		ls.chainsyncBlockfetchMutex.Lock()
+		defer ls.chainsyncBlockfetchMutex.Unlock()
+		ls.chainRollbackGeneration.Add(1)
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
 		if err := ls.validateAndEmitRollbackUndo(point); err != nil {
