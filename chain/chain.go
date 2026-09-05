@@ -1079,24 +1079,16 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	if c == nil {
 		return errors.New("chain is nil")
 	}
-	pendingEvents, err := c.rollbackLocked(point, false)
-	if err != nil {
+	if _, err := c.rollbackLocked(point); err != nil {
 		return err
 	}
-	// Drain the sequencer first: rollbackLocked queued this rollback's
-	// header invalidation there so it stays ordered against the
-	// announcements addBlockHeader queues on the same sequencer.
+	// rollbackLocked queued this rollback's events on the chain-level
+	// sequencer under c.mutex, so draining here -- with the lock released,
+	// to avoid deadlocking a subscriber that calls back into chain/manager
+	// state -- publishes them in true chain-mutation order relative to any
+	// concurrent deferred add. Publishing them inline instead would let an
+	// add that mutated the chain after this rollback be published before it.
 	c.PublishPendingChainUpdates()
-	// Publish events after locks are released to prevent deadlocks
-	// when subscribers call back into chain/manager state. The
-	// mutex-holding ledger rollback path uses RollbackDeferred instead,
-	// which returns these events for the ledger to publish after it
-	// releases chainsyncMutex.
-	if c.eventBus != nil {
-		for _, evt := range pendingEvents {
-			c.eventBus.Publish(evt.Type, evt)
-		}
-	}
 	return nil
 }
 
@@ -1122,7 +1114,7 @@ func (c *Chain) RollbackDeferred(
 	if c == nil {
 		return nil, errors.New("chain is nil")
 	}
-	return c.rollbackLocked(point, true)
+	return c.rollbackLocked(point)
 }
 
 // rollbackForkDepth returns the number of blocks a rollback to
@@ -1344,9 +1336,12 @@ func (c *Chain) ValidateRollback(point ocommon.Point) error {
 
 // rollbackLocked performs all rollback logic under locks and returns
 // events to be published by the caller after locks are released.
+// rollbackLocked performs the rollback and enqueues the resulting events on the
+// chain-level sequencer. Both entry points publish through that sequencer; they
+// differ only in who drains it -- RollbackDeferred's caller once it releases
+// its outer ledger mutex, or Rollback itself before it returns.
 func (c *Chain) rollbackLocked(
 	point ocommon.Point,
-	deferred bool,
 ) ([]event.Event, error) {
 	// Wait for any chain-owned batch transaction that has already applied to
 	// the in-memory chain to conclude, so the removal loop below cannot ask
@@ -1578,18 +1573,22 @@ func (c *Chain) rollbackLocked(
 			)
 		}
 	}
-	// Deferred callers (the mutex-holding chainsync rollback path) publish
-	// through the chain-level sequencer rather than inline. Enqueue while
+	// Both modes publish through the chain-level sequencer. Enqueue while
 	// c.mutex is still held so this rollback is sequenced against concurrent
 	// blockfetch adds in true mutation order -- the rollback's chain.update
 	// then cannot be published ahead of an add that mutated the chain before
-	// it, or behind one that mutated after. The caller drains after releasing
-	// chainsyncMutex. See the pendingUpdates field and
-	// PublishPendingChainUpdates.
-	if deferred {
-		for _, evt := range pendingEvents {
-			c.queueDeferredEventLocked(evt)
-		}
+	// it, or behind one that mutated after.
+	//
+	// The non-deferred entry point used to publish these inline after
+	// draining, which reintroduced exactly that inversion: a deferred add
+	// that mutated the chain *after* this rollback is already on the
+	// sequencer, so the drain published it first and the rollback followed,
+	// inverting mutation order for the chain.update subscriber. Deferred
+	// callers drain after releasing their outer ledger mutex; Rollback drains
+	// itself. The slice is still returned for callers and tests that inspect
+	// it. See the pendingUpdates field and PublishPendingChainUpdates.
+	for _, evt := range pendingEvents {
+		c.queueDeferredEventLocked(evt)
 	}
 	return pendingEvents, nil
 }

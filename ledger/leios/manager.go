@@ -2723,14 +2723,24 @@ func (m *VoteManager) replaceHeaderStream() (<-chan event.Event, bool) {
 
 // handleChainHeaderInvalidation drops announcements for ranking blocks that
 // left our chain without becoming blocks -- a rollback, or the header queue
-// being discarded. It is the counterpart to handleChainHeaderAnnouncement and
-// arrives on the same event type, so the two can never be observed out of
-// order: an announcement re-armed after an invalidation was genuinely
-// re-admitted to the chain, and one armed before it is genuinely gone.
+// being discarded -- together with everything derived from them: the votes
+// this node emitted for them, their tallies, their dedup records, and the
+// endorser-block acquisitions no surviving announcement still needs. See
+// dropAnnouncementDerivedStateLocked, which does that cleanup keyed by
+// announcing ranking block rather than by slot.
 //
-// Votes, tallies and dedup records are not touched here; those follow the
-// block-level rollback on chain.update (handleRollback), which is keyed by
-// slot and is safe to apply in any order relative to this.
+// It is the counterpart to handleChainHeaderAnnouncement and arrives on the
+// same event type, so the two can never be observed out of order: an
+// announcement re-armed after an invalidation was genuinely re-admitted to the
+// chain, and one armed before it is genuinely gone.
+//
+// The block-level rollback on chain.update (handleRollback) still performs its
+// own slot-keyed sweep for state this handler cannot see -- peer votes for
+// slots above the rollback point that no local announcement accounts for. The
+// two are delivered on independent channels, so neither may depend on running
+// before the other; both are therefore idempotent, and handleRollback is
+// additionally sequence-guarded so it cannot undo what this handler has
+// already let through.
 func (m *VoteManager) handleChainHeaderInvalidation(
 	evt chain.ChainHeaderInvalidationEvent,
 ) {

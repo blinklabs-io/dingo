@@ -412,8 +412,11 @@ func TestVoteManagerInvalidatedHeaderAnnouncementDoesNotVote(t *testing.T) {
 		chain.HeaderInvalidationRollback,
 		2,
 	)
-	// Both events are on one channel, so waiting for the invalidation to be
-	// applied also proves the announcement ahead of it was.
+	// Waiting on the invalidation's sequence is sound where waiting on an
+	// announcement's is not: handleChainHeaderInvalidation advances the
+	// watermark in the same critical section as its pruning, and both
+	// handlers run on the one event-loop goroutine, so the announcement
+	// ahead of it has already been applied in full.
 	testutil.WaitForCondition(t, func() bool {
 		fixture.mgr.mu.Lock()
 		defer fixture.mgr.mu.Unlock()
@@ -457,11 +460,7 @@ func TestVoteManagerLateRollbackDoesNotDropRearmedAnnouncement(t *testing.T) {
 		7,
 	)
 	publishHeaderAnnouncement(fixture, headerArmingRbSlot, rbHash, ebHash, 8)
-	testutil.WaitForCondition(t, func() bool {
-		fixture.mgr.mu.Lock()
-		defer fixture.mgr.mu.Unlock()
-		return fixture.mgr.lastHeaderStreamSeq >= 8
-	}, 2*time.Second, "replacement announcement armed")
+	waitForAnnouncement(t, fixture, rbHash)
 
 	// The matching rollback finally arrives on chain.update, carrying the
 	// sequence number of the mutation the header stream already moved past.
@@ -494,11 +493,7 @@ func TestVoteManagerUnsequencedRollbackStillPrunes(t *testing.T) {
 	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
 	rbHash := lcommon.NewBlake2b256([]byte("orphaned-rb"))
 	publishHeaderAnnouncement(fixture, headerArmingRbSlot, rbHash, ebHash, 4)
-	testutil.WaitForCondition(t, func() bool {
-		fixture.mgr.mu.Lock()
-		defer fixture.mgr.mu.Unlock()
-		return fixture.mgr.lastHeaderStreamSeq >= 4
-	}, 2*time.Second, "announcement armed")
+	waitForAnnouncement(t, fixture, rbHash)
 
 	fixture.mgr.handleRollback(chain.ChainRollbackEvent{
 		Point: ocommon.Point{Slot: headerArmingRbSlot - 1},
@@ -591,6 +586,28 @@ func TestVoteManagerNotEmittedReasonsMaterialized(t *testing.T) {
 	assert.ElementsMatch(t, voteNotEmittedReasons, labels)
 }
 
+// waitForAnnouncement blocks until the announcement record itself is in the
+// manager's map.
+//
+// Waiting on lastHeaderStreamSeq is not equivalent and must not be used for
+// this: handleChainHeaderAnnouncement advances that watermark in its own
+// critical section and only then calls observeAnnouncement, which resolves the
+// epoch and re-acquires mu before inserting the record. A test that proceeds
+// on the watermark can therefore read the map before the record exists.
+func waitForAnnouncement(
+	t *testing.T,
+	fixture *managerFixture,
+	rbHash lcommon.Blake2b256,
+) {
+	t.Helper()
+	testutil.WaitForCondition(t, func() bool {
+		fixture.mgr.mu.Lock()
+		defer fixture.mgr.mu.Unlock()
+		_, ok := fixture.mgr.announcements[rbHash]
+		return ok
+	}, 2*time.Second, "announcement record present")
+}
+
 // armAndVote drives one announcement from header arrival to an emitted local
 // vote and returns the emitted event, so the tests below start from a node
 // that has genuinely voted rather than from hand-placed state.
@@ -604,11 +621,7 @@ func armAndVote(
 ) VoteEmittedEvent {
 	t.Helper()
 	publishHeaderAnnouncement(fixture, slot, rbHash, ebHash, seq)
-	testutil.WaitForCondition(t, func() bool {
-		fixture.mgr.mu.Lock()
-		defer fixture.mgr.mu.Unlock()
-		return fixture.mgr.lastHeaderStreamSeq >= seq
-	}, 2*time.Second, "announcement armed")
+	waitForAnnouncement(t, fixture, rbHash)
 	fixture.mgr.HandleEndorserBlock(slot, ebHash)
 	emitted := testutil.RequireReceive(
 		t, emittedCh, 2*time.Second, "local vote emitted",
@@ -701,11 +714,8 @@ func TestVoteManagerLateRollbackStillPrunesAbandonedChainState(t *testing.T) {
 	publishHeaderAnnouncement(
 		fixture, headerArmingRbSlot, replacementRb, replacementEb, 9,
 	)
-	testutil.WaitForCondition(t, func() bool {
-		fixture.mgr.mu.Lock()
-		defer fixture.mgr.mu.Unlock()
-		return fixture.mgr.lastHeaderStreamSeq >= 9
-	}, 2*time.Second, "both announcements armed")
+	waitForAnnouncement(t, fixture, abandonedRb)
+	waitForAnnouncement(t, fixture, replacementRb)
 
 	fixture.mgr.handleRollback(chain.ChainRollbackEvent{
 		Point: ocommon.Point{Slot: headerArmingRbSlot - 1},
@@ -898,6 +908,9 @@ func TestVoteManagerRollbackDeliveredBeforeHeaderStreamIsSafe(t *testing.T) {
 		chain.HeaderInvalidationRollback,
 		4,
 	)
+	// The invalidation's sequence is the safe watermark to wait on: it is
+	// advanced in the same critical section as the pruning, behind the
+	// announcement it voids on the one event-loop goroutine.
 	testutil.WaitForCondition(t, func() bool {
 		fixture.mgr.mu.Lock()
 		defer fixture.mgr.mu.Unlock()
