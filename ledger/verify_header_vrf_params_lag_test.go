@@ -277,3 +277,56 @@ func TestLeaderEligibilityStakeUsesTheSuppliedEpochCache(t *testing.T) {
 	assert.Equal(t, uint64(1_000), poolStake)
 	assert.Equal(t, uint64(10_000), totalStake)
 }
+
+// TestLeaderEligibilityStakeSkipDecisionUsesTheSuppliedEpochCache completes the
+// pairing. shouldSkipPostMithrilMarkEligibility decides whether to bypass the
+// leader-eligibility threshold entirely for a mark snapshot reconstructed after
+// its own boundary, and it read ls.epochCache directly -- a third generation,
+// and the mutable field rather than a published snapshot.
+//
+// A bypass is the most consequential of the three decisions in this path: it
+// admits a block whose stake eligibility nothing checked. It must be taken
+// against the same cache as the VRF key it is paired with.
+//
+// The two caches place epoch 38's start on either side of the capture, so they
+// disagree on the bypass: the supplied cache starts epoch 38 after the capture
+// and must not skip, while the live cache starts it before and would.
+func TestLeaderEligibilityStakeSkipDecisionUsesTheSuppliedEpochCache(
+	t *testing.T,
+) {
+	nonce := bytes.Repeat([]byte{0x07}, 32)
+	tb := createTestBlock(t, [32]byte{55}, 55, tamperNone)
+	tb.block.slot = 3_400_000
+	ls, db := newEligibilityTestLedger(t, nonce)
+
+	// Live cache: epoch 38 starts at 3_283_200, before the capture below, so
+	// the bypass would fire.
+	ls.epochCache = previewEpochs(38, 39, nonce)
+	ls.mithrilLedgerSlot = 3_000_000
+	ls.publishSnapshotsLocked()
+
+	// Supplied cache: epoch 38 starts after the capture, so the mark row was
+	// not reconstructed past its boundary and eligibility must be evaluated.
+	supplied := []models.Epoch{
+		{EpochId: 36, StartSlot: 2_900_000, LengthInSlots: 200_000, Nonce: nonce},
+		{EpochId: 37, StartSlot: 3_100_000, LengthInSlots: 200_000, Nonce: nonce},
+		{EpochId: 38, StartSlot: 3_300_000, LengthInSlots: 200_000, Nonce: nonce},
+	}
+
+	pool := lcommon.PoolKeyHash(tb.block.IssuerVkey().Hash())
+	other := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x21}, 28))
+	seedPoolStakeSnapshotOfTypeAtSlot(t, db, 38,
+		models.PoolStakeSnapshotTypeMark, pool[:], 1_000, 0, 3_290_000)
+	seedPoolStakeSnapshotOfTypeAtSlot(t, db, 38,
+		models.PoolStakeSnapshotTypeMark, other[:], 9_000, 0, 3_290_000)
+
+	poolStake, totalStake, _, _, skip, err :=
+		ls.leaderEligibilityStakeWithCache(tb.block, 39, pool, supplied)
+	require.NoError(t, err)
+	assert.False(t, skip,
+		"the bypass must be decided on the supplied cache, which places the "+
+			"capture before epoch 38 rather than inside it")
+	assert.Equal(t, uint64(1_000), poolStake)
+	assert.Equal(t, uint64(10_000), totalStake,
+		"not skipping means the threshold's denominator is actually read")
+}

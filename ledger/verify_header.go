@@ -1394,7 +1394,9 @@ func (ls *LedgerState) leaderEligibilityStakeWithCache(
 				diag,
 			)
 	}
-	if ls.shouldSkipPostMithrilMarkEligibility(snapshot, snapshotEpoch) {
+	if ls.shouldSkipPostMithrilMarkEligibilityWithCache(
+		snapshot, snapshotEpoch, epochCache,
+	) {
 		if ls.config.Logger != nil {
 			ls.config.Logger.Warn(
 				"skipping leader eligibility check: post-Mithril mark snapshot was reconstructed after the target boundary",
@@ -1440,9 +1442,28 @@ func (ls *LedgerState) leaderEligibilityStakeWithCache(
 // Mithril anchor itself as CapturedSlot, so that exact legacy provenance is
 // accepted too; startup-synthesized historical rows use another post-boundary
 // slot and remain conservative.
+//
+//nolint:unused // retained as a test helper
 func (ls *LedgerState) shouldSkipPostMithrilMarkEligibility(
 	snapshot *models.PoolStakeSnapshot,
 	snapshotEpoch uint64,
+) bool {
+	return ls.shouldSkipPostMithrilMarkEligibilityWithCache(
+		snapshot, snapshotEpoch, ls.epochCacheSnapshot(),
+	)
+}
+
+// shouldSkipPostMithrilMarkEligibilityWithCache decides the bypass against a
+// caller-supplied epoch cache.
+//
+// This is the most consequential of the decisions header verification makes
+// from the epoch cache: it admits a block whose stake eligibility nothing
+// checked. Deciding it from a different cache generation than the VRF key and
+// the snapshot selection is the same hazard, so it takes the pinned cache too.
+func (ls *LedgerState) shouldSkipPostMithrilMarkEligibilityWithCache(
+	snapshot *models.PoolStakeSnapshot,
+	snapshotEpoch uint64,
+	epochCache []models.Epoch,
 ) bool {
 	if snapshot == nil ||
 		snapshot.SnapshotType != models.PoolStakeSnapshotTypeMark ||
@@ -1451,15 +1472,16 @@ func (ls *LedgerState) shouldSkipPostMithrilMarkEligibility(
 	}
 
 	ls.RLock()
-	defer ls.RUnlock()
+	mithrilLedgerSlot := ls.mithrilLedgerSlot
+	ls.RUnlock()
 
-	if ls.mithrilLedgerSlot == 0 {
+	if mithrilLedgerSlot == 0 {
 		return false
 	}
-	if snapshot.CapturedSlot == ls.mithrilLedgerSlot {
+	if snapshot.CapturedSlot == mithrilLedgerSlot {
 		return false
 	}
-	for _, ep := range ls.epochCache {
+	for _, ep := range epochCache {
 		if ep.EpochId != snapshotEpoch || ep.LengthInSlots == 0 {
 			continue
 		}
