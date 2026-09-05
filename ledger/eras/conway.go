@@ -43,12 +43,19 @@ var ConwayEraDesc = EraDesc{
 	DecodePParamsFunc:       DecodePParamsConway,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateConway,
 	PParamsUpdateFunc:       PParamsUpdateConway,
-	HardForkFunc:            HardForkConway,
-	EpochLengthFunc:         EpochLengthShelley,
-	CalculateEtaVFunc:       CalculateEtaVConway,
-	CertDepositFunc:         CertDepositConway,
-	ValidateTxFunc:          ValidateTxConway,
-	EvaluateTxFunc:          EvaluateTxConway,
+	ParamUpdateHasPlutusV2CostModelFunc: func(u any) bool {
+		upd, ok := u.(conway.ConwayProtocolParameterUpdate)
+		if !ok {
+			return false
+		}
+		return paramUpdateHasPlutusV2CostModel(upd.CostModels)
+	},
+	HardForkFunc:      HardForkConway,
+	EpochLengthFunc:   EpochLengthShelley,
+	CalculateEtaVFunc: CalculateEtaVConway,
+	CertDepositFunc:   CertDepositConway,
+	ValidateTxFunc:    ValidateTxConway,
+	EvaluateTxFunc:    EvaluateTxConway,
 }
 
 func DecodePParamsConway(data []byte) (lcommon.ProtocolParameters, error) {

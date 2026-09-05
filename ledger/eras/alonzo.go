@@ -42,12 +42,19 @@ var AlonzoEraDesc = EraDesc{
 	DecodePParamsFunc:       DecodePParamsAlonzo,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateAlonzo,
 	PParamsUpdateFunc:       PParamsUpdateAlonzo,
-	HardForkFunc:            HardForkAlonzo,
-	EpochLengthFunc:         EpochLengthShelley,
-	CalculateEtaVFunc:       CalculateEtaVAlonzo,
-	CertDepositFunc:         CertDepositAlonzo,
-	ValidateTxFunc:          ValidateTxAlonzo,
-	EvaluateTxFunc:          EvaluateTxAlonzo,
+	ParamUpdateHasPlutusV2CostModelFunc: func(u any) bool {
+		upd, ok := u.(alonzo.AlonzoProtocolParameterUpdate)
+		if !ok {
+			return false
+		}
+		return paramUpdateHasPlutusV2CostModel(upd.CostModels)
+	},
+	HardForkFunc:      HardForkAlonzo,
+	EpochLengthFunc:   EpochLengthShelley,
+	CalculateEtaVFunc: CalculateEtaVAlonzo,
+	CertDepositFunc:   CertDepositAlonzo,
+	ValidateTxFunc:    ValidateTxAlonzo,
+	EvaluateTxFunc:    EvaluateTxAlonzo,
 }
 
 func DecodePParamsAlonzo(data []byte) (lcommon.ProtocolParameters, error) {
