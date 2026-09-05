@@ -37,7 +37,12 @@ var topologyTests = []topologyTestDefinition{
 {
   "localRoots": [
     {
-      "accessPoints": [],
+			"accessPoints": [
+				{
+					"address": "127.0.0.1",
+					"port": 3001
+				}
+			],
       "advertise": false,
       "valency": 1
     }
@@ -68,9 +73,14 @@ var topologyTests = []topologyTestDefinition{
 		expectedObject: &topology.TopologyConfig{
 			LocalRoots: []topology.TopologyConfigP2PLocalRoot{
 				{
-					AccessPoints: []topology.TopologyConfigP2PAccessPoint{},
-					Advertise:    false,
-					Valency:      1,
+					AccessPoints: []topology.TopologyConfigP2PAccessPoint{
+						{
+							Address: "127.0.0.1",
+							Port:    3001,
+						},
+					},
+					Advertise: false,
+					Valency:   1,
 				},
 			},
 			PublicRoots: []topology.TopologyConfigP2PPublicRoot{
@@ -115,7 +125,12 @@ var topologyTests = []topologyTestDefinition{
   ],
   "localRoots": [
     {
-      "accessPoints": [],
+			"accessPoints": [
+				{
+					"address": "127.0.0.1",
+					"port": 3001
+				}
+			],
       "advertise": false,
       "trustable": false,
       "valency": 1
@@ -133,10 +148,15 @@ var topologyTests = []topologyTestDefinition{
 		expectedObject: &topology.TopologyConfig{
 			LocalRoots: []topology.TopologyConfigP2PLocalRoot{
 				{
-					AccessPoints: []topology.TopologyConfigP2PAccessPoint{},
-					Advertise:    false,
-					Trustable:    false,
-					Valency:      1,
+					AccessPoints: []topology.TopologyConfigP2PAccessPoint{
+						{
+							Address: "127.0.0.1",
+							Port:    3001,
+						},
+					},
+					Advertise: false,
+					Trustable: false,
+					Valency:   1,
 				},
 			},
 			PublicRoots: []topology.TopologyConfigP2PPublicRoot{
@@ -318,6 +338,209 @@ func TestNewTopologyConfigFromReader_OversizedInput(t *testing.T) {
 		err.Error(),
 		"topology file exceeds maximum size",
 	)
+}
+
+func TestNewTopologyConfigFromReader_ValidationErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		json    string
+		wantErr string
+	}{
+		{
+			name: "local root empty address",
+			json: `{
+  "localRoots": [
+    {
+      "accessPoints": [{"address": "", "port": 3001}],
+      "valency": 1
+    }
+  ]
+}`,
+			wantErr: "localRoots[0].accessPoints[0].address must not be empty",
+		},
+		{
+			name: "local root port lower bound",
+			json: `{
+  "localRoots": [
+    {
+      "accessPoints": [{"address": "127.0.0.1", "port": 0}],
+      "valency": 1
+    }
+  ]
+}`,
+			wantErr: "localRoots[0].accessPoints[0].port must be in range 1-65535",
+		},
+		{
+			name: "local root port upper bound",
+			json: `{
+  "localRoots": [
+    {
+      "accessPoints": [{"address": "127.0.0.1", "port": 65536}],
+      "valency": 1
+    }
+  ]
+}`,
+			wantErr: "localRoots[0].accessPoints[0].port must be in range 1-65535",
+		},
+		{
+			name: "local root warm valency exceeds valency",
+			json: `{
+  "localRoots": [
+    {
+      "accessPoints": [{"address": "127.0.0.1", "port": 3001}],
+			"valency": 1,
+			"warmValency": 2
+    }
+  ]
+}`,
+			wantErr: "localRoots[0].warmValency must be <= localRoots[0].valency",
+		},
+		{
+			name: "local root valency exceeds access points",
+			json: `{
+  "localRoots": [
+    {
+      "accessPoints": [{"address": "127.0.0.1", "port": 3001}],
+      "valency": 2
+    }
+  ]
+}`,
+			wantErr: "localRoots[0].valency must be <= len(localRoots[0].accessPoints)",
+		},
+		{
+			name: "public root empty address",
+			json: `{
+  "publicRoots": [
+    {
+      "accessPoints": [{"address": "", "port": 3001}],
+      "valency": 1
+    }
+  ]
+}`,
+			wantErr: "publicRoots[0].accessPoints[0].address must not be empty",
+		},
+		{
+			name: "public root invalid port",
+			json: `{
+  "publicRoots": [
+    {
+      "accessPoints": [{"address": "public.example.com", "port": 65536}],
+      "valency": 1
+    }
+  ]
+}`,
+			wantErr: "publicRoots[0].accessPoints[0].port must be in range 1-65535",
+		},
+		{
+			name: "public root valency exceeds warm valency when set",
+			json: `{
+  "publicRoots": [
+    {
+      "accessPoints": [{"address": "public.example.com", "port": 3001}],
+			"valency": 1,
+			"warmValency": 2
+    }
+  ]
+}`,
+			wantErr: "publicRoots[0].warmValency must be <= publicRoots[0].valency",
+		},
+		{
+			name: "public root valency exceeds access points",
+			json: `{
+  "publicRoots": [
+    {
+      "accessPoints": [{"address": "public.example.com", "port": 3001}],
+      "valency": 2
+    }
+  ]
+}`,
+			wantErr: "publicRoots[0].valency must be <= len(publicRoots[0].accessPoints)",
+		},
+		{
+			name: "bootstrap peer empty address",
+			json: `{
+  "bootstrapPeers": [
+    {"address": "", "port": 3001}
+  ]
+}`,
+			wantErr: "bootstrapPeers[0].address must not be empty",
+		},
+		{
+			name: "bootstrap peer invalid port",
+			json: `{
+  "bootstrapPeers": [
+    {"address": "bootstrap.example.com", "port": 0}
+  ]
+}`,
+			wantErr: "bootstrapPeers[0].port must be in range 1-65535",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := topology.NewTopologyConfigFromReader(
+				strings.NewReader(test.json),
+			)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), test.wantErr)
+		})
+	}
+}
+
+func TestNewTopologyConfigFromReader_AllowsEmptyAccessPointsWithValency(t *testing.T) {
+	jsonData := `{
+	"localRoots": [
+		{
+			"accessPoints": [],
+			"valency": 1
+		}
+	],
+	"publicRoots": [
+		{
+			"accessPoints": [],
+			"valency": 1
+		}
+	]
+}`
+
+	_, err := topology.NewTopologyConfigFromReader(strings.NewReader(jsonData))
+	require.NoError(t, err)
+}
+
+func TestNewTopologyConfigFromReader_AllowsWarmValencyBelowValency(t *testing.T) {
+	jsonData := `{
+	"localRoots": [
+		{
+			"accessPoints": [
+				{"address": "127.0.0.1", "port": 3001},
+				{"address": "127.0.0.2", "port": 3001}
+			],
+			"valency": 2,
+			"warmValency": 1
+		}
+	]
+}`
+
+	_, err := topology.NewTopologyConfigFromReader(strings.NewReader(jsonData))
+	require.NoError(t, err)
+}
+
+func TestNewPeerSnapshotConfigFromReader_AllowsMissingRelayPort(t *testing.T) {
+	jsonData := `{
+	"NetworkMagic": 1,
+	"NodeToClientVersion": 23,
+	"Point": {"blockPointHash": "abc", "blockPointSlot": 1},
+	"allLedgerPools": [
+		{
+			"relays": [
+				{"address": "relay.example.com"}
+			]
+		}
+	]
+}`
+
+	_, err := topology.NewPeerSnapshotConfigFromReader(strings.NewReader(jsonData))
+	require.NoError(t, err)
 }
 
 // TestPeerSnapshotConfigValidate verifies that snapshot identity, format,
