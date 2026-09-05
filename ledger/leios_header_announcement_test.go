@@ -361,3 +361,79 @@ func newChainsyncRollbackFixtureWithBus(
 		ancestorNonce: ancestorNonce,
 	}
 }
+
+// TestConnectionClosedPublishesHeaderInvalidation covers a header-queue
+// discard on a peer-stall path. When the connection that owned the header
+// pipeline closes, the queue is discarded and Chain.ClearHeaders enqueues the
+// invalidation on the chain-level sequencer -- but this handler previously
+// registered no drain, so it sat there until some unrelated handler ran. A
+// dead peer is exactly the case where no further event is guaranteed, so the
+// announcement would stay armed well past the ten-slot vote window.
+func TestConnectionClosedPublishesHeaderInvalidation(t *testing.T) {
+	fixture := newHeaderStreamLedger(t)
+	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
+	header := announcingHeader(
+		577, "hdr-1", lcommon.NewBlake2b256(nil), 1, ebHash,
+	)
+	require.NoError(t, fixture.ls.chain.AddBlockHeader(header))
+	fixture.ls.headerPipelineConnId = fixture.connId
+	require.Equal(t, 1, fixture.ls.chain.HeaderCount())
+
+	// The announcement is still undrained on the sequencer; the closed
+	// connection must publish it and the invalidation that voids it.
+	fixture.ls.handleConnectionClosedEvent(event.NewEvent(
+		ConnectionClosedEventType,
+		ConnectionClosedEvent{ConnectionId: fixture.connId},
+	))
+	assert.Zero(t, fixture.ls.chain.HeaderCount())
+
+	announcement := testutil.RequireReceive(
+		t, fixture.ch, 2*time.Second, "announcement",
+	)
+	announced, ok := announcement.Data.(chain.ChainHeaderAnnouncementEvent)
+	require.True(t, ok, "got %T", announcement.Data)
+	assert.Equal(t, header.hash, announced.RbHash)
+
+	invalidation := testutil.RequireReceive(
+		t,
+		fixture.ch,
+		2*time.Second,
+		"invalidation published without any later event",
+	)
+	invalid, ok := invalidation.Data.(chain.ChainHeaderInvalidationEvent)
+	require.True(t, ok, "got %T", invalidation.Data)
+	assert.Equal(t, chain.HeaderInvalidationQueueCleared, invalid.Reason)
+	assert.Contains(t, invalid.RbHashes, header.hash)
+	assert.Greater(t, invalid.Seq, announced.Seq)
+}
+
+// TestBlockfetchTimeoutDrainsHeaderSequencer covers the other peer-stall path.
+// The timeout handler tears the batch down and clears the header queue, and it
+// is the last thing that runs for a peer that stopped sending, so it has to
+// drain the sequencer rather than leave header events queued behind it.
+func TestBlockfetchTimeoutDrainsHeaderSequencer(t *testing.T) {
+	fixture := newHeaderStreamLedger(t)
+	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
+	header := announcingHeader(
+		577, "hdr-1", lcommon.NewBlake2b256(nil), 1, ebHash,
+	)
+	require.NoError(t, fixture.ls.chain.AddBlockHeader(header))
+
+	var pending pendingPublishes
+	func() {
+		defer pending.flush()
+		fixture.ls.chainsyncBlockfetchMutex.Lock()
+		defer fixture.ls.chainsyncBlockfetchMutex.Unlock()
+		fixture.ls.handleBlockfetchTimeoutLocked(fixture.connId, &pending)
+	}()
+
+	evt := testutil.RequireReceive(
+		t,
+		fixture.ch,
+		2*time.Second,
+		"header events published without any later event",
+	)
+	announced, ok := evt.Data.(chain.ChainHeaderAnnouncementEvent)
+	require.True(t, ok, "got %T", evt.Data)
+	assert.Equal(t, header.hash, announced.RbHash)
+}

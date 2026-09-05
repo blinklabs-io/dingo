@@ -15,6 +15,7 @@
 package chain_test
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	utxorpc "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
 
 // headerStreamHeader is a minimal ranking-block header that does not implement
@@ -478,4 +480,136 @@ func TestNonDeferredRollbackPublishesInvalidation(t *testing.T) {
 			t.Fatalf("unexpected payload %T", data)
 		}
 	}
+}
+
+// localForgedBlock is the minimum a locally forged block needs to reach
+// AddLocalBlock's header-discard path.
+type localForgedBlock struct {
+	announcingStreamHeader
+}
+
+func (b localForgedBlock) Header() lcommon.BlockHeader { return b.announcingStreamHeader }
+func (b localForgedBlock) Type() int                   { return 6 }
+func (b localForgedBlock) Transactions() []lcommon.Transaction {
+	return nil
+}
+func (b localForgedBlock) Utxorpc() (*utxorpc.Block, error) {
+	return nil, errors.New("not implemented")
+}
+
+// TestAddLocalBlockInvalidatesDiscardedPeerHeaders covers the one header-queue
+// discard that neither a rollback nor ClearHeaders produces. A locally forged
+// block on the same parent as the queued peer headers discards them, and the
+// chain.update it publishes is a block add, not a rollback -- so without an
+// explicit invalidation nothing voids the announcements those headers carried,
+// and the producer would vote for a ranking block that is not on its chain.
+//
+// The chain grew rather than shrank, so the discarded headers can sit at or
+// below the new tip: the invalidation names them explicitly rather than
+// relying on the point.
+func TestAddLocalBlockInvalidatesDiscardedPeerHeaders(t *testing.T) {
+	c, bus := newHeaderStreamChain(t)
+	subId, ch := bus.Subscribe(chain.ChainHeaderEventType)
+	defer bus.Unsubscribe(chain.ChainHeaderEventType, subId)
+
+	blocks, err := testfixtures.GenerateConwayChain(2)
+	require.NoError(t, err)
+	for i := range blocks {
+		_, addErr := c.AddBlockWithPointDeferred(blocks[i], ocommon.Point{
+			Slot: blocks[i].SlotNumber(),
+			Hash: blocks[i].Hash().Bytes(),
+		}, nil)
+		require.NoError(t, addErr)
+	}
+	c.PublishPendingChainUpdates()
+
+	// A peer header announcing an endorser block, queued on the tip.
+	peerHeader := announcingStreamHeader{
+		headerStreamHeader: headerStreamHeader{
+			hash:        lcommon.NewBlake2b256([]byte("peer-hdr")),
+			prevHash:    blocks[1].Hash(),
+			blockNumber: blocks[1].BlockNumber() + 1,
+			slot:        blocks[1].SlotNumber() + 1,
+		},
+		ebHash:    lcommon.NewBlake2b256([]byte("peer-eb")),
+		ebSize:    4096,
+		announces: true,
+	}
+	require.NoError(t, c.AddBlockHeader(peerHeader))
+	c.PublishPendingChainUpdates()
+	announcement := testutil.RequireReceive(
+		t, ch, 2*time.Second, "peer header announcement",
+	)
+	announced, ok := announcement.Data.(chain.ChainHeaderAnnouncementEvent)
+	require.True(t, ok)
+	assert.Equal(t, peerHeader.hash, announced.RbHash)
+
+	// Forge on the same parent. The peer header is discarded, and the new
+	// tip is deliberately at a HIGHER slot than it, so a point-based rule
+	// alone would not name it.
+	local := localForgedBlock{announcingStreamHeader: announcingStreamHeader{
+		headerStreamHeader: headerStreamHeader{
+			hash:        lcommon.NewBlake2b256([]byte("local-hdr")),
+			prevHash:    blocks[1].Hash(),
+			blockNumber: blocks[1].BlockNumber() + 1,
+			slot:        peerHeader.slot + 10,
+		},
+	}}
+	require.NoError(t, c.AddLocalBlock(local))
+	require.Zero(t, c.HeaderCount(), "the local block discards peer headers")
+
+	// AddLocalBlock drains the sequencer itself; no other event is needed.
+	evt := testutil.RequireReceive(
+		t, ch, 2*time.Second, "invalidation for the discarded peer header",
+	)
+	invalid, ok := evt.Data.(chain.ChainHeaderInvalidationEvent)
+	require.True(t, ok, "got %T", evt.Data)
+	assert.Equal(t, chain.HeaderInvalidationLocalBlock, invalid.Reason)
+	assert.Contains(
+		t,
+		invalid.RbHashes,
+		peerHeader.hash,
+		"the discarded header must be named; it sits below the new tip",
+	)
+	assert.Greater(t, invalid.Seq, announced.Seq)
+	assert.Equal(t, c.Tip().Point.Slot, invalid.Point.Slot)
+	assert.NotContains(
+		t,
+		invalid.RbHashes,
+		local.hash,
+		"the forged block itself is on the chain and must not be invalidated",
+	)
+}
+
+// TestAddLocalBlockWithNoQueuedHeadersPublishesNothing keeps the ordinary
+// forging path free of spurious invalidations.
+func TestAddLocalBlockWithNoQueuedHeadersPublishesNothing(t *testing.T) {
+	c, bus := newHeaderStreamChain(t)
+	subId, ch := bus.Subscribe(chain.ChainHeaderEventType)
+	defer bus.Unsubscribe(chain.ChainHeaderEventType, subId)
+
+	blocks, err := testfixtures.GenerateConwayChain(1)
+	require.NoError(t, err)
+	_, err = c.AddBlockWithPointDeferred(blocks[0], ocommon.Point{
+		Slot: blocks[0].SlotNumber(),
+		Hash: blocks[0].Hash().Bytes(),
+	}, nil)
+	require.NoError(t, err)
+	c.PublishPendingChainUpdates()
+
+	local := localForgedBlock{announcingStreamHeader: announcingStreamHeader{
+		headerStreamHeader: headerStreamHeader{
+			hash:        lcommon.NewBlake2b256([]byte("local-hdr")),
+			prevHash:    blocks[0].Hash(),
+			blockNumber: blocks[0].BlockNumber() + 1,
+			slot:        blocks[0].SlotNumber() + 1,
+		},
+	}}
+	require.NoError(t, c.AddLocalBlock(local))
+	testutil.RequireNoReceive(
+		t,
+		ch,
+		300*time.Millisecond,
+		"forging with an empty header queue publishes no invalidation",
+	)
 }

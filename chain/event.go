@@ -100,6 +100,13 @@ type ChainHeaderAnnouncementEvent struct {
 // queued headers and is now gone).
 type ChainHeaderInvalidationEvent struct {
 	Point ocommon.Point
+	// RbHashes names the discarded ranking-block headers explicitly. It
+	// exists because Point alone only describes a chain that shrank: when
+	// the chain *grows* past discarded headers -- a locally forged block
+	// replacing queued peer headers -- some of those headers sit at or
+	// below the new tip, so no point-based rule can name them. Consumers
+	// must drop announcements matching either rule.
+	RbHashes []lcommon.Blake2b256
 	// Reason is a short, stable label for logs and metrics.
 	Reason string
 	// Seq is this invalidation's chain-mutation sequence number. For a
@@ -115,4 +122,8 @@ const (
 	// HeaderInvalidationQueueCleared: the queued headers above Point were
 	// discarded without being fetched.
 	HeaderInvalidationQueueCleared = "queue_cleared"
+	// HeaderInvalidationLocalBlock: a locally forged block was added on the
+	// same parent as the queued peer headers, which discards them. The
+	// chain grew rather than shrank, so RbHashes, not Point, names them.
+	HeaderInvalidationLocalBlock = "local_block"
 )
