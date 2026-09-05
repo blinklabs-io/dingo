@@ -15,7 +15,9 @@
 package dingo
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/stretchr/testify/assert"
@@ -88,4 +90,38 @@ func TestLedgerStateConfigReportsTipGapAfterRebuild(t *testing.T) {
 	gap, ok := n.TipGapSlots()
 	require.True(t, ok)
 	assert.Equal(t, uint64(22), gap)
+}
+
+// TestLiveLifecycleTeardownForgetsTipGap covers the window a live database
+// Restore or Truncate opens: closeStorageForLiveLifecycleOp stops the ledger
+// that feeds the probe, and the rebuilt one does not tick until it has
+// caught up again. Without clearing the gap, TipGapSlots would keep
+// returning the pre-restore reading, and /readyz would answer 200 for the
+// whole rebuild -- the opposite of what a readiness probe is for.
+func TestLiveLifecycleTeardownForgetsTipGap(t *testing.T) {
+	n := &Node{
+		config: Config{cfg: &internalconfig.Config{}},
+	}
+	n.ledgerStateConfig().ReportTipGapFunc(3)
+	gap, ok := n.TipGapSlots()
+	require.True(t, ok)
+	require.Equal(t, uint64(3), gap)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	require.NoError(t, n.closeStorageForLiveLifecycleOp(ctx))
+
+	gap, ok = n.TipGapSlots()
+	assert.False(
+		t,
+		ok,
+		"a torn-down ledger must leave the tip gap unknown, not stale",
+	)
+	assert.Zero(t, gap)
+
+	// The rebuilt ledger reports into the same state and restores it.
+	n.ledgerStateConfig().ReportTipGapFunc(9)
+	gap, ok = n.TipGapSlots()
+	require.True(t, ok)
+	assert.Equal(t, uint64(9), gap)
 }

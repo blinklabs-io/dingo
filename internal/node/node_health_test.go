@@ -328,3 +328,78 @@ func TestHealthServerBindsPublicBindAddr(t *testing.T) {
 		t.Fatalf("health listener address = %q, want %q", got, want)
 	}
 }
+
+// An IPv6 bindAddr has to be bracketed: "%s:%d" would produce "::1:12799",
+// which net.Listen rejects, and the probes would silently never come up.
+func TestHealthServerBracketsIPv6BindAddr(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		bindAddr string
+		want     string
+	}{
+		{bindAddr: "0.0.0.0", want: "0.0.0.0:12799"},
+		{bindAddr: "127.0.0.1", want: "127.0.0.1:12799"},
+		{bindAddr: "::", want: "[::]:12799"},
+		{bindAddr: "::1", want: "[::1]:12799"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.bindAddr, func(t *testing.T) {
+			t.Parallel()
+			cfg := &config.Config{
+				BindAddr:   test.bindAddr,
+				HealthPort: 12799,
+			}
+			srv := newHealthServer(cfg, nil)
+			if srv == nil {
+				t.Fatal("expected an enabled health listener")
+			}
+			if srv.Addr != test.want {
+				t.Fatalf(
+					"health listener address = %q, want %q",
+					srv.Addr,
+					test.want,
+				)
+			}
+		})
+	}
+}
+
+// The address must not merely look right: it has to bind and answer.
+func TestHealthListenerBindsIPv6Loopback(t *testing.T) {
+	t.Parallel()
+
+	if l, err := net.Listen("tcp", "[::1]:0"); err != nil {
+		t.Skipf("no IPv6 loopback on this host: %s", err)
+	} else {
+		l.Close()
+	}
+
+	cfg := &config.Config{HealthPort: freeTCPPort(t), BindAddr: "::1"}
+	srv := newHealthServer(cfg, func() (uint64, bool) { return 4, true })
+	if srv == nil {
+		t.Fatal("expected an enabled health listener")
+	}
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+	go serveAuxiliaryListener("health", srv, logger)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
+
+	base := "http://" + srv.Addr
+	waitForListener(t, base+health.PathLive)
+	if code, body := getHealth(t, base+health.PathReady); code != http.StatusOK {
+		t.Fatalf(
+			"%s over IPv6 = %d, want 200 (%+v)",
+			health.PathReady,
+			code,
+			body,
+		)
+	}
+}

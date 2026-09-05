@@ -39,6 +39,19 @@ func (h *nodeHealth) recordTipGap(gapSlots uint64) {
 	h.tipGapKnown.Store(true)
 }
 
+// forgetTipGap returns the probe to its "no chain tip yet" state. Called
+// when the ledger that was reporting is torn down for a live database
+// Restore or Truncate: the last gap it reported describes a chain the node
+// is no longer following, and leaving it in place would let /readyz answer
+// 200 through the whole rebuild.
+func (h *nodeHealth) forgetTipGap() {
+	if h == nil {
+		return
+	}
+	h.tipGapKnown.Store(false)
+	h.tipGapSlots.Store(0)
+}
+
 // TipGapSlots reports the distance in slots between the wall-clock slot and
 // the node's chain tip, as observed on the most recent slot-clock tick. The
 // second return is false until the node has processed its first tick, which

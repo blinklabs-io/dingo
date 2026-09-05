@@ -19,9 +19,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/pprof"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -200,10 +202,11 @@ func newHealthServer(
 		readyTipGapSlots = config.DefaultHealthReadyGapSlots
 	}
 	return &http.Server{
-		Addr: fmt.Sprintf(
-			"%s:%d",
+		// JoinHostPort, not "%s:%d": an IPv6 bindAddr such as "::" has to
+		// be bracketed or net.Listen rejects the address.
+		Addr: net.JoinHostPort(
 			cfg.BindAddr,
-			cfg.HealthPort,
+			strconv.FormatUint(uint64(cfg.HealthPort), 10),
 		),
 		Handler:           health.NewMux(tipGap, readyTipGapSlots),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -287,10 +290,9 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			listeners,
 			dingo.ListenerConfig{
 				ListenNetwork: "tcp",
-				ListenAddress: fmt.Sprintf(
-					"%s:%d",
+				ListenAddress: net.JoinHostPort(
 					cfg.BindAddr,
-					cfg.RelayPort,
+					strconv.FormatUint(uint64(cfg.RelayPort), 10),
 				),
 				ReuseAddress: true,
 			},
@@ -302,10 +304,9 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			listeners,
 			dingo.ListenerConfig{
 				ListenNetwork: "tcp",
-				ListenAddress: fmt.Sprintf(
-					"%s:%d",
+				ListenAddress: net.JoinHostPort(
 					cfg.PrivateBindAddr,
-					cfg.PrivatePort,
+					strconv.FormatUint(uint64(cfg.PrivatePort), 10),
 				),
 				UseNtC: true,
 			},
@@ -407,10 +408,9 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	// pprof or other handlers registered on DefaultServeMux.
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", promhttp.Handler())
-	metricsAddr := fmt.Sprintf(
-		"%s:%d",
+	metricsAddr := net.JoinHostPort(
 		cfg.BindAddr,
-		cfg.MetricsPort,
+		strconv.FormatUint(uint64(cfg.MetricsPort), 10),
 	)
 	logger.Info(
 		"serving prometheus metrics on "+metricsAddr,
