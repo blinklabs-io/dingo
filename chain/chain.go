@@ -1083,6 +1083,10 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	if err != nil {
 		return err
 	}
+	// Drain the sequencer first: rollbackLocked queued this rollback's
+	// header invalidation there so it stays ordered against the
+	// announcements addBlockHeader queues on the same sequencer.
+	c.PublishPendingChainUpdates()
 	// Publish events after locks are released to prevent deadlocks
 	// when subscribers call back into chain/manager state. The
 	// mutex-holding ledger rollback path uses RollbackDeferred instead,
@@ -1373,7 +1377,20 @@ func (c *Chain) rollbackLocked(
 		if idx >= 0 {
 			// Rollback point is a queued header. Drop only the headers
 			// after it and leave the matched header itself queued.
+			dropped := len(c.headers) - (idx + 1)
 			c.headers = slices.Delete(c.headers, idx+1, len(c.headers))
+			// Those headers never become blocks, so any announcement
+			// they carried is void. This path returns no chain.update
+			// event at all -- no block was removed -- so without this
+			// the announcements would stay armed with nothing left to
+			// void them.
+			if dropped > 0 {
+				c.queueDeferredEventLocked(headerInvalidationEvent(
+					point,
+					HeaderInvalidationRollback,
+					c.nextHeaderSeqLocked(),
+				))
+			}
 			return nil, nil
 		}
 	}
@@ -1515,18 +1532,23 @@ func (c *Chain) rollbackLocked(
 	c.notifyWaitingIterators()
 	// Build events for caller to publish after locks are released
 	var pendingEvents []event.Event
-	// Emitted even when only queued headers were dropped: a header that
-	// never became a block still published an announcement, and the
+	// The header invalidation always goes on the chain-level sequencer,
+	// deferred or not, and is never handed back to the caller. Its only
+	// ordering requirement is against the announcements queued by
+	// addBlockHeader, which are on that same sequencer; publishing it
+	// inline from Rollback would bypass the sequencer and could place it
+	// ahead of an announcement that was queued before it. Non-deferred
+	// Rollback drains the sequencer itself once the lock is released.
+	//
+	// It is emitted even when only queued headers were dropped: a header
+	// that never became a block still published an announcement, and the
 	// ChainRollbackEvent below is deliberately block-only.
 	rollbackSeq := c.nextHeaderSeqLocked()
-	pendingEvents = append(
-		pendingEvents,
-		headerInvalidationEvent(
-			point,
-			HeaderInvalidationRollback,
-			rollbackSeq,
-		),
-	)
+	c.queueDeferredEventLocked(headerInvalidationEvent(
+		point,
+		HeaderInvalidationRollback,
+		rollbackSeq,
+	))
 	if len(rolledBackBlocks) > 0 {
 		// Rollback event - only emit when blocks were actually removed
 		pendingEvents = append(

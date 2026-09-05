@@ -308,6 +308,14 @@ type announcementRecord struct {
 	epoch  uint64
 	ebHash lcommon.Blake2b256
 	seenAt time.Time
+	// headerSeq is the chain-mutation sequence number of the header
+	// admission that armed this announcement, or zero when it was armed
+	// from the apply-path backstop rather than the ordered header stream.
+	// It is what lets handleRollback tell state belonging to the chain
+	// this rollback abandons from state belonging to the chain that
+	// replaced it. Never decreases: re-observing the same announcing
+	// ranking block keeps the highest sequence seen.
+	headerSeq uint64
 }
 
 type readyAnnouncement struct {
@@ -2726,28 +2734,98 @@ func (m *VoteManager) replaceHeaderStream() (<-chan event.Event, bool) {
 func (m *VoteManager) handleChainHeaderInvalidation(
 	evt chain.ChainHeaderInvalidationEvent,
 ) {
+	// prototypeEmissionMu linearizes this against an in-flight local
+	// emission, exactly as handleRollback does: without it a vote being
+	// signed for an announcement invalidated here could be committed after
+	// the cleanup ran.
+	m.prototypeEmissionMu.Lock()
+	defer m.prototypeEmissionMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if evt.Seq > m.lastHeaderStreamSeq {
 		m.lastHeaderStreamSeq = evt.Seq
 	}
-	dropped := 0
+	invalidated := make(map[lcommon.Blake2b256]struct{})
 	for rbHash, record := range m.announcements {
 		if record.slot > evt.Point.Slot {
 			delete(m.announcements, rbHash)
 			delete(m.votedAnnouncements, rbHash)
 			m.removePendingAnnouncementLocked(rbHash)
-			dropped++
+			invalidated[rbHash] = struct{}{}
 		}
 	}
-	if dropped > 0 {
-		m.logger.Debug(
-			"dropped leios announcements for headers no longer on our chain",
-			"point_slot", evt.Point.Slot,
-			"reason", evt.Reason,
-			"dropped", dropped,
-		)
+	if len(invalidated) == 0 {
+		return
 	}
+	droppedVotes := m.dropAnnouncementDerivedStateLocked(invalidated)
+	m.updateRecordsGaugeLocked()
+	m.logger.Debug(
+		"dropped leios announcements for headers no longer on our chain",
+		"point_slot", evt.Point.Slot,
+		"reason", evt.Reason,
+		"dropped_announcements", len(invalidated),
+		"dropped_votes", droppedVotes,
+	)
+}
+
+// dropAnnouncementDerivedStateLocked removes the votes, tallies and dedup
+// records that belong to the given announcing ranking blocks, and the
+// endorser-block acquisitions those announcements were the only reason to
+// keep. Callers must hold mu.
+//
+// It is keyed by announcing ranking block, not by slot, so a competing
+// announcement at the same slot -- the replacement chain's -- keeps its own
+// vote, tally and record. That is stricter than the slot-wide sweep
+// handleRollback performs for block rollbacks, and it is what frees the
+// (slot, voter) vote id so a re-vote on the replacement chain is accepted
+// rather than being read as equivocation.
+//
+// A local vote already published to peers is not retracted: the prototype has
+// no vote-retraction message, and none is needed. A vote names the announcing
+// ranking block, so a peer whose chain does not hold that block does not tally
+// it; peers that do hold it are on the fork we abandoned. Dropping the local
+// copy is what matters, because it is what would otherwise keep occupying the
+// vote id and be served to peers as if it were current.
+func (m *VoteManager) dropAnnouncementDerivedStateLocked(
+	invalidated map[lcommon.Blake2b256]struct{},
+) int {
+	droppedIds := make(map[lcommon.LeiosVoteId]struct{})
+	keptEbs := make(map[lcommon.Blake2b256]struct{})
+	for id, rec := range m.voteRecords {
+		if _, ok := invalidated[rec.announcingRbHash]; ok {
+			delete(m.voteRecords, id)
+			droppedIds[id] = struct{}{}
+		}
+	}
+	for key := range m.tallies {
+		if _, ok := invalidated[key.announcingRbHash]; ok {
+			delete(m.tallies, key)
+		}
+	}
+	if len(droppedIds) > 0 {
+		m.filterVotesLocked(func(sv *storedVote) bool {
+			_, dropped := droppedIds[lcommon.LeiosVoteId{
+				SlotNo:  sv.vote.SlotNo,
+				VoterId: sv.vote.VoterId,
+			}]
+			return !dropped
+		})
+	}
+	// An acquired endorser block is kept while any surviving announcement
+	// still refers to it: the same EB can be announced by more than one
+	// ranking block, and re-fetching it would be wasted work.
+	for _, record := range m.announcements {
+		keptEbs[record.ebHash] = struct{}{}
+	}
+	for _, rec := range m.voteRecords {
+		keptEbs[rec.ebHash] = struct{}{}
+	}
+	for ebHash := range m.acquiredEbs {
+		if _, keep := keptEbs[ebHash]; !keep {
+			delete(m.acquiredEbs, ebHash)
+		}
+	}
+	return len(droppedIds)
 }
 
 // handleChainHeaderAnnouncement arms an announcement from the chainsync
@@ -2766,7 +2844,7 @@ func (m *VoteManager) handleChainHeaderAnnouncement(
 	evt chain.ChainHeaderAnnouncementEvent,
 ) {
 	m.advanceHeaderStreamSeq(evt.Seq)
-	m.ObserveAnnouncement(evt.Slot, evt.RbHash, evt.EbHash)
+	m.observeAnnouncement(evt.Slot, evt.RbHash, evt.EbHash, evt.Seq)
 }
 
 // advanceHeaderStreamSeq records how far the ordered header stream has been
@@ -2819,6 +2897,18 @@ func (m *VoteManager) ObserveAnnouncement(
 	rbHash lcommon.Blake2b256,
 	ebHash lcommon.Blake2b256,
 ) {
+	m.observeAnnouncement(slot, rbHash, ebHash, 0)
+}
+
+// observeAnnouncement is ObserveAnnouncement with the chain-mutation sequence
+// number of the header admission that produced it. headerSeq is zero for
+// announcements that did not come from the ordered header stream.
+func (m *VoteManager) observeAnnouncement(
+	slot uint64,
+	rbHash lcommon.Blake2b256,
+	ebHash lcommon.Blake2b256,
+	headerSeq uint64,
+) {
 	epoch, err := m.epochProvider.EpochForSlot(slot)
 	if err != nil {
 		m.logger.Debug(
@@ -2830,9 +2920,17 @@ func (m *VoteManager) ObserveAnnouncement(
 	}
 	record := announcementRecord{
 		slot: slot, epoch: epoch, ebHash: ebHash, seenAt: m.now(),
+		headerSeq: headerSeq,
 	}
 	m.mu.Lock()
 	m.prunePrototypeStateLocked(record.seenAt)
+	// The apply-path backstop re-observes announcements the header stream
+	// already armed; keep the sequence that records where on the chain
+	// this announcement came from rather than clearing it to zero.
+	if existing, ok := m.announcements[rbHash]; ok &&
+		existing.headerSeq > record.headerSeq {
+		record.headerSeq = existing.headerSeq
+	}
 	m.announcements[rbHash] = record
 	_, acquired := m.acquiredEbs[ebHash]
 	pendingMap := m.removePendingAnnouncementLocked(rbHash)
@@ -2913,6 +3011,40 @@ func (m *VoteManager) handleEpochTransition(
 	)
 }
 
+// rollbackProtectedLocked returns the announcing ranking blocks, vote ids and
+// endorser blocks that belong to announcements the ordered header stream armed
+// *after* the chain mutation numbered rollbackSeq -- that is, state belonging
+// to the chain that replaced the one being rolled back. A zero rollbackSeq
+// means the rollback carries no sequence number and supersedes nothing, so
+// nothing is protected. Callers must hold mu.
+func (m *VoteManager) rollbackProtectedLocked(rollbackSeq uint64) (
+	map[lcommon.Blake2b256]struct{},
+	map[lcommon.LeiosVoteId]struct{},
+	map[lcommon.Blake2b256]struct{},
+) {
+	rbs := make(map[lcommon.Blake2b256]struct{})
+	ids := make(map[lcommon.LeiosVoteId]struct{})
+	ebs := make(map[lcommon.Blake2b256]struct{})
+	if rollbackSeq == 0 {
+		return rbs, ids, ebs
+	}
+	for rbHash, record := range m.announcements {
+		if record.headerSeq > rollbackSeq {
+			rbs[rbHash] = struct{}{}
+			ebs[record.ebHash] = struct{}{}
+		}
+	}
+	if len(rbs) == 0 {
+		return rbs, ids, ebs
+	}
+	for id, rec := range m.voteRecords {
+		if _, ok := rbs[rec.announcingRbHash]; ok {
+			ids[id] = struct{}{}
+		}
+	}
+	return rbs, ids, ebs
+}
+
 // handleRollback drops votes and tallies past the rollback point and
 // clears the committee memo: a rollback across an epoch boundary can
 // change the stake snapshots committees derive from, and recomputation is
@@ -2922,45 +3054,73 @@ func (m *VoteManager) handleRollback(evt chain.ChainRollbackEvent) {
 	defer m.prototypeEmissionMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// chain.update and the ordered header stream are delivered on
+	// independent channels, so this rollback can arrive after the header
+	// stream has already applied the matching invalidation *and* re-armed
+	// the replacement chain's announcements -- which is systematic during
+	// fork resolution, since it rolls back and then re-queues the peer's
+	// fork headers. Everything below is keyed by slot, and the replacement
+	// chain occupies the same slots, so an unguarded sweep would delete the
+	// replacement chain's announcement, its vote, its tally and its dedup
+	// record, leaving the node unable to re-vote for a slot it had already
+	// voted on correctly.
+	//
+	// Protect exactly the state whose announcement the header stream armed
+	// after this rollback. An unsequenced rollback (Seq 0) supersedes
+	// nothing and protects nothing, so it prunes exactly as before.
+	protectedRbs, protectedIds, protectedEbs := m.rollbackProtectedLocked(
+		evt.Seq,
+	)
 	m.filterVotesLocked(func(sv *storedVote) bool {
-		return sv.vote.SlotNo <= evt.Point.Slot
+		if sv.vote.SlotNo <= evt.Point.Slot {
+			return true
+		}
+		_, protected := protectedIds[lcommon.LeiosVoteId{
+			SlotNo:  sv.vote.SlotNo,
+			VoterId: sv.vote.VoterId,
+		}]
+		return protected
 	})
 	for key := range m.tallies {
-		if key.slotNo > evt.Point.Slot {
-			delete(m.tallies, key)
+		if key.slotNo <= evt.Point.Slot {
+			continue
 		}
+		if _, protected := protectedRbs[key.announcingRbHash]; protected {
+			continue
+		}
+		delete(m.tallies, key)
 	}
 	// Records share the tally predicate, so record/tally pairs are
 	// dropped together and a re-vote for the replacement chain is
 	// accepted instead of being mistaken for equivocation.
-	for id := range m.voteRecords {
-		if id.SlotNo > evt.Point.Slot {
-			delete(m.voteRecords, id)
+	for id, rec := range m.voteRecords {
+		if id.SlotNo <= evt.Point.Slot {
+			continue
 		}
+		if _, protected := protectedRbs[rec.announcingRbHash]; protected {
+			continue
+		}
+		delete(m.voteRecords, id)
 	}
-	// Announcement pruning is skipped when the ordered header stream has
-	// already applied a mutation newer than this rollback. That stream
-	// carries the matching invalidation, which pruned these same entries in
-	// order; anything armed since is a header the chain admitted after the
-	// rollback. Without this guard the two streams -- delivered on
-	// independent channels with no ordering between them -- would let a
-	// late rollback delete an announcement for the replacement chain, which
-	// is systematic during fork resolution (roll back, then re-queue the
-	// peer's fork headers). An unsequenced event (Seq 0) is never
-	// superseded and always prunes.
-	if evt.Seq == 0 || evt.Seq >= m.lastHeaderStreamSeq {
-		for rbHash, record := range m.announcements {
-			if record.slot > evt.Point.Slot {
-				delete(m.announcements, rbHash)
-				delete(m.votedAnnouncements, rbHash)
-				m.removePendingAnnouncementLocked(rbHash)
-			}
+	for rbHash, record := range m.announcements {
+		if record.slot <= evt.Point.Slot {
+			continue
 		}
+		if _, protected := protectedRbs[rbHash]; protected {
+			continue
+		}
+		delete(m.announcements, rbHash)
+		delete(m.votedAnnouncements, rbHash)
+		m.removePendingAnnouncementLocked(rbHash)
 	}
 	for ebHash, record := range m.acquiredEbs {
-		if record.slot > evt.Point.Slot {
-			delete(m.acquiredEbs, ebHash)
+		if record.slot <= evt.Point.Slot {
+			continue
 		}
+		if _, protected := protectedEbs[ebHash]; protected {
+			continue
+		}
+		delete(m.acquiredEbs, ebHash)
 	}
 	m.updateRecordsGaugeLocked()
 	m.committees = make(map[uint64]*epochEntry)

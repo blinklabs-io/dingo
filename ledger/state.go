@@ -3645,18 +3645,15 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	// A database commit becomes visible before its AfterCommit callbacks run.
 	// Exclude that window so blocksAboveSlot can never publish an Undo for the
 	// new state before the matching Apply reaches the ordered lane.
-	var rollbackEvents []event.Event
 	err := func() error {
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
 		if err := ls.validateAndEmitRollbackUndo(point); err != nil {
 			return err
 		}
-		evts, rbErr := ls.chain.RollbackDeferred(point)
-		if rbErr != nil {
+		if _, rbErr := ls.chain.RollbackDeferred(point); rbErr != nil {
 			return rbErr
 		}
-		rollbackEvents = evts
 		return nil
 	}()
 	if err != nil {
@@ -3671,9 +3668,12 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	// that sequencer once the mutex is released (a nil pubs drains
 	// immediately on the unlocked path). See
 	// chain.Chain.PublishPendingChainUpdates.
-	if len(rollbackEvents) > 0 {
-		pubs.drainChain(ls.chain)
-	}
+	// Drained unconditionally: rollbackLocked queues this rollback's header
+	// invalidation on the sequencer even when no block was removed (the
+	// rollback point was a queued header, so only later headers were
+	// dropped and no chain.update is produced at all). drainChain is
+	// idempotent per chain.
+	pubs.drainChain(ls.chain)
 	if err := ls.rollback(point); err != nil {
 		return fmt.Errorf("synchronize ledger rollback state: %w", err)
 	}
