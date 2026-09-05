@@ -4369,6 +4369,59 @@ The start, expiry, current-period, and remaining-period gauges use that same
 protocol lifetime; the KES key's `2^depth` cryptographic capacity remains a
 separate upper bound rather than an operational lifetime.
 
+When `ForgerConfig.OpCertLedgerView` is wired (`NewBlockForger` requires
+`EraParams` alongside it), the runtime gate pre-flights the opcert's
+issue-number counter against `LedgerView.LatestOpCertSequence` using the
+same era-scoped rule block application enforces at apply time
+(`ledger/eras.ValidateOpCertCounter`, the single implementation shared with
+`validateOpCertCounter` in `ledger/verify_opcert.go` and mirrored here as
+`validateOpCertSequence`): a counter behind the last value the ledger
+observed for this pool is always rejected (stale or stolen hot key), and
+one that skips ahead of it is additionally rejected in Praos eras (Babbage
+onward) but accepted in TPraos eras (Shelley-Alonzo). `EraParams.ProtocolParamsForSlot`
+resolves the era for the slot being forged. Startup validation and the
+KES-lifetime gate above cover genesis-derived evolution limits, which are
+fixed for the life of the chain; this covers the era-scoped counter rule
+and the on-chain observed counter, both of which can change after startup
+as blocks are applied (this node's own or a peer's for the same pool) or
+as the chain crosses an era boundary. The check runs right after leader
+selection (a Praos leader-VRF check that, together with the KES-lifetime
+gate above, already precedes it) -- it costs a real ledger read, so it is
+skipped for a slot this pool does not lead -- but still before Leios work
+and the forge-slot fence, so a bad key state costs a could-not-forge
+disposition instead of a burned leader slot and a rejected `AddLocalBlock`
+call. The check is opt-in: a nil `OpCertLedgerView` (dev mode, embedders
+without ledger wiring) skips it entirely, unchanged from before.
+
+`LedgerState.LatestOpCertSequence` -- the `LedgerView` method both this
+gate and startup's `PoolCredentials.ValidateAgainstLedger` read through --
+resolves the "latest observed" counter via the same Mithril-boundary-aware
+path as block application (`latestOpCertCounterForValidation`, both now
+backed by the shared `latestOpCertCounterAfterMithril`), instead of a plain
+`MAX` over the whole table. A Mithril-restored node's per-pool opcert
+history is only trustworthy after the certified boundary; a plain MAX could
+return a stale pre-boundary row that block application itself does not
+trust as a baseline. Neither caller otherwise holds a lock across
+`mithrilLedgerSlot`, so both resolve it through the existing lock-safe
+`mithrilLedgerSlotSnapshot` accessor before calling the shared resolver,
+rather than reading the field directly.
+
+Startup's `PoolCredentials.ValidateAgainstLedger` deliberately stays on the
+staleness-only half of this rule and does not apply the era-scoped no-gap
+check the forge loop enforces. Applying it at startup would pair a
+wall-clock-resolved era (`LedgerState.CurrentSlot` is wall-clock and valid
+regardless of sync state) with a baseline that only reflects the applied
+chain (`LatestOpCertSequence`); on a node whose applied tip is behind wall-
+clock time -- an interrupted initial sync, a resume after downtime, a
+restore to an older snapshot -- those two can disagree enough to make a
+pool several opcert rotations into its life look gapped against a baseline
+that has simply not caught up yet, and a fatal startup rejection would
+prevent the node from ever syncing to the point that makes the baseline
+correct. The forge loop's own gate does not have this problem: it runs
+after the upstream-sync skip and the leader check, so both its era and its
+baseline come from near-tip state, and a rejection there costs one slot
+rather than the node's ability to start.
+
 Each production forge attempt takes an independently owned snapshot of one
 complete credential generation at the runtime gate. The snapshot deep-copies
 the VRF secret, KES secret, verification keys, opcert, and validated lifetime;
