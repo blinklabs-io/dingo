@@ -36,7 +36,9 @@ PROTOC_SHA256=$(PROTOC_SHA256_$(PROTOC_OS)_$(PROTOC_ARCH))
 
 # Set version strings: use env vars if set, else git
 VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null)
-COMMIT_HASH ?= $(shell git rev-parse --short HEAD)
+# Pin the abbreviation to 7 chars so the stamped CommitHash is deterministic and
+# matches the Homebrew formula bump (which slices the first 7 of the full SHA).
+COMMIT_HASH ?= $(shell git rev-parse --short=7 HEAD)
 GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(VERSION)' -X '$(GOMODULE)/internal/version.CommitHash=$(COMMIT_HASH)'"
 BUILD_TAGS ?= dingo_extra_plugins
 GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
