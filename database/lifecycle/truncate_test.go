@@ -860,13 +860,27 @@ func TestTruncateRejectsPreCancelledContextWithoutRecordingMarker(
 func TestTruncateClearsConsumedUtxoPruneFloorAboveTarget(t *testing.T) {
 	const sweptSlot uint64 = 35
 
+	sweptTxId := bytes.Repeat([]byte{0x3B}, 32)
+
+	requireSweptUtxoAbsent := func(t *testing.T, f *chainFixture) {
+		t.Helper()
+		utxo, err := f.db.Metadata().GetUtxoIncludingSpent(sweptTxId, 0, nil)
+		require.NoError(t, err)
+		require.Nil(
+			t,
+			utxo,
+			"the swept row was hard-deleted; a truncate must not "+
+				"re-materialize it, since nothing can restore its contents",
+		)
+	}
+
 	newFixtureWithFloor := func(t *testing.T) *chainFixture {
 		t.Helper()
 		f := buildTestChain(t, 5)
 		txn := f.db.MetadataTxn(true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
 			return f.db.CreateUtxo(txn, &models.Utxo{
-				TxId:        bytes.Repeat([]byte{0x3B}, 32),
+				TxId:        sweptTxId,
 				OutputIdx:   0,
 				AddedSlot:   10,
 				DeletedSlot: 30,
@@ -876,6 +890,7 @@ func TestTruncateClearsConsumedUtxoPruneFloorAboveTarget(t *testing.T) {
 		pruned, err := f.db.UtxosDeleteConsumed(sweptSlot, 100, nil)
 		require.NoError(t, err)
 		require.Equal(t, 1, pruned)
+		requireSweptUtxoAbsent(t, f)
 		floor, err := f.db.ConsumedUtxoPruneFloor(nil)
 		require.NoError(t, err)
 		require.Equal(t, sweptSlot, floor)
@@ -896,6 +911,10 @@ func TestTruncateClearsConsumedUtxoPruneFloorAboveTarget(t *testing.T) {
 			floor,
 			"a truncate past the floor must not leave it above the new tip",
 		)
+		// Clearing the record is an admission that this database has no
+		// rollback boundary left to enforce, not a claim that the swept rows
+		// came back.
+		requireSweptUtxoAbsent(t, f)
 	})
 
 	t.Run("target above the floor keeps it", func(t *testing.T) {
@@ -913,5 +932,6 @@ func TestTruncateClearsConsumedUtxoPruneFloorAboveTarget(t *testing.T) {
 			floor,
 			"a truncate that does not cross the floor must leave it intact",
 		)
+		requireSweptUtxoAbsent(t, f)
 	})
 }

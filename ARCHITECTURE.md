@@ -517,15 +517,30 @@ deeper rewind, until the descent ran out of room at the Mithril anchor and the
 pipeline halted with a UTxO set no rewind could repair (issue #3766).
 
 The sweep therefore records how deep it removed rows in the
-`consumed_utxo_prune_slot` sync-state key, mirrored in memory as
-`LedgerState.consumedUtxoPruneFloor` (a failed read is not treated as "nothing
-swept"; the floor is re-read and the rollback refused if that fails too).
-`rollback` and `rollbackChainAndState` refuse a target below it with
-`ErrRollbackBelowUtxoPruneFloor` before mutating anything — `rollbackChainAndState`
-checks separately because it truncates the primary chain before synchronizing
-the ledger, and a refusal raised only by `rollback` would leave the chain rewound
-past a point the ledger cannot follow. At-tip validation recovery clamps its own
-escalating rewind target to the ledger tip instead of erroring
+`consumed_utxo_prune_slot` sync-state key, written in the same transaction that
+removes them. The value is read from the database at each check rather than
+mirrored in memory: a mirror is only ever refreshed after the sweep's own
+transaction commits, so between commit and refresh it reports a floor lower than
+the database holds — permissive in exactly the direction the check exists to
+prevent. A read or parse failure fails closed and refuses the rollback.
+
+`rollback` and `rollbackChainAndState` refuse a target below the floor with
+`ErrRollbackBelowUtxoPruneFloor` before mutating anything, and
+`rollbackIsAppliable` matches so the loop detector does not classify such a
+target as crossable. Both checks run against the *resolved* target from
+`resolveRollbackTarget`, because the same-slot competitor redirect above can
+turn a target sitting exactly on a boundary into one below it;
+`rollbackChainAndState` checks separately, and pre-resolves, because it
+truncates the primary chain before synchronizing the ledger, so a refusal raised
+only by `rollback` would leave the chain rewound past a point the ledger cannot
+follow.
+
+A peer rollback the floor refuses is handled like the Mithril boundary —
+chainsync state resets and a fresh intersection is requested — rather than
+returned, because `handleEventChainsync` routes a rollback error to
+`FatalErrorFunc` and a peer's choice of rollback point must not terminate the
+node. At-tip validation recovery clamps its own escalating rewind target to the
+ledger tip instead of erroring
 (`dingo_ledger_attip_recovery_prune_floor_clamped_total`), keeping the
 non-destructive half of recovery — a fresh intersection so peer rotation can
 offer a different candidate chain — and dropping only a rewind that could not

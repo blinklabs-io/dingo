@@ -18,12 +18,16 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -301,10 +305,12 @@ func TestAtTipRecoveryRewindBelowConsumedUtxoPruneFloor(t *testing.T) {
 		f.inLiveSet(t, f.prunedTxId),
 		"output consumed at or below the prune floor must be hard-deleted by the sweep",
 	)
+	floor, err := f.db.ConsumedUtxoPruneFloor(nil)
+	require.NoError(t, err)
 	require.Equal(
 		t,
 		uint64(pruneFixtureFloorSlot),
-		f.ls.consumedUtxoPruneFloor.Load(),
+		floor,
 		"the sweep must record how deep it removed spent rows",
 	)
 
@@ -339,9 +345,11 @@ func TestAtTipRecoveryPruneFloorBindsAboveMithrilAnchor(t *testing.T) {
 	f := newPrunedUtxoFixture(t, mithrilAnchorSlot)
 
 	f.ls.cleanupConsumedUtxos()
+	floor, err := f.db.ConsumedUtxoPruneFloor(nil)
+	require.NoError(t, err)
 	require.Greater(
 		t,
-		f.ls.consumedUtxoPruneFloor.Load(),
+		floor,
 		uint64(mithrilAnchorSlot),
 		"the fixture must place the prune floor above the Mithril anchor",
 	)
@@ -442,10 +450,12 @@ func TestRollbackIsAppliableRejectsBelowConsumedUtxoPruneFloor(t *testing.T) {
 	)
 }
 
-// TestConsumedUtxoPruneFloorIsPersisted pins the floor's durability. A node
-// restarted after a sweep must still refuse the rewinds that sweep made
-// unrestorable, so the floor lives in sync state rather than only in memory.
-func TestConsumedUtxoPruneFloorIsPersisted(t *testing.T) {
+// TestConsumedUtxoPruneFloorIsReadFromTheDatabase pins where the floor comes
+// from. It is deliberately not mirrored in memory: a mirror is only refreshed
+// after the sweep's transaction commits, so between commit and refresh it
+// reports a lower floor than the database holds, and a rollback admitted on
+// that stale value is exactly the divergence the floor exists to refuse.
+func TestConsumedUtxoPruneFloorIsReadFromTheDatabase(t *testing.T) {
 	f := newPrunedUtxoFixture(t, 0)
 
 	floor, err := f.db.ConsumedUtxoPruneFloor(nil)
@@ -458,17 +468,182 @@ func TestConsumedUtxoPruneFloorIsPersisted(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(pruneFixtureFloorSlot), floor)
 
-	// A fresh LedgerState over the same database picks the floor back up.
-	restarted := &LedgerState{
-		db: f.db,
-		config: LedgerStateConfig{
-			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
+	// A floor written by another writer -- a prior run, or the sweep's own
+	// transaction before any in-process cache could observe it -- is honored
+	// immediately, with no reload step.
+	require.NoError(t, f.db.SetSyncState(
+		"consumed_utxo_prune_slot",
+		strconv.FormatUint(pruneFixtureRetainedSlot, 10),
+		nil,
+	))
+	below, seen, err := f.ls.rollbackBelowConsumedUtxoPruneFloor(
+		ocommon.NewPoint(pruneFixtureFloorSlot, nil),
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(pruneFixtureRetainedSlot), seen)
+	require.True(
+		t,
+		below,
+		"the check must read the persisted floor, not a cached copy",
+	)
+
+	// A malformed value fails closed rather than reading as "nothing swept".
+	require.NoError(t, f.db.SetSyncState(
+		"consumed_utxo_prune_slot", "not-a-slot", nil,
+	))
+	_, _, err = f.ls.rollbackBelowConsumedUtxoPruneFloor(
+		ocommon.NewPoint(pruneFixtureFloorSlot, nil),
+	)
+	require.Error(t, err)
+	require.ErrorIs(
+		t,
+		f.ls.rollback(
+			ocommon.NewPoint(
+				pruneFixtureDeepRewindSlot,
+				testHashBytes("3766-deep"),
+			),
+		),
+		strconv.ErrSyntax,
+		"an unreadable floor must refuse the rollback",
+	)
+}
+
+// TestRollbackChainAndStateRefusesRedirectBelowPruneFloor covers the ordering
+// hazard between the same-slot competitor redirect (issue #3678) and the prune
+// floor. rollbackChainAndState truncates the primary chain and only then
+// synchronizes the ledger. A target sitting exactly on the floor whose hash
+// differs from the applied tip resolves to an applied ancestor strictly below
+// the floor, so checking the unresolved point would admit it here and refuse it
+// only after chain.Rollback had already run, splitting the chain from the
+// ledger.
+func TestRollbackChainAndStateRefusesRedirectBelowPruneFloor(t *testing.T) {
+	f := newPrunedUtxoFixture(t, 0)
+	f.ls.cleanupConsumedUtxos()
+
+	// Put the applied ledger tip on a same-slot competitor at the floor, with
+	// a recorded nonce so the redirect treats it as genuinely applied.
+	competitorHash := testHashBytes("3766-floor-competitor")
+	require.NoError(t, f.db.SetBlockNonce(
+		competitorHash,
+		pruneFixtureFloorSlot,
+		[]byte("nonce-3766-competitor"),
+		false,
+		nil,
+	))
+	competitorTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(pruneFixtureFloorSlot, competitorHash),
+		BlockNumber: 5,
 	}
-	restarted.loadConsumedUtxoPruneFloor()
+	require.NoError(t, f.db.SetTip(competitorTip, nil))
+	f.ls.currentTip = competitorTip
+	f.ls.publishSnapshotsLocked()
+
+	chainTipBefore := f.ls.chain.Tip().Point
+
+	// The target's slot equals the floor, so an unresolved check passes; the
+	// redirect resolves it below the floor.
+	target := ocommon.NewPoint(
+		pruneFixtureFloorSlot,
+		testHashBytes("3766-floor"),
+	)
+	resolved, err := f.ls.resolveRollbackTarget(target, competitorTip)
+	require.NoError(t, err)
+	require.Less(
+		t,
+		resolved.Slot,
+		uint64(pruneFixtureFloorSlot),
+		"fixture must produce a redirect below the floor",
+	)
+
+	require.ErrorIs(
+		t,
+		f.ls.rollbackChainAndState(target),
+		ErrRollbackBelowUtxoPruneFloor,
+	)
 	require.Equal(
 		t,
-		uint64(pruneFixtureFloorSlot),
-		restarted.consumedUtxoPruneFloor.Load(),
+		chainTipBefore,
+		f.ls.chain.Tip().Point,
+		"the primary chain must not be truncated for a refused rollback",
 	)
+	require.Equal(
+		t,
+		competitorTip.Point,
+		f.ls.currentTip.Point,
+		"the ledger tip must not move for a refused rollback",
+	)
+}
+
+// TestHandleEventChainsyncRollbackRejectsBelowPruneFloor pins that a peer
+// rollback the prune floor refuses is handled as peer divergence, not as a
+// local fault. handleEventChainsync routes any error returned by the rollback
+// handler to FatalErrorFunc, so returning one here would let a peer's choice of
+// rollback point terminate the node. The handler must instead reject the peer
+// chain and ask for a fresh intersection, exactly as the Mithril boundary does.
+func TestHandleEventChainsyncRollbackRejectsBelowPruneFloor(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+
+	// A floor above the rollback target, as a sweep at a higher tip would
+	// have left behind.
+	require.NoError(t, fixture.ls.db.SetSyncState(
+		"consumed_utxo_prune_slot",
+		strconv.FormatUint(fixture.currentTip.Point.Slot, 10),
+		nil,
+	))
+
+	fatalCalls := 0
+	fixture.ls.config.FatalErrorFunc = func(error) { fatalCalls++ }
+
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	subId := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if !ok {
+				return
+			}
+			select {
+			case resyncCh <- e:
+			default:
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
+	})
+
+	err := fixture.ls.handleEventChainsyncRollback(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point:        fixture.ancestorTip.Point,
+		},
+		nil,
+	)
+	require.NoError(
+		t,
+		err,
+		"a refused rollback must not surface as an error the fatal path acts on",
+	)
+	require.Zero(t, fatalCalls)
+
+	// Neither side moved: the chain was not truncated and the ledger tip
+	// stands.
+	require.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	require.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+
+	e := testutil.RequireReceive(
+		t,
+		resyncCh,
+		time.Second,
+		"expected prune-floor rollback resync event",
+	)
+	require.Equal(
+		t,
+		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+		e.Reason,
+	)
+	require.Equal(t, fixture.connId, e.ConnectionId)
 }

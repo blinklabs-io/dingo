@@ -1085,18 +1085,6 @@ type LedgerState struct {
 	syncUpstreamTipSlot  atomic.Uint64 // latest admitted peer header slot
 	syncUpstreamState    atomic.Pointer[upstreamSyncState]
 	nextNonceReadyEpoch  atomic.Uint64 // last ready epoch emitted for next-epoch nonce stability
-	// consumedUtxoPruneFloor mirrors database.ConsumedUtxoPruneFloor: the
-	// highest slot the consumed-UTxO sweep has hard-deleted spent rows at or
-	// below. Rolling back below it cannot restore what the sweep removed, so
-	// rollback refuses instead of reporting a repair it did not perform
-	// (issue #3766). Written by the cleanup timer goroutine and read by the
-	// ledger pipeline goroutine, hence atomic rather than lock-protected.
-	consumedUtxoPruneFloor atomic.Uint64
-	// consumedUtxoPruneFloorLoaded records whether the mirror above actually
-	// holds the persisted value. A failed read must not present itself as
-	// "nothing has been swept", so callers fall back to a direct read and
-	// refuse the rollback if that fails too.
-	consumedUtxoPruneFloorLoaded atomic.Bool
 
 	// Rate-limiting for non-active rollback drop messages
 	dropRollbackLastLog time.Time // last time we logged a drop rollback
@@ -1486,7 +1474,6 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	}
 
 	ls.loadMithrilTrustBoundary()
-	ls.loadConsumedUtxoPruneFloor()
 
 	// Initialize database worker pool for async operations
 	if !ls.config.DatabaseWorkerPoolConfig.Disabled {
@@ -1664,72 +1651,27 @@ func (ls *LedgerState) subscribeBlockfetchEvents(
 	)
 }
 
-// loadConsumedUtxoPruneFloor seeds the in-memory mirror of the persisted
-// consumed-UTxO prune floor at startup, so the first rollback of a restarted
-// node is bounded by sweeps performed in earlier runs and not only by sweeps
-// this process has done.
-func (ls *LedgerState) loadConsumedUtxoPruneFloor() {
-	floor, err := ls.db.ConsumedUtxoPruneFloor(nil)
-	if err != nil {
-		ls.config.Logger.Error(
-			"failed to read consumed UTxO prune floor",
-			"component", "ledger",
-			"error", err,
-		)
-		return
-	}
-	ls.consumedUtxoPruneFloor.Store(floor)
-	ls.consumedUtxoPruneFloorLoaded.Store(true)
-}
-
-// recordConsumedUtxoPruneFloor raises the in-memory mirror after a sweep has
-// hard-deleted spent rows at or below slot. The floor only moves up: a sweep
-// at a lower slot does not make rows an earlier, higher sweep removed
-// restorable again.
-func (ls *LedgerState) recordConsumedUtxoPruneFloor(slot uint64) {
-	for {
-		current := ls.consumedUtxoPruneFloor.Load()
-		if slot <= current {
-			break
-		}
-		if ls.consumedUtxoPruneFloor.CompareAndSwap(current, slot) {
-			break
-		}
-	}
-	ls.consumedUtxoPruneFloorLoaded.Store(true)
-}
-
-// consumedUtxoPruneFloorSlot returns the deepest slot a rollback may target and
-// still be able to restore every UTxO consumed above it.
-//
-// It fails closed. When the persisted floor could not be read at startup the
-// mirror is not authoritative, so this re-reads it; if that read also fails the
-// error is returned and the caller refuses the rollback. Treating an
-// unreadable floor as "nothing has been swept" would re-open exactly the silent
-// divergence the floor exists to refuse.
-func (ls *LedgerState) consumedUtxoPruneFloorSlot() (uint64, error) {
-	if ls.consumedUtxoPruneFloorLoaded.Load() {
-		return ls.consumedUtxoPruneFloor.Load(), nil
-	}
-	if ls.db == nil {
-		return 0, nil
-	}
-	floor, err := ls.db.ConsumedUtxoPruneFloor(nil)
-	if err != nil {
-		return 0, err
-	}
-	ls.consumedUtxoPruneFloor.Store(floor)
-	ls.consumedUtxoPruneFloorLoaded.Store(true)
-	return floor, nil
-}
-
 // rollbackBelowConsumedUtxoPruneFloor reports whether rolling back to point
-// would leave the live UTxO set short of outputs the consumed-UTxO sweep
-// already removed.
+// would leave the live UTxO set short of outputs the consumed-UTxO sweep has
+// already removed, and returns the floor it compared against.
+//
+// The persisted sync-state row is read directly rather than mirrored in memory.
+// A mirror is only ever refreshed after the sweep's own transaction commits, so
+// between that commit and the refresh it reports a floor lower than the one the
+// database holds -- permissive in exactly the direction that re-opens the
+// silent divergence this check exists to prevent (issue #3766). A rollback is
+// rare and already opens transactions of its own, so it can afford the read.
+//
+// It fails closed: a read or parse failure is returned, and the caller refuses
+// the rollback. Treating an unreadable floor as "nothing has been swept" would
+// defeat the check exactly when the metadata store is least trustworthy.
 func (ls *LedgerState) rollbackBelowConsumedUtxoPruneFloor(
 	point ocommon.Point,
 ) (bool, uint64, error) {
-	floor, err := ls.consumedUtxoPruneFloorSlot()
+	if ls.db == nil {
+		return false, 0, nil
+	}
+	floor, err := ls.db.ConsumedUtxoPruneFloor(nil)
 	if err != nil {
 		return false, 0, err
 	}
@@ -2911,12 +2853,80 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 		}
 		// These rows are gone for good: TruncateAfterSlot restores spent
 		// UTxOs with an UPDATE, which cannot reach a row that no longer
-		// exists. Mirror the floor the database just persisted so rollback
-		// refuses to target a point below it (issue #3766).
+		// exists. UtxosDeleteConsumed persisted the floor in the same
+		// transaction that removed them, so rollback already refuses to
+		// target a point below it (issue #3766).
 		if pruned > 0 {
-			ls.recordConsumedUtxoPruneFloor(pruneSlot)
+			ls.config.Logger.Debug(
+				"consumed UTxO sweep raised the prune floor",
+				"component", "ledger",
+				"prune_floor_slot", pruneSlot,
+				"utxos", pruned,
+			)
 		}
 	}
+}
+
+// resolveRollbackTarget returns the point a rollback will actually truncate to,
+// applying the same-slot competitor redirect whose rationale is set out at its
+// call site in LedgerState.rollback. Both
+// LedgerState.rollback and rollbackChainAndState resolve the target before
+// deciding whether it is legal: rollbackChainAndState truncates the primary
+// chain before it calls rollback, so checking the unresolved point there would
+// let a redirect below a boundary surface only after the chain had already
+// moved (issues #3678, #3766).
+func (ls *LedgerState) resolveRollbackTarget(
+	point ocommon.Point,
+	currentTip ochainsync.Tip,
+) (ocommon.Point, error) {
+	sameSlotCompetitor := point.Slot == currentTip.Point.Slot &&
+		!bytes.Equal(point.Hash, currentTip.Point.Hash)
+	if sameSlotCompetitor {
+		tipNonce, nonceErr := ls.db.GetBlockNonce(currentTip.Point, nil)
+		if nonceErr != nil {
+			return ocommon.Point{}, fmt.Errorf(
+				"read applied nonce for contested tip at slot %d: %w",
+				currentTip.Point.Slot,
+				nonceErr,
+			)
+		}
+		sameSlotCompetitor = len(tipNonce) > 0
+	}
+	if sameSlotCompetitor {
+		// latestLedgerPrimaryChainAncestor searches block nonces over the
+		// half-open range [start, point.Slot), so passing point already means
+		// "strictly below the contested slot". Passing point.Slot-1 would skip
+		// an applied ancestor sitting at exactly point.Slot-1.
+		ancestor, ok, ancestorErr := ls.latestLedgerPrimaryChainAncestor(
+			point,
+			false,
+		)
+		if ancestorErr != nil {
+			return ocommon.Point{}, fmt.Errorf(
+				"resolve applied ancestor below contested slot %d: %w",
+				point.Slot,
+				ancestorErr,
+			)
+		}
+		if !ok {
+			return ocommon.Point{}, fmt.Errorf(
+				"no applied ancestor below contested slot %d: %w",
+				point.Slot,
+				ErrNoAppliedAncestorBelowContestedSlot,
+			)
+		}
+		ls.config.Logger.Warn(
+			"rollback target shares the applied tip's slot with a different hash, redirecting below the contested slot",
+			"component", "ledger",
+			"contested_slot", point.Slot,
+			"rollback_hash", hex.EncodeToString(point.Hash),
+			"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
+			"ancestor_slot", ancestor.Slot,
+			"ancestor_hash", hex.EncodeToString(ancestor.Hash),
+		)
+		point = ancestor
+	}
+	return point, nil
 }
 
 func (ls *LedgerState) rollback(point ocommon.Point) error {
@@ -2974,53 +2984,11 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	// applied -- enforceDurableTipFloor also repairs an in-memory tip that
 	// leads the durable state -- so there is nothing at the contested slot to
 	// undo and the slot-only predicates are already correct for it.
-	sameSlotCompetitor := point.Slot == currentTip.Point.Slot &&
-		!bytes.Equal(point.Hash, currentTip.Point.Hash)
-	if sameSlotCompetitor {
-		tipNonce, nonceErr := ls.db.GetBlockNonce(currentTip.Point, nil)
-		if nonceErr != nil {
-			return fmt.Errorf(
-				"read applied nonce for contested tip at slot %d: %w",
-				currentTip.Point.Slot,
-				nonceErr,
-			)
-		}
-		sameSlotCompetitor = len(tipNonce) > 0
+	resolved, resolveErr := ls.resolveRollbackTarget(point, currentTip)
+	if resolveErr != nil {
+		return resolveErr
 	}
-	if sameSlotCompetitor {
-		// latestLedgerPrimaryChainAncestor searches block nonces over the
-		// half-open range [start, point.Slot), so passing point already means
-		// "strictly below the contested slot". Passing point.Slot-1 would skip
-		// an applied ancestor sitting at exactly point.Slot-1.
-		ancestor, ok, ancestorErr := ls.latestLedgerPrimaryChainAncestor(
-			point,
-			false,
-		)
-		if ancestorErr != nil {
-			return fmt.Errorf(
-				"resolve applied ancestor below contested slot %d: %w",
-				point.Slot,
-				ancestorErr,
-			)
-		}
-		if !ok {
-			return fmt.Errorf(
-				"no applied ancestor below contested slot %d: %w",
-				point.Slot,
-				ErrNoAppliedAncestorBelowContestedSlot,
-			)
-		}
-		ls.config.Logger.Warn(
-			"rollback target shares the applied tip's slot with a different hash, redirecting below the contested slot",
-			"component", "ledger",
-			"contested_slot", point.Slot,
-			"rollback_hash", hex.EncodeToString(point.Hash),
-			"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
-			"ancestor_slot", ancestor.Slot,
-			"ancestor_hash", hex.EncodeToString(ancestor.Hash),
-		)
-		point = ancestor
-	}
+	point = resolved
 	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
 		return ErrRollbackExceedsMithrilBoundary
 	}
@@ -3451,16 +3419,30 @@ func (ls *LedgerState) drainBlockPipelineBeforeRollback(
 func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 	ls.RLock()
 	mithrilLedgerSlot := ls.mithrilLedgerSlot
+	currentTip := ls.currentTip
 	ls.RUnlock()
-	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
+	// Check the boundaries here as well as in ls.rollback: this function
+	// truncates the primary chain first and synchronizes the ledger
+	// afterwards, so a refusal raised only by ls.rollback would leave the
+	// chain rewound past a point the ledger cannot follow.
+	//
+	// Both checks run against the *resolved* target. ls.rollback redirects a
+	// same-slot competitor to the newest applied ancestor strictly below the
+	// contested slot, so a target sitting exactly on a boundary can resolve to
+	// one below it; checking the unresolved point would admit it here and
+	// refuse it only after chain.Rollback had already run (issues #3678,
+	// #3766). The tip can still move between this check and ls.rollback's own
+	// -- the pre-existing Mithril check has the same window -- and ls.rollback
+	// remains the backstop that refuses before mutating the ledger.
+	resolved, resolveErr := ls.resolveRollbackTarget(point, currentTip)
+	if resolveErr != nil {
+		return resolveErr
+	}
+	if mithrilLedgerSlot > 0 && resolved.Slot < mithrilLedgerSlot {
 		return ErrRollbackExceedsMithrilBoundary
 	}
-	// Check the consumed-UTxO prune floor here as well as in ls.rollback:
-	// this function truncates the primary chain first and synchronizes the
-	// ledger afterwards, so a refusal raised only by ls.rollback would leave
-	// the chain rewound past a point the ledger cannot follow (issue #3766).
 	belowPruneFloor, pruneFloor, floorErr := ls.rollbackBelowConsumedUtxoPruneFloor(
-		point,
+		resolved,
 	)
 	if floorErr != nil {
 		return fmt.Errorf(
@@ -3472,7 +3454,7 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 		return fmt.Errorf(
 			"%w: target slot %d, prune floor %d",
 			ErrRollbackBelowUtxoPruneFloor,
-			point.Slot,
+			resolved.Slot,
 			pruneFloor,
 		)
 	}

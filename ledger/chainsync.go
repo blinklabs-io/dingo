@@ -2183,6 +2183,45 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			)
 			return nil
 		}
+		if errors.Is(err, ErrRollbackBelowUtxoPruneFloor) {
+			// The consumed-UTxO sweep hard-deleted the rows this rewind would
+			// have to restore, so the target is not crossable. That is a peer
+			// divergence this node cannot follow, not a local fault: refuse it
+			// and ask for a fresh intersection, exactly as the Mithril
+			// boundary does. Returning the error instead would reach
+			// handleEventChainsync's fatal path and terminate the node on a
+			// rollback a peer chose (issue #3766).
+			ls.config.Logger.Error(
+				"chainsync rollback is below the consumed UTxO prune floor, rejecting peer chain",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
+				"connection_id", e.ConnectionId.String(),
+				"error", err,
+				"hint",
+				"UTxOs consumed above the prune floor were hard-deleted and cannot be restored by a rewind",
+			)
+			ls.reportUnrecoverableRollbackIfStuck(
+				e.Point,
+				event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+				e.ConnectionId,
+			)
+			ls.resetChainsyncResyncState()
+			ls.setChainsyncState(SyncingChainsyncState)
+			pending.add(
+				ls.config.EventBus,
+				event.ChainsyncResyncEventType,
+				event.NewEvent(
+					event.ChainsyncResyncEventType,
+					event.ChainsyncResyncEvent{
+						ConnectionId: e.ConnectionId,
+						Reason: event.
+							ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+					},
+				),
+			)
+			return nil
+		}
 		return fmt.Errorf("chain rollback failed: %w", err)
 	}
 	// The rollback applied: we crossed to the peer's point, so any prior

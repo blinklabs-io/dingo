@@ -65,18 +65,12 @@ func (d *Database) ConsumedUtxoPruneFloor(txn *Txn) (uint64, error) {
 	return slot, nil
 }
 
-// setConsumedUtxoPruneFloor raises the recorded floor to slot. The floor only
-// ever moves up: a later sweep at a lower slot (the tip fell after a rollback)
-// does not make the rows an earlier, higher sweep already removed restorable
-// again.
-func (d *Database) setConsumedUtxoPruneFloor(slot uint64, txn *Txn) error {
-	current, err := d.ConsumedUtxoPruneFloor(txn)
-	if err != nil {
-		return err
-	}
-	if slot <= current {
-		return nil
-	}
+// writeConsumedUtxoPruneFloor records slot as the floor. It performs no read of
+// its own: the caller compares against the value it read before deleting
+// anything, so the only work left after an irreversible blob delete is this
+// write. Callers must not lower the floor -- rows an earlier, higher sweep
+// removed do not become restorable because a later sweep ran at a lower slot.
+func (d *Database) writeConsumedUtxoPruneFloor(slot uint64, txn *Txn) error {
 	return d.SetSyncState(
 		consumedUtxoPruneFloorSyncKey,
 		strconv.FormatUint(slot, 10),

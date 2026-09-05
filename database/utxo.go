@@ -1027,6 +1027,16 @@ func (d *Database) UtxosDeleteConsumed(
 			}
 		}()
 	}
+	// Read the recorded prune floor before deleting anything. Recording it
+	// afterwards would put a read that can fail -- a malformed or unreadable
+	// persisted value -- after the blob deletions, and a blob transaction that
+	// has already issued irreversible deletes cannot be undone by rolling the
+	// metadata transaction back. Reading first means the only work left after
+	// the deletes is a SetSyncState write.
+	pruneFloor, err := d.ConsumedUtxoPruneFloor(txn)
+	if err != nil {
+		return 0, err
+	}
 	// Get UTxOs that are marked as deleted and older than our slot window
 	utxos, err := d.utxoStore().GetUtxosDeletedBeforeSlot(
 		slot,
@@ -1068,9 +1078,11 @@ func (d *Database) UtxosDeleteConsumed(
 	// that removes them. TruncateAfterSlot restores spent UTxOs with an
 	// UPDATE, which cannot reach a row that no longer exists, so a rollback
 	// below this slot silently leaves the live set short of every output
-	// consumed above it (issue #3766).
-	if utxoCount > 0 {
-		if err := d.setConsumedUtxoPruneFloor(slot, txn); err != nil {
+	// consumed above it (issue #3766). The floor only ever moves up: a sweep
+	// at a lower slot does not make rows an earlier, higher sweep removed
+	// restorable again.
+	if utxoCount > 0 && slot > pruneFloor {
+		if err := d.writeConsumedUtxoPruneFloor(slot, txn); err != nil {
 			return 0, err
 		}
 	}
