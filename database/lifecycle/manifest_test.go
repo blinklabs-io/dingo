@@ -15,6 +15,7 @@
 package lifecycle_test
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -84,6 +85,27 @@ func TestManifestDetectsTamperedContent(t *testing.T) {
 			"resolveSnapshotSource can report corruption instead of "+
 			"'not found'",
 	)
+}
+
+func TestManifestRejectsOversizedInput(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, lifecycle.ManifestFileName)
+	require.NoError(t, os.WriteFile(
+		path, bytes.Repeat([]byte{'x'}, lifecycle.MaxManifestBytes+1), 0o600,
+	))
+	_, err := lifecycle.ReadManifest(dir)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "size exceeds maximum")
+	require.ErrorContains(t, err, "1048576")
+}
+
+func TestWriteManifestRejectsOversizedInput(t *testing.T) {
+	dir := t.TempDir()
+	m := testManifest()
+	m.Description = string(bytes.Repeat([]byte{'x'}, lifecycle.MaxManifestBytes))
+	err := lifecycle.WriteManifest(dir, m)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "exceeds maximum")
 }
 
 // TestManifestRejectsNewerFormatVersion verifies that a manifest whose
