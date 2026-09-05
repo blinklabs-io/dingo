@@ -557,8 +557,16 @@ func ComparePoolEpoch(
 			// simply not be computed yet (reference_lag, ERROR); past it, it
 			// is a genuine gap in what Dingo can answer (dingo_db_missing,
 			// ERROR).
+			// RewardsPending is the chain-position form of the same question
+			// the grace window asks, and it is the one that survives a replay:
+			// the wall-clock window compares against the epoch's real close
+			// time, which for a from-genesis replay is years ago, so it can
+			// never fire and a row Dingo has not written yet reads as a hard
+			// gap (issue #3857).
 			cat := CategoryDBMissing
-			if graceHours > 0 && !epochEndTime.IsZero() &&
+			if dingoPool.RewardsPending {
+				cat = CategoryReferenceLag
+			} else if graceHours > 0 && !epochEndTime.IsZero() &&
 				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
 				cat = CategoryReferenceLag
 			}
@@ -582,6 +590,14 @@ func ComparePoolEpoch(
 				dingoValue = dingoPool.MemberRewardTotal
 			}
 			if dingoValue != koiosPool.MemberRewards {
+				// Before the rewards are applied the spendable flags are
+				// provisional, so Dingo reads high by the forfeitures that
+				// have not happened yet. That is a timing statement, not a
+				// divergence, and must not be reported as one (dingo #3852).
+				cat := CategoryValueMismatch
+				if dingoPool.RewardsPending {
+					cat = CategoryReferenceLag
+				}
 				out = append(out, CheckMismatch{
 					Network:    network,
 					Epoch:      epoch,
@@ -589,7 +605,7 @@ func ComparePoolEpoch(
 					Field:      "member_rewards",
 					DingoValue: dingoValue,
 					KoiosValue: koiosPool.MemberRewards,
-					Category:   CategoryValueMismatch,
+					Category:   cat,
 					CheckedAt:  now,
 				})
 			}
@@ -664,6 +680,10 @@ type accountRewardKey struct {
 //
 // graceHours/epochEndTime/now/network/epoch all mirror ComparePoolEpoch's
 // identical parameters and meaning.
+// rewardsPending reports that Dingo has not yet computed this epoch's rewards,
+// in which case every account Koios has a reward for is absent on the Dingo side
+// for a reason that is not a divergence. See DingoPoolEpochData.RewardsPending;
+// this is the account-granularity half of the same guard (issue #3857).
 func CompareAccountEpoch(
 	network string,
 	epoch uint64,
@@ -672,6 +692,7 @@ func CompareAccountEpoch(
 	now time.Time,
 	graceHours int,
 	epochEndTime time.Time,
+	rewardsPending bool,
 ) []CheckMismatch {
 	var out []CheckMismatch
 
@@ -768,8 +789,14 @@ func CompareAccountEpoch(
 		dr, dingoOK := dingoByKey[k]
 		switch {
 		case koiosOK && !dingoOK:
+			// The chain-position form of the same question the grace window
+			// asks, and the one that survives a replay: an epoch Dingo has not
+			// computed yet makes every Koios reward look absent here, which is
+			// a statement about timing rather than a divergence (issue #3857).
 			cat := CategoryAcctOnlyKoios
-			if graceHours > 0 && !epochEndTime.IsZero() &&
+			if rewardsPending {
+				cat = CategoryReferenceLag
+			} else if graceHours > 0 && !epochEndTime.IsZero() &&
 				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
 				cat = CategoryReferenceLag
 			}
@@ -815,6 +842,17 @@ func CompareAccountEpoch(
 			})
 		default:
 			if !lovelaceEqual(dr.Amount, kr.Earned) {
+				// Guarded the same way the presence case above is, and the
+				// same way ComparePoolEpoch guards its own value comparison:
+				// before the applying boundary the amount can still change,
+				// so a difference is a statement about timing rather than a
+				// divergence (issue #3857). Leaving this strict while the
+				// presence check is not would report the same epoch as both
+				// a lag and a mismatch.
+				cat := CategoryValueMismatch
+				if rewardsPending {
+					cat = CategoryReferenceLag
+				}
 				out = append(out, CheckMismatch{
 					Network:      network,
 					Epoch:        epoch,
@@ -822,7 +860,7 @@ func CompareAccountEpoch(
 					Field:        "account_reward_amount",
 					DingoValue:   dr.Amount,
 					KoiosValue:   kr.Earned,
-					Category:     CategoryValueMismatch,
+					Category:     cat,
 					CheckedAt:    now,
 				})
 			}

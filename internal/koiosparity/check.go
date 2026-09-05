@@ -728,6 +728,20 @@ func checkEpoch(
 	// interrupted or not-yet-run account fetch can never be silently treated
 	// as "nothing to compare" — see KoiosAccountCoverage's doc comment.
 	if accountsEnabled && hasStakeEpoch {
+		// An epoch Dingo has not computed yet makes every Koios reward look
+		// absent, which is timing rather than divergence (issue #3857). The
+		// pool rows carry that answer already: when the reward output for the
+		// stake epoch has not been written, every entry reports pending, so
+		// requiring all of them keeps this from firing when only some pools sit
+		// before their own boundary. An empty map says nothing, so it does not
+		// suppress anything.
+		accountRewardsPending := len(dingoPoolMap) > 0
+		for _, dingoPool := range dingoPoolMap {
+			if dingoPool == nil || !dingoPool.RewardsPending {
+				accountRewardsPending = false
+				break
+			}
+		}
 		allMismatches = append(
 			allMismatches,
 			compareEpochAccounts(
@@ -740,6 +754,7 @@ func checkEpoch(
 				now,
 				graceHours,
 				epochEndTime,
+				accountRewardsPending,
 				logger,
 			)...,
 		)
@@ -814,6 +829,7 @@ func compareEpochAccounts(
 	now time.Time,
 	graceHours int,
 	epochEndTime time.Time,
+	rewardsPending bool,
 	logger *slog.Logger,
 ) []CheckMismatch {
 	coverage, covErr := cache.GetAccountCoverage(network, epoch)
@@ -920,6 +936,7 @@ func compareEpochAccounts(
 			now,
 			graceHours,
 			epochEndTime,
+			rewardsPending,
 		)...,
 	)
 	out = append(
