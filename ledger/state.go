@@ -759,7 +759,15 @@ type EndorserBlockProviderFunc func(
 // returns an error when no fetch connection is available or the relay does not
 // serve the block. The endorser block shares the slot of the ranking block that
 // references it (they are co-produced), so ebSlot is the ranking block's slot.
-type EndorserBlockFetcherFunc func(ebSlot uint64, ebHash []byte) error
+//
+// ctx bounds the whole fetch, including its per-connection failover. The caller
+// owns the budget: block application waits for this fetch, so an implementation
+// must not outlive the context it was handed (dingo #3552).
+type EndorserBlockFetcherFunc func(
+	ctx context.Context,
+	ebSlot uint64,
+	ebHash []byte,
+) error
 
 // BlockfetchRequestRangeFunc describes a callback function used to start a blockfetch request for
 // a range of blocks
@@ -4167,6 +4175,12 @@ func (ls *LedgerState) ledgerReadChain(
 	// Without this, the consumer blocks forever on the channel
 	// read if the reader goroutine exits silently on an error.
 	defer close(resultCh)
+	reportErr := func(err error) {
+		select {
+		case resultCh <- readChainResult{err: err}:
+		case <-ctx.Done():
+		}
+	}
 	const maxReconcileRetries = 3
 	reconcileRetries := 0
 	for {
@@ -4184,6 +4198,7 @@ func (ls *LedgerState) ledgerReadChain(
 					"error", err,
 					"start_slot", startPoint.Slot,
 				)
+				reportErr(fmt.Errorf("create chain iterator from %v: %w", startPoint, err))
 				return
 			}
 			if reconcileRetries >= maxReconcileRetries {
@@ -4200,6 +4215,7 @@ func (ls *LedgerState) ledgerReadChain(
 					"max_retries",
 					maxReconcileRetries,
 				)
+				reportErr(fmt.Errorf("exhausted ledger rollback retries from %v: %w", startPoint, err))
 				return
 			}
 			ls.config.Logger.Warn(
@@ -4218,6 +4234,7 @@ func (ls *LedgerState) ledgerReadChain(
 					"start_slot", startPoint.Slot,
 					"start_hash", hex.EncodeToString(startPoint.Hash),
 				)
+				reportErr(fmt.Errorf("recover missing chain iterator start point: %w", reconcileErr))
 				return
 			}
 			reconcileRetries++
@@ -4233,6 +4250,7 @@ func (ls *LedgerState) ledgerReadChain(
 					"start_hash",
 					hex.EncodeToString(startPoint.Hash),
 				)
+				reportErr(fmt.Errorf("ledger rollback did not change missing chain iterator start point: %v", startPoint))
 				return
 			}
 			continue
@@ -4255,6 +4273,12 @@ func (ls *LedgerState) ledgerReadChainIterator(
 	var err error
 	var shouldBlock bool
 	var result readChainResult
+	reportErr := func(err error) {
+		select {
+		case resultCh <- readChainResult{err: err}:
+		case <-ctx.Done():
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -4322,6 +4346,7 @@ func (ls *LedgerState) ledgerReadChainIterator(
 							"error", err,
 						)
 						releaseGatherLock()
+						reportErr(fmt.Errorf("get next block from chain iterator: %w", err))
 						return
 					}
 					shouldBlock = true
@@ -4341,6 +4366,7 @@ func (ls *LedgerState) ledgerReadChainIterator(
 			if next == nil {
 				ls.config.Logger.Error("next block from chain iterator is nil")
 				releaseGatherLock()
+				reportErr(errors.New("chain iterator returned nil block"))
 				return
 			}
 			if next.Rollback {
@@ -4839,16 +4865,24 @@ func ledgerPipelineBackoff(consecutiveNoProgress int) (time.Duration, bool) {
 	), true
 }
 
-// ledgerPipelineRetryDelay applies the common no-progress backoff while
-// retaining a caller's minimum delay for retry classes that need one. A
-// deterministic rejection therefore cannot remain at a fixed retry cadence,
-// but a transient class still keeps its required minimum spacing.
-func ledgerPipelineRetryDelay(
+// certifiedEndorserBlockPipelineRetryDelay returns how long the pipeline waits
+// before restarting after a certified Leios endorser block was unavailable.
+//
+// The gap escalates with the no-progress count. A flat one-second retry meant
+// an endorser block that stays unavailable respun the chain reader, re-read the
+// batch and re-decoded it once per second indefinitely -- spending the node on a
+// fetch that is not getting anywhere -- and the ledger-side fetch is itself
+// bounded and retried now, so a fast pipeline restart adds nothing (dingo
+// #3552). The floor stays at certifiedEndorserBlockRetryDelay so the common
+// case, where the endorser block lands moments later, still recovers promptly.
+func certifiedEndorserBlockPipelineRetryDelay(
 	consecutiveNoProgress int,
-	minimum time.Duration,
-) (time.Duration, bool) {
-	backoff, stuck := ledgerPipelineBackoff(consecutiveNoProgress)
-	return max(backoff, minimum), stuck
+) time.Duration {
+	delay := certifiedEndorserBlockRetryDelay
+	if backoff, _ := ledgerPipelineBackoff(consecutiveNoProgress); backoff > delay {
+		delay = backoff
+	}
+	return delay
 }
 
 // pipelineProgress is the ledger pipeline's view of whether restarts are
@@ -4861,6 +4895,13 @@ type pipelineProgress struct {
 	haveLastTip           bool
 	lastTipSlot           uint64
 	lastTipHash           []byte
+}
+
+// stuck reports whether the pipeline has restarted without progress often
+// enough that the failure should be treated as deterministic.
+func (p pipelineProgress) stuck() bool {
+	_, stuck := ledgerPipelineBackoff(p.consecutiveNoProgress)
+	return stuck
 }
 
 // trackPipelineProgress folds one pipeline restart into the no-progress
@@ -4974,12 +5015,9 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 			// accounting entirely, so an endorser block that never becomes
 			// available wedged the pipeline without ever raising the stuck
 			// signal. Count it like any other failure to advance; the
-			// bespoke minimum delay below still governs its pacing.
+			// bespoke delay below still governs its pacing.
 			progress = ls.trackPipelineProgress(progress)
-			endorserBackoff, endorserStuck := ledgerPipelineRetryDelay(
-				progress.consecutiveNoProgress,
-				certifiedEndorserBlockRetryDelay,
-			)
+			endorserStuck := progress.stuck()
 			ls.metrics.setPipelineNoProgress(
 				progress.consecutiveNoProgress,
 				endorserStuck,
@@ -5000,7 +5038,11 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 					err,
 				)
 			}
-			timer := time.NewTimer(endorserBackoff)
+			timer := time.NewTimer(
+				certifiedEndorserBlockPipelineRetryDelay(
+					progress.consecutiveNoProgress,
+				),
+			)
 			select {
 			case <-ctx.Done():
 				timer.Stop()
