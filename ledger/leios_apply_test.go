@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -671,38 +672,62 @@ func TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently(t *testing.T) {
 	mu.Unlock()
 }
 
-// TestLeiosBackfillerSpawnCancelsFetch verifies that a backfill does not keep
-// running after the block-application context is cancelled. Before the fetch
-// callback accepted a context, a pipeline restart or node shutdown left the
-// network request alive and competing with the next apply attempt (dingo #3552).
-func TestLeiosBackfillerSpawnCancelsFetch(t *testing.T) {
-	started := make(chan struct{})
-	cancelled := make(chan error, 1)
-	hash := lcommon.NewBlake2b256(leiosTestHash(0xEF))
+// TestLeiosBackfillerFetchOnceDedupsWithSpawnInFlight verifies that the
+// mandatory retry path observes the best-effort fetch marker for the same
+// (slot, hash) reference instead of starting a redundant fetch.
+func TestLeiosBackfillerFetchOnceDedupsWithSpawnInFlight(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	fetchDone := make(chan struct{})
+
+	hash := lcommon.NewBlake2b256(leiosTestHash(0xEE))
+	r := leiosEbRef{slot: 100, hash: hash}
 	b := &leiosBackfiller{
-		fetch: func(ctx context.Context, _ uint64, _ []byte) error {
-			close(started)
-			<-ctx.Done()
-			cancelled <- ctx.Err()
-			return ctx.Err()
+		fetch: func(_ context.Context, _ uint64, _ []byte) error {
+			mu.Lock()
+			calls++
+			mu.Unlock()
+			started <- struct{}{}
+			<-release
+			return nil
 		},
 		provider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
 			return nil, false
 		},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		sem:    make(chan struct{}, leiosBackfillConcurrency),
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	b.spawn(ctx, leiosEbRef{slot: 300, hash: hash})
-	<-started
-	cancel()
 
-	select {
-	case err := <-cancelled:
-		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(time.Second):
-		t.Fatal("backfill fetch did not observe cancellation")
-	}
+	b.spawn(t.Context(), r)
+	testutil.RequireReceive(
+		t,
+		started,
+		time.Second,
+		"spawn fetch never started",
+	)
+	go func() {
+		defer close(fetchDone)
+		_ = b.fetchOnce(t.Context(), r, time.Millisecond)
+	}()
+	testutil.RequireNoReceive(
+		t,
+		started,
+		200*time.Millisecond,
+		"fetchOnce started a redundant fetch for spawn's in-flight reference",
+	)
+
+	mu.Lock()
+	require.Equal(t, 1, calls)
+	mu.Unlock()
+	close(release)
+	testutil.RequireReceive(
+		t,
+		fetchDone,
+		time.Second,
+		"fetchOnce did not finish",
+	)
 }
 
 // TestLeiosBackfillerAwaitFetchDoesNotSkipFastOnDifferentSlotCompletion is the

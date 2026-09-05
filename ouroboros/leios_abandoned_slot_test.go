@@ -166,6 +166,7 @@ func TestLeiosBlockTxsAbandonedSlotFailsOverAndBecomesAvailable(t *testing.T) {
 
 	deadline := time.Now().Add(1500 * time.Millisecond)
 	txs, err := o.fetchLeiosEbTxsBatchedUntil(
+		context.Background(),
 		abandonedConn.LeiosFetch().Client,
 		point,
 		1,
@@ -181,12 +182,17 @@ func TestLeiosBlockTxsAbandonedSlotFailsOverAndBecomesAvailable(t *testing.T) {
 	o.leiosFetchGuardFor(abandonedConn.Id()).markFetchOK()
 	require.NoError(
 		t,
-		o.FetchEndorserBlockByPoint(context.Background(), point.Slot, point.Hash),
+		o.FetchEndorserBlockByPoint(
+			context.Background(),
+			point.Slot,
+			point.Hash,
+		),
 	)
 	abandonedRetired := cm.GetConnectionById(abandonedConn.Id()) == nil
 	require.True(
 		t,
-		abandonedRetired || o.leiosFetchGuardFor(abandonedConn.Id()).inCooldown(time.Now()),
+		abandonedRetired ||
+			o.leiosFetchGuardFor(abandonedConn.Id()).inCooldown(time.Now()),
 		"abandoned peer was neither cooled down nor retired",
 	)
 	require.True(
