@@ -38,6 +38,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func rewardCalcUint64Ptr(value uint64) *uint64 {
+	return &value
+}
+
 func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
@@ -154,6 +158,8 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 			DelegatedStake:             1_000,
 			OwnerStake:                 500,
 			DelegatorCount:             2,
+			BlocksProduced:             rewardCalcUint64Ptr(10),
+			TotalBlocksInEpoch:         rewardCalcUint64Ptr(10),
 			CapturedSlot:               100,
 			BoundarySlot:               100,
 		},
@@ -455,6 +461,8 @@ func applyGuardExpiredLeaderScenario(
 			DelegatedStake:             1_000,
 			OwnerStake:                 500,
 			DelegatorCount:             2,
+			BlocksProduced:             rewardCalcUint64Ptr(10),
+			TotalBlocksInEpoch:         rewardCalcUint64Ptr(10),
 			CapturedSlot:               100,
 			BoundarySlot:               100,
 		},
@@ -1429,6 +1437,8 @@ func TestApplyStakeRewardsUsesPrecomputedOutputs(t *testing.T) {
 			DelegatedStake:             1_000,
 			OwnerStake:                 500,
 			DelegatorCount:             2,
+			BlocksProduced:             rewardCalcUint64Ptr(10),
+			TotalBlocksInEpoch:         rewardCalcUint64Ptr(10),
 			CapturedSlot:               100,
 			BoundarySlot:               100,
 		},
@@ -1632,6 +1642,8 @@ func TestApplyPrecomputedStakeRewardsChecksFinalAccountRegistration(
 			DelegatedStake:             1_000,
 			OwnerStake:                 500,
 			DelegatorCount:             2,
+			BlocksProduced:             rewardCalcUint64Ptr(10),
+			TotalBlocksInEpoch:         rewardCalcUint64Ptr(10),
 			CapturedSlot:               100,
 			BoundarySlot:               100,
 		},
