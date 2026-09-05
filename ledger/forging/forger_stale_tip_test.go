@@ -85,7 +85,7 @@ func TestForgeSkipsWhenLedgerTipTrailsHeaderFrontier(t *testing.T) {
 	require.Equal(
 		t,
 		float64(1),
-		testutil.ToFloat64(forger.metrics.forgeStaleTipSkip),
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipSlotGap),
 	)
 	// Never silently: the skip is a WARN an operator can alert on.
 	require.Contains(
@@ -114,7 +114,14 @@ func TestForgeProceedsWithinHeaderFrontierTolerance(t *testing.T) {
 
 	require.Equal(t, 1, builder.calls)
 	require.Equal(t, 1, broadcaster.calls)
-	require.Zero(t, testutil.ToFloat64(forger.metrics.forgeStaleTipSkip))
+	require.Zero(
+		t,
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipSlotGap),
+	)
+	require.Zero(
+		t,
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipHashDiverged),
+	)
 	require.NotContains(
 		t,
 		logs.String(),
@@ -190,4 +197,164 @@ func TestTipGapGaugeReportsApplyBacklogOnEveryLeaderCheck(t *testing.T) {
 	caughtUp, _, _ := newStaleTipTestForger(t, 200, 199, 199, &logs)
 	require.NoError(t, caughtUp.checkAndForgeProduction(context.Background()))
 	require.Zero(t, testutil.ToFloat64(caughtUp.metrics.tipGapSlots))
+}
+
+// newEqualSlotForkTestForger builds a production forger whose applied tip and
+// header frontier sit at the SAME slot but carry the given hashes.
+func newEqualSlotForkTestForger(
+	t *testing.T,
+	appliedHash, frontierHash []byte,
+	logs *bytes.Buffer,
+) (*BlockForger, *forgerTestBuilder, *forgerTestBroadcaster) {
+	t.Helper()
+	block := newForgerTestBlock(200, 2)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	broadcaster := &forgerTestBroadcaster{}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(logs, nil)),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       200,
+			chainTipSlot:      100,
+			chainTipHash:      appliedHash,
+			frontierSlot:      100,
+			frontierHash:      frontierHash,
+			slotsPerKESPeriod: 100,
+		},
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+	return forger, builder, broadcaster
+}
+
+// TestForgeSkipsOnEqualSlotFrontierDivergence is the equal-slot fork the slot
+// gap cannot see. Chain selection replaced the block at the applied tip's slot
+// with a competing one at the SAME slot that the ledger has not applied, so
+// the gap is 0 while the ledger state still describes the block that was
+// replaced -- the builder would parent the block on one chain position while
+// its transactions, protocol parameters and leader eligibility came from
+// another.
+func TestForgeSkipsOnEqualSlotFrontierDivergence(t *testing.T) {
+	var logs bytes.Buffer
+	forger, builder, broadcaster := newEqualSlotForkTestForger(
+		t,
+		bytes.Repeat([]byte{0xAA}, 32),
+		bytes.Repeat([]byte{0xBB}, 32),
+		&logs,
+	)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Zero(t, builder.calls, "must not forge across an equal-slot fork")
+	require.Zero(t, broadcaster.calls)
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipHashDiverged),
+	)
+	// The slot-gap reason must not be charged for a divergence.
+	require.Zero(
+		t,
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipSlotGap),
+	)
+	require.Contains(
+		t,
+		logs.String(),
+		"forge skip: ledger tip stale vs header frontier",
+	)
+	require.Contains(t, logs.String(), `"reason":"frontier_hash_diverged"`)
+	require.Contains(t, logs.String(), `"level":"WARN"`)
+	// The gauge is a slot gap and there is none; the divergence shows on the
+	// counter, not here.
+	require.Zero(t, testutil.ToFloat64(forger.metrics.tipGapSlots))
+}
+
+// TestForgeProceedsWhenFrontierMatchesAppliedTip pins the other side: the same
+// slot with the same hash is the normal caught-up state and must forge.
+func TestForgeProceedsWhenFrontierMatchesAppliedTip(t *testing.T) {
+	var logs bytes.Buffer
+	hash := bytes.Repeat([]byte{0xAA}, 32)
+	forger, builder, broadcaster := newEqualSlotForkTestForger(
+		t,
+		hash,
+		bytes.Clone(hash),
+		&logs,
+	)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Equal(t, 1, builder.calls)
+	require.Equal(t, 1, broadcaster.calls)
+	require.Zero(
+		t,
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipHashDiverged),
+	)
+	require.NotContains(
+		t,
+		logs.String(),
+		"forge skip: ledger tip stale vs header frontier",
+	)
+}
+
+// TestForgeProceedsWhenEitherTipHashIsEmpty pins that a genesis or
+// uninitialised primary chain -- where there is no hash to compare -- does not
+// wedge a fresh node into never forging.
+func TestForgeProceedsWhenEitherTipHashIsEmpty(t *testing.T) {
+	for name, tc := range map[string]struct {
+		applied, frontier []byte
+	}{
+		"frontier hash unknown": {
+			applied:  bytes.Repeat([]byte{0xAA}, 32),
+			frontier: []byte{},
+		},
+		"applied hash unknown": {
+			applied:  []byte{},
+			frontier: bytes.Repeat([]byte{0xBB}, 32),
+		},
+		"both at genesis": {applied: []byte{}, frontier: []byte{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var logs bytes.Buffer
+			forger, builder, _ := newEqualSlotForkTestForger(
+				t,
+				tc.applied,
+				tc.frontier,
+				&logs,
+			)
+			require.NoError(
+				t,
+				forger.checkAndForgeProduction(context.Background()),
+			)
+			require.Equal(t, 1, builder.calls)
+			require.Zero(
+				t,
+				testutil.ToFloat64(
+					forger.metrics.forgeStaleTipSkipHashDiverged,
+				),
+			)
+		})
+	}
+}
+
+// TestForgeStaleTipSkipReasonsArePreMaterialized pins that both reason series
+// exist before the first skip, so a dashboard is not looking at an absent
+// series.
+func TestForgeStaleTipSkipReasonsArePreMaterialized(t *testing.T) {
+	var logs bytes.Buffer
+	hash := bytes.Repeat([]byte{0xAA}, 32)
+	forger, _, _ := newEqualSlotForkTestForger(
+		t,
+		hash,
+		bytes.Clone(hash),
+		&logs,
+	)
+	require.Equal(
+		t,
+		2,
+		testutil.CollectAndCount(forger.metrics.forgeStaleTipSkip),
+	)
 }

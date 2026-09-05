@@ -107,6 +107,7 @@ type forgerTestSlotClock struct {
 	chainTipSlot      uint64
 	chainTipHash      []byte
 	frontierSlot      uint64
+	frontierHash      []byte
 	upstreamTipSlot   uint64
 	upstreamActive    bool
 	slotsPerKESPeriod uint64
@@ -124,36 +125,19 @@ func (c forgerTestSlotClock) ChainTip() ocommon.Point {
 	return ocommon.Point{Slot: c.chainTipSlot, Hash: c.chainTipHash}
 }
 
-// PrimaryChainTip mirrors the applied tip unless the test describes a primary
-// tip of its own. Mirroring is the caught-up steady state, so a test that sets
-// no primary chain tip field observes no backlog and no divergence.
-//
-// Setting primaryTipSlot or primaryTipHash is itself enough to opt in: a test
-// that set primaryTipSlot but forgot primaryTipExplicit would otherwise
-// silently get the mirrored applied tip, so its gap would read 0 and it would
-// pass no matter what the forger did -- which is exactly what happened to the
-// configurable tolerance test. primaryTipExplicit remains for the one case the
-// values cannot express on their own: an explicitly empty primary tip (slot 0,
-// no hash), which is an uninitialised primary chain.
-//
-// The values are used verbatim, including a primary tip BEHIND the applied
-// tip, which is a real state the forger must handle and which a clamp would
-// hide.
+// PrimaryChainTip defaults to the applied tip in both slot and hash, so a test
+// that sets neither frontier field observes no ledger-apply backlog and no
+// equal-slot divergence.
 func (c forgerTestSlotClock) PrimaryChainTip() ocommon.Point {
-	if !c.primaryTipExplicit && c.primaryTipSlot == 0 &&
-		c.primaryTipHash == nil {
-		return ocommon.Point{Slot: c.chainTipSlot, Hash: c.chainTipHash}
+	slot := c.frontierSlot
+	if slot < c.chainTipSlot {
+		slot = c.chainTipSlot
 	}
-	return ocommon.Point{Slot: c.primaryTipSlot, Hash: c.primaryTipHash}
-}
-
-// PrimaryChainTipSlot defaults to the applied tip, so a test that does not
-// set frontierSlot explicitly observes no ledger-apply backlog.
-func (c forgerTestSlotClock) PrimaryChainTipSlot() uint64 {
-	if c.frontierSlot < c.chainTipSlot {
-		return c.chainTipSlot
+	hash := c.frontierHash
+	if hash == nil {
+		hash = c.chainTipHash
 	}
-	return c.frontierSlot
+	return ocommon.Point{Slot: slot, Hash: hash}
 }
 
 func (forgerTestSlotClock) NextSlotTime() (time.Time, error) {
