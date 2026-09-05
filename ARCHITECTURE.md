@@ -3698,6 +3698,14 @@ dial capacity; local-root and bootstrap peers, and any peer that has connected
 at least once, keep retrying, and the drop is suppressed while the node has no
 eligible upstream so its last leads back onto the network are never discarded.
 
+Peer sharing is an address-validation boundary in both directions. The server
+callback exports only sharable, nonzero-port IP literals accepted by the shared
+peer-governor routability policy; operator-configured private peers remain
+usable locally but are not advertised. A received reply is capped to the
+requested count and is rechecked for valid, routable, non-reserved IP and port
+values before it reaches peer admission, so malformed or internal targets do
+not trigger DNS or outbound dialing.
+
 Ledger-peer discovery is demand-driven so the pool never collapses in the
 first place. While the node has fewer chain-selection-eligible upstreams than
 its hot-peer target (`MinHotPeers`), replenishment is treated as urgent: a
