@@ -1221,6 +1221,47 @@ func (c *Cache) GetEpochsMissingAccountCoverage(
 	return result, rows.Err()
 }
 
+// GetEpochsMissingParams returns epoch numbers in [from, through] that have
+// fresh pool-level Koios data but no /epoch_params row.
+//
+// It exists for the same reason as GetEpochsMissingAccountCoverage: an epoch
+// cached before parameter comparison existed would otherwise look complete to
+// GetUncachedEpochs forever and never gain a parameter row. Requiring the
+// parameter row inside GetUncachedEpochs instead would work, but at the cost
+// of re-fetching /epoch_info, /totals and every pool-history row for that
+// epoch just to obtain one parameter row — and would break the guarantee that
+// an account backfill does not re-fetch pool-level data.
+func (c *Cache) GetEpochsMissingParams(
+	network string,
+	from, through uint64,
+) ([]uint64, error) {
+	rows, err := c.db.Query(
+		`SELECT i.epoch FROM koios_epoch_info i
+		 WHERE i.network = ? AND i.epoch >= ? AND i.epoch <= ?
+		   AND NOT EXISTS (
+			SELECT 1 FROM koios_epoch_params p
+			WHERE p.network = i.network AND p.epoch = i.epoch
+		 )
+		 ORDER BY i.epoch`,
+		network,
+		from,
+		through,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []uint64
+	for rows.Next() {
+		var e uint64
+		if err := rows.Scan(&e); err != nil {
+			return nil, err
+		}
+		result = append(result, e)
+	}
+	return result, rows.Err()
+}
+
 // GetUncachedEpochs returns epoch numbers in [from, through] (inclusive) that
 // are NOT yet complete in the cache for the given network. This is used by Fetch
 // to fill holes left by prior failed or interrupted runs rather than naively
@@ -1237,11 +1278,7 @@ func (c *Cache) GetUncachedEpochs(
 
 	rows, err := c.db.Query(
 		`SELECT i.epoch FROM koios_epoch_info i
-		 WHERE i.network = ? AND i.epoch >= ? AND i.epoch <= ?
-			AND EXISTS (
-			SELECT 1 FROM koios_epoch_params p
-			WHERE p.network = i.network AND p.epoch = i.epoch
-		 )`,
+		 WHERE i.network = ? AND i.epoch >= ? AND i.epoch <= ?`,
 		network,
 		from,
 		through,

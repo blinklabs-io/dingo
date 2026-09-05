@@ -216,6 +216,10 @@ func Fetch(
 	// per-epoch worker skips the redundant pool/epoch_info/totals fetchEpoch
 	// call for these and fetches only account rewards.
 	accountOnlyEpochs := make(map[uint64]bool)
+	// paramsOnlyEpochs marks epochs whose pool-level data is already fresh but
+	// which predate parameter caching. They need only the single
+	// /epoch_params request, not a whole fetchEpoch.
+	paramsOnlyEpochs := make(map[uint64]bool)
 	if cfg.ForceRefresh {
 		for e := fromEpoch; e <= throughEpoch; e++ {
 			epochs = append(epochs, e)
@@ -244,6 +248,27 @@ func Fetch(
 			for _, e := range missingAccounts {
 				if !have[e] {
 					accountOnlyEpochs[e] = true
+					epochs = append(epochs, e)
+				}
+			}
+			slices.Sort(epochs)
+		}
+		missingParams, err := cache.GetEpochsMissingParams(
+			cfg.Network,
+			fromEpoch,
+			throughEpoch,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("get epochs missing params: %w", err)
+		}
+		if len(missingParams) > 0 {
+			have := make(map[uint64]bool, len(epochs))
+			for _, e := range epochs {
+				have[e] = true
+			}
+			for _, e := range missingParams {
+				if !have[e] {
+					paramsOnlyEpochs[e] = true
 					epochs = append(epochs, e)
 				}
 			}
@@ -382,7 +407,24 @@ loop:
 			}
 
 			var cnt int
-			if accountOnlyEpochs[epoch] {
+			switch {
+			case paramsOnlyEpochs[epoch]:
+				// Pool-level data is fresh and only the parameter row is
+				// missing, so fetch that one request rather than re-running
+				// the whole epoch. Re-fetching /epoch_info here would also
+				// break the account-backfill guarantee this mirrors.
+				logger.Debug(
+					"koiosparity: epoch pool data already fresh, backfilling parameters only",
+					"network", cfg.Network,
+					"epoch", epoch,
+				)
+				if fetchErr := fetchEpochParamsOnly(
+					fetchCtx, koios, cache, cfg.Network, epoch,
+				); fetchErr != nil {
+					handleEpochFetchErr("params", fetchErr)
+					return
+				}
+			case accountOnlyEpochs[epoch]:
 				// Pool-level Koios data for this epoch is already fresh —
 				// only #3097's per-account coverage is missing/incomplete —
 				// so skip the redundant pool/epoch_info/totals fetchEpoch
@@ -394,7 +436,7 @@ loop:
 					"network", cfg.Network,
 					"epoch", epoch,
 				)
-			} else {
+			default:
 				var fetchErr error
 				cnt, fetchErr = fetchEpoch(fetchCtx, koios, cache, cfg.Network, epoch, poolIDs, firstActiveEpochs, logger)
 				if fetchErr != nil {
@@ -901,6 +943,31 @@ func unixTime(sec int64) time.Time {
 		return time.Time{}
 	}
 	return time.Unix(sec, 0).UTC()
+}
+
+// fetchEpochParamsOnly fetches and commits just the /epoch_params row for an
+// epoch whose pool-level data is already cached and fresh.
+//
+// It deliberately does not touch koios_epoch_info.fetched_at. That column is
+// the freshness marker for pool-level data, which this did not refetch, so
+// advancing it would claim a freshness this call has not established.
+func fetchEpochParamsOnly(
+	ctx context.Context,
+	koios *KoiosClient,
+	cache *Cache,
+	network string,
+	epoch uint64,
+) error {
+	paramsResp, err := koios.GetEpochParams(ctx, epoch)
+	if err != nil {
+		return classifyFetchErr(fmt.Errorf("get epoch params: %w", err))
+	}
+	if err := cache.UpsertEpochParams(
+		epochParamsFromKoios(network, epoch, paramsResp, time.Now().UTC()),
+	); err != nil {
+		return fmt.Errorf("commit epoch params: %w", err)
+	}
+	return nil
 }
 
 // epochParamsFromKoios flattens a /epoch_params response into the cache row.
