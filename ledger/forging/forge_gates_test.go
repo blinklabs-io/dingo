@@ -19,7 +19,9 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -536,16 +538,18 @@ func TestForgeStaleGapSkipMarksScheduledLeaderSlots(t *testing.T) {
 	}
 }
 
-// newOwnTipGateForger builds a production forger with NO fence store, so
-// the duplicate-slot fence is in-memory only and starts unloaded, and
-// captures its logs at Debug so a test can assert on the level a skip was
-// emitted at.
+// newOwnTipGateForger builds a production forger over an explicit slot
+// clock and an optional fence store, and captures its logs at Debug so a
+// test can assert on the level a skip was emitted at. Passing a nil
+// fence leaves the duplicate-slot fence in-memory and unloaded, which is
+// how a wiring with no metadata store behaves.
 func newOwnTipGateForger(
 	t *testing.T,
-	clock forgerTestSlotClock,
+	clock SlotClockProvider,
 	leader LeaderChecker,
 	builder BlockBuilder,
 	broadcaster BlockBroadcaster,
+	fence ForgeFenceStore,
 ) (*BlockForger, *bytes.Buffer) {
 	t.Helper()
 	logs := &bytes.Buffer{}
@@ -559,15 +563,16 @@ func newOwnTipGateForger(
 		LeaderChecker:    leader,
 		BlockBuilder:     builder,
 		BlockBroadcaster: broadcaster,
-		// Deliberately no ForgeFence.
-		SlotClock:    clock,
-		PromRegistry: prometheus.NewRegistry(),
+		ForgeFence:       fence,
+		SlotClock:        clock,
+		PromRegistry:     prometheus.NewRegistry(),
 	})
 	require.NoError(t, err)
-	require.False(
+	require.Equal(
 		t,
+		fence != nil,
 		forger.fenceLoaded,
-		"a forger with no fence store must start with an unloaded fence",
+		"the fence must be loaded exactly when a fence store is wired",
 	)
 	// Construction itself warns that no fence store is wired. Drop it so
 	// the buffer holds only what the forge cycle under test emitted.
@@ -612,6 +617,7 @@ func TestEqualSlotOwnBlockIsIdentifiedByHashNotByFence(t *testing.T) {
 			leader,
 			builder,
 			broadcaster,
+			nil,
 		)
 		// We forged this slot and the block was adopted: the tip is
 		// byte-for-byte our block.
@@ -679,6 +685,7 @@ func TestEqualSlotOwnBlockIsIdentifiedByHashNotByFence(t *testing.T) {
 				leader,
 				builder,
 				broadcaster,
+				nil,
 			)
 			// A tracker record for the slot must not be mistaken for
 			// ownership of the block at the tip: we forged for this
@@ -710,5 +717,148 @@ func TestEqualSlotOwnBlockIsIdentifiedByHashNotByFence(t *testing.T) {
 				"a leader slot lost to a rival must be visible",
 			)
 		},
+	)
+}
+
+// forgerMovingTipSlotClock is a slot clock whose chain tip moves between
+// the read at the top of a forge cycle and the read taken next to the
+// tip hash. The first ChainTipSlot call answers chainTipSlot, every
+// later one answers movedTipSlot, which is what a rival block landing
+// mid-cycle looks like to the forger.
+type forgerMovingTipSlotClock struct {
+	currentSlot       uint64
+	chainTipSlot      uint64
+	movedTipSlot      uint64
+	chainTipHash      []byte
+	slotsPerKESPeriod uint64
+
+	mu        sync.Mutex
+	tipReads  int
+	hashReads int
+}
+
+func (c *forgerMovingTipSlotClock) CurrentSlot() (uint64, error) {
+	return c.currentSlot, nil
+}
+
+func (c *forgerMovingTipSlotClock) SlotsPerKESPeriod() uint64 {
+	return c.slotsPerKESPeriod
+}
+
+func (c *forgerMovingTipSlotClock) ChainTipSlot() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.tipReads++
+	if c.tipReads == 1 {
+		return c.chainTipSlot
+	}
+	return c.movedTipSlot
+}
+
+func (c *forgerMovingTipSlotClock) ChainTipHash() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.hashReads++
+	return c.chainTipHash
+}
+
+func (*forgerMovingTipSlotClock) NextSlotTime() (time.Time, error) {
+	return time.Now(), nil
+}
+
+func (*forgerMovingTipSlotClock) UpstreamTipSlot() uint64 {
+	return 0
+}
+
+func (*forgerMovingTipSlotClock) UpstreamSyncStatus() (uint64, bool) {
+	return 0, false
+}
+
+func (c *forgerMovingTipSlotClock) reads() (int, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.tipReads, c.hashReads
+}
+
+// TestEqualSlotOwnershipIsInconclusiveWhenTheTipMoves pins the tip-slot
+// re-read inside the ownership check.
+//
+// tipSlot is sampled once at the top of checkAndForgeProduction, and the
+// chain can move before ChainTipHash is read. Comparing a hash from one
+// tip against a slot from another decides ownership from two different
+// blocks: here it would read a rival's hash and conclude we lost a
+// battle at slot 10 when the tip has in fact already moved past it.
+//
+// Re-reading the tip slot next to the hash makes that disagreement
+// inconclusive instead, and the decision falls back to the fence, which
+// is the conservative answer. The reads are still not atomic, so this
+// narrows the window rather than closing it; what it guarantees is that
+// a moved tip cannot manufacture a slot-battle report.
+func TestEqualSlotOwnershipIsInconclusiveWhenTheTipMoves(t *testing.T) {
+	const slot = uint64(10)
+	ourHash := bytes.Repeat([]byte{0xa1}, 32)
+	rivalHash := bytes.Repeat([]byte{0xb2}, 32)
+
+	leader := &forgerCountingLeader{}
+	builder := &forgerTestBuilder{}
+	broadcaster := &forgerTestBroadcaster{}
+	fence := &fenceTestStore{slot: slot, present: true}
+	clock := &forgerMovingTipSlotClock{
+		currentSlot: slot,
+		// The cycle opens with the tip at the current slot...
+		chainTipSlot: slot,
+		// ...and it has moved on by the time the hash is read.
+		movedTipSlot:      slot + 1,
+		chainTipHash:      rivalHash,
+		slotsPerKESPeriod: 100,
+	}
+	forger, logs := newOwnTipGateForger(
+		t,
+		clock,
+		leader,
+		builder,
+		broadcaster,
+		fence,
+	)
+	forger.slotTracker.RecordForgedBlock(slot, ourHash)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	tipReads, hashReads := clock.reads()
+	assert.Equal(
+		t,
+		2,
+		tipReads,
+		"the tip slot must be re-read next to the hash, not reused "+
+			"from the top of the cycle",
+	)
+	assert.Equal(t, 1, hashReads)
+
+	assert.Zero(t, builder.calls)
+	assert.Zero(t, broadcaster.calls)
+	assert.Empty(t, fence.stored)
+	assert.Equal(
+		t,
+		float64(0),
+		testutil.ToFloat64(forger.metrics.slotBattlesTotal),
+		"a tip that moved proves nothing about who held slot 10",
+	)
+	assert.Equal(
+		t,
+		float64(0),
+		testutil.ToFloat64(forger.metrics.forgeCouldNot),
+	)
+	logged := logs.String()
+	assert.NotContains(
+		t,
+		logged,
+		`"level":"WARN"`,
+		"an inconclusive comparison must not be reported as a lost battle",
+	)
+	assert.Contains(
+		t,
+		logged,
+		`"matched_by":"forge_fence"`,
+		"the decision must fall back to the fence",
 	)
 }
