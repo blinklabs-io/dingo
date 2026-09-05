@@ -5043,7 +5043,8 @@ the database state alone, so the operator never needs to know it:
 
 - empty database -> full bootstrap
 - non-empty `sync_status` (`in_progress`, `backfill`, or an unknown future
-  value) -> resume the existing path, except an interrupted v2 core catch-up
+  value) -> resume the existing path against the pinned artifact (below),
+  except an interrupted v2 core catch-up
   (import marker present, or the ephemeral `mithril_catchup_active` flag for a
   markerless catch-up) re-runs as a catch-up so the reconcile pass repairs the
   partial import
@@ -5082,6 +5083,60 @@ deleted. Complete API-mode databases with an immutable marker are rejected
 because incremental metadata replacement is not implemented; markerless API
 databases and the v1 backend use the bootstrap path. The marker is written
 after sync completion clears `sync_status`, so it survives across runs.
+
+### Artifact pinning across interrupted imports
+
+A sync run records the artifact it selected in `sync_state`
+(`mithril_pinned_artifact`: backend, network, digest/hash, beacon, certificate
+hash, and — once the certified ImmutableDB is open — the certified tip slot).
+The pin is written from `BootstrapConfig.OnArtifactSelected`, which both
+backends invoke after the artifact is identity-checked and, when enabled,
+certificate-verified, and before the first byte is downloaded. It is ephemeral:
+`ClearSyncState` on sync completion wipes it, so its presence means a run is
+mid-flight against that artifact.
+
+A resuming run (`sync_status` non-empty) passes the pinned digest to
+`BootstrapConfig.PinnedDigest`, which resolves that exact artifact
+(`GetCardanoDatabaseSnapshot` for v2, `GetSnapshot` for v1) instead of the
+aggregator's latest. Without the pin, `Bootstrap` re-resolves the latest
+artifact on every run: if the aggregator advanced during the interruption, the
+resume imports a second snapshot's ledger state over the first's partially
+imported rows. The bootstrap path imports with `ImportConfig.Reconcile` off and
+the metadata import is insert-if-absent, so nothing removes the first
+snapshot's rows — the database keeps the union of both snapshots' live sets
+(UTxOs spent between the two artifacts stay unspent, and accounts, pools and
+DReps the newer snapshot dropped stay active). The ledger-state phase
+checkpoints do not catch this either: they are keyed `"{digest}:{slot}"`, so a
+different artifact simply reads as a fresh import.
+
+The resume is fail-closed rather than best-effort. It aborts with an explicit
+recovery instruction when the pin is absent (an in-progress marker written by a
+build without pinning), when the pin names another backend or network, when the
+aggregator no longer serves the pinned artifact or answers it with a different
+beacon, or when the reused extraction cache produces a certified ImmutableDB tip
+other than the one recorded. The one exception is an interrupted *catch-up*
+without a pin: catch-up imports with `Reconcile` on, which marks every live row
+absent from the newly selected snapshot inactive, so re-selecting a newer
+artifact cannot leave the interrupted one's rows behind. A fresh bootstrap
+(clear `sync_status`) always takes the latest artifact.
+
+### Immutable archive digest diagnosis
+
+Every immutable trio is checked against the artifact's digest list, which is
+itself verified against the certificate's merkle root before any archive is
+fetched, so bytes that disagree with it are refused and never imported. When no
+source produces a matching trio, `downloadImmutables` returns an
+`ImmutableArchiveError` carrying the artifact hash and beacon, the immutable
+file number, and one `ImmutableArchiveAttempt` per source tried — the local
+extraction cache (recorded separately, and the trio removed, so a rejected
+cache is never confused with a replica) and each published location, by
+redacted URI. Location URIs are reduced to scheme, host and path, because
+cloud-storage locations are pre-signed and carry credentials in the query
+string. When every published location was rejected for a digest mismatch on the
+same file with the same observed digest, the error says so explicitly: the
+archive as published disagrees with its own certificate, rather than one
+replica being stale, and that is what an operator reports to the aggregator
+operator. None of this relaxes the check.
 
 The `mithril/` package itself has no internal Dingo imports. Database import,
 ledger-state import, ImmutableDB loading, and API-mode metadata backfill are
