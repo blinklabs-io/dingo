@@ -9188,32 +9188,6 @@ embedder that builds a `LedgerStateConfig` directly and skips validation.
 This is phase 1 of issue #1894 (decode parallelism only, no ledger
 validation change).
 
-**Phase 2 (apply-stage wiring) is not implemented as literally described,
-by design, and is tracked separately.** The pipeline's own `ApplyStage`/
-`ApplyFunc` remains `nil` in every phase implemented so far (see "apply
-stage is a no-op" above) — real ledger apply (`chain.AddBlock`, error
-handling, event publishing, sync progress logging) continues to run
-entirely in `ledgerProcessBlocksFromSource`, fed by the pipeline's
-decoded/validated output, exactly as before the pipeline existed. This is
-not a throughput gap: decode and VRF/KES validation are the parallelizable,
-CPU-heavy work the pipeline targets; ledger-state application is inherently
-sequential regardless of which abstraction runs it, since each block's
-state depends on the one before it. Wiring the real apply logic into
-`gouroboros/pipeline.ApplyFunc`, as phase 2 literally asks, was investigated
-and found not safely achievable without a disproportionate redesign:
-`ApplyFunc` (`func(*BlockItem) error`) is called one block at a time by a
-single goroutine, with no batching and no mechanism to signal "restart the
-whole pipeline" back to a caller, while `ledgerProcessBlocksFromSource` is a
-stateful, whole-batch, multi-transaction loop (`SubmitAsyncDBTxn`,
-`deltaBatch` accumulation, mid-batch epoch-rollover handling) whose retry
-loop depends on sentinel restart errors (`errRestartLedgerPipeline`,
-`errStaleChainIterator`) propagating synchronously back to
-`ledgerProcessBlocks`. Closing this gap for real needs its own scoped
-design — either extending gouroboros' `pipeline` package with a
-batch-oriented apply contract or a restart-signal mechanism, or redesigning
-dingo's apply loop to be per-block and restart-tolerant — tracked
-separately in #3227, not folded into #1894's decode/validate phases.
-
 **Phase 3: parallel header-crypto validation.**
 `LedgerStateConfig.BlockPipelineValidateEnabled` (config
 `blockPipelineValidateEnabled` / `DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED` /
@@ -9447,12 +9421,14 @@ combined with `blockPipelineGatherMutex`) only waits for `ls.blockPipeline`'s
 own decode/validate stages plus the reader's own not-yet-submitted gather,
 not for `ledgerProcessBlocksFromSource`'s subsequent DB-apply of a batch
 already drained from the pipeline before the wait started — that step runs
-entirely outside `blockPipeline` (phase 2, wiring real ledger apply into
-`gouroboros/pipeline.ApplyFunc`, is deliberately deferred to #3227, as
-described above). A rollback landing exactly in that narrower window can
-still leave `ls.currentTip` transiently re-advanced onto an abandoned
-block. This is not a new failure mode introduced by the pipeline or by
-this phase: `processChainIteratorRollback`'s stale-tip detection (see
+entirely outside `blockPipeline` by decision, not by omission (see "Why
+dingo's ledger apply is not wired into `pipeline.ApplyFunc`" at the end of
+this section, issue #3227; moving it inside would make this drain wait a
+bounded wait on database work, which is worse here, not better). A rollback
+landing exactly in that narrower window can still leave `ls.currentTip`
+transiently re-advanced onto an abandoned block. This is not a new failure
+mode introduced by the pipeline or by this phase:
+`processChainIteratorRollback`'s stale-tip detection (see
 below) already exists specifically to self-heal exactly this class of lag
 between chain-selection and ledger apply, independent of whether the
 pipeline is enabled, and remains the backstop here regardless of how the
@@ -9473,6 +9449,104 @@ versus pipeline-disabled), all in `ledger/read_chain_pipeline_test.go`; and
 `blockPipelineGatherMutex`'s write lock cannot be obtained while the reader
 is mid-gather with a raw block already collected, and can be obtained again
 once the batch is delivered.
+
+#### Why dingo's ledger apply is not wired into `pipeline.ApplyFunc`
+
+**Phase 2 of issue #1894 ("wire apply stage — chain add, error handling,
+event publishing, sync progress logging") is closed as a decision not to
+wire it, not as unfinished work (issue #3227).** The pipeline's own
+`ApplyStage`/`ApplyFunc` is `nil` in every phase, and stays that way. Real
+ledger apply continues to run in `ledgerProcessBlocksFromSource`, fed by the
+pipeline's re-sequenced decoded/validated output. The re-sequencing *is* the
+job dingo needs from the apply stage; running ledger mutation there would
+change observable behavior for no throughput gain.
+
+This is not a throughput gap. Decode and VRF/KES validation are the
+parallelizable, CPU-heavy per-block work the pipeline targets, and they are
+wired (phases 1 and 3). Ledger-state application is inherently sequential
+whichever abstraction runs it, because each block's state depends on the one
+before it, and `ApplyStage` is itself single-goroutine and strictly ordered
+— so moving the same serial work behind the same serial barrier buys
+nothing.
+
+Five facts about the two sides make the wiring unsafe rather than merely
+awkward. The first three are properties of
+`gouroboros/pipeline.ApplyStage` at the pinned version and are pinned by
+contract tests in `ledger/block_pipeline_apply_contract_test.go`, so a
+gouroboros bump that changes any of them fails CI instead of silently
+invalidating this decision.
+
+1. **`ApplyFunc` does not stop on failure.** `ApplyStage.maybeApply` records
+   a failing item's error on the item and pushes it onto the errors channel,
+   then applies every following block regardless. There is no option to halt
+   the sequence. A ledger must stop: block N+1's validation and delta apply
+   read state that block N was supposed to have written.
+   (`TestPipelineApplyFuncErrorDoesNotStopLaterBlocks`.)
+2. **A skipped item still consumes its sequence slot.** An item that failed
+   decode or validation is not applied, but `nextSequence` advances and the
+   *next* block is applied normally. `decodeReadChainBatchWithError` does the
+   opposite on purpose: any decode or enforced-validation failure discards
+   the whole batch, so a partially-decoded batch is never handed downstream.
+   Wiring apply would replace batch-discard with apply-the-rest, a
+   chain-continuity violation.
+   (`TestPipelineApplyFuncSkipsUndecodableBlockButAppliesTheNext`.)
+3. **The failure never reaches the submitter synchronously.** An
+   `ApplyFunc` error reaches `BlockItem.ApplyError()` and
+   `BlockPipeline.Errors()`, which `drainBlockPipelineErrors` reads for
+   logging and counters only. Dingo's retry contract requires
+   `errRestartLedgerPipeline` and `errStaleChainIterator` to return
+   synchronously up to `ledgerProcessBlocks`, which then waits for the
+   attempt's reader goroutine to fully exit before starting the next attempt
+   (`runLedgerReadChainAttempt`; regression test
+   `TestLedgerProcessBlocksRetryDoesNotMixBlocksAcrossAttempts`). That
+   invariant cannot be expressed through a per-item error field.
+4. **The transaction boundary is a batch, not a block.** Apply runs one
+   `submitBlockApplyDBTxn` per `batchSize` (50) chunk, accumulating a
+   `LedgerDeltaBatch` across blocks and flushing it mid-chunk before the
+   first validated block. An epoch or era boundary ends the chunk early,
+   defers the remainder to `cachedNextBatch`, and runs its rollover in a
+   *separate* `SubmitAsyncDBTxn`. `ApplyFunc`'s `func(*BlockItem) error`
+   shape has no begin-batch/end-batch hook to carry any of that.
+5. **`chain.AddBlock` is upstream of the pipeline, not downstream.** Blocks
+   enter `chain.Chain` from the blockfetch handler in `ledger/chainsync.go`;
+   `ledgerReadChainIterator` reads them back *out* of the chain and is the
+   pipeline's only submitter. Phase 2's "chain add" therefore cannot move
+   into `ApplyFunc` at all — it happens before the pipeline sees the block.
+
+**Ordering and rollback risk (issues #3718, #3771/#3840).** Those two fixes
+constrain the *upstream* path — `chain.update` publication deferred past
+`chainsyncBlockfetchMutex` (#3718) and blockfetch batches bound to a
+chain-rollback generation (#3840) — so neither is touched by leaving apply
+where it is. Wiring apply into the pipeline would put both back in play.
+`drainBlockPipelineBeforeRollback` bounds `WaitForDrain` at
+`BlockPipelineRollbackDrainTimeout` (5s) and, on timeout, logs and proceeds
+with the rollback anyway. That is safe today precisely because a nil
+`ApplyFunc` means the barrier only covers decode and re-sequencing, while
+the real apply stays behind the reader goroutine's in-order
+`readChainResult` handshake, which the rollback path holds via
+`blockPipelineGatherMutex`. `WaitForDrain` does cover `ApplyFunc`
+(`TestPipelineWaitForDrainCoversApplyFunc`), so with real apply wired in,
+that same timeout would be a bounded wait on database work — and expiring
+it would let a rollback run while blocks were still being applied to the
+ledger, which is the "mutation survives a rollback" class of #3771/#3840.
+Ledger events (`EpochTransitionEventType`, `HardForkEventType`) and sync
+progress logging would likewise move onto the pipeline's apply goroutine,
+where they would interleave with the rollback's deferred `chain.update`
+outside the ordering #3718 established. Rollbacks are also not
+representable in the pipeline's sequence at all: `Submit` takes only
+`(blockType, rawCbor, tip)`, so the in-band rollback markers that
+`ledgerReadChainIterator` currently forwards in order with blocks would have
+to be re-serialized out of band by exactly that fence.
+
+**What would reopen this.** Either (a) `gouroboros/pipeline` grows a
+batch-oriented apply contract with begin/end hooks and a caller-visible
+"halt and restart" signal, released as a tagged gouroboros version, or
+(b) dingo's apply loop is redesigned to be per-block, per-transaction and
+restart-tolerant — a consensus-critical rewrite of transaction boundaries,
+epoch rollover and retry semantics. Neither is warranted by throughput,
+since the parallelizable work is already parallel. If a contract test in
+`ledger/block_pipeline_apply_contract_test.go` starts failing after a
+gouroboros bump, revisit this decision rather than the test.
 
 ### Ledger-Tip/Chain-Iterator Rollback Synchronization
 
