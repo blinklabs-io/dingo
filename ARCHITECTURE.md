@@ -5754,6 +5754,7 @@ internal/koiosparity/      # shared library
   cache.go                 # SQLite cache schema + CRUD (database/sql)
   koios_client.go          # Koios v1 REST client with pagination + retry
   dingo_db.go              # read-only database/sql access to Dingo's metadata database
+  pparams.go               # era-independent view of Dingo's effective per-epoch protocol parameters
   compare.go               # field-level comparison, Mismatch category constants
   fetch.go                 # Koios fetch orchestration (worker pool per epoch)
   fetch_accounts.go        # #3097 per-account Koios fetch (address-universe union), #3099 checkpointed resume
@@ -5769,10 +5770,17 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
 **Data sources:**
 - **Reference (Koios):** fetched once into `cache.db` (default `.koios/cache.db`)
   via the `fetch` subcommand. The cache holds `koios_epoch_info`,
-  `koios_pool_epoch`, and `koios_totals` rows per closed epoch, storing the
-  full documented `/epoch_info`, `/pool_history`, and `/totals` field sets
-  (not just the subset compared against Dingo) so the cache is a complete
-  Koios reference even as new comparisons are added later. `cache.db` is this
+  `koios_pool_epoch`, `koios_totals`, and `koios_epoch_params` rows per closed
+  epoch, storing the full documented `/epoch_info`, `/pool_history`, and
+  `/totals` field sets (not just the subset compared against Dingo) so the
+  cache is a complete Koios reference even as new comparisons are added later.
+  `koios_epoch_params` (dingo #3931) stores every scalar `/epoch_params` field
+  as the literal text Koios published — a JSON number keeps its own digits, so
+  `price_step` is stored as `7.21e-05` and never round-trips through a float —
+  with `""` meaning "the era does not define this parameter". `cost_models`
+  is stored as canonical JSON (`encoding/json` sorts the language keys) and
+  compared entry for entry; the Conway governance parameters are deliberately
+  not fetched. See the coverage table below. `cache.db` is this
   tool's own private cache, not part of Dingo's own metadata schema —
   `DATABASE.md` does not (and need not) document it. #3097 adds
   `koios_account_rewards` (one row per `(network, epoch, stake_address,
@@ -5818,7 +5826,9 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   per-pool map keyed by pool-key-hash — a pool may have an input row before
   its output row is computed), `epoch_summary` (total active stake, pool
   count, delegator count), `reward_ada_pots` (treasury, reserves, fees,
-  rewards — Dingo's full AdaPots).
+  rewards — Dingo's full AdaPots), and `epoch` + `pparams` (the protocol
+  parameters in force for the epoch — see "Protocol parameter resolution"
+  below).
 
   **Coverage contract.** A `PASS` means only that every **exact-match** and
   **derived-match** field below matched. It does not claim parity for fields
@@ -5861,6 +5871,47 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   | `/account_reward_history` | exact-match | `stake_address`, `earned_epoch` | Identifies the `(stake_address, type)` row `CompareAccountEpoch` matches on; response identity must equal the requested epoch. |
   | `/account_reward_history` | exact-match | `amount`, `type` | Exact integer lovelace equality against `reward_account_output.amount`/`reward_type` for member/leader rows; treasury/reserves/refund rows are filtered out, see `koiosAccountRewardTypesOutOfScope`. |
   | `/account_reward_history` | unsupported | `spendable_epoch`, `pool_id_bech32` | Stored for reference only; not part of the match key or currently compared against Dingo's schema. |
+  | `/epoch_params` | exact-match | `epoch_no` | The filtered response must contain exactly the requested reporting epoch K. |
+  | `/epoch_params` | exact-match | `era` | Dingo's `epoch.era_id` name; the era decides which validation rules run at all. |
+  | `/epoch_params` | exact-match | `min_fee_a`, `min_fee_b`, `max_block_size`, `max_tx_size`, `max_bh_size`, `key_deposit`, `pool_deposit`, `max_epoch`, `optimal_pool_count`, `protocol_major`, `protocol_minor`, `min_pool_cost` | Exact values against the effective `pparams` row for K. A wrong `max_tx_size` is the #3928 wedge class. |
+  | `/epoch_params` | exact-match | `influence`, `monetary_expand_rate`, `treasury_growth_rate`, `price_mem`, `price_step` | Compared as rationals: Koios publishes `0.0577`/`7.21e-05` where Dingo stores `577/10000`/`721/10000000`. |
+  | `/epoch_params` | exact-match | `max_tx_ex_mem`, `max_tx_ex_steps`, `max_block_ex_mem`, `max_block_ex_steps`, `max_val_size`, `collateral_percent`, `max_collateral_inputs` | Exact values against the effective `pparams` row. These gate phase-2 validation, where a divergence is silent until a script transaction fails. |
+  | `/epoch_params` | exact-match | `cost_models` | Entry-for-entry equality per Plutus language. Dingo's numeric keys (`0`, `1`) map to Koios's `PlutusV1`/`PlutusV2` names and the positional arrays agree exactly (166 and 175 entries on preview). Findings name the language and first differing entry rather than dumping the array. |
+  | `/epoch_params` | unsupported | `coins_per_utxo_size` | Koios reports Alonzo's per-word figure where Dingo stores per-byte (34482 vs 4310 on preview epochs 0-2); they agree from Babbage on. Cached for reference pending its own investigation. |
+  | `/epoch_params` | unsupported | `decentralisation`, `min_utxo_value`, `extra_entropy` | Pre-Babbage parameters absent from every live era's parameter struct. |
+  | `/epoch_params` | unsupported | `nonce`, `block_hash` | Epoch identity, not protocol parameters. |
+  | `/epoch_params` | unsupported | `pvt_*`, `pvtpp_security_group`, `dvt_*`, `committee_min_size`, `committee_max_term_length`, `gov_action_lifetime`, `gov_action_deposit`, `drep_deposit`, `drep_activity`, `min_fee_ref_script_cost_per_byte` | Conway governance and reference-script parameters. Real and worth covering, but their cross-side representation is not yet verified against a Conway-era reference chain. |
+
+  **Protocol parameter resolution.** `CompareEpochProtocolParams`
+  (`compare.go`) reads Dingo's parameters at K itself, with no stake-epoch
+  offset: `/epoch_params?_epoch_no=K` reports the parameters in force during
+  K, and Dingo's effective `pparams` row for K is the same thing — nothing
+  here is a delayed reward-calculation input. Resolving that row correctly
+  needs two properties of the table, and getting either wrong silently reads
+  back a different parameter set:
+
+  - `pparams` holds one row per parameter **change**, not one per epoch
+    (preview carries roughly a dozen rows across 400+ epochs), so the row that
+    applies is the latest one at `epoch <= K`. An exact-epoch lookup finds
+    nothing for almost every epoch.
+  - At an era boundary the rollover path writes **both** an old-era row
+    (post-pparams-update) and a new-era row (`transitionToEra`) at the same
+    epoch, with different CBOR shapes — preview really does carry two epoch-2
+    rows and two epoch-3 rows. Which one applies is decided by the era the
+    `epoch` table records for K, so the era is resolved first and used both to
+    filter the row and to select the decoder, matching what
+    `api/blockfrost`'s adapter already does. Choosing by insertion order
+    instead picks the Babbage row for preview epoch 2 and fails to decode it
+    as Alonzo.
+
+  A differing parameter value is a real divergence (`value_mismatch`, FAIL)
+  and is never softened by the grace window, since a parameter is stored when
+  its change is applied rather than computed late. An unresolvable row is
+  `dingo_db_missing` (ERROR, `reference_lag` inside the grace window) because
+  nothing was compared, and a failed read is `dingo_db_error`. A parameter
+  present on exactly one side is a mismatch rather than a skip: `""` means
+  "this era does not define it", so one-sided absence is a disagreement about
+  the shape of the ledger state, which is what an era-gating bug looks like.
 
   **Epoch alignment.** Koios reports everything for a reporting epoch K, but
   Dingo's `epoch_summary`/`reward_pool_input`/`reward_pool_output` rows do not
