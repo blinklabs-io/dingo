@@ -325,19 +325,10 @@ func TestArchiveFetchBlockReturnsNotFoundWithoutDiscardingBatch(
 	require.Nil(t, msg.GetNotFound()[1].Hash)
 }
 
-// TestArchiveFetchBlockLogsUnservableResolvedBlock covers the one shape a
-// not_found answer can hide: the block is in the archive's index, and the
-// blob store still reports it missing when asked for a URL. Both cloud
-// plugins return types.ErrBlobKeyNotFound for a lost metadata object and
-// for a block that was never written, so the error cannot distinguish them
-// — a lookup having already read the block is what does.
-//
-// The client answer stays not_found, since there is no URL to give it and
-// failing the call would discard the rest of the batch. The operator gets a
-// log line naming the block. The hash+slot and unknown-hash cases below pin
-// the other half of that contract: neither resolves through a lookup, so
-// neither is evidence of anything and neither may log.
-func TestArchiveFetchBlockLogsUnservableResolvedBlock(t *testing.T) {
+// TestArchiveFetchBlockRejectsMissingMetadata covers an indexed block whose
+// URL metadata is unavailable. The index lookup already proved the block
+// exists, so this is a storage error rather than a missing block.
+func TestArchiveFetchBlockRejectsMissingMetadata(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(
 		&logs,
@@ -356,31 +347,20 @@ func TestArchiveFetchBlockLogsUnservableResolvedBlock(t *testing.T) {
 	require.Equal(t, lostHash, hex.EncodeToString(lost.Hash))
 	servedHash := hex.EncodeToString(served.Hash)
 
-	msg := fetchBlocks(
-		t,
-		handler,
-		&archive.BlockRef{Hash: new(lostHash)},
-		&archive.BlockRef{
-			Hash: new(servedHash),
-			Slot: new(served.Slot),
-		},
-	)
-
-	require.Len(t, msg.GetBlocks(), 1, "rest of the batch is still served")
-	require.Equal(t, servedHash, msg.GetBlocks()[0].GetBlock().GetHash())
-	require.Len(t, msg.GetNotFound(), 1)
-	require.Equal(t, lostHash, msg.GetNotFound()[0].GetHash())
-
-	logged := logs.String()
-	require.Contains(t, logged, "blob store reports it missing")
-	require.Contains(t, logged, lostHash)
-	require.Contains(t, logged, fmt.Sprintf("slot=%d", lost.Slot))
+	_, err := handler.FetchBlock(t.Context(), connect.NewRequest(
+		&archive.FetchBlockRequest{Blocks: []*archive.BlockRef{
+			{Hash: new(lostHash)},
+			{Hash: new(servedHash), Slot: new(served.Slot)},
+		}},
+	))
+	require.Error(t, err)
+	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
 
 	// hash+slot resolves with no lookup, so a miss there is an ordinary
 	// absent block as far as the handler can tell, and must not be logged
 	// as an inconsistency.
 	logs.Reset()
-	msg = fetchBlocks(t, handler, &archive.BlockRef{
+	msg := fetchBlocks(t, handler, &archive.BlockRef{
 		Hash: new(lostHash),
 		Slot: new(lost.Slot),
 	})

@@ -296,7 +296,12 @@ func (a *archiveServiceHandler) FetchBlock(
 		if err != nil {
 			if isBlockMissing(err) {
 				if confirmed {
-					a.logBlockUnservable(point, err)
+					return nil, fmt.Errorf(
+						"block %d/%s is indexed but its metadata is unavailable: %w",
+						point.Slot,
+						hex.EncodeToString(point.Hash),
+						err,
+					)
 				}
 				resp.NotFound = append(resp.NotFound, ref.requested())
 				continue
