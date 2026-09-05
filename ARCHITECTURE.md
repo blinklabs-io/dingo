@@ -1839,7 +1839,14 @@ fallback:
   are accepted only when they are HTTPS, credential-free, and hosted by the
   expected archive hostname or a configured `barkBlockDownloadHosts` allowlist
   entry; redirects are disabled and response bodies are capped before buffering.
-  This wrapper can be used with or without local History Expiry.
+  This wrapper can be used with or without local History Expiry. It is
+  installed by replacing the database's blob-store reference
+  (`Database.SetBlobStore`) after `database.New` has returned, on both the
+  `Run()` startup path and `node_lifecycle.go`'s live reconfigure path where
+  readers are already running — see "Blob-store replacement" under Threading
+  and Concurrency for the rules that make that safe. The wrapper takes the
+  store it replaces as its upstream and forwards `Close` to it, so the
+  replaced store is kept alive rather than retired.
 
 ### Tiered CBOR Cache
 
@@ -7453,6 +7460,35 @@ the continuation drain without holding the scheduling mutex while waiting.
 | Context Cancellation | Graceful shutdown signals |
 | Worker Pools | Database operations and event delivery |
 | sync.Once | Ensure single shutdown execution |
+
+### Blob-store replacement
+
+`Database.blobRef` is guarded by an `RWMutex` (`database/blob_store.go`).
+`Blob()` and the internal pin accessor are its only readers, `SetBlobStore` its
+only writer, so a replacement cannot race a reader — `SetBlobStore` is called
+after `database.New` has returned on both the startup and live-reconfigure
+paths, by which point the size-metrics goroutine `New` started is already
+ticking against the same field.
+
+Replacement swaps a whole reference, not the store inside one, and each
+reference counts the operations pinning it. A `Txn` pins at construction and
+releases at `Commit`/`Rollback`/`Release` (through the same `finishLocked` that
+releases the commit barrier), and `Txn.BlobStore()` returns the store it
+pinned: the store and the `types.Txn` handle opened on it therefore always come
+from the same installation, which re-reading `Blob()` mid-transaction would not
+guarantee. Blob work that runs outside a transaction — the tiered CBOR cache's
+cold path, the blob block iterator, the blob-store identity mint, and
+`lifecycle.Snapshot`'s backup call — brackets itself with `Database.PinBlob`
+and the release func it returns.
+
+`SetBlobStore` returns the replaced store and a drain func. New operations get
+the new store immediately, so nothing blocks; drain returns once every
+operation pinned on the replaced store has finished, and that is the point at
+which the replaced store may be closed. `SetBlobStore` never closes anything
+itself, because the two production callers wrap the previous store rather than
+retiring it. `Blob()` deliberately hands back an unpinned reference for callers
+that only identify, wrap, or ask a whole-store question of the current store;
+its result must be used within the call that obtained it.
 
 `LedgerState` publishes its read-mostly state through two copy-on-write
 snapshots. The consensus snapshot groups the current epoch, era, current and

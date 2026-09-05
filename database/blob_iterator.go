@@ -178,7 +178,8 @@ func (it *BlobBlockIterator) Close() {
 // fetchBatch retrieves the next batch of block keys from the blob store.
 // Must be called with it.mu held.
 func (it *BlobBlockIterator) fetchBatch() error {
-	blob := it.db.Blob()
+	blob, releaseBlob := it.db.PinBlob()
+	defer releaseBlob()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
@@ -297,7 +298,8 @@ func (it *BlobBlockIterator) fetchBlock(
 	slot uint64,
 	hash []byte,
 ) ([]byte, types.BlockMetadata, error) {
-	blob := it.db.Blob()
+	blob, releaseBlob := it.db.PinBlob()
+	defer releaseBlob()
 	if blob == nil {
 		return nil, types.BlockMetadata{}, types.ErrBlobStoreUnavailable
 	}

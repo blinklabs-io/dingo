@@ -223,7 +223,8 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 		return nil, types.ErrBlobStoreUnavailable
 	}
 
-	blob := c.db.Blob()
+	blob, releaseBlob := c.db.PinBlob()
+	defer releaseBlob()
 	if blob == nil {
 		return nil, types.ErrBlobStoreUnavailable
 	}
@@ -333,7 +334,8 @@ func (c *TieredCborCache) ResolveTxCbor(
 		return nil, types.ErrBlobStoreUnavailable
 	}
 
-	blob := c.db.Blob()
+	blob, releaseBlob := c.db.PinBlob()
+	defer releaseBlob()
 	if blob == nil {
 		return nil, types.ErrBlobStoreUnavailable
 	}
@@ -456,7 +458,8 @@ func (c *TieredCborCache) ResolveUtxoCborBatch(
 		return result, types.ErrBlobStoreUnavailable
 	}
 
-	blob := c.db.Blob()
+	blob, releaseBlob := c.db.PinBlob()
+	defer releaseBlob()
 	if blob == nil {
 		return result, types.ErrBlobStoreUnavailable
 	}
@@ -610,7 +613,8 @@ func (c *TieredCborCache) ResolveTxCborBatch(
 		return result, types.ErrBlobStoreUnavailable
 	}
 
-	blob := c.db.Blob()
+	blob, releaseBlob := c.db.PinBlob()
+	defer releaseBlob()
 	if blob == nil {
 		return result, types.ErrBlobStoreUnavailable
 	}

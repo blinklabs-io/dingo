@@ -11,6 +11,21 @@ behavior, and persisted formats are unchanged. Library callers of Mithril
 `Sync` or `NeedsSync` may leave `SyncConfig.StoragePlugins` unset to select the
 local `badger` blob and `sqlite` metadata providers.
 
+The blob-store reference can be replaced while the database is live.
+`Database.SetBlobStore` installs the new store and returns the one it replaced
+together with a drain func. Operations already in flight keep running against
+the store they pinned: a `Txn` pins the blob store it opened on for its whole
+lifetime and exposes it as `Txn.BlobStore()`, and blob work outside a
+transaction brackets itself with `Database.PinBlob`. The drain func returns
+once every operation pinned on the replaced store has finished, which is the
+point at which that store may be closed — `SetBlobStore` never closes it. The
+two production callers (`node.go` and `node_lifecycle.go`, the latter on the
+live reconfigure path) install a `bark.BlobStoreBark` wrapper over the store
+they were handed and keep it alive inside the wrapper, so they have nothing to
+drain. `Database.Blob()` returns the currently installed store without a pin,
+for callers that only need to identify, wrap, or ask a whole-store question of
+it; it must be used within the call that obtained it.
+
 The Badger provider threads the host's stop context through its close path.
 Stopping periodic value-log GC prevents a successful rewrite from starting a
 second pass. Badger does not expose cancellation for a rewrite already in
@@ -244,8 +259,8 @@ The Go model `models.Block` has `TableName() == "block"`, but it is not migrated
 
 Use the Go APIs when code runs inside Dingo:
 
-- `database.Database` in `database/database.go` owns both stores and exposes `Blob()`, `Metadata()`, `Transaction()`, `BlobTxn()`, `MetadataTxn()`, `StorageMode()`, and `Close()`.
-- `database.Txn` in `database/txn.go` coordinates sibling metadata/blob transactions. Write commits update commit timestamps in both stores, commit the blob transaction first, then commit metadata.
+- `database.Database` in `database/database.go` owns both stores and exposes `Blob()`, `PinBlob()`, `SetBlobStore()`, `Metadata()`, `Transaction()`, `BlobTxn()`, `MetadataTxn()`, `StorageMode()`, and `Close()`. `Blob()`, `PinBlob()`, and `SetBlobStore()` are the only readers and writer of the installed blob store; see "Storage provider ownership" for the pin/drain rules that make replacement safe.
+- `database.Txn` in `database/txn.go` coordinates sibling metadata/blob transactions. Write commits update commit timestamps in both stores, commit the blob transaction first, then commit metadata. `Txn.BlobStore()` returns the blob store the transaction was opened on — the store its `Blob()` handle belongs to, and the one every blob call inside the transaction must use.
 - `metadata.MetadataStore` in `database/plugin/metadata/store.go` is the
   compatibility composition of the SQL-facing capabilities. New components
   should accept the narrowest one they use rather than the composition.

@@ -66,8 +66,10 @@ var errExactAddressCandidateScanLimit = errors.New(
 // wait for and counts immediately.
 func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
 	const batchSize = 500
-	blob := d.Blob()
-	if blob == nil {
+	// Report an absent blob store up front, so an empty utxos slice reports
+	// it the same way a populated one does rather than silently succeeding
+	// because the batch loop never ran.
+	if d.Blob() == nil {
 		return types.ErrBlobStoreUnavailable
 	}
 
@@ -75,6 +77,16 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
 	for start := 0; start < len(utxos); start += batchSize {
 		end := min(start+batchSize, len(utxos))
 		batchTxn := NewBlobOnlyTxn(d, true)
+		// Take the store from the batch's own transaction rather than
+		// from the database once up front: each batch commits separately,
+		// so a replacement between batches would otherwise leave later
+		// batches deleting through a store that no longer owns their
+		// transaction handles.
+		blob := batchTxn.BlobStore()
+		if blob == nil {
+			batchTxn.Release()
+			return types.ErrBlobStoreUnavailable
+		}
 		var batchDeleteErrors int
 		for _, utxo := range utxos[start:end] {
 			if err := blob.DeleteUtxo(batchTxn.Blob(), utxo.TxId, utxo.OutputIdx); err != nil {
@@ -156,7 +168,7 @@ func loadCbor(u *models.Utxo, txn *Txn) error {
 	}
 
 	// Fallback: direct blob access (for tests without cache)
-	blob := db.Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
@@ -320,7 +332,7 @@ func fetchTxBlobSlotAndHash(
 	if db == nil || txn == nil {
 		return 0, blockHash, false, nil
 	}
-	blob := db.Blob()
+	blob := txn.BlobStore()
 	blobTxn := txn.Blob()
 	if blob == nil || blobTxn == nil {
 		return 0, blockHash, false, nil
@@ -444,21 +456,25 @@ func repairUtxoBlob(
 	outputIdx uint32,
 	offset *CborOffset,
 ) error {
-	blob := db.Blob()
-	if blob == nil {
-		return nil
-	}
-
 	offsetData := EncodeUtxoOffset(offset)
 
 	// Use the caller's blob txn when it is write-capable
 	if txn != nil && txn.Blob() != nil && txn.IsReadWrite() {
+		blob := txn.BlobStore()
+		if blob == nil {
+			return nil
+		}
 		return blob.SetUtxo(txn.Blob(), txId, outputIdx, offsetData)
 	}
 
 	// Open a dedicated write transaction when the caller txn is
 	// nil or its blob handle is read-only / absent.
 	writeTxn := NewBlobOnlyTxn(db, true)
+	blob := writeTxn.BlobStore()
+	if blob == nil {
+		writeTxn.Release()
+		return nil
+	}
 	if err := blob.SetUtxo(
 		writeTxn.Blob(), txId, outputIdx, offsetData,
 	); err != nil {
