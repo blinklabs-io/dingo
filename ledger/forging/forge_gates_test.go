@@ -15,6 +15,7 @@
 package forging
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -297,6 +298,166 @@ func TestForgeSkipsLeaderSlotWhenUpstreamTargetUnknownEvenAtTip(
 				float64(1),
 				testutil.ToFloat64(forger.metrics.forgeSyncSkip),
 			)
+		})
+	}
+}
+
+// forgerScheduleAwareLeader reports a fixed set of scheduled leader
+// slots through NextLeaderSlot, the way Election answers from its
+// precomputed VRF schedule, so a test can distinguish a skipped slot
+// this node was due to lead from an ordinary one.
+type forgerScheduleAwareLeader struct {
+	scheduled map[uint64]struct{}
+}
+
+func (l *forgerScheduleAwareLeader) ShouldProduceBlock(slot uint64) bool {
+	_, ok := l.scheduled[slot]
+	return ok
+}
+
+func (l *forgerScheduleAwareLeader) NextLeaderSlot(
+	fromSlot uint64,
+) (uint64, bool) {
+	if _, ok := l.scheduled[fromSlot]; ok {
+		return fromSlot, true
+	}
+	return 0, false
+}
+
+// newGateSkipLogForger builds a production forger whose logs are
+// captured, over a leader checker that answers NextLeaderSlot from a
+// fixed schedule, so a test can read back the level a pre-leader gate
+// skip was logged at.
+func newGateSkipLogForger(
+	t *testing.T,
+	clock forgerTestSlotClock,
+	scheduled map[uint64]struct{},
+) (*BlockForger, *bytes.Buffer) {
+	t.Helper()
+	logs := &bytes.Buffer{}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode: ModeProduction,
+		Logger: slog.New(slog.NewJSONHandler(
+			logs,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		)),
+		Credentials: setupTestCredentials(t),
+		LeaderChecker: &forgerScheduleAwareLeader{
+			scheduled: scheduled,
+		},
+		BlockBuilder:     &forgerTestBuilder{},
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		SlotClock:        clock,
+		PromRegistry:     prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+	return forger, logs
+}
+
+// TestForgeGateSkipWarnsOnlyForScheduledLeaderSlots pins the log level
+// of both gates that run before leader selection. Such a gate returns
+// from checkAndForgeProduction before checkLeaderSafe, so the slot it
+// drops moves about_to_lead and nothing else: no Forge_node_is_leader,
+// no Forge_node_not_leader, no Forge_could_not_forge. A dropped
+// scheduled leader slot is therefore indistinguishable at INFO from "we
+// were simply not the leader", which is how a producer can decline its
+// own leader slots while every standard SPO dashboard shows it healthy.
+//
+// A gate skip on an ordinary slot is routine and stays at Debug. A gate
+// skip that swallows a slot this node was scheduled to lead is a lost
+// block that nothing downstream will ever mention again, so it is
+// raised to Warn and marked leader_slot=true.
+func TestForgeGateSkipWarnsOnlyForScheduledLeaderSlots(t *testing.T) {
+	// The leader slot under test is slot 10 in both gates.
+	const leaderSlot = uint64(10)
+	for _, gate := range []struct {
+		name  string
+		clock forgerTestSlotClock
+		msg   string
+	}{
+		{
+			// The chain tip has moved past the slot we would
+			// produce for.
+			name: "tip ahead",
+			clock: forgerTestSlotClock{
+				currentSlot:       leaderSlot,
+				chainTipSlot:      leaderSlot + 1,
+				slotsPerKESPeriod: 100,
+			},
+			msg: "forge skip: chain tip is ahead of the current slot",
+		},
+		{
+			// The corroborated upstream target is unknown, so the
+			// node is treated as still syncing even though it is at
+			// its own tip.
+			name: "upstream syncing",
+			clock: forgerTestSlotClock{
+				currentSlot:       leaderSlot,
+				chainTipSlot:      leaderSlot - 1,
+				upstreamTipSlot:   0,
+				upstreamActive:    true,
+				slotsPerKESPeriod: 100,
+			},
+			msg: "chain syncing from peer, skipping forge",
+		},
+	} {
+		t.Run(gate.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name       string
+				scheduled  map[uint64]struct{}
+				wantLevel  string
+				wantMarker bool
+			}{
+				{
+					name:      "ordinary slot stays at debug",
+					scheduled: map[uint64]struct{}{},
+					wantLevel: "DEBUG",
+				},
+				{
+					name: "scheduled leader slot warns",
+					scheduled: map[uint64]struct{}{
+						leaderSlot: {},
+					},
+					wantLevel:  "WARN",
+					wantMarker: true,
+				},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					forger, logs := newGateSkipLogForger(
+						t,
+						gate.clock,
+						tc.scheduled,
+					)
+
+					require.NoError(
+						t,
+						forger.checkAndForgeProduction(
+							context.Background(),
+						),
+					)
+
+					out := logs.String()
+					require.Contains(t, out, gate.msg)
+					assert.Contains(
+						t,
+						out,
+						`"level":"`+tc.wantLevel+`"`,
+					)
+					if tc.wantMarker {
+						assert.Contains(
+							t,
+							out,
+							`"leader_slot":true`,
+						)
+					} else {
+						assert.NotContains(
+							t,
+							out,
+							`"leader_slot":true`,
+						)
+					}
+				})
+			}
 		})
 	}
 }
