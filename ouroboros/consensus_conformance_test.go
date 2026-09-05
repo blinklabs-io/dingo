@@ -316,6 +316,16 @@ func (a *replayAdapter) collectSwitchesThroughBarrier() {
 				PreviousTip: fromGouroborosTip(e.PreviousTip),
 				NewTip:      fromGouroborosTip(e.NewTip),
 			})
+		default:
+			// Only the selector and the barrier above publish on this
+			// lane, so anything else is a bug in one of them. Skipping it
+			// would still terminate -- the barrier is behind it in the
+			// same FIFO -- but it would drop a switch decision the
+			// harness then reports as "never switched", which is a much
+			// worse diagnosis than naming the payload.
+			a.t.Fatalf(
+				"unexpected %T on the chain_switch lane", evt.Data,
+			)
 		}
 	}
 }

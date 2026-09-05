@@ -1329,9 +1329,10 @@ paths, where the point is to report before the goroutine unwinds.
   `queued`, `buffer`) once per `handlerProgressWarnInterval` (30s) for any
   handler that has not returned, counting it in
   `event_subscriber_handler_stalled_total`. Registering a `SubscribeFunc`
-  subscription materializes that counter's zero-valued series, so a healthy
-  bus is distinguishable from a missing subscription.
-  `EventBus.StuckHandlerCount()` exposes the same condition programmatically
+  subscription materializes that counter's series for its event type at zero,
+  so "nothing has stalled" is distinguishable from "no handler was ever
+  registered for this type". `EventBus.StuckHandlerCount()` exposes the same
+  condition programmatically
 - **Never `Publish`, `PublishAsync`, `PublishOrdered`, or `PublishBlocking`
   while holding a lock that a subscriber of that event acquires.** All four can
   wait for capacity, and a subscriber that is merely slow is still allowed the

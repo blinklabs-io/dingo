@@ -126,13 +126,17 @@ func (e *EventBus) StuckHandlerCount() int {
 }
 
 // observeHandlerProgress materializes the zero-valued handler-stall series for
-// a subscription the watchdog can observe. The counter is only ever
-// incremented by a stall, so without this a healthy bus exports no series at
-// all for the event type and a Prometheus query cannot tell "no handler here
-// has ever stalled" from "this subscription was never registered" -- the two
-// answers an operator most needs to distinguish. Called for the SubscribeFunc
-// paths only: a Subscribe channel's read loop is not owned by the bus, so the
-// watchdog never reports it and a series for it would always read zero.
+// an event type the watchdog can observe. The counter is only ever incremented
+// by a stall, so without this a healthy bus exports no series at all for the
+// type and a Prometheus query cannot tell "no handler for this type has ever
+// stalled" from "no handler for this type was ever registered" -- the two
+// answers an operator most needs to distinguish.
+//
+// The series is per event type, so subscriptions to one type share it, and it
+// outlives their unsubscribe like any other counter. Called for the
+// SubscribeFunc paths only: a Subscribe channel's read loop is not owned by
+// the bus, so the watchdog never reports it and a series for it would always
+// read zero.
 func (e *EventBus) observeHandlerProgress(eventType EventType) {
 	if e.metrics == nil {
 		return
