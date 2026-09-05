@@ -20,6 +20,7 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -306,6 +307,32 @@ func TestExtractRawCostModels_CoversDijkstra(t *testing.T) {
 	assert.Equal(t, map[uint][]int64{0: {1}, 1: {2}}, got)
 }
 
+// TestExtractRawCostModels_NilPointerDoesNotPanic covers blinklabs-io/dingo#3825's
+// PR review (Cubic): a concrete-typed nil pointer (lcommon.ProtocolParameters
+// holding e.g. a nil *dijkstra.DijkstraProtocolParameters) still matches its
+// type's case in the switch, so every case must guard against nil before
+// dereferencing rather than panicking -- mirroring the guard
+// withoutSyntheticV2CostModel already has for the identical hazard.
+func TestExtractRawCostModels_NilPointerDoesNotPanic(t *testing.T) {
+	cases := []struct {
+		name string
+		pp   lcommon.ProtocolParameters
+	}{
+		{"Alonzo", (*alonzo.AlonzoProtocolParameters)(nil)},
+		{"Babbage", (*babbage.BabbageProtocolParameters)(nil)},
+		{"Conway", (*conway.ConwayProtocolParameters)(nil)},
+		{"Dijkstra", (*dijkstra.DijkstraProtocolParameters)(nil)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NotPanics(t, func() {
+				got := extractRawCostModels(tc.pp)
+				assert.Nil(t, got)
+			})
+		})
+	}
+}
+
 // TestQueryShelleyCurrentProtocolParams_OmitsSyntheticV2CostModel is the
 // end-to-end regression test for blinklabs-io/dingo#3825: confirmed against
 // a real cardano-node's raw wire bytes (captured via a temporary diagnostic,
@@ -481,6 +508,60 @@ func TestResolveSyntheticV2CostModel_ExplicitValueWins(t *testing.T) {
 	}
 	assert.True(t, resolveSyntheticV2CostModel("true", realData))
 	assert.False(t, resolveSyntheticV2CostModel("false", realData))
+}
+
+// TestMarkRealV2CostModelObserved_KeepsEarliestConfirmationAcrossMultipleUpdates
+// covers blinklabs-io/dingo#3825's PR review (Cubic): a chain that enacts
+// more than one real PlutusV2 cost-model update over its life must not have
+// its cleared-epoch marker overwritten by the later update -- doing so would
+// make RecomputeSyntheticV2CostModelMarkerAfterTruncate incorrectly reset
+// the marker to synthetic on a rollback that crosses back past only the
+// LATEST update but not an EARLIER one, even though the earlier real value
+// still survives on the truncated chain.
+func TestMarkRealV2CostModelObserved_KeepsEarliestConfirmationAcrossMultipleUpdates(
+	t *testing.T,
+) {
+	ls, db := newExpiryRollbackTestLedger(t, false, 0)
+
+	// First real update confirmed at epoch 5 (slot 500).
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.markRealV2CostModelObserved(5, txn)
+	}))
+
+	// A second real update (e.g. a later governance-enacted cost-model
+	// change) confirmed at epoch 10 (slot 1000) must not overwrite the
+	// epoch-5 confirmation.
+	txn = db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.markRealV2CostModelObserved(10, txn)
+	}))
+
+	clearedEpoch, cleared, err := database.SyntheticV2CostModelClearedEpoch(
+		db, nil,
+	)
+	require.NoError(t, err)
+	require.True(t, cleared)
+	require.Equal(
+		t,
+		uint64(5),
+		clearedEpoch,
+		"the earliest confirmation must be kept, not overwritten by the later one",
+	)
+
+	// Roll back to slot 700 (epoch 7): after the first real update, before
+	// the second. The surviving chain's PlutusV2 cost model is still real
+	// (from the first update), so the marker must NOT be reset to synthetic.
+	require.NoError(
+		t,
+		database.RecomputeSyntheticV2CostModelMarkerAfterTruncate(db, nil, 700),
+	)
+
+	value, err := db.GetSyncState(database.SyntheticV2CostModelSyncKey, nil)
+	require.NoError(t, err)
+	require.Equal(t, "false", value,
+		"the surviving chain still has real data from the first update"+
+			" and must not be reported as synthetic")
 }
 
 // TestTransitionToEraFrom_PersistsSyntheticMarkerInSameTransactionAsPParams

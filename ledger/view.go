@@ -617,6 +617,10 @@ func extractCostModelsFromPParams(
 // extractRawCostModels retrieves the raw cost model data from
 // protocol parameters. It tries the costModelsProvider interface
 // first, then falls back to type assertions for known era types.
+//
+// A concrete-typed nil (pp holding e.g. a nil *conway.ConwayProtocolParameters)
+// still matches its type's case below; every case guards against nil before
+// dereferencing, matching withoutSyntheticV2CostModel's identical guard.
 func extractRawCostModels(
 	pp lcommon.ProtocolParameters,
 ) map[uint][]int64 {
@@ -630,12 +634,24 @@ func extractRawCostModels(
 	// Fall back to concrete era type assertions.
 	switch p := pp.(type) {
 	case *alonzo.AlonzoProtocolParameters:
+		if p == nil {
+			return nil
+		}
 		return p.CostModels
 	case *babbage.BabbageProtocolParameters:
+		if p == nil {
+			return nil
+		}
 		return p.CostModels
 	case *conway.ConwayProtocolParameters:
+		if p == nil {
+			return nil
+		}
 		return p.CostModels
 	case *dijkstra.DijkstraProtocolParameters:
+		if p == nil {
+			return nil
+		}
 		return p.CostModels
 	default:
 		return nil
