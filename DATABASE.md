@@ -1543,6 +1543,23 @@ on a database whose index has not been backfilled. Reserve the by-hash lookup
 for callers that genuinely have only a hash, and treat its `ErrBlockNotFound`
 as "not reachable by hash" rather than "not present".
 
+### Block Number Lookup
+
+`BlockByNumber` resolves a block from its chain block number (height). Block
+number is not an indexed blob key — only slot (`bp`), hash (`bh`), and the
+internal sequential ID (`bi`) are — so the lookup binary-searches the ID space
+that block numbers increase with, bounded above by the highest indexed block,
+and probes with `BlockAtOrAfterIndex` so a gap left by a Mithril bootstrap or
+drain import does not end the search early. A number no block carries returns
+`models.ErrBlockNotFound`. It costs O(log n) blob reads where a slot or hash
+lookup costs one, so prefer either of those when the caller has one; bark's
+`ArchiveService.FetchBlock` uses it only for a reference that supplies height
+alone.
+
+`lifecycle.ResolveTargetByNumber` keeps its own tip-bounded search rather than
+calling this: a truncate target must not resolve past the persisted tip, while
+a read should serve any block the blob store actually holds.
+
 ## SQL Examples Mirroring the Go API
 
 The examples below mirror common `metadata.MetadataStore` methods. Postgres examples use `decode($1, 'hex')`; MySQL equivalents use `UNHEX(?)`, `HEX(col)`, and `` `transaction` `` instead of `"transaction"`.

@@ -387,6 +387,18 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 
 	blocks := resp.Msg.GetBlocks()
 	if len(blocks) != 1 {
+		// The archive reports a block it does not hold under not_found and
+		// still answers the rest of the batch, so an empty blocks list with
+		// a not_found entry is a missing block rather than a broken
+		// archive. Report it the way a local blob store reports one.
+		if len(blocks) == 0 && len(resp.Msg.GetNotFound()) > 0 {
+			return nil, types.BlockMetadata{},
+				fmt.Errorf(
+					"bark: archive has no block at slot %d: %w",
+					slot,
+					types.ErrBlobKeyNotFound,
+				)
+		}
 		return nil, types.BlockMetadata{},
 			fmt.Errorf("expected 1 block, got %d", len(blocks))
 	}

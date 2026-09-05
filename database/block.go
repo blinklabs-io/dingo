@@ -336,6 +336,76 @@ func BlockBySlot(db *Database, slot uint64) (models.Block, error) {
 	return ret, err
 }
 
+// BlockByNumber resolves the block carrying the given chain block number
+// (height). Block numbers are not indexed in the blob store -- only slot,
+// hash, and the internal sequential ID are -- so this binary-searches the
+// internal-ID space that block numbers increase with, bounded above by the
+// highest indexed block. A number no block carries returns
+// models.ErrBlockNotFound, so a caller can tell a genuine miss from a
+// storage failure.
+//
+// database/lifecycle.ResolveTargetByNumber keeps its own tip-bounded
+// search rather than calling this: a truncate target must not resolve past
+// the persisted tip, while a read should serve any block the blob store
+// actually holds.
+func BlockByNumber(db *Database, number uint64) (models.Block, error) {
+	var ret models.Block
+	txn := db.Transaction(false)
+	err := txn.Do(func(txn *Txn) error {
+		var err error
+		ret, err = BlockByNumberTxn(txn, number)
+		return err
+	})
+	return ret, err
+}
+
+func BlockByNumberTxn(txn *Txn, number uint64) (models.Block, error) {
+	if txn == nil {
+		return models.Block{}, types.ErrNilTxn
+	}
+	highest, err := BlocksRecentTxn(txn, 1)
+	if err != nil {
+		return models.Block{}, err
+	}
+	// An empty chain, or a number past the highest one stored, cannot
+	// match: block numbers increase with the internal ID the search walks.
+	if len(highest) == 0 || number > highest[0].Number {
+		return models.Block{}, models.ErrBlockNotFound
+	}
+	lo, hi := BlockInitialIndex, highest[0].ID
+	for lo <= hi {
+		mid := lo + (hi-lo)/2
+		// BlockAtOrAfterIndex, not BlockByIndex: a probe landing in a gap
+		// of a sparse (Mithril bootstrap/drain-imported) ID space must
+		// seek forward to the next indexed block rather than fail, and a
+		// fallback that merely lowered hi would never find a target above
+		// the gap.
+		block, err := txn.DB().BlockAtOrAfterIndex(mid, txn)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				hi = mid - 1
+				continue
+			}
+			return models.Block{}, err
+		}
+		if block.ID > hi {
+			hi = mid - 1
+			continue
+		}
+		switch {
+		case block.Number == number:
+			return block, nil
+		case block.Number < number:
+			// block.ID, not mid+1: the seek forward may have landed above
+			// mid, and re-probing (mid, block.ID) only finds it again.
+			lo = block.ID + 1
+		default:
+			hi = mid - 1
+		}
+	}
+	return models.Block{}, models.ErrBlockNotFound
+}
+
 func BlockURL(
 	ctx context.Context,
 	db *Database,
