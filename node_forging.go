@@ -753,14 +753,16 @@ func (a *slotClockAdapter) SlotsPerKESPeriod() uint64 {
 	return a.ledgerState.SlotsPerKESPeriod()
 }
 
-func (a *slotClockAdapter) ChainTipSlot() uint64 {
-	return a.ledgerState.ChainTipSlot()
+// ChainTip returns the ledger-applied tip. LedgerState.Tip reads one atomic
+// tip snapshot, so the returned slot and hash are always from the same tip.
+func (a *slotClockAdapter) ChainTip() ocommon.Point {
+	return a.ledgerState.Tip().Point
 }
 
 // ChainTipHash satisfies forging.ChainTipHashProvider. It lets the
 // forger tell its own block at the current slot from a rival's by hash
 // rather than inferring it from the forge fence, which is in-memory only
-// when no fence store is wired. Both this and ChainTipSlot read the same
+// when no fence store is wired. Both this and ChainTip read the same
 // tip snapshot; a tip that moves between the two reads simply fails the
 // hash match and falls back to the fence.
 func (a *slotClockAdapter) ChainTipHash() []byte {
@@ -772,8 +774,11 @@ func (a *slotClockAdapter) ChainTipHash() []byte {
 // build.
 var _ forging.ChainTipHashProvider = (*slotClockAdapter)(nil)
 
-func (a *slotClockAdapter) PrimaryChainTipSlot() uint64 {
-	return a.ledgerState.PrimaryChainTipSlot()
+// PrimaryChainTip returns this node's header frontier. The primary chain
+// returns its tip under one lock, so the returned slot and hash are always
+// from the same tip.
+func (a *slotClockAdapter) PrimaryChainTip() ocommon.Point {
+	return a.ledgerState.PrimaryChainTip().Point
 }
 
 func (a *slotClockAdapter) NextSlotTime() (time.Time, error) {

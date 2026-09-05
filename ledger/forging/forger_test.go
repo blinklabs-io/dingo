@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -106,6 +107,7 @@ type forgerTestSlotClock struct {
 	chainTipSlot      uint64
 	chainTipHash      []byte
 	frontierSlot      uint64
+	frontierHash      []byte
 	upstreamTipSlot   uint64
 	upstreamActive    bool
 	slotsPerKESPeriod uint64
@@ -119,17 +121,23 @@ func (c forgerTestSlotClock) SlotsPerKESPeriod() uint64 {
 	return c.slotsPerKESPeriod
 }
 
-func (c forgerTestSlotClock) ChainTipSlot() uint64 {
-	return c.chainTipSlot
+func (c forgerTestSlotClock) ChainTip() ocommon.Point {
+	return ocommon.Point{Slot: c.chainTipSlot, Hash: c.chainTipHash}
 }
 
-// PrimaryChainTipSlot defaults to the applied tip, so a test that does not
-// set frontierSlot explicitly observes no ledger-apply backlog.
-func (c forgerTestSlotClock) PrimaryChainTipSlot() uint64 {
-	if c.frontierSlot < c.chainTipSlot {
-		return c.chainTipSlot
+// PrimaryChainTip defaults to the applied tip in both slot and hash, so a test
+// that sets neither frontier field observes no ledger-apply backlog and no
+// equal-slot divergence.
+func (c forgerTestSlotClock) PrimaryChainTip() ocommon.Point {
+	slot := c.frontierSlot
+	if slot < c.chainTipSlot {
+		slot = c.chainTipSlot
 	}
-	return c.frontierSlot
+	hash := c.frontierHash
+	if hash == nil {
+		hash = c.chainTipHash
+	}
+	return ocommon.Point{Slot: slot, Hash: hash}
 }
 
 func (forgerTestSlotClock) NextSlotTime() (time.Time, error) {

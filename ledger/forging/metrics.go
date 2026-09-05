@@ -43,13 +43,20 @@ type forgingMetrics struct {
 	blockSizeBytes   prometheus.Histogram
 	blockTxCount     prometheus.Histogram
 	forgeSyncSkip    prometheus.Counter
-	// Leader checks refused because the ledger-applied tip -- the parent a
-	// forged block would be built on -- trailed this node's own header
-	// frontier by more than the tolerance. Any increment means the ledger
-	// pipeline, not the network, was the thing behind.
-	forgeStaleTipSkip prometheus.Counter
-	slotClockErrors   prometheus.Counter
-	tipGapSlots       prometheus.Gauge
+	// Leader checks refused because this node's ledger-applied tip and its
+	// header frontier described different chain positions, by reason:
+	// "slot_gap" (the ledger trails the frontier by more than the tolerance)
+	// or "frontier_hash_diverged" (an equal-slot fork the ledger has not
+	// applied). Any increment means the ledger pipeline, not the network, was
+	// the thing behind.
+	forgeStaleTipSkip *prometheus.CounterVec
+	// Pre-materialized children for the reason label values, so the leader
+	// check does not resolve a label on every skip and neither series is
+	// absent from a dashboard before the first skip.
+	forgeStaleTipSkipSlotGap      prometheus.Counter
+	forgeStaleTipSkipHashDiverged prometheus.Counter
+	slotClockErrors               prometheus.Counter
+	tipGapSlots                   prometheus.Gauge
 
 	// Slots refused by the persisted last-forged-slot fence. Any
 	// increment means the node was asked to forge a slot it had
@@ -186,11 +193,18 @@ func initForgingMetrics(
 			Help: "errors reading slot clock for forging",
 		},
 	)
-	m.forgeStaleTipSkip = factory.NewCounter(
+	m.forgeStaleTipSkip = factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "dingo_forge_stale_tip_skip_total",
-			Help: "forging attempts skipped because the ledger-applied tip trailed this node's own header frontier by more than the tolerance",
+			Help: "forging attempts skipped because the ledger-applied tip and this node's own header frontier described different chain positions, by reason",
 		},
+		[]string{"reason"},
+	)
+	m.forgeStaleTipSkipSlotGap = m.forgeStaleTipSkip.WithLabelValues(
+		forgeStaleTipReasonSlotGap,
+	)
+	m.forgeStaleTipSkipHashDiverged = m.forgeStaleTipSkip.WithLabelValues(
+		forgeStaleTipReasonHashDiverged,
 	)
 	m.tipGapSlots = factory.NewGauge(
 		prometheus.GaugeOpts{
