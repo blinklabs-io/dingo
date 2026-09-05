@@ -177,6 +177,11 @@ type EventBus struct {
 	stopSeq         uint64
 	stopMu          sync.RWMutex
 	stopOpMu        sync.Mutex // Serializes Stop() calls to prevent duplicate worker pools
+
+	// handlerProgressInterval is this bus's snapshot of
+	// handlerProgressWarnInterval, taken once at construction. See
+	// handler_progress.go.
+	handlerProgressInterval time.Duration
 }
 
 // NewEventBus creates a new EventBus with async worker pool
@@ -193,6 +198,8 @@ func NewEventBus(
 		Logger:              logger,
 		asyncQueue:          make(chan asyncEvent, AsyncQueueSize),
 		stopCh:              make(chan struct{}),
+
+		handlerProgressInterval: handlerProgressWarnInterval,
 	}
 	if promRegistry != nil {
 		e.initMetrics(promRegistry)
@@ -202,6 +209,8 @@ func NewEventBus(
 		e.asyncWg.Add(1)
 		go e.asyncWorker()
 	}
+	e.asyncWg.Add(1)
+	go e.handlerProgressWatchdog(e.stopCh)
 	return e
 }
 
@@ -315,6 +324,16 @@ type channelSubscriber struct {
 	// of with time. See TestDeliverStallWarningIsRateLimitedPerSubscriber.
 	stallNextWarn   time.Time
 	stallSuppressed int
+
+	// handlerStartedAt is the unix-nano time the dispatch goroutine entered
+	// its handler, or 0 when no handler is running. handlerWarnedAt is the
+	// last time handlerProgressWatchdog reported this subscription, and is
+	// cleared with handlerStartedAt so a recovered handler is not left
+	// suppressed. Both stay zero for subscribers with no dispatch goroutine
+	// (Subscribe/SubscribeWithBuffer), whose read loop the bus does not own
+	// and therefore cannot observe. See handler_progress.go.
+	handlerStartedAt atomic.Int64
+	handlerWarnedAt  atomic.Int64
 }
 
 // warnStalled reports a subscriber that is not draining, at most once per
@@ -770,7 +789,9 @@ func (e *EventBus) SubscribeFuncWithBufferPolicy(
 			if e.terminalClosing.Load() {
 				return
 			}
+			chSub.beginHandler(time.Now())
 			e.safeHandlerCall(handlerFunc, evt, nil)
+			chSub.endHandler()
 		}
 	}(
 		chSub.ch,
@@ -853,7 +874,10 @@ func (e *EventBus) SubscribeFuncStrict(
 			if e.terminalClosing.Load() {
 				return
 			}
-			if e.safeHandlerCall(handlerFunc, evt, onPanic) {
+			chSub.beginHandler(time.Now())
+			panicked := e.safeHandlerCall(handlerFunc, evt, onPanic)
+			chSub.endHandler()
+			if panicked {
 				// The handler panicked: stop delivering events to it rather
 				// than looping back for the next one as if nothing failed.
 				e.Unsubscribe(eventType, subId)
@@ -1491,6 +1515,7 @@ func (e *EventBus) shutdown(restart bool) {
 	}
 	e.asyncQueue = make(chan asyncEvent, AsyncQueueSize)
 	e.stopCh = make(chan struct{})
+	restartStopCh := e.stopCh
 	e.stopped = false
 	e.stopMu.Unlock()
 
@@ -1499,6 +1524,8 @@ func (e *EventBus) shutdown(restart bool) {
 		e.asyncWg.Add(1)
 		go e.asyncWorker()
 	}
+	e.asyncWg.Add(1)
+	go e.handlerProgressWatchdog(restartStopCh)
 }
 
 func (e *EventBus) refreshSubscriberSnapshotLocked(eventType EventType) {
