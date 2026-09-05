@@ -15,7 +15,6 @@
 package ledger
 
 import (
-	"bytes"
 	"errors"
 	"testing"
 
@@ -27,10 +26,9 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	omockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
+	omockfixtures "github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	utxorpc_cardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
 
 // previewWedgeLedgerState reproduces the ledger state the from-genesis Preview
@@ -102,54 +100,6 @@ func TestLedgerViewSlotToTimeUsesHorizonAnchor(t *testing.T) {
 		"a bound past the anchored horizon must still be refused")
 }
 
-// previewHorizonBlock is a minimal Babbage block carrying one transaction, used
-// to drive ledgerProcessBlock at a chosen slot.
-type previewHorizonBlock struct {
-	slot        uint64
-	blockNumber uint64
-	txs         []lcommon.Transaction
-}
-
-func (b *previewHorizonBlock) Type() int { return babbage.BlockTypeBabbage }
-
-func (b *previewHorizonBlock) Hash() lcommon.Blake2b256 {
-	return lcommon.Blake2b256Hash([]byte("preview-horizon-block"))
-}
-
-func (b *previewHorizonBlock) Header() lcommon.BlockHeader {
-	return &babbage.BabbageBlockHeader{
-		Body: babbage.BabbageBlockHeaderBody{
-			BlockNumber: b.blockNumber,
-			Slot:        b.slot,
-			ProtoVersion: babbage.BabbageProtoVersion{
-				Major: 8,
-			},
-		},
-	}
-}
-
-func (b *previewHorizonBlock) PrevHash() lcommon.Blake2b256 {
-	return lcommon.Blake2b256{}
-}
-func (b *previewHorizonBlock) BlockNumber() uint64 { return b.blockNumber }
-func (b *previewHorizonBlock) SlotNumber() uint64  { return b.slot }
-func (b *previewHorizonBlock) IssuerVkey() lcommon.IssuerVkey {
-	return lcommon.IssuerVkey{}
-}
-func (b *previewHorizonBlock) BlockBodySize() uint64 { return 1 }
-func (b *previewHorizonBlock) Era() lcommon.Era      { return babbage.EraBabbage }
-func (b *previewHorizonBlock) Transactions() []lcommon.Transaction {
-	return b.txs
-}
-func (b *previewHorizonBlock) Cbor() []byte { return []byte{0x82, 0x80, 0x80} }
-func (b *previewHorizonBlock) BlockBodyHash() lcommon.Blake2b256 {
-	return lcommon.Blake2b256{}
-}
-
-func (b *previewHorizonBlock) Utxorpc() (*utxorpc_cardano.Block, error) {
-	return nil, nil
-}
-
 // errHorizonProbeDone stops ledgerProcessBlock right after the probe has run,
 // so the assertion is about the LedgerView it was handed rather than about
 // everything block application does afterwards.
@@ -187,15 +137,6 @@ func TestLedgerProcessBlockAnchorsValidationHorizonAtParent(t *testing.T) {
 			ls := previewWedgeLedgerState(t)
 			ls.db = db
 
-			inputID := bytes.Repeat([]byte{0x41}, 32)
-			input, err := omockledger.NewSimpleTransactionInput(inputID, 0)
-			require.NoError(t, err)
-			mockTx := omockledger.NewTransactionBuilder()
-			mockTx.WithId(bytes.Repeat([]byte{0x43}, 32))
-			mockTx.WithType(babbage.TxTypeBabbage)
-			mockTx.WithInputs(input)
-			tx := mockTx
-
 			var probeErr error
 			var probed bool
 			testEra := eras.BabbageEraDesc
@@ -215,11 +156,14 @@ func TestLedgerProcessBlockAnchorsValidationHorizonAtParent(t *testing.T) {
 			}
 			ls.activeEras = []eras.EraDesc{testEra}
 
-			block := &previewHorizonBlock{
-				slot:        previewBlockSlot,
-				blockNumber: 168_145,
-				txs:         []lcommon.Transaction{tx},
-			}
+			blocks, err := omockfixtures.GenerateBabbageChain(
+				168_145, lcommon.Blake2b256{}, previewBlockSlot, 1, 1,
+			)
+			require.NoError(t, err)
+			block, ok := blocks[0].(*babbage.BabbageBlock)
+			require.True(t, ok)
+			block.TransactionBodies = []babbage.BabbageTransactionBody{{}}
+			block.TransactionWitnessSets = []babbage.BabbageTransactionWitnessSet{{}}
 			pparams := &babbage.BabbageProtocolParameters{
 				ProtocolMajor:      8,
 				MaxBlockBodySize:   100_000,
