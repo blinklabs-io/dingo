@@ -255,10 +255,10 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 	// Runs before the deferred Unlock above (LIFO), so the cooldown state is
 	// published while the guard is still held and stays ordered with the fetch.
 	defer func() {
-		if err != nil {
-			g.markFetchFailed(time.Now(), leiosBackfillConnCooldown)
-		} else {
+		if err == nil {
 			g.markFetchOK()
+		} else if !errors.Is(err, context.Canceled) {
+			g.markFetchFailed(time.Now(), leiosBackfillConnCooldown)
 		}
 	}()
 	// Keyed by (slot, hash): a cached or blob-reloaded entry for a different
