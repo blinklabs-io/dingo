@@ -9628,6 +9628,54 @@ truncated-away blocks, producing incorrect stake/reward/DRep calculations
 downstream. This affected both the offline CLI path and the live path
 (`Node.Truncate` calls the same `lifecycle.Truncate`).
 
+### Synthetic PlutusV2 Cost Model Provenance (blinklabs-io/dingo#3825)
+
+`HardForkBabbage` (`ledger/eras/babbage.go`) fabricates a canonical-value
+PlutusV2 cost model whenever the previous era's params don't have one, so
+internal script validation always has *some* model to evaluate against
+before the real one arrives on-chain. `GetCurrentProtocolParams`
+(`ledger/queries.go`'s `ShelleyCurrentProtocolParamsQuery`, filtered by
+`ledger.withoutSyntheticV2CostModel` in `ledger/view.go`) must not report
+that fabricated value as if it were real data — a real cardano-node on the
+same chain genuinely reports no PlutusV2 entry until a real update lands.
+
+Whether the current PlutusV2 cost model is still that fabricated default is
+tracked with the same shared-database-function pattern as the CIP-0163
+section above, split into two sync_state markers
+(`database/synthetic_cost_model.go`):
+
+- `database.SyntheticV2CostModelSyncKey` (`"true"`/`"false"`) is the live
+  answer `ledger.LedgerState.syntheticV2CostModel` mirrors in memory. An
+  absent value (a database that predates this key) falls back to comparing
+  the current cost model directly against the known fabricated default
+  (`ledger.resolveSyntheticV2CostModel`) rather than assuming "not
+  synthetic" — the latter would leave the fix permanently inert on any
+  already-running node upgraded onto this build, since the boolean can then
+  only ever be set `true` again at a live era transition.
+- `database.SyntheticV2CostModelClearedEpochSyncKey` is the provenance
+  signal: the epoch at which real PlutusV2 cost-model data was last
+  confirmed *written* (not merely present), set whenever the enacted delta
+  itself specifies the cost model — `governance.EnactmentResult.PlutusV2CostModelWritten`
+  for CIP-1694 governance (Conway/Dijkstra `ParameterChangeGovAction`), or
+  `EraDesc.ParamUpdateHasPlutusV2CostModelFunc` (wired per era in
+  `ledger/eras/*.go`) for the classic pre-Conway Shelley-style update system
+  `database.ComputeAndApplyPParamUpdates` applies — real mainnet received
+  its actual PlutusV2 cost model this way, years before Conway governance
+  existed. Comparing the merged result's value before and after (instead of
+  checking the enacted delta itself) is unsound here: the fabricated default
+  is the real, canonical mainnet value, so real governance re-affirming it
+  verbatim would look unchanged under a value-comparison approach and never
+  clear the marker on an actual production network.
+
+`database.RecomputeSyntheticV2CostModelMarkerAfterTruncate` is the
+CIP-0163-style shared recompute: called from both
+`ledger.LedgerState.rollback` and `database/lifecycle.Truncate`, it deletes
+the cleared-epoch marker and restores the boolean to `"true"` when a
+rollback or truncate crosses back before the epoch that marker recorded, so
+a re-sync (potentially onto a fork that never re-enacts the confirming
+write) re-derives synthetic status instead of trusting a stale
+confirmation that no longer applies to the surviving chain.
+
 ### Live Restore/Truncate LedgerStateConfig Parity
 
 The `ledger.LedgerStateConfig` both construction paths use is

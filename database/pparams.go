@@ -224,6 +224,21 @@ func (d *Database) ApplyPParamUpdates(
 // mutate its underlying concrete protocol-parameter pointer in place. Callers
 // that need the original value preserved must pass an independently owned copy;
 // the returned value is the authoritative updated parameter set.
+//
+// hasPlutusV2CostModelFunc reports whether the enacted update itself (not the
+// merged result) explicitly specifies a PlutusV2 cost model (map key 1). This
+// is the pre-Conway equivalent of governance.EnactmentResult's
+// PlutusV2CostModelWritten: on a network that forks into Babbage before
+// receiving a real PlutusV2 cost model, that model can arrive through this
+// classic Shelley-style update system (as it did on real mainnet, well before
+// CIP-1694 governance existed), and the caller needs the same real-write
+// provenance signal here that governance.EnactProposal provides for the
+// Conway/Dijkstra path -- comparing the merged result's value before and
+// after is unsound for the same reason it is there: HardForkBabbage's
+// synthetic default is the real, canonical mainnet value, so a real update
+// writing that exact value would otherwise look unchanged. See
+// blinklabs-io/dingo#3825's PR review. May be nil (no signal available for
+// this era, e.g. Byron), in which case the returned bool is always false.
 func (d *Database) ComputeAndApplyPParamUpdates(
 	slot, epoch uint64,
 	era uint,
@@ -234,26 +249,27 @@ func (d *Database) ComputeAndApplyPParamUpdates(
 		lcommon.ProtocolParameters,
 		any,
 	) (lcommon.ProtocolParameters, error),
+	hasPlutusV2CostModelFunc func(any) bool,
 	txn *Txn,
-) (lcommon.ProtocolParameters, error) {
+) (lcommon.ProtocolParameters, bool, error) {
 	if txn == nil {
 		tmpTxn := d.MetadataTxn(true)
 		defer tmpTxn.Release()
-		result, err := d.ComputeAndApplyPParamUpdates(
+		result, plutusV2CostModelWritten, err := d.ComputeAndApplyPParamUpdates(
 			slot, epoch, era, quorum, currentPParams,
-			decodeFunc, updateFunc, tmpTxn,
+			decodeFunc, updateFunc, hasPlutusV2CostModelFunc, tmpTxn,
 		)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if err := tmpTxn.Commit(); err != nil {
-			return nil, fmt.Errorf("commit pparams update: %w", err)
+			return nil, false, fmt.Errorf("commit pparams update: %w", err)
 		}
-		return result, nil
+		return result, plutusV2CostModelWritten, nil
 	}
 	if epoch == 0 {
 		// No prior (submission) epoch, so nothing to enact.
-		return currentPParams, nil
+		return currentPParams, false, nil
 	}
 	// Fetch proposals submitted in the prior epoch; they are what gets enacted
 	// as epoch's parameters.
@@ -262,7 +278,7 @@ func (d *Database) ComputeAndApplyPParamUpdates(
 		submissionEpoch, txn.Metadata(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, false, fmt.Errorf(
 			"get pparam updates for epoch %d: %w",
 			submissionEpoch,
 			err,
@@ -279,15 +295,15 @@ func (d *Database) ComputeAndApplyPParamUpdates(
 			"uniqueProposals", uniqueCount,
 			"quorum", quorum,
 		)
-		return currentPParams, nil
+		return currentPParams, false, nil
 	}
 	tmpPParamUpdate, err := decodeFunc(latestUpdate.Cbor)
 	if err != nil {
-		return nil, fmt.Errorf("decode pparam update: %w", err)
+		return nil, false, fmt.Errorf("decode pparam update: %w", err)
 	}
 	// Compute updated pparams
 	if currentPParams == nil {
-		return nil, fmt.Errorf(
+		return nil, false, fmt.Errorf(
 			"current PParams is nil - cannot apply protocol parameter updates for epoch %d",
 			epoch,
 		)
@@ -297,7 +313,7 @@ func (d *Database) ComputeAndApplyPParamUpdates(
 		tmpPParamUpdate,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("apply pparam update: %w", err)
+		return nil, false, fmt.Errorf("apply pparam update: %w", err)
 	}
 	d.logger.Debug(
 		"computed updated protocol params",
@@ -310,7 +326,7 @@ func (d *Database) ComputeAndApplyPParamUpdates(
 	// Write pparams update to DB
 	pparamsCbor, err := cbor.Encode(newPParams)
 	if err != nil {
-		return nil, fmt.Errorf("encode updated pparams: %w", err)
+		return nil, false, fmt.Errorf("encode updated pparams: %w", err)
 	}
 	// Store params for the target epoch (epoch) where they take effect
 	err = d.metadata.SetPParams(
@@ -321,9 +337,11 @@ func (d *Database) ComputeAndApplyPParamUpdates(
 		txn.Metadata(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("set pparams: %w", err)
+		return nil, false, fmt.Errorf("set pparams: %w", err)
 	}
-	return newPParams, nil
+	plutusV2CostModelWritten := hasPlutusV2CostModelFunc != nil &&
+		hasPlutusV2CostModelFunc(tmpPParamUpdate)
+	return newPParams, plutusV2CostModelWritten, nil
 }
 
 // ForecastPParamUpdates computes the protocol parameters that the epoch

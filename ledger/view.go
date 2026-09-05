@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"math/big"
 	"time"
@@ -32,6 +33,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
 // ErrNilDecodedOutput is returned when a decoded UTxO output is nil.
@@ -615,6 +617,10 @@ func extractCostModelsFromPParams(
 // extractRawCostModels retrieves the raw cost model data from
 // protocol parameters. It tries the costModelsProvider interface
 // first, then falls back to type assertions for known era types.
+//
+// A concrete-typed nil (pp holding e.g. a nil *conway.ConwayProtocolParameters)
+// still matches its type's case below; every case guards against nil before
+// dereferencing, matching withoutSyntheticV2CostModel's identical guard.
 func extractRawCostModels(
 	pp lcommon.ProtocolParameters,
 ) map[uint][]int64 {
@@ -628,14 +634,123 @@ func extractRawCostModels(
 	// Fall back to concrete era type assertions.
 	switch p := pp.(type) {
 	case *alonzo.AlonzoProtocolParameters:
+		if p == nil {
+			return nil
+		}
 		return p.CostModels
 	case *babbage.BabbageProtocolParameters:
+		if p == nil {
+			return nil
+		}
 		return p.CostModels
 	case *conway.ConwayProtocolParameters:
+		if p == nil {
+			return nil
+		}
+		return p.CostModels
+	case *dijkstra.DijkstraProtocolParameters:
+		if p == nil {
+			return nil
+		}
 		return p.CostModels
 	default:
 		return nil
 	}
+}
+
+// withoutSyntheticV2CostModel returns pp unchanged unless synthetic is true,
+// in which case it returns a shallow copy with the PlutusV2 cost model (map
+// key 1) removed.
+//
+// See LedgerState.syntheticV2CostModel (blinklabs-io/dingo#3825): the real
+// struct backing pp always carries HardForkBabbage's fabricated PlutusV2
+// cost model once real data hasn't yet replaced it, because internal script
+// validation needs it (a real V2 script can arrive before a real update
+// does). This is called only at the LocalStateQuery reply boundary, so a
+// caller asking "what are the current protocol parameters" sees only what
+// the chain has actually committed to -- matching what a real cardano-node
+// reports during the same window -- without touching the live struct
+// internal validation still reads.
+//
+// The shallow copy (`modified := *p`) is safe: it produces a new struct
+// value referencing the original's other fields, then replaces only
+// CostModels with a freshly built map, so the original -- still reachable
+// from ls.currentPParams / the published snapshot -- is never mutated.
+//
+// logger receives a warning when synthetic is true but pp's concrete type
+// matches none of the cases below: unlike every other branch, that combination
+// returns pp unfiltered, silently reintroducing #3825 for a future era type
+// this switch hasn't been taught yet. logger may be nil (e.g. in tests that
+// don't care about this diagnostic).
+func withoutSyntheticV2CostModel(
+	pp lcommon.ProtocolParameters,
+	synthetic bool,
+	logger *slog.Logger,
+) lcommon.ProtocolParameters {
+	if !synthetic {
+		return pp
+	}
+	// A concrete-typed nil (pp holding e.g. a nil *conway.ConwayProtocolParameters)
+	// still matches its type's case below; guard every case before
+	// dereferencing rather than relying on the interface-level pp == nil
+	// check callers already do elsewhere in this file.
+	switch p := pp.(type) {
+	case *alonzo.AlonzoProtocolParameters:
+		if p == nil {
+			return pp
+		}
+		modified := *p
+		modified.CostModels = withoutV2CostModelKey(p.CostModels)
+		return &modified
+	case *babbage.BabbageProtocolParameters:
+		if p == nil {
+			return pp
+		}
+		modified := *p
+		modified.CostModels = withoutV2CostModelKey(p.CostModels)
+		return &modified
+	case *conway.ConwayProtocolParameters:
+		if p == nil {
+			return pp
+		}
+		modified := *p
+		modified.CostModels = withoutV2CostModelKey(p.CostModels)
+		return &modified
+	case *dijkstra.DijkstraProtocolParameters:
+		if p == nil {
+			return pp
+		}
+		modified := *p
+		modified.CostModels = withoutV2CostModelKey(p.CostModels)
+		return &modified
+	default:
+		if logger != nil {
+			logger.Warn(
+				"synthetic PlutusV2 cost model filter does not recognize this protocol-parameters type; returning it unfiltered",
+				"component", "ledger",
+				"type", fmt.Sprintf("%T", pp),
+			)
+		}
+		return pp
+	}
+}
+
+// withoutV2CostModelKey returns a new map holding every entry of m except
+// the PlutusV2 key (1).
+func withoutV2CostModelKey(
+	m map[uint][]int64,
+) map[uint][]int64 {
+	if m == nil {
+		return nil
+	}
+	out := make(map[uint][]int64, len(m))
+	for k, v := range m {
+		if k == 1 {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // CommitteeStateAvailable reports whether this view can authoritatively answer

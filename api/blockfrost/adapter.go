@@ -662,11 +662,15 @@ func (a *NodeAdapter) CurrentEpoch() (
 }
 
 // CurrentProtocolParams returns the current protocol
-// parameters.
+// parameters, with any synthetic (not-yet-real) PlutusV2 cost model
+// omitted -- see LedgerState.GetCurrentPParamsForReporting. This is a
+// reporting surface (GET /epochs/latest/parameters, and other callers'
+// non-cost-model numeric reads), not an internal validation/fee-computation
+// path, so the filtered view is correct here.
 func (a *NodeAdapter) CurrentProtocolParams() (
 	ProtocolParamsInfo, error,
 ) {
-	pparams := a.ledgerState.GetCurrentPParams()
+	pparams := a.ledgerState.GetCurrentPParamsForReporting()
 	if pparams == nil {
 		// A Byron prefix has no protocol-parameter CBOR to report. Surface
 		// the sentinel so the handler can answer "not found" rather than

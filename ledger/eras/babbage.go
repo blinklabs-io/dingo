@@ -42,12 +42,19 @@ var BabbageEraDesc = EraDesc{
 	DecodePParamsFunc:       DecodePParamsBabbage,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateBabbage,
 	PParamsUpdateFunc:       PParamsUpdateBabbage,
-	HardForkFunc:            HardForkBabbage,
-	EpochLengthFunc:         EpochLengthShelley,
-	CalculateEtaVFunc:       CalculateEtaVBabbage,
-	CertDepositFunc:         CertDepositBabbage,
-	ValidateTxFunc:          ValidateTxBabbage,
-	EvaluateTxFunc:          EvaluateTxBabbage,
+	ParamUpdateHasPlutusV2CostModelFunc: func(u any) bool {
+		upd, ok := u.(babbage.BabbageProtocolParameterUpdate)
+		if !ok {
+			return false
+		}
+		return paramUpdateHasPlutusV2CostModel(upd.CostModels)
+	},
+	HardForkFunc:      HardForkBabbage,
+	EpochLengthFunc:   EpochLengthShelley,
+	CalculateEtaVFunc: CalculateEtaVBabbage,
+	CertDepositFunc:   CertDepositBabbage,
+	ValidateTxFunc:    ValidateTxBabbage,
+	EvaluateTxFunc:    EvaluateTxBabbage,
 }
 
 func DecodePParamsBabbage(data []byte) (lcommon.ProtocolParameters, error) {
