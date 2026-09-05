@@ -66,12 +66,41 @@ func bootstrapV2(
 ) (*BootstrapResult, error) {
 	client := newMithrilClient(aggregatorURL, cfg.AllowInsecureHTTP)
 
-	// Step 1: Fetch latest artifact and verify its self-hash
-	artifact, err := client.GetLatestCardanoDatabaseSnapshot(ctx)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"fetching latest Cardano database snapshot: %w",
-			err,
+	// Step 1: Fetch the selected artifact -- the pinned one for a resumed sync,
+	// otherwise the latest -- and verify its self-hash.
+	var artifact *CardanoDatabaseSnapshot
+	var err error
+	if cfg.PinnedDigest != "" {
+		artifact, err = client.GetCardanoDatabaseSnapshot(
+			ctx, cfg.PinnedDigest,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"fetching pinned Cardano database snapshot %s: %w",
+				cfg.PinnedDigest,
+				err,
+			)
+		}
+		if artifact != nil && artifact.Hash != cfg.PinnedDigest {
+			return nil, fmt.Errorf(
+				"aggregator returned Cardano database snapshot %s for "+
+					"pinned artifact %s",
+				artifact.Hash,
+				cfg.PinnedDigest,
+			)
+		}
+	} else {
+		artifact, err = client.GetLatestCardanoDatabaseSnapshot(ctx)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"fetching latest Cardano database snapshot: %w",
+				err,
+			)
+		}
+	}
+	if artifact == nil {
+		return nil, errors.New(
+			"aggregator returned no Cardano database snapshot",
 		)
 	}
 	if computed := artifact.ComputeHash(); computed != artifact.Hash {
@@ -150,6 +179,21 @@ func bootstrapV2(
 			"phase", "certificate_verification",
 			"artifact", "cardano_database",
 		)
+	}
+
+	// Report the selected artifact before the first download so the caller can
+	// pin it durably; an interruption anywhere below then has an identity to
+	// resume against, including the artifact-keyed download cache.
+	if cfg.OnArtifactSelected != nil {
+		if err := cfg.OnArtifactSelected(SelectedArtifact{
+			Backend:         BackendV2,
+			Network:         artifact.Network,
+			Digest:          artifact.Hash,
+			Beacon:          artifact.Beacon,
+			CertificateHash: artifact.CertificateHash,
+		}); err != nil {
+			return nil, err
+		}
 	}
 
 	// Step 2: Set up download directory
@@ -904,24 +948,70 @@ func downloadImmutables(
 			if err := gctx.Err(); err != nil {
 				return err
 			}
-			if bytes, err := checkImmutableTrio(
+			archiveErr := &ImmutableArchiveError{
+				ArtifactHash:        artifact.Hash,
+				Epoch:               artifact.Beacon.Epoch,
+				ImmutableFileNumber: num,
+				Locations:           len(locations),
+			}
+			cachedBytes, cacheErr := checkImmutableTrio(
 				immutableRoot, num, digests,
-			); err == nil {
-				onArchiveDone(bytes)
+			)
+			switch {
+			case cacheErr == nil:
+				onArchiveDone(cachedBytes)
 				if seq != nil {
 					seq.Complete(num)
 				}
 				return nil
+			case errors.Is(cacheErr, fs.ErrNotExist):
+				// Nothing extracted for this number yet: the ordinary first
+				// pass, not a rejected cache. No attempt is recorded.
+			default:
+				archiveErr.Attempts = append(
+					archiveErr.Attempts,
+					ImmutableArchiveAttempt{
+						Source: immutableSourceCache,
+						Err:    cacheErr,
+					},
+				)
+				if !errors.As(cacheErr, new(*DigestMismatchError)) {
+					// The certified digest list carries no entry for this
+					// file, or the cached files cannot be read. Neither is
+					// something another location can fix, and neither says the
+					// cached bytes are wrong, so the trio is left in place.
+					return archiveErr
+				}
+				// A trio left by an earlier run that does not match the
+				// digest list this run verified. It is removed before the
+				// first download rather than left for extraction to
+				// overwrite, so a later failure cannot be reported against
+				// bytes no location served, and a partially overwritten trio
+				// cannot survive into the next attempt.
+				removeImmutableTrio(immutableRoot, num)
+				cfg.Logger.Warn(
+					"cached immutable trio does not match the certified "+
+						"digest list, removing and refetching",
+					"component", "mithril",
+					"immutable_file_number", num,
+					"source", immutableSourceCache,
+					"error", cacheErr,
+				)
 			}
 			var bytes int64
-			var lastErr error
 			fetched := false
 			for i, location := range locations {
+				source := redactLocationURI(location.ImmutableArchiveURI(num))
+				attempt := ImmutableArchiveAttempt{
+					Source:   source,
+					Location: i + 1,
+				}
 				if err := fetchImmutableArchive(
 					gctx, cfg, quietLogger, location, num,
 					archiveDir, extractDir,
 				); err != nil {
-					lastErr = err
+					attempt.Err = err
+					archiveErr.Attempts = append(archiveErr.Attempts, attempt)
 					// fetchImmutableArchive has already removed its own
 					// archive file, through the root it downloaded
 					// through, on every exit -- no bare-path cleanup of
@@ -933,22 +1023,38 @@ func downloadImmutables(
 						"immutable_file_number", num,
 						"location", i+1,
 						"total", len(locations),
-						"error", lastErr,
+						"location_uri", source,
+						"error", err,
 					)
 					continue
 				}
-				bytes, lastErr = checkImmutableTrio(
+				var checkErr error
+				bytes, checkErr = checkImmutableTrio(
 					immutableRoot, num, digests,
 				)
-				if lastErr != nil {
+				if checkErr != nil {
+					attempt.Err = checkErr
+					archiveErr.Attempts = append(archiveErr.Attempts, attempt)
 					removeImmutableTrio(immutableRoot, num)
-					cfg.Logger.Warn(
-						"immutable archive verification failed, trying next",
+					logAttrs := []any{
 						"component", "mithril",
 						"immutable_file_number", num,
-						"location", i+1,
+						"location", i + 1,
 						"total", len(locations),
-						"error", lastErr,
+						"location_uri", source,
+						"error", checkErr,
+					}
+					if mismatch := attempt.Mismatch(); mismatch != nil {
+						logAttrs = append(
+							logAttrs,
+							"immutable_file", mismatch.FileName,
+							"expected_digest", mismatch.Expected,
+							"observed_digest", mismatch.Observed,
+						)
+					}
+					cfg.Logger.Warn(
+						"immutable archive verification failed, trying next",
+						logAttrs...,
 					)
 					continue
 				}
@@ -956,16 +1062,18 @@ func downloadImmutables(
 				break
 			}
 			if !fetched {
-				if lastErr == nil {
-					lastErr = errors.New(
-						"no usable immutable archive locations",
+				if len(archiveErr.Attempts) == 0 {
+					archiveErr.Attempts = append(
+						archiveErr.Attempts,
+						ImmutableArchiveAttempt{
+							Source: "none",
+							Err: errors.New(
+								"no usable immutable archive locations",
+							),
+						},
 					)
 				}
-				return fmt.Errorf(
-					"immutable archive %05d: %w",
-					num,
-					lastErr,
-				)
+				return archiveErr
 			}
 			onArchiveDone(bytes)
 			if seq != nil {
@@ -1197,12 +1305,11 @@ func checkImmutableTrio(
 			return 0, err
 		}
 		if sum != expected {
-			return 0, fmt.Errorf(
-				"digest mismatch for %s: computed %s, expected %s",
-				name,
-				sum,
-				expected,
-			)
+			return 0, &DigestMismatchError{
+				FileName: name,
+				Expected: expected,
+				Observed: sum,
+			}
 		}
 		totalBytes += size
 	}
