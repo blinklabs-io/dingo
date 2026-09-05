@@ -15,7 +15,6 @@
 package bark
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
@@ -327,13 +326,15 @@ func TestArchiveFetchBlockReturnsNotFoundWithoutDiscardingBatch(
 
 // TestArchiveFetchBlockRejectsMissingMetadata covers an indexed block whose
 // URL metadata is unavailable. The index lookup already proved the block
-// exists, so this is a storage error rather than a missing block.
+// exists, so this is a storage error rather than a missing block, and it
+// fails the call.
+//
+// The other two cases pin the boundary of that rule. A hash+slot reference
+// resolves without reading anything, so a miss there is an ordinary absent
+// block as far as the handler can tell; and a hash naming no stored block
+// misses at resolution, before the blob store is asked for a URL at all.
+// Neither is evidence of an inconsistency, so neither may fail the call.
 func TestArchiveFetchBlockRejectsMissingMetadata(t *testing.T) {
-	var logs bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(
-		&logs,
-		&slog.HandlerOptions{Level: slog.LevelDebug},
-	))
 	// testBlock is deterministic, so the second seeded block's hash is
 	// known before the store that has to refuse to sign it is built.
 	lostHash := hex.EncodeToString(testBlock(2, 0x12).Hash)
@@ -341,7 +342,7 @@ func TestArchiveFetchBlockRejectsMissingMetadata(t *testing.T) {
 		t,
 		3,
 		map[string]struct{}{lostHash: {}},
-		logger,
+		nil,
 	)
 	lost, served := blocks[1], blocks[0]
 	require.Equal(t, lostHash, hex.EncodeToString(lost.Hash))
@@ -356,26 +357,18 @@ func TestArchiveFetchBlockRejectsMissingMetadata(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
 
-	// hash+slot resolves with no lookup, so a miss there is an ordinary
-	// absent block as far as the handler can tell, and must not be logged
-	// as an inconsistency.
-	logs.Reset()
 	msg := fetchBlocks(t, handler, &archive.BlockRef{
 		Hash: new(lostHash),
 		Slot: new(lost.Slot),
 	})
 	require.Len(t, msg.GetNotFound(), 1)
 	require.Empty(t, msg.GetBlocks())
-	require.Empty(t, logs.String())
 
-	// A hash that names no stored block fails at resolution, before the
-	// blob store is asked for anything.
-	logs.Reset()
 	msg = fetchBlocks(t, handler, &archive.BlockRef{
 		Hash: new(strings.Repeat("ab", 32)),
 	})
 	require.Len(t, msg.GetNotFound(), 1)
-	require.Empty(t, logs.String())
+	require.Empty(t, msg.GetBlocks())
 }
 
 // TestArchiveFetchBlockTreatsInconsistentReferenceAsNotFound covers a

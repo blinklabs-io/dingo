@@ -196,42 +196,6 @@ func isBlockMissing(err error) bool {
 		errors.Is(err, types.ErrBlobKeyNotFound)
 }
 
-// logBlockUnservable records a block the archive resolved out of its own
-// index and then could not sign a URL for.
-//
-// The cloud blob plugins report a lost metadata object with the same
-// types.ErrBlobKeyNotFound they use for an absent block object -- gcs
-// GetBlock and GetBlockURL log the partial write and return that error
-// anyway, and s3 GetBlockURL reads metadata before it ever heads the block
-// object -- so the error alone cannot tell the two apart. What does tell
-// them apart is that a lookup path already read this block: the index says
-// the archive holds it, and the blob store now says it does not.
-//
-// The reference is still answered in not_found. There is no URL to hand the
-// client, FetchBlockResponse has no per-reference error field, and failing
-// the call would discard every other block in the batch -- the exact defect
-// #3442 asked to remove. The operator, who is the only party that can act on
-// it, gets the log line instead.
-func (a *archiveServiceHandler) logBlockUnservable(
-	point common.Point,
-	err error,
-) {
-	if a.bark == nil || a.bark.config.Logger == nil {
-		return
-	}
-	a.bark.config.Logger.Warn(
-		"block resolved from the index but the blob store reports it missing; treating as not_found",
-		"component",
-		"bark",
-		"slot",
-		point.Slot,
-		"hash",
-		hex.EncodeToString(point.Hash),
-		"error",
-		err,
-	)
-}
-
 // FetchBlock resolves each requested block reference to a signed URL. A
 // reference the archive does not hold is reported in
 // FetchBlockResponse.not_found and the rest of the batch is still served;
