@@ -17,6 +17,7 @@ package forging
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"sync"
@@ -778,6 +779,100 @@ func (c *forgerMovingTipSlotClock) reads() (int, int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.tipReads, c.hashReads
+}
+
+// TestEqualSlotLostBattleUnderTheFenceIsNotSilent covers the case where
+// the two ownership signals disagree: the fence says this node already
+// committed to the slot, and the recorded forge hash says the block that
+// actually won it belongs to someone else.
+//
+// The fence must still win the forging decision. A slot at or below the
+// fence may already have a signed, diffused block behind it, and signing
+// a second different block for it is equivocation; losing a slot battle
+// is not a licence to equivocate. So: no build, no broadcast, no
+// advance of the fence.
+//
+// What must change is that the loss stops being silent. Reporting it as
+// "slot already has our own block" at Debug is both false and exactly
+// the invisible leader-slot loss this PR exists to remove, so the
+// declined battle is counted and logged at Warn with both hashes.
+func TestEqualSlotLostBattleUnderTheFenceIsNotSilent(t *testing.T) {
+	const slot = uint64(10)
+	ourHash := bytes.Repeat([]byte{0xa1}, 32)
+	rivalHash := bytes.Repeat([]byte{0xb2}, 32)
+
+	leader := &forgerCountingLeader{}
+	builder := &forgerTestBuilder{}
+	broadcaster := &forgerTestBroadcaster{}
+	fence := &fenceTestStore{slot: slot, present: true}
+	forger, logs := newOwnTipGateForger(
+		t,
+		forgerTestSlotClock{
+			currentSlot:       slot,
+			chainTipSlot:      slot,
+			chainTipHash:      rivalHash,
+			slotsPerKESPeriod: 100,
+		},
+		leader,
+		builder,
+		broadcaster,
+		fence,
+	)
+	// We forged for this slot, but the chain adopted a rival's block.
+	forger.slotTracker.RecordForgedBlock(slot, ourHash)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	// The fence still refuses the slot.
+	assert.Zero(t, builder.calls, "the fence must still forbid a second block")
+	assert.Zero(t, broadcaster.calls)
+	assert.Empty(t, fence.stored, "must not advance the fence")
+	assert.Zero(
+		t,
+		leader.callCount(),
+		"a slot the fence has already spent needs no leader selection",
+	)
+
+	// But the loss is accounted for and visible.
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.slotBattlesTotal),
+		"a rival's block at a slot we forged is a slot battle we lost",
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeCouldNot),
+		"a leader slot we did not hold must be visible as a "+
+			"could-not-forge, not as silence",
+	)
+	logged := logs.String()
+	assert.Contains(t, logged, `"level":"WARN"`)
+	assert.Contains(
+		t,
+		logged,
+		"slot battle lost: rival block at tip for a slot this node "+
+			"already forged",
+	)
+	assert.Contains(
+		t,
+		logged,
+		hex.EncodeToString(ourHash),
+		"the log must name the block we forged",
+	)
+	assert.Contains(
+		t,
+		logged,
+		hex.EncodeToString(rivalHash),
+		"the log must name the block that won the slot",
+	)
+	assert.NotContains(
+		t,
+		logged,
+		"forge skip: slot already has our own block",
+		"the block at the tip is demonstrably not ours",
+	)
 }
 
 // TestEqualSlotOwnershipIsInconclusiveWhenTheTipMoves pins the tip-slot
