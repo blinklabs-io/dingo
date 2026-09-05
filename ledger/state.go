@@ -8840,6 +8840,50 @@ func (ls *LedgerState) primaryChainTipAtOrAheadOfLedgerTip() bool {
 		bytes.Equal(chainTip.Point.Hash, ledgerTip.Point.Hash)
 }
 
+// recentChainPointsFallbackAnchor resolves the newest block row that can anchor
+// the recent-chain-point walk when the ledger tip's own row is absent from the
+// metadata database. It returns the primary chain's tip block, which during an
+// in-flight rollback is the rollback point the ledger is being rewound to.
+//
+// It reports ok=false when there is no chain, when the chain is still at
+// origin, when the chain tip is not strictly below the ledger tip (see below),
+// or when the chain tip's own row is not readable either. In all of those cases
+// the node has nothing better to offer and the caller keeps its previous
+// behaviour of returning no points.
+func (ls *LedgerState) recentChainPointsFallbackAnchor(
+	ledgerTip ochainsync.Tip,
+) (models.Block, bool) {
+	ls.RLock()
+	chain := ls.chain
+	ls.RUnlock()
+	if chain == nil {
+		return models.Block{}, false
+	}
+	chainTip := chain.Tip()
+	if chainTip.Point.Slot == 0 && len(chainTip.Point.Hash) == 0 {
+		return models.Block{}, false
+	}
+	// Only a chain tip strictly BELOW the ledger tip qualifies. That is the
+	// signature of a rewind in progress: the chain has been rolled back to a
+	// point the ledger has already applied and is being rewound to, so
+	// offering it describes chain state we hold and have validated.
+	//
+	// A chain tip at or ahead of the ledger tip is the opposite case --
+	// unapplied forward work, possibly on a fork that does not descend from
+	// the ledger tip at all. Offering that would break the ancestor
+	// invariant established in #2309 (primaryChainTipAtOrAheadOfLedgerTip
+	// exists precisely to gate it), which is why the ahead case stays with
+	// the existing behaviour of reporting no points.
+	if chainTip.Point.Slot >= ledgerTip.Point.Slot {
+		return models.Block{}, false
+	}
+	block, err := database.BlockByPoint(ls.db, chainTip.Point)
+	if err != nil {
+		return models.Block{}, false
+	}
+	return block, true
+}
+
 func (ls *LedgerState) authoritativeRecentChainPoints(
 	count int,
 ) ([]ocommon.Point, error) {
@@ -8886,10 +8930,41 @@ func (ls *LedgerState) authoritativeRecentChainPoints(
 		// (peers can't sync from us) and our own outbound
 		// chainsync setup (we ship MsgFindIntersect with these
 		// points).
-		if errors.Is(err, models.ErrBlockNotFound) {
+		if !errors.Is(err, models.ErrBlockNotFound) {
+			return nil, err
+		}
+		// Tolerating the missing row must not mean offering nothing.
+		// rollbackChainAndStateDeferred rewinds ls.chain (which removes
+		// the rolled-away block rows) before ls.rollback runs, and
+		// ls.rollback only assigns ls.currentTip once its metadata
+		// truncation has committed. For the whole truncation -- tens of
+		// seconds on a large metadata database -- ls.currentTip names a
+		// block that no longer exists while the chain already sits at the
+		// rollback point. Returning an empty slice here made
+		// IntersectPoints yield nothing, which
+		// buildDefaultChainsyncIntersectPoints turns into an origin-only
+		// MsgFindIntersect: the peer replays genesis-era headers, header
+		// verification rejects them (no epoch-0 stake entry for the
+		// genesis-era producer), and every connection is recycled until
+		// the truncation finishes.
+		//
+		// Anchor the walk on the primary chain's tip instead. During that
+		// window it is precisely the rollback point, so the points we
+		// offer describe the chain we will hold once the truncation
+		// commits.
+		fallbackBlock, ok := ls.recentChainPointsFallbackAnchor(currentTip)
+		if !ok {
 			return points, nil
 		}
-		return nil, err
+		ls.config.Logger.Warn(
+			"ledger tip block missing, anchoring intersect points on primary chain tip",
+			"component", "ledger",
+			"ledger_tip_slot", currentTip.Point.Slot,
+			"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
+			"chain_tip_slot", fallbackBlock.Slot,
+			"chain_tip_hash", hex.EncodeToString(fallbackBlock.Hash),
+		)
+		tipBlock = fallbackBlock
 	}
 	appendBlock(tipBlock)
 	denseStartIndex := tipBlock.ID
