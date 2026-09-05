@@ -15,6 +15,7 @@
 package forging
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -291,6 +292,20 @@ type SlotClockProvider interface {
 	// UpstreamSyncStatus reports whether a live upstream is selected and its
 	// corroborated target.
 	UpstreamSyncStatus() (targetSlot uint64, active bool)
+}
+
+// ChainTipHashProvider is an optional extension of SlotClockProvider.
+// When the wired slot clock implements it, the forger can identify the
+// block sitting at the chain tip by hash instead of inferring ownership
+// of a slot from the forge fence alone.
+//
+// It is deliberately a separate, optional interface so that existing
+// SlotClockProvider implementations outside this repository keep
+// compiling; a clock that does not implement it falls back to the fence.
+type ChainTipHashProvider interface {
+	// ChainTipHash returns the block hash of the current chain tip, or
+	// nil when the chain is empty or the hash is unavailable.
+	ChainTipHash() []byte
 }
 
 // ForgerConfig holds configuration for the block forger.
@@ -734,19 +749,21 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	}
 
 	// The tip is at the current slot and the block there is one this
-	// node already committed to forging, so the slot-aligned loop has
-	// simply re-entered a slot it already used. Leave without running
-	// leader selection: this is not a contested slot, and the fence
-	// below would refuse it anyway.
-	if currentSlot == tipSlot && f.fenceLoaded &&
-		currentSlot <= f.lastForgedSlot {
-		f.logger.Debug(
-			"forge skip: slot already has our own block",
-			"current_slot", currentSlot,
-			"tip_slot", tipSlot,
-			"last_forged_slot", f.lastForgedSlot,
-		)
-		return nil
+	// node produced, so the slot-aligned loop has simply re-entered a
+	// slot it already used. Leave without running leader selection:
+	// this is not a contested slot, and the fence below would refuse
+	// it anyway.
+	if currentSlot == tipSlot {
+		if ours, matchedBy := f.tipBlockIsOurs(currentSlot); ours {
+			f.logger.Debug(
+				"forge skip: slot already has our own block",
+				"current_slot", currentSlot,
+				"tip_slot", tipSlot,
+				"last_forged_slot", f.lastForgedSlot,
+				"matched_by", matchedBy,
+			)
+			return nil
+		}
 	}
 
 	// Skip if the chain is still syncing from a peer.
@@ -1284,6 +1301,59 @@ func (f *BlockForger) reserveForgeSlot(slot uint64) (bool, error) {
 	f.lastForgedSlot = slot
 	f.fenceLoaded = true
 	return true, nil
+}
+
+// tipBlockIsOurs reports whether the block occupying slot at the chain
+// tip is one this node produced, and which signal decided it.
+//
+// The primary signal is identity, not bookkeeping: SlotTracker already
+// records the hash of every block this node forged and adopted, so a tip
+// hash equal to that record proves the block at the tip is ours rather
+// than a rival's. That check is independent of whether a durable
+// ForgeFenceStore is wired, which matters because the fence is in-memory
+// only when it is not (see fenceStore above).
+//
+// The fence is kept as an additional guard, not replaced. It covers the
+// window the tracker cannot: reserveForgeSlot writes the fence *before*
+// the header for a slot is signed, while RecordForgedBlock runs only
+// after the block is adopted, so between those two points the slot is
+// already ours but has no recorded hash yet. The fence is also the only
+// signal available when the wired slot clock does not implement
+// ChainTipHashProvider.
+//
+// Neither signal survives a process restart on its own: the tracker is
+// in-memory, and the fence is durable only through a ForgeFenceStore.
+func (f *BlockForger) tipBlockIsOurs(slot uint64) (bool, string) {
+	if f.tipHashMatchesForgedBlock(slot) {
+		return true, "forged_block_hash"
+	}
+	if f.fenceLoaded && slot <= f.lastForgedSlot {
+		return true, "forge_fence"
+	}
+	return false, ""
+}
+
+// tipHashMatchesForgedBlock reports whether the current chain tip is the
+// exact block this node forged for slot. It answers false whenever any
+// input is missing (no tracker record, no tip-hash capable slot clock,
+// an empty hash on either side) so the caller falls back to the fence.
+func (f *BlockForger) tipHashMatchesForgedBlock(slot uint64) bool {
+	if f.slotTracker == nil {
+		return false
+	}
+	forgedHash, ok := f.slotTracker.WasForgedByUs(slot)
+	if !ok || len(forgedHash) == 0 {
+		return false
+	}
+	provider, hasTipHash := f.slotClock.(ChainTipHashProvider)
+	if !hasTipHash {
+		return false
+	}
+	tipHash := provider.ChainTipHash()
+	if len(tipHash) == 0 {
+		return false
+	}
+	return bytes.Equal(tipHash, forgedHash)
 }
 
 func (f *BlockForger) incCouldNotForge() {
