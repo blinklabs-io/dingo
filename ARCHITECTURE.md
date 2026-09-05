@@ -1265,6 +1265,27 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `peergov.bootstrap_exited` | PeerGov | Exited bootstrap mode |
 | `peergov.bootstrap_recovery` | PeerGov | Bootstrap recovery |
 
+The six topics the ChainSelector publishes itself —
+`chainselection.chain_switch`, `selection`, `peer_evicted`,
+`genesis_corroboration_failed`, `genesis_mode_exited` and `selected_none` —
+go through `ChainSelector.publishSelection`, which uses `PublishOrdered` rather
+than `Publish`. The selector's producers are all goroutines that have to keep
+making progress — the EventBus dispatch goroutines for the internal
+`chainselection.peer_activity`, `chainselection.peer_tip_update` and
+`connmanager.conn_closed` subscriptions, plus the selector's own evaluation
+loop — and an inline `Publish` parks its caller on any subscriber that has
+stopped draining. Routing every selector publication through the same per-type
+lanes keeps delivery and per-topic order while confining a blocked subscriber
+to that lane's worker. Publishing one of these six directly would reintroduce
+the hazard, because a queued chain switch could then be overtaken by one
+published inline.
+
+The other three `chainselection.*` topics are not on ordered lanes and are not
+covered by that guarantee: `chainselection.peer_tip_update` is published inline
+by the ouroboros chainsync path and by node wiring, not by the selector, and
+the two panic topics are published inline from the selector's own recovery
+paths, where the point is to report before the goroutine unwinds.
+
 ### EventBus Features
 
 - Asynchronous delivery via worker pool (4 workers, 1000-entry async queue)
@@ -1300,6 +1321,19 @@ All event types follow the `subsystem.snake_case_name` convention.
   delivery, and reports how many publishers are parked on it — every parked
   publisher observes the same stall, so a per-delivery limit made the log
   volume scale with publisher count rather than with time
+- **Handler-progress watchdog** (`event/handler_progress.go`). The stalled
+  warning above is raised by a publisher that had to wait for capacity, so it
+  cannot fire until the buffer is already full: its time to first signal is a
+  function of buffer size and event rate, not of the fault. One bus-wide
+  goroutine additionally samples every `SubscribeFunc` dispatch goroutine and
+  logs `event subscriber handler not making progress` (with `stuck_for`,
+  `queued`, `buffer`) once per `handlerProgressWarnInterval` (30s) for any
+  handler that has not returned, counting it in
+  `event_subscriber_handler_stalled_total`. Registering a `SubscribeFunc`
+  subscription materializes that counter's series for its event type at zero,
+  so "nothing has stalled" is distinguishable from "no handler was ever
+  registered for this type". `EventBus.StuckHandlerCount()` exposes the same
+  condition programmatically
 - **Never `Publish`, `PublishAsync`, `PublishOrdered`, or `PublishBlocking`
   while holding a lock that a subscriber of that event acquires.** All four can
   wait for capacity, and a subscriber that is merely slow is still allowed the
@@ -1368,7 +1402,9 @@ All event types follow the `subsystem.snake_case_name` convention.
   on the `connmanager.conn_closed` subscription above
 - Prometheus metrics for event delivery tracking and latency, including
   `event_delivery_blocked_total{type,kind}` and
-  `event_async_enqueue_blocked_total{type}` for backpressure
+  `event_async_enqueue_blocked_total{type}` for backpressure, and
+  `event_subscriber_handler_stalled_total{type}` for a handler that has
+  stopped returning
 - `Unsubscribe` only stops *future* deliveries to a `SubscribeFunc`
   subscriber; a handler already dequeued before the call can still be
   executing concurrently after it returns. `UnsubscribeAndWait` additionally
