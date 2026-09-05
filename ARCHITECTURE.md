@@ -6628,17 +6628,19 @@ every one of #3097's own tests passes unmodified.
   them and only re-fetches whatever never completed, instead of redoing the
   whole epoch from scratch. Once every chunk in the current plan is
   checkpointed, `Cache.GetStagedAccountRows` reads them all back and calls
-  the existing, unmodified `Cache.CommitAccountRewardsForEpoch` exactly
+  `Cache.CommitAccountRewardsForEpoch` exactly
   once — the same atomic replace-and-gate #3097 always used, now fed from
-  durable staging instead of an in-memory slice. **Neither staging table is
-  ever bulk-cleared after a successful commit** — `koios_account_checked`
-  must persist indefinitely since the zero-reward/lifecycle reporting below
-  reads it long after the fetch completes, and `koios_account_fetch_staged_rows`
-  must persist too so a later idempotent re-run of an already-complete epoch
-  with an unchanged universe finds real rows to re-commit instead of
-  committing an empty set over the correct one; the two tables grow at the
-  same rate `koios_account_rewards` itself already does, which is an accepted
-  characteristic of this cache, not a new problem. `--force-refresh`
+  durable staging instead of an in-memory slice. The two checkpoint tables
+  are retained through the successful commit so a same-epoch idempotent
+  retry can reuse them, then `Cache.PruneAccountCoverage` evicts both tables
+  outside the rolling four-epoch account checkpoint window after the batch
+  worker group has joined (or after the observer's sequential epoch check).
+  An evicted incomplete epoch is correct to refetch from scratch; retaining
+  failed checkpoints forever would make repeated backfills unbounded.
+  `koios_account_rewards` and `koios_account_coverage` are not evicted: the
+  former remains the authoritative exact-comparison input, and the latter
+  stores the exact zero-reward count plus a capped sample for historical
+  lifecycle reporting. `--force-refresh`
   (`FetchConfig.ForceRefresh`, threaded to `fetchAccountRewardsForEpoch` as
   `forceRefresh`) is the one caller that deliberately bypasses the "trust an
   already-checkpointed chunk" behavior — without it, an unchanged address
@@ -6760,7 +6762,9 @@ every one of #3097's own tests passes unmodified.
   compares keys present in at least one side's row map, so a
   confirmed-zero-reward address (Koios answered, no reward, so no row is
   ever emitted for it) never enters that comparison at all — this half is
-  read from `koios_account_checked` (`Cache.GetZeroRewardAccountsForEpoch`).
+  read from the coverage row's exact count and capped sample
+  (`Cache.GetZeroRewardSummary`), with a bounded legacy fallback to
+  `koios_account_checked`.
   Newly-registered/deregistered accounts are diffed from **Dingo's own
   epoch-scoped `reward_account_output` rows** at the current and previous
   stake epoch (`dingo.GetRewardAccountOutputs`, decoded via
