@@ -182,6 +182,12 @@ func TestSlotToEpochProjection(t *testing.T) {
 				EraId:         1,
 			},
 		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+		},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(250, []byte("tip")),
+		},
 	}
 	testLedgerState.publishSnapshotsLocked()
 

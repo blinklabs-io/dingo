@@ -3826,12 +3826,12 @@ func TestPrunePoolSnapshotsWithRetentionFloor_KeepsReadoptableDeferredHeader(
 			Nonce:         tb.epochNonce,
 		},
 	}
-	// The test config carries no Byron genesis, so the stability window is the
-	// 50_000-slot default; with the tip at 60_000 the rollback horizon cuts off
-	// at slot 10_000.
-	ls.currentTip = ochainsync.Tip{Point: ocommon.Point{Slot: 60_000}}
+	// The test config carries Byron genesis with k=432, so the stability window
+	// is 2k = 864 slots; with the tip at 21_000 the rollback horizon cuts off
+	// at slot 20_136, between the two points below.
+	ls.currentTip = ochainsync.Tip{Point: ocommon.Point{Slot: 21_000}}
 	ls.publishSnapshotsLocked()
-	require.Equal(t, uint64(50_000), ls.calculateStabilityWindow())
+	require.Equal(t, uint64(864), ls.calculateStabilityWindow())
 
 	// Behind the tip but INSIDE the horizon: a rollback can still re-adopt it.
 	readoptable := ocommon.Point{Slot: 20_500, Hash: []byte{0x11}}
