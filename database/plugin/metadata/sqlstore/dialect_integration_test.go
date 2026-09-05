@@ -186,6 +186,21 @@ func testSQLStoreIntegration(
 	)
 	require.NoError(t, err)
 	require.Equal(t, account.ID, loaded.ID)
+	// GetAccountsByCredential's derived-table UNION ALL join binds its
+	// credential_tag/staking_key parameters untyped: PostgreSQL resolves
+	// them to text rather than inferring account's BIGINT/BYTEA column
+	// types from the join, which the SQLite benchmark alone can't catch
+	// (issue: "operator does not exist: bytea = text").
+	batchLoaded, err := store.GetAccountsByCredential(
+		[]models.StakeCredentialRef{
+			models.NewStakeCredentialRef(0, account.StakingKey),
+		},
+		false,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Contains(t, batchLoaded, models.NewStakeCredentialRef(0, account.StakingKey).MapKey())
+	require.Equal(t, account.ID, batchLoaded[models.NewStakeCredentialRef(0, account.StakingKey).MapKey()].ID)
 	_, err = db.Exec(dialect.Rebind(`
 INSERT INTO reward_live_stake (
  pool_key_hash, staking_key, credential_tag, utxo_stake, reward_stake,

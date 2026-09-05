@@ -27,7 +27,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 10)
+	require.Len(t, registry, 11)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -98,16 +98,21 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Len(t, registry[8].SQL["sqlite"].Expand, 1)
 	require.NotNil(t, registry[8].Backfill)
 	require.Equal(t, 10, registry[9].Version)
-	require.Equal(t, "pointer-address-stake", registry[9].Name)
-	require.Len(t, registry[9].SQL["sqlite"].Expand, 2)
+	require.Equal(t, "reward-seed-failure", registry[9].Name)
+	require.Len(t, registry[9].SQL["sqlite"].Expand, 1)
+	require.Contains(t, registry[9].SQL["sqlite"].Expand[0],
+		"CREATE TABLE IF NOT EXISTS `reward_seed_failure`")
+	require.Equal(t, 11, registry[10].Version)
+	require.Equal(t, "pointer-address-stake", registry[10].Name)
+	require.Len(t, registry[10].SQL["sqlite"].Expand, 2)
 	require.Contains(
 		t,
-		registry[9].SQL["sqlite"].Expand[0],
+		registry[10].SQL["sqlite"].Expand[0],
 		"CREATE TABLE IF NOT EXISTS `utxo_pointer`",
 	)
 	require.Contains(
 		t,
-		registry[9].SQL["sqlite"].Expand,
+		registry[10].SQL["sqlite"].Expand,
 		"CREATE INDEX IF NOT EXISTS `idx_utxo_pointer_target`"+
 			" ON `utxo_pointer`(`ptr_slot`,`ptr_tx_index`,`ptr_cert_index`)",
 	)
@@ -124,7 +129,7 @@ func TestPointerStakeMigrationTranslatesForProviders(t *testing.T) {
 
 	postgres, err := PostgresRegistry()
 	require.NoError(t, err)
-	postgresSQL := strings.Join(postgres[9].SQL["postgres"].Expand, "\n")
+	postgresSQL := strings.Join(postgres[10].SQL["postgres"].Expand, "\n")
 	require.Contains(t, postgresSQL, `"utxo_id" BIGINT NOT NULL`)
 	require.Contains(t, postgresSQL, `"ptr_cert_index" BIGINT NOT NULL`)
 	require.Contains(
@@ -136,7 +141,7 @@ func TestPointerStakeMigrationTranslatesForProviders(t *testing.T) {
 
 	mysql, err := MySQLRegistry()
 	require.NoError(t, err)
-	mysqlSQL := strings.Join(mysql[9].SQL["mysql"].Expand, "\n")
+	mysqlSQL := strings.Join(mysql[10].SQL["mysql"].Expand, "\n")
 	require.Contains(t, mysqlSQL, "`utxo_id` BIGINT NOT NULL")
 	require.Contains(
 		t,
@@ -236,7 +241,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 10)
+	require.Len(t, registry, 11)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

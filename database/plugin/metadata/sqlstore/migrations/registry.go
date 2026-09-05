@@ -40,6 +40,7 @@ const (
 	accountDepositSchemaRelease                = "account-import-deposit"
 	committeeCredentialTagsSchemaRelease       = "committee-credential-tags"
 	committeeTermStartPresenceSchemaRelease    = "committee-term-start-presence"
+	rewardSeedFailureSchemaRelease             = "reward-seed-failure"
 	pointerAddressStakeSchemaRelease           = "pointer-address-stake"
 )
 
@@ -66,7 +67,8 @@ var schemaVersions = []struct {
 		Name:    committeeTermStartPresenceSchemaRelease,
 		Dir:     "v9",
 	},
-	{Version: 10, Name: pointerAddressStakeSchemaRelease, Dir: "v10"},
+	{Version: 10, Name: rewardSeedFailureSchemaRelease, Dir: "v10"},
+	{Version: 11, Name: pointerAddressStakeSchemaRelease, Dir: "v11"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

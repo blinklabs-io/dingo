@@ -316,6 +316,100 @@ func TestTxSubmissionClientRequestTxIdsClearsConsumerCacheOnAck(t *testing.T) {
 	require.Empty(t, bodies)
 }
 
+// TestTxSubmissionClientRequestTxIdsPartialAck verifies that acknowledging
+// part of a batch of offered transactions discards only the acknowledged
+// prefix, in the order the ids were offered, and preserves the bodies of ids
+// the peer has not yet acknowledged so they remain available to retry.
+// Regression test for
+// https://github.com/blinklabs-io/dingo/issues/3424, where any nonzero ack
+// cleared the entire offered cache and silently dropped unacknowledged
+// bodies.
+func TestTxSubmissionClientRequestTxIdsPartialAck(t *testing.T) {
+	// Arrange two cached transactions for a peer consumer.
+	fixtures := txsubmissionTestFixtures(t)[:2]
+	o, connId := newTxSubmissionTestOuroboros(t)
+	o.mempool.NewConsumer(connId)
+	addTxSubmissionTestFixtures(t, o.mempool, fixtures...)
+	ctx := txsubmission.CallbackContext{ConnectionId: connId}
+
+	// Advertise both transactions so both are stored in the consumer cache.
+	ids, err := o.txsubmissionClientRequestTxIds(ctx, false, 0, 2)
+	require.NoError(t, err)
+	require.Len(t, ids, 2)
+
+	// Acknowledge only the first (oldest) offered transaction; request no
+	// additional ids in the same call to isolate the ack's effect.
+	ids, err = o.txsubmissionClientRequestTxIds(ctx, false, 1, 0)
+	require.NoError(t, err)
+	require.Empty(t, ids)
+
+	// The acknowledged transaction body can no longer be served.
+	bodies, err := o.txsubmissionClientRequestTxs(ctx, []txsubmission.TxId{
+		fixtures[0].txId,
+	})
+	require.NoError(t, err)
+	require.Empty(t, bodies)
+
+	// The unacknowledged transaction body is still cached and can be served.
+	bodies, err = o.txsubmissionClientRequestTxs(ctx, []txsubmission.TxId{
+		fixtures[1].txId,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []txsubmission.TxBody{
+		{
+			EraId:  txsubmissionRelayTestEraId,
+			TxBody: fixtures[1].body,
+		},
+	}, bodies)
+}
+
+// TestTxSubmissionClientRequestTxIdsAckAcrossMixedBatches verifies that
+// acknowledgements accumulate correctly across multiple RequestTxIds calls
+// that mix acknowledging older offers with advertising new ones in the same
+// call, matching the sliding FIFO window the TxSubmission protocol uses.
+func TestTxSubmissionClientRequestTxIdsAckAcrossMixedBatches(t *testing.T) {
+	// Arrange three cached transactions for a peer consumer.
+	fixtures := txsubmissionTestFixtures(t)
+	o, connId := newTxSubmissionTestOuroboros(t)
+	o.mempool.NewConsumer(connId)
+	addTxSubmissionTestFixtures(t, o.mempool, fixtures...)
+	ctx := txsubmission.CallbackContext{ConnectionId: connId}
+
+	// Offer the first two transactions.
+	ids, err := o.txsubmissionClientRequestTxIds(ctx, false, 0, 2)
+	require.NoError(t, err)
+	require.Len(t, ids, 2)
+
+	// Acknowledge the first offer while requesting the third in the same
+	// call, mirroring a peer that both confirms and asks for more at once.
+	ids, err = o.txsubmissionClientRequestTxIds(ctx, false, 1, 1)
+	require.NoError(t, err)
+	require.Len(t, ids, 1)
+	require.Equal(
+		t,
+		fixtures[2].hash,
+		hex.EncodeToString(ids[0].TxId.TxId[:]),
+	)
+
+	// The first offer was acknowledged and its body is gone.
+	bodies, err := o.txsubmissionClientRequestTxs(ctx, []txsubmission.TxId{
+		fixtures[0].txId,
+	})
+	require.NoError(t, err)
+	require.Empty(t, bodies)
+
+	// The second and third offers are still unacknowledged and servable.
+	bodies, err = o.txsubmissionClientRequestTxs(ctx, []txsubmission.TxId{
+		fixtures[1].txId,
+		fixtures[2].txId,
+	})
+	require.NoError(t, err)
+	require.ElementsMatch(t, []txsubmission.TxBody{
+		{EraId: txsubmissionRelayTestEraId, TxBody: fixtures[1].body},
+		{EraId: txsubmissionRelayTestEraId, TxBody: fixtures[2].body},
+	}, bodies)
+}
+
 // TestTxSubmissionClientRequestTxs verifies that known cached TxIds return
 // bodies while unknown or already-served TxIds are ignored.
 func TestTxSubmissionClientRequestTxs(t *testing.T) {
@@ -562,6 +656,89 @@ func txsubmissionTestFixtures(t *testing.T) []txsubmissionTestFixture {
 		})
 	}
 	return ret
+}
+
+func TestValidateTxsubmissionReply(t *testing.T) {
+	fixtures := txsubmissionTestFixtures(t)[:2]
+	requested := make([]txsubmission.TxIdAndSize, 0, len(fixtures))
+	returned := make([]txsubmission.TxBody, 0, len(fixtures))
+	for _, fixture := range fixtures {
+		requested = append(requested, txsubmission.TxIdAndSize{
+			TxId: fixture.txId,
+			Size: uint32(len(fixture.body)), // #nosec G115 -- test fixture
+		})
+		returned = append(returned, txsubmission.TxBody{
+			EraId:  fixture.txId.EraId,
+			TxBody: fixture.body,
+		})
+	}
+
+	t.Run("matching batch", func(t *testing.T) {
+		validated, err := validateTxsubmissionReply(requested, returned)
+		require.NoError(t, err)
+		require.Len(t, validated, len(returned))
+	})
+	t.Run("ordered subset", func(t *testing.T) {
+		validated, err := validateTxsubmissionReply(requested, returned[1:])
+		require.NoError(t, err)
+		require.Len(t, validated, 1)
+		require.Equal(t, returned[1], validated[0].body)
+	})
+
+	tests := []struct {
+		name   string
+		mutate func([]txsubmission.TxIdAndSize, []txsubmission.TxBody)
+		match  string
+	}{
+		{
+			name:  "count",
+			match: "count exceeds request",
+		},
+		{
+			name: "order",
+			mutate: func(_ []txsubmission.TxIdAndSize, got []txsubmission.TxBody) {
+				got[0], got[1] = got[1], got[0]
+			},
+			match: "hash or order mismatch",
+		},
+		{
+			name: "era",
+			mutate: func(want []txsubmission.TxIdAndSize, _ []txsubmission.TxBody) {
+				want[0].TxId.EraId++
+			},
+			match: "era mismatch",
+		},
+		{
+			name: "size",
+			mutate: func(want []txsubmission.TxIdAndSize, _ []txsubmission.TxBody) {
+				want[0].Size++
+				want[1].Size--
+			},
+			match: "size mismatch",
+		},
+		{
+			name: "hash",
+			mutate: func(want []txsubmission.TxIdAndSize, _ []txsubmission.TxBody) {
+				want[0].TxId.TxId[0] ^= 0xff
+			},
+			match: "hash or order mismatch",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			want := slices.Clone(requested)
+			got := slices.Clone(returned)
+			if tt.name == "count" {
+				got = append(got, returned[0])
+			}
+			if tt.mutate != nil {
+				tt.mutate(want, got)
+			}
+			validated, err := validateTxsubmissionReply(want, got)
+			require.ErrorContains(t, err, tt.match)
+			require.Nil(t, validated)
+		})
+	}
 }
 
 func addTxSubmissionTestFixtures(
@@ -1040,9 +1217,9 @@ func TestTxSubmissionServerInitContinuesAfterMempoolRejection(
 	)
 }
 
-// TestTxSubmissionServerInitContinuesAfterDecodeFailure verifies malformed
-// transaction CBOR does not stop later offers on the same connection.
-func TestTxSubmissionServerInitContinuesAfterDecodeFailure(t *testing.T) {
+// TestTxSubmissionServerInitRejectsMalformedReply verifies a mismatched reply
+// stops the pull loop before a later request could acknowledge it.
+func TestTxSubmissionServerInitRejectsMalformedReply(t *testing.T) {
 	fixtures := txsubmissionTestFixtures(t)
 	malformed := fixtures[0]
 	accepted := fixtures[1]
@@ -1068,36 +1245,34 @@ func TestTxSubmissionServerInitContinuesAfterDecodeFailure(t *testing.T) {
 		func() bool {
 			return strings.Contains(
 				logBuf.String(),
-				"failed to parse transaction CBOR",
+				"rejected mismatched txsubmission reply",
 			)
 		},
 		5*time.Second,
 		10*time.Millisecond,
 		"expected the malformed transaction to be logged",
 	)
-	require.Contains(t, logBuf.String(), malformed.hash)
+	require.Contains(t, logBuf.String(), "decode failed")
 	require.Contains(t, logBuf.String(), h.connA.Id().String())
 
-	// Offer the valid transaction only after the malformed item completed its
-	// own round trip. This proves the same per-peer pump requests another batch.
+	// A subsequent offer must not be requested, because doing so would
+	// acknowledge and advance beyond the rejected reply.
 	addTxSubmissionTestFixtures(t, h.mB, accepted)
-
-	require.Eventually(
+	require.Never(
 		t,
 		func() bool {
 			_, ok := h.mA.GetTransaction(accepted.hash)
 			return ok
 		},
-		5*time.Second,
+		250*time.Millisecond,
 		10*time.Millisecond,
-		"expected a valid transaction after malformed CBOR to be processed on the same connection",
+		"pull loop advanced after rejecting a mismatched reply",
 	)
 }
 
-// TestTxSubmissionServerInitDoesNotMislabelPartialMalformedResponse verifies
-// a body shifted forward by an earlier cache miss is not labeled with the
-// missing transaction's ID when its CBOR cannot be decoded.
-func TestTxSubmissionServerInitDoesNotMislabelPartialMalformedResponse(
+// TestTxSubmissionServerInitRejectsBatchAtomically verifies a valid prefix is
+// not admitted when a later body in the same reply is mismatched.
+func TestTxSubmissionServerInitRejectsBatchAtomically(
 	t *testing.T,
 ) {
 	fixtures := txsubmissionTestFixtures(t)
@@ -1114,7 +1289,6 @@ func TestTxSubmissionServerInitDoesNotMislabelPartialMalformedResponse(
 	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
 		logger:           logger,
 		corruptOfferHash: malformed.hash,
-		omitOfferHash:    omitted.hash,
 		batchRequestsA:   true,
 	})
 	defer h.close(t)
@@ -1127,14 +1301,45 @@ func TestTxSubmissionServerInitDoesNotMislabelPartialMalformedResponse(
 		func() bool {
 			return strings.Contains(
 				logBuf.String(),
-				"failed to parse transaction CBOR",
+				"rejected mismatched txsubmission reply",
 			)
 		},
 		5*time.Second,
 		10*time.Millisecond,
-		"expected the partial malformed response to be logged",
+		"expected the mismatched batch to be rejected",
 	)
 	logOutput := logBuf.String()
-	require.Contains(t, logOutput, `"tx_id":""`)
-	require.NotContains(t, logOutput, `"tx_id":"`+omitted.hash+`"`)
+	require.Contains(t, logOutput, "transaction 1 decode failed")
+	_, admitted := h.mA.GetTransaction(omitted.hash)
+	require.False(t, admitted, "valid prefix was partially admitted")
+}
+
+// TestTxSubmissionServerInitAcceptsOrderedSubset verifies a peer may omit a
+// transaction that disappeared after advertisement while still returning a
+// later requested transaction.
+func TestTxSubmissionServerInitAcceptsOrderedSubset(t *testing.T) {
+	fixtures := txsubmissionTestFixtures(t)
+	omitted := fixtures[0]
+	returned := fixtures[1]
+	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
+		omitOfferHash:  omitted.hash,
+		batchRequestsA: true,
+	})
+	defer h.close(t)
+
+	addTxSubmissionTestFixtures(t, h.mB, omitted, returned)
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+
+	require.Eventually(
+		t,
+		func() bool {
+			_, ok := h.mA.GetTransaction(returned.hash)
+			return ok
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected later transaction from an ordered subset to be admitted",
+	)
+	_, admitted := h.mA.GetTransaction(omitted.hash)
+	require.False(t, admitted)
 }
