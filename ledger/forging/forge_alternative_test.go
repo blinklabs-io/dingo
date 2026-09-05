@@ -358,6 +358,81 @@ func TestCheckAndForgeProductionEqualSlotDeclinesWithoutTheAlternativePath(
 	}
 }
 
+// TestEqualSlotAlternativeRequiresADurableFence pins the anti-equivocation
+// precondition for contesting a slot at all. This path cannot tell a rival's
+// block from one of our own: it reads "the tip is at my slot" and forges an
+// alternative to whatever is there.
+//
+// Without a durable fence store, lastForgedSlot is in-memory only and
+// fenceLoaded is false after a restart, so the "slot already has our own
+// block" gate cannot fire. A producer restarted inside a slot it has already
+// forged for would therefore find its OWN block at the tip, treat it as a
+// rival, sign a second different block for that slot -- equivocation, against
+// a first block that may already have reached peers -- and roll its own good
+// block off the tip to adopt it.
+//
+// Everything wired here is wired correctly: chain context, sibling adopter,
+// context-capable builder, a tip genuinely at the contested slot. Only the
+// fence is missing, and that alone must decline the contest. The node
+// binary refuses to start a producer without a fence store at all
+// (node_forging.go), so this guards embedders and dev-mode wiring, which the
+// forging package still admits.
+func TestEqualSlotAlternativeRequiresADurableFence(t *testing.T) {
+	leader := &forgerCountingLeader{}
+	builder := &forgerTestBuilder{
+		block: newForgerTestBlock(10, altTestRivalBlockNumber),
+		cbor:  []byte{0x01},
+	}
+	broadcaster := &forgerTestBroadcaster{}
+	adopter := &forgerTestSiblingAdopter{adopted: true}
+	published := 0
+
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    leader,
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		// No ForgeFence: the case this test exists for.
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      10,
+			slotsPerKESPeriod: 100,
+		},
+		ChainContext:   newAltTestChainContext(10),
+		SiblingAdopter: adopter,
+		BlockForged: func(ledger.Block, []byte, time.Duration) {
+			published++
+		},
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	// The slot is still observable as a contested one that was declined,
+	// exactly as any other missing part of the capability is.
+	assert.Equal(t, 1, leader.callCount())
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.slotBattlesTotal),
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeCouldNot),
+	)
+	// Nothing signed, nothing adopted, nothing diffused.
+	assert.Zero(t, builder.contextCalls, "no alternative may be built")
+	assert.Zero(t, builder.calls)
+	assert.Zero(t, builder.leiosCalls)
+	assert.Zero(t, adopter.calls, "nothing may be offered to chain selection")
+	assert.Zero(t, broadcaster.calls)
+	assert.Zero(t, published)
+}
+
 // TestEqualSlotAlternativeRecoversAdopterPanic keeps a misbehaving adopter
 // from taking down the forge loop goroutine, matching addBlockSafe.
 func TestEqualSlotAlternativeRecoversAdopterPanic(t *testing.T) {
@@ -375,7 +450,7 @@ func TestEqualSlotAlternativeRecoversAdopterPanic(t *testing.T) {
 		&forgerCountingLeader{},
 		builder,
 		&forgerTestBroadcaster{},
-		nil,
+		&fenceTestStore{},
 		newAltTestChainContext(10),
 		&forgerTestSiblingAdopter{panics: true},
 	)
@@ -440,6 +515,7 @@ func TestEqualSlotAlternativeCarriesNoLeiosData(t *testing.T) {
 			chainTipSlot:      10,
 			slotsPerKESPeriod: 100,
 		},
+		ForgeFence:                      &fenceTestStore{},
 		ChainContext:                    newAltTestChainContext(10),
 		SiblingAdopter:                  adopter,
 		LeiosCertificateProvider:        leiosCerts,
