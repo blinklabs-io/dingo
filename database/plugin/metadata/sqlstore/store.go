@@ -40,6 +40,11 @@ type Config struct {
 	// StorageMode controls retention of API-only transaction detail. Empty
 	// selects the consensus-focused core mode.
 	StorageMode string
+	// CommitteeAuthRetentionSlots overrides how far back superseded
+	// auth_committee_hot rows are retained for rollback, in slots. Zero
+	// selects DefaultCommitteeAuthRetentionSlots; see committee_prune.go for
+	// the retention rule and why the window has to cover the rollback bound.
+	CommitteeAuthRetentionSlots uint64
 
 	Migrations      []migrations.Migration
 	MigrationLocker migrations.Locker
@@ -88,6 +93,11 @@ type Store struct {
 	logger      *slog.Logger
 	storageMode string
 
+	// committeeAuthRetentionSlots is the configured rollback window for
+	// auth_committee_hot pruning. Read it through committeeAuthRetention(),
+	// which applies the default, rather than directly.
+	committeeAuthRetentionSlots uint64
+
 	migrations        []migrations.Migration
 	migrationLocker   migrations.Locker
 	diskSize          func() (int64, error)
@@ -129,6 +139,14 @@ func New(config Config) (*Store, error) {
 	if config.StorageMode == "" {
 		config.StorageMode = types.StorageModeCore
 	}
+	if config.CommitteeAuthRetentionSlots != 0 &&
+		config.CommitteeAuthRetentionSlots < DefaultCommitteeAuthRetentionSlots {
+		return nil, fmt.Errorf(
+			"sqlstore: committee auth retention slots %d is below the safe rollback window %d",
+			config.CommitteeAuthRetentionSlots,
+			DefaultCommitteeAuthRetentionSlots,
+		)
+	}
 	switch config.StorageMode {
 	case types.StorageModeCore, types.StorageModeAPI:
 	default:
@@ -143,21 +161,22 @@ func New(config Config) (*Store, error) {
 		)
 	}
 	return &Store{
-		writeDB:          config.WriteDB,
-		readDB:           config.ReadDB,
-		dialect:          config.Dialect,
-		logger:           config.Logger,
-		storageMode:      config.StorageMode,
-		migrations:       config.Migrations,
-		migrationLocker:  config.MigrationLocker,
-		diskSize:         config.DiskSize,
-		maintenance:      config.Maintenance,
-		maintenanceEvery: config.MaintenanceInterval,
-		backupTo:         config.BackupTo,
-		restoreFrom:      config.RestoreFrom,
-		prepare:          config.Prepare,
-		reset:            config.Reset,
-		validateBackup:   config.ValidateBackup,
+		writeDB:                     config.WriteDB,
+		readDB:                      config.ReadDB,
+		dialect:                     config.Dialect,
+		logger:                      config.Logger,
+		storageMode:                 config.StorageMode,
+		committeeAuthRetentionSlots: config.CommitteeAuthRetentionSlots,
+		migrations:                  config.Migrations,
+		migrationLocker:             config.MigrationLocker,
+		diskSize:                    config.DiskSize,
+		maintenance:                 config.Maintenance,
+		maintenanceEvery:            config.MaintenanceInterval,
+		backupTo:                    config.BackupTo,
+		restoreFrom:                 config.RestoreFrom,
+		prepare:                     config.Prepare,
+		reset:                       config.Reset,
+		validateBackup:              config.ValidateBackup,
 	}, nil
 }
 
