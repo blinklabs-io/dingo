@@ -2775,6 +2775,16 @@ The `LedgerView` interface provides query access to ledger state:
   inclusive. The legacy hash-only `CommitteeMember` and
   `CommitteeMembers` methods omit ambiguous same-hash key/script identities
   instead of selecting one by map iteration.
+- `EpochForSlot` implements the `common.EpochState` capability, mapping a slot
+  to its epoch through the same epoch cache the header path uses. gouroboros
+  expresses several rules relative to the current epoch and obtains it by
+  optional type assertion, so a ledger state that omits this method silently
+  takes the weaker path in each of them rather than failing to build. Two
+  depend on it: the pool-deposit decision cannot otherwise distinguish a
+  retired pool from a registered one, so a re-registration of a retired pool
+  is charged no deposit and then fails value conservation by exactly the
+  deposit; and the Shelley POOL retirement bound can only reject epoch zero
+  without it.
 - The Conway and Dijkstra validation compositions replace the pinned
   hash-only committee certificate and voter rules when that capability is
   present. Cold authorization/resignation certificates and hot committee votes

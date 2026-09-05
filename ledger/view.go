@@ -414,6 +414,24 @@ func (lv *LedgerView) PoolCurrentState(
 	return currentReg, pendingEpoch, nil
 }
 
+// EpochForSlot returns the epoch containing the given slot, satisfying
+// gouroboros' optional common.EpochState capability.
+//
+// Several ledger rules are expressed relative to the current epoch and degrade
+// to a weaker check when the ledger state cannot supply one. Without this the
+// pool-deposit decision cannot tell a retired pool from a registered one, so a
+// registration for an already-retired pool is charged no deposit and the
+// transaction fails value conservation by exactly that amount
+// (issue #3908); the retirement-epoch bound on pool retirement certificates is
+// skipped for the same reason.
+func (lv *LedgerView) EpochForSlot(slot uint64) (uint64, error) {
+	epoch, err := lv.ls.epochForSlot(slot)
+	if err != nil {
+		return 0, err
+	}
+	return epoch.EpochId, nil
+}
+
 // IsPoolRegistered checks if a pool is currently registered
 func (lv *LedgerView) IsPoolRegistered(pkh lcommon.PoolKeyHash) bool {
 	reg, _, err := lv.PoolCurrentState(pkh)
