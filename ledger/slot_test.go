@@ -20,7 +20,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
@@ -38,47 +37,50 @@ func TestSlotCalc(t *testing.T) {
 				StartSlot:     0,
 				SlotLength:    1000,
 				LengthInSlots: 86400,
+				EraId:         1,
 			},
 			{
 				EpochId:       1,
 				StartSlot:     86400,
 				SlotLength:    1000,
 				LengthInSlots: 86400,
+				EraId:         1,
 			},
 			{
 				EpochId:       2,
 				StartSlot:     172800,
 				SlotLength:    1000,
 				LengthInSlots: 86400,
+				EraId:         1,
 			},
 			{
 				EpochId:       3,
 				StartSlot:     259200,
 				SlotLength:    1000,
 				LengthInSlots: 86400,
+				EraId:         1,
 			},
 			{
 				EpochId:       4,
 				StartSlot:     345600,
 				SlotLength:    1000,
 				LengthInSlots: 86400,
+				EraId:         1,
 			},
 			{
 				EpochId:       5,
 				StartSlot:     432000,
 				SlotLength:    1000,
 				LengthInSlots: 86400,
+				EraId:         1,
 			},
 		},
 		config: LedgerStateConfig{
-			CardanoNodeConfig: &cardano.CardanoNodeConfig{},
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
 		},
+		currentTip: ochainsync.Tip{Point: ocommon.NewPoint(432001, []byte("tip"))},
 	}
 	testLedgerState.publishSnapshotsLocked()
-	testShelleyGenesis := `{"systemStart": "2022-10-25T00:00:00Z"}`
-	if err := testLedgerState.config.CardanoNodeConfig.LoadShelleyGenesisFromReader(strings.NewReader(testShelleyGenesis)); err != nil {
-		t.Fatalf("unexpected error loading cardano node config: %s", err)
-	}
 	testDefs := []struct {
 		slot     uint64
 		slotTime time.Time
@@ -179,6 +181,12 @@ func TestSlotToEpochProjection(t *testing.T) {
 				LengthInSlots: 100,
 				EraId:         1,
 			},
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+		},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(250, []byte("tip")),
 		},
 	}
 	testLedgerState.publishSnapshotsLocked()

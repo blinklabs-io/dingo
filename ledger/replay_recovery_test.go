@@ -23,11 +23,13 @@ import (
 	"log/slog"
 	"math/big"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	nodeconfig "github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -1222,10 +1224,15 @@ func TestTryRecoverFromTxValidationErrorRecoversDependencyClosure(
 	)
 	require.NoError(t, db.SetTip(currentTip, nil))
 
+	// This recovery test uses a synthetic Shelley-only cache. Keep the config
+	// Shelley-only so the forecast shape does not alter recovery semantics.
+	recoveryCfg := &nodeconfig.CardanoNodeConfig{}
+	err = recoveryCfg.LoadShelleyGenesisFromReader(strings.NewReader(`{"activeSlotsCoeff":0.05,"securityParam":432,"slotsPerKESPeriod":129600,"systemStart":"2022-10-25T00:00:00Z"}`))
+	require.NoError(t, err)
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
 		ChainManager:      cm,
-		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		CardanoNodeConfig: recoveryCfg,
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
 		),
