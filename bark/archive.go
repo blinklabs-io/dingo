@@ -132,7 +132,11 @@ func (r blockRefRequest) resolved(
 }
 
 // resolveBlockPoint maps a validated reference to the (slot, hash) point
-// the blob store keys blocks by.
+// the blob store keys blocks by, and reports whether resolving it actually
+// read the block out of the store. That second value is what separates "the
+// archive does not hold this block" from "the archive's index holds it but
+// the blob store will not serve it": only a lookup path proves the block was
+// there a moment ago.
 //
 // The precedence is hash+slot, then hash, then slot, then height:
 //
@@ -156,28 +160,30 @@ func (r blockRefRequest) resolved(
 func resolveBlockPoint(
 	db *database.Database,
 	ref blockRefRequest,
-) (common.Point, error) {
+) (common.Point, bool, error) {
 	switch {
 	case ref.hasHash && ref.hasSlot:
-		return common.NewPoint(ref.slot, ref.hash), nil
+		// Taken at face value: nothing was read, so this says nothing
+		// about whether the archive holds the block.
+		return common.NewPoint(ref.slot, ref.hash), false, nil
 	case ref.hasHash:
 		block, err := database.BlockByHash(db, ref.hash)
 		if err != nil {
-			return common.Point{}, err
+			return common.Point{}, false, err
 		}
-		return common.NewPoint(block.Slot, block.Hash), nil
+		return common.NewPoint(block.Slot, block.Hash), true, nil
 	case ref.hasSlot:
 		block, err := database.BlockBySlot(db, ref.slot)
 		if err != nil {
-			return common.Point{}, err
+			return common.Point{}, false, err
 		}
-		return common.NewPoint(block.Slot, block.Hash), nil
+		return common.NewPoint(block.Slot, block.Hash), true, nil
 	default:
 		block, err := database.BlockByNumber(db, ref.height)
 		if err != nil {
-			return common.Point{}, err
+			return common.Point{}, false, err
 		}
-		return common.NewPoint(block.Slot, block.Hash), nil
+		return common.NewPoint(block.Slot, block.Hash), true, nil
 	}
 }
 
@@ -188,6 +194,42 @@ func resolveBlockPoint(
 func isBlockMissing(err error) bool {
 	return errors.Is(err, models.ErrBlockNotFound) ||
 		errors.Is(err, types.ErrBlobKeyNotFound)
+}
+
+// logBlockUnservable records a block the archive resolved out of its own
+// index and then could not sign a URL for.
+//
+// The cloud blob plugins report a lost metadata object with the same
+// types.ErrBlobKeyNotFound they use for an absent block object -- gcs
+// GetBlock and GetBlockURL log the partial write and return that error
+// anyway, and s3 GetBlockURL reads metadata before it ever heads the block
+// object -- so the error alone cannot tell the two apart. What does tell
+// them apart is that a lookup path already read this block: the index says
+// the archive holds it, and the blob store now says it does not.
+//
+// The reference is still answered in not_found. There is no URL to hand the
+// client, FetchBlockResponse has no per-reference error field, and failing
+// the call would discard every other block in the batch -- the exact defect
+// #3442 asked to remove. The operator, who is the only party that can act on
+// it, gets the log line instead.
+func (a *archiveServiceHandler) logBlockUnservable(
+	point common.Point,
+	err error,
+) {
+	if a.bark == nil || a.bark.config.Logger == nil {
+		return
+	}
+	a.bark.config.Logger.Warn(
+		"block resolved from the index but the blob store reports it missing; treating as not_found",
+		"component",
+		"bark",
+		"slot",
+		point.Slot,
+		"hash",
+		hex.EncodeToString(point.Hash),
+		"error",
+		err,
+	)
 }
 
 // FetchBlock resolves each requested block reference to a signed URL. A
@@ -238,7 +280,7 @@ func (a *archiveServiceHandler) FetchBlock(
 	defer release()
 
 	for _, ref := range refs {
-		point, err := resolveBlockPoint(db, ref)
+		point, confirmed, err := resolveBlockPoint(db, ref)
 		if err != nil {
 			if isBlockMissing(err) {
 				resp.NotFound = append(resp.NotFound, ref.requested())
@@ -253,6 +295,9 @@ func (a *archiveServiceHandler) FetchBlock(
 		signedURL, metadata, err := database.BlockURL(ctx, db, point)
 		if err != nil {
 			if isBlockMissing(err) {
+				if confirmed {
+					a.logBlockUnservable(point, err)
+				}
 				resp.NotFound = append(resp.NotFound, ref.requested())
 				continue
 			}

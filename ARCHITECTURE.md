@@ -6994,6 +6994,20 @@ identity. Only a malformed request (no identifier at all, or a hash that is not
 32 hex-encoded bytes) or a genuine storage failure fails the whole call, the
 former with `InvalidArgument`.
 
+One `not_found` answer is also a node-side signal. When a reference resolved
+through a lookup -- hash alone, slot alone, or height alone -- and the blob
+store then reports the block missing on `GetBlockURL`, the index and the blob
+store disagree, which is a storage inconsistency rather than an absent block.
+The cloud plugins cannot express that difference in the error: `s3` and `gcs`
+return `types.ErrBlobKeyNotFound` both for a block that was never written and
+for a block whose metadata object was lost, so the lookup having already read
+the block is the only evidence available. The client still gets `not_found` --
+there is no URL to hand it, `FetchBlockResponse` has no per-reference error
+field, and failing the call would discard the rest of the batch -- and the
+condition is logged at warn with the block's slot and hash for the operator.
+The hash+slot case resolves without a lookup and so carries no such evidence;
+it is reported as an ordinary `not_found`.
+
 The client side (`bark.BlobStoreBark`) wraps the configured local blob store.
 `GetBlock` and block iterators pass through local values, but resolve
 `types.ErrHistoryExpired` or missing historical block CBOR by calling the

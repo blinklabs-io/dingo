@@ -15,9 +15,11 @@
 package bark
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 	"testing"
@@ -55,6 +57,15 @@ var signedURLBlobTestExpiry = time.Date(
 // use, so the handler's not-found classification is exercised for real.
 type signedURLBlobStore struct {
 	blob.BlobStore
+	// unsignable holds hex block hashes whose metadata object is treated
+	// as lost: GetBlockURL reports types.ErrBlobKeyNotFound while the block
+	// itself stays readable through GetBlock. That is the partial-write
+	// shape both cloud plugins collapse into the same error they use for a
+	// block that was never written (gcs GetBlockURL logs the difference and
+	// returns ErrBlobKeyNotFound regardless; s3 GetBlockURL reads metadata
+	// before it heads the block object at all), so it cannot be produced by
+	// deleting anything -- it has to be injected here.
+	unsignable map[string]struct{}
 }
 
 func (s *signedURLBlobStore) GetBlockURL(
@@ -62,6 +73,14 @@ func (s *signedURLBlobStore) GetBlockURL(
 	txn types.Txn,
 	point ocommon.Point,
 ) (types.SignedURL, types.BlockMetadata, error) {
+	if _, ok := s.unsignable[hex.EncodeToString(point.Hash)]; ok {
+		return types.SignedURL{}, types.BlockMetadata{}, fmt.Errorf(
+			"metadata object for block [%d, %s] is missing: %w",
+			point.Slot,
+			hex.EncodeToString(point.Hash),
+			types.ErrBlobKeyNotFound,
+		)
+	}
 	_, metadata, err := s.BlobStore.GetBlock(txn, point.Slot, point.Hash)
 	if err != nil {
 		return types.SignedURL{}, types.BlockMetadata{}, err
@@ -80,7 +99,14 @@ func (s *signedURLBlobStore) GetBlockURL(
 
 type signedURLBlobConfig struct{}
 
-func registerSignedURLBlobProvider(host *hostplugin.Host) error {
+// registerSignedURLBlobProvider registers the store, treating the given hex
+// block hashes as unsignable. dbtest builds a fresh plugin.Host per
+// database, so each test gets its own registration and the shared provider
+// name does not collide.
+func registerSignedURLBlobProvider(
+	host *hostplugin.Host,
+	unsignable map[string]struct{},
+) error {
 	return hostplugin.Register(
 		host,
 		hostplugin.Descriptor{
@@ -102,7 +128,11 @@ func registerSignedURLBlobProvider(host *hostplugin.Host) error {
 			if err != nil {
 				return nil, nil, err
 			}
-			return &signedURLBlobStore{BlobStore: store},
+			signing := &signedURLBlobStore{
+				BlobStore:  store,
+				unsignable: unsignable,
+			}
+			return signing,
 				hostplugin.Lifecycle{
 					StartFunc: func(context.Context) error {
 						return store.Start()
@@ -115,13 +145,20 @@ func registerSignedURLBlobProvider(host *hostplugin.Host) error {
 
 // newSigningTestDB builds a test database whose blob store can sign block
 // URLs, which the archive handler needs to produce any SignedUrl at all.
-func newSigningTestDB(t *testing.T) *database.Database {
+// Hashes in unsignable are the exception: the store holds those blocks but
+// refuses to sign them, so GetBlockURL reports them missing.
+func newSigningTestDB(
+	t *testing.T,
+	unsignable map[string]struct{},
+) *database.Database {
 	t.Helper()
 	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
 		Config: &database.Config{DataDir: t.TempDir()},
 		Blob: dbtest.StorageProvider{
-			Name:     signedURLBlobProviderName,
-			Register: registerSignedURLBlobProvider,
+			Name: signedURLBlobProviderName,
+			Register: func(host *hostplugin.Host) error {
+				return registerSignedURLBlobProvider(host, unsignable)
+			},
 		},
 	})
 	require.NoError(t, err)
@@ -135,7 +172,21 @@ func newArchiveTestHandler(
 	count int,
 ) (*archiveServiceHandler, []models.Block) {
 	t.Helper()
-	db := newSigningTestDB(t)
+	return newArchiveTestHandlerWithLogger(t, count, nil, nil)
+}
+
+// newArchiveTestHandlerWithLogger builds an archive handler over a signing
+// database seeded with count blocks, refusing to sign the hex block hashes
+// in unsignable and logging through logger. A nil logger leaves NewBark's
+// discard logger in place.
+func newArchiveTestHandlerWithLogger(
+	t *testing.T,
+	count int,
+	unsignable map[string]struct{},
+	logger *slog.Logger,
+) (*archiveServiceHandler, []models.Block) {
+	t.Helper()
+	db := newSigningTestDB(t, unsignable)
 	blocks := make([]models.Block, 0, count)
 	for i := 1; i <= count; i++ {
 		// #nosec G115 -- fixed small test fixture values.
@@ -143,7 +194,9 @@ func newArchiveTestHandler(
 		require.NoError(t, db.BlockCreate(block, nil))
 		blocks = append(blocks, block)
 	}
-	return &archiveServiceHandler{bark: newTestBark(t, db)}, blocks
+	b, err := NewBark(BarkConfig{DB: db, Port: 1, Logger: logger})
+	require.NoError(t, err)
+	return &archiveServiceHandler{bark: b}, blocks
 }
 
 func fetchBlocks(
@@ -270,6 +323,79 @@ func TestArchiveFetchBlockReturnsNotFoundWithoutDiscardingBatch(
 	require.Nil(t, msg.GetNotFound()[0].Height)
 	require.Equal(t, missingHeight, msg.GetNotFound()[1].GetHeight())
 	require.Nil(t, msg.GetNotFound()[1].Hash)
+}
+
+// TestArchiveFetchBlockLogsUnservableResolvedBlock covers the one shape a
+// not_found answer can hide: the block is in the archive's index, and the
+// blob store still reports it missing when asked for a URL. Both cloud
+// plugins return types.ErrBlobKeyNotFound for a lost metadata object and
+// for a block that was never written, so the error cannot distinguish them
+// — a lookup having already read the block is what does.
+//
+// The client answer stays not_found, since there is no URL to give it and
+// failing the call would discard the rest of the batch. The operator gets a
+// log line naming the block. The hash+slot and unknown-hash cases below pin
+// the other half of that contract: neither resolves through a lookup, so
+// neither is evidence of anything and neither may log.
+func TestArchiveFetchBlockLogsUnservableResolvedBlock(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(
+		&logs,
+		&slog.HandlerOptions{Level: slog.LevelDebug},
+	))
+	// testBlock is deterministic, so the second seeded block's hash is
+	// known before the store that has to refuse to sign it is built.
+	lostHash := hex.EncodeToString(testBlock(2, 0x12).Hash)
+	handler, blocks := newArchiveTestHandlerWithLogger(
+		t,
+		3,
+		map[string]struct{}{lostHash: {}},
+		logger,
+	)
+	lost, served := blocks[1], blocks[0]
+	require.Equal(t, lostHash, hex.EncodeToString(lost.Hash))
+	servedHash := hex.EncodeToString(served.Hash)
+
+	msg := fetchBlocks(
+		t,
+		handler,
+		&archive.BlockRef{Hash: new(lostHash)},
+		&archive.BlockRef{
+			Hash: new(servedHash),
+			Slot: new(served.Slot),
+		},
+	)
+
+	require.Len(t, msg.GetBlocks(), 1, "rest of the batch is still served")
+	require.Equal(t, servedHash, msg.GetBlocks()[0].GetBlock().GetHash())
+	require.Len(t, msg.GetNotFound(), 1)
+	require.Equal(t, lostHash, msg.GetNotFound()[0].GetHash())
+
+	logged := logs.String()
+	require.Contains(t, logged, "blob store reports it missing")
+	require.Contains(t, logged, lostHash)
+	require.Contains(t, logged, fmt.Sprintf("slot=%d", lost.Slot))
+
+	// hash+slot resolves with no lookup, so a miss there is an ordinary
+	// absent block as far as the handler can tell, and must not be logged
+	// as an inconsistency.
+	logs.Reset()
+	msg = fetchBlocks(t, handler, &archive.BlockRef{
+		Hash: new(lostHash),
+		Slot: new(lost.Slot),
+	})
+	require.Len(t, msg.GetNotFound(), 1)
+	require.Empty(t, msg.GetBlocks())
+	require.Empty(t, logs.String())
+
+	// A hash that names no stored block fails at resolution, before the
+	// blob store is asked for anything.
+	logs.Reset()
+	msg = fetchBlocks(t, handler, &archive.BlockRef{
+		Hash: new(strings.Repeat("ab", 32)),
+	})
+	require.Len(t, msg.GetNotFound(), 1)
+	require.Empty(t, logs.String())
 }
 
 // TestArchiveFetchBlockTreatsInconsistentReferenceAsNotFound covers a
