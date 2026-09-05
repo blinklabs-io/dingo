@@ -8774,6 +8774,11 @@ Epoch transition events may come from block processing or the slot clock. The
 slot clock only emits proactive epoch transitions when the ledger tip is within
 the current era's stability window of the upstream tip; while farther behind,
 block processing owns historical epoch transitions during catch-up.
+Slot-clock subscriptions are owned by that clock lifecycle: stopping the clock
+or cancelling its parent context closes every existing channel, and a
+subscription made after it has stopped is already closed. A later `Start`
+creates a new subscription lifecycle; a concurrent `Stop` waits only for the
+generation it stopped, not for that replacement worker.
 
 The fallback capture runs outside the rollover transaction, so when its
 transaction tip has already passed the snapshot slot it must reconstruct the
