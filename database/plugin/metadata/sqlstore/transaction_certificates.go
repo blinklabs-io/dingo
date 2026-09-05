@@ -201,6 +201,8 @@ WHERE mir_id IN (
 	return nil
 }
 
+// nullableDecimalUint64 preserves unknown deposits as SQL NULL while keeping
+// an authoritative zero deposit distinct from an unknown value.
 func nullableDecimalUint64(value *uint64) any {
 	if value == nil {
 		return nil
@@ -313,13 +315,14 @@ RETURNING id`,
 		)
 		return id, nil, err
 	case *lcommon.DeregistrationDrepCertificate:
+		amount := uint64(cert.Amount)
 		id, err := applyDrepDeregistrationCertificate(
 			ctx,
 			db,
 			cert,
 			certificateID,
 			slot,
-			func() *uint64 { amount := uint64(cert.Amount); return &amount }(),
+			&amount,
 		)
 		return id, nil, err
 	case *lcommon.UpdateDrepCertificate:
