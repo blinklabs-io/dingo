@@ -512,6 +512,12 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 	// Runs before the deferred Unlock above (LIFO), so the cooldown state is
 	// published while the guard is still held and stays ordered with the fetch.
 	defer func() {
+		// Caller cancellation is not evidence of a peer failure. In particular,
+		// ledger shutdown and apply cancellation must not cool down a healthy
+		// connection.
+		if errors.Is(err, context.Canceled) && errors.Is(ctx.Err(), context.Canceled) {
+			return
+		}
 		switch classifyLeiosFetchFailure(err) {
 		case leiosFetchFailureNone:
 			g.markFetchOK()

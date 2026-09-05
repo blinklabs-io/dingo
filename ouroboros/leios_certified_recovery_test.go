@@ -573,6 +573,9 @@ func TestFetchEndorserBlockByPointHonoursCallerBudget(t *testing.T) {
 		"by-point fetch ignored the cancelled caller context",
 	)
 	require.ErrorIs(t, err, context.Canceled)
+	guard := o.leiosFetchGuardFor(stalledConn.Id())
+	require.Zero(t, guard.consecutiveFailures.Load())
+	require.False(t, guard.inCooldown(time.Now()))
 }
 
 // TestFetchEndorserBlockByPointTxsUnavailableIsNotAnAllPeerDecline covers the
