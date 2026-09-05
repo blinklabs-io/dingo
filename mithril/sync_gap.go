@@ -518,7 +518,7 @@ func processGapBlocks(
 	if err != nil {
 		return fmt.Errorf("loading epochs for gap blocks: %w", err)
 	}
-	conwayPParamsCache := make(map[uint64]*conway.ConwayProtocolParameters)
+	pparamsCache := make(map[uint64]lcommon.ProtocolParameters)
 	for _, block := range blocks {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("cancelled: %w", err)
@@ -562,14 +562,16 @@ func processGapBlocks(
 				err,
 			)
 		}
+		var blockPParams lcommon.ProtocolParameters
 		blockConwayPParams := (*conway.ConwayProtocolParameters)(nil)
-		if epoch.EraId == conway.EraIdConway {
-			cached, ok := conwayPParamsCache[epoch.EpochId]
+		eraDesc := eras.GetEraById(epoch.EraId)
+		if eraDesc != nil && eraDesc.DecodePParamsFunc != nil {
+			cached, ok := pparamsCache[epoch.EpochId]
 			if !ok {
 				pparams, err := db.GetPParams(
 					epoch.EpochId,
-					eras.ConwayEraDesc.Id,
-					eras.ConwayEraDesc.DecodePParamsFunc,
+					epoch.EraId,
+					eraDesc.DecodePParamsFunc,
 					nil,
 				)
 				if err != nil {
@@ -581,19 +583,18 @@ func processGapBlocks(
 					)
 				}
 				if pparams != nil {
-					cached, ok = pparams.(*conway.ConwayProtocolParameters)
-					if !ok {
-						return fmt.Errorf(
-							"unexpected protocol params %T for gap block at slot %d (epoch %d)",
-							pparams,
-							block.Slot,
-							epoch.EpochId,
-						)
-					}
+					cached = pparams
 				}
-				conwayPParamsCache[epoch.EpochId] = cached
+				pparamsCache[epoch.EpochId] = cached
 			}
-			blockConwayPParams = cached
+			blockPParams = cached
+			if epoch.EraId == conway.EraIdConway {
+				var ok bool
+				blockConwayPParams, ok = blockPParams.(*conway.ConwayProtocolParameters)
+				if !ok && blockPParams != nil {
+					return fmt.Errorf("unexpected protocol params %T for Conway gap block at slot %d (epoch %d)", blockPParams, block.Slot, epoch.EpochId)
+				}
+			}
 		}
 		if err := processGapBlockTransactions(
 			db,
@@ -601,6 +602,8 @@ func processGapBlocks(
 			txs,
 			offsets,
 			epoch.EpochId,
+			epoch.EraId,
+			blockPParams,
 			blockConwayPParams,
 		); err != nil {
 			return fmt.Errorf(
@@ -624,6 +627,8 @@ func processGapBlockTransactions(
 	txs []lcommon.Transaction,
 	offsets *database.BlockIngestionResult,
 	epochId uint64,
+	eraId uint,
+	blockPParams lcommon.ProtocolParameters,
 	conwayPParams *conway.ConwayProtocolParameters,
 ) error {
 	txn := db.Transaction(true)
@@ -632,10 +637,15 @@ func processGapBlockTransactions(
 		// Gap blocks are already reflected in the Mithril snapshot's
 		// UTxO set, so input UTxOs are already consumed. Store the TX
 		// record and blob offsets without re-consuming inputs.
+		var certDeposits map[int]uint64
+		if tx.IsValid() {
+			certDeposits = gapCertificateDeposits(tx, blockPParams, eraId)
+		}
 		if err := db.SetGapBlockTransaction(
 			tx,
 			point,
 			uint32(i), // #nosec G115 -- tx index within a block
+			certDeposits,
 			offsets,
 			txn,
 		); err != nil {
@@ -685,6 +695,36 @@ func processGapBlockTransactions(
 		return fmt.Errorf("commit transaction: %w", err)
 	}
 	return nil
+}
+
+func gapCertificateDeposits(
+	tx lcommon.Transaction,
+	pparams lcommon.ProtocolParameters,
+	eraId uint,
+) map[int]uint64 {
+	certificates := tx.Certificates()
+	if len(certificates) == 0 {
+		return nil
+	}
+	era := eras.GetEraById(eraId)
+	if era == nil {
+		return nil
+	}
+	deposits := make(map[int]uint64, len(certificates))
+	if era.CertDepositFunc == nil {
+		return deposits
+	}
+	if pparams == nil {
+		return deposits
+	}
+	for i, certificate := range certificates {
+		deposit, err := era.CertDepositFunc(certificate, pparams)
+		if err != nil {
+			continue
+		}
+		deposits[i] = deposit
+	}
+	return deposits
 }
 
 // gapBlockEpoch resolves the epoch containing slot from a slice of

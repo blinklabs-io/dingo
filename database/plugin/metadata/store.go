@@ -955,6 +955,7 @@ type TransactionStore interface {
 		lcommon.Transaction,
 		ocommon.Point,
 		uint32, // idx
+		map[int]uint64, // certDeposits
 		types.Txn,
 	) error
 
