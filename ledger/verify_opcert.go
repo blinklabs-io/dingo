@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -150,24 +151,7 @@ func validateOpCertCounter(
 	candidate uint64,
 	enforceNoGap bool,
 ) error {
-	if !found {
-		return nil
-	}
-	if candidate < stored {
-		return fmt.Errorf(
-			"opcert counter %d is below last seen %d (stale or stolen hot key)",
-			candidate,
-			stored,
-		)
-	}
-	if enforceNoGap && candidate > stored+1 {
-		return fmt.Errorf(
-			"opcert counter %d skips ahead of last seen %d (gapped rotation)",
-			candidate,
-			stored,
-		)
-	}
-	return nil
+	return eras.ValidateOpCertCounter(stored, found, candidate, enforceNoGap)
 }
 
 // ValidateLeiosAnnouncementHeader validates the announcement's header crypto

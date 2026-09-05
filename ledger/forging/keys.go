@@ -29,6 +29,7 @@ import (
 
 	"github.com/blinklabs-io/bursa"
 	"github.com/blinklabs-io/dingo/keystore"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/kes"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -1124,37 +1125,13 @@ func (pc *PoolCredentials) ValidateAgainstLedger(
 // VRF/KES/Leios work or committing the duplicate-slot fence. The two must
 // stay in agreement: a candidate this accepts and block application rejects
 // wastes a leader slot; the reverse blocks a slot the chain would have
-// adopted.
-//
-// A counter below the last-seen value is always rejected (stale or stolen
-// hot key). A counter that skips ahead of it is rejected only when
-// enforceNoGap is set: the over-increment rule is Praos-only (Babbage
-// onward), while TPraos eras (Shelley-Alonzo) accept any candidate at or
-// above stored. When the ledger has no recorded counter for this pool
-// (found is false) there is no baseline to compare against, so the
-// candidate is accepted.
+// adopted. The rule itself lives in ledger/eras.ValidateOpCertCounter, the
+// single source both call sites share, so it cannot drift between them.
 func validateOpCertSequence(
 	stored uint64,
 	found bool,
 	candidate uint64,
 	enforceNoGap bool,
 ) error {
-	if !found {
-		return nil
-	}
-	if candidate < stored {
-		return fmt.Errorf(
-			"opcert counter %d is below last seen %d (stale or stolen hot key)",
-			candidate,
-			stored,
-		)
-	}
-	if enforceNoGap && candidate > stored && candidate-stored > 1 {
-		return fmt.Errorf(
-			"opcert counter %d skips ahead of last seen %d (gapped rotation)",
-			candidate,
-			stored,
-		)
-	}
-	return nil
+	return eras.ValidateOpCertCounter(stored, found, candidate, enforceNoGap)
 }

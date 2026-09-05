@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"reflect"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -807,6 +806,20 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return nil
 	}
 
+	// Check if we're the leader for this slot only after the KES gate.
+	isLeader := f.checkLeaderSafe(currentSlot)
+	if !isLeader {
+		f.logger.Debug(
+			"forge check: not leader for slot",
+			"current_slot", currentSlot,
+			"tip_slot", tipSlot,
+		)
+		if f.metrics != nil {
+			f.metrics.forgeNotLeader.Inc()
+		}
+		return nil
+	}
+
 	// Pre-flight the OpCert counter against the ledger's observed on-chain
 	// state and the era-scoped rule block application enforces (see
 	// checkOpCertSequence). This covers genesis/era context the KES-lifetime
@@ -814,6 +827,10 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// applied (this node's own or a peer's for the same pool), so a key
 	// state that was fine at startup or on an earlier slot can become stale,
 	// or -- from Babbage onward -- gapped, by the time a later slot is won.
+	// Checked only for the winning slot -- after the cheap leader check --
+	// rather than on every KES-valid slot, since the check performs a real
+	// ledger read that would otherwise run regardless of whether this pool
+	// is even leader for the slot.
 	if f.opCertLedgerView != nil {
 		if err := f.checkOpCertSequence(currentSlot, generation); err != nil {
 			f.incCouldNotForge()
@@ -828,20 +845,6 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			)
 			return nil
 		}
-	}
-
-	// Check if we're the leader for this slot only after the KES gate.
-	isLeader := f.checkLeaderSafe(currentSlot)
-	if !isLeader {
-		f.logger.Debug(
-			"forge check: not leader for slot",
-			"current_slot", currentSlot,
-			"tip_slot", tipSlot,
-		)
-		if f.metrics != nil {
-			f.metrics.forgeNotLeader.Inc()
-		}
-		return nil
 	}
 
 	// The credential snapshot owns its secret material, so the callback above
@@ -1249,12 +1252,15 @@ func (f *BlockForger) checkOpCertSequence(
 		return fmt.Errorf("opcert sequence lookup: %w", err)
 	}
 	pparams := f.eraParams.ProtocolParamsForSlot(slot)
-	if pparams == nil || (reflect.ValueOf(pparams).Kind() == reflect.Ptr && reflect.ValueOf(pparams).IsNil()) {
+	if pparams == nil {
 		return fmt.Errorf(
 			"protocol parameters unavailable for slot %d",
 			slot,
 		)
 	}
+	// extractPParamsLimits also rejects a typed-nil pointer of a known
+	// era's type stored in this interface, which the plain nil check above
+	// cannot see (see its doc comment in eras.go).
 	limits, err := extractPParamsLimits(pparams)
 	if err != nil {
 		return fmt.Errorf("resolve era for opcert counter rule: %w", err)

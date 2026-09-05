@@ -276,6 +276,13 @@ func TestValidateOpCertCounter(t *testing.T) {
 			candidate:    7,
 			enforceNoGap: false,
 		},
+		{
+			name:         "equal counters at max uint64 do not wrap into a gap",
+			stored:       ^uint64(0),
+			found:        true,
+			candidate:    ^uint64(0),
+			enforceNoGap: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

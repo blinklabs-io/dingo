@@ -31,11 +31,13 @@ import (
 // opCertSequenceGateForger builds a production BlockForger whose credentials'
 // OpCert issue number is the fixed value baked into testOpCertJSON (0, see
 // TestValidateOpCertUnsafe_ValidCertificate), wired with the given ledger
-// view / era params so tests can drive the pre-flight counter gate.
+// view / era params so tests can drive the pre-flight counter gate. The
+// caller retains leader so it can assert whether leader selection ran.
 func opCertSequenceGateForger(
 	t *testing.T,
 	view LedgerView,
 	eraParams ProtocolParamsProvider,
+	leader LeaderChecker,
 	builder *forgerTestBuilder,
 	broadcaster *forgerTestBroadcaster,
 	logs *bytes.Buffer,
@@ -46,7 +48,7 @@ func opCertSequenceGateForger(
 		Mode:             ModeProduction,
 		Logger:           slog.New(slog.NewJSONHandler(logs, nil)),
 		Credentials:      creds,
-		LeaderChecker:    &forgerCountingLeader{},
+		LeaderChecker:    leader,
 		BlockBuilder:     builder,
 		BlockBroadcaster: broadcaster,
 		SlotClock: forgerTestSlotClock{
@@ -90,21 +92,29 @@ func TestNewBlockForgerRequiresEraParamsWithOpCertLedgerView(t *testing.T) {
 // TestCheckAndForgeProductionSkipsOnStaleOpCertCounter covers a stale
 // counter -- the ledger has observed a higher issue number for this pool
 // than the loaded credentials carry -- which block application would
-// reject regardless of era. It must be caught before the leader check,
-// block build, or forge-slot fence.
+// reject regardless of era. It must be caught after leader selection (so
+// the ledger read it performs is skipped for slots this pool does not
+// lead) but before block build or the forge-slot fence.
 func TestCheckAndForgeProductionSkipsOnStaleOpCertCounter(t *testing.T) {
 	builder, broadcaster := newOpCertSequenceGateTestBuilder()
+	leader := &forgerCountingLeader{}
 	var logs bytes.Buffer
 	view := &fakeLedgerView{seqFound: true, latestSeq: 1}
 	eraParams := &mockPParamsProvider{
 		pparams: &babbage.BabbageProtocolParameters{},
 	}
 	forger := opCertSequenceGateForger(
-		t, view, eraParams, builder, broadcaster, &logs,
+		t, view, eraParams, leader, builder, broadcaster, &logs,
 	)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 
+	require.Equal(
+		t,
+		1,
+		leader.callCount(),
+		"leader selection must run before the counter check",
+	)
 	require.Zero(t, builder.calls, "stale counter must not build a block")
 	require.Zero(
 		t,
@@ -131,7 +141,13 @@ func TestCheckAndForgeProductionAllowsUnobservedOpCertCounter(t *testing.T) {
 		pparams: &babbage.BabbageProtocolParameters{},
 	}
 	forger := opCertSequenceGateForger(
-		t, view, eraParams, builder, broadcaster, &logs,
+		t,
+		view,
+		eraParams,
+		&forgerCountingLeader{},
+		builder,
+		broadcaster,
+		&logs,
 	)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
@@ -145,20 +161,28 @@ func TestCheckAndForgeProductionAllowsUnobservedOpCertCounter(t *testing.T) {
 // startup). The gate fails closed rather than guessing an era-scoped rule.
 func TestCheckAndForgeProductionSkipsWhenEraUnresolvable(t *testing.T) {
 	builder, broadcaster := newOpCertSequenceGateTestBuilder()
+	leader := &forgerCountingLeader{}
 	var logs bytes.Buffer
 	view := &fakeLedgerView{seqFound: true, latestSeq: 0}
 	eraParams := &mockPParamsProvider{pparams: nil}
 	forger := opCertSequenceGateForger(
-		t, view, eraParams, builder, broadcaster, &logs,
+		t, view, eraParams, leader, builder, broadcaster, &logs,
 	)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 
+	require.Equal(
+		t,
+		1,
+		leader.callCount(),
+		"leader selection must run before the counter check",
+	)
 	require.Zero(
 		t,
 		builder.calls,
 		"an unresolvable era must not build a block",
 	)
+	require.Zero(t, broadcaster.calls)
 }
 
 // TestCheckAndForgeProductionEraScopedOpCertCounterRule covers the era-
@@ -213,11 +237,12 @@ func TestCheckAndForgeProductionEraScopedOpCertCounterRule(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			builder, broadcaster := newOpCertSequenceGateTestBuilder()
+			leader := &forgerCountingLeader{}
 			var logs bytes.Buffer
 			view := &fakeLedgerView{seqFound: true, latestSeq: tt.stored}
 			eraParams := &mockPParamsProvider{pparams: tt.pparams}
 			forger := opCertSequenceGateForger(
-				t, view, eraParams, builder, broadcaster, &logs,
+				t, view, eraParams, leader, builder, broadcaster, &logs,
 			)
 			forger.creds.mu.Lock()
 			forger.creds.opCert.IssueNumber = tt.candidate
@@ -228,6 +253,12 @@ func TestCheckAndForgeProductionEraScopedOpCertCounterRule(t *testing.T) {
 				forger.checkAndForgeProduction(context.Background()),
 			)
 
+			require.Equal(
+				t,
+				1,
+				leader.callCount(),
+				"leader selection must run before the counter check",
+			)
 			if tt.wantForged {
 				require.Equal(t, 1, builder.calls)
 				require.Equal(t, 1, broadcaster.calls)
@@ -254,7 +285,7 @@ func TestCheckAndForgeProductionSkipsOpCertSequenceCheckWhenLedgerViewNil(
 	builder, broadcaster := newOpCertSequenceGateTestBuilder()
 	var logs bytes.Buffer
 	forger := opCertSequenceGateForger(
-		t, nil, nil, builder, broadcaster, &logs,
+		t, nil, nil, &forgerCountingLeader{}, builder, broadcaster, &logs,
 	)
 	// A counter far ahead of any plausible on-chain value would be rejected
 	// under the gate if it were active; with no LedgerView wired it is not

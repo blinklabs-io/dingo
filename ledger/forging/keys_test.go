@@ -1396,7 +1396,7 @@ func TestValidateOpCertSequence(t *testing.T) {
 			enforceNoGap: false,
 		},
 		{
-			name:         "maximum counter accepted when unchanged",
+			name:         "maximum counter accepted when unchanged (boundary)",
 			stored:       math.MaxUint64,
 			found:        true,
 			candidate:    math.MaxUint64,
