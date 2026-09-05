@@ -104,15 +104,16 @@ func (n *Node) configuredShutdownTimeout() time.Duration {
 
 func (n *Node) shutdown() error {
 	shutdownTimeout := n.configuredShutdownTimeout()
-	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	shutdownStart := time.Now()
+	lockCtx, cancelLocks := context.WithTimeout(
+		context.Background(), shutdownTimeout,
+	)
+	defer cancelLocks()
 
 	// Run holds this gate until startup has either completed or rolled back.
 	// In particular, a signal can reach Stop while Run is still unwinding a
 	// failed startup; waiting here keeps the phase-ordered shutdown from
 	// concurrently closing a component the startup stack is stopping.
-	if err := lockMutexContext(ctx, &n.startupLifecycleMu); err != nil {
+	if err := lockMutexContext(lockCtx, &n.startupLifecycleMu); err != nil {
 		return fmt.Errorf("shutdown startup lifecycle lock: %w", err)
 	}
 	defer n.startupLifecycleMu.Unlock()
@@ -121,14 +122,18 @@ func (n *Node) shutdown() error {
 	// gates, in the same order, before cancelling those components or closing
 	// their storage; otherwise a concurrent live operation can use a resource
 	// while shutdown tears it down.
-	if err := lockMutexContext(ctx, &n.liveLifecycleMu); err != nil {
+	if err := lockMutexContext(lockCtx, &n.liveLifecycleMu); err != nil {
 		return fmt.Errorf("shutdown live lifecycle lock: %w", err)
 	}
 	defer n.liveLifecycleMu.Unlock()
-	if err := lockMutexContext(ctx, &n.snapshotMu); err != nil {
+	if err := lockMutexContext(lockCtx, &n.snapshotMu); err != nil {
 		return fmt.Errorf("shutdown snapshot lock: %w", err)
 	}
 	defer n.snapshotMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	shutdownStart := time.Now()
 
 	if n.cancel != nil {
 		n.cancel()
