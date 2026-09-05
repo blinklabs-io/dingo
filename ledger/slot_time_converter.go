@@ -44,8 +44,10 @@ const operationalWindow = 5 * time.Second
 type SlotTimeConverterDeps struct {
 	// HardForkSummary returns the current hardfork.Summary describing era
 	// history, or an error when it cannot be built (e.g. no epochs known
-	// yet).
-	HardForkSummary func() (*hardfork.Summary, error)
+	// yet). The current era's forecast horizon is measured from
+	// max(the published tip slot, horizonAnchorSlot); 0 accepts the
+	// published tip.
+	HardForkSummary func(horizonAnchorSlot uint64) (*hardfork.Summary, error)
 	// ShelleyGenesis returns the Shelley genesis config, or nil if it has
 	// not been loaded.
 	ShelleyGenesis func() *shelley.ShelleyGenesis
@@ -99,12 +101,15 @@ func (c *SlotTimeConverter) shelleyGenesis() *shelley.ShelleyGenesis {
 }
 
 // hardForkSummary returns the current hardfork.Summary, or an error if the
-// dependency is unset or fails.
-func (c *SlotTimeConverter) hardForkSummary() (*hardfork.Summary, error) {
+// dependency is unset or fails. horizonAnchorSlot moves the forecast horizon
+// forward to a known applied block; 0 keeps the published tip.
+func (c *SlotTimeConverter) hardForkSummary(
+	horizonAnchorSlot uint64,
+) (*hardfork.Summary, error) {
 	if c.deps.HardForkSummary == nil {
 		return nil, errors.New("ledger: no hardfork summary source configured")
 	}
-	return c.deps.HardForkSummary()
+	return c.deps.HardForkSummary(horizonAnchorSlot)
 }
 
 // epochCache returns the current epoch cache snapshot, or nil if the
@@ -147,7 +152,7 @@ func (c *SlotTimeConverter) SlotToTime(slot uint64) (time.Time, error) {
 	if when, handled, err := c.slotToTimePrelude(slot); handled {
 		return when, err
 	}
-	sum, err := c.hardForkSummary()
+	sum, err := c.hardForkSummary(0)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -186,54 +191,36 @@ func (c *SlotTimeConverter) SlotToTime(slot uint64) (time.Time, error) {
 	return when, nil
 }
 
-// SlotToTimeInEra converts a slot without the forecast horizon, using the
-// current era's parameters when the bounded Summary refuses the slot.
+// SlotToTimeWithHorizonFrom converts a slot with the forecast horizon measured
+// from horizonAnchorSlot rather than from the published tip, and keeps the
+// horizon: a slot past the anchored bound still returns hardfork.ErrPastHorizon.
 //
 // Transaction validation needs this. Building a Plutus script context converts
-// the transaction's validity interval to POSIX time, and a legal validity bound
-// may sit well past the horizon: on Preview a canonical block at slot 3516512
-// carries a bound of 3593399, 50999 slots beyond it. Refusing the conversion
-// fails the transaction, so its outputs are never created, the next block that
-// spends them trips missing-input recovery, and the replay fails the same way --
-// the node cannot follow a chain the reference implementation follows
-// (issue #3844).
+// the transaction's validity interval to POSIX time, and cardano-ledger fails
+// the transaction when that translation is refused
+// (TimeTranslationPastHorizon, eras/alonzo/impl Cardano.Ledger.Alonzo.Plutus.TxInfo),
+// so the bound itself is consensus-relevant and must stay. What diverged was
+// the horizon's input: the published tip advances only when a whole block batch
+// commits, while the reference measures the safe zone from the applied block's
+// immediate predecessor. applySafeZone snaps up to an epoch boundary, so a tip
+// trailing by a single block can cost a full epoch of horizon and reject a
+// canonical block (issue #3844).
 //
-// The horizon is the right bound for *forecasting* across a possible era change,
-// which is why header validation and the NtC era-history query keep using
-// SlotToTime. It is the wrong bound for a slot inside a block already being
-// applied: epoch length and slot length are constant within an era, so the
-// projection is exact rather than a guess.
-// This resolves the summary itself rather than delegating to SlotToTime: the
-// summary is rebuilt from the epoch cache on every hardForkSummary call, and
-// delegating would build it twice on the past-horizon path -- the common path
-// here, which runs per transaction.
-func (c *SlotTimeConverter) SlotToTimeInEra(slot uint64) (time.Time, error) {
+// The near-now extrapolation SlotToTime applies is deliberately absent: it
+// exists so the operational slot clock can tick while the ledger is behind the
+// wall clock, and transaction validation must answer from era history alone.
+func (c *SlotTimeConverter) SlotToTimeWithHorizonFrom(
+	horizonAnchorSlot uint64,
+	slot uint64,
+) (time.Time, error) {
 	if when, handled, err := c.slotToTimePrelude(slot); handled {
 		return when, err
 	}
-	sum, err := c.hardForkSummary()
+	sum, err := c.hardForkSummary(horizonAnchorSlot)
 	if err != nil {
 		return time.Time{}, err
 	}
-	epochCache := c.epochCache()
-	when, sumErr := sum.SlotToTime(slot)
-	if sumErr == nil {
-		return when, nil
-	}
-	if errors.Is(sumErr, hardfork.ErrPastHorizon) {
-		// Unconditional, unlike SlotToTime's near-now gate: a slot inside the
-		// current era converts exactly, so there is nothing to guard against.
-		if extrapolated, ok := currentEraTimeAtSlot(
-			sum,
-			epochCache,
-			slot,
-		); ok {
-			return extrapolated, nil
-		}
-	}
-	// Before the current era's start, or beyond time.Duration's range: the
-	// era's parameters cannot answer, so the original error stands.
-	return time.Time{}, sumErr
+	return sum.SlotToTime(slot)
 }
 
 // TimeToSlot returns the slot containing the given wall-clock time.
@@ -250,7 +237,7 @@ func (c *SlotTimeConverter) TimeToSlot(t time.Time) (uint64, error) {
 	if t.Before(shelleyGenesis.SystemStart) {
 		return 0, ErrBeforeGenesis
 	}
-	sum, err := c.hardForkSummary()
+	sum, err := c.hardForkSummary(0)
 	if err != nil {
 		if isNearNow(c.now(), t) {
 			return nearNowSlot(shelleyGenesis, c.now()), nil
@@ -293,7 +280,7 @@ func (c *SlotTimeConverter) TimeToSlot(t time.Time) (uint64, error) {
 // through the configured safe-zone horizon. Returns an error for an empty
 // cache or for slots outside that range.
 func (c *SlotTimeConverter) SlotToEpoch(slot uint64) (models.Epoch, error) {
-	sum, err := c.hardForkSummary()
+	sum, err := c.hardForkSummary(0)
 	if err != nil {
 		return models.Epoch{}, errors.New("no epochs in cache")
 	}
@@ -335,7 +322,7 @@ func (c *SlotTimeConverter) EpochInfo(epoch uint64) (models.Epoch, error) {
 		}
 	}
 
-	sum, err := c.hardForkSummary()
+	sum, err := c.hardForkSummary(0)
 	if err != nil {
 		return models.Epoch{}, errors.New("no epochs in cache")
 	}

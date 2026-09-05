@@ -6372,6 +6372,14 @@ func (ls *LedgerState) ledgerProcessBlock(
 					ls:                   ls,
 					intraBlockUtxos:      intraBlockUtxos,
 					skipPhase2Validation: skipPhase2Validation,
+					// The reference implementation ticks from the block's
+					// immediate predecessor, so that is where the era forecast
+					// horizon has to be measured from. ls.currentTip is only
+					// published once a whole batch commits, and applySafeZone
+					// snaps up to an epoch boundary, so trailing by even one
+					// block can cost an entire epoch of horizon and reject a
+					// canonical Plutus transaction (issue #3844).
+					horizonAnchorSlot: parent.slot,
 				}).pinCommitteeState(committeeEpoch, pp)
 				err := validationEra.ValidateTxFunc(
 					tx,
