@@ -1326,23 +1326,28 @@ overflow `uint32` and wrap past the check.
 
 S3 and GCS `GetBlock` re-derive a block's identity from its returned bytes
 (`blockverify.Hash`, `database/plugin/blob/internal/blockverify`) before
-handing them to a caller, for every `bp..._metadata` entry except the exact
-`(ID, Type) == (0, 0)` synthetic-entry marker (see the `ID==0` note above;
-checking both fields, not `ID` alone, keeps a real block that somehow ended
-up with `ID == 0` from silently skipping verification instead of failing
-it) -- neither backend offers a content-addressing guarantee of its own, so
-corruption, an eventual-consistency stale read, or a misdirected request
-could otherwise return bytes for a different block than the one asked for.
-The check verifies three things, all independently derived from the
-decoded bytes rather than trusted from the caller's claim: the decoded
-block's own hash matches the requested `bp` key's hash; its own slot
-matches the requested slot (a hash match alone does not pin the point);
-and, since the block hash for Shelley and later eras covers only the
-header and adjacent eras share that header layout -- so the same bytes can
-decode, with an identical hash and slot, under more than one era -- the
-era independently derived from the decoded header
-(`gledger.DetermineBlockType`) matches the type recorded in
-`bp..._metadata`. Bark's archive fetch already re-verifies its downloaded
+handing them to a caller, for every non-tombstoned `bp..._metadata` entry
+except the exact `(ID, Type) == (0, 0)` synthetic-entry marker (see the
+`ID==0` note above; checking both fields, not `ID` alone, keeps a real
+block that somehow ended up with `ID == 0` from silently skipping
+verification instead of failing it; a tombstoned entry returns
+`types.ErrHistoryExpired` before reaching this check at all, since its
+content has already been pruned) -- neither backend offers a
+content-addressing guarantee of its own, so corruption, an
+eventual-consistency stale read, or a misdirected request could otherwise
+return bytes for a different block than the one asked for. The check
+always verifies two things, independently derived from the decoded bytes
+rather than trusted from the caller's claim: the decoded block's own hash
+matches the requested `bp` key's hash, and its own slot matches the
+requested slot (a hash match alone does not pin the point). For Shelley
+and later eras it verifies a third: since the block hash for those eras
+covers only the header and adjacent eras share that header layout -- so
+the same bytes can decode, with an identical hash and slot, under more
+than one era -- the era independently derived from the decoded header
+(`gledger.DetermineBlockType`) must also match the type recorded in
+`bp..._metadata`. Byron is exempt from that third check because its hash
+already covers the block-type byte, binding the era without needing to
+derive it separately. Bark's archive fetch already re-verifies its downloaded
 blocks the same way (`verifyArchiveBlock`/`blockEraFromHeader`), which this
 mirrors; it closes the equivalent gap for the two cloud object-store blob
 backends. Badger's local `GetBlock` trusts its own on-disk storage and is

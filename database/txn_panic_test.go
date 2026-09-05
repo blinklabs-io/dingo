@@ -246,12 +246,44 @@ func TestTxnRollbackAttemptsBothStoresWhenOnePanics(t *testing.T) {
 	})
 	require.ErrorContains(t, err, "blob rollback")
 	require.ErrorContains(t, err, "panicked")
+	require.ErrorIs(t, err, ErrTxnPanic,
+		"a panicking provider Rollback must be identifiable via "+
+			"errors.Is(err, ErrTxnPanic) like every other path in the "+
+			"panic contract, not just the ones Do's own recover catches")
 	require.Equal(t, 1, metadataTxn.rollbackCount,
 		"the metadata store's Rollback must still be attempted even "+
 			"though the blob store's Rollback panicked")
 	require.True(t, txn.finished,
 		"the transaction must still be marked finished so it isn't "+
 			"rolled back twice")
+}
+
+// TestTxnDoOrdinaryErrorThenRollbackPanicIsIdentifiableAsTxnPanic proves the
+// panic contract holds on Do's *ordinary*-error path too, not just its own
+// recovery path: when fn returns a normal error and the resulting Rollback
+// then panics, the error Do returns must still satisfy
+// errors.Is(err, ErrTxnPanic), since a real panic did occur during
+// cleanup -- even though Do's own top-level recover never fires for this
+// path (only fn's ordinary error return does).
+func TestTxnDoOrdinaryErrorThenRollbackPanicIsIdentifiableAsTxnPanic(
+	t *testing.T,
+) {
+	txn := &Txn{
+		db: &Database{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		metadataTxn: &panicCommitAndRollbackTxn{},
+		readWrite:   true,
+	}
+
+	fnErr := errors.New("ordinary function error")
+	var err error
+	require.NotPanics(t, func() {
+		err = txn.Do(func(*Txn) error { return fnErr })
+	})
+	require.ErrorIs(t, err, fnErr)
+	require.ErrorIs(t, err, ErrTxnPanic)
+	require.ErrorContains(t, err, "rollback panic")
 }
 
 // panicFnTxn is a no-op metadata Txn used where the panic under test comes
