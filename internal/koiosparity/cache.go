@@ -1210,7 +1210,7 @@ func (c *Cache) GetEpochsMissingAccountCoverage(
 }
 
 // GetUncachedEpochs returns epoch numbers in [from, through] (inclusive) that
-// are NOT yet in koios_epoch_info for the given network. This is used by Fetch
+// are NOT yet complete in the cache for the given network. This is used by Fetch
 // to fill holes left by prior failed or interrupted runs rather than naively
 // resuming from max(fetched) + 1.
 func (c *Cache) GetUncachedEpochs(
@@ -1224,7 +1224,12 @@ func (c *Cache) GetUncachedEpochs(
 	}
 
 	rows, err := c.db.Query(
-		"SELECT epoch FROM koios_epoch_info WHERE network = ? AND epoch >= ? AND epoch <= ?",
+		`SELECT i.epoch FROM koios_epoch_info i
+		 WHERE i.network = ? AND i.epoch >= ? AND i.epoch <= ?
+		 AND NOT EXISTS (
+			SELECT 1 FROM koios_epoch_params p
+			WHERE p.network = i.network AND p.epoch = i.epoch
+		 )`,
 		network,
 		from,
 		through,
