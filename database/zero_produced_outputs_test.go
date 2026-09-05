@@ -21,9 +21,14 @@ import (
 	"testing"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
+
+// collateralReturnAddress is an arbitrary mainnet payment address; the
+// collateral-return fixtures only need a decodable one.
+const collateralReturnAddress = "addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd"
 
 // noOutputsTx is the legal zero-output shape from issue #3932: a valid
 // transaction that declares no outputs, so Produced() is empty too. On chain
@@ -62,6 +67,35 @@ func (t invalidTx) CollateralReturn() lcommon.TransactionOutput {
 }
 
 func (t invalidTx) Produced() []lcommon.Utxo { return nil }
+
+// collateralReturnTx is the shape a real phase-2 failure takes in Babbage and
+// later: invalid, a non-nil collateral return, and a Produced() that carries
+// that return at index len(Outputs()). It is the true negative for the
+// collateral branch of the warning -- the only shape where a non-nil
+// CollateralReturn() coexists with a correctly stored UTxO, so it is the shape
+// that would expose the branch firing on declaration alone rather than on loss.
+type collateralReturnTx struct {
+	lcommon.Transaction
+	collateralReturn lcommon.TransactionOutput
+}
+
+func (t collateralReturnTx) IsValid() bool { return false }
+
+func (t collateralReturnTx) CollateralReturn() lcommon.TransactionOutput {
+	return t.collateralReturn
+}
+
+func (t collateralReturnTx) Produced() []lcommon.Utxo {
+	return []lcommon.Utxo{
+		{
+			Id: shelley.NewShelleyTransactionInput(
+				t.Hash().String(),
+				len(t.Outputs()),
+			),
+			Output: t.collateralReturn,
+		},
+	}
+}
 
 // TestSetTransactionZeroProducedOutputsLogging covers the log emitted when a
 // transaction stores no UTxOs. A zero-output transaction is a legal shape and
@@ -111,9 +145,13 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 		db *Database,
 		logs *bytes.Buffer,
 		tx lcommon.Transaction,
+		withOffsets ...func(*BlockIngestionResult),
 	) string {
 		t.Helper()
 		offsets := mustBlockOffsets(t, candidate.consumerBlock)
+		for _, fn := range withOffsets {
+			fn(offsets)
+		}
 		logs.Reset()
 		require.NoError(t, db.SetTransactionWithOpts(
 			tx,
@@ -183,7 +221,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 	t.Run("dropped collateral return warns", func(t *testing.T) {
 		const collateralLovelace = 1_000_000
 		collateralReturn, err := mockledger.NewTransactionOutputBuilder().
-			WithAddress("addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd").
+			WithAddress(collateralReturnAddress).
 			WithLovelace(collateralLovelace).
 			Build()
 		require.NoError(t, err)
@@ -211,4 +249,42 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 		require.NotContains(t, out, `"outputs":`)
 		require.NotContains(t, out, "despite declaring outputs")
 	})
+
+	t.Run(
+		"invalid transaction keeping its collateral return does not warn",
+		func(t *testing.T) {
+			collateralReturn, err := mockledger.NewTransactionOutputBuilder().
+				WithAddress(collateralReturnAddress).
+				WithLovelace(1_000_000).
+				Build()
+			require.NoError(t, err)
+			var logs bytes.Buffer
+			db := newStagedDB(t, &logs)
+			var txHash [32]byte
+			copy(txHash[:], ledgerHashBytes(candidate.consumerTx.Hash()))
+			collateralIdx := uint32(len(candidate.consumerTx.Outputs()))
+			out := setTx(
+				t, db, &logs,
+				collateralReturnTx{
+					Transaction:      candidate.consumerTx,
+					collateralReturn: collateralReturn,
+				},
+				func(offsets *BlockIngestionResult) {
+					// The indexer only emits offsets for the outputs the
+					// transaction declares, so the collateral return's index
+					// has none and SetTransactionWithOpts would fail before
+					// reaching the log. Nothing on this path decodes the
+					// offset, so output 0's span stands in for it.
+					offsets.UtxoOffsets[UtxoRef{
+						TxId:      txHash,
+						OutputIdx: collateralIdx,
+					}] = offsets.UtxoOffsets[UtxoRef{
+						TxId:      txHash,
+						OutputIdx: 0,
+					}]
+				},
+			)
+			require.NotContains(t, out, `"level":"WARN"`)
+		},
+	)
 }

@@ -250,20 +250,26 @@ func (d *Database) SetTransactionWithOpts(
 	// Each branch reports its own declaration: the two are different fields, so
 	// one shared message would name the wrong one for half the warnings.
 	if len(produced) == 0 {
+		// Each accessor is read once into a local: every era's Outputs()
+		// allocates a fresh slice per call, and reading CollateralReturn()
+		// once closes the gap between the nil test and the dereference.
+		outputs := tx.Outputs()
+		collateralReturn := tx.CollateralReturn()
+		txHashHex := hex.EncodeToString(ledgerHashPrefix(txHash))
 		switch {
-		case tx.IsValid() && len(tx.Outputs()) > 0:
+		case tx.IsValid() && len(outputs) > 0:
 			d.logger.Warn(
 				"valid transaction produced no UTxOs despite declaring outputs",
-				"txHash", hex.EncodeToString(ledgerHashPrefix(txHash)),
-				"outputs", len(tx.Outputs()),
+				"txHash", txHashHex,
+				"outputs", len(outputs),
 				"slot", point.Slot,
 			)
-		case !tx.IsValid() && tx.CollateralReturn() != nil:
+		case !tx.IsValid() && collateralReturn != nil:
 			d.logger.Warn(
-				"invalid transaction produced no UTxOs despite declaring a collateral return",
-				"txHash", hex.EncodeToString(ledgerHashPrefix(txHash)),
-				"collateralReturnLovelace",
-				tx.CollateralReturn().Amount().String(),
+				"invalid transaction produced no UTxOs despite "+
+					"declaring a collateral return",
+				"txHash", txHashHex,
+				"collateralReturnLovelace", collateralReturn.Amount().String(),
 				"slot", point.Slot,
 			)
 		}
