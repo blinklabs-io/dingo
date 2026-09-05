@@ -1019,6 +1019,7 @@ func TestVerifyBlockHeaderCrypto_RejectsBlockOutsideKnownEpochs(
 			{
 				EpochId:       0,
 				StartSlot:     0,
+				SlotLength:    1_000,
 				LengthInSlots: 1000,
 				Nonce:         []byte{0x01, 0x02, 0x03},
 			},
@@ -1039,7 +1040,7 @@ func TestVerifyBlockHeaderCrypto_RejectsBlockOutsideKnownEpochs(
 		err,
 		"block outside known epochs must be rejected, not skipped",
 	)
-	assert.Contains(t, err.Error(), "no epoch data for slot")
+	assert.Contains(t, err.Error(), "past era horizon")
 }
 
 func TestHeaderVerificationEpochRejectsPastForecastBeforeCacheAdvance(
@@ -1131,7 +1132,7 @@ func TestVerifyBlockHeaderCrypto_RejectsBlockWithNoNonce(t *testing.T) {
 	block := &mockBabbageBlock{slot: 500}
 	err := ls.verifyBlockHeaderCrypto(block)
 	assert.Error(t, err, "block with missing nonce must be rejected")
-	assert.Contains(t, err.Error(), "has no nonce")
+	assert.Contains(t, err.Error(), "epoch nonce not available")
 }
 
 // TestVerifyBlockHeaderCrypto_EpochBoundaryUsesCorrectNonce verifies that
