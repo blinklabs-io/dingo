@@ -360,9 +360,17 @@ func (n *Node) runChainSelectedNoneWorker(
 				}
 				retryInterval = nextChainSelectedNoneRetryInterval(
 					retryInterval,
+					false,
 				)
 				continue
 			}
+			// A successful acquisition ends this contention period. If another
+			// lifecycle operation takes the lock before a newly queued transition
+			// is drained, ramp that fresh contention from the initial interval.
+			retryInterval = nextChainSelectedNoneRetryInterval(
+				retryInterval,
+				true,
+			)
 
 			n.chainSelectedNoneMu.Lock()
 			pending := n.chainSelectedNonePending
@@ -374,7 +382,13 @@ func (n *Node) runChainSelectedNoneWorker(
 	}
 }
 
-func nextChainSelectedNoneRetryInterval(current time.Duration) time.Duration {
+func nextChainSelectedNoneRetryInterval(
+	current time.Duration,
+	lockAcquired bool,
+) time.Duration {
+	if lockAcquired {
+		return chainSelectedNoneInitialRetryInterval
+	}
 	if current >= chainSelectedNoneMaxRetryInterval/2 {
 		return chainSelectedNoneMaxRetryInterval
 	}

@@ -506,7 +506,7 @@ func TestChainSelectedNoneRetryBackoffCaps(t *testing.T) {
 	delays := make([]time.Duration, 0, 10)
 	for range 10 {
 		delays = append(delays, delay)
-		delay = nextChainSelectedNoneRetryInterval(delay)
+		delay = nextChainSelectedNoneRetryInterval(delay, false)
 	}
 	require.Equal(t, []time.Duration{
 		10 * time.Millisecond,
@@ -520,6 +520,11 @@ func TestChainSelectedNoneRetryBackoffCaps(t *testing.T) {
 		time.Second,
 		time.Second,
 	}, delays)
+	require.Equal(t,
+		chainSelectedNoneInitialRetryInterval,
+		nextChainSelectedNoneRetryInterval(delay, true),
+		"a successful acquisition must restart the next contention ramp",
+	)
 }
 
 // TestHandleChainSwitchEventNilChainsyncStateDoesNotPanic covers the window
