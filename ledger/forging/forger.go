@@ -28,6 +28,8 @@ import (
 
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/vrf"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -151,6 +153,43 @@ type BlockBuilder interface {
 	BuildBlock(slot uint64, kesPeriod uint64) (ledger.Block, []byte, error)
 }
 
+// BlockContext names the parent a forged block is built on. It mirrors
+// ouroboros-consensus' BlockContext (NodeKernel/Forge.hs): a block number and
+// the point the block extends.
+//
+// A nil *BlockContext means "extend the live chain tip", which is what every
+// uncontested slot uses and what BuildBlock does. An explicit context exists
+// for the equal-slot case, where the tip already holds a rival block at the
+// slot being forged: there the alternative carries the rival's block number
+// and names the rival's predecessor as parent, so the two blocks are siblings
+// that chain selection arbitrates between.
+type BlockContext struct {
+	// Parent is the point the forged block names as its parent. It must sit
+	// strictly below the forged slot.
+	Parent ocommon.Point
+	// BlockNumber is the block number the forged block carries. For an
+	// equal-slot alternative this is the rival's own block number, not the
+	// rival's plus one.
+	BlockNumber uint64
+	// Rival is the chain tip this block is an alternative to. The builder
+	// re-checks it against the live tip and abandons the candidate if the
+	// chain has moved, so a contest that is already over costs nothing.
+	Rival ochainsync.Tip
+}
+
+// AlternativeBlockBuilder constructs a block on an explicitly named parent
+// rather than on the live chain tip. A BlockBuilder that does not implement it
+// cannot forge the equal-slot alternative, and the forger declines contested
+// slots for such a builder exactly as it did before this capability existed.
+type AlternativeBlockBuilder interface {
+	BuildBlockOnContext(
+		slot uint64,
+		kesPeriod uint64,
+		leios LeiosBlockData,
+		blockCtx BlockContext,
+	) (ledger.Block, []byte, error)
+}
+
 // LeiosBlockBuilder constructs Dijkstra blocks with Leios prototype header/body
 // extensions. Builders that do not implement it cannot safely announce or
 // certify Leios endorser blocks.
@@ -172,6 +211,7 @@ type credentialGenerationBlockBuilder interface {
 		kesPeriod uint64,
 		leios LeiosBlockData,
 		generation *credentialGeneration,
+		blockCtx *BlockContext,
 	) (ledger.Block, []byte, error)
 }
 
@@ -1106,6 +1146,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		kesPeriod,
 		leiosBlockData,
 		generation,
+		nil,
 	)
 	if err != nil {
 		f.incCouldNotForge()
@@ -1284,6 +1325,7 @@ func (f *BlockForger) buildBlock(
 	kesPeriod uint64,
 	leiosData LeiosBlockData,
 	generation *credentialGeneration,
+	blockCtx *BlockContext,
 ) (ledger.Block, []byte, error) {
 	var (
 		block     ledger.Block
@@ -1296,6 +1338,23 @@ func (f *BlockForger) buildBlock(
 			kesPeriod,
 			leiosData,
 			generation,
+			blockCtx,
+		)
+	} else if blockCtx != nil {
+		// Only reachable for a custom builder, and only when the forger has
+		// already confirmed it implements AlternativeBlockBuilder before
+		// committing to the contested slot.
+		altBuilder, ok := f.blockBuilder.(AlternativeBlockBuilder)
+		if !ok {
+			return nil, nil, errors.New(
+				"an explicit block context requires an AlternativeBlockBuilder",
+			)
+		}
+		block, blockCbor, err = altBuilder.BuildBlockOnContext(
+			slot,
+			kesPeriod,
+			leiosData,
+			*blockCtx,
 		)
 	} else if leiosData.empty() {
 		block, blockCbor, err = f.blockBuilder.BuildBlock(slot, kesPeriod)
