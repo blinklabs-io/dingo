@@ -772,20 +772,40 @@ func (s *State) UpdateClientTip(
 	point ocommon.Point,
 	tip ochainsync.Tip,
 ) bool {
-	return s.updateClientTip(connId, point, tip, true)
+	if !s.updateTrackedClientTip(connId, point, tip) {
+		return true
+	}
+	return s.RecordHeaderForDedup(connId, point)
 }
 
 // UpdateClientTipWithoutDedup updates the cursor, tip, and
-// activity tracking for a tracked client without recording the
-// header in the shared dedup cache. This is used for peers that
-// should not drive ledger ingress, so they do not suppress
-// later delivery of the same header from an eligible peer.
+// activity tracking for a tracked client without recording the header in the
+// shared dedup cache. The Ouroboros ingress path uses this before synchronous
+// chain selection so a switch event can verify that the client has delivered a
+// tip. It records the header for deduplication separately, and only when the
+// post-selection apply gate admits it. It reports whether the client was still
+// tracked and updated.
 func (s *State) UpdateClientTipWithoutDedup(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
 	tip ochainsync.Tip,
-) {
-	s.updateClientTip(connId, point, tip, false)
+) bool {
+	return s.updateTrackedClientTip(connId, point, tip)
+}
+
+// RecordHeaderForDedup records a tracked header in the shared cross-peer
+// deduplication and fork-detection cache. Callers that update the tracked tip
+// before a synchronous selection decision use this after the apply gate, so a
+// withheld Genesis header cannot suppress a later eligible delivery.
+func (s *State) RecordHeaderForDedup(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) bool {
+	isNew := s.processHeader(connId, point)
+	// Prune stale observations on the normal progress path so the dedup cache
+	// stays bounded over long-running nodes.
+	s.maybePruneSeenHeaders()
+	return isNew
 }
 
 // RewindTrackedClientsTo rewinds tracked client cursors that sit ahead of the
@@ -903,17 +923,16 @@ func (s *State) ClearObservedHeaderHistory(
 	s.clearObservedHeaderHistory(connId)
 }
 
-func (s *State) updateClientTip(
+func (s *State) updateTrackedClientTip(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
 	tip ochainsync.Tip,
-	dedup bool,
 ) bool {
 	s.clientConnIdMutex.Lock()
 	tc, exists := s.trackedClients[connId]
 	if !exists {
 		s.clientConnIdMutex.Unlock()
-		return true
+		return false
 	}
 	tc.Cursor = point
 	tc.Tip = tip
@@ -923,16 +942,7 @@ func (s *State) updateClientTip(
 		tc.Status = ClientStatusSyncing
 	}
 	s.clientConnIdMutex.Unlock()
-
-	if !dedup {
-		return true
-	}
-	// Header deduplication and fork detection
-	isNew := s.processHeader(connId, point)
-	// Prune stale observations on the normal progress path so the dedup
-	// cache stays bounded over long-running nodes.
-	s.maybePruneSeenHeaders()
-	return isNew
+	return true
 }
 
 // processHeader checks whether the header at the given point

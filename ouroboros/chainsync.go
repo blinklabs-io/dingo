@@ -1097,13 +1097,26 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				}
 			}
 		}
-		// Observe the tip for chain selection FIRST, so the apply-eligibility
-		// decision below reflects this header. Only ingress-eligible peers are
-		// observed; random inbound peers reporting ephemeral tips are filtered
-		// by peergov and skipped here.
+		// Build the observation used by chain selection. Only ingress-eligible
+		// peers are observed; random inbound peers reporting ephemeral tips are
+		// filtered by peergov and skipped here.
 		observedTip := ochainsync.Tip{
 			Point:       point,
 			BlockNumber: v.BlockNumber(),
+		}
+		// Publish the delivered frontier into tracked client state before a
+		// synchronous Genesis selection. That selection can emit a chain switch
+		// immediately, and the switch handler must be able to distinguish this
+		// client from a newly reused connection ID that has delivered no header.
+		// Cross-peer deduplication remains after the apply gate below so withheld
+		// uncorroborated headers cannot poison the shared cache.
+		trackedClient := false
+		if o.chainsyncState != nil {
+			trackedClient = o.chainsyncState.UpdateClientTipWithoutDedup(
+				ctx.ConnectionId,
+				point,
+				tip,
+			)
 		}
 		if ingressEligible {
 			peerTipUpdate := chainselection.PeerTipUpdateEvent{
@@ -1137,26 +1150,18 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// blocks are withheld from the ledger.
 		applyEligible := ingressEligible &&
 			o.shouldApplyChainsyncToLedger(ctx.ConnectionId)
-		// Update tracked client cursor/tip and deduplicate headers. Record the
-		// cross-peer dedup entry ONLY for headers we will actually apply, so a
-		// header withheld from an uncorroborated peer is not permanently
-		// deduplicated — a later corroborated, apply-eligible peer can still
-		// publish the point into the ledger.
+		// Record the cross-peer dedup entry ONLY for headers we will actually
+		// apply, so a header withheld from an uncorroborated peer is not
+		// permanently deduplicated — a later corroborated, apply-eligible peer
+		// can still publish the point into the ledger. The cursor, tip, and header
+		// count were updated before selection above and must not be incremented a
+		// second time here.
 		isNew := true
-		if o.chainsyncState != nil {
-			if applyEligible {
-				isNew = o.chainsyncState.UpdateClientTip(
-					ctx.ConnectionId,
-					point,
-					tip,
-				)
-			} else {
-				o.chainsyncState.UpdateClientTipWithoutDedup(
-					ctx.ConnectionId,
-					point,
-					tip,
-				)
-			}
+		if applyEligible && trackedClient {
+			isNew = o.chainsyncState.RecordHeaderForDedup(
+				ctx.ConnectionId,
+				point,
+			)
 		}
 		if ingressEligible && o.chainsyncState != nil {
 			o.chainsyncState.RecordObservedHeader(

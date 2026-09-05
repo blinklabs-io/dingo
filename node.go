@@ -157,6 +157,17 @@ type Node struct {
 	// running, which this mutex would otherwise make indistinguishable.
 	liveLifecycleMu sync.Mutex
 
+	// A selected-to-none transition cannot be dropped while a live database
+	// lifecycle operation holds liveLifecycleMu. One node-owned worker retains
+	// only the latest contended transition and retries until the lifecycle lock
+	// is available or the node context is cancelled, bounding both queued work
+	// and goroutine count.
+	chainSelectedNoneMu         sync.Mutex
+	chainSelectedNonePending    chainselection.ChainSelectedNoneEvent
+	chainSelectedNonePendingSet bool
+	chainSelectedNoneWake       chan struct{}
+	chainSelectedNoneWorkerDone chan struct{}
+
 	// snapshotMu serializes Snapshot calls against each other and against
 	// a concurrent Restore/Truncate (which closes n.db out from under an
 	// in-progress Snapshot if not excluded), and is what enforces bark
@@ -1162,7 +1173,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			"min_corroborating_peers", n.config.genesisCorroborationPeers,
 		)
 	}
-	// Wire chain-selector event subscriptions.
+	// Wire chain-selector event subscriptions. Start the selected-to-none
+	// deferral worker first so a contended one-shot transition is never lost.
+	n.startChainSelectedNoneWorker(n.ctx)
+	started = append(started, n.waitChainSelectedNoneWorker)
 	n.subscribeChainSelectorEvents()
 	// Start the chain selector
 	if err := n.chainSelector.Start(n.ctx); err != nil { //nolint:contextcheck

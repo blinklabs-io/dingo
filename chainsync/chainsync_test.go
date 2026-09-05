@@ -188,7 +188,6 @@ func TestSetClientObservabilityOnly_DemotesPrimary(t *testing.T) {
 	connB := newTestConnId(2)
 	s.AddClientConnId(connA)
 	s.AddClientConnId(connB)
-	s.SetClientConnId(connA)
 	s.UpdateClientTip(connA,
 		ocommon.NewPoint(500, []byte("ha")),
 		ochainsync.Tip{Point: ocommon.NewPoint(500, []byte("ha"))},
@@ -197,6 +196,7 @@ func TestSetClientObservabilityOnly_DemotesPrimary(t *testing.T) {
 		ocommon.NewPoint(400, []byte("hb")),
 		ochainsync.Tip{Point: ocommon.NewPoint(400, []byte("hb"))},
 	)
+	require.True(t, s.TrySetClientConnId(connA))
 
 	require.True(t, s.SetClientObservabilityOnly(connA, true))
 	require.Equal(t, 1, s.ClientConnCount())
@@ -241,11 +241,11 @@ func TestSetClientObservabilityOnly_PreservesCurrentActiveClient(
 	connB := newTestConnId(2)
 	s.AddClientConnId(connA)
 	require.True(t, s.TryAddObservedClientConnId(connB))
-	s.SetClientConnId(connA)
 	s.UpdateClientTip(connA,
 		ocommon.NewPoint(100, []byte("ha")),
 		ochainsync.Tip{Point: ocommon.NewPoint(100, []byte("ha"))},
 	)
+	require.True(t, s.TrySetClientConnId(connA))
 	s.UpdateClientTipWithoutDedup(connB,
 		ocommon.NewPoint(500, []byte("hb")),
 		ochainsync.Tip{Point: ocommon.NewPoint(500, []byte("hb"))},
@@ -304,9 +304,6 @@ func TestRemoveActiveClientDoesNotPromoteStalledFallback(t *testing.T) {
 	s.AddClientConnId(connA)
 	s.AddClientConnId(connB)
 
-	// Set A as primary
-	s.SetClientConnId(connA)
-
 	// Update tips so both have data
 	s.UpdateClientTip(connA,
 		ocommon.NewPoint(100, []byte("ha")),
@@ -318,6 +315,8 @@ func TestRemoveActiveClientDoesNotPromoteStalledFallback(t *testing.T) {
 		ochainsync.Tip{
 			Point: ocommon.NewPoint(200, []byte("hb")),
 		})
+	// Select A only after it has delivered a tip.
+	require.True(t, s.TrySetClientConnId(connA))
 
 	// Wait for stall timeout to elapse for both clients.
 	// Use a map to deduplicate connection IDs across
@@ -750,14 +749,14 @@ func TestStallDetectionLeavesSelectionToChainSelector(t *testing.T) {
 	s.AddClientConnId(connA)
 	s.AddClientConnId(connB)
 
-	// Set A as primary with a high tip
-	s.SetClientConnId(connA)
 	s.UpdateClientTip(connA,
 		ocommon.NewPoint(500, []byte("ha")),
 		ochainsync.Tip{Point: ocommon.NewPoint(500, []byte("ha"))})
 	s.UpdateClientTip(connB,
 		ocommon.NewPoint(400, []byte("hb")),
 		ochainsync.Tip{Point: ocommon.NewPoint(400, []byte("hb"))})
+	// Select A only after it has delivered a tip.
+	require.True(t, s.TrySetClientConnId(connA))
 
 	// Poll until A's stall timeout elapses, keeping B
 	// active. Use a map to deduplicate IDs across polling
@@ -893,6 +892,8 @@ func TestClientRemovedEvent(t *testing.T) {
 
 	conn := newTestConnId(1)
 	s.AddClientConnId(conn)
+	point := ocommon.NewPoint(1, []byte("header"))
+	s.UpdateClientTipWithoutDedup(conn, point, ochainsync.Tip{Point: point})
 	require.True(t, s.TrySetClientConnId(conn))
 	s.RemoveClientConnId(conn)
 
