@@ -22,6 +22,7 @@ import (
 type voteManagerMetrics struct {
 	votesReceivedTotal     prometheus.Counter
 	votesRejectedTotal     *prometheus.CounterVec
+	votesNotEmittedTotal   *prometheus.CounterVec
 	votesEquivocationTotal prometheus.Counter
 	ebQuorumReachedTotal   prometheus.Counter
 	certificatesBuiltTotal prometheus.Counter
@@ -39,6 +40,10 @@ func initVoteManagerMetrics(reg prometheus.Registerer) *voteManagerMetrics {
 		votesRejectedTotal: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: "dingo_metrics_leios_votes_rejected_total",
 			Help: "number of leios votes rejected, by reason",
+		}, []string{"reason"}),
+		votesNotEmittedTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "dingo_metrics_leios_votes_not_emitted_total",
+			Help: "number of times this node declined to emit its own leios vote, by reason",
 		}, []string{"reason"}),
 		votesEquivocationTotal: factory.NewCounter(prometheus.CounterOpts{
 			Name: "dingo_metrics_leios_votes_equivocation_total",

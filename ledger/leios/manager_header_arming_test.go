@@ -15,6 +15,10 @@
 package leios
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +27,8 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -39,6 +45,25 @@ const (
 	headerArmingVoteWindow    = 10
 	headerArmingSeatedVoterId = 3
 )
+
+// syncBuffer is a bytes.Buffer safe for the vote manager's event loop
+// goroutine to write log records into while the test reads them.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 // newHeaderArmingFixture builds a fixture whose local pool is seated on the
 // committee with a loaded signing key, with the vote window and wall-clock
@@ -254,5 +279,89 @@ func TestVoteManagerRolledBackHeaderAnnouncementDoesNotVote(t *testing.T) {
 			SlotNo:  headerArmingRbSlot,
 			VoterId: headerArmingSeatedVoterId,
 		}}),
+	)
+}
+
+// TestVoteManagerSlotWindowDeclineIsCountedAndWarned covers the second half
+// of the reported failure: the decline was logged at Debug and incremented no
+// metric, so a permanently non-voting producer looked green on every health
+// signal an operator checks.
+func TestVoteManagerSlotWindowDeclineIsCountedAndWarned(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	logBuf := &syncBuffer{}
+	slots := &fakeSlotProvider{slot: 1000}
+	fixture := newHeaderArmingFixture(
+		t,
+		slots,
+		func(_ *managerFixture, cfg *VoteManagerConfig) {
+			cfg.PromRegistry = reg
+			cfg.Logger = slog.New(slog.NewJSONHandler(
+				logBuf,
+				&slog.HandlerOptions{Level: slog.LevelWarn},
+			))
+		},
+	)
+
+	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
+	// An announcement whose ranking block slot is far behind the wall clock,
+	// exactly what the apply-driven path used to hand the emitter.
+	staleSlot := uint64(1000 - headerArmingVoteWindow - 100)
+	fixture.mgr.HandleEndorserBlock(staleSlot, ebHash)
+	fixture.mgr.ObserveAnnouncement(staleSlot, rbHash, ebHash)
+
+	assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+		SlotNo:  staleSlot,
+		VoterId: headerArmingSeatedVoterId,
+	}}))
+	assert.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(
+			fixture.mgr.metrics.votesNotEmittedTotal.WithLabelValues(
+				voteNotEmittedSlotWindow,
+			),
+		),
+		"slot-window decline is counted",
+	)
+	assert.Contains(
+		t,
+		logBuf.String(),
+		"outside vote window",
+		"a seated node holding a key warns rather than staying silent",
+	)
+	assert.True(
+		t,
+		strings.Contains(logBuf.String(), `"level":"WARN"`),
+		"the decline is logged at warn level, got: %s",
+		logBuf.String(),
+	)
+}
+
+// TestVoteManagerVotesNotEmittedCountsMissingKey pins a second reason label so
+// the counter is usable to tell "not configured" apart from "too late".
+func TestVoteManagerVotesNotEmittedCountsMissingKey(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
+	fixture := newManagerFixture(
+		t,
+		func(_ *managerFixture, cfg *VoteManagerConfig) {
+			cfg.SlotProvider = slots
+			cfg.VoteWindowSlots = headerArmingVoteWindow
+			cfg.PromRegistry = reg
+		},
+	)
+	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
+	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, ebHash)
+	fixture.mgr.ObserveAnnouncement(headerArmingRbSlot, rbHash, ebHash)
+	assert.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(
+			fixture.mgr.metrics.votesNotEmittedTotal.WithLabelValues(
+				voteNotEmittedNoKey,
+			),
+		),
 	)
 }
