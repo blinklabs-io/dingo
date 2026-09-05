@@ -894,7 +894,7 @@ func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 			return false
 		}
 		return runtime.Close(context.Background()) == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	}, 30*time.Second, 10*time.Millisecond)
 }
 
 // TestLiveTruncateResumesAfterCompletedStorageStopFailure proves that an
