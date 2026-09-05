@@ -143,6 +143,61 @@ func (c *Chain) HeaderTip() ochainsync.Tip {
 	return c.headerTip()
 }
 
+// TipPredecessor reports the block context an alternative to the current chain
+// tip must be built on: the tip itself (the block that would be competed with)
+// and the point of the tip's immediate predecessor, which becomes the
+// alternative block's parent.
+//
+// This is the data ouroboros-consensus' mkCurrentBlockContext returns for its
+// EQ case, where a leader whose slot is already occupied forges an alternative
+// with the same block number as the occupant and the occupant's predecessor as
+// parent (Ouroboros/Consensus/NodeKernel/Forge.hs).
+//
+// ok is false whenever that context cannot be established: an empty chain, a
+// tip that is the first block on the chain (its parent is genesis, which is not
+// a rollback target here), or a predecessor the chain can no longer resolve.
+// Callers must treat that as "no alternative can be built" and must not fall
+// back to the live tip: binding the tip itself as parent produces a block whose
+// parent slot equals its own, which envelope validation and every Praos peer
+// reject.
+func (c *Chain) TipPredecessor() (
+	parent ocommon.Point,
+	tip ochainsync.Tip,
+	ok bool,
+) {
+	if c == nil {
+		return ocommon.Point{}, ochainsync.Tip{}, false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	c.manager.mutex.RLock()
+	defer c.manager.mutex.RUnlock()
+	// initialBlockIndex is the first block; it has no predecessor on this
+	// chain, and neither does an empty chain.
+	if c.tipBlockIndex <= initialBlockIndex {
+		return ocommon.Point{}, ochainsync.Tip{}, false
+	}
+	tipBlock, err := c.blockByIndexLocked(c.tipBlockIndex)
+	if err != nil {
+		return ocommon.Point{}, ochainsync.Tip{}, false
+	}
+	parentBlock, err := c.blockByIndexLocked(c.tipBlockIndex - 1)
+	if err != nil {
+		return ocommon.Point{}, ochainsync.Tip{}, false
+	}
+	// Cross-check the two records against each other and against the tip this
+	// chain advertises. The chain maintains all three invariants, but a caller
+	// of this function is about to sign a block against the answer, so a
+	// disagreement is reported as "no context" rather than resolved.
+	if !bytes.Equal(tipBlock.Hash, c.currentTip.Point.Hash) ||
+		!bytes.Equal(tipBlock.PrevHash, parentBlock.Hash) {
+		return ocommon.Point{}, ochainsync.Tip{}, false
+	}
+	return ocommon.NewPoint(parentBlock.Slot, parentBlock.Hash),
+		c.currentTip,
+		true
+}
+
 // blockNumberContiguous reports whether a block number legitimately follows its
 // parent's. Shelley-era and later increment by exactly one per block. Byron
 // epoch-boundary blocks reuse the parent's block number (they do not increment),
@@ -296,6 +351,28 @@ func (c *Chain) AddLocalBlock(block ledger.Block) error {
 		c.eventBus.Publish(ChainUpdateEventType, evt)
 	}
 	return nil
+}
+
+// AddLocalBlockDeferred adds a locally forged block exactly like AddLocalBlock
+// but, instead of publishing the resulting chain.update inline, enqueues it on
+// the chain-level sequencer under c.mutex and returns it. This is the entry
+// point for a forged block adopted from a path that holds a ledger mutex --
+// specifically the equal-slot alternative, which rolls the chain back to the
+// contested block's parent under chainsyncMutex and then adopts the local
+// sibling. Publishing inline from there is the drain deadlock described on
+// AddBlockWithPointDeferred; enqueuing under c.mutex also keeps this add
+// ordered behind the rollback that preceded it. A returned event with an empty
+// Type means there is nothing to publish.
+func (c *Chain) AddLocalBlockDeferred(
+	block ledger.Block,
+) (event.Event, error) {
+	return c.addBlockInternal(
+		block,
+		ocommon.Point{},
+		nil,
+		false,
+		true,
+	)
 }
 
 // AddBlockWithPoint adds a block using a caller-supplied point. This avoids
