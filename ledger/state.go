@@ -8588,25 +8588,9 @@ func (ls *LedgerState) reconcileLivePrimaryChainLedgerDivergence(
 	)
 	if err := ls.reconcilePrimaryChainTipWithLedgerTip(); err != nil {
 		if errors.Is(err, ErrRollbackExceedsMithrilBoundary) {
-			// The plateau watchdog has no pending event batch or peer
-			// rollback handler to classify this local reconciliation failure.
-			// Publish the same resync reason here so the live caller does
-			// not merely log the boundary rejection and leave chainsync
-			// pinned on the divergent view.
-			if ls.config.EventBus != nil {
-				ls.config.EventBus.PublishAsync(
-					event.ChainsyncResyncEventType,
-					event.NewEvent(
-						event.ChainsyncResyncEventType,
-						event.ChainsyncResyncEvent{
-							ConnectionId: connId,
-							Reason:       event.ChainsyncResyncReasonRollbackExceedsMithril,
-							Point:        ledgerTip.Point,
-						},
-					),
-				)
-			}
-			return false, nil
+			// Let each live caller classify and publish the boundary
+			// resync through its normal pending-event path.
+			return false, err
 		}
 		if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
 			// The common ancestor sits more than K blocks behind the
