@@ -504,6 +504,9 @@ func (b *blockBroadcaster) AddBlock(
 // snapshot rotation semantics as other ledger queries.
 type stakeDistributionAdapter struct {
 	ledgerState *ledger.LedgerState
+	// afterPoolStakeReadFn is a test-only hook for coordinating a concurrent
+	// snapshot recapture after the transaction has read the numerator.
+	afterPoolStakeReadFn func()
 }
 
 func (a *stakeDistributionAdapter) getStakeDistribution(
@@ -597,6 +600,12 @@ func (a *stakeDistributionAdapter) GetPoolAndTotalActiveStake(
 			poolKey,
 			err,
 		)
+	}
+	// Test-only synchronization seam. The transaction has already observed
+	// the numerator, so a concurrent recapture can commit before the
+	// denominator query without changing this transaction's snapshot.
+	if a.afterPoolStakeReadFn != nil {
+		a.afterPoolStakeReadFn()
 	}
 	totalActiveStake, err = view.GetTotalActiveStake(epoch)
 	if err != nil {
