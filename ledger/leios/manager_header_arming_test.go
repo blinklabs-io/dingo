@@ -98,16 +98,18 @@ func publishHeaderAnnouncement(
 	fixture *managerFixture,
 	slot uint64,
 	rbHash, ebHash lcommon.Blake2b256,
+	seq uint64,
 ) {
 	fixture.eventBus.Publish(
-		chain.ChainHeaderAnnouncementEventType,
+		chain.ChainHeaderEventType,
 		event.NewEvent(
-			chain.ChainHeaderAnnouncementEventType,
+			chain.ChainHeaderEventType,
 			chain.ChainHeaderAnnouncementEvent{
 				Slot:   slot,
 				RbHash: rbHash,
 				EbHash: ebHash,
 				EbSize: 1024,
+				Seq:    seq,
 			},
 		),
 	)
@@ -133,7 +135,7 @@ func TestVoteManagerVotesFromHeaderArrivalBeforeRankingBlockApplies(
 
 	// The ranking block's header arrives from chainsync roll-forward at its
 	// own slot. Its body has not been fetched, let alone applied.
-	publishHeaderAnnouncement(fixture, headerArmingRbSlot, rbHash, ebHash)
+	publishHeaderAnnouncement(fixture, headerArmingRbSlot, rbHash, ebHash, 1)
 
 	// The announced endorser block is acquired one slot later.
 	slots.setSlot(headerArmingEbAcquiredAt)
@@ -194,7 +196,7 @@ func TestVoteManagerHeaderAndApplyArmingDoNotDoubleVote(t *testing.T) {
 	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
 
 	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, ebHash)
-	publishHeaderAnnouncement(fixture, headerArmingRbSlot, rbHash, ebHash)
+	publishHeaderAnnouncement(fixture, headerArmingRbSlot, rbHash, ebHash, 1)
 	testutil.RequireReceive(
 		t,
 		emittedCh,
@@ -207,7 +209,7 @@ func TestVoteManagerHeaderAndApplyArmingDoNotDoubleVote(t *testing.T) {
 	// observation land on top of it.
 	fixture.mgr.ObserveAnnouncement(headerArmingRbSlot, rbHash, ebHash)
 	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, ebHash)
-	publishHeaderAnnouncement(fixture, headerArmingRbSlot, rbHash, ebHash)
+	publishHeaderAnnouncement(fixture, headerArmingRbSlot, rbHash, ebHash, 2)
 	testutil.RequireNoReceive(
 		t,
 		emittedCh,
@@ -364,4 +366,227 @@ func TestVoteManagerVotesNotEmittedCountsMissingKey(t *testing.T) {
 			),
 		),
 	)
+}
+
+// publishHeaderInvalidation delivers the counterpart signal: queued headers
+// above point left the chain without becoming blocks.
+func publishHeaderInvalidation(
+	fixture *managerFixture,
+	slot uint64,
+	reason string,
+	seq uint64,
+) {
+	fixture.eventBus.Publish(
+		chain.ChainHeaderEventType,
+		event.NewEvent(
+			chain.ChainHeaderEventType,
+			chain.ChainHeaderInvalidationEvent{
+				Point:  ocommon.Point{Slot: slot},
+				Reason: reason,
+				Seq:    seq,
+			},
+		),
+	)
+}
+
+// TestVoteManagerInvalidatedHeaderAnnouncementDoesNotVote is the ordering
+// regression test. The chain rolls back and then re-queues the peer's fork
+// headers, so an announcement and the invalidation that voids it are produced
+// back to back. They ride one event type precisely so the manager cannot
+// observe them out of order: here the announcement is armed first and the
+// invalidation follows, and the endorser block arriving afterwards must not
+// produce a vote for a ranking block that is no longer on our chain.
+func TestVoteManagerInvalidatedHeaderAnnouncementDoesNotVote(t *testing.T) {
+	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
+	fixture := newHeaderArmingFixture(t, slots)
+	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
+
+	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("orphaned-rb"))
+
+	publishHeaderAnnouncement(fixture, headerArmingRbSlot, rbHash, ebHash, 1)
+	publishHeaderInvalidation(
+		fixture,
+		headerArmingRbSlot-1,
+		chain.HeaderInvalidationRollback,
+		2,
+	)
+	// Both events are on one channel, so waiting for the invalidation to be
+	// applied also proves the announcement ahead of it was.
+	testutil.WaitForCondition(t, func() bool {
+		fixture.mgr.mu.Lock()
+		defer fixture.mgr.mu.Unlock()
+		return fixture.mgr.lastHeaderStreamSeq >= 2
+	}, 2*time.Second, "invalidation applied")
+
+	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, ebHash)
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		500*time.Millisecond,
+		"no vote for an announcement the chain invalidated",
+	)
+	assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+		SlotNo:  headerArmingRbSlot,
+		VoterId: headerArmingSeatedVoterId,
+	}}))
+}
+
+// TestVoteManagerLateRollbackDoesNotDropRearmedAnnouncement is the other half
+// of the same hazard. chain.update and the header stream are delivered on
+// independent channels, so the ChainRollbackEvent for a fork resolution can
+// arrive after the header stream has already replayed the winning fork's
+// headers. Pruning announcements on that late rollback would delete the
+// replacement chain's announcement and put the node back to not voting.
+func TestVoteManagerLateRollbackDoesNotDropRearmedAnnouncement(t *testing.T) {
+	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
+	fixture := newHeaderArmingFixture(t, slots)
+	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
+
+	ebHash := lcommon.NewBlake2b256([]byte("replacement-eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("replacement-rb"))
+
+	// Chain-mutation order: roll back to S-1, then admit the replacement
+	// chain's announcing header at S.
+	publishHeaderInvalidation(
+		fixture,
+		headerArmingRbSlot-1,
+		chain.HeaderInvalidationRollback,
+		7,
+	)
+	publishHeaderAnnouncement(fixture, headerArmingRbSlot, rbHash, ebHash, 8)
+	testutil.WaitForCondition(t, func() bool {
+		fixture.mgr.mu.Lock()
+		defer fixture.mgr.mu.Unlock()
+		return fixture.mgr.lastHeaderStreamSeq >= 8
+	}, 2*time.Second, "replacement announcement armed")
+
+	// The matching rollback finally arrives on chain.update, carrying the
+	// sequence number of the mutation the header stream already moved past.
+	fixture.mgr.handleRollback(chain.ChainRollbackEvent{
+		Point: ocommon.Point{Slot: headerArmingRbSlot - 1},
+		Seq:   7,
+	})
+
+	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, ebHash)
+	emitted := testutil.RequireReceive(
+		t,
+		emittedCh,
+		2*time.Second,
+		"vote for the replacement chain's announcement",
+	)
+	vote, ok := emitted.Data.(VoteEmittedEvent)
+	require.True(t, ok)
+	assert.Equal(t, rbHash, vote.Vote.AnnouncingRbHash)
+}
+
+// TestVoteManagerUnsequencedRollbackStillPrunes keeps the pre-existing
+// contract for a rollback that did not come from the chain's sequencer: with
+// no sequence number there is nothing to supersede it, so it prunes as before.
+func TestVoteManagerUnsequencedRollbackStillPrunes(t *testing.T) {
+	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
+	fixture := newHeaderArmingFixture(t, slots)
+	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
+
+	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("orphaned-rb"))
+	publishHeaderAnnouncement(fixture, headerArmingRbSlot, rbHash, ebHash, 4)
+	testutil.WaitForCondition(t, func() bool {
+		fixture.mgr.mu.Lock()
+		defer fixture.mgr.mu.Unlock()
+		return fixture.mgr.lastHeaderStreamSeq >= 4
+	}, 2*time.Second, "announcement armed")
+
+	fixture.mgr.handleRollback(chain.ChainRollbackEvent{
+		Point: ocommon.Point{Slot: headerArmingRbSlot - 1},
+	})
+	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, ebHash)
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		500*time.Millisecond,
+		"an unsequenced rollback still prunes announcements",
+	)
+}
+
+// TestVoteManagerHeaderStreamRecoversFromClosedChannel covers the header
+// stream closing under the event loop. It is ordering-critical and the only
+// thing that arms a vote inside the window, so losing it silently would put
+// the node back to never voting. The loop must keep serving chain events and
+// re-arm header delivery instead of exiting.
+func TestVoteManagerHeaderStreamRecoversFromClosedChannel(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
+	fixture := newHeaderArmingFixture(
+		t,
+		slots,
+		func(_ *managerFixture, cfg *VoteManagerConfig) {
+			cfg.PromRegistry = reg
+		},
+	)
+	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
+
+	// Close the manager's header subscription out from under the loop,
+	// exactly as a bus-side detach would.
+	fixture.mgr.mu.Lock()
+	var headerSubId event.EventSubscriberId
+	for _, sub := range fixture.mgr.subs {
+		if sub.eventType == chain.ChainHeaderEventType {
+			headerSubId = sub.id
+		}
+	}
+	fixture.mgr.mu.Unlock()
+	require.NotZero(t, headerSubId)
+	fixture.eventBus.Unsubscribe(chain.ChainHeaderEventType, headerSubId)
+
+	testutil.WaitForCondition(t, func() bool {
+		return promtestutil.ToFloat64(
+			fixture.mgr.metrics.headerStreamResubscribeTotal,
+		) == 1
+	}, 2*time.Second, "header stream resubscribed")
+
+	// The replacement subscription arms announcements again.
+	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
+	publishHeaderAnnouncement(fixture, headerArmingRbSlot, rbHash, ebHash, 3)
+	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, ebHash)
+	emitted := testutil.RequireReceive(
+		t,
+		emittedCh,
+		2*time.Second,
+		"vote emitted after the header stream was recovered",
+	)
+	vote, ok := emitted.Data.(VoteEmittedEvent)
+	require.True(t, ok)
+	assert.Equal(t, rbHash, vote.Vote.AnnouncingRbHash)
+}
+
+// TestVoteManagerNotEmittedReasonsMaterialized pins that every reason label
+// exists from startup, so rate()/increase() have a series to work with on a
+// node that has never emitted a vote -- which is the node this counter is for.
+func TestVoteManagerNotEmittedReasonsMaterialized(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	newManagerFixture(t, func(_ *managerFixture, cfg *VoteManagerConfig) {
+		cfg.PromRegistry = reg
+	})
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	var labels []string
+	for _, family := range families {
+		if family.GetName() != "dingo_metrics_leios_votes_not_emitted_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, pair := range metric.GetLabel() {
+				if pair.GetName() == "reason" {
+					labels = append(labels, pair.GetValue())
+				}
+			}
+		}
+	}
+	assert.ElementsMatch(t, voteNotEmittedReasons, labels)
 }
