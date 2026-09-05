@@ -2091,6 +2091,12 @@ func (ls *LedgerState) PoolRegistrationVRFKeyHash(
 	return vrfHash, true, nil
 }
 
+// LatestOpCertSequence returns the highest opcert issue-number counter
+// observed for poolID, honoring the same Mithril trust boundary block
+// application enforces (see latestOpCertCounterAfterMithril): a plain MAX
+// over the whole table would trust rows a Mithril import left below the
+// certified boundary, giving startup and forge-loop credential checks a
+// baseline block application itself does not use.
 func (ls *LedgerState) LatestOpCertSequence(
 	poolID [28]byte,
 ) (sequence uint64, found bool, err error) {
@@ -2105,7 +2111,11 @@ func (ls *LedgerState) LatestOpCertSequence(
 	if pool == nil {
 		return 0, false, nil
 	}
-	return ls.db.LatestPoolOpCertSequence(pkh, nil)
+	return ls.latestOpCertCounterAfterMithril(
+		pkh,
+		ls.mithrilLedgerSlotSnapshot(),
+		nil,
+	)
 }
 
 // Datum looks up a datum by hash & adding this for implementing query.ReadData #741
@@ -7060,14 +7070,39 @@ func (ls *LedgerState) ledgerProcessBlock(
 // latestOpCertCounterForValidation returns the highest observed counter after
 // the Mithril boundary, or the certified counter at the boundary when no later
 // row exists. Rows before the boundary are not part of the certified state.
+// Reads mithrilLedgerSlot through the lock-safe mithrilLedgerSlotSnapshot,
+// since the block-apply transaction this runs inside does not itself hold
+// a lock across that field (the snapshot taken before the transaction,
+// e.g. ledgerProcessBlocksFromSource's snapshotMithrilSlot, is not
+// threaded down to this call).
 func (ls *LedgerState) latestOpCertCounterForValidation(
 	poolKeyHash lcommon.PoolKeyHash,
 	txn *database.Txn,
 ) (uint64, bool, error) {
-	if ls.mithrilLedgerSlot > 0 {
+	return ls.latestOpCertCounterAfterMithril(
+		poolKeyHash,
+		ls.mithrilLedgerSlotSnapshot(),
+		txn,
+	)
+}
+
+// latestOpCertCounterAfterMithril is the Mithril-boundary-aware resolver
+// shared by latestOpCertCounterForValidation (block application) and
+// LatestOpCertSequence (startup and forge-loop credential checks), so both
+// paths agree on which counter is "the latest observed" for a pool instead
+// of one trusting a plain MAX over rows a Mithril import may have left
+// stale relative to the certified boundary. mithrilLedgerSlot is passed in
+// rather than read from ls directly so each caller controls how it is
+// obtained (a lock-safe snapshot, or a value already captured under one).
+func (ls *LedgerState) latestOpCertCounterAfterMithril(
+	poolKeyHash lcommon.PoolKeyHash,
+	mithrilLedgerSlot uint64,
+	txn *database.Txn,
+) (uint64, bool, error) {
+	if mithrilLedgerSlot > 0 {
 		sequence, found, err := ls.db.LatestPoolOpCertSequenceAfter(
 			poolKeyHash,
-			ls.mithrilLedgerSlot,
+			mithrilLedgerSlot,
 			txn,
 		)
 		if err != nil || found {
@@ -7075,7 +7110,7 @@ func (ls *LedgerState) latestOpCertCounterForValidation(
 		}
 		return ls.db.LatestPoolOpCertSequenceAfter(
 			poolKeyHash,
-			ls.mithrilLedgerSlot-1,
+			mithrilLedgerSlot-1,
 			txn,
 		)
 	}
