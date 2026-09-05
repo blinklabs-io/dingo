@@ -168,6 +168,18 @@ func (ls *LedgerState) AdoptLocalForgedSibling(
 		"fork_point_slot", parent.Slot,
 		"block_number", block.BlockNumber(),
 	)
+	// Publish the rollback before performing it. A blockfetch batch requested
+	// against the queued headers that descend from the block about to be
+	// rolled off is still in flight, and its delivery runs under
+	// chainsyncBlockfetchMutex, not the chainsyncMutex held here -- so it can
+	// flush at any point during or after the truncation below. The chainsync
+	// rollback paths supersede such a batch by re-queueing the winning fork's
+	// headers and restarting blockfetch; this path does neither, so the batch
+	// is invalidated by generation instead. Bumping here, before
+	// rollbackChainAndStateDeferred truncates, is what makes the ordering
+	// sound: a batch tagged with the older generation can only have been
+	// requested for the segment this rollback abandons.
+	ls.blockfetchRollbackGeneration.Add(1)
 	if err := ls.rollbackChainAndStateDeferred(parent, &pending); err != nil {
 		return false, fmt.Errorf(
 			"roll back to fork point %x for locally forged sibling: %w",
