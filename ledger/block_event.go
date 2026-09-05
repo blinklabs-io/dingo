@@ -222,7 +222,11 @@ func (ls *LedgerState) publishBlockEvent(
 // It does not close the window completely: the chain can still grow between
 // this validation and the rollback and push the rollback past the security
 // parameter, and an I/O failure mid-truncation is not predictable at all.
-// Both leave the chain needing recovery regardless.
+// Both leave the chain needing recovery regardless. The same shape --
+// LedgerState.rollback as a separate call after the emit, which can itself
+// fail -- exists in reconcilePrimaryChainTipWithLedgerTip (issue #3516); a
+// true durable, atomic handoff across every rollback path is tracked as
+// issue #3817, not fixed piecemeal per call site.
 func (ls *LedgerState) validateAndEmitRollbackUndo(
 	point ocommon.Point,
 ) error {
@@ -284,5 +288,157 @@ func (ls *LedgerState) blocksAboveSlot(slot uint64) []models.Block {
 		return nil
 	}
 	slices.Reverse(blocks)
+	return blocks
+}
+
+// reconciliationUndoBlocks returns the blocks the ledger itself applied
+// between ancestor (exclusive) and ledgerTipSlot (inclusive), newest first,
+// for the primary-chain/ledger divergence reconciler (issue #3516).
+//
+// It deliberately does not reuse blocksAboveSlot: that helper reads
+// whatever the primary chain's blob store currently holds above a slot,
+// which is correct for a live, not-yet-applied rollback (the blocks being
+// discarded are still there), but wrong here. By the time this reconciler
+// runs, chain selection has already replaced the primary chain's content
+// between ancestor and the ledger's old tip with a different, competing
+// branch -- the blocks the ledger actually applied are gone from that
+// index, not merely about to be removed. Reading "whatever occupies these
+// slots now" would build undo events for the new branch's blocks, which the
+// ledger never applied, instead of the old branch's, which it did.
+//
+// The durable block_nonce rows are the ledger's own record of which points
+// it applied (see durableAppliedFloor), independent of what the primary
+// chain currently holds, so this resolves each one by point through
+// ChainManager.BlockByPoint -- which checks the manager's retained
+// block-cache before the database, so a still-cached abandoned block
+// resolves even after chain selection removed it from the active index.
+//
+// The block cache does not survive a restart, so a point chain selection
+// already replaced before this process started (and whose blob row is
+// therefore already gone) cannot be resolved at all -- there is no other
+// durable copy of an abandoned block's bytes to fall back to. Rather than
+// fail the reconciliation over a notification gap -- which, at this
+// function's three call sites, means refusing to start the node, halting
+// the block-processing reader goroutine, or dropping a live chainsync
+// connection, all considerably worse than an incomplete notification -- an
+// unresolved point is skipped, logged at error level, and counted via
+// reconciliationUndoUnresolved so the gap is observable rather than silent.
+// This is the same best-effort degradation blocksAboveSlot uses for a
+// decode failure: the reconciliation is what keeps the ledger correct, and
+// it must not fail because a notification could not be built.
+//
+// A block_nonce row only exists for a block whose era has a
+// CalculateEtaVFunc (see ledger/eras): Byron's BFT/PoA consensus has no VRF
+// nonce to evolve, so a Byron block is never in this query's result at
+// all, not merely unresolvable -- reconciliationUndoUnresolved cannot even
+// see it to count it. This is not new to this function: durableAppliedFloor
+// and latestLedgerPrimaryChainAncestor already key the same reconciliation's
+// applied-point search on block_nonce rows, so a divergence spanning Byron
+// blocks already has no era-agnostic durable record of applied points to
+// resolve an ancestor from, let alone build undo events for. Closing that
+// would mean adding an era-agnostic applied-block record the rest of the
+// reconciler doesn't have either -- out of scope for issue #3516, which
+// bounds and correctly sources this rewind's data, not the reconciler's
+// pre-existing era coverage. Tracked separately as issue #3778.
+//
+// Because such a block has no row to iterate over at all, this cannot name
+// it the way an unresolvable block is named -- but it can detect that one
+// is missing: the block-number gap between ancestor and ledgerTipBlockNumber
+// is independent of block_nonce entirely, so comparing it against how many
+// nonce rows accounted for that gap reveals a block-number's worth of
+// applied history this function had no record of, without guessing at
+// which block or reading it from the primary chain's current index (which
+// would risk resolving the wrong branch's block for that slot -- the exact
+// failure mode this function exists to avoid, see above). Logged and
+// counted via reconciliationUndoMissingRecord, distinctly from
+// reconciliationUndoUnresolved, so an operator can tell "we know what's
+// missing but can't reach it" apart from "we don't even have a record of
+// it existing" (wolf31o2 review, PR #3611). Skipped when ancestor's own
+// block cannot be resolved (e.g., after a restart) rather than reporting a
+// false gap from a missing baseline.
+func (ls *LedgerState) reconciliationUndoBlocks(
+	ancestor ocommon.Point,
+	ledgerTipSlot uint64,
+	ledgerTipBlockNumber uint64,
+) []models.Block {
+	if ls.config.EventBus == nil || ls.db == nil ||
+		ls.config.ChainManager == nil {
+		return nil
+	}
+	if !ls.config.EventBus.HasSubscribers(TransactionEventType) &&
+		!ls.config.EventBus.HasSubscribers(LedgerErrorEventType) {
+		return nil
+	}
+	if ledgerTipSlot <= ancestor.Slot {
+		return nil
+	}
+	nonceRows, err := ls.db.GetBlockNoncesInSlotRange(
+		ancestor.Slot,
+		ledgerTipSlot+1,
+		nil,
+	)
+	if err != nil {
+		ls.config.Logger.Warn(
+			"failed to read applied block points for reconciliation undo events",
+			"component", "ledger",
+			"error", err,
+			"ancestor_slot", ancestor.Slot,
+			"ledger_tip_slot", ledgerTipSlot,
+		)
+		return nil
+	}
+	blocks := make([]models.Block, 0, len(nonceRows))
+	accountedRows := 0
+	for _, row := range slices.Backward(nonceRows) {
+		if row.Slot <= ancestor.Slot {
+			// The ancestor's own row: it is being kept, not undone.
+			continue
+		}
+		accountedRows++
+		block, err := ls.config.ChainManager.BlockByPoint(
+			ocommon.NewPoint(row.Slot, row.Hash),
+			nil,
+		)
+		if err != nil {
+			ls.config.Logger.Error(
+				"reconciliation cannot build an undo event for an applied "+
+					"block: it is no longer resolvable (likely already "+
+					"replaced by chain selection and, after a restart, no "+
+					"longer cached either); ledger.tx subscribers will not "+
+					"see this block undone",
+				"component", "ledger",
+				"error", err,
+				"slot", row.Slot,
+				"hash", hex.EncodeToString(row.Hash),
+			)
+			if ls.metrics.reconciliationUndoUnresolved != nil {
+				ls.metrics.reconciliationUndoUnresolved.Inc()
+			}
+			continue
+		}
+		blocks = append(blocks, block)
+	}
+	if ancestorBlock, err := ls.config.ChainManager.BlockByPoint(ancestor, nil); err == nil &&
+		ledgerTipBlockNumber > ancestorBlock.Number {
+		expectedRows := ledgerTipBlockNumber - ancestorBlock.Number
+		if expectedRows > uint64(accountedRows) {
+			missing := expectedRows - uint64(accountedRows)
+			ls.config.Logger.Error(
+				"reconciliation undo range contains applied blocks with no "+
+					"block_nonce row at all (not merely unresolvable) -- "+
+					"likely Byron-era blocks, whose ledger.tx undo events "+
+					"cannot be built at all (issue #3778)",
+				"component", "ledger",
+				"ancestor_slot", ancestor.Slot,
+				"ledger_tip_slot", ledgerTipSlot,
+				"missing_records", missing,
+			)
+			if ls.metrics.reconciliationUndoMissingRecord != nil {
+				ls.metrics.reconciliationUndoMissingRecord.Add(
+					float64(missing),
+				)
+			}
+		}
+	}
 	return blocks
 }
