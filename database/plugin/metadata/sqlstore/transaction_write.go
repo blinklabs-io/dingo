@@ -421,9 +421,11 @@ func (s *Store) SetGapBlockTransaction(
 	index uint32,
 	txn types.Txn,
 ) error {
-	// Gap ingestion intentionally has no available input state. Persisting only
-	// the transaction and produced outputs is equivalent to SetTransaction
-	// after suppressing the consumed-input update.
+	// Gap ingestion intentionally has no available input state, so this is
+	// equivalent to SetTransaction with the consumed-input update suppressed.
+	// The transaction, its certificates, and its produced outputs are all
+	// persisted; certificates are applied without calculated deposits, which
+	// the gap path cannot supply.
 	if transaction == nil {
 		return errors.New("set gap transaction: nil transaction")
 	}

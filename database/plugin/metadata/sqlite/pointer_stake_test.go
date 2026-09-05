@@ -140,6 +140,30 @@ func (f *pointerStakeFixture) apply(
 	))
 }
 
+// applyGap writes one transaction through the Mithril gap path, which carries
+// no calculated deposits and no consumed-input state.
+func (f *pointerStakeFixture) applyGap(
+	t *testing.T,
+	slot uint64,
+	blockIndex uint32,
+	certificates []lcommon.Certificate,
+) {
+	t.Helper()
+	hash := lcommon.Blake2b256{}
+	hash[0] = f.nextTx
+	f.nextTx++
+	require.NoError(t, f.store.SetGapBlockTransaction(
+		&mockTransaction{
+			hash:         hash,
+			isValid:      true,
+			certificates: certificates,
+		},
+		ocommon.Point{Slot: slot, Hash: bytes.Repeat([]byte{0xc3}, 32)},
+		blockIndex,
+		nil,
+	))
+}
+
 // spend consumes an input at slot, marking the output it names deleted.
 func (f *pointerStakeFixture) spend(
 	t *testing.T,
@@ -484,4 +508,30 @@ func TestPointerAddressStakeResolvesTheWedgeAddress(t *testing.T) {
 	f.apply(t, wedgePointerSlot+1, 0, nil, f.output(35_553_515_656, addr))
 
 	require.Equal(t, uint64(35_553_515_656), f.stakeAt(t, wedgePointerSlot+10))
+}
+
+// TestPointerAddressStakeResolvesAnInGapRegistration covers the case both
+// review bots raised against resolving at ingest: a pointer whose registration
+// certificate lands inside a Mithril gap block. Gap ingestion supplies no
+// deposits and no input state, and until recently wrote no certificate rows at
+// all, so nothing was available to resolve against at the moment the output was
+// applied.
+//
+// Resolving at the slot being evaluated removes the ordering requirement
+// entirely -- the registration only has to be in the database by the time
+// stake is computed, not by the time the output is written.
+func TestPointerAddressStakeResolvesAnInGapRegistration(t *testing.T) {
+	t.Parallel()
+	f := newPointerStakeFixture(t)
+	f.setEra(t, babbage.EraIdBabbage)
+	paymentKey := bytes.Repeat([]byte{0x22}, lcommon.AddressHashSize)
+
+	// Both the registration and the delegation arrive through the gap path.
+	f.applyGap(t, 100, 0, []lcommon.Certificate{f.register(), f.delegate()})
+	f.apply(t, 200, 0, nil,
+		f.output(600, newPointerAddress(t, paymentKey, 100, 0, 0)))
+
+	require.Equal(t, uint64(600), f.stakeAt(t, 300),
+		"a pointer naming a registration ingested through a gap block must "+
+			"still resolve")
 }
