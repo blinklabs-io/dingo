@@ -160,6 +160,18 @@ func newFakeKoiosServer(
 					endTime,
 					ref.activeStake,
 				)
+			case "/epoch_params":
+				epoch, _, ok := lookupFakeEpoch(r, epochs)
+				if !ok {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(
+					w,
+					previewBabbageEpochParamsTmpl,
+					strconv.FormatUint(epoch, 10),
+				)
 			case "/totals":
 				epoch, ref, ok := lookupFakeEpoch(r, epochs)
 				if !ok {
@@ -231,7 +243,11 @@ func TestFetchAccountsIfNeededSkipsPreStakingEpoch(t *testing.T) {
 // seedDingoEpochAggregate writes epoch_summary at koiosEpoch-1 (the "stake
 // epoch" CompareEpochAggregates reads total_active_stake from) and
 // reward_ada_pots at koiosEpoch itself (unshifted), matching a fakeEpochRef
-// with the same values so the pair compares as a clean PASS.
+// with the same values so the pair compares as a clean PASS. It also seeds
+// the epoch/pparams rows CompareEpochProtocolParams reads, matching the
+// parameter set fakeKoiosServer serves — without them a clean-PASS epoch
+// would report protocol parameters as missing, which is the correct finding
+// for a node that has none but not what these tests are about.
 func seedDingoEpochAggregate(
 	t *testing.T,
 	source *DatabaseSource,
@@ -250,6 +266,7 @@ func seedDingoEpochAggregate(
 		Reserves: types.Uint64(reserves),
 		Fees:     types.Uint64(fees),
 	}).Error)
+	seedDingoBabbageProtocolParams(t, sqlDB, koiosEpoch)
 }
 
 // setDingoActiveStake overwrites the stake-epoch active-stake row for
@@ -1023,6 +1040,10 @@ func TestObserverStartSeedsBacklogForMissingAccountCoverage(t *testing.T) {
 		Reward:    "1",
 		FetchedAt: fetchedAt,
 	}))
+	// This cache is built directly rather than fetched, so it also needs the
+	// /epoch_params reference row a fetch would have written; without it the
+	// epoch correctly reports incomplete protocol-parameter reference data.
+	seedKoiosBabbageProtocolParams(t, cache, "preview", koiosEpoch)
 	require.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
 		Network:       "preview",
 		Epoch:         koiosEpoch,

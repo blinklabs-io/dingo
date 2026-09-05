@@ -51,6 +51,10 @@ const validEpochInfoTmpl = `[{"epoch_no":%s,"era":"conway","out_sum":"100","fees
 
 const validTotalsTmpl = `[{"epoch_no":%s,"treasury":"1","reserves":"1","fees":"1","reward":"1"}]`
 
+// validEpochParamsTmpl serves the shared preview Babbage parameter fixture
+// (see previewBabbageEpochParamsTmpl) for any requested epoch.
+var validEpochParamsTmpl = previewBabbageEpochParamsTmpl
+
 // TestFetchAbortsOnPermanentEpochInfoError guards against the bug where every
 // Koios client error was wrapped as transient regardless of cause: a
 // daily-quota/auth failure (permanent, non-retryable) must abort the whole
@@ -77,6 +81,13 @@ func TestFetchAbortsOnPermanentEpochInfoError(t *testing.T) {
 				}
 				w.WriteHeader(http.StatusOK)
 				_, _ = fmt.Fprintf(w, validEpochInfoTmpl, epoch)
+			case r.URL.Path == "/epoch_params":
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(
+					w,
+					validEpochParamsTmpl,
+					r.URL.Query().Get("_epoch_no"),
+				)
 			case r.URL.Path == "/totals":
 				w.WriteHeader(http.StatusOK)
 				_, _ = fmt.Fprintf(
@@ -144,6 +155,13 @@ func TestFetchTransient503LandsInFailedEpochs(t *testing.T) {
 				}
 				w.WriteHeader(http.StatusOK)
 				_, _ = fmt.Fprintf(w, validEpochInfoTmpl, epoch)
+			case r.URL.Path == "/epoch_params":
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(
+					w,
+					validEpochParamsTmpl,
+					r.URL.Query().Get("_epoch_no"),
+				)
 			case r.URL.Path == "/totals":
 				w.WriteHeader(http.StatusOK)
 				_, _ = fmt.Fprintf(
@@ -212,6 +230,13 @@ func TestFetchEpochStopsSchedulingPoolsAfterPermanentError(t *testing.T) {
 				_, _ = fmt.Fprintf(
 					w,
 					validEpochInfoTmpl,
+					r.URL.Query().Get("_epoch_no"),
+				)
+			case r.URL.Path == "/epoch_params":
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(
+					w,
+					validEpochParamsTmpl,
 					r.URL.Query().Get("_epoch_no"),
 				)
 			case r.URL.Path == "/totals":
@@ -302,6 +327,13 @@ func TestFetchBackfillsAccountsForPreExistingCache(t *testing.T) {
 					w,
 					validEpochInfoTmpl,
 					strconv.FormatUint(epoch, 10),
+				)
+			case r.URL.Path == "/epoch_params":
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(
+					w,
+					validEpochParamsTmpl,
+					r.URL.Query().Get("_epoch_no"),
 				)
 			case r.URL.Path == "/totals":
 				totalsCalls.Add(1)

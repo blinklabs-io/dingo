@@ -315,6 +315,191 @@ func CompareEpochTotals(
 	return out
 }
 
+// CompareEpochProtocolParams compares the protocol parameters Dingo has in
+// force for an epoch against Koios /epoch_params for that same epoch
+// (dingo #3931).
+//
+// Why this is its own comparison rather than more fields on
+// CompareEpochAggregates: a wrong protocol parameter is wedge-class. It
+// changes what the node accepts, so it produces the same outcome as a wrong
+// validation rule (the #3928 maxTxSize replay wedge) — a canonical block
+// rejected and the node off the chain — while every reward, stake and pool
+// comparison in this checker keeps reporting PASS right up to the rejection.
+// The execution-unit parameters are sharper still: maxTxExUnits,
+// maxBlockExUnits and the execution prices gate phase-2 validation, where a
+// divergence stays silent until a script transaction fails.
+//
+// Failure classification is deliberate, and the three cases are NOT the same
+// finding:
+//
+//   - A differing value is a real divergence: value_mismatch, i.e. FAIL. It
+//     is never downgraded by a grace window, because a parameter value is not
+//     something Dingo computes late — it is stored when the change is applied.
+//   - An unresolvable Dingo row means nothing was compared. That must not read
+//     as FAIL (no divergence was demonstrated) and must not read as PASS
+//     either, so it is dingo_db_missing (ERROR), softened to reference_lag
+//     inside the grace window after the epoch closed, exactly as
+//     CompareEpochAggregates treats an absent epoch_summary.
+//   - A failed Dingo read is dingo_db_error (ERROR), kept distinct from an
+//     absent row so an operator can tell a broken query from missing data.
+//
+// A missing Koios row is reported as "koios_epoch_params"/dingo_db_missing
+// rather than skipped, mirroring CompareEpochTotals' koios_totals handling: a
+// cache populated before this comparison existed must surface as incomplete
+// reference data, never produce a PASS that validated no parameters at all.
+//
+// Presence disagreement is a mismatch, not a skip. "" on either side means
+// "this era does not define this parameter", so both sides empty is agreement
+// and is skipped, but exactly one side empty is a disagreement about the
+// shape of the ledger state — which is precisely what an era-gating bug would
+// look like, and skipping it would let that bug read as PASS.
+//
+// Every numeric field is compared with rationalsEqual rather than string
+// equality. Dingo stores rationals exactly ("577/10000", "721/10000000") and
+// Koios publishes the same numbers as decimals, sometimes in exponent form
+// ("0.0577", "7.21e-05"); big.Rat parses all of these forms, so plain integer
+// parameters compare correctly through the same path and no field needs a
+// second code path. rationalsEqual returns false on anything that fails to
+// parse, so a malformed value on either side surfaces as a mismatch rather
+// than a false pass.
+//
+// Deliberately NOT compared, each verified against real preview data before
+// being excluded:
+//
+//   - cost_models. Koios publishes them as named arrays (PlutusV1/PlutusV2)
+//     while Dingo stores map[uint][]int64; the operation ordering that makes
+//     the two comparable is not established here, and comparing them on an
+//     assumption would produce noise in the one tool whose value depends on
+//     its findings being real.
+//   - coins_per_utxo_size. Koios reports Alonzo's per-word figure (34482 on
+//     preview epochs 0-2) where Dingo stores 4310; the two agree from Babbage
+//     onward. Which side is right for Alonzo needs its own investigation, so
+//     including it would attach an unexplained permanent FAIL to those epochs.
+//   - decentralisation and min_utxo_value. Neither exists in the Babbage or
+//     Conway parameter structs, so on every currently live era there is no
+//     Dingo-side value to compare.
+//   - The Conway governance parameters (pvt_*, dvt_*, committee_*,
+//     gov_action_*, drep_*, min_fee_ref_script_cost_per_byte). These are real
+//     and worth covering, but the reference chain available for verification
+//     is Babbage-era throughout, so their cross-side representation is
+//     unverified; adding them unverified is the failure mode this exclusion
+//     list exists to avoid.
+//
+// All four are classified in koiosCoverageMatrix so a report never implies
+// they were checked.
+//
+// epochEndTime is the actual epoch close time (KoiosEpochInfo.EpochEndTime);
+// zero means unknown, which disables the grace window.
+func CompareEpochProtocolParams(
+	network string,
+	epoch uint64,
+	koios *KoiosEpochParams,
+	dingoParams *DingoProtocolParams,
+	fetchErr error,
+	now time.Time,
+	graceHours int,
+	epochEndTime time.Time,
+) []CheckMismatch {
+	mismatch := func(field, dingoValue, koiosValue, category string) CheckMismatch {
+		return CheckMismatch{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      field,
+			DingoValue: dingoValue,
+			KoiosValue: koiosValue,
+			Category:   category,
+			CheckedAt:  now,
+		}
+	}
+
+	if fetchErr != nil {
+		return []CheckMismatch{mismatch(
+			"protocol_params",
+			fmt.Sprintf("error: %v", fetchErr),
+			"",
+			CategoryDBError,
+		)}
+	}
+	if koios == nil {
+		return []CheckMismatch{mismatch(
+			"koios_epoch_params",
+			"present",
+			"",
+			CategoryDBMissing,
+		)}
+	}
+	if dingoParams == nil {
+		cat := CategoryDBMissing
+		if graceHours > 0 && !epochEndTime.IsZero() &&
+			now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
+			cat = CategoryReferenceLag
+		}
+		return []CheckMismatch{mismatch("protocol_params", "", "present", cat)}
+	}
+
+	var out []CheckMismatch
+
+	// The era decides which validation rules run at all, so a disagreement
+	// about it is at least as serious as any individual parameter. Compared
+	// as an exact string: Dingo's era names (ledger/eras) and Koios's are the
+	// same words.
+	if dingoParams.EraName != koios.Era {
+		out = append(out, mismatch(
+			"pparams_era",
+			dingoParams.EraName,
+			koios.Era,
+			CategoryValueMismatch,
+		))
+	}
+
+	for _, f := range []struct {
+		field string
+		dingo string
+		koios string
+	}{
+		{"pparams_min_fee_a", dingoParams.MinFeeA, koios.MinFeeA},
+		{"pparams_min_fee_b", dingoParams.MinFeeB, koios.MinFeeB},
+		{"pparams_max_block_body_size", dingoParams.MaxBlockBodySize, koios.MaxBlockBodySize},
+		{"pparams_max_tx_size", dingoParams.MaxTxSize, koios.MaxTxSize},
+		{"pparams_max_block_header_size", dingoParams.MaxBlockHeaderSize, koios.MaxBlockHeaderSize},
+		{"pparams_key_deposit", dingoParams.KeyDeposit, koios.KeyDeposit},
+		{"pparams_pool_deposit", dingoParams.PoolDeposit, koios.PoolDeposit},
+		{"pparams_max_epoch", dingoParams.MaxEpoch, koios.MaxEpoch},
+		{"pparams_n_opt", dingoParams.NOpt, koios.NOpt},
+		{"pparams_a0", dingoParams.A0, koios.A0},
+		{"pparams_rho", dingoParams.Rho, koios.Rho},
+		{"pparams_tau", dingoParams.Tau, koios.Tau},
+		{"pparams_protocol_major", dingoParams.ProtocolMajor, koios.ProtocolMajor},
+		{"pparams_protocol_minor", dingoParams.ProtocolMinor, koios.ProtocolMinor},
+		{"pparams_min_pool_cost", dingoParams.MinPoolCost, koios.MinPoolCost},
+		{"pparams_price_mem", dingoParams.PriceMem, koios.PriceMem},
+		{"pparams_price_step", dingoParams.PriceStep, koios.PriceStep},
+		{"pparams_max_tx_ex_mem", dingoParams.MaxTxExMem, koios.MaxTxExMem},
+		{"pparams_max_tx_ex_steps", dingoParams.MaxTxExSteps, koios.MaxTxExSteps},
+		{"pparams_max_block_ex_mem", dingoParams.MaxBlockExMem, koios.MaxBlockExMem},
+		{"pparams_max_block_ex_steps", dingoParams.MaxBlockExSteps, koios.MaxBlockExSteps},
+		{"pparams_max_value_size", dingoParams.MaxValueSize, koios.MaxValueSize},
+		{"pparams_collateral_percentage", dingoParams.CollateralPercentage, koios.CollateralPercentage},
+		{"pparams_max_collateral_inputs", dingoParams.MaxCollateralInputs, koios.MaxCollateralInputs},
+	} {
+		if f.dingo == "" && f.koios == "" {
+			// Both sides agree the era does not define this parameter.
+			continue
+		}
+		if rationalsEqual(f.dingo, f.koios) {
+			continue
+		}
+		out = append(out, mismatch(
+			f.field,
+			f.dingo,
+			f.koios,
+			CategoryValueMismatch,
+		))
+	}
+
+	return out
+}
+
 // ComparePoolEpoch compares per-pool reward-input fields from Dingo's database
 // against the Koios reference row for (pool, epoch).
 // dingoPool is nil when the pool has no reward_pool_input row for this epoch.

@@ -126,6 +126,53 @@ type KoiosTotals struct {
 	ReservesWithdrawal string
 }
 
+// KoiosEpochParams holds the Koios /epoch_params reference row for one epoch
+// (dingo #3931). Every value is stored as the literal text Koios published,
+// with "" meaning the parameter is not defined in that epoch's era — never
+// zero. Rationals therefore keep Koios's decimal/exponent form ("0.0577",
+// "7.21e-05") and are reconciled against Dingo's exact num/denom form by
+// rationalsEqual in CompareEpochProtocolParams, so neither side is rounded.
+type KoiosEpochParams struct {
+	ID      uint
+	Network string
+	Epoch   uint64
+	Era     string
+
+	MinFeeA            string
+	MinFeeB            string
+	MaxBlockBodySize   string // Koios max_block_size
+	MaxTxSize          string
+	MaxBlockHeaderSize string // Koios max_bh_size
+	KeyDeposit         string
+	PoolDeposit        string
+	MaxEpoch           string
+	NOpt               string // Koios optimal_pool_count
+	A0                 string // Koios influence
+	Rho                string // Koios monetary_expand_rate
+	Tau                string // Koios treasury_growth_rate
+	ProtocolMajor      string
+	ProtocolMinor      string
+	MinPoolCost        string
+
+	PriceMem             string
+	PriceStep            string
+	MaxTxExMem           string
+	MaxTxExSteps         string
+	MaxBlockExMem        string
+	MaxBlockExSteps      string
+	MaxValueSize         string // Koios max_val_size
+	CollateralPercentage string // Koios collateral_percent
+	MaxCollateralInputs  string
+
+	FetchedAt time.Time
+
+	// Remaining fields are stored for reference but are NOT compared — see
+	// CompareEpochProtocolParams for each exclusion and its reason.
+	Decentralisation string
+	MinUtxoValue     string
+	CoinsPerUtxoSize string
+}
+
 // KoiosAccountRewards holds one Koios /account_reward_history reference row
 // for (network, epoch, stake_address, reward_type) — issue #3097's
 // per-account exact-parity comparison consumes this. RewardType is part of
@@ -448,6 +495,78 @@ func (c *Cache) GetTotals(network string, epoch uint64) (*KoiosTotals, error) {
 		return nil, err
 	}
 	return &totals, nil
+}
+
+// epochParamsColumns is the column list shared by UpsertEpochParams and
+// GetEpochParams so the two can never drift out of positional agreement.
+const epochParamsColumns = `network, epoch, era, min_fee_a, min_fee_b, max_block_body_size, max_tx_size,
+	max_block_header_size, key_deposit, pool_deposit, max_epoch, n_opt, a0, rho, tau, protocol_major,
+	protocol_minor, min_pool_cost, price_mem, price_step, max_tx_ex_mem, max_tx_ex_steps, max_block_ex_mem,
+	max_block_ex_steps, max_value_size, collateral_percentage, max_collateral_inputs, decentralisation,
+	min_utxo_value, coins_per_utxo_size, fetched_at`
+
+// UpsertEpochParams idempotently inserts or updates the Koios /epoch_params
+// reference row for one epoch.
+//
+// This is written separately from CommitEpochData rather than inside its
+// transaction, and fetchEpoch calls it BEFORE that commit. That ordering is
+// what keeps the freshness marker honest: koios_epoch_info.fetched_at only
+// advances once the parameter row is already durable, so a process killed
+// between the two writes leaves the epoch looking unfetched and it is simply
+// re-fetched. The reverse order could advance fetched_at with no parameter
+// row, which GetEpochsNeedingCheck would then never revisit.
+func (c *Cache) UpsertEpochParams(p KoiosEpochParams) error {
+	_, err := c.db.Exec(
+		`INSERT INTO koios_epoch_params (`+epochParamsColumns+`)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(network, epoch) DO UPDATE SET
+		 era=excluded.era, min_fee_a=excluded.min_fee_a, min_fee_b=excluded.min_fee_b,
+		 max_block_body_size=excluded.max_block_body_size, max_tx_size=excluded.max_tx_size,
+		 max_block_header_size=excluded.max_block_header_size, key_deposit=excluded.key_deposit,
+		 pool_deposit=excluded.pool_deposit, max_epoch=excluded.max_epoch, n_opt=excluded.n_opt,
+		 a0=excluded.a0, rho=excluded.rho, tau=excluded.tau, protocol_major=excluded.protocol_major,
+		 protocol_minor=excluded.protocol_minor, min_pool_cost=excluded.min_pool_cost,
+		 price_mem=excluded.price_mem, price_step=excluded.price_step, max_tx_ex_mem=excluded.max_tx_ex_mem,
+		 max_tx_ex_steps=excluded.max_tx_ex_steps, max_block_ex_mem=excluded.max_block_ex_mem,
+		 max_block_ex_steps=excluded.max_block_ex_steps, max_value_size=excluded.max_value_size,
+		 collateral_percentage=excluded.collateral_percentage,
+		 max_collateral_inputs=excluded.max_collateral_inputs, decentralisation=excluded.decentralisation,
+		 min_utxo_value=excluded.min_utxo_value, coins_per_utxo_size=excluded.coins_per_utxo_size,
+		 fetched_at=excluded.fetched_at`,
+		p.Network, p.Epoch, p.Era, p.MinFeeA, p.MinFeeB, p.MaxBlockBodySize, p.MaxTxSize,
+		p.MaxBlockHeaderSize, p.KeyDeposit, p.PoolDeposit, p.MaxEpoch, p.NOpt, p.A0, p.Rho, p.Tau,
+		p.ProtocolMajor, p.ProtocolMinor, p.MinPoolCost, p.PriceMem, p.PriceStep, p.MaxTxExMem,
+		p.MaxTxExSteps, p.MaxBlockExMem, p.MaxBlockExSteps, p.MaxValueSize, p.CollateralPercentage,
+		p.MaxCollateralInputs, p.Decentralisation, p.MinUtxoValue, p.CoinsPerUtxoSize, p.FetchedAt,
+	)
+	return err
+}
+
+// GetEpochParams retrieves the cached Koios /epoch_params row, returning
+// sql.ErrNoRows when absent — e.g. an epoch cached before protocol-parameter
+// fetching was added and not yet re-fetched. Callers must treat that as an
+// incomplete reference row (see CompareEpochProtocolParams's
+// "koios_epoch_params" CategoryDBMissing mismatch), never as a reason to skip
+// the parameter comparison silently.
+func (c *Cache) GetEpochParams(
+	network string,
+	epoch uint64,
+) (*KoiosEpochParams, error) {
+	var p KoiosEpochParams
+	err := c.db.QueryRow(
+		`SELECT `+epochParamsColumns+` FROM koios_epoch_params WHERE network = ? AND epoch = ?`,
+		network, epoch,
+	).Scan(
+		&p.Network, &p.Epoch, &p.Era, &p.MinFeeA, &p.MinFeeB, &p.MaxBlockBodySize, &p.MaxTxSize,
+		&p.MaxBlockHeaderSize, &p.KeyDeposit, &p.PoolDeposit, &p.MaxEpoch, &p.NOpt, &p.A0, &p.Rho, &p.Tau,
+		&p.ProtocolMajor, &p.ProtocolMinor, &p.MinPoolCost, &p.PriceMem, &p.PriceStep, &p.MaxTxExMem,
+		&p.MaxTxExSteps, &p.MaxBlockExMem, &p.MaxBlockExSteps, &p.MaxValueSize, &p.CollateralPercentage,
+		&p.MaxCollateralInputs, &p.Decentralisation, &p.MinUtxoValue, &p.CoinsPerUtxoSize, &p.FetchedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
 }
 
 // GetAllPoolsForEpoch retrieves all cached pool rows for (network, epoch).
@@ -1399,6 +1518,22 @@ func createCacheSchema(db *sql.DB) error {
 			deposits_drep TEXT NOT NULL DEFAULT '', deposits_proposal TEXT NOT NULL DEFAULT '', treasury_donation TEXT NOT NULL DEFAULT '',
 			treasury_withdrawal TEXT NOT NULL DEFAULT '', reserves_withdrawal TEXT NOT NULL DEFAULT '')`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_kt_net_epoch ON koios_totals(network, epoch)`,
+		`CREATE TABLE IF NOT EXISTS koios_epoch_params (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
+			era TEXT NOT NULL DEFAULT '', min_fee_a TEXT NOT NULL DEFAULT '', min_fee_b TEXT NOT NULL DEFAULT '',
+			max_block_body_size TEXT NOT NULL DEFAULT '', max_tx_size TEXT NOT NULL DEFAULT '',
+			max_block_header_size TEXT NOT NULL DEFAULT '', key_deposit TEXT NOT NULL DEFAULT '',
+			pool_deposit TEXT NOT NULL DEFAULT '', max_epoch TEXT NOT NULL DEFAULT '', n_opt TEXT NOT NULL DEFAULT '',
+			a0 TEXT NOT NULL DEFAULT '', rho TEXT NOT NULL DEFAULT '', tau TEXT NOT NULL DEFAULT '',
+			protocol_major TEXT NOT NULL DEFAULT '', protocol_minor TEXT NOT NULL DEFAULT '',
+			min_pool_cost TEXT NOT NULL DEFAULT '', price_mem TEXT NOT NULL DEFAULT '', price_step TEXT NOT NULL DEFAULT '',
+			max_tx_ex_mem TEXT NOT NULL DEFAULT '', max_tx_ex_steps TEXT NOT NULL DEFAULT '',
+			max_block_ex_mem TEXT NOT NULL DEFAULT '', max_block_ex_steps TEXT NOT NULL DEFAULT '',
+			max_value_size TEXT NOT NULL DEFAULT '', collateral_percentage TEXT NOT NULL DEFAULT '',
+			max_collateral_inputs TEXT NOT NULL DEFAULT '', decentralisation TEXT NOT NULL DEFAULT '',
+			min_utxo_value TEXT NOT NULL DEFAULT '', coins_per_utxo_size TEXT NOT NULL DEFAULT '',
+			fetched_at DATETIME NOT NULL)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_kep_net_epoch ON koios_epoch_params(network, epoch)`,
 		`CREATE TABLE IF NOT EXISTS koios_account_rewards (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
 			stake_address TEXT NOT NULL, reward_type TEXT NOT NULL DEFAULT '', earned TEXT NOT NULL,

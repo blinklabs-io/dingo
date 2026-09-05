@@ -16,6 +16,7 @@ package koiosparity
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -668,9 +669,30 @@ func fetchEpoch(
 		return 0, classifyFetchErr(fmt.Errorf("get totals: %w", err))
 	}
 
+	// 1c. Fetch /epoch_params — the per-epoch protocol parameters
+	// (dingo #3931). Another single sequential request, treated exactly like
+	// /totals above: any failure aborts the epoch rather than caching
+	// epoch_info and pool rows with a permanently missing parameter row.
+	paramsResp, err := koios.GetEpochParams(ctx, epoch)
+	if err != nil {
+		return 0, classifyFetchErr(fmt.Errorf("get epoch params: %w", err))
+	}
+
 	now := time.Now()
 
-	// 1c. Skip pools that could not possibly have any history yet this
+	// The parameter row is committed BEFORE CommitEpochData, not inside it.
+	// CommitEpochData advances koios_epoch_info.fetched_at, which is the
+	// freshness marker GetEpochsNeedingCheck compares against; writing the
+	// parameters first means a process killed between the two writes leaves
+	// the epoch looking unfetched and it is simply re-fetched. Committing
+	// them after would advance fetched_at with no parameter row behind it.
+	if err := cache.UpsertEpochParams(
+		epochParamsFromKoios(network, epoch, paramsResp, now),
+	); err != nil {
+		return 0, fmt.Errorf("commit epoch params: %w", err)
+	}
+
+	// 1d. Skip pools that could not possibly have any history yet this
 	// epoch — cuts wasted requests substantially on early epochs, when most
 	// of the network's ever-registered pools (firstActiveEpochs is hoisted
 	// once for the whole historical pool set) don't exist yet.
@@ -876,6 +898,67 @@ func unixTime(sec int64) time.Time {
 		return time.Time{}
 	}
 	return time.Unix(sec, 0).UTC()
+}
+
+// epochParamsFromKoios flattens a /epoch_params response into the cache row.
+//
+// Every value is carried across as the literal text Koios published — a
+// json.Number keeps its own digits, so "7.21e-05" is stored exactly as sent
+// with no float round-trip — and a null becomes "", which
+// CompareEpochProtocolParams reads as "this era does not define this
+// parameter" rather than as zero.
+func epochParamsFromKoios(
+	network string,
+	epoch uint64,
+	resp *KoiosEpochParamsResp,
+	now time.Time,
+) KoiosEpochParams {
+	if resp == nil {
+		return KoiosEpochParams{Network: network, Epoch: epoch, FetchedAt: now}
+	}
+	return KoiosEpochParams{
+		Network:              network,
+		Epoch:                epoch,
+		Era:                  resp.Era,
+		MinFeeA:              numOrEmpty(resp.MinFeeA),
+		MinFeeB:              numOrEmpty(resp.MinFeeB),
+		MaxBlockBodySize:     numOrEmpty(resp.MaxBlockSize),
+		MaxTxSize:            numOrEmpty(resp.MaxTxSize),
+		MaxBlockHeaderSize:   numOrEmpty(resp.MaxBhSize),
+		KeyDeposit:           strOrEmpty(resp.KeyDeposit),
+		PoolDeposit:          strOrEmpty(resp.PoolDeposit),
+		MaxEpoch:             numOrEmpty(resp.MaxEpoch),
+		NOpt:                 numOrEmpty(resp.OptimalPoolCount),
+		A0:                   numOrEmpty(resp.Influence),
+		Rho:                  numOrEmpty(resp.MonetaryExpandRate),
+		Tau:                  numOrEmpty(resp.TreasuryGrowthRate),
+		ProtocolMajor:        numOrEmpty(resp.ProtocolMajor),
+		ProtocolMinor:        numOrEmpty(resp.ProtocolMinor),
+		MinPoolCost:          strOrEmpty(resp.MinPoolCost),
+		PriceMem:             numOrEmpty(resp.PriceMem),
+		PriceStep:            numOrEmpty(resp.PriceStep),
+		MaxTxExMem:           numOrEmpty(resp.MaxTxExMem),
+		MaxTxExSteps:         numOrEmpty(resp.MaxTxExSteps),
+		MaxBlockExMem:        numOrEmpty(resp.MaxBlockExMem),
+		MaxBlockExSteps:      numOrEmpty(resp.MaxBlockExSteps),
+		MaxValueSize:         numOrEmpty(resp.MaxValSize),
+		CollateralPercentage: numOrEmpty(resp.CollateralPercent),
+		MaxCollateralInputs:  numOrEmpty(resp.MaxCollateralInputs),
+		Decentralisation:     numOrEmpty(resp.Decentralisation),
+		MinUtxoValue:         strOrEmpty(resp.MinUtxoValue),
+		CoinsPerUtxoSize:     strOrEmpty(resp.CoinsPerUtxoSize),
+		FetchedAt:            now,
+	}
+}
+
+// numOrEmpty dereferences a nullable Koios JSON number, preserving its
+// literal text (json.Number) so no decimal or exponent value is ever routed
+// through a float64. Returns "" when Koios published null.
+func numOrEmpty(n *json.Number) string {
+	if n == nil {
+		return ""
+	}
+	return n.String()
 }
 
 // strOrEmpty dereferences a nullable Koios string field, returning "" when nil.
