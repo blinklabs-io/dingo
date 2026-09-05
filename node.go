@@ -155,8 +155,7 @@ type Node struct {
 	// tick only needs to know whether a REBUILD is in flight -- not
 	// whether an unrelated, non-rebuilding Snapshot happens to be
 	// running, which this mutex would otherwise make indistinguishable.
-	liveLifecycleMu     sync.Mutex
-	selectedNonePending atomic.Bool
+	liveLifecycleMu sync.Mutex
 
 	// A selected-to-none transition cannot be dropped while a live database
 	// lifecycle operation holds liveLifecycleMu. One node-owned worker retains
