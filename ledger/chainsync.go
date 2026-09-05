@@ -3995,9 +3995,12 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 	}
 	ls.pendingBlockfetchEvents = append(ls.pendingBlockfetchEvents, e)
 	ls.batchBlocksReceived++
-	// If this block is the one a tracked range was failing to obtain, that
-	// range is fetchable after all and its failure record is stale.
-	ls.noteBlockfetchRangeProgress(e.Point)
+	// Range progress is noted where the block actually extends the chain,
+	// not here. Arrival alone is not progress: a block from a batch a
+	// rollback has superseded is discarded unapplied, and one that no
+	// longer fits the tip is declined, yet either would clear the failure
+	// record for the range that is stuck. See
+	// flushPendingBlockfetchBlocksDeferred.
 	if len(ls.pendingBlockfetchEvents) >= blockfetchCommitBatchSize {
 		if err := ls.flushPendingBlockfetchBlocksDeferred(pubs); err != nil {
 			return err
@@ -4348,6 +4351,13 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 	ls.activeBlockfetchStart = time.Now()
 	ls.firstBlockReceived = false
 	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
+	// Tag the batch with the rollback generation current at request time.
+	// The blocks it delivers are only valid for the chain segment these
+	// queued headers describe; a rollback that abandons that segment
+	// publishes a newer generation before truncating, and the flush below
+	// discards anything still carrying this one. See
+	// blockfetchRollbackGeneration.
+	ls.blockfetchBatchRollbackGeneration = ls.blockfetchRollbackGeneration.Load()
 	ls.blockfetchRequestGeneration++
 	primaryRequestGeneration := ls.blockfetchRequestGeneration
 	ls.blockfetchPrimaryRequestGeneration = primaryRequestGeneration
@@ -4599,6 +4609,44 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 	}()
 }
 
+// discardStaleBlockfetchBatch drops blocks delivered for a batch that a
+// rollback has since superseded, releasing the deferred-header-validation
+// bookkeeping each of them registered on arrival. It performs the same cleanup
+// the flush does for a block the chain declines, minus the add.
+//
+// Nothing is lost by dropping them: the rollback cleared the queued headers
+// these blocks were fetched against, so the chain would reject every one of
+// them anyway (their parent is no longer on the chain), and any block still
+// wanted after the rollback is re-offered by chainsync and re-fetched by the
+// next batch.
+//
+// The blockfetch range-failure record is deliberately left alone. These blocks
+// never reached the chain, so they are not evidence that the range which is
+// currently stuck can be obtained; clearing it here would reset the count that
+// eventually drops an unservable queued header -- the header that blocks local
+// forging, and the routine aftermath of the slot battle this path resolves.
+func (ls *LedgerState) discardStaleBlockfetchBatch(
+	pending []BlockfetchEvent,
+) error {
+	for _, pendingEvent := range pending {
+		ls.clearDeferredHeaderValidation(pendingEvent.Point)
+		if err := ls.clearPersistentDeferredHeaderValidation(
+			pendingEvent.Point,
+			nil,
+		); err != nil {
+			return err
+		}
+	}
+	ls.config.Logger.Warn(
+		"discarding blockfetch blocks fetched before a chain rollback",
+		"component", "ledger",
+		"block_count", len(pending),
+		"batch_generation", ls.blockfetchBatchRollbackGeneration,
+		"rollback_generation", ls.blockfetchRollbackGeneration.Load(),
+	)
+	return nil
+}
+
 // flushPendingBlockfetchBlocksDeferred is flushPendingBlockfetchBlocks that
 // queues each committed block's chain.update onto pubs instead of letting the
 // chain publish it inline. The blockfetch drain runs under
@@ -4617,6 +4665,19 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 	}
 	pending := ls.pendingBlockfetchEvents
 	ls.pendingBlockfetchEvents = ls.pendingBlockfetchEvents[:0]
+	// A rollback published a newer generation after this batch was
+	// requested, so these blocks were fetched for a chain segment that no
+	// longer exists. Discard them rather than offering them to the chain:
+	// the batch was requested against the abandoned segment's queued
+	// headers, which the rollback cleared, and the winner that replaced it
+	// is already on the chain. See blockfetchRollbackGeneration.
+	if ls.blockfetchBatchRollbackGeneration !=
+		ls.blockfetchRollbackGeneration.Load() {
+		if err := ls.discardStaleBlockfetchBatch(pending); err != nil {
+			return err
+		}
+		return nil
+	}
 	// Commit each block before exposing it on the primary chain. The chain tip
 	// is used immediately by fork detection, so batching blob writes behind an
 	// already-advanced in-memory tip can strand the node on a fork when ancestor
@@ -4646,6 +4707,16 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 			validationEnabled, _ := ls.validationStateSnapshot()
 			ls.auditContinuationBlock(pendingEvent, validationEnabled)
 			ls.checkSlotBattle(pendingEvent, nil)
+			// The block extended the chain, so the range it belongs to
+			// is fetchable after all and any failure record for it is
+			// stale. Noting it here rather than on arrival is what keeps
+			// the count meaningful: the record exists to unstick a
+			// queued header whose body cannot be applied, which is
+			// exactly the state a delivered-but-never-applied block
+			// leaves the queue in -- and, per
+			// noteBlockfetchRangeUnavailable, the routine aftermath of a
+			// tip slot battle, which is the case this path creates.
+			ls.noteBlockfetchRangeProgress(pendingEvent.Point)
 			continue
 		}
 		ls.clearDeferredHeaderValidation(pendingEvent.Point)

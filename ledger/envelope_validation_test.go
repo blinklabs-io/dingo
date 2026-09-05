@@ -512,3 +512,57 @@ func mustEnvelopeBlockCbor(
 	require.NoError(t, err)
 	return data
 }
+
+// TestValidateBlockOrderPinsTheEqualSlotAlternativeShape pins, from the
+// validator's side, exactly which of the two possible equal-slot blocks may
+// ever be built.
+//
+// When a rival occupies the slot this node is about to forge, there are two
+// candidate shapes. Binding the parent to the live chain tip -- what
+// DefaultBlockBuilder does for an uncontested slot -- names the rival as
+// parent, so the block's parent slot equals its own and this validator rejects
+// it; so does every Praos peer. Binding the rival's predecessor instead (the
+// alternative-block context, mirroring ouroboros-consensus
+// mkCurrentBlockContext) is a well-ordered sibling of the rival and passes.
+//
+// DefaultBlockBuilder refuses to construct the first shape at all
+// (TestBuildBlockRefusesAParentAtItsOwnSlot in ledger/forging); this test
+// documents why it must, and fails if either side of the rule ever moves.
+func TestValidateBlockOrderPinsTheEqualSlotAlternativeShape(t *testing.T) {
+	const (
+		predecessorSlot   = uint64(999)
+		predecessorNumber = uint64(99)
+		contestedSlot     = uint64(1000)
+		rivalNumber       = predecessorNumber + 1
+	)
+
+	// The block a live-tip-bound builder would produce at a contested slot:
+	// the rival is the parent, so parent slot == block slot.
+	sameSlotParent := &envelopeTestBlock{
+		header: &envelopeTestHeader{
+			slot:   contestedSlot,
+			number: rivalNumber + 1,
+			era:    shelley.EraShelley,
+		},
+	}
+	err := validateBlockOrder(sameSlotParent, envelopeParent{
+		slot:        contestedSlot,
+		blockNumber: rivalNumber,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "does not follow parent slot")
+
+	// The alternative: same block number as the rival, the rival's
+	// predecessor as parent.
+	alternative := &envelopeTestBlock{
+		header: &envelopeTestHeader{
+			slot:   contestedSlot,
+			number: rivalNumber,
+			era:    shelley.EraShelley,
+		},
+	}
+	require.NoError(t, validateBlockOrder(alternative, envelopeParent{
+		slot:        predecessorSlot,
+		blockNumber: predecessorNumber,
+	}))
+}
