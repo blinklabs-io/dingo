@@ -809,9 +809,10 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 
 	window := uint64(securityParam) //nolint:gosec // positive, checked above
 	var (
-		haveLastStep bool
-		lastStepSlot uint64
-		stalls       int
+		haveLastStep       bool
+		lastStepSlot       uint64
+		overKRetries       int
+		nonConvergingSteps int
 	)
 	for {
 		tip := ls.chain.Tip()
@@ -869,8 +870,8 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 		emitted, err := ls.validateAndEmitRollbackUndoEmitted(next)
 		if err != nil {
 			if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) &&
-				stalls < maxWindowedRewindStalls {
-				stalls++
+				overKRetries < maxWindowedRewindRetries {
+				overKRetries++
 				continue
 			}
 			return stepErr(err)
@@ -878,8 +879,8 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 		if err := ls.chain.Rollback(next); err != nil {
 			if !emitted &&
 				errors.Is(err, chain.ErrRollbackExceedsSecurityParam) &&
-				stalls < maxWindowedRewindStalls {
-				stalls++
+				overKRetries < maxWindowedRewindRetries {
+				overKRetries++
 				continue
 			}
 			return stepErr(err)
@@ -887,14 +888,15 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 		if final {
 			return nil
 		}
+		overKRetries = 0
 		// Each committed step must land below the previous one. It will not
 		// when the chain grew by at least the window the step just covered,
 		// and a descent that never gains on its target would otherwise
 		// truncate and re-truncate the chain for as long as peers keep
 		// serving blocks.
 		if haveLastStep && next.Slot >= lastStepSlot {
-			stalls++
-			if stalls > maxWindowedRewindStalls {
+			nonConvergingSteps++
+			if nonConvergingSteps > maxWindowedRewindNonConvergingSteps {
 				return fmt.Errorf(
 					"%w: target slot %d, step slot %d, chain tip slot %d",
 					errRecoveryRewindNotConverging,
@@ -904,7 +906,7 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 				)
 			}
 		} else {
-			stalls = 0
+			nonConvergingSteps = 0
 		}
 		haveLastStep = true
 		lastStepSlot = next.Slot
@@ -920,13 +922,14 @@ var errRecoveryRewindNotConverging = errors.New(
 	"recovery rewind is not gaining on its target",
 )
 
-// maxWindowedRewindStalls bounds consecutive windowed steps the chain refuses
-// for exceeding K. Each step is derived from the chain's live tip, so a
-// refusal means blocks landed between that read and the truncation; re-reading
-// the tip is what clears it, and a couple of retries covers any realistic
-// interleaving. Past that the chain is being extended at least as fast as the
-// descent moves and the rewind is not going to complete.
-const maxWindowedRewindStalls = 3
+// maxWindowedRewindRetries bounds consecutive retries after a rollback is
+// refused for exceeding K. A successful step resets this budget.
+const maxWindowedRewindRetries = 3
+
+// maxWindowedRewindNonConvergingSteps bounds consecutive committed steps that
+// fail to move the rewind target closer. It is independent of the retry
+// budget, so transient over-K refusals cannot consume this convergence budget.
+const maxWindowedRewindNonConvergingSteps = 3
 
 // maxRecoveryRewindRejections bounds how many consecutive recovery rewinds may
 // be refused for exceeding the security parameter at an applied ledger tip
