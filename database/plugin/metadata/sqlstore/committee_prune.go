@@ -148,3 +148,47 @@ WHERE id IN (
 	}
 	return pruned, nil
 }
+
+// pruneAllCommitteeHotAuthorizations applies the same bounded retention rule
+// to every credential. Running it from the authorization write path prevents
+// retired credentials from retaining an unbounded historical backlog.
+func (s *Store) pruneAllCommitteeHotAuthorizations(
+	ctx context.Context,
+	db queryer,
+	tipSlot uint64,
+) error {
+	rows, err := db.QueryContext(ctx, `
+SELECT DISTINCT cold_credential_tag, cold_credential
+FROM auth_committee_hot`)
+	if err != nil {
+		return fmt.Errorf("list committee hot credentials for pruning: %w", err)
+	}
+	credentials := make([]struct {
+		tag        uint8
+		credential []byte
+	}, 0)
+	for rows.Next() {
+		var item struct {
+			tag        uint8
+			credential []byte
+		}
+		if err := rows.Scan(&item.tag, &item.credential); err != nil {
+			return fmt.Errorf("read committee hot credential for pruning: %w", err)
+		}
+		credentials = append(credentials, item)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate committee hot credentials for pruning: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close committee hot credentials for pruning: %w", err)
+	}
+	for _, item := range credentials {
+		if _, err := s.pruneCommitteeHotAuthorizations(
+			ctx, db, item.tag, item.credential, tipSlot,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}

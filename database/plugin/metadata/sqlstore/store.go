@@ -139,6 +139,14 @@ func New(config Config) (*Store, error) {
 	if config.StorageMode == "" {
 		config.StorageMode = types.StorageModeCore
 	}
+	if config.CommitteeAuthRetentionSlots != 0 &&
+		config.CommitteeAuthRetentionSlots < DefaultCommitteeAuthRetentionSlots {
+		return nil, fmt.Errorf(
+			"sqlstore: committee auth retention slots %d is below the safe rollback window %d",
+			config.CommitteeAuthRetentionSlots,
+			DefaultCommitteeAuthRetentionSlots,
+		)
+	}
 	switch config.StorageMode {
 	case types.StorageModeCore, types.StorageModeAPI:
 	default:

@@ -381,13 +381,7 @@ RETURNING id`,
 		// batch of the ones now outside the rollback window so the table
 		// tracks the committee instead of the whole certificate history; see
 		// committee_prune.go for the retention rule.
-		if _, err := s.pruneCommitteeHotAuthorizations(
-			ctx,
-			db,
-			coldTag,
-			cert.ColdCredential.Credential[:],
-			slot,
-		); err != nil {
+		if err := s.pruneAllCommitteeHotAuthorizations(ctx, db, slot); err != nil {
 			return id, nil, err
 		}
 		return id, nil, nil
