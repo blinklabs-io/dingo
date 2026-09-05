@@ -962,6 +962,50 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 			}
 		}
 	}
+	// Never target a point below the consumed-UTxO prune floor. The sweep
+	// hard-deletes spent rows at or below tip-stabilityWindow, while each
+	// escalating attempt rewinds a further stability window below the
+	// *already lowered* tip -- so successive attempts walk past a floor that
+	// stays fixed at the highest tip the node reached.
+	// database.TruncateAfterSlot restores spent UTxOs with an UPDATE keyed on
+	// deleted_slot, which cannot reach a row that no longer exists, so such a
+	// target moves the tip and reports a repair while leaving the live set
+	// short of every output consumed above it. Blocks the node already applied
+	// cleanly then fail to resolve their inputs, which drives the next, deeper
+	// rewind: the descent that ends at the Mithril anchor with a halted
+	// pipeline (issue #3766).
+	//
+	// Fall back to the ledger tip, which is always at or above the floor and
+	// is what attempt 1 uses. Recovery keeps its non-destructive lever -- a
+	// fresh intersection so peer rotation can offer a different candidate
+	// chain -- and loses only a rewind that could not have repaired anything.
+	belowPruneFloor, pruneFloor, floorErr := ls.rollbackBelowConsumedUtxoPruneFloor(
+		rewindPoint,
+	)
+	if floorErr != nil {
+		ls.config.Logger.Error(
+			"failed to read consumed UTxO prune floor, using ledger tip as the rewind target",
+			"component", "ledger",
+			"rewind_target_slot", rewindPoint.Slot,
+			"error", floorErr.Error(),
+		)
+		rewindPoint = ledgerTip.Point
+	} else if belowPruneFloor {
+		ls.metrics.atTipRecoveryPruneFloorClamped.Inc()
+		ls.config.Logger.Warn(
+			"at-tip recovery rewind target is below the consumed UTxO prune floor, holding at ledger tip instead",
+			"component", "ledger",
+			"tx_hash", hex.EncodeToString(validationErr.TxHash),
+			"failing_block_slot", validationErr.BlockPoint.Slot,
+			"requested_rewind_slot", rewindPoint.Slot,
+			"utxo_prune_floor_slot", pruneFloor,
+			"ledger_tip_slot", ledgerTip.Point.Slot,
+			"attempt", attempts,
+			"hint",
+			"UTxOs consumed above the prune floor were hard-deleted and cannot be restored by a rewind",
+		)
+		rewindPoint = ledgerTip.Point
+	}
 	if ls.recoveryRollbackExceedsMithrilBoundary(rewindPoint) {
 		if err := ls.rejectAtTipRecoveryAtMithrilBoundary(
 			validationErr,

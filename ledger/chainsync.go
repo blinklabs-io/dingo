@@ -186,6 +186,16 @@ var ErrRollbackExceedsMithrilBoundary = errors.New(
 	"rollback exceeds Mithril trust boundary",
 )
 
+// ErrRollbackBelowUtxoPruneFloor reports a rollback target below the slot the
+// consumed-UTxO sweep has hard-deleted spent rows at or below. Those rows are
+// gone, and database.TruncateAfterSlot restores spent UTxOs with an UPDATE, so
+// the rewind cannot reconstruct the live set the target implies. The rollback
+// is refused with the ledger untouched rather than performed and reported as a
+// repair (issue #3766).
+var ErrRollbackBelowUtxoPruneFloor = errors.New(
+	"rollback below consumed UTxO prune floor",
+)
+
 // ErrNoAppliedAncestorBelowContestedSlot reports that a rollback target shares
 // the applied tip's slot with a different hash and no applied ancestor below
 // that slot could be found to rewind to. The contested slot's effects cannot be
@@ -2173,6 +2183,45 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			)
 			return nil
 		}
+		if errors.Is(err, ErrRollbackBelowUtxoPruneFloor) {
+			// The consumed-UTxO sweep hard-deleted the rows this rewind would
+			// have to restore, so the target is not crossable. That is a peer
+			// divergence this node cannot follow, not a local fault: refuse it
+			// and ask for a fresh intersection, exactly as the Mithril
+			// boundary does. Returning the error instead would reach
+			// handleEventChainsync's fatal path and terminate the node on a
+			// rollback a peer chose (issue #3766).
+			ls.config.Logger.Error(
+				"chainsync rollback is below the consumed UTxO prune floor, rejecting peer chain",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
+				"connection_id", e.ConnectionId.String(),
+				"error", err,
+				"hint",
+				"UTxOs consumed above the prune floor were hard-deleted and cannot be restored by a rewind",
+			)
+			ls.reportUnrecoverableRollbackIfStuck(
+				e.Point,
+				event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+				e.ConnectionId,
+			)
+			ls.resetChainsyncResyncState()
+			ls.setChainsyncState(SyncingChainsyncState)
+			pending.add(
+				ls.config.EventBus,
+				event.ChainsyncResyncEventType,
+				event.NewEvent(
+					event.ChainsyncResyncEventType,
+					event.ChainsyncResyncEvent{
+						ConnectionId: e.ConnectionId,
+						Reason: event.
+							ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+					},
+				),
+			)
+			return nil
+		}
 		return fmt.Errorf("chain rollback failed: %w", err)
 	}
 	// The rollback applied: we crossed to the peer's point, so any prior
@@ -2193,9 +2242,10 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 // rollbackIsAppliable reports whether rollbackChainAndState(point) would
 // succeed right now, without mutating any state. It mirrors the pre-checks
 // rollbackChainAndState relies on for its block-not-found / exceeds-K /
-// exceeds-Mithril failures: the point must sit at or above the Mithril trust
-// anchor, and the chain must be able to roll back to it (target block present
-// and within the security parameter K, verified via chain.ValidateRollback).
+// exceeds-Mithril / below-prune-floor failures: the point must sit at or above
+// the Mithril trust anchor and at or above the consumed-UTxO prune floor, and
+// the chain must be able to roll back to it (target block present and within
+// the security parameter K, verified via chain.ValidateRollback).
 //
 // The loop detector uses this to decide whether a repeated rollback is a
 // crossable point that must be applied (issue #2790) rather than a genuinely
@@ -2206,8 +2256,23 @@ func (ls *LedgerState) rollbackIsAppliable(point ocommon.Point) bool {
 	if ls.chain == nil {
 		return false
 	}
+	ls.RLock()
+	currentTip := ls.currentTip
+	ls.RUnlock()
+	resolved, err := ls.resolveRollbackTarget(point, currentTip)
+	if err != nil {
+		return false
+	}
 	mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
-	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
+	if mithrilLedgerSlot > 0 && resolved.Slot < mithrilLedgerSlot {
+		return false
+	}
+	// A target below the consumed-UTxO prune floor is not crossable either:
+	// the rows the rewind would have to restore were hard-deleted, so
+	// rollbackChainAndState refuses it (issue #3766). An unreadable floor
+	// fails closed here for the same reason it does there.
+	belowPruneFloor, _, err := ls.rollbackBelowConsumedUtxoPruneFloor(resolved)
+	if err != nil || belowPruneFloor {
 		return false
 	}
 	return ls.chain.ValidateRollback(point) == nil

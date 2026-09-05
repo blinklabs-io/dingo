@@ -51,6 +51,13 @@ type stateMetrics struct {
 	// false-positive validation rejection), not a peer/fork problem. See
 	// issue #2939.
 	atTipRecoveryNonConverging prometheus.Counter
+	// Incremented when an at-tip recovery rewind target falls below the
+	// consumed-UTxO prune floor and is clamped to the ledger tip. The sweep
+	// hard-deletes spent rows, and rollback restores them with an UPDATE, so
+	// a rewind past the floor cannot rebuild the live UTxO set it implies. A
+	// rising value means recovery is asking for rewinds deeper than local
+	// history can support. See issue #3766.
+	atTipRecoveryPruneFloorClamped prometheus.Counter
 	// Incremented when unresolved-producer replay recovery repeatedly fails
 	// to move the applied ledger tip forward and holds at that tip instead of
 	// pruning another security-parameter window. See issue #3005.
@@ -352,6 +359,12 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_attip_recovery_nonconverging_total",
 			Help: "times at-tip validation recovery held at the ledger tip instead of rewinding the primary chain deeper, because a descending series of distinct failures indicated local validation divergence (operator intervention required)",
+		},
+	)
+	m.atTipRecoveryPruneFloorClamped = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_attip_recovery_prune_floor_clamped_total",
+			Help: "times an at-tip validation recovery rewind target below the consumed-UTxO prune floor was clamped to the ledger tip, because UTxOs consumed above that floor were hard-deleted and cannot be restored by a rewind",
 		},
 	)
 	m.replayRecoveryNonConverging = promautoFactory.NewCounter(
