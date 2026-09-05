@@ -1489,6 +1489,32 @@ func (idx *Indexer) processTx(
 	return nil
 }
 
+// checkedCnightQuantity converts a cNIGHT asset amount to a uint64,
+// rejecting a value that would silently wrap (delegating to
+// models.CheckedUint64FromBigInt, the same arbitrary-precision-to-uint64
+// domain check database/models already applies to every other indexed
+// on-chain asset amount) and additionally rejecting anything above
+// math.MaxInt64. midnight_asset_creates.quantity is a signed SQLite
+// INTEGER column (sqlstore's own checkedInt64 guards the write), so a
+// legitimate uint64 value with the top bit set would still fail
+// CreateMidnightAssetCreate below even though it fits in a uint64.
+// Rejecting it here keeps that failure on the same non-fatal,
+// skip-and-log path as a true arbitrary-precision overflow, rather than
+// letting it surface as a write error that reaches idx.fatal.
+func checkedCnightQuantity(qty *big.Int) (uint64, error) {
+	amount, err := models.CheckedUint64FromBigInt(qty)
+	if err != nil {
+		return 0, err
+	}
+	if amount > math.MaxInt64 {
+		return 0, fmt.Errorf(
+			"cNIGHT quantity %d exceeds midnight_asset_creates.quantity's signed 64-bit storage range",
+			amount,
+		)
+	}
+	return amount, nil
+}
+
 // processOutput checks a single transaction output for cNIGHT tokens,
 // registration auth tokens, and governance/Ariadne/candidate data. txn is
 // processBlock's block-scoped write transaction; journal records this
@@ -1514,32 +1540,57 @@ func (idx *Indexer) processOutput(
 		if assets := out.Assets(); assets != nil {
 			qty := assets.Asset(idx.cnightPolicyID, idx.cnightAssetName)
 			if qty != nil && qty.Cmp(new(big.Int)) > 0 {
-				addrBytes, _ := out.Address().Bytes()
-				quantity := qty.Uint64()
-				row := &models.MidnightAssetCreate{
-					Address:          addrBytes,
-					Quantity:         quantity,
-					TxHash:           txHashBytes,
-					OutputIndex:      outIdx,
-					BlockNumber:      block.Number,
-					BlockHash:        block.Hash,
-					TxIndex:          txIdx,
-					BlockTimestampMs: timestampMs,
+				quantity, err := checkedCnightQuantity(qty)
+				switch {
+				case err != nil:
+					// An out-of-domain quantity is a property of this
+					// output's on-chain data, not a transient operational
+					// failure like the write errors below: failing the
+					// whole block would make the indexer -- an optional,
+					// secondary subsystem (see ARCHITECTURE.md) -- re-fail
+					// identically on every restart and take the entire
+					// node down via idx.fatal over one malformed row.
+					// Reject just this create (skip the row and the
+					// in-memory track below, but keep scanning this output
+					// for registration/governance data) and log loudly
+					// instead, so the anomaly stays visible without an
+					// unrecoverable outage.
+					if idx.config.Logger != nil {
+						idx.config.Logger.Error(
+							"midnight indexer: cNIGHT quantity out of domain",
+							"error", err,
+							"tx", txHashHex,
+							"output", outIdx,
+							"block", block.Number,
+						)
+					}
+				default:
+					addrBytes, _ := out.Address().Bytes()
+					row := &models.MidnightAssetCreate{
+						Address:          addrBytes,
+						Quantity:         quantity,
+						TxHash:           txHashBytes,
+						OutputIndex:      outIdx,
+						BlockNumber:      block.Number,
+						BlockHash:        block.Hash,
+						TxIndex:          txIdx,
+						BlockTimestampMs: timestampMs,
+					}
+					if err := idx.config.Metadata.CreateMidnightAssetCreate(txn, row); err != nil {
+						return fmt.Errorf(
+							"write asset create tx=%s output=%d: %w",
+							txHashHex, outIdx, err,
+						)
+					}
+					counts["create"]++
+					idx.mu.Lock()
+					journal.cNightUTxOs.record(idx.cNightUTxOs, key)
+					idx.cNightUTxOs[key] = cNightUTxO{
+						Address:  addrBytes,
+						Quantity: quantity,
+					}
+					idx.mu.Unlock()
 				}
-				if err := idx.config.Metadata.CreateMidnightAssetCreate(txn, row); err != nil {
-					return fmt.Errorf(
-						"write asset create tx=%s output=%d: %w",
-						txHashHex, outIdx, err,
-					)
-				}
-				counts["create"]++
-				idx.mu.Lock()
-				journal.cNightUTxOs.record(idx.cNightUTxOs, key)
-				idx.cNightUTxOs[key] = cNightUTxO{
-					Address:  addrBytes,
-					Quantity: quantity,
-				}
-				idx.mu.Unlock()
 			}
 		}
 	}
