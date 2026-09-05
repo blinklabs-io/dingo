@@ -200,12 +200,18 @@ func NewTieredCborCache(config CborCacheConfig, db *Database) *TieredCborCache {
 
 // ResolveUtxoCbor resolves UTxO CBOR data by transaction ID and output index.
 // It checks caches in order: hot UTxO cache, block LRU cache, then blob store.
-// An optional blob transaction can be provided to see uncommitted writes within
-// the same transaction (important for intra-batch UTxO lookups during validation).
+// An optional database transaction can be provided to see uncommitted writes
+// within the same transaction (important for intra-batch UTxO lookups during
+// validation).
+//
+// The parameter is the database transaction rather than its bare blob handle
+// because the cold path has to run against the store that handle belongs to.
+// A bare types.Txn does not say which store that is, so pairing it with the
+// currently installed store would break across a concurrent SetBlobStore.
 func (c *TieredCborCache) ResolveUtxoCbor(
 	txId []byte,
 	outputIdx uint32,
-	blobTxn ...types.Txn,
+	dbTxn ...*Txn,
 ) ([]byte, error) {
 	key := makeUtxoKey(txId, outputIdx)
 
@@ -223,25 +229,28 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 		return nil, types.ErrBlobStoreUnavailable
 	}
 
-	blob, releaseBlob := c.db.PinBlob()
+	var callerTxn *Txn
+	if len(dbTxn) > 0 {
+		callerTxn = dbTxn[0]
+	}
+
+	// The caller's transaction already chose a store; reuse it rather than
+	// pinning whichever store is installed now. See Database.pinBlobForTxn.
+	blob, releaseBlob := c.db.pinBlobForTxn(callerTxn)
 	defer releaseBlob()
 	if blob == nil {
 		return nil, types.ErrBlobStoreUnavailable
 	}
 
-	// Use provided transaction if available, otherwise create a new one
+	// Use the caller's blob handle when it has one -- it belongs to the
+	// store just selected -- otherwise open one on that same store.
 	var txn types.Txn
-	var ownedTxn bool
-	if len(blobTxn) > 0 && blobTxn[0] != nil {
-		txn = blobTxn[0]
-	} else {
+	if callerTxn != nil {
+		txn = callerTxn.Blob()
+	}
+	if txn == nil {
 		txn = blob.NewTransaction(false)
-		ownedTxn = true
-		defer func() {
-			if ownedTxn {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
+		defer txn.Rollback() //nolint:errcheck
 	}
 
 	utxoData, err := blob.GetUtxo(txn, txId, outputIdx)
@@ -334,7 +343,9 @@ func (c *TieredCborCache) ResolveTxCbor(
 		return nil, types.ErrBlobStoreUnavailable
 	}
 
-	blob, releaseBlob := c.db.PinBlob()
+	// The caller's transaction already chose a store; reuse it rather than
+	// pinning whichever store is installed now. See Database.pinBlobForTxn.
+	blob, releaseBlob := c.db.pinBlobForTxn(txn)
 	defer releaseBlob()
 	if blob == nil {
 		return nil, types.ErrBlobStoreUnavailable
@@ -342,6 +353,7 @@ func (c *TieredCborCache) ResolveTxCbor(
 
 	// Get TX offset data from blob store. Use the caller's active
 	// blob transaction when provided so uncommitted writes are visible.
+	// It belongs to the store just selected.
 	blobTxn := types.Txn(nil)
 	cacheResolved := true
 	if txn != nil {

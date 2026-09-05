@@ -7476,19 +7476,28 @@ releases at `Commit`/`Rollback`/`Release` (through the same `finishLocked` that
 releases the commit barrier), and `Txn.BlobStore()` returns the store it
 pinned: the store and the `types.Txn` handle opened on it therefore always come
 from the same installation, which re-reading `Blob()` mid-transaction would not
-guarantee. Blob work that runs outside a transaction — the tiered CBOR cache's
-cold path, the blob block iterator, the blob-store identity mint, and
-`lifecycle.Snapshot`'s backup call — brackets itself with `Database.PinBlob`
-and the release func it returns.
+guarantee. Blob work that runs outside a transaction — the blob block iterator,
+the blob-store identity mint, `lifecycle.Snapshot`'s backup call, and
+`LedgerState.cleanupOrphanedBlobs` — brackets itself with `Database.PinBlob`
+and the release func it returns. Work that may or may not be handed a
+transaction follows the same rule from one place: the tiered CBOR cache's cold
+path (`ResolveUtxoCbor`, `ResolveTxCbor`) takes the caller's `*database.Txn`
+and resolves through that transaction's store when it has one, pinning the
+installed store only when it does not. That is why those two entry points take
+the transaction rather than its bare `types.Txn` handle — a bare handle does
+not say which store it belongs to.
 
 `SetBlobStore` returns the replaced store and a drain func. New operations get
 the new store immediately, so nothing blocks; drain returns once every
 operation pinned on the replaced store has finished, and that is the point at
 which the replaced store may be closed. `SetBlobStore` never closes anything
 itself, because the two production callers wrap the previous store rather than
-retiring it. `Blob()` deliberately hands back an unpinned reference for callers
-that only identify, wrap, or ask a whole-store question of the current store;
-its result must be used within the call that obtained it.
+retiring it. Drain covers the reference that call retired, so a caller that
+intends to close the replaced store must not install it again before drain
+returns: a second installation of the same store counts its pins separately.
+`Blob()` deliberately hands back an unpinned reference for callers that only
+identify, wrap, or ask a whole-store question of the current store; its result
+must be used within the call that obtained it.
 
 `LedgerState` publishes its read-mostly state through two copy-on-write
 snapshots. The consensus snapshot groups the current epoch, era, current and

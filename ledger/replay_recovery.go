@@ -1715,15 +1715,20 @@ func (ls *LedgerState) durableAppliedFloorAnchorIndex() (uint64, bool, error) {
 func (ls *LedgerState) replayRecoveryBlockFromTxBlob(
 	txHash []byte,
 ) (models.Block, bool, error) {
-	blob := ls.db.Blob()
-	if blob == nil {
-		return models.Block{}, false, nil
-	}
 	txn := ls.db.BlobTxn(false)
-	if txn == nil || txn.Blob() == nil {
+	if txn == nil {
 		return models.Block{}, false, nil
 	}
 	defer txn.Rollback() //nolint:errcheck
+	// The store the transaction was opened on, not whichever is installed
+	// now: the handle below only means anything to that store, and the
+	// transaction's pin is what keeps it alive for this call. Reading
+	// ls.db.Blob() separately could pair a handle from one installation with
+	// a store from another across a concurrent SetBlobStore.
+	blob := txn.BlobStore()
+	if blob == nil || txn.Blob() == nil {
+		return models.Block{}, false, nil
+	}
 
 	txData, err := blob.GetTx(txn.Blob(), txHash)
 	if err != nil {

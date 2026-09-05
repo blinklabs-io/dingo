@@ -17,10 +17,12 @@ package database
 import (
 	"bytes"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -190,6 +192,10 @@ func TestSetBlobStoreDrainWaitsForOpenTransaction(t *testing.T) {
 	// A transaction opened after the replacement uses the new store, so it
 	// cannot be what keeps drain waiting.
 	afterTxn := db.BlobTxn(false)
+	// Release is idempotent (Rollback returns early once the transaction is
+	// finished), so registering it here as well as calling it below keeps
+	// the pin from outliving a failure of the require in between.
+	t.Cleanup(afterTxn.Release)
 	require.True(
 		t,
 		afterTxn.BlobStore() == blob.BlobStore(replacement),
@@ -308,4 +314,104 @@ func TestTxnKeepsBlobStoreAcrossReplacement(t *testing.T) {
 	got, err := readTxn.BlobStore().Get(readTxn.Blob(), key)
 	require.NoError(t, err)
 	require.Equal(t, want, got)
+}
+
+// pairingProbeBlobStore is a passthrough that counts the reads which reach it.
+// A read that lands here came from the store installed *now*, so a test that
+// opens a transaction on one store and then installs this one can tell whether
+// an operation ran the transaction's handle through the wrong store.
+type pairingProbeBlobStore struct {
+	blob.BlobStore
+	getTx   atomic.Int64
+	getUtxo atomic.Int64
+}
+
+func (s *pairingProbeBlobStore) GetTx(
+	txn types.Txn,
+	txHash []byte,
+) ([]byte, error) {
+	s.getTx.Add(1)
+	return s.BlobStore.GetTx(txn, txHash)
+}
+
+func (s *pairingProbeBlobStore) GetUtxo(
+	txn types.Txn,
+	txId []byte,
+	outputIdx uint32,
+) ([]byte, error) {
+	s.getUtxo.Add(1)
+	return s.BlobStore.GetUtxo(txn, txId, outputIdx)
+}
+
+// TestResolveTxCborUsesTransactionStore covers the cold path of the CBOR cache
+// against the same pairing rule the rest of the package follows. ResolveTxCbor
+// takes the caller's transaction so uncommitted writes are visible, and that
+// transaction's handle belongs to the store it was opened on. Pinning the
+// installed store instead would send that handle into a store replaced in
+// between, which is what this test forbids.
+func TestResolveTxCborUsesTransactionStore(t *testing.T) {
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	base := db.Blob()
+	require.NotNil(t, base)
+
+	var txHash [32]byte
+	copy(txHash[:], []byte("resolve-tx-pairing-hash"))
+	// Raw CBOR rather than an offset record, so the resolve returns after
+	// the single GetTx this test is measuring.
+	want := []byte{0x82, 0x01, 0x02}
+	writeTxn := db.BlobTxn(true)
+	require.NoError(t, base.SetTx(writeTxn.Blob(), txHash[:], want))
+	require.NoError(t, writeTxn.Commit())
+
+	txn := db.BlobTxn(false)
+	t.Cleanup(txn.Release)
+	require.True(t, txn.BlobStore() == base)
+
+	replacement := &pairingProbeBlobStore{BlobStore: base}
+	db.SetBlobStore(replacement)
+	t.Cleanup(func() { db.SetBlobStore(base) })
+
+	got, err := db.CborCache().ResolveTxCbor(txn, txHash[:])
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+	require.Zero(
+		t,
+		replacement.getTx.Load(),
+		"ResolveTxCbor ran the transaction's handle through the store installed after it was opened",
+	)
+}
+
+// TestResolveUtxoCborUsesTransactionStore is the same contract for the UTxO
+// entry point, which loadCbor reaches with the transaction validation is
+// running under.
+func TestResolveUtxoCborUsesTransactionStore(t *testing.T) {
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	base := db.Blob()
+	require.NotNil(t, base)
+
+	txId := make([]byte, 32)
+	copy(txId, []byte("resolve-utxo-pairing-txid"))
+	want := []byte{0x82, 0x03, 0x04}
+	writeTxn := db.BlobTxn(true)
+	require.NoError(t, base.SetUtxo(writeTxn.Blob(), txId, 0, want))
+	require.NoError(t, writeTxn.Commit())
+
+	txn := db.BlobTxn(false)
+	t.Cleanup(txn.Release)
+	require.True(t, txn.BlobStore() == base)
+
+	replacement := &pairingProbeBlobStore{BlobStore: base}
+	db.SetBlobStore(replacement)
+	t.Cleanup(func() { db.SetBlobStore(base) })
+
+	got, err := db.CborCache().ResolveUtxoCbor(txId, 0, txn)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+	require.Zero(
+		t,
+		replacement.getUtxo.Load(),
+		"ResolveUtxoCbor ran the transaction's handle through the store installed after it was opened",
+	)
 }

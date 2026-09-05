@@ -138,10 +138,11 @@ func loadCbor(u *models.Utxo, txn *Txn) error {
 	db := txn.DB()
 	// Use tiered cache if available
 	if db.cborCache != nil {
-		// Pass the blob transaction so we can see uncommitted writes
-		// (important for intra-batch UTxO lookups during validation)
-		blobTxn := txn.Blob()
-		cbor, err := db.cborCache.ResolveUtxoCbor(u.TxId, u.OutputIdx, blobTxn)
+		// Pass the transaction so we can see uncommitted writes
+		// (important for intra-batch UTxO lookups during validation).
+		// The transaction, not its bare blob handle: the cold path has to
+		// run against the store that handle was opened on.
+		cbor, err := db.cborCache.ResolveUtxoCbor(u.TxId, u.OutputIdx, txn)
 		if err != nil {
 			if errors.Is(err, types.ErrBlobKeyNotFound) {
 				recoveredCbor, recoverErr := recoverUtxoCbor(

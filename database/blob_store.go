@@ -137,6 +137,28 @@ func (d *Database) PinBlob() (blob.BlobStore, func()) {
 	return ref.blobStore(), ref.release
 }
 
+// pinBlobForTxn returns the blob store an operation must run against, together
+// with the func that releases whatever pin it took.
+//
+// A transaction that already holds a blob handle pinned its store at
+// construction, and that handle means nothing to any other store. Pinning
+// whichever store is installed now would pair a handle from one installation
+// with a store from another -- the pairing the notes at the top of this file
+// exist to rule out -- so an operation handed such a transaction uses the
+// transaction's store. The transaction's own pin keeps that store alive for as
+// long as its caller holds the transaction open, so no second pin is taken and
+// the returned release func is a no-op. With no transaction, or one that opened
+// no blob handle, the operation is not attached to an installation yet and pins
+// the installed store like any other PinBlob caller.
+func (d *Database) pinBlobForTxn(txn *Txn) (blob.BlobStore, func()) {
+	if txn != nil && txn.Blob() != nil {
+		if store := txn.BlobStore(); store != nil {
+			return store, func() {}
+		}
+	}
+	return d.PinBlob()
+}
+
 // Blob returns the currently installed blob store without pinning it. See the
 // ownership notes at the top of this file: use the returned store within the
 // call that obtained it, and use a Txn or PinBlob for anything longer.
@@ -156,6 +178,15 @@ func (d *Database) Blob() blob.BlobStore {
 // keeps prev alive (the bark wrapper in node.go and node_lifecycle.go wraps
 // the store it was handed and forwards Close to it) has nothing to drain and
 // may ignore both results; SetBlobStore itself never closes prev.
+//
+// drain covers the reference this call retires, which is the only route by
+// which prev can still be reached: the pins taken on it before the swap, and no
+// new ones. Installing prev again before drain returns creates a second
+// reference to the same store whose pins are counted separately, so drain would
+// then report only the first reference as idle while the second is in use. A
+// caller that intends to close prev must therefore not re-install it -- install
+// a fresh store, or drain before re-installing. Neither production caller
+// closes prev at all, so neither can reach that case.
 //
 // drain is never nil, so it is always safe to call.
 func (d *Database) SetBlobStore(

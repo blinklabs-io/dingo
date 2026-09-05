@@ -603,7 +603,9 @@ func (m *DingoStateManager) createUtxo(
 	if err := m.db.CreateUtxo(txn, &utxoModel); err != nil {
 		return fmt.Errorf("create utxo metadata: %w", err)
 	}
-	if blobStore := m.db.Blob(); blobStore != nil {
+	// The transaction's own store, so the handle and the store it is used
+	// with always come from the same installation.
+	if blobStore := txn.BlobStore(); blobStore != nil {
 		if err := blobStore.SetUtxo(
 			txn.Blob(), utxoModel.TxId, utxoModel.OutputIdx,
 			utxo.Output.Cbor(),
