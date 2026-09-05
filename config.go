@@ -206,6 +206,7 @@ type Config struct {
 	// canonical loaded configuration; these are refreshed by syncCompatFields.
 	dataDir                         string
 	bindAddr                        string
+	apiBindAddr                     string
 	pluginSelections                map[hostplugin.Capability]hostplugin.Selection
 	network                         string
 	tlsCertFilePath, tlsKeyFilePath string
@@ -659,17 +660,17 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 	// Start with a default internal config
 	c := Config{
 		cfg: &internalconfig.Config{
-			BindAddr:           "0.0.0.0",
-			StorageMode:        string(StorageModeCore),
-			RunMode:            internalconfig.RunModeServe,
-			Cache:              internalconfig.DefaultCacheConfig(),
-			Chainsync:          internalconfig.DefaultChainsyncConfig(),
-			GenesisBootstrap:   internalconfig.DefaultGenesisBootstrapConfig(),
-			HistoryExpiry:      internalconfig.DefaultHistoryExpiryConfig(),
-			KoiosParity:        internalconfig.DefaultKoiosParityConfig(),
-			Logging:            internalconfig.DefaultLoggingConfig(),
-			Midnight:           internalconfig.DefaultMidnightConfig(),
-			CORSAllowedOrigins: []string{"*"},
+			BindAddr:         "0.0.0.0",
+			APIBindAddr:      internalconfig.DefaultAPIBindAddr,
+			StorageMode:      string(StorageModeCore),
+			RunMode:          internalconfig.RunModeServe,
+			Cache:            internalconfig.DefaultCacheConfig(),
+			Chainsync:        internalconfig.DefaultChainsyncConfig(),
+			GenesisBootstrap: internalconfig.DefaultGenesisBootstrapConfig(),
+			HistoryExpiry:    internalconfig.DefaultHistoryExpiryConfig(),
+			KoiosParity:      internalconfig.DefaultKoiosParityConfig(),
+			Logging:          internalconfig.DefaultLoggingConfig(),
+			Midnight:         internalconfig.DefaultMidnightConfig(),
 			Plugins: internalconfig.PluginsConfig{
 				Storage: internalconfig.StoragePluginsConfig{
 					Blob: hostplugin.Selection{
@@ -721,6 +722,19 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 
 func (c *Config) syncCompatFields() {
 	c.dataDir, c.bindAddr = c.cfg.DatabasePath, c.cfg.BindAddr
+	// Keep the API listeners fail-safe on every construction path: a
+	// Config assembled without the internal defaults (or with the field
+	// explicitly cleared) binds loopback rather than inheriting the
+	// wildcard bindAddr uses. Mirrors ApplyDefaults and
+	// Config.APIListenHost.
+	c.apiBindAddr = c.cfg.APIBindAddr
+	if c.apiBindAddr == "" {
+		c.apiBindAddr = internalconfig.DefaultAPIBindAddr
+		// Normalize the underlying field too, so APIBindAddr() reports
+		// the address the listeners will really bind rather than the
+		// empty value that produced it.
+		c.cfg.APIBindAddr = c.apiBindAddr
+	}
 	c.network, c.networkMagic = c.cfg.Network, c.cfg.NetworkMagic
 	c.tlsCertFilePath, c.tlsKeyFilePath = c.cfg.TlsCertFilePath, c.cfg.TlsKeyFilePath
 	c.apiConfig = c.cfg.API
@@ -993,11 +1007,25 @@ func WithCardanoNodeConfig(
 	}
 }
 
-// WithBindAddr specifies the IP address used for API listeners
-// (Blockfrost, Mesh, UTxO RPC). The default is "0.0.0.0" (all interfaces).
+// WithBindAddr specifies the IP address used for the public relay/NtN and
+// metrics listeners. The default is "0.0.0.0" (all interfaces). It does
+// not govern the Blockfrost, Mesh, and UTxO RPC listeners -- those follow
+// WithAPIBindAddr, which stays on loopback even when this is a wildcard.
 func WithBindAddr(addr string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BindAddr = addr
+	}
+}
+
+// WithAPIBindAddr specifies the IP address used for the Blockfrost, Mesh,
+// and UTxO RPC listeners. The default is "127.0.0.1": these listeners have
+// authentication disabled unless an operator configures api.auth, so they
+// are not exposed beyond loopback without an explicit decision, and they
+// do not inherit a wildcard WithBindAddr. A single provider can be widened
+// on its own through plugins.api.<name>.config.host instead.
+func WithAPIBindAddr(addr string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.APIBindAddr = addr
 	}
 }
 
@@ -1571,7 +1599,9 @@ func WithKoiosParity(cfg KoiosParityConfig) ConfigOptionFunc {
 
 // WithCORSAllowedOrigins configures browser CORS access for public API
 // servers. Use []string{"*"} to allow any origin, or an empty list to
-// disable CORS headers.
+// disable CORS headers. The default is an empty list: a wildcard is an
+// explicit operator decision, not something an unconfigured node hands
+// out.
 func WithCORSAllowedOrigins(origins []string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.CORSAllowedOrigins = slices.Clone(origins)
@@ -1760,9 +1790,16 @@ func (c *Config) MetadataPlugin() string {
 	return c.cfg.Plugins.Storage.Metadata.Provider
 }
 
-// BindAddr returns the IP address for API listeners.
+// BindAddr returns the IP address for the public relay/NtN and metrics
+// listeners. The API listeners use APIBindAddr.
 func (c *Config) BindAddr() string {
 	return c.cfg.BindAddr
+}
+
+// APIBindAddr returns the IP address for the Blockfrost, Mesh, and UTxO
+// RPC listeners.
+func (c *Config) APIBindAddr() string {
+	return c.cfg.APIBindAddr
 }
 
 // PrivateBindAddr returns the IP address for the private NtC listener.

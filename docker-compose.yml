@@ -21,6 +21,14 @@ services:
       - CARDANO_NETWORK=${CARDANO_NETWORK:-preview}
       - CARDANO_DATABASE_PATH=/data/db
       - DINGO_SOCKET_PATH=/ipc/dingo.socket
+      # API listeners bind loopback by default, which a container port
+      # mapping cannot reach. Widen only the listener this file publishes;
+      # a container-side bind is reachable by every other container on the
+      # same Docker network, so apiBindAddr stays on loopback and
+      # Blockfrost/Mesh stay unreachable rather than being widened along
+      # with it. Set DINGO_PLUGINS_API_<NAME>_CONFIG_HOST per listener, or
+      # DINGO_API_BIND_ADDR to widen all three at once.
+      - DINGO_PLUGINS_API_UTXORPC_CONFIG_HOST=0.0.0.0
       # Uncomment to enable debug logging
       # - DINGO_DEBUG=1
       # Uncomment to bootstrap from Mithril snapshot on first run

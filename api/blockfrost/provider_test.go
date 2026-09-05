@@ -45,12 +45,32 @@ func freeLoopbackPort(t *testing.T) uint {
 	return uint(port)
 }
 
+// providerDeps builds provider dependencies over a test double, with the
+// shared API bind address composition would hand down.
+func providerDeps() ProviderDependencies {
+	return ProviderDependencies{Node: &mockNode{}, Host: "127.0.0.1"}
+}
+
 // resolveOnFreePortWithConfig resolves the built-in Blockfrost provider on
 // a free loopback port with extra config fields (e.g. "tls"/"auth")
-// merged alongside "port", retrying on a lost race for the port.
+// merged alongside "port", retrying on a lost race for the port. It is
+// resolveOnFreePortWithDeps over the default dependencies.
 func resolveOnFreePortWithConfig(
 	t *testing.T,
 	host *plugin.Host,
+	extra map[string]any,
+) *Blockfrost {
+	t.Helper()
+	return resolveOnFreePortWithDeps(t, host, providerDeps(), extra)
+}
+
+// resolveOnFreePortWithDeps is resolveOnFreePortWithConfig with the
+// provider dependencies supplied by the caller, for tests that need a
+// specific shared Host to resolve a per-provider override against.
+func resolveOnFreePortWithDeps(
+	t *testing.T,
+	host *plugin.Host,
+	deps ProviderDependencies,
 	extra map[string]any,
 ) *Blockfrost {
 	t.Helper()
@@ -64,7 +84,7 @@ func resolveOnFreePortWithConfig(
 			plugin.CapabilityAPIBlockfrost,
 			"builtin",
 			cfg,
-			ProviderDependencies{Node: &mockNode{}, Host: "127.0.0.1"},
+			deps,
 		)
 		if err != nil {
 			lastErr = err
@@ -163,4 +183,21 @@ func TestProviderPropagatesTLSAndAuth(t *testing.T) {
 	require.Equal(t, keyPath, srv.config.TLS.KeyFilePath)
 	require.True(t, srv.config.Auth.Enabled)
 	require.Equal(t, "shared-secret", srv.config.Auth.Token)
+}
+
+// TestProviderHostOverridesSharedDefault asserts the per-plugin
+// `plugins.api.blockfrost.config.host` override wins over the shared API
+// bind address composition hands down (issue #3498).
+func TestProviderHostOverridesSharedDefault(t *testing.T) {
+	host := newProviderHost(t)
+	deps := providerDeps()
+	deps.Host = "0.0.0.0"
+
+	srv := resolveOnFreePortWithDeps(
+		t, host, deps, map[string]any{"host": "127.0.0.1"},
+	)
+
+	hostPart, _, err := net.SplitHostPort(srv.config.ListenAddress)
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.1", hostPart)
 }

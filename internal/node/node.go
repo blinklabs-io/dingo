@@ -660,6 +660,7 @@ func buildDingoConfig(
 			chainsyncStrategy,
 		),
 		dingo.WithBindAddr(cfg.BindAddr),
+		dingo.WithAPIBindAddr(cfg.APIBindAddr),
 		dingo.WithStorageMode(storageMode),
 		// CIP-23 minimum pool margin (consensus-affecting)
 		dingo.WithMinPoolMargin(cfg.MinPoolMargin),

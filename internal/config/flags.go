@@ -64,6 +64,12 @@ var flagSpecs = []flagSpec{
 		"data directory for all storage plugins (overrides CARDANO_DATABASE_PATH)",
 	),
 	stringFlag("BindAddr", "bind-addr", "", "public bind address"),
+	stringFlag(
+		"APIBindAddr",
+		"api-bind-addr",
+		"",
+		"bind address for the Blockfrost, Mesh, and UTxO RPC listeners (loopback by default; wildcard exposure requires an explicit override)",
+	),
 	stringFlag("SocketPath", "socket-path", "", "path to UNIX socket file"),
 	transformStringFlag(
 		"RunMode",

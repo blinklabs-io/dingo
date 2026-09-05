@@ -242,6 +242,39 @@ func TestValidate(t *testing.T) {
 			wantErr: "is assigned to both",
 		},
 		{
+			// Validation reads each API listener's own
+			// plugins.api.<name>.config.host, so two providers pinned to
+			// distinct addresses may share a port -- the same rule the
+			// other listeners already follow (issue #3498).
+			name: "api providers on distinct hosts may share a port",
+			modify: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.BindAddr = "127.0.0.1"
+				c.APIBindAddr = "127.0.0.1"
+				c.Plugins.API.Blockfrost.Config["host"] = "127.0.0.2"
+				setPluginPort(
+					&c.Plugins.API.Blockfrost,
+					APIPluginPort(c.Plugins.API.Mesh),
+				)
+			},
+		},
+		{
+			// A per-provider host override that widens one listener to a
+			// wildcard still contends with every other listener's port.
+			name: "api provider wildcard host collides with specific",
+			modify: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.BindAddr = "127.0.0.1"
+				c.APIBindAddr = "127.0.0.1"
+				c.Plugins.API.Blockfrost.Config["host"] = "0.0.0.0"
+				setPluginPort(
+					&c.Plugins.API.Blockfrost,
+					APIPluginPort(c.Plugins.API.Mesh),
+				)
+			},
+			wantErr: "is assigned to both",
+		},
+		{
 			name: "cardano config path traversal",
 			modify: func(c *Config) {
 				c.CardanoConfig = "configs/../../etc/passwd"
