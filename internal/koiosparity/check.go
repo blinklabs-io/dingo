@@ -17,6 +17,7 @@ package koiosparity
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -880,6 +881,17 @@ func compareEpochAccounts(
 	var out []CheckMismatch
 	dingoRows := make([]DingoAccountReward, 0, len(dingoOutputs))
 	for _, row := range dingoOutputs {
+		if row == nil {
+			out = append(out, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				Field:      "reward_account_output",
+				DingoValue: "nil reward_account_output row",
+				Category:   CategoryDBError,
+				CheckedAt:  now,
+			})
+			continue
+		}
 		addr, addrErr := StakeAddressFromCredential(
 			row.StakingKey,
 			row.CredentialTag,
@@ -903,10 +915,44 @@ func compareEpochAccounts(
 			})
 			continue
 		}
+		poolID, poolErr := PoolKeyHashHexToBech32(
+			hex.EncodeToString(row.PoolKeyHash),
+		)
+		if poolErr != nil {
+			out = append(out, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				Field:      "account_reward_pool_decode",
+				DingoValue: fmt.Sprintf("error: %v", poolErr),
+				KoiosValue: "",
+				Category:   CategoryDBError,
+				CheckedAt:  now,
+			})
+			continue
+		}
+		if row.RewardType != "member" && row.RewardType != "leader" {
+			out = append(out, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				Field:      "account_reward_type",
+				DingoValue: row.RewardType,
+				KoiosValue: "member or leader",
+				Category:   CategoryDBError,
+				CheckedAt:  now,
+			})
+			continue
+		}
+		// Koios reports rewards that were credited to the account. Dingo also
+		// persists computed rewards that were withheld because the account was
+		// ineligible or guarded; those rows must not enter the comparison.
+		if !row.Spendable || row.Guarded {
+			continue
+		}
 		dingoRows = append(dingoRows, DingoAccountReward{
 			StakeAddress: addr,
 			RewardType:   row.RewardType,
 			Amount:       strconv.FormatUint(uint64(row.Amount), 10),
+			PoolIDBech32: poolID,
 		})
 	}
 
@@ -1117,6 +1163,10 @@ func dingoRewardAddressSet(
 ) (set map[string]bool, decodeErrs int) {
 	set = make(map[string]bool, len(outputs))
 	for _, o := range outputs {
+		if o == nil {
+			decodeErrs++
+			continue
+		}
 		addr, err := StakeAddressFromCredential(o.StakingKey, o.CredentialTag)
 		if err != nil {
 			decodeErrs++

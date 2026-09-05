@@ -5836,9 +5836,10 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   | `/pool_history` | derived-match | `member_rewards` | Exact lovelace equality with the sum of K-1 `reward_account_output` member rows the ledger credits (`spendable`, not `guarded`), falling back to `reward_pool_output.member_reward_total` only when that row's `unspendable` is zero. |
   | `/pool_history` | intentionally-incomparable | `pool_fees`, `deleg_rewards` | Koios derives these from an approximation that omits the pledge/owner-stake bonus and rounds components. |
   | `/pool_history` | unsupported | `active_stake_pct`, `saturation_pct`, `epoch_ros` | Dingo has no matching persisted pool aggregate. |
-  | `/account_reward_history` | exact-match | `stake_address`, `earned_epoch` | Identifies the `(stake_address, type)` row `CompareAccountEpoch` matches on; response identity must equal the requested epoch. |
-  | `/account_reward_history` | exact-match | `amount`, `type` | Exact integer lovelace equality against `reward_account_output.amount`/`reward_type` for member/leader rows; treasury/reserves/refund rows are filtered out, see `koiosAccountRewardTypesOutOfScope`. |
-  | `/account_reward_history` | unsupported | `spendable_epoch`, `pool_id_bech32` | Stored for reference only; not part of the match key or currently compared against Dingo's schema. |
+  | `/account_reward_history` | exact-match | `stake_address`, `earned_epoch` | Identifies the `(stake_address, type)` total `CompareAccountEpoch` matches on; response identity must equal the requested epoch. |
+  | `/account_reward_history` | exact-match | `amount`, `type` | Exact integer lovelace equality against the sum of credited `reward_account_output.amount` rows for member/leader types; treasury/reserves/refund rows are filtered out, see `koiosAccountRewardTypesOutOfScope`. |
+  | `/account_reward_history` | derived-match | `pool_id_bech32` | Distinguishes contributions from different pools during normalization. Multiple pool rows for one account/type are a valid shared-account total; repeating the same pool contribution remains a duplicate. |
+  | `/account_reward_history` | unsupported | `spendable_epoch` | Stored for reference only; it is not currently compared against Dingo's schema. |
 
   **Epoch alignment.** Koios reports everything for a reporting epoch K, but
   Dingo's `epoch_summary`/`reward_pool_input`/`reward_pool_output` rows do not
@@ -6076,8 +6077,8 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
 may be transient), `pool_departed` (informational: the pool left the pool set
 at K+1, so its epoch-K block count has no row to live on), plus #3097's
 per-account categories: `acct_only_dingo`,
-`acct_only_koios`, `acct_duplicate` (a genuine duplicate (stake_address,
-reward_type) row within one side — a data-integrity problem, not a value
+`acct_only_koios`, `acct_duplicate` (a repeated (stake_address, reward_type,
+pool) contribution within one side — a data-integrity problem, not a value
 disagreement), and `acct_coverage_incomplete` (the per-account Koios fetch for
 this epoch never completed across every chunk — see "Per-account exact parity
 (#3097)" below). Results are stored in `check_mismatches` and summarised in
@@ -6526,34 +6527,33 @@ never the reverse.
     already decided about that epoch for other reasons — the same
     independent-gating shape `fetchAccountsIfNeeded` already used relative to
     `fetchPoolsIfNeeded` for the per-epoch on-demand path.
-- **Comparison.** `CompareAccountEpoch` (`compare.go`) keys both sides by
-  `(stake_address, reward_type)` — not `stake_address` alone — since a pool
-  owner delegating to their own pool legitimately has both a `member` and a
-  `leader` row in the same epoch, checked independently (never merged or
-  summed). Internal duplicates within either side (the same key appearing
-  twice) are reported once per duplicate occurrence as `acct_duplicate`
-  before the union walk runs, so a duplicate is never mistaken for or masked
-  by a value disagreement. `koios_account_rewards`'s
+- **Comparison.** `CompareAccountEpoch` (`compare.go`) normalizes both sides
+  to `(stake_address, reward_type)` totals — not `stake_address` alone — since
+  a pool owner delegating to their own pool legitimately has both a `member`
+  and a `leader` total in the same epoch, checked independently. Rows from
+  different `pool_id_bech32` values are summed because a reward account can be
+  shared by multiple pools. A repeated contribution from the same pool is
+  reported once per occurrence as `acct_duplicate` before the union walk runs,
+  so legitimate sharing is not mistaken for duplication while true source
+  duplication remains visible. Dingo rows that are computed but not credited
+  (`spendable = false` or `guarded = true`) are excluded before normalization,
+  matching the ledger crediting path and Koios's credited-reward view.
+  `koios_account_rewards`'s
   `(network, epoch, stake_address, reward_type)` index
-  (`idx_kar_net_epoch_addr_type`) is deliberately non-unique: Koios can
-  itself return duplicate rows for the same key, and a unique constraint
-  would abort `CommitAccountRewardsForEpoch`'s insert with a constraint
-  error before `CompareAccountEpoch` ever gets the chance to detect and
-  report that duplication as `acct_duplicate`. Amounts are compared via
-  `lovelaceEqual`. Both sides of every amount comparison are parsed and
-  validated as non-negative `big.Int` values before any equality check —
-  including the identical-string case, so two identical malformed or
-  negative amounts never compare equal-by-accident — never a float/rational,
-  so #3097's "no rounding, sampling, or tolerance" requirement holds exactly,
-  including a 1-lovelace difference. `graceHours`/`epochEndTime` apply the
+  (`idx_kar_net_epoch_addr_type`) remains non-unique so multiple pool
+  contributions reach the comparator. Amounts are summed and compared via
+  exact, non-negative `big.Int` values; malformed amounts produce an explicit
+  `dingo_db_error` rather than being skipped or treated as zero. Thus #3097's
+  "no rounding, sampling, or tolerance" requirement holds exactly, including
+  a 1-lovelace difference. `graceHours`/`epochEndTime` apply the
   identical `reference_lag` treatment `ComparePoolEpoch` already uses for a
   genuinely-too-recent epoch, symmetrically for both presence-mismatch
-  directions: `acct_only_koios` (Koios has a row Dingo doesn't yet) and
-  `acct_only_dingo` (Dingo has a row Koios hasn't published yet — Koios can
+  directions: `acct_only_koios` (Koios has a total Dingo doesn't yet) and
+  `acct_only_dingo` (Dingo has a total Koios hasn't published yet — Koios can
   lag in publishing `/account_reward_history` for a just-closed epoch the
   same way it can lag on any other endpoint) both fall back to
-  `reference_lag` within the grace window rather than only the
-  Koios-side direction.
+  `reference_lag` within the grace window rather than only the Koios-side
+  direction.
 - **Strict-mode propagation.** An account-level `FAIL` flows through
   `DetermineStatus` (any `acct_only_dingo`/`acct_only_koios`/`acct_duplicate`
   forces `FAIL`, exactly like the pool-level categories) into
