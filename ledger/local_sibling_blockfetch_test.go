@@ -26,22 +26,47 @@ import (
 // stageInFlightBlockfetchBatch puts the fixture in the state that exists while
 // a blockfetch batch requested for the rival's continuation is in flight: the
 // batch carries the rollback generation current at request time, and one
-// fetched block is waiting to be flushed onto the chain.
+// fetched block has been delivered and is waiting to be flushed onto the
+// chain.
+//
+// The block is delivered through the real arrival handler rather than pushed
+// onto the pending slice, so the test covers what arrival itself is allowed to
+// conclude. A range-failure record is seeded for that exact range first, as
+// noteBlockfetchRangeUnavailable would leave it after a miss: arrival must not
+// clear it, because a delivered block that is never applied leaves the queued
+// header just as stuck as one that was never delivered.
 func stageInFlightBlockfetchBatch(
+	t *testing.T,
 	ls *LedgerState,
 	block gledger.Block,
 ) {
+	t.Helper()
+	point := ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
 	ls.blockfetchBatchRollbackGeneration = ls.blockfetchRollbackGeneration.Load()
-	ls.pendingBlockfetchEvents = []BlockfetchEvent{
-		{
-			Block: block,
-			Point: ocommon.NewPoint(
-				block.SlotNumber(),
-				block.Hash().Bytes(),
-			),
-			Type: uint(block.Type()),
-		},
+	ls.blockfetchRangeFailure = blockfetchRangeFailureState{
+		slot:  point.Slot,
+		hash:  string(point.Hash),
+		count: 1,
 	}
+	connId := testRecycleConnId()
+	ls.activeBlockfetchConnId = connId
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	require.NoError(t, ls.handleEventBlockfetchBlockDeferred(
+		BlockfetchEvent{
+			ConnectionId: connId,
+			Block:        block,
+			Point:        point,
+			Type:         uint(block.Type()),
+		},
+		nil,
+	))
+	require.Len(t, ls.pendingBlockfetchEvents, 1)
+	require.Equal(
+		t,
+		1,
+		ls.blockfetchRangeFailure.count,
+		"arrival is not range progress: the block has not been applied yet",
+	)
 }
 
 // TestStaleBlockfetchBatchIsDiscardedAfterLocalSiblingAdoption covers the race
@@ -78,7 +103,7 @@ func TestStaleBlockfetchBatchIsDiscardedAfterLocalSiblingAdoption(
 	t.Run("control: the batch lands with no rollback", func(t *testing.T) {
 		f := newSiblingFixture(t)
 		continuation := newContinuation(t, f)
-		stageInFlightBlockfetchBatch(f.ls, continuation)
+		stageInFlightBlockfetchBatch(t, f.ls, continuation)
 
 		require.NoError(t, f.ls.flushPendingBlockfetchBlocksDeferred(nil))
 		assert.Equal(
@@ -87,12 +112,17 @@ func TestStaleBlockfetchBatchIsDiscardedAfterLocalSiblingAdoption(
 			f.ls.chain.Tip().Point.Hash,
 			"without a rollback the fetched block extends the chain",
 		)
+		assert.Zero(
+			t,
+			f.ls.blockfetchRangeFailure.count,
+			"a block that extends the chain clears the range failure record",
+		)
 	})
 
 	t.Run("stale batch after the alternative wins", func(t *testing.T) {
 		f := newSiblingFixture(t)
 		continuation := newContinuation(t, f)
-		stageInFlightBlockfetchBatch(f.ls, continuation)
+		stageInFlightBlockfetchBatch(t, f.ls, continuation)
 		before := f.ls.blockfetchRollbackGeneration.Load()
 
 		// Lower VRF output wins, so the alternative replaces the rival.
@@ -121,6 +151,14 @@ func TestStaleBlockfetchBatchIsDiscardedAfterLocalSiblingAdoption(
 			f.ls.pendingBlockfetchEvents,
 			"the discarded batch must not be left queued for a later flush",
 		)
+		assert.Equal(
+			t,
+			1,
+			f.ls.blockfetchRangeFailure.count,
+			"a discarded block is not range progress: clearing the record "+
+				"would reset the count that unsticks the queued header "+
+				"blocking local forging",
+		)
 	})
 
 	t.Run("stale batch inside the rollback window", func(t *testing.T) {
@@ -137,7 +175,7 @@ func TestStaleBlockfetchBatchIsDiscardedAfterLocalSiblingAdoption(
 		// cannot see anything wrong with it.
 		f := newSiblingFixture(t)
 		continuation := newContinuation(t, f)
-		stageInFlightBlockfetchBatch(f.ls, continuation)
+		stageInFlightBlockfetchBatch(t, f.ls, continuation)
 		f.ls.mithrilLedgerSlot = siblingParentSlot + 1
 		before := f.ls.blockfetchRollbackGeneration.Load()
 
@@ -167,6 +205,12 @@ func TestStaleBlockfetchBatchIsDiscardedAfterLocalSiblingAdoption(
 			"a batch superseded by a published rollback generation must "+
 				"not extend the chain even when its block still fits",
 		)
+		assert.Equal(
+			t,
+			1,
+			f.ls.blockfetchRangeFailure.count,
+			"a discarded block is not range progress",
+		)
 	})
 
 	t.Run("stale batch after the alternative loses", func(t *testing.T) {
@@ -176,7 +220,7 @@ func TestStaleBlockfetchBatchIsDiscardedAfterLocalSiblingAdoption(
 		// every time a slot battle is lost.
 		f := newSiblingFixture(t)
 		continuation := newContinuation(t, f)
-		stageInFlightBlockfetchBatch(f.ls, continuation)
+		stageInFlightBlockfetchBatch(t, f.ls, continuation)
 		before := f.ls.blockfetchRollbackGeneration.Load()
 
 		// Higher VRF output loses.

@@ -4041,9 +4041,12 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 	}
 	ls.pendingBlockfetchEvents = append(ls.pendingBlockfetchEvents, e)
 	ls.batchBlocksReceived++
-	// If this block is the one a tracked range was failing to obtain, that
-	// range is fetchable after all and its failure record is stale.
-	ls.noteBlockfetchRangeProgress(e.Point)
+	// Range progress is noted where the block actually extends the chain,
+	// not here. Arrival alone is not progress: a block from a batch a
+	// rollback has superseded is discarded unapplied, and one that no
+	// longer fits the tip is declined, yet either would clear the failure
+	// record for the range that is stuck. See
+	// flushPendingBlockfetchBlocksDeferred.
 	if len(ls.pendingBlockfetchEvents) >= blockfetchCommitBatchSize {
 		if err := ls.flushPendingBlockfetchBlocksDeferred(pubs); err != nil {
 			return err
@@ -4662,6 +4665,12 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 // them anyway (their parent is no longer on the chain), and any block still
 // wanted after the rollback is re-offered by chainsync and re-fetched by the
 // next batch.
+//
+// The blockfetch range-failure record is deliberately left alone. These blocks
+// never reached the chain, so they are not evidence that the range which is
+// currently stuck can be obtained; clearing it here would reset the count that
+// eventually drops an unservable queued header -- the header that blocks local
+// forging, and the routine aftermath of the slot battle this path resolves.
 func (ls *LedgerState) discardStaleBlockfetchBatch(
 	pending []BlockfetchEvent,
 ) error {
@@ -4744,6 +4753,16 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 			validationEnabled, _ := ls.validationStateSnapshot()
 			ls.auditContinuationBlock(pendingEvent, validationEnabled)
 			ls.checkSlotBattle(pendingEvent, nil)
+			// The block extended the chain, so the range it belongs to
+			// is fetchable after all and any failure record for it is
+			// stale. Noting it here rather than on arrival is what keeps
+			// the count meaningful: the record exists to unstick a
+			// queued header whose body cannot be applied, which is
+			// exactly the state a delivered-but-never-applied block
+			// leaves the queue in -- and, per
+			// noteBlockfetchRangeUnavailable, the routine aftermath of a
+			// tip slot battle, which is the case this path creates.
+			ls.noteBlockfetchRangeProgress(pendingEvent.Point)
 			continue
 		}
 		ls.clearDeferredHeaderValidation(pendingEvent.Point)
