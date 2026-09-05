@@ -1718,14 +1718,35 @@ func (f *BlockForger) validateForgedBlockSafe(
 // mkCurrentBlockContext returns for EQ.
 //
 // It reports false -- and the caller declines the contested slot -- whenever
-// any part of the capability is missing: an unwired chain context or sibling
-// adopter, a BlockBuilder that cannot take an explicit context, a tip with no
-// resolvable predecessor, a tip that is no longer at the contested slot, or a
-// predecessor that does not sit strictly below it. Declining costs one block;
-// guessing a parent here costs a signature over a block no peer will accept.
+// any part of the capability is missing: no durable forge fence, an unwired
+// chain context or sibling adopter, a BlockBuilder that cannot take an
+// explicit context, a tip with no resolvable predecessor, a tip that is no
+// longer at the contested slot, or a predecessor that does not sit strictly
+// below it. Declining costs one block; guessing a parent here costs a
+// signature over a block no peer will accept.
 func (f *BlockForger) alternativeBlockContext(
 	slot uint64,
 ) (BlockContext, bool) {
+	// A durable fence is a precondition for contesting a slot at all,
+	// because this path cannot tell a rival's block from our own.
+	//
+	// The caller's "slot already has our own block" gate reads fenceLoaded,
+	// and lastForgedSlot is in-memory only when no store is wired. Restart a
+	// producer inside a slot it has already forged for and that gate cannot
+	// fire: the tip is our own block, the slot equals the tip's, and this
+	// function would hand back a context naming our own block as the rival.
+	// Forging that alternative signs a second, different block for a slot
+	// whose first block may already have reached peers -- equivocation, and
+	// the adoption would roll our own good block off the tip to do it.
+	//
+	// A wired store makes the situation unreachable: the fence is loaded at
+	// construction, so the gate refuses the slot before this is called and
+	// reserveForgeSlot would refuse it again. Conceding a genuinely
+	// contested slot is one block; equivocating is a slashable-class
+	// protocol violation, so decline rather than guess.
+	if f.fenceStore == nil {
+		return BlockContext{}, false
+	}
 	if f.chainContext == nil || f.siblingAdopter == nil {
 		return BlockContext{}, false
 	}
