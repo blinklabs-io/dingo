@@ -77,6 +77,42 @@ const (
 	// harness/devnet mode where slotProvider is nil and EpochForSlot
 	// projects arbitrarily far.
 	committeeInFlightMaxEpochs = 16
+	// slotWindowWarnInterval throttles the seated-but-outside-vote-window
+	// warning so catching up cannot flood the log; the
+	// dingo_metrics_leios_votes_not_emitted_total counter carries the rate.
+	slotWindowWarnInterval = 30 * time.Second
+)
+
+// Reasons recorded by dingo_metrics_leios_votes_not_emitted_total. They
+// partition every path on which this node declines to emit its own vote for
+// an announcement it has both observed and acquired the endorser block for.
+const (
+	// voteNotEmittedDuplicate: a vote for this announcing ranking block was
+	// already emitted. Expected -- an announcement is armed from the header
+	// and again when the block applies.
+	voteNotEmittedDuplicate = "duplicate"
+	// voteNotEmittedNoKey: local vote emission is not configured (no pool
+	// key hash or no signing key).
+	voteNotEmittedNoKey = "no_key"
+	// voteNotEmittedSlotWindow: the announcing ranking block is outside the
+	// vote window.
+	voteNotEmittedSlotWindow = "slot_window"
+	// voteNotEmittedCommitteeUnavailable: the epoch's committee could not be
+	// computed.
+	voteNotEmittedCommitteeUnavailable = "committee_unavailable"
+	// voteNotEmittedNotSeated: the local pool holds no seat this epoch.
+	voteNotEmittedNotSeated = "not_seated"
+	// voteNotEmittedUnknownMember: the resolved voter id has no committee
+	// member entry.
+	voteNotEmittedUnknownMember = "unknown_member"
+	// voteNotEmittedKeyMismatch: the configured key no longer matches the
+	// public key resolved for this pool.
+	voteNotEmittedKeyMismatch = "key_mismatch"
+	// voteNotEmittedSigningFailed: signing the vote failed.
+	voteNotEmittedSigningFailed = "signing_failed"
+	// voteNotEmittedNotInserted: the signed vote was refused by the store
+	// (dedup or equivocation guard).
+	voteNotEmittedNotInserted = "not_inserted"
 )
 
 // ErrVoteManagerStopped is returned by blocking calls when the vote
@@ -441,6 +477,10 @@ type VoteManager struct {
 	// configuration. Every initial lookup or retry receives a generation when
 	// it starts; only the newest generation may change voting state.
 	votingLookupGeneration uint64
+
+	// lastSlotWindowWarn throttles the seated-but-outside-vote-window
+	// warning. Guarded by mu.
+	lastSlotWindowWarn time.Time
 }
 
 type managerSubscription struct {
@@ -2354,19 +2394,46 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 	votingGeneration := m.votingLookupGeneration
 	_, alreadyVoted := m.votedAnnouncements[rbHash]
 	m.mu.Unlock()
-	if len(votingPool) == 0 || votingKey == nil || alreadyVoted {
+	if alreadyVoted {
+		m.noteVoteNotEmitted(voteNotEmittedDuplicate)
+		return
+	}
+	if len(votingPool) == 0 || votingKey == nil {
+		m.noteVoteNotEmitted(voteNotEmittedNoKey)
 		return
 	}
 	if err := m.slotWindowCheck(record.slot); err != nil {
-		m.logger.Debug(
-			"announcing ranking block outside vote window, not voting",
-			"slot", record.slot,
-			"error", err,
-		)
+		m.noteVoteNotEmitted(voteNotEmittedSlotWindow)
+		// A seated node holding a key that never votes is otherwise
+		// silently green: committee size, key loaded, EBs observed and
+		// certificates built all read healthy. Warn in that case, but
+		// throttle it -- catch-up replays every announcement it passes
+		// -- and let the counter carry the true rate.
+		//
+		// The throttle is checked before the seating lookup: computing a
+		// committee can hit the stake provider, and a failed lookup is
+		// deliberately not memoized.
+		if m.slotWindowWarnDue() &&
+			m.seatedForEpoch(record.epoch, votingPool) {
+			m.markSlotWindowWarned()
+			m.logger.Warn(
+				"announcing ranking block outside vote window, not voting; this node is seated on the leios committee and holds a voting key",
+				"slot", record.slot,
+				"epoch", record.epoch,
+				"error", err,
+			)
+		} else {
+			m.logger.Debug(
+				"announcing ranking block outside vote window, not voting",
+				"slot", record.slot,
+				"error", err,
+			)
+		}
 		return
 	}
 	entry, err := m.committeeAndParamsForEpoch(record.epoch)
 	if err != nil {
+		m.noteVoteNotEmitted(voteNotEmittedCommitteeUnavailable)
 		m.logger.Debug(
 			"leios committee unavailable, not voting",
 			"slot", record.slot,
@@ -2378,6 +2445,7 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 	committee := entry.committee
 	voterId, ok := committee.VoterIdFor(votingPool)
 	if !ok {
+		m.noteVoteNotEmitted(voteNotEmittedNotSeated)
 		m.logger.Debug(
 			"local pool is not a leios committee member, not voting",
 			"slot", record.slot,
@@ -2387,6 +2455,7 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 	}
 	member, ok := committee.Member(voterId)
 	if !ok {
+		m.noteVoteNotEmitted(voteNotEmittedUnknownMember)
 		return
 	}
 	// A vote this node marks verified=true is trusted without a
@@ -2398,6 +2467,7 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 	// signature check would accept.
 	resolved, resolvedOK := m.resolveVoterKey(entry, member.PoolKeyHash)
 	if !resolvedOK || !resolved.Equal(votingKey.PublicKey()) {
+		m.noteVoteNotEmitted(voteNotEmittedKeyMismatch)
 		m.logger.Error(
 			"configured leios voting key no longer matches the resolved public key for this pool, not voting",
 			"slot",
@@ -2410,6 +2480,7 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 	msg := PrototypeVoteMessageBytes(rbHash)
 	sig, err := m.signVote(votingKey, msg)
 	if err != nil {
+		m.noteVoteNotEmitted(voteNotEmittedSigningFailed)
 		m.logger.Error(
 			"failed to sign leios vote",
 			"slot", record.slot,
@@ -2452,8 +2523,57 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 				VoteSignature:    sig,
 			}},
 		))
+	} else {
+		m.noteVoteNotEmitted(voteNotEmittedNotInserted)
 	}
 	m.prototypeEmissionMu.Unlock()
+}
+
+// noteVoteNotEmitted counts one declined local vote emission. The reasons
+// partition every early return in emitPrototypeVoteLocked, so the sum of this
+// counter plus dingo_metrics_leios_votes_received_total's locally produced
+// votes accounts for every announcement this node considered voting on.
+func (m *VoteManager) noteVoteNotEmitted(reason string) {
+	if m.metrics == nil {
+		return
+	}
+	m.metrics.votesNotEmittedTotal.WithLabelValues(reason).Inc()
+}
+
+// seatedForEpoch reports whether votingPool holds a seat on the epoch's
+// committee. It is used only to decide log severity, so any lookup failure is
+// reported as "not seated" rather than surfaced.
+func (m *VoteManager) seatedForEpoch(epoch uint64, votingPool []byte) bool {
+	if len(votingPool) == 0 {
+		return false
+	}
+	entry, err := m.committeeAndParamsForEpoch(epoch)
+	if err != nil || entry == nil || entry.committee == nil {
+		return false
+	}
+	_, ok := entry.committee.VoterIdFor(votingPool)
+	return ok
+}
+
+// slotWindowWarnDue rate-limits the seated-but-not-voting warning. Catching up
+// replays every announcement between the local tip and the network tip, and
+// every one of those is legitimately outside the vote window.
+//
+// Peek and commit are separate so the seating lookup, which can reach the
+// stake provider, only runs for a declination that is actually going to be
+// logged. Two emissions racing between the two calls costs at most an extra
+// warning line.
+func (m *VoteManager) slotWindowWarnDue() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastSlotWindowWarn.IsZero() ||
+		m.now().Sub(m.lastSlotWindowWarn) >= slotWindowWarnInterval
+}
+
+func (m *VoteManager) markSlotWindowWarned() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastSlotWindowWarn = m.now()
 }
 
 // RemoveConnection drops the vote-serving cursor for a closed connection.
