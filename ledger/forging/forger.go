@@ -677,10 +677,12 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 
 	tipSlot := f.slotClock.ChainTipSlot()
 
-	// Skip if a block already exists at the current slot.
-	// When tipSlot >= currentSlot, the chain already has a block at
-	// this slot (possibly from a peer). Producing another would create
-	// a competing block and fork the chain.
+	// Skip if the chain has already moved PAST the current slot.
+	// A tip beyond currentSlot means any block we produced would fork
+	// the chain below its own tip. A tip AT currentSlot is the
+	// contested case and is handled after leader selection below:
+	// ouroboros-consensus mkCurrentBlockContext declines only for GT
+	// and treats EQ as a slot battle.
 	// Count every slot check (matches cardano-node
 	// Forge.about_to_lead)
 	if f.metrics != nil {
@@ -688,10 +690,10 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		f.metrics.tipGapSlots.Set(0)
 	}
 
-	if currentSlot <= tipSlot {
+	if currentSlot < tipSlot {
 		// Detect stale data: if the tip is far ahead of the slot clock,
 		// the database likely contains chain data from a different genesis.
-		// Use subtraction (safe here since tipSlot >= currentSlot from
+		// Use subtraction (safe here since tipSlot > currentSlot from
 		// the outer check) to avoid uint64 overflow on the addition.
 		gap := tipSlot - currentSlot
 		if f.metrics != nil {
@@ -709,11 +711,27 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			)
 		} else {
 			f.logger.Debug(
-				"forge skip: slot already has block",
+				"forge skip: chain tip is ahead of the current slot",
 				"current_slot", currentSlot,
 				"tip_slot", tipSlot,
 			)
 		}
+		return nil
+	}
+
+	// The tip is at the current slot and the block there is one this
+	// node already committed to forging, so the slot-aligned loop has
+	// simply re-entered a slot it already used. Leave without running
+	// leader selection: this is not a contested slot, and the fence
+	// below would refuse it anyway.
+	if currentSlot == tipSlot && f.fenceLoaded &&
+		currentSlot <= f.lastForgedSlot {
+		f.logger.Debug(
+			"forge skip: slot already has our own block",
+			"current_slot", currentSlot,
+			"tip_slot", tipSlot,
+			"last_forged_slot", f.lastForgedSlot,
+		)
 		return nil
 	}
 
@@ -880,6 +898,32 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// the pre-selection gate.
 	if f.metrics != nil {
 		f.metrics.forgeNodeIsLeader.Inc()
+	}
+
+	// A rival block already occupies this leader slot. This is a slot
+	// battle, not a reason to treat the slot as spent: the reference
+	// implementation forges an alternative here (same block number, the
+	// tip's predecessor as parent) and lets the leader VRF and chain
+	// selection arbitrate.
+	//
+	// Dingo cannot build that alternative yet. BlockBuilder binds the
+	// parent to the live chain tip, so a block forged now would name a
+	// parent whose slot equals its own and be rejected by
+	// ledger.validateBlockOrder; binding the tip's predecessor instead
+	// needs a block that does not extend the local tip, which
+	// chain.addBlockLocked refuses. Until that path exists, record the
+	// battle we are declining rather than dropping the slot silently.
+	if currentSlot == tipSlot {
+		if f.metrics != nil {
+			f.metrics.slotBattlesTotal.Inc()
+		}
+		f.incCouldNotForge()
+		f.logger.Warn(
+			"forge skip: leader slot already holds another block; forging an alternative is not supported",
+			"current_slot", currentSlot,
+			"tip_slot", tipSlot,
+		)
+		return nil
 	}
 
 	// Commit to this slot before any signing happens for it, including
