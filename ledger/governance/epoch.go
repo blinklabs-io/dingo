@@ -70,6 +70,7 @@ type EpochInput struct {
 type EpochOutput struct {
 	UpdatedPParams    lcommon.ProtocolParameters
 	PParamsChanged    bool
+	CostModelsChanged bool
 	EnactedCount      int
 	RatifiedCount     int
 	ExpiredCount      int
@@ -165,6 +166,7 @@ func ProcessEpoch(
 		if res.PParamsChanged {
 			out.UpdatedPParams = res.UpdatedPParams
 			out.PParamsChanged = true
+			out.CostModelsChanged = out.CostModelsChanged || res.CostModelsChanged
 			if lcommon.GovActionType(proposal.ActionType) ==
 				lcommon.GovActionTypeHardForkInitiation {
 				out.HardForkInitiated = true

@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
 // ErrNilDecodedOutput is returned when a decoded UTxO output is nil.
@@ -633,9 +634,59 @@ func extractRawCostModels(
 		return p.CostModels
 	case *conway.ConwayProtocolParameters:
 		return p.CostModels
+	case *dijkstra.DijkstraProtocolParameters:
+		return p.CostModels
 	default:
 		return nil
 	}
+}
+
+// withoutSyntheticV2CostModel returns pp unchanged unless the current
+// parameters still contain the model fabricated by HardForkBabbage. In that
+// case it returns a shallow copy with only PlutusV2 removed. The live
+// parameters remain untouched because internal validation needs the fallback
+// until a real governance update arrives.
+func withoutSyntheticV2CostModel(
+	pp lcommon.ProtocolParameters,
+	synthetic bool,
+) lcommon.ProtocolParameters {
+	if !synthetic {
+		return pp
+	}
+	switch p := pp.(type) {
+	case *alonzo.AlonzoProtocolParameters:
+		modified := *p
+		modified.CostModels = withoutPlutusV2CostModel(p.CostModels)
+		return &modified
+	case *babbage.BabbageProtocolParameters:
+		modified := *p
+		modified.CostModels = withoutPlutusV2CostModel(p.CostModels)
+		return &modified
+	case *conway.ConwayProtocolParameters:
+		modified := *p
+		modified.CostModels = withoutPlutusV2CostModel(p.CostModels)
+		return &modified
+	case *dijkstra.DijkstraProtocolParameters:
+		modified := *p
+		modified.CostModels = withoutPlutusV2CostModel(p.CostModels)
+		return &modified
+	default:
+		return pp
+	}
+}
+
+// withoutPlutusV2CostModel returns a new map without the PlutusV2 entry.
+func withoutPlutusV2CostModel(m map[uint][]int64) map[uint][]int64 {
+	if m == nil {
+		return nil
+	}
+	out := make(map[uint][]int64, len(m))
+	for k, v := range m {
+		if k != 1 {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // CommitteeStateAvailable reports whether this view can authoritatively answer

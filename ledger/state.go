@@ -74,6 +74,7 @@ const (
 	ledgerIntersectDenseCount    = 32
 	ledgerAncestorSearchWindow   = 10_000
 	firstBlockIndex              = 1
+	syntheticV2CostModelSyncKey  = "ledger.synthetic_v2_cost_model"
 	mithrilLedgerSlotSyncKey     = "mithril_ledger_slot"
 	mithrilLedgerHashSyncKey     = "mithril_ledger_hash"
 	// blockPipelineDecodeWorkers is the fixed decode worker count for phase 1
@@ -836,6 +837,9 @@ type consensusSnapshot struct {
 	prevEraPParams lcommon.ProtocolParameters
 	epochCache     []models.Epoch
 	transitionInfo hardfork.TransitionInfo
+	// syntheticV2CostModelInEffect mirrors LedgerState.syntheticV2CostModel;
+	// see that field's doc comment.
+	syntheticV2CostModelInEffect bool
 }
 
 // tipSnapshot contains the applied tip and the Praos block nonce belonging to
@@ -908,6 +912,12 @@ type LedgerState struct {
 	slotClock                          *SlotClock
 	slotTickChan                       <-chan SlotTick
 	ctx                                context.Context
+
+	// syntheticV2CostModel is true from the moment HardForkBabbage fabricates
+	// a PlutusV2 cost model until a real governance enactment supplies one.
+	// Internal validation retains the synthetic value; only the
+	// LocalStateQuery reply filters it so callers see committed parameters.
+	syntheticV2CostModel bool
 	// cleanupMu owns timerCleanupConsumedUtxos and serializes cleanup-run
 	// registration against Close. Deliberately not the LedgerState RWMutex:
 	// Close waits on cleanupWG while an in-flight run still needs RLock to
@@ -1225,6 +1235,10 @@ type upstreamSyncState struct {
 type EraTransitionResult struct {
 	NewPParams lcommon.ProtocolParameters
 	NewEra     eras.EraDesc
+	// InjectedSyntheticV2CostModel identifies HardForkBabbage's fallback
+	// PlutusV2 model. A model carried forward from an earlier era is not
+	// synthetic merely because the successor transition also has it.
+	InjectedSyntheticV2CostModel bool
 }
 
 // HardForkInfo holds details about a detected hard fork
@@ -1258,6 +1272,10 @@ type EpochRolloverResult struct {
 	// NewCurrentPParams. It stays false for the initial-epoch path, which never
 	// captures a mark snapshot.
 	BoundarySnapshotDeferred bool
+	// RealV2CostModelObserved records that governance enacted a PlutusV2
+	// model in this rollover. This clears the synthetic marker even when the
+	// enacted value equals Dingo's fallback value.
+	RealV2CostModelObserved bool
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
@@ -1407,8 +1425,9 @@ func (ls *LedgerState) publishSnapshotsLocked() {
 		// element updates; its capped capacity also forces accidental appends to
 		// allocate. Tip-only publications can therefore safely reuse it instead
 		// of copying the full epoch history for every block.
-		epochCache:     ls.epochCache,
-		transitionInfo: ls.transitionInfo,
+		epochCache:                   ls.epochCache,
+		transitionInfo:               ls.transitionInfo,
+		syntheticV2CostModelInEffect: ls.syntheticV2CostModel,
 	})
 	ls.tip.Store(&tipSnapshot{
 		generation:           generation,
@@ -3201,6 +3220,16 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	if ppComputed {
 		ls.currentPParams = newPParams
 		ls.prevEraPParams = newPrevPParams
+		marker := "false"
+		if isSyntheticV2CostModel(newPParams, newPrevPParams) {
+			marker = "true"
+		}
+		if err := ls.db.SetSyncState(
+			syntheticV2CostModelSyncKey, marker, nil,
+		); err != nil {
+			ls.config.Logger.Warn("persist synthetic V2 marker after rollback", "error", err)
+		}
+		ls.syntheticV2CostModel = marker == "true"
 	}
 	ls.lastLocalRollbackSeq++
 	ls.lastLocalRollbackPoint = ocommon.Point{
@@ -3668,6 +3697,10 @@ func (ls *LedgerState) transitionToEraFrom(
 			return nil, fmt.Errorf("hard fork failed: %w", err)
 		}
 		result.NewPParams = newPParams
+		result.InjectedSyntheticV2CostModel = injectedSyntheticV2CostModel(
+			currentPParams,
+			newPParams,
+		)
 		ls.config.Logger.Debug(
 			"updated protocol params",
 			"pparams",
@@ -3687,6 +3720,13 @@ func (ls *LedgerState) transitionToEraFrom(
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to set pparams: %w", err)
+		}
+		if result.InjectedSyntheticV2CostModel {
+			if err := ls.db.SetSyncState(
+				syntheticV2CostModelSyncKey, "true", txn,
+			); err != nil {
+				return nil, fmt.Errorf("persist synthetic V2 marker: %w", err)
+			}
 		}
 		if err := governance.TranslateRatifiedGovActions(
 			ls.db,
@@ -3881,6 +3921,41 @@ func (ls *LedgerState) applyEraTransition(result *EraTransitionResult) {
 	ls.currentEra = result.NewEra
 	// Any pending TransitionKnown is consumed: the new era is now active.
 	ls.transitionInfo = hardfork.NewTransitionUnknown()
+	if result.InjectedSyntheticV2CostModel {
+		ls.syntheticV2CostModel = true
+	}
+}
+
+// injectedSyntheticV2CostModel reports whether an era transition added the
+// exact fallback model used by HardForkBabbage to make PlutusV2 validation
+// available before governance has enacted a model. It deliberately requires
+// the key to be absent before the transition, so a real model is never
+// classified as synthetic.
+func injectedSyntheticV2CostModel(
+	before, after lcommon.ProtocolParameters,
+) bool {
+	afterV2, ok := extractRawCostModels(after)[1]
+	if !ok {
+		return false
+	}
+	if _, hadV2 := extractRawCostModels(before)[1]; hadV2 {
+		return false
+	}
+	return slices.Equal(afterV2, eras.DefaultPlutusV2CostModel)
+}
+
+func isSyntheticV2CostModel(
+	current, previous lcommon.ProtocolParameters,
+) bool {
+	currentV2, ok := extractRawCostModels(current)[1]
+	if !ok || !slices.Equal(currentV2, eras.DefaultPlutusV2CostModel) {
+		return false
+	}
+	previousV2, hadPreviousV2 := extractRawCostModels(previous)[1]
+	// After the Babbage transition, subsequent eras carry the fallback model
+	// forward. It remains synthetic when the previous value is that same
+	// fallback; a different previous model proves that governance supplied it.
+	return !hadPreviousV2 || slices.Equal(previousV2, eras.DefaultPlutusV2CostModel)
 }
 
 // IsAtTip reports whether the node has caught up to the chain tip at least
@@ -5366,6 +5441,9 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				ls.currentEpoch = rolloverResult.NewCurrentEpoch
 				ls.currentEra = rolloverResult.NewCurrentEra
 				ls.currentPParams = rolloverResult.NewCurrentPParams
+				if rolloverResult.RealV2CostModelObserved {
+					ls.syntheticV2CostModel = false
+				}
 				ls.checkpointWrittenForEpoch = rolloverResult.CheckpointWrittenForEpoch
 				ls.metrics.epochNum.Set(rolloverResult.NewEpochNum)
 				// New epoch: any TransitionImpossible set for the previous
@@ -6933,6 +7011,17 @@ func (ls *LedgerState) loadPParams() error {
 	}
 	ls.currentPParams = pp
 	ls.prevEraPParams = prevPP
+	marker, markerErr := ls.db.GetSyncState(syntheticV2CostModelSyncKey, nil)
+	if markerErr != nil {
+		return fmt.Errorf("load synthetic V2 marker: %w", markerErr)
+	}
+	if marker == "" {
+		marker = "false"
+		if isSyntheticV2CostModel(pp, prevPP) {
+			marker = "true"
+		}
+	}
+	ls.syntheticV2CostModel = marker == "true"
 	ls.publishSnapshotsLocked()
 	return nil
 }
@@ -7678,6 +7767,9 @@ func (ls *LedgerState) setEpochCache(
 	ls.currentEpoch = rolloverResult.NewCurrentEpoch
 	ls.currentEra = rolloverResult.NewCurrentEra
 	ls.currentPParams = rolloverResult.NewCurrentPParams
+	if rolloverResult.RealV2CostModelObserved {
+		ls.syntheticV2CostModel = false
+	}
 	ls.checkpointWrittenForEpoch = rolloverResult.CheckpointWrittenForEpoch
 	ls.metrics.epochNum.Set(rolloverResult.NewEpochNum)
 	return nil

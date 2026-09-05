@@ -53,8 +53,9 @@ type EnactmentContext struct {
 // the in-memory protocol parameters (ParameterChange, HardForkInitiation).
 // The caller is responsible for persisting UpdatedPParams via SetPParams.
 type EnactmentResult struct {
-	UpdatedPParams lcommon.ProtocolParameters
-	PParamsChanged bool
+	UpdatedPParams    lcommon.ProtocolParameters
+	PParamsChanged    bool
+	CostModelsChanged bool
 }
 
 // EnactProposal applies the side effects of a ratified governance
@@ -89,6 +90,8 @@ func EnactProposal(
 		}
 		result.UpdatedPParams = updated
 		result.PParamsChanged = true
+		model, ok := a.ParamUpdate.CostModels[1]
+		result.CostModelsChanged = ok && model != nil
 
 	case *gdijkstra.DijkstraParameterChangeGovAction:
 		updated, err := ctx.UpdateFn(ctx.PParams, a.ParamUpdate)
@@ -97,6 +100,8 @@ func EnactProposal(
 		}
 		result.UpdatedPParams = updated
 		result.PParamsChanged = true
+		model, ok := a.ParamUpdate.CostModels[1]
+		result.CostModelsChanged = ok && model != nil
 
 	case *lcommon.HardForkInitiationGovAction:
 		updated, err := setProtocolVersion(
