@@ -155,7 +155,8 @@ type Node struct {
 	// tick only needs to know whether a REBUILD is in flight -- not
 	// whether an unrelated, non-rebuilding Snapshot happens to be
 	// running, which this mutex would otherwise make indistinguishable.
-	liveLifecycleMu sync.Mutex
+	liveLifecycleMu     sync.Mutex
+	selectedNonePending atomic.Bool
 
 	// snapshotMu serializes Snapshot calls against each other and against
 	// a concurrent Restore/Truncate (which closes n.db out from under an

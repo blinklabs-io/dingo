@@ -420,7 +420,9 @@ func (s *State) GetClientConnId() *ouroboros.ConnectionId {
 // ID. This is used when chain selection determines a new best
 // peer. A stale selection for an unavailable client is ignored.
 func (s *State) SetClientConnId(connId ouroboros.ConnectionId) {
-	s.TrySetClientConnId(connId)
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	s.activeClientConnId = &connId
 }
 
 // TrySetClientConnId sets the active chainsync client after a chain-selection
@@ -786,6 +788,14 @@ func (s *State) UpdateClientTipWithoutDedup(
 	tip ochainsync.Tip,
 ) {
 	s.updateClientTip(connId, point, tip, false)
+}
+
+// RecordHeader records a header in the cross-peer deduplication cache after
+// the caller has completed any synchronous eligibility checks.
+func (s *State) RecordHeader(connId ouroboros.ConnectionId, point ocommon.Point) bool {
+	isNew := s.processHeader(connId, point)
+	s.maybePruneSeenHeaders()
+	return isNew
 }
 
 // RewindTrackedClientsTo rewinds tracked client cursors that sit ahead of the

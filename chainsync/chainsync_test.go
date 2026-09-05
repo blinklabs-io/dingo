@@ -893,7 +893,7 @@ func TestClientRemovedEvent(t *testing.T) {
 
 	conn := newTestConnId(1)
 	s.AddClientConnId(conn)
-	require.True(t, s.TrySetClientConnId(conn))
+	s.SetClientConnId(conn)
 	s.RemoveClientConnId(conn)
 
 	evt := testutil.RequireReceive(
