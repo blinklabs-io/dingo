@@ -1229,19 +1229,6 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `chainselection.selected_none` | ChainSelector | Best-peer selection transitioned to none (selection stalled) |
 | `chainselection.peer_rollback_handler_panic` | ChainSelector | The PeerRollbackEvent handler panicked; its subscription was torn down |
 | `chainselection.evaluation_panic` | ChainSelector | A background evaluation tick or triggered evaluation panicked; the transition it would have produced was dropped |
-
-Every `chainselection.*` topic above except the two panic topics is published
-through `ChainSelector.publishSelection`, which uses `PublishOrdered` rather
-than `Publish`. The selector's producers are all goroutines that have to keep
-making progress — the EventBus dispatch goroutines for the internal
-`chainselection.peer_activity`, `chainselection.peer_tip_update` and
-`connmanager.conn_closed` subscriptions, plus the selector's own evaluation
-loop — and an inline `Publish` parks its caller on any subscriber that has
-stopped draining. Routing every selector publication through the same per-type
-lanes keeps delivery and per-topic order while confining a blocked subscriber
-to that lane's worker. Publishing one of these topics directly would reintroduce
-the hazard, because a queued chain switch could then be overtaken by one
-published inline.
 | `chainsync.client_added` | ChainsyncState | Client tracking added |
 | `chainsync.client_removed` | ChainsyncState | Client tracking removed |
 | `chainsync.client_synced` | ChainsyncState | Client caught up |
@@ -1276,6 +1263,27 @@ published inline.
 | `peergov.quota_status` | PeerGov | Quota status update |
 | `peergov.bootstrap_exited` | PeerGov | Exited bootstrap mode |
 | `peergov.bootstrap_recovery` | PeerGov | Bootstrap recovery |
+
+The six topics the ChainSelector publishes itself —
+`chainselection.chain_switch`, `selection`, `peer_evicted`,
+`genesis_corroboration_failed`, `genesis_mode_exited` and `selected_none` —
+go through `ChainSelector.publishSelection`, which uses `PublishOrdered` rather
+than `Publish`. The selector's producers are all goroutines that have to keep
+making progress — the EventBus dispatch goroutines for the internal
+`chainselection.peer_activity`, `chainselection.peer_tip_update` and
+`connmanager.conn_closed` subscriptions, plus the selector's own evaluation
+loop — and an inline `Publish` parks its caller on any subscriber that has
+stopped draining. Routing every selector publication through the same per-type
+lanes keeps delivery and per-topic order while confining a blocked subscriber
+to that lane's worker. Publishing one of these six directly would reintroduce
+the hazard, because a queued chain switch could then be overtaken by one
+published inline.
+
+The other three `chainselection.*` topics are not on ordered lanes and are not
+covered by that guarantee: `chainselection.peer_tip_update` is published inline
+by the ouroboros chainsync path and by node wiring, not by the selector, and
+the two panic topics are published inline from the selector's own recovery
+paths, where the point is to report before the goroutine unwinds.
 
 ### EventBus Features
 
@@ -1320,8 +1328,10 @@ published inline.
   logs `event subscriber handler not making progress` (with `stuck_for`,
   `queued`, `buffer`) once per `handlerProgressWarnInterval` (30s) for any
   handler that has not returned, counting it in
-  `event_subscriber_handler_stalled_total`. `EventBus.StuckHandlerCount()`
-  exposes the same condition programmatically
+  `event_subscriber_handler_stalled_total`. Registering a `SubscribeFunc`
+  subscription materializes that counter's zero-valued series, so a healthy
+  bus is distinguishable from a missing subscription.
+  `EventBus.StuckHandlerCount()` exposes the same condition programmatically
 - **Never `Publish`, `PublishAsync`, `PublishOrdered`, or `PublishBlocking`
   while holding a lock that a subscriber of that event acquires.** All four can
   wait for capacity, and a subscriber that is merely slow is still allowed the
