@@ -323,15 +323,34 @@ func headerInvalidationEvent(
 	point ocommon.Point,
 	reason string,
 	seq uint64,
+	rbHashes []lcommon.Blake2b256,
 ) event.Event {
 	return event.NewEvent(
 		ChainHeaderEventType,
 		ChainHeaderInvalidationEvent{
-			Point:  point,
-			Reason: reason,
-			Seq:    seq,
+			Point:    point,
+			RbHashes: rbHashes,
+			Reason:   reason,
+			Seq:      seq,
 		},
 	)
+}
+
+// queuedHeaderHashes names the headers currently in the queue, for an
+// invalidation that must identify them individually. Callers must hold
+// c.mutex.
+func (c *Chain) queuedHeaderHashes() []lcommon.Blake2b256 {
+	if len(c.headers) == 0 {
+		return nil
+	}
+	hashes := make([]lcommon.Blake2b256, 0, len(c.headers))
+	for _, queued := range c.headers {
+		hashes = append(
+			hashes,
+			lcommon.NewBlake2b256(queued.point.Hash),
+		)
+	}
+	return hashes
 }
 
 // nextHeaderSeqLocked stamps the next chain-mutation sequence number. Callers
@@ -378,6 +397,12 @@ func (c *Chain) AddLocalBlock(block ledger.Block) error {
 	if err != nil {
 		return err
 	}
+	// addBlockLocked queued a header invalidation for the peer headers this
+	// block discarded on the chain-level sequencer. Drain it here, with
+	// c.mutex released: forging is the only caller, it runs on the scheduler
+	// goroutine rather than under a ledger mutex, and nothing else on this
+	// path is guaranteed to drain afterwards.
+	c.PublishPendingChainUpdates()
 	if c.eventBus != nil && evt.Type != "" {
 		c.eventBus.Publish(ChainUpdateEventType, evt)
 	}
@@ -585,9 +610,11 @@ func (c *Chain) addBlockLocked(
 		c.blocks = append(c.blocks, tmpPoint)
 	}
 	// Remove matching header entry, if any
+	var discardedHeaders []lcommon.Blake2b256
 	if matchPendingHeader && len(c.headers) > 0 {
 		c.headers = slices.Delete(c.headers, 0, 1)
 	} else if !matchPendingHeader {
+		discardedHeaders = c.queuedHeaderHashes()
 		c.headers = c.headers[:0]
 	}
 	// Update tip
@@ -597,6 +624,21 @@ func (c *Chain) addBlockLocked(
 	}
 	c.tipBlockIndex = newBlockIndex
 	c.mutationGeneration++
+	// A locally forged block discards the queued peer headers without
+	// rolling anything back, so nothing else voids the Leios announcements
+	// they carried: the chain.update this produces is a block add, not a
+	// rollback. The chain grew, so those headers can sit at or below the
+	// new tip and Point cannot name them -- RbHashes does. Enqueued under
+	// c.mutex like every other header-lifecycle event, so it stays ordered
+	// against the announcements addBlockHeader queues.
+	if len(discardedHeaders) > 0 {
+		c.queueDeferredEventLocked(headerInvalidationEvent(
+			c.currentTip.Point,
+			HeaderInvalidationLocalBlock,
+			c.nextHeaderSeqLocked(),
+			discardedHeaders,
+		))
+	}
 	if notifyWaiters {
 		c.notifyWaitingIterators()
 	}
@@ -1372,7 +1414,8 @@ func (c *Chain) rollbackLocked(
 		if idx >= 0 {
 			// Rollback point is a queued header. Drop only the headers
 			// after it and leave the matched header itself queued.
-			dropped := len(c.headers) - (idx + 1)
+			discarded := c.queuedHeaderHashes()[idx+1:]
+			dropped := len(discarded)
 			c.headers = slices.Delete(c.headers, idx+1, len(c.headers))
 			// Those headers never become blocks, so any announcement
 			// they carried is void. This path returns no chain.update
@@ -1384,6 +1427,7 @@ func (c *Chain) rollbackLocked(
 					point,
 					HeaderInvalidationRollback,
 					c.nextHeaderSeqLocked(),
+					discarded,
 				))
 			}
 			return nil, nil
@@ -1481,6 +1525,7 @@ func (c *Chain) rollbackLocked(
 		c.lastCommonBlockIndex = rollbackBlockIndex
 	}
 	// Clear out any headers
+	discardedHeaders := c.queuedHeaderHashes()
 	c.headers = slices.Delete(c.headers, 0, len(c.headers))
 	// Update tip
 	c.currentTip = ochainsync.Tip{
@@ -1543,6 +1588,7 @@ func (c *Chain) rollbackLocked(
 		point,
 		HeaderInvalidationRollback,
 		rollbackSeq,
+		discardedHeaders,
 	))
 	if len(rolledBackBlocks) > 0 {
 		// Rollback event - only emit when blocks were actually removed
@@ -1602,7 +1648,8 @@ func (c *Chain) ClearHeaders() {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	hadHeaders := len(c.headers) > 0
+	discarded := c.queuedHeaderHashes()
+	hadHeaders := len(discarded) > 0
 	c.headers = c.headers[:0]
 	// Discarded headers never become blocks, so any announcement they
 	// carried is void, and no rollback is published for them because no
@@ -1613,6 +1660,7 @@ func (c *Chain) ClearHeaders() {
 			c.currentTip.Point,
 			HeaderInvalidationQueueCleared,
 			c.nextHeaderSeqLocked(),
+			discarded,
 		))
 	}
 }

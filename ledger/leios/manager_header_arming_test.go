@@ -376,14 +376,28 @@ func publishHeaderInvalidation(
 	reason string,
 	seq uint64,
 ) {
+	publishHeaderInvalidationNaming(fixture, slot, reason, seq, nil)
+}
+
+// publishHeaderInvalidationNaming is publishHeaderInvalidation for a discard
+// the point cannot describe, where the chain grew past the dropped headers and
+// they are named individually instead.
+func publishHeaderInvalidationNaming(
+	fixture *managerFixture,
+	slot uint64,
+	reason string,
+	seq uint64,
+	rbHashes []lcommon.Blake2b256,
+) {
 	fixture.eventBus.Publish(
 		chain.ChainHeaderEventType,
 		event.NewEvent(
 			chain.ChainHeaderEventType,
 			chain.ChainHeaderInvalidationEvent{
-				Point:  ocommon.Point{Slot: slot},
-				Reason: reason,
-				Seq:    seq,
+				Point:    ocommon.Point{Slot: slot},
+				RbHashes: rbHashes,
+				Reason:   reason,
+				Seq:      seq,
 			},
 		),
 	)
@@ -927,4 +941,117 @@ func TestVoteManagerRollbackDeliveredBeforeHeaderStreamIsSafe(t *testing.T) {
 	fixture.mgr.mu.Lock()
 	defer fixture.mgr.mu.Unlock()
 	assert.NotContains(t, fixture.mgr.announcements, rbHash)
+}
+
+// TestVoteManagerLocalBlockInvalidationDropsNamedAnnouncement covers the
+// discard a locally forged block causes. The chain grows rather than shrinks,
+// so the discarded peer header can sit at or below the new tip and the point
+// alone cannot name it -- the invalidation names it explicitly. Without this,
+// a producer that admits an announcing header and then forges on the same
+// parent keeps that announcement armed and votes for a ranking block that is
+// not on its chain, leaving the vote id occupied by an abandoned fork.
+func TestVoteManagerLocalBlockInvalidationDropsNamedAnnouncement(t *testing.T) {
+	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
+	fixture := newHeaderArmingFixture(t, slots)
+	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
+
+	peerRb := lcommon.NewBlake2b256([]byte("peer-rb"))
+	peerEb := lcommon.NewBlake2b256([]byte("peer-eb"))
+	voteId := lcommon.LeiosVoteId{
+		SlotNo:  headerArmingRbSlot,
+		VoterId: headerArmingSeatedVoterId,
+	}
+	armAndVote(
+		t, fixture, emittedCh, headerArmingRbSlot, peerRb, peerEb, 1,
+	)
+	require.Len(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{voteId}), 1)
+
+	// The locally forged block lands at a HIGHER slot than the discarded
+	// peer header, so a point-based rule would keep the announcement.
+	publishHeaderInvalidationNaming(
+		fixture,
+		headerArmingRbSlot+10,
+		chain.HeaderInvalidationLocalBlock,
+		2,
+		[]lcommon.Blake2b256{peerRb},
+	)
+	testutil.WaitForCondition(t, func() bool {
+		return len(
+			fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{voteId}),
+		) == 0
+	}, 2*time.Second, "the discarded header's vote is dropped")
+
+	fixture.mgr.mu.Lock()
+	assert.NotContains(t, fixture.mgr.announcements, peerRb)
+	assert.NotContains(t, fixture.mgr.votedAnnouncements, peerRb)
+	assert.NotContains(t, fixture.mgr.voteRecords, voteId)
+	assert.NotContains(t, fixture.mgr.acquiredEbs, peerEb)
+	assert.Empty(t, fixture.mgr.tallies)
+	fixture.mgr.mu.Unlock()
+
+	// The vote id is free, so the block that actually won the slot can be
+	// voted on.
+	localRb := lcommon.NewBlake2b256([]byte("local-rb"))
+	localEb := lcommon.NewBlake2b256([]byte("local-eb"))
+	revote := armAndVote(
+		t, fixture, emittedCh, headerArmingRbSlot, localRb, localEb, 3,
+	)
+	assert.Equal(t, localRb, revote.Vote.AnnouncingRbHash)
+}
+
+// TestVoteManagerLocalBlockInvalidationKeepsUnnamedAnnouncements pins that a
+// named-header invalidation drops only what it names. The forged block's own
+// announcement, and any other header still on the chain, must survive -- the
+// producer must not invalidate its own vote.
+func TestVoteManagerLocalBlockInvalidationKeepsUnnamedAnnouncements(
+	t *testing.T,
+) {
+	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
+	fixture := newHeaderArmingFixture(t, slots)
+	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
+
+	discardedRb := lcommon.NewBlake2b256([]byte("discarded-rb"))
+	discardedEb := lcommon.NewBlake2b256([]byte("discarded-eb"))
+	keptRb := lcommon.NewBlake2b256([]byte("kept-rb"))
+	keptEb := lcommon.NewBlake2b256([]byte("kept-eb"))
+	keptSlot := uint64(headerArmingRbSlot - 5)
+
+	armAndVote(
+		t, fixture, emittedCh, headerArmingRbSlot, discardedRb, discardedEb, 1,
+	)
+	armAndVote(t, fixture, emittedCh, keptSlot, keptRb, keptEb, 2)
+	keptVoteId := lcommon.LeiosVoteId{
+		SlotNo:  keptSlot,
+		VoterId: headerArmingSeatedVoterId,
+	}
+
+	// Point is above both announcements, so only the naming saves the one
+	// that is still on the chain.
+	publishHeaderInvalidationNaming(
+		fixture,
+		headerArmingRbSlot+10,
+		chain.HeaderInvalidationLocalBlock,
+		3,
+		[]lcommon.Blake2b256{discardedRb},
+	)
+	testutil.WaitForCondition(t, func() bool {
+		fixture.mgr.mu.Lock()
+		defer fixture.mgr.mu.Unlock()
+		_, still := fixture.mgr.announcements[discardedRb]
+		return !still
+	}, 2*time.Second, "named announcement dropped")
+
+	assert.Len(
+		t,
+		fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{keptVoteId}),
+		1,
+		"an announcement the invalidation does not name keeps its vote",
+	)
+	fixture.mgr.mu.Lock()
+	defer fixture.mgr.mu.Unlock()
+	assert.Contains(t, fixture.mgr.announcements, keptRb)
+	assert.Contains(t, fixture.mgr.voteRecords, keptVoteId)
+	assert.Contains(t, fixture.mgr.acquiredEbs, keptEb)
 }

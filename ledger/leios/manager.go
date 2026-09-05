@@ -2755,14 +2755,26 @@ func (m *VoteManager) handleChainHeaderInvalidation(
 	if evt.Seq > m.lastHeaderStreamSeq {
 		m.lastHeaderStreamSeq = evt.Seq
 	}
+	// Two rules, because a chain can lose headers by shrinking or by
+	// growing past them. Point covers the shrink (rollback, discarded
+	// queue): everything above it is gone. RbHashes covers the grow (a
+	// locally forged block replacing queued peer headers), where the
+	// discarded headers can sit at or below the new tip and no point-based
+	// rule can name them.
+	named := make(map[lcommon.Blake2b256]struct{}, len(evt.RbHashes))
+	for _, rbHash := range evt.RbHashes {
+		named[rbHash] = struct{}{}
+	}
 	invalidated := make(map[lcommon.Blake2b256]struct{})
 	for rbHash, record := range m.announcements {
-		if record.slot > evt.Point.Slot {
-			delete(m.announcements, rbHash)
-			delete(m.votedAnnouncements, rbHash)
-			m.removePendingAnnouncementLocked(rbHash)
-			invalidated[rbHash] = struct{}{}
+		_, byHash := named[rbHash]
+		if !byHash && record.slot <= evt.Point.Slot {
+			continue
 		}
+		delete(m.announcements, rbHash)
+		delete(m.votedAnnouncements, rbHash)
+		m.removePendingAnnouncementLocked(rbHash)
+		invalidated[rbHash] = struct{}{}
 	}
 	if len(invalidated) == 0 {
 		return
@@ -2773,6 +2785,7 @@ func (m *VoteManager) handleChainHeaderInvalidation(
 		"dropped leios announcements for headers no longer on our chain",
 		"point_slot", evt.Point.Slot,
 		"reason", evt.Reason,
+		"named_headers", len(evt.RbHashes),
 		"dropped_announcements", len(invalidated),
 		"dropped_votes", droppedVotes,
 	)

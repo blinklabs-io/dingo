@@ -1027,6 +1027,17 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	if !ok {
 		return
 	}
+	// This handler discards the header queue when the dead connection owned
+	// the header pipeline, which queues a chain.header invalidation on the
+	// chain-level sequencer. Register the drain before the mutexes are taken
+	// so defer's LIFO order publishes it after they are released. Without
+	// it the invalidation waits for an unrelated handler to drain, and a
+	// peer stalling is exactly the case where no further event is
+	// guaranteed -- the announcement would stay armed past the vote window.
+	// See pendingPublishes and chain.Chain.PublishPendingChainUpdates.
+	var pending pendingPublishes
+	defer pending.flush()
+	pending.drainChain(ls.chain)
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
 	ls.chainsyncBlockfetchMutex.Lock()
@@ -1395,6 +1406,20 @@ func (ls *LedgerState) bufferHeaderEvent(e ChainsyncEvent) {
 	ls.bufferedHeaderEvents[key] = events
 }
 
+// clearQueuedHeaders discards the header queue. Chain.ClearHeaders enqueues a
+// chain.header invalidation on the chain-level sequencer for the announcements
+// those headers carried, so every caller must ensure that sequencer is drained
+// once its own lock is released -- in practice by registering
+// pending.drainChain(ls.chain) in the handler that owns the call.
+//
+// The registration deliberately lives in the handlers rather than here. This
+// function has no access to the caller's pendingPublishes, and drainChain's
+// nil-receiver behaviour is to publish immediately; at all but two of its call
+// sites that would happen while chainsyncMutex or chainsyncBlockfetchMutex is
+// held, which is precisely the drain deadlock pendingPublishes exists to
+// prevent. Threading a required non-nil queue through all of them and their
+// callers would touch the most deadlock-sensitive code in the ledger for no
+// behavioural gain at the sites that already register it.
 func (ls *LedgerState) clearQueuedHeaders() {
 	ls.chain.ClearHeaders()
 	// The blockfetch range-failure record is deliberately NOT cleared here.
@@ -6691,6 +6716,14 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 	currentConnId ouroboros.ConnectionId,
 	pending *pendingPublishes,
 ) {
+	// This path discards the header queue and restarts blockfetch, both of
+	// which enqueue chain.header events on the chain-level sequencer. A
+	// blockfetch timeout means the peer stopped sending, so no later handler
+	// is guaranteed to drain it and an announcement would stay armed past
+	// the vote window. Registered here rather than in the timer callback so
+	// every caller of this function is covered. See
+	// chain.Chain.PublishPendingChainUpdates.
+	pending.drainChain(ls.chain)
 	if ls.blockfetchPrimaryRequestGeneration != 0 {
 		// The protocol request is still blocked outside the ledger mutex. Do
 		// not issue a duplicate range request while it is in flight; the
