@@ -250,6 +250,7 @@ RETURNING id`,
 					point,
 					index,
 					certDeposits,
+					false,
 				)
 				if err != nil {
 					return err
@@ -466,14 +467,11 @@ RETURNING id`,
 				return err
 			}
 			if transaction.IsValid() {
-				// Gap blocks do not carry calculated deposits, but their
-				// certificates must still be materialized before outputs are
-				// resolved. An empty map records zero for unavailable deposit
-				// data while preserving the certificate coordinates needed by
-				// pointer addresses in the same gap block.
+				// Gap blocks do not carry calculated deposits. Preserve NULL for
+				// unknown deposit-bearing certificates; zero is a real value.
 				if _, err := s.applyTransactionCertificates(
 					ctx, db, transactionID, transaction.Certificates(),
-					point, index, map[int]uint64{},
+					point, index, nil, true,
 				); err != nil {
 					return err
 				}
