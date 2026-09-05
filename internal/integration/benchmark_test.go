@@ -20,16 +20,22 @@ import (
 	"path/filepath"
 	"testing"
 
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 )
 
-// loadBlockData loads real block data from testdata chunks for benchmarking
-func loadBlockData(numBlocks int) ([][]byte, error) {
-	var blocks [][]byte
+// loadImmutableBlocks loads numBlocks real blocks -- hash, type, slot, and
+// CBOR together, so a caller that needs a block whose (hash, type, slot)
+// genuinely match its own CBOR (e.g. for a cloud backend's content
+// verification, which independently re-derives all three from the bytes)
+// can use them as a set instead of only the raw CBOR loadBlockData exposes.
+func loadImmutableBlocks(numBlocks int) ([]immutable.Block, error) {
+	var blocks []immutable.Block
 	// Use absolute path to testdata directory by going up from the current package
 	// internal/integration -> internal -> root -> database/immutable/testdata
 	testdataDir := filepath.Join(
@@ -72,7 +78,7 @@ func loadBlockData(numBlocks int) ([][]byte, error) {
 			break
 		}
 
-		blocks = append(blocks, block.Cbor)
+		blocks = append(blocks, *block)
 	}
 
 	if len(blocks) == 0 {
@@ -92,6 +98,42 @@ func loadBlockData(numBlocks int) ([][]byte, error) {
 	}
 
 	return blocks[:numBlocks], nil
+}
+
+// loadBlockData loads real block CBOR from testdata chunks for benchmarking.
+func loadBlockData(numBlocks int) ([][]byte, error) {
+	blocks, err := loadImmutableBlocks(numBlocks)
+	if err != nil {
+		return nil, err
+	}
+	cbors := make([][]byte, len(blocks))
+	for i, block := range blocks {
+		cbors[i] = block.Cbor
+	}
+	return cbors, nil
+}
+
+// TestLoadImmutableBlocksAreSelfConsistent proves loadImmutableBlocks'
+// (Hash, Type, Slot) actually match the block each one names -- decoding
+// the CBOR under the recorded Type must reproduce the same hash and slot.
+// storage_migration_test.go's blob dataset depends on exactly this: S3 and
+// GCS independently re-derive a block's identity from its bytes before
+// returning it (blockverify.Hash, database/plugin/blob/internal/
+// blockverify, which this mirrors without importing across that internal
+// package boundary), so a migration fixture using a real block's own
+// (hash, type, slot) rather than arbitrary placeholders only exercises the
+// migration path this test is for if the three genuinely agree with the
+// bytes to begin with.
+func TestLoadImmutableBlocksAreSelfConsistent(t *testing.T) {
+	blocks, err := loadImmutableBlocks(1)
+	require.NoError(t, err)
+	block := blocks[0]
+
+	decoded, err := gledger.NewBlockFromCbor(block.Type, block.Cbor)
+	require.NoError(t, err)
+	gotHash := decoded.Hash()
+	require.Equal(t, block.Hash, gotHash[:])
+	require.Equal(t, block.Slot, decoded.SlotNumber())
 }
 
 // storageBenchBackend is one storage backend under benchmark: a display name,

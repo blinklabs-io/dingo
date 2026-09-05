@@ -585,35 +585,39 @@ func (t *Txn) rollback() error {
 	defer t.finishLocked()
 	var errs []error
 	if t.blobTxn != nil {
-		if err := safeProviderRollback(t.blobTxn); err != nil {
+		if err := safeProviderRollback(t.logger(), t.blobTxn); err != nil {
 			errs = append(errs, fmt.Errorf("blob rollback: %w", err))
 		}
 	}
 	if t.metadataTxn != nil {
-		if err := safeProviderRollback(t.metadataTxn); err != nil {
+		if err := safeProviderRollback(t.logger(), t.metadataTxn); err != nil {
 			errs = append(errs, fmt.Errorf("metadata rollback: %w", err))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// safeProviderRollback calls txn.Rollback(), recovering and converting to
-// an ErrTxnPanic-wrapped error any panic it raises. Without this, a panic
-// from the blob store's Rollback would skip the metadata store's Rollback
-// entirely (and vice versa): rollback's own finishLocked defer would still
-// mark the transaction finished, but finished is exactly what makes a
-// later Rollback/Release call a no-op, so there would be no way to ever
-// retry the provider whose Rollback never ran -- silently leaking its
-// connection/transaction for the process's lifetime. The error is wrapped
-// with ErrTxnPanic (not a bare fmt.Errorf) so the panic contract holds
-// regardless of which of Do's two call paths reaches this: Do's own
-// recovery-path rollback (already wrapping) and the ordinary path, where
-// fn returned a normal error and this provider's Rollback then panics
-// while cleaning up -- errors.Is(err, ErrTxnPanic) must identify that
-// panic too, not just the one that triggered Do's own recover.
-func safeProviderRollback(txn types.Txn) (err error) {
+// safeProviderRollback calls txn.Rollback(), recovering, logging, and
+// converting to an ErrTxnPanic-wrapped error any panic it raises. Without
+// the recovery, a panic from the blob store's Rollback would skip the
+// metadata store's Rollback entirely (and vice versa): rollback's own
+// finishLocked defer would still mark the transaction finished, but
+// finished is exactly what makes a later Rollback/Release call a no-op, so
+// there would be no way to ever retry the provider whose Rollback never
+// ran -- silently leaking its connection/transaction for the process's
+// lifetime. logTxnPanic is called here directly (not left to a caller)
+// because this can be reached from Do's ordinary-error path -- fn
+// returned a normal error, and this provider's Rollback then panics while
+// cleaning up -- which has no other recover site to log through; the
+// panic contract promises every panic is logged, not just the ones that
+// happen to bubble through Do's own recovery block. The error is wrapped
+// with ErrTxnPanic (not a bare fmt.Errorf) for the matching reason:
+// errors.Is(err, ErrTxnPanic) must identify this panic too, regardless of
+// which of Do's two call paths reaches it.
+func safeProviderRollback(logger *slog.Logger, txn types.Txn) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
+			logTxnPanic(logger, "panic during provider rollback", r)
 			err = NewTxnPanicError("provider rollback", r)
 		}
 	}()
