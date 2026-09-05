@@ -1085,6 +1085,18 @@ type LedgerState struct {
 	syncUpstreamTipSlot  atomic.Uint64 // latest admitted peer header slot
 	syncUpstreamState    atomic.Pointer[upstreamSyncState]
 	nextNonceReadyEpoch  atomic.Uint64 // last ready epoch emitted for next-epoch nonce stability
+	// consumedUtxoPruneFloor mirrors database.ConsumedUtxoPruneFloor: the
+	// highest slot the consumed-UTxO sweep has hard-deleted spent rows at or
+	// below. Rolling back below it cannot restore what the sweep removed, so
+	// rollback refuses instead of reporting a repair it did not perform
+	// (issue #3766). Written by the cleanup timer goroutine and read by the
+	// ledger pipeline goroutine, hence atomic rather than lock-protected.
+	consumedUtxoPruneFloor atomic.Uint64
+	// consumedUtxoPruneFloorLoaded records whether the mirror above actually
+	// holds the persisted value. A failed read must not present itself as
+	// "nothing has been swept", so callers fall back to a direct read and
+	// refuse the rollback if that fails too.
+	consumedUtxoPruneFloorLoaded atomic.Bool
 
 	// Rate-limiting for non-active rollback drop messages
 	dropRollbackLastLog time.Time // last time we logged a drop rollback
@@ -1474,6 +1486,7 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	}
 
 	ls.loadMithrilTrustBoundary()
+	ls.loadConsumedUtxoPruneFloor()
 
 	// Initialize database worker pool for async operations
 	if !ls.config.DatabaseWorkerPoolConfig.Disabled {
@@ -1649,6 +1662,78 @@ func (ls *LedgerState) subscribeBlockfetchEvents(
 		event.SubscriberBackpressureBlock,
 		handler,
 	)
+}
+
+// loadConsumedUtxoPruneFloor seeds the in-memory mirror of the persisted
+// consumed-UTxO prune floor at startup, so the first rollback of a restarted
+// node is bounded by sweeps performed in earlier runs and not only by sweeps
+// this process has done.
+func (ls *LedgerState) loadConsumedUtxoPruneFloor() {
+	floor, err := ls.db.ConsumedUtxoPruneFloor(nil)
+	if err != nil {
+		ls.config.Logger.Error(
+			"failed to read consumed UTxO prune floor",
+			"component", "ledger",
+			"error", err,
+		)
+		return
+	}
+	ls.consumedUtxoPruneFloor.Store(floor)
+	ls.consumedUtxoPruneFloorLoaded.Store(true)
+}
+
+// recordConsumedUtxoPruneFloor raises the in-memory mirror after a sweep has
+// hard-deleted spent rows at or below slot. The floor only moves up: a sweep
+// at a lower slot does not make rows an earlier, higher sweep removed
+// restorable again.
+func (ls *LedgerState) recordConsumedUtxoPruneFloor(slot uint64) {
+	for {
+		current := ls.consumedUtxoPruneFloor.Load()
+		if slot <= current {
+			break
+		}
+		if ls.consumedUtxoPruneFloor.CompareAndSwap(current, slot) {
+			break
+		}
+	}
+	ls.consumedUtxoPruneFloorLoaded.Store(true)
+}
+
+// consumedUtxoPruneFloorSlot returns the deepest slot a rollback may target and
+// still be able to restore every UTxO consumed above it.
+//
+// It fails closed. When the persisted floor could not be read at startup the
+// mirror is not authoritative, so this re-reads it; if that read also fails the
+// error is returned and the caller refuses the rollback. Treating an
+// unreadable floor as "nothing has been swept" would re-open exactly the silent
+// divergence the floor exists to refuse.
+func (ls *LedgerState) consumedUtxoPruneFloorSlot() (uint64, error) {
+	if ls.consumedUtxoPruneFloorLoaded.Load() {
+		return ls.consumedUtxoPruneFloor.Load(), nil
+	}
+	if ls.db == nil {
+		return 0, nil
+	}
+	floor, err := ls.db.ConsumedUtxoPruneFloor(nil)
+	if err != nil {
+		return 0, err
+	}
+	ls.consumedUtxoPruneFloor.Store(floor)
+	ls.consumedUtxoPruneFloorLoaded.Store(true)
+	return floor, nil
+}
+
+// rollbackBelowConsumedUtxoPruneFloor reports whether rolling back to point
+// would leave the live UTxO set short of outputs the consumed-UTxO sweep
+// already removed.
+func (ls *LedgerState) rollbackBelowConsumedUtxoPruneFloor(
+	point ocommon.Point,
+) (bool, uint64, error) {
+	floor, err := ls.consumedUtxoPruneFloorSlot()
+	if err != nil {
+		return false, 0, err
+	}
+	return floor > 0 && point.Slot < floor, floor, nil
 }
 
 func (ls *LedgerState) loadMithrilTrustBoundary() {
@@ -2810,8 +2895,9 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 		// No lock needed here - the database handles its own consistency
 		// and we're not accessing any in-memory LedgerState fields.
 		// The tipSlot was captured above with a read lock.
-		_, err := ls.db.UtxosDeleteConsumed(
-			tipSlot-stabilityWindow,
+		pruneSlot := tipSlot - stabilityWindow
+		pruned, err := ls.db.UtxosDeleteConsumed(
+			pruneSlot,
 			cleanupConsumedUtxoBatchSize,
 			nil,
 		)
@@ -2821,6 +2907,14 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 				"component", "ledger",
 				"error", err,
 			)
+			return
+		}
+		// These rows are gone for good: TruncateAfterSlot restores spent
+		// UTxOs with an UPDATE, which cannot reach a row that no longer
+		// exists. Mirror the floor the database just persisted so rollback
+		// refuses to target a point below it (issue #3766).
+		if pruned > 0 {
+			ls.recordConsumedUtxoPruneFloor(pruneSlot)
 		}
 	}
 }
@@ -2929,6 +3023,40 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	}
 	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
 		return ErrRollbackExceedsMithrilBoundary
+	}
+	// Refuse a target the consumed-UTxO sweep has already made unrestorable.
+	// TruncateAfterSlot restores spent UTxOs with an UPDATE keyed on
+	// deleted_slot, so rows the sweep hard-deleted cannot come back; rolling
+	// back below the sweep floor would move the tip and report a repair while
+	// leaving the live set short of every output consumed above the target.
+	// Refusing before any mutation leaves the ledger where it was (issue
+	// #3766).
+	belowPruneFloor, pruneFloor, floorErr := ls.rollbackBelowConsumedUtxoPruneFloor(
+		point,
+	)
+	if floorErr != nil {
+		return fmt.Errorf(
+			"determine consumed UTxO prune floor: %w",
+			floorErr,
+		)
+	}
+	if belowPruneFloor {
+		ls.config.Logger.Error(
+			"rollback target is below the consumed UTxO prune floor, refusing to rewind",
+			"component", "ledger",
+			"rollback_slot", point.Slot,
+			"rollback_hash", hex.EncodeToString(point.Hash),
+			"ledger_tip_slot", currentTip.Point.Slot,
+			"utxo_prune_floor_slot", pruneFloor,
+			"hint",
+			"UTxOs consumed above the prune floor were hard-deleted and cannot be restored by a rewind",
+		)
+		return fmt.Errorf(
+			"%w: target slot %d, prune floor %d",
+			ErrRollbackBelowUtxoPruneFloor,
+			point.Slot,
+			pruneFloor,
+		)
 	}
 	// Bracket every rollback mutation so split reward precomputation cannot
 	// persist results that mixed pre- and post-rollback blocks, pots, protocol
@@ -3326,6 +3454,27 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 	ls.RUnlock()
 	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
 		return ErrRollbackExceedsMithrilBoundary
+	}
+	// Check the consumed-UTxO prune floor here as well as in ls.rollback:
+	// this function truncates the primary chain first and synchronizes the
+	// ledger afterwards, so a refusal raised only by ls.rollback would leave
+	// the chain rewound past a point the ledger cannot follow (issue #3766).
+	belowPruneFloor, pruneFloor, floorErr := ls.rollbackBelowConsumedUtxoPruneFloor(
+		point,
+	)
+	if floorErr != nil {
+		return fmt.Errorf(
+			"determine consumed UTxO prune floor: %w",
+			floorErr,
+		)
+	}
+	if belowPruneFloor {
+		return fmt.Errorf(
+			"%w: target slot %d, prune floor %d",
+			ErrRollbackBelowUtxoPruneFloor,
+			point.Slot,
+			pruneFloor,
+		)
 	}
 	// Exclude ledgerReadChainIterator's gather-then-submit cycle for the
 	// entire remainder of this function -- see blockPipelineGatherMutex's

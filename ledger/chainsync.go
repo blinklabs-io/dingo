@@ -186,6 +186,16 @@ var ErrRollbackExceedsMithrilBoundary = errors.New(
 	"rollback exceeds Mithril trust boundary",
 )
 
+// ErrRollbackBelowUtxoPruneFloor reports a rollback target below the slot the
+// consumed-UTxO sweep has hard-deleted spent rows at or below. Those rows are
+// gone, and database.TruncateAfterSlot restores spent UTxOs with an UPDATE, so
+// the rewind cannot reconstruct the live set the target implies. The rollback
+// is refused with the ledger untouched rather than performed and reported as a
+// repair (issue #3766).
+var ErrRollbackBelowUtxoPruneFloor = errors.New(
+	"rollback below consumed UTxO prune floor",
+)
+
 // ErrNoAppliedAncestorBelowContestedSlot reports that a rollback target shares
 // the applied tip's slot with a different hash and no applied ancestor below
 // that slot could be found to rewind to. The contested slot's effects cannot be
@@ -2193,9 +2203,10 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 // rollbackIsAppliable reports whether rollbackChainAndState(point) would
 // succeed right now, without mutating any state. It mirrors the pre-checks
 // rollbackChainAndState relies on for its block-not-found / exceeds-K /
-// exceeds-Mithril failures: the point must sit at or above the Mithril trust
-// anchor, and the chain must be able to roll back to it (target block present
-// and within the security parameter K, verified via chain.ValidateRollback).
+// exceeds-Mithril / below-prune-floor failures: the point must sit at or above
+// the Mithril trust anchor and at or above the consumed-UTxO prune floor, and
+// the chain must be able to roll back to it (target block present and within
+// the security parameter K, verified via chain.ValidateRollback).
 //
 // The loop detector uses this to decide whether a repeated rollback is a
 // crossable point that must be applied (issue #2790) rather than a genuinely
@@ -2208,6 +2219,14 @@ func (ls *LedgerState) rollbackIsAppliable(point ocommon.Point) bool {
 	}
 	mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
 	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
+		return false
+	}
+	// A target below the consumed-UTxO prune floor is not crossable either:
+	// the rows the rewind would have to restore were hard-deleted, so
+	// rollbackChainAndState refuses it (issue #3766). An unreadable floor
+	// fails closed here for the same reason it does there.
+	belowPruneFloor, _, err := ls.rollbackBelowConsumedUtxoPruneFloor(point)
+	if err != nil || belowPruneFloor {
 		return false
 	}
 	return ls.chain.ValidateRollback(point) == nil

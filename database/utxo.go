@@ -1064,6 +1064,17 @@ func (d *Database) UtxosDeleteConsumed(
 		return 0, err
 	}
 
+	// Record how deep spent rows have been removed, in the same transaction
+	// that removes them. TruncateAfterSlot restores spent UTxOs with an
+	// UPDATE, which cannot reach a row that no longer exists, so a rollback
+	// below this slot silently leaves the live set short of every output
+	// consumed above it (issue #3766).
+	if utxoCount > 0 {
+		if err := d.setConsumedUtxoPruneFloor(slot, txn); err != nil {
+			return 0, err
+		}
+	}
+
 	if owned {
 		if err := txn.Commit(); err != nil {
 			return 0, err
