@@ -4886,10 +4886,10 @@ func ledgerPipelineRetryDelay(
 func certifiedEndorserBlockPipelineRetryDelay(
 	consecutiveNoProgress int,
 ) time.Duration {
-	delay := certifiedEndorserBlockRetryDelay
-	if backoff, _ := ledgerPipelineBackoff(consecutiveNoProgress); backoff > delay {
-		delay = backoff
-	}
+	delay, _ := ledgerPipelineRetryDelay(
+		consecutiveNoProgress,
+		certifiedEndorserBlockRetryDelay,
+	)
 	return delay
 }
 
