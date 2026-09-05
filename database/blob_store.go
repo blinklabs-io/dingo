@@ -54,6 +54,18 @@ import (
 //     wrap the previous store rather than retiring it, and closing a store
 //     still reachable through a wrapper would break the wrapper.
 //
+//   - One consequence of "never closes" is load-bearing beyond drain.
+//     Txn.Commit's partial-commit path (types.ErrPartialCommit: the blob
+//     transaction committed, the metadata did not) releases the Txn's pin
+//     when the transaction finishes, but the recovery that trims the blob
+//     store back to the metadata tip runs later and from the caller —
+//     LedgerState.RecoverCommitTimestampConflict — against the store
+//     installed at that point. The pin is deliberately not held across that
+//     gap: recovery is caller-scheduled and unbounded, so holding one would
+//     block drain for as long as recovery is pending. What makes the gap
+//     safe is that the replaced store stays open and stays reachable, since
+//     the wrapper installed over it forwards to it.
+//
 // Blob returns the currently installed store without a pin. It is the
 // accessor for callers that only need to identify, wrap, or ask a
 // whole-store question of the current store (bark wrapping it, a DiskSize

@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -416,5 +417,75 @@ func TestResolveUtxoCborUsesTransactionStore(t *testing.T) {
 		t,
 		replacement.getUtxo.Load(),
 		"ResolveUtxoCbor ran the transaction's handle through the store installed after it was opened",
+	)
+}
+
+// missingBlockBlobStore is a passthrough whose GetBlock always reports the
+// block absent. Installing one stands in for a replacement that does not
+// contain what the store it replaced did.
+type missingBlockBlobStore struct {
+	blob.BlobStore
+}
+
+func (s *missingBlockBlobStore) GetBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) ([]byte, types.BlockMetadata, error) {
+	return nil, types.BlockMetadata{}, types.ErrBlobKeyNotFound
+}
+
+// TestBlobIteratorKeepsBatchStoreAcrossReplacement covers the iterator's half
+// of the pairing rule. BlobBlockIterator scans a batch of block keys from one
+// store and then reads each block's CBOR back in a later call, so the scan and
+// the reads have to run against the same store: NextRaw treats a block whose
+// CBOR is missing as skippable and logs a warning, so a replacement between
+// the two would drop blocks from the iteration silently rather than failing.
+func TestBlobIteratorKeepsBatchStoreAcrossReplacement(t *testing.T) {
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	base := db.Blob()
+	require.NotNil(t, base)
+
+	// Fewer than blobIteratorBatchSize blocks, so the whole iteration is
+	// served by one batch and one scan.
+	slots := []uint64{10, 20, 30, 40, 50}
+	for _, slot := range slots {
+		hash := make([]byte, 32)
+		hash[0] = byte(slot)
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot: slot,
+			Hash: hash,
+			Cbor: []byte{0x82, byte(slot), 0x01},
+			Type: 1,
+		}, nil))
+	}
+
+	iter := db.BlocksFromSlot(0)
+	t.Cleanup(iter.Close)
+
+	// The first call scans the batch, pinning the store it scanned.
+	first, err := iter.NextRaw()
+	require.NoError(t, err)
+	require.NotNil(t, first)
+	require.Equal(t, slots[0], first.Slot)
+
+	db.SetBlobStore(&missingBlockBlobStore{BlobStore: base})
+	t.Cleanup(func() { db.SetBlobStore(base) })
+
+	var got []uint64
+	for {
+		next, nextErr := iter.NextRaw()
+		require.NoError(t, nextErr)
+		if next == nil {
+			break
+		}
+		got = append(got, next.Slot)
+	}
+	require.Equal(
+		t,
+		slots[1:],
+		got,
+		"blocks scanned before the replacement must still be read from the store they were scanned in",
 	)
 }

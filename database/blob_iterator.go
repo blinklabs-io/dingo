@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
@@ -61,6 +62,18 @@ type BlobBlockIterator struct {
 	// resumeKey is the blob key to seek past when fetching the next batch.
 	// nil means start from the beginning (or from startSlot).
 	resumeKey []byte
+
+	// batchStore is the blob store batch's keys were scanned from, and
+	// batchRelease the pin that keeps that store usable until the batch
+	// has been consumed. Every entry in batch is read back through
+	// batchStore, so the scan that found a key and the read that fetches
+	// its CBOR can never land on two different installations: a
+	// SetBlobStore in between would otherwise make a block that exists in
+	// the scanned store look absent in the new one, and NextRaw skips a
+	// missing block with a warning rather than reporting it. Both fields
+	// are set and cleared together, under mu.
+	batchStore   blob.BlobStore
+	batchRelease func()
 }
 
 // BlocksFromSlot returns an iterator that yields blocks starting from
@@ -111,6 +124,9 @@ func (it *BlobBlockIterator) NextRaw() (*BlobBlockResult, error) {
 		// Refill batch if needed
 		if it.batchIdx >= len(it.batch) {
 			if it.exhausted {
+				// Nothing left to read through the batch's
+				// store, so stop holding it open.
+				it.releaseBatchPinLocked()
 				return nil, nil
 			}
 			if err := it.fetchBatch(); err != nil {
@@ -118,6 +134,7 @@ func (it *BlobBlockIterator) NextRaw() (*BlobBlockResult, error) {
 			}
 			if len(it.batch) == 0 {
 				it.exhausted = true
+				it.releaseBatchPinLocked()
 				return nil, nil
 			}
 		}
@@ -173,24 +190,54 @@ func (it *BlobBlockIterator) Close() {
 	it.closed = true
 	it.batch = nil
 	it.resumeKey = nil
+	it.releaseBatchPinLocked()
+}
+
+// releaseBatchPinLocked drops the pin held for the current batch, if any.
+// The fields are cleared before the pin is released, so a repeat call is a
+// no-op rather than an unmatched WaitGroup.Done -- which matters because
+// both Close (idempotent by contract) and the exhaustion paths in NextRaw
+// call it. Callers must hold it.mu.
+func (it *BlobBlockIterator) releaseBatchPinLocked() {
+	if it.batchRelease == nil {
+		return
+	}
+	release := it.batchRelease
+	it.batchRelease = nil
+	it.batchStore = nil
+	release()
 }
 
 // fetchBatch retrieves the next batch of block keys from the blob store.
 // Must be called with it.mu held.
 func (it *BlobBlockIterator) fetchBatch() error {
-	blob, releaseBlob := it.db.PinBlob()
-	defer releaseBlob()
-	if blob == nil {
+	// The previous batch is about to be replaced, so the store it was
+	// scanned from is no longer needed. The new pin is held past this
+	// function, until the batch it scans has been consumed.
+	it.releaseBatchPinLocked()
+	store, releaseBlob := it.db.PinBlob()
+	if store == nil {
+		releaseBlob()
 		return types.ErrBlobStoreUnavailable
 	}
+	it.batchStore = store
+	it.batchRelease = releaseBlob
+	// A batch that is never produced has nothing to read back, so every
+	// error return below drops the pin it just took.
+	scanned := false
+	defer func() {
+		if !scanned {
+			it.releaseBatchPinLocked()
+		}
+	}()
 
-	txn := blob.NewTransaction(false)
+	txn := store.NewTransaction(false)
 	defer txn.Rollback() //nolint:errcheck
 
 	iterOpts := types.BlobIteratorOptions{
 		Prefix: []byte(types.BlockBlobKeyPrefix),
 	}
-	blobIter := blob.NewIterator(txn, iterOpts)
+	blobIter := store.NewIterator(txn, iterOpts)
 	if blobIter == nil {
 		return errors.New("blob iterator is nil")
 	}
@@ -289,6 +336,7 @@ func (it *BlobBlockIterator) fetchBatch() error {
 		it.exhausted = true
 	}
 
+	scanned = true
 	return nil
 }
 
@@ -298,16 +346,17 @@ func (it *BlobBlockIterator) fetchBlock(
 	slot uint64,
 	hash []byte,
 ) ([]byte, types.BlockMetadata, error) {
-	blob, releaseBlob := it.db.PinBlob()
-	defer releaseBlob()
-	if blob == nil {
+	// The store this batch's keys came from, held by the batch's own pin
+	// -- not whichever store is installed now. See batchStore.
+	store := it.batchStore
+	if store == nil {
 		return nil, types.BlockMetadata{}, types.ErrBlobStoreUnavailable
 	}
 
-	txn := blob.NewTransaction(false)
+	txn := store.NewTransaction(false)
 	defer txn.Rollback() //nolint:errcheck
 
-	return blob.GetBlock(txn, slot, hash)
+	return store.GetBlock(txn, slot, hash)
 }
 
 // buildSlotSeekKey constructs a blob key prefix for seeking to a specific slot.

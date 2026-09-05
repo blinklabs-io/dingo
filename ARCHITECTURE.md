@@ -7476,10 +7476,14 @@ releases at `Commit`/`Rollback`/`Release` (through the same `finishLocked` that
 releases the commit barrier), and `Txn.BlobStore()` returns the store it
 pinned: the store and the `types.Txn` handle opened on it therefore always come
 from the same installation, which re-reading `Blob()` mid-transaction would not
-guarantee. Blob work that runs outside a transaction — the blob block iterator,
-the blob-store identity mint, `lifecycle.Snapshot`'s backup call, and
+guarantee. Blob work that runs outside a transaction — the blob-store identity
+mint, `lifecycle.Snapshot`'s backup call, and
 `LedgerState.cleanupOrphanedBlobs` — brackets itself with `Database.PinBlob`
-and the release func it returns. Work that may or may not be handed a
+and the release func it returns. `BlobBlockIterator` holds its pin for the
+lifetime of a batch rather than a call: it scans a batch of block keys from one
+store and reads each block's CBOR back in a later `NextRaw`, and a replacement
+between the two would make a scanned block look absent, which `NextRaw` skips
+with a warning instead of reporting. Work that may or may not be handed a
 transaction follows the same rule from one place: the tiered CBOR cache's cold
 path (`ResolveUtxoCbor`, `ResolveTxCbor`) takes the caller's `*database.Txn`
 and resolves through that transaction's store when it has one, pinning the
@@ -7498,6 +7502,16 @@ returns: a second installation of the same store counts its pins separately.
 `Blob()` deliberately hands back an unpinned reference for callers that only
 identify, wrap, or ask a whole-store question of the current store; its result
 must be used within the call that obtained it.
+
+"Never closes" also covers partial-commit recovery. When `Txn.Commit` returns
+`types.ErrPartialCommit` the blob transaction has committed and the metadata
+has not, and the transaction releases its pin as it finishes; the recovery that
+trims the blob store back to the metadata tip runs afterwards, from
+`LedgerState.RecoverCommitTimestampConflict`, against the store installed at
+that point. No pin spans that gap on purpose — recovery is caller-scheduled and
+unbounded, so a pin held for it would block drain indefinitely. The replaced
+store staying open, reachable through the wrapper installed over it, is what
+keeps recovery correct.
 
 `LedgerState` publishes its read-mostly state through two copy-on-write
 snapshots. The consensus snapshot groups the current epoch, era, current and
