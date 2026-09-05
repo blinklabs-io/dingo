@@ -190,6 +190,12 @@ func (p pinnedArtifact) verifyResolved(snapshot *SnapshotListItem) error {
 			snapshot.Beacon.Epoch, snapshot.Beacon.ImmutableFileNumber,
 		)
 	}
+	if p.CertificateHash != "" && snapshot.CertificateHash != p.CertificateHash {
+		return fmt.Errorf(
+			"resuming pinned Mithril artifact %s: certificate changed",
+			p.Digest,
+		)
+	}
 	return nil
 }
 

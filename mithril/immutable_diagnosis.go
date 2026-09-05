@@ -184,13 +184,7 @@ func (e *ImmutableArchiveError) Unwrap() error {
 func redactLocationURI(raw string) string {
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" {
-		if idx := strings.Index(raw, "?"); idx >= 0 {
-			raw = raw[:idx]
-		}
-		if raw == "" {
-			return "unparsable location"
-		}
-		return raw
+		return "unparsable location"
 	}
 	redacted := url.URL{
 		Scheme: parsed.Scheme,

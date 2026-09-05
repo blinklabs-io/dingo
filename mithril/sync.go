@@ -631,6 +631,17 @@ func Sync(
 		BootstrapConfig{
 			OnChunkContiguous: chunkHook,
 			OnArtifactSelected: func(sel SelectedArtifact) error {
+				if pinnedDigest != "" {
+					if normalizeBackend(sel.Backend) != resumePin.Backend ||
+						sel.Network != resumePin.Network ||
+						sel.Digest != resumePin.Digest ||
+						sel.Beacon.Epoch != resumePin.Epoch ||
+						sel.Beacon.ImmutableFileNumber != resumePin.ImmutableFileNumber ||
+						(resumePin.CertificateHash != "" &&
+							sel.CertificateHash != resumePin.CertificateHash) {
+						return fmt.Errorf("resuming pinned Mithril artifact %s: selected artifact changed", pinnedDigest)
+					}
+				}
 				return setPinnedArtifact(db, pinnedArtifact{
 					Backend:             normalizeBackend(sel.Backend),
 					Network:             sel.Network,
