@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/plugin"
@@ -28,6 +29,21 @@ func (n *Node) Stop() error {
 		n.shutdownErr = n.shutdown()
 	})
 	return n.shutdownErr
+}
+
+func lockMutexContext(ctx context.Context, mutex *sync.Mutex) error {
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if mutex.TryLock() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (n *Node) closeWithShutdownTimeout(
@@ -87,17 +103,38 @@ func (n *Node) configuredShutdownTimeout() time.Duration {
 }
 
 func (n *Node) shutdown() error {
+	shutdownTimeout := n.configuredShutdownTimeout()
+	lockCtx, cancelLocks := context.WithTimeout(
+		context.Background(), shutdownTimeout,
+	)
+	defer cancelLocks()
+
 	// Run holds this gate until startup has either completed or rolled back.
 	// In particular, a signal can reach Stop while Run is still unwinding a
 	// failed startup; waiting here keeps the phase-ordered shutdown from
 	// concurrently closing a component the startup stack is stopping.
-	n.startupLifecycleMu.Lock()
+	if err := lockMutexContext(lockCtx, &n.startupLifecycleMu); err != nil {
+		return fmt.Errorf("shutdown startup lifecycle lock: %w", err)
+	}
 	defer n.startupLifecycleMu.Unlock()
+	// Restore and Truncate hold these gates while quiescing, closing, and
+	// rebuilding storage-dependent components. Shutdown must take the same
+	// gates, in the same order, before cancelling those components or closing
+	// their storage; otherwise a concurrent live operation can use a resource
+	// while shutdown tears it down.
+	if err := lockMutexContext(lockCtx, &n.liveLifecycleMu); err != nil {
+		return fmt.Errorf("shutdown live lifecycle lock: %w", err)
+	}
+	defer n.liveLifecycleMu.Unlock()
+	if err := lockMutexContext(lockCtx, &n.snapshotMu); err != nil {
+		return fmt.Errorf("shutdown snapshot lock: %w", err)
+	}
+	defer n.snapshotMu.Unlock()
 
-	shutdownStart := time.Now()
-	shutdownTimeout := n.configuredShutdownTimeout()
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
+	shutdownStart := time.Now()
+
 	if n.cancel != nil {
 		n.cancel()
 	}
