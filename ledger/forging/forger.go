@@ -672,14 +672,27 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			f.metrics.tipGapSlots.Set(float64(gap))
 		}
 		if gap > f.forgeStaleGapThresholdSlots {
-			f.logger.Error(
-				"chain tip is far ahead of slot clock; database may contain data from a different genesis",
+			// This gate also runs before leader selection, so it
+			// swallows a scheduled leader slot as silently as the
+			// skips routed through logGateSkip. The stale-genesis
+			// diagnosis stays at Error, but carry the same
+			// leader_slot marker so a lost block is still
+			// attributable. Reuse isScheduledLeaderSlot rather
+			// than repeating the schedule lookup.
+			attrs := []any{
 				"current_slot",
 				currentSlot,
 				"tip_slot",
 				tipSlot,
 				"slot_gap",
 				gap,
+			}
+			if f.isScheduledLeaderSlot(currentSlot) {
+				attrs = append(attrs, "leader_slot", true)
+			}
+			f.logger.Error(
+				"chain tip is far ahead of slot clock; database may contain data from a different genesis",
+				attrs...,
 			)
 		} else {
 			f.logGateSkip(
