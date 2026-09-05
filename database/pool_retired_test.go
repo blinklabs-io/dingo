@@ -24,10 +24,12 @@ import (
 )
 
 // retiredPoolFixture seeds one pool with an explicit certificate history so
-// GetPoolKeyHashesRetiredByEpoch's ordering rules can be exercised directly.
-// Every registration and retirement gets a real transaction/certs row, so
-// added_slot ties are broken by block_index then cert_index exactly the way
-// a same-block registration and retirement would be on chain.
+// the pool-retirement queries' ordering rules can be exercised directly.
+// Every certificate-backed registration and retirement gets a real
+// transaction/certs row, so added_slot ties are broken by block_index then
+// cert_index exactly the way a same-block registration and retirement would
+// be on chain. A retirement marked synthetic gets neither, matching what
+// Store.RetirePools writes.
 type retiredPoolFixture struct {
 	keyHash []byte
 	regs    []retiredPoolCert
