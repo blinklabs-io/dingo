@@ -312,14 +312,16 @@ func (ls *LedgerState) verifyBlockHeaderCryptoWithEpochAdvance(
 	allowEpochCacheAdvance bool,
 	allowStateDefer bool,
 ) error {
-	epoch, err := ls.verifyBlockHeaderStatelessCrypto(
+	epoch, epochCache, err := ls.verifyBlockHeaderStatelessCryptoWithCache(
 		block,
 		allowEpochCacheAdvance,
 	)
 	if err != nil {
 		return err
 	}
-	return ls.verifyBlockHeaderState(block, epoch.EpochId, allowStateDefer)
+	return ls.verifyBlockHeaderStateWithCache(
+		block, epoch.EpochId, epochCache, allowStateDefer,
+	)
 }
 
 func (ls *LedgerState) verifyBlockHeaderStateWithEpochAdvance(
@@ -330,20 +332,32 @@ func (ls *LedgerState) verifyBlockHeaderStateWithEpochAdvance(
 	if block.Era().Id == byron.EraIdByron {
 		return nil
 	}
-	epoch, err := ls.headerVerificationEpoch(
+	epoch, epochCache, err := ls.headerVerificationEpochWithCache(
 		block.SlotNumber(),
 		allowEpochCacheAdvance,
 	)
 	if err != nil {
 		return err
 	}
-	return ls.verifyBlockHeaderState(block, epoch.EpochId, allowStateDefer)
+	return ls.verifyBlockHeaderStateWithCache(
+		block, epoch.EpochId, epochCache, allowStateDefer,
+	)
 }
 
 func (ls *LedgerState) verifyBlockHeaderStatelessCrypto(
 	block ledger.Block,
 	allowEpochCacheAdvance bool,
 ) (models.Epoch, error) {
+	epoch, _, err := ls.verifyBlockHeaderStatelessCryptoWithCache(
+		block, allowEpochCacheAdvance,
+	)
+	return epoch, err
+}
+
+func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithCache(
+	block ledger.Block,
+	allowEpochCacheAdvance bool,
+) (models.Epoch, []models.Epoch, error) {
 	// Byron uses PBFT rather than Praos. Validate its exact signature,
 	// configured genesis issuer, protocol magic, and current-slot bound before
 	// avoiding the Praos epoch/nonce lookups below. Ordered active-delegation
@@ -351,21 +365,21 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCrypto(
 	// pre-validation cannot see earlier blocks in the same batch.
 	if block.Era().Id == byron.EraIdByron {
 		err := ls.validateByronPBFTHeaderCrypto(block)
-		return models.Epoch{}, err
+		return models.Epoch{}, nil, err
 	}
 
 	blockSlot := block.SlotNumber()
-	epoch, err := ls.headerVerificationEpoch(
+	epoch, epochCache, err := ls.headerVerificationEpochWithCache(
 		blockSlot,
 		allowEpochCacheAdvance,
 	)
 	if err != nil {
-		return models.Epoch{}, err
+		return models.Epoch{}, nil, err
 	}
 
 	slotsPerKesPeriod := ls.SlotsPerKESPeriod()
 	if slotsPerKesPeriod == 0 {
-		return models.Epoch{}, fmt.Errorf(
+		return models.Epoch{}, nil, fmt.Errorf(
 			"shelley genesis not available for block header verification at slot %d",
 			blockSlot,
 		)
@@ -376,7 +390,7 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCrypto(
 		ls.epochNonceHex(epoch.EpochId, epoch.Nonce),
 		slotsPerKesPeriod,
 	); err != nil {
-		return models.Epoch{}, err
+		return models.Epoch{}, nil, err
 	}
 
 	// Validate the operational certificate's cold-key signature and KES
@@ -388,14 +402,14 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCrypto(
 		slotsPerKesPeriod,
 		ls.maxKESEvolutions(),
 	); err != nil {
-		return models.Epoch{}, fmt.Errorf(
+		return models.Epoch{}, nil, fmt.Errorf(
 			"block header verification failed at slot %d: %w",
 			blockSlot,
 			err,
 		)
 	}
 
-	return epoch, nil
+	return epoch, epochCache, nil
 }
 
 func (ls *LedgerState) headerVerificationEpoch(
@@ -497,9 +511,45 @@ func (ls *LedgerState) headerVerificationEpoch(
 	return epoch, nil
 }
 
+// headerVerificationEpochWithCache pairs the epoch result with the immutable
+// cache that produced it. Retry if an epoch rollover publishes a new cache
+// during the lookup.
+func (ls *LedgerState) headerVerificationEpochWithCache(
+	blockSlot uint64,
+	allowEpochCacheAdvance bool,
+) (models.Epoch, []models.Epoch, error) {
+	for range 3 {
+		before := ls.loadConsensusSnapshot()
+		epoch, err := ls.headerVerificationEpoch(
+			blockSlot, allowEpochCacheAdvance,
+		)
+		if err != nil {
+			return models.Epoch{}, nil, err
+		}
+		after := ls.loadConsensusSnapshot()
+		if before == after {
+			return epoch, after.epochCache, nil
+		}
+	}
+	return models.Epoch{}, nil, fmt.Errorf(
+		"block header verification deferred: epoch cache changed during lookup",
+	)
+}
+
 func (ls *LedgerState) verifyBlockHeaderState(
 	block ledger.Block,
 	epochId uint64,
+	allowStateDefer bool,
+) error {
+	return ls.verifyBlockHeaderStateWithCache(
+		block, epochId, ls.loadConsensusSnapshot().epochCache, allowStateDefer,
+	)
+}
+
+func (ls *LedgerState) verifyBlockHeaderStateWithCache(
+	block ledger.Block,
+	epochId uint64,
+	epochCache []models.Epoch,
 	allowStateDefer bool,
 ) error {
 	if handled, err := ls.verifyGenesisDelegateHeader(
@@ -513,7 +563,7 @@ func (ls *LedgerState) verifyBlockHeaderState(
 	// The crypto path above verifies the VRF proof only against the key carried
 	// in the header (SkipStakePoolValidation skips gouroboros' registered-key
 	// check), so without this an attacker can grind VRF keys to win slots.
-	if err := ls.verifyRegisteredVrfKey(block, epochId); err != nil {
+	if err := ls.verifyRegisteredVrfKeyWithCache(block, epochId, epochCache); err != nil {
 		if allowStateDefer &&
 			(errors.Is(err, models.ErrPoolNotFound) ||
 				errors.Is(err, errVrfKeyRegistrationHistoryUnavailable)) &&
@@ -1389,10 +1439,22 @@ func (ls *LedgerState) electingVrfKeyHash(
 	epochId uint64,
 	poolKeyHash lcommon.PoolKeyHash,
 ) (lcommon.Blake2b256, bool, error) {
-	cutoffSlot, capturedSlot, ok, err := ls.electingPoolParamsCutoffSlot(
+	return ls.electingVrfKeyHashWithCache(
+		block, epochId, poolKeyHash, ls.loadConsensusSnapshot().epochCache,
+	)
+}
+
+func (ls *LedgerState) electingVrfKeyHashWithCache(
+	block ledger.Block,
+	epochId uint64,
+	poolKeyHash lcommon.PoolKeyHash,
+	epochCache []models.Epoch,
+) (lcommon.Blake2b256, bool, error) {
+	cutoffSlot, capturedSlot, ok, err := ls.electingPoolParamsCutoffSlotWithCache(
 		block,
 		epochId,
 		poolKeyHash,
+		epochCache,
 	)
 	if err != nil {
 		return lcommon.Blake2b256{}, false, err
@@ -1477,6 +1539,17 @@ func (ls *LedgerState) electingPoolParamsCutoffSlot(
 	epochId uint64,
 	poolKeyHash lcommon.PoolKeyHash,
 ) (cutoffSlot uint64, capturedSlot uint64, ok bool, err error) {
+	return ls.electingPoolParamsCutoffSlotWithCache(
+		block, epochId, poolKeyHash, ls.loadConsensusSnapshot().epochCache,
+	)
+}
+
+func (ls *LedgerState) electingPoolParamsCutoffSlotWithCache(
+	block ledger.Block,
+	epochId uint64,
+	poolKeyHash lcommon.PoolKeyHash,
+	epochCache []models.Epoch,
+) (cutoffSlot uint64, capturedSlot uint64, ok bool, err error) {
 	snapshotEpoch := praos.StakeSnapshotEpoch(epochId)
 	snapshotType := models.PoolStakeSnapshotTypeMark
 	useImportedActive, err := ls.shouldUseImportedActivePoolDistribution(
@@ -1499,7 +1572,7 @@ func (ls *LedgerState) electingPoolParamsCutoffSlot(
 	if err != nil || snapshot == nil || snapshot.CapturedSlot == 0 {
 		return 0, 0, false, err
 	}
-	capturedEpoch, err := ls.epochForSlot(snapshot.CapturedSlot)
+	capturedEpoch, err := epochForSlotInCache(epochCache, snapshot.CapturedSlot)
 	if err != nil {
 		// The capture predates the epoch cache, so the parameter cutoff
 		// cannot be placed. Report unavailable rather than guessing; the
@@ -1526,6 +1599,16 @@ func (ls *LedgerState) verifyRegisteredVrfKey(
 	block ledger.Block,
 	epochId uint64,
 ) error {
+	return ls.verifyRegisteredVrfKeyWithCache(
+		block, epochId, ls.loadConsensusSnapshot().epochCache,
+	)
+}
+
+func (ls *LedgerState) verifyRegisteredVrfKeyWithCache(
+	block ledger.Block,
+	epochId uint64,
+	epochCache []models.Epoch,
+) error {
 	// Byron (PBFT) blocks have no pool-registered VRF key.
 	if block.Era().Id == byron.EraIdByron {
 		return nil
@@ -1548,10 +1631,11 @@ func (ls *LedgerState) verifyRegisteredVrfKey(
 			block.SlotNumber(),
 		)
 	}
-	registeredVrfKeyHash, ok, err := ls.electingVrfKeyHash(
+	registeredVrfKeyHash, ok, err := ls.electingVrfKeyHashWithCache(
 		block,
 		epochId,
 		poolKeyHash,
+		epochCache,
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -1686,6 +1770,10 @@ func (ls *LedgerState) blockPipelineEta0Provider(slot uint64) (string, error) {
 // Returns the matching epoch or an error if no epoch covers the slot.
 func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
 	cache := ls.loadConsensusSnapshot().epochCache
+	return epochForSlotInCache(cache, slot)
+}
+
+func epochForSlotInCache(cache []models.Epoch, slot uint64) (models.Epoch, error) {
 
 	if len(cache) == 0 {
 		return models.Epoch{}, errors.New("epoch cache is empty")

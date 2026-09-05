@@ -480,6 +480,8 @@ func TestQueryShelleyPoolDistr2_PrefersRegistrationVrfKey(t *testing.T) {
 func TestQueryShelleyPoolDistr2_VrfKeyMatchesHeaderValidation(t *testing.T) {
 	tb := createTestBlock(t, [32]byte{91}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.epochCache = previewEpochs(0, 5, tb.epochNonce)
+	ls.publishSnapshotsLocked()
 
 	headerVrfKey, ok, err := headerVrfKeyFromBodyCbor(tb.block.Header())
 	require.NoError(t, err)
@@ -507,6 +509,19 @@ func TestQueryShelleyPoolDistr2_VrfKeyMatchesHeaderValidation(t *testing.T) {
 			AddedSlot:   1,
 			Pledge:      dbtypes.Uint64(1),
 			Cost:        dbtypes.Uint64(1),
+		},
+		nil,
+	))
+
+	// Save the mark snapshot used by epoch 5 before validation. The non-zero
+	// capture slot forces the snapshot-aligned historical lookup.
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:        4,
+			SnapshotType: snapshotTypeMark,
+			PoolKeyHash:  pkh.Bytes(),
+			TotalStake:   dbtypes.Uint64(2_000_000),
+			CapturedSlot: 4_000_100,
 		},
 		nil,
 	))
