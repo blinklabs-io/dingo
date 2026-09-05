@@ -2256,15 +2256,22 @@ func (ls *LedgerState) rollbackIsAppliable(point ocommon.Point) bool {
 	if ls.chain == nil {
 		return false
 	}
+	ls.RLock()
+	currentTip := ls.currentTip
+	ls.RUnlock()
+	resolved, err := ls.resolveRollbackTarget(point, currentTip)
+	if err != nil {
+		return false
+	}
 	mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
-	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
+	if mithrilLedgerSlot > 0 && resolved.Slot < mithrilLedgerSlot {
 		return false
 	}
 	// A target below the consumed-UTxO prune floor is not crossable either:
 	// the rows the rewind would have to restore were hard-deleted, so
 	// rollbackChainAndState refuses it (issue #3766). An unreadable floor
 	// fails closed here for the same reason it does there.
-	belowPruneFloor, _, err := ls.rollbackBelowConsumedUtxoPruneFloor(point)
+	belowPruneFloor, _, err := ls.rollbackBelowConsumedUtxoPruneFloor(resolved)
 	if err != nil || belowPruneFloor {
 		return false
 	}

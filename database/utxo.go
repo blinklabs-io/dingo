@@ -1027,16 +1027,6 @@ func (d *Database) UtxosDeleteConsumed(
 			}
 		}()
 	}
-	// Read the recorded prune floor before deleting anything. Recording it
-	// afterwards would put a read that can fail -- a malformed or unreadable
-	// persisted value -- after the blob deletions, and a blob transaction that
-	// has already issued irreversible deletes cannot be undone by rolling the
-	// metadata transaction back. Reading first means the only work left after
-	// the deletes is a SetSyncState write.
-	pruneFloor, err := d.ConsumedUtxoPruneFloor(txn)
-	if err != nil {
-		return 0, err
-	}
 	// Get UTxOs that are marked as deleted and older than our slot window
 	utxos, err := d.utxoStore().GetUtxosDeletedBeforeSlot(
 		slot,
@@ -1050,6 +1040,16 @@ func (d *Database) UtxosDeleteConsumed(
 		)
 	}
 	utxoCount := len(utxos)
+	var pruneFloor uint64
+	if utxoCount > 0 {
+		// Read the floor before deleting anything. A malformed or unreadable
+		// value must not follow irreversible blob deletes. No-op sweeps skip
+		// this read so they do not fail on an unused corrupt floor.
+		pruneFloor, err = d.ConsumedUtxoPruneFloor(txn)
+		if err != nil {
+			return 0, err
+		}
+	}
 	deleteUtxos := make([]models.UtxoId, utxoCount)
 	for idx, utxo := range utxos {
 		deleteUtxos[idx] = models.UtxoId{Hash: utxo.TxId, Idx: utxo.OutputIdx}
