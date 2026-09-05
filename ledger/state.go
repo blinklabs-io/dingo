@@ -2971,6 +2971,13 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	currentTip := ls.currentTip
 	mithrilLedgerSlot := ls.mithrilLedgerSlot
 	ls.RUnlock()
+	// The in-memory tip is still needed for the equal-point repair path. The
+	// durable tip is used below for the ahead check because commit callbacks can
+	// leave the in-memory value behind a committed block-apply transaction.
+	durableTip, err := ls.db.GetTip(nil)
+	if err != nil {
+		return fmt.Errorf("read durable ledger tip: %w", err)
+	}
 	if currentTip.Point.Slot == point.Slot &&
 		bytes.Equal(currentTip.Point.Hash, point.Hash) {
 		if err := ls.enforceDurableTipFloor(); err != nil {
@@ -2978,7 +2985,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		}
 		return clearRollbackIntent(ls.db)
 	}
-	if point.Slot > currentTip.Point.Slot {
+	if point.Slot > durableTip.Point.Slot {
 		ls.config.Logger.Debug(
 			"rollback point ahead of ledger tip, skipping metadata rollback",
 			"component", "ledger",
@@ -3014,7 +3021,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	// CIP-0163 reward-account expiration hooks (ledger-owned, since they
 	// need the epoch schedule) and captures the resulting tip/nonce for
 	// the in-memory cache reload below.
-	err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
+	err = ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
 		// CIP-0163: capture the reward-account credentials witnessed in the
 		// rolled-away blocks (added_slot > rollback slot) before
 		// TruncateAfterSlot's certificate/reward-withdrawal deletes remove
