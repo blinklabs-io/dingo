@@ -944,11 +944,34 @@ func epochParamsFromKoios(
 		MaxValueSize:         numOrEmpty(resp.MaxValSize),
 		CollateralPercentage: numOrEmpty(resp.CollateralPercent),
 		MaxCollateralInputs:  numOrEmpty(resp.MaxCollateralInputs),
+		CostModels:           canonicalCostModels(resp.CostModels),
 		Decentralisation:     numOrEmpty(resp.Decentralisation),
 		MinUtxoValue:         strOrEmpty(resp.MinUtxoValue),
 		CoinsPerUtxoSize:     strOrEmpty(resp.CoinsPerUtxoSize),
 		FetchedAt:            now,
 	}
+}
+
+// canonicalCostModels renders Koios's cost models as canonical JSON for the
+// cache: encoding/json sorts map keys, so the same models always produce the
+// same text and a cached row can be compared or diffed without re-parsing
+// order-sensitivity into it. "" when Koios published none (every pre-Alonzo
+// era), which CompareEpochProtocolParams reads as "this era prices no
+// scripts".
+//
+// A marshal failure is impossible for map[string][]int64, but is turned into
+// a deliberately unparseable marker rather than "" so it can never be
+// mistaken for "Koios published no cost models" and quietly skip the
+// comparison.
+func canonicalCostModels(models map[string][]int64) string {
+	if len(models) == 0 {
+		return ""
+	}
+	encoded, err := json.Marshal(models)
+	if err != nil {
+		return "unparseable: " + err.Error()
+	}
+	return string(encoded)
 }
 
 // numOrEmpty dereferences a nullable Koios JSON number, preserving its

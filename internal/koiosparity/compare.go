@@ -15,10 +15,12 @@
 package koiosparity
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -366,11 +368,6 @@ func CompareEpochTotals(
 // Deliberately NOT compared, each verified against real preview data before
 // being excluded:
 //
-//   - cost_models. Koios publishes them as named arrays (PlutusV1/PlutusV2)
-//     while Dingo stores map[uint][]int64; the operation ordering that makes
-//     the two comparable is not established here, and comparing them on an
-//     assumption would produce noise in the one tool whose value depends on
-//     its findings being real.
 //   - coins_per_utxo_size. Koios reports Alonzo's per-word figure (34482 on
 //     preview epochs 0-2) where Dingo stores 4310; the two agree from Babbage
 //     onward. Which side is right for Alonzo needs its own investigation, so
@@ -385,8 +382,8 @@ func CompareEpochTotals(
 //     unverified; adding them unverified is the failure mode this exclusion
 //     list exists to avoid.
 //
-// All four are classified in koiosCoverageMatrix so a report never implies
-// they were checked.
+// All three are classified in koiosCoverageMatrix so a report never implies
+// they were checked. Cost models ARE compared; see compareCostModels.
 //
 // epochEndTime is the actual epoch close time (KoiosEpochInfo.EpochEndTime);
 // zero means unknown, which disables the grace window.
@@ -497,7 +494,171 @@ func CompareEpochProtocolParams(
 		))
 	}
 
+	return append(out, compareCostModels(
+		dingoParams.CostModels,
+		koios.CostModels,
+		mismatch,
+	)...)
+}
+
+// compareCostModels compares the per-language Plutus operation prices.
+//
+// A mispriced operation is wedge-class in the same way a wrong ex-unit limit
+// is: it changes the budget a script transaction is charged, so the two sides
+// disagree about whether a transaction fits. Verified comparable on real
+// preview data — Dingo's stored CBOR decodes to map[uint][]int64 keyed 0 for
+// PlutusV1 and 1 for PlutusV2, Koios publishes the same arrays under those
+// names, and the epoch-107 models agree entry for entry across all 166 and
+// 175 entries. Note this is NOT the same thing as a Plutus budget divergence
+// in general: dingo #3935 is one where the cost models were identical, so
+// this comparison would not have caught it.
+//
+// Findings are reported per language and summarised rather than dumped: a
+// 166-integer array on each side of a mismatch row is unusable, while "entry
+// 42 = 197145 (1 of 166 entries differ)" names the operation to look at. The
+// first differing index is reported because cost-model arrays are positional,
+// so the index IS the operation's identity.
+//
+// koiosJSON is the canonical JSON written by canonicalCostModels; "" means
+// Koios priced no scripts. Text that will not parse is reported rather than
+// skipped, so a corrupt cached row can never turn the whole cost-model
+// comparison into a silent pass.
+func compareCostModels(
+	dingoModels map[string][]int64,
+	koiosJSON string,
+	mismatch func(field, dingoValue, koiosValue, category string) CheckMismatch,
+) []CheckMismatch {
+	var koiosModels map[string][]int64
+	if koiosJSON != "" {
+		if err := json.Unmarshal([]byte(koiosJSON), &koiosModels); err != nil {
+			return []CheckMismatch{mismatch(
+				"pparams_cost_models",
+				costModelSummary(dingoModels),
+				fmt.Sprintf("unparseable: %v", err),
+				CategoryValueMismatch,
+			)}
+		}
+	}
+	if len(dingoModels) == 0 && len(koiosModels) == 0 {
+		// Both sides agree this era prices no scripts.
+		return nil
+	}
+
+	languages := make([]string, 0, len(dingoModels)+len(koiosModels))
+	for language := range dingoModels {
+		languages = append(languages, language)
+	}
+	for language := range koiosModels {
+		if _, ok := dingoModels[language]; !ok {
+			languages = append(languages, language)
+		}
+	}
+	slices.Sort(languages)
+
+	var out []CheckMismatch
+	for _, language := range languages {
+		dingoModel, inDingo := dingoModels[language]
+		koiosModel, inKoios := koiosModels[language]
+		field := costModelFieldName(language)
+		switch {
+		case !inKoios:
+			// Dingo prices a language Koios does not, or vice versa below —
+			// a disagreement about which scripts can run at all.
+			out = append(out, mismatch(
+				field,
+				entryCount(dingoModel),
+				"",
+				CategoryValueMismatch,
+			))
+		case !inDingo:
+			out = append(out, mismatch(
+				field,
+				"",
+				entryCount(koiosModel),
+				CategoryValueMismatch,
+			))
+		case len(dingoModel) != len(koiosModel):
+			// A model of the wrong length misprices every operation from the
+			// first missing one on, so the count is the finding.
+			out = append(out, mismatch(
+				field,
+				entryCount(dingoModel),
+				entryCount(koiosModel),
+				CategoryValueMismatch,
+			))
+		default:
+			first, differing := firstCostModelDifference(dingoModel, koiosModel)
+			if differing == 0 {
+				continue
+			}
+			out = append(out, mismatch(
+				field,
+				fmt.Sprintf(
+					"entry %d = %d (%d of %d entries differ)",
+					first, dingoModel[first], differing, len(dingoModel),
+				),
+				fmt.Sprintf("entry %d = %d", first, koiosModel[first]),
+				CategoryValueMismatch,
+			))
+		}
+	}
 	return out
+}
+
+// firstCostModelDifference returns the lowest index at which two equal-length
+// cost models differ, and how many entries differ in total. differing == 0
+// means the models are identical.
+func firstCostModelDifference(a, b []int64) (first, differing int) {
+	first = -1
+	for i := range a {
+		if a[i] == b[i] {
+			continue
+		}
+		if first < 0 {
+			first = i
+		}
+		differing++
+	}
+	return first, differing
+}
+
+func entryCount(model []int64) string {
+	return fmt.Sprintf("%d entries", len(model))
+}
+
+// costModelSummary describes a whole cost-model set compactly, for the one
+// finding that is about the set rather than a single language.
+func costModelSummary(models map[string][]int64) string {
+	if len(models) == 0 {
+		return ""
+	}
+	languages := make([]string, 0, len(models))
+	for language := range models {
+		languages = append(
+			languages,
+			fmt.Sprintf("%s: %d entries", language, len(models[language])),
+		)
+	}
+	slices.Sort(languages)
+	return strings.Join(languages, ", ")
+}
+
+// costModelFieldName turns a Koios language name into this package's
+// snake_case mismatch field naming ("PlutusV1" -> pparams_cost_model_plutus_v1).
+// Any character that is not a lowercase letter, digit, or underscore is
+// replaced so an unexpected language name still produces a usable field.
+func costModelFieldName(language string) string {
+	name := strings.Replace(strings.ToLower(language), "plutusv", "plutus_v", 1)
+	sanitized := make([]byte, 0, len(name))
+	for i := range len(name) {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' {
+			sanitized = append(sanitized, c)
+			continue
+		}
+		sanitized = append(sanitized, '_')
+	}
+	return "pparams_cost_model_" + string(sanitized)
 }
 
 // ComparePoolEpoch compares per-pool reward-input fields from Dingo's database

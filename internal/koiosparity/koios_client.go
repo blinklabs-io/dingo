@@ -156,11 +156,9 @@ type KoiosPoolHistoryItem struct {
 // parameter (everything from price_mem down is null before Alonzo). "" in the
 // cached KoiosEpochParams means exactly that "not defined", never zero.
 //
-// Deliberately not modeled: cost_models (a ~4KB nested object per epoch
-// whose cross-side representation is unresolved), the Conway governance
-// parameters
+// Deliberately not modeled: the Conway governance parameters
 // (pvt_*/dvt_*/committee_*/gov_action_*/drep_*/min_fee_ref_script_cost_per_byte),
-// and nonce/block_hash/extra_entropy. All are classified explicitly in
+// and nonce/block_hash/extra_entropy. Both are classified explicitly in
 // koiosCoverageMatrix; see CompareEpochProtocolParams for why each is left to
 // follow-up work rather than compared unverified.
 type KoiosEpochParamsResp struct {
@@ -184,6 +182,10 @@ type KoiosEpochParamsResp struct {
 	ProtocolMinor      *json.Number `json:"protocol_minor"`
 	MinUtxoValue       *string      `json:"min_utxo_value"`
 	MinPoolCost        *string      `json:"min_pool_cost"`
+	// CostModels is Koios's name-keyed dict of per-language Plutus operation
+	// prices ("PlutusV1", "PlutusV2", ...). Kept as a raw map of arrays so
+	// the fetch layer can normalise it without committing to a language set.
+	CostModels map[string][]int64 `json:"cost_models"`
 
 	PriceMem            *json.Number `json:"price_mem"`
 	PriceStep           *json.Number `json:"price_step"`

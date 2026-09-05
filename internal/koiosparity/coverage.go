@@ -552,13 +552,15 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Reason:   "Koios reports Alonzo's per-word figure where Dingo stores per-byte (34482 vs 4310 on preview epochs 0-2); cached for reference pending its own investigation",
 	},
 
-	// Documented /epoch_params fields this checker does not model at all.
-	// Classified here so a report never implies they were checked.
+	// cost_models is modeled and compared; the fields after it are documented
+	// /epoch_params fields this checker does not model at all, classified
+	// here so a report never implies they were checked.
 	{
-		Endpoint: "/epoch_params",
-		Field:    "cost_models",
-		Class:    CoverageUnsupported,
-		Reason:   "Koios publishes named PlutusV1/V2 arrays against Dingo's map[uint][]int64; the operation ordering that makes them comparable is not established, so they are neither fetched nor compared",
+		Endpoint:   "/epoch_params",
+		Field:      "cost_models",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams cost_models",
+		Reason:     "entry-for-entry equality per Plutus language; Dingo's numeric keys (0, 1) map to Koios's PlutusV1/PlutusV2 names and the positional arrays agree exactly",
 	},
 	{
 		Endpoint: "/epoch_params",

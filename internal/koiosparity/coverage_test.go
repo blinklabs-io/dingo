@@ -96,7 +96,6 @@ func TestKoiosCoverageMatrixIsComplete(t *testing.T) {
 		"/pool_history.pool_id_bech32",
 		"/epoch_info.pool_cnt",
 		"/epoch_info.delegator_cnt",
-		"/epoch_params.cost_models",
 		"/epoch_params.nonce",
 		"/epoch_params.block_hash",
 		"/epoch_params.extra_entropy",

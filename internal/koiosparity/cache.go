@@ -164,6 +164,12 @@ type KoiosEpochParams struct {
 	CollateralPercentage string // Koios collateral_percent
 	MaxCollateralInputs  string
 
+	// CostModels is the per-language Plutus operation prices as canonical
+	// JSON ({"PlutusV1":[...],"PlutusV2":[...]}, keys sorted by
+	// encoding/json). "" means Koios published none, which is what every
+	// pre-Alonzo era reports.
+	CostModels string
+
 	FetchedAt time.Time
 
 	// Remaining fields are stored for reference but are NOT compared — see
@@ -502,8 +508,8 @@ func (c *Cache) GetTotals(network string, epoch uint64) (*KoiosTotals, error) {
 const epochParamsColumns = `network, epoch, era, min_fee_a, min_fee_b, max_block_body_size, max_tx_size,
 	max_block_header_size, key_deposit, pool_deposit, max_epoch, n_opt, a0, rho, tau, protocol_major,
 	protocol_minor, min_pool_cost, price_mem, price_step, max_tx_ex_mem, max_tx_ex_steps, max_block_ex_mem,
-	max_block_ex_steps, max_value_size, collateral_percentage, max_collateral_inputs, decentralisation,
-	min_utxo_value, coins_per_utxo_size, fetched_at`
+	max_block_ex_steps, max_value_size, collateral_percentage, max_collateral_inputs, cost_models,
+	decentralisation, min_utxo_value, coins_per_utxo_size, fetched_at`
 
 // UpsertEpochParams idempotently inserts or updates the Koios /epoch_params
 // reference row for one epoch.
@@ -518,7 +524,7 @@ const epochParamsColumns = `network, epoch, era, min_fee_a, min_fee_b, max_block
 func (c *Cache) UpsertEpochParams(p KoiosEpochParams) error {
 	_, err := c.db.Exec(
 		`INSERT INTO koios_epoch_params (`+epochParamsColumns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(network, epoch) DO UPDATE SET
 		 era=excluded.era, min_fee_a=excluded.min_fee_a, min_fee_b=excluded.min_fee_b,
 		 max_block_body_size=excluded.max_block_body_size, max_tx_size=excluded.max_tx_size,
@@ -530,14 +536,16 @@ func (c *Cache) UpsertEpochParams(p KoiosEpochParams) error {
 		 max_tx_ex_steps=excluded.max_tx_ex_steps, max_block_ex_mem=excluded.max_block_ex_mem,
 		 max_block_ex_steps=excluded.max_block_ex_steps, max_value_size=excluded.max_value_size,
 		 collateral_percentage=excluded.collateral_percentage,
-		 max_collateral_inputs=excluded.max_collateral_inputs, decentralisation=excluded.decentralisation,
+		 max_collateral_inputs=excluded.max_collateral_inputs, cost_models=excluded.cost_models,
+		 decentralisation=excluded.decentralisation,
 		 min_utxo_value=excluded.min_utxo_value, coins_per_utxo_size=excluded.coins_per_utxo_size,
 		 fetched_at=excluded.fetched_at`,
 		p.Network, p.Epoch, p.Era, p.MinFeeA, p.MinFeeB, p.MaxBlockBodySize, p.MaxTxSize,
 		p.MaxBlockHeaderSize, p.KeyDeposit, p.PoolDeposit, p.MaxEpoch, p.NOpt, p.A0, p.Rho, p.Tau,
 		p.ProtocolMajor, p.ProtocolMinor, p.MinPoolCost, p.PriceMem, p.PriceStep, p.MaxTxExMem,
 		p.MaxTxExSteps, p.MaxBlockExMem, p.MaxBlockExSteps, p.MaxValueSize, p.CollateralPercentage,
-		p.MaxCollateralInputs, p.Decentralisation, p.MinUtxoValue, p.CoinsPerUtxoSize, p.FetchedAt,
+		p.MaxCollateralInputs, p.CostModels, p.Decentralisation, p.MinUtxoValue, p.CoinsPerUtxoSize,
+		p.FetchedAt,
 	)
 	return err
 }
@@ -561,7 +569,8 @@ func (c *Cache) GetEpochParams(
 		&p.MaxBlockHeaderSize, &p.KeyDeposit, &p.PoolDeposit, &p.MaxEpoch, &p.NOpt, &p.A0, &p.Rho, &p.Tau,
 		&p.ProtocolMajor, &p.ProtocolMinor, &p.MinPoolCost, &p.PriceMem, &p.PriceStep, &p.MaxTxExMem,
 		&p.MaxTxExSteps, &p.MaxBlockExMem, &p.MaxBlockExSteps, &p.MaxValueSize, &p.CollateralPercentage,
-		&p.MaxCollateralInputs, &p.Decentralisation, &p.MinUtxoValue, &p.CoinsPerUtxoSize, &p.FetchedAt,
+		&p.MaxCollateralInputs, &p.CostModels, &p.Decentralisation, &p.MinUtxoValue, &p.CoinsPerUtxoSize,
+		&p.FetchedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -1530,7 +1539,8 @@ func createCacheSchema(db *sql.DB) error {
 			max_tx_ex_mem TEXT NOT NULL DEFAULT '', max_tx_ex_steps TEXT NOT NULL DEFAULT '',
 			max_block_ex_mem TEXT NOT NULL DEFAULT '', max_block_ex_steps TEXT NOT NULL DEFAULT '',
 			max_value_size TEXT NOT NULL DEFAULT '', collateral_percentage TEXT NOT NULL DEFAULT '',
-			max_collateral_inputs TEXT NOT NULL DEFAULT '', decentralisation TEXT NOT NULL DEFAULT '',
+			max_collateral_inputs TEXT NOT NULL DEFAULT '', cost_models TEXT NOT NULL DEFAULT '',
+			decentralisation TEXT NOT NULL DEFAULT '',
 			min_utxo_value TEXT NOT NULL DEFAULT '', coins_per_utxo_size TEXT NOT NULL DEFAULT '',
 			fetched_at DATETIME NOT NULL)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_kep_net_epoch ON koios_epoch_params(network, epoch)`,

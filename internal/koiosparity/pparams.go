@@ -83,6 +83,12 @@ type DingoProtocolParams struct {
 	MaxValueSize         string
 	CollateralPercentage string
 	MaxCollateralInputs  string
+
+	// CostModels holds the per-language Plutus operation prices, keyed by the
+	// same language names Koios uses ("PlutusV1", "PlutusV2", ...) rather
+	// than Dingo's stored numeric keys, so the two sides are directly
+	// comparable. nil in Shelley/Allegra/Mary, where no scripts are priced.
+	CostModels map[string][]int64
 }
 
 // decodeProtocolParams decodes one stored `pparams` CBOR blob as the given
@@ -174,6 +180,7 @@ func protocolParamsFromNative(
 		fillPlutusParams(
 			out, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits,
 			pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs,
+			pp.CostModels,
 		)
 	case *babbage.BabbageProtocolParameters:
 		fillShelleyFamilyParams(
@@ -186,6 +193,7 @@ func protocolParamsFromNative(
 		fillPlutusParams(
 			out, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits,
 			pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs,
+			pp.CostModels,
 		)
 	case *conway.ConwayProtocolParameters:
 		fillConwayFamilyParams(out, pp)
@@ -217,6 +225,7 @@ func fillConwayFamilyParams(
 	fillPlutusParams(
 		out, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits,
 		pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs,
+		pp.CostModels,
 	)
 }
 
@@ -251,7 +260,9 @@ func fillPlutusParams(
 	executionCosts lcommon.ExUnitPrice,
 	maxTxExUnits, maxBlockExUnits lcommon.ExUnits,
 	maxValueSize, collateralPercentage, maxCollateralInputs uint,
+	costModels map[uint][]int64,
 ) {
+	out.CostModels = namedCostModels(costModels)
 	out.PriceMem = ratString(executionCosts.MemPrice)
 	out.PriceStep = ratString(executionCosts.StepPrice)
 	out.MaxTxExMem = strconv.FormatInt(maxTxExUnits.Memory, 10)
@@ -261,6 +272,32 @@ func fillPlutusParams(
 	out.MaxValueSize = uintString(maxValueSize)
 	out.CollateralPercentage = uintString(collateralPercentage)
 	out.MaxCollateralInputs = uintString(maxCollateralInputs)
+}
+
+// namedCostModels re-keys Dingo's stored cost models from the numeric
+// language identifiers in the CBOR (0, 1, 2, ...) to the names Koios and
+// Blockfrost publish, so CompareEpochProtocolParams can match them up
+// directly. The mapping matches api/blockfrost's plutusVersionName, which
+// serves the same values over Dingo's own API; it is duplicated rather than
+// imported because internal/koiosparity must not depend on the API layer.
+//
+// An unrecognised identifier still gets a name ("PlutusV8" for key 7) rather
+// than being dropped: a language Dingo prices and Koios does not is a real
+// finding, and silently discarding it would hide exactly that.
+func namedCostModels(models map[uint][]int64) map[string][]int64 {
+	if len(models) == 0 {
+		return nil
+	}
+	out := make(map[string][]int64, len(models))
+	for language, model := range models {
+		out[plutusLanguageName(language)] = model
+	}
+	return out
+}
+
+func plutusLanguageName(language uint) string {
+	// #nosec G115 -- language is a small CBOR map key
+	return "PlutusV" + strconv.FormatUint(uint64(language)+1, 10)
 }
 
 func uintString(v uint) string {

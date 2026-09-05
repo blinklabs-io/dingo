@@ -5755,8 +5755,9 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   as the literal text Koios published — a JSON number keeps its own digits, so
   `price_step` is stored as `7.21e-05` and never round-trips through a float —
   with `""` meaning "the era does not define this parameter". `cost_models`
-  and the Conway governance parameters are deliberately not fetched; see the
-  coverage table below. `cache.db` is this
+  is stored as canonical JSON (`encoding/json` sorts the language keys) and
+  compared entry for entry; the Conway governance parameters are deliberately
+  not fetched. See the coverage table below. `cache.db` is this
   tool's own private cache, not part of Dingo's own metadata schema —
   `DATABASE.md` does not (and need not) document it. #3097 adds
   `koios_account_rewards` (one row per `(network, epoch, stake_address,
@@ -5852,7 +5853,7 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   | `/epoch_params` | exact-match | `min_fee_a`, `min_fee_b`, `max_block_size`, `max_tx_size`, `max_bh_size`, `key_deposit`, `pool_deposit`, `max_epoch`, `optimal_pool_count`, `protocol_major`, `protocol_minor`, `min_pool_cost` | Exact values against the effective `pparams` row for K. A wrong `max_tx_size` is the #3928 wedge class. |
   | `/epoch_params` | exact-match | `influence`, `monetary_expand_rate`, `treasury_growth_rate`, `price_mem`, `price_step` | Compared as rationals: Koios publishes `0.0577`/`7.21e-05` where Dingo stores `577/10000`/`721/10000000`. |
   | `/epoch_params` | exact-match | `max_tx_ex_mem`, `max_tx_ex_steps`, `max_block_ex_mem`, `max_block_ex_steps`, `max_val_size`, `collateral_percent`, `max_collateral_inputs` | Exact values against the effective `pparams` row. These gate phase-2 validation, where a divergence is silent until a script transaction fails. |
-  | `/epoch_params` | unsupported | `cost_models` | Koios publishes named PlutusV1/V2 arrays against Dingo's `map[uint][]int64`; the ordering that makes them comparable is not established, so they are neither fetched nor compared. |
+  | `/epoch_params` | exact-match | `cost_models` | Entry-for-entry equality per Plutus language. Dingo's numeric keys (`0`, `1`) map to Koios's `PlutusV1`/`PlutusV2` names and the positional arrays agree exactly (166 and 175 entries on preview). Findings name the language and first differing entry rather than dumping the array. |
   | `/epoch_params` | unsupported | `coins_per_utxo_size` | Koios reports Alonzo's per-word figure where Dingo stores per-byte (34482 vs 4310 on preview epochs 0-2); they agree from Babbage on. Cached for reference pending its own investigation. |
   | `/epoch_params` | unsupported | `decentralisation`, `min_utxo_value`, `extra_entropy` | Pre-Babbage parameters absent from every live era's parameter struct. |
   | `/epoch_params` | unsupported | `nonce`, `block_hash` | Epoch identity, not protocol parameters. |

@@ -487,21 +487,25 @@ func seedPParams(
 
 // previewBabbageEpochParamsTmpl is the real Koios /epoch_params body for
 // preview epoch 107 with the epoch number templated, matching the
-// pparams_preview_epoch107_babbage.hex CBOR fixture field for field. Test
-// fake servers serve this so an epoch fetched through the normal path lands
-// a parameter row that agrees with seedDingoBabbageProtocolParams' Dingo
-// side; cost models are elided since nothing fetches or compares them.
-const previewBabbageEpochParamsTmpl = `[{"epoch_no":%s,"era":"Babbage",` +
-	`"min_fee_a":44,"min_fee_b":155381,"max_block_size":90112,"max_tx_size":16384,` +
-	`"max_bh_size":1100,"key_deposit":"2000000","pool_deposit":"500000000",` +
-	`"max_epoch":18,"optimal_pool_count":500,"influence":0.3,` +
-	`"monetary_expand_rate":0.003,"treasury_growth_rate":0.2,"decentralisation":0,` +
-	`"extra_entropy":null,"protocol_major":8,"protocol_minor":0,` +
-	`"min_utxo_value":"0","min_pool_cost":"340000000","coins_per_utxo_size":"4310",` +
-	`"price_mem":0.0577,"price_step":7.21e-05,` +
-	`"max_tx_ex_mem":14000000,"max_tx_ex_steps":10000000000,` +
-	`"max_block_ex_mem":62000000,"max_block_ex_steps":20000000000,` +
-	`"max_val_size":5000,"collateral_percent":150,"max_collateral_inputs":3}]`
+// pparams_preview_epoch107_babbage.hex CBOR fixture field for field —
+// including both cost models (PlutusV1: 166 entries, PlutusV2: 175). Test
+// fake servers serve this so an epoch fetched through the normal path lands a
+// parameter row that agrees with seedDingoBabbageProtocolParams' Dingo side.
+//
+// Loaded at package init rather than through a testing.T helper because the
+// fake Koios servers write it from HTTP handler goroutines, where require/
+// t.Fatalf must not be called.
+var previewBabbageEpochParamsTmpl = mustLoadEpochParamsTemplate()
+
+func mustLoadEpochParamsTemplate() string {
+	raw, err := os.ReadFile(
+		"testdata/koios_epoch_params_preview_epoch107.json",
+	)
+	if err != nil {
+		panic("koiosparity test fixture: " + err.Error())
+	}
+	return strings.TrimSpace(string(raw))
+}
 
 // seedDingoBabbageProtocolParams gives a Dingo metadata fixture the two rows
 // GetProtocolParams needs: an `epoch` row naming the era in force, and a
@@ -751,7 +755,22 @@ func TestCheckDetectsWedgeClassProtocolParamDivergence(t *testing.T) {
 		"pparams_max_tx_ex_mem",
 		"pparams_max_block_ex_mem",
 		"pparams_max_block_ex_steps",
+		// Preview repriced both Plutus cost models between epoch 2 and
+		// epoch 107, so swapping the row also exercises the cost-model
+		// comparison end to end through the real Check path.
+		"pparams_cost_model_plutus_v1",
+		"pparams_cost_model_plutus_v2",
 	}, fields)
+
+	for _, m := range mismatches {
+		if !strings.HasPrefix(m.Field, "pparams_cost_model_") {
+			continue
+		}
+		require.Contains(t, m.DingoValue, "entries differ",
+			"a cost-model finding must name the entry, not dump the array")
+		require.Less(t, len(m.DingoValue), 120,
+			"a cost-model finding must stay small enough to read in a report")
+	}
 }
 
 // TestCheckDetectsMissingKoiosEpochParamsOnUpgradedCache mirrors
@@ -793,4 +812,196 @@ func TestCheckDetectsMissingDingoProtocolParams(t *testing.T) {
 	require.Len(t, mismatches, 1)
 	require.Equal(t, "protocol_params", mismatches[0].Field)
 	require.Equal(t, CategoryDBMissing, mismatches[0].Category)
+}
+
+// costModelFixture returns the PlutusV1/PlutusV2 cost models the shared
+// preview epoch-107 fixture carries on both sides, so a test can perturb one
+// entry and attribute the finding to it.
+func costModelFixture(t *testing.T) map[string][]int64 {
+	t.Helper()
+	var resp []struct {
+		CostModels map[string][]int64 `json:"cost_models"`
+	}
+	require.NoError(t, json.Unmarshal(
+		fmt.Appendf(nil, previewBabbageEpochParamsTmpl, "107"),
+		&resp,
+	))
+	require.Len(t, resp, 1)
+	require.Len(t, resp[0].CostModels["PlutusV1"], 166)
+	require.Len(t, resp[0].CostModels["PlutusV2"], 175)
+	return resp[0].CostModels
+}
+
+func koiosCostModelsJSON(t *testing.T, models map[string][]int64) string {
+	t.Helper()
+	b, err := json.Marshal(models)
+	require.NoError(t, err)
+	return string(b)
+}
+
+// TestCompareEpochProtocolParamsCostModelsMatch is the control: the real
+// preview epoch-107 cost models, decoded from Dingo's CBOR into
+// map[uint][]int64 (0 = PlutusV1, 1 = PlutusV2) and from Koios's
+// name-keyed dict, are entry-for-entry identical and must compare clean.
+func TestCompareEpochProtocolParamsCostModelsMatch(t *testing.T) {
+	models := costModelFixture(t)
+	dingo := dingoPParamsPreview380()
+	dingo.CostModels = models
+	koios := koiosPParamsPreview380()
+	koios.CostModels = koiosCostModelsJSON(t, models)
+
+	require.Empty(t, CompareEpochProtocolParams(
+		"preview", 380, koios, dingo, nil, time.Now(), 0, time.Time{},
+	))
+}
+
+// TestCompareEpochProtocolParamsCostModelEntryDiverges: a single mispriced
+// operation is the divergence this coverage is for, and the report has to
+// name the language and the entry — dumping 166 integers into a mismatch row
+// would be unusable.
+func TestCompareEpochProtocolParamsCostModelEntryDiverges(t *testing.T) {
+	models := costModelFixture(t)
+	dingo := dingoPParamsPreview380()
+	dingo.CostModels = models
+	koios := koiosPParamsPreview380()
+
+	// Bound to a local and length-guarded explicitly rather than indexed
+	// straight out of the map: a map read yields a nil slice for a missing
+	// key, and indexing that would be a panic rather than a test failure.
+	perturbedV1 := append([]int64(nil), models["PlutusV1"]...)
+	if len(perturbedV1) <= 42 {
+		t.Fatalf("fixture PlutusV1 model has %d entries", len(perturbedV1))
+	}
+	perturbedV1[42]++
+	koios.CostModels = koiosCostModelsJSON(t, map[string][]int64{
+		"PlutusV1": perturbedV1,
+		"PlutusV2": models["PlutusV2"],
+	})
+
+	got := CompareEpochProtocolParams(
+		"preview", 380, koios, dingo, nil, time.Now(), 0, time.Time{},
+	)
+	require.Len(t, got, 1)
+	require.Equal(t, "pparams_cost_model_plutus_v1", got[0].Field)
+	require.Equal(t, CategoryValueMismatch, got[0].Category)
+	require.Contains(t, got[0].DingoValue, "entry 42 = ")
+	require.Contains(t, got[0].KoiosValue, "entry 42 = ")
+	require.Contains(t, got[0].DingoValue, "1 of 166 entries differ")
+	require.NotEqual(t, got[0].DingoValue, got[0].KoiosValue)
+	require.Equal(t, StatusFail, DetermineStatus(got))
+}
+
+// TestCompareEpochProtocolParamsCostModelLengthDiverges: a model with the
+// wrong number of operations prices every later operation wrongly, so the
+// entry count is reported on its own rather than as a first-index diff.
+func TestCompareEpochProtocolParamsCostModelLengthDiverges(t *testing.T) {
+	models := costModelFixture(t)
+	fullV1 := models["PlutusV1"]
+	if len(fullV1) != 166 {
+		t.Fatalf("fixture PlutusV1 model has %d entries, want 166", len(fullV1))
+	}
+	dingo := dingoPParamsPreview380()
+	dingo.CostModels = map[string][]int64{
+		"PlutusV1": fullV1[:165],
+		"PlutusV2": models["PlutusV2"],
+	}
+	koios := koiosPParamsPreview380()
+	koios.CostModels = koiosCostModelsJSON(t, models)
+
+	got := CompareEpochProtocolParams(
+		"preview", 380, koios, dingo, nil, time.Now(), 0, time.Time{},
+	)
+	require.Len(t, got, 1)
+	require.Equal(t, "pparams_cost_model_plutus_v1", got[0].Field)
+	require.Equal(t, "165 entries", got[0].DingoValue)
+	require.Equal(t, "166 entries", got[0].KoiosValue)
+}
+
+// TestCompareEpochProtocolParamsCostModelLanguagePresence: a language one
+// side prices and the other does not is a divergence about which scripts can
+// run at all, and must not be skipped just because the key is absent from one
+// map.
+func TestCompareEpochProtocolParamsCostModelLanguagePresence(t *testing.T) {
+	models := costModelFixture(t)
+
+	dingo := dingoPParamsPreview380()
+	dingo.CostModels = map[string][]int64{"PlutusV1": models["PlutusV1"]}
+	koios := koiosPParamsPreview380()
+	koios.CostModels = koiosCostModelsJSON(t, models)
+
+	got := CompareEpochProtocolParams(
+		"preview", 380, koios, dingo, nil, time.Now(), 0, time.Time{},
+	)
+	require.Len(t, got, 1)
+	require.Equal(t, "pparams_cost_model_plutus_v2", got[0].Field)
+	require.Empty(t, got[0].DingoValue)
+	require.Equal(t, "175 entries", got[0].KoiosValue)
+
+	// ...and the reverse: Dingo prices a language Koios does not.
+	dingo.CostModels = map[string][]int64{
+		"PlutusV1": models["PlutusV1"],
+		"PlutusV2": models["PlutusV2"],
+		"PlutusV3": {1, 2, 3},
+	}
+	got = CompareEpochProtocolParams(
+		"preview", 380, koios, dingo, nil, time.Now(), 0, time.Time{},
+	)
+	require.Len(t, got, 1)
+	require.Equal(t, "pparams_cost_model_plutus_v3", got[0].Field)
+	require.Equal(t, "3 entries", got[0].DingoValue)
+	require.Empty(t, got[0].KoiosValue)
+}
+
+// TestCompareEpochProtocolParamsCostModelsAbsentBothSides: pre-Alonzo eras
+// price no scripts at all, and both sides agreeing on that is agreement.
+func TestCompareEpochProtocolParamsCostModelsAbsentBothSides(t *testing.T) {
+	dingo := dingoPParamsPreview380()
+	koios := koiosPParamsPreview380()
+	require.Nil(t, dingo.CostModels)
+	require.Empty(t, koios.CostModels)
+
+	require.Empty(t, CompareEpochProtocolParams(
+		"preview", 380, koios, dingo, nil, time.Now(), 0, time.Time{},
+	))
+}
+
+// TestCompareEpochProtocolParamsRejectsMalformedKoiosCostModels: cached cost
+// models that will not parse must surface, never silently drop the whole
+// cost-model comparison and let the epoch read as PASS.
+func TestCompareEpochProtocolParamsRejectsMalformedKoiosCostModels(t *testing.T) {
+	models := costModelFixture(t)
+	dingo := dingoPParamsPreview380()
+	dingo.CostModels = models
+	koios := koiosPParamsPreview380()
+	koios.CostModels = `{"PlutusV1": "not-an-array"}`
+
+	got := CompareEpochProtocolParams(
+		"preview", 380, koios, dingo, nil, time.Now(), 0, time.Time{},
+	)
+	require.Len(t, got, 1)
+	require.Equal(t, "pparams_cost_models", got[0].Field)
+	require.Equal(t, CategoryValueMismatch, got[0].Category)
+	require.Contains(t, got[0].KoiosValue, "unparseable")
+	require.Equal(t, StatusFail, DetermineStatus(got))
+}
+
+// TestDingoDBGetProtocolParamsDecodesCostModels pins the language-key mapping
+// against real stored CBOR: Dingo keys cost models 0/1 where Koios names them
+// PlutusV1/PlutusV2, and the preview epoch-107 row carries 166 and 175
+// entries respectively.
+func TestDingoDBGetProtocolParamsDecodesCostModels(t *testing.T) {
+	dingo, gdb := openTestDingoDB(t)
+	defer dingo.Close() //nolint:errcheck
+	seedDingoBabbageProtocolParams(t, gdb, 107)
+
+	got, err := dingo.GetProtocolParams(context.Background(), 107)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Len(t, got.CostModels, 2)
+	require.Len(t, got.CostModels["PlutusV1"], 166)
+	require.Len(t, got.CostModels["PlutusV2"], 175)
+
+	// Entry-for-entry equality with what Koios publishes for the same epoch
+	// is the property the comparison depends on.
+	require.Equal(t, costModelFixture(t), got.CostModels)
 }
