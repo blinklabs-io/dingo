@@ -380,7 +380,10 @@ func collectEntryPointVectors(testdataRoot string) ([]string, error) {
 // points. State advancement mirrors the harness: successful transactions are
 // applied, epoch events cross the boundary, and a rollback event restores the
 // initial state and re-applies the journaled transactions at or below the
-// target slot.
+// target slot. The one modelled difference is that only transactions are
+// journaled, not epoch events, so a rollback that follows an epoch boundary
+// is reported as an error rather than replayed -- no corpus vector does that
+// today.
 func replayEntryPoints(
 	sm *DingoStateManager,
 	testdataRoot string,
@@ -452,6 +455,7 @@ func replayVectorEntryPoints(
 
 	epoch := initialState.CurrentEpoch
 	var applied []appliedTx
+	var epochCrossed bool
 
 	for idx, event := range vector.Events {
 		switch event.Type {
@@ -495,7 +499,23 @@ func replayVectorEntryPoints(
 				return ev
 			}
 			pp = sm.GetProtocolParameters()
+			epochCrossed = true
 		case conformance.EventTypeRollback:
+			if epochCrossed {
+				// The harness restores initialProtocolParams and replays its
+				// journaled epoch events on rollback. This pass journals only
+				// transactions, so it can neither undo an enacted parameter
+				// change nor re-cross a boundary. No vector in the corpus
+				// rolls back after an epoch event, so rather than model a
+				// path nothing exercises -- and silently route later
+				// transactions through an era selected from stale parameters
+				// -- fail loudly if one ever appears.
+				ev.Err = fmt.Errorf(
+					"event %d: rollback after an epoch boundary is not modelled by this replay; journal epoch events and restore the vector's initial protocol parameters before relying on it",
+					idx,
+				)
+				return ev
+			}
 			retained, err := rollbackEntryPointReplay(
 				sm, initialState, pp, applied, event.RollbackSlot,
 			)
@@ -567,6 +587,11 @@ func routeVectorTransaction(
 // reload the vector's initial state, and re-apply the journaled transactions
 // at or below the target slot. Re-applied transactions are not routed again;
 // they already produced their evidence on first execution.
+//
+// pp is the vector's initial protocol parameters. replayVectorEntryPoints
+// refuses a rollback that follows an epoch boundary, so the parameters still
+// active here are the ones LoadForVector produced, which is what the harness
+// restores explicitly from its own initialProtocolParams.
 func rollbackEntryPointReplay(
 	sm *DingoStateManager,
 	initialState *conformance.ParsedInitialState,
