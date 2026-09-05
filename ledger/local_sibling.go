@@ -199,10 +199,19 @@ func (ls *LedgerState) AdoptLocalForgedSibling(
 }
 
 // validateLocalSibling checks that block genuinely competes with the tip:
-// same parent, same block number, and a slot strictly above the parent's. Only
-// a block that satisfies all three can be adopted by rolling back exactly one
-// block, and only such a block is an equal-length candidate for the Praos
-// comparison that follows.
+// the tip's slot, the tip's parent, the tip's block number, and a slot strictly
+// above the parent's. Only a block that satisfies all four can be adopted by
+// rolling back exactly one block, and only such a block is an equal-length
+// candidate for the Praos comparison that follows.
+//
+// Slot equality is the admission boundary for this path, not merely the
+// forger's precondition. This is the equal-slot (EQ) case of
+// mkCurrentBlockContext and nothing else: a same-block-number competitor at a
+// different slot is an ordinary fork, which belongs to chainsync's fork
+// resolution with its ancestor search and rollback-depth accounting, not to a
+// one-block rollback driven from the forge loop. Enforcing it here keeps the
+// ledger gate closed even if a future caller reaches it without the forger's
+// own currentSlot == tipSlot check.
 func validateLocalSibling(
 	block gledger.Block,
 	parent ocommon.Point,
@@ -238,6 +247,14 @@ func validateLocalSibling(
 			ErrNotChainTipSibling,
 			block.SlotNumber(),
 			parent.Slot,
+		)
+	}
+	if block.SlotNumber() != incumbentTip.Point.Slot {
+		return fmt.Errorf(
+			"%w: block slot %d is not the chain tip's slot %d",
+			ErrNotChainTipSibling,
+			block.SlotNumber(),
+			incumbentTip.Point.Slot,
 		)
 	}
 	return nil
