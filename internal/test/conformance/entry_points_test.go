@@ -508,9 +508,18 @@ type eraProbe struct {
 }
 
 // inputlessEraProbes returns one input-less transaction per era, keyed by era
-// name. Each era's entry point type-asserts its own parameter type, so the
-// parameters have to match or the entry point returns
-// eras.ErrIncompatibleProtocolParams before reaching any rule.
+// name.
+//
+// From Shelley onward each entry point type-asserts its own parameter type,
+// so the parameters have to match or the entry point returns
+// eras.ErrIncompatibleProtocolParams before reaching any rule -- which would
+// satisfy the input-less assertion for the wrong reason.
+//
+// Byron is the exception and carries nil: ValidateTxByron never asserts on
+// pp, and gouroboros has no Byron protocol-parameters type to supply. It runs
+// its structural rules unconditionally (byronValidateInputsNotEmpty is what
+// rejects the probe) and its UTxO-aware rules whenever a ledger state is
+// given, passing pp through to rules that ignore it.
 func inputlessEraProbes() map[string]eraProbe {
 	return map[string]eraProbe{
 		byron.EraNameByron: {

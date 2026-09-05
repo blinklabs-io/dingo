@@ -17,6 +17,7 @@ package conformance
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"sort"
 
@@ -357,7 +358,13 @@ func collectEntryPointVectors(testdataRoot string) ([]string, error) {
 		root := filepath.Join(testdataRoot, sub)
 		paths, err := conformance.CollectVectorFiles(root)
 		if err != nil {
-			if sub == "synthetic" {
+			// A corpus that ships no synthetic/ directory is legitimate, so
+			// that one case is skipped. Every other failure is reported: an
+			// unreadable vector or an IO error would otherwise shrink the
+			// vector set silently, and a partial corpus that still routes
+			// some transactions reports as full entry-point coverage --
+			// the exact failure mode these tests exist to catch.
+			if sub == "synthetic" && errors.Is(err, fs.ErrNotExist) {
 				continue
 			}
 			return nil, fmt.Errorf("collect %s vectors: %w", sub, err)
