@@ -1571,9 +1571,10 @@ Search probes read the ordered `bi` entry and the block's `_metadata` object,
 never the block CBOR: a probe needs only the block's ID and height to decide
 which way to move, and reading it through the block itself would download a
 whole block object from cloud storage per probe. Only the one matching block is
-read in full. Because that value is read directly rather than through
-`GetBlock`, it is decoded with `types.UnmarshalBlockMetadata`, which accepts
-both the CBOR and the compact `DBM1` encodings.
+read in full. Because the `_metadata` object is read directly rather than
+through `GetBlock`, it is decoded with `types.UnmarshalBlockMetadata`, which
+accepts both the CBOR and the compact `DBM1` encodings. The block CBOR itself
+is unaffected: the matching block is still read through `GetBlock`.
 
 `lifecycle.ResolveTargetByNumber` keeps its own tip-bounded search rather than
 calling this: a truncate target must not resolve past the persisted tip, while

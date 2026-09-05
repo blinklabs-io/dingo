@@ -413,6 +413,18 @@ func UnmarshalBlockMetadata(data []byte) (BlockMetadata, error) {
 	if len(data) >= BlockMetadataBinaryHeaderLen &&
 		bytes.Equal(data[:4], BlockMetadataBinaryMagic[:]) {
 		prevHashLen := binary.BigEndian.Uint32(data[28:32])
+		// The same bound the encoder enforces. A value carrying a longer
+		// previous hash is one MarshalBlockMetadataInto could not have
+		// written, so it is corrupt rather than merely unexpected, and
+		// decoding it would propagate an impossible block record instead
+		// of reporting the damage.
+		if prevHashLen > BlockMetadataPrevHashMaxLen {
+			return BlockMetadata{}, fmt.Errorf(
+				"invalid block metadata prev hash length: got %d, max %d",
+				prevHashLen,
+				BlockMetadataPrevHashMaxLen,
+			)
+		}
 		expectedLen := BlockMetadataBinaryHeaderLen + int(prevHashLen)
 		if len(data) != expectedLen {
 			return BlockMetadata{}, fmt.Errorf(
