@@ -185,3 +185,118 @@ func TestCheckAndForgeProductionEqualSlotDoesNotReForgeOurOwnSlot(
 		"a slot we forged must not report could-not-forge",
 	)
 }
+
+// TestForgeSkipsLeaderSlotWhenUpstreamTargetUnknownEvenAtTip documents
+// the cost of the upstream-sync gate's `upstreamTip == 0` disjunct on a
+// node that is NOT behind.
+//
+// LedgerState.UpstreamSyncStatus returns (0, true) for the whole window
+// between an active-connection switch and the new peer's first
+// authenticated, admitted, trusted header: publishActiveUpstream stores
+// the new connection key with targetSlot zero, and only
+// publishAdmittedUpstreamTarget makes it non-zero. A best-peer switch
+// therefore disables forging outright, independent of how fresh the
+// local tip is and independent of forgeSyncToleranceSlots.
+//
+// The clock below is a healthy steady-state producer: the chain tip is
+// the previous slot's block, i.e. the node is at tip. It is scheduled to
+// lead the current slot. It forges nothing, and the only counter that
+// moves is dingo_forge_sync_skip_total, which is shared with the
+// genuinely-behind case, so the lost leader slot is not recoverable from
+// /metrics.
+//
+// This test asserts the CURRENT behaviour, which is deliberate and is
+// already pinned by
+// TestCheckAndForgeProductionWaitsForUnknownActiveUpstreamTarget. It is
+// written to make the trade-off concrete and reviewable rather than to
+// change it; the fix is a separate discussion (see the linked issue).
+// If the gate is later keyed on local tip freshness instead of on the
+// upstream target being known, this test fails and names the decision
+// that was revisited.
+func TestForgeSkipsLeaderSlotWhenUpstreamTargetUnknownEvenAtTip(
+	t *testing.T,
+) {
+	for _, tc := range []struct {
+		name      string
+		tolerance uint64
+	}{
+		// The tolerance is irrelevant to this branch of the gate: the
+		// `upstreamTip == 0` disjunct is not compared against it.
+		{name: "default tolerance", tolerance: 0},
+		{name: "tolerance far wider than the lag", tolerance: 100000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			leader := &forgerCountingLeader{}
+			builder := &forgerTestBuilder{}
+			broadcaster := &forgerTestBroadcaster{}
+			forger, err := NewBlockForger(ForgerConfig{
+				Mode: ModeProduction,
+				Logger: slog.New(
+					slog.NewJSONHandler(io.Discard, nil),
+				),
+				Credentials:      setupTestCredentials(t),
+				LeaderChecker:    leader,
+				BlockBuilder:     builder,
+				BlockBroadcaster: broadcaster,
+				SlotClock: forgerTestSlotClock{
+					// At tip: the tip is the previous slot's block.
+					currentSlot:  10,
+					chainTipSlot: 9,
+					// A peer switch has just happened, so the
+					// corroborated upstream target is not yet known.
+					upstreamTipSlot:   0,
+					upstreamActive:    true,
+					slotsPerKESPeriod: 100,
+				},
+				ForgeSyncToleranceSlots: tc.tolerance,
+				PromRegistry:            prometheus.NewRegistry(),
+			})
+			require.NoError(t, err)
+
+			require.NoError(
+				t,
+				forger.checkAndForgeProduction(context.Background()),
+			)
+
+			assert.Zero(
+				t,
+				leader.callCount(),
+				"leader selection is never reached, so the node cannot "+
+					"know it just lost a leader slot",
+			)
+			assert.Zero(t, builder.calls)
+			assert.Zero(t, broadcaster.calls)
+
+			// The loss is invisible in every cardano-node-compatible
+			// counter: about_to_lead moves, nothing else does.
+			assert.Equal(
+				t,
+				float64(1),
+				testutil.ToFloat64(forger.metrics.forgeAboutToLead),
+			)
+			assert.Equal(
+				t,
+				float64(0),
+				testutil.ToFloat64(forger.metrics.forgeNotLeader),
+			)
+			assert.Equal(
+				t,
+				float64(0),
+				testutil.ToFloat64(forger.metrics.forgeNodeIsLeader),
+			)
+			assert.Equal(
+				t,
+				float64(0),
+				testutil.ToFloat64(forger.metrics.forgeCouldNot),
+			)
+			// The one series that does move cannot distinguish "upstream
+			// is ahead of us" from "we have not heard from the peer we
+			// selected a moment ago".
+			assert.Equal(
+				t,
+				float64(1),
+				testutil.ToFloat64(forger.metrics.forgeSyncSkip),
+			)
+		})
+	}
+}
