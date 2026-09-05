@@ -354,6 +354,39 @@ func TestTickCatchUpExtendsGracePeriod(t *testing.T) {
 	)
 }
 
+func TestTickCatchUpDoesNotExtendPlateauThreshold(t *testing.T) {
+	connId := testConnId(3)
+	active := connId
+	ledger := &fakeLedger{tip: testTip(100, 50), atTip: false}
+	state := &fakeChainsyncState{
+		tracked:    []chainsync.TrackedClient{activeClient(connId, 100)},
+		activeConn: &active,
+	}
+	selector := plateauSelector(connId, 500)
+	pub := newFakePublisher()
+	r, _ := newTestRecycler(t, ledger, state, selector, pub, Config{})
+
+	now := time.Now()
+	st := newTestTickState(100, now.Add(-5*time.Minute))
+
+	r.tick(now, st, LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+		ChainSelector:  selector,
+	}, 100)
+
+	events := pub.byType(event.ChainsyncResyncEventType)
+	require.Len(t, events, 1)
+	resyncEvt, ok := events[0].evt.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	assert.Equal(t, connId, resyncEvt.ConnectionId)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonLocalTipPlateau,
+		resyncEvt.Reason,
+	)
+}
+
 func TestTickClearsScheduleWhenClientRecovers(t *testing.T) {
 	connId := testConnId(1)
 	ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}
