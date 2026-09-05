@@ -795,7 +795,13 @@ func (c *forgerMovingTipSlotClock) reads() (int, int) {
 // What must change is that the loss stops being silent. Reporting it as
 // "slot already has our own block" at Debug is both false and exactly
 // the invisible leader-slot loss this PR exists to remove, so the
-// declined battle is counted and logged at Warn with both hashes.
+// declined leader slot is counted as a could-not-forge and logged at
+// Warn with both hashes.
+//
+// slotBattlesTotal stays where it is: LedgerState.checkSlotBattle
+// already counted this battle when the rival block was accepted, over
+// the same SlotTracker and the same recorder, so the forger counting it
+// again would double it.
 func TestEqualSlotLostBattleUnderTheFenceIsNotSilent(t *testing.T) {
 	const slot = uint64(10)
 	ourHash := bytes.Repeat([]byte{0xa1}, 32)
@@ -833,13 +839,24 @@ func TestEqualSlotLostBattleUnderTheFenceIsNotSilent(t *testing.T) {
 		"a slot the fence has already spent needs no leader selection",
 	)
 
-	// But the loss is accounted for and visible.
+	// The battle itself is counted by LedgerState.checkSlotBattle, not
+	// here. Reaching this case means a block other than ours was
+	// accepted at a slot SlotTracker says we forged, and the only path
+	// that accepts a peer's block already ran checkSlotBattle over the
+	// same tracker and the same recorder — the node wiring points
+	// ForgedBlockChecker at this forger's SlotTracker and
+	// SlotBattleRecorder at the forger itself. Incrementing again here
+	// would double the count, so the forger must leave it alone.
 	assert.Equal(
 		t,
-		float64(1),
+		float64(0),
 		testutil.ToFloat64(forger.metrics.slotBattlesTotal),
-		"a rival's block at a slot we forged is a slot battle we lost",
+		"chainsync owns the slot-battle count for a rival block that "+
+			"was accepted at a slot we forged; the forger must not "+
+			"count it a second time",
 	)
+
+	// The declined leader slot is still visible, which is the point.
 	assert.Equal(
 		t,
 		float64(1),
