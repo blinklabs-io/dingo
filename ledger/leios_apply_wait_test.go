@@ -399,14 +399,15 @@ func TestLeiosEbWaitMetricsRecordOutcomeAndDuration(t *testing.T) {
 	}
 	ls.metrics.init(reg)
 
-	// Both outcome series are pre-materialized at init, before any wait.
+	// Every outcome series is pre-materialized at init, before any wait.
 	require.Equal(
 		t,
-		2,
+		3,
 		testutil.CollectAndCount(ls.metrics.leiosEbWaitSeconds),
 	)
 	require.Zero(t, leiosWaitTestHistogram(t, reg, "arrived"))
 	require.Zero(t, leiosWaitTestHistogram(t, reg, "timeout"))
+	require.Zero(t, leiosWaitTestHistogram(t, reg, "cancelled"))
 	require.Zero(t, testutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts))
 
 	ebHash := lcommon.NewBlake2b256(leiosTestHash(0xE7))
@@ -448,4 +449,97 @@ func TestLeiosEbWaitMetricsRecordOutcomeAndDuration(t *testing.T) {
 		float64(1),
 		testutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
 	)
+}
+
+// TestLeiosEbWaitCancellationIsNotCountedAsTimeout covers the review finding:
+// the wait's context is a timeout CHILD of the block-processing context, so its
+// Done also closes when the parent is cancelled -- node shutdown, or the pass
+// being aborted and restarted. That is not a diffusion-window expiry, and
+// counting it as one inflates the timeout rate exactly when a node is shutting
+// down or restarting its pipeline, which is when the metric is most likely to
+// be read.
+func TestLeiosEbWaitCancellationIsNotCountedAsTimeout(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			EndorserBlockProvider: func(
+				[]byte,
+				uint64,
+			) ([]cbor.RawMessage, bool) {
+				// Never arrives, so only a cancellation or the window can end
+				// the wait.
+				return nil, false
+			},
+		},
+	}
+	ls.metrics.init(reg)
+
+	// All three outcome series exist before any wait.
+	require.Equal(
+		t,
+		3,
+		testutil.CollectAndCount(ls.metrics.leiosEbWaitSeconds),
+	)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	timer := time.AfterFunc(leiosWaitTestWindow/4, cancel)
+	defer timer.Stop()
+	defer cancel()
+
+	start := time.Now()
+	ls.waitForEndorserBlock(
+		ctx,
+		100,
+		lcommon.NewBlake2b256(leiosTestHash(0xE8)),
+		leiosWaitTestWindow,
+		time.Millisecond,
+	)
+	elapsed := time.Since(start)
+	require.Less(
+		t,
+		elapsed,
+		leiosWaitTestWindow,
+		"the wait must end on parent cancellation, not run out the window",
+	)
+
+	require.Equal(t, uint64(1), leiosWaitTestHistogram(t, reg, "cancelled"))
+	require.Zero(t, leiosWaitTestHistogram(t, reg, "timeout"))
+	require.Zero(t, leiosWaitTestHistogram(t, reg, "arrived"))
+	require.Zero(
+		t,
+		testutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
+		"a cancelled pass must not be counted as a diffusion-window timeout",
+	)
+}
+
+// TestLeiosEbWaitCancellationLeavesCallerBehaviourUnchanged pins that the new
+// classification is only a classification: a cancelled pass still runs the
+// mandatory-closure check, so it still fails the chunk when a certified
+// closure is missing rather than silently committing without it.
+func TestLeiosEbWaitCancellationLeavesCallerBehaviourUnchanged(t *testing.T) {
+	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			EndorserBlockProvider: func(
+				[]byte,
+				uint64,
+			) ([]cbor.RawMessage, bool) {
+				return nil, false
+			},
+			EndorserBlockWaitSlots:     leiosWaitTestWaitSlots,
+			LeiosApplyEndorserBlockTxs: false,
+		},
+	}
+	withLeiosWaitTestSlotLength(ls)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := ls.ensureReferencedEndorserBlocks(
+		ctx,
+		[]gledger.Block{parent, certifier},
+	)
+	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
 }
