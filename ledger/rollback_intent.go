@@ -153,7 +153,7 @@ func (ls *LedgerState) recoverRollbackIntent() error {
 			return fmt.Errorf("validate rollback intent point: %w", err)
 		}
 		if !contains {
-			return fmt.Errorf("rollback intent point is not on the primary chain")
+			return errors.New("rollback intent point is not on the primary chain")
 		}
 	}
 	if ls.config.ChainManager != nil {
@@ -172,9 +172,7 @@ func (ls *LedgerState) recoverRollbackIntent() error {
 			point.Slot,
 		)
 	}
-	if current.Slot != point.Slot || !bytes.Equal(current.Hash, point.Hash) {
-		ls.emitRollbackTransactionEvents(blocks)
-	}
+	ls.emitRollbackTransactionEvents(blocks)
 	if err := ls.rollback(point); err != nil {
 		return fmt.Errorf("recover rollback intent: %w", err)
 	}
