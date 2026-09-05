@@ -465,6 +465,19 @@ RETURNING id`,
 			if err != nil {
 				return err
 			}
+			if transaction.IsValid() {
+				// Gap blocks do not carry calculated deposits, but their
+				// certificates must still be materialized before outputs are
+				// resolved. An empty map records zero for unavailable deposit
+				// data while preserving the certificate coordinates needed by
+				// pointer addresses in the same gap block.
+				if _, err := s.applyTransactionCertificates(
+					ctx, db, transactionID, transaction.Certificates(),
+					point, index, map[int]uint64{},
+				); err != nil {
+					return err
+				}
+			}
 			collateralReturn := transaction.CollateralReturn()
 			stakeRefs := make([]models.StakeCredentialRef, 0)
 			for _, produced := range transaction.Produced() {
