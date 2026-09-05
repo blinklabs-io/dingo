@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"time"
+
 	"github.com/blinklabs-io/gouroboros/pipeline"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -36,6 +38,22 @@ type stateMetrics struct {
 	shelleyStartTime    prometheus.Gauge
 	epochLengthSlots    prometheus.Gauge
 	shadowGateDecisions *prometheus.CounterVec
+	// Wall-clock time the ledger apply path spent waiting for a referenced
+	// Leios endorser block, by outcome ("arrived" or "timeout"). This wait is
+	// taken ahead of the batch's DB transaction on the single ledger pipeline,
+	// so it is time every block queued behind the batch also spends waiting.
+	// Only references ledger application actually reads are waited on (see
+	// leiosApplyReadsOwnAnnouncement); the rest are prefetched in the
+	// background and never observed here.
+	leiosEbWaitSeconds *prometheus.HistogramVec
+	// Pre-materialized observers for the two outcome label values, so the
+	// apply path does not resolve a label on every wait.
+	leiosEbWaitArrived  prometheus.Observer
+	leiosEbWaitTimedOut prometheus.Observer
+	// Waits that ran to the full diffusion window without the endorser block
+	// arriving. A rising value against a flat leios_eb_wait_seconds "arrived"
+	// count means the wait is buying nothing and is pure apply latency.
+	leiosEbWaitTimeouts prometheus.Counter
 	// Incremented when a stored governance proposal's CBOR fails to
 	// decode during the mid-epoch ratifiability check, so the failures
 	// surface as a metric instead of just log volume.
@@ -149,6 +167,28 @@ func (m *stateMetrics) observeLeaderThresholdMargin(margin float64) {
 		return
 	}
 	m.leaderThresholdMargin.Observe(margin)
+}
+
+// observeLeiosEbWait records one apply-path endorser-block wait. Recording the
+// duration under both outcomes (rather than only timeouts) is what makes the
+// metric answer the question that matters: whether the wait is delivering
+// endorser blocks or just costing apply latency before proceeding without one.
+func (m *stateMetrics) observeLeiosEbWait(d time.Duration, timedOut bool) {
+	if m == nil {
+		return
+	}
+	if timedOut {
+		if m.leiosEbWaitTimeouts != nil {
+			m.leiosEbWaitTimeouts.Inc()
+		}
+		if m.leiosEbWaitTimedOut != nil {
+			m.leiosEbWaitTimedOut.Observe(d.Seconds())
+		}
+		return
+	}
+	if m.leiosEbWaitArrived != nil {
+		m.leiosEbWaitArrived.Observe(d.Seconds())
+	}
 }
 
 func (m *stateMetrics) incLeaderThresholdRejections() {
@@ -341,6 +381,25 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			Help: "shadow blockfetch gate decisions, by path and cutoff source",
 		},
 		[]string{"path", "cutoff"},
+	)
+	m.leiosEbWaitSeconds = promautoFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "dingo_metrics_leios_eb_wait_seconds",
+			Help: "wall-clock time the ledger apply path spent waiting for a referenced Leios endorser block, by outcome",
+			// 5ms to ~82s: the wait is bounded by the certify-by deadline
+			// converted to wall clock, so the useful range spans sub-slot
+			// arrivals up to several stacked protocol windows.
+			Buckets: prometheus.ExponentialBuckets(0.005, 2, 15),
+		},
+		[]string{"outcome"},
+	)
+	m.leiosEbWaitArrived = m.leiosEbWaitSeconds.WithLabelValues("arrived")
+	m.leiosEbWaitTimedOut = m.leiosEbWaitSeconds.WithLabelValues("timeout")
+	m.leiosEbWaitTimeouts = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_metrics_leios_eb_wait_timeouts_total",
+			Help: "ledger apply-path waits for a referenced Leios endorser block that ran to the full diffusion window without it arriving",
+		},
 	)
 	m.governanceProposalDecodeFailures = promautoFactory.NewCounter(
 		prometheus.CounterOpts{

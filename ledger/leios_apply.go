@@ -1264,12 +1264,21 @@ func (b *leiosBackfiller) fetchOnce(
 // diffusion-window timeout elapses. The concurrent leios-notify/leios-fetch
 // handlers keep making progress while this blocks, so the in-flight fetch
 // completes during the wait.
+//
+// Every wait is recorded to dingo_metrics_leios_eb_wait_seconds with its
+// outcome, and expiries additionally to
+// dingo_metrics_leios_eb_wait_timeouts_total. This wait is taken on the single
+// ledger pipeline ahead of the batch's DB transaction, so it is apply latency
+// for every block queued behind the batch as well; it previously had no metric
+// at all, only an Info log, which is why a producer could sit in it for tens of
+// seconds per block with nothing in monitoring to show for it.
 func (ls *LedgerState) waitForEndorserBlock(
 	ctx context.Context,
 	rbSlot uint64,
 	ebHash lcommon.Blake2b256,
 	timeout, poll time.Duration,
 ) {
+	start := time.Now()
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	ticker := time.NewTicker(poll)
@@ -1280,10 +1289,12 @@ func (ls *LedgerState) waitForEndorserBlock(
 			ebHash.Bytes(),
 			rbSlot,
 		) {
+			ls.metrics.observeLeiosEbWait(time.Since(start), false)
 			return
 		}
 		select {
 		case <-waitCtx.Done():
+			ls.metrics.observeLeiosEbWait(time.Since(start), true)
 			ls.config.Logger.Info(
 				"endorser block not fetched within diffusion window; proceeding without it",
 				"component",
@@ -1292,6 +1303,8 @@ func (ls *LedgerState) waitForEndorserBlock(
 				rbSlot,
 				"eb_hash",
 				ebHash.String(),
+				"waited_seconds",
+				time.Since(start).Seconds(),
 			)
 			return
 		case <-ticker.C:

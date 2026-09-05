@@ -29,6 +29,8 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -347,4 +349,103 @@ func TestAwaitEndorserBlocksFetchesUpFront(t *testing.T) {
 	)
 	require.Less(t, time.Since(start), leiosWaitTestWindow/2)
 	require.Equal(t, int64(1), fetches.Load())
+}
+
+// leiosWaitTestHistogram returns the sample count of
+// dingo_metrics_leios_eb_wait_seconds for the given outcome label.
+func leiosWaitTestHistogram(
+	t *testing.T,
+	reg *prometheus.Registry,
+	outcome string,
+) uint64 {
+	t.Helper()
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != "dingo_metrics_leios_eb_wait_seconds" {
+			continue
+		}
+		for _, m := range family.GetMetric() {
+			for _, label := range m.GetLabel() {
+				if label.GetName() == "outcome" &&
+					label.GetValue() == outcome {
+					return m.GetHistogram().GetSampleCount()
+				}
+			}
+		}
+	}
+	t.Fatalf("no eb wait histogram series for outcome %q", outcome)
+	return 0
+}
+
+// TestLeiosEbWaitMetricsRecordOutcomeAndDuration covers the observability gap:
+// the apply-path endorser-block wait had no metric at all, only an Info log,
+// so a producer sitting in it for tens of seconds per block showed nothing in
+// monitoring. Both outcomes are recorded, and both label values exist before
+// any wait happens so a dashboard is not looking at an absent series.
+func TestLeiosEbWaitMetricsRecordOutcomeAndDuration(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	var available atomic.Bool
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			EndorserBlockProvider: func(
+				[]byte,
+				uint64,
+			) ([]cbor.RawMessage, bool) {
+				return nil, available.Load()
+			},
+		},
+	}
+	ls.metrics.init(reg)
+
+	// Both outcome series are pre-materialized at init, before any wait.
+	require.Equal(
+		t,
+		2,
+		testutil.CollectAndCount(ls.metrics.leiosEbWaitSeconds),
+	)
+	require.Zero(t, leiosWaitTestHistogram(t, reg, "arrived"))
+	require.Zero(t, leiosWaitTestHistogram(t, reg, "timeout"))
+	require.Zero(t, testutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts))
+
+	ebHash := lcommon.NewBlake2b256(leiosTestHash(0xE7))
+
+	// Expiry: recorded as a timeout, on both the histogram and the counter.
+	ls.waitForEndorserBlock(
+		t.Context(),
+		100,
+		ebHash,
+		leiosWaitTestWindow,
+		time.Millisecond,
+	)
+	require.Equal(t, uint64(1), leiosWaitTestHistogram(t, reg, "timeout"))
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
+	)
+	require.Zero(t, leiosWaitTestHistogram(t, reg, "arrived"))
+
+	// Arrival: recorded as arrived, and does not increment the timeout
+	// counter.
+	timer := time.AfterFunc(
+		leiosWaitTestWindow/4,
+		func() { available.Store(true) },
+	)
+	defer timer.Stop()
+	ls.waitForEndorserBlock(
+		t.Context(),
+		100,
+		ebHash,
+		leiosWaitTestWindow,
+		time.Millisecond,
+	)
+	require.Equal(t, uint64(1), leiosWaitTestHistogram(t, reg, "arrived"))
+	require.Equal(t, uint64(1), leiosWaitTestHistogram(t, reg, "timeout"))
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
+	)
 }
