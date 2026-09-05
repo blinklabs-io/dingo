@@ -556,7 +556,7 @@ func (ls *LedgerState) verifyBlockHeaderState(
 	allowStateDefer bool,
 ) error {
 	return ls.verifyBlockHeaderStateWithCache(
-		block, epochId, ls.loadConsensusSnapshot().epochCache, allowStateDefer,
+		block, epochId, ls.epochCacheSnapshot(), allowStateDefer,
 	)
 }
 
@@ -592,7 +592,9 @@ func (ls *LedgerState) verifyBlockHeaderStateWithCache(
 		return err
 	}
 
-	if err := ls.verifyBlockLeaderEligibility(block, epochId); err != nil {
+	if err := ls.verifyBlockLeaderEligibilityWithCache(
+		block, epochId, epochCache,
+	); err != nil {
 		// Scope the deferral to the RECOVERABLE case only (issue #3727,
 		// finding 4 -- consensus-sensitive). A leader-stake snapshot reported
 		// unavailable (errLeaderStakeSnapshotUnavailable) means the epoch's
@@ -1010,9 +1012,36 @@ func (ls *LedgerState) ledgerTipBehindSlot(slot uint64) bool {
 // Byron blocks are skipped (PBFT). A missing total-stake or unavailable active
 // slot coefficient is logged and skipped rather than rejecting, to tolerate
 // early-chain bootstrap states where the genesis snapshot is not yet written.
+//
+// epochCacheSnapshot returns the published epoch cache, or nil when no
+// snapshot has been published. The test-helper wrappers that pin a cache for
+// their WithCache counterparts read it before the callee's own early returns
+// (a Byron block, for instance, is skipped without touching ledger state), and
+// a zero-value LedgerState has no published snapshot.
+//
+//nolint:unused // reached only from the test-helper wrappers that pin a cache
+func (ls *LedgerState) epochCacheSnapshot() []models.Epoch {
+	snapshot := ls.loadConsensusSnapshot()
+	if snapshot == nil {
+		return nil
+	}
+	return snapshot.epochCache
+}
+
+//nolint:unused // retained as a test helper
 func (ls *LedgerState) verifyBlockLeaderEligibility(
 	block ledger.Block,
 	epochId uint64,
+) error {
+	return ls.verifyBlockLeaderEligibilityWithCache(
+		block, epochId, ls.epochCacheSnapshot(),
+	)
+}
+
+func (ls *LedgerState) verifyBlockLeaderEligibilityWithCache(
+	block ledger.Block,
+	epochId uint64,
+	epochCache []models.Epoch,
 ) error {
 	if block.Era().Id == byron.EraIdByron {
 		return nil
@@ -1022,10 +1051,11 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 	issuerVkey := block.IssuerVkey()
 	poolKeyHash := lcommon.PoolKeyHash(issuerVkey.Hash())
 
-	poolStake, totalStake, snapshotEpoch, snapshotType, skipEligibility, err := ls.leaderEligibilityStake(
+	poolStake, totalStake, snapshotEpoch, snapshotType, skipEligibility, err := ls.leaderEligibilityStakeWithCache(
 		block,
 		epochId,
 		poolKeyHash,
+		epochCache,
 	)
 	if err != nil {
 		return err
@@ -1215,14 +1245,27 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 	return nil
 }
 
+//nolint:unused // retained as a test helper
 func (ls *LedgerState) leaderEligibilityStake(
 	block ledger.Block,
 	epochId uint64,
 	poolKeyHash lcommon.PoolKeyHash,
 ) (uint64, uint64, uint64, string, bool, error) {
-	useImportedActive, err := ls.shouldUseImportedActivePoolDistribution(
+	return ls.leaderEligibilityStakeWithCache(
+		block, epochId, poolKeyHash, ls.epochCacheSnapshot(),
+	)
+}
+
+func (ls *LedgerState) leaderEligibilityStakeWithCache(
+	block ledger.Block,
+	epochId uint64,
+	poolKeyHash lcommon.PoolKeyHash,
+	epochCache []models.Epoch,
+) (uint64, uint64, uint64, string, bool, error) {
+	useImportedActive, err := ls.shouldUseImportedActivePoolDistributionWithCache(
 		block,
 		epochId,
+		epochCache,
 	)
 	if err != nil {
 		return 0, 0, epochId, models.PoolStakeSnapshotTypeActive, false, err
@@ -1425,14 +1468,34 @@ func (ls *LedgerState) shouldSkipPostMithrilMarkEligibility(
 	return false
 }
 
+//nolint:unused // retained as a test helper
 func (ls *LedgerState) shouldUseImportedActivePoolDistribution(
 	block ledger.Block,
 	epochId uint64,
 ) (bool, error) {
+	return ls.shouldUseImportedActivePoolDistributionWithCache(
+		block, epochId, ls.epochCacheSnapshot(),
+	)
+}
+
+// shouldUseImportedActivePoolDistributionWithCache resolves the Mithril trust
+// boundary against a caller-supplied epoch cache.
+//
+// This selection decides *which* snapshot elects the block, and both halves of
+// header verification consume it: the VRF-key cutoff and the leader stake. A
+// second, unpinned read of the live cache here would let those two halves
+// disagree about the electing snapshot across an epoch rollover or a rollback,
+// which is the divergence threading epochId through this path exists to
+// prevent.
+func (ls *LedgerState) shouldUseImportedActivePoolDistributionWithCache(
+	block ledger.Block,
+	epochId uint64,
+	epochCache []models.Epoch,
+) (bool, error) {
 	if ls.mithrilLedgerSlot == 0 || block.SlotNumber() <= ls.mithrilLedgerSlot {
 		return false, nil
 	}
-	mithrilEpoch, err := ls.epochForSlot(ls.mithrilLedgerSlot)
+	mithrilEpoch, err := epochForSlotInCache(epochCache, ls.mithrilLedgerSlot)
 	if err != nil {
 		return false, fmt.Errorf(
 			"block header verification rejected at slot %d: "+
@@ -1475,7 +1538,7 @@ func (ls *LedgerState) electingVrfKeyHash(
 	poolKeyHash lcommon.PoolKeyHash,
 ) (lcommon.Blake2b256, bool, error) {
 	return ls.electingVrfKeyHashWithCache(
-		block, epochId, poolKeyHash, ls.loadConsensusSnapshot().epochCache,
+		block, epochId, poolKeyHash, ls.epochCacheSnapshot(),
 	)
 }
 
@@ -1577,7 +1640,7 @@ func (ls *LedgerState) electingPoolParamsCutoffSlot(
 	poolKeyHash lcommon.PoolKeyHash,
 ) (cutoffSlot uint64, capturedSlot uint64, ok bool, err error) {
 	return ls.electingPoolParamsCutoffSlotWithCache(
-		block, epochId, poolKeyHash, ls.loadConsensusSnapshot().epochCache,
+		block, epochId, poolKeyHash, ls.epochCacheSnapshot(),
 	)
 }
 
@@ -1589,9 +1652,10 @@ func (ls *LedgerState) electingPoolParamsCutoffSlotWithCache(
 ) (cutoffSlot uint64, capturedSlot uint64, ok bool, err error) {
 	snapshotEpoch := praos.StakeSnapshotEpoch(epochId)
 	snapshotType := models.PoolStakeSnapshotTypeMark
-	useImportedActive, err := ls.shouldUseImportedActivePoolDistribution(
+	useImportedActive, err := ls.shouldUseImportedActivePoolDistributionWithCache(
 		block,
 		epochId,
+		epochCache,
 	)
 	if err != nil {
 		return 0, 0, false, err
@@ -1639,7 +1703,7 @@ func (ls *LedgerState) verifyRegisteredVrfKey(
 	epochId uint64,
 ) error {
 	return ls.verifyRegisteredVrfKeyWithCache(
-		block, epochId, ls.loadConsensusSnapshot().epochCache,
+		block, epochId, ls.epochCacheSnapshot(),
 	)
 }
 

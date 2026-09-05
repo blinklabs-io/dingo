@@ -195,3 +195,85 @@ func TestElectingVrfKeyHashResolvesTheEarlierKeyWhenAReRegistrationFollowsTheCut
 			"registration is in force at the cutoff",
 	)
 }
+
+// TestElectingPoolParamsCutoffSlotUsesTheSuppliedEpochCache pins that the
+// cutoff path resolves the Mithril trust boundary against the epoch cache it
+// was handed, not against whatever cache is live when it runs.
+//
+// verifyBlockHeaderStateWithCache pins one immutable cache and threads it
+// through so the VRF key and the stake eligibility check cannot be answered
+// from different snapshot generations. shouldUseImportedActivePoolDistribution
+// selects which snapshot elects the block, so a second, unpinned read there
+// reopens the gap the pinning exists to close.
+//
+// The two caches disagree by construction: the live one starts at epoch 38 and
+// cannot place the Mithril boundary at all, so reading it fails the lookup
+// outright rather than returning a merely different answer.
+func TestElectingPoolParamsCutoffSlotUsesTheSuppliedEpochCache(t *testing.T) {
+	nonce := bytes.Repeat([]byte{0x07}, 32)
+	tb := createTestBlock(t, [32]byte{53}, 53, tamperNone)
+	tb.block.slot = 3_400_000
+	ls, db := newEligibilityTestLedger(t, nonce)
+
+	// Live cache: epochs 38-39 only. The Mithril boundary predates it.
+	ls.epochCache = previewEpochs(38, 39, nonce)
+	ls.mithrilLedgerSlot = 3_150_000
+	ls.publishSnapshotsLocked()
+
+	// Supplied cache: epochs 35-39, which does place the boundary.
+	supplied := previewEpochs(35, 39, nonce)
+
+	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x11}, 28))
+	seedPoolStakeSnapshotOfTypeAtSlot(t, db, 37,
+		models.PoolStakeSnapshotTypeMark, pool[:], 1_000, 10_000, 3_196_799)
+
+	cutoff, captured, ok, err := ls.electingPoolParamsCutoffSlotWithCache(
+		tb.block, 38, pool, supplied,
+	)
+	require.NoError(t, err,
+		"the boundary must be resolved against the supplied cache")
+	require.True(t, ok)
+	assert.Equal(t, uint64(3_110_399), cutoff)
+	assert.Equal(t, uint64(3_196_799), captured)
+}
+
+// TestLeaderEligibilityStakeUsesTheSuppliedEpochCache is the other half of the
+// same pairing: the stake side must select its snapshot from the same cache
+// the VRF key side used, or the two can disagree about whether the imported
+// active distribution elects this block.
+//
+// Only the active snapshot is seeded. Selecting the mark snapshot instead --
+// which is what resolving the boundary against the live cache produces here --
+// finds nothing and rejects.
+func TestLeaderEligibilityStakeUsesTheSuppliedEpochCache(t *testing.T) {
+	nonce := bytes.Repeat([]byte{0x07}, 32)
+	tb := createTestBlock(t, [32]byte{54}, 54, tamperNone)
+	tb.block.slot = 3_400_000
+	ls, db := newEligibilityTestLedger(t, nonce)
+
+	// Live cache places the Mithril boundary in epoch 39, so epoch 38 would
+	// not be the imported epoch and the mark snapshot would be selected.
+	ls.epochCache = previewEpochs(38, 39, nonce)
+	ls.mithrilLedgerSlot = 3_370_000
+	ls.publishSnapshotsLocked()
+
+	// Supplied cache places the same boundary in epoch 38, the epoch under
+	// verification, so the imported active distribution is the electing one.
+	supplied := []models.Epoch{
+		{EpochId: 38, StartSlot: 3_283_200, LengthInSlots: 172_800, Nonce: nonce},
+	}
+
+	pool := lcommon.PoolKeyHash(tb.block.IssuerVkey().Hash())
+	seedPoolStakeSnapshotOfType(t, db, 38,
+		models.PoolStakeSnapshotTypeActive, pool[:], 1_000, 10_000)
+
+	poolStake, totalStake, snapshotEpoch, snapshotType, skip, err :=
+		ls.leaderEligibilityStakeWithCache(tb.block, 38, pool, supplied)
+	require.NoError(t, err,
+		"the electing snapshot must be selected from the supplied cache")
+	assert.False(t, skip)
+	assert.Equal(t, models.PoolStakeSnapshotTypeActive, snapshotType)
+	assert.Equal(t, uint64(38), snapshotEpoch)
+	assert.Equal(t, uint64(1_000), poolStake)
+	assert.Equal(t, uint64(10_000), totalStake)
+}
