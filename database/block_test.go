@@ -381,6 +381,60 @@ func TestResolveBlockNumberBoundIsSeparableFromTheSearch(t *testing.T) {
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }
 
+// TestBlockByNumberResolvesCompactBlockMetadata pins the height lookup
+// against the other block-metadata encoding. The badger plugin writes a
+// compact binary value instead of CBOR for run mode "serve" or "leios"
+// with storage mode "core", and the search reads that value directly
+// rather than through GetBlock, so decoding it as CBOR would fail every
+// height lookup and every bound resolution on exactly the configurations
+// a production node runs.
+func TestBlockByNumberResolvesCompactBlockMetadata(t *testing.T) {
+	db, err := newTestDatabaseWithRunMode(
+		t,
+		&Config{DataDir: "", StorageMode: types.StorageModeCore},
+		"serve",
+	)
+	require.NoError(t, err)
+
+	blocks := make([]models.Block, 0, 5)
+	for i := uint64(1); i <= 5; i++ {
+		block := testIndexedBlock(i*10, i, byte(i))
+		require.NoError(t, db.BlockCreate(block, nil))
+		blocks = append(blocks, block)
+	}
+
+	// The stored value really is the compact encoding, not CBOR -- without
+	// this the test would still pass if the plugin silently fell back.
+	txn := db.BlobTxn(false)
+	t.Cleanup(func() { _ = txn.Rollback() })
+	raw, err := db.Blob().Get(
+		txn.Blob(),
+		types.BlockBlobMetadataKey(
+			types.BlockBlobKey(blocks[0].Slot, blocks[0].Hash),
+		),
+	)
+	require.NoError(t, err)
+	require.True(
+		t,
+		bytes.HasPrefix(raw, types.BlockMetadataBinaryMagic[:]),
+		"expected compact block metadata for run mode serve and storage mode core",
+	)
+
+	bound, err := ResolveBlockNumberBound(db)
+	require.NoError(t, err)
+	require.True(t, bound.Resolved)
+	require.Equal(t, blocks[4].ID, bound.HighestID)
+	require.Equal(t, blocks[4].Number, bound.HighestNumber)
+
+	for _, want := range blocks {
+		got, err := BlockByNumber(db, want.Number)
+		require.NoError(t, err)
+		require.Equal(t, want.ID, got.ID)
+		require.Equal(t, want.Slot, got.Slot)
+		require.True(t, bytes.Equal(want.Hash, got.Hash))
+	}
+}
+
 // TestBlockByNumberBoundedRejectsUnresolvedBound pins the fail-closed zero
 // value: a caller that never resolved a bound must get ErrBlockNotFound
 // rather than a search over an ID space the bound says is empty, which

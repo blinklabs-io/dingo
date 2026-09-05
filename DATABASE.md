@@ -1269,7 +1269,7 @@ flowchart LR
 | Logical key | Value | Used by |
 |---|---|---|
 | `bp` + big-endian slot `uint64` + block hash bytes | Raw block CBOR, or expired-history marker `DBT1` | `BlobStore.SetBlock`, `GetBlock`, `TombstoneBlock`, block iterators |
-| `bp..._metadata` | `types.BlockMetadata`: `id`, `type`, `height`, `prev_hash` encoded as CBOR; Badger can use compact `DBM1` binary metadata | `GetBlock` and archive-proxy/history-expiry paths |
+| `bp..._metadata` | `types.BlockMetadata`: `id`, `type`, `height`, `prev_hash` encoded as CBOR; Badger can use compact `DBM1` binary metadata (run mode `serve`/`leios` with storage mode `core`). Which encoding is present depends on the configuration of the node that wrote the block, so decode with `types.UnmarshalBlockMetadata` rather than as CBOR — code outside the plugins reads this key directly. | `GetBlock`, the block-number search, and archive-proxy/history-expiry paths |
 | `bi` + big-endian internal block ID `uint64` | The corresponding `bp...` block key | Block iteration and block-by-index lookup |
 | `bh` + block hash bytes | The corresponding `bp...` block key | Fast block-by-hash lookup |
 | `u` + tx hash bytes + big-endian output index `uint32` | UTxO CBOR or a 52-byte `DOFF` CBOR-offset reference into a block | UTxO resolution and history expiry |
@@ -1571,7 +1571,9 @@ Search probes read the ordered `bi` entry and the block's `_metadata` object,
 never the block CBOR: a probe needs only the block's ID and height to decide
 which way to move, and reading it through the block itself would download a
 whole block object from cloud storage per probe. Only the one matching block is
-read in full.
+read in full. Because that value is read directly rather than through
+`GetBlock`, it is decoded with `types.UnmarshalBlockMetadata`, which accepts
+both the CBOR and the compact `DBM1` encodings.
 
 `lifecycle.ResolveTargetByNumber` keeps its own tip-bounded search rather than
 calling this: a truncate target must not resolve past the persisted tip, while

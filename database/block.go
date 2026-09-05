@@ -651,6 +651,11 @@ func blockIndexEntryAtOrAfterTxn(
 // or previous hash can read a few dozen bytes instead of a whole block
 // object. A tombstoned block still has its metadata, so this also answers
 // for history that has expired locally.
+//
+// The value is decoded with types.UnmarshalBlockMetadata rather than as
+// CBOR: badger writes a compact binary encoding instead when compact block
+// metadata is enabled, so which encoding is at the key depends on how the
+// node that wrote the block was configured.
 func blockMetadataByKey(
 	txn *Txn,
 	blockKey []byte,
@@ -673,8 +678,8 @@ func blockMetadataByKey(
 		}
 		return types.BlockMetadata{}, err
 	}
-	var metadata types.BlockMetadata
-	if _, err := cbor.Decode(raw, &metadata); err != nil {
+	metadata, err := types.UnmarshalBlockMetadata(raw)
+	if err != nil {
 		return types.BlockMetadata{}, fmt.Errorf(
 			"decoding metadata for block key %x: %w",
 			blockKey,
