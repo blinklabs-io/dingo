@@ -1266,8 +1266,9 @@ func (b *leiosBackfiller) fetchOnce(
 // completes during the wait.
 //
 // Every wait is recorded to dingo_metrics_leios_eb_wait_seconds with its
-// outcome, and expiries additionally to
-// dingo_metrics_leios_eb_wait_timeouts_total. This wait is taken on the single
+// outcome -- arrived, timeout, or cancelled, the last being a cancellation of
+// the block-processing context rather than a diffusion-window expiry -- and
+// expiries additionally to dingo_metrics_leios_eb_wait_timeouts_total. This wait is taken on the single
 // ledger pipeline ahead of the batch's DB transaction, so it is apply latency
 // for every block queued behind the batch as well; it previously had no metric
 // at all, only an Info log, which is why a producer could sit in it for tens of
@@ -1289,12 +1290,55 @@ func (ls *LedgerState) waitForEndorserBlock(
 			ebHash.Bytes(),
 			rbSlot,
 		) {
-			ls.metrics.observeLeiosEbWait(time.Since(start), false)
+			ls.metrics.observeLeiosEbWait(
+				time.Since(start),
+				leiosEbWaitOutcomeArrived,
+			)
 			return
 		}
 		select {
 		case <-waitCtx.Done():
-			ls.metrics.observeLeiosEbWait(time.Since(start), true)
+			// waitCtx is a timeout child of ctx, so its Done also closes when
+			// the PARENT is cancelled -- node shutdown, or the block-processing
+			// pass being aborted and restarted. That is not a diffusion-window
+			// expiry: nothing was learned about whether the endorser block is
+			// obtainable, and reporting it as one would inflate the timeout
+			// rate exactly when a node is shutting down or restarting its
+			// pipeline. waitCtx.Err() distinguishes the two and is stable once
+			// resolved -- a deadline that fires first leaves DeadlineExceeded
+			// even if the parent is cancelled immediately afterwards.
+			//
+			// The caller's behaviour is unchanged either way, and deliberately
+			// so: this function returns, and ensureReferencedEndorserBlocks
+			// then runs its mandatory-closure fetch and availability check as
+			// usual, so a cancelled pass still fails the chunk when a certified
+			// closure is missing and still proceeds when every reference was
+			// best-effort. That is what the code did before the wait was
+			// instrumented; only the classification is new.
+			if !errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				ls.metrics.observeLeiosEbWait(
+					time.Since(start),
+					leiosEbWaitOutcomeCancelled,
+				)
+				ls.config.Logger.Debug(
+					"endorser block wait cancelled before the diffusion window elapsed",
+					"component",
+					"ledger",
+					"slot",
+					rbSlot,
+					"eb_hash",
+					ebHash.String(),
+					"waited_seconds",
+					time.Since(start).Seconds(),
+					"error",
+					waitCtx.Err(),
+				)
+				return
+			}
+			ls.metrics.observeLeiosEbWait(
+				time.Since(start),
+				leiosEbWaitOutcomeTimeout,
+			)
 			ls.config.Logger.Info(
 				"endorser block not fetched within diffusion window; proceeding without it",
 				"component",
