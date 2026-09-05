@@ -720,22 +720,60 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return nil
 	}
 
-	// The tip is at the current slot and the block there is one this
-	// node produced, so the slot-aligned loop has simply re-entered a
-	// slot it already used. Leave without running leader selection:
-	// this is not a contested slot, and the fence below would refuse
-	// it anyway.
+	// The tip is at the current slot. Before treating that as a
+	// contested slot, work out whether the block sitting there is one
+	// this node produced.
 	if currentSlot == tipSlot {
-		if ours, matchedBy := f.tipBlockIsOurs(currentSlot); ours {
+		ownership, ourHash, tipHash := f.tipBlockOwnership(currentSlot)
+		fenceCovers := f.fenceLoaded && currentSlot <= f.lastForgedSlot
+		switch {
+		case ownership == tipOwnershipOurs:
+			// The slot-aligned loop has simply re-entered a slot
+			// whose block is provably ours. Not a contested slot,
+			// and the fence would refuse it anyway.
 			f.logger.Debug(
 				"forge skip: slot already has our own block",
 				"current_slot", currentSlot,
 				"tip_slot", tipSlot,
 				"last_forged_slot", f.lastForgedSlot,
-				"matched_by", matchedBy,
+				"matched_by", "forged_block_hash",
+			)
+			return nil
+		case ownership == tipOwnershipRival && fenceCovers:
+			// We committed to this slot and a rival's block is what
+			// the chain adopted for it. The fence still forbids
+			// forging: a second, different block for a slot whose
+			// first block may already have reached peers is
+			// equivocation, and losing a battle is not a licence to
+			// equivocate. But this is a slot battle we lost, not
+			// "the tip block is ours", and dropping it at Debug is
+			// exactly the silent loss this change exists to remove.
+			f.RecordSlotBattle()
+			f.incCouldNotForge()
+			f.logger.Warn(
+				"slot battle lost: rival block at tip for a slot this node already forged",
+				"current_slot", currentSlot,
+				"tip_slot", tipSlot,
+				"last_forged_slot", f.lastForgedSlot,
+				"our_block_hash", hex.EncodeToString(ourHash),
+				"tip_block_hash", hex.EncodeToString(tipHash),
+			)
+			return nil
+		case fenceCovers:
+			// Ownership is inconclusive, but the fence says this
+			// node already committed to the slot, so it is not
+			// available regardless of who holds the tip.
+			f.logger.Debug(
+				"forge skip: slot already has our own block",
+				"current_slot", currentSlot,
+				"tip_slot", tipSlot,
+				"last_forged_slot", f.lastForgedSlot,
+				"matched_by", "forge_fence",
 			)
 			return nil
 		}
+		// Neither signal claims the slot: fall through and let leader
+		// selection and the contested-slot branch account for it.
 	}
 
 	// Skip if the chain is still syncing from a peer.
@@ -1248,67 +1286,85 @@ func (f *BlockForger) reserveForgeSlot(slot uint64) (bool, error) {
 	return true, nil
 }
 
-// tipBlockIsOurs reports whether the block occupying slot at the chain
-// tip is one this node produced, and which signal decided it.
+// tipOwnership is the outcome of comparing the block sitting at the
+// chain tip against the block this node forged for a given slot.
+type tipOwnership int
+
+const (
+	// tipOwnershipUnknown means the comparison could not be made: no
+	// recorded hash for the slot, a slot clock that cannot report a tip
+	// hash, an empty hash on either side, or a tip that moved between
+	// the two reads. The caller must fall back to the fence.
+	tipOwnershipUnknown tipOwnership = iota
+	// tipOwnershipOurs means the tip block is byte-for-byte the block
+	// this node forged for the slot.
+	tipOwnershipOurs
+	// tipOwnershipRival means the tip holds a different block for a slot
+	// this node forged for: a slot battle this node lost.
+	tipOwnershipRival
+)
+
+// tipBlockOwnership reports whether the block at the chain tip for slot
+// is the one this node forged, a rival's, or indeterminate, together
+// with the two hashes it compared (nil when indeterminate).
 //
-// The primary signal is identity, not bookkeeping: SlotTracker already
-// records the hash of every block this node forged and adopted, so a tip
-// hash equal to that record proves the block at the tip is ours rather
-// than a rival's. That check is independent of whether a durable
-// ForgeFenceStore is wired, which matters because the fence is in-memory
-// only when it is not (see fenceStore above).
+// This is identity rather than bookkeeping. SlotTracker already records
+// the hash of every block this node forged and adopted, so comparing it
+// against the hash at the tip distinguishes "we re-entered our own slot"
+// from "we lost this slot to a rival". The forge fence cannot make that
+// distinction: it is a high-water mark over slots this node committed
+// to, so it reports both cases identically, and it is durable only
+// through a ForgeFenceStore, so where none is wired (see fenceStore
+// above) it can be silent about a slot this node demonstrably forged.
 //
-// The fence is kept as an additional guard, not replaced. It covers the
-// window the tracker cannot: reserveForgeSlot writes the fence *before*
-// the header for a slot is signed, while RecordForgedBlock runs only
-// after the block is adopted, so between those two points the slot is
-// already ours but has no recorded hash yet. The fence is also the only
-// signal available when the wired slot clock does not implement
-// ChainTipHashProvider.
+// The fence is not replaced by this, and the caller must keep consulting
+// it. It covers the window the tracker cannot: reserveForgeSlot writes
+// the fence *before* the header for a slot is signed, while
+// RecordForgedBlock runs only after adoption, so between those two
+// points the slot is already ours but has no recorded hash yet. More
+// importantly, a fence that covers the slot forbids forging even when
+// this function answers tipOwnershipRival — losing a slot battle is not
+// a licence to sign a second block for a slot whose first block may
+// already have reached peers.
 //
 // Neither signal survives a process restart on its own: the tracker is
-// in-memory, and the fence is durable only through a ForgeFenceStore.
-func (f *BlockForger) tipBlockIsOurs(slot uint64) (bool, string) {
-	if f.tipHashMatchesForgedBlock(slot) {
-		return true, "forged_block_hash"
-	}
-	if f.fenceLoaded && slot <= f.lastForgedSlot {
-		return true, "forge_fence"
-	}
-	return false, ""
-}
-
-// tipHashMatchesForgedBlock reports whether the current chain tip is the
-// exact block this node forged for slot. It answers false whenever any
-// input is missing (no tracker record, no tip-hash capable slot clock,
-// an empty hash on either side) or the tip has moved off slot between
-// the two reads, so the caller falls back to the fence.
-func (f *BlockForger) tipHashMatchesForgedBlock(slot uint64) bool {
+// in-memory, and the fence is durable only through a store.
+//
+// The result can only choose between skipping quietly and skipping
+// loudly; no branch of the equal-slot gate forges, so a wrong answer
+// here cannot produce a block.
+func (f *BlockForger) tipBlockOwnership(
+	slot uint64,
+) (tipOwnership, []byte, []byte) {
 	if f.slotTracker == nil {
-		return false
+		return tipOwnershipUnknown, nil, nil
 	}
 	forgedHash, ok := f.slotTracker.WasForgedByUs(slot)
 	if !ok || len(forgedHash) == 0 {
-		return false
+		return tipOwnershipUnknown, nil, nil
 	}
 	provider, hasTipHash := f.slotClock.(ChainTipHashProvider)
 	if !hasTipHash {
-		return false
+		return tipOwnershipUnknown, nil, nil
 	}
 	tipHash := provider.ChainTipHash()
 	if len(tipHash) == 0 {
-		return false
+		return tipOwnershipUnknown, nil, nil
 	}
 	// The caller's tipSlot was sampled at the top of the forge cycle and
 	// the chain can move underneath it, so this hash need not belong to
 	// the slot being decided. Re-read the tip slot next to the hash and
-	// refuse to conclude anything if the tip is no longer at this slot,
-	// which sends the caller back to the fence. The two reads are still
-	// not atomic, so this narrows the window rather than closing it.
+	// refuse to conclude anything if the tip is no longer at this slot.
+	// The two reads are still not atomic, so this narrows the window
+	// rather than closing it; every remaining disagreement resolves to
+	// tipOwnershipUnknown or to a Warn, never to a forge.
 	if f.slotClock.ChainTipSlot() != slot {
-		return false
+		return tipOwnershipUnknown, nil, nil
 	}
-	return bytes.Equal(tipHash, forgedHash)
+	if bytes.Equal(tipHash, forgedHash) {
+		return tipOwnershipOurs, forgedHash, tipHash
+	}
+	return tipOwnershipRival, forgedHash, tipHash
 }
 
 func (f *BlockForger) incCouldNotForge() {
