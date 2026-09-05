@@ -15,12 +15,13 @@
 package bark
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
-	"log/slog"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -65,6 +66,73 @@ type signedURLBlobStore struct {
 	// before it heads the block object at all), so it cannot be produced by
 	// deleting anything -- it has to be injected here.
 	unsignable map[string]struct{}
+	// counts, when non-nil, records the blob operations a request causes.
+	counts *blobOpCounts
+}
+
+// blobOpCounts records the blob operations that matter to the cost of a
+// FetchBlock batch. Badger answers all of them locally and cheaply, so a
+// regression in how many of them a request makes is invisible in wall
+// clock here and only shows up as load on s3 or gcs -- counting them is
+// the only way an in-process test can see it.
+type blobOpCounts struct {
+	// reverseIndexScans counts reverse iterations over the block-index
+	// prefix. Each one is a full listing of every block-index object in
+	// the bucket on s3 and gcs (listKeysToFile, no early break).
+	reverseIndexScans atomic.Int64
+	// forwardIndexScans counts forward iterations over the block-index
+	// prefix. These are prefix-bounded range LISTs.
+	forwardIndexScans atomic.Int64
+	// blockReads counts whole-block reads: a block object downloaded in
+	// full from the store.
+	blockReads atomic.Int64
+	// metadataReads counts reads of the small per-block metadata object,
+	// which carries the block ID and height without the block CBOR.
+	metadataReads atomic.Int64
+}
+
+func (c *blobOpCounts) reset() {
+	c.reverseIndexScans.Store(0)
+	c.forwardIndexScans.Store(0)
+	c.blockReads.Store(0)
+	c.metadataReads.Store(0)
+}
+
+func (s *signedURLBlobStore) NewIterator(
+	txn types.Txn,
+	opts types.BlobIteratorOptions,
+) types.BlobIterator {
+	if s.counts != nil &&
+		bytes.HasPrefix(opts.Prefix, []byte(types.BlockBlobIndexKeyPrefix)) {
+		if opts.Reverse {
+			s.counts.reverseIndexScans.Add(1)
+		} else {
+			s.counts.forwardIndexScans.Add(1)
+		}
+	}
+	return s.BlobStore.NewIterator(txn, opts)
+}
+
+func (s *signedURLBlobStore) GetBlock(
+	txn types.Txn,
+	slot uint64,
+	hash []byte,
+) ([]byte, types.BlockMetadata, error) {
+	if s.counts != nil {
+		s.counts.blockReads.Add(1)
+	}
+	return s.BlobStore.GetBlock(txn, slot, hash)
+}
+
+func (s *signedURLBlobStore) Get(
+	txn types.Txn,
+	key []byte,
+) ([]byte, error) {
+	if s.counts != nil &&
+		bytes.HasSuffix(key, []byte(types.BlockBlobMetadataKeySuffix)) {
+		s.counts.metadataReads.Add(1)
+	}
+	return s.BlobStore.Get(txn, key)
 }
 
 func (s *signedURLBlobStore) GetBlockURL(
@@ -80,6 +148,9 @@ func (s *signedURLBlobStore) GetBlockURL(
 			types.ErrBlobKeyNotFound,
 		)
 	}
+	// s.BlobStore, not s: the real cloud GetBlockURL reads the metadata
+	// object and heads the block object, so this stand-in must not be
+	// counted as a whole-block read.
 	_, metadata, err := s.BlobStore.GetBlock(txn, point.Slot, point.Hash)
 	if err != nil {
 		return types.SignedURL{}, types.BlockMetadata{}, err
@@ -98,13 +169,21 @@ func (s *signedURLBlobStore) GetBlockURL(
 
 type signedURLBlobConfig struct{}
 
+// archiveTestOptions tunes the database an archive test handler runs on.
+type archiveTestOptions struct {
+	// unsignable holds hex block hashes GetBlockURL must refuse to sign.
+	unsignable map[string]struct{}
+	// counts, when non-nil, records the blob operations requests cause.
+	counts *blobOpCounts
+}
+
 // registerSignedURLBlobProvider registers the store, treating the given hex
 // block hashes as unsignable. dbtest builds a fresh plugin.Host per
 // database, so each test gets its own registration and the shared provider
 // name does not collide.
 func registerSignedURLBlobProvider(
 	host *hostplugin.Host,
-	unsignable map[string]struct{},
+	opts archiveTestOptions,
 ) error {
 	return hostplugin.Register(
 		host,
@@ -129,7 +208,8 @@ func registerSignedURLBlobProvider(
 			}
 			signing := &signedURLBlobStore{
 				BlobStore:  store,
-				unsignable: unsignable,
+				unsignable: opts.unsignable,
+				counts:     opts.counts,
 			}
 			return signing,
 				hostplugin.Lifecycle{
@@ -148,7 +228,7 @@ func registerSignedURLBlobProvider(
 // refuses to sign them, so GetBlockURL reports them missing.
 func newSigningTestDB(
 	t *testing.T,
-	unsignable map[string]struct{},
+	opts archiveTestOptions,
 ) *database.Database {
 	t.Helper()
 	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
@@ -156,7 +236,7 @@ func newSigningTestDB(
 		Blob: dbtest.StorageProvider{
 			Name: signedURLBlobProviderName,
 			Register: func(host *hostplugin.Host) error {
-				return registerSignedURLBlobProvider(host, unsignable)
+				return registerSignedURLBlobProvider(host, opts)
 			},
 		},
 	})
@@ -171,21 +251,18 @@ func newArchiveTestHandler(
 	count int,
 ) (*archiveServiceHandler, []models.Block) {
 	t.Helper()
-	return newArchiveTestHandlerWithLogger(t, count, nil, nil)
+	return newArchiveTestHandlerWithOptions(t, count, archiveTestOptions{})
 }
 
-// newArchiveTestHandlerWithLogger builds an archive handler over a signing
-// database seeded with count blocks, refusing to sign the hex block hashes
-// in unsignable and logging through logger. A nil logger leaves NewBark's
-// discard logger in place.
-func newArchiveTestHandlerWithLogger(
+// newArchiveTestHandlerWithOptions builds an archive handler over a signing
+// database seeded with count blocks, configured by opts.
+func newArchiveTestHandlerWithOptions(
 	t *testing.T,
 	count int,
-	unsignable map[string]struct{},
-	logger *slog.Logger,
+	opts archiveTestOptions,
 ) (*archiveServiceHandler, []models.Block) {
 	t.Helper()
-	db := newSigningTestDB(t, unsignable)
+	db := newSigningTestDB(t, opts)
 	blocks := make([]models.Block, 0, count)
 	for i := 1; i <= count; i++ {
 		// #nosec G115 -- fixed small test fixture values.
@@ -193,7 +270,7 @@ func newArchiveTestHandlerWithLogger(
 		require.NoError(t, db.BlockCreate(block, nil))
 		blocks = append(blocks, block)
 	}
-	b, err := NewBark(BarkConfig{DB: db, Port: 1, Logger: logger})
+	b, err := NewBark(BarkConfig{DB: db, Port: 1})
 	require.NoError(t, err)
 	return &archiveServiceHandler{bark: b}, blocks
 }
@@ -338,11 +415,10 @@ func TestArchiveFetchBlockRejectsMissingMetadata(t *testing.T) {
 	// testBlock is deterministic, so the second seeded block's hash is
 	// known before the store that has to refuse to sign it is built.
 	lostHash := hex.EncodeToString(testBlock(2, 0x12).Hash)
-	handler, blocks := newArchiveTestHandlerWithLogger(
-		t,
-		3,
-		map[string]struct{}{lostHash: {}},
-		nil,
+	handler, blocks := newArchiveTestHandlerWithOptions(t, 3,
+		archiveTestOptions{
+			unsignable: map[string]struct{}{lostHash: {}},
+		},
 	)
 	lost, served := blocks[1], blocks[0]
 	require.Equal(t, lostHash, hex.EncodeToString(lost.Hash))
@@ -369,6 +445,75 @@ func TestArchiveFetchBlockRejectsMissingMetadata(t *testing.T) {
 	})
 	require.Len(t, msg.GetNotFound(), 1)
 	require.Empty(t, msg.GetBlocks())
+}
+
+// TestArchiveFetchBlockResolvesHeightBoundOncePerBatch pins the blob cost
+// of a height-only batch.
+//
+// Height is the one identifier nothing is keyed by, so resolving one is a
+// binary search bounded above by the highest indexed block. Reading that
+// bound is a reverse iteration over the block-index prefix, and on s3 and
+// gcs -- the only backends that sign URLs, so the only ones this handler
+// runs on -- a reverse iterator lists every block-index object in the
+// bucket with no early break. ArchiveService takes no operator
+// credentials, so resolving the bound once per reference let a single
+// anonymous request carrying DefaultMaxFetchBlockRefs height-only
+// references cost that many full-bucket enumerations.
+//
+// The counts are asserted exactly rather than as an upper bound. Badger
+// answers every one of these cheaply and locally, so a regression costs no
+// measurable time here and would surface only as cloud-storage load.
+func TestArchiveFetchBlockResolvesHeightBoundOncePerBatch(t *testing.T) {
+	const blockCount = 16
+	counts := &blobOpCounts{}
+	handler, blocks := newArchiveTestHandlerWithOptions(t, blockCount,
+		archiveTestOptions{counts: counts},
+	)
+
+	heightRefs := make([]*archive.BlockRef, 0, len(blocks))
+	pointRefs := make([]*archive.BlockRef, 0, len(blocks))
+	for _, block := range blocks {
+		heightRefs = append(heightRefs, &archive.BlockRef{
+			Height: new(block.Number),
+		})
+		hash := hex.EncodeToString(block.Hash)
+		pointRefs = append(pointRefs, &archive.BlockRef{
+			Hash: new(hash),
+			Slot: new(block.Slot),
+		})
+	}
+
+	counts.reset()
+	msg := fetchBlocks(t, handler, heightRefs...)
+	require.Len(t, msg.GetBlocks(), blockCount)
+	require.Empty(t, msg.GetNotFound())
+
+	require.Equal(
+		t,
+		int64(1),
+		counts.reverseIndexScans.Load(),
+		"the highest indexed block must be resolved once for the batch, not once per reference",
+	)
+	require.Equal(
+		t,
+		int64(blockCount),
+		counts.blockReads.Load(),
+		"only the matched block is read in full; search probes read the metadata object instead of the block CBOR",
+	)
+	require.Positive(
+		t,
+		counts.metadataReads.Load(),
+		"the search must be reading metadata objects",
+	)
+
+	// A batch that needs no height search must resolve no bound at all, so
+	// hash+slot references stay free of index work entirely.
+	counts.reset()
+	msg = fetchBlocks(t, handler, pointRefs...)
+	require.Len(t, msg.GetBlocks(), blockCount)
+	require.Empty(t, msg.GetNotFound())
+	require.Zero(t, counts.reverseIndexScans.Load())
+	require.Zero(t, counts.forwardIndexScans.Load())
 }
 
 // TestArchiveFetchBlockTreatsInconsistentReferenceAsNotFound covers a

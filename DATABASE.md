@@ -1549,12 +1549,29 @@ as "not reachable by hash" rather than "not present".
 number is not an indexed blob key — only slot (`bp`), hash (`bh`), and the
 internal sequential ID (`bi`) are — so the lookup binary-searches the ID space
 that block numbers increase with, bounded above by the highest indexed block,
-and probes with `BlockAtOrAfterIndex` so a gap left by a Mithril bootstrap or
-drain import does not end the search early. A number no block carries returns
-`models.ErrBlockNotFound`. It costs O(log n) blob reads where a slot or hash
-lookup costs one, so prefer either of those when the caller has one; bark's
-`ArchiveService.FetchBlock` uses it only for a reference that supplies height
-alone.
+and seeks to the next indexed entry at or after each probe so a gap left by a
+Mithril bootstrap or drain import does not end the search early. A number no
+block carries returns `models.ErrBlockNotFound`. It costs O(log n) blob reads
+where a slot or hash lookup costs one, so prefer either of those when the
+caller has one; bark's `ArchiveService.FetchBlock` uses it only for a reference
+that supplies height alone.
+
+The upper bound is a separate value, `BlockNumberBound`, resolved by
+`ResolveBlockNumberBound` and passed to `BlockByNumberBounded`. Resolving it
+reads the newest `bi` entry through a **reverse** iterator, and the `s3` and
+`gcs` plugins implement a reverse iterator as a full listing of every object
+under the prefix with no early break (`listKeysToFile`) — one resolution
+enumerates every block-index object in the bucket. A caller answering more than
+one block number must therefore resolve the bound once and reuse it;
+`BlockByNumber` resolves its own and is a single-lookup convenience. The zero
+`BlockNumberBound` is unresolved and matches nothing, so a forgotten resolution
+fails closed with `ErrBlockNotFound` rather than searching an empty ID space.
+
+Search probes read the ordered `bi` entry and the block's `_metadata` object,
+never the block CBOR: a probe needs only the block's ID and height to decide
+which way to move, and reading it through the block itself would download a
+whole block object from cloud storage per probe. Only the one matching block is
+read in full.
 
 `lifecycle.ResolveTargetByNumber` keeps its own tip-bounded search rather than
 calling this: a truncate target must not resolve past the persisted tip, while

@@ -6979,10 +6979,20 @@ written before the hash index existed -- the historical range an archive
 serves. Hash alone is the only identifier unique across forks and resolves
 through the O(1) hash index; slot alone needs a bounded prefix scan; height
 alone is last because block numbers are not indexed at all and resolving one is
-a binary search over the block-ID space (`database.BlockByNumber`). Because the
-point is built from the identifiers the client supplied, hash and slot agree
-with the answer by construction; height is checked against the block metadata
-afterwards.
+a binary search over the block-ID space (`database.BlockByNumberBounded`).
+Because the point is built from the identifiers the client supplied, hash and
+slot agree with the answer by construction; height is checked against the block
+metadata afterwards.
+
+That binary search is bounded above by the highest indexed block, and reading
+that bound is a reverse iteration over the block index, which `s3` and `gcs`
+answer by listing every block-index object in the bucket. `ArchiveService` is
+registered without the operator auth interceptor, so `FetchBlock` resolves the
+bound once for the whole batch and only when the batch actually contains a
+height-only reference — resolving it per reference would let one anonymous
+request carrying `DefaultMaxFetchBlockRefs` height-only references cost that
+many full-bucket enumerations. A batch of hash+slot references touches no index
+at all.
 
 The batch is answered as a whole. A reference that names no stored block --
 absent, or carrying a height belonging to a different block -- is returned in

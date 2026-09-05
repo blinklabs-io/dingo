@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 
 	"connectrpc.com/connect"
 	archive "github.com/blinklabs-io/bark/proto/v1alpha1/archive"
@@ -112,6 +113,14 @@ func (r blockRefRequest) requested() *archive.BlockRef {
 	return ref
 }
 
+// resolvesByHeight reports whether this reference has to be resolved by
+// binary-searching the block-ID space, which is the one resolution path
+// that needs a bound. parseBlockRef guarantees at least one identifier, so
+// a reference carrying neither hash nor slot carries a height.
+func (r blockRefRequest) resolvesByHeight() bool {
+	return !r.hasHash && !r.hasSlot
+}
+
 // resolved describes a found block. Every identifier the client supplied is
 // preserved verbatim -- a hash sent in upper case comes back in upper case
 // -- and the identifiers it left out are filled in from the stored block,
@@ -148,7 +157,8 @@ func (r blockRefRequest) resolved(
 //     resolves through an O(1) hash-index read.
 //   - a slot alone needs a bounded prefix scan of that one slot.
 //   - a height alone is last: block numbers are not indexed at all, so
-//     resolving one is a binary search over the block-ID space.
+//     resolving one is a binary search over the block-ID space, against a
+//     bound the caller resolves once for the whole batch.
 //
 // Because the point is always built from the identifiers the client
 // supplied, a returned point agrees with them by construction: a hash
@@ -160,6 +170,7 @@ func (r blockRefRequest) resolved(
 func resolveBlockPoint(
 	db *database.Database,
 	ref blockRefRequest,
+	bound database.BlockNumberBound,
 ) (common.Point, bool, error) {
 	switch {
 	case ref.hasHash && ref.hasSlot:
@@ -179,7 +190,7 @@ func resolveBlockPoint(
 		}
 		return common.NewPoint(block.Slot, block.Hash), true, nil
 	default:
-		block, err := database.BlockByNumber(db, ref.height)
+		block, err := database.BlockByNumberBounded(db, ref.height, bound)
 		if err != nil {
 			return common.Point{}, false, err
 		}
@@ -243,8 +254,30 @@ func (a *archiveServiceHandler) FetchBlock(
 	}
 	defer release()
 
+	// Height is the one identifier nothing is keyed by, so resolving one is
+	// a binary search bounded above by the highest indexed block. Reading
+	// that bound is a reverse iteration over the block-index prefix, and on
+	// s3 and gcs -- the only backends that sign URLs, so the only ones this
+	// handler is reachable on -- a reverse iterator lists every object under
+	// the prefix with no early break. ArchiveService is unauthenticated, so
+	// resolving the bound per reference let one anonymous request carrying
+	// DefaultMaxFetchBlockRefs height-only references cost that many
+	// full-bucket enumerations. Resolve it once for the batch, and only when
+	// the batch actually contains a reference that needs it: a batch of
+	// hash+slot references still touches no index at all.
+	var bound database.BlockNumberBound
+	if slices.ContainsFunc(refs, blockRefRequest.resolvesByHeight) {
+		bound, err = database.ResolveBlockNumberBound(db)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"failed resolving highest indexed block: %w",
+				err,
+			)
+		}
+	}
+
 	for _, ref := range refs {
-		point, confirmed, err := resolveBlockPoint(db, ref)
+		point, confirmed, err := resolveBlockPoint(db, ref, bound)
 		if err != nil {
 			if isBlockMissing(err) {
 				resp.NotFound = append(resp.NotFound, ref.requested())

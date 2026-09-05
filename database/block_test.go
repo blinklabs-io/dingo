@@ -342,6 +342,60 @@ func TestBlockByNumberSkipsSparseIndexGap(t *testing.T) {
 	require.Equal(t, blocks[4].ID, above.ID)
 }
 
+// TestResolveBlockNumberBoundIsSeparableFromTheSearch pins the split that
+// keeps a batch of block-number lookups from re-reading the chain tip once
+// per number. Resolving the bound is a reverse iteration over the block
+// index, which the s3 and gcs plugins answer by listing every block-index
+// object in the bucket, so the bound is resolved by the caller and carried
+// into each search.
+func TestResolveBlockNumberBoundIsSeparableFromTheSearch(t *testing.T) {
+	db := newTestDB(t)
+
+	empty, err := ResolveBlockNumberBound(db)
+	require.NoError(t, err)
+	require.False(t, empty.Resolved, "an empty chain bounds nothing")
+
+	blocks := make([]models.Block, 0, 5)
+	for i := uint64(1); i <= 5; i++ {
+		block := testIndexedBlock(i*10, i, byte(i))
+		require.NoError(t, db.BlockCreate(block, nil))
+		blocks = append(blocks, block)
+	}
+
+	bound, err := ResolveBlockNumberBound(db)
+	require.NoError(t, err)
+	require.True(t, bound.Resolved)
+	require.Equal(t, blocks[4].ID, bound.HighestID)
+	require.Equal(t, blocks[4].Number, bound.HighestNumber)
+
+	// One bound answers every number in the chain.
+	for _, want := range blocks {
+		got, err := BlockByNumberBounded(db, want.Number, bound)
+		require.NoError(t, err)
+		require.Equal(t, want.ID, got.ID)
+		require.Equal(t, want.Slot, got.Slot)
+		require.True(t, bytes.Equal(want.Hash, got.Hash))
+	}
+
+	_, err = BlockByNumberBounded(db, blocks[4].Number+1, bound)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
+
+// TestBlockByNumberBoundedRejectsUnresolvedBound pins the fail-closed zero
+// value: a caller that never resolved a bound must get ErrBlockNotFound
+// rather than a search over an ID space the bound says is empty, which
+// would report the same thing for the wrong reason.
+func TestBlockByNumberBoundedRejectsUnresolvedBound(t *testing.T) {
+	db := newTestDB(t)
+	for i := uint64(1); i <= 3; i++ {
+		block := testIndexedBlock(i*10, i, byte(i))
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	_, err := BlockByNumberBounded(db, 1, BlockNumberBound{})
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
+
 // TestBlockByNumberReportsMissingNumbersAsNotFound proves an absent height
 // is reported as models.ErrBlockNotFound rather than a generic error, which
 // is what lets the bark archive service classify it as a not_found
