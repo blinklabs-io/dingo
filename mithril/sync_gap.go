@@ -637,9 +637,9 @@ func processGapBlockTransactions(
 		// Gap blocks are already reflected in the Mithril snapshot's
 		// UTxO set, so input UTxOs are already consumed. Store the TX
 		// record and blob offsets without re-consuming inputs.
-		certDeposits, err := gapCertificateDeposits(tx, blockPParams, eraId)
-		if err != nil {
-			return err
+		var certDeposits map[int]uint64
+		if tx.IsValid() {
+			certDeposits = gapCertificateDeposits(tx, blockPParams, eraId)
 		}
 		if err := db.SetGapBlockTransaction(
 			tx,
@@ -701,35 +701,30 @@ func gapCertificateDeposits(
 	tx lcommon.Transaction,
 	pparams lcommon.ProtocolParameters,
 	eraId uint,
-) (map[int]uint64, error) {
+) map[int]uint64 {
 	certificates := tx.Certificates()
 	if len(certificates) == 0 {
-		return nil, nil
+		return nil
 	}
 	era := eras.GetEraById(eraId)
 	if era == nil {
-		return nil, fmt.Errorf("unknown era ID %d for gap transaction", eraId)
+		return nil
 	}
 	deposits := make(map[int]uint64, len(certificates))
 	if era.CertDepositFunc == nil {
-		return deposits, nil
+		return deposits
 	}
 	if pparams == nil {
-		return nil, fmt.Errorf(
-			"missing protocol parameters for gap transaction certificates in era %d",
-			eraId,
-		)
+		return deposits
 	}
 	for i, certificate := range certificates {
 		deposit, err := era.CertDepositFunc(certificate, pparams)
 		if err != nil {
-			return nil, fmt.Errorf(
-				"calculate certificate %d deposit: %w", i, err,
-			)
+			continue
 		}
 		deposits[i] = deposit
 	}
-	return deposits, nil
+	return deposits
 }
 
 // gapBlockEpoch resolves the epoch containing slot from a slice of
