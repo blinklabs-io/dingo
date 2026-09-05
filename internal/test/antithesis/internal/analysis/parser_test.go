@@ -48,6 +48,22 @@ func TestParseDingo_MempoolAdd(t *testing.T) {
 	require.Equal(t, EventMempoolAdd, ev.Type)
 }
 
+func TestParseDingo_ConfirmedTransaction(t *testing.T) {
+	line := `{"msg":"confirmed transaction","component":"mempool","tx_hash":"abc123"}`
+	ev := ParseLogLine(line)
+	require.NotNil(t, ev)
+	require.Equal(t, EventTxConfirmed, ev.Type)
+	require.Equal(t, "abc123", ev.TxID)
+}
+
+func TestParseTxpump_SubmissionIncludesID(t *testing.T) {
+	line := `{"ts":"2026-01-01T00:00:01Z","tx_id":"abc123","tx_type":"payment","status":"submitted"}`
+	ev := ParseLogLine(line)
+	require.NotNil(t, ev)
+	require.Equal(t, EventTxSubmitted, ev.Type)
+	require.Equal(t, "abc123", ev.TxID)
+}
+
 func TestParseDingo_MempoolMissingComponent(t *testing.T) {
 	// "added transaction" without "component":"mempool" should NOT match
 	line := `{"time":"2026-01-01T00:00:04Z","msg":"added transaction","slot":400}`
