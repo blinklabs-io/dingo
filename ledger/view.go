@@ -60,6 +60,14 @@ type LedgerView struct {
 	// skipPhase2Validation is set for accepted block replay, where
 	// the producer's isValid flag is authoritative for Phase-2 results.
 	skipPhase2Validation bool
+	// horizonAnchorSlot is the slot the era forecast horizon is measured
+	// from when this view converts slots to time. Block application sets it
+	// to the applied block's immediate predecessor, which is what the
+	// reference implementation ticks from; the published tip trails that by
+	// up to a whole block batch during replay. Zero leaves the published tip
+	// in charge, which is correct for every caller with no applied block in
+	// hand (mempool validation, standalone evaluation).
+	horizonAnchorSlot uint64
 }
 
 func (lv *LedgerView) pinCommitteeState(
@@ -443,9 +451,16 @@ func (lv *LedgerView) IsVrfKeyInUse(
 	), nil
 }
 
-// SlotToTime returns the current time for a given slot based on known epochs
+// SlotToTime returns the current time for a given slot based on known epochs.
+//
+// This is the converter transaction validation sees, and a Plutus script
+// context must convert the transaction's validity interval through it. The
+// forecast horizon stays in force, matching cardano-ledger's
+// TimeTranslationPastHorizon failure, but it is measured from this view's
+// horizon anchor so a block being applied is judged against its own
+// predecessor rather than a tip that has not been published yet (issue #3844).
 func (lv *LedgerView) SlotToTime(slot uint64) (time.Time, error) {
-	return lv.ls.SlotToTime(slot)
+	return lv.ls.SlotToTimeWithHorizonFrom(lv.horizonAnchorSlot, slot)
 }
 
 // TimeToSlot returns the slot number for a given time based on known epochs
