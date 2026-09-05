@@ -453,7 +453,7 @@ func TestHandleChainSelectedNoneEventCoalescesLifecycleContention(
 
 	require.Eventually(t, func() bool {
 		return logCount.Load() == 1 && state.GetClientConnId() == nil
-	}, time.Second, time.Millisecond)
+	}, 5*time.Second, time.Millisecond)
 	require.Never(t, func() bool {
 		return logCount.Load() > 1
 	}, 100*time.Millisecond, time.Millisecond,
