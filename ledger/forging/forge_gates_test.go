@@ -461,3 +461,77 @@ func TestForgeGateSkipWarnsOnlyForScheduledLeaderSlots(t *testing.T) {
 		})
 	}
 }
+
+// TestForgeStaleGapSkipMarksScheduledLeaderSlots covers the sub-branch
+// of the tip-ahead gate that the marker would otherwise miss. When the
+// tip runs further ahead than forgeStaleGapThresholdSlots the gate
+// diagnoses a stale database at Error instead of routing the skip
+// through logGateSkip, but it drops the slot just as silently and just
+// as far before leader selection. The severity and wording are the
+// operator's stale-genesis signal and stay as they are; the slot is
+// additionally marked leader_slot=true when it was one this node was
+// scheduled to lead, so a block lost this way is still attributable.
+func TestForgeStaleGapSkipMarksScheduledLeaderSlots(t *testing.T) {
+	const leaderSlot = uint64(10)
+	// Well past the default forgeStaleGapThresholdSlots of 1000, so
+	// the gate takes the stale-database branch.
+	clock := forgerTestSlotClock{
+		currentSlot:       leaderSlot,
+		chainTipSlot:      leaderSlot + 2000,
+		slotsPerKESPeriod: 100,
+	}
+	const msg = "chain tip is far ahead of slot clock; " +
+		"database may contain data from a different genesis"
+
+	for _, tc := range []struct {
+		name       string
+		scheduled  map[uint64]struct{}
+		wantMarker bool
+	}{
+		{
+			name:      "ordinary slot is not marked",
+			scheduled: map[uint64]struct{}{},
+		},
+		{
+			name: "scheduled leader slot is marked",
+			scheduled: map[uint64]struct{}{
+				leaderSlot: {},
+			},
+			wantMarker: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			forger, logs := newGateSkipLogForger(
+				t,
+				clock,
+				tc.scheduled,
+			)
+
+			require.NoError(
+				t,
+				forger.checkAndForgeProduction(
+					context.Background(),
+				),
+			)
+
+			out := logs.String()
+			require.Contains(t, out, msg)
+			// The stale-genesis diagnosis keeps its severity
+			// whether or not the slot was a scheduled one.
+			assert.Contains(t, out, `"level":"ERROR"`)
+			if tc.wantMarker {
+				assert.Contains(
+					t,
+					out,
+					`"leader_slot":true`,
+				)
+			} else {
+				assert.NotContains(
+					t,
+					out,
+					`"leader_slot":true`,
+				)
+			}
+		})
+	}
+}
