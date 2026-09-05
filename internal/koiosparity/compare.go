@@ -19,6 +19,7 @@ import (
 	"math/big"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -64,14 +65,25 @@ const (
 	// (dingo #3099) report the three account dimensions #3097's merged
 	// comparison structurally cannot: CompareAccountEpoch only ever compares
 	// keys present in at least one side's row map, so an address absent from
-	// both (a confirmed-zero-reward account, since Koios never emits a row
-	// for zero reward) never enters that comparison at all, and #3097's
+	// both (a confirmed-zero-reward account, meaning Koios returned no rows
+	// for it at all — distinct from Koios returning a row whose amount is
+	// zero, which it does emit and which CategoryAcctZeroRewardRow covers)
+	// never enters that comparison at all, and #3097's
 	// address universe is a single flat list reused across every epoch in one
 	// run, with no per-epoch persisted snapshot to diff for lifecycle
 	// changes. All three are purely informational — descriptive state, not a
 	// Dingo-vs-Koios discrepancy — and must never affect Status (see
 	// DetermineStatus's dedicated no-op case for these three).
 	CategoryAcctZeroReward = "acct_zero_reward"
+	// CategoryAcctZeroRewardRow marks a reward row worth zero that exists on
+	// only one side. It corrects the premise stated above: Koios does emit a
+	// row for a zero reward — Preview publishes zero-earned leader rows —
+	// while Dingo writes no reward_account_output row at all in that case.
+	// Nothing is credited either way, so the two agree about every lovelace
+	// and the one-sided row is a representational difference, not a
+	// divergence. Purely informational, and reported rather than dropped so
+	// the difference stays visible.
+	CategoryAcctZeroRewardRow = "acct_zero_reward_row"
 	// CategoryAcctNewlyRegistered marks a stake address present in this
 	// stake epoch's Dingo-committed reward_account_output universe but
 	// absent from the previous stake epoch's — see
@@ -769,8 +781,13 @@ func CompareAccountEpoch(
 		switch {
 		case koiosOK && !dingoOK:
 			cat := CategoryAcctOnlyKoios
-			if graceHours > 0 && !epochEndTime.IsZero() &&
-				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
+			switch {
+			case isZeroRewardAmount(kr.Earned):
+				// Both sides credited nothing; see
+				// CategoryAcctZeroRewardRow.
+				cat = CategoryAcctZeroRewardRow
+			case graceHours > 0 && !epochEndTime.IsZero() &&
+				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour:
 				cat = CategoryReferenceLag
 			}
 			out = append(out, CheckMismatch{
@@ -795,8 +812,12 @@ func CompareAccountEpoch(
 			// hasn't published yet within graceHours is reference lag, not
 			// a real acct_only_dingo discrepancy.
 			cat := CategoryAcctOnlyDingo
-			if graceHours > 0 && !epochEndTime.IsZero() &&
-				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
+			switch {
+			case isZeroRewardAmount(dr.Amount):
+				// Symmetric with the koiosOK && !dingoOK case above.
+				cat = CategoryAcctZeroRewardRow
+			case graceHours > 0 && !epochEndTime.IsZero() &&
+				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour:
 				cat = CategoryReferenceLag
 			}
 			out = append(out, CheckMismatch{
@@ -869,6 +890,17 @@ func rationalsEqual(a, b string) bool {
 	return ra.Cmp(&rb) == 0
 }
 
+// isZeroRewardAmount reports whether a lovelace decimal string is zero.
+//
+// Parsed rather than compared to "0": the two sides format independently, and
+// a reward that is genuinely zero must be recognised as zero however it is
+// spelled. An unparseable amount is not zero — it is a real value the
+// comparison must keep reporting rather than quietly waive.
+func isZeroRewardAmount(amount string) bool {
+	v, err := strconv.ParseUint(strings.TrimSpace(amount), 10, 64)
+	return err == nil && v == 0
+}
+
 // DetermineStatus returns PASS, FAIL, or ERROR from a list of mismatches.
 //
 //   - FAIL: any value_mismatch, pool_only_dingo, pool_only_koios,
@@ -895,6 +927,7 @@ func DetermineStatus(mismatches []CheckMismatch) string {
 			CategoryAcctCoverageIncomplete:
 			hasError = true
 		case CategoryAcctZeroReward,
+			CategoryAcctZeroRewardRow,
 			CategoryAcctNewlyRegistered,
 			CategoryAcctDeregistered,
 			CategoryPoolDeparted:
