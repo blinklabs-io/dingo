@@ -617,25 +617,31 @@ type LedgerStateConfig struct {
 	// logged warning (the block is trusted). It defaults to false so the check
 	// is enforced everywhere unless explicitly disabled.
 	//
-	// dingo derives a pool's leadership stake from delegated UTxO only; it does
-	// not yet compute staking rewards (CalculateRewards/GetAdaPots/
-	// RewardAccountBalance are unimplemented), so reward-account balances are
-	// omitted from the stake distribution. On real networks (many diffuse
-	// pools) this omission is proportionally negligible and the check catches
-	// genuine ineligibility, so it stays enforced. On the concentrated
-	// prototype-2026w29 musashi topology the dominant pool's reward accrual
-	// drifts its true relative stake above the UTxO-only figure, so enforcing
-	// the threshold falsely rejects that pool's legitimately-eligible blocks and
-	// wedges the chain — so it is skipped there. All other header checks (KES,
-	// VRF proof, registered-VRF-key binding, opcert) still apply regardless.
+	// The leadership stake includes reward-account balances.
+	// refreshRewardLiveStakeAggregate stores total_stake =
+	// utxo_stake + reward_stake, with reward_stake read from account.reward,
+	// and GetLiveStakeInputsForPools selects total_stake; the historical
+	// reconstruction adds the same term in getStakeByPoolsAtSlot.
+	// LedgerView.CalculateRewards and LedgerView.GetAdaPots are still
+	// unimplemented, but RewardAccountBalance is not, and neither gates the
+	// reward term above. An earlier version of this comment said the stake
+	// was delegated UTxO only; that claim was stale, and #3165 was diagnosed
+	// from it rather than from the code. Verified on preview: the epoch
+	// 17-20 mark totals equal cardano-node's active stake for epochs 18-21
+	// exactly (see #3626).
+	//
+	// The check stays enforced on real networks. On the concentrated
+	// prototype-2026w29 musashi topology it rejected the dominant pool's
+	// legitimately-eligible blocks and wedged the chain, so it is skipped
+	// there. All other header checks (KES, VRF proof,
+	// registered-VRF-key binding, opcert) still apply regardless.
 	// Separately, TPraos bootstrap epochs with decentralization still active
 	// validate genesis overlay assignment in verify_header.go, then skip only
 	// the local pool stake-threshold check while d remains active.
-	// Interim measure until reward calculation lands and reward balances can be
-	// included in the leadership stake. Set from the network in node.go (true
-	// on musashi, false otherwise) via Config.prototypeTrustBypassesEnabled,
-	// which requires an unambiguous Musashi identity so this can never be
-	// reached from a preview/preprod/mainnet configuration.
+	// Set from the network in node.go (true on musashi, false otherwise) via
+	// Config.prototypeTrustBypassesEnabled, which requires an unambiguous
+	// Musashi identity so this can never be reached from a
+	// preview/preprod/mainnet configuration.
 	SkipLeaderStakeThresholdCheck bool
 	// SkipDijkstraTxValidation, when true, skips the Dijkstra per-transaction
 	// validation rule set entirely. On the Haskell-conformant Musashi path,

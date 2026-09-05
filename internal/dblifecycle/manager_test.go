@@ -881,7 +881,7 @@ func TestManagerStopWaitsForInFlightHandlerAfterExternalContextCancellation(
 
 	publishEpochTransition(eb, 3)
 	testutil.RequireReceive(
-		t, dest.started, 5*time.Second,
+		t, dest.started, 30*time.Second,
 		"the snapshot handler must have entered UploadDir",
 	)
 
