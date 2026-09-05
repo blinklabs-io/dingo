@@ -39,49 +39,21 @@ type stateMetrics struct {
 	epochLengthSlots    prometheus.Gauge
 	shadowGateDecisions *prometheus.CounterVec
 	// Wall-clock time the ledger apply path spent waiting for a referenced
-	// Leios endorser block, by outcome ("arrived", "timeout", "cancelled" or
-	// "unavailable"). It covers both waits the apply path can take: the
-	// diffusion window, and the CIP grace phase that waits out an in-flight
-	// by-point fetch. This wait is taken ahead of the batch's DB transaction
-	// on the single ledger pipeline, so it is time every block queued behind
-	// the batch also spends waiting.
+	// Leios endorser block, by outcome ("arrived" or "timeout"). This wait is
+	// taken ahead of the batch's DB transaction on the single ledger pipeline,
+	// so it is time every block queued behind the batch also spends waiting.
 	// Only references ledger application actually reads are waited on (see
 	// leiosApplyReadsOwnAnnouncement); the rest are prefetched in the
 	// background and never observed here.
 	leiosEbWaitSeconds *prometheus.HistogramVec
-	// Pre-materialized observers for the outcome label values, so the apply
-	// path does not resolve a label on every wait.
-	leiosEbWaitArrived     prometheus.Observer
-	leiosEbWaitTimedOut    prometheus.Observer
-	leiosEbWaitCancelled   prometheus.Observer
-	leiosEbWaitUnavailable prometheus.Observer
-	// Waits that ran to a full bound without the endorser block arriving --
-	// the diffusion window, or the CIP grace phase's hard bound. A rising
-	// value against a flat leios_eb_wait_seconds "arrived" count means the
-	// wait is buying nothing and is pure apply latency.
-	//
-	// Two outcomes are deliberately excluded because neither is a bound
-	// expiring: "cancelled" says nothing about endorser-block availability,
-	// and "unavailable" means the fetch COMPLETED without caching, which is
-	// routine on a CIP node and would swamp the counter.
+	// Pre-materialized observers for the two outcome label values, so the
+	// apply path does not resolve a label on every wait.
+	leiosEbWaitArrived  prometheus.Observer
+	leiosEbWaitTimedOut prometheus.Observer
+	// Waits that ran to the full diffusion window without the endorser block
+	// arriving. A rising value against a flat leios_eb_wait_seconds "arrived"
+	// count means the wait is buying nothing and is pure apply latency.
 	leiosEbWaitTimeouts prometheus.Counter
-	// Per-stage wall-clock time spent processing one block through the
-	// ledger's slice of the pipeline: header_verify (VRF/KES/signature
-	// checks run when a fetched block arrives), validate (one
-	// transaction's era ledger-rule validation, including Plutus
-	// evaluation, inside ledgerProcessBlock), and apply (writing a
-	// flushed LedgerDeltaBatch's UTXO and transaction rows to the
-	// metadata store). See dingo_blockfetch_stage_duration_seconds in the
-	// ouroboros package for the wire-decode stage, which runs before a
-	// block reaches the ledger at all. Together the two metrics answer
-	// "where does per-block processing time go", which no existing
-	// histogram covers end to end.
-	blockStageDuration *prometheus.HistogramVec
-	// Pre-materialized observers for the stage label values, so the hot
-	// path does not resolve a label on every block or transaction.
-	blockStageHeaderVerify prometheus.Observer
-	blockStageValidate     prometheus.Observer
-	blockStageApply        prometheus.Observer
 	// Incremented when a stored governance proposal's CBOR fails to
 	// decode during the mid-epoch ratifiability check, so the failures
 	// surface as a metric instead of just log volume.
@@ -271,89 +243,25 @@ func (m *stateMetrics) observeLeaderThresholdMargin(margin float64) {
 	m.leaderThresholdMargin.Observe(margin)
 }
 
-// Outcome label values for dingo_metrics_leios_eb_wait_seconds.
-//
-//   - arrived:   the endorser block became available during the wait.
-//   - timeout:   a bound elapsed without it -- the diffusion window, or the
-//     CIP grace phase's hard bound. This is the outcome that means the wait
-//     cost apply latency and bought nothing.
-//   - unavailable: the CIP grace phase's by-point fetch COMPLETED without
-//     caching, because no peer holds the endorser block. Nothing timed out,
-//     and this is the common ending on a CIP node, so it is deliberately not
-//     folded into timeout: doing so would inflate the timeout rate and its
-//     counter on routine operation.
-//   - cancelled: the wait ended because the block-processing context was
-//     cancelled (node shutdown, or the pass being aborted and restarted).
-//     Nothing was learned about the endorser block's availability, so this is
-//     kept out of the timeout counter: folding it in would inflate the
-//     timeout rate exactly when a node is shutting down or restarting its
-//     pipeline, which is when the metric is most likely to be read.
-const (
-	leiosEbWaitOutcomeArrived   = "arrived"
-	leiosEbWaitOutcomeTimeout   = "timeout"
-	leiosEbWaitOutcomeCancelled = "cancelled"
-	// leiosEbWaitOutcomeUnavailable is the CIP grace phase's routine ending:
-	// the by-point fetch COMPLETED without caching, because no peer holds the
-	// endorser block. Nothing timed out and nothing was cancelled, so folding
-	// it into either would overstate both -- and it is the most common ending
-	// on a CIP node, so it would overstate them badly.
-	leiosEbWaitOutcomeUnavailable = "unavailable"
-)
-
-// Stage labels for blockStageDuration. See its field doc comment for what
-// each stage covers.
-const (
-	blockStageHeaderVerify = "header_verify"
-	blockStageValidate     = "validate"
-	blockStageApply        = "apply"
-)
-
-// observeBlockStage records one sample of wall-clock time spent in the named
-// per-block processing stage. Safe to call before init (or when metrics are
-// disabled), matching the other observe helpers in this file.
-func (m *stateMetrics) observeBlockStage(stage string, d time.Duration) {
+// observeLeiosEbWait records one apply-path endorser-block wait. Recording the
+// duration under both outcomes (rather than only timeouts) is what makes the
+// metric answer the question that matters: whether the wait is delivering
+// endorser blocks or just costing apply latency before proceeding without one.
+func (m *stateMetrics) observeLeiosEbWait(d time.Duration, timedOut bool) {
 	if m == nil {
 		return
 	}
-	var obs prometheus.Observer
-	switch stage {
-	case blockStageHeaderVerify:
-		obs = m.blockStageHeaderVerify
-	case blockStageValidate:
-		obs = m.blockStageValidate
-	case blockStageApply:
-		obs = m.blockStageApply
-	}
-	if obs != nil {
-		obs.Observe(d.Seconds())
-	}
-}
-
-// observeLeiosEbWait records one apply-path endorser-block wait under the
-// given outcome. Recording the duration under every outcome (rather than only
-// timeouts) is what makes the metric answer the question that matters: whether
-// the wait is delivering endorser blocks or just costing apply latency before
-// proceeding without one.
-func (m *stateMetrics) observeLeiosEbWait(d time.Duration, outcome string) {
-	if m == nil {
-		return
-	}
-	var obs prometheus.Observer
-	switch outcome {
-	case leiosEbWaitOutcomeArrived:
-		obs = m.leiosEbWaitArrived
-	case leiosEbWaitOutcomeTimeout:
-		obs = m.leiosEbWaitTimedOut
+	if timedOut {
 		if m.leiosEbWaitTimeouts != nil {
 			m.leiosEbWaitTimeouts.Inc()
 		}
-	case leiosEbWaitOutcomeCancelled:
-		obs = m.leiosEbWaitCancelled
-	case leiosEbWaitOutcomeUnavailable:
-		obs = m.leiosEbWaitUnavailable
+		if m.leiosEbWaitTimedOut != nil {
+			m.leiosEbWaitTimedOut.Observe(d.Seconds())
+		}
+		return
 	}
-	if obs != nil {
-		obs.Observe(d.Seconds())
+	if m.leiosEbWaitArrived != nil {
+		m.leiosEbWaitArrived.Observe(d.Seconds())
 	}
 }
 
@@ -585,55 +493,21 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.leiosEbWaitSeconds = promautoFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "dingo_metrics_leios_eb_wait_seconds",
-			Help: "wall-clock time the ledger apply path spent waiting for a referenced Leios endorser block, across both the diffusion window and the CIP in-flight-fetch grace phase, by outcome (arrived, timeout, cancelled, unavailable)",
-			// 5ms to ~164s. The lower end covers sub-slot arrivals; the
-			// upper end must clear the LONGEST wait this histogram now
-			// records, the CIP grace phase's leiosTipFetchHardBound
-			// (leiosBackfillMaxWait, 120s). At 15 buckets the top edge was
-			// ~82s, so every wedged-fetch wait -- the most anomalous ones,
-			// and the reason the grace phase is instrumented at all --
-			// collapsed into +Inf with no resolution.
-			Buckets: prometheus.ExponentialBuckets(0.005, 2, 16),
+			Help: "wall-clock time the ledger apply path spent waiting for a referenced Leios endorser block, by outcome",
+			// 5ms to ~82s: the wait is bounded by the certify-by deadline
+			// converted to wall clock, so the useful range spans sub-slot
+			// arrivals up to several stacked protocol windows.
+			Buckets: prometheus.ExponentialBuckets(0.005, 2, 15),
 		},
 		[]string{"outcome"},
 	)
-	m.leiosEbWaitArrived = m.leiosEbWaitSeconds.WithLabelValues(
-		leiosEbWaitOutcomeArrived,
-	)
-	m.leiosEbWaitTimedOut = m.leiosEbWaitSeconds.WithLabelValues(
-		leiosEbWaitOutcomeTimeout,
-	)
-	m.leiosEbWaitCancelled = m.leiosEbWaitSeconds.WithLabelValues(
-		leiosEbWaitOutcomeCancelled,
-	)
-	m.leiosEbWaitUnavailable = m.leiosEbWaitSeconds.WithLabelValues(
-		leiosEbWaitOutcomeUnavailable,
-	)
+	m.leiosEbWaitArrived = m.leiosEbWaitSeconds.WithLabelValues("arrived")
+	m.leiosEbWaitTimedOut = m.leiosEbWaitSeconds.WithLabelValues("timeout")
 	m.leiosEbWaitTimeouts = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_metrics_leios_eb_wait_timeouts_total",
-			Help: "ledger apply-path waits for a referenced Leios endorser block that ran to a full bound without it arriving: the diffusion window, or the CIP in-flight-fetch grace phase hard bound",
+			Help: "ledger apply-path waits for a referenced Leios endorser block that ran to the full diffusion window without it arriving",
 		},
-	)
-	m.blockStageDuration = promautoFactory.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name: "dingo_ledger_block_stage_duration_seconds",
-			Help: "wall-clock time spent in each ledger-owned stage of per-block processing, by stage: header_verify (VRF/KES/signature checks on blockfetch arrival), validate (one transaction's era ledger-rule validation, including Plutus evaluation), apply (writing a flushed delta batch's UTXO and transaction rows to the metadata store)",
-			// 100us to ~3.3s. Block-processing work here ranges from a
-			// single cheap signature check to a Plutus-heavy transaction
-			// or a large multi-block delta-batch flush.
-			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 16),
-		},
-		[]string{"stage"},
-	)
-	m.blockStageHeaderVerify = m.blockStageDuration.WithLabelValues(
-		blockStageHeaderVerify,
-	)
-	m.blockStageValidate = m.blockStageDuration.WithLabelValues(
-		blockStageValidate,
-	)
-	m.blockStageApply = m.blockStageDuration.WithLabelValues(
-		blockStageApply,
 	)
 	m.governanceProposalDecodeFailures = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
