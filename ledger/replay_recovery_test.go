@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"net"
 	"sync"
 	"testing"
@@ -1807,6 +1808,12 @@ func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
 	)
 }
 
+// models.ErrRewardWithdrawalExceedsBalance is the state-specific source: the
+// withdrawal write refuses an amount validation already accepted against that
+// same persisted balance, so the two layers disagree about local state rather
+// than about the block. It is the one reward withdrawal mismatch that stays
+// terminal on redelivery, which is what keeps a narrowing of the
+// validation-rule sibling from removing the halt altogether.
 func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
 	ls := newReplayRecoveryAuditLedger(t, true)
 	bus := event.NewEventBus(nil, nil)
@@ -1817,7 +1824,7 @@ func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
 			BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
 			TxHash:     testHashBytes("reward-withdrawal-mismatch-tx"),
 			Cause: fmt.Errorf(
-				"amount 78446537 exceeds account balance 78446536: %w",
+				"record transaction: reward withdrawal amount 78446537 exceeds account balance 78446536: %w",
 				models.ErrRewardWithdrawalExceedsBalance,
 			),
 		}
@@ -1830,6 +1837,91 @@ func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
 	recovered, err = ls.tryRecoverFromTxValidationError(validation())
 	require.ErrorIs(t, err, errHaltLedgerPipeline)
 	require.False(t, recovered)
+	require.ErrorIs(
+		t,
+		err,
+		models.ErrRewardWithdrawalExceedsBalance,
+		"the halt error must carry the underlying mismatch",
+	)
+}
+
+// The Shelley-family UTxO rule reports a withdrawal that does not match the
+// local reward balance as shelley.IncorrectWithdrawalAmountError. That is a
+// verdict about a peer's block, not about local state: the rule returns it for
+// every amount that fails the era's relationship to the balance it read, so a
+// block carrying a wrong withdrawal amount is reported exactly like a correct
+// block this node's reward accounting disagrees with. Redelivery cannot
+// promote it to proof of divergence either, since a peer chooses what to
+// redeliver. It therefore keeps the ordinary deterministic disposition however
+// many times it repeats, and never reaches errHaltLedgerPipeline, which no
+// retry clears.
+func TestReplayRecoveryRejectsRepeatedIncorrectWithdrawalAmount(t *testing.T) {
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+	validation := func() *txValidationError {
+		return &txValidationError{
+			BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+			TxHash:     testHashBytes("incorrect-withdrawal-amount-tx"),
+			Cause: fmt.Errorf(
+				"shelley UTxO rule: %w",
+				shelley.IncorrectWithdrawalAmountError{
+					Provided: big.NewInt(399009945),
+					Balance:  399088479,
+				},
+			),
+		}
+	}
+
+	recovered, err := ls.tryRecoverFromTxValidationError(validation())
+	require.NoError(
+		t,
+		err,
+		"the first incorrect withdrawal amount must be rejected, not halted",
+	)
+	require.True(t, recovered)
+	assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+	assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"the first rejection must request a fresh ChainSync intersection",
+	)
+	assert.Equal(t, ls.Tip().Point, resync.Point)
+
+	// A peer that keeps serving the same crafted block at the same applied
+	// tip must not be able to stop the node. Peer rotation is what is bounded
+	// here, not the rejection.
+	for attempt := 2; attempt <= 4; attempt++ {
+		recovered, err = ls.tryRecoverFromTxValidationError(validation())
+		require.NoErrorf(
+			t,
+			err,
+			"redelivery %d of an incorrect withdrawal amount must be rejected, not halted",
+			attempt,
+		)
+		require.NotErrorIs(
+			t,
+			err,
+			errHaltLedgerPipeline,
+			"a withdrawal amount verdict about a peer's block must never halt the ledger pipeline",
+		)
+		require.Truef(
+			t,
+			recovered,
+			"redelivery %d must still reject the branch containing the block",
+			attempt,
+		)
+		assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+		testutil.RequireNoReceive(
+			t,
+			resyncCh,
+			250*time.Millisecond,
+			"a repeat rejection must not request another fresh intersection",
+		)
+	}
 }
 
 func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
