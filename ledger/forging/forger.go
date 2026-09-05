@@ -1108,10 +1108,32 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return nil
 	}
 
-	leiosBlockData, embeddedEb, embeddedEbSlot := f.leiosBlockDataForSlot(
-		currentSlot,
+	var (
+		leiosBlockData LeiosBlockData
+		embeddedEb     *lcommon.Blake2b256
+		embeddedEbSlot uint64
 	)
-	if f.leiosChecker != nil {
+	// An alternative is built on the contested block's predecessor, not on
+	// the contested block, but ParentLeiosAnnouncement resolves "the parent"
+	// from the live tip -- which here is the rival. A certificate selected
+	// from that answer would certify an endorser block announced by a ranking
+	// block this one is not built on. Forge the alternative as a plain
+	// ranking block: no certificate, and no new announcement either, so a
+	// contested slot cannot also introduce an endorser block whose announcing
+	// chain may be the one that loses.
+	forgeLeiosData := altBlockContext == nil
+	if !forgeLeiosData {
+		f.logger.Debug(
+			"leios data omitted from an equal-slot alternative",
+			"slot", currentSlot,
+		)
+	}
+	if forgeLeiosData {
+		leiosBlockData, embeddedEb, embeddedEbSlot = f.leiosBlockDataForSlot(
+			currentSlot,
+		)
+	}
+	if forgeLeiosData && f.leiosChecker != nil {
 		var excludedTxHashes map[string]struct{}
 		canAnnounce := true
 		if embeddedEb != nil {

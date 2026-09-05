@@ -18,10 +18,12 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -385,4 +387,77 @@ func TestEqualSlotAlternativeRecoversAdopterPanic(t *testing.T) {
 		float64(1),
 		testutil.ToFloat64(forger.metrics.forgeCouldNot),
 	)
+}
+
+// TestEqualSlotAlternativeCarriesNoLeiosData pins a deliberate limitation. An
+// alternative is built on the contested block's predecessor, but
+// ParentLeiosAnnouncement resolves "the parent" from the live tip -- the
+// rival. A certificate chosen from that answer would certify an endorser
+// block announced by a ranking block the alternative is not built on, so the
+// alternative is forged as a plain ranking block: the parent-announcement
+// provider is not consulted at all, and no new endorser block is announced
+// either.
+func TestEqualSlotAlternativeCarriesNoLeiosData(t *testing.T) {
+	ebHash := lcommon.NewBlake2b256(
+		[]byte(strings.Repeat("e", 32)),
+	)
+	rbHash := lcommon.NewBlake2b256(
+		[]byte(strings.Repeat("r", 32)),
+	)
+	parent := &forgerTestLeiosParentAnnouncement{
+		rbHash: rbHash,
+		hash:   ebHash,
+		ok:     true,
+	}
+	leiosCerts := &forgerTestLeiosCerts{
+		eligible: []LeiosCertifiedEndorserBlock{
+			{
+				SlotNo:            9,
+				EndorserBlockHash: ebHash,
+				Certificate: &lcommon.LeiosEbCertificate{
+					EndorserBlockHash: ebHash,
+				},
+				AnnouncingRbHash: rbHash,
+			},
+		},
+		txHashesOK: true,
+	}
+	builder := &forgerTestBuilder{
+		block: newForgerTestBlock(10, altTestRivalBlockNumber),
+		cbor:  []byte{0x01},
+	}
+	adopter := &forgerTestSiblingAdopter{adopted: true}
+
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    &forgerCountingLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      10,
+			slotsPerKESPeriod: 100,
+		},
+		ChainContext:                    newAltTestChainContext(10),
+		SiblingAdopter:                  adopter,
+		LeiosCertificateProvider:        leiosCerts,
+		LeiosParentAnnouncementProvider: parent,
+		PromRegistry:                    prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Equal(t, 1, builder.contextCalls)
+	assert.Zero(
+		t,
+		parent.calls,
+		"the parent announcement provider must not be consulted for an "+
+			"alternative: it answers for the tip, not for our parent",
+	)
+	assert.Nil(t, builder.leiosData.Certificate)
+	assert.Nil(t, builder.leiosData.Announcement)
+	assert.True(t, builder.leiosData.empty())
 }
