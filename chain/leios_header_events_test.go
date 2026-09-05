@@ -20,17 +20,18 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
+	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// headerStreamHeader is a minimal ranking-block header. announces controls
-// whether it carries a Leios endorser-block announcement; leiosCapable
-// controls whether it implements the announcement interface at all, which is
-// how a pre-Leios era header behaves.
+// headerStreamHeader is a minimal ranking-block header that does not implement
+// the Leios announcement interface at all, which is how a pre-Leios era header
+// behaves. announcingStreamHeader embeds it to add the interface.
 type headerStreamHeader struct {
 	hash        lcommon.Blake2b256
 	prevHash    lcommon.Blake2b256
@@ -207,4 +208,274 @@ func TestClearHeadersQueuesHeaderInvalidation(t *testing.T) {
 		300*time.Millisecond,
 		"clearing an empty header queue publishes nothing",
 	)
+}
+
+// TestRollbackToQueuedHeaderInvalidatesLaterHeaders covers the rollback branch
+// that resolves its point inside the header queue. It drops the later queued
+// headers and returns before any block-level work, so it produces no
+// ChainRollbackEvent at all -- nothing else would ever void the announcements
+// those headers carried.
+func TestRollbackToQueuedHeaderInvalidatesLaterHeaders(t *testing.T) {
+	c, bus := newHeaderStreamChain(t)
+	subId, ch := bus.Subscribe(chain.ChainHeaderEventType)
+	defer bus.Unsubscribe(chain.ChainHeaderEventType, subId)
+
+	first := announcingStreamHeader{
+		headerStreamHeader: headerStreamHeader{
+			hash:        lcommon.NewBlake2b256([]byte("hdr-1")),
+			prevHash:    lcommon.NewBlake2b256(nil),
+			blockNumber: 1,
+			slot:        577,
+		},
+		ebHash:    lcommon.NewBlake2b256([]byte("eb-1")),
+		ebSize:    4096,
+		announces: true,
+	}
+	second := announcingStreamHeader{
+		headerStreamHeader: headerStreamHeader{
+			hash:        lcommon.NewBlake2b256([]byte("hdr-2")),
+			prevHash:    first.hash,
+			blockNumber: 2,
+			slot:        578,
+		},
+		ebHash:    lcommon.NewBlake2b256([]byte("eb-2")),
+		ebSize:    4096,
+		announces: true,
+	}
+	require.NoError(t, c.AddBlockHeader(first))
+	require.NoError(t, c.AddBlockHeader(second))
+	c.PublishPendingChainUpdates()
+	for range 2 {
+		testutil.RequireReceive(t, ch, 2*time.Second, "announcement")
+	}
+
+	// Roll back to the first queued header. The second is dropped; no block
+	// was ever added, so no chain.update is produced.
+	require.NoError(t, c.Rollback(ocommon.NewPoint(
+		first.slot,
+		first.hash.Bytes(),
+	)))
+	require.Equal(t, 1, c.HeaderCount())
+
+	evt := testutil.RequireReceive(
+		t, ch, 2*time.Second, "invalidation for the dropped queued headers",
+	)
+	invalid, ok := evt.Data.(chain.ChainHeaderInvalidationEvent)
+	require.True(t, ok)
+	assert.Equal(t, chain.HeaderInvalidationRollback, invalid.Reason)
+	assert.Equal(t, first.slot, invalid.Point.Slot)
+	assert.NotZero(t, invalid.Seq)
+
+	// Rolling back to the queue tip drops nothing and publishes nothing.
+	require.NoError(t, c.Rollback(ocommon.NewPoint(
+		first.slot,
+		first.hash.Bytes(),
+	)))
+	testutil.RequireNoReceive(
+		t,
+		ch,
+		300*time.Millisecond,
+		"a rollback that drops no header publishes no invalidation",
+	)
+}
+
+// TestRollbackInvalidationRoutedThroughSequencer pins the routing, not just
+// the eventual delivery. The invalidation must go on the chain-level sequencer
+// in both rollback modes and must never be handed back to the caller for
+// inline publication: inline, it bypasses the sequencer and can be published
+// ahead of an announcement that was queued before it, which is exactly the
+// inversion the single ordered stream exists to prevent.
+func TestRollbackInvalidationRoutedThroughSequencer(t *testing.T) {
+	c, bus := newHeaderStreamChain(t)
+	subId, ch := bus.Subscribe(chain.ChainHeaderEventType)
+	defer bus.Unsubscribe(chain.ChainHeaderEventType, subId)
+
+	first := announcingStreamHeader{
+		headerStreamHeader: headerStreamHeader{
+			hash:        lcommon.NewBlake2b256([]byte("hdr-1")),
+			prevHash:    lcommon.NewBlake2b256(nil),
+			blockNumber: 1,
+			slot:        577,
+		},
+		ebHash:    lcommon.NewBlake2b256([]byte("eb-1")),
+		ebSize:    4096,
+		announces: true,
+	}
+	second := announcingStreamHeader{
+		headerStreamHeader: headerStreamHeader{
+			hash:        lcommon.NewBlake2b256([]byte("hdr-2")),
+			prevHash:    first.hash,
+			blockNumber: 2,
+			slot:        578,
+		},
+		ebHash:    lcommon.NewBlake2b256([]byte("eb-2")),
+		ebSize:    4096,
+		announces: true,
+	}
+
+	// Two real blocks, so the rollback below takes the block-removal path
+	// (the one that builds the caller-published event slice) rather than
+	// the queued-header early return.
+	blocks, err := testfixtures.GenerateConwayChain(2)
+	require.NoError(t, err)
+	require.Len(t, blocks, 2)
+	for i := range blocks {
+		_, addErr := c.AddBlockWithPointDeferred(blocks[i], ocommon.Point{
+			Slot: blocks[i].SlotNumber(),
+			Hash: blocks[i].Hash().Bytes(),
+		}, nil)
+		require.NoError(t, addErr)
+	}
+	c.PublishPendingChainUpdates()
+	require.Equal(t, blocks[1].SlotNumber(), c.Tip().Point.Slot)
+
+	// Chain the announcing headers onto the block tip, and leave them
+	// undrained on the sequencer.
+	first.prevHash = blocks[1].Hash()
+	first.blockNumber = blocks[1].BlockNumber() + 1
+	first.slot = blocks[1].SlotNumber() + 1
+	second.prevHash = first.hash
+	second.blockNumber = first.blockNumber + 1
+	second.slot = first.slot + 1
+	require.NoError(t, c.AddBlockHeader(first))
+	require.NoError(t, c.AddBlockHeader(second))
+
+	evts, err := c.RollbackDeferred(ocommon.Point{
+		Slot: blocks[0].SlotNumber(),
+		Hash: blocks[0].Hash().Bytes(),
+	})
+	require.NoError(t, err)
+	require.NotEmpty(
+		t,
+		evts,
+		"the rollback must remove a block, so it produces caller-published events",
+	)
+	for _, evt := range evts {
+		require.NotEqual(
+			t,
+			event.EventType(chain.ChainHeaderEventType),
+			evt.Type,
+			"the invalidation must not be handed back for inline publication",
+		)
+	}
+
+	// Queued after the rollback. If the invalidation were published inline
+	// rather than sequenced, it could land either side of this.
+	third := announcingStreamHeader{
+		headerStreamHeader: headerStreamHeader{
+			hash:        lcommon.NewBlake2b256([]byte("hdr-3")),
+			prevHash:    blocks[0].Hash(),
+			blockNumber: blocks[0].BlockNumber() + 1,
+			slot:        blocks[0].SlotNumber() + 1,
+		},
+		ebHash:    lcommon.NewBlake2b256([]byte("eb-3")),
+		ebSize:    4096,
+		announces: true,
+	}
+	require.NoError(t, c.AddBlockHeader(third))
+
+	c.PublishPendingChainUpdates()
+
+	// Exactly: announcement, announcement, invalidation, announcement --
+	// in chain-mutation order.
+	wantAnnouncements := []lcommon.Blake2b256{
+		first.hash,
+		second.hash,
+	}
+	for _, want := range wantAnnouncements {
+		evt := testutil.RequireReceive(
+			t, ch, 2*time.Second, "announcement before the rollback",
+		)
+		data, ok := evt.Data.(chain.ChainHeaderAnnouncementEvent)
+		require.True(t, ok, "got %T, want an announcement", evt.Data)
+		assert.Equal(t, want, data.RbHash)
+	}
+	evt := testutil.RequireReceive(
+		t, ch, 2*time.Second, "invalidation",
+	)
+	invalid, ok := evt.Data.(chain.ChainHeaderInvalidationEvent)
+	require.True(
+		t,
+		ok,
+		"the invalidation must follow the announcements it voids, got %T",
+		evt.Data,
+	)
+	assert.Equal(t, chain.HeaderInvalidationRollback, invalid.Reason)
+
+	evt = testutil.RequireReceive(
+		t, ch, 2*time.Second, "announcement after the rollback",
+	)
+	after, ok := evt.Data.(chain.ChainHeaderAnnouncementEvent)
+	require.True(t, ok, "got %T, want an announcement", evt.Data)
+	assert.Equal(t, third.hash, after.RbHash)
+	assert.Greater(
+		t,
+		after.Seq,
+		invalid.Seq,
+		"a header admitted after the rollback is sequenced after it",
+	)
+}
+
+// TestNonDeferredRollbackPublishesInvalidation covers the same routing through
+// the non-deferred entry point, which drains the sequencer itself.
+func TestNonDeferredRollbackPublishesInvalidation(t *testing.T) {
+	c, bus := newHeaderStreamChain(t)
+	subId, ch := bus.Subscribe(chain.ChainHeaderEventType)
+	defer bus.Unsubscribe(chain.ChainHeaderEventType, subId)
+
+	first := announcingStreamHeader{
+		headerStreamHeader: headerStreamHeader{
+			hash:        lcommon.NewBlake2b256([]byte("hdr-1")),
+			prevHash:    lcommon.NewBlake2b256(nil),
+			blockNumber: 1,
+			slot:        577,
+		},
+		ebHash:    lcommon.NewBlake2b256([]byte("eb-1")),
+		ebSize:    4096,
+		announces: true,
+	}
+	second := announcingStreamHeader{
+		headerStreamHeader: headerStreamHeader{
+			hash:        lcommon.NewBlake2b256([]byte("hdr-2")),
+			prevHash:    first.hash,
+			blockNumber: 2,
+			slot:        578,
+		},
+		ebHash:    lcommon.NewBlake2b256([]byte("eb-2")),
+		ebSize:    4096,
+		announces: true,
+	}
+	require.NoError(t, c.AddBlockHeader(first))
+	require.NoError(t, c.AddBlockHeader(second))
+	require.NoError(t, c.Rollback(ocommon.NewPoint(
+		first.slot,
+		first.hash.Bytes(),
+	)))
+
+	var seqs []uint64
+	for range 3 {
+		evt := testutil.RequireReceive(
+			t, ch, 2*time.Second, "ordered header event",
+		)
+		switch data := evt.Data.(type) {
+		case chain.ChainHeaderAnnouncementEvent:
+			require.Less(
+				t,
+				len(seqs),
+				2,
+				"both announcements precede the invalidation",
+			)
+			seqs = append(seqs, data.Seq)
+		case chain.ChainHeaderInvalidationEvent:
+			require.Len(
+				t,
+				seqs,
+				2,
+				"the invalidation must not overtake the announcements it voids",
+			)
+			assert.Greater(t, data.Seq, seqs[1])
+		default:
+			t.Fatalf("unexpected payload %T", data)
+		}
+	}
 }

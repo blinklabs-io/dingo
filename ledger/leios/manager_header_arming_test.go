@@ -590,3 +590,328 @@ func TestVoteManagerNotEmittedReasonsMaterialized(t *testing.T) {
 	}
 	assert.ElementsMatch(t, voteNotEmittedReasons, labels)
 }
+
+// armAndVote drives one announcement from header arrival to an emitted local
+// vote and returns the emitted event, so the tests below start from a node
+// that has genuinely voted rather than from hand-placed state.
+func armAndVote(
+	t *testing.T,
+	fixture *managerFixture,
+	emittedCh <-chan event.Event,
+	slot uint64,
+	rbHash, ebHash lcommon.Blake2b256,
+	seq uint64,
+) VoteEmittedEvent {
+	t.Helper()
+	publishHeaderAnnouncement(fixture, slot, rbHash, ebHash, seq)
+	testutil.WaitForCondition(t, func() bool {
+		fixture.mgr.mu.Lock()
+		defer fixture.mgr.mu.Unlock()
+		return fixture.mgr.lastHeaderStreamSeq >= seq
+	}, 2*time.Second, "announcement armed")
+	fixture.mgr.HandleEndorserBlock(slot, ebHash)
+	emitted := testutil.RequireReceive(
+		t, emittedCh, 2*time.Second, "local vote emitted",
+	)
+	vote, ok := emitted.Data.(VoteEmittedEvent)
+	require.True(t, ok)
+	assert.Equal(t, rbHash, vote.Vote.AnnouncingRbHash)
+	return vote
+}
+
+// TestVoteManagerLateRollbackKeepsReplacementVoteAndTally is the second half of
+// the cross-stream ordering hazard. Protecting only the announcement is not
+// enough: the vote, its tally, its dedup record and the acquired endorser
+// block are all keyed by slot, and the replacement chain occupies the same
+// slot, so a late rollback would erase a vote this node had already emitted
+// correctly -- and, because the announcement survives and is marked voted,
+// never re-emit it.
+func TestVoteManagerLateRollbackKeepsReplacementVoteAndTally(t *testing.T) {
+	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
+	fixture := newHeaderArmingFixture(t, slots)
+	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
+
+	ebHash := lcommon.NewBlake2b256([]byte("replacement-eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("replacement-rb"))
+
+	// Chain-mutation order: roll back to S-1 (seq 7), then admit the
+	// replacement chain's announcing header at S (seq 8), which this node
+	// votes on.
+	publishHeaderInvalidation(
+		fixture,
+		headerArmingRbSlot-1,
+		chain.HeaderInvalidationRollback,
+		7,
+	)
+	armAndVote(
+		t, fixture, emittedCh, headerArmingRbSlot, rbHash, ebHash, 8,
+	)
+	voteId := lcommon.LeiosVoteId{
+		SlotNo:  headerArmingRbSlot,
+		VoterId: headerArmingSeatedVoterId,
+	}
+	require.Len(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{voteId}), 1)
+
+	// The matching rollback finally arrives on chain.update, carrying the
+	// sequence number of the mutation the header stream already moved past.
+	fixture.mgr.handleRollback(chain.ChainRollbackEvent{
+		Point: ocommon.Point{Slot: headerArmingRbSlot - 1},
+		Seq:   7,
+	})
+
+	assert.Len(
+		t,
+		fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{voteId}),
+		1,
+		"the replacement chain's vote survives a superseded rollback",
+	)
+	fixture.mgr.mu.Lock()
+	defer fixture.mgr.mu.Unlock()
+	assert.Contains(t, fixture.mgr.announcements, rbHash)
+	assert.Contains(t, fixture.mgr.voteRecords, voteId)
+	assert.Contains(t, fixture.mgr.acquiredEbs, ebHash)
+	var tallied bool
+	for key := range fixture.mgr.tallies {
+		if key.announcingRbHash == rbHash {
+			tallied = true
+		}
+	}
+	assert.True(t, tallied, "the replacement chain's tally survives")
+}
+
+// TestVoteManagerLateRollbackStillPrunesAbandonedChainState is the guard's
+// other side: state belonging to the chain the rollback abandons must still be
+// removed, even while the replacement chain's state at the same slot is
+// protected.
+func TestVoteManagerLateRollbackStillPrunesAbandonedChainState(t *testing.T) {
+	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
+	fixture := newHeaderArmingFixture(t, slots)
+
+	abandonedRb := lcommon.NewBlake2b256([]byte("abandoned-rb"))
+	abandonedEb := lcommon.NewBlake2b256([]byte("abandoned-eb"))
+	replacementRb := lcommon.NewBlake2b256([]byte("replacement-rb"))
+	replacementEb := lcommon.NewBlake2b256([]byte("replacement-eb"))
+
+	// Armed before the rollback (seq 3) and after it (seq 9), both above
+	// the rollback point.
+	publishHeaderAnnouncement(
+		fixture, headerArmingRbSlot, abandonedRb, abandonedEb, 3,
+	)
+	publishHeaderAnnouncement(
+		fixture, headerArmingRbSlot, replacementRb, replacementEb, 9,
+	)
+	testutil.WaitForCondition(t, func() bool {
+		fixture.mgr.mu.Lock()
+		defer fixture.mgr.mu.Unlock()
+		return fixture.mgr.lastHeaderStreamSeq >= 9
+	}, 2*time.Second, "both announcements armed")
+
+	fixture.mgr.handleRollback(chain.ChainRollbackEvent{
+		Point: ocommon.Point{Slot: headerArmingRbSlot - 1},
+		Seq:   7,
+	})
+
+	fixture.mgr.mu.Lock()
+	defer fixture.mgr.mu.Unlock()
+	assert.NotContains(
+		t,
+		fixture.mgr.announcements,
+		abandonedRb,
+		"an announcement armed before the rollback is still pruned",
+	)
+	assert.Contains(
+		t,
+		fixture.mgr.announcements,
+		replacementRb,
+		"an announcement armed after the rollback is protected",
+	)
+}
+
+// TestVoteManagerInvalidationDropsDerivedVoteAndAllowsRevote covers a header
+// cleared *after* its endorser block arrived and the vote was emitted --
+// blockfetch startup failing on an admitted announcing header, for instance.
+// Leaving the vote, tally and dedup record behind would keep the (slot, voter)
+// vote id occupied, so the replacement chain's vote at the same slot would be
+// read as equivocation and dropped.
+func TestVoteManagerInvalidationDropsDerivedVoteAndAllowsRevote(t *testing.T) {
+	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
+	fixture := newHeaderArmingFixture(t, slots)
+	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
+
+	orphanRb := lcommon.NewBlake2b256([]byte("orphan-rb"))
+	orphanEb := lcommon.NewBlake2b256([]byte("orphan-eb"))
+	voteId := lcommon.LeiosVoteId{
+		SlotNo:  headerArmingRbSlot,
+		VoterId: headerArmingSeatedVoterId,
+	}
+
+	armAndVote(
+		t, fixture, emittedCh, headerArmingRbSlot, orphanRb, orphanEb, 1,
+	)
+	require.Len(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{voteId}), 1)
+
+	// The queue holding that header is discarded.
+	publishHeaderInvalidation(
+		fixture,
+		headerArmingRbSlot-1,
+		chain.HeaderInvalidationQueueCleared,
+		2,
+	)
+	testutil.WaitForCondition(t, func() bool {
+		return len(
+			fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{voteId}),
+		) == 0
+	}, 2*time.Second, "the vote derived from the cleared header is dropped")
+
+	fixture.mgr.mu.Lock()
+	assert.NotContains(t, fixture.mgr.announcements, orphanRb)
+	assert.NotContains(t, fixture.mgr.votedAnnouncements, orphanRb)
+	assert.NotContains(t, fixture.mgr.voteRecords, voteId)
+	assert.NotContains(t, fixture.mgr.acquiredEbs, orphanEb)
+	assert.Empty(t, fixture.mgr.tallies)
+	fixture.mgr.mu.Unlock()
+
+	// The vote id is free again, so the replacement chain's announcing
+	// block at the same slot is voted on rather than being read as
+	// equivocation.
+	replacementRb := lcommon.NewBlake2b256([]byte("replacement-rb"))
+	replacementEb := lcommon.NewBlake2b256([]byte("replacement-eb"))
+	revote := armAndVote(
+		t,
+		fixture,
+		emittedCh,
+		headerArmingRbSlot,
+		replacementRb,
+		replacementEb,
+		3,
+	)
+	assert.Equal(t, replacementRb, revote.Vote.AnnouncingRbHash)
+	assert.Len(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{voteId}), 1)
+}
+
+// TestVoteManagerInvalidationKeepsUnrelatedAnnouncementState pins that the
+// derived-state cleanup is keyed by announcing ranking block, not swept by
+// slot: an announcement the invalidation does not cover keeps its own vote,
+// tally, dedup record and acquired endorser block.
+func TestVoteManagerInvalidationKeepsUnrelatedAnnouncementState(t *testing.T) {
+	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
+	fixture := newHeaderArmingFixture(t, slots)
+	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
+
+	// Below the invalidation point: survives.
+	keptRb := lcommon.NewBlake2b256([]byte("kept-rb"))
+	keptEb := lcommon.NewBlake2b256([]byte("kept-eb"))
+	keptSlot := uint64(headerArmingRbSlot - 5)
+	armAndVote(t, fixture, emittedCh, keptSlot, keptRb, keptEb, 1)
+	keptVoteId := lcommon.LeiosVoteId{
+		SlotNo:  keptSlot,
+		VoterId: headerArmingSeatedVoterId,
+	}
+
+	// Above the invalidation point: dropped, along with everything derived
+	// from it.
+	orphanRb := lcommon.NewBlake2b256([]byte("orphan-rb"))
+	orphanEb := lcommon.NewBlake2b256([]byte("orphan-eb"))
+	armAndVote(
+		t, fixture, emittedCh, headerArmingRbSlot, orphanRb, orphanEb, 2,
+	)
+	orphanVoteId := lcommon.LeiosVoteId{
+		SlotNo:  headerArmingRbSlot,
+		VoterId: headerArmingSeatedVoterId,
+	}
+	require.Len(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{
+		keptVoteId, orphanVoteId,
+	}), 2)
+
+	publishHeaderInvalidation(
+		fixture,
+		headerArmingRbSlot-1,
+		chain.HeaderInvalidationRollback,
+		3,
+	)
+	testutil.WaitForCondition(t, func() bool {
+		return len(fixture.mgr.VotesByIds(
+			[]lcommon.LeiosVoteId{orphanVoteId},
+		)) == 0
+	}, 2*time.Second, "the invalidated announcement's vote is dropped")
+
+	assert.Len(
+		t,
+		fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{keptVoteId}),
+		1,
+		"an announcement the invalidation does not cover keeps its vote",
+	)
+	fixture.mgr.mu.Lock()
+	defer fixture.mgr.mu.Unlock()
+	assert.Contains(t, fixture.mgr.announcements, keptRb)
+	assert.Contains(t, fixture.mgr.voteRecords, keptVoteId)
+	assert.Contains(t, fixture.mgr.acquiredEbs, keptEb)
+	assert.NotContains(t, fixture.mgr.announcements, orphanRb)
+	assert.NotContains(t, fixture.mgr.voteRecords, orphanVoteId)
+	assert.NotContains(t, fixture.mgr.acquiredEbs, orphanEb)
+	var keptTally, orphanTally bool
+	for key := range fixture.mgr.tallies {
+		switch key.announcingRbHash {
+		case keptRb:
+			keptTally = true
+		case orphanRb:
+			orphanTally = true
+		}
+	}
+	assert.True(t, keptTally, "the surviving announcement keeps its tally")
+	assert.False(t, orphanTally, "the invalidated announcement's tally is gone")
+}
+
+// TestVoteManagerRollbackDeliveredBeforeHeaderStreamIsSafe answers the
+// remaining two-channel case directly. chain.update and chain.header are still
+// separate subscriptions, so the event loop's select can process a rollback
+// before header events that the chain produced earlier. That inversion is now
+// harmless rather than prevented: the rollback's own invalidation rides the
+// header stream behind the announcement it voids, so the authoritative removal
+// still happens in chain-mutation order, and the rollback's slot sweep is
+// sequence-guarded so it cannot delete anything the header stream armed later.
+func TestVoteManagerRollbackDeliveredBeforeHeaderStreamIsSafe(t *testing.T) {
+	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
+	fixture := newHeaderArmingFixture(t, slots)
+	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
+
+	ebHash := lcommon.NewBlake2b256([]byte("orphan-eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("orphan-rb"))
+
+	// Chain-mutation order is: announcing header admitted (seq 3), then
+	// rolled back (seq 4). The rollback wins the race to the manager and is
+	// applied before either header event.
+	fixture.mgr.handleRollback(chain.ChainRollbackEvent{
+		Point: ocommon.Point{Slot: headerArmingRbSlot - 1},
+		Seq:   4,
+	})
+
+	// The header stream then delivers both events, still in order.
+	publishHeaderAnnouncement(fixture, headerArmingRbSlot, rbHash, ebHash, 3)
+	publishHeaderInvalidation(
+		fixture,
+		headerArmingRbSlot-1,
+		chain.HeaderInvalidationRollback,
+		4,
+	)
+	testutil.WaitForCondition(t, func() bool {
+		fixture.mgr.mu.Lock()
+		defer fixture.mgr.mu.Unlock()
+		return fixture.mgr.lastHeaderStreamSeq >= 4
+	}, 2*time.Second, "header stream drained")
+
+	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, ebHash)
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		500*time.Millisecond,
+		"no vote for a header the rollback removed, whatever order the two streams arrived in",
+	)
+	fixture.mgr.mu.Lock()
+	defer fixture.mgr.mu.Unlock()
+	assert.NotContains(t, fixture.mgr.announcements, rbHash)
+}
