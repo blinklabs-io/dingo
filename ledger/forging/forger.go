@@ -62,6 +62,27 @@ const (
 	// and the slot clock above which the forger logs an error suggesting
 	// the database contains data from a different genesis.
 	forgeStaleGapThresholdSlots = 1000
+
+	// forgeHeaderFrontierToleranceSlots is how far the ledger-applied tip may
+	// lag this node's own header frontier -- the tip of the primary chain,
+	// i.e. blocks whose headers the node has already admitted and selected but
+	// whose ledger application has not finished -- before the forger refuses
+	// to build on the applied tip.
+	//
+	// A forged block's parent is the ledger-applied tip. When the frontier is
+	// ahead, that parent is a block this node has ITSELF already superseded,
+	// so the forged block enters a fork race it has already lost and is
+	// orphaned. This is distinct from forgeSyncToleranceSlots, which tolerates
+	// trailing the NETWORK while catching up and is therefore generous: there
+	// is no legitimate reason to build on a parent the node has already
+	// replaced, so this bound is small.
+	//
+	// It is not zero because the ledger pipeline commits in batches, so a gap
+	// of a slot or two is the normal steady state at the head of a fast chain
+	// and a zero tolerance would suppress forging continuously. Five slots is
+	// a few pipeline batches' worth of headroom while still being far below
+	// the tens-of-slots staleness that produced orphaned blocks in the field.
+	forgeHeaderFrontierToleranceSlots = 5
 )
 
 // BlockForger coordinates block production for a stake pool.
@@ -105,6 +126,7 @@ type BlockForger struct {
 
 	// Configurable forging tolerances
 	forgeSyncToleranceSlots     uint64
+	forgeFrontierToleranceSlots uint64
 	forgeStaleGapThresholdSlots uint64
 
 	// Optional self-validation before adoption (nil = disabled)
@@ -282,8 +304,16 @@ type SlotClockProvider interface {
 	CurrentSlot() (uint64, error)
 	// SlotsPerKESPeriod returns the number of slots in a KES period.
 	SlotsPerKESPeriod() uint64
-	// ChainTipSlot returns the slot number of the current chain tip.
+	// ChainTipSlot returns the slot number of the current chain tip. This is
+	// the LEDGER-APPLIED tip, which is what a forged block's parent must be,
+	// and which trails PrimaryChainTipSlot while the ledger pipeline works
+	// through its backlog.
 	ChainTipSlot() uint64
+	// PrimaryChainTipSlot returns the slot number of this node's own header
+	// frontier: the tip of the primary chain, which can be ahead of
+	// ChainTipSlot while the ledger pipeline is still applying blocks the node
+	// has already admitted and selected.
+	PrimaryChainTipSlot() uint64
 	// NextSlotTime returns the wall-clock time when the next slot begins.
 	NextSlotTime() (time.Time, error)
 	// UpstreamTipSlot returns the latest admitted header slot from upstream
@@ -370,6 +400,10 @@ type ForgerConfig struct {
 	// ForgeSyncToleranceSlots controls how far the local chain can lag the
 	// upstream tip before forging is skipped. Zero uses the default.
 	ForgeSyncToleranceSlots uint64
+	// ForgeHeaderFrontierToleranceSlots controls how far the ledger-applied
+	// tip may lag this node's own header frontier before the forger refuses
+	// to build on it. Zero selects forgeHeaderFrontierToleranceSlots.
+	ForgeHeaderFrontierToleranceSlots uint64
 	// ForgeStaleGapThresholdSlots controls when to log an error if the
 	// chain tip is far ahead of the slot clock. Zero uses the default.
 	ForgeStaleGapThresholdSlots uint64
@@ -423,8 +457,12 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 	if cfg.ForgeStaleGapThresholdSlots == 0 {
 		cfg.ForgeStaleGapThresholdSlots = forgeStaleGapThresholdSlots
 	}
+	if cfg.ForgeHeaderFrontierToleranceSlots == 0 {
+		cfg.ForgeHeaderFrontierToleranceSlots = forgeHeaderFrontierToleranceSlots
+	}
 	f.forgeSyncToleranceSlots = cfg.ForgeSyncToleranceSlots
 	f.forgeStaleGapThresholdSlots = cfg.ForgeStaleGapThresholdSlots
+	f.forgeFrontierToleranceSlots = cfg.ForgeHeaderFrontierToleranceSlots
 
 	if cfg.Mode == ModeProduction {
 		if cfg.Credentials == nil || !cfg.Credentials.IsLoaded() {
@@ -690,7 +728,16 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return fmt.Errorf("failed to get current slot: %w", err)
 	}
 
+	// tipSlot is the LEDGER-APPLIED tip, which is the parent a forged block
+	// would be built on. frontierSlot is this node's own header frontier: the
+	// tip of the primary chain, which runs ahead of tipSlot while the ledger
+	// pipeline works through admitted blocks it has not applied yet.
 	tipSlot := f.slotClock.ChainTipSlot()
+	frontierSlot := f.slotClock.PrimaryChainTipSlot()
+	applyGap := uint64(0)
+	if frontierSlot > tipSlot {
+		applyGap = frontierSlot - tipSlot
+	}
 
 	// Skip if the chain has already moved PAST the current slot.
 	// A tip beyond currentSlot means any block we produced would fork
@@ -700,9 +747,20 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// and treats EQ as a slot battle.
 	// Count every slot check (matches cardano-node
 	// Forge.about_to_lead)
+	//
+	// dingo_forge_tip_gap_slots reports the ledger-apply backlog
+	// (frontier - applied tip) on EVERY leader check. It previously reset to 0
+	// here and was only set non-zero on the two skip paths below, so the case
+	// that matters -- proceeding to forge while the applied tip trails the
+	// frontier -- reported a gap of exactly 0, and the gauge read 0 on
+	// producers that were forging tens of slots stale. The skip paths no
+	// longer overwrite it with their own, differently-defined gaps (tip ahead
+	// of the slot clock; upstream ahead of the tip); both are still logged,
+	// and the sync skip still has its own counter, so the gauge now has one
+	// meaning instead of three.
 	if f.metrics != nil {
 		f.metrics.forgeAboutToLead.Inc()
-		f.metrics.tipGapSlots.Set(0)
+		f.metrics.tipGapSlots.Set(float64(applyGap))
 	}
 
 	if currentSlot < tipSlot {
@@ -711,9 +769,6 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		// Use subtraction (safe here since tipSlot > currentSlot from
 		// the outer check) to avoid uint64 overflow on the addition.
 		gap := tipSlot - currentSlot
-		if f.metrics != nil {
-			f.metrics.tipGapSlots.Set(float64(gap))
-		}
 		if gap > f.forgeStaleGapThresholdSlots {
 			// This gate also runs before leader selection, so it
 			// swallows a scheduled leader slot as silently as the
@@ -825,14 +880,11 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		(upstreamTip > tipSlot &&
 			upstreamTip-tipSlot > f.forgeSyncToleranceSlots)) {
 		if f.metrics != nil {
-			gap := uint64(0)
-			if upstreamTip > tipSlot {
-				gap = upstreamTip - tipSlot
-			}
 			f.metrics.forgeSyncSkip.Inc()
-			f.metrics.tipGapSlots.Set(
-				float64(gap),
-			)
+		}
+		upstreamGap := uint64(0)
+		if upstreamTip > tipSlot {
+			upstreamGap = upstreamTip - tipSlot
 		}
 		f.logGateSkip(
 			currentSlot,
@@ -840,6 +892,34 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			"current_slot", currentSlot,
 			"tip_slot", tipSlot,
 			"upstream_tip", upstreamTip,
+			"upstream_gap_slots", upstreamGap,
+		)
+		return nil
+	}
+
+	// Refuse to build on a parent this node has itself already superseded.
+	// The forged block's parent is the ledger-applied tip; when the header
+	// frontier is further ahead than the tolerance, the applied tip is no
+	// longer the node's own best chain, so the block would lose the fork race
+	// and be orphaned. The upstream sync check above cannot catch this: it
+	// compares the applied tip against the NETWORK, with a tolerance sized for
+	// catch-up, and a node whose own pipeline is the thing lagging can be
+	// well inside that tolerance while still building on a stale parent.
+	//
+	// Skip loudly rather than silently: an operator whose pipeline is lagging
+	// needs to see it, and a block that is going to be orphaned is worth a
+	// warning either way. See forgeHeaderFrontierToleranceSlots.
+	if applyGap > f.forgeFrontierToleranceSlots {
+		if f.metrics != nil {
+			f.metrics.forgeStaleTipSkip.Inc()
+		}
+		f.logger.Warn(
+			"forge skip: ledger tip stale vs header frontier",
+			"current_slot", currentSlot,
+			"tip_slot", tipSlot,
+			"frontier_slot", frontierSlot,
+			"gap_slots", applyGap,
+			"tolerance_slots", f.forgeFrontierToleranceSlots,
 		)
 		return nil
 	}

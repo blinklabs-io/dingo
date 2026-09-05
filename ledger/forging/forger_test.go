@@ -105,6 +105,7 @@ type forgerTestSlotClock struct {
 	currentSlot       uint64
 	chainTipSlot      uint64
 	chainTipHash      []byte
+	frontierSlot      uint64
 	upstreamTipSlot   uint64
 	upstreamActive    bool
 	slotsPerKESPeriod uint64
@@ -120,6 +121,15 @@ func (c forgerTestSlotClock) SlotsPerKESPeriod() uint64 {
 
 func (c forgerTestSlotClock) ChainTipSlot() uint64 {
 	return c.chainTipSlot
+}
+
+// PrimaryChainTipSlot defaults to the applied tip, so a test that does not
+// set frontierSlot explicitly observes no ledger-apply backlog.
+func (c forgerTestSlotClock) PrimaryChainTipSlot() uint64 {
+	if c.frontierSlot < c.chainTipSlot {
+		return c.chainTipSlot
+	}
+	return c.frontierSlot
 }
 
 func (forgerTestSlotClock) NextSlotTime() (time.Time, error) {

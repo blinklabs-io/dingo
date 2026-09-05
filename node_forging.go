@@ -772,6 +772,10 @@ func (a *slotClockAdapter) ChainTipHash() []byte {
 // build.
 var _ forging.ChainTipHashProvider = (*slotClockAdapter)(nil)
 
+func (a *slotClockAdapter) PrimaryChainTipSlot() uint64 {
+	return a.ledgerState.PrimaryChainTipSlot()
+}
+
 func (a *slotClockAdapter) NextSlotTime() (time.Time, error) {
 	return a.ledgerState.NextSlotTime()
 }
