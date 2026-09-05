@@ -2828,6 +2828,17 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	return ls.rollbackWithResync(point, true)
 }
 
+// rollbackCommittedError reports an error found after the metadata rollback
+// transaction and in-memory tip update have committed. Callers that publish
+// side effects separately must not treat this as an all-or-nothing failure.
+type rollbackCommittedError struct {
+	err error
+}
+
+func (e *rollbackCommittedError) Error() string { return e.err.Error() }
+
+func (e *rollbackCommittedError) Unwrap() error { return e.err }
+
 func (ls *LedgerState) rollbackWithoutResync(point ocommon.Point) error {
 	return ls.rollbackWithResync(point, false)
 }
@@ -3166,7 +3177,7 @@ func (ls *LedgerState) rollbackWithResync(
 		"ledger",
 	)
 	if err := ls.enforceDurableTipFloor(); err != nil {
-		return err
+		return &rollbackCommittedError{err: err}
 	}
 	return nil
 }
@@ -7998,6 +8009,10 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 			// reconciliation attempt lands right back in this same
 			// branch and retries both.
 			if err := ls.rollbackWithoutResync(chainTip.Point); err != nil {
+				var committedErr *rollbackCommittedError
+				if errors.As(err, &committedErr) {
+					ls.emitRollbackTransactionEvents(undoBlocks)
+				}
 				return err
 			}
 			ls.emitRollbackTransactionEvents(undoBlocks)
@@ -8248,6 +8263,10 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		// A true durable, atomic handoff across every rollback path --
 		// not just this one -- is tracked as issue #3817.
 		if err := ls.rollbackWithoutResync(ancestor); err != nil {
+			var committedErr *rollbackCommittedError
+			if errors.As(err, &committedErr) {
+				ls.emitRollbackTransactionEvents(undoBlocks)
+			}
 			return err
 		}
 		ls.emitRollbackTransactionEvents(undoBlocks)

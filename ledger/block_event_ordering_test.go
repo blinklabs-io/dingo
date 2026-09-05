@@ -1063,18 +1063,9 @@ func TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmit
 	)
 }
 
-// TestReconciliationUndoBlocksDetectsMissingBlockNonceRecords covers
-// wolf31o2's review on PR #3611: reconciliationUndoBlocks cannot even name
-// an applied block with no block_nonce row at all -- the shape of a
-// Byron-era block, since Byron's BFT/PoA consensus writes no VRF nonce --
-// so unlike an unresolvable block (reconciliationUndoUnresolved), such a
-// gap was previously invisible to both the log and the metrics. This
-// proves the block-number-delta check catches it: an applied block
-// between the ancestor and the ledger tip with no nonce row at all must
-// still be resolved and counted separately via
-// reconciliationUndoMissingRecord, without guessing at its content (which
-// would risk resolving the wrong branch's block for that slot).
-func TestReconciliationUndoBlocksDetectsMissingBlockNonceRecords(t *testing.T) {
+// TestReconciliationUndoBlocksIncludesNilNonceRecords covers a durable
+// applied-point row with no evolving nonce, as used by Byron-like blocks.
+func TestReconciliationUndoBlocksIncludesNilNonceRecords(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
@@ -1133,6 +1124,44 @@ func TestReconciliationUndoBlocksDetectsMissingBlockNonceRecords(t *testing.T) {
 		"a missing record is a different gap from an unresolvable one and "+
 			"must not double-count into it",
 	)
+}
+
+// TestReconciliationUndoBlocksDetectsMissingBlockNonceRecords covers the
+// absent-row path for an applied block. Byron-era processing historically
+// produced this shape, so the block-number delta must still make the gap
+// observable through reconciliationUndoMissingRecord without fabricating an
+// undo block from the replacement chain.
+func TestReconciliationUndoBlocksDetectsMissingBlockNonceRecords(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+	txSubID, _ := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), txSubID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
+
+	byronLikeHash := testHashBytes("byron-like-absent-nonce-row")
+	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{{
+		Slot:        fixture.currentTip.Point.Slot + 5,
+		Hash:        byronLikeHash,
+		BlockNumber: fixture.currentTip.BlockNumber + 1,
+		Type:        1,
+		PrevHash:    fixture.currentTip.Point.Hash,
+		Cbor:        []byte{0x80},
+	}}))
+
+	blocks := ls.reconciliationUndoBlocks(
+		fixture.ancestorTip.Point,
+		fixture.currentTip.Point.Slot+5,
+		fixture.currentTip.BlockNumber+1,
+	)
+
+	require.Len(t, blocks, 1)
+	require.Equal(t, fixture.currentTip.Point.Hash, blocks[0].Hash)
+	require.Equal(t, float64(1), promtestutil.ToFloat64(ls.metrics.reconciliationUndoMissingRecord))
+	require.Equal(t, float64(0), promtestutil.ToFloat64(ls.metrics.reconciliationUndoUnresolved))
 }
 
 // TestReconcilePrimaryChainTipWithLedgerTipSucceedsBeforeSetLedger covers a
