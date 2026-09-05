@@ -6077,10 +6077,13 @@ at K+1, so its epoch-K block count has no row to live on), plus #3097's
 per-account categories: `acct_only_dingo`,
 `acct_only_koios`, `acct_duplicate` (a genuine duplicate (stake_address,
 reward_type) row within one side — a data-integrity problem, not a value
-disagreement), and `acct_coverage_incomplete` (the per-account Koios fetch for
-this epoch never completed across every chunk — see "Per-account exact parity
-(#3097)" below). Results are stored in `check_mismatches` and summarised in
-`check_epoch_status`.
+disagreement), `acct_zero_reward_row` (informational: a reward row worth zero
+lovelace present on one side only — nothing was credited either way, so the
+two sides agree about every lovelace and the one-sided row is a
+representational difference, not a divergence), and `acct_coverage_incomplete`
+(the per-account Koios fetch for this epoch never completed across every chunk
+— see "Per-account exact parity (#3097)" below). Results are stored in
+`check_mismatches` and summarised in `check_epoch_status`.
 
 Epochs 0-1 predate a valid Shelley "go" stake snapshot (mark→set→go takes 3
 epoch boundaries, so the go snapshot backing epoch E's active_stake needs
@@ -6544,7 +6547,12 @@ never the reverse.
   including the identical-string case, so two identical malformed or
   negative amounts never compare equal-by-accident — never a float/rational,
   so #3097's "no rounding, sampling, or tolerance" requirement holds exactly,
-  including a 1-lovelace difference. `graceHours`/`epochEndTime` apply the
+  including a 1-lovelace difference. `lovelaceEqual` and the
+  `acct_zero_reward_row` presence test share one parse (`parseLovelace`:
+  digits only, no sign, no surrounding whitespace) so that the same string
+  cannot be read as zero by one and malformed by the other — otherwise a
+  spelling like `" 0"` or `"+0"` gets a different verdict depending only on
+  whether the other side happened to have a row. `graceHours`/`epochEndTime` apply the
   identical `reference_lag` treatment `ComparePoolEpoch` already uses for a
   genuinely-too-recent epoch, symmetrically for both presence-mismatch
   directions: `acct_only_koios` (Koios has a row Dingo doesn't yet) and
@@ -6555,7 +6563,9 @@ never the reverse.
   Koios-side direction.
 - **Strict-mode propagation.** An account-level `FAIL` flows through
   `DetermineStatus` (any `acct_only_dingo`/`acct_only_koios`/`acct_duplicate`
-  forces `FAIL`, exactly like the pool-level categories) into
+  forces `FAIL`, exactly like the pool-level categories — except a one-sided
+  row worth zero lovelace, which is classified `acct_zero_reward_row` before
+  the presence categories are reached and is purely informational) into
   `EpochCompareResult.Status`, then into `Observer.processEpoch`'s
   `result.Status != StatusPass` check the same way a pool-level mismatch
   already does — no separate code path, so strict mode stops the node on an
@@ -6760,6 +6770,9 @@ every one of #3097's own tests passes unmodified.
   confirmed-zero-reward address (Koios answered, no reward, so no row is
   ever emitted for it) never enters that comparison at all — this half is
   read from `koios_account_checked` (`Cache.GetZeroRewardAccountsForEpoch`).
+  That is a distinct case from a row Koios *does* emit whose amount is zero,
+  which reaches `CompareAccountEpoch` normally and is reported as
+  `acct_zero_reward_row`; preview publishes zero-earned leader rows.
   Newly-registered/deregistered accounts are diffed from **Dingo's own
   epoch-scoped `reward_account_output` rows** at the current and previous
   stake epoch (`dingo.GetRewardAccountOutputs`, decoded via

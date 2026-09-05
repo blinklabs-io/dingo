@@ -19,7 +19,6 @@ import (
 	"math/big"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -867,14 +866,50 @@ func lovelaceEqual(a, b string) bool {
 	// string-equality short-circuit would report two identical malformed or
 	// negative strings as "equal" without ever validating them, letting
 	// CompareAccountEpoch pass on invalid account data.
-	var x, y big.Int
-	if _, ok := x.SetString(a, 10); !ok || x.Sign() < 0 {
+	x, ok := parseLovelace(a)
+	if !ok {
 		return false
 	}
-	if _, ok := y.SetString(b, 10); !ok || y.Sign() < 0 {
+	y, ok := parseLovelace(b)
+	if !ok {
 		return false
 	}
-	return x.Cmp(&y) == 0
+	return x.Cmp(y) == 0
+}
+
+// parseLovelace is the single definition of a well-formed lovelace amount:
+// one or more ASCII digits, nothing else. No sign, no surrounding whitespace,
+// no separators.
+//
+// It exists so that lovelaceEqual and isZeroRewardAmount cannot disagree about
+// what a string means. They read the same field from the same two sides, and a
+// string one of them accepts while the other rejects gets two verdicts from the
+// same input: with a divergent parse, " 0" was agreement when the row was
+// one-sided and value_mismatch when both sides had one, and "+0" was the
+// reverse. Whether a given malformed spelling ought to be tolerated is a
+// separate question from whether the two paths answer it the same way; this
+// answers the second, strictly, so a malformed amount is always reported and
+// never waived.
+//
+// Deliberately stricter than big.Int.SetString alone, which accepts a leading
+// sign: "-0" parses to zero with a non-negative sign, so a sign check does not
+// exclude it, and a negative lovelace amount is malformed data rather than a
+// zero reward. Leading zeros are accepted ("00" is zero) because the two sides
+// format independently and a value's spelling is not the comparison's business.
+func parseLovelace(s string) (*big.Int, bool) {
+	if s == "" {
+		return nil, false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return nil, false
+		}
+	}
+	var v big.Int
+	if _, ok := v.SetString(s, 10); !ok {
+		return nil, false
+	}
+	return &v, true
 }
 
 // rationalsEqual reports whether two numeric strings represent the same
@@ -894,11 +929,15 @@ func rationalsEqual(a, b string) bool {
 //
 // Parsed rather than compared to "0": the two sides format independently, and
 // a reward that is genuinely zero must be recognised as zero however it is
-// spelled. An unparseable amount is not zero — it is a real value the
-// comparison must keep reporting rather than quietly waive.
+// spelled, so "00" is zero. An unparseable amount is not zero — it is a real
+// value the comparison must keep reporting rather than quietly waive, so "",
+// "abc", " 0" and "-0" all stay one-sided rows and keep failing the epoch.
+//
+// The parse is parseLovelace, the same one lovelaceEqual uses, so a string
+// cannot be zero here and malformed there.
 func isZeroRewardAmount(amount string) bool {
-	v, err := strconv.ParseUint(strings.TrimSpace(amount), 10, 64)
-	return err == nil && v == 0
+	v, ok := parseLovelace(amount)
+	return ok && v.Sign() == 0
 }
 
 // DetermineStatus returns PASS, FAIL, or ERROR from a list of mismatches.
