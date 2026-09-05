@@ -59,7 +59,8 @@ type pinnedArtifact struct {
 	// zero until the bootstrap has opened the certified ImmutableDB, and is
 	// filled in before the ledger-state import runs, so a resume can detect an
 	// artifact that re-resolved to different content.
-	CertifiedTipSlot uint64 `json:"certified_tip_slot"`
+	CertifiedTipSlot    uint64 `json:"certified_tip_slot"`
+	CertifiedTipSlotSet bool   `json:"certified_tip_slot_set"`
 }
 
 // setPinnedArtifact records pin as the artifact this sync run is importing.
@@ -128,10 +129,11 @@ func recordPinnedCertifiedTip(db *database.Database, slot uint64) error {
 	if err != nil || !ok {
 		return err
 	}
-	if pin.CertifiedTipSlot == slot {
+	if pin.CertifiedTipSlotSet && pin.CertifiedTipSlot == slot {
 		return nil
 	}
 	pin.CertifiedTipSlot = slot
+	pin.CertifiedTipSlotSet = true
 	return setPinnedArtifact(db, pin)
 }
 
@@ -205,7 +207,7 @@ func (p pinnedArtifact) verifyResolved(snapshot *SnapshotListItem) error {
 // certified ImmutableDB was opened) accepts any tip and is filled in by the
 // caller.
 func (p pinnedArtifact) verifyCertifiedTip(slot uint64) error {
-	if p.CertifiedTipSlot == 0 || p.CertifiedTipSlot == slot {
+	if !p.CertifiedTipSlotSet || p.CertifiedTipSlot == slot {
 		return nil
 	}
 	return fmt.Errorf(

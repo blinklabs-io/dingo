@@ -685,10 +685,9 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 // and returns it, the way a live aggregator does between one sync run and the
 // next. It reuses the fixture's certified digest list, merkle root, locations
 // and ancillary archive, changing only the beacon epoch — so the new artifact
-// hash (sha256(epoch || merkle root)) is genuinely different and the artifact
-// is fully usable end to end. A run that selects it therefore succeeds rather
-// than failing for some incidental reason, which is what makes "which artifact
-// did the run pick" the only thing a test asserting on it can be measuring.
+// hash (sha256(epoch || merkle root)) is genuinely different. Certificate
+// verification is disabled by callers of this fixture because the reused
+// certificate belongs to the original beacon.
 func (f *v2Fixture) publishNewerArtifact(
 	t *testing.T,
 ) *CardanoDatabaseSnapshot {

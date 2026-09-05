@@ -179,8 +179,7 @@ func (e *ImmutableArchiveError) Unwrap() error {
 // signature in the query string, and a userinfo component carries them
 // outright. Neither belongs in an error an operator is asked to paste into a
 // bug report, while scheme+host+path is exactly what identifies the replica.
-// A URI that will not parse is reported as its scheme-and-host prefix only, or
-// as "unparsable location" when it has none.
+// A URI that will not parse or has no host is reported as "unparsable location".
 func redactLocationURI(raw string) string {
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Host == "" {

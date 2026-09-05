@@ -257,6 +257,7 @@ func TestSyncRefusesResumeWhenCertifiedTipMoved(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	pin.CertifiedTipSlot = fixtureLedgerStateSlot + 5000
+	pin.CertifiedTipSlotSet = true
 	require.NoError(t, setPinnedArtifact(db, pin))
 	require.NoError(t, dbtest.CloseDatabase(db))
 

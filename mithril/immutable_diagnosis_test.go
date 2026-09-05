@@ -49,9 +49,9 @@ func TestRedactLocationURI(t *testing.T) {
 			want: "https://cdn.example.org/a/05471.tar.zst",
 		},
 		{
-			name: "unparsable input keeps nothing after the query marker",
+			name: "unparsable input is rejected",
 			in:   "::not a url::?token=secret",
-			want: "::not a url::",
+			want: "unparsable location",
 		},
 		{
 			name: "empty input",

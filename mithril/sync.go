@@ -632,8 +632,9 @@ func Sync(
 			OnChunkContiguous: chunkHook,
 			OnArtifactSelected: func(sel SelectedArtifact) error {
 				if pinnedDigest != "" {
-					if normalizeBackend(sel.Backend) != resumePin.Backend ||
-						sel.Network != resumePin.Network ||
+					if (resumePin.Backend != "" &&
+						normalizeBackend(sel.Backend) != resumePin.Backend) ||
+						(resumePin.Network != "" && sel.Network != resumePin.Network) ||
 						sel.Digest != resumePin.Digest ||
 						sel.Beacon.Epoch != resumePin.Epoch ||
 						sel.Beacon.ImmutableFileNumber != resumePin.ImmutableFileNumber ||
@@ -650,6 +651,7 @@ func Sync(
 					ImmutableFileNumber: sel.Beacon.ImmutableFileNumber,
 					CertificateHash:     sel.CertificateHash,
 					CertifiedTipSlot:    resumePin.CertifiedTipSlot,
+					CertifiedTipSlotSet: resumePin.CertifiedTipSlotSet,
 				})
 			},
 			PinnedDigest:           pinnedDigest,
