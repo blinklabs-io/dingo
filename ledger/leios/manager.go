@@ -115,6 +115,20 @@ const (
 	voteNotEmittedNotInserted = "not_inserted"
 )
 
+// voteNotEmittedReasons is every label the counter can carry, so all of them
+// can be materialized at startup.
+var voteNotEmittedReasons = []string{
+	voteNotEmittedDuplicate,
+	voteNotEmittedNoKey,
+	voteNotEmittedSlotWindow,
+	voteNotEmittedCommitteeUnavailable,
+	voteNotEmittedNotSeated,
+	voteNotEmittedUnknownMember,
+	voteNotEmittedKeyMismatch,
+	voteNotEmittedSigningFailed,
+	voteNotEmittedNotInserted,
+}
+
 // ErrVoteManagerStopped is returned by blocking calls when the vote
 // manager is not running. committeeAndParamsForEpoch also returns it to a
 // caller waiting on another caller's in-flight committee computation when the
@@ -481,6 +495,14 @@ type VoteManager struct {
 	// lastSlotWindowWarn throttles the seated-but-outside-vote-window
 	// warning. Guarded by mu.
 	lastSlotWindowWarn time.Time
+
+	// lastHeaderStreamSeq is the highest chain-mutation sequence number
+	// applied from the ordered header stream. Because that stream is a
+	// single event type, everything up to this number has been applied in
+	// chain-mutation order, which is what lets handleRollback tell a
+	// rollback it has already superseded from one it has not. Guarded by
+	// mu.
+	lastHeaderStreamSeq uint64
 }
 
 type managerSubscription struct {
@@ -587,21 +609,11 @@ func (m *VoteManager) Start(ctx context.Context) error {
 		event.EpochTransitionEventType,
 	)
 	chainSubId, chainCh := m.eventBus.Subscribe(chain.ChainUpdateEventType)
-	// Announcements are armed from header arrival, not block application:
-	// applying an EB-announcing ranking block waits on fetching that same
-	// endorser block, which lands after the vote window has closed. The
-	// apply-driven ChainBlockEvent above remains as a backstop for blocks
-	// that reach the chain by another route.
-	headerSubId, headerCh := m.eventBus.Subscribe(
-		chain.ChainHeaderAnnouncementEventType,
-	)
+	headerSubId, headerCh := m.subscribeHeaderStream()
 	m.subs = []managerSubscription{
 		{eventType: event.EpochTransitionEventType, id: epochSubId},
 		{eventType: chain.ChainUpdateEventType, id: chainSubId},
-		{
-			eventType: chain.ChainHeaderAnnouncementEventType,
-			id:        headerSubId,
-		},
+		{eventType: chain.ChainHeaderEventType, id: headerSubId},
 	}
 	m.loopWg.Go(func() {
 		m.eventLoop(childCtx, epochCh, chainCh, headerCh)
@@ -2615,12 +2627,126 @@ func (m *VoteManager) eventLoop(
 			}
 		case evt, ok := <-headerCh:
 			if !ok {
-				return
+				// The header stream is ordering-critical: losing it
+				// silently would put the node back to never voting,
+				// which is the failure this stream exists to fix. It
+				// is subscribed with SubscriberBackpressureBlock so
+				// the bus does not detach it under load, leaving Stop
+				// (which closes it after clearing running) as the
+				// expected closer. Anything else is recovered.
+				replacement, ok := m.replaceHeaderStream()
+				if !ok {
+					return
+				}
+				headerCh = replacement
+				continue
 			}
-			if data, ok := evt.Data.(chain.ChainHeaderAnnouncementEvent); ok {
+			switch data := evt.Data.(type) {
+			case chain.ChainHeaderAnnouncementEvent:
 				m.handleChainHeaderAnnouncement(data)
+			case chain.ChainHeaderInvalidationEvent:
+				m.handleChainHeaderInvalidation(data)
 			}
 		}
+	}
+}
+
+// subscribeHeaderStream subscribes to the ordered header-lifecycle stream.
+//
+// The buffer and the blocking backpressure policy match what ledger/state.go
+// uses for chain.update, and for the same reason: this stream is
+// ordering-critical. An announcement and the invalidation that voids it are
+// only safe to act on in the order the chain produced them, so a subscriber
+// that the bus detached mid-stream (the default policy) could arm a vote for a
+// ranking block that had already left our chain. Blocking backpressures the
+// publisher instead, and the buffer is sized for bulk catch-up, where every
+// admitted header is replayed through this stream.
+func (m *VoteManager) subscribeHeaderStream() (
+	event.EventSubscriberId,
+	<-chan event.Event,
+) {
+	return m.eventBus.SubscribeWithBufferPolicy(
+		chain.ChainHeaderEventType,
+		event.EventQueueSize,
+		event.SubscriberBackpressureBlock,
+	)
+}
+
+// replaceHeaderStream re-subscribes after the header channel closed
+// unexpectedly. It reports false when the manager is stopping or the bus is
+// gone, in which case the closure was the expected teardown and the event loop
+// should exit.
+func (m *VoteManager) replaceHeaderStream() (<-chan event.Event, bool) {
+	m.mu.Lock()
+	stopping := m.stopping || !m.running
+	m.mu.Unlock()
+	if stopping {
+		return nil, false
+	}
+	subId, ch := m.subscribeHeaderStream()
+	if ch == nil {
+		// The bus is stopped or closed; nothing to recover to.
+		return nil, false
+	}
+	m.mu.Lock()
+	replaced := false
+	for i := range m.subs {
+		if m.subs[i].eventType == chain.ChainHeaderEventType {
+			m.subs[i].id = subId
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		m.subs = append(m.subs, managerSubscription{
+			eventType: chain.ChainHeaderEventType,
+			id:        subId,
+		})
+	}
+	m.mu.Unlock()
+	if m.metrics != nil {
+		m.metrics.headerStreamResubscribeTotal.Inc()
+	}
+	m.logger.Warn(
+		"leios header stream closed unexpectedly, resubscribed; announcements in the gap are armed only when their ranking block applies",
+	)
+	return ch, true
+}
+
+// handleChainHeaderInvalidation drops announcements for ranking blocks that
+// left our chain without becoming blocks -- a rollback, or the header queue
+// being discarded. It is the counterpart to handleChainHeaderAnnouncement and
+// arrives on the same event type, so the two can never be observed out of
+// order: an announcement re-armed after an invalidation was genuinely
+// re-admitted to the chain, and one armed before it is genuinely gone.
+//
+// Votes, tallies and dedup records are not touched here; those follow the
+// block-level rollback on chain.update (handleRollback), which is keyed by
+// slot and is safe to apply in any order relative to this.
+func (m *VoteManager) handleChainHeaderInvalidation(
+	evt chain.ChainHeaderInvalidationEvent,
+) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if evt.Seq > m.lastHeaderStreamSeq {
+		m.lastHeaderStreamSeq = evt.Seq
+	}
+	dropped := 0
+	for rbHash, record := range m.announcements {
+		if record.slot > evt.Point.Slot {
+			delete(m.announcements, rbHash)
+			delete(m.votedAnnouncements, rbHash)
+			m.removePendingAnnouncementLocked(rbHash)
+			dropped++
+		}
+	}
+	if dropped > 0 {
+		m.logger.Debug(
+			"dropped leios announcements for headers no longer on our chain",
+			"point_slot", evt.Point.Slot,
+			"reason", evt.Reason,
+			"dropped", dropped,
+		)
 	}
 }
 
@@ -2639,7 +2765,21 @@ func (m *VoteManager) eventLoop(
 func (m *VoteManager) handleChainHeaderAnnouncement(
 	evt chain.ChainHeaderAnnouncementEvent,
 ) {
+	m.advanceHeaderStreamSeq(evt.Seq)
 	m.ObserveAnnouncement(evt.Slot, evt.RbHash, evt.EbHash)
+}
+
+// advanceHeaderStreamSeq records how far the ordered header stream has been
+// applied.
+func (m *VoteManager) advanceHeaderStreamSeq(seq uint64) {
+	if seq == 0 {
+		return
+	}
+	m.mu.Lock()
+	if seq > m.lastHeaderStreamSeq {
+		m.lastHeaderStreamSeq = seq
+	}
+	m.mu.Unlock()
 }
 
 // handleChainBlock arms an announcement from an applied ranking block. It is a
@@ -2798,11 +2938,23 @@ func (m *VoteManager) handleRollback(evt chain.ChainRollbackEvent) {
 			delete(m.voteRecords, id)
 		}
 	}
-	for rbHash, record := range m.announcements {
-		if record.slot > evt.Point.Slot {
-			delete(m.announcements, rbHash)
-			delete(m.votedAnnouncements, rbHash)
-			m.removePendingAnnouncementLocked(rbHash)
+	// Announcement pruning is skipped when the ordered header stream has
+	// already applied a mutation newer than this rollback. That stream
+	// carries the matching invalidation, which pruned these same entries in
+	// order; anything armed since is a header the chain admitted after the
+	// rollback. Without this guard the two streams -- delivered on
+	// independent channels with no ordering between them -- would let a
+	// late rollback delete an announcement for the replacement chain, which
+	// is systematic during fork resolution (roll back, then re-queue the
+	// peer's fork headers). An unsequenced event (Seq 0) is never
+	// superseded and always prunes.
+	if evt.Seq == 0 || evt.Seq >= m.lastHeaderStreamSeq {
+		for rbHash, record := range m.announcements {
+			if record.slot > evt.Point.Slot {
+				delete(m.announcements, rbHash)
+				delete(m.votedAnnouncements, rbHash)
+				m.removePendingAnnouncementLocked(rbHash)
+			}
 		}
 	}
 	for ebHash, record := range m.acquiredEbs {

@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -115,6 +116,15 @@ type Chain struct {
 	// takes a caller-supplied transaction whose commit the chain neither
 	// performs nor observes, so the same window remains open there.
 	batchCommitMutex sync.RWMutex
+
+	// headerSeq numbers the chain mutations that affect the header queue.
+	// It is stamped on ChainHeaderEventType events and, for a rollback,
+	// on the matching ChainRollbackEvent, so a consumer subscribed to both
+	// event types -- which the bus delivers on independent channels, with
+	// no ordering between them -- can still tell which mutation came
+	// first. Guarded by c.mutex, so the numbering matches the order the
+	// sequencer publishes in.
+	headerSeq uint64
 }
 
 type queuedHeader struct {
@@ -254,7 +264,83 @@ func (c *Chain) addBlockHeader(
 	}
 	// Add header
 	c.headers = append(c.headers, queued)
+	// Surface a Leios endorser-block announcement the moment its ranking
+	// block's header enters the queue. The apply-driven ChainUpdateEventType
+	// cannot serve this: applying an EB-announcing ranking block waits on
+	// fetching that same endorser block, so it lands long after the Leios
+	// vote window (measured from the announcing ranking block's slot) has
+	// closed. Emitting here rather than at the chainsync call site also
+	// covers the fork-resolution path, which queues headers through this
+	// same method and returns before the caller's ordinary bookkeeping.
+	// Enqueued under c.mutex so it is ordered against the invalidations
+	// emitted by rollbackLocked and ClearHeaders.
+	if evt, ok := leiosAnnouncementEvent(
+		header,
+		headerHash,
+		c.nextHeaderSeqLocked(),
+	); ok {
+		c.queueDeferredEventLocked(evt)
+	}
 	return nil
+}
+
+// leiosAnnouncementEvent builds the header-arrival event for a ranking-block
+// header that announces a Leios endorser block. Headers from eras without
+// announcements, and announcement-capable headers that announce nothing,
+// return false, so a chain carrying no Leios traffic pays one type assertion
+// per header and enqueues nothing.
+func leiosAnnouncementEvent(
+	header ledger.BlockHeader,
+	headerHash lcommon.Blake2b256,
+	seq uint64,
+) (event.Event, bool) {
+	announcer, ok := header.(interface {
+		LeiosAnnouncement() (lcommon.Blake2b256, uint64, bool)
+	})
+	if !ok {
+		return event.Event{}, false
+	}
+	ebHash, ebSize, ok := announcer.LeiosAnnouncement()
+	if !ok {
+		return event.Event{}, false
+	}
+	return event.NewEvent(
+		ChainHeaderEventType,
+		ChainHeaderAnnouncementEvent{
+			Slot:   header.SlotNumber(),
+			RbHash: lcommon.NewBlake2b256(headerHash.Bytes()),
+			EbHash: ebHash,
+			EbSize: ebSize,
+			Seq:    seq,
+		},
+	), true
+}
+
+// headerInvalidationEvent builds the counterpart to leiosAnnouncementEvent:
+// every announcement above point describes a ranking block that is no longer
+// on our chain.
+func headerInvalidationEvent(
+	point ocommon.Point,
+	reason string,
+	seq uint64,
+) event.Event {
+	return event.NewEvent(
+		ChainHeaderEventType,
+		ChainHeaderInvalidationEvent{
+			Point:  point,
+			Reason: reason,
+			Seq:    seq,
+		},
+	)
+}
+
+// nextHeaderSeqLocked stamps the next chain-mutation sequence number. Callers
+// must hold c.mutex, so the number orders mutations exactly as the sequencer
+// orders the events they produce. It starts at 1: zero means "unsequenced" to
+// consumers.
+func (c *Chain) nextHeaderSeqLocked() uint64 {
+	c.headerSeq++
+	return c.headerSeq
 }
 
 func (c *Chain) AddBlock(
@@ -1429,6 +1515,18 @@ func (c *Chain) rollbackLocked(
 	c.notifyWaitingIterators()
 	// Build events for caller to publish after locks are released
 	var pendingEvents []event.Event
+	// Emitted even when only queued headers were dropped: a header that
+	// never became a block still published an announcement, and the
+	// ChainRollbackEvent below is deliberately block-only.
+	rollbackSeq := c.nextHeaderSeqLocked()
+	pendingEvents = append(
+		pendingEvents,
+		headerInvalidationEvent(
+			point,
+			HeaderInvalidationRollback,
+			rollbackSeq,
+		),
+	)
 	if len(rolledBackBlocks) > 0 {
 		// Rollback event - only emit when blocks were actually removed
 		pendingEvents = append(
@@ -1438,6 +1536,7 @@ func (c *Chain) rollbackLocked(
 				ChainRollbackEvent{
 					Point:            point,
 					RolledBackBlocks: rolledBackBlocks,
+					Seq:              rollbackSeq,
 				},
 			),
 		)
@@ -1482,7 +1581,19 @@ func (c *Chain) ClearHeaders() {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	hadHeaders := len(c.headers) > 0
 	c.headers = c.headers[:0]
+	// Discarded headers never become blocks, so any announcement they
+	// carried is void, and no rollback is published for them because no
+	// block was ever added. Everything at or below the block tip survives;
+	// the queue held only what was above it.
+	if hadHeaders {
+		c.queueDeferredEventLocked(headerInvalidationEvent(
+			c.currentTip.Point,
+			HeaderInvalidationQueueCleared,
+			c.nextHeaderSeqLocked(),
+		))
+	}
 }
 
 // RecentPoints returns up to count recent chain points in descending

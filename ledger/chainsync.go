@@ -239,6 +239,13 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 	// node. See pendingPublishes.
 	var pending pendingPublishes
 	defer pending.flush()
+	// Every header-queue mutation below (admit, clear, fork replay,
+	// rollback) enqueues its chain.header event on the chain-level
+	// sequencer under c.mutex, which is what keeps announcements ordered
+	// against the invalidations that void them. Registering the drain here
+	// -- it is idempotent per chain -- means no individual mutation site
+	// has to remember to. See chain.Chain.PublishPendingChainUpdates.
+	pending.drainChain(ls.chain)
 	e, ok := evt.Data.(ChainsyncEvent)
 	if !ok {
 		ls.chainsyncMutex.Lock()
@@ -784,6 +791,11 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 	// way. See pendingPublishes.
 	var pending pendingPublishes
 	defer pending.flush()
+	// Header-queue mutations enqueue their chain.header events on the
+	// chain-level sequencer; register the drain so they are published once
+	// the mutex is released. Idempotent per chain, and a missed drain only
+	// delays delivery -- the sequencer is FIFO, so order is never lost.
+	pending.drainChain(ls.chain)
 	ls.chainsyncBlockfetchMutex.Lock()
 	defer ls.chainsyncBlockfetchMutex.Unlock()
 	e, ok := evt.Data.(BlockfetchEvent)
@@ -882,6 +894,11 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 	// after the unlock. See pendingPublishes.
 	var pending pendingPublishes
 	defer pending.flush()
+	// Header-queue mutations enqueue their chain.header events on the
+	// chain-level sequencer; register the drain so they are published once
+	// the mutex is released. Idempotent per chain, and a missed drain only
+	// delays delivery -- the sequencer is FIFO, so order is never lost.
+	pending.drainChain(ls.chain)
 	var replayConnId ouroboros.ConnectionId
 	effectiveConnId := e.NewConnectionId
 	var effectiveObservedTip ochainsync.Tip
@@ -2028,6 +2045,11 @@ func (ls *LedgerState) replayBufferedHeadersAsync(
 		defer ls.replayWG.Done()
 		var pending pendingPublishes
 		defer pending.flush()
+		// Header-queue mutations enqueue their chain.header events on the
+		// chain-level sequencer; register the drain so they are published once
+		// the mutex is released. Idempotent per chain, and a missed drain only
+		// delays delivery -- the sequencer is FIFO, so order is never lost.
+		pending.drainChain(ls.chain)
 		ls.chainsyncMutex.Lock()
 		defer ls.chainsyncMutex.Unlock()
 		// Re-check after acquiring the mutex in case Close started
@@ -2982,6 +3004,11 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 ) LocalRollbackRecoveryResult {
 	var pending pendingPublishes
 	defer pending.flush()
+	// Header-queue mutations enqueue their chain.header events on the
+	// chain-level sequencer; register the drain so they are published once
+	// the mutex is released. Idempotent per chain, and a missed drain only
+	// delays delivery -- the sequencer is FIFO, so order is never lost.
+	pending.drainChain(ls.chain)
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
 
@@ -3124,6 +3151,12 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	e ChainsyncEvent,
 	pending *pendingPublishes,
 ) error {
+	// Admitting, discarding or fork-replaying a header enqueues the
+	// matching chain.header event on the chain-level sequencer under
+	// c.mutex; register the drain so it is published once chainsyncMutex is
+	// released. Idempotent per chain. See
+	// chain.Chain.PublishPendingChainUpdates.
+	pending.drainChain(ls.chain)
 	// Detect connection switch so pipeline ownership is handed off
 	// even when the first post-switch event is a header rather than
 	// a rollback. Without this, headers from a newly-selected active
@@ -3351,12 +3384,6 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		e,
 		headerTrusted,
 	)
-	// Surface a Leios endorser-block announcement as soon as its ranking
-	// block's header is admitted. Applying an EB-announcing ranking block
-	// waits on fetching that same endorser block, so an apply-driven signal
-	// arrives well after the Leios vote window (measured from the announcing
-	// ranking block's slot) has already closed.
-	ls.publishLeiosHeaderAnnouncement(e, pending)
 	// Wait for additional block headers before fetching block bodies if we're
 	// far enough out from upstream tip
 	// Use security window as slot threshold if available
@@ -3586,54 +3613,6 @@ func (ls *LedgerState) recordAdmittedHeaderFrontier(
 	}
 	ls.advanceUpstreamTipSlot(admittedPoint.Slot)
 	ls.publishAdmittedUpstreamTarget(e)
-}
-
-// publishLeiosHeaderAnnouncement emits chain.ChainHeaderAnnouncementEvent for a
-// just-admitted ranking-block header that announces a Leios endorser block.
-//
-// This is deliberately a header-arrival signal. chain.ChainUpdateEventType is
-// published only after a block commits, and committing an EB-announcing ranking
-// block blocks on fetching and applying the announced endorser block, so it
-// cannot arrive inside the vote window. Nothing here validates the ranking
-// block body -- consumers must treat the announcement as provisional and handle
-// the header later being rolled back.
-//
-// Headers with no announcement publish nothing, so nodes not running Leios pay
-// only a type assertion per header. When no subscriber is registered the
-// publish is a no-op.
-func (ls *LedgerState) publishLeiosHeaderAnnouncement(
-	e ChainsyncEvent,
-	pending *pendingPublishes,
-) {
-	if ls.config.EventBus == nil || e.BlockHeader == nil {
-		return
-	}
-	announcer, ok := e.BlockHeader.(interface {
-		LeiosAnnouncement() (lcommon.Blake2b256, uint64, bool)
-	})
-	if !ok {
-		return
-	}
-	ebHash, ebSize, ok := announcer.LeiosAnnouncement()
-	if !ok {
-		return
-	}
-	headerHash := e.BlockHeader.Hash()
-	// Queued rather than published directly: this runs with
-	// ls.chainsyncMutex held. See pendingPublishes.
-	pending.add(
-		ls.config.EventBus,
-		chain.ChainHeaderAnnouncementEventType,
-		event.NewEvent(
-			chain.ChainHeaderAnnouncementEventType,
-			chain.ChainHeaderAnnouncementEvent{
-				Slot:   e.BlockHeader.SlotNumber(),
-				RbHash: lcommon.NewBlake2b256(headerHash.Bytes()),
-				EbHash: ebHash,
-				EbSize: ebSize,
-			},
-		),
-	)
 }
 
 func (ls *LedgerState) shouldVerifyChainsyncHeaderCrypto(slot uint64) bool {
