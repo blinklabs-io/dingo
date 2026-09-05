@@ -3943,8 +3943,11 @@ func isSyntheticV2CostModel(
 	if !ok || !slices.Equal(currentV2, eras.DefaultPlutusV2CostModel) {
 		return false
 	}
-	_, hadPreviousV2 := extractRawCostModels(previous)[1]
-	return !hadPreviousV2
+	previousV2, hadPreviousV2 := extractRawCostModels(previous)[1]
+	// After the Babbage transition, subsequent eras carry the fallback model
+	// forward. It remains synthetic when the previous value is that same
+	// fallback; a different previous model proves that governance supplied it.
+	return !hadPreviousV2 || slices.Equal(previousV2, eras.DefaultPlutusV2CostModel)
 }
 
 // IsAtTip reports whether the node has caught up to the chain tip at least
