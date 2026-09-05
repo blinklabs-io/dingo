@@ -930,7 +930,7 @@ again.
 | `constitution` | `id`, `anchor_url`, `anchor_hash`, `policy_hash`, `added_slot`, `deleted_slot` | PK `id`; unique `added_slot`; index `deleted_slot` | Current or historical constitution references. |
 | `committee_member` | `id`, `cold_credential_tag`, `cold_cred_hash`, `expires_epoch`, `term_start_slot`, `term_start_slot_set`, `added_slot`, `deleted_slot` | PK `id`; unique `(cold_credential_tag, cold_cred_hash, added_slot)`; indexes `added_slot`, `deleted_slot` | Snapshot-imported and enacted committee state. Credential tag 0 is a key hash and 1 is a script hash. `term_start_slot` bounds the authorization and resignation certificates that apply to this membership term; `term_start_slot_set` preserves an explicit slot-zero start. Re-election creates a new historical row; soft deletion and rollback match the full tagged identity and mutation slot. |
 | `committee_quorum` | `id`, `quorum`, `added_slot` | PK `id`; unique `added_slot` | Enacted committee quorum threshold. `quorum` is stored through `types.Rat`. |
-| `auth_committee_hot` | `id`, `cold_credential_tag`, `cold_credential`, `hot_credential_tag`, `host_credential`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold and hot identities, `certificate_id`, `added_slot` | Committee hot-credential authorization certificate. The SQL column is `host_credential` for backward compatibility. Resolution selects the latest authorization no earlier than the active member's `term_start_slot` and suppresses it after a resignation in that term. |
+| `auth_committee_hot` | `id`, `cold_credential_tag`, `cold_credential`, `hot_credential_tag`, `host_credential`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold and hot identities, `certificate_id`, `added_slot` | Committee hot-credential authorization certificate. The SQL column is `host_credential` for backward compatibility. Resolution selects the latest authorization no earlier than the active member's `term_start_slot` and suppresses it after a resignation in that term. Superseded rows older than the rollback window are pruned on write; see Committee Hot-Key Authorization Retention. |
 | `resign_committee_cold` | `id`, `cold_credential_tag`, `cold_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold identity, `certificate_id`, `added_slot` | Committee cold-credential resignation certificate. A resignation is authoritative even when no earlier authorization row exists and is permanent for that membership term. Removal followed by re-election starts a new term; historical rows remain available for rollback. |
 
 ### Off-chain Metadata Cache
@@ -1131,6 +1131,50 @@ therefore re-crossed on the selected chain, where `SavePoolStakeSnapshots`
 replaces that epoch's rows and `SaveEpochSummary` upserts the summary.
 `DeleteEpochSummariesAfterEpoch` and `DeletePoolStakeSnapshotsAfterEpoch` exist
 on `metadata.MetadataStore` for that case but currently have no callers.
+
+#### Committee Hot-Key Authorization Retention
+
+`auth_committee_hot` records one row per `AuthCommitteeHot` certificate and
+never overwrites, but only the newest authorization per cold credential is ever
+read back (`GetActiveCommitteeMembers`, `GetCommitteeMember`). On preprod at
+slot ~79.48M the table held 648,758 rows for 35 distinct cold credentials. The
+certificate write path therefore prunes superseded rows for the credential it
+just wrote, in batches bounded per certificate so no single applied block turns
+into a large delete.
+
+Retention rule, applied per `(cold_credential_tag, cold_credential)`: keep every
+row with `added_slot` above the horizon, plus the single newest row at or below
+it, where the horizon is the applied block's slot minus the rollback window.
+The window is `sqlstore.DefaultCommitteeAuthRetentionSlots` (129600 slots = 3k/f
+for k=2160, f=0.05 — the Shelley stability window, and the same immutability
+bound `internal/historyexpiry` uses to expire block history), overridable with
+`sqlstore.Config.CommitteeAuthRetentionSlots`. Retention is per credential, not
+a global row cap, and it only ever deletes below that window.
+
+Rollback safety: `DeleteCertificatesAfterSlot` deletes `auth_committee_hot` rows
+with `added_slot` above the rollback target S, and Ouroboros bounds S at or
+above the immutable tip, so the horizon is always at or below S. If a row exists
+between the horizon and S it is retained (everything above the horizon is) and
+dominates every older row; if none does, the correct answer is the one
+pre-horizon row the rule retains. The post-rollback query result is therefore
+identical whether or not pruning ran, and a credential's last row is never
+removed, so a credential that has an authorization can never become one that has
+none.
+
+The partition is the tagged credential, so a script-hash credential never prunes
+a key-hash credential sharing its 28 bytes. `committee_member` is not pruned:
+`CommitteeStateAvailable` reads it including soft-deleted rows to tell an
+authoritatively empty committee from an unpopulated one, and pruning it would
+destroy that distinction.
+
+`resign_committee_cold`, `update_drep`, `registration_drep`, and
+`pool_registration` keep full history and are not pruned. The same rule would be
+sound for `resign_committee_cold` (its readers take `MAX(added_slot)` per
+credential), but it grows at most once per member per term rather than per
+re-authorization, so it has no observed growth problem. The DRep and pool
+tables are read by first-seen/`MIN(added_slot)` aggregates as well as latest-row
+lookups, so a latest-plus-window rule would change their answers and they need
+a different analysis.
 
 ## Blob Store Reference
 
