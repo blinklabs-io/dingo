@@ -186,6 +186,17 @@ var ErrRollbackExceedsMithrilBoundary = errors.New(
 	"rollback exceeds Mithril trust boundary",
 )
 
+// ErrChainTruncatedLedgerRollbackFailed reports the one rollback outcome that
+// left the node's two halves disagreeing: the primary chain truncation
+// committed and the ledger rollback that follows it did not, so the ledger tip
+// names a block the chain has deleted. It is deliberately distinct from the
+// refusal errors above, which mean no state changed and a re-intersect is
+// enough; recovering from this one the same way resumes from the stale ledger
+// tip. See LedgerState.reportFailedLedgerRollbackAfterTruncation.
+var ErrChainTruncatedLedgerRollbackFailed = errors.New(
+	"primary chain truncated but ledger rollback failed",
+)
+
 type peerHeaderRecord struct {
 	// event carries only the metadata needed to reconstruct a ChainsyncEvent.
 	// Production records leave BlockHeader nil and decode headerCbor only when
