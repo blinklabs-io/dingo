@@ -88,10 +88,16 @@ func SetSyntheticV2CostModelClearedEpoch(
 	return nil
 }
 
-// RecomputeSyntheticV2CostModelMarkerAfterTruncate restores
-// SyntheticV2CostModelSyncKey when a rollback or truncate to rollbackSlot
-// crosses back before the epoch SyntheticV2CostModelClearedEpochSyncKey
-// recorded.
+// RecomputeSyntheticV2CostModelMarkerAfterTruncate clears both
+// SyntheticV2CostModelSyncKey and SyntheticV2CostModelClearedEpochSyncKey
+// when a rollback or truncate to rollbackSlot crosses back before the epoch
+// SyntheticV2CostModelClearedEpochSyncKey recorded, leaving the boolean
+// marker absent rather than forcing it to "true": an absent marker falls
+// back to comparing the live PlutusV2 cost model directly against the
+// known synthetic default (ledger.resolveSyntheticV2CostModel), the same
+// mechanism a database that predates these markers entirely already relies
+// on, which correctly handles a chain whose real model has been in force
+// since before the confirming epoch this function is undoing.
 //
 // Without this, a rollback past the enactment or protocol-parameter update
 // that confirmed real PlutusV2 cost-model data restores the fabricated
@@ -138,8 +144,17 @@ func RecomputeSyntheticV2CostModelMarkerAfterTruncate(
 	}
 	// Rolling back to before the confirming epoch: the confirmation no
 	// longer applies to the surviving chain (which may resync onto a fork
-	// that never re-enacts it), so undo both the epoch marker and the
-	// boolean it drove.
+	// that never re-enacts it), so undo both markers -- deleting the
+	// boolean rather than forcing it to "true". Forcing "true" would assert
+	// synthetic even for a chain whose real model has been in force since
+	// long before the confirming epoch (reachable on a database that
+	// predates these markers: the first later real update still records a
+	// clearedEpoch, even though the model was already real). Deleting
+	// instead defers to the same absent-marker fallback
+	// ledger.resolveSyntheticV2CostModel already uses for exactly that
+	// case: it re-derives from the live PlutusV2 cost model itself,
+	// correctly yielding "true" for the fabricated default and "false" for
+	// any other value, real or not. See blinklabs-io/dingo#3825's PR review.
 	if err := d.DeleteSyncState(
 		SyntheticV2CostModelClearedEpochSyncKey, txn,
 	); err != nil {
@@ -148,11 +163,11 @@ func RecomputeSyntheticV2CostModelMarkerAfterTruncate(
 			err,
 		)
 	}
-	if err := d.SetSyncState(
-		SyntheticV2CostModelSyncKey, "true", txn,
+	if err := d.DeleteSyncState(
+		SyntheticV2CostModelSyncKey, txn,
 	); err != nil {
 		return fmt.Errorf(
-			"restore synthetic PlutusV2 cost model marker: %w",
+			"clear synthetic PlutusV2 cost model marker: %w",
 			err,
 		)
 	}

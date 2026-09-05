@@ -64,8 +64,11 @@ func TestRecomputeSyntheticV2CostModelMarkerAfterTruncate_UndoesClearWhenRollbac
 
 	value, err := db.GetSyncState(SyntheticV2CostModelSyncKey, nil)
 	require.NoError(t, err)
-	require.Equal(t, "true", value,
-		"the boolean marker must be restored to synthetic")
+	require.Empty(t, value,
+		"the boolean marker must be cleared (not forced to \"true\"), so a"+
+			" later read falls back to comparing the live PlutusV2 cost"+
+			" model directly -- correct even for a chain whose real model"+
+			" predates this marker entirely")
 
 	_, cleared, err := SyntheticV2CostModelClearedEpoch(db, nil)
 	require.NoError(t, err)

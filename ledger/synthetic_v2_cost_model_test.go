@@ -437,6 +437,63 @@ func TestQueryShelleyCurrentProtocolParams_IncludesRealV2CostModel(
 	)
 }
 
+// TestGetCurrentPParamsForReporting_OmitsSyntheticV2CostModel covers
+// blinklabs-io/dingo#3825's PR review (wolf31o2): withoutSyntheticV2CostModel
+// originally had a single call site (queries.go's LocalStateQuery handler),
+// while every other interface reporting current parameters --
+// api/blockfrost, api/utxorpc, api/mesh -- read GetCurrentPParams()
+// unfiltered and would still report a synthetic PlutusV2 entry a real
+// cardano-node never has. GetCurrentPParamsForReporting is the shared
+// accessor all of those now use; this proves its filtering behavior
+// directly, independent of which specific API surface calls it.
+func TestGetCurrentPParamsForReporting_OmitsSyntheticV2CostModel(t *testing.T) {
+	ls := newPoolDistr2Ledger(t, newTestDB(t))
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentPParams = conwayPParamsWithCostModels(map[uint][]int64{
+		0: {1, 1, 1},
+		1: eras.DefaultPlutusV2CostModel,
+		2: {3, 3, 3},
+	})
+	ls.syntheticV2CostModel = true
+	ls.publishSnapshotsLocked()
+
+	reported := ls.GetCurrentPParamsForReporting()
+	pp, ok := reported.(*conway.ConwayProtocolParameters)
+	require.True(t, ok)
+	assert.NotContains(t, pp.CostModels, uint(1),
+		"the reporting accessor must omit the synthetic PlutusV2 cost model,"+
+			" matching every other reporting surface")
+
+	// GetCurrentPParams (used by internal validation, block-building, Leios
+	// committee parameters, and governance-action decoding) must be
+	// completely unaffected.
+	internal, ok := ls.GetCurrentPParams().(*conway.ConwayProtocolParameters)
+	require.True(t, ok)
+	assert.Contains(t, internal.CostModels, uint(1),
+		"GetCurrentPParams must keep the default for internal validation")
+}
+
+// TestGetCurrentPParamsForReporting_IncludesRealV2CostModel covers the other
+// half: once the synthetic marker is cleared, the reporting accessor must
+// return the same value GetCurrentPParams does.
+func TestGetCurrentPParamsForReporting_IncludesRealV2CostModel(t *testing.T) {
+	ls := newPoolDistr2Ledger(t, newTestDB(t))
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentPParams = conwayPParamsWithCostModels(map[uint][]int64{
+		0: {1, 1, 1},
+		1: eras.DefaultPlutusV2CostModel,
+		2: {3, 3, 3},
+	})
+	ls.syntheticV2CostModel = false
+	ls.publishSnapshotsLocked()
+
+	reported := ls.GetCurrentPParamsForReporting()
+	pp, ok := reported.(*conway.ConwayProtocolParameters)
+	require.True(t, ok)
+	assert.Contains(t, pp.CostModels, uint(1))
+	assert.Equal(t, eras.DefaultPlutusV2CostModel, pp.CostModels[1])
+}
+
 // TestSyntheticV2CostModelPersistence_RoundTripsAcrossRestart covers
 // blinklabs-io/dingo#3825's PR review: LedgerState.syntheticV2CostModel must
 // survive a restart via persistSyntheticV2CostModel/loadSyntheticV2CostModel,
@@ -562,6 +619,62 @@ func TestMarkRealV2CostModelObserved_KeepsEarliestConfirmationAcrossMultipleUpda
 	require.Equal(t, "false", value,
 		"the surviving chain still has real data from the first update"+
 			" and must not be reported as synthetic")
+}
+
+// TestRollbackRestore_LeavesRealPreExistingModelCorrectlyResolvedAsNotSynthetic
+// covers blinklabs-io/dingo#3825's PR review (wolf31o2): on a database that
+// predates these markers entirely, a real PlutusV2 cost model already in
+// force (differing from the known synthetic default) can still pick up a
+// clearedEpoch marker from the first update tracked AFTER these markers
+// existed, even though the model was already real long before that epoch.
+// A rollback crossing that epoch must not force the marker to "true" --
+// doing so would misreport a real, already-in-force model as synthetic.
+// Deleting it instead (RecomputeSyntheticV2CostModelMarkerAfterTruncate)
+// lets resolveSyntheticV2CostModel's absent-marker fallback re-derive the
+// correct answer from the live value.
+func TestRollbackRestore_LeavesRealPreExistingModelCorrectlyResolvedAsNotSynthetic(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+	// differs from eras.DefaultPlutusV2CostModel
+	realNonDefaultV2 := []int64{1, 2, 3}
+
+	// A persisted epoch table is needed for EpochBySlot to resolve the
+	// rollback slot below (epochs 0-9, 100 slots each).
+	for i := range uint64(10) {
+		require.NoError(t, db.SetEpoch(
+			i*100, i, nil, nil, nil, nil, 1, 1000, 100, nil,
+		))
+	}
+
+	// A clearedEpoch marker exists (from the first tracked update after
+	// these markers were introduced), even though the real model has
+	// actually been in force since before that epoch.
+	require.NoError(t, database.SetSyntheticV2CostModelClearedEpoch(db, nil, 5))
+	require.NoError(
+		t,
+		db.SetSyncState(database.SyntheticV2CostModelSyncKey, "false", nil),
+	)
+
+	// Roll back to before epoch 5.
+	require.NoError(
+		t,
+		database.RecomputeSyntheticV2CostModelMarkerAfterTruncate(db, nil, 0),
+	)
+
+	// The boolean marker must be absent, not forced to "true".
+	value, err := db.GetSyncState(database.SyntheticV2CostModelSyncKey, nil)
+	require.NoError(t, err)
+	require.Empty(t, value)
+
+	// A fresh load against the surviving (real, non-default) pparams value
+	// must resolve to "not synthetic", not be misreported as synthetic.
+	pp := &conway.ConwayProtocolParameters{
+		CostModels: map[uint][]int64{1: realNonDefaultV2},
+	}
+	assert.False(t, resolveSyntheticV2CostModel(value, pp),
+		"a real, non-default model already in force must not be reported"+
+			" as synthetic just because a later marker briefly existed")
 }
 
 // TestTransitionToEraFrom_PersistsSyntheticMarkerInSameTransactionAsPParams
