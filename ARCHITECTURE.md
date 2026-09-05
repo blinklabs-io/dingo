@@ -22,6 +22,10 @@ continues after that rewrite drains; direct close calls join the same cleanup.
 Live restore and truncate classify that deadline as an unconfirmed storage
 drain and request a supervised restart; they never resolve a replacement store
 against the same data directory while the prior close may still own it.
+`LedgerState.Close` retains the first close result until all later callers have
+observed it, so the normal shutdown triggered by that cancellation cannot
+mistake an earlier unconfirmed drain for a successful second close and close
+the database underneath the outstanding worker.
 API providers are resolved for lifecycle only because node composition has no
 in-process consumer of their concrete server values. Each API provider's
 TLS/authentication policy goes through a merged-config handoff, not a

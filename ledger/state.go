@@ -977,6 +977,9 @@ type LedgerState struct {
 	deferredHeaderValidationMu sync.Mutex
 	checkpointWrittenForEpoch  bool
 	closed                     atomic.Bool
+	closeMu                    sync.Mutex
+	closeDone                  chan struct{}
+	closeErr                   error
 	inRecovery                 bool // guards against recursive recovery in SubmitAsyncDBTxn
 	lastAtTipRecovery          *atTipRecoveryAttempt
 	// At-tip recovery non-convergence tracking (issue #2939). A descending
@@ -2085,6 +2088,7 @@ var (
 	CloseProcessBlocksDrainTimeout = 20 * time.Second
 	CloseBlockPipelineDrainTimeout = 10 * time.Second
 	CloseBlockfetchDrainTimeout    = 10 * time.Second
+	CloseResultReplayTimeout       = 10 * time.Second
 	// BlockPipelineRollbackDrainTimeout bounds how long an asynchronous
 	// rollback (chainsync fork resolution or a peer-reported rollback --
 	// see rollbackChainAndStateDeferred) waits for ls.blockPipeline to drain
@@ -2096,14 +2100,49 @@ var (
 	BlockPipelineRollbackDrainTimeout = 5 * time.Second
 )
 
-func (ls *LedgerState) Close() error {
+func (ls *LedgerState) Close() (retErr error) {
+	// Close can be called once by the live lifecycle operation and again by
+	// the node's normal shutdown after that operation cancels the node. Keep
+	// the first result visible to every caller: returning nil from the second
+	// call would make shutdown close storage after the first call reported an
+	// unconfirmed drain.
+	ls.closeMu.Lock()
+	if ls.closeDone != nil {
+		done := ls.closeDone
+		ls.closeMu.Unlock()
+		select {
+		case <-done:
+		case <-time.After(CloseResultReplayTimeout):
+			return errors.New("previous ledger state close still in progress")
+		}
+		ls.closeMu.Lock()
+		retErr = ls.closeErr
+		ls.closeMu.Unlock()
+		return retErr
+	}
+	ls.closeDone = make(chan struct{})
+	done := ls.closeDone
+	if ls.closed.Load() {
+		// A few low-level tests mark closed directly to model a lifecycle
+		// state that has already begun closing. There is no close result to
+		// replay in that case, so publish the completed no-op explicitly.
+		close(done)
+		ls.closeMu.Unlock()
+		return nil
+	}
+	ls.closed.Store(true)
+	ls.closeMu.Unlock()
+	defer func() {
+		ls.closeMu.Lock()
+		ls.closeErr = retErr
+		close(done)
+		ls.closeMu.Unlock()
+	}()
+
 	// Release any ledger.tx publish parked on a full ordered lane before
 	// waiting on the goroutines that might be doing the publishing.
 	if ls.publishCancel != nil {
 		ls.publishCancel()
-	}
-	if !ls.closed.CompareAndSwap(false, true) {
-		return nil
 	}
 
 	// Accumulates errors from the two bounded waits below (rollback
