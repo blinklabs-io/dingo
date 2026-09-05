@@ -89,6 +89,7 @@ var logURIConfigFields = []string{
 // recursively and classified per key rather than as a whole.
 var logProviderConfigFields = []string{
 	"Plugins.API.Blockfrost.Config",
+	"Plugins.API.Kupo.Config",
 	"Plugins.API.Mesh.Config",
 	"Plugins.API.Utxorpc.Config",
 	"Plugins.Mempool.Config",
@@ -217,6 +218,7 @@ var logPlainConfigFields = []string{
 	"PledgeLeverage",
 	"PledgeLeverageEnabled",
 	"Plugins.API.Blockfrost.Provider",
+	"Plugins.API.Kupo.Provider",
 	"Plugins.API.Mesh.Provider",
 	"Plugins.API.Utxorpc.Provider",
 	"Plugins.Mempool.Provider",
@@ -293,7 +295,7 @@ var providerConfigPlainKeys = []string{
 	// mempool
 	"capacity", "evictionwatermark", "rejectionwatermark",
 	"revalidationdeltacap",
-	// api/{blockfrost,mesh,utxorpc} policy keys inside the tls and auth
+	// api/{blockfrost,kupo,mesh,utxorpc} policy keys inside the tls and auth
 	// sections
 	"mode", "certfilepath", "keyfilepath", "tokenfilepath",
 }

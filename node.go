@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/api/blockfrost"
+	"github.com/blinklabs-io/dingo/api/kupo"
 	"github.com/blinklabs-io/dingo/api/mesh"
 	"github.com/blinklabs-io/dingo/api/utxorpc"
 	"github.com/blinklabs-io/dingo/bark"
@@ -266,7 +267,7 @@ func New(cfg Config) (*Node, error) {
 // deliberately does not feed cfg.apiConfig.TLS (the shared api.tls default
 // every provider inherits from): UTxORPC was the only provider these root
 // fields ever configured TLS for, and promoting them to a shared default
-// would silently switch Blockfrost/Mesh from plaintext to TLS on upgrade
+// would silently switch Blockfrost/Kupo/Mesh from plaintext to TLS on upgrade
 // for any deployment that set them, breaking existing plaintext clients.
 // See ARCHITECTURE.md's "API security" section for this compatibility
 // decision. Returns the zero TLSPolicy (no effect on the merge) unless
@@ -320,6 +321,7 @@ func (c *Config) apiProviderConfig(
 // cfg.TLS.Resolve/cfg.Auth.Resolve call, which use the identical path.
 var apiProviderConfigPath = map[plugin.Capability]string{
 	plugin.CapabilityAPIBlockfrost: "plugins.api.blockfrost.config",
+	plugin.CapabilityAPIKupo:       "plugins.api.kupo.config",
 	plugin.CapabilityAPIMesh:       "plugins.api.mesh.config",
 	plugin.CapabilityAPIUtxorpc:    "plugins.api.utxorpc.config",
 }
@@ -380,6 +382,7 @@ func (n *Node) apiPluginSelection(
 	if !ok {
 		defaultPorts := map[plugin.Capability]uint{
 			plugin.CapabilityAPIBlockfrost: 3000,
+			plugin.CapabilityAPIKupo:       0,
 			plugin.CapabilityAPIMesh:       8080,
 			plugin.CapabilityAPIUtxorpc:    9090,
 		}
@@ -1588,6 +1591,35 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		started = append(
 			started,
 			stopPluginCapability(plugin.CapabilityAPIBlockfrost),
+		)
+	}
+
+	// Resolve Kupo API only in API mode with a non-zero configured port.
+	kupoSelection, kupoPort, err := n.apiPluginSelection(
+		plugin.CapabilityAPIKupo,
+	)
+	if err != nil {
+		return err
+	}
+	if n.config.storageMode.IsAPI() && kupoPort > 0 {
+		adapter, err := kupo.NewNodeAdapter(n.ledgerState)
+		if err != nil {
+			return fmt.Errorf("creating kupo node adapter: %w", err)
+		}
+		err = plugin.ResolveProvider(
+			n.ctx, n.pluginHost, plugin.CapabilityAPIKupo,
+			kupoSelection.Provider, kupoSelection.Config,
+			kupo.ProviderDependencies{
+				Node: adapter, Logger: n.config.logger, Host: n.config.bindAddr,
+				CORSAllowedOrigins: n.config.corsAllowedOrigins,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("resolve kupo API: %w", err)
+		}
+		started = append(
+			started,
+			stopPluginCapability(plugin.CapabilityAPIKupo),
 		)
 	}
 

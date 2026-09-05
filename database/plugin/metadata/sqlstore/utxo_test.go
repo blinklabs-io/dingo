@@ -15,11 +15,13 @@
 package sqlstore
 
 import (
+	"bytes"
 	"math"
 	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -27,6 +29,310 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
+
+func TestGetUtxosWithHistoryFiltersAndHydratesLifecycle(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+
+	createdHashes := [][]byte{
+		bytes.Repeat([]byte{0x01}, 32),
+		bytes.Repeat([]byte{0x02}, 32),
+		bytes.Repeat([]byte{0x03}, 32),
+	}
+	createdBlockHashes := [][]byte{
+		bytes.Repeat([]byte{0xa1}, 32),
+		bytes.Repeat([]byte{0xa2}, 32),
+		bytes.Repeat([]byte{0xa3}, 32),
+	}
+	spentHashes := [][]byte{
+		bytes.Repeat([]byte{0x51}, 32),
+		bytes.Repeat([]byte{0x61}, 32),
+	}
+	spentBlockHashes := [][]byte{
+		bytes.Repeat([]byte{0xb1}, 32),
+		bytes.Repeat([]byte{0xb2}, 32),
+	}
+	for i := range createdHashes {
+		_, err := store.writeDB.Exec(`
+INSERT INTO "transaction" (
+    id, hash, block_hash, slot, block_index, type, fee, collateral_fee,
+    ttl, valid
+) VALUES (?, ?, ?, ?, ?, 0, '0', '0', '0', TRUE)`,
+			i+1,
+			createdHashes[i],
+			createdBlockHashes[i],
+			(i+1)*10,
+			i+2,
+		)
+		require.NoError(t, err)
+	}
+	for i := range spentHashes {
+		_, err := store.writeDB.Exec(`
+INSERT INTO "transaction" (
+    id, hash, block_hash, slot, block_index, type, fee, collateral_fee,
+    ttl, valid
+) VALUES (?, ?, ?, ?, 0, 0, '0', '0', '0', TRUE)`,
+			i+11,
+			spentHashes[i],
+			spentBlockHashes[i],
+			(i+5)*10,
+		)
+		require.NoError(t, err)
+	}
+	_, err := store.writeDB.Exec(`
+INSERT INTO transaction_metadata_label (
+    transaction_id, label, slot, cbor_value, json_value
+) VALUES (?, ?, ?, ?, ?)`, 2, "42", 20, []byte{0x01}, "1")
+	require.NoError(t, err)
+
+	paymentA := bytes.Repeat([]byte{0xca}, lcommon.AddressHashSize)
+	paymentB := bytes.Repeat([]byte{0xcb}, lcommon.AddressHashSize)
+	policyID := bytes.Repeat([]byte{0xda}, lcommon.AddressHashSize)
+	assetNames := [][]byte{[]byte("same"), []byte("same"), []byte("other")}
+	for i := range createdHashes {
+		transactionID := uint(i + 1)
+		row := &models.Utxo{
+			TransactionID: &transactionID,
+			TxId:          createdHashes[i],
+			PaymentKey:    paymentA,
+			AddedSlot:     uint64((i + 1) * 10),
+			Amount:        types.Uint64(1_000_000 + i),
+			OutputIdx:     uint32(i),
+			Assets: []models.Asset{{
+				Name:     assetNames[i],
+				PolicyId: policyID,
+				Amount:   types.Uint64(i + 1),
+			}},
+		}
+		if i == 2 {
+			row.PaymentKey = paymentB
+		}
+		if i > 0 {
+			row.SpentAtTxId = types.NullableHash(spentHashes[i-1])
+			row.DeletedSlot = uint64((i + 4) * 10)
+		}
+		require.NoError(t, store.CreateUtxo(nil, row))
+	}
+	// Snapshot-imported outputs have no producing transaction row. The
+	// historical query must retain their AddedSlot fallback and empty block
+	// hash.
+	require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
+		TxId:       bytes.Repeat([]byte{0x04}, 32),
+		PaymentKey: paymentB,
+		AddedSlot:  40,
+		Amount:     4_000_000,
+		OutputIdx:  3,
+	}))
+
+	all, err := store.GetUtxosWithHistory(
+		&models.UtxoHistoryQuery{MatchAllAddresses: true},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, all, 4)
+	require.Equal(t, []byte{0x01, 0x02, 0x03, 0x04}, []byte{
+		all[0].TxId[0], all[1].TxId[0], all[2].TxId[0], all[3].TxId[0],
+	})
+	require.Equal(t, uint64(10), all[0].TxSlot)
+	require.Equal(t, uint32(2), all[0].TxBlockIndex)
+	require.Equal(t, createdBlockHashes[0], all[0].CreatedBlockHash)
+	require.Empty(t, all[0].SpentBlockHash)
+	require.Len(t, all[0].Assets, 1)
+	require.Equal(t, spentBlockHashes[0], all[1].SpentBlockHash)
+	require.Equal(t, uint64(40), all[3].TxSlot)
+	require.Empty(t, all[3].CreatedBlockHash)
+
+	createdAfter, createdBefore := uint64(20), uint64(30)
+	createdWindow, err := store.GetUtxosWithHistory(
+		&models.UtxoHistoryQuery{
+			MatchAllAddresses: true,
+			CreatedAfter:      &createdAfter,
+			CreatedBefore:     &createdBefore,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []byte{0x02, 0x03}, []byte{
+		createdWindow[0].TxId[0], createdWindow[1].TxId[0],
+	})
+
+	spentAfter := uint64(51)
+	spent, err := store.GetUtxosWithHistory(
+		&models.UtxoHistoryQuery{
+			MatchAllAddresses: true,
+			SpentAfter:        &spentAfter,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, spent, 1)
+	require.Equal(t, byte(0x03), spent[0].TxId[0])
+
+	unspent, err := store.GetUtxosWithHistory(
+		&models.UtxoHistoryQuery{
+			MatchAllAddresses: true,
+			Status:            models.UtxoHistoryStatusUnspent,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []byte{0x01, 0x04}, []byte{
+		unspent[0].TxId[0], unspent[1].TxId[0],
+	})
+
+	byAddress, err := store.GetUtxosWithHistory(
+		&models.UtxoHistoryQuery{AddressPatterns: []models.UtxoAddressPattern{{
+			PaymentPart: paymentA,
+		}}},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, byAddress, 2)
+
+	byAsset, err := store.GetUtxosWithHistory(
+		&models.UtxoHistoryQuery{
+			MatchAllAddresses: true,
+			FilterByAsset:     true,
+			AssetPolicyID:     policyID,
+			AssetName:         []byte("same"),
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, byAsset, 2)
+
+	metadataLabel := uint64(42)
+	byMetadata, err := store.GetUtxosWithHistory(
+		&models.UtxoHistoryQuery{
+			MatchAllAddresses: true,
+			MetadataLabel:     &metadataLabel,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, byMetadata, 1)
+	require.Equal(t, createdHashes[1], byMetadata[0].TxId)
+
+	outputIndex := uint32(1)
+	byRef, err := store.GetUtxosWithHistory(
+		&models.UtxoHistoryQuery{
+			MatchAllAddresses: true,
+			TransactionID:     createdHashes[1],
+			OutputIndex:       &outputIndex,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, byRef, 1)
+	require.Equal(t, createdHashes[1], byRef[0].TxId)
+
+	descending, err := store.GetUtxosWithHistory(
+		&models.UtxoHistoryQuery{
+			MatchAllAddresses: true,
+			Descending:        true,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []byte{0x04, 0x03, 0x02, 0x01}, []byte{
+		descending[0].TxId[0],
+		descending[1].TxId[0],
+		descending[2].TxId[0],
+		descending[3].TxId[0],
+	})
+
+	ascendingPage, err := store.GetUtxosWithHistory(
+		&models.UtxoHistoryQuery{
+			MatchAllAddresses: true,
+			Limit:             2,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []byte{0x01, 0x02}, []byte{
+		ascendingPage[0].TxId[0], ascendingPage[1].TxId[0],
+	})
+	ascendingPage, err = store.GetUtxosWithHistory(
+		&models.UtxoHistoryQuery{
+			MatchAllAddresses: true,
+			After: &models.UtxoOrderingCursor{
+				Slot:       ascendingPage[1].TxSlot,
+				BlockIndex: ascendingPage[1].TxBlockIndex,
+				OutputIdx:  ascendingPage[1].OutputIdx,
+				TxId:       ascendingPage[1].TxId,
+			},
+			Limit: 2,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []byte{0x03, 0x04}, []byte{
+		ascendingPage[0].TxId[0], ascendingPage[1].TxId[0],
+	})
+
+	descendingPage, err := store.GetUtxosWithHistory(
+		&models.UtxoHistoryQuery{
+			MatchAllAddresses: true,
+			Descending:        true,
+			Limit:             2,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []byte{0x04, 0x03}, []byte{
+		descendingPage[0].TxId[0], descendingPage[1].TxId[0],
+	})
+	descendingPage, err = store.GetUtxosWithHistory(
+		&models.UtxoHistoryQuery{
+			MatchAllAddresses: true,
+			Descending:        true,
+			After: &models.UtxoOrderingCursor{
+				Slot:       descendingPage[1].TxSlot,
+				BlockIndex: descendingPage[1].TxBlockIndex,
+				OutputIdx:  descendingPage[1].OutputIdx,
+				TxId:       descendingPage[1].TxId,
+			},
+			Limit: 2,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []byte{0x02, 0x01}, []byte{
+		descendingPage[0].TxId[0], descendingPage[1].TxId[0],
+	})
+
+	producerID := uint(1)
+	require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
+		CollateralReturnForTxID: &producerID,
+		TxId:                    createdHashes[0],
+		PaymentKey:              paymentA,
+		AddedSlot:               10,
+		Amount:                  9_000_000,
+		OutputIdx:               9,
+	}))
+	collateralIndex := uint32(9)
+	collateralReturn, err := store.GetUtxosWithHistory(
+		&models.UtxoHistoryQuery{
+			MatchAllAddresses: true,
+			TransactionID:     createdHashes[0],
+			OutputIndex:       &collateralIndex,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, collateralReturn, 1)
+	require.Equal(t, uint64(10), collateralReturn[0].TxSlot)
+	require.Equal(t, uint32(2), collateralReturn[0].TxBlockIndex)
+	require.Equal(t, createdBlockHashes[0], collateralReturn[0].CreatedBlockHash)
+
+	_, err = store.GetUtxosWithHistory(nil, nil)
+	require.ErrorIs(t, err, models.ErrNilUtxoHistoryQuery)
+	_, err = store.GetUtxosWithHistory(&models.UtxoHistoryQuery{
+		MatchAllAddresses: true,
+		Status:            models.UtxoHistoryStatus(255),
+	}, nil)
+	require.ErrorIs(t, err, models.ErrInvalidUtxoHistoryStatus)
+}
 
 // TestDedupeUtxoIDs proves GetUtxosByRefs' input deduplication removes
 // repeated (Hash, Idx) pairs, including a repeat that would otherwise land

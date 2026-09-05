@@ -177,7 +177,7 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
-			// UTxORPC/Blockfrost/Mesh/Midnight bind only under API storage
+			// UTxORPC/Blockfrost/Kupo/Mesh/Midnight bind only under API storage
 			// mode; in core mode their ports never bind, so even an
 			// out-of-range or privileged value must not be rejected.
 			name: "core mode skips inactive API port validation",

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Package apiconfig defines the TLS and authentication configuration
-// surface shared by every built-in API provider (Blockfrost, Mesh,
+// surface shared by every built-in API provider (Blockfrost, Kupo, Mesh,
 // UTxORPC): a top-level `api.tls`/`api.auth` default policy that each
 // provider's own `plugins.api.<name>.config.tls`/`config.auth` can
 // override field by field. See ARCHITECTURE.md's "API security" section

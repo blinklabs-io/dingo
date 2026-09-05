@@ -335,26 +335,32 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		ls.publishReplayRecoveryNonConvergingResync(rewindPoint)
 	}
 	primaryChainRewound := false
-	if rewindPrimaryChain && !primaryChainAlreadyHeld {
-		if err := ls.rollbackPrimaryChainInSecurityParamWindows(
-			rewindPoint,
-		); err != nil {
-			return false, fmt.Errorf(
-				"rewind primary chain for replay recovery: %w",
+	transitionErr := ls.withDestructiveDatabaseTransition(func() error {
+		if rewindPrimaryChain && !primaryChainAlreadyHeld {
+			if err := ls.rollbackPrimaryChainInSecurityParamWindows(
+				rewindPoint,
+			); err != nil {
+				return fmt.Errorf(
+					"rewind primary chain for replay recovery: %w",
+					err,
+				)
+			}
+			primaryChainRewound = true
+		}
+		// The chain moves first while the rollback anchor is guaranteed to remain
+		// available. If metadata synchronization fails, the primary chain is still
+		// at a valid retained point and the standard divergence reconciler can
+		// finish rolling metadata back to its common ancestor.
+		if err := ls.rollback(rewindPoint); err != nil {
+			return fmt.Errorf(
+				"rollback ledger state for replay recovery: %w",
 				err,
 			)
 		}
-		primaryChainRewound = true
-	}
-	// The chain moves first while the rollback anchor is guaranteed to remain
-	// available. If metadata synchronization fails, the primary chain is still
-	// at a valid retained point and the standard divergence reconciler can
-	// finish rolling metadata back to its common ancestor.
-	if err := ls.rollback(rewindPoint); err != nil {
-		return false, fmt.Errorf(
-			"rollback ledger state for replay recovery: %w",
-			err,
-		)
+		return nil
+	})
+	if transitionErr != nil {
+		return false, transitionErr
 	}
 	// Arm only when the corrective primary-chain rewind actually happened and
 	// metadata now sits at that same point. A replay target ahead of the
@@ -642,20 +648,26 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 			validationErr.Cause,
 		)
 	}
-	if err := ls.rollbackPrimaryChainInSecurityParamWindows(rewindPoint); err != nil {
-		if errors.Is(err, chain.ErrRollbackPointNotOnChain) {
+	transitionErr := ls.withDestructiveDatabaseTransition(func() error {
+		if err := ls.rollbackPrimaryChainInSecurityParamWindows(rewindPoint); err != nil {
+			return fmt.Errorf(
+				"rewind primary chain after deterministic transaction validation failure: %w",
+				err,
+			)
+		}
+		if err := ls.rollback(rewindPoint); err != nil {
+			return fmt.Errorf(
+				"rollback ledger state after deterministic transaction validation failure: %w",
+				err,
+			)
+		}
+		return nil
+	})
+	if transitionErr != nil {
+		if errors.Is(transitionErr, chain.ErrRollbackPointNotOnChain) {
 			return true, nil
 		}
-		return false, fmt.Errorf(
-			"rewind primary chain after deterministic transaction validation failure: %w",
-			err,
-		)
-	}
-	if err := ls.rollback(rewindPoint); err != nil {
-		return false, fmt.Errorf(
-			"rollback ledger state after deterministic transaction validation failure: %w",
-			err,
-		)
+		return false, transitionErr
 	}
 	if resyncSpent {
 		if ls.config.Logger != nil {
@@ -1067,29 +1079,35 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 		"attempt", attempts,
 		"holding", ls.atTipRecoveryHolding,
 	)
-	if err := ls.rollbackPrimaryChainInSecurityParamWindows(
-		rewindPoint,
-	); err != nil {
-		return false, fmt.Errorf(
-			"rewind primary chain after validation failure: %w",
-			err,
-		)
-	}
-	// Roll back the ledger metadata state to the rewind point. Without
-	// this, the chain is pruned to rewindPoint but the UTxO database
-	// still reflects the failing block's post-apply state — consumed
-	// inputs stay consumed, created outputs stay created. When peers
-	// re-deliver the block we just rewound past, ledger validation
-	// looks up its inputs, finds them already marked consumed, and
-	// returns "rule 22 bad input(s) ... rule 24 value not conserved
-	// (consumed 0)" again, looping the recovery indefinitely until
-	// process restart. Primary-chain rollback only touches the chain
-	// store — the matching ledger rollback must be explicit.
-	if err := ls.rollback(rewindPoint); err != nil {
-		return false, fmt.Errorf(
-			"rollback ledger state after validation failure: %w",
-			err,
-		)
+	transitionErr := ls.withDestructiveDatabaseTransition(func() error {
+		if err := ls.rollbackPrimaryChainInSecurityParamWindows(
+			rewindPoint,
+		); err != nil {
+			return fmt.Errorf(
+				"rewind primary chain after validation failure: %w",
+				err,
+			)
+		}
+		// Roll back the ledger metadata state to the rewind point. Without
+		// this, the chain is pruned to rewindPoint but the UTxO database
+		// still reflects the failing block's post-apply state — consumed
+		// inputs stay consumed, created outputs stay created. When peers
+		// re-deliver the block we just rewound past, ledger validation
+		// looks up its inputs, finds them already marked consumed, and
+		// returns "rule 22 bad input(s) ... rule 24 value not conserved
+		// (consumed 0)" again, looping the recovery indefinitely until
+		// process restart. Primary-chain rollback only touches the chain
+		// store — the matching ledger rollback must be explicit.
+		if err := ls.rollback(rewindPoint); err != nil {
+			return fmt.Errorf(
+				"rollback ledger state after validation failure: %w",
+				err,
+			)
+		}
+		return nil
+	})
+	if transitionErr != nil {
+		return false, transitionErr
 	}
 	if ls.config.EventBus != nil {
 		ls.config.EventBus.Publish(

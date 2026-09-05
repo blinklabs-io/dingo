@@ -96,8 +96,9 @@ type Database struct {
 	// commitBarrier lets PauseCommits/PauseCommitsContext hold off every
 	// in-flight and new read-write Txn that opens a metadata write
 	// transaction, without a full quiesce, so database/lifecycle.Snapshot
-	// can back up the blob and metadata stores as of the same logical
-	// point. Only Txns holding the metadata store's single write
+	// can back up the blob and metadata stores and NewReadSnapshotContext
+	// can open both read views as of the same logical commit boundary. Only
+	// Txns holding the metadata store's single write
 	// connection participate (see acquireCommitBarrier) — a blob-only Txn
 	// never touches that connection and never writes the commit timestamp
 	// this guards, so it does not take part. Txn construction holds the
@@ -112,6 +113,18 @@ type Database struct {
 	// phantom queued writer). Its zero value is directly usable, same as
 	// the sync.RWMutex it replaces, so no constructor change is needed.
 	commitBarrier cancellableBarrier
+
+	// destructiveTransitionBarrier prevents a coordinated read or lifecycle
+	// snapshot from opening while one logical rollback spans multiple physical
+	// transactions. Primary-chain rollback deletes block blobs first, then the
+	// ledger truncates metadata in a combined transaction; neither physical
+	// transaction can safely stand alone as a snapshot boundary. Snapshot
+	// construction holds the shared side before taking commitBarrier, while
+	// BeginDestructiveTransition holds the exclusive side across the whole
+	// logical rollback. Ordinary writes and blob-only cleanup do not take this
+	// barrier, preserving their existing concurrency and avoiding nested-write
+	// deadlocks.
+	destructiveTransitionBarrier cancellableBarrier
 }
 
 // Blob returns the underling blob store instance
@@ -119,34 +132,41 @@ func (d *Database) Blob() blob.BlobStore {
 	return d.blob
 }
 
-// PauseCommits blocks until every currently open read-write Txn that
-// participates in this barrier (see acquireCommitBarrier) has reached
-// Commit, Rollback, or Release — not merely until one already inside its
-// Commit call finishes, but until every such Txn opened before this call,
-// however far along it currently is, concludes one way or another — then
-// blocks any new one from being constructed until the returned resume
-// func is called. It does not stop reads, and it is not a quiesce —
-// nothing is torn down, no peers are disconnected, callers just see a new
-// read-write Txn's construction (not its eventual Commit) block briefly.
+// PauseCommits first waits for any multi-transaction destructive transition,
+// then blocks until every currently open read-write Txn that participates in
+// the commit barrier (see acquireCommitBarrier) has reached Commit, Rollback,
+// or Release — not merely until one already inside its Commit call finishes,
+// but until every such Txn opened before this call, however far along it
+// currently is, concludes one way or another. It then blocks any new one from
+// being constructed until the returned resume func is called. Already-open
+// reads remain usable, and this is not a quiesce — nothing is torn down and no
+// peers are disconnected. New read-write Txn construction and other callers
+// capturing an exclusive commit boundary block briefly.
 //
 // database/lifecycle.Snapshot uses this to bracket its blob and metadata
 // backup calls: each backup is independently consistent as of whenever it
 // runs, but a commit landing between the two would write its timestamp to
 // one store's backup and not the other's, so the restored copy fails
-// checkCommitTimestamp's cross-check. Pausing commits for that window
-// keeps both backups describing the same set of committed writes.
+// checkCommitTimestamp's cross-check. NewReadSnapshotContext similarly
+// brackets opening its two read views. The destructive-transition shared hold
+// also prevents either snapshot type from opening in the gap between a
+// blob-only primary-chain truncation and its later ledger metadata rollback.
+// Together the two barriers keep both stores at one logical boundary.
 func (d *Database) PauseCommits() (resume func()) {
+	d.destructiveTransitionBarrier.RLock()
 	token := d.commitBarrier.Lock()
-	return func() { d.commitBarrier.Unlock(token) }
+	return func() {
+		d.commitBarrier.Unlock(token)
+		d.destructiveTransitionBarrier.RUnlock()
+	}
 }
 
 // PauseCommitsContext is PauseCommits, but the wait for the barrier can
 // be abandoned via ctx: if a long-running write transaction is currently
 // open, acquiring the exclusive side can block for as long as that
-// transaction takes to commit, and plain PauseCommits gives a caller like
-// lifecycle.Snapshot (which already accepts a ctx for the rest of its
-// work) no way to give up on that wait if its own operation is
-// cancelled.
+// transaction takes to commit, and plain PauseCommits gives callers such as
+// lifecycle.Snapshot and NewReadSnapshotContext no way to give up on that wait
+// if their own operation is cancelled.
 //
 // If ctx is cancelled before the barrier is acquired, this returns
 // ctx.Err() and a nil resume, having fully withdrawn its claim on the
@@ -158,11 +178,34 @@ func (d *Database) PauseCommits() (resume func()) {
 func (d *Database) PauseCommitsContext(
 	ctx context.Context,
 ) (resume func(), err error) {
-	token, err := d.commitBarrier.LockContext(ctx)
-	if err != nil {
+	if err := d.destructiveTransitionBarrier.RLockContext(ctx); err != nil {
 		return nil, err
 	}
-	return func() { d.commitBarrier.Unlock(token) }, nil
+	token, err := d.commitBarrier.LockContext(ctx)
+	if err != nil {
+		d.destructiveTransitionBarrier.RUnlock()
+		return nil, err
+	}
+	return func() {
+		d.commitBarrier.Unlock(token)
+		d.destructiveTransitionBarrier.RUnlock()
+	}, nil
+}
+
+// BeginDestructiveTransition prevents coordinated read and lifecycle snapshots
+// from opening while a logical destructive update spans multiple physical
+// transactions. The returned finish function must be called exactly once after
+// both the blob deletion and corresponding metadata rollback have completed.
+//
+// The transition barrier is deliberately separate from commitBarrier. A
+// rollback must open a normal combined write transaction after its blob-only
+// chain deletion, so taking commitBarrier exclusively for the whole operation
+// would deadlock that nested write. Ordinary blob-only transactions do not take
+// either barrier and remain safe for helpers such as deleteUtxoBlobs that open
+// one beneath an existing combined write.
+func (d *Database) BeginDestructiveTransition() (finish func()) {
+	token := d.destructiveTransitionBarrier.Lock()
+	return func() { d.destructiveTransitionBarrier.Unlock(token) }
 }
 
 // Config returns the config object used for the database instance
@@ -227,6 +270,15 @@ func (d *Database) utxoStore() metadata.UtxoStore {
 // Transaction starts a new database transaction and returns a handle to it
 func (d *Database) Transaction(readWrite bool) *Txn {
 	return NewTxn(d, readWrite)
+}
+
+// TransactionContext starts a transaction whose metadata queries observe
+// context cancellation.
+func (d *Database) TransactionContext(
+	ctx context.Context,
+	readWrite bool,
+) *Txn {
+	return NewTxnContext(ctx, d, readWrite)
 }
 
 // BlobTxn starts a new blob-only database transaction and returns a handle to it

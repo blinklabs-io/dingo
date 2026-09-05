@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/types"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
 
 // PartialCommitError is returned when blob commits but metadata fails.
@@ -133,6 +134,16 @@ func (t *Txn) finishLocked() {
 }
 
 func NewTxn(db *Database, readWrite bool) *Txn {
+	return NewTxnContext(context.Background(), db, readWrite)
+}
+
+// NewTxnContext creates a coordinated transaction whose metadata operations
+// are canceled with ctx. Blob operations do not accept contexts, so callers
+// doing long mixed-store scans must also check ctx between blob reads.
+func NewTxnContext(ctx context.Context, db *Database, readWrite bool) *Txn {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	t := &Txn{db: db, readWrite: readWrite}
 	acquireCommitBarrier(t, db.Metadata() != nil)
 	if bs := db.Blob(); bs != nil {
@@ -144,19 +155,10 @@ func NewTxn(db *Database, readWrite bool) *Txn {
 		// prevents chainsync FindIntersect and snapshot calculations
 		// from blocking on concurrent block processing.
 		//
-		// context.Background(): NewTxn itself takes no ctx, and none of
-		// its own callers (Database.Transaction and its ~100 call sites
-		// across ledger/api/mempool) have one to offer yet either -- this
-		// is the current propagation boundary between the metadata
-		// store's own ctx-aware Transaction/ReadTransaction and the rest
-		// of the node, not a gap within the metadata store itself.
-		// Threading a real ctx from callers into this boundary is a
-		// separate, distinctly larger change than this metadata-store
-		// specific one.
 		if readWrite {
-			t.metadataTxn = ms.Transaction(context.Background())
+			t.metadataTxn = ms.Transaction(ctx)
 		} else {
-			t.metadataTxn = ms.ReadTransaction(context.Background())
+			t.metadataTxn = ms.ReadTransaction(ctx)
 		}
 		if t.metadataTxn == nil {
 			db.logger.Warn(
@@ -165,6 +167,52 @@ func NewTxn(db *Database, readWrite bool) *Txn {
 		}
 	}
 	return t
+}
+
+// NewReadSnapshotContext creates a coordinated read transaction and returns
+// the metadata tip that anchors it. PauseCommitsContext brackets construction
+// with both the logical destructive-transition barrier and the physical commit
+// barrier, so neither a multi-transaction rollback nor a combined write can
+// change blob data between opening the metadata and blob views. Both holds are
+// released as soon as the views are fixed; they are not held for the lifetime
+// of the read.
+func NewReadSnapshotContext(
+	ctx context.Context,
+	db *Database,
+) (*Txn, ochainsync.Tip, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	resume, err := db.PauseCommitsContext(ctx)
+	if err != nil {
+		return nil, ochainsync.Tip{}, fmt.Errorf(
+			"pause commits for read snapshot: %w",
+			err,
+		)
+	}
+	defer resume()
+
+	t := &Txn{db: db}
+	var tip ochainsync.Tip
+	if ms := db.Metadata(); ms != nil {
+		t.metadataTxn = ms.ReadTransaction(ctx)
+		if t.metadataTxn == nil {
+			return nil, tip, types.ErrNilTxn
+		}
+		var err error
+		tip, err = ms.GetTip(t.metadataTxn)
+		if err != nil {
+			_ = t.Rollback()
+			return nil, tip, fmt.Errorf(
+				"anchor metadata read snapshot: %w",
+				err,
+			)
+		}
+	}
+	if bs := db.Blob(); bs != nil {
+		t.blobTxn = bs.NewTransaction(false)
+	}
+	return t, tip, nil
 }
 
 func NewBlobOnlyTxn(db *Database, readWrite bool) *Txn {

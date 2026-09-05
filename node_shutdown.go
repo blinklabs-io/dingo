@@ -193,6 +193,7 @@ func (n *Node) shutdown() error {
 		for _, capability := range []plugin.Capability{
 			plugin.CapabilityAPIUtxorpc,
 			plugin.CapabilityAPIMesh,
+			plugin.CapabilityAPIKupo,
 			plugin.CapabilityAPIBlockfrost,
 		} {
 			if stopErr := n.pluginHost.StopCapability(ctx, capability); stopErr != nil {

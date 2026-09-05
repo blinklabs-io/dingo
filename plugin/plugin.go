@@ -40,6 +40,7 @@ const (
 	CapabilityStorageMetadata Capability = "storage.metadata"
 	CapabilityMempool         Capability = "mempool"
 	CapabilityAPIBlockfrost   Capability = "api.blockfrost"
+	CapabilityAPIKupo         Capability = "api.kupo"
 	CapabilityAPIMesh         Capability = "api.mesh"
 	CapabilityAPIUtxorpc      Capability = "api.utxorpc"
 )
@@ -48,7 +49,8 @@ const (
 func (c Capability) Valid() bool {
 	switch c {
 	case CapabilityStorageBlob, CapabilityStorageMetadata, CapabilityMempool,
-		CapabilityAPIBlockfrost, CapabilityAPIMesh, CapabilityAPIUtxorpc:
+		CapabilityAPIBlockfrost, CapabilityAPIKupo, CapabilityAPIMesh,
+		CapabilityAPIUtxorpc:
 		return true
 	default:
 		return false

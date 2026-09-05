@@ -67,7 +67,7 @@ func ServerConfig(config *tls.Config) *tls.Config {
 // keyFilePath and installs it on server's TLSConfig (creating one via
 // ServerConfig if server.TLSConfig is nil), applying the shared minimum
 // TLS version floor. It is the single keypair-loading implementation
-// shared by every built-in API provider (Blockfrost, Mesh, UTxORPC),
+// shared by every built-in API provider (Blockfrost, Kupo, Mesh, UTxORPC),
 // replacing what was previously duplicated tls.LoadX509KeyPair-plus-floor
 // logic per provider. Callers must still call server.ServeTLS (not
 // Serve) after this returns successfully -- this only prepares the

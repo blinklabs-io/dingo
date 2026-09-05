@@ -415,7 +415,10 @@ func (cm *ChainManager) loadPrimaryChain() error {
 // RewindPrimaryChainToPoint silently prunes the persistent primary chain back
 // to the specified point without emitting rollback/fork events. This is used
 // during startup to discard speculative blob-only blocks that were never
-// committed into the authoritative ledger metadata tip.
+// committed into the authoritative ledger metadata tip. A caller that follows
+// this blob-only rewind with a ledger metadata rollback must bracket both calls
+// with database.Database.BeginDestructiveTransition so coordinated reads
+// cannot open between the two physical transactions.
 func (cm *ChainManager) RewindPrimaryChainToPoint(
 	point ocommon.Point,
 ) error {
@@ -530,6 +533,10 @@ func (cm *ChainManager) addBlock(
 func (cm *ChainManager) removeBlockByIndex(
 	blockIndex uint64,
 ) (models.Block, error) {
+	// This blob-only deletion is one half of a logical primary-chain rollback.
+	// Ledger rollback callers hold Database.BeginDestructiveTransition across
+	// the complete chain-delete -> metadata-truncate sequence; taking that
+	// barrier here would release it too early between per-block transactions.
 	// Record removed block event for each non-primary chain
 	for chainId := range cm.chains {
 		if chainId == primaryChainId {

@@ -617,6 +617,124 @@ func (d *Database) UtxosByAddress(
 	return filterUtxosByAddressPatterns(utxos, patterns)
 }
 
+// UtxosWithHistory returns retained live and spent outputs with their
+// producing and spending chain positions. The metadata store performs the
+// indexed coarse query; this coordinated layer resolves output CBOR and
+// completes exact-address matching, which cannot be done from credential
+// columns alone. For a bounded exact-address query, Limit applies to exact
+// matches rather than coarse SQL candidates.
+func (d *Database) UtxosWithHistory(
+	q *models.UtxoHistoryQuery,
+	txn *Txn,
+) ([]models.UtxoWithHistory, error) {
+	if q == nil {
+		return nil, models.ErrNilUtxoHistoryQuery
+	}
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	requiresExact := !q.MatchAllAddresses &&
+		models.RequiresExactAddressFilter(q.AddressPatterns)
+	if !requiresExact || q.Limit <= 0 {
+		utxos, err := d.utxoStore().GetUtxosWithHistory(
+			q,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return nil, err
+		}
+		patterns := q.AddressPatterns
+		if !requiresExact {
+			patterns = nil
+		}
+		return d.loadAndFilterHistoricalUtxos(utxos, patterns, txn)
+	}
+
+	// Exact address identity is only available in output CBOR. Scan coarse SQL
+	// candidates in keyset order until Limit exact matches are collected, so a
+	// page full of other address forms sharing the requested credential cannot
+	// truncate the result. GetUtxosWithHistory uses the cursor's comparison
+	// direction for both ascending and descending queries.
+	scanQuery := *q
+	// Keep each SQL query and decoded candidate set bounded without imposing a
+	// total scan cap. The number of credential-sharing address forms before an
+	// exact match is not a correctness boundary.
+	scanQuery.Limit = min(max(q.Limit, 128), 1024)
+	ret := make([]models.UtxoWithHistory, 0, q.Limit)
+	for len(ret) < q.Limit {
+		batch, err := d.utxoStore().GetUtxosWithHistory(
+			&scanQuery,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return nil, err
+		}
+		filtered, err := d.loadAndFilterHistoricalUtxos(
+			batch,
+			q.AddressPatterns,
+			txn,
+		)
+		if err != nil {
+			return nil, err
+		}
+		remaining := q.Limit - len(ret)
+		if len(filtered) > remaining {
+			filtered = filtered[:remaining]
+		}
+		ret = append(ret, filtered...)
+		if len(batch) < scanQuery.Limit || len(batch) == 0 {
+			break
+		}
+		last := batch[len(batch)-1]
+		scanQuery.After = &models.UtxoOrderingCursor{
+			Slot:       last.TxSlot,
+			BlockIndex: last.TxBlockIndex,
+			OutputIdx:  last.OutputIdx,
+			TxId:       last.TxId,
+		}
+	}
+	return ret, nil
+}
+
+func (d *Database) loadAndFilterHistoricalUtxos(
+	utxos []models.UtxoWithHistory,
+	patterns []models.UtxoAddressPattern,
+	txn *Txn,
+) ([]models.UtxoWithHistory, error) {
+	for i := range utxos {
+		if err := loadCbor(&utxos[i].Utxo, txn); err != nil {
+			return nil, err
+		}
+	}
+	if !models.RequiresExactAddressFilter(patterns) {
+		return utxos, nil
+	}
+	ret := make([]models.UtxoWithHistory, 0, len(utxos))
+	for i := range utxos {
+		output, err := utxos[i].Decode()
+		if err != nil {
+			return nil, fmt.Errorf(
+				"decode historical UTxO %x#%d for exact address match: %w",
+				utxos[i].TxId,
+				utxos[i].OutputIdx,
+				err,
+			)
+		}
+		match, err := models.MatchesUtxoAddressPatterns(
+			output.Address(),
+			patterns,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if match {
+			ret = append(ret, utxos[i])
+		}
+	}
+	return ret, nil
+}
+
 // GetControlledAmountByCredential returns the sum of live UTxO amounts
 // controlled by the given stake credential.
 func (d *Database) GetControlledAmountByCredential(

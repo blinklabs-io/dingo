@@ -174,28 +174,34 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 		)
 	}
 
-	if err := ls.rollbackPrimaryChainInSecurityParamWindows(
-		rewindPoint,
-	); err != nil {
+	transitionErr := ls.withDestructiveDatabaseTransition(func() error {
+		if err := ls.rollbackPrimaryChainInSecurityParamWindows(
+			rewindPoint,
+		); err != nil {
+			return fmt.Errorf(
+				"rewind primary chain after header validation failure: %w",
+				err,
+			)
+		}
+		// The chain prune alone leaves the ledger reflecting the rejected
+		// block's post-apply state; the matching ledger rollback has to be
+		// explicit, for the same reason it is on the transaction-validation
+		// path.
+		if err := ls.rollback(rewindPoint); err != nil {
+			return fmt.Errorf(
+				"rollback ledger state after header validation failure: %w",
+				err,
+			)
+		}
+		return nil
+	})
+	if transitionErr != nil {
 		if ls.yieldedToChainSelection(
-			err, validationErr, rewindPoint, "rewind",
+			transitionErr, validationErr, rewindPoint, "rewind",
 		) {
 			return true, nil
 		}
-		return false, fmt.Errorf(
-			"rewind primary chain after header validation failure: %w",
-			err,
-		)
-	}
-	// The chain prune alone leaves the ledger reflecting the rejected
-	// block's post-apply state; the matching ledger rollback has to be
-	// explicit, for the same reason it is on the transaction-validation
-	// path.
-	if err := ls.rollback(rewindPoint); err != nil {
-		return false, fmt.Errorf(
-			"rollback ledger state after header validation failure: %w",
-			err,
-		)
+		return false, transitionErr
 	}
 	if ls.config.EventBus != nil {
 		ls.config.EventBus.Publish(
