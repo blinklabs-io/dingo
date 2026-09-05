@@ -535,3 +535,180 @@ func TestForgeStaleGapSkipMarksScheduledLeaderSlots(t *testing.T) {
 		})
 	}
 }
+
+// newOwnTipGateForger builds a production forger with NO fence store, so
+// the duplicate-slot fence is in-memory only and starts unloaded, and
+// captures its logs at Debug so a test can assert on the level a skip was
+// emitted at.
+func newOwnTipGateForger(
+	t *testing.T,
+	clock forgerTestSlotClock,
+	leader LeaderChecker,
+	builder BlockBuilder,
+	broadcaster BlockBroadcaster,
+) (*BlockForger, *bytes.Buffer) {
+	t.Helper()
+	logs := &bytes.Buffer{}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode: ModeProduction,
+		Logger: slog.New(slog.NewJSONHandler(
+			logs,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		)),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    leader,
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		// Deliberately no ForgeFence.
+		SlotClock:    clock,
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+	require.False(
+		t,
+		forger.fenceLoaded,
+		"a forger with no fence store must start with an unloaded fence",
+	)
+	// Construction itself warns that no fence store is wired. Drop it so
+	// the buffer holds only what the forge cycle under test emitted.
+	logs.Reset()
+	return forger, logs
+}
+
+// TestEqualSlotOwnBlockIsIdentifiedByHashNotByFence pins that "the block
+// at the tip is ours" is decided by identity, not by the fence
+// bookkeeping alone.
+//
+// The fence is a high-water mark over slots this node committed to, and
+// it is only guaranteed to be present when a durable ForgeFenceStore is
+// wired: without one it is in-memory (see BlockForger.fenceStore), so
+// there are wirings in which the forger holds proof that the block at the
+// tip is its own — SlotTracker recorded the hash it forged for that slot
+// — while the fence signal says nothing. Keying the quiet skip solely on
+// the fence sends that slot to the contested-slot branch, where the node
+// records a slot battle at Warn against its own block and reports a
+// could-not-forge for a slot it did in fact forge.
+//
+// Both subtests run with no fence store at all, leaving the hash as the
+// only signal, and require the forger to tell its own block from a
+// rival's using it.
+func TestEqualSlotOwnBlockIsIdentifiedByHashNotByFence(t *testing.T) {
+	const slot = uint64(10)
+	ourHash := bytes.Repeat([]byte{0xa1}, 32)
+	rivalHash := bytes.Repeat([]byte{0xb2}, 32)
+
+	t.Run("our own block at the tip is a quiet skip", func(t *testing.T) {
+		leader := &forgerCountingLeader{}
+		builder := &forgerTestBuilder{}
+		broadcaster := &forgerTestBroadcaster{}
+		forger, logs := newOwnTipGateForger(
+			t,
+			forgerTestSlotClock{
+				currentSlot:       slot,
+				chainTipSlot:      slot,
+				chainTipHash:      ourHash,
+				slotsPerKESPeriod: 100,
+			},
+			leader,
+			builder,
+			broadcaster,
+		)
+		// We forged this slot and the block was adopted: the tip is
+		// byte-for-byte our block.
+		forger.slotTracker.RecordForgedBlock(slot, ourHash)
+
+		require.NoError(
+			t,
+			forger.checkAndForgeProduction(context.Background()),
+		)
+
+		assert.Zero(
+			t,
+			leader.callCount(),
+			"our own block at our own slot needs no leader selection",
+		)
+		assert.Zero(t, builder.calls, "must not forge a second block")
+		assert.Zero(t, broadcaster.calls)
+		assert.Equal(
+			t,
+			float64(0),
+			testutil.ToFloat64(forger.metrics.slotBattlesTotal),
+			"our own block is not a rival, so this is not a slot battle",
+		)
+		assert.Equal(
+			t,
+			float64(0),
+			testutil.ToFloat64(forger.metrics.forgeCouldNot),
+			"a slot we forged must not report could-not-forge",
+		)
+		assert.NotContains(
+			t,
+			logs.String(),
+			`"level":"WARN"`,
+			"re-entering a slot whose tip block is ours is routine and "+
+				"must not warn",
+		)
+		assert.Contains(
+			t,
+			logs.String(),
+			"forge skip: slot already has our own block",
+		)
+		assert.Contains(
+			t,
+			logs.String(),
+			`"matched_by":"forged_block_hash"`,
+			"the skip must be attributed to the hash match, not to a "+
+				"fence that was never loaded",
+		)
+	})
+
+	t.Run(
+		"a rival block at the tip is still a slot battle",
+		func(t *testing.T) {
+			leader := &forgerCountingLeader{}
+			builder := &forgerTestBuilder{}
+			broadcaster := &forgerTestBroadcaster{}
+			forger, logs := newOwnTipGateForger(
+				t,
+				forgerTestSlotClock{
+					currentSlot:       slot,
+					chainTipSlot:      slot,
+					chainTipHash:      rivalHash,
+					slotsPerKESPeriod: 100,
+				},
+				leader,
+				builder,
+				broadcaster,
+			)
+			// A tracker record for the slot must not be mistaken for
+			// ownership of the block at the tip: we forged for this
+			// slot, but a rival's block is what the chain adopted.
+			forger.slotTracker.RecordForgedBlock(slot, ourHash)
+
+			require.NoError(
+				t,
+				forger.checkAndForgeProduction(context.Background()),
+			)
+
+			assert.Equal(
+				t,
+				1,
+				leader.callCount(),
+				"a rival's block at our slot is a contested slot",
+			)
+			assert.Equal(
+				t,
+				float64(1),
+				testutil.ToFloat64(forger.metrics.slotBattlesTotal),
+			)
+			assert.Zero(t, builder.calls, "must not bind a same-slot parent")
+			assert.Zero(t, broadcaster.calls)
+			assert.Contains(
+				t,
+				logs.String(),
+				`"level":"WARN"`,
+				"a leader slot lost to a rival must be visible",
+			)
+		},
+	)
+}
