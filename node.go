@@ -169,6 +169,10 @@ type Node struct {
 	// own documented "keeps syncing normally" behavior.
 	snapshotMu sync.Mutex
 
+	// health carries the sync signals the readiness probe reads. See
+	// node_health.go; it survives a live database restore/truncate rebuild.
+	health nodeHealth
+
 	// rebuildableMetrics tracks every Prometheus collector registered by a
 	// component a live database restore/truncate rebuilds, so
 	// closeStorageForLiveLifecycleOp can unregister them before the

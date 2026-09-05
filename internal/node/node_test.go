@@ -148,6 +148,7 @@ func TestShutdownNodeResourcesAggregatesErrors(t *testing.T) {
 			return metricsErr
 		},
 		nil,
+		nil,
 		func() error {
 			return nodeErr
 		},
@@ -180,6 +181,7 @@ func TestShutdownNodeResourcesReturnsNilWithoutErrors(t *testing.T) {
 		func(context.Context) error {
 			return nil
 		},
+		nil,
 		nil,
 		func() error {
 			return nil

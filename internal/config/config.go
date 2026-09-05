@@ -91,6 +91,15 @@ const (
 	DefaultRejectionWatermark          = 1.0
 	DefaultForgeSyncToleranceSlots     = 100
 	DefaultForgeStaleGapThresholdSlots = 1000
+	DefaultHealthPort                  = 12799
+	// DefaultHealthReadyGapSlots matches
+	// DefaultForgeStaleGapThresholdSlots: both answer "has this node
+	// stopped following the chain?", and a readiness probe that flapped
+	// more readily than the forger's own staleness gate would evict a
+	// node the forger still considers current. At Cardano's f=0.05 an
+	// empty 1000-slot stretch is not something a live chain produces, so
+	// crossing it means the tip is genuinely stuck, not merely quiet.
+	DefaultHealthReadyGapSlots         = 1000
 	DefaultMempoolCapacityPraos        = 1048576  // 1 MiB
 	DefaultMempoolCapacityLeios        = 26214400 // 25 MiB
 	DefaultMempoolRevalidationDeltaCap = 64
@@ -564,7 +573,19 @@ type Config struct {
 	// pprof on a wildcard or management-network address.
 	DebugBindAddr string `yaml:"debugBindAddr"                       envconfig:"DINGO_DEBUG_BIND_ADDR"`
 	DebugPort     uint   `yaml:"debugPort"                           envconfig:"DINGO_DEBUG_PORT"`
-	IntersectTip  bool   `yaml:"intersectTip"                                                                                 split_words:"true"`
+	// HealthPort serves the liveness (/health, /healthz) and readiness
+	// (/readyz) probes on a listener of their own, so an operator can
+	// expose them to an orchestrator or load balancer without also
+	// exposing Prometheus metrics, pprof, or any API. It binds BindAddr,
+	// the same address the relay and metrics listeners use and distinct
+	// from the API listeners' own bind address: a probe is operational
+	// surface, not API surface. 0 disables the listener.
+	HealthPort uint `yaml:"healthPort"                          envconfig:"DINGO_HEALTH_PORT"`
+	// HealthReadyGapSlots is how far the chain tip may trail the
+	// wall-clock slot while /readyz still reports ready. Liveness ignores
+	// it entirely; see internal/health for why the two are separate.
+	HealthReadyGapSlots uint `yaml:"healthReadyGapSlots"                 envconfig:"DINGO_HEALTH_READY_GAP_SLOTS"`
+	IntersectTip        bool `yaml:"intersectTip"                                                                                 split_words:"true"`
 	// ValidateHistorical validates the complete replay from the selected
 	// intersection. The default from-origin sync path must not trust peers to
 	// have validated historical blocks for us.
@@ -1065,6 +1086,8 @@ var globalConfig = &Config{
 	MetricsPort:                         12798,
 	DebugBindAddr:                       DefaultDebugBindAddr,
 	DebugPort:                           0,
+	HealthPort:                          DefaultHealthPort,
+	HealthReadyGapSlots:                 DefaultHealthReadyGapSlots,
 	PrivateBindAddr:                     "127.0.0.1",
 	PrivatePort:                         3002,
 	RelayPort:                           3001,
@@ -1483,6 +1506,12 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.ForgeStaleGapThresholdSlots == 0 {
 		c.ForgeStaleGapThresholdSlots = DefaultForgeStaleGapThresholdSlots
+	}
+	// Zero would make every probe ready only at an exact-tip match, which
+	// no live node sustains; take the default instead. Disabling the
+	// readiness signal is done by disabling the listener (healthPort 0).
+	if c.HealthReadyGapSlots == 0 {
+		c.HealthReadyGapSlots = DefaultHealthReadyGapSlots
 	}
 	// Only an unset (zero) frequency takes the default; an explicitly
 	// negative value is preserved so Validate can reject it instead of
