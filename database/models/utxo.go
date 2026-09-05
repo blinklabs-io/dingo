@@ -296,6 +296,24 @@ type Utxo struct {
 	// index (deleted_slot, payment_script, amount) lets the supply sum
 	// scan only live script UTxOs.
 	PaymentScript bool
+	// Pointer is set only for a pointer address (types 4 and 5), which
+	// designates a stake registration certificate by position instead of
+	// carrying a credential. StakingKey is left empty for such an output
+	// because which credential the position resolves to depends on the
+	// certificate history at the slot being evaluated, not on the address.
+	// See UtxoPointer.
+	Pointer *UtxoPointer
+}
+
+// UtxoPointer is the certificate position a pointer address names:
+// the slot of the block holding the certificate, the transaction's index
+// within that block, and the certificate's index within that transaction --
+// the ledger's Ptr. It is persisted in utxo_pointer and resolved to a stake
+// credential when stake is computed.
+type UtxoPointer struct {
+	Slot      uint64
+	TxIndex   uint64
+	CertIndex uint64
 }
 
 // UtxoWithOrdering includes UTxO with transaction ordering metadata
@@ -405,6 +423,18 @@ func UtxoLedgerToModel(
 		credentialTag, ok := StakeCredentialTagFromAddress(outAddr)
 		if ok {
 			ret.CredentialTag = credentialTag
+		}
+	}
+	// A pointer address reports an empty StakeKeyHash, correctly: it names
+	// the position of a registration certificate rather than a credential,
+	// and resolving that position is the ledger's job. Keep the position so
+	// the stake computation can resolve it against the certificate history
+	// at the slot it is evaluating (dingo #3854).
+	if pointer, ok := outAddr.StakingPayload().(lcommon.AddressPayloadPointer); ok {
+		ret.Pointer = &UtxoPointer{
+			Slot:      pointer.Slot,
+			TxIndex:   pointer.TxIndex,
+			CertIndex: pointer.CertIndex,
 		}
 	}
 	if dh := utxo.Output.DatumHash(); dh != nil {

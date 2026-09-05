@@ -100,11 +100,12 @@ fixtures when schema seeding or assertions require raw SQL.
 Startup reserves the write connection, acquires the backend migration lock,
 rejects unversioned metadata tables (users must delete the data directory,
 including metadata and blob stores, and resync), and validates/resumes versioned expand/backfill/contract work before
-advertising readiness. The current registry has migrations 1 through 9:
+advertising readiness. The current registry has migrations 1 through 10:
 `v1alpha1`, `leios-key-registration`, `token-registry-metadata`,
 `account-import-baseline`, `leios-snapshot-keys`,
 `governance-ratification-history`, `account-import-deposit`,
-`committee-credential-tags`, and `committee-term-start-presence`. `DATABASE.md` is the source of truth for their
+`committee-credential-tags`, `committee-term-start-presence`, and
+`pointer-address-stake`. `DATABASE.md` is the source of truth for their
 schema changes and upgrade behavior. It then checks the read pool. File-backed
 SQLite uses a
 cross-process lock file; isolated in-memory databases use a process lock. A
@@ -8003,12 +8004,13 @@ transaction as the source change. Refresh derives total stake, registration,
 current pool delegation, and delegation certificate order; rollback therefore
 restores the aggregate from the same historical metadata used by normal account
 and UTxO repair. Malformed non-empty stake credentials are rejected before they
-enter the aggregate. The aggregate currently attributes only base-address stake:
-UTxO metadata does not retain the pointer triple needed to resolve pointer
-addresses to stake credentials, so lovelace at otherwise resolvable pointer
-addresses is omitted. Consumers must not treat `RewardLiveStake` as an exact
-replacement for the ledger stake distribution for eras where pointer-address
-stake matters.
+enter the aggregate. The aggregate attributes only base-address stake, because
+it keys on `utxo.staking_key` and a pointer address leaves that column empty.
+The pointer position itself is retained, in `utxo_pointer`, and the
+slot-aware historical stake path resolves it; the live aggregate does not,
+which matches Conway, where pointer addresses confer no stake at all.
+Consumers must not treat `RewardLiveStake` as an exact replacement for the
+ledger stake distribution for eras where pointer-address stake matters.
 
 `RebuildRewardLiveStake` provides a composition-neutral full rebuild from the
 union of account credentials and live UTxO stake credentials. It retains
