@@ -96,7 +96,7 @@ func TestCheckAndForgeProductionEqualSlotReachesLeaderCheck(t *testing.T) {
 		leader,
 		builder,
 		broadcaster,
-		nil,
+		&fenceTestStore{},
 		newAltTestChainContext(10),
 		adopter,
 	)
