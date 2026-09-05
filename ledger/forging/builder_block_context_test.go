@@ -249,3 +249,144 @@ func TestBuildBlockStillExtendsTheLiveTipByDefault(t *testing.T) {
 	assert.Equal(t, uint64(101), block.BlockNumber())
 	assert.Equal(t, tipHash, block.PrevHash().Bytes())
 }
+
+// TestBuildBlockOnContextCarriesNoMempoolTransactions is the state-mismatch
+// half of the equal-slot alternative. Every transaction validator reachable
+// from the builder answers against the ledger's live state, which has the
+// rival applied; the alternative is built on the rival's predecessor and
+// adoption rolls the rival back before applying it. A mempool transaction
+// spending a UTxO the rival created therefore passes validation, gets
+// selected, and then fails to apply after adoption -- wedging the node at the
+// fork point with neither candidate on the chain.
+//
+// The validator here accepts everything, exactly as a live-state validator
+// would for such a transaction. The live-tip build shows it is admitted there;
+// the context build must not consult the validator at all.
+func TestBuildBlockOnContextCarriesNoMempoolTransactions(t *testing.T) {
+	const (
+		contestedSlot   = uint64(1000)
+		parentSlot      = uint64(999)
+		rivalBlockNumbr = uint64(100)
+	)
+	rivalHash := testHash32(0xAA)
+	parentHash := testHash32(0xBB)
+	rival := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: contestedSlot, Hash: rivalHash},
+		BlockNumber: rivalBlockNumbr,
+	}
+	// A UTxO that only exists because the rival block created it.
+	rivalCreatedTxHash := testHash32(0xCC)
+	mempool := &mockMempool{
+		transactions: []MempoolTransaction{
+			{
+				Hash: "spends_rival_output",
+				Cbor: makeMinimalTxCborWithInput(t, rivalCreatedTxHash, 0),
+				Type: conway.TxTypeConway,
+			},
+		},
+	}
+	validator := &sessionMockTxValidator{}
+	builder := newSelectionTestBuilder(
+		t,
+		mempool,
+		&mockChainTip{tip: rival},
+		validator,
+	)
+
+	// Live-tip control: the validator admits the transaction, so a normal
+	// build selects it. This is the state the alternative must not inherit.
+	control, _, err := builder.BuildBlock(contestedSlot+1, 0)
+	require.NoError(t, err)
+	require.Len(
+		t,
+		control.Transactions(),
+		1,
+		"control: the live-state validator admits this transaction",
+	)
+	require.Equal(t, 1, validator.validateCalls)
+
+	block, _, err := builder.BuildBlockOnContext(
+		contestedSlot,
+		0,
+		LeiosBlockData{},
+		BlockContext{
+			Parent:      ocommon.Point{Slot: parentSlot, Hash: parentHash},
+			BlockNumber: rivalBlockNumbr,
+			Rival:       rival,
+		},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, block)
+	assert.Empty(
+		t,
+		block.Transactions(),
+		"an alternative must carry no transaction selected against the rival's state",
+	)
+	assert.Equal(
+		t,
+		1,
+		validator.validateCalls,
+		"no mempool transaction may be offered to a live-state validator for an alternative",
+	)
+}
+
+// TestBuildBlockOnContextRejectsLeiosData pins the fail-closed guard on the
+// exported entrypoint. Leios certificate and announcement data is resolved
+// against the live tip -- the rival -- so a block that does not build on the
+// rival must not carry it. The forger omits it already; the builder refuses it
+// rather than trusting every caller to.
+func TestBuildBlockOnContextRejectsLeiosData(t *testing.T) {
+	const (
+		contestedSlot   = uint64(1000)
+		parentSlot      = uint64(999)
+		rivalBlockNumbr = uint64(100)
+	)
+	rival := ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: contestedSlot,
+			Hash: testHash32(0xAA),
+		},
+		BlockNumber: rivalBlockNumbr,
+	}
+	builder := newBlockContextTestBuilder(t, rival)
+	blockCtx := BlockContext{
+		Parent: ocommon.Point{
+			Slot: parentSlot,
+			Hash: testHash32(0xBB),
+		},
+		BlockNumber: rivalBlockNumbr,
+		Rival:       rival,
+	}
+
+	for name, leios := range map[string]LeiosBlockData{
+		"announcement": {
+			Announcement: &LeiosEndorserBlockAnnouncement{},
+		},
+		"certificate": {
+			Certificate: &lcommon.LeiosEbCertificate{},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			block, blockCbor, err := builder.BuildBlockOnContext(
+				contestedSlot,
+				0,
+				leios,
+				blockCtx,
+			)
+			require.ErrorIs(t, err, errLeiosDataOnAlternative)
+			assert.Nil(t, block)
+			assert.Nil(t, blockCbor)
+		})
+	}
+
+	// Empty Leios data on the same context still builds, so the guard is
+	// rejecting the data and not the context.
+	block, _, err := builder.BuildBlockOnContext(
+		contestedSlot,
+		0,
+		LeiosBlockData{},
+		blockCtx,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, block)
+}
