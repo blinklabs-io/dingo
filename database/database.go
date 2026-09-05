@@ -324,6 +324,12 @@ func New(config *Config, stores Stores) (*Database, error) {
 				"error", err,
 			)
 		}
+		if err := RegisterTruncateMetrics(configCopy.PromRegistry); err != nil {
+			configCopy.Logger.Warn(
+				"failed to register rollback truncation metrics",
+				"error", err,
+			)
+		}
 	}
 	// Register database size metrics
 	if configCopy.PromRegistry != nil {
