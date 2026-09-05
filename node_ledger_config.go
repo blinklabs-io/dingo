@@ -288,6 +288,14 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			}
 			return n.chainSelector.GenesisSelectionState()
 		},
+		// Feeds the node's readiness probe (internal/health) the same
+		// wall-clock-to-tip gap the dingo_tip_gap_slots gauge carries, so
+		// /readyz needs neither the Prometheus listener nor a live
+		// n.ledgerState pointer. A closure over n, not a method value on
+		// n.ledgerState, so a live rebuild keeps reporting.
+		ReportTipGapFunc: func(gapSlots uint64) {
+			n.health.recordTipGap(gapSlots)
+		},
 		FatalErrorFunc: func(err error) {
 			n.config.logger.Error(
 				"fatal ledger error, initiating shutdown",

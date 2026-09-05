@@ -265,6 +265,9 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	//   - relay, private: serving modes only (required there);
 	//   - metrics, debug: serving modes and the Mithril sync operation
 	//     (RunModeSync); the read-only Mithril subcommands start neither;
+	//   - health: serving modes only. `dingo mithril sync` runs no node to
+	//     probe, so it starts no health listener and its healthPort cannot
+	//     conflict;
 	//   - bark: serving modes only (not storage-gated);
 	//   - UTxORPC, Blockfrost, Mesh, Midnight: serving modes under API
 	//     storage. Dev mode forces API storage on at startup, and node.Run
@@ -297,6 +300,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		{"privatePort", c.PrivateBindAddr, c.PrivatePort, serving, serving},
 		{"metricsPort", c.BindAddr, c.MetricsPort, auxListeners, serving},
 		{"debugPort", c.DebugBindAddr, c.DebugPort, auxListeners, false},
+		{"healthPort", c.BindAddr, c.HealthPort, serving, false},
 		{"barkPort", c.BarkHost, c.BarkPort, serving, false},
 		{
 			"plugins.api.utxorpc.config.port",

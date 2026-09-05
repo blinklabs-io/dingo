@@ -158,6 +158,35 @@ topology: ""
 # CLI: --metrics-port
 metricsPort: 12798
 
+# TCP port for the liveness/readiness probe listener. 0 disables it.
+# Binds bindAddr, like the relay and metrics listeners (not the API bind
+# address): a kubelet or load-balancer probe reaches the container from
+# outside, so loopback would fail those closed.
+#
+#   GET /health, GET /healthz  -> liveness. 200 whenever the process is up
+#     and serving, independent of sync state. This is what the container
+#     HEALTHCHECK probes: an orchestrator answers an unhealthy container by
+#     replacing it, and a node in initial sync is legitimately not useful
+#     for hours without needing to be killed.
+#   GET /readyz                -> readiness. 200 only once the chain tip is
+#     within healthReadyGapSlots of the wall-clock slot; 503 while syncing,
+#     bootstrapping, or when the tip has frozen. Use it for a Kubernetes
+#     readinessProbe or a load-balancer target check, where failing drains
+#     traffic instead of restarting the node.
+#
+# Both bodies are JSON carrying the readiness verdict, a reason, and the
+# observed tip gap.
+# CLI: --health-port  Env: DINGO_HEALTH_PORT
+healthPort: 12799
+
+# How far the chain tip may trail the wall-clock slot while /readyz still
+# reports ready. Matches forgeStaleGapThresholdSlots: both answer "has this
+# node stopped following the chain?", and a readiness probe that flapped
+# more readily than the forger's own staleness gate would evict a node the
+# forger still considers current. 0 takes the default.
+# CLI: --health-ready-gap-slots  Env: DINGO_HEALTH_READY_GAP_SLOTS
+healthReadyGapSlots: 1000
+
 # TCP port to bind for pprof debug endpoints (heap, profile, goroutine, etc).
 # 0 disables. Operators opt in; never enable in production by default — debug
 # endpoints expose internal state and run on a separate listener from metrics.
