@@ -26,7 +26,10 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
-const chainSelectedNoneRetryInterval = 10 * time.Millisecond
+const (
+	chainSelectedNoneInitialRetryInterval = 10 * time.Millisecond
+	chainSelectedNoneMaxRetryInterval     = time.Second
+)
 
 // chainsyncObservePeerTip synchronously feeds a peer tip update into chain
 // selection (and peergov) when the Genesis corroboration gate is active, so the
@@ -334,22 +337,30 @@ func (n *Node) runChainSelectedNoneWorker(
 		case <-wake:
 		}
 
-		retry := time.NewTicker(chainSelectedNoneRetryInterval)
+		retryInterval := chainSelectedNoneInitialRetryInterval
 		for {
 			n.chainSelectedNoneMu.Lock()
 			hasPending := n.chainSelectedNonePendingSet
 			n.chainSelectedNoneMu.Unlock()
 			if !hasPending {
-				retry.Stop()
 				break
 			}
 			if !n.liveLifecycleMu.TryLock() {
+				retry := time.NewTimer(retryInterval)
 				select {
 				case <-ctx.Done():
-					retry.Stop()
+					if !retry.Stop() {
+						select {
+						case <-retry.C:
+						default:
+						}
+					}
 					return
 				case <-retry.C:
 				}
+				retryInterval = nextChainSelectedNoneRetryInterval(
+					retryInterval,
+				)
 				continue
 			}
 
@@ -361,6 +372,13 @@ func (n *Node) runChainSelectedNoneWorker(
 			n.liveLifecycleMu.Unlock()
 		}
 	}
+}
+
+func nextChainSelectedNoneRetryInterval(current time.Duration) time.Duration {
+	if current >= chainSelectedNoneMaxRetryInterval/2 {
+		return chainSelectedNoneMaxRetryInterval
+	}
+	return 2 * current
 }
 
 // nodeRecyclerComponents adapts the node's swappable storage/networking

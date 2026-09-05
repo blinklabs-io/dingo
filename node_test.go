@@ -501,6 +501,27 @@ func TestChainSelectedNoneWorkerCancelsDuringLifecycleContention(
 	require.Equal(t, conn, *active)
 }
 
+func TestChainSelectedNoneRetryBackoffCaps(t *testing.T) {
+	delay := chainSelectedNoneInitialRetryInterval
+	delays := make([]time.Duration, 0, 10)
+	for range 10 {
+		delays = append(delays, delay)
+		delay = nextChainSelectedNoneRetryInterval(delay)
+	}
+	require.Equal(t, []time.Duration{
+		10 * time.Millisecond,
+		20 * time.Millisecond,
+		40 * time.Millisecond,
+		80 * time.Millisecond,
+		160 * time.Millisecond,
+		320 * time.Millisecond,
+		640 * time.Millisecond,
+		time.Second,
+		time.Second,
+		time.Second,
+	}, delays)
+}
+
 // TestHandleChainSwitchEventNilChainsyncStateDoesNotPanic covers the window
 // during a live database restore/truncate where n.chainsyncState is nil
 // between closeStorageForLiveLifecycleOp and reinitializeNetworkingCore.
