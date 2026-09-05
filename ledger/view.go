@@ -118,6 +118,16 @@ var _ lcommon.DRepDelegationState = (*LedgerView)(nil)
 // witnesses rather than fail to build.
 var _ eras.ByronProtocolMagicProvider = (*LedgerView)(nil)
 
+// UtxoValidateValueNotConservedUtxo discovers this capability with a runtime
+// type assertion and, unlike the assertions above, degrades rather than fails
+// when it misses: a failed assertion silently refunds a legacy stake
+// deregistration at the current KeyDeposit instead of the deposit actually
+// recorded at registration. Value conservation then passes on the wrong
+// number for every credential registered under a different KeyDeposit, with
+// no error anywhere. A missed assertion is therefore invisible at runtime,
+// which is exactly why it has to be a compile error here.
+var _ lcommon.StakeCredentialDepositState = (*LedgerView)(nil)
+
 func (lv *LedgerView) NetworkId() uint {
 	genesis := lv.ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if genesis == nil {
