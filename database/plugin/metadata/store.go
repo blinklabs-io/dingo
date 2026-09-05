@@ -905,7 +905,7 @@ type TransactionStore interface {
 		lcommon.Transaction,
 		ocommon.Point,
 		uint32, // idx
-		map[int]uint64, // certDeposits: indexed by certificate position in tx.Certificates(); an absent key means the deposit is unknown and is stored as NULL, not zero
+		map[int]uint64, // certDeposits: indexed by certificate position; nil or absent means unknown and is stored as NULL
 		bool, // skipWithdrawalWitness: elide the CIP-0163 account_withdrawal_witness insert (see BatchedTxIngestOpts.SkipWithdrawalWitnessWrite)
 		types.Txn,
 	) error
