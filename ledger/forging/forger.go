@@ -710,7 +710,8 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 				gap,
 			)
 		} else {
-			f.logger.Debug(
+			f.logGateSkip(
+				currentSlot,
 				"forge skip: chain tip is ahead of the current slot",
 				"current_slot", currentSlot,
 				"tip_slot", tipSlot,
@@ -755,7 +756,8 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 				float64(gap),
 			)
 		}
-		f.logger.Debug(
+		f.logGateSkip(
+			currentSlot,
 			"chain syncing from peer, skipping forge",
 			"current_slot", currentSlot,
 			"tip_slot", tipSlot,
@@ -1317,6 +1319,48 @@ func (f *BlockForger) checkOpCertSequence(
 		opCert.IssueNumber,
 		!limits.era.isTPraos(),
 	)
+}
+
+// logGateSkip logs a slot dropped by a gate that runs before leader
+// selection. Such skips are routine and stay at Debug, but one that
+// swallows a slot this node was scheduled to lead is a lost block, and
+// nothing downstream will ever mention that slot again, so it is raised
+// to Warn.
+func (f *BlockForger) logGateSkip(
+	slot uint64,
+	msg string,
+	attrs ...any,
+) {
+	if f.isScheduledLeaderSlot(slot) {
+		f.logger.Warn(msg, append(attrs, "leader_slot", true)...)
+		return
+	}
+	f.logger.Debug(msg, attrs...)
+}
+
+// isScheduledLeaderSlot reports whether slot is one this node is
+// scheduled to lead, by consulting the precomputed VRF leader schedule
+// rather than running leader selection. Election.NextLeaderSlot is a
+// read-locked scan of the cached schedule for the slot's epoch, so it
+// is cheap enough to call on a skip path.
+//
+// It only decides a log level, so it fails quiet: a checker with no
+// cached schedule for that epoch reports false and the skip stays at
+// Debug. A panic in the pluggable checker is recovered for the same
+// reason checkLeaderSafe recovers one — it must not take down the
+// producer-loop goroutine.
+func (f *BlockForger) isScheduledLeaderSlot(slot uint64) (scheduled bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			scheduled = false
+			f.reportForgeCallbackPanic("schedule", r)
+		}
+	}()
+	if f.leaderChecker == nil {
+		return false
+	}
+	next, ok := f.leaderChecker.NextLeaderSlot(slot)
+	return ok && next == slot
 }
 
 // checkLeaderSafe calls the pluggable LeaderChecker, recovering any
