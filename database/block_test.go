@@ -293,3 +293,70 @@ func TestBlockBeforeSlotSyntheticOnlyNotFound(t *testing.T) {
 	_, err := BlockBeforeSlot(db, 120)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }
+
+// TestBlockByNumberResolvesEveryIndexedBlock pins the height-identifier
+// lookup the bark archive service needs: block numbers are not indexed in
+// the blob store, so the resolution is a binary search over the block-ID
+// space and every number in the chain must come back as its own block.
+func TestBlockByNumberResolvesEveryIndexedBlock(t *testing.T) {
+	db := newTestDB(t)
+	blocks := make([]models.Block, 0, 5)
+	for i := uint64(1); i <= 5; i++ {
+		block := testIndexedBlock(i*10, i, byte(i))
+		require.NoError(t, db.BlockCreate(block, nil))
+		blocks = append(blocks, block)
+	}
+
+	for _, want := range blocks {
+		got, err := BlockByNumber(db, want.Number)
+		require.NoError(t, err)
+		require.Equal(t, want.ID, got.ID)
+		require.Equal(t, want.Slot, got.Slot)
+		require.True(t, bytes.Equal(want.Hash, got.Hash))
+	}
+}
+
+// TestBlockByNumberSkipsSparseIndexGap proves the search tolerates gaps in
+// the block-ID space, which a Mithril bootstrap or drain import leaves
+// behind, rather than treating a missing probe as the end of the range. A
+// target above the gap is the discriminating case: a fallback that merely
+// shrinks the upper bound on a missing probe converges into the low range
+// and never finds it.
+func TestBlockByNumberSkipsSparseIndexGap(t *testing.T) {
+	db := newTestDB(t)
+	ids := []uint64{1, 2, 3, 1000, 1001, 1002}
+	blocks := make([]models.Block, 0, len(ids))
+	for i, id := range ids {
+		// #nosec G115 -- fixed small test fixture values.
+		block := testIndexedBlock(id*10, id, byte(i+1))
+		require.NoError(t, db.BlockCreate(block, nil))
+		blocks = append(blocks, block)
+	}
+
+	below, err := BlockByNumber(db, blocks[1].Number)
+	require.NoError(t, err)
+	require.Equal(t, blocks[1].ID, below.ID)
+
+	above, err := BlockByNumber(db, blocks[4].Number)
+	require.NoError(t, err)
+	require.Equal(t, blocks[4].ID, above.ID)
+}
+
+// TestBlockByNumberReportsMissingNumbersAsNotFound proves an absent height
+// is reported as models.ErrBlockNotFound rather than a generic error, which
+// is what lets the bark archive service classify it as a not_found
+// reference instead of failing the whole batch.
+func TestBlockByNumberReportsMissingNumbersAsNotFound(t *testing.T) {
+	db := newTestDB(t)
+
+	_, err := BlockByNumber(db, 1)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+
+	for i := uint64(1); i <= 3; i++ {
+		block := testIndexedBlock(i*10, i, byte(i))
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	_, err = BlockByNumber(db, 99)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}

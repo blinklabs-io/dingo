@@ -1824,8 +1824,11 @@ fallback:
 
 - An archive node uses a signed-URL-capable object-storage blob plugin (`s3` or
   `gcs`) and enables the Bark server with `barkPort`. Bark's archive service
-  maps a requested `(slot, hash)` to the blob store's `GetBlockURL`, returning
-  a signed object URL plus compact block metadata.
+  resolves each requested block reference -- by hash, slot, height, or a
+  consistent combination of them -- to a `(slot, hash)` point, maps that to the
+  blob store's `GetBlockURL`, and returns a signed object URL plus compact
+  block metadata. A reference the node does not hold comes back under
+  `not_found` without discarding the rest of the batch.
 - A node with `historyExpiry.enabled` keeps its local blob plugin and starts
   `internal/historyexpiry.Pruner`. The worker derives its safety window from
   `LedgerState.StabilityWindow()` and scans only blocks older than that window.
@@ -6964,15 +6967,39 @@ services. It exposes archive access over Connect/gRPC and supplies the remote
 archive adapter used by nodes that want historical fallback.
 
 The server side (`bark.Bark`) registers the archive service, health endpoint,
-and gRPC reflection. Archive fetches validate the requested block hash, ask the
-active blob plugin for a signed block URL, and return that URL with block type,
-height, and previous-hash metadata. In practice this makes `s3` and `gcs` the
-archive-node blob backends because they can sign object-storage URLs.
+and gRPC reflection. Archive fetches ask the active blob plugin for a signed
+block URL and return it with block type, height, and previous-hash metadata. In
+practice this makes `s3` and `gcs` the archive-node blob backends because they
+can sign object-storage URLs.
+
+`FetchBlock` resolves each `BlockRef` in the batch by hash and slot together,
+then hash, then slot, then height. Hash and slot together already are the blob
+store's block key, so that case needs no index read and still resolves a block
+written before the hash index existed -- the historical range an archive
+serves. Hash alone is the only identifier unique across forks and resolves
+through the O(1) hash index; slot alone needs a bounded prefix scan; height
+alone is last because block numbers are not indexed at all and resolving one is
+a binary search over the block-ID space (`database.BlockByNumber`). Because the
+point is built from the identifiers the client supplied, hash and slot agree
+with the answer by construction; height is checked against the block metadata
+afterwards.
+
+The batch is answered as a whole. A reference that names no stored block --
+absent, or carrying a height belonging to a different block -- is returned in
+`FetchBlockResponse.not_found` carrying exactly the identifiers the client
+supplied, and every other reference in the batch is still served. Each returned
+`SignedUrl.block` echoes the supplied identifiers verbatim and fills in the
+ones the client omitted, so a hash-only or height-only caller learns the full
+identity. Only a malformed request (no identifier at all, or a hash that is not
+32 hex-encoded bytes) or a genuine storage failure fails the whole call, the
+former with `InvalidArgument`.
 
 The client side (`bark.BlobStoreBark`) wraps the configured local blob store.
 `GetBlock` and block iterators pass through local values, but resolve
 `types.ErrHistoryExpired` or missing historical block CBOR by calling the
-remote Bark archive and downloading the signed URL. Bark does not decide which
+remote Bark archive and downloading the signed URL. A block the archive answers
+under `not_found` surfaces as `types.ErrBlobKeyNotFound`, the same error a
+local blob store reports for a missing block. Bark does not decide which
 local blocks expire; `internal/historyexpiry.Pruner` owns that lifecycle when
 `historyExpiry.enabled` is configured.
 

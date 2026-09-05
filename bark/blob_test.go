@@ -54,6 +54,11 @@ type fakeArchive struct {
 	oversize       bool
 	substituteBody []byte
 
+	// serveNotFound models the archive answering a well-formed request for
+	// a block it does not hold: an empty blocks list with the reference
+	// echoed under not_found, rather than a transport error.
+	serveNotFound bool
+
 	fetchCalls int
 }
 
@@ -65,6 +70,13 @@ func (a *fakeArchive) FetchBlock(
 	resp := &archive.FetchBlockResponse{}
 	for _, b := range req.Msg.GetBlocks() {
 		hashHex := b.GetHash()
+		if a.serveNotFound {
+			resp.NotFound = append(resp.NotFound, &archive.BlockRef{
+				Hash: b.Hash,
+				Slot: b.Slot,
+			})
+			continue
+		}
 		if _, ok := a.blocks[hashHex]; !ok {
 			a.t.Fatalf("fakeArchive: unexpected block requested: %s", hashHex)
 		}
@@ -1032,4 +1044,28 @@ func TestBarkIterator_PassesThroughLiveValues(t *testing.T) {
 
 	assert.Zero(t, archiveSrv.fetchCalls,
 		"no archive call must occur when no tombstones are present")
+}
+
+// TestGetBlock_ReportsArchiveNotFoundAsMissingKey pins the client half of
+// the batched archive contract: a block the archive does not hold now comes
+// back as an ordinary response carrying a not_found reference, not as a
+// transport error, and the wrapper has to translate that into the same
+// types.ErrBlobKeyNotFound a local blob store reports so callers can tell a
+// missing block from a broken archive.
+func TestGetBlock_ReportsArchiveNotFoundAsMissingKey(t *testing.T) {
+	db := newTestDB(t)
+	block := archiveBlockFixtures(t, 1)[0]
+
+	blocks, configure := serveArchiveBlock(t, block)
+	baseURL, fakeArch, httpClient := startFakeArchive(t, blocks)
+	configure(fakeArch)
+	fakeArch.serveNotFound = true
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	hash := block.Hash()
+	_, _, err := store.GetBlock(rTxn, block.SlotNumber(), hash[:])
+	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
 }
