@@ -91,4 +91,21 @@ func TestGetBlockVerifiesContent(t *testing.T) {
 		require.Equal(t, notABlock, gotCbor)
 		require.Equal(t, uint64(0), meta.ID)
 	})
+
+	t.Run("ID=0 with a nonzero type is still verified", func(t *testing.T) {
+		// Only the exact (ID, Type) == (0, 0) synthetic marker skips
+		// verification. A real chain block never has both zero, so this
+		// proves an ID==0 row with a nonzero type -- however it got that
+		// way -- still gets its content checked rather than silently
+		// passing through as though it were a synthetic entry.
+		requestedHash := realBlock.Hash()
+		txn := store.NewTransaction(true)
+		require.NoError(t, store.SetBlock(
+			txn, 3000, requestedHash[:], otherBlock.Cbor(),
+			0, uint(gledger.BlockTypeConway), 1, nil,
+		))
+
+		_, _, err := store.GetBlock(txn, 3000, requestedHash[:])
+		require.ErrorIs(t, err, blockverify.ErrHashMismatch)
+	})
 }

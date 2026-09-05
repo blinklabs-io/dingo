@@ -101,6 +101,26 @@ func Hash(
 // Byron is exempt: its hash is taken over the block-type byte followed by
 // the header, so its era is already bound by the hash check above and
 // there is nothing further to derive.
+//
+// Known accepted gap for Byron main blocks specifically: gouroboros checks
+// their transaction, delegation, and update proofs but not ssc_proof,
+// because the SSC proof hashes cardano-ledger's own encoding of the
+// sub-payloads rather than the bytes carried in the block -- an upstream
+// limitation, not something derivable here. An alteration confined to the
+// SSC payload therefore changes nothing Hash checks (hash, slot, and era
+// all come from the untouched header). Bark's own archive-fetch path hits
+// this identical gap and closes it by rejecting Byron main blocks
+// entirely (see assertBodyFullyAuthenticated in bark/blob.go) -- but bark
+// treats a remote archive as an optional, distrusted fallback behind a
+// trusted local store, so refusing one era there costs only availability
+// of a path that has a fallback. Hash instead guards the *primary*
+// GetBlock path for S3/GCS: rejecting Byron main blocks here would make
+// every Byron-era block permanently unretrievable from an S3/GCS-backed
+// node (needed for a from-genesis sync, or serving historical API
+// queries), a full functional regression traded for closing a gap that is
+// narrow -- confined to one payload, in one era, on a store the operator
+// already configured and trusted enough to write real chain data into in
+// the first place. Accepted as a documented risk rather than rejected.
 func checkEra(decoded gledger.Block, blockType uint) error {
 	if blockType == gledger.BlockTypeByronEbb ||
 		blockType == gledger.BlockTypeByronMain {

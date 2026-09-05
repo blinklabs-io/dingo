@@ -585,16 +585,33 @@ func (t *Txn) rollback() error {
 	defer t.finishLocked()
 	var errs []error
 	if t.blobTxn != nil {
-		if err := t.blobTxn.Rollback(); err != nil {
+		if err := safeProviderRollback(t.blobTxn); err != nil {
 			errs = append(errs, fmt.Errorf("blob rollback: %w", err))
 		}
 	}
 	if t.metadataTxn != nil {
-		if err := t.metadataTxn.Rollback(); err != nil {
+		if err := safeProviderRollback(t.metadataTxn); err != nil {
 			errs = append(errs, fmt.Errorf("metadata rollback: %w", err))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// safeProviderRollback calls txn.Rollback(), recovering and converting to
+// an error any panic it raises. Without this, a panic from the blob
+// store's Rollback would skip the metadata store's Rollback entirely (and
+// vice versa): rollback's own finishLocked defer would still mark the
+// transaction finished, but finished is exactly what makes a later
+// Rollback/Release call a no-op, so there would be no way to ever retry
+// the provider whose Rollback never ran -- silently leaking its
+// connection/transaction for the process's lifetime.
+func safeProviderRollback(txn types.Txn) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panicked: %v", r)
+		}
+	}()
+	return txn.Rollback()
 }
 
 // Release releases transaction resources. For read-only transactions, this

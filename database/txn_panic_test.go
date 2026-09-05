@@ -175,7 +175,83 @@ func TestTxnDoCommitAndRollbackBothPanicReturnsErrorAndReleasesBarrier(
 		time.Second,
 		"PauseCommits must acquire after panic cleanup",
 	)
+
+	writerOpened := make(chan struct{})
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		next := &Txn{db: db, readWrite: true}
+		acquireCommitBarrier(next, true)
+		close(writerOpened)
+		_ = next.Rollback()
+	}()
+	testutil.RequireNoReceive(
+		t,
+		writerOpened,
+		100*time.Millisecond,
+		"the pause must still exclude a new writer",
+	)
 	resume()
+	testutil.RequireReceive(
+		t,
+		writerOpened,
+		time.Second,
+		"the next writer must open after resume",
+	)
+	testutil.RequireReceive(
+		t,
+		writerDone,
+		time.Second,
+		"the next writer must roll back during cleanup",
+	)
+}
+
+type panicRollbackTxn struct{}
+
+func (*panicRollbackTxn) Commit() error   { return nil }
+func (*panicRollbackTxn) Rollback() error { panic("blob rollback panic") }
+
+type trackingRollbackTxn struct {
+	rollbackCount int
+}
+
+func (*trackingRollbackTxn) Commit() error { return nil }
+func (t *trackingRollbackTxn) Rollback() error {
+	t.rollbackCount++
+	return nil
+}
+
+// TestTxnRollbackAttemptsBothStoresWhenOnePanics proves a panic from one
+// provider's Rollback (blobTxn here) does not prevent the other
+// (metadataTxn) from being rolled back too. Without this, finished would
+// still end up true (finishLocked's own defer runs during the panic
+// unwind), but finished is exactly what makes a later Rollback/Release
+// call a no-op -- so metadataTxn's own Rollback would never run at all,
+// silently leaking its connection/transaction for the process's lifetime
+// with no way to ever retry it.
+func TestTxnRollbackAttemptsBothStoresWhenOnePanics(t *testing.T) {
+	metadataTxn := &trackingRollbackTxn{}
+	txn := &Txn{
+		db: &Database{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		blobTxn:     &panicRollbackTxn{},
+		metadataTxn: metadataTxn,
+		readWrite:   true,
+	}
+
+	var err error
+	require.NotPanics(t, func() {
+		err = txn.Rollback()
+	})
+	require.ErrorContains(t, err, "blob rollback")
+	require.ErrorContains(t, err, "panicked")
+	require.Equal(t, 1, metadataTxn.rollbackCount,
+		"the metadata store's Rollback must still be attempted even "+
+			"though the blob store's Rollback panicked")
+	require.True(t, txn.finished,
+		"the transaction must still be marked finished so it isn't "+
+			"rolled back twice")
 }
 
 // panicFnTxn is a no-op metadata Txn used where the panic under test comes

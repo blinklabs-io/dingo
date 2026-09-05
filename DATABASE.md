@@ -1326,24 +1326,44 @@ overflow `uint32` and wrap past the check.
 
 S3 and GCS `GetBlock` re-derive a block's identity from its returned bytes
 (`blockverify.Hash`, `database/plugin/blob/internal/blockverify`) before
-handing them to a caller, for every `bp..._metadata` entry with `ID != 0`
-(a real chain block; see the `ID==0` synthetic-entry note above) -- neither
-backend offers a content-addressing guarantee of its own, so corruption, an
-eventual-consistency stale read, or a misdirected request could otherwise
-return bytes for a different block than the one asked for. The check
-verifies three things, all independently derived from the decoded bytes
-rather than trusted from the caller's claim: the decoded block's own hash
-matches the requested `bp` key's hash; its own slot matches the requested
-slot (a hash match alone does not pin the point); and, since the block hash
-for Shelley and later eras covers only the header and adjacent eras share
-that header layout -- so the same bytes can decode, with an identical hash
-and slot, under more than one era -- the era independently derived from the
-decoded header (`gledger.DetermineBlockType`) matches the type recorded in
+handing them to a caller, for every `bp..._metadata` entry except the exact
+`(ID, Type) == (0, 0)` synthetic-entry marker (see the `ID==0` note above;
+checking both fields, not `ID` alone, keeps a real block that somehow ended
+up with `ID == 0` from silently skipping verification instead of failing
+it) -- neither backend offers a content-addressing guarantee of its own, so
+corruption, an eventual-consistency stale read, or a misdirected request
+could otherwise return bytes for a different block than the one asked for.
+The check verifies three things, all independently derived from the
+decoded bytes rather than trusted from the caller's claim: the decoded
+block's own hash matches the requested `bp` key's hash; its own slot
+matches the requested slot (a hash match alone does not pin the point);
+and, since the block hash for Shelley and later eras covers only the
+header and adjacent eras share that header layout -- so the same bytes can
+decode, with an identical hash and slot, under more than one era -- the
+era independently derived from the decoded header
+(`gledger.DetermineBlockType`) matches the type recorded in
 `bp..._metadata`. Bark's archive fetch already re-verifies its downloaded
 blocks the same way (`verifyArchiveBlock`/`blockEraFromHeader`), which this
 mirrors; it closes the equivalent gap for the two cloud object-store blob
 backends. Badger's local `GetBlock` trusts its own on-disk storage and is
 not changed.
+
+One documented, accepted gap: gouroboros checks a Byron main block's
+transaction, delegation, and update proofs but not its `ssc_proof` (an
+upstream limitation -- the SSC proof hashes cardano-ledger's own encoding
+of the sub-payloads rather than the bytes carried in the block), so an
+alteration confined to that one payload changes nothing the checks above
+verify. Bark's archive-fetch path hits the identical gap and closes it by
+rejecting Byron main blocks outright, but bark treats a remote archive as
+an optional, distrusted fallback behind a trusted local store, so refusing
+one era there only costs the availability of a path that has a fallback.
+`blockverify.Hash` guards the *primary* `GetBlock` path for S3/GCS instead:
+rejecting Byron main blocks there would make every Byron-era block
+permanently unretrievable from an S3/GCS-backed node (needed for a
+from-genesis sync, or serving historical API queries), trading a
+narrow, single-payload, single-era gap on storage the operator already
+configured and trusted for a full functional regression. Accepted rather
+than rejected; see the comment on `checkEra` in `blockverify.go`.
 
 Leios endorser-block storage uses the same blob-key namespace, even though an
 endorser block is not part of the ranking-block chain. When a Dijkstra ranking

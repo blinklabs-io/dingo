@@ -739,13 +739,15 @@ func (d *BlobStoreGCS) GetBlock(
 	}
 	// GCS offers no content-addressing guarantee: re-derive the block's
 	// identity from its bytes rather than trusting the (slot, hash) key
-	// used to fetch it. ID==0 marks a synthetic, non-block entry sharing
-	// this same bp/bp..._metadata key layout (SetGenesisCbor: genesis
-	// UTxO CBOR or a Leios endorser-block manifest, neither of which is a
-	// decodable ledger block), which real chain blocks never have --
-	// BlockCreate always assigns ID >= 1 -- so verification only applies
-	// to genuine blocks.
-	if tmpMetadata.ID != 0 {
+	// used to fetch it. (ID, Type) == (0, 0) marks a synthetic, non-block
+	// entry sharing this same bp/bp..._metadata key layout
+	// (SetGenesisCbor: genesis UTxO CBOR or a Leios endorser-block
+	// manifest, neither of which is a decodable ledger block); a real
+	// chain block never has both zero -- BlockCreate always assigns
+	// ID >= 1 regardless of type. Checking both, not ID alone, keeps a
+	// real block that somehow ended up with ID == 0 from silently
+	// skipping verification instead of failing it.
+	if tmpMetadata.ID != 0 || tmpMetadata.Type != 0 {
 		if _, err := blockverify.Hash(
 			tmpMetadata.Type,
 			slot,
