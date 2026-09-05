@@ -26,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1581,4 +1582,135 @@ INSERT INTO reward_pool_input (
 		paramEpoch,
 	).Scan(&snapshots))
 	require.Zero(t, snapshots, "the mark rows must be gone")
+}
+
+// TestCheckAccountRewardsPendingWiring is the other half of
+// TestAccountRewardsPendingFold: that fold pins what checkEpoch decides, this
+// pins that checkEpoch's decision is the one the account comparison actually
+// receives. Neither test alone would notice a call site that passed a
+// constant.
+//
+// The two subtests differ only in the chain tip. Below the pool's applying
+// boundary the epoch's rewards are not computed yet, so an account amount
+// difference is a statement about timing and is reported as reference_lag; at
+// the boundary the same fixture is a real disagreement and stays
+// value_mismatch. Everything else — the Dingo rows, the cached Koios rows,
+// the epoch — is identical between them.
+func TestCheckAccountRewardsPendingWiring(t *testing.T) {
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+	const stakeEpoch = koiosEpoch - 1
+	const boundarySlot = uint64(1_000_000)
+
+	run := func(t *testing.T, tipSlot uint64) []CheckMismatch {
+		t.Helper()
+		dingoDir, gdb := newTestDingoDB(t)
+		poolHash := testPoolKeyHash(t, 0x03)
+		stakingKey := testPoolKeyHash(t, 0x42)
+
+		require.NoError(t, gdb.Create(&models.EpochSummary{
+			Epoch:            stakeEpoch,
+			TotalActiveStake: types.Uint64(5_000_000),
+			SnapshotReady:    true,
+		}).Error)
+		require.NoError(t, gdb.Create(&models.RewardPoolInput{
+			Epoch:          stakeEpoch,
+			PoolKeyHash:    poolHash,
+			DelegatedStake: types.Uint64(5_000_000),
+			DelegatorCount: 1,
+		}).Error)
+		// The pool's own reward output carries the applying boundary, which
+		// is what GetPoolEpochDataMap compares the tip against.
+		require.NoError(t, gdb.Create(&models.RewardPoolOutput{
+			Epoch:             stakeEpoch,
+			PoolKeyHash:       poolHash,
+			MemberRewardTotal: types.Uint64(2_000_000),
+			BoundarySlot:      boundarySlot,
+		}).Error)
+		require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+			Epoch:       stakeEpoch,
+			StakingKey:  stakingKey,
+			PoolKeyHash: poolHash,
+			RewardType:  "member",
+			Amount:      types.Uint64(2_000_000),
+			Spendable:   true,
+		}).Error)
+		require.NoError(t, gdb.Exec(
+			`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
+			[]byte{0x01}, tipSlot, 1,
+		).Error)
+
+		sqlDB, err := gdb.DB()
+		require.NoError(t, err)
+		require.NoError(t, sqlDB.Close())
+
+		addr, err := StakeAddressFromCredential(stakingKey, 0)
+		require.NoError(t, err)
+
+		cachePath := filepath.Join(t.TempDir(), "cache.db")
+		cache, err := OpenCache(cachePath, nil)
+		require.NoError(t, err)
+		defer cache.Close() //nolint:errcheck
+
+		fetchedAt := time.Now().Add(-time.Hour).UTC()
+		require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+			Network:      network,
+			Epoch:        koiosEpoch,
+			ActiveStake:  "5000000",
+			EpochEndTime: fetchedAt,
+			FetchedAt:    fetchedAt,
+		}, nil, &KoiosTotals{
+			Network:   network,
+			Epoch:     koiosEpoch,
+			FetchedAt: fetchedAt,
+		}))
+		require.NoError(t, cache.CommitAccountRewardsForEpoch(
+			network,
+			koiosEpoch,
+			[]KoiosAccountRewards{{
+				StakeAddress: addr,
+				RewardType:   "member",
+				Earned:       "2000001", // one lovelace off
+				FetchedAt:    fetchedAt,
+			}},
+			1,
+			true,
+			fetchedAt,
+		))
+
+		_, err = Check(context.Background(), CheckConfig{
+			Network:         network,
+			DingoDB:         DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+			CachePath:       cachePath,
+			AccountsEnabled: true,
+			// No grace window, so the wall-clock path cannot be what
+			// downgrades the mismatch.
+			GraceHours: 0,
+		}, slog.New(slog.DiscardHandler))
+		require.NoError(t, err)
+
+		all, err := cache.GetMismatches(network, koiosEpoch, "")
+		require.NoError(t, err)
+		var acct []CheckMismatch
+		for _, m := range all {
+			if m.Field == "account_reward_amount" {
+				acct = append(acct, m)
+			}
+		}
+		return acct
+	}
+
+	t.Run("before the boundary the amount difference is a lag", func(t *testing.T) {
+		acct := run(t, boundarySlot-1)
+		require.Len(t, acct, 1)
+		assert.Equal(t, CategoryReferenceLag, acct[0].Category,
+			"checkEpoch must pass the pending answer to the account comparison")
+	})
+
+	t.Run("at the boundary the same difference is a divergence", func(t *testing.T) {
+		acct := run(t, boundarySlot)
+		require.Len(t, acct, 1)
+		assert.Equal(t, CategoryValueMismatch, acct[0].Category,
+			"once the rewards are applied the comparison must stay strict")
+	})
 }

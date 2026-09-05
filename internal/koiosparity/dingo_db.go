@@ -519,6 +519,14 @@ func (d *DingoDB) GetPoolEpochDataMap(
 	// the node reaches that slot their absence is expected rather than a gap.
 	// An epoch missing from the table means the node has plainly not reached
 	// it. Mirrors DatabaseSource; see DingoPoolEpochData.RewardsPending.
+	//
+	// The three outcomes below are three different claims and are kept apart.
+	// Only an absent row asserts "the node has not reached E+3"; a failed read
+	// or a row whose start slot is unusable asserts nothing at all, and per
+	// RewardsPending's contract a source that cannot establish the boundary
+	// must leave the comparison strict rather than downgrade a real divergence
+	// to a lag. That is the same direction the tip read above takes when it
+	// cannot establish a tip.
 	epochRewardsPending := false
 	if tipKnown {
 		var startSlot sql.NullInt64
@@ -527,10 +535,15 @@ func (d *DingoDB) GetPoolEpochDataMap(
 			stakeEpoch+3,
 		).Scan(&startSlot)
 		switch {
-		case err != nil || !startSlot.Valid || startSlot.Int64 < 0:
-			// A negative start slot is not representable and means the row
-			// cannot be trusted, which is the same position as not having it.
+		case errors.Is(err, sql.ErrNoRows):
+			// The applying epoch is not in the table: the node has plainly
+			// not reached it.
 			epochRewardsPending = true
+		case err != nil:
+			// The read failed. Nothing is known about the boundary.
+		case !startSlot.Valid || startSlot.Int64 < 0:
+			// A NULL or negative start slot is not a representable boundary,
+			// so the row is unusable — again, nothing is known.
 		default:
 			epochRewardsPending = tipSlot < uint64(startSlot.Int64)
 		}

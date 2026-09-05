@@ -287,11 +287,20 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 	// before the node reaches that slot their absence is expected rather than a
 	// gap. When that epoch is not in the table at all the node has plainly not
 	// reached it, which is the common case for an observer near the tip.
+	//
+	// A failed read is a different claim from an absent row and is kept
+	// separate: GetEpoch reports "no such epoch" as (nil, nil), so a non-nil
+	// error means the boundary could not be established at all. Per
+	// RewardsPending's contract that must leave the comparison strict rather
+	// than downgrade a real divergence to a lag — the same direction the tip
+	// read above takes. Mirrors DingoDB.
 	epochRewardsPending := false
 	if tipKnown {
 		applyEpoch, err := meta.GetEpoch(stakeEpoch+3, txn.Metadata())
 		switch {
-		case err != nil || applyEpoch == nil:
+		case err != nil:
+			// Nothing is known about the boundary.
+		case applyEpoch == nil:
 			epochRewardsPending = true
 		default:
 			epochRewardsPending = tipSlot < applyEpoch.StartSlot

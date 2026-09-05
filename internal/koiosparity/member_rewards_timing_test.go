@@ -233,3 +233,61 @@ func TestCompareAccountEpochPendingRewardsAreALag(t *testing.T) {
 		}
 	})
 }
+
+// TestAccountRewardsPendingFold pins the decision checkEpoch makes about
+// whether the whole epoch's account comparison may be downgraded.
+//
+// member_rewards_timing_test.go's other cases hand rewardsPending to
+// CompareAccountEpoch directly, so they never reach this fold — replacing it
+// with a bare `true` left the entire package green. It is the code that
+// decides whether every account-level presence *and* amount mismatch in an
+// epoch is waived, and the two guards that keep it narrow (every entry, not
+// any; an empty or nil-bearing map claims nothing) are what needed pinning.
+func TestAccountRewardsPendingFold(t *testing.T) {
+	pending := func(v bool) *DingoPoolEpochData {
+		return &DingoPoolEpochData{RewardsPending: v}
+	}
+	for _, tc := range []struct {
+		name string
+		in   map[string]*DingoPoolEpochData
+		want bool
+	}{{
+		name: "every pool pending",
+		in: map[string]*DingoPoolEpochData{
+			"aa": pending(true), "bb": pending(true),
+		},
+		want: true,
+	}, {
+		name: "one pool past its boundary keeps the epoch strict",
+		in: map[string]*DingoPoolEpochData{
+			"aa": pending(true), "bb": pending(false),
+		},
+		want: false,
+	}, {
+		// The map is the only evidence available, so having none of it is not
+		// evidence that the rewards are pending.
+		name: "an empty map claims nothing",
+		in:   map[string]*DingoPoolEpochData{},
+		want: false,
+	}, {
+		name: "a nil map claims nothing",
+		in:   nil,
+		want: false,
+	}, {
+		// A nil entry is an absence of information about that pool, and one
+		// pool with no answer is enough to keep the epoch strict.
+		name: "a nil entry claims nothing",
+		in: map[string]*DingoPoolEpochData{
+			"aa": pending(true), "bb": nil,
+		},
+		want: false,
+	}, {
+		name: "a single pending pool is enough when it is the only one",
+		in:   map[string]*DingoPoolEpochData{"aa": pending(true)},
+		want: true,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, accountRewardsPending(tc.in))
+		})
+	}
+}
