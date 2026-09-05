@@ -208,7 +208,8 @@ func (ls *LedgerState) publishBlockEvent(
 }
 
 // validateAndEmitRollbackUndo rejects a rollback that the chain will not
-// accept, then emits the undo events for the blocks it is about to discard.
+// accept, durably records the block bodies needed for undo notification
+// recovery, then emits the undo events for the blocks it is about to discard.
 //
 // The two steps belong together and callers must use this rather than pairing
 // them by hand. The emit has to happen before the truncation for ordering (see
@@ -218,6 +219,11 @@ func (ls *LedgerState) publishBlockEvent(
 // prevent. Keeping the validate inseparable from the emit is what stops a new
 // rollback path from acquiring the emit without the guard, which is how
 // rollbackPrimaryChainInSecurityParamWindows initially shipped it.
+//
+// The durable record is written before the emit and before chain rollback. A
+// chain rollback deletes the block bodies, so persisting only the point after
+// the chain mutation would leave recovery unable to reconstruct the events if
+// metadata truncation then fails.
 //
 // It does not close the window completely: the chain can still grow between
 // this validation and the rollback and push the rollback past the security
@@ -229,27 +235,23 @@ func (ls *LedgerState) validateAndEmitRollbackUndo(
 	if err := ls.chain.ValidateRollback(point); err != nil {
 		return err
 	}
-	ls.emitRollbackTransactionEvents(ls.blocksAboveSlot(point.Slot))
+	blocks, err := ls.readBlocksAboveSlot(point.Slot)
+	if err != nil {
+		return fmt.Errorf("read rollback undo blocks: %w", err)
+	}
+	if err := persistRollbackIntent(ls.db, point, blocks); err != nil {
+		return err
+	}
+	ls.emitRollbackTransactionEvents(blocks)
 	return nil
 }
 
-// blocksAboveSlot returns the blocks a rollback to slot would discard,
-// newest first, or nil when they cannot be read.
-//
-// The descending order matters: it is the reverse of the order the blocks
-// were applied in, which is the order their effects have to be undone in, and
-// it matches the order chain.rollbackLocked itself reports rolled-back blocks
-// (it walks the chain down from the tip). BlocksAfterSlotTxn returns ascending
-// slot order, so the result is reversed here.
-//
-// It must be called before the chain is truncated, while those blocks still
-// exist. A read failure is logged and yields no undo events rather than
-// failing the rollback: the rollback itself is what keeps the ledger correct,
-// and refusing to roll back because a notification could not be built would
-// trade a subscriber's derived state for the node's own.
-func (ls *LedgerState) blocksAboveSlot(slot uint64) []models.Block {
+// readBlocksAboveSlot returns the blocks a rollback to slot would discard,
+// newest first. Unlike blocksAboveSlot, it returns storage errors so the
+// caller can fail before mutating the chain without a durable undo payload.
+func (ls *LedgerState) readBlocksAboveSlot(slot uint64) ([]models.Block, error) {
 	if ls.config.EventBus == nil || ls.db == nil {
-		return nil
+		return nil, nil
 	}
 	// Skip the read entirely when nothing consumes ledger.tx, which is the
 	// default node: this runs under chainsyncMutex on every rollback, and
@@ -265,7 +267,7 @@ func (ls *LedgerState) blocksAboveSlot(slot uint64) []models.Block {
 	// ledger.error would otherwise stop seeing rollback decode failures.
 	if !ls.config.EventBus.HasSubscribers(TransactionEventType) &&
 		!ls.config.EventBus.HasSubscribers(LedgerErrorEventType) {
-		return nil
+		return nil, nil
 	}
 	var blocks []models.Block
 	txn := ls.db.Transaction(false)
@@ -275,14 +277,8 @@ func (ls *LedgerState) blocksAboveSlot(slot uint64) []models.Block {
 		return err
 	})
 	if err != nil {
-		ls.config.Logger.Warn(
-			"failed to read rolled-back blocks for tx undo events",
-			"component", "ledger",
-			"error", err,
-			"slot", slot,
-		)
-		return nil
+		return nil, err
 	}
 	slices.Reverse(blocks)
-	return blocks
+	return blocks, nil
 }

@@ -1021,6 +1021,15 @@ type LedgerState struct {
 	mithrilLedgerHash      []byte // hash for mithrilLedgerSlot, used as a stable chainsync intersect point
 	lastLocalRollbackSeq   uint64
 	lastLocalRollbackPoint ocommon.Point
+	// rollbackTruncateAfterSlotFunc is a deterministic failure seam for the
+	// rollback recovery test. Production uses Database.TruncateAfterSlot;
+	// keeping the seam on LedgerState avoids changing the database contract just
+	// to make a provider failure reproducible.
+	rollbackTruncateAfterSlotFunc func(
+		ocommon.Point,
+		uint64,
+		*database.Txn,
+	) (ochainsync.Tip, []byte, error)
 
 	// Subscription IDs for event bus unsubscribe on close
 	chainsyncSubID           event.EventSubscriberId
@@ -1666,6 +1675,14 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 			event.EpochTransitionEventType,
 			ls.handleRewardPrecomputeEpochTransition,
 		)
+	}
+	// Complete any rollback whose chain mutation or metadata truncation was
+	// interrupted after its undo outbox was committed. This runs after the
+	// ledger-owned subscriptions are installed so a recovered undo can reach
+	// the same consumers as a live rollback, and before reconciliation or block
+	// processing can publish events for the restored chain.
+	if err := ls.recoverRollbackIntent(); err != nil {
+		return fmt.Errorf("recover interrupted ledger rollback: %w", err)
 	}
 	// Now that both tip and epoch are loaded, check whether the safe zone
 	// already covers the epoch end (TransitionImpossible).  This handles the
@@ -2962,11 +2979,21 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	currentTip := ls.currentTip
 	mithrilLedgerSlot := ls.mithrilLedgerSlot
 	ls.RUnlock()
+	// The in-memory tip is still needed for the equal-point repair path. The
+	// durable tip is used below for the ahead check because commit callbacks can
+	// leave the in-memory value behind a committed block-apply transaction.
+	durableTip, err := ls.db.GetTip(nil)
+	if err != nil {
+		return fmt.Errorf("read durable ledger tip: %w", err)
+	}
 	if currentTip.Point.Slot == point.Slot &&
 		bytes.Equal(currentTip.Point.Hash, point.Hash) {
-		return ls.enforceDurableTipFloor()
+		if err := ls.enforceDurableTipFloor(); err != nil {
+			return err
+		}
+		return clearRollbackIntent(ls.db)
 	}
-	if point.Slot > currentTip.Point.Slot {
+	if point.Slot > durableTip.Point.Slot {
 		ls.config.Logger.Debug(
 			"rollback point ahead of ledger tip, skipping metadata rollback",
 			"component", "ledger",
@@ -2975,10 +3002,13 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			"rollback_hash", hex.EncodeToString(point.Hash),
 			"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
 		)
-		return nil
+		return clearRollbackIntent(ls.db)
 	}
 	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
 		return ErrRollbackExceedsMithrilBoundary
+	}
+	if err := ls.ensureRollbackIntent(point); err != nil {
+		return fmt.Errorf("prepare rollback intent: %w", err)
 	}
 	// Bracket every rollback mutation so split reward precomputation cannot
 	// persist results that mixed pre- and post-rollback blocks, pots, protocol
@@ -2999,7 +3029,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	// CIP-0163 reward-account expiration hooks (ledger-owned, since they
 	// need the epoch schedule) and captures the resulting tip/nonce for
 	// the in-memory cache reload below.
-	err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
+	err = ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
 		// CIP-0163: capture the reward-account credentials witnessed in the
 		// rolled-away blocks (added_slot > rollback slot) before
 		// TruncateAfterSlot's certificate/reward-withdrawal deletes remove
@@ -3021,11 +3051,19 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			}
 		}
 		var err error
-		newTip, newNonce, err = ls.db.TruncateAfterSlot(
-			point,
-			mithrilLedgerSlot,
-			txn,
-		)
+		if ls.rollbackTruncateAfterSlotFunc != nil {
+			newTip, newNonce, err = ls.rollbackTruncateAfterSlotFunc(
+				point,
+				mithrilLedgerSlot,
+				txn,
+			)
+		} else {
+			newTip, newNonce, err = ls.db.TruncateAfterSlot(
+				point,
+				mithrilLedgerSlot,
+				txn,
+			)
+		}
 		if err != nil {
 			return err
 		}
@@ -3275,7 +3313,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	if err := ls.enforceDurableTipFloor(); err != nil {
 		return err
 	}
-	return nil
+	return clearRollbackIntent(ls.db)
 }
 
 // drainBlockPipelineBeforeRollback waits, up to
