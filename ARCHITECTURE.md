@@ -9,7 +9,7 @@ provider configuration, service, and dependency bundles.
 
 Startup resolves storage, constructs database and ledger, resolves mempool,
 then resolves the enabled API capabilities. Each API provider (Blockfrost,
-Mesh, UTxO RPC) is resolved only in API storage mode and only when its
+Kupo, Mesh, UTxO RPC) is resolved only in API storage mode and only when its
 configured port is nonzero, so core-mode nodes and disabled ports resolve
 none of them. Failures unwind providers in reverse order. Normal shutdown
 orders APIs, mempool, ledger/database, then storage.
@@ -251,6 +251,7 @@ graph TB
     subgraph "External Interfaces"
         URPC["UTxO RPC<br/><i>api/utxorpc/</i>"]
         BFA["Blockfrost API<br/><i>api/blockfrost/</i>"]
+        Kupo["Kupo API<br/><i>api/kupo/</i>"]
         Mesh["Mesh API<br/><i>api/mesh/</i>"]
         Bark["Bark<br/><i>bark/</i>"]
         MidnightIndex["Midnight indexer<br/><i>midnight/indexer/</i>"]
@@ -264,7 +265,7 @@ graph TB
     EB["EventBus<br/><i>event/</i>"]
 
     Node --> CM & PG & OB & ChM & LS & MP & DB & EB
-    Node -.->|"optional"| BF & LE & URPC & BFA & Mesh & Bark & MidnightIndex & Midnight & HExpiry & DBLC
+    Node -.->|"optional"| BF & LE & URPC & BFA & Kupo & Mesh & Bark & MidnightIndex & Midnight & HExpiry & DBLC
 
     PG -->|"outbound conn requests"| CM
     CM -->|"connections"| OB
@@ -283,7 +284,7 @@ graph TB
     CS -->|"stall detection"| CM
 
     EB -.->|"events"| LS & ChM & CS & CSel & PG & SM & DBLC & OB & MP & MidnightIndex
-    URPC & BFA & Mesh -.-> LS & DB
+    URPC & BFA & Kupo & Mesh -.-> LS & DB
     Bark -.-> DB
     MidnightIndex -.-> DB
     Midnight -.-> DB
@@ -338,6 +339,7 @@ graph LR
     intrecycler["internal/chainsyncrecycler"]
     utxorpc["api/utxorpc"]
     blockfrost["api/blockfrost"]
+    kupo["api/kupo"]
     mesh["api/mesh"]
     bark["bark"]
     midnight["midnight/{indexer,server}"]
@@ -348,7 +350,7 @@ graph LR
     root --> ledger & ledger_forging & ledger_leader & ledger_leios & ledger_snapshot
     root --> mempool & ouroboros & peergov & topology & plugin & intplugins
     root --> intnode_ledgerpeers & intrecycler & intdblifecycle & midnight
-    root --> utxorpc & blockfrost & mesh & bark & cardano_cfg
+    root --> utxorpc & blockfrost & kupo & mesh & bark & cardano_cfg
 
     cmd --> root & cardano_cfg & db & db_models & plugin & intplugins
     cmd --> intcfg & intnode & ledgerstate & ledger_eras
@@ -387,7 +389,7 @@ graph LR
 
     intcfg --> plugin & topology
     intplugins --> plugin & db_blob_impl & db_meta_impl & mempool
-    intplugins --> utxorpc & blockfrost & mesh
+    intplugins --> utxorpc & blockfrost & kupo & mesh
     intnode --> root & chain & chainsync & cardano_cfg
     intnode --> db & db_immutable & db_models & db_meta
     intnode --> ledger & ledger_eras & ledger_governance & intcfg
@@ -397,6 +399,7 @@ graph LR
 
     utxorpc --> chain & cardano_cfg & db & db_models & ev
     utxorpc --> ledger & ledger_eras & mempool & plugin
+    kupo --> db & db_models & ledger & plugin
     mesh --> chain & db & db_models & ev & ledger & mempool & plugin
     blockfrost --> db & db_models & db_meta_util & ledger & ledger_eras & mempool & plugin
     bark --> db & db_blob & db_types & db_lifecycle
@@ -864,6 +867,14 @@ dingo/
 │   │   ├── handlers.go      # HTTP handlers
 │   │   ├── pagination.go    # Cursor-based pagination
 │   │   └── types.go         # API response types
+│   ├── kupo/                # Kupo-compatible chain-index REST API
+│   │   ├── adapter.go       # Ledger/database state adapter
+│   │   ├── config.go        # Resolved listener configuration
+│   │   ├── handlers.go      # HTTP handlers
+│   │   ├── pattern.go       # Kupo pattern parsing and matching
+│   │   ├── provider.go      # Plugin provider registration
+│   │   ├── server.go        # HTTP listener lifecycle
+│   │   └── types.go         # Package-local interface and response types
 │   ├── mesh/                # Mesh (Rosetta) API
 │   │   ├── mesh.go          # Server lifecycle
 │   │   ├── network.go       # /network/* endpoints
@@ -1061,11 +1072,12 @@ When `Node.Run()` is called, components are initialized in this order:
 21. Midnight gRPC server (if API storage mode and
     `midnight.serverEnabled`, with a non-zero port)
 22. Blockfrost API (if API storage mode and port configured)
-23. Mesh API (if API storage mode and port configured)
-24. Off-chain metadata fetcher (if API storage mode)
-25. CIP-26 token registry sync (if API storage mode and tokenRegistry.enabled)
-26. Block forger + leader election (if block producer mode)
-27. Wait for shutdown signal
+23. Kupo API (if API storage mode and port configured)
+24. Mesh API (if API storage mode and port configured)
+25. Off-chain metadata fetcher (if API storage mode)
+26. CIP-26 token registry sync (if API storage mode and tokenRegistry.enabled)
+27. Block forger + leader election (if block producer mode)
+28. Wait for shutdown signal
 ```
 
 Mempool revalidation uses a private candidate overlay while admissions and
@@ -1148,7 +1160,7 @@ Phase 1: Stop accepting new work
   Block forger, leader election, chain selector,
   peer governor, snapshot manager, database lifecycle manager, UTxO RPC,
   Bark C2/archive server, Midnight gRPC server,
-  Blockfrost API, Mesh API, off-chain metadata fetcher,
+  Blockfrost API, Kupo API, Mesh API, off-chain metadata fetcher,
   CIP-26 token registry sync
 
 Phase 2: Drain and close connections
@@ -1467,7 +1479,7 @@ the blob commit succeeded, the result is a `PartialCommitError`, which
 Dingo supports two storage modes, configured via `storageMode`:
 
 - `core` (default): Minimal storage for chain following and block production.
-- `api`: Extended storage with transaction indexes, address lookups, and asset tracking. Required when any client-facing API server (Blockfrost, Mesh, UTxO RPC) is enabled. Bark is a separate Dingo-to-Dingo protocol and is not part of that API surface.
+- `api`: Extended storage with transaction indexes, address lookups, and asset tracking. Required when any client-facing API server (Blockfrost, Kupo, Mesh, UTxO RPC) is enabled. Bark is a separate Dingo-to-Dingo protocol and is not part of that API surface.
 
 In core mode, the ledger's background consumed-UTxO pruner is advisory: it
 defers while the local tip is materially behind the known upstream tip, so its
@@ -5307,15 +5319,19 @@ those indexes in place while deferring the remaining manifest entries.
 
 ## External Interfaces
 
-Dingo provides three client-facing APIs plus Bark. All are optional and gated by port configuration. UTxO RPC, Blockfrost, and Mesh are general-purpose external APIs and require `storageMode: api`. Bark is different: it is Dingo's own protocol for Dingo-to-Dingo C2/archive services, not a general-purpose application API.
+Dingo provides four client-facing APIs plus Bark. All are optional and gated
+by port configuration. UTxO RPC, Blockfrost, Kupo, and Mesh are
+general-purpose external APIs and require `storageMode: api`. Bark is
+different: it is Dingo's own protocol for Dingo-to-Dingo C2/archive services,
+not a general-purpose application API.
 
 ### API security (TLS and authentication)
 
-Blockfrost, Mesh, and UTxO RPC share one TLS/authentication contract
+Blockfrost, Kupo, Mesh, and UTxO RPC share one TLS/authentication contract
 (dingo#2996/#2998), rather than each exposing its own ad hoc surface. A
 reverse proxy or API gateway in front of these listeners remains fully
 supported — TLS/auth here is additive, not a replacement requirement — but
-an operator can now also secure any subset of the three in-process,
+an operator can now also secure any subset of the four in-process,
 without one.
 
 - **Policy types (`internal/apiconfig`).** `TLSPolicy` (`mode`,
@@ -5377,17 +5393,17 @@ without one.
   read once from `tokenFilePath` at listener startup, matching
   `EffectiveTLS`'s own deferral of certificate loading to listener
   startup rather than config-resolution time). `apiauth.Middleware` adapts
-  it to `net/http` (Blockfrost, Mesh, UTxO RPC's own HTTP mux), responding
-  `401` and never calling the wrapped handler on a missing/invalid
+  it to `net/http` (Blockfrost, Kupo, Mesh, UTxO RPC's own HTTP mux),
+  responding `401` and never calling the wrapped handler on a missing/invalid
   credential. `apiauth.Interceptor` adapts the identical `Verifier` to a
   `connect.Interceptor` (UTxO RPC's Connect/gRPC handlers, including
   health and reflection — there is no separate unauthenticated allowlist
   for those two), responding `connect.CodeUnauthenticated` (surfaced over
   HTTP as `401` by the Connect protocol). This is a deliberate design
-  choice, applied uniformly across all three providers, not a
-  UTxO-RPC-specific gap: Blockfrost's own `GET /health` route sits behind
-  the identical `apiauth.Middleware` wrapping its whole mux, so no provider
-  carves out an unauthenticated allowlist for health/liveness checking once
+  choice, applied uniformly across all four providers, not a
+  UTxO-RPC-specific gap: Blockfrost's and Kupo's own `GET /health` routes sit
+  behind the identical `apiauth.Middleware` wrapping their whole muxes, so no
+  provider carves out an unauthenticated allowlist for health/liveness checking once
   `auth.mode: token` is set. The operator-facing consequence — a
   container-orchestrator liveness/readiness probe against these routes
   needs to present the shared credential once auth is enabled, or must be
@@ -5406,9 +5422,8 @@ without one.
   a credential there would make cross-origin browser access impossible
   regardless of what the real request later sends. Every other request,
   including a non-preflight `OPTIONS`, still authenticates normally. All
-  three providers wire the chain in this order; `*_test.go`'s
-  `TestServerCORSPreflightBypassesAuth`/`TestBlockfrostCORSPreflightBypassesAuth`/
-  `TestUtxorpcCORSPreflightBypassesAuth` pin it down.
+  four providers wire the chain in this order; the API-package tests
+  pin the preflight behavior down for every listener.
 - **Blockfrost's `project_id` header is an alias for the same shared
   token**, not a separate credential mechanism: real Blockfrost clients
   send their API key as `project_id: <value>` rather than a bearer
@@ -5429,15 +5444,16 @@ without one.
   RPC-only** default TLS policy, expressed as the lowest-priority input to
   the merge above (`node.go`'s `legacyUtxorpcTLSPolicy`). They are
   deliberately **not** promoted into the shared `api.tls` default: doing
-  so would silently switch Blockfrost/Mesh from plaintext to TLS on
+  so would silently switch Blockfrost/Kupo/Mesh from plaintext to TLS on
   upgrade for any deployment that had set them only for UTxO RPC, which
-  they never protected. An operator opting Blockfrost/Mesh into TLS does so
-  explicitly, through `api.tls` or their own `plugins.api.<name>.config.tls`.
+  they never protected. An operator opting Blockfrost/Kupo/Mesh into TLS does
+  so explicitly, through `api.tls` or their own
+  `plugins.api.<name>.config.tls`.
   `bindAddr`, `debugBindAddr`, and `corsAllowedOrigins` are unaffected by any
   of this and stay at the `Config` root: `bindAddr` is not API-specific (the
   relay/NtN and metrics listeners use it too), `debugBindAddr` controls the
   separate pprof listener, and `corsAllowedOrigins`'s single shared value
-  already applies uniformly to all three API providers today. Duplicating
+  already applies uniformly to all four API providers today. Duplicating
   these fields under `api:` would only add a second source of truth with no
   behavioral gain.
   Authentication has no legacy root field at all — its default is simply
@@ -5446,10 +5462,10 @@ without one.
 
 ### API listener lifecycle (`internal/apilistener`)
 
-All three API servers (`api/blockfrost`, `api/mesh`, `api/utxorpc`) share one
-start/stop protocol rather than each implementing its own, because the way they
-bind makes a correct `Stop` genuinely subtle and the subtlety is identical in
-all three.
+All four API servers (`api/blockfrost`, `api/kupo`, `api/mesh`,
+`api/utxorpc`) share one start/stop protocol rather than each implementing its
+own, because the way they bind makes a correct `Stop` genuinely subtle and the
+subtlety is identical in all four.
 
 The problem is that `http.Server.Shutdown` closes only the listeners `Serve`
 has already registered, and each server opens its socket synchronously — so a
@@ -5492,10 +5508,11 @@ that safely needs three pieces that only make sense together:
 - **`teardown` — the loser's wait is honest.** Only a genuinely finished
   teardown closes it, so a caller that reads it as "the port is free" is right.
 
-`ShutdownFunc` is the one axis the three servers differ on. `apilistener.Graceful`
-(plain `http.Server.Shutdown`) covers Blockfrost and Mesh. `api/utxorpc` supplies
-its own, keeping the escalation described under "Live database lifecycle
-operations" above: `WatchTx`/`WatchMempool` are unbounded streaming RPCs, so a
+`ShutdownFunc` is the one axis the four servers differ on.
+`apilistener.Graceful` (plain `http.Server.Shutdown`) covers Blockfrost, Kupo,
+and Mesh. `api/utxorpc` supplies its own, keeping the escalation described under
+"Live database lifecycle operations" above: `WatchTx`/`WatchMempool` are
+unbounded streaming RPCs, so a
 connected client can keep `Shutdown` blocked indefinitely, and a `ShutdownTimeout`
 timer (or the caller `ctx`'s own deadline, or its cancellation) escalates to a
 hard `Close`. The socket close runs after whichever path that function takes, so
@@ -5667,6 +5684,112 @@ name and reads `token_registry_entry` through
 `MetadataStore.GetTokenRegistryEntry`, returning `null` when the registry has
 no entry or the sync is disabled. See the CIP-26 Token Registry Sync section
 above. CIP-68 datum metadata is not yet sourced and returns `null`.
+
+### Kupo API (`api/kupo/`)
+
+The Kupo provider is a read-oriented compatibility adapter over Dingo's API
+mode index. It is registered explicitly as capability `api.kupo`, is disabled
+by default (`port: 0`; `1442` is the conventional opt-in port), and participates
+in the same plugin-host resolution,
+`internal/apilistener` lifecycle, shared TLS/auth policy, and live
+restore/truncate re-resolution as the other client APIs. The HTTP package
+depends on a narrow package-local node interface; its adapter is the only code
+that binds Kupo response shapes to ledger and database types.
+
+Dingo's index is complete rather than pattern-selected, so the provider's
+installed pattern set is immutable and always serializes as `["*"]`. Pattern
+additions are successful idempotent operations with no rollback. Pattern and
+match deletion return `400 Bad Request`, because deleting indexed rows would
+break other API consumers and the ledger/database history contract. A pattern
+on `GET /matches/{pattern}` remains a query selector: wildcard, address and
+credential, asset, transaction-output, and metadata-label forms narrow the
+complete index without changing what later blocks persist.
+
+Match lookup is backed by
+`Database.UtxosWithHistory(*models.UtxoHistoryQuery, *database.Txn)`, whose
+metadata-side implementation is `MetadataStore.GetUtxosWithHistory`. The query
+has one SQL path across SQLite, PostgreSQL, and MySQL for full-index or address
+candidate lookup, asset and output-reference filters, spent/unspent status,
+inclusive creation/spend bounds, and deterministic oldest/newest ordering.
+`models.UtxoWithHistory` carries the producing transaction's slot, block
+index, and block hash plus the spending block hash; the normal coordinated
+database wrapper resolves output CBOR before the adapter performs exact
+address and remaining pattern checks. Kupo credential patterns deliberately
+match the 28-byte credential regardless of whether it is a key or script
+credential. This keeps SQL-generated row types and Kupo pattern semantics out
+of the storage interface. Producing and spending chain points come from the
+history query itself. For spent matches, the adapter hydrates each distinct
+consuming transaction at most once per result page, sorts its consumed
+references by canonical `(transaction hash, output index)` order, and uses that
+ordinal to select the spend redeemer. This supplies Kupo's
+`spent_at.input_index` and raw-CBOR `spent_at.redeemer` without relying on the
+metadata association's row-ID order; legacy rows missing consuming transaction
+associations retain Kupo's nullable fields.
+
+API-mode script and datum ingestion follows the current gouroboros transaction
+shape: it indexes top-level witnesses and outputs plus Dijkstra sub-transaction
+witness sets and outputs. Nested native and Plutus V1-V4 witness scripts,
+Plutus data, reference scripts, and inline datums therefore remain resolvable
+through Kupo's global datum and script endpoints. Key/bootstrap witnesses and
+redeemers retain their top-level transaction semantics because Dingo does not
+project sub-transaction inputs into the top-level spent-output association.
+
+Each match request opens one context-bound coordinated read transaction. Its
+constructor takes the database destructive-transition and commit barriers while
+it opens and anchors the metadata snapshot and then opens the blob snapshot.
+Every combined write transaction holds the commit barrier's shared side for its
+whole lifetime. Primary-chain rollback additionally holds the separate
+destructive-transition barrier from its blob-only block deletion through the
+later ledger metadata truncation, closing the cross-transaction gap without
+making ordinary or nested blob-only writes participate. The constructor
+releases both holds as soon as its views are fixed. Point bounds, the response
+tip, and every result page are read from that same snapshot. The adapter
+advances through deterministic 512-row keyset pages and the handler streams the
+JSON array, checking request cancellation between rows and releasing the
+snapshot when the stream finishes or the client disconnects. This bounds memory
+independently of the number of retained outputs and prevents the response
+headers from naming a newer tip than the rows in the body.
+
+The provider implements Kupo v2.12 match, datum, script, pattern, checkpoint,
+metadata, health, and metrics paths at both their unversioned locations and
+under the `/v1` compatibility prefix. Match filtering accepts `spent`,
+`unspent`, `resolve_hashes`, `order`, creation/spend bounds, asset, transaction,
+and output-index parameters. Point-form bounds include a header hash and must
+resolve to that exact primary-chain point before the query runs. Responses use
+Kupo's `X-Most-Recent-Checkpoint` and tip-hash `ETag` headers and honor
+`If-None-Match` with `304`; metadata lookup also names the resolved block in
+`X-Block-Header-Hash`. The JSON match encoder includes inline datum/reference
+script resolution only when requested and switches value quantities to strings
+for `Accept: application/json;asset-quantity=string`.
+
+Datum, script, checkpoint, and metadata operations each open one context-bound
+coordinated read transaction. The returned body, checkpoint header, and ETag
+therefore describe the same snapshot, and conditional requests compare
+`If-None-Match` only after that operation returns its anchored tip instead of
+sampling the live ledger tip separately.
+
+Kupo checkpoints are derived rather than persisted independently. The sample
+endpoint selects exponentially spaced canonical points across the ledger
+security window, the slot endpoint resolves an exact block or nearest canonical
+ancestor, and response checkpoint headers use the committed ledger tip. Point
+lookup uses retained primary-chain index keys and therefore still works after
+the corresponding block blob has been tombstoned. No separate Kupo resume
+cursor or checkpoint state is created; this surface exists so compatible
+clients can validate points and construct fork-safe range queries against
+Dingo's canonical history.
+
+`GET /health` maps Dingo's upstream connection and sync state to Kupo's status
+contract: `200` at sync, `202` while connected and catching up, and `503` when
+disconnected. The body and its checkpoint/ETag headers reuse one sampled ledger
+tip, so a concurrently arriving block cannot make them disagree. `GET /metrics`
+exposes the same health representation but always answers `200`. Both routes
+use JSON when `Accept` is absent and negotiate Prometheus text with
+`Accept: text/plain` or `Accept: */*`;
+unsupported media types return `400`. Dingo does not persist Kupo's ingestion
+wall-clock sample, so `seconds_since_last_block` is `null` in JSON and omitted
+from Prometheus output. Token authentication covers both endpoints when
+enabled; CORS preflight remains outside the authentication middleware as
+described above.
 
 ### Mesh API (`api/mesh/`)
 
@@ -7359,8 +7482,9 @@ Package isolation is enforced by direction, ownership, and composition:
   and `ledger/forging`.
 - `database/` and `database/plugin/*` own persistence and storage backends.
   They should not import node, ledger, mempool, networking, or API packages.
-- API packages (`api/blockfrost/`, `api/mesh/`, `api/utxorpc/`) should expose server logic
-  through local interfaces. Concrete adapters to `ledger`, `database`, and
+- API packages (`api/blockfrost/`, `api/kupo/`, `api/mesh/`,
+  `api/utxorpc/`) should expose server logic through local interfaces.
+  Concrete adapters to `ledger`, `database`, and
   `mempool` are integration boundaries and should remain narrow.
 
 ### Import Boundary Check
@@ -7705,7 +7829,8 @@ Port checks apply only to the listeners a given invocation actually starts,
 derived from the *effective* run mode plus the storage mode: the serving modes
 start the relay, private, metrics, debug, and bark listeners (and, under `api`
 storage or a configured `dev` run mode — which forces `api` storage — the
-UTxORPC/Blockfrost/Mesh listeners and an explicitly enabled Midnight listener);
+UTxORPC/Blockfrost/Kupo/Mesh listeners and an explicitly enabled Midnight
+listener);
 the Mithril snapshot
 sync (`dingo sync --mithril` or `dingo mithril sync`) starts only the metrics
 and debug listeners; the read-only `mithril list`/`show` and `load` start none.
@@ -7820,7 +7945,7 @@ Key configuration areas:
 - Off-chain metadata fetcher interval, request timeout, IPFS gateway, batch
   size, response cap, and private-address policy
 - Block producer credentials (VRF key, KES key, operational certificate)
-- External interface ports (Blockfrost, Mesh, UTxO RPC, Bark)
+- External interface ports (Blockfrost, Kupo, Mesh, UTxO RPC, Bark)
 
 ### Node Settings Gate Enforcement
 

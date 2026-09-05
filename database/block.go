@@ -278,10 +278,23 @@ func BlockIDByPointLocal(
 ) (uint64, error) {
 	txn := db.BlobTxn(false)
 	defer txn.Rollback() //nolint:errcheck
+	return BlockIDByPointLocalTxn(txn, point)
+}
+
+// BlockIDByPointLocalTxn is the transaction-scoped form of
+// BlockIDByPointLocal. It keeps point validation in the same blob snapshot as
+// the caller's other chain reads.
+func BlockIDByPointLocalTxn(
+	txn *Txn,
+	point ocommon.Point,
+) (uint64, error) {
+	if txn == nil {
+		return 0, types.ErrNilTxn
+	}
 	if txn.Blob() == nil {
 		return 0, types.ErrNilTxn
 	}
-	store := db.Blob()
+	store := txn.DB().Blob()
 	if store == nil {
 		return 0, types.ErrBlobStoreUnavailable
 	}
@@ -312,6 +325,150 @@ func BlockIDByPointLocal(
 		)
 	}
 	return metadata.ID, nil
+}
+
+// BlockPointBySlotTxn returns the canonical point at slot without loading
+// block CBOR. Retained history-expiry tombstones are valid because their bp
+// keys, metadata, and canonical block-index entries remain present.
+func BlockPointBySlotTxn(txn *Txn, slot uint64) (ocommon.Point, error) {
+	if txn == nil || txn.Blob() == nil {
+		return ocommon.Point{}, types.ErrNilTxn
+	}
+	store := txn.DB().Blob()
+	if store == nil {
+		return ocommon.Point{}, types.ErrBlobStoreUnavailable
+	}
+	prefix := slices.Concat(
+		[]byte(types.BlockBlobKeyPrefix),
+		types.BlockBlobKeyUint64ToBytes(slot),
+	)
+	it := store.NewIterator(txn.Blob(), types.BlobIteratorOptions{Prefix: prefix})
+	if it == nil {
+		return ocommon.Point{}, errors.New("blob iterator is nil")
+	}
+	defer it.Close()
+	var (
+		ret     ocommon.Point
+		retID   uint64
+		matched bool
+	)
+	for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+		item := it.Item()
+		if item == nil {
+			continue
+		}
+		key := item.Key()
+		if len(key) != types.BlockBlobKeySize {
+			continue
+		}
+		point, err := BlockBlobKeyToPoint(key)
+		if err != nil {
+			return ocommon.Point{}, err
+		}
+		id, err := BlockIDByPointLocalTxn(txn, point)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				continue
+			}
+			return ocommon.Point{}, err
+		}
+		if id == 0 {
+			continue
+		}
+		indexed, err := txn.DB().BlockPointByIndex(id, txn)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				continue
+			}
+			return ocommon.Point{}, err
+		}
+		if indexed.Slot != point.Slot || !bytes.Equal(indexed.Hash, point.Hash) {
+			continue
+		}
+		if !matched || id > retID {
+			ret = point
+			retID = id
+			matched = true
+		}
+	}
+	if err := it.Err(); err != nil {
+		return ocommon.Point{}, err
+	}
+	if !matched {
+		return ocommon.Point{}, models.ErrBlockNotFound
+	}
+	return ret, nil
+}
+
+// BlockPointAtOrBeforeSlotTxn returns the newest canonical point whose slot is
+// at most slot, using only retained keys and metadata. It therefore remains
+// usable after local block CBOR expires.
+func BlockPointAtOrBeforeSlotTxn(
+	txn *Txn,
+	slot uint64,
+) (ocommon.Point, error) {
+	if txn == nil || txn.Blob() == nil {
+		return ocommon.Point{}, types.ErrNilTxn
+	}
+	store := txn.DB().Blob()
+	if store == nil {
+		return ocommon.Point{}, types.ErrBlobStoreUnavailable
+	}
+	prefix := []byte(types.BlockBlobKeyPrefix)
+	it := store.NewIterator(txn.Blob(), types.BlobIteratorOptions{
+		Reverse: true,
+		Prefix:  prefix,
+	})
+	if it == nil {
+		return ocommon.Point{}, errors.New("blob iterator is nil")
+	}
+	defer it.Close()
+	seek := slices.Concat(
+		prefix,
+		types.BlockBlobKeyUint64ToBytes(slot),
+		bytes.Repeat([]byte{0xff}, 64),
+	)
+	for it.Seek(seek); it.ValidForPrefix(prefix); it.Next() {
+		item := it.Item()
+		if item == nil {
+			continue
+		}
+		key := item.Key()
+		if len(key) != types.BlockBlobKeySize {
+			continue
+		}
+		point, err := BlockBlobKeyToPoint(key)
+		if err != nil {
+			return ocommon.Point{}, err
+		}
+		if point.Slot > slot {
+			continue
+		}
+		id, err := BlockIDByPointLocalTxn(txn, point)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				continue
+			}
+			return ocommon.Point{}, err
+		}
+		if id == 0 {
+			continue
+		}
+		indexed, err := txn.DB().BlockPointByIndex(id, txn)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				continue
+			}
+			return ocommon.Point{}, err
+		}
+		if indexed.Slot == point.Slot && bytes.Equal(indexed.Hash, point.Hash) {
+			return point, nil
+		}
+	}
+	if err := it.Err(); err != nil {
+		return ocommon.Point{}, err
+	}
+	return ocommon.Point{}, models.ErrBlockNotFound
 }
 
 func BlockByHash(db *Database, hash []byte) (models.Block, error) {

@@ -354,7 +354,7 @@ CI.
 
 A plugin that implements neither interface simply cannot be snapshotted/restored — `lifecycle.Snapshot`/`Restore` return a clear error (e.g. `blob plugin "s3" does not support snapshotting`) rather than silently no-op'ing, and the failure happens before any file is written, since both interfaces are type-asserted up front.
 
-Each backup call is independently consistent, but `lifecycle.Snapshot` runs the two concurrently (in separate goroutines, joined via a `sync.WaitGroup`), not sequentially — neither Badger's `Backup` nor SQLite's `VACUUM INTO` exposes a way to separate "capture a consistent point" from "stream/copy it", so the full duration of whichever call runs longer must still be covered by the same pause, bounded by the slower of the two rather than their sum. Without that pause, a commit landing during either call's own window would write its commit timestamp to one store's backup and not the other's, and the restored copy fails `Database.checkCommitTimestamp`'s cross-store validation on open. `database.Database.PauseCommitsContext` closes that window (its non-cancellable sibling `PauseCommits` is what pre-dates `Snapshot` accepting a `ctx`; `Snapshot` itself calls the cancellable variant, so a caller can give up on a snapshot stuck waiting behind a long-running write transaction): every read-write `Txn` that opens a metadata write transaction holds the shared (`RLock`) side of the barrier from construction through `Commit`/`Rollback`/`Release`, and `lifecycle.Snapshot` takes the exclusive side around both concurrent backup calls together, so no such transaction — committed or still open — can straddle them. The barrier is held from construction, not just around `Commit`, because the metadata plugin's write connection pool is sized to exactly one connection: an already-opened-but-uncommitted transaction holds that connection regardless of whether `Commit` has been called, and if the barrier only guarded `Commit`, `PauseCommitsContext` could acquire its lock while such a transaction sat open — deadlocking `Snapshot`'s metadata backup (`VACUUM INTO`, which needs that same connection) against a writer that can now never reach `Commit`'s release. A blob-only `Txn` (`NewBlobOnlyTxn`) deliberately does *not* participate in the barrier: unlike SQLite, Badger natively supports concurrent read-write transactions, so a blob-only `Txn` never holds the single metadata connection the barrier protects, and its commit never writes the commit timestamp this barrier keeps consistent (only a paired blob+metadata `Txn.Commit` does). Several callers (`deleteUtxoBlobs`, `deleteTxBlobs`) open batched blob-only `Txn`s while an outer read-write `Txn` from the same call is already open on the same goroutine — if blob-only `Txn`s took the barrier too, that nested acquire could deadlock against a concurrent `PauseCommitsContext` caller, since the barrier's write side isn't reentrant. This pauses new read-write transactions only — not reads, and not a quiesce (nothing is torn down or disconnected) — so a snapshot against a live, actively-syncing node stays safe.
+Each backup call is independently consistent, but `lifecycle.Snapshot` runs the two concurrently (in separate goroutines, joined via a `sync.WaitGroup`), not sequentially — neither Badger's `Backup` nor SQLite's `VACUUM INTO` exposes a way to separate "capture a consistent point" from "stream/copy it", so the full duration of whichever call runs longer must still be covered by the same pause, bounded by the slower of the two rather than their sum. Without that pause, a commit landing during either call's own window would write its commit timestamp to one store's backup and not the other's, and the restored copy fails `Database.checkCommitTimestamp`'s cross-store validation on open. `database.Database.PauseCommitsContext` closes that window (its non-cancellable sibling `PauseCommits` is what pre-dates `Snapshot` accepting a `ctx`; `Snapshot` itself calls the cancellable variant, so a caller can give up on a snapshot stuck waiting behind a long-running write transaction): every read-write `Txn` that opens a metadata write transaction holds the shared (`RLock`) side of the commit barrier from construction through `Commit`/`Rollback`/`Release`, and `lifecycle.Snapshot` takes the exclusive side around both concurrent backup calls together, so no such transaction — committed or still open — can straddle them. `PauseCommitsContext` first takes the shared side of a separate destructive-transition barrier. Ledger paths that remove primary-chain blocks in blob-only transactions and then truncate their metadata hold that barrier exclusively across the full logical rollback, preventing a backup from opening in the otherwise inconsistent gap. The lock order is destructive-transition then commit barrier: the rollback's later combined metadata transaction can therefore take the ordinary commit-barrier shared side without deadlocking against the snapshot. The commit barrier is held from transaction construction, not just around `Commit`, because the metadata plugin's write connection pool is sized to exactly one connection: an already-opened-but-uncommitted transaction holds that connection regardless of whether `Commit` has been called, and if the barrier only guarded `Commit`, `PauseCommitsContext` could acquire its lock while such a transaction sat open — deadlocking `Snapshot`'s metadata backup (`VACUUM INTO`, which needs that same connection) against a writer that can now never reach `Commit`'s release. A blob-only `Txn` (`NewBlobOnlyTxn`) deliberately does *not* participate in either barrier: unlike SQLite, Badger natively supports concurrent read-write transactions, so ordinary blob-only cleanup need not block snapshots, and its commit never writes the commit timestamp this barrier keeps consistent (only a paired blob+metadata `Txn.Commit` does). Several callers (`deleteUtxoBlobs`, `deleteTxBlobs`) open batched blob-only `Txn`s while an outer read-write `Txn` from the same call is already open on the same goroutine — if every blob-only `Txn` took a barrier too, that nested acquire could deadlock against a concurrent `PauseCommitsContext` caller, since the barriers are not reentrant. Only the ledger's explicit, database-owned `BeginDestructiveTransition` scope connects the blob-only chain deletion to its corresponding metadata truncation. This pauses new read-write transactions only — not existing reads, and not a quiesce (nothing is torn down or disconnected) — so a snapshot against a live, actively-syncing node stays safe.
 
 **Snapshot directory layout**, written by `lifecycle.Snapshot`:
 
@@ -691,17 +691,17 @@ post-Mithril-boundary strictness (see below).
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
 | `transaction` | `id`, `hash`, `block_hash`, `slot`, `block_index`, `type`, `fee`, `collateral_fee`, `ttl`, `valid`, `metadata` | PK `id`; unique `hash`; indexes `block_hash`, `slot` | One row per transaction. `block_hash` and `slot` point to the blob block. `fee` is the declared body fee; `collateral_fee` is the collateral consumed into the fee pot by a phase-2-invalid transaction (collateral inputs minus collateral return) and zero for valid transactions. The epoch fee pot sums `fee` for valid rows plus `collateral_fee` for invalid rows. `metadata` is populated only in API mode. |
-| `utxo` | `id`, `transaction_id`, `collateral_return_for_tx_id`, `tx_id`, `output_idx`, `payment_key`, `credential_tag`, `staking_key`, `datum_hash`, `spent_at_tx_id`, `referenced_by_tx_id`, `collateral_by_tx_id`, `added_slot`, `deleted_slot`, `amount`, `payment_script` | PK `id`; unique `(tx_id, output_idx)`; unique `collateral_return_for_tx_id`; indexes `transaction_id`, `payment_key`, `staking_key`, spend/reference/collateral tx hashes, and `added_slot`; composites `idx_utxo_deleted_staking_amount` (`deleted_slot`, `credential_tag`, `staking_key`, `amount`), `idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key`, `deleted_slot`, `amount`), and `idx_utxo_deleted_payment_script` (`deleted_slot`, `payment_script`, `amount`) | Produced outputs use `transaction_id -> transaction.id`. Collateral returns use `collateral_return_for_tx_id -> transaction.id`. Inputs/reference/collateral joins are logical: `spent_at_tx_id`, `referenced_by_tx_id`, and `collateral_by_tx_id` store transaction hashes. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. The `(credential_tag, staking_key, deleted_slot, amount)` composite backs stake-credential live UTxO sums such as DRep voting-power tallying. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
+| `utxo` | `id`, `transaction_id`, `collateral_return_for_tx_id`, `tx_id`, `output_idx`, `payment_key`, `credential_tag`, `staking_key`, `datum_hash`, `spent_at_tx_id`, `referenced_by_tx_id`, `collateral_by_tx_id`, `added_slot`, `deleted_slot`, `amount`, `payment_script` | PK `id`; unique `(tx_id, output_idx)`; unique `collateral_return_for_tx_id`; indexes `transaction_id`, `payment_key`, `staking_key`, spend/reference/collateral tx hashes, and `added_slot`; composites `idx_utxo_deleted_staking_amount` (`deleted_slot`, `credential_tag`, `staking_key`, `amount`), `idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key`, `deleted_slot`, `amount`), and `idx_utxo_deleted_payment_script` (`deleted_slot`, `payment_script`, `amount`) | Produced outputs use `transaction_id -> transaction.id`. Collateral returns use `collateral_return_for_tx_id -> transaction.id`. Inputs/reference/collateral joins are logical: `spent_at_tx_id`, `referenced_by_tx_id`, and `collateral_by_tx_id` store transaction hashes. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. `deleted_slot = 0` is the live-output sentinel; a nonzero value and `spent_at_tx_id` identify a spent output and back Kupo's spent-output history. The `(credential_tag, staking_key, deleted_slot, amount)` composite backs stake-credential live UTxO sums such as DRep voting-power tallying. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
 | `asset` | `id`, `utxo_id`, `policy_id`, `name`, `name_hex`, `fingerprint`, `amount` | PK `id`; unique `(name, policy_id, utxo_id)`; named index `idx_asset_policy_id` on `policy_id`; indexes `name_hex`, `fingerprint`, `amount` | Multi-asset quantities attached to `utxo.id`. The unique key backs ledger-state import `ON CONFLICT`; the policy-id query index can be deferred during bulk load. Use `utxo.deleted_slot = 0` for live balances. |
 | `asset_mint_burn` | `id`, `tx_hash`, `policy_id`, `name`, `fingerprint`, `slot`, `quantity`, `tx_index` | PK `id`; unique `(tx_hash, policy_id, name)` (`idx_asset_mint_burn_unique`); composite `(policy_id, name, slot)` (`idx_asset_mint_burn_lookup`); indexes `fingerprint`, `slot` | API-mode-only mint/burn history: one row per `(transaction, asset)` for every tx that mints or burns the asset. Populated from `tx.AssetMint()` during indexing; `quantity` is a signed decimal string (negative for burns). Unlike `asset` (live holdings), this preserves full history so Blockfrost `/assets/{asset}` can derive `initial_mint_tx_hash` (earliest event by `(slot, tx_index, id)`) and `mint_or_burn_count` (row count). The unique key makes re-applying a transaction after a rollback idempotent. Rows with `slot > rollback_slot` are deleted alongside `transaction` on rollback. |
 | `address_transaction` | `id`, `payment_key`, `credential_tag`, `staking_key`, `transaction_id`, `slot`, `tx_index` | PK `id`; indexes `payment_key`, `transaction_id`, `slot`; composite `(credential_tag, staking_key, slot, tx_index, payment_key)` | API-mode address-to-transaction index. Join to `transaction.id`. `credential_tag`: 0 key hash, 1 script hash for stake-bearing addresses. The composite index supports credential-scoped pagination and its leading columns cover simple credential lookups. |
 | `transaction_metadata_label` | `id`, `transaction_id`, `label`, `slot`, `cbor_value`, `json_value` | PK `id`; unique `(transaction_id, label)`; indexes `label`, `slot` | API-mode per-label metadata index. Join to `transaction.id`. |
 | `key_witness` | `id`, `transaction_id`, `type`, `vkey`, `signature`, `public_key`, `chain_code`, `attributes` | PK `id`; indexes `transaction_id`, `type` | API-mode vkey/bootstrap witnesses. Join to `transaction.id`. `transaction_id` is never deferred during bulk load: every API-mode `SetTransaction` clears this table by `transaction_id` before re-inserting. |
-| `witness_scripts` | `id`, `transaction_id`, `script_hash`, `type` | PK `id`; indexes `transaction_id`, `script_hash`, `type` | API-mode witness-script references. Join `script_hash = script.hash`. `transaction_id` is never deferred during bulk load, for the same reason as `key_witness`. |
-| `script` | `id`, `hash`, `content`, `created_slot`, `type` | PK `id`; unique/index `hash`; index `type` | API-mode de-duplicated script content by hash. |
-| `plutus_data` | `id`, `transaction_id`, `data` | PK `id`; index `transaction_id` | API-mode Plutus data from witness sets. Join to `transaction.id`. `transaction_id` is never deferred during bulk load, for the same reason as `key_witness`. |
+| `witness_scripts` | `id`, `transaction_id`, `script_hash`, `type` | PK `id`; indexes `transaction_id`, `script_hash`, `type` | API-mode witness-script references from the top-level transaction and Dijkstra sub-transactions, de-duplicated per transaction. Join `script_hash = script.hash`. `transaction_id` is never deferred during bulk load, for the same reason as `key_witness`. |
+| `script` | `id`, `hash`, `content`, `created_slot`, `type` | PK `id`; unique/index `hash`; index `type` | API-mode de-duplicated script content by hash. Ingestion covers native and Plutus V1-V4 witness scripts, output reference scripts (including collateral returns and Dijkstra sub-transaction outputs), and auxiliary-data scripts. |
+| `plutus_data` | `id`, `transaction_id`, `data` | PK `id`; index `transaction_id` | API-mode Plutus data from top-level and Dijkstra sub-transaction witness sets, including phase-2-invalid transactions and de-duplicated per transaction. Join to `transaction.id`. `transaction_id` is never deferred during bulk load, for the same reason as `key_witness`. |
 | `redeemer` | `id`, `transaction_id`, `tag`, `index`, `data`, `ex_units_memory`, `ex_units_cpu` | PK `id`; indexes `transaction_id`, `tag`, `index` | API-mode redeemers. Join to `transaction.id`. `transaction_id` is never deferred during bulk load, for the same reason as `key_witness`. |
-| `datum` | `id`, `hash`, `raw_datum`, `added_slot` | PK `id`; unique/index `hash`; index `added_slot` | API-mode datum hash index. UTxOs can reference it with `utxo.datum_hash = datum.hash`. |
+| `datum` | `id`, `hash`, `raw_datum`, `added_slot` | PK `id`; unique/index `hash`; index `added_slot` | API-mode datum hash index populated from top-level and Dijkstra sub-transaction witness data and output datums for valid and phase-2-invalid transactions. UTxOs can reference it with `utxo.datum_hash = datum.hash`. |
 | `certs` | `id`, `transaction_id`, `cert_index`, `cert_type`, `certificate_id`, `slot`, `block_hash` | PK `id`; unique `(transaction_id, cert_index)`; indexes `transaction_id`, `certificate_id`, `cert_type`, `slot`, `block_hash` | Unified certificate index. `certificate_id` points to one specialized certificate table according to `cert_type`; this is logical, not DB-enforced. |
 
 Deferred-index bulk mode is shared by SQLite, PostgreSQL, and MySQL. InnoDB
@@ -1644,6 +1644,80 @@ LEFT JOIN asset a ON a.utxo_id = u.id
 WHERE u.tx_id = decode($1, 'hex')
   AND u.output_idx = $2;
 ```
+
+### `UtxosWithHistory` / `GetUtxosWithHistory`
+
+The Kupo adapter reads both live and spent outputs through
+`Database.UtxosWithHistory(*models.UtxoHistoryQuery, *database.Txn)`, backed
+by `MetadataStore.GetUtxosWithHistory`. This is a new query surface over the
+existing `utxo`, `asset`, and `transaction` rows; it adds no table, column,
+migration, blob key, or encoding.
+
+Kupo creates that transaction with `NewReadSnapshotContext`. The constructor
+first acquires `PauseCommitsContext`, then opens the repeatable-read metadata
+transaction, reads its tip, and opens the blob transaction before immediately
+resuming commits. Every combined write transaction holds the commit barrier's
+shared side for its whole lifetime. Multi-transaction primary-chain rollbacks
+hold a separate destructive-transition barrier from their blob-only block
+deletes through the later ledger metadata truncation; `PauseCommitsContext`
+takes that barrier's shared side before the commit barrier, so it cannot open in
+the gap without making ordinary or nested blob-only writes participate. Both
+views therefore describe one logical database boundary and remain fixed for the
+lifetime of the streamed query; commits are paused only for construction, not
+while results are streamed.
+
+The metadata query left-joins the producing transaction by
+`COALESCE(utxo.transaction_id, utxo.collateral_return_for_tx_id) = producer.id`
+and the spending transaction by `utxo.spent_at_tx_id = spender.hash`. Its result,
+`models.UtxoWithHistory`, includes the producing slot, transaction index, and
+block hash plus the spending block hash. The stored `utxo.added_slot` remains
+the fallback creation slot for snapshot-imported rows with no producing
+transaction. Assets are loaded in bulk for the selected rows instead of
+joining them into the base result and duplicating one output per native asset.
+The UTxO row does not persist a consuming input ordinal. The Kupo adapter
+derives it from the consuming transaction's retained input associations by
+sorting `(tx_id, output_idx)` canonically, then selects the `spend` redeemer at
+that ordinal; it does not treat the metadata query's row-ID order as ledger
+input order.
+
+Conceptually, the base query has this shape (backend placeholder and identifier
+quoting differ):
+
+```sql
+SELECT
+  u.*,
+  COALESCE(producer.slot, u.added_slot) AS producer_slot,
+  COALESCE(producer.block_index, 0) AS producer_block_index,
+  producer.block_hash AS producer_block_hash,
+  spender.block_hash AS spender_block_hash
+FROM utxo u
+LEFT JOIN "transaction" producer
+  ON producer.id = COALESCE(u.transaction_id, u.collateral_return_for_tx_id)
+LEFT JOIN "transaction" spender ON spender.hash = u.spent_at_tx_id
+WHERE /* UtxoHistoryQuery predicates */
+ORDER BY producer_slot, producer_block_index, u.output_idx, u.tx_id;
+```
+
+`models.UtxoHistoryQuery` selects all outputs or credential-based address
+candidates and can combine asset policy/name, producing transaction/output,
+metadata label, spent/unspent status, inclusive creation/spend slot bounds,
+ascending or descending chain order, a keyset cursor, and a row limit. Status
+uses the existing `deleted_slot` convention: zero is unspent and nonzero is
+spent. Bounds apply to the effective producing slot and `deleted_slot`;
+point-form Kupo bounds are verified against the primary chain in the same
+coordinated read transaction before their slot reaches the query.
+
+Address columns are intentionally candidate indexes, as in the existing
+ordered address queries. The coordinated `Database` wrapper resolves each
+candidate's output CBOR before Kupo applies exact full-address and remaining
+pattern matching. For bounded exact-address calls, it advances through coarse
+SQL candidates until the requested number of exact matches is filled or the
+candidate set is exhausted, so `Limit` applies after CBOR filtering. Credential
+patterns match their 28-byte payment or delegation part without discriminating
+key credentials from script credentials, as Kupo does. This preserves correct
+pointer, enterprise, Byron, and full-address behavior without putting Kupo's
+pattern grammar into the metadata plugin or adding an API-to-storage
+dependency.
 
 ### `GetUtxosByRefs`
 

@@ -30,6 +30,10 @@ var (
 	ErrNilUtxoWithOrderingQuery = errors.New(
 		"nil UtxoWithOrderingQuery",
 	)
+	ErrNilUtxoHistoryQuery      = errors.New("nil UtxoHistoryQuery")
+	ErrInvalidUtxoHistoryStatus = errors.New(
+		"invalid UTxO history status",
+	)
 	ErrEmptyAssetPolicyID       = errors.New("empty asset policy id")
 	ErrEmptyUtxoAddressPattern  = errors.New("empty UTxO address pattern")
 	ErrExactAddressRequiresCbor = errors.New(
@@ -303,6 +307,53 @@ type UtxoWithOrdering struct {
 	Utxo
 	TxSlot       uint64
 	TxBlockIndex uint32
+}
+
+// UtxoWithHistory includes the chain positions needed to expose a UTxO's
+// complete lifecycle. CreatedBlockHash can be empty for snapshot-imported
+// UTxOs that have no producing transaction row. SpentBlockHash is empty for
+// live outputs.
+type UtxoWithHistory struct {
+	Utxo
+	TxSlot           uint64
+	TxBlockIndex     uint32
+	CreatedBlockHash []byte
+	SpentBlockHash   []byte
+}
+
+// UtxoHistoryStatus selects outputs by lifecycle state.
+type UtxoHistoryStatus uint8
+
+const (
+	// UtxoHistoryStatusAll returns both live and spent outputs.
+	UtxoHistoryStatusAll UtxoHistoryStatus = iota
+	// UtxoHistoryStatusUnspent returns only live outputs.
+	UtxoHistoryStatusUnspent
+	// UtxoHistoryStatusSpent returns only spent outputs.
+	UtxoHistoryStatusSpent
+)
+
+// UtxoHistoryQuery selects historical UTxOs in producing-chain order.
+// Created and spent slot bounds are inclusive. A non-nil AssetName matches
+// that exact asset name; nil matches every name under AssetPolicyID. Spent
+// bounds imply a spent-output predicate even when Status is All.
+type UtxoHistoryQuery struct {
+	MatchAllAddresses bool
+	AddressPatterns   []UtxoAddressPattern
+	FilterByAsset     bool
+	AssetPolicyID     []byte
+	AssetName         []byte
+	TransactionID     []byte
+	OutputIndex       *uint32
+	MetadataLabel     *uint64
+	CreatedAfter      *uint64
+	CreatedBefore     *uint64
+	SpentAfter        *uint64
+	SpentBefore       *uint64
+	Status            UtxoHistoryStatus
+	Descending        bool
+	After             *UtxoOrderingCursor
+	Limit             int
 }
 
 // UtxoOrderingCursor is the keyset position for SearchUtxos.
