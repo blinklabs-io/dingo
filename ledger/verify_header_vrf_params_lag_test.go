@@ -144,11 +144,15 @@ func blockEpochId(
 //
 // cardano-ledger routes a re-registration through psFutureStakePoolParams,
 // which POOLREAP merges only after SNAP has run, so the snapshot still carries
-// the parameters in force before it. This also guards the first-registration
-// fallback: that fallback resolves the earliest registration at or before the
-// capture, which here is the same earlier key — so a test asserting only the
-// key could pass for the wrong reason. The cutoff lookup must be what answers,
-// and the sub-test below proves it by removing the fallback's candidate.
+// the parameters in force before it.
+//
+// Three registrations, not two, so the assertion distinguishes which lookup
+// answered. The first-registration fallback resolves the EARLIEST registration
+// at or before the capture; the cutoff lookup resolves the LATEST at or before
+// the cutoff. With a registration before both, those differ — the fallback
+// would yield originalKey and only the cutoff lookup yields cutoffKey. A
+// two-registration fixture makes them coincide, so it would pass whichever
+// path ran.
 func TestElectingVrfKeyHashResolvesTheEarlierKeyWhenAReRegistrationFollowsTheCutoff(
 	t *testing.T,
 ) {
@@ -159,12 +163,15 @@ func TestElectingVrfKeyHashResolvesTheEarlierKeyWhenAReRegistrationFollowsTheCut
 	ls.publishSnapshotsLocked()
 
 	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x11}, 28))
-	earlyKey := bytes.Repeat([]byte{0xB5}, 32)
+	originalKey := bytes.Repeat([]byte{0xC3}, 32)
+	cutoffKey := bytes.Repeat([]byte{0xB5}, 32)
 	rotatedKey := bytes.Repeat([]byte{0xFA}, 32)
 
-	// Cutoff for epoch 38 is 3110399. The first registration precedes it; the
-	// re-registration falls after it but before the capture at 3196799.
-	seedPoolRegistrationAtSlot(t, db, pool[:], earlyKey, 2_479_516)
+	// Cutoff for epoch 38 is 3110399, capture is 3196799. The first two
+	// registrations precede the cutoff; the re-registration falls between the
+	// cutoff and the capture.
+	seedPoolRegistrationAtSlot(t, db, pool[:], originalKey, 2_479_516)
+	seedPoolRegistrationAtSlot(t, db, pool[:], cutoffKey, 3_000_000)
 	seedPoolRegistrationAtSlot(t, db, pool[:], rotatedKey, 3_150_000)
 	seedPoolStakeSnapshotOfTypeAtSlot(t, db, 37,
 		models.PoolStakeSnapshotTypeMark, pool[:], 1_000, 10_000, 3_196_799)
@@ -173,13 +180,18 @@ func TestElectingVrfKeyHashResolvesTheEarlierKeyWhenAReRegistrationFollowsTheCut
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t,
-		lcommon.NewBlake2b256(earlyKey), got,
+		lcommon.NewBlake2b256(cutoffKey), got,
 		"the re-registration was deferred past SNAP, so the snapshot "+
-			"carries the key registered before the cutoff",
+			"carries the key in force at the parameter cutoff",
 	)
 	assert.NotEqual(t,
 		lcommon.NewBlake2b256(rotatedKey), got,
 		"resolving the latest registration at or before the capture would "+
 			"pick the deferred key and reject a canonical block",
+	)
+	assert.NotEqual(t,
+		lcommon.NewBlake2b256(originalKey), got,
+		"the first-registration fallback must not answer when a "+
+			"registration is in force at the cutoff",
 	)
 }
