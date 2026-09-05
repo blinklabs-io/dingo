@@ -1338,12 +1338,21 @@ func (cs *ChainSelector) triggerEvaluation() {
 // once its 1024-slot buffer filled every keepalive response parked a
 // gouroboros protocol goroutine in ouroboros.keepaliveClientResponse.
 //
-// PublishOrdered keeps both delivery and order: each event type has its own
-// FIFO lane drained by exactly one worker, so events of a type reach
-// subscribers in the order they were published here, and a subscriber that
-// blocks parks only that lane's worker. Every chainselection publication goes
-// through this helper precisely so a queued chain switch can never be
-// overtaken by one published directly.
+// PublishOrdered keeps both delivery and publisher order: each event type has
+// its own FIFO lane drained by exactly one worker, so events of a type reach
+// subscribers in the order they were handed to PublishOrdered, and a
+// subscriber that blocks parks only that lane's worker. Every chainselection
+// publication goes through this helper precisely so a queued chain switch can
+// never be overtaken by one published directly.
+//
+// The order preserved is the order publications arrive here, not the order the
+// switches were decided in. Every producer decides under cs.mutex and
+// publishes after releasing it -- EvaluateAndSwitch and TouchPeerActivity both
+// do -- so two goroutines can decide A then B and still enqueue B then A, and
+// a subscriber sees B before A. That window is unchanged from the inline
+// Publish this replaced, and closing it would mean publishing while holding
+// cs.mutex, which is the deadlock shape #3550 is about avoiding (wolf31o2
+// review).
 func (cs *ChainSelector) publishSelection(
 	eventType event.EventType,
 	evt event.Event,

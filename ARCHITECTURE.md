@@ -1274,10 +1274,19 @@ making progress — the EventBus dispatch goroutines for the internal
 `connmanager.conn_closed` subscriptions, plus the selector's own evaluation
 loop — and an inline `Publish` parks its caller on any subscriber that has
 stopped draining. Routing every selector publication through the same per-type
-lanes keeps delivery and per-topic order while confining a blocked subscriber
-to that lane's worker. Publishing one of these six directly would reintroduce
-the hazard, because a queued chain switch could then be overtaken by one
-published inline.
+lanes keeps delivery and per-topic publisher order while confining a blocked
+subscriber to that lane's worker. Publishing one of these six directly would
+reintroduce the hazard, because a queued chain switch could then be overtaken
+by one published inline.
+
+That order is the order publications reach `PublishOrdered`, not the order the
+selector decided the switches in. Every producer decides under `cs.mutex` and
+publishes after releasing it, so two goroutines can decide A then B and enqueue
+B then A, and a subscriber sees B before A. The window is unchanged from the
+inline `Publish` the lanes replaced; closing it would mean publishing under the
+lock, which is what the EventBus rule below forbids. A consumer that must not
+act on a superseded switch has to reconcile against the selector's current best
+peer rather than rely on arrival order.
 
 The other three `chainselection.*` topics are not on ordered lanes and are not
 covered by that guarantee: `chainselection.peer_tip_update` is published inline

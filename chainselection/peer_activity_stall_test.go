@@ -183,7 +183,14 @@ func TestPeerActivityHandlerKeepsDrainingWhileDownstreamConsumerBlocks(
 // acts on chainselection.chain_switch (the ledger repoints its chainsync
 // cursor at NewConnectionId) ends up on the wrong peer if an older switch is
 // delivered after a newer one.
-func TestChainSwitchEventsPreserveSelectionOrder(t *testing.T) {
+//
+// What this pins is publisher order, which is the whole of what the lane
+// promises. All eight switches are decided and published from this goroutine,
+// so decision order and publish order coincide here. They do not in general:
+// every producer decides under cs.mutex and publishes after releasing it, so
+// two goroutines can decide in one order and enqueue in the other, and no lane
+// prevents that (wolf31o2 review). See publishSelection.
+func TestChainSwitchEventsPreservePublishOrder(t *testing.T) {
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Stop)
 
@@ -227,6 +234,6 @@ func TestChainSwitchEventsPreserveSelectionOrder(t *testing.T) {
 		got = append(got, data.NewConnectionId)
 	}
 	require.Equal(t, want, got,
-		"chain switch events must be delivered in selection order",
+		"chain switch events must be delivered in publish order",
 	)
 }
