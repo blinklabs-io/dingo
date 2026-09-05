@@ -590,15 +590,15 @@ func (s *chainStateSnapshot) publishLocked(c *Chain) {
 	s.published = true
 }
 
-// matchesPublishedLocked reports whether the chain still holds exactly what the
-// closure published. The mutation counter is the real test: a concurrent retry
-// of the same blocks leaves every staged field identical while its writes are
-// durable and this batch's are not, so field equality alone would let the
-// restore rewind past it. The field comparison is kept as well, so a mutation
-// path that ever forgets markMutatedLocked still fails closed rather than
-// silently reopening the clobber. Callers must hold c.mutex and c.manager.mutex.
-func (s *chainStateSnapshot) matchesPublishedLocked(c *Chain) bool {
-	return c.mutationSeq == s.publishedSeq &&
+// mutatedSincePublishLocked reports whether anything changed the chain after
+// the closure handed its batch to Commit. The mutation counter is the test that
+// works: a retry that re-commits the same blocks leaves every staged field
+// identical, so comparing values alone would not see it. The field comparison
+// is kept alongside as a fail-safe, so a mutation path that ever forgets
+// markMutatedLocked is still noticed. Callers must hold c.mutex and
+// c.manager.mutex.
+func (s *chainStateSnapshot) mutatedSincePublishLocked(c *Chain) bool {
+	unchanged := c.mutationSeq == s.publishedSeq &&
 		c.tipBlockIndex == s.publishedIndex &&
 		c.currentTip.Point.Slot == s.publishedTip.Point.Slot &&
 		bytes.Equal(
@@ -607,24 +607,36 @@ func (s *chainStateSnapshot) matchesPublishedLocked(c *Chain) bool {
 		) &&
 		len(c.headers) == s.publishedHeaders &&
 		len(c.blocks) == s.publishedBlocksLen
+	return !unchanged
 }
 
 // ErrChainStateChangedDuringCommit reports a batch whose Commit failed while
-// another chain mutation had already landed on top of it. The batch's writes
-// are gone from storage but its in-memory effects cannot be unwound without
-// discarding that later mutation, so neither half of the chain can be trusted
-// and the caller must not treat the failure as a plain retryable batch error.
+// another chain mutation had already landed. The batch's writes are gone from
+// storage, so undoing its in-memory effects can discard that later mutation --
+// but leaving them in place would be worse (see restoreAfterCommitFailure), so
+// the undo happens and this reports that the chain cannot be trusted. The
+// caller must not treat it as a plain retryable batch error.
 var ErrChainStateChangedDuringCommit = errors.New(
 	"chain mutated concurrently with a failed batch commit",
 )
 
 // restoreAfterCommitFailure undoes a batch whose Commit failed. txn.Do calls
 // Commit after the closure's deferred unlocks have run, so this re-acquires
-// c.mutex and c.manager.mutex -- and every chain mutation takes c.mutex, so a
-// state that no longer matches what the closure published means one landed in
-// that window. Restoring over it would roll the in-memory chain back past a
-// durable commit, leaving it *behind* storage rather than level with it, so the
-// mismatch is reported instead.
+// c.mutex and c.manager.mutex, and a mutation can have landed in between --
+// every chain mutation takes c.mutex and bumps mutationSeq, which is how that
+// is detected.
+//
+// The undo happens either way, because the two failure states are not
+// symmetric. Skipping it leaves the in-memory chain naming a tip whose blocks
+// the rolled-back transaction never stored -- the ahead-of-storage state this
+// whole path exists to prevent, and the one startup reconciliation cannot
+// repair, since it can trim a blob store that leads but cannot rebuild blocks
+// missing beneath the ledger tip. Performing it can instead leave the chain
+// behind a mutation that did commit, which is the repairable direction. Neither
+// is recoverable in place once a mutation has interleaved, so the point of
+// detecting it is to report it rather than to choose a different in-memory
+// outcome: the caller gets ErrChainStateChangedDuringCommit alongside the
+// commit error and must treat the chain as untrusted.
 func (c *Chain) restoreAfterCommitFailure(s *chainStateSnapshot) error {
 	if !s.taken || !s.published {
 		return nil
@@ -633,10 +645,11 @@ func (c *Chain) restoreAfterCommitFailure(s *chainStateSnapshot) error {
 	defer c.mutex.Unlock()
 	c.manager.mutex.Lock()
 	defer c.manager.mutex.Unlock()
-	if !s.matchesPublishedLocked(c) {
+	mutated := s.mutatedSincePublishLocked(c)
+	s.restoreLocked(c)
+	if mutated {
 		return ErrChainStateChangedDuringCommit
 	}
-	s.restoreLocked(c)
 	return nil
 }
 

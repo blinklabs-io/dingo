@@ -341,9 +341,12 @@ func TestAddBlocksRestoresChainStateInsideClosureOnBatchFailure(t *testing.T) {
 // TestAddBlocksReportsConcurrentMutationWhenCommitFails covers the one restore
 // that cannot be made atomic: txn.Do calls Commit after the closure's deferred
 // unlocks have run, so the commit-failure restore must re-take c.mutex, and a
-// chain mutation can land in between. Restoring over it would roll the
-// in-memory chain back past a durable commit -- behind storage rather than
-// level with it -- so the mismatch is reported instead of silently applied.
+// chain mutation can land in between.
+//
+// The undo still happens -- leaving the tip advanced past blocks the rolled-back
+// transaction never stored is the unrepairable direction -- but the caller is
+// told the chain is no longer trustworthy instead of getting a bare commit
+// error.
 func TestAddBlocksReportsConcurrentMutationWhenCommitFails(t *testing.T) {
 	base := newTestDB(t)
 	commitErr := errors.New("injected blob commit failure")
@@ -376,6 +379,8 @@ func TestAddBlocksReportsConcurrentMutationWhenCommitFails(t *testing.T) {
 	require.NoError(t, err)
 	c = cm.PrimaryChain()
 	require.NotNil(t, c)
+
+	tipBefore := c.Tip()
 
 	var origin common.Blake2b256
 	blocks := generateTestChain(t, 1, origin, 20, 20, 3)
@@ -411,15 +416,15 @@ func TestAddBlocksReportsConcurrentMutationWhenCommitFails(t *testing.T) {
 		t,
 		err,
 		chain.ErrChainStateChangedDuringCommit,
-		"a commit-failure restore that would overwrite a later chain "+
-			"mutation must be reported, not applied",
+		"a commit-failure restore that overwrote a later chain mutation "+
+			"must say so; the chain cannot be trusted afterwards",
 	)
 	require.Equal(
 		t,
-		blocks[2].SlotNumber(),
-		c.Tip().Point.Slot,
-		"the later mutation's tip must survive; rolling it back would put "+
-			"the in-memory chain behind durable storage",
+		tipBefore,
+		c.Tip(),
+		"the batch's blocks are gone from storage, so its tip must not "+
+			"survive the failure even when a mutation interleaved",
 	)
 }
 
@@ -489,7 +494,11 @@ func TestAddRawBlocksRestoresChainStateWhenCommitFails(t *testing.T) {
 //
 // ClearHeaders on an already-empty queue is the same case reduced to one call:
 // a real, reachable mutation (the active peer changed) that leaves every staged
-// field identical. Only chain.mutationSeq distinguishes it.
+// field identical. Only chain.mutationSeq sees it.
+//
+// It is also why detection must not gate the undo. This mutation touched no
+// durable state, so the batch's rollback still needs undoing; refusing would
+// leave the tip advanced past a transaction that stored nothing.
 func TestAddBlocksReportsIndistinguishableMutationWhenCommitFails(t *testing.T) {
 	base := newTestDB(t)
 	commitErr := errors.New("injected blob commit failure")
@@ -522,6 +531,8 @@ func TestAddBlocksReportsIndistinguishableMutationWhenCommitFails(t *testing.T) 
 	c = cm.PrimaryChain()
 	require.NotNil(t, c)
 
+	tipBefore := c.Tip()
+
 	var origin common.Blake2b256
 	blocks := generateTestChain(t, 1, origin, 20, 20, 2)
 
@@ -546,5 +557,14 @@ func TestAddBlocksReportsIndistinguishableMutationWhenCommitFails(t *testing.T) 
 		"a mutation that leaves every staged field identical is still a "+
 			"mutation; the restore must not assume it is undoing only "+
 			"its own work",
+	)
+	require.Equal(
+		t,
+		tipBefore,
+		c.Tip(),
+		"an in-memory-only mutation must not cost the batch its undo: "+
+			"refusing to restore here leaves the tip ahead of a "+
+			"transaction that stored nothing, which is exactly the "+
+			"state this path exists to prevent",
 	)
 }

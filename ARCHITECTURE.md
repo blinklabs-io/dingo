@@ -497,16 +497,23 @@ the same `c.mutex` / `c.manager.mutex` the mutation held, so the rejected
 batch's tip is never published: no reader observes it, and no concurrent
 mutation can be overwritten by the restore. A `Commit` failure cannot be
 handled that way — `txn.Do` runs `Commit` after the closure's deferred unlocks
-— so `restoreAfterCommitFailure` re-acquires both locks and restores only if
-nothing has happened since. Every chain mutation takes `c.mutex` and bumps
-`mutationSeq`, and the restore compares that counter (plus the staged fields, so
-a mutation path that forgets to bump still fails closed). The counter, not the
-field values, is what makes the test correct: a retry that re-commits the same
-blocks reproduces every staged field exactly while its writes are durable and
-the failed batch's are not. Restoring over any such mutation would roll the
-in-memory chain back past a durable commit, leaving it *behind* storage rather
-than level with it, so that case is reported as
-`chain.ErrChainStateChangedDuringCommit` instead of being silently applied.
+— so `restoreAfterCommitFailure` re-acquires both locks, and a mutation can
+have landed in between. Every chain mutation takes `c.mutex` and bumps
+`mutationSeq`, which is how that is detected (the staged fields are compared
+too, as a fail-safe for a path that ever forgets to bump; the counter is the
+test that works, because a retry re-committing the same blocks reproduces every
+field exactly).
+
+Detection reports, it does not gate the undo. The two failure states are not
+symmetric: skipping the undo leaves the chain naming a tip whose blocks the
+rolled-back transaction never stored — the ahead-of-storage state this path
+exists to prevent, and the one startup reconciliation cannot repair, since it
+can trim a blob store that leads but cannot rebuild blocks missing beneath the
+ledger tip. Performing it can instead leave the chain behind a mutation that did
+commit, which is the repairable direction. So the undo always happens, and an
+intervening mutation surfaces as `chain.ErrChainStateChangedDuringCommit`
+alongside the commit error: the chain is untrusted either way, and the caller is
+told rather than left to infer it.
 
 The rollback halves cannot be staged the same way, because they commit
 separately: `rollbackChainAndStateDeferred` truncates the primary chain first
