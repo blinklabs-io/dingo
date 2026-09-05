@@ -831,6 +831,9 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 		// rejection here is reachable, not theoretical: emitting without
 		// it would tell subscribers to undo blocks the failed rewind
 		// leaves applied. See validateAndEmitRollbackUndo.
+		if err := persistRollbackIntent(ls.db, nextPoint); err != nil {
+			return fmt.Errorf("persist rollback intent at intermediate point %d: %w", nextIndex, err)
+		}
 		if err := ls.validateAndEmitRollbackUndo(nextPoint); err != nil {
 			return fmt.Errorf(
 				"rollback primary chain to intermediate point %d: %w",
@@ -846,6 +849,9 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 			)
 		}
 		tipIndex = nextIndex
+	}
+	if err := persistRollbackIntent(ls.db, point); err != nil {
+		return fmt.Errorf("persist rollback intent at recovery point: %w", err)
 	}
 	if err := ls.validateAndEmitRollbackUndo(point); err != nil {
 		return fmt.Errorf("rollback primary chain to recovery point: %w", err)
