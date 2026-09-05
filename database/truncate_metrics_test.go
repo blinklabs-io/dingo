@@ -15,10 +15,12 @@
 package database
 
 import (
+	"bytes"
 	"testing"
 
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -33,7 +35,7 @@ func TestTruncateAfterSlotObservesDuration(t *testing.T) {
 	// Registering a second registry must not panic or error.
 	require.NoError(t, RegisterTruncateMetrics(prometheus.NewRegistry()))
 
-	before := collectHistogramCount(t, reg)
+	before := collectHistogramCount(t, reg, truncateResultSuccess)
 
 	targetBlock := testIndexedBlock(1500, 1, 0x15)
 	require.NoError(t, db.BlockCreate(targetBlock, nil))
@@ -44,8 +46,43 @@ func TestTruncateAfterSlotObservesDuration(t *testing.T) {
 	require.Equal(
 		t,
 		before+1,
-		collectHistogramCount(t, reg),
+		collectHistogramCount(t, reg, truncateResultSuccess),
 		"TruncateAfterSlot must record its duration",
+	)
+}
+
+// TestTruncateAfterSlotRecordsFailureSeparately verifies a failed sweep is not
+// reported as a completed truncation. The duration is still observed -- a sweep
+// that failed held the ledger write lock for that long -- but under the failure
+// label, and the log line says failed rather than complete.
+func TestTruncateAfterSlotRecordsFailureSeparately(t *testing.T) {
+	db := newTestDB(t)
+
+	reg := prometheus.NewRegistry()
+	require.NoError(t, RegisterTruncateMetrics(reg))
+	beforeOK := collectHistogramCount(t, reg, truncateResultSuccess)
+	beforeFail := collectHistogramCount(t, reg, truncateResultFailure)
+
+	// A rollback point above slot 0 whose block row does not exist makes
+	// TruncateAfterSlot fail when it looks the block up for the new tip.
+	point := ocommon.Point{
+		Slot: 4242,
+		Hash: bytes.Repeat([]byte{0x99}, 32),
+	}
+	_, _, err := db.TruncateAfterSlot(point, 0, nil)
+	require.Error(t, err)
+
+	assert.Equal(
+		t,
+		beforeOK,
+		collectHistogramCount(t, reg, truncateResultSuccess),
+		"a failed sweep must not be counted as a success",
+	)
+	assert.Equal(
+		t,
+		beforeFail+1,
+		collectHistogramCount(t, reg, truncateResultFailure),
+		"a failed sweep must still record its duration under the failure label",
 	)
 }
 
@@ -55,7 +92,11 @@ func TestRegisterTruncateMetricsNilRegistry(t *testing.T) {
 	require.NoError(t, RegisterTruncateMetrics(nil))
 }
 
-func collectHistogramCount(t *testing.T, reg *prometheus.Registry) uint64 {
+func collectHistogramCount(
+	t *testing.T,
+	reg *prometheus.Registry,
+	result string,
+) uint64 {
 	t.Helper()
 	families, err := reg.Gather()
 	require.NoError(t, err)
@@ -64,9 +105,16 @@ func collectHistogramCount(t *testing.T, reg *prometheus.Registry) uint64 {
 			"dingo_database_truncate_after_slot_duration_seconds" {
 			continue
 		}
-		require.NotEmpty(t, family.GetMetric())
-		return family.GetMetric()[0].GetHistogram().GetSampleCount()
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "result" &&
+					label.GetValue() == result {
+					return metric.GetHistogram().GetSampleCount()
+				}
+			}
+		}
 	}
-	t.Fatal("truncation duration histogram not registered")
+	// A labelled child that has never been observed is absent from the
+	// gathered output, which is a legitimate count of zero.
 	return 0
 }

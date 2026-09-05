@@ -37,12 +37,22 @@ import (
 // panics; see RegisterBlockByHashMetrics for the same reasoning.
 var (
 	truncateAfterSlotDurationOnce sync.Once
-	truncateAfterSlotDuration     prometheus.Histogram
+	truncateAfterSlotDuration     *prometheus.HistogramVec
 )
 
-func truncateAfterSlotDurationHistogram() prometheus.Histogram {
+// truncateResultSuccess and truncateResultFailure are the values of the
+// histogram's "result" label. A failed sweep can have a very different
+// duration profile from a successful one (it aborts at whichever sweep
+// failed), so mixing them into one distribution would misreport the
+// chain-freeze cost.
+const (
+	truncateResultSuccess = "success"
+	truncateResultFailure = "failure"
+)
+
+func truncateAfterSlotDurationHistogram() *prometheus.HistogramVec {
 	truncateAfterSlotDurationOnce.Do(func() {
-		truncateAfterSlotDuration = prometheus.NewHistogram(
+		truncateAfterSlotDuration = prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
 				Name: "dingo_database_truncate_after_slot_duration_seconds",
 				Help: "Duration of TruncateAfterSlot metadata rollback sweeps",
@@ -50,6 +60,7 @@ func truncateAfterSlotDurationHistogram() prometheus.Histogram {
 				// a large-database sweep is tens of seconds.
 				Buckets: prometheus.ExponentialBuckets(0.001, 2, 17),
 			},
+			[]string{"result"},
 		)
 	})
 	return truncateAfterSlotDuration
@@ -106,23 +117,54 @@ func (d *Database) TruncateAfterSlot(
 	point ocommon.Point,
 	mithrilFloor uint64,
 	txn *Txn,
-) (ochainsync.Tip, []byte, error) {
+) (retTip ochainsync.Tip, retNonce []byte, retErr error) {
 	started := time.Now()
+	// Set only when this call opened and committed its own transaction.
+	// Distinct from `owned`, which is also false when the caller supplied
+	// txn and therefore cannot express "durably committed here".
+	committedInternally := false
 	defer func() {
 		elapsed := time.Since(started)
-		truncateAfterSlotDurationHistogram().Observe(elapsed.Seconds())
-		// Logged unconditionally at Info: the ledger holds its write lock
-		// across this call, so its duration is the length of a chain-freeze
-		// window and needs to be visible without enabling Debug.
-		if d.logger != nil {
-			d.logger.Info(
-				"metadata rollback truncation complete",
+		// The duration is recorded either way -- a sweep that failed still
+		// held the ledger write lock for that long -- but under a label so
+		// success and failure are distinguishable.
+		result := truncateResultSuccess
+		if retErr != nil {
+			result = truncateResultFailure
+		}
+		truncateAfterSlotDurationHistogram().
+			WithLabelValues(result).
+			Observe(elapsed.Seconds())
+		if d.logger == nil {
+			return
+		}
+		// Logged at Info: the ledger holds its write lock across this call,
+		// so its duration is the length of a chain-freeze window and needs
+		// to be visible without enabling Debug.
+		//
+		// Note this reports the sweep, not the commit. When the caller
+		// supplies txn, it owns the commit and can still roll back after
+		// this returns, so the message deliberately says the sweep
+		// completed rather than claiming the truncation was durable.
+		if retErr != nil {
+			d.logger.Warn(
+				"metadata rollback truncation failed",
 				"component", "database",
 				"rollback_slot", point.Slot,
 				"duration", elapsed.String(),
 				"duration_seconds", elapsed.Seconds(),
+				"error", retErr,
 			)
+			return
 		}
+		d.logger.Info(
+			"metadata rollback truncation sweep complete",
+			"component", "database",
+			"rollback_slot", point.Slot,
+			"duration", elapsed.String(),
+			"duration_seconds", elapsed.Seconds(),
+			"committed", committedInternally,
+		)
 	}()
 	owned := false
 	if txn == nil {
@@ -390,6 +432,7 @@ func (d *Database) TruncateAfterSlot(
 			)
 		}
 		owned = false
+		committedInternally = true
 	}
 	return newTip, newNonce, nil
 }
