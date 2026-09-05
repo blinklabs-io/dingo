@@ -465,20 +465,8 @@ RETURNING id`,
 			if err != nil {
 				return err
 			}
-			certificateRefs, err := s.applyTransactionCertificates(
-				ctx,
-				db,
-				transactionID,
-				transaction.Certificates(),
-				point,
-				index,
-				nil,
-			)
-			if err != nil {
-				return err
-			}
 			collateralReturn := transaction.CollateralReturn()
-			stakeRefs := append([]models.StakeCredentialRef{}, certificateRefs...)
+			stakeRefs := make([]models.StakeCredentialRef, 0)
 			for _, produced := range transaction.Produced() {
 				model, err := models.UtxoLedgerToModel(produced, point.Slot)
 				if err != nil {
@@ -749,8 +737,8 @@ SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 UPDATE utxo
 SET transaction_id = COALESCE(transaction_id, ?),
     collateral_return_for_tx_id = COALESCE(collateral_return_for_tx_id, ?),
-    staking_key = CASE WHEN length(staking_key) = 0 THEN ? ELSE staking_key END,
-    credential_tag = CASE WHEN length(staking_key) = 0 THEN ? ELSE credential_tag END
+    staking_key = CASE WHEN COALESCE(length(staking_key), 0) = 0 THEN ? ELSE staking_key END,
+    credential_tag = CASE WHEN COALESCE(length(staking_key), 0) = 0 THEN ? ELSE credential_tag END
 WHERE id = ?`,
 				params.TransactionID,
 				params.CollateralReturnForTxID,
