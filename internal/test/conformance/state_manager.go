@@ -338,8 +338,9 @@ func (m *DingoStateManager) LoadInitialState(
 			CredentialTag: conformanceCredentialTag(credential.AsCredential()),
 			Active:        true,
 			Reward:        types.Uint64(balance),
+			ImportDeposit: m.initialStakeDepositLocked(),
 		}
-		if err := m.db.CreateAccount(txn, account); err != nil {
+		if err := m.db.Metadata().ImportAccount(account, txn.Metadata()); err != nil {
 			return fmt.Errorf("seed account: %w", err)
 		}
 	}
@@ -470,6 +471,21 @@ func resolveInitialStakeRegistrations(
 		}
 	}
 	return regs
+}
+
+// initialStakeDepositLocked returns the deposit paid by a stake credential
+// represented by ParsedInitialState. The upstream parser exposes the
+// registration identity and reward balance, but not a per-credential deposit,
+// so the vector's KeyDeposit is the only available value for this baseline.
+// Keep the value nil when the parameters are unavailable rather than inventing
+// a deposit that the source state did not provide.
+func (m *DingoStateManager) initialStakeDepositLocked() *types.Uint64 {
+	conwayPP, ok := m.protocolParams.(*conway.ConwayProtocolParameters)
+	if !ok || conwayPP == nil {
+		return nil
+	}
+	deposit := types.Uint64(conwayPP.KeyDeposit)
+	return &deposit
 }
 
 // seedAuthCommitteeHot persists pre-existing hot-key authorizations from a
