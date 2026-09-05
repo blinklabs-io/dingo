@@ -345,10 +345,17 @@ func koiosStakeEpoch(koiosEpoch uint64) (epoch uint64, ok bool) {
 //
 // retiredByParamEpoch is per-pool certificate evidence: the pool's latest
 // certificate as of the K+1 boundary is a retirement effective at or before
-// it. That is a positive fact about this pool alone, so unlike the pool-set
+// K. That is a positive fact about this pool alone, so unlike the pool-set
 // route it needs no argument that some set was completely recorded, and it
 // survives the snapshot retention window a trailing observer runs behind
 // (dingo #3925).
+//
+// The comparison epoch is K, not the K+1 boundary the certificates are
+// resolved as of. epochBoundarySnapshotSlot captures the K+1 mark pool set at
+// boundarySlot-1, which GetActivePoolKeyHashesAtSlot resolves against epoch K
+// and so keeps every pool whose retirement is effective K+1. Such a pool is
+// still in the K+1 pool set and still has a K+1 reward_pool_input row, so
+// reading it as departed would mask a genuinely missing one.
 //
 // paramEpochPools is the pool-set route: absence from a set already
 // established as complete. It is checked second because absence only means
@@ -639,13 +646,18 @@ func checkEpoch(
 	// rows are pruned to currentEpoch-3, and reward_pool_input is short of
 	// the declared count whenever a degraded active pool was omitted from it.
 	// Certificate history answers the same question per pool instead. A
-	// retirement effective at or before K+1 that no later registration
+	// retirement effective at or before K that no later registration
 	// cancelled is direct evidence this pool left, and
 	// pool_registration/pool_retirement are retained for the life of the
-	// database. Resolved once per epoch, and only against the K+1 summary's
-	// own boundary slot -- without one there is no point in the chain to
-	// resolve each pool's latest certificate as of, so the route stays
-	// closed and the stricter classification stands (dingo #3925).
+	// database. The effective-epoch bound is K rather than the K+1 boundary
+	// the certificates are resolved as of: the K+1 mark pool set is captured
+	// one slot before that boundary, so it still contains every pool
+	// retiring effective K+1, and those pools still have a K+1
+	// reward_pool_input row. Resolved once per epoch, and only against the
+	// K+1 summary's own boundary slot -- without one there is no point in
+	// the chain to resolve each pool's latest certificate as of, so the
+	// route stays closed and the stricter classification stands (dingo
+	// #3925).
 	var retiredByParamEpoch map[string]struct{}
 	if paramBoundarySlot > 0 {
 		retired, rErr := dingo.GetPoolsRetiredByEpoch(

@@ -6070,11 +6070,17 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   history, through `RewardParitySource.GetPoolsRetiredByEpoch` and
   `MetadataStore.GetPoolKeyHashesRetiredByEpoch` (see DATABASE.md), read once
   per epoch at the K+1 `epoch_summary.boundary_slot`
-  (`DingoEpochData.BoundarySlot`). A retirement effective at or before K+1
+  (`DingoEpochData.BoundarySlot`). A retirement effective at or before K
   that no later registration cancelled is a positive fact about that one
   pool, so it proves departure without any argument about set completeness,
   and `pool_registration`/`pool_retirement` are retained for the life of the
-  database. This route also fails closed: "a retirement certificate exists"
+  database. The effective-epoch bound is K rather than the K+1 boundary the
+  certificates are resolved as of, because `epochBoundarySnapshotSlot`
+  captures the K+1 mark pool set at `boundarySlot - 1`: that slot falls in
+  epoch K, so `GetActivePoolKeyHashesAtSlot` keeps every pool retiring
+  effective K+1 and those pools still get a K+1 `reward_pool_input` row.
+  Reading them as departed would mask a genuinely missing one. This route
+  also fails closed: "a retirement certificate exists"
   is not the predicate, because a later registration cancels a pending
   retirement and a re-registration after one has taken effect puts the pool
   back — such a pool is still in the pool set, and downgrading it would turn

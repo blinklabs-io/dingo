@@ -476,11 +476,28 @@ VALUES (?, ?, ?, ?)`, poolID, keyHash, retEpoch, retSlot).Error)
 	)
 }
 
+// retiredParityCert is one seeded certificate. blockIndex is the
+// transaction's index within its block and certIndex the certificate's index
+// within that transaction, which together break added_slot ties exactly the
+// way a registration and a retirement filed in one block do on chain.
+//
+// reconcile writes the row the way Store.RetirePools does — certificate_id = 0
+// with no certs/transaction row behind it — so such a row has no
+// block_index/cert_index of its own and is ordered by the synthetic_ret key
+// instead. Retirements only.
+type retiredParityCert struct {
+	slot       uint64
+	blockIndex uint64
+	certIndex  uint64
+	epoch      uint64 // retirements only
+	reconcile  bool   // retirements only
+}
+
 // retiredParitySeeder seeds pool certificate histories into the real,
-// migrated metadata schema. Every registration and retirement gets a
-// transaction/certs row so added_slot ties are broken on block_index then
-// cert_index, which is the only way to exercise the same-slot half of the
-// cancellation rule.
+// migrated metadata schema. Every certificate-backed registration and
+// retirement gets a transaction/certs row so added_slot ties are broken on
+// block_index then cert_index, which is the only way to exercise the same-slot
+// half of the cancellation rule.
 type retiredParitySeeder struct {
 	t   *testing.T
 	raw *sql.DB
@@ -509,12 +526,11 @@ func (s *retiredParitySeeder) cert(slot, blockIndex, certIndex uint64) int64 {
 	return certID
 }
 
-// seed writes one pool. regs and rets are (slot, certIndex) pairs; a
-// retirement's effective epoch is its third element.
+// seed writes one pool with the given registration and retirement history.
 func (s *retiredParitySeeder) seed(
 	keyHash []byte,
-	regs [][2]uint64,
-	rets [][3]uint64,
+	regs []retiredParityCert,
+	rets []retiredParityCert,
 ) {
 	s.t.Helper()
 	res, err := s.raw.Exec(
@@ -525,22 +541,25 @@ func (s *retiredParitySeeder) seed(
 	poolID, err := res.LastInsertId()
 	require.NoError(s.t, err)
 	for _, reg := range regs {
-		certID := s.cert(reg[0], 0, reg[1])
+		certID := s.cert(reg.slot, reg.blockIndex, reg.certIndex)
 		_, err := s.raw.Exec(`
 INSERT INTO pool_registration (
     pool_id, pool_key_hash, certificate_id, added_slot, deposit_amount
 ) VALUES (?, ?, ?, ?, '500')`,
-			poolID, keyHash, certID, reg[0],
+			poolID, keyHash, certID, reg.slot,
 		)
 		require.NoError(s.t, err)
 	}
 	for _, ret := range rets {
-		certID := s.cert(ret[0], 0, ret[1])
+		var certID int64
+		if !ret.reconcile {
+			certID = s.cert(ret.slot, ret.blockIndex, ret.certIndex)
+		}
 		_, err := s.raw.Exec(`
 INSERT INTO pool_retirement (
     pool_id, pool_key_hash, certificate_id, epoch, added_slot
 ) VALUES (?, ?, ?, ?, ?)`,
-			poolID, keyHash, certID, ret[2], ret[0],
+			poolID, keyHash, certID, ret.epoch, ret.slot,
 		)
 		require.NoError(s.t, err)
 	}
@@ -562,9 +581,19 @@ INSERT INTO pool_retirement (
 //
 // The fixture is built so that every clause of the predicate is load-bearing
 // for at least one pool: the `<=` comparison, the `added_slot < boundarySlot`
-// visibility cut, the cancellation guard, and both directions of the same-slot
-// cert_index tie-break. Neutralising any one of them in either implementation
-// fails this test.
+// visibility cut, the cancellation guard, both directions of the same-slot
+// block_index and cert_index tie-breaks, latest_ret's own cert_index ordering,
+// and the synthetic_ret key that ranks a reconcile retirement
+// (`certificate_id = 0`) ahead of certificate-backed rows in its own slot and
+// exempts it from cancellation. Neutralising any one of them in either
+// implementation fails this test.
+//
+// The reconcile pools matter because the two implementations diverged on
+// exactly them: DingoDB carried synthetic_ret while the store query did not,
+// so a node bootstrapped from a ledger-state snapshot — where ImportPool and
+// RetirePools write a registration and a certificate_id = 0 retirement in one
+// slot — would have the standalone CLI and the in-process observer classify
+// the same pool differently.
 func TestGetPoolsRetiredByEpochImplementationsAgree(t *testing.T) {
 	const (
 		queryEpoch   = uint64(7)
@@ -587,40 +616,55 @@ func TestGetPoolsRetiredByEpochImplementationsAgree(t *testing.T) {
 		retiredAfterBoundary = testPoolKeyHash(t, 0x37)
 		neverRetired         = testPoolKeyHash(t, 0x38)
 		reregisteredAtBound  = testPoolKeyHash(t, 0x39)
+		retiredLaterTx       = testPoolKeyHash(t, 0x3A)
+		reregisteredLaterTx  = testPoolKeyHash(t, 0x3B)
+		retiredTwiceSameSlot = testPoolKeyHash(t, 0x3C)
+		reconcileSameSlot    = testPoolKeyHash(t, 0x3D)
+		reconcileOverCertRet = testPoolKeyHash(t, 0x3E)
 	)
 	// Retired several epochs ago and still departed — the `<=` clause.
-	seeder.seed(departedEarlier, [][2]uint64{{100, 0}}, [][3]uint64{{200, 0, 5}})
+	seeder.seed(
+		departedEarlier,
+		[]retiredParityCert{{slot: 100}},
+		[]retiredParityCert{{slot: 200, epoch: 5}},
+	)
 	seeder.seed(
 		departedAtEpoch,
-		[][2]uint64{{100, 0}},
-		[][3]uint64{{200, 0, queryEpoch}},
+		[]retiredParityCert{{slot: 100}},
+		[]retiredParityCert{{slot: 200, epoch: queryEpoch}},
 	)
-	seeder.seed(retiringLater, [][2]uint64{{100, 0}}, [][3]uint64{{200, 0, 9}})
+	seeder.seed(
+		retiringLater,
+		[]retiredParityCert{{slot: 100}},
+		[]retiredParityCert{{slot: 200, epoch: 9}},
+	)
 	// The cancellation guard: a later registration puts the pool back.
 	seeder.seed(
 		reregistered,
-		[][2]uint64{{100, 0}, {300, 0}},
-		[][3]uint64{{200, 0, 5}},
+		[]retiredParityCert{{slot: 100}, {slot: 300}},
+		[]retiredParityCert{{slot: 200, epoch: 5}},
 	)
-	// Same slot, registration ordered after the retirement by cert_index.
+	// Same slot and same transaction, registration ordered after the
+	// retirement by cert_index.
 	seeder.seed(
 		reregisteredSameSlot,
-		[][2]uint64{{100, 0}, {200, 2}},
-		[][3]uint64{{200, 1, 5}},
+		[]retiredParityCert{{slot: 100}, {slot: 200, certIndex: 2}},
+		[]retiredParityCert{{slot: 200, certIndex: 1, epoch: 5}},
 	)
-	// Same slot, retirement ordered after the registration.
+	// Same slot and same transaction, retirement ordered after the
+	// registration.
 	seeder.seed(
 		retiredSameSlotAfter,
-		[][2]uint64{{100, 0}, {200, 1}},
-		[][3]uint64{{200, 2, 5}},
+		[]retiredParityCert{{slot: 100}, {slot: 200, certIndex: 1}},
+		[]retiredParityCert{{slot: 200, certIndex: 2, epoch: 5}},
 	)
 	// Not yet visible at the boundary.
 	seeder.seed(
 		retiredAfterBoundary,
-		[][2]uint64{{100, 0}},
-		[][3]uint64{{boundarySlot, 0, 5}},
+		[]retiredParityCert{{slot: 100}},
+		[]retiredParityCert{{slot: boundarySlot, epoch: 5}},
 	)
-	seeder.seed(neverRetired, [][2]uint64{{100, 0}}, nil)
+	seeder.seed(neverRetired, []retiredParityCert{{slot: 100}}, nil)
 	// The re-registration lands exactly on the boundary slot, so it is not
 	// yet visible and cannot cancel: the pool is still departed. This is the
 	// only pool for which the registration-side `added_slot < boundarySlot`
@@ -628,8 +672,60 @@ func TestGetPoolsRetiredByEpochImplementationsAgree(t *testing.T) {
 	// ordering guard instead.
 	seeder.seed(
 		reregisteredAtBound,
-		[][2]uint64{{100, 0}, {boundarySlot, 0}},
-		[][3]uint64{{200, 0, 5}},
+		[]retiredParityCert{{slot: 100}, {slot: boundarySlot}},
+		[]retiredParityCert{{slot: 200, epoch: 5}},
+	)
+	// Same slot, different transactions: the retirement is in the later
+	// transaction of the block, so it stands. cert_index cannot decide this
+	// pair — both are 0 — so only the block_index comparison can.
+	seeder.seed(
+		retiredLaterTx,
+		[]retiredParityCert{{slot: 100}, {slot: 200, blockIndex: 1}},
+		[]retiredParityCert{{slot: 200, blockIndex: 2, epoch: 5}},
+	)
+	// The mirror image: the registration is in the later transaction, so it
+	// cancels. Together these two pin both directions of the block_index
+	// comparison, which no other pool here exercises.
+	seeder.seed(
+		reregisteredLaterTx,
+		[]retiredParityCert{{slot: 100}, {slot: 200, blockIndex: 2}},
+		[]retiredParityCert{{slot: 200, blockIndex: 1, epoch: 5}},
+	)
+	// Two retirement certificates in one transaction naming different
+	// effective epochs. latest_ret must pick the higher cert_index, so the
+	// pool is departed by 5 rather than still retiring at 9. The epoch-9 row
+	// is seeded first so insertion order disagrees with cert_index order,
+	// which is what makes latest_ret's ORDER BY key load-bearing rather than
+	// incidentally satisfied by the scan order.
+	seeder.seed(
+		retiredTwiceSameSlot,
+		[]retiredParityCert{{slot: 100}},
+		[]retiredParityCert{
+			{slot: 200, certIndex: 1, epoch: 9},
+			{slot: 200, certIndex: 2, epoch: 5},
+		},
+	)
+	// A reconcile retirement (certificate_id = 0) in a certificate-backed
+	// registration's own slot. It has no certs row, so both its indices are
+	// zero and it would lose the tie-break without the synthetic_ret
+	// exemption. This is the shape ledgerstate's snapshot import writes, so
+	// it is on every node bootstrapped from a ledger-state snapshot.
+	seeder.seed(
+		reconcileSameSlot,
+		[]retiredParityCert{{slot: 100}, {slot: 200, certIndex: 1}},
+		[]retiredParityCert{{slot: 200, epoch: 5, reconcile: true}},
+	)
+	// A reconcile retirement sharing a slot with a certificate-backed
+	// retirement effective after the queried epoch. The reconcile row is the
+	// ledger state's answer and must win the ROW_NUMBER ordering despite its
+	// zero indices.
+	seeder.seed(
+		reconcileOverCertRet,
+		[]retiredParityCert{{slot: 100}},
+		[]retiredParityCert{
+			{slot: 200, certIndex: 3, epoch: 9},
+			{slot: 200, epoch: 5, reconcile: true},
+		},
 	)
 
 	want := map[string]struct{}{
@@ -637,6 +733,10 @@ func TestGetPoolsRetiredByEpochImplementationsAgree(t *testing.T) {
 		hex.EncodeToString(departedAtEpoch):      {},
 		hex.EncodeToString(retiredSameSlotAfter): {},
 		hex.EncodeToString(reregisteredAtBound):  {},
+		hex.EncodeToString(retiredLaterTx):       {},
+		hex.EncodeToString(retiredTwiceSameSlot): {},
+		hex.EncodeToString(reconcileSameSlot):    {},
+		hex.EncodeToString(reconcileOverCertRet): {},
 	}
 
 	source, err := NewDatabaseSource(db)

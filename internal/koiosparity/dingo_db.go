@@ -401,8 +401,12 @@ func quoteTransactionTable(dialect string) string {
 // certificate tables. It is the standalone-CLI twin of
 // MetadataStore.GetPoolKeyHashesRetiredByEpoch and must resolve departure
 // identically: latest registration and latest retirement as of boundarySlot,
-// ordered by (added_slot, block_index, cert_index), with a retirement that a
-// later registration cancelled excluded.
+// ordered by (added_slot, synthetic_ret, block_index, cert_index), with a
+// retirement that a later registration cancelled excluded. synthetic_ret ranks
+// reconcile retirements (certificate_id = 0) ahead of certificate-backed rows
+// at the same slot and exempts them from the cancellation clauses, because
+// they have no certs/transaction join to break the tie with. See the store
+// method's doc comment.
 func (d *DingoDB) GetPoolsRetiredByEpoch(
 	ctx context.Context,
 	epoch uint64,
