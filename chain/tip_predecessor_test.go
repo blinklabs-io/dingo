@@ -100,6 +100,48 @@ func TestTipPredecessorRefusesWithoutAResolvablePredecessor(t *testing.T) {
 	}
 }
 
+// TestTipPredecessorRefusesAParentAtOrAboveTheContestedSlot pins the strict
+// slot-ordering half of the contract. The alternative built on this context is
+// signed against the parent it names, so a parent whose slot is not strictly
+// below the contested tip's would produce a block that Praos ordering and
+// ledger envelope validation both reject. The chain does not enforce
+// increasing slots on add, so this state is reachable; the answer is "no
+// context", never a context the signer cannot use.
+func TestTipPredecessorRefusesAParentAtOrAboveTheContestedSlot(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks[:3] {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	if _, _, ok := c.TipPredecessor(); !ok {
+		t.Fatal("expected a resolvable tip predecessor before the same-slot tip")
+	}
+	// A tip that reuses its parent's slot. Its predecessor is resolvable and
+	// the hash linkage is intact, so only the slot check can reject it.
+	sameSlotTip := &MockBlock{
+		MockBlockNumber: testBlocks[2].MockBlockNumber + 1,
+		MockSlot:        testBlocks[2].MockSlot,
+		MockHash:        testHashPrefix + "00fe",
+		MockPrevHash:    testBlocks[2].MockHash,
+	}
+	if err := c.AddBlock(sameSlotTip, nil); err != nil {
+		t.Fatalf("unexpected error adding same-slot block: %s", err)
+	}
+	if parent, tip, ok := c.TipPredecessor(); ok {
+		t.Fatalf(
+			"expected no context for a tip at its parent's slot, got parent %d.%x tip %d",
+			parent.Slot,
+			parent.Hash,
+			tip.Point.Slot,
+		)
+	}
+}
+
 // TestAddLocalBlockDeferredAdoptsSiblingAfterRollback exercises the two chain
 // operations an equal-slot alternative needs in sequence: roll the contested
 // block off the tip, then adopt the locally forged sibling that shares its
