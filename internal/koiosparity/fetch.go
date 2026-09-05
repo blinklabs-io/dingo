@@ -28,13 +28,19 @@ import (
 
 // FetchConfig holds parameters for a Koios fetch run.
 type FetchConfig struct {
-	Network      string
-	APIKey       string
-	CachePath    string
-	Concurrency  int
-	FromEpoch    uint64 // 0 = resume from last cached + 1
-	ThroughEpoch uint64 // 0 = tip - 1
-	ForceRefresh bool   // re-fetch epochs already in cache (overwrite); implies FromEpoch is a hard start
+	Network string
+	APIKey  string
+	// BaseURL overrides the public koios.rest host for the network; see
+	// NewKoiosClient. Empty selects the public host.
+	BaseURL string
+	// AllowInsecureHTTP permits a plain-HTTP BaseURL; see
+	// NewKoiosClient. Local dev and test only.
+	AllowInsecureHTTP bool
+	CachePath         string
+	Concurrency       int
+	FromEpoch         uint64 // 0 = resume from last cached + 1
+	ThroughEpoch      uint64 // 0 = tip - 1
+	ForceRefresh      bool   // re-fetch epochs already in cache (overwrite); implies FromEpoch is a hard start
 	// AccountsEnabled additionally fetches #3097's per-account Koios
 	// reference data (FetchAccountRewardsForEpoch) for every epoch this run
 	// fetches. False by default: per-account fetching issues far more Koios
@@ -132,7 +138,12 @@ func Fetch(
 	}
 	defer cache.Close() //nolint:errcheck
 
-	koios, err := NewKoiosClient(cfg.Network, cfg.APIKey)
+	koios, err := NewKoiosClient(
+		cfg.Network,
+		cfg.APIKey,
+		cfg.BaseURL,
+		cfg.AllowInsecureHTTP,
+	)
 	if err != nil {
 		return nil, err
 	}

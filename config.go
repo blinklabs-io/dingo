@@ -95,6 +95,11 @@ type KoiosParityConfig struct {
 	// CachePath is the Koios reference cache.db path. Empty defaults to
 	// {DatabasePath}/.koios/cache.db.
 	CachePath string
+	// BaseURL overrides the public koios.rest host for the network, for a
+	// self-hosted or mirrored Koios instance. Empty selects the public host.
+	BaseURL string
+	// AllowInsecureHTTP permits a plain-HTTP BaseURL. Local dev/test only.
+	AllowInsecureHTTP bool
 	// APIKey is the Koios Bearer token for higher-rate-limit access.
 	APIKey string
 	// Strict stops/cancels the node on the first Koios/tool error or exact
@@ -760,6 +765,8 @@ func (c *Config) syncCompatFields() {
 		Network:              c.cfg.KoiosParity.Network,
 		CachePath:            c.cfg.KoiosParity.CachePath,
 		APIKey:               c.cfg.KoiosParity.APIKey,
+		BaseURL:              c.cfg.KoiosParity.BaseURL,
+		AllowInsecureHTTP:    c.cfg.KoiosParity.AllowInsecureHTTP,
 		Strict:               c.cfg.KoiosParity.Strict,
 		GraceHours:           c.cfg.KoiosParity.GraceHours,
 		Accounts:             &koiosParityAccounts,
@@ -1560,6 +1567,8 @@ func WithKoiosParity(cfg KoiosParityConfig) ConfigOptionFunc {
 			Network:              cfg.Network,
 			CachePath:            cfg.CachePath,
 			APIKey:               cfg.APIKey,
+			BaseURL:              cfg.BaseURL,
+			AllowInsecureHTTP:    cfg.AllowInsecureHTTP,
 			Strict:               cfg.Strict,
 			GraceHours:           cfg.GraceHours,
 			Accounts:             accounts,

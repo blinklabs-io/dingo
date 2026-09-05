@@ -6387,6 +6387,34 @@ never the reverse.
   long crawl is distinguishable from a stalled one; the logger is a parameter
   rather than a client field because the same client serves the concurrent
   chunk fetchers.
+- **Koios host.** `koiosBaseURLs` maps the network to the public
+  `*.koios.rest` v1 root, and `KoiosParityConfig.BaseURL`
+  (`--koios-parity-base-url`, `DINGO_KOIOS_PARITY_BASE_URL`, and `--koios-url`
+  / `KOIOS_URL` on the standalone CLI) overrides it for a self-hosted or
+  mirrored instance. A custom host also drops the burst cap:
+  `koiosBurstLimitSafe` describes koios.rest's own published Public/Free
+  window and says nothing about another deployment, so applying it there would
+  throttle against a limit that does not exist. Per-request retry, timeout and
+  429 backoff are unchanged, so a host that *does* rate-limit still behaves
+  correctly. `NewKoiosClient` runs `validateKoiosNetwork` before it applies the
+  override, so an override cannot be used to reach a network the tool does not
+  support — that check is what keeps `StakeAddressFromCredential`, which
+  hardcodes the testnet address network ID, from being handed a network it
+  would silently generate wrong-network stake addresses for. The override
+  itself is validated too: a custom host must be `https`, since `get` and
+  `post` attach the API key as a Bearer token to every request and forged
+  reference data can make a comparison report a false PASS. `AllowInsecureHTTP` is the local dev/test escape
+  hatch, mirroring `Mithril.AllowInsecureHTTP` —
+  `--koios-parity-allow-insecure-http` on the node, and
+  `--koios-allow-insecure-http` / `KOIOS_ALLOW_INSECURE_HTTP` on the standalone
+  CLI, where an explicitly-set flag beats the environment per CLAUDE.md's
+  CLI > env rule. A custom root must also carry no query string or fragment,
+  since `get` and `post` append an endpoint path and their own query to it and
+  would otherwise reach a different endpoint than intended. Validation errors
+  never echo the URL, because the value they describe is the one
+  `logURIConfigFields` exists to keep out of logs. `KoiosParity.BaseURL` is classified as
+  a URI field for logging (`logURIConfigFields`), not a plain one, because an
+  operator can embed credentials in it.
 - **Koios endpoint.** `/account_rewards` is deprecated; `/account_reward_
   history` is the replacement (`KoiosClient.GetAccountRewardHistory`), taking
   the same `stake_addresses_with_epoch_no` POST body shape via a new `post()`

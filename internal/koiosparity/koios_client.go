@@ -23,6 +23,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -224,11 +225,39 @@ func validateKoiosNetwork(network string) error {
 }
 
 // NewKoiosClient creates a client for the given network.
-func NewKoiosClient(network, apiKey string) (*KoiosClient, error) {
+//
+// baseURL overrides the public koios.rest host for the network, for a
+// self-hosted or mirrored Koios instance. It is the full v1 API root, e.g.
+// "https://preview-koios.example.com/api/v1"; a trailing slash is trimmed so
+// the caller does not have to care. Empty selects the public host.
+//
+// A custom host also drops the burst cap. koiosBurstLimitSafe describes
+// koios.rest's own published Public/Free tier window and says nothing about
+// another deployment, so applying it there would throttle against a limit that
+// does not exist. The per-request retry and timeout handling is unchanged, so a
+// host that does rate-limit still backs off correctly on 429.
+func NewKoiosClient(
+	network, apiKey, baseURL string,
+	allowInsecureHTTP bool,
+) (*KoiosClient, error) {
 	if err := validateKoiosNetwork(network); err != nil {
 		return nil, err
 	}
 	base := koiosBaseURLs[network]
+	burstLimit := koiosBurstLimitSafe
+	if trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/"); trimmed != "" {
+		if err := validateKoiosBaseURL(trimmed, allowInsecureHTTP); err != nil {
+			return nil, err
+		}
+		base = trimmed
+		// The cap is dropped for a custom deployment, not for a custom
+		// spelling of the public one. An override naming a koios.rest host is
+		// still subject to that host's published window, and dropping the cap
+		// there would earn avoidable 429 cooldowns.
+		if !isPublicKoiosHost(trimmed) {
+			burstLimit = 0
+		}
+	}
 	return &KoiosClient{
 		baseURL: base,
 		apiKey:  apiKey,
@@ -237,9 +266,95 @@ func NewKoiosClient(network, apiKey string) (*KoiosClient, error) {
 		},
 		// Public and Free tiers share the 100/10s burst cap; Pro/Premium are
 		// higher, but we don't learn the tier from the key alone, so stay at
-		// the Free-safe ceiling for every client.
-		limiter: newBurstLimiter(koiosBurstLimitSafe, koiosBurstWindow),
+		// the Free-safe ceiling for every client on the public host.
+		limiter: newBurstLimiter(burstLimit, koiosBurstWindow),
 	}, nil
+}
+
+// isPublicKoiosHost reports whether a base URL names a koios.rest deployment,
+// whose published tier window applies however the URL was spelled -- as a
+// built-in default or as an override naming the same host.
+func isPublicKoiosHost(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		// Unparseable never reaches here (validateKoiosBaseURL runs first),
+		// but treat it as public so an unexpected shape keeps the cap rather
+		// than losing it.
+		return true
+	}
+	// A single terminal dot is a valid DNS spelling of the same name, so
+	// "preview.koios.rest." must not read as a different, non-public host and
+	// lose the cap.
+	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	return host == "koios.rest" || strings.HasSuffix(host, ".koios.rest")
+}
+
+// validateKoiosBaseURL rejects a custom host this client must not send an API
+// key to, or trust reference data from.
+//
+// get and post attach APIKey as a Bearer token to every request, so plain HTTP
+// puts the token on the wire in cleartext. It also leaves the reference data
+// this tool compares Dingo against tamperable in flight, and a comparison
+// against forged reference data can report a false PASS -- the one outcome a
+// parity checker must never produce. allowInsecureHTTP is the local dev/test
+// escape hatch, mirroring Mithril.AllowInsecureHTTP.
+func validateKoiosBaseURL(rawURL string, allowInsecureHTTP bool) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		// rawURL is never echoed: an operator can put credentials in it as
+		// userinfo or as a credential-shaped query parameter, and a validation
+		// error is written to the same log the URI redaction protects.
+		return fmt.Errorf("parse koios base URL: %w", redactURLError(err))
+	}
+	if parsed.Host == "" {
+		return errors.New(
+			"koios base URL has no host; give the full v1 API root, e.g. https://host/api/v1",
+		)
+	}
+	// get and post build an endpoint by appending a path and its own query to
+	// this root. A root that already carries a query or fragment would put the
+	// appended path after that delimiter, so the request would silently reach
+	// a different endpoint than intended.
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		return errors.New(
+			"koios base URL must not carry a query string; give the bare v1 API root, e.g. https://host/api/v1",
+		)
+	}
+	// url.URL has no ForceFragment counterpart to ForceQuery, so a bare "#"
+	// parses to an empty Fragment and would otherwise be accepted — and the
+	// appended endpoint path would still land after the delimiter.
+	if parsed.Fragment != "" || strings.Contains(rawURL, "#") {
+		return errors.New(
+			"koios base URL must not carry a fragment; give the bare v1 API root, e.g. https://host/api/v1",
+		)
+	}
+	switch parsed.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if allowInsecureHTTP {
+			return nil
+		}
+		return errors.New(
+			"koios base URL uses plain HTTP, which would send the API key in cleartext and leave the reference data tamperable; use https or set allowInsecureHttp for local dev/test",
+		)
+	default:
+		return fmt.Errorf(
+			"koios base URL must use http or https, got scheme %q",
+			parsed.Scheme,
+		)
+	}
+}
+
+// redactURLError strips the URL from a *url.Error so a parse failure cannot
+// carry credentials into a log. url.Parse wraps the offending string in the
+// error it returns, which is exactly the value being kept out of logs.
+func redactURLError(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return fmt.Errorf("%s: %w", urlErr.Op, urlErr.Err)
+	}
+	return errors.New("invalid URL")
 }
 
 // burstLimiter enforces a sliding-window request budget matching Koios's

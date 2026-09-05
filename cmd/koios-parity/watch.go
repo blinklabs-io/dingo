@@ -36,6 +36,7 @@ Does not replace manual 'run --all' after a ledger replay.`,
 	}
 
 	cmd.Flags().String("api-key", "", "Koios Bearer token (or KOIOS_API_KEY)")
+	addKoiosURLFlag(cmd)
 	cmd.Flags().Duration("interval", 15*time.Minute, "poll interval")
 	cmd.Flags().Int("concurrency", 5, "Koios fetch workers")
 	cmd.Flags().Int("workers", 0, "check workers (default: NumCPU)")
@@ -71,6 +72,8 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	apiKey := koiosAPIKey(cmd)
+	baseURL := koiosBaseURL(cmd)
+	allowInsecure := koiosAllowInsecureHTTP(cmd)
 	accounts := accountsEnabled(cmd)
 
 	logger := slog.Default()
@@ -128,6 +131,8 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 				fetchResult, fetchErr := koiosparity.Fetch(ctx, koiosparity.FetchConfig{
 					Network:              network,
 					APIKey:               apiKey,
+					BaseURL:              baseURL,
+					AllowInsecureHTTP:    allowInsecure,
 					CachePath:            cachePath,
 					Concurrency:          concurrency,
 					FromEpoch:            fromClosed,
