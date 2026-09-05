@@ -19,6 +19,7 @@ import (
 
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 	utxorpc_cardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
@@ -60,4 +61,39 @@ func TestExtractPParamsLimitsRejectsTypedNilPointer(t *testing.T) {
 func TestExtractPParamsLimitsRejectsUnrecognizedType(t *testing.T) {
 	_, err := extractPParamsLimits(unrecognizedProtocolParameters{})
 	require.ErrorContains(t, err, "unsupported")
+}
+
+// TestEnforceOpCertNoGapRule pins the exported era classification callers
+// outside this package (startup credential validation) rely on to match
+// the forge loop's own classification: Praos (Babbage onward) enforces the
+// no-gap rule, TPraos (Shelley-Alonzo) does not.
+func TestEnforceOpCertNoGapRule(t *testing.T) {
+	enforce, err := EnforceOpCertNoGapRule(
+		&babbage.BabbageProtocolParameters{},
+	)
+	require.NoError(t, err)
+	require.True(
+		t,
+		enforce,
+		"Babbage is Praos and must enforce the no-gap rule",
+	)
+
+	enforce, err = EnforceOpCertNoGapRule(
+		&conway.ConwayProtocolParameters{},
+	)
+	require.NoError(t, err)
+	require.True(t, enforce, "Conway is Praos and must enforce the no-gap rule")
+
+	enforce, err = EnforceOpCertNoGapRule(
+		&shelley.ShelleyProtocolParameters{ProtocolMajor: 2},
+	)
+	require.NoError(t, err)
+	require.False(
+		t,
+		enforce,
+		"Shelley is TPraos and must not enforce the no-gap rule",
+	)
+
+	_, err = EnforceOpCertNoGapRule(nil)
+	require.Error(t, err)
 }

@@ -4364,6 +4364,33 @@ instead of a burned leader slot and a rejected `AddLocalBlock` call. The
 check is opt-in: a nil `OpCertLedgerView` (dev mode, embedders without
 ledger wiring) skips it entirely, unchanged from before.
 
+`LedgerState.LatestOpCertSequence` -- the `LedgerView` method both this
+gate and startup's `PoolCredentials.ValidateAgainstLedger` read through --
+resolves the "latest observed" counter via the same Mithril-boundary-aware
+path as block application (`latestOpCertCounterForValidation`, both now
+backed by the shared `latestOpCertCounterAfterMithril`), instead of a plain
+`MAX` over the whole table. A Mithril-restored node's per-pool opcert
+history is only trustworthy after the certified boundary; a plain MAX could
+return a stale pre-boundary row that block application itself does not
+trust as a baseline. `LatestOpCertSequence` captures `mithrilLedgerSlot`
+under a read lock before calling the shared resolver, since (unlike
+`latestOpCertCounterForValidation`'s block-application caller) neither
+startup validation nor the forge loop otherwise holds a lock across that
+field.
+
+Startup's `PoolCredentials.ValidateAgainstLedger` applies the identical
+era-scoped counter rule (an `enforceNoGap` parameter, resolved by
+`Node.opCertNoGapRuleForCurrentSlot` via the same exported
+`forging.EnforceOpCertNoGapRule` era classification the forge loop uses),
+not just the staleness half it always checked. Before this, a Praos-era
+opcert that was gapped but not stale would start the node cleanly and only
+be rejected on every subsequent forge attempt; startup now surfaces that
+loudly instead. Era resolution failing at startup (e.g. protocol
+parameters genuinely unavailable yet) is not itself fatal: it logs a
+warning and falls back to the stale-only check rather than adding a new
+startup-failure mode for a condition unrelated to the credential
+cross-check itself.
+
 Each production forge attempt takes an independently owned snapshot of one
 complete credential generation at the runtime gate. The snapshot deep-copies
 the VRF secret, KES secret, verification keys, opcert, and validated lifetime;

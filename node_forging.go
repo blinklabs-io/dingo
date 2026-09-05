@@ -163,7 +163,25 @@ func (n *Node) validateBlockProducerLedgerWithView(
 	if creds == nil {
 		return errors.New("nil pool credentials")
 	}
-	registered, vrfMatched, err := creds.ValidateAgainstLedger(view)
+	enforceNoGap, gapErr := n.opCertNoGapRuleForCurrentSlot()
+	if gapErr != nil {
+		// Era resolution failing here is not itself a reason to refuse
+		// startup: fall back to the stale-only check ValidateAgainstLedger
+		// already applied before this era-scoped rule existed, rather than
+		// adding a new startup-failure mode for an edge case unrelated to
+		// the credential cross-check itself.
+		n.config.logger.Warn(
+			"could not resolve era for opcert no-gap rule; startup will only check for a stale counter",
+			"component",
+			"node",
+			"error",
+			gapErr,
+		)
+	}
+	registered, vrfMatched, err := creds.ValidateAgainstLedger(
+		view,
+		enforceNoGap,
+	)
 	if err != nil {
 		if errors.Is(err, forging.ErrVRFKeyHashMismatch) &&
 			n.config.network == "devnet" {
@@ -204,6 +222,32 @@ func (n *Node) validateBlockProducerLedgerWithView(
 		)
 	}
 	return nil
+}
+
+// opCertNoGapRuleForCurrentSlot resolves whether the era at the ledger's
+// current slot enforces the operational-certificate no-gap rule (Praos,
+// Babbage onward) as opposed to only the stale-counter check (TPraos,
+// Shelley-Alonzo), so ValidateAgainstLedger can apply the same era-scoped
+// rule at startup that the forge loop and block application apply
+// afterward. An error here means the era could not be determined -- the
+// caller falls back to the pre-existing stale-only check rather than
+// refusing startup for it.
+func (n *Node) opCertNoGapRuleForCurrentSlot() (bool, error) {
+	if n.ledgerState == nil {
+		return false, errors.New("ledger state unavailable")
+	}
+	currentSlot, err := n.ledgerState.CurrentSlot()
+	if err != nil {
+		if errors.Is(err, ledger.ErrBeforeGenesis) {
+			return false, nil
+		}
+		return false, fmt.Errorf("compute current slot: %w", err)
+	}
+	pparams := n.ledgerState.ProtocolParamsForSlot(currentSlot)
+	if pparams == nil {
+		return false, errors.New("protocol parameters unavailable")
+	}
+	return forging.EnforceOpCertNoGapRule(pparams)
 }
 
 // handleGenesisSnapshotError returns a fatal error for block producers (which

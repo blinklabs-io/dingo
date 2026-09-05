@@ -17,6 +17,7 @@ package forging
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 
@@ -181,6 +182,78 @@ func TestCheckAndForgeProductionSkipsWhenEraUnresolvable(t *testing.T) {
 		t,
 		builder.calls,
 		"an unresolvable era must not build a block",
+	)
+	require.Zero(t, broadcaster.calls)
+}
+
+// TestCheckAndForgeProductionSkipsOnTransientLedgerReadError covers a
+// transient database error from LatestOpCertSequence itself (as opposed to
+// a definite stale/gapped counter). A DB hiccup on a leader slot costs a
+// could-not-forge disposition for that slot rather than forging with an
+// unverified key state; the slot is not adopted either way, so failing
+// closed here does not risk a block the chain would reject.
+func TestCheckAndForgeProductionSkipsOnTransientLedgerReadError(t *testing.T) {
+	builder, broadcaster := newOpCertSequenceGateTestBuilder()
+	leader := &forgerCountingLeader{}
+	var logs bytes.Buffer
+	view := &fakeLedgerView{seqErr: errors.New("transient database error")}
+	eraParams := &mockPParamsProvider{
+		pparams: &babbage.BabbageProtocolParameters{},
+	}
+	forger := opCertSequenceGateForger(
+		t, view, eraParams, leader, builder, broadcaster, &logs,
+	)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Equal(
+		t,
+		1,
+		leader.callCount(),
+		"leader selection must run before the counter check",
+	)
+	require.Zero(t, builder.calls, "a lookup error must not build a block")
+	require.Zero(t, broadcaster.calls)
+	require.Contains(t, logs.String(), "opcert sequence lookup")
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeCouldNot),
+	)
+}
+
+// TestCheckAndForgeProductionSkipsOnTypedNilProtocolParameters covers a
+// ProtocolParamsForSlot implementation that returns a typed-nil pointer of
+// a known era's type (e.g. a lookup miss represented as
+// (*babbage.BabbageProtocolParameters)(nil)) rather than a true nil
+// interface. This is the case extractPParamsLimits' reflect-based guard
+// exists for; TestCheckAndForgeProductionSkipsWhenEraUnresolvable above
+// only exercises the plain-nil-interface half of that guard.
+func TestCheckAndForgeProductionSkipsOnTypedNilProtocolParameters(
+	t *testing.T,
+) {
+	builder, broadcaster := newOpCertSequenceGateTestBuilder()
+	leader := &forgerCountingLeader{}
+	var logs bytes.Buffer
+	view := &fakeLedgerView{seqFound: true, latestSeq: 0}
+	var nilPParams *babbage.BabbageProtocolParameters
+	eraParams := &mockPParamsProvider{pparams: nilPParams}
+	forger := opCertSequenceGateForger(
+		t, view, eraParams, leader, builder, broadcaster, &logs,
+	)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Equal(
+		t,
+		1,
+		leader.callCount(),
+		"leader selection must run before the counter check",
+	)
+	require.Zero(
+		t,
+		builder.calls,
+		"a typed-nil protocol parameters value must not build a block",
 	)
 	require.Zero(t, broadcaster.calls)
 }

@@ -1057,6 +1057,14 @@ type LedgerView interface {
 // registration is not fatal because operators commonly stage their keys
 // before submitting the registration certificate.
 //
+// enforceNoGap applies the same era-scoped counter rule the forge loop's
+// checkOpCertSequence and block application enforce (see
+// ledger/eras.ValidateOpCertCounter): Praos eras (Babbage onward) reject a
+// counter that skips ahead of the last observed value by more than one, in
+// addition to the stale check both eras always apply. Without this, a
+// gapped-but-not-stale opcert would start the node cleanly and only be
+// rejected on every subsequent forge attempt.
+//
 // Three return values describe the outcome:
 //   - registered: true if the pool registration was found on chain.
 //   - vrfMatched: true if registered AND the on-chain VRF key hash
@@ -1068,6 +1076,7 @@ type LedgerView interface {
 //     devnet callers may choose to warn on ErrVRFKeyHashMismatch.
 func (pc *PoolCredentials) ValidateAgainstLedger(
 	view LedgerView,
+	enforceNoGap bool,
 ) (registered, vrfMatched bool, err error) {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
@@ -1109,10 +1118,16 @@ func (pc *PoolCredentials) ValidateAgainstLedger(
 	if err != nil {
 		return true, vrfMatched, fmt.Errorf("opcert sequence lookup: %w", err)
 	}
-	if seqFound && pc.opCert.IssueNumber < latestSeq {
+	if seqErr := eras.ValidateOpCertCounter(
+		latestSeq,
+		seqFound,
+		pc.opCert.IssueNumber,
+		enforceNoGap,
+	); seqErr != nil {
 		return true, vrfMatched, fmt.Errorf(
-			"opcert sequence %d is stale: ledger has observed %d for this pool",
-			pc.opCert.IssueNumber, latestSeq,
+			"opcert sequence %d invalid: %w",
+			pc.opCert.IssueNumber,
+			seqErr,
 		)
 	}
 	return true, vrfMatched, nil
