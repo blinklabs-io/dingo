@@ -759,6 +759,7 @@ func (b *forgerTestBuilder) BuildBlockWithLeios(
 	leiosData LeiosBlockData,
 ) (ledger.Block, []byte, error) {
 	b.leiosCalls++
+	b.noteBuild()
 	b.leiosData = leiosData
 	return b.block, b.cbor, nil
 }

@@ -178,7 +178,7 @@ func TestCheckAndForgeProductionEqualSlotReachesLeaderCheck(t *testing.T) {
 	)
 }
 
-// TestCheckAndForgeProductionEqualSlotDoesNotReForgeOurOwnSlot is the// TestCheckAndForgeProductionEqualSlotDoesNotReForgeOurOwnSlot is the
+// TestCheckAndForgeProductionEqualSlotDoesNotReForgeOurOwnSlot is the
 // anti-equivocation companion to the test above. The slot-aligned loop
 // can re-enter a slot it already committed to (a clock that has not
 // advanced, or a NextSlotTime already in the past), and after a
