@@ -31,12 +31,12 @@ var handlerProgressWarnInterval = 30 * time.Second
 // its handler. Called immediately before the handler runs, and paired with
 // endHandler.
 //
-// The rate limiter is cleared here as well as in endHandler: each invocation
-// gets its own grace period, and clearing on both edges means a watchdog tick
-// that races endHandler cannot leave a stale timestamp behind that suppresses
-// the report for the next event.
+// It deliberately does not touch the watchdog's rate-limit stamp. Clearing it
+// here would race the watchdog: a tick that read the previous invocation's
+// start time can write its stamp after this store, and the cleared field would
+// then be re-set for an invocation that has just begun. The stamp instead
+// carries the start time it belongs to, so a stale one cannot match.
 func (c *channelSubscriber) beginHandler(now time.Time) {
-	c.handlerWarnedAt.Store(0)
 	c.handlerStartedAt.Store(now.UnixNano())
 }
 
@@ -45,45 +45,51 @@ func (c *channelSubscriber) beginHandler(now time.Time) {
 // one: only a handler that has not returned is reported.
 func (c *channelSubscriber) endHandler() {
 	c.handlerStartedAt.Store(0)
-	c.handlerWarnedAt.Store(0)
 }
 
 // handlerStuckFor reports how long the current handler invocation has been
-// running, and whether one is running at all.
+// running, which invocation that is (its unix-nano start time, 0 when none),
+// and whether one is running at all.
 func (c *channelSubscriber) handlerStuckFor(
 	now time.Time,
-) (time.Duration, bool) {
+) (time.Duration, int64, bool) {
 	started := c.handlerStartedAt.Load()
 	if started == 0 {
-		return 0, false
+		return 0, 0, false
 	}
 	elapsed := now.Sub(time.Unix(0, started))
 	if elapsed < 0 {
-		return 0, true
+		return 0, started, true
 	}
-	return elapsed, true
+	return elapsed, started, true
 }
 
 // warnStuckHandler reports a subscription whose handler has not returned, at
 // most once per interval per subscription. Returns true when the subscription
 // is currently stuck, whether or not this call logged.
+//
+// Called only from handlerProgressWatchdog, which is what makes the unlocked
+// read-then-write of the two stamp fields safe: a bus runs one watchdog at a
+// time, and nothing else writes them.
 func (c *channelSubscriber) warnStuckHandler(
 	now time.Time,
 	interval time.Duration,
 ) bool {
-	elapsed, running := c.handlerStuckFor(now)
+	elapsed, started, running := c.handlerStuckFor(now)
 	if !running || elapsed < interval {
 		return false
 	}
-	// Rate-limit per subscription. endHandler resets this, so a handler that
-	// recovers starts from a clean slate rather than staying suppressed.
-	lastWarn := c.handlerWarnedAt.Load()
-	if lastWarn != 0 && now.Sub(time.Unix(0, lastWarn)) < interval {
-		return true
+	// Rate-limit per invocation, not per subscription: a stamp left behind
+	// for an invocation that has since returned names a different start
+	// time, so it cannot suppress the first report for the current one.
+	if c.handlerWarnedFor.Load() == started {
+		lastWarn := c.handlerWarnedAt.Load()
+		if lastWarn != 0 && now.Sub(time.Unix(0, lastWarn)) < interval {
+			return true
+		}
 	}
-	if !c.handlerWarnedAt.CompareAndSwap(lastWarn, now.UnixNano()) {
-		return true
-	}
+	c.handlerWarnedAt.Store(now.UnixNano())
+	c.handlerWarnedFor.Store(started)
 	if c.logger != nil {
 		c.logger.Warn(
 			"event subscriber handler not making progress",
@@ -111,12 +117,27 @@ func (e *EventBus) StuckHandlerCount() int {
 	now := time.Now()
 	count := 0
 	for _, sub := range e.channelSubscriberSnapshot() {
-		if elapsed, running := sub.handlerStuckFor(now); running &&
+		if elapsed, _, running := sub.handlerStuckFor(now); running &&
 			elapsed >= e.handlerProgressInterval {
 			count++
 		}
 	}
 	return count
+}
+
+// observeHandlerProgress materializes the zero-valued handler-stall series for
+// a subscription the watchdog can observe. The counter is only ever
+// incremented by a stall, so without this a healthy bus exports no series at
+// all for the event type and a Prometheus query cannot tell "no handler here
+// has ever stalled" from "this subscription was never registered" -- the two
+// answers an operator most needs to distinguish. Called for the SubscribeFunc
+// paths only: a Subscribe channel's read loop is not owned by the bus, so the
+// watchdog never reports it and a series for it would always read zero.
+func (e *EventBus) observeHandlerProgress(eventType EventType) {
+	if e.metrics == nil {
+		return
+	}
+	e.metrics.handlerStalls.WithLabelValues(string(eventType)).Add(0)
 }
 
 // channelSubscriberSnapshot copies the live channel subscribers out from under

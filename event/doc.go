@@ -109,7 +109,10 @@
 // handler that has stopped returning is reported directly, by a
 // bus-wide watchdog, as an "event subscriber handler not making
 // progress" warning and the event_subscriber_handler_stalled_total
-// metric. See handler_progress.go.
+// metric. That counter carries a zero-valued series for every
+// SubscribeFunc subscription, so a bus with no stall is
+// distinguishable from one where the subscription is missing. See
+// handler_progress.go.
 //
 // # Subscribing
 //

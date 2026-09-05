@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -197,4 +199,113 @@ func TestStuckHandlerReportIdentifiesSubscriber(t *testing.T) {
 	require.Contains(t, logs, "stuck_for=")
 	require.Contains(t, logs, "queued=")
 	require.Contains(t, logs, "buffer=8")
+}
+
+// A watchdog tick that races the handler's return must not silence the report
+// for the invocation that follows it.
+//
+// handlerStuckFor can load the running invocation's start time and then, before
+// the tick writes its rate-limit stamp, have that handler return and the
+// dispatch loop begin the next event. The stamp then lands while a different
+// invocation is running. Keying it to the invocation it actually described is
+// what keeps it from suppressing that invocation's own first report — a stamp
+// cleared on each begin cannot, because the racing write happens after the
+// clear.
+func TestStuckHandlerRateLimitIsPerInvocation(t *testing.T) {
+	const interval = time.Second
+
+	var buf lockedBuffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+		Level: slog.LevelWarn,
+	}))
+	c := newChannelSubscriber(handlerProgressTestType, 1, logger)
+
+	first := time.Now()
+	c.beginHandler(first)
+	firstWarn := first.Add(interval)
+	require.True(t, c.warnStuckHandler(firstWarn, interval))
+	require.Equal(t, 1, stuckHandlerWarnings(&buf))
+
+	// Replay the losing interleaving. The tick above sampled `first`; the
+	// handler returned and the dispatch loop began the next event before the
+	// tick's stamp was written, so the stamp is applied here, after
+	// beginHandler.
+	second := first.Add(interval / 2)
+	c.endHandler()
+	c.beginHandler(second)
+	c.handlerWarnedAt.Store(firstWarn.UnixNano())
+	c.handlerWarnedFor.Store(first.UnixNano())
+
+	// The second invocation has now been stuck for a full interval of its
+	// own and must be reported, even though the stale stamp is younger than
+	// one interval.
+	require.True(t, c.warnStuckHandler(second.Add(interval), interval))
+	require.Equal(t, 2, stuckHandlerWarnings(&buf),
+		"a report stamped for an invocation that already returned must not "+
+			"suppress the first report for the one running now",
+	)
+
+	// The rate limit still holds within one invocation.
+	require.True(
+		t,
+		c.warnStuckHandler(second.Add(interval+interval/2), interval),
+	)
+	require.Equal(t, 2, stuckHandlerWarnings(&buf),
+		"repeat reports for the same invocation stay rate-limited",
+	)
+}
+
+func stuckHandlerWarnings(buf *lockedBuffer) int {
+	return strings.Count(
+		buf.String(),
+		"event subscriber handler not making progress",
+	)
+}
+
+// event_subscriber_handler_stalled_total only ever moves on a stall, so a
+// healthy bus would export no series for it at all and a query could not tell
+// "nothing here has stalled" from "this subscription does not exist" — which
+// is the distinction an operator watching for a wedged internal consumer
+// needs. Registering a SubscribeFunc subscription materializes its zero.
+func TestHandlerStallSeriesExistsBeforeAnyStall(t *testing.T) {
+	const funcType EventType = "test.handler_stall.func"
+	const chanType EventType = "test.handler_stall.chan"
+
+	registry := prometheus.NewRegistry()
+	eb := NewEventBus(registry, nil)
+	t.Cleanup(eb.Close)
+
+	require.Equal(
+		t,
+		0,
+		promtestutil.CollectAndCount(eb.metrics.handlerStalls),
+		"nothing is subscribed yet",
+	)
+
+	eb.SubscribeFunc(funcType, func(Event) {})
+	require.Equal(
+		t,
+		1,
+		promtestutil.CollectAndCount(eb.metrics.handlerStalls),
+		"a SubscribeFunc subscription must publish its zero",
+	)
+
+	// A Subscribe channel's read loop is not owned by the bus, so the
+	// watchdog never reports it. A series for it would be permanently zero
+	// and would misrepresent the subscription as observed.
+	_, _ = eb.Subscribe(chanType)
+	require.Equal(
+		t,
+		1,
+		promtestutil.CollectAndCount(eb.metrics.handlerStalls),
+		"a channel subscription is not observable and gets no series",
+	)
+
+	require.Equal(
+		t,
+		float64(0),
+		promtestutil.ToFloat64(
+			eb.metrics.handlerStalls.WithLabelValues(string(funcType)),
+		),
+	)
 }

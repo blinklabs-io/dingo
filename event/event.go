@@ -326,14 +326,23 @@ type channelSubscriber struct {
 	stallSuppressed int
 
 	// handlerStartedAt is the unix-nano time the dispatch goroutine entered
-	// its handler, or 0 when no handler is running. handlerWarnedAt is the
-	// last time handlerProgressWatchdog reported this subscription, and is
-	// cleared with handlerStartedAt so a recovered handler is not left
-	// suppressed. Both stay zero for subscribers with no dispatch goroutine
+	// its handler, or 0 when no handler is running. It is written only by
+	// that dispatch goroutine.
+	//
+	// handlerWarnedAt and handlerWarnedFor are handlerProgressWatchdog's
+	// rate limiter: when it last reported this subscription, and the
+	// handlerStartedAt value that report was about. They are written only by
+	// the watchdog, of which a bus runs exactly one at a time. Keying the
+	// stamp to the invocation, rather than clearing it on each new one, is
+	// what stops a report that raced the handler's return from landing on
+	// the next invocation and suppressing its own first report.
+	//
+	// All three stay zero for subscribers with no dispatch goroutine
 	// (Subscribe/SubscribeWithBuffer), whose read loop the bus does not own
 	// and therefore cannot observe. See handler_progress.go.
 	handlerStartedAt atomic.Int64
 	handlerWarnedAt  atomic.Int64
+	handlerWarnedFor atomic.Int64
 }
 
 // warnStalled reports a subscriber that is not draining, at most once per
@@ -766,6 +775,7 @@ func (e *EventBus) SubscribeFuncWithBufferPolicy(
 	)
 	e.subscriberWg.Add(1)
 	e.stopMu.RUnlock()
+	e.observeHandlerProgress(eventType)
 
 	go func(evtCh <-chan Event, handlerFunc EventHandlerFunc, done chan struct{}) {
 		defer close(done)
@@ -851,6 +861,7 @@ func (e *EventBus) SubscribeFuncStrict(
 	)
 	e.subscriberWg.Add(1)
 	e.stopMu.RUnlock()
+	e.observeHandlerProgress(eventType)
 
 	go func(evtCh <-chan Event, handlerFunc EventHandlerFunc, done chan struct{}) {
 		defer close(done)
