@@ -1811,6 +1811,19 @@ type MetadataStore interface {
 		txn types.Txn,
 	) ([]models.PoolRetirementRefund, error)
 
+	// GetPoolEarliestVrfKeyHashAtSlot returns the VRF key hash from the
+	// pool's earliest registration at or before the given slot, which is what
+	// cardano-ledger's psStakePools holds for a pool that first registered
+	// inside the captured epoch: the POOL rule inserts a first registration
+	// directly and defers only a re-registration through
+	// psFutureStakePoolParams. Contrast GetPoolVrfKeyHashAtSlot, which
+	// returns the latest such registration.
+	GetPoolEarliestVrfKeyHashAtSlot(
+		[]byte, // poolKeyHash
+		uint64, // slot
+		types.Txn,
+	) ([]byte, bool, error)
+
 	// GetStakeByPool returns the total delegated stake and delegator count for a pool.
 	// This aggregates all accounts delegated to the pool and sums their UTxO values.
 	GetStakeByPool(

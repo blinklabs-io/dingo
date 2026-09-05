@@ -95,7 +95,7 @@ func TestElectingVrfKeyHashLagsPoolParamsByOneEpoch(t *testing.T) {
 		{"epoch 39 elected by mark(38)", 39, 3_196_799},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			gotCutoff, ok, err := ls.electingPoolParamsCutoffSlot(
+			gotCutoff, _, ok, err := ls.electingPoolParamsCutoffSlot(
 				tb.block, tc.epoch, pool,
 			)
 			require.NoError(t, err)
@@ -135,4 +135,51 @@ func blockEpochId(
 	epoch, err := ls.epochForSlot(block.SlotNumber())
 	require.NoError(t, err)
 	return epoch.EpochId
+}
+
+// TestElectingVrfKeyHashResolvesTheEarlierKeyWhenAReRegistrationFollowsTheCutoff
+// pins the resolved key rather than the cutoff, for the case the cutoff exists
+// to handle: a pool with an earlier registration whose re-registration lands
+// after the parameter cutoff must elect on the earlier key.
+//
+// cardano-ledger routes a re-registration through psFutureStakePoolParams,
+// which POOLREAP merges only after SNAP has run, so the snapshot still carries
+// the parameters in force before it. This also guards the first-registration
+// fallback: that fallback resolves the earliest registration at or before the
+// capture, which here is the same earlier key — so a test asserting only the
+// key could pass for the wrong reason. The cutoff lookup must be what answers,
+// and the sub-test below proves it by removing the fallback's candidate.
+func TestElectingVrfKeyHashResolvesTheEarlierKeyWhenAReRegistrationFollowsTheCutoff(
+	t *testing.T,
+) {
+	nonce := bytes.Repeat([]byte{0x07}, 32)
+	tb := createTestBlock(t, [32]byte{51}, 51, tamperNone)
+	ls, db := newEligibilityTestLedger(t, nonce)
+	ls.epochCache = previewEpochs(35, 39, nonce)
+	ls.publishSnapshotsLocked()
+
+	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x11}, 28))
+	earlyKey := bytes.Repeat([]byte{0xB5}, 32)
+	rotatedKey := bytes.Repeat([]byte{0xFA}, 32)
+
+	// Cutoff for epoch 38 is 3110399. The first registration precedes it; the
+	// re-registration falls after it but before the capture at 3196799.
+	seedPoolRegistrationAtSlot(t, db, pool[:], earlyKey, 2_479_516)
+	seedPoolRegistrationAtSlot(t, db, pool[:], rotatedKey, 3_150_000)
+	seedPoolStakeSnapshotOfTypeAtSlot(t, db, 37,
+		models.PoolStakeSnapshotTypeMark, pool[:], 1_000, 10_000, 3_196_799)
+
+	got, ok, err := ls.electingVrfKeyHash(tb.block, 38, pool)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t,
+		lcommon.NewBlake2b256(earlyKey), got,
+		"the re-registration was deferred past SNAP, so the snapshot "+
+			"carries the key registered before the cutoff",
+	)
+	assert.NotEqual(t,
+		lcommon.NewBlake2b256(rotatedKey), got,
+		"resolving the latest registration at or before the capture would "+
+			"pick the deferred key and reject a canonical block",
+	)
 }

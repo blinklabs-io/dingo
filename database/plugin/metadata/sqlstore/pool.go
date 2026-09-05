@@ -1082,6 +1082,56 @@ LIMIT 1`,
 	return vrfKeyHash, true, nil
 }
 
+// GetPoolEarliestVrfKeyHashAtSlot returns the VRF key hash from the pool's
+// earliest registration at or before the given slot.
+//
+// This is the key cardano-ledger's psStakePools holds for a pool that first
+// registered inside the captured epoch. The POOL rule inserts a first
+// registration into psStakePools directly and defers only a re-registration
+// through psFutureStakePoolParams, so when both land in that epoch the
+// snapshot carries the first one's key. GetPoolVrfKeyHashAtSlot answers the
+// opposite question and would resolve the deferred key.
+func (s *Store) GetPoolEarliestVrfKeyHashAtSlot(
+	poolKeyHash []byte,
+	slot uint64,
+	txn types.Txn,
+) ([]byte, bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, false, fmt.Errorf(
+			"GetPoolEarliestVrfKeyHashAtSlot: resolve db: %w",
+			err,
+		)
+	}
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, false, fmt.Errorf("GetPoolEarliestVrfKeyHashAtSlot: %w", err)
+	}
+	var vrfKeyHash []byte
+	err = db.QueryRowContext(ctx, `
+SELECT pr.vrf_key_hash
+FROM pool_registration pr
+JOIN pool p ON p.id = pr.pool_id
+LEFT JOIN certs c ON c.id = pr.certificate_id
+LEFT JOIN "transaction" t ON t.id = c.transaction_id
+WHERE p.pool_key_hash = ?
+  AND pr.added_slot <= ?
+ORDER BY pr.added_slot ASC,
+         COALESCE(t.block_index, 0) ASC,
+         COALESCE(c.cert_index, 0) ASC
+LIMIT 1`,
+		poolKeyHash,
+		slotValue,
+	).Scan(&vrfKeyHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("GetPoolEarliestVrfKeyHashAtSlot: %w", err)
+	}
+	return vrfKeyHash, true, nil
+}
+
 func (s *Store) GetActivePoolKeyHashesAtSlot(
 	slot uint64,
 	txn types.Txn,

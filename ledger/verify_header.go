@@ -1389,7 +1389,7 @@ func (ls *LedgerState) electingVrfKeyHash(
 	epochId uint64,
 	poolKeyHash lcommon.PoolKeyHash,
 ) (lcommon.Blake2b256, bool, error) {
-	cutoffSlot, ok, err := ls.electingPoolParamsCutoffSlot(
+	cutoffSlot, capturedSlot, ok, err := ls.electingPoolParamsCutoffSlot(
 		block,
 		epochId,
 		poolKeyHash,
@@ -1411,10 +1411,35 @@ func (ls *LedgerState) electingVrfKeyHash(
 			copy(hash[:], vrfKeyHash)
 			return hash, true, nil
 		}
+		// No registration in force at the cutoff. That is not a gap in
+		// history: cardano-ledger's POOL rule inserts a pool's FIRST
+		// registration into psStakePools immediately and defers only a
+		// re-registration through psFutureStakePoolParams, so a pool that
+		// first registered inside the captured epoch is already in the
+		// snapshot with that registration's key. Resolve the earliest
+		// registration at or before the capture, which is what psStakePools
+		// holds for it. Earliest rather than latest: if the pool also
+		// re-registered in that same epoch, the re-registration was deferred
+		// and is not the key the snapshot carries.
+		vrfKeyHash, found, err = ls.db.Metadata().
+			GetPoolEarliestVrfKeyHashAtSlot(
+				poolKeyHash[:],
+				capturedSlot,
+				nil,
+			)
+		if err != nil {
+			return lcommon.Blake2b256{}, false, err
+		}
+		if found && len(vrfKeyHash) == len(lcommon.Blake2b256{}) {
+			var hash lcommon.Blake2b256
+			copy(hash[:], vrfKeyHash)
+			return hash, true, nil
+		}
 		return lcommon.Blake2b256{}, false, fmt.Errorf(
-			"%w at cutoff slot %d for pool %x",
+			"%w at cutoff slot %d or capture slot %d for pool %x",
 			errVrfKeyRegistrationHistoryUnavailable,
 			cutoffSlot,
+			capturedSlot,
 			poolKeyHash[:],
 		)
 	}
@@ -1451,7 +1476,7 @@ func (ls *LedgerState) electingPoolParamsCutoffSlot(
 	block ledger.Block,
 	epochId uint64,
 	poolKeyHash lcommon.PoolKeyHash,
-) (uint64, bool, error) {
+) (cutoffSlot uint64, capturedSlot uint64, ok bool, err error) {
 	snapshotEpoch := praos.StakeSnapshotEpoch(epochId)
 	snapshotType := models.PoolStakeSnapshotTypeMark
 	useImportedActive, err := ls.shouldUseImportedActivePoolDistribution(
@@ -1459,7 +1484,7 @@ func (ls *LedgerState) electingPoolParamsCutoffSlot(
 		epochId,
 	)
 	if err != nil {
-		return 0, false, err
+		return 0, 0, false, err
 	}
 	if useImportedActive {
 		snapshotEpoch = epochId
@@ -1472,7 +1497,7 @@ func (ls *LedgerState) electingPoolParamsCutoffSlot(
 		nil,
 	)
 	if err != nil || snapshot == nil || snapshot.CapturedSlot == 0 {
-		return 0, false, err
+		return 0, 0, false, err
 	}
 	capturedEpoch, err := ls.epochForSlot(snapshot.CapturedSlot)
 	if err != nil {
@@ -1480,14 +1505,14 @@ func (ls *LedgerState) electingPoolParamsCutoffSlot(
 		// cannot be placed. Report unavailable rather than guessing; the
 		// caller falls back to the live registration only when no snapshot
 		// exists.
-		return 0, false, nil //nolint:nilerr // unplaceable capture is "unavailable", not an error
+		return 0, 0, false, nil //nolint:nilerr // unplaceable capture is "unavailable", not an error
 	}
 	if capturedEpoch.StartSlot == 0 {
 		// Captured in the first epoch: there is no preceding epoch to take
 		// parameters from, so registration history cannot answer.
-		return 0, false, nil
+		return 0, 0, false, nil
 	}
-	return capturedEpoch.StartSlot - 1, true, nil
+	return capturedEpoch.StartSlot - 1, snapshot.CapturedSlot, true, nil
 }
 
 // verifyRegisteredVrfKey rejects a block whose VRF verification key (carried in

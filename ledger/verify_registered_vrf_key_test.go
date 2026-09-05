@@ -87,11 +87,19 @@ func TestVerifyRegisteredVrfKey_RejectsUnregisteredOrMismatchedKey(
 	assert.Contains(t, err.Error(), "registered VRF key hash unavailable")
 }
 
-// TestVerifyRegisteredVrfKeyDoesNotUseLiveKeyWhenSnapshotHistoryIsMissing
-// prevents a present electing snapshot from silently falling back to the live
-// registration. That fallback would accept the rotated key and reject a
-// canonical block carrying the key used by the electing snapshot.
-func TestVerifyRegisteredVrfKeyDoesNotUseLiveKeyWhenSnapshotHistoryIsMissing(
+// TestVerifyRegisteredVrfKeyAcceptsAFirstRegistrationInsideTheCapturedEpoch
+// pins the reference behaviour for a pool that has only ever registered once,
+// inside the epoch the electing snapshot was captured in.
+//
+// cardano-ledger's POOL rule inserts a first registration into psStakePools
+// immediately and defers only a re-registration through
+// psFutureStakePoolParams (Shelley/Rules/Pool.hs), so such a pool is already
+// in psStakePools when SNAP runs and the snapshot carries its VRF key. The
+// parameter cutoff predates that registration, so resolving strictly at the
+// cutoff finds nothing — and rejecting there would reject a canonical block
+// from every pool for its first epochs, which is what this test previously
+// asserted.
+func TestVerifyRegisteredVrfKeyAcceptsAFirstRegistrationInsideTheCapturedEpoch(
 	t *testing.T,
 ) {
 	tb := createTestBlock(t, [32]byte{76}, 0, tamperNone)
@@ -130,9 +138,9 @@ func TestVerifyRegisteredVrfKeyDoesNotUseLiveKeyWhenSnapshotHistoryIsMissing(
 		nil,
 	))
 
-	err = ls.verifyRegisteredVrfKey(tb.block, 5)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "VRF key registration history unavailable")
+	require.NoError(t, ls.verifyRegisteredVrfKey(tb.block, 5),
+		"a pool whose only registration lands inside the captured epoch is "+
+			"in psStakePools when SNAP runs, so the snapshot carries its key")
 }
 
 // TestVerifyRegisteredVrfKey_AcceptsMatchingKeyRejectsMismatch is the
