@@ -466,18 +466,20 @@ RETURNING id`,
 			if err != nil {
 				return err
 			}
+			stakeRefs := make([]models.StakeCredentialRef, 0)
 			if transaction.IsValid() {
 				// Gap blocks do not carry calculated deposits. Preserve NULL for
 				// unknown deposit-bearing certificates; zero is a real value.
-				if _, err := s.applyTransactionCertificates(
+				certificateRefs, err := s.applyTransactionCertificates(
 					ctx, db, transactionID, transaction.Certificates(),
 					point, index, nil, true,
-				); err != nil {
+				)
+				if err != nil {
 					return err
 				}
+				stakeRefs = append(stakeRefs, certificateRefs...)
 			}
 			collateralReturn := transaction.CollateralReturn()
-			stakeRefs := make([]models.StakeCredentialRef, 0)
 			for _, produced := range transaction.Produced() {
 				model, err := models.UtxoLedgerToModel(produced, point.Slot)
 				if err != nil {
