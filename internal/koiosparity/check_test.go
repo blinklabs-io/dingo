@@ -1733,7 +1733,7 @@ func TestCheckRetiredPoolStaysDepartedInLaterEpochs(t *testing.T) {
 // TestCheckReregisteredPoolStillErrors is the fail-closed half, and the reason
 // "a retirement certificate exists" cannot be the predicate. A later
 // registration cancels a pending retirement, and a re-registration after one
-// has taken effect puts the pool back — this chain has seven pools with a
+// has taken effect puts the pool back — this fixture has one pool with a
 // registration filed after a retirement certificate. Such a pool is still in
 // the pool set, so its absent K+1 reward-input row is genuine missing input,
 // and downgrading it would turn a real ERROR into a PASS.

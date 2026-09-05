@@ -650,7 +650,7 @@ func checkEpoch(
 	if paramBoundarySlot > 0 {
 		retired, rErr := dingo.GetPoolsRetiredByEpoch(
 			ctx,
-			paramEpoch,
+			paramEpoch-1,
 			paramBoundarySlot,
 		)
 		if rErr != nil {
