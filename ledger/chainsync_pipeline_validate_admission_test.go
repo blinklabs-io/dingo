@@ -97,7 +97,7 @@ func TestHandleEventBlockfetchBlockKeepsAdmissionCryptoWhenPipelineValidates(
 
 	// Without a validating pipeline, the tampered VRF proof is caught
 	// directly here as a genuine (non-deferred) crypto failure.
-	err := ls.handleEventBlockfetchBlock(evt)
+	err := ls.handleEventBlockfetchBlockDeferred(evt, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "crypto verification failed")
 	assert.Empty(t, ls.pendingBlockfetchEvents)
@@ -110,7 +110,7 @@ func TestHandleEventBlockfetchBlockKeepsAdmissionCryptoWhenPipelineValidates(
 	ls.blockPipeline = pipeline.NewBlockPipeline()
 	ls.config.BlockPipelineValidateEnabled = true
 
-	err = ls.handleEventBlockfetchBlock(evt)
+	err = ls.handleEventBlockfetchBlockDeferred(evt, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "crypto verification failed")
 	assert.Empty(t, ls.pendingBlockfetchEvents)
@@ -134,14 +134,14 @@ func TestHandleEventBlockfetchBlockRejectsInvalidOpCertWhenPipelineValidates(
 	ls.config.BlockPipelineValidateEnabled = true
 	ls.publishSnapshotsLocked()
 
-	err := ls.handleEventBlockfetchBlock(BlockfetchEvent{
+	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
 		ConnectionId: connId,
 		Block:        tb.block,
 		Point: ocommon.Point{
 			Slot: tb.block.SlotNumber(),
 			Hash: tb.block.Hash().Bytes(),
 		},
-	})
+	}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "opcert cold-key signature invalid")
 	assert.Empty(t, ls.pendingBlockfetchEvents)

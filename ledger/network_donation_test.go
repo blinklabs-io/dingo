@@ -253,25 +253,41 @@ func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
 		70, endedEpoch, donation, nil,
 	))
 
-	txn := db.Transaction(true)
-	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		if _, err := governance.ProcessEpoch(&governance.EpochInput{
-			DB:           db,
-			Txn:          txn,
-			PrevEpoch:    endedEpoch,
-			NewEpoch:     endedEpoch + 1,
-			BoundarySlot: boundarySlot,
-			PParams:      donationTestConwayPParams(10),
-			UpdateFn: func(
-				p lcommon.ProtocolParameters, _ any,
-			) (lcommon.ProtocolParameters, error) {
-				return p, nil
-			},
-		}); err != nil {
+	runBoundary := func() uint64 {
+		t.Helper()
+		var providerTreasury uint64
+		txn := db.Transaction(true)
+		require.NoError(t, txn.Do(func(txn *database.Txn) error {
+			if _, err := governance.ProcessEpoch(&governance.EpochInput{
+				DB:           db,
+				Txn:          txn,
+				PrevEpoch:    endedEpoch,
+				NewEpoch:     endedEpoch + 1,
+				BoundarySlot: boundarySlot,
+				PParams:      donationTestConwayPParams(10),
+				UpdateFn: func(
+					p lcommon.ProtocolParameters, _ any,
+				) (lcommon.ProtocolParameters, error) {
+					return p, nil
+				},
+			}); err != nil {
+				return err
+			}
+			if err := ls.applyEpochDonations(
+				txn,
+				endedEpoch,
+				boundarySlot,
+			); err != nil {
+				return err
+			}
+			var err error
+			providerTreasury, err = ls.NewView(txn).TreasuryValue()
 			return err
-		}
-		return ls.applyEpochDonations(txn, endedEpoch, boundarySlot)
-	}))
+		}))
+		return providerTreasury
+	}
+
+	require.Equal(t, uint64(900), runBoundary())
 
 	// Withdrawal (400) was applied against the pre-donation treasury (1000),
 	// then the donation (300) was added: 1000 - 400 + 300 = 900.
@@ -286,6 +302,32 @@ func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
 	require.NotNil(t, account)
 	assert.Equal(t, withdrawal, uint64(account.Reward),
 		"withdrawal paid to the reward account")
+
+	// A crash between the boundary transaction and the tip advance replays
+	// the boundary after reward application rewrites the absolute pot row.
+	// The enacted proposal and reward credit are replay-idempotent, while the
+	// provider must still expose the same post-withdrawal, post-donation value.
+	require.NoError(t, db.Metadata().SetNetworkState(
+		initialTreasury,
+		initialReserves,
+		boundarySlot,
+		nil,
+	))
+	require.Equal(t, uint64(900), runBoundary())
+	requireTreasuryValue(t, ls, nil, 900)
+
+	account, err = db.GetAccountByCredential(0, stakeCred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, withdrawal, uint64(account.Reward),
+		"boundary replay must not double-credit the withdrawal")
+
+	// Rewinding before both the donation block and boundary restores the
+	// earlier pot row. These are the same slot-keyed deletes used by the
+	// database rollback path.
+	require.NoError(t, db.DeleteNetworkStateAfterSlot(1, nil))
+	require.NoError(t, db.DeleteNetworkDonationsAfterSlot(1, nil))
+	requireTreasuryValue(t, ls, nil, initialTreasury)
 }
 
 // TestAddUint64Overflow exercises addUint64 at the exact uint64 max

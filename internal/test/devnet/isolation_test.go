@@ -748,12 +748,23 @@ var devnetPortVarNames = []string{
 	"DEVNET_DINGO2_NTC_PORT", "DEVNET_DINGO3_NTC_PORT",
 	"DEVNET_DINGO_RELAY_NTC_PORT", "DEVNET_DINGO_PORT",
 	"DEVNET_CARDANO_PORT", "DEVNET_RELAY_PORT",
+	"DEVNET_DINGO_NTC_PORT", "DEVNET_CARDANO_NTC_PORT",
 }
 
 // derivePorts sources compose-project.sh with SCRIPT_DIR pointed at a fake
-// worktree, calls devnet_ports, and returns whichever of the 11 port vars
+// worktree, calls devnet_ports, and returns whichever of the 13 port vars
 // ended up set (only the caller-supplied ones, if any override is given
 // and devnet_ports therefore leaves the rest alone).
+//
+// devnetPortVarNames must stay in sync with compose-project.sh's own
+// _DEVNET_PORT_VARS: derivePorts clears every name in this list from the
+// subprocess's inherited environment before calling devnet_ports, and
+// devnet_ports bails out early (leaving its vars alone) if any
+// _DEVNET_PORT_VARS entry is already set. A name present in
+// _DEVNET_PORT_VARS but missing here would leak through from whatever the
+// test process's own environment happened to have (run-tests.sh/start.sh
+// export these), making derivePorts's results depend on the outside
+// environment instead of purely on devnet_ports' own logic.
 func derivePorts(
 	t *testing.T,
 	helper string,
