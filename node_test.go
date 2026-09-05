@@ -589,6 +589,110 @@ func TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed(
 	}, nil))
 }
 
+// TestCleanupFailedStartupSkipsDatabaseCloseWhenLedgerDrainIsUnconfirmed
+// covers the startup-failure LIFO rollback path with the same guard
+// TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed covers for the
+// normal signal-driven path: cleanupFailedStartup runs the same ledgerState
+// timeout Run() registers, and the earlier-registered (so later-run) db.Close
+// and pluginHost.Stop LIFO stops must skip closing storage a still-running
+// background goroutine may be using, not silently discard the drain failure.
+//
+// Unlike that shutdown() test, this one hand-builds the rollback slice
+// rather than driving Run() to a real startup failure: shutdown()'s phase
+// ordering is hard-coded directly in that function, so calling it exercises
+// the real order; cleanupFailedStartup's ordering is purely a property of
+// which `started = append(started, ...)` calls Run() happens to reach before
+// failing, assembled across ~30 such calls interleaved through Run()'s
+// startup sequence, each registered immediately after the resource it tears
+// down becomes available -- so driving the real path here would mean
+// injecting a failure at a specific point inside that sequence rather than
+// calling one self-contained function. This test therefore only proves the
+// guard logic is correct given the order Run() is documented (here and in
+// ARCHITECTURE.md) to register it in; it cannot catch a future edit to Run()
+// that reorders the db.Close/pluginHost.Stop/ledgerState.Close registrations
+// relative to each other. Matches this file's existing convention for
+// exercising cleanupFailedStartup with a hand-built `started` (see the
+// startup-lifecycle-gate test above) and newLiveLifecycleTestNode's own
+// documented pattern of wiring a real Node without going through Run().
+func TestCleanupFailedStartupSkipsDatabaseCloseWhenLedgerDrainIsUnconfirmed(
+	t *testing.T,
+) {
+	n, _ := newLiveLifecycleTestNodeWithGenesis(
+		t,
+		1,
+		nil,
+		ledger.DatabaseWorkerPoolConfig{WorkerPoolSize: 1, TaskQueueSize: 1},
+	)
+
+	origTimeout := ledger.CloseDBWorkerPoolShutdownTimeout
+	ledger.CloseDBWorkerPoolShutdownTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { ledger.CloseDBWorkerPoolShutdownTimeout = origTimeout })
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	workerDone := make(chan struct{})
+	defer func() {
+		close(release)
+		testutil.RequireReceive(
+			t,
+			workerDone,
+			time.Second,
+			"database worker drain",
+		)
+	}()
+	go func() {
+		defer close(workerDone)
+		_ = n.ledgerState.SubmitAsyncDBOperation(
+			func(*database.Database) error {
+				close(started)
+				<-release
+				return nil
+			},
+		)
+	}()
+	<-started
+
+	// Mirror Run's exact registration order and skip logic: ledgerState.Close
+	// registered last (so run first in LIFO) sets the flag; db.Close and
+	// pluginHost.Stop, registered earlier (so run later), check it.
+	ledgerStateDrainConfirmed := true
+	var pluginHostStopped, dbClosed bool
+	rollback := []func(){
+		func() {
+			if !ledgerStateDrainConfirmed {
+				return
+			}
+			dbClosed = true
+			_ = n.db.Close()
+		},
+		func() {
+			if !ledgerStateDrainConfirmed {
+				return
+			}
+			pluginHostStopped = true
+			_ = n.pluginHost.Stop(context.Background())
+		},
+		func() {
+			if err := n.ledgerState.Close(); err != nil {
+				ledgerStateDrainConfirmed = false
+			}
+		},
+	}
+	n.startupLifecycleMu.Lock()
+	n.cleanupFailedStartup(rollback)
+
+	assert.False(t, dbClosed, "db.Close must be skipped when the ledger drain is unconfirmed")
+	assert.False(
+		t,
+		pluginHostStopped,
+		"pluginHost.Stop must be skipped when the ledger drain is unconfirmed",
+	)
+	// The ledger worker is still blocked, so the database must remain usable.
+	require.NoError(t, n.db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(1, make([]byte, 32)),
+	}, nil))
+}
+
 // newChainSelectorSubscriptionTestNode builds the minimal node
 // subscribeChainSelectorEvents needs, so tests can register the production
 // subscriptions instead of reimplementing them.

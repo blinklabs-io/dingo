@@ -89,6 +89,7 @@ type Consumer interface {
 	GetTxFromCache(string) *MempoolTransaction
 	ClearCache()
 	RemoveTxFromCache(string)
+	AcknowledgeOffered(count int)
 }
 
 // Service is the domain-owned mempool capability consumed by node wiring,

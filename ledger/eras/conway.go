@@ -261,38 +261,29 @@ func conwayValidationRules(
 }
 
 func buildConwayValidationRules() []indexedUtxoValidationRule {
-	skips := []utxoValidationRuleSkip{
-		{
-			validationFunc: conway.
-				UtxoValidateConwayFeaturesWithPlutusV1V2,
-			name: "conway.UtxoValidateConwayFeaturesWithPlutusV1V2",
-		},
-		{
-			validationFunc: conway.UtxoValidateFeeTooSmallUtxo,
-			name:           "conway.UtxoValidateFeeTooSmallUtxo",
-		},
-		{
-			validationFunc: conway.UtxoValidatePlutusScripts,
-			name:           "conway.UtxoValidatePlutusScripts",
-		},
-		{
-			validationFunc: conway.UtxoValidateCommitteeCertificates,
-			name:           "conway.UtxoValidateCommitteeCertificates",
-		},
-		{
-			validationFunc: conway.UtxoValidateUnknownVoters,
-			name:           "conway.UtxoValidateUnknownVoters",
-		},
+	// Skips are resolved by upstream rule Id, never by validation function.
+	// conway.UtxoValidationRules is composed with
+	// common.ComposeUtxoValidationRules, so every phase-2-gated entry —
+	// committee-certificates and unknown-voters among them — is an anonymous
+	// wrapper closure with no trace of the original function.
+	skipRuleIds := []lcommon.UtxoValidationRuleId{
+		lcommon.UtxoValidationRuleConwayFeaturesWithPlutusV1V2,
+		lcommon.UtxoValidationRuleFeeTooSmall,
+		lcommon.UtxoValidationRulePlutusScripts,
+		lcommon.UtxoValidationRuleCommitteeCertificates,
+		lcommon.UtxoValidationRuleUnknownVoters,
 	}
-	indexes := make([]int, len(skips))
-	for i := range skips {
+	descriptors := conway.UtxoValidationRuleDescriptors()
+	indexes := make([]int, len(skipRuleIds))
+	for i := range skipRuleIds {
 		indexes[i] = resolveUtxoValidationSkipIndex(
-			conway.UtxoValidationRules, skips[i].validationFunc, skips[i].name,
+			descriptors, conway.UtxoValidationRules, skipRuleIds[i],
 		)
 	}
 	ret := buildIndexedUtxoValidationRulesWithSkips(
+		descriptors,
 		conway.UtxoValidationRules,
-		skips,
+		skipRuleIds,
 	)
 	ret = append(ret, indexedUtxoValidationRule{
 		index:          indexes[0],
@@ -338,8 +329,7 @@ func validateConwayFeaturesWithNeededPlutusV1V2(
 		return nil
 	}
 
-	if treasury := tx.CurrentTreasuryValue(); treasury != nil &&
-		treasury.Sign() > 0 {
+	if conwayCurrentTreasuryValuePresent(tx) {
 		return conway.CurrentTreasuryValueWithPlutusV1V2Error{
 			PlutusVersion: plutusVersion,
 		}
@@ -388,6 +378,57 @@ func validateConwayFeaturesWithNeededPlutusV1V2(
 	}
 
 	return nil
+}
+
+// conwayCurrentTreasuryValuePresent reports whether transaction-body key 21
+// is present, preserving the distinction between an absent value and an
+// explicitly encoded zero. A declared zero is a real assertion about the
+// treasury and must reach validation; collapsing it into "absent" would let a
+// transaction assert a zero treasury for free.
+//
+// Maintained gouroboros exposes the distinction through a nil value and the
+// CurrentTreasuryValuePresent capability. The pinned release stores key 21 in
+// an int64 with omitempty and returns a non-nil zero for both cases, so
+// decoded or constructed Conway transactions fall back to inspecting the
+// transaction-body map. The fallback treats an undecodable body as present:
+// this rule only rejects, so failing closed cannot admit a transaction.
+func conwayCurrentTreasuryValuePresent(tx lcommon.Transaction) bool {
+	if tx == nil {
+		return false
+	}
+	treasury := tx.CurrentTreasuryValue()
+	if treasury == nil {
+		return false
+	}
+	if treasury.Sign() != 0 {
+		return true
+	}
+	conwayTx, ok := tx.(*conway.ConwayTransaction)
+	if !ok || conwayTx == nil {
+		// CurrentTreasuryValue's nil/non-nil contract is authoritative for
+		// implementations that do not need the pinned-release compatibility
+		// path.
+		return true
+	}
+	if presence, ok := any(&conwayTx.Body).(interface {
+		CurrentTreasuryValuePresent() bool
+	}); ok {
+		return presence.CurrentTreasuryValuePresent()
+	}
+	bodyCbor := conwayTx.Body.Cbor()
+	if len(bodyCbor) == 0 {
+		var err error
+		bodyCbor, err = cbor.Encode(&conwayTx.Body)
+		if err != nil {
+			return true
+		}
+	}
+	var fields map[uint]cbor.RawMessage
+	if _, err := cbor.Decode(bodyCbor, &fields); err != nil {
+		return true
+	}
+	_, ok = fields[21]
+	return ok
 }
 
 func neededPlutusV1V2Version(view script.TxScriptView) string {
