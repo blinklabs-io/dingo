@@ -177,6 +177,23 @@ type DingoPoolEpochData struct {
 	// would not be equivalent: that column accumulates unspendable leader
 	// rewards too.
 	SpendableMemberRewardTotal string
+
+	// RewardsPending reports that the node has NOT yet reached the boundary at
+	// which this stake epoch's rewards are applied, taken from the tip and
+	// reward_pool_output.boundary_slot.
+	//
+	// Before that boundary the per-account spendable flags are provisional: a
+	// reward computed for a credential that deregisters in the meantime is
+	// still marked spendable, and only the application flips it. Koios reports
+	// rewards that were actually distributed, so comparing earlier makes Dingo
+	// read high by the forfeitures that have not happened yet (dingo #3852). A
+	// difference before the boundary is a timing statement, not a divergence.
+	//
+	// The sense is deliberately negative so the zero value compares strictly.
+	// A source that cannot establish the boundary must not silently downgrade
+	// a real divergence to a lag; reporting a spurious mismatch is safer than
+	// hiding a true one.
+	RewardsPending bool
 }
 
 // rewardTypeMember is the reward_account_output.reward_type value Dingo writes
@@ -468,9 +485,29 @@ func (d *DingoDB) GetPoolEpochDataMap(
 	}
 	_ = rows.Close() //nolint:sqlclosecheck
 
+	// The tip decides whether this stake epoch's rewards have been applied;
+	// see DingoPoolEpochData.RewardsPending. An unreadable or empty tip table
+	// leaves tipKnown false, which keeps the comparison strict rather than
+	// downgrading a real divergence on incomplete information.
+	var tipSlot uint64
+	tipKnown := false
+	if tipRow := d.queryRow(
+		ctx, `SELECT slot, hash FROM tip ORDER BY id DESC LIMIT 1`,
+	); tipRow != nil {
+		var slot sql.NullInt64
+		var hash []byte
+		// A hash is required as well as a slot: a row carrying a slot but no
+		// hash is incomplete metadata, not a chain tip.
+		if err := tipRow.Scan(&slot, &hash); err == nil && slot.Valid &&
+			slot.Int64 > 0 && len(hash) > 0 {
+			tipSlot = uint64(slot.Int64)
+			tipKnown = true
+		}
+	}
+
 	rows, err = d.query(
 		ctx,
-		`SELECT pool_key_hash, member_reward_total, unspendable FROM reward_pool_output WHERE epoch = ?`,
+		`SELECT pool_key_hash, member_reward_total, unspendable, boundary_slot FROM reward_pool_output WHERE epoch = ?`,
 		stakeEpoch,
 	)
 	if err != nil {
@@ -485,7 +522,10 @@ func (d *DingoDB) GetPoolEpochDataMap(
 		var poolHash []byte
 		var reward types.Uint64
 		var unspendable types.Uint64
-		if err := rows.Scan(&poolHash, &reward, &unspendable); err != nil {
+		var boundarySlot uint64
+		if err := rows.Scan(
+			&poolHash, &reward, &unspendable, &boundarySlot,
+		); err != nil {
 			return nil, err
 		}
 		key := hex.EncodeToString(poolHash)
@@ -497,6 +537,7 @@ func (d *DingoDB) GetPoolEpochDataMap(
 		data.MemberRewardPresent = true
 		data.MemberRewardTotal = strconv.FormatUint(uint64(reward), 10)
 		data.PoolUnspendable = uint64(unspendable)
+		data.RewardsPending = tipKnown && tipSlot < boundarySlot
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

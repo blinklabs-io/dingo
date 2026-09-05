@@ -413,3 +413,61 @@ func TestDatabaseSourceGetPoolEpochDataMapTracksChangingPoolParams(
 		"blocks_produced still comes from the param epoch",
 	)
 }
+
+// TestDatabaseSourceReportsRewardsPending covers the in-process source half
+// of dingo #3852. The live observer reads the same committed tip and reward
+// output boundary as the standalone checker; before the boundary, a
+// spendable-sum difference is provisional, while at the boundary it is real.
+func TestDatabaseSourceReportsRewardsPending(t *testing.T) {
+	const (
+		stakeEpoch   = uint64(9)
+		paramEpoch   = uint64(10)
+		boundarySlot = uint64(1_000_000)
+	)
+	db := newTestDatabaseSourceDB(t)
+	sqlDB := sourceSQLDB(t, db)
+	poolHash := testPoolKeyHash(t, 0x42)
+
+	require.NoError(t, sqlDB.Exec(
+		`INSERT INTO reward_pool_input
+		 (pool_key_hash, epoch, pledge, delegated_stake, owner_stake,
+		  cost, delegator_count, captured_slot, boundary_slot)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		poolHash, stakeEpoch, "0", "1000", "0", "0", 1, 0, 0).Error)
+	require.NoError(t, sqlDB.Exec(
+		`INSERT INTO reward_pool_output
+			 (pool_key_hash, epoch, optimal_reward, total_reward, leader_reward,
+			  member_reward_total, owner_stake, undistributed, unspendable,
+			  captured_slot, boundary_slot)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		poolHash, stakeEpoch, "0", "0", "0", "4006269", "0", "0", "1857",
+		0, boundarySlot,
+	).Error)
+	require.NoError(t, sqlDB.Exec(
+		`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
+		[]byte{0x01}, boundarySlot-1, 1,
+	).Error)
+
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+	dataMap, err := source.GetPoolEpochDataMap(
+		context.Background(), stakeEpoch, paramEpoch,
+	)
+	require.NoError(t, err)
+	data, ok := dataMap[hex.EncodeToString(poolHash)]
+	require.True(t, ok, "pool missing from the map")
+	require.True(t, data.RewardsPending,
+		"before the boundary, the spendable flags remain provisional")
+
+	require.NoError(t, sqlDB.Exec(
+		`UPDATE tip SET slot = ?`, boundarySlot,
+	).Error)
+	dataMap, err = source.GetPoolEpochDataMap(
+		context.Background(), stakeEpoch, paramEpoch,
+	)
+	require.NoError(t, err)
+	data, ok = dataMap[hex.EncodeToString(poolHash)]
+	require.True(t, ok, "pool missing from the map after tip update")
+	require.False(t, data.RewardsPending,
+		"at the boundary, the spendable flags are final")
+}

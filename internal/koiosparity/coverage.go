@@ -332,11 +332,13 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Reason:   "derived from Koios's approximate pool fee and rounded components",
 	},
 	{
-		Endpoint:   "/pool_history",
-		Field:      "member_rewards",
-		Class:      CoverageDerivedMatch,
-		DingoField: "reward_pool_output.member_reward_total at K-1",
-		Reason:     "exact lovelace equality against Dingo's per-member aggregate",
+		Endpoint: "/pool_history",
+		Field:    "member_rewards",
+		Class:    CoverageDerivedMatch,
+		DingoField: "sum(reward_account_output.amount) where spendable " +
+			"and not guarded, reward_type member, at K-1",
+		Reason: "exact lovelace equality against Dingo's per-member spendable " +
+			"aggregate, once the epoch's rewards have been applied",
 	},
 	{
 		Endpoint: "/pool_history",
