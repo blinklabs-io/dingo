@@ -100,12 +100,13 @@ fixtures when schema seeding or assertions require raw SQL.
 Startup reserves the write connection, acquires the backend migration lock,
 rejects unversioned metadata tables (users must delete the data directory,
 including metadata and blob stores, and resync), and validates/resumes versioned expand/backfill/contract work before
-advertising readiness. The current registry has migrations 1 through 9:
+advertising readiness. The current registry has migrations 1 through 10:
 `v1alpha1`, `leios-key-registration`, `token-registry-metadata`,
 `account-import-baseline`, `leios-snapshot-keys`,
 `governance-ratification-history`, `account-import-deposit`,
-`committee-credential-tags`, and `committee-term-start-presence`. `DATABASE.md` is the source of truth for their
-schema changes and upgrade behavior. It then checks the read pool. File-backed
+`committee-credential-tags`, `committee-term-start-presence`, and
+`reward-seed-failure`. `DATABASE.md` is the source of truth for their schema
+changes and upgrade behavior. It then checks the read pool. File-backed
 SQLite uses a
 cross-process lock file; isolated in-memory databases use a process lock. A
 failed or interrupted phase leaves readiness false and carries the migration
@@ -2441,6 +2442,17 @@ The experimental N2N Leios protocols (`Config.experimentalLeiosNetworkingEnabled
 
 For the current respun prototype, the notify vote dialect is specifically the three-field `(announcing_rb_hash, voter_id, signature)` form. The selected-chain `chain.update` path records an announcement only after its ranking block is adopted; merely observing an eligible ChainSync header cannot make a local vote eligible. A bounded TTL queue holds votes that race ahead of adoption and retains a bounded set of alternate signatures per voter, so an invalid first candidate cannot suppress a later valid vote. Local votes use that same LeiosNotify stream; each outbound response reserves its log entry and commits the per-peer cursor only after gouroboros reports a successful send. Failed or aborted sends release the reservation into a counted retry set retained across reconnects; a reconnect advances through every pending retry on its stream rather than clearing only the first failed entry. The transitional offered-ID and four-field forms remain decode-compatible only.
 
+Before header cryptography or body deltas run, the inbound consensus-envelope
+validator enforces the era's block body/header limits and, for Alonzo and later,
+the aggregate `MaxBlockExUnits` budget. The aggregate contains every declared
+redeemer budget in every transaction, including both the outer Dijkstra witness
+set and all Dijkstra subtransaction witness sets; phase-2-invalid transactions
+remain included because the block budget constrains declared execution, not the
+UTxO outcome. Negative values and checked-add overflow fail closed. The forging
+selector uses the same transaction-wide declared-budget helper, so it cannot
+construct a candidate that inbound envelope validation would reject on that
+block-wide budget.
+
 During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution is skipped only for blocks at or before the immutable tip (`tipBlockNo - securityParam`), where the block producer's `isValid` flag is treated as authoritative until the local Plutus VM is consensus-equivalent. Volatile block replay, local transaction validation for mempool submission, and forging continue to run Plutus execution.
 
 Restrictive Phase 2 validation runs the CEK machine against the protocol's
@@ -2775,6 +2787,16 @@ The `LedgerView` interface provides query access to ledger state:
   inclusive. The legacy hash-only `CommitteeMember` and
   `CommitteeMembers` methods omit ambiguous same-hash key/script identities
   instead of selecting one by map iteration.
+- `EpochForSlot` implements the `common.EpochState` capability, mapping a slot
+  to its epoch through the same epoch cache the header path uses. gouroboros
+  expresses several rules relative to the current epoch and obtains it by
+  optional type assertion, so a ledger state that omits this method silently
+  takes the weaker path in each of them rather than failing to build. Two
+  depend on it: the pool-deposit decision cannot otherwise distinguish a
+  retired pool from a registered one, so a re-registration of a retired pool
+  is charged no deposit and then fails value conservation by exactly the
+  deposit; and the Shelley POOL retirement bound can only reject epoch zero
+  without it.
 - The Conway and Dijkstra validation compositions replace the pinned
   hash-only committee certificate and voter rules when that capability is
   present. Cold authorization/resignation certificates and hot committee votes
@@ -3588,13 +3610,15 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
 
 #### Header-Sync Strategy
 
-A configurable strategy (`chainsync.HeaderSyncStrategy`, `chainsync/strategy.go`) decides which eligible peer is permitted to drive ledger ingress when several peers offer valid next headers. The Ouroboros roll-forward handler runs cross-peer deduplication and fork detection first, then calls `State.ShouldPublishHeader` to apply the strategy before publishing a `ChainsyncEvent` into the ledger:
+A configurable strategy (`chainsync.HeaderSyncStrategy`, `chainsync/strategy.go`) decides which eligible peer is permitted to drive ledger ingress when several peers offer valid next headers. The Ouroboros roll-forward handler first records the delivered cursor, tip, activity, and header count in the per-peer registry, then synchronously observes the tip when Genesis corroboration is active. This ordering lets an immediate `ChainSwitchEvent` distinguish the delivering client from a reused zero-tip connection ID. After the resulting apply-eligibility decision, admitted headers enter cross-peer deduplication and fork detection, then `State.ShouldPublishHeader` applies the strategy before a `ChainsyncEvent` is published into the ledger:
 
-- **primary** (default) — a single active peer drives ingress; new headers from any eligible peer publish, and the active peer replays a header first observed from another peer so it stays the contiguous driver. Stall detection promotes a replacement active peer, so a stalled or disconnected peer does not strand ingestion. This preserves the behavior from before the strategy existed.
+- **primary** (default) — a single active peer drives ingress; new headers from any eligible peer publish, and the active peer replays a header first observed from another peer so it stays the contiguous driver. `ChainSelector` exclusively chooses replacements after a peer delivers a selectable tip; registry insertion never selects a peer, while eligibility demotion and connection removal may clear an invalid active peer but never promote a connected zero-tip fallback independently. A fallback's first valid new header can still enter the ledger queue and chain selection, whose switch event then makes that peer active. This keeps the ledger and blockfetch source aligned with the selector's liveness, eligibility, and Genesis-corroboration gates.
 - **parallel** — every eligible peer may supply headers concurrently. The first peer to report a header drives it; duplicates from other peers are deduplicated before ledger ingress (no replay), so a header never enters ledger processing twice.
 - **round-robin** — a single ingress-driving peer that rotates across the eligible peers; the rotation advances on the stall-check cadence (`AdvanceHeaderSyncRotation`).
 
-Under every strategy, all eligible peers still update tip tracking, observed-header history (for blockfetch peer discovery), and fork detection, so divergent peer headers produce fork/candidate-chain handling rather than silent suppression. The strategy is set via `chainsync.strategy` (YAML), `DINGO_CHAINSYNC_STRATEGY` (env), or `--chainsync-strategy` (CLI).
+Under every strategy, all ingress-eligible peers still update tip tracking and observed-header history (for blockfetch peer discovery). Only headers admitted by the post-observation apply gate enter the shared deduplication and fork-detection cache; this prevents an uncorroborated Genesis source from suppressing a later corroborated delivery of the same point. Divergent admitted headers still produce fork/candidate-chain handling rather than silent suppression. The strategy is set via `chainsync.strategy` (YAML), `DINGO_CHAINSYNC_STRATEGY` (env), or `--chainsync-strategy` (CLI).
+
+Chain selection's selected-to-none transition is one-shot, so the node cannot discard it when a live Restore/Truncate holds `liveLifecycleMu`. On contention, one node-owned, context-cancellable worker retains only the newest pending transition and retries `TryLock` with exponential backoff from 10 milliseconds to a one-second cap, resetting after each successful acquisition. A burst therefore consumes one pending slot and one worker rather than creating a detached waiter per event or a tight poll loop. After the lifecycle operation completes, the handler rechecks current selector state: a newer selection makes the transition obsolete, while a still-empty selection clears the registry's current active connection even if a dropped intermediate switch means it differs from the coalesced event's previous ID. Shutdown cancels and joins this worker before tearing down chain-selection or chainsync state.
 
 `LedgerState` advances its shared sync-progress and cleanup frontier to an
 admitted header's own slot only after that header passes the applicable crypto
@@ -3836,6 +3860,44 @@ block. It is therefore performed as a sequence of ordinary rollbacks of at most
 block payloads to one security-parameter window. If a later step fails, the
 primary chain remains at the last committed intermediate point; the standard
 startup/live reconciliation paths can synchronize metadata to that valid tip.
+
+Each step's target is read from the chain's live tip (`Chain.PointAtDepth`),
+never from a schedule computed once when the descent began. Nothing serialises
+the descent against chain growth -- it runs under `transactionEventMutex` while
+blockfetch appends under `chainsyncMutex` -- so a fixed schedule goes stale the
+moment one block lands: the next target is then more than `k` below the tip
+`Chain.Rollback` measures fork depth against, and the whole rewind is refused.
+That is issue #3889, where recovery recomputed the same unreachable descent on
+every pipeline restart for hours and never truncated the chain at all. A step
+the chain still refuses is retried a bounded number of times against a freshly
+read tip, and only while `validateAndEmitRollbackUndoEmitted` reports that it
+published nothing -- retrying after a publish would tell a `ledger.tx` consumer
+to undo the same block twice. A descent whose committed steps stop landing
+below the previous one has been outrun by chain growth and gives up rather than
+truncate and re-truncate indefinitely.
+
+`Chain.addRawBlocks` participates in the same window from the other side. It
+releases both chain locks when its transaction closure returns and only then
+does `txn.Do` commit, so its Commit-failure restore runs with the chain open to
+everyone else -- and rolling the primary chain back while blockfetch appends to
+it is exactly what a recovery rewind does. `batchRestoreIsSafeLocked` therefore
+writes the pre-batch snapshot back only while the chain still shows what that
+batch left behind; otherwise a concurrent rollback's result would be overwritten
+with a tip index above the blocks that rollback deleted, leaving the chain
+claiming a tip it does not store.
+
+All five recovery rewinds go through `rewindPrimaryChainForRecovery`, which
+carries the one classification a pipeline restart cannot help with. A rewind
+the chain refuses for exceeding `k`, or a descent that cannot gain on its
+target, leaves recovery with no legal target at all, and restarting only
+re-derives it against a chain that has grown further from the applied tip. The
+tally therefore keys on the applied ledger tip -- the thing that is not moving
+-- rather than on the target, which is recomputed and different on every
+attempt; past `maxRecoveryRewindRejections` refusals at the same applied
+high-water mark the failure is reported as `errHaltLedgerPipeline` with an
+operator hint. Forward progress past that mark clears the tally through
+`resetRecoveryRewindRejections`, alongside the at-tip, replay, and
+Mithril-boundary resets.
 The chain moves before metadata because the retained rollback anchor must remain
 queryable while metadata reconstructs its tip and nonce. If that metadata step
 fails, the primary chain is already at a valid target and the same reconciliation
@@ -3857,9 +3919,11 @@ and rolls both stores back to the last applied ledger tip, then publishes a
 ChainSync obtains a fresh intersection. Other transaction-validation errors
 continue through producer resolution and the unresolved-producer fallback.
 
-The rejection is never terminal. A redelivery of the same failing block at the
-same applied tip is rejected and rewound again but spends no further peer
-rotation, because chain selection has already had its alternate-branch
+The rejection itself is never terminal -- what can become terminal is the
+rewind that carries it out, when the chain refuses that rewind for exceeding
+`k` and the applied tip stops moving (above). A redelivery of the same failing
+block at the same applied tip is rejected and rewound again but spends no
+further peer rotation, because chain selection has already had its alternate-branch
 opportunity for that block and further rotations only close connections. The
 latch that records it keys on the applied tip together with the failing block
 and transaction, so a different rejected block on a newly selected branch gets
@@ -4121,6 +4185,15 @@ therefore exposed to forging and relay consumers in admission order. Duplicate
 submission refreshes `LastSeen` without changing position, and oldest entries
 are removed first when watermark eviction is active. FIFO is not a fee-density
 priority queue.
+
+Pending-transaction overlays in both mempool validation and forging apply the
+consensus UTxO outcome exposed by `Transaction.Consumed()` and
+`Transaction.Produced()`. A valid transaction therefore consumes its regular
+inputs and produces its normal outputs; a phase-2-invalid transaction consumes
+collateral instead, leaves its regular inputs available, and produces only its
+collateral return when present. Dependency and double-spend checks use that
+same outcome rather than treating the transaction body's regular input set as
+unconditionally spent.
 
 The DAG provider maintains nodes keyed by transaction hash, a pending-output
 producer index, explicit parent/child edges, and a cached transaction order. An
@@ -8220,7 +8293,14 @@ read and a record that does not match degrades to the VRF-only reading rather
 than mapping a field onto the wrong parameter. Note that a snapshot's owner
 set lists only the owners holding stake in it, not every owner the
 registration names; the omitted ones contribute nothing to owner stake, so the
-reward basis is unaffected.
+reward basis is unaffected. If an imported basis fails reconciliation or lacks
+the historical protocol parameters needed to consume it, ledgerstate persists
+the failure reason in `reward_seed_failure` in the same metadata transaction as
+the import. A later reward boundary reads that marker when its reward snapshot
+is absent and reports the imported seeding failure; a genuinely missing import
+has no marker and is reported as a missing basis. Successful seeding clears the
+marker, and rollback removes markers above its slot, so the message cannot
+outlive the imported state it describes.
 
 Registration history is the fallback, for a snapshot whose pool entries are
 the compact pool-distr shape carrying only a VRF key. It is resolved per epoch
@@ -8752,6 +8832,11 @@ Epoch transition events may come from block processing or the slot clock. The
 slot clock only emits proactive epoch transitions when the ledger tip is within
 the current era's stability window of the upstream tip; while farther behind,
 block processing owns historical epoch transitions during catch-up.
+Slot-clock subscriptions are owned by that clock lifecycle: stopping the clock
+or cancelling its parent context closes every existing channel, and a
+subscription made after it has stopped is already closed. A later `Start`
+creates a new subscription lifecycle; a concurrent `Stop` waits only for the
+generation it stopped, not for that replacement worker.
 
 The fallback capture runs outside the rollover transaction, so when its
 transaction tip has already passed the snapshot slot it must reconstruct the

@@ -85,10 +85,10 @@ func CalculateMinFee(
 	)
 }
 
-// DeclaredExUnits returns the total execution units
-// declared across all redeemers in a transaction's
-// witness set. Returns an error if the summation
-// would overflow int64.
+// DeclaredExUnits returns the total execution units declared across all
+// redeemers in a transaction, including Dijkstra subtransaction witness sets.
+// Returns an error for negative values or if the summation would overflow
+// int64.
 func DeclaredExUnits(
 	tx lcommon.Transaction,
 ) (lcommon.ExUnits, error) {
