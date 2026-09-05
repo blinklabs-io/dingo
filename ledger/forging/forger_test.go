@@ -103,19 +103,13 @@ func (l *forgerCountingLeader) callCount() int {
 }
 
 type forgerTestSlotClock struct {
-	currentSlot  uint64
-	chainTipSlot uint64
-	chainTipHash []byte
-	// primaryTipExplicit selects whether primaryTipSlot/primaryTipHash are
-	// used verbatim. When false the primary tip mirrors the applied tip,
-	// which is the caught-up steady state and what every test that does not
-	// care about the distinction wants.
-	primaryTipExplicit bool
-	primaryTipSlot     uint64
-	primaryTipHash     []byte
-	upstreamTipSlot    uint64
-	upstreamActive     bool
-	slotsPerKESPeriod  uint64
+	currentSlot       uint64
+	chainTipSlot      uint64
+	chainTipHash      []byte
+	frontierSlot      uint64
+	upstreamTipSlot   uint64
+	upstreamActive    bool
+	slotsPerKESPeriod uint64
 }
 
 func (c forgerTestSlotClock) CurrentSlot() (uint64, error) {
@@ -151,6 +145,15 @@ func (c forgerTestSlotClock) PrimaryChainTip() ocommon.Point {
 		return ocommon.Point{Slot: c.chainTipSlot, Hash: c.chainTipHash}
 	}
 	return ocommon.Point{Slot: c.primaryTipSlot, Hash: c.primaryTipHash}
+}
+
+// PrimaryChainTipSlot defaults to the applied tip, so a test that does not
+// set frontierSlot explicitly observes no ledger-apply backlog.
+func (c forgerTestSlotClock) PrimaryChainTipSlot() uint64 {
+	if c.frontierSlot < c.chainTipSlot {
+		return c.chainTipSlot
+	}
+	return c.frontierSlot
 }
 
 func (forgerTestSlotClock) NextSlotTime() (time.Time, error) {
