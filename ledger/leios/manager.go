@@ -547,12 +547,24 @@ func (m *VoteManager) Start(ctx context.Context) error {
 		event.EpochTransitionEventType,
 	)
 	chainSubId, chainCh := m.eventBus.Subscribe(chain.ChainUpdateEventType)
+	// Announcements are armed from header arrival, not block application:
+	// applying an EB-announcing ranking block waits on fetching that same
+	// endorser block, which lands after the vote window has closed. The
+	// apply-driven ChainBlockEvent above remains as a backstop for blocks
+	// that reach the chain by another route.
+	headerSubId, headerCh := m.eventBus.Subscribe(
+		chain.ChainHeaderAnnouncementEventType,
+	)
 	m.subs = []managerSubscription{
 		{eventType: event.EpochTransitionEventType, id: epochSubId},
 		{eventType: chain.ChainUpdateEventType, id: chainSubId},
+		{
+			eventType: chain.ChainHeaderAnnouncementEventType,
+			id:        headerSubId,
+		},
 	}
 	m.loopWg.Go(func() {
-		m.eventLoop(childCtx, epochCh, chainCh)
+		m.eventLoop(childCtx, epochCh, chainCh, headerCh)
 		// If the loop exits because the parent context was cancelled
 		// (not via Stop), reset running and unsubscribe so Start can
 		// be called again without leaking a stale subscriber.
@@ -2451,12 +2463,13 @@ func (m *VoteManager) RemoveConnection(connKey string) {
 	delete(m.cursors, connKey)
 }
 
-// eventLoop processes epoch transition and chain update events until the
-// context is cancelled or both subscriptions close.
+// eventLoop processes epoch transition, chain update and header announcement
+// events until the context is cancelled or a subscription closes.
 func (m *VoteManager) eventLoop(
 	ctx context.Context,
 	epochCh <-chan event.Event,
 	chainCh <-chan event.Event,
+	headerCh <-chan event.Event,
 ) {
 	for {
 		select {
@@ -2480,10 +2493,40 @@ func (m *VoteManager) eventLoop(
 			case chain.ChainBlockEvent:
 				m.handleChainBlock(data)
 			}
+		case evt, ok := <-headerCh:
+			if !ok {
+				return
+			}
+			if data, ok := evt.Data.(chain.ChainHeaderAnnouncementEvent); ok {
+				m.handleChainHeaderAnnouncement(data)
+			}
 		}
 	}
 }
 
+// handleChainHeaderAnnouncement arms an announcement from the chainsync
+// roll-forward header, roughly thirty slots before the announcing ranking
+// block finishes applying.
+//
+// The announcing ranking block has not been validated or applied here and may
+// still be rolled back. That is deliberate and matches what a Leios vote
+// attests to: the vote binds the announced endorser block to the announcing
+// ranking block's hash, not to that block's ledger validity. If the header is
+// later rolled back, handleRollback drops the announcement, the emitted vote,
+// and its dedup marker together, exactly as it already does for announcements
+// armed from block application, which also permits a re-vote on the
+// replacement chain.
+func (m *VoteManager) handleChainHeaderAnnouncement(
+	evt chain.ChainHeaderAnnouncementEvent,
+) {
+	m.ObserveAnnouncement(evt.Slot, evt.RbHash, evt.EbHash)
+}
+
+// handleChainBlock arms an announcement from an applied ranking block. It is a
+// backstop for blocks that reach the chain without a chainsync roll-forward
+// header (local forging, block replay); for announcements that did arrive by
+// header, ObserveAnnouncement is idempotent and emitPrototypeVoteLocked
+// dedups, so this is a no-op.
 func (m *VoteManager) handleChainBlock(evt chain.ChainBlockEvent) {
 	block, err := evt.Block.Decode()
 	if err != nil {

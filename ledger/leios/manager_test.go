@@ -211,11 +211,22 @@ func (f *fakeEpochProvider) EpochForSlot(slot uint64) (uint64, error) {
 }
 
 type fakeSlotProvider struct {
+	mu   sync.Mutex
 	slot uint64
 }
 
 func (f *fakeSlotProvider) CurrentOrTipSlot() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.slot
+}
+
+// setSlot advances (or rewinds) the wall-clock slot the vote window is
+// measured against.
+func (f *fakeSlotProvider) setSlot(slot uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.slot = slot
 }
 
 type fakeParamsProvider struct {
