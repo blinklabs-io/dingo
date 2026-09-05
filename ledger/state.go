@@ -4865,6 +4865,14 @@ func ledgerPipelineBackoff(consecutiveNoProgress int) (time.Duration, bool) {
 	), true
 }
 
+func ledgerPipelineRetryDelay(
+	consecutiveNoProgress int,
+	minimum time.Duration,
+) (time.Duration, bool) {
+	backoff, stuck := ledgerPipelineBackoff(consecutiveNoProgress)
+	return max(backoff, minimum), stuck
+}
+
 // certifiedEndorserBlockPipelineRetryDelay returns how long the pipeline waits
 // before restarting after a certified Leios endorser block was unavailable.
 //
