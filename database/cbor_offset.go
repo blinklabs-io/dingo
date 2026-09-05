@@ -18,6 +18,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 )
 
 // offsetMagic is a 4-byte prefix that identifies offset-based storage.
@@ -266,20 +267,40 @@ func DecodeTxCborParts(data []byte) (*TxCborParts, error) {
 	parts.MetadataOffset = binary.BigEndian.Uint32(data[60:64])
 	parts.MetadataLength = binary.BigEndian.Uint32(data[64:68])
 
-	// Decode IsValid (byte 68)
-	parts.IsValid = data[68] != 0
+	// Decode IsValid (byte 68). Only the canonical encoded values (0 = false,
+	// 1 = true, as produced by Encode) are accepted; any other byte value
+	// indicates corrupted or hand-crafted data rather than a genuine
+	// encoding, so it is rejected instead of being silently coerced to
+	// true by a `!= 0` check.
+	switch data[68] {
+	case 0:
+		parts.IsValid = false
+	case 1:
+		parts.IsValid = true
+	default:
+		return nil, fmt.Errorf(
+			"invalid TxCborParts IsValid byte: expected 0 or 1, got %d",
+			data[68],
+		)
+	}
 
 	return parts, nil
 }
 
 // IsTxCborPartsStorage checks if the data is TxCborParts storage.
-// Returns true if data has the correct size and magic prefix.
+// Returns true if data has the correct size and magic prefix, and its
+// IsValid byte is one of the canonical encoded values -- kept in lockstep
+// with DecodeTxCborParts's own validation so a caller can rely on this
+// check predicting whether decode will succeed.
 func IsTxCborPartsStorage(data []byte) bool {
 	if len(data) != TxCborPartsSize {
 		return false
 	}
-	return data[0] == txPartsMagic[0] && data[1] == txPartsMagic[1] &&
-		data[2] == txPartsMagic[2] && data[3] == txPartsMagic[3]
+	if data[0] != txPartsMagic[0] || data[1] != txPartsMagic[1] ||
+		data[2] != txPartsMagic[2] || data[3] != txPartsMagic[3] {
+		return false
+	}
+	return data[68] == 0 || data[68] == 1
 }
 
 // HasMetadata returns true if the transaction has metadata.
@@ -298,10 +319,18 @@ func (t *TxCborParts) HasMetadata() bool {
 // arrays, so the reassembled CBOR may differ from tx.Cbor() which may use
 // a different encoding order or structure.
 func (t *TxCborParts) ReassembleTxCbor(blockCbor []byte) ([]byte, error) {
-	// Safe conversion: Cardano blocks are limited to ~90KB, well within uint32 range.
-	blockLen := uint32(
-		len(blockCbor),
-	) // #nosec G115: bounded by Cardano protocol limits
+	// Cardano blocks are limited to ~90KB, well within uint32 range, but the
+	// narrowing conversion is checked explicitly rather than assumed so a
+	// caller passing an unexpectedly huge buffer fails loudly instead of
+	// silently wrapping into a bogus (and possibly smaller) blockLen that
+	// the bounds checks below would then validate against.
+	if len(blockCbor) > math.MaxUint32 {
+		return nil, fmt.Errorf(
+			"block CBOR length %d exceeds uint32 range",
+			len(blockCbor),
+		)
+	}
+	blockLen := uint32(len(blockCbor)) // #nosec G115: checked above
 
 	// Validate body bounds (overflow-safe: check offset first, then remaining space)
 	if t.BodyOffset > blockLen || t.BodyLength > blockLen-t.BodyOffset {

@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"errors"
+	"math"
 	"sync"
 	"testing"
 
@@ -190,4 +191,65 @@ func TestInsertNodeSettingsGatesIfAbsentPreservesRollbackFailure(t *testing.T) {
 	rollbackErr := errors.New("rollback failed")
 	err := errors.Join(errNodeSettingsGateInitializationLost, rollbackErr)
 	require.False(t, isOnlyNodeSettingsGateInitializationRace(err))
+}
+
+// TestNodeSettingsGatesRejectOutOfDomainEpochAndSlot proves every write path
+// that stamps recordedEpoch/recordedSlot onto a gate row rejects a uint64
+// value outside SQLite's signed INTEGER domain instead of silently wrapping
+// it into a negative column value, matching the checkedInt64 guard already
+// used elsewhere in this package for the same write boundary.
+func TestNodeSettingsGatesRejectOutOfDomainEpochAndSlot(t *testing.T) {
+	const outOfDomain = uint64(math.MaxInt64) + 1
+
+	t.Run("SetNodeSettingsGates bad epoch", func(t *testing.T) {
+		store := newManagementTestStore(t)
+		err := store.SetNodeSettingsGates(
+			nodesettings.Values{"start_era": "byron"},
+			outOfDomain,
+			0,
+		)
+		require.Error(t, err)
+	})
+
+	t.Run("SetNodeSettingsGates bad slot", func(t *testing.T) {
+		store := newManagementTestStore(t)
+		err := store.SetNodeSettingsGates(
+			nodesettings.Values{"start_era": "byron"},
+			0,
+			outOfDomain,
+		)
+		require.Error(t, err)
+	})
+
+	t.Run("InsertNodeSettingsGateIfAbsent bad epoch", func(t *testing.T) {
+		store := newManagementTestStore(t)
+		_, err := store.InsertNodeSettingsGateIfAbsent(
+			"start_era", "byron", outOfDomain, 0,
+		)
+		require.Error(t, err)
+	})
+
+	t.Run("InsertNodeSettingsGateIfAbsent bad slot", func(t *testing.T) {
+		store := newManagementTestStore(t)
+		_, err := store.InsertNodeSettingsGateIfAbsent(
+			"start_era", "byron", 0, outOfDomain,
+		)
+		require.Error(t, err)
+	})
+
+	t.Run("InsertNodeSettingsGatesIfAbsent bad epoch", func(t *testing.T) {
+		store := newManagementTestStore(t)
+		_, err := store.InsertNodeSettingsGatesIfAbsent(
+			nodesettings.Values{"start_era": "byron"}, outOfDomain, 0,
+		)
+		require.Error(t, err)
+	})
+
+	t.Run("InsertNodeSettingsGatesIfAbsent bad slot", func(t *testing.T) {
+		store := newManagementTestStore(t)
+		_, err := store.InsertNodeSettingsGatesIfAbsent(
+			nodesettings.Values{"start_era": "byron"}, 0, outOfDomain,
+		)
+		require.Error(t, err)
+	})
 }

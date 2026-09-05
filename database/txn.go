@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -261,23 +262,86 @@ func (t *Txn) dispatchAfterCommit() {
 	}
 }
 
-// runAfterCommitCallback runs a single after-commit callback, recovering and
-// logging any panic. Callbacks run detached from the transaction (after the
-// durable commit, without the txn lock), so a panic must not escape the drain
-// loop: an escaping panic would leave dispatching=true, silently stranding
-// every callback registered afterward, and would drop the callbacks already
-// dequeued for this drain. Panics are logged, not propagated.
+// ErrTxnPanic identifies an error produced by recovering a panic raised by
+// transaction-related work, as opposed to an ordinary error a caller
+// returned deliberately. Every transaction worker that can convert a panic
+// into an error return (Txn.Do; ledger.DatabaseWorkerPool.executeOperation)
+// wraps it with this sentinel via NewTxnPanicError, so a caller can tell
+// "the underlying operation failed" (an ordinary error) apart from
+// "something the operation didn't expect to fail this way panicked" (this)
+// with a single errors.Is check, regardless of which worker recovered it.
+var ErrTxnPanic = errors.New("transaction worker panicked")
+
+// NewTxnPanicError formats a recovered panic value r (from the given
+// worker/context label) into an error wrapping ErrTxnPanic. It is the
+// shared error half of the panic contract documented below; logTxnPanic is
+// the shared logging half.
+func NewTxnPanicError(context string, r any) error {
+	return fmt.Errorf("%w: %s: %v", ErrTxnPanic, context, r)
+}
+
+// Panic contract for transaction workers (this function and Do, below,
+// plus ledger.DatabaseWorkerPool.executeOperation): a panic raised by
+// transaction-related work is always recovered and logged with its stack
+// trace via logTxnPanic, and -- when the worker has anywhere to put it -- an
+// error wrapping ErrTxnPanic via NewTxnPanicError, before the recovering
+// deferred func decides what happens next. What differs between workers is
+// only that next step, and the difference tracks whether the worker has a
+// caller to hand the result to:
+//   - Do and executeOperation both run underneath a caller that is
+//     synchronously waiting on a result (Do's caller on the stack;
+//     executeOperation's via its result channel), so both convert the
+//     panic into a returned ErrTxnPanic-wrapped error instead of crashing
+//     that caller's goroutine out from under it. Do additionally rolls
+//     back before returning, since it -- unlike executeOperation, whose
+//     OpFunc owns any transaction it opened -- is itself the transaction
+//     boundary.
+//   - runAfterCommitCallback runs detached on the dispatch loop, after the
+//     registering caller has already moved on and after the transaction
+//     has already durably committed; there is nobody left to hand a
+//     result to, and it may be only one of several callbacks in the
+//     current drain. Returning or re-panicking here would drop every
+//     other callback already dequeued for this drain and strand every
+//     callback registered afterward (see the comment below), so it logs
+//     and continues instead -- the one case where the contract's error
+//     half has nowhere to go.
+//
+// logTxnPanic implements the shared logging half of that contract so every
+// path reports a panic identically; it never itself panics, even when
+// logger is nil (a bare Txn built directly for a test may have no db, and
+// so no logger, but must still finish the corresponding cleanup).
+func logTxnPanic(logger *slog.Logger, msg string, r any) {
+	if logger == nil {
+		return
+	}
+	logger.Error(
+		msg,
+		"panic", fmt.Sprintf("%v", r),
+		"stack", string(debug.Stack()),
+	)
+}
+
+// runAfterCommitCallback runs a single after-commit callback. See the panic
+// contract above Do: a panic here is logged, not propagated, because a
+// panic escaping the drain loop would leave dispatching=true, silently
+// stranding every callback registered afterward, and would drop the
+// callbacks already dequeued for this drain.
 func (t *Txn) runAfterCommitCallback(fn func()) {
 	defer func() {
-		if r := recover(); r != nil && t.db != nil {
-			t.db.logger.Error(
-				"panic in after-commit callback",
-				"panic", fmt.Sprintf("%v", r),
-				"stack", string(debug.Stack()),
-			)
+		if r := recover(); r != nil {
+			logTxnPanic(t.logger(), "panic in after-commit callback", r)
 		}
 	}()
 	fn()
+}
+
+// logger returns the transaction's logger, or nil if this Txn was built
+// without a db (as bare Txn{} literals in tests do).
+func (t *Txn) logger() *slog.Logger {
+	if t.db == nil {
+		return nil
+	}
+	return t.db.logger
 }
 
 type savepointTxn interface {
@@ -312,43 +376,45 @@ func (t *Txn) RollbackTo(name string) error {
 	return savepointer.RollbackTo(name)
 }
 
-// Do executes the specified function in the context of the transaction. Any errors returned will result
-// in the transaction being rolled back. If the function panics, the transaction is rolled back and the
-// panic is re-raised after logging.
-func (t *Txn) Do(fn func(*Txn) error) error {
+// Do executes the specified function in the context of the transaction. Any
+// errors returned will result in the transaction being rolled back. If the
+// function panics, the transaction is rolled back and Do returns an error
+// wrapping ErrTxnPanic instead of letting the panic escape -- see the panic
+// contract above runAfterCommitCallback for how this fits the same contract
+// as executeOperation and why runAfterCommitCallback itself cannot do the
+// same.
+func (t *Txn) Do(fn func(*Txn) error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			// Log the panic before attempting rollback
-			t.db.logger.Error(
+			logTxnPanic(
+				t.logger(),
 				"panic in transaction function, ensuring rollback",
-				"panic", fmt.Sprintf("%v", r),
-				"stack", string(debug.Stack()),
+				r,
 			)
 			// Attempt rollback to ensure transaction is cleaned up
-			if err := t.Rollback(); err != nil {
-				t.db.logger.Error(
+			if rbErr := t.Rollback(); rbErr != nil && t.logger() != nil {
+				t.logger().Error(
 					"rollback failed after panic",
 					"panic", fmt.Sprintf("%v", r),
-					"rollback_error", err,
+					"rollback_error", rbErr,
 				)
 			}
-			// Re-panic to propagate the error up the stack
-			panic(r)
+			err = NewTxnPanicError("transaction function", r)
 		}
 	}()
 
-	if err := fn(t); err != nil {
-		if err2 := t.Rollback(); err2 != nil {
+	if fnErr := fn(t); fnErr != nil {
+		if rbErr := t.Rollback(); rbErr != nil {
 			return fmt.Errorf(
 				"rollback failed: %w: original error: %w",
-				err2,
-				err,
+				rbErr,
+				fnErr,
 			)
 		}
-		return err
+		return fnErr
 	}
-	if err := t.Commit(); err != nil {
-		return fmt.Errorf("commit failed: %w", err)
+	if commitErr := t.Commit(); commitErr != nil {
+		return fmt.Errorf("commit failed: %w", commitErr)
 	}
 	return nil
 }

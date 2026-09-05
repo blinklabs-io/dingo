@@ -1965,11 +1965,31 @@ reinitialization, then calls `Commit`; a later swap failure can still call
 
 `Txn.Commit` owns its transaction lock and shared barrier hold through one
 function-scope cleanup. A storage-provider panic releases both before `Txn.Do`
-recovers, allowing its rollback to reacquire the transaction lock, finish the
-underlying stores, and re-panic instead of self-deadlocking. Successful commits
-also release both before `AfterCommit` callbacks run, while still draining those
-callbacks before `Commit` returns; failed commits and rollbacks never dispatch
-them.
+recovers, allowing its rollback to reacquire the transaction lock and finish
+the underlying stores before `Do` returns the converted error described below,
+rather than self-deadlocking. Successful commits also release both before
+`AfterCommit` callbacks run, while still draining those callbacks before
+`Commit` returns; failed commits and rollbacks never dispatch them.
+
+`database/txn.go` documents one panic contract shared by every transaction
+worker: `Txn.Do`, the after-commit dispatch loop (`runAfterCommitCallback`),
+and `ledger.DatabaseWorkerPool.executeOperation`. All three always recover a
+panic and log it (message, value, and stack trace); `Do` and
+`executeOperation` additionally convert it into an error wrapping
+`database.ErrTxnPanic` (via `database.NewTxnPanicError`) instead of letting it
+escape, so `errors.Is(err, database.ErrTxnPanic)` identifies a recovered panic
+the same way regardless of which of the two produced it. What differs,
+deliberately, is what each worker does with that outcome: `Do` rolls back
+before returning it, since a synchronous caller is still on the stack waiting
+on the return value; `executeOperation` returns it on `DatabaseResult.Error`
+for the same reason, since its submitter is synchronously waiting on
+`ResultChan`. `runAfterCommitCallback` is the one exception with nowhere to
+put an error return: it runs detached on the dispatch loop after the
+registering caller has already moved on and the transaction has already
+durably committed, and it may be only one of several callbacks in the current
+drain — returning or re-panicking there would drop every other callback
+already dequeued for the current drain and strand every callback registered
+afterward, so it logs and continues instead.
 
 Truncate reuses `database.TruncateAfterSlot`, the same metadata+blob-referenced-UTxO/tx sweep `ledger.LedgerState.rollback` uses for ordinary in-bounds rollback, extended with a bulk blob-block-delete path for ranges too large for the one-transaction-per-block pattern `Chain.Rollback` uses. Unlike `Chain.Rollback`, it does not reject a target beyond the configured security parameter, since an operator explicitly invoking it (the CIP-0135 disaster-recovery case) is the informed-consent replacement for that guard.
 

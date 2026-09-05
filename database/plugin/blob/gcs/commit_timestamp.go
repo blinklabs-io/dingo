@@ -19,6 +19,7 @@ package gcs
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"time"
 
@@ -27,6 +28,21 @@ import (
 )
 
 const commitTimestampBlobKey = "metadata_commit_timestamp"
+
+// decodeCommitTimestamp decodes a big-endian byte-encoded timestamp.
+// big.Int.Int64() is undefined for a value that does not fit in an int64,
+// so this rejects rather than silently truncates an oversized or corrupted
+// stored value.
+func decodeCommitTimestamp(data []byte) (int64, error) {
+	ts := new(big.Int).SetBytes(data)
+	if !ts.IsInt64() {
+		return 0, fmt.Errorf(
+			"commit timestamp value out of int64 range: %s",
+			ts.String(),
+		)
+	}
+	return ts.Int64(), nil
+}
 
 func (b *BlobStoreGCS) GetCommitTimestamp() (int64, error) {
 	// No nil check: NewTransaction returns a concrete *gcsTxn as a types.Txn,
@@ -47,16 +63,17 @@ func (b *BlobStoreGCS) GetCommitTimestamp() (int64, error) {
 
 	// If SOPS is not enabled, read plaintext directly
 	if !dingosops.IsEnabled() {
-		return new(big.Int).SetBytes(r).Int64(), nil
+		return decodeCommitTimestamp(r)
 	}
 
 	plaintext, err := dingosops.Decrypt(r)
 	if err != nil {
 		if !json.Valid(r) && len(r) <= 8 {
-			ts := new(big.Int).SetBytes(r).Int64()
+			ts, decodeErr := decodeCommitTimestamp(r)
 			// Validate timestamp is reasonable (post-2000, not in future)
 			now := time.Now().UnixMilli()
-			if ts > 946684800000 && ts <= now { // post-2000, not in future
+			if decodeErr == nil && ts > 946684800000 &&
+				ts <= now { // post-2000, not in future
 				b.logger.Warningf(
 					"commit timestamp stored plaintext in GCS, migrating to SOPS encryption: %v",
 					err,
@@ -85,7 +102,7 @@ func (b *BlobStoreGCS) GetCommitTimestamp() (int64, error) {
 		return 0, err
 	}
 
-	return new(big.Int).SetBytes(plaintext).Int64(), nil
+	return decodeCommitTimestamp(plaintext)
 }
 
 func (b *BlobStoreGCS) SetCommitTimestamp(

@@ -137,6 +137,64 @@ func TestAddUtxosRejectsOverflowAssetWithoutMutation(t *testing.T) {
 // returned. Callers that only need row identity or ordering (an
 // exact-address candidate scan, a reference-only lookup) use this to avoid
 // paying for asset joins that would be immediately discarded.
+// TestGetUtxosByAddressRequiresPositiveMaxResults proves maxResults is a
+// required, explicit bound: callers cannot opt into an unbounded query by
+// passing zero or a negative value.
+func TestGetUtxosByAddressRequiresPositiveMaxResults(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	pattern := models.UtxoAddressPattern{PaymentPart: []byte("payment")}
+
+	for _, maxResults := range []int{0, -1} {
+		_, err := store.GetUtxosByAddress(
+			[]models.UtxoAddressPattern{pattern},
+			maxResults,
+			nil,
+		)
+		require.Error(t, err)
+	}
+}
+
+// TestGetUtxosByAddressEnforcesMaxResults proves a broad query that would
+// return more than maxResults candidate rows fails with
+// models.ErrTooManyUtxoResults instead of silently returning a truncated
+// (and therefore wrong) answer, and that raising the bound to cover the
+// true result size succeeds.
+func TestGetUtxosByAddressEnforcesMaxResults(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+
+	paymentKey := []byte("shared-payment-key-28-bytes-")
+	const utxoCount = 5
+	for i := range utxoCount {
+		txId := make([]byte, 32)
+		txId[31] = byte(i)
+		require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
+			TxId:       txId,
+			OutputIdx:  0,
+			PaymentKey: paymentKey,
+			AddedSlot:  uint64(i + 1),
+			Amount:     100,
+		}))
+	}
+	pattern := models.UtxoAddressPattern{PaymentPart: paymentKey}
+
+	_, err := store.GetUtxosByAddress(
+		[]models.UtxoAddressPattern{pattern},
+		utxoCount-1,
+		nil,
+	)
+	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
+
+	got, err := store.GetUtxosByAddress(
+		[]models.UtxoAddressPattern{pattern},
+		utxoCount,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, got, utxoCount)
+}
+
 func TestGetUtxosByAddressWithOrderingSkipAssets(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)

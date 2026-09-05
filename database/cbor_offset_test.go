@@ -16,6 +16,7 @@ package database
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"testing"
 
@@ -837,6 +838,34 @@ func TestDecodeTxCborPartsInvalidMagic(t *testing.T) {
 		"magic",
 		"error message should mention magic",
 	)
+}
+
+// TestDecodeTxCborPartsRejectsNoncanonicalIsValid proves a validity byte
+// other than the canonical 0/1 that Encode ever produces is rejected rather
+// than silently coerced to true by a `!= 0` check.
+func TestDecodeTxCborPartsRejectsNoncanonicalIsValid(t *testing.T) {
+	for _, isValidByte := range []byte{2, 0x7f, 0x80, 0xfe, 0xff} {
+		t.Run(
+			fmt.Sprintf("byte value %d", isValidByte),
+			func(t *testing.T) {
+				data := (&TxCborParts{IsValid: true}).Encode()
+				data[68] = isValidByte
+
+				decoded, err := DecodeTxCborParts(data)
+				assert.Error(
+					t,
+					err,
+					"decode should reject a noncanonical IsValid byte",
+				)
+				assert.Nil(t, decoded, "decoded should be nil on error")
+				assert.False(
+					t,
+					IsTxCborPartsStorage(data),
+					"storage detector must agree with decode",
+				)
+			},
+		)
+	}
 }
 
 func TestIsTxCborPartsStorage(t *testing.T) {

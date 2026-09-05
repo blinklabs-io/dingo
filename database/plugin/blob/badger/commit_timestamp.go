@@ -46,7 +46,17 @@ func (b *BlobStoreBadger) GetCommitTimestamp() (int64, error) {
 		//nolint:gosec // Unix timestamps are always positive and within int64 range.
 		return int64(binary.BigEndian.Uint64(val)), nil
 	}
-	return new(big.Int).SetBytes(val).Int64(), nil
+	// Legacy variable-length encoding: big.Int.Int64() is undefined for a
+	// value that does not fit in an int64, so reject rather than silently
+	// truncate a corrupted or oversized stored value.
+	bigVal := new(big.Int).SetBytes(val)
+	if !bigVal.IsInt64() {
+		return 0, fmt.Errorf(
+			"commit timestamp value out of int64 range: %s",
+			bigVal.String(),
+		)
+	}
+	return bigVal.Int64(), nil
 }
 
 func (b *BlobStoreBadger) SetCommitTimestamp(

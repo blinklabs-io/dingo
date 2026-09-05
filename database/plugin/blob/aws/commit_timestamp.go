@@ -19,6 +19,7 @@ package aws
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"time"
 
@@ -27,6 +28,21 @@ import (
 )
 
 const commitTimestampBlobKey = "metadata_commit_timestamp"
+
+// decodeCommitTimestamp decodes a big-endian byte-encoded timestamp.
+// big.Int.Int64() is undefined for a value that does not fit in an int64,
+// so this rejects rather than silently truncates an oversized or corrupted
+// stored value.
+func decodeCommitTimestamp(data []byte) (int64, error) {
+	ts := new(big.Int).SetBytes(data)
+	if !ts.IsInt64() {
+		return 0, fmt.Errorf(
+			"commit timestamp value out of int64 range: %s",
+			ts.String(),
+		)
+	}
+	return ts.Int64(), nil
+}
 
 func (b *BlobStoreS3) GetCommitTimestamp() (int64, error) {
 	// No nil check: NewTransaction returns a concrete *s3Txn as a types.Txn,
@@ -47,7 +63,7 @@ func (b *BlobStoreS3) GetCommitTimestamp() (int64, error) {
 
 	// If SOPS is not enabled, read plaintext directly
 	if !dingosops.IsEnabled() {
-		return new(big.Int).SetBytes(data).Int64(), nil
+		return decodeCommitTimestamp(data)
 	}
 
 	plaintext, err := dingosops.Decrypt(data)
@@ -56,10 +72,11 @@ func (b *BlobStoreS3) GetCommitTimestamp() (int64, error) {
 		// Plaintext timestamps are small byte arrays (<= 8 bytes) containing valid timestamps
 		if len(data) <= 8 && len(data) > 0 &&
 			!json.Valid(data) {
-			ts := new(big.Int).SetBytes(data).Int64()
+			ts, decodeErr := decodeCommitTimestamp(data)
 			// Validate timestamp is reasonable (post-2000, not in future)
 			now := time.Now().UnixMilli()
-			if ts > 946684800000 && ts <= now { // post-2000, not in future
+			if decodeErr == nil && ts > 946684800000 &&
+				ts <= now { // post-2000, not in future
 				b.logger.Warningf(
 					"commit timestamp stored plaintext in S3, migrating to SOPS encryption: %v",
 					err,
@@ -88,7 +105,7 @@ func (b *BlobStoreS3) GetCommitTimestamp() (int64, error) {
 		b.logger.Errorf("failed to decrypt commit timestamp: %v", err)
 		return 0, err
 	}
-	return new(big.Int).SetBytes(plaintext).Int64(), nil
+	return decodeCommitTimestamp(plaintext)
 }
 
 func (b *BlobStoreS3) SetCommitTimestamp(

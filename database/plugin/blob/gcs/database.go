@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
+	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/blockverify"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/compensate"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -735,6 +736,16 @@ func (d *BlobStoreGCS) GetBlock(
 	if isTombstone {
 		return nil, tmpMetadata,
 			&types.HistoryExpiredError{Slot: slot, Hash: hash}
+	}
+	// GCS offers no content-addressing guarantee: re-derive the block's
+	// identity from its bytes rather than trusting the (slot, hash) key
+	// used to fetch it.
+	if _, err := blockverify.Hash(tmpMetadata.Type, cborData, hash); err != nil {
+		return nil, types.BlockMetadata{}, fmt.Errorf(
+			"get block: slot %d: %w",
+			slot,
+			err,
+		)
 	}
 	return cborData, tmpMetadata, nil
 }

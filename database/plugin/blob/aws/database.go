@@ -39,6 +39,7 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
+	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/blockverify"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/compensate"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -661,6 +662,16 @@ func (d *BlobStoreS3) GetBlock(
 	if isTombstone {
 		return nil, tmpMetadata,
 			&types.HistoryExpiredError{Slot: slot, Hash: hash}
+	}
+	// S3 offers no content-addressing guarantee: re-derive the block's
+	// identity from its bytes rather than trusting the (slot, hash) key
+	// used to fetch it.
+	if _, err := blockverify.Hash(tmpMetadata.Type, cborData, hash); err != nil {
+		return nil, types.BlockMetadata{}, fmt.Errorf(
+			"get block: slot %d: %w",
+			slot,
+			err,
+		)
 	}
 	return cborData, tmpMetadata, nil
 }
