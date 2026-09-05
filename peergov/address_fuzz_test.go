@@ -98,26 +98,12 @@ func FuzzAddressHost(f *testing.F) {
 	})
 }
 
-// FuzzIsRoutableAddr checks the string wrapper, not the routability policy
-// itself: whatever host isRoutableAddr extracts must be judged exactly as
-// IsRoutableIP judges it, and a host that is not an IP literal must be
-// accepted as a hostname. The policy's own address classes are enumerated in
-// TestIsRoutableIP, so restating them here would only duplicate that table and
-// drift from it — which is what happened when unreachablePrefixes was added.
 func FuzzIsRoutableAddr(f *testing.F) {
 	f.Add("")
 	f.Add("127.0.0.1:3001")
 	f.Add("10.0.0.1:3001")
 	f.Add("8.8.8.8:3001")
 	f.Add("relay.example.com:3001")
-	// Seeds inside unreachablePrefixes, which net.IP reports as global
-	// unicast. Without these the corpus never reaches that branch.
-	f.Add("100.64.0.1:3001")
-	f.Add("192.0.0.1:3001")
-	f.Add("198.18.0.1:3001")
-	f.Add("240.0.0.1:3001")
-	f.Add("[100::1]:3001")
-	f.Add("[::ffff:100.64.0.1]:3001")
 
 	f.Fuzz(func(t *testing.T, address string) {
 		routable := isRoutableAddr(address)
@@ -135,14 +121,13 @@ func FuzzIsRoutableAddr(f *testing.F) {
 			}
 			return
 		}
-		if want := IsRoutableIP(ip); routable != want {
-			t.Fatalf(
-				"isRoutableAddr(%q)=%v disagrees with IsRoutableIP(%v)=%v",
-				address,
-				routable,
-				ip,
-				want,
-			)
+		if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
+			ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+			if routable {
+				t.Fatalf("non-routable IP %q was accepted", address)
+			}
+		} else if !routable {
+			t.Fatalf("routable IP %q was rejected (isRoutableAddr=%v)", address, routable)
 		}
 	})
 }

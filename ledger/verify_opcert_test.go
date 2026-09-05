@@ -109,11 +109,11 @@ func TestOpCertFromHeader_NonPraosReturnsFalse(t *testing.T) {
 // pins the opcert signable representation to real cardano output. The values
 // are taken from a real cardano-cli NodeOperationalCertificate
 // (config/cardano/devnet/keys/opcert.cert). The signature verifies only under
-// the raw 48-byte OCertSignable representation (KES vkey || counter || period),
-// which is what verifyOpCertColdSignature now verifies by delegating directly
-// to gouroboros' ledger.VerifyOpCertSignature. If this test ever fails, either
-// the inbound check or its upstream dependency has drifted from real cardano
-// and would stall the chain by rejecting valid blocks.
+// the raw 48-byte OCertSignable representation (KES vkey || counter || period);
+// gouroboros' CBOR-based VerifyOpCertSignature rejects it, which is exactly why
+// verifyOpCertColdSignature does not call that function. If this test ever
+// fails, the inbound check has drifted from real cardano and would stall the
+// chain by rejecting valid blocks.
 func TestVerifyOpCertColdSignature_RealCardanoCliCert(t *testing.T) {
 	mustHex := func(s string) []byte {
 		b, err := hex.DecodeString(s)

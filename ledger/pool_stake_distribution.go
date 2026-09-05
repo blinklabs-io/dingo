@@ -60,12 +60,6 @@ type PoolStakeDistribution struct {
 	// because cardano clients decode this as a NonZero value; see its doc
 	// comment. It is the denominator every StakeFraction is taken over.
 	TotalActiveStake uint64
-	// TotalCirculatingSupply is genesis MaxLovelaceSupply minus the live
-	// reserves pot, clamped the same way as TotalActiveStake. It is a
-	// different total from TotalActiveStake -- see totalCirculatingSupply's
-	// doc comment (blinklabs-io/dingo#3824) for why GetStakeDistribution, and
-	// only GetStakeDistribution, needs this one instead.
-	TotalCirculatingSupply uint64
 	// Pools is ordered by PoolKeyHash. Callers that place this in a repeated
 	// protobuf field or any other ordered encoding depend on that: without it
 	// the order is Go map iteration order, so two identical requests against
@@ -169,17 +163,6 @@ func (ls *LedgerState) PoolStakeDistribution(
 	if err != nil {
 		return nil, err
 	}
-	// Read inside the same transaction as everything else here so a caller
-	// combining this with per-pool Stake gets one consistent view, the same
-	// reason totalActiveStake is read from metaTxn rather than a fresh one.
-	totalCirculatingSupply, err := ls.totalCirculatingSupply(
-		snapshotEpoch,
-		true,
-		metaTxn,
-	)
-	if err != nil {
-		return nil, err
-	}
 
 	keyHashes := make([]lcommon.PoolKeyHash, 0, len(stakeByPool))
 	for hash := range stakeByPool {
@@ -203,11 +186,10 @@ func (ls *LedgerState) PoolStakeDistribution(
 	}
 
 	dist := &PoolStakeDistribution{
-		Tip:                    tip,
-		SnapshotEpoch:          snapshotEpoch,
-		TotalActiveStake:       totalActiveStake,
-		TotalCirculatingSupply: totalCirculatingSupply,
-		Pools:                  make([]PoolStakeShare, 0, len(keyHashes)),
+		Tip:              tip,
+		SnapshotEpoch:    snapshotEpoch,
+		TotalActiveStake: totalActiveStake,
+		Pools:            make([]PoolStakeShare, 0, len(keyHashes)),
 	}
 	for _, pkh := range keyHashes {
 		stake := stakeByPool[string(pkh.Bytes())]

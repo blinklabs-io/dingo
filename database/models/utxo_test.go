@@ -102,7 +102,7 @@ func TestUtxoLedgerToModelPaymentScript(t *testing.T) {
 // TestUtxoLedgerToModelPropagatesAssetOverflowError exercises the asset
 // overflow guard end-to-end through a real ledger.TransactionOutput (a Mary
 // output, the era multi-asset was introduced in) rather than only unit
-// testing ConvertMultiAssetToModels/CheckedUint64FromBigInt directly: it
+// testing ConvertMultiAssetToModels/checkedUint64FromBigInt directly: it
 // confirms UtxoLedgerToModel itself surfaces the error and returns a
 // zero-value Utxo instead of a model with a wrapped asset amount.
 func TestUtxoLedgerToModelPropagatesAssetOverflowError(t *testing.T) {

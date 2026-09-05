@@ -197,11 +197,9 @@ type Result struct {
 	Unspendable      uint64
 	TotalCirculation uint64
 	TotalBlocks      uint64
-	// ExpectedBlocks is the ledger-specified integer expectation represented
-	// as a rational for compatibility with the existing result contract.
-	ExpectedBlocks *big.Rat
-	pendingRewards []pendingReward
-	poolAccounted  []uint64
+	ExpectedBlocks   *big.Rat
+	pendingRewards   []pendingReward
+	poolAccounted    []uint64
 }
 
 type PoolReward struct {
@@ -1203,12 +1201,9 @@ func ApportionFullPot(baseRewards []uint64, availableRewards uint64) []uint64 {
 
 func expectedBlocks(params Parameters) *big.Rat {
 	nonObftSlots := new(big.Rat).Sub(oneRat(), params.Decentralization)
-	expected := new(big.Rat).Mul(
+	return new(big.Rat).Mul(
 		new(big.Rat).Mul(nonObftSlots, params.ActiveSlotsCoeff),
 		uintRat(params.EpochLength),
-	)
-	return new(big.Rat).SetInt(
-		new(big.Int).Quo(expected.Num(), expected.Denom()),
 	)
 }
 

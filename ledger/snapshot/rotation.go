@@ -1030,17 +1030,6 @@ func (m *Manager) rotateSnapshots(ctx context.Context, newEpoch uint64) {
 	)
 }
 
-// poolSnapshotRetentionMaxDepth bounds how many epochs of pool_stake_snapshot
-// rows the deferred-header retention pin (issue #3727) may ever hold below the
-// current epoch. It is a safety backstop far larger than any legitimate
-// deferred-header gap (a header awaiting apply needs a snapshot within a few
-// epochs of the apply cursor, and the retention guard additionally evicts
-// deferred headers the cursor has already passed), so in normal operation it
-// never binds; it exists only so a permanently-stuck deferred header cannot pin
-// ~1.3M rows/epoch on mainnet without limit. Retention never drops below the
-// default currentEpoch-3 window regardless.
-const poolSnapshotRetentionMaxDepth uint64 = 24
-
 // cleanupOldSnapshots removes snapshots older than needed for the rotation and
 // delayed reward models. We keep 4 epochs of per-pool and per-credential rows:
 // current, current-1, current-2 for Go, and current-3 so reward calculation can
@@ -1080,75 +1069,20 @@ func (m *Manager) cleanupOldSnapshots(
 
 	deleteBeforeEpoch := currentEpoch - 3
 
-	// Pool-stake snapshots may still be needed below the default window by a
-	// queued/deferred header that validates leader eligibility against an
-	// older epoch's mark snapshot (issue #3727). Pruning them out from under
-	// such a header makes leaderEligibilityStake read the missing rows as a
-	// zero-stake "pool absent" answer, which the reference node never
-	// intended. So pool-snapshot pruning runs THROUGH the retention guard: the
-	// guard holds the deferred-header set stable across both the retention
-	// floor selection and this delete+commit, so no header can be admitted
-	// between the floor read and the prune and lose its snapshot. Only the
-	// pool-snapshot boundary moves; reward-state retention keeps the unchanged
-	// currentEpoch-3 window (deferred header validation reads pool stake, never
-	// reward rows), and runs in a separate transaction outside the guard to
-	// keep the locked section tight.
-	//
-	// prunePoolSnapshots deletes AND commits below the boundary the guard
-	// hands back (its own transaction), so the rows are actually gone before
-	// the guard releases the deferred-header lock.
-	prunePoolSnapshots := func(before uint64) error {
-		if before < deleteBeforeEpoch {
-			m.logger.Info(
-				"retaining historical pool stake snapshots for deferred header validation",
-				"component", "snapshot",
-				"current_epoch", currentEpoch,
-				"default_before_epoch", deleteBeforeEpoch,
-				"pinned_before_epoch", before,
-			)
-		}
-		poolTxn := m.db.Transaction(true)
-		defer func() { _ = poolTxn.Rollback() }()
-		if err := m.db.Metadata().DeletePoolStakeSnapshotsBeforeEpoch(
-			before,
-			poolTxn.Metadata(),
-		); err != nil {
-			return fmt.Errorf("cleanup pool snapshots: %w", err)
-		}
-		return poolTxn.Commit()
-	}
-	// minPoolSnapshotDeleteBefore is the hard backstop on how far the retention
-	// pin can lower pruning: retain at most poolSnapshotRetentionMaxDepth epochs
-	// of pool snapshots so an unresolvable deferred header cannot pin them
-	// without bound (issue #3727, finding 5). It never rises above the default
-	// window (a header needing a within-window snapshot is unaffected), and the
-	// guard clamps the pinned boundary up to it.
-	minPoolSnapshotDeleteBefore := uint64(0)
-	if currentEpoch > poolSnapshotRetentionMaxDepth {
-		minPoolSnapshotDeleteBefore = currentEpoch - poolSnapshotRetentionMaxDepth
-	}
-	if minPoolSnapshotDeleteBefore > deleteBeforeEpoch {
-		minPoolSnapshotDeleteBefore = deleteBeforeEpoch
-	}
-	if guard := m.poolSnapshotRetentionGuard(); guard != nil {
-		if err := guard(
-			deleteBeforeEpoch,
-			minPoolSnapshotDeleteBefore,
-			prunePoolSnapshots,
-		); err != nil {
-			return err
-		}
-	} else if err := prunePoolSnapshots(deleteBeforeEpoch); err != nil {
-		return err
-	}
-
-	// Reward-state pruning: unchanged currentEpoch-3 window, separate
-	// transaction (not under the retention guard).
 	txn := m.db.Transaction(true) // read-write transaction
 	defer func() { _ = txn.Rollback() }()
 
 	meta := m.db.Metadata()
 	metaTxn := txn.Metadata()
+
+	// Delete old pool stake snapshots
+	// For cleaning up old data, we want to delete epochs < deleteBeforeEpoch
+	if err := meta.DeletePoolStakeSnapshotsBeforeEpoch(
+		deleteBeforeEpoch,
+		metaTxn,
+	); err != nil {
+		return fmt.Errorf("cleanup pool snapshots: %w", err)
+	}
 
 	if m.db.StorageMode() == types.StorageModeAPI {
 		// API storage mode: retain reward_account_output without bound (see

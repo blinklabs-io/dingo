@@ -15,13 +15,11 @@
 package ledger
 
 import (
-	"errors"
 	"fmt"
 	"math"
 	"sync"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -193,14 +191,6 @@ func (d *LedgerDelta) applyWithDonationRecording(
 		// Return the map to pool
 		certDepositsMapPool.Put(certDeposits)
 		if setErr != nil {
-			if errors.Is(setErr, models.ErrRewardWithdrawalExceedsBalance) {
-				return &txValidationError{
-					BlockPoint: d.Point,
-					TxHash:     append([]byte(nil), tr.Tx.Hash().Bytes()...),
-					Inputs:     collectReferencedInputs(tr.Tx),
-					Cause:      setErr,
-				}
-			}
 			return fmt.Errorf("record transaction: %w", setErr)
 		}
 		appliedTxs[i] = true

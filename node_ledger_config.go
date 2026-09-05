@@ -15,7 +15,6 @@
 package dingo
 
 import (
-	"context"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
@@ -95,16 +94,8 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// any endorser block by point on demand, so a from-scratch sync can
 		// backfill older ranking blocks' endorser-resident outputs and build
 		// a complete UTxO set instead of trusting the chain.
-		EndorserBlockFetcher: func(
-			ctx context.Context,
-			ebSlot uint64,
-			ebHash []byte,
-		) error {
-			return n.ouroboros().FetchEndorserBlockByPoint(
-				ctx,
-				ebSlot,
-				ebHash,
-			)
+		EndorserBlockFetcher: func(ebSlot uint64, ebHash []byte) error {
+			return n.ouroboros().FetchEndorserBlockByPoint(ebSlot, ebHash)
 		},
 		// Wait, at the tip, for a ranking block's referenced endorser block
 		// to arrive before applying it. Sourced from the pipeline timing

@@ -25,7 +25,6 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
-	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/plutigo/lang"
 	"github.com/blinklabs-io/plutigo/syn"
 	"github.com/stretchr/testify/require"
@@ -244,109 +243,6 @@ func TestValidateTxDijkstraDoesNotTreatPhase1FailureAsPhase2Failure(
 		dijkstraValidityOutcomePParams(),
 	)
 	require.ErrorIs(t, err, phase1Sentinel)
-}
-
-// TestValidateTxDijkstraSkipPhase2StillValidatesRequiredRedeemers pins the
-// Dijkstra phase-1 boundary through Dingo's production entry point. Historical
-// replay may skip script execution, but a reference-script spend must still
-// carry its required redeemer.
-func TestValidateTxDijkstraSkipPhase2StillValidatesRequiredRedeemers(
-	t *testing.T,
-) {
-	requiredRedeemerIndex := noUtxoValidationRuleIndex
-	for index, descriptor := range gdijkstra.UtxoValidationRuleDescriptors() {
-		if descriptor.Id == lcommon.UtxoValidationRuleRequiredRedeemers {
-			requiredRedeemerIndex = index
-			break
-		}
-	}
-	require.NotEqual(
-		t,
-		noUtxoValidationRuleIndex,
-		requiredRedeemerIndex,
-		"Dijkstra must declare the required-redeemer rule",
-	)
-
-	var requiredRedeemerRule *indexedUtxoValidationRule
-	for _, rule := range dijkstraPhase1UtxoValidationRules {
-		if rule.index == requiredRedeemerIndex {
-			ruleCopy := rule
-			requiredRedeemerRule = &ruleCopy
-			break
-		}
-	}
-	require.NotNil(
-		t,
-		requiredRedeemerRule,
-		"Dijkstra phase-1 validation must retain the required-redeemer rule",
-	)
-
-	originalPhase1 := dijkstraPhase1UtxoValidationRules
-	dijkstraPhase1UtxoValidationRules = []indexedUtxoValidationRule{
-		*requiredRedeemerRule,
-	}
-	t.Cleanup(func() { dijkstraPhase1UtxoValidationRules = originalPhase1 })
-
-	plutusScript := lcommon.PlutusV1Script{0x01, 0x02, 0x03}
-	scriptAddr := newTestScriptAddress(t, plutusScript)
-	spendInput := shelley.NewShelleyTransactionInput(
-		"6666666666666666666666666666666666666666666666666666666666666666",
-		0,
-	)
-	ls := newMockLedgerState()
-	ls.skipPhase2Validation = true
-	ls.addUtxo(
-		spendInput,
-		testAddressScriptOutput{
-			testOutput: newTestOutput(1_000),
-			addr:       scriptAddr,
-			scriptRef:  plutusScript,
-		},
-	)
-
-	newTx := func() *gdijkstra.DijkstraTransaction {
-		return &gdijkstra.DijkstraTransaction{
-			Body: gdijkstra.DijkstraTransactionBody{
-				TxInputs: conway.NewConwayTransactionInputSet(
-					[]shelley.ShelleyTransactionInput{spendInput},
-				),
-			},
-			TxIsValid: true,
-		}
-	}
-
-	t.Run("missing redeemer", func(t *testing.T) {
-		err := ValidateTxDijkstra(
-			newTx(),
-			0,
-			ls,
-			dijkstraValidityOutcomePParams(),
-		)
-		var missing lcommon.MissingRedeemerForScriptError
-		require.ErrorAs(t, err, &missing)
-		require.Equal(t, plutusScript.Hash(), missing.ScriptHash)
-		require.Equal(t, lcommon.RedeemerTagSpend, missing.Tag)
-		require.Equal(t, uint32(0), missing.Index)
-	})
-
-	t.Run("matching redeemer", func(t *testing.T) {
-		tx := newTx()
-		tx.WitnessSet = gdijkstra.DijkstraTransactionWitnessSet{
-			WsRedeemers: gdijkstra.DijkstraRedeemers{
-				Redeemers: map[lcommon.RedeemerKey]lcommon.RedeemerValue{
-					{Tag: lcommon.RedeemerTagSpend, Index: 0}: {
-						ExUnits: lcommon.ExUnits{Steps: 1, Memory: 1},
-					},
-				},
-			},
-		}
-		require.NoError(t, ValidateTxDijkstra(
-			tx,
-			0,
-			ls,
-			dijkstraValidityOutcomePParams(),
-		))
-	})
 }
 
 func (t *declaredValidityConwayTx) IsValid() bool {

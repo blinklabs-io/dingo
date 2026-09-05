@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"crypto/ed25519"
+	"encoding/binary"
 	"errors"
 	"fmt"
 
@@ -243,6 +245,15 @@ func (ls *LedgerState) leiosAnnouncementOCINStaleness(
 	return LeiosAnnouncementFreshOCIN, nil
 }
 
+const (
+	// opCertKesVkeySize is the length of the KES (hot) verification key carried
+	// in an operational certificate.
+	opCertKesVkeySize = 32
+	// opCertSignableSize is the length of the cardano-ledger OCertSignable
+	// representation: KES vkey || counter (uint64 BE) || KES period (uint64 BE).
+	opCertSignableSize = opCertKesVkeySize + 8 + 8
+)
+
 // verifyOpCertColdSignature verifies the pool cold-key signature over the
 // operational certificate.
 //
@@ -250,18 +261,49 @@ func (ls *LedgerState) leiosAnnouncementOCINStaleness(
 // raw concatenation of the KES (hot) verification key, the issue counter as a
 // big-endian uint64, and the KES period as a big-endian uint64 — NOT a CBOR
 // encoding. This matches what cardano-node signs (verified byte-for-byte
-// against a real cardano-cli NodeOperationalCertificate; see
-// TestVerifyOpCertColdSignature_RealCardanoCliCert) and the forging-side check
-// in ledger/forging/keys.go ValidateOpCert.
+// against a real cardano-cli NodeOperationalCertificate) and the forging-side
+// check in ledger/forging/keys.go ValidateOpCert.
 //
-// gouroboros' ledger.VerifyOpCertSignature builds this same raw
-// representation (via ledger/common.OpCertSignableBytes), so this delegates
-// to it directly instead of re-deriving the byte layout locally. That was not
-// always true: gouroboros previously hashed a CBOR array
-// ([kes_vkey, issue_number, kes_period]) here, which does not match real
-// opcerts and would have rejected every inbound block.
+// gouroboros' ledger.VerifyOpCertSignature is intentionally NOT used here: it
+// hashes a CBOR array ([kes_vkey, issue_number, kes_period]) instead of this
+// raw representation, which does not match real opcerts and would reject every
+// inbound block.
 func verifyOpCertColdSignature(opCert *ledger.OpCert, coldVkey []byte) error {
-	return ledger.VerifyOpCertSignature(opCert, coldVkey)
+	if len(coldVkey) != ed25519.PublicKeySize {
+		return fmt.Errorf(
+			"cold vkey must be %d bytes, got %d",
+			ed25519.PublicKeySize,
+			len(coldVkey),
+		)
+	}
+	if len(opCert.KesVkey) != opCertKesVkeySize {
+		return fmt.Errorf(
+			"KES vkey must be %d bytes, got %d",
+			opCertKesVkeySize,
+			len(opCert.KesVkey),
+		)
+	}
+	if len(opCert.ColdSignature) != ed25519.SignatureSize {
+		return fmt.Errorf(
+			"cold signature must be %d bytes, got %d",
+			ed25519.SignatureSize,
+			len(opCert.ColdSignature),
+		)
+	}
+	var signable [opCertSignableSize]byte
+	copy(signable[:opCertKesVkeySize], opCert.KesVkey)
+	binary.BigEndian.PutUint64(
+		signable[opCertKesVkeySize:opCertKesVkeySize+8],
+		opCert.IssueNumber,
+	)
+	binary.BigEndian.PutUint64(
+		signable[opCertKesVkeySize+8:],
+		opCert.KesPeriod,
+	)
+	if !ed25519.Verify(coldVkey, signable[:], opCert.ColdSignature) {
+		return errors.New("signature verification failed")
+	}
+	return nil
 }
 
 // verifyOpCertHeaderCrypto performs the stateless inbound operational

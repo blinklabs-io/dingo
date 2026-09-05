@@ -2414,11 +2414,6 @@ type MetadataStore interface {
 	// DeleteSyncState removes a sync state key.
 	DeleteSyncState(string, types.Txn) error
 
-	// ListSyncStateKeysByPrefix returns every sync_state key that begins with
-	// the given prefix (used to enumerate the persisted deferred-header
-	// markers so their retention floor survives a restart -- issue #3727).
-	ListSyncStateKeysByPrefix(string, types.Txn) ([]string, error)
-
 	// ClearSyncState removes all sync state entries.
 	ClearSyncState(types.Txn) error
 

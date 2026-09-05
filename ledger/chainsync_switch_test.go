@@ -458,11 +458,11 @@ func TestHandleEventBlockfetchBlockAllowsBlocksFromActiveBatch(t *testing.T) {
 		},
 	}
 
-	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+	err := ls.handleEventBlockfetchBlock(BlockfetchEvent{
 		ConnectionId: connId1,
 		Block:        &mockBabbageBlock{slot: 2},
 		Point:        ocommon.Point{Slot: 2, Hash: []byte("block-2")},
-	}, nil)
+	})
 	require.NoError(t, err)
 	require.Len(t, ls.pendingBlockfetchEvents, 1)
 	assert.Equal(t, connId1, ls.pendingBlockfetchEvents[0].ConnectionId)
@@ -549,11 +549,11 @@ func TestHandleEventBlockfetchBlockAllowsEquivalentConnectionId(t *testing.T) {
 		},
 	}
 
-	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+	err := ls.handleEventBlockfetchBlock(BlockfetchEvent{
 		ConnectionId: connId1Dup,
 		Block:        &mockBabbageBlock{slot: 2},
 		Point:        ocommon.Point{Slot: 2, Hash: []byte("block-2")},
-	}, nil)
+	})
 	require.NoError(t, err)
 	require.Len(t, ls.pendingBlockfetchEvents, 1)
 	assert.True(
@@ -591,11 +591,11 @@ func TestHandleEventBlockfetchBlockDropsBlocksFromStaleConnection(
 		},
 	}
 
-	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+	err := ls.handleEventBlockfetchBlock(BlockfetchEvent{
 		ConnectionId: connId1,
 		Block:        &mockBabbageBlock{slot: 2},
 		Point:        ocommon.Point{Slot: 2, Hash: []byte("block-2")},
-	}, nil)
+	})
 	require.NoError(t, err)
 	require.Empty(t, ls.pendingBlockfetchEvents)
 }

@@ -121,6 +121,29 @@ func MusashiNetworkIdentityConflict(
 	return "", false
 }
 
+// PeerSnapshotNetworkMismatch reports whether a topology peer snapshot names a
+// different network than the node is configured for.
+//
+// cardano-node writes the snapshot's own NetworkMagic into the file, so a
+// snapshot taken on another network is self-identifying. It matters because
+// the snapshot's relays *replace* the configured bootstrap peers during
+// Genesis selection: accepting a foreign one aims the node at another
+// network's relays and throws away the only addresses that could have worked.
+// Every one of those relays is then denied at the handshake on a network-magic
+// mismatch, leaving the node with no peers and nothing to fall back to.
+//
+// A zero magic on either side is "unspecified" rather than a network -- no
+// real network uses magic 0, and a hand-written or older snapshot may omit the
+// field -- so it is not treated as a mismatch.
+func PeerSnapshotNetworkMismatch(
+	snapshotMagic uint32,
+	networkMagic uint32,
+) bool {
+	return snapshotMagic != 0 &&
+		networkMagic != 0 &&
+		snapshotMagic != networkMagic
+}
+
 // MusashiPrototypeNetwork reports whether network/networkMagic unambiguously
 // identifies the Musashi prototype network, and is therefore permitted to run
 // with the prototype's consensus/ledger trust bypasses.

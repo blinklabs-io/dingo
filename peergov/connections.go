@@ -547,7 +547,7 @@ func (p *PeerGovernor) createOutboundConnection(
 			}
 			continue
 		}
-		if p.denyNetworkMagicMismatch(peer, dialTarget, err) {
+		if p.permanentlyDenyNetworkMagicMismatch(peer, dialTarget, err) {
 			return
 		}
 		failMsg := fmt.Sprintf(
@@ -1101,13 +1101,8 @@ func (p *PeerGovernor) IsDenied(address string) bool {
 // isDeniedLocked checks if a peer is on the deny list.
 // This method assumes the mutex is already held by the caller.
 func (p *PeerGovernor) isDeniedLocked(address string) bool {
-	if expiry, exists := p.networkMismatchDenyList[address]; exists {
-		if time.Now().After(expiry) {
-			// Expired, remove from the network-mismatch deny list.
-			delete(p.networkMismatchDenyList, address)
-		} else {
-			return true
-		}
+	if _, exists := p.permanentDenyList[address]; exists {
+		return true
 	}
 	expiry, exists := p.denyList[address]
 	if !exists {
@@ -1121,13 +1116,10 @@ func (p *PeerGovernor) isDeniedLocked(address string) bool {
 	return true
 }
 
-// denyNetworkMagicMismatch records an address-scoped denial for a peer that
-// proved it belongs to another Cardano network. The denial is bounded by
-// NetworkMismatchDenyDuration (much longer than the ordinary DenyDuration,
-// since this signal is far stronger than a generic dial failure) rather than
-// held indefinitely, and is held only in PeerGovernor memory, so it also
-// clears early on a node restart.
-func (p *PeerGovernor) denyNetworkMagicMismatch(
+// permanentlyDenyNetworkMagicMismatch records an address-scoped denial for a
+// peer that proved it belongs to another Cardano network. The denial is held
+// only in PeerGovernor memory and therefore clears when the node restarts.
+func (p *PeerGovernor) permanentlyDenyNetworkMagicMismatch(
 	peer *Peer,
 	dialTarget string,
 	err error,
@@ -1137,16 +1129,14 @@ func (p *PeerGovernor) denyNetworkMagicMismatch(
 	}
 
 	p.mu.Lock()
-	if p.networkMismatchDenyList == nil {
-		p.networkMismatchDenyList = make(map[string]time.Time)
+	if p.permanentDenyList == nil {
+		p.permanentDenyList = make(map[string]struct{})
 	}
-	expiry := time.Now().Add(p.config.NetworkMismatchDenyDuration)
 	// The peer can be removed or replaced while its dial and handshake run.
 	// Record the immutable attempt identity first so that a stale completion
 	// still suppresses rediscovery of the proven wrong-network address.
-	p.addNetworkMismatchDenyKeysLocked(
+	p.addPermanentPeerDenyKeysLocked(
 		peer,
-		expiry,
 		connmanager.NormalizePeerAddr(dialTarget),
 		p.normalizeAddress(dialTarget),
 	)
@@ -1163,7 +1153,7 @@ func (p *PeerGovernor) denyNetworkMagicMismatch(
 	removed := false
 	if peerIdx != -1 && p.peers[peerIdx] != nil {
 		currentPeer := p.peers[peerIdx]
-		p.addNetworkMismatchDenyKeysLocked(currentPeer, expiry)
+		p.addPermanentPeerDenyKeysLocked(currentPeer)
 		peerAddress = currentPeer.Address
 		peerSource = currentPeer.Source
 		removed = dropIfNeverConnected(peerSource)
@@ -1175,11 +1165,10 @@ func (p *PeerGovernor) denyNetworkMagicMismatch(
 	p.mu.Unlock()
 
 	p.config.Logger.Info(
-		"outbound: denying peer on a different Cardano network",
+		"outbound: permanently denying peer on a different Cardano network",
 		"address", peerAddress,
 		"source", peerSource.String(),
 		"error", err,
-		"deny_duration", p.config.NetworkMismatchDenyDuration,
 	)
 	if removed {
 		p.publishEvent(
@@ -1193,24 +1182,23 @@ func (p *PeerGovernor) denyNetworkMagicMismatch(
 	return true
 }
 
-func (p *PeerGovernor) addNetworkMismatchDenyKeysLocked(
+func (p *PeerGovernor) addPermanentPeerDenyKeysLocked(
 	peer *Peer,
-	expiry time.Time,
 	addresses ...string,
 ) {
 	for _, address := range addresses {
 		if address != "" {
-			p.networkMismatchDenyList[address] = expiry
+			p.permanentDenyList[address] = struct{}{}
 		}
 	}
 	if peer == nil {
 		return
 	}
 	if peer.NormalizedAddress != "" {
-		p.networkMismatchDenyList[peer.NormalizedAddress] = expiry
+		p.permanentDenyList[peer.NormalizedAddress] = struct{}{}
 	}
 	if peer.Address != "" {
-		p.networkMismatchDenyList[p.normalizeAddress(peer.Address)] = expiry
+		p.permanentDenyList[p.normalizeAddress(peer.Address)] = struct{}{}
 	}
 }
 
@@ -1292,21 +1280,6 @@ func (p *PeerGovernor) cleanupDenyList() {
 	}
 }
 
-// cleanupNetworkMismatchDenyList removes expired entries from the
-// network-mismatch deny list. Kept separate from cleanupDenyList so the two
-// lifecycles (ordinary dial-failure denials vs. proven wrong-network
-// denials, bounded by two different, independently configured durations)
-// stay independently readable and testable.
-// This method assumes the mutex is already held by the caller.
-func (p *PeerGovernor) cleanupNetworkMismatchDenyList() {
-	now := time.Now()
-	for address, expiry := range p.networkMismatchDenyList {
-		if now.After(expiry) {
-			delete(p.networkMismatchDenyList, address)
-		}
-	}
-}
-
 // TestPeer tests a peer's suitability by attempting a connection and verifying
 // the Ouroboros protocol handshake succeeds. Returns true if the peer is
 // suitable, false otherwise. Results are cached to avoid excessive testing.
@@ -1376,24 +1349,16 @@ func (p *PeerGovernor) TestPeer(address string) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Re-find peer in case slice changed, but only accept it if it is the
-	// exact entry (same pointer) this call started with, not merely the
-	// same address. reconcile's isStaleTestOnlyPeerLocked can prune a
-	// stale-but-not-yet-recooled TestPeer-only entry concurrently with a
-	// slow, outside-lock re-test still running against it (started before
-	// the entry aged past TestCooldown), and a real peer can be admitted at
-	// the same address in the interim — that is the whole point of pruning
-	// it. Matching by address alone would let this call's result and
-	// deny-list side effects land on that unrelated, newly admitted peer
-	// instead of the probe entry it actually tested.
+	// Re-find peer in case slice changed
 	idx := p.peerIndexByAddress(normalized)
-	if idx == -1 || p.peers[idx] != peer {
-		// Peer was removed, or replaced by a different peer, during the test.
+	if idx == -1 {
+		// Peer was removed during test, nothing to update
 		if testErr != nil {
 			return false, testErr
 		}
 		return true, nil
 	}
+	peer = p.peers[idx]
 
 	peer.LastTestTime = time.Now()
 	if testErr != nil {

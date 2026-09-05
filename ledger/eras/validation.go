@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"reflect"
+	"runtime"
 
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -118,6 +120,11 @@ func checkPoolMarginFloor(
 type indexedUtxoValidationRule struct {
 	index          int
 	validationFunc lcommon.UtxoValidationRuleFunc
+}
+
+type utxoValidationRuleSkip struct {
+	validationFunc lcommon.UtxoValidationRuleFunc
+	name           string
 }
 
 const (
@@ -369,28 +376,26 @@ func txHasRedeemers(tx lcommon.Transaction) bool {
 }
 
 func buildIndexedUtxoValidationRules(
-	descriptors []lcommon.UtxoValidationRuleDescriptor,
 	rules []lcommon.UtxoValidationRuleFunc,
-	skipRuleId lcommon.UtxoValidationRuleId,
+	skipValidationFunc lcommon.UtxoValidationRuleFunc,
+	skipRuleName string,
 ) []indexedUtxoValidationRule {
-	return buildIndexedUtxoValidationRulesWithSkips(
-		descriptors,
-		rules,
-		[]lcommon.UtxoValidationRuleId{skipRuleId},
-	)
+	return buildIndexedUtxoValidationRulesWithSkips(rules, []utxoValidationRuleSkip{{
+		validationFunc: skipValidationFunc,
+		name:           skipRuleName,
+	}})
 }
 
 func buildIndexedUtxoValidationRulesWithSkips(
-	descriptors []lcommon.UtxoValidationRuleDescriptor,
 	rules []lcommon.UtxoValidationRuleFunc,
-	skipRuleIds []lcommon.UtxoValidationRuleId,
+	skips []utxoValidationRuleSkip,
 ) []indexedUtxoValidationRule {
-	skipIndexes := make(map[int]struct{}, len(skipRuleIds))
-	for _, skipRuleId := range skipRuleIds {
+	skipIndexes := map[int]struct{}{}
+	for _, skip := range skips {
 		resolvedIndex := resolveUtxoValidationSkipIndex(
-			descriptors,
 			rules,
-			skipRuleId,
+			skip.validationFunc,
+			skip.name,
 		)
 		skipIndexes[resolvedIndex] = struct{}{}
 	}
@@ -407,46 +412,27 @@ func buildIndexedUtxoValidationRulesWithSkips(
 	return ret
 }
 
-// resolveUtxoValidationSkipIndex returns the position of the upstream rule
-// carrying the stable semantic identifier skipRuleId.
-//
-// Resolution is by rule Id and must never fall back to validation function
-// identity or runtime function name. gouroboros builds several era rule lists
-// with common.ComposeUtxoValidationRules, which replaces every phase-2-gated
-// entry with an anonymous wrapper closure, and it moves shared rules between
-// era packages across releases. Both erase function identity while leaving the
-// Id intact, so a function-keyed resolver panics at package initialization on
-// an ordinary upstream refactor.
-//
-// It panics when the Id is empty, absent, or duplicated, and when the upstream
-// descriptor list and rule list have diverged in length, so an upstream change
-// fails loudly instead of silently leaving an upstream rule in place or
-// removing the wrong one.
 func resolveUtxoValidationSkipIndex(
-	descriptors []lcommon.UtxoValidationRuleDescriptor,
 	rules []lcommon.UtxoValidationRuleFunc,
-	skipRuleId lcommon.UtxoValidationRuleId,
+	skipValidationFunc lcommon.UtxoValidationRuleFunc,
+	skipRuleName string,
 ) int {
-	if skipRuleId == "" {
-		panic("UTxO validation skip rule Id is empty")
+	if skipRuleName == "" {
+		skipRuleName = "UTxO validation skip rule"
 	}
-	if len(descriptors) != len(rules) {
-		panic(fmt.Sprintf(
-			"UTxO validation rule %q: upstream descriptor count %d does not match rule count %d",
-			skipRuleId,
-			len(descriptors),
-			len(rules),
-		))
+	if skipValidationFunc == nil {
+		panic(skipRuleName + " expected validation function is nil")
 	}
+	targetName := utxoValidationRuleName(skipValidationFunc)
 	found := noUtxoValidationRuleIndex
-	for index, descriptor := range descriptors {
-		if descriptor.Id != skipRuleId {
+	for index, rule := range rules {
+		if utxoValidationRuleName(rule) != targetName {
 			continue
 		}
 		if found != noUtxoValidationRuleIndex {
 			panic(fmt.Sprintf(
-				"UTxO validation rule %q resolves to multiple upstream rule indexes %d and %d",
-				skipRuleId,
+				"%s resolves to multiple upstream rule indexes %d and %d",
+				skipRuleName,
 				found,
 				index,
 			))
@@ -454,19 +440,23 @@ func resolveUtxoValidationSkipIndex(
 		found = index
 	}
 	if found == noUtxoValidationRuleIndex {
-		panic(fmt.Sprintf(
-			"UTxO validation rule %q is absent from the upstream validation rule descriptors",
-			skipRuleId,
-		))
-	}
-	if rules[found] == nil {
-		panic(fmt.Sprintf(
-			"UTxO validation rule %q resolves to a nil upstream rule at index %d",
-			skipRuleId,
-			found,
-		))
+		panic(
+			skipRuleName +
+				" expected function is absent from upstream validation rules",
+		)
 	}
 	return found
+}
+
+func utxoValidationRuleName(fn lcommon.UtxoValidationRuleFunc) string {
+	if fn == nil {
+		return ""
+	}
+	pc := reflect.ValueOf(fn).Pointer()
+	if runtimeFn := runtime.FuncForPC(pc); runtimeFn != nil {
+		return runtimeFn.Name()
+	}
+	return fmt.Sprintf("%x", pc)
 }
 
 // SafeAddExUnits adds two ExUnits values with

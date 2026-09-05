@@ -376,7 +376,7 @@ func UtxoLedgerToModel(
 	slot uint64,
 ) (Utxo, error) {
 	outAddr := utxo.Output.Address()
-	amount, err := CheckedUint64FromBigInt(utxo.Output.Amount())
+	amount, err := checkedUint64FromBigInt(utxo.Output.Amount())
 	if err != nil {
 		return Utxo{}, fmt.Errorf("utxo amount: %w", err)
 	}

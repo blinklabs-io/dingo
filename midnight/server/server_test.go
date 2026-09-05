@@ -270,18 +270,7 @@ func TestReflectionListsService(t *testing.T) {
 
 func TestReflectionDisabledByDefault(t *testing.T) {
 	addr := startTestServer(t)
-	conn := dial(t, addr)
-	readyCtx, readyCancel := context.WithTimeout(
-		context.Background(),
-		5*time.Second,
-	)
-	defer readyCancel()
-	_, err := healthpb.NewHealthClient(conn).Check(
-		readyCtx,
-		&healthpb.HealthCheckRequest{},
-	)
-	require.NoError(t, err)
-	client := reflectionpb.NewServerReflectionClient(conn)
+	client := reflectionpb.NewServerReflectionClient(dial(t, addr))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

@@ -713,7 +713,7 @@ func TestFetchEndorserBlockByPointRejectsStaleReloadedSlot(t *testing.T) {
 	// o.connManager is nil, so a genuine cache miss (or a correctly-rejected
 	// stale reload) must return an error here, not silently succeed --
 	// there is no way to actually fetch anything without a connection.
-	err = o.FetchEndorserBlockByPoint(context.Background(), authoritativeSlot, hash)
+	err = o.FetchEndorserBlockByPoint(authoritativeSlot, hash)
 	require.Error(
 		t,
 		err,

@@ -244,7 +244,6 @@ func (s *Server) Start(ctx context.Context) error {
 		blockNumberByHash: s.config.BlockNumberByHash,
 		db:                s.config.Database,
 		slotTimer:         s.config.SlotTimer,
-		logger:            s.config.Logger,
 	})
 
 	// Health service reporting SERVING for the overall server ("") and the
@@ -379,8 +378,4 @@ type service struct {
 	blockNumberByHash func(hash []byte) (blockNumber uint64, found bool, err error)
 	db                MidnightDatabase
 	slotTimer         SlotTimer
-	// logger receives the diagnostic detail behind every codes.Internal
-	// response (see internalError in service.go); it is never nil, so
-	// handlers can log unconditionally.
-	logger *slog.Logger
 }

@@ -534,86 +534,42 @@ func (a *stakeDistributionAdapter) getStakeDistribution(
 	return a.ledgerState.NewView(txn).GetStakeDistribution(epoch)
 }
 
-// GetPoolAndTotalActiveStake reads the sigma numerator and denominator for
-// one pool inside a single metadata transaction.
-//
-// Two defects are fixed here, and both are load-bearing for consensus:
-//
-// dingo #3814 -- the denominator comes from LedgerView.GetTotalActiveStake,
-// a txn-scoped wrapper over Metadata().GetTotalActiveStake, which is the
-// same store accessor ledger/verify_header.go resolves the denominator
-// through when it checks an incoming header's leader eligibility.
-// Verification calls that store method directly rather than through a
-// LedgerView, with the snapshotType it resolved for the header under check;
-// the shared thing is the store accessor, not the call path. The previous
-// implementation returned
-// ledger.StakeDistribution.TotalStake, which LedgerView.GetStakeDistribution
-// accumulates by summing the mark rows itself, while verification reads
-// epoch_summary.total_active_stake. Those two agree only "by construction"
-// -- one rotation transaction writes both from one calculation
-// (ledger/pool_stake_distribution.go documents the exact conditions) -- so
-// the equality is a property of the writer, not of the readers, and nothing
-// stops the two paths from drifting. A node whose forge denominator differs
-// from its verify denominator can forge a block it would itself reject, or
-// decline a slot it is genuinely eligible for. Resolving both through one
-// accessor removes the second derivation entirely.
-//
-// dingo #3815 -- both values are read through one db.MetadataTxn and one
-// LedgerView. Opening a transaction per value let a snapshot re-capture land
-// between them, yielding a sigma whose halves come from different writes.
-func (a *stakeDistributionAdapter) GetPoolAndTotalActiveStake(
+func (a *stakeDistributionAdapter) GetPoolStake(
 	epoch uint64,
 	poolKeyHash []byte,
-) (poolStake uint64, totalActiveStake uint64, err error) {
-	if a.ledgerState == nil {
-		return 0, 0, errors.New("ledger state unavailable")
-	}
-	db := a.ledgerState.Database()
-	if db == nil {
-		return 0, 0, errors.New("database unavailable")
-	}
-	txn := db.MetadataTxn(false)
-	if txn == nil {
-		return 0, 0, errors.New("metadata transaction unavailable")
-	}
-	defer func() {
-		if rollbackErr := txn.Rollback(); rollbackErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf(
-					"release stake distribution transaction: %w",
-					rollbackErr,
-				),
-			)
-		}
-	}()
-	view := a.ledgerState.NewView(txn)
+) (uint64, error) {
+	dist, err := a.getStakeDistribution(epoch)
 	poolKey := hex.EncodeToString(poolKeyHash)
-	poolStake, err = view.GetPoolStake(epoch, poolKeyHash)
 	if err != nil {
-		return 0, 0, fmt.Errorf(
-			"get pool stake for epoch %d pool %s: %w",
+		return 0, fmt.Errorf(
+			"get stake distribution for epoch %d pool %s: %w",
 			epoch,
 			poolKey,
 			err,
 		)
 	}
-	totalActiveStake, err = view.GetTotalActiveStake(epoch)
+	if dist == nil {
+		return 0, nil
+	}
+	return dist.PoolStakes[poolKey], nil
+}
+
+func (a *stakeDistributionAdapter) GetTotalActiveStake(
+	epoch uint64,
+) (uint64, error) {
+	dist, err := a.getStakeDistribution(epoch)
 	if err != nil {
-		return 0, 0, fmt.Errorf(
-			"get total active stake for epoch %d: %w",
+		return 0, fmt.Errorf(
+			"get stake distribution for epoch %d: %w",
 			epoch,
 			err,
 		)
 	}
-	return poolStake, totalActiveStake, nil
+	if dist == nil {
+		return 0, nil
+	}
+	return dist.TotalStake, nil
 }
-
-// The forging adapter must resolve sigma through the atomic pair accessor.
-// A drift back to two independent reads, or to summing the mark rows for the
-// denominator, is the pair of defects dingo #3814 and #3815 describe; make it
-// a compile error rather than a silent consensus divergence.
-var _ leader.StakeDistributionProvider = (*stakeDistributionAdapter)(nil)
 
 // epochInfoAdapter adapts ledger.LedgerState to leader.EpochInfoProvider.
 type epochInfoAdapter struct {

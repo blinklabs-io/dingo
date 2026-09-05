@@ -41,13 +41,6 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 
 	// Cleanup expired deny list entries
 	p.cleanupDenyList()
-	p.cleanupNetworkMismatchDenyList()
-
-	// Reconcile ledger-derived address bookkeeping against currently
-	// retained peers so addresses from peers that left the peer list (deny,
-	// capacity, inactivity, reconnect-failure eviction) do not linger in
-	// memory forever.
-	p.pruneLedgerKnownAddrsLocked()
 
 	// Check if we should exit bootstrap mode
 	if shouldExit, reason := p.shouldExitBootstrap(); shouldExit {
@@ -170,31 +163,6 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 					PeerStateChangeEvent{Address: peer.Address, Reason: "excessive failures"},
 				})
 				// Remove from slice (safe while iterating backwards)
-				p.peers = slices.Delete(p.peers, i, i+1)
-			} else if p.isStaleTestOnlyPeerLocked(peer, now) {
-				// TestPeer creates this entry solely to cache a suitability
-				// result; it never dials through the normal reconnect path,
-				// so ReconnectCount never rises and the branch above never
-				// fires. Without this, an untested address that nothing else
-				// ever discovers again stays PeerSourceUnknown/cold forever,
-				// occupies a peer-cap slot, and blocks AddPeer from ever
-				// admitting that address under its real source (AddPeer
-				// treats any existing entry as a dedupe match regardless of
-				// source). Once its cooldown lapses, the cached result is no
-				// longer even consulted by TestPeer, so nothing depends on
-				// keeping it.
-				knownRemoved++
-				p.config.Logger.Debug(
-					"removing stale test-only peer entry",
-					"address", peer.Address,
-				)
-				events = append(events, pendingEvent{
-					PeerRemovedEventType,
-					PeerStateChangeEvent{
-						Address: peer.Address,
-						Reason:  "test entry expired",
-					},
-				})
 				p.peers = slices.Delete(p.peers, i, i+1)
 			}
 		}
@@ -846,50 +814,4 @@ func (p *PeerGovernor) inboundPruneDecisionLocked(
 		return false, reason, reasonLabel, cooldownDuration, applyCooldown
 	}
 	return true, reason, reasonLabel, cooldownDuration, applyCooldown
-}
-
-// isStaleTestOnlyPeerLocked reports whether peer is a TestPeer-only probe
-// entry (PeerSourceUnknown, never actually connected) whose cached result has
-// outlived the cooldown that makes it useful. Past that point a fresh
-// TestPeer call would retest rather than trust the cache, so nothing reads
-// this entry any longer. Must be called with p.mu held.
-func (p *PeerGovernor) isStaleTestOnlyPeerLocked(
-	peer *Peer,
-	now time.Time,
-) bool {
-	if peer == nil ||
-		peer.Source != PeerSourceUnknown ||
-		peer.EverConnected ||
-		peer.LastTestTime.IsZero() {
-		return false
-	}
-	return now.Sub(peer.LastTestTime) >= p.config.TestCooldown
-}
-
-// pruneLedgerKnownAddrsLocked removes ledgerKnownAddrs entries that no longer
-// correspond to a retained peer. An address is recorded here only while a
-// live peer holds it (either as a newly admitted PeerSourceP2PLedger peer, or
-// as an existing peer from another source that a ledger candidate matched),
-// so once no peer in p.peers carries the address any longer, the entry only
-// serves to grow this map forever across ledger-discovery rounds as relays
-// rotate in and out of the on-chain registration set. Must be called with
-// p.mu held.
-func (p *PeerGovernor) pruneLedgerKnownAddrsLocked() {
-	if len(p.ledgerKnownAddrs) == 0 {
-		return
-	}
-	live := make(map[string]struct{}, len(p.peers))
-	for _, peer := range p.peers {
-		if peer == nil {
-			continue
-		}
-		// ledgerKnownAddrs is keyed on normalizeAddress(peer.Address) (see
-		// addLedgerPeerContext), not peer.NormalizedAddress.
-		live[p.normalizeAddress(peer.Address)] = struct{}{}
-	}
-	for addr := range p.ledgerKnownAddrs {
-		if _, ok := live[addr]; !ok {
-			delete(p.ledgerKnownAddrs, addr)
-		}
-	}
 }

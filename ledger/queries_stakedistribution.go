@@ -15,8 +15,6 @@
 package ledger
 
 import (
-	"math/big"
-
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -38,23 +36,17 @@ type stakeDistributionEntry = struct {
 // snapshot. Unlike GetPoolDistr2 (queryShelleyPoolDistr2), this query has
 // no pool filter on the wire, so every pool that holds stake is reported.
 //
-// Reads the per-pool stake, pool set, and VRF keys from PoolStakeDistribution,
-// the same helper queryShelleyPoolDistr2 and the UTxO RPC ReadState handler
-// share, so this query cannot report a different snapshot, pool set, or VRF
-// key for the same chain than either of those.
-//
-// It does NOT reuse PoolStakeDistribution's own StakeFraction (taken over
-// TotalActiveStake, the sum of delegated stake): a real cardano-node's
-// GetStakeDistribution reply uses total circulating supply as its
-// denominator instead, confirmed against real cardano-node's raw wire bytes
-// -- see totalCirculatingSupply's doc comment (blinklabs-io/dingo#3824) for
-// the full story and why GetPoolDistr2 must not make the same change.
+// Reads from PoolStakeDistribution, the same helper queryShelleyPoolDistr2
+// and the UTxO RPC ReadState handler share, so this query cannot report a
+// different snapshot or VRF key for the same chain than either of those --
+// which is exactly what lets the devnet cross-node ledger-state comparison
+// (internal/test/devnet, blinklabs-io/dingo#1900) trust this leaf as a
+// faithful reflection of Dingo's own leadership-election view.
 func (ls *LedgerState) queryShelleyStakeDistribution() (any, error) {
 	dist, err := ls.PoolStakeDistribution(nil)
 	if err != nil {
 		return nil, err
 	}
-	circulation := new(big.Int).SetUint64(dist.TotalCirculatingSupply)
 	result := olocalstatequery.StakeDistributionResult{
 		Results: make(
 			map[ledger.PoolId]stakeDistributionEntry,
@@ -62,12 +54,8 @@ func (ls *LedgerState) queryShelleyStakeDistribution() (any, error) {
 		),
 	}
 	for _, pool := range dist.Pools {
-		fraction := new(big.Rat).SetFrac(
-			new(big.Int).SetUint64(pool.Stake),
-			circulation,
-		)
 		result.Results[ledger.PoolId(pool.PoolKeyHash)] = stakeDistributionEntry{
-			StakeFraction: &cbor.Rat{Rat: fraction},
+			StakeFraction: pool.StakeFraction,
 			VrfHash:       pool.VrfKeyHash,
 		}
 	}

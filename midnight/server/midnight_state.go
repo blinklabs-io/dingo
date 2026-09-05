@@ -16,8 +16,6 @@ package server
 
 import (
 	"context"
-	"fmt"
-	"math"
 	"sort"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -123,15 +121,15 @@ func (s *service) GetAssetCreates(
 		nil,
 	)
 	if err != nil {
-		return nil, s.internalError("query asset creates", err)
+		return nil, status.Errorf(
+			codes.Internal,
+			"query asset creates: %v",
+			err,
+		)
 	}
 	creates := make([]*midnight.AssetCreate, len(rows))
 	for i := range rows {
-		pb, err := assetCreateToProto(&rows[i])
-		if err != nil {
-			return nil, s.internalError("convert asset create", err)
-		}
-		creates[i] = pb
+		creates[i] = assetCreateToProto(&rows[i])
 	}
 	return &midnight.AssetCreatesResponse{Creates: creates}, nil
 }
@@ -156,15 +154,11 @@ func (s *service) GetAssetSpends(
 		nil,
 	)
 	if err != nil {
-		return nil, s.internalError("query asset spends", err)
+		return nil, status.Errorf(codes.Internal, "query asset spends: %v", err)
 	}
 	spends := make([]*midnight.AssetSpend, len(rows))
 	for i := range rows {
-		pb, err := assetSpendToProto(&rows[i])
-		if err != nil {
-			return nil, s.internalError("convert asset spend", err)
-		}
-		spends[i] = pb
+		spends[i] = assetSpendToProto(&rows[i])
 	}
 	return &midnight.AssetSpendsResponse{Spends: spends}, nil
 }
@@ -189,15 +183,15 @@ func (s *service) GetRegistrations(
 		nil,
 	)
 	if err != nil {
-		return nil, s.internalError("query registrations", err)
+		return nil, status.Errorf(
+			codes.Internal,
+			"query registrations: %v",
+			err,
+		)
 	}
 	registrations := make([]*midnight.Registration, len(rows))
 	for i := range rows {
-		pb, err := registrationToProto(&rows[i])
-		if err != nil {
-			return nil, s.internalError("convert registration", err)
-		}
-		registrations[i] = pb
+		registrations[i] = registrationToProto(&rows[i])
 	}
 	return &midnight.RegistrationsResponse{Registrations: registrations}, nil
 }
@@ -222,15 +216,15 @@ func (s *service) GetDeregistrations(
 		nil,
 	)
 	if err != nil {
-		return nil, s.internalError("query deregistrations", err)
+		return nil, status.Errorf(
+			codes.Internal,
+			"query deregistrations: %v",
+			err,
+		)
 	}
 	deregistrations := make([]*midnight.Deregistration, len(rows))
 	for i := range rows {
-		pb, err := deregistrationToProto(&rows[i])
-		if err != nil {
-			return nil, s.internalError("convert deregistration", err)
-		}
-		deregistrations[i] = pb
+		deregistrations[i] = deregistrationToProto(&rows[i])
 	}
 	return &midnight.DeregistrationsResponse{
 		Deregistrations: deregistrations,
@@ -246,12 +240,7 @@ type utxoEventMergeItem struct {
 	kindOrder   int
 	blockHash   []byte
 	timestampMs uint64
-	// buildEvent lazily converts this row to its proto representation.
-	// Deferred until after the end_block_hash and tx_capacity trims below
-	// so an out-of-domain field on a row that the trims would exclude from
-	// the page anyway can never fail the whole response -- only rows that
-	// actually make the final page are converted.
-	buildEvent func() (*midnight.UtxoEvent, error)
+	event       *midnight.UtxoEvent
 }
 
 // GetUtxoEvents returns a merged, kind_order-tie-broken stream of all four
@@ -295,7 +284,11 @@ func (s *service) GetUtxoEvents(
 		txn,
 	)
 	if err != nil {
-		return nil, s.internalError("query asset creates", err)
+		return nil, status.Errorf(
+			codes.Internal,
+			"query asset creates: %v",
+			err,
+		)
 	}
 	spends, err := s.metadata.FindMidnightAssetSpendsFrom(
 		startBlock,
@@ -304,7 +297,7 @@ func (s *service) GetUtxoEvents(
 		txn,
 	)
 	if err != nil {
-		return nil, s.internalError("query asset spends", err)
+		return nil, status.Errorf(codes.Internal, "query asset spends: %v", err)
 	}
 	registrations, err := s.metadata.FindMidnightRegistrationsFrom(
 		startBlock,
@@ -313,7 +306,11 @@ func (s *service) GetUtxoEvents(
 		txn,
 	)
 	if err != nil {
-		return nil, s.internalError("query registrations", err)
+		return nil, status.Errorf(
+			codes.Internal,
+			"query registrations: %v",
+			err,
+		)
 	}
 	deregistrations, err := s.metadata.FindMidnightDeregistrationsFrom(
 		startBlock,
@@ -322,7 +319,11 @@ func (s *service) GetUtxoEvents(
 		txn,
 	)
 	if err != nil {
-		return nil, s.internalError("query deregistrations", err)
+		return nil, status.Errorf(
+			codes.Internal,
+			"query deregistrations: %v",
+			err,
+		)
 	}
 
 	items := make(
@@ -338,14 +339,10 @@ func (s *service) GetUtxoEvents(
 			kindOrder:   utxoEventKindAssetCreate,
 			blockHash:   row.BlockHash,
 			timestampMs: row.BlockTimestampMs,
-			buildEvent: func() (*midnight.UtxoEvent, error) {
-				pb, err := assetCreateToProto(row)
-				if err != nil {
-					return nil, err
-				}
-				return &midnight.UtxoEvent{
-					Kind: &midnight.UtxoEvent_AssetCreate{AssetCreate: pb},
-				}, nil
+			event: &midnight.UtxoEvent{
+				Kind: &midnight.UtxoEvent_AssetCreate{
+					AssetCreate: assetCreateToProto(row),
+				},
 			},
 		})
 	}
@@ -357,14 +354,10 @@ func (s *service) GetUtxoEvents(
 			kindOrder:   utxoEventKindAssetSpend,
 			blockHash:   row.BlockHash,
 			timestampMs: row.BlockTimestampMs,
-			buildEvent: func() (*midnight.UtxoEvent, error) {
-				pb, err := assetSpendToProto(row)
-				if err != nil {
-					return nil, err
-				}
-				return &midnight.UtxoEvent{
-					Kind: &midnight.UtxoEvent_AssetSpend{AssetSpend: pb},
-				}, nil
+			event: &midnight.UtxoEvent{
+				Kind: &midnight.UtxoEvent_AssetSpend{
+					AssetSpend: assetSpendToProto(row),
+				},
 			},
 		})
 	}
@@ -376,14 +369,10 @@ func (s *service) GetUtxoEvents(
 			kindOrder:   utxoEventKindRegistration,
 			blockHash:   row.BlockHash,
 			timestampMs: row.BlockTimestampMs,
-			buildEvent: func() (*midnight.UtxoEvent, error) {
-				pb, err := registrationToProto(row)
-				if err != nil {
-					return nil, err
-				}
-				return &midnight.UtxoEvent{
-					Kind: &midnight.UtxoEvent_Registration{Registration: pb},
-				}, nil
+			event: &midnight.UtxoEvent{
+				Kind: &midnight.UtxoEvent_Registration{
+					Registration: registrationToProto(row),
+				},
 			},
 		})
 	}
@@ -395,16 +384,10 @@ func (s *service) GetUtxoEvents(
 			kindOrder:   utxoEventKindDeregistration,
 			blockHash:   row.BlockHash,
 			timestampMs: row.BlockTimestampMs,
-			buildEvent: func() (*midnight.UtxoEvent, error) {
-				pb, err := deregistrationToProto(row)
-				if err != nil {
-					return nil, err
-				}
-				return &midnight.UtxoEvent{
-					Kind: &midnight.UtxoEvent_Deregistration{
-						Deregistration: pb,
-					},
-				}, nil
+			event: &midnight.UtxoEvent{
+				Kind: &midnight.UtxoEvent_Deregistration{
+					Deregistration: deregistrationToProto(row),
+				},
 			},
 		})
 	}
@@ -431,7 +414,11 @@ func (s *service) GetUtxoEvents(
 		// items, silently letting the response run past the boundary.
 		boundary, found, err := s.blockNumberByHash(endHash)
 		if err != nil {
-			return nil, s.internalError("resolve end_block_hash", err)
+			return nil, status.Errorf(
+				codes.Internal,
+				"resolve end_block_hash: %v",
+				err,
+			)
 		}
 		if found {
 			cut := len(items)
@@ -461,127 +448,93 @@ func (s *service) GetUtxoEvents(
 
 	events := make([]*midnight.UtxoEvent, len(items))
 	for i, item := range items {
-		event, err := item.buildEvent()
-		if err != nil {
-			return nil, s.internalError("convert utxo event", err)
-		}
-		events[i] = event
+		events[i] = item.event
 	}
 	resp := &midnight.UtxoEventsResponse{Events: events}
 	if len(items) > 0 {
 		last := items[len(items)-1]
-		blockNumber, err := midnightBlockNumber(last.blockNumber)
-		if err != nil {
-			return nil, s.internalError(
-				"convert next_position block number",
-				err,
-			)
-		}
-		ts, err := midnightTimestamp(last.timestampMs)
-		if err != nil {
-			return nil, s.internalError("convert next_position timestamp", err)
-		}
 		resp.NextPosition = &midnight.CardanoPosition{
-			BlockHash:                last.blockHash,
-			BlockNumber:              blockNumber,
-			TxIndex:                  last.txIndex,
-			BlockTimestampUnixMillis: ts,
+			BlockHash:   last.blockHash,
+			BlockNumber: midnightBlockNumber(last.blockNumber),
+			TxIndex:     last.txIndex,
+			BlockTimestampUnixMillis: midnightTimestamp(
+				last.timestampMs,
+			),
 		}
 	}
 	return resp, nil
 }
 
-// midnightBlockNumber converts a stored block number to the Midnight
-// protocol's fixed uint32 wire representation, rejecting a value that would
-// silently wrap rather than reporting the corruption. Delegates to
-// checkedUint32 (service.go) -- the same uint64->uint32 domain check used
-// for Block/BlockByHashResponse fields -- rather than a second copy of it.
-func midnightBlockNumber(value uint64) (uint32, error) {
-	return checkedUint32(value)
+func midnightBlockNumber(value uint64) uint32 {
+	// The Midnight protocol fixes this field at uint32.
+	return uint32(value) //nolint:gosec
 }
 
-// midnightTimestamp converts a stored millisecond timestamp to the Midnight
-// protocol's fixed int64 wire representation, rejecting a value that would
-// wrap negative rather than reporting the corruption.
-func midnightTimestamp(value uint64) (int64, error) {
-	if value > math.MaxInt64 {
-		return 0, fmt.Errorf("timestamp %d exceeds int64 range", value)
-	}
-	return int64(value), nil
+func midnightTimestamp(value uint64) int64 {
+	// The Midnight protocol fixes Unix millisecond timestamps at int64.
+	return int64(value) //nolint:gosec
 }
 
-func assetCreateToProto(
-	row *models.MidnightAssetCreate,
-) (*midnight.AssetCreate, error) {
-	ts, err := midnightTimestamp(row.BlockTimestampMs)
-	if err != nil {
-		return nil, err
-	}
+func assetCreateToProto(row *models.MidnightAssetCreate) *midnight.AssetCreate {
 	return &midnight.AssetCreate{
-		Address:                  row.Address,
-		Quantity:                 row.Quantity,
-		TxHash:                   row.TxHash,
-		OutputIndex:              row.OutputIndex,
-		BlockNumber:              row.BlockNumber,
-		BlockHash:                row.BlockHash,
-		TxIndex:                  row.TxIndex,
-		BlockTimestampUnixMillis: ts,
-	}, nil
+		Address:     row.Address,
+		Quantity:    row.Quantity,
+		TxHash:      row.TxHash,
+		OutputIndex: row.OutputIndex,
+		BlockNumber: row.BlockNumber,
+		BlockHash:   row.BlockHash,
+		TxIndex:     row.TxIndex,
+		BlockTimestampUnixMillis: midnightTimestamp(
+			row.BlockTimestampMs,
+		),
+	}
 }
 
-func assetSpendToProto(
-	row *models.MidnightAssetSpend,
-) (*midnight.AssetSpend, error) {
-	ts, err := midnightTimestamp(row.BlockTimestampMs)
-	if err != nil {
-		return nil, err
-	}
+func assetSpendToProto(row *models.MidnightAssetSpend) *midnight.AssetSpend {
 	return &midnight.AssetSpend{
-		Address:                  row.Address,
-		Quantity:                 row.Quantity,
-		SpendingTxHash:           row.SpendingTxHash,
-		BlockNumber:              row.BlockNumber,
-		BlockHash:                row.BlockHash,
-		TxIndex:                  row.TxIndex,
-		UtxoTxHash:               row.UtxoTxHash,
-		UtxoIndex:                row.UtxoIndex,
-		BlockTimestampUnixMillis: ts,
-	}, nil
+		Address:        row.Address,
+		Quantity:       row.Quantity,
+		SpendingTxHash: row.SpendingTxHash,
+		BlockNumber:    row.BlockNumber,
+		BlockHash:      row.BlockHash,
+		TxIndex:        row.TxIndex,
+		UtxoTxHash:     row.UtxoTxHash,
+		UtxoIndex:      row.UtxoIndex,
+		BlockTimestampUnixMillis: midnightTimestamp(
+			row.BlockTimestampMs,
+		),
+	}
 }
 
 func registrationToProto(
 	row *models.MidnightRegistration,
-) (*midnight.Registration, error) {
-	ts, err := midnightTimestamp(row.BlockTimestampMs)
-	if err != nil {
-		return nil, err
-	}
+) *midnight.Registration {
 	return &midnight.Registration{
-		FullDatum:                row.FullDatum,
-		TxHash:                   row.TxHash,
-		OutputIndex:              row.OutputIndex,
-		BlockNumber:              row.BlockNumber,
-		BlockHash:                row.BlockHash,
-		TxIndex:                  row.TxIndex,
-		BlockTimestampUnixMillis: ts,
-	}, nil
+		FullDatum:   row.FullDatum,
+		TxHash:      row.TxHash,
+		OutputIndex: row.OutputIndex,
+		BlockNumber: row.BlockNumber,
+		BlockHash:   row.BlockHash,
+		TxIndex:     row.TxIndex,
+		BlockTimestampUnixMillis: midnightTimestamp(
+			row.BlockTimestampMs,
+		),
+	}
 }
 
 func deregistrationToProto(
 	row *models.MidnightDeregistration,
-) (*midnight.Deregistration, error) {
-	ts, err := midnightTimestamp(row.BlockTimestampMs)
-	if err != nil {
-		return nil, err
-	}
+) *midnight.Deregistration {
 	return &midnight.Deregistration{
-		FullDatum:                row.FullDatum,
-		TxHash:                   row.TxHash,
-		BlockNumber:              row.BlockNumber,
-		BlockHash:                row.BlockHash,
-		TxIndex:                  row.TxIndex,
-		UtxoTxHash:               row.UtxoTxHash,
-		UtxoIndex:                row.UtxoIndex,
-		BlockTimestampUnixMillis: ts,
-	}, nil
+		FullDatum:   row.FullDatum,
+		TxHash:      row.TxHash,
+		BlockNumber: row.BlockNumber,
+		BlockHash:   row.BlockHash,
+		TxIndex:     row.TxIndex,
+		UtxoTxHash:  row.UtxoTxHash,
+		UtxoIndex:   row.UtxoIndex,
+		BlockTimestampUnixMillis: midnightTimestamp(
+			row.BlockTimestampMs,
+		),
+	}
 }

@@ -20,8 +20,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
-	"math"
-	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
@@ -438,34 +436,6 @@ func TestCNightCreate_HappyPath(t *testing.T) {
 	_, ok := idx.cNightUTxOs[utxoKey{TxHash: txHash, Index: 0}]
 	idx.mu.RUnlock()
 	assert.True(t, ok, "cNIGHT UTxO must be tracked in-memory after create")
-}
-
-// TestCheckedCnightQuantity_Boundary verifies checkedCnightQuantity accepts
-// every value up to math.MaxInt64 (the shared mock's Asset.Amount field is
-// itself a uint64, so this is exercised directly rather than through
-// processBlock/buildCNightOutput), and rejects both a big.Int amount that
-// would silently truncate via big.Int.Uint64 and a legitimate uint64 value
-// above math.MaxInt64 -- the latter fits in a uint64 but would still fail
-// to persist, since midnight_asset_creates.quantity is a signed SQLite
-// INTEGER column.
-func TestCheckedCnightQuantity_Boundary(t *testing.T) {
-	t.Parallel()
-
-	got, err := checkedCnightQuantity(big.NewInt(math.MaxInt64))
-	require.NoError(t, err)
-	assert.Equal(t, uint64(math.MaxInt64), got)
-
-	_, err = checkedCnightQuantity(new(big.Int).SetUint64(math.MaxUint64))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "signed 64-bit storage range")
-
-	overflow := new(big.Int).Add(
-		new(big.Int).SetUint64(math.MaxUint64),
-		big.NewInt(1),
-	)
-	_, err = checkedCnightQuantity(overflow)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "does not fit in uint64")
 }
 
 // TestCNightSpend_HappyPath verifies that spending a tracked cNIGHT UTxO

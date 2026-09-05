@@ -15,7 +15,6 @@
 package ledger
 
 import (
-	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
 )
 
@@ -59,15 +58,6 @@ import (
 // preserved.
 type pendingPublishes struct {
 	events []pendingPublish
-	// chainDrains holds chains whose chain-level sequencer must be drained
-	// after this queue flushes. The mutex-holding paths that add a block or
-	// roll back the chain no longer hand their chain.update event back for
-	// requeueing here; the chain enqueues it on its own shared sequencer under
-	// c.mutex (so publication order matches chain-mutation order across every
-	// handler), and the caller registers the chain here so flush() drains that
-	// sequencer once the outer ledger mutex is released. See
-	// chain.Chain.PublishPendingChainUpdates and drainChain.
-	chainDrains []*chain.Chain
 }
 
 type pendingPublish struct {
@@ -103,41 +93,10 @@ func (p *pendingPublishes) add(
 	})
 }
 
-// drainChain registers a chain whose deferred chain.update / chain.fork events
-// must be published once the caller's outer mutex is released. Registration is
-// idempotent per chain: the block-add drain enqueues several blocks' events but
-// only needs one drain.
-//
-// A nil receiver drains immediately, matching add's nil-receiver contract: the
-// unlocked / test path holds no deadlock-prone mutex, so publishing inline is
-// safe. A nil chain is ignored.
-func (p *pendingPublishes) drainChain(c *chain.Chain) {
-	if c == nil {
-		return
-	}
-	if p == nil {
-		c.PublishPendingChainUpdates()
-		return
-	}
-	for _, existing := range p.chainDrains {
-		if existing == c {
-			return
-		}
-	}
-	p.chainDrains = append(p.chainDrains, c)
-}
-
-// flush publishes everything queued, in the order it was added, then drains any
-// registered chain sequencers. The chain drains run last and only after every
-// directly-queued event has been published; each publishes its own events FIFO
-// in chain-mutation order (see chain.Chain.PublishPendingChainUpdates).
+// flush publishes everything queued, in the order it was added.
 func (p *pendingPublishes) flush() {
 	for _, pub := range p.events {
 		pub.bus.Publish(pub.eventType, pub.evt)
 	}
 	p.events = nil
-	for _, c := range p.chainDrains {
-		c.PublishPendingChainUpdates()
-	}
-	p.chainDrains = nil
 }

@@ -288,26 +288,30 @@ func ValidateTxDijkstra(
 var dijkstraPhase1UtxoValidationRules = buildDijkstraValidationRules()
 
 func buildDijkstraValidationRules() []indexedUtxoValidationRule {
-	// Skips are resolved by upstream rule Id, never by validation function.
-	// Dijkstra reimplements several rules that Conway owned in earlier
-	// releases, so the package a rule's function lives in is not stable
-	// either.
-	skipRuleIds := []lcommon.UtxoValidationRuleId{
-		lcommon.UtxoValidationRulePlutusScripts,
-		lcommon.UtxoValidationRuleCommitteeCertificates,
-		lcommon.UtxoValidationRuleUnknownVoters,
+	skips := []utxoValidationRuleSkip{
+		{
+			validationFunc: gdijkstra.UtxoValidatePlutusScripts,
+			name:           "dijkstra.UtxoValidatePlutusScripts",
+		},
+		{
+			validationFunc: conway.
+				UtxoValidateCommitteeCertificates,
+			name: "conway.UtxoValidateCommitteeCertificates",
+		},
+		{
+			validationFunc: conway.UtxoValidateUnknownVoters,
+			name:           "conway.UtxoValidateUnknownVoters",
+		},
 	}
-	descriptors := gdijkstra.UtxoValidationRuleDescriptors()
-	indexes := make([]int, len(skipRuleIds))
-	for i := range skipRuleIds {
+	indexes := make([]int, len(skips))
+	for i := range skips {
 		indexes[i] = resolveUtxoValidationSkipIndex(
-			descriptors, gdijkstra.UtxoValidationRules, skipRuleIds[i],
+			gdijkstra.UtxoValidationRules, skips[i].validationFunc, skips[i].name,
 		)
 	}
 	ret := buildIndexedUtxoValidationRulesWithSkips(
-		descriptors,
 		gdijkstra.UtxoValidationRules,
-		skipRuleIds,
+		skips,
 	)
 	ret = append(ret,
 		indexedUtxoValidationRule{

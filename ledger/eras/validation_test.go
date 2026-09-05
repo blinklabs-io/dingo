@@ -309,30 +309,26 @@ func (m *mockRedeemers) Iter() iter.Seq2[lcommon.RedeemerKey, lcommon.RedeemerVa
 }
 
 func TestAlonzoValidationRulesUseLocalPlutusExecution(t *testing.T) {
-	descriptors := alonzo.UtxoValidationRuleDescriptors()
-	plutusIndex := requireRuleIdResolvesToFunc(
+	requireRuleIndexResolvesToFunc(
 		t,
-		descriptors,
 		alonzo.UtxoValidationRules,
-		lcommon.UtxoValidationRulePlutusScripts,
+		alonzo.UtxoValidatePlutusScripts,
 		"alonzo.UtxoValidatePlutusScripts",
 	)
 	require.Len(t, alonzoUtxoValidationRules, len(alonzo.UtxoValidationRules)-1)
-	requireIndexedRulesDropRuleIndex(
+	requireIndexedRulesExcludeFunc(
 		t,
 		alonzoUtxoValidationRules,
-		plutusIndex,
+		alonzo.UtxoValidatePlutusScripts,
 		"Alonzo validation must use Dingo's local Plutus execution path",
 	)
 }
 
 func TestBabbageValidationRulesUseLocalPlutusExecution(t *testing.T) {
-	descriptors := babbage.UtxoValidationRuleDescriptors()
-	plutusIndex := requireRuleIdResolvesToFunc(
+	requireRuleIndexResolvesToFunc(
 		t,
-		descriptors,
 		babbage.UtxoValidationRules,
-		lcommon.UtxoValidationRulePlutusScripts,
+		babbage.UtxoValidatePlutusScripts,
 		"babbage.UtxoValidatePlutusScripts",
 	)
 	require.Len(
@@ -340,10 +336,10 @@ func TestBabbageValidationRulesUseLocalPlutusExecution(t *testing.T) {
 		babbageUtxoValidationRules,
 		len(babbage.UtxoValidationRules)-1,
 	)
-	requireIndexedRulesDropRuleIndex(
+	requireIndexedRulesExcludeFunc(
 		t,
 		babbageUtxoValidationRules,
-		plutusIndex,
+		babbage.UtxoValidatePlutusScripts,
 		"Babbage validation must use Dingo's local Plutus execution path",
 	)
 }
@@ -520,92 +516,98 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 }
 
 func TestConwayValidationRulesUseLocalPlutusExecution(t *testing.T) {
-	descriptors := conway.UtxoValidationRuleDescriptors()
-	featuresIndex := requireRuleIdResolvesToFunc(
+	requireRuleIndexResolvesToFunc(
 		t,
-		descriptors,
 		conway.UtxoValidationRules,
-		lcommon.UtxoValidationRuleConwayFeaturesWithPlutusV1V2,
+		conway.UtxoValidateConwayFeaturesWithPlutusV1V2,
 		"conway.UtxoValidateConwayFeaturesWithPlutusV1V2",
 	)
-	feeIndex := requireRuleIdResolvesToFunc(
+	requireRuleIndexResolvesToFunc(
 		t,
-		descriptors,
 		conway.UtxoValidationRules,
-		lcommon.UtxoValidationRuleFeeTooSmall,
+		conway.UtxoValidateFeeTooSmallUtxo,
 		"conway.UtxoValidateFeeTooSmallUtxo",
 	)
-	plutusIndex := requireRuleIdResolvesToFunc(
+	requireRuleIndexResolvesToFunc(
 		t,
-		descriptors,
 		conway.UtxoValidationRules,
-		lcommon.UtxoValidationRulePlutusScripts,
+		conway.UtxoValidatePlutusScripts,
 		"conway.UtxoValidatePlutusScripts",
 	)
-	committeeIndex := requireRuleIdResolvesToFunc(
+	requireRuleIndexResolvesToFunc(
 		t,
-		descriptors,
 		conway.UtxoValidationRules,
-		lcommon.UtxoValidationRuleCommitteeCertificates,
+		conway.UtxoValidateCommitteeCertificates,
 		"conway.UtxoValidateCommitteeCertificates",
 	)
-	votersIndex := requireRuleIdResolvesToFunc(
+	requireRuleIndexResolvesToFunc(
 		t,
-		descriptors,
 		conway.UtxoValidationRules,
-		lcommon.UtxoValidationRuleUnknownVoters,
+		conway.UtxoValidateUnknownVoters,
 		"conway.UtxoValidateUnknownVoters",
 	)
 	require.Len(t, conwayUtxoValidationRules, len(conway.UtxoValidationRules)-2)
-	requireIndexedRulesReplaceRuleIndex(
+	requireIndexedRulesExcludeFunc(
 		t,
 		conwayUtxoValidationRules,
-		featuresIndex,
-		validateConwayFeaturesWithNeededPlutusV1V2,
+		conway.UtxoValidateConwayFeaturesWithPlutusV1V2,
 		"Conway validation must count only needed PlutusV1/V2 scripts",
 	)
-	requireIndexedRulesDropRuleIndex(
+	requireIndexedRulesIncludeFunc(
 		t,
 		conwayUtxoValidationRules,
-		feeIndex,
+		validateConwayFeaturesWithNeededPlutusV1V2,
+		"Conway validation must install Dingo's needed-script rule",
+	)
+	requireIndexedRulesExcludeFunc(
+		t,
+		conwayUtxoValidationRules,
+		conway.UtxoValidateFeeTooSmallUtxo,
 		"Conway validation must use Dingo's reference-script-aware fee rule",
 	)
-	requireIndexedRulesDropRuleIndex(
+	requireIndexedRulesExcludeFunc(
 		t,
 		conwayUtxoValidationRules,
-		plutusIndex,
+		conway.UtxoValidatePlutusScripts,
 		"Conway validation must use Dingo's local Plutus execution path",
 	)
-	requireIndexedRulesReplaceRuleIndex(
+	requireIndexedRulesExcludeFunc(
 		t,
 		conwayUtxoValidationRules,
-		committeeIndex,
-		validateCommitteeCertificates,
+		conway.UtxoValidateCommitteeCertificates,
 		"Conway validation must preserve committee cold credential tags",
 	)
-	requireIndexedRulesReplaceRuleIndex(
+	requireIndexedRulesIncludeFunc(
 		t,
 		conwayUtxoValidationRules,
-		votersIndex,
-		validateUnknownVoters,
+		validateCommitteeCertificates,
+		"Conway validation must install Dingo's committee certificate rule",
+	)
+	requireIndexedRulesExcludeFunc(
+		t,
+		conwayUtxoValidationRules,
+		conway.UtxoValidateUnknownVoters,
 		"Conway validation must preserve committee hot credential tags",
+	)
+	requireIndexedRulesIncludeFunc(
+		t,
+		conwayUtxoValidationRules,
+		validateUnknownVoters,
+		"Conway validation must install Dingo's unknown-voter rule",
 	)
 }
 
 func TestDijkstraValidationRulesUseCredentialAwareCommitteeState(t *testing.T) {
-	descriptors := gdijkstra.UtxoValidationRuleDescriptors()
-	committeeIndex := requireRuleIdResolvesToFunc(
+	requireRuleIndexResolvesToFunc(
 		t,
-		descriptors,
 		gdijkstra.UtxoValidationRules,
-		lcommon.UtxoValidationRuleCommitteeCertificates,
+		conway.UtxoValidateCommitteeCertificates,
 		"conway.UtxoValidateCommitteeCertificates",
 	)
-	votersIndex := requireRuleIdResolvesToFunc(
+	requireRuleIndexResolvesToFunc(
 		t,
-		descriptors,
 		gdijkstra.UtxoValidationRules,
-		lcommon.UtxoValidationRuleUnknownVoters,
+		conway.UtxoValidateUnknownVoters,
 		"conway.UtxoValidateUnknownVoters",
 	)
 	require.Len(
@@ -613,19 +615,29 @@ func TestDijkstraValidationRulesUseCredentialAwareCommitteeState(t *testing.T) {
 		dijkstraPhase1UtxoValidationRules,
 		len(gdijkstra.UtxoValidationRules)-1,
 	)
-	requireIndexedRulesReplaceRuleIndex(
+	requireIndexedRulesExcludeFunc(
 		t,
 		dijkstraPhase1UtxoValidationRules,
-		committeeIndex,
-		validateCommitteeCertificates,
+		conway.UtxoValidateCommitteeCertificates,
 		"Dijkstra validation must preserve committee cold credential tags",
 	)
-	requireIndexedRulesReplaceRuleIndex(
+	requireIndexedRulesIncludeFunc(
 		t,
 		dijkstraPhase1UtxoValidationRules,
-		votersIndex,
-		validateUnknownVoters,
+		validateCommitteeCertificates,
+		"Dijkstra validation must install Dingo's committee certificate rule",
+	)
+	requireIndexedRulesExcludeFunc(
+		t,
+		dijkstraPhase1UtxoValidationRules,
+		conway.UtxoValidateUnknownVoters,
 		"Dijkstra validation must preserve committee hot credential tags",
+	)
+	requireIndexedRulesIncludeFunc(
+		t,
+		dijkstraPhase1UtxoValidationRules,
+		validateUnknownVoters,
+		"Dijkstra validation must install Dingo's unknown-voter rule",
 	)
 }
 
@@ -704,9 +716,7 @@ func TestConwayCommitteeCertificateRulePreservesCredentialTag(t *testing.T) {
 			TxCertificates: []lcommon.CertificateWrapper{{
 				Type: uint(lcommon.CertificateTypeAuthCommitteeHot),
 				Certificate: &lcommon.AuthCommitteeHotCertificate{
-					CertType: uint(
-						lcommon.CertificateTypeAuthCommitteeHot,
-					),
+					CertType:       uint(lcommon.CertificateTypeAuthCommitteeHot),
 					ColdCredential: scriptCredential,
 				},
 			}},
@@ -762,26 +772,22 @@ func TestConwayUnknownVoterRulePreservesCredentialTag(t *testing.T) {
 }
 
 func TestConwayPhase1ValidationRulesSkipPlutusExecution(t *testing.T) {
-	descriptors := conway.UtxoValidationRuleDescriptors()
-	feeIndex := requireRuleIdResolvesToFunc(
+	requireRuleIndexResolvesToFunc(
 		t,
-		descriptors,
 		conway.UtxoValidationRules,
-		lcommon.UtxoValidationRuleFeeTooSmall,
+		conway.UtxoValidateFeeTooSmallUtxo,
 		"conway.UtxoValidateFeeTooSmallUtxo",
 	)
-	exUnitsIndex := requireRuleIdResolvesToFunc(
+	requireRuleIndexResolvesToFunc(
 		t,
-		descriptors,
 		conway.UtxoValidationRules,
-		lcommon.UtxoValidationRuleExUnitsTooBig,
+		conway.UtxoValidateExUnitsTooBigUtxo,
 		"conway.UtxoValidateExUnitsTooBigUtxo",
 	)
-	plutusIndex := requireRuleIdResolvesToFunc(
+	requireRuleIndexResolvesToFunc(
 		t,
-		descriptors,
 		conway.UtxoValidationRules,
-		lcommon.UtxoValidationRulePlutusScripts,
+		conway.UtxoValidatePlutusScripts,
 		"conway.UtxoValidatePlutusScripts",
 	)
 	require.Len(
@@ -789,23 +795,22 @@ func TestConwayPhase1ValidationRulesSkipPlutusExecution(t *testing.T) {
 		conwayPhase1UtxoValidationRules,
 		len(conway.UtxoValidationRules)-2,
 	)
-	requireIndexedRulesDropRuleIndex(
+	requireIndexedRulesExcludeFunc(
 		t,
 		conwayPhase1UtxoValidationRules,
-		feeIndex,
+		conway.UtxoValidateFeeTooSmallUtxo,
 		"Conway phase-1 validation must use Dingo's reference-script-aware fee rule",
 	)
-	requireIndexedRulesRetainRuleIndex(
+	requireIndexedRulesIncludeFunc(
 		t,
 		conwayPhase1UtxoValidationRules,
-		conway.UtxoValidationRules,
-		exUnitsIndex,
+		conway.UtxoValidateExUnitsTooBigUtxo,
 		"Conway phase-1 replay must still enforce ExUnits limits",
 	)
-	requireIndexedRulesDropRuleIndex(
+	requireIndexedRulesExcludeFunc(
 		t,
 		conwayPhase1UtxoValidationRules,
-		plutusIndex,
+		conway.UtxoValidatePlutusScripts,
 		"Conway phase-1 replay must not execute Plutus scripts",
 	)
 }
@@ -1414,141 +1419,49 @@ func TestTxInfoV2ContextSortsInputs(t *testing.T) {
 	)
 }
 
-// TestBuildIndexedUtxoValidationRulesResolvesByRuleId moves the plutus-scripts
-// rule to the front of the upstream list and gates it behind
-// common.Phase2ValidUtxoValidationRules, so the skip is only resolvable
-// through the descriptor Id: a fixed index points at the wrong rule and a
-// function-keyed lookup cannot see past the wrapper.
-func TestBuildIndexedUtxoValidationRulesResolvesByRuleId(t *testing.T) {
-	descriptors := alonzo.UtxoValidationRuleDescriptors()
+func TestBuildIndexedUtxoValidationRulesResolvesByFunctionIdentity(t *testing.T) {
+	rules := append([]lcommon.UtxoValidationRuleFunc(nil), alonzo.UtxoValidationRules...)
 	originalIndex := resolveUtxoValidationSkipIndex(
-		descriptors,
-		alonzo.UtxoValidationRules,
-		lcommon.UtxoValidationRulePlutusScripts,
+		rules, alonzo.UtxoValidatePlutusScripts, "test.UtxoValidatePlutusScripts",
 	)
-	require.NotZero(t, originalIndex)
-	descriptors[0], descriptors[originalIndex] = descriptors[originalIndex], descriptors[0]
-	rest := make([]lcommon.UtxoValidationRuleFunc, 0, len(descriptors)-1)
-	for _, descriptor := range descriptors[1:] {
-		rest = append(rest, descriptor.Validator)
-	}
-	rules := lcommon.ComposeUtxoValidationRules(
-		lcommon.Phase2ValidUtxoValidationRules(descriptors[0].Validator),
-		lcommon.AlwaysUtxoValidationRules(rest...),
-	)
-	require.Len(t, rules, len(descriptors))
-	require.NotEqual(
-		t,
-		utxoValidationRuleName(descriptors[0].Validator),
-		utxoValidationRuleName(rules[0]),
-		"the moved rule must be wrapped so no function name can match it",
-	)
-
-	require.Zero(t, resolveUtxoValidationSkipIndex(
-		descriptors, rules, lcommon.UtxoValidationRulePlutusScripts,
-	))
-	indexed := buildIndexedUtxoValidationRules(
-		descriptors,
+	rules[0], rules[originalIndex] = rules[originalIndex], rules[0]
+	resolved := resolveUtxoValidationSkipIndex(
 		rules,
-		lcommon.UtxoValidationRulePlutusScripts,
+		alonzo.UtxoValidatePlutusScripts,
+		"test.UtxoValidatePlutusScripts",
 	)
-	require.Len(t, indexed, len(rules)-1)
-	requireIndexedRulesDropRuleIndex(
+	require.Zero(t, resolved)
+	indexed := buildIndexedUtxoValidationRules(
+		rules,
+		alonzo.UtxoValidatePlutusScripts,
+		"test.UtxoValidatePlutusScripts",
+	)
+	requireIndexedRulesExcludeFunc(
 		t,
 		indexed,
-		0,
+		alonzo.UtxoValidatePlutusScripts,
 		"the resolved upstream rule must be removed",
 	)
 }
 
-// requireRuleIdResolvesToFunc asserts that upstream rule id resolves to a
-// single position in the era's composed rule list and that the descriptor
-// there is implemented by wantFuncName. The function name is an assertion
-// only; resolution keys on the Id, because upstream wraps phase-2-gated rules
-// and moves shared rules between era packages.
-func requireRuleIdResolvesToFunc(
+func requireRuleIndexResolvesToFunc(
 	t *testing.T,
-	descriptors []lcommon.UtxoValidationRuleDescriptor,
 	rules []lcommon.UtxoValidationRuleFunc,
-	id lcommon.UtxoValidationRuleId,
-	wantFuncName string,
+	want lcommon.UtxoValidationRuleFunc,
+	name string,
+) {
+	t.Helper()
+	index := findUtxoValidationRuleIndex(t, rules, want)
+	require.Equal(t, utxoValidationRuleName(want), utxoValidationRuleName(rules[index]), name)
+}
+
+func findUtxoValidationRuleIndex(
+	t *testing.T,
+	rules []lcommon.UtxoValidationRuleFunc,
+	want lcommon.UtxoValidationRuleFunc,
 ) int {
 	t.Helper()
-	index := resolveUtxoValidationSkipIndex(descriptors, rules, id)
-	require.Equal(t, id, descriptors[index].Id)
-	require.Equal(
-		t,
-		wantFuncName,
-		shortUtxoValidationRuleName(descriptors[index].Validator),
-		"upstream rule %s is no longer implemented by %s", id, wantFuncName,
-	)
-	return index
-}
-
-// requireIndexedRulesDropRuleIndex asserts the upstream rule at index is gone
-// from the built list. Comparing positions rather than functions keeps the
-// assertion meaningful for phase-2-gated rules, whose composed entries are
-// anonymous wrappers that no function name can match.
-func requireIndexedRulesDropRuleIndex(
-	t *testing.T,
-	rules []indexedUtxoValidationRule,
-	index int,
-	message string,
-) {
-	t.Helper()
-	for _, rule := range rules {
-		require.NotEqual(t, index, rule.index, message)
-	}
-}
-
-// requireIndexedRulesRetainRuleIndex asserts the upstream rule at index still
-// runs, and runs the upstream implementation.
-func requireIndexedRulesRetainRuleIndex(
-	t *testing.T,
-	rules []indexedUtxoValidationRule,
-	upstream []lcommon.UtxoValidationRuleFunc,
-	index int,
-	message string,
-) {
-	t.Helper()
-	for _, rule := range rules {
-		if rule.index != index {
-			continue
-		}
-		require.Equal(
-			t,
-			utxoValidationRuleName(upstream[index]),
-			utxoValidationRuleName(rule.validationFunc),
-			message,
-		)
-		return
-	}
-	require.Fail(t, message)
-}
-
-// requireIndexedRulesReplaceRuleIndex asserts the upstream rule at index was
-// swapped for Dingo's own want rule, which keeps a stable function identity.
-func requireIndexedRulesReplaceRuleIndex(
-	t *testing.T,
-	rules []indexedUtxoValidationRule,
-	index int,
-	want lcommon.UtxoValidationRuleFunc,
-	message string,
-) {
-	t.Helper()
-	for _, rule := range rules {
-		if rule.index != index {
-			continue
-		}
-		require.Equal(
-			t,
-			utxoValidationRuleName(want),
-			utxoValidationRuleName(rule.validationFunc),
-			message,
-		)
-		return
-	}
-	require.Fail(t, message)
+	return resolveUtxoValidationSkipIndex(rules, want, "test rule")
 }
 
 func requireIndexedRulesIncludeFunc(
@@ -1565,6 +1478,24 @@ func requireIndexedRulesIncludeFunc(
 		}
 	}
 	require.Fail(t, message)
+}
+
+func requireIndexedRulesExcludeFunc(
+	t *testing.T,
+	rules []indexedUtxoValidationRule,
+	want lcommon.UtxoValidationRuleFunc,
+	message string,
+) {
+	t.Helper()
+	wantName := utxoValidationRuleName(want)
+	for _, rule := range rules {
+		require.NotEqual(
+			t,
+			wantName,
+			utxoValidationRuleName(rule.validationFunc),
+			message,
+		)
+	}
 }
 
 func TestTxSizeForFee(t *testing.T) {
@@ -1819,19 +1750,16 @@ func TestPreAlonzoRebuiltWireSize(t *testing.T) {
 }
 
 func TestPreAlonzoValidationRulesUseLocalFeeAndSizeChecks(t *testing.T) {
-	shelleyDescriptors := shelley.UtxoValidationRuleDescriptors()
-	shelleyFeeIndex := requireRuleIdResolvesToFunc(
+	requireRuleIndexResolvesToFunc(
 		t,
-		shelleyDescriptors,
 		shelley.UtxoValidationRules,
-		lcommon.UtxoValidationRuleFeeTooSmall,
+		shelley.UtxoValidateFeeTooSmallUtxo,
 		"shelley.UtxoValidateFeeTooSmallUtxo",
 	)
-	shelleySizeIndex := requireRuleIdResolvesToFunc(
+	requireRuleIndexResolvesToFunc(
 		t,
-		shelleyDescriptors,
 		shelley.UtxoValidationRules,
-		lcommon.UtxoValidationRuleMaxTxSize,
+		shelley.UtxoValidateMaxTxSizeUtxo,
 		"shelley.UtxoValidateMaxTxSizeUtxo",
 	)
 	require.Len(
@@ -1839,32 +1767,29 @@ func TestPreAlonzoValidationRulesUseLocalFeeAndSizeChecks(t *testing.T) {
 		shelleyUtxoValidationRules,
 		len(shelley.UtxoValidationRules)-2,
 	)
-	requireIndexedRulesDropRuleIndex(
+	requireIndexedRulesExcludeFunc(
 		t,
 		shelleyUtxoValidationRules,
-		shelleyFeeIndex,
+		shelley.UtxoValidateFeeTooSmallUtxo,
 		"Shelley validation must size the minimum fee with TxSizeForFee",
 	)
-	requireIndexedRulesDropRuleIndex(
+	requireIndexedRulesExcludeFunc(
 		t,
 		shelleyUtxoValidationRules,
-		shelleySizeIndex,
+		shelley.UtxoValidateMaxTxSizeUtxo,
 		"Shelley validation must size the max-size check with TxSizeForFee",
 	)
 
-	allegraDescriptors := allegra.UtxoValidationRuleDescriptors()
-	allegraFeeIndex := requireRuleIdResolvesToFunc(
+	requireRuleIndexResolvesToFunc(
 		t,
-		allegraDescriptors,
 		allegra.UtxoValidationRules,
-		lcommon.UtxoValidationRuleFeeTooSmall,
+		allegra.UtxoValidateFeeTooSmallUtxo,
 		"allegra.UtxoValidateFeeTooSmallUtxo",
 	)
-	allegraSizeIndex := requireRuleIdResolvesToFunc(
+	requireRuleIndexResolvesToFunc(
 		t,
-		allegraDescriptors,
 		allegra.UtxoValidationRules,
-		lcommon.UtxoValidationRuleMaxTxSize,
+		allegra.UtxoValidateMaxTxSizeUtxo,
 		"allegra.UtxoValidateMaxTxSizeUtxo",
 	)
 	require.Len(
@@ -1872,16 +1797,16 @@ func TestPreAlonzoValidationRulesUseLocalFeeAndSizeChecks(t *testing.T) {
 		allegraUtxoValidationRules,
 		len(allegra.UtxoValidationRules)-2,
 	)
-	requireIndexedRulesDropRuleIndex(
+	requireIndexedRulesExcludeFunc(
 		t,
 		allegraUtxoValidationRules,
-		allegraFeeIndex,
+		allegra.UtxoValidateFeeTooSmallUtxo,
 		"Allegra validation must size the minimum fee with TxSizeForFee",
 	)
-	requireIndexedRulesDropRuleIndex(
+	requireIndexedRulesExcludeFunc(
 		t,
 		allegraUtxoValidationRules,
-		allegraSizeIndex,
+		allegra.UtxoValidateMaxTxSizeUtxo,
 		"Allegra validation must size the max-size check with TxSizeForFee",
 	)
 }
@@ -3941,9 +3866,7 @@ func TestConwayCommitteeCertificateRuleDoesNotRejectWhenStateUnavailable(
 			TxCertificates: []lcommon.CertificateWrapper{{
 				Type: uint(lcommon.CertificateTypeAuthCommitteeHot),
 				Certificate: &lcommon.AuthCommitteeHotCertificate{
-					CertType: uint(
-						lcommon.CertificateTypeAuthCommitteeHot,
-					),
+					CertType:       uint(lcommon.CertificateTypeAuthCommitteeHot),
 					ColdCredential: credential,
 				},
 			}},
@@ -4056,9 +3979,7 @@ func TestConwayCommitteeRulesSkipPhase2InvalidTransaction(t *testing.T) {
 			TxCertificates: []lcommon.CertificateWrapper{{
 				Type: uint(lcommon.CertificateTypeAuthCommitteeHot),
 				Certificate: &lcommon.AuthCommitteeHotCertificate{
-					CertType: uint(
-						lcommon.CertificateTypeAuthCommitteeHot,
-					),
+					CertType:       uint(lcommon.CertificateTypeAuthCommitteeHot),
 					ColdCredential: credential,
 				},
 			}},
@@ -4168,9 +4089,7 @@ func TestConwayCommitteeRulesFailClosedOnLookupError(t *testing.T) {
 			TxCertificates: []lcommon.CertificateWrapper{{
 				Type: uint(lcommon.CertificateTypeAuthCommitteeHot),
 				Certificate: &lcommon.AuthCommitteeHotCertificate{
-					CertType: uint(
-						lcommon.CertificateTypeAuthCommitteeHot,
-					),
+					CertType:       uint(lcommon.CertificateTypeAuthCommitteeHot),
 					ColdCredential: credential,
 				},
 			}},

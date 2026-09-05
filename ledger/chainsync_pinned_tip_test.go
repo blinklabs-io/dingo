@@ -31,7 +31,7 @@ import (
 // header tip sits ahead of the block tip. If the peer then sends a
 // RollBackward to the block tip, the no-op shortcut in
 // handleEventChainsyncRollback compares the rollback point against
-// HeaderTip and falls through to rollbackChainAndStateDeferred, which calls
+// HeaderTip and falls through to rollbackChainAndState, which calls
 // ls.rollback and publishes a spurious "local ledger rollback" event
 // even though the ledger never advanced past the block tip in the
 // first place. That event drives RecoverAfterLocalRollback every cycle,

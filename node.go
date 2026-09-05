@@ -455,12 +455,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	n.startupLifecycleMu.Lock()
 	startupGateHeld := true
 	var started []func()
-	// Set to false by the ledgerState.Close LIFO stop if it cannot confirm
-	// every background goroutine has exited. The db.Close and pluginHost.Stop
-	// LIFO stops registered below then skip closing storage a still-running
-	// goroutine may be using -- mirrors node_shutdown.go's shutdown()
-	// ledgerStateDrainConfirmed guard on the normal signal-driven path.
-	ledgerStateDrainConfirmed := true
 	defer func() {
 		if !startupGateHeld {
 			return
@@ -512,19 +506,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// the async-worker pool, leaking those goroutines.
 	started = append(started, func() { n.eventBus.Close() })
 	started = append(started, func() {
-		// Skipped on an unconfirmed ledger state drain for the same reason
-		// the db.Close LIFO stop above is: storage plugins can be backed by
-		// the same n.db a still-running background goroutine may be using.
-		// This closure is registered before (so stops after) both the
-		// ledgerState.Close and db.Close stops below, so it observes
-		// ledgerStateDrainConfirmed's final value -- mirrors
-		// node_shutdown.go's shutdown() phase 3 guard on pluginHost.Stop.
-		if !ledgerStateDrainConfirmed {
-			n.config.logger.Error(
-				"skipping plugin host shutdown during startup-failure cleanup because ledger state drain was not confirmed",
-			)
-			return
-		}
 		if err := n.pluginHost.Stop(context.Background()); err != nil {
 			n.config.logger.Error(
 				"failed to stop plugin host during cleanup",
@@ -605,19 +586,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return errors.New("empty database returned")
 	}
 	n.db = db
-	// ledgerStateDrainConfirmed (declared above) is set false by the
-	// ledgerState.Close LIFO stop below on an unconfirmed drain; this
-	// closure runs after that one in LIFO order (registered first, so
-	// stopped last), so it observes the flag's final value.
-	started = append(started, func() {
-		if !ledgerStateDrainConfirmed {
-			n.config.logger.Error(
-				"skipping database close during startup-failure cleanup because ledger state drain was not confirmed",
-			)
-			return
-		}
-		n.db.Close()
-	})
+	started = append(started, func() { n.db.Close() })
 	if err != nil {
 		if _, ok := errors.AsType[database.CommitTimestampError](err); !ok {
 			return fmt.Errorf("failed to open database: %w", err)
@@ -901,14 +870,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("configuring snapshot manager: %w", err)
 	}
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
-	// Prune pool snapshots through the deferred-header retention guard, so a
-	// snapshot a queued/deferred header still needs for leader validation is
-	// never pruned out from under it and misread as pool absence, and the
-	// floor selection is atomic with deferred-header admission (issue #3727).
-	// Set before Start; the pin is released automatically as headers resolve.
-	n.snapshotMgr.SetPoolSnapshotRetentionGuard(
-		n.ledgerState.PrunePoolSnapshotsWithRetentionFloor,
-	)
 	// Wire the authoritative epoch-boundary capture before block sync begins so
 	// each epoch rollover stages its mark snapshot atomically at the SNAP point.
 	// Set before CaptureGenesisSnapshot/sync; a nil hook (never set) would leave
@@ -958,24 +919,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start ledger: %w", err)
 	}
-	started = append(started, func() {
-		// Close returns a non-nil error only when a bounded wait
-		// (rollback-event goroutines, dbWorkerPool shutdown) could not
-		// confirm every background goroutine had actually exited before
-		// giving up -- unlike an ordinary cleanup failure, that means a
-		// goroutine may still be reading or writing n.db. Setting
-		// ledgerStateDrainConfirmed false makes the earlier-registered (so
-		// later-run) db.Close LIFO stop skip closing it out from under that
-		// goroutine, the same guard node_shutdown.go's shutdown() applies
-		// on the normal signal-driven path.
-		if err := n.ledgerState.Close(); err != nil {
-			ledgerStateDrainConfirmed = false
-			n.config.logger.Error(
-				"ledger state did not fully shut down; skipping database close because a background goroutine may still be using it",
-				"error", err,
-			)
-		}
-	})
+	started = append(started, func() { n.ledgerState.Close() })
 	// Register midnight indexer cleanup after LedgerState so it is torn down
 	// first (reverse order): midnight.Stop() → ledgerState.Close().
 	if n.midnightIndexer != nil {
@@ -1862,41 +1806,23 @@ func (n *Node) handleConnManagerClosed(
 	}
 }
 
-// subscribeConnectionRecycleRequests subscribes handler to
-// connmanager.ConnectionRecycleRequestedEventType with lossless delivery.
-//
-// Every recycle publisher (the chainsync stall recycler, peer governance, the
-// ledger translation below) ends here, and a recycle request cannot be
-// replayed: each publisher raises exactly one request per connection and then
-// keeps its own "already asked" flag set. The leios-fetch backfill is the
-// clearest case -- a connection whose leios-fetch request slot is permanently
-// abandoned can never answer again, so dropping its single recycle request
-// leaves that connection in the pool for the rest of its life and the by-point
-// fetch keeps re-trying a corpse (dingo #3552). Detaching this subscriber under
-// backpressure would do exactly that, so it stays attached until it drains or
-// node shutdown closes it.
-func (n *Node) subscribeConnectionRecycleRequests(
-	handler event.EventHandlerFunc,
-) event.EventSubscriberId {
-	return n.eventBus.SubscribeFuncWithBufferPolicy(
+// subscribeConnectionEvents wires the connection-manager side of the EventBus:
+// recycle requests, connection-closed and inbound-connection delivery to
+// ouroboros, and the ledger<->connmanager event translation that keeps ledger/
+// from importing connmanager/. Subscriptions are registered before listeners
+// start so inbound connections from peers that connect immediately are not
+// lost.
+func (n *Node) subscribeConnectionEvents() {
+	// Subscriber ID captured for the same reason as chainManager's above —
+	// n.connManager is rebuilt during a live database restore/truncate.
+	n.connManagerRecycleSubId = n.eventBus.SubscribeFunc(
 		connmanager.ConnectionRecycleRequestedEventType,
-		event.DefaultSubscriberBuffer,
-		event.SubscriberBackpressureBlock,
-		handler,
+		n.connManager.HandleConnectionRecycleRequestedEvent,
 	)
-}
-
-// subscribeLedgerConnectionRecycleTranslation translates ledger-owned recycle
-// events to connmanager recycle events so ledger/ does not import connmanager/.
-// It is the first hop of the same one-request-per-connection stream as
-// subscribeConnectionRecycleRequests above and is lossless for the same reason:
-// a detached translator silently strips every ledger- and ouroboros-side
-// recycle request out of the stream.
-func (n *Node) subscribeLedgerConnectionRecycleTranslation() {
-	n.eventBus.SubscribeFuncWithBufferPolicy(
+	// Translate ledger-owned recycle events to connmanager recycle events so
+	// ledger/ does not import connmanager/.
+	n.eventBus.SubscribeFunc(
 		ledger.ConnectionRecycleRequestedEventType,
-		event.DefaultSubscriberBuffer,
-		event.SubscriberBackpressureBlock,
 		func(evt event.Event) {
 			e, ok := evt.Data.(ledger.ConnectionRecycleRequestedEvent)
 			if !ok {
@@ -1916,21 +1842,6 @@ func (n *Node) subscribeLedgerConnectionRecycleTranslation() {
 			)
 		},
 	)
-}
-
-// subscribeConnectionEvents wires the connection-manager side of the EventBus:
-// recycle requests, connection-closed and inbound-connection delivery to
-// ouroboros, and the ledger<->connmanager event translation that keeps ledger/
-// from importing connmanager/. Subscriptions are registered before listeners
-// start so inbound connections from peers that connect immediately are not
-// lost.
-func (n *Node) subscribeConnectionEvents() {
-	// Subscriber ID captured for the same reason as chainManager's above —
-	// n.connManager is rebuilt during a live database restore/truncate.
-	n.connManagerRecycleSubId = n.subscribeConnectionRecycleRequests(
-		n.connManager.HandleConnectionRecycleRequestedEvent,
-	)
-	n.subscribeLedgerConnectionRecycleTranslation()
 	// Subscribe to connection events BEFORE starting listeners so that
 	// inbound connections from peers that connect immediately are not lost.
 	//

@@ -179,11 +179,9 @@ func TestFetchEndorserBlockOnConnSkipsBusyConnection(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- o.fetchEndorserBlockOnConn(
-			context.Background(),
 			connId,
 			nil,
 			point,
-			leiosBackfillPerAttemptTimeout,
 		)
 	}()
 	err := testutil.RequireReceive(
@@ -209,7 +207,6 @@ func TestFetchLeiosEbTxsBatchedUntilPastDeadline(t *testing.T) {
 	requester := &cappingBlockTxsRequester{maxPerResp: 50, includeBitmaps: true}
 
 	txs, err := o.fetchLeiosEbTxsBatchedUntil(
-		context.Background(),
 		requester,
 		point,
 		200,
@@ -292,7 +289,6 @@ func TestFetchLeiosEbTxsBatchedUntilAbandonsSlowRelay(t *testing.T) {
 	requester := &dribbleBlockTxsRequester{perRound: 20 * time.Millisecond}
 
 	txs, err := o.fetchLeiosEbTxsBatchedUntil(
-		context.Background(),
 		requester,
 		point,
 		txCount,
@@ -321,7 +317,6 @@ func TestFetchLeiosEbTxsBatchedNoDeadlineStillCompletes(t *testing.T) {
 	o := &Ouroboros{}
 	point := ocommon.Point{Slot: 100, Hash: []byte{0x0b}}
 	txs, err := o.fetchLeiosEbTxsBatchedUntil(
-		context.Background(),
 		&cappingBlockTxsRequester{maxPerResp: 50, includeBitmaps: true},
 		point,
 		200,

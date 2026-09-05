@@ -317,18 +317,6 @@ type PipelineManager struct {
 	// ebState by hash for O(1) quorum and embed lookups.
 	instances map[uint64]*pipelineInstance
 	byHash    map[lcommon.Blake2b256]*ebState
-	// canonicalRbs maps the hash of every ranking block the pipeline has
-	// seen added to the chain to that block's slot. It is the pipeline's
-	// own answer to "is this announcing ranking block still canonical?",
-	// which handleEbQuorum needs before it recreates state for an
-	// endorser block it is not tracking: a quorum event is built inside
-	// VoteManager's lock and published after it is released, so a
-	// rollback can be processed in between and the event that arrives
-	// afterwards describes a chain that no longer exists (#3600).
-	// Entries are dropped past the rollback point by handleRollback and
-	// past InstanceTTLSlots by pruneExpiredLocked, which bounds the map
-	// to the canonical blocks of one instance-TTL window.
-	canonicalRbs map[lcommon.Blake2b256]uint64
 }
 
 // NewPipelineManager creates a pipeline manager.
@@ -357,7 +345,6 @@ func NewPipelineManager(cfg PipelineManagerConfig) (*PipelineManager, error) {
 		timing:        cfg.Timing,
 		instances:     make(map[uint64]*pipelineInstance),
 		byHash:        make(map[lcommon.Blake2b256]*ebState),
-		canonicalRbs:  make(map[lcommon.Blake2b256]uint64),
 	}
 	if cfg.PromRegistry != nil {
 		m.metrics = initPipelineManagerMetrics(cfg.PromRegistry)
@@ -482,13 +469,7 @@ func (m *PipelineManager) eventLoop(
 			if !ok {
 				return
 			}
-			// Block and rollback updates arrive on the same subscription, so
-			// they are applied to canonicalRbs in the order the chain
-			// produced them.
-			switch data := evt.Data.(type) {
-			case chain.ChainBlockEvent:
-				m.handleChainBlock(data)
-			case chain.ChainRollbackEvent:
+			if data, ok := evt.Data.(chain.ChainRollbackEvent); ok {
 				m.handleRollback(data)
 			}
 		}
@@ -549,8 +530,7 @@ func (m *PipelineManager) ObserveEndorserBlock(
 // reports its verified votes reached quorum, capturing the built
 // certificate verbatim. If the certified EB's body was never observed (only
 // its votes), it is tracked here so eligibility reflects every certified
-// block -- but only while the announcing ranking block that every one of
-// those votes signed is still canonical (see canonicalRbs).
+// block.
 func (m *PipelineManager) handleEbQuorum(evt EbQuorumEvent) {
 	cur := m.slotProvider.CurrentOrTipSlot()
 	m.mu.Lock()
@@ -558,59 +538,7 @@ func (m *PipelineManager) handleEbQuorum(evt EbQuorumEvent) {
 	m.pruneExpiredLocked(cur)
 
 	eb := m.byHash[evt.EndorserBlockHash]
-	if eb != nil {
-		if _, exists := eb.certificates[evt.AnnouncingRbHash]; exists {
-			return
-		}
-	}
-	// A certificate at or past the certification deadline is too late: the
-	// EB has already expired in stageFor's uncertified branch, so honoring it
-	// would resurrect a block the rest of the pipeline treats as dead. An
-	// already-tracked EB stays tracked (it still counts toward equivocation
-	// and the stage gauge) but is never marked certified, so
-	// EligibleCertifiedEbs and StageOf agree it is expired; an untracked one
-	// is not created at all, since a block that can never become eligible
-	// would otherwise only serve to flag the slot as equivocating and to deny
-	// local production for it.
-	if cur >= evt.SlotNo && cur-evt.SlotNo >= m.timing.CertifyByDeadlineSlots {
-		if m.metrics != nil {
-			m.metrics.certsRejectedTotal.WithLabelValues("late").Inc()
-		}
-		m.logger.Warn(
-			"discarding leios certificate past certification deadline",
-			"slot", evt.SlotNo,
-			"eb_hash", evt.EndorserBlockHash.String(),
-			"offset_slots", cur-evt.SlotNo,
-			"deadline_slots", m.timing.CertifyByDeadlineSlots,
-		)
-		m.updateGaugesLocked(cur)
-		return
-	}
 	if eb == nil {
-		// Recreating state for an untracked EB is the one path by which a
-		// quorum event that went stale across a rollback can re-enter the
-		// pipeline: handleRollback has already dropped this slot's instance,
-		// and re-adding it would make the replacement chain's endorser block
-		// for the same produce slot look like equivocation (excluding it from
-		// EligibleCertifiedEbs) and make MayProduceEndorserBlock refuse local
-		// production while that slot's produce window is open. The votes
-		// behind this certificate all signed evt.AnnouncingRbHash, so that
-		// ranking block still being on our chain is exactly the condition
-		// under which the certificate still describes our chain.
-		if _, canonical := m.canonicalRbs[evt.AnnouncingRbHash]; !canonical {
-			if m.metrics != nil {
-				m.metrics.certsRejectedTotal.
-					WithLabelValues("non_canonical_announcement").Inc()
-			}
-			m.logger.Warn(
-				"discarding leios certificate for non-canonical announcing ranking block",
-				"slot", evt.SlotNo,
-				"eb_hash", evt.EndorserBlockHash.String(),
-				"announcing_rb_hash", evt.AnnouncingRbHash.String(),
-			)
-			m.updateGaugesLocked(cur)
-			return
-		}
 		inst := m.instances[evt.SlotNo]
 		if inst == nil {
 			inst = &pipelineInstance{
@@ -628,6 +556,29 @@ func (m *PipelineManager) handleEbQuorum(evt EbQuorumEvent) {
 		inst.ebs[evt.EndorserBlockHash] = eb
 		m.byHash[evt.EndorserBlockHash] = eb
 		m.markEquivocationLocked(inst)
+	}
+	if _, exists := eb.certificates[evt.AnnouncingRbHash]; exists {
+		return
+	}
+	// A certificate at or past the certification deadline is too late: the
+	// EB has already expired in stageFor's uncertified branch, so honoring it
+	// would resurrect a block the rest of the pipeline treats as dead. Keep
+	// it tracked (it still counts toward equivocation and the stage gauge)
+	// but never mark it certified, so EligibleCertifiedEbs and StageOf agree
+	// it is expired.
+	if cur >= evt.SlotNo && cur-evt.SlotNo >= m.timing.CertifyByDeadlineSlots {
+		if m.metrics != nil {
+			m.metrics.certsRejectedTotal.WithLabelValues("late").Inc()
+		}
+		m.logger.Warn(
+			"discarding leios certificate past certification deadline",
+			"slot", evt.SlotNo,
+			"eb_hash", evt.EndorserBlockHash.String(),
+			"offset_slots", cur-evt.SlotNo,
+			"deadline_slots", m.timing.CertifyByDeadlineSlots,
+		)
+		m.updateGaugesLocked(cur)
+		return
 	}
 	firstCertification := !eb.certified
 	eb.certified = true
@@ -777,8 +728,7 @@ func (m *PipelineManager) markEquivocationLocked(inst *pipelineInstance) {
 }
 
 // pruneExpiredLocked drops pipeline instances whose produce slot is more
-// than InstanceTTLSlots behind the current slot, along with the canonical
-// ranking-block hashes that far behind. Callers must hold m.mu.
+// than InstanceTTLSlots behind the current slot. Callers must hold m.mu.
 func (m *PipelineManager) pruneExpiredLocked(cur uint64) {
 	for slot, inst := range m.instances {
 		if cur < inst.produceSlot {
@@ -792,46 +742,7 @@ func (m *PipelineManager) pruneExpiredLocked(cur uint64) {
 		}
 		delete(m.instances, slot)
 	}
-	// A quorum event can only be honored inside CertifyByDeadlineSlots of
-	// its produce slot, which the validated timing keeps at or below
-	// InstanceTTLSlots, so the announcement record for any event that can
-	// still be accepted is never pruned here.
-	for rbHash, slot := range m.canonicalRbs {
-		if cur < slot {
-			continue
-		}
-		if cur-slot < m.timing.InstanceTTLSlots {
-			continue
-		}
-		delete(m.canonicalRbs, rbHash)
-	}
 	m.updateGaugesLocked(cur)
-}
-
-// handleChainBlock records a block added to the chain so handleEbQuorum can
-// tell whether a quorum event's announcing ranking block is still part of
-// the chain. Every ranking block is recorded, not only the announcing ones:
-// the announcement binding itself is VoteManager's to enforce (insertVote
-// rejects a vote whose announcing ranking block does not resolve to the
-// vote's slot and endorser block), and decoding each block again here to
-// re-derive it would duplicate that work on every chain update for no extra
-// protection. Known limitation: an ephemeral fork chain publishes the same
-// event type for its own blocks, so a losing fork's ranking block is
-// recorded until its rollback or TTL removes it -- the same view VoteManager
-// takes of announcements, which is what keeps the two components from
-// disagreeing about whether a quorum event is admissible.
-func (m *PipelineManager) handleChainBlock(evt chain.ChainBlockEvent) {
-	if len(evt.Point.Hash) != len(lcommon.Blake2b256{}) {
-		// A short or absent hash would be zero-extended by NewBlake2b256 and
-		// could then match a zero AnnouncingRbHash.
-		return
-	}
-	rbHash := lcommon.NewBlake2b256(evt.Point.Hash)
-	cur := m.slotProvider.CurrentOrTipSlot()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.canonicalRbs[rbHash] = evt.Point.Slot
-	m.pruneExpiredLocked(cur)
 }
 
 // handleEpochTransition flushes pipeline instances older than the previous
@@ -865,10 +776,9 @@ func (m *PipelineManager) handleEpochTransition(
 	)
 }
 
-// handleRollback drops pipeline instances and canonical ranking-block
-// records past the rollback point, so a re-produced endorser block on the
-// replacement chain is not mistaken for equivocation and a quorum event
-// that went stale across the rollback cannot resurrect the instance.
+// handleRollback drops pipeline instances whose produce slot is past the
+// rollback point, so a re-produced endorser block on the replacement chain
+// is not mistaken for equivocation.
 func (m *PipelineManager) handleRollback(evt chain.ChainRollbackEvent) {
 	cur := m.slotProvider.CurrentOrTipSlot()
 	m.mu.Lock()
@@ -879,14 +789,6 @@ func (m *PipelineManager) handleRollback(evt chain.ChainRollbackEvent) {
 				delete(m.byHash, h)
 			}
 			delete(m.instances, slot)
-		}
-	}
-	// Announcing ranking blocks past the rollback point are no longer on
-	// our chain, so a quorum event still in flight for one of them can no
-	// longer recreate the instance dropped above.
-	for rbHash, slot := range m.canonicalRbs {
-		if slot > evt.Point.Slot {
-			delete(m.canonicalRbs, rbHash)
 		}
 	}
 	m.updateGaugesLocked(cur)
