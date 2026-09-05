@@ -157,31 +157,9 @@ func (s *Store) pruneAllCommitteeHotAuthorizations(
 	db queryer,
 	tipSlot uint64,
 ) error {
-	rows, err := db.QueryContext(ctx, `
-SELECT DISTINCT cold_credential_tag, cold_credential
-FROM auth_committee_hot`)
+	credentials, err := listCommitteeHotColdCredentials(ctx, db)
 	if err != nil {
-		return fmt.Errorf("list committee hot credentials for pruning: %w", err)
-	}
-	credentials := make([]struct {
-		tag        uint8
-		credential []byte
-	}, 0)
-	for rows.Next() {
-		var item struct {
-			tag        uint8
-			credential []byte
-		}
-		if err := rows.Scan(&item.tag, &item.credential); err != nil {
-			return fmt.Errorf("read committee hot credential for pruning: %w", err)
-		}
-		credentials = append(credentials, item)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate committee hot credentials for pruning: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close committee hot credentials for pruning: %w", err)
+		return err
 	}
 	for _, item := range credentials {
 		if _, err := s.pruneCommitteeHotAuthorizations(
@@ -191,4 +169,50 @@ FROM auth_committee_hot`)
 		}
 	}
 	return nil
+}
+
+// committeeHotColdCredential is one cold credential holding hot-key
+// authorization rows.
+type committeeHotColdCredential struct {
+	tag        uint8
+	credential []byte
+}
+
+// listCommitteeHotColdCredentials reads the distinct cold credentials with
+// authorization rows. Collecting them in a separate call is what closes the
+// cursor before the caller issues its prune statements: those writes run on
+// the same connection, and on SQLite an open read cursor makes each of them a
+// SQLITE_BUSY candidate.
+func listCommitteeHotColdCredentials(
+	ctx context.Context,
+	db queryer,
+) ([]committeeHotColdCredential, error) {
+	rows, err := db.QueryContext(ctx, `
+SELECT DISTINCT cold_credential_tag, cold_credential
+FROM auth_committee_hot`)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"list committee hot credentials for pruning: %w",
+			err,
+		)
+	}
+	defer rows.Close() //nolint:errcheck
+	var credentials []committeeHotColdCredential
+	for rows.Next() {
+		var item committeeHotColdCredential
+		if err := rows.Scan(&item.tag, &item.credential); err != nil {
+			return nil, fmt.Errorf(
+				"read committee hot credential for pruning: %w",
+				err,
+			)
+		}
+		credentials = append(credentials, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf(
+			"iterate committee hot credentials for pruning: %w",
+			err,
+		)
+	}
+	return credentials, nil
 }
