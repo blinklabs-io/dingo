@@ -465,8 +465,10 @@ func EvaluateTxAlonzo(
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
 			}
-			retTotalExUnits.Steps += usedBudget.Steps
-			retTotalExUnits.Memory += usedBudget.Memory
+			retTotalExUnits, err = SafeAddExUnits(retTotalExUnits, usedBudget)
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("aggregate execution units: %w", err)
+			}
 			retRedeemerExUnits[lcommon.RedeemerKey{
 				Tag:   redeemer.Tag,
 				Index: redeemer.Index,
