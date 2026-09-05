@@ -679,9 +679,12 @@ not durably adopted:
   stays observable through the `Forge_forged_int` and
   `Forge_could_not_forge_int` counters. `Forge_could_not_forge_int` also
   counts leader slots declined because a rival block already occupies the
-  slot, so it no longer means "local build or sign failure" alone and its
-  rate overlaps `dingo_metrics_slotBattlesTotal_int`; subtract or inspect
-  that counter when alerting on it.
+  slot, so it no longer means "local build or sign failure" alone. Its
+  rate only *partially* overlaps `dingo_metrics_slotBattlesTotal_int`,
+  which `ledger/chainsync.go` raises for battles detected outside the
+  forge path as well, so the two are not a clean decomposition of one
+  another: inspect `dingo_metrics_slotBattlesTotal_int` alongside when
+  alerting rather than subtracting it exactly.
 - **Duplicate-slot fence.** The chain-tip check (`currentSlot < tipSlot`)
   cannot see a slot whose block was signed and diffused but never adopted,
   and it forgets slots entirely when the tip rolls back or the process
