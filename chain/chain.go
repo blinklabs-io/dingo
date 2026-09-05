@@ -55,10 +55,18 @@ type Chain struct {
 	currentTip           ochainsync.Tip
 	tipBlockIndex        uint64
 	lastCommonBlockIndex uint64
-	id                   ChainId
-	mutex                sync.RWMutex
-	waitingChanMutex     sync.Mutex
-	persistent           bool
+	// mutationSeq counts mutations of the fields chainStateSnapshot stages:
+	// currentTip, tipBlockIndex, headers and blocks. Every one of them runs
+	// under c.mutex and ends in markMutatedLocked, which is what lets
+	// restoreAfterCommitFailure tell whether the chain is still exactly what
+	// its batch published. Comparing the fields cannot answer that on its
+	// own: a concurrent retry of the same blocks reproduces them value for
+	// value while its writes are durable and the failed batch's are not.
+	mutationSeq      uint64
+	id               ChainId
+	mutex            sync.RWMutex
+	waitingChanMutex sync.Mutex
+	persistent       bool
 
 	// pendingUpdates is the chain-level sequencer for deferred chain.update
 	// / chain.fork publication. The mutex-holding ledger paths (blockfetch
@@ -167,6 +175,12 @@ func (c *Chain) AddVerifiedBlockHeader(header ledger.BlockHeader) error {
 	return c.addBlockHeader(header, true)
 }
 
+// markMutatedLocked records that a field chainStateSnapshot stages has
+// changed. Callers must hold c.mutex.
+func (c *Chain) markMutatedLocked() {
+	c.mutationSeq++
+}
+
 func (c *Chain) addBlockHeader(
 	header ledger.BlockHeader,
 	cryptoVerified bool,
@@ -225,6 +239,7 @@ func (c *Chain) addBlockHeader(
 	}
 	// Add header
 	c.headers = append(c.headers, queued)
+	c.markMutatedLocked()
 	return nil
 }
 
@@ -481,6 +496,7 @@ func (c *Chain) addBlockLocked(
 		BlockNumber: blockNumber,
 	}
 	c.tipBlockIndex = newBlockIndex
+	c.markMutatedLocked()
 	if notifyWaiters {
 		c.notifyWaitingIterators()
 	}
@@ -531,6 +547,7 @@ type chainStateSnapshot struct {
 	publishedIndex     uint64
 	publishedHeaders   int
 	publishedBlocksLen int
+	publishedSeq       uint64
 }
 
 // captureLocked records the pre-batch state. Callers must hold c.mutex and
@@ -555,6 +572,7 @@ func (s *chainStateSnapshot) restoreLocked(c *Chain) {
 	if !c.persistent {
 		c.blocks = s.blocks
 	}
+	c.markMutatedLocked()
 	s.published = false
 }
 
@@ -568,13 +586,20 @@ func (s *chainStateSnapshot) publishLocked(c *Chain) {
 	s.publishedIndex = c.tipBlockIndex
 	s.publishedHeaders = len(c.headers)
 	s.publishedBlocksLen = len(c.blocks)
+	s.publishedSeq = c.mutationSeq
 	s.published = true
 }
 
 // matchesPublishedLocked reports whether the chain still holds exactly what the
-// closure published. Callers must hold c.mutex and c.manager.mutex.
+// closure published. The mutation counter is the real test: a concurrent retry
+// of the same blocks leaves every staged field identical while its writes are
+// durable and this batch's are not, so field equality alone would let the
+// restore rewind past it. The field comparison is kept as well, so a mutation
+// path that ever forgets markMutatedLocked still fails closed rather than
+// silently reopening the clobber. Callers must hold c.mutex and c.manager.mutex.
 func (s *chainStateSnapshot) matchesPublishedLocked(c *Chain) bool {
-	return c.tipBlockIndex == s.publishedIndex &&
+	return c.mutationSeq == s.publishedSeq &&
+		c.tipBlockIndex == s.publishedIndex &&
 		c.currentTip.Point.Slot == s.publishedTip.Point.Slot &&
 		bytes.Equal(
 			c.currentTip.Point.Hash,
@@ -782,6 +807,7 @@ func (c *Chain) addRawBlockLocked(
 		BlockNumber: rb.BlockNumber,
 	}
 	c.tipBlockIndex = newBlockIndex
+	c.markMutatedLocked()
 	// Build event for deferred publication (same pattern as
 	// addBlockLocked — publish after the transaction commits).
 	if c.eventBus != nil {
@@ -1209,6 +1235,7 @@ func (c *Chain) rollbackLocked(
 			// Rollback point is a queued header. Drop only the headers
 			// after it and leave the matched header itself queued.
 			c.headers = slices.Delete(c.headers, idx+1, len(c.headers))
+			c.markMutatedLocked()
 			return nil, nil
 		}
 	}
@@ -1311,6 +1338,7 @@ func (c *Chain) rollbackLocked(
 		BlockNumber: tmpBlock.Number,
 	}
 	c.tipBlockIndex = rollbackBlockIndex
+	c.markMutatedLocked()
 	// Update iterators for rollback
 	for _, iter := range c.iterators {
 		// Reverse iterators never deliver rollback markers, but if a
@@ -1403,6 +1431,7 @@ func (c *Chain) ClearHeaders() {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	c.headers = c.headers[:0]
+	c.markMutatedLocked()
 }
 
 // RecentPoints returns up to count recent chain points in descending
@@ -2071,6 +2100,7 @@ func (c *Chain) reconcile() error {
 			// Adjust our chain-local blocks and offset point from primary chain
 			c.blocks = slices.Delete(c.blocks, 0, i+1)
 			c.lastCommonBlockIndex = tmpBlock.ID
+			c.markMutatedLocked()
 			return nil
 		}
 		if blockIndex == 0 {
@@ -2145,6 +2175,7 @@ func (c *Chain) reconcile() error {
 		// Reverse newBlocks since they were collected in reverse order
 		slices.Reverse(newBlocks)
 		c.blocks = slices.Concat(newBlocks, c.blocks)
+		c.markMutatedLocked()
 	}
 	return nil
 }

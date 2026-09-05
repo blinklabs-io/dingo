@@ -38,9 +38,10 @@ import (
 type commitFailingBlobStore struct {
 	blob.BlobStore
 	err error
-	// onceOnly arms the failure for a single read-write transaction, so a
-	// mutation injected by beforeFail can commit for real.
-	onceOnly *atomic.Bool
+	// armed selects which read-write transaction fails: the next one opened
+	// after the test sets it. Arming explicitly lets a test seed the chain
+	// first, and lets a mutation injected by beforeFail commit for real.
+	armed *atomic.Bool
 	// beforeFail runs inside Commit, after the batch closure's deferred
 	// unlocks have released the chain locks and before the injected error
 	// is returned -- exactly the window the outer restore has to survive.
@@ -52,7 +53,7 @@ func (s commitFailingBlobStore) NewTransaction(readWrite bool) dbtypes.Txn {
 	if !readWrite {
 		return txn
 	}
-	if s.onceOnly != nil && !s.onceOnly.CompareAndSwap(false, true) {
+	if s.armed == nil || !s.armed.CompareAndSwap(true, false) {
 		return txn
 	}
 	return &commitFailingBlobTxn{
@@ -173,13 +174,14 @@ func TestAddBlocksRestoresChainStateWhenBatchFails(t *testing.T) {
 func TestAddBlocksRestoresChainStateWhenCommitFails(t *testing.T) {
 	base := newTestDB(t)
 	commitErr := errors.New("injected blob commit failure")
+	armed := &atomic.Bool{}
 	db, err := database.New(
 		base.Config(),
 		database.Stores{
 			Blob: commitFailingBlobStore{
 				BlobStore: base.Blob(),
 				err:       commitErr,
-				onceOnly:  &atomic.Bool{},
+				armed:     armed,
 			},
 			Metadata: base.Metadata(),
 		},
@@ -196,6 +198,7 @@ func TestAddBlocksRestoresChainStateWhenCommitFails(t *testing.T) {
 
 	var origin common.Blake2b256
 	blocks := generateTestChain(t, 1, origin, 20, 20, 2)
+	armed.Store(true)
 	err = c.AddBlocks(blocks)
 	require.ErrorIs(t, err, commitErr)
 
@@ -345,6 +348,7 @@ func TestAddBlocksReportsConcurrentMutationWhenCommitFails(t *testing.T) {
 	base := newTestDB(t)
 	commitErr := errors.New("injected blob commit failure")
 
+	armed := &atomic.Bool{}
 	var (
 		c         *chain.Chain
 		interject func()
@@ -355,7 +359,7 @@ func TestAddBlocksReportsConcurrentMutationWhenCommitFails(t *testing.T) {
 			Blob: commitFailingBlobStore{
 				BlobStore: base.Blob(),
 				err:       commitErr,
-				onceOnly:  &atomic.Bool{},
+				armed:     armed,
 				beforeFail: func() {
 					if interject != nil {
 						interject()
@@ -393,6 +397,7 @@ func TestAddBlocksReportsConcurrentMutationWhenCommitFails(t *testing.T) {
 		interjectedErr = c.AddBlocks(blocks[2:])
 	}
 
+	armed.Store(true)
 	err = c.AddBlocks(blocks[:2])
 	require.True(t, interjected, "the interjected mutation must have run")
 	require.NoError(
@@ -426,13 +431,14 @@ func TestAddBlocksReportsConcurrentMutationWhenCommitFails(t *testing.T) {
 func TestAddRawBlocksRestoresChainStateWhenCommitFails(t *testing.T) {
 	base := newTestDB(t)
 	commitErr := errors.New("injected blob commit failure")
+	armed := &atomic.Bool{}
 	db, err := database.New(
 		base.Config(),
 		database.Stores{
 			Blob: commitFailingBlobStore{
 				BlobStore: base.Blob(),
 				err:       commitErr,
-				onceOnly:  &atomic.Bool{},
+				armed:     armed,
 			},
 			Metadata: base.Metadata(),
 		},
@@ -461,6 +467,7 @@ func TestAddRawBlocksRestoresChainStateWhenCommitFails(t *testing.T) {
 		})
 	}
 
+	armed.Store(true)
 	err = c.AddRawBlocks(rawBlocks)
 	require.ErrorIs(t, err, commitErr)
 	require.Equal(
@@ -469,5 +476,75 @@ func TestAddRawBlocksRestoresChainStateWhenCommitFails(t *testing.T) {
 		c.Tip(),
 		"a raw batch whose commit failed must not leave the in-memory tip "+
 			"advanced past the last durable block",
+	)
+}
+
+// TestAddBlocksReportsIndistinguishableMutationWhenCommitFails covers the
+// intervening mutation the staged fields cannot show. Comparing tip, index and
+// queue lengths answers "does the chain still look like what the batch
+// published", not "has anything happened since" -- and the two differ. A retry
+// that re-commits the same blocks reproduces every staged field exactly while
+// its writes are durable and the failed batch's are not, so the comparison
+// matches and the restore rewinds past a committed mutation.
+//
+// ClearHeaders on an already-empty queue is the same case reduced to one call:
+// a real, reachable mutation (the active peer changed) that leaves every staged
+// field identical. Only chain.mutationSeq distinguishes it.
+func TestAddBlocksReportsIndistinguishableMutationWhenCommitFails(t *testing.T) {
+	base := newTestDB(t)
+	commitErr := errors.New("injected blob commit failure")
+	armed := &atomic.Bool{}
+	var (
+		c         *chain.Chain
+		interject func()
+	)
+	db, err := database.New(
+		base.Config(),
+		database.Stores{
+			Blob: commitFailingBlobStore{
+				BlobStore: base.Blob(),
+				err:       commitErr,
+				armed:     armed,
+				beforeFail: func() {
+					if interject != nil {
+						interject()
+					}
+				},
+			},
+			Metadata: base.Metadata(),
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	c = cm.PrimaryChain()
+	require.NotNil(t, c)
+
+	var origin common.Blake2b256
+	blocks := generateTestChain(t, 1, origin, 20, 20, 2)
+
+	var interjected bool
+	interject = func() {
+		if interjected {
+			return
+		}
+		interjected = true
+		// Mutates the chain without changing any staged field.
+		c.ClearHeaders()
+	}
+
+	armed.Store(true)
+	err = c.AddBlocks(blocks)
+	require.True(t, interjected, "the interjected mutation must have run")
+	require.ErrorIs(t, err, commitErr)
+	require.ErrorIs(
+		t,
+		err,
+		chain.ErrChainStateChangedDuringCommit,
+		"a mutation that leaves every staged field identical is still a "+
+			"mutation; the restore must not assume it is undoing only "+
+			"its own work",
 	)
 }

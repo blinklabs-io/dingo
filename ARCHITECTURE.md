@@ -498,10 +498,14 @@ batch's tip is never published: no reader observes it, and no concurrent
 mutation can be overwritten by the restore. A `Commit` failure cannot be
 handled that way — `txn.Do` runs `Commit` after the closure's deferred unlocks
 — so `restoreAfterCommitFailure` re-acquires both locks and restores only if
-the chain still holds exactly what the closure published. Every chain mutation
-takes `c.mutex`, so a mismatch means one landed in that window, and restoring
-over it would roll the in-memory chain back past a durable commit, leaving it
-*behind* storage rather than level with it. That case is reported as
+nothing has happened since. Every chain mutation takes `c.mutex` and bumps
+`mutationSeq`, and the restore compares that counter (plus the staged fields, so
+a mutation path that forgets to bump still fails closed). The counter, not the
+field values, is what makes the test correct: a retry that re-commits the same
+blocks reproduces every staged field exactly while its writes are durable and
+the failed batch's are not. Restoring over any such mutation would roll the
+in-memory chain back past a durable commit, leaving it *behind* storage rather
+than level with it, so that case is reported as
 `chain.ErrChainStateChangedDuringCommit` instead of being silently applied.
 
 The rollback halves cannot be staged the same way, because they commit
