@@ -726,11 +726,22 @@ func TestNewBlockForgerRejectsInvalidOpCertGeneration(t *testing.T) {
 }
 
 type forgerTestBuilder struct {
-	block      ledger.Block
-	cbor       []byte
-	calls      int
-	leiosCalls int
-	leiosData  LeiosBlockData
+	block        ledger.Block
+	cbor         []byte
+	calls        int
+	leiosCalls   int
+	contextCalls int
+	blockCtx     BlockContext
+	leiosData    LeiosBlockData
+	// onBuild, when set, runs at the moment a build entry point is
+	// invoked, so a test can observe state as of block assembly.
+	onBuild func()
+}
+
+func (b *forgerTestBuilder) noteBuild() {
+	if b.onBuild != nil {
+		b.onBuild()
+	}
 }
 
 func (b *forgerTestBuilder) BuildBlock(
@@ -738,6 +749,7 @@ func (b *forgerTestBuilder) BuildBlock(
 	uint64,
 ) (ledger.Block, []byte, error) {
 	b.calls++
+	b.noteBuild()
 	return b.block, b.cbor, nil
 }
 
@@ -747,6 +759,23 @@ func (b *forgerTestBuilder) BuildBlockWithLeios(
 	leiosData LeiosBlockData,
 ) (ledger.Block, []byte, error) {
 	b.leiosCalls++
+	b.leiosData = leiosData
+	return b.block, b.cbor, nil
+}
+
+// BuildBlockOnContext makes forgerTestBuilder an AlternativeBlockBuilder, so
+// tests can wire the equal-slot alternative path. It records the context it
+// was handed; the forger only reaches it when a test also supplies a
+// ChainContext and a SiblingAdopter.
+func (b *forgerTestBuilder) BuildBlockOnContext(
+	_ uint64,
+	_ uint64,
+	leiosData LeiosBlockData,
+	blockCtx BlockContext,
+) (ledger.Block, []byte, error) {
+	b.contextCalls++
+	b.noteBuild()
+	b.blockCtx = blockCtx
 	b.leiosData = leiosData
 	return b.block, b.cbor, nil
 }

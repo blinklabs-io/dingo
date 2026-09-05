@@ -63,20 +63,30 @@ func newGateTestForger(
 // the propagation race puts the chain tip AT the current slot, not past
 // it. ouroboros-consensus treats that as a contested slot rather than a
 // reason to stop: mkCurrentBlockContext declines only for GT
-// (TraceBlockFromFuture) and, for EQ, builds a block context on the
-// tip's predecessor so the node still participates.
+// (TraceBlockFromFuture) and, for EQ, forges an alternative to the block
+// at the tip -- same block number, the tip's predecessor as parent -- so
+// the leader VRF and chain selection arbitrate.
 //
-// Dingo instead folded EQ into the GT skip with `currentSlot <=
-// tipSlot`, which returns before checkLeaderSafe. The slot never
-// reaches leader selection, so no leadership counter moves and the only
-// trace is a Debug line: the loss is invisible on every dashboard.
+// Dingo folded EQ into the GT skip with `currentSlot <= tipSlot`, which
+// returns before checkLeaderSafe. The slot never reached leader
+// selection, so no leadership counter moved and the only trace was a
+// Debug line.
 //
-// The slot must at minimum reach leader selection and be accounted for.
+// With the alternative path wired, the contested slot must reach leader
+// selection, be counted as a leader slot and a slot battle, and produce
+// a block built on the tip's predecessor rather than on the tip.
+// TestCheckAndForgeProductionEqualSlotDeclinesWithoutTheAlternativePath
+// covers the unwired case, which still declines and still accounts for
+// the battle.
 func TestCheckAndForgeProductionEqualSlotReachesLeaderCheck(t *testing.T) {
 	leader := &forgerCountingLeader{}
-	builder := &forgerTestBuilder{}
+	builder := &forgerTestBuilder{
+		block: newForgerTestBlock(10, altTestRivalBlockNumber),
+		cbor:  []byte{0x01},
+	}
 	broadcaster := &forgerTestBroadcaster{}
-	forger := newGateTestForger(
+	adopter := &forgerTestSiblingAdopter{adopted: true}
+	forger := newAlternativeTestForger(
 		t,
 		forgerTestSlotClock{
 			currentSlot:       10,
@@ -87,6 +97,8 @@ func TestCheckAndForgeProductionEqualSlotReachesLeaderCheck(t *testing.T) {
 		builder,
 		broadcaster,
 		nil,
+		newAltTestChainContext(10),
+		adopter,
 	)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
@@ -112,27 +124,61 @@ func TestCheckAndForgeProductionEqualSlotReachesLeaderCheck(t *testing.T) {
 	)
 	assert.Equal(
 		t,
-		float64(1),
+		float64(0),
 		testutil.ToFloat64(forger.metrics.forgeCouldNot),
-		"a leader slot we did not produce for must be visible as a "+
-			"could-not-forge, not as silence",
+		"a contested slot we did forge for is not a could-not-forge",
 	)
 
-	// The block must NOT be built. BuildBlock binds the parent to the
-	// live chain tip, which here is the rival's block at this same
-	// slot; the resulting block would carry a parent whose slot equals
-	// its own and be rejected by ledger.validateBlockOrder. Forging a
-	// valid alternative needs the tip's predecessor as parent, which
-	// the builder cannot express yet.
+	// The block must be built on the tip's PREDECESSOR. Binding the live
+	// tip -- the rival's block at this same slot -- would carry a parent
+	// whose slot equals its own and be rejected by
+	// ledger.validateBlockOrder and by every Praos peer.
+	require.Equal(
+		t,
+		1,
+		builder.contextCalls,
+		"a contested slot must build on an explicit block context",
+	)
 	assert.Zero(
 		t,
 		builder.calls,
 		"must not bind a same-slot parent",
 	)
+	assert.Equal(
+		t,
+		altTestParentPoint(),
+		builder.blockCtx.Parent,
+		"the alternative's parent is the tip's predecessor",
+	)
+	assert.Equal(
+		t,
+		altTestRivalBlockNumber,
+		builder.blockCtx.BlockNumber,
+		"the alternative carries the rival's block number, not one past it",
+	)
+	assert.Equal(
+		t,
+		altTestRivalTip(10),
+		builder.blockCtx.Rival,
+		"the alternative names the tip it competes with",
+	)
+
+	// It goes to chain selection, not to the extend-only add path.
+	assert.Equal(t, 1, adopter.calls)
 	assert.Zero(t, broadcaster.calls)
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeForged),
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeAdopted),
+	)
 }
 
-// TestCheckAndForgeProductionEqualSlotDoesNotReForgeOurOwnSlot is the
+// TestCheckAndForgeProductionEqualSlotDoesNotReForgeOurOwnSlot is the// TestCheckAndForgeProductionEqualSlotDoesNotReForgeOurOwnSlot is the
 // anti-equivocation companion to the test above. The slot-aligned loop
 // can re-enter a slot it already committed to (a clock that has not
 // advanced, or a NextSlotTime already in the past), and after a
