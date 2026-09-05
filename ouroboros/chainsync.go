@@ -17,6 +17,7 @@ package ouroboros
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -328,6 +329,93 @@ func isOriginPoint(point ocommon.Point) bool {
 	return point.Slot == 0 && len(point.Hash) == 0
 }
 
+// originOnlyIntersectWarnInterval throttles the "intersect points collapsed to
+// origin" warning. The condition that produces it (an in-flight ledger
+// rollback) is re-evaluated on every reconnect, and peer governance reconnects
+// every second or so, so an unthrottled warning would emit hundreds of lines
+// for a single incident.
+const originOnlyIntersectWarnInterval = 30 * time.Second
+
+// finalizeChainsyncIntersectPoints appends origin as the last-resort intersect
+// point and refuses to offer origin *alone* while the local chain holds a
+// non-origin tip.
+//
+// Origin is always appended so FindIntersect still succeeds against a peer that
+// follows a divergent fork (e.g. a multi-producer DevNet) -- without it such
+// peers have no common point at all. But an origin-ONLY list is a different
+// request: it asks the peer to replay the chain from genesis. A synced node
+// cannot accept that reply. Genesis-era headers fail leader-eligibility
+// verification (the genesis-era producer has no entry in the epoch-0 stake
+// snapshot), which publishes ConnectionRecycleRequestedEvent and tears the
+// connection down milliseconds after it opened, so the node makes no chainsync
+// progress with any peer for as long as the condition lasts.
+//
+// The condition does occur on a healthy node: while a rollback's metadata
+// truncation is in flight the ledger tip names a block the chain rewind has
+// already deleted, and the ledger can return no points. When that happens the
+// primary chain still reports a real tip, so seed the list with it and let
+// origin stay the fallback it was meant to be.
+//
+// Returns the finalized points and whether an origin-only list had to be
+// rescued, which the caller logs (throttled).
+func finalizeChainsyncIntersectPoints(
+	intersectPoints []ocommon.Point,
+	primaryChainTip ochainsync.Tip,
+) ([]ocommon.Point, bool) {
+	rescued := false
+	hasRealPoint := false
+	for _, point := range intersectPoints {
+		if !isOriginPoint(point) {
+			hasRealPoint = true
+			break
+		}
+	}
+	if !hasRealPoint && !isOriginPoint(primaryChainTip.Point) {
+		intersectPoints = normalizeIntersectPoints(
+			append(
+				[]ocommon.Point{primaryChainTip.Point},
+				intersectPoints...,
+			),
+		)
+		rescued = true
+	}
+	// Always include origin as the last intersect point. This
+	// ensures FindIntersect succeeds even when the peer follows
+	// a different fork (e.g. multi-producer DevNet). Without
+	// origin, peers on divergent chains have no common point.
+	if len(intersectPoints) == 0 ||
+		!isOriginPoint(intersectPoints[len(intersectPoints)-1]) {
+		intersectPoints = append(intersectPoints, ocommon.NewPointOrigin())
+	}
+	return intersectPoints, rescued
+}
+
+// warnOriginOnlyIntersectRescued reports, at most once per
+// originOnlyIntersectWarnInterval, that we were about to ask a peer to replay
+// from genesis on a node that is not at genesis.
+func (o *Ouroboros) warnOriginOnlyIntersectRescued(
+	connId ouroboros.ConnectionId,
+	primaryChainTip ochainsync.Tip,
+) {
+	now := time.Now()
+	last := o.lastOriginOnlyIntersectWarn.Load()
+	if last != 0 &&
+		now.Sub(time.Unix(0, last)) < originOnlyIntersectWarnInterval {
+		return
+	}
+	if !o.lastOriginOnlyIntersectWarn.CompareAndSwap(last, now.UnixNano()) {
+		return
+	}
+	o.config.Logger.Warn(
+		"chainsync intersect points collapsed to origin on a non-origin chain, using primary chain tip instead",
+		"component", "ouroboros",
+		"connection_id", connId.String(),
+		"chain_tip_slot", primaryChainTip.Point.Slot,
+		"chain_tip_hash", hex.EncodeToString(primaryChainTip.Point.Hash),
+		"reason", "ledger returned no intersect points (rollback truncation in flight?)",
+	)
+}
+
 func chainsyncResyncRequiresFreshConnection(reason string) bool {
 	switch reason {
 	case event.ChainsyncResyncReasonLocalTipPlateau,
@@ -444,13 +532,13 @@ func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
 		}
 	}
 	intersectPoints = normalizeIntersectPoints(intersectPoints)
-	// Always include origin as the last intersect point. This
-	// ensures FindIntersect succeeds even when the peer follows
-	// a different fork (e.g. multi-producer DevNet). Without
-	// origin, peers on divergent chains have no common point.
-	if len(intersectPoints) == 0 ||
-		!isOriginPoint(intersectPoints[len(intersectPoints)-1]) {
-		intersectPoints = append(intersectPoints, ocommon.NewPointOrigin())
+	primaryChainTip := o.ledgerState.PrimaryChainTip()
+	intersectPoints, rescued := finalizeChainsyncIntersectPoints(
+		intersectPoints,
+		primaryChainTip,
+	)
+	if rescued {
+		o.warnOriginOnlyIntersectRescued(connId, primaryChainTip)
 	}
 	return intersectPoints, nil
 }

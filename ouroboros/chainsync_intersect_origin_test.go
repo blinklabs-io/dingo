@@ -1,0 +1,240 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package ouroboros
+
+import (
+	"bytes"
+	"io"
+	"log/slog"
+	"testing"
+
+	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func testChainTip(slot uint64) ochainsync.Tip {
+	return ochainsync.Tip{
+		Point:       ocommon.NewPoint(slot, bytes.Repeat([]byte{0xab}, 32)),
+		BlockNumber: slot,
+	}
+}
+
+// TestFinalizeChainsyncIntersectPointsNeverOffersOriginAloneOnNonOriginChain is
+// the regression test for the connection-recycle loop: while a rollback's
+// metadata truncation is in flight the ledger can return no intersect points,
+// and the "always append origin" fallback then made a fully synced node ask its
+// peers to replay from genesis. Those genesis-era headers fail leader
+// verification and recycle every connection until the truncation commits.
+func TestFinalizeChainsyncIntersectPointsNeverOffersOriginAloneOnNonOriginChain(
+	t *testing.T,
+) {
+	chainTip := testChainTip(2576716)
+
+	for name, points := range map[string][]ocommon.Point{
+		"nil points":      nil,
+		"empty points":    {},
+		"origin-only set": {ocommon.NewPointOrigin()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, rescued := finalizeChainsyncIntersectPoints(
+				points,
+				chainTip,
+			)
+
+			require.NotEmpty(t, got)
+			require.True(
+				t,
+				rescued,
+				"expected the origin-only collapse to be reported",
+			)
+			require.False(
+				t,
+				len(got) == 1 && isOriginPoint(got[0]),
+				"offered origin as the only intersect point while the chain tip is slot %d",
+				chainTip.Point.Slot,
+			)
+
+			// The chain tip leads, origin remains the last resort.
+			assert.Equal(t, chainTip.Point.Slot, got[0].Slot)
+			assert.Equal(t, chainTip.Point.Hash, got[0].Hash)
+			assert.True(
+				t,
+				isOriginPoint(got[len(got)-1]),
+				"origin must remain the final fallback point",
+			)
+		})
+	}
+}
+
+// TestFinalizeChainsyncIntersectPointsKeepsOriginOnlyAtOrigin guards the other
+// direction: a node that really is at origin (fresh sync) must still be allowed
+// to ask for a full replay, otherwise it could never bootstrap.
+func TestFinalizeChainsyncIntersectPointsKeepsOriginOnlyAtOrigin(t *testing.T) {
+	got, rescued := finalizeChainsyncIntersectPoints(
+		nil,
+		ochainsync.Tip{},
+	)
+
+	require.Len(t, got, 1)
+	assert.True(t, isOriginPoint(got[0]))
+	assert.False(t, rescued)
+}
+
+// TestFinalizeChainsyncIntersectPointsPreservesRealPoints verifies the normal
+// path is untouched: a healthy point list keeps its order and still gets origin
+// appended as the final fallback for divergent-fork peers.
+func TestFinalizeChainsyncIntersectPointsPreservesRealPoints(t *testing.T) {
+	points := []ocommon.Point{
+		ocommon.NewPoint(300, bytes.Repeat([]byte{0x03}, 32)),
+		ocommon.NewPoint(200, bytes.Repeat([]byte{0x02}, 32)),
+		ocommon.NewPoint(100, bytes.Repeat([]byte{0x01}, 32)),
+	}
+
+	got, rescued := finalizeChainsyncIntersectPoints(
+		points,
+		testChainTip(300),
+	)
+
+	assert.False(t, rescued)
+	require.Len(t, got, len(points)+1)
+	for idx, point := range points {
+		assert.Equal(t, point.Slot, got[idx].Slot)
+		assert.Equal(t, point.Hash, got[idx].Hash)
+	}
+	assert.True(t, isOriginPoint(got[len(got)-1]))
+}
+
+// TestFinalizeChainsyncIntersectPointsDoesNotDoubleAppendOrigin verifies a list
+// that already ends in origin is left alone.
+func TestFinalizeChainsyncIntersectPointsDoesNotDoubleAppendOrigin(
+	t *testing.T,
+) {
+	points := []ocommon.Point{
+		ocommon.NewPoint(300, bytes.Repeat([]byte{0x03}, 32)),
+		ocommon.NewPointOrigin(),
+	}
+
+	got, rescued := finalizeChainsyncIntersectPoints(
+		points,
+		testChainTip(300),
+	)
+
+	assert.False(t, rescued)
+	require.Len(t, got, 2)
+	assert.True(t, isOriginPoint(got[1]))
+}
+
+// newTestLedgerStateWithChain builds a ledger whose primary chain holds
+// blockCount blocks, so PrimaryChainTip reports a real (non-origin) tip.
+func newTestLedgerStateWithChain(
+	t *testing.T,
+	blockCount uint64,
+) *ledger.LedgerState {
+	t.Helper()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
+
+	var prevHash []byte
+	for slot := uint64(1); slot <= blockCount; slot++ {
+		hash := bytes.Repeat([]byte{byte(slot)}, 32)
+		require.NoError(t, db.BlockCreate(models.Block{
+			ID:       slot,
+			Slot:     slot,
+			Number:   slot,
+			Hash:     hash,
+			PrevHash: prevHash,
+			Type:     1,
+			Cbor:     []byte{0x80},
+		}, nil))
+		prevHash = hash
+	}
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		cm.SetLedger(testSecurityParamLedger{securityParam: 2160}),
+	)
+
+	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
+		Database:     db,
+		ChainManager: cm,
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	return ls
+}
+
+// TestChainsyncNeverAsksPeerToReplayFromGenesisDuringRollback is the
+// composition test for the incident: a node holding a real chain whose ledger
+// tip block row has been removed (the window between the chain rewind and the
+// end of the metadata truncation) must not build an origin-only FindIntersect
+// list. It exercises both halves of the fix together -- the ledger anchoring
+// its points on the chain tip, and chainsync refusing an origin-only list --
+// because either one alone is sufficient to preserve the invariant.
+func TestChainsyncNeverAsksPeerToReplayFromGenesisDuringRollback(t *testing.T) {
+	o := &Ouroboros{}
+	o.ledgerState = newTestLedgerStateWithChain(t, 5)
+
+	chainTip := o.ledgerState.PrimaryChainTip()
+	require.False(
+		t,
+		isOriginPoint(chainTip.Point),
+		"fixture must hold a non-origin chain",
+	)
+
+	// The ledger tip names a block that is not in the metadata database,
+	// which is what a chain rewind leaves behind until ls.rollback's
+	// truncation commits and reassigns ls.currentTip.
+	setTestLedgerTip(t, o, ochainsync.Tip{
+		Point:       ocommon.NewPoint(2576729, bytes.Repeat([]byte{0xe8}, 32)),
+		BlockNumber: 112915,
+	})
+
+	points, err := o.ledgerState.IntersectPoints(chainsyncIntersectPointCount)
+	require.NoError(t, err)
+
+	got, _ := finalizeChainsyncIntersectPoints(
+		normalizeIntersectPoints(points),
+		o.ledgerState.PrimaryChainTip(),
+	)
+
+	require.NotEmpty(t, got)
+	require.False(
+		t,
+		len(got) == 1 && isOriginPoint(got[0]),
+		"chainsync would have asked the peer to replay from genesis while holding a chain at slot %d",
+		chainTip.Point.Slot,
+	)
+	assert.False(
+		t,
+		isOriginPoint(got[0]),
+		"the leading intersect point must be a real chain point",
+	)
+	assert.True(
+		t,
+		isOriginPoint(got[len(got)-1]),
+		"origin must remain the final fallback point",
+	)
+}

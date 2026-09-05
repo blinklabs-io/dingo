@@ -92,6 +92,9 @@ type Ouroboros struct {
 	eventBus       *event.EventBus
 	mempool        mempool.Service
 	ledgerState    *ledger.LedgerState
+	// lastOriginOnlyIntersectWarn throttles warnOriginOnlyIntersectRescued.
+	// Unix nanoseconds; 0 means "never warned".
+	lastOriginOnlyIntersectWarn atomic.Int64
 	// leiosAnnouncementLedger is the narrow synchronous ledger view used by
 	// LeiosNotify. It returns validation facts only; this package owns peer,
 	// publication, and relay semantics.
