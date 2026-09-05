@@ -567,39 +567,6 @@ func (c *Cache) CommitAccountRewardsForEpoch(
 	return err
 }
 
-func pruneCompletedAccountCoverageTx(
-	tx *sql.Tx,
-	network string,
-	throughEpoch uint64,
-) error {
-	if throughEpoch < accountCheckpointRetentionEpochs {
-		return nil
-	}
-	cutoff := throughEpoch - accountCheckpointRetentionEpochs + 1
-	for _, table := range []string{
-		"koios_account_checked",
-		"koios_account_fetch_staged_rows",
-	} {
-		var query string
-		switch table {
-		case "koios_account_checked":
-			query = `DELETE FROM koios_account_checked
-				WHERE network = ? AND epoch < ? AND EXISTS (
-				SELECT 1 FROM koios_account_coverage
-				WHERE network = ? AND epoch = koios_account_checked.epoch AND complete = 1)`
-		case "koios_account_fetch_staged_rows":
-			query = `DELETE FROM koios_account_fetch_staged_rows
-				WHERE network = ? AND epoch < ? AND EXISTS (
-				SELECT 1 FROM koios_account_coverage
-				WHERE network = ? AND epoch = koios_account_fetch_staged_rows.epoch AND complete = 1)`
-		}
-		if _, err := tx.Exec(query, network, cutoff, network); err != nil {
-			return fmt.Errorf("prune completed %s: %w", table, err)
-		}
-	}
-	return nil
-}
-
 type sqlQueryer interface {
 	QueryRow(query string, args ...any) *sql.Row
 	Query(query string, args ...any) (*sql.Rows, error)

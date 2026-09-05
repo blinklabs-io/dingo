@@ -478,7 +478,10 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 	}
 	if o.cfg.AccountsEnabled {
 		if err := o.cache.PruneAccountCoverage(o.cfg.Network, epoch); err != nil {
-			o.reportError(epoch, fmt.Errorf("prune account coverage: %w", err))
+			o.cfg.Logger.Warn(
+				"koiosparity observer: prune account coverage failed",
+				"network", o.cfg.Network, "epoch", epoch, "error", err,
+			)
 		}
 	}
 	if result.Status != StatusPass {
