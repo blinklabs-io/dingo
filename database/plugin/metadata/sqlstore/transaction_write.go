@@ -250,6 +250,7 @@ RETURNING id`,
 					point,
 					index,
 					certDeposits,
+					false,
 				)
 				if err != nil {
 					return err
@@ -277,6 +278,11 @@ RETURNING id`,
 						produced.Id.Index(),
 						err,
 					)
+				}
+				if err := s.resolvePointerStakeCredential(
+					ctx, db, produced.Output.Address(), &model,
+				); err != nil {
+					return err
 				}
 				if collateralReturn != nil &&
 					produced.Output == collateralReturn {
@@ -460,8 +466,20 @@ RETURNING id`,
 			if err != nil {
 				return err
 			}
-			collateralReturn := transaction.CollateralReturn()
 			stakeRefs := make([]models.StakeCredentialRef, 0)
+			if transaction.IsValid() {
+				// Gap blocks do not carry calculated deposits. Preserve NULL for
+				// unknown deposit-bearing certificates; zero is a real value.
+				certificateRefs, err := s.applyTransactionCertificates(
+					ctx, db, transactionID, transaction.Certificates(),
+					point, index, nil, true,
+				)
+				if err != nil {
+					return err
+				}
+				stakeRefs = append(stakeRefs, certificateRefs...)
+			}
+			collateralReturn := transaction.CollateralReturn()
 			for _, produced := range transaction.Produced() {
 				model, err := models.UtxoLedgerToModel(produced, point.Slot)
 				if err != nil {
@@ -470,6 +488,11 @@ RETURNING id`,
 						produced.Id.Index(),
 						err,
 					)
+				}
+				if err := s.resolvePointerStakeCredential(
+					ctx, db, produced.Output.Address(), &model,
+				); err != nil {
+					return err
 				}
 				id := uint(transactionID)
 				if collateralReturn != nil &&
@@ -723,13 +746,47 @@ SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			// Snapshot imports can create an output before its producer
 			// transaction is replayed. Once that transaction is known, fill in
 			// the provenance without overwriting an already-linked output.
+			//
+			// The stake credential is filled the same way and for the same
+			// reason: a pointer address's credential is resolved when the
+			// producing transaction is applied, and an output imported before
+			// that carries none. Without this the resolution is discarded by
+			// the conflict and the row stays unattributed, which is the bug
+			// this path exists to avoid (dingo #3854). Both are COALESCE, so an
+			// output that already has a credential keeps it.
+			//
+			// credential_tag is NOT NULL, so it cannot be COALESCEd; it is set
+			// only when the stake key is being filled in. Every SET expression
+			// is evaluated against the pre-update row, so the guards see
+			// staking_key as it was before this statement.
+			//
+			// An absent credential is tested as "NULL or zero length" rather
+			// than NULL alone. Nothing observed writes a zero-length key -- a
+			// 1.3M-row database has none -- but a caller passing a non-nil
+			// empty slice would bind one, and it would then read as present and
+			// silently swallow the resolved stake. length() is used rather than
+			// a blob literal because this statement also runs on postgres and
+			// mysql.
 			_, err = db.ExecContext(ctx, `
 UPDATE utxo
 SET transaction_id = COALESCE(transaction_id, ?),
-    collateral_return_for_tx_id = COALESCE(collateral_return_for_tx_id, ?)
+    collateral_return_for_tx_id = COALESCE(collateral_return_for_tx_id, ?),
+    credential_tag = CASE
+        WHEN (staking_key IS NULL OR length(staking_key) = 0)
+             AND ? IS NOT NULL THEN ?
+        ELSE credential_tag
+    END,
+    staking_key = CASE
+        WHEN staking_key IS NULL OR length(staking_key) = 0
+            THEN COALESCE(?, staking_key)
+        ELSE staking_key
+    END
 WHERE id = ?`,
 				params.TransactionID,
 				params.CollateralReturnForTxID,
+				params.StakingKey,
+				params.CredentialTag,
+				params.StakingKey,
 				id,
 			)
 		}
