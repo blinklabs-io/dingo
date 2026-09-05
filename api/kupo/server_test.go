@@ -458,8 +458,9 @@ func TestV1RouteAliases(t *testing.T) {
 }
 
 func TestDatumAndScriptNotFound(t *testing.T) {
+	tipHash := strings.Repeat("aa", 32)
 	server := newTestServer(&mockNode{
-		snapshotTip: Point{SlotNo: 42, HeaderHash: strings.Repeat("aa", 32)},
+		snapshotTip: Point{SlotNo: 42, HeaderHash: tipHash},
 	})
 	for _, target := range []string{
 		"/datums/" + strings.Repeat("11", 32),
@@ -469,6 +470,13 @@ func TestDatumAndScriptNotFound(t *testing.T) {
 			response := serve(t, server, http.MethodGet, target, nil)
 			if response.Code != http.StatusNotFound {
 				t.Fatalf("status = %d, want 404", response.Code)
+			}
+			req := httptest.NewRequest(http.MethodGet, target, nil)
+			req.Header.Set("If-None-Match", tipHash)
+			recorder := httptest.NewRecorder()
+			server.handler().ServeHTTP(recorder, req)
+			if recorder.Code != http.StatusNotFound {
+				t.Fatalf("conditional status = %d, want 404", recorder.Code)
 			}
 		})
 	}

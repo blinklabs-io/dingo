@@ -291,11 +291,11 @@ func (s *Server) handleDatum(w http.ResponseWriter, r *http.Request) {
 		s.writeNodeError(w, err)
 		return
 	}
-	if notModifiedAt(w, r, tip) {
-		return
-	}
 	if datum == nil {
 		writeError(w, http.StatusNotFound, ErrNotFound)
+		return
+	}
+	if notModifiedAt(w, r, tip) {
 		return
 	}
 	writeJSON(w, http.StatusOK, datum)
@@ -312,11 +312,11 @@ func (s *Server) handleScript(w http.ResponseWriter, r *http.Request) {
 		s.writeNodeError(w, err)
 		return
 	}
-	if notModifiedAt(w, r, tip) {
-		return
-	}
 	if script == nil {
 		writeError(w, http.StatusNotFound, ErrNotFound)
+		return
+	}
+	if notModifiedAt(w, r, tip) {
 		return
 	}
 	writeJSON(w, http.StatusOK, script)
