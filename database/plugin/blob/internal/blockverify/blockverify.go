@@ -37,13 +37,30 @@ var ErrUndecodable = errors.New("block content could not be decoded")
 // something other than what was requested.
 var ErrHashMismatch = errors.New("block content hash mismatch")
 
+// ErrSlotMismatch means the returned bytes decode and hash correctly but
+// were produced for a different slot than requested.
+var ErrSlotMismatch = errors.New("block content slot mismatch")
+
+// ErrTypeMismatch means the returned bytes decode and hash correctly under
+// the claimed type, but the type derived from the decoded header disagrees
+// with it.
+var ErrTypeMismatch = errors.New("block content era/type mismatch")
+
 // Hash decodes cborData as a block of blockType and verifies that it hashes
-// to wantHash, returning the decoded block on success. blockType is a
-// decode hint only: a wrong type either fails to decode (ErrUndecodable) or
-// yields a different hash (ErrHashMismatch), so it cannot be used to smuggle
-// in substitute bytes.
+// to wantHash and was produced at wantSlot, returning the decoded block on
+// success. blockType is a decode hint, but is not trusted on its own: a
+// wrong type usually either fails to decode (ErrUndecodable) or yields a
+// different hash (ErrHashMismatch), but the hash alone does not pin the era
+// for Shelley and later -- those hashes cover the header alone, and
+// adjacent eras share its layout, so one set of bytes can decode under
+// several eras with an identical hash and slot (see bark's
+// verifyArchiveBlock/blockEraFromHeader, which this mirrors, for the same
+// reasoning against an untrusted archive). So the era independently
+// derived from the decoded header must also agree with blockType before
+// the caller's claimed BlockMetadata.Type can be trusted.
 func Hash(
 	blockType uint,
+	wantSlot uint64,
 	cborData []byte,
 	wantHash []byte,
 ) (gledger.Block, error) {
@@ -65,5 +82,52 @@ func Hash(
 			wantHash,
 		)
 	}
+	if decoded.SlotNumber() != wantSlot {
+		return nil, fmt.Errorf(
+			"%w: block %x is at slot %d, requested slot %d",
+			ErrSlotMismatch,
+			gotHash[:], decoded.SlotNumber(), wantSlot,
+		)
+	}
+	if err := checkEra(decoded, blockType); err != nil {
+		return nil, err
+	}
 	return decoded, nil
+}
+
+// checkEra independently derives blockType's decoded era from the block's
+// own header and rejects a disagreement with the type blockType claims.
+//
+// Byron is exempt: its hash is taken over the block-type byte followed by
+// the header, so its era is already bound by the hash check above and
+// there is nothing further to derive.
+func checkEra(decoded gledger.Block, blockType uint) error {
+	if blockType == gledger.BlockTypeByronEbb ||
+		blockType == gledger.BlockTypeByronMain {
+		return nil
+	}
+	header := decoded.Header()
+	if header == nil {
+		return fmt.Errorf(
+			"%w: block has no header to derive the era from",
+			ErrTypeMismatch,
+		)
+	}
+	derived, err := gledger.DetermineBlockType(header.Cbor())
+	if err != nil {
+		// Fail closed: an era that cannot be derived cannot be checked,
+		// and falling back to the claimed type would hand era selection
+		// back to whatever supplied blockType in the first place.
+		return fmt.Errorf(
+			"%w: deriving era from header: %w",
+			ErrTypeMismatch, err,
+		)
+	}
+	if derived != blockType {
+		return fmt.Errorf(
+			"%w: header is era %d, claimed %d",
+			ErrTypeMismatch, derived, blockType,
+		)
+	}
+	return nil
 }

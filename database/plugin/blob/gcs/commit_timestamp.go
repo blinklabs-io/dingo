@@ -19,30 +19,15 @@ package gcs
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"math/big"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/committimestamp"
 	dingosops "github.com/blinklabs-io/dingo/database/sops"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
 const commitTimestampBlobKey = "metadata_commit_timestamp"
-
-// decodeCommitTimestamp decodes a big-endian byte-encoded timestamp.
-// big.Int.Int64() is undefined for a value that does not fit in an int64,
-// so this rejects rather than silently truncates an oversized or corrupted
-// stored value.
-func decodeCommitTimestamp(data []byte) (int64, error) {
-	ts := new(big.Int).SetBytes(data)
-	if !ts.IsInt64() {
-		return 0, fmt.Errorf(
-			"commit timestamp value out of int64 range: %s",
-			ts.String(),
-		)
-	}
-	return ts.Int64(), nil
-}
 
 func (b *BlobStoreGCS) GetCommitTimestamp() (int64, error) {
 	// No nil check: NewTransaction returns a concrete *gcsTxn as a types.Txn,
@@ -63,13 +48,13 @@ func (b *BlobStoreGCS) GetCommitTimestamp() (int64, error) {
 
 	// If SOPS is not enabled, read plaintext directly
 	if !dingosops.IsEnabled() {
-		return decodeCommitTimestamp(r)
+		return committimestamp.DecodeLegacy(r)
 	}
 
 	plaintext, err := dingosops.Decrypt(r)
 	if err != nil {
 		if !json.Valid(r) && len(r) <= 8 {
-			ts, decodeErr := decodeCommitTimestamp(r)
+			ts, decodeErr := committimestamp.DecodeLegacy(r)
 			// Validate timestamp is reasonable (post-2000, not in future)
 			now := time.Now().UnixMilli()
 			if decodeErr == nil && ts > 946684800000 &&
@@ -102,7 +87,7 @@ func (b *BlobStoreGCS) GetCommitTimestamp() (int64, error) {
 		return 0, err
 	}
 
-	return decodeCommitTimestamp(plaintext)
+	return committimestamp.DecodeLegacy(plaintext)
 }
 
 func (b *BlobStoreGCS) SetCommitTimestamp(

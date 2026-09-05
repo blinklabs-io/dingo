@@ -288,19 +288,23 @@ func DecodeTxCborParts(data []byte) (*TxCborParts, error) {
 }
 
 // IsTxCborPartsStorage checks if the data is TxCborParts storage.
-// Returns true if data has the correct size and magic prefix, and its
-// IsValid byte is one of the canonical encoded values -- kept in lockstep
-// with DecodeTxCborParts's own validation so a caller can rely on this
-// check predicting whether decode will succeed.
+// Returns true if data has the correct size and magic prefix.
+//
+// This is format recognition only, deliberately independent of
+// DecodeTxCborParts's canonical-value validation (e.g. a noncanonical
+// IsValid byte): callers such as the UTxO-recovery dispatch in
+// database/utxo.go use this to decide whether a blob is DTXP-shaped at
+// all before calling DecodeTxCborParts. If this also rejected a
+// recognizable-but-corrupt record, such a caller would take its
+// not-DTXP-shaped fallback path and silently treat corrupted recovery
+// data as simply absent, instead of reaching DecodeTxCborParts and
+// surfacing a loud decode error.
 func IsTxCborPartsStorage(data []byte) bool {
 	if len(data) != TxCborPartsSize {
 		return false
 	}
-	if data[0] != txPartsMagic[0] || data[1] != txPartsMagic[1] ||
-		data[2] != txPartsMagic[2] || data[3] != txPartsMagic[3] {
-		return false
-	}
-	return data[68] == 0 || data[68] == 1
+	return data[0] == txPartsMagic[0] && data[1] == txPartsMagic[1] &&
+		data[2] == txPartsMagic[2] && data[3] == txPartsMagic[3]
 }
 
 // HasMetadata returns true if the transaction has metadata.

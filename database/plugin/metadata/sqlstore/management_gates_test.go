@@ -201,6 +201,16 @@ func TestInsertNodeSettingsGatesIfAbsentPreservesRollbackFailure(t *testing.T) {
 func TestNodeSettingsGatesRejectOutOfDomainEpochAndSlot(t *testing.T) {
 	const outOfDomain = uint64(math.MaxInt64) + 1
 
+	// requireGateTableEmpty proves rejection actually left no row behind:
+	// a regression that writes the row and still returns an error would
+	// otherwise slip past a test that only checks the error return.
+	requireGateTableEmpty := func(t *testing.T, store *Store) {
+		t.Helper()
+		gates, err := store.GetNodeSettingsGates()
+		require.NoError(t, err)
+		require.Empty(t, gates)
+	}
+
 	t.Run("SetNodeSettingsGates bad epoch", func(t *testing.T) {
 		store := newManagementTestStore(t)
 		err := store.SetNodeSettingsGates(
@@ -209,6 +219,7 @@ func TestNodeSettingsGatesRejectOutOfDomainEpochAndSlot(t *testing.T) {
 			0,
 		)
 		require.Error(t, err)
+		requireGateTableEmpty(t, store)
 	})
 
 	t.Run("SetNodeSettingsGates bad slot", func(t *testing.T) {
@@ -219,6 +230,7 @@ func TestNodeSettingsGatesRejectOutOfDomainEpochAndSlot(t *testing.T) {
 			outOfDomain,
 		)
 		require.Error(t, err)
+		requireGateTableEmpty(t, store)
 	})
 
 	t.Run("InsertNodeSettingsGateIfAbsent bad epoch", func(t *testing.T) {
@@ -227,6 +239,7 @@ func TestNodeSettingsGatesRejectOutOfDomainEpochAndSlot(t *testing.T) {
 			"start_era", "byron", outOfDomain, 0,
 		)
 		require.Error(t, err)
+		requireGateTableEmpty(t, store)
 	})
 
 	t.Run("InsertNodeSettingsGateIfAbsent bad slot", func(t *testing.T) {
@@ -235,6 +248,7 @@ func TestNodeSettingsGatesRejectOutOfDomainEpochAndSlot(t *testing.T) {
 			"start_era", "byron", 0, outOfDomain,
 		)
 		require.Error(t, err)
+		requireGateTableEmpty(t, store)
 	})
 
 	t.Run("InsertNodeSettingsGatesIfAbsent bad epoch", func(t *testing.T) {
@@ -243,6 +257,7 @@ func TestNodeSettingsGatesRejectOutOfDomainEpochAndSlot(t *testing.T) {
 			nodesettings.Values{"start_era": "byron"}, outOfDomain, 0,
 		)
 		require.Error(t, err)
+		requireGateTableEmpty(t, store)
 	})
 
 	t.Run("InsertNodeSettingsGatesIfAbsent bad slot", func(t *testing.T) {
@@ -251,5 +266,6 @@ func TestNodeSettingsGatesRejectOutOfDomainEpochAndSlot(t *testing.T) {
 			nodesettings.Values{"start_era": "byron"}, 0, outOfDomain,
 		)
 		require.Error(t, err)
+		requireGateTableEmpty(t, store)
 	})
 }

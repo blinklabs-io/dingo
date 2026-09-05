@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -972,6 +973,36 @@ func (s *Store) GetUtxosByAddress(
 		return nil, err
 	}
 	paramLimit := s.dialect.ParameterLimit()
+	// chunkQueryLimit is a fixed per-chunk SQL LIMIT, one more than
+	// maxResults, computed once rather than shrunk by the deduplicated
+	// count already collected (len(ret)). A shrinking limit is unsound
+	// across overlapping chunks: chunk A's coarse branch and chunk B's
+	// exact-address branch can both match the same physical row, so a
+	// chunk full of already-seen duplicates would leave no budget left
+	// to see a chunk's own, still-unseen matches, silently returning an
+	// incomplete answer instead of detecting the overflow. A fixed
+	// maxResults+1 per chunk avoids that: by construction, at most
+	// maxResults of a chunk's returned rows can already be in ret
+	// (ret's own length is checked against maxResults after every
+	// insertion below), so whenever a chunk's true match count exceeds
+	// maxResults+1, at least one of its returned rows is guaranteed to
+	// be new, which is what actually proves the overflow. 0 means
+	// unbounded, guarding maxResults+1 against overflow when the caller
+	// passes math.MaxInt (a query-level LIMIT would be moot at that
+	// bound regardless).
+	chunkQueryLimit := 0
+	if maxResults < math.MaxInt {
+		chunkQueryLimit = maxResults + 1
+	}
+	// queryUtxos appends one extra bind parameter for the LIMIT clause
+	// whenever chunkQueryLimit > 0. That parameter must be reserved here
+	// too, or a chunk that fills exactly to paramLimit on WHERE-clause
+	// args alone produces a statement with paramLimit+1 total parameters,
+	// which the dialect may reject.
+	limitParamReserve := 0
+	if chunkQueryLimit > 0 {
+		limitParamReserve = 1
+	}
 	type utxoKey struct {
 		txId string
 		idx  uint32
@@ -984,16 +1015,12 @@ func (s *Store) GetUtxosByAddress(
 		if len(branches) == 0 {
 			return nil
 		}
-		// Ask for one more row than the remaining budget so an
-		// over-budget result is detected instead of silently truncated
-		// into a partial answer that looks complete.
-		chunkLimit := maxResults - len(ret) + 1
 		utxos, err := s.queryUtxos(
 			txn,
 			"utxo.deleted_slot = 0 AND ("+strings.Join(branches, " OR ")+")",
 			args,
 			"",
-			chunkLimit,
+			chunkQueryLimit,
 		)
 		if err != nil {
 			return err
@@ -1028,7 +1055,7 @@ func (s *Store) GetUtxosByAddress(
 			return nil, err
 		}
 		if len(branches) > 0 &&
-			(len(args)+len(branchArgs) > paramLimit ||
+			(len(args)+len(branchArgs)+limitParamReserve > paramLimit ||
 				len(branches)+len(branchOrs) >= max(1, paramLimit/2)) {
 			if err := runQuery(); err != nil {
 				return nil, err

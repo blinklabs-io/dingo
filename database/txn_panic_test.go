@@ -122,6 +122,62 @@ func TestTxnDoCommitPanicReleasesLockAndBarrier(t *testing.T) {
 	)
 }
 
+type panicCommitAndRollbackTxn struct{}
+
+func (*panicCommitAndRollbackTxn) Commit() error {
+	panic("commit panic")
+}
+
+func (*panicCommitAndRollbackTxn) Rollback() error {
+	panic("rollback panic")
+}
+
+// TestTxnDoCommitAndRollbackBothPanicReturnsErrorAndReleasesBarrier proves
+// Do never re-panics even when its own recovery rollback panics too: Do's
+// top-level recover already consumed the Commit panic, so a second,
+// unrelated panic from t.Rollback() (or the underlying store's Rollback it
+// calls) would otherwise propagate straight out of that already-executing
+// deferred function -- the outermost frame in Do -- and crash the
+// goroutine instead of returning. It also proves the commit barrier is
+// still released: rollback() releases it via a defer (finishLocked), which
+// runs during the panic unwind through rollback() regardless of whether
+// the underlying store's Rollback call panicked partway through.
+func TestTxnDoCommitAndRollbackBothPanicReturnsErrorAndReleasesBarrier(
+	t *testing.T,
+) {
+	db := &Database{
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	txn := &Txn{
+		db:          db,
+		metadataTxn: &panicCommitAndRollbackTxn{},
+		readWrite:   true,
+	}
+	acquireCommitBarrier(txn, true)
+
+	var err error
+	require.NotPanics(t, func() {
+		err = txn.Do(func(*Txn) error { return nil })
+	})
+	require.ErrorIs(t, err, ErrTxnPanic)
+	require.ErrorContains(t, err, "commit panic")
+	require.ErrorContains(t, err, "rollback panic")
+
+	// The barrier must not be leaked: PauseCommits must still be able to
+	// acquire it, and a writer queued behind that pause must open
+	// promptly after resume, exactly as in
+	// TestTxnDoCommitPanicReleasesLockAndBarrier above.
+	paused := make(chan func(), 1)
+	go func() { paused <- db.PauseCommits() }()
+	resume := testutil.RequireReceive(
+		t,
+		paused,
+		time.Second,
+		"PauseCommits must acquire after panic cleanup",
+	)
+	resume()
+}
+
 // panicFnTxn is a no-op metadata Txn used where the panic under test comes
 // from the function passed to Do rather than from Commit.
 type panicFnTxn struct{}

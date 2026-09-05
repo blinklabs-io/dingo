@@ -15,6 +15,8 @@
 package badger
 
 import (
+	"encoding/binary"
+	"math"
 	"math/big"
 	"testing"
 
@@ -56,6 +58,32 @@ func TestGetCommitTimestampRejectsOversizedLegacyValue(t *testing.T) {
 	require.NoError(
 		t,
 		store.Set(txn, []byte(commitTimestampBlobKey), oversized),
+	)
+	require.NoError(t, txn.Commit())
+
+	_, err = store.GetCommitTimestamp()
+	require.Error(t, err)
+}
+
+// TestGetCommitTimestampRejectsFixedWidthValueAboveMaxInt64 proves the
+// primary 8-byte fixed-width path also rejects an out-of-range value
+// instead of silently wrapping it into a negative int64: a raw
+// int64(uint64) cast is undefined once the stored value's high bit is
+// set, and only the separate legacy variable-length fallback path was
+// originally guarded against that -- this stored value is exactly 8
+// bytes, so it takes the fixed-width path, not the fallback.
+func TestGetCommitTimestampRejectsFixedWidthValueAboveMaxInt64(t *testing.T) {
+	store, err := New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	var raw [8]byte
+	binary.BigEndian.PutUint64(raw[:], uint64(math.MaxInt64)+1)
+
+	txn := store.NewTransaction(true)
+	require.NoError(
+		t,
+		store.Set(txn, []byte(commitTimestampBlobKey), raw[:]),
 	)
 	require.NoError(t, txn.Commit())
 

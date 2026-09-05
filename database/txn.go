@@ -391,13 +391,23 @@ func (t *Txn) Do(fn func(*Txn) error) (err error) {
 				"panic in transaction function, ensuring rollback",
 				r,
 			)
-			// Attempt rollback to ensure transaction is cleaned up
-			if rbErr := t.Rollback(); rbErr != nil && t.logger() != nil {
-				t.logger().Error(
-					"rollback failed after panic",
-					"panic", fmt.Sprintf("%v", r),
-					"rollback_error", rbErr,
+			// Attempt rollback to ensure transaction is cleaned up. This
+			// call is itself already inside Do's one recovery defer, so a
+			// second panic from Rollback (or the underlying store's
+			// Rollback it calls) would otherwise propagate straight out
+			// of this already-executing deferred function -- the
+			// outermost frame in Do -- and crash the goroutine instead of
+			// returning the converted error below. safeRollback recovers
+			// that second panic too, so Do always returns rather than
+			// ever re-panicking.
+			if rbErr := safeRollback(t); rbErr != nil {
+				logTxnPanic(t.logger(), "rollback failed after panic", rbErr)
+				err = fmt.Errorf(
+					"%w (rollback also failed: %w)",
+					NewTxnPanicError("transaction function", r),
+					rbErr,
 				)
+				return
 			}
 			err = NewTxnPanicError("transaction function", r)
 		}
@@ -417,6 +427,19 @@ func (t *Txn) Do(fn func(*Txn) error) (err error) {
 		return fmt.Errorf("commit failed: %w", commitErr)
 	}
 	return nil
+}
+
+// safeRollback calls t.Rollback(), recovering and converting to an error
+// any panic Rollback itself (or the underlying blob/metadata store's
+// Rollback it calls) raises. See the comment at its call site in Do for
+// why this recovery must be nested rather than relying on Do's own.
+func safeRollback(t *Txn) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("rollback panicked: %v", r)
+		}
+	}()
+	return t.Rollback()
 }
 
 func (t *Txn) Commit() error {
@@ -552,6 +575,14 @@ func (t *Txn) rollback() error {
 	if t.finished {
 		return nil
 	}
+	// Deferred, not a plain trailing call: a panicking provider Rollback
+	// below (blobTxn or metadataTxn) must not skip marking the
+	// transaction finished and releasing its commit barrier hold, or
+	// that hold leaks for the process's lifetime -- see finishLocked's
+	// own doc comment. Do's safeRollback recovers the panic that skips
+	// past this defer's own call site, but only after this defer has
+	// already run during the panic unwind.
+	defer t.finishLocked()
 	var errs []error
 	if t.blobTxn != nil {
 		if err := t.blobTxn.Rollback(); err != nil {
@@ -563,7 +594,6 @@ func (t *Txn) rollback() error {
 			errs = append(errs, fmt.Errorf("metadata rollback: %w", err))
 		}
 	}
-	t.finishLocked()
 	return errors.Join(errs...)
 }
 

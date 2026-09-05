@@ -72,4 +72,23 @@ func TestGetBlockVerifiesContent(t *testing.T) {
 		_, _, err := store.GetBlock(txn, 1010, requestedHash[:])
 		require.ErrorIs(t, err, blockverify.ErrHashMismatch)
 	})
+
+	t.Run("synthetic ID=0 entries skip verification", func(t *testing.T) {
+		// Mirrors Database.SetGenesisCbor: genesis UTxO CBOR and Leios
+		// endorser-block manifests share this same bp/bp..._metadata key
+		// layout with ID=0, but are not decodable ledger blocks, so
+		// GetBlock must not attempt to verify them.
+		notABlock := []byte("genesis UTxO CBOR, not a block")
+		key := []byte("synthetic-key-hash")
+		txn := store.NewTransaction(true)
+		require.NoError(t, store.SetBlock(
+			txn, 2000, key, notABlock,
+			0, 0, 0, nil,
+		))
+
+		gotCbor, meta, err := store.GetBlock(txn, 2000, key)
+		require.NoError(t, err)
+		require.Equal(t, notABlock, gotCbor)
+		require.Equal(t, uint64(0), meta.ID)
+	})
 }
