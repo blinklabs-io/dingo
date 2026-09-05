@@ -952,10 +952,11 @@ type LedgerState struct {
 	// discarded rather than applied (issue #3771). Guarded by
 	// chainsyncBlockfetchMutex, like the rest of the per-batch state.
 	blockfetchBatchChainGeneration uint64
-	// chainRollbackGeneration counts primary-chain rollbacks. It is bumped
-	// before the chain is changed, so a reader that has observed a rollback's
-	// effect on the chain always observes the new value. Written by the
-	// rollback paths and read by the blockfetch paths, so it is atomic.
+	// chainRollbackGeneration counts attempted primary-chain rollbacks,
+	// including failed attempts. It is bumped before the chain is changed, so
+	// a reader that has observed a rollback's effect on the chain always
+	// observes the new value. Written by the rollback paths and read by the
+	// blockfetch paths, so it is atomic.
 	chainRollbackGeneration atomic.Uint64
 	// Failures to obtain one specific queued header range, keyed by its
 	// start point and counting both a NoBlocks reply (a synchronous
