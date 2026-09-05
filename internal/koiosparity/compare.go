@@ -83,6 +83,31 @@ const (
 	CategoryAcctDeregistered = "acct_deregistered"
 )
 
+// AllCategories is every mismatch category above, in one place.
+//
+// severityOf classifies exactly these values, and the tests that guard the
+// classification iterate this slice rather than restating it. A hand-written
+// second copy is how a category comes to be classified by DetermineStatus and
+// missed by CountSignificant (or the reverse) with every test still green, so
+// the list exists once and TestAllCategoriesCoversEveryConstant pins it to the
+// const block above.
+var AllCategories = []string{
+	CategoryValueMismatch,
+	CategoryPoolOnlyDingo,
+	CategoryPoolOnlyKoios,
+	CategoryReferenceLag,
+	CategoryDBError,
+	CategoryDBMissing,
+	CategoryPoolDeparted,
+	CategoryAcctOnlyDingo,
+	CategoryAcctOnlyKoios,
+	CategoryAcctDuplicate,
+	CategoryAcctCoverageIncomplete,
+	CategoryAcctZeroReward,
+	CategoryAcctNewlyRegistered,
+	CategoryAcctDeregistered,
+}
+
 // Epoch check status values.
 const (
 	StatusPass  = "PASS"
