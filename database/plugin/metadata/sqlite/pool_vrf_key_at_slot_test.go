@@ -122,6 +122,58 @@ func TestGetPoolVrfKeyHashAtSlotBeforeFirstRegistration(t *testing.T) {
 	assert.Nil(t, got)
 }
 
+// TestGetPoolEarliestVrfKeyHashAtSlotResolvesTheFirstRegistration covers the
+// ascending sibling, which answers a different question from
+// GetPoolVrfKeyHashAtSlot: not "which registration was in force at this slot"
+// but "which one did the pool first make at or before it".
+//
+// That is what cardano-ledger's psStakePools holds for a pool whose first
+// registration lands inside the epoch a snapshot was captured in. The POOL rule
+// inserts a first registration immediately and defers only a re-registration
+// through psFutureStakePoolParams, so a re-registration made in the same epoch
+// is not the key the snapshot carries — and resolving the latest instead of the
+// earliest would pick exactly that deferred key.
+func TestGetPoolEarliestVrfKeyHashAtSlotResolvesTheFirstRegistration(
+	t *testing.T,
+) {
+	t.Parallel()
+	store, raw := newSharedSQLStore(t)
+
+	pool := bytes.Repeat([]byte{0x44}, 28)
+	firstKey := bytes.Repeat([]byte{0xC3}, 32)
+	secondKey := bytes.Repeat([]byte{0xB5}, 32)
+	thirdKey := bytes.Repeat([]byte{0xFA}, 32)
+
+	seedPoolRegistration(t, raw, pool, firstKey, 3_150_000)
+	seedPoolRegistration(t, raw, pool, secondKey, 3_160_000)
+	seedPoolRegistration(t, raw, pool, thirdKey, 3_290_000)
+
+	// Capture slot 3196799 sees the first two registrations. The snapshot
+	// carries the first, because the second was deferred past SNAP.
+	got, ok, err := store.GetPoolEarliestVrfKeyHashAtSlot(pool, 3_196_799, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, firstKey, got,
+		"the earliest registration at or before the capture is the one "+
+			"psStakePools holds")
+	assert.NotEqual(t, secondKey, got,
+		"a re-registration in the same epoch is deferred past SNAP")
+
+	// Widening the slot must not change the answer: the question is anchored
+	// at the pool's first registration, not at the slot.
+	got, ok, err = store.GetPoolEarliestVrfKeyHashAtSlot(pool, 3_290_000, nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, firstKey, got)
+
+	// Before the pool ever registered there is no key, matching the
+	// descending sibling's absent case.
+	got, ok, err = store.GetPoolEarliestVrfKeyHashAtSlot(pool, 3_149_999, nil)
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.Nil(t, got)
+}
+
 // Two registrations for one pool at the same slot are not representable:
 // pool_registration is UNIQUE on (pool_id, added_slot). The query still orders
 // by block and certificate index after added_slot so it cannot disagree with
