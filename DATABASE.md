@@ -1660,8 +1660,9 @@ resuming commits. Every combined write transaction holds the commit barrier's
 shared side for its whole lifetime. Multi-transaction primary-chain rollbacks
 hold a separate destructive-transition barrier from their blob-only block
 deletes through the later ledger metadata truncation; `PauseCommitsContext`
-takes that barrier's shared side before the commit barrier, so it cannot open in
-the gap without making ordinary or nested blob-only writes participate. Both
+takes the destructive-transition barrier's shared side before the commit
+barrier, so it cannot open between the blob-only deletion and the metadata
+truncation. Both
 views therefore describe one logical database boundary and remain fixed for the
 lifetime of the streamed query; commits are paused only for construction, not
 while results are streamed.

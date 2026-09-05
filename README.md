@@ -256,10 +256,11 @@ storageMode: "api"
 Dingo includes four general-purpose external APIs, an Acropolis-compatible
 Midnight state service, and Bark. UTxO RPC, Blockfrost, Kupo, and Mesh are
 client-facing APIs and require `storageMode: "api"`.
-Their built-in providers are registered with the instance-owned plugin host,
-start on their provider defaults in API mode, and can be configured
+Their built-in providers are registered with the instance-owned plugin host
+and can be configured
 independently under `plugins.api`. Set an individual port to 0 to disable that
-interface.
+interface. Kupo is disabled by default and must have a nonzero port to enable
+it; the other providers start on their defaults in API mode.
 
 Midnight indexing and serving are separate opt-ins. `midnight.enabled` starts
 the indexer, while `midnight.serverEnabled` starts the gRPC listener for rows

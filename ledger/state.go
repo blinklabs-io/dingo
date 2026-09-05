@@ -3469,8 +3469,10 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 		if err := ls.validateAndEmitRollbackUndo(point); err != nil {
 			return err
 		}
-		finishTransition := ls.db.BeginDestructiveTransition()
-		defer finishTransition()
+		if ls.db != nil {
+			finishTransition := ls.db.BeginDestructiveTransition()
+			defer finishTransition()
+		}
 		evts, rbErr := ls.chain.RollbackDeferred(point)
 		if rbErr != nil {
 			return rbErr
@@ -3484,6 +3486,9 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 		return nil
 	}()
 	if err != nil {
+		if len(rollbackEvents) > 0 {
+			pubs.drainChain(ls.chain)
+		}
 		return err
 	}
 	// Publish the rollback's chain.update after chainsyncMutex is released.

@@ -375,14 +375,11 @@ func BlockPointBySlotTxn(txn *Txn, slot uint64) (ocommon.Point, error) {
 		if id == 0 {
 			continue
 		}
-		indexed, err := txn.DB().BlockPointByIndex(id, txn)
+		matches, err := canonicalPointForID(txn, point, id)
 		if err != nil {
-			if errors.Is(err, models.ErrBlockNotFound) {
-				continue
-			}
 			return ocommon.Point{}, err
 		}
-		if indexed.Slot != point.Slot || !bytes.Equal(indexed.Hash, point.Hash) {
+		if !matches {
 			continue
 		}
 		if !matched || id > retID {
@@ -454,14 +451,11 @@ func BlockPointAtOrBeforeSlotTxn(
 		if id == 0 {
 			continue
 		}
-		indexed, err := txn.DB().BlockPointByIndex(id, txn)
+		matches, err := canonicalPointForID(txn, point, id)
 		if err != nil {
-			if errors.Is(err, models.ErrBlockNotFound) {
-				continue
-			}
 			return ocommon.Point{}, err
 		}
-		if indexed.Slot == point.Slot && bytes.Equal(indexed.Hash, point.Hash) {
+		if matches {
 			return point, nil
 		}
 	}
@@ -469,6 +463,20 @@ func BlockPointAtOrBeforeSlotTxn(
 		return ocommon.Point{}, err
 	}
 	return ocommon.Point{}, models.ErrBlockNotFound
+}
+
+func canonicalPointForID(txn *Txn, point ocommon.Point, id uint64) (bool, error) {
+	if id == 0 {
+		return false, nil
+	}
+	indexed, err := txn.DB().BlockPointByIndex(id, txn)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return indexed.Slot == point.Slot && bytes.Equal(indexed.Hash, point.Hash), nil
 }
 
 func BlockByHash(db *Database, hash []byte) (models.Block, error) {

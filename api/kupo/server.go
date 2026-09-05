@@ -34,6 +34,7 @@ type Server struct {
 	node     KupoNode
 	listener *apilistener.Listener
 	verifier *apiauth.Verifier
+	cancel   context.CancelFunc
 }
 
 // New creates a Kupo-compatible server.
@@ -117,8 +118,11 @@ func registerRoutes(mux *http.ServeMux, prefix string, s *Server) {
 
 // Start binds the configured HTTP listener and serves in the background.
 func (s *Server) Start(ctx context.Context) error {
+	serveCtx, cancel := context.WithCancel(ctx)
+	s.cancel = cancel
 	verifier, err := apiauth.NewVerifier(s.config.Auth)
 	if err != nil {
+		cancel()
 		return fmt.Errorf("kupo: %w", err)
 	}
 	server, bindDone, err := s.listener.Publish(func() *http.Server {
@@ -135,7 +139,7 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	go func() { //nolint:gosec // graceful shutdown intentionally outlives ctx
-		<-ctx.Done()
+		<-serveCtx.Done()
 		job, _ := s.listener.TakeIf(server)
 		if job == nil {
 			return
@@ -151,6 +155,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 	served, err := s.listener.Bind(server, bindDone, s.config.TLS)
 	if err != nil {
+		cancel()
 		s.listener.Unpublish(server)
 		return err
 	}
@@ -162,6 +167,10 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Stop gracefully stops the API and waits until its socket is released.
 func (s *Server) Stop(ctx context.Context) error {
+	if s.cancel != nil {
+		s.cancel()
+		s.cancel = nil
+	}
 	job, inFlight := s.listener.Take()
 	if job == nil {
 		return s.listener.AwaitTeardown(ctx, inFlight)

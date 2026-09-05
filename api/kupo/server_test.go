@@ -391,6 +391,8 @@ func TestV1RouteAliases(t *testing.T) {
 	node := &mockNode{
 		snapshotTip: Point{SlotNo: 42, HeaderHash: strings.Repeat("aa", 32)},
 		healthCode:  http.StatusOK,
+		datum:       &Datum{Datum: "d87980"},
+		script:      &Script{Language: "native", Script: "00"},
 	}
 	server := newTestServer(node)
 	for _, test := range []struct {
@@ -452,6 +454,23 @@ func TestV1RouteAliases(t *testing.T) {
 	response := serve(t, server, http.MethodPost, "/v1/health", nil)
 	if response.Code != http.StatusNotAcceptable {
 		t.Fatalf("POST /v1/health status = %d", response.Code)
+	}
+}
+
+func TestDatumAndScriptNotFound(t *testing.T) {
+	server := newTestServer(&mockNode{
+		snapshotTip: Point{SlotNo: 42, HeaderHash: strings.Repeat("aa", 32)},
+	})
+	for _, target := range []string{
+		"/datums/" + strings.Repeat("11", 32),
+		"/scripts/" + strings.Repeat("22", 28),
+	} {
+		t.Run(target, func(t *testing.T) {
+			response := serve(t, server, http.MethodGet, target, nil)
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want 404", response.Code)
+			}
+		})
 	}
 }
 

@@ -188,6 +188,8 @@ INSERT INTO transaction_metadata_label (
 	)
 	require.NoError(t, err)
 	require.Len(t, byAddress, 2)
+	require.Equal(t, byte(0x01), byAddress[0].TxId[0])
+	require.Equal(t, byte(0x02), byAddress[1].TxId[0])
 
 	byAsset, err := store.GetUtxosWithHistory(
 		&models.UtxoHistoryQuery{
@@ -200,6 +202,8 @@ INSERT INTO transaction_metadata_label (
 	)
 	require.NoError(t, err)
 	require.Len(t, byAsset, 2)
+	require.Equal(t, byte(0x01), byAsset[0].TxId[0])
+	require.Equal(t, byte(0x02), byAsset[1].TxId[0])
 
 	metadataLabel := uint64(42)
 	byMetadata, err := store.GetUtxosWithHistory(

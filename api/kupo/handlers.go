@@ -294,6 +294,10 @@ func (s *Server) handleDatum(w http.ResponseWriter, r *http.Request) {
 	if notModifiedAt(w, r, tip) {
 		return
 	}
+	if datum == nil {
+		writeError(w, http.StatusNotFound, ErrNotFound)
+		return
+	}
 	writeJSON(w, http.StatusOK, datum)
 }
 
@@ -309,6 +313,10 @@ func (s *Server) handleScript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if notModifiedAt(w, r, tip) {
+		return
+	}
+	if script == nil {
+		writeError(w, http.StatusNotFound, ErrNotFound)
 		return
 	}
 	writeJSON(w, http.StatusOK, script)

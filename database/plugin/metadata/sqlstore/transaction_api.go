@@ -598,10 +598,12 @@ func storeTransactionIndexedScripts(
 	transaction lcommon.Transaction,
 	slot uint64,
 ) error {
-	outputs := append(
-		[]lcommon.TransactionOutput(nil),
-		transaction.Outputs()...,
-	)
+	outputs := make([]lcommon.TransactionOutput, 0)
+	for _, produced := range transaction.Produced() {
+		if produced.Output != nil {
+			outputs = append(outputs, produced.Output)
+		}
+	}
 	outputs = append(
 		outputs,
 		lcommon.SubTransactionOutputsFromTransaction(transaction)...,
