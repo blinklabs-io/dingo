@@ -7021,7 +7021,9 @@ The client side (`bark.BlobStoreBark`) wraps the configured local blob store.
 `types.ErrHistoryExpired` or missing historical block CBOR by calling the
 remote Bark archive and downloading the signed URL. A block the archive answers
 under `not_found` surfaces as `types.ErrBlobKeyNotFound`, the same error a
-local blob store reports for a missing block. Bark does not decide which
+local blob store reports for a missing block, but only when the echoed
+reference is the `(slot, hash)` that was requested: a returned block is
+re-verified against the request, so an absence must be too. Bark does not decide which
 local blocks expire; `internal/historyexpiry.Pruner` owns that lifecycle when
 `historyExpiry.enabled` is configured.
 
