@@ -292,6 +292,25 @@ func TestAdoptLocalForgedSiblingRejectsNonSiblings(t *testing.T) {
 		assert.False(t, adopted)
 	})
 
+	t.Run("same block number at a different slot", func(t *testing.T) {
+		// A same-block-number competitor one slot above the tip is an
+		// ordinary fork, not the equal-slot (EQ) case this path serves.
+		// It would win or lose the Praos tiebreak on its merits, but
+		// arbitrating it here would adopt a fork through a one-block
+		// rollback driven from the forge loop instead of through
+		// chainsync's fork resolution.
+		f := newSiblingFixture(t)
+		offSlot := newSiblingTestBlock(
+			t, f.rival.BlockNumber(), f.rival.SlotNumber()+1,
+			f.parent.Hash(), 0x33, 0x33, 1,
+		)
+		require.Greater(t, offSlot.SlotNumber(), siblingParentSlot)
+		adopted, err := f.ls.AdoptLocalForgedSibling(offSlot)
+		require.ErrorIs(t, err, ErrNotChainTipSibling)
+		require.ErrorContains(t, err, "is not the chain tip's slot")
+		assert.False(t, adopted)
+	})
+
 	t.Run("the block already at the tip", func(t *testing.T) {
 		f := newSiblingFixture(t)
 		adopted, err := f.ls.AdoptLocalForgedSibling(f.rival)
