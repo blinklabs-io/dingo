@@ -170,8 +170,15 @@ func (c *Chain) TipPredecessor() (
 	}
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	c.manager.mutex.RLock()
-	defer c.manager.mutex.RUnlock()
+	// Both lookups below go through blockByIndexLocked, which resolves a
+	// common-prefix index against the primary chain when this chain is an
+	// in-memory fork. That read needs the primary-chain lock as well as the
+	// manager lock, in the chain -> primary -> manager order this helper
+	// establishes; taking manager.mutex directly would let a concurrent
+	// primary-chain mutation move the common prefix between the two lookups
+	// and yield a tip and a parent that never sat next to each other.
+	unlockBlockIndexReadLocks := c.lockBlockIndexReadLocks()
+	defer unlockBlockIndexReadLocks()
 	// initialBlockIndex is the first block; it has no predecessor on this
 	// chain, and neither does an empty chain.
 	if c.tipBlockIndex <= initialBlockIndex {
@@ -189,8 +196,14 @@ func (c *Chain) TipPredecessor() (
 	// chain advertises. The chain maintains all three invariants, but a caller
 	// of this function is about to sign a block against the answer, so a
 	// disagreement is reported as "no context" rather than resolved.
+	//
+	// The parent must also sit strictly below the tip's slot. That is the
+	// ordering contract this function's doc comment states, and the caller
+	// signs against the answer: a parent whose slot is at or above the
+	// contested slot produces a block Praos and envelope validation reject.
 	if !bytes.Equal(tipBlock.Hash, c.currentTip.Point.Hash) ||
-		!bytes.Equal(tipBlock.PrevHash, parentBlock.Hash) {
+		!bytes.Equal(tipBlock.PrevHash, parentBlock.Hash) ||
+		parentBlock.Slot >= tipBlock.Slot {
 		return ocommon.Point{}, ochainsync.Tip{}, false
 	}
 	return ocommon.NewPoint(parentBlock.Slot, parentBlock.Hash),
