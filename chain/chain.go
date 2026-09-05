@@ -518,6 +518,21 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 		// when a later block in the batch fails.
 		pendingEvents := make([]event.Event, 0, batchSize)
 		txn := c.manager.db.BlobTxn(true)
+		// addBlockLocked advances c.currentTip, c.tipBlockIndex,
+		// c.headers and c.blocks per block, but nothing it wrote is
+		// durable until txn.Do commits. Both failure modes therefore
+		// leave the in-memory chain ahead of storage: a later block in
+		// the batch can be rejected inside the closure, and txn.Do runs
+		// Commit *after* the closure returns and after the chain locks
+		// are released. Snapshot the pre-batch state so either one can
+		// be undone -- see addRawBlocks, which stages the same way.
+		var (
+			snapshotTaken      bool
+			savedTip           ochainsync.Tip
+			savedTipBlockIndex uint64
+			savedHeaders       []queuedHeader
+			savedBlocks        []ocommon.Point
+		)
 		err := txn.Do(func(txn *database.Txn) error {
 			c.mutex.Lock()
 			defer c.mutex.Unlock()
@@ -526,6 +541,13 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 			if err := c.reconcile(); err != nil {
 				return fmt.Errorf("reconcile chain: %w", err)
 			}
+			savedTip = c.currentTip
+			savedTipBlockIndex = c.tipBlockIndex
+			savedHeaders = slices.Clone(c.headers)
+			if !c.persistent {
+				savedBlocks = slices.Clone(c.blocks)
+			}
+			snapshotTaken = true
 			for _, tmpBlock := range blocks[batchOffset : batchOffset+batchSize] {
 				evt, err := c.addBlockLocked(
 					tmpBlock,
@@ -544,6 +566,23 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 			return nil
 		})
 		if err != nil {
+			// Restore under the same locks the closure held. This
+			// covers both the closure-error path and the later
+			// Commit-failure path; running it after a closure error
+			// is a safe no-op because the closure wrote nothing the
+			// snapshot does not already describe.
+			if snapshotTaken {
+				c.mutex.Lock()
+				c.manager.mutex.Lock()
+				c.currentTip = savedTip
+				c.tipBlockIndex = savedTipBlockIndex
+				c.headers = savedHeaders
+				if !c.persistent {
+					c.blocks = savedBlocks
+				}
+				c.manager.mutex.Unlock()
+				c.mutex.Unlock()
+			}
 			return err
 		}
 		c.notifyWaitingIterators()

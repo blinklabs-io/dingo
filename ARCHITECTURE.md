@@ -483,6 +483,28 @@ be read from the committed state. If rollback wins, truncation and the ledger
 rewind make the waiting block batch stale, and the tip recheck rejects it
 instead of publishing Apply after Undo.
 
+Both mutation paths stage their in-memory state against the durable commit.
+`Chain.AddBlocks` and `Chain.addRawBlocks` advance `currentTip`,
+`tipBlockIndex`, the queued headers, and the ephemeral block buffer per block
+inside the batch transaction, so they snapshot those fields first and restore
+them on either failure mode: a block the closure rejects, and the `Commit`
+`txn.Do` runs after the closure has returned and released the chain locks.
+Without the restore a rolled-back batch leaves the chain naming a tip whose
+block the database no longer holds.
+
+The rollback halves cannot be staged the same way, because they commit
+separately: `rollbackChainAndStateDeferred` truncates the primary chain first
+(`chain.RollbackDeferred`, whose per-block deletions commit as they go) and
+rolls the ledger back second (`LedgerState.rollback`). A ledger failure after
+that point cannot be undone, so it is invalidated explicitly instead — the
+continuation-audit window is discarded and the failure is reported as
+`ErrChainTruncatedLedgerRollbackFailed`. That identity is deliberately distinct
+from the refusals that mean no state changed (`models.ErrBlockNotFound`,
+`chain.ErrRollbackExceedsSecurityParam`, `ErrRollbackExceedsMithrilBoundary`),
+each of which `handleEventChainsyncRollback` and `tryResolveFork` recover from
+with a plain re-intersect; recovering that way here would resume from a ledger
+tip whose block the chain has already deleted.
+
 Getting this wrong is subtle, so the constraint is worth stating plainly:
 **the undo events must be emitted before the truncation, by the rollback
 path.** `handleEventChainUpdate` deliberately does *not* emit them, even
