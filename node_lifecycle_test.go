@@ -881,7 +881,6 @@ func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 	// Wait for the provider-owned background close before TempDir cleanup. A
 	// scratch runtime can acquire the same path only after the old Badger lock
 	// is released; the cancelled Node itself remains stopped and never reopens.
-	var reopenCloseErr error
 	require.Eventually(t, func() bool {
 		deps := n.storageDependencies(n.config.dataDir)
 		deps.PromRegistry = n.config.promRegistry
@@ -894,10 +893,8 @@ func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 		if openErr != nil {
 			return false
 		}
-		reopenCloseErr = runtime.Close(context.Background())
-		return true
+		return runtime.Close(context.Background()) == nil
 	}, 5*time.Second, 10*time.Millisecond)
-	require.NoError(t, reopenCloseErr)
 }
 
 // TestLiveTruncateResumesAfterCompletedStorageStopFailure proves that an

@@ -218,10 +218,10 @@ func TestRewardSeedFailureRoundTripAndRollback(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "pool has no reward account", reason)
 	require.NoError(t, store.SaveRewardSeedFailure(
-		12, "mark", "pool has no parameters", 200, nil,
+		12, "mark", "pool has no reward account", 50, nil,
 	))
 	require.NoError(t, store.SaveRewardSeedFailure(
-		12, "mark", "pool has no parameters", 50, nil,
+		12, "mark", "pool has no parameters", 200, nil,
 	))
 	require.NoError(t, store.SaveRewardSeedFailure(
 		11, "mark", "missing parameters", 200, nil,
@@ -232,7 +232,7 @@ func TestRewardSeedFailureRoundTripAndRollback(t *testing.T) {
 	require.Equal(t, "pool has no reward account", reason)
 	reason, err = store.GetRewardSeedFailure(12, "mark", nil)
 	require.NoError(t, err)
-	require.Equal(t, "pool has no parameters", reason)
+	require.Equal(t, "pool has no reward account", reason)
 	reason, err = store.GetRewardSeedFailure(11, "mark", nil)
 	require.NoError(t, err)
 	require.Empty(t, reason)

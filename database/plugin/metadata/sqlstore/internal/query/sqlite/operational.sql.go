@@ -4217,7 +4217,11 @@ INSERT INTO reward_seed_failure (
     epoch, snapshot_type, failure_reason, captured_slot
 ) VALUES (?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type) DO UPDATE SET
-    failure_reason = excluded.failure_reason,
+    failure_reason = CASE
+        WHEN excluded.captured_slot < reward_seed_failure.captured_slot
+        THEN excluded.failure_reason
+        ELSE reward_seed_failure.failure_reason
+    END,
     captured_slot = MIN(reward_seed_failure.captured_slot, excluded.captured_slot)
 `
 
