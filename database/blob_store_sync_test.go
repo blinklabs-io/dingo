@@ -75,6 +75,7 @@ func TestSetBlobStoreConcurrentWithReaders(t *testing.T) {
 	key := []byte("blob-store-sync-test-key")
 	want := []byte("blob-store-sync-test-value")
 	writeTxn := db.BlobTxn(true)
+	t.Cleanup(writeTxn.Release)
 	require.NoError(t, base.Set(writeTxn.Blob(), key, want))
 	require.NoError(t, writeTxn.Commit())
 
@@ -361,6 +362,7 @@ func TestResolveTxCborUsesTransactionStore(t *testing.T) {
 	// the single GetTx this test is measuring.
 	want := []byte{0x82, 0x01, 0x02}
 	writeTxn := db.BlobTxn(true)
+	t.Cleanup(writeTxn.Release)
 	require.NoError(t, base.SetTx(writeTxn.Blob(), txHash[:], want))
 	require.NoError(t, writeTxn.Commit())
 
