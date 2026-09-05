@@ -20,7 +20,7 @@ import (
 	"testing"
 
 	"cloud.google.com/go/storage"
-	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/blockverify"
+	"github.com/blinklabs-io/dingo/internal/blockverify"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/ouroboros-mock/fixtures"

@@ -15,19 +15,17 @@
 package integration
 
 import (
-	"bytes"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
-	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
+	"github.com/blinklabs-io/dingo/internal/blockverify"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 )
 
@@ -115,57 +113,19 @@ func loadBlockData(numBlocks int) ([][]byte, error) {
 	return cbors, nil
 }
 
-// verifyBlockSelfConsistent checks the same things S3/GCS's own
-// blockverify.Hash does (database/plugin/blob/internal/blockverify, which
-// this mirrors without importing across that internal package boundary):
-// decoding block.Cbor under block.Type must reproduce block.Hash and
-// block.Slot, and -- since NewBlockFromCbor treats Type as a decode hint,
-// and for Shelley and later eras the block hash covers only the header,
-// which adjacent eras share the layout of, so decoding under an
-// adjacent-but-wrong era can still succeed and reproduce the same hash and
-// slot -- the era independently re-derived from the decoded header
-// (Byron exempt, matching blockverify.checkEra: its hash already covers
-// the block-type byte) must also match block.Type.
+// verifyBlockSelfConsistent proves block's (Hash, Type, Slot) are what
+// blockverify.Hash -- the same production check S3/GCS's own GetBlock
+// runs -- would accept, by calling it directly rather than maintaining a
+// second copy of its logic. Checking only that block.Cbor decodes under
+// block.Type would not be enough on its own: NewBlockFromCbor treats Type
+// as a decode hint, and for Shelley and later eras the block hash covers
+// only the header, which adjacent eras share the layout of, so decoding
+// under an adjacent-but-wrong era can still succeed and reproduce the
+// same hash and slot -- exactly the case blockverify.Hash's own era check
+// exists to catch.
 func verifyBlockSelfConsistent(block immutable.Block) error {
-	decoded, err := gledger.NewBlockFromCbor(block.Type, block.Cbor)
-	if err != nil {
-		return fmt.Errorf("decode: %w", err)
-	}
-	gotHash := decoded.Hash()
-	if !bytes.Equal(gotHash[:], block.Hash) {
-		return fmt.Errorf(
-			"hash mismatch: got %x, recorded %x",
-			gotHash[:],
-			block.Hash,
-		)
-	}
-	if decoded.SlotNumber() != block.Slot {
-		return fmt.Errorf(
-			"slot mismatch: got %d, recorded %d",
-			decoded.SlotNumber(),
-			block.Slot,
-		)
-	}
-	if block.Type == gledger.BlockTypeByronEbb ||
-		block.Type == gledger.BlockTypeByronMain {
-		return nil
-	}
-	header := decoded.Header()
-	if header == nil {
-		return errors.New("block has no header to derive the era from")
-	}
-	derived, err := gledger.DetermineBlockType(header.Cbor())
-	if err != nil {
-		return fmt.Errorf("derive era from header: %w", err)
-	}
-	if derived != block.Type {
-		return fmt.Errorf(
-			"era mismatch: header derives %d, recorded %d",
-			derived,
-			block.Type,
-		)
-	}
-	return nil
+	_, err := blockverify.Hash(block.Type, block.Slot, block.Cbor, block.Hash)
+	return err
 }
 
 // loadMigrationFixtureBlock returns a real testdata block that passes

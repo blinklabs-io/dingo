@@ -1325,8 +1325,11 @@ blockLen-offset`), which cannot underflow, rather than adding
 overflow `uint32` and wrap past the check.
 
 S3 and GCS `GetBlock` re-derive a block's identity from its returned bytes
-(`blockverify.Hash`, `database/plugin/blob/internal/blockverify`) before
-handing them to a caller, for every non-tombstoned `bp..._metadata` entry
+(`blockverify.Hash`, `internal/blockverify` -- top-level, not nested under
+`database/plugin/blob`, so `internal/integration`'s migration-fixture test
+can call it directly too, instead of maintaining a second copy of the same
+check) before handing them to a caller, for every non-tombstoned
+`bp..._metadata` entry
 except the exact `(ID, Type) == (0, 0)` synthetic-entry marker (see the
 `ID==0` note above; checking both fields, not `ID` alone, keeps a real
 block that somehow ended up with `ID == 0` from silently skipping

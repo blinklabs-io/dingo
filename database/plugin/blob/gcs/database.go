@@ -33,9 +33,9 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
-	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/blockverify"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/compensate"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/blockverify"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
