@@ -15,6 +15,8 @@
 package integration
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -113,27 +115,101 @@ func loadBlockData(numBlocks int) ([][]byte, error) {
 	return cbors, nil
 }
 
-// TestLoadImmutableBlocksAreSelfConsistent proves loadImmutableBlocks'
-// (Hash, Type, Slot) actually match the block each one names -- decoding
-// the CBOR under the recorded Type must reproduce the same hash and slot.
-// storage_migration_test.go's blob dataset depends on exactly this: S3 and
-// GCS independently re-derive a block's identity from its bytes before
-// returning it (blockverify.Hash, database/plugin/blob/internal/
-// blockverify, which this mirrors without importing across that internal
-// package boundary), so a migration fixture using a real block's own
-// (hash, type, slot) rather than arbitrary placeholders only exercises the
-// migration path this test is for if the three genuinely agree with the
-// bytes to begin with.
-func TestLoadImmutableBlocksAreSelfConsistent(t *testing.T) {
-	blocks, err := loadImmutableBlocks(1)
-	require.NoError(t, err)
-	block := blocks[0]
-
+// verifyBlockSelfConsistent checks the same things S3/GCS's own
+// blockverify.Hash does (database/plugin/blob/internal/blockverify, which
+// this mirrors without importing across that internal package boundary):
+// decoding block.Cbor under block.Type must reproduce block.Hash and
+// block.Slot, and -- since NewBlockFromCbor treats Type as a decode hint,
+// and for Shelley and later eras the block hash covers only the header,
+// which adjacent eras share the layout of, so decoding under an
+// adjacent-but-wrong era can still succeed and reproduce the same hash and
+// slot -- the era independently re-derived from the decoded header
+// (Byron exempt, matching blockverify.checkEra: its hash already covers
+// the block-type byte) must also match block.Type.
+func verifyBlockSelfConsistent(block immutable.Block) error {
 	decoded, err := gledger.NewBlockFromCbor(block.Type, block.Cbor)
-	require.NoError(t, err)
+	if err != nil {
+		return fmt.Errorf("decode: %w", err)
+	}
 	gotHash := decoded.Hash()
-	require.Equal(t, block.Hash, gotHash[:])
-	require.Equal(t, block.Slot, decoded.SlotNumber())
+	if !bytes.Equal(gotHash[:], block.Hash) {
+		return fmt.Errorf(
+			"hash mismatch: got %x, recorded %x",
+			gotHash[:],
+			block.Hash,
+		)
+	}
+	if decoded.SlotNumber() != block.Slot {
+		return fmt.Errorf(
+			"slot mismatch: got %d, recorded %d",
+			decoded.SlotNumber(),
+			block.Slot,
+		)
+	}
+	if block.Type == gledger.BlockTypeByronEbb ||
+		block.Type == gledger.BlockTypeByronMain {
+		return nil
+	}
+	header := decoded.Header()
+	if header == nil {
+		return errors.New("block has no header to derive the era from")
+	}
+	derived, err := gledger.DetermineBlockType(header.Cbor())
+	if err != nil {
+		return fmt.Errorf("derive era from header: %w", err)
+	}
+	if derived != block.Type {
+		return fmt.Errorf(
+			"era mismatch: header derives %d, recorded %d",
+			derived,
+			block.Type,
+		)
+	}
+	return nil
+}
+
+// loadMigrationFixtureBlock returns a real testdata block that passes
+// verifyBlockSelfConsistent, for a caller (storage_migration_test.go's
+// blob dataset) that needs one whose (hash, type, slot) as a set are what
+// blockverify.Hash would accept -- not just one that decodes successfully
+// under its own recorded Type, which verifyBlockSelfConsistent's own doc
+// comment explains is not the same thing.
+//
+// A plain loadImmutableBlocks(1) is not enough on its own: this testdata
+// set's first ~20 blocks decode fine under their recorded Type and
+// reproduce the right hash/slot, but carry a protocol-version field
+// DetermineBlockType can't place in any known era's range ("unknown proto
+// major 7 for Shelley-like") -- evidently placeholder data left over from
+// however this fixture set was originally generated, not a genuine era
+// disagreement. Scanning forward for the first block that passes every
+// check, rather than assuming the first block in iteration order will,
+// is what keeps this independent of exactly which testdata blocks happen
+// to carry that placeholder.
+func loadMigrationFixtureBlock() (immutable.Block, error) {
+	const scanLimit = 50
+	blocks, err := loadImmutableBlocks(scanLimit)
+	if err != nil {
+		return immutable.Block{}, err
+	}
+	for _, block := range blocks {
+		if err := verifyBlockSelfConsistent(block); err == nil {
+			return block, nil
+		}
+	}
+	return immutable.Block{}, fmt.Errorf(
+		"no self-consistent block found in the first %d testdata blocks",
+		scanLimit,
+	)
+}
+
+// TestLoadImmutableBlocksAreSelfConsistent proves loadMigrationFixtureBlock
+// actually returns a block whose (hash, type, slot) blockverify.Hash would
+// accept -- see verifyBlockSelfConsistent's own doc comment for what that
+// means and why checking hash and slot alone would not be enough.
+func TestLoadImmutableBlocksAreSelfConsistent(t *testing.T) {
+	block, err := loadMigrationFixtureBlock()
+	require.NoError(t, err)
+	require.NoError(t, verifyBlockSelfConsistent(block))
 }
 
 // storageBenchBackend is one storage backend under benchmark: a display name,
