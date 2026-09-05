@@ -193,6 +193,11 @@ func (b *DefaultBlockBuilder) BuildBlock(
 
 // BuildBlockOnContext creates a new block on an explicitly named parent
 // instead of the live chain tip. See BlockContext.
+//
+// leios must be empty: an equal-slot alternative is a plain ranking block, and
+// a non-empty value is rejected rather than carried. The block also carries no
+// mempool transactions, because no validator here can select them against the
+// state at blockCtx.Parent. Both are explained at their guards in buildBlock.
 func (b *DefaultBlockBuilder) BuildBlockOnContext(
 	slot uint64,
 	kesPeriod uint64,
@@ -256,6 +261,15 @@ var errParentSlotNotBelowBlock = errors.New(
 	"parent slot is not below the forged slot",
 )
 
+// errLeiosDataOnAlternative indicates Leios data was supplied together with an
+// explicit block context. An equal-slot alternative is a plain ranking block:
+// see the guard in buildBlock for why certificate and announcement data
+// resolved against the live tip cannot be carried by a block that does not
+// build on it.
+var errLeiosDataOnAlternative = errors.New(
+	"an alternative block cannot carry leios data",
+)
+
 // tipsEqual reports whether two chain tips reference the same point and
 // block number. Slot and hash are both required: a rollback can restore a
 // prior slot, and two forged blocks never share a hash.
@@ -316,6 +330,18 @@ func (b *DefaultBlockBuilder) buildBlock(
 	// ouroboros-consensus mkCurrentBlockContext's EQ branch, which forges
 	// "an alternative to @hdr@: same block no and same predecessor".
 	if blockCtx != nil {
+		// An alternative is a plain ranking block. Leios data is resolved
+		// against "the parent", which the providers answer from the live tip
+		// -- here the rival, which is precisely the block this one does not
+		// build on. A certificate selected that way certifies an endorser
+		// block announced by a chain this block is not on, and a new
+		// announcement would introduce an endorser block whose announcing
+		// chain may be the one that loses the battle. The forger already
+		// omits both; refuse here too so the exported entrypoint cannot be
+		// called into that state.
+		if !leios.empty() {
+			return nil, nil, errLeiosDataOnAlternative
+		}
 		// The candidate only makes sense against the tip it was derived
 		// from. If the chain has already moved, the contest is over;
 		// abandon before doing any work rather than after signing.
@@ -403,6 +429,28 @@ func (b *DefaultBlockBuilder) buildBlock(
 	)
 
 	mempoolTxs := b.mempool.Transactions()
+	if blockCtx != nil {
+		// An alternative is built on the rival's predecessor, but every
+		// transaction validator reachable from here answers against the
+		// ledger's live state -- which has the rival applied. A mempool
+		// transaction spending a UTxO the rival created passes that check
+		// and would be selected, and adoption then rolls the rival back
+		// before applying this block: the transaction's input no longer
+		// exists, so applying our own adopted block fails and the node is
+		// left wedged at the fork point.
+		//
+		// Selecting against a validation snapshot taken at blockCtx.Parent
+		// is the fix, but no validator exposes one: LedgerState's
+		// WithTxValidationSession and ValidateTxWithOverlay both read the
+		// current UTxO set, and the overlay can only add pending state, not
+		// un-apply the block at the tip. Until such a snapshot exists, fail
+		// closed and forge the alternative with no transactions at all. An
+		// empty ranking block is valid against the parent state whatever
+		// the rival did, and it still carries the VRF and opcert that
+		// decide the battle, which is the whole purpose of forging it. The
+		// transactions stay in the mempool for the next block.
+		mempoolTxs = nil
+	}
 	if leiosCert != nil {
 		// A prototype CertRB carries the Leios certificate and no Dijkstra
 		// transactions; node-to-client later inlines the certified EB txs.
