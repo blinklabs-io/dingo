@@ -2950,6 +2950,17 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 }
 
 func (ls *LedgerState) rollback(point ocommon.Point) error {
+	return ls.rollbackWithOptions(point, false)
+}
+
+// rollbackWithOptions restores metadata even when point is already the
+// in-memory ledger tip when repairSameTip is set. At-tip validation recovery
+// can leave consumed UTxOs above the durable tip (for example after Mithril
+// gap replay), so the usual same-point no-op must not skip UTxO restoration.
+func (ls *LedgerState) rollbackWithOptions(
+	point ocommon.Point,
+	repairSameTip bool,
+) error {
 	// Rolling back to the point we already sit at is a no-op. Skip
 	// it entirely so we don't publish a "local ledger rollback"
 	// resync event for a rollback that didn't move the ledger. That
@@ -2962,8 +2973,9 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	currentTip := ls.currentTip
 	mithrilLedgerSlot := ls.mithrilLedgerSlot
 	ls.RUnlock()
-	if currentTip.Point.Slot == point.Slot &&
-		bytes.Equal(currentTip.Point.Hash, point.Hash) {
+	sameTip := currentTip.Point.Slot == point.Slot &&
+		bytes.Equal(currentTip.Point.Hash, point.Hash)
+	if sameTip && !repairSameTip {
 		return ls.enforceDurableTipFloor()
 	}
 	if point.Slot > currentTip.Point.Slot {
@@ -3245,7 +3257,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	ls.updateTipMetrics(newTipDensity)
 	ls.publishSnapshotsLocked()
 	ls.Unlock()
-	if ls.config.EventBus != nil {
+	if ls.config.EventBus != nil && !sameTip {
 		ls.config.EventBus.Publish(
 			event.ChainsyncResyncEventType,
 			event.NewEvent(
