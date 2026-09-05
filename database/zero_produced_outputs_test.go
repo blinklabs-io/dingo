@@ -16,6 +16,7 @@ package database
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"testing"
 
@@ -101,8 +102,19 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 		return db
 	}
 
-	setTx := func(t *testing.T, db *Database, tx lcommon.Transaction) {
+	// setTx discards everything newStagedDB logged before calling the function
+	// under test, so an assertion sees only that call's output. Staging writes
+	// blocks and producer transactions, and a warning from that setup would
+	// otherwise decide a "does not warn" subtest.
+	setTx := func(
+		t *testing.T,
+		db *Database,
+		logs *bytes.Buffer,
+		tx lcommon.Transaction,
+	) string {
 		t.Helper()
+		offsets := mustBlockOffsets(t, candidate.consumerBlock)
+		logs.Reset()
 		require.NoError(t, db.SetTransactionWithOpts(
 			tx,
 			candidate.consumerPoint,
@@ -110,36 +122,49 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 			0,
 			nil,
 			nil,
-			mustBlockOffsets(t, candidate.consumerBlock),
+			offsets,
 			nil,
 			BatchedTxIngestOpts{},
 		))
+		return logs.String()
 	}
 
 	t.Run("zero-output transaction does not warn", func(t *testing.T) {
 		var logs bytes.Buffer
 		db := newStagedDB(t, &logs)
-		setTx(t, db, noOutputsTx{Transaction: candidate.consumerTx})
-		require.NotContains(t, logs.String(), `"level":"WARN"`)
+		out := setTx(
+			t, db, &logs,
+			noOutputsTx{Transaction: candidate.consumerTx},
+		)
+		require.NotContains(t, out, `"level":"WARN"`)
 	})
 
 	t.Run("transaction with outputs does not warn", func(t *testing.T) {
 		var logs bytes.Buffer
 		db := newStagedDB(t, &logs)
-		setTx(t, db, candidate.consumerTx)
-		require.NotContains(t, logs.String(), `"level":"WARN"`)
+		out := setTx(t, db, &logs, candidate.consumerTx)
+		require.NotContains(t, out, `"level":"WARN"`)
 	})
 
 	t.Run("dropped outputs warn", func(t *testing.T) {
 		var logs bytes.Buffer
 		db := newStagedDB(t, &logs)
-		setTx(t, db, droppedOutputsTx{Transaction: candidate.consumerTx})
-		require.Contains(t, logs.String(), `"level":"WARN"`)
+		out := setTx(
+			t, db, &logs,
+			droppedOutputsTx{Transaction: candidate.consumerTx},
+		)
+		require.Contains(t, out, `"level":"WARN"`)
 		require.Contains(
 			t,
-			logs.String(),
-			"transaction produced no UTxOs despite declaring outputs",
+			out,
+			"valid transaction produced no UTxOs despite declaring outputs",
 		)
+		// The count names what was dropped, so it must be the declared
+		// outputs rather than the (empty) produced set.
+		require.Contains(t, out, fmt.Sprintf(
+			`"outputs":%d`,
+			len(candidate.consumerTx.Outputs()),
+		))
 	})
 
 	t.Run(
@@ -147,28 +172,43 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 		func(t *testing.T) {
 			var logs bytes.Buffer
 			db := newStagedDB(t, &logs)
-			setTx(t, db, invalidTx{Transaction: candidate.consumerTx})
-			require.NotContains(t, logs.String(), `"level":"WARN"`)
+			out := setTx(
+				t, db, &logs,
+				invalidTx{Transaction: candidate.consumerTx},
+			)
+			require.NotContains(t, out, `"level":"WARN"`)
 		},
 	)
 
 	t.Run("dropped collateral return warns", func(t *testing.T) {
+		const collateralLovelace = 1_000_000
 		collateralReturn, err := mockledger.NewTransactionOutputBuilder().
 			WithAddress("addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd").
-			WithLovelace(1_000_000).
+			WithLovelace(collateralLovelace).
 			Build()
 		require.NoError(t, err)
 		var logs bytes.Buffer
 		db := newStagedDB(t, &logs)
-		setTx(t, db, invalidTx{
+		out := setTx(t, db, &logs, invalidTx{
 			Transaction:      candidate.consumerTx,
 			collateralReturn: collateralReturn,
 		})
-		require.Contains(t, logs.String(), `"level":"WARN"`)
+		require.Contains(t, out, `"level":"WARN"`)
+		// The dropped declaration here is the collateral return, so the
+		// message and the attribute must name it. Reporting the transaction's
+		// outputs instead would point an operator at a field that is not what
+		// went missing.
 		require.Contains(
 			t,
-			logs.String(),
-			"transaction produced no UTxOs despite declaring outputs",
+			out,
+			"invalid transaction produced no UTxOs despite declaring "+
+				"a collateral return",
 		)
+		require.Contains(t, out, fmt.Sprintf(
+			`"collateralReturnLovelace":"%d"`,
+			collateralLovelace,
+		))
+		require.NotContains(t, out, `"outputs":`)
+		require.NotContains(t, out, "despite declaring outputs")
 	})
 }
