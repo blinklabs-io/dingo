@@ -101,16 +101,6 @@ RETURNING id`,
 				err,
 			)
 		}
-		// An absent key means the deposit is unknown, not zero: the
-		// producers omit an index whose deposit could not be computed
-		// (ledger.calculateCertificateDeposit and
-		// backfill.calculateCertDeposits both do). Defaulting it to zero
-		// records an authoritative zero, and a later legacy deregistration
-		// is then refunded zero by
-		// UtxoValidateValueNotConservedUtxo instead of falling back to the
-		// current KeyDeposit, failing value conservation on a valid
-		// transaction. Pass nil through so the column is stored NULL. A
-		// recorded zero stays a non-nil zero.
 		var deposit *uint64
 		if value, found := deposits[certIndex]; found {
 			deposit = &value
@@ -211,19 +201,11 @@ WHERE mir_id IN (
 	return nil
 }
 
-func certificateRequiresDeposit(certificate lcommon.Certificate) bool {
-	switch certificate.(type) {
-	case *lcommon.PoolRegistrationCertificate,
-		*lcommon.RegistrationCertificate,
-		*lcommon.RegistrationDrepCertificate,
-		*lcommon.StakeRegistrationCertificate,
-		*lcommon.StakeRegistrationDelegationCertificate,
-		*lcommon.StakeVoteRegistrationDelegationCertificate,
-		*lcommon.VoteRegistrationDelegationCertificate:
-		return true
-	default:
-		return false
+func nullableDecimalUint64(value *uint64) any {
+	if value == nil {
+		return nil
 	}
+	return decimalUint64(types.Uint64(*value))
 }
 
 func certificateType(certificate lcommon.Certificate) (uint, error) {
@@ -331,16 +313,13 @@ RETURNING id`,
 		)
 		return id, nil, err
 	case *lcommon.DeregistrationDrepCertificate:
-		// A DRep deregistration carries its refund in the certificate
-		// itself, so this amount is always known and never NULL.
-		amount := uint64(cert.Amount)
 		id, err := applyDrepDeregistrationCertificate(
 			ctx,
 			db,
 			cert,
 			certificateID,
 			slot,
-			&amount,
+			func() *uint64 { amount := uint64(cert.Amount); return &amount }(),
 		)
 		return id, nil, err
 	case *lcommon.UpdateDrepCertificate:
@@ -427,19 +406,6 @@ RETURNING id`,
 		slot,
 		deposit,
 	)
-}
-
-// nullableDecimalUint64 renders a deposit for a TEXT column that must
-// distinguish an unknown deposit from a recorded zero. A nil pointer binds as
-// a nil interface, which the driver writes as SQL NULL; a non-nil zero binds
-// as "0". This mirrors the account_import_baseline.deposit_amount binding,
-// whose migration states the rule: substituting today's protocol parameter for
-// a value the ingest never knew would invent history.
-func nullableDecimalUint64(value *uint64) any {
-	if value == nil {
-		return nil
-	}
-	return decimalUint64(types.Uint64(*value))
 }
 
 func applyAccountCertificate(
