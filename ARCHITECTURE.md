@@ -4357,12 +4357,13 @@ fixed for the life of the chain; this covers the era-scoped counter rule
 and the on-chain observed counter, both of which can change after startup
 as blocks are applied (this node's own or a peer's for the same pool) or
 as the chain crosses an era boundary. The check runs right after leader
-selection -- it costs a real ledger read, so it is skipped for a slot this
-pool does not lead -- but still before the forge-slot fence and any
-VRF/KES/Leios work, so a bad key state costs a could-not-forge disposition
-instead of a burned leader slot and a rejected `AddLocalBlock` call. The
-check is opt-in: a nil `OpCertLedgerView` (dev mode, embedders without
-ledger wiring) skips it entirely, unchanged from before.
+selection (a Praos leader-VRF check that, together with the KES-lifetime
+gate above, already precedes it) -- it costs a real ledger read, so it is
+skipped for a slot this pool does not lead -- but still before Leios work
+and the forge-slot fence, so a bad key state costs a could-not-forge
+disposition instead of a burned leader slot and a rejected `AddLocalBlock`
+call. The check is opt-in: a nil `OpCertLedgerView` (dev mode, embedders
+without ledger wiring) skips it entirely, unchanged from before.
 
 `LedgerState.LatestOpCertSequence` -- the `LedgerView` method both this
 gate and startup's `PoolCredentials.ValidateAgainstLedger` read through --
@@ -4372,24 +4373,26 @@ backed by the shared `latestOpCertCounterAfterMithril`), instead of a plain
 `MAX` over the whole table. A Mithril-restored node's per-pool opcert
 history is only trustworthy after the certified boundary; a plain MAX could
 return a stale pre-boundary row that block application itself does not
-trust as a baseline. `LatestOpCertSequence` captures `mithrilLedgerSlot`
-under a read lock before calling the shared resolver, since (unlike
-`latestOpCertCounterForValidation`'s block-application caller) neither
-startup validation nor the forge loop otherwise holds a lock across that
-field.
+trust as a baseline. Neither caller otherwise holds a lock across
+`mithrilLedgerSlot`, so both resolve it through the existing lock-safe
+`mithrilLedgerSlotSnapshot` accessor before calling the shared resolver,
+rather than reading the field directly.
 
-Startup's `PoolCredentials.ValidateAgainstLedger` applies the identical
-era-scoped counter rule (an `enforceNoGap` parameter, resolved by
-`Node.opCertNoGapRuleForCurrentSlot` via the same exported
-`forging.EnforceOpCertNoGapRule` era classification the forge loop uses),
-not just the staleness half it always checked. Before this, a Praos-era
-opcert that was gapped but not stale would start the node cleanly and only
-be rejected on every subsequent forge attempt; startup now surfaces that
-loudly instead. Era resolution failing at startup (e.g. protocol
-parameters genuinely unavailable yet) is not itself fatal: it logs a
-warning and falls back to the stale-only check rather than adding a new
-startup-failure mode for a condition unrelated to the credential
-cross-check itself.
+Startup's `PoolCredentials.ValidateAgainstLedger` deliberately stays on the
+staleness-only half of this rule and does not apply the era-scoped no-gap
+check the forge loop enforces. Applying it at startup would pair a
+wall-clock-resolved era (`LedgerState.CurrentSlot` is wall-clock and valid
+regardless of sync state) with a baseline that only reflects the applied
+chain (`LatestOpCertSequence`); on a node whose applied tip is behind wall-
+clock time -- an interrupted initial sync, a resume after downtime, a
+restore to an older snapshot -- those two can disagree enough to make a
+pool several opcert rotations into its life look gapped against a baseline
+that has simply not caught up yet, and a fatal startup rejection would
+prevent the node from ever syncing to the point that makes the baseline
+correct. The forge loop's own gate does not have this problem: it runs
+after the upstream-sync skip and the leader check, so both its era and its
+baseline come from near-tip state, and a rejection there costs one slot
+rather than the node's ability to start.
 
 Each production forge attempt takes an independently owned snapshot of one
 complete credential generation at the runtime gate. The snapshot deep-copies

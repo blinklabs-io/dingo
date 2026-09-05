@@ -1057,13 +1057,19 @@ type LedgerView interface {
 // registration is not fatal because operators commonly stage their keys
 // before submitting the registration certificate.
 //
-// enforceNoGap applies the same era-scoped counter rule the forge loop's
-// checkOpCertSequence and block application enforce (see
-// ledger/eras.ValidateOpCertCounter): Praos eras (Babbage onward) reject a
-// counter that skips ahead of the last observed value by more than one, in
-// addition to the stale check both eras always apply. Without this, a
-// gapped-but-not-stale opcert would start the node cleanly and only be
-// rejected on every subsequent forge attempt.
+// The opcert counter check here is staleness-only (candidate below the
+// last observed value), not the full era-scoped no-gap rule the forge
+// loop's checkOpCertSequence and block application enforce. Startup
+// cannot apply that rule safely: the era for "now" would have to come
+// from a wall-clock slot, while the observed baseline
+// (LatestOpCertSequence) only reflects the applied chain, and those two
+// can disagree on a node whose applied tip is behind wall-clock time (an
+// interrupted sync, a resume after downtime, a restore to an older
+// snapshot) -- a pool several rotations into its life would look gapped
+// against a baseline that just hasn't caught up yet, and refusing
+// startup for it would prevent the node from ever syncing to the point
+// that makes the baseline correct. The forge loop's own gate does not
+// have this problem, since it runs near the chain tip.
 //
 // Three return values describe the outcome:
 //   - registered: true if the pool registration was found on chain.
@@ -1076,7 +1082,6 @@ type LedgerView interface {
 //     devnet callers may choose to warn on ErrVRFKeyHashMismatch.
 func (pc *PoolCredentials) ValidateAgainstLedger(
 	view LedgerView,
-	enforceNoGap bool,
 ) (registered, vrfMatched bool, err error) {
 	pc.mu.RLock()
 	defer pc.mu.RUnlock()
@@ -1118,11 +1123,13 @@ func (pc *PoolCredentials) ValidateAgainstLedger(
 	if err != nil {
 		return true, vrfMatched, fmt.Errorf("opcert sequence lookup: %w", err)
 	}
+	// enforceNoGap is always false here; see the doc comment above for why
+	// startup cannot safely apply the era-scoped no-gap half of this rule.
 	if seqErr := eras.ValidateOpCertCounter(
 		latestSeq,
 		seqFound,
 		pc.opCert.IssueNumber,
-		enforceNoGap,
+		false,
 	); seqErr != nil {
 		return true, vrfMatched, fmt.Errorf(
 			"opcert sequence %d invalid: %w",

@@ -163,25 +163,23 @@ func (n *Node) validateBlockProducerLedgerWithView(
 	if creds == nil {
 		return errors.New("nil pool credentials")
 	}
-	enforceNoGap, gapErr := n.opCertNoGapRuleForCurrentSlot()
-	if gapErr != nil {
-		// Era resolution failing here is not itself a reason to refuse
-		// startup: fall back to the stale-only check ValidateAgainstLedger
-		// already applied before this era-scoped rule existed, rather than
-		// adding a new startup-failure mode for an edge case unrelated to
-		// the credential cross-check itself.
-		n.config.logger.Warn(
-			"could not resolve era for opcert no-gap rule; startup will only check for a stale counter",
-			"component",
-			"node",
-			"error",
-			gapErr,
-		)
-	}
-	registered, vrfMatched, err := creds.ValidateAgainstLedger(
-		view,
-		enforceNoGap,
-	)
+	// Startup deliberately checks only for a stale counter, not the
+	// era-scoped no-gap rule the forge loop and block application enforce.
+	// The era for "now" would have to come from LedgerState.CurrentSlot,
+	// which is wall-clock and valid regardless of sync state; the baseline
+	// comes from LatestOpCertSequence, which reflects only the applied
+	// chain. On a node whose applied tip is behind wall-clock time (an
+	// interrupted initial sync, a resume after downtime, a restore to an
+	// older snapshot), those two can disagree: the era resolves to
+	// whatever the wall clock says while the baseline is still the stale,
+	// pre-catch-up counter, so a pool several rotations into its life
+	// would look gapped and fail startup -- unable to then sync to the
+	// point that would make the baseline correct. The forge loop's own
+	// gate does not have this problem: it runs after the upstream-sync
+	// skip and the leader check, so both its era and its baseline come
+	// from near-tip state, and it fails closed per slot rather than
+	// refusing to start the node at all.
+	registered, vrfMatched, err := creds.ValidateAgainstLedger(view)
 	if err != nil {
 		if errors.Is(err, forging.ErrVRFKeyHashMismatch) &&
 			n.config.network == "devnet" {
@@ -222,32 +220,6 @@ func (n *Node) validateBlockProducerLedgerWithView(
 		)
 	}
 	return nil
-}
-
-// opCertNoGapRuleForCurrentSlot resolves whether the era at the ledger's
-// current slot enforces the operational-certificate no-gap rule (Praos,
-// Babbage onward) as opposed to only the stale-counter check (TPraos,
-// Shelley-Alonzo), so ValidateAgainstLedger can apply the same era-scoped
-// rule at startup that the forge loop and block application apply
-// afterward. An error here means the era could not be determined -- the
-// caller falls back to the pre-existing stale-only check rather than
-// refusing startup for it.
-func (n *Node) opCertNoGapRuleForCurrentSlot() (bool, error) {
-	if n.ledgerState == nil {
-		return false, errors.New("ledger state unavailable")
-	}
-	currentSlot, err := n.ledgerState.CurrentSlot()
-	if err != nil {
-		if errors.Is(err, ledger.ErrBeforeGenesis) {
-			return false, nil
-		}
-		return false, fmt.Errorf("compute current slot: %w", err)
-	}
-	pparams := n.ledgerState.ProtocolParamsForSlot(currentSlot)
-	if pparams == nil {
-		return false, errors.New("protocol parameters unavailable")
-	}
-	return forging.EnforceOpCertNoGapRule(pparams)
 }
 
 // handleGenesisSnapshotError returns a fatal error for block producers (which

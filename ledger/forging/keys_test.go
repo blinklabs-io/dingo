@@ -1118,7 +1118,7 @@ func newCredsForLedger(t *testing.T) *PoolCredentials {
 func TestValidateAgainstLedger_PoolNotRegistered(t *testing.T) {
 	pc := newCredsForLedger(t)
 	view := &fakeLedgerView{registered: false}
-	registered, matched, err := pc.ValidateAgainstLedger(view, false)
+	registered, matched, err := pc.ValidateAgainstLedger(view)
 	if err != nil {
 		t.Errorf("ValidateAgainstLedger: %v", err)
 	}
@@ -1154,7 +1154,7 @@ func TestValidateAgainstLedger_VRFMatch(t *testing.T) {
 		registered: true,
 		regVRFHash: lcommon.Blake2b256Hash(pc.vrfVKey),
 	}
-	registered, matched, err := pc.ValidateAgainstLedger(view, false)
+	registered, matched, err := pc.ValidateAgainstLedger(view)
 	if err != nil {
 		t.Fatalf("ValidateAgainstLedger: %v", err)
 	}
@@ -1173,7 +1173,7 @@ func TestValidateAgainstLedger_VRFMismatch(t *testing.T) {
 		registered: true,
 		regVRFHash: lcommon.Blake2b256Hash(bytes32(0xDD)),
 	}
-	_, _, err := pc.ValidateAgainstLedger(view, false)
+	_, _, err := pc.ValidateAgainstLedger(view)
 	if err == nil {
 		t.Fatal("expected mismatch error")
 	}
@@ -1191,7 +1191,7 @@ func TestValidateAgainstLedger_ZeroVRFHashIsUnknown(t *testing.T) {
 		registered: true,
 		regVRFHash: [32]byte{},
 	}
-	registered, matched, err := pc.ValidateAgainstLedger(view, false)
+	registered, matched, err := pc.ValidateAgainstLedger(view)
 	if err != nil {
 		t.Errorf("ValidateAgainstLedger: %v", err)
 	}
@@ -1218,7 +1218,7 @@ func TestValidateAgainstLedger_SeedOnlySkipsCheck(t *testing.T) {
 		registered: true,
 		regVRFHash: lcommon.Blake2b256Hash([]byte("anything")),
 	}
-	registered, matched, err := pc.ValidateAgainstLedger(view, false)
+	registered, matched, err := pc.ValidateAgainstLedger(view)
 	if err != nil {
 		t.Errorf("ValidateAgainstLedger: %v", err)
 	}
@@ -1239,7 +1239,7 @@ func TestValidateAgainstLedger_StaleOpCert(t *testing.T) {
 		seqFound:   true,
 		latestSeq:  5,
 	}
-	_, _, err := pc.ValidateAgainstLedger(view, false)
+	_, _, err := pc.ValidateAgainstLedger(view)
 	if err == nil {
 		t.Fatal("expected stale-counter error")
 	}
@@ -1248,13 +1248,15 @@ func TestValidateAgainstLedger_StaleOpCert(t *testing.T) {
 	}
 }
 
-// TestValidateAgainstLedger_GappedOpCertRejectedUnderNoGap covers startup
-// applying the same era-scoped no-gap rule the forge loop and block
-// application enforce: a counter that skips ahead of the last observed
-// value by more than one is not stale (it is ahead, not behind), so
-// without this check startup would accept it cleanly and only reject it
-// on every subsequent forge attempt.
-func TestValidateAgainstLedger_GappedOpCertRejectedUnderNoGap(t *testing.T) {
+// TestValidateAgainstLedger_GappedOpCertAccepted documents the deliberate
+// startup behavior: a counter that skips ahead of the last observed value
+// by more than one is not stale (it is ahead, not behind), and startup
+// does not apply the era-scoped no-gap rule the forge loop and block
+// application enforce (see ValidateAgainstLedger's doc comment for why:
+// startup's era and its observed baseline can come from different points
+// in time). Only the forge loop's own gate rejects a gapped counter, and
+// it does so near the chain tip where both sides of the check agree.
+func TestValidateAgainstLedger_GappedOpCertAccepted(t *testing.T) {
 	pc := newCredsForLedger(t)
 	pc.opCert.IssueNumber = 7
 	view := &fakeLedgerView{
@@ -1263,33 +1265,9 @@ func TestValidateAgainstLedger_GappedOpCertRejectedUnderNoGap(t *testing.T) {
 		seqFound:   true,
 		latestSeq:  5,
 	}
-	_, _, err := pc.ValidateAgainstLedger(view, true)
-	if err == nil {
-		t.Fatal("expected gapped-counter error under enforceNoGap")
-	}
-	if !strings.Contains(err.Error(), "skips ahead") {
-		t.Errorf("expected 'skips ahead' in error, got: %v", err)
-	}
-}
-
-// TestValidateAgainstLedger_GappedOpCertAcceptedWithoutNoGap covers the
-// TPraos side of the same rule: the identical gapped counter is accepted
-// when enforceNoGap is false, matching a TPraos-era pool.
-func TestValidateAgainstLedger_GappedOpCertAcceptedWithoutNoGap(t *testing.T) {
-	pc := newCredsForLedger(t)
-	pc.opCert.IssueNumber = 7
-	view := &fakeLedgerView{
-		registered: true,
-		regVRFHash: lcommon.Blake2b256Hash(pc.vrfVKey),
-		seqFound:   true,
-		latestSeq:  5,
-	}
-	_, _, err := pc.ValidateAgainstLedger(view, false)
+	_, _, err := pc.ValidateAgainstLedger(view)
 	if err != nil {
-		t.Fatalf(
-			"expected gapped counter to be accepted without enforceNoGap: %v",
-			err,
-		)
+		t.Fatalf("expected gapped counter to be accepted at startup: %v", err)
 	}
 }
 
@@ -1314,7 +1292,7 @@ func TestValidateAgainstLedger_OpCertEqualOrAhead(t *testing.T) {
 				seqFound:   true,
 				latestSeq:  tc.ledgerSeq,
 			}
-			if _, _, err := pc.ValidateAgainstLedger(view, false); err != nil {
+			if _, _, err := pc.ValidateAgainstLedger(view); err != nil {
 				t.Errorf("ValidateAgainstLedger: %v", err)
 			}
 		})
@@ -1330,7 +1308,7 @@ func TestValidateAgainstLedger_NoObservedOpCertSequence(t *testing.T) {
 		regVRFHash: lcommon.Blake2b256Hash(pc.vrfVKey),
 		seqFound:   false,
 	}
-	registered, matched, err := pc.ValidateAgainstLedger(view, false)
+	registered, matched, err := pc.ValidateAgainstLedger(view)
 	if err != nil {
 		t.Errorf("ValidateAgainstLedger: %v", err)
 	}
@@ -1345,7 +1323,7 @@ func TestValidateAgainstLedger_NoObservedOpCertSequence(t *testing.T) {
 
 func TestValidateAgainstLedger_NilView(t *testing.T) {
 	pc := newCredsForLedger(t)
-	_, _, err := pc.ValidateAgainstLedger(nil, false)
+	_, _, err := pc.ValidateAgainstLedger(nil)
 	if err == nil {
 		t.Fatal("expected nil-view error")
 	}
@@ -1354,7 +1332,7 @@ func TestValidateAgainstLedger_NilView(t *testing.T) {
 func TestValidateAgainstLedger_NoOpCert(t *testing.T) {
 	pc := &PoolCredentials{vrfVKey: bytes32(0xAA)}
 	view := &fakeLedgerView{}
-	_, _, err := pc.ValidateAgainstLedger(view, false)
+	_, _, err := pc.ValidateAgainstLedger(view)
 	if err == nil {
 		t.Fatal("expected error when opcert not loaded")
 	}

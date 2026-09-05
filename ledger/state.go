@@ -2052,10 +2052,11 @@ func (ls *LedgerState) LatestOpCertSequence(
 	if pool == nil {
 		return 0, false, nil
 	}
-	ls.RLock()
-	mithrilLedgerSlot := ls.mithrilLedgerSlot
-	ls.RUnlock()
-	return ls.latestOpCertCounterAfterMithril(pkh, mithrilLedgerSlot, nil)
+	return ls.latestOpCertCounterAfterMithril(
+		pkh,
+		ls.mithrilLedgerSlotSnapshot(),
+		nil,
+	)
 }
 
 // Datum looks up a datum by hash & adding this for implementing query.ReadData #741
@@ -6721,17 +6722,18 @@ func (ls *LedgerState) ledgerProcessBlock(
 // latestOpCertCounterForValidation returns the highest observed counter after
 // the Mithril boundary, or the certified counter at the boundary when no later
 // row exists. Rows before the boundary are not part of the certified state.
-// Called only from block application, which already holds whatever lock
-// guards ls.mithrilLedgerSlot for that path; a caller outside that path must
-// go through LatestOpCertSequence instead, which reads the field under a
-// read lock.
+// Reads mithrilLedgerSlot through the lock-safe mithrilLedgerSlotSnapshot,
+// since the block-apply transaction this runs inside does not itself hold
+// a lock across that field (the snapshot taken before the transaction,
+// e.g. ledgerProcessBlocksFromSource's snapshotMithrilSlot, is not
+// threaded down to this call).
 func (ls *LedgerState) latestOpCertCounterForValidation(
 	poolKeyHash lcommon.PoolKeyHash,
 	txn *database.Txn,
 ) (uint64, bool, error) {
 	return ls.latestOpCertCounterAfterMithril(
 		poolKeyHash,
-		ls.mithrilLedgerSlot,
+		ls.mithrilLedgerSlotSnapshot(),
 		txn,
 	)
 }
@@ -6742,9 +6744,8 @@ func (ls *LedgerState) latestOpCertCounterForValidation(
 // paths agree on which counter is "the latest observed" for a pool instead
 // of one trusting a plain MAX over rows a Mithril import may have left
 // stale relative to the certified boundary. mithrilLedgerSlot is passed in
-// rather than read from ls directly so callers outside block application
-// can capture it under their own lock instead of this function assuming
-// one is already held.
+// rather than read from ls directly so each caller controls how it is
+// obtained (a lock-safe snapshot, or a value already captured under one).
 func (ls *LedgerState) latestOpCertCounterAfterMithril(
 	poolKeyHash lcommon.PoolKeyHash,
 	mithrilLedgerSlot uint64,

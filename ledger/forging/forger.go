@@ -313,10 +313,12 @@ type ForgerConfig struct {
 	// ledger has observed on chain for this pool. When non-nil, the forge
 	// loop pre-flights the candidate counter against it using the same
 	// era-scoped rule block application enforces (see
-	// ledger/verify_opcert.go validateOpCertCounter), before spending a
-	// leader slot on VRF/KES/Leios work a stale or gapped counter would
-	// have the chain discard anyway. Nil disables the check (dev mode,
-	// embedders without ledger wiring). Requires EraParams.
+	// ledger/verify_opcert.go validateOpCertCounter), after leader
+	// selection but before Leios work and the forge-slot fence -- a stale
+	// or gapped counter is rejected there instead of reaching an
+	// `AddLocalBlock` call the chain would discard anyway. Nil disables
+	// the check (dev mode, embedders without ledger wiring). Requires
+	// EraParams.
 	OpCertLedgerView LedgerView
 	// EraParams supplies the era-defining protocol parameters in effect for
 	// the slot being forged, so OpCertLedgerView's counter check applies

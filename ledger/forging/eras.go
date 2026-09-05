@@ -81,22 +81,6 @@ type pparamsLimits struct {
 	protoMinor   uint64
 }
 
-// EnforceOpCertNoGapRule reports whether the operational-certificate
-// counter's no-gap (over-increment) rule applies for the era described by
-// pparams: Praos eras (Babbage onward) enforce it, TPraos eras
-// (Shelley-Alonzo) do not (see ledger/eras.ValidateOpCertCounter's
-// enforceNoGap parameter). Exported so callers outside this package that
-// need the same era-scoped classification -- e.g. startup credential
-// validation -- do not have to duplicate extractPParamsLimits' era
-// dispatch.
-func EnforceOpCertNoGapRule(pparams lcommon.ProtocolParameters) (bool, error) {
-	limits, err := extractPParamsLimits(pparams)
-	if err != nil {
-		return false, err
-	}
-	return !limits.era.isTPraos(), nil
-}
-
 // extractPParamsLimits returns the BuildBlock-relevant fields from any
 // era's protocol parameters. Returns an error if pparams is nil (including
 // a typed-nil pointer of a known era's type stored in the interface, which
