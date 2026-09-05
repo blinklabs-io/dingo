@@ -15,9 +15,13 @@
 package ledger
 
 import (
+	"bytes"
+	"log/slog"
+	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -35,6 +39,54 @@ func protocolParamsQuery() *olocalstatequery.BlockQuery {
 	return &olocalstatequery.BlockQuery{
 		Query: &olocalstatequery.ShelleyQuery{
 			Query: &olocalstatequery.ShelleyCurrentProtocolParamsQuery{},
+		},
+	}
+}
+
+// conwayPParamsWithCostModels builds a Conway pparams value with every
+// cbor.Rat-bearing field populated, not just CostModels -- blinklabs-io/dingo#3825's
+// PR review (wolf31o2): a fixture that only sets CostModels type-asserts fine
+// but is not actually encodable, since cbor.Rat.MarshalCBOR panics on the nil
+// *big.Rat a zero-value cbor.Rat (or a nil *cbor.Rat pointer field) carries,
+// and PoolVotingThresholds/DRepVotingThresholds's value-typed cbor.Rat fields
+// are always encoded (never skippable as CBOR null the way a nil *cbor.Rat
+// pointer field is). This is what real cardano-node protocol-parameter data
+// always has populated, so an end-to-end wire test should encode a value
+// shaped like the real thing, not a partial struct that happens to satisfy a
+// type assertion.
+func conwayPParamsWithCostModels(
+	costModels map[uint][]int64,
+) *conway.ConwayProtocolParameters {
+	rat := func(n, d int64) cbor.Rat { return cbor.Rat{Rat: big.NewRat(n, d)} }
+	ratPtr := func(n, d int64) *cbor.Rat { return &cbor.Rat{Rat: big.NewRat(n, d)} }
+	return &conway.ConwayProtocolParameters{
+		CostModels:                 costModels,
+		A0:                         ratPtr(3, 10),
+		Rho:                        ratPtr(3, 1000),
+		Tau:                        ratPtr(1, 5),
+		MinFeeRefScriptCostPerByte: ratPtr(15, 1),
+		ExecutionCosts: lcommon.ExUnitPrice{
+			MemPrice:  ratPtr(577, 10000),
+			StepPrice: ratPtr(721, 10000000),
+		},
+		PoolVotingThresholds: conway.PoolVotingThresholds{
+			MotionNoConfidence:    rat(51, 100),
+			CommitteeNormal:       rat(51, 100),
+			CommitteeNoConfidence: rat(51, 100),
+			HardForkInitiation:    rat(51, 100),
+			PpSecurityGroup:       rat(51, 100),
+		},
+		DRepVotingThresholds: conway.DRepVotingThresholds{
+			MotionNoConfidence:    rat(67, 100),
+			CommitteeNormal:       rat(67, 100),
+			CommitteeNoConfidence: rat(60, 100),
+			UpdateToConstitution:  rat(75, 100),
+			HardForkInitiation:    rat(60, 100),
+			PpNetworkGroup:        rat(67, 100),
+			PpEconomicGroup:       rat(67, 100),
+			PpTechnicalGroup:      rat(67, 100),
+			PpGovGroup:            rat(75, 100),
+			TreasuryWithdrawal:    rat(67, 100),
 		},
 	}
 }
@@ -104,7 +156,7 @@ func TestWithoutSyntheticV2CostModel_RemovesKeyWithoutMutatingOriginal(
 		},
 	}
 
-	filtered := withoutSyntheticV2CostModel(original, true)
+	filtered := withoutSyntheticV2CostModel(original, true, nil)
 
 	fp, ok := filtered.(*conway.ConwayProtocolParameters)
 	require.True(t, ok)
@@ -128,7 +180,7 @@ func TestWithoutSyntheticV2CostModel_CoversEveryEraType(t *testing.T) {
 
 	t.Run("Alonzo", func(t *testing.T) {
 		pp := &alonzo.AlonzoProtocolParameters{CostModels: cloneMap(costModels)}
-		got := withoutSyntheticV2CostModel(pp, true)
+		got := withoutSyntheticV2CostModel(pp, true, nil)
 		fp, ok := got.(*alonzo.AlonzoProtocolParameters)
 		require.True(t, ok)
 		assert.NotContains(t, fp.CostModels, uint(1))
@@ -138,8 +190,16 @@ func TestWithoutSyntheticV2CostModel_CoversEveryEraType(t *testing.T) {
 		pp := &babbage.BabbageProtocolParameters{
 			CostModels: cloneMap(costModels),
 		}
-		got := withoutSyntheticV2CostModel(pp, true)
+		got := withoutSyntheticV2CostModel(pp, true, nil)
 		fp, ok := got.(*babbage.BabbageProtocolParameters)
+		require.True(t, ok)
+		assert.NotContains(t, fp.CostModels, uint(1))
+		assert.Contains(t, pp.CostModels, uint(1), "original must be untouched")
+	})
+	t.Run("Conway", func(t *testing.T) {
+		pp := &conway.ConwayProtocolParameters{CostModels: cloneMap(costModels)}
+		got := withoutSyntheticV2CostModel(pp, true, nil)
+		fp, ok := got.(*conway.ConwayProtocolParameters)
 		require.True(t, ok)
 		assert.NotContains(t, fp.CostModels, uint(1))
 		assert.Contains(t, pp.CostModels, uint(1), "original must be untouched")
@@ -150,7 +210,7 @@ func TestWithoutSyntheticV2CostModel_CoversEveryEraType(t *testing.T) {
 				CostModels: cloneMap(costModels),
 			},
 		}
-		got := withoutSyntheticV2CostModel(pp, true)
+		got := withoutSyntheticV2CostModel(pp, true, nil)
 		fp, ok := got.(*dijkstra.DijkstraProtocolParameters)
 		require.True(t, ok)
 		assert.NotContains(t, fp.CostModels, uint(1))
@@ -176,7 +236,7 @@ func TestWithoutSyntheticV2CostModel_NilPointerDoesNotPanic(t *testing.T) {
 	var pp lcommon.ProtocolParameters = nilConway
 
 	require.NotPanics(t, func() {
-		got := withoutSyntheticV2CostModel(pp, true)
+		got := withoutSyntheticV2CostModel(pp, true, nil)
 		assert.Equal(t, pp, got)
 	})
 }
@@ -191,9 +251,59 @@ func TestWithoutSyntheticV2CostModel_NoOpWhenNotSynthetic(t *testing.T) {
 		CostModels: map[uint][]int64{0: {1}, 1: {2}, 2: {3}},
 	}
 
-	got := withoutSyntheticV2CostModel(pp, false)
+	got := withoutSyntheticV2CostModel(pp, false, nil)
 
 	assert.Same(t, pp, got)
+}
+
+// unknownProtocolParameters is a lcommon.ProtocolParameters implementation
+// the withoutSyntheticV2CostModel switch has no case for -- standing in for
+// a future era type this switch hasn't been taught yet.
+type unknownProtocolParameters struct {
+	lcommon.ProtocolParameters
+}
+
+// TestWithoutSyntheticV2CostModel_UnknownTypeLogsAndReturnsUnfiltered covers
+// blinklabs-io/dingo#3825's PR review (wolf31o2): a protocol-parameters type
+// the switch doesn't recognize falls to the default branch, which -- unlike
+// every other branch -- returns pp unfiltered even though synthetic is true.
+// That silently reintroduces #3825 for whatever type this is; the least this
+// path can do is log so the gap is observable instead of invisible.
+func TestWithoutSyntheticV2CostModel_UnknownTypeLogsAndReturnsUnfiltered(
+	t *testing.T,
+) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	pp := &unknownProtocolParameters{}
+
+	got := withoutSyntheticV2CostModel(pp, true, logger)
+
+	assert.Same(t, pp, got,
+		"an unrecognized type must still be returned, unfiltered")
+	assert.Contains(
+		t,
+		buf.String(),
+		"does not recognize this protocol-parameters type",
+	)
+}
+
+// TestExtractRawCostModels_CoversDijkstra covers blinklabs-io/dingo#3825's PR
+// review (wolf31o2): extractRawCostModels' type switch lacked a Dijkstra
+// case (falling to its own default: return nil), asymmetric with
+// withoutSyntheticV2CostModel, which does handle Dijkstra -- meaning
+// injectedSyntheticV2CostModel (built on extractRawCostModels) could never
+// detect a Dijkstra-era injection even though the filter it feeds covers
+// that era.
+func TestExtractRawCostModels_CoversDijkstra(t *testing.T) {
+	pp := &dijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			CostModels: map[uint][]int64{0: {1}, 1: {2}},
+		},
+	}
+
+	got := extractRawCostModels(pp)
+
+	assert.Equal(t, map[uint][]int64{0: {1}, 1: {2}}, got)
 }
 
 // TestQueryShelleyCurrentProtocolParams_OmitsSyntheticV2CostModel is the
@@ -211,13 +321,11 @@ func TestQueryShelleyCurrentProtocolParams_OmitsSyntheticV2CostModel(
 ) {
 	ls := newPoolDistr2Ledger(t, newTestDB(t))
 	ls.currentEra = eras.ConwayEraDesc
-	ls.currentPParams = &conway.ConwayProtocolParameters{
-		CostModels: map[uint][]int64{
-			0: {1, 1, 1},
-			1: eras.DefaultPlutusV2CostModel,
-			2: {3, 3, 3},
-		},
-	}
+	ls.currentPParams = conwayPParamsWithCostModels(map[uint][]int64{
+		0: {1, 1, 1},
+		1: eras.DefaultPlutusV2CostModel,
+		2: {3, 3, 3},
+	})
 	ls.syntheticV2CostModel = true
 	ls.publishSnapshotsLocked()
 
@@ -234,6 +342,22 @@ func TestQueryShelleyCurrentProtocolParams_OmitsSyntheticV2CostModel(
 		"the reply must omit the synthetic PlutusV2 cost model")
 	assert.Contains(t, pp.CostModels, uint(0))
 	assert.Contains(t, pp.CostModels, uint(2))
+
+	// This is a wire-level regression test, not just a type-assertion check:
+	// encode what the reply actually contains and decode it back with the
+	// real client-side type, matching the raw-CBOR verification this issue's
+	// original diagnosis relied on independent of any display-layer bug.
+	encoded, err := cbor.Encode(pp)
+	require.NoError(t, err)
+	var decoded conway.ConwayProtocolParameters
+	_, err = cbor.Decode(encoded, &decoded)
+	require.NoError(t, err)
+	assert.NotContains(
+		t,
+		decoded.CostModels,
+		uint(1),
+		"the encoded wire bytes must not carry the synthetic PlutusV2 cost model",
+	)
 
 	// Internal validation state must be completely unaffected by the query.
 	internal, ok := ls.currentPParams.(*conway.ConwayProtocolParameters)
@@ -253,13 +377,11 @@ func TestQueryShelleyCurrentProtocolParams_IncludesRealV2CostModel(
 ) {
 	ls := newPoolDistr2Ledger(t, newTestDB(t))
 	ls.currentEra = eras.ConwayEraDesc
-	ls.currentPParams = &conway.ConwayProtocolParameters{
-		CostModels: map[uint][]int64{
-			0: {1, 1, 1},
-			1: eras.DefaultPlutusV2CostModel,
-			2: {3, 3, 3},
-		},
-	}
+	ls.currentPParams = conwayPParamsWithCostModels(map[uint][]int64{
+		0: {1, 1, 1},
+		1: eras.DefaultPlutusV2CostModel,
+		2: {3, 3, 3},
+	})
 	ls.syntheticV2CostModel = false
 	ls.publishSnapshotsLocked()
 
@@ -274,6 +396,18 @@ func TestQueryShelleyCurrentProtocolParams_IncludesRealV2CostModel(
 
 	assert.Contains(t, pp.CostModels, uint(1))
 	assert.Equal(t, eras.DefaultPlutusV2CostModel, pp.CostModels[1])
+
+	encoded, err := cbor.Encode(pp)
+	require.NoError(t, err)
+	var decoded conway.ConwayProtocolParameters
+	_, err = cbor.Decode(encoded, &decoded)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		eras.DefaultPlutusV2CostModel,
+		decoded.CostModels[1],
+		"real data equal to the known default must still round-trip on the wire",
+	)
 }
 
 // TestSyntheticV2CostModelPersistence_RoundTripsAcrossRestart covers
@@ -302,6 +436,51 @@ func TestSyntheticV2CostModelPersistence_RoundTripsAcrossRestart(t *testing.T) {
 	ls.loadSyntheticV2CostModel()
 	assert.False(t, ls.syntheticV2CostModel,
 		"a later persisted false must also survive the simulated restart")
+}
+
+// TestResolveSyntheticV2CostModel_BootstrapsFromValueWhenMarkerAbsent covers
+// blinklabs-io/dingo#3825's PR review (wolf31o2): a database that predates
+// this marker (or one that was reset by
+// database.RecomputeSyntheticV2CostModelMarkerAfterTruncate) must not
+// silently behave as "not synthetic" -- it must compare the current PlutusV2
+// cost model directly against the known synthetic default instead.
+func TestResolveSyntheticV2CostModel_BootstrapsFromValueWhenMarkerAbsent(
+	t *testing.T,
+) {
+	stillSynthetic := &conway.ConwayProtocolParameters{
+		CostModels: map[uint][]int64{1: eras.DefaultPlutusV2CostModel},
+	}
+	assert.True(t, resolveSyntheticV2CostModel("", stillSynthetic),
+		"an absent marker with the exact synthetic default present must"+
+			" resolve to still-synthetic")
+
+	realData := &conway.ConwayProtocolParameters{
+		CostModels: map[uint][]int64{1: {9, 9, 9}},
+	}
+	assert.False(t, resolveSyntheticV2CostModel("", realData),
+		"an absent marker with a value that differs from the synthetic"+
+			" default must resolve to real, not synthetic")
+
+	noV2 := &conway.ConwayProtocolParameters{
+		CostModels: map[uint][]int64{0: {1, 2, 3}},
+	}
+	assert.False(t, resolveSyntheticV2CostModel("", noV2),
+		"an absent marker with no PlutusV2 key at all must resolve to"+
+			" not-synthetic")
+
+	assert.False(t, resolveSyntheticV2CostModel("", nil),
+		"an absent marker with nil pparams must resolve to not-synthetic")
+}
+
+// TestResolveSyntheticV2CostModel_ExplicitValueWins covers the common case:
+// an explicitly persisted marker value is trusted directly, regardless of
+// what pp happens to contain.
+func TestResolveSyntheticV2CostModel_ExplicitValueWins(t *testing.T) {
+	realData := &conway.ConwayProtocolParameters{
+		CostModels: map[uint][]int64{1: eras.DefaultPlutusV2CostModel},
+	}
+	assert.True(t, resolveSyntheticV2CostModel("true", realData))
+	assert.False(t, resolveSyntheticV2CostModel("false", realData))
 }
 
 // TestTransitionToEraFrom_PersistsSyntheticMarkerInSameTransactionAsPParams

@@ -116,6 +116,60 @@ func TestEnactProposal_DijkstraParameterChange(t *testing.T) {
 // synthetic default uses -- to prove real governance re-affirming that
 // canonical value is still correctly reported as written, which a
 // before/after value-comparison could not distinguish from "unchanged."
+// TestEnactProposal_ConwayParameterChangeDoesNotWritePlutusV2CostModel
+// covers the Conway negative case, previously exercised only by the
+// Dijkstra path (TestEnactProposal_DijkstraParameterChange): an enacted
+// update that changes an unrelated field must not report
+// PlutusV2CostModelWritten, even though the merged result still carries a
+// PlutusV2 cost model unchanged from before.
+func TestEnactProposal_ConwayParameterChangeDoesNotWritePlutusV2CostModel(
+	t *testing.T,
+) {
+	db, _ := newTallyTestDB(t)
+
+	fee := uint(1234)
+	action := &conway.ConwayParameterChangeGovAction{
+		Type: uint(lcommon.GovActionTypeParameterChange),
+		ParamUpdate: conway.ConwayProtocolParameterUpdate{
+			MinFeeA: &fee,
+		},
+	}
+	encoded, err := cbor.Encode(action)
+	require.NoError(t, err)
+
+	pparams := &conway.ConwayProtocolParameters{
+		CostModels: map[uint][]int64{
+			0: {1, 2, 3},
+			1: eras.DefaultPlutusV2CostModel,
+		},
+	}
+	proposal := &models.GovernanceProposal{
+		TxHash:        testBytes(32, 0xC4),
+		ActionIndex:   0,
+		ActionType:    uint8(lcommon.GovActionTypeParameterChange),
+		GovActionCbor: encoded,
+		AddedSlot:     500,
+		ExpiresEpoch:  100,
+		AnchorURL:     "https://example.invalid/conway-unrelated-field",
+		AnchorHash:    testBytes(32, 0xC5),
+		ReturnAddress: testBytes(29, 0xC6),
+		Deposit:       0,
+	}
+
+	result, err := EnactProposal(&EnactmentContext{
+		DB:       db,
+		Slot:     2000,
+		Epoch:    42,
+		PParams:  pparams,
+		UpdateFn: eras.PParamsUpdateConway,
+	}, proposal)
+	require.NoError(t, err)
+	require.True(t, result.PParamsChanged)
+	require.False(t, result.PlutusV2CostModelWritten,
+		"this update never touched CostModels[1], even though the merged"+
+			" result still carries one unchanged")
+}
+
 func TestEnactProposal_ConwayParameterChangeWritesPlutusV2CostModel(
 	t *testing.T,
 ) {

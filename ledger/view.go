@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"math/big"
 	"time"
@@ -634,6 +635,8 @@ func extractRawCostModels(
 		return p.CostModels
 	case *conway.ConwayProtocolParameters:
 		return p.CostModels
+	case *dijkstra.DijkstraProtocolParameters:
+		return p.CostModels
 	default:
 		return nil
 	}
@@ -657,9 +660,16 @@ func extractRawCostModels(
 // value referencing the original's other fields, then replaces only
 // CostModels with a freshly built map, so the original -- still reachable
 // from ls.currentPParams / the published snapshot -- is never mutated.
+//
+// logger receives a warning when synthetic is true but pp's concrete type
+// matches none of the cases below: unlike every other branch, that combination
+// returns pp unfiltered, silently reintroducing #3825 for a future era type
+// this switch hasn't been taught yet. logger may be nil (e.g. in tests that
+// don't care about this diagnostic).
 func withoutSyntheticV2CostModel(
 	pp lcommon.ProtocolParameters,
 	synthetic bool,
+	logger *slog.Logger,
 ) lcommon.ProtocolParameters {
 	if !synthetic {
 		return pp
@@ -698,6 +708,13 @@ func withoutSyntheticV2CostModel(
 		modified.CostModels = withoutV2CostModelKey(p.CostModels)
 		return &modified
 	default:
+		if logger != nil {
+			logger.Warn(
+				"synthetic PlutusV2 cost model filter does not recognize this protocol-parameters type; returning it unfiltered",
+				"component", "ledger",
+				"type", fmt.Sprintf("%T", pp),
+			)
+		}
 		return pp
 	}
 }

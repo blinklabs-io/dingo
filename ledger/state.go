@@ -76,13 +76,6 @@ const (
 	firstBlockIndex              = 1
 	mithrilLedgerSlotSyncKey     = "mithril_ledger_slot"
 	mithrilLedgerHashSyncKey     = "mithril_ledger_hash"
-	// syntheticV2CostModelSyncKey persists LedgerState.syntheticV2CostModel
-	// across restarts. Without this, a restarted node would reconstruct it
-	// as false (the zero value) regardless of the chain's real history,
-	// since transitionToEraFrom's detection only runs at the moment of a
-	// live era transition -- not again for every era a chain merely started
-	// in past (blinklabs-io/dingo#3825).
-	syntheticV2CostModelSyncKey = "synthetic_v2_cost_model"
 	// blockPipelineDecodeWorkers is the fixed decode worker count for phase 1
 	// of the block-processing pipeline (issue #1894). Validation workers stay
 	// at 0 (disabled) unless LedgerStateConfig.BlockPipelineValidateEnabled
@@ -3072,6 +3065,20 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 				err,
 			)
 		}
+		// Undo the synthetic-PlutusV2-cost-model marker if this rollback
+		// crosses back before the epoch it was last confirmed cleared at;
+		// see database.RecomputeSyntheticV2CostModelMarkerAfterTruncate and
+		// blinklabs-io/dingo#3825's PR review (wolf31o2).
+		if err := database.RecomputeSyntheticV2CostModelMarkerAfterTruncate(
+			ls.db,
+			txn,
+			point.Slot,
+		); err != nil {
+			return fmt.Errorf(
+				"recompute synthetic PlutusV2 cost model marker after rollback: %w",
+				err,
+			)
+		}
 		return nil
 	}, true)
 	if err != nil {
@@ -3184,6 +3191,27 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			ppComputed = true
 		}
 	}
+	// Reload the synthetic-PlutusV2-cost-model marker against the
+	// rolled-back pparams, mirroring every other piece of state reloaded
+	// above: computed here (nil newPParams when !ppComputed correctly
+	// resolves to "not synthetic", since a Byron-era view has no cost
+	// models at all) rather than inside the locked section below, since the
+	// database read this needs must not happen while ls.Lock() is held.
+	newSyntheticV2CostModelValue, syntheticErr := ls.db.GetSyncState(
+		database.SyntheticV2CostModelSyncKey, nil,
+	)
+	if syntheticErr != nil {
+		ls.config.Logger.Warn(
+			"failed to reload synthetic PlutusV2 cost model marker after rollback",
+			"error",
+			syntheticErr,
+			"component",
+			"ledger",
+		)
+	}
+	newSyntheticV2CostModel := resolveSyntheticV2CostModel(
+		newSyntheticV2CostModelValue, newPParams,
+	)
 	newTipDensity := ls.chainFragmentDensity(
 		newTip,
 		ls.securityParamForEraOrDefault(newCurrentEra.Id),
@@ -3230,6 +3258,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		ls.currentPParams = newPParams
 		ls.prevEraPParams = newPrevPParams
 	}
+	ls.syntheticV2CostModel = newSyntheticV2CostModel
 	ls.lastLocalRollbackSeq++
 	ls.lastLocalRollbackPoint = ocommon.Point{
 		Slot: point.Slot,
@@ -3940,23 +3969,53 @@ func (ls *LedgerState) applyEraTransition(result *EraTransitionResult) {
 	}
 }
 
+// resolveSyntheticV2CostModel computes the synthetic-marker value implied by
+// the durable database marker's raw value (empty string if never written)
+// and pp, the protocol parameters the marker describes. An empty value falls
+// back to comparing pp's PlutusV2 cost model directly against the known
+// synthetic default -- see loadSyntheticV2CostModel's doc comment for why.
+// Shared by loadSyntheticV2CostModel (startup, and reloading the in-memory
+// mirror after database.RecomputeSyntheticV2CostModelMarkerAfterTruncate
+// resets the durable marker during a rollback) and rollback itself (which
+// cannot safely call loadSyntheticV2CostModel directly there: this must be
+// computed from the rolled-back pparams value before it is applied to
+// ls.currentPParams under lock, matching every other piece of rollback's
+// reloaded state).
+func resolveSyntheticV2CostModel(
+	value string,
+	pp lcommon.ProtocolParameters,
+) bool {
+	if value == "" {
+		v2, hasV2 := extractRawCostModels(pp)[1]
+		return hasV2 && slices.Equal(v2, eras.DefaultPlutusV2CostModel)
+	}
+	return value == "true"
+}
+
 // loadSyntheticV2CostModel restores LedgerState.syntheticV2CostModel from the
 // database at startup, so a restart does not silently reconstruct it as
 // false (the zero value) regardless of the chain's real history -- see
-// syntheticV2CostModelSyncKey. Must run after loadPParams, which this
-// otherwise has no ordering dependency on.
+// database.SyntheticV2CostModelSyncKey. Must run after loadPParams, which
+// this otherwise has no ordering dependency on (the bootstrap fallback in
+// resolveSyntheticV2CostModel reads ls.currentPParams).
 //
 // A node whose database predates this field (blinklabs-io/dingo#3825) reads
-// an empty value here and starts as false ("not synthetic"), same as if the
-// key were explicitly written false. That is the correct answer for the
-// case this matters in practice -- a real network that hard-forked into
-// Babbage and received its real PlutusV2 update long ago -- and only wrong
-// for a database that both predates this field AND has never received that
-// real update, which is realistically a devnet/test network carried across
-// a binary upgrade at exactly that moment rather than a production node.
-// Not retroactively reconstructed by scanning full transition history.
+// an empty value here. Rather than defaulting to false ("not synthetic") --
+// which would be wrong for a database that predates this field AND has
+// never received a real PlutusV2 update (wolf31o2's PR review: this makes
+// the fix inert for any already-running devnet or production node upgraded
+// onto this build, since the marker can then only ever be set true again at
+// a live era transition, which such a node will never perform again) --
+// resolveSyntheticV2CostModel falls back to comparing the current PlutusV2
+// cost model directly against the known synthetic default. This can misjudge
+// real governance data that happens to re-affirm the exact default value as
+// still-synthetic; that is the safe failure direction (suppressing a real
+// value that would look identical to the fabricated one) given a database
+// with no other provenance signal at all, and matches the heuristic
+// injectedSyntheticV2CostModel already applies to detect the original
+// fabrication.
 func (ls *LedgerState) loadSyntheticV2CostModel() {
-	value, err := ls.db.GetSyncState(syntheticV2CostModelSyncKey, nil)
+	value, err := ls.db.GetSyncState(database.SyntheticV2CostModelSyncKey, nil)
 	if err != nil {
 		ls.config.Logger.Warn(
 			"failed to read synthetic PlutusV2 cost model marker from database",
@@ -3965,17 +4024,19 @@ func (ls *LedgerState) loadSyntheticV2CostModel() {
 		)
 		return
 	}
-	ls.syntheticV2CostModel = value == "true"
+	ls.syntheticV2CostModel = resolveSyntheticV2CostModel(
+		value, ls.currentPParams,
+	)
 }
 
 // persistSyntheticV2CostModel durably records LedgerState.syntheticV2CostModel
 // so a restart reconstructs it correctly instead of defaulting to false; see
-// syntheticV2CostModelSyncKey. The caller supplies txn so this write commits
-// atomically with the protocol-parameter write it describes -- a nil txn
-// commits immediately as its own transaction, matching database.Txn's usual
-// convention. Errors are propagated rather than logged-and-swallowed: when
-// txn is a caller-managed transaction, a write failure here must abort that
-// transaction along with the pparams write it accompanies, not silently
+// database.SyntheticV2CostModelSyncKey. The caller supplies txn so this write
+// commits atomically with the protocol-parameter write it describes -- a nil
+// txn commits immediately as its own transaction, matching database.Txn's
+// usual convention. Errors are propagated rather than logged-and-swallowed:
+// when txn is a caller-managed transaction, a write failure here must abort
+// that transaction along with the pparams write it accompanies, not silently
 // leave the two inconsistent. See blinklabs-io/dingo#3825's PR review.
 func (ls *LedgerState) persistSyntheticV2CostModel(
 	value bool,
@@ -3985,10 +4046,35 @@ func (ls *LedgerState) persistSyntheticV2CostModel(
 	if value {
 		v = "true"
 	}
-	if err := ls.db.SetSyncState(syntheticV2CostModelSyncKey, v, txn); err != nil {
+	if err := ls.db.SetSyncState(
+		database.SyntheticV2CostModelSyncKey, v, txn,
+	); err != nil {
 		return fmt.Errorf(
 			"persist synthetic PlutusV2 cost model marker: %w", err,
 		)
+	}
+	return nil
+}
+
+// markRealV2CostModelObserved durably records that real (non-synthetic)
+// PlutusV2 cost-model data was confirmed written as of epoch, both the
+// boolean marker (persistSyntheticV2CostModel) and the epoch it happened at
+// (database.SetSyntheticV2CostModelClearedEpoch) -- the latter is what lets
+// database.RecomputeSyntheticV2CostModelMarkerAfterTruncate tell whether a
+// later rollback crosses back before this confirmation and so must undo it.
+// Both writes share the caller's txn so they commit together with the
+// pparams write they describe. See blinklabs-io/dingo#3825's PR review.
+func (ls *LedgerState) markRealV2CostModelObserved(
+	epoch uint64,
+	txn *database.Txn,
+) error {
+	if err := ls.persistSyntheticV2CostModel(false, txn); err != nil {
+		return err
+	}
+	if err := database.SetSyntheticV2CostModelClearedEpoch(
+		ls.db, txn, epoch,
+	); err != nil {
+		return err
 	}
 	return nil
 }

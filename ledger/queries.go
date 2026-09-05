@@ -488,6 +488,7 @@ func (ls *LedgerState) queryShelleyLeaf(query any) (any, error) {
 			withoutSyntheticV2CostModel(
 				snapshot.currentPParams,
 				snapshot.syntheticV2CostModelInEffect,
+				ls.config.Logger,
 			),
 		}, nil
 	case *olocalstatequery.ShelleyGenesisConfigQuery:
