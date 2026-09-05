@@ -498,6 +498,123 @@ func (c *Chain) addBlockLocked(
 	return evt, nil
 }
 
+// chainStateSnapshot stages the in-memory chain state that a batch add
+// mutates so a failed batch can put it back. addBlockLocked and
+// addRawBlockLocked advance c.currentTip, c.tipBlockIndex, c.headers and
+// c.blocks per block, but nothing they write is durable until txn.Do commits,
+// and both batch paths have two failure modes:
+//
+//   - the closure rejects a later block in the batch, which rolls back every
+//     block the transaction already wrote; and
+//   - the closure returns nil and txn.Do's Commit then fails, which rolls the
+//     same writes back *after* the closure's deferred unlocks have released
+//     the chain locks.
+//
+// The first is restored inside the closure, under the locks that guarded the
+// mutation, so no reader ever observes a tip whose block the batch no longer
+// stores. The second cannot be: Commit runs unlocked, so the restore has to
+// re-acquire the locks, and publishLocked records what the closure handed to
+// Commit so restoreAfterCommitFailure can tell whether it is still undoing its
+// own work.
+type chainStateSnapshot struct {
+	taken         bool
+	tip           ochainsync.Tip
+	tipBlockIndex uint64
+	headers       []queuedHeader
+	blocks        []ocommon.Point
+
+	// published is the state the closure left for Commit, recorded only on
+	// the success path. A closure that restored its own mutation clears it,
+	// so the outer restore knows there is nothing left to undo.
+	published          bool
+	publishedTip       ochainsync.Tip
+	publishedIndex     uint64
+	publishedHeaders   int
+	publishedBlocksLen int
+}
+
+// captureLocked records the pre-batch state. Callers must hold c.mutex and
+// c.manager.mutex.
+func (s *chainStateSnapshot) captureLocked(c *Chain) {
+	s.tip = c.currentTip
+	s.tipBlockIndex = c.tipBlockIndex
+	s.headers = slices.Clone(c.headers)
+	if !c.persistent {
+		s.blocks = slices.Clone(c.blocks)
+	}
+	s.taken = true
+	s.published = false
+}
+
+// restoreLocked puts the captured state back. Callers must hold c.mutex and
+// c.manager.mutex.
+func (s *chainStateSnapshot) restoreLocked(c *Chain) {
+	c.currentTip = s.tip
+	c.tipBlockIndex = s.tipBlockIndex
+	c.headers = s.headers
+	if !c.persistent {
+		c.blocks = s.blocks
+	}
+	s.published = false
+}
+
+// publishLocked records the post-batch state the closure is handing to Commit.
+// Callers must hold c.mutex and c.manager.mutex.
+func (s *chainStateSnapshot) publishLocked(c *Chain) {
+	if !s.taken {
+		return
+	}
+	s.publishedTip = c.currentTip
+	s.publishedIndex = c.tipBlockIndex
+	s.publishedHeaders = len(c.headers)
+	s.publishedBlocksLen = len(c.blocks)
+	s.published = true
+}
+
+// matchesPublishedLocked reports whether the chain still holds exactly what the
+// closure published. Callers must hold c.mutex and c.manager.mutex.
+func (s *chainStateSnapshot) matchesPublishedLocked(c *Chain) bool {
+	return c.tipBlockIndex == s.publishedIndex &&
+		c.currentTip.Point.Slot == s.publishedTip.Point.Slot &&
+		bytes.Equal(
+			c.currentTip.Point.Hash,
+			s.publishedTip.Point.Hash,
+		) &&
+		len(c.headers) == s.publishedHeaders &&
+		len(c.blocks) == s.publishedBlocksLen
+}
+
+// ErrChainStateChangedDuringCommit reports a batch whose Commit failed while
+// another chain mutation had already landed on top of it. The batch's writes
+// are gone from storage but its in-memory effects cannot be unwound without
+// discarding that later mutation, so neither half of the chain can be trusted
+// and the caller must not treat the failure as a plain retryable batch error.
+var ErrChainStateChangedDuringCommit = errors.New(
+	"chain mutated concurrently with a failed batch commit",
+)
+
+// restoreAfterCommitFailure undoes a batch whose Commit failed. txn.Do calls
+// Commit after the closure's deferred unlocks have run, so this re-acquires
+// c.mutex and c.manager.mutex -- and every chain mutation takes c.mutex, so a
+// state that no longer matches what the closure published means one landed in
+// that window. Restoring over it would roll the in-memory chain back past a
+// durable commit, leaving it *behind* storage rather than level with it, so the
+// mismatch is reported instead.
+func (c *Chain) restoreAfterCommitFailure(s *chainStateSnapshot) error {
+	if !s.taken || !s.published {
+		return nil
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.manager.mutex.Lock()
+	defer c.manager.mutex.Unlock()
+	if !s.matchesPublishedLocked(c) {
+		return ErrChainStateChangedDuringCommit
+	}
+	s.restoreLocked(c)
+	return nil
+}
+
 func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 	if c == nil {
 		return errors.New("chain is nil")
@@ -518,21 +635,10 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 		// when a later block in the batch fails.
 		pendingEvents := make([]event.Event, 0, batchSize)
 		txn := c.manager.db.BlobTxn(true)
-		// addBlockLocked advances c.currentTip, c.tipBlockIndex,
-		// c.headers and c.blocks per block, but nothing it wrote is
-		// durable until txn.Do commits. Both failure modes therefore
-		// leave the in-memory chain ahead of storage: a later block in
-		// the batch can be rejected inside the closure, and txn.Do runs
-		// Commit *after* the closure returns and after the chain locks
-		// are released. Snapshot the pre-batch state so either one can
-		// be undone -- see addRawBlocks, which stages the same way.
-		var (
-			snapshotTaken      bool
-			savedTip           ochainsync.Tip
-			savedTipBlockIndex uint64
-			savedHeaders       []queuedHeader
-			savedBlocks        []ocommon.Point
-		)
+		// Stage the pre-batch state so both failure modes can be undone
+		// -- see chainStateSnapshot, and addRawBlocks, which stages the
+		// same way.
+		var snapshot chainStateSnapshot
 		err := txn.Do(func(txn *database.Txn) error {
 			c.mutex.Lock()
 			defer c.mutex.Unlock()
@@ -541,13 +647,7 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 			if err := c.reconcile(); err != nil {
 				return fmt.Errorf("reconcile chain: %w", err)
 			}
-			savedTip = c.currentTip
-			savedTipBlockIndex = c.tipBlockIndex
-			savedHeaders = slices.Clone(c.headers)
-			if !c.persistent {
-				savedBlocks = slices.Clone(c.blocks)
-			}
-			snapshotTaken = true
+			snapshot.captureLocked(c)
 			for _, tmpBlock := range blocks[batchOffset : batchOffset+batchSize] {
 				evt, err := c.addBlockLocked(
 					tmpBlock,
@@ -557,31 +657,33 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 					true,
 				)
 				if err != nil {
+					// Restore here, not after txn.Do
+					// returns: the deferred unlocks have
+					// not run yet, so no reader can
+					// observe the rejected batch's tip and
+					// no concurrent mutation can be
+					// overwritten by the restore.
+					snapshot.restoreLocked(c)
 					return err
 				}
 				if evt.Type != "" {
 					pendingEvents = append(pendingEvents, evt)
 				}
 			}
+			snapshot.publishLocked(c)
 			return nil
 		})
 		if err != nil {
-			// Restore under the same locks the closure held. This
-			// covers both the closure-error path and the later
-			// Commit-failure path; running it after a closure error
-			// is a safe no-op because the closure wrote nothing the
-			// snapshot does not already describe.
-			if snapshotTaken {
-				c.mutex.Lock()
-				c.manager.mutex.Lock()
-				c.currentTip = savedTip
-				c.tipBlockIndex = savedTipBlockIndex
-				c.headers = savedHeaders
-				if !c.persistent {
-					c.blocks = savedBlocks
-				}
-				c.manager.mutex.Unlock()
-				c.mutex.Unlock()
+			// Only the Commit-failure path reaches a still-advanced
+			// chain here; a closure error already restored itself.
+			if restoreErr := c.restoreAfterCommitFailure(
+				&snapshot,
+			); restoreErr != nil {
+				return fmt.Errorf(
+					"%w: %w",
+					restoreErr,
+					err,
+				)
 			}
 			return err
 		}
@@ -743,21 +845,10 @@ func (c *Chain) addRawBlocks(
 		// successfully.
 		pendingEvents := make([]event.Event, 0, batchSize)
 		txn := c.manager.db.BlobTxn(true)
-		// addRawBlockLocked mutates c.currentTip, c.tipBlockIndex,
-		// c.headers, and c.blocks before the txn commits. If a
-		// later block in the batch fails the closure restores the
-		// pre-batch state, but txn.Do also runs Commit *after* the
-		// closure returns and after the chain locks are released —
-		// a Commit failure rolls back the persistent state while
-		// leaving the in-memory chain advanced. Capture the
-		// snapshot here so we can also restore on Commit failure.
-		var (
-			snapshotTaken      bool
-			savedTip           ochainsync.Tip
-			savedTipBlockIndex uint64
-			savedHeaders       []queuedHeader
-			savedBlocks        []ocommon.Point
-		)
+		// Stage the pre-batch state so both failure modes can be undone
+		// -- see chainStateSnapshot, and AddBlocks, which stages the
+		// same way.
+		var snapshot chainStateSnapshot
 		err := txn.Do(func(txn *database.Txn) error {
 			batch := blocks[batchOffset : batchOffset+batchSize]
 			c.mutex.Lock()
@@ -767,13 +858,7 @@ func (c *Chain) addRawBlocks(
 			if err := c.reconcile(); err != nil {
 				return fmt.Errorf("reconcile: %w", err)
 			}
-			savedTip = c.currentTip
-			savedTipBlockIndex = c.tipBlockIndex
-			savedHeaders = slices.Clone(c.headers)
-			if !c.persistent {
-				savedBlocks = slices.Clone(c.blocks)
-			}
-			snapshotTaken = true
+			snapshot.captureLocked(c)
 			for _, rb := range batch {
 				evt, err := c.addRawBlockLocked(
 					rb,
@@ -781,12 +866,7 @@ func (c *Chain) addRawBlocks(
 					callback,
 				)
 				if err != nil {
-					c.currentTip = savedTip
-					c.tipBlockIndex = savedTipBlockIndex
-					c.headers = savedHeaders
-					if !c.persistent {
-						c.blocks = savedBlocks
-					}
+					snapshot.restoreLocked(c)
 					return err
 				}
 				if evt.Type != "" {
@@ -795,26 +875,20 @@ func (c *Chain) addRawBlocks(
 					)
 				}
 			}
+			snapshot.publishLocked(c)
 			return nil
 		})
 		if err != nil {
-			// Cover the Commit-failure path: closure returned nil
-			// but txn.Do's later Commit failed, so memory still
-			// reflects the post-batch tip while the DB rolled
-			// back. Re-acquire the locks and restore. Restoring
-			// after a closure-internal error path is a safe no-op
-			// because the closure already wrote the same values.
-			if snapshotTaken {
-				c.mutex.Lock()
-				c.manager.mutex.Lock()
-				c.currentTip = savedTip
-				c.tipBlockIndex = savedTipBlockIndex
-				c.headers = savedHeaders
-				if !c.persistent {
-					c.blocks = savedBlocks
-				}
-				c.manager.mutex.Unlock()
-				c.mutex.Unlock()
+			// Only the Commit-failure path reaches a still-advanced
+			// chain here; a closure error already restored itself.
+			if restoreErr := c.restoreAfterCommitFailure(
+				&snapshot,
+			); restoreErr != nil {
+				return fmt.Errorf(
+					"add raw block batch: %w: %w",
+					restoreErr,
+					err,
+				)
 			}
 			return fmt.Errorf("add raw block batch: %w", err)
 		}

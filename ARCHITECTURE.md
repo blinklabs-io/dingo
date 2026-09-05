@@ -486,11 +486,23 @@ instead of publishing Apply after Undo.
 Both mutation paths stage their in-memory state against the durable commit.
 `Chain.AddBlocks` and `Chain.addRawBlocks` advance `currentTip`,
 `tipBlockIndex`, the queued headers, and the ephemeral block buffer per block
-inside the batch transaction, so they snapshot those fields first and restore
-them on either failure mode: a block the closure rejects, and the `Commit`
-`txn.Do` runs after the closure has returned and released the chain locks.
+inside the batch transaction, so they snapshot those fields first
+(`chainStateSnapshot`, shared by both) and restore them on either failure mode.
 Without the restore a rolled-back batch leaves the chain naming a tip whose
 block the database no longer holds.
+
+The two failure modes are restored in different places, and the difference
+matters. A block the closure rejects is restored **inside the closure**, under
+the same `c.mutex` / `c.manager.mutex` the mutation held, so the rejected
+batch's tip is never published: no reader observes it, and no concurrent
+mutation can be overwritten by the restore. A `Commit` failure cannot be
+handled that way — `txn.Do` runs `Commit` after the closure's deferred unlocks
+— so `restoreAfterCommitFailure` re-acquires both locks and restores only if
+the chain still holds exactly what the closure published. Every chain mutation
+takes `c.mutex`, so a mismatch means one landed in that window, and restoring
+over it would roll the in-memory chain back past a durable commit, leaving it
+*behind* storage rather than level with it. That case is reported as
+`chain.ErrChainStateChangedDuringCommit` instead of being silently applied.
 
 The rollback halves cannot be staged the same way, because they commit
 separately: `rollbackChainAndStateDeferred` truncates the primary chain first
@@ -504,6 +516,13 @@ from the refusals that mean no state changed (`models.ErrBlockNotFound`,
 each of which `handleEventChainsyncRollback` and `tryResolveFork` recover from
 with a plain re-intersect; recovering that way here would resume from a ledger
 tip whose block the chain has already deleted.
+
+That reporting is scoped to an actual split. `LedgerState.rollback` can also
+fail with the ledger tip already **on** the rollback point — both
+`enforceDurableTipFloor` call sites do — and there the two halves agree, so the
+failure keeps the ordinary wrapped error and the recovery it has always had.
+The check is the same `pointMatches(ls.Tip().Point, point)` test the success
+path uses to decide whether to arm the continuation audit.
 
 Getting this wrong is subtle, so the constraint is worth stating plainly:
 **the undo events must be emitted before the truncation, by the rollback

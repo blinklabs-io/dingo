@@ -153,3 +153,78 @@ func TestHandleEventChainsyncRollbackFailsHardAfterChainTruncation(
 			"swallowed as a recoverable re-intersect",
 	)
 }
+
+// floorLookupFailingMetadataStore fails the durable-applied-floor lookup that
+// enforceDurableTipFloor runs. ls.rollback calls enforceDurableTipFloor from
+// two places -- the no-op branch it takes when the ledger tip already equals
+// the rollback point, and the tail of the full rollback, after the truncation
+// has committed and ls.currentTip has been published -- so this is how
+// ls.rollback fails with the ledger already sitting on the rollback point.
+type floorLookupFailingMetadataStore struct {
+	metadata.MetadataStore
+	err error
+}
+
+func (s floorLookupFailingMetadataStore) GetLatestBlockNonce(
+	_ dbtypes.Txn,
+) (models.BlockNonce, bool, error) {
+	return models.BlockNonce{}, false, s.err
+}
+
+// TestRollbackChainAndStateDeferredKeepsOrdinaryErrorWhenLedgerReachedPoint is
+// the negative half of the sentinel's contract. ErrChainTruncatedLedgerRollbackFailed
+// means the chain truncated and the ledger did not, and the callers escalate on
+// it. A ls.rollback failure raised once the ledger tip is already at the
+// rollback point is not that state -- both halves agree -- so it has to keep
+// the ordinary wrapped error and the recovery it has always had.
+func TestRollbackChainAndStateDeferredKeepsOrdinaryErrorWhenLedgerReachedPoint(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	// Put the ledger on the rollback point while the chain is still ahead,
+	// so the chain truncation below is real and ls.rollback is the no-op
+	// that returns enforceDurableTipFloor's error directly.
+	ls.currentTip = fixture.ancestorTip
+	ls.publishSnapshotsLocked()
+
+	floorErr := models.ErrBlockNotFound
+	base := ls.db
+	failing, err := database.New(
+		base.Config(),
+		database.Stores{
+			Blob: base.Blob(),
+			Metadata: floorLookupFailingMetadataStore{
+				MetadataStore: base.Metadata(),
+				err:           floorErr,
+			},
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, failing.Close()) })
+	ls.db = failing
+
+	rbErr := ls.rollbackChainAndStateDeferred(fixture.ancestorTip.Point, nil)
+	require.Error(t, rbErr)
+
+	// Both halves reached the rollback point: the chain truncated to it and
+	// the ledger was already there.
+	require.Equal(t, fixture.ancestorTip, ls.chain.Tip())
+	require.Equal(t, fixture.ancestorTip, ls.currentTip)
+
+	require.False(
+		t,
+		errors.Is(rbErr, ErrChainTruncatedLedgerRollbackFailed),
+		"the ledger tip is on the rollback point, so the two halves are "+
+			"not split and the divergence sentinel must not be "+
+			"reported; got %v",
+		rbErr,
+	)
+	require.ErrorIs(
+		t,
+		rbErr,
+		floorErr,
+		"a failure that left the halves agreeing keeps the cause in the "+
+			"errors.Is chain, as it did before the sentinel existed",
+	)
+}

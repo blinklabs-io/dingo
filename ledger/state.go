@@ -3460,6 +3460,24 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 		pubs.drainChain(ls.chain)
 	}
 	if err := ls.rollback(point); err != nil {
+		// ls.rollback can fail with the ledger already sitting on the
+		// rollback point: the no-op branch it takes when the tip
+		// already matches returns enforceDurableTipFloor's error
+		// directly, and the full path runs enforceDurableTipFloor again
+		// after committing the truncation and publishing the new tip.
+		// Neither leaves the halves disagreeing -- the chain truncated
+		// to point and the ledger is at point -- so those keep the
+		// ordinary wrapped error and the recovery it has always had.
+		// Only a ledger that did not reach the point is the divergence
+		// ErrChainTruncatedLedgerRollbackFailed exists to report. This
+		// is the same both-sides-reached-it test the success path below
+		// uses to decide whether to arm the continuation audit.
+		if pointMatches(ls.Tip().Point, point) {
+			return fmt.Errorf(
+				"synchronize ledger rollback state: %w",
+				err,
+			)
+		}
 		return ls.reportFailedLedgerRollbackAfterTruncation(point, err)
 	}
 	// A primary chain can be ahead of the applied ledger during genesis or
@@ -3483,6 +3501,11 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 // the abandoned blocks through their own committed transactions. There is
 // nothing left to restore -- the blocks are gone -- so the stale half is
 // invalidated explicitly instead.
+//
+// The caller reaches this only for a ledger that did not arrive at the rollback
+// point. A failure raised once the ledger tip is already at the point (both
+// enforceDurableTipFloor call sites in ls.rollback) leaves the two halves
+// agreeing and keeps the ordinary wrapped error.
 //
 // Invalidating means two things. The continuation-audit window is discarded:
 // arming it presumes the chain and the ledger both reached the rollback point

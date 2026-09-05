@@ -16,6 +16,7 @@ package chain_test
 
 import (
 	"errors"
+	"sync/atomic"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -24,6 +25,7 @@ import (
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
@@ -36,6 +38,13 @@ import (
 type commitFailingBlobStore struct {
 	blob.BlobStore
 	err error
+	// onceOnly arms the failure for a single read-write transaction, so a
+	// mutation injected by beforeFail can commit for real.
+	onceOnly *atomic.Bool
+	// beforeFail runs inside Commit, after the batch closure's deferred
+	// unlocks have released the chain locks and before the injected error
+	// is returned -- exactly the window the outer restore has to survive.
+	beforeFail func()
 }
 
 func (s commitFailingBlobStore) NewTransaction(readWrite bool) dbtypes.Txn {
@@ -43,11 +52,21 @@ func (s commitFailingBlobStore) NewTransaction(readWrite bool) dbtypes.Txn {
 	if !readWrite {
 		return txn
 	}
-	return &commitFailingBlobTxn{Txn: txn, err: s.err}
+	if s.onceOnly != nil && !s.onceOnly.CompareAndSwap(false, true) {
+		return txn
+	}
+	return &commitFailingBlobTxn{
+		Txn:        txn,
+		err:        s.err,
+		beforeFail: s.beforeFail,
+	}
 }
 
-// SetBlock is the only store call AddBlocks makes with the wrapped
-// transaction, so it is the only one that has to unwrap before delegating.
+// SetBlock is the only store call reached with the wrapped transaction, so it
+// is the only override needed. AddBlocks runs on a blob-only transaction
+// (Database.BlobTxn), and Txn.Commit updates the commit timestamp -- the other
+// call that would receive this transaction -- only when a metadata transaction
+// is present too, so Blob().SetCommitTimestamp is never reached from here.
 func (s commitFailingBlobStore) SetBlock(
 	txn dbtypes.Txn,
 	slot uint64,
@@ -70,23 +89,17 @@ func (s commitFailingBlobStore) SetBlock(
 	)
 }
 
-func (s commitFailingBlobStore) SetCommitTimestamp(
-	timestamp int64,
-	txn dbtypes.Txn,
-) error {
-	return s.BlobStore.SetCommitTimestamp(
-		timestamp,
-		unwrapCommitFailingBlobTxn(txn),
-	)
-}
-
 type commitFailingBlobTxn struct {
 	dbtypes.Txn
-	err error
+	err        error
+	beforeFail func()
 }
 
 func (t *commitFailingBlobTxn) Commit() error {
 	_ = t.Txn.Rollback()
+	if t.beforeFail != nil {
+		t.beforeFail()
+	}
 	return t.err
 }
 
@@ -166,6 +179,7 @@ func TestAddBlocksRestoresChainStateWhenCommitFails(t *testing.T) {
 			Blob: commitFailingBlobStore{
 				BlobStore: base.Blob(),
 				err:       commitErr,
+				onceOnly:  &atomic.Bool{},
 			},
 			Metadata: base.Metadata(),
 		},
@@ -190,6 +204,270 @@ func TestAddBlocksRestoresChainStateWhenCommitFails(t *testing.T) {
 		tipBefore,
 		c.Tip(),
 		"a batch whose commit failed must not leave the in-memory tip "+
+			"advanced past the last durable block",
+	)
+}
+
+// rollbackObservingBlobStore records the chain tip at the moment txn.Do rolls
+// the transaction back after a closure error. That call happens after the
+// closure's deferred unlocks have released the chain locks and before txn.Do
+// returns to the batch function, so it is the exact instant at which a reader
+// could observe a tip the batch has already abandoned.
+type rollbackObservingBlobStore struct {
+	blob.BlobStore
+	observe func()
+}
+
+func (s rollbackObservingBlobStore) NewTransaction(readWrite bool) dbtypes.Txn {
+	txn := s.BlobStore.NewTransaction(readWrite)
+	if !readWrite {
+		return txn
+	}
+	return &rollbackObservingBlobTxn{Txn: txn, observe: s.observe}
+}
+
+// SetBlock unwraps for the same reason commitFailingBlobStore.SetBlock does.
+func (s rollbackObservingBlobStore) SetBlock(
+	txn dbtypes.Txn,
+	slot uint64,
+	hash []byte,
+	cbor []byte,
+	id uint64,
+	blockType uint,
+	height uint64,
+	prevHash []byte,
+) error {
+	return s.BlobStore.SetBlock(
+		unwrapRollbackObservingBlobTxn(txn),
+		slot,
+		hash,
+		cbor,
+		id,
+		blockType,
+		height,
+		prevHash,
+	)
+}
+
+type rollbackObservingBlobTxn struct {
+	dbtypes.Txn
+	observe func()
+}
+
+func (t *rollbackObservingBlobTxn) Rollback() error {
+	if t.observe != nil {
+		t.observe()
+	}
+	return t.Txn.Rollback()
+}
+
+func unwrapRollbackObservingBlobTxn(txn dbtypes.Txn) dbtypes.Txn {
+	if wrapped, ok := txn.(*rollbackObservingBlobTxn); ok {
+		return wrapped.Txn
+	}
+	return txn
+}
+
+// TestAddBlocksRestoresChainStateInsideClosureOnBatchFailure pins *where* the
+// batch-failure restore happens, not just that it happens. The closure holds
+// c.mutex and c.manager.mutex for the whole batch; restoring after txn.Do
+// returns means the deferred unlocks publish the rejected batch's tip first and
+// the restore has to take the locks back, so a reader in that window sees a tip
+// whose blocks the transaction is discarding, and the restore itself can land
+// on top of a mutation that got in. addRawBlocks restores inside the closure;
+// AddBlocks now does too.
+func TestAddBlocksRestoresChainStateInsideClosureOnBatchFailure(t *testing.T) {
+	base := newTestDB(t)
+	var (
+		c           *chain.Chain
+		observed    ochainsync.Tip
+		observedSet bool
+	)
+	db, err := database.New(
+		base.Config(),
+		database.Stores{
+			Blob: rollbackObservingBlobStore{
+				BlobStore: base.Blob(),
+				observe: func() {
+					if c == nil || observedSet {
+						return
+					}
+					observed = c.Tip()
+					observedSet = true
+				},
+			},
+			Metadata: base.Metadata(),
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	c = cm.PrimaryChain()
+	require.NotNil(t, c)
+
+	var origin common.Blake2b256
+	blocks := generateTestChain(t, 1, origin, 20, 20, 4)
+	require.Len(t, blocks, 4)
+
+	require.NoError(t, c.AddBlocks(blocks[:1]))
+	tipBefore := c.Tip()
+
+	// blocks[1] is accepted and advances the tip; blocks[3] does not fit, so
+	// the closure fails and txn.Do rolls back -- calling the observer.
+	require.Error(t, c.AddBlocks([]ledger.Block{blocks[1], blocks[3]}))
+
+	require.True(
+		t,
+		observedSet,
+		"the rollback observer must have run; without it the test proves "+
+			"nothing",
+	)
+	require.Equal(
+		t,
+		tipBefore,
+		observed,
+		"the rejected batch's tip was still published when txn.Do rolled "+
+			"back, so the restore ran after the closure released the "+
+			"chain locks instead of under them",
+	)
+	require.Equal(t, tipBefore, c.Tip())
+}
+
+// TestAddBlocksReportsConcurrentMutationWhenCommitFails covers the one restore
+// that cannot be made atomic: txn.Do calls Commit after the closure's deferred
+// unlocks have run, so the commit-failure restore must re-take c.mutex, and a
+// chain mutation can land in between. Restoring over it would roll the
+// in-memory chain back past a durable commit -- behind storage rather than
+// level with it -- so the mismatch is reported instead of silently applied.
+func TestAddBlocksReportsConcurrentMutationWhenCommitFails(t *testing.T) {
+	base := newTestDB(t)
+	commitErr := errors.New("injected blob commit failure")
+
+	var (
+		c         *chain.Chain
+		interject func()
+	)
+	db, err := database.New(
+		base.Config(),
+		database.Stores{
+			Blob: commitFailingBlobStore{
+				BlobStore: base.Blob(),
+				err:       commitErr,
+				onceOnly:  &atomic.Bool{},
+				beforeFail: func() {
+					if interject != nil {
+						interject()
+					}
+				},
+			},
+			Metadata: base.Metadata(),
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	c = cm.PrimaryChain()
+	require.NotNil(t, c)
+
+	var origin common.Blake2b256
+	blocks := generateTestChain(t, 1, origin, 20, 20, 3)
+	require.Len(t, blocks, 3)
+
+	// The failing batch is blocks[:2]. While its Commit is failing -- chain
+	// locks free, exactly where a concurrent mutation fits -- add blocks[2]
+	// on top of the tip the batch published. That add opens its own
+	// transaction, which the one-shot store lets commit for real.
+	var (
+		interjected    bool
+		interjectedErr error
+	)
+	interject = func() {
+		if interjected {
+			return
+		}
+		interjected = true
+		interjectedErr = c.AddBlocks(blocks[2:])
+	}
+
+	err = c.AddBlocks(blocks[:2])
+	require.True(t, interjected, "the interjected mutation must have run")
+	require.NoError(
+		t,
+		interjectedErr,
+		"the interjected mutation must have committed; otherwise there is "+
+			"nothing for the restore to clobber",
+	)
+	require.ErrorIs(t, err, commitErr, "the commit failure must be reported")
+	require.ErrorIs(
+		t,
+		err,
+		chain.ErrChainStateChangedDuringCommit,
+		"a commit-failure restore that would overwrite a later chain "+
+			"mutation must be reported, not applied",
+	)
+	require.Equal(
+		t,
+		blocks[2].SlotNumber(),
+		c.Tip().Point.Slot,
+		"the later mutation's tip must survive; rolling it back would put "+
+			"the in-memory chain behind durable storage",
+	)
+}
+
+// TestAddRawBlocksRestoresChainStateWhenCommitFails pins the sibling path. Both
+// batch functions share chainStateSnapshot and restoreAfterCommitFailure now,
+// which is what keeps them from drifting apart again -- this PR exists because
+// the staging was added to addRawBlocks alone and AddBlocks kept advancing its
+// tip past a rolled-back batch.
+func TestAddRawBlocksRestoresChainStateWhenCommitFails(t *testing.T) {
+	base := newTestDB(t)
+	commitErr := errors.New("injected blob commit failure")
+	db, err := database.New(
+		base.Config(),
+		database.Stores{
+			Blob: commitFailingBlobStore{
+				BlobStore: base.Blob(),
+				err:       commitErr,
+				onceOnly:  &atomic.Bool{},
+			},
+			Metadata: base.Metadata(),
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	c := cm.PrimaryChain()
+	require.NotNil(t, c)
+
+	tipBefore := c.Tip()
+
+	var origin common.Blake2b256
+	blocks := generateTestChain(t, 1, origin, 20, 20, 2)
+	rawBlocks := make([]chain.RawBlock, 0, len(blocks))
+	for _, b := range blocks {
+		rawBlocks = append(rawBlocks, chain.RawBlock{
+			Slot:        b.SlotNumber(),
+			Hash:        b.Hash().Bytes(),
+			BlockNumber: b.BlockNumber(),
+			Type:        uint(b.Type()),
+			PrevHash:    b.PrevHash().Bytes(),
+			Cbor:        b.Cbor(),
+		})
+	}
+
+	err = c.AddRawBlocks(rawBlocks)
+	require.ErrorIs(t, err, commitErr)
+	require.Equal(
+		t,
+		tipBefore,
+		c.Tip(),
+		"a raw batch whose commit failed must not leave the in-memory tip "+
 			"advanced past the last durable block",
 	)
 }
