@@ -410,6 +410,21 @@ func TestSeedImportedRewardInputsSkipsEpochsWithNoParamsWindow(t *testing.T) {
 	}
 }
 
+func TestEmptyRewardSeedFailureReasonReportsMissingParameters(t *testing.T) {
+	pools := ParsedSnapShot{
+		Stake: map[string]uint64{"credential": 1},
+		Delegations: map[string][]byte{
+			"credential": []byte{0x01, 0x02},
+		},
+	}
+
+	reason := emptyRewardSeedFailureReason(&pools)
+	require.Equal(t,
+		"derived reward basis contains no pool inputs: pool 0102 has no parameters",
+		reason,
+	)
+}
+
 func TestSeedImportedRewardInputsPreservesFailureForEmptyBundle(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)

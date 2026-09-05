@@ -691,7 +691,7 @@ func emptyRewardSeedFailureReason(snap *ParsedSnapShot) string {
 	reasons := make([]string, 0, len(pools))
 	for _, pool := range pools {
 		pool = boundRewardSeedFailurePoolKey(pool)
-		reasons = append(reasons, fmt.Sprintf("pool %s has no reward account", pool))
+		reasons = append(reasons, fmt.Sprintf("pool %s has no parameters", pool))
 	}
 	return generic + ": " + boundRewardSeedFailureReasons(reasons)
 }

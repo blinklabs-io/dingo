@@ -4218,7 +4218,7 @@ INSERT INTO reward_seed_failure (
 ) VALUES (?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type) DO UPDATE SET
     failure_reason = excluded.failure_reason,
-    captured_slot = excluded.captured_slot
+    captured_slot = MIN(reward_seed_failure.captured_slot, excluded.captured_slot)
 `
 
 type SaveRewardSeedFailureParams struct {
