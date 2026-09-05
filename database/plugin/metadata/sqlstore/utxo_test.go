@@ -15,6 +15,8 @@
 package sqlstore
 
 import (
+	"bytes"
+	"encoding/binary"
 	"math"
 	"math/big"
 	"testing"
@@ -130,6 +132,160 @@ func TestAddUtxosRejectsOverflowAssetWithoutMutation(t *testing.T) {
 	).Scan(&assetCount))
 	require.Equal(t, 0, utxoCount)
 	require.Equal(t, 0, assetCount)
+}
+
+// TestGetUtxosByAddressRequiresPositiveMaxResults proves maxResults is a
+// required, explicit bound: callers cannot opt into an unbounded query by
+// passing zero or a negative value.
+func TestGetUtxosByAddressRequiresPositiveMaxResults(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	pattern := models.UtxoAddressPattern{PaymentPart: []byte("payment")}
+
+	for _, maxResults := range []int{0, -1} {
+		_, err := store.GetUtxosByAddress(
+			[]models.UtxoAddressPattern{pattern},
+			maxResults,
+			nil,
+		)
+		require.Error(t, err)
+	}
+}
+
+// TestGetUtxosByAddressEnforcesMaxResults proves a broad query that would
+// return more than maxResults candidate rows fails with
+// models.ErrTooManyUtxoResults instead of silently returning a truncated
+// (and therefore wrong) answer, and that raising the bound to cover the
+// true result size succeeds.
+func TestGetUtxosByAddressEnforcesMaxResults(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+
+	paymentKey := []byte("shared-payment-key-28-bytes-")
+	const utxoCount = 5
+	for i := range utxoCount {
+		txId := make([]byte, 32)
+		txId[31] = byte(i)
+		require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
+			TxId:       txId,
+			OutputIdx:  0,
+			PaymentKey: paymentKey,
+			AddedSlot:  uint64(i + 1),
+			Amount:     100,
+		}))
+	}
+	pattern := models.UtxoAddressPattern{PaymentPart: paymentKey}
+
+	_, err := store.GetUtxosByAddress(
+		[]models.UtxoAddressPattern{pattern},
+		utxoCount-1,
+		nil,
+	)
+	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
+
+	got, err := store.GetUtxosByAddress(
+		[]models.UtxoAddressPattern{pattern},
+		utxoCount,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, got, utxoCount)
+}
+
+// TestGetUtxosByAddressDetectsOverflowAcrossOverlappingChunks proves the
+// per-chunk SQL LIMIT stays sound when a physical UTxO can be matched by
+// more than one chunk's OR-expression. GetUtxosByAddress deduplicates
+// candidates by (tx id, output index) across chunks, so an earlier fix
+// shrunk each later chunk's limit by the deduplicated count already
+// collected (maxResults - len(ret) + 1); that is unsound here: a chunk
+// full of already-seen duplicates could leave no budget left to see that
+// same chunk's own, still-unseen matches, silently returning an
+// incomplete answer instead of detecting the overflow. The fix uses a
+// fixed maxResults+1 limit on every chunk instead.
+//
+// This forces multiple, overlapping chunks the same way
+// TestUtxosByAddressManyZeroArgBranches does: a run of Byron patterns
+// whose payment and staking hash both decode as zero falls back to a
+// zero-argument branch (see AppendUtxoAddressPatternOrBranch), so
+// GetUtxosByAddress's chunking -- which flushes on branch count as well
+// as bind-argument count -- splits before the parameter limit would ever
+// be reached. Every such branch matches the one "shared" UTxO seeded
+// below regardless of which chunk it lands in, while three additional,
+// genuinely distinct UTxOs are matched only by their own PaymentPart
+// pattern in the final chunk alongside a run of that same filler.
+func TestGetUtxosByAddressDetectsOverflowAcrossOverlappingChunks(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+
+	// The shared UTxO: no payment/staking key, matched by every
+	// zero-argument filler branch.
+	sharedTxId := make([]byte, 32)
+	sharedTxId[31] = 0xee
+	require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
+		TxId:      sharedTxId,
+		OutputIdx: 0,
+		AddedSlot: 1,
+		Amount:    1,
+	}))
+
+	// Three additional, genuinely distinct UTxOs.
+	const distinctCount = 3
+	distinctKeys := make([][]byte, distinctCount)
+	for i := range distinctKeys {
+		key := bytes.Repeat([]byte{byte(i + 1)}, lcommon.AddressHashSize)
+		distinctKeys[i] = key
+		txId := make([]byte, 32)
+		txId[31] = byte(i + 1)
+		require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
+			TxId:       txId,
+			OutputIdx:  0,
+			PaymentKey: key,
+			AddedSlot:  uint64(i + 2),
+			Amount:     100,
+		}))
+	}
+
+	// Enough zero-argument filler branches to force at least one
+	// branch-count-triggered chunk flush (paramLimit/2 == 499 for
+	// SQLite), followed by the three distinct-address patterns so they
+	// land in a later chunk alongside more of the same filler.
+	zeroPayment := bytes.Repeat([]byte{0x00}, lcommon.AddressHashSize)
+	const fillerCount = 600
+	patterns := make(
+		[]models.UtxoAddressPattern, 0, fillerCount+distinctCount,
+	)
+	for i := range fillerCount {
+		payload := make([]byte, 4)
+		binary.BigEndian.PutUint32(payload, uint32(i)+1)
+		addr, err := lcommon.NewByronAddressFromParts(
+			0, zeroPayment, lcommon.ByronAddressAttributes{Payload: payload},
+		)
+		require.NoError(t, err)
+		addrBytes, err := addr.Bytes()
+		require.NoError(t, err)
+		patterns = append(
+			patterns,
+			models.UtxoAddressPattern{ExactAddress: addrBytes},
+		)
+	}
+	for _, key := range distinctKeys {
+		patterns = append(
+			patterns,
+			models.UtxoAddressPattern{PaymentPart: key},
+		)
+	}
+
+	// 4 genuinely distinct UTxOs match (the shared one plus the 3
+	// PaymentPart-only ones); a maxResults of 2 must be reported as
+	// exceeded, not silently answered with an incomplete 2-row result.
+	_, err := store.GetUtxosByAddress(patterns, 2, nil)
+	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
+
+	// Raising the bound to cover the true count must return every
+	// distinct UTxO exactly once: no unique match dropped by chunking.
+	got, err := store.GetUtxosByAddress(patterns, distinctCount+1, nil)
+	require.NoError(t, err)
+	require.Len(t, got, distinctCount+1)
 }
 
 // TestGetUtxosByAddressWithOrderingSkipAssets proves SkipAssets omits a

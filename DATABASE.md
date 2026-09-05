@@ -567,7 +567,7 @@ erDiagram
 |---|---|---|---|
 | `commit_timestamp` | `id`, `timestamp` | PK `id`; singleton row `id = 1` | Mirrored with the blob-store `metadata_commit_timestamp` key to detect partial commits. |
 | `node_settings` | `id`, `storage_mode`, `network` | PK `id`; singleton row `id = 1` | Read-only compatibility fallback for the `storage_mode` and `network` gates, superseded by `node_settings_gate` below. Its row is physically immutable after creation: `InsertNodeSettings` is `ON CONFLICT (id) DO NOTHING` on sqlite/postgres and a no-op `ON DUPLICATE KEY UPDATE` on mysql, and the only `UPDATE node_settings` statement in the store, `BackfillNodeSettingsNetwork`, sets `network` alone (once, while it is still empty) and never touches `storage_mode`. Because of that immutability it cannot be authoritative for either gate; `persistedGateValues` reads it first and lets `node_settings_gate` override it, so a database created before that table existed still validates correctly. The narrow exception is the `network` fill-once: `writeGateValues` still mirrors it here too, keyed on whatever `storage_mode` is physically in the row, so `GetNodeSettings()` stays accurate for callers that read this table directly. |
-| `node_settings_gate` | `name`, `value`, `recorded_epoch`, `recorded_slot` | PK `name` | Authoritative store for every gate registered in `database/nodesettings.Gates()`, including `storage_mode` and `network` as well as network_magic, start_era, feature latches, genesis hashes, taints, and plugin selection. `value` is the gate's encoded string (plain value, `LatchOff`/`LatchOn`/`LatchOn:<carried>`, an enum member, or, for `start_era` specifically, the canonical sentinel `nodesettings.NoStartEra` recording "no start era" as a confirmed value rather than an absent row — needed because that gate's `FrozenFillOnce` class otherwise treats an empty configured value as unknown, which would leave the ordinary no-override case unpersisted and let a later `--start-era` change through as a first-ever fill instead of being rejected). `recorded_epoch`/`recorded_slot` are stamped from the write that produced the current value and are zero when the write happens before the first block. Read via `SettingsStore.GetNodeSettingsGates`, which returns a `nodesettings.Values` map, and written one row per gate via `SettingsStore.SetNodeSettingsGates`, an upsert that overwrites the prior value, epoch, and slot for that name. Enforcement of frozen/latched/tainted transitions is `database/nodesettings.Evaluate`, not this table. Two callers merge this table with the legacy `node_settings` row into one value set (`persistedGateValues`) before evaluating: `Database.CheckNodeSettings`, called from `database.New` for the gates a bare open can supply, and `Database.EnforceNodeSettings` (`database/enforce_node_settings.go`), called once from node startup for the genesis-hash and ledger-semantics gates that require the fully-parsed node configuration (see ARCHITECTURE.md's "Node Settings Gate Enforcement"). A database that predates this table simply has no rows here yet, and every gate is skipped rather than compared until it is. `evaluateAndPersistGates` writes a gate's *first-ever* value (one absent from both this table and the legacy row) via `SettingsStore.InsertNodeSettingsGateIfAbsent` rather than the plain upsert, and only falls back to `writeGateValues`'s unconditional upsert for a value already known to exist: two openers can otherwise both see no rows here and both write their own first value, and an unconditional upsert would let whichever commits last silently overwrite the other with no record a collision happened. `InsertNodeSettingsGateIfAbsent` is `INSERT ... ON CONFLICT (name) DO NOTHING` on sqlite/postgres and `INSERT IGNORE` (not `ON DUPLICATE KEY UPDATE`, whose `RowsAffected` is ambiguous under `CLIENT_FOUND_ROWS` — see `SetNodeSettings`'s row above) on mysql, and reports whether its own call is what created the row; a caller that loses re-reads what is now actually persisted and evaluates against that instead of assuming its own write landed. This is reachable in practice only when the metadata plugin is shared across processes by design (postgres, mysql, both `dingo_extra_plugins`-gated): sqlite is opened per-process, and the default blob plugin's exclusive process lock already rules out two full opens of the same database at once regardless of metadata plugin. |
+| `node_settings_gate` | `name`, `value`, `recorded_epoch`, `recorded_slot` | PK `name` | Authoritative store for every gate registered in `database/nodesettings.Gates()`, including `storage_mode` and `network` as well as network_magic, start_era, feature latches, genesis hashes, taints, and plugin selection. `value` is the gate's encoded string (plain value, `LatchOff`/`LatchOn`/`LatchOn:<carried>`, an enum member, or, for `start_era` specifically, the canonical sentinel `nodesettings.NoStartEra` recording "no start era" as a confirmed value rather than an absent row — needed because that gate's `FrozenFillOnce` class otherwise treats an empty configured value as unknown, which would leave the ordinary no-override case unpersisted and let a later `--start-era` change through as a first-ever fill instead of being rejected). `recorded_epoch`/`recorded_slot` are stamped from the write that produced the current value and are zero when the write happens before the first block; every write path (`SetNodeSettingsGates`, `InsertNodeSettingsGateIfAbsent`, `InsertNodeSettingsGatesIfAbsent`) converts them with the same `checkedInt64` guard the rest of this package uses at the uint64-to-SQL-INTEGER boundary, rejecting a value that would not survive the round trip rather than silently writing a wrapped negative. Read via `SettingsStore.GetNodeSettingsGates`, which returns a `nodesettings.Values` map, and written one row per gate via `SettingsStore.SetNodeSettingsGates`, an upsert that overwrites the prior value, epoch, and slot for that name. Enforcement of frozen/latched/tainted transitions is `database/nodesettings.Evaluate`, not this table. Two callers merge this table with the legacy `node_settings` row into one value set (`persistedGateValues`) before evaluating: `Database.CheckNodeSettings`, called from `database.New` for the gates a bare open can supply, and `Database.EnforceNodeSettings` (`database/enforce_node_settings.go`), called once from node startup for the genesis-hash and ledger-semantics gates that require the fully-parsed node configuration (see ARCHITECTURE.md's "Node Settings Gate Enforcement"). A database that predates this table simply has no rows here yet; every gate absent from both this table and the legacy `node_settings` row is skipped rather than compared until it is written -- in practice that is every gate other than `storage_mode`/`network`, since those two alone still validate via that legacy row (see the `node_settings` row above), while every other gate has no persisted value at all to compare against until this table gains a row for it. `evaluateAndPersistGates` reserves the complete set of a database's *first-ever* gate values (those absent from both this table and the legacy row) in one call to `SettingsStore.InsertNodeSettingsGatesIfAbsent` rather than the plain upsert, and only falls back to `writeGateValues`'s unconditional upsert once every gate is already known to exist: two openers can otherwise both see no rows here and both write their own first values, and an unconditional upsert would let whichever commits last silently overwrite the other with no record a collision happened. `InsertNodeSettingsGatesIfAbsent` inserts the whole reserved set in one transaction and rolls it back unless every name's own conditional insert wins -- `INSERT ... ON CONFLICT (name) DO NOTHING` on sqlite/postgres and `INSERT IGNORE` (not `ON DUPLICATE KEY UPDATE`, whose `RowsAffected` is ambiguous under `CLIENT_FOUND_ROWS` — see `SetNodeSettings`'s row above) on mysql -- so a caller that loses re-reads what is now actually persisted and evaluates against that instead of assuming its own write landed. This is reachable in practice only when the metadata plugin is shared across processes by design (postgres, mysql, both `dingo_extra_plugins`-gated): sqlite is opened per-process, and the default blob plugin's exclusive process lock already rules out two full opens of the same database at once regardless of metadata plugin. |
 | `tip` | `id`, `hash`, `slot`, `block_number` | PK `id` | Current metadata tip. Block CBOR is in the blob store, not SQL. |
 | `epoch` | `id`, `epoch_id`, `start_slot`, `era_id`, `slot_length`, `length_in_slots`, `nonce`, `evolving_nonce`, `candidate_nonce`, `last_epoch_block_nonce` | PK `id`; unique `epoch_id` | Epoch nonce and era boundary state. `last_epoch_block_nonce` is the Praos lab carried at the boundary: the previous epoch's last block `PrevHash`, or the previously carried lab when that epoch had no blocks. Join snapshots and rewards with `epoch.epoch_id = ... .epoch`. |
 | `block_nonce` | `id`, `hash`, `slot`, `nonce`, `is_checkpoint` | PK `id`; unique `(hash, slot)`; index `slot` | Per-block nonce history (cumulative evolving nonce through each block) used by Praos nonce computation. New Mithril imports retain the ledger cursor at the stable imported anchor, so ordinary replay creates subsequent nonce rows. For databases produced by older releases, `healMithrilGapBlockNonces` can reconstruct missing gap-block rows at startup (see below). |
@@ -1307,6 +1307,69 @@ magic "DTXP" (4) + block_slot (8) + block_hash (32)
 + metadata_offset/metadata_length (8) + is_valid (1)
 ```
 
+`DecodeTxCborParts` only accepts `0`/`1` for the `is_valid` byte -- the only
+values `Encode` ever produces -- rather than treating every nonzero byte as
+true. `IsTxCborPartsStorage` deliberately does *not* apply that same check:
+it is format recognition only (magic + size), independent of
+`DecodeTxCborParts`'s canonical-value validation, because the UTxO-recovery
+dispatch in `database/utxo.go` (and `ledger/replay_recovery.go`) uses it to
+decide whether a blob is DTXP-shaped at all before calling
+`DecodeTxCborParts` -- if it also rejected a recognizable-but-corrupt
+record, that dispatch would take its not-DTXP-shaped fallback path and
+silently treat corrupted recovery data as simply absent, instead of
+reaching `DecodeTxCborParts` and surfacing a loud decode error.
+`ReassembleTxCbor`'s offset/length bounds checks compare the offset against
+the block length before subtracting (`offset > blockLen || length >
+blockLen-offset`), which cannot underflow, rather than adding
+`offset+length` and comparing against the block length, which could
+overflow `uint32` and wrap past the check.
+
+S3 and GCS `GetBlock` re-derive a block's identity from its returned bytes
+(`blockverify.Hash`, `database/plugin/blob/internal/blockverify`) before
+handing them to a caller, for every non-tombstoned `bp..._metadata` entry
+except the exact `(ID, Type) == (0, 0)` synthetic-entry marker (see the
+`ID==0` note above; checking both fields, not `ID` alone, keeps a real
+block that somehow ended up with `ID == 0` from silently skipping
+verification instead of failing it; a tombstoned entry returns
+`types.ErrHistoryExpired` before reaching this check at all, since its
+content has already been pruned) -- neither backend offers a
+content-addressing guarantee of its own, so corruption, an
+eventual-consistency stale read, or a misdirected request could otherwise
+return bytes for a different block than the one asked for. The check
+always verifies two things, independently derived from the decoded bytes
+rather than trusted from the caller's claim: the decoded block's own hash
+matches the requested `bp` key's hash, and its own slot matches the
+requested slot (a hash match alone does not pin the point). For Shelley
+and later eras it verifies a third: since the block hash for those eras
+covers only the header and adjacent eras share that header layout -- so
+the same bytes can decode, with an identical hash and slot, under more
+than one era -- the era independently derived from the decoded header
+(`gledger.DetermineBlockType`) must also match the type recorded in
+`bp..._metadata`. Byron is exempt from that third check because its hash
+already covers the block-type byte, binding the era without needing to
+derive it separately. Bark's archive fetch already re-verifies its downloaded
+blocks the same way (`verifyArchiveBlock`/`blockEraFromHeader`), which this
+mirrors; it closes the equivalent gap for the two cloud object-store blob
+backends. Badger's local `GetBlock` trusts its own on-disk storage and is
+not changed.
+
+One documented, accepted gap: gouroboros checks a Byron main block's
+transaction, delegation, and update proofs but not its `ssc_proof` (an
+upstream limitation -- the SSC proof hashes cardano-ledger's own encoding
+of the sub-payloads rather than the bytes carried in the block), so an
+alteration confined to that one payload changes nothing the checks above
+verify. Bark's archive-fetch path hits the identical gap and closes it by
+rejecting Byron main blocks outright, but bark treats a remote archive as
+an optional, distrusted fallback behind a trusted local store, so refusing
+one era there only costs the availability of a path that has a fallback.
+`blockverify.Hash` guards the *primary* `GetBlock` path for S3/GCS instead:
+rejecting Byron main blocks there would make every Byron-era block
+permanently unretrievable from an S3/GCS-backed node (needed for a
+from-genesis sync, or serving historical API queries), trading a
+narrow, single-payload, single-era gap on storage the operator already
+configured and trusted for a full functional regression. Accepted rather
+than rejected; see the comment on `checkEra` in `blockverify.go`.
+
 Leios endorser-block storage uses the same blob-key namespace, even though an
 endorser block is not part of the ranking-block chain. When a Dijkstra ranking
 block references an endorser block (`ledger/leios_apply.go`), `SetGenesisCbor`
@@ -1795,6 +1858,34 @@ input address and applies the same exact-address CBOR filtering as the
 single-address case. This backs the Ouroboros local-state-query `GetUTxOByAddress`
 handler (`ledger.queryShelleyUtxoByAddress`), whose wire request already
 carries a set of addresses.
+
+`GetUtxosByAddress` (and `Database.UtxosByAddress`) require an explicit,
+positive `maxResults` bound: a broad pattern set, or a single address with an
+unusually large UTxO set, would otherwise force the database layer to
+materialize an unbounded result. Every SQL chunk is queried with the same
+fixed `LIMIT maxResults+1`, deliberately not shrunk by the deduplicated
+count already collected: a physical UTxO can be matched by more than one
+chunk's OR-expression, so a shrinking limit could let a chunk full of
+already-seen duplicates crowd out that same chunk's own still-unseen
+matches, silently returning an incomplete answer instead of detecting the
+overflow. A fixed `maxResults+1` per chunk guarantees the opposite: at
+most `maxResults` of a chunk's returned rows can already be seen, so
+whenever a chunk's true match count exceeds `maxResults+1`, at least one
+returned row is guaranteed new, which is what actually proves the
+overflow -- detected rather than silently truncated into a partial (and
+therefore wrong) answer; exceeding the bound returns
+`models.ErrTooManyUtxoResults`. Callers with no more specific limit of
+their own use `database.MaxUtxosByAddressResults`. This is unrelated to
+`GetUtxosByAddressWithOrdering`'s own `Limit`/`Offset` pagination, which
+remains the mechanism for a caller that wants a bounded page rather than an
+error on overflow.
+
+The `LIMIT` clause's own bind parameter is reserved when `GetUtxosByAddress`
+decides whether a chunk's accumulated WHERE-clause arguments have reached
+the dialect's parameter limit, not just counted against it afterward: a
+chunk that filled to exactly that limit on WHERE-clause args alone would
+otherwise produce a statement with one more bound parameter than the
+dialect allows once the `LIMIT ?` placeholder is appended.
 
 Live UTxOs for a payment key with assets:
 

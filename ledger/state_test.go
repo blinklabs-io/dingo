@@ -1618,6 +1618,57 @@ func TestDatabaseWorkerPoolBasic(t *testing.T) {
 	pool.Shutdown(5 * time.Second)
 }
 
+// TestDatabaseWorkerPoolOpFuncPanicReturnsWrappedError proves
+// executeOperation follows the same panic contract as database.Txn.Do: a
+// panic in OpFunc is recovered and delivered on ResultChan as an error
+// wrapping database.ErrTxnPanic, rather than crashing the worker goroutine
+// or leaving the submitter's ResultChan waiting forever.
+func TestDatabaseWorkerPoolOpFuncPanicReturnsWrappedError(t *testing.T) {
+	config := DefaultDatabaseWorkerPoolConfig()
+	config.WorkerPoolSize = 1
+	config.TaskQueueSize = 5
+
+	pool := NewDatabaseWorkerPool(nil, config)
+	require.NotNil(t, pool)
+
+	resultChan := make(chan DatabaseResult, 1)
+	pool.Submit(DatabaseOperation{
+		OpFunc: func(db *database.Database) error {
+			panic("opfunc boom")
+		},
+		ResultChan: resultChan,
+	})
+
+	select {
+	case result := <-resultChan:
+		require.ErrorIs(t, result.Error, database.ErrTxnPanic)
+		require.ErrorContains(t, result.Error, "opfunc boom")
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for operation result")
+	}
+
+	// The pool itself must still be usable after a worker recovers a panic:
+	// its goroutine must have kept running rather than dying with the panic.
+	var executedCount atomic.Int32
+	okResultChan := make(chan DatabaseResult, 1)
+	pool.Submit(DatabaseOperation{
+		OpFunc: func(db *database.Database) error {
+			executedCount.Add(1)
+			return nil
+		},
+		ResultChan: okResultChan,
+	})
+	select {
+	case result := <-okResultChan:
+		require.NoError(t, result.Error)
+		require.Equal(t, int32(1), executedCount.Load())
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for post-panic operation result")
+	}
+
+	pool.Shutdown(5 * time.Second)
+}
+
 // TestDatabaseWorkerPoolInFlightOperations tests that shutdown waits for in-flight operations
 func TestDatabaseWorkerPoolInFlightOperations(t *testing.T) {
 	config := DefaultDatabaseWorkerPoolConfig()

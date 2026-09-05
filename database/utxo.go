@@ -32,6 +32,12 @@ import (
 // view). Callers may use errors.Is to detect a genuinely-absent row.
 var ErrUtxoNotFound = types.ErrUtxoNotFound
 
+// MaxUtxosByAddressResults is the default bound passed to UtxosByAddress
+// for callers with no more specific limit of their own. It caps how many
+// candidate rows a broad multi-address query (or a single address with an
+// unusually large UTxO set) may force the database layer to materialize.
+const MaxUtxosByAddressResults = 100_000
+
 // ErrUtxoCborUnavailable signals that the metadata row for a UTxO
 // exists but its CBOR could not be loaded from the blob store and
 // could not be recovered from any indexed block — typically because
@@ -586,8 +592,13 @@ func (d *Database) UtxoByRefIncludingSpent(
 }
 
 // UtxosByAddress returns all UTxOs belonging to any of the given addresses.
+// maxResults is a required, positive bound on the number of candidate rows
+// the query may materialize; callers with no more specific limit of their
+// own should pass MaxUtxosByAddressResults. Exceeding the bound returns
+// models.ErrTooManyUtxoResults.
 func (d *Database) UtxosByAddress(
 	addrs []ledger.Address,
+	maxResults int,
 	txn *Txn,
 ) ([]models.Utxo, error) {
 	if len(addrs) == 0 {
@@ -605,7 +616,8 @@ func (d *Database) UtxosByAddress(
 		}
 		patterns[i] = pattern
 	}
-	utxos, err := d.utxoStore().GetUtxosByAddress(patterns, txn.Metadata())
+	utxos, err := d.utxoStore().
+		GetUtxosByAddress(patterns, maxResults, txn.Metadata())
 	if err != nil {
 		return nil, err
 	}

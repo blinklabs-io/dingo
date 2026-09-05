@@ -39,6 +39,7 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
+	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/blockverify"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/compensate"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -661,6 +662,30 @@ func (d *BlobStoreS3) GetBlock(
 	if isTombstone {
 		return nil, tmpMetadata,
 			&types.HistoryExpiredError{Slot: slot, Hash: hash}
+	}
+	// S3 offers no content-addressing guarantee: re-derive the block's
+	// identity from its bytes rather than trusting the (slot, hash) key
+	// used to fetch it. (ID, Type) == (0, 0) marks a synthetic, non-block
+	// entry sharing this same bp/bp..._metadata key layout
+	// (SetGenesisCbor: genesis UTxO CBOR or a Leios endorser-block
+	// manifest, neither of which is a decodable ledger block); a real
+	// chain block never has both zero -- BlockCreate always assigns
+	// ID >= 1 regardless of type. Checking both, not ID alone, keeps a
+	// real block that somehow ended up with ID == 0 from silently
+	// skipping verification instead of failing it.
+	if tmpMetadata.ID != 0 || tmpMetadata.Type != 0 {
+		if _, err := blockverify.Hash(
+			tmpMetadata.Type,
+			slot,
+			cborData,
+			hash,
+		); err != nil {
+			return nil, types.BlockMetadata{}, fmt.Errorf(
+				"get block: slot %d: %w",
+				slot,
+				err,
+			)
+		}
 	}
 	return cborData, tmpMetadata, nil
 }
