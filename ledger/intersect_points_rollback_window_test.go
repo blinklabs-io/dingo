@@ -16,8 +16,10 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -241,4 +243,126 @@ func TestAuthoritativeRecentChainPointsIgnoresChainTipAheadOfLedgerTip(
 		points,
 		"must not offer unapplied forward chain state as intersect points",
 	)
+}
+
+// countingWarnHandler counts Warn records carrying a given message.
+type countingWarnHandler struct {
+	slog.Handler
+	message string
+	count   *atomic.Int64
+}
+
+func (h countingWarnHandler) Handle(
+	ctx context.Context,
+	record slog.Record,
+) error {
+	if record.Level == slog.LevelWarn && record.Message == h.message {
+		h.count.Add(1)
+	}
+	return nil
+}
+
+func (h countingWarnHandler) Enabled(
+	_ context.Context,
+	level slog.Level,
+) bool {
+	return level >= slog.LevelWarn
+}
+
+// TestRecentChainPointsFallbackAnchorPropagatesStorageError verifies a real
+// storage failure is surfaced rather than silently degraded into "no anchor".
+// Swallowing it would turn a transient database fault into an origin-only
+// intersect list, i.e. a request that the peer replay the chain from genesis.
+func TestRecentChainPointsFallbackAnchorPropagatesStorageError(t *testing.T) {
+	f := newRollbackWindowFixture(t)
+
+	// Sanity: the anchor resolves while the database is healthy.
+	block, ok, err := f.ls.recentChainPointsFallbackAnchor(f.staleLedger)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, f.rollbackTo.Slot, block.Slot)
+
+	require.NoError(t, dbtest.CloseDatabase(f.ls.db))
+
+	_, ok, err = f.ls.recentChainPointsFallbackAnchor(f.staleLedger)
+	require.Error(t, err, "storage failure must not be swallowed")
+	assert.False(t, ok)
+	assert.NotErrorIs(
+		t,
+		err,
+		models.ErrBlockNotFound,
+		"a real storage fault must not be reported as a missing block",
+	)
+}
+
+// TestAuthoritativeRecentChainPointsPropagatesAnchorStorageError verifies the
+// propagated error reaches the caller instead of becoming an empty point list.
+func TestAuthoritativeRecentChainPointsPropagatesAnchorStorageError(
+	t *testing.T,
+) {
+	f := newRollbackWindowFixture(t)
+	require.NoError(t, dbtest.CloseDatabase(f.ls.db))
+
+	points, err := f.ls.authoritativeRecentChainPoints(4)
+	require.Error(t, err)
+	assert.Nil(t, points)
+}
+
+// TestIntersectAnchorFallbackWarnIsThrottled verifies the anchor-fallback
+// warning does not flood. authoritativeRecentChainPoints runs on every
+// chainsync client start, and during the truncation window peer governance
+// reconnects roughly once a second across every peer, so an unthrottled
+// warning would emit hundreds of lines for a single rollback.
+func TestIntersectAnchorFallbackWarnIsThrottled(t *testing.T) {
+	f := newRollbackWindowFixture(t)
+
+	var warns atomic.Int64
+	f.ls.config.Logger = slog.New(countingWarnHandler{
+		Handler: slog.NewJSONHandler(io.Discard, nil),
+		message: "ledger tip block missing, anchoring intersect points on primary chain tip",
+		count:   &warns,
+	})
+
+	for range 50 {
+		points, err := f.ls.authoritativeRecentChainPoints(4)
+		require.NoError(t, err)
+		require.NotEmpty(t, points)
+	}
+
+	assert.Equal(
+		t,
+		int64(1),
+		warns.Load(),
+		"anchor-fallback warning must be throttled, not emitted per call",
+	)
+}
+
+// TestRollbackWindowIntersectAnchorReportsRollbackPoint verifies the exported
+// anchor, which chainsync relies on, names the rollback point during the
+// window.
+func TestRollbackWindowIntersectAnchorReportsRollbackPoint(t *testing.T) {
+	f := newRollbackWindowFixture(t)
+
+	point, ok := f.ls.RollbackWindowIntersectAnchor()
+	require.True(t, ok)
+	assert.Equal(t, f.rollbackTo.Slot, point.Slot)
+	assert.Equal(t, f.rollbackTo.Hash, point.Hash)
+}
+
+// TestRollbackWindowIntersectAnchorAbsentWhenLedgerTipPresent verifies the
+// anchor is offered only inside the window: a self-consistent ledger whose tip
+// row is readable needs no rescue.
+func TestRollbackWindowIntersectAnchorAbsentWhenLedgerTipPresent(t *testing.T) {
+	f := newRollbackWindowFixture(t)
+
+	// Move the ledger tip onto a block that still exists.
+	f.ls.Lock()
+	f.ls.currentTip = ochainsync.Tip{
+		Point:       makeTestPoint(f.rollbackTo),
+		BlockNumber: f.rollbackTo.Number,
+	}
+	f.ls.Unlock()
+
+	_, ok := f.ls.RollbackWindowIntersectAnchor()
+	assert.False(t, ok)
 }

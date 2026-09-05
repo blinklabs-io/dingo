@@ -31,11 +31,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func testChainTip(slot uint64) ochainsync.Tip {
-	return ochainsync.Tip{
-		Point:       ocommon.NewPoint(slot, bytes.Repeat([]byte{0xab}, 32)),
-		BlockNumber: slot,
-	}
+func testAnchorPoint(slot uint64) ocommon.Point {
+	return ocommon.NewPoint(slot, bytes.Repeat([]byte{0xab}, 32))
 }
 
 // TestFinalizeChainsyncIntersectPointsNeverOffersOriginAloneOnNonOriginChain is
@@ -47,7 +44,7 @@ func testChainTip(slot uint64) ochainsync.Tip {
 func TestFinalizeChainsyncIntersectPointsNeverOffersOriginAloneOnNonOriginChain(
 	t *testing.T,
 ) {
-	chainTip := testChainTip(2576716)
+	anchor := testAnchorPoint(2576716)
 
 	for name, points := range map[string][]ocommon.Point{
 		"nil points":      nil,
@@ -57,7 +54,8 @@ func TestFinalizeChainsyncIntersectPointsNeverOffersOriginAloneOnNonOriginChain(
 		t.Run(name, func(t *testing.T) {
 			got, rescued := finalizeChainsyncIntersectPoints(
 				points,
-				chainTip,
+				anchor,
+				true,
 			)
 
 			require.NotEmpty(t, got)
@@ -69,13 +67,13 @@ func TestFinalizeChainsyncIntersectPointsNeverOffersOriginAloneOnNonOriginChain(
 			require.False(
 				t,
 				len(got) == 1 && isOriginPoint(got[0]),
-				"offered origin as the only intersect point while the chain tip is slot %d",
-				chainTip.Point.Slot,
+				"offered origin as the only intersect point while holding a rollback anchor at slot %d",
+				anchor.Slot,
 			)
 
-			// The chain tip leads, origin remains the last resort.
-			assert.Equal(t, chainTip.Point.Slot, got[0].Slot)
-			assert.Equal(t, chainTip.Point.Hash, got[0].Hash)
+			// The anchor leads, origin remains the last resort.
+			assert.Equal(t, anchor.Slot, got[0].Slot)
+			assert.Equal(t, anchor.Hash, got[0].Hash)
 			assert.True(
 				t,
 				isOriginPoint(got[len(got)-1]),
@@ -91,7 +89,8 @@ func TestFinalizeChainsyncIntersectPointsNeverOffersOriginAloneOnNonOriginChain(
 func TestFinalizeChainsyncIntersectPointsKeepsOriginOnlyAtOrigin(t *testing.T) {
 	got, rescued := finalizeChainsyncIntersectPoints(
 		nil,
-		ochainsync.Tip{},
+		ocommon.Point{},
+		false,
 	)
 
 	require.Len(t, got, 1)
@@ -111,7 +110,8 @@ func TestFinalizeChainsyncIntersectPointsPreservesRealPoints(t *testing.T) {
 
 	got, rescued := finalizeChainsyncIntersectPoints(
 		points,
-		testChainTip(300),
+		testAnchorPoint(300),
+		true,
 	)
 
 	assert.False(t, rescued)
@@ -135,7 +135,8 @@ func TestFinalizeChainsyncIntersectPointsDoesNotDoubleAppendOrigin(
 
 	got, rescued := finalizeChainsyncIntersectPoints(
 		points,
-		testChainTip(300),
+		testAnchorPoint(300),
+		true,
 	)
 
 	assert.False(t, rescued)
@@ -215,9 +216,11 @@ func TestChainsyncNeverAsksPeerToReplayFromGenesisDuringRollback(t *testing.T) {
 	points, err := o.ledgerState.IntersectPoints(chainsyncIntersectPointCount)
 	require.NoError(t, err)
 
+	anchor, hasAnchor := o.ledgerState.RollbackWindowIntersectAnchor()
 	got, _ := finalizeChainsyncIntersectPoints(
 		normalizeIntersectPoints(points),
-		o.ledgerState.PrimaryChainTip(),
+		anchor,
+		hasAnchor,
 	)
 
 	require.NotEmpty(t, got)
@@ -237,4 +240,74 @@ func TestChainsyncNeverAsksPeerToReplayFromGenesisDuringRollback(t *testing.T) {
 		isOriginPoint(got[len(got)-1]),
 		"origin must remain the final fallback point",
 	)
+}
+
+// TestFinalizeChainsyncIntersectPointsRefusesAheadForkAnchor is the regression
+// test for the review finding that the origin-only rescue re-introduced the
+// #2309 violation one layer up.
+//
+// When the point list is empty because the primary chain is AHEAD on a fork
+// that does not contain the applied ledger tip, the ledger deliberately reports
+// no rollback anchor. Seeding from the raw chain tip in that case would
+// advertise unapplied fork state. The list must stay origin-only, exactly as
+// before the rescue existed.
+func TestFinalizeChainsyncIntersectPointsRefusesAheadForkAnchor(t *testing.T) {
+	got, rescued := finalizeChainsyncIntersectPoints(
+		nil,
+		// A caller that wrongly passes a real ahead-fork point must still
+		// be refused when the ledger says there is no anchor.
+		testAnchorPoint(999999),
+		false,
+	)
+
+	assert.False(t, rescued, "must not rescue without a ledger-approved anchor")
+	require.Len(t, got, 1)
+	assert.True(
+		t,
+		isOriginPoint(got[0]),
+		"an ahead-fork chain tip must never seed the intersect list",
+	)
+}
+
+// TestRollbackWindowIntersectAnchorRefusesChainTipAheadOfLedgerTip drives the
+// ledger's authoritative anchor decision through the exact #2309 shape: the
+// ledger tip row is missing AND the primary chain is ahead on a fork. The
+// ledger must report no anchor, which is what keeps the chainsync rescue from
+// firing.
+func TestRollbackWindowIntersectAnchorRefusesChainTipAheadOfLedgerTip(
+	t *testing.T,
+) {
+	o := &Ouroboros{}
+	o.ledgerState = newTestLedgerStateWithChain(t, 5)
+
+	// Ledger tip is below the chain tip and its row is absent.
+	setTestLedgerTip(t, o, ochainsync.Tip{
+		Point:       ocommon.NewPoint(2, bytes.Repeat([]byte{0xe8}, 32)),
+		BlockNumber: 2,
+	})
+	require.Greater(
+		t,
+		o.ledgerState.PrimaryChainTip().Point.Slot,
+		uint64(2),
+		"fixture must have the chain ahead of the ledger tip",
+	)
+
+	_, hasAnchor := o.ledgerState.RollbackWindowIntersectAnchor()
+	assert.False(
+		t,
+		hasAnchor,
+		"ledger must refuse to anchor on a chain tip ahead of its own tip",
+	)
+
+	points, err := o.ledgerState.IntersectPoints(chainsyncIntersectPointCount)
+	require.NoError(t, err)
+	anchor, hasAnchor := o.ledgerState.RollbackWindowIntersectAnchor()
+	got, rescued := finalizeChainsyncIntersectPoints(
+		normalizeIntersectPoints(points),
+		anchor,
+		hasAnchor,
+	)
+	assert.False(t, rescued)
+	require.Len(t, got, 1)
+	assert.True(t, isOriginPoint(got[0]))
 }

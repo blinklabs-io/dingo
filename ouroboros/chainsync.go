@@ -352,15 +352,24 @@ const originOnlyIntersectWarnInterval = 30 * time.Second
 //
 // The condition does occur on a healthy node: while a rollback's metadata
 // truncation is in flight the ledger tip names a block the chain rewind has
-// already deleted, and the ledger can return no points. When that happens the
-// primary chain still reports a real tip, so seed the list with it and let
-// origin stay the fallback it was meant to be.
+// already deleted, and the ledger can return no points. In that case the
+// ledger can still name a point it has applied, so seed the list with it and
+// let origin stay the fallback it was meant to be.
+//
+// rollbackAnchor MUST come from LedgerState.RollbackWindowIntersectAnchor,
+// never from the primary chain tip directly. An empty point list can also mean
+// the primary chain is ahead of the ledger on a fork that does not descend
+// from the applied ledger tip; seeding from that raw chain tip would advertise
+// unapplied fork state and break the primary-chain ancestor invariant (#2309).
+// The ledger returns hasRollbackAnchor=false for that case, so it stays
+// origin-only exactly as before.
 //
 // Returns the finalized points and whether an origin-only list had to be
 // rescued, which the caller logs (throttled).
 func finalizeChainsyncIntersectPoints(
 	intersectPoints []ocommon.Point,
-	primaryChainTip ochainsync.Tip,
+	rollbackAnchor ocommon.Point,
+	hasRollbackAnchor bool,
 ) ([]ocommon.Point, bool) {
 	rescued := false
 	hasRealPoint := false
@@ -370,10 +379,10 @@ func finalizeChainsyncIntersectPoints(
 			break
 		}
 	}
-	if !hasRealPoint && !isOriginPoint(primaryChainTip.Point) {
+	if !hasRealPoint && hasRollbackAnchor && !isOriginPoint(rollbackAnchor) {
 		intersectPoints = normalizeIntersectPoints(
 			append(
-				[]ocommon.Point{primaryChainTip.Point},
+				[]ocommon.Point{rollbackAnchor},
 				intersectPoints...,
 			),
 		)
@@ -395,7 +404,7 @@ func finalizeChainsyncIntersectPoints(
 // from genesis on a node that is not at genesis.
 func (o *Ouroboros) warnOriginOnlyIntersectRescued(
 	connId ouroboros.ConnectionId,
-	primaryChainTip ochainsync.Tip,
+	rollbackAnchor ocommon.Point,
 ) {
 	now := time.Now()
 	last := o.lastOriginOnlyIntersectWarn.Load()
@@ -407,12 +416,12 @@ func (o *Ouroboros) warnOriginOnlyIntersectRescued(
 		return
 	}
 	o.config.Logger.Warn(
-		"chainsync intersect points collapsed to origin on a non-origin chain, using primary chain tip instead",
+		"chainsync intersect points collapsed to origin on a non-origin chain, using rollback anchor instead",
 		"component", "ouroboros",
 		"connection_id", connId.String(),
-		"chain_tip_slot", primaryChainTip.Point.Slot,
-		"chain_tip_hash", hex.EncodeToString(primaryChainTip.Point.Hash),
-		"reason", "ledger returned no intersect points (rollback truncation in flight?)",
+		"anchor_slot", rollbackAnchor.Slot,
+		"anchor_hash", hex.EncodeToString(rollbackAnchor.Hash),
+		"reason", "ledger returned no intersect points (rollback truncation in flight)",
 	)
 }
 
@@ -532,13 +541,14 @@ func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
 		}
 	}
 	intersectPoints = normalizeIntersectPoints(intersectPoints)
-	primaryChainTip := o.ledgerState.PrimaryChainTip()
+	rollbackAnchor, hasRollbackAnchor := o.ledgerState.RollbackWindowIntersectAnchor()
 	intersectPoints, rescued := finalizeChainsyncIntersectPoints(
 		intersectPoints,
-		primaryChainTip,
+		rollbackAnchor,
+		hasRollbackAnchor,
 	)
 	if rescued {
-		o.warnOriginOnlyIntersectRescued(connId, primaryChainTip)
+		o.warnOriginOnlyIntersectRescued(connId, rollbackAnchor)
 	}
 	return intersectPoints, nil
 }

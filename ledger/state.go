@@ -1043,11 +1043,14 @@ type LedgerState struct {
 	// Cross-fork continuation audit (issue #3005). Armed by a local
 	// rollback and consumed by the blockfetch handler; see
 	// ledger/continuation_audit.go for the cost and soundness argument.
-	continuationAudit      atomic.Pointer[continuationAuditWindow]
-	mithrilLedgerSlot      uint64 // blocks at or below this slot are Mithril-verified; skip validation
-	mithrilLedgerHash      []byte // hash for mithrilLedgerSlot, used as a stable chainsync intersect point
-	lastLocalRollbackSeq   uint64
-	lastLocalRollbackPoint ocommon.Point
+	continuationAudit    atomic.Pointer[continuationAuditWindow]
+	mithrilLedgerSlot    uint64 // blocks at or below this slot are Mithril-verified; skip validation
+	mithrilLedgerHash    []byte // hash for mithrilLedgerSlot, used as a stable chainsync intersect point
+	lastLocalRollbackSeq uint64
+	// lastIntersectAnchorFallbackWarn throttles
+	// warnIntersectAnchorFallback. Unix nanoseconds; 0 means never warned.
+	lastIntersectAnchorFallbackWarn atomic.Int64
+	lastLocalRollbackPoint          ocommon.Point
 
 	// Subscription IDs for event bus unsubscribe on close
 	chainsyncSubID           event.EventSubscriberId
@@ -8852,16 +8855,16 @@ func (ls *LedgerState) primaryChainTipAtOrAheadOfLedgerTip() bool {
 // behaviour of returning no points.
 func (ls *LedgerState) recentChainPointsFallbackAnchor(
 	ledgerTip ochainsync.Tip,
-) (models.Block, bool) {
+) (models.Block, bool, error) {
 	ls.RLock()
 	chain := ls.chain
 	ls.RUnlock()
 	if chain == nil {
-		return models.Block{}, false
+		return models.Block{}, false, nil
 	}
 	chainTip := chain.Tip()
 	if chainTip.Point.Slot == 0 && len(chainTip.Point.Hash) == 0 {
-		return models.Block{}, false
+		return models.Block{}, false, nil
 	}
 	// Only a chain tip strictly BELOW the ledger tip qualifies. That is the
 	// signature of a rewind in progress: the chain has been rolled back to a
@@ -8875,13 +8878,95 @@ func (ls *LedgerState) recentChainPointsFallbackAnchor(
 	// exists precisely to gate it), which is why the ahead case stays with
 	// the existing behaviour of reporting no points.
 	if chainTip.Point.Slot >= ledgerTip.Point.Slot {
-		return models.Block{}, false
+		return models.Block{}, false, nil
 	}
 	block, err := database.BlockByPoint(ls.db, chainTip.Point)
 	if err != nil {
-		return models.Block{}, false
+		// A chain tip whose row is simply absent means there is no better
+		// anchor and the caller keeps its previous behaviour. Any other
+		// error is a storage failure and must not be silently downgraded
+		// into "offer no intersect points", which reaches the network as a
+		// request to replay from genesis.
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return models.Block{}, false, nil
+		}
+		return models.Block{}, false, fmt.Errorf(
+			"look up primary chain tip block for intersect anchor: %w",
+			err,
+		)
 	}
-	return block, true
+	return block, true, nil
+}
+
+// RollbackWindowIntersectAnchor reports the point that may safely seed a
+// chainsync intersect list while a rollback's metadata truncation is in
+// flight, and whether such a point exists.
+//
+// It is the ledger's authoritative answer to "is this node mid-rewind, and if
+// so what has it actually applied": ok is true only when the ledger tip's own
+// block row is absent (the signature of the window) AND the primary chain tip
+// sits strictly below the ledger tip (a rewind target the ledger has already
+// applied, not unapplied forward work).
+//
+// Callers outside the ledger must use this rather than reading the primary
+// chain tip directly. A raw chain tip can be an unapplied fork ahead of the
+// ledger tip that does not descend from it, and advertising that would break
+// the primary-chain ancestor invariant (#2309).
+func (ls *LedgerState) RollbackWindowIntersectAnchor() (ocommon.Point, bool) {
+	ls.RLock()
+	currentTip := ls.currentTip
+	ls.RUnlock()
+	if currentTip.Point.Slot == 0 && len(currentTip.Point.Hash) == 0 {
+		return ocommon.Point{}, false
+	}
+	// The window is defined by the ledger tip's row being gone. If it is
+	// readable the ledger is self-consistent and needs no rescue.
+	if _, err := database.BlockByPoint(ls.db, currentTip.Point); err == nil {
+		return ocommon.Point{}, false
+	} else if !errors.Is(err, models.ErrBlockNotFound) {
+		return ocommon.Point{}, false
+	}
+	block, ok, err := ls.recentChainPointsFallbackAnchor(currentTip)
+	if err != nil || !ok {
+		return ocommon.Point{}, false
+	}
+	return ocommon.NewPoint(block.Slot, block.Hash), true
+}
+
+// intersectAnchorFallbackWarnInterval throttles the anchor-fallback warning.
+// authoritativeRecentChainPoints runs on every chainsync client start, and
+// during the truncation window peer governance reconnects roughly once a
+// second across every peer, so an unthrottled warning floods the log for the
+// whole freeze.
+const intersectAnchorFallbackWarnInterval = 30 * time.Second
+
+// warnIntersectAnchorFallback logs, at most once per
+// intersectAnchorFallbackWarnInterval, that the ledger tip's block row is
+// missing and intersect points are being anchored on the primary chain tip.
+func (ls *LedgerState) warnIntersectAnchorFallback(
+	currentTip ochainsync.Tip,
+	fallbackBlock models.Block,
+) {
+	now := time.Now()
+	last := ls.lastIntersectAnchorFallbackWarn.Load()
+	if last != 0 &&
+		now.Sub(time.Unix(0, last)) < intersectAnchorFallbackWarnInterval {
+		return
+	}
+	if !ls.lastIntersectAnchorFallbackWarn.CompareAndSwap(
+		last,
+		now.UnixNano(),
+	) {
+		return
+	}
+	ls.config.Logger.Warn(
+		"ledger tip block missing, anchoring intersect points on primary chain tip",
+		"component", "ledger",
+		"ledger_tip_slot", currentTip.Point.Slot,
+		"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
+		"chain_tip_slot", fallbackBlock.Slot,
+		"chain_tip_hash", hex.EncodeToString(fallbackBlock.Hash),
+	)
 }
 
 func (ls *LedgerState) authoritativeRecentChainPoints(
@@ -8952,18 +9037,16 @@ func (ls *LedgerState) authoritativeRecentChainPoints(
 		// window it is precisely the rollback point, so the points we
 		// offer describe the chain we will hold once the truncation
 		// commits.
-		fallbackBlock, ok := ls.recentChainPointsFallbackAnchor(currentTip)
+		fallbackBlock, ok, anchorErr := ls.recentChainPointsFallbackAnchor(
+			currentTip,
+		)
+		if anchorErr != nil {
+			return nil, anchorErr
+		}
 		if !ok {
 			return points, nil
 		}
-		ls.config.Logger.Warn(
-			"ledger tip block missing, anchoring intersect points on primary chain tip",
-			"component", "ledger",
-			"ledger_tip_slot", currentTip.Point.Slot,
-			"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
-			"chain_tip_slot", fallbackBlock.Slot,
-			"chain_tip_hash", hex.EncodeToString(fallbackBlock.Hash),
-		)
+		ls.warnIntersectAnchorFallback(currentTip, fallbackBlock)
 		tipBlock = fallbackBlock
 	}
 	appendBlock(tipBlock)
