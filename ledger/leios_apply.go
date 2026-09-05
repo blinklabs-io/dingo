@@ -403,8 +403,13 @@ func buildEndorserBlockBlob(
 //
 //   - Near the head (within the wait window): the relay co-produces and
 //     diffuses the endorser block with its ranking block, so it is already
-//     being pushed; wait for the in-flight leios-notify/leios-fetch to cache
-//     it, with an active by-point fetch as a fallback if the window elapses.
+//     being pushed. Only the references that applying THIS batch actually
+//     reads are waited for (see leiosApplyReadsOwnAnnouncement and
+//     splitTipWaitByApplyDependency); the rest are dispatched as background
+//     prefetch and never block the pipeline. The waits that remain run
+//     concurrently under one shared window and dispatch an active by-point
+//     fetch up front, so a batch costs at most one diffusion window rather
+//     than one per missing endorser block.
 //   - Historical backlog (well below the head, e.g. during a from-scratch
 //     catch-up): the relay does not diffuse these, but it does serve any
 //     endorser block by point on demand, so actively fetch them -- in parallel
@@ -607,38 +612,27 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 			}
 		}
 	}
-	for _, r := range tipWait {
-		if endorserBlockAvailableAt(
-			ls.config.EndorserBlockProvider,
-			r.hash.Bytes(),
-			r.slot,
-		) {
-			continue
-		}
-		ls.waitForEndorserBlock(ctx, r.slot, r.hash, timeout, poll)
-		if ls.config.EndorserBlockFetcher == nil {
-			continue
-		}
-		if !endorserBlockAvailableAt(
-			ls.config.EndorserBlockProvider,
-			r.hash.Bytes(),
-			r.slot,
-		) {
-			if err := ls.config.EndorserBlockFetcher(
-				ctx,
-				r.slot,
-				r.hash.Bytes(),
-			); err != nil {
-				ls.config.Logger.Debug(
-					"endorser block tip fetch fallback failed",
-					"component", "ledger",
-					"slot", r.slot,
-					"eb_hash", r.hash.String(),
-					"error", err,
-				)
-			}
+	// Near the head: split the references by whether applying THIS batch
+	// actually reads them, and block only on the ones it does. See
+	// leiosApplyReadsOwnAnnouncement for the contract.
+	blockingWait, prefetch := splitTipWaitByApplyDependency(
+		tipWait,
+		required,
+		certDrivenHistorical,
+	)
+	// Best-effort references: never block the ledger pipeline on them. The
+	// fetch is dispatched in the background (deduped and concurrency-bounded by
+	// the backfiller) so the endorser block is in cache by the time something
+	// does depend on it, and this batch is delivered to ledgerProcessBlock
+	// immediately.
+	if ls.leiosBackfill != nil {
+		for _, r := range prefetch {
+			ls.leiosBackfill.spawn(ctx, r)
 		}
 	}
+	// Blocking references: one shared diffusion window for the whole batch,
+	// with an active by-point fetch dispatched up front for each one.
+	ls.awaitEndorserBlocks(ctx, blockingWait, timeout, poll)
 	// Musashi path: a certified closure is mandatory, so each required endorser
 	// block still missing after the diffusion waits gets a bounded retry across
 	// the connected peers rather than the single attempt per pipeline restart it
@@ -649,6 +643,114 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// restart, or none at all when every connection was unusable (dingo #3552).
 	fetchMissingRequired(poll)
 	return ensureRequiredAvailable()
+}
+
+// leiosApplyReadsOwnAnnouncement reports whether ledger application of a
+// ranking block reads that block's OWN endorser-block announcement, as opposed
+// to only the certified closure announced by a certifying block's parent. It
+// is the apply-path contract that decides whether the pre-apply gate may block
+// on a reference, and it mirrors leiosEndorserBlockForApply exactly -- the two
+// must stay in step, since blocking on a reference application never reads buys
+// nothing, and not blocking on one it does read silently drops the endorser
+// block's transactions.
+//
+//   - CIP-conformant path (LeiosApplyEndorserBlockTxs true): true. Application
+//     resolves the block's own announcement and applies the endorser-resident
+//     transactions ahead of the ranking block whose transactions spend their
+//     outputs. Nothing re-applies them later -- the endorser-block arrival
+//     handler drives Leios voting only, not ledger application -- so an
+//     announcement skipped here is omitted from the UTxO set permanently and
+//     the ranking block's spends fall through to the interim trust path.
+//     The wait is therefore load-bearing and is kept.
+//   - Haskell-conformant (Musashi prototype) path: false. Application resolves
+//     only the certified closure: the endorser block announced by a certifying
+//     ranking block's PARENT. A block's own announcement is never read when
+//     that block is applied; it becomes relevant only later, if and when a
+//     descendant certifies it, at which point it is a mandatory reference in
+//     its own right (requiredCertifiedEndorserBlocks) and is fetched and waited
+//     for then. Blocking this batch on it buys nothing: on expiry the gate
+//     applied the block unchanged, having stalled every block queued behind it
+//     on the single ledger pipeline for the whole diffusion window.
+func leiosApplyReadsOwnAnnouncement(applyEndorserBlockTxs bool) bool {
+	return applyEndorserBlockTxs
+}
+
+// splitTipWaitByApplyDependency partitions the near-head references into the
+// ones ledger application of this batch depends on (blocking) and the ones it
+// does not (prefetch, dispatched in the background and never waited on).
+//
+// required is the set of mandatory certified closures for this batch. Those are
+// always blocking: committing a certifying ranking block without its closure
+// would permanently omit the endorser block's transaction and certificate
+// effects, and ensureRequiredAvailable fails the chunk rather than allow it.
+//
+// On the CIP path required is empty and every reference is read at apply time
+// (see leiosApplyReadsOwnAnnouncement), so everything stays blocking and the
+// only change is that the waits now share one window instead of running back to
+// back. On the Musashi path the non-required references are announcements this
+// batch never reads, so they are demoted to background prefetch.
+func splitTipWaitByApplyDependency(
+	tipWait, required []leiosEbRef,
+	certDrivenHistorical bool,
+) (blocking, prefetch []leiosEbRef) {
+	if leiosApplyReadsOwnAnnouncement(!certDrivenHistorical) {
+		return tipWait, nil
+	}
+	requiredKeys := make(map[string]struct{}, len(required))
+	for _, r := range required {
+		requiredKeys[leiosEbRefKey(r)] = struct{}{}
+	}
+	for _, r := range tipWait {
+		if _, ok := requiredKeys[leiosEbRefKey(r)]; ok {
+			blocking = append(blocking, r)
+			continue
+		}
+		prefetch = append(prefetch, r)
+	}
+	return blocking, prefetch
+}
+
+// awaitEndorserBlocks waits for every still-missing reference in refs to become
+// available, CONCURRENTLY under one shared diffusion window.
+//
+// The waits are independent -- none of them observes another's result -- so
+// running them back to back charged the ledger pipeline one full window per
+// missing endorser block (k missing references cost k windows), which is where
+// the multi-window apply stalls came from. Running them together bounds the
+// whole batch by a single window.
+//
+// Each wait also dispatches an active by-point fetch up front rather than
+// polling passively and only falling back to a fetch after the window has
+// already been spent: the reference is wanted now, so ask for it now. The
+// backfiller dedups by (slot, hash) and bounds concurrency, so a reference
+// already in flight is not fetched twice.
+func (ls *LedgerState) awaitEndorserBlocks(
+	ctx context.Context,
+	refs []leiosEbRef,
+	timeout, poll time.Duration,
+) {
+	var wg sync.WaitGroup
+	for _, r := range refs {
+		if endorserBlockAvailableAt(
+			ls.config.EndorserBlockProvider,
+			r.hash.Bytes(),
+			r.slot,
+		) {
+			continue
+		}
+		// The fetch is bound to ctx, not to the wait window, so an endorser
+		// block that arrives just after the window still lands in the cache
+		// for whatever needs it next instead of being abandoned.
+		if ls.leiosBackfill != nil {
+			ls.leiosBackfill.spawn(ctx, r)
+		}
+		wg.Add(1)
+		go func(r leiosEbRef) {
+			defer wg.Done()
+			ls.waitForEndorserBlock(ctx, r.slot, r.hash, timeout, poll)
+		}(r)
+	}
+	wg.Wait()
 }
 
 // leiosEbRef pairs a ranking block's slot with the hash of the endorser block
