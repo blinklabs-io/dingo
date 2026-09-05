@@ -40,6 +40,7 @@ func TestBatchRestoreIsSafeLocked(t *testing.T) {
 		BlockNumber: 10,
 	}
 	const appliedIndex = uint64(10)
+	const appliedGeneration = uint64(1)
 
 	for _, tc := range []struct {
 		name  string
@@ -49,8 +50,9 @@ func TestBatchRestoreIsSafeLocked(t *testing.T) {
 		{
 			name: "unchanged since the batch",
 			chain: &Chain{
-				tipBlockIndex: appliedIndex,
-				currentTip:    applied,
+				tipBlockIndex:      appliedIndex,
+				mutationGeneration: appliedGeneration,
+				currentTip:         applied,
 			},
 			want: true,
 		},
@@ -98,7 +100,9 @@ func TestBatchRestoreIsSafeLocked(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := tc.chain.batchRestoreIsSafeLocked(applied, appliedIndex)
+			got := tc.chain.batchRestoreIsSafeLocked(
+				applied, appliedIndex, appliedGeneration,
+			)
 			if got != tc.want {
 				t.Fatalf(
 					"batchRestoreIsSafeLocked() = %v, want %v",

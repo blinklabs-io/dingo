@@ -54,6 +54,7 @@ type Chain struct {
 	iterators            []*ChainIterator
 	currentTip           ochainsync.Tip
 	tipBlockIndex        uint64
+	mutationGeneration   uint64
 	lastCommonBlockIndex uint64
 	id                   ChainId
 	mutex                sync.RWMutex
@@ -481,6 +482,7 @@ func (c *Chain) addBlockLocked(
 		BlockNumber: blockNumber,
 	}
 	c.tipBlockIndex = newBlockIndex
+	c.mutationGeneration++
 	if notifyWaiters {
 		c.notifyWaitingIterators()
 	}
@@ -641,6 +643,7 @@ func (c *Chain) addRawBlockLocked(
 		BlockNumber: rb.BlockNumber,
 	}
 	c.tipBlockIndex = newBlockIndex
+	c.mutationGeneration++
 	// Build event for deferred publication (same pattern as
 	// addBlockLocked — publish after the transaction commits).
 	if c.eventBus != nil {
@@ -704,8 +707,10 @@ func (c *Chain) AddRawBlocksWithCallback(
 func (c *Chain) batchRestoreIsSafeLocked(
 	appliedTip ochainsync.Tip,
 	appliedTipBlockIndex uint64,
+	appliedGeneration uint64,
 ) bool {
 	return c.tipBlockIndex == appliedTipBlockIndex &&
+		c.mutationGeneration == appliedGeneration &&
 		bytes.Equal(c.currentTip.Point.Hash, appliedTip.Point.Hash)
 }
 
@@ -738,11 +743,13 @@ func (c *Chain) addRawBlocks(
 		var (
 			savedTip             ochainsync.Tip
 			savedTipBlockIndex   uint64
+			savedGeneration      uint64
 			savedHeaders         []queuedHeader
 			savedBlocks          []ocommon.Point
 			batchApplied         bool
 			appliedTip           ochainsync.Tip
 			appliedTipBlockIndex uint64
+			appliedGeneration    uint64
 		)
 		err := txn.Do(func(txn *database.Txn) error {
 			batch := blocks[batchOffset : batchOffset+batchSize]
@@ -755,6 +762,7 @@ func (c *Chain) addRawBlocks(
 			}
 			savedTip = c.currentTip
 			savedTipBlockIndex = c.tipBlockIndex
+			savedGeneration = c.mutationGeneration
 			savedHeaders = slices.Clone(c.headers)
 			if !c.persistent {
 				savedBlocks = slices.Clone(c.blocks)
@@ -768,6 +776,7 @@ func (c *Chain) addRawBlocks(
 				if err != nil {
 					c.currentTip = savedTip
 					c.tipBlockIndex = savedTipBlockIndex
+					c.mutationGeneration = savedGeneration
 					c.headers = savedHeaders
 					if !c.persistent {
 						c.blocks = savedBlocks
@@ -785,6 +794,7 @@ func (c *Chain) addRawBlocks(
 			batchApplied = true
 			appliedTip = c.currentTip
 			appliedTipBlockIndex = c.tipBlockIndex
+			appliedGeneration = c.mutationGeneration
 			return nil
 		})
 		if err != nil {
@@ -814,9 +824,11 @@ func (c *Chain) addRawBlocks(
 				if c.batchRestoreIsSafeLocked(
 					appliedTip,
 					appliedTipBlockIndex,
+					appliedGeneration,
 				) {
 					c.currentTip = savedTip
 					c.tipBlockIndex = savedTipBlockIndex
+					c.mutationGeneration = savedGeneration
 					c.headers = savedHeaders
 					if !c.persistent {
 						c.blocks = savedBlocks
@@ -1246,6 +1258,7 @@ func (c *Chain) rollbackLocked(
 		BlockNumber: tmpBlock.Number,
 	}
 	c.tipBlockIndex = rollbackBlockIndex
+	c.mutationGeneration++
 	// Update iterators for rollback
 	for _, iter := range c.iterators {
 		// Reverse iterators never deliver rollback markers, but if a
