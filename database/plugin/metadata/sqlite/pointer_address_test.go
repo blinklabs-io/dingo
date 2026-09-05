@@ -96,3 +96,59 @@ func TestSetTransactionAttributesPointerAddressStake(t *testing.T) {
 	).Scan(&utxoStake))
 	require.Equal(t, "123", utxoStake)
 }
+
+func TestSetGapTransactionAttributesPointerAddressStake(t *testing.T) {
+	store, _ := newSharedSQLStore(t)
+	stakeKey := lcommon.NewBlake2b224(bytes.Repeat([]byte{0x31}, 28))
+	registration := &mockTransaction{
+		hash:    lcommon.NewBlake2b256(bytes.Repeat([]byte{0x32}, 32)),
+		isValid: true,
+		certificates: []lcommon.Certificate{
+			&lcommon.StakeRegistrationCertificate{
+				CertType: uint(lcommon.CertificateTypeStakeRegistration),
+				StakeCredential: lcommon.Credential{
+					CredType:   0,
+					Credential: stakeKey,
+				},
+			},
+		},
+	}
+	require.NoError(t, store.SetGapBlockTransaction(
+		registration,
+		ocommon.Point{Slot: 30, Hash: bytes.Repeat([]byte{0x33}, 32)},
+		4,
+		nil,
+	))
+
+	paymentKey := bytes.Repeat([]byte{0x41}, lcommon.AddressHashSize)
+	pointerAddressBytes := append(
+		[]byte{lcommon.AddressTypeKeyPointer << 4},
+		paymentKey...,
+	)
+	pointerAddressBytes = append(pointerAddressBytes, 0x1e, 0x04, 0x00)
+	pointerAddress, err := lcommon.NewAddressFromBytes(pointerAddressBytes)
+	require.NoError(t, err)
+	hash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x42}, 32))
+	tx := &mockTransaction{
+		hash:    hash,
+		isValid: true,
+		produced: []lcommon.Utxo{{
+			Id: mockTransactionInput{hash: hash, index: 0},
+			Output: &shelley.ShelleyTransactionOutput{
+				OutputAddress: pointerAddress,
+				OutputAmount:  456,
+			},
+		}},
+	}
+	require.NoError(t, store.SetGapBlockTransaction(
+		tx,
+		ocommon.Point{Slot: 40, Hash: bytes.Repeat([]byte{0x43}, 32)},
+		0,
+		nil,
+	))
+
+	stored, err := store.GetUtxo(hash.Bytes(), 0, nil)
+	require.NoError(t, err)
+	require.Equal(t, stakeKey.Bytes(), stored.StakingKey)
+	require.Equal(t, uint8(0), stored.CredentialTag)
+}
