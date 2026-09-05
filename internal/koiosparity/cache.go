@@ -550,6 +550,18 @@ func (c *Cache) UpsertEpochParams(p KoiosEpochParams) error {
 	return err
 }
 
+// DeleteEpochParams invalidates a parameter row after a later epoch commit
+// fails. This forces the next fetch to refresh the complete epoch instead of
+// treating new parameters with stale pool data as complete.
+func (c *Cache) DeleteEpochParams(network string, epoch uint64) error {
+	_, err := c.db.Exec(
+		`DELETE FROM koios_epoch_params WHERE network = ? AND epoch = ?`,
+		network,
+		epoch,
+	)
+	return err
+}
+
 // GetEpochParams retrieves the cached Koios /epoch_params row, returning
 // sql.ErrNoRows when absent — e.g. an epoch cached before protocol-parameter
 // fetching was added and not yet re-fetched. Callers must treat that as an
@@ -1226,7 +1238,7 @@ func (c *Cache) GetUncachedEpochs(
 	rows, err := c.db.Query(
 		`SELECT i.epoch FROM koios_epoch_info i
 		 WHERE i.network = ? AND i.epoch >= ? AND i.epoch <= ?
-		 AND NOT EXISTS (
+			AND EXISTS (
 			SELECT 1 FROM koios_epoch_params p
 			WHERE p.network = i.network AND p.epoch = i.epoch
 		 )`,

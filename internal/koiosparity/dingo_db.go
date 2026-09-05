@@ -337,9 +337,16 @@ func (d *DingoDB) GetProtocolParams(
 	ctx context.Context,
 	epoch uint64,
 ) (*DingoProtocolParams, error) {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin protocol params read: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	queryRow := func(query string, args ...any) *sql.Row {
+		return tx.QueryRowContext(ctx, rebind(query, d.dialect), args...)
+	}
 	var eraID uint
-	if err := d.queryRow(
-		ctx,
+	if err := queryRow(
 		`SELECT era_id FROM epoch WHERE epoch_id = ?`,
 		epoch,
 	).Scan(&eraID); err != nil {
@@ -353,8 +360,7 @@ func (d *DingoDB) GetProtocolParams(
 		cborBytes   []byte
 		sourceEpoch uint64
 	)
-	if err := d.queryRow(
-		ctx,
+	if err := queryRow(
 		`SELECT cbor, epoch FROM pparams WHERE epoch <= ? AND era_id = ?
 		 ORDER BY epoch DESC, id DESC LIMIT 1`,
 		epoch,
@@ -364,6 +370,9 @@ func (d *DingoDB) GetProtocolParams(
 			return nil, nil
 		}
 		return nil, fmt.Errorf("pparams epoch %d: %w", epoch, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit protocol params read: %w", err)
 	}
 	return decodeProtocolParams(cborBytes, eraID, sourceEpoch)
 }

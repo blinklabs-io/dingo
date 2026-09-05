@@ -1071,6 +1071,7 @@ func TestObserverStartSeedsBacklogForMissingAccountCoverage(t *testing.T) {
 			Reward:    "1",
 			FetchedAt: fetchedAt,
 		}))
+		seedKoiosBabbageProtocolParams(t, cache, "preview", e)
 		require.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
 			Network:       "preview",
 			Epoch:         e,
