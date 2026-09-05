@@ -748,7 +748,17 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			// equivocate. But this is a slot battle we lost, not
 			// "the tip block is ours", and dropping it at Debug is
 			// exactly the silent loss this change exists to remove.
-			f.RecordSlotBattle()
+			//
+			// slotBattlesTotal is deliberately NOT incremented here.
+			// Reaching this case means a block other than ours was
+			// accepted at a slot SlotTracker says we forged, and the
+			// only path that accepts a peer's block already ran
+			// LedgerState.checkSlotBattle over the same tracker
+			// (node wiring points ForgedBlockChecker at this
+			// forger's SlotTracker and SlotBattleRecorder at this
+			// forger), which found the same hash mismatch and
+			// counted the battle. chainsync owns that count;
+			// counting it again here would double it.
 			f.incCouldNotForge()
 			f.logger.Warn(
 				"slot battle lost: rival block at tip for a slot this node already forged",
@@ -928,6 +938,17 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// needs a block that does not extend the local tip, which
 	// chain.addBlockLocked refuses. Until that path exists, record the
 	// battle we are declining rather than dropping the slot silently.
+	//
+	// Unlike the rival-under-fence case in the equal-slot gate above,
+	// counting the battle here does not double up with
+	// LedgerState.checkSlotBattle. Reaching this point means the gate
+	// found no fence covering the slot, which in turn means
+	// reserveForgeSlot never ran for it, which means SlotTracker holds
+	// no record of it either — the fence is written before signing and
+	// RecordForgedBlock only after adoption, so a tracker record cannot
+	// exist without a fence. checkSlotBattle returns early when
+	// WasForgedByUs says we never forged the slot, so this is the only
+	// place the battle is counted.
 	if currentSlot == tipSlot {
 		if f.metrics != nil {
 			f.metrics.slotBattlesTotal.Inc()
