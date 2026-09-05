@@ -3850,6 +3850,44 @@ block. It is therefore performed as a sequence of ordinary rollbacks of at most
 block payloads to one security-parameter window. If a later step fails, the
 primary chain remains at the last committed intermediate point; the standard
 startup/live reconciliation paths can synchronize metadata to that valid tip.
+
+Each step's target is read from the chain's live tip (`Chain.PointAtDepth`),
+never from a schedule computed once when the descent began. Nothing serialises
+the descent against chain growth -- it runs under `transactionEventMutex` while
+blockfetch appends under `chainsyncMutex` -- so a fixed schedule goes stale the
+moment one block lands: the next target is then more than `k` below the tip
+`Chain.Rollback` measures fork depth against, and the whole rewind is refused.
+That is issue #3889, where recovery recomputed the same unreachable descent on
+every pipeline restart for hours and never truncated the chain at all. A step
+the chain still refuses is retried a bounded number of times against a freshly
+read tip, and only while `validateAndEmitRollbackUndoEmitted` reports that it
+published nothing -- retrying after a publish would tell a `ledger.tx` consumer
+to undo the same block twice. A descent whose committed steps stop landing
+below the previous one has been outrun by chain growth and gives up rather than
+truncate and re-truncate indefinitely.
+
+`Chain.addRawBlocks` participates in the same window from the other side. It
+releases both chain locks when its transaction closure returns and only then
+does `txn.Do` commit, so its Commit-failure restore runs with the chain open to
+everyone else -- and rolling the primary chain back while blockfetch appends to
+it is exactly what a recovery rewind does. `batchRestoreIsSafeLocked` therefore
+writes the pre-batch snapshot back only while the chain still shows what that
+batch left behind; otherwise a concurrent rollback's result would be overwritten
+with a tip index above the blocks that rollback deleted, leaving the chain
+claiming a tip it does not store.
+
+All five recovery rewinds go through `rewindPrimaryChainForRecovery`, which
+carries the one classification a pipeline restart cannot help with. A rewind
+the chain refuses for exceeding `k`, or a descent that cannot gain on its
+target, leaves recovery with no legal target at all, and restarting only
+re-derives it against a chain that has grown further from the applied tip. The
+tally therefore keys on the applied ledger tip -- the thing that is not moving
+-- rather than on the target, which is recomputed and different on every
+attempt; past `maxRecoveryRewindRejections` refusals at the same applied
+high-water mark the failure is reported as `errHaltLedgerPipeline` with an
+operator hint. Forward progress past that mark clears the tally through
+`resetRecoveryRewindRejections`, alongside the at-tip, replay, and
+Mithril-boundary resets.
 The chain moves before metadata because the retained rollback anchor must remain
 queryable while metadata reconstructs its tip and nonce. If that metadata step
 fails, the primary chain is already at a valid target and the same reconciliation
@@ -3871,9 +3909,11 @@ and rolls both stores back to the last applied ledger tip, then publishes a
 ChainSync obtains a fresh intersection. Other transaction-validation errors
 continue through producer resolution and the unresolved-producer fallback.
 
-The rejection is never terminal. A redelivery of the same failing block at the
-same applied tip is rejected and rewound again but spends no further peer
-rotation, because chain selection has already had its alternate-branch
+The rejection itself is never terminal -- what can become terminal is the
+rewind that carries it out, when the chain refuses that rewind for exceeding
+`k` and the applied tip stops moving (above). A redelivery of the same failing
+block at the same applied tip is rejected and rewound again but spends no
+further peer rotation, because chain selection has already had its alternate-branch
 opportunity for that block and further rotations only close connections. The
 latch that records it keys on the applied tip together with the failing block
 and transaction, so a different rejected block on a newly selected branch gets
