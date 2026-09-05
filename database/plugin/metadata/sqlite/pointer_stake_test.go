@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"bytes"
+	"math"
 	"math/big"
 	"testing"
 
@@ -534,4 +535,45 @@ func TestPointerAddressStakeResolvesAnInGapRegistration(t *testing.T) {
 	require.Equal(t, uint64(600), f.stakeAt(t, 300),
 		"a pointer naming a registration ingested through a gap block must "+
 			"still resolve")
+}
+
+// TestPointerAddressStakeToleratesAnUnrepresentablePosition covers the
+// availability hazard in recording the position: nothing validates a pointer
+// payload, and gouroboros decodes each component with an unbounded
+// shift-accumulate loop, so a spendable output can name a position above
+// int64. The columns holding it are signed, so the value cannot be stored.
+//
+// The block still has to apply. Failing the write would stall ingestion of a
+// block the network accepted -- the same class of failure #3854 exists to
+// avoid -- and the position names no certificate in any case, so the output is
+// simply left unattributed, as a pointer to an unoccupied position is.
+func TestPointerAddressStakeToleratesAnUnrepresentablePosition(t *testing.T) {
+	t.Parallel()
+	paymentKey := bytes.Repeat([]byte{0x22}, lcommon.AddressHashSize)
+	for _, tc := range []struct {
+		name                     string
+		slot, txIndex, certIndex uint64
+	}{
+		{name: "slot", slot: math.MaxInt64 + 1},
+		{name: "transaction index", slot: 100, txIndex: math.MaxInt64 + 1},
+		{name: "certificate index", slot: 100, certIndex: math.MaxInt64 + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newPointerStakeFixture(t)
+			f.setEra(t, babbage.EraIdBabbage)
+			f.apply(
+				t, 100, 0,
+				[]lcommon.Certificate{f.register(), f.delegate()},
+			)
+			f.apply(t, 150, 0, nil, f.output(700, f.baseAddress(t)))
+			// f.apply requires SetTransaction to succeed, so the block
+			// applying at all is the first half of the assertion.
+			f.apply(t, 200, 0, nil, f.output(600, newPointerAddress(
+				t, paymentKey, tc.slot, tc.txIndex, tc.certIndex,
+			)))
+			require.Equal(t, uint64(700), f.stakeAt(t, 300),
+				"an unrepresentable pointer position confers no stake")
+		})
+	}
 }

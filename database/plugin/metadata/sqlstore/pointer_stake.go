@@ -107,6 +107,17 @@ LIMIT 1`,
 // converges rather than conflicting: an output a snapshot import created before
 // its producing transaction was replayed has no row yet, and an output applied
 // twice writes the same values.
+//
+// A component above int64 is dropped rather than raised. Nothing validates an
+// address's pointer payload, and gouroboros decodes each component with an
+// unbounded shift-accumulate loop (AddressPayloadPointer.decode), so a
+// spendable output can carry a position no int64 column can hold. Such a
+// position names no certificate -- certs.slot, "transaction".block_index and
+// certs.cert_index are int64 columns holding real chain values -- so it is
+// dangling by construction, and dropping it leaves the output unattributed
+// exactly as a pointer to an unoccupied position is. Returning an error here
+// would instead fail the enclosing setUtxo and stall ingestion of a block the
+// network accepted, which is the failure #3854 exists to avoid.
 func persistUtxoPointer(
 	ctx context.Context,
 	db queryer,
@@ -118,15 +129,15 @@ func persistUtxoPointer(
 	}
 	slot, err := checkedInt64(pointer.Slot)
 	if err != nil {
-		return fmt.Errorf("pointer slot: %w", err)
+		return nil //nolint:nilerr // unrepresentable position: see above
 	}
 	txIndex, err := checkedInt64(pointer.TxIndex)
 	if err != nil {
-		return fmt.Errorf("pointer tx index: %w", err)
+		return nil //nolint:nilerr // unrepresentable position: see above
 	}
 	certIndex, err := checkedInt64(pointer.CertIndex)
 	if err != nil {
-		return fmt.Errorf("pointer cert index: %w", err)
+		return nil //nolint:nilerr // unrepresentable position: see above
 	}
 	if _, err := db.ExecContext(ctx, `
 INSERT INTO utxo_pointer (utxo_id, ptr_slot, ptr_tx_index, ptr_cert_index)
