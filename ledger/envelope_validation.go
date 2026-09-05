@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -88,6 +89,26 @@ func validateInboundBlockEnvelope(
 		return err
 	}
 	if block.Era().Id == byron.EraIdByron {
+		// Byron does not carry the Shelley-style body-size field, but its
+		// header carries a separate proof over every body payload. Verify it
+		// before admitting the block so a genuine header cannot be paired with
+		// a substituted body.
+		// Decoded inbound blocks preserve their complete CBOR. Synthetic
+		// blocks used by callers that do not carry wire bytes cannot provide a
+		// body proof to verify and are handled by the normal structural path.
+		if len(block.Cbor()) == 0 {
+			return nil
+		}
+		switch byronBlock := block.(type) {
+		case *byron.ByronMainBlock:
+			if err := byronBlock.ValidateBodyProof(); err != nil {
+				return fmt.Errorf("validate Byron main block body proof: %w", err)
+			}
+		case *byron.ByronEpochBoundaryBlock:
+			if err := byronBlock.ValidateBodyProof(); err != nil {
+				return fmt.Errorf("validate Byron epoch boundary body proof: %w", err)
+			}
+		}
 		return nil
 	}
 	return validateBlockSizes(block, pparams)
@@ -222,6 +243,36 @@ func validateBlockSizes(
 			"block body size %d exceeds maxBlockBodySize %d",
 			actualBodySize,
 			maxBodySize,
+		)
+	}
+	return nil
+}
+
+// validateByronBlockSizes enforces the limits carried by Byron genesis. Byron
+// does not put a body-size declaration in its header, so the encoded block
+// size is the value checked against maxBlockSize.
+func validateByronBlockSizes(
+	block gledger.Block,
+	config *cardano.CardanoNodeConfig,
+) error {
+	if config == nil || config.ByronGenesis() == nil {
+		return errors.New("byron genesis is required for block size validation")
+	}
+	genesis := config.ByronGenesis()
+	version := genesis.BlockVersionData
+	if version.MaxBlockSize <= 0 || version.MaxHeaderSize <= 0 {
+		return errors.New("byron genesis has invalid block size limits")
+	}
+	if uint64(len(block.Header().Cbor())) > uint64(version.MaxHeaderSize) {
+		return fmt.Errorf(
+			"byron block header size %d exceeds maxHeaderSize %d",
+			len(block.Header().Cbor()), version.MaxHeaderSize,
+		)
+	}
+	if uint64(len(block.Cbor())) > uint64(version.MaxBlockSize) {
+		return fmt.Errorf(
+			"byron block size %d exceeds maxBlockSize %d",
+			len(block.Cbor()), version.MaxBlockSize,
 		)
 	}
 	return nil

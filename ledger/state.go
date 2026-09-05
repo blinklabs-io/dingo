@@ -6331,6 +6331,25 @@ func (ls *LedgerState) ledgerProcessBlock(
 		); err != nil {
 			return nil, err
 		}
+		if block.Era().Id == byron.EraIdByron && len(block.Cbor()) > 0 {
+			// Only gouroboros' decoded Byron block types carry wire CBOR
+			// whose size limits can be enforced here. Test and embedding
+			// implementations may expose placeholder CBOR while constructing
+			// a block from structured fields; treating that as a complete wire
+			// block would reject it for lacking Byron genesis configuration
+			// before transaction validation runs. The envelope proof check has
+			// the same concrete-type boundary, while real inbound Byron blocks
+			// always use one of these types.
+			switch block.(type) {
+			case *byron.ByronMainBlock, *byron.ByronEpochBoundaryBlock:
+				if err := validateByronBlockSizes(
+					block,
+					ls.config.CardanoNodeConfig,
+				); err != nil {
+					return nil, err
+				}
+			}
+		}
 		if err := ls.validateBlockHeaderProtocolVersion(
 			block.Header(), pparams,
 		); err != nil {
