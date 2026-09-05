@@ -343,7 +343,8 @@ func TestIntersectAnchorFallbackWarnIsThrottled(t *testing.T) {
 func TestRollbackWindowIntersectAnchorReportsRollbackPoint(t *testing.T) {
 	f := newRollbackWindowFixture(t)
 
-	point, ok := f.ls.RollbackWindowIntersectAnchor()
+	point, ok, err := f.ls.RollbackWindowIntersectAnchor()
+	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, f.rollbackTo.Slot, point.Slot)
 	assert.Equal(t, f.rollbackTo.Hash, point.Hash)
@@ -363,6 +364,7 @@ func TestRollbackWindowIntersectAnchorAbsentWhenLedgerTipPresent(t *testing.T) {
 	}
 	f.ls.Unlock()
 
-	_, ok := f.ls.RollbackWindowIntersectAnchor()
+	_, ok, err := f.ls.RollbackWindowIntersectAnchor()
+	require.NoError(t, err)
 	assert.False(t, ok)
 }

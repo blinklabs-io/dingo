@@ -8912,25 +8912,40 @@ func (ls *LedgerState) recentChainPointsFallbackAnchor(
 // chain tip directly. A raw chain tip can be an unapplied fork ahead of the
 // ledger tip that does not descend from it, and advertising that would break
 // the primary-chain ancestor invariant (#2309).
-func (ls *LedgerState) RollbackWindowIntersectAnchor() (ocommon.Point, bool) {
+func (ls *LedgerState) RollbackWindowIntersectAnchor() (
+	ocommon.Point,
+	bool,
+	error,
+) {
 	ls.RLock()
 	currentTip := ls.currentTip
 	ls.RUnlock()
 	if currentTip.Point.Slot == 0 && len(currentTip.Point.Hash) == 0 {
-		return ocommon.Point{}, false
+		return ocommon.Point{}, false, nil
 	}
 	// The window is defined by the ledger tip's row being gone. If it is
 	// readable the ledger is self-consistent and needs no rescue.
+	//
+	// A lookup failure that is not "block not found" is a storage fault, not
+	// an answer. Reporting it as "no anchor" would let a transient database
+	// error silently become an origin-only intersect list, i.e. a request
+	// that the peer replay the chain from genesis.
 	if _, err := database.BlockByPoint(ls.db, currentTip.Point); err == nil {
-		return ocommon.Point{}, false
+		return ocommon.Point{}, false, nil
 	} else if !errors.Is(err, models.ErrBlockNotFound) {
-		return ocommon.Point{}, false
+		return ocommon.Point{}, false, fmt.Errorf(
+			"look up ledger tip block for rollback intersect anchor: %w",
+			err,
+		)
 	}
 	block, ok, err := ls.recentChainPointsFallbackAnchor(currentTip)
-	if err != nil || !ok {
-		return ocommon.Point{}, false
+	if err != nil {
+		return ocommon.Point{}, false, err
 	}
-	return ocommon.NewPoint(block.Slot, block.Hash), true
+	if !ok {
+		return ocommon.Point{}, false, nil
+	}
+	return ocommon.NewPoint(block.Slot, block.Hash), true, nil
 }
 
 // intersectAnchorFallbackWarnInterval throttles the anchor-fallback warning.

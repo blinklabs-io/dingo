@@ -541,7 +541,16 @@ func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
 		}
 	}
 	intersectPoints = normalizeIntersectPoints(intersectPoints)
-	rollbackAnchor, hasRollbackAnchor := o.ledgerState.RollbackWindowIntersectAnchor()
+	rollbackAnchor, hasRollbackAnchor, err := o.ledgerState.RollbackWindowIntersectAnchor()
+	if err != nil {
+		// Surfaced like any other intersect-point failure above: a storage
+		// fault must fail the chainsync start so the caller retries, not be
+		// downgraded into "no anchor" and sent to the peer as origin-only.
+		return nil, fmt.Errorf(
+			"LedgerState.RollbackWindowIntersectAnchor failed: %w",
+			err,
+		)
+	}
 	intersectPoints, rescued := finalizeChainsyncIntersectPoints(
 		intersectPoints,
 		rollbackAnchor,
