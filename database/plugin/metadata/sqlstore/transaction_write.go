@@ -278,6 +278,11 @@ RETURNING id`,
 						err,
 					)
 				}
+				if err := setPointerAddressStakeCredential(
+					db, produced.Output.Address(), &model,
+				); err != nil {
+					return fmt.Errorf("resolve produced pointer address: %w", err)
+				}
 				if collateralReturn != nil &&
 					produced.Output == collateralReturn {
 					id := uint(transactionID)
@@ -460,8 +465,23 @@ RETURNING id`,
 			if err != nil {
 				return err
 			}
+			certificateRefs, err := s.applyTransactionCertificates(
+				ctx,
+				db,
+				transactionID,
+				transaction.Certificates(),
+				point,
+				index,
+				map[int]uint64{},
+			)
+			if err != nil {
+				return err
+			}
 			collateralReturn := transaction.CollateralReturn()
-			stakeRefs := make([]models.StakeCredentialRef, 0)
+			stakeRefs := append(
+				make([]models.StakeCredentialRef, 0, len(certificateRefs)),
+				certificateRefs...,
+			)
 			for _, produced := range transaction.Produced() {
 				model, err := models.UtxoLedgerToModel(produced, point.Slot)
 				if err != nil {
@@ -470,6 +490,11 @@ RETURNING id`,
 						produced.Id.Index(),
 						err,
 					)
+				}
+				if err := setPointerAddressStakeCredential(
+					db, produced.Output.Address(), &model,
+				); err != nil {
+					return fmt.Errorf("resolve gap produced pointer address: %w", err)
 				}
 				id := uint(transactionID)
 				if collateralReturn != nil &&
@@ -726,10 +751,14 @@ SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			_, err = db.ExecContext(ctx, `
 UPDATE utxo
 SET transaction_id = COALESCE(transaction_id, ?),
-    collateral_return_for_tx_id = COALESCE(collateral_return_for_tx_id, ?)
+    collateral_return_for_tx_id = COALESCE(collateral_return_for_tx_id, ?),
+    credential_tag = CASE WHEN COALESCE(length(staking_key), 0) = 0 THEN ? ELSE credential_tag END,
+    staking_key = CASE WHEN COALESCE(length(staking_key), 0) = 0 THEN ? ELSE staking_key END
 WHERE id = ?`,
 				params.TransactionID,
 				params.CollateralReturnForTxID,
+				params.CredentialTag,
+				params.StakingKey,
 				id,
 			)
 		}
