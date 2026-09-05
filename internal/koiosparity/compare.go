@@ -869,6 +869,60 @@ func rationalsEqual(a, b string) bool {
 	return ra.Cmp(&rb) == 0
 }
 
+// mismatchSeverity classifies one mismatch category. DetermineStatus and
+// CountSignificant both read it, so a category added to one can never be
+// forgotten by the other — the failure the split invited was a count that did
+// not agree with the status it accompanied.
+type mismatchSeverity int
+
+const (
+	// severityInformational describes state rather than disagreement. These
+	// must never turn an otherwise-clean epoch into ERROR or FAIL, and must
+	// never be counted as a reason for one.
+	severityInformational mismatchSeverity = iota
+	// severityError means the comparison could not be trusted, not that it
+	// disagreed.
+	severityError
+	// severityFail is a real Dingo/Koios disagreement.
+	severityFail
+)
+
+func severityOf(category string) mismatchSeverity {
+	switch category {
+	case CategoryDBError,
+		CategoryDBMissing,
+		CategoryReferenceLag,
+		CategoryAcctCoverageIncomplete:
+		return severityError
+	case CategoryAcctZeroReward,
+		CategoryAcctNewlyRegistered,
+		CategoryAcctDeregistered,
+		CategoryPoolDeparted:
+		// Purely informational — see these categories' doc comments.
+		return severityInformational
+	default:
+		return severityFail
+	}
+}
+
+// CountSignificant returns how many mismatches drove the status DetermineStatus
+// reports — every mismatch that is not purely informational.
+//
+// A caller reporting a failure should use this rather than len(mismatches).
+// An epoch can hold many informational rows and still pass, so including them
+// points the reader at rows that are by definition never the reason: Preview
+// epoch 198 failed on three account mismatches and reported twelve, eight of
+// which were pool departures that DetermineStatus ignores by design.
+func CountSignificant(mismatches []CheckMismatch) int {
+	n := 0
+	for _, m := range mismatches {
+		if severityOf(m.Category) != severityInformational {
+			n++
+		}
+	}
+	return n
+}
+
 // DetermineStatus returns PASS, FAIL, or ERROR from a list of mismatches.
 //
 //   - FAIL: any value_mismatch, pool_only_dingo, pool_only_koios,
@@ -883,27 +937,14 @@ func rationalsEqual(a, b string) bool {
 //     reference set to compare against yet).
 //   - PASS: no mismatches.
 func DetermineStatus(mismatches []CheckMismatch) string {
-	if len(mismatches) == 0 {
-		return StatusPass
-	}
 	hasError := false
 	for _, m := range mismatches {
-		switch m.Category {
-		case CategoryDBError,
-			CategoryDBMissing,
-			CategoryReferenceLag,
-			CategoryAcctCoverageIncomplete:
-			hasError = true
-		case CategoryAcctZeroReward,
-			CategoryAcctNewlyRegistered,
-			CategoryAcctDeregistered,
-			CategoryPoolDeparted:
-			// Purely informational — see these categories' doc comments.
-			// Deliberately not counted toward hasError or default's FAIL: a
-			// zero-reward or lifecycle-change mismatch must never turn an
-			// otherwise-clean epoch into ERROR or FAIL.
-		default:
+		switch severityOf(m.Category) {
+		case severityFail:
 			return StatusFail
+		case severityError:
+			hasError = true
+		case severityInformational:
 		}
 	}
 	if hasError {
