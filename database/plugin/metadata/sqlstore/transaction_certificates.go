@@ -287,7 +287,11 @@ func (s *Store) applySpecializedCertificate(
 			db,
 			cert,
 			certificateID,
-			slot,
+			poolCertPosition{
+				slot:       slot,
+				blockIndex: uint64(blockIndex),
+				certIndex:  uint64(certIndex),
+			},
 			deposit,
 		)
 		return id, nil, err
@@ -658,9 +662,10 @@ func applyPoolRegistrationCertificate(
 	db queryer,
 	cert *lcommon.PoolRegistrationCertificate,
 	certificateID uint,
-	slot uint64,
+	at poolCertPosition,
 	deposit uint64,
 ) (uint, error) {
+	slot := at.slot
 	rewardTag, rewardAccount, err := certutil.PoolRewardAccount(cert)
 	if err != nil {
 		return 0, err
@@ -715,6 +720,14 @@ RETURNING id`,
 		metadataURL = cert.PoolMetadata.Url
 		metadataHash = cert.PoolMetadata.Hash[:]
 	}
+	// The pool row above is upserted before this, but it carries no deposit
+	// and no history, so the held amount is derived from the registration and
+	// retirement rows strictly before this certificate's position rather than
+	// from live pool state.
+	held, err := poolRegistrationDepositHeld(ctx, db, poolID, at, deposit)
+	if err != nil {
+		return 0, err
+	}
 	registrationID, err := insertPoolRegistration(ctx, db, []any{
 		margin,
 		metadataURL,
@@ -729,6 +742,7 @@ RETURNING id`,
 		poolID,
 		slot,
 		decimalUint64(types.Uint64(deposit)),
+		decimalUint64(types.Uint64(held)),
 		nullBytes(leiosKeyPublic),
 		nullBytes(leiosKeyPoP),
 	}, poolID, slot)

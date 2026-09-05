@@ -34,11 +34,15 @@ import (
 // added to the treasury. This reuses the governance refund helpers so deposit
 // returns follow identical registered-vs-unclaimed accounting.
 //
-// The refunded amount and reward account come from the pool's latest
-// registration. This equals the originally-held deposit whenever the
-// poolDeposit parameter is stable across the pool's lifetime, which is the case
-// on all live networks; a governance change to poolDeposit between a pool's
-// first and last registration is the only scenario where the two could differ.
+// The reward account comes from the pool's latest registration; the amount is
+// that registration's persisted held deposit
+// (`pool_registration.deposit_held`), not what the current protocol parameters
+// would charge. cardano-ledger charges a pool deposit only for a registration
+// of a pool that is not already registered, so a re-registration carries the
+// earlier registration's held amount forward and a poolDeposit parameter change
+// after the registration that paid neither mints nor burns the difference at
+// this boundary. A registration made after the pool's retirement was reaped is
+// a first registration again and pays the deposit in force at its own slot.
 //
 // Removal from active pool state is not a separate write: dingo derives the
 // active pool set from the latest registration/retirement certificates
@@ -66,7 +70,7 @@ func (ls *LedgerState) applyPoolRetirements(
 		return nil
 	}
 	for _, refund := range refunds {
-		deposit := uint64(refund.DepositAmount)
+		deposit := uint64(refund.DepositHeld)
 		// The reward account on a pool registration is the 28-byte stake
 		// credential hash, the same form AddAccountReward looks up.
 		credited, err := governance.CreditRegisteredRewardAccountAfterSnapshot(
