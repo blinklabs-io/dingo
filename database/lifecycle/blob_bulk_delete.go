@@ -111,10 +111,6 @@ func DeleteBlocksAfter(
 	if tipID <= afterID {
 		return 0, nil
 	}
-	blob := db.Blob()
-	if blob == nil {
-		return 0, types.ErrBlobStoreUnavailable
-	}
 	indexPrefix := []byte(types.BlockBlobIndexKeyPrefix)
 	for start := afterID + 1; start <= tipID; {
 		if err := ctx.Err(); err != nil {
@@ -131,6 +127,13 @@ func DeleteBlocksAfter(
 			// discards staged work with no bucket I/O.
 			if irreversible, ok := txn.Blob().(types.IrreversibleTxn); ok {
 				batchIsIrreversible = irreversible.RollbackIsNoop()
+			}
+			// Per batch, from the batch's own transaction: each batch
+			// commits separately, so the store has to be the one that owns
+			// this batch's handles rather than whichever is installed now.
+			blob := txn.BlobStore()
+			if blob == nil {
+				return types.ErrBlobStoreUnavailable
 			}
 			it := blob.NewIterator(
 				txn.Blob(),
