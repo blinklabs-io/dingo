@@ -3030,6 +3030,80 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		)
 		return nil
 	}
+	// A target sharing the applied tip's slot with a different hash cannot be
+	// expressed by the UTxO and transaction truncation predicates in
+	// database.TruncateAfterSlot. Those are slot-only (added_slot > slot,
+	// deleted_slot > slot), unlike DeleteBlockNoncesAfterPoint beside them,
+	// which is point-aware (slot > ? OR (slot = ? AND hash <> ?)) precisely
+	// because same-slot competitors must not survive a rollback.
+	//
+	// Left alone, such a target truncates nothing at the contested slot: the
+	// abandoned same-slot block's outputs stay live, and the UTxOs it consumed
+	// stay marked spent with deleted_slot equal to the boundary, so the
+	// strictly-greater restore never matches them. Once cleanup hard-deletes
+	// those rows there is nothing left to restore at all. The next block that
+	// legitimately spends one of them cannot resolve the input, which Conway
+	// reports as bad inputs and -- because value conservation sums consumed
+	// over only the inputs that did resolve -- as value not conserved in the
+	// same pass, from the one divergence (issue #3678).
+	//
+	// Redirect to the newest applied ancestor strictly below the contested
+	// slot so the existing predicates truncate that slot whole. The block at
+	// point is then re-applied by the pipeline, which is what makes recovery
+	// converge instead of rewinding to the same non-repairing target forever.
+	//
+	// This applies only when the competing tip was genuinely applied, which a
+	// recorded block nonce witnesses. A tip that carries no nonce was never
+	// applied -- enforceDurableTipFloor also repairs an in-memory tip that
+	// leads the durable state -- so there is nothing at the contested slot to
+	// undo and the slot-only predicates are already correct for it.
+	sameSlotCompetitor := point.Slot == currentTip.Point.Slot &&
+		!bytes.Equal(point.Hash, currentTip.Point.Hash)
+	if sameSlotCompetitor {
+		tipNonce, nonceErr := ls.db.GetBlockNonce(currentTip.Point, nil)
+		if nonceErr != nil {
+			return fmt.Errorf(
+				"read applied nonce for contested tip at slot %d: %w",
+				currentTip.Point.Slot,
+				nonceErr,
+			)
+		}
+		sameSlotCompetitor = len(tipNonce) > 0
+	}
+	if sameSlotCompetitor {
+		// latestLedgerPrimaryChainAncestor searches block nonces over the
+		// half-open range [start, point.Slot), so passing point already means
+		// "strictly below the contested slot". Passing point.Slot-1 would skip
+		// an applied ancestor sitting at exactly point.Slot-1.
+		ancestor, ok, ancestorErr := ls.latestLedgerPrimaryChainAncestor(
+			point,
+			false,
+		)
+		if ancestorErr != nil {
+			return fmt.Errorf(
+				"resolve applied ancestor below contested slot %d: %w",
+				point.Slot,
+				ancestorErr,
+			)
+		}
+		if !ok {
+			return fmt.Errorf(
+				"no applied ancestor below contested slot %d: %w",
+				point.Slot,
+				ErrNoAppliedAncestorBelowContestedSlot,
+			)
+		}
+		ls.config.Logger.Warn(
+			"rollback target shares the applied tip's slot with a different hash, redirecting below the contested slot",
+			"component", "ledger",
+			"contested_slot", point.Slot,
+			"rollback_hash", hex.EncodeToString(point.Hash),
+			"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
+			"ancestor_slot", ancestor.Slot,
+			"ancestor_hash", hex.EncodeToString(ancestor.Hash),
+		)
+		point = ancestor
+	}
 	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
 		return ErrRollbackExceedsMithrilBoundary
 	}
