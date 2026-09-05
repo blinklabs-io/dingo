@@ -397,6 +397,7 @@ func TestResolveUtxoCborUsesTransactionStore(t *testing.T) {
 	copy(txId, []byte("resolve-utxo-pairing-txid"))
 	want := []byte{0x82, 0x03, 0x04}
 	writeTxn := db.BlobTxn(true)
+	t.Cleanup(writeTxn.Release)
 	require.NoError(t, base.SetUtxo(writeTxn.Blob(), txId, 0, want))
 	require.NoError(t, writeTxn.Commit())
 
