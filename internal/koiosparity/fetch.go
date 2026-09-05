@@ -885,7 +885,7 @@ outer:
 		FetchedAt:          now,
 	}); err != nil {
 		if invalidateErr := cache.DeleteEpochParams(network, epoch); invalidateErr != nil {
-			return 0, fmt.Errorf("commit epoch: %w; invalidate params: %v", err, invalidateErr)
+			return 0, fmt.Errorf("commit epoch: %w; invalidate params: %w", err, invalidateErr)
 		}
 		return 0, fmt.Errorf("commit epoch: %w", err)
 	}

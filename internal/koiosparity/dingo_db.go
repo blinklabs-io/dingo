@@ -337,7 +337,7 @@ func (d *DingoDB) GetProtocolParams(
 	ctx context.Context,
 	epoch uint64,
 ) (*DingoProtocolParams, error) {
-	tx, err := d.db.BeginTx(ctx, nil)
+	tx, err := d.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("begin protocol params read: %w", err)
 	}
