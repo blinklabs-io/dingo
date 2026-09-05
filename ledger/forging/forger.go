@@ -1336,7 +1336,8 @@ func (f *BlockForger) tipBlockIsOurs(slot uint64) (bool, string) {
 // tipHashMatchesForgedBlock reports whether the current chain tip is the
 // exact block this node forged for slot. It answers false whenever any
 // input is missing (no tracker record, no tip-hash capable slot clock,
-// an empty hash on either side) so the caller falls back to the fence.
+// an empty hash on either side) or the tip has moved off slot between
+// the two reads, so the caller falls back to the fence.
 func (f *BlockForger) tipHashMatchesForgedBlock(slot uint64) bool {
 	if f.slotTracker == nil {
 		return false
@@ -1351,6 +1352,15 @@ func (f *BlockForger) tipHashMatchesForgedBlock(slot uint64) bool {
 	}
 	tipHash := provider.ChainTipHash()
 	if len(tipHash) == 0 {
+		return false
+	}
+	// The caller's tipSlot was sampled at the top of the forge cycle and
+	// the chain can move underneath it, so this hash need not belong to
+	// the slot being decided. Re-read the tip slot next to the hash and
+	// refuse to conclude anything if the tip is no longer at this slot,
+	// which sends the caller back to the fence. The two reads are still
+	// not atomic, so this narrows the window rather than closing it.
+	if f.slotClock.ChainTipSlot() != slot {
 		return false
 	}
 	return bytes.Equal(tipHash, forgedHash)
