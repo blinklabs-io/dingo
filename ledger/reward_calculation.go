@@ -229,9 +229,23 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	}
 	if rewardSnapshot == nil {
 		if reportSkips {
+			reason := "missing reward snapshot"
+			failure, failureErr := meta.GetRewardSeedFailure(
+				rewardSnapshotEpoch, "mark", metaTxn,
+			)
+			if failureErr != nil {
+				return nil, false, fmt.Errorf(
+					"get reward seed failure for epoch %d: %w",
+					rewardSnapshotEpoch,
+					failureErr,
+				)
+			}
+			if failure != "" {
+				reason = "imported reward basis seeding failed: " + failure
+			}
 			ls.reportSkippedStakeRewards(
 				newEpoch,
-				"missing reward snapshot",
+				reason,
 				"reward_snapshot_epoch",
 				rewardSnapshotEpoch,
 			)

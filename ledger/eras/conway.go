@@ -43,12 +43,19 @@ var ConwayEraDesc = EraDesc{
 	DecodePParamsFunc:       DecodePParamsConway,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateConway,
 	PParamsUpdateFunc:       PParamsUpdateConway,
-	HardForkFunc:            HardForkConway,
-	EpochLengthFunc:         EpochLengthShelley,
-	CalculateEtaVFunc:       CalculateEtaVConway,
-	CertDepositFunc:         CertDepositConway,
-	ValidateTxFunc:          ValidateTxConway,
-	EvaluateTxFunc:          EvaluateTxConway,
+	ParamUpdateHasPlutusV2CostModelFunc: func(u any) bool {
+		upd, ok := u.(conway.ConwayProtocolParameterUpdate)
+		if !ok {
+			return false
+		}
+		return paramUpdateHasPlutusV2CostModel(upd.CostModels)
+	},
+	HardForkFunc:      HardForkConway,
+	EpochLengthFunc:   EpochLengthShelley,
+	CalculateEtaVFunc: CalculateEtaVConway,
+	CertDepositFunc:   CertDepositConway,
+	ValidateTxFunc:    ValidateTxConway,
+	EvaluateTxFunc:    EvaluateTxConway,
 }
 
 func DecodePParamsConway(data []byte) (lcommon.ProtocolParameters, error) {
@@ -1393,8 +1400,10 @@ func EvaluateTxConway(
 		if execErr != nil {
 			return 0, lcommon.ExUnits{}, nil, execErr
 		}
-		retTotalExUnits.Steps += usedBudget.Steps
-		retTotalExUnits.Memory += usedBudget.Memory
+		retTotalExUnits, err = SafeAddExUnits(retTotalExUnits, usedBudget)
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, fmt.Errorf("aggregate execution units: %w", err)
+		}
 		retRedeemerExUnits[lcommon.RedeemerKey{
 			Tag:   redeemer.Tag,
 			Index: redeemer.Index,
