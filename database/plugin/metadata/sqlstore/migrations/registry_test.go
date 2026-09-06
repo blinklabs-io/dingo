@@ -104,9 +104,11 @@ func TestSQLiteRegistry(t *testing.T) {
 		"CREATE TABLE IF NOT EXISTS `reward_seed_failure`")
 	require.Equal(t, 11, registry[10].Version)
 	require.Equal(t, "imported-pool-block-count", registry[10].Name)
-	require.Len(t, registry[10].SQL["sqlite"].Expand, 1)
+	require.Len(t, registry[10].SQL["sqlite"].Expand, 2)
 	require.Contains(t, registry[10].SQL["sqlite"].Expand[0],
 		"CREATE TABLE IF NOT EXISTS `imported_pool_block_count`")
+	require.Contains(t, registry[10].SQL["sqlite"].Expand[1],
+		"CREATE TABLE IF NOT EXISTS `imported_epoch_block_total`")
 }
 
 func TestCommitteeCredentialMigrationTranslatesForProviders(t *testing.T) {
