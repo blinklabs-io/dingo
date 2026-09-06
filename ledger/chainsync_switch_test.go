@@ -1203,7 +1203,7 @@ func TestDiscardBufferedPeerHeadersDoesNotRaceBufferedHeaderIteration(
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(4)
 	// Mirrors handleEventBlockfetch: the read side holds
 	// chainsyncBlockfetchMutex across the iteration.
 	go func() {
@@ -1219,6 +1219,31 @@ func TestDiscardBufferedPeerHeadersDoesNotRaceBufferedHeaderIteration(
 		defer wg.Done()
 		for i := range 200 {
 			ls.discardBufferedPeerHeaders(connIds[i%conns])
+		}
+	}()
+	// The buffering write path. claimHeaderPipelineOwnership releases
+	// chainsyncBlockfetchMutex before this runs, so it is a genuinely
+	// unsynchronized writer without bufferedHeaderMutex.
+	go func() {
+		defer wg.Done()
+		for i := range 200 {
+			ls.bufferHeaderEvent(ChainsyncEvent{
+				ConnectionId: connIds[i%conns],
+				Point:        ocommon.NewPoint(uint64(i), []byte("hdr")),
+			})
+		}
+	}()
+	// The resync delete path, which reaches the map from callers that do
+	// not all hold chainsyncBlockfetchMutex.
+	go func() {
+		defer wg.Done()
+		var pending pendingPublishes
+		for i := range 200 {
+			ls.requestChainsyncResync(
+				connIds[i%conns],
+				"race probe",
+				&pending,
+			)
 		}
 	}()
 	wg.Wait()

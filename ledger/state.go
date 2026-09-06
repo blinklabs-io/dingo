@@ -941,9 +941,17 @@ type LedgerState struct {
 	chainsyncMutex                sync.Mutex
 	chainsyncBlockfetchMutex      sync.Mutex
 	chainsyncBlockfetchReadyMutex sync.Mutex
-	chainsyncBlockfetchReadyChan  chan struct{}
-	activeBlockfetchConnId        ouroboros.ConnectionId // connection used for current blockfetch pipeline
-	shadowBlockfetchConnId        ouroboros.ConnectionId // shadow peer dispatched for parallel blockfetch
+	// bufferedHeaderMutex guards bufferedHeaderEvents alone. That map is
+	// reached from both the chainsync dispatch goroutine (which holds
+	// chainsyncMutex) and the blockfetch path (which holds
+	// chainsyncBlockfetchMutex), so neither of those locks covers every
+	// access and a concurrent iteration and write is fatal at runtime.
+	// Where both are held, acquire this one last; nothing calls out to
+	// other ledger code while holding it, so the order stays fixed.
+	bufferedHeaderMutex          sync.Mutex
+	chainsyncBlockfetchReadyChan chan struct{}
+	activeBlockfetchConnId       ouroboros.ConnectionId // connection used for current blockfetch pipeline
+	shadowBlockfetchConnId       ouroboros.ConnectionId // shadow peer dispatched for parallel blockfetch
 	// blockfetchPrimaryRequestGeneration identifies the currently running
 	// primary request. A timeout may fire while the request is blocked in the
 	// protocol client; keeping its generation lets the timeout wait instead of
