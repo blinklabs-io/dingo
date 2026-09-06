@@ -444,6 +444,11 @@ func (cm *ChainManager) RewindPrimaryChainToPoint(
 	// See Chain.batchCommitMutex.
 	primaryChain.batchCommitMutex.Lock()
 	defer primaryChain.batchCommitMutex.Unlock()
+	// It also waits on the same caller-transaction barrier, for the same
+	// reason: an add whose store write is still in a caller-supplied
+	// transaction leaves an index the store cannot serve. See
+	// pendingAddBarrier.
+	primaryChain.awaitPendingCallerAdds()
 	primaryChain.mutex.Lock()
 	defer primaryChain.mutex.Unlock()
 	cm.mutex.Lock()
