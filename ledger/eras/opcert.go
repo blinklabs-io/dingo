@@ -14,7 +14,10 @@
 
 package eras
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // ValidateOpCertCounter enforces the operational-certificate issue-number
 // counter rule shared by block application (ledger/verify_opcert.go) and
@@ -54,6 +57,50 @@ func ValidateOpCertCounter(
 			"opcert counter %d skips ahead of last seen %d (gapped rotation)",
 			candidate,
 			stored,
+		)
+	}
+	return nil
+}
+
+// MaxPersistableOpCertCounter is the highest operational-certificate issue
+// number dingo can record for a pool.
+//
+// The reference imposes no bound: cardano-ledger decodes the counter as
+// Word64 (Cardano.Protocol.TPraos.OCert) and the CDDL declares it uint .size
+// 8, so every value up to math.MaxUint64 is a well-formed counter. dingo's
+// bound is narrower because it persists what cardano-node only holds in
+// memory. pool_opcert_sequence.sequence and pool.latest_op_cert_sequence are
+// signed engine integers that carry both the value and the ordering the
+// monotonicity rule reads -- MAX(sequence) per pool, the
+// latest_op_cert_sequence < ? guard on the denormalized maximum, and the
+// (pool_key_hash, sequence) index GetChainDepState's aggregate is served
+// from. A counter above math.MaxInt64 stored in those columns as two's
+// complement would order below every smaller counter and silently invert
+// each of those three reads.
+//
+// The bound is unreachable from Babbage onward: Praos rejects a counter more
+// than one past the last seen (CounterOverIncrementedOCERT) and a registered
+// pool with no recorded counter has a baseline of zero (currentIssueNo), so
+// reaching it would take 2^63 rotations. Only the TPraos eras
+// (Shelley-Alonzo), which enforce monotonicity alone, admit an arbitrary
+// first counter -- so this is the one place where dingo is narrower than the
+// reference, and it says so at the boundary rather than failing part-way
+// through block application.
+const MaxPersistableOpCertCounter = uint64(math.MaxInt64)
+
+// ValidateOpCertPersistableCounter rejects an operational-certificate issue
+// number dingo cannot record, naming the bound and why it exists.
+//
+// It is deliberately separate from ValidateOpCertCounter: that rule is the
+// era-scoped chain rule and is only evaluated for blocks being validated,
+// while this bound governs every counter that reaches the metadata store --
+// an unvalidated replay and a locally forged block included.
+func ValidateOpCertPersistableCounter(candidate uint64) error {
+	if candidate > MaxPersistableOpCertCounter {
+		return fmt.Errorf(
+			"opcert counter %d exceeds the highest counter dingo records (%d); the reference accepts it but the pool_opcert_sequence ordering cannot represent it",
+			candidate,
+			MaxPersistableOpCertCounter,
 		)
 	}
 	return nil
