@@ -45,12 +45,20 @@ const defaultKoiosParityCacheSubdir = ".koios/cache.db"
 // the event has already committed.
 //
 // A strict-mode failure (the default — see KoiosParityConfig) calls
-// n.cancel via FatalFunc, matching every other FatalErrorFunc-style
-// composition callback in Run() (ledger, Midnight indexer): a Koios/tool
-// error or exact parity mismatch stops the node rather than being logged as
-// ordinary operation.
+// n.cancelForFatal via FatalFunc: a Koios/tool error or exact parity mismatch
+// stops the node and is returned by Run so the process exits non-zero rather
+// than being logged as ordinary operation or mistaken for a clean signal.
 func (n *Node) startKoiosParityObserver() error {
 	cfg := n.config.koiosParity
+
+	// Accounts defaults to true when unset (see KoiosParityConfig's doc
+	// comment); the mirror populated by syncCompatFields always carries a
+	// resolved, non-nil pointer, but this stays defensive against a nil
+	// value regardless.
+	accountsEnabled := true
+	if cfg.Accounts != nil {
+		accountsEnabled = *cfg.Accounts
+	}
 
 	network := cfg.Network
 	if network == "" {
@@ -78,19 +86,22 @@ func (n *Node) startKoiosParityObserver() error {
 	}
 
 	observer, err := koiosparity.NewObserver(koiosparity.ObserverConfig{
-		Network:    network,
-		CachePath:  cachePath,
-		APIKey:     cfg.APIKey,
-		Source:     source,
-		Strict:     cfg.Strict,
-		GraceHours: cfg.GraceHours,
-		Logger:     n.config.logger,
+		Network:              network,
+		CachePath:            cachePath,
+		APIKey:               cfg.APIKey,
+		Source:               source,
+		Strict:               cfg.Strict,
+		AccountsEnabled:      accountsEnabled,
+		GraceHours:           cfg.GraceHours,
+		AccountChunkSize:     cfg.AccountChunkSize,
+		AccountChunkMaxBytes: cfg.AccountChunkMaxBytes,
+		Logger:               n.config.logger,
 		FatalFunc: func(err error) {
 			n.config.logger.Error(
 				"fatal koios parity validation failure, initiating shutdown",
 				"error", err,
 			)
-			n.cancel()
+			n.cancelForFatal(err)
 		},
 	})
 	if err != nil {
@@ -123,6 +134,7 @@ func (n *Node) startKoiosParityObserver() error {
 		"koios parity observer enabled",
 		"network", network,
 		"strict", cfg.Strict,
+		"accounts", accountsEnabled,
 		"cache", cachePath,
 	)
 	return nil

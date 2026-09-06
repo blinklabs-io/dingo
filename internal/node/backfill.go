@@ -397,12 +397,12 @@ func (b *Backfill) resolvePParams(
 			if era != nil &&
 				era.DecodePParamsUpdateFunc != nil &&
 				era.PParamsUpdateFunc != nil {
-				newPP, ppErr := b.db.ComputeAndApplyPParamUpdates(
+				newPP, _, ppErr := b.db.ComputeAndApplyPParamUpdates(
 					ep.StartSlot, ep.EpochId,
 					ep.EraId, quorum,
 					b.currentPParams,
 					era.DecodePParamsUpdateFunc,
-					era.PParamsUpdateFunc, nil,
+					era.PParamsUpdateFunc, nil, nil,
 				)
 				if ppErr != nil {
 					b.logger.Warn(
@@ -1077,6 +1077,29 @@ func (b *Backfill) Run(ctx context.Context) error {
 		saveCommittedCheckpoint()
 		return fmt.Errorf("flushing final backfill batch: %w", err)
 	}
+	// Do not start the potentially expensive aggregate rebuild after a caller
+	// has canceled the backfill. Re-check after it returns as well so callers
+	// observe cancellation before the completion checkpoint is persisted.
+	if err := ctx.Err(); err != nil {
+		saveCommittedCheckpoint()
+		return err
+	}
+	// Historical replay intentionally leaves the imported snapshot reward
+	// balances untouched and skips per-transaction live-stake refreshes. The
+	// derived aggregate is rebuilt once from canonical account and live-UTxO
+	// metadata after all historical rows are present, avoiding millions of
+	// repeated indexed UTxO sums during API backfill.
+	if err := b.db.RebuildRewardLiveStake(tipSlot, nil); err != nil {
+		saveCommittedCheckpoint()
+		return fmt.Errorf(
+			"rebuilding reward live stake after backfill: %w",
+			err,
+		)
+	}
+	if err := ctx.Err(); err != nil {
+		saveCommittedCheckpoint()
+		return err
+	}
 	b.maybeLogProgress(
 		cp, processedBlocks, processedTxs,
 		tipSlot, startSlot, startTime, &lastLogTime,
@@ -1158,6 +1181,11 @@ func (b *Backfill) processBlockTxsBatched(
 				// checkMithrilInactivityCompat (cmd/dingo/serve.go) and
 				// errMithrilInactivityIncompatible (cmd/dingo/mithril.go).
 				SkipWithdrawalWitnessWrite: !b.delegatorInactivityEnabled,
+				// Historical replay follows the snapshot's complete reward
+				// state, not the balance at each historical slot. Preserve
+				// withdrawal history without applying the live-path balance
+				// sufficiency check.
+				HistoricalBackfill: true,
 			},
 		); err != nil {
 			return fmt.Errorf("storing TX: %w", err)

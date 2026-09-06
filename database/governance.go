@@ -38,7 +38,7 @@ func (d *Database) DeleteGovernanceProposalsAfterSlot(
 			}
 		}()
 	}
-	if err := d.metadata.DeleteGovernanceProposalsAfterSlot(
+	if err := d.governanceStore().DeleteGovernanceProposalsAfterSlot(
 		slot,
 		txn.Metadata(),
 	); err != nil {
@@ -74,7 +74,7 @@ func (d *Database) DeleteGovernanceVotesAfterSlot(
 			}
 		}()
 	}
-	if err := d.metadata.DeleteGovernanceVotesAfterSlot(
+	if err := d.governanceStore().DeleteGovernanceVotesAfterSlot(
 		slot,
 		txn.Metadata(),
 	); err != nil {
@@ -103,7 +103,7 @@ func (d *Database) GetGovernanceProposal(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	proposal, err := d.metadata.GetGovernanceProposal(
+	proposal, err := d.governanceStore().GetGovernanceProposal(
 		txHash,
 		actionIndex,
 		txn.Metadata(),
@@ -127,7 +127,7 @@ func (d *Database) GetActiveGovernanceProposals(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	proposals, err := d.metadata.GetActiveGovernanceProposals(
+	proposals, err := d.governanceStore().GetActiveGovernanceProposals(
 		epoch,
 		txn.Metadata(),
 	)
@@ -151,7 +151,7 @@ func (d *Database) GetExpiringGovernanceProposals(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	proposals, err := d.metadata.GetExpiringGovernanceProposals(
+	proposals, err := d.governanceStore().GetExpiringGovernanceProposals(
 		epoch, txn.Metadata(),
 	)
 	if err != nil {
@@ -173,7 +173,7 @@ func (d *Database) GetExpiredGovernanceProposalsAt(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	proposals, err := d.metadata.GetExpiredGovernanceProposalsAt(
+	proposals, err := d.governanceStore().GetExpiredGovernanceProposalsAt(
 		epoch, slot, txn.Metadata(),
 	)
 	if err != nil {
@@ -195,7 +195,9 @@ func (d *Database) GetRatifiedGovernanceProposals(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	proposals, err := d.metadata.GetRatifiedGovernanceProposals(txn.Metadata())
+	proposals, err := d.governanceStore().GetRatifiedGovernanceProposals(
+		txn.Metadata(),
+	)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"failed to get ratified governance proposals: %w", err,
@@ -215,7 +217,7 @@ func (d *Database) GetEnactedGovernanceProposalsAt(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	proposals, err := d.metadata.GetEnactedGovernanceProposalsAt(
+	proposals, err := d.governanceStore().GetEnactedGovernanceProposalsAt(
 		epoch, slot, txn.Metadata(),
 	)
 	if err != nil {
@@ -239,7 +241,7 @@ func (d *Database) GetLastEnactedGovernanceProposal(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	proposal, err := d.metadata.GetLastEnactedGovernanceProposal(
+	proposal, err := d.governanceStore().GetLastEnactedGovernanceProposal(
 		actionTypes, txn.Metadata(),
 	)
 	if err != nil {
@@ -264,12 +266,52 @@ func (d *Database) SetGovernanceProposal(
 		owned = true
 		defer txn.Release()
 	}
-	if err := d.metadata.SetGovernanceProposal(proposal, txn.Metadata()); err != nil {
+	if err := d.governanceStore().SetGovernanceProposal(
+		proposal,
+		txn.Metadata(),
+	); err != nil {
 		return fmt.Errorf("failed to set governance proposal: %w", err)
 	}
 	if owned {
 		if err := txn.Commit(); err != nil {
 			return fmt.Errorf("failed to commit governance proposal: %w", err)
+		}
+	}
+	return nil
+}
+
+// ClearGovernanceProposalRatification moves a proposal back to the active,
+// pending state at transitionSlot. Governance epoch processing uses it when a
+// legacy ratified row fails a deterministic enactment precondition.
+func (d *Database) ClearGovernanceProposalRatification(
+	txHash []byte,
+	actionIndex uint32,
+	transitionSlot uint64,
+	txn *Txn,
+) error {
+	owned := false
+	if txn == nil {
+		txn = d.MetadataTxn(true)
+		owned = true
+		defer txn.Release()
+	}
+	if err := d.governanceStore().ClearGovernanceProposalRatification(
+		txHash,
+		actionIndex,
+		transitionSlot,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"failed to clear governance proposal ratification: %w",
+			err,
+		)
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return fmt.Errorf(
+				"failed to commit proposal ratification clear: %w",
+				err,
+			)
 		}
 	}
 	return nil
@@ -288,7 +330,7 @@ func (d *Database) GetChildGovernanceProposals(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	proposals, err := d.metadata.GetChildGovernanceProposals(
+	proposals, err := d.governanceStore().GetChildGovernanceProposals(
 		parentTxHash, parentActionIdx, txn.Metadata(),
 	)
 	if err != nil {
@@ -308,7 +350,10 @@ func (d *Database) GetGovernanceVotes(
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	votes, err := d.metadata.GetGovernanceVotes(proposalID, txn.Metadata())
+	votes, err := d.governanceStore().GetGovernanceVotes(
+		proposalID,
+		txn.Metadata(),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get governance votes: %w", err)
 	}
@@ -329,7 +374,10 @@ func (d *Database) SetGovernanceVote(
 		owned = true
 		defer txn.Release()
 	}
-	if err := d.metadata.SetGovernanceVote(vote, txn.Metadata()); err != nil {
+	if err := d.governanceStore().SetGovernanceVote(
+		vote,
+		txn.Metadata(),
+	); err != nil {
 		return fmt.Errorf("failed to set governance vote: %w", err)
 	}
 	if owned {

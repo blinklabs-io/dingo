@@ -104,7 +104,7 @@ func TestDecodeChainsyncHeaderAcceptsFullByronEbb(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	o := NewOuroboros(OuroborosConfig{})
+	o := newOuroboros(OuroborosConfig{})
 	header, err := o.decodeChainsyncHeader(gledger.BlockTypeByronEbb, ebbCbor)
 	require.NoError(t, err)
 	require.Equal(t, expected.Header().Hash(), header.Hash())
@@ -235,6 +235,21 @@ func newTestConnId(local, remote string) ouroboros.ConnectionId {
 	}
 }
 
+func selectTrackedChainsyncClient(
+	t testing.TB,
+	state *dchainsync.State,
+	connId ouroboros.ConnectionId,
+) {
+	t.Helper()
+	point := ocommon.NewPoint(1, []byte("selected-client"))
+	state.UpdateClientTipWithoutDedup(
+		connId,
+		point,
+		ochainsync.Tip{Point: point},
+	)
+	require.True(t, state.TrySetClientConnId(connId))
+}
+
 type testSecurityParamLedger struct {
 	securityParam int
 }
@@ -276,7 +291,7 @@ func setTestLedgerTip(
 	tip ochainsync.Tip,
 ) {
 	t.Helper()
-	o.LedgerState.SetTipForTesting(tip)
+	o.ledgerState.SetTipForTesting(tip)
 }
 
 func snapshotChainsyncNtNTimeouts() map[string]struct {
@@ -311,12 +326,12 @@ func TestNewOuroborosDoesNotMutateChainsyncNtNTimeouts(t *testing.T) {
 
 	before := snapshotChainsyncNtNTimeouts()
 
-	_ = NewOuroboros(OuroborosConfig{
+	_ = newOuroboros(OuroborosConfig{
 		ChainsyncBlockTimeout: 10 * time.Minute,
 	})
 	require.Equal(t, before, snapshotChainsyncNtNTimeouts())
 
-	_ = NewOuroboros(OuroborosConfig{
+	_ = newOuroboros(OuroborosConfig{
 		ChainsyncBlockTimeout: 20 * time.Minute,
 	})
 	require.Equal(t, before, snapshotChainsyncNtNTimeouts())
@@ -325,7 +340,7 @@ func TestNewOuroborosDoesNotMutateChainsyncNtNTimeouts(t *testing.T) {
 func TestChainsyncConnOptsUseConfiguredBlockTimeout(t *testing.T) {
 	const blockTimeout = 20 * time.Minute
 
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		ChainsyncBlockTimeout: blockTimeout,
 	})
 
@@ -385,7 +400,7 @@ func TestCloseChainsyncServerConnTearsDownTransport(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = serverConn.Close() })
 
-	o := NewOuroboros(OuroborosConfig{Logger: logger})
+	o := newOuroboros(OuroborosConfig{Logger: logger})
 	o.closeChainsyncServerConn(
 		serverConn,
 		serverConn.Id().String(),
@@ -422,7 +437,7 @@ func TestChainsyncServerFindIntersect_LedgerErrorPropagates(
 		blockType: 1,
 		cbor:      []byte{0x80},
 	}
-	require.NoError(t, o.LedgerState.Chain().AddBlock(block, nil))
+	require.NoError(t, o.ledgerState.Chain().AddBlock(block, nil))
 	setTestLedgerTip(t, o, ochainsync.Tip{
 		Point: ocommon.NewPoint(
 			block.SlotNumber(),
@@ -452,7 +467,7 @@ func TestChainsyncServerFindIntersect_ClientRegistrationFailure(
 	// Use a ledger that can intersect at origin, but a ChainsyncState without
 	// a chain provider so client registration must fail.
 	o := newFindIntersectTestOuroboros(t)
-	o.ChainsyncState = dchainsync.NewState(o.EventBus, nil)
+	o.chainsyncState = dchainsync.NewState(o.eventBus, nil)
 	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
 
 	// Perform FindIntersect with origin so registration is the first failing
@@ -475,7 +490,7 @@ func TestChainsyncServerRequestNext_AddClientFailure(
 	// Configure RequestNext with ChainsyncState that cannot build a
 	// server-side iterator for the downstream client.
 	o := newFindIntersectTestOuroboros(t)
-	o.ChainsyncState = dchainsync.NewState(o.EventBus, nil)
+	o.chainsyncState = dchainsync.NewState(o.eventBus, nil)
 	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
 
 	// Enter RequestNext before any protocol response can be sent.
@@ -699,7 +714,7 @@ func TestChainsyncClientRollForwardApplyGateWithholdsLedgerButObservesTip(
 	require.True(t, state.AddClientConnId(conn))
 
 	applyEligible := false
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
@@ -708,8 +723,8 @@ func TestChainsyncClientRollForwardApplyGateWithholdsLedgerButObservesTip(
 			return applyEligible
 		},
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	header := newTestBlockHeader(100, 1, 0xaa)
 	tip := ochainsync.Tip{
@@ -789,7 +804,7 @@ func TestChainsyncClientRollForward_WithheldHeaderNotPermanentlyDeduped(
 	require.True(t, state.AddClientConnId(connA))
 	require.True(t, state.AddClientConnId(connB))
 
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
@@ -804,8 +819,8 @@ func TestChainsyncClientRollForward_WithheldHeaderNotPermanentlyDeduped(
 		},
 		ChainsyncApplyEligible: cs.ShouldApplyIngress,
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	header := newTestBlockHeader(100, 1, 0xaa)
 	tip := ochainsync.Tip{
@@ -898,7 +913,7 @@ func TestChainsyncClientRollBackwardSyncObservationOrdersApplyGate(
 	require.True(t, cs.ShouldApplyIngress(connP),
 		"P must be apply-eligible (corroborated) before the rollback")
 
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
@@ -914,8 +929,8 @@ func TestChainsyncClientRollBackwardSyncObservationOrdersApplyGate(
 		},
 		ChainsyncApplyEligible: cs.ShouldApplyIngress,
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	// P rolls back to slot 99, below its entire corroborated frontier, trimming
 	// its observed points to empty. Its synchronous observation makes P
@@ -957,10 +972,12 @@ func TestChainsyncClientRollForwardSyncObservationOrdersApplyGate(
 	connB := newTestConnId("127.0.0.1:6000", "10.0.0.2:3001")
 	require.True(t, state.AddClientConnId(connA))
 	require.True(t, state.AddClientConnId(connB))
-	// connA drives, so it may replay a duplicate header first seen from connB.
-	state.SetClientConnId(connA)
+	// Prefer connA at an equal corroborated frontier so its first delivered
+	// header is also the first selectable switch to connA.
+	cs.SetConnectionPriority(connA, 1)
+	var switchAccepted bool
 
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
@@ -969,15 +986,24 @@ func TestChainsyncClientRollForwardSyncObservationOrdersApplyGate(
 		ChainsyncObservePeerTip: func(
 			e chainselection.PeerTipUpdateEvent,
 		) bool {
+			previousBest := cs.GetBestPeer()
 			cs.HandlePeerTipUpdateEvent(
 				event.NewEvent(chainselection.PeerTipUpdateEventType, e),
 			)
+			best := cs.GetBestPeer()
+			if previousBest == nil && best != nil {
+				// This is the same synchronous callback ordering as the node's
+				// ChainSwitchEvent handler: the newly selected client must already
+				// show a delivered tip, or TrySetClientConnId rejects the one-shot
+				// switch with no retry.
+				switchAccepted = state.TrySetClientConnId(*best)
+			}
 			return true
 		},
 		ChainsyncApplyEligible: cs.ShouldApplyIngress,
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	header := newTestBlockHeader(100, 1, 0xaa)
 	tip := ochainsync.Tip{
@@ -1019,6 +1045,15 @@ func TestChainsyncClientRollForwardSyncObservationOrdersApplyGate(
 			"corroborating header must be applied in the same roll-forward",
 		)
 	}
+	require.True(t, switchAccepted,
+		"the first corroborated switch must accept its delivered client")
+	active := state.GetClientConnId()
+	require.NotNil(t, active)
+	require.Equal(t, connA, *active)
+	trackedA := state.GetTrackedClient(connA)
+	require.NotNil(t, trackedA)
+	require.Equal(t, uint64(1), trackedA.HeadersRecv,
+		"pre-selection tracking must not double-count the delivered header")
 }
 
 func TestChainsyncClientRollForwardReplaysDuplicateFromSelectedPeerSeenElsewhere(
@@ -1033,16 +1068,16 @@ func TestChainsyncClientRollForwardReplaysDuplicateFromSelectedPeerSeenElsewhere
 	connB := newTestConnId("127.0.0.1:6000", "2.2.2.2:3001")
 	require.True(t, state.AddClientConnId(connA))
 	require.True(t, state.AddClientConnId(connB))
-	state.SetClientConnId(connA)
+	selectTrackedChainsyncClient(t, state, connA)
 
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
 		},
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	header := newTestBlockHeader(100, 1, 0xaa)
 	tip := ochainsync.Tip{
@@ -1095,16 +1130,16 @@ func TestChainsyncClientRollForwardReplaysDuplicateFromEquivalentSelectedPeerSee
 	require.True(t, state.AddClientConnId(connA))
 	require.True(t, state.AddClientConnId(connADup))
 	require.True(t, state.AddClientConnId(connB))
-	state.SetClientConnId(connA)
+	selectTrackedChainsyncClient(t, state, connA)
 
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
 		},
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	header := newTestBlockHeader(100, 1, 0xaa)
 	tip := ochainsync.Tip{
@@ -1153,16 +1188,16 @@ func TestChainsyncClientRollForwardDropsDuplicateFromSameSelectedPeer(
 	state := dchainsync.NewState(bus, nil)
 	connA := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
 	require.True(t, state.AddClientConnId(connA))
-	state.SetClientConnId(connA)
+	selectTrackedChainsyncClient(t, state, connA)
 
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
 		},
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	header := newTestBlockHeader(100, 1, 0xaa)
 	tip := ochainsync.Tip{
@@ -1217,16 +1252,16 @@ func TestChainsyncClientRollForward_ParallelMultiPeerNoDoubleIngress(
 	connB := newTestConnId("127.0.0.1:6000", "2.2.2.2:3001")
 	require.True(t, state.AddClientConnId(connA))
 	require.True(t, state.AddClientConnId(connB))
-	state.SetClientConnId(connA)
+	selectTrackedChainsyncClient(t, state, connA)
 
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
 		},
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	header := newTestBlockHeader(100, 1, 0xaa)
 	tip := ochainsync.Tip{
@@ -1281,14 +1316,14 @@ func TestChainsyncClientRollForward_ParallelMultiPeerOrdering(t *testing.T) {
 	require.True(t, state.AddClientConnId(connA))
 	require.True(t, state.AddClientConnId(connB))
 
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
 		},
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	type step struct {
 		conn   ouroboros.ConnectionId
@@ -1360,14 +1395,14 @@ func TestChainsyncClientRollForward_IneligiblePeerDoesNotPoisonDedup(
 	require.True(t, state.AddClientConnId(connEligible))
 	require.True(t, state.AddClientConnId(connIneligible))
 
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
 		ChainsyncIngressEligible: func(connId ouroboros.ConnectionId) bool {
 			return connId == connEligible
 		},
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
 
@@ -1421,8 +1456,8 @@ func TestRegisterTrackedChainsyncClient_ObservabilityOnlyDoesNotConsumePool(
 		MaxClients:   1,
 		StallTimeout: time.Minute,
 	})
-	o := NewOuroboros(OuroborosConfig{EventBus: bus})
-	o.ChainsyncState = state
+	o := newOuroboros(OuroborosConfig{EventBus: bus})
+	o.chainsyncState = state
 
 	require.True(t, o.registerTrackedChainsyncClient(connObserved, false, true))
 	observabilityOnly, exists := state.ClientObservabilityOnly(connObserved)
@@ -1438,8 +1473,7 @@ func TestRegisterTrackedChainsyncClient_ObservabilityOnlyDoesNotConsumePool(
 	require.Equal(t, 1, state.ClientConnCount())
 
 	active := state.GetClientConnId()
-	require.NotNil(t, active)
-	require.Equal(t, connEligible, *active)
+	require.Nil(t, active)
 }
 
 func TestRegisterTrackedChainsyncClient_PromotedObservedKeepsDirection(
@@ -1453,8 +1487,8 @@ func TestRegisterTrackedChainsyncClient_PromotedObservedKeepsDirection(
 		MaxClients:   1,
 		StallTimeout: time.Minute,
 	})
-	o := NewOuroboros(OuroborosConfig{EventBus: bus})
-	o.ChainsyncState = state
+	o := newOuroboros(OuroborosConfig{EventBus: bus})
+	o.chainsyncState = state
 
 	require.True(t, o.registerTrackedChainsyncClient(connId, false, true))
 	observabilityOnly, exists := state.ClientObservabilityOnly(connId)
@@ -1483,7 +1517,7 @@ func TestHandlePeerEligibilityChangedEvent_DemotesObservedIngress(
 	state := dchainsync.NewState(bus, nil)
 	require.True(t, state.AddClientConnId(connA))
 	require.True(t, state.AddClientConnId(connB))
-	state.SetClientConnId(connA)
+	selectTrackedChainsyncClient(t, state, connA)
 	state.UpdateClientTip(
 		connA,
 		ocommon.NewPoint(200, []byte("ha")),
@@ -1495,8 +1529,8 @@ func TestHandlePeerEligibilityChangedEvent_DemotesObservedIngress(
 		ochainsync.Tip{Point: ocommon.NewPoint(100, []byte("hb"))},
 	)
 
-	o := NewOuroboros(OuroborosConfig{EventBus: bus})
-	o.ChainsyncState = state
+	o := newOuroboros(OuroborosConfig{EventBus: bus})
+	o.chainsyncState = state
 	o.HandlePeerEligibilityChangedEvent(event.NewEvent(
 		peergov.PeerEligibilityChangedEventType,
 		peergov.PeerEligibilityChangedEvent{
@@ -1510,8 +1544,7 @@ func TestHandlePeerEligibilityChangedEvent_DemotesObservedIngress(
 	require.True(t, observabilityOnly)
 
 	active := state.GetClientConnId()
-	require.NotNil(t, active)
-	require.Equal(t, connB, *active)
+	require.Nil(t, active)
 }
 
 func TestChainsyncClientRollForward_UntrackedPeerDoesNotPublishToLedger(
@@ -1522,14 +1555,14 @@ func TestChainsyncClientRollForward_UntrackedPeerDoesNotPublishToLedger(
 
 	connId := newTestConnId("127.0.0.1:6000", "3.3.3.3:3001")
 	state := dchainsync.NewState(bus, nil)
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
 		},
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
 	header := newTestBlockHeader(42, 7, 0xaa)
@@ -1581,9 +1614,9 @@ func TestSubscribeChainsyncResyncRewindsClientsWithoutRecycle(
 		state.HeaderPreviouslySeenFromOtherConn(connA, point),
 	)
 
-	o := NewOuroboros(OuroborosConfig{EventBus: bus})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o := newOuroboros(OuroborosConfig{EventBus: bus})
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	_, recycleCh := bus.Subscribe(
 		connmanager.ConnectionRecycleRequestedEventType,
@@ -1636,10 +1669,10 @@ func TestSubscribeChainsyncResyncDoesNotRecycleOnLocalRollbackWithoutPeerHistory
 		rollbackPoint,
 		ochainsync.Tip{Point: rollbackPoint},
 	)
-	o := NewOuroboros(OuroborosConfig{EventBus: bus})
-	o.ChainsyncState = state
-	o.EventBus = bus
-	o.LedgerState = newTestLedgerState(t)
+	o := newOuroboros(OuroborosConfig{EventBus: bus})
+	o.chainsyncState = state
+	o.eventBus = bus
+	o.ledgerState = newTestLedgerState(t)
 
 	_, recycleCh := bus.Subscribe(
 		connmanager.ConnectionRecycleRequestedEventType,
@@ -1730,12 +1763,12 @@ func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 			require.NoError(t, err)
 			connManager.AddConnection(oConn, false, "127.0.0.1:1234")
 
-			o := NewOuroboros(OuroborosConfig{
+			o := newOuroboros(OuroborosConfig{
 				EventBus: bus,
 				Logger:   logger,
 			})
-			o.EventBus = bus
-			o.ConnManager = connManager
+			o.eventBus = bus
+			o.connManager = connManager
 
 			ctx := t.Context()
 			o.SubscribeChainsyncResync(ctx)
@@ -1792,12 +1825,12 @@ func TestSubscribeChainsyncResyncDeniesDivergentPeer(t *testing.T) {
 	peerGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
 		Logger: logger,
 	})
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
 		Logger:   logger,
 	})
-	o.EventBus = bus
-	o.PeerGov = peerGov
+	o.eventBus = bus
+	o.peerGov = peerGov
 	o.SubscribeChainsyncResync(t.Context())
 
 	localAddr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
@@ -1838,12 +1871,12 @@ func TestSubscribeChainsyncResyncDoesNotDenyRollbackLoop(t *testing.T) {
 	peerGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
 		Logger: logger,
 	})
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
 		Logger:   logger,
 	})
-	o.EventBus = bus
-	o.PeerGov = peerGov
+	o.eventBus = bus
+	o.peerGov = peerGov
 	o.SubscribeChainsyncResync(t.Context())
 
 	localAddr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
@@ -1913,14 +1946,14 @@ func TestChainsyncClientRollForward_InboundUpstreamPublishesWhenEligible(
 	connInbound := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
 	state := dchainsync.NewState(bus, nil)
 
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
 		ChainsyncIngressEligible: func(connId ouroboros.ConnectionId) bool {
 			return connId == connInbound
 		},
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	// Register as inbound + ingress-eligible to model a full-duplex inbound
 	// from a trusted upstream peer.
@@ -1989,14 +2022,14 @@ func TestChainsyncClientRollForward_InboundIneligiblePeerStaysObservabilityOnly(
 	connInbound := newTestConnId("127.0.0.1:6000", "2.2.2.2:3001")
 	state := dchainsync.NewState(bus, nil)
 
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return false
 		},
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	require.True(t, o.registerTrackedChainsyncClient(connInbound, false, false))
 	observabilityOnly, exists := state.ClientObservabilityOnly(connInbound)
@@ -2054,9 +2087,9 @@ func TestShouldPublishChainsyncToLedger_InboundFailsClosedWithNilCallback(
 	connOutbound := newTestConnId("127.0.0.1:6000", "2.2.2.2:3001")
 	state := dchainsync.NewState(bus, nil)
 
-	o := NewOuroboros(OuroborosConfig{EventBus: bus})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o := newOuroboros(OuroborosConfig{EventBus: bus})
+	o.chainsyncState = state
+	o.eventBus = bus
 	require.Nil(t, o.config.ChainsyncIngressEligible)
 
 	require.True(t, o.registerTrackedChainsyncClient(connOutbound, true, true))
@@ -2133,14 +2166,14 @@ func TestChainsyncClientRollBackward_InboundUpstreamProcessesRollback(
 	connInbound := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
 	state := dchainsync.NewState(bus, nil)
 
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
 		},
 	})
-	o.ChainsyncState = state
-	o.EventBus = bus
+	o.chainsyncState = state
+	o.eventBus = bus
 
 	require.True(t, o.registerTrackedChainsyncClient(connInbound, true, false))
 
@@ -2199,12 +2232,12 @@ func newFindIntersectTestOuroboros(t *testing.T) *Ouroboros {
 	bus := event.NewEventBus(nil, logger)
 	t.Cleanup(bus.Close)
 	ledgerState := newTestLedgerState(t)
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
 		Logger:   logger,
 	})
-	o.LedgerState = ledgerState
-	o.ChainsyncState = dchainsync.NewState(bus, ledgerState)
+	o.ledgerState = ledgerState
+	o.chainsyncState = dchainsync.NewState(bus, ledgerState)
 	return o
 }
 
@@ -2254,6 +2287,11 @@ func TestChainsyncResyncMithrilReasonsDenyPeerAndRequireFreshConnection(
 		},
 		{
 			reason:         event.ChainsyncResyncReasonLiveTxValidationRecovery,
+			wantFresh:      true,
+			wantDeniesPeer: false,
+		},
+		{
+			reason:         event.ChainsyncResyncReasonDeterministicTxValidationRecovery,
 			wantFresh:      true,
 			wantDeniesPeer: false,
 		},

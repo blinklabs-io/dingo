@@ -38,6 +38,10 @@ type Batch struct {
 	Tx     *sql.Tx
 	Cursor string
 	Limit  int
+	// Rebind converts ? placeholders to the dialect's own form. It is never
+	// nil; the runner substitutes an identity function for dialects that take
+	// ? directly.
+	Rebind func(string) string
 }
 
 // BatchResult describes the durable checkpoint after a backfill batch.

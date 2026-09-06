@@ -15,19 +15,34 @@
 package ledger
 
 import (
-	"crypto/ed25519"
-	"encoding/binary"
 	"errors"
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+)
+
+// LeiosAnnouncementOCINStaleness reports whether an otherwise-valid dangling
+// Leios announcement uses an operational-certificate issue number accepted by
+// the chain-dependent state at the immutable tip.
+type LeiosAnnouncementOCINStaleness uint8
+
+const (
+	// LeiosAnnouncementFreshOCIN means the announcement counter is equal to or
+	// ahead of the immutable-tip counter and may be processed and relayed.
+	LeiosAnnouncementFreshOCIN LeiosAnnouncementOCINStaleness = iota
+	// LeiosAnnouncementStaleOCIN means the announcement counter is lower than
+	// the immutable-tip counter, or its issuer is unknown at that point. The
+	// peer message is accepted, but networking must not process or relay it.
+	LeiosAnnouncementStaleOCIN
 )
 
 // opCertFromHeader extracts the operational certificate from a Praos/TPraos
@@ -134,34 +149,83 @@ func validateOpCertCounter(
 	candidate uint64,
 	enforceNoGap bool,
 ) error {
-	if !found {
-		return nil
-	}
-	if candidate < stored {
-		return fmt.Errorf(
-			"opcert counter %d is below last seen %d (stale or stolen hot key)",
-			candidate,
-			stored,
-		)
-	}
-	if enforceNoGap && candidate > stored+1 {
-		return fmt.Errorf(
-			"opcert counter %d skips ahead of last seen %d (gapped rotation)",
-			candidate,
-			stored,
-		)
-	}
-	return nil
+	return eras.ValidateOpCertCounter(stored, found, candidate, enforceNoGap)
 }
 
-const (
-	// opCertKesVkeySize is the length of the KES (hot) verification key carried
-	// in an operational certificate.
-	opCertKesVkeySize = 32
-	// opCertSignableSize is the length of the cardano-ledger OCertSignable
-	// representation: KES vkey || counter (uint64 BE) || KES period (uint64 BE).
-	opCertSignableSize = opCertKesVkeySize + 8 + 8
-)
+// ValidateLeiosAnnouncementHeader validates the announcement's header crypto
+// before classifying its op-cert counter against the selected primary chain's
+// immutable-tip state. Counter equality and arbitrary forward movement are
+// fresh because this lagging view cannot enforce an upper bound. A lower or
+// as-yet-unknown counter is stale, not invalid.
+//
+// The result is deliberately a ledger verdict only. The Ouroboros composition
+// layer owns whether a stale peer message is recorded, published, or relayed.
+func (ls *LedgerState) ValidateLeiosAnnouncementHeader(
+	header ledger.BlockHeader,
+) (LeiosAnnouncementOCINStaleness, error) {
+	if err := ls.ValidateBlockHeaderCrypto(header); err != nil {
+		return LeiosAnnouncementFreshOCIN, err
+	}
+	return ls.leiosAnnouncementOCINStaleness(header)
+}
+
+func (ls *LedgerState) leiosAnnouncementOCINStaleness(
+	header ledger.BlockHeader,
+) (LeiosAnnouncementOCINStaleness, error) {
+	opCert, ok := opCertFromHeader(header)
+	if !ok || opCert == nil {
+		return LeiosAnnouncementFreshOCIN, errors.New(
+			"leios announcement header has no operational certificate",
+		)
+	}
+	ls.RLock()
+	primaryChain := ls.chain
+	eraID := ls.currentEra.Id
+	ls.RUnlock()
+	if primaryChain == nil {
+		return LeiosAnnouncementFreshOCIN, errors.New(
+			"primary chain unavailable for leios announcement validation",
+		)
+	}
+	if ls.db == nil {
+		return LeiosAnnouncementFreshOCIN, errors.New(
+			"database unavailable for leios announcement validation",
+		)
+	}
+	k, ok := ls.securityParamForEra(eraID)
+	if !ok {
+		return LeiosAnnouncementFreshOCIN, errors.New(
+			"security parameter unavailable for leios announcement validation",
+		)
+	}
+	immutablePoint, found, err := primaryChain.PointAtDepth(k)
+	if err != nil {
+		return LeiosAnnouncementFreshOCIN, fmt.Errorf(
+			"resolve immutable tip for leios announcement: %w",
+			err,
+		)
+	}
+	if !found {
+		return LeiosAnnouncementStaleOCIN, nil
+	}
+	poolKeyHash := lcommon.PoolKeyHash(header.IssuerVkey().Hash())
+	stored, found, err := ls.db.LatestPoolOpCertSequenceAtOrBefore(
+		poolKeyHash,
+		immutablePoint.Slot,
+		nil,
+	)
+	if err != nil {
+		return LeiosAnnouncementFreshOCIN, fmt.Errorf(
+			"read immutable-tip opcert counter for pool %x: %w",
+			poolKeyHash,
+			err,
+		)
+	}
+	if !found || opCert.IssueNumber < stored {
+		return LeiosAnnouncementStaleOCIN, nil
+	}
+	return LeiosAnnouncementFreshOCIN, nil
+}
 
 // verifyOpCertColdSignature verifies the pool cold-key signature over the
 // operational certificate.
@@ -170,49 +234,18 @@ const (
 // raw concatenation of the KES (hot) verification key, the issue counter as a
 // big-endian uint64, and the KES period as a big-endian uint64 — NOT a CBOR
 // encoding. This matches what cardano-node signs (verified byte-for-byte
-// against a real cardano-cli NodeOperationalCertificate) and the forging-side
-// check in ledger/forging/keys.go ValidateOpCert.
+// against a real cardano-cli NodeOperationalCertificate; see
+// TestVerifyOpCertColdSignature_RealCardanoCliCert) and the forging-side check
+// in ledger/forging/keys.go ValidateOpCert.
 //
-// gouroboros' ledger.VerifyOpCertSignature is intentionally NOT used here: it
-// hashes a CBOR array ([kes_vkey, issue_number, kes_period]) instead of this
-// raw representation, which does not match real opcerts and would reject every
-// inbound block.
+// gouroboros' ledger.VerifyOpCertSignature builds this same raw
+// representation (via ledger/common.OpCertSignableBytes), so this delegates
+// to it directly instead of re-deriving the byte layout locally. That was not
+// always true: gouroboros previously hashed a CBOR array
+// ([kes_vkey, issue_number, kes_period]) here, which does not match real
+// opcerts and would have rejected every inbound block.
 func verifyOpCertColdSignature(opCert *ledger.OpCert, coldVkey []byte) error {
-	if len(coldVkey) != ed25519.PublicKeySize {
-		return fmt.Errorf(
-			"cold vkey must be %d bytes, got %d",
-			ed25519.PublicKeySize,
-			len(coldVkey),
-		)
-	}
-	if len(opCert.KesVkey) != opCertKesVkeySize {
-		return fmt.Errorf(
-			"KES vkey must be %d bytes, got %d",
-			opCertKesVkeySize,
-			len(opCert.KesVkey),
-		)
-	}
-	if len(opCert.ColdSignature) != ed25519.SignatureSize {
-		return fmt.Errorf(
-			"cold signature must be %d bytes, got %d",
-			ed25519.SignatureSize,
-			len(opCert.ColdSignature),
-		)
-	}
-	var signable [opCertSignableSize]byte
-	copy(signable[:opCertKesVkeySize], opCert.KesVkey)
-	binary.BigEndian.PutUint64(
-		signable[opCertKesVkeySize:opCertKesVkeySize+8],
-		opCert.IssueNumber,
-	)
-	binary.BigEndian.PutUint64(
-		signable[opCertKesVkeySize+8:],
-		opCert.KesPeriod,
-	)
-	if !ed25519.Verify(coldVkey, signable[:], opCert.ColdSignature) {
-		return errors.New("signature verification failed")
-	}
-	return nil
+	return ledger.VerifyOpCertSignature(opCert, coldVkey)
 }
 
 // verifyOpCertHeaderCrypto performs the stateless inbound operational

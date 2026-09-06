@@ -24,6 +24,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -89,6 +90,7 @@ func TestLoadVoteSigningKeyFile(t *testing.T) {
 	// Trailing whitespace must be tolerated
 	content := fmt.Sprintf("%064x\n", 42)
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	testutil.RestrictFileToCurrentUser(t, path)
 	key, err := LoadVoteSigningKeyFile(path)
 	require.NoError(t, err)
 	expected, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 42))
@@ -107,6 +109,7 @@ func TestLoadVoteSigningKeyFileCardanoTextEnvelope(t *testing.T) {
 		hex.EncodeToString(cborBytes),
 	)
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	testutil.RestrictFileToCurrentUser(t, path)
 
 	key, err := LoadVoteSigningKeyFile(path)
 	require.NoError(t, err)
@@ -127,6 +130,7 @@ func TestLoadVoteSigningKeyFileRejectsTrailingCbor(t *testing.T) {
 		hex.EncodeToString(cborBytes),
 	)
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	testutil.RestrictFileToCurrentUser(t, path)
 
 	_, err := LoadVoteSigningKeyFile(path)
 	assert.ErrorIs(t, err, ErrInvalidSigningKey)
@@ -137,6 +141,7 @@ func TestLoadVoteSigningKeyFileRejectsUnsupportedEnvelope(t *testing.T) {
 	path := filepath.Join(dir, "node.skey")
 	content := `{"type":"Node KES Signing Key","description":"","cborHex":"582001"}`
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	testutil.RestrictFileToCurrentUser(t, path)
 
 	_, err := LoadVoteSigningKeyFile(path)
 	assert.ErrorIs(t, err, ErrInvalidSigningKey)
@@ -301,6 +306,7 @@ func TestLoadVoteSigningKeyFileRejectsOversized(t *testing.T) {
 	path := filepath.Join(dir, "vote.skey")
 	content := fmt.Sprintf("%064x", 42) + strings.Repeat(" ", 2048)
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	testutil.RestrictFileToCurrentUser(t, path)
 	_, err := LoadVoteSigningKeyFile(path)
 	assert.Error(t, err)
 }

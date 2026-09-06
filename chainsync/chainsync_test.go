@@ -104,19 +104,26 @@ func TestAddAndRemoveClientConnId(t *testing.T) {
 	require.True(t, s.HasClientConnId(connB))
 	require.Equal(t, 2, s.ClientConnCount())
 
-	// First added should be active (primary)
+	// Registration alone cannot make a zero-tip client active.
 	active := s.GetClientConnId()
+	require.Nil(t, active)
+
+	// Chain selection chooses the active client after observing its tip.
+	tip := ocommon.NewPoint(1, []byte("tip"))
+	s.UpdateClientTip(connA, tip, ochainsync.Tip{Point: tip})
+	require.True(t, s.TrySetClientConnId(connA))
+	active = s.GetClientConnId()
 	require.NotNil(t, active)
 	require.Equal(t, connA, *active)
 
-	// Remove first client; second should become active
+	// Removing the active client clears selection. The registry must not choose
+	// a replacement without ChainSelector's tracked-tip and eligibility checks.
 	s.RemoveClientConnId(connA)
 	require.False(t, s.HasClientConnId(connA))
 	require.Equal(t, 1, s.ClientConnCount())
 
 	active = s.GetClientConnId()
-	require.NotNil(t, active)
-	require.Equal(t, connB, *active)
+	require.Nil(t, active)
 }
 
 func TestTryAddClientConnId_LimitEnforced(t *testing.T) {
@@ -170,8 +177,7 @@ func TestTryAddObservedClientConnId_DoesNotConsumeEligibleLimit(
 	require.True(t, observabilityOnly)
 
 	active := s.GetClientConnId()
-	require.NotNil(t, active)
-	require.Equal(t, connEligible, *active)
+	require.Nil(t, active)
 }
 
 func TestSetClientObservabilityOnly_DemotesPrimary(t *testing.T) {
@@ -200,8 +206,7 @@ func TestSetClientObservabilityOnly_DemotesPrimary(t *testing.T) {
 	require.True(t, observabilityOnly)
 
 	active := s.GetClientConnId()
-	require.NotNil(t, active)
-	require.Equal(t, connB, *active)
+	require.Nil(t, active)
 }
 
 func TestSetClientObservabilityOnly_EligiblePromotionRespectsMaxClients(
@@ -286,7 +291,7 @@ func TestAddClientConnId_DuplicatePreservesState(
 	)
 }
 
-func TestPromoteBestClient_NoHealthyClients(t *testing.T) {
+func TestRemoveActiveClientDoesNotPromoteStalledFallback(t *testing.T) {
 	bus := newTestEventBus(t)
 	cfg := chainsync.Config{
 		MaxClients:   5,
@@ -330,19 +335,11 @@ func TestPromoteBestClient_NoHealthyClients(t *testing.T) {
 	)
 	require.Len(t, stalledSet, 2)
 
-	// Remove primary; only stalled clients remain so
-	// the most recently active stalled client is promoted
-	// as a fallback to prevent permanent nil-selection deadlock.
+	// Removing the primary must not promote a stalled peer independently of
+	// ChainSelector.
 	s.RemoveClientConnId(connA)
 	active := s.GetClientConnId()
-	require.NotNil(
-		t,
-		active,
-		"should promote stalled client as fallback when no healthy clients exist",
-	)
-	require.Equal(t, connB, *active,
-		"should promote the remaining stalled client",
-	)
+	require.Nil(t, active)
 }
 
 func TestGetClientConnIds(t *testing.T) {
@@ -370,15 +367,23 @@ func TestSetClientConnId(t *testing.T) {
 	s.AddClientConnId(connB)
 
 	// Override active client
-	s.SetClientConnId(connB)
+	tip := ocommon.NewPoint(1, []byte("tip"))
+	s.UpdateClientTip(connB, tip, ochainsync.Tip{Point: tip})
+	require.True(t, s.TrySetClientConnId(connB))
 	active := s.GetClientConnId()
 	require.NotNil(t, active)
 	require.Equal(t, connB, *active)
+
+	// A delayed switch cannot reactivate a connection that is no longer in the
+	// eligible registry.
+	s.RemoveClientConnId(connA)
+	require.False(t, s.TrySetClientConnId(connA))
+	require.Equal(t, connB, *s.GetClientConnId())
 }
 
 // --- Failover tests ---
 
-func TestFailover_PrimaryDisconnects(t *testing.T) {
+func TestDisconnectClearsPrimaryForChainSelection(t *testing.T) {
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.DefaultConfig())
 
@@ -401,13 +406,12 @@ func TestFailover_PrimaryDisconnects(t *testing.T) {
 	s.SetClientConnId(connA)
 	s.RemoveClientConnId(connA)
 
-	// B should be promoted (highest tip)
+	// Only ChainSelector may choose B using the full selection contract.
 	active := s.GetClientConnId()
-	require.NotNil(t, active)
-	require.Equal(t, connB, *active)
+	require.Nil(t, active)
 }
 
-func TestFailover_PromotesNonStalledClient(t *testing.T) {
+func TestDisconnectDoesNotPromoteNonStalledClient(t *testing.T) {
 	bus := newTestEventBus(t)
 	cfg := chainsync.Config{
 		MaxClients:   5,
@@ -466,10 +470,9 @@ func TestFailover_PromotesNonStalledClient(t *testing.T) {
 	// Remove A (primary)
 	s.RemoveClientConnId(connA)
 
-	// C should be promoted because B is stalled
+	// The local registry must not choose C independently of ChainSelector.
 	active := s.GetClientConnId()
-	require.NotNil(t, active)
-	require.Equal(t, connC, *active)
+	require.Nil(t, active)
 }
 
 // --- Header deduplication tests ---
@@ -734,7 +737,7 @@ func TestStallDetection_RecoveryOnActivity(t *testing.T) {
 	require.Equal(t, chainsync.ClientStatusSyncing, tc.Status)
 }
 
-func TestStallDetection_PrimaryFailover(t *testing.T) {
+func TestStallDetectionLeavesSelectionToChainSelector(t *testing.T) {
 	bus := newTestEventBus(t)
 	cfg := chainsync.Config{
 		MaxClients:   5,
@@ -781,7 +784,7 @@ func TestStallDetection_PrimaryFailover(t *testing.T) {
 
 	active := s.GetClientConnId()
 	require.NotNil(t, active)
-	require.Equal(t, connB, *active)
+	require.Equal(t, connA, *active)
 }
 
 func TestStallDetection_SkipsObservabilityOnlyClient(t *testing.T) {
@@ -890,6 +893,7 @@ func TestClientRemovedEvent(t *testing.T) {
 
 	conn := newTestConnId(1)
 	s.AddClientConnId(conn)
+	s.SetClientConnId(conn)
 	s.RemoveClientConnId(conn)
 
 	evt := testutil.RequireReceive(
@@ -908,9 +912,9 @@ func TestClientRemovedEvent_NonPrimary(t *testing.T) {
 
 	connA := newTestConnId(1)
 	connB := newTestConnId(2)
-	s.AddClientConnId(connA) // becomes primary
+	s.AddClientConnId(connA)
 	s.AddClientConnId(connB)
-	s.RemoveClientConnId(connB) // not primary
+	s.RemoveClientConnId(connB)
 
 	evt := testutil.RequireReceive(
 		t, ch, 2*time.Second, "expected client removed event",
@@ -1191,14 +1195,13 @@ func TestNewState_BackwardCompatible(t *testing.T) {
 	require.NotNil(t, s)
 	require.Equal(t, chainsync.DefaultMaxClients, s.MaxClients())
 
-	// Single client should work exactly as before
+	// Registration works without pre-selecting a zero-tip client.
 	conn := newTestConnId(1)
 	s.AddClientConnId(conn)
 	require.True(t, s.HasClientConnId(conn))
 
 	active := s.GetClientConnId()
-	require.NotNil(t, active)
-	require.Equal(t, conn, *active)
+	require.Nil(t, active)
 
 	s.RemoveClientConnId(conn)
 	require.False(t, s.HasClientConnId(conn))
@@ -1474,6 +1477,78 @@ func (m *mockChainProvider) StabilityWindow() uint64 {
 	return m.stabilityWin
 }
 
+// TestLookupClientReturnsSnapshot guards against the race fixed in issue
+// 3267: a caller could take the pointer LookupClient returned and read its
+// fields later while the server goroutine mutated the same live
+// ChainsyncClientState (e.g. clearing NeedsInitialRollback), so the read and
+// the write were unsynchronized.
+//
+// It registers a client, takes a snapshot via LookupClient, then mutates the
+// real client state returned by AddClient (flipping NeedsInitialRollback and
+// overwriting a byte of the cursor hash). The snapshot must still show the
+// pre-mutation values, proving LookupClient copied the data — including a
+// deep copy of the Cursor.Hash byte slice — rather than handing back a
+// pointer an observer could see change underneath it.
+func TestLookupClientReturnsSnapshot(t *testing.T) {
+	provider := &mockChainProvider{}
+	s := chainsync.NewStateWithConfig(nil, provider, chainsync.DefaultConfig())
+	conn := newTestConnId(1)
+	point := ocommon.NewPoint(1, []byte{0x01})
+	clientState, err := s.AddClient(conn, point)
+	require.NoError(t, err)
+
+	// Snapshot must be taken before the mutation below to prove it isn't
+	// affected by changes made to the live state afterward.
+	snapshot, ok := s.LookupClient(conn)
+	require.True(t, ok)
+
+	// Mutate the live client state the same way the server does in
+	// production (clearing NeedsInitialRollback) plus a cursor byte, to
+	// confirm neither field aliases the snapshot.
+	clientState.NeedsInitialRollback = false
+	clientState.Cursor.Hash[0] = 0x02
+	require.True(t, snapshot.NeedsInitialRollback)
+	require.Equal(t, []byte{0x01}, snapshot.Cursor.Hash)
+}
+
+// TestLookupClientPerClientLockDoesNotBlockOtherClients guards against a
+// second issue found in review of the 3267 fix: an earlier version of the
+// rollback-state lock reused chainsync.State's map-wide mutex, so a slow
+// RollBackward send on one connection (chainsyncServerRequestNext holds the
+// lock across that send) would stall LookupClient and RemoveClient for every
+// other connection too.
+//
+// It locks one client's rollback state to simulate a send in flight, then
+// proves LookupClient and RemoveClient on a different client complete almost
+// immediately rather than waiting on that lock.
+func TestLookupClientPerClientLockDoesNotBlockOtherClients(t *testing.T) {
+	provider := &mockChainProvider{}
+	s := chainsync.NewStateWithConfig(nil, provider, chainsync.DefaultConfig())
+	slowConn := newTestConnId(1)
+	otherConn := newTestConnId(2)
+	slowClient, err := s.AddClient(slowConn, ocommon.NewPoint(1, []byte{0x01}))
+	require.NoError(t, err)
+	_, err = s.AddClient(otherConn, ocommon.NewPoint(2, []byte{0x02}))
+	require.NoError(t, err)
+
+	slowClient.LockRollbackState()
+	defer slowClient.UnlockRollbackState()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, ok := s.LookupClient(otherConn)
+		require.True(t, ok)
+		s.RemoveClient(otherConn)
+	}()
+	testutil.RequireReceive(
+		t,
+		done,
+		200*time.Millisecond,
+		"LookupClient/RemoveClient for another connection must not wait on a different client's rollback lock",
+	)
+}
+
 // TestAddClient_NilChainProvider_ReturnsError verifies that AddClient returns
 // an error rather than panicking when no ChainProvider has been wired.
 func TestAddClient_NilChainProvider_ReturnsError(t *testing.T) {
@@ -1530,6 +1605,7 @@ func TestObservedHeader_RoundTrip(t *testing.T) {
 	prev := []byte("prev-hash")
 	point := ocommon.NewPoint(200, hash)
 	tip := ochainsync.Tip{Point: point, BlockNumber: 5}
+	arrivalTime := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
 	hdr := testBlockHeader{
 		hash:        lcommon.NewBlake2b256(hash),
 		prevHash:    lcommon.NewBlake2b256(prev),
@@ -1542,6 +1618,7 @@ func TestObservedHeader_RoundTrip(t *testing.T) {
 		BlockHeader:  hdr,
 		Point:        point,
 		Tip:          tip,
+		ArrivalTime:  arrivalTime,
 		BlockNumber:  5,
 		Type:         1,
 	})
@@ -1550,6 +1627,7 @@ func TestObservedHeader_RoundTrip(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, point, got.Point)
 	require.Equal(t, tip, got.Tip)
+	require.Equal(t, arrivalTime, got.ArrivalTime)
 	require.Equal(t, uint64(5), got.BlockNumber)
 	require.Equal(t, uint(1), got.Type)
 	require.Equal(t, hdr.PrevHash().Bytes(), gotPrev)

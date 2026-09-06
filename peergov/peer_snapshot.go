@@ -15,6 +15,7 @@
 package peergov
 
 import (
+	"context"
 	"math/rand/v2"
 	"net"
 
@@ -25,6 +26,7 @@ import (
 // It is intended for Ouroboros Genesis startup, where the snapshot provides
 // historical ledger peers before the local ledger can answer relay queries.
 func (p *PeerGovernor) LoadPeerSnapshot(
+	ctx context.Context,
 	snapshot *topology.PeerSnapshotConfig,
 ) int {
 	if p == nil || snapshot == nil || !snapshot.HasRelays() ||
@@ -32,7 +34,7 @@ func (p *PeerGovernor) LoadPeerSnapshot(
 		return 0
 	}
 	relays := PoolRelaysFromPeerSnapshot(snapshot)
-	added := p.addLedgerRelays(relays, 0)
+	added := p.addLedgerRelaysContext(ctx, relays, 0)
 	p.config.Logger.Info(
 		"loaded peer snapshot",
 		"snapshot_slot", snapshot.Point.BlockPointSlot,
@@ -87,18 +89,32 @@ func poolRelayFromSnapshotAccessPoint(
 
 // addLedgerRelays fills the configured ledger-peer target. extraAdds permits a
 // bounded emergency overfill after the target is already satisfied.
+//
+//nolint:unused // Kept as a context-free test helper for existing snapshot tests.
 func (p *PeerGovernor) addLedgerRelays(relays []PoolRelay, extraAdds int) int {
+	return p.addLedgerRelaysContext(context.Background(), relays, extraAdds)
+}
+
+func (p *PeerGovernor) addLedgerRelaysContext(
+	ctx context.Context,
+	relays []PoolRelay,
+	extraAdds int,
+) int {
 	candidates := dedupeRelayCandidates(flattenRelayCandidates(relays))
+	//nolint:gosec // relay spread, not security-sensitive
 	rand.Shuffle(len(candidates), func(i, j int) {
 		candidates[i], candidates[j] = candidates[j], candidates[i]
 	})
 
 	added := 0
 	for _, addr := range candidates {
+		if err := ctx.Err(); err != nil {
+			break
+		}
 		if p.ledgerPeerDeficit() <= 0 && added >= extraAdds {
 			break
 		}
-		if p.addLedgerPeer(addr) {
+		if p.addLedgerPeerContext(ctx, addr) {
 			added++
 		}
 	}

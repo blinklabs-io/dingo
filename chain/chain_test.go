@@ -757,40 +757,81 @@ func TestChainIteratorReverseRollbackToOriginClamps(t *testing.T) {
 	}
 }
 
-func TestHandleBlockProposedEventAddsBlockAndAcks(t *testing.T) {
+func TestAddLocalBlockIgnoresAndClearsPendingPeerHeaders(t *testing.T) {
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error creating chain manager: %s", err)
 	}
 	c := cm.PrimaryChain()
-	ack := make(chan error, 1)
+	for _, testBlock := range testBlocks[:3] {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	if err := c.AddBlockHeader(testBlocks[3]); err != nil {
+		t.Fatalf("unexpected error adding peer header: %s", err)
+	}
+	localBlock := &MockBlock{
+		MockBlockNumber: testBlocks[3].MockBlockNumber,
+		MockSlot:        testBlocks[3].MockSlot + 1,
+		MockHash:        testHashPrefix + "00ff",
+		MockPrevHash:    testBlocks[2].MockHash,
+	}
 
-	c.HandleBlockProposedEvent(
-		event.NewEvent(
-			chain.BlockProposedEventType,
-			chain.BlockProposedEvent{
-				Block: testBlocks[0],
-				Ack:   ack,
-			},
-		),
-	)
-
-	if err := testutil.RequireReceive(
-		t,
-		ack,
-		time.Second,
-		"block proposal ack",
-	); err != nil {
-		t.Fatalf("unexpected block proposal error: %s", err)
+	if err := c.AddLocalBlock(localBlock); err != nil {
+		t.Fatalf("unexpected error adding local block: %s", err)
 	}
 	tip := c.Tip()
-	if tip.Point.Slot != testBlocks[0].MockSlot ||
-		!bytes.Equal(tip.Point.Hash, testBlocks[0].Hash().Bytes()) {
+	if tip.Point.Slot != localBlock.MockSlot ||
+		!bytes.Equal(tip.Point.Hash, localBlock.Hash().Bytes()) {
 		t.Fatalf(
-			"unexpected tip after block proposal: %d.%x",
+			"unexpected tip after local block: %d.%x",
 			tip.Point.Slot,
 			tip.Point.Hash,
 		)
+	}
+	if got := c.HeaderCount(); got != 0 {
+		t.Fatalf("expected local block to clear pending headers, got %d", got)
+	}
+}
+
+func TestAddLocalBlockRejectsStaleParentAndPreservesPendingHeaders(
+	t *testing.T,
+) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks[:3] {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	if err := c.AddBlockHeader(testBlocks[3]); err != nil {
+		t.Fatalf("unexpected error adding peer header: %s", err)
+	}
+	staleBlock := &MockBlock{
+		MockBlockNumber: testBlocks[3].MockBlockNumber,
+		MockSlot:        testBlocks[3].MockSlot + 1,
+		MockHash:        testHashPrefix + "00fe",
+		MockPrevHash:    testBlocks[1].MockHash,
+	}
+
+	err = c.AddLocalBlock(staleBlock)
+	var staleErr chain.BlockNotFitChainTipError
+	if !errors.As(err, &staleErr) {
+		t.Fatalf("expected stale parent error, got %v", err)
+	}
+	if got := c.HeaderCount(); got != 1 {
+		t.Fatalf(
+			"expected rejected block to preserve pending header, got %d",
+			got,
+		)
+	}
+	tip := c.Tip()
+	if !bytes.Equal(tip.Point.Hash, testBlocks[2].Hash().Bytes()) {
+		t.Fatalf("rejected local block changed tip to %x", tip.Point.Hash)
 	}
 }
 
@@ -935,6 +976,150 @@ func TestChainHeaderRange(t *testing.T) {
 			end.Hash,
 			testEndBlock.SlotNumber(),
 			testEndBlock.Hash().String(),
+		)
+	}
+}
+
+// TestChainHeaderRangeNonPositiveCount ensures HeaderRange returns zero-value
+// points instead of panicking on an out-of-range slice index when count is
+// zero or negative (issue #3531).
+func TestChainHeaderRangeNonPositiveCount(t *testing.T) {
+	for _, count := range []int{0, -1, -1000} {
+		t.Run(fmt.Sprintf("count=%d", count), func(t *testing.T) {
+			cm, err := chain.NewManager(nil, nil)
+			if err != nil {
+				t.Fatalf("unexpected error creating chain manager: %s", err)
+			}
+			c := cm.PrimaryChain()
+			for _, testBlock := range testBlocks {
+				if err := c.AddBlockHeader(testBlock); err != nil {
+					t.Fatalf(
+						"unexpected error adding header to chain: %s",
+						err,
+					)
+				}
+			}
+			start, end := c.HeaderRange(count)
+			if start.Slot != 0 || len(start.Hash) != 0 {
+				t.Fatalf(
+					"expected zero-value start point for count=%d, got %#v",
+					count,
+					start,
+				)
+			}
+			if end.Slot != 0 || len(end.Hash) != 0 {
+				t.Fatalf(
+					"expected zero-value end point for count=%d, got %#v",
+					count,
+					end,
+				)
+			}
+		})
+	}
+}
+
+// TestChainRollbackInvalidHeaderTargetPreservesQueue rolls back to a point
+// that falls between two queued headers and matches neither. The rollback
+// must fail without deleting any of the queued headers that a naive scan
+// would have already pruned by the time it discovers the target is invalid
+// (issue #3531).
+func TestChainRollbackInvalidHeaderTargetPreservesQueue(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	// Queue headers at slots 60, 80, 100.
+	queuedBlocks := testBlocks[3:]
+	for _, testBlock := range queuedBlocks {
+		if err := c.AddBlockHeader(testBlock); err != nil {
+			t.Fatalf("unexpected error adding header to chain: %s", err)
+		}
+	}
+	beforeStart, beforeEnd := c.HeaderRange(len(queuedBlocks))
+
+	// Slot 70 falls strictly between the queued headers at 60 and 80 and
+	// matches neither, so it is not a valid rollback target.
+	invalidPoint := ocommon.Point{Slot: 70, Hash: []byte("not-a-real-hash")}
+	err = c.Rollback(invalidPoint)
+	if !errors.Is(err, models.ErrBlockNotFound) {
+		t.Fatalf(
+			"expected models.ErrBlockNotFound rolling back to an invalid target, got: %v",
+			err,
+		)
+	}
+
+	afterStart, afterEnd := c.HeaderRange(len(queuedBlocks))
+	if afterStart.Slot != beforeStart.Slot ||
+		!bytes.Equal(afterStart.Hash, beforeStart.Hash) ||
+		afterEnd.Slot != beforeEnd.Slot ||
+		!bytes.Equal(afterEnd.Hash, beforeEnd.Hash) {
+		t.Fatalf(
+			"queued headers were mutated by a failed rollback: before=(%#v,%#v) after=(%#v,%#v)",
+			beforeStart, beforeEnd, afterStart, afterEnd,
+		)
+	}
+}
+
+// TestChainRollbackToQueuedHeaderSucceeds rolls back to a point that exactly
+// matches a queued header. Only the headers after the matched one should be
+// discarded; the matched header itself stays queued and the chain tip moves
+// to it (issue #3531).
+func TestChainRollbackToQueuedHeaderSucceeds(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	// Queue headers at slots 60, 80, 100.
+	queuedBlocks := testBlocks[3:]
+	for _, testBlock := range queuedBlocks {
+		if err := c.AddBlockHeader(testBlock); err != nil {
+			t.Fatalf("unexpected error adding header to chain: %s", err)
+		}
+	}
+	rollbackBlock := queuedBlocks[1] // slot 80
+	rollbackPoint := ocommon.Point{
+		Slot: rollbackBlock.SlotNumber(),
+		Hash: rollbackBlock.Hash().Bytes(),
+	}
+	if err := c.Rollback(rollbackPoint); err != nil {
+		t.Fatalf("unexpected error rolling back to queued header: %s", err)
+	}
+	// The header at slot 100 must be pruned; slots 60 and 80 remain queued.
+	start, end := c.HeaderRange(2)
+	firstBlock := queuedBlocks[0]
+	if start.Slot != firstBlock.SlotNumber() ||
+		string(start.Hash) != string(firstBlock.Hash().Bytes()) {
+		t.Fatalf(
+			"did not get expected start point after rollback: got %d.%x, wanted %d.%s",
+			start.Slot,
+			start.Hash,
+			firstBlock.SlotNumber(),
+			firstBlock.Hash().String(),
+		)
+	}
+	if end.Slot != rollbackPoint.Slot ||
+		string(end.Hash) != string(rollbackPoint.Hash) {
+		t.Fatalf(
+			"did not get expected end point after rollback: got %d.%x, wanted %d.%x",
+			end.Slot,
+			end.Hash,
+			rollbackPoint.Slot,
+			rollbackPoint.Hash,
+		)
+	}
+	// The queued header at the rollback point is retained (only headers
+	// after it are pruned), so the header tip now names that point.
+	headerTip := c.HeaderTip()
+	if headerTip.Point.Slot != rollbackPoint.Slot ||
+		string(headerTip.Point.Hash) != string(rollbackPoint.Hash) {
+		t.Fatalf(
+			"header tip does not match rollback point: got %d.%x, wanted %d.%x",
+			headerTip.Point.Slot,
+			headerTip.Point.Hash,
+			rollbackPoint.Slot,
+			rollbackPoint.Hash,
 		)
 	}
 }
@@ -1385,6 +1570,43 @@ func TestRecentPointsNoDatabase(t *testing.T) {
 			secondLastBlock.MockSlot,
 			points[1].Slot,
 		)
+	}
+}
+
+func TestPointAtDepthNoDatabase(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	for _, block := range testBlocks[:4] {
+		if err := c.AddBlock(block, nil); err != nil {
+			t.Fatalf("unexpected error adding block: %s", err)
+		}
+	}
+
+	tip, found, err := c.PointAtDepth(0)
+	if err != nil {
+		t.Fatalf("unexpected tip lookup error: %s", err)
+	}
+	if !found || !reflect.DeepEqual(tip, blockPoint(testBlocks[3])) {
+		t.Fatalf("unexpected tip point: found=%t point=%v", found, tip)
+	}
+
+	point, found, err := c.PointAtDepth(2)
+	if err != nil {
+		t.Fatalf("unexpected depth lookup error: %s", err)
+	}
+	if !found || !reflect.DeepEqual(point, blockPoint(testBlocks[1])) {
+		t.Fatalf("unexpected depth-2 point: found=%t point=%v", found, point)
+	}
+
+	_, found, err = c.PointAtDepth(4)
+	if err != nil {
+		t.Fatalf("unexpected origin lookup error: %s", err)
+	}
+	if found {
+		t.Fatal("a chain shorter than k must have origin as its immutable tip")
 	}
 }
 

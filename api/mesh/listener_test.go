@@ -18,9 +18,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -234,8 +236,13 @@ func TestServerBindFailure(t *testing.T) {
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "failed to listen")
-	// A failed start must leave the server restartable.
-	require.Nil(t, srv.httpServer)
+
+	// A failed start must leave the server restartable rather than holding a
+	// server it never brought up, so a retry once the address frees up is not
+	// refused as "already started".
+	require.NoError(t, occupied.Close())
+	require.NoError(t, srv.Start(t.Context()))
+	require.NoError(t, srv.Stop(t.Context()))
 }
 
 // TestServerDoubleStart asserts a second Start is refused rather than
@@ -257,8 +264,8 @@ func TestServerStopIsIdempotent(t *testing.T) {
 	require.NoError(t, srv.Stop(t.Context()))
 }
 
-// TestServerGracefulShutdown asserts Stop closes the listener so the
-// port stops accepting connections.
+// TestServerGracefulShutdown asserts Stop releases the listener before it
+// returns by immediately starting a replacement on the same address.
 func TestServerGracefulShutdown(t *testing.T) {
 	srv, addr := startOnFreePort(
 		t, t.Context(), newTestDeps(),
@@ -270,12 +277,90 @@ func TestServerGracefulShutdown(t *testing.T) {
 	defer cancel()
 	require.NoError(t, srv.Stop(stopCtx))
 
-	testutil.WaitForCondition(
+	restarted := newTestServer(
 		t,
-		func() bool { return !portAccepts(addr) },
-		5*time.Second,
-		"listener still accepting after Stop",
+		newTestDeps(),
+		func(c *ServerConfig) { c.ListenAddress = addr },
 	)
+	require.NoError(t, restarted.Start(t.Context()))
+	require.NoError(t, restarted.Stop(t.Context()))
+}
+
+// TestConcurrentStartStopNeverLeavesThePortBound hammers the interleavings the
+// individual lifecycle tests each pin one of: Start racing Stop, Stop racing the
+// context monitor, and a restart on the same address immediately after.
+//
+// The invariant is the one every caller relies on: once Stop returns without an
+// error, the address is free, so the next Start on it must succeed.
+//
+// What this does NOT cover, verified by running it against the earlier buggy
+// revisions, where it passed: the paths that need a bind still in flight when a
+// wait expires. A real bind settles far too quickly for that, so a stalled bind
+// has to be constructed, which needs the protocol's internals. Those tests live
+// with the protocol, in internal/apilistener. Do not read a pass here as
+// covering them.
+func TestConcurrentStartStopNeverLeavesThePortBound(t *testing.T) {
+	addr := testutil.FreePort(t)
+
+	for i := range 60 {
+		srv := newTestServer(
+			t, newTestDeps(),
+			func(c *ServerConfig) { c.ListenAddress = addr },
+		)
+		ctx, cancel := context.WithCancel(context.Background())
+
+		// Four-way contention on purpose: Start, two Stops, and the context
+		// monitor. Two Stops matter — one of them loses takeServer and has to
+		// wait on the winner's teardown, which is the path where a premature
+		// completion signal turns into a false "the port is free".
+		var wg sync.WaitGroup
+		stopErrs := make([]error, 2)
+		wg.Add(4)
+		go func() {
+			defer wg.Done()
+			_ = srv.Start(ctx)
+		}()
+		for slot := range stopErrs {
+			go func() {
+				defer wg.Done()
+				stopErrs[slot] = srv.Stop(t.Context())
+			}()
+		}
+		go func() {
+			defer wg.Done()
+			cancel()
+		}()
+		wg.Wait()
+
+		// Every Stop that returned nil made the same promise, so the strictest
+		// reading applies: if any of them reported clean, the port must be free.
+		stopErr := errors.Join(stopErrs...)
+		if stopErr != nil && stopErrs[0] != nil && stopErrs[1] != nil {
+			// A reported timeout is honest: the caller was told the port may
+			// still be held, so it is not licensed to rebind.
+			continue
+		}
+		require.NoError(
+			t, srv.Stop(t.Context()),
+			"a second Stop must stay clean (iteration %d)", i,
+		)
+		// The contract Stop's nil return promises: the address is rebindable.
+		// Rebinding is the package-level assertion: dialing a released
+		// ephemeral address could instead reach another package's listener
+		// when the suite runs concurrently.
+		next := newTestServer(
+			t, newTestDeps(),
+			func(c *ServerConfig) { c.ListenAddress = addr },
+		)
+		nextCtx, cancelNext := context.WithCancel(context.Background())
+		require.NoError(
+			t, next.Start(nextCtx),
+			"rebinding after a clean Stop must succeed (iteration %d)", i,
+		)
+		require.NoError(t, next.Stop(t.Context()))
+		cancelNext()
+		_ = stopErr
+	}
 }
 
 // TestServerShutdownOnContextCancel asserts cancelling the context
@@ -420,9 +505,7 @@ func TestRequestBodyAtLimitIsAccepted(t *testing.T) {
 func TestServerTimeoutsAreConfigured(t *testing.T) {
 	srv, _ := startTestServer(t, newTestDeps())
 
-	srv.mu.Lock()
-	httpServer := srv.httpServer
-	srv.mu.Unlock()
+	httpServer := srv.listener.Server()
 
 	require.NotNil(t, httpServer)
 	require.Equal(

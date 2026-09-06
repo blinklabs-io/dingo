@@ -381,7 +381,10 @@ func mithrilSyncRunE(
 	if cfg.DelegatorInactivityEnabled {
 		return errMithrilInactivityIncompatible()
 	}
-	logger := commonRun(cfg)
+	logger, err := commonRun(cfg)
+	if err != nil {
+		return err
+	}
 	network := cfg.Network
 	if network == "" {
 		network = "preview"
@@ -464,8 +467,7 @@ func runMithrilSync(
 	}
 	debugServer, debugErr := startDebugPprofServer(
 		logger,
-		cfg.BindAddr,
-		cfg.DebugPort,
+		cfg,
 		"mithril",
 	)
 	if debugErr != nil {

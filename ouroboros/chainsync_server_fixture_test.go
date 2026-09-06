@@ -49,7 +49,7 @@ import (
 // # Asynchronous paths
 //
 // Immediately after sending AwaitReply, chainsyncServerRequestNext resolves the
-// peer with o.ConnManager.GetConnectionById(ctx.ConnectionId) so it can abandon
+// peer with o.connManager.GetConnectionById(ctx.ConnectionId) so it can abandon
 // the blocked iterator read if the peer goes away. The fixture therefore
 // registers the harness's connection (ouroboros-mock v0.16.0's
 // Harness.ServerConnection) with Dingo's ConnManager before driving anything.
@@ -101,7 +101,7 @@ func (f *chainsyncServerFixture) registerClientAtOrigin(
 	t *testing.T,
 ) *dchainsync.ChainsyncClientState {
 	t.Helper()
-	clientState, err := f.o.ChainsyncState.AddClient(
+	clientState, err := f.o.chainsyncState.AddClient(
 		f.conn.Id(),
 		ocommon.NewPointOrigin(),
 	)
@@ -138,15 +138,45 @@ func newChainsyncServerFixture(
 	mode csmock.Mode,
 ) *chainsyncServerFixture {
 	t.Helper()
+	return newChainsyncServerFixtureWithConfig(t, mode, OuroborosConfig{})
+}
+
+// newChainsyncServerFixtureWithConfig is newChainsyncServerFixture with extra
+// OuroborosConfig fields (EnableLeios, LeiosClosureWaitTimeout, ...) folded in.
+// ConnManager, EventBus and Logger are always supplied by the fixture and
+// override anything set in cfg.
+//
+// The connection manager's ConnClosedFunc is wired to the same
+// ReleaseLeiosServeWaiters call the node makes, so a disconnect releases a
+// parked NtC serving wait exactly as it does in production. The callback
+// closes over the o variable rather than a value because the manager has to
+// exist before newOuroboros can be given it; it can only fire after
+// AddConnection below, by which point o is assigned.
+func newChainsyncServerFixtureWithConfig(
+	t *testing.T,
+	mode csmock.Mode,
+	cfg OuroborosConfig,
+) *chainsyncServerFixture {
+	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	bus := event.NewEventBus(nil, logger)
 	t.Cleanup(bus.Close)
 
+	var o *Ouroboros
 	ledgerState := newTestLedgerState(t)
 	connManager := connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{
 			EventBus: bus,
 			Logger:   logger,
+			ConnClosedFunc: func(
+				connId ouroboros.ConnectionId,
+				_ bool,
+				_ error,
+			) {
+				if o != nil {
+					o.ReleaseLeiosServeWaiters(connId)
+				}
+			},
 		},
 	)
 	t.Cleanup(func() {
@@ -158,13 +188,12 @@ func newChainsyncServerFixture(
 		_ = connManager.Stop(stopCtx)
 	})
 
-	o := NewOuroboros(OuroborosConfig{
-		ConnManager: connManager,
-		EventBus:    bus,
-		Logger:      logger,
-	})
-	o.LedgerState = ledgerState
-	o.ChainsyncState = dchainsync.NewState(bus, ledgerState)
+	cfg.ConnManager = connManager
+	cfg.EventBus = bus
+	cfg.Logger = logger
+	o = newOuroboros(cfg)
+	o.ledgerState = ledgerState
+	o.chainsyncState = dchainsync.NewState(bus, ledgerState)
 
 	f := &chainsyncServerFixture{o: o}
 
@@ -248,7 +277,7 @@ func (f *chainsyncServerFixture) appendBlock(
 		blockType:       1,
 		cbor:            []byte{0x80},
 	}
-	require.NoError(t, f.o.LedgerState.Chain().AddBlock(block, nil))
+	require.NoError(t, f.o.ledgerState.Chain().AddBlock(block, nil))
 	return block, ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
 }
 
@@ -257,7 +286,7 @@ func (f *chainsyncServerFixture) setTip(
 	block *testBlock,
 	point ocommon.Point,
 ) {
-	f.o.LedgerState.SetTipForTesting(ochainsync.Tip{
+	f.o.ledgerState.SetTipForTesting(ochainsync.Tip{
 		Point:       point,
 		BlockNumber: block.BlockNumber(),
 	})
@@ -269,13 +298,13 @@ func (f *chainsyncServerFixture) setTip(
 // state being asserted on.
 func (f *chainsyncServerFixture) registeredClient(
 	t *testing.T,
-) (*dchainsync.ChainsyncClientState, bool) {
+) (*dchainsync.ChainsyncClientStateSnapshot, bool) {
 	t.Helper()
 	connId, ok := f.observedConnId()
 	if !ok {
 		return nil, false
 	}
-	return f.o.ChainsyncState.LookupClient(connId)
+	return f.o.chainsyncState.LookupClient(connId)
 }
 
 // requireConnectionClosed asserts the connection was closed through normal
@@ -454,6 +483,78 @@ func TestChainsyncServerFindIntersectAcceptsNormalPointList(t *testing.T) {
 	require.True(t, msg.IsIntersectFound())
 }
 
+// TestChainsyncServerFindIntersectDeduplicatesRepeatedPointsForBudget verifies
+// duplicate points within one request are deduplicated before the
+// per-connection work budget is charged. A list of chainsyncMaxFindIntersectPoints
+// copies of the same point is at the point-count limit but collapses to a
+// single point after deduplication, so it must be charged as 1 point of work,
+// not chainsyncMaxFindIntersectPoints.
+func TestChainsyncServerFindIntersectDeduplicatesRepeatedPointsForBudget(
+	t *testing.T,
+) {
+	f := newChainsyncServerFixture(t, csmock.ModeNtC)
+
+	// An empty chain intersects any in-bounds request at origin, so
+	// IntersectFound here only tells us the request wasn't rejected — the
+	// assertion that matters is the second request below.
+	point := makeFindIntersectPoints(1)[0]
+	dup := make([]ocommon.Point, chainsyncMaxFindIntersectPoints)
+	for i := range dup {
+		dup[i] = point
+	}
+	require.NoError(t, f.h.FindIntersect(dup))
+	require.True(t, f.observe(t).IsIntersectFound())
+
+	// Had the duplicate-heavy request above been charged its full
+	// un-deduplicated size, it would have exhausted the entire work budget
+	// on its own, and this distinct-point request — within both the
+	// point-count and work-budget limits by itself — would be rejected too.
+	require.NoError(
+		t,
+		f.h.FindIntersect(
+			makeFindIntersectPoints(chainsyncMaxFindIntersectPoints-1),
+		),
+	)
+	require.True(
+		t,
+		f.observe(t).IsIntersectFound(),
+		"a duplicate-heavy request must not exhaust the work budget meant for distinct points",
+	)
+}
+
+// TestChainsyncServerFindIntersectRateLimitsRepeatedRequests verifies the
+// per-connection work budget bounds cumulative work across many in-bounds
+// requests, not just the size of a single request: a second full-size
+// request immediately following the first must be rejected even though
+// each is within the point-count limit on its own. The limiter's clock is
+// pinned so the assertion holds regardless of how long the wire round trips
+// actually take, rather than relying on them staying under the 5s a full
+// burst would need to refill at chainsyncFindIntersectBudgetRate.
+func TestChainsyncServerFindIntersectRateLimitsRepeatedRequests(
+	t *testing.T,
+) {
+	f := newChainsyncServerFixture(t, csmock.ModeNtC)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	f.o.chainsyncFindIntersectLimiter.nowFunc = func() time.Time {
+		return now
+	}
+
+	points := makeFindIntersectPoints(chainsyncMaxFindIntersectPoints)
+	require.NoError(t, f.h.FindIntersect(points))
+	require.True(
+		t,
+		f.observe(t).IsIntersectFound(),
+		"first full-size request should be within the work budget",
+	)
+
+	require.NoError(t, f.h.FindIntersect(points))
+	require.True(
+		t,
+		f.observe(t).IsIntersectNotFound(),
+		"a repeated full-size request over the per-connection work budget must be rejected",
+	)
+}
+
 // =============================================================================
 // RequestNext (synchronous replies)
 // =============================================================================
@@ -547,7 +648,7 @@ func TestChainsyncServerRequestNextEmitsRollBackwardOnChainRollback(
 
 	require.NoError(
 		t,
-		f.o.LedgerState.Chain().Rollback(ocommon.NewPointOrigin()),
+		f.o.ledgerState.Chain().Rollback(ocommon.NewPointOrigin()),
 	)
 
 	require.NoError(t, f.h.RequestNext())
@@ -629,7 +730,7 @@ func TestChainsyncServerRequestNextEmitsAsyncRollBackward(t *testing.T) {
 
 	require.NoError(
 		t,
-		f.o.LedgerState.Chain().Rollback(ocommon.NewPointOrigin()),
+		f.o.ledgerState.Chain().Rollback(ocommon.NewPointOrigin()),
 	)
 
 	msg := f.observe(t)
@@ -684,7 +785,7 @@ func TestChainsyncServerRequestNextAsyncRollBackwardFailureClosesConnection(
 	f.h.Server().Stop()
 	require.NoError(
 		t,
-		f.o.LedgerState.Chain().Rollback(ocommon.NewPointOrigin()),
+		f.o.ledgerState.Chain().Rollback(ocommon.NewPointOrigin()),
 	)
 
 	f.requireConnectionClosed(
@@ -735,7 +836,7 @@ func TestChainsyncServerRequestNextSyncIteratorErrorPropagates(t *testing.T) {
 
 	// Break the backing store so the synchronous iterator returns a real
 	// lookup error.
-	require.NoError(t, dbtest.CloseDatabase(f.o.LedgerState.Database()))
+	require.NoError(t, dbtest.CloseDatabase(f.o.ledgerState.Database()))
 
 	err := f.o.chainsyncServerRequestNext(f.callbackContext())
 
@@ -766,7 +867,7 @@ func TestChainsyncServerRequestNextMissingConnectionAfterAwaitReply(
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 	f.registerClientAtOrigin(t)
 
-	require.True(t, f.o.ConnManager.RemoveConnection(f.conn.Id(), f.conn))
+	require.True(t, f.o.connManager.RemoveConnection(f.conn.Id(), f.conn))
 
 	err := f.o.chainsyncServerRequestNext(f.callbackContext())
 

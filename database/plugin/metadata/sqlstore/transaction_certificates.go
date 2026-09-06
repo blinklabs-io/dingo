@@ -58,6 +58,7 @@ type certificateAccountState struct {
 }
 
 func (s *Store) applyTransactionCertificates(
+	ctx context.Context,
 	db queryer,
 	transactionID int64,
 	certificates []lcommon.Certificate,
@@ -68,7 +69,7 @@ func (s *Store) applyTransactionCertificates(
 	if len(certificates) == 0 {
 		return nil, nil
 	}
-	if err := deleteSpecializedCertificates(db, transactionID); err != nil {
+	if err := deleteSpecializedCertificates(ctx, db, transactionID); err != nil {
 		return nil, err
 	}
 	refs := make(map[string]models.StakeCredentialRef)
@@ -77,7 +78,7 @@ func (s *Store) applyTransactionCertificates(
 		if err != nil {
 			return nil, err
 		}
-		unifiedID, err := queryReturnedID(db, `
+		unifiedID, err := queryReturnedID(ctx, db, `
 INSERT INTO certs (
     block_hash, transaction_id, certificate_id, slot, cert_index, cert_type
 ) VALUES (?, ?, 0, ?, ?, ?)
@@ -111,6 +112,7 @@ RETURNING id`,
 			deposit = 0
 		}
 		specializedID, ref, err := s.applySpecializedCertificate(
+			ctx,
 			db,
 			certificate,
 			uint(unifiedID),
@@ -127,7 +129,7 @@ RETURNING id`,
 				err,
 			)
 		}
-		if _, err := db.ExecContext(context.Background(), `
+		if _, err := db.ExecContext(ctx, `
 UPDATE certs SET certificate_id = ? WHERE id = ?`,
 			specializedID,
 			unifiedID,
@@ -145,8 +147,12 @@ UPDATE certs SET certificate_id = ? WHERE id = ?`,
 	return ret, nil
 }
 
-func deleteSpecializedCertificates(db queryer, transactionID int64) error {
-	if _, err := db.ExecContext(context.Background(), `
+func deleteSpecializedCertificates(
+	ctx context.Context,
+	db queryer,
+	transactionID int64,
+) error {
+	if _, err := db.ExecContext(ctx, `
 DELETE FROM pool_registration_owner
 WHERE pool_registration_id IN (
     SELECT pool_registration.id
@@ -158,7 +164,7 @@ WHERE pool_registration_id IN (
 	); err != nil {
 		return fmt.Errorf("delete existing pool registration owners: %w", err)
 	}
-	if _, err := db.ExecContext(context.Background(), `
+	if _, err := db.ExecContext(ctx, `
 DELETE FROM pool_registration_relay
 WHERE pool_registration_id IN (
     SELECT pool_registration.id
@@ -170,7 +176,7 @@ WHERE pool_registration_id IN (
 	); err != nil {
 		return fmt.Errorf("delete existing pool registration relays: %w", err)
 	}
-	if _, err := db.ExecContext(context.Background(), `
+	if _, err := db.ExecContext(ctx, `
 DELETE FROM move_instantaneous_rewards_reward
 WHERE mir_id IN (
     SELECT move_instantaneous_rewards.id
@@ -187,7 +193,7 @@ WHERE mir_id IN (
 			" WHERE certificate_id IN (" +
 			"SELECT id FROM certs WHERE transaction_id = ?)"
 		if _, err := db.ExecContext(
-			context.Background(),
+			ctx,
 			query,
 			transactionID,
 		); err != nil {
@@ -265,6 +271,7 @@ func certificateType(certificate lcommon.Certificate) (uint, error) {
 // returns its ID plus the reward-account credential whose live stake needs
 // refreshing, if any.
 func (s *Store) applySpecializedCertificate(
+	ctx context.Context,
 	db queryer,
 	certificate lcommon.Certificate,
 	certificateID uint,
@@ -276,6 +283,7 @@ func (s *Store) applySpecializedCertificate(
 	switch cert := certificate.(type) {
 	case *lcommon.PoolRegistrationCertificate:
 		id, err := applyPoolRegistrationCertificate(
+			ctx,
 			db,
 			cert,
 			certificateID,
@@ -285,6 +293,7 @@ func (s *Store) applySpecializedCertificate(
 		return id, nil, err
 	case *lcommon.PoolRetirementCertificate:
 		id, err := applyPoolRetirementCertificate(
+			ctx,
 			db,
 			cert,
 			certificateID,
@@ -292,7 +301,7 @@ func (s *Store) applySpecializedCertificate(
 		)
 		return id, nil, err
 	case *lcommon.GenesisKeyDelegationCertificate:
-		id, err := insertCertificateRow(db, `
+		id, err := insertCertificateRow(ctx, db, `
 INSERT INTO genesis_delegation (
     genesis_hash, genesis_delegate_hash, vrf_key_hash, added_slot,
     block_index, cert_index, certificate_id
@@ -309,6 +318,7 @@ RETURNING id`,
 		return id, nil, err
 	case *lcommon.RegistrationDrepCertificate:
 		id, err := applyDrepRegistrationCertificate(
+			ctx,
 			db,
 			cert,
 			certificateID,
@@ -318,6 +328,7 @@ RETURNING id`,
 		return id, nil, err
 	case *lcommon.DeregistrationDrepCertificate:
 		id, err := applyDrepDeregistrationCertificate(
+			ctx,
 			db,
 			cert,
 			certificateID,
@@ -327,6 +338,7 @@ RETURNING id`,
 		return id, nil, err
 	case *lcommon.UpdateDrepCertificate:
 		id, err := applyDrepUpdateCertificate(
+			ctx,
 			db,
 			cert,
 			certificateID,
@@ -334,12 +346,30 @@ RETURNING id`,
 		)
 		return id, nil, err
 	case *lcommon.AuthCommitteeHotCertificate:
-		id, err := insertCertificateRow(db, `
+		// CredType is decoded from CBOR without a range check. Storing it raw
+		// would write a tag the validated uint8 writers can never match, so
+		// the member would silently drop out of the active committee.
+		coldTag, err := models.CredentialTagFromUint(
+			cert.ColdCredential.CredType,
+		)
+		if err != nil {
+			return 0, nil, err
+		}
+		hotTag, err := models.CredentialTagFromUint(
+			cert.HotCredential.CredType,
+		)
+		if err != nil {
+			return 0, nil, err
+		}
+		id, err := insertCertificateRow(ctx, db, `
 INSERT INTO auth_committee_hot (
-    cold_credential, host_credential, certificate_id, added_slot
-) VALUES (?, ?, ?, ?)
+    cold_credential_tag, cold_credential, hot_credential_tag,
+    host_credential, certificate_id, added_slot
+) VALUES (?, ?, ?, ?, ?, ?)
 RETURNING id`,
+			coldTag,
 			cert.ColdCredential.Credential[:],
+			hotTag,
 			cert.HotCredential.Credential[:],
 			certificateID,
 			slot,
@@ -352,12 +382,20 @@ RETURNING id`,
 			anchorURL = cert.Anchor.Url
 			anchorHash = cert.Anchor.DataHash[:]
 		}
-		id, err := insertCertificateRow(db, `
+		coldTag, err := models.CredentialTagFromUint(
+			cert.ColdCredential.CredType,
+		)
+		if err != nil {
+			return 0, nil, err
+		}
+		id, err := insertCertificateRow(ctx, db, `
 INSERT INTO resign_committee_cold (
-    anchor_url, cold_credential, anchor_hash, certificate_id, added_slot
-) VALUES (?, ?, ?, ?, ?)
+    anchor_url, cold_credential_tag, cold_credential, anchor_hash,
+    certificate_id, added_slot
+) VALUES (?, ?, ?, ?, ?, ?)
 RETURNING id`,
 			anchorURL,
+			coldTag,
 			cert.ColdCredential.Credential[:],
 			anchorHash,
 			certificateID,
@@ -366,6 +404,7 @@ RETURNING id`,
 		return id, nil, err
 	case *lcommon.MoveInstantaneousRewardsCertificate:
 		id, err := applyMIRCertificate(
+			ctx,
 			db,
 			cert,
 			certificateID,
@@ -374,6 +413,7 @@ RETURNING id`,
 		return id, nil, err
 	}
 	return applyAccountCertificate(
+		ctx,
 		db,
 		certificate,
 		certificateID,
@@ -383,6 +423,7 @@ RETURNING id`,
 }
 
 func applyAccountCertificate(
+	ctx context.Context,
 	db queryer,
 	certificate lcommon.Certificate,
 	certificateID uint,
@@ -490,7 +531,7 @@ func applyAccountCertificate(
 		return 0, nil, err
 	}
 	key := stakeCredential.Credential[:]
-	if err := updateCertificateAccount(db, tag, key, slot, state); err != nil {
+	if err := updateCertificateAccount(ctx, db, tag, key, slot, state); err != nil {
 		return 0, nil, err
 	}
 	switch cert := certificate.(type) {
@@ -515,6 +556,7 @@ func applyAccountCertificate(
 		args = []any{key, tag, state.drep, state.drepType, slot, certificateID}
 	}
 	id, err := insertCertificateRow(
+		ctx,
 		db,
 		"INSERT INTO "+table+" ("+columns+") VALUES ("+values+") RETURNING id",
 		args...,
@@ -524,6 +566,7 @@ func applyAccountCertificate(
 }
 
 func updateCertificateAccount(
+	ctx context.Context,
 	db queryer,
 	tag uint8,
 	key []byte,
@@ -536,7 +579,7 @@ func updateCertificateAccount(
 		drep     []byte
 		drepType uint64
 	)
-	err := db.QueryRowContext(context.Background(), `
+	err := db.QueryRowContext(ctx, `
 SELECT active, pool, drep, drep_type
 FROM account
 WHERE credential_tag = ? AND staking_key = ?`,
@@ -569,7 +612,7 @@ WHERE credential_tag = ? AND staking_key = ?`,
 		drep = next.drep
 		drepType = next.drepType
 	}
-	_, err = db.ExecContext(context.Background(), `
+	_, err = db.ExecContext(ctx, `
 INSERT INTO account (
     staking_key, credential_tag, pool, drep, added_slot, created_slot,
     reward, drep_type, active, expiration_epoch
@@ -611,6 +654,7 @@ func certificateDrep(
 }
 
 func applyPoolRegistrationCertificate(
+	ctx context.Context,
 	db queryer,
 	cert *lcommon.PoolRegistrationCertificate,
 	certificateID uint,
@@ -636,7 +680,7 @@ func applyPoolRegistrationCertificate(
 		leiosKeyPublic = cert.LeiosKey.PublicKey
 		leiosKeyPoP = cert.LeiosKey.PossessionProof
 	}
-	poolID, err := queryReturnedID(db, `
+	poolID, err := queryReturnedID(ctx, db, `
 INSERT INTO pool (
     margin, pool_key_hash, vrf_key_hash, reward_account,
     latest_op_cert_sequence, reward_account_credential_tag, pledge, cost,
@@ -671,7 +715,7 @@ RETURNING id`,
 		metadataURL = cert.PoolMetadata.Url
 		metadataHash = cert.PoolMetadata.Hash[:]
 	}
-	registrationID, err := insertPoolRegistration(db, []any{
+	registrationID, err := insertPoolRegistration(ctx, db, []any{
 		margin,
 		metadataURL,
 		cert.VrfKeyHash[:],
@@ -691,20 +735,20 @@ RETURNING id`,
 	if err != nil {
 		return 0, err
 	}
-	if _, err := db.ExecContext(context.Background(), `
+	if _, err := db.ExecContext(ctx, `
 DELETE FROM pool_registration_owner WHERE pool_registration_id = ?`,
 		registrationID,
 	); err != nil {
 		return 0, err
 	}
-	if _, err := db.ExecContext(context.Background(), `
+	if _, err := db.ExecContext(ctx, `
 DELETE FROM pool_registration_relay WHERE pool_registration_id = ?`,
 		registrationID,
 	); err != nil {
 		return 0, err
 	}
 	for _, owner := range cert.PoolOwners {
-		if _, err := db.ExecContext(context.Background(), `
+		if _, err := db.ExecContext(ctx, `
 INSERT INTO pool_registration_owner (
     key_hash, pool_registration_id, pool_id
 ) VALUES (?, ?, ?)`,
@@ -724,7 +768,7 @@ INSERT INTO pool_registration_owner (
 		if relay.Hostname != nil {
 			hostname = *relay.Hostname
 		}
-		if _, err := db.ExecContext(context.Background(), `
+		if _, err := db.ExecContext(ctx, `
 INSERT INTO pool_registration_relay (
     ipv4, ipv6, hostname, pool_registration_id, pool_id, port
 ) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -742,12 +786,13 @@ INSERT INTO pool_registration_relay (
 }
 
 func applyPoolRetirementCertificate(
+	ctx context.Context,
 	db queryer,
 	cert *lcommon.PoolRetirementCertificate,
 	certificateID uint,
 	slot uint64,
 ) (uint, error) {
-	poolID, err := queryReturnedID(db, `
+	poolID, err := queryReturnedID(ctx, db, `
 INSERT INTO pool (
     pool_key_hash, latest_op_cert_sequence, pledge, cost,
     reward_account_credential_tag
@@ -760,7 +805,7 @@ RETURNING id`,
 	if err != nil {
 		return 0, err
 	}
-	return insertCertificateRow(db, `
+	return insertCertificateRow(ctx, db, `
 INSERT INTO pool_retirement (
     pool_key_hash, certificate_id, pool_id, epoch, added_slot
 ) VALUES (?, ?, ?, ?, ?)
@@ -774,6 +819,7 @@ RETURNING id`,
 }
 
 func applyDrepRegistrationCertificate(
+	ctx context.Context,
 	db queryer,
 	cert *lcommon.RegistrationDrepCertificate,
 	certificateID uint,
@@ -793,6 +839,7 @@ func applyDrepRegistrationCertificate(
 		anchorHash = cert.Anchor.DataHash[:]
 	}
 	if err := setDrepCertificateState(
+		ctx,
 		db,
 		tag,
 		cert.DrepCredential.Credential[:],
@@ -804,7 +851,7 @@ func applyDrepRegistrationCertificate(
 	); err != nil {
 		return 0, err
 	}
-	return insertCertificateRow(db, `
+	return insertCertificateRow(ctx, db, `
 INSERT INTO registration_drep (
     anchor_url, drep_credential, anchor_hash, certificate_id,
     credential_tag, added_slot, deposit_amount
@@ -826,6 +873,7 @@ RETURNING id`,
 }
 
 func applyDrepDeregistrationCertificate(
+	ctx context.Context,
 	db queryer,
 	cert *lcommon.DeregistrationDrepCertificate,
 	certificateID uint,
@@ -839,6 +887,7 @@ func applyDrepDeregistrationCertificate(
 		return 0, err
 	}
 	if err := setDrepCertificateState(
+		ctx,
 		db,
 		tag,
 		cert.DrepCredential.Credential[:],
@@ -850,7 +899,7 @@ func applyDrepDeregistrationCertificate(
 	); err != nil {
 		return 0, err
 	}
-	return insertCertificateRow(db, `
+	return insertCertificateRow(ctx, db, `
 INSERT INTO deregistration_drep (
     drep_credential, certificate_id, credential_tag, added_slot,
     deposit_amount
@@ -865,6 +914,7 @@ RETURNING id`,
 }
 
 func applyDrepUpdateCertificate(
+	ctx context.Context,
 	db queryer,
 	cert *lcommon.UpdateDrepCertificate,
 	certificateID uint,
@@ -883,6 +933,7 @@ func applyDrepUpdateCertificate(
 		anchorHash = cert.Anchor.DataHash[:]
 	}
 	if err := setDrepCertificateState(
+		ctx,
 		db,
 		tag,
 		cert.DrepCredential.Credential[:],
@@ -894,7 +945,7 @@ func applyDrepUpdateCertificate(
 	); err != nil {
 		return 0, err
 	}
-	return insertCertificateRow(db, `
+	return insertCertificateRow(ctx, db, `
 INSERT INTO update_drep (
     anchor_url, credential, anchor_hash, certificate_id,
     credential_tag, added_slot
@@ -910,6 +961,7 @@ RETURNING id`,
 }
 
 func setDrepCertificateState(
+	ctx context.Context,
 	db queryer,
 	tag uint8,
 	credential []byte,
@@ -920,7 +972,7 @@ func setDrepCertificateState(
 	requireExisting bool,
 ) error {
 	var exists bool
-	if err := db.QueryRowContext(context.Background(), `
+	if err := db.QueryRowContext(ctx, `
 SELECT EXISTS (
     SELECT 1 FROM drep WHERE credential_tag = ? AND credential = ?
 )`,
@@ -933,7 +985,7 @@ SELECT EXISTS (
 		return models.ErrDrepNotFound
 	}
 	if exists {
-		_, err := db.ExecContext(context.Background(), `
+		_, err := db.ExecContext(ctx, `
 UPDATE drep
 SET anchor_url = ?, anchor_hash = ?, added_slot = ?, active = ?
 WHERE credential_tag = ? AND credential = ?`,
@@ -946,7 +998,7 @@ WHERE credential_tag = ? AND credential = ?`,
 		)
 		return err
 	}
-	_, err := db.ExecContext(context.Background(), `
+	_, err := db.ExecContext(ctx, `
 INSERT INTO drep (
     anchor_url, credential, anchor_hash, added_slot, credential_tag,
     last_activity_epoch, expiry_epoch, active
@@ -962,12 +1014,13 @@ INSERT INTO drep (
 }
 
 func applyMIRCertificate(
+	ctx context.Context,
 	db queryer,
 	cert *lcommon.MoveInstantaneousRewardsCertificate,
 	certificateID uint,
 	slot uint64,
 ) (uint, error) {
-	id, err := insertCertificateRow(db, `
+	id, err := insertCertificateRow(ctx, db, `
 INSERT INTO move_instantaneous_rewards (
     pot, certificate_id, added_slot, other_pot
 ) VALUES (?, ?, ?, ?)
@@ -985,7 +1038,7 @@ RETURNING id`,
 		if err != nil {
 			return 0, err
 		}
-		if _, err := db.ExecContext(context.Background(), `
+		if _, err := db.ExecContext(ctx, `
 INSERT INTO move_instantaneous_rewards_reward (
     credential, credential_tag, amount, mir_id
 ) VALUES (?, ?, ?, ?)`,
@@ -1001,10 +1054,11 @@ INSERT INTO move_instantaneous_rewards_reward (
 }
 
 func insertCertificateRow(
+	ctx context.Context,
 	db queryer,
 	query string,
 	args ...any,
 ) (uint, error) {
-	id, err := queryReturnedID(db, query, args...)
+	id, err := queryReturnedID(ctx, db, query, args...)
 	return uint(id), err
 }

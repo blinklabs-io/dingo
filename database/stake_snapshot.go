@@ -35,9 +35,13 @@ func (d *Database) GetPoolStakeSnapshotsByEpoch(
 		)
 	}
 	if txn == nil {
-		return d.metadata.GetPoolStakeSnapshotsByEpoch(epoch, snapshotType, nil)
+		return d.stakeSnapshotStore().GetPoolStakeSnapshotsByEpoch(
+			epoch,
+			snapshotType,
+			nil,
+		)
 	}
-	return d.metadata.GetPoolStakeSnapshotsByEpoch(
+	return d.stakeSnapshotStore().GetPoolStakeSnapshotsByEpoch(
 		epoch,
 		snapshotType,
 		txn.Metadata(),

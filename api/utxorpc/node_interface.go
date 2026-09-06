@@ -47,6 +47,7 @@ type UtxorpcLedgerState interface {
 		inclusive bool,
 	) (*chain.ChainIterator, error)
 	GetCurrentPParams() lcommon.ProtocolParameters
+	GetCurrentPParamsForReporting() lcommon.ProtocolParameters
 	GetEpochs() ([]models.Epoch, error)
 	GetIntersectPoint(points []ocommon.Point) (*ocommon.Point, error)
 	GetPParamsForEpoch(
@@ -85,4 +86,5 @@ type UtxorpcEventBus interface {
 		handlerFunc event.EventHandlerFunc,
 	) event.EventSubscriberId
 	Unsubscribe(eventType event.EventType, subId event.EventSubscriberId)
+	UnsubscribeAndWait(eventType event.EventType, subId event.EventSubscriberId)
 }

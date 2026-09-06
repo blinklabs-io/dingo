@@ -24,6 +24,7 @@ go.work
 /dingo
 /bin/dingo
 /koios-parity
+/node-parity
 
 # Local data directory
 /.dingo

@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -201,9 +202,17 @@ func bootstrapV2(
 		downloadDir,
 		filepath.Base("immutable-"+artifact.Hash),
 	)
-	var ancillaryDir string
+	var ancillaryTree *vettedDir
+	var ancillaryDigests map[string]string
 	var ancillaryArchivePath string
 	var ancillaryErr error
+	// Closed only when the result that would own it is never returned; on
+	// success it is carried to the ledger-state import and released by Cleanup.
+	defer func() {
+		if !success {
+			ancillaryTree.Close()
+		}
+	}()
 
 	// Steps 4+5: Download immutable archives and the ancillary archive in
 	// parallel. A verified bootstrap records ancillary failures and returns
@@ -228,10 +237,15 @@ func bootstrapV2(
 					truncateDigest(artifact.Hash),
 				)),
 			)
-			if hasLedgerFiles(candidateDir) {
-				if err := verifyAncillaryExtraction(
-					cfg, candidateDir,
-				); err != nil {
+			// One handle spans the cache check, the manifest verification,
+			// and the ledger-state import downstream. A directory substituted
+			// at any point after the check is therefore not what gets
+			// verified *or* loaded — where re-resolving the name at each step
+			// would leave each step describing a possibly different tree.
+			if cached := ledgerDir(candidateDir); cached != nil {
+				cachedDigests, err := verifyAncillaryExtraction(cfg, cached)
+				if err != nil {
+					cached.Close()
 					cfg.Logger.Warn(
 						"cached ancillary data failed "+
 							"verification, redownloading",
@@ -261,24 +275,33 @@ func bootstrapV2(
 						"ancillary data already "+
 							"extracted, skipping",
 						"component", "mithril",
-						"path", candidateDir,
+						"path", cached.Path(),
 					)
-					ancillaryDir = candidateDir
+					ancillaryTree = cached
+					ancillaryDigests = cachedDigests
 					if _, err := os.Stat(candidateArchive); err == nil {
 						ancillaryArchivePath = candidateArchive
 					}
 					return
 				}
 			}
-			dir, archPath, ancErr := downloadAncillaryV2(
+			tree, treeDigests, archPath, ancErr := downloadAncillaryV2(
 				ancCtx, cfg, artifact, downloadDir,
 			)
+			// Recorded whether or not the tree turned out usable, so a
+			// downloaded archive still gets cleaned up.
+			if archPath != "" {
+				ancillaryArchivePath = archPath
+			}
 			if ancErr != nil {
 				ancillaryErr = ancErr
 				return
 			}
-			ancillaryDir = dir
-			ancillaryArchivePath = archPath
+			// The handle the manifest was checked through, carried straight
+			// across. Reopening the directory by name here would hand the
+			// import a tree nothing verified, under a flag saying otherwise.
+			ancillaryTree = tree
+			ancillaryDigests = treeDigests
 		})
 	}
 
@@ -291,11 +314,35 @@ func bootstrapV2(
 			err,
 		)
 	}
-	immutableDir := filepath.Join(extractDir, "immutable")
-	if !hasChunkFiles(immutableDir) {
+	// Both components are checked, not just the last one. The extraction
+	// directory is itself derived inside the download directory and no more
+	// trustworthy than what it contains, so it is vetted first and the
+	// immutable directory is then taken from that handle.
+	//
+	// One handle, because the ledger-state import falls back to this same
+	// directory: vetting it twice would be two resolutions of one name, and the
+	// tree whose ImmutableDB was accepted could then differ from the tree whose
+	// ledger state gets imported.
+	//
+	// Both are held until Cleanup and closed on every error path below, since
+	// the result that would own them is never returned.
+	extractTree, err := openVerifiedDir(extractDir)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"verifying extraction directory %s: %w", extractDir, err,
+		)
+	}
+	immutableTree := chunkDirIn(extractTree, extractDir, "immutable")
+	defer func() {
+		if !success {
+			immutableTree.Close()
+			_ = extractTree.Close()
+		}
+	}()
+	if immutableTree == nil {
 		return nil, fmt.Errorf(
 			"immutable DB directory not found at %s after download",
-			immutableDir,
+			filepath.Join(extractDir, "immutable"),
 		)
 	}
 
@@ -317,7 +364,7 @@ func bootstrapV2(
 			ancillaryErr,
 		)
 	}
-	if cfg.VerifyCertificateChain && ancillaryDir == "" {
+	if cfg.VerifyCertificateChain && ancillaryTree == nil {
 		return nil, errors.New(
 			"verified Mithril bootstrap produced no ancillary data",
 		)
@@ -327,8 +374,8 @@ func bootstrapV2(
 		"Mithril bootstrap ready for loading",
 		"component", "mithril",
 		"phase", "bootstrap_ready",
-		"immutable_dir", immutableDir,
-		"ancillary_dir", ancillaryDir,
+		"immutable_dir", immutableTree.Path(),
+		"ancillary_dir", ancillaryTree.Path(),
 	)
 
 	success = true
@@ -347,9 +394,24 @@ func bootstrapV2(
 				CardanoNodeVersion: artifact.CardanoNodeVersion,
 			},
 		},
-		ImmutableDir:         immutableDir,
-		ExtractDir:           extractDir,
-		AncillaryDir:         ancillaryDir,
+		ImmutableDir:  immutableTree.Path(),
+		ImmutableRoot: immutableTree.Root(),
+		// The digest list the certificate's merkle root covers, carried on so
+		// the load can re-check each file from the descriptor it reads through
+		// rather than trusting a check that ran before the file was closed.
+		ImmutableDigests: digests,
+		ExtractDir:       extractDir,
+		ExtractRoot:      extractTree,
+		AncillaryDir:     ancillaryTree.Path(),
+		AncillaryRoot:    ancillaryTree.Root(),
+		// Both paths that accept an ancillary tree verify it through the very
+		// handle carried here — the cache-reuse path opens it once and keeps
+		// it, and downloadAncillaryV2 returns the handle it checked. So the
+		// flag is a claim about the directory this handle refers to, which is
+		// the only thing that makes it worth anything.
+		AncillaryVerified: ancillaryTree != nil &&
+			cfg.VerifyCertificateChain,
+		AncillaryDigests:     ancillaryDigests,
 		AncillaryArchivePath: ancillaryArchivePath,
 	}
 	if createdTempDir {
@@ -382,16 +444,12 @@ func verifyArtifactCertificateV2(
 		"artifact", "cardano_database",
 		"certificate_hash", artifact.CertificateHash,
 	)
-	verificationMode := VerificationModeStructural
-	if cfg.GenesisVerificationKey != "" {
-		verificationMode = VerificationModeSTM
-	}
 	verificationResult, err := VerifyCertificateChainWithMode(
 		ctx,
 		client,
 		artifact.CertificateHash,
 		"", // v2 leaf binding uses cardano_database_merkle_root below
-		verificationMode,
+		VerificationModeSTM,
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -399,22 +457,20 @@ func verifyArtifactCertificateV2(
 			err,
 		)
 	}
-	if cfg.GenesisVerificationKey != "" {
-		if verificationResult == nil ||
-			verificationResult.GenesisCertificate == nil {
-			return errors.New(
-				"genesis verification key provided but no genesis certificate found in chain",
-			)
-		}
-		if err := VerifyGenesisCertificateSignature(
-			verificationResult.GenesisCertificate,
-			cfg.GenesisVerificationKey,
-		); err != nil {
-			return fmt.Errorf(
-				"genesis certificate verification failed: %w",
-				err,
-			)
-		}
+	if verificationResult == nil ||
+		verificationResult.GenesisCertificate == nil {
+		return errors.New(
+			"verified certificate chain has no genesis certificate",
+		)
+	}
+	if err := VerifyGenesisCertificateSignature(
+		verificationResult.GenesisCertificate,
+		cfg.GenesisVerificationKey,
+	); err != nil {
+		return fmt.Errorf(
+			"genesis certificate verification failed: %w",
+			err,
+		)
 	}
 	verificationMaterial, err := BuildVerificationMaterial(
 		ctx,
@@ -638,6 +694,8 @@ func downloadDigestsArchive(
 		downloadDir,
 		filepath.Base("digests-"+truncateDigest(artifact.Hash)),
 	)
+	// Replace: removeDigestsCache may not have run if a previous attempt
+	// was interrupted, leaving a stale digests directory.
 	if _, err := ExtractArchive(
 		ctx,
 		archivePath,
@@ -646,6 +704,7 @@ func downloadDigestsArchive(
 			"phase", "digest_extraction",
 			"artifact", "immutable_digest_list",
 		),
+		WithReplaceDestination(),
 	); err != nil {
 		return nil, fmt.Errorf("extracting digests archive: %w", err)
 	}
@@ -693,17 +752,23 @@ func downloadImmutables(
 	downloadDir string,
 	extractDir string,
 ) error {
-	immutableDir := filepath.Join(extractDir, "immutable")
-	if err := os.MkdirAll(immutableDir, 0o750); err != nil {
-		return fmt.Errorf("creating immutable directory: %w", err)
+	immutableDir, immutableRoot, err := openImmutableRoot(extractDir)
+	if err != nil {
+		return err
 	}
+	defer immutableRoot.Close()
+
+	// archiveDir is not created here. A create-then-close-then-hand-off-
+	// the-bare-path step would itself be a TOCTOU window: a symlink
+	// swapped in for it between this function returning and the first
+	// download would be followed by whatever opens it next. Instead,
+	// DownloadSnapshot (called below, once per archive) creates and
+	// verifies its own DestDir through a handle on its parent every time
+	// it runs, closing that window at the point it actually matters.
 	archiveDir := filepath.Join(
 		downloadDir,
 		filepath.Base("immutable-archives-"+truncateDigest(artifact.Hash)),
 	)
-	if err := os.MkdirAll(archiveDir, 0o750); err != nil {
-		return fmt.Errorf("creating archive directory: %w", err)
-	}
 
 	locations := make(
 		[]*CardanoDatabaseLocation,
@@ -802,7 +867,13 @@ func downloadImmutables(
 		dlCtx, cancelDownloads = context.WithCancelCause(ctx)
 		defer cancelDownloads(nil)
 		seqProcess := func(num uint64) error {
-			if err := cfg.OnChunkContiguous(immutableDir, num); err != nil {
+			if err := cfg.OnChunkContiguous(ContiguousChunk{
+				Dir:     immutableDir,
+				Root:    immutableRoot,
+				Digests: digests,
+				Start:   startArchive,
+				Num:     num,
+			}); err != nil {
 				copyErr = err
 				cancelDownloads(err)
 				return err
@@ -834,7 +905,7 @@ func downloadImmutables(
 				return err
 			}
 			if bytes, err := checkImmutableTrio(
-				immutableDir, num, digests,
+				immutableRoot, num, digests,
 			); err == nil {
 				onArchiveDone(bytes)
 				if seq != nil {
@@ -851,10 +922,11 @@ func downloadImmutables(
 					archiveDir, extractDir,
 				); err != nil {
 					lastErr = err
-					removeImmutableTrio(immutableDir, num)
-					_ = os.Remove(
-						immutableArchivePath(archiveDir, num),
-					)
+					// fetchImmutableArchive has already removed its own
+					// archive file, through the root it downloaded
+					// through, on every exit -- no bare-path cleanup of
+					// archiveDir needed here.
+					removeImmutableTrio(immutableRoot, num)
 					cfg.Logger.Warn(
 						"immutable archive location failed, trying next",
 						"component", "mithril",
@@ -866,13 +938,10 @@ func downloadImmutables(
 					continue
 				}
 				bytes, lastErr = checkImmutableTrio(
-					immutableDir, num, digests,
+					immutableRoot, num, digests,
 				)
 				if lastErr != nil {
-					removeImmutableTrio(immutableDir, num)
-					_ = os.Remove(
-						immutableArchivePath(archiveDir, num),
-					)
+					removeImmutableTrio(immutableRoot, num)
 					cfg.Logger.Warn(
 						"immutable archive verification failed, trying next",
 						"component", "mithril",
@@ -905,7 +974,7 @@ func downloadImmutables(
 			return nil
 		})
 	}
-	err := g.Wait()
+	err = g.Wait()
 	if seq != nil {
 		// A download failure (or the copy-triggered cancel above) means the
 		// contiguous prefix can never advance, so unblock the consumer's Wait.
@@ -1002,6 +1071,19 @@ func newImmutableProgressWithContext(
 
 // fetchImmutableArchive downloads and extracts a single immutable
 // archive, then removes the archive file to bound disk usage.
+//
+// The download, the extraction, and the removal are all anchored to the
+// same directory handle DownloadSnapshot's internal directory verification
+// opens on archiveDir, rather than each re-resolving archiveDir by name.
+// archiveDir is shared by every archive this pool downloads and is deleted
+// out from under the process on every success (see the comment below), so a
+// directory swapped in for its name between this call's steps would, with a
+// bare path, redirect extraction to attacker-controlled content and let
+// os.Remove delete an external file. Passing the retained root and a
+// root-relative filename to extraction and removal instead means a later
+// swap of archiveDir's name cannot affect either operation: they resolve
+// through the handle opened before the swap could happen, not through the
+// name.
 func fetchImmutableArchive(
 	ctx context.Context,
 	cfg BootstrapConfig,
@@ -1016,13 +1098,13 @@ func fetchImmutableArchive(
 	// and reach the operator. extractLogger (discarded) is still used for
 	// the extraction step to suppress per-file INFO noise.
 	dlLogger := cfg.Logger.With("immutable_file_number", num)
-	archivePath, err := DownloadSnapshot(
+	archivePath := immutableArchivePath(archiveDir, num)
+	archiveFilename := filepath.Base(archivePath)
+	_, root, dlErr := downloadSnapshot(
 		ctx, DownloadConfig{
-			URL:     location.ImmutableArchiveURI(num),
-			DestDir: archiveDir,
-			Filename: filepath.Base(
-				immutableArchivePath(archiveDir, num),
-			),
+			URL:                 location.ImmutableArchiveURI(num),
+			DestDir:             archiveDir,
+			Filename:            archiveFilename,
 			Logger:              dlLogger,
 			HTTPClient:          cfg.httpClient,
 			IdleTimeout:         cfg.DownloadIdleTimeout,
@@ -1031,21 +1113,48 @@ func fetchImmutableArchive(
 			AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
 		},
 	)
-	if err != nil {
-		return err
+	if root != nil {
+		// Removed here, through the same root every other operation in
+		// this function uses, on every exit -- success, download failure
+		// leaving a partial file, or extraction failure leaving a
+		// complete one. The caller used to repeat this cleanup itself by
+		// joining archiveDir (a bare path) with the filename after this
+		// function returned; a directory swapped in for archiveDir's name
+		// in that gap made that cleanup delete a same-named external file
+		// through the replacement instead of this one. Doing it here,
+		// still anchored to root, closes that gap on the failure path the
+		// same way the success path was already closed.
+		defer func() {
+			if removeErr := root.Remove(archiveFilename); removeErr != nil &&
+				!os.IsNotExist(removeErr) {
+				cfg.Logger.Warn(
+					"failed to remove immutable archive after fetch",
+					"component", "mithril",
+					"path", archivePath,
+					"error", removeErr,
+				)
+			}
+			root.Close()
+		}()
 	}
-	if _, err := ExtractArchive(
-		ctx, archivePath, extractDir, extractLogger,
+	if dlErr != nil {
+		return dlErr
+	}
+
+	file, err := root.Open(archiveFilename)
+	if err != nil {
+		return fmt.Errorf("opening downloaded archive: %w", err)
+	}
+	defer file.Close()
+
+	// Merge: every immutable archive extracts into one shared directory,
+	// concurrently, so this destination accumulates across calls and must
+	// not be staged-and-swapped.
+	if _, err := extractArchiveFile(
+		ctx, file, archivePath, extractDir, extractLogger,
+		WithMergeIntoDestination(),
 	); err != nil {
 		return fmt.Errorf("extracting: %w", err)
-	}
-	if err := os.Remove(archivePath); err != nil {
-		cfg.Logger.Warn(
-			"failed to remove immutable archive after extraction",
-			"component", "mithril",
-			"path", archivePath,
-			"error", err,
-		)
 	}
 	return nil
 }
@@ -1057,8 +1166,22 @@ func immutableArchivePath(archiveDir string, num uint64) string {
 // checkImmutableTrio verifies the SHA-256 digests of the three files
 // of an immutable file number against the verified digest map.
 // Returns the cumulative file size on success.
+//
+// Hashed through the immutable directory's handle rather than by joining its
+// name. Extraction writes through that handle, so hashing anything else would
+// be a digest of a file this process did not necessarily write — and the
+// mismatch a repointed name produces would be reported as a corrupt download,
+// sending the pool round the locations again instead of refusing.
+//
+// What this cannot establish on its own is that the file it hashed is the file
+// something later reads: it closes each one, and the load opens it again by
+// name. That second half is immutable.NewFromRootVerified's, which re-checks
+// these same digests from the descriptor the read goes through. Neither is
+// redundant — this one decides whether a downloaded archive is kept and lets
+// the pool retry another location, and it runs while the tree is still being
+// assembled.
 func checkImmutableTrio(
-	dir string,
+	root *os.Root,
 	num uint64,
 	digests map[string]string,
 ) (int64, error) {
@@ -1069,7 +1192,7 @@ func checkImmutableTrio(
 		if !ok {
 			return 0, fmt.Errorf("no digest entry for %s", name)
 		}
-		sum, size, err := sha256File(filepath.Join(dir, name))
+		sum, size, err := sha256FileInRoot(root, name)
 		if err != nil {
 			return 0, err
 		}
@@ -1086,30 +1209,79 @@ func checkImmutableTrio(
 	return totalBytes, nil
 }
 
+// openImmutableRoot creates the immutable directory under extractDir and
+// returns its path along with a handle to resolve cleanup through.
+//
+// A symlink at that name is refused rather than followed. Extraction already
+// refuses to write through one, but the retry path removes a failed trio by
+// name, and removing `<extract>/immutable/00000.chunk` resolves `immutable` on
+// the way to the file — through a symlink that unlinks somebody else's files
+// as the cost of a failed download. The handle closes the same gap against a
+// symlink planted later: it refers to the directory rather than to a name that
+// can be repointed once the download is under way.
+func openImmutableRoot(extractDir string) (string, *os.Root, error) {
+	cleanDir := filepath.Clean(extractDir)
+	// The same check ExtractArchive applies to its own destination. This runs
+	// first, so without it the accumulation root would be created through a
+	// symlinked extraction directory and only the later extraction would
+	// notice — after the fact, and after creating a directory in whatever the
+	// link pointed at.
+	if err := assertSafeExtractRoot(cleanDir); err != nil {
+		return "", nil, err
+	}
+	parent := filepath.Dir(cleanDir)
+	if err := os.MkdirAll(parent, extractDirMode); err != nil {
+		return "", nil, fmt.Errorf("creating extraction directory: %w", err)
+	}
+	// Both directories are created and opened through the handle above them,
+	// so neither is resolved by a pathname a writer could repoint between the
+	// check and the open.
+	parentRoot, err := os.OpenRoot(parent)
+	if err != nil {
+		return "", nil, fmt.Errorf(
+			"opening extraction parent %s: %w", parent, err,
+		)
+	}
+	defer parentRoot.Close()
+	extractRoot, err := openExtractRoot(parentRoot, filepath.Base(cleanDir))
+	if err != nil {
+		return "", nil, fmt.Errorf("creating extraction directory: %w", err)
+	}
+	defer extractRoot.Close()
+	immutableRoot, err := openExtractRoot(extractRoot, "immutable")
+	if err != nil {
+		return "", nil, fmt.Errorf("creating immutable directory: %w", err)
+	}
+	return filepath.Join(cleanDir, "immutable"), immutableRoot, nil
+}
+
 // removeImmutableTrio deletes the three files of an immutable file
 // number so a corrupted download is not reused on resume.
-func removeImmutableTrio(dir string, num uint64) {
+//
+// Resolved through the immutable directory's handle so a failed download can
+// only ever unlink files in the directory it was writing into.
+func removeImmutableTrio(root *os.Root, num uint64) {
 	for _, ext := range immutableFileExtensions {
-		path := filepath.Join(dir, fmt.Sprintf("%05d.%s", num, ext))
-		_ = os.Remove(
-			path,
-		) //nolint:gosec // path is constructed from our own extraction directory
+		_ = root.Remove(fmt.Sprintf("%05d.%s", num, ext))
 	}
 }
 
-// sha256File returns the hex SHA-256 digest and size of a file.
-func sha256File(path string) (string, int64, error) {
-	f, err := os.Open(
-		path,
-	) //nolint:gosec // callers construct the path from controlled directories
+// sha256FileInRoot returns the hex SHA-256 digest and size of a file directly
+// beneath root, resolved through the handle rather than by name.
+func sha256FileInRoot(root *os.Root, name string) (string, int64, error) {
+	f, err := root.Open(name)
 	if err != nil {
 		return "", 0, err
 	}
 	defer f.Close()
+	return sha256Reader(f, name)
+}
+
+func sha256Reader(r io.Reader, name string) (string, int64, error) {
 	hasher := sha256.New()
-	size, err := io.Copy(hasher, f)
+	size, err := io.Copy(hasher, r)
 	if err != nil {
-		return "", 0, fmt.Errorf("hashing %s: %w", path, err)
+		return "", 0, fmt.Errorf("hashing %s: %w", name, err)
 	}
 	return hex.EncodeToString(hasher.Sum(nil)), size, nil
 }
@@ -1118,14 +1290,23 @@ func sha256File(path string) (string, int64, error) {
 // (ledger state plus the next in-progress immutable trio) and, when
 // certificate verification is enabled, verifies the signed ancillary
 // manifest. A verified bootstrap fails closed when this data is unavailable.
+// downloadAncillaryV2 downloads, extracts and verifies the v2 ancillary archive
+// and returns the extracted tree as the handle its manifest was checked
+// through.
+//
+// Returning the handle rather than the directory's name is what lets the caller
+// claim the tree is verified. A name would have to be reopened, and the tree
+// behind it need not be the one the ancillary key signed by the time it is —
+// the check and the claim would then be about different directories. The caller
+// closes the result.
 func downloadAncillaryV2(
 	ctx context.Context,
 	cfg BootstrapConfig,
 	artifact *CardanoDatabaseSnapshot,
 	downloadDir string,
-) (string, string, error) {
+) (*vettedDir, map[string]string, string, error) {
 	if len(artifact.Ancillary.Locations) == 0 {
-		return "", "", errors.New(
+		return nil, nil, "", errors.New(
 			"no ancillary locations in Cardano database snapshot",
 		)
 	}
@@ -1183,7 +1364,18 @@ func downloadAncillaryV2(
 		err = errors.New("no usable ancillary locations")
 	}
 	if err != nil {
-		return "", "", fmt.Errorf(
+		// The destination path, not the (empty) return of a failed download:
+		// DownloadSnapshot resumes, so a failed attempt leaves a partial file
+		// there for Cleanup to remove.
+		//
+		// Asked of the downloader rather than assembled here, so the two
+		// cannot name different files — see downloadAncillary for what that
+		// costs when the aggregator picks the network name.
+		dest := downloadDestinationPath(DownloadConfig{
+			DestDir:  downloadDir,
+			Filename: ancillaryFilename,
+		})
+		return nil, nil, dest, fmt.Errorf(
 			"downloading ancillary archive: %w",
 			err,
 		)
@@ -1193,6 +1385,8 @@ func downloadAncillaryV2(
 		downloadDir,
 		filepath.Base("ancillary-"+artifact.Hash),
 	)
+	// Replace: the resume path above may have removed an unverified
+	// extraction, but an interrupted run can still leave one behind.
 	if _, extractErr := ExtractArchive(
 		ctx,
 		ancillaryPath,
@@ -1201,50 +1395,89 @@ func downloadAncillaryV2(
 			"phase", "ancillary_extraction",
 			"artifact", "ancillary_ledger_state",
 		),
+		WithReplaceDestination(),
 	); extractErr != nil {
-		return "", "", fmt.Errorf(
+		return nil, nil, ancillaryPath, fmt.Errorf(
 			"extracting ancillary archive: %w",
 			extractErr,
 		)
 	}
 
-	if err := verifyAncillaryExtraction(cfg, ancillaryDir); err != nil {
+	// Vetted and then verified through one handle, which is the same handle
+	// returned. Anything else leaves the manifest check describing a tree the
+	// caller does not go on to read.
+	extracted := ledgerDir(ancillaryDir)
+	if extracted == nil {
+		// Unverified bootstraps reach here too — verifyAncillaryExtraction is
+		// a no-op for them — so an ancillary archive carrying no ledger state
+		// has to be caught on its own.
+		os.RemoveAll(ancillaryDir)
+		// The archive path goes back even so, since it was downloaded and
+		// still wants cleaning up.
+		return nil, nil, ancillaryPath, fmt.Errorf(
+			"extracted ancillary data at %s holds no ledger state",
+			ancillaryDir,
+		)
+	}
+	digests, verifyErr := verifyAncillaryExtraction(cfg, extracted)
+	if verifyErr != nil {
 		// Remove the unverified extraction so it cannot be
 		// picked up by the resume path on a later run.
+		extracted.Close()
 		os.RemoveAll(ancillaryDir)
-		return "", "", err
+		// The extraction goes, the archive stays — and stays reported.
+		// Cleanup removes the two separately, so an unverified manifest that
+		// cleared this path would leave the download behind in a directory the
+		// operator supplied and nothing else sweeps.
+		return nil, nil, ancillaryPath, verifyErr
 	}
 
 	cfg.Logger.Info(
 		"ancillary data extracted",
 		"component", "mithril",
-		"path", ancillaryDir,
+		"path", extracted.Path(),
 	)
 
-	return ancillaryDir, ancillaryPath, nil
+	return extracted, digests, ancillaryPath, nil
 }
 
+// verifyAncillaryExtraction checks a verified bootstrap's ancillary tree
+// against the signed manifest.
+//
+// It takes the directory as the handle it was vetted through, and every read
+// below — the ledger-state presence check, the manifest, the per-file digests,
+// the completeness walk — resolves through that one handle. The handle then
+// goes on to the ledger-state import, so what was verified and what is loaded
+// are the same directory. Verifying by name would not carry that: the importer
+// resolves the name again, and nothing links the tree it reads to the tree that
+// satisfied the signature.
 func verifyAncillaryExtraction(
 	cfg BootstrapConfig,
-	ancillaryDir string,
-) error {
+	ancillary *vettedDir,
+) (map[string]string, error) {
 	if !cfg.VerifyCertificateChain {
-		return nil
+		return nil, nil
 	}
 	if cfg.AncillaryVerificationKey == "" {
-		return errors.New(
+		return nil, errors.New(
 			"ancillary verification key is required for verified bootstrap",
 		)
 	}
-	if !hasLedgerFiles(ancillaryDir) {
-		return errors.New(
+	if ancillary == nil {
+		return nil, errors.New(
+			"verified ancillary archive was not vetted",
+		)
+	}
+	if !hasLedgerFilesIn(ancillary.Root()) {
+		return nil, errors.New(
 			"verified ancillary archive contains no ledger state",
 		)
 	}
-	if err := verifyAncillaryManifest(
-		ancillaryDir, cfg.AncillaryVerificationKey,
-	); err != nil {
-		return fmt.Errorf(
+	digests, err := verifyAncillaryManifest(
+		ancillary.Root(), cfg.AncillaryVerificationKey,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
 			"ancillary manifest verification failed: %w",
 			err,
 		)
@@ -1253,7 +1486,7 @@ func verifyAncillaryExtraction(
 		"ancillary manifest verified",
 		"component", "mithril",
 	)
-	return nil
+	return digests, nil
 }
 
 // ancillaryManifest is the signed manifest shipped inside a v2
@@ -1279,49 +1512,53 @@ func (m *ancillaryManifest) computeHash() []byte {
 // verifies the Ed25519 signature over its file digest map with the
 // configured ancillary verification key, and checks every listed
 // file's SHA-256 digest.
+//
+// It returns the signed digest map on success. The caller carries it to the
+// import, because this pass hashes each file and closes it while the import
+// opens the state and table it selects afterwards — so the bytes that get
+// parsed have to be checked against these digests again, from the descriptors
+// the import reads through.
 func verifyAncillaryManifest(
-	dir string,
+	root *os.Root,
 	ancillaryVerificationKey string,
-) error {
-	data, err := os.ReadFile( //nolint:gosec // path rooted in our own extraction directory
-		filepath.Join(dir, ancillaryManifestFilename),
-	)
+) (map[string]string, error) {
+	data, err := readFileIn(root, ancillaryManifestFilename)
 	if err != nil {
-		return fmt.Errorf("reading ancillary manifest: %w", err)
+		return nil, fmt.Errorf("reading ancillary manifest: %w", err)
 	}
 	var manifest ancillaryManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		return fmt.Errorf("parsing ancillary manifest: %w", err)
+		return nil, fmt.Errorf("parsing ancillary manifest: %w", err)
 	}
 	if len(manifest.Data) == 0 {
-		return errors.New("ancillary manifest lists no files")
+		return nil, errors.New("ancillary manifest lists no files")
 	}
 	if manifest.Signature == "" {
-		return errors.New("ancillary manifest has no signature")
+		return nil, errors.New("ancillary manifest has no signature")
 	}
 
 	key, err := ParseVerificationKey(ancillaryVerificationKey)
 	if err != nil {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"parsing ancillary verification key: %w",
 			err,
 		)
 	}
 	if len(key.RawKeyBytes) != ed25519.PublicKeySize {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"ancillary verification key has unexpected size %d",
 			len(key.RawKeyBytes),
 		)
 	}
 	signature, err := decodeHexString(manifest.Signature)
 	if err != nil {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"decoding ancillary manifest signature: %w",
 			err,
 		)
 	}
 	if len(signature) != ed25519.SignatureSize {
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"ancillary manifest signature has unexpected size %d",
 			len(signature),
 		)
@@ -1331,28 +1568,26 @@ func verifyAncillaryManifest(
 		manifest.computeHash(),
 		signature,
 	) {
-		return errors.New("ancillary manifest signature is invalid")
+		return nil, errors.New("ancillary manifest signature is invalid")
 	}
 
 	for _, relPath := range slices.Sorted(maps.Keys(manifest.Data)) {
 		if !filepath.IsLocal(relPath) {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"ancillary manifest contains non-local path %q",
 				relPath,
 			)
 		}
-		sum, _, err := sha256File(
-			filepath.Join(dir, filepath.FromSlash(relPath)),
-		)
+		sum, err := sha256FileIn(root, relPath)
 		if err != nil {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"hashing ancillary file %s: %w",
 				relPath,
 				err,
 			)
 		}
 		if sum != manifest.Data[relPath] {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"ancillary file %s digest mismatch",
 				relPath,
 			)
@@ -1361,20 +1596,16 @@ func verifyAncillaryManifest(
 	// The signed manifest must cover the complete extracted payload. An
 	// attacker must not be able to add an unlisted ledger or immutable file
 	// that the importer could later select.
-	if err := filepath.WalkDir(
-		dir,
-		func(path string, entry os.DirEntry, walkErr error) error {
+	if err := fs.WalkDir(
+		root.FS(),
+		".",
+		func(relPath string, entry fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				return walkErr
 			}
 			if entry.IsDir() {
 				return nil
 			}
-			relPath, err := filepath.Rel(dir, path)
-			if err != nil {
-				return err
-			}
-			relPath = filepath.ToSlash(relPath)
 			if relPath == ancillaryManifestFilename {
 				return nil
 			}
@@ -1387,7 +1618,36 @@ func verifyAncillaryManifest(
 			return nil
 		},
 	); err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	return manifest.Data, nil
+}
+
+// readFileIn reads a slash-separated path relative to root.
+func readFileIn(root *os.Root, rel string) ([]byte, error) {
+	f, err := root.Open(filepath.FromSlash(rel))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
+}
+
+// sha256FileIn hashes a slash-separated path relative to root.
+//
+// Through the handle rather than by name, because the digest has to describe
+// the file in the tree that was vetted. Hashing a name would leave the manifest
+// check and everything downstream of it about whatever occupied that name at
+// two different instants.
+func sha256FileIn(root *os.Root, rel string) (string, error) {
+	f, err := root.Open(filepath.FromSlash(rel))
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, f); err != nil {
+		return "", fmt.Errorf("hashing %s: %w", rel, err)
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }

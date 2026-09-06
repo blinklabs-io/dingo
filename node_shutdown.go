@@ -87,6 +87,13 @@ func (n *Node) configuredShutdownTimeout() time.Duration {
 }
 
 func (n *Node) shutdown() error {
+	// Run holds this gate until startup has either completed or rolled back.
+	// In particular, a signal can reach Stop while Run is still unwinding a
+	// failed startup; waiting here keeps the phase-ordered shutdown from
+	// concurrently closing a component the startup stack is stopping.
+	n.startupLifecycleMu.Lock()
+	defer n.startupLifecycleMu.Unlock()
+
 	shutdownStart := time.Now()
 	shutdownTimeout := n.configuredShutdownTimeout()
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
@@ -108,6 +115,9 @@ func (n *Node) shutdown() error {
 	// n.cancel() above asks the stall recycler to stop; wait here so it cannot
 	// race later shutdown phases that close connection, ledger, or DB state.
 	n.waitChainsyncStallRecycler()
+	// The selected-to-none worker is also context-owned. Wait for it before
+	// tearing down the selector or the chainsync state it reads.
+	n.waitChainSelectedNoneWorker()
 
 	// Stop block forger first to prevent new blocks
 	if n.blockForger != nil {
@@ -129,7 +139,12 @@ func (n *Node) shutdown() error {
 	}
 
 	if n.peerGov != nil {
-		n.peerGov.Stop()
+		if stopErr := n.peerGov.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("peer governor shutdown: %w", stopErr),
+			)
+		}
 	}
 
 	if n.snapshotMgr != nil {
@@ -195,6 +210,18 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	// The token registry sync holds a background goroutine and reads n.db
+	// through its store, so it has to stop here, before phase 3 tears the
+	// store down. Run()'s rollback stack only covers startup failure.
+	if n.tokenRegistrySync != nil {
+		if stopErr := n.tokenRegistrySync.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("token registry sync shutdown: %w", stopErr),
+			)
+		}
+	}
+
 	// Stop the Koios parity observer before phase 3 tears down n.db/
 	// n.pluginHost: the observer's background goroutine reads Dingo's
 	// committed reward state through its RewardParitySource, which is backed
@@ -227,22 +254,27 @@ func (n *Node) shutdown() error {
 		}
 	}
 
-	// Close the EventBus before draining network connections. Since v0.68,
-	// event delivery applies backpressure instead of dropping events. A
-	// chainsync callback can therefore be blocked waiting for a full ledger
-	// subscriber while ConnectionManager.Stop waits for that callback to
-	// finish. Closing the terminal bus here releases those blocked publishers
-	// before connection teardown begins. The node context is already cancelled
-	// and mempool has stopped, so no component should produce useful work after
-	// this point; later component teardown treats an already-closed bus as
-	// harmless and idempotent.
+	// Close the EventBus while draining connections. Since v0.68, event
+	// delivery applies backpressure instead of dropping events. A chainsync
+	// callback can therefore be blocked waiting for a full ledger subscriber,
+	// while a blockfetch continuation can wait for a BatchDone event that only
+	// connection shutdown releases. Run both operations together so neither
+	// side waits indefinitely for the other.
+	var connManagerDone chan error
+	if n.connManager != nil {
+		connManagerDone = make(chan error, 1)
+		go func() {
+			connManagerDone <- n.connManager.Stop(ctx)
+		}()
+	}
+
 	if n.eventBus != nil {
-		n.config.logger.Info("closing event bus before connection drain")
+		n.config.logger.Info("closing event bus while draining connections")
 		n.eventBus.Close()
 	}
 
-	if n.connManager != nil {
-		if stopErr := n.connManager.Stop(ctx); stopErr != nil {
+	if connManagerDone != nil {
+		if stopErr := <-connManagerDone; stopErr != nil {
 			err = errors.Join(
 				err,
 				fmt.Errorf("connection manager shutdown: %w", stopErr),
@@ -258,6 +290,7 @@ func (n *Node) shutdown() error {
 	// Phase 3: Flush state and close database
 	n.config.logger.Info("shutdown phase 3: flushing state")
 	phase3Start := time.Now()
+	ledgerStateDrainConfirmed := true
 
 	if n.ledgerState != nil {
 		n.config.logger.Info("closing ledger state")
@@ -267,6 +300,7 @@ func (n *Node) shutdown() error {
 			shutdownTimeout,
 			n.ledgerState.Close,
 		); closeErr != nil {
+			ledgerStateDrainConfirmed = false
 			err = errors.Join(
 				err,
 				fmt.Errorf("ledger state close: %w", closeErr),
@@ -298,21 +332,37 @@ func (n *Node) shutdown() error {
 	}
 
 	if n.db != nil {
-		n.config.logger.Info("closing database")
-		if closeErr := n.closeWithShutdownTimeout(
-			ctx,
-			"database",
-			shutdownTimeout,
-			n.db.Close,
-		); closeErr != nil {
+		if !ledgerStateDrainConfirmed {
+			n.config.logger.Error(
+				"skipping database close because ledger state drain was not confirmed",
+			)
 			err = errors.Join(
 				err,
-				fmt.Errorf("database close: %w", closeErr),
+				errors.New(
+					"database close skipped: ledger state drain unconfirmed",
+				),
 			)
+		} else {
+			n.config.logger.Info("closing database")
+			if closeErr := n.closeWithShutdownTimeout(
+				ctx,
+				"database",
+				shutdownTimeout,
+				n.db.Close,
+			); closeErr != nil {
+				err = errors.Join(
+					err,
+					fmt.Errorf("database close: %w", closeErr),
+				)
+			}
 		}
 	}
 	if n.pluginHost != nil {
-		if stopErr := n.pluginHost.Stop(ctx); stopErr != nil {
+		if !ledgerStateDrainConfirmed {
+			n.config.logger.Error(
+				"skipping plugin host shutdown because ledger state drain was not confirmed",
+			)
+		} else if stopErr := n.pluginHost.Stop(ctx); stopErr != nil {
 			err = errors.Join(
 				err,
 				fmt.Errorf("plugin host shutdown: %w", stopErr),

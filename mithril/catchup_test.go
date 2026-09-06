@@ -28,6 +28,17 @@ import (
 
 const immutableTestdataDir = "../database/immutable/testdata"
 
+// testImmutable opens the immutable testdata by pathname. The catch-up checks
+// take an open ImmutableDB rather than a directory name so production can hand
+// them the handle the bootstrap vetted; these tests have no such handle and
+// nothing racing them, so a plain open is what they want.
+func testImmutable(t *testing.T) *immutable.ImmutableDb {
+	t.Helper()
+	imm, err := immutable.New(immutableTestdataDir)
+	require.NoError(t, err)
+	return imm
+}
+
 // firstImmutableBlock returns a real (slot, hash) from the immutable testdata so
 // the intersection check is exercised against genuine on-chain block data.
 func firstImmutableBlock(t *testing.T) (uint64, []byte) {
@@ -62,7 +73,7 @@ func TestVerifyCatchupIntersection(t *testing.T) {
 			Type:     6,
 		}, nil))
 		require.NoError(
-			t, verifyCatchupIntersection(db, immutableTestdataDir, discard),
+			t, verifyCatchupIntersection(db, testImmutable(t), discard),
 		)
 	})
 
@@ -78,7 +89,7 @@ func TestVerifyCatchupIntersection(t *testing.T) {
 			Number:   1,
 			Type:     6,
 		}, nil))
-		err := verifyCatchupIntersection(db, immutableTestdataDir, discard)
+		err := verifyCatchupIntersection(db, testImmutable(t), discard)
 		require.Error(t, err)
 		require.ErrorContains(t, err, "diverges")
 	})
@@ -136,7 +147,7 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 				bytes.Repeat([]byte{0xcd}, 32),
 				99,
 			), nil))
-			err := verifyCatchupIntersection(db, immutableTestdataDir, discard)
+			err := verifyCatchupIntersection(db, testImmutable(t), discard)
 			require.Error(t, err)
 			require.NotErrorIs(t, err, errCatchUpLocalAhead)
 			require.ErrorContains(t, err, "diverges")
@@ -151,7 +162,7 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 			require.NoError(t, db.BlockCreate(catchupTestBlock(
 				artSlot+5000, aheadHash, wrong, 99,
 			), nil))
-			err := verifyCatchupIntersection(db, immutableTestdataDir, discard)
+			err := verifyCatchupIntersection(db, testImmutable(t), discard)
 			require.Error(t, err)
 			require.NotErrorIs(t, err, errCatchUpLocalAhead)
 			require.ErrorContains(t, err, "diverges")
@@ -169,7 +180,7 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 			require.NoError(t, db.BlockCreate(catchupTestBlock(
 				artSlot+5000, aheadHash, wrong, 99,
 			), nil))
-			err := verifyCatchupIntersection(db, immutableTestdataDir, discard)
+			err := verifyCatchupIntersection(db, testImmutable(t), discard)
 			require.Error(t, err)
 			require.NotErrorIs(t, err, errCatchUpLocalAhead)
 			require.ErrorContains(t, err, "diverges")
@@ -181,7 +192,7 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 		require.NoError(t, db.BlockCreate(catchupTestBlock(
 			artSlot+5000, aheadHash, artHash, 99,
 		), nil))
-		err := verifyCatchupIntersection(db, immutableTestdataDir, discard)
+		err := verifyCatchupIntersection(db, testImmutable(t), discard)
 		require.ErrorIs(t, err, errCatchUpLocalAhead)
 	})
 }
@@ -203,7 +214,7 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 		db := newSyncModeTestDB(t)
 		require.NoError(t, db.BlockCreate(artBlock, nil))
 		upToDate, err := verifyCatchupBeforeImport(
-			db, immutableTestdataDir, 42, false, discard,
+			db, testImmutable(t), 42, false, discard,
 		)
 		require.NoError(t, err)
 		require.False(t, upToDate)
@@ -220,7 +231,7 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 				artSlot+5000, aheadHash, artHash, 99,
 			), nil))
 			upToDate, err := verifyCatchupBeforeImport(
-				db, immutableTestdataDir, 42, false, discard,
+				db, testImmutable(t), 42, false, discard,
 			)
 			require.NoError(t, err)
 			require.True(t, upToDate)
@@ -243,7 +254,7 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 				artSlot+5000, aheadHash, artHash, 99,
 			), nil))
 			upToDate, err := verifyCatchupBeforeImport(
-				db, immutableTestdataDir, 43, true, discard,
+				db, testImmutable(t), 43, true, discard,
 			)
 			require.NoError(t, err)
 			require.False(
@@ -266,7 +277,7 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 			artSlot, wrong, bytes.Repeat([]byte{0x01}, 32), 98,
 		), nil))
 		_, err := verifyCatchupBeforeImport(
-			db, immutableTestdataDir, 42, false, discard,
+			db, testImmutable(t), 42, false, discard,
 		)
 		require.Error(t, err)
 		require.ErrorContains(t, err, "diverges")

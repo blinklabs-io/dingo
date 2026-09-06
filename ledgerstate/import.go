@@ -17,12 +17,14 @@ package ledgerstate
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
 	"net"
+	"os"
 	"slices"
 	"sort"
 	"time"
@@ -70,6 +72,11 @@ type RawLedgerState struct {
 	GovStateData cbor.RawMessage
 	// PParamsData is the deferred CBOR for protocol parameters.
 	PParamsData cbor.RawMessage
+	// PrevPParamsData is the deferred CBOR for the protocol parameters that
+	// were in force during the preceding epoch. Cardano ledger state keeps
+	// this alongside the current parameters because delayed reward
+	// calculation consumes it after the epoch has ended.
+	PrevPParamsData cbor.RawMessage
 	// SnapShotsData is the deferred CBOR for mark/set/go stake snapshots.
 	SnapShotsData cbor.RawMessage
 	// PoolDistrData is the deferred CBOR for the active consensus pool
@@ -102,6 +109,10 @@ type RawLedgerState struct {
 	// LastEpochBlockNonce is the Praos last applied block hash from
 	// consensus state (used in epoch nonce calculation).
 	LastEpochBlockNonce []byte
+	// OpCertCounters is the certified per-pool operational-certificate
+	// counter state from the Praos HeaderState. Keys are 28-byte pool cold-key
+	// hashes encoded as strings so they remain comparable.
+	OpCertCounters map[string]uint64
 	// EraBoundsWarning holds a non-fatal error from era bounds
 	// extraction. When set, epoch generation falls back to
 	// the single-epoch path.
@@ -110,6 +121,28 @@ type RawLedgerState struct {
 	// format). When set, UTxOs are streamed from this file instead
 	// of from UTxOData.
 	UTxOTablePath string
+	// UTxOTableFile, when set, is an already-open handle on the UTxO table
+	// that the import reads instead of resolving UTxOTablePath.
+	//
+	// A caller that vetted the snapshot tree needs this: resolving the
+	// pathname here would read whatever occupies that name at import time,
+	// which need not be the file the caller checked. UTxOTablePath stays set
+	// alongside it for messages. The caller keeps ownership and must hold the
+	// file open for the duration of the import.
+	UTxOTableFile *os.File
+	// UTxOTableDigest, when set, is the hex SHA-256 the table's contents must
+	// have, checked against the mapped bytes immediately before they are
+	// decoded.
+	//
+	// A caller holding a signature over the table needs this rather than
+	// hashing UTxOTableFile itself: the table is mapped rather than read, so a
+	// digest taken from the descriptor beforehand describes a read that then
+	// happens again. Handing the digest down means the bytes that are checked
+	// and the bytes that are decoded are one mapping.
+	//
+	// Empty means nothing signed this table — v1, and any tree nothing
+	// vouched for — and it is decoded unchecked, as it was before.
+	UTxOTableDigest string
 	// UTxOHD indicates that the snapshot used the UTxO-HD ledger
 	// state wrapper. These snapshots keep the real UTxO set in an
 	// external table file and the inline UTxO field is only a
@@ -170,10 +203,43 @@ type Credential struct {
 
 // ParsedCertState holds the parsed delegation, pool, and DRep state.
 type ParsedCertState struct {
-	Accounts []ParsedAccount
-	Pools    []ParsedPool
-	DReps    []ParsedDRep
+	Accounts              []ParsedAccount
+	Pools                 []ParsedPool
+	DReps                 []ParsedDRep
+	CommitteeHotKeys      []ParsedCommitteeHotKey
+	CommitteeResignations []Credential
 }
+
+type ParsedCommitteeHotKey struct {
+	Cold Credential
+	Hot  Credential
+}
+
+// importedCommitteeTransaction carries snapshot committee certificates through
+// the normal metadata certificate writer. Keeping this at the database
+// boundary preserves the same tagged credential and rollback semantics as
+// certificates received from the chain.
+type importedCommitteeTransaction struct {
+	lcommon.TransactionBodyBase
+	hash  lcommon.Blake2b256
+	certs []lcommon.Certificate
+}
+
+func (t importedCommitteeTransaction) Type() int                { return 0 }
+func (t importedCommitteeTransaction) Cbor() []byte             { return t.hash[:] }
+func (t importedCommitteeTransaction) Id() lcommon.Blake2b256   { return t.hash }
+func (t importedCommitteeTransaction) Hash() lcommon.Blake2b256 { return t.hash }
+func (t importedCommitteeTransaction) ProtocolParameterUpdates() (uint64, map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate) {
+	return 0, nil
+}
+func (t importedCommitteeTransaction) LeiosHash() lcommon.Blake2b256            { return t.hash }
+func (t importedCommitteeTransaction) Metadata() lcommon.TransactionMetadatum   { return nil }
+func (t importedCommitteeTransaction) AuxiliaryData() lcommon.AuxiliaryData     { return nil }
+func (t importedCommitteeTransaction) IsValid() bool                            { return true }
+func (t importedCommitteeTransaction) Certificates() []lcommon.Certificate      { return t.certs }
+func (t importedCommitteeTransaction) Consumed() []lcommon.TransactionInput     { return nil }
+func (t importedCommitteeTransaction) Produced() []lcommon.Utxo                 { return nil }
+func (t importedCommitteeTransaction) Witnesses() lcommon.TransactionWitnessSet { return nil }
 
 // ParsedAccount represents a stake account with its delegation.
 type ParsedAccount struct {
@@ -181,7 +247,7 @@ type ParsedAccount struct {
 	PoolKeyHash []byte     // 28-byte pool key hash (delegation target)
 	DRepCred    Credential // DRep credential (vote delegation)
 	Reward      uint64     // reward balance in lovelace
-	Deposit     uint64     // deposit in lovelace
+	Deposit     *uint64    // deposit in lovelace; nil when absent from the source
 	Active      bool
 }
 
@@ -265,10 +331,12 @@ type ParsedSnapShot struct {
 // StakeNumerator/StakeDenominator are the exact sigma fraction used by
 // Praos leader eligibility.
 type ParsedActivePoolStake struct {
-	PoolKeyHash      []byte
-	StakeNumerator   uint64
-	StakeDenominator uint64
-	VrfKeyHash       []byte
+	PoolKeyHash             []byte
+	StakeNumerator          uint64
+	StakeDenominator        uint64
+	VrfKeyHash              []byte
+	LeiosKeyPublic          []byte
+	LeiosKeyPossessionProof []byte
 }
 
 // ImportProgress reports progress during ledger state import.
@@ -776,7 +844,23 @@ func importUTxOs(
 	}
 
 	var err error
-	if cfg.State.UTxOTablePath != "" {
+	switch {
+	case cfg.State.UTxOTableFile != nil:
+		// UTxO-HD format, read through the handle the caller vetted the tree
+		// with rather than by re-resolving UTxOTablePath.
+		_, err = parseUTxOsFromOpenFileWithProgress(
+			cfg.State.UTxOTableFile,
+			cfg.State.UTxOTableDigest,
+			batchCallback,
+			reportProgress,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"parsing UTxOs from file %s: %w",
+				cfg.State.UTxOTablePath, err,
+			)
+		}
+	case cfg.State.UTxOTablePath != "":
 		// UTxO-HD format: stream from tvar file
 		_, err = parseUTxOsFromFileWithProgress(
 			cfg.State.UTxOTablePath,
@@ -789,7 +873,7 @@ func importUTxOs(
 				cfg.State.UTxOTablePath, err,
 			)
 		}
-	} else {
+	default:
 		// Legacy format: decode from inline CBOR
 		_, err = parseUTxOsStreamingWithProgress(
 			cfg.State.UTxOData,
@@ -952,6 +1036,14 @@ func importCertState(
 			),
 		})
 	}
+	if err := persistImportedCommitteeCertificates(
+		cfg.Database,
+		certState,
+		snapshotEpochAnchorSlot(cfg, cfg.State.Epoch),
+		nil,
+	); err != nil {
+		return 0, fmt.Errorf("importing committee authorizations: %w", err)
+	}
 
 	return importedPools, nil
 }
@@ -1018,6 +1110,10 @@ func importAccounts(
 			AddedSlot:     slot,
 			Reward:        types.Uint64(acct.Reward),
 			Active:        acct.Active,
+		}
+		if acct.Deposit != nil {
+			deposit := types.Uint64(*acct.Deposit)
+			model.ImportDeposit = &deposit
 		}
 
 		if err := store.ImportAccount(
@@ -1365,9 +1461,11 @@ func importSnapShots(
 	//   - Mark for epoch N-1   = imported set snapshot
 	//   - Mark for epoch N-2   = imported go snapshot
 	//
-	// Import the bundle into those historical epochs so leader
-	// schedule queries (which request epoch-2, "mark") work
-	// immediately after a Mithril restore.
+	// Import the bundle into those historical epochs so leader schedule
+	// queries can read mark[E-1], the stake captured at the end of E-2,
+	// immediately after a Mithril restore. Preserve the semantic boundary
+	// capture slot from NewEpochState.SnapShots rather than stamping the rows
+	// with the mid-epoch ledger-state tip.
 	for _, st := range snapshotImportTargets(epoch, snapshots) {
 		select {
 		case <-ctx.Done():
@@ -1377,11 +1475,16 @@ func importSnapShots(
 		default:
 		}
 
+		capturedSlot := importedSnapshotCaptureSlot(
+			cfg,
+			st.targetEpoch,
+			slot,
+		)
 		poolSnapshots := AggregatePoolStake(
 			st.snap,
 			st.targetEpoch,
 			"mark",
-			slot,
+			capturedSlot,
 		)
 
 		if err := persistImportedSnapshot(
@@ -1407,6 +1510,7 @@ func importSnapShots(
 			"snapshot", st.name,
 			"stored_as", "mark",
 			"target_epoch", st.targetEpoch,
+			"captured_slot", capturedSlot,
 			"pools", len(poolSnapshots),
 			"total_stake", totalStake,
 			"component", "ledgerstate",
@@ -1611,6 +1715,11 @@ func seedImportedRewardBasis(
 		txn.Metadata(),
 		snapshots,
 		resolveParams,
+		func(target uint64) error {
+			return validateImportedRewardPParams(
+				cfg, txn.Metadata(), target,
+			)
+		},
 		epoch,
 		slot,
 		cfg.Logger,
@@ -1991,12 +2100,18 @@ func ActivePoolDistributionSnapshots(
 			continue
 		}
 		snapshots = append(snapshots, &models.PoolStakeSnapshot{
-			Epoch:              epoch,
-			SnapshotType:       models.PoolStakeSnapshotTypeActive,
-			PoolKeyHash:        slices.Clone(pool.PoolKeyHash),
-			TotalStake:         types.Uint64(pool.StakeNumerator),
-			StakeDenominator:   types.Uint64(pool.StakeDenominator),
-			CapturedSlot:       capturedSlot,
+			Epoch:            epoch,
+			SnapshotType:     models.PoolStakeSnapshotTypeActive,
+			PoolKeyHash:      slices.Clone(pool.PoolKeyHash),
+			TotalStake:       types.Uint64(pool.StakeNumerator),
+			StakeDenominator: types.Uint64(pool.StakeDenominator),
+			CapturedSlot:     capturedSlot,
+			LeiosKeyPublic: append(
+				[]byte(nil), pool.LeiosKeyPublic...,
+			),
+			LeiosKeyPossessionProof: append(
+				[]byte(nil), pool.LeiosKeyPossessionProof...,
+			),
 			CalculationVersion: models.RewardStakeCalculationVersion,
 		})
 	}
@@ -2103,6 +2218,16 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 		return fmt.Errorf("setting tip: %w", err)
 	}
 
+	// The HeaderState counters are certified at the snapshot tip. Persist them
+	// in the same transaction as the tip so post-snapshot block validation has
+	// the authoritative baseline and never treats an arbitrary first replayed
+	// certificate as one.
+	if err := importOpCertCounters(
+		store, cfg.State.OpCertCounters, tip.Slot, txn.Metadata(),
+	); err != nil {
+		return err
+	}
+
 	// Store evolving nonce as the tip block nonce so that
 	// subsequent block processing starts from the correct rolling
 	// nonce. Without this, the node falls back to the Shelley
@@ -2163,6 +2288,30 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 			"commit transaction in importTip: %w",
 			err,
 		)
+	}
+	return nil
+}
+
+func importOpCertCounters(
+	store metadata.MetadataStore,
+	counters map[string]uint64,
+	slot uint64,
+	txn types.Txn,
+) error {
+	for poolKey, sequence := range counters {
+		if len(poolKey) != len(lcommon.PoolKeyHash{}) {
+			return fmt.Errorf(
+				"certified opcert pool key has length %d, expected 28",
+				len(poolKey),
+			)
+		}
+		var poolKeyHash lcommon.PoolKeyHash
+		copy(poolKeyHash[:], poolKey)
+		if err := store.UpdatePoolOpCertSequence(
+			poolKeyHash, sequence, slot, txn,
+		); err != nil {
+			return fmt.Errorf("storing certified opcert counter: %w", err)
+		}
 	}
 	return nil
 }
@@ -2248,6 +2397,28 @@ func importedEpochStartSlot(
 	}
 	return cfg.State.EraBoundSlot +
 		(epoch-cfg.State.EraBoundEpoch)*uint64(lengthInSlots), true
+}
+
+// importedSnapshotCaptureSlot returns the semantic slot represented by one
+// member of NewEpochState.SnapShots. A Dingo mark row for epoch N records the
+// SNAP distribution taken immediately before the boundary into N, regardless
+// of which later slot exported the ledger-state file. When the imported era
+// history cannot place that boundary, retaining the import tip preserves the
+// older import encoding; header validation recognizes the exact Mithril anchor
+// as certified SnapShots provenance.
+func importedSnapshotCaptureSlot(
+	cfg ImportConfig,
+	epoch uint64,
+	importSlot uint64,
+) uint64 {
+	epochStart, ok := importedEpochStartSlot(cfg, epoch)
+	if !ok {
+		return importSlot
+	}
+	if epochStart == 0 {
+		return 0
+	}
+	return epochStart - 1
 }
 
 // generateAndSaveEpochs creates epoch records for every epoch from
@@ -2517,20 +2688,150 @@ func resolveEraParams(
 	return 0, epochLength
 }
 
-// importPParams decodes and stores protocol parameters from the
-// snapshot.
+// validateImportedRewardPParams checks the parameter rows that will be read
+// when one imported Mark basis is consumed. Mark for E needs only future live
+// rows; Set for E-1 needs the imported current row E; Go for E-2 additionally
+// needs historical row E-1. A valid row already in the database satisfies the
+// same lookup and makes catch-up/reconcile re-entry safe.
+func validateImportedRewardPParams(
+	cfg ImportConfig,
+	txn types.Txn,
+	rewardEpoch uint64,
+) error {
+	if cfg.State == nil {
+		return errors.New(
+			"checking imported reward pparams: ledger state is nil",
+		)
+	}
+	currentEpoch := cfg.State.Epoch
+	if rewardEpoch == currentEpoch {
+		return nil
+	}
+	needsCurrent := currentEpoch > 0 && rewardEpoch == currentEpoch-1
+	needsPrevious := currentEpoch > 1 && rewardEpoch == currentEpoch-2
+	if !needsCurrent && !needsPrevious {
+		return fmt.Errorf(
+			"%w: reward epoch %d is outside snapshot epoch %d's Mark/Set/Go window",
+			errRewardPParamsUnavailable,
+			rewardEpoch,
+			currentEpoch,
+		)
+	}
+
+	store := cfg.Database.Metadata()
+	currentAvailable, err := importedPParamsAvailable(
+		store,
+		txn,
+		currentEpoch,
+		cfg.State.EraIndex,
+		[]byte(cfg.State.PParamsData),
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"checking protocol parameters for epoch %d: %w",
+			currentEpoch, err,
+		)
+	}
+	if !currentAvailable {
+		return fmt.Errorf(
+			"%w: current protocol parameters for epoch %d are unavailable",
+			errRewardPParamsUnavailable,
+			currentEpoch,
+		)
+	}
+	if !needsPrevious {
+		return nil
+	}
+
+	previousEpoch := currentEpoch - 1
+	previousEra, ok := importedEraForEpoch(cfg.State, previousEpoch)
+	if !ok {
+		return fmt.Errorf(
+			"%w: era for historical protocol parameters epoch %d cannot be determined",
+			errRewardPParamsUnavailable,
+			previousEpoch,
+		)
+	}
+	previousAvailable, err := importedPParamsAvailable(
+		store,
+		txn,
+		previousEpoch,
+		previousEra,
+		[]byte(cfg.State.PrevPParamsData),
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"checking historical protocol parameters for epoch %d: %w",
+			previousEpoch, err,
+		)
+	}
+	if !previousAvailable {
+		return fmt.Errorf(
+			"%w: historical protocol parameters for epoch %d are unavailable in era %s",
+			errRewardPParamsUnavailable,
+			previousEpoch,
+			EraName(previousEra),
+		)
+	}
+	return nil
+}
+
+func importedPParamsAvailable(
+	store metadata.MetadataStore,
+	txn types.Txn,
+	epoch uint64,
+	era int,
+	payload []byte,
+) (bool, error) {
+	if era < 0 {
+		return false, nil
+	}
+	if len(payload) > 0 && pparamsDataIsValid(era, payload) {
+		return true, nil
+	}
+	stored, err := storedValidPParams(store, txn, epoch, era)
+	if err != nil {
+		return false, err
+	}
+	return stored != nil, nil
+}
+
+func storedValidPParams(
+	store metadata.MetadataStore,
+	txn types.Txn,
+	epoch uint64,
+	era int,
+) (*models.PParams, error) {
+	if era < 0 {
+		return nil, nil
+	}
+	// #nosec G115 -- era was checked non-negative above.
+	rows, err := store.GetPParams(epoch, uint(era), txn)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	if !pparamsDataIsValid(era, rows[0].Cbor) {
+		return nil, nil
+	}
+	return &rows[0], nil
+}
+
+func pparamsDataIsValid(era int, payload []byte) bool {
+	return validatePParamsData(era, payload) == nil
+}
+
+// importPParams validates and stores the snapshot's compatible protocol
+// parameters. Eligibility for an imported reward basis is decided earlier,
+// while that basis can still be skipped independently.
 func importPParams(
 	ctx context.Context,
 	cfg ImportConfig,
 ) error {
-	if cfg.State.PParamsData == nil {
-		return nil
-	}
-
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf(
-			"pparams import cancelled: %w", err,
-		)
+		return fmt.Errorf("pparams import cancelled: %w", err)
 	}
 
 	cfg.Logger.Info(
@@ -2538,46 +2839,164 @@ func importPParams(
 		"component", "ledgerstate",
 	)
 
-	pparamsCbor := []byte(cfg.State.PParamsData)
-	if err := validatePParamsData(
-		cfg.State.EraIndex,
-		pparamsCbor,
-	); err != nil {
-		return fmt.Errorf(
-			"validating protocol parameters: %w",
-			err,
-		)
-	}
-
 	store := cfg.Database.Metadata()
 	txn := cfg.Database.MetadataTxn(true)
 	defer txn.Release()
-	pparamsSlot := snapshotEpochAnchorSlot(
-		cfg,
-		cfg.State.Epoch,
-	)
 
-	// #nosec G115
-	if err := store.SetPParams(
-		pparamsCbor,
-		pparamsSlot,
-		cfg.State.Epoch,
-		uint(cfg.State.EraIndex),
+	pparamsCbor := []byte(cfg.State.PParamsData)
+	currentStored, err := storedValidPParams(
+		store,
 		txn.Metadata(),
-	); err != nil {
+		cfg.State.Epoch,
+		cfg.State.EraIndex,
+	)
+	if err != nil {
 		return fmt.Errorf(
-			"storing protocol parameters: %w",
-			err,
+			"checking stored protocol parameters for epoch %d: %w",
+			cfg.State.Epoch, err,
 		)
+	}
+	writeCurrent := false
+	if len(pparamsCbor) > 0 {
+		if err := validatePParamsData(cfg.State.EraIndex, pparamsCbor); err != nil {
+			if currentStored == nil {
+				return fmt.Errorf(
+					"validating protocol parameters for epoch %d: %w",
+					cfg.State.Epoch,
+					err,
+				)
+			}
+			cfg.Logger.Warn(
+				"not importing incompatible current protocol parameters from snapshot; retaining the existing valid row",
+				"component",
+				"ledgerstate",
+				"epoch",
+				cfg.State.Epoch,
+				"era",
+				EraName(cfg.State.EraIndex),
+				"error",
+				err.Error(),
+			)
+		} else {
+			writeCurrent = currentStored == nil ||
+				!bytes.Equal(currentStored.Cbor, pparamsCbor)
+		}
+	}
+
+	var (
+		previousEpoch uint64
+		previousEra   int
+		previousCbor  = []byte(cfg.State.PrevPParamsData)
+		writePrevious bool
+	)
+	if cfg.State.Epoch > 0 && len(previousCbor) > 0 {
+		previousEpoch = cfg.State.Epoch - 1
+		var previousEraKnown bool
+		previousEra, previousEraKnown = importedEraForEpoch(
+			cfg.State, previousEpoch,
+		)
+		if !previousEraKnown {
+			cfg.Logger.Warn(
+				"not importing historical protocol parameters from snapshot because the epoch's era cannot be determined",
+				"component",
+				"ledgerstate",
+				"epoch",
+				previousEpoch,
+			)
+		} else if validationErr := validatePParamsData(
+			previousEra, previousCbor,
+		); validationErr != nil {
+			cfg.Logger.Warn(
+				"not importing historical protocol parameters from snapshot because the payload is incompatible with the epoch's era",
+				"component", "ledgerstate",
+				"epoch", previousEpoch,
+				"era", EraName(previousEra),
+				"error", validationErr.Error(),
+			)
+		} else {
+			previousStored, err := storedValidPParams(
+				store,
+				txn.Metadata(),
+				previousEpoch,
+				previousEra,
+			)
+			if err != nil {
+				return fmt.Errorf(
+					"checking stored historical protocol parameters for epoch %d: %w",
+					previousEpoch, err,
+				)
+			}
+			writePrevious = previousStored == nil ||
+				!bytes.Equal(previousStored.Cbor, previousCbor)
+		}
+	}
+	if !writePrevious && !writeCurrent {
+		return nil
+	}
+
+	if writePrevious {
+		previousSlot := snapshotEpochAnchorSlot(cfg, previousEpoch)
+		// #nosec G115 -- previousEra is a non-negative era index returned by
+		// importedEraForEpoch.
+		if err := store.SetPParams(
+			previousCbor,
+			previousSlot,
+			previousEpoch,
+			uint(previousEra),
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"storing historical protocol parameters for epoch %d: %w",
+				previousEpoch,
+				err,
+			)
+		}
+	}
+
+	if writeCurrent {
+		pparamsSlot := snapshotEpochAnchorSlot(cfg, cfg.State.Epoch)
+		// #nosec G115 -- the parser only accepts known non-negative era indexes.
+		if err := store.SetPParams(
+			pparamsCbor,
+			pparamsSlot,
+			cfg.State.Epoch,
+			uint(cfg.State.EraIndex),
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("storing protocol parameters: %w", err)
+		}
 	}
 
 	if err := txn.Commit(); err != nil {
-		return fmt.Errorf(
-			"commit transaction in importPParams: %w",
-			err,
-		)
+		return fmt.Errorf("commit transaction in importPParams: %w", err)
 	}
 	return nil
+}
+
+// importedEraForEpoch resolves an imported epoch against the era telescope
+// carried by the ledger state. The last bound at or before the epoch wins,
+// which also handles zero-epoch eras on Preview. Without the full telescope,
+// only epochs at or after the current era's known bound are defensible.
+func importedEraForEpoch(state *RawLedgerState, epoch uint64) (int, bool) {
+	if state == nil {
+		return 0, false
+	}
+	if len(state.EraBounds) > 0 {
+		if epoch < state.EraBounds[0].Epoch {
+			return 0, false
+		}
+		era := -1
+		for i := range state.EraBounds {
+			if state.EraBounds[i].Epoch <= epoch {
+				era = i
+			}
+		}
+		return era, era >= 0
+	}
+	if epoch < state.EraBoundEpoch {
+		return 0, false
+	}
+	return state.EraIndex, state.EraIndex >= 0
 }
 
 // importGovState imports governance state (constitution, committee
@@ -2670,10 +3089,21 @@ func importGovState(
 							i, len(cm.ColdCredential.Hash),
 						)
 					}
+					credentialTag, tagErr := models.CredentialTagFromUint64(
+						cm.ColdCredential.Type,
+					)
+					if tagErr != nil {
+						return fmt.Errorf(
+							"committee member %d: %w", i, tagErr,
+						)
+					}
 					members[i] = &models.CommitteeMember{
-						ColdCredHash: cm.ColdCredential.Hash,
-						ExpiresEpoch: cm.ExpiresEpoch,
-						AddedSlot:    currentEpochSlot,
+						ColdCredentialTag: credentialTag,
+						ColdCredHash:      cm.ColdCredential.Hash,
+						ExpiresEpoch:      cm.ExpiresEpoch,
+						TermStartSlot:     currentEpochSlot,
+						TermStartSlotSet:  true,
+						AddedSlot:         currentEpochSlot,
 					}
 				}
 				if err := store.SetCommitteeMembers(
@@ -2871,6 +3301,61 @@ func importGovState(
 	})
 
 	return nil
+}
+
+func persistImportedCommitteeCertificates(
+	db *database.Database,
+	certState *ParsedCertState,
+	slot uint64,
+	txn *database.Txn,
+) error {
+	if certState == nil ||
+		(len(certState.CommitteeHotKeys) == 0 && len(certState.CommitteeResignations) == 0) {
+		return nil
+	}
+	certs := make([]lcommon.Certificate, 0,
+		len(certState.CommitteeHotKeys)+len(certState.CommitteeResignations))
+	for _, authorization := range certState.CommitteeHotKeys {
+		cold, hot := authorization.Cold, authorization.Hot
+		if len(cold.Hash) != 28 || len(hot.Hash) != 28 {
+			return errors.New("committee authorization credentials must be 28 bytes")
+		}
+		var coldHash, hotHash lcommon.Blake2b224
+		copy(coldHash[:], cold.Hash)
+		copy(hotHash[:], hot.Hash)
+		certs = append(certs, &lcommon.AuthCommitteeHotCertificate{
+			CertType: uint(lcommon.CertificateTypeAuthCommitteeHot),
+			ColdCredential: lcommon.Credential{
+				CredType: uint(cold.Type), Credential: coldHash,
+			},
+			HotCredential: lcommon.Credential{
+				CredType: uint(hot.Type), Credential: hotHash,
+			},
+		})
+	}
+	for _, cold := range certState.CommitteeResignations {
+		if len(cold.Hash) != 28 {
+			return errors.New("committee resignation credential must be 28 bytes")
+		}
+		var coldHash lcommon.Blake2b224
+		copy(coldHash[:], cold.Hash)
+		certs = append(certs, &lcommon.ResignCommitteeColdCertificate{
+			CertType: uint(lcommon.CertificateTypeResignCommitteeCold),
+			ColdCredential: lcommon.Credential{
+				CredType: uint(cold.Type), Credential: coldHash,
+			},
+		})
+	}
+	slotBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(slotBytes, slot)
+	seed := append([]byte("mithril-committee"), slotBytes...)
+	// Transaction identities on Cardano are Blake2b-256. A SHA-256 digest here
+	// would hand consumers a hash that cannot be a transaction id.
+	hash := lcommon.Blake2b256Hash(seed)
+	tx := importedCommitteeTransaction{hash: hash, certs: certs}
+	return db.SetTransactionMetadataOnly(
+		&tx, ocommon.Point{Slot: slot, Hash: hash[:]}, 0, map[int]uint64{}, txn,
+	)
 }
 
 func ratifiedGovActionIdSet(

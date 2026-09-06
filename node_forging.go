@@ -26,7 +26,6 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/leiosheader"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
@@ -164,6 +163,22 @@ func (n *Node) validateBlockProducerLedgerWithView(
 	if creds == nil {
 		return errors.New("nil pool credentials")
 	}
+	// Startup deliberately checks only for a stale counter, not the
+	// era-scoped no-gap rule the forge loop and block application enforce.
+	// The era for "now" would have to come from LedgerState.CurrentSlot,
+	// which is wall-clock and valid regardless of sync state; the baseline
+	// comes from LatestOpCertSequence, which reflects only the applied
+	// chain. On a node whose applied tip is behind wall-clock time (an
+	// interrupted initial sync, a resume after downtime, a restore to an
+	// older snapshot), those two can disagree: the era resolves to
+	// whatever the wall clock says while the baseline is still the stale,
+	// pre-catch-up counter, so a pool several rotations into its life
+	// would look gapped and fail startup -- unable to then sync to the
+	// point that would make the baseline correct. The forge loop's own
+	// gate does not have this problem: it runs after the upstream-sync
+	// skip and the leader check, so both its era and its baseline come
+	// from near-tip state, and it fails closed per slot rather than
+	// refusing to start the node at all.
 	registered, vrfMatched, err := creds.ValidateAgainstLedger(view)
 	if err != nil {
 		if errors.Is(err, forging.ErrVRFKeyHashMismatch) &&
@@ -247,10 +262,10 @@ func (n *Node) initBlockForger(
 		return fmt.Errorf("failed to create block builder: %w", err)
 	}
 
-	// Create block broadcaster (uses the chain manager and event bus)
+	// Create block broadcaster for synchronous local chain adoption.
 	broadcaster := &blockBroadcaster{
-		eventBus: n.eventBus,
-		logger:   n.config.logger,
+		chain:  n.chainManager.PrimaryChain(),
+		logger: n.config.logger,
 	}
 
 	// Create the leader election component
@@ -300,28 +315,47 @@ func (n *Node) initBlockForger(
 	var leiosParent forging.LeiosParentAnnouncementProvider
 	var leiosEBCaster forging.EndorserBlockBroadcaster
 	var leiosMempool forging.MempoolProvider
-	if n.leiosPipelineManager != nil && n.ouroboros != nil {
+	if n.leiosPipelineManager != nil && n.ouroboros() != nil {
 		adapter := &leiosPipelineAdapter{
 			mgr:                   n.leiosPipelineManager,
 			chain:                 n.chainManager.PrimaryChain(),
-			endorserBlockTxHashes: n.ouroboros.EndorserBlockTxHashesByHash,
+			endorserBlockTxHashes: n.ouroboros().EndorserBlockTxHashesByHash,
 		}
 		leiosChecker = adapter
 		leiosCerts = adapter
 		leiosParent = adapter
-		leiosEBCaster = n.ouroboros
+		leiosEBCaster = n.ouroboros()
 		leiosMempool = mempoolAdapter
 	}
 	blockForged := n.ledgerState.RecordForgedBlock
-	if n.ouroboros != nil {
+	if n.ouroboros() != nil {
 		blockForged = func(block gledger.Block, blockCbor []byte, latency time.Duration) {
 			n.ledgerState.RecordForgedBlock(block, blockCbor, latency)
 			if header, ok := block.Header().(*gdijkstra.DijkstraBlockHeader); ok {
 				if _, _, announces := header.LeiosAnnouncement(); announces {
-					n.ouroboros.EnqueueLeiosBlockAnnouncement(header.Cbor())
+					n.ouroboros().EnqueueLeiosBlockAnnouncement(header.Cbor())
 				}
 			}
 		}
+	}
+
+	// Wire the durable last-forged-slot fence. A block producer must not
+	// start without it: the in-memory fallback cannot survive a restart,
+	// which is precisely the case the fence exists for. The forging
+	// package still tolerates a nil store for embedders and dev-mode
+	// wiring, so refuse here rather than there.
+	var forgeFence forging.ForgeFenceStore
+	if n.db != nil {
+		forgeFence = forging.NewSyncStateForgeFenceStore(
+			n.db.Metadata(),
+			poolKeyHash,
+		)
+	}
+	if forgeFence == nil {
+		_ = election.Stop()
+		return errors.New(
+			"block producer requires a metadata store for the forge fence",
+		)
 	}
 
 	// Wire self-validation when the operator opts in. The validator runs
@@ -347,12 +381,18 @@ func (n *Node) initBlockForger(
 		ForgeSyncToleranceSlots:         n.config.forgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots:     n.config.forgeStaleGapThresholdSlots,
 		BlockValidator:                  blockValidator,
+		ForgeFence:                      forgeFence,
 		PromRegistry:                    n.config.promRegistry,
 		LeiosProduceChecker:             leiosChecker,
 		LeiosEBBroadcaster:              leiosEBCaster,
 		LeiosMempool:                    leiosMempool,
+		LeiosTxValidator:                n.ledgerState,
 		LeiosCertificateProvider:        leiosCerts,
 		LeiosParentAnnouncementProvider: leiosParent,
+		OpCertLedgerView: blockProducerLedgerView{
+			ls: n.ledgerState,
+		},
+		EraParams: n.ledgerState,
 	})
 	if err != nil {
 		// Stop election to prevent goroutine leak
@@ -447,14 +487,13 @@ func (a *forgingMempoolAdapter) RemoveTxsByHash(hashes []string) {
 	a.source.RemoveTxsByHash(hashes)
 }
 
-// blockBroadcaster implements forging.BlockBroadcaster by proposing locally
-// forged blocks to the chain component over the EventBus.
+// blockBroadcaster implements forging.BlockBroadcaster through synchronous
+// local chain admission. Block proposals are requests, not notifications, so
+// they must not wait in the asynchronous EventBus while the chain advances.
 type blockBroadcaster struct {
-	eventBus *event.EventBus
-	logger   *slog.Logger
+	chain  *chain.Chain
+	logger *slog.Logger
 }
-
-const blockProposalAckTimeout = 30 * time.Second
 
 func (b *blockBroadcaster) AddBlock(
 	block gledger.Block,
@@ -463,38 +502,11 @@ func (b *blockBroadcaster) AddBlock(
 	if block == nil {
 		return errors.New("proposed block is nil")
 	}
-	if b.eventBus == nil {
-		return errors.New("event bus unavailable")
+	if b.chain == nil {
+		return errors.New("chain unavailable")
 	}
-	if !b.eventBus.HasSubscribers(chain.BlockProposedEventType) {
-		return errors.New("no chain block proposal subscribers")
-	}
-
-	ack := make(chan error, 1)
-	b.eventBus.Publish(
-		chain.BlockProposedEventType,
-		event.NewEvent(
-			chain.BlockProposedEventType,
-			chain.BlockProposedEvent{
-				Block: block,
-				Ack:   ack,
-			},
-		),
-	)
-
-	timer := time.NewTimer(blockProposalAckTimeout)
-	defer timer.Stop()
-
-	select {
-	case err := <-ack:
-		if err != nil {
-			return fmt.Errorf("chain rejected proposed block: %w", err)
-		}
-	case <-timer.C:
-		return fmt.Errorf(
-			"timed out waiting for proposed block ack after %s",
-			blockProposalAckTimeout,
-		)
+	if err := b.chain.AddLocalBlock(block); err != nil {
+		return fmt.Errorf("chain rejected proposed block: %w", err)
 	}
 
 	b.logger.Info(
@@ -542,47 +554,98 @@ func (a *stakeDistributionAdapter) getStakeDistribution(
 	return a.ledgerState.NewView(txn).GetStakeDistribution(epoch)
 }
 
-func (a *stakeDistributionAdapter) GetPoolStake(
+// GetPoolAndTotalActiveStake reads the sigma numerator and denominator for
+// one pool inside a single metadata transaction.
+//
+// Two defects are fixed here, and both are load-bearing for consensus:
+//
+// dingo #3814 -- the denominator comes from LedgerView.GetTotalActiveStake,
+// a txn-scoped wrapper over Metadata().GetTotalActiveStake, which is the
+// same store accessor ledger/verify_header.go resolves the denominator
+// through when it checks an incoming header's leader eligibility.
+// Verification calls that store method directly rather than through a
+// LedgerView, with the snapshotType it resolved for the header under check;
+// the shared thing is the store accessor, not the call path. The previous
+// implementation returned
+// ledger.StakeDistribution.TotalStake, which LedgerView.GetStakeDistribution
+// accumulates by summing the mark rows itself, while verification reads
+// epoch_summary.total_active_stake. Those two agree only "by construction"
+// -- one rotation transaction writes both from one calculation
+// (ledger/pool_stake_distribution.go documents the exact conditions) -- so
+// the equality is a property of the writer, not of the readers, and nothing
+// stops the two paths from drifting. A node whose forge denominator differs
+// from its verify denominator can forge a block it would itself reject, or
+// decline a slot it is genuinely eligible for. Resolving both through one
+// accessor removes the second derivation entirely.
+//
+// dingo #3815 -- both values are read through one db.MetadataTxn and one
+// LedgerView. Opening a transaction per value let a snapshot re-capture land
+// between them, yielding a sigma whose halves come from different writes.
+func (a *stakeDistributionAdapter) GetPoolAndTotalActiveStake(
 	epoch uint64,
 	poolKeyHash []byte,
-) (uint64, error) {
-	dist, err := a.getStakeDistribution(epoch)
+) (poolStake uint64, totalActiveStake uint64, err error) {
+	if a.ledgerState == nil {
+		return 0, 0, errors.New("ledger state unavailable")
+	}
+	db := a.ledgerState.Database()
+	if db == nil {
+		return 0, 0, errors.New("database unavailable")
+	}
+	txn := db.MetadataTxn(false)
+	if txn == nil {
+		return 0, 0, errors.New("metadata transaction unavailable")
+	}
+	defer func() {
+		if rollbackErr := txn.Rollback(); rollbackErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf(
+					"release stake distribution transaction: %w",
+					rollbackErr,
+				),
+			)
+		}
+	}()
+	view := a.ledgerState.NewView(txn)
 	poolKey := hex.EncodeToString(poolKeyHash)
+	poolStake, err = view.GetPoolStake(epoch, poolKeyHash)
 	if err != nil {
-		return 0, fmt.Errorf(
-			"get stake distribution for epoch %d pool %s: %w",
+		return 0, 0, fmt.Errorf(
+			"get pool stake for epoch %d pool %s: %w",
 			epoch,
 			poolKey,
 			err,
 		)
 	}
-	if dist == nil {
-		return 0, nil
-	}
-	return dist.PoolStakes[poolKey], nil
-}
-
-func (a *stakeDistributionAdapter) GetTotalActiveStake(
-	epoch uint64,
-) (uint64, error) {
-	dist, err := a.getStakeDistribution(epoch)
+	totalActiveStake, err = view.GetTotalActiveStake(epoch)
 	if err != nil {
-		return 0, fmt.Errorf(
-			"get stake distribution for epoch %d: %w",
+		return 0, 0, fmt.Errorf(
+			"get total active stake for epoch %d: %w",
 			epoch,
 			err,
 		)
 	}
-	if dist == nil {
-		return 0, nil
-	}
-	return dist.TotalStake, nil
+	return poolStake, totalActiveStake, nil
 }
+
+// The forging adapter must resolve sigma through the atomic pair accessor.
+// A drift back to two independent reads, or to summing the mark rows for the
+// denominator, is the pair of defects dingo #3814 and #3815 describe; make it
+// a compile error rather than a silent consensus divergence.
+var _ leader.StakeDistributionProvider = (*stakeDistributionAdapter)(nil)
 
 // epochInfoAdapter adapts ledger.LedgerState to leader.EpochInfoProvider.
 type epochInfoAdapter struct {
 	ledgerState *ledger.LedgerState
 }
+
+// computeSchedule discovers the exact-rational coefficient with a runtime type
+// assertion and silently falls back to the float64 accessor when it fails,
+// which yields a strictly larger leadership threshold than the reference node's
+// (dingo #2798). Make that drift a compile error;
+// TestEpochInfoAdapterProvidesExactActiveSlotCoeff covers the same pairing.
+var _ leader.ActiveSlotCoeffRatProvider = (*epochInfoAdapter)(nil)
 
 func (a *epochInfoAdapter) CurrentEpoch() uint64 {
 	return a.ledgerState.CurrentEpoch()
@@ -693,12 +756,16 @@ func (a *slotClockAdapter) UpstreamTipSlot() uint64 {
 	return a.ledgerState.UpstreamTipSlot()
 }
 
+func (a *slotClockAdapter) UpstreamSyncStatus() (uint64, bool) {
+	return a.ledgerState.UpstreamSyncStatus()
+}
+
 // leiosPipelineAdapter adapts leios.PipelineManager and the primary chain to
 // the narrow Leios interfaces the forge loop expects.
 type leiosPipelineAdapter struct {
 	mgr                   *leios.PipelineManager
 	chain                 leiosParentChain
-	endorserBlockTxHashes func([]byte) ([]string, bool)
+	endorserBlockTxHashes func(ebHash []byte, ebSlot uint64) ([]string, bool)
 }
 
 type leiosParentChain interface {
@@ -732,11 +799,12 @@ func (a *leiosPipelineAdapter) EligibleCertifiedEndorserBlocks() []forging.Leios
 
 func (a *leiosPipelineAdapter) CertifiedEndorserBlockTxHashes(
 	ebHash lcommon.Blake2b256,
+	ebSlot uint64,
 ) ([]string, bool) {
 	if a.endorserBlockTxHashes == nil {
 		return nil, false
 	}
-	return a.endorserBlockTxHashes(ebHash.Bytes())
+	return a.endorserBlockTxHashes(ebHash.Bytes(), ebSlot)
 }
 
 func (a *leiosPipelineAdapter) MarkEndorserBlockEmbedded(

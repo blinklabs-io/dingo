@@ -29,8 +29,23 @@ const EbQuorumEventType event.EventType = "leios.eb_quorum"
 // composition layer for diffusion over LeiosNotify.
 const VoteEmittedEventType event.EventType = "leios.vote_emitted"
 
+// VoteReceivedEventType announces a newly accepted prototype vote received
+// from a peer, so the node composition layer re-diffuses it over LeiosNotify
+// the same way it diffuses a locally emitted vote. Without this, a vote
+// reaching a relay from one peer never reaches the relay's other peers, and a
+// block producer behind that relay never observes quorum.
+const VoteReceivedEventType event.EventType = "leios.vote_received"
+
 type VoteEmittedEvent struct {
 	Vote lcommon.LeiosPrototypeVote
+}
+
+// VoteReceivedEvent carries a newly accepted peer vote and the connection
+// that delivered it. The composition layer uses OriginConnKey to avoid
+// diffusing the vote back over that same LeiosNotify connection.
+type VoteReceivedEvent struct {
+	Vote          lcommon.LeiosPrototypeVote
+	OriginConnKey string
 }
 
 // EbQuorumEvent carries the certificate built when an endorser block

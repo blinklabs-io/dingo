@@ -88,11 +88,9 @@ func stallWarningsForPublishers(
 
 	var wg sync.WaitGroup
 	for i := range publishers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_ = sub.Deliver(NewEvent("test.stalled", i))
-		}()
+		})
 	}
 	// Park everyone before the first interval elapses, so both runs are
 	// measured from the same starting condition.
@@ -131,11 +129,9 @@ func TestDeliverStallWarningReportsBlockedPublishers(t *testing.T) {
 	const blockedPublishers = 3
 	var wg sync.WaitGroup
 	for i := range blockedPublishers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_ = sub.Deliver(NewEvent("test.stalled", i))
-		}()
+		})
 	}
 
 	// Every warning carries the field, so asserting the key is present

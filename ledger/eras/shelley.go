@@ -165,7 +165,9 @@ func CertDepositShelley(
 	pp lcommon.ProtocolParameters,
 ) (uint64, error) {
 	tmpPparams, ok := pp.(*shelley.ShelleyProtocolParameters)
-	if !ok {
+	// A typed nil satisfies the assertion, so the nil test is not
+	// redundant: without it the deposit reads below dereference it.
+	if !ok || tmpPparams == nil {
 		return 0, ErrIncompatibleProtocolParams
 	}
 	switch cert.(type) {
@@ -178,18 +180,43 @@ func CertDepositShelley(
 	}
 }
 
+var shelleyUtxoValidationRules = buildShelleyValidationRules()
+
+// buildShelleyValidationRules drops the upstream fee and max-size rules so
+// ValidateTxShelley can apply the Dingo checks that size a transaction with
+// TxSizeForFee. buildIndexedUtxoValidationRulesWithSkips resolves each skip by
+// upstream rule Id and panics at package initialization if an Id stops matching
+// exactly one upstream rule, so an upstream change fails loudly instead of
+// silently leaving the upstream rule in place.
+func buildShelleyValidationRules() []indexedUtxoValidationRule {
+	return buildIndexedUtxoValidationRulesWithSkips(
+		shelley.UtxoValidationRuleDescriptors(),
+		shelley.UtxoValidationRules,
+		[]lcommon.UtxoValidationRuleId{
+			lcommon.UtxoValidationRuleFeeTooSmall,
+			lcommon.UtxoValidationRuleMaxTxSize,
+		},
+	)
+}
+
 func ValidateTxShelley(
 	tx lcommon.Transaction,
 	slot uint64,
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
-	errs := make([]error, 0, len(shelley.UtxoValidationRules))
-	for _, validationFunc := range shelley.UtxoValidationRules {
-		errs = append(
-			errs,
-			validationFunc(tx, slot, ls, pp),
-		)
+	tmpPparams, ok := pp.(*shelley.ShelleyProtocolParameters)
+	if !ok || tmpPparams == nil {
+		return ErrIncompatibleProtocolParams
 	}
-	return errors.Join(errs...)
+	return validatePreAlonzoTx(
+		tx,
+		slot,
+		ls,
+		pp,
+		shelleyUtxoValidationRules,
+		tmpPparams.MaxTxSize,
+		tmpPparams.MinFeeA,
+		tmpPparams.MinFeeB,
+	)
 }

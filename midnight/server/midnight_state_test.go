@@ -17,7 +17,9 @@ package server_test
 import (
 	"context"
 	"log/slog"
+	"math"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -209,6 +211,55 @@ func TestGetUtxoEvents_EmptyDatabase(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, resp.GetEvents())
 	require.Nil(t, resp.GetNextPosition())
+}
+
+// TestGetUtxoEvents_NextPositionBlockNumberOutOfDomain seeds a row whose
+// stored block number exceeds uint32 range (CardanoPosition's wire type) and
+// verifies GetUtxoEvents rejects building next_position with a stable,
+// generic Internal error instead of silently wrapping the block number.
+func TestGetUtxoEvents_NextPositionBlockNumberOutOfDomain(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+
+	const badBlockNumber = uint64(math.MaxUint32) + 1
+	require.NoError(
+		t,
+		store.CreateMidnightAssetCreate(nil, &models.MidnightAssetCreate{
+			Address:     []byte{0x01},
+			Quantity:    1,
+			TxHash:      hashForByte(1),
+			OutputIndex: 0,
+			BlockNumber: badBlockNumber,
+			BlockHash:   hashForByte(1),
+			TxIndex:     0,
+		}),
+	)
+
+	client := midnight.NewMidnightStateClient(
+		dial(t, startTestServerWithMetadata(t, store)),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := client.GetUtxoEvents(
+		ctx,
+		&midnight.UtxoEventsRequest{TxCapacity: 10},
+	)
+	require.Error(t, err)
+	require.Equal(t, codes.Internal, status.Code(err))
+	msg := status.Convert(err).Message()
+	require.NotContains(
+		t,
+		msg,
+		"4294967296",
+		"internal error must not leak the raw stored value to the client",
+	)
+	require.True(
+		t,
+		strings.HasSuffix(msg, "failed"),
+		"client message must be the stable generic form, got %q",
+		msg,
+	)
 }
 
 // TestGetUtxoEvents_KindOrderTieBreak seeds one row of each of the four
@@ -556,9 +607,9 @@ type spyEventStore struct {
 	seenTxns     []types.Txn
 }
 
-func (s *spyEventStore) ReadTransaction() types.Txn {
+func (s *spyEventStore) ReadTransaction(ctx context.Context) types.Txn {
 	s.readTxnCalls++
-	return s.Store.ReadTransaction()
+	return s.Store.ReadTransaction(ctx)
 }
 
 func (s *spyEventStore) FindMidnightAssetCreatesFrom(

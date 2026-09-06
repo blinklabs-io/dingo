@@ -184,7 +184,7 @@ func newReplayAdapter(
 	_, switchCh := bus.SubscribeWithBuffer(
 		chainselection.ChainSwitchEventType, switchEventBuffer,
 	)
-	o := NewOuroboros(OuroborosConfig{
+	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
 		// Open the ingress-eligibility gate: the captured peers are the
 		// upstreams we want feeding selection. With ChainsyncState left
@@ -193,7 +193,7 @@ func newReplayAdapter(
 			return true
 		},
 	})
-	o.EventBus = bus
+	o.eventBus = bus
 	return &replayAdapter{
 		o:        o,
 		cs:       cs,

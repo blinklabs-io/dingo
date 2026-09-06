@@ -730,16 +730,16 @@ func (c *TieredCborCache) Metrics() *CacheMetrics {
 	return c.metrics
 }
 
-// SetLogger wires a logger into both hot caches for CAS-retry-budget
+// SetLogger wires a logger into both hot caches for update-retry-budget
 // diagnostics (see HotCache.SetLogger). A nil logger disables this logging.
 func (c *TieredCborCache) SetLogger(logger *slog.Logger) {
 	c.hotUtxo.SetLogger(logger, "utxo")
 	c.hotTx.SetLogger(logger, "tx")
 }
 
-// RegisterCASMetrics exposes both hot caches' copy-on-write contention
-// counters on the given Prometheus registry (see HotCache.RegisterCASMetrics).
-// If registry is nil, this is a no-op.
+// RegisterCASMetrics exposes both hot caches' update-contention counters on
+// the given Prometheus registry (see HotCache.RegisterCASMetrics). The name is
+// retained for compatibility. If registry is nil, this is a no-op.
 func (c *TieredCborCache) RegisterCASMetrics(
 	registry prometheus.Registerer,
 ) error {

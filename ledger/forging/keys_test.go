@@ -19,13 +19,19 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/bursa"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/keystore"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/kes"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -68,16 +74,99 @@ func createTestKeys(t *testing.T) (string, string, string) {
 	require.NoError(t, os.WriteFile(vrfPath, []byte(testVRFSKeyJSON), 0o600))
 	require.NoError(t, os.WriteFile(kesPath, []byte(testKESSKeyJSON), 0o600))
 	require.NoError(t, os.WriteFile(opCertPath, []byte(testOpCertJSON), 0o600))
+	testutil.RestrictFileToCurrentUser(t, vrfPath)
+	testutil.RestrictFileToCurrentUser(t, kesPath)
 
 	return vrfPath, kesPath, opCertPath
 }
 
+func createAlternateTestVRFKey(t *testing.T) string {
+	t.Helper()
+	seed := make([]byte, vrf.SeedSize)
+	for i := range seed {
+		seed[i] = byte(i + 1)
+	}
+	_, secretKey, err := vrf.KeyGen(seed)
+	require.NoError(t, err)
+	keyFile, err := bursa.GetVRFSKey(secretKey)
+	require.NoError(t, err)
+	data, err := json.Marshal(keyFile)
+	require.NoError(t, err)
+	path := filepath.Join(t.TempDir(), "alternate-vrf.skey")
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+	testutil.RestrictFileToCurrentUser(t, path)
+	return path
+}
+
+func createMismatchedTestVRFEnvelope(
+	t *testing.T,
+	validVRFPath string,
+) string {
+	t.Helper()
+	validKey, err := loadSecretKeyFromFile(validVRFPath)
+	require.NoError(t, err)
+	defer wipeCredentialBytes(validKey.SKey)
+
+	alternateSeed := make([]byte, vrf.SeedSize)
+	for i := range alternateSeed {
+		alternateSeed[i] = byte(i + 1)
+	}
+	derivedVKey, derivedSeed, err := vrf.KeyGen(alternateSeed)
+	require.NoError(t, err)
+	wipeCredentialBytes(derivedSeed)
+	require.NotEqual(t, validKey.VKey, derivedVKey)
+
+	// Cardano CLI's 64-byte envelope is seed || public key. Keep the
+	// original public-key suffix while replacing only its seed.
+	envelope := append(append([]byte(nil), alternateSeed...), validKey.VKey...)
+	keyFile, err := bursa.GetVRFSKey(envelope)
+	require.NoError(t, err)
+	data, err := json.Marshal(keyFile)
+	require.NoError(t, err)
+	path := filepath.Join(t.TempDir(), "mismatched-vrf.skey")
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+	testutil.RestrictFileToCurrentUser(t, path)
+	return path
+}
+
+func requireVRFKeyPairCoherent(
+	t *testing.T,
+	credentials *PoolCredentials,
+) {
+	t.Helper()
+	seed := credentials.GetVRFSKey()
+	require.Len(t, seed, vrf.SeedSize)
+	defer wipeCredentialBytes(seed)
+
+	derivedVKey, derivedSeed, err := vrf.KeyGen(seed)
+	require.NoError(t, err)
+	wipeCredentialBytes(derivedSeed)
+	require.Equal(t, derivedVKey, credentials.GetVRFVKey())
+
+	alpha := []byte("credential identity coherence")
+	proof, output, err := credentials.VRFProve(alpha)
+	require.NoError(t, err)
+	verified, err := vrf.Verify(derivedVKey, proof, output, alpha)
+	require.NoError(t, err)
+	require.True(t, verified)
+}
+
+func writeTestOpCert(t *testing.T, contents string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "opcert.cert")
+	require.NoError(t, os.WriteFile(path, []byte(contents), 0o600))
+	return path
+}
+
 func TestPoolCredentialsLoadFromFiles(t *testing.T) {
 	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	loadedVRF, err := loadSecretKeyFromFile(vrfPath)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Base(vrfPath), loadedVRF.File)
 
 	// Load credentials
 	pc := NewPoolCredentials()
-	err := pc.LoadFromFiles(vrfPath, kesPath, opCertPath)
+	err = pc.LoadFromFiles(vrfPath, kesPath, opCertPath)
 	require.NoError(t, err)
 
 	// Verify VRF keys
@@ -110,6 +199,218 @@ func TestPoolCredentialsLoadFromFiles(t *testing.T) {
 
 	// Verify IsLoaded
 	assert.True(t, pc.IsLoaded())
+	requireVRFKeyPairCoherent(t, pc)
+}
+
+func TestPoolCredentialsRejectsMismatchedVRFEnvelopeAtStartup(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	pc := NewPoolCredentials()
+
+	err := pc.LoadFromFiles(
+		createMismatchedTestVRFEnvelope(t, vrfPath),
+		kesPath,
+		opCertPath,
+	)
+	require.ErrorContains(t, err, "VRF verification key mismatch")
+	require.False(t, pc.IsLoaded())
+	require.Empty(t, pc.GetVRFSKey())
+	require.Empty(t, pc.GetVRFVKey())
+	require.False(t, pc.identitySet)
+}
+
+func TestPoolCredentialsRejectsMismatchedVRFEnvelopeOnReload(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+	require.NoError(t, pc.ValidateKESPeriod(
+		synthGenesis(1, 3, time.Second, time.Unix(0, 0)),
+		0,
+	))
+	requireVRFKeyPairCoherent(t, pc)
+	pinnedVKey := append([]byte(nil), pc.identityVRFVKey...)
+
+	err := pc.LoadFromFiles(
+		createMismatchedTestVRFEnvelope(t, vrfPath),
+		kesPath,
+		opCertPath,
+	)
+	require.ErrorContains(t, err, "VRF verification key mismatch")
+	require.False(t, pc.IsLoaded())
+	require.Zero(t, pc.OpCertExpiryPeriod())
+	require.True(t, pc.identitySet)
+	require.Equal(t, pinnedVKey, pc.identityVRFVKey)
+
+	// A failed replacement must not poison the pinned identity. Reloading the
+	// original generation restores coherent leader-election and proof keys.
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+	require.NoError(t, pc.ValidateKESPeriod(
+		synthGenesis(1, 3, time.Second, time.Unix(0, 0)),
+		0,
+	))
+	requireVRFKeyPairCoherent(t, pc)
+}
+
+func TestPoolCredentialsRejectsRuntimeVRFIdentityChange(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+	require.NoError(t, pc.ValidateKESPeriod(
+		synthGenesis(1, 3, time.Second, time.Unix(0, 0)),
+		0,
+	))
+
+	err := pc.LoadFromFiles(
+		createAlternateTestVRFKey(t),
+		kesPath,
+		opCertPath,
+	)
+	require.ErrorContains(t, err, "cannot change pool or VRF identity")
+	require.False(t, pc.IsLoaded())
+	require.Zero(t, pc.OpCertExpiryPeriod())
+	require.ErrorContains(
+		t,
+		pc.LoadFromFiles(
+			createAlternateTestVRFKey(t),
+			kesPath,
+			opCertPath,
+		),
+		"cannot change pool or VRF identity",
+	)
+}
+
+func TestPoolCredentialsInvalidOpCertCannotPublishKESPolicy(t *testing.T) {
+	vrfPath, kesPath, _ := createTestKeys(t)
+	corrupted := strings.Replace(testOpCertJSON, "89fc9e9f", "88fc9e9f", 1)
+	require.NotEqual(t, testOpCertJSON, corrupted)
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(
+		vrfPath,
+		kesPath,
+		writeTestOpCert(t, corrupted),
+	))
+
+	require.ErrorContains(t, pc.ValidateOpCert(), "signature verification failed")
+	require.ErrorContains(
+		t,
+		pc.ValidateKESPeriod(
+			synthGenesis(1, 3, time.Second, time.Unix(0, 0)),
+			0,
+		),
+		"signature verification failed",
+	)
+	generation := pc.acquireCredentialGeneration()
+	defer generation.release()
+	require.ErrorContains(
+		t,
+		generation.validateKESPeriod(0),
+		"operational certificate is not validated",
+	)
+}
+
+func TestPoolCredentialsMismatchedKESReloadFailsClosed(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+	require.NoError(t, pc.ValidateKESPeriod(
+		synthGenesis(1, 3, time.Second, time.Unix(0, 0)),
+		0,
+	))
+
+	mismatched := strings.Replace(
+		testOpCertJSON,
+		"4cd49bb0",
+		"5cd49bb0",
+		1,
+	)
+	require.NotEqual(t, testOpCertJSON, mismatched)
+	err := pc.LoadFromFiles(
+		vrfPath,
+		kesPath,
+		writeTestOpCert(t, mismatched),
+	)
+	require.ErrorContains(t, err, "KES verification key mismatch")
+	require.False(t, pc.IsLoaded())
+	require.Zero(t, pc.OpCertExpiryPeriod())
+}
+
+func TestPoolCredentialsRejectsPermissiveSecretKeyModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip(
+			"Unix mode test; Windows DACL checks are covered by keystore tests",
+		)
+	}
+
+	tests := []struct {
+		name      string
+		keyName   string
+		selectKey func(vrfPath, kesPath string) string
+	}{
+		{
+			name:    "VRF",
+			keyName: "VRF signing key",
+			selectKey: func(vrfPath, _ string) string {
+				return vrfPath
+			},
+		},
+		{
+			name:    "KES",
+			keyName: "KES signing key",
+			selectKey: func(_, kesPath string) string {
+				return kesPath
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			vrfPath, kesPath, opCertPath := createTestKeys(t)
+			keyPath := test.selectKey(vrfPath, kesPath)
+			require.NoError(t, os.Chmod(keyPath, 0o644))
+
+			err := NewPoolCredentials().LoadFromFiles(
+				vrfPath,
+				kesPath,
+				opCertPath,
+			)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, keystore.ErrInsecureFileMode)
+			assert.Contains(t, err.Error(), "failed to load "+test.keyName)
+			assert.Contains(t, err.Error(), "mode 0644")
+			assert.Contains(t, err.Error(), "group/other access not permitted")
+		})
+	}
+}
+
+func TestPoolCredentialsAllowsPermissiveOpCertMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix mode test")
+	}
+
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	require.NoError(t, os.Chmod(opCertPath, 0o644))
+
+	err := NewPoolCredentials().LoadFromFiles(vrfPath, kesPath, opCertPath)
+	require.NoError(t, err)
+}
+
+func TestLoadSecretKeyRejectsNonRegularFile(t *testing.T) {
+	_, err := loadSecretKeyFromFile(t.TempDir())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is not a regular file")
+}
+
+func TestLoadSecretKeyRejectsOversizedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oversized.skey")
+	require.NoError(t, os.WriteFile(
+		path,
+		make([]byte, maxSecretKeyFileSize+1),
+		0o600,
+	))
+	testutil.RestrictFileToCurrentUser(t, path)
+
+	_, err := loadSecretKeyFromFile(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds maximum size")
 }
 
 func TestVRFProve(t *testing.T) {
@@ -210,6 +511,28 @@ func TestKESPeriodUpdateExhaustedKey(t *testing.T) {
 	assert.True(t, ok, "key should still be usable after failed evolution")
 }
 
+func TestKESPeriodUpdatePartialFailureRetainsNewestKey(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+	require.NoError(t, pc.UpdateKESPeriod(62))
+
+	// The update to period 64 first succeeds from 62 to 63, then fails
+	// because a depth-6 key cannot evolve beyond period 63. The successful
+	// successor is the only key that remains usable after forward evolution.
+	err := pc.UpdateKESPeriod(64)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "key is exhausted at period 63")
+	require.Equal(t, uint64(63), pc.kesSKey.Period)
+	require.NotEmpty(t, pc.kesSKey.Data)
+
+	message := []byte("test message after partial evolution failure")
+	signature, err := pc.KESSign(63, message)
+	require.NoError(t, err)
+	require.True(t, kes.VerifySignedKES(pc.kesVKey, 63, message, signature))
+}
+
 func TestKESPeriodUpdateBackward(t *testing.T) {
 	vrfPath, kesPath, opCertPath := createTestKeys(t)
 
@@ -307,20 +630,23 @@ func TestOpCertValidation(t *testing.T) {
 	// Validate OpCert - should pass since keys match and signature is valid
 	err = pc.ValidateOpCert()
 	require.NoError(t, err)
+	require.NoError(t, pc.ValidateKESPeriod(
+		synthGenesis(100, 62, time.Second, time.Unix(0, 0)),
+		0,
+	))
 
 	// Check expiry period
 	expiryPeriod := pc.OpCertExpiryPeriod()
-	// For depth 6, max periods = 64, starting at period 0
-	assert.Equal(t, uint64(64), expiryPeriod)
+	assert.Equal(t, uint64(62), expiryPeriod)
 
 	// Check periods remaining
 	remaining := pc.PeriodsRemaining(0)
-	assert.Equal(t, uint64(64), remaining)
+	assert.Equal(t, uint64(62), remaining)
 
 	remaining = pc.PeriodsRemaining(32)
-	assert.Equal(t, uint64(32), remaining)
+	assert.Equal(t, uint64(30), remaining)
 
-	remaining = pc.PeriodsRemaining(64)
+	remaining = pc.PeriodsRemaining(62)
 	assert.Equal(t, uint64(0), remaining)
 
 	remaining = pc.PeriodsRemaining(100)
@@ -604,6 +930,34 @@ func TestValidateKESPeriod_HappyPath(t *testing.T) {
 	}
 }
 
+func TestValidateOpCertPreservesValidatedKESLifetime(t *testing.T) {
+	pc := setupTestCredentials(t)
+	wantExpiry := pc.OpCertExpiryPeriod()
+	require.NotZero(t, wantExpiry)
+
+	require.NoError(t, pc.ValidateOpCert())
+	require.Equal(t, wantExpiry, pc.OpCertExpiryPeriod())
+
+	generation := pc.acquireCredentialGeneration()
+	start, maxEvolutions, expiry, err := generation.validatedKESProtocolLifetime()
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), start)
+	require.Equal(t, uint64(62), maxEvolutions)
+	require.Equal(t, wantExpiry, expiry)
+	generation.release()
+
+	pc.mu.Lock()
+	pc.opCert.Signature[0] ^= 0xff
+	pc.mu.Unlock()
+	require.ErrorContains(t, pc.ValidateOpCert(), "signature verification failed")
+	require.Zero(t, pc.OpCertExpiryPeriod())
+
+	invalidGeneration := pc.acquireCredentialGeneration()
+	defer invalidGeneration.release()
+	_, _, _, err = invalidGeneration.validatedKESProtocolLifetime()
+	require.ErrorContains(t, err, "not validated")
+}
+
 func TestValidateKESPeriod_AtStart(t *testing.T) {
 	// Edge case: opcert KESPeriod equals current period (just rotated
 	// into use). Should pass.
@@ -683,6 +1037,44 @@ func TestValidateKESPeriod_NilGenesis(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for nil genesis")
 	}
+}
+
+func TestValidateKESPeriod_InvalidMaxKESEvolutions(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		max  int
+		want string
+	}{
+		{name: "zero", max: 0, want: "must be positive"},
+		{name: "negative", max: -1, want: "must be positive"},
+		{
+			name: "exceeds key capacity",
+			max:  int(kes.MaxPeriod(kes.CardanoKesDepth)) + 1,
+			want: "exceeds KES key capacity",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			g := synthGenesis(100, test.max, time.Second, time.Unix(0, 0))
+			pc := &PoolCredentials{opCert: &OpCert{KESPeriod: 0}}
+
+			err := pc.ValidateKESPeriod(g, 0)
+			require.ErrorContains(t, err, test.want)
+			require.Zero(t, pc.OpCertExpiryPeriod())
+			require.Zero(t, pc.PeriodsRemaining(0))
+		})
+	}
+}
+
+func TestValidateKESPeriod_ExpiryOverflowFailsClosed(t *testing.T) {
+	g := synthGenesis(1, 3, time.Second, time.Unix(0, 0))
+	pc := &PoolCredentials{
+		opCert: &OpCert{KESPeriod: math.MaxUint64 - 1},
+	}
+
+	err := pc.ValidateKESPeriod(g, math.MaxUint64)
+	require.ErrorContains(t, err, "expiry overflows uint64")
+	require.Zero(t, pc.OpCertExpiryPeriod())
+	require.Zero(t, pc.PeriodsRemaining(math.MaxUint64))
 }
 
 // fakeLedgerView is a test stub for the LedgerView interface.
@@ -856,6 +1248,29 @@ func TestValidateAgainstLedger_StaleOpCert(t *testing.T) {
 	}
 }
 
+// TestValidateAgainstLedger_GappedOpCertAccepted documents the deliberate
+// startup behavior: a counter that skips ahead of the last observed value
+// by more than one is not stale (it is ahead, not behind), and startup
+// does not apply the era-scoped no-gap rule the forge loop and block
+// application enforce (see ValidateAgainstLedger's doc comment for why:
+// startup's era and its observed baseline can come from different points
+// in time). Only the forge loop's own gate rejects a gapped counter, and
+// it does so near the chain tip where both sides of the check agree.
+func TestValidateAgainstLedger_GappedOpCertAccepted(t *testing.T) {
+	pc := newCredsForLedger(t)
+	pc.opCert.IssueNumber = 7
+	view := &fakeLedgerView{
+		registered: true,
+		regVRFHash: lcommon.Blake2b256Hash(pc.vrfVKey),
+		seqFound:   true,
+		latestSeq:  5,
+	}
+	_, _, err := pc.ValidateAgainstLedger(view)
+	if err != nil {
+		t.Fatalf("expected gapped counter to be accepted at startup: %v", err)
+	}
+}
+
 func TestValidateAgainstLedger_OpCertEqualOrAhead(t *testing.T) {
 	// Equal counter is fine; ahead-of-ledger is fine (the ledger may
 	// just not have observed our latest opcert yet).
@@ -929,4 +1344,118 @@ func bytes32(seed byte) []byte {
 		b[i] = seed + byte(i)
 	}
 	return b
+}
+
+// TestValidateOpCertSequence mirrors ledger/verify_opcert_test.go's
+// TestValidateOpCertCounter: the backward (stale) rule applies to every era,
+// while the no-gap (over-increment) rule is Praos-only, so the gapped cases
+// are split by enforceNoGap. The two functions must stay in agreement, since
+// this one pre-flights exactly the rule block application enforces.
+func TestValidateOpCertSequence(t *testing.T) {
+	tests := []struct {
+		name         string
+		stored       uint64
+		found        bool
+		candidate    uint64
+		enforceNoGap bool
+		wantErr      string
+	}{
+		{
+			name:         "first sighting accepts any counter",
+			found:        false,
+			candidate:    7,
+			enforceNoGap: true,
+		},
+		{
+			name:         "equal to last seen",
+			stored:       5,
+			found:        true,
+			candidate:    5,
+			enforceNoGap: true,
+		},
+		{
+			name:         "exactly one greater (boundary, praos)",
+			stored:       5,
+			found:        true,
+			candidate:    6,
+			enforceNoGap: true,
+		},
+		{
+			name:         "exactly one greater (boundary, tpraos)",
+			stored:       5,
+			found:        true,
+			candidate:    6,
+			enforceNoGap: false,
+		},
+		{
+			name:         "backward counter rejected (praos)",
+			stored:       5,
+			found:        true,
+			candidate:    4,
+			enforceNoGap: true,
+			wantErr:      "below last seen",
+		},
+		{
+			name:         "backward counter rejected (tpraos)",
+			stored:       5,
+			found:        true,
+			candidate:    4,
+			enforceNoGap: false,
+			wantErr:      "below last seen",
+		},
+		{
+			name:         "gapped counter rejected under praos (era change)",
+			stored:       5,
+			found:        true,
+			candidate:    7,
+			enforceNoGap: true,
+			wantErr:      "skips ahead",
+		},
+		{
+			name:         "gapped counter accepted under tpraos (era change)",
+			stored:       5,
+			found:        true,
+			candidate:    7,
+			enforceNoGap: false,
+		},
+		{
+			name:         "maximum counter accepted when unchanged (boundary)",
+			stored:       math.MaxUint64,
+			found:        true,
+			candidate:    math.MaxUint64,
+			enforceNoGap: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateOpCertSequence(
+				tt.stored,
+				tt.found,
+				tt.candidate,
+				tt.enforceNoGap,
+			)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf(
+						"validateOpCertSequence: unexpected error: %v",
+						err,
+					)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf(
+					"validateOpCertSequence: expected error containing %q, got nil",
+					tt.wantErr,
+				)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf(
+					"validateOpCertSequence: error %q does not contain %q",
+					err.Error(),
+					tt.wantErr,
+				)
+			}
+		})
+	}
 }

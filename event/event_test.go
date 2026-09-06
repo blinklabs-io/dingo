@@ -15,6 +15,7 @@
 package event_test
 
 import (
+	"context"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -293,6 +294,176 @@ func TestEventBusClose(t *testing.T) {
 	eb.Close()
 }
 
+func TestEventBusCloseDiscardsQueuedSubscriberEvents(t *testing.T) {
+	const testEvtType event.EventType = "test.close.discard"
+	eb := event.NewEventBus(nil, nil)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var handled atomic.Int32
+	eb.SubscribeFuncWithBuffer(testEvtType, 2, func(event.Event) {
+		if handled.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+	})
+
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "in-flight"))
+	testutil.RequireReceive(t, entered, time.Second, "handler did not start")
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "queued-1"))
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "queued-2"))
+
+	closeDone := make(chan struct{})
+	go func() {
+		eb.Close()
+		close(closeDone)
+	}()
+	testutil.RequireNoReceive(
+		t,
+		closeDone,
+		50*time.Millisecond,
+		"Close should still wait for the in-flight handler",
+	)
+	close(release)
+	testutil.RequireReceive(t, closeDone, time.Second, "Close did not finish")
+	require.Equal(
+		t,
+		int32(1),
+		handled.Load(),
+		"queued events were replayed during Close",
+	)
+}
+
+func TestEventBusUnsubscribePreservesQueuedSubscriberEvents(t *testing.T) {
+	const testEvtType event.EventType = "test.unsubscribe.preserves"
+	eb := event.NewEventBus(nil, nil)
+	// Close, not Stop: NewEventBus starts an async worker unconditionally, and
+	// Stop reinitializes it (restart=true) rather than leaving it stopped, so
+	// only Close lets the worker goroutine exit when the test ends.
+	defer eb.Close()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var handled atomic.Int32
+	subID := eb.SubscribeFuncWithBuffer(testEvtType, 2, func(event.Event) {
+		if handled.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+	})
+
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "in-flight"))
+	testutil.RequireReceive(t, entered, time.Second, "handler did not start")
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "queued-1"))
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "queued-2"))
+
+	unsubscribed := make(chan struct{})
+	go func() {
+		eb.UnsubscribeAndWait(testEvtType, subID)
+		close(unsubscribed)
+	}()
+	testutil.RequireNoReceive(
+		t,
+		unsubscribed,
+		50*time.Millisecond,
+		"UnsubscribeAndWait should wait for the in-flight handler",
+	)
+	close(release)
+	testutil.RequireReceive(
+		t,
+		unsubscribed,
+		time.Second,
+		"UnsubscribeAndWait did not finish",
+	)
+	require.Equal(
+		t,
+		int32(3),
+		handled.Load(),
+		"ordinary unsubscribe discarded queued events",
+	)
+}
+
+func TestUnsubscribeAndWaitContextBoundsTheWait(t *testing.T) {
+	const testEvtType event.EventType = "test.unsubscribe.ctx"
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Close()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	// Registered after the deferred Close so it runs first: a failure here
+	// leaves the handler blocked, and Close would otherwise wait on it
+	// forever instead of letting the test report the failure.
+	var releaseOnce sync.Once
+	releaseHandler := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseHandler()
+
+	var handled atomic.Int32
+	subID := eb.SubscribeFunc(testEvtType, func(event.Event) {
+		if handled.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+	})
+
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "in-flight"))
+	testutil.RequireReceive(t, entered, time.Second, "handler did not start")
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		50*time.Millisecond,
+	)
+	defer cancel()
+	returned := make(chan error, 1)
+	go func() {
+		returned <- eb.UnsubscribeAndWaitContext(ctx, testEvtType, subID)
+	}()
+	// The wait, not the unsubscribe, is what ctx bounds: this must return
+	// while the handler is still blocked, or a bounded shutdown path can be
+	// held open indefinitely by one stuck handler.
+	require.ErrorIs(
+		t,
+		testutil.RequireReceive(
+			t,
+			returned,
+			5*time.Second,
+			"UnsubscribeAndWaitContext did not honor the context deadline",
+		),
+		context.DeadlineExceeded,
+	)
+
+	// Delivery stopped even though the wait was cut short.
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "after-unsubscribe"))
+	releaseHandler()
+	// Never, not Eventually: handled is already 1 from the in-flight event,
+	// so an Eventually would pass on its first poll without ever observing
+	// whether the post-unsubscribe publish got delivered.
+	require.Never(
+		t,
+		func() bool { return handled.Load() != 1 },
+		time.Second,
+		10*time.Millisecond,
+		"unsubscribe must still take effect when the wait is cut short",
+	)
+}
+
+func TestUnsubscribeAndWaitContextReturnsNilOnceHandlerFinishes(t *testing.T) {
+	const testEvtType event.EventType = "test.unsubscribe.ctx.ok"
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Close()
+
+	handled := make(chan struct{})
+	subID := eb.SubscribeFunc(testEvtType, func(event.Event) {
+		close(handled)
+	})
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "handled"))
+	testutil.RequireReceive(t, handled, time.Second, "handler did not run")
+
+	require.NoError(
+		t,
+		eb.UnsubscribeAndWaitContext(t.Context(), testEvtType, subID),
+	)
+}
+
 func TestSubscribeFuncPanicRecovery(t *testing.T) {
 	var testEvtType event.EventType = "test.panic"
 	eb := event.NewEventBus(nil, nil)
@@ -319,6 +490,135 @@ func TestSubscribeFuncPanicRecovery(t *testing.T) {
 		return received.Load() >= 2
 	}, 10*time.Second, 10*time.Millisecond,
 		"handler should continue processing events after a panic",
+	)
+}
+
+// TestSubscribeFuncStrictPanicRecovery verifies that, unlike SubscribeFunc,
+// a SubscribeFuncStrict handler panic is recovered but not silently followed
+// by continued delivery: onPanic is invoked with the failing event and the
+// recovered value, and the subscription is torn down so a later publish is
+// not delivered to it.
+func TestSubscribeFuncStrictPanicRecovery(t *testing.T) {
+	var testEvtType event.EventType = "test.strict.panic"
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Stop()
+
+	var received atomic.Int32
+	var panicEvt atomic.Value
+	var panicVal atomic.Value
+
+	subId := eb.SubscribeFuncStrict(
+		testEvtType,
+		0,
+		event.SubscriberBackpressureDetach,
+		func(evt event.Event) {
+			received.Add(1)
+			panic("intentional strict test panic")
+		},
+		func(evt event.Event, r any) {
+			panicEvt.Store(evt)
+			panicVal.Store(r)
+		},
+	)
+	require.NotZero(t, subId)
+
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "boom"))
+
+	require.Eventually(t, func() bool {
+		return panicVal.Load() != nil
+	}, 10*time.Second, 10*time.Millisecond,
+		"onPanic should be invoked after the handler panics",
+	)
+	require.Equal(t, "intentional strict test panic", panicVal.Load())
+	require.Equal(
+		t,
+		testEvtType,
+		panicEvt.Load().(event.Event).Type,
+		"onPanic should receive the event that was being processed",
+	)
+
+	require.Eventually(t, func() bool {
+		return !eb.HasSubscribers(testEvtType)
+	}, 10*time.Second, 10*time.Millisecond,
+		"the subscription must be torn down after the handler panics",
+	)
+
+	// A later publish must not reach the (now unsubscribed) handler.
+	// Never, not Eventually: received is already 1 from the panicking
+	// delivery, so an Eventually would pass on its first poll without ever
+	// observing whether the post-panic publish got delivered.
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "after-panic"))
+	require.Never(
+		t,
+		func() bool { return received.Load() != 1 },
+		time.Second,
+		10*time.Millisecond,
+		"no further event should be delivered after the handler panicked",
+	)
+}
+
+// TestSubscribeFuncStrictOnPanicHookPanicIsContained is a regression test for
+// a bug where a panicking onPanic hook was not itself panic-safe: it runs
+// from inside safeHandlerCall's own deferred recover, which has already
+// consumed the handler's panic, so nothing further up the stack could catch
+// a second one from onPanic. That let a misbehaving onPanic hook (or Logger)
+// propagate out of safeHandlerCall as a fresh, unrecovered panic --
+// safeHandlerCall never returned at all, so SubscribeFuncStrict never
+// observed panicked=true and never tore the subscription down, and the
+// panic crashed the whole process once it unwound past the dispatch
+// goroutine's remaining defers with nothing left to catch it. This verifies
+// the subscription is still torn down, and the EventBus itself remains
+// usable, even when onPanic panics.
+func TestSubscribeFuncStrictOnPanicHookPanicIsContained(t *testing.T) {
+	var testEvtType event.EventType = "test.strict.onpanic.panic"
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Stop()
+
+	var onPanicCalled atomic.Bool
+
+	eb.SubscribeFuncStrict(
+		testEvtType,
+		0,
+		event.SubscriberBackpressureDetach,
+		func(evt event.Event) {
+			panic("intentional handler panic")
+		},
+		func(evt event.Event, r any) {
+			// Set before panicking: this is what proves the panic below
+			// actually happened inside onPanic (the path under test) rather
+			// than the test passing on handler-panic teardown alone with
+			// onPanic silently never having run at all.
+			onPanicCalled.Store(true)
+			panic("intentional onPanic hook panic")
+		},
+	)
+
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "boom"))
+
+	require.Eventually(t, func() bool {
+		return onPanicCalled.Load()
+	}, 10*time.Second, 10*time.Millisecond,
+		"onPanic must have been invoked",
+	)
+	require.Eventually(t, func() bool {
+		return !eb.HasSubscribers(testEvtType)
+	}, 10*time.Second, 10*time.Millisecond,
+		"the subscription must still be torn down even when onPanic itself panics",
+	)
+
+	// The EventBus itself must still be usable: an unrelated subscription
+	// must still receive its own events normally, proving the dispatch
+	// goroutine's panic did not crash the process or corrupt the bus.
+	var otherType event.EventType = "test.strict.onpanic.panic.other"
+	var received atomic.Bool
+	eb.SubscribeFunc(otherType, func(event.Event) {
+		received.Store(true)
+	})
+	eb.Publish(otherType, event.NewEvent(otherType, "ok"))
+	require.Eventually(t, func() bool {
+		return received.Load()
+	}, 10*time.Second, 10*time.Millisecond,
+		"the EventBus must remain usable after a panicking onPanic hook",
 	)
 }
 

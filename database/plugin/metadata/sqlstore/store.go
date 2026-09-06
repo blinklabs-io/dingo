@@ -269,6 +269,7 @@ func (s *Store) Start(ctx context.Context) error {
 			Registry: s.migrations,
 			Locker:   s.migrationLocker,
 			Logger:   s.logger,
+			Rebind:   s.dialect.Rebind,
 		}
 		if err := runner.Run(ctx); err != nil {
 			return fmt.Errorf("sqlstore: metadata upgrade: %w", err)
@@ -303,22 +304,35 @@ func (s *Store) ReadPoolStats() sql.DBStats {
 	return s.readDB.Stats()
 }
 
-// Transaction begins a write transaction. Begin failures are retained on the
-// returned transaction because the historical MetadataStore contract cannot
-// return an error from this method.
-func (s *Store) Transaction() types.Txn {
-	return s.transaction(false)
+// Transaction begins a write transaction bound to ctx: every statement a
+// caller issues against the returned Txn (via a domain method's txn
+// parameter) runs with this ctx, and per database/sql's own BeginTx
+// contract, canceling it rolls the transaction back rather than leaving it
+// to time out on its own. Begin failures are retained on the returned
+// transaction because the historical MetadataStore contract cannot return
+// an error from this method. A nil ctx is treated as context.Background(),
+// matching prior behavior for any caller that does not supply one.
+func (s *Store) Transaction(ctx context.Context) types.Txn {
+	return s.transaction(ctx, false)
 }
 
-// ReadTransaction begins a repeatable, read-only transaction on the read pool.
-func (s *Store) ReadTransaction() types.Txn {
-	return s.transaction(true)
+// ReadTransaction begins a repeatable, read-only transaction on the read
+// pool, bound to ctx the same way Transaction is.
+func (s *Store) ReadTransaction(ctx context.Context) types.Txn {
+	return s.transaction(ctx, true)
 }
 
-func (s *Store) transaction(readOnly bool) types.Txn {
+// transaction begins a transaction bound to ctx. The context.Background()
+// fallback below is for a caller passing a literal nil, not a dropped
+// caller ctx -- there is nothing above to derive from in that case.
+func (s *Store) transaction(ctx context.Context, readOnly bool) types.Txn {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if !s.ready.Load() {
 		return &sqlTxn{
 			owner:    s,
+			ctx:      ctx,
 			beginErr: errors.New("sqlstore: store is not ready"),
 		}
 	}
@@ -328,14 +342,11 @@ func (s *Store) transaction(readOnly bool) types.Txn {
 		err     error
 	)
 	if readOnly {
-		tx, err = s.readDB.BeginTx(
-			context.Background(),
-			s.dialect.BeginOptions(true),
-		)
+		tx, err = s.readDB.BeginTx(ctx, s.dialect.BeginOptions(true))
 	} else {
-		tx, release, err = s.beginWriteTx(context.Background())
+		tx, release, err = s.beginWriteTx(ctx)
 	}
-	return &sqlTxn{owner: s, tx: tx, release: release, beginErr: err}
+	return &sqlTxn{owner: s, tx: tx, ctx: ctx, release: release, beginErr: err}
 }
 
 // Close closes each owned pool exactly once.
@@ -444,60 +455,97 @@ func (s *Store) closeMaintenanceAdmission() {
 	}
 }
 
-func (s *Store) dbFromTxn(txn types.Txn) (queryer, error) {
+// dbFromTxn resolves txn to a queryer plus the context.Context statements
+// against it should use. txn == nil is the autocommit convenience: no
+// caller-managed ctx exists for that path, so it returns
+// context.Background() -- accepted for a one-off statement against the
+// shared pool, bounded server-side by the statement/lock timeout config
+// instead of by caller cancellation. A real *sqlTxn instead carries the
+// ctx its owning Transaction/ReadTransaction call was given, so every
+// statement issued against it -- through whichever domain method's txn
+// parameter it arrived through -- is bound to that same caller-supplied
+// ctx without that method needing a ctx parameter of its own.
+func (s *Store) dbFromTxn(
+	txn types.Txn,
+) (queryer, context.Context, error) {
 	if txn == nil {
 		if err := s.ensureReady(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return newDialectQueryer(s.writeDB, s.dialect.Name()), nil
+		return newDialectQueryer(
+			s.writeDB,
+			s.dialect.Name(),
+		), context.Background(), nil
 	}
 	sqlTransaction, ok := txn.(*sqlTxn)
 	if !ok || sqlTransaction.owner != s {
-		return nil, errors.New("sqlstore: transaction belongs to another store")
+		return nil, nil, errors.New(
+			"sqlstore: transaction belongs to another store",
+		)
 	}
 	sqlTransaction.mu.Lock()
 	defer sqlTransaction.mu.Unlock()
 	if sqlTransaction.beginErr != nil {
-		return nil, sqlTransaction.beginErr
+		return nil, nil, sqlTransaction.beginErr
 	}
 	if sqlTransaction.finished || sqlTransaction.tx == nil {
-		return nil, types.ErrNilTxn
+		return nil, nil, types.ErrNilTxn
 	}
-	return newDialectQueryer(sqlTransaction.tx, s.dialect.Name()), nil
+	return newDialectQueryer(
+		sqlTransaction.tx,
+		s.dialect.Name(),
+	), sqlTransaction.ctx, nil
 }
 
-func (s *Store) readDBFromTxn(txn types.Txn) (queryer, error) {
+func (s *Store) readDBFromTxn(
+	txn types.Txn,
+) (queryer, context.Context, error) {
 	if txn == nil {
 		if err := s.ensureReady(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return newDialectQueryer(s.readDB, s.dialect.Name()), nil
+		return newDialectQueryer(
+			s.readDB,
+			s.dialect.Name(),
+		), context.Background(), nil
 	}
 	return s.dbFromTxn(txn)
 }
 
+// withWriteTransaction runs fn against either the caller-supplied txn (its
+// own ctx passed through, per dbFromTxn) or, when txn is nil, a fresh
+// implicit write transaction this call begins and commits/rolls back
+// itself -- that implicit case has no caller-managed ctx to inherit
+// either, so it uses context.Background(), the same accepted autocommit-
+// path gap dbFromTxn documents.
 func (s *Store) withWriteTransaction(
-	ctx context.Context,
 	txn types.Txn,
-	fn func(queryer) error,
+	fn func(queryer, context.Context) error,
 ) error {
 	if err := s.ensureReady(); err != nil {
 		return err
 	}
 	if txn != nil {
-		db, err := s.dbFromTxn(txn)
+		db, ctx, err := s.dbFromTxn(txn)
 		if err != nil {
 			return err
 		}
-		return fn(db)
+		return fn(db, ctx)
 	}
+	ctx := context.Background()
 	sqlTransaction, release, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
 	}
-	sqlTxnState := &sqlTxn{owner: s, tx: sqlTransaction, release: release}
-	if err := fn(newDialectQueryer(sqlTransaction, s.dialect.Name())); err != nil {
-		return errors.Join(err, sqlTxnState.Rollback())
+	sqlTxnState := &sqlTxn{
+		owner:   s,
+		tx:      sqlTransaction,
+		ctx:     ctx,
+		release: release,
+	}
+	fnErr := fn(newDialectQueryer(sqlTransaction, s.dialect.Name()), ctx)
+	if fnErr != nil {
+		return errors.Join(fnErr, sqlTxnState.Rollback())
 	}
 	return sqlTxnState.Commit()
 }
@@ -531,8 +579,13 @@ type queryer interface {
 }
 
 type sqlTxn struct {
-	owner    *Store
-	tx       *sql.Tx
+	owner *Store
+	tx    *sql.Tx
+	// ctx is the context.Context this transaction was begun with (via
+	// Transaction/ReadTransaction). dbFromTxn hands it back alongside the
+	// queryer so every statement issued against this txn -- through
+	// whichever domain method's txn parameter -- is bound to it.
+	ctx      context.Context
 	release  func()
 	beginErr error
 

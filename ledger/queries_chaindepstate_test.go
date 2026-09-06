@@ -198,7 +198,9 @@ func TestQueryShelleyDebugChainDepState_DecodesAsPraosState(t *testing.T) {
 //
 // dingo supports Shelley through Alonzo, and a node syncing from genesis sits
 // in them for a long stretch, serving queries the whole time.
-func TestQueryShelleyDebugChainDepState_TPraosEraUsesTPraosLayout(t *testing.T) {
+func TestQueryShelleyDebugChainDepState_TPraosEraUsesTPraosLayout(
+	t *testing.T,
+) {
 	db := newTestDB(t)
 
 	// Shelley's window is 3k/f = 3*6/0.4 = 45 slots, so with the epoch running
@@ -318,7 +320,9 @@ func TestQueryShelleyDebugChainDepState_TPraosEraUsesTPraosLayout(t *testing.T) 
 // difference of opinion. Walking the whole era table is what makes a new era
 // added to one list and forgotten in the other fail here rather than in the
 // field.
-func TestQueryShelleyDebugChainDepState_LayoutFollowsConsensusMode(t *testing.T) {
+func TestQueryShelleyDebugChainDepState_LayoutFollowsConsensusMode(
+	t *testing.T,
+) {
 	for _, era := range eras.ErasWithDijkstra {
 		t.Run(era.Name, func(t *testing.T) {
 			db := newTestDB(t)
@@ -785,7 +789,9 @@ func TestQueryShelleyDebugChainDepState_LabNonceWithoutHashIndex(t *testing.T) {
 //
 // Consensus only moves the lab when a block is applied, so before the first
 // one it holds whatever the epoch opened with.
-func TestQueryShelleyDebugChainDepState_LabNonceCarriesWithoutBlocks(t *testing.T) {
+func TestQueryShelleyDebugChainDepState_LabNonceCarriesWithoutBlocks(
+	t *testing.T,
+) {
 	db := newTestDB(t)
 	carriedLab := bytes.Repeat([]byte{0x41}, 32)
 	require.NoError(t, db.Metadata().SetEpoch(
@@ -819,7 +825,9 @@ func TestQueryShelleyDebugChainDepState_LabNonceCarriesWithoutBlocks(t *testing.
 // an error here aborts the LocalStateQuery protocol and drops the connection,
 // which is the failure this whole handler exists to remove. Carrying the
 // epoch's value is wrong by at most one block.
-func TestQueryShelleyDebugChainDepState_LabNonceTipBlockUnavailable(t *testing.T) {
+func TestQueryShelleyDebugChainDepState_LabNonceTipBlockUnavailable(
+	t *testing.T,
+) {
 	db := newTestDB(t)
 	carriedLab := bytes.Repeat([]byte{0x61}, 32)
 	absentTip := bytes.Repeat([]byte{0x62}, 32)
@@ -861,7 +869,9 @@ func TestQueryShelleyDebugChainDepState_LabNonceTipBlockUnavailable(t *testing.T
 // the wrong slot is a reordering the earlier tests cannot see -- every field
 // around it there decodes to a value that is either neutral or shared with its
 // neighbour.
-func TestQueryShelleyDebugChainDepState_ReportsPreviousEpochNonce(t *testing.T) {
+func TestQueryShelleyDebugChainDepState_ReportsPreviousEpochNonce(
+	t *testing.T,
+) {
 	previousNonce := make([]byte, 32)
 	for i := range previousNonce {
 		previousNonce[i] = 0x55
@@ -923,11 +933,15 @@ func TestQueryShelleyDebugChainDepState_ReportsPreviousEpochNonce(t *testing.T) 
 	}, *decoded.EpochNonce, "the epoch nonce is the current epoch's")
 	require.NotNil(t, decoded.PreviousEpochNonce,
 		"an epoch with a predecessor must carry its nonce")
-	assert.Equal(t, lcommon.Nonce{
-		Type:  lcommon.NonceTypeNonce,
-		Value: [32]byte(previousNonce),
-	}, *decoded.PreviousEpochNonce,
-		"the previous-epoch nonce is the preceding epoch's, not the current one's")
+	assert.Equal(
+		t,
+		lcommon.Nonce{
+			Type:  lcommon.NonceTypeNonce,
+			Value: [32]byte(previousNonce),
+		},
+		*decoded.PreviousEpochNonce,
+		"the previous-epoch nonce is the preceding epoch's, not the current one's",
+	)
 }
 
 // TestQueryShelleyDebugChainDepState_ReportsOpCertCounters covers the other
@@ -1007,7 +1021,9 @@ func TestQueryShelleyDebugChainDepState_ReportsOpCertCounters(t *testing.T) {
 // currently registered pools instead would drop a retired pool's entry, so a
 // caller reading this reply would be told the chain has accepted nothing for a
 // cold key it would in fact reject a replayed certificate for.
-func TestQueryShelleyDebugChainDepState_CountersOutliveRegistration(t *testing.T) {
+func TestQueryShelleyDebugChainDepState_CountersOutliveRegistration(
+	t *testing.T,
+) {
 	db := newTestDB(t)
 	require.NoError(t, db.SetTip(
 		ochainsync.Tip{Point: ocommon.NewPoint(100, []byte("tip"))},

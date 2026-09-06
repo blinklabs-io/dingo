@@ -16,10 +16,12 @@ package ledgerstate
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -32,16 +34,21 @@ import (
 // PaymentKeyHash/StakeKeyHash returned a meaningful credential.
 var zeroBlake2b224 ledger.Blake2b224
 
+// maxUTxOMapEntries is separate from the generic maxMapEntries limit because
+// the valid chain UTxO set can be much larger than other ledger-state maps.
+// The explicit cap still bounds work on a malformed or adversarial stream.
+const maxUTxOMapEntries = 100_000_000
+
 // checkUTxOMapEntryCount validates a definite-length UTxO map's
-// declared entry count against maxMapEntries before any entries are
-// streamed. See "Local CBOR decode limits policy" in
-// cbor_decode.go for why this cap exists and matches the one used
-// by decodeMapEntries.
+// declared entry count against maxUTxOMapEntries before any entries
+// are streamed. See "Local CBOR decode limits policy" in
+// cbor_decode.go for why UTxO streaming has a larger cap than
+// decodeMapEntries.
 func checkUTxOMapEntryCount(count int) error {
-	if count > maxMapEntries {
+	if count > maxUTxOMapEntries {
 		return fmt.Errorf(
 			"UTxO map claims %d entries, exceeds max (%d)",
-			count, maxMapEntries,
+			count, maxUTxOMapEntries,
 		)
 	}
 	return nil
@@ -52,7 +59,7 @@ func checkUTxOMapEntryCount(count int) error {
 // (unlike the definite-length case checked up front by
 // checkUTxOMapEntryCount) has no declared header count to validate
 // before entries are read. Production code always calls this via
-// parseIndefiniteUTxOMapWithProgress with limit=maxMapEntries; tests
+// parseIndefiniteUTxOMapWithProgress with limit=maxUTxOMapEntries; tests
 // call parseIndefiniteUTxOMapWithProgressLimit directly with a small
 // limit to prove the boundary check accepts exactly `limit` entries
 // and rejects entry `limit`+1 without streaming a mainnet-scale
@@ -82,7 +89,7 @@ func checkUTxOMapRunningEntryCount(entryIndex, limit int) error {
 				"the import checkpoint and chain tip were not "+
 				"advanced, so the database is not left in a usable "+
 				"state — this indicates the map is corrupted or "+
-				"genuinely exceeds the configured cap and needs "+
+				"genuinely exceeds the production cap and needs "+
 				"investigation, not a bare retry",
 			limit,
 		)
@@ -356,8 +363,8 @@ func parseUTxOsStreamingWithProgress(
 	// The map header count comes straight off the wire and is not
 	// otherwise bounds-checked by DecodeMapHeader (unlike a full
 	// cbor.Decode of a map, which is capped internally). Enforce the
-	// same maxMapEntries cap used by decodeMapEntries so a corrupted
-	// or adversarial header can't drive an unbounded loop below.
+	// UTxO-specific cap so a corrupted or adversarial header can't
+	// drive an unbounded loop below.
 	if err := checkUTxOMapEntryCount(count); err != nil {
 		return 0, err
 	}
@@ -637,7 +644,55 @@ func parseUTxOsFromFileWithProgress(
 		return 0, fmt.Errorf("reading tvar file: %w", err)
 	}
 	defer cleanup()
+	return parseUTxOsFromMapped(data, callback, progress)
+}
 
+// parseUTxOsFromOpenFileWithProgress is parseUTxOsFromFileWithProgress reading
+// an already-open file, for callers that resolved it through a directory handle
+// and must not have the name resolved again here. The caller closes f.
+func parseUTxOsFromOpenFileWithProgress(
+	f *os.File,
+	expectedDigest string,
+	callback UTxOCallback,
+	progress func(UTxOParseProgress),
+) (int, error) {
+	data, cleanup, err := mmapFile(f)
+	if err != nil {
+		return 0, fmt.Errorf("reading tvar file: %w", err)
+	}
+	defer cleanup()
+	// Checked over the mapping, not over the descriptor beforehand. The table
+	// is gigabytes, so it cannot be read into a buffer the way the state file
+	// is; mapping it once and hashing what was mapped is the nearest thing —
+	// the decoder below walks these same bytes, so nothing re-reads the file
+	// between the check and the parse.
+	//
+	// An empty digest is the unsigned path: v1, and any tree nothing vouched
+	// for. Those have nothing to check against, not permission to skip a check
+	// they have.
+	if expectedDigest != "" {
+		sum := sha256.Sum256(data)
+		if got := hex.EncodeToString(sum[:]); got != expectedDigest {
+			return 0, fmt.Errorf(
+				"%w: computed %s, signed %s",
+				ErrTableDigestMismatch, got, expectedDigest,
+			)
+		}
+	}
+	return parseUTxOsFromMapped(data, callback, progress)
+}
+
+// ErrTableDigestMismatch reports a UTxO-HD table whose mapped contents are not
+// the contents the caller's digest covers.
+var ErrTableDigestMismatch = errors.New(
+	"UTxO table is not the file the digest covers",
+)
+
+func parseUTxOsFromMapped(
+	data []byte,
+	callback UTxOCallback,
+	progress func(UTxOParseProgress),
+) (int, error) {
 	// Parse outer array header using StreamDecoder
 	decoder, err := cbor.NewStreamDecoder(data)
 	if err != nil {
@@ -684,7 +739,7 @@ func parseUTxOsFromFileWithProgress(
 // indefinite-length CBOR map (0xbf ... 0xff). Each entry is a
 // TxIn key and TxOut value decoded using the existing parsers.
 // An optional progress callback receives byte-level progress. The
-// entry count is capped at maxMapEntries; see
+// entry count is capped at maxUTxOMapEntries; see
 // checkUTxOMapRunningEntryCount for why indefinite-length maps need
 // a running check rather than an upfront header check.
 func parseIndefiniteUTxOMapWithProgress(
@@ -693,14 +748,14 @@ func parseIndefiniteUTxOMapWithProgress(
 	progress func(UTxOParseProgress),
 ) (int, error) {
 	return parseIndefiniteUTxOMapWithProgressLimit(
-		data, callback, progress, maxMapEntries,
+		data, callback, progress, maxUTxOMapEntries,
 	)
 }
 
 // parseIndefiniteUTxOMapWithProgressLimit is
 // parseIndefiniteUTxOMapWithProgress parameterized by the maximum
 // allowed entry count. Production code always calls it via
-// parseIndefiniteUTxOMapWithProgress with limit=maxMapEntries; tests
+// parseIndefiniteUTxOMapWithProgress with limit=maxUTxOMapEntries; tests
 // call it directly with a small limit to exercise the boundary
 // check without streaming a mainnet-scale fixture.
 func parseIndefiniteUTxOMapWithProgressLimit(

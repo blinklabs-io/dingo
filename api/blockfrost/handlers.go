@@ -257,6 +257,24 @@ func (b *Blockfrost) handleLatestEpochParams(
 ) {
 	info, err := b.node.CurrentProtocolParams()
 	if err != nil {
+		// A Byron prefix carries no protocol parameters, which is an
+		// expected stage of a from-genesis sync rather than a node fault.
+		// Reporting 500 here reads as an outage and trips alerting, so
+		// answer 404 as the absent-epoch path already does.
+		if errors.Is(err, ErrProtocolParamsUnavailable) {
+			b.logger.Debug(
+				"no protocol params for current era",
+				"error", err,
+			)
+			writeError(
+				w,
+				http.StatusNotFound,
+				"Not Found",
+				"Protocol parameters are not available for the "+
+					"current era.",
+			)
+			return
+		}
 		b.logger.Error(
 			"failed to get protocol params",
 			"error", err,
@@ -294,12 +312,31 @@ func (b *Blockfrost) handleEpochParams(
 	}
 	info, err := b.node.EpochProtocolParams(epoch)
 	if err != nil {
-		b.logger.Error(
-			"failed to get protocol params for epoch",
-			"epoch", epoch,
-			"error", err,
-		)
+		// Log after classifying, not before: an epoch the node does not
+		// hold and a Byron epoch that has no parameters are both expected
+		// answers, and logging them at error level fills the log with
+		// alerts for ordinary queries. This mirrors handleLatestEpochParams.
+		if errors.Is(err, ErrProtocolParamsUnavailable) {
+			b.logger.Debug(
+				"no protocol params for epoch era",
+				"epoch", epoch,
+				"error", err,
+			)
+			writeError(
+				w,
+				http.StatusNotFound,
+				"Not Found",
+				"Protocol parameters are not available for the "+
+					"requested epoch.",
+			)
+			return
+		}
 		if errors.Is(err, ErrEpochNotFound) {
+			b.logger.Debug(
+				"epoch not found",
+				"epoch", epoch,
+				"error", err,
+			)
 			writeError(
 				w,
 				http.StatusNotFound,
@@ -308,6 +345,11 @@ func (b *Blockfrost) handleEpochParams(
 			)
 			return
 		}
+		b.logger.Error(
+			"failed to get protocol params for epoch",
+			"epoch", epoch,
+			"error", err,
+		)
 		writeError(
 			w,
 			http.StatusInternalServerError,
@@ -1149,6 +1191,23 @@ func (b *Blockfrost) handleTransaction(
 	})
 }
 
+// transactionRejectionReason returns the reason the mempool declined a
+// transaction. The typed rejection carries the cause as a separate error, so
+// a rejection wrapped with additional context still reports the mempool's
+// reason instead of the wrapper's text. Trimming the sentinel off the front
+// of the message is only a fallback for a BlockfrostNode that reports the
+// bare sentinel and so has no cause to read.
+func transactionRejectionReason(err error) string {
+	if rejected, ok := errors.AsType[*TransactionRejectedError](err); ok &&
+		rejected.Cause != nil {
+		return rejected.Cause.Error()
+	}
+	return strings.TrimPrefix(
+		err.Error(),
+		ErrTransactionRejected.Error()+": ",
+	)
+}
+
 // handleTransactionSubmit handles POST /api/v0/tx/submit and submits raw
 // signed transaction CBOR to the mempool.
 func (b *Blockfrost) handleTransactionSubmit(
@@ -1202,6 +1261,49 @@ func (b *Blockfrost) handleTransactionSubmit(
 
 	hash, err := b.node.TransactionSubmit(txCbor)
 	if err != nil {
+		// Classify node conditions before the rejection: admission runs
+		// ledger validation against storage, so a storage fault arrives on
+		// the same return as a verdict on the transaction, and answering it
+		// 400 would tell the caller to fix a transaction that was never
+		// judged.
+		if errors.Is(err, ErrLedgerUnavailable) {
+			b.logger.Error(
+				"transaction submit failed on ledger storage",
+				"error", err,
+			)
+			writeError(
+				w,
+				http.StatusServiceUnavailable,
+				"Service Unavailable",
+				"ledger state unavailable",
+			)
+			return
+		}
+		if errors.Is(err, ErrTransactionRejected) {
+			// The transaction decoded; the mempool declined it. Reporting
+			// that as malformed CBOR sends callers looking at their
+			// serialization instead of at the rejection, so name the
+			// reason. Blockfrost likewise passes the node's rejection
+			// through, and an off-chain SDK surfaces this message verbatim
+			// to whoever ran the transaction.
+			//
+			// A rejection is an ordinary client-side condition -- a fee too
+			// small, a validity interval that has not started, a script that
+			// failed -- so it is logged at Debug for the same reason
+			// handleEpochParams logs its expected answers there: at Error
+			// level a caller probing submissions fills the log with alerts.
+			b.logger.Debug(
+				"transaction rejected by the mempool",
+				"error", err,
+			)
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"Bad Request",
+				"Transaction rejected: "+transactionRejectionReason(err),
+			)
+			return
+		}
 		if errors.Is(err, ErrInvalidTransaction) {
 			writeError(
 				w,

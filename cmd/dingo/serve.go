@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 
 	dingo "github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -33,16 +32,18 @@ import (
 
 func serveRun(
 	cmd *cobra.Command, _ []string, cfg *config.Config,
-) {
-	logger := commonRun(cfg)
+) error {
+	logger, err := commonRun(cfg)
+	if err != nil {
+		return err
+	}
 
 	// Check for an in-progress sync. If the "sync_status" key in
 	// the sync_state table holds a non-empty value, a previous sync
 	// did not complete. The user must finish (or re-run) the sync
 	// before starting the node.
 	if err := checkSyncState(cfg, logger); err != nil {
-		slog.Error(err.Error())
-		os.Exit(1)
+		return err
 	}
 
 	// CIP-0163: refuse to serve a Mithril-bootstrapped database with the
@@ -51,8 +52,7 @@ func serveRun(
 	// sync command cannot see; a bootstrapped node cannot reproduce a
 	// genesis-synced node's expiration state.
 	if err := checkMithrilInactivityCompat(cfg, logger); err != nil {
-		slog.Error(err.Error())
-		os.Exit(1)
+		return err
 	}
 
 	// Historical metadata backfill is only needed for API mode.
@@ -66,11 +66,7 @@ func serveRun(
 		if err := resumeBackfill(
 			cmd.Context(), cfg, logger,
 		); err != nil {
-			slog.Error(
-				"backfill resume failed",
-				"error", err,
-			)
-			os.Exit(1)
+			return fmt.Errorf("backfill resume failed: %w", err)
 		}
 	} else {
 		// Core mode: if a Mithril sync interrupted between drop
@@ -78,19 +74,15 @@ func serveRun(
 		// secondary-index-backed queries return correct
 		// cardinalities.
 		if err := repairDeferredIndexes(cfg, logger); err != nil {
-			slog.Error(
-				"deferred-index repair failed",
-				"error", err,
-			)
-			os.Exit(1)
+			return fmt.Errorf("deferred-index repair failed: %w", err)
 		}
 	}
 
 	// Run node
 	if err := node.Run(cfg, logger); err != nil {
-		slog.Error(err.Error())
-		os.Exit(1)
+		return err
 	}
+	return nil
 }
 
 func checkSyncState(
@@ -425,13 +417,12 @@ func serveCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Run as a node",
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := config.FromContext(cmd.Context())
 			if cfg == nil {
-				slog.Error("no config found in context")
-				os.Exit(1)
+				return errors.New("no config found in context")
 			}
-			serveRun(cmd, args, cfg)
+			return serveRun(cmd, args, cfg)
 		},
 	}
 	return cmd

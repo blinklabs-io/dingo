@@ -247,7 +247,7 @@ func TestPeerGovernorStopWaitsForInFlightGoroutines(t *testing.T) {
 
 	stopDone := make(chan struct{})
 	go func() {
-		pg.Stop()
+		_ = pg.Stop(context.Background())
 		close(stopDone)
 	}()
 
@@ -264,6 +264,49 @@ func TestPeerGovernorStopWaitsForInFlightGoroutines(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Stop did not return after the in-flight goroutine finished")
 	}
+}
+
+func TestPeerGovernorStopHonorsContextDeadline(t *testing.T) {
+	eventBus := newMockEventBus()
+	t.Cleanup(eventBus.Stop)
+
+	blocking := &blockingLedgerPeerProvider{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:           eventBus,
+		DisableOutbound:    true,
+		LedgerPeerProvider: blocking,
+	})
+	require.NoError(t, pg.Start(context.Background()))
+
+	select {
+	case <-blocking.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("discoverLedgerPeers never reached GetPoolRelays")
+	}
+
+	stopCtx, cancel := context.WithTimeout(
+		context.Background(),
+		50*time.Millisecond,
+	)
+	defer cancel()
+	err := pg.Stop(stopCtx)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	// Every caller wraps this with its own "peer governor shutdown: %w",
+	// matching how the other components' Stop errors are reported, so
+	// self-prefixing here doubles the prefix in the joined shutdown error.
+	require.NotContains(
+		t,
+		err.Error(),
+		"peer governor shutdown",
+		"Stop must not repeat the prefix its callers add",
+	)
+
+	close(blocking.release)
+	require.NoError(t, pg.Stop(context.Background()))
 }
 
 func TestPeerGovernorStopUnsubscribesConnectionHandlers(t *testing.T) {
@@ -286,7 +329,7 @@ func TestPeerGovernorStopUnsubscribesConnectionHandlers(t *testing.T) {
 		eventBus.HasSubscribers(connmanager.ConnectionClosedEventType),
 	)
 
-	pg.Stop()
+	_ = pg.Stop(context.Background())
 
 	require.False(
 		t,
@@ -1507,6 +1550,85 @@ func TestPeerGovernor_TestPeer_NoConnManager(t *testing.T) {
 	assert.False(t, result)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no test function or connection manager")
+}
+
+// TestPeerGovernor_Reconcile_PrunesStaleTestOnlyPeer verifies that a
+// TestPeer-only probe entry (PeerSourceUnknown, never actually connected) is
+// removed once its cached result has outlived TestCooldown, and that a
+// fresh entry survives reconcile until then.
+func TestPeerGovernor_Reconcile_PrunesStaleTestOnlyPeer(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		TestCooldown: time.Minute,
+		PeerTestFunc: func(address string) error {
+			return nil
+		},
+	})
+
+	result, err := pg.TestPeer("44.0.0.1:3001")
+	assert.True(t, result)
+	assert.NoError(t, err)
+	assert.Len(t, pg.GetPeers(), 1)
+
+	// A test result still inside its cooldown window must survive
+	// reconcile; repeated passes must not misbehave either.
+	pg.reconcile(t.Context())
+	pg.reconcile(t.Context())
+	assert.Len(t, pg.GetPeers(), 1)
+
+	// Backdate the cached result past the cooldown (white-box: same
+	// package) instead of sleeping in the test.
+	pg.mu.Lock()
+	for _, peer := range pg.peers {
+		peer.LastTestTime = time.Now().Add(-2 * pg.config.TestCooldown)
+	}
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+	assert.Empty(t, pg.GetPeers())
+
+	// A second reconcile over an already-pruned list must stay stable.
+	pg.reconcile(t.Context())
+	assert.Empty(t, pg.GetPeers())
+}
+
+// TestPeerGovernor_Reconcile_PrunedTestPeerAllowsReplacement verifies the
+// concrete harm of the leak: while the stale PeerSourceUnknown probe entry
+// is retained, AddPeer's dedupe-by-address check matches it and silently
+// refuses to admit the same address under its real source. Pruning the
+// stale entry must let a subsequent, real discovery of that address replace
+// it.
+func TestPeerGovernor_Reconcile_PrunedTestPeerAllowsReplacement(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		TestCooldown: time.Minute,
+		PeerTestFunc: func(address string) error {
+			return nil
+		},
+	})
+
+	_, err := pg.TestPeer("44.0.0.1:3001")
+	require.NoError(t, err)
+	require.Len(t, pg.GetPeers(), 1)
+	require.EqualValues(t, PeerSourceUnknown, pg.GetPeers()[0].Source)
+
+	// Before the stale entry is pruned, real discovery of the same address
+	// is blocked.
+	require.NoError(t, pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip))
+	require.Len(t, pg.GetPeers(), 1)
+	require.EqualValues(t, PeerSourceUnknown, pg.GetPeers()[0].Source)
+
+	pg.mu.Lock()
+	for _, peer := range pg.peers {
+		peer.LastTestTime = time.Now().Add(-2 * pg.config.TestCooldown)
+	}
+	pg.mu.Unlock()
+	pg.reconcile(t.Context())
+	require.Empty(t, pg.GetPeers())
+
+	require.NoError(t, pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip))
+	require.Len(t, pg.GetPeers(), 1)
+	require.EqualValues(t, PeerSourceP2PGossip, pg.GetPeers()[0].Source)
 }
 
 func TestPeerGovernor_DenyPeer(t *testing.T) {
@@ -2831,6 +2953,100 @@ func TestPeerGovernor_LoadTopologyConfig_ValencyStored(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, publicRootCount, "should have 1 public root peer")
+}
+
+// TestPeerGovernor_LoadTopologyConfig_EnforcesRootTarget verifies that the
+// configured root target changes the topology peers retained by the governor,
+// while local roots remain available to satisfy their configured valency.
+func TestPeerGovernor_LoadTopologyConfig_EnforcesRootTarget(t *testing.T) {
+	topologyConfig := &topology.TopologyConfig{
+		LocalRoots: []topology.TopologyConfigP2PLocalRoot{{
+			AccessPoints: []topology.TopologyConfigP2PAccessPoint{{
+				Address: "192.0.2.1",
+				Port:    3001,
+			}},
+			Valency: 1,
+		}},
+		PublicRoots: []topology.TopologyConfigP2PPublicRoot{{
+			AccessPoints: []topology.TopologyConfigP2PAccessPoint{
+				{Address: "192.0.2.2", Port: 3001},
+				{Address: "192.0.2.3", Port: 3001},
+				{Address: "192.0.2.4", Port: 3001},
+			},
+		}},
+	}
+	tests := []struct {
+		name       string
+		target     int
+		wantRoots  int
+		wantPublic int
+	}{
+		{name: "explicit", target: 2, wantRoots: 2, wantPublic: 1},
+		{name: "default", target: 0, wantRoots: 4, wantPublic: 3},
+		{name: "unlimited", target: -1, wantRoots: 4, wantPublic: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pg := NewPeerGovernor(PeerGovernorConfig{
+				TargetNumberOfRootPeers: tt.target,
+			})
+			pg.LoadTopologyConfig(topologyConfig)
+
+			rootCount := 0
+			localCount := 0
+			publicCount := 0
+			for _, peer := range pg.peers {
+				switch peer.Source {
+				case PeerSourceTopologyLocalRoot:
+					rootCount++
+					localCount++
+				case PeerSourceTopologyPublicRoot:
+					rootCount++
+					publicCount++
+				}
+			}
+
+			assert.Equal(t, tt.wantRoots, rootCount)
+			assert.Equal(t, 1, localCount)
+			assert.Equal(t, tt.wantPublic, publicCount)
+		})
+	}
+}
+
+// TestPeerGovernor_LoadTopologyConfig_RootTargetPreservesOverlappingLocalRoot
+// verifies that a public-root entry cannot overwrite operator-mandated local
+// root ownership or its group valencies when both resolve to the same address.
+func TestPeerGovernor_LoadTopologyConfig_RootTargetPreservesOverlappingLocalRoot(
+	t *testing.T,
+) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		TargetNumberOfRootPeers: 2,
+	})
+	pg.LoadTopologyConfig(&topology.TopologyConfig{
+		LocalRoots: []topology.TopologyConfigP2PLocalRoot{{
+			AccessPoints: []topology.TopologyConfigP2PAccessPoint{{
+				Address: "192.0.2.1",
+				Port:    3001,
+			}},
+			Valency:     1,
+			WarmValency: 1,
+		}},
+		PublicRoots: []topology.TopologyConfigP2PPublicRoot{{
+			AccessPoints: []topology.TopologyConfigP2PAccessPoint{{
+				Address: "192.0.2.1",
+				Port:    3001,
+			}},
+			Valency:     9,
+			WarmValency: 9,
+		}},
+	})
+
+	require.Len(t, pg.peers, 1)
+	assert.EqualValues(t, PeerSourceTopologyLocalRoot, pg.peers[0].Source)
+	assert.Equal(t, uint(1), pg.peers[0].Valency)
+	assert.Equal(t, uint(1), pg.peers[0].WarmValency)
+	assert.Equal(t, "local-root-0", pg.peers[0].GroupID)
 }
 
 func TestPeerGovernor_LoadTopologyConfig_ExitedBootstrapKeepsBootstrapSource(
@@ -7378,6 +7594,7 @@ func TestAddLedgerPeer_RejectsNonRoutable(t *testing.T) {
 	assert.False(t, added)
 
 	assert.Empty(t, pg.GetPeers())
+	assert.Empty(t, pg.ledgerKnownAddrs)
 }
 
 func TestAddLedgerPeer_AcceptsRoutable(t *testing.T) {
@@ -7388,6 +7605,8 @@ func TestAddLedgerPeer_AcceptsRoutable(t *testing.T) {
 	added := pg.addLedgerPeer("44.0.0.1:3001")
 	assert.True(t, added)
 	assert.Len(t, pg.GetPeers(), 1)
+	_, retained := pg.ledgerKnownAddrs["44.0.0.1:3001"]
+	assert.True(t, retained, "accepted ledger peer must be retained")
 }
 
 // --- Phase 2: inbound admission metadata & identity ---------------------

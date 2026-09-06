@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/rewards"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -50,6 +51,38 @@ func (ls *LedgerState) applyStakeRewards(
 	newEpoch uint64,
 	boundarySlot uint64,
 ) error {
+	// Byron has no Shelley-era reward parameters. During the Byron prefix,
+	// the delayed reward round reaches a boundary before its performance epoch
+	// can have pparams; the first Shelley boundary has the same shape because
+	// its performance epoch is still Byron. There are no stake rewards to
+	// apply for that epoch, so continue the rollover without entering the
+	// Shelley reward calculation path.
+	//
+	// Resolved through stakeRewardEpochsForApplication, the same helper the
+	// guarded path uses (calculateStakeRewardApplication,
+	// precomputedStakeRewardApplication). The two helpers agree from newEpoch
+	// 3 up; at newEpoch 1 and 2 stakeRewardEpochsForNewEpoch reports ok=false
+	// for being below 3 while the application path resolves a bootstrap round
+	// against performance epoch 0. Guarding on the narrower helper skipped
+	// exactly the rounds this guard exists to catch, and epochs 1 and 2 are
+	// inside the Byron prefix on every network this affects.
+	if rewardEpochs, ok := stakeRewardEpochsForApplication(newEpoch); ok {
+		performanceEpoch, err := ls.db.Metadata().GetEpoch(
+			rewardEpochs.performance,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"get reward performance epoch %d: %w",
+				rewardEpochs.performance,
+				err,
+			)
+		}
+		if performanceEpoch != nil &&
+			performanceEpoch.EraId == eras.ByronEraDesc.Id {
+			return nil
+		}
+	}
 	app, ok, err := ls.precomputedStakeRewardApplication(
 		txn,
 		newEpoch,
@@ -196,9 +229,23 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	}
 	if rewardSnapshot == nil {
 		if reportSkips {
+			reason := "missing reward snapshot"
+			failure, failureErr := meta.GetRewardSeedFailure(
+				rewardSnapshotEpoch, "mark", metaTxn,
+			)
+			if failureErr != nil {
+				return nil, false, fmt.Errorf(
+					"get reward seed failure for epoch %d: %w",
+					rewardSnapshotEpoch,
+					failureErr,
+				)
+			}
+			if failure != "" {
+				reason = "imported reward basis seeding failed: " + failure
+			}
 			ls.reportSkippedStakeRewards(
 				newEpoch,
-				"missing reward snapshot",
+				reason,
 				"reward_snapshot_epoch",
 				rewardSnapshotEpoch,
 			)
@@ -458,7 +505,7 @@ func (ls *LedgerState) applyStakeRewardApplication(
 		"reward_snapshot_epoch", app.epochs.snapshot,
 		"performance_epoch", app.epochs.performance,
 		"pots_epoch", app.epochs.pots,
-		"pparams_type", fmt.Sprintf("%T", app.pparams),
+		"performance_pparams_type", fmt.Sprintf("%T", app.pparams),
 		"precomputed", app.precomputed,
 		"total_reward_pot", app.totalRewardPot,
 		"available_rewards", app.availableRewards,
@@ -652,9 +699,9 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 	if pots == nil || pots.Rewards == 0 {
 		return nil, false, nil
 	}
-	// The bootstrap calculation has no durable output rows with which to
-	// validate the precompute against rollbacks. Always recalculate it at the
-	// epoch-2 boundary rather than treating pots.Rewards alone as provenance.
+	// A bootstrap calculation has no durable output rows with which to
+	// validate the precompute against rollbacks. Always recalculate it at its
+	// boundary rather than treating pots.Rewards alone as provenance.
 	if epochs.bootstrap {
 		return nil, false, nil
 	}
@@ -1552,6 +1599,11 @@ func precomputedMissingPrefilterLeaderOutput(
 		if output == nil || output.LeaderReward == 0 {
 			continue
 		}
+		// SA6001 suggests indexing with string(output.PoolKeyHash) directly,
+		// which would convert twice instead of once: poolKey is the key for
+		// both actualLeaderByPool and rewardAccountByPool below. The directive
+		// sits on the conversion because that is the line SA6001 reports.
+		//nolint:staticcheck // SA6001: one conversion serves two lookups
 		poolKey := string(output.PoolKeyHash)
 		if actualLeaderByPool[poolKey] != 0 {
 			continue
@@ -2337,15 +2389,28 @@ type stakeRewardEpochs struct {
 func stakeRewardEpochsForApplication(
 	newEpoch uint64,
 ) (stakeRewardEpochs, bool) {
-	// The first RUPD calculation is made during epoch 1 from epoch 0's block
-	// performance and the epoch 1 ADA pots. The Go stake distribution is
-	// still empty, so the epoch 2 NEWEPOCH rule applies monetary expansion
-	// and treasury tax but distributes no pool or account rewards.
-	if newEpoch == 2 {
+	// cardano-ledger's NEWEPOCH rule applies monetary expansion and the
+	// treasury tax at every boundary from the network's first Shelley-era
+	// epoch onward, including the two boundaries that precede any Go stake
+	// distribution. Both are bootstrap rounds: the pots move, but no pool or
+	// account rewards are distributed.
+	//
+	// Into epoch 1, the pot inputs are the slot-0 genesis baseline (the epoch
+	// 0 ADA pots row) and the fee pot is empty, because no epoch precedes
+	// epoch 0. Into epoch 2, the first RUPD calculation is made during epoch 1
+	// from epoch 0's block performance and the epoch 1 ADA pots.
+	//
+	// Networks with a Byron prefix have no Shelley reward round at either
+	// boundary, and applyStakeRewards' Byron performance-epoch guard
+	// suppresses both there. Networks that declare Shelley at genesis run
+	// both: preview's epoch 0 is Alonzo, and omitting the 0->1 round left its
+	// treasury at 0 and its reserves at the genesis value, which propagated
+	// into every later epoch (dingo #3381).
+	if newEpoch == 1 || newEpoch == 2 {
 		return stakeRewardEpochs{
 			snapshot:    0,
 			performance: 0,
-			pots:        1,
+			pots:        newEpoch - 1,
 			bootstrap:   true,
 		}, true
 	}
@@ -2374,9 +2439,10 @@ func stakeRewardEpochsForApplication(
 // counted, because a node in this state is silently diverging from the
 // network and only says so when it eventually rejects a block.
 //
-// The inputs are absent chiefly after a Mithril bootstrap: applying the round
-// at the boundary into N needs this node's own reward snapshot for N-3 and
-// ADA pots for N-1, and those epochs predate the import.
+// The inputs can be absent after a Mithril bootstrap, but the cause is not
+// necessarily that they predate the import: an imported reward basis can also
+// have failed reconciliation and therefore never been persisted. The warning
+// stays factual and points to the earlier diagnostics rather than guessing.
 func (ls *LedgerState) reportSkippedStakeRewards(
 	newEpoch uint64,
 	reason string,
@@ -2391,8 +2457,8 @@ func (ls *LedgerState) reportSkippedStakeRewards(
 		"skipping stake rewards: "+reason+
 			"; this epoch's rewards will never be credited, leaving reward"+
 			" balances and the leadership stake distribution permanently"+
-			" short (expected after a Mithril bootstrap, whose preceding"+
-			" epochs this node never saw)",
+			" short (the required basis was never persisted; inspect earlier"+
+			" bootstrap and ledgerstate import warnings for the cause)",
 		"component", "ledger",
 		"new_epoch", newEpoch,
 		epochKey, epochValue,
@@ -2542,10 +2608,9 @@ func (ls *LedgerState) rewardParameters(
 			performanceEpochRow.EraId, performanceEpoch,
 		)
 	}
-	performancePParams, err := ls.db.GetPParams(
+	performancePParams, err := ls.loadPersistedProtocolParameters(
 		performanceEpoch,
-		performanceEraDesc.Id,
-		performanceEraDesc.DecodePParamsFunc,
+		*performanceEraDesc,
 		txn,
 	)
 	if err != nil {
@@ -2558,15 +2623,6 @@ func (ls *LedgerState) rewardParameters(
 		return nil, rewards.Parameters{}, nil, fmt.Errorf(
 			"missing pparams for reward performance epoch %d",
 			performanceEpoch,
-		)
-	}
-	performanceDecentralization, err := rewardDecentralizationFromPParams(
-		performancePParams,
-	)
-	if err != nil {
-		return nil, rewards.Parameters{}, nil, fmt.Errorf(
-			"get decentralization for reward performance epoch %d: %w",
-			performanceEpoch, err,
 		)
 	}
 	calculationEpochRow, err := ls.db.Metadata().GetEpoch(
@@ -2586,33 +2642,27 @@ func (ls *LedgerState) rewardParameters(
 			calculationEpoch,
 		)
 	}
-	eraDesc, ok := ls.eraById(calculationEpochRow.EraId)
-	if !ok || eraDesc == nil {
-		return nil, rewards.Parameters{}, nil, fmt.Errorf(
-			"unknown era ID %d for reward calculation epoch %d",
-			calculationEpochRow.EraId, calculationEpoch,
-		)
-	}
-	pparams, err := ls.db.GetPParams(
-		calculationEpoch,
-		eraDesc.Id,
-		eraDesc.DecodePParamsFunc,
-		txn,
-	)
-	if err != nil {
-		return nil, rewards.Parameters{}, nil, fmt.Errorf(
-			"get pparams for reward calculation epoch %d: %w",
-			calculationEpoch, err,
-		)
-	}
-	if pparams == nil {
-		return nil, rewards.Parameters{}, nil, fmt.Errorf(
-			"missing pparams for reward calculation epoch %d",
-			calculationEpoch,
-		)
-	}
+	// Every protocol-parameter input to the reward calculation comes from the
+	// performance epoch, not the calculation epoch. cardano-ledger's startStep
+	// (LedgerState/PulsingReward.hs) binds `pr = es ^. prevPParamsEpochStateL`
+	// and reads d, rho and tau from it, then hands that same `pr` to
+	// mkPoolRewardInfo for the pool-level parameters; updateRewards reads the
+	// protocol version from it too. `prevPParams` during the epoch that
+	// computes the update is the parameter set in force over the epoch whose
+	// blocks are being counted, which is exactly this round's performance
+	// epoch.
+	//
+	// Only the epoch length is the calculation epoch's, matching the
+	// slotsPerEpoch the RUPD rule passes for the epoch it runs in.
+	//
+	// The two agree whenever the parameters did not change across the
+	// boundary, which is why reading the calculation epoch's went unnoticed.
+	// They diverge on preview at the 2->3 round: d is 1 at the performance
+	// epoch (1) and 0 at the calculation epoch (2), and taking 0 dropped the
+	// d >= 0.8 short circuit, leaving eta at 0 and suppressing that epoch's
+	// entire monetary expansion (dingo #3481).
 	params, err := rewardParametersFromPParams(
-		pparams,
+		performancePParams,
 		ls.config.CardanoNodeConfig,
 		uint64(calculationEpochRow.LengthInSlots),
 	)
@@ -2638,7 +2688,7 @@ func (ls *LedgerState) rewardParameters(
 			params.MaxLovelaceSupply,
 		)
 	}
-	return pparams, params, performanceDecentralization, nil
+	return performancePParams, params, params.Decentralization, nil
 }
 
 // applyFullPotConfig copies the CIP-0163 full-pot feature gate from the ledger
@@ -3519,45 +3569,6 @@ func rewardParametersFromPParams(
 		return rewards.Parameters{}, err
 	}
 	return params, nil
-}
-
-func rewardDecentralizationFromPParams(
-	pparams lcommon.ProtocolParameters,
-) (*big.Rat, error) {
-	var decentralization *big.Rat
-	switch pp := pparams.(type) {
-	case *shelley.ShelleyProtocolParameters:
-		decentralization = cloneCBORRat(pp.Decentralization)
-	case *mary.MaryProtocolParameters:
-		decentralization = cloneCBORRat(pp.Decentralization)
-	case *alonzo.AlonzoProtocolParameters:
-		decentralization = cloneCBORRat(pp.Decentralization)
-	case *babbage.BabbageProtocolParameters,
-		*conway.ConwayProtocolParameters,
-		*dijkstra.DijkstraProtocolParameters:
-		decentralization = new(big.Rat)
-	default:
-		return nil, fmt.Errorf("unsupported reward pparams type %T", pparams)
-	}
-	if decentralization == nil {
-		return nil, fmt.Errorf(
-			"%w: missing decentralization",
-			rewards.ErrInvalidParameters,
-		)
-	}
-	if decentralization.Sign() < 0 {
-		return nil, fmt.Errorf(
-			"%w: negative decentralization",
-			rewards.ErrInvalidParameters,
-		)
-	}
-	if decentralization.Cmp(big.NewRat(1, 1)) > 0 {
-		return nil, fmt.Errorf(
-			"%w: decentralization greater than one",
-			rewards.ErrInvalidParameters,
-		)
-	}
-	return decentralization, nil
 }
 
 func rewardEpochFees(

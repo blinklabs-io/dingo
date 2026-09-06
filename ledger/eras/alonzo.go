@@ -42,12 +42,19 @@ var AlonzoEraDesc = EraDesc{
 	DecodePParamsFunc:       DecodePParamsAlonzo,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateAlonzo,
 	PParamsUpdateFunc:       PParamsUpdateAlonzo,
-	HardForkFunc:            HardForkAlonzo,
-	EpochLengthFunc:         EpochLengthShelley,
-	CalculateEtaVFunc:       CalculateEtaVAlonzo,
-	CertDepositFunc:         CertDepositAlonzo,
-	ValidateTxFunc:          ValidateTxAlonzo,
-	EvaluateTxFunc:          EvaluateTxAlonzo,
+	ParamUpdateHasPlutusV2CostModelFunc: func(u any) bool {
+		upd, ok := u.(alonzo.AlonzoProtocolParameterUpdate)
+		if !ok {
+			return false
+		}
+		return paramUpdateHasPlutusV2CostModel(upd.CostModels)
+	},
+	HardForkFunc:      HardForkAlonzo,
+	EpochLengthFunc:   EpochLengthShelley,
+	CalculateEtaVFunc: CalculateEtaVAlonzo,
+	CertDepositFunc:   CertDepositAlonzo,
+	ValidateTxFunc:    ValidateTxAlonzo,
+	EvaluateTxFunc:    EvaluateTxAlonzo,
 }
 
 func DecodePParamsAlonzo(data []byte) (lcommon.ProtocolParameters, error) {
@@ -212,10 +219,6 @@ func ValidateTxAlonzo(
 	); err != nil {
 		return err
 	}
-	// Skip script evaluation if TX is marked as not valid
-	if !tx.IsValid() {
-		return nil
-	}
 	if shouldSkipPhase2Validation(ls) {
 		return nil
 	}
@@ -267,6 +270,7 @@ func ValidateTxAlonzo(
 			ls,
 			tx,
 			slices.Concat(resolvedInputs, resolvedRefInputs),
+			script.StrictValidityUpperBoundForTransaction(tx),
 		)
 		if err != nil {
 			return err
@@ -310,41 +314,51 @@ func ValidateTxAlonzo(
 				redeemer.Data,
 				sc.ToPlutusData(),
 				lcommon.ExUnits{
-					Steps:  restrictiveEnormousBudget,
-					Memory: restrictiveEnormousBudget,
+					Steps:  tmpPparams.MaxTxExUnits.Steps,
+					Memory: tmpPparams.MaxTxExUnits.Memory,
 				},
 				evalContext,
 			)
 			if err != nil {
-				return err
+				return validatePlutusOutcome(
+					tx,
+					conway.PlutusScriptFailedError{
+						ScriptHash: tmpScript.Hash(),
+						Tag:        redeemer.Tag,
+						Index:      redeemer.Index,
+						Err:        err,
+					},
+				)
 			}
 			if usedBudget.Steps > redeemer.ExUnits.Steps || usedBudget.Memory > redeemer.ExUnits.Memory {
-				return conway.PlutusScriptFailedError{
-					ScriptHash: tmpScript.Hash(),
-					Tag:        redeemer.Tag,
-					Index:      redeemer.Index,
-					Err: fmt.Errorf(
-						"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
-						usedBudget.Steps, usedBudget.Memory,
-						redeemer.ExUnits.Steps, redeemer.ExUnits.Memory,
-					),
-				}
+				return validatePlutusOutcome(
+					tx,
+					conway.PlutusScriptFailedError{
+						ScriptHash: tmpScript.Hash(),
+						Tag:        redeemer.Tag,
+						Index:      redeemer.Index,
+						Err: fmt.Errorf(
+							"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+							usedBudget.Steps, usedBudget.Memory,
+							redeemer.ExUnits.Steps, redeemer.ExUnits.Memory,
+						),
+					},
+				)
 			}
 		default:
 			return fmt.Errorf("unimplemented script type: %T", tmpScript)
 		}
 	}
-	return nil
+	return validatePlutusOutcome(tx, nil)
 }
 
 var alonzoUtxoValidationRules = buildAlonzoValidationRules()
 
 func buildAlonzoValidationRules() []indexedUtxoValidationRule {
 	return buildIndexedUtxoValidationRules(
+		alonzo.UtxoValidationRuleDescriptors(),
 		alonzo.UtxoValidationRules,
-		alonzoUtxoValidatePlutusScriptsRuleIndex,
-		alonzo.UtxoValidatePlutusScripts,
-		"alonzo.UtxoValidatePlutusScripts",
+		lcommon.UtxoValidationRulePlutusScripts,
 	)
 }
 
@@ -408,6 +422,7 @@ func EvaluateTxAlonzo(
 			ls,
 			tx,
 			slices.Concat(resolvedInputs, resolvedRefInputs),
+			script.StrictValidityUpperBoundForTransaction(tx),
 		)
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, err
@@ -457,8 +472,10 @@ func EvaluateTxAlonzo(
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
 			}
-			retTotalExUnits.Steps += usedBudget.Steps
-			retTotalExUnits.Memory += usedBudget.Memory
+			retTotalExUnits, err = SafeAddExUnits(retTotalExUnits, usedBudget)
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("aggregate execution units: %w", err)
+			}
 			retRedeemerExUnits[lcommon.RedeemerKey{
 				Tag:   redeemer.Tag,
 				Index: redeemer.Index,
