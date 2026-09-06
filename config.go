@@ -248,6 +248,8 @@ type Config struct {
 	blockProducer                                                                       bool
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
+	forgeHeaderFrontierToleranceSlots                                                   uint64
+	forgeUpstreamStalenessSlots, forgeAppliedTipStalenessSlots                          uint64
 	validateForgedBlock                                                                 bool
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
@@ -824,6 +826,8 @@ func (c *Config) syncCompatFields() {
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
+	c.forgeHeaderFrontierToleranceSlots = c.cfg.ForgeHeaderFrontierToleranceSlots
+	c.forgeUpstreamStalenessSlots, c.forgeAppliedTipStalenessSlots = c.cfg.ForgeUpstreamStalenessSlots, c.cfg.ForgeAppliedTipStalenessSlots
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
@@ -1446,6 +1450,32 @@ func WithLeiosPipelineTiming(timing leios.PipelineTiming) ConfigOptionFunc {
 func WithForgeSyncToleranceSlots(slots uint64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ForgeSyncToleranceSlots = slots
+	}
+}
+
+// WithForgeHeaderFrontierToleranceSlots sets how far the ledger-applied tip may
+// trail this node's own header frontier before forging is skipped.
+func WithForgeHeaderFrontierToleranceSlots(slots uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ForgeHeaderFrontierToleranceSlots = slots
+	}
+}
+
+// WithForgeUpstreamStalenessSlots sets how far the newest block this node holds
+// may trail the corroborated upstream sync target before forging is skipped.
+// Use 0 to fall back to the built-in default.
+func WithForgeUpstreamStalenessSlots(slots uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ForgeUpstreamStalenessSlots = slots
+	}
+}
+
+// WithForgeAppliedTipStalenessSlots sets how many slots older than the current
+// slot the newest block this node holds may be before forging is skipped. 0
+// disables this wall-clock backstop.
+func WithForgeAppliedTipStalenessSlots(slots uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ForgeAppliedTipStalenessSlots = slots
 	}
 }
 
@@ -2184,6 +2214,25 @@ func (c *Config) ShelleyOperationalCertificate() string {
 // ForgeSyncToleranceSlots returns the sync tolerance for block forging.
 func (c *Config) ForgeSyncToleranceSlots() uint64 {
 	return c.cfg.ForgeSyncToleranceSlots
+}
+
+// ForgeHeaderFrontierToleranceSlots returns how far the ledger-applied tip may
+// trail this node's own header frontier before forging is skipped.
+func (c *Config) ForgeHeaderFrontierToleranceSlots() uint64 {
+	return c.cfg.ForgeHeaderFrontierToleranceSlots
+}
+
+// ForgeUpstreamStalenessSlots returns how far the newest block this node holds
+// may trail the corroborated upstream sync target before forging is skipped.
+func (c *Config) ForgeUpstreamStalenessSlots() uint64 {
+	return c.cfg.ForgeUpstreamStalenessSlots
+}
+
+// ForgeAppliedTipStalenessSlots returns how many slots older than the current
+// slot the newest block this node holds may be before forging is skipped.
+// 0 disables the wall-clock backstop.
+func (c *Config) ForgeAppliedTipStalenessSlots() uint64 {
+	return c.cfg.ForgeAppliedTipStalenessSlots
 }
 
 // ForgeStaleGapThresholdSlots returns the stale gap threshold for warnings.

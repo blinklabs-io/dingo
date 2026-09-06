@@ -1798,3 +1798,65 @@ func TestResolveCertifiedEndorserTxsWithholdsUnverifiedSlot(t *testing.T) {
 	require.True(t, ok)
 	require.Len(t, txs, 1)
 }
+
+// TestMaxVerifiedEndorserBlockSlotTracksOnlyCorroboratedSlots pins the
+// spoof-resistance of the forge gate's Leios input.
+//
+// The forge gate treats a corroborated endorser block at slot S as proof a
+// ranking block exists at S, and uses that only to REFUSE to forge. A
+// peer-offered manifest carries nothing but that connection's claim about which
+// slot the block belongs to, so counting unverified offers would let a single
+// peer suppress block production by offering a manifest bound to a slot near
+// the current one. Only corroborated occurrences may advance it.
+func TestMaxVerifiedEndorserBlockSlotTracksOnlyCorroboratedSlots(t *testing.T) {
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	require.Zero(t, o.MaxVerifiedEndorserBlockSlot())
+
+	// A corroborated occurrence advances it.
+	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{mustCbor(t, "tx0")},
+		leiosStoreAuthoritative,
+	))
+	require.Equal(t, uint64(10), o.MaxVerifiedEndorserBlockSlot())
+
+	// A peer-offered occurrence at a HIGHER slot, with no announcement to
+	// corroborate the binding, must not.
+	offered, offeredRaw := testLeiosEndorserBlockRaw(t, 99)
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		offered,
+		offeredRaw,
+		[]cbor.RawMessage{mustCbor(t, "tx1")},
+		leiosStorePeerOffered,
+	))
+	require.Equal(
+		t,
+		uint64(10),
+		o.MaxVerifiedEndorserBlockSlot(),
+		"an unverified peer claim must not be able to hold back forging",
+	)
+
+	// Monotonic: an older corroborated occurrence does not move it back. The
+	// question it answers -- is there a block at least this recent -- stays
+	// true across a fork.
+	older, olderRaw := testLeiosEndorserBlockRaw(t, 5)
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		older,
+		olderRaw,
+		[]cbor.RawMessage{mustCbor(t, "tx2")},
+		leiosStoreAuthoritative,
+	))
+	require.Equal(t, uint64(10), o.MaxVerifiedEndorserBlockSlot())
+
+	// A newer corroborated occurrence advances it.
+	newer, newerRaw := testLeiosEndorserBlockRaw(t, 42)
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		newer,
+		newerRaw,
+		[]cbor.RawMessage{mustCbor(t, "tx3")},
+		leiosStoreAuthoritative,
+	))
+	require.Equal(t, uint64(42), o.MaxVerifiedEndorserBlockSlot())
+}
