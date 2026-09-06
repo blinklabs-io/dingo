@@ -488,15 +488,16 @@ func TestAuthCommitteeHotPruningIsPerTaggedCredential(t *testing.T) {
 		)
 	}
 
-	// A script-hash authorization at the tip prunes the backlog for every
-	// credential, but the credential tag remains part of each partition.
+	// A script-hash authorization at the tip must prune only script-hash rows.
 	applyAuthCertificate(
 		t, store, 1,
 		uint(scriptTag), shared,
 		lcommon.CredentialTypeScriptHash, hotHash(0x71, 5),
 		preprodTipSlot,
 	)
-	require.Equal(t, 1, authRowCountFor(t, store, keyTag, shared))
+	require.Equal(t, 4, authRowCountFor(t, store, keyTag, shared),
+		"a script-hash credential must not prune a key-hash credential "+
+			"sharing its hash")
 	require.Equal(t, 2, authRowCountFor(t, store, scriptTag, shared))
 
 	applyAuthCertificate(
