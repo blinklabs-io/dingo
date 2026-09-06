@@ -549,34 +549,100 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 		// in-memory chain until its transaction has concluded, so a
 		// concurrent rollback cannot resolve an index the store has yet to
 		// commit. See the batchCommitMutex field.
-		c.batchCommitMutex.RLock()
-		txn := c.manager.db.BlobTxn(true)
-		err := txn.Do(func(txn *database.Txn) error {
-			c.mutex.Lock()
-			defer c.mutex.Unlock()
-			c.manager.mutex.Lock()
-			defer c.manager.mutex.Unlock()
-			if err := c.reconcile(); err != nil {
-				return fmt.Errorf("reconcile chain: %w", err)
-			}
-			for _, tmpBlock := range blocks[batchOffset : batchOffset+batchSize] {
-				evt, err := c.addBlockLocked(
-					tmpBlock,
-					ocommon.Point{},
-					txn,
-					false,
-					true,
-				)
-				if err != nil {
-					return err
+		err := func() error {
+			c.batchCommitMutex.RLock()
+			defer c.batchCommitMutex.RUnlock()
+			txn := c.manager.db.BlobTxn(true)
+			var (
+				savedTip             ochainsync.Tip
+				savedTipBlockIndex   uint64
+				savedGeneration      uint64
+				savedHeaders         []queuedHeader
+				savedBlocks          []ocommon.Point
+				batchApplied         bool
+				appliedTip           ochainsync.Tip
+				appliedTipBlockIndex uint64
+				appliedGeneration    uint64
+			)
+			err := txn.Do(func(txn *database.Txn) error {
+				c.mutex.Lock()
+				defer c.mutex.Unlock()
+				c.manager.mutex.Lock()
+				defer c.manager.mutex.Unlock()
+				if err := c.reconcile(); err != nil {
+					return fmt.Errorf("reconcile chain: %w", err)
 				}
-				if evt.Type != "" {
-					pendingEvents = append(pendingEvents, evt)
+				savedTip = c.currentTip
+				savedTipBlockIndex = c.tipBlockIndex
+				savedGeneration = c.mutationGeneration
+				savedHeaders = slices.Clone(c.headers)
+				if !c.persistent {
+					savedBlocks = slices.Clone(c.blocks)
 				}
+				for _, tmpBlock := range blocks[batchOffset : batchOffset+batchSize] {
+					evt, err := c.addBlockLocked(
+						tmpBlock,
+						ocommon.Point{},
+						txn,
+						false,
+						true,
+					)
+					if err != nil {
+						c.currentTip = savedTip
+						c.tipBlockIndex = savedTipBlockIndex
+						c.mutationGeneration = savedGeneration
+						c.headers = savedHeaders
+						if !c.persistent {
+							c.blocks = savedBlocks
+						}
+						return err
+					}
+					if evt.Type != "" {
+						pendingEvents = append(pendingEvents, evt)
+					}
+				}
+				batchApplied = true
+				appliedTip = c.currentTip
+				appliedTipBlockIndex = c.tipBlockIndex
+				appliedGeneration = c.mutationGeneration
+				return nil
+			})
+			if err != nil && batchApplied {
+				c.mutex.Lock()
+				c.manager.mutex.Lock()
+				if c.batchRestoreIsSafeLocked(
+					appliedTip,
+					appliedTipBlockIndex,
+					appliedGeneration,
+				) {
+					c.currentTip = savedTip
+					c.tipBlockIndex = savedTipBlockIndex
+					c.mutationGeneration = savedGeneration
+					c.headers = savedHeaders
+					if !c.persistent {
+						c.blocks = savedBlocks
+					}
+				} else {
+					slog.Default().Error(
+						"skipped in-memory restore after block batch commit failure: chain moved under the batch",
+						"component", "chain",
+						"chain_id", c.id,
+						"applied_tip_block_index", appliedTipBlockIndex,
+						"tip_block_index", c.tipBlockIndex,
+						"applied_generation", appliedGeneration,
+						"mutation_generation", c.mutationGeneration,
+						"applied_tip_slot", appliedTip.Point.Slot,
+						"applied_tip_hash", hex.EncodeToString(appliedTip.Point.Hash),
+						"tip_slot", c.currentTip.Point.Slot,
+						"tip_hash", hex.EncodeToString(c.currentTip.Point.Hash),
+						"error", err,
+					)
+				}
+				c.manager.mutex.Unlock()
+				c.mutex.Unlock()
 			}
-			return nil
-		})
-		c.batchCommitMutex.RUnlock()
+			return err
+		}()
 		if err != nil {
 			return err
 		}
@@ -767,139 +833,136 @@ func (c *Chain) addRawBlocks(
 		// in-memory chain until its transaction has concluded, so a
 		// concurrent rollback cannot resolve an index the store has yet to
 		// commit. See the batchCommitMutex field.
-		c.batchCommitMutex.RLock()
-		txn := c.manager.db.BlobTxn(true)
-		// addRawBlockLocked mutates c.currentTip, c.tipBlockIndex,
-		// c.headers, and c.blocks before the txn commits. If a
-		// later block in the batch fails the closure restores the
-		// pre-batch state, but txn.Do also runs Commit *after* the
-		// closure returns and after the chain locks are released —
-		// a Commit failure rolls back the persistent state while
-		// leaving the in-memory chain advanced. Capture the
-		// snapshot here so we can also restore on Commit failure.
-		var (
-			savedTip             ochainsync.Tip
-			savedTipBlockIndex   uint64
-			savedGeneration      uint64
-			savedHeaders         []queuedHeader
-			savedBlocks          []ocommon.Point
-			batchApplied         bool
-			appliedTip           ochainsync.Tip
-			appliedTipBlockIndex uint64
-			appliedGeneration    uint64
-		)
-		err := txn.Do(func(txn *database.Txn) error {
-			batch := blocks[batchOffset : batchOffset+batchSize]
-			c.mutex.Lock()
-			defer c.mutex.Unlock()
-			c.manager.mutex.Lock()
-			defer c.manager.mutex.Unlock()
-			if err := c.reconcile(); err != nil {
-				return fmt.Errorf("reconcile: %w", err)
-			}
-			savedTip = c.currentTip
-			savedTipBlockIndex = c.tipBlockIndex
-			savedGeneration = c.mutationGeneration
-			savedHeaders = slices.Clone(c.headers)
-			if !c.persistent {
-				savedBlocks = slices.Clone(c.blocks)
-			}
-			for _, rb := range batch {
-				evt, err := c.addRawBlockLocked(
-					rb,
-					txn,
-					callback,
-				)
-				if err != nil {
-					c.currentTip = savedTip
-					c.tipBlockIndex = savedTipBlockIndex
-					c.mutationGeneration = savedGeneration
-					c.headers = savedHeaders
-					if !c.persistent {
-						c.blocks = savedBlocks
-					}
-					return err
-				}
-				if evt.Type != "" {
-					pendingEvents = append(
-						pendingEvents, evt,
-					)
-				}
-			}
-			// Record what this batch leaves behind so the Commit-failure
-			// path below can tell its own state from someone else's.
-			batchApplied = true
-			appliedTip = c.currentTip
-			appliedTipBlockIndex = c.tipBlockIndex
-			appliedGeneration = c.mutationGeneration
-			return nil
-		})
-		if err != nil {
-			// Cover the Commit-failure path: closure returned nil
-			// but txn.Do's later Commit failed, so memory still
-			// reflects the post-batch tip while the DB rolled
-			// back. Re-acquire the locks and restore -- but only
-			// while the chain still shows exactly what this batch
-			// left behind.
-			//
-			// The locks are released when the closure returns, so
-			// another goroutine can move the chain before this runs,
-			// and rolling the primary chain back while blockfetch
-			// appends to it is a normal pairing rather than a corner
-			// case: it is what every ledger recovery rewind does.
-			// Writing the pre-batch snapshot over a rollback's result
-			// raises tipBlockIndex back above blocks that rollback
-			// deleted, leaving the chain claiming a tip it does not
-			// store -- an inflated fork depth on the next rollback and
-			// a not-found lookup for any index in the resurrected
-			// span. A closure-internal error already restored under
-			// the lock, so there is nothing left to do for it here
-			// either.
-			if batchApplied {
+		err := func() error {
+			c.batchCommitMutex.RLock()
+			defer c.batchCommitMutex.RUnlock()
+			txn := c.manager.db.BlobTxn(true)
+			// addRawBlockLocked mutates c.currentTip, c.tipBlockIndex,
+			// c.headers, and c.blocks before the txn commits. If a
+			// later block in the batch fails the closure restores the
+			// pre-batch state, but txn.Do also runs Commit *after* the
+			// closure returns and after the chain locks are released —
+			// a Commit failure rolls back the persistent state while
+			// leaving the in-memory chain advanced. Capture the
+			// snapshot here so we can also restore on Commit failure.
+			var (
+				savedTip             ochainsync.Tip
+				savedTipBlockIndex   uint64
+				savedGeneration      uint64
+				savedHeaders         []queuedHeader
+				savedBlocks          []ocommon.Point
+				batchApplied         bool
+				appliedTip           ochainsync.Tip
+				appliedTipBlockIndex uint64
+				appliedGeneration    uint64
+			)
+			err := txn.Do(func(txn *database.Txn) error {
+				batch := blocks[batchOffset : batchOffset+batchSize]
 				c.mutex.Lock()
+				defer c.mutex.Unlock()
 				c.manager.mutex.Lock()
-				if c.batchRestoreIsSafeLocked(
-					appliedTip,
-					appliedTipBlockIndex,
-					appliedGeneration,
-				) {
-					c.currentTip = savedTip
-					c.tipBlockIndex = savedTipBlockIndex
-					c.mutationGeneration = savedGeneration
-					c.headers = savedHeaders
-					if !c.persistent {
-						c.blocks = savedBlocks
-					}
-				} else {
-					// Skipping the restore is the correct choice -- writing
-					// the snapshot over whatever moved the chain is the
-					// divergence this guard exists to prevent -- but it
-					// leaves the in-memory chain holding a batch the commit
-					// discarded. Record it, so the missing block or inflated
-					// fork depth it later surfaces as is attributable to this
-					// commit failure instead of appearing without a cause.
-					slog.Default().Error(
-						"skipped in-memory restore after batch commit failure: chain moved under the batch",
-						"component", "chain",
-						"chain_id", c.id,
-						"applied_tip_block_index", appliedTipBlockIndex,
-						"tip_block_index", c.tipBlockIndex,
-						"applied_generation", appliedGeneration,
-						"mutation_generation", c.mutationGeneration,
-						"applied_tip_slot", appliedTip.Point.Slot,
-						"applied_tip_hash", hex.EncodeToString(appliedTip.Point.Hash),
-						"tip_slot", c.currentTip.Point.Slot,
-						"tip_hash", hex.EncodeToString(c.currentTip.Point.Hash),
-						"error", err,
-					)
+				defer c.manager.mutex.Unlock()
+				if err := c.reconcile(); err != nil {
+					return fmt.Errorf("reconcile: %w", err)
 				}
-				c.manager.mutex.Unlock()
-				c.mutex.Unlock()
+				savedTip = c.currentTip
+				savedTipBlockIndex = c.tipBlockIndex
+				savedGeneration = c.mutationGeneration
+				savedHeaders = slices.Clone(c.headers)
+				if !c.persistent {
+					savedBlocks = slices.Clone(c.blocks)
+				}
+				for _, rb := range batch {
+					evt, err := c.addRawBlockLocked(
+						rb,
+						txn,
+						callback,
+					)
+					if err != nil {
+						c.currentTip = savedTip
+						c.tipBlockIndex = savedTipBlockIndex
+						c.mutationGeneration = savedGeneration
+						c.headers = savedHeaders
+						if !c.persistent {
+							c.blocks = savedBlocks
+						}
+						return err
+					}
+					if evt.Type != "" {
+						pendingEvents = append(
+							pendingEvents, evt,
+						)
+					}
+				}
+				// Record what this batch leaves behind so the Commit-failure
+				// path below can tell its own state from someone else's.
+				batchApplied = true
+				appliedTip = c.currentTip
+				appliedTipBlockIndex = c.tipBlockIndex
+				appliedGeneration = c.mutationGeneration
+				return nil
+			})
+			if err != nil {
+				// Cover the Commit-failure path: closure returned nil
+				// but txn.Do's later Commit failed, so memory still
+				// reflects the post-batch tip while the DB rolled
+				// back. Re-acquire the locks and restore -- but only
+				// while the chain still shows exactly what this batch
+				// left behind.
+				//
+				// The batch-commit barrier remains held while this recovery runs, so
+				// another chain mutation cannot move the chain between the failed
+				// commit and the snapshot check. A closure-internal error already
+				// restored under the chain locks, so there is nothing left to do for
+				// it here either.
+				if batchApplied {
+					c.mutex.Lock()
+					c.manager.mutex.Lock()
+					if c.batchRestoreIsSafeLocked(
+						appliedTip,
+						appliedTipBlockIndex,
+						appliedGeneration,
+					) {
+						c.currentTip = savedTip
+						c.tipBlockIndex = savedTipBlockIndex
+						c.mutationGeneration = savedGeneration
+						c.headers = savedHeaders
+						if !c.persistent {
+							c.blocks = savedBlocks
+						}
+					} else {
+						// Skipping the restore is the correct choice -- writing
+						// the snapshot over whatever moved the chain is the
+						// divergence this guard exists to prevent -- but it
+						// leaves the in-memory chain holding a batch the commit
+						// discarded. Record it, so the missing block or inflated
+						// fork depth it later surfaces as is attributable to this
+						// commit failure instead of appearing without a cause.
+						slog.Default().Error(
+							"skipped in-memory restore after batch commit failure: chain moved under the batch",
+							"component", "chain",
+							"chain_id", c.id,
+							"applied_tip_block_index", appliedTipBlockIndex,
+							"tip_block_index", c.tipBlockIndex,
+							"applied_generation", appliedGeneration,
+							"mutation_generation", c.mutationGeneration,
+							"applied_tip_slot", appliedTip.Point.Slot,
+							"applied_tip_hash", hex.EncodeToString(appliedTip.Point.Hash),
+							"tip_slot", c.currentTip.Point.Slot,
+							"tip_hash", hex.EncodeToString(c.currentTip.Point.Hash),
+							"error", err,
+						)
+					}
+					c.manager.mutex.Unlock()
+					c.mutex.Unlock()
+				}
+				return fmt.Errorf("add raw block batch: %w", err)
 			}
-			c.batchCommitMutex.RUnlock()
-			return fmt.Errorf("add raw block batch: %w", err)
+			return nil
+		}()
+		if err != nil {
+			return err
 		}
-		c.batchCommitMutex.RUnlock()
 		c.notifyWaitingIterators()
 		// Publish events (only when eventBus is set). Not reached under a
 		// ledger mutex, so an inline Publish is safe here.

@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -148,5 +149,42 @@ func TestRollbackDoesNotResolveUncommittedBlockIndex(t *testing.T) {
 		if rollbackErr != nil {
 			t.Fatalf("round %d: rollback: %v", round, rollbackErr)
 		}
+	}
+}
+
+// TestAddBlocksRestoresMemoryAfterBatchFailure ensures a failed AddBlocks
+// transaction cannot leave the in-memory tip ahead of the durable store.
+// The first three blocks fit; the fourth has a mismatched parent, so the
+// transaction rolls back after the chain has already advanced in memory.
+func TestAddBlocksRestoresMemoryAfterBatchFailure(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	mustSetLedger(t, cm, 100)
+	pc := cm.PrimaryChain()
+
+	invalid := *testBlocks[3]
+	invalid.MockPrevHash = testHashPrefix + "ffff"
+	blocks := []ledger.Block{
+		testBlocks[0],
+		testBlocks[1],
+		testBlocks[2],
+		&invalid,
+	}
+	if err := pc.AddBlocks(blocks); err == nil {
+		t.Fatal("expected AddBlocks to reject a mismatched parent")
+	}
+
+	tip := pc.Tip()
+	if tip.Point.Slot != 0 || len(tip.Point.Hash) != 0 || tip.BlockNumber != 0 {
+		t.Fatalf("failed batch advanced in-memory tip: %+v", tip)
+	}
+	if _, err := db.BlockByIndex(3, nil); !errors.Is(err, models.ErrBlockNotFound) {
+		t.Fatalf("expected failed batch block to be absent from storage, got %v", err)
+	}
+	if err := pc.Rollback(ocommon.Point{}); err != nil {
+		t.Fatalf("rollback after failed batch: %v", err)
 	}
 }
