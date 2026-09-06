@@ -505,6 +505,65 @@ block at the target is re-applied; when no such ancestor exists it fails with
 (issue #3678). `enforceDurableTipFloor` is the path that produces such a
 target.
 
+`LedgerState.rollback` also refuses a target below the consumed-UTxO prune
+floor. `cleanupConsumedUtxos` hard-deletes spent `utxo` rows (blob objects and
+the metadata row) once `deleted_slot <= tip - stabilityWindow`, while
+`database.TruncateAfterSlot` restores spent UTxOs with an UPDATE
+(`SetUtxosNotDeletedAfterSlot`, `deleted_slot > ?`). An UPDATE cannot reach a
+row that no longer exists, so a rollback below the swept slot leaves the live
+set short of every output consumed above the target and reports the tip
+repaired anyway. The two bounds are meant to line up — the sweep runs a
+stability window below the tip and a single rollback reaches at most that far —
+but nothing enforced it, and successive recovery rewinds compound: each attempt
+rewinds a further stability window below the *already lowered* tip while the
+floor stays fixed at the highest tip the node reached. Blocks the node had
+applied cleanly then failed to resolve their inputs, which drove the next,
+deeper rewind, until the descent ran out of room at the Mithril anchor and the
+pipeline halted with a UTxO set no rewind could repair (issue #3766).
+
+The sweep therefore records how deep it removed rows in the
+`consumed_utxo_prune_slot` sync-state key, written in the same transaction that
+removes them. The value is read from the database at each check rather than
+mirrored in memory: a mirror is only ever refreshed after the sweep's own
+transaction commits, so between commit and refresh it reports a floor lower than
+the database holds — permissive in exactly the direction the check exists to
+prevent. A read or parse failure fails closed and refuses the rollback.
+
+`rollback` and `rollbackChainAndState` refuse a target below the floor with
+`ErrRollbackBelowUtxoPruneFloor` before mutating anything, and
+`rollbackIsAppliable` matches so the loop detector does not classify such a
+target as crossable. Both checks run against the *resolved* target from
+`resolveRollbackTarget`, because the same-slot competitor redirect above can
+turn a target sitting exactly on a boundary into one below it;
+`rollbackChainAndState` checks separately, and pre-resolves, because it
+truncates the primary chain before synchronizing the ledger, so a refusal raised
+only by `rollback` would leave the chain rewound past a point the ledger cannot
+follow.
+
+A peer rollback the floor refuses is handled like the Mithril boundary —
+chainsync state resets and a fresh intersection is requested — rather than
+returned, because `handleEventChainsync` routes a rollback error to
+`FatalErrorFunc` and a peer's choice of rollback point must not terminate the
+node. At-tip validation recovery clamps its own escalating rewind target to the
+ledger tip instead of erroring
+(`dingo_ledger_attip_recovery_prune_floor_clamped_total`), keeping the
+non-destructive half of recovery — a fresh intersection so peer rotation can
+offer a different candidate chain — and dropping only a rewind that could not
+have repaired anything. The Mithril trust boundary does not subsume this floor:
+on a Mithril-bootstrapped node the anchor sits far below the prune floor, so the
+boundary check admits every target the rewind schedule produces and only the
+prune floor refuses them.
+
+Startup reconciliation rolls the ledger back to the blob tip when metadata
+leads it, and that rollback can be arbitrarily deep, so it can now fail with
+`ErrRollbackBelowUtxoPruneFloor` and refuse to start. That is the intended
+outcome rather than a regression: the rewind it was about to perform could not
+have rebuilt the live UTxO set, so the alternative is a node that starts,
+validates against a UTxO set missing rows, and halts later with no way to tell
+what went wrong. The operator recovery is `dingo database truncate`, which is
+deliberately not bound by this floor (nor by the security parameter) and clears
+the record when it crosses it, or a fresh bootstrap.
+
 Getting this wrong is subtle, so the constraint is worth stating plainly:
 **the undo events must be emitted before the truncation, by the rollback
 path.** `handleEventChainUpdate` deliberately does *not* emit them, even
@@ -3841,6 +3900,9 @@ resolution exceeding the security parameter K, and both Mithril
 trust-boundary reasons) place the peer on the deny list for a cooldown in
 addition to closing the connection, so the node does not redial a peer that
 will deterministically be rejected again moments later.
+A rollback below the consumed-UTxO prune floor also closes the bearer for a
+fresh intersection, but does not deny the peer: another chain from that peer
+may still be usable.
 
 An outbound handshake refusal that proves the remote address belongs to a
 different Cardano network is denied for the lifetime of the in-memory peer
@@ -3865,7 +3927,8 @@ rollback does not accumulate toward the threshold. Second, even when a point
 does reach the threshold, the detector only breaks the loop if the rollback is
 genuinely un-crossable: `rollbackIsAppliable` mirrors the pre-checks
 `rollbackChainAndStateDeferred` uses (target block present and within the security
-parameter K via `chain.ValidateRollback`, and at/above the Mithril anchor),
+parameter K via `chain.ValidateRollback`, at/above the Mithril anchor, and
+at/above the consumed-UTxO prune floor),
 and a rollback that would succeed is applied even on the repeat rather than
 suppressed. Only a rollback the node cannot cross takes the skip path, which
 would otherwise wedge the node in a reconnect loop behind a legitimately
@@ -4028,6 +4091,9 @@ Replay recovery engages only for the failure it can repair. `txValidationError`
 carries every referenced input of the failing transaction regardless of what
 the transaction failed on, so a failure with nothing missing — a script data
 hash mismatch, say — arrived at the candidate search with a full input list.
+Before any replay recovery path rewinds the primary chain, it checks the
+consumed-UTxO prune floor; a target below that floor is refused while both the
+primary chain and ledger metadata remain untouched.
 `resolveReplayRecoveryProducer` returns a nil producer both for an input that
 is present in the UTxO set (nothing to find) and for one that is missing with
 no producer locatable, and folding the two together made every input of such a

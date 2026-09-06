@@ -1711,6 +1711,26 @@ func TestReplayRecoveryArmsAuditAfterPrimaryAndLedgerRewind(t *testing.T) {
 	assert.Equal(t, ls.Tip().Point, window.forkPoint)
 }
 
+func TestReplayRecoveryRefusesBelowPruneFloorBeforeChainRewind(t *testing.T) {
+	ls := newReplayRecoveryAuditLedger(t, true)
+	const pruneFloorSyncKey = "consumed_utxo_prune_slot"
+	require.NoError(t, ls.db.SetSyncState(pruneFloorSyncKey, "120", nil))
+	chainTipBefore := ls.chain.Tip().Point
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("audit-prune-floor-failing-tx"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{txId: testHashBytes("missing-audit-producer")},
+		},
+		Cause: errors.New("bad input"),
+	})
+
+	require.ErrorIs(t, err, ErrRollbackBelowUtxoPruneFloor)
+	require.False(t, recovered)
+	require.Equal(t, chainTipBefore, ls.chain.Tip().Point)
+}
+
 func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
 	ls := newReplayRecoveryAuditLedger(t, true)
 	activeConnId := ouroboros.ConnectionId{
