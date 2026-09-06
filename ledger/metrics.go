@@ -66,6 +66,21 @@ type stateMetrics struct {
 	// the local applied chain. A rising value means a peer is feeding the
 	// node a continuation from a fork it never applied. See issue #3005.
 	continuationInputUnresolved prometheus.Counter
+	// Cross-fork continuation audit outcomes. The first three label values
+	// count one audited input each; disarmed_cap counts one audit window
+	// each. See continuationAuditOutcome for the verdicts.
+	continuationAuditOutcomes *prometheus.CounterVec
+	// Pre-materialized children of continuationAuditOutcomes, so every
+	// verdict is exported from process start (an absent series and a zero
+	// series read very differently when the question is "is this node
+	// reporting missing producers") and so the audit pays no label lookup
+	// per input while holding chainsyncBlockfetchMutex.
+	continuationAuditClean                 prometheus.Counter
+	continuationAuditMissingProducer       prometheus.Counter
+	continuationAuditInconclusiveEbPending prometheus.Counter
+	continuationAuditDisarmedCap           prometheus.Counter
+	continuationAuditSkippedBudget         prometheus.Counter
+	continuationAuditRefUnresolvable       prometheus.Counter
 	// Observed for every Praos leader-eligibility decision on an inbound
 	// header: (threshold - leaderValue) / threshold. Positive is eligible,
 	// and the magnitude is the headroom. dingo derives its leadership stake
@@ -377,6 +392,51 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			Name: "dingo_ledger_continuation_input_unresolved_total",
 			Help: "inputs in freshly fetched continuation blocks whose producing transaction is not on the local applied chain (cross-fork splice indicator)",
 		},
+	)
+	// Cross-fork continuation audit verdicts, labelled by result:
+	//   result="clean"                   — the input resolved to a producer
+	//   result="missing_producer"        — no producer found; reported at
+	//        Error, and the splice indicator above is incremented too
+	//   result="inconclusive_eb_pending" — the window's producer set is
+	//        knowingly incomplete because a certified Leios endorser block
+	//        had not been fetched when the audit ran, so an unresolved input
+	//        cannot be distinguished from one the audit simply cannot see
+	//   result="disarmed_cap"            — one per window, when the producer
+	//        set reached continuationAuditMaxProducedTxs and the window was
+	//        disarmed rather than report from a truncated set
+	//   result="skipped_budget"          — one per audited body that had more
+	//        endorser blocks queued than continuationAuditMaxEndorserBlocksPerBlock
+	//        allows it to resolve; the rest stay queued for a later body
+	//   result="ref_unresolvable"        — an endorser-block reference given up
+	//        on for good, because resolving it failed for a reason retrying
+	//        cannot fix; that hole in the producer set never closes
+	// A node whose inconclusive count dominates is telling the operator the
+	// audit is not covering it, which is the honest reading of an
+	// endorser-block backlog.
+	m.continuationAuditOutcomes = promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_continuation_audit_outcomes_total",
+			Help: "cross-fork continuation audit verdicts by result; clean/missing_producer/inconclusive_eb_pending count audited inputs, skipped_budget counts audited blocks, ref_unresolvable counts abandoned endorser-block references, disarmed_cap counts audit windows",
+		},
+		[]string{"result"},
+	)
+	m.continuationAuditClean = m.continuationAuditOutcomes.WithLabelValues(
+		continuationAuditResultClean,
+	)
+	m.continuationAuditMissingProducer = m.continuationAuditOutcomes.WithLabelValues(
+		continuationAuditResultMissingProducer,
+	)
+	m.continuationAuditInconclusiveEbPending = m.continuationAuditOutcomes.WithLabelValues(
+		continuationAuditResultInconclusiveEbPending,
+	)
+	m.continuationAuditDisarmedCap = m.continuationAuditOutcomes.WithLabelValues(
+		continuationAuditResultDisarmedCap,
+	)
+	m.continuationAuditSkippedBudget = m.continuationAuditOutcomes.WithLabelValues(
+		continuationAuditResultSkippedBudget,
+	)
+	m.continuationAuditRefUnresolvable = m.continuationAuditOutcomes.WithLabelValues(
+		continuationAuditResultRefUnresolvable,
 	)
 	m.leaderThresholdMargin = promautoFactory.NewHistogram(
 		prometheus.HistogramOpts{
