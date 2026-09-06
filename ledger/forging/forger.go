@@ -207,6 +207,7 @@ type credentialGenerationBlockBuilder interface {
 		kesPeriod uint64,
 		leios LeiosBlockData,
 		generation *credentialGeneration,
+		constraints blockSelectionConstraints,
 	) (ledger.Block, []byte, error)
 }
 
@@ -1346,6 +1347,13 @@ func (f *BlockForger) leiosBlockDataForSlot(
 	return LeiosBlockData{}, nil, 0
 }
 
+// errBlockConstraintsUnsupported reports that the configured BlockBuilder
+// cannot honour the per-attempt constraints the forge loop asked for, so
+// the attempt must not be made rather than made incorrectly.
+var errBlockConstraintsUnsupported = errors.New(
+	"block builder does not support per-attempt selection constraints",
+)
+
 // isRetriableSelectionError reports whether err means the chain moved
 // underneath transaction selection rather than that the block could not be
 // built at all. Both sentinels describe the same event -- a ledger
@@ -1366,6 +1374,9 @@ type forgeBuildStats struct {
 	// during selection. Only then does the slot's outcome count as a
 	// selection fallback.
 	aborted bool
+	// empty is set when the block was produced by the transaction-free
+	// fallback rather than by a completed selection pass.
+	empty bool
 }
 
 // observeSelectionFallback records how a slot whose selection was aborted
@@ -1421,11 +1432,44 @@ func (f *BlockForger) buildBlockForSlot(
 ) (ledger.Block, []byte, error) {
 	var stats forgeBuildStats
 	deadline, haveDeadline := f.slotSelectionDeadline(slot)
+	// lost is the end of the ladder for an attempt whose selection was
+	// aborted by the chain moving: try a transaction-free block before
+	// giving the slot up. The guards the fallback needs are already
+	// established here -- the leader check and the forge-slot fence have
+	// both passed, and the builder re-reads and re-checks the parent tip
+	// for the fallback build itself.
 	lost := func(err error) (ledger.Block, []byte, error) {
-		if stats.aborted {
-			f.observeSelectionFallback(forgeSelectionResultLost)
+		if !stats.aborted {
+			return nil, nil, err
 		}
-		return nil, nil, err
+		stats.attempts++
+		block, blockCbor, emptyErr := f.buildBlock(
+			slot,
+			kesPeriod,
+			leiosData,
+			generation,
+			blockSelectionConstraints{emptyBody: true},
+		)
+		if emptyErr != nil {
+			f.observeSelectionFallback(forgeSelectionResultLost)
+			f.logger.Error(
+				"leader slot lost: selection was aborted and no empty block could be built",
+				"slot", slot,
+				"attempts", stats.attempts,
+				"selection_error", err,
+				"error", emptyErr,
+			)
+			return nil, nil, err
+		}
+		stats.empty = true
+		f.observeSelectionFallback(forgeSelectionResultEmpty)
+		f.logger.Warn(
+			"forging a transaction-free block: selection could not complete inside the slot",
+			"slot", slot,
+			"attempts", stats.attempts,
+			"selection_error", err,
+		)
+		return block, blockCbor, nil
 	}
 	for {
 		stats.attempts++
@@ -1434,6 +1478,7 @@ func (f *BlockForger) buildBlockForSlot(
 			kesPeriod,
 			leiosData,
 			generation,
+			blockSelectionConstraints{},
 		)
 		if err == nil {
 			if stats.aborted {
@@ -1494,6 +1539,7 @@ func (f *BlockForger) buildBlock(
 	kesPeriod uint64,
 	leiosData LeiosBlockData,
 	generation *credentialGeneration,
+	constraints blockSelectionConstraints,
 ) (ledger.Block, []byte, error) {
 	var (
 		block     ledger.Block
@@ -1506,7 +1552,14 @@ func (f *BlockForger) buildBlock(
 			kesPeriod,
 			leiosData,
 			generation,
+			constraints,
 		)
+	} else if constraints != (blockSelectionConstraints{}) {
+		// Only the package-private builder path carries per-attempt
+		// constraints. An embedder-supplied BlockBuilder cannot be told
+		// to drop its transactions, so the slot is reported lost rather
+		// than silently forged under constraints that were ignored.
+		return nil, nil, errBlockConstraintsUnsupported
 	} else if leiosData.empty() {
 		block, blockCbor, err = f.blockBuilder.BuildBlock(slot, kesPeriod)
 	} else {
