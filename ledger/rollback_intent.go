@@ -87,7 +87,7 @@ func (ls *LedgerState) ensureRollbackIntent(
 		}
 		return nil
 	}
-	if len(rollbackBlocks) == 0 {
+	if rollbackBlocks == nil {
 		rollbackBlocks, err = ls.readBlocksAboveSlot(point.Slot)
 		if err != nil {
 			return fmt.Errorf("read rollback undo blocks: %w", err)
