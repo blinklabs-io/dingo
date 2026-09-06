@@ -128,64 +128,6 @@ func TestLeiosEBSelectionWithoutDeadlineIsUnbounded(t *testing.T) {
 	require.Len(t, selected, 8)
 }
 
-// TestCheckAndForgeProductionBoundsLeiosEBSelection follows the runtime
-// composition path -- checkAndForgeProduction -> checkAndForgeLeiosEB ->
-// selectValidLeiosTransactions -- and proves the slot deadline actually
-// reaches endorser-block selection. A deadline that exists in the forger
-// but never arrives at the pass that spends the slot bounds nothing.
-func TestCheckAndForgeProductionBoundsLeiosEBSelection(t *testing.T) {
-	block := newForgerTestBlock(10, 2)
-	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
-	broadcaster := &forgerTestBroadcaster{}
-	leiosCaster := &forgerTestLeiosCaster{}
-	validator := &sessionMockTxValidator{}
-
-	forger, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Credentials:      setupTestCredentials(t),
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     builder,
-		BlockBroadcaster: broadcaster,
-		SlotClock: &ebTestSlotClock{
-			currentSlot:       10,
-			chainTipSlot:      9,
-			slotsPerKESPeriod: 100,
-			slotEnd:           time.Now().Add(time.Second),
-		},
-		LeiosProduceChecker: &forgerTestLeiosChecker{allowed: true},
-		LeiosEBBroadcaster:  leiosCaster,
-		LeiosTxValidator:    validator,
-		LeiosMempool: forgerTestMempoolProvider{
-			txs: leiosCandidateTxs(t, 10),
-		},
-		PromRegistry: prometheus.NewRegistry(),
-	})
-	require.NoError(t, err)
-	// Every candidate consumes a tenth of a second of the budget, so the
-	// pass cannot get through all ten inside the slot.
-	fakeNow := time.Now()
-	forger.now = func() time.Time { return fakeNow }
-	validator.onValidate = func(int) {
-		fakeNow = fakeNow.Add(100 * time.Millisecond)
-	}
-
-	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
-	require.Less(
-		t,
-		len(leiosCaster.txBodies),
-		10,
-		"endorser-block selection must stop when the slot budget is gone",
-	)
-	require.NotEmpty(t, leiosCaster.txBodies)
-	require.Equal(
-		t,
-		1,
-		broadcaster.calls,
-		"the ranking block must still be forged and broadcast",
-	)
-}
-
 // ebTestSlotClock is forgerTestSlotClock with a controllable slot-end
 // instant so a test can place the forge inside or past its slot without
 // sleeping.
@@ -216,16 +158,19 @@ func (c *ebTestSlotClock) UpstreamSyncStatus() (uint64, bool) {
 	return 0, false
 }
 
-// TestCheckAndForgeProductionKeepsEBWhenSlotBudgetIsGone pins what a late
-// slot does now. Producing no endorser block at all would be worse than a
-// small one -- it still feeds the pipeline even when its ranking block
-// loses the race -- so production continues, but under a minimal fixed
-// budget rather than the unbounded pass an expired deadline used to allow.
-func TestCheckAndForgeProductionKeepsEBWhenSlotBudgetIsGone(t *testing.T) {
+// TestCheckAndForgeProductionSkipsEBWhenSlotIsOver pins what a late slot
+// does: nothing. The endorser block's hash is committed into the
+// ranking-block header, so once the slot has closed, selecting would only
+// delay the block that actually extends the chain -- and the endorser
+// block is announced by that same ranking block, so a ranking block
+// orphaned for being late cannot carry it either. The ranking block is
+// still forged and broadcast.
+func TestCheckAndForgeProductionSkipsEBWhenSlotIsOver(t *testing.T) {
 	block := newForgerTestBlock(10, 2)
 	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
 	broadcaster := &forgerTestBroadcaster{}
 	leiosCaster := &forgerTestLeiosCaster{}
+	validator := &sessionMockTxValidator{}
 
 	forger, err := NewBlockForger(ForgerConfig{
 		Mode:             ModeProduction,
@@ -241,47 +186,6 @@ func TestCheckAndForgeProductionKeepsEBWhenSlotBudgetIsGone(t *testing.T) {
 			// The slot has already ended.
 			slotEnd: time.Now(),
 		},
-		LeiosProduceChecker: &forgerTestLeiosChecker{allowed: true},
-		LeiosEBBroadcaster:  leiosCaster,
-		LeiosTxValidator:    &sessionMockTxValidator{},
-		LeiosMempool: forgerTestMempoolProvider{
-			txs: leiosCandidateTxs(t, 4),
-		},
-		PromRegistry: prometheus.NewRegistry(),
-	})
-	require.NoError(t, err)
-
-	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
-	require.Len(
-		t,
-		leiosCaster.txBodies,
-		4,
-		"a late slot still produces an endorser block",
-	)
-}
-
-// TestCheckAndForgeProductionBoundsALateEBSelection is the half that
-// matters for the defect: a producer that woke after its slot closed must
-// not start a full mempool re-validation. The pass is cut off by the
-// minimal late budget just as an in-slot pass is cut off by the deadline.
-func TestCheckAndForgeProductionBoundsALateEBSelection(t *testing.T) {
-	block := newForgerTestBlock(10, 2)
-	leiosCaster := &forgerTestLeiosCaster{}
-	validator := &sessionMockTxValidator{}
-
-	forger, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Credentials:      setupTestCredentials(t),
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     &forgerTestBuilder{block: block, cbor: block.cbor},
-		BlockBroadcaster: &forgerTestBroadcaster{},
-		SlotClock: &ebTestSlotClock{
-			currentSlot:       10,
-			chainTipSlot:      9,
-			slotsPerKESPeriod: 100,
-			slotEnd:           time.Now(),
-		},
 		LeiosProduceChecker:     &forgerTestLeiosChecker{allowed: true},
 		LeiosEBBroadcaster:      leiosCaster,
 		LeiosTxValidator:        validator,
@@ -292,27 +196,29 @@ func TestCheckAndForgeProductionBoundsALateEBSelection(t *testing.T) {
 		PromRegistry: prometheus.NewRegistry(),
 	})
 	require.NoError(t, err)
-	fakeNow := time.Now()
-	forger.now = func() time.Time { return fakeNow }
-	validator.onValidate = func(int) {
-		fakeNow = fakeNow.Add(200 * time.Millisecond)
-	}
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
-	require.NotEmpty(
+	require.Empty(
 		t,
 		leiosCaster.txBodies,
-		"the endorser block is still produced",
+		"a slot that has closed produces no endorser block",
 	)
-	require.Less(
+	require.Zero(
 		t,
-		len(leiosCaster.txBodies),
-		20,
-		"a late slot must not re-validate the whole mempool",
+		validator.validateCalls,
+		"a late slot must not re-validate the mempool at all",
 	)
 	require.Equal(
 		t,
 		float64(1),
-		testutil.ToFloat64(forger.metrics.leiosEbSelectionTruncated),
+		testutil.ToFloat64(
+			forger.metrics.leiosEbSkipped.WithLabelValues("slot_expired"),
+		),
+	)
+	require.Equal(
+		t,
+		1,
+		broadcaster.calls,
+		"the ranking block is still forged and broadcast",
 	)
 }

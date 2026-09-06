@@ -116,4 +116,36 @@ func TestBuildDingoConfigDefaultsUnsetForgeEBCaps(t *testing.T) {
 		*got != config.DefaultForgeEBMaxTxRefs {
 		t.Fatalf("unset forgeEbMaxTxRefs must take the default, got %v", got)
 	}
+	if got := built.ForgeEBMaxBytes(); got == nil ||
+		*got != config.DefaultForgeEBMaxBytes {
+		t.Fatalf("unset forgeEbMaxBytes must take the default, got %v", got)
+	}
+}
+
+// TestBuildDingoConfigWiresForgeEBSelectionReserve follows the same
+// composition path for the selection reserve. Without the With... call
+// here the field is dropped between the loaded configuration and the
+// forger, so every deployment silently runs the built-in default however
+// the operator set it.
+func TestBuildDingoConfigWiresForgeEBSelectionReserve(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{ForgeEBSelectionReserve: 750 * time.Millisecond}
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+
+	built := buildDingoConfig(
+		cfg,
+		logger,
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+
+	if got := built.ForgeEBSelectionReserve(); got != 750*time.Millisecond {
+		t.Fatalf("expected forgeEbSelectionReserve 750ms to flow through, got %s", got)
+	}
 }

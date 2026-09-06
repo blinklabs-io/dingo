@@ -153,8 +153,12 @@ func (c forgerTestSlotClock) PrimaryChainTip() ocommon.Point {
 	return ocommon.Point{Slot: c.primaryTipSlot, Hash: c.primaryTipHash}
 }
 
+// NextSlotTime reports a boundary that is still ahead, which is what a
+// healthy clock reports for a leader forging inside its own slot. Handing
+// back the current instant would instead mean the slot has already closed,
+// and endorser-block production is skipped for a closed slot.
 func (forgerTestSlotClock) NextSlotTime() (time.Time, error) {
-	return time.Now(), nil
+	return time.Now().Add(time.Second), nil
 }
 
 // ChainTipHash satisfies the optional ChainTipHashProvider. It returns
