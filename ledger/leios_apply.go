@@ -640,8 +640,9 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	ls.awaitEndorserBlocks(ctx, blockingWait, timeout, poll)
 	// CIP path only: application reads these references and nothing re-applies
 	// an endorser block that lands after the batch, so a fetch still in flight
-	// when the window elapsed gets a bounded grace to finish. See
-	// awaitInFlightEndorserFetches.
+	// when the window elapsed is waited out rather than abandoned. See
+	// awaitInFlightEndorserFetches; timeout is the reporting threshold, not the
+	// bound.
 	if !certDrivenHistorical {
 		ls.awaitInFlightEndorserFetches(ctx, blockingWait, timeout, poll)
 	}
@@ -766,9 +767,18 @@ func (ls *LedgerState) awaitEndorserBlocks(
 	wg.Wait()
 }
 
-// awaitInFlightEndorserFetches gives this batch's own by-point fetches a
-// bounded chance to finish after the diffusion window has elapsed, for
-// references whose absence would otherwise be permanent.
+// leiosTipFetchHardBound bounds how long the CIP apply path will hold a batch
+// waiting for its own in-flight by-point fetch. It is the same backstop the
+// backfiller uses, and deliberately so: the code this replaces issued a
+// SYNCHRONOUS FetchEndorserBlockByPoint after the diffusion window, which swept
+// every peer and was bounded only by the leios-fetch timeout, so waiting for
+// the fetch to actually finish is parity rather than a new cost. In practice
+// awaitFetch returns as soon as the in-flight marker clears, so this is reached
+// only if a fetch neither caches nor completes.
+const leiosTipFetchHardBound = leiosBackfillMaxWait
+
+// awaitInFlightEndorserFetches waits for this batch's own by-point fetches to
+// FINISH, for references whose absence would otherwise be permanent.
 //
 // It exists because the diffusion window and the fetch are different clocks.
 // The window bounds how long to wait for the network to PUSH an endorser block
@@ -782,30 +792,34 @@ func (ls *LedgerState) awaitEndorserBlocks(
 // is picked up by whichever later batch certifies it. On the CIP path neither
 // is true: application reads each ranking block's own announcement, nothing
 // re-applies an endorser block that lands afterwards, and the ranking block's
-// spends fall through to the interim trust path permanently. The previous
-// shape of this code got that right by accident -- it issued a SYNCHRONOUS
-// by-point fetch after the window, so however slow that fetch was it still
-// populated the cache before the batch was handed to ledgerProcessBlock.
-// Dispatching the fetch up front and asynchronously is strictly better for
-// latency but silently dropped that guarantee; this restores it explicitly and
-// with a bound the synchronous version never had.
+// spends fall through to the interim trust path permanently.
 //
-// The grace is one further diffusion window, so it stays slot-denominated like
-// every other bound here and the worst case is two windows rather than the
-// unbounded-by-any-window synchronous fetch it replaces. It is usually not
-// reached at all: awaitFetch returns as soon as the endorser block is cached
-// or the in-flight marker clears, so a fetch that fails fast costs nothing.
-// The waits run concurrently, so k references cost one grace, not k.
+// The bound is the FETCH's completion, not a second diffusion window. An
+// earlier version of this waited one further window and returned even if the
+// fetch was still running, which lost exactly the transactions it was added to
+// protect, just one window later. awaitFetch returns as soon as the endorser
+// block is cached or the in-flight marker clears, so a fetch that fails fast
+// costs nothing; leiosTipFetchHardBound is only a backstop. softWarn is a
+// reporting threshold, not a deadline: crossing it means this batch is holding
+// the ledger pipeline on a slow fetch, which is worth a log line, and it is the
+// signal an operator needs to distinguish this from the pre-fetch stall.
+//
+// When the fetch finishes without caching -- no peer holds the endorser block
+// -- application proceeds without it. That is the long-standing behaviour of
+// this path and is NOT changed here: failing the chunk instead would turn an
+// unfetchable endorser block into an unbounded pipeline retry, which is a wedge
+// this codebase has hit before. The loss is real but it is pre-existing and
+// orthogonal to the regression this function fixes.
+//
+// The waits run concurrently, so k references cost one wait, not k.
 func (ls *LedgerState) awaitInFlightEndorserFetches(
 	ctx context.Context,
 	refs []leiosEbRef,
-	grace, poll time.Duration,
+	softWarn, poll time.Duration,
 ) {
 	if ls.leiosBackfill == nil {
 		return
 	}
-	graceCtx, cancel := context.WithTimeout(ctx, grace)
-	defer cancel()
 	var wg sync.WaitGroup
 	for _, r := range refs {
 		if endorserBlockAvailableAt(
@@ -818,7 +832,39 @@ func (ls *LedgerState) awaitInFlightEndorserFetches(
 		wg.Add(1)
 		go func(r leiosEbRef) {
 			defer wg.Done()
-			ls.leiosBackfill.awaitFetch(graceCtx, r, poll, grace)
+			start := time.Now()
+			ls.leiosBackfill.awaitFetch(
+				ctx,
+				r,
+				poll,
+				leiosTipFetchHardBound,
+			)
+			elapsed := time.Since(start)
+			cached := endorserBlockAvailableAt(
+				ls.config.EndorserBlockProvider,
+				r.hash.Bytes(),
+				r.slot,
+			)
+			if cached && elapsed < softWarn {
+				return
+			}
+			if cached {
+				ls.config.Logger.Warn(
+					"endorser block fetch outlived the diffusion window; held block application until it landed",
+					"component", "ledger",
+					"slot", r.slot,
+					"eb_hash", r.hash.String(),
+					"waited_seconds", elapsed.Seconds(),
+				)
+				return
+			}
+			ls.config.Logger.Warn(
+				"endorser block could not be fetched; applying its ranking block without the endorser-resident transactions",
+				"component", "ledger",
+				"slot", r.slot,
+				"eb_hash", r.hash.String(),
+				"waited_seconds", elapsed.Seconds(),
+			)
 		}(r)
 	}
 	wg.Wait()
