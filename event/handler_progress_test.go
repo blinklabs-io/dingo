@@ -223,7 +223,9 @@ func TestStuckHandlerRateLimitIsPerInvocation(t *testing.T) {
 	first := time.Now()
 	c.beginHandler(first)
 	firstWarn := first.Add(interval)
-	require.True(t, c.warnStuckHandler(firstWarn, interval))
+	stalled, reported := c.warnStuckHandler(firstWarn, interval)
+	require.True(t, stalled)
+	require.True(t, reported)
 	require.Equal(t, 1, stuckHandlerWarnings(&buf))
 
 	// Replay the losing interleaving. The tick above sampled `first`; the
@@ -239,16 +241,26 @@ func TestStuckHandlerRateLimitIsPerInvocation(t *testing.T) {
 	// The second invocation has now been stuck for a full interval of its
 	// own and must be reported, even though the stale stamp is younger than
 	// one interval.
-	require.True(t, c.warnStuckHandler(second.Add(interval), interval))
+	stalled, reported = c.warnStuckHandler(second.Add(interval), interval)
+	require.True(t, stalled)
+	require.True(t, reported)
 	require.Equal(t, 2, stuckHandlerWarnings(&buf),
 		"a report stamped for an invocation that already returned must not "+
 			"suppress the first report for the one running now",
 	)
 
 	// The rate limit still holds within one invocation.
-	require.True(
+	stalled, reported = c.warnStuckHandler(
+		second.Add(interval+interval/2),
+		interval,
+	)
+	require.True(t, stalled, "the handler is still stuck")
+	require.False(
 		t,
-		c.warnStuckHandler(second.Add(interval+interval/2), interval),
+		reported,
+		"a suppressed sample must not count as a report; the counter is "+
+			"driven off this and handlerProgressTick samples twice per "+
+			"interval",
 	)
 	require.Equal(t, 2, stuckHandlerWarnings(&buf),
 		"repeat reports for the same invocation stay rate-limited",
@@ -331,4 +343,41 @@ func TestHandlerProgressSamplesTwicePerInterval(t *testing.T) {
 				"bound to hold (interval=%s)", interval,
 		)
 	}
+}
+
+// TestHandlerStallCounterMatchesWarnRate pins the counter to the report rate
+// rather than the sample rate. handlerProgressTick samples twice per interval,
+// so counting every stalled sample moved
+// event_subscriber_handler_stalled_total at twice the rate ARCHITECTURE.md and
+// event/doc.go document for it, and twice the rate of the warning it is meant
+// to accompany.
+func TestHandlerStallCounterMatchesWarnRate(t *testing.T) {
+	const interval = time.Second
+
+	var buf lockedBuffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+		Level: slog.LevelWarn,
+	}))
+	c := newChannelSubscriber(handlerProgressTestType, 1, logger)
+
+	start := time.Now()
+	c.beginHandler(start)
+
+	reports := 0
+	// Ten intervals sampled at the real tick rate (interval/2).
+	for i := 1; i <= 20; i++ {
+		now := start.Add(time.Duration(i) * interval / 2)
+		if _, reported := c.warnStuckHandler(now, interval); reported {
+			reports++
+		}
+	}
+
+	warnings := stuckHandlerWarnings(&buf)
+	require.Equal(t, warnings, reports,
+		"every report must correspond to exactly one warning",
+	)
+	require.LessOrEqual(t, reports, 11,
+		"a handler wedged for ten intervals must not report more than "+
+			"once per interval, however often it is sampled",
+	)
 }

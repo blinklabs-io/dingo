@@ -96,13 +96,18 @@ func (c *channelSubscriber) handlerStuckFor(
 // Called only from handlerProgressWatchdog, which is what makes the unlocked
 // read-then-write of the two stamp fields safe: a bus runs one watchdog at a
 // time, and nothing else writes them.
+// It returns whether the handler is stalled, and separately whether this call
+// actually emitted a report. They differ on the rate-limited path: the handler
+// is still stalled, but the report is suppressed. The counter tracks reports,
+// not samples -- handlerProgressTick samples twice per interval, so counting
+// samples would move it at twice the documented once-per-interval rate.
 func (c *channelSubscriber) warnStuckHandler(
 	now time.Time,
 	interval time.Duration,
-) bool {
+) (stalled bool, reported bool) {
 	elapsed, started, running := c.handlerStuckFor(now)
 	if !running || elapsed < interval {
-		return false
+		return false, false
 	}
 	// Rate-limit per invocation, not per subscription: a stamp left behind
 	// for an invocation that has since returned names a different start
@@ -110,7 +115,7 @@ func (c *channelSubscriber) warnStuckHandler(
 	if c.handlerWarnedFor.Load() == started {
 		lastWarn := c.handlerWarnedAt.Load()
 		if lastWarn != 0 && now.Sub(time.Unix(0, lastWarn)) < interval {
-			return true
+			return true, false
 		}
 	}
 	c.handlerWarnedAt.Store(now.UnixNano())
@@ -125,7 +130,7 @@ func (c *channelSubscriber) warnStuckHandler(
 			"blocked_publishers", c.stallWaiters.Load(),
 		)
 	}
-	return true
+	return true, true
 }
 
 // StuckHandlerCount reports how many SubscribeFunc subscriptions currently
@@ -210,7 +215,8 @@ func (e *EventBus) handlerProgressWatchdog(stopCh chan struct{}) {
 			return
 		case now := <-ticker.C:
 			for _, sub := range e.channelSubscriberSnapshot() {
-				if sub.warnStuckHandler(now, interval) && e.metrics != nil {
+				_, reported := sub.warnStuckHandler(now, interval)
+				if reported && e.metrics != nil {
 					e.metrics.handlerStalls.WithLabelValues(
 						string(sub.eventType),
 					).Inc()
