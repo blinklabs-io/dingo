@@ -26,6 +26,13 @@ const (
 	chunkFileExtension = ".chunk"
 )
 
+// ErrInvalidChunkOffset reports a secondary-index block offset that cannot be
+// trusted to seek or slice the chunk file it names: it overflows int64,
+// lands beyond the file's size, or does not strictly follow the offset
+// before it. Callers can match it with errors.Is to distinguish a corrupt or
+// tampered index from an ordinary I/O failure.
+var ErrInvalidChunkOffset = errors.New("invalid chunk offset")
+
 type chunk struct {
 	file         entryReader
 	secondary    *secondaryIndex
@@ -75,14 +82,19 @@ func (c *chunk) Next() (*Block, error) {
 	}
 	if c.nextEntry == nil {
 		if c.currentEntry.BlockOffset > math.MaxInt64 {
-			return nil, errors.New("current block offset integer overflow")
+			return nil, fmt.Errorf(
+				"%w: current block offset %d overflows int64",
+				ErrInvalidChunkOffset,
+				c.currentEntry.BlockOffset,
+			)
 		}
 		// This triggers even though we check it above
 		// #nosec G115
 		currOffset := int64(c.currentEntry.BlockOffset)
 		if currOffset > c.fileSize {
 			return nil, fmt.Errorf(
-				"current block offset %d is beyond chunk size %d",
+				"%w: current block offset %d is beyond chunk size %d",
+				ErrInvalidChunkOffset,
 				currOffset,
 				c.fileSize,
 			)
@@ -130,35 +142,46 @@ func (c *chunk) Next() (*Block, error) {
 	} else {
 		// Calculate block size based on the offsets for the current and next entries
 		if c.currentEntry.BlockOffset > math.MaxInt64 {
-			return nil, errors.New("current block offset integer overflow")
+			return nil, fmt.Errorf(
+				"%w: current block offset %d overflows int64",
+				ErrInvalidChunkOffset,
+				c.currentEntry.BlockOffset,
+			)
 		}
 		// This triggers even though we check it above
 		// #nosec G115
 		currOffset := int64(c.currentEntry.BlockOffset)
 
 		if c.nextEntry.BlockOffset > math.MaxInt64 {
-			return nil, errors.New("next block offset integer overflow")
+			return nil, fmt.Errorf(
+				"%w: next block offset %d overflows int64",
+				ErrInvalidChunkOffset,
+				c.nextEntry.BlockOffset,
+			)
 		}
 		// This triggers even though we check it above
 		// #nosec G115
 		nextOffset := int64(c.nextEntry.BlockOffset)
 		if currOffset > c.fileSize {
 			return nil, fmt.Errorf(
-				"current block offset %d is beyond chunk size %d",
+				"%w: current block offset %d is beyond chunk size %d",
+				ErrInvalidChunkOffset,
 				currOffset,
 				c.fileSize,
 			)
 		}
 		if nextOffset > c.fileSize {
 			return nil, fmt.Errorf(
-				"next block offset %d is beyond chunk size %d",
+				"%w: next block offset %d is beyond chunk size %d",
+				ErrInvalidChunkOffset,
 				nextOffset,
 				c.fileSize,
 			)
 		}
 		if nextOffset <= currOffset {
 			return nil, fmt.Errorf(
-				"next block offset %d does not follow current block offset %d",
+				"%w: next block offset %d does not follow current block offset %d",
+				ErrInvalidChunkOffset,
 				nextOffset,
 				currOffset,
 			)

@@ -190,8 +190,14 @@ func minimalLedgerState(t *testing.T, slot uint64, hash []byte) []byte {
 		cbor.RawMessage(emptyMap),
 	})
 	require.NoError(t, err)
+	// nesBprev and nesBcur are BlocksMade, which the reference encodes as a
+	// bare map of pool key hash to count; an empty one is a map with no
+	// entries, not an empty array.
 	newEpochState, err := cbor.Encode([]any{
-		uint64(0), []any{}, []any{}, cbor.RawMessage(epochState),
+		uint64(0),
+		cbor.RawMessage(emptyMap),
+		cbor.RawMessage(emptyMap),
+		cbor.RawMessage(epochState),
 		[]any{}, cbor.RawMessage(emptyMap), []any{},
 	})
 	require.NoError(t, err)

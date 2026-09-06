@@ -1822,10 +1822,14 @@ func TestHandleEpochTransitionSkipsPoolWithMissingMargin(t *testing.T) {
 	rewardSnapshot, err := db.Metadata().GetRewardSnapshot(1, "mark", nil)
 	require.NoError(t, err)
 	require.NotNil(t, rewardSnapshot)
-	// Only the good pool's stake counts toward the reward snapshot.
+	// Only the good pool earns, so it is the only reward_pool_input row, but
+	// the bad pool's delegator stake stays in the snapshot's active stake:
+	// that total is the reward calculation's sigma_a denominator, and
+	// cardano-ledger derives it from every delegating credential rather than
+	// from the pools that appear in the snapshot.
 	require.Equal(
 		t,
-		uint64(50_000_000),
+		uint64(80_000_000),
 		uint64(rewardSnapshot.TotalActiveStake),
 	)
 	require.Equal(t, uint64(1), rewardSnapshot.TotalPoolCount)

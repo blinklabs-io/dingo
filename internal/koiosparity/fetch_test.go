@@ -51,6 +51,10 @@ const validEpochInfoTmpl = `[{"epoch_no":%s,"era":"conway","out_sum":"100","fees
 
 const validTotalsTmpl = `[{"epoch_no":%s,"treasury":"1","reserves":"1","fees":"1","reward":"1"}]`
 
+// validEpochParamsTmpl serves the shared preview Babbage parameter fixture
+// (see previewBabbageEpochParamsTmpl) for any requested epoch.
+var validEpochParamsTmpl = previewBabbageEpochParamsTmpl
+
 // TestFetchAbortsOnPermanentEpochInfoError guards against the bug where every
 // Koios client error was wrapped as transient regardless of cause: a
 // daily-quota/auth failure (permanent, non-retryable) must abort the whole
@@ -77,6 +81,13 @@ func TestFetchAbortsOnPermanentEpochInfoError(t *testing.T) {
 				}
 				w.WriteHeader(http.StatusOK)
 				_, _ = fmt.Fprintf(w, validEpochInfoTmpl, epoch)
+			case r.URL.Path == "/epoch_params":
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(
+					w,
+					validEpochParamsTmpl,
+					r.URL.Query().Get("_epoch_no"),
+				)
 			case r.URL.Path == "/totals":
 				w.WriteHeader(http.StatusOK)
 				_, _ = fmt.Fprintf(
@@ -144,6 +155,13 @@ func TestFetchTransient503LandsInFailedEpochs(t *testing.T) {
 				}
 				w.WriteHeader(http.StatusOK)
 				_, _ = fmt.Fprintf(w, validEpochInfoTmpl, epoch)
+			case r.URL.Path == "/epoch_params":
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(
+					w,
+					validEpochParamsTmpl,
+					r.URL.Query().Get("_epoch_no"),
+				)
 			case r.URL.Path == "/totals":
 				w.WriteHeader(http.StatusOK)
 				_, _ = fmt.Fprintf(
@@ -212,6 +230,13 @@ func TestFetchEpochStopsSchedulingPoolsAfterPermanentError(t *testing.T) {
 				_, _ = fmt.Fprintf(
 					w,
 					validEpochInfoTmpl,
+					r.URL.Query().Get("_epoch_no"),
+				)
+			case r.URL.Path == "/epoch_params":
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(
+					w,
+					validEpochParamsTmpl,
 					r.URL.Query().Get("_epoch_no"),
 				)
 			case r.URL.Path == "/totals":
@@ -285,7 +310,7 @@ func TestFetchBackfillsAccountsForPreExistingCache(t *testing.T) {
 	const epoch = uint64(50)
 	const koiosAddr = "stake1uzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
 
-	var epochInfoCalls, totalsCalls atomic.Int32
+	var epochInfoCalls, totalsCalls, epochParamsCalls atomic.Int32
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
@@ -302,6 +327,14 @@ func TestFetchBackfillsAccountsForPreExistingCache(t *testing.T) {
 					w,
 					validEpochInfoTmpl,
 					strconv.FormatUint(epoch, 10),
+				)
+			case r.URL.Path == "/epoch_params":
+				epochParamsCalls.Add(1)
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(
+					w,
+					validEpochParamsTmpl,
+					r.URL.Query().Get("_epoch_no"),
 				)
 			case r.URL.Path == "/totals":
 				totalsCalls.Add(1)
@@ -434,4 +467,115 @@ func TestFetchBackfillsAccountsForPreExistingCache(t *testing.T) {
 		time.Second,
 		"pool-level fetched_at must not be clobbered by an accounts-only backfill",
 	)
+
+	// The same upgraded cache is missing the parameter row as well as the
+	// account rows, so this run must satisfy both backfills. The two are
+	// independent properties of an epoch, not alternatives: an epoch selected
+	// for the account backfill still needs its /epoch_params request, or Fetch
+	// reports success while the next check still finds the parameters absent.
+	require.Equal(
+		t,
+		int32(1),
+		epochParamsCalls.Load(),
+		"an epoch needing both backfills must still fetch /epoch_params",
+	)
+	params, err := cache2.GetEpochParams(network, epoch)
+	require.NoError(t, err)
+	require.NotNil(
+		t,
+		params,
+		"the parameter row must be committed alongside the account backfill",
+	)
+}
+
+// TestFetchBackfillsParamsWithoutRefetchingPoolData pins the params-only
+// backfill path.
+//
+// An epoch cached before parameter comparison existed has fresh pool-level
+// data and no koios_epoch_params row. It must gain that row from the single
+// /epoch_params request, not by re-running the whole epoch: requiring the
+// parameter row inside GetUncachedEpochs instead would re-fetch /epoch_info,
+// /totals and every pool-history row to obtain it, and would break the same
+// guarantee TestFetchBackfillsAccountsForPreExistingCache makes for accounts.
+func TestFetchBackfillsParamsWithoutRefetchingPoolData(t *testing.T) {
+	const network = "preview"
+	const epoch = uint64(50)
+
+	var epochInfoCalls, totalsCalls, paramsCalls atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/tip":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[{"epoch_no":100}]`))
+			case "/pool_list", "/pool_updates":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[]`))
+			case "/epoch_info":
+				epochInfoCalls.Add(1)
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(w, validEpochInfoTmpl,
+					strconv.FormatUint(epoch, 10))
+			case "/epoch_params":
+				paramsCalls.Add(1)
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(w, validEpochParamsTmpl,
+					r.URL.Query().Get("_epoch_no"))
+			case "/totals":
+				totalsCalls.Add(1)
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(w, validTotalsTmpl,
+					strconv.FormatUint(epoch, 10))
+			default:
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[]`))
+			}
+		}),
+	)
+	defer srv.Close()
+	withTestKoiosBaseURL(t, srv.URL)
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := OpenCache(cachePath, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	fetchedAt := time.Now().UTC()
+	// Pool-level data present and fresh; no koios_epoch_params row.
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        epoch,
+		ActiveStake:  "12345",
+		EpochEndTime: fetchedAt,
+		FetchedAt:    fetchedAt,
+	}, nil, &KoiosTotals{
+		Treasury:  "1",
+		Reserves:  "1",
+		Fees:      "1",
+		Reward:    "1",
+		FetchedAt: fetchedAt,
+	}))
+	require.NoError(t, cache.Close())
+
+	_, err = Fetch(context.Background(), FetchConfig{
+		Network:      network,
+		CachePath:    cachePath,
+		Concurrency:  1,
+		FromEpoch:    epoch,
+		ThroughEpoch: epoch,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+
+	require.Equal(t, int32(1), paramsCalls.Load(),
+		"the missing parameter row must be backfilled")
+	require.Equal(t, int32(0), epochInfoCalls.Load(),
+		"pool-level data was fresh; /epoch_info must not be re-fetched "+
+			"just to backfill parameters")
+	require.Equal(t, int32(0), totalsCalls.Load(),
+		"pool-level data was fresh; /totals must not be re-fetched")
+
+	reopened, err := OpenCache(cachePath, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	defer reopened.Close()
+	got, err := reopened.GetEpochParams(network, epoch)
+	require.NoError(t, err)
+	require.NotNil(t, got, "the parameter row must be committed")
 }

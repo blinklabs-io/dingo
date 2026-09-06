@@ -174,7 +174,7 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 		)
 	}
 
-	if err := ls.rollbackPrimaryChainInSecurityParamWindows(
+	if err := ls.rewindPrimaryChainForRecovery(
 		rewindPoint,
 	); err != nil {
 		if ls.yieldedToChainSelection(

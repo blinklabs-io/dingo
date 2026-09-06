@@ -50,7 +50,7 @@ func newGapHealTestLedgerState(
 		currentTip: ochainsync.Tip{
 			Point: ocommon.Point{Slot: tipSlot, Hash: tipHash},
 		},
-		epochNonceHexCache: map[uint64]string{},
+		epochNonceHexCache: map[uint64]epochNonceHexCacheEntry{},
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
@@ -128,7 +128,10 @@ func TestHealMithrilGapBlockNonces_ReconstructsGapAndRefreshesTip(
 	ls := newGapHealTestLedgerState(t, db, boundary, tipSlot, tipHash)
 	ls.config.CardanoNodeConfig = newConwayBootstrapStabilityCfg(t)
 	ls.currentTipBlockNonce = bytes.Clone(staleTipNonce)
-	ls.epochNonceHexCache[42] = "stale"
+	ls.epochNonceHexCache[42] = epochNonceHexCacheEntry{
+		nonce: []byte("stale"),
+		hex:   "stale",
+	}
 
 	expected := bytes.Clone(anchorNonce)
 	expectedBySlot := map[uint64][]byte{}

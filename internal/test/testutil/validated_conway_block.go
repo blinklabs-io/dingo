@@ -149,7 +149,7 @@ func buildValidatedConwayBlockBytes(
 		epochNonce[i] = nonceSeed + byte(i) //nolint:gosec
 	}
 
-	const opCertSeqNum = uint32(0)
+	const opCertSeqNum = 0
 	// opCertKesPeriod is the absolute Cardano KES period at which this
 	// synthetic operational certificate claims to have been issued -- i.e.
 	// the absolute period at which the KES key was fresh (its own internal
@@ -159,7 +159,7 @@ func buildValidatedConwayBlockBytes(
 	// validateKESSignature), not from OpCert.KesPeriod directly, so this
 	// only needs to stay within maxKESEvolutions of whatever slot ends up
 	// chosen, which a 200-slot search window comfortably satisfies.
-	const opCertKesPeriod = uint32(0)
+	const opCertKesPeriod = 0
 	var opCertBody [48]byte
 	copy(opCertBody[:32], kesPk)
 	binary.BigEndian.PutUint64(opCertBody[32:40], uint64(opCertSeqNum))

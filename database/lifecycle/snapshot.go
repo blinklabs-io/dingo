@@ -70,7 +70,11 @@ func Snapshot(
 	blobPluginName string,
 	metadataPluginName string,
 ) (m Manifest, err error) {
-	blobBackuper, ok := db.Blob().(blob.Backuper)
+	// Pinned for the whole call: the Backup below runs long, and the store
+	// backing blobBackuper must not be drained and closed while it does.
+	blobStore, releaseBlob := db.PinBlob()
+	defer releaseBlob()
+	blobBackuper, ok := blobStore.(blob.Backuper)
 	if !ok {
 		return Manifest{}, fmt.Errorf(
 			"blob plugin %q does not support snapshotting",

@@ -118,11 +118,11 @@ func TestGetLeiosEBManifestPropagatesRealLegacyReadError(t *testing.T) {
 	slot := uint64(111)
 	readErr := errors.New("legacy read: storage unavailable")
 
-	d.blob = &mockBlobStore{
+	d.SetBlobStore(&mockBlobStore{
 		getErrs: map[string]error{
 			string(types.LegacyLeiosEBManifestKey(hash)): readErr,
 		},
-	}
+	})
 
 	_, err := d.GetLeiosEBManifest(hash, slot)
 	require.ErrorIs(t, err, readErr)
@@ -137,11 +137,11 @@ func TestGetLeiosEBTxsPropagatesRealLegacyReadError(t *testing.T) {
 	slot := uint64(222)
 	readErr := errors.New("legacy read: storage unavailable")
 
-	d.blob = &mockBlobStore{
+	d.SetBlobStore(&mockBlobStore{
 		getErrs: map[string]error{
 			string(types.LegacyLeiosEBManifestKey(hash)): readErr,
 		},
-	}
+	})
 
 	_, err := d.GetLeiosEBTxs(hash, slot)
 	require.ErrorIs(t, err, readErr)

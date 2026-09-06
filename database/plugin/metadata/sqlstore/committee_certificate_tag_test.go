@@ -92,7 +92,7 @@ func TestCommitteeCertificateRejectsUnsupportedCredentialTag(t *testing.T) {
 				100,
 				0,
 				0,
-				0,
+				nil,
 			)
 			require.ErrorContains(t, err, "unsupported stake credential tag")
 		})

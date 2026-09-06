@@ -75,16 +75,19 @@ func pendingTruncateChecksum(pending PendingTruncate) ([]byte, error) {
 // deleted block object. Recovery must still be able to authenticate that
 // index and retry its idempotent cleanup.
 func latestIndexedBlobBlock(db *database.Database) (models.Block, error) {
-	blob := db.Blob()
-	if blob == nil {
-		return models.Block{}, types.ErrBlobStoreUnavailable
-	}
 	txn := db.BlobTxn(false)
 	var ret models.Block
 	err := txn.Do(func(txn *database.Txn) error {
 		blobTxn := txn.Blob()
 		if blobTxn == nil {
 			return types.ErrNilTxn
+		}
+		// The transaction's own store, which it pins for its lifetime, so
+		// the iterator and the handle it runs on cannot come from two
+		// different installations.
+		blob := txn.BlobStore()
+		if blob == nil {
+			return types.ErrBlobStoreUnavailable
 		}
 		prefix := []byte(types.BlockBlobIndexKeyPrefix)
 		it := blob.NewIterator(blobTxn, types.BlobIteratorOptions{
@@ -751,6 +754,16 @@ func finishPendingTruncate(
 		); err != nil {
 			return fmt.Errorf(
 				"recompute account expirations after truncate: %w",
+				err,
+			)
+		}
+		if err := database.RecomputeSyntheticV2CostModelMarkerAfterTruncate(
+			db,
+			txn,
+			point.Slot,
+		); err != nil {
+			return fmt.Errorf(
+				"recompute synthetic PlutusV2 cost model marker after truncate: %w",
 				err,
 			)
 		}

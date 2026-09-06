@@ -4943,7 +4943,7 @@ func TestRewardBlockCountsTotalIncludesPoolsOutsideSnapshot(t *testing.T) {
 		))
 	}
 
-	counts, total, err := ls.rewardBlockCounts(
+	counts, total, known, err := ls.rewardBlockCounts(
 		meta,
 		nil,
 		performanceEpoch,
@@ -4953,6 +4953,7 @@ func TestRewardBlockCountsTotalIncludesPoolsOutsideSnapshot(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
+	require.True(t, known)
 	require.Equal(t, uint64(3), counts[string(poolKey)])
 	require.Equal(t, uint64(5), total)
 }
@@ -5002,7 +5003,7 @@ func TestRewardBlockCountsSkipsOverlaySlots(t *testing.T) {
 	require.True(t, rewardIsOverlaySlot(100, decentralization, 102))
 	require.False(t, rewardIsOverlaySlot(100, decentralization, 103))
 
-	counts, total, err := ls.rewardBlockCounts(
+	counts, total, known, err := ls.rewardBlockCounts(
 		meta,
 		nil,
 		performanceEpoch,
@@ -5012,6 +5013,7 @@ func TestRewardBlockCountsSkipsOverlaySlots(t *testing.T) {
 		decentralization,
 	)
 	require.NoError(t, err)
+	require.True(t, known)
 	require.Equal(t, uint64(2), counts[string(poolKey)])
 	require.Equal(t, uint64(3), total)
 }
@@ -6017,4 +6019,81 @@ func TestPrecomputedRewardPoolRewardsMatchInputsFullPot(t *testing.T) {
 	paramsOff := params
 	paramsOff.FullPotRewardsEnabled = false
 	require.False(t, check(paramsOff, apportioned))
+}
+
+// TestRewardCalculatorInputsAllowExcludedPoolStake covers the reward-input
+// shape snapshot capture writes when a pool is excluded for degraded
+// registration data: reward_pool_input holds only the surviving pools, while
+// reward_snapshot.total_active_stake still carries the excluded pool's
+// delegated stake because that stake belongs in the sigma_a denominator (see
+// snapshot.buildRewardStateInputs). Requiring the rows to sum to exactly the
+// snapshot total forced the denominator down to the surviving pool set, which
+// under-credits every reward the node reconstructs.
+func TestRewardCalculatorInputsAllowExcludedPoolStake(t *testing.T) {
+	poolKey := rewardCalcHash(0x4a)
+	rewardAccount := rewardCalcHash(0x5a)
+	member := rewardCalcHash(0x6a)
+	snapshot := func(totalActiveStake uint64) *models.RewardSnapshot {
+		return &models.RewardSnapshot{
+			TotalActiveStake: types.Uint64(totalActiveStake),
+			TotalPoolCount:   1,
+			TotalDelegators:  1,
+			CapturedSlot:     10,
+			BoundarySlot:     20,
+		}
+	}
+	poolInputs := []*models.RewardPoolInput{
+		{
+			PoolKeyHash:                poolKey,
+			RewardAccount:              rewardAccount,
+			RewardAccountCredentialTag: 0,
+			Margin:                     &types.Rat{Rat: big.NewRat(1, 10)},
+			DelegatedStake:             100,
+			OwnerStake:                 0,
+			DelegatorCount:             1,
+			CapturedSlot:               10,
+			BoundarySlot:               20,
+		},
+	}
+	stakeInputs := []*models.RewardStakeInput{
+		{
+			PoolKeyHash:  poolKey,
+			StakingKey:   member,
+			Stake:        100,
+			CapturedSlot: 10,
+			BoundarySlot: 20,
+		},
+	}
+
+	// 40 lovelace of the boundary's active stake belongs to an excluded pool.
+	require.NoError(t, validateRewardCalculatorInputs(
+		snapshot(140),
+		poolInputs,
+		stakeInputs,
+	))
+	match, err := precomputedRewardPoolInputsMatchSnapshot(
+		snapshot(140),
+		poolInputs,
+	)
+	require.NoError(t, err)
+	require.True(t, match)
+
+	// Rows summing to more than the declared active stake still fail: the row
+	// set and the snapshot then describe different boundaries.
+	err = validateRewardCalculatorInputs(
+		snapshot(99),
+		poolInputs,
+		stakeInputs,
+	)
+	require.ErrorContains(
+		t,
+		err,
+		"reward pool input total delegated stake 100 exceeds snapshot active stake 99",
+	)
+	match, err = precomputedRewardPoolInputsMatchSnapshot(
+		snapshot(99),
+		poolInputs,
+	)
+	require.NoError(t, err)
+	require.False(t, match)
 }

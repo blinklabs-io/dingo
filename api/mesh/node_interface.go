@@ -44,6 +44,7 @@ type MeshDatabase interface {
 // MeshLedgerState is the subset of ledger.LedgerState needed by the Mesh server.
 type MeshLedgerState interface {
 	GetCurrentPParams() lcommon.ProtocolParameters
+	GetCurrentPParamsForReporting() lcommon.ProtocolParameters
 	SlotToTime(slot uint64) (time.Time, error)
 	UtxosByAddress(addrs []lcommon.Address) ([]models.Utxo, error)
 	// UtxosByAddressAtSlot returns the UTxOs the address held at the

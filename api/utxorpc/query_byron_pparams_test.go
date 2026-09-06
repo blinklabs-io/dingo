@@ -59,6 +59,11 @@ func (s *byronLedgerStub) GetCurrentPParams() lcommon.ProtocolParameters {
 	return nil
 }
 
+func (s *byronLedgerStub) GetCurrentPParamsForReporting() lcommon.ProtocolParameters {
+	s.pparamsCalls++
+	return nil
+}
+
 func (s *byronLedgerStub) Tip() ochainsync.Tip {
 	s.tipCalls++
 	return s.tip
@@ -156,6 +161,11 @@ type shelleyLedgerStub struct {
 }
 
 func (s *shelleyLedgerStub) GetCurrentPParams() lcommon.ProtocolParameters {
+	s.pparamsCalls++
+	return s.pparams
+}
+
+func (s *shelleyLedgerStub) GetCurrentPParamsForReporting() lcommon.ProtocolParameters {
 	s.pparamsCalls++
 	return s.pparams
 }

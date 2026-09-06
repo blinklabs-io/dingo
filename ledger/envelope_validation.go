@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -90,7 +91,54 @@ func validateInboundBlockEnvelope(
 	if block.Era().Id == byron.EraIdByron {
 		return nil
 	}
-	return validateBlockSizes(block, pparams)
+	if err := validateBlockSizes(block, pparams); err != nil {
+		return err
+	}
+	return validateBlockExUnits(block, pparams)
+}
+
+// validateBlockExUnits enforces the aggregate execution-unit budget for all
+// transactions in an inbound block. Per-transaction validation checks
+// MaxTxExUnits, but the protocol also bounds the sum at MaxBlockExUnits.
+// This runs before ledger deltas are created or applied.
+func validateBlockExUnits(
+	block gledger.Block,
+	pparams lcommon.ProtocolParameters,
+) error {
+	limits, ok := protocolBlockLimits(pparams)
+	if !ok {
+		// Byron through Mary have no Plutus execution-unit budget.
+		return nil
+	}
+	if !limits.hasMaxBlockExUnits {
+		return nil
+	}
+	var total lcommon.ExUnits
+	for index, tx := range block.Transactions() {
+		declared, err := eras.DeclaredExUnits(tx)
+		if err != nil {
+			return fmt.Errorf(
+				"transaction %d declared execution units: %w",
+				index,
+				err,
+			)
+		}
+		total, err = eras.SafeAddExUnits(total, declared)
+		if err != nil {
+			return fmt.Errorf("block declared execution units: %w", err)
+		}
+		if total.Memory > limits.maxBlockExUnits.Memory ||
+			total.Steps > limits.maxBlockExUnits.Steps {
+			return fmt.Errorf(
+				"block declared execution units %d memory/%d steps exceed maxBlockExUnits %d memory/%d steps",
+				total.Memory,
+				total.Steps,
+				limits.maxBlockExUnits.Memory,
+				limits.maxBlockExUnits.Steps,
+			)
+		}
+	}
+	return nil
 }
 
 func isNilBlockHeader(header lcommon.BlockHeader) bool {
@@ -190,7 +238,7 @@ func validateBlockSizes(
 	block gledger.Block,
 	pparams lcommon.ProtocolParameters,
 ) error {
-	maxBodySize, maxHeaderSize, ok := protocolBlockSizeLimits(pparams)
+	limits, ok := protocolBlockLimits(pparams)
 	if !ok {
 		return fmt.Errorf(
 			"block size validation unsupported for protocol parameters %T",
@@ -198,11 +246,11 @@ func validateBlockSizes(
 		)
 	}
 	headerCbor := block.Header().Cbor()
-	if uint64(len(headerCbor)) > maxHeaderSize {
+	if uint64(len(headerCbor)) > limits.maxHeaderSize {
 		return fmt.Errorf(
 			"block header size %d exceeds maxBlockHeaderSize %d",
 			len(headerCbor),
-			maxHeaderSize,
+			limits.maxHeaderSize,
 		)
 	}
 	actualBodySize, err := serializedBlockBodySize(block)
@@ -217,11 +265,11 @@ func validateBlockSizes(
 			actualBodySize,
 		)
 	}
-	if actualBodySize > maxBodySize {
+	if actualBodySize > limits.maxBodySize {
 		return fmt.Errorf(
 			"block body size %d exceeds maxBlockBodySize %d",
 			actualBodySize,
-			maxBodySize,
+			limits.maxBodySize,
 		)
 	}
 	return nil
@@ -260,43 +308,75 @@ func serializedBlockBodySize(block gledger.Block) (uint64, error) {
 	return size, nil
 }
 
-// protocolBlockSizeLimits extracts max block body/header size protocol
-// parameters from eras whose inbound block sizes can be validated here.
-func protocolBlockSizeLimits(
-	pparams lcommon.ProtocolParameters,
-) (maxBodySize, maxHeaderSize uint64, ok bool) {
+type blockProtocolLimits struct {
+	maxBodySize        uint64
+	maxHeaderSize      uint64
+	maxBlockExUnits    lcommon.ExUnits
+	hasMaxBlockExUnits bool
+}
+
+// protocolBlockLimits extracts the inbound block limits for a protocol era.
+// Keeping the era mapping here ensures size and execution-unit validation use
+// the same protocol-parameter type coverage.
+func protocolBlockLimits(pparams lcommon.ProtocolParameters) (blockProtocolLimits, bool) {
 	switch pp := pparams.(type) {
 	case *shelley.ShelleyProtocolParameters:
 		if pp == nil {
-			return 0, 0, false
+			return blockProtocolLimits{}, false
 		}
-		return uint64(pp.MaxBlockBodySize), uint64(pp.MaxBlockHeaderSize), true
+		return blockProtocolLimits{
+			maxBodySize:   uint64(pp.MaxBlockBodySize),
+			maxHeaderSize: uint64(pp.MaxBlockHeaderSize),
+		}, true
 	case *mary.MaryProtocolParameters:
 		if pp == nil {
-			return 0, 0, false
+			return blockProtocolLimits{}, false
 		}
-		return uint64(pp.MaxBlockBodySize), uint64(pp.MaxBlockHeaderSize), true
+		return blockProtocolLimits{
+			maxBodySize:   uint64(pp.MaxBlockBodySize),
+			maxHeaderSize: uint64(pp.MaxBlockHeaderSize),
+		}, true
 	case *alonzo.AlonzoProtocolParameters:
 		if pp == nil {
-			return 0, 0, false
+			return blockProtocolLimits{}, false
 		}
-		return uint64(pp.MaxBlockBodySize), uint64(pp.MaxBlockHeaderSize), true
+		return blockProtocolLimits{
+			maxBodySize:        uint64(pp.MaxBlockBodySize),
+			maxHeaderSize:      uint64(pp.MaxBlockHeaderSize),
+			maxBlockExUnits:    pp.MaxBlockExUnits,
+			hasMaxBlockExUnits: true,
+		}, true
 	case *babbage.BabbageProtocolParameters:
 		if pp == nil {
-			return 0, 0, false
+			return blockProtocolLimits{}, false
 		}
-		return uint64(pp.MaxBlockBodySize), uint64(pp.MaxBlockHeaderSize), true
+		return blockProtocolLimits{
+			maxBodySize:        uint64(pp.MaxBlockBodySize),
+			maxHeaderSize:      uint64(pp.MaxBlockHeaderSize),
+			maxBlockExUnits:    pp.MaxBlockExUnits,
+			hasMaxBlockExUnits: true,
+		}, true
 	case *conway.ConwayProtocolParameters:
 		if pp == nil {
-			return 0, 0, false
+			return blockProtocolLimits{}, false
 		}
-		return uint64(pp.MaxBlockBodySize), uint64(pp.MaxBlockHeaderSize), true
+		return blockProtocolLimits{
+			maxBodySize:        uint64(pp.MaxBlockBodySize),
+			maxHeaderSize:      uint64(pp.MaxBlockHeaderSize),
+			maxBlockExUnits:    pp.MaxBlockExUnits,
+			hasMaxBlockExUnits: true,
+		}, true
 	case *dijkstra.DijkstraProtocolParameters:
 		if pp == nil {
-			return 0, 0, false
+			return blockProtocolLimits{}, false
 		}
-		return uint64(pp.MaxBlockBodySize), uint64(pp.MaxBlockHeaderSize), true
+		return blockProtocolLimits{
+			maxBodySize:        uint64(pp.MaxBlockBodySize),
+			maxHeaderSize:      uint64(pp.MaxBlockHeaderSize),
+			maxBlockExUnits:    pp.MaxBlockExUnits,
+			hasMaxBlockExUnits: true,
+		}, true
 	default:
-		return 0, 0, false
+		return blockProtocolLimits{}, false
 	}
 }

@@ -34,9 +34,17 @@ var blobStoreIDKey = []byte("nodesettings/storeid")
 // alarms while still missing the case this guards, which is a metadata store
 // paired with a blob store it was never initialised with.
 func (d *Database) blobStoreID() (string, error) {
-	readTxn := d.Blob().NewTransaction(false)
+	// One pin for the whole mint: the read, the write, and the Sync that
+	// makes the write durable all have to hit the same store, and that
+	// store has to stay open until the Sync returns.
+	store, releaseBlob := d.PinBlob()
+	defer releaseBlob()
+	if store == nil {
+		return "", types.ErrBlobStoreUnavailable
+	}
+	readTxn := store.NewTransaction(false)
 	defer func() { _ = readTxn.Rollback() }()
-	existing, err := d.Blob().Get(readTxn, blobStoreIDKey)
+	existing, err := store.Get(readTxn, blobStoreIDKey)
 	switch {
 	case err == nil && len(existing) > 0:
 		return string(existing), nil
@@ -44,8 +52,8 @@ func (d *Database) blobStoreID() (string, error) {
 		return "", fmt.Errorf("read blob store id: %w", err)
 	}
 	minted := uuid.NewString()
-	writeTxn := d.Blob().NewTransaction(true)
-	if err := d.Blob().Set(writeTxn, blobStoreIDKey, []byte(minted)); err != nil {
+	writeTxn := store.NewTransaction(true)
+	if err := store.Set(writeTxn, blobStoreIDKey, []byte(minted)); err != nil {
 		_ = writeTxn.Rollback()
 		return "", fmt.Errorf("mint blob store id: %w", err)
 	}
@@ -63,7 +71,7 @@ func (d *Database) blobStoreID() (string, error) {
 	// metadata commit that depends on it. Losing this specific key after the
 	// gate has already latched is permanent: the next startup mints a new
 	// id, which can never match the Frozen gate again.
-	if err := d.Blob().Sync(); err != nil {
+	if err := store.Sync(); err != nil {
 		return "", fmt.Errorf("sync blob store id: %w", err)
 	}
 	return minted, nil

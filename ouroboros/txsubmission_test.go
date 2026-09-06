@@ -96,6 +96,7 @@ type txsubmissionCorruptingConsumer struct {
 	mempool.Consumer
 	corruptHash string
 	omitHash    string
+	corruptAll  bool
 }
 
 func (c *txsubmissionCorruptingConsumer) GetTxFromCache(
@@ -105,7 +106,7 @@ func (c *txsubmissionCorruptingConsumer) GetTxFromCache(
 		return nil
 	}
 	tx := c.Consumer.GetTxFromCache(hash)
-	if tx == nil || hash != c.corruptHash {
+	if tx == nil || (!c.corruptAll && hash != c.corruptHash) {
 		return tx
 	}
 	corrupted := *tx
@@ -117,6 +118,7 @@ type txsubmissionCorruptingService struct {
 	mempool.Service
 	corruptHash string
 	omitHash    string
+	corruptAll  bool
 	mu          sync.Mutex
 	consumers   map[ouroboros.ConnectionId]mempool.Consumer
 }
@@ -143,6 +145,7 @@ func (s *txsubmissionCorruptingService) NewConsumer(
 		Consumer:    consumer,
 		corruptHash: s.corruptHash,
 		omitHash:    s.omitHash,
+		corruptAll:  s.corruptAll,
 	}
 	s.consumers[connId] = wrapped
 	return wrapped
@@ -273,9 +276,20 @@ func TestTxSubmissionClientRequestTxIds(t *testing.T) {
 					uint16(txsubmissionRelayTestEraId),
 					id.TxId.EraId,
 				)
+				// The advertised size is the wrapped wire size, which is
+				// what cardano-node advertises and what a peer reads off
+				// the wire, not the unwrapped body length.
 				require.Equal(
 					t,
-					uint32(len(fixtures[idx].body)),
+					uint32( // #nosec G115 -- test fixture
+						len(
+							txsubmissionWireEncodedItem(
+								t,
+								uint16(txsubmissionRelayTestEraId),
+								fixtures[idx].body,
+							),
+						),
+					),
 					id.Size,
 				)
 				require.Equal(
@@ -810,7 +824,11 @@ type txSubmissionRelayHarnessOpts struct {
 	dagA             bool
 	corruptOfferHash string
 	omitOfferHash    string
+	corruptAllOffers bool
 	batchRequestsA   bool
+	// promRegistryA installs protocol metrics on node A, whose
+	// txsubmission server runs the relay pull loop under test.
+	promRegistryA prometheus.Registerer
 }
 
 func newTxSubmissionRelayHarnessWithOpts(
@@ -875,15 +893,21 @@ func newTxSubmissionRelayHarnessWithOpts(
 		connmanager.ConnectionManagerConfig{Logger: logger},
 	)
 
-	nodeA := newOuroboros(OuroborosConfig{ConnManager: cmA, Logger: logger})
+	nodeA := newOuroboros(OuroborosConfig{
+		ConnManager:  cmA,
+		Logger:       logger,
+		PromRegistry: opts.promRegistryA,
+	})
 	nodeA.mempool = nodeAMempool
 	nodeB := newOuroboros(OuroborosConfig{ConnManager: cmB, Logger: logger})
 	nodeBMempool := mempool.Service(&mempool.FIFO{Mempool: mB})
-	if opts.corruptOfferHash != "" || opts.omitOfferHash != "" {
+	if opts.corruptOfferHash != "" || opts.omitOfferHash != "" ||
+		opts.corruptAllOffers {
 		nodeBMempool = &txsubmissionCorruptingService{
 			Service:     nodeBMempool,
 			corruptHash: opts.corruptOfferHash,
 			omitHash:    opts.omitOfferHash,
+			corruptAll:  opts.corruptAllOffers,
 			consumers: make(
 				map[ouroboros.ConnectionId]mempool.Consumer,
 			),
@@ -1218,7 +1242,9 @@ func TestTxSubmissionServerInitContinuesAfterMempoolRejection(
 }
 
 // TestTxSubmissionServerInitRejectsMalformedReply verifies a mismatched reply
-// stops the pull loop before a later request could acknowledge it.
+// is dropped in full and that the per-peer pull loop keeps running, so one
+// bad reply cannot end tx ingest from that peer for the life of the
+// connection.
 func TestTxSubmissionServerInitRejectsMalformedReply(t *testing.T) {
 	fixtures := txsubmissionTestFixtures(t)
 	malformed := fixtures[0]
@@ -1254,19 +1280,66 @@ func TestTxSubmissionServerInitRejectsMalformedReply(t *testing.T) {
 	)
 	require.Contains(t, logBuf.String(), "decode failed")
 	require.Contains(t, logBuf.String(), h.connA.Id().String())
+	_, admitted := h.mA.GetTransaction(malformed.hash)
+	require.False(t, admitted, "mismatched body was admitted")
 
-	// A subsequent offer must not be requested, because doing so would
-	// acknowledge and advance beyond the rejected reply.
+	// The pull loop must survive the rejection and admit the next offer.
 	addTxSubmissionTestFixtures(t, h.mB, accepted)
-	require.Never(
+	require.Eventually(
 		t,
 		func() bool {
 			_, ok := h.mA.GetTransaction(accepted.hash)
 			return ok
 		},
-		250*time.Millisecond,
+		5*time.Second,
 		10*time.Millisecond,
-		"pull loop advanced after rejecting a mismatched reply",
+		"pull loop stopped after rejecting a single mismatched reply",
+	)
+	require.NotContains(
+		t,
+		logBuf.String(),
+		"stopping tx ingest after repeated mismatched txsubmission replies",
+	)
+}
+
+// TestTxSubmissionServerInitStopsAfterRepeatedMismatches verifies a peer
+// that returns nothing but mismatched replies is eventually given up on,
+// so continuing the pull loop cannot become an unbounded hot loop.
+func TestTxSubmissionServerInitStopsAfterRepeatedMismatches(t *testing.T) {
+	fixtures := txsubmissionTestFixtures(t)
+	require.GreaterOrEqual(
+		t,
+		len(fixtures),
+		txsubmissionMaxConsecutiveReplyMismatches,
+	)
+	logBuf := &lockedBuffer{}
+	logger := slog.New(
+		slog.NewJSONHandler(
+			logBuf,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		),
+	)
+
+	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
+		logger:           logger,
+		corruptAllOffers: true,
+	})
+	defer h.close(t)
+
+	addTxSubmissionTestFixtures(t, h.mB, fixtures...)
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+
+	require.Eventually(
+		t,
+		func() bool {
+			return strings.Contains(
+				logBuf.String(),
+				"stopping tx ingest after repeated mismatched txsubmission replies",
+			)
+		},
+		10*time.Second,
+		10*time.Millisecond,
+		"expected tx ingest to stop after repeated mismatched replies",
 	)
 }
 

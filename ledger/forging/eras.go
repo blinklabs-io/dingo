@@ -17,6 +17,7 @@ package forging
 import (
 	"errors"
 	"fmt"
+	"reflect"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -81,11 +82,19 @@ type pparamsLimits struct {
 }
 
 // extractPParamsLimits returns the BuildBlock-relevant fields from any
-// era's protocol parameters. Returns an error only if pparams is nil
-// or of an unrecognized type.
+// era's protocol parameters. Returns an error if pparams is nil (including
+// a typed-nil pointer of a known era's type stored in the interface, which
+// an `== nil` interface comparison alone would miss and the type switch
+// below would then dereference) or of an unrecognized type.
 func extractPParamsLimits(p lcommon.ProtocolParameters) (pparamsLimits, error) {
 	if p == nil {
 		return pparamsLimits{}, errors.New("protocol parameters are nil")
+	}
+	if v := reflect.ValueOf(p); v.Kind() == reflect.Pointer && v.IsNil() {
+		return pparamsLimits{}, fmt.Errorf(
+			"protocol parameters are a nil %T pointer",
+			p,
+		)
 	}
 	switch pp := p.(type) {
 	case *dijkstra.DijkstraProtocolParameters:

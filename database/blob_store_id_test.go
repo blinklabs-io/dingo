@@ -177,7 +177,7 @@ func TestBlobStoreIDMismatchIsFatal(t *testing.T) {
 // applies to combined commits.
 func TestBlobStoreIDSyncsAfterMint(t *testing.T) {
 	store := &mockBlobStore{}
-	db := &Database{blob: store}
+	db := &Database{blobRef: newBlobStoreRef(store)}
 
 	id, err := db.blobStoreID()
 	require.NoError(t, err)
@@ -202,7 +202,7 @@ func TestPhase1RejectsBlobStoreIDReadFailure(t *testing.T) {
 	readErr := errors.New("simulated corrupted blob store read")
 	store := &mockBlobStore{getErr: readErr}
 	db := &Database{
-		blob: store,
+		blobRef: newBlobStoreRef(store),
 		config: &Config{
 			StorageMode: "core",
 			Network:     "preprod",
@@ -221,7 +221,7 @@ func TestPhase1RejectsBlobStoreIDReadFailure(t *testing.T) {
 func TestBlobStoreIDSyncFailurePropagates(t *testing.T) {
 	syncErr := errors.New("simulated sync failure")
 	store := &mockBlobStore{syncErr: syncErr}
-	db := &Database{blob: store}
+	db := &Database{blobRef: newBlobStoreRef(store)}
 
 	_, err := db.blobStoreID()
 	require.ErrorIs(t, err, syncErr)

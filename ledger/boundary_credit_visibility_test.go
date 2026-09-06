@@ -16,11 +16,11 @@ package ledger
 
 import (
 	"database/sql"
+	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -72,7 +72,7 @@ func TestBoundaryCreditVisibility_MIRIsIncludedInSnapshot(t *testing.T) {
 		0,
 		epochStartSlot+1,
 		[]models.MoveInstantaneousRewardsReward{
-			{Credential: credential, Amount: types.Uint64(amount)},
+			{Credential: credential, Amount: new(big.Int).SetUint64(amount)},
 		},
 	)
 

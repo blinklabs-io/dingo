@@ -80,7 +80,11 @@ func (d *Database) PruneBlock(slot uint64, hash []byte) (int, error) {
 	var materialized int
 	blobTxn := d.BlobTxn(true)
 	if err := blobTxn.Do(func(txn *Txn) error {
-		blockCbor, _, err := d.blob.GetBlock(txn.Blob(), slot, hash)
+		blobStore := txn.BlobStore()
+		if blobStore == nil {
+			return types.ErrBlobStoreUnavailable
+		}
+		blockCbor, _, err := blobStore.GetBlock(txn.Blob(), slot, hash)
 		if err != nil {
 			return fmt.Errorf(
 				"prune block (slot=%d): get block: %w",
@@ -89,13 +93,13 @@ func (d *Database) PruneBlock(slot uint64, hash []byte) (int, error) {
 			)
 		}
 		for _, ref := range utxoRefs {
-			n, err := d.materializeUtxo(txn.Blob(), slot, hash, blockCbor, ref)
+			n, err := d.materializeUtxo(txn, slot, hash, blockCbor, ref)
 			if err != nil {
 				return err
 			}
 			materialized += n
 		}
-		if err := d.blob.TombstoneBlock(txn.Blob(), slot, hash); err != nil {
+		if err := blobStore.TombstoneBlock(txn.Blob(), slot, hash); err != nil {
 			return fmt.Errorf(
 				"prune block (slot=%d): expire block: %w",
 				slot,
@@ -113,14 +117,24 @@ func (d *Database) PruneBlock(slot uint64, hash []byte) (int, error) {
 // raw CBOR by extracting the bytes from the given block CBOR. Returns 1
 // if the entry was rewritten, 0 if it was already raw, missing, or
 // references a different block.
+//
+// It takes the *Txn rather than a bare types.Txn so the store and the blob
+// transaction handle it writes through come from the same place: reading the
+// database's installed store separately could pair a handle from one store
+// with a call into another after a concurrent SetBlobStore.
 func (d *Database) materializeUtxo(
-	blobTxn types.Txn,
+	txn *Txn,
 	slot uint64,
 	hash []byte,
 	blockCbor []byte,
 	ref models.UtxoId,
 ) (int, error) {
-	utxoData, err := d.blob.GetUtxo(blobTxn, ref.Hash, ref.Idx)
+	blobStore := txn.BlobStore()
+	if blobStore == nil {
+		return 0, types.ErrBlobStoreUnavailable
+	}
+	blobTxn := txn.Blob()
+	utxoData, err := blobStore.GetUtxo(blobTxn, ref.Hash, ref.Idx)
 	if err != nil {
 		// Raced with a consume that already deleted the blob entry. The
 		// metadata row may also be in flight to deleted_slot != 0; either
@@ -179,7 +193,12 @@ func (d *Database) materializeUtxo(
 	}
 	utxoCbor := make([]byte, offset.ByteLength)
 	copy(utxoCbor, blockCbor[offset.ByteOffset:end])
-	if err := d.blob.SetUtxo(blobTxn, ref.Hash, ref.Idx, utxoCbor); err != nil {
+	if err := blobStore.SetUtxo(
+		blobTxn,
+		ref.Hash,
+		ref.Idx,
+		utxoCbor,
+	); err != nil {
 		return 0, fmt.Errorf(
 			"prune block (slot=%d): rewrite utxo %x#%d as raw cbor: %w",
 			slot,

@@ -1953,7 +1953,7 @@ func TestPeerGovernor_DiscoverLedgerPeers_SlotNotReached(t *testing.T) {
 
 func TestPeerGovernor_DiscoverLedgerPeers_Success(t *testing.T) {
 	ipv4 := net.ParseIP("44.0.0.1")
-	ipv6 := net.ParseIP("2001:db8::1")
+	ipv6 := net.ParseIP("2001:4860:4860::8888")
 
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -7487,7 +7487,7 @@ func TestIsRoutableAddr(t *testing.T) {
 		// Routable addresses
 		{"public IPv4", "44.0.0.1:3001", true},
 		{"public IPv4 no port", "44.0.0.1", true},
-		{"public IPv6", "[2001:db8::1]:3001", true},
+		{"public IPv6", "[2001:4860:4860::8888]:3001", true},
 		{"hostname", "relay.example.com:3001", true},
 		{"bare hostname", "relay.example.com", true},
 
@@ -7547,6 +7547,63 @@ func TestAddPeer_RejectsNonRoutableLedgerPeer(t *testing.T) {
 	err := pg.AddPeer("192.168.1.1:3001", PeerSourceP2PLedger)
 	assert.ErrorIs(t, err, ErrUnroutableAddress)
 	assert.Empty(t, pg.GetPeers())
+}
+
+func TestAddPeer_RejectsDocumentationRanges(t *testing.T) {
+	tests := []struct {
+		name    string
+		address string
+		source  PeerSource
+		allow   bool
+	}{
+		{
+			name:    "gossip rejects ipv4 test-net",
+			address: "192.0.2.1:3001",
+			source:  PeerSourceP2PGossip,
+		},
+		{
+			name:    "ledger rejects ipv4 test-net",
+			address: "198.51.100.1:3001",
+			source:  PeerSourceP2PLedger,
+		},
+		{
+			name:    "gossip rejects ipv4 test-net 3",
+			address: "203.0.113.1:3001",
+			source:  PeerSourceP2PGossip,
+		},
+		{
+			name:    "ledger rejects ipv6 documentation",
+			address: "[2001:db8::1]:3001",
+			source:  PeerSourceP2PLedger,
+		},
+		{
+			name:    "gossip accepts public ipv4 control",
+			address: "44.0.0.1:3001",
+			source:  PeerSourceP2PGossip,
+			allow:   true,
+		},
+		{
+			name:    "ledger accepts public ipv6 control",
+			address: "[2001:4860:4860::8888]:3001",
+			source:  PeerSourceP2PLedger,
+			allow:   true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pg := NewPeerGovernor(PeerGovernorConfig{
+				Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			})
+			err := pg.AddPeer(tt.address, tt.source)
+			if tt.allow {
+				require.NoError(t, err)
+				require.Len(t, pg.GetPeers(), 1)
+				return
+			}
+			require.ErrorIs(t, err, ErrUnroutableAddress)
+			require.Empty(t, pg.GetPeers())
+		})
+	}
 }
 
 func TestAddPeer_AllowsTopologyWithPrivateIP(t *testing.T) {

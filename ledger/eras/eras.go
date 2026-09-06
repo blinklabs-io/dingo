@@ -47,18 +47,43 @@ func praosVRFNonceValue(vrfOutput []byte) []byte {
 
 var ErrIncompatibleProtocolParams = errors.New("pparams are not expected type")
 
+// paramUpdateHasPlutusV2CostModel reports whether a decoded protocol-
+// parameter update's CostModels map explicitly specifies a PlutusV2 cost
+// model (key 1). Shared by every era's EraDesc.ParamUpdateHasPlutusV2CostModelFunc
+// implementation.
+func paramUpdateHasPlutusV2CostModel(costModels map[uint][]int64) bool {
+	_, ok := costModels[1]
+	return ok
+}
+
 type EraDesc struct {
 	DecodePParamsFunc       func([]byte) (lcommon.ProtocolParameters, error)
 	DecodePParamsUpdateFunc func([]byte) (any, error)
 	PParamsUpdateFunc       func(lcommon.ProtocolParameters, any) (lcommon.ProtocolParameters, error)
-	HardForkFunc            func(*cardano.CardanoNodeConfig, lcommon.ProtocolParameters) (lcommon.ProtocolParameters, error)
-	EpochLengthFunc         func(*cardano.CardanoNodeConfig) (uint, uint, error)
-	CalculateEtaVFunc       func(*cardano.CardanoNodeConfig, []byte, ledger.Block) ([]byte, error)
-	CertDepositFunc         func(lcommon.Certificate, lcommon.ProtocolParameters) (uint64, error)
-	ValidateTxFunc          func(lcommon.Transaction, uint64, lcommon.LedgerState, lcommon.ProtocolParameters) error
-	EvaluateTxFunc          func(lcommon.Transaction, lcommon.LedgerState, lcommon.ProtocolParameters) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error)
-	Name                    string
-	Id                      uint
+	// ParamUpdateHasPlutusV2CostModelFunc reports whether a decoded
+	// DecodePParamsUpdateFunc value (the enacted update itself, not the
+	// merged result) explicitly specifies a PlutusV2 cost model (map key
+	// 1). This is the pre-Conway equivalent of
+	// governance.EnactmentResult.PlutusV2CostModelWritten, used by
+	// database.ComputeAndApplyPParamUpdates: on a network that forks into
+	// Babbage before receiving a real PlutusV2 cost model, that model can
+	// arrive through this classic Shelley-style update system rather than
+	// CIP-1694 governance (as it did on real mainnet, well before Conway
+	// governance existed), and that path needs the same real-write
+	// provenance signal EnactProposal provides for Conway/Dijkstra --
+	// comparing the merged result's value before and after is unsound for
+	// the same reason it is there. See blinklabs-io/dingo#3825's PR review.
+	// nil for eras with no CostModels concept at all (Byron, Shelley,
+	// Allegra, Mary).
+	ParamUpdateHasPlutusV2CostModelFunc func(any) bool
+	HardForkFunc                        func(*cardano.CardanoNodeConfig, lcommon.ProtocolParameters) (lcommon.ProtocolParameters, error)
+	EpochLengthFunc                     func(*cardano.CardanoNodeConfig) (uint, uint, error)
+	CalculateEtaVFunc                   func(*cardano.CardanoNodeConfig, []byte, ledger.Block) ([]byte, error)
+	CertDepositFunc                     func(lcommon.Certificate, lcommon.ProtocolParameters) (uint64, error)
+	ValidateTxFunc                      func(lcommon.Transaction, uint64, lcommon.LedgerState, lcommon.ProtocolParameters) error
+	EvaluateTxFunc                      func(lcommon.Transaction, lcommon.LedgerState, lcommon.ProtocolParameters) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error)
+	Name                                string
+	Id                                  uint
 	// MinMajorVersion and MaxMajorVersion are the inclusive protocol-major
 	// version range covered by this era. Adjacent eras must meet without
 	// gap or overlap (cur.MinMajorVersion == prev.MaxMajorVersion + 1).

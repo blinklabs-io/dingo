@@ -181,6 +181,43 @@ func TestValidateTxBabbageKeepsHorizonForRedeemerTx(t *testing.T) {
 	assert.Positive(t, ls.slotToTimeCalls)
 }
 
+// The accept half of the redeemer class: a transaction that does run scripts
+// and whose validity bound is inside the horizon must have its script context
+// built, which means its validity interval is translated and the translation
+// succeeds. Only the reject half was pinned before, so a regression that
+// refused every redeemer transaction's translation would have gone unnoticed.
+//
+// The transaction carries no matching script, so evaluation cannot proceed past
+// the redeemer lookup; reaching that lookup is the proof that the script
+// context was built rather than skipped or refused.
+func TestValidateTxBabbageBuildsScriptContextInsideHorizon(t *testing.T) {
+	withoutBabbageUtxoValidationRules(t)
+
+	tx, err := babbage.NewBabbageTransactionFromCbor(
+		newTestTxCbor(t, testAppliedSlot+100, redeemerWitnessSet()),
+	)
+	require.NoError(t, err)
+	require.True(t, txHasRedeemers(tx))
+
+	ls := newPastHorizonLedgerState()
+	ls.addUtxo(tx.Inputs()[0], newTestOutput(1_000_000))
+
+	err = ValidateTxBabbage(
+		tx,
+		testAppliedSlot,
+		ls,
+		&babbage.BabbageProtocolParameters{},
+	)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, hardfork.ErrPastHorizon,
+		"a validity bound inside the horizon must translate")
+	assert.ErrorContains(t, err, "could not find script with hash",
+		"validation must reach redeemer resolution, which only happens once "+
+			"the script context has been built")
+	assert.Positive(t, ls.slotToTimeCalls,
+		"building the script context must translate the validity interval")
+}
+
 // A redeemerless transaction whose TTL is inside the horizon behaves the same
 // either way, so the gate cannot be hiding a translation that used to succeed.
 func TestValidateTxBabbageWithoutRedeemersInsideHorizon(t *testing.T) {

@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math/big"
 	"strconv"
 	"strings"
 
@@ -817,7 +818,9 @@ func (s *Store) GetAccountSumsByCredential(
 	stakingKey []byte,
 	txn types.Txn,
 ) (models.AccountSums, error) {
-	var ret models.AccountSums
+	// The two MIR totals are non-nil on every return, including the failure
+	// ones, so AccountSums never hands a caller a nil *big.Int.
+	ret := models.NewAccountSums()
 	if len(stakingKey) == 0 {
 		return ret, nil
 	}
@@ -828,6 +831,11 @@ func (s *Store) GetAccountSumsByCredential(
 	sum := func(query string, args ...any) (uint64, error) {
 		return sumUint64Rows(ctx, db, s.dialect.Rebind(query), args...)
 	}
+	// MIR amounts are delta_coin, so the two pot totals are summed as signed
+	// values. A withdrawal is coin and stays unsigned.
+	sumSigned := func(query string, args ...any) (*big.Int, error) {
+		return sumSignedRows(ctx, db, s.dialect.Rebind(query), args...)
+	}
 	ret.WithdrawalsSum, err = sum(`
 SELECT amount
 FROM account_reward_delta
@@ -836,12 +844,12 @@ WHERE withdrawal = TRUE AND credential_tag = ? AND staking_key = ?`,
 		stakingKey,
 	)
 	if err != nil {
-		return models.AccountSums{}, fmt.Errorf(
+		return models.NewAccountSums(), fmt.Errorf(
 			"query account sums: sum withdrawals: %w",
 			err,
 		)
 	}
-	ret.ReservesSum, err = sum(`
+	ret.ReservesSum, err = sumSigned(`
 SELECT reward.amount
 FROM move_instantaneous_rewards_reward reward
 JOIN move_instantaneous_rewards mir ON mir.id = reward.mir_id
@@ -851,12 +859,12 @@ WHERE mir.pot = 0 AND reward.credential_tag = ?
 		stakingKey,
 	)
 	if err != nil {
-		return models.AccountSums{}, fmt.Errorf(
+		return models.NewAccountSums(), fmt.Errorf(
 			"query account sums: sum reserves MIR: %w",
 			err,
 		)
 	}
-	ret.TreasurySum, err = sum(`
+	ret.TreasurySum, err = sumSigned(`
 SELECT reward.amount
 FROM move_instantaneous_rewards_reward reward
 JOIN move_instantaneous_rewards mir ON mir.id = reward.mir_id
@@ -866,7 +874,7 @@ WHERE mir.pot = 1 AND reward.credential_tag = ?
 		stakingKey,
 	)
 	if err != nil {
-		return models.AccountSums{}, fmt.Errorf(
+		return models.NewAccountSums(), fmt.Errorf(
 			"query account sums: sum treasury MIR: %w",
 			err,
 		)

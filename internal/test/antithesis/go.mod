@@ -6,7 +6,7 @@ toolchain go1.26.7
 
 require (
 	github.com/antithesishq/antithesis-sdk-go v0.7.0
-	github.com/blinklabs-io/gouroboros v0.202.6
+	github.com/blinklabs-io/gouroboros v0.202.10
 	github.com/blinklabs-io/plutigo v0.5.0
 	github.com/stretchr/testify v1.12.1
 	gopkg.in/yaml.v3 v3.0.1
@@ -15,7 +15,6 @@ require (
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/bits-and-blooms/bitset v1.24.6 // indirect
-	github.com/blinklabs-io/ouroboros-mock v0.18.0 // indirect
 	github.com/btcsuite/btcd/btcec/v2 v2.5.0 // indirect
 	github.com/btcsuite/btcd/btcutil v1.2.0 // indirect
 	github.com/btcsuite/btcd/chaincfg/chainhash v1.2.0 // indirect

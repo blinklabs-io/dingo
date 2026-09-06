@@ -27,10 +27,13 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -123,6 +126,138 @@ func TestProtocolParamsForSlot_ForecastsBumpAtBoundarySlot(t *testing.T) {
 			"will produce an Allegra block at it.",
 		got75Major,
 	)
+}
+
+// TestProtocolParamsForSlot_UsesMultiEraEpochs ensures the target epoch is
+// resolved from the complete era history. Dividing an absolute slot by the
+// current era's epoch length loses the epochs occupied by a Byron prefix and
+// can therefore miss a scheduled fork at the first future Shelley boundary.
+func TestProtocolParamsForSlot_UsesMultiEraEpochs(t *testing.T) {
+	const (
+		byronEpochs       = 2
+		byronEpochLength  = uint(100)
+		shelleyEpoch      = uint64(207)
+		shelleyEpochLen   = uint(432)
+		byronEndSlot      = uint64(byronEpochs) * uint64(byronEpochLength)
+		currentEpochStart = byronEndSlot + (shelleyEpoch-2)*uint64(shelleyEpochLen)
+		boundarySlot      = currentEpochStart + uint64(shelleyEpochLen)
+	)
+
+	cfg := newMultiEraForecastCfg(t, shelleyEpoch+1)
+	epochCache := make([]models.Epoch, 0, int(shelleyEpoch)+1)
+	for epoch := uint64(0); epoch < byronEpochs; epoch++ {
+		epochCache = append(epochCache, models.Epoch{
+			EpochId:       epoch,
+			StartSlot:     epoch * uint64(byronEpochLength),
+			SlotLength:    20_000,
+			LengthInSlots: byronEpochLength,
+			EraId:         eras.ByronEraDesc.Id,
+		})
+	}
+	for epoch := uint64(2); epoch <= shelleyEpoch; epoch++ {
+		epochCache = append(epochCache, models.Epoch{
+			EpochId:       epoch,
+			StartSlot:     byronEndSlot + (epoch-2)*uint64(shelleyEpochLen),
+			SlotLength:    1_000,
+			LengthInSlots: shelleyEpochLen,
+			EraId:         eras.ShelleyEraDesc.Id,
+		})
+	}
+
+	ls := &LedgerState{
+		epochCache:   epochCache,
+		currentEra:   eras.ShelleyEraDesc,
+		currentEpoch: epochCache[len(epochCache)-1],
+		currentTip: ochainsync.Tip{Point: ocommon.NewPoint(
+			boundarySlot-1, []byte("tip"),
+		)},
+		currentPParams: &shelley.ShelleyProtocolParameters{
+			ProtocolMajor: 2,
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	got := ls.ProtocolParamsForSlot(boundarySlot)
+	gotShelley, ok := got.(*shelley.ShelleyProtocolParameters)
+	require.True(t, ok)
+	require.Equal(t, uint(3), gotShelley.ProtocolMajor,
+		"the first Shelley slot after a Byron prefix must forecast the scheduled fork")
+}
+
+// TestProtocolParamsForSlot_FallbackProjectsFromCurrentEpoch verifies the
+// bounded-summary error path. A slot beyond the forecast horizon still needs
+// an epoch estimate, and that estimate must retain the absolute epoch offset
+// introduced by earlier eras.
+func TestProtocolParamsForSlot_FallbackProjectsFromCurrentEpoch(t *testing.T) {
+	const (
+		byronEpochs      = uint64(2)
+		byronEpochLength = uint64(100)
+		currentEpoch     = uint64(207)
+		shelleyEpochLen  = uint64(432)
+	)
+	currentStart := byronEpochs*byronEpochLength +
+		(currentEpoch-byronEpochs)*shelleyEpochLen
+	targetEpoch := currentEpoch + 100
+	targetSlot := currentStart + (targetEpoch-currentEpoch)*shelleyEpochLen
+	cfg := newMultiEraForecastCfg(t, targetEpoch)
+
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{EpochId: 0, StartSlot: 0, SlotLength: 20_000,
+				LengthInSlots: uint(byronEpochLength), EraId: eras.ByronEraDesc.Id},
+			{EpochId: 1, StartSlot: byronEpochLength, SlotLength: 20_000,
+				LengthInSlots: uint(byronEpochLength), EraId: eras.ByronEraDesc.Id},
+			{EpochId: currentEpoch, StartSlot: currentStart, SlotLength: 1_000,
+				LengthInSlots: uint(shelleyEpochLen), EraId: eras.ShelleyEraDesc.Id},
+		},
+		currentEra: eras.ShelleyEraDesc,
+		currentEpoch: models.Epoch{
+			EpochId: currentEpoch, StartSlot: currentStart,
+			SlotLength: 1_000, LengthInSlots: uint(shelleyEpochLen),
+			EraId: eras.ShelleyEraDesc.Id,
+		},
+		currentTip: ochainsync.Tip{Point: ocommon.NewPoint(
+			currentStart-1, []byte("tip"),
+		)},
+		currentPParams: &shelley.ShelleyProtocolParameters{ProtocolMajor: 2},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+	_, err := ls.SlotToEpoch(targetSlot)
+	require.ErrorIs(t, err, hardfork.ErrPastHorizon,
+		"the target must exercise the bounded-summary fallback")
+
+	got, ok := ls.ProtocolParamsForSlot(targetSlot).(*shelley.ShelleyProtocolParameters)
+	require.True(t, ok)
+	require.Equal(t, uint(3), got.ProtocolMajor,
+		"fallback epoch projection must preserve the Byron epoch offset")
+}
+
+func newMultiEraForecastCfg(t *testing.T, forkEpoch uint64) *cardano.CardanoNodeConfig {
+	t.Helper()
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(`{
+		"blockVersionData": { "slotDuration": "20000" },
+		"protocolConsts": { "k": 1 }
+	}`)))
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+		"activeSlotsCoeff": 0.4,
+		"securityParam": 1,
+		"slotLength": 1,
+		"epochLength": 432,
+		"systemStart": "2026-01-01T00:00:00Z"
+	}`)))
+	enabled := true
+	cfg.ExperimentalHardForksEnabled = &enabled
+	cfg.TestAllegraHardForkAtEpoch = &forkEpoch
+	return cfg
 }
 
 // TestProtocolParamsForSlot_ForecastsPendingPParamUpdateAtNormalBoundary is

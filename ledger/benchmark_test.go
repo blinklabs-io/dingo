@@ -2365,7 +2365,7 @@ func BenchmarkVerifyBlockHeader(b *testing.B) {
 				CardanoNodeConfig: newTestShelleyGenesisCfg(b),
 				Logger:            benchmarkDiscardLogger,
 			},
-			epochNonceHexCache: make(map[uint64]string),
+			epochNonceHexCache: make(map[uint64]epochNonceHexCacheEntry),
 		}
 		// The epoch cache is read through the published consensus snapshot,
 		// not the raw field, so it must be published before use even for

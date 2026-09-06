@@ -899,3 +899,48 @@ func TestHardForkSummary_TransitionImpossibleKeepsLiveForecastRolling(
 	require.NoError(t, err,
 		"a known same-era epoch boundary must remain forecastable")
 }
+
+// TestHardForkSummary_HorizonAnchoredAtAppliedParent is the summary half of the
+// dingo #3844 fix. HardForkSummary measures the safe zone from the published
+// tip, which only advances when a whole block batch commits; the reference
+// implementation measures it from the applied block's immediate predecessor.
+// Because applySafeZone snaps up to an epoch boundary, that difference is not
+// proportional to the staleness: on Preview, 46 slots of lag cost a full epoch
+// of horizon and rejected a canonical Plutus transaction.
+func TestHardForkSummary_HorizonAnchoredAtAppliedParent(t *testing.T) {
+	ls := previewWedgeLedgerState(t)
+
+	sum, err := ls.HardForkSummary()
+	require.NoError(t, err)
+	require.Len(t, sum.Eras, 1)
+	require.NotNil(t, sum.Eras[0].End)
+	assert.Equal(
+		t,
+		uint64(previewTipHorizonSlot),
+		sum.Eras[0].End.Slot,
+		"the published tip must still produce the horizon that wedged the "+
+			"replay; if it does not, the fixture no longer reproduces #3844",
+	)
+
+	anchored, err := ls.hardForkSummaryAnchoredAt(previewParentSlot)
+	require.NoError(t, err)
+	require.Len(t, anchored.Eras, 1)
+	require.NotNil(t, anchored.Eras[0].End)
+	assert.Equal(
+		t,
+		uint64(previewParentHorizon),
+		anchored.Eras[0].End.Slot,
+		"anchoring at the applied block's predecessor must extend the "+
+			"horizon by the epoch the stale tip lost",
+	)
+
+	behind, err := ls.hardForkSummaryAnchoredAt(previewEraStartSlot)
+	require.NoError(t, err)
+	require.NotNil(t, behind.Eras[0].End)
+	assert.Equal(
+		t,
+		uint64(previewTipHorizonSlot),
+		behind.Eras[0].End.Slot,
+		"an anchor behind the published tip must not shrink the horizon",
+	)
+}

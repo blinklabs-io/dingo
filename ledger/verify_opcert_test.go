@@ -68,18 +68,17 @@ func addLeiosOCINChainBlocks(
 
 func leiosOCINHeader(
 	issuer lcommon.IssuerVkey,
-	sequence uint32,
+	sequence uint64,
 ) *dijkstra.DijkstraBlockHeader {
-	return &dijkstra.DijkstraBlockHeader{
+	header := &dijkstra.DijkstraBlockHeader{
 		BabbageBlockHeader: babbage.BabbageBlockHeader{
 			Body: babbage.BabbageBlockHeaderBody{
 				IssuerVkey: issuer,
-				OpCert: babbage.BabbageOpCert{
-					SequenceNumber: sequence,
-				},
 			},
 		},
 	}
+	setOpCertSequenceNumber(&header.Body.OpCert.SequenceNumber, sequence)
+	return header
 }
 
 // TestOpCertFromHeader_Babbage verifies the per-era extractor pulls the opcert
@@ -276,6 +275,13 @@ func TestValidateOpCertCounter(t *testing.T) {
 			candidate:    7,
 			enforceNoGap: false,
 		},
+		{
+			name:         "equal counters at max uint64 do not wrap into a gap",
+			stored:       ^uint64(0),
+			found:        true,
+			candidate:    ^uint64(0),
+			enforceNoGap: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -320,7 +326,7 @@ func TestLeiosAnnouncementOCINStalenessUsesImmutableTip(t *testing.T) {
 	tests := []struct {
 		name      string
 		issuer    lcommon.IssuerVkey
-		candidate uint32
+		candidate uint64
 		want      LeiosAnnouncementOCINStaleness
 	}{
 		{

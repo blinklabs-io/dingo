@@ -70,6 +70,10 @@ func newBackendContractPool(
 func getDependentTestTxBytes(t *testing.T) ([]byte, []byte, string, string) {
 	t.Helper()
 	parentBytes := getTestTxBytes(t)
+	// The shared fixture is phase-2-invalid so validity-outcome tests can use
+	// it. Dependency/removal tests need a regular output to exist, so make
+	// this local copy a declared-valid transaction before deriving the child.
+	parentBytes[len(parentBytes)-2] = 0xf5
 	parent, err := gledger.NewTransactionFromCbor(
 		uint(conway.EraIdConway),
 		parentBytes,
@@ -89,6 +93,10 @@ func getDependentTestTxBytes(t *testing.T) ([]byte, []byte, string, string) {
 
 	childBytes := bytes.Clone(parentBytes)
 	copy(childBytes[inputOffset:], parentOutputHashBytes)
+	// The original fixture spends output 1. A valid parent has its regular
+	// output at index 0, so keep the dependency shape while adapting the local
+	// child input to the valid transaction's produced set.
+	childBytes[inputOffset+len(originalInputHashBytes)] = 0
 	child, err := gledger.NewTransactionFromCbor(
 		uint(conway.EraIdConway),
 		childBytes,

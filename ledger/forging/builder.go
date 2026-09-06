@@ -436,12 +436,12 @@ func (b *DefaultBlockBuilder) buildBlock(
 				continue
 			}
 
-			// Check for intra-block double-spends: if any input of
-			// this transaction was already consumed by an earlier
-			// transaction in this block candidate, skip it.
-			txInputKeys := make([]string, 0, len(fullTx.Inputs()))
+			// Check for intra-block double-spends using the consensus spent
+			// set. A phase-2-invalid transaction consumes collateral, not
+			// its regular inputs.
+			txInputKeys := make([]string, 0, len(fullTx.Consumed()))
 			doubleSpend := false
-			for _, input := range fullTx.Inputs() {
+			for _, input := range fullTx.Consumed() {
 				key := fmt.Sprintf(
 					"%s:%d",
 					input.Id().String(),
@@ -463,28 +463,14 @@ func (b *DefaultBlockBuilder) buildBlock(
 				continue
 			}
 
-			// Pull ExUnits from redeemers in the witness set
-			var estimatedTxExUnits lcommon.ExUnits
-			var exUnitsErr error
-			if witnesses := fullTx.Witnesses(); witnesses != nil {
-				if redeemers := witnesses.Redeemers(); redeemers != nil {
-					for _, redeemer := range redeemers.Iter() {
-						estimatedTxExUnits, exUnitsErr = eras.SafeAddExUnits(
-							estimatedTxExUnits,
-							redeemer.ExUnits,
-						)
-						if exUnitsErr != nil {
-							b.logger.Debug(
-								"skipping transaction - ExUnits overflow",
-								"component", "forging",
-								"error", exUnitsErr,
-							)
-							break
-						}
-					}
-				}
-			}
+			// Pull ExUnits from every transaction-level witness set.
+			estimatedTxExUnits, exUnitsErr := eras.DeclaredExUnits(fullTx)
 			if exUnitsErr != nil {
+				b.logger.Debug(
+					"skipping transaction - invalid ExUnits",
+					"component", "forging",
+					"error", exUnitsErr,
+				)
 				continue
 			}
 
@@ -839,18 +825,15 @@ func (b *DefaultBlockBuilder) buildBlock(
 	if opCert == nil {
 		return nil, nil, errors.New("operational certificate not loaded")
 	}
-	// Validate OpCert values fit in uint32 before conversion
-	if opCert.IssueNumber > math.MaxUint32 {
-		return nil, nil, fmt.Errorf(
-			"OpCert issue number %d exceeds uint32 max",
-			opCert.IssueNumber,
-		)
-	}
-	if opCert.KESPeriod > math.MaxUint32 {
-		return nil, nil, fmt.Errorf(
-			"OpCert KES period %d exceeds uint32 max",
-			opCert.KESPeriod,
-		)
+	// The header carries the counter and KES period at the width gouroboros
+	// decodes them, so neither is narrowed here. The counter is still bounded
+	// by what the metadata store can record: a block whose counter the node
+	// cannot persist would be forged and then fail its own apply, so it is
+	// refused before the leader slot is spent on VRF and KES work.
+	if err := eras.ValidateOpCertPersistableCounter(
+		opCert.IssueNumber,
+	); err != nil {
+		return nil, nil, err
 	}
 	// Get issuer vkey (cold vkey) from operational certificate.
 	// The IssuerVkey identifies the pool operator via their cold key.
@@ -887,25 +870,21 @@ func (b *DefaultBlockBuilder) buildBlock(
 	var headerBody any
 	if limits.era.isTPraos() {
 		headerBody = tpraosHeaderBody{
-			BlockNumber:   nextBlockNumber,
-			Slot:          slot,
-			PrevHash:      prevHash,
-			IssuerVkey:    issuerVKeyArray,
-			VrfKey:        vrfVKey,
-			NonceVrf:      nonceVrf,
-			LeaderVrf:     leaderVrf,
-			BlockBodySize: actualBlockBodySize,
-			BlockBodyHash: bodyHash,
-			OpCertHotVkey: opCert.KESVKey,
-			OpCertSequenceNumber: uint32(
-				opCert.IssueNumber,
-			), // #nosec G115 -- validated above
-			OpCertKesPeriod: uint32(
-				opCert.KESPeriod,
-			), // #nosec G115 -- validated above
-			OpCertSignature:   opCert.Signature,
-			ProtoMajorVersion: limits.protoMajor,
-			ProtoMinorVersion: dingoversion.BlockHeaderProtocolMinor,
+			BlockNumber:          nextBlockNumber,
+			Slot:                 slot,
+			PrevHash:             prevHash,
+			IssuerVkey:           issuerVKeyArray,
+			VrfKey:               vrfVKey,
+			NonceVrf:             nonceVrf,
+			LeaderVrf:            leaderVrf,
+			BlockBodySize:        actualBlockBodySize,
+			BlockBodyHash:        bodyHash,
+			OpCertHotVkey:        opCert.KESVKey,
+			OpCertSequenceNumber: opCert.IssueNumber,
+			OpCertKesPeriod:      opCert.KESPeriod,
+			OpCertSignature:      opCert.Signature,
+			ProtoMajorVersion:    limits.protoMajor,
+			ProtoMinorVersion:    dingoversion.BlockHeaderProtocolMinor,
 		}
 	} else if limits.era == eraDijkstra {
 		leiosAnnouncement, err := dijkstraLeiosAnnouncementForHeader(leios)
@@ -921,10 +900,10 @@ func (b *DefaultBlockBuilder) buildBlock(
 			VrfResult:     praosVrf,
 			BlockBodySize: actualBlockBodySize,
 			BlockBodyHash: bodyHash,
-			OpCert: babbage.BabbageOpCert{
+			OpCert: praosOpCert{
 				HotVkey:        opCert.KESVKey,
-				SequenceNumber: uint32(opCert.IssueNumber), // #nosec G115 -- validated above
-				KesPeriod:      uint32(opCert.KESPeriod),   // #nosec G115 -- validated above
+				SequenceNumber: opCert.IssueNumber,
+				KesPeriod:      opCert.KESPeriod,
 				Signature:      opCert.Signature,
 			},
 			ProtoVersion: babbage.BabbageProtoVersion{
@@ -944,10 +923,10 @@ func (b *DefaultBlockBuilder) buildBlock(
 			VrfResult:     praosVrf,
 			BlockBodySize: actualBlockBodySize,
 			BlockBodyHash: bodyHash,
-			OpCert: babbage.BabbageOpCert{
+			OpCert: praosOpCert{
 				HotVkey:        opCert.KESVKey,
-				SequenceNumber: uint32(opCert.IssueNumber), // #nosec G115 -- validated above
-				KesPeriod:      uint32(opCert.KESPeriod),   // #nosec G115 -- validated above
+				SequenceNumber: opCert.IssueNumber,
+				KesPeriod:      opCert.KESPeriod,
 				Signature:      opCert.Signature,
 			},
 			ProtoVersion: babbage.BabbageProtoVersion{
@@ -1224,6 +1203,23 @@ func ComputeConwayBlockBodyHash(
 	)
 }
 
+// praosOpCert is the operational_cert array a Praos-era header body carries:
+// hot_vkey, sequence_number, kes_period, sigma. It is declared here rather
+// than reused from gouroboros for the same reason the header bodies around it
+// are -- these structs are what dingo KES-signs, so their field widths are
+// dingo's to fix. The counter and KES period are uint64 because that is what
+// cardano-ledger decodes (Word64 and KESPeriod{Word}) and what the CDDL
+// declares (uint .size 8); a narrower field would truncate a counter the
+// chain accepts. Encoded CBOR is identical for any value either width can
+// hold, so this changes no wire bytes.
+type praosOpCert struct {
+	cbor.StructAsArray
+	HotVkey        []byte
+	SequenceNumber uint64
+	KesPeriod      uint64
+	Signature      []byte
+}
+
 // nullablePrevHashHeaderBody mirrors BabbageBlockHeaderBody but uses a
 // pointer for PrevHash so nil encodes as CBOR null (genesis origin).
 // Used for Babbage and Conway (Praos) header bodies.
@@ -1237,7 +1233,7 @@ type nullablePrevHashHeaderBody struct {
 	VrfResult     lcommon.VrfResult
 	BlockBodySize uint64
 	BlockBodyHash lcommon.Blake2b256
-	OpCert        babbage.BabbageOpCert
+	OpCert        praosOpCert
 	ProtoVersion  babbage.BabbageProtoVersion
 }
 
@@ -1253,7 +1249,7 @@ type dijkstraLeiosHeaderBody struct {
 	VrfResult         lcommon.VrfResult
 	BlockBodySize     uint64
 	BlockBodyHash     lcommon.Blake2b256
-	OpCert            babbage.BabbageOpCert
+	OpCert            praosOpCert
 	ProtoVersion      babbage.BabbageProtoVersion
 	LeiosCertified    bool
 	LeiosAnnouncement cbor.RawMessage
@@ -1277,8 +1273,8 @@ type tpraosHeaderBody struct {
 	BlockBodySize        uint64
 	BlockBodyHash        lcommon.Blake2b256
 	OpCertHotVkey        []byte
-	OpCertSequenceNumber uint32
-	OpCertKesPeriod      uint32
+	OpCertSequenceNumber uint64
+	OpCertKesPeriod      uint64
 	OpCertSignature      []byte
 	ProtoMajorVersion    uint64
 	ProtoMinorVersion    uint64
