@@ -329,7 +329,7 @@ func (c *Chain) AddBlock(
 	block ledger.Block,
 	txn *database.Txn,
 ) error {
-	evt, err := c.addBlockInternal(block, ocommon.Point{}, txn, true, false)
+	evt, err := c.addBlockInternal(block, ocommon.Point{}, txn, true, false, nil)
 	if err != nil {
 		return err
 	}
@@ -356,6 +356,7 @@ func (c *Chain) AddLocalBlock(block ledger.Block) error {
 		nil,
 		false,
 		false,
+		nil,
 	)
 	if err != nil {
 		return err
@@ -385,6 +386,7 @@ func (c *Chain) AddLocalBlockDeferred(
 		nil,
 		false,
 		true,
+		nil,
 	)
 }
 
@@ -396,7 +398,7 @@ func (c *Chain) AddBlockWithPoint(
 	point ocommon.Point,
 	txn *database.Txn,
 ) error {
-	evt, err := c.addBlockInternal(block, point, txn, true, false)
+	evt, err := c.addBlockInternal(block, point, txn, true, false, nil)
 	if err != nil {
 		return err
 	}
@@ -426,7 +428,33 @@ func (c *Chain) AddBlockWithPointDeferred(
 	point ocommon.Point,
 	txn *database.Txn,
 ) (event.Event, error) {
-	return c.addBlockInternal(block, point, txn, true, true)
+	return c.addBlockInternal(block, point, txn, true, true, nil)
+}
+
+// AddBlockWithPointDeferredIf is AddBlockWithPointDeferred with a caller
+// supplied admission predicate, evaluated while the chain mutex is held and
+// before any chain state is read or written. When admit reports false the add
+// is abandoned and ErrBlockAddNotAdmitted is returned; nothing is mutated and
+// no event is queued.
+//
+// It exists because a precondition checked by the caller before calling is
+// not a precondition of the mutation. The blockfetch drain holds
+// chainsyncBlockfetchMutex, not the chainsyncMutex the equal-slot alternative
+// adoption holds, so a rollback can publish a new generation and truncate the
+// chain in the window between the drain testing its batch and this add taking
+// the chain mutex. Passing the test as a predicate closes that window: the
+// generation comparison and the tip mutation it guards become one atomic step
+// under the same lock every other chain mutation takes.
+//
+// admit must not acquire the chain or manager mutex, and must not block: it
+// runs on the chain's own write path.
+func (c *Chain) AddBlockWithPointDeferredIf(
+	block ledger.Block,
+	point ocommon.Point,
+	txn *database.Txn,
+	admit func() bool,
+) (event.Event, error) {
+	return c.addBlockInternal(block, point, txn, true, true, admit)
 }
 
 // queueDeferredEventLocked appends evt to the chain-level sequencer. The caller
@@ -483,6 +511,7 @@ func (c *Chain) addBlockInternal(
 	txn *database.Txn,
 	matchPendingHeader bool,
 	deferred bool,
+	admit func() bool,
 ) (event.Event, error) {
 	if c == nil {
 		return event.Event{}, errors.New("chain is nil")
@@ -492,6 +521,14 @@ func (c *Chain) addBlockInternal(
 	// We get a write lock on the manager to cover the integrity checks and adding the block below
 	c.manager.mutex.Lock()
 	defer c.manager.mutex.Unlock()
+	// Ask the caller, under the same lock that serializes every chain
+	// mutation, whether this add is still wanted. Evaluating it here is the
+	// point: a caller that checks its own precondition before calling has
+	// already released whatever it inspected, so a rollback landing in
+	// between would leave that check stale. See AddBlockWithPointDeferredIf.
+	if admit != nil && !admit() {
+		return event.Event{}, ErrBlockAddNotAdmitted
+	}
 	// Verify chain integrity
 	if err := c.reconcile(); err != nil {
 		return event.Event{}, fmt.Errorf("reconcile chain: %w", err)

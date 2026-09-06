@@ -4655,6 +4655,22 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 	}()
 }
 
+// blockfetchBatchStillCurrent reports whether the batch the pending blockfetch
+// events belong to was requested against the chain segment the chain still
+// holds -- that is, whether no rollback has published a newer generation since
+// the request. See blockfetchRollbackGeneration.
+//
+// It is passed to the chain as an admission predicate so the comparison and
+// the tip mutation it guards happen under one lock; it is also used directly
+// as a fast path, to drop a whole superseded batch without offering any of it
+// to the chain. Callers must hold chainsyncBlockfetchMutex, which is what
+// guards blockfetchBatchRollbackGeneration; the chain calls it while holding
+// its own mutex, and takes neither of the ledger's.
+func (ls *LedgerState) blockfetchBatchStillCurrent() bool {
+	return ls.blockfetchBatchRollbackGeneration ==
+		ls.blockfetchRollbackGeneration.Load()
+}
+
 // discardStaleBlockfetchBatch drops blocks delivered for a batch that a
 // rollback has since superseded, releasing the deferred-header-validation
 // bookkeeping each of them registered on arrival. It performs the same cleanup
@@ -4717,8 +4733,7 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 	// the batch was requested against the abandoned segment's queued
 	// headers, which the rollback cleared, and the winner that replaced it
 	// is already on the chain. See blockfetchRollbackGeneration.
-	if ls.blockfetchBatchRollbackGeneration !=
-		ls.blockfetchRollbackGeneration.Load() {
+	if !ls.blockfetchBatchStillCurrent() {
 		if err := ls.discardStaleBlockfetchBatch(pending); err != nil {
 			return err
 		}
@@ -4728,12 +4743,29 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 	// is used immediately by fork detection, so batching blob writes behind an
 	// already-advanced in-memory tip can strand the node on a fork when ancestor
 	// lookups hit uncommitted state.
-	for _, pendingEvent := range pending {
-		evt, addBlockErr := ls.chain.AddBlockWithPointDeferred(
+	for i, pendingEvent := range pending {
+		// The generation test above is a fast path, not the guarantee. It
+		// releases nothing, but it also holds nothing: a rollback can publish
+		// its generation and truncate between that test and this add, because
+		// the adoption that does so holds chainsyncMutex while this drain
+		// holds chainsyncBlockfetchMutex. Passing the same comparison as an
+		// admission predicate makes it atomic with the tip mutation it
+		// guards -- the chain evaluates it under the mutex that serializes
+		// every chain mutation, so no rollback can interleave between the
+		// two.
+		evt, addBlockErr := ls.chain.AddBlockWithPointDeferredIf(
 			pendingEvent.Block,
 			pendingEvent.Point,
 			nil,
+			ls.blockfetchBatchStillCurrent,
 		)
+		if errors.Is(addBlockErr, chain.ErrBlockAddNotAdmitted) {
+			// A rollback superseded this batch after the fast path let it
+			// through. Every event still unprocessed belongs to that same
+			// batch, so drop the remainder in one go instead of offering
+			// each one to a chain that will decline it for the same reason.
+			return ls.discardStaleBlockfetchBatch(pending[i:])
+		}
 		if addBlockErr == nil {
 			// Defer this block's chain.update past chainsyncBlockfetchMutex
 			// rather than publishing inline. AddBlockWithPointDeferred has
