@@ -14,7 +14,11 @@
 
 package models
 
-import "github.com/blinklabs-io/dingo/database/types"
+import (
+	"math/big"
+
+	"github.com/blinklabs-io/dingo/database/types"
+)
 
 type MoveInstantaneousRewards struct {
 	Rewards       []MoveInstantaneousRewardsReward
@@ -32,28 +36,34 @@ type MoveInstantaneousRewards struct {
 // epoch-boundary application logic. One of OtherPot > 0 (pot-to-pot transfer)
 // or len(Rewards) > 0 (credential distribution) will be non-empty.
 type MIREffect struct {
-	// ID is the move_instantaneous_rewards row ID. It is used as the stable
-	// per-MIR reward-credit discriminator when applying epoch-boundary effects.
+	// ID is the move_instantaneous_rewards row ID, used to order the
+	// certificates of an ended epoch before their deltas are folded.
 	ID uint
 	// Pot is the source Ada pot: 0 = Reserves, 1 = Treasury.
 	Pot uint
 	// OtherPot is the amount for a pot-to-pot transfer (0 when distributing).
 	OtherPot uint64
-	// Rewards lists credential→amount pairs for a distribution MIR.
+	// Rewards lists credential→delta pairs for a distribution MIR.
 	Rewards []MIRReward
 }
 
-// MIRReward is a single credential→amount entry from a distribution MIR cert.
+// MIRReward is a single credential→delta entry from a distribution MIR cert.
 type MIRReward struct {
 	Credential    []byte
 	CredentialTag uint8
-	Amount        uint64
+	// Amount is the signed reward delta. The wire format types it as
+	// delta_coin (int), which the reference decodes as the signed unbounded
+	// DeltaCoin, so a later certificate in the same epoch can reduce an
+	// earlier one. Never nil on a value read from the store.
+	Amount *big.Int
 }
 
 type MoveInstantaneousRewardsReward struct {
 	Credential    []byte
 	CredentialTag uint8
-	Amount        types.Uint64
-	ID            uint
-	MIRID         uint
+	// Amount is the signed reward delta persisted for one credential of one
+	// MIR certificate. See MIRReward.Amount.
+	Amount *big.Int
+	ID     uint
+	MIRID  uint
 }

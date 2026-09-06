@@ -109,6 +109,7 @@ func testSchema(includePools bool) []string {
 		ret = append(
 			ret,
 			`CREATE TABLE reward_pool_input (margin TEXT, pool_key_hash BLOB NOT NULL, reward_account BLOB, blocks_produced INTEGER, total_blocks_in_epoch INTEGER, id INTEGER PRIMARY KEY AUTOINCREMENT, epoch INTEGER NOT NULL, pledge TEXT NOT NULL DEFAULT '0', delegated_stake TEXT NOT NULL DEFAULT '0', owner_stake TEXT NOT NULL DEFAULT '0', cost TEXT NOT NULL DEFAULT '0', delegator_count INTEGER NOT NULL DEFAULT 0, reward_account_credential_tag INTEGER NOT NULL DEFAULT 0, captured_slot INTEGER NOT NULL DEFAULT 0, boundary_slot INTEGER NOT NULL DEFAULT 0)`,
+			`CREATE TABLE tip (hash BLOB, id INTEGER PRIMARY KEY AUTOINCREMENT, slot INTEGER, block_number INTEGER)`,
 			`CREATE TABLE reward_pool_output (apparent_performance TEXT, pool_key_hash BLOB NOT NULL, id INTEGER PRIMARY KEY AUTOINCREMENT, epoch INTEGER NOT NULL, optimal_reward TEXT NOT NULL DEFAULT '0', total_reward TEXT NOT NULL DEFAULT '0', leader_reward TEXT NOT NULL DEFAULT '0', member_reward_total TEXT NOT NULL DEFAULT '0', owner_stake TEXT NOT NULL DEFAULT '0', undistributed TEXT NOT NULL DEFAULT '0', unspendable TEXT NOT NULL DEFAULT '0', captured_slot INTEGER NOT NULL DEFAULT 0, boundary_slot INTEGER NOT NULL DEFAULT 0)`,
 		)
 	}
