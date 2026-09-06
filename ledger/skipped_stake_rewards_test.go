@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -85,4 +86,72 @@ func TestSkippedStakeRewardsSurvivesNilDependencies(t *testing.T) {
 			1383,
 		)
 	})
+}
+
+func TestMissingRewardSnapshotReportsImportedSeedFailure(t *testing.T) {
+	const (
+		newEpoch            = uint64(4)
+		rewardSnapshotEpoch = uint64(1)
+		potsEpoch           = uint64(3)
+		failureReason       = "historical protocol parameters are unavailable"
+	)
+
+	for _, tc := range []struct {
+		name        string
+		seedFailure bool
+		wantReason  string
+		notReason   string
+	}{
+		{
+			name:        "durable import failure",
+			seedFailure: true,
+			wantReason: "imported reward basis seeding failed: " +
+				failureReason,
+			notReason: "skipping stake rewards: missing reward snapshot;",
+		},
+		{
+			name:       "genuinely missing import",
+			wantReason: "skipping stake rewards: missing reward snapshot;",
+			notReason:  "imported reward basis seeding failed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ls, db := newRewardCalculationTestLedger(t)
+			var logs bytes.Buffer
+			ls.config.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+
+			meta := db.Metadata()
+			require.NoError(t, meta.SaveRewardAdaPots(
+				&models.RewardAdaPots{
+					Epoch:        potsEpoch,
+					CapturedSlot: 300,
+				},
+				nil,
+			))
+			if tc.seedFailure {
+				require.NoError(t, meta.SaveRewardSeedFailure(
+					rewardSnapshotEpoch,
+					"mark",
+					failureReason,
+					100,
+					nil,
+				))
+			}
+
+			txn := db.Transaction(false)
+			defer func() { _ = txn.Rollback() }()
+			app, ok, err := ls.calculateStakeRewardApplication(
+				txn,
+				newEpoch,
+				400,
+				400,
+				true,
+			)
+			require.NoError(t, err)
+			require.False(t, ok)
+			require.Nil(t, app)
+			assert.Contains(t, logs.String(), tc.wantReason)
+			assert.NotContains(t, logs.String(), tc.notReason)
+		})
+	}
 }
