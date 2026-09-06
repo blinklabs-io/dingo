@@ -334,7 +334,7 @@ func (d *s3Destination) fetchManifest(
 		return Manifest{}, fmt.Errorf("get s3://%s/%s: %w", d.bucket, key, err)
 	}
 	defer out.Body.Close()
-	data, err := io.ReadAll(out.Body)
+	data, err := io.ReadAll(io.LimitReader(out.Body, MaxManifestBytes+1))
 	if err != nil {
 		return Manifest{}, fmt.Errorf("read s3://%s/%s: %w", d.bucket, key, err)
 	}
