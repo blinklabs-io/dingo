@@ -4485,6 +4485,31 @@ disposition instead of a burned leader slot and a rejected `AddLocalBlock`
 call. The check is opt-in: a nil `OpCertLedgerView` (dev mode, embedders
 without ledger wiring) skips it entirely, unchanged from before.
 
+The counter and the KES period are carried at the width the reference
+decodes them. cardano-ledger reads the counter as `Word64` and the KES
+period as `KESPeriod{Word}`, and the CDDL declares both `uint .size 8`, so
+the header bodies the forger encodes and KES-signs -- `tpraosHeaderBody` and
+`praosOpCert` in `ledger/forging/builder.go` -- declare both `uint64` and no
+forging path narrows either value. Those structs are dingo's own rather than
+gouroboros types precisely because they are what gets signed, so their field
+widths are fixed here instead of following a release.
+
+The counter alone carries a further bound that is dingo's own rather than
+the chain's: `eras.MaxPersistableOpCertCounter`, which is `math.MaxInt64`.
+`pool_opcert_sequence`.`sequence` and `pool`.`latest_op_cert_sequence` are
+signed engine integers that carry the monotonicity ordering as well as the
+value, so a counter above that bound has no representation the `MAX`,
+`<`, and index reads over those columns would order correctly.
+`ledgerProcessBlock` refuses a block carrying one before processing its
+transactions -- for validated and unvalidated blocks alike, because the
+counter is recorded for every applied block -- naming the bound, rather than
+letting the block fail inside `UpdatePoolOpCertSequence` once its
+transactions are already applied. The forge loop's pre-flight and the block
+builder refuse the same counter, so the node never forges a block it could
+not then apply. The bound is unreachable from Babbage onward, where Praos
+rejects a counter more than one past the last seen; only the TPraos eras,
+which enforce monotonicity alone, admit an arbitrary first counter.
+
 `LedgerState.LatestOpCertSequence` -- the `LedgerView` method both this
 gate and startup's `PoolCredentials.ValidateAgainstLedger` read through --
 resolves the "latest observed" counter via the same Mithril-boundary-aware
