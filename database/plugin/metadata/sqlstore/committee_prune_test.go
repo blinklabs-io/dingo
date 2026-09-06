@@ -16,6 +16,8 @@ package sqlstore
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -23,6 +25,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
 )
 
@@ -179,6 +182,74 @@ func applyAuthCertificate(
 		nil,
 	)
 	require.NoError(t, err)
+}
+
+func TestNewRejectsUnsafeCommitteeAuthRetention(t *testing.T) {
+	t.Parallel()
+	db, err := sql.Open(
+		"sqlite",
+		fmt.Sprintf(
+			"file:sqlstore_%d?mode=memory&cache=shared",
+			testStoreSequence.Add(1),
+		),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	_, err = New(Config{
+		WriteDB:                     db,
+		Dialect:                     SQLiteDialect(),
+		CommitteeAuthRetentionSlots: DefaultCommitteeAuthRetentionSlots - 1,
+	})
+	require.ErrorContains(t, err, "below the safe rollback window")
+}
+
+func TestAuthCommitteeHotTransactionDrainsMultipleBatches(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	const coldTag = uint8(lcommon.CredentialTypeAddrKeyHash)
+	cold := credentialHash(0xc5)
+	for i := 1; i <= committeeAuthPruneBatch*2; i++ {
+		seedAuthorization(
+			t, store, coldTag, cold,
+			uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0x73, i),
+			uint64(i), uint64(i), // #nosec G115
+		)
+	}
+
+	certificates := []lcommon.Certificate{
+		&lcommon.AuthCommitteeHotCertificate{
+			CertType: uint(lcommon.CertificateTypeAuthCommitteeHot),
+			ColdCredential: lcommon.Credential{
+				CredType: uint(coldTag), Credential: lcommon.NewBlake2b224(cold),
+			},
+			HotCredential: lcommon.Credential{
+				CredType:   lcommon.CredentialTypeAddrKeyHash,
+				Credential: lcommon.NewBlake2b224(hotHash(0x73, 2*committeeAuthPruneBatch+1)),
+			},
+		},
+		&lcommon.AuthCommitteeHotCertificate{
+			CertType: uint(lcommon.CertificateTypeAuthCommitteeHot),
+			ColdCredential: lcommon.Credential{
+				CredType: uint(coldTag), Credential: lcommon.NewBlake2b224(cold),
+			},
+			HotCredential: lcommon.Credential{
+				CredType:   lcommon.CredentialTypeAddrKeyHash,
+				Credential: lcommon.NewBlake2b224(hotHash(0x73, 2*committeeAuthPruneBatch+2)),
+			},
+		},
+	}
+	_, err := store.applyTransactionCertificates(
+		context.Background(),
+		newDialectQueryer(store.writeDB, store.dialect.Name()),
+		1, certificates,
+		ocommon.Point{Slot: preprodTipSlot, Hash: credentialHash(0x99)},
+		0, nil,
+	)
+	require.NoError(t, err)
+	// Two certificate calls remove two bounded batches and retain the newest
+	// pre-horizon row plus both newly applied authorizations.
+	require.Equal(t, 3, authRowCountFor(t, store, coldTag, cold))
 }
 
 // TestAuthCommitteeHotWritePathPrunesSupersededAuthorizations is the
@@ -516,9 +587,10 @@ func TestAuthCommitteeHotPruningSurvivesRollbackAcrossPrunedBoundary(t *testing.
 		"the post-rollback tally must be identical with and without pruning")
 }
 
-// TestAuthCommitteeHotPruningIsPerTaggedCredential covers the negative case
-// where a key-hash and a script-hash cold credential share the same 28 bytes.
-// They are different identities, so neither may prune the other.
+// TestAuthCommitteeHotPruningIsPerTaggedCredential covers the case where a
+// key-hash and a script-hash cold credential share the same 28 bytes. They are
+// different identities, so each credential is pruned only within its own
+// (tag, hash) partition and neither loses its newest row.
 func TestAuthCommitteeHotPruningIsPerTaggedCredential(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)
