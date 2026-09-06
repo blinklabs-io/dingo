@@ -393,16 +393,14 @@ func (r *Recycler) tick(
 		st.lastProgressAt = now
 	}
 	if primaryChainTipSlot != st.lastPrimaryChainTipSlot {
-		if primaryChainTipSlot > st.lastPrimaryChainTipSlot {
-			st.lastProgressAt = now
-		}
 		st.lastPrimaryChainTipSlot = primaryChainTipSlot
+		st.lastProgressAt = now
 	}
 	// During catch-up, extend stalled-client grace and recycle cooldowns to
 	// avoid churning connections while the node is making progress. The
-	// plateau clock above resets when either the applied tip or downloaded
-	// primary chain advances, so catch-up alone is not evidence that a stall is
-	// healthy and does not extend the plateau threshold.
+	// plateau clock above resets when either the applied tip advances or the
+	// downloaded primary chain changes, so catch-up alone is not evidence that
+	// a stall is healthy and does not extend the plateau threshold.
 	multiplier := 1
 	if !live.Ledger.IsAtTip() {
 		multiplier = catchUpMultiplier

@@ -433,7 +433,7 @@ func TestTickCatchUpDefersPlateauResyncWhilePrimaryChainAdvances(
 	)
 }
 
-func TestTickCatchUpTracksPrimaryChainProgressAfterRollback(t *testing.T) {
+func TestTickCatchUpTracksPrimaryChainChangesAfterRollback(t *testing.T) {
 	connId := testConnId(3)
 	active := connId
 	ledger := &fakeLedger{
@@ -450,17 +450,23 @@ func TestTickCatchUpTracksPrimaryChainProgressAfterRollback(t *testing.T) {
 	r, _ := newTestRecycler(t, ledger, state, selector, pub, Config{})
 
 	now := time.Now()
-	rollbackAt := now.Add(-5 * time.Minute)
-	st := newTestTickState(100, rollbackAt)
+	st := newTestTickState(100, now.Add(-5*time.Minute))
 	st.lastPrimaryChainTipSlot = 300
-	r.tick(rollbackAt, st, LiveComponents{
+	r.tick(now, st, LiveComponents{
 		Ledger:         ledger,
 		ChainsyncState: state,
 		ChainSelector:  selector,
 	}, 100)
+	assert.Empty(
+		t,
+		pub.byType(event.ChainsyncResyncEventType),
+		"a primary-chain rollback must refresh the plateau clock",
+	)
+	assert.Equal(t, now, st.lastProgressAt)
 
 	ledger.setPrimaryChainTipSlot(250)
-	r.tick(now, st, LiveComponents{
+	advanceAt := now.Add(3 * time.Minute)
+	r.tick(advanceAt, st, LiveComponents{
 		Ledger:         ledger,
 		ChainsyncState: state,
 		ChainSelector:  selector,
@@ -471,6 +477,7 @@ func TestTickCatchUpTracksPrimaryChainProgressAfterRollback(t *testing.T) {
 		pub.byType(event.ChainsyncResyncEventType),
 		"progress after a primary-chain rollback must refresh the plateau clock",
 	)
+	assert.Equal(t, advanceAt, st.lastProgressAt)
 }
 
 func TestTickClearsScheduleWhenClientRecovers(t *testing.T) {
