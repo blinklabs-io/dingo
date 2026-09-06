@@ -389,11 +389,27 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 // a wire-level duplicate cardano-node coalesces and this verdict rejects
 // (preview slot 1462320; blinklabs-io/gouroboros#1989). Recovery must stay
 // non-terminal for that duplicate verdict for exactly that reason.
+//
+// A missing redeemer is the same kind of verdict. The rule compares the
+// transaction's own redeemer set against the script purposes the transaction
+// itself declares, so the resolved UTxO decides only which scripts are
+// required, never whether a declared purpose carries its redeemer. Rebuilding
+// the local UTxO window from a different producer cannot add a redeemer to a
+// witness set, so the rejection repeats on every replay. Three paths report
+// it, all as the one common type: script.ValidateRequiredRedeemers behind
+// babbage/conway/dijkstra UtxoValidateRequiredRedeemers,
+// common.ValidateScriptWitnesses behind UtxoValidateScriptWitnesses, and
+// Dingo's own validateConwayRequiredPlutusRedeemers in ledger/eras. The
+// conway and babbage names are aliases of lcommon.MissingRedeemerForScriptError
+// rather than distinct types, so matching the common type covers all of them.
 func isDeterministicTxValidationError(err error) bool {
 	if _, ok := errors.AsType[shelley.DuplicateInputError](err); ok {
 		return true
 	}
 	if _, ok := errors.AsType[conway.PlutusScriptFailedError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[lcommon.MissingRedeemerForScriptError](err); ok {
 		return true
 	}
 	if isRewardWithdrawalMismatch(err) {
