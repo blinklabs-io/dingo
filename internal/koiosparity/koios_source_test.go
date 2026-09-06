@@ -470,3 +470,86 @@ func TestRecordKoiosSourceUnchangedMakesNoRequest(t *testing.T) {
 	assert.Equal(t, int32(1), hits.Load(),
 		"an unchanged source must not cost a request")
 }
+
+// TestClaimedSourceRefusesWritesAfterAnotherWriterRepoints is the concurrent
+// case RecordKoiosSource alone cannot cover: it invalidates only the rows
+// present when it runs, so a client already fetching from the old host would
+// otherwise go on appending that host's answers under the new host's marker —
+// reassembling the mixed-oracle state the marker exists to make impossible.
+//
+// The default cache path is shared across the standalone commands and the
+// in-process observer, so an observer on one host and a `fetch --koios-url` on
+// another are a reachable pair rather than a hypothetical one.
+func TestClaimedSourceRefusesWritesAfterAnotherWriterRepoints(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.db")
+
+	first, err := OpenCache(path, nil)
+	require.NoError(t, err)
+	defer first.Close() //nolint:errcheck
+	_, err = first.RecordKoiosSource(
+		"preview", "https://first.example/api/v1", time.Now().UTC(),
+	)
+	require.NoError(t, err)
+
+	// A write from the first handle is fine while it still owns the cache.
+	require.NoError(t, first.CommitAccountRewardsForEpoch(
+		"preview", 7, nil, 0, true, time.Now().UTC(),
+	))
+
+	// A second process re-points the same cache at another host.
+	second, err := OpenCache(path, nil)
+	require.NoError(t, err)
+	defer second.Close() //nolint:errcheck
+	_, err = second.RecordKoiosSource(
+		"preview", "https://second.example/api/v1", time.Now().UTC(),
+	)
+	require.NoError(t, err)
+
+	// The first handle must now refuse rather than mix.
+	now := time.Now().UTC()
+	err = first.CommitAccountRewardsForEpoch("preview", 7, nil, 0, true, now)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "refusing to write")
+
+	require.Error(t, first.CommitEpochData(KoiosEpochInfo{
+		Network:      "preview",
+		Epoch:        7,
+		ActiveStake:  "1",
+		Fees:         "1",
+		TotalRewards: "1",
+		EpochEndTime: now,
+		FetchedAt:    now,
+	}, nil, nil))
+	require.Error(t, first.SaveAccountUniverse(
+		"preview", []string{"stake_test1x"}, now,
+	))
+	require.Error(t, first.SaveAccountFetchChunkProgress(
+		"preview", 7, "chunk", nil, []string{"stake_test1x"}, now,
+	))
+
+	// The handle that owns the cache is unaffected.
+	assert.NoError(t, second.CommitAccountRewardsForEpoch(
+		"preview", 7, nil, 0, true, now,
+	))
+}
+
+// TestUnclaimedCacheStillWrites keeps the guard off every read-only command
+// and every existing caller: a handle that never recorded a source must not
+// start refusing writes to a cache someone else stamped.
+func TestUnclaimedCacheStillWrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.db")
+	owner, err := OpenCache(path, nil)
+	require.NoError(t, err)
+	defer owner.Close() //nolint:errcheck
+	_, err = owner.RecordKoiosSource(
+		"preview", "https://first.example/api/v1", time.Now().UTC(),
+	)
+	require.NoError(t, err)
+
+	bystander, err := OpenCache(path, nil)
+	require.NoError(t, err)
+	defer bystander.Close() //nolint:errcheck
+	assert.NoError(t, bystander.CommitAccountRewardsForEpoch(
+		"preview", 7, nil, 0, true, time.Now().UTC(),
+	))
+}

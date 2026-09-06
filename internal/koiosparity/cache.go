@@ -224,6 +224,15 @@ type CheckMismatch struct {
 type Cache struct {
 	db     *sql.DB
 	logger *slog.Logger
+
+	// claimedSources maps network to the Koios API root this handle recorded
+	// for it, and is empty for a handle that never recorded one (every
+	// read-only command). Bulk writes verify it inside their own transaction
+	// so a second writer that re-pointed the cache at another oracle cannot
+	// have this one keep appending the old oracle's answers under the new
+	// marker. Keyed by network because the root is resolved per network, so a
+	// claim on one says nothing about another.
+	claimedSources map[string]string
 }
 
 // OpenCache opens (or creates) the SQLite cache at path, running migrations.
@@ -332,6 +341,9 @@ func (c *Cache) CommitEpochData(
 			_ = tx.Rollback()
 		}
 	}()
+	if err = c.assertClaimedSource(tx, info.Network); err != nil {
+		return err
+	}
 	if _, err = tx.Exec("DELETE FROM koios_pool_epoch WHERE network = ? AND epoch = ?", info.Network, info.Epoch); err != nil {
 		return err
 	}
@@ -505,6 +517,9 @@ func (c *Cache) CommitAccountRewardsForEpoch(
 			_ = tx.Rollback()
 		}
 	}()
+	if err = c.assertClaimedSource(tx, network); err != nil {
+		return err
+	}
 	if _, err = tx.Exec("DELETE FROM koios_account_rewards WHERE network = ? AND epoch = ?", network, epoch); err != nil {
 		return err
 	}
@@ -653,6 +668,9 @@ func (c *Cache) SaveAccountFetchChunkProgress(
 			_ = tx.Rollback()
 		}
 	}()
+	if err = c.assertClaimedSource(tx, network); err != nil {
+		return err
+	}
 
 	if _, err = tx.Exec(
 		`DELETE FROM koios_account_fetch_staged_rows WHERE network = ? AND epoch = ? AND chunk_hash = ?`,
@@ -1284,6 +1302,9 @@ func (c *Cache) SaveAccountUniverse(
 		return fmt.Errorf("save account universe: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := c.assertClaimedSource(tx, network); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(
 		`DELETE FROM koios_account_universe WHERE network = ?`,
 		network,
@@ -1528,7 +1549,53 @@ func (c *Cache) RecordKoiosSource(
 	if err = tx.Commit(); err != nil {
 		return change, fmt.Errorf("commit koios source: %w", err)
 	}
+	if c.claimedSources == nil {
+		c.claimedSources = make(map[string]string, 1)
+	}
+	c.claimedSources[network] = baseURL
 	return change, nil
+}
+
+// assertClaimedSource fails a write whose cache has since been re-pointed at
+// a different oracle by another process.
+//
+// The cache path is shared by default across the standalone commands and the
+// in-process observer, so an observer on one host and a `fetch --koios-url`
+// on another are a reachable pair. RecordKoiosSource only invalidates the rows
+// present when it runs; without this the older client would go on appending
+// its host's answers under the newer host's marker, which is the mixed-oracle
+// state the marker exists to make impossible.
+//
+// A handle that never claimed a source does not enforce one — that is every
+// read-only command (check, status, explain), which must keep working against
+// a cache written by someone else. Callers run this inside their own
+// transaction so the check is atomic against a concurrent RecordKoiosSource.
+func (c *Cache) assertClaimedSource(tx *sql.Tx, network string) error {
+	claimed, ok := c.claimedSources[network]
+	if !ok {
+		return nil
+	}
+	var current string
+	err := tx.QueryRow(
+		"SELECT base_url FROM koios_source WHERE network = ?",
+		network,
+	).Scan(&current)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf(
+			"koios source for %q was cleared while this run held %q; another writer owns this cache",
+			network, claimed,
+		)
+	}
+	if err != nil {
+		return fmt.Errorf("verify koios source: %w", err)
+	}
+	if current != claimed {
+		return fmt.Errorf(
+			"koios source for %q changed from %q to %q while this run was fetching; refusing to write another host's answers into this cache",
+			network, claimed, current,
+		)
+	}
+	return nil
 }
 
 // GetKoiosSource returns the API root recorded for network, and whether one

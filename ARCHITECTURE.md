@@ -6619,6 +6619,17 @@ never the reverse.
   `NewObserver` because the probe needs a context and a startup the caller can
   fail — because the node's config dump names the configured value only for
   the in-process observer and says nothing on the `fetch`/`run`/`watch` paths.
+  Recording alone only invalidates the rows present when it runs, so the four
+  bulk writes (`CommitEpochData`, `CommitAccountRewardsForEpoch`,
+  `SaveAccountFetchChunkProgress`, `SaveAccountUniverse`) also verify, inside
+  their own transaction, that the cache still holds the root this handle
+  claimed. The default cache path is shared across the standalone commands and
+  the in-process observer, so an observer on one host and a `fetch
+  --koios-url` on another are a reachable pair; without the check the older
+  client would go on appending its host's answers under the newer host's
+  marker. A handle that never recorded a source enforces nothing, which keeps
+  every read-only command (`check`, `status`, `explain`) working against a
+  cache someone else stamped.
 - **Koios endpoint.** `/account_rewards` is deprecated; `/account_reward_
   history` is the replacement (`KoiosClient.GetAccountRewardHistory`), taking
   the same `stake_addresses_with_epoch_no` POST body shape via a new `post()`
