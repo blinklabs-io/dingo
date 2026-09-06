@@ -27,8 +27,10 @@ const (
 	// was the wrapped wire size rather than the unwrapped body size. This
 	// is the normal, spec-correct case for a cardano-node peer.
 	txsubmissionReplySizeAcceptedWire = "accepted_wire_size"
-	// txsubmissionReplySizeRejected counts replies dropped because an
-	// advertised size matched neither the body size nor the wire size.
+	// txsubmissionReplySizeRejected counts the bodies of replies dropped
+	// because an advertised size matched neither the body size nor the
+	// wire size. The whole reply is dropped, so every body it carried is
+	// counted, keeping the unit the same as the accepted outcome.
 	txsubmissionReplySizeRejected = "rejected"
 )
 
@@ -67,7 +69,7 @@ func (o *Ouroboros) initProtocolMetrics() {
 		txsubmissionReplySizeMismatch: factory.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "dingo_txsubmission_reply_size_mismatch_total",
-				Help: "tx-submission reply bodies whose length differed from the size the peer advertised, by outcome",
+				Help: "tx-submission reply bodies, counted in bodies not replies, whose length differed from the size the peer advertised: accepted_wire_size counts bodies advertised at the wrapped wire size, rejected counts every body of a reply dropped for a size mismatch since the whole reply is dropped",
 			},
 			[]string{"outcome"},
 		),

@@ -129,14 +129,6 @@ func validateTxsubmissionReply(
 	var returnedBytes uint64
 	nextRequested := 0
 	for i, txBody := range returned {
-		returnedBytes += uint64(len(txBody.TxBody))
-		if returnedBytes > requestedBytes {
-			return nil, fmt.Errorf(
-				"txsubmission reply exceeds byte limit: requested %d, received at least %d",
-				requestedBytes,
-				returnedBytes,
-			)
-		}
 		tx, err := ledger.NewTransactionFromCbor(
 			uint(txBody.EraId),
 			txBody.TxBody,
@@ -193,6 +185,21 @@ func validateTxsubmissionReply(
 				txBody.EraId,
 			)
 		}
+		// The aggregate budget is checked after the per-body size, so an
+		// advertisement smaller than the body it describes is reported and
+		// counted as the size mismatch it is instead of surfacing as an
+		// unattributed batch-budget error. Every accepted body is no larger
+		// than its own advertisement and each advertisement is consumed at
+		// most once, so this is an invariant backstop rather than a check
+		// a size advertisement alone can trip.
+		returnedBytes += bodySize
+		if returnedBytes > requestedBytes {
+			return nil, fmt.Errorf(
+				"txsubmission reply exceeds byte limit: requested %d, received at least %d",
+				requestedBytes,
+				returnedBytes,
+			)
+		}
 		nextRequested = matched + 1
 		ret = append(ret, validatedTxsubmissionBody{
 			body:               txBody,
@@ -201,6 +208,35 @@ func validateTxsubmissionReply(
 		})
 	}
 	return ret, nil
+}
+
+// recordTxsubmissionReplyOutcome records the size-advertisement outcome of
+// one reply. Both outcomes are counted in reply BODIES, never in replies:
+// accepted_wire_size counts the bodies whose advertisement was the wrapped
+// wire size, and a reply dropped for a size mismatch contributes every body
+// it carried to rejected, because the whole reply is dropped.
+func (o *Ouroboros) recordTxsubmissionReplyOutcome(
+	validated []validatedTxsubmissionBody,
+	replyBodies int,
+	err error,
+) {
+	if errors.Is(err, errTxsubmissionReplySizeMismatch) {
+		o.recordTxsubmissionReplySize(
+			txsubmissionReplySizeRejected,
+			replyBodies,
+		)
+		return
+	}
+	var wireSized int
+	for _, validatedTx := range validated {
+		if validatedTx.wireSizeAdvertised {
+			wireSized++
+		}
+	}
+	o.recordTxsubmissionReplySize(
+		txsubmissionReplySizeAcceptedWire,
+		wireSized,
+	)
 }
 
 // txsubmissionBackoffDuration returns the exponential backoff duration
@@ -558,23 +594,12 @@ func (o *Ouroboros) txsubmissionServerInit(
 					requestedTxs,
 					txs,
 				)
-				var wireSized int
-				for _, validatedTx := range validatedTxs {
-					if validatedTx.wireSizeAdvertised {
-						wireSized++
-					}
-				}
-				o.recordTxsubmissionReplySize(
-					txsubmissionReplySizeAcceptedWire,
-					wireSized,
+				o.recordTxsubmissionReplyOutcome(
+					validatedTxs,
+					len(txs),
+					err,
 				)
 				if err != nil {
-					if errors.Is(err, errTxsubmissionReplySizeMismatch) {
-						o.recordTxsubmissionReplySize(
-							txsubmissionReplySizeRejected,
-							1,
-						)
-					}
 					consecutiveReplyMismatches++
 					o.config.Logger.Error(
 						"rejected mismatched txsubmission reply",

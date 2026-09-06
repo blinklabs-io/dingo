@@ -152,14 +152,11 @@ func TestValidateTxsubmissionReplyRejectsGenuineSizeMismatch(t *testing.T) {
 		size  uint32
 		match string
 	}{
-		// An advertisement below the body size trips the batch byte
-		// budget before the per-item size check.
-		{
-			name:  "one below body",
-			size:  bodySize - 1,
-			match: "exceeds byte limit",
-		},
-		{name: "zero", size: 0, match: "exceeds byte limit"},
+		// An advertisement below the body size is a size mismatch like
+		// any other, and must be classified as one rather than falling
+		// through to the aggregate byte-budget error.
+		{name: "one below body", size: bodySize - 1, match: "size mismatch"},
+		{name: "zero", size: 0, match: "size mismatch"},
 		{name: "one above body", size: bodySize + 1, match: "size mismatch"},
 		{name: "one below wire", size: wireSize - 1, match: "size mismatch"},
 		{name: "one above wire", size: wireSize + 1, match: "size mismatch"},
@@ -285,4 +282,145 @@ func TestRecordTxsubmissionReplySizeWithoutMetrics(t *testing.T) {
 	require.NotPanics(t, func() {
 		o.recordTxsubmissionReplySize(txsubmissionReplySizeRejected, 1)
 	})
+}
+
+// TestValidateTxsubmissionReplyUndersizedAdvertisementIsCounted covers a
+// peer advertising a size SMALLER than the body it returns. That case used
+// to trip the aggregate byte-budget check before the per-body size check
+// ran, so the reply was dropped without being classified or counted as a
+// size mismatch.
+func TestValidateTxsubmissionReplyUndersizedAdvertisementIsCounted(
+	t *testing.T,
+) {
+	fixture := txsubmissionTestFixtures(t)[0]
+	returned := []txsubmission.TxBody{
+		{EraId: fixture.txId.EraId, TxBody: fixture.body},
+	}
+	requested := []txsubmission.TxIdAndSize{
+		{
+			TxId: fixture.txId,
+			Size: uint32(len(fixture.body)) - 1, // #nosec G115 -- fixture
+		},
+	}
+
+	validated, err := validateTxsubmissionReply(requested, returned)
+	require.Nil(t, validated)
+	require.ErrorIs(t, err, errTxsubmissionReplySizeMismatch)
+	// The operator needs both numbers and the era to tell an undersized
+	// advertisement apart from a wrapper-size disagreement.
+	require.ErrorContains(t, err, "advertised")
+	require.ErrorContains(t, err, "body")
+	require.ErrorContains(t, err, "wire")
+	require.ErrorContains(t, err, "era")
+
+	reg := prometheus.NewRegistry()
+	o := newOuroboros(OuroborosConfig{PromRegistry: reg})
+	o.recordTxsubmissionReplyOutcome(validated, len(returned), err)
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			o.protocolMetrics.txsubmissionReplySizeMismatch.
+				WithLabelValues(txsubmissionReplySizeRejected),
+		),
+	)
+}
+
+// TestRecordTxsubmissionReplyOutcomeCountsBodies pins the unit of both
+// outcomes: each counts reply BODIES, never replies. A three-body reply
+// that is accepted adds three to accepted_wire_size, and a three-body
+// reply dropped for a size mismatch adds three to rejected, because the
+// whole reply is dropped.
+func TestRecordTxsubmissionReplyOutcomeCountsBodies(t *testing.T) {
+	fixtures := txsubmissionTestFixtures(t)
+	require.Len(t, fixtures, 3)
+	requested := make([]txsubmission.TxIdAndSize, 0, len(fixtures))
+	returned := make([]txsubmission.TxBody, 0, len(fixtures))
+	for _, fixture := range fixtures {
+		requested = append(requested, txsubmission.TxIdAndSize{
+			TxId: fixture.txId,
+			Size: uint32( // #nosec G115 -- test fixture
+				len(
+					txsubmissionWireEncodedItem(
+						t,
+						fixture.txId.EraId,
+						fixture.body,
+					),
+				),
+			),
+		})
+		returned = append(returned, txsubmission.TxBody{
+			EraId:  fixture.txId.EraId,
+			TxBody: fixture.body,
+		})
+	}
+
+	t.Run("accepted counts three bodies", func(t *testing.T) {
+		reg := prometheus.NewRegistry()
+		o := newOuroboros(OuroborosConfig{PromRegistry: reg})
+		validated, err := validateTxsubmissionReply(requested, returned)
+		require.NoError(t, err)
+		require.Len(t, validated, 3)
+		o.recordTxsubmissionReplyOutcome(validated, len(returned), err)
+		require.Equal(
+			t,
+			float64(3),
+			testutil.ToFloat64(
+				o.protocolMetrics.txsubmissionReplySizeMismatch.
+					WithLabelValues(txsubmissionReplySizeAcceptedWire),
+			),
+		)
+		require.Equal(
+			t,
+			float64(0),
+			testutil.ToFloat64(
+				o.protocolMetrics.txsubmissionReplySizeMismatch.
+					WithLabelValues(txsubmissionReplySizeRejected),
+			),
+		)
+	})
+
+	// One bad advertisement drops the whole three-body reply, so all three
+	// bodies are counted as rejected regardless of which one was bad.
+	for _, badIdx := range []int{0, 1, 2} {
+		t.Run(
+			fmt.Sprintf("rejected counts three bodies bad%d", badIdx),
+			func(t *testing.T) {
+				bad := make([]txsubmission.TxIdAndSize, len(requested))
+				copy(bad, requested)
+				bad[badIdx].Size += 8
+				reg := prometheus.NewRegistry()
+				o := newOuroboros(OuroborosConfig{PromRegistry: reg})
+				validated, err := validateTxsubmissionReply(bad, returned)
+				require.ErrorIs(t, err, errTxsubmissionReplySizeMismatch)
+				o.recordTxsubmissionReplyOutcome(
+					validated,
+					len(returned),
+					err,
+				)
+				require.Equal(
+					t,
+					float64(3),
+					testutil.ToFloat64(
+						o.protocolMetrics.txsubmissionReplySizeMismatch.
+							WithLabelValues(
+								txsubmissionReplySizeRejected,
+							),
+					),
+				)
+				// A dropped reply contributes nothing to the accepted
+				// outcome, even when earlier bodies validated.
+				require.Equal(
+					t,
+					float64(0),
+					testutil.ToFloat64(
+						o.protocolMetrics.txsubmissionReplySizeMismatch.
+							WithLabelValues(
+								txsubmissionReplySizeAcceptedWire,
+							),
+					),
+				)
+			},
+		)
+	}
 }
