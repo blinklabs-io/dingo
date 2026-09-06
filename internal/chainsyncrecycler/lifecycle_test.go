@@ -386,7 +386,11 @@ func TestLoopStopsAfterPanicWhenCancelled(t *testing.T) {
 }
 
 func TestStartupBaselineSkippedWhenComponentsUnavailable(t *testing.T) {
-	ledger := &fakeLedger{tip: testTip(5_000, 100), atTip: true}
+	ledger := &fakeLedger{
+		tip:                 testTip(5_000, 100),
+		primaryChainTipSlot: 6_000,
+		atTip:               true,
+	}
 	state := &fakeChainsyncState{}
 	components := newFakeComponents(LiveComponents{
 		Ledger:         ledger,
@@ -404,10 +408,12 @@ func TestStartupBaselineSkippedWhenComponentsUnavailable(t *testing.T) {
 		st.lastProgressSlot,
 		"an unavailable baseline read leaves the plateau baseline at zero",
 	)
+	assert.Equal(t, uint64(0), st.lastPrimaryChainTipSlot)
 	assert.False(t, st.lastProgressAt.IsZero())
 
 	components.setAvailable(true)
 	st2 := newTickState()
 	r.initProgressBaseline(st2)
 	assert.Equal(t, uint64(5_000), st2.lastProgressSlot)
+	assert.Equal(t, uint64(6_000), st2.lastPrimaryChainTipSlot)
 }
