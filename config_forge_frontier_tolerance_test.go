@@ -32,6 +32,15 @@ import (
 // the knob silently inert: the loaded config carries the value, the node
 // Config snapshot copies it out of the loaded config, and the accessor
 // reports it.
+//
+// IMPORTANT: this covers the NewConfigFromInternal path only. The binary does
+// NOT take it -- internal/node.buildDingoConfig composes dingo.Config via
+// dingo.NewConfig from an explicit With... list, and a field missing from that
+// list is dropped no matter how green this test is. That is exactly how
+// ForgeHeaderFrontierToleranceSlots shipped inert while every layer here
+// asserted green. The runtime composition path is covered by
+// TestBuildDingoConfigWiresForgeTolerances in internal/node; presence of a
+// field at each layer is not wiring.
 func TestForgeHeaderFrontierToleranceSlotsIsOperatorTunable(t *testing.T) {
 	t.Run("explicit value survives every hop", func(t *testing.T) {
 		loaded := &internalconfig.Config{
