@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"math/big"
@@ -648,15 +649,25 @@ func TestLeiosEbWaitCancellationLeavesCallerBehaviourUnchanged(t *testing.T) {
 }
 
 // leiosWaitTestPolledFromGrace reports whether the provider is being polled by
-// the post-window grace phase (awaitInFlightEndorserFetches, via awaitFetch)
-// rather than by the diffusion wait or by one of the gate's other checks.
+// the post-window fetch wait (awaitInFlightEndorserFetches).
+//
+// It matches awaitInFlightEndorserFetches itself, NOT awaitFetch. awaitFetch is
+// shared: the certificate-driven path reaches it through fetchOnce's dedup
+// wait, so keying on it would make a cert-driven test report a grace phase that
+// never ran, depending on whether a fetch happened to be in flight. The waits
+// are dispatched from a goroutine per reference, and a closure carries its
+// enclosing function's name in the stack (…awaitInFlightEndorserFetches.func1),
+// so the enclosing frame is still visible from inside the poll.
 func leiosWaitTestPolledFromGrace() bool {
 	pcs := make([]uintptr, 64)
 	n := runtime.Callers(2, pcs)
 	frames := runtime.CallersFrames(pcs[:n])
 	for {
 		frame, more := frames.Next()
-		if strings.Contains(frame.Function, "awaitFetch") {
+		if strings.Contains(
+			frame.Function,
+			"awaitInFlightEndorserFetches",
+		) {
 			return true
 		}
 		if !more {
@@ -687,8 +698,19 @@ func TestEnsureReferencedEndorserBlocksAwaitsLateFetchOnCIPPath(t *testing.T) {
 	ebHash := lcommon.NewBlake2b256(leiosTestHash(0xF1))
 	block := leiosWaitTestAnnouncingBlock(t, 1, 100, ebHash)
 
+	// gracePollsBeforeRelease is chosen so the fetch cannot complete until the
+	// wait has polled for materially longer than the soft-warn window: the poll
+	// interval is a tenth of a slot, so the window is worth about
+	// leiosWaitTestWaitSlots*10 polls and this is comfortably beyond it. A wait
+	// bounded BY that window -- which is what this test exists to reject --
+	// gives up before reaching this count, deterministically and regardless of
+	// machine load, because it is counting the wait's own polls rather than
+	// racing a clock.
+	const gracePollsBeforeRelease = leiosWaitTestWaitSlots * 20
+
 	release := make(chan struct{})
 	var releaseOnce sync.Once
+	var gracePolls atomic.Int64
 	var cached, sawGracePhase, fetchCompleted atomic.Bool
 
 	cfg := LedgerStateConfig{
@@ -701,10 +723,13 @@ func TestEnsureReferencedEndorserBlocksAwaitsLateFetchOnCIPPath(t *testing.T) {
 				return nil, false
 			}
 			if leiosWaitTestPolledFromGrace() {
-				// The diffusion window has elapsed and the grace phase is
-				// running, so let the in-flight fetch finish.
+				// The diffusion window has elapsed and the post-window wait is
+				// running. Hold the fetch for long enough that a wait bounded
+				// by one further window would have abandoned it.
 				sawGracePhase.Store(true)
-				releaseOnce.Do(func() { close(release) })
+				if gracePolls.Add(1) >= gracePollsBeforeRelease {
+					releaseOnce.Do(func() { close(release) })
+				}
 			}
 			return nil, cached.Load()
 		},
@@ -745,6 +770,12 @@ func TestEnsureReferencedEndorserBlocksAwaitsLateFetchOnCIPPath(t *testing.T) {
 		"the post-window grace phase must run on the CIP path",
 	)
 	require.True(t, fetchCompleted.Load(), "the in-flight fetch must finish")
+	require.GreaterOrEqual(
+		t,
+		gracePolls.Load(),
+		int64(gracePollsBeforeRelease),
+		"the wait must outlast a single further diffusion window",
+	)
 	require.True(
 		t,
 		endorserBlockAvailableAt(
@@ -801,5 +832,109 @@ func TestEnsureReferencedEndorserBlocksSkipsGraceOnCertDrivenPath(t *testing.T) 
 		t,
 		sawGracePhase.Load(),
 		"the post-window grace must not run on the certificate-driven path",
+	)
+}
+
+// TestEnsureReferencedEndorserBlocksProceedsWhenCIPFetchFindsNothing pins the
+// other arm of the CIP wait: when the by-point fetch finishes without caching
+// -- no connected peer holds the endorser block -- application proceeds without
+// it rather than failing the chunk.
+//
+// This is deliberate and is NOT a behaviour this change introduces: it is the
+// long-standing semantics of the CIP path. Failing the chunk instead would turn
+// an unfetchable endorser block into an unbounded pipeline retry, which is a
+// wedge this codebase has hit before. The wait exists to stop us abandoning a
+// fetch that was about to succeed, not to convert a genuine absence into a
+// stall.
+func TestEnsureReferencedEndorserBlocksProceedsWhenCIPFetchFindsNothing(
+	t *testing.T,
+) {
+	ebHash := lcommon.NewBlake2b256(leiosTestHash(0xF3))
+	block := leiosWaitTestAnnouncingBlock(t, 1, 100, ebHash)
+
+	var fetches atomic.Int64
+	cfg := LedgerStateConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
+			return nil, false
+		},
+		EndorserBlockFetcher: func(
+			_ context.Context,
+			_ uint64,
+			_ []byte,
+		) error {
+			// Finishes promptly, having found nothing.
+			fetches.Add(1)
+			return errors.New("no peer holds this endorser block")
+		},
+		EndorserBlockWaitSlots:     leiosWaitTestWaitSlots,
+		LeiosApplyEndorserBlockTxs: true,
+	}
+	ls := &LedgerState{config: cfg}
+	ls.leiosBackfill = newLeiosBackfiller(cfg)
+	withLeiosWaitTestSlotLength(ls)
+
+	start := time.Now()
+	require.NoError(t, ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{block},
+	))
+	// One diffusion window, then the fetch's own prompt failure -- not the
+	// hard backstop.
+	require.Less(t, time.Since(start), leiosTipFetchHardBound)
+	require.Positive(t, fetches.Load())
+	require.False(t, endorserBlockAvailableAt(
+		ls.config.EndorserBlockProvider,
+		ebHash.Bytes(),
+		100,
+	))
+}
+
+// TestLeiosGraceDetectorIgnoresSharedAwaitFetch pins the property that makes
+// the certificate-driven test above meaningful rather than timing-dependent.
+//
+// awaitFetch is shared: the certificate-driven path reaches it through
+// fetchOnce's dedup wait whenever a spawned fetch for the same reference is
+// still in flight. A grace detector keyed on awaitFetch therefore reports a
+// post-window wait that never ran, but only when that race happens to occur --
+// so the cert-driven test would pass or fail depending on scheduling. Keying on
+// awaitInFlightEndorserFetches makes it positive and deterministic, and this
+// asserts exactly that: reached through awaitFetch alone, the detector is
+// false.
+func TestLeiosGraceDetectorIgnoresSharedAwaitFetch(t *testing.T) {
+	var sawGrace atomic.Bool
+	cfg := LedgerStateConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
+			if leiosWaitTestPolledFromGrace() {
+				sawGrace.Store(true)
+			}
+			return nil, false
+		},
+		EndorserBlockFetcher: func(
+			_ context.Context,
+			_ uint64,
+			_ []byte,
+		) error {
+			return nil
+		},
+	}
+	b := newLeiosBackfiller(cfg)
+	require.NotNil(t, b)
+
+	b.awaitFetch(
+		t.Context(),
+		leiosEbRef{
+			slot: 100,
+			hash: lcommon.NewBlake2b256(leiosTestHash(0xF4)),
+		},
+		time.Millisecond,
+		20*time.Millisecond,
+	)
+
+	require.False(
+		t,
+		sawGrace.Load(),
+		"awaitFetch alone must not be mistaken for the post-window wait",
 	)
 }
