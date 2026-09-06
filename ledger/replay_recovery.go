@@ -390,18 +390,27 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 // (preview slot 1462320; blinklabs-io/gouroboros#1989). Recovery must stay
 // non-terminal for that duplicate verdict for exactly that reason.
 //
-// A missing redeemer is the same kind of verdict. The rule compares the
-// transaction's own redeemer set against the script purposes the transaction
-// itself declares, so the resolved UTxO decides only which scripts are
-// required, never whether a declared purpose carries its redeemer. Rebuilding
-// the local UTxO window from a different producer cannot add a redeemer to a
-// witness set, so the rejection repeats on every replay. Three paths report
-// it, all as the one common type: script.ValidateRequiredRedeemers behind
-// babbage/conway/dijkstra UtxoValidateRequiredRedeemers,
-// common.ValidateScriptWitnesses behind UtxoValidateScriptWitnesses, and
-// Dingo's own validateConwayRequiredPlutusRedeemers in ledger/eras. The
-// conway and babbage names are aliases of lcommon.MissingRedeemerForScriptError
-// rather than distinct types, so matching the common type covers all of them.
+// A missing redeemer is the same kind of verdict, and it holds for the spend
+// purpose as well as for the five that read no UTxO at all. Rebuilding the
+// local UTxO window cannot add a redeemer to a witness set, so the only thing
+// replay can change is whether the spent output is present to require one --
+// never what that output says. A UTxO is addressed by producing transaction
+// hash and output index (LedgerState.UtxoByRef), so an input that resolves at
+// all resolves to exactly the output its producer wrote, script address
+// included; a different local history can only make it absent. Absence is
+// itself a rejection: UtxoValidateBadInputsUtxo is registered ahead of the
+// redeemer rules in every era that has them. So no local history accepts a
+// transaction that spends a script-locked input without its spend redeemer,
+// which is the property this classification needs -- not that the verdict is
+// reached by the same rule under every replay.
+//
+// Three paths report it, all as the one common type:
+// script.ValidateRequiredRedeemers behind babbage/conway/dijkstra
+// UtxoValidateRequiredRedeemers, common.ValidateScriptWitnesses behind
+// UtxoValidateScriptWitnesses, and Dingo's own
+// validateConwayRequiredPlutusRedeemers in ledger/eras. The conway and babbage
+// names are aliases of lcommon.MissingRedeemerForScriptError rather than
+// distinct types, so matching the common type covers all of them.
 func isDeterministicTxValidationError(err error) bool {
 	if _, ok := errors.AsType[shelley.DuplicateInputError](err); ok {
 		return true

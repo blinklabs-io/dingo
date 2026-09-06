@@ -2531,14 +2531,38 @@ func TestResolveReplayRecoveryProducerReportsPresentInput(t *testing.T) {
 	assert.Nil(t, resolved)
 }
 
-// A missing redeemer is a verdict about the transaction's own witness set: the
-// resolved UTxO decides which script purposes need a redeemer, never whether
-// the declared ones carry one. Replaying a different local UTxO history cannot
-// add a redeemer, so the rejection must take the deterministic branch instead
-// of the unresolved-producer rewind that re-fetches and re-rejects the same
-// block. Inputs are supplied so the fallback path would have a candidate to
-// rewind to if the classification were missing.
+// A missing redeemer must take the deterministic branch rather than the
+// unresolved-producer rewind that re-fetches and re-rejects the same block.
+// Inputs are supplied so the fallback path would have a candidate to rewind to
+// if the classification were missing.
+//
+// The spend case is covered alongside a non-spend one because it is the only
+// purpose whose redeemer requirement is decided by a resolved UTxO at all, and
+// so the only one where replay could plausibly change the verdict. It cannot:
+// a UTxO is addressed by producing transaction hash and output index, so an
+// input that resolves resolves to exactly the output its producer wrote, and
+// the only variation another local history can produce is absence -- which
+// UtxoValidateBadInputsUtxo, registered ahead of the redeemer rules, rejects on
+// its own. No local history accepts the block either way.
 func TestReplayRecoveryRejectsDeterministicMissingRedeemer(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tag  lcommon.RedeemerTag
+	}{
+		{name: "spend purpose", tag: lcommon.RedeemerTagSpend},
+		{name: "mint purpose", tag: lcommon.RedeemerTagMint},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireDeterministicMissingRedeemerRecovery(t, tc.tag)
+		})
+	}
+}
+
+func requireDeterministicMissingRedeemerRecovery(
+	t *testing.T,
+	tag lcommon.RedeemerTag,
+) {
+	t.Helper()
 	ls := newReplayRecoveryAuditLedger(t, true)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
@@ -2562,10 +2586,10 @@ func TestReplayRecoveryRejectsDeterministicMissingRedeemer(t *testing.T) {
 				ScriptHash: lcommon.Blake2b224Hash(
 					[]byte("missing-redeemer-script"),
 				),
-				Tag:   lcommon.RedeemerTagMint,
+				Tag:   tag,
 				Index: 0,
 				RedeemerKey: lcommon.RedeemerKey{
-					Tag:   lcommon.RedeemerTagMint,
+					Tag:   tag,
 					Index: 0,
 				},
 			},
