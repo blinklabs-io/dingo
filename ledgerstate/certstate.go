@@ -1984,6 +1984,7 @@ type ParsedGovState struct {
 	Constitution         *ParsedConstitution
 	Committee            []ParsedCommitteeMember
 	CommitteeQuorum      *cbor.Rat
+	CommitteeParseError  error
 	Proposals            []ParsedGovProposal
 	PrevGovActionIds     *ParsedPrevGovActionIds
 	RatifiedGovActionIds []ParsedGovActionId
@@ -1991,9 +1992,10 @@ type ParsedGovState struct {
 	// carried by RatifyState.rsEnactState.  This is the state already
 	// enacted at the snapshot boundary, independent of rsEnacted (which
 	// is applied at the next boundary).
-	EnactCommittee       []ParsedCommitteeMember
-	EnactCommitteeQuorum *cbor.Rat
-	EnactCommitteeSet    bool
+	EnactCommittee           []ParsedCommitteeMember
+	EnactCommitteeQuorum     *cbor.Rat
+	EnactCommitteeSet        bool
+	EnactCommitteeParseError error
 }
 
 // ParseGovState decodes governance state from raw CBOR.
@@ -2053,6 +2055,7 @@ func ParseGovState(
 	// Parse committee (field 1) — best-effort
 	committee, quorum, err := parseCommittee(fields[1])
 	if err != nil {
+		result.CommitteeParseError = err
 		warnings = append(warnings, fmt.Errorf(
 			"parsing committee: %w", err,
 		))
@@ -2082,6 +2085,9 @@ func ParseGovState(
 		result.EnactCommittee = enactCommittee
 		result.EnactCommitteeQuorum = enactQuorum
 		result.EnactCommitteeSet = enactSet
+		if err != nil {
+			result.EnactCommitteeParseError = err
+		}
 		result.RatifiedGovActionIds = ratifiedIds
 	}
 
@@ -2441,13 +2447,6 @@ func parseDRepPulsingState(
 	}
 
 	return committee, quorum, committeeSet, ratifiedIds, errors.Join(errs...)
-}
-
-// parseDRepPulsingStateRatifiedIds is retained for callers that only need
-// rsEnacted action IDs.
-func parseDRepPulsingStateRatifiedIds(data []byte) ([]ParsedGovActionId, error) {
-	_, _, _, ids, err := parseDRepPulsingState(data)
-	return ids, err
 }
 
 // parseProposalsRoots decodes the GovRelation StrictMaybe at the

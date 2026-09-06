@@ -3149,6 +3149,12 @@ func importGovState(
 	if govState == nil {
 		return nil
 	}
+	if govState.CommitteeParseError != nil {
+		return fmt.Errorf("parsing imported committee: %w", govState.CommitteeParseError)
+	}
+	if govState.EnactCommitteeParseError != nil {
+		return fmt.Errorf("parsing imported enact-state committee: %w", govState.EnactCommitteeParseError)
+	}
 	if err != nil {
 		// Non-fatal warnings from committee/proposals parsing
 		cfg.Logger.Warn(
