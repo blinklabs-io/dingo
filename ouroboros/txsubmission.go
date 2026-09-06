@@ -36,6 +36,9 @@ const (
 	txsubmissionMaxBackoff               = 5 * time.Second // Cap on exponential backoff wait
 	txsubmissionBaseBackoff              = 150 * time.Millisecond
 	txsubmissionLogEvery                 = 10 // Log every Nth rate limit hit after the 1st
+	// Give up on a peer only after this many consecutive rejected replies.
+	// A single bad reply drops that reply and keeps the pull loop running.
+	txsubmissionMaxConsecutiveReplyMismatches = 3
 )
 
 var (
@@ -45,16 +48,68 @@ var (
 	errTxsubmissionAdmissionStopped = errors.New(
 		"txsubmission admission wait stopped",
 	)
+	errTxsubmissionReplySizeMismatch = errors.New(
+		"txsubmission reply size mismatch",
+	)
 )
+
+// cborHeadLen returns the encoded length in bytes of a CBOR head (the
+// initial byte plus any following argument bytes) whose argument is v.
+func cborHeadLen(v uint64) uint64 {
+	switch {
+	case v <= 0x17:
+		return 1
+	case v <= 0xff:
+		return 2
+	case v <= 0xffff:
+		return 3
+	case v <= 0xffffffff:
+		return 5
+	default:
+		return 9
+	}
+}
+
+// txsubmissionWireSize returns the size of one MsgReplyTxs item as it
+// appears on the wire, given the era ID and the length of the unwrapped
+// transaction body.
+//
+// gouroboros decodes each item -- [eraId, #6.24(bytes)] -- and keeps only
+// the tag-24 payload, so TxBody.TxBody is the inner transaction CBOR. A
+// cardano-node peer advertises the spec-correct wire size in MsgReplyTxIds
+// (ouroboros-consensus SupportsMempool.txWireSize, which is deliberately
+// distinct from txInBlockSize), covering the whole wrapped item:
+//
+//	array(2) header + era ID uint  2 bytes for era IDs <= 23
+//	tag 24 (0xd8 0x18)             2 bytes
+//	byte-string length header      1, 2, 3, 5 or 9 bytes
+//
+// so the advertised value exceeds len(TxBody) by 6 bytes for a 24..255 byte
+// body and by 7 bytes for a 256..65535 byte body.
+func txsubmissionWireSize(eraId uint16, bodyLen int) uint64 {
+	body := uint64(0)
+	if bodyLen > 0 {
+		body = uint64(bodyLen)
+	}
+	// 1 byte for the definite-length array(2) header, the era ID head, the
+	// two-byte tag 24 head, then the byte string itself.
+	return 1 + cborHeadLen(uint64(eraId)) + 2 + cborHeadLen(body) + body
+}
 
 type validatedTxsubmissionBody struct {
 	body txsubmission.TxBody
 	tx   ledger.Transaction
+	// wireSizeAdvertised records that the peer advertised the wrapped wire
+	// size for this body rather than the unwrapped body size.
+	wireSizeAdvertised bool
 }
 
 // validateTxsubmissionReply verifies the complete reply before its first
 // transaction is admitted. The advertised sizes are part of the request
-// budget, so each body must have the exact size the peer advertised.
+// budget, so each body must have exactly one of the two sizes the peer can
+// legitimately have advertised for it: the unwrapped body size, or the
+// wrapped wire size that cardano-node advertises (see txsubmissionWireSize).
+// Anything else is a mismatch.
 func validateTxsubmissionReply(
 	requested []txsubmission.TxIdAndSize,
 	returned []txsubmission.TxBody,
@@ -117,16 +172,33 @@ func validateTxsubmissionReply(
 				txBody.EraId,
 			)
 		}
-		if uint64(len(txBody.TxBody)) != uint64(want.Size) {
+		bodySize := uint64(len(txBody.TxBody))
+		wireSize := txsubmissionWireSize(txBody.EraId, len(txBody.TxBody))
+		var wireSizeAdvertised bool
+		switch uint64(want.Size) {
+		case bodySize:
+			// Peer advertised the unwrapped body size, as Dingo's own
+			// client did before it was corrected to advertise the wire
+			// size. Still accepted so that a mixed fleet interoperates.
+		case wireSize:
+			wireSizeAdvertised = true
+		default:
 			return nil, fmt.Errorf(
-				"txsubmission reply size mismatch at index %d: requested %d, received %d",
+				"%w at index %d: advertised %d, body %d, wire %d, era %d",
+				errTxsubmissionReplySizeMismatch,
 				i,
 				want.Size,
-				len(txBody.TxBody),
+				bodySize,
+				wireSize,
+				txBody.EraId,
 			)
 		}
 		nextRequested = matched + 1
-		ret = append(ret, validatedTxsubmissionBody{body: txBody, tx: tx})
+		ret = append(ret, validatedTxsubmissionBody{
+			body:               txBody,
+			tx:                 tx,
+			wireSizeAdvertised: wireSizeAdvertised,
+		})
 	}
 	return ret, nil
 }
@@ -286,6 +358,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 		var consecutiveRateLimits int
 		var rateLimitTotal int
 		var consecutiveImpossibleOffers int
+		var consecutiveReplyMismatches int
 		backoffTimer := time.NewTimer(0)
 		backoffTimer.Stop()
 		defer backoffTimer.Stop()
@@ -412,6 +485,10 @@ func (o *Ouroboros) txsubmissionServerInit(
 					len(txIds),
 				)
 				if limitAdmission {
+					// The advertised size is the wrapped wire size for a
+					// spec-conformant peer, so it is an upper bound on the
+					// body that will be admitted. Reserving against it is
+					// conservative by the few bytes of wrapper.
 					if int64(txIds[0].Size) >
 						headroom.MaxAdmissionHeadroomBytes() {
 						consecutiveImpossibleOffers++
@@ -481,17 +558,61 @@ func (o *Ouroboros) txsubmissionServerInit(
 					requestedTxs,
 					txs,
 				)
+				var wireSized int
+				for _, validatedTx := range validatedTxs {
+					if validatedTx.wireSizeAdvertised {
+						wireSized++
+					}
+				}
+				o.recordTxsubmissionReplySize(
+					txsubmissionReplySizeAcceptedWire,
+					wireSized,
+				)
 				if err != nil {
+					if errors.Is(err, errTxsubmissionReplySizeMismatch) {
+						o.recordTxsubmissionReplySize(
+							txsubmissionReplySizeRejected,
+							1,
+						)
+					}
+					consecutiveReplyMismatches++
 					o.config.Logger.Error(
 						"rejected mismatched txsubmission reply",
 						"component", "network",
 						"protocol", "tx-submission",
 						"role", "server",
 						"connection_id", ctx.ConnectionId.String(),
+						"consecutive_mismatches", consecutiveReplyMismatches,
 						"error", err,
 					)
-					return
+					// One bad reply must not end tx ingest for the life of
+					// the connection. Drop the whole reply -- a partially
+					// valid batch is still not trusted -- and keep pulling,
+					// giving up only on a peer that returns nothing else.
+					if consecutiveReplyMismatches >= txsubmissionMaxConsecutiveReplyMismatches {
+						o.config.Logger.Error(
+							"stopping tx ingest after repeated mismatched txsubmission replies",
+							"component", "network",
+							"protocol", "tx-submission",
+							"role", "server",
+							"connection_id", ctx.ConnectionId.String(),
+							"consecutive_mismatches", consecutiveReplyMismatches,
+						)
+						return
+					}
+					backoffTimer.Reset(
+						txsubmissionBackoffDuration(
+							consecutiveReplyMismatches,
+						),
+					)
+					select {
+					case <-backoffTimer.C:
+					case <-conn.ErrorChan():
+						return
+					}
+					continue
 				}
+				consecutiveReplyMismatches = 0
 				for _, validatedTx := range validatedTxs {
 					txBody := validatedTx.body
 					tx := validatedTx.tx
@@ -643,7 +764,12 @@ func (o *Ouroboros) txsubmissionClientRequestTxIds(
 		}
 		var txIdArr [32]byte
 		copy(txIdArr[:], txHashBytes)
-		txSize := len(tmpTx.Cbor)
+		eraId := uint16(tmpTx.Type) // #nosec G115
+		// Advertise the size of the transaction as it appears on the wire,
+		// matching cardano-node's txWireSize. Peers use the advertised size
+		// for flow control against the bytes they will actually read off
+		// the wire, which includes the tx-submission wrapper.
+		txSize := txsubmissionWireSize(eraId, len(tmpTx.Cbor))
 		if txSize > math.MaxUint32 {
 			return nil, errors.New("tx impossibly large")
 		}
@@ -651,7 +777,7 @@ func (o *Ouroboros) txsubmissionClientRequestTxIds(
 			ret,
 			txsubmission.TxIdAndSize{
 				TxId: txsubmission.TxId{
-					EraId: uint16(tmpTx.Type), // #nosec G115
+					EraId: eraId,
 					TxId:  txIdArr,
 				},
 				Size: uint32(txSize),

@@ -21,10 +21,22 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// Outcomes for the txsubmission reply size mismatch counter.
+const (
+	// txsubmissionReplySizeAcceptedWire counts bodies whose advertised size
+	// was the wrapped wire size rather than the unwrapped body size. This
+	// is the normal, spec-correct case for a cardano-node peer.
+	txsubmissionReplySizeAcceptedWire = "accepted_wire_size"
+	// txsubmissionReplySizeRejected counts replies dropped because an
+	// advertised size matched neither the body size nor the wire size.
+	txsubmissionReplySizeRejected = "rejected"
+)
+
 type protocolMetrics struct {
-	messagesReceived             *prometheus.CounterVec
-	messageDuration              *prometheus.HistogramVec
-	txsubmissionAdmissionRetries prometheus.Histogram
+	messagesReceived              *prometheus.CounterVec
+	messageDuration               *prometheus.HistogramVec
+	txsubmissionAdmissionRetries  prometheus.Histogram
+	txsubmissionReplySizeMismatch *prometheus.CounterVec
 }
 
 func (o *Ouroboros) initProtocolMetrics() {
@@ -52,6 +64,13 @@ func (o *Ouroboros) initProtocolMetrics() {
 			},
 			[]string{"protocol", "outcome"},
 		),
+		txsubmissionReplySizeMismatch: factory.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "dingo_txsubmission_reply_size_mismatch_total",
+				Help: "tx-submission reply bodies whose length differed from the size the peer advertised, by outcome",
+			},
+			[]string{"outcome"},
+		),
 		txsubmissionAdmissionRetries: factory.NewHistogram(
 			prometheus.HistogramOpts{
 				Name: "dingo_txsubmission_admission_retry_streak",
@@ -62,6 +81,12 @@ func (o *Ouroboros) initProtocolMetrics() {
 			},
 		),
 	}
+	// Pre-materialize both outcomes so a dashboard or alert sees a zero
+	// series before the first mismatch rather than a missing one.
+	o.protocolMetrics.txsubmissionReplySizeMismatch.
+		WithLabelValues(txsubmissionReplySizeAcceptedWire).Add(0)
+	o.protocolMetrics.txsubmissionReplySizeMismatch.
+		WithLabelValues(txsubmissionReplySizeRejected).Add(0)
 }
 
 // recordProtocolMessage records one received message and the callback
@@ -86,6 +111,17 @@ func (o *Ouroboros) recordProtocolMessage(
 	o.protocolMetrics.messageDuration.
 		WithLabelValues(protocol, outcome).
 		Observe(dur.Seconds())
+}
+
+// recordTxsubmissionReplySize records count reply bodies resolved with the
+// given outcome. Safe to call when metrics are not initialized.
+func (o *Ouroboros) recordTxsubmissionReplySize(outcome string, count int) {
+	if o.protocolMetrics == nil || count <= 0 {
+		return
+	}
+	o.protocolMetrics.txsubmissionReplySizeMismatch.
+		WithLabelValues(outcome).
+		Add(float64(count))
 }
 
 func (o *Ouroboros) recordTxsubmissionAdmissionRetry(streak int) {
