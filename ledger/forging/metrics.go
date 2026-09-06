@@ -61,9 +61,18 @@ type forgingMetrics struct {
 	forgePanicRecovered *prometheus.CounterVec
 
 	// Leios EB forging outcomes
-	leiosEbForged  prometheus.Counter
-	leiosEbSkipped *prometheus.CounterVec
-	leiosEbFailed  prometheus.Counter
+	// leiosEbSelectionSeconds records how long endorser-block transaction
+	// selection ran. It is the dominant cost of a Leios leader slot and
+	// scales with mempool depth, so it is what an operator alerts on when
+	// blocks start arriving late.
+	leiosEbSelectionSeconds prometheus.Histogram
+	// leiosEbSelectionTruncated counts passes stopped by the slot deadline
+	// rather than by running out of candidates -- i.e. slots where the
+	// budget, not the mempool, decided the endorser block's size.
+	leiosEbSelectionTruncated prometheus.Counter
+	leiosEbForged             prometheus.Counter
+	leiosEbSkipped            *prometheus.CounterVec
+	leiosEbFailed             prometheus.Counter
 }
 
 // initForgingMetrics initializes all forging metrics using the
@@ -208,6 +217,21 @@ func initForgingMetrics(
 			Help: "panics recovered from pluggable forging callbacks, by phase",
 		},
 		[]string{"phase"},
+	)
+	m.leiosEbSelectionSeconds = factory.NewHistogram(
+		prometheus.HistogramOpts{
+			Name: "dingo_forge_eb_selection_seconds",
+			Help: "wall-clock time spent selecting transactions for a Leios endorser block; every candidate costs a full ledger re-validation, so this scales with mempool depth",
+			Buckets: prometheus.ExponentialBuckets(
+				0.001, 2, 14,
+			), // 1ms to ~8s
+		},
+	)
+	m.leiosEbSelectionTruncated = factory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_forge_eb_selection_truncated_total",
+			Help: "Leios endorser-block selection passes stopped by the slot deadline before considering every candidate",
+		},
 	)
 	m.leiosEbForged = factory.NewCounter(
 		prometheus.CounterOpts{

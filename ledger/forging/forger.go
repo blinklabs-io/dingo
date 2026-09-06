@@ -1834,11 +1834,20 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		// the pipeline even when its ranking block does not win.
 		limits.deadline = deadline
 	}
+	candidateCount := len(txs)
+	selectStart := f.now()
 	validatedTxs, truncated, err := selectValidLeiosTransactions(
 		txs,
 		f.leiosValidator,
 		limits,
 	)
+	selectDuration := f.now().Sub(selectStart)
+	if f.metrics != nil {
+		f.metrics.leiosEbSelectionSeconds.Observe(selectDuration.Seconds())
+		if truncated {
+			f.metrics.leiosEbSelectionTruncated.Inc()
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("validate leios EB transactions: %w", err)
 	}
@@ -1860,10 +1869,12 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		return nil, nil
 	}
 
+	buildStart := f.now()
 	ebCbor, ebHash, bodies, err := buildLeiosEB(txs, leiosEBCaps{
 		maxRefs:  f.forgeEBMaxTxRefs,
 		maxBytes: f.forgeEBMaxBytes,
 	})
+	buildDuration := f.now().Sub(buildStart)
 	if err != nil {
 		if errors.Is(err, errNoValidTxRefs) {
 			f.logger.Debug("leios EB skipped: no valid tx refs", "slot", slot)
@@ -1879,6 +1890,7 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 	// Pass the transaction bodies alongside the manifest so the endorser
 	// block can be served to peers over leios-fetch (they request the bodies
 	// after fetching the manifest).
+	broadcastStart := f.now()
 	if err := f.leiosEBCaster.BroadcastEndorserBlock(
 		slot,
 		ebHash,
@@ -1887,12 +1899,22 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 	); err != nil {
 		return nil, fmt.Errorf("broadcast leios EB: %w", err)
 	}
+	broadcastDuration := f.now().Sub(broadcastStart)
 
+	// Endorser-block construction is what a Leios leader slot is mostly
+	// spent on, and its hash has to be final before the ranking-block
+	// header can be signed, so this breakdown is where a late block is
+	// diagnosed from.
 	f.logger.Info(
 		"leios endorser block produced",
 		"slot", slot,
 		"hash", hex.EncodeToString(ebHash),
 		"tx_refs", len(bodies),
+		"candidates", candidateCount,
+		"truncated", truncated,
+		"eb_select", selectDuration,
+		"eb_build", buildDuration,
+		"eb_broadcast", broadcastDuration,
 	)
 	if f.metrics != nil {
 		f.metrics.leiosEbForged.Inc()
