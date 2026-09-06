@@ -42,3 +42,28 @@ func TestGetLatestBlockNonce(t *testing.T) {
 	require.Equal(t, uint64(20), row.Slot)
 	require.Equal(t, []byte{0xff}, row.Hash)
 }
+
+func TestGetLatestBlockNonceUsesApplicationOrderForSameSlot(t *testing.T) {
+	store, _ := newSharedSQLStore(t)
+
+	const slot = uint64(20)
+	firstHash := []byte{0xff}
+	secondHash := []byte{0x01}
+	firstNonce := []byte("nonce-first")
+	secondNonce := []byte("nonce-second")
+
+	// The later application has the lower hash. Hash ordering must not make the
+	// earlier row look like the durable floor after a same-slot fork race.
+	require.NoError(t, store.SetBlockNonce(
+		firstHash, slot, firstNonce, false, nil,
+	))
+	require.NoError(t, store.SetBlockNonce(
+		secondHash, slot, secondNonce, false, nil,
+	))
+
+	row, ok, err := store.GetLatestBlockNonce(nil)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, secondHash, row.Hash)
+	require.Equal(t, secondNonce, row.Nonce)
+}
