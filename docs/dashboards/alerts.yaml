@@ -27,3 +27,127 @@ groups:
         annotations:
           summary: "Dingo has no outgoing peers on {{ $labels.network }}"
           description: "Node {{ $labels.instance }} on {{ $labels.network }}: zero outgoing connections for 5+ minutes. Node cannot sync."
+
+  # node-parity (blinklabs-io/dingo#1900): cross-node ledger-state
+  # comparison against a reference cardano-node. See cmd/node-parity and
+  # docs/dashboards/prometheus.yaml's node-parity/cardano-node-reference jobs.
+  - name: node-parity
+    rules:
+      - alert: NodeParityDivergence
+        # increase(), not the absolute counter value: the raw counter would
+        # stay "> 0" forever after a single divergence, since a Counter
+        # never decreases on its own -- increase() bounds that to roughly
+        # the [1h] window instead. This does not fully insulate against a
+        # metrics-server restart: Prometheus's counter-reset handling
+        # extrapolates through a reset rather than discarding what came
+        # before it, so a divergence recorded shortly before a restart can
+        # still contribute to increase() for up to an hour afterwards.
+        #
+        # severity: warning, and for: 5m rather than 0m, deliberately: this
+        # tool's own design (see ARCHITECTURE.md's Node Parity section) is
+        # that live cross-node disagreement is often transient (propagation
+        # delay, short forks, the documented tip-sandwich race) rather than
+        # a confirmed bug, and there is no fatal/strict mode precisely
+        # because of that -- paging critical on a single occurrence, before
+        # even one retry cycle has had a chance to self-correct it,
+        # contradicts that design. NodeParityRepeatedDivergence below is the
+        # higher-confidence critical signal for a divergence that keeps
+        # recurring rather than resolving on its own.
+        expr: increase(node_parity_divergence_total{network=~".+"}[1h]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "node-parity found ledger-state divergence on {{ $labels.network }}"
+          description: "node-parity ({{ $labels.instance }}) reported a {{ $labels.field }} divergence between dingo and cardano-node on {{ $labels.network }} in the last hour."
+
+      - alert: NodeParityRepeatedDivergence
+        # A single divergence is common-enough noise (see NodeParityDivergence
+        # above) that it only warrants a warning; more than one within the
+        # same rolling hour is a much stronger signal of a persistent, real
+        # bug rather than one-off transient disagreement, and is worth
+        # paging critical for.
+        #
+        # >= 2, not > 1: increase() extrapolates a counter's observed slope
+        # out to the full window's boundaries, so even a genuine single
+        # event can evaluate to slightly more than 1 (e.g. ~1.008 with a 1h
+        # window and 15s scrapes) -- ">1" would let that extrapolation
+        # noise page critical on exactly the one-off case this rule exists
+        # to exclude. ">= 2" tolerates that slop while still requiring the
+        # increase to be genuinely at least two.
+        expr: increase(node_parity_divergence_total{network=~".+"}[1h]) >= 2
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "node-parity found repeated ledger-state divergence on {{ $labels.network }}"
+          description: "node-parity ({{ $labels.instance }}) reported more than one {{ $labels.field }} divergence between dingo and cardano-node on {{ $labels.network }} within the last hour -- unlikely to be transient noise."
+
+      - alert: NodeParityDown
+        expr: up{job="node-parity"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "node-parity is not reachable"
+          description: "Prometheus has not been able to scrape {{ $labels.instance }} (job node-parity) for 5+ minutes."
+
+      - alert: NodeParityNotChecking
+        # watch is block-triggered (a check fires the moment either node's
+        # tip changes), with --fallback-interval (default 2m) as a backstop
+        # if a watcher's subscription silently stalls -- so real activity
+        # (completed, skipped, or outright failed) is expected roughly every
+        # block, and never less often than the fallback interval. Sums all
+        # three counters rather than just checks_total alone: a run of
+        # legitimate skips during a noisy stretch, or a run of check errors
+        # from a misconfigured address (which never increments checks_total
+        # or checks_skipped_total either), must not look identical to the
+        # tool itself being stuck. NodeParityCheckErrors below is the
+        # dedicated signal for "attempting but failing"; this alert is only
+        # for "not attempting at all."
+        #
+        # The [10m] window is fixed at rule-authoring time; --fallback-interval
+        # is an operator-set runtime flag this file has no way to read. If
+        # --fallback-interval is configured well above 10m (the 2m default
+        # leaves a 5x margin), a perfectly healthy run can show zero activity
+        # within a trailing 10m window purely because its own configured
+        # cadence is slower than that, and this alert would misfire. Keep
+        # --fallback-interval comfortably under 10m (an order of magnitude,
+        # as with the default, is a safe margin), or widen this window and
+        # NodeParityDown's/NodeParityCheckErrors' for: durations to match if
+        # a longer interval is genuinely needed.
+        expr: |
+          (
+            rate(node_parity_checks_total{network=~".+"}[10m])
+            + sum without (reason) (rate(node_parity_checks_skipped_total{network=~".+"}[10m]))
+            + rate(node_parity_check_errors_total{network=~".+"}[10m])
+          ) == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "node-parity has not attempted a check on {{ $labels.network }}"
+          description: "{{ $labels.instance }} (job node-parity) has recorded no completed, skipped, or failed check in the last 10 minutes, well past its --fallback-interval -- the tool itself is stuck (its watchers are not attempting anything at all), not merely discarding cycles or failing them."
+
+      - alert: NodeParityCheckErrors
+        # Distinguishes "attempting checks but every one fails outright" (a
+        # dial or query error -- e.g. a misconfigured address, or a node
+        # that's down) from NodeParityNotChecking's "not attempting
+        # anything at all": both leave checks_total and
+        # checks_skipped_total at zero, but this is a different, more
+        # specific root cause an operator can act on directly (check
+        # --dingo-addr/--cardano-addr and both nodes' health) rather than
+        # treating it as the whole tool being stuck.
+        #
+        # rate() over a [5m] window, not increase() over [10m]: the window
+        # must not exceed "for" below, or a single transient error stays
+        # visible in the window for the rest of its full length regardless
+        # of "for", so the alert would still fire 5 minutes after checks
+        # had already recovered from one isolated blip.
+        expr: rate(node_parity_check_errors_total{network=~".+"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "node-parity checks are failing on {{ $labels.network }}"
+          description: "{{ $labels.instance }} (job node-parity) has logged check errors (dial or query failures) for 5+ minutes -- verify --dingo-addr/--cardano-addr and that both nodes are reachable."

@@ -42,12 +42,19 @@ var AlonzoEraDesc = EraDesc{
 	DecodePParamsFunc:       DecodePParamsAlonzo,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateAlonzo,
 	PParamsUpdateFunc:       PParamsUpdateAlonzo,
-	HardForkFunc:            HardForkAlonzo,
-	EpochLengthFunc:         EpochLengthShelley,
-	CalculateEtaVFunc:       CalculateEtaVAlonzo,
-	CertDepositFunc:         CertDepositAlonzo,
-	ValidateTxFunc:          ValidateTxAlonzo,
-	EvaluateTxFunc:          EvaluateTxAlonzo,
+	ParamUpdateHasPlutusV2CostModelFunc: func(u any) bool {
+		upd, ok := u.(alonzo.AlonzoProtocolParameterUpdate)
+		if !ok {
+			return false
+		}
+		return paramUpdateHasPlutusV2CostModel(upd.CostModels)
+	},
+	HardForkFunc:      HardForkAlonzo,
+	EpochLengthFunc:   EpochLengthShelley,
+	CalculateEtaVFunc: CalculateEtaVAlonzo,
+	CertDepositFunc:   CertDepositAlonzo,
+	ValidateTxFunc:    ValidateTxAlonzo,
+	EvaluateTxFunc:    EvaluateTxAlonzo,
 }
 
 func DecodePParamsAlonzo(data []byte) (lcommon.ProtocolParameters, error) {
@@ -349,9 +356,9 @@ var alonzoUtxoValidationRules = buildAlonzoValidationRules()
 
 func buildAlonzoValidationRules() []indexedUtxoValidationRule {
 	return buildIndexedUtxoValidationRules(
+		alonzo.UtxoValidationRuleDescriptors(),
 		alonzo.UtxoValidationRules,
-		alonzo.UtxoValidatePlutusScripts,
-		"alonzo.UtxoValidatePlutusScripts",
+		lcommon.UtxoValidationRulePlutusScripts,
 	)
 }
 
@@ -465,8 +472,10 @@ func EvaluateTxAlonzo(
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
 			}
-			retTotalExUnits.Steps += usedBudget.Steps
-			retTotalExUnits.Memory += usedBudget.Memory
+			retTotalExUnits, err = SafeAddExUnits(retTotalExUnits, usedBudget)
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("aggregate execution units: %w", err)
+			}
 			retRedeemerExUnits[lcommon.RedeemerKey{
 				Tag:   redeemer.Tag,
 				Index: redeemer.Index,

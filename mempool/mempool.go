@@ -89,6 +89,7 @@ type Consumer interface {
 	GetTxFromCache(string) *MempoolTransaction
 	ClearCache()
 	RemoveTxFromCache(string)
+	AcknowledgeOffered(count int)
 }
 
 // Service is the domain-owned mempool capability consumed by node wiring,
@@ -357,7 +358,10 @@ func (o *utxoOverlay) applyTx(
 		cbor:    cbor,
 		created: make(map[string]lcommon.Utxo),
 	}
-	for _, input := range tx.Inputs() {
+	// Consumed is the consensus spent set: regular inputs for valid
+	// transactions and collateral for phase-2-invalid transactions. Using
+	// Inputs here would incorrectly reserve an input the ledger does not spend.
+	for _, input := range tx.Consumed() {
 		key := fmt.Sprintf("%s:%d", input.Id().String(), input.Index())
 		o.consumed[key] = struct{}{}
 		at.consumed = append(at.consumed, key)

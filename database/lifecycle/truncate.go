@@ -776,6 +776,16 @@ func finishPendingTruncate(
 				"utxo_prune_floor_slot", oldFloor,
 			)
 		}
+		if err := database.RecomputeSyntheticV2CostModelMarkerAfterTruncate(
+			db,
+			txn,
+			point.Slot,
+		); err != nil {
+			return fmt.Errorf(
+				"recompute synthetic PlutusV2 cost model marker after truncate: %w",
+				err,
+			)
+		}
 		if err := db.DeleteSyncState(pendingTruncateSyncKey, txn); err != nil {
 			return fmt.Errorf("clear pending truncate marker: %w", err)
 		}

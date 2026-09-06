@@ -423,7 +423,7 @@ func TestRollbackBelowConsumedUtxoPruneFloorIsRefused(t *testing.T) {
 // TestRollbackIsAppliableRejectsBelowConsumedUtxoPruneFloor keeps the loop
 // detector's crossability predicate in step with the rollback it predicts.
 // Reporting a target below the prune floor as crossable would make the detector
-// insist on applying a rollback rollbackChainAndState refuses.
+// insist on applying a rollback rollbackChainAndStateDeferred refuses.
 func TestRollbackIsAppliableRejectsBelowConsumedUtxoPruneFloor(t *testing.T) {
 	f := newPrunedUtxoFixture(t, 0)
 	f.ls.cleanupConsumedUtxos()
@@ -510,7 +510,7 @@ func TestConsumedUtxoPruneFloorIsReadFromTheDatabase(t *testing.T) {
 
 // TestRollbackChainAndStateRefusesRedirectBelowPruneFloor covers the ordering
 // hazard between the same-slot competitor redirect (issue #3678) and the prune
-// floor. rollbackChainAndState truncates the primary chain and only then
+// floor. rollbackChainAndStateDeferred truncates the primary chain and only then
 // synchronizes the ledger. A target sitting exactly on the floor whose hash
 // differs from the applied tip resolves to an applied ancestor strictly below
 // the floor, so checking the unresolved point would admit it here and refuse it
@@ -557,7 +557,7 @@ func TestRollbackChainAndStateRefusesRedirectBelowPruneFloor(t *testing.T) {
 
 	require.ErrorIs(
 		t,
-		f.ls.rollbackChainAndState(target),
+		f.ls.rollbackChainAndStateDeferred(target, nil),
 		ErrRollbackBelowUtxoPruneFloor,
 	)
 	require.Equal(

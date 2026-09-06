@@ -141,6 +141,93 @@ func (s *Store) SaveRewardSnapshot(
 	return nil
 }
 
+func (s *Store) SaveRewardSeedFailure(
+	epoch uint64,
+	snapshotType string,
+	reason string,
+	capturedSlot uint64,
+	txn types.Txn,
+) error {
+	db, ctx, err := s.dbFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return err
+	}
+	sqlSlot, err := checkedInt64(capturedSlot)
+	if err != nil {
+		return err
+	}
+	if err := s.operationalQueries(db).SaveRewardSeedFailure(
+		ctx,
+		sqlitequery.SaveRewardSeedFailureParams{
+			Epoch:         sqlEpoch,
+			SnapshotType:  snapshotType,
+			FailureReason: reason,
+			CapturedSlot:  sqlSlot,
+		},
+	); err != nil {
+		return fmt.Errorf("save reward seed failure: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetRewardSeedFailure(
+	epoch uint64,
+	snapshotType string,
+	txn types.Txn,
+) (string, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return "", err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return "", err
+	}
+	reason, err := s.operationalQueries(db).GetRewardSeedFailure(
+		ctx,
+		sqlitequery.GetRewardSeedFailureParams{
+			Epoch:        sqlEpoch,
+			SnapshotType: snapshotType,
+		},
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get reward seed failure: %w", err)
+	}
+	return reason, nil
+}
+
+func (s *Store) DeleteRewardSeedFailure(
+	epoch uint64,
+	snapshotType string,
+	txn types.Txn,
+) error {
+	db, ctx, err := s.dbFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return err
+	}
+	if err := s.operationalQueries(db).DeleteRewardSeedFailure(
+		ctx,
+		sqlitequery.DeleteRewardSeedFailureParams{
+			Epoch:        sqlEpoch,
+			SnapshotType: snapshotType,
+		},
+	); err != nil {
+		return fmt.Errorf("delete reward seed failure: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) DeleteProvisionalRewardSnapshot(
 	epoch uint64,
 	snapshotType string,
@@ -713,10 +800,29 @@ boundary_slot = excluded.boundary_slot`
 	// Multi-row upserts do not expose all generated IDs portably. Resolve them
 	// by their natural key in one bounded query and assign IDs only after the
 	// write succeeds.
-	predicates := make([]string, len(params))
+	//
+	// Looked up via a join against a derived table of literal
+	// (epoch, credential_tag, staking_key, pool_key_hash, reward_type) rows,
+	// not an OR-chain of five-way equality predicates -- the same
+	// GetAccountsByCredential planner limitation applies here:
+	// idx_reward_account_output_epoch_cred_pool_type exists on exactly these
+	// five columns, but a long OR-chain over it is not reliably compiled into
+	// per-term index seeks, and this runs on every epoch boundary for every
+	// account earning a reward.
+	rowSelectTemplate := "SELECT ? AS epoch, ? AS credential_tag, ? AS staking_key, ? AS pool_key_hash, ? AS reward_type"
+	if s.dialect.Name() == "postgres" {
+		// See GetAccountsByCredential's identical cast for why: an otherwise
+		// untyped derived-table parameter resolves to text on Postgres rather
+		// than being inferred from the joined columns, which fails the join
+		// once compared against epoch/credential_tag (BIGINT) or
+		// staking_key/pool_key_hash (BYTEA). reward_type (VARCHAR) needs no
+		// cast: Postgres's text default already matches it.
+		rowSelectTemplate = "SELECT CAST(? AS BIGINT) AS epoch, CAST(? AS BIGINT) AS credential_tag, CAST(? AS BYTEA) AS staking_key, CAST(? AS BYTEA) AS pool_key_hash, ? AS reward_type"
+	}
+	rowSelects := make([]string, len(params))
 	lookupArgs := make([]any, 0, len(params)*5)
 	for index, value := range params {
-		predicates[index] = "(epoch = ? AND credential_tag = ? AND staking_key = ? AND pool_key_hash = ? AND reward_type = ?)"
+		rowSelects[index] = rowSelectTemplate
 		lookupArgs = append(
 			lookupArgs,
 			value.Epoch,
@@ -726,14 +832,14 @@ boundary_slot = excluded.boundary_slot`
 			value.RewardType,
 		)
 	}
-	rows, err := db.QueryContext(
-		ctx,
-		`SELECT id, epoch, credential_tag, staking_key, pool_key_hash, reward_type
-FROM reward_account_output WHERE `+strings.Join(
-			predicates,
-			" OR ",
-		),
-		lookupArgs...)
+	lookupQuery := s.dialect.Rebind(
+		`SELECT o.id, o.epoch, o.credential_tag, o.staking_key, o.pool_key_hash, o.reward_type
+FROM reward_account_output o JOIN (` + strings.Join(rowSelects, " UNION ALL ") + `) v
+ON o.epoch = v.epoch AND o.credential_tag = v.credential_tag AND
+   o.staking_key = v.staking_key AND o.pool_key_hash = v.pool_key_hash AND
+   o.reward_type = v.reward_type`,
+	)
+	rows, err := db.QueryContext(ctx, lookupQuery, lookupArgs...)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"lookup reward account output batch IDs: %w",
@@ -951,6 +1057,12 @@ func (s *Store) DeleteRewardStateAfterSlot(
 			if err := q.DeleteRewardSnapshotsAfterSlot(
 				ctx,
 				pair,
+			); err != nil {
+				return err
+			}
+			if err := q.DeleteRewardSeedFailuresAfterSlot(
+				ctx,
+				sqlSlot,
 			); err != nil {
 				return err
 			}
