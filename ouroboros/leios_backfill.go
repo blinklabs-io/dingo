@@ -515,7 +515,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 		// Caller cancellation is not evidence of a peer failure. In particular,
 		// ledger shutdown and apply cancellation must not cool down a healthy
 		// connection.
-		if errors.Is(err, context.Canceled) && errors.Is(ctx.Err(), context.Canceled) {
+		if ctx.Err() != nil {
 			return
 		}
 		switch classifyLeiosFetchFailure(err) {
