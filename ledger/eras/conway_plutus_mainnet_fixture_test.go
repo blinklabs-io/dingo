@@ -30,11 +30,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Mainnet parameters for the fixture's epoch (653, protocol version 11.0).
+// Mainnet parameters for the fixture's epoch. The transaction is in epoch 653;
+// epochs 652 and 653 carry an identical protocol version and cost model, so one
+// parameter file serves the block and its inputs.
 const (
 	mainnetFixtureTxFile    = "mainnet-conway-tx-2d295dbf.cbor"
 	mainnetFixtureInputFile = "mainnet-conway-inputs-2d295dbf.cbor"
-	mainnetFixtureCostFile  = "mainnet-costmodels-pv11-epoch652.json"
+	mainnetFixtureCostFile  = "mainnet-costmodels-pv11-epoch653.json"
 	mainnetFixtureTxId      = "2d295dbffc2898b14ccc9b359a342305006fdcf6ccd7907b444419520a98f351"
 	mainnetFixtureSlot      = 196_783_015
 	mainnetProtoMajor       = 11
