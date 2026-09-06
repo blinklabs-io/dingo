@@ -397,12 +397,12 @@ func (b *Backfill) resolvePParams(
 			if era != nil &&
 				era.DecodePParamsUpdateFunc != nil &&
 				era.PParamsUpdateFunc != nil {
-				newPP, ppErr := b.db.ComputeAndApplyPParamUpdates(
+				newPP, _, ppErr := b.db.ComputeAndApplyPParamUpdates(
 					ep.StartSlot, ep.EpochId,
 					ep.EraId, quorum,
 					b.currentPParams,
 					era.DecodePParamsUpdateFunc,
-					era.PParamsUpdateFunc, nil,
+					era.PParamsUpdateFunc, nil, nil,
 				)
 				if ppErr != nil {
 					b.logger.Warn(

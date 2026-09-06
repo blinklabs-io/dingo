@@ -189,7 +189,7 @@ func (p *DingoStateProvider) IsStakeCredentialRegistered(
 // UtxoValidateValueNotConservedUtxo's optional type assertion misses and
 // every legacy stake deregistration in the corpus is refunded at the current
 // KeyDeposit. The corpus then cannot distinguish a correct recorded refund
-// from the fallback.
+// from the fallback, which is the gap #3831 covers.
 //
 // This mirrors ledger.LedgerView.StakeCredentialDeposit: the account lookup
 // gates on the same live registration state as
