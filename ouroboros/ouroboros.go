@@ -981,10 +981,6 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 	}
 }
 
-// HandleInboundConnEvent starts client-side mini-protocols on full-duplex
-// inbound connections. When the remote peer negotiated InitiatorAndResponder
-// mode, a single TCP connection can carry both directions of the Ouroboros
-// protocols, matching cardano-node's connection manager behavior.
 // closeOutboundConnAfterChainsyncFailure closes the connection that chainsync
 // failed to start on, so peer governance observes the failure and applies its
 // reconnect backoff.
@@ -1021,6 +1017,10 @@ func (o *Ouroboros) closeOutboundConnAfterChainsyncFailure(
 	}
 }
 
+// HandleInboundConnEvent starts client-side mini-protocols on full-duplex
+// inbound connections. When the remote peer negotiated InitiatorAndResponder
+// mode, a single TCP connection can carry both directions of the Ouroboros
+// protocols, matching cardano-node's connection manager behavior.
 func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 	e, ok := evt.Data.(connmanager.InboundConnectionEvent)
 	if !ok {
