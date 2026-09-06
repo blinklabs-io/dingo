@@ -1490,11 +1490,49 @@ func (c *Chain) IntersectPoints(count int) []ocommon.Point {
 	if c.tipBlockIndex <= initialBlockIndex {
 		return points
 	}
+	// Beyond the dense band the ladder doubles, so a peer L blocks behind
+	// resolves its FindIntersect to the next rung at or past L. Once that
+	// rung passes the security parameter K, the rollback the peer asks for
+	// is refused as an over-K fork even though the peer's chain is a strict
+	// prefix of ours: at K=108 the first rung past K is 128, so a peer only
+	// 65 blocks behind is already refused. Offering the rung at exactly K
+	// closes that band — with a point at offset K, every peer within K of
+	// our tip holds it, so the shallowest rung it can match is at most K
+	// deep and stays crossable. It costs exactly one extra point, so the
+	// FindIntersect message stays the same size in practice (the list is
+	// capped by count).
+	//
+	// securityParam is written once by ChainManager.SetLedger during
+	// startup and read without the manager lock elsewhere on this path
+	// (see MaxQueuedHeaders); a zero value simply skips the extra rung.
+	securityRung := uint64(0)
+	if c.manager != nil && c.manager.securityParam > 0 {
+		securityRung = uint64(c.manager.securityParam) //nolint:gosec // guarded positive
+	}
 	for offset := uint64(denseCount); len(points) < count; offset *= 2 { //nolint:gosec // denseCount is bounded to non-negative values
 		if offset == 0 || offset >= c.tipBlockIndex {
 			break
 		}
+		// Keep the list descending: emit the K rung before the first
+		// doubling rung that would overshoot it.
+		if securityRung > 0 && securityRung < offset {
+			if securityRung < c.tipBlockIndex {
+				appendBlockPoint(c.tipBlockIndex - securityRung)
+			}
+			securityRung = 0
+			if len(points) >= count {
+				break
+			}
+		}
 		appendBlockPoint(c.tipBlockIndex - offset)
+	}
+	// The doubling loop can stop before reaching the K rung when the chain
+	// is shorter than the next rung. Every offset it emitted is then at or
+	// below K (a smaller K would have been emitted inside the loop), so
+	// appending it here keeps the list descending.
+	if securityRung > 0 && securityRung < c.tipBlockIndex &&
+		len(points) < count {
+		appendBlockPoint(c.tipBlockIndex - securityRung)
 	}
 	if len(points) < count {
 		appendBlockPoint(initialBlockIndex)
