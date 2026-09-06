@@ -24,7 +24,7 @@ func (s *Server) handleNetworkList(
 	r *http.Request,
 ) {
 	var req MetadataRequest
-	if err := decodeRequest(w, r, &req); err != nil {
+	if err := s.decodeRequest(w, r, &req); err != nil {
 		writeError(w, ErrInvalidRequest)
 		return
 	}

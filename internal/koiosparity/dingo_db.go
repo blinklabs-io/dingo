@@ -59,7 +59,15 @@ type DingoEpochData struct {
 	// TotalPoolCount, which counts the reduced reward distribution with
 	// degraded pools already excluded.
 	TotalPoolCount uint64
-	Fees           string // lovelace decimal string; empty when reward_ada_pots row absent
+	// BoundarySlot is epoch_summary.boundary_slot: the slot the epoch
+	// transition into this epoch resolved ledger state at. It is the slot
+	// GetPoolsRetiredByEpoch resolves each pool's latest certificate as of,
+	// so the departure question is answered against the same point in the
+	// chain the epoch's own pool set was captured at. Zero when the row
+	// predates the column or was never stamped, which reads as "no boundary
+	// to resolve against" rather than slot 0.
+	BoundarySlot uint64
+	Fees         string // lovelace decimal string; empty when reward_ada_pots row absent
 	// TotalRewards is reward_ada_pots.rewards for this epoch alone: a fresh
 	// per-epoch FLOW value (rewards.Result.TotalRewardPot, overwritten every
 	// epoch — see ledger/reward_calculation.go:389,1955 and
@@ -289,6 +297,7 @@ func (d *DingoDB) GetEpochData(
 			10,
 		),
 		TotalPoolCount: summary.TotalPoolCount,
+		BoundarySlot:   summary.BoundarySlot,
 	}
 
 	var pots models.RewardAdaPots
@@ -309,6 +318,72 @@ func (d *DingoDB) GetEpochData(
 	}
 
 	return data, nil
+}
+
+// GetProtocolParams resolves the protocol parameters in force for epoch and
+// decodes them into the era-independent DingoProtocolParams view. Returns
+// nil, nil when Dingo has no `epoch` row for the epoch yet, or no `pparams`
+// row at or before it for that epoch's era.
+//
+// Two properties of Dingo's `pparams` table shape this query, and getting
+// either wrong silently reads back the wrong parameter set (dingo #3931):
+//
+//   - It holds one row per parameter CHANGE, not one per epoch. Preview has
+//     roughly a dozen rows spanning 400+ epochs, so the row for a given epoch
+//     is the latest one at or before it — an exact-epoch lookup finds nothing
+//     for almost every epoch.
+//   - At an era boundary the rollover path writes BOTH an old-era row
+//     (post-pparams-update) and a new-era row (transitionToEra) at the same
+//     epoch, with different CBOR shapes. Preview really does carry two epoch-2
+//     rows and two epoch-3 rows. Which one applies is decided by the era the
+//     `epoch` table records for the epoch, not by insertion order, so the era
+//     is resolved first and used both to filter the row and to pick the
+//     decoder — the same order api/blockfrost's adapter uses.
+//
+// ctx is forwarded to the DB driver so that a cancelled context aborts the
+// query.
+func (d *DingoDB) GetProtocolParams(
+	ctx context.Context,
+	epoch uint64,
+) (*DingoProtocolParams, error) {
+	tx, err := d.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("begin protocol params read: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	queryRow := func(query string, args ...any) *sql.Row {
+		return tx.QueryRowContext(ctx, rebind(query, d.dialect), args...)
+	}
+	var eraID uint
+	if err := queryRow(
+		`SELECT era_id FROM epoch WHERE epoch_id = ?`,
+		epoch,
+	).Scan(&eraID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("epoch era epoch %d: %w", epoch, err)
+	}
+
+	var (
+		cborBytes   []byte
+		sourceEpoch uint64
+	)
+	if err := queryRow(
+		`SELECT cbor, epoch FROM pparams WHERE epoch <= ? AND era_id = ?
+		 ORDER BY epoch DESC, id DESC LIMIT 1`,
+		epoch,
+		eraID,
+	).Scan(&cborBytes, &sourceEpoch); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("pparams epoch %d: %w", epoch, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit protocol params read: %w", err)
+	}
+	return decodeProtocolParams(cborBytes, eraID, sourceEpoch)
 }
 
 // GetPoolEpochDataMap returns per-pool reward data assembled for Koios
@@ -373,6 +448,106 @@ func (d *DingoDB) GetPoolStakeSnapshotMembers(
 		members[hex.EncodeToString(poolHash)] = struct{}{}
 	}
 	return members, rows.Err()
+}
+
+// quoteTransactionTable renders the reserved "transaction" identifier for
+// dialect. SQLite and PostgreSQL both accept the double-quoted spelling,
+// while MySQL reads double quotes as string delimiters unless ANSI_QUOTES is
+// enabled — the same split sqlstore handles centrally in
+// translateMySQLReservedIdentifiers. DingoDB's own rebind only rewrites
+// placeholders, so the one query that joins that table spells it itself.
+func quoteTransactionTable(dialect string) string {
+	if dialect == "mysql" {
+		return "`transaction`"
+	}
+	return `"transaction"`
+}
+
+// GetPoolsRetiredByEpoch implements RewardParitySource against the pool
+// certificate tables. It is the standalone-CLI twin of
+// MetadataStore.GetPoolKeyHashesRetiredByEpoch and must resolve departure
+// identically: latest registration and latest retirement as of boundarySlot,
+// ordered by (added_slot, synthetic_ret, block_index, cert_index), with a
+// retirement that a later registration cancelled excluded. synthetic_ret ranks
+// reconcile retirements (certificate_id = 0) ahead of certificate-backed rows
+// at the same slot and exempts them from the cancellation clauses, because
+// they have no certs/transaction join to break the tie with. See the store
+// method's doc comment.
+func (d *DingoDB) GetPoolsRetiredByEpoch(
+	ctx context.Context,
+	epoch uint64,
+	boundarySlot uint64,
+) (map[string]struct{}, error) {
+	txTable := quoteTransactionTable(d.dialect)
+	rows, err := d.query(
+		ctx,
+		`
+WITH latest_reg AS (
+    SELECT pr.pool_id, pr.added_slot,
+           COALESCE(t.block_index, 0) block_index,
+           COALESCE(c.cert_index, 0) cert_index,
+           ROW_NUMBER() OVER (
+               PARTITION BY pr.pool_id
+               ORDER BY pr.added_slot DESC,
+                        COALESCE(t.block_index, 0) DESC,
+                        COALESCE(c.cert_index, 0) DESC
+           ) rn
+    FROM pool_registration pr
+    LEFT JOIN certs c ON c.id = pr.certificate_id
+    LEFT JOIN `+txTable+` t ON t.id = c.transaction_id
+    WHERE pr.added_slot < ?
+),
+latest_ret AS (
+    SELECT rt.pool_id, rt.added_slot, rt.epoch,
+           CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END synthetic_ret,
+           COALESCE(t.block_index, 0) block_index,
+           COALESCE(c.cert_index, 0) cert_index,
+           ROW_NUMBER() OVER (
+               PARTITION BY rt.pool_id
+               ORDER BY rt.added_slot DESC,
+                        CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC,
+                        COALESCE(t.block_index, 0) DESC,
+                        COALESCE(c.cert_index, 0) DESC
+           ) rn
+    FROM pool_retirement rt
+    LEFT JOIN certs c ON c.id = rt.certificate_id
+    LEFT JOIN `+txTable+` t ON t.id = c.transaction_id
+    WHERE rt.added_slot < ?
+)
+SELECT p.pool_key_hash
+FROM pool p
+JOIN latest_reg reg ON reg.pool_id = p.id AND reg.rn = 1
+JOIN latest_ret ret ON ret.pool_id = p.id AND ret.rn = 1
+WHERE ret.epoch <= ?
+  AND NOT (
+      ret.added_slot < reg.added_slot
+      OR (ret.added_slot = reg.added_slot AND ret.synthetic_ret = 0
+          AND ret.block_index < reg.block_index)
+      OR (ret.added_slot = reg.added_slot AND ret.synthetic_ret = 0
+          AND ret.block_index = reg.block_index
+          AND ret.cert_index < reg.cert_index)
+  )`,
+		boundarySlot,
+		boundarySlot,
+		epoch,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"pool_retirement through epoch %d: %w",
+			epoch,
+			err,
+		)
+	}
+	defer rows.Close()
+	retired := make(map[string]struct{})
+	for rows.Next() {
+		var poolHash []byte
+		if err := rows.Scan(&poolHash); err != nil {
+			return nil, err
+		}
+		retired[hex.EncodeToString(poolHash)] = struct{}{}
+	}
+	return retired, rows.Err()
 }
 
 func (d *DingoDB) GetPoolEpochDataMap(

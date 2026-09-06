@@ -36,12 +36,19 @@ var DijkstraEraDesc = EraDesc{
 	DecodePParamsFunc:       DecodePParamsDijkstra,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateDijkstra,
 	PParamsUpdateFunc:       PParamsUpdateDijkstra,
-	HardForkFunc:            HardForkDijkstra,
-	EpochLengthFunc:         EpochLengthShelley,
-	CalculateEtaVFunc:       CalculateEtaVDijkstra,
-	CertDepositFunc:         CertDepositDijkstra,
-	ValidateTxFunc:          ValidateTxDijkstra,
-	EvaluateTxFunc:          EvaluateTxDijkstra,
+	ParamUpdateHasPlutusV2CostModelFunc: func(u any) bool {
+		upd, ok := u.(gdijkstra.DijkstraProtocolParameterUpdate)
+		if !ok {
+			return false
+		}
+		return paramUpdateHasPlutusV2CostModel(upd.CostModels)
+	},
+	HardForkFunc:      HardForkDijkstra,
+	EpochLengthFunc:   EpochLengthShelley,
+	CalculateEtaVFunc: CalculateEtaVDijkstra,
+	CertDepositFunc:   CertDepositDijkstra,
+	ValidateTxFunc:    ValidateTxDijkstra,
+	EvaluateTxFunc:    EvaluateTxDijkstra,
 }
 
 func DecodePParamsDijkstra(data []byte) (lcommon.ProtocolParameters, error) {
