@@ -79,6 +79,7 @@ type stateMetrics struct {
 	continuationAuditMissingProducer       prometheus.Counter
 	continuationAuditInconclusiveEbPending prometheus.Counter
 	continuationAuditDisarmedCap           prometheus.Counter
+	continuationAuditSkippedBudget         prometheus.Counter
 	// Observed for every Praos leader-eligibility decision on an inbound
 	// header: (threshold - leaderValue) / threshold. Positive is eligible,
 	// and the magnitude is the headroom. dingo derives its leadership stake
@@ -402,13 +403,16 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	//   result="disarmed_cap"            — one per window, when the producer
 	//        set reached continuationAuditMaxProducedTxs and the window was
 	//        disarmed rather than report from a truncated set
+	//   result="skipped_budget"          — one per audited body that had more
+	//        endorser blocks queued than continuationAuditMaxEndorserBlocksPerBlock
+	//        allows it to resolve; the rest stay queued for a later body
 	// A node whose inconclusive count dominates is telling the operator the
 	// audit is not covering it, which is the honest reading of an
 	// endorser-block backlog.
 	m.continuationAuditOutcomes = promautoFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_continuation_audit_outcomes_total",
-			Help: "cross-fork continuation audit verdicts by result; clean/missing_producer/inconclusive_eb_pending count audited inputs, disarmed_cap counts audit windows",
+			Help: "cross-fork continuation audit verdicts by result; clean/missing_producer/inconclusive_eb_pending count audited inputs, skipped_budget counts audited blocks, disarmed_cap counts audit windows",
 		},
 		[]string{"result"},
 	)
@@ -423,6 +427,9 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	)
 	m.continuationAuditDisarmedCap = m.continuationAuditOutcomes.WithLabelValues(
 		continuationAuditResultDisarmedCap,
+	)
+	m.continuationAuditSkippedBudget = m.continuationAuditOutcomes.WithLabelValues(
+		continuationAuditResultSkippedBudget,
 	)
 	m.leaderThresholdMargin = promautoFactory.NewHistogram(
 		prometheus.HistogramOpts{

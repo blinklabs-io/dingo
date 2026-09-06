@@ -17,6 +17,7 @@ package ledger
 import (
 	"encoding/binary"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -111,11 +112,14 @@ func leiosAuditCertifyingBlock(
 // certified closure.
 type leiosAuditFixture struct {
 	*chainsyncRollbackFixture
-	certRB     *dijkstra.DijkstraBlock
-	certPoint  ocommon.Point
-	ebTx       lcommon.Transaction
-	providerOK *bool
-	logs       *strings.Builder
+	certRB        *dijkstra.DijkstraBlock
+	certPoint     ocommon.Point
+	announceHash  lcommon.Blake2b256
+	ebTx          lcommon.Transaction
+	ebRepeatTx    lcommon.Transaction
+	providerOK    *bool
+	providerCalls *int
+	logs          *strings.Builder
 }
 
 func newLeiosAuditFixture(t *testing.T) *leiosAuditFixture {
@@ -163,19 +167,24 @@ func newLeiosAuditFixture(t *testing.T) *leiosAuditFixture {
 		"a certifying ranking block carries no transactions of its own",
 	)
 
+	// Two transactions, so a cap test can offer the window one id it already
+	// holds alongside one it does not.
 	rawTx, _, ebTx := leiosApplyTestTx(t, 0x5A)
+	rawRepeatTx, _, ebRepeatTx := leiosApplyTestTx(t, 0x5B)
 	providerOK := true
+	providerCalls := 0
 	ls.config.EndorserBlockProvider = func(
 		hash []byte,
 		slot uint64,
 	) ([]cbor.RawMessage, bool) {
+		providerCalls++
 		if !providerOK {
 			return nil, false
 		}
 		if string(hash) != string(ebHash.Bytes()) || slot != announceSlot {
 			return nil, false
 		}
-		return []cbor.RawMessage{rawTx}, true
+		return []cbor.RawMessage{rawTx, rawRepeatTx}, true
 	}
 
 	return &leiosAuditFixture{
@@ -185,9 +194,12 @@ func newLeiosAuditFixture(t *testing.T) *leiosAuditFixture {
 			certRB.SlotNumber(),
 			certRB.Hash().Bytes(),
 		),
-		ebTx:       ebTx,
-		providerOK: &providerOK,
-		logs:       logs,
+		announceHash:  announcing.Hash(),
+		ebTx:          ebTx,
+		ebRepeatTx:    ebRepeatTx,
+		providerOK:    &providerOK,
+		providerCalls: &providerCalls,
+		logs:          logs,
 	}
 }
 
@@ -454,28 +466,47 @@ func TestContinuationAuditOutcomesAreCounted(t *testing.T) {
 	})
 }
 
+// continuationAuditFillProducers seeds the window's producer set with n
+// synthetic ids, so a cap test does not have to audit a quarter of a million
+// real transactions to reach the boundary.
+func continuationAuditFillProducers(
+	window *continuationAuditWindow,
+	n int,
+) {
+	filler := make([]byte, 8)
+	for i := range n {
+		binary.BigEndian.PutUint64(filler, uint64(i))
+		window.producedTxs[string(filler)] = struct{}{}
+	}
+}
+
 // TestContinuationAuditCapDisarmIsExplicit covers the other half of the cap
 // review: including endorser-block transactions in the producer set makes a
 // busy Leios window reach continuationAuditMaxProducedTxs, so the disarm must
 // be visible — a Warn line and a counted outcome — instead of the audit going
 // quiet with no way to tell it apart from a clean node.
+//
+// The window is seeded one short of the cap so the spending body's own
+// transaction fits and its input probe reaches the endorser-block drain; the
+// endorser transaction is then the id that runs the set into the cap, which is
+// the path a real Leios window disarms on.
 func TestContinuationAuditCapDisarmIsExplicit(t *testing.T) {
 	f := newLeiosAuditFixture(t)
 	ls := f.ls
 	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
 	window := ls.continuationAudit.Load()
 	require.NotNil(t, window)
-	filler := make([]byte, 8)
-	for i := range continuationAuditMaxProducedTxs {
-		binary.BigEndian.PutUint64(filler, uint64(i))
-		window.producedTxs[string(filler)] = struct{}{}
-	}
+	continuationAuditFillProducers(
+		window,
+		continuationAuditMaxProducedTxs-1,
+	)
 
 	ls.auditContinuationBlock(BlockfetchEvent{
 		ConnectionId: f.connId,
 		Block:        f.certRB,
 		Point:        f.certPoint,
 	}, true)
+	ls.auditContinuationBlock(f.spenderBlock(t), true)
 
 	assert.Equal(t, 0, window.remaining, "the window must disarm at the cap")
 	record := findLogRecord(
@@ -495,13 +526,284 @@ func TestContinuationAuditCapDisarmIsExplicit(t *testing.T) {
 	)
 }
 
+// TestContinuationAuditCapCountsOnlyNewProducers is the regression for the
+// review finding on the cap check: it compared the producer set's size plus
+// every id the block offered, so an id the set already held was charged against
+// the cap a second time and a window whose producer set never grew could
+// disarm itself.
+//
+// That is not hypothetical on the Leios path. The same transaction can appear
+// in more than one endorser block — applyEndorserBlock carries
+// deduplicateEndorserBlockTransactionIndexes for exactly that — and an endorser
+// block is content-addressed, so the same closure can be referenced from more
+// than one ranking block inside a window. The cap bounds the size of the set,
+// so only ids the set does not already hold may count toward it.
+//
+// Same seeding as the disarm test above, one id short of the cap, except that
+// the endorser block's transaction is already recorded. The drain therefore
+// offers a repeat, the set cannot grow, and the window must stay armed.
+func TestContinuationAuditCapCountsOnlyNewProducers(t *testing.T) {
+	f := newLeiosAuditFixture(t)
+	ls := f.ls
+	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+	window := ls.continuationAudit.Load()
+	require.NotNil(t, window)
+	// One of the endorser block's two transactions is already a producer.
+	// Seeded two short of the cap, the window has room for exactly the two
+	// ids it is about to be offered that it does not already hold: the
+	// spending body's own transaction and the endorser block's other one.
+	window.producedTxs[string(f.ebRepeatTx.Hash().Bytes())] = struct{}{}
+	continuationAuditFillProducers(
+		window,
+		continuationAuditMaxProducedTxs-3,
+	)
+	require.Len(t, window.producedTxs, continuationAuditMaxProducedTxs-2)
+
+	ls.auditContinuationBlock(BlockfetchEvent{
+		ConnectionId: f.connId,
+		Block:        f.certRB,
+		Point:        f.certPoint,
+	}, true)
+	ls.auditContinuationBlock(f.spenderBlock(t), true)
+
+	assert.Positive(
+		t,
+		window.remaining,
+		"a repeated endorser transaction must not disarm the window",
+	)
+	assert.Equal(t, 2, window.blocksSeen)
+	assert.Len(
+		t,
+		window.producedTxs,
+		continuationAuditMaxProducedTxs,
+		"only the two ids the set did not already hold may have been added",
+	)
+	assert.Contains(t, window.producedTxs, string(f.ebTx.Hash().Bytes()))
+	require.Positive(
+		t,
+		window.endorserResolutions,
+		"the endorser block must actually have been drained, or this test proves nothing",
+	)
+	assert.NotContains(
+		t,
+		f.logs.String(),
+		"disarming cross-fork continuation audit",
+	)
+	assert.Equal(
+		t,
+		float64(0),
+		promtestutil.ToFloat64(
+			ls.metrics.continuationAuditOutcomes.WithLabelValues(
+				"disarmed_cap",
+			),
+		),
+	)
+}
+
+// TestContinuationAuditResolvesEachEndorserBlockOnce is the cost regression for
+// the review finding that the audit resolved a block's endorser block for every
+// referencing ranking block, inside auditContinuationBlock while
+// chainsyncBlockfetchMutex is held.
+//
+// A certified endorser block is content-addressed and can be certified from
+// more than one ranking block in a window; resolving it costs a parent-block
+// read plus a hash of every one of its transactions. Three certifying blocks
+// over the same closure must cost exactly one resolution, not three.
+func TestContinuationAuditResolvesEachEndorserBlockOnce(t *testing.T) {
+	f := newLeiosAuditFixture(t)
+	ls := f.ls
+	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+
+	for _, slot := range []uint64{40, 41, 42} {
+		certRB := leiosAuditCertifyingBlock(t, slot, f.announceHash)
+		ls.auditContinuationBlock(BlockfetchEvent{
+			ConnectionId: f.connId,
+			Block:        certRB,
+			Point: ocommon.NewPoint(
+				certRB.SlotNumber(),
+				certRB.Hash().Bytes(),
+			),
+		}, true)
+	}
+	window := ls.continuationAudit.Load()
+	require.NotNil(t, window)
+	require.Len(
+		t,
+		window.pendingEndorserRefs,
+		1,
+		"three blocks certifying the same closure must queue one reference",
+	)
+
+	ls.auditContinuationBlock(f.spenderBlock(t), true)
+
+	assert.Equal(
+		t,
+		1,
+		window.endorserResolutions,
+		"the shared endorser block must be resolved exactly once per window",
+	)
+	assert.Equal(t, 1, *f.providerCalls)
+	assert.Contains(t, window.producedTxs, string(f.ebTx.Hash().Bytes()))
+	assert.NotContains(
+		t,
+		f.logs.String(),
+		"no producer on the local applied chain",
+	)
+}
+
+// TestContinuationAuditSkipsEndorserResolutionWithoutEndorserSpends is the
+// other half of that finding: the resolution ran even when nothing in the
+// window spent an endorser-resident output, so a node in a dense endorser-block
+// backlog — exactly when the audit is armed — paid for it on every body for no
+// diagnostic value.
+//
+// Here the spending body's producer is an ordinary in-window ranking-block
+// transaction, so the audit must never touch the queued endorser block.
+func TestContinuationAuditSkipsEndorserResolutionWithoutEndorserSpends(
+	t *testing.T,
+) {
+	f := newLeiosAuditFixture(t)
+	ls := f.ls
+	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+
+	ls.auditContinuationBlock(BlockfetchEvent{
+		ConnectionId: f.connId,
+		Block:        f.certRB,
+		Point:        f.certPoint,
+	}, true)
+
+	producerTxId := testHashBytes("ordinary-in-window-producer")
+	producerBlock := &spliceAuditBlock{
+		slot: 45,
+		hash: lcommon.NewBlake2b256(testHashBytes("ordinary-producer-block")),
+		txs: []lcommon.Transaction{
+			mustSpliceAuditTx(
+				t,
+				producerTxId,
+				[]lcommon.TransactionInput{
+					mustSpliceAuditInput(t, producerTxId, 9),
+				},
+			),
+		},
+	}
+	ls.auditContinuationBlock(BlockfetchEvent{
+		ConnectionId: f.connId,
+		Block:        producerBlock,
+		Point: ocommon.NewPoint(
+			producerBlock.slot,
+			producerBlock.hash.Bytes(),
+		),
+	}, true)
+
+	spender := &spliceAuditBlock{
+		slot: 50,
+		hash: lcommon.NewBlake2b256(testHashBytes("ordinary-spender-block")),
+		txs: []lcommon.Transaction{
+			mustSpliceAuditTx(
+				t,
+				testHashBytes("ordinary-spender-tx"),
+				[]lcommon.TransactionInput{
+					mustSpliceAuditInput(t, producerTxId, 0),
+				},
+			),
+		},
+	}
+	ls.auditContinuationBlock(BlockfetchEvent{
+		ConnectionId: f.connId,
+		Block:        spender,
+		Point:        ocommon.NewPoint(spender.slot, spender.hash.Bytes()),
+	}, true)
+
+	window := ls.continuationAudit.Load()
+	require.NotNil(t, window)
+	assert.Equal(
+		t,
+		0,
+		window.endorserResolutions,
+		"a window that spends nothing endorser-resident must not resolve any endorser block",
+	)
+	assert.Equal(t, 0, *f.providerCalls)
+	assert.Len(
+		t,
+		window.pendingEndorserRefs,
+		1,
+		"the reference must stay queued, classified but unresolved",
+	)
+	assert.NotContains(
+		t,
+		f.logs.String(),
+		"no producer on the local applied chain",
+	)
+}
+
+// TestContinuationAuditEndorserResolutionIsBudgeted pins the per-block bound on
+// endorser-block resolution, the analogue of continuationAuditMaxInputsPerBlock
+// for the endorser path: one audited body may not resolve an unbounded number
+// of endorser blocks under the blockfetch mutex. The overflow stays queued for
+// a later body, the window reports inconclusive rather than missing while it is
+// short, and the stop is counted.
+func TestContinuationAuditEndorserResolutionIsBudgeted(t *testing.T) {
+	f := newLeiosAuditFixture(t)
+	ls := f.ls
+	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+	window := ls.continuationAudit.Load()
+	require.NotNil(t, window)
+
+	// Queue one more distinct certified closure than a single body may
+	// resolve. Their parents are absent from the chain, so each resolution
+	// attempt is spent and accounted without needing a provider entry.
+	queued := continuationAuditMaxEndorserBlocksPerBlock + 1
+	for i := range queued {
+		window.pendingEndorserRefs = append(
+			window.pendingEndorserRefs,
+			continuationAuditEndorserRef{
+				certParentHash: testHashBytes(
+					"budget-parent-" + strconv.Itoa(i),
+				),
+				blockSlot: uint64(60 + i),
+			},
+		)
+		window.pendingEndorserSeen[window.pendingEndorserRefs[i].key()] = struct{}{}
+	}
+
+	ls.auditContinuationBlock(f.spenderBlock(t), true)
+
+	assert.Equal(
+		t,
+		continuationAuditMaxEndorserBlocksPerBlock,
+		window.endorserResolutions,
+		"one body must not resolve more endorser blocks than its budget",
+	)
+	assert.Len(
+		t,
+		window.pendingEndorserRefs,
+		1,
+		"the overflow must stay queued for a later body",
+	)
+	assert.True(t, window.endorserProducersPending)
+	assert.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(
+			ls.metrics.continuationAuditOutcomes.WithLabelValues(
+				"skipped_budget",
+			),
+		),
+	)
+	assert.NotContains(
+		t,
+		f.logs.String(),
+		"no producer on the local applied chain",
+	)
+}
+
 // TestContinuationAuditAcceptsAnnouncedEndorserBlockProducer covers the
 // forward/CIP path, where a ranking block applies the endorser block it
-// announces itself rather than one its parent announced. The audit resolves
-// the reference through the same leiosEndorserBlockForApply the apply path
-// uses, so both Leios shapes are covered by one change; this pins the CIP half
-// so a future divergence in that selector cannot silently reintroduce the
-// false positive on the conformant path.
+// announces itself rather than one its parent announced. The audit classifies
+// the reference the same way the apply path selects it, so both Leios shapes
+// are covered by one change; this pins the CIP half so a future divergence in
+// that selector cannot silently reintroduce the false positive on the
+// conformant path.
 func TestContinuationAuditAcceptsAnnouncedEndorserBlockProducer(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
@@ -536,10 +838,12 @@ func TestContinuationAuditAcceptsAnnouncedEndorserBlockProducer(t *testing.T) {
 	}
 
 	rawTx, _, ebTx := leiosApplyTestTx(t, 0x7C)
+	providerCalls := 0
 	ls.config.EndorserBlockProvider = func(
 		hash []byte,
 		slot uint64,
 	) ([]cbor.RawMessage, bool) {
+		providerCalls++
 		// On the CIP path the endorser block is bound to the announcing
 		// block's own slot, not a parent's.
 		if string(hash) != string(ebHash.Bytes()) ||
@@ -558,6 +862,14 @@ func TestContinuationAuditAcceptsAnnouncedEndorserBlockProducer(t *testing.T) {
 			announcing.Hash().Bytes(),
 		),
 	}, true)
+	window := ls.continuationAudit.Load()
+	require.NotNil(t, window)
+	require.Equal(
+		t,
+		0,
+		providerCalls,
+		"an announced reference must be classified without being resolved",
+	)
 
 	spender := &spliceAuditBlock{
 		slot: 50,
@@ -584,9 +896,8 @@ func TestContinuationAuditAcceptsAnnouncedEndorserBlockProducer(t *testing.T) {
 		"no producer on the local applied chain",
 		"a producer in the endorser block this window announced must not be reported",
 	)
-	window := ls.continuationAudit.Load()
-	require.NotNil(t, window)
 	assert.False(t, window.endorserProducersPending)
+	assert.Equal(t, 1, window.endorserResolutions)
 	assert.Contains(
 		t,
 		window.producedTxs,
