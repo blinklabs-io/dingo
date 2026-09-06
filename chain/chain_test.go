@@ -3062,6 +3062,23 @@ func TestIteratorPostRollbackBlockDelivery(t *testing.T) {
 			rollbackPoint.Slot, rollbackPoint.Hash,
 		)
 	}
+	if len(next.RollbackBlocks) != len(testBlocks)-2 {
+		t.Fatalf(
+			"rollback payload length: got %d, want %d",
+			len(next.RollbackBlocks), len(testBlocks)-2,
+		)
+	}
+	for idx, block := range testBlocks[2:] {
+		got := next.RollbackBlocks[len(next.RollbackBlocks)-1-idx]
+		if got.Slot != block.SlotNumber() ||
+			!bytes.Equal(got.Hash, block.Hash().Bytes()) {
+			t.Fatalf(
+				"rollback payload %d: got %d.%x, want %d.%x",
+				idx, got.Slot, got.Hash,
+				block.SlotNumber(), block.Hash().Bytes(),
+			)
+		}
+	}
 
 	// After the rollback signal the chain is at testBlocks[1].
 	// Add testBlocks[2] back onto the chain.

@@ -68,7 +68,10 @@ func clearRollbackIntent(db *database.Database) error {
 	return db.DeleteSyncState(durableRollbackIntentSyncKey, nil)
 }
 
-func (ls *LedgerState) ensureRollbackIntent(point ocommon.Point) error {
+func (ls *LedgerState) ensureRollbackIntent(
+	point ocommon.Point,
+	rollbackBlocks []models.Block,
+) error {
 	existing, _, pending, err := loadRollbackIntent(ls.db)
 	if err != nil {
 		return err
@@ -84,11 +87,13 @@ func (ls *LedgerState) ensureRollbackIntent(point ocommon.Point) error {
 		}
 		return nil
 	}
-	blocks, err := ls.readBlocksAboveSlot(point.Slot)
-	if err != nil {
-		return fmt.Errorf("read rollback undo blocks: %w", err)
+	if len(rollbackBlocks) == 0 {
+		rollbackBlocks, err = ls.readBlocksAboveSlot(point.Slot)
+		if err != nil {
+			return fmt.Errorf("read rollback undo blocks: %w", err)
+		}
 	}
-	return persistRollbackIntent(ls.db, point, blocks)
+	return persistRollbackIntent(ls.db, point, rollbackBlocks)
 }
 
 func loadRollbackIntent(

@@ -2074,6 +2074,7 @@ func TestProcessChainIteratorRollbackAppliesMatchingRollback(t *testing.T) {
 	err := fixture.ls.processChainIteratorRollback(
 		t.Context(),
 		fixture.ancestorTip.Point,
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -2105,6 +2106,7 @@ func TestProcessChainIteratorRollbackNoopWhenLedgerAlreadyAtPoint(
 	err := fixture.ls.processChainIteratorRollback(
 		t.Context(),
 		fixture.ancestorTip.Point,
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -2122,6 +2124,7 @@ func TestProcessChainIteratorRollbackSkipsStaleRollback(t *testing.T) {
 	err := fixture.ls.processChainIteratorRollback(
 		t.Context(),
 		fixture.ancestorTip.Point,
+		nil,
 	)
 	require.ErrorIs(t, err, errRestartLedgerPipeline)
 
@@ -2165,6 +2168,7 @@ func TestProcessChainIteratorRollbackAppliesStaleRollbackWhenLedgerTipAbandoned(
 	err := fixture.ls.processChainIteratorRollback(
 		t.Context(),
 		fixture.ancestorTip.Point,
+		nil,
 	)
 	require.ErrorIs(t, err, errRestartLedgerPipeline)
 
@@ -2177,6 +2181,39 @@ func TestProcessChainIteratorRollbackAppliesStaleRollbackWhenLedgerTipAbandoned(
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
 	assert.Equal(t, fixture.ancestorTip, dbTip)
+}
+
+func TestProcessChainIteratorRollbackUsesCapturedBlocksAfterChainDeletion(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	removedBlock, err := database.BlockByPoint(
+		fixture.ls.db,
+		fixture.currentTip.Point,
+	)
+	require.NoError(t, err)
+	putPrimaryChainOnForkBeyondK(t, fixture, "captured-rollback-payload")
+
+	injected := errors.New("injected metadata truncation failure")
+	fixture.ls.rollbackTruncateAfterSlotFunc = func(
+		ocommon.Point,
+		uint64,
+		*database.Txn,
+	) (ochainsync.Tip, []byte, error) {
+		return ochainsync.Tip{}, nil, injected
+	}
+	err = fixture.ls.processChainIteratorRollback(
+		t.Context(),
+		fixture.ancestorTip.Point,
+		[]models.Block{removedBlock},
+	)
+	require.ErrorIs(t, err, injected)
+
+	intentPoint, intentBlocks, pending, err := loadRollbackIntent(fixture.ls.db)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Equal(t, fixture.ancestorTip.Point, intentPoint)
+	require.Equal(t, []models.Block{removedBlock}, intentBlocks)
 }
 
 func TestLedgerProcessBlocksFromSourceRestartsOnStaleIteratorRollback(

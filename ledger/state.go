@@ -2959,6 +2959,13 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 }
 
 func (ls *LedgerState) rollback(point ocommon.Point) error {
+	return ls.rollbackWithBlocks(point, nil)
+}
+
+func (ls *LedgerState) rollbackWithBlocks(
+	point ocommon.Point,
+	rollbackBlocks []models.Block,
+) error {
 	// Rolling back to the point we already sit at is a no-op. Skip
 	// it entirely so we don't publish a "local ledger rollback"
 	// resync event for a rollback that didn't move the ledger. That
@@ -2999,7 +3006,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
 		return ErrRollbackExceedsMithrilBoundary
 	}
-	if err := ls.ensureRollbackIntent(point); err != nil {
+	if err := ls.ensureRollbackIntent(point, rollbackBlocks); err != nil {
 		return fmt.Errorf("prepare rollback intent: %w", err)
 	}
 	// Bracket every rollback mutation so split reward precomputation cannot
@@ -3574,6 +3581,7 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 func (ls *LedgerState) processChainIteratorRollback(
 	ctx context.Context,
 	point ocommon.Point,
+	rollbackBlocks []models.Block,
 ) error {
 	ls.drainBlockPipelineBeforeRollback(ctx, "chain iterator rollback")
 	chainTip := ls.chain.Tip()
@@ -3620,7 +3628,7 @@ func (ls *LedgerState) processChainIteratorRollback(
 				"ledger_tip_hash",
 				hex.EncodeToString(currentTip.Point.Hash),
 			)
-			if err := ls.rollback(point); err != nil {
+			if err := ls.rollbackWithBlocks(point, rollbackBlocks); err != nil {
 				return err
 			}
 			return errRestartLedgerPipeline
@@ -4169,11 +4177,12 @@ func (ls *LedgerState) StabilityWindow() uint64 {
 }
 
 type readChainResult struct {
-	rollbackPoint ocommon.Point
-	blocks        []ledger.Block
-	err           error
-	rollback      bool
-	done          chan struct{}
+	rollbackPoint  ocommon.Point
+	rollbackBlocks []models.Block
+	blocks         []ledger.Block
+	err            error
+	rollback       bool
+	done           chan struct{}
 }
 
 func trimReadBatchForRollback(
@@ -4424,9 +4433,10 @@ func (ls *LedgerState) ledgerReadChainIterator(
 				}
 			} else {
 				result = readChainResult{
-					rollback:      true,
-					rollbackPoint: rollbackNext.Point,
-					done:          make(chan struct{}),
+					rollback:       true,
+					rollbackPoint:  rollbackNext.Point,
+					rollbackBlocks: rollbackNext.RollbackBlocks,
+					done:           make(chan struct{}),
 				}
 			}
 		}
@@ -5664,6 +5674,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					if err = ls.processChainIteratorRollback(
 						ctx,
 						result.rollbackPoint,
+						result.rollbackBlocks,
 					); err != nil {
 						completeReadResult()
 						return fmt.Errorf("process rollback: %w", err)
