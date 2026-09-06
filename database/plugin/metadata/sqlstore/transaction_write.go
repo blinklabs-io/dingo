@@ -465,23 +465,8 @@ RETURNING id`,
 			if err != nil {
 				return err
 			}
-			certificateRefs, err := s.applyTransactionCertificates(
-				ctx,
-				db,
-				transactionID,
-				transaction.Certificates(),
-				point,
-				index,
-				map[int]uint64{},
-			)
-			if err != nil {
-				return err
-			}
 			collateralReturn := transaction.CollateralReturn()
-			stakeRefs := append(
-				make([]models.StakeCredentialRef, 0, len(certificateRefs)),
-				certificateRefs...,
-			)
+			stakeRefs := make([]models.StakeCredentialRef, 0)
 			for _, produced := range transaction.Produced() {
 				model, err := models.UtxoLedgerToModel(produced, point.Slot)
 				if err != nil {

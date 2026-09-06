@@ -98,7 +98,7 @@ func TestSetTransactionAttributesPointerAddressStake(t *testing.T) {
 }
 
 func TestSetGapTransactionAttributesPointerAddressStake(t *testing.T) {
-	store, _ := newSharedSQLStore(t)
+	store, raw := newSharedSQLStore(t)
 	stakeKey := lcommon.NewBlake2b224(bytes.Repeat([]byte{0x31}, 28))
 	registration := &mockTransaction{
 		hash:    lcommon.NewBlake2b256(bytes.Repeat([]byte{0x32}, 32)),
@@ -119,6 +119,11 @@ func TestSetGapTransactionAttributesPointerAddressStake(t *testing.T) {
 		4,
 		nil,
 	))
+	var registrationCount int
+	require.NoError(t, raw.QueryRow(
+		`SELECT COUNT(*) FROM stake_registration`,
+	).Scan(&registrationCount))
+	require.Zero(t, registrationCount)
 
 	paymentKey := bytes.Repeat([]byte{0x41}, lcommon.AddressHashSize)
 	pointerAddressBytes := append(
@@ -149,6 +154,5 @@ func TestSetGapTransactionAttributesPointerAddressStake(t *testing.T) {
 
 	stored, err := store.GetUtxo(hash.Bytes(), 0, nil)
 	require.NoError(t, err)
-	require.Equal(t, stakeKey.Bytes(), stored.StakingKey)
-	require.Equal(t, uint8(0), stored.CredentialTag)
+	require.Empty(t, stored.StakingKey)
 }
