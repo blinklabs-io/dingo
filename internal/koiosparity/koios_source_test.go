@@ -640,13 +640,42 @@ func TestPinnedSourceRefusesCheckWrites(t *testing.T) {
 	assert.Empty(t, rows)
 }
 
-// TestPinRecordedSourceOnUnstampedCacheEnforcesNothing keeps a check against a
-// cache no writer has ever stamped behaving exactly as it did before.
-func TestPinRecordedSourceOnUnstampedCacheEnforcesNothing(t *testing.T) {
-	cache := newSourceTestCache(t)
-	require.NoError(t, cache.PinRecordedSource("preview"))
-	assert.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
+// TestPinnedUnstampedCacheWritesUntilItIsStamped covers the legacy cache. It
+// has to hold both halves at once: a check against a cache nothing has ever
+// stamped must keep working exactly as before, and must still stop if another
+// process stamps it with a different host mid-run — the case that slips
+// through if an unstamped cache pins nothing at all.
+func TestPinnedUnstampedCacheWritesUntilItIsStamped(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.db")
+	checker, err := OpenCache(path, nil)
+	require.NoError(t, err)
+	defer checker.Close() //nolint:errcheck
+	require.NoError(t, checker.PinRecordedSource("preview"))
+
+	status := CheckEpochStatus{
 		Network: "preview", Epoch: 7,
 		LastCheckedAt: time.Now().UTC(), Status: StatusPass,
-	}))
+	}
+	require.NoError(t, checker.UpsertCheckEpochStatus(status),
+		"an unstamped cache must behave as it did before this guard existed")
+
+	// Another process records the public root explicitly: same oracle, so the
+	// attribution still matches and the check carries on.
+	stamper, err := OpenCache(path, nil)
+	require.NoError(t, err)
+	defer stamper.Close() //nolint:errcheck
+	_, err = stamper.RecordKoiosSource(
+		"preview", koiosBaseURLs["preview"], time.Now().UTC(),
+	)
+	require.NoError(t, err)
+	assert.NoError(t, checker.UpsertCheckEpochStatus(status),
+		"recording the root the cache was already attributed to changes nothing")
+
+	// Switching it to a custom host does end the run.
+	_, err = stamper.RecordKoiosSource(
+		"preview", "https://koios.example/api/v1", time.Now().UTC(),
+	)
+	require.NoError(t, err)
+	assert.Error(t, checker.UpsertCheckEpochStatus(status),
+		"a legacy cache switched to another host mid-check must stop the check")
 }

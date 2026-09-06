@@ -232,6 +232,12 @@ type Cache struct {
 	// have this one keep appending the old oracle's answers under the new
 	// marker. Keyed by network because the root is resolved per network, so a
 	// claim on one says nothing about another.
+	//
+	// Written only by RecordKoiosSource and PinRecordedSource, which every
+	// caller runs before starting the goroutines that read it (Fetch before
+	// its epoch fetchers, Observer.Start before its run goroutine, Check
+	// before its workers). Claiming on a handle already in concurrent use
+	// would need a lock added here.
 	claimedSources map[string]string
 }
 
@@ -1504,17 +1510,21 @@ func (c *Cache) PendingKoiosSourceChange(
 // A cache with nothing recorded pins nothing, so a check against a cache no
 // writer has ever stamped behaves exactly as before.
 func (c *Cache) PinRecordedSource(network string) error {
-	current, recorded, err := c.GetKoiosSource(network)
+	recordedURL, recorded, err := c.GetKoiosSource(network)
 	if err != nil {
 		return err
-	}
-	if !recorded {
-		return nil
 	}
 	if c.claimedSources == nil {
 		c.claimedSources = make(map[string]string, 1)
 	}
-	c.claimedSources[network] = current
+	// An unstamped cache pins the public root it is attributed to, not
+	// nothing. Pinning nothing would leave the one case this is for — a
+	// legacy cache another process switches to a custom host mid-check —
+	// unguarded, letting the check repopulate verdicts over rows that were
+	// just discarded.
+	c.claimedSources[network] = attributedKoiosSource(
+		network, recordedURL, recorded,
+	)
 	return nil
 }
 
@@ -1637,23 +1647,24 @@ func (c *Cache) assertClaimedSource(tx *sql.Tx, network string) error {
 	if !ok {
 		return nil
 	}
-	var current string
+	var recorded string
 	err := tx.QueryRow(
 		"SELECT base_url FROM koios_source WHERE network = ?",
 		network,
-	).Scan(&current)
-	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf(
-			"koios source for %q was cleared while this run held %q; another writer owns this cache",
-			network, claimed,
-		)
-	}
-	if err != nil {
+	).Scan(&recorded)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("verify koios source: %w", err)
 	}
+	// Compared as attributions, not as raw rows, so the unstamped cache is
+	// judged by the same rule everything else uses: no row means the public
+	// root. A handle that pinned an unstamped cache therefore keeps writing
+	// while it stays unstamped, and starts failing the moment another process
+	// stamps it with a different host — which is the case that would otherwise
+	// slip through, since pinning nothing enforces nothing.
+	current := attributedKoiosSource(network, recorded, err == nil)
 	if current != claimed {
 		return fmt.Errorf(
-			"koios source for %q changed from %q to %q while this run was fetching; refusing to write another host's answers into this cache",
+			"koios source for %q changed from %q to %q while this run was writing; refusing to write another host's answers into this cache",
 			network, claimed, current,
 		)
 	}

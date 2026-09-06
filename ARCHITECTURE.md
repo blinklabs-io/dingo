@@ -6633,8 +6633,11 @@ never the reverse.
   it calls `PinRecordedSource` at startup and claims whatever is recorded: the
   same re-point that discards check evidence then fails the in-flight run's
   `CommitEpochMismatches`/`UpsertCheckEpochStatus`/`InsertCheckRun` instead of
-  letting it repopulate them under a source its verdicts never saw. A cache
-  nothing has stamped pins nothing.
+  letting it repopulate them under a source its verdicts never saw. An
+  unstamped cache pins the public root it is attributed to rather than pinning
+  nothing, and `assertClaimedSource` compares attributions rather than raw
+  rows, so a legacy cache keeps writing while it stays unstamped and stops the
+  moment another process stamps it with a different host.
 - **Koios endpoint.** `/account_rewards` is deprecated; `/account_reward_
   history` is the replacement (`KoiosClient.GetAccountRewardHistory`), taking
   the same `stake_addresses_with_epoch_no` POST body shape via a new `post()`
