@@ -818,10 +818,9 @@ func (s *Store) GetAccountSumsByCredential(
 	stakingKey []byte,
 	txn types.Txn,
 ) (models.AccountSums, error) {
-	ret := models.AccountSums{
-		ReservesSum: new(big.Int),
-		TreasurySum: new(big.Int),
-	}
+	// The two MIR totals are non-nil on every return, including the failure
+	// ones, so AccountSums never hands a caller a nil *big.Int.
+	ret := models.NewAccountSums()
 	if len(stakingKey) == 0 {
 		return ret, nil
 	}
@@ -845,7 +844,7 @@ WHERE withdrawal = TRUE AND credential_tag = ? AND staking_key = ?`,
 		stakingKey,
 	)
 	if err != nil {
-		return models.AccountSums{}, fmt.Errorf(
+		return models.NewAccountSums(), fmt.Errorf(
 			"query account sums: sum withdrawals: %w",
 			err,
 		)
@@ -860,7 +859,7 @@ WHERE mir.pot = 0 AND reward.credential_tag = ?
 		stakingKey,
 	)
 	if err != nil {
-		return models.AccountSums{}, fmt.Errorf(
+		return models.NewAccountSums(), fmt.Errorf(
 			"query account sums: sum reserves MIR: %w",
 			err,
 		)
@@ -875,7 +874,7 @@ WHERE mir.pot = 1 AND reward.credential_tag = ?
 		stakingKey,
 	)
 	if err != nil {
-		return models.AccountSums{}, fmt.Errorf(
+		return models.NewAccountSums(), fmt.Errorf(
 			"query account sums: sum treasury MIR: %w",
 			err,
 		)

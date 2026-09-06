@@ -217,22 +217,11 @@ func TestApplyMIRCerts_MultipleDistributionsSameAccount(t *testing.T) {
 	require.NotNil(t, state)
 	assert.Equal(t, uint64(9_250), uint64(state.Reserves))
 
-	rows, err := gdb.Query(`
-SELECT tx_hash FROM account_reward_delta
-WHERE credential_tag = ? AND staking_key = ? AND added_slot = ?
-ORDER BY id ASC`,
-		0, cred, boundarySlot,
+	require.Len(
+		t,
+		boundaryRewardSourceHashes(t, gdb, cred, boundarySlot),
+		1,
 	)
-	require.NoError(t, err)
-	defer rows.Close()
-	var hashes [][]byte
-	for rows.Next() {
-		var hash []byte
-		require.NoError(t, rows.Scan(&hash))
-		hashes = append(hashes, hash)
-	}
-	require.NoError(t, rows.Err())
-	require.Len(t, hashes, 1)
 }
 
 // TestApplyMIRCerts_ReservesAndTreasuryStayDistinct verifies that a reserves
@@ -320,7 +309,12 @@ ORDER BY id ASC`,
 	return hashes
 }
 
-func TestApplyMIRCerts_DistributionTotalOverflowRollsBack(t *testing.T) {
+// TestApplyMIRCerts_DistributionTotalBeyondEveryPotIsNoOp verifies that folded
+// credits whose per-pot total no longer fits uint64 discard the boundary rather
+// than failing it. cardano-ledger folds over unbounded Coin, so a total larger
+// than the pot reaches its no-op branch; failing would wedge the node, since
+// the stored certificates are re-read and re-fail on every retry.
+func TestApplyMIRCerts_DistributionTotalBeyondEveryPotIsNoOp(t *testing.T) {
 	ls, db, gdb := newMIRTestLedger(t)
 
 	maxUint := ^uint64(0)
@@ -346,8 +340,8 @@ func TestApplyMIRCerts_DistributionTotalOverflowRollsBack(t *testing.T) {
 	}))
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, maxUint, 50, nil))
 
-	err := applyMIRCertsErr(ls, db, 0, 1_000)
-	require.ErrorContains(t, err, "MIR distribution total overflow")
+	require.NoError(t, applyMIRCertsErr(ls, db, 0, 1_000),
+		"a total larger than every pot must not fail the epoch boundary")
 
 	accountA, err := db.GetAccountByCredential(0, credA, false, nil)
 	require.NoError(t, err)

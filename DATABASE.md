@@ -2370,24 +2370,28 @@ Backs the Blockfrost account `withdrawals_sum`, `reserves_sum`, and
 `treasury_sum` fields. All three totals are reconstructed from rollback-aware
 persisted rows rather than stored as running counters:
 
+Each total selects its rows and adds them in Go rather than asking the engine
+for a `SUM`: the amount columns are decimal text, and coercing them to a signed
+engine integer differs across SQLite, PostgreSQL, and MySQL and cannot span the
+full `uint64` range.
+
 ```sql
 -- withdrawals_sum
-SELECT COALESCE(SUM(amount), 0)
+SELECT amount
 FROM account_reward_delta
 WHERE withdrawal = true AND credential_tag = $1 AND staking_key = decode($2, 'hex');
 
 -- reserves_sum (pot = 0) / treasury_sum (pot = 1)
-SELECT COALESCE(SUM(r.amount), 0)
+SELECT r.amount
 FROM move_instantaneous_rewards_reward r
 JOIN move_instantaneous_rewards mir ON mir.id = r.mir_id
 WHERE mir.pot = $pot AND r.credential_tag = $1 AND r.credential = decode($2, 'hex');
 ```
 
-A withdrawal is `coin`, so `withdrawals_sum` is unsigned. A MIR reward is
-`delta_coin`, so `reserves_sum` and `treasury_sum` are summed as signed values
-and are rendered with their sign. The rows are summed in Go rather than by the
-engine: the amount columns are decimal text, and `SUM` over them differs across
-SQLite, PostgreSQL, and MySQL.
+A withdrawal is `coin`, so `withdrawals_sum` is accumulated as `uint64` and a
+negative row is an error. A MIR reward is `delta_coin`, so `reserves_sum` and
+`treasury_sum` are accumulated as signed unbounded values and are rendered with
+their sign.
 
 ### `GetStakeRegistrationsByCredential`
 

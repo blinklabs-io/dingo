@@ -218,21 +218,28 @@ func (b *mirBoundary) isEmpty() bool {
 // stays unsigned: every credit reaching here is the non-negative fold of the
 // epoch's deltas for one credential, so it is `fold` over cardano-ledger's
 // restricted InstantaneousRewards map.
-func (b *mirBoundary) addCredit(credit mirCredit) error {
+//
+// A total that no longer fits uint64 necessarily exceeds every Ada pot, so it
+// is reported as a discarded boundary rather than an error, exactly like a
+// single fold that does not fit. cardano-ledger folds over unbounded Coin and
+// reaches its no-op branch here; failing instead would wedge the node, since
+// the stored certificates are re-read and re-fail on every retry.
+func (b *mirBoundary) addCredit(credit mirCredit) {
 	total := &b.totalReserves
 	if credit.pot == mirPotTreasury {
 		total = &b.totalTreasury
 	}
 	if credit.amount > ^uint64(0)-*total {
-		return fmt.Errorf(
-			"MIR distribution total overflow: current=%d adding=%d",
+		b.discard = fmt.Sprintf(
+			"MIR distribution total for pot %d exceeds every Ada pot: %d plus %d",
+			credit.pot,
 			*total,
 			credit.amount,
 		)
+		return
 	}
 	*total += credit.amount
 	b.credits = append(b.credits, credit)
-	return nil
 }
 
 // addTransfer records a pot-to-pot transfer as an outflow from its source pot
@@ -344,13 +351,14 @@ func (ls *LedgerState) collectMIRBoundary(
 			)
 			return boundary, nil
 		}
-		if err := boundary.addCredit(mirCredit{
+		boundary.addCredit(mirCredit{
 			pot:           key.pot,
 			credentialTag: key.tag,
 			credential:    []byte(key.credential),
 			amount:        net.Uint64(),
-		}); err != nil {
-			return nil, err
+		})
+		if boundary.discard != "" {
+			return boundary, nil
 		}
 	}
 	return boundary, nil

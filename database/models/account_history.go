@@ -130,3 +130,13 @@ type AccountSums struct {
 	// account sourced from the treasury pot. See ReservesSum.
 	TreasurySum *big.Int
 }
+
+// NewAccountSums returns an AccountSums with every total at zero and neither
+// signed total nil. Readers return it on their failure paths too, so the
+// non-nil guarantee does not depend on the caller checking the error first.
+func NewAccountSums() AccountSums {
+	return AccountSums{
+		ReservesSum: new(big.Int),
+		TreasurySum: new(big.Int),
+	}
+}
