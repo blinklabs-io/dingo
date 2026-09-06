@@ -22,6 +22,10 @@ continues after that rewrite drains; direct close calls join the same cleanup.
 Live restore and truncate classify that deadline as an unconfirmed storage
 drain and request a supervised restart; they never resolve a replacement store
 against the same data directory while the prior close may still own it.
+`LedgerState.Close` retains the first close result until all later callers have
+observed it, so the normal shutdown triggered by that cancellation cannot
+mistake an earlier unconfirmed drain for a successful second close and close
+the database underneath the outstanding worker.
 API providers are resolved for lifecycle only because node composition has no
 in-process consumer of their concrete server values. Each API provider's
 TLS/authentication policy goes through a merged-config handoff, not a
@@ -1866,7 +1870,14 @@ fallback:
   are accepted only when they are HTTPS, credential-free, and hosted by the
   expected archive hostname or a configured `barkBlockDownloadHosts` allowlist
   entry; redirects are disabled and response bodies are capped before buffering.
-  This wrapper can be used with or without local History Expiry.
+  This wrapper can be used with or without local History Expiry. It is
+  installed by replacing the database's blob-store reference
+  (`Database.SetBlobStore`) after `database.New` has returned, on both the
+  `Run()` startup path and `node_lifecycle.go`'s live reconfigure path where
+  readers are already running — see "Blob-store replacement" under Threading
+  and Concurrency for the rules that make that safe. The wrapper takes the
+  store it replaces as its upstream and forwards `Close` to it, so the
+  replaced store is kept alive rather than retired.
 
 ### Tiered CBOR Cache
 
@@ -4479,6 +4490,31 @@ disposition instead of a burned leader slot and a rejected `AddLocalBlock`
 call. The check is opt-in: a nil `OpCertLedgerView` (dev mode, embedders
 without ledger wiring) skips it entirely, unchanged from before.
 
+The counter and the KES period are carried at the width the reference
+decodes them. cardano-ledger reads the counter as `Word64` and the KES
+period as `KESPeriod{Word}`, and the CDDL declares both `uint .size 8`, so
+the header bodies the forger encodes and KES-signs -- `tpraosHeaderBody` and
+`praosOpCert` in `ledger/forging/builder.go` -- declare both `uint64` and no
+forging path narrows either value. Those structs are dingo's own rather than
+gouroboros types precisely because they are what gets signed, so their field
+widths are fixed here instead of following a release.
+
+The counter alone carries a further bound that is dingo's own rather than
+the chain's: `eras.MaxPersistableOpCertCounter`, which is `math.MaxInt64`.
+`pool_opcert_sequence`.`sequence` and `pool`.`latest_op_cert_sequence` are
+signed engine integers that carry the monotonicity ordering as well as the
+value, so a counter above that bound has no representation the `MAX`,
+`<`, and index reads over those columns would order correctly.
+`ledgerProcessBlock` refuses a block carrying one before processing its
+transactions -- for validated and unvalidated blocks alike, because the
+counter is recorded for every applied block -- naming the bound, rather than
+letting the block fail inside `UpdatePoolOpCertSequence` once its
+transactions are already applied. The forge loop's pre-flight and the block
+builder refuse the same counter, so the node never forges a block it could
+not then apply. The bound is unreachable from Babbage onward, where Praos
+rejects a counter more than one past the last seen; only the TPraos eras,
+which enforce monotonicity alone, admit an arbitrary first counter.
+
 `LedgerState.LatestOpCertSequence` -- the `LedgerView` method both this
 gate and startup's `PoolCredentials.ValidateAgainstLedger` read through --
 resolves the "latest observed" counter via the same Mithril-boundary-aware
@@ -5813,6 +5849,17 @@ TLS and token authentication are configured through
 `plugins.api.mesh.config.tls`/`config.auth`; see "API security" above.
 
 Implements the Mesh (formerly Rosetta) API specification for wallet integration and chain analysis. Provides endpoints for network status, account balances, block queries, transaction construction, and mempool access.
+
+Request bodies are bounded in two dimensions, because either bound alone
+leaves a handler goroutine reachable indefinitely. `maxRequestBody` (1 MiB)
+caps how many bytes a client may send; `defaultRequestBodyTimeout` (30s),
+applied as a read deadline in `decodeRequest` and cleared once the body is
+read, caps how long it may take to send them. A request that breaches either
+bound fails as the existing `ErrInvalidRequest`, so callers see no new error.
+`listenerReadTimeout` (60s, the listener's `http.Server.ReadTimeout`) is the
+backstop for a request whose body no handler reads — an unknown route, or one
+rejected by authentication before the handler runs — which the per-request
+deadline never sees.
 
 The server depends on four narrow interfaces (`api/mesh/node_interface.go`) —
 `MeshChain`, `MeshDatabase`, `MeshLedgerState`, and `MeshMempool` — rather than
@@ -7713,6 +7760,58 @@ the continuation drain without holding the scheduling mutex while waiting.
 | Worker Pools | Database operations and event delivery |
 | sync.Once | Ensure single shutdown execution |
 
+### Blob-store replacement
+
+`Database.blobRef` is guarded by an `RWMutex` (`database/blob_store.go`).
+`Blob()` and the internal pin accessor are its only readers, `SetBlobStore` its
+only writer, so a replacement cannot race a reader — `SetBlobStore` is called
+after `database.New` has returned on both the startup and live-reconfigure
+paths, by which point the size-metrics goroutine `New` started is already
+ticking against the same field.
+
+Replacement swaps a whole reference, not the store inside one, and each
+reference counts the operations pinning it. A `Txn` pins at construction and
+releases at `Commit`/`Rollback`/`Release` (through the same `finishLocked` that
+releases the commit barrier), and `Txn.BlobStore()` returns the store it
+pinned: the store and the `types.Txn` handle opened on it therefore always come
+from the same installation, which re-reading `Blob()` mid-transaction would not
+guarantee. Blob work that runs outside a transaction — the blob-store identity
+mint, `lifecycle.Snapshot`'s backup call, and
+`LedgerState.cleanupOrphanedBlobs` — brackets itself with `Database.PinBlob`
+and the release func it returns. `BlobBlockIterator` holds its pin for the
+lifetime of a batch rather than a call: it scans a batch of block keys from one
+store and reads each block's CBOR back in a later `NextRaw`, and a replacement
+between the two would make a scanned block look absent, which `NextRaw` skips
+with a warning instead of reporting. Work that may or may not be handed a
+transaction follows the same rule from one place: the tiered CBOR cache's cold
+path (`ResolveUtxoCbor`, `ResolveTxCbor`) takes the caller's `*database.Txn`
+and resolves through that transaction's store when it has one, pinning the
+installed store only when it does not. That is why those two entry points take
+the transaction rather than its bare `types.Txn` handle — a bare handle does
+not say which store it belongs to.
+
+`SetBlobStore` returns the replaced store and a drain func. New operations get
+the new store immediately, so nothing blocks; drain returns once every
+operation pinned on the replaced store has finished, and that is the point at
+which the replaced store may be closed. `SetBlobStore` never closes anything
+itself, because the two production callers wrap the previous store rather than
+retiring it. Drain covers the reference that call retired, so a caller that
+intends to close the replaced store must not install it again before drain
+returns: a second installation of the same store counts its pins separately.
+`Blob()` deliberately hands back an unpinned reference for callers that only
+identify, wrap, or ask a whole-store question of the current store; its result
+must be used within the call that obtained it.
+
+"Never closes" also covers partial-commit recovery. When `Txn.Commit` returns
+`types.ErrPartialCommit` the blob transaction has committed and the metadata
+has not, and the transaction releases its pin as it finishes; the recovery that
+trims the blob store back to the metadata tip runs afterwards, from
+`LedgerState.RecoverCommitTimestampConflict`, against the store installed at
+that point. No pin spans that gap on purpose — recovery is caller-scheduled and
+unbounded, so a pin held for it would block drain indefinitely. The replaced
+store staying open, reachable through the wrapper installed over it, is what
+keeps recovery correct.
+
 `LedgerState` publishes its read-mostly state through two copy-on-write
 snapshots. The consensus snapshot groups the current epoch, era, current and
 previous-era protocol parameters, epoch cache, and hard-fork transition
@@ -8497,9 +8596,28 @@ snapshots are imported. It resolves each epoch against its own era rather than
 the current one: mark, set and go span three epochs, so an import landing in
 the first two epochs of a new era has set or go in the era before it, with a
 different boundary slot and epoch length. An epoch it cannot place at all is
-skipped rather than seeded from a guessed window. Block counts are not seeded and
-do not need to be — `rewardBlockCounts` derives them by scanning the imported
-chain for the performance epoch.
+skipped rather than seeded from a guessed window.
+
+Block counts are seeded, because they cannot be derived. A bootstrap applies no
+block at or below its anchor, so there is no imported chain for
+`rewardBlockCounts` to scan: `CountPoolBlocksInSlotRange` raises its start slot
+past `mithril_ledger_slot` precisely so the certified opcert rows are not
+mistaken for blocks, which leaves an epoch that ended below the anchor with a
+count of zero for every pool. Pool performance is beta/sigma_a with beta the
+pool's share of the epoch's blocks, so that zero credits nothing to anyone and
+still reports a completed round, and the chain contradicts the resulting state
+at the first withdrawal of rewards the reference did credit (issue #3767). The
+snapshot carries what is missing: `NewEpochState.nesBprev` holds the blocks
+minted in epoch E-1 and `nesBcur` those minted in E up to the anchor, which are
+the performance epochs of the first two rounds after an import in E.
+`importBlocksMade` persists both into `imported_pool_block_count`, with the
+epoch total and the fact of the import in `imported_epoch_block_total`, and
+`rewardBlockCounts` adds them to the disjoint counts observed above the anchor.
+The separate total row exists because a `BlocksMade` map with no entries writes
+no per-pool rows, and a certified zero-block epoch must not read as an epoch
+nothing was imported for. An epoch the anchor covers with no seeded counts has
+unknown performance, and the round is declined and reported rather than
+distributed at zero.
 
 The same imported reward window also makes protocol-parameter history part of
 the snapshot contract. The first boundary after a snapshot in epoch E consumes

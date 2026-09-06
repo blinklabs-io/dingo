@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"bytes"
+	"database/sql"
 	"math"
 	"math/big"
 	"testing"
@@ -72,6 +73,7 @@ func newPointerAddress(
 
 type pointerStakeFixture struct {
 	store    *sqlstore.Store
+	db       *sql.DB
 	pool     []byte
 	stakeKey lcommon.CredentialHash
 	nextTx   byte
@@ -79,9 +81,10 @@ type pointerStakeFixture struct {
 
 func newPointerStakeFixture(t *testing.T) *pointerStakeFixture {
 	t.Helper()
-	store, _ := newSharedSQLStore(t)
+	store, db := newSharedSQLStore(t)
 	return &pointerStakeFixture{
 		store: store,
+		db:    db,
 		pool:  bytes.Repeat([]byte{0xF1}, 28),
 		stakeKey: lcommon.NewBlake2b224(
 			bytes.Repeat([]byte{0x31}, lcommon.AddressHashSize),
@@ -640,4 +643,47 @@ func TestPointerAddressStakeSurvivesCreateUtxo(t *testing.T) {
 	require.Equal(t, uint64(1_300), f.stakeAt(t, 300),
 		"a pointer output written through CreateUtxo must reach the "+
 			"credential its position designates")
+}
+
+// TestPointerRowsAreRemovedByRollback pins the half of the pointer's lifecycle
+// that only rollback exercises. The position lives in utxo_pointer rather than
+// on the utxo row, and nothing deletes it explicitly: it goes with its utxo
+// through the migration's ON DELETE CASCADE, which SQLite honours only because
+// the connection sets foreign_keys(1).
+//
+// So a dropped pragma, or a dialect translation that loses the constraint,
+// would orphan the row rather than fail loudly — and the rolled-back output
+// would keep conferring stake on the credential its position names, which is
+// exactly the attribution error this table exists to get right.
+func TestPointerRowsAreRemovedByRollback(t *testing.T) {
+	t.Parallel()
+	f := newPointerStakeFixture(t)
+	f.setEra(t, babbage.EraIdBabbage)
+	paymentKey := bytes.Repeat([]byte{0x77}, lcommon.AddressHashSize)
+
+	f.apply(t, 100, 0, []lcommon.Certificate{f.register(), f.delegate()})
+	f.apply(t, 200, 0, nil,
+		f.output(600, newPointerAddress(t, paymentKey, 100, 0, 0)))
+
+	require.Equal(t, uint64(600), f.stakeAt(t, 300),
+		"precondition: the pointer output reaches its credential")
+	require.Equal(t, 1, f.pointerRowCount(t),
+		"precondition: the position was persisted")
+
+	require.NoError(t, f.store.DeleteTransactionsAfterSlot(150, nil))
+
+	require.Zero(t, f.pointerRowCount(t),
+		"a rolled-back output must not leave its pointer position behind")
+	require.Zero(t, f.stakeAt(t, 300),
+		"a rolled-back pointer output must stop conferring stake")
+}
+
+// pointerRowCount reports how many pointer positions the store currently holds.
+func (f *pointerStakeFixture) pointerRowCount(t *testing.T) int {
+	t.Helper()
+	var n int
+	require.NoError(t, f.db.QueryRow(
+		"SELECT COUNT(*) FROM utxo_pointer",
+	).Scan(&n))
+	return n
 }

@@ -2361,13 +2361,23 @@ func (a *NodeAdapter) Account(
 		ControlledAmount:   strconv.FormatUint(controlledAmount, 10),
 		RewardsSum:         reward,
 		WithdrawalsSum:     strconv.FormatUint(sums.WithdrawalsSum, 10),
-		ReservesSum:        strconv.FormatUint(sums.ReservesSum, 10),
-		TreasurySum:        strconv.FormatUint(sums.TreasurySum, 10),
+		ReservesSum:        signedSumText(sums.ReservesSum),
+		TreasurySum:        signedSumText(sums.TreasurySum),
 		WithdrawableAmount: reward,
 		PoolID:             poolID,
 		DrepID:             accountDrepID(account.Drep, account.DrepType),
 		Registered:         account.Active,
 	}, nil
+}
+
+// signedSumText renders a signed MIR pot total. The aggregate is summed over
+// delta_coin rows, so it carries a sign; a nil total is rendered as zero so a
+// stake account with no MIR history reports "0" rather than an empty field.
+func signedSumText(value *big.Int) string {
+	if value == nil {
+		return "0"
+	}
+	return value.String()
 }
 
 // accountDrepID renders the Bech32 DRep ID a stake account is delegated to,
@@ -4381,7 +4391,7 @@ func (a *NodeAdapter) TransactionMIRs(
 		case uint(lcommon.MirSourceTreasury):
 			pot = "treasury"
 		}
-		for credential, amount := range c.Reward.Rewards {
+		for credential, amount := range c.Reward.RewardsAmount() {
 			address, err := stakeAddressFromCredential(*credential, networkID)
 			if err != nil {
 				return nil, fmt.Errorf(
@@ -4391,9 +4401,19 @@ func (a *NodeAdapter) TransactionMIRs(
 					err,
 				)
 			}
+			if amount == nil {
+				return nil, fmt.Errorf(
+					"MIR delta missing for transaction %x cert %d",
+					hash,
+					cert.Index,
+				)
+			}
 			ret = append(ret, TransactionMIRInfo{
-				Address:   address,
-				Amount:    strconv.FormatUint(amount, 10),
+				Address: address,
+				// delta_coin is signed, so the rendered amount
+				// keeps the sign rather than being formatted as
+				// an unsigned coin.
+				Amount:    amount.String(),
 				CertIndex: cert.Index,
 				Pot:       pot,
 			})

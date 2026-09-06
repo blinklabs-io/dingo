@@ -1064,10 +1064,25 @@ RETURNING id`,
 	if err != nil {
 		return 0, err
 	}
-	for credential, amount := range cert.Reward.Rewards {
+	// A MIR reward is delta_coin, so the amount column carries its own sign
+	// and the delta is persisted as written. Whether a negative delta is
+	// permitted, and whether the deltas for one credential net to a
+	// creditable amount, are decided by the DELEG and INSTANT rules, not
+	// here. RewardsAmount projects the reward map to *big.Int on every
+	// gouroboros release, so the sign survives regardless of the width of
+	// the underlying field.
+	for credential, amount := range cert.Reward.RewardsAmount() {
 		tag, err := models.CredentialTagFromUint(credential.CredType)
 		if err != nil {
 			return 0, err
+		}
+		delta, err := signedDecimal("MIR reward delta", amount)
+		if err != nil {
+			return 0, fmt.Errorf(
+				"%w for credential %x",
+				err,
+				credential.Credential[:],
+			)
 		}
 		if _, err := db.ExecContext(ctx, `
 INSERT INTO move_instantaneous_rewards_reward (
@@ -1075,7 +1090,7 @@ INSERT INTO move_instantaneous_rewards_reward (
 ) VALUES (?, ?, ?, ?)`,
 			credential.Credential[:],
 			tag,
-			decimalUint64(types.Uint64(amount)),
+			delta,
 			id,
 		); err != nil {
 			return 0, err
