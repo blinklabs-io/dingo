@@ -1923,7 +1923,12 @@ type orphanedBlock struct {
 // This handles the case where blob committed successfully but metadata failed,
 // leaving orphaned blocks in the blob store.
 func (ls *LedgerState) cleanupOrphanedBlobs(tipSlot uint64) error {
-	blobStore := ls.db.Blob()
+	// Pin rather than reading the installed store: this runs a scan, a
+	// separate write transaction, and a commit against one store, so it has
+	// to keep that store alive for the whole operation rather than sample
+	// whichever is installed at each step.
+	blobStore, releaseBlob := ls.db.PinBlob()
+	defer releaseBlob()
 	if blobStore == nil {
 		return nil // No blob store configured
 	}
@@ -5210,6 +5215,14 @@ func ledgerPipelineBackoff(consecutiveNoProgress int) (time.Duration, bool) {
 	), true
 }
 
+func ledgerPipelineRetryDelay(
+	consecutiveNoProgress int,
+	minimum time.Duration,
+) (time.Duration, bool) {
+	backoff, stuck := ledgerPipelineBackoff(consecutiveNoProgress)
+	return max(backoff, minimum), stuck
+}
+
 // certifiedEndorserBlockPipelineRetryDelay returns how long the pipeline waits
 // before restarting after a certified Leios endorser block was unavailable.
 //
@@ -5223,10 +5236,10 @@ func ledgerPipelineBackoff(consecutiveNoProgress int) (time.Duration, bool) {
 func certifiedEndorserBlockPipelineRetryDelay(
 	consecutiveNoProgress int,
 ) time.Duration {
-	delay := certifiedEndorserBlockRetryDelay
-	if backoff, _ := ledgerPipelineBackoff(consecutiveNoProgress); backoff > delay {
-		delay = backoff
-	}
+	delay, _ := ledgerPipelineRetryDelay(
+		consecutiveNoProgress,
+		certifiedEndorserBlockRetryDelay,
+	)
 	return delay
 }
 
@@ -6706,6 +6719,17 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 		opCertIssueNumber = opCert.IssueNumber
 		opCertPoolKeyHash = lcommon.PoolKeyHash(block.IssuerVkey().Hash())
+		// The counter is recorded for every applied block, validated or not,
+		// so the bound on what the metadata store can record is checked here
+		// rather than beside the era rule below: an unvalidated replay would
+		// otherwise reach UpdatePoolOpCertSequence with a counter it cannot
+		// write and fail after the block's transactions had been processed,
+		// with the width limit named nowhere.
+		if err := eras.ValidateOpCertPersistableCounter(
+			opCertIssueNumber,
+		); err != nil {
+			return nil, fmt.Errorf("pool %x: %w", opCertPoolKeyHash, err)
+		}
 		// Counter monotonicity is the stateful half of inbound opcert
 		// validation: read the pool's last-seen counter before processing this
 		// block, inside the same validation transaction. A backward counter
@@ -9335,7 +9359,33 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 	if currentPParams == nil || currentEpoch.LengthInSlots == 0 {
 		return currentPParams
 	}
-	slotEpoch := slot / uint64(currentEpoch.LengthInSlots)
+	// Epoch lengths can change at an era boundary. Resolve the target slot
+	// through the multi-era converter so a Byron prefix does not make a
+	// future Shelley slot appear to belong to an early epoch.
+	slotEpoch := currentEpoch.EpochId
+	// Use the epoch cache from the same immutable snapshot as the other
+	// forecast inputs. Calling ls.SlotToEpoch here would load a second snapshot
+	// and could mix its epoch cache with currentEpoch/currentEra/currentPParams
+	// across a concurrent rollover or rollback.
+	for i := len(snapshot.epochCache) - 1; i >= 0; i-- {
+		epoch := snapshot.epochCache[i]
+		if slot < epoch.StartSlot {
+			continue
+		}
+		slotEpoch = epoch.EpochId
+		if epoch.LengthInSlots != 0 {
+			slotEpoch += (slot - epoch.StartSlot) /
+				uint64(epoch.LengthInSlots)
+		}
+		break
+	}
+	if len(snapshot.epochCache) == 0 && slot >= currentEpoch.StartSlot {
+		// With no cache, project from the captured current epoch. This retains
+		// the absolute epoch offset while preserving the existing bare-state
+		// forecast behavior.
+		slotEpoch += (slot - currentEpoch.StartSlot) /
+			uint64(currentEpoch.LengthInSlots)
+	}
 	if slotEpoch <= currentEpoch.EpochId {
 		return currentPParams
 	}

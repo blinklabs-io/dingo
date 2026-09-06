@@ -23,6 +23,7 @@ import (
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -200,7 +201,7 @@ func (d *Database) SetTransactionWithOpts(
 		defer txn.Rollback() //nolint:errcheck
 	}
 
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
@@ -424,7 +425,7 @@ func (d *Database) SetGapBlockTransaction(
 		defer txn.Rollback() //nolint:errcheck
 	}
 
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
@@ -864,7 +865,7 @@ func (d *Database) recoverConsumedUtxo(
 	txn *Txn,
 	enforcePrimaryChain bool,
 ) (*models.Utxo, error) {
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return nil, types.ErrBlobStoreUnavailable
 	}
@@ -1081,7 +1082,7 @@ func (d *Database) SetGenesisTransaction(
 		defer txn.Rollback() //nolint:errcheck
 	}
 
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
@@ -1788,16 +1789,22 @@ func (d *Database) DeleteTransactionMetadataLabelsAfterSlot(
 // reason given on deleteUtxoBlobs.
 func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 	const batchSize = 500
-	blob := d.Blob()
-	if blob == nil {
+	// Report an absent blob store up front, so an empty txHashes slice
+	// reports it the same way a populated one does rather than silently
+	// succeeding because the batch loop never ran.
+	if d.Blob() == nil {
 		return types.ErrBlobStoreUnavailable
 	}
 
 	var deleteErrors int
-	deleteBatch := func(blobTxn types.Txn, batch [][]byte) int {
+	deleteBatch := func(
+		store blob.BlobStore,
+		blobTxn types.Txn,
+		batch [][]byte,
+	) int {
 		var batchDeleteErrors int
 		for _, txHash := range batch {
-			if err := blob.DeleteTx(blobTxn, txHash); err != nil {
+			if err := store.DeleteTx(blobTxn, txHash); err != nil {
 				deleteErrors++
 				batchDeleteErrors++
 				d.logger.Warn(
@@ -1810,18 +1817,31 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 		return batchDeleteErrors
 	}
 
+	// The store used for each delete comes from whichever transaction owns
+	// the handle that delete runs through, so a concurrent SetBlobStore
+	// cannot leave a handle from one store being deleted through another.
 	if txn != nil && txn.Blob() != nil {
-		deleteBatch(txn.Blob(), txHashes)
+		blob := txn.BlobStore()
+		if blob == nil {
+			return types.ErrBlobStoreUnavailable
+		}
+		deleteBatch(blob, txn.Blob(), txHashes)
 	} else {
 		for start := 0; start < len(txHashes); start += batchSize {
 			end := min(start+batchSize, len(txHashes))
 			batch := txHashes[start:end]
 			batchTxn := NewBlobOnlyTxn(d, true)
+			blob := batchTxn.BlobStore()
+			if blob == nil {
+				batchTxn.Release()
+				return types.ErrBlobStoreUnavailable
+			}
 			batchBlobTxn := batchTxn.Blob()
 			if batchBlobTxn == nil {
+				batchTxn.Release()
 				return types.ErrNilTxn
 			}
-			batchDeleteErrors := deleteBatch(batchBlobTxn, batch)
+			batchDeleteErrors := deleteBatch(blob, batchBlobTxn, batch)
 			if err := batchTxn.Commit(); err != nil {
 				deleteErrors += len(batch) - batchDeleteErrors
 				_ = batchTxn.Rollback()
