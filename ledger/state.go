@@ -6101,6 +6101,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			snapshotEra := ls.currentEra
 			snapshotPParams := ls.currentPParams
 			snapshotPrevEraPParams := ls.prevEraPParams
+			snapshotSyntheticV2CostModel := ls.syntheticV2CostModel
 			snapshotTip := ls.currentTip
 			snapshotTipHash := ls.currentTip.Point.Hash
 			snapshotNonce := ls.currentTipBlockNonce
@@ -6354,6 +6355,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							snapshotPParams,
 							snapshotPrevEraPParams,
 							snapshotEpoch.EpochId,
+							snapshotSyntheticV2CostModel,
 						)
 						if err != nil {
 							deltaBatch.Release()
@@ -6676,6 +6678,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	pparams lcommon.ProtocolParameters,
 	prevEraPParams lcommon.ProtocolParameters,
 	committeeEpoch uint64,
+	syntheticV2CostModel bool,
 ) (*LedgerDelta, error) {
 	// Check that we're processing things in order
 	if len(expectedPrevHash) > 0 {
@@ -6974,16 +6977,18 @@ func (ls *LedgerState) ledgerProcessBlock(
 					pp = prevEraPParams
 					isCurrentEraPParams = false
 				}
-				// ls.syntheticV2CostModel is read directly (not via the
-				// lock-free loadConsensusSnapshot() mechanism): this runs on
-				// the single writer's own goroutine, sequentially after
-				// pparams/currentEra/prevEraPParams were themselves captured
-				// from ls's own fields earlier in this same batch, so no
-				// concurrent mutation can make it disagree with pp here.
+				// syntheticV2CostModel is a parameter, captured under the same
+				// RLock as pparams/prevEraPParams
+				// (ledgerProcessBlocksFromSource's snapshotSyntheticV2CostModel),
+				// not read live from ls here: a concurrent rollback
+				// (RecoverCommitTimestampConflict) can mutate
+				// ls.syntheticV2CostModel between that capture and this
+				// point, which would otherwise let this disagree with the
+				// already-snapshotted pp.
 				synthetic := syntheticV2CostModelForValidation(
 					pp,
 					isCurrentEraPParams,
-					ls.syntheticV2CostModel,
+					syntheticV2CostModel,
 				)
 				lv := (&LedgerView{
 					txn:                  txn,

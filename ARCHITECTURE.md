@@ -9907,6 +9907,18 @@ re-derives the answer directly from `prevEraPParams`'s own value
 `resolveSyntheticV2CostModel`'s empty-marker branch uses) rather than
 reusing the current era's flag for a different pparams object.
 
+The block-application call site (`ledgerProcessBlock`) cannot source this
+from a snapshot mirror the way mempool/standalone validation do, since it
+runs from parameters its caller already captured directly from `ls`'s
+mutable fields. `ledgerProcessBlocksFromSource` reads
+`ls.syntheticV2CostModel` under the same `ls.RLock()` it already holds to
+capture `snapshotPParams`/`snapshotPrevEraPParams`, and passes the result
+into `ledgerProcessBlock` as an explicit parameter rather than letting
+`ledgerProcessBlock` read the live field itself — a concurrent rollback
+(`RecoverCommitTimestampConflict`) mutates `ls.syntheticV2CostModel` outside
+that lock, so a live read inside `ledgerProcessBlock` could pair the wrong
+marker with the already-snapshotted `pparams` it validates against.
+
 **Known gap, not fixed here:** once the chain's active era is Dijkstra,
 `ValidateTxDijkstra` delegates phase-2 script validation entirely to
 gouroboros's own `dijkstra.UtxoValidatePlutusScripts` (which itself falls
