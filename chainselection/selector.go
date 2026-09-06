@@ -1545,6 +1545,9 @@ func (cs *ChainSelector) localTipStalledLocked() bool {
 //     near-genesis behavior and existing tests unchanged.
 //   - the incumbent is no longer selectable (gone/disconnected/ineligible/
 //     stale/implausible).
+//   - the incumbent was registered from a rollback and has not delivered a
+//     header yet (awaitingFirstHeader) — it has no head to micro-fork from, so
+//     a real delivered frontier always replaces it.
 //   - the applied local tip has stalled past catchUpPinStallTimeout
 //     (progress-aware escape — cannot pin to a dead peer forever).
 //   - the challenger is genuinely ahead of the incumbent by more than
@@ -1563,6 +1566,17 @@ func (cs *ChainSelector) pinIncumbentDuringCatchUpLocked(
 		return false
 	}
 	if incumbentTip == nil || challengerTip == nil {
+		return false
+	}
+	// Release if the incumbent was registered from a rollback and has not
+	// delivered a header yet. Such a peer has no head to micro-fork from, so
+	// there is nothing for the anti-flap pin to protect: it is selectable only
+	// because nothing better was tracked, and a peer with a real delivered
+	// frontier must always be able to take the pipeline from it. The
+	// longer-chain escape below cannot do that on its own, because the
+	// incumbent's selection block number is 0 ("nothing delivered yet"), so
+	// every challenger within catchUpPinHeadMargin of genesis still pins.
+	if incumbentTip.awaitingFirstHeader {
 		return false
 	}
 	// Release if the incumbent is no longer a viable selection target.

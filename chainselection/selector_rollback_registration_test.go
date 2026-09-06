@@ -608,3 +608,56 @@ func TestHandlePeerRollbackReportsOutcomeWithoutSelectorLock(t *testing.T) {
 		"the callback must observe the peer it was told about",
 	)
 }
+
+// The anti-flap incumbent pin exists to stop the chainsync+blockfetch pipeline
+// from flapping between peers on sibling head-forks. A peer registered from a
+// rollback has no head to fork from: its selection block number is 0, meaning
+// "nothing delivered yet". Without an explicit release the pin's longer-chain
+// escape (challenger more than catchUpPinHeadMargin blocks ahead) cannot fire
+// for a challenger at block 1 or 2, so the node would keep the pipeline on a
+// connection that has delivered no header while a peer with a real delivered
+// frontier is available.
+func TestRollbackRegisteredIncumbentDoesNotPinOutDeliveredChallenger(
+	t *testing.T,
+) {
+	rollbackConn := newTestConnectionId(1)
+	deliveredConn := newTestConnectionId(2)
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2160,
+		DisableEventSubscriptions: true,
+	})
+	// A local tip has been applied, so the pin is armed.
+	localPoint := ocommon.Point{Slot: 1, Hash: []byte("local")}
+	cs.SetLocalTip(ochainsync.Tip{Point: localPoint, BlockNumber: 1})
+
+	// The recycled connection re-intersects at the local tip and becomes the
+	// incumbent, because nothing better is tracked.
+	cs.HandlePeerRollbackEvent(
+		newRollbackEvent(rollbackConn, localPoint, tip(4, 4, "advertised")),
+	)
+	best := cs.GetBestPeer()
+	require.NotNil(t, best)
+	require.Equal(t, rollbackConn, *best)
+	incumbentTip := cs.GetPeerTip(rollbackConn)
+	require.NotNil(t, incumbentTip)
+	require.True(t, incumbentTip.awaitingFirstHeader)
+	require.Equal(t, uint64(0), incumbentTip.SelectionTip().BlockNumber)
+
+	// Another peer delivers a real header, inside the head margin of the
+	// incumbent's zero selection block number.
+	require.True(
+		t,
+		cs.UpdatePeerTip(deliveredConn, tip(2, 2, "delivered"), nil),
+	)
+	cs.EvaluateAndSwitch()
+
+	best = cs.GetBestPeer()
+	require.NotNil(t, best)
+	assert.Equal(
+		t,
+		deliveredConn,
+		*best,
+		"a delivered frontier must take the pipeline from a header-less "+
+			"rollback incumbent",
+	)
+}
