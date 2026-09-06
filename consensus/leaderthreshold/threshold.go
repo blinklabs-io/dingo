@@ -23,26 +23,13 @@ import (
 // Threshold returns the integer comparison threshold for the Praos leader
 // rule. The ledger rule compares the real-valued certified-natural ratio
 // strictly against 1-(1-f)^sigma. For an integer leader value v, that is
-// equivalent to v < ceil(certNatMax*(1-(1-f)^sigma)), not v < floor(...).
+// equivalent to v < ceil(certNatMax*(1-(1-f)^sigma)).
 //
-// gouroboros's own CertifiedNatThresholdWithMode (consensus/threshold.go)
-// already returns exactly that ceil(...) value -- see its own doc comment
-// ("The returned integer is ceil(T), preserving the real-valued strict
-// comparison...") and its exact-rational fast path
-// (exactOneMinusFPowerSigmaThreshold), which adds 1 itself whenever the
-// division has a remainder, or leaves the value alone when the cutoff is
-// already exactly an integer.
-//
-// This function previously duplicated that adjustment on top of
-// gouroboros's already-correct result, silently computing ceil(T)+1 for
-// every non-integer cutoff -- accepted too few certified-natural values by
-// one integer per fractional (poolStake, totalStake, activeSlotCoeff)
-// combination, a real eligibility-decision bug in both block production
-// (ledger/leader/schedule.go) and header verification
-// (ledger/verify_header.go), not merely a boundary test nitpick. Caught by
-// TestThresholdPreservesProtocolBoundary's two "fractional cutoff admits
-// its floor" cases. Delegating directly, with no further adjustment, is
-// the correct fix now that gouroboros performs it internally.
+// Gouroboros performs the exact-rational and bounded-precision calculation,
+// including the strict-comparison ceiling and consensus-mode validation.
+// Keep this wrapper as the Dingo-owned boundary so callers do not duplicate
+// the protocol calculation. The returned ceiling is used unchanged; adding
+// to it would admit the ceiling itself, which the real-valued rule rejects.
 func Threshold(
 	poolStake uint64,
 	totalStake uint64,

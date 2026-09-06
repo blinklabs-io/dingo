@@ -489,6 +489,17 @@ func (cm *ChainManager) SecurityParamConfigured() bool {
 	return cm.securityParam > 0
 }
 
+// persistentPrimaryChain resolves the primary chain for
+// RewindPrimaryChainToPoint/RewindPrimaryChainAtStartup and confirms it is
+// persistent. It does not re-take primaryChain.batchCommitMutex or
+// cm.mutex around the caller's rollback: both RewindPrimaryChainToPoint and
+// RewindPrimaryChainAtStartup delete blocks by index through
+// Chain.Rollback/RollbackUnbounded now, and rollbackLocked already takes
+// both of those (chain.go's batchCommitMutex field, added for the same
+// in-flight-batch hazard this function's callers used to close
+// separately) for the whole removal loop. Duplicating either lock here
+// would double-lock the same primary chain rollbackLocked is about to
+// lock itself.
 func (cm *ChainManager) persistentPrimaryChain() (*Chain, error) {
 	primaryChain, err := cm.primaryChain()
 	if err != nil {
