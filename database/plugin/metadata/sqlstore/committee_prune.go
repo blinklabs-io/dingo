@@ -17,6 +17,7 @@ package sqlstore
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // auth_committee_hot records one row per AuthCommitteeHot certificate and
@@ -77,6 +78,11 @@ const (
 	// well above one drains an existing backlog while keeping any single
 	// block's extra work bounded.
 	committeeAuthPruneBatch = 512
+
+	// committeeAuthMaintenanceInterval is deliberately long enough that the
+	// background sweep cannot compete with block application, while ensuring a
+	// credential that never re-authorizes still eventually drains.
+	committeeAuthMaintenanceInterval = 24 * time.Hour
 )
 
 // committeeAuthRetentionSlots returns the configured rollback window, falling
@@ -147,4 +153,60 @@ WHERE id IN (
 		)
 	}
 	return pruned, nil
+}
+
+// pruneCommitteeHotAuthorizationsMaintenance removes a bounded batch of
+// superseded authorizations across all credentials. The certificate write
+// path can only visit credentials that re-authorize; this periodic sweep is
+// the liveness path for inactive credentials.
+func (s *Store) pruneCommitteeHotAuthorizationsMaintenance(
+	ctx context.Context,
+) error {
+	tip, err := s.GetTip(nil)
+	if err != nil {
+		return fmt.Errorf("read tip for committee hot maintenance: %w", err)
+	}
+	retention := s.committeeAuthRetention()
+	if tip.Point.Slot <= retention {
+		return nil
+	}
+	horizon := tip.Point.Slot - retention
+	db := newDialectQueryer(s.writeDB, s.dialect.Name())
+	_, err = db.ExecContext(ctx, `
+DELETE FROM auth_committee_hot
+WHERE id IN (
+    SELECT id FROM (
+        SELECT old.id
+        FROM auth_committee_hot old
+        WHERE old.added_slot <= ?
+          AND EXISTS (
+              SELECT 1
+              FROM auth_committee_hot newer
+              WHERE newer.cold_credential_tag = old.cold_credential_tag
+                AND newer.cold_credential = old.cold_credential
+                AND newer.added_slot <= ?
+                AND (
+                    newer.added_slot > old.added_slot
+                    OR (
+                        newer.added_slot = old.added_slot
+                        AND newer.certificate_id > old.certificate_id
+                    )
+                    OR (
+                        newer.added_slot = old.added_slot
+                        AND newer.certificate_id = old.certificate_id
+                        AND newer.id > old.id
+                    )
+                )
+          )
+        ORDER BY old.added_slot ASC, old.certificate_id ASC, old.id ASC
+        LIMIT ?
+    ) superseded
+)`, horizon, horizon, committeeAuthPruneBatch)
+	if err != nil {
+		return fmt.Errorf(
+			"prune superseded committee hot authorizations in maintenance: %w",
+			err,
+		)
+	}
+	return nil
 }

@@ -21,6 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
@@ -224,6 +225,37 @@ func TestAuthCommitteeHotWritePathPrunesSupersededAuthorizations(t *testing.T) {
 	}
 	require.NoError(t, rows.Err())
 	require.Equal(t, []uint64{20_000, preprodTipSlot}, retainedSlots)
+}
+
+func TestCommitteeHotMaintenancePrunesInactiveCredentialBacklog(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	const coldTag = uint8(lcommon.CredentialTypeAddrKeyHash)
+	cold := credentialHash(0xc4)
+	for i := 1; i <= committeeAuthPruneBatch+1; i++ {
+		seedAuthorization(
+			t, store, coldTag, cold,
+			uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0x72, i),
+			uint64(i), uint64(i), // #nosec G115
+		)
+	}
+	require.NoError(t, store.SetTip(ochainsync.Tip{
+		Point: ocommon.Point{Slot: preprodTipSlot, Hash: []byte("tip")},
+	}, nil))
+
+	// No new certificate is applied for this credential. One maintenance
+	// pass must nevertheless make bounded progress and retain its newest
+	// pre-horizon authorization.
+	require.NoError(t, store.pruneCommitteeHotAuthorizationsMaintenance(
+		context.Background(),
+	))
+	require.Equal(t, 1, authRowCountFor(t, store, coldTag, cold))
+	var retainedSlot uint64
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT added_slot FROM auth_committee_hot WHERE cold_credential = ?",
+		cold,
+	).Scan(&retainedSlot))
+	require.Equal(t, uint64(committeeAuthPruneBatch+1), retainedSlot)
 }
 
 // TestAuthCommitteeHotPruningKeepsTallyIdenticalAtPreprodScale builds the

@@ -1140,7 +1140,10 @@ read back (`GetActiveCommitteeMembers`, `GetCommitteeMember`). On preprod at
 slot ~79.48M the table held 648,758 rows for 35 distinct cold credentials. The
 certificate write path therefore prunes superseded rows for the credential it
 just wrote, in batches bounded per certificate so no single applied block turns
-into a large delete.
+into a large delete. A store-level maintenance sweep also prunes at most the
+same bounded batch across all credential partitions every 24 hours. That second
+path is required for a credential that stops re-authorizing: its old rows must
+drain even though no later certificate will revisit that partition.
 
 Retention rule, applied per `(cold_credential_tag, cold_credential)`: keep every
 row with `added_slot` above the horizon, plus the single newest row at or below

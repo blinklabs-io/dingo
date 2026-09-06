@@ -139,6 +139,9 @@ func New(config Config) (*Store, error) {
 	if config.StorageMode == "" {
 		config.StorageMode = types.StorageModeCore
 	}
+	if config.MaintenanceInterval <= 0 {
+		config.MaintenanceInterval = committeeAuthMaintenanceInterval
+	}
 	if config.CommitteeAuthRetentionSlots != 0 &&
 		config.CommitteeAuthRetentionSlots < DefaultCommitteeAuthRetentionSlots {
 		return nil, fmt.Errorf(
@@ -414,7 +417,7 @@ func (s *Store) closePools() error {
 }
 
 func (s *Store) startMaintenance() {
-	if s.maintenance == nil || s.maintenanceEvery <= 0 {
+	if s.maintenanceEvery <= 0 {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -440,7 +443,7 @@ func (s *Store) startMaintenance() {
 					return
 				}
 				started := time.Now()
-				err := s.maintenance(ctx)
+				err := s.runMaintenance(ctx)
 				s.maintenanceState.CompareAndSwap(1, 0)
 				if err != nil {
 					if ctx.Err() == nil {
@@ -463,6 +466,15 @@ func (s *Store) startMaintenance() {
 			}
 		}
 	}()
+}
+
+func (s *Store) runMaintenance(ctx context.Context) error {
+	if s.maintenance != nil {
+		if err := s.maintenance(ctx); err != nil {
+			return err
+		}
+	}
+	return s.pruneCommitteeHotAuthorizationsMaintenance(ctx)
 }
 
 func (s *Store) closeMaintenanceAdmission() {
