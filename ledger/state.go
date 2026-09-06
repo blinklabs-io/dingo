@@ -948,8 +948,29 @@ type LedgerState struct {
 	// primary request. A timeout may fire while the request is blocked in the
 	// protocol client; keeping its generation lets the timeout wait instead of
 	// issuing a duplicate request on the same batch.
-	blockfetchRequestGeneration         uint64
-	blockfetchPrimaryRequestGeneration  uint64
+	blockfetchRequestGeneration        uint64
+	blockfetchPrimaryRequestGeneration uint64
+	// blockfetchRollbackGeneration counts rollbacks that abandon the chain
+	// segment an in-flight blockfetch batch was requested for, without also
+	// superseding that batch. It is published before the truncation, so any
+	// batch that observed an older value was requested against a chain
+	// segment the rollback has since discarded and its blocks must not be
+	// applied.
+	//
+	// Only the locally forged sibling adoption bumps it. The chainsync
+	// rollback paths (handleEventChainsyncRollback, tryResolveFork) re-queue
+	// the winning fork's headers and restart blockfetch under
+	// chainsyncBlockfetchMutex, which supersedes the in-flight batch by
+	// itself; AdoptLocalForgedSibling does neither -- it rolls back and
+	// adopts from the forge loop, holding only chainsyncMutex.
+	//
+	// Atomic because the bump happens under chainsyncMutex while the read
+	// happens under chainsyncBlockfetchMutex.
+	blockfetchRollbackGeneration atomic.Uint64
+	// blockfetchBatchRollbackGeneration is blockfetchRollbackGeneration as
+	// observed when the current batch was requested. Guarded by
+	// chainsyncBlockfetchMutex, like the rest of the per-batch state.
+	blockfetchBatchRollbackGeneration   uint64
 	blockfetchRequestsInFlight          map[string]chan struct{}
 	blockfetchShadowRequestsInFlight    map[string]struct{}
 	blockfetchInFlightTimeoutGeneration uint64
