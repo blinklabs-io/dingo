@@ -229,14 +229,23 @@ func TestProviderStopDeadlineDuringValueLogGC(t *testing.T) {
 		50*time.Millisecond,
 	)
 	defer cancel()
-	stopDone := make(chan error, 1)
+	stopDone := make(chan struct {
+		err     error
+		elapsed time.Duration
+	}, 1)
 	go func() {
-		stopDone <- host.Stop(ctx)
+		started := time.Now()
+		err := host.Stop(ctx)
+		stopDone <- struct {
+			err     error
+			elapsed time.Duration
+		}{err, time.Since(started)}
 	}()
-	stopErr := testutil.RequireReceive(
+	stopResult := testutil.RequireReceive(
 		t, stopDone, 5*time.Second,
 		"provider stop exceeded its context",
 	)
+	require.Less(t, stopResult.elapsed, 2*time.Second, "provider stop did not honor its deadline promptly")
 
 	release()
 	require.Eventually(
@@ -247,7 +256,7 @@ func TestProviderStopDeadlineDuringValueLogGC(t *testing.T) {
 		"provider-owned close did not finish after value-log GC drained",
 	)
 
-	require.ErrorIs(t, stopErr, context.DeadlineExceeded)
+	require.ErrorIs(t, stopResult.err, context.DeadlineExceeded)
 	require.Equal(t, int32(1), attempts.Load())
 	require.True(t, store.DB().IsClosed())
 	require.ErrorIs(

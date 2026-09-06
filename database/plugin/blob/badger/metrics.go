@@ -16,27 +16,175 @@ package badger
 
 import (
 	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
+)
+
+type badgerGCMetrics struct {
+	attempts       prometheus.Counter
+	successes      prometheus.Counter
+	noRewrite      prometheus.Counter
+	errors         prometheus.Counter
+	duration       prometheus.Observer
+	lsmBytes       prometheus.Gauge
+	vlogBytes      prometheus.Gauge
+	reclaimedBytes prometheus.Gauge
+	consecutive    prometheus.Gauge
+	lastSuccess    prometheus.Gauge
+	cleanup        func()
+}
+
+type badgerGCMetricCollectors struct {
+	attempts       *prometheus.CounterVec
+	successes      *prometheus.CounterVec
+	noRewrite      *prometheus.CounterVec
+	errors         *prometheus.CounterVec
+	duration       *prometheus.HistogramVec
+	lsmBytes       *prometheus.GaugeVec
+	vlogBytes      *prometheus.GaugeVec
+	reclaimedBytes *prometheus.GaugeVec
+	consecutive    *prometheus.GaugeVec
+	lastSuccess    *prometheus.GaugeVec
+}
+
+type badgerGCCollectorCache struct {
+	mu         sync.Mutex
+	collectors map[prometheus.Registerer]*badgerGCMetricCollectors
+}
+
+var (
+	badgerGCCollectors = badgerGCCollectorCache{
+		collectors: make(map[prometheus.Registerer]*badgerGCMetricCollectors),
+	}
+	nextBadgerStoreID atomic.Uint64
 )
 
 const (
 	badgerMetricNamePrefix = "database_blob_"
 )
 
-// safeRegister registers a collector, silently ignoring duplicates.
-func safeRegister(reg prometheus.Registerer, c prometheus.Collector) {
+func registerExistingOrNew(
+	reg prometheus.Registerer,
+	c prometheus.Collector,
+) prometheus.Collector {
 	if err := reg.Register(c); err != nil {
-		// Ignore AlreadyRegisteredError — a second blob store instance
-		// (e.g. chain-manager store) shares the same default registry.
-		if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
+		var alreadyRegistered prometheus.AlreadyRegisteredError
+		if !errors.As(err, &alreadyRegistered) {
 			panic(err)
 		}
+		return alreadyRegistered.ExistingCollector
 	}
+	return c
+}
+
+func registerCollector[T prometheus.Collector](
+	reg prometheus.Registerer,
+	c prometheus.Collector,
+) T {
+	registered := registerExistingOrNew(reg, c)
+	collector, ok := registered.(T)
+	if !ok {
+		panic(fmt.Sprintf("registered collector has unexpected type %T", registered))
+	}
+	return collector
+}
+
+func safeRegister(reg prometheus.Registerer, c prometheus.Collector) {
+	_ = registerExistingOrNew(reg, c)
+}
+
+func (c *badgerGCCollectorCache) get(
+	reg prometheus.Registerer,
+) *badgerGCMetricCollectors {
+	return c.collectors[reg]
+}
+
+func (c *badgerGCCollectorCache) put(
+	reg prometheus.Registerer,
+	collectors *badgerGCMetricCollectors,
+) {
+	c.collectors[reg] = collectors
 }
 
 func (d *BlobStoreBadger) registerBlobMetrics() {
+	badgerGCCollectors.mu.Lock()
+	defer badgerGCCollectors.mu.Unlock()
+	storeID := fmt.Sprintf("store-%d", nextBadgerStoreID.Add(1))
+	labels := []string{"store"}
+	gcCollectors := badgerGCCollectors.get(d.promRegistry)
+	if gcCollectors == nil {
+		gcCollectors = &badgerGCMetricCollectors{}
+		gcCollectors.attempts = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: badgerMetricNamePrefix + "gc_attempts_total", Help: "Total Badger value-log GC attempts.",
+		}, labels)
+		gcCollectors.successes = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: badgerMetricNamePrefix + "gc_successes_total", Help: "Total successful Badger value-log GC rewrites.",
+		}, labels)
+		gcCollectors.noRewrite = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: badgerMetricNamePrefix + "gc_no_rewrite_total", Help: "Total Badger value-log GC attempts with no rewrite.",
+		}, labels)
+		gcCollectors.errors = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: badgerMetricNamePrefix + "gc_errors_total", Help: "Total Badger value-log GC errors.",
+		}, labels)
+		gcCollectors.duration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name: badgerMetricNamePrefix + "gc_duration_seconds", Help: "Duration of Badger value-log GC attempts in seconds.",
+		}, labels)
+		gcCollectors.lsmBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "gc_lsm_bytes", Help: "Badger LSM size after the last successful value-log GC rewrite.",
+		}, labels)
+		gcCollectors.vlogBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "gc_vlog_bytes", Help: "Badger value-log size after the last successful GC rewrite.",
+		}, labels)
+		gcCollectors.reclaimedBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "gc_reclaimed_bytes", Help: "Bytes reclaimed by the last successful Badger GC rewrite.",
+		}, labels)
+		gcCollectors.consecutive = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "gc_consecutive_successes", Help: "Successful value-log GC rewrites in the current GC cycle.",
+		}, labels)
+		gcCollectors.lastSuccess = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: badgerMetricNamePrefix + "gc_last_success_timestamp_seconds", Help: "Unix timestamp of the last successful value-log GC rewrite.",
+		}, labels)
+		gcCollectors.attempts = registerCollector[*prometheus.CounterVec](d.promRegistry, gcCollectors.attempts)
+		gcCollectors.successes = registerCollector[*prometheus.CounterVec](d.promRegistry, gcCollectors.successes)
+		gcCollectors.noRewrite = registerCollector[*prometheus.CounterVec](d.promRegistry, gcCollectors.noRewrite)
+		gcCollectors.errors = registerCollector[*prometheus.CounterVec](d.promRegistry, gcCollectors.errors)
+		gcCollectors.duration = registerCollector[*prometheus.HistogramVec](d.promRegistry, gcCollectors.duration)
+		gcCollectors.lsmBytes = registerCollector[*prometheus.GaugeVec](d.promRegistry, gcCollectors.lsmBytes)
+		gcCollectors.vlogBytes = registerCollector[*prometheus.GaugeVec](d.promRegistry, gcCollectors.vlogBytes)
+		gcCollectors.reclaimedBytes = registerCollector[*prometheus.GaugeVec](d.promRegistry, gcCollectors.reclaimedBytes)
+		gcCollectors.consecutive = registerCollector[*prometheus.GaugeVec](d.promRegistry, gcCollectors.consecutive)
+		gcCollectors.lastSuccess = registerCollector[*prometheus.GaugeVec](d.promRegistry, gcCollectors.lastSuccess)
+		badgerGCCollectors.put(d.promRegistry, gcCollectors)
+	}
+	d.gcMetrics = &badgerGCMetrics{
+		attempts:       gcCollectors.attempts.WithLabelValues(storeID),
+		successes:      gcCollectors.successes.WithLabelValues(storeID),
+		noRewrite:      gcCollectors.noRewrite.WithLabelValues(storeID),
+		errors:         gcCollectors.errors.WithLabelValues(storeID),
+		duration:       gcCollectors.duration.WithLabelValues(storeID),
+		lsmBytes:       gcCollectors.lsmBytes.WithLabelValues(storeID),
+		vlogBytes:      gcCollectors.vlogBytes.WithLabelValues(storeID),
+		reclaimedBytes: gcCollectors.reclaimedBytes.WithLabelValues(storeID),
+		consecutive:    gcCollectors.consecutive.WithLabelValues(storeID),
+		lastSuccess:    gcCollectors.lastSuccess.WithLabelValues(storeID),
+		cleanup: func() {
+			gcCollectors.attempts.DeleteLabelValues(storeID)
+			gcCollectors.successes.DeleteLabelValues(storeID)
+			gcCollectors.noRewrite.DeleteLabelValues(storeID)
+			gcCollectors.errors.DeleteLabelValues(storeID)
+			gcCollectors.duration.DeleteLabelValues(storeID)
+			gcCollectors.lsmBytes.DeleteLabelValues(storeID)
+			gcCollectors.vlogBytes.DeleteLabelValues(storeID)
+			gcCollectors.reclaimedBytes.DeleteLabelValues(storeID)
+			gcCollectors.consecutive.DeleteLabelValues(storeID)
+			gcCollectors.lastSuccess.DeleteLabelValues(storeID)
+		},
+	}
+
 	// Badger exposes metrics via expvar, so we need to set up some translation
 	collector := collectors.NewExpvarCollector(
 		map[string]*prometheus.Desc{
@@ -116,8 +264,10 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 			Help: "Total block cache hits",
 		},
 		func() float64 {
-			if m := d.DB().BlockCacheMetrics(); m != nil {
-				return float64(m.Hits())
+			if db := d.DB(); db != nil {
+				if m := db.BlockCacheMetrics(); m != nil {
+					return float64(m.Hits())
+				}
 			}
 			return 0
 		},
@@ -128,8 +278,10 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 			Help: "Total block cache misses",
 		},
 		func() float64 {
-			if m := d.DB().BlockCacheMetrics(); m != nil {
-				return float64(m.Misses())
+			if db := d.DB(); db != nil {
+				if m := db.BlockCacheMetrics(); m != nil {
+					return float64(m.Misses())
+				}
 			}
 			return 0
 		},
@@ -140,8 +292,10 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 			Help: "Block cache hit ratio (0.0-1.0)",
 		},
 		func() float64 {
-			if m := d.DB().BlockCacheMetrics(); m != nil {
-				return m.Ratio()
+			if db := d.DB(); db != nil {
+				if m := db.BlockCacheMetrics(); m != nil {
+					return m.Ratio()
+				}
 			}
 			return 0
 		},
@@ -152,13 +306,15 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 			Help: "Current block cache cost in bytes (added - evicted)",
 		},
 		func() float64 {
-			if m := d.DB().BlockCacheMetrics(); m != nil {
-				added := m.CostAdded()
-				evicted := m.CostEvicted()
-				if added >= evicted {
-					return float64(added - evicted)
+			if db := d.DB(); db != nil {
+				if m := db.BlockCacheMetrics(); m != nil {
+					added := m.CostAdded()
+					evicted := m.CostEvicted()
+					if added >= evicted {
+						return float64(added - evicted)
+					}
+					return 0
 				}
-				return 0
 			}
 			return 0
 		},
@@ -169,8 +325,10 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 			Help: "Total keys added to block cache",
 		},
 		func() float64 {
-			if m := d.DB().BlockCacheMetrics(); m != nil {
-				return float64(m.KeysAdded())
+			if db := d.DB(); db != nil {
+				if m := db.BlockCacheMetrics(); m != nil {
+					return float64(m.KeysAdded())
+				}
 			}
 			return 0
 		},
@@ -181,8 +339,10 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 			Help: "Total keys evicted from block cache",
 		},
 		func() float64 {
-			if m := d.DB().BlockCacheMetrics(); m != nil {
-				return float64(m.KeysEvicted())
+			if db := d.DB(); db != nil {
+				if m := db.BlockCacheMetrics(); m != nil {
+					return float64(m.KeysEvicted())
+				}
 			}
 			return 0
 		},
@@ -193,8 +353,10 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 			Help: "Total index cache hits",
 		},
 		func() float64 {
-			if m := d.DB().IndexCacheMetrics(); m != nil {
-				return float64(m.Hits())
+			if db := d.DB(); db != nil {
+				if m := db.IndexCacheMetrics(); m != nil {
+					return float64(m.Hits())
+				}
 			}
 			return 0
 		},
@@ -205,8 +367,10 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 			Help: "Total index cache misses",
 		},
 		func() float64 {
-			if m := d.DB().IndexCacheMetrics(); m != nil {
-				return float64(m.Misses())
+			if db := d.DB(); db != nil {
+				if m := db.IndexCacheMetrics(); m != nil {
+					return float64(m.Misses())
+				}
 			}
 			return 0
 		},
@@ -217,8 +381,10 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 			Help: "Index cache hit ratio (0.0-1.0)",
 		},
 		func() float64 {
-			if m := d.DB().IndexCacheMetrics(); m != nil {
-				return m.Ratio()
+			if db := d.DB(); db != nil {
+				if m := db.IndexCacheMetrics(); m != nil {
+					return m.Ratio()
+				}
 			}
 			return 0
 		},
