@@ -831,6 +831,17 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		f.metrics.tipGapSlots.Set(float64(applyGap))
 	}
 
+	// Strictly PAST the current slot, measured against parentSlot -- the slot
+	// the forged block's parent would actually be at -- rather than the applied
+	// tip alone. Comparing against the applied tip alone misses a frontier that
+	// is ahead of the current slot (applied 199, current 200, frontier 201),
+	// which otherwise reaches the builder and produces a block whose parent
+	// sits at a LATER slot than the block itself.
+	//
+	// The comparison is strict so an EQUAL slot survives to the two cases
+	// below, which distinguish a competing block at the applied tip from one
+	// only on the frontier. Dropping equal slots here would also collide with
+	// the contested-slot handling in #3955, which needs them.
 	if currentSlot < parentSlot {
 		// Detect stale data: if the tip is far ahead of the slot clock,
 		// the database likely contains chain data from a different genesis.
@@ -938,6 +949,33 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		}
 		// Neither signal claims the slot: fall through and let leader
 		// selection and the contested-slot branch account for it.
+	}
+
+	// The FRONTIER already holds a block at the current slot while the ledger
+	// has not applied it yet (parentSlot == currentSlot > tipSlot, so neither
+	// the strictly-past guard nor the equal-applied-tip branch above fires).
+	// The builder parents on the frontier, so forging here would produce a
+	// block for slot S whose parent is already at slot S -- a non-increasing
+	// slot, admitted locally and broadcast to peers.
+	//
+	// This is deliberately separate from the contested-slot branch above.
+	// There the competing block is applied, so tipBlockOwnership can compare
+	// it against SlotTracker by hash and tell our own block from a rival's.
+	// Here the block is unapplied: tipBlockOwnership reads the applied tip and
+	// answers tipOwnershipUnknown, and the fence only covers slots this node
+	// committed to, so nothing downstream would stop the forge.
+	//
+	// Routed through logGateSkip because this runs before leader selection, so
+	// a slot this node was scheduled to lead would otherwise vanish at Debug.
+	if currentSlot == parentSlot && parentSlot > tipSlot {
+		f.logGateSkip(
+			currentSlot,
+			"forge skip: header frontier already has a block at this slot",
+			"current_slot", currentSlot,
+			"tip_slot", tipSlot,
+			"frontier_slot", frontier.Slot,
+		)
+		return nil
 	}
 
 	// Skip if the chain is still syncing from a peer.
