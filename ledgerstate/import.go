@@ -3022,6 +3022,22 @@ func importGovState(
 	if govState == nil {
 		return nil
 	}
+	var keyCredentialCount, scriptCredentialCount int
+	for _, member := range govState.Committee {
+		if member.ColdCredential.Type == CredentialTypeScript {
+			scriptCredentialCount++
+		} else {
+			keyCredentialCount++
+		}
+	}
+	cfg.Logger.Info(
+		"parsed committee state",
+		"component", "ledgerstate",
+		"committee_members", len(govState.Committee),
+		"key_credentials", keyCredentialCount,
+		"script_credentials", scriptCredentialCount,
+		"committee_quorum_present", govState.CommitteeQuorum != nil,
+	)
 	if err != nil {
 		// Non-fatal warnings from committee/proposals parsing
 		cfg.Logger.Warn(
