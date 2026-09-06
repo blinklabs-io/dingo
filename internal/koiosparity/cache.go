@@ -1235,9 +1235,20 @@ func (c *Cache) GetEpochsMissingParams(
 	network string,
 	from, through uint64,
 ) ([]uint64, error) {
+	// pre_staking = 0 excludes epochs <= preStakingThroughEpoch for the same
+	// reason GetEpochsMissingAccountCoverage does: fetchEpoch commits the
+	// PreStaking marker and returns before ever requesting /epoch_params, so
+	// those epochs carry a koios_epoch_info row and never a
+	// koios_epoch_params row. Koios has no parameter row for them either — on
+	// preprod /epoch_params?_epoch_no=0 and _epoch_no=1 both return [] — so
+	// without this filter they would be selected for parameter backfill on
+	// every run forever, fail the fetch as a transient error, and land in
+	// FailedEpochs permanently, which cmd/koios-parity turns into a hard
+	// error that skips the check phase.
 	rows, err := c.db.Query(
 		`SELECT i.epoch FROM koios_epoch_info i
 		 WHERE i.network = ? AND i.epoch >= ? AND i.epoch <= ?
+		   AND i.pre_staking = 0
 		   AND NOT EXISTS (
 			SELECT 1 FROM koios_epoch_params p
 			WHERE p.network = i.network AND p.epoch = i.epoch

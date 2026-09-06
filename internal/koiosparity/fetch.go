@@ -951,6 +951,19 @@ func unixTime(sec int64) time.Time {
 // It deliberately does not touch koios_epoch_info.fetched_at. That column is
 // the freshness marker for pool-level data, which this did not refetch, so
 // advancing it would claim a freshness this call has not established.
+// FetchEpochParams fetches and commits the /epoch_params row for one epoch.
+// Exported for the in-process Observer, which backfills parameters
+// independently of the pool-level fetch.
+func FetchEpochParams(
+	ctx context.Context,
+	koios *KoiosClient,
+	cache *Cache,
+	network string,
+	epoch uint64,
+) error {
+	return fetchEpochParamsOnly(ctx, koios, cache, network, epoch)
+}
+
 func fetchEpochParamsOnly(
 	ctx context.Context,
 	koios *KoiosClient,

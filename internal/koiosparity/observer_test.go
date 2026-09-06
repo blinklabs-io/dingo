@@ -1260,3 +1260,92 @@ func TestObserverFetchIfNeededSurfacesPermanentErrorImmediately(t *testing.T) {
 	err = o.fetchIfNeeded(context.Background(), 9)
 	require.Error(t, err)
 }
+
+// TestObserverBackfillsParamsForAPreExistingCache pins that the in-process
+// observer gains a parameter row for an epoch cached before parameter
+// comparison existed.
+//
+// GetUncachedEpochs reports such an epoch as cached — it has a
+// koios_epoch_info row — so fetchPoolsIfNeeded returns early. Without a gate
+// on the parameter row itself the row would never arrive, and the epoch would
+// either keep a stored PASS that compared no parameters at all, or fail every
+// check with a koios_epoch_params mismatch no fetch could resolve.
+func TestObserverBackfillsParamsForAPreExistingCache(t *testing.T) {
+	const network = "preview"
+	const epoch = uint64(50)
+
+	var paramsCalls, epochInfoCalls atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/tip":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[{"epoch_no":999999}]`))
+			case "/pool_list", "/pool_updates":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[]`))
+			case "/epoch_info":
+				epochInfoCalls.Add(1)
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(w, validEpochInfoTmpl,
+					strconv.FormatUint(epoch, 10))
+			case "/epoch_params":
+				paramsCalls.Add(1)
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(w, validEpochParamsTmpl,
+					r.URL.Query().Get("_epoch_no"))
+			default:
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[]`))
+			}
+		}),
+	)
+	defer srv.Close()
+	withTestKoiosBaseURL(t, srv.URL)
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := OpenCache(cachePath, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	fetchedAt := time.Now().UTC()
+	// The upgraded-cache shape: pool-level data present, no parameter row.
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        epoch,
+		ActiveStake:  "12345",
+		EpochEndTime: fetchedAt,
+		FetchedAt:    fetchedAt,
+	}, nil, &KoiosTotals{
+		Treasury: "1", Reserves: "1", Fees: "1", Reward: "1",
+		FetchedAt: fetchedAt,
+	}))
+	require.NoError(t, cache.Close())
+
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+	o, err := NewObserver(ObserverConfig{
+		Network:            network,
+		CachePath:          cachePath,
+		Source:             source,
+		Logger:             slog.New(slog.DiscardHandler),
+		FetchRetryAttempts: 2,
+		FetchRetryDelay:    time.Millisecond,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Stop(context.Background()) })
+
+	require.NoError(t, o.fetchIfNeeded(context.Background(), epoch))
+
+	require.Equal(t, int32(1), paramsCalls.Load(),
+		"the observer must backfill the missing parameter row")
+	require.Equal(t, int32(0), epochInfoCalls.Load(),
+		"pool-level data was already cached; the parameter backfill must "+
+			"not re-request /epoch_info")
+
+	reopened, err := OpenCache(cachePath, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	defer reopened.Close()
+	got, err := reopened.GetEpochParams(network, epoch)
+	require.NoError(t, err)
+	require.NotNil(t, got, "the parameter row must be committed")
+}
