@@ -316,3 +316,35 @@ func TestProviderPropagatesTLSAndAuth(t *testing.T) {
 	require.True(t, srv.config.Auth.Enabled)
 	require.Equal(t, "shared-secret", srv.config.Auth.Token)
 }
+
+// TestProviderHostOverridesSharedDefault asserts the per-plugin
+// `plugins.api.mesh.config.host` override wins over the shared API bind
+// address composition hands down, so one listener can be exposed without
+// widening the other two (issue #3498).
+func TestProviderHostOverridesSharedDefault(t *testing.T) {
+	host := newProviderHost(t)
+	pd := providerDeps(newTestDeps())
+	pd.Host = "0.0.0.0"
+
+	srv := resolveOnFreePortWithConfig(
+		t, host, pd, map[string]any{"host": "127.0.0.1"},
+	)
+
+	hostPart, _, err := net.SplitHostPort(srv.config.ListenAddress)
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.1", hostPart)
+}
+
+// TestProviderHostFallsBackToDependency asserts that with no per-plugin
+// override the shared API bind address is what the listener uses.
+func TestProviderHostFallsBackToDependency(t *testing.T) {
+	host := newProviderHost(t)
+	pd := providerDeps(newTestDeps())
+	pd.Host = "127.0.0.1"
+
+	srv := resolveOnFreePort(t, host, pd)
+
+	hostPart, _, err := net.SplitHostPort(srv.config.ListenAddress)
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.1", hostPart)
+}

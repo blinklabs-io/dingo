@@ -43,11 +43,12 @@ func resetGlobalConfig() {
 		StrictUtxoValidation:        true,
 		Network:                     "preview",
 		MetricsPort:                 12798,
+		APIBindAddr:                 DefaultAPIBindAddr,
 		DebugBindAddr:               DefaultDebugBindAddr,
 		PrivateBindAddr:             "127.0.0.1",
 		PrivatePort:                 3002,
 		RelayPort:                   3001,
-		CORSAllowedOrigins:          []string{"*"},
+		CORSAllowedOrigins:          nil,
 		Topology:                    "",
 		TlsCertFilePath:             "",
 		TlsKeyFilePath:              "",
@@ -85,6 +86,7 @@ func unsetDebugBindAddrEnv(t *testing.T) {
 func TestLoad_CompareFullStruct(t *testing.T) {
 	resetGlobalConfig()
 	unsetDebugBindAddrEnv(t)
+	unsetAPIExposureEnv(t)
 	yamlContent := `
 plugins:
   mempool:
@@ -172,11 +174,12 @@ mithril:
 		StrictUtxoValidation: true,
 		Network:              "preview",
 		MetricsPort:          8088,
+		APIBindAddr:          DefaultAPIBindAddr,
 		DebugBindAddr:        DefaultDebugBindAddr,
 		PrivateBindAddr:      "127.0.0.1",
 		PrivatePort:          8000,
 		RelayPort:            4000,
-		CORSAllowedOrigins:   []string{"*"},
+		CORSAllowedOrigins:   nil,
 		Topology:             "",
 		TlsCertFilePath:      "cert1.pem",
 		TlsKeyFilePath:       "key1.pem",
@@ -264,6 +267,7 @@ func TestLoad_DAGMempoolProvider(t *testing.T) {
 func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	resetGlobalConfig()
 	unsetDebugBindAddrEnv(t)
+	unsetAPIExposureEnv(t)
 
 	// Without Config file
 	cfg, err := LoadConfig("")
@@ -290,11 +294,12 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		StrictUtxoValidation: true,
 		Network:              "preview",
 		MetricsPort:          12798,
+		APIBindAddr:          DefaultAPIBindAddr,
 		DebugBindAddr:        DefaultDebugBindAddr,
 		PrivateBindAddr:      "127.0.0.1",
 		PrivatePort:          3002,
 		RelayPort:            3001,
-		CORSAllowedOrigins:   []string{"*"},
+		CORSAllowedOrigins:   nil,
 		Topology:             "",
 		TlsCertFilePath:      "",
 		TlsKeyFilePath:       "",

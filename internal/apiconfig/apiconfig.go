@@ -149,6 +149,20 @@ func firstSet(override, base *string) *string {
 	return base
 }
 
+// ListenHost resolves the bind address one API listener uses: its own
+// plugins.api.<name>.config.host when that is set, otherwise the shared
+// apiBindAddr default composition passes down. Every provider resolves it
+// the same way here, so a per-provider override and the shared default
+// cannot disagree between the validation that checks for a port conflict
+// and the listener that actually binds. See ARCHITECTURE.md's "API
+// security" section.
+func ListenHost(configured, fallback string) string {
+	if configured != "" {
+		return configured
+	}
+	return fallback
+}
+
 // MergeTLS resolves override's fields against base, field by field:
 // whatever override explicitly sets (including an explicit "disabled"
 // Mode) wins outright; any field override leaves nil falls back to base.

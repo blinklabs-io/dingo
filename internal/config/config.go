@@ -86,6 +86,7 @@ func FromContext(ctx context.Context) *Config {
 const (
 	DefaultBlobPlugin                  = "badger"
 	DefaultDebugBindAddr               = "127.0.0.1"
+	DefaultAPIBindAddr                 = "127.0.0.1"
 	DefaultMetadataPlugin              = "sqlite"
 	DefaultEvictionWatermark           = 0.0
 	DefaultRejectionWatermark          = 1.0
@@ -558,6 +559,15 @@ type Config struct {
 	BarkOperatorCertificateFingerprints []string `yaml:"barkOperatorCertificateFingerprints" envconfig:"DINGO_BARK_OPERATOR_CERTIFICATE_FINGERPRINTS"`
 	CORSAllowedOrigins                  []string `yaml:"corsAllowedOrigins"                  envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
 	MetricsPort                         uint     `yaml:"metricsPort"                                                                                  split_words:"true"`
+	// APIBindAddr is the interface the Blockfrost, Mesh, and UTxO RPC
+	// listeners bind. Like DebugBindAddr it defaults to loopback
+	// independently of BindAddr and PrivateBindAddr, so widening the
+	// public bind address the relay/NtN and metrics listeners need never
+	// silently exposes an API listener whose authentication is off by
+	// default. Operators expose one on purpose, either by setting this
+	// field or by setting one provider's own
+	// plugins.api.<name>.config.host.
+	APIBindAddr string `yaml:"apiBindAddr"                        envconfig:"DINGO_API_BIND_ADDR"`
 	// DebugBindAddr is the interface used by the unauthenticated pprof
 	// listener. It defaults to loopback independently of BindAddr and
 	// PrivateBindAddr; operators must set this field explicitly to expose
@@ -1063,6 +1073,7 @@ var globalConfig = &Config{
 	Network:                             "preview",
 	NetworkMagic:                        0,
 	MetricsPort:                         12798,
+	APIBindAddr:                         DefaultAPIBindAddr,
 	DebugBindAddr:                       DefaultDebugBindAddr,
 	DebugPort:                           0,
 	PrivateBindAddr:                     "127.0.0.1",
@@ -1073,7 +1084,7 @@ var globalConfig = &Config{
 	BarkHost:                            "",
 	BarkClientCAFilePath:                "",
 	BarkOperatorCertificateFingerprints: nil,
-	CORSAllowedOrigins:                  []string{"*"},
+	CORSAllowedOrigins:                  nil,
 	Topology:                            "",
 	TlsCertFilePath:                     "",
 	TlsKeyFilePath:                      "",
@@ -1445,6 +1456,11 @@ func (c *Config) ApplyDefaults() {
 	if c.DebugBindAddr == "" {
 		c.DebugBindAddr = DefaultDebugBindAddr
 	}
+	// Same rule for the API listeners: an unset apiBindAddr is loopback,
+	// never the public wildcard bindAddr uses.
+	if c.APIBindAddr == "" {
+		c.APIBindAddr = DefaultAPIBindAddr
+	}
 	// Match the Midnight server's safe default before validation so an
 	// explicitly empty YAML or environment value does not look like a remote
 	// plaintext listener and require the insecure-remote escape hatch.
@@ -1544,6 +1560,28 @@ func (c *Config) MempoolSettings() (int64, float64, float64) {
 // APIPluginPort returns the configured port for a built-in API selection.
 func APIPluginPort(selection hostplugin.Selection) uint {
 	return pluginUint(selection.Config["port"])
+}
+
+// APIPluginHost returns the bind address for a built-in API selection:
+// its own plugins.api.<name>.config.host when set, else fallback. The
+// per-provider override exists so one API can be exposed without
+// widening the other two, and it is read here as well as by the provider
+// itself so validation sees the address the listener will really bind.
+func APIPluginHost(selection hostplugin.Selection, fallback string) string {
+	host, _ := selection.Config["host"].(string)
+	return apiconfig.ListenHost(host, fallback)
+}
+
+// APIListenHost returns the effective bind address for one built-in API
+// provider. An unset APIBindAddr resolves to loopback rather than to the
+// public wildcard, so a Config that never went through ApplyDefaults is
+// fail-safe too -- the same defensive fallback DebugListenAddress makes.
+func (c *Config) APIListenHost(selection hostplugin.Selection) string {
+	fallback := c.APIBindAddr
+	if fallback == "" {
+		fallback = DefaultAPIBindAddr
+	}
+	return APIPluginHost(selection, fallback)
 }
 
 func pluginFloat64(value any) float64 {

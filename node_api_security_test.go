@@ -250,3 +250,46 @@ func TestNewRejectsInvalidAPIAuthMode(t *testing.T) {
 	assert.Contains(t, err.Error(), "config.auth")
 	assert.Contains(t, err.Error(), "invalid mode")
 }
+
+// TestAPIListenersDefaultToLoopback pins #3498's programmatic default:
+// NewConfig binds the three API listeners to loopback while leaving the
+// public bind address the relay/NtN and metrics listeners use alone.
+func TestAPIListenersDefaultToLoopback(t *testing.T) {
+	cfg := NewConfig()
+
+	assert.Equal(t, "0.0.0.0", cfg.BindAddr())
+	assert.Equal(t, internalconfig.DefaultAPIBindAddr, cfg.APIBindAddr())
+	assert.Equal(t, "127.0.0.1", cfg.APIBindAddr())
+}
+
+// TestWithAPIBindAddrWidensOnlyTheAPIListeners asserts the explicit
+// opt-out an operator fronting Dingo with a proxy or a container network
+// needs, and that it does not disturb bindAddr.
+func TestWithAPIBindAddrWidensOnlyTheAPIListeners(t *testing.T) {
+	// A non-default API address, so the bindAddr assertion below cannot
+	// pass by coincidence: if WithAPIBindAddr wrote through to BindAddr,
+	// BindAddr would read 192.0.2.20 rather than its own default.
+	cfg := NewConfig(WithAPIBindAddr("192.0.2.20"))
+
+	assert.Equal(t, "192.0.2.20", cfg.APIBindAddr())
+	assert.Equal(t, "0.0.0.0", cfg.BindAddr())
+
+	cfg = NewConfig(WithBindAddr("192.0.2.10"))
+	assert.Equal(t, "192.0.2.10", cfg.BindAddr())
+	assert.Equal(
+		t,
+		internalconfig.DefaultAPIBindAddr,
+		cfg.APIBindAddr(),
+		"widening the public bind address must not widen the API listeners",
+	)
+}
+
+// TestCORSDefaultsToDisabled pins the CORS half of #3498: no wildcard
+// Access-Control-Allow-Origin unless an operator asks for one.
+func TestCORSDefaultsToDisabled(t *testing.T) {
+	defaults := NewConfig()
+	assert.Empty(t, defaults.CORSAllowedOrigins())
+
+	wildcard := NewConfig(WithCORSAllowedOrigins([]string{"*"}))
+	assert.Equal(t, []string{"*"}, wildcard.CORSAllowedOrigins())
+}

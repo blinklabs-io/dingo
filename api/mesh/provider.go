@@ -36,7 +36,11 @@ const defaultProviderPort uint = 8080
 // already-resolved-for-this-provider settings, identical in shape to a
 // provider that set every field inline.
 type ProviderConfig struct {
-	Port uint                 `yaml:"port"`
+	Port uint `yaml:"port"`
+	// Host overrides the shared API bind address (apiBindAddr) for this
+	// listener alone. Unset means "use the shared default", which is
+	// loopback -- see ARCHITECTURE.md's "API security" section.
+	Host string               `yaml:"host"`
 	TLS  apiconfig.TLSPolicy  `yaml:"tls"`
 	Auth apiconfig.AuthPolicy `yaml:"auth"`
 }
@@ -85,7 +89,7 @@ func RegisterProvider(host *plugin.Host) error {
 				Logger: deps.Logger, LedgerState: deps.LedgerState,
 				Database: deps.Database, Chain: deps.Chain, Mempool: deps.Mempool,
 				ListenAddress: net.JoinHostPort(
-					deps.Host,
+					apiconfig.ListenHost(cfg.Host, deps.Host),
 					strconv.FormatUint(uint64(cfg.Port), 10),
 				),
 				Network: deps.Network, NetworkMagic: deps.NetworkMagic,

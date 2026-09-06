@@ -249,6 +249,45 @@ func TestBuildDingoConfigWiresAPIConfig(t *testing.T) {
 	}
 }
 
+// TestBuildDingoConfigWiresAPIBindAddr pins the composition boundary for
+// issue #3498: an operator's explicit apiBindAddr must reach dingo.Config,
+// and an unset one must resolve to loopback rather than to bindAddr.
+func TestBuildDingoConfigWiresAPIBindAddr(t *testing.T) {
+	t.Parallel()
+
+	build := func(cfg *config.Config) dingo.Config {
+		logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+		return buildDingoConfig(
+			cfg,
+			logger,
+			nil,
+			nil,
+			false,
+			dingo.StorageModeCore,
+			30*time.Second,
+			chainsync.DefaultStallTimeout,
+			chainsync.HeaderSyncStrategyPrimary,
+		)
+	}
+
+	explicit := build(&config.Config{
+		BindAddr:    "0.0.0.0",
+		APIBindAddr: "192.0.2.10",
+	})
+	if got, want := explicit.APIBindAddr(), "192.0.2.10"; got != want {
+		t.Fatalf("apiBindAddr = %q, want %q", got, want)
+	}
+
+	// A wildcard public bind address must not widen the API listeners.
+	inherited := build(&config.Config{BindAddr: "0.0.0.0"})
+	if got, want := inherited.APIBindAddr(), config.DefaultAPIBindAddr; got != want {
+		t.Fatalf("unset apiBindAddr = %q, want %q", got, want)
+	}
+	if got, want := inherited.BindAddr(), "0.0.0.0"; got != want {
+		t.Fatalf("bindAddr = %q, want %q", got, want)
+	}
+}
+
 // TestBuildDingoConfigWiresBarkOperatorFingerprints pins the production
 // composition boundary between loaded YAML/env/CLI configuration and the root
 // configuration that Run passes to dingo.New and, in turn, Bark.

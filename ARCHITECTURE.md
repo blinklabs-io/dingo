@@ -5571,16 +5571,37 @@ without one.
   upgrade for any deployment that had set them only for UTxO RPC, which
   they never protected. An operator opting Blockfrost/Mesh into TLS does so
   explicitly, through `api.tls` or their own `plugins.api.<name>.config.tls`.
-  `bindAddr`, `debugBindAddr`, and `corsAllowedOrigins` are unaffected by any
-  of this and stay at the `Config` root: `bindAddr` is not API-specific (the
-  relay/NtN and metrics listeners use it too), `debugBindAddr` controls the
-  separate pprof listener, and `corsAllowedOrigins`'s single shared value
-  already applies uniformly to all three API providers today. Duplicating
-  these fields under `api:` would only add a second source of truth with no
+  `bindAddr`, `apiBindAddr`, `debugBindAddr`, and `corsAllowedOrigins` are
+  unaffected by any of this and stay at the `Config` root: `bindAddr` is not
+  API-specific (the relay/NtN and metrics listeners use it), `apiBindAddr` is
+  the API listeners' own bind address, `debugBindAddr` controls the separate
+  pprof listener, and `corsAllowedOrigins`'s single shared value already
+  applies uniformly to all three API providers today. Duplicating these
+  fields under `api:` would only add a second source of truth with no
   behavioral gain.
   Authentication has no legacy root field at all — its default is simply
   `"disabled"` everywhere, so existing reverse-proxy/no-auth deployments
   are unaffected regardless.
+- **Exposure defaults (dingo#3498).** The three API listeners bind
+  `apiBindAddr`, which defaults to `127.0.0.1` and is resolved
+  *independently of* `bindAddr` — widening the public bind address the
+  relay/NtN and metrics listeners need never widens an API listener whose
+  auth is `disabled` by default. This is the same fail-safe rule
+  `debugBindAddr` follows for pprof, and it is applied in
+  `internal/config.Config.ApplyDefaults` (for the CLI/YAML/environment path)
+  and again in `dingo.Config.syncCompatFields` (for the programmatic path),
+  so a `Config` that never went through either still resolves to loopback
+  rather than to a wildcard. One provider is widened on its own through
+  `plugins.api.<name>.config.host`, a per-provider override that beats
+  `apiBindAddr`; `internal/apiconfig.ListenHost` is the single definition of
+  that precedence, called both by `internal/config.APIPluginHost` (so
+  `Validate`'s port-conflict check sees the address the listener will really
+  bind) and by each provider's own `RegisterProvider` factory (so the
+  listener and the validation cannot disagree). `corsAllowedOrigins`
+  likewise defaults to an empty list — no `Access-Control-Allow-Origin`
+  header at all — rather than to `["*"]`. Both are breaking changes for a
+  deployment that relied on the previous wildcard defaults, and the README's
+  "API Exposure" section documents the migration.
 
 ### API listener lifecycle (`internal/apilistener`)
 

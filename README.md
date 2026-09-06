@@ -305,6 +305,44 @@ plugins:
     utxorpc: {provider: builtin, config: {port: 9090}}
 ```
 
+### API Exposure
+
+The Blockfrost, Mesh, and UTxO RPC listeners bind `127.0.0.1` by default.
+Their dedicated `apiBindAddr` is independent of `bindAddr`, so widening the
+public bind address the relay/NtN and metrics listeners use does not widen
+the APIs with it — the same rule `debugBindAddr` already follows for the
+pprof listener. Authentication is `disabled` by default (see below), so an
+API listener reachable off-box is an explicit operator decision:
+
+```yaml
+# Expose every API listener. Pair this with api.auth, TLS, a firewall, or
+# a reverse proxy.
+apiBindAddr: "0.0.0.0"
+
+plugins:
+  api:
+    # Or widen one listener only, leaving the other two on loopback.
+    blockfrost:
+      provider: builtin
+      config:
+        port: 3000
+        host: "0.0.0.0"
+```
+
+`plugins.api.<name>.config.host` overrides `apiBindAddr` for that provider
+alone; the CLI (`--api-bind-addr`) and environment
+(`DINGO_API_BIND_ADDR`) set the shared default.
+
+`corsAllowedOrigins` likewise defaults to an empty list, which sends no CORS
+headers at all. Set it explicitly — to specific origins, or to `["*"]` — to
+allow browser access.
+
+> **Upgrading:** a deployment that relied on the previous `0.0.0.0` API
+> default (for example, a container publishing an API port to the host) must
+> now set `apiBindAddr` — or that provider's own `host` — explicitly. A
+> deployment that relied on the previous wildcard CORS default must set
+> `corsAllowedOrigins` explicitly.
+
 ### API TLS and Authentication
 
 `api.tls`/`api.auth` set a shared default TLS and authentication policy for
@@ -400,8 +438,8 @@ inherits the two paths from the legacy root settings. The root pair is not
 promoted onto Blockfrost or Mesh, since doing so would silently switch a
 previously plaintext listener to TLS on upgrade. `bindAddr` and
 `corsAllowedOrigins` are unrelated to this policy and remain root-level
-settings shared by all listeners (`bindAddr` is also used by the relay/NtN
-listener, not just the APIs).
+settings (`bindAddr` is used by the relay/NtN and metrics listeners, not by
+the APIs — see "API Exposure" above).
 
 ### Archive And History Expiry Nodes
 
@@ -996,9 +1034,10 @@ go tool pprof http://127.0.0.1:6060/debug/pprof/heap
 
 The live pprof server has no authentication or TLS. Its dedicated
 `debugBindAddr` defaults to `127.0.0.1` even when `bindAddr` or
-`privateBindAddr` uses a wildcard. External exposure therefore requires an
-explicit `--debug-bind-addr`, `DINGO_DEBUG_BIND_ADDR`, or `debugBindAddr`
-override and should be protected by a firewall or equivalent network policy.
+`privateBindAddr` uses a wildcard, exactly as `apiBindAddr` does for the API
+listeners. External exposure therefore requires an explicit
+`--debug-bind-addr`, `DINGO_DEBUG_BIND_ADDR`, or `debugBindAddr` override and
+should be protected by a firewall or equivalent network policy.
 
 ## DevNet
 
