@@ -4473,12 +4473,54 @@ normal steady state at the head of a fast chain. The gate also compares tip
 identity, not just position: an equal-slot fork the ledger has not applied has
 a gap of zero but still means the two views describe different blocks. Skips
 are logged at `WARN` (`forge skip: ledger tip stale vs header frontier`) and
-counted by `dingo_forge_stale_tip_skip_total`, labelled `reason="slot_gap"` or
-`reason="frontier_hash_diverged"`. The ledger-apply backlog itself is reported
-on every leader check by `dingo_forge_tip_gap_slots`. Raising the tolerance
-lets the node forge blocks whose contents were chosen against an older chain
-position than their parent, so raise it only where the ledger pipeline is
-known to be legitimately slow.
+counted by `dingo_forge_stale_tip_skip_total`. The ledger-apply backlog itself
+is reported on every leader check by `dingo_forge_tip_gap_slots`. Raising the
+tolerance lets the node forge blocks whose contents were chosen against an
+older chain position than their parent, so raise it only where the ledger
+pipeline is known to be legitimately slow.
+
+The gate also covers the case the frontier comparison structurally cannot see:
+header admission and ledger application stalling *together*. Both local tips
+then agree, every gap above reads 0, and the node forges on a parent the
+network has long built past. Two further bounds catch it, both measured
+against `newestKnown` -- the most recent block this node has any evidence of,
+whether applied, admitted as a header, or corroborated as a Leios endorser
+block:
+
+- `forgeUpstreamStalenessSlots` (default 5, flag
+  `--forge-upstream-staleness-slots`, env
+  `CARDANO_DINGO_FORGE_UPSTREAM_STALENESS_SLOTS`) bounds how far `newestKnown`
+  may trail the corroborated upstream sync target. When chain selection has
+  not published a target -- routine between batches and after an
+  active-connection handoff -- it falls back to the frontier of headers this
+  node itself admitted, which is authenticated rather than claimed. Measured
+  against the network rather than the wall clock on purpose: "how far behind
+  the network am I" is ~0 on a quiet chain however long blocks take.
+- `forgeAppliedTipStalenessSlots` (default 0 = disabled, flag
+  `--forge-applied-tip-staleness-slots`, env
+  `CARDANO_DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS`) is a wall-clock backstop
+  bounding how many slots older than the current slot `newestKnown` may be. It
+  is off by default because "how old is my newest block" tracks the block
+  interval, so any fixed bound refuses constantly on a low-throughput chain;
+  set it only where the block interval is known and bounded.
+
+`dingo_forge_stale_tip_skip_total` carries a `reason` label with five values,
+each from a different pair of inputs:
+
+| `reason` | Meaning | Inputs |
+| --- | --- | --- |
+| `slot_gap` | The applied tip trails the header frontier by more than `forgeHeaderFrontierToleranceSlots`. | applied tip slot, frontier slot |
+| `frontier_hash_diverged` | Frontier and applied tip are at the same slot but name different blocks -- an equal-slot fork the ledger has not applied. | applied tip hash, frontier hash |
+| `frontier_behind_applied` | The frontier is at a lower slot than the applied tip, so the builder's parent is a block the ledger has already built past. | applied tip slot, frontier slot |
+| `eb_manifest_ahead` | The headers alone looked fine; only a corroborated Leios endorser block pushed the gap over the tolerance, proving a ranking block exists at a slot whose header this node has not admitted. | applied tip slot, frontier slot, highest corroborated endorser-block slot |
+| `applied_tip_stale` | The local tips agree, but `newestKnown` is too old: it trails the corroborated upstream target (or the admitted-header frontier) by more than `forgeUpstreamStalenessSlots`, or trails the current slot by more than a configured `forgeAppliedTipStalenessSlots`. | `newestKnown`, upstream sync target or admitted-header frontier, current slot |
+
+Every reason except `applied_tip_stale` means the ledger pipeline, not the
+network, was the thing behind; `applied_tip_stale` means this node was behind
+the network as a whole. All five are counted only on slots this node was
+actually elected to forge, so the counter reads as lost blocks rather than as
+leader checks.
+
 KES periods are computed from the era-aware absolute slot (`currentSlot / slotsPerKESPeriod`) for both startup opcert validation and forge-time signing, so networks with Byron-era prefixes do not skew the current KES period by converting wall-clock duration directly through the Shelley slot length.
 Successful startup validation captures Shelley genesis `MaxKESEvolutions` on
 the loaded credentials together with the opcert start and overflow-checked
