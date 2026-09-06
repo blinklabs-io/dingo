@@ -122,6 +122,45 @@ func classifyFetchErr(err error) error {
 	return transientErr(err)
 }
 
+// recordKoiosSource stamps the resolved Koios API root on the cache and logs
+// it once, for the two entry points that write Koios rows (Fetch and
+// NewObserver).
+//
+// The log line is the other half of the guard: the node's startup config dump
+// names the configured value only for the in-process observer, and says
+// nothing on the fetch/run/watch paths, so without this an operator has no
+// record of which oracle a run actually queried. An override that failed to
+// apply is otherwise invisible.
+func recordKoiosSource(
+	cache *Cache,
+	network, resolvedBaseURL string,
+	logger *slog.Logger,
+) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	change, err := cache.RecordKoiosSource(
+		network, resolvedBaseURL, time.Now().UTC(),
+	)
+	if err != nil {
+		return fmt.Errorf("record koios source: %w", err)
+	}
+	if change.Changed {
+		logger.Warn(
+			"koiosparity: koios source changed, discarding cached reference data",
+			"network", network,
+			"previous_base_url", change.Previous,
+			"base_url", resolvedBaseURL,
+			"rows_discarded", change.RowsDiscarded,
+		)
+	}
+	logger.Info("koiosparity: koios source",
+		"network", network,
+		"base_url", resolvedBaseURL,
+	)
+	return nil
+}
+
 // Fetch pulls Koios data into the cache, resuming from the last cached epoch.
 func Fetch(
 	ctx context.Context,
@@ -145,6 +184,11 @@ func Fetch(
 		cfg.AllowInsecureHTTP,
 	)
 	if err != nil {
+		return nil, err
+	}
+	if err := recordKoiosSource(
+		cache, cfg.Network, koios.ResolvedBaseURL(), logger,
+	); err != nil {
 		return nil, err
 	}
 

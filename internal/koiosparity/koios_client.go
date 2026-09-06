@@ -271,6 +271,34 @@ func NewKoiosClient(
 	}, nil
 }
 
+// ResolvedBaseURL reports the API root this client actually queries, with any
+// userinfo removed so it is safe to log or persist.
+//
+// The resolved host is the identity of the oracle a parity run is judging
+// Dingo against, and it is not otherwise visible anywhere: an override that
+// silently failed to apply produces a run indistinguishable from one against
+// the intended host. Callers record it (Cache.RecordKoiosSource) and log it
+// once at startup for exactly that reason.
+func (c *KoiosClient) ResolvedBaseURL() string {
+	return redactKoiosBaseURL(c.baseURL)
+}
+
+// redactKoiosBaseURL strips userinfo from a Koios API root.
+//
+// validateKoiosBaseURL already rejects a query string and a fragment, so
+// userinfo is the only place a credential can survive into a validated base
+// URL, and dropping it leaves scheme, host and path — the parts that identify
+// the oracle — intact. An unparseable value is reported as a placeholder
+// rather than echoed, on the same rule redactURLError follows.
+func redactKoiosBaseURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "invalid URL"
+	}
+	parsed.User = nil
+	return parsed.String()
+}
+
 // isPublicKoiosHost reports whether a base URL names a koios.rest deployment,
 // whose published tier window applies however the URL was spelled -- as a
 // built-in default or as an override naming the same host.

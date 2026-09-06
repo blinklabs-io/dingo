@@ -1374,6 +1374,138 @@ func (c *Cache) GetAccountUniverse(
 	return addrs, fetchedAt, true, nil
 }
 
+// koiosSourcedTables holds every table whose rows came from a Koios
+// deployment, or were derived by comparing Dingo against one. All are keyed by
+// network, so a host change invalidates exactly the network that changed.
+//
+// The derived check tables belong here as much as the fetched ones: a
+// mismatch row records a verdict reached against a particular oracle, and
+// keeping it after the oracle changed would leave the report asserting
+// something the new reference data was never asked about.
+var koiosSourcedTables = []string{
+	"koios_epoch_info",
+	"koios_pool_epoch",
+	"koios_totals",
+	"koios_account_rewards",
+	"koios_account_coverage",
+	"koios_account_fetch_staged_rows",
+	"koios_account_checked",
+	"koios_account_universe",
+	"koios_account_universe_state",
+	"check_epoch_status",
+	"check_runs",
+	"check_mismatches",
+}
+
+// KoiosSourceChange describes what RecordKoiosSource found and did.
+type KoiosSourceChange struct {
+	// Previous is the API root previously recorded for this network, empty
+	// when none was.
+	Previous string
+	// Changed is true when a different root was already recorded and this
+	// network's cached rows were therefore discarded.
+	Changed bool
+	// RowsDiscarded counts the rows removed by that invalidation.
+	RowsDiscarded int64
+}
+
+// RecordKoiosSource stamps the Koios API root this cache's rows for network
+// came from, and discards them when it differs from the one already recorded.
+//
+// Every Koios table is keyed by (network, epoch) and records nothing about
+// which deployment answered. Without this, pointing --koios-parity-base-url at
+// a self-hosted mirror and then running again without it silently compares
+// Dingo against a mixture of two oracles, and the report is indistinguishable
+// from one produced against either alone. That is the failure mode the base
+// URL option introduces, so the option carries the guard.
+//
+// Invalidation is deliberately destructive rather than advisory: the rows are
+// a cache of another system's answers, rebuildable by fetching again, and any
+// weaker response leaves the mixed-oracle report reachable. baseURL must
+// already be redacted (KoiosClient.ResolvedBaseURL) — a credential has no
+// business in the cache file, and comparing redacted roots correctly treats a
+// rotated key against the same host as the same oracle.
+func (c *Cache) RecordKoiosSource(
+	network, baseURL string,
+	now time.Time,
+) (KoiosSourceChange, error) {
+	var change KoiosSourceChange
+	tx, err := c.db.Begin()
+	if err != nil {
+		return change, fmt.Errorf("begin koios source tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var previous string
+	err = tx.QueryRow(
+		"SELECT base_url FROM koios_source WHERE network = ?",
+		network,
+	).Scan(&previous)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// First run against this network in this cache file. Nothing to
+		// invalidate — but a pre-existing row set from before this column
+		// existed is also unattributed, so it is claimed by the current
+		// source rather than discarded: it was fetched by a build that had no
+		// override to apply.
+	case err != nil:
+		return change, fmt.Errorf("read koios source: %w", err)
+	case previous != baseURL:
+		change.Previous = previous
+		change.Changed = true
+		for _, table := range koiosSourcedTables {
+			// #nosec G202 -- table comes from koiosSourcedTables, a
+			// package-level literal slice; no caller-supplied value reaches
+			// this string. TestKoiosSourcedTablesAreBareIdentifiers keeps
+			// that true. The network value stays a bound parameter.
+			res, delErr := tx.Exec(
+				"DELETE FROM "+table+" WHERE network = ?",
+				network,
+			)
+			if delErr != nil {
+				return change, fmt.Errorf(
+					"discard %s for changed koios source: %w", table, delErr,
+				)
+			}
+			if n, rowsErr := res.RowsAffected(); rowsErr == nil {
+				change.RowsDiscarded += n
+			}
+		}
+	}
+
+	if _, err = tx.Exec(
+		`INSERT INTO koios_source (network, base_url, recorded_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(network) DO UPDATE SET
+			base_url = excluded.base_url,
+			recorded_at = excluded.recorded_at`,
+		network, baseURL, now.UTC(),
+	); err != nil {
+		return change, fmt.Errorf("record koios source: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return change, fmt.Errorf("commit koios source: %w", err)
+	}
+	return change, nil
+}
+
+// GetKoiosSource returns the API root recorded for network, and whether one
+// has been recorded at all.
+func (c *Cache) GetKoiosSource(network string) (string, bool, error) {
+	var baseURL string
+	err := c.db.QueryRow(
+		"SELECT base_url FROM koios_source WHERE network = ?",
+		network,
+	).Scan(&baseURL)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read koios source: %w", err)
+	}
+	return baseURL, true, nil
+}
+
 func createCacheSchema(db *sql.DB) error {
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS koios_epoch_info (
@@ -1480,6 +1612,18 @@ func createCacheSchema(db *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS koios_account_universe_state (
 			network TEXT PRIMARY KEY, fetched_at DATETIME NOT NULL,
 			address_count INTEGER NOT NULL)`,
+
+		// The oracle this cache's Koios rows came from. Every other table is
+		// keyed by (network, epoch) and says nothing about which deployment
+		// answered, so rows fetched from a self-hosted mirror and rows fetched
+		// from the public host are indistinguishable once written — and a run
+		// against the wrong oracle produces a report indistinguishable from a
+		// run against the right one. Recording the resolved root makes a host
+		// change detectable, and RecordKoiosSource invalidates on one rather
+		// than silently mixing two oracles in a single comparison.
+		`CREATE TABLE IF NOT EXISTS koios_source (
+			network TEXT PRIMARY KEY, base_url TEXT NOT NULL,
+			recorded_at DATETIME NOT NULL)`,
 	}
 	for _, stmt := range statements {
 		if _, err := db.Exec(stmt); err != nil {

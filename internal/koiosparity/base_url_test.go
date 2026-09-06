@@ -237,3 +237,30 @@ func TestNewKoiosClientRejectsBareFragment(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "fragment")
 }
+
+// TestResolvedBaseURLDropsUserinfo covers the value that gets logged and
+// persisted. validateKoiosBaseURL already rejects a query and a fragment, so
+// userinfo is the only place a credential survives into a validated root, and
+// both the log line and the cache row must be safe to read.
+func TestResolvedBaseURLDropsUserinfo(t *testing.T) {
+	c, err := NewKoiosClient(
+		"preview",
+		"key",
+		"https://dingo:hunter2@koios.example/api/v1",
+		false,
+	)
+	require.NoError(t, err)
+	resolved := c.ResolvedBaseURL()
+	assert.Equal(t, "https://koios.example/api/v1", resolved)
+	assert.NotContains(t, resolved, "hunter2")
+	assert.NotContains(t, resolved, "dingo:")
+}
+
+// TestResolvedBaseURLReportsTheDefaultHost pins that the accessor names the
+// host actually queried when no override is given, rather than reporting the
+// empty override back.
+func TestResolvedBaseURLReportsTheDefaultHost(t *testing.T) {
+	c, err := NewKoiosClient("preview", "", "", false)
+	require.NoError(t, err)
+	assert.Equal(t, koiosBaseURLs["preview"], c.ResolvedBaseURL())
+}

@@ -6591,6 +6591,27 @@ never the reverse.
   `logURIConfigFields` exists to keep out of logs. `KoiosParity.BaseURL` is classified as
   a URI field for logging (`logURIConfigFields`), not a plain one, because an
   operator can embed credentials in it.
+- **Koios source provenance.** Every Koios table is keyed by `(network,
+  epoch)` and records nothing about which deployment answered, so once a row is
+  written a self-hosted mirror's answer and the public host's answer are the
+  same row. Left alone, that makes a run against the wrong oracle produce a
+  report indistinguishable from a run against the right one — the failure mode
+  the override introduces. `koios_source` records the resolved API root per
+  network, and `Cache.RecordKoiosSource` discards that network's Koios and
+  derived check rows (`koiosSourcedTables`) when the root changes, rather than
+  silently mixing two oracles in one comparison. Invalidation is destructive on
+  purpose: the rows are a cache of another system's answers and are rebuildable
+  by fetching again, whereas anything weaker leaves the mixed-oracle report
+  reachable. It is scoped to the network whose source changed, since the root
+  is resolved per network. The recorded value is
+  `KoiosClient.ResolvedBaseURL()`, which strips userinfo — validation already
+  rejects a query and a fragment, so that is the only place a credential can
+  survive — which also makes a rotated key against the same host read as the
+  same oracle. The first recording for a network never discards: an existing
+  cache predates the column and is unattributed rather than wrong. `Fetch` and
+  `NewObserver` both record and log the resolved root once at startup, because
+  the node's config dump names the configured value only for the in-process
+  observer and says nothing on the `fetch`/`run`/`watch` paths.
 - **Koios endpoint.** `/account_rewards` is deprecated; `/account_reward_
   history` is the replacement (`KoiosClient.GetAccountRewardHistory`), taking
   the same `stake_addresses_with_epoch_no` POST body shape via a new `post()`

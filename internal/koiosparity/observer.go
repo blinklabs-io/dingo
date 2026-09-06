@@ -208,6 +208,12 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 		_ = cache.Close()
 		return nil, fmt.Errorf("create koios client: %w", err)
 	}
+	if err := recordKoiosSource(
+		cache, cfg.Network, koios.ResolvedBaseURL(), cfg.Logger,
+	); err != nil {
+		_ = cache.Close()
+		return nil, err
+	}
 
 	return &Observer{
 		cfg:     cfg,
