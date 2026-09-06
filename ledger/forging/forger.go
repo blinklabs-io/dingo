@@ -864,6 +864,17 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		f.metrics.tipGapSlots.Set(float64(applyGap))
 	}
 
+	// Strictly PAST the current slot, measured against parentSlot -- the slot
+	// the forged block's parent would actually be at -- rather than the applied
+	// tip alone. Comparing against the applied tip alone misses a frontier that
+	// is ahead of the current slot (applied 199, current 200, frontier 201),
+	// which otherwise reaches the builder and produces a block whose parent
+	// sits at a LATER slot than the block itself.
+	//
+	// The comparison is strict so an EQUAL slot survives to the two cases
+	// below, which distinguish a competing block at the applied tip from one
+	// only on the frontier. Dropping equal slots here would also collide with
+	// the contested-slot handling in #3955, which needs them.
 	if currentSlot < parentSlot {
 		// Detect stale data: if the tip is far ahead of the slot clock,
 		// the database likely contains chain data from a different genesis.
@@ -978,80 +989,29 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		// selection and the contested-slot branch account for it.
 	}
 
-	// The PRIMARY CHAIN TIP already holds a block at the current slot while
-	// the ledger has not applied it yet (parentSlot == currentSlot > tipSlot,
-	// so neither the strictly-past guard nor the equal-applied-tip branch
-	// above fires). The builder parents on the primary chain tip, so forging
-	// here would produce a block for slot S whose parent is already at slot S
-	// -- a non-increasing slot, admitted locally and broadcast to peers.
+	// The FRONTIER already holds a block at the current slot while the ledger
+	// has not applied it yet (parentSlot == currentSlot > tipSlot, so neither
+	// the strictly-past guard nor the equal-applied-tip branch above fires).
+	// The builder parents on the frontier, so forging here would produce a
+	// block for slot S whose parent is already at slot S -- a non-increasing
+	// slot, admitted locally and broadcast to peers.
 	//
 	// This is deliberately separate from the contested-slot branch above.
 	// There the competing block is applied, so tipBlockOwnership can compare
 	// it against SlotTracker by hash and tell our own block from a rival's.
-	// Here the block is unapplied, so that helper cannot: it compares against
-	// the APPLIED tip hash, which by construction names an earlier block, and
-	// answers tipOwnershipUnknown for everything that reaches this branch.
-	// Ownership is still decidable, just from the other tip --
-	// unappliedTipOwnership compares SlotTracker's hash for this slot against
-	// the PRIMARY chain tip's -- and it has to be decided, because this
-	// node's own just-forged, not-yet-applied block arrives here too: the
-	// refusal is right for it (a second block for the slot would equivocate)
-	// but calling it a rival that cost us a leader slot is not.
+	// Here the block is unapplied: tipBlockOwnership reads the applied tip and
+	// answers tipOwnershipUnknown, and the fence only covers slots this node
+	// committed to, so nothing downstream would stop the forge.
 	//
 	// Routed through logGateSkip because this runs before leader selection, so
 	// a slot this node was scheduled to lead would otherwise vanish at Debug.
-	//
-	// The schedule lookup is also what the counter is taken from. This is the
-	// one refusal the gate adds that can lose a scheduled leader slot without
-	// moving any parity counter: it returns before checkLeaderSafe, so
-	// about_to_lead has already incremented and none of node_is_leader,
-	// not_leader or could_not_forge ever will. The same real-world event --
-	// a rival block at our leader slot -- reaches the contested-slot branch
-	// above when the ledger has applied it, where it moves both
-	// slotBattlesTotal and could_not_forge, and lands here when it has not, so
-	// without a counter a dashboard would see the lost block in one case and
-	// not the other purely on pipeline timing.
-	//
-	// Counted on the stale-tip vector because it is the same disagreement the
-	// vector already reports -- applied tip behind primary chain tip -- and a
-	// dashboard summing the reasons then has every locally-caused lost slot in
-	// one series. It is the only reason counted from the VRF schedule rather
-	// than from a completed leader check; see forgeStaleTipReasonUnappliedRival.
 	if currentSlot == parentSlot && parentSlot > tipSlot {
-		// The unapplied block at the primary chain tip is one this node
-		// forged: the slot produced a block rather than losing one, so this
-		// is the routine re-entry the equal-applied-tip branch above logs at
-		// Debug with no counter, and it must read the same way here. Counting
-		// it would make the series over-report a lost leader slot purely
-		// because the ledger has not caught up with our own block yet, which
-		// is the split on pipeline timing this gate exists to remove.
-		if ownership, matchedBy := f.unappliedTipOwnership(
+		f.logGateSkip(
 			currentSlot,
-			primaryTip.Hash,
-		); ownership == tipOwnershipOurs {
-			f.logger.Debug(
-				"forge skip: slot already has our own block",
-				"current_slot", currentSlot,
-				"tip_slot", tipSlot,
-				"primary_tip_slot", primaryTip.Slot,
-				"last_forged_slot", f.lastForgedSlot,
-				"matched_by", matchedBy,
-			)
-			return nil
-		}
-		// One schedule read, shared by the counter and the log level, so a
-		// skip does not run the lookup (or the panic recovery around it)
-		// twice.
-		leaderSlot := f.isScheduledLeaderSlot(currentSlot)
-		if leaderSlot && f.metrics != nil {
-			f.metrics.forgeStaleTipSkipUnappliedRival.Inc()
-		}
-		f.logGateSkipScheduled(
-			leaderSlot,
-			"forge skip: primary chain tip already has a block at this slot",
+			"forge skip: header frontier already has a block at this slot",
 			"current_slot", currentSlot,
 			"tip_slot", tipSlot,
-			"primary_tip_slot", primaryTip.Slot,
+			"frontier_slot", frontier.Slot,
 		)
 		return nil
 	}

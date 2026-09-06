@@ -450,6 +450,68 @@ func TestForgeSkipsWhenFrontierAlreadyHasTheCurrentSlot(t *testing.T) {
 		"must not forge a non-increasing slot on top of the frontier",
 	)
 	require.Zero(t, broadcaster.calls)
+	require.Contains(
+		t,
+		logs.String(),
+		"forge skip: header frontier already has a block at this slot",
+	)
+	// Warned, not Debug: this gate runs before leader selection, so a slot
+	// this node was scheduled to lead would otherwise vanish silently.
+	require.Contains(t, logs.String(), `"level":"WARN"`)
+}
+
+// TestForgeSkipsWhenFrontierIsAheadOfTheCurrentSlot covers the case that
+// falls through every other gate: the applied tip is behind the current slot,
+// so the applied-tip comparison passes, but the FRONTIER is ahead of it. The
+// builder parents on the frontier, so forging would produce a block for slot
+// 200 whose parent already sits at slot 201 -- a block earlier than its own
+// parent. Comparing the current slot against the applied tip alone cannot see
+// this; comparing against max(applied, frontier) can.
+func TestForgeSkipsWhenFrontierIsAheadOfTheCurrentSlot(t *testing.T) {
+	var logs bytes.Buffer
+	forger, builder, broadcaster := newStaleTipTestForger(
+		t,
+		200, // current slot
+		199, // applied tip, behind the current slot
+		201, // frontier AHEAD of the current slot
+		&logs,
+	)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Zero(
+		t,
+		builder.calls,
+		"must not forge a block whose parent is at a later slot than itself",
+	)
+	require.Zero(t, broadcaster.calls)
+	require.Contains(
+		t,
+		logs.String(),
+		"forge skip: chain tip is ahead of the current slot",
+	)
+}
+
+// TestForgeSkipsWhenAppliedTipAlreadyHasTheCurrentSlot pins that narrowing the
+// past-slot comparison to a strict inequality did not re-open the plain
+// equal-applied-tip case. That case is still refused here; #3955 replaces this
+// block with a contested-slot branch that can tell this node's own block from
+// a rival's, which is why equal slots must reach it rather than being consumed
+// by the comparison above.
+func TestForgeSkipsWhenAppliedTipAlreadyHasTheCurrentSlot(t *testing.T) {
+	var logs bytes.Buffer
+	forger, builder, broadcaster := newStaleTipTestForger(
+		t,
+		200, // current slot
+		200, // applied tip already at this slot
+		200, // frontier agrees
+		&logs,
+	)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Zero(t, builder.calls)
+	require.Zero(t, broadcaster.calls)
 	require.Contains(t, logs.String(), "forge skip: slot already has block")
 }
 
