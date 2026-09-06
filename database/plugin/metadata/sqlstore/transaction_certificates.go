@@ -315,6 +315,8 @@ RETURNING id`,
 		)
 		return id, nil, err
 	case *lcommon.DeregistrationDrepCertificate:
+		// The refund is carried by the certificate, so this deposit is always
+		// known and never uses the nullable legacy fallback.
 		amount := uint64(cert.Amount)
 		id, err := applyDrepDeregistrationCertificate(
 			ctx,
