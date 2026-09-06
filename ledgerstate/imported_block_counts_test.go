@@ -37,25 +37,44 @@ func TestSnapshotCarriesBlocksMadeForBothEpochs(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(4), state.Epoch)
 
-	const (
-		poolA = "2b00dcd8850e3baa26295ce80c9a36898566e26665e14fe10950a6f7"
-		poolB = "b0f3f3effa2365ab4937cfd7dea054cb3fb7a5b1fb65bb99c436527c"
-	)
-	decode := func(hexKey string) string {
-		raw, err := hex.DecodeString(hexKey)
-		require.NoError(t, err)
-		return string(raw)
-	}
-
 	require.Len(t, state.BlocksPrev, 2)
-	assert.Equal(t, uint64(63), state.BlocksPrev[decode(poolA)])
-	assert.Equal(t, uint64(104), state.BlocksPrev[decode(poolB)])
+	assert.Equal(
+		t,
+		uint64(63),
+		state.BlocksPrev[decodeSnapshotPoolKey(t, snapshotPoolA)],
+	)
+	assert.Equal(
+		t,
+		uint64(104),
+		state.BlocksPrev[decodeSnapshotPoolKey(t, snapshotPoolB)],
+	)
 	assert.Equal(t, uint64(167), sumBlocksMade(state.BlocksPrev))
 
 	require.Len(t, state.BlocksCur, 2)
-	assert.Equal(t, uint64(63), state.BlocksCur[decode(poolA)])
-	assert.Equal(t, uint64(81), state.BlocksCur[decode(poolB)])
+	assert.Equal(
+		t,
+		uint64(63),
+		state.BlocksCur[decodeSnapshotPoolKey(t, snapshotPoolA)],
+	)
+	assert.Equal(
+		t,
+		uint64(81),
+		state.BlocksCur[decodeSnapshotPoolKey(t, snapshotPoolB)],
+	)
 	assert.Equal(t, uint64(144), sumBlocksMade(state.BlocksCur))
+}
+
+// The two pools that minted blocks in the devnet snapshot fixture.
+const (
+	snapshotPoolA = "2b00dcd8850e3baa26295ce80c9a36898566e26665e14fe10950a6f7"
+	snapshotPoolB = "b0f3f3effa2365ab4937cfd7dea054cb3fb7a5b1fb65bb99c436527c"
+)
+
+func decodeSnapshotPoolKey(t *testing.T, hexKey string) string {
+	t.Helper()
+	raw, err := hex.DecodeString(hexKey)
+	require.NoError(t, err)
+	return string(raw)
 }
 
 // A dropped entry lowers one pool's beta and the epoch total every other
@@ -142,13 +161,22 @@ func TestImportBlocksMadePersistsBothEpochs(t *testing.T) {
 		nil,
 	))
 
+	// The expected values are spelled out rather than compared against the
+	// parsed state, so a parse that returned nothing could not satisfy this by
+	// agreeing with itself.
 	prev, err := store.GetImportedPoolBlockCounts(state.Epoch-1, nil)
 	require.NoError(t, err)
-	assert.Equal(t, state.BlocksPrev, prev)
+	assert.Equal(t, map[string]uint64{
+		decodeSnapshotPoolKey(t, snapshotPoolA): 63,
+		decodeSnapshotPoolKey(t, snapshotPoolB): 104,
+	}, prev)
 
 	cur, err := store.GetImportedPoolBlockCounts(state.Epoch, nil)
 	require.NoError(t, err)
-	assert.Equal(t, state.BlocksCur, cur)
+	assert.Equal(t, map[string]uint64{
+		decodeSnapshotPoolKey(t, snapshotPoolA): 63,
+		decodeSnapshotPoolKey(t, snapshotPoolB): 81,
+	}, cur)
 
 	// An epoch the snapshot says nothing about must stay empty, so the reward
 	// round can tell "not imported" from "imported as zero".
