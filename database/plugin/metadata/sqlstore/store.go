@@ -469,12 +469,16 @@ func (s *Store) startMaintenance() {
 }
 
 func (s *Store) runMaintenance(ctx context.Context) error {
+	var errs []error
 	if s.maintenance != nil {
 		if err := s.maintenance(ctx); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
-	return s.pruneCommitteeHotAuthorizationsMaintenance(ctx)
+	if err := s.pruneCommitteeHotAuthorizationsMaintenance(ctx); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 func (s *Store) closeMaintenanceAdmission() {

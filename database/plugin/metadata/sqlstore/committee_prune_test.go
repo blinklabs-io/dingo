@@ -232,7 +232,7 @@ func TestCommitteeHotMaintenancePrunesInactiveCredentialBacklog(t *testing.T) {
 	store := newManagementTestStore(t)
 	const coldTag = uint8(lcommon.CredentialTypeAddrKeyHash)
 	cold := credentialHash(0xc4)
-	for i := 1; i <= committeeAuthPruneBatch+1; i++ {
+	for i := 1; i <= committeeAuthPruneBatch*2; i++ {
 		seedAuthorization(
 			t, store, coldTag, cold,
 			uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0x72, i),
@@ -243,9 +243,9 @@ func TestCommitteeHotMaintenancePrunesInactiveCredentialBacklog(t *testing.T) {
 		Point: ocommon.Point{Slot: preprodTipSlot, Hash: []byte("tip")},
 	}, nil))
 
-	// No new certificate is applied for this credential. One maintenance
-	// pass must nevertheless make bounded progress and retain its newest
-	// pre-horizon authorization.
+	// No new certificate is applied for this credential. One maintenance cycle
+	// must drain successive bounded batches and retain its newest pre-horizon
+	// authorization.
 	require.NoError(t, store.pruneCommitteeHotAuthorizationsMaintenance(
 		context.Background(),
 	))
@@ -255,7 +255,29 @@ func TestCommitteeHotMaintenancePrunesInactiveCredentialBacklog(t *testing.T) {
 		"SELECT added_slot FROM auth_committee_hot WHERE cold_credential = ?",
 		cold,
 	).Scan(&retainedSlot))
-	require.Equal(t, uint64(committeeAuthPruneBatch+1), retainedSlot)
+	require.Equal(t, uint64(committeeAuthPruneBatch*2), retainedSlot)
+}
+
+func TestCommitteeHotPruningBoundsEachDeleteCall(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	const coldTag = uint8(lcommon.CredentialTypeAddrKeyHash)
+	cold := credentialHash(0xc5)
+	for i := 1; i <= committeeAuthPruneBatch*2; i++ {
+		seedAuthorization(
+			t, store, coldTag, cold,
+			uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0x73, i),
+			uint64(i), uint64(i), // #nosec G115
+		)
+	}
+
+	queryer := newDialectQueryer(store.writeDB, store.dialect.Name())
+	pruned, err := store.pruneCommitteeHotAuthorizations(
+		context.Background(), queryer, coldTag, cold, preprodTipSlot,
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(committeeAuthPruneBatch), pruned)
+	require.Equal(t, committeeAuthPruneBatch, authRowCountFor(t, store, coldTag, cold))
 }
 
 // TestAuthCommitteeHotPruningKeepsTallyIdenticalAtPreprodScale builds the

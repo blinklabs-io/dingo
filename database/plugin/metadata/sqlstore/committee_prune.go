@@ -155,10 +155,11 @@ WHERE id IN (
 	return pruned, nil
 }
 
-// pruneCommitteeHotAuthorizationsMaintenance removes a bounded batch of
-// superseded authorizations across all credentials. The certificate write
-// path can only visit credentials that re-authorize; this periodic sweep is
-// the liveness path for inactive credentials.
+// pruneCommitteeHotAuthorizationsMaintenance removes superseded
+// authorizations across all credentials. The certificate write path can only
+// visit credentials that re-authorize; this periodic sweep is the liveness
+// path for inactive credentials. Each delete is bounded, while one maintenance
+// cycle repeats those deletes until the table has no more eligible rows.
 func (s *Store) pruneCommitteeHotAuthorizationsMaintenance(
 	ctx context.Context,
 ) error {
@@ -172,7 +173,8 @@ func (s *Store) pruneCommitteeHotAuthorizationsMaintenance(
 	}
 	horizon := tip.Point.Slot - retention
 	db := newDialectQueryer(s.writeDB, s.dialect.Name())
-	_, err = db.ExecContext(ctx, `
+	for {
+		result, err := db.ExecContext(ctx, `
 DELETE FROM auth_committee_hot
 WHERE id IN (
     SELECT id FROM (
@@ -202,11 +204,21 @@ WHERE id IN (
         LIMIT ?
     ) superseded
 )`, horizon, horizon, committeeAuthPruneBatch)
-	if err != nil {
-		return fmt.Errorf(
-			"prune superseded committee hot authorizations in maintenance: %w",
-			err,
-		)
+		if err != nil {
+			return fmt.Errorf(
+				"prune superseded committee hot authorizations in maintenance: %w",
+				err,
+			)
+		}
+		pruned, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf(
+				"prune superseded committee hot authorizations in maintenance: row count: %w",
+				err,
+			)
+		}
+		if pruned == 0 {
+			return nil
+		}
 	}
-	return nil
 }
