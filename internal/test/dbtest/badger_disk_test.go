@@ -17,17 +17,18 @@ import (
 // disk once a package builds several stores. See issue #3980.
 const maxTestBlobFileBytes = 32 << 20
 
-func TestNewDatabaseBoundsBadgerFileReservation(t *testing.T) {
-	dataDir := t.TempDir()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dataDir})
-	require.NoError(t, err)
-	require.NotNil(t, db)
-
-	var largest int64
-	var largestPath string
-	err = filepath.WalkDir(
-		dataDir,
-		func(path string, d fs.DirEntry, err error) error {
+// largestFile reports the biggest file under dir and its path. Badger truncates
+// its value log and memtable to their configured sizes on open, and os.Stat
+// reports that truncated length even where the filesystem stores it sparsely,
+// so this measures the reservation on every platform rather than only where it
+// costs real blocks.
+func largestFile(t *testing.T, dir string) (int64, string) {
+	t.Helper()
+	var size int64
+	var path string
+	require.NoError(t, filepath.WalkDir(
+		dir,
+		func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
@@ -38,13 +39,22 @@ func TestNewDatabaseBoundsBadgerFileReservation(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if info.Size() > largest {
-				largest, largestPath = info.Size(), path
+			if info.Size() > size {
+				size, path = info.Size(), p
 			}
 			return nil
 		},
-	)
+	))
+	return size, path
+}
+
+func TestNewDatabaseBoundsBadgerFileReservation(t *testing.T) {
+	dataDir := t.TempDir()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dataDir})
 	require.NoError(t, err)
+	require.NotNil(t, db)
+
+	largest, largestPath := largestFile(t, dataDir)
 
 	t.Logf("largest reserved file: %s (%d bytes)", largestPath, largest)
 	require.LessOrEqualf(
@@ -68,25 +78,7 @@ func TestBoundedBadgerSizesSurviveAPartialCallerConfig(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, db)
 
-	var largest int64
-	var largestPath string
-	require.NoError(t, filepath.WalkDir(dataDir,
-		func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d.IsDir() {
-				return nil
-			}
-			info, err := d.Info()
-			if err != nil {
-				return err
-			}
-			if info.Size() > largest {
-				largest, largestPath = info.Size(), path
-			}
-			return nil
-		}))
+	largest, largestPath := largestFile(t, dataDir)
 
 	t.Logf("largest reserved file: %s (%d bytes)", largestPath, largest)
 	require.LessOrEqualf(
