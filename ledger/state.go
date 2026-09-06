@@ -7294,7 +7294,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 			if err != nil {
 				return nil, fmt.Errorf(
 					"read opcert counter for pool %x: %w",
-					opCertPoolKeyHash,
+					opCertPoolKeyHash.Bytes(),
 					err,
 				)
 			}
@@ -7304,7 +7304,11 @@ func (ls *LedgerState) ledgerProcessBlock(
 				opCertIssueNumber,
 				opCertNoGapRuleApplies(block.Era().Id),
 			); err != nil {
-				return nil, fmt.Errorf("pool %x: %w", opCertPoolKeyHash, err)
+				return nil, fmt.Errorf(
+					"pool %x: %w",
+					opCertPoolKeyHash.Bytes(),
+					err,
+				)
 			}
 		}
 	}
