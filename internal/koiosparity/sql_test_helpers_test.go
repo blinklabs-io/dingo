@@ -94,6 +94,16 @@ func testSchema(includePools bool) []string {
 		`CREATE UNIQUE INDEX idx_epoch_epoch_id ON epoch(epoch_id)`,
 		`CREATE TABLE pparams (cbor BLOB, id INTEGER PRIMARY KEY AUTOINCREMENT, added_slot INTEGER, epoch INTEGER, era_id INTEGER)`,
 		`CREATE TABLE reward_account_output (staking_key BLOB NOT NULL, pool_key_hash BLOB NOT NULL, reward_type TEXT NOT NULL, id INTEGER PRIMARY KEY, epoch INTEGER NOT NULL, credential_tag INTEGER NOT NULL DEFAULT 0, amount TEXT NOT NULL, spendable BOOLEAN NOT NULL, guarded BOOLEAN NOT NULL DEFAULT FALSE, captured_slot INTEGER NOT NULL, boundary_slot INTEGER NOT NULL, UNIQUE (epoch, credential_tag, staking_key, pool_key_hash, reward_type))`,
+		// The pool certificate tables back DingoDB.GetPoolsRetiredByEpoch.
+		// Created unconditionally for the same reason as
+		// reward_account_output: they are cheap, independent of the reward
+		// tables, and a checkEpoch run reads them for every epoch whether
+		// or not the test seeds pool reward rows.
+		`CREATE TABLE pool (id INTEGER PRIMARY KEY AUTOINCREMENT, pool_key_hash BLOB NOT NULL UNIQUE)`,
+		`CREATE TABLE pool_registration (id INTEGER PRIMARY KEY AUTOINCREMENT, pool_id INTEGER NOT NULL, pool_key_hash BLOB NOT NULL, certificate_id INTEGER, added_slot INTEGER NOT NULL)`,
+		`CREATE TABLE pool_retirement (id INTEGER PRIMARY KEY AUTOINCREMENT, pool_id INTEGER NOT NULL, pool_key_hash BLOB NOT NULL, certificate_id INTEGER, epoch INTEGER NOT NULL, added_slot INTEGER NOT NULL)`,
+		`CREATE TABLE "transaction" (id INTEGER PRIMARY KEY AUTOINCREMENT, hash BLOB, slot INTEGER, block_index INTEGER)`,
+		`CREATE TABLE certs (id INTEGER PRIMARY KEY AUTOINCREMENT, transaction_id INTEGER, slot INTEGER, cert_index INTEGER)`,
 	}
 	if includePools {
 		ret = append(

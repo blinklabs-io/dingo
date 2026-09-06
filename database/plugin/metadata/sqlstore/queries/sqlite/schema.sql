@@ -192,6 +192,14 @@ CREATE TABLE reward_snapshot (
     UNIQUE (epoch, snapshot_type)
 );
 
+CREATE TABLE reward_seed_failure (
+    epoch INTEGER NOT NULL,
+    snapshot_type TEXT NOT NULL,
+    failure_reason TEXT NOT NULL,
+    captured_slot INTEGER NOT NULL,
+    PRIMARY KEY (epoch, snapshot_type)
+);
+
 CREATE TABLE reward_pool_input (
     margin TEXT,
     pool_key_hash BLOB NOT NULL,

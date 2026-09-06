@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -1348,4 +1349,123 @@ func TestObserverBackfillsParamsForAPreExistingCache(t *testing.T) {
 	got, err := reopened.GetEpochParams(network, epoch)
 	require.NoError(t, err)
 	require.NotNil(t, got, "the parameter row must be committed")
+}
+
+// TestObserverFailureReportsSignificantMismatchCount is the user-visible half
+// of the fix: the number an operator reads in the strict-mode fatal error and
+// in the observer's "epoch validation failed" log line.
+//
+// CountSignificant's own unit tests pin the arithmetic but not what
+// processEpoch does with it, and processEpoch is the only place the number
+// ever reaches a human. The epoch below holds one account value mismatch --
+// the reason it fails -- and one acct_newly_registered row, which
+// DetermineStatus ignores by design, so a message quoting len(Mismatches)
+// reports twice the count that caused the failure.
+func TestObserverFailureReportsSignificantMismatchCount(t *testing.T) {
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	const koiosEpoch = uint64(5)
+	const stakeEpoch = koiosEpoch - 1
+
+	stakingKey := testPoolKeyHash(t, 0x55)
+	addr, err := StakeAddressFromCredential(stakingKey, 0)
+	require.NoError(t, err)
+	// A second address in the requested universe that neither side ever pays.
+	// It becomes an acct_zero_reward row: descriptive state, never a reason
+	// for the failure, and exactly the kind of row that inflated the count.
+	quietAddr, err := StakeAddressFromCredential(testPoolKeyHash(t, 0x77), 0)
+	require.NoError(t, err)
+
+	srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{
+		koiosEpoch: {
+			activeStake: "1000000",
+			treasury:    "10",
+			reserves:    "20",
+			fees:        "30",
+		},
+	}, fakeKoiosAccountFixtures{
+		addresses: []string{addr, quietAddr},
+		rewardsByEpoch: map[uint64][]KoiosAccountRewardHistoryItem{
+			koiosEpoch: {{
+				StakeAddress: addr,
+				EarnedEpoch:  koiosEpoch,
+				Amount:       "9999999", // deliberately wrong
+				Type:         "member",
+			}},
+		},
+	})
+	withTestKoiosBaseURL(t, srv.URL)
+
+	var mu sync.Mutex
+	var fatalErr error
+	var results []EpochCompareResult
+	o, err := NewObserver(ObserverConfig{
+		Network:         "preview",
+		CachePath:       filepath.Join(t.TempDir(), "cache.db"),
+		Source:          source,
+		Strict:          true,
+		AccountsEnabled: true,
+		Logger:          slog.New(slog.DiscardHandler),
+		OnResult: func(r *EpochCompareResult) {
+			mu.Lock()
+			results = append(results, *r)
+			mu.Unlock()
+		},
+		FatalFunc: func(err error) {
+			mu.Lock()
+			fatalErr = err
+			mu.Unlock()
+		},
+	})
+	require.NoError(t, err)
+	defer func() { _ = o.Stop(context.Background()) }()
+
+	require.NoError(t, o.Start(context.Background()))
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Stop()
+	eb.SubscribeFunc(
+		event.EpochTransitionEventType,
+		o.HandleEpochTransitionEvent,
+	)
+
+	seedDingoEpochAggregate(t, source, koiosEpoch, 1_000_000, 10, 20, 30)
+	sqlDB := sourceSQLDB(t, source.db)
+	require.NoError(t, sqlDB.Create(&models.RewardAccountOutput{
+		Epoch:       stakeEpoch,
+		StakingKey:  stakingKey,
+		PoolKeyHash: testPoolKeyHash(t, 0x66),
+		RewardType:  "member",
+		Amount:      types.Uint64(1_000_000),
+		Spendable:   true,
+	}).Error)
+
+	publishEpochTransition(eb, koiosEpoch)
+
+	testutil.WaitForCondition(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return fatalErr != nil
+	}, 5*time.Second, "strict mode must report the epoch failure")
+
+	mu.Lock()
+	err = fatalErr
+	got := slices.Clone(results)
+	mu.Unlock()
+
+	// The scenario has to actually contain an informational mismatch, or the
+	// two numbers coincide and the assertion below proves nothing.
+	require.NotEmpty(t, got)
+	result := got[len(got)-1]
+	require.Equal(t, StatusFail, result.Status)
+	require.Greater(t, len(result.Mismatches), CountSignificant(result.Mismatches),
+		"scenario must hold at least one informational mismatch")
+
+	require.ErrorContains(t, err, fmt.Sprintf(
+		"parity FAIL at epoch %d (%d significant of %d mismatch(es))",
+		koiosEpoch,
+		CountSignificant(result.Mismatches),
+		len(result.Mismatches),
+	))
 }
