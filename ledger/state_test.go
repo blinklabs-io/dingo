@@ -5080,6 +5080,17 @@ func TestCloseWaitsForBlockProcessingPipelineToActuallyStop(t *testing.T) {
 	}
 }
 
+func TestCloseReplayReturnsWhenPreviousCloseIsStillRunning(t *testing.T) {
+	origTimeout := CloseResultReplayTimeout
+	CloseResultReplayTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { CloseResultReplayTimeout = origTimeout })
+
+	ls := &LedgerState{closeDone: make(chan struct{})}
+	err := ls.Close()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "previous ledger state close still in progress")
+}
+
 // TestCloseStopsDecodePipelineBeforeWaitingForBlockProcessing covers the
 // shutdown ordering required when block processing is draining the decode
 // pipeline's Results channel. That drain has no context select after a batch
@@ -5112,7 +5123,7 @@ func TestCloseStopsDecodePipelineBeforeWaitingForBlockProcessing(t *testing.T) {
 // Byron guard as a backstop rather than a redundancy.
 //
 // It is not covered by the currentPParams == nil check that follows it. The
-// reachable shape is a rollback into Byron: rollbackChainAndState sets
+// reachable shape is a rollback into Byron: rollbackChainAndStateDeferred sets
 // currentEra to Byron and then calls this function, and before the ppComputed
 // change it skipped the currentPParams assignment whenever the recomputed
 // value was nil -- which is exactly what Byron computes. That left a Shelley

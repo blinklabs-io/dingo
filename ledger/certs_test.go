@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -33,13 +34,20 @@ func TestCalculateCertificateDepositUsesPublishedPParams(t *testing.T) {
 				shelley.EraIdShelley,
 				ls.loadConsensusSnapshot().currentPParams,
 			)
-			if err != nil ||
-				(deposit != firstDeposit && deposit != secondDeposit) {
-				if err != nil {
-					errs <- err
-				} else {
-					errs <- fmt.Errorf("unexpected certificate deposit: got %d", deposit)
-				}
+			switch {
+			case err != nil:
+				errs <- err
+				return
+			case deposit == nil:
+				errs <- errors.New(
+					"certificate deposit reported unknown",
+				)
+				return
+			case *deposit != firstDeposit && *deposit != secondDeposit:
+				errs <- fmt.Errorf(
+					"unexpected certificate deposit: got %d",
+					*deposit,
+				)
 				return
 			}
 		}

@@ -326,6 +326,66 @@ func TestSlotClockStartStop(t *testing.T) {
 	clock.mu.RUnlock()
 }
 
+func TestSlotClockStartOverlappingStopWaitsOnlyForStoppedGeneration(
+	t *testing.T,
+) {
+	provider := newMockSlotTimeProvider(time.Now(), time.Second, 100)
+	clock := NewSlotClock(provider, DefaultSlotClockConfig())
+	oldStateReleased := make(chan struct{})
+	allowOldCompletion := make(chan struct{})
+	var hookCalls atomic.Uint32
+	clock.beforeRunDone = func() {
+		if hookCalls.Add(1) != 1 {
+			return
+		}
+		close(oldStateReleased)
+		<-allowOldCompletion
+	}
+
+	var releaseOnce sync.Once
+	releaseOld := func() {
+		releaseOnce.Do(func() { close(allowOldCompletion) })
+	}
+	defer clock.Stop()
+	defer releaseOld()
+
+	clock.Start(context.Background())
+	stopDone := make(chan struct{})
+	go func() {
+		clock.Stop()
+		close(stopDone)
+	}()
+
+	testutil.RequireReceive(
+		t,
+		oldStateReleased,
+		time.Second,
+		"stopped generation should release its lifecycle state",
+	)
+	replacementCtx, cancelReplacement := context.WithCancel(context.Background())
+	defer cancelReplacement()
+	clock.Start(replacementCtx)
+	releaseOld()
+
+	waitCtx, cancelWait := context.WithTimeout(t.Context(), time.Second)
+	defer cancelWait()
+	select {
+	case <-stopDone:
+	case <-waitCtx.Done():
+		cancelReplacement()
+		<-stopDone
+		t.Fatal("Stop waited for a replacement slot-clock generation")
+	}
+
+	clock.mu.RLock()
+	replacementRunning := clock.running
+	clock.mu.RUnlock()
+	require.True(t, replacementRunning, "overlapping Start should remain running")
+
+	cancelReplacement()
+	clock.Stop()
+}
+
 func TestSlotClockReceivesTicks(t *testing.T) {
 	// Use short slot length for faster test
 	systemStart := time.Now()
@@ -485,23 +545,51 @@ func TestSlotClockContextCancellation(t *testing.T) {
 	clock := NewSlotClock(provider, DefaultSlotClockConfig())
 
 	ctx, cancel := context.WithCancel(context.Background())
+	existing := clock.Subscribe()
 	clock.Start(ctx)
 
 	// Cancel context
 	cancel()
 
-	// Wait briefly for goroutine to exit
-	done := make(chan struct{})
-	go func() {
-		clock.wg.Wait()
-		close(done)
-	}()
+	clock.mu.RLock()
+	done := clock.done
+	clock.mu.RUnlock()
 
 	select {
 	case <-done:
 		// Good, clock stopped
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("clock did not stop after context cancellation")
+	}
+
+	// A cancelled clock has stopped just as surely as one stopped explicitly:
+	// its existing subscriber and any later subscription must be closed.
+	_, ok := <-existing
+	assert.False(t, ok, "cancellation must close existing subscriptions")
+	_, ok = <-clock.Subscribe()
+	assert.False(t, ok, "cancellation must close later subscriptions")
+}
+
+func TestSlotClockSubscriptionAfterStopIsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		start bool
+	}{
+		{name: "before_start"},
+		{name: "after_start", start: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			systemStart := time.Now()
+			provider := newMockSlotTimeProvider(systemStart, time.Second, 100)
+			clock := NewSlotClock(provider, DefaultSlotClockConfig())
+			if tc.start {
+				clock.Start(t.Context())
+			}
+			clock.Stop()
+
+			_, ok := <-clock.Subscribe()
+			assert.False(t, ok, "subscriptions registered after Stop must be closed")
+		})
 	}
 }
 

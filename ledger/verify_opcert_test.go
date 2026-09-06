@@ -68,18 +68,17 @@ func addLeiosOCINChainBlocks(
 
 func leiosOCINHeader(
 	issuer lcommon.IssuerVkey,
-	sequence uint32,
+	sequence uint64,
 ) *dijkstra.DijkstraBlockHeader {
-	return &dijkstra.DijkstraBlockHeader{
+	header := &dijkstra.DijkstraBlockHeader{
 		BabbageBlockHeader: babbage.BabbageBlockHeader{
 			Body: babbage.BabbageBlockHeaderBody{
 				IssuerVkey: issuer,
-				OpCert: babbage.BabbageOpCert{
-					SequenceNumber: sequence,
-				},
 			},
 		},
 	}
+	setOpCertSequenceNumber(&header.Body.OpCert.SequenceNumber, sequence)
+	return header
 }
 
 // TestOpCertFromHeader_Babbage verifies the per-era extractor pulls the opcert
@@ -109,11 +108,11 @@ func TestOpCertFromHeader_NonPraosReturnsFalse(t *testing.T) {
 // pins the opcert signable representation to real cardano output. The values
 // are taken from a real cardano-cli NodeOperationalCertificate
 // (config/cardano/devnet/keys/opcert.cert). The signature verifies only under
-// the raw 48-byte OCertSignable representation (KES vkey || counter || period);
-// gouroboros' CBOR-based VerifyOpCertSignature rejects it, which is exactly why
-// verifyOpCertColdSignature does not call that function. If this test ever
-// fails, the inbound check has drifted from real cardano and would stall the
-// chain by rejecting valid blocks.
+// the raw 48-byte OCertSignable representation (KES vkey || counter || period),
+// which is what verifyOpCertColdSignature now verifies by delegating directly
+// to gouroboros' ledger.VerifyOpCertSignature. If this test ever fails, either
+// the inbound check or its upstream dependency has drifted from real cardano
+// and would stall the chain by rejecting valid blocks.
 func TestVerifyOpCertColdSignature_RealCardanoCliCert(t *testing.T) {
 	mustHex := func(s string) []byte {
 		b, err := hex.DecodeString(s)
@@ -276,6 +275,13 @@ func TestValidateOpCertCounter(t *testing.T) {
 			candidate:    7,
 			enforceNoGap: false,
 		},
+		{
+			name:         "equal counters at max uint64 do not wrap into a gap",
+			stored:       ^uint64(0),
+			found:        true,
+			candidate:    ^uint64(0),
+			enforceNoGap: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -320,7 +326,7 @@ func TestLeiosAnnouncementOCINStalenessUsesImmutableTip(t *testing.T) {
 	tests := []struct {
 		name      string
 		issuer    lcommon.IssuerVkey
-		candidate uint32
+		candidate uint64
 		want      LeiosAnnouncementOCINStaleness
 	}{
 		{
