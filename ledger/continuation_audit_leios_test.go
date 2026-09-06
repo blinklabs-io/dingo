@@ -1267,3 +1267,96 @@ func TestContinuationAuditBudgetStopIsCountedOncePerBody(t *testing.T) {
 		"the budget must not be replenished between inputs of one body",
 	)
 }
+
+// TestContinuationAuditReusesAnAlreadyMergedEndorserBlock pins the second half
+// of the once-per-window cost bound. The queue dedupe only covers references
+// still waiting: the drain takes a reference's dedupe entry with it, so a
+// ranking block that certifies a closure already merged is queued again — and
+// on a Leios fork window, where a closure is certified by many ranking blocks
+// arriving over the length of the window, that is the ordinary case rather
+// than an edge one.
+//
+// Only the memo of merged (hash, slot) occurrences keeps that requeue from
+// costing a second provider lookup and a second hashing pass over every
+// transaction of a thousand-transaction endorser block, once per later audited
+// body, all under chainsyncBlockfetchMutex. Deduplicating on insert alone
+// cannot do it, because there is nothing left to deduplicate against.
+func TestContinuationAuditReusesAnAlreadyMergedEndorserBlock(t *testing.T) {
+	f := newLeiosAuditFixture(t)
+	ls := f.ls
+	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+
+	ls.auditContinuationBlock(BlockfetchEvent{
+		ConnectionId: f.connId,
+		Block:        f.certRB,
+		Point:        f.certPoint,
+	}, true)
+	// An endorser-resident spend drains the queued reference and merges the
+	// closure: one parent read, one provider lookup, one hashing pass.
+	ls.auditContinuationBlock(f.spenderBlock(t), true)
+	window := ls.continuationAudit.Load()
+	require.NotNil(t, window)
+	require.Equal(t, 1, *f.providerCalls)
+	require.Equal(t, 1, window.endorserResolutions)
+	require.Empty(t, window.pendingEndorserRefs)
+
+	// A later ranking block certifying the same closure. Its reference is
+	// queued again — the entry that would have deduplicated it went with the
+	// drain.
+	later := leiosAuditCertifyingBlock(t, 43, f.announceHash)
+	ls.auditContinuationBlock(BlockfetchEvent{
+		ConnectionId: f.connId,
+		Block:        later,
+		Point: ocommon.NewPoint(
+			later.SlotNumber(),
+			later.Hash().Bytes(),
+		),
+	}, true)
+	require.Len(t, window.pendingEndorserRefs, 1)
+
+	// A body whose input nothing can explain forces a second drain, which is
+	// where an unmemoized occurrence would be fetched and hashed again.
+	body := &spliceAuditBlock{
+		slot: 60,
+		hash: lcommon.NewBlake2b256(testHashBytes("remerge-spender")),
+		prevHash: lcommon.NewBlake2b256(
+			testHashBytes("remerge-spender-parent"),
+		),
+		txs: []lcommon.Transaction{
+			mustSpliceAuditTx(
+				t,
+				testHashBytes("remerge-spender-tx"),
+				[]lcommon.TransactionInput{
+					mustSpliceAuditInput(
+						t,
+						testHashBytes("remerge-absent-producer"),
+						0,
+					),
+				},
+			),
+		},
+	}
+	ls.auditContinuationBlock(BlockfetchEvent{
+		ConnectionId: f.connId,
+		Block:        body,
+		Point:        ocommon.NewPoint(body.slot, body.hash.Bytes()),
+	}, true)
+
+	assert.Equal(
+		t,
+		2,
+		window.endorserResolutions,
+		"the requeued reference is probed, so the drain did run",
+	)
+	assert.Equal(
+		t,
+		1,
+		*f.providerCalls,
+		"an occurrence already merged must not be fetched or hashed again",
+	)
+	assert.Empty(
+		t,
+		window.pendingEndorserRefs,
+		"a reference resolved onto a merged occurrence is finished, not requeued",
+	)
+}
