@@ -4098,6 +4098,33 @@ func resolveSyntheticV2CostModel(
 	return value == "true"
 }
 
+// syntheticV2CostModelForValidation reports whether pp's PlutusV2 cost model
+// should be treated as still-synthetic for a ValidateTxFunc/EvaluateTxFunc
+// call, given currentSynthetic (the tracked LedgerState.syntheticV2CostModel
+// value, or its snapshot mirror, describing ls.currentPParams specifically)
+// and whether pp actually is that current-era object.
+//
+// When validating an era-1 transaction, pp is instead the previous era's own
+// (already-superseded) pparams -- the tracked flag describes the CURRENT
+// era's object, not necessarily this different one, so this re-derives
+// directly from pp's own value instead (the same bootstrap heuristic
+// resolveSyntheticV2CostModel's empty-marker branch uses). See
+// blinklabs-io/dingo#3962's PR review (Cubic): this pairs with pinning
+// (LedgerView.pinSyntheticV2CostModel) to keep the answer for a single
+// validation operation consistent with the exact pp it's evaluating
+// against, rather than either a live re-read that can race a concurrent
+// writer or a flag that describes a different pparams object than pp.
+func syntheticV2CostModelForValidation(
+	pp lcommon.ProtocolParameters,
+	isCurrentEraPParams bool,
+	currentSynthetic bool,
+) bool {
+	if isCurrentEraPParams {
+		return currentSynthetic
+	}
+	return resolveSyntheticV2CostModel("", pp)
+}
+
 // loadSyntheticV2CostModel restores LedgerState.syntheticV2CostModel from the
 // database at startup, so a restart does not silently reconstruct it as
 // false (the zero value) regardless of the chain's real history -- see
@@ -6941,10 +6968,23 @@ func (ls *LedgerState) ledgerProcessBlock(
 				// parameters when validating an era-1
 				// transaction.
 				pp := pparams
+				isCurrentEraPParams := true
 				if validationEra.Id != currentEra.Id &&
 					prevEraPParams != nil {
 					pp = prevEraPParams
+					isCurrentEraPParams = false
 				}
+				// ls.syntheticV2CostModel is read directly (not via the
+				// lock-free loadConsensusSnapshot() mechanism): this runs on
+				// the single writer's own goroutine, sequentially after
+				// pparams/currentEra/prevEraPParams were themselves captured
+				// from ls's own fields earlier in this same batch, so no
+				// concurrent mutation can make it disagree with pp here.
+				synthetic := syntheticV2CostModelForValidation(
+					pp,
+					isCurrentEraPParams,
+					ls.syntheticV2CostModel,
+				)
 				lv := (&LedgerView{
 					txn:                  txn,
 					ls:                   ls,
@@ -6958,7 +6998,8 @@ func (ls *LedgerState) ledgerProcessBlock(
 					// block can cost an entire epoch of horizon and reject a
 					// canonical Plutus transaction (issue #3844).
 					horizonAnchorSlot: parent.slot,
-				}).pinCommitteeState(committeeEpoch, pp)
+				}).pinCommitteeState(committeeEpoch, pp).
+					pinSyntheticV2CostModel(synthetic)
 				err := validationEra.ValidateTxFunc(
 					tx,
 					point.Slot,
@@ -10152,13 +10193,14 @@ func validationReferenceSlot(
 }
 
 type txValidationSnapshot struct {
-	generation     uint64
-	currentEra     eras.EraDesc
-	currentPParams lcommon.ProtocolParameters
-	prevEraPParams lcommon.ProtocolParameters
-	eraList        []eras.EraDesc
-	referenceSlot  uint64
-	currentEpoch   uint64
+	generation                   uint64
+	currentEra                   eras.EraDesc
+	currentPParams               lcommon.ProtocolParameters
+	prevEraPParams               lcommon.ProtocolParameters
+	eraList                      []eras.EraDesc
+	referenceSlot                uint64
+	currentEpoch                 uint64
+	syntheticV2CostModelInEffect bool
 }
 
 func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
@@ -10186,7 +10228,8 @@ func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
 			currentSlot,
 			currentSlotErr,
 		),
-		currentEpoch: consensusState.currentEpoch.EpochId,
+		currentEpoch:                 consensusState.currentEpoch.EpochId,
+		syntheticV2CostModelInEffect: consensusState.syntheticV2CostModelInEffect,
 	}
 }
 
@@ -10234,10 +10277,17 @@ func (ls *LedgerState) WithTxValidationSession(
 				return nil
 			}
 			pp := snapshot.currentPParams
+			isCurrentEraPParams := true
 			if validationEra.Id != snapshot.currentEra.Id &&
 				snapshot.prevEraPParams != nil {
 				pp = snapshot.prevEraPParams
+				isCurrentEraPParams = false
 			}
+			synthetic := syntheticV2CostModelForValidation(
+				pp,
+				isCurrentEraPParams,
+				snapshot.syntheticV2CostModelInEffect,
+			)
 			err = validationEra.ValidateTxFunc(
 				tx,
 				snapshot.referenceSlot,
@@ -10246,7 +10296,8 @@ func (ls *LedgerState) WithTxValidationSession(
 					ls:              ls,
 					intraBlockUtxos: createdUtxos,
 					consumedUtxos:   consumedUtxos,
-				}).pinCommitteeState(snapshot.currentEpoch, pp),
+				}).pinCommitteeState(snapshot.currentEpoch, pp).
+					pinSyntheticV2CostModel(synthetic),
 				pp,
 			)
 			if err != nil {
@@ -10287,13 +10338,21 @@ func (ls *LedgerState) validateTxCore(
 	}
 	if validationEra.ValidateTxFunc != nil {
 		pp := snapshot.currentPParams
+		isCurrentEraPParams := true
 		if validationEra.Id != snapshot.currentEra.Id &&
 			snapshot.prevEraPParams != nil {
 			pp = snapshot.prevEraPParams
+			isCurrentEraPParams = false
 		}
+		synthetic := syntheticV2CostModelForValidation(
+			pp,
+			isCurrentEraPParams,
+			snapshot.syntheticV2CostModelInEffect,
+		)
 		txn := ls.db.Transaction(false)
 		err := txn.Do(func(txn *database.Txn) error {
-			lv := buildLV(txn).pinCommitteeState(snapshot.currentEpoch, pp)
+			lv := buildLV(txn).pinCommitteeState(snapshot.currentEpoch, pp).
+				pinSyntheticV2CostModel(synthetic)
 			return validationEra.ValidateTxFunc(
 				tx,
 				snapshot.referenceSlot,
@@ -10366,9 +10425,14 @@ func (ls *LedgerState) EvaluateTx(
 		// Use the previous era's protocol parameters when evaluating
 		// a transaction from the immediately previous era (era-1).
 		pp := snapshotPParams
+		isCurrentEraPParams := true
 		if validationEra.Id != snapshotEra.Id && snapshotPrevEraPParams != nil {
 			pp = snapshotPrevEraPParams
+			isCurrentEraPParams = false
 		}
+		synthetic := syntheticV2CostModelForValidation(
+			pp, isCurrentEraPParams, consensusState.syntheticV2CostModelInEffect,
+		)
 		txn := ls.db.Transaction(false)
 		err := txn.Do(func(txn *database.Txn) error {
 			lv := (&LedgerView{
@@ -10377,7 +10441,7 @@ func (ls *LedgerState) EvaluateTx(
 			}).pinCommitteeState(
 				consensusState.currentEpoch.EpochId,
 				pp,
-			)
+			).pinSyntheticV2CostModel(synthetic)
 			var err error
 			fee, totalExUnits, redeemerExUnits, err = validationEra.EvaluateTxFunc(
 				tx,

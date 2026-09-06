@@ -70,6 +70,24 @@ type LedgerView struct {
 	// in charge, which is correct for every caller with no applied block in
 	// hand (mempool validation, standalone evaluation).
 	horizonAnchorSlot uint64
+	// syntheticV2CostModel is pinned from the same snapshot pparams (pp) was
+	// captured from -- see pinSyntheticV2CostModel and
+	// SyntheticV2CostModelInEffect. It must not be re-read live from
+	// ls.loadConsensusSnapshot() at query time: a validation operation can
+	// run long enough (evaluating scripts) that the writer publishes a
+	// newer snapshot in the meantime, which would let this disagree with pp
+	// -- the exact protocol parameters this operation is actually
+	// evaluating against. See blinklabs-io/dingo#3962's PR review.
+	syntheticV2CostModel bool
+}
+
+// pinSyntheticV2CostModel records whether the PlutusV2 cost model was still
+// synthetic in the same snapshot pp (passed to ValidateTxFunc/EvaluateTxFunc
+// alongside this view) was captured from. Every call site that pins
+// committee state alongside pp also pins this.
+func (lv *LedgerView) pinSyntheticV2CostModel(inEffect bool) *LedgerView {
+	lv.syntheticV2CostModel = inEffect
+	return lv
 }
 
 func (lv *LedgerView) pinCommitteeState(
@@ -628,8 +646,14 @@ func (lv *LedgerView) CostModels() map[lcommon.PlutusLanguage]lcommon.CostModel 
 // this package) type-asserts its lcommon.LedgerState parameter against a
 // locally declared interface with this exact method signature to reach it
 // without a package cycle.
+//
+// Returns the value pinSyntheticV2CostModel recorded, not a live read of
+// ls.loadConsensusSnapshot() -- see syntheticV2CostModel's field doc
+// comment for why a live read would be unsound here. A *LedgerView this
+// wasn't called on (e.g. a test constructing one directly) reports false,
+// matching the field's zero value.
 func (lv *LedgerView) SyntheticV2CostModelInEffect() bool {
-	return lv.ls.loadConsensusSnapshot().syntheticV2CostModelInEffect
+	return lv.syntheticV2CostModel
 }
 
 // costModelsProvider is an optional interface implemented by

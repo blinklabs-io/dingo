@@ -9891,6 +9891,22 @@ passes a `*ledger.LedgerView`, so the type assertion succeeds in practice —
 any other `lcommon.LedgerState` implementation (e.g. a test stub) simply
 skips the check.
 
+`LedgerView.SyntheticV2CostModelInEffect` returns a value pinned at
+construction time (`pinSyntheticV2CostModel`, mirroring the existing
+`pinCommitteeState` pattern) rather than a live read of
+`ls.loadConsensusSnapshot()`: a script-evaluation-heavy validation can run
+long enough that the writer publishes a newer snapshot mid-operation, which
+would let a live read disagree with `pp` — the exact protocol parameters
+that operation is actually evaluating against. Every `ValidateTxFunc`/
+`EvaluateTxFunc` call site pins this alongside `pp` itself, sourced from
+`ledger.LedgerState.syntheticV2CostModel` (or its snapshot mirror). Since
+that tracked flag describes the *current* era's own `pparams` specifically,
+a call site validating an era-1 transaction against `prevEraPParams` instead
+re-derives the answer directly from `prevEraPParams`'s own value
+(`syntheticV2CostModelForValidation`, the same bootstrap heuristic
+`resolveSyntheticV2CostModel`'s empty-marker branch uses) rather than
+reusing the current era's flag for a different pparams object.
+
 **Known gap, not fixed here:** once the chain's active era is Dijkstra,
 `ValidateTxDijkstra` delegates phase-2 script validation entirely to
 gouroboros's own `dijkstra.UtxoValidatePlutusScripts` (which itself falls
