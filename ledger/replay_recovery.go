@@ -1285,8 +1285,8 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 	// inputs stay consumed, created outputs stay created. When peers
 	// re-deliver the block we just rewound past, ledger validation
 	// looks up its inputs, finds them already marked consumed, and
-	// returns "rule 22 bad input(s) ... rule 24 value not conserved
-	// (consumed 0)" again, looping the recovery indefinitely until
+	// returns bad input(s) and value not conserved (consumed 0)
+	// again, looping the recovery indefinitely until
 	// process restart. Primary-chain rollback only touches the chain
 	// store — the matching ledger rollback must be explicit.
 	if err := ls.rollback(rewindPoint); err != nil {

@@ -239,9 +239,11 @@ func (f *sameSlotCompetitorFixture) inputInLiveSet(t *testing.T) bool {
 // with no row left to restore them, while the tip was reported as repaired.
 //
 // The next block that legitimately spends such an input cannot resolve it,
-// which Conway reports as bad inputs (rule 29) and, because value conservation
-// sums consumed over only the inputs that did resolve, as value not conserved
-// (rule 32) in the same pass -- both from the one divergence.
+// which Conway reports under the bad-inputs rule and, because value
+// conservation sums consumed over only the inputs that did resolve, under the
+// value-not-conserved rule in the same pass -- both from the one divergence.
+// The numbers those rules carry in the diagnostic are upstream positions and
+// move on a gouroboros bump, so they are named here rather than pinned.
 //
 // This drives LedgerState.rollback, the entry point every recovery path uses,
 // and asserts live-set membership through the database.UtxoByRef lookup that
