@@ -680,12 +680,12 @@ var flagSpecs = []flagSpec{
 		"forge-stale-gap-threshold-slots",
 		"slot gap threshold for stale slot clock alerts",
 	),
-	uint64Flag(
+	uint64PtrFlag(
 		"ForgeEBMaxTxRefs",
 		"forge-eb-max-tx-refs",
 		"maximum transaction references in a forged Leios endorser block (0 = unlimited)",
 	),
-	uint64Flag(
+	uint64PtrFlag(
 		"ForgeEBMaxBytes",
 		"forge-eb-max-bytes",
 		"maximum total referenced transaction bytes in a forged Leios endorser block (0 = unlimited)",
@@ -1148,6 +1148,31 @@ func uint32Flag(field, name, help string) flagSpec {
 				)
 			}
 			targetValue(cfg, field).SetUint(uint64(v))
+			return nil
+		},
+	}
+}
+
+// uint64PtrFlag binds a CLI flag to a *uint64 field. The pointer keeps an
+// explicit 0 -- which disables the cap it controls -- distinct from never
+// passing the flag at all, which takes the default. Only an explicitly
+// passed flag writes to the field, matching boolPtrFlag's contract.
+func uint64PtrFlag(field, name, help string) flagSpec {
+	return flagSpec{
+		field: field,
+		name:  name,
+		register: func(f *pflag.FlagSet, _ *Config) {
+			f.Uint64(name, 0, help)
+		},
+		apply: func(f *pflag.FlagSet, cfg *Config) error {
+			if !f.Changed(name) {
+				return nil
+			}
+			v, err := f.GetUint64(name)
+			if err != nil {
+				return err
+			}
+			targetValue(cfg, field).Set(reflect.ValueOf(&v))
 			return nil
 		},
 	}

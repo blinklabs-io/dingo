@@ -65,8 +65,8 @@ func resetGlobalConfig() {
 		Midnight:                    DefaultMidnightConfig(),
 		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
-		ForgeEBMaxTxRefs:            DefaultForgeEBMaxTxRefs,
-		ForgeEBMaxBytes:             DefaultForgeEBMaxBytes,
+		ForgeEBMaxTxRefs:            forgeEBCapDefault(DefaultForgeEBMaxTxRefs),
+		ForgeEBMaxBytes:             forgeEBCapDefault(DefaultForgeEBMaxBytes),
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,
@@ -215,8 +215,8 @@ mithril:
 		},
 		ForgeSyncToleranceSlots:     321,
 		ForgeStaleGapThresholdSlots: 654,
-		ForgeEBMaxTxRefs:            777,
-		ForgeEBMaxBytes:             888888,
+		ForgeEBMaxTxRefs:            forgeEBCapDefault(777),
+		ForgeEBMaxBytes:             forgeEBCapDefault(888888),
 		Mithril: MithrilConfig{
 			Enabled:                false,
 			AggregatorURL:          "https://mithril.example.net",
@@ -323,8 +323,8 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		}(),
 		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
-		ForgeEBMaxTxRefs:            DefaultForgeEBMaxTxRefs,
-		ForgeEBMaxBytes:             DefaultForgeEBMaxBytes,
+		ForgeEBMaxTxRefs:            forgeEBCapDefault(DefaultForgeEBMaxTxRefs),
+		ForgeEBMaxBytes:             forgeEBCapDefault(DefaultForgeEBMaxBytes),
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,

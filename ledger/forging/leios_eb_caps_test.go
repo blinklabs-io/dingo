@@ -87,11 +87,87 @@ func TestCheckAndForgeProductionAppliesEBRefCap(t *testing.T) {
 		LeiosMempool: forgerTestMempoolProvider{
 			txs: leiosCandidateTxs(t, 12),
 		},
-		ForgeEBMaxTxRefs: 5,
+		ForgeEBMaxTxRefs: capPtr(5),
 		PromRegistry:     prometheus.NewRegistry(),
 	})
 	require.NoError(t, err)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 	require.Len(t, leiosCaster.txBodies, 5)
+}
+
+// TestBuildLeiosEBBoundsPreallocation keeps the cap a bound on work and
+// memory, not only on the emitted manifest. Preallocating for the whole
+// mempool would let a deep mempool dictate allocation even when the cap
+// admits a handful of references.
+func TestBuildLeiosEBBoundsPreallocation(t *testing.T) {
+	txs := leiosCandidateTxs(t, 500)
+	_, _, bodies, err := buildLeiosEB(txs, leiosEBCaps{maxRefs: 3})
+	require.NoError(t, err)
+	require.Len(t, bodies, 3)
+	require.LessOrEqual(
+		t,
+		cap(bodies),
+		16,
+		"capacity must follow the cap, not the mempool depth",
+	)
+}
+
+// TestNewBlockForgerAppliesEBCapDefaults covers the embedder path: a
+// ForgerConfig that never mentions the caps must still get the backstop,
+// rather than silently running uncapped because the zero value means
+// "disabled".
+func TestNewBlockForgerAppliesEBCapDefaults(t *testing.T) {
+	forger := newCapDefaultsForger(t, nil, nil)
+	require.Equal(t, uint64(defaultForgeEBMaxTxRefs), forger.forgeEBMaxTxRefs)
+	require.Equal(t, uint64(defaultForgeEBMaxBytes), forger.forgeEBMaxBytes)
+}
+
+// TestNewBlockForgerHonoursExplicitZeroEBCaps is the other half: an
+// explicit zero disables the cap and must not be overwritten by the
+// default.
+func TestNewBlockForgerHonoursExplicitZeroEBCaps(t *testing.T) {
+	zero := uint64(0)
+	forger := newCapDefaultsForger(t, &zero, &zero)
+	require.Zero(t, forger.forgeEBMaxTxRefs)
+	require.Zero(t, forger.forgeEBMaxBytes)
+}
+
+func capPtr(v uint64) *uint64 { return &v }
+
+func newCapDefaultsForger(
+	t *testing.T,
+	refs *uint64,
+	bytes *uint64,
+) *BlockForger {
+	t.Helper()
+	block := newForgerTestBlock(10, 2)
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     &forgerTestBuilder{block: block, cbor: block.cbor},
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		SlotClock: &ebTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      9,
+			slotsPerKESPeriod: 100,
+			slotEnd:           time.Now().Add(time.Hour),
+		},
+		ForgeEBMaxTxRefs: refs,
+		ForgeEBMaxBytes:  bytes,
+		PromRegistry:     prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+	return forger
+}
+
+// TestForgeEBCapDefaultsArePinned is the ledger/forging half of the
+// drift guard. internal/config declares the same two numbers for its
+// yaml/env defaults and cannot import this package, so both sides pin the
+// literals; a change to one without the other fails here.
+func TestForgeEBCapDefaultsArePinned(t *testing.T) {
+	require.Equal(t, uint64(20000), defaultForgeEBMaxTxRefs)
+	require.Equal(t, uint64(25165824), defaultForgeEBMaxBytes)
 }

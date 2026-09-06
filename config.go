@@ -248,7 +248,7 @@ type Config struct {
 	blockProducer                                                                       bool
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
-	forgeEBMaxTxRefs, forgeEBMaxBytes                                                   uint64
+	forgeEBMaxTxRefs, forgeEBMaxBytes                                                   *uint64
 	validateForgedBlock                                                                 bool
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
@@ -1460,19 +1460,21 @@ func WithForgeStaleGapThresholdSlots(slots uint64) ConfigOptionFunc {
 }
 
 // WithForgeEBMaxTxRefs caps the number of transaction references a forged
-// Leios endorser block may carry. Use 0 for no cap; the slot deadline
-// remains the operative bound in normal operation.
+// Leios endorser block may carry. 0 disables the cap; leaving the option
+// unset takes the built-in default. The slot deadline remains the
+// operative bound in normal operation.
 func WithForgeEBMaxTxRefs(refs uint64) ConfigOptionFunc {
 	return func(c *Config) {
-		c.cfg.ForgeEBMaxTxRefs = refs
+		c.cfg.ForgeEBMaxTxRefs = &refs
 	}
 }
 
 // WithForgeEBMaxBytes caps the total referenced transaction bytes a forged
-// Leios endorser block may carry. Use 0 for no cap.
+// Leios endorser block may carry. 0 disables the cap; leaving the option
+// unset takes the built-in default.
 func WithForgeEBMaxBytes(bytes uint64) ConfigOptionFunc {
 	return func(c *Config) {
-		c.cfg.ForgeEBMaxBytes = bytes
+		c.cfg.ForgeEBMaxBytes = &bytes
 	}
 }
 
@@ -2206,12 +2208,15 @@ func (c *Config) ForgeSyncToleranceSlots() uint64 {
 }
 
 // ForgeEBMaxTxRefs returns the endorser-block transaction reference cap.
-func (c *Config) ForgeEBMaxTxRefs() uint64 {
+// Nil means unset, so the forger applies its built-in default; a non-nil 0
+// disables the cap.
+func (c *Config) ForgeEBMaxTxRefs() *uint64 {
 	return c.cfg.ForgeEBMaxTxRefs
 }
 
-// ForgeEBMaxBytes returns the endorser-block referenced-bytes cap.
-func (c *Config) ForgeEBMaxBytes() uint64 {
+// ForgeEBMaxBytes returns the endorser-block referenced-bytes cap. Nil
+// means unset; a non-nil 0 disables the cap.
+func (c *Config) ForgeEBMaxBytes() *uint64 {
 	return c.cfg.ForgeEBMaxBytes
 }
 

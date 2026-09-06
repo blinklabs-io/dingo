@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -215,11 +216,11 @@ func (c *ebTestSlotClock) UpstreamSyncStatus() (uint64, bool) {
 	return 0, false
 }
 
-// TestCheckAndForgeProductionKeepsEBWhenSlotBudgetIsGone pins the other
-// half of the bound. Enforcing an already-expired deadline would select
-// nothing and produce no endorser block at all -- strictly worse than the
-// unbounded pass this replaced, because a late endorser block still feeds
-// the pipeline even when its ranking block loses the race.
+// TestCheckAndForgeProductionKeepsEBWhenSlotBudgetIsGone pins what a late
+// slot does now. Producing no endorser block at all would be worse than a
+// small one -- it still feeds the pipeline even when its ranking block
+// loses the race -- so production continues, but under a minimal fixed
+// budget rather than the unbounded pass an expired deadline used to allow.
 func TestCheckAndForgeProductionKeepsEBWhenSlotBudgetIsGone(t *testing.T) {
 	block := newForgerTestBlock(10, 2)
 	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
@@ -255,6 +256,63 @@ func TestCheckAndForgeProductionKeepsEBWhenSlotBudgetIsGone(t *testing.T) {
 		t,
 		leiosCaster.txBodies,
 		4,
-		"an expired budget must not empty the endorser block",
+		"a late slot still produces an endorser block",
+	)
+}
+
+// TestCheckAndForgeProductionBoundsALateEBSelection is the half that
+// matters for the defect: a producer that woke after its slot closed must
+// not start a full mempool re-validation. The pass is cut off by the
+// minimal late budget just as an in-slot pass is cut off by the deadline.
+func TestCheckAndForgeProductionBoundsALateEBSelection(t *testing.T) {
+	block := newForgerTestBlock(10, 2)
+	leiosCaster := &forgerTestLeiosCaster{}
+	validator := &sessionMockTxValidator{}
+
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     &forgerTestBuilder{block: block, cbor: block.cbor},
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		SlotClock: &ebTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      9,
+			slotsPerKESPeriod: 100,
+			slotEnd:           time.Now(),
+		},
+		LeiosProduceChecker:     &forgerTestLeiosChecker{allowed: true},
+		LeiosEBBroadcaster:      leiosCaster,
+		LeiosTxValidator:        validator,
+		ForgeEBSelectionReserve: 300 * time.Millisecond,
+		LeiosMempool: forgerTestMempoolProvider{
+			txs: leiosCandidateTxs(t, 20),
+		},
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+	fakeNow := time.Now()
+	forger.now = func() time.Time { return fakeNow }
+	validator.onValidate = func(int) {
+		fakeNow = fakeNow.Add(200 * time.Millisecond)
+	}
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	require.NotEmpty(
+		t,
+		leiosCaster.txBodies,
+		"the endorser block is still produced",
+	)
+	require.Less(
+		t,
+		len(leiosCaster.txBodies),
+		20,
+		"a late slot must not re-validate the whole mempool",
+	)
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.leiosEbSelectionTruncated),
 	)
 }

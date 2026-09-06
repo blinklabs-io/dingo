@@ -685,9 +685,12 @@ type Config struct {
 	ShelleyOperationalCertificate string `yaml:"shelleyOperationalCertificate" envconfig:"SHELLEY_OPERATIONAL_CERTIFICATE"`
 	ForgeSyncToleranceSlots       uint64 `yaml:"forgeSyncToleranceSlots"       envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
 	ForgeStaleGapThresholdSlots   uint64 `yaml:"forgeStaleGapThresholdSlots"   envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
-	ForgeEBMaxTxRefs              uint64 `yaml:"forgeEbMaxTxRefs"              envconfig:"DINGO_FORGE_EB_MAX_TX_REFS"`
-	ForgeEBMaxBytes               uint64 `yaml:"forgeEbMaxBytes"               envconfig:"DINGO_FORGE_EB_MAX_BYTES"`
-	ValidateForgedBlock           bool   `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
+	// Endorser-block manifest backstops. Pointers so that "the operator
+	// never mentioned this" (nil, take the default) stays distinct from
+	// an explicit 0, which disables the cap.
+	ForgeEBMaxTxRefs    *uint64 `yaml:"forgeEbMaxTxRefs" envconfig:"DINGO_FORGE_EB_MAX_TX_REFS"`
+	ForgeEBMaxBytes     *uint64 `yaml:"forgeEbMaxBytes"  envconfig:"DINGO_FORGE_EB_MAX_BYTES"`
+	ValidateForgedBlock bool    `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
 
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. Consensus-affecting
@@ -1129,8 +1132,14 @@ var globalConfig = &Config{
 	// Forging defaults
 	ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
 	ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
-	ForgeEBMaxTxRefs:            DefaultForgeEBMaxTxRefs,
-	ForgeEBMaxBytes:             DefaultForgeEBMaxBytes,
+	ForgeEBMaxTxRefs:            forgeEBCapDefault(DefaultForgeEBMaxTxRefs),
+	ForgeEBMaxBytes:             forgeEBCapDefault(DefaultForgeEBMaxBytes),
+}
+
+// forgeEBCapDefault returns a pointer to v, for the endorser-block cap
+// defaults. A nil cap means "unset"; an explicit 0 disables the cap.
+func forgeEBCapDefault(v uint64) *uint64 {
+	return &v
 }
 
 // deepCopyPluginValue duplicates the reference-typed values a YAML plugin
@@ -1495,11 +1504,14 @@ func (c *Config) ApplyDefaults() {
 	if c.ForgeStaleGapThresholdSlots == 0 {
 		c.ForgeStaleGapThresholdSlots = DefaultForgeStaleGapThresholdSlots
 	}
-	if c.ForgeEBMaxTxRefs == 0 {
-		c.ForgeEBMaxTxRefs = DefaultForgeEBMaxTxRefs
+	// Only an unset (nil) cap takes the default. An explicit 0 is
+	// preserved: it means the operator switched the cap off, which the
+	// flag help and the forger contract both document.
+	if c.ForgeEBMaxTxRefs == nil {
+		c.ForgeEBMaxTxRefs = forgeEBCapDefault(DefaultForgeEBMaxTxRefs)
 	}
-	if c.ForgeEBMaxBytes == 0 {
-		c.ForgeEBMaxBytes = DefaultForgeEBMaxBytes
+	if c.ForgeEBMaxBytes == nil {
+		c.ForgeEBMaxBytes = forgeEBCapDefault(DefaultForgeEBMaxBytes)
 	}
 	// Only an unset (zero) frequency takes the default; an explicitly
 	// negative value is preserved so Validate can reject it instead of

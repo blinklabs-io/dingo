@@ -471,6 +471,16 @@ func applyRootPeerTargetFallback(cfg *config.Config, target int) {
 	}
 }
 
+// forgeEBCap resolves an optional endorser-block cap. Load applies the
+// defaults, so nil here means the Config was built directly rather than
+// loaded; an explicit 0 is preserved and disables the cap.
+func forgeEBCap(v *uint64, fallback uint64) uint64 {
+	if v == nil {
+		return fallback
+	}
+	return *v
+}
+
 // buildDingoConfig translates the loaded internal/config.Config, plus the
 // values Run derives from it (the resolved cardano-node config, listeners,
 // peer-sharing decision, storage mode, and parsed durations/strategy), into
@@ -686,8 +696,12 @@ func buildDingoConfig(
 		dingo.WithForgeStaleGapThresholdSlots(
 			cfg.ForgeStaleGapThresholdSlots,
 		),
-		dingo.WithForgeEBMaxTxRefs(cfg.ForgeEBMaxTxRefs),
-		dingo.WithForgeEBMaxBytes(cfg.ForgeEBMaxBytes),
+		dingo.WithForgeEBMaxTxRefs(
+			forgeEBCap(cfg.ForgeEBMaxTxRefs, config.DefaultForgeEBMaxTxRefs),
+		),
+		dingo.WithForgeEBMaxBytes(
+			forgeEBCap(cfg.ForgeEBMaxBytes, config.DefaultForgeEBMaxBytes),
+		),
 		dingo.WithValidateForgedBlock(cfg.ValidateForgedBlock),
 		// CIP-0163 reward-account inactivity expiry (consensus-affecting)
 		dingo.WithDelegatorInactivity(
