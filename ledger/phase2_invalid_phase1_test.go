@@ -117,6 +117,7 @@ func TestLedgerProcessBlockRunsPhase1ForPhase2InvalidTransaction(
 			pparams,
 			nil,
 			0,
+			false,
 		)
 		return err
 	})

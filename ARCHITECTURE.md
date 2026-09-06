@@ -10026,11 +10026,94 @@ section above, split into two sync_state markers
 `database.RecomputeSyntheticV2CostModelMarkerAfterTruncate` is the
 CIP-0163-style shared recompute: called from both
 `ledger.LedgerState.rollback` and `database/lifecycle.Truncate`, it deletes
-the cleared-epoch marker and restores the boolean to `"true"` when a
-rollback or truncate crosses back before the epoch that marker recorded, so
-a re-sync (potentially onto a fork that never re-enacts the confirming
-write) re-derives synthetic status instead of trusting a stale
-confirmation that no longer applies to the surviving chain.
+both the cleared-epoch marker and the boolean marker itself (not forcing the
+boolean to `"true"`) when a rollback or truncate crosses back before the
+epoch the cleared-epoch marker recorded. Deleting rather than forcing
+matters on a database that predates these markers: a real (non-default)
+PlutusV2 model can already have been in force long before the first
+`clearedEpoch` this build ever records, so forcing `"true"` would mislabel
+that pre-existing real data as synthetic. Leaving the boolean absent instead
+defers to the exact same fallback (`ledger.resolveSyntheticV2CostModel`,
+comparing the live value against the known default) that database already
+relies on for bootstrapping.
+
+#### Consensus-critical script validation (blinklabs-io/dingo#3962)
+
+Real `cardano-ledger` does not merely omit the synthetic model from
+reporting: the formal UTXOW rule `languages txw ⊆ dom(costmdls pp)`
+(`eras/{alonzo,babbage}/impl/src/Cardano/Ledger/*/Rules/Utxow.hs`,
+`IntersectMBO/cardano-ledger`) rejects a transaction outright — at the
+UTXOW level, before any script evaluation runs — whenever it uses a Plutus
+language absent from the current protocol parameters' cost-models map,
+raising `NoCostModel` (`Cardano.Ledger.Alonzo.Plutus.Context.CollectError`,
+realized in `.../Plutus/Evaluate.hs`). On a real network during the
+pre-update gap, PlutusV2 genuinely has no entry in that map, so a real node
+rejects such a transaction; `IntersectMBO/cardano-node#4050` documents this
+exact rejection reachable in practice, and cardano-ledger's own Conway
+conformance suite (`Test.Cardano.Ledger.Conway.Imp.UtxosSpec`) has the
+identical-shaped test for PlutusV3 at the Conway boundary.
+
+Dingo's fabricated default means `CostModels[1]` is never genuinely absent
+internally, so a literal transcription of the formal rule against Dingo's
+own map would never fire. `ledger/eras/babbage.go`'s `ValidateTxBabbage`/
+`EvaluateTxBabbage` and `ledger/eras/conway.go`'s `evaluateConwayPlutusScript`
+(shared by `ValidateTxConway`'s `validateTxPlutusConwayWithContext` and
+`EvaluateTxConway`) instead check the equivalent real-world condition —
+`syntheticV2CostModelInEffect(ls)`, still `true` — immediately before
+evaluating a PlutusV2 script, returning `ErrNoCostModelForPlutusV2` rather
+than pricing the script against the fabricated value. The check reaches
+`ls` (an `lcommon.LedgerState` interface value) via a package-local
+`syntheticV2CostModelReporter` interface declared in `ledger/eras/eras.go`
+(this package cannot import `ledger`, which already imports it); `ledger.LedgerView`
+implements it (`SyntheticV2CostModelInEffect`, `ledger/view.go`), and every
+`ValidateTxFunc`/`EvaluateTxFunc` call site in `ledger/state.go` always
+passes a `*ledger.LedgerView`, so the type assertion succeeds in practice —
+any other `lcommon.LedgerState` implementation (e.g. a test stub) simply
+skips the check.
+
+`LedgerView.SyntheticV2CostModelInEffect` returns a value pinned at
+construction time (`pinSyntheticV2CostModel`, mirroring the existing
+`pinCommitteeState` pattern) rather than a live read of
+`ls.loadConsensusSnapshot()`: a script-evaluation-heavy validation can run
+long enough that the writer publishes a newer snapshot mid-operation, which
+would let a live read disagree with `pp` — the exact protocol parameters
+that operation is actually evaluating against. Every `ValidateTxFunc`/
+`EvaluateTxFunc` call site pins this alongside `pp` itself, sourced from
+`ledger.LedgerState.syntheticV2CostModel` (or its snapshot mirror). Since
+that tracked flag describes the *current* era's own `pparams` specifically,
+a call site validating an era-1 transaction against `prevEraPParams` instead
+re-derives the answer directly from `prevEraPParams`'s own value
+(`syntheticV2CostModelForValidation`, the same bootstrap heuristic
+`resolveSyntheticV2CostModel`'s empty-marker branch uses) rather than
+reusing the current era's flag for a different pparams object.
+
+The block-application call site (`ledgerProcessBlock`) cannot source this
+from a snapshot mirror the way mempool/standalone validation do, since it
+runs from parameters its caller already captured directly from `ls`'s
+mutable fields. `ledgerProcessBlocksFromSource` reads
+`ls.syntheticV2CostModel` under the same `ls.RLock()` it already holds to
+capture `snapshotPParams`/`snapshotPrevEraPParams`, and passes the result
+into `ledgerProcessBlock` as an explicit parameter rather than letting
+`ledgerProcessBlock` read the live field itself — a concurrent rollback
+(`RecoverCommitTimestampConflict`) mutates `ls.syntheticV2CostModel` outside
+that lock, so a live read inside `ledgerProcessBlock` could pair the wrong
+marker with the already-snapshotted `pparams` it validates against.
+
+**Known gap, not fixed here:** once the chain's active era is Dijkstra,
+`ValidateTxDijkstra` delegates phase-2 script validation entirely to
+gouroboros's own `dijkstra.UtxoValidatePlutusScripts` (which itself falls
+back to gouroboros's own `conway.UtxoValidatePlutusScripts` for
+non-Dijkstra-shaped transactions) — neither of which is Dingo's
+`ledger/eras/conway.go` code, so this check does not run there. Since
+`LedgerState.syntheticV2CostModel` persists across era transitions until
+real data actually clears it, a chain that reaches Dijkstra without ever
+receiving a real PlutusV2 update remains exposed for transactions validated
+in that era. Fixing this would require either an upstream gouroboros change
+or a Dijkstra-side reimplementation of the check; deferred as a follow-up
+rather than attempted here. In practice this only matters for a synthetic
+devnet that skips straight through eras without a real update — any real
+network reaching Dijkstra will have had a real PlutusV2 cost model for
+years already.
 
 ### Live Restore/Truncate LedgerStateConfig Parity
 
