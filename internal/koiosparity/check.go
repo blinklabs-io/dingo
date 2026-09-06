@@ -122,6 +122,14 @@ func Check(
 		return nil, fmt.Errorf("open cache: %w", err)
 	}
 	defer cache.Close() //nolint:errcheck
+	// Pin the oracle this run's verdicts are computed against. Check has no
+	// Koios client to name a source, but its writes are derived from one, so
+	// a concurrent re-point must fail those writes rather than let them
+	// repopulate the check evidence RecordKoiosSource just discarded under a
+	// source the verdicts never saw.
+	if err := cache.PinRecordedSource(cfg.Network); err != nil {
+		return nil, fmt.Errorf("pin koios source: %w", err)
+	}
 
 	dingo, err := OpenDingoDB(cfg.DingoDB)
 	if err != nil {

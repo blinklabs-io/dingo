@@ -367,9 +367,12 @@ func TestPendingKoiosSourceChangeMatchesRecord(t *testing.T) {
 // old host's rows, because recovering from that costs a full historical
 // refetch — the expense that made the override worth guarding at all.
 func TestRecordKoiosSourceProbeFailureKeepsCache(t *testing.T) {
+	// 404, not 500: get() classifies 4xx as ErrKoiosPermanent and returns
+	// immediately, while a 5xx would be retried three times with a 2s, 4s, 6s
+	// backoff and put ~12s of sleep in every run of this package.
 	dead := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusInternalServerError)
+			w.WriteHeader(http.StatusNotFound)
 		}),
 	)
 	defer dead.Close()
@@ -552,4 +555,98 @@ func TestUnclaimedCacheStillWrites(t *testing.T) {
 	assert.NoError(t, bystander.CommitAccountRewardsForEpoch(
 		"preview", 7, nil, 0, true, time.Now().UTC(),
 	))
+}
+
+// TestPreviousInferredDistinguishesAttributionFromRecord keeps the discard log
+// honest. "The host we recorded" and "the host a legacy cache must have used"
+// are different strengths of claim, and Previous alone cannot tell them apart.
+func TestPreviousInferredDistinguishesAttributionFromRecord(t *testing.T) {
+	t.Run("legacy cache is an inference", func(t *testing.T) {
+		cache := newSourceTestCache(t)
+		change, err := cache.RecordKoiosSource(
+			"preview", "https://koios.example/api/v1", time.Now().UTC(),
+		)
+		require.NoError(t, err)
+		require.True(t, change.Changed)
+		assert.True(t, change.PreviousInferred)
+		assert.Equal(t, koiosBaseURLs["preview"], change.Previous)
+	})
+	t.Run("a recorded source is a record", func(t *testing.T) {
+		cache := newSourceTestCache(t)
+		_, err := cache.RecordKoiosSource(
+			"preview", "https://first.example/api/v1", time.Now().UTC(),
+		)
+		require.NoError(t, err)
+		change, err := cache.RecordKoiosSource(
+			"preview", "https://second.example/api/v1", time.Now().UTC(),
+		)
+		require.NoError(t, err)
+		require.True(t, change.Changed)
+		assert.False(t, change.PreviousInferred)
+		assert.Equal(t, "https://first.example/api/v1", change.Previous)
+	})
+}
+
+// TestPinnedSourceRefusesCheckWrites covers the derived half. RecordKoiosSource
+// discards check evidence too, so a check already in flight would otherwise
+// repopulate mismatches and status under a source its verdicts were never
+// computed against — the same mixing, one layer up.
+func TestPinnedSourceRefusesCheckWrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.db")
+	owner, err := OpenCache(path, nil)
+	require.NoError(t, err)
+	defer owner.Close() //nolint:errcheck
+	_, err = owner.RecordKoiosSource(
+		"preview", "https://first.example/api/v1", time.Now().UTC(),
+	)
+	require.NoError(t, err)
+
+	// A checker pins whatever is recorded; it has no client to name a source.
+	checker, err := OpenCache(path, nil)
+	require.NoError(t, err)
+	defer checker.Close() //nolint:errcheck
+	require.NoError(t, checker.PinRecordedSource("preview"))
+
+	now := time.Now().UTC()
+	mismatch := []CheckMismatch{{
+		Network: "preview", Epoch: 7, Field: "active_stake",
+		DingoValue: "1", KoiosValue: "2",
+		Category: CategoryValueMismatch, CheckedAt: now,
+	}}
+	status := CheckEpochStatus{
+		Network: "preview", Epoch: 7, LastCheckedAt: now,
+		Status: StatusFail, MismatchCount: 1,
+	}
+	run := CheckRun{Network: "preview", RunAt: now, EpochsChecked: 1}
+
+	// While it still owns the pin, all three writes go through.
+	require.NoError(t, checker.CommitEpochMismatches("preview", 7, mismatch))
+	require.NoError(t, checker.UpsertCheckEpochStatus(status))
+	require.NoError(t, checker.InsertCheckRun(run))
+
+	// Another process re-points the cache mid-run.
+	_, err = owner.RecordKoiosSource(
+		"preview", "https://second.example/api/v1", time.Now().UTC(),
+	)
+	require.NoError(t, err)
+
+	assert.Error(t, checker.CommitEpochMismatches("preview", 7, mismatch))
+	assert.Error(t, checker.UpsertCheckEpochStatus(status))
+	assert.Error(t, checker.InsertCheckRun(run))
+
+	// The discarded evidence stays discarded rather than being rewritten.
+	rows, err := owner.GetMismatches("preview", 7, "")
+	require.NoError(t, err)
+	assert.Empty(t, rows)
+}
+
+// TestPinRecordedSourceOnUnstampedCacheEnforcesNothing keeps a check against a
+// cache no writer has ever stamped behaving exactly as it did before.
+func TestPinRecordedSourceOnUnstampedCacheEnforcesNothing(t *testing.T) {
+	cache := newSourceTestCache(t)
+	require.NoError(t, cache.PinRecordedSource("preview"))
+	assert.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
+		Network: "preview", Epoch: 7,
+		LastCheckedAt: time.Now().UTC(), Status: StatusPass,
+	}))
 }

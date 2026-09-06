@@ -172,6 +172,11 @@ func recordKoiosSource(
 			"koiosparity: koios source changed, discarding cached reference data",
 			"network", network,
 			"previous_base_url", change.Previous,
+			// A legacy cache recorded no source, so the previous host is the
+			// public root those rows must have come from rather than one this
+			// cache ever stated. Saying which keeps the log from presenting an
+			// inference as a record.
+			"previous_base_url_inferred", change.PreviousInferred,
 			"base_url", resolvedBaseURL,
 			"rows_discarded", change.RowsDiscarded,
 		)

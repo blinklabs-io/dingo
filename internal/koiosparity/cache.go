@@ -1149,39 +1149,64 @@ func (c *Cache) GetUncachedEpochs(
 
 // UpsertCheckEpochStatus idempotently stores a check result for an epoch.
 func (c *Cache) UpsertCheckEpochStatus(status CheckEpochStatus) error {
-	_, err := c.db.Exec(
-		`INSERT INTO check_epoch_status
+	return c.withClaimedSource(status.Network, func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`INSERT INTO check_epoch_status
 		(network, epoch, last_checked_at, status, mismatch_count, dingo_pool_count, koios_pool_count, only_dingo_pools, only_koios_pools)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(network, epoch) DO UPDATE SET last_checked_at=excluded.last_checked_at, status=excluded.status,
 		mismatch_count=excluded.mismatch_count, dingo_pool_count=excluded.dingo_pool_count,
 		koios_pool_count=excluded.koios_pool_count, only_dingo_pools=excluded.only_dingo_pools,
 		only_koios_pools=excluded.only_koios_pools`,
-		status.Network,
-		status.Epoch,
-		status.LastCheckedAt,
-		status.Status,
-		status.MismatchCount,
-		status.DingoPoolCount,
-		status.KoiosPoolCount,
-		status.OnlyDingoPools,
-		status.OnlyKoiosPools,
-	)
-	return err
+			status.Network,
+			status.Epoch,
+			status.LastCheckedAt,
+			status.Status,
+			status.MismatchCount,
+			status.DingoPoolCount,
+			status.KoiosPoolCount,
+			status.OnlyDingoPools,
+			status.OnlyKoiosPools,
+		)
+		return err
+	})
 }
 
 // InsertCheckRun appends a check run record.
 func (c *Cache) InsertCheckRun(run CheckRun) error {
-	_, err := c.db.Exec(
-		`INSERT INTO check_runs (network, run_at, epochs_checked, pools_checked, mismatch_count, report_path) VALUES (?, ?, ?, ?, ?, ?)`,
-		run.Network,
-		run.RunAt,
-		run.EpochsChecked,
-		run.PoolsChecked,
-		run.MismatchCount,
-		run.ReportPath,
-	)
-	return err
+	return c.withClaimedSource(run.Network, func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`INSERT INTO check_runs (network, run_at, epochs_checked, pools_checked, mismatch_count, report_path) VALUES (?, ?, ?, ?, ?, ?)`,
+			run.Network,
+			run.RunAt,
+			run.EpochsChecked,
+			run.PoolsChecked,
+			run.MismatchCount,
+			run.ReportPath,
+		)
+		return err
+	})
+}
+
+// withClaimedSource runs fn in a transaction that first verifies this handle
+// still owns the cache's Koios source, for the small writers that would
+// otherwise have no transaction of their own.
+func (c *Cache) withClaimedSource(
+	network string,
+	fn func(tx *sql.Tx) error,
+) error {
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if err := c.assertClaimedSource(tx, network); err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // CommitEpochMismatches atomically replaces all mismatch rows for an epoch:
@@ -1210,6 +1235,9 @@ func (c *Cache) CommitEpochMismatches(
 			_ = tx.Rollback()
 		}
 	}()
+	if err = c.assertClaimedSource(tx, network); err != nil {
+		return err
+	}
 	if _, err = tx.Exec(
 		"DELETE FROM check_mismatches WHERE network = ? AND epoch = ?",
 		network,
@@ -1464,11 +1492,44 @@ func (c *Cache) PendingKoiosSourceChange(
 	return attributed != baseURL, attributed, nil
 }
 
+// PinRecordedSource claims whatever root is currently recorded for network,
+// without recording or discarding anything.
+//
+// It is for a run that writes verdicts derived from the cache but has no Koios
+// client of its own to name a source — Check. Pinning at the start makes its
+// writes fail if another process re-points the cache mid-run, rather than
+// letting it repopulate check evidence that RecordKoiosSource just discarded,
+// now stamped with a source the verdicts were never computed against.
+//
+// A cache with nothing recorded pins nothing, so a check against a cache no
+// writer has ever stamped behaves exactly as before.
+func (c *Cache) PinRecordedSource(network string) error {
+	current, recorded, err := c.GetKoiosSource(network)
+	if err != nil {
+		return err
+	}
+	if !recorded {
+		return nil
+	}
+	if c.claimedSources == nil {
+		c.claimedSources = make(map[string]string, 1)
+	}
+	c.claimedSources[network] = current
+	return nil
+}
+
 // KoiosSourceChange describes what RecordKoiosSource found and did.
 type KoiosSourceChange struct {
-	// Previous is the API root previously recorded for this network, empty
-	// when none was.
+	// Previous is the API root network's discarded rows are taken to have come
+	// from: the recorded one, or — when nothing was recorded — the built-in
+	// public root the rows are attributed to. PreviousInferred says which,
+	// since "the host we recorded" and "the host a legacy cache must have
+	// used" are different strengths of claim and the discard log should not
+	// present the second as the first.
 	Previous string
+	// PreviousInferred is true when Previous is the legacy attribution rather
+	// than a root this cache actually recorded.
+	PreviousInferred bool
 	// Changed is true when a different root was already recorded and this
 	// network's cached rows were therefore discarded.
 	Changed bool
@@ -1515,6 +1576,7 @@ func (c *Cache) RecordKoiosSource(
 		return change, fmt.Errorf("read koios source: %w", err)
 	case koiosSourceChanged(network, previous, baseURL, err == nil):
 		change.Previous = attributedKoiosSource(network, previous, err == nil)
+		change.PreviousInferred = err != nil
 		change.Changed = true
 		for _, table := range koiosSourcedTables {
 			// #nosec G202 -- table comes from koiosSourcedTables, a

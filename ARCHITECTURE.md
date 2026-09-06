@@ -6628,8 +6628,13 @@ never the reverse.
   --koios-url` on another are a reachable pair; without the check the older
   client would go on appending its host's answers under the newer host's
   marker. A handle that never recorded a source enforces nothing, which keeps
-  every read-only command (`check`, `status`, `explain`) working against a
-  cache someone else stamped.
+  `status` and `explain` working against a cache someone else stamped. `Check`
+  writes verdicts derived from the cache but has no client to name a source, so
+  it calls `PinRecordedSource` at startup and claims whatever is recorded: the
+  same re-point that discards check evidence then fails the in-flight run's
+  `CommitEpochMismatches`/`UpsertCheckEpochStatus`/`InsertCheckRun` instead of
+  letting it repopulate them under a source its verdicts never saw. A cache
+  nothing has stamped pins nothing.
 - **Koios endpoint.** `/account_rewards` is deprecated; `/account_reward_
   history` is the replacement (`KoiosClient.GetAccountRewardHistory`), taking
   the same `stake_addresses_with_epoch_no` POST body shape via a new `post()`
