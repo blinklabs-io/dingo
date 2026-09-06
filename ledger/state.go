@@ -1695,6 +1695,11 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	if err := ls.createGenesisBlock(); err != nil {
 		return fmt.Errorf("failed to create genesis block: %w", err)
 	}
+	// Repair older Mithril-imported databases that predate genesis committee
+	// persistence. The operation is idempotent and runs before validation.
+	if err := ls.ensureGenesisCommittee(nil); err != nil {
+		return fmt.Errorf("failed to ensure genesis committee: %w", err)
+	}
 	// Initialize scheduler
 	if err := ls.initScheduler(); err != nil {
 		return fmt.Errorf("initialize scheduler: %w", err)
