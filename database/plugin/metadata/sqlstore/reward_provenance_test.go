@@ -238,6 +238,67 @@ func TestRewardSeedFailureRoundTripAndRollback(t *testing.T) {
 	require.Empty(t, reason)
 }
 
+// TestImportedBlockCountRollbackRemovesBothTables pins the rollback cleanup for
+// the imported block counts. The per-pool rows and the epoch total row are
+// deleted by separate statements in DeleteRewardStateAfterSlot, and either one
+// surviving alone is worse than both surviving: an epoch total without its rows
+// fails the stored-total check on every read, and rows without a total read as
+// an epoch nothing was imported for. Rows left above a rollback slot would also
+// pair counts from a reverted anchor with the trust boundary of the surviving
+// one, which is the disjointness the reward merge assumes.
+func TestImportedBlockCountRollbackRemovesBothTables(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	keptPool := bytes.Repeat([]byte{0x01}, 28)
+	rolledPool := bytes.Repeat([]byte{0x02}, 28)
+
+	require.NoError(t, store.SaveImportedPoolBlockCounts(
+		[]models.ImportedPoolBlockCount{
+			{
+				PoolKeyHash:    keptPool,
+				Epoch:          10,
+				BlocksProduced: 7,
+				CapturedSlot:   100,
+			},
+			{
+				PoolKeyHash:    rolledPool,
+				Epoch:          11,
+				BlocksProduced: 9,
+				CapturedSlot:   200,
+			},
+		},
+		nil,
+	))
+	require.NoError(t, store.SaveImportedEpochBlockTotal(10, 7, 100, nil))
+	require.NoError(t, store.SaveImportedEpochBlockTotal(11, 9, 200, nil))
+
+	require.NoError(t, store.DeleteRewardStateAfterSlot(150, nil))
+
+	counts, total, known, err := store.GetImportedPoolBlockCounts(10, nil)
+	require.NoError(t, err)
+	require.True(t, known, "an epoch captured below the rollback slot survives")
+	require.Equal(t, uint64(7), total)
+	require.Equal(t, map[string]uint64{string(keptPool): 7}, counts)
+
+	counts, total, known, err = store.GetImportedPoolBlockCounts(11, nil)
+	require.NoError(t, err,
+		"neither table may keep a row captured above the rollback slot")
+	require.False(t, known)
+	require.Zero(t, total)
+	require.Empty(t, counts)
+
+	// Asserted against the table rather than through
+	// GetImportedPoolBlockCounts, which answers "unknown" from the missing
+	// total row alone and never looks at the per-pool rows. Reading it
+	// through the accessor would pass with the per-pool delete removed.
+	var rolledRows int
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT COUNT(*) FROM imported_pool_block_count WHERE epoch = 11",
+	).Scan(&rolledRows))
+	require.Zero(t, rolledRows,
+		"per-pool rows captured above the rollback slot are deleted too")
+}
+
 func TestV1Alpha1AddressTransactionIndex(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)
