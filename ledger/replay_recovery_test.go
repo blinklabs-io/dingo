@@ -2531,36 +2531,36 @@ func TestResolveReplayRecoveryProducerReportsPresentInput(t *testing.T) {
 	assert.Nil(t, resolved)
 }
 
-// A missing redeemer must take the deterministic branch rather than the
-// unresolved-producer rewind that re-fetches and re-rejects the same block.
-// Inputs are supplied so the fallback path would have a candidate to rewind to
-// if the classification were missing.
-//
-// The spend case is covered alongside a non-spend one because it is the only
-// purpose whose redeemer requirement is decided by a resolved UTxO at all, and
-// so the only one where replay could plausibly change the verdict. It cannot:
-// a UTxO is addressed by producing transaction hash and output index, so an
-// input that resolves resolves to exactly the output its producer wrote, and
-// the only variation another local history can produce is absence -- which
-// UtxoValidateBadInputsUtxo, registered ahead of the redeemer rules, rejects on
-// its own. No local history accepts the block either way.
+// A missing redeemer is deterministic for transaction-owned script purposes,
+// but spend-purpose errors remain state-dependent because replay can change
+// whether the input resolves to a script output.
 func TestReplayRecoveryRejectsDeterministicMissingRedeemer(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		tag  lcommon.RedeemerTag
+		name          string
+		tag           lcommon.RedeemerTag
+		deterministic bool
 	}{
-		{name: "spend purpose", tag: lcommon.RedeemerTagSpend},
-		{name: "mint purpose", tag: lcommon.RedeemerTagMint},
+		{
+			name:          "spend purpose",
+			tag:           lcommon.RedeemerTagSpend,
+			deterministic: false,
+		},
+		{
+			name:          "mint purpose",
+			tag:           lcommon.RedeemerTagMint,
+			deterministic: true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			requireDeterministicMissingRedeemerRecovery(t, tc.tag)
+			requireMissingRedeemerRecovery(t, tc.tag, tc.deterministic)
 		})
 	}
 }
 
-func requireDeterministicMissingRedeemerRecovery(
+func requireMissingRedeemerRecovery(
 	t *testing.T,
 	tag lcommon.RedeemerTag,
+	deterministic bool,
 ) {
 	t.Helper()
 	ls := newReplayRecoveryAuditLedger(t, true)
@@ -2598,21 +2598,40 @@ func requireDeterministicMissingRedeemerRecovery(
 	require.NoError(t, err)
 	require.True(t, recovered)
 
-	// The deterministic branch holds the applied tip and rewinds the primary
-	// chain to meet it, rather than descending to a producer's parent.
-	assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
-	assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
-	assert.Nil(t, ls.lastAtTipRecovery)
-	assert.Nil(t, ls.continuationAudit.Load())
+	if deterministic {
+		// The deterministic branch holds the applied tip and rewinds the
+		// primary chain to meet it, rather than descending to a producer's
+		// parent.
+		assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+		assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
+		assert.Nil(t, ls.lastAtTipRecovery)
+		assert.Nil(t, ls.continuationAudit.Load())
 
-	resync := testutil.RequireReceive(
+		resync := testutil.RequireReceive(
+			t,
+			resyncCh,
+			2*time.Second,
+			"deterministic missing-redeemer rejection must request a fresh "+
+				"ChainSync intersection",
+		)
+		assert.Equal(t, ls.Tip().Point, resync.Point)
+		return
+	}
+
+	// Spend redeemer requirements depend on the resolved input, so this
+	// rejection must stay on the state-dependent rewind path.
+	assert.NotNil(
+		t,
+		ls.continuationAudit.Load(),
+		"spend missing-redeemer rejection must take the rewind path",
+	)
+	testutil.RequireNoReceive(
 		t,
 		resyncCh,
-		2*time.Second,
-		"deterministic missing-redeemer rejection must request a fresh "+
+		250*time.Millisecond,
+		"spend missing-redeemer rejection must not request a fresh "+
 			"ChainSync intersection",
 	)
-	assert.Equal(t, ls.Tip().Point, resync.Point)
 }
 
 // The control for the classification above. A bad-input verdict is exactly the
