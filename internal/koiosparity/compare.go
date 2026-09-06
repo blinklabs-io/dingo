@@ -64,14 +64,25 @@ const (
 	// (dingo #3099) report the three account dimensions #3097's merged
 	// comparison structurally cannot: CompareAccountEpoch only ever compares
 	// keys present in at least one side's row map, so an address absent from
-	// both (a confirmed-zero-reward account, since Koios never emits a row
-	// for zero reward) never enters that comparison at all, and #3097's
+	// both (a confirmed-zero-reward account, meaning Koios returned no rows
+	// for it at all — distinct from Koios returning a row whose amount is
+	// zero, which it does emit and which CategoryAcctZeroRewardRow covers)
+	// never enters that comparison at all, and #3097's
 	// address universe is a single flat list reused across every epoch in one
 	// run, with no per-epoch persisted snapshot to diff for lifecycle
 	// changes. All three are purely informational — descriptive state, not a
 	// Dingo-vs-Koios discrepancy — and must never affect Status (see
 	// DetermineStatus's dedicated no-op case for these three).
 	CategoryAcctZeroReward = "acct_zero_reward"
+	// CategoryAcctZeroRewardRow marks a reward row worth zero that exists on
+	// only one side. It corrects the premise stated above: Koios does emit a
+	// row for a zero reward — Preview publishes zero-earned leader rows —
+	// while Dingo writes no reward_account_output row at all in that case.
+	// Nothing is credited either way, so the two agree about every lovelace
+	// and the one-sided row is a representational difference, not a
+	// divergence. Purely informational, and reported rather than dropped so
+	// the difference stays visible.
+	CategoryAcctZeroRewardRow = "acct_zero_reward_row"
 	// CategoryAcctNewlyRegistered marks a stake address present in this
 	// stake epoch's Dingo-committed reward_account_output universe but
 	// absent from the previous stake epoch's — see
@@ -104,6 +115,7 @@ var AllCategories = []string{
 	CategoryAcctDuplicate,
 	CategoryAcctCoverageIncomplete,
 	CategoryAcctZeroReward,
+	CategoryAcctZeroRewardRow,
 	CategoryAcctNewlyRegistered,
 	CategoryAcctDeregistered,
 }
@@ -681,14 +693,26 @@ type accountRewardKey struct {
 // is not masked by the duplicate report.
 //
 // The union of the two (deduplicated) keysets is then walked: present only
-// in Koios -> CategoryAcctOnlyKoios (or CategoryReferenceLag within
-// graceHours of epochEndTime, mirroring ComparePoolEpoch's identical
-// pattern), present only in Dingo -> CategoryAcctOnlyDingo, present on both
-// sides with differing amounts -> CategoryValueMismatch (compared as exact
-// integers via lovelaceEqual, never as floats/rationals), present on both
-// sides with equal amounts -> no mismatch. A zero-reward account present
-// identically on both sides is therefore a pass, exactly like any other
-// equal-amount case.
+// in Koios -> CategoryAcctOnlyKoios, present only in Dingo ->
+// CategoryAcctOnlyDingo, present on both sides with differing amounts ->
+// CategoryValueMismatch (compared as exact integers via lovelaceEqual, never
+// as floats/rationals), present on both sides with equal amounts -> no
+// mismatch. A zero-reward account present identically on both sides is
+// therefore a pass, exactly like any other equal-amount case.
+//
+// Two things reclassify a one-sided row before it is emitted, in this order:
+//
+//   - The row is worth zero. The two sides then agree on what was credited
+//     (nothing) and disagree only about whether to store a row saying so, so
+//     it is CategoryAcctZeroRewardRow — informational — rather than either
+//     acct_only_* category. This takes precedence over the grace window
+//     below, because a zero row is not a value the other side can still
+//     publish later.
+//   - The check is inside graceHours of epochEndTime. Koios can lag in
+//     publishing /account_reward_history for a just-closed epoch, and Dingo
+//     can commit ahead of it, so a nonzero one-sided row is
+//     CategoryReferenceLag until the window closes — mirroring
+//     ComparePoolEpoch's identical pattern.
 //
 // graceHours/epochEndTime/now/network/epoch all mirror ComparePoolEpoch's
 // identical parameters and meaning.
@@ -797,8 +821,13 @@ func CompareAccountEpoch(
 		switch {
 		case koiosOK && !dingoOK:
 			cat := CategoryAcctOnlyKoios
-			if graceHours > 0 && !epochEndTime.IsZero() &&
-				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
+			switch {
+			case isZeroRewardAmount(kr.Earned):
+				// Both sides credited nothing; see
+				// CategoryAcctZeroRewardRow.
+				cat = CategoryAcctZeroRewardRow
+			case graceHours > 0 && !epochEndTime.IsZero() &&
+				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour:
 				cat = CategoryReferenceLag
 			}
 			out = append(out, CheckMismatch{
@@ -823,8 +852,12 @@ func CompareAccountEpoch(
 			// hasn't published yet within graceHours is reference lag, not
 			// a real acct_only_dingo discrepancy.
 			cat := CategoryAcctOnlyDingo
-			if graceHours > 0 && !epochEndTime.IsZero() &&
-				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
+			switch {
+			case isZeroRewardAmount(dr.Amount):
+				// Symmetric with the koiosOK && !dingoOK case above.
+				cat = CategoryAcctZeroRewardRow
+			case graceHours > 0 && !epochEndTime.IsZero() &&
+				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour:
 				cat = CategoryReferenceLag
 			}
 			out = append(out, CheckMismatch{
@@ -874,14 +907,50 @@ func lovelaceEqual(a, b string) bool {
 	// string-equality short-circuit would report two identical malformed or
 	// negative strings as "equal" without ever validating them, letting
 	// CompareAccountEpoch pass on invalid account data.
-	var x, y big.Int
-	if _, ok := x.SetString(a, 10); !ok || x.Sign() < 0 {
+	x, ok := parseLovelace(a)
+	if !ok {
 		return false
 	}
-	if _, ok := y.SetString(b, 10); !ok || y.Sign() < 0 {
+	y, ok := parseLovelace(b)
+	if !ok {
 		return false
 	}
-	return x.Cmp(&y) == 0
+	return x.Cmp(y) == 0
+}
+
+// parseLovelace is the single definition of a well-formed lovelace amount:
+// one or more ASCII digits, nothing else. No sign, no surrounding whitespace,
+// no separators.
+//
+// It exists so that lovelaceEqual and isZeroRewardAmount cannot disagree about
+// what a string means. They read the same field from the same two sides, and a
+// string one of them accepts while the other rejects gets two verdicts from the
+// same input: with a divergent parse, " 0" was agreement when the row was
+// one-sided and value_mismatch when both sides had one, and "+0" was the
+// reverse. Whether a given malformed spelling ought to be tolerated is a
+// separate question from whether the two paths answer it the same way; this
+// answers the second, strictly, so a malformed amount is always reported and
+// never waived.
+//
+// Deliberately stricter than big.Int.SetString alone, which accepts a leading
+// sign: "-0" parses to zero with a non-negative sign, so a sign check does not
+// exclude it, and a negative lovelace amount is malformed data rather than a
+// zero reward. Leading zeros are accepted ("00" is zero) because the two sides
+// format independently and a value's spelling is not the comparison's business.
+func parseLovelace(s string) (*big.Int, bool) {
+	if s == "" {
+		return nil, false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return nil, false
+		}
+	}
+	var v big.Int
+	if _, ok := v.SetString(s, 10); !ok {
+		return nil, false
+	}
+	return &v, true
 }
 
 // rationalsEqual reports whether two numeric strings represent the same
@@ -923,6 +992,7 @@ func severityOf(category string) mismatchSeverity {
 		CategoryAcctCoverageIncomplete:
 		return severityError
 	case CategoryAcctZeroReward,
+		CategoryAcctZeroRewardRow,
 		CategoryAcctNewlyRegistered,
 		CategoryAcctDeregistered,
 		CategoryPoolDeparted:
@@ -949,6 +1019,21 @@ func CountSignificant(mismatches []CheckMismatch) int {
 		}
 	}
 	return n
+}
+
+// isZeroRewardAmount reports whether a lovelace decimal string is zero.
+//
+// Parsed rather than compared to "0": the two sides format independently, and
+// a reward that is genuinely zero must be recognised as zero however it is
+// spelled, so "00" is zero. An unparseable amount is not zero — it is a real
+// value the comparison must keep reporting rather than quietly waive, so "",
+// "abc", " 0" and "-0" all stay one-sided rows and keep failing the epoch.
+//
+// The parse is parseLovelace, the same one lovelaceEqual uses, so a string
+// cannot be zero here and malformed there.
+func isZeroRewardAmount(amount string) bool {
+	v, ok := parseLovelace(amount)
+	return ok && v.Sign() == 0
 }
 
 // DetermineStatus returns PASS, FAIL, or ERROR from a list of mismatches.
