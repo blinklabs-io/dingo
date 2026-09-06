@@ -50,16 +50,26 @@ import (
 type fakeLeiosAnnouncementLedger struct {
 	currentSlot uint64
 	slotTime    time.Time
-	staleness   ledger.LeiosAnnouncementOCINStaleness
-	err         error
-	validated   int
+	// slotTimeFunc, when set, overrides slotTime with a per-slot mapping --
+	// e.g. so a test can make one slot's binding read as expired while
+	// another's does not. Every other caller leaves it nil and gets the
+	// single fixed slotTime as before.
+	slotTimeFunc func(uint64) time.Time
+	staleness    ledger.LeiosAnnouncementOCINStaleness
+	err          error
+	validated    int
 }
 
 func (f *fakeLeiosAnnouncementLedger) CurrentSlot() (uint64, error) {
 	return f.currentSlot, nil
 }
 
-func (f *fakeLeiosAnnouncementLedger) SlotToTime(uint64) (time.Time, error) {
+func (f *fakeLeiosAnnouncementLedger) SlotToTime(
+	slot uint64,
+) (time.Time, error) {
+	if f.slotTimeFunc != nil {
+		return f.slotTimeFunc(slot), nil
+	}
 	return f.slotTime, nil
 }
 
@@ -274,6 +284,7 @@ func TestLeiosFetchServerBlockTxsRejectsIncompleteCache(t *testing.T) {
 			point,
 			blockRaw,
 			[]cbor.RawMessage{mustCbor(t, "tx0")},
+			leiosStoreAuthoritative,
 		),
 	)
 
@@ -298,6 +309,7 @@ func TestLeiosFetchServerBlockTxsRejectsOutOfRangeBitmap(t *testing.T) {
 			point,
 			blockRaw,
 			[]cbor.RawMessage{mustCbor(t, "tx0"), mustCbor(t, "tx1")},
+			leiosStoreAuthoritative,
 		),
 	)
 
@@ -544,7 +556,7 @@ var errLeiosEndorserBlockNotCached = errors.New(
 func (o *Ouroboros) fetchCachedLeiosEndorserBlockTxs(
 	point ocommon.Point,
 ) ([]cbor.RawMessage, error) {
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	if !ok {
 		return nil, fmt.Errorf(
 			"%w: %d.%x",
@@ -572,6 +584,7 @@ func TestFetchCachedLeiosEndorserBlockTxsReturnsCompleteCacheWithoutFetch(
 			point,
 			blockRaw,
 			[]cbor.RawMessage{txRaw},
+			leiosStoreAuthoritative,
 		),
 	)
 
@@ -581,7 +594,7 @@ func TestFetchCachedLeiosEndorserBlockTxsReturnsCompleteCacheWithoutFetch(
 	require.Equal(t, []cbor.RawMessage{txRaw}, got)
 
 	got[0][0] ^= 0xff
-	cached, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	cached, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.Equal(t, txRaw, cached.txsRaw[0])
 }
@@ -596,9 +609,10 @@ func TestEndorserBlockTxHashesByHashReturnsManifestHashes(t *testing.T) {
 		point,
 		blockRaw,
 		[]cbor.RawMessage{mustCbor(t, "tx0"), mustCbor(t, "tx1")},
+		leiosStoreAuthoritative,
 	))
 
-	got, ok := o.EndorserBlockTxHashesByHash(point.Hash)
+	got, ok := o.EndorserBlockTxHashesByHash(point.Hash, point.Slot)
 	require.True(t, ok)
 	require.Equal(t, []string{
 		hex.EncodeToString(
@@ -631,7 +645,15 @@ func TestLeiosEndorserBlockLookupReloadsFromDBAndServesFetchRequests(
 	}
 
 	o := newTestOuroborosWithLeiosDB(t)
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, txsRaw))
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			txsRaw,
+			leiosStoreAuthoritative,
+		),
+	)
 
 	// Endorser-block persistence is asynchronous: storeLeiosEndorserBlock
 	// queues the blob write on a background writer. Drain it so the blob store
@@ -643,7 +665,7 @@ func TestLeiosEndorserBlockLookupReloadsFromDBAndServesFetchRequests(
 	o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
 	o.leiosMu.Unlock()
 
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.Equal(t, point.Slot, data.point.Slot)
 	require.Equal(t, point.Hash, data.point.Hash)
@@ -684,29 +706,37 @@ func TestStoreLeiosEndorserBlockRejectsPointHashMismatch(t *testing.T) {
 	point.Hash[0] ^= 0xff
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	err := o.storeLeiosEndorserBlock(point, blockRaw, nil)
+	err := o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		nil,
+		leiosStoreAuthoritative,
+	)
 	require.ErrorContains(
 		t,
 		err,
 		"leios endorser block cache: point hash mismatch",
 	)
 
-	_, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	_, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.False(t, ok)
 }
 
 func TestLeiosEndorserBlockLookupExpiresStaleEntries(t *testing.T) {
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	point, raw := testLeiosEndorserBlockRaw(t, 1)
-	require.NoError(t, o.storeLeiosEndorserBlock(point, raw, nil))
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(point, raw, nil, leiosStoreAuthoritative),
+	)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 
 	o.leiosMu.Lock()
 	data.insertedAt = time.Now().Add(-leiosEndorserBlockCacheTTL - time.Second)
 	o.leiosMu.Unlock()
 
-	_, ok = o.lookupLeiosEndorserBlock(point.Hash)
+	_, ok = o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.False(t, ok)
 
 	o.leiosMu.RLock()
@@ -718,8 +748,16 @@ func TestLeiosEndorserBlockLookupExpiresStaleEntries(t *testing.T) {
 func TestLeiosEndorserBlockCachePrunesExpiredEntries(t *testing.T) {
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	oldPoint, oldRaw := testLeiosEndorserBlockRaw(t, 1)
-	require.NoError(t, o.storeLeiosEndorserBlock(oldPoint, oldRaw, nil))
-	oldData, ok := o.lookupLeiosEndorserBlock(oldPoint.Hash)
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			oldPoint,
+			oldRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
+	oldData, ok := o.lookupLeiosEndorserBlock(oldPoint.Slot, oldPoint.Hash)
 	require.True(t, ok)
 
 	o.leiosMu.Lock()
@@ -728,11 +766,19 @@ func TestLeiosEndorserBlockCachePrunesExpiredEntries(t *testing.T) {
 	o.leiosMu.Unlock()
 
 	newPoint, newRaw := testLeiosEndorserBlockRaw(t, 2)
-	require.NoError(t, o.storeLeiosEndorserBlock(newPoint, newRaw, nil))
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			newPoint,
+			newRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
 
-	_, ok = o.lookupLeiosEndorserBlock(oldPoint.Hash)
+	_, ok = o.lookupLeiosEndorserBlock(oldPoint.Slot, oldPoint.Hash)
 	require.False(t, ok)
-	_, ok = o.lookupLeiosEndorserBlock(newPoint.Hash)
+	_, ok = o.lookupLeiosEndorserBlock(newPoint.Slot, newPoint.Hash)
 	require.True(t, ok)
 }
 
@@ -741,7 +787,10 @@ func TestLeiosEndorserBlockCachePrunesBySize(t *testing.T) {
 	var lastPoint ocommon.Point
 	for idx := range leiosEndorserBlockCacheMaxEntries + 1 {
 		point, raw := testLeiosEndorserBlockRaw(t, idx)
-		require.NoError(t, o.storeLeiosEndorserBlock(point, raw, nil))
+		require.NoError(
+			t,
+			o.storeLeiosEndorserBlock(point, raw, nil, leiosStoreAuthoritative),
+		)
 		lastPoint = point
 	}
 
@@ -749,7 +798,7 @@ func TestLeiosEndorserBlockCachePrunesBySize(t *testing.T) {
 	cacheEntries := len(o.leiosEndorserBlocks)
 	o.leiosMu.RUnlock()
 	require.LessOrEqual(t, cacheEntries, leiosEndorserBlockCacheMaxEntries)
-	_, ok := o.lookupLeiosEndorserBlock(lastPoint.Hash)
+	_, ok := o.lookupLeiosEndorserBlock(lastPoint.Slot, lastPoint.Hash)
 	require.True(t, ok)
 }
 
@@ -1010,11 +1059,24 @@ func TestFetchLeiosEbTxsBatchedRefetchesMismatchedRetainedPartial(
 	require.NoError(t, err)
 	point := ocommon.NewPoint(123, lcommon.Blake2b256Hash(manifestRaw).Bytes())
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil))
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			manifestRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
 
 	// Seed index 0 with the body for index 1. A resumed fetch must discard it
 	// before computing its request bitmap, then replace it in the retained set.
-	o.retainLeiosPartialTxs(point.Hash, []cbor.RawMessage{tx2, nil}, nil)
+	o.retainLeiosPartialTxs(
+		point.Slot,
+		point.Hash,
+		[]cbor.RawMessage{tx2, nil},
+		nil,
+	)
 	requester := &recordingManifestTxRequester{
 		txs: []cbor.RawMessage{tx1, tx2},
 	}
@@ -1023,7 +1085,7 @@ func TestFetchLeiosEbTxsBatchedRefetchesMismatchedRetainedPartial(
 	require.Contains(t, requester.requested, 0)
 	require.NoError(t, validateLeiosEndorserBlockTxs(manifestRaw, txs))
 
-	cached, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	cached, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.Equal(t, 2, cached.partialTxCount())
 	require.NoError(t, validateLeiosEndorserBlockTxs(
@@ -1046,7 +1108,15 @@ func TestValidatedLeiosFetchRejectsMismatchBeforePartialRetention(
 		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
 	)
 	o := newOuroboros(OuroborosConfig{})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil))
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			manifestRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
 
 	_, err = o.fetchLeiosEbTxsBatched(
 		manifestTxRequester{txs: []cbor.RawMessage{tx2, tx1}},
@@ -1055,7 +1125,7 @@ func TestValidatedLeiosFetchRejectsMismatchBeforePartialRetention(
 		manifestRaw,
 	)
 	require.ErrorContains(t, err, "endorser tx 0 hash mismatch")
-	cached, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	cached, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.False(t, cached.completeTxCache())
 	require.Zero(t, cached.partialTxCount())
@@ -1068,8 +1138,16 @@ func TestValidatedLeiosFetchRejectsMismatchBeforePartialRetention(
 	)
 	require.NoError(t, err)
 	require.NoError(t, validateLeiosEndorserBlockTxs(manifestRaw, txs))
-	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, txs))
-	cached, ok = o.lookupLeiosEndorserBlock(point.Hash)
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			manifestRaw,
+			txs,
+			leiosStoreAuthoritative,
+		),
+	)
+	cached, ok = o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.True(t, cached.completeTxCache())
 }
@@ -1097,7 +1175,7 @@ func TestLoadLeiosEBFromDBRejectsTransactionsThatMismatchManifest(
 		[]cbor.RawMessage{mismatchedTx},
 	))
 
-	cached, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	cached, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok, "the valid manifest should remain available")
 	require.False(
 		t,
@@ -1127,7 +1205,7 @@ func TestLoadLeiosEBFromDBAcceptsTransactionsThatMatchManifest(t *testing.T) {
 		[]cbor.RawMessage{validTx},
 	))
 
-	cached, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	cached, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.True(t, cached.completeTxCache())
 	require.Equal(t, []cbor.RawMessage{validTx}, cached.txsRaw)
@@ -1269,7 +1347,7 @@ func TestCertifiedEndorserBlockHashTriState(t *testing.T) {
 
 	// A non-certifying Dijkstra block is not a CertRB: certified=false.
 	_, blockRaw := testDijkstraBlockRaw(t, 1)
-	_, certified, resolved := o.certifiedEndorserBlockHash(blockRaw)
+	_, _, certified, resolved := o.certifiedEndorserBlockHash(blockRaw)
 	require.False(t, certified)
 	require.False(t, resolved)
 
@@ -1277,7 +1355,7 @@ func TestCertifiedEndorserBlockHashTriState(t *testing.T) {
 	// must report certified=true, resolved=false so the caller disconnects
 	// instead of downgrading a certified block to the raw serve path.
 	certRB := testDijkstraCertRBRaw(t, 2, make([]byte, lcommon.Blake2b256Size))
-	_, certified, resolved = o.certifiedEndorserBlockHash(certRB)
+	_, _, certified, resolved = o.certifiedEndorserBlockHash(certRB)
 	require.True(t, certified)
 	require.False(t, resolved)
 }
@@ -1322,12 +1400,13 @@ func TestWaitForLeiosEndorserClosureReturnsWhenAlreadyCached(t *testing.T) {
 			point,
 			blockRaw,
 			[]cbor.RawMessage{mustCbor(t, "tx0")},
+			leiosStoreAuthoritative,
 		),
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	require.True(t, o.waitForLeiosEndorserClosure(ctx, point.Hash))
+	require.True(t, o.waitForLeiosEndorserClosure(ctx, point.Slot, point.Hash))
 }
 
 func TestWaitForLeiosEndorserClosureWakesOnStore(t *testing.T) {
@@ -1341,7 +1420,7 @@ func TestWaitForLeiosEndorserClosureWakesOnStore(t *testing.T) {
 			2*time.Second,
 		)
 		defer cancel()
-		result <- o.waitForLeiosEndorserClosure(ctx, point.Hash)
+		result <- o.waitForLeiosEndorserClosure(ctx, point.Slot, point.Hash)
 	}()
 
 	// Register the waiter before storing so the store exercises the
@@ -1351,7 +1430,9 @@ func TestWaitForLeiosEndorserClosureWakesOnStore(t *testing.T) {
 		func() bool {
 			o.leiosMu.RLock()
 			defer o.leiosMu.RUnlock()
-			return len(o.leiosClosureWaiters[leiosBlockKey(point.Hash)]) > 0
+			return len(
+				o.leiosClosureWaiters[leiosBlockKey(point.Slot, point.Hash)],
+			) > 0
 		},
 		2*time.Second,
 		"closure waiter to register",
@@ -1363,6 +1444,7 @@ func TestWaitForLeiosEndorserClosureWakesOnStore(t *testing.T) {
 			point,
 			blockRaw,
 			[]cbor.RawMessage{mustCbor(t, "tx0")},
+			leiosStoreAuthoritative,
 		),
 	)
 
@@ -1384,7 +1466,7 @@ func TestWaitForLeiosEndorserClosureTimesOutAndCleansUp(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	require.False(t, o.waitForLeiosEndorserClosure(ctx, ebHash))
+	require.False(t, o.waitForLeiosEndorserClosure(ctx, 999, ebHash))
 
 	o.leiosMu.RLock()
 	waiters := len(o.leiosClosureWaiters)
@@ -1403,7 +1485,7 @@ func TestAwaitMergedLeiosRankingBlockTimesOut(t *testing.T) {
 		20*time.Millisecond,
 	)
 	defer cancel()
-	merged, ok := o.awaitMergedLeiosRankingBlock(ctx, certRB, ebHash)
+	merged, ok := o.awaitMergedLeiosRankingBlock(ctx, certRB, ebHash, 42)
 	require.False(t, ok)
 	require.Nil(t, merged)
 }
@@ -1482,6 +1564,7 @@ func TestServeLeiosCertRbWithWaitErrorsOnTimeout(t *testing.T) {
 	got, err := o.serveLeiosCertRbWithWait(
 		block,
 		ebHash,
+		77,
 		gouroboros.ConnectionId{},
 	)
 	require.Error(t, err)
@@ -1510,17 +1593,41 @@ func TestStoreLeiosEndorserBlockManifestDoesNotClobberCachedTxs(t *testing.T) {
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 
 	// One connection delivers the manifest, another completes the txs.
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, txsRaw))
-	_, gotTxs, ok := o.EndorserBlockTxsByHash(point.Hash)
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			txsRaw,
+			leiosStoreAuthoritative,
+		),
+	)
+	gotTxs, ok := o.EndorserBlockTxsByHash(point.Hash, point.Slot)
 	require.True(t, ok)
 	require.Equal(t, txsRaw, gotTxs)
 
 	// Every remaining connection's redundant manifest fetch must leave the
 	// completed transaction set intact.
 	for range 3 {
-		require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
-		data, found := o.lookupLeiosEndorserBlock(point.Hash)
+		require.NoError(
+			t,
+			o.storeLeiosEndorserBlock(
+				point,
+				blockRaw,
+				nil,
+				leiosStoreAuthoritative,
+			),
+		)
+		data, found := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 		require.True(t, found)
 		require.True(
 			t,
@@ -1529,9 +1636,8 @@ func TestStoreLeiosEndorserBlockManifestDoesNotClobberCachedTxs(t *testing.T) {
 		)
 	}
 
-	slot, gotTxs, ok := o.EndorserBlockTxsByHash(point.Hash)
+	gotTxs, ok = o.EndorserBlockTxsByHash(point.Hash, point.Slot)
 	require.True(t, ok)
-	require.Equal(t, point.Slot, slot)
 	require.Equal(t, txsRaw, gotTxs)
 
 	// The leios-fetch serving path must keep answering downstream peers too.
@@ -1558,10 +1664,137 @@ func TestStoreLeiosEndorserBlockKeepsLargerTxSet(t *testing.T) {
 	}
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, full))
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, full[:1]))
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			full,
+			leiosStoreAuthoritative,
+		),
+	)
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			full[:1],
+			leiosStoreAuthoritative,
+		),
+	)
 
-	_, gotTxs, ok := o.EndorserBlockTxsByHash(point.Hash)
+	gotTxs, ok := o.EndorserBlockTxsByHash(point.Hash, point.Slot)
 	require.True(t, ok)
 	require.Equal(t, full, gotTxs)
+}
+
+// testDijkstraAnnouncingBlockRaw builds a full, correctly-hashed Dijkstra
+// ranking block (header and body, not just a header) that announces
+// ebHash/ebSize at slot. Unlike testDijkstraAnnouncementHeaderRawFor, the
+// result is insertable into a real chain via LedgerState.Chain().AddBlock, so
+// certifiedEndorserBlockHash can resolve it as a genuine parent block through
+// LedgerState.BlockByHash rather than only through header decoding.
+func testDijkstraAnnouncingBlockRaw(
+	t *testing.T,
+	slot uint64,
+	ebHash lcommon.Blake2b256,
+	ebSize uint64,
+) []byte {
+	t.Helper()
+	_, blockRaw := testDijkstraBlockRaw(t, int(slot))
+	var components []cbor.RawMessage
+	_, err := cbor.Decode(blockRaw, &components)
+	require.NoError(t, err)
+	require.Len(t, components, 2)
+
+	var headerTop []cbor.RawMessage
+	_, err = cbor.Decode(components[0], &headerTop)
+	require.NoError(t, err)
+	require.Len(t, headerTop, 2)
+	var headerBody []cbor.RawMessage
+	_, err = cbor.Decode(headerTop[0], &headerBody)
+	require.NoError(t, err)
+	headerBody = append(
+		headerBody,
+		mustCbor(t, false),
+		mustCbor(t, []any{ebHash.Bytes(), ebSize}),
+	)
+	headerTop[0], err = cbor.Encode(headerBody)
+	require.NoError(t, err)
+	components[0], err = cbor.Encode(headerTop)
+	require.NoError(t, err)
+	raw, err := cbor.Encode(components)
+	require.NoError(t, err)
+	return raw
+}
+
+// TestResolveCertifiedEndorserTxsWithholdsUnverifiedSlot is the third named
+// consumer from the second review round's comment 2: resolveCertifiedEndorserTxs
+// backs the node-to-client CertRB merge path (mergedLeiosRankingBlockCbor),
+// so a complete-but-unbound endorser block must not resolve there either, the
+// same as the ledger-facing and forge-loop providers. This exercises the full
+// certifiedEndorserBlockHash resolution (a real announcing parent block
+// inserted into the ledger's chain), not just the cache lookup, so it also
+// guards that resolved=true alone is not treated as sufficient.
+func TestResolveCertifiedEndorserTxsWithholdsUnverifiedSlot(t *testing.T) {
+	manifestPoint, manifestRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 1)
+	ebHash := testEbHash(manifestPoint)
+
+	// The parent announces the EB at its own slot, matching manifestPoint's
+	// slot: the endorser block shares its announcing ranking block's slot, so
+	// certifiedEndorserBlockHash's derived ebSlot must equal the slot the
+	// manifest is actually stored under for the lookup below to hit the same
+	// occurrence.
+	parentRaw := testDijkstraAnnouncingBlockRaw(
+		t,
+		manifestPoint.Slot,
+		ebHash,
+		uint64(len(manifestRaw)),
+	)
+	parentBlock, err := gdijkstra.NewDijkstraBlockFromCbor(parentRaw)
+	require.NoError(t, err)
+
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	o.ledgerState = newTestLedgerState(t)
+	require.NoError(t, o.ledgerState.Chain().AddBlock(parentBlock, nil))
+
+	certRB := testDijkstraCertRBRaw(t, 11, parentBlock.Hash().Bytes())
+
+	// Sanity check: the parent resolves through the real ledger lookup, not
+	// just header decoding.
+	gotHash, gotSlot, certified, resolved := o.certifiedEndorserBlockHash(
+		certRB,
+	)
+	require.True(t, certified)
+	require.True(t, resolved)
+	require.Equal(t, ebHash, gotHash)
+	require.Equal(t, manifestPoint.Slot, gotSlot)
+
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		manifestPoint,
+		manifestRaw,
+		[]cbor.RawMessage{mustCbor(t, "tx0")},
+		leiosStorePeerOffered,
+	))
+	data, ok := o.lookupLeiosEndorserBlock(manifestPoint.Slot, ebHash.Bytes())
+	require.True(t, ok)
+	require.True(t, data.completeTxCache())
+	require.False(t, data.slotVerified)
+
+	_, ok = o.resolveCertifiedEndorserTxs(certRB)
+	require.False(
+		t,
+		ok,
+		"a complete but unverified endorser block must not merge into NtC",
+	)
+	merged, mergedOk, err := o.mergedLeiosRankingBlockCbor(certRB)
+	require.NoError(t, err)
+	require.False(t, mergedOk)
+	require.Equal(t, []byte(certRB), merged)
+
+	// Once the slot is corroborated, the same closure resolves.
+	o.bindLeiosEndorserBlockSlot(ebHash.Bytes(), manifestPoint.Slot)
+	txs, ok := o.resolveCertifiedEndorserTxs(certRB)
+	require.True(t, ok)
+	require.Len(t, txs, 1)
 }

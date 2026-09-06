@@ -49,19 +49,18 @@ type recordingStakeProvider struct {
 	totalStake       uint64
 }
 
-func (p *recordingStakeProvider) GetPoolStake(
+// GetPoolAndTotalActiveStake records the snapshot epoch for BOTH halves on
+// every call. Since dingo #3815 the pair is read through one method, so the
+// two recorded slices are necessarily the same length and carry the same
+// epochs -- which is itself the property TestComputeScheduleDrawsSigmaInputs\
+// FromSameSnapshotEpoch asserts.
+func (p *recordingStakeProvider) GetPoolAndTotalActiveStake(
 	epoch uint64,
 	_ []byte,
-) (uint64, error) {
+) (uint64, uint64, error) {
 	p.poolStakeEpochs = append(p.poolStakeEpochs, epoch)
-	return p.poolStake, nil
-}
-
-func (p *recordingStakeProvider) GetTotalActiveStake(
-	epoch uint64,
-) (uint64, error) {
 	p.totalStakeEpochs = append(p.totalStakeEpochs, epoch)
-	return p.totalStake, nil
+	return p.poolStake, p.totalStake, nil
 }
 
 // sigmaAuditEpochProvider is a minimal EpochInfoProvider. exactCoeff, when
@@ -111,7 +110,7 @@ func (p *sigmaAuditEpochProvider) ActiveSlotCoeffRat() *big.Rat {
 }
 
 func newSigmaAuditElection(
-	stake *recordingStakeProvider,
+	stake StakeDistributionProvider,
 	epochs *sigmaAuditEpochProvider,
 	logger *slog.Logger,
 ) *Election {
@@ -289,4 +288,79 @@ func findLogRecord(
 	require.NoError(t, scanner.Err())
 	t.Fatalf("no log record with msg %q in:\n%s", msg, buf.String())
 	return nil
+}
+
+// generationStakeProvider models a store whose snapshot is re-captured
+// between reads: every call returns the NEXT generation. Both generations
+// carry the same sigma with different absolute values, so a pair assembled
+// from two different calls is detectable as a sigma matching neither.
+type generationStakeProvider struct {
+	calls int
+}
+
+const (
+	sigmaGenOnePoolStake  = uint64(59_000_000)
+	sigmaGenOneTotalStake = uint64(1_000_000_000)
+)
+
+func (p *generationStakeProvider) GetPoolAndTotalActiveStake(
+	_ uint64,
+	_ []byte,
+) (uint64, uint64, error) {
+	generation := uint64(1 << p.calls)
+	p.calls++
+	return sigmaGenOnePoolStake * generation,
+		sigmaGenOneTotalStake * generation,
+		nil
+}
+
+// TestComputeScheduleReadsSigmaPairInOneProviderCall is the regression test
+// for dingo #3815, driven through the real schedule computation.
+//
+// computeSchedule used to call GetPoolStake and GetTotalActiveStake in
+// sequence (election.go:773 and :804), each opening its own db.MetadataTxn in
+// the forging adapter. A snapshot re-capture landing between the two produced
+// a schedule whose numerator and denominator came from different writes: a
+// sigma reproducible from neither snapshot alone.
+//
+// The provider here advances a generation on every call, which is what a
+// re-capture between reads looks like from the caller's side. Two assertions
+// pin the fix:
+//
+//   - exactly ONE paired read happens, so there is no window between halves;
+//   - the schedule's stake pair is generation one entire, so sigma is exact.
+//
+// Under the two-call code the numerator comes from generation one and the
+// denominator from generation two, halving sigma, and both assertions fail.
+func TestComputeScheduleReadsSigmaPairInOneProviderCall(t *testing.T) {
+	stake := &generationStakeProvider{}
+	election := newSigmaAuditElection(
+		stake,
+		&sigmaAuditEpochProvider{floatCoeff: 0.05},
+		slog.New(slog.DiscardHandler),
+	)
+
+	schedule, err := election.computeSchedule(
+		context.Background(), sigmaAuditEpoch,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, schedule)
+
+	require.Equal(t, 1, stake.calls,
+		"the sigma numerator and denominator must be read in ONE paired "+
+			"call; a second read is a torn-sigma window (dingo #3815)")
+
+	require.Equal(t, sigmaGenOnePoolStake, schedule.PoolStake,
+		"numerator must come from the first snapshot generation")
+	require.Equal(t, sigmaGenOneTotalStake, schedule.TotalStake,
+		"denominator must come from the SAME generation as the numerator")
+
+	// The ratio itself, cross-multiplied so the check is exact rather than
+	// float. This is the assertion that fails on a torn pair even if the
+	// absolute values above were ever relaxed.
+	require.Equal(t,
+		schedule.PoolStake*sigmaGenOneTotalStake,
+		schedule.TotalStake*sigmaGenOnePoolStake,
+		"sigma must equal the fixture's ratio exactly",
+	)
 }

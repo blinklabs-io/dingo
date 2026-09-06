@@ -141,7 +141,15 @@ func TestLeiosBlockTxsAbandonedSlotFailsOverAndBecomesAvailable(t *testing.T) {
 		ConnManager: cm,
 		EnableLeios: true,
 	})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, manifestRaw, nil))
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			manifestRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
 
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
@@ -158,6 +166,7 @@ func TestLeiosBlockTxsAbandonedSlotFailsOverAndBecomesAvailable(t *testing.T) {
 
 	deadline := time.Now().Add(1500 * time.Millisecond)
 	txs, err := o.fetchLeiosEbTxsBatchedUntil(
+		context.Background(),
 		abandonedConn.LeiosFetch().Client,
 		point,
 		1,
@@ -168,13 +177,23 @@ func TestLeiosBlockTxsAbandonedSlotFailsOverAndBecomesAvailable(t *testing.T) {
 	require.EqualError(t, err, abandonedLeiosFetchError)
 
 	// Make the poisoned connection the first backfill candidate. Its bounded
-	// abandoned-slot error must cool it down and let the healthy peer complete.
+	// abandoned-slot error must cool it down (or retire the connection) and let
+	// the healthy peer complete.
 	o.leiosFetchGuardFor(abandonedConn.Id()).markFetchOK()
-	require.NoError(t, o.FetchEndorserBlockByPoint(point.Slot, point.Hash))
+	require.NoError(
+		t,
+		o.FetchEndorserBlockByPoint(
+			context.Background(),
+			point.Slot,
+			point.Hash,
+		),
+	)
+	abandonedRetired := cm.GetConnectionById(abandonedConn.Id()) == nil
 	require.True(
 		t,
-		o.leiosFetchGuardFor(abandonedConn.Id()).inCooldown(time.Now()),
-		"abandoned peer was not recorded as failed",
+		abandonedRetired ||
+			o.leiosFetchGuardFor(abandonedConn.Id()).inCooldown(time.Now()),
+		"abandoned peer was neither cooled down nor retired",
 	)
 	require.True(
 		t,
@@ -185,9 +204,8 @@ func TestLeiosBlockTxsAbandonedSlotFailsOverAndBecomesAvailable(t *testing.T) {
 		"healthy peer was not recorded as successful",
 	)
 
-	slot, ledgerTxs, ok := o.EndorserBlockTxsByHash(point.Hash)
+	ledgerTxs, ok := o.EndorserBlockTxsByHash(point.Hash, point.Slot)
 	require.True(t, ok, "ledger provider still reports EB unavailable")
-	require.Equal(t, point.Slot, slot)
 	require.Equal(t, []cbor.RawMessage{tx}, ledgerTxs)
 
 	served, err := o.leiosfetchServerBlockTxsRequest(

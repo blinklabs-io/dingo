@@ -27,7 +27,7 @@ import (
 
 // depositHeldBackfillDB returns a database migrated to the version before the
 // pool deposit-held column exists, so a test can seed the legacy registration
-// rows the v10 backfill reads.
+// rows the v11 backfill reads.
 func depositHeldBackfillDB(
 	t *testing.T,
 ) (*sql.DB, func(versions []migrations.Migration)) {
@@ -39,7 +39,7 @@ func depositHeldBackfillDB(
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 10)
+	require.Len(t, registry, 11)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -51,7 +51,7 @@ func depositHeldBackfillDB(
 		}
 		require.NoError(t, runner.Run(ctx))
 	}
-	runTo(registry[:9])
+	runTo(registry[:10])
 	return db, runTo
 }
 
@@ -181,7 +181,7 @@ WHERE pool_key_hash = ?`,
 	_, err = db.ExecContext(context.Background(), `
 UPDATE schema_migrations
 SET phase = 'backfill', cursor = '', dirty = 1, completed_at = NULL
-WHERE version = 10`)
+WHERE version = 11`)
 	require.NoError(t, err)
 	runTo(registry)
 
@@ -206,13 +206,13 @@ func TestDepositHeldExpandPhaseReplaysAfterInterruptedUpgrade(t *testing.T) {
 	runTo(registry)
 
 	ctx := context.Background()
-	// Rewind version 10 to the durable state such an interruption leaves: the
+	// Rewind version 11 to the durable state such an interruption leaves: the
 	// column exists because its ALTER committed, the phase row still says
 	// expand, and the backfill has not run.
 	_, err = db.ExecContext(ctx, `
 UPDATE schema_migrations
 SET phase = 'expand', cursor = '', dirty = 1, completed_at = NULL
-WHERE version = 10`)
+	WHERE version = 11`)
 	require.NoError(t, err)
 	_, err = db.ExecContext(
 		ctx,
@@ -235,9 +235,42 @@ WHERE version = 10`)
 	var dirty bool
 	var completed sql.NullInt64
 	require.NoError(t, db.QueryRowContext(ctx, `
-SELECT phase, dirty, completed_at FROM schema_migrations WHERE version = 10`,
+	SELECT phase, dirty, completed_at FROM schema_migrations WHERE version = 11`,
 	).Scan(&phase, &dirty, &completed))
 	require.Equal(t, "complete", phase)
 	require.False(t, dirty)
 	require.True(t, completed.Valid)
+}
+
+// A re-registration after a retirement needs the epoch history to determine
+// whether the retirement was already reaped. The migration must not infer a
+// new held amount from the later protocol parameters when that history is
+// missing; fail closed so the database can be resynced from chain data.
+func TestDepositHeldBackfillFailsClosedWithoutEpochHistory(t *testing.T) {
+	t.Parallel()
+	db, _ := depositHeldBackfillDB(t)
+	keyHash := []byte("legacy-pool-key-hash-0000006")
+	seedLegacyPoolRegistration(t, db, keyHash, 100, "500000000")
+	var poolID int64
+	require.NoError(t, db.QueryRowContext(context.Background(),
+		"SELECT id FROM pool WHERE pool_key_hash = ?", keyHash).Scan(&poolID))
+	_, err := db.ExecContext(context.Background(), `
+INSERT INTO pool_retirement (pool_id, pool_key_hash, certificate_id, epoch, added_slot)
+VALUES (?, ?, 0, ?, ?)`, poolID, keyHash, 1, 200)
+	require.NoError(t, err)
+	_, err = db.ExecContext(context.Background(), `
+INSERT INTO pool_registration (pool_id, pool_key_hash, added_slot, deposit_amount)
+VALUES (?, ?, ?, ?)`, poolID, keyHash, 300, "800000000")
+	require.NoError(t, err)
+
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	runner := migrations.Runner{
+		DB:       db,
+		Dialect:  "sqlite",
+		Registry: registry,
+		Locker:   migrations.NewProcessLocker(),
+	}
+	err = runner.Run(context.Background())
+	require.ErrorContains(t, err, "resync required")
 }

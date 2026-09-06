@@ -2105,12 +2105,12 @@ func BenchmarkBlockfetchNearTipThroughput(b *testing.B) {
 			Type:  block.Type,
 		}
 
-		if err := ledgerState.handleEventBlockfetchBlock(evt); err != nil {
+		if err := ledgerState.handleEventBlockfetchBlockDeferred(evt, nil); err != nil {
 			b.Fatalf("handleEventBlockfetchBlock failed: %v", err)
 		}
 		// Flush after each block to simulate near-tip behavior where
 		// blocks are committed individually rather than batched.
-		if err := ledgerState.flushPendingBlockfetchBlocks(); err != nil {
+		if err := ledgerState.flushPendingBlockfetchBlocksDeferred(nil); err != nil {
 			b.Fatalf("flushPendingBlockfetchBlocks failed: %v", err)
 		}
 
@@ -2170,10 +2170,10 @@ func BenchmarkBlockfetchNearTipThroughputPredecoded(b *testing.B) {
 		}
 		blockIdx++
 
-		if err := ledgerState.handleEventBlockfetchBlock(evt); err != nil {
+		if err := ledgerState.handleEventBlockfetchBlockDeferred(evt, nil); err != nil {
 			b.Fatalf("handleEventBlockfetchBlock failed: %v", err)
 		}
-		if err := ledgerState.flushPendingBlockfetchBlocks(); err != nil {
+		if err := ledgerState.flushPendingBlockfetchBlocksDeferred(nil); err != nil {
 			b.Fatalf("flushPendingBlockfetchBlocks failed: %v", err)
 		}
 
@@ -2236,7 +2236,7 @@ func BenchmarkBlockfetchNearTipFlushOnlyPredecoded(b *testing.B) {
 		)
 		blockIdx++
 
-		if err := ledgerState.flushPendingBlockfetchBlocks(); err != nil {
+		if err := ledgerState.flushPendingBlockfetchBlocksDeferred(nil); err != nil {
 			b.Fatalf("flushPendingBlockfetchBlocks failed: %v", err)
 		}
 
@@ -2304,10 +2304,10 @@ func BenchmarkBlockfetchNearTipQueuedHeaderPredecoded(b *testing.B) {
 			Type:  uint(block.Type()),
 		}
 
-		if err := ledgerState.handleEventBlockfetchBlock(evt); err != nil {
+		if err := ledgerState.handleEventBlockfetchBlockDeferred(evt, nil); err != nil {
 			b.Fatalf("handleEventBlockfetchBlock failed: %v", err)
 		}
-		if err := ledgerState.flushPendingBlockfetchBlocks(); err != nil {
+		if err := ledgerState.flushPendingBlockfetchBlocksDeferred(nil); err != nil {
 			b.Fatalf("flushPendingBlockfetchBlocks failed: %v", err)
 		}
 
@@ -2365,7 +2365,7 @@ func BenchmarkVerifyBlockHeader(b *testing.B) {
 				CardanoNodeConfig: newTestShelleyGenesisCfg(b),
 				Logger:            benchmarkDiscardLogger,
 			},
-			epochNonceHexCache: make(map[uint64]string),
+			epochNonceHexCache: make(map[uint64]epochNonceHexCacheEntry),
 		}
 		// The epoch cache is read through the published consensus snapshot,
 		// not the raw field, so it must be published before use even for
@@ -2459,7 +2459,7 @@ func BenchmarkBlockfetchVerifiedHeaderDispatch(b *testing.B) {
 	b.ResetTimer()
 
 	for b.Loop() {
-		if err := ledgerState.handleEventBlockfetchBlock(evt); err != nil {
+		if err := ledgerState.handleEventBlockfetchBlockDeferred(evt, nil); err != nil {
 			b.Fatal(err)
 		}
 		ledgerState.pendingBlockfetchEvents = ledgerState.pendingBlockfetchEvents[:0]

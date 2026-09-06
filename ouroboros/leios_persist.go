@@ -32,6 +32,31 @@ import (
 // UTxO correctness (that uses the ledger's own genesis-blob path).
 const leiosPersistMaxPending = 4096
 
+// leiosPersistMaxQueueBytes bounds the aggregate retained size (manifest plus
+// every transaction body) of the pending-write map, counting both installed
+// jobs and reservations whose payload copy is still in flight.
+// leiosPersistMaxPending alone bounds only entry count: every job is built
+// from an endorser-block cache entry that storeLeiosEndorserBlock has just
+// admitted under leiosEndorserBlockCacheMaxEntryBytes (16 MiB), so
+// leiosPersistMaxPending entries could retain 64 GiB. This bounds actual
+// memory directly, at the same 256 MiB the endorser-block cache itself uses
+// (leiosEndorserBlockCacheMaxBytes) -- the queue only ever holds a copy of
+// what that cache already holds, so it has no reason to be allowed to grow
+// larger than it. A job cannot be permanently unqueueable at this budget:
+// the cache's own per-entry cap keeps every job at or below 16 MiB, far
+// under the aggregate.
+//
+// Over-budget entries are dropped, not deferred, exactly like the
+// leiosPersistMaxPending drop above: this queue feeds historical serving
+// only, a dropped endorser block is re-fetched and re-persisted later, and
+// deferring would mean blocking the leios-fetch hot path that this whole
+// writer exists to keep clear.
+//
+// Declared as a var, not a const, solely so tests can lower it (save,
+// override, t.Cleanup restore) without allocating hundreds of megabytes of
+// test data. Production code only reads it.
+var leiosPersistMaxQueueBytes = 256 << 20 // 256 MiB
+
 // leiosPersistShutdownDrainTimeout bounds how long StopLeiosPersistWriter waits
 // for the background writer to finish draining queued blob writes at shutdown.
 // The drain calls Database.SetLeiosEB, which can block indefinitely on a stuck
@@ -57,19 +82,57 @@ var ErrLeiosPersistDrainUnconfirmed = errors.New(
 
 // leiosPersistJob is one endorser block queued for best-effort blob-store
 // persistence. txsRaw is nil for a manifest-only job (incomplete EB).
+//
+// size is the byte reservation this job holds against
+// leiosPersistMaxQueueBytes. It is recorded on the job, rather than
+// recomputed from the payload when the job leaves the queue, so that the
+// amount released is always exactly the amount reserved: the reservation is
+// taken before the payload is copied (see enqueueLeiosPersist), so a
+// recomputation would be a second, independent measurement of a different
+// set of slices and any disagreement between the two would leak or
+// double-release queue capacity.
 type leiosPersistJob struct {
 	slot        uint64
 	hash        []byte
 	manifestRaw []byte
 	txsRaw      []cbor.RawMessage
+	size        int
+}
+
+// leiosPersistJobSize is the retained size a job for this endorser block
+// would hold: the hash key plus the manifest plus every transaction body.
+// Measured from the caller's own slices so the admission decision in
+// reserveLeiosPersistBytes costs no allocation and no copy.
+func leiosPersistJobSize(
+	hash []byte,
+	manifestRaw []byte,
+	txsRaw []cbor.RawMessage,
+) int {
+	// The hash is charged twice because the queue retains two copies: the
+	// map key string and the cloned job.hash. Undercharging here would let
+	// the queue hold more than the budget it reports.
+	size := 2*len(hash) + len(manifestRaw)
+	for _, raw := range txsRaw {
+		size += len(raw)
+	}
+	return size
 }
 
 // enqueueLeiosPersist queues an endorser block for asynchronous blob-store
 // persistence (historical serving) instead of writing it synchronously on the
-// leios-fetch hot path. Jobs coalesce by hash: a complete job (carrying txs)
-// supersedes a manifest-only one for the same hash, so the backfiller's
-// manifest-only-then-complete pair collapses to a single write. Best-effort: a
+// leios-fetch hot path. Jobs coalesce by (slot, hash): a complete job (carrying
+// txs) supersedes a manifest-only one for the same occurrence, so the
+// backfiller's manifest-only-then-complete pair collapses to a single write.
+// Best-effort: a
 // full queue drops the write; no error is surfaced to the caller.
+//
+// Admission runs before any copying. The queue's aggregate byte reservation
+// and its entry-count cap are both decided from the caller's own slices in
+// reserveLeiosPersistBytes, so an endorser block the queue is going to drop
+// never costs the manifest-and-every-transaction-body copy that cloning it
+// would -- previously a peer could make this path allocate a full copy of
+// every endorser block it offered and have it thrown away immediately at the
+// count cap, and 4096 accepted copies had no aggregate size limit at all.
 func (o *Ouroboros) enqueueLeiosPersist(
 	point ocommon.Point,
 	blockRaw []byte,
@@ -79,16 +142,82 @@ func (o *Ouroboros) enqueueLeiosPersist(
 		return
 	}
 	o.leiosPersistOnce.Do(o.startLeiosPersistWriter)
+	// The caller's transaction slices, not a copy: they are only measured
+	// here, and are cloned below if and only if the job is admitted.
+	var txsRaw []cbor.RawMessage
+	if data != nil && data.completeTxCache() && data.txCount > 0 {
+		txsRaw = data.txsRaw
+	}
+	key := leiosBlockKey(point.Slot, point.Hash)
+	size := leiosPersistJobSize(point.Hash, blockRaw, txsRaw)
+	admitted, dropReason := o.reserveLeiosPersistBytes(
+		key,
+		size,
+		len(txsRaw) > 0,
+	)
+	if !admitted {
+		if dropReason != "" {
+			// Logged outside leiosPersistMu: the drain holds that mutex to
+			// pop each job, and a log sink that blocks must not stall it.
+			o.logLeiosPersistDrop(point.Slot, dropReason)
+		}
+		return
+	}
+	// size bytes are now reserved. Every path out of this function must
+	// either hand that reservation to an installed job or give it back --
+	// a reservation that is neither is permanent queue capacity lost to
+	// nothing, which looks exactly like the memory exhaustion the budget
+	// exists to prevent. The deferred release covers the unwind path:
+	// cloning a multi-megabyte endorser block is the one allocation-failure
+	// point between the reservation and its hand-off.
+	reservationHeld := true
+	defer func() {
+		if reservationHeld {
+			o.releaseLeiosPersistReservation(size)
+		}
+	}()
 	job := &leiosPersistJob{
 		slot:        point.Slot,
 		hash:        slices.Clone(point.Hash),
 		manifestRaw: slices.Clone(blockRaw),
+		txsRaw:      cloneRawMessages(txsRaw),
+		size:        size,
 	}
-	if data != nil && data.completeTxCache() && data.txCount > 0 {
-		job.txsRaw = cloneRawMessages(data.txsRaw)
+	// From here the reservation's fate belongs to installLeiosPersistJob,
+	// which decides it in the same critical section as the map mutation and
+	// performs the release itself on each of its own drop paths. The
+	// deferred net must not also fire, or the release would be doubled.
+	reservationHeld = false
+	if !o.installLeiosPersistJob(key, job) {
+		return
 	}
-	key := string(job.hash)
+	select {
+	case o.leiosPersistSignal <- struct{}{}:
+	default:
+	}
+}
+
+// reserveLeiosPersistBytes decides whether a job of the given size is admitted
+// and, when it is, reserves those bytes against leiosPersistMaxQueueBytes
+// before the caller copies anything. It returns false having reserved nothing
+// when the job must be dropped, along with a drop reason for the caller to log
+// (empty for the routine manifest-only-behind-complete coalescing case, which
+// is not a capacity drop).
+//
+// An in-flight reservation counts against both budgets: its bytes against
+// leiosPersistMaxQueueBytes, and -- for a hash that is not already pending --
+// one slot against leiosPersistMaxPending. Counting reservations toward the
+// entry cap is what lets installLeiosPersistJob install unconditionally: N
+// concurrent enqueues for N distinct hashes would otherwise all pass the count
+// check against the same not-quite-full map and then all install, overshooting
+// the cap by N-1.
+func (o *Ouroboros) reserveLeiosPersistBytes(
+	key string,
+	size int,
+	hasTxs bool,
+) (bool, string) {
 	o.leiosPersistMu.Lock()
+	defer o.leiosPersistMu.Unlock()
 	// Reject work once the writer is stopping. The shutdown drain runs only
 	// after leiosPersistStop is closed and reads the pending map under this same
 	// mutex; a job added after the drain has emptied the map would be stranded
@@ -101,35 +230,108 @@ func (o *Ouroboros) enqueueLeiosPersist(
 	// after restart.
 	select {
 	case <-o.leiosPersistStop:
-		o.leiosPersistMu.Unlock()
-		return
+		return false, ""
 	default:
 	}
 	if existing := o.leiosPersistPending[key]; existing != nil {
 		// Never let a manifest-only job overwrite one that already carries
 		// txs — that would re-introduce the duplicate manifest write and lose
 		// the tx bodies from the pending write.
+		if existing.txsRaw != nil && !hasTxs {
+			return false, ""
+		}
+	} else if len(o.leiosPersistPending)+
+		o.leiosPersistReserved >= leiosPersistMaxPending {
+		return false, "queue full"
+	}
+	// A job that could never fit even in an empty queue is reported
+	// separately: it is a permanent property of that endorser block, not
+	// transient pressure, and the two want different operator responses.
+	// storeLeiosEndorserBlock's per-entry cap keeps this unreachable at the
+	// production budgets; it is enforced here so lowering either bound
+	// cannot turn it into a silent accounting hole.
+	if size > leiosPersistMaxQueueBytes {
+		return false, "endorser block larger than the whole queue budget"
+	}
+	// A replacement charges its full size rather than the delta against the
+	// job it will supersede, so that exactly `size` is reserved here and
+	// exactly `size` is released later on whichever path the reservation
+	// takes. The incumbent's bytes are released by installLeiosPersistJob as
+	// it leaves the map, so the two only overlap for the duration of the
+	// copy. That transient double-charge costs at most one endorser block of
+	// headroom (16 MiB against a 256 MiB budget), and a replacement rejected
+	// for want of it leaves the already-queued manifest-only write in place
+	// rather than losing the block entirely.
+	if o.leiosPersistBytes+size > leiosPersistMaxQueueBytes {
+		return false, "byte budget exhausted"
+	}
+	o.leiosPersistBytes += size
+	o.leiosPersistReserved++
+	return true, ""
+}
+
+// installLeiosPersistJob publishes a job whose payload copy is complete,
+// handing the reservation reserveLeiosPersistBytes took over to the installed
+// job. It always ends that reservation's in-flight phase, and it releases the
+// reserved bytes itself on every path that does not install, so the caller
+// owns the reservation only up to this call. Returns whether the job was
+// installed, and therefore whether the writer needs a wakeup.
+func (o *Ouroboros) installLeiosPersistJob(
+	key string,
+	job *leiosPersistJob,
+) bool {
+	o.leiosPersistMu.Lock()
+	defer o.leiosPersistMu.Unlock()
+	// The in-flight phase ends either way: the bytes are held by the
+	// installed job from here on, or released below.
+	o.leiosPersistReserved--
+	select {
+	case <-o.leiosPersistStop:
+		// Stop was signalled while this job was being copied. Installing it
+		// now would strand it exactly as a post-stop enqueue would: the
+		// shutdown drain may already have made its final map read.
+		o.leiosPersistBytes -= job.size
+		return false
+	default:
+	}
+	if existing := o.leiosPersistPending[key]; existing != nil {
 		if existing.txsRaw != nil && job.txsRaw == nil {
-			o.leiosPersistMu.Unlock()
-			return
+			// A complete job for this hash landed while this manifest-only
+			// one was being copied; keep the complete one, same as
+			// reserveLeiosPersistBytes would have decided had it seen it.
+			o.leiosPersistBytes -= job.size
+			return false
 		}
-	} else if len(o.leiosPersistPending) >= leiosPersistMaxPending {
-		o.leiosPersistMu.Unlock()
-		if n := o.leiosPersistDropped.Add(1); n%256 == 1 {
-			o.config.Logger.Warn(
-				"leios EB persistence queue full; dropping historical-serving write",
-				"component", "network",
-				"slot", point.Slot,
-				"dropped_total", n,
-			)
-		}
-		return
+		// Replacement: the incumbent's reservation leaves the queue with it,
+		// and this job keeps the reservation it arrived holding.
+		o.leiosPersistBytes -= existing.size
 	}
 	o.leiosPersistPending[key] = job
-	o.leiosPersistMu.Unlock()
-	select {
-	case o.leiosPersistSignal <- struct{}{}:
-	default:
+	return true
+}
+
+// releaseLeiosPersistReservation gives back a reservation that never became an
+// installed job -- the unwind path between reserveLeiosPersistBytes and
+// installLeiosPersistJob.
+func (o *Ouroboros) releaseLeiosPersistReservation(size int) {
+	o.leiosPersistMu.Lock()
+	defer o.leiosPersistMu.Unlock()
+	o.leiosPersistReserved--
+	o.leiosPersistBytes -= size
+}
+
+// logLeiosPersistDrop reports a dropped historical-serving write, rate-limited
+// to one log line per 256 drops so sustained pressure cannot flood the log.
+// Must be called without leiosPersistMu held.
+func (o *Ouroboros) logLeiosPersistDrop(slot uint64, reason string) {
+	if n := o.leiosPersistDropped.Add(1); n%256 == 1 {
+		o.config.Logger.Warn(
+			"dropping leios EB historical-serving write",
+			"component", "network",
+			"slot", slot,
+			"reason", reason,
+			"dropped_total", n,
+		)
 	}
 }
 
@@ -139,6 +341,13 @@ func (o *Ouroboros) enqueueLeiosPersist(
 // published to concurrent enqueuers.
 func (o *Ouroboros) startLeiosPersistWriter() {
 	o.leiosPersistPending = make(map[string]*leiosPersistJob)
+	// The byte and reservation counters describe the map being replaced, so
+	// they are reset with it. This matters on the
+	// PauseLeiosPersistWriterForLiveLifecycleOp restart path, where the old
+	// map's accounting would otherwise be carried onto the new one as a
+	// permanent reduction in queue capacity.
+	o.leiosPersistBytes = 0
+	o.leiosPersistReserved = 0
 	o.leiosPersistSignal = make(chan struct{}, 1)
 	o.leiosPersistStop = make(chan struct{})
 	o.leiosPersistDone = make(chan struct{})
@@ -175,6 +384,10 @@ func (o *Ouroboros) drainLeiosPersist() {
 		}
 		if job != nil {
 			delete(o.leiosPersistPending, key)
+			// A popped job's bytes leave the queue with it, which is what
+			// makes room for the next enqueue. Without this the budget
+			// would be a one-shot allowance for the process lifetime.
+			o.leiosPersistBytes -= job.size
 		}
 		o.leiosPersistMu.Unlock()
 		if job == nil {

@@ -184,9 +184,13 @@ type Ouroboros struct {
 	// multi-second EB fetch from head-of-line blocking every later offer on
 	// the connection.
 	leiosFetchGuards sync.Map // ouroboros.ConnectionId → *leiosFetchGuard
-	// EB hashes with a fetch already in progress, so a given endorser block is
-	// fetched once across all connections (it is offered on every connection).
-	leiosFetchInProgress sync.Map // string(eb hash) → struct{}
+	// (slot, EB hash) occurrences with a fetch already in progress, so a given
+	// endorser block occurrence is fetched once across all connections (it is
+	// offered on every connection). Keyed by slot and hash together, not hash
+	// alone, so an in-flight fetch for one occurrence does not suppress a
+	// legitimate offer of the same content-addressed hash recurring at a
+	// different slot (issue #3513).
+	leiosFetchInProgress sync.Map // leiosBlockKey(point.Slot, point.Hash) → struct{}
 
 	// Locally-forged EB broadcast log (cursors are owned by the log).
 	leiosEBLog *leiosForgedEBLog
@@ -202,6 +206,18 @@ type Ouroboros struct {
 	leiosDeferredMu            sync.Mutex
 	leiosDeferredAnnouncements map[string]leiosDeferredAnnouncement
 	leiosAnnouncementSizes     map[string]uint64
+	// leiosAnnouncementSlots records, for each announced endorser-block hash,
+	// the set of slots a live (unexpired) announcement has declared it at, so
+	// a later leios-fetch offer or store can be bound to a point its own
+	// announcement actually vouched for instead of trusting whatever point
+	// the offering connection supplies (issue #3513). It is a set rather than
+	// a single scalar because the manifest is content-addressed: the same
+	// hash can be a live, independently required occurrence at more than one
+	// slot at once (two elections producing an identical transaction-
+	// reference set), and a scalar would let a second live, legitimate
+	// announcement be rejected as "inconsistent" with the first (issue #3513
+	// review).
+	leiosAnnouncementSlots map[string]map[uint64]struct{}
 	// LeiosNotify permits at most two distinct announcements for one election
 	// (slot plus issuer) from each peer. Keep that bound per source so one
 	// equivocating peer cannot inject an unbounded stream without suppressing
@@ -212,14 +228,24 @@ type Ouroboros struct {
 	// blob store for historical serving. The blob write (CBOR encode + commit)
 	// is moved off the leios-fetch hot path onto a single background writer so
 	// it does not serialize against block application during catch-up. Jobs
-	// coalesce by EB hash — a complete job (with txs) supersedes a
-	// manifest-only one — which also elides the backfiller's duplicate manifest
-	// write. Lazily started on first enqueue; stopped via StopLeiosPersistWriter.
+	// coalesce by (slot, hash), not hash alone — a complete job (with txs)
+	// supersedes a manifest-only one for the same occurrence — which also
+	// elides the backfiller's duplicate manifest write, while two live
+	// occurrences of the same hash at different slots persist independently.
+	// Lazily started on first enqueue; stopped via StopLeiosPersistWriter.
 	leiosPersistOnce     sync.Once
 	leiosPersistStopOnce sync.Once
 	leiosPersistStarted  atomic.Bool
 	leiosPersistMu       sync.Mutex
 	leiosPersistPending  map[string]*leiosPersistJob
+	// leiosPersistBytes is the aggregate reserved size of the queue: the sum
+	// of leiosPersistPending's job sizes plus every reservation whose payload
+	// copy is still in flight. leiosPersistReserved counts those in-flight
+	// reservations so they also occupy a leiosPersistMaxPending slot. Both
+	// are guarded by leiosPersistMu and are reset with the pending map in
+	// startLeiosPersistWriter; see leiosPersistMaxQueueBytes.
+	leiosPersistBytes    int
+	leiosPersistReserved int
 	leiosPersistSignal   chan struct{}
 	leiosPersistStop     chan struct{}
 	leiosPersistDone     chan struct{}
@@ -450,6 +476,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		leiosAnnouncements:         make(map[string]leiosAnnouncement),
 		leiosDeferredAnnouncements: make(map[string]leiosDeferredAnnouncement),
 		leiosAnnouncementSizes:     make(map[string]uint64),
+		leiosAnnouncementSlots:     make(map[string]map[uint64]struct{}),
 		leiosAnnouncementElections: make(map[string]map[string]struct{}),
 	}
 	if o.ledgerState != nil {

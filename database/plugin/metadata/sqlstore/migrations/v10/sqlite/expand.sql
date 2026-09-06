@@ -1,10 +1,9 @@
--- The pool deposit a registration retains, as distinct from `deposit_amount`,
--- which is what the block era's certificate deposit function computed from the
--- protocol parameters in force at that registration's slot. The two differ for
--- a re-registration: cardano-ledger's POOL rule charges a deposit only when the
--- pool is not already registered, so a re-registration leaves `psDeposits`
--- alone and the pool keeps holding the deposit its first registration paid.
--- POOLREAP refunds `psDeposits`, so refunding `deposit_amount` created or
--- destroyed ledger value whenever a poolDeposit parameter change landed between
--- a pool's first and last registration.
-ALTER TABLE `pool_registration` ADD COLUMN `deposit_held` text;
+-- Persist failed imported reward-basis reconciliation so later reward skips
+-- can identify an import failure rather than misreporting a bootstrap gap.
+CREATE TABLE IF NOT EXISTS `reward_seed_failure` (
+    `epoch` integer NOT NULL,
+    `snapshot_type` text NOT NULL,
+    `failure_reason` text NOT NULL,
+    `captured_slot` integer NOT NULL,
+    PRIMARY KEY (`epoch`, `snapshot_type`)
+);

@@ -95,9 +95,10 @@ type SlotClock struct {
 	subscribers []chan SlotTick
 	mu          sync.RWMutex
 	cancel      context.CancelFunc
-	ctx         context.Context
+	done        chan struct{}
+	generation  uint64
 	running     bool
-	wg          sync.WaitGroup
+	stopped     bool
 
 	// Track last emitted epoch to avoid duplicates and detect discrepancies
 	lastEmittedEpoch uint64
@@ -112,6 +113,9 @@ type SlotClock struct {
 	// For testing: allow injection of custom time source
 	nowFunc  func() time.Time
 	waitFunc func(context.Context, time.Duration) error
+	// beforeRunDone is a test hook that runs after a worker releases its
+	// lifecycle state but before it reports completion. It is nil in production.
+	beforeRunDone func()
 }
 
 // NewSlotClock creates a new SlotClock with the given provider and configuration
@@ -152,17 +156,23 @@ func waitForDuration(ctx context.Context, delay time.Duration) error {
 // The clock will emit SlotTick notifications at each slot boundary.
 // Returns immediately; the tick loop runs in a goroutine.
 func (sc *SlotClock) Start(ctx context.Context) {
+	clockCtx, cancel := context.WithCancel(ctx)
 	sc.mu.Lock()
 	if sc.running {
+		cancel()
 		sc.mu.Unlock()
 		return
 	}
 	sc.running = true
-	sc.ctx, sc.cancel = context.WithCancel(ctx)
+	sc.stopped = false
+	sc.cancel = cancel
+	sc.generation++
+	generation := sc.generation
+	done := make(chan struct{})
+	sc.done = done
 	sc.mu.Unlock()
 
-	sc.wg.Add(1)
-	go sc.run()
+	go sc.run(clockCtx, generation, done)
 }
 
 // Stop halts the slot clock and waits for the tick loop to exit.
@@ -170,22 +180,17 @@ func (sc *SlotClock) Start(ctx context.Context) {
 // on receiving from them to exit cleanly.
 func (sc *SlotClock) Stop() {
 	sc.mu.Lock()
-	if !sc.running {
-		sc.mu.Unlock()
-		return
-	}
-	sc.running = false
-	if sc.cancel != nil {
+	sc.stopped = true
+	if sc.running && sc.cancel != nil {
 		sc.cancel()
 	}
-	// Close all subscriber channels to unblock any goroutines waiting on them
-	for _, ch := range sc.subscribers {
-		close(ch)
-	}
-	sc.subscribers = nil
+	sc.closeSubscribersLocked()
+	done := sc.done
 	sc.mu.Unlock()
 
-	sc.wg.Wait()
+	if done != nil {
+		<-done
+	}
 }
 
 // Subscribe returns a channel that will receive SlotTick notifications.
@@ -194,9 +199,21 @@ func (sc *SlotClock) Stop() {
 func (sc *SlotClock) Subscribe() <-chan SlotTick {
 	ch := make(chan SlotTick, 1)
 	sc.mu.Lock()
+	if sc.stopped {
+		close(ch)
+		sc.mu.Unlock()
+		return ch
+	}
 	sc.subscribers = append(sc.subscribers, ch)
 	sc.mu.Unlock()
 	return ch
+}
+
+func (sc *SlotClock) closeSubscribersLocked() {
+	for _, ch := range sc.subscribers {
+		close(ch)
+	}
+	sc.subscribers = nil
 }
 
 // Unsubscribe removes a subscriber channel from the notification list.
@@ -341,15 +358,33 @@ func (sc *SlotClock) SetLastEmittedEpoch(epoch uint64) {
 // =============================================================================
 
 // run is the main tick loop
-func (sc *SlotClock) run() {
-	defer sc.wg.Done()
+func (sc *SlotClock) run(
+	ctx context.Context,
+	generation uint64,
+	done chan struct{},
+) {
+	defer func() {
+		sc.mu.Lock()
+		if sc.generation == generation {
+			sc.running = false
+			sc.stopped = true
+			sc.cancel = nil
+			sc.closeSubscribersLocked()
+		}
+		beforeRunDone := sc.beforeRunDone
+		sc.mu.Unlock()
+		if beforeRunDone != nil {
+			beforeRunDone()
+		}
+		close(done)
+	}()
 
 	logger := sc.config.Logger.With("component", "slot_clock")
 
 	for {
 		// Check context first
 		select {
-		case <-sc.ctx.Done():
+		case <-ctx.Done():
 			return
 		default:
 		}
@@ -367,7 +402,7 @@ func (sc *SlotClock) run() {
 						"error", slotErr,
 					)
 					select {
-					case <-sc.ctx.Done():
+					case <-ctx.Done():
 						return
 					case <-time.After(time.Second):
 						continue
@@ -383,7 +418,7 @@ func (sc *SlotClock) run() {
 					"wait", waitDur.Round(time.Second),
 				)
 				select {
-				case <-sc.ctx.Done():
+				case <-ctx.Done():
 					return
 				case <-time.After(waitDur):
 					continue
@@ -392,7 +427,7 @@ func (sc *SlotClock) run() {
 			logger.Error("failed to get current slot", "error", err)
 			// Sleep briefly and retry
 			select {
-			case <-sc.ctx.Done():
+			case <-ctx.Done():
 				return
 			case <-time.After(100 * time.Millisecond):
 				continue
@@ -411,7 +446,7 @@ func (sc *SlotClock) run() {
 				nextSlot,
 			)
 			select {
-			case <-sc.ctx.Done():
+			case <-ctx.Done():
 				return
 			case <-time.After(100 * time.Millisecond):
 				continue
@@ -422,7 +457,7 @@ func (sc *SlotClock) run() {
 		sleepDuration := nextSlotTime.Sub(now)
 		if sleepDuration > 0 {
 			select {
-			case <-sc.ctx.Done():
+			case <-ctx.Done():
 				return
 			case <-time.After(sleepDuration):
 			}

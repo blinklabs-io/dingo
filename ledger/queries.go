@@ -34,6 +34,53 @@ import (
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
+// MaxLocalStateQueryItems bounds caller-controlled collections on query paths
+// that perform database work for each requested item. Explicit over-limit
+// filters are rejected before database access.
+const MaxLocalStateQueryItems = 1000
+
+// ErrLocalStateQueryLimitExceeded identifies a LocalStateQuery request whose
+// caller-controlled item count exceeds MaxLocalStateQueryItems.
+var ErrLocalStateQueryLimitExceeded = errors.New(
+	"local state query item limit exceeded",
+)
+
+// LocalStateQueryLimitError describes an over-limit LocalStateQuery request.
+// In-process callers can use errors.Is for the stable category and errors.As
+// for QueryName, SubmittedItemCount, and MaximumAllowedItemCount. Node-to-client
+// protocol errors terminate the connection, so an over-the-wire client
+// observes a closed connection rather than this Go error value.
+type LocalStateQueryLimitError struct {
+	QueryName               string
+	SubmittedItemCount      int
+	MaximumAllowedItemCount int
+}
+
+func (e *LocalStateQueryLimitError) Error() string {
+	return fmt.Sprintf(
+		"%s: %s: got %d items, limit %d",
+		ErrLocalStateQueryLimitExceeded,
+		e.QueryName,
+		e.SubmittedItemCount,
+		e.MaximumAllowedItemCount,
+	)
+}
+
+func (e *LocalStateQueryLimitError) Unwrap() error {
+	return ErrLocalStateQueryLimitExceeded
+}
+
+func checkLocalStateQueryItemLimit(query string, items int) error {
+	if items <= MaxLocalStateQueryItems {
+		return nil
+	}
+	return &LocalStateQueryLimitError{
+		QueryName:               query,
+		SubmittedItemCount:      items,
+		MaximumAllowedItemCount: MaxLocalStateQueryItems,
+	}
+}
+
 func (ls *LedgerState) Query(query any) (any, error) {
 	switch q := query.(type) {
 	case *olocalstatequery.BlockQuery:
@@ -436,7 +483,7 @@ func (ls *LedgerState) queryShelleyLeaf(query any) (any, error) {
 	case *olocalstatequery.ShelleyEpochNoQuery:
 		return []any{ls.loadConsensusSnapshot().currentEpoch.EpochId}, nil
 	case *olocalstatequery.ShelleyCurrentProtocolParamsQuery:
-		return []any{ls.loadConsensusSnapshot().currentPParams}, nil
+		return []any{ls.GetCurrentPParamsForReporting()}, nil
 	case *olocalstatequery.ShelleyGenesisConfigQuery:
 		return ls.queryShelleyGenesisConfig()
 	case *olocalstatequery.ShelleyUtxoByAddressQuery:
@@ -467,13 +514,15 @@ func (ls *LedgerState) queryShelleyLeaf(query any) (any, error) {
 		return ls.queryShelleyDebugChainDepState()
 	case *olocalstatequery.ShelleyPoolDistr2Query:
 		return ls.queryShelleyPoolDistr2(q)
+	case *olocalstatequery.ShelleyStakeDistributionQuery:
+		return ls.queryShelleyStakeDistribution()
+	case *olocalstatequery.ShelleyUtxoWholeQuery:
+		return ls.queryShelleyUtxoWhole()
 	// TODO (#394)
 	/*
 		case *olocalstatequery.ShelleyLedgerTipQuery:
 		case *olocalstatequery.ShelleyNonMyopicMemberRewardsQuery:
 		case *olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery:
-		case *olocalstatequery.ShelleyStakeDistributionQuery:
-		case *olocalstatequery.ShelleyUtxoWholeQuery:
 		case *olocalstatequery.ShelleyDebugEpochStateQuery:
 		case *olocalstatequery.ShelleyDebugNewEpochStateQuery:
 		case *olocalstatequery.ShelleyRewardProvenanceQuery:
@@ -499,19 +548,35 @@ func (ls *LedgerState) queryShelleyCbor(
 	if err != nil {
 		return nil, err
 	}
-	// Inner handlers return the result in the MsgResult wire form: a
-	// single-element []any{value} for a query whose direct reply is one
-	// value (e.g. GetStakeSnapshots' []any{result}), or a multi-element
-	// []any{field1, field2, ...} for one whose handler destructures a
-	// multi-field StructAsArray result's fields directly into the slice
-	// (e.g. queryShelleyPoolDistr2's []any{result.Pools,
-	// result.TotalActiveStake}). Either way, GetCBOR's tag-24 content must
-	// be the same bytes a direct (non-wrapped) reply to that inner query
-	// would carry as its value -- which is cbor.Encode(values[0]) for the
-	// single-element case (unwrapping the outer slice) and
-	// cbor.Encode(values) for the multi-element case (the slice's own
-	// array encoding already matches a StructAsArray struct with those
-	// same field values, byte for byte).
+	// Two different, shape-indistinguishable conventions collide at
+	// exactly one element. Most handlers return []any{value} where value
+	// IS the complete result the client decodes directly (e.g.
+	// GetStakeSnapshots' []any{result}, where the direct reply's own
+	// client-side type is a one-element slice of the result struct) --
+	// GetCBOR's tag-24 content there must be cbor.Encode(value) (unwrapping
+	// the outer slice), which strips exactly the slice-of-one wrapping
+	// that direct reply needed but GetCBOR does not. This is pinned
+	// against real cardano-node wire bytes by
+	// TestQueryStakeSnapshotSpecificPool, which fails if this case is
+	// changed to keep the outer slice.
+	//
+	// queryShelleyPoolDistr2 and queryShelleyStakeDistribution instead
+	// destructure their result struct's own fields directly into values
+	// (so that struct's StructAsArray encoding doesn't nest inside an
+	// extra wrapping array on their direct, non-GetCBOR reply, whose
+	// client-side type decodes the bare struct with no slice-of-one
+	// wrapping, unlike GetStakeSnapshots). For those, GetCBOR's content
+	// must be cbor.Encode(values) (the whole slice, reconstructing that
+	// struct's array-of-fields encoding exactly) regardless of field
+	// count -- proven for the 2-field case (queryShelleyPoolDistr2) by
+	// TestQueryShelleyPoolDistr2_ViaGetCBOR and for the 1-field case
+	// (queryShelleyStakeDistribution) by
+	// TestQueryShelleyStakeDistribution_ViaGetCBOR, which fails if this
+	// case is unwrapped like the general one above instead.
+	//
+	// Slice length alone cannot tell the two conventions apart when there
+	// is exactly one field/value, so the destructured-fields query types
+	// are named explicitly here rather than guessed from shape.
 	values, ok := inner.([]any)
 	if !ok || len(values) == 0 {
 		return nil, fmt.Errorf(
@@ -520,8 +585,14 @@ func (ls *LedgerState) queryShelleyCbor(
 		)
 	}
 	var content any = values
-	if len(values) == 1 {
-		content = values[0]
+	switch q.Query.(type) {
+	case *olocalstatequery.ShelleyPoolDistr2Query,
+		*olocalstatequery.ShelleyStakeDistributionQuery:
+		// content stays the whole slice; see comment above.
+	default:
+		if len(values) == 1 {
+			content = values[0]
+		}
 	}
 	encoded, err := cbor.Encode(content)
 	if err != nil {
@@ -543,6 +614,7 @@ func (ls *LedgerState) queryShelleyCbor(
 func (ls *LedgerState) queryShelleyStakeSnapshots(
 	q *olocalstatequery.ShelleyStakeSnapshotsQuery,
 ) (any, error) {
+	pools, all := q.PoolFilter()
 	consensus := ls.loadConsensusSnapshot()
 	epoch := consensus.currentEpoch.EpochId
 	setEpoch, hasSet := priorEpoch(epoch, 1)
@@ -564,8 +636,6 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 	txn := ls.db.Transaction(false)
 	defer txn.Release()
 	metaTxn := txn.Metadata()
-
-	pools, all := q.PoolFilter()
 
 	var poolSnapshots map[ledger.Blake2b224]*olocalstatequery.PoolStakeSnapshot
 	if all {
@@ -608,34 +678,41 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 			}
 		}
 	} else {
-		// A pool filter is bounded by the caller, so read only the requested
-		// pools' snapshots rather than every pool's.
+		// Read each epoch's requested pools in one batch. This keeps database
+		// round trips constant as the caller's filter grows.
+		mark, err := ls.markStakeForPools(epoch, pools, metaTxn)
+		if err != nil {
+			return nil, err
+		}
+		var set map[string]uint64
+		if hasSet {
+			set, err = ls.markStakeForPools(setEpoch, pools, metaTxn)
+			if err != nil {
+				return nil, err
+			}
+		}
+		var snapshotGo map[string]uint64
+		if hasGo {
+			snapshotGo, err = ls.markStakeForPools(goEpoch, pools, metaTxn)
+			if err != nil {
+				return nil, err
+			}
+		}
 		poolSnapshots = make(
 			map[ledger.Blake2b224]*olocalstatequery.PoolStakeSnapshot,
 			len(pools),
 		)
 		for _, pool := range pools {
-			hash := make([]byte, len(pool))
-			copy(hash, pool[:])
-			mark, err := ls.poolSnapshotStake(epoch, true, hash, metaTxn)
-			if err != nil {
-				return nil, err
-			}
-			set, err := ls.poolSnapshotStake(setEpoch, hasSet, hash, metaTxn)
-			if err != nil {
-				return nil, err
-			}
-			snapshotGo, err := ls.poolSnapshotStake(goEpoch, hasGo, hash, metaTxn)
-			if err != nil {
-				return nil, err
-			}
-			if omitZeroPools && mark == 0 && set == 0 && snapshotGo == 0 {
+			markStake := mark[string(pool[:])]
+			setStake := set[string(pool[:])]
+			goStake := snapshotGo[string(pool[:])]
+			if omitZeroPools && markStake == 0 && setStake == 0 && goStake == 0 {
 				continue
 			}
-			poolSnapshots[ledger.NewBlake2b224(hash)] = &olocalstatequery.PoolStakeSnapshot{
-				StakeMark: mark,
-				StakeSet:  set,
-				StakeGo:   snapshotGo,
+			poolSnapshots[ledger.NewBlake2b224(pool[:])] = &olocalstatequery.PoolStakeSnapshot{
+				StakeMark: markStake,
+				StakeSet:  setStake,
+				StakeGo:   goStake,
 			}
 		}
 	}
@@ -700,34 +777,6 @@ func (ls *LedgerState) markStakeByPool(
 		byPool[string(snapshot.PoolKeyHash)] = uint64(snapshot.TotalStake)
 	}
 	return byPool, nil
-}
-
-// poolSnapshotStake returns a single pool's mark-snapshot stake at the given
-// epoch, or 0 when the epoch does not exist (exists=false) or has no snapshot
-// row for the pool. Used for the bounded pool-filter path; the all-pools path
-// uses markStakeByPool to avoid a per-pool query.
-func (ls *LedgerState) poolSnapshotStake(
-	epoch uint64,
-	exists bool,
-	poolKeyHash []byte,
-	txn types.Txn,
-) (uint64, error) {
-	if !exists {
-		return 0, nil
-	}
-	snapshot, err := ls.db.Metadata().GetPoolStakeSnapshot(
-		epoch,
-		snapshotTypeMark,
-		poolKeyHash,
-		txn,
-	)
-	if err != nil {
-		return 0, err
-	}
-	if snapshot == nil {
-		return 0, nil
-	}
-	return uint64(snapshot.TotalStake), nil
 }
 
 // markStakeForPools reads the mark snapshot for just the pools named, keyed by
@@ -797,6 +846,67 @@ func (ls *LedgerState) totalActiveStake(
 	return total, nil
 }
 
+// totalCirculatingSupply returns the total ADA in circulation, delegated or
+// not: MaxLovelaceSupply minus the live reserves pot, clamped to a minimum of
+// one for the same NonZero-decode reason totalActiveStake is (see its doc
+// comment).
+//
+// This is a genuinely different total from totalActiveStake, not an
+// alternative way to compute the same one. GetPoolDistr2's TotalActiveStake
+// really is the sum of delegated stake -- confirmed against the real
+// cardano-ledger source (calculatePoolDistr/SnapShot.ssTotalActiveStake,
+// IntersectMBO/cardano-ledger) -- and Dingo already gets that right; an
+// earlier attempt at blinklabs-io/dingo#3824 wrongly "fixed" GetPoolDistr2's
+// total to use this instead, which was reverted.
+//
+// GetStakeDistribution is a different, older query, and a real cardano-node
+// answers it with a genuinely different total: captured raw wire bytes
+// (not just the decoded Go value) show cardano-node's GetStakeDistribution
+// reply encoding each pool's StakeFraction as tag(30)[stake, circulation],
+// not tag(30)[stake, sum-of-delegated] -- verified against a live cardano-node
+// on a devnet whose genesis deliberately delegates only half its circulating
+// supply (a staked and an unstaked genesis address per pool; see
+// internal/test/devnet/testnet.yaml), where GetStakeSnapshots independently
+// confirmed both nodes agree exactly on the underlying per-pool and
+// sum-of-delegated numbers, isolating the divergence to this one query.
+//
+// Falls back to totalActiveStake's sum-of-delegated total when genesis
+// config or live network state is unavailable to read circulation from --
+// only true of a LedgerState a test builds by hand rather than one backing a
+// running node, which always has both.
+func (ls *LedgerState) totalCirculatingSupply(
+	epoch uint64,
+	exists bool,
+	txn types.Txn,
+) (uint64, error) {
+	fallback := func() (uint64, error) {
+		return ls.totalActiveStake(epoch, exists, txn)
+	}
+	if ls.config.CardanoNodeConfig == nil {
+		return fallback()
+	}
+	genesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil || genesis.MaxLovelaceSupply == 0 {
+		return fallback()
+	}
+	state, err := ls.db.Metadata().GetNetworkState(txn)
+	if err != nil {
+		return 0, err
+	}
+	if state == nil {
+		return fallback()
+	}
+	reserves := uint64(state.Reserves)
+	if reserves > genesis.MaxLovelaceSupply {
+		return fallback()
+	}
+	circulation := genesis.MaxLovelaceSupply - reserves
+	if circulation == 0 {
+		return 1, nil
+	}
+	return circulation, nil
+}
+
 func (ls *LedgerState) queryShelleyGenesisConfig() (any, error) {
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	return []any{shelleyGenesis}, nil
@@ -824,10 +934,21 @@ func (ls *LedgerState) queryShelleyStakePools() (any, error) {
 func (ls *LedgerState) queryShelleyDRepState(
 	creds []lcommon.Credential,
 ) (any, error) {
+	if err := checkLocalStateQueryItemLimit(
+		"GetDRepState",
+		len(creds),
+	); err != nil {
+		return nil, err
+	}
 	result := make(olocalstatequery.DRepStateResult)
 	var dreps []*models.Drep
+	var allDelegators map[string][]olocalstatequery.StakeCredential
 	if len(creds) == 0 {
 		all, err := ls.db.GetActiveDreps(nil)
+		if err != nil {
+			return nil, err
+		}
+		allDelegators, err = ls.allDRepDelegators()
 		if err != nil {
 			return nil, err
 		}
@@ -859,9 +980,18 @@ func (ls *LedgerState) queryShelleyDRepState(
 		if drep == nil {
 			continue
 		}
-		delegators, err := ls.drepDelegators(drep)
-		if err != nil {
-			return nil, err
+		var delegators []olocalstatequery.StakeCredential
+		if allDelegators != nil {
+			delegators = allDelegators[models.StakeCredentialRef{
+				Tag: drep.CredentialTag,
+				Key: drep.Credential,
+			}.MapKey()]
+		} else {
+			var err error
+			delegators, err = ls.drepDelegators(drep)
+			if err != nil {
+				return nil, err
+			}
 		}
 		key := olocalstatequery.StakeCredential{
 			Tag:   uint64(drep.CredentialTag),
@@ -878,6 +1008,69 @@ func (ls *LedgerState) queryShelleyDRepState(
 	// expects (verified against cardano-node: an empty result is the CBOR
 	// `81 a0`, i.e. [ {} ]).
 	return []any{result}, nil
+}
+
+// allDRepDelegators loads active accounts in batches and groups their voting
+// delegations by DRep. This preserves the unrestricted empty GetDRepState form
+// without issuing one database query for every active DRep.
+// allDRepDelegatorsBatchSize bounds how many active account refs are
+// hydrated into full Account rows at once. GetAccountsByCredential's result
+// map retains every hydrated row even though only Drep/DrepType are read
+// here, so folding each batch down before hydrating the next caps retained
+// memory at this batch size instead of growing with the active-account
+// count on every empty GetDRepState request.
+const allDRepDelegatorsBatchSize = 10_000
+
+func (ls *LedgerState) allDRepDelegators() (
+	map[string][]olocalstatequery.StakeCredential,
+	error,
+) {
+	refs, err := ls.db.Metadata().GetActiveAccountCredentials(nil)
+	if err != nil {
+		return nil, err
+	}
+	ret := make(map[string][]olocalstatequery.StakeCredential)
+	for start := 0; start < len(refs); start += allDRepDelegatorsBatchSize {
+		end := min(start+allDRepDelegatorsBatchSize, len(refs))
+		batch := refs[start:end]
+		accounts, err := ls.db.GetAccountsByCredential(batch, false, nil)
+		if err != nil {
+			return nil, err
+		}
+		for _, ref := range batch {
+			account := accounts[ref.MapKey()]
+			if account == nil || len(account.Drep) == 0 ||
+				account.DrepType > models.DrepTypeScriptHash {
+				continue
+			}
+			drepKey := models.StakeCredentialRef{
+				Tag: uint8(account.DrepType),
+				Key: account.Drep,
+			}.MapKey()
+			ret[drepKey] = append(
+				ret[drepKey],
+				olocalstatequery.StakeCredential{
+					Tag:   uint64(ref.Tag),
+					Bytes: ledger.NewBlake2b224(ref.Key),
+				},
+			)
+		}
+	}
+	for key := range ret {
+		slices.SortFunc(
+			ret[key],
+			func(a, b olocalstatequery.StakeCredential) int {
+				if a.Tag < b.Tag {
+					return -1
+				}
+				if a.Tag > b.Tag {
+					return 1
+				}
+				return bytes.Compare(a.Bytes[:], b.Bytes[:])
+			},
+		)
+	}
+	return ret, nil
 }
 
 // queryShelleyAccountState answers GetAccountState: the chain's treasury and
@@ -1090,6 +1283,12 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 func (ls *LedgerState) queryShelleyStakeDelegDeposits(
 	creds []olocalstatequery.StakeCredential,
 ) (any, error) {
+	if err := checkLocalStateQueryItemLimit(
+		"GetStakeDelegDeposits",
+		len(creds),
+	); err != nil {
+		return nil, err
+	}
 	ret := make(olocalstatequery.StakeDelegDepositsResult)
 	for _, cred := range creds {
 		credentialTag, err := models.CredentialTagFromUint64(cred.Tag)
@@ -1122,22 +1321,40 @@ func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
 	creds []lcommon.Credential,
 ) (any, error) {
 	ret := make(olocalstatequery.FilteredVoteDelegateesResult)
-	for _, cred := range creds {
+	refs := make([]models.StakeCredentialRef, 0, len(creds))
+	// Carried alongside creds so the second loop can reuse the tag each
+	// credential decoded to here, instead of decoding it again.
+	tags := make([]uint8, len(creds))
+	seen := make(map[string]struct{}, len(creds))
+	for i, cred := range creds {
 		credentialTag, err := models.CredentialTagFromUint(cred.CredType)
 		if err != nil {
 			return nil, err
 		}
-		account, err := ls.db.GetAccountByCredential(
-			credentialTag,
-			cred.Credential[:],
-			false,
-			nil,
-		)
-		if err != nil {
-			if errors.Is(err, models.ErrAccountNotFound) {
-				continue
-			}
-			return nil, err
+		tags[i] = credentialTag
+		ref := models.StakeCredentialRef{
+			Tag: credentialTag,
+			Key: cred.Credential[:],
+		}
+		key := ref.MapKey()
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		refs = append(refs, ref)
+	}
+	accounts, err := ls.db.GetAccountsByCredential(refs, false, nil)
+	if err != nil {
+		return nil, err
+	}
+	for i, cred := range creds {
+		credentialTag := tags[i]
+		account, ok := accounts[models.StakeCredentialRef{
+			Tag: credentialTag,
+			Key: cred.Credential[:],
+		}.MapKey()]
+		if !ok {
+			continue
 		}
 		if account == nil ||
 			(len(account.Drep) == 0 &&
