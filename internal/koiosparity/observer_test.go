@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -160,6 +161,18 @@ func newFakeKoiosServer(
 					endTime,
 					ref.activeStake,
 				)
+			case "/epoch_params":
+				epoch, _, ok := lookupFakeEpoch(r, epochs)
+				if !ok {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(
+					w,
+					previewBabbageEpochParamsTmpl,
+					strconv.FormatUint(epoch, 10),
+				)
 			case "/totals":
 				epoch, ref, ok := lookupFakeEpoch(r, epochs)
 				if !ok {
@@ -231,7 +244,11 @@ func TestFetchAccountsIfNeededSkipsPreStakingEpoch(t *testing.T) {
 // seedDingoEpochAggregate writes epoch_summary at koiosEpoch-1 (the "stake
 // epoch" CompareEpochAggregates reads total_active_stake from) and
 // reward_ada_pots at koiosEpoch itself (unshifted), matching a fakeEpochRef
-// with the same values so the pair compares as a clean PASS.
+// with the same values so the pair compares as a clean PASS. It also seeds
+// the epoch/pparams rows CompareEpochProtocolParams reads, matching the
+// parameter set fakeKoiosServer serves — without them a clean-PASS epoch
+// would report protocol parameters as missing, which is the correct finding
+// for a node that has none but not what these tests are about.
 func seedDingoEpochAggregate(
 	t *testing.T,
 	source *DatabaseSource,
@@ -250,6 +267,7 @@ func seedDingoEpochAggregate(
 		Reserves: types.Uint64(reserves),
 		Fees:     types.Uint64(fees),
 	}).Error)
+	seedDingoBabbageProtocolParams(t, sqlDB, koiosEpoch)
 }
 
 // setDingoActiveStake overwrites the stake-epoch active-stake row for
@@ -1023,6 +1041,10 @@ func TestObserverStartSeedsBacklogForMissingAccountCoverage(t *testing.T) {
 		Reward:    "1",
 		FetchedAt: fetchedAt,
 	}))
+	// This cache is built directly rather than fetched, so it also needs the
+	// /epoch_params reference row a fetch would have written; without it the
+	// epoch correctly reports incomplete protocol-parameter reference data.
+	seedKoiosBabbageProtocolParams(t, cache, "preview", koiosEpoch)
 	require.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
 		Network:       "preview",
 		Epoch:         koiosEpoch,
@@ -1050,6 +1072,7 @@ func TestObserverStartSeedsBacklogForMissingAccountCoverage(t *testing.T) {
 			Reward:    "1",
 			FetchedAt: fetchedAt,
 		}))
+		seedKoiosBabbageProtocolParams(t, cache, "preview", e)
 		require.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
 			Network:       "preview",
 			Epoch:         e,
@@ -1237,4 +1260,244 @@ func TestObserverFetchIfNeededSurfacesPermanentErrorImmediately(t *testing.T) {
 
 	err = o.fetchIfNeeded(context.Background(), 9)
 	require.Error(t, err)
+}
+
+// TestObserverBackfillsParamsForAPreExistingCache pins that the in-process
+// observer gains a parameter row for an epoch cached before parameter
+// comparison existed.
+//
+// The test drives Start, not fetchIfNeeded, because the gap is a queuing
+// decision and not a fetching one. GetUncachedEpochs reports such an epoch as
+// cached — it has a koios_epoch_info row — and a prior PASS keeps
+// GetEpochsNeedingCheck from returning it, so nothing puts it in the backlog
+// and fetchIfNeeded is never called for it at all. Calling fetchIfNeeded
+// directly would exercise the gate while skipping the decision that has to
+// reach it.
+//
+// Every epoch in range is therefore already cached and already PASSed here:
+// the parameter row is the only thing missing, so the epoch is queued for
+// that reason or not at all.
+func TestObserverBackfillsParamsForAPreExistingCache(t *testing.T) {
+	const network = "preview"
+	// Epochs 0 and 1 are pre-staking; 2 is the upgraded-cache epoch under
+	// test. Dingo's latest epoch is 3, so the observer's safely-closed bound
+	// is exactly 2.
+	const epoch = uint64(2)
+
+	var paramsCalls, epochInfoCalls atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/tip":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[{"epoch_no":999999}]`))
+			case "/pool_list", "/pool_updates":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[]`))
+			case "/epoch_info":
+				epochInfoCalls.Add(1)
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(w, validEpochInfoTmpl,
+					r.URL.Query().Get("_epoch_no"))
+			case "/epoch_params":
+				paramsCalls.Add(1)
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(w, validEpochParamsTmpl,
+					r.URL.Query().Get("_epoch_no"))
+			default:
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`[]`))
+			}
+		}),
+	)
+	defer srv.Close()
+	withTestKoiosBaseURL(t, srv.URL)
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := OpenCache(cachePath, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	fetchedAt := time.Now().UTC().Add(-time.Hour)
+	for e := uint64(0); e <= epoch; e++ {
+		// The upgraded-cache shape: pool-level data present, no parameter
+		// row. Epochs 0 and 1 carry the pre-staking marker, which is why
+		// they never gain a parameter row and must not be queued for one.
+		info := KoiosEpochInfo{
+			Network:      network,
+			Epoch:        e,
+			ActiveStake:  "12345",
+			EpochEndTime: fetchedAt,
+			FetchedAt:    fetchedAt,
+			PreStaking:   e < epoch,
+		}
+		require.NoError(t, cache.CommitEpochData(info, nil, &KoiosTotals{
+			Treasury: "1", Reserves: "1", Fees: "1", Reward: "1",
+			FetchedAt: fetchedAt,
+		}))
+		// A stored PASS newer than fetched_at removes the only other reason
+		// Start would queue the epoch.
+		require.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
+			Network:       network,
+			Epoch:         e,
+			LastCheckedAt: fetchedAt.Add(time.Minute),
+			Status:        StatusPass,
+		}))
+	}
+	require.NoError(t, cache.Close())
+
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+	// Puts an epoch_summary row at epoch 3, so GetLatestEpoch is 3 and the
+	// observer's safely-closed bound is 2.
+	seedDingoEpochAggregate(t, source, 4, 1_000_000, 10, 20, 30)
+
+	o, err := NewObserver(ObserverConfig{
+		Network:            network,
+		CachePath:          cachePath,
+		Source:             source,
+		Logger:             slog.New(slog.DiscardHandler),
+		FetchRetryAttempts: 2,
+		FetchRetryDelay:    time.Millisecond,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Stop(context.Background()) })
+
+	require.NoError(t, o.Start(context.Background()))
+
+	require.Eventually(t, func() bool {
+		reopened, err := OpenCache(cachePath, slog.New(slog.DiscardHandler))
+		if err != nil {
+			return false
+		}
+		defer reopened.Close() //nolint:errcheck
+		got, err := reopened.GetEpochParams(network, epoch)
+		return err == nil && got != nil
+	}, 10*time.Second, 10*time.Millisecond,
+		"Start must queue the epoch whose parameter row is missing")
+
+	require.Equal(t, int32(1), paramsCalls.Load(),
+		"exactly the one epoch missing a parameter row is backfilled; the "+
+			"pre-staking epochs have no Koios parameter row to fetch")
+	require.Equal(t, int32(0), epochInfoCalls.Load(),
+		"pool-level data was already cached; the parameter backfill must "+
+			"not re-request /epoch_info")
+}
+
+// TestObserverFailureReportsSignificantMismatchCount is the user-visible half
+// of the fix: the number an operator reads in the strict-mode fatal error and
+// in the observer's "epoch validation failed" log line.
+//
+// CountSignificant's own unit tests pin the arithmetic but not what
+// processEpoch does with it, and processEpoch is the only place the number
+// ever reaches a human. The epoch below holds one account value mismatch --
+// the reason it fails -- and one acct_newly_registered row, which
+// DetermineStatus ignores by design, so a message quoting len(Mismatches)
+// reports twice the count that caused the failure.
+func TestObserverFailureReportsSignificantMismatchCount(t *testing.T) {
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+
+	const koiosEpoch = uint64(5)
+	const stakeEpoch = koiosEpoch - 1
+
+	stakingKey := testPoolKeyHash(t, 0x55)
+	addr, err := StakeAddressFromCredential(stakingKey, 0)
+	require.NoError(t, err)
+	// A second address in the requested universe that neither side ever pays.
+	// It becomes an acct_zero_reward row: descriptive state, never a reason
+	// for the failure, and exactly the kind of row that inflated the count.
+	quietAddr, err := StakeAddressFromCredential(testPoolKeyHash(t, 0x77), 0)
+	require.NoError(t, err)
+
+	srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{
+		koiosEpoch: {
+			activeStake: "1000000",
+			treasury:    "10",
+			reserves:    "20",
+			fees:        "30",
+		},
+	}, fakeKoiosAccountFixtures{
+		addresses: []string{addr, quietAddr},
+		rewardsByEpoch: map[uint64][]KoiosAccountRewardHistoryItem{
+			koiosEpoch: {{
+				StakeAddress: addr,
+				EarnedEpoch:  koiosEpoch,
+				Amount:       "9999999", // deliberately wrong
+				Type:         "member",
+			}},
+		},
+	})
+	withTestKoiosBaseURL(t, srv.URL)
+
+	var mu sync.Mutex
+	var fatalErr error
+	var results []EpochCompareResult
+	o, err := NewObserver(ObserverConfig{
+		Network:         "preview",
+		CachePath:       filepath.Join(t.TempDir(), "cache.db"),
+		Source:          source,
+		Strict:          true,
+		AccountsEnabled: true,
+		Logger:          slog.New(slog.DiscardHandler),
+		OnResult: func(r *EpochCompareResult) {
+			mu.Lock()
+			results = append(results, *r)
+			mu.Unlock()
+		},
+		FatalFunc: func(err error) {
+			mu.Lock()
+			fatalErr = err
+			mu.Unlock()
+		},
+	})
+	require.NoError(t, err)
+	defer func() { _ = o.Stop(context.Background()) }()
+
+	require.NoError(t, o.Start(context.Background()))
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Stop()
+	eb.SubscribeFunc(
+		event.EpochTransitionEventType,
+		o.HandleEpochTransitionEvent,
+	)
+
+	seedDingoEpochAggregate(t, source, koiosEpoch, 1_000_000, 10, 20, 30)
+	sqlDB := sourceSQLDB(t, source.db)
+	require.NoError(t, sqlDB.Create(&models.RewardAccountOutput{
+		Epoch:       stakeEpoch,
+		StakingKey:  stakingKey,
+		PoolKeyHash: testPoolKeyHash(t, 0x66),
+		RewardType:  "member",
+		Amount:      types.Uint64(1_000_000),
+		Spendable:   true,
+	}).Error)
+
+	publishEpochTransition(eb, koiosEpoch)
+
+	testutil.WaitForCondition(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return fatalErr != nil
+	}, 5*time.Second, "strict mode must report the epoch failure")
+
+	mu.Lock()
+	err = fatalErr
+	got := slices.Clone(results)
+	mu.Unlock()
+
+	// The scenario has to actually contain an informational mismatch, or the
+	// two numbers coincide and the assertion below proves nothing.
+	require.NotEmpty(t, got)
+	result := got[len(got)-1]
+	require.Equal(t, StatusFail, result.Status)
+	require.Greater(t, len(result.Mismatches), CountSignificant(result.Mismatches),
+		"scenario must hold at least one informational mismatch")
+
+	require.ErrorContains(t, err, fmt.Sprintf(
+		"parity FAIL at epoch %d (%d significant of %d mismatch(es))",
+		koiosEpoch,
+		CountSignificant(result.Mismatches),
+		len(result.Mismatches),
+	))
 }
