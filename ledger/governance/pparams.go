@@ -22,19 +22,12 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
-// governanceProtocolParameters is the narrow marker shared by protocol
-// parameter types for eras with Conway governance. Dijkstra satisfies it via
-// its embedded Conway parameters; pre-Conway parameter types do not.
-type governanceProtocolParameters interface {
-	lcommon.ProtocolParameters
-	ProtocolMajorVersion() uint
-}
-
 // conwayGovernanceProtocolParameters returns the Conway fields consumed by
 // ratification while retaining the caller's original concrete parameter value
-// for enactment. A nil result identifies the intentional pre-Conway no-op; an
-// unsupported governance-era type must fail instead of silently skipping an
-// epoch tick.
+// for enactment. A nil result identifies the intentional pre-Conway no-op.
+// Every pre-Conway parameter type implements the shared protocol-parameter
+// accessors, so capability detection must remain an explicit concrete-type
+// check rather than a broad interface assertion.
 func conwayGovernanceProtocolParameters(
 	pparams lcommon.ProtocolParameters,
 ) (*conway.ConwayProtocolParameters, error) {
@@ -56,12 +49,6 @@ func conwayGovernanceProtocolParameters(
 		}
 		return &p.ConwayProtocolParameters, nil
 	default:
-		if _, ok := pparams.(governanceProtocolParameters); ok {
-			return nil, fmt.Errorf(
-				"unsupported governance protocol parameters type %T",
-				pparams,
-			)
-		}
 		return nil, nil
 	}
 }

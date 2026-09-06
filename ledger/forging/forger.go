@@ -77,6 +77,8 @@ type BlockForger struct {
 	blockForged      BlockForgedObserver
 	slotClock        SlotClockProvider
 	slotDuration     time.Duration
+	opCertLedgerView LedgerView
+	eraParams        ProtocolParamsProvider
 
 	// Slot battle detection
 	slotTracker *SlotTracker
@@ -307,6 +309,25 @@ type ForgerConfig struct {
 	BlockForged      BlockForgedObserver
 	SlotClock        SlotClockProvider
 
+	// OpCertLedgerView supplies the highest OpCert issue-number counter the
+	// ledger has observed on chain for this pool. When non-nil, the forge
+	// loop pre-flights the candidate counter against it using the same
+	// era-scoped rule block application enforces (see
+	// ledger/verify_opcert.go validateOpCertCounter), after leader
+	// selection but before Leios work and the forge-slot fence -- a stale
+	// or gapped counter is rejected there instead of reaching an
+	// `AddLocalBlock` call the chain would discard anyway. Nil disables
+	// the check (dev mode, embedders without ledger wiring). Requires
+	// EraParams.
+	OpCertLedgerView LedgerView
+	// EraParams supplies the era-defining protocol parameters in effect for
+	// the slot being forged, so OpCertLedgerView's counter check applies
+	// the correct era-scoped rule: TPraos (Shelley-Alonzo) accepts any
+	// forward counter movement, Praos (Babbage onward) additionally
+	// rejects one that skips ahead of the last-seen value by more than
+	// one. Required whenever OpCertLedgerView is set.
+	EraParams ProtocolParamsProvider
+
 	// ForgeFence persists the last-forged-slot fence so a restart cannot
 	// sign a second block for a slot this node already used. Nil
 	// disables the durable fence, which leaves only the in-memory chain
@@ -378,6 +399,8 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		leiosParent:      cfg.LeiosParentAnnouncementProvider,
 		blockValidator:   cfg.BlockValidator,
 		fenceStore:       cfg.ForgeFence,
+		opCertLedgerView: cfg.OpCertLedgerView,
+		eraParams:        cfg.EraParams,
 	}
 	if cfg.ForgeSyncToleranceSlots == 0 {
 		cfg.ForgeSyncToleranceSlots = forgeSyncToleranceSlots
@@ -435,6 +458,11 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		cfg.LeiosParentAnnouncementProvider == nil {
 		return nil, errors.New(
 			"leios certificate provider requires LeiosParentAnnouncementProvider",
+		)
+	}
+	if cfg.OpCertLedgerView != nil && cfg.EraParams == nil {
+		return nil, errors.New(
+			"OpCertLedgerView requires EraParams to resolve the era-scoped opcert counter rule",
 		)
 	}
 
@@ -792,6 +820,33 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			f.metrics.forgeNotLeader.Inc()
 		}
 		return nil
+	}
+
+	// Pre-flight the OpCert counter against the ledger's observed on-chain
+	// state and the era-scoped rule block application enforces (see
+	// checkOpCertSequence). This covers genesis/era context the KES-lifetime
+	// gate above does not: LatestOpCertSequence advances as blocks are
+	// applied (this node's own or a peer's for the same pool), so a key
+	// state that was fine at startup or on an earlier slot can become stale,
+	// or -- from Babbage onward -- gapped, by the time a later slot is won.
+	// Checked only for the winning slot -- after the cheap leader check --
+	// rather than on every KES-valid slot, since the check performs a real
+	// ledger read that would otherwise run regardless of whether this pool
+	// is even leader for the slot.
+	if f.opCertLedgerView != nil {
+		if err := f.checkOpCertSequence(currentSlot, generation); err != nil {
+			f.incCouldNotForge()
+			f.logger.Error(
+				"forge skip: operational certificate counter is not valid for chain state",
+				"slot",
+				currentSlot,
+				"credential_generation",
+				generation.id,
+				"error",
+				err,
+			)
+			return nil
+		}
 	}
 
 	// The credential snapshot owns its secret material, so the callback above
@@ -1176,6 +1231,48 @@ func (f *BlockForger) incCouldNotForge() {
 	if f.metrics != nil {
 		f.metrics.forgeCouldNot.Inc()
 	}
+}
+
+// checkOpCertSequence resolves the era in effect for slot and validates the
+// generation's OpCert counter against the ledger's on-chain observed value
+// using that era's rule (validateOpCertSequence). Called only when
+// f.opCertLedgerView is set; NewBlockForger guarantees f.eraParams is then
+// also non-nil.
+func (f *BlockForger) checkOpCertSequence(
+	slot uint64,
+	generation *credentialGeneration,
+) error {
+	opCert := generation.opCert()
+	if opCert == nil {
+		return errors.New("operational certificate not loaded")
+	}
+	credsPoolID := f.creds.GetPoolID()
+	var poolID [28]byte
+	copy(poolID[:], credsPoolID[:])
+	stored, found, err := f.opCertLedgerView.LatestOpCertSequence(poolID)
+	if err != nil {
+		return fmt.Errorf("opcert sequence lookup: %w", err)
+	}
+	pparams := f.eraParams.ProtocolParamsForSlot(slot)
+	if pparams == nil {
+		return fmt.Errorf(
+			"protocol parameters unavailable for slot %d",
+			slot,
+		)
+	}
+	// extractPParamsLimits also rejects a typed-nil pointer of a known
+	// era's type stored in this interface, which the plain nil check above
+	// cannot see (see its doc comment in eras.go).
+	limits, err := extractPParamsLimits(pparams)
+	if err != nil {
+		return fmt.Errorf("resolve era for opcert counter rule: %w", err)
+	}
+	return validateOpCertSequence(
+		stored,
+		found,
+		opCert.IssueNumber,
+		!limits.era.isTPraos(),
+	)
 }
 
 // checkLeaderSafe calls the pluggable LeaderChecker, recovering any

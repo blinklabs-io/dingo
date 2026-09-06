@@ -42,12 +42,19 @@ var BabbageEraDesc = EraDesc{
 	DecodePParamsFunc:       DecodePParamsBabbage,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateBabbage,
 	PParamsUpdateFunc:       PParamsUpdateBabbage,
-	HardForkFunc:            HardForkBabbage,
-	EpochLengthFunc:         EpochLengthShelley,
-	CalculateEtaVFunc:       CalculateEtaVBabbage,
-	CertDepositFunc:         CertDepositBabbage,
-	ValidateTxFunc:          ValidateTxBabbage,
-	EvaluateTxFunc:          EvaluateTxBabbage,
+	ParamUpdateHasPlutusV2CostModelFunc: func(u any) bool {
+		upd, ok := u.(babbage.BabbageProtocolParameterUpdate)
+		if !ok {
+			return false
+		}
+		return paramUpdateHasPlutusV2CostModel(upd.CostModels)
+	},
+	HardForkFunc:      HardForkBabbage,
+	EpochLengthFunc:   EpochLengthShelley,
+	CalculateEtaVFunc: CalculateEtaVBabbage,
+	CertDepositFunc:   CertDepositBabbage,
+	ValidateTxFunc:    ValidateTxBabbage,
+	EvaluateTxFunc:    EvaluateTxBabbage,
 }
 
 func DecodePParamsBabbage(data []byte) (lcommon.ProtocolParameters, error) {
@@ -439,9 +446,9 @@ var babbageUtxoValidationRules = buildBabbageValidationRules()
 
 func buildBabbageValidationRules() []indexedUtxoValidationRule {
 	return buildIndexedUtxoValidationRules(
+		babbage.UtxoValidationRuleDescriptors(),
 		babbage.UtxoValidationRules,
-		babbage.UtxoValidatePlutusScripts,
-		"babbage.UtxoValidatePlutusScripts",
+		lcommon.UtxoValidationRulePlutusScripts,
 	)
 }
 
@@ -568,8 +575,10 @@ func EvaluateTxBabbage(
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
 			}
-			retTotalExUnits.Steps += usedBudget.Steps
-			retTotalExUnits.Memory += usedBudget.Memory
+			retTotalExUnits, err = SafeAddExUnits(retTotalExUnits, usedBudget)
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("aggregate execution units: %w", err)
+			}
 			retRedeemerExUnits[lcommon.RedeemerKey{
 				Tag:   redeemer.Tag,
 				Index: redeemer.Index,
@@ -611,8 +620,10 @@ func EvaluateTxBabbage(
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
 			}
-			retTotalExUnits.Steps += usedBudget.Steps
-			retTotalExUnits.Memory += usedBudget.Memory
+			retTotalExUnits, err = SafeAddExUnits(retTotalExUnits, usedBudget)
+			if err != nil {
+				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("aggregate execution units: %w", err)
+			}
 			retRedeemerExUnits[lcommon.RedeemerKey{
 				Tag:   redeemer.Tag,
 				Index: redeemer.Index,

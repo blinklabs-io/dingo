@@ -83,6 +83,31 @@ const (
 	CategoryAcctDeregistered = "acct_deregistered"
 )
 
+// AllCategories is every mismatch category above, in one place.
+//
+// severityOf classifies exactly these values, and the tests that guard the
+// classification iterate this slice rather than restating it. A hand-written
+// second copy is how a category comes to be classified by DetermineStatus and
+// missed by CountSignificant (or the reverse) with every test still green, so
+// the list exists once and TestAllCategoriesCoversEveryConstant pins it to the
+// const block above.
+var AllCategories = []string{
+	CategoryValueMismatch,
+	CategoryPoolOnlyDingo,
+	CategoryPoolOnlyKoios,
+	CategoryReferenceLag,
+	CategoryDBError,
+	CategoryDBMissing,
+	CategoryPoolDeparted,
+	CategoryAcctOnlyDingo,
+	CategoryAcctOnlyKoios,
+	CategoryAcctDuplicate,
+	CategoryAcctCoverageIncomplete,
+	CategoryAcctZeroReward,
+	CategoryAcctNewlyRegistered,
+	CategoryAcctDeregistered,
+}
+
 // Epoch check status values.
 const (
 	StatusPass  = "PASS"
@@ -321,15 +346,18 @@ func CompareEpochTotals(
 // epochEndTime is the actual epoch close time (from KoiosEpochInfo.EpochEndTime);
 // zero means unknown. graceHours: if the epoch closed within this many hours and
 // Dingo has no reward_pool_input row, emit reference_lag instead of pool_only_koios.
-// departedAtParamEpoch reports whether this pool is provably absent from the
-// K+1 pool set, established from the mark pool_stake_snapshot rather than from
-// epoch_summary.SnapshotReady. That distinction matters: the snapshot writer
-// commits the epoch summary on every transition regardless of reward-input
-// availability, and deliberately omits a degraded active pool from
-// reward_pool_input while keeping it in the pool-stake snapshot. Both are
-// missing input rather than departure, so only per-pool absence from the K+1
-// pool set may downgrade the finding. False whenever membership could not be
-// established, which keeps the stricter classification (dingo #3485).
+// departedAtParamEpoch reports whether this pool provably left the pool set by
+// K+1 — either because its own retirement certificate had taken effect by the
+// K+1 boundary and no later registration cancelled it, or because it is absent
+// from a K+1 pool set already established as complete. Both are per-pool
+// facts, which is the distinction that matters: epoch_summary.SnapshotReady is
+// not one. The snapshot writer commits the epoch summary on every transition
+// regardless of reward-input availability, and deliberately omits a degraded
+// active pool from reward_pool_input while keeping it in the pool set. Those
+// are missing input rather than departure, and an epoch-level flag would
+// downgrade both. False whenever neither route could establish departure,
+// which keeps the stricter classification (dingo #3485, #3925). See
+// poolDepartedAtParamEpoch in check.go.
 func ComparePoolEpoch(
 	network string,
 	epoch uint64,
@@ -907,6 +935,60 @@ func rationalsEqual(a, b string) bool {
 	return ra.Cmp(&rb) == 0
 }
 
+// mismatchSeverity classifies one mismatch category. DetermineStatus and
+// CountSignificant both read it, so a category added to one can never be
+// forgotten by the other — the failure the split invited was a count that did
+// not agree with the status it accompanied.
+type mismatchSeverity int
+
+const (
+	// severityInformational describes state rather than disagreement. These
+	// must never turn an otherwise-clean epoch into ERROR or FAIL, and must
+	// never be counted as a reason for one.
+	severityInformational mismatchSeverity = iota
+	// severityError means the comparison could not be trusted, not that it
+	// disagreed.
+	severityError
+	// severityFail is a real Dingo/Koios disagreement.
+	severityFail
+)
+
+func severityOf(category string) mismatchSeverity {
+	switch category {
+	case CategoryDBError,
+		CategoryDBMissing,
+		CategoryReferenceLag,
+		CategoryAcctCoverageIncomplete:
+		return severityError
+	case CategoryAcctZeroReward,
+		CategoryAcctNewlyRegistered,
+		CategoryAcctDeregistered,
+		CategoryPoolDeparted:
+		// Purely informational — see these categories' doc comments.
+		return severityInformational
+	default:
+		return severityFail
+	}
+}
+
+// CountSignificant returns how many mismatches drove the status DetermineStatus
+// reports — every mismatch that is not purely informational.
+//
+// A caller reporting a failure should use this rather than len(mismatches).
+// An epoch can hold many informational rows and still pass, so including them
+// points the reader at rows that are by definition never the reason: Preview
+// epoch 198 failed on three account mismatches and reported twelve, eight of
+// which were pool departures that DetermineStatus ignores by design.
+func CountSignificant(mismatches []CheckMismatch) int {
+	n := 0
+	for _, m := range mismatches {
+		if severityOf(m.Category) != severityInformational {
+			n++
+		}
+	}
+	return n
+}
+
 // DetermineStatus returns PASS, FAIL, or ERROR from a list of mismatches.
 //
 //   - FAIL: any value_mismatch, pool_only_dingo, pool_only_koios,
@@ -921,27 +1003,14 @@ func rationalsEqual(a, b string) bool {
 //     reference set to compare against yet).
 //   - PASS: no mismatches.
 func DetermineStatus(mismatches []CheckMismatch) string {
-	if len(mismatches) == 0 {
-		return StatusPass
-	}
 	hasError := false
 	for _, m := range mismatches {
-		switch m.Category {
-		case CategoryDBError,
-			CategoryDBMissing,
-			CategoryReferenceLag,
-			CategoryAcctCoverageIncomplete:
-			hasError = true
-		case CategoryAcctZeroReward,
-			CategoryAcctNewlyRegistered,
-			CategoryAcctDeregistered,
-			CategoryPoolDeparted:
-			// Purely informational — see these categories' doc comments.
-			// Deliberately not counted toward hasError or default's FAIL: a
-			// zero-reward or lifecycle-change mismatch must never turn an
-			// otherwise-clean epoch into ERROR or FAIL.
-		default:
+		switch severityOf(m.Category) {
+		case severityFail:
 			return StatusFail
+		case severityError:
+			hasError = true
+		case severityInformational:
 		}
 	}
 	if hasError {

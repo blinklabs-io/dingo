@@ -26,9 +26,20 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestProcessEpochSkipsPreConwayProtocolParameters(t *testing.T) {
+	pparams := &shelley.ShelleyProtocolParameters{}
+	out, err := ProcessEpoch(&EpochInput{
+		PParams: pparams,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, out)
+	assert.Same(t, pparams, out.UpdatedPParams)
+}
 
 func TestRefundProposalDepositCreditsRewardAccount(t *testing.T) {
 	db, store := newTallyTestDB(t)
@@ -639,6 +650,102 @@ func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 			require.Equal(t, stabilityTestEpoch+1, *stored.EnactedEpoch)
 		})
 	}
+}
+
+// TestProcessEpochEnactsConwayParameterChangeReportsPlutusV2CostModelWritten
+// covers blinklabs-io/dingo#3825's PR review (wolf31o2): a real ratify+enact
+// cycle through ProcessEpoch, not EnactProposal called in isolation, must
+// still surface PlutusV2CostModelWritten on the resulting EpochOutput --
+// proving applyEnactmentResult's OR into EpochOutput actually connects to
+// EnactmentResult, the one hop between the two that was previously
+// untested.
+func TestProcessEpochEnactsConwayParameterChangeReportsPlutusV2CostModelWritten(
+	t *testing.T,
+) {
+	db, store := newTallyTestDB(t)
+	actionCbor, err := cbor.Encode(
+		&conway.ConwayParameterChangeGovAction{
+			Type: uint(lcommon.GovActionTypeParameterChange),
+			ParamUpdate: conway.ConwayProtocolParameterUpdate{
+				CostModels: map[uint][]int64{1: {205665, 812, 1}},
+			},
+		},
+	)
+	require.NoError(t, err)
+
+	txHash := testBytes(32, 0xE0)
+	require.NoError(t, db.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        txHash,
+			ActionIndex:   0,
+			ActionType:    uint8(lcommon.GovActionTypeParameterChange),
+			ProposedEpoch: stabilityTestEpoch - 1,
+			ExpiresEpoch:  stabilityTestEpoch + 10,
+			AnchorURL:     "https://example.invalid/conway-cost-model-epoch",
+			AnchorHash:    testBytes(32, 0xE1),
+			ReturnAddress: testBytes(29, 0xE2),
+			GovActionCbor: actionCbor,
+			AddedSlot:     400,
+		},
+		nil,
+	))
+	proposal, err := db.GetGovernanceProposal(txHash, 0, nil)
+	require.NoError(t, err)
+	drepCred := seedDRepWithStake(t, db, 100)
+	seedDRepYesVote(t, db, proposal.ID, drepCred)
+	seedHardForkCommitteeAndSPOVotes(t, db, store, proposal)
+
+	pparams := &conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+			Major: conway.MinProtocolVersionConway,
+		},
+		MinCommitteeSize: 1,
+		CostModels:       map[uint][]int64{0: {1, 2, 3}},
+		PoolVotingThresholds: conway.PoolVotingThresholds{
+			PpSecurityGroup: newRat(1, 1),
+		},
+		DRepVotingThresholds: conway.DRepVotingThresholds{
+			PpNetworkGroup: newRat(1, 1),
+			PpGovGroup:     newRat(1, 1),
+		},
+	}
+
+	runEpoch := func(
+		prevEpoch uint64,
+		newEpoch uint64,
+		activePParams lcommon.ProtocolParameters,
+	) *EpochOutput {
+		t.Helper()
+		txn := db.MetadataTxn(true)
+		defer txn.Release()
+		out, processErr := ProcessEpoch(&EpochInput{
+			DB:           db,
+			Txn:          txn,
+			PrevEpoch:    prevEpoch,
+			NewEpoch:     newEpoch,
+			BoundarySlot: newEpoch * 100,
+			PParams:      activePParams,
+			UpdateFn:     eras.PParamsUpdateConway,
+		})
+		require.NoError(t, processErr)
+		require.NoError(t, txn.Commit())
+		return out
+	}
+
+	ratification := runEpoch(stabilityTestEpoch-1, stabilityTestEpoch, pparams)
+	require.Equal(t, 1, ratification.RatifiedCount)
+	require.False(t, ratification.PlutusV2CostModelWritten,
+		"ratification alone must not report the write -- only enactment does")
+
+	enactment := runEpoch(
+		stabilityTestEpoch, stabilityTestEpoch+1, ratification.UpdatedPParams,
+	)
+	require.Equal(t, 1, enactment.EnactedCount)
+	require.True(t, enactment.PlutusV2CostModelWritten,
+		"the enacted ParamUpdate explicitly specified CostModels[1]")
+	updated, ok := enactment.UpdatedPParams.(*conway.ConwayProtocolParameters)
+	require.True(t, ok)
+	require.Contains(t, updated.CostModels, uint(1))
 }
 
 func TestProcessEpochReplaysBoundaryTreasuryWithdrawalAfterStakeRewardReset(
