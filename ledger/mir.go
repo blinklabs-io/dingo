@@ -231,7 +231,8 @@ func (b *mirBoundary) addCredit(credit mirCredit) {
 	}
 	if credit.amount > ^uint64(0)-*total {
 		b.discard = fmt.Sprintf(
-			"MIR distribution total for pot %d exceeds every Ada pot: %d plus %d",
+			"MIR distribution total for credential %x in pot %d exceeds every Ada pot: %d plus %d",
+			credit.credential,
 			credit.pot,
 			*total,
 			credit.amount,
