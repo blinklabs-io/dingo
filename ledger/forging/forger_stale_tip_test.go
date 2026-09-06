@@ -814,3 +814,82 @@ func TestForgeIgnoresEndorserBlockSlotBeyondTheCurrentSlot(t *testing.T) {
 	)
 	require.Contains(t, logs.String(), `"eb_slot":0`)
 }
+
+// TestForgeStalenessFallsBackToAdmittedHeaders is the production shape that
+// made the staleness term inert. The advertised sync target is published only
+// when chain selection resolved one; routinely -- between batches, and right
+// after an active-connection handoff -- it is 0 while a healthy peer is
+// connected. Field logs showed upstream_target_slot=0 on every refusal and on
+// a ghosted forge, so the term never fired at all.
+//
+// The admitted-header frontier is available whenever headers are flowing and
+// is authenticated by this node rather than claimed by a peer, so it is the
+// right fallback reference.
+func TestForgeStalenessFallsBackToAdmittedHeaders(t *testing.T) {
+	var logs bytes.Buffer
+	block := newForgerTestBlock(300, 2)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode: ModeProduction,
+		Logger: slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		})),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		SlotClock: forgerTestSlotClock{
+			currentSlot:      300,
+			chainTipSlot:     299,
+			frontierExplicit: true,
+			frontierSlot:     299,
+			// No advertised target and no live-upstream signal -- the
+			// shape seen in the field, where UpstreamSyncStatus reported
+			// (0, false) while a healthy peer was connected.
+			upstreamTipSlot: 0,
+			upstreamActive:  false,
+			// Headers are flowing, and we are 19 slots behind them.
+			admittedTipSlot:   318,
+			slotsPerKESPeriod: 100,
+		},
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Zero(
+		t,
+		builder.calls,
+		"the admitted-header frontier must serve as the staleness reference "+
+			"when no sync target has been published",
+	)
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipAppliedStale),
+	)
+	require.Contains(t, logs.String(), `"staleness_ref_slot":318`)
+	require.Contains(
+		t,
+		logs.String(),
+		`"staleness_ref_source":"admitted_headers"`,
+	)
+}
+
+// TestForgeStalenessReportsWhenNoReferenceIsAvailable pins that a forge with
+// no staleness reference at all says so, rather than silently proceeding as if
+// the check had passed. Without this an operator cannot tell "we are in sync"
+// from "we have no idea".
+func TestForgeStalenessReportsWhenNoReferenceIsAvailable(t *testing.T) {
+	var logs bytes.Buffer
+	forger, builder := newStalenessTestForger(
+		t, 300, 299, 299, 0, 0, 0, &logs,
+	)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Equal(t, 1, builder.calls, "no reference must not block forging")
+	require.Contains(t, logs.String(), `"msg":"forge context"`)
+	require.Contains(t, logs.String(), `"staleness_ref_source":"none"`)
+}

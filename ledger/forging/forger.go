@@ -365,6 +365,11 @@ type SlotClockProvider interface {
 	// UpstreamSyncStatus reports whether a live upstream is selected and its
 	// corroborated target.
 	UpstreamSyncStatus() (targetSlot uint64, active bool)
+	// UpstreamAdmittedTipSlot returns the highest header slot admitted from a
+	// live upstream, or 0 when none is live. It is populated whenever headers
+	// are flowing, unlike the advertised sync target, which is 0 whenever
+	// chain selection has not resolved one.
+	UpstreamAdmittedTipSlot() uint64
 }
 
 // ChainTipHashProvider is an optional extension of SlotClockProvider.
@@ -880,8 +885,23 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// admission and ledger application stall together, which is precisely when
 	// the frontier gap reads 0 while the node is many slots behind.
 	upstreamTarget, upstreamLive := f.slotClock.UpstreamSyncStatus()
-	upstreamStale := upstreamLive && upstreamTarget > newestKnown &&
-		upstreamTarget-newestKnown > f.forgeUpstreamStalenessSlots
+	// The advertised sync target is 0 whenever chain selection has not
+	// resolved one -- routinely, between batches and after an
+	// active-connection handoff -- which silently made this whole term inert
+	// in the field. Fall back to the frontier of headers this node itself
+	// admitted, which is available whenever headers are flowing and is
+	// authenticated rather than claimed.
+	stalenessRef, stalenessSrc := upstreamTarget, "upstream_target"
+	if stalenessRef == 0 {
+		if admitted := f.slotClock.UpstreamAdmittedTipSlot(); admitted > 0 {
+			stalenessRef, stalenessSrc = admitted, "admitted_headers"
+			upstreamLive = true
+		} else {
+			stalenessSrc = "none"
+		}
+	}
+	upstreamStale := upstreamLive && stalenessRef > newestKnown &&
+		stalenessRef-newestKnown > f.forgeUpstreamStalenessSlots
 	// Wall-clock backstop, off unless an operator sets a bound.
 	appliedStale := f.forgeAppliedStalenessSlots > 0 &&
 		currentSlot > newestKnown &&
@@ -1255,6 +1275,10 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			"eb_slot", ebSlot,
 			"newest_known_slot", newestKnown,
 			"upstream_target_slot", upstreamTarget,
+			"staleness_ref_slot", stalenessRef,
+			"staleness_ref_source", stalenessSrc,
+			"tip_hash", hex.EncodeToString(appliedTip.Hash),
+			"frontier_hash", hex.EncodeToString(frontier.Hash),
 			"gap_slots", applyGap,
 			"effective_gap_slots", effectiveGap,
 			"tolerance_slots", f.forgeFrontierToleranceSlots,
@@ -1275,6 +1299,8 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		"eb_slot", ebSlot,
 		"newest_known_slot", newestKnown,
 		"upstream_target_slot", upstreamTarget,
+		"staleness_ref_slot", stalenessRef,
+		"staleness_ref_source", stalenessSrc,
 		"gap_slots", applyGap,
 		"effective_gap_slots", effectiveGap,
 	)

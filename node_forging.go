@@ -795,6 +795,10 @@ func (a *slotClockAdapter) UpstreamTipSlot() uint64 {
 	return a.ledgerState.UpstreamTipSlot()
 }
 
+func (a *slotClockAdapter) UpstreamAdmittedTipSlot() uint64 {
+	return a.ledgerState.UpstreamAdmittedTipSlot()
+}
+
 func (a *slotClockAdapter) UpstreamSyncStatus() (uint64, bool) {
 	return a.ledgerState.UpstreamSyncStatus()
 }

@@ -5258,3 +5258,48 @@ func TestWarnOnPreByronPrefixEpochCache(t *testing.T) {
 		assert.NotContains(t, logs.String(), warning)
 	})
 }
+
+// TestUpstreamAdmittedTipSlotIsAvailableWithoutAPublishedTarget pins the
+// distinction that made the forge staleness check inert in the field.
+//
+// The advertised sync target is published only when chain selection resolved
+// one, so it reads 0 routinely -- between batches and across an
+// active-connection handoff -- while a healthy peer is connected and headers
+// are flowing. The admitted-header frontier is advanced by header admission
+// itself, so it is available in exactly those windows, and it reports what this
+// node authenticated rather than what a peer claimed.
+func TestUpstreamAdmittedTipSlotIsAvailableWithoutAPublishedTarget(
+	t *testing.T,
+) {
+	conn := testChainsyncConnId(6000, 3094)
+	activeConn := conn
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				return &activeConn
+			},
+		},
+	}
+
+	assert.Zero(t, ls.UpstreamAdmittedTipSlot())
+
+	// Header admission advances it, with no sync target published at all.
+	ls.advanceUpstreamTipSlot(318)
+	assert.Equal(t, uint64(318), ls.UpstreamAdmittedTipSlot())
+	assert.Zero(
+		t,
+		ls.UpstreamTipSlot(),
+		"no target was published, which is exactly the field condition",
+	)
+
+	// Monotonic: an older admission does not move it back.
+	ls.advanceUpstreamTipSlot(300)
+	assert.Equal(t, uint64(318), ls.UpstreamAdmittedTipSlot())
+
+	// Bound to a live upstream: with no active connection there is no
+	// reference to report.
+	ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
+		return nil
+	}
+	assert.Zero(t, ls.UpstreamAdmittedTipSlot())
+}

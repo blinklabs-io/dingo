@@ -9265,6 +9265,32 @@ func (ls *LedgerState) UpstreamTipSlot() uint64 {
 	return state.targetSlot
 }
 
+// UpstreamAdmittedTipSlot returns the highest header slot this node has
+// ADMITTED from a live upstream, or 0 when no upstream is live.
+//
+// It differs from UpstreamTipSlot in what it trusts and therefore in when it
+// is populated. That one reports the peer's advertised sync target, which is
+// only published when chain selection resolved one: when it did not --
+// routinely, e.g. between batches or right after an active-connection handoff
+// -- the stored target is 0 and every consumer reads 0 while a healthy peer is
+// connected. This one reports the frontier of headers this node itself
+// authenticated and admitted, which is available whenever headers are flowing
+// and is not a peer claim at all.
+//
+// Use it as a staleness reference, not as a chain-selection target: it says
+// "headers at least this recent have been admitted", which is exactly the
+// question "am I behind the network" needs.
+func (ls *LedgerState) UpstreamAdmittedTipSlot() uint64 {
+	if ls.config.GetActiveConnectionFunc == nil {
+		return ls.syncUpstreamTipSlot.Load()
+	}
+	activeConnId := ls.config.GetActiveConnectionFunc()
+	if activeConnId == nil || !ls.isConnectionLive(*activeConnId) {
+		return 0
+	}
+	return ls.syncUpstreamTipSlot.Load()
+}
+
 // UpstreamSyncStatus reports whether a live upstream is selected and its
 // corroborated target. An active upstream with target 0 is still syncing.
 func (ls *LedgerState) UpstreamSyncStatus() (uint64, bool) {
