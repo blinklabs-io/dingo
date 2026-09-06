@@ -262,7 +262,11 @@ func NewTopologyConfigFromFS(
 
 // maxTopologySize is the maximum allowed size for a topology config file
 // (10 MB). This prevents unbounded memory allocation from untrusted readers.
-const maxTopologySize = 10 * 1024 * 1024
+const (
+	maxTopologySize     = 10 * 1024 * 1024
+	maxPeerSnapshotSize = 10 * 1024 * 1024
+	maxAccessPointPort  = 65535
+)
 
 func NewTopologyConfigFromReader(r io.Reader) (*TopologyConfig, error) {
 	t := &TopologyConfig{}
@@ -279,12 +283,11 @@ func NewTopologyConfigFromReader(r io.Reader) (*TopologyConfig, error) {
 	if err := json.Unmarshal(data, t); err != nil {
 		return nil, err
 	}
+	if err := t.validate(); err != nil {
+		return nil, err
+	}
 	return t, nil
 }
-
-// maxPeerSnapshotSize is the maximum allowed size for peer-snapshot.json
-// (10 MB). This matches topology config's defensive read limit.
-const maxPeerSnapshotSize = 10 * 1024 * 1024
 
 func NewPeerSnapshotConfigFromReader(
 	r io.Reader,
@@ -304,6 +307,105 @@ func NewPeerSnapshotConfigFromReader(
 		return nil, err
 	}
 	return s, nil
+}
+
+func validateAccessPoint(
+	ap TopologyConfigP2PAccessPoint,
+	field string,
+	requirePort bool,
+) error {
+	if strings.TrimSpace(ap.Address) == "" {
+		return fmt.Errorf("%s.address must not be empty", field)
+	}
+	if requirePort {
+		if ap.Port == 0 || ap.Port > maxAccessPointPort {
+			return fmt.Errorf("%s.port must be in range 1-65535", field)
+		}
+		return nil
+	}
+	if ap.Port > maxAccessPointPort {
+		return fmt.Errorf("%s.port must be in range 0-65535", field)
+	}
+	return nil
+}
+
+func validateRootValencies(
+	fieldPrefix string,
+	warmValency uint,
+	valency uint,
+	accessPointCount int,
+) error {
+	if warmValency > valency {
+		return fmt.Errorf(
+			"%s.warmValency must be <= %s.valency",
+			fieldPrefix,
+			fieldPrefix,
+		)
+	}
+	if accessPointCount > 0 && valency > uint(accessPointCount) {
+		return fmt.Errorf(
+			"%s.valency must be <= len(%s.accessPoints)",
+			fieldPrefix,
+			fieldPrefix,
+		)
+	}
+	return nil
+}
+
+func (t *TopologyConfig) validate() error {
+	for idx, localRoot := range t.LocalRoots {
+		fieldPrefix := fmt.Sprintf("localRoots[%d]", idx)
+		for apIdx, ap := range localRoot.AccessPoints {
+			if err := validateAccessPoint(
+				ap,
+				fmt.Sprintf("%s.accessPoints[%d]", fieldPrefix, apIdx),
+				true,
+			); err != nil {
+				return err
+			}
+		}
+		if err := validateRootValencies(
+			fieldPrefix,
+			localRoot.WarmValency,
+			localRoot.Valency,
+			len(localRoot.AccessPoints),
+		); err != nil {
+			return err
+		}
+	}
+
+	for idx, publicRoot := range t.PublicRoots {
+		fieldPrefix := fmt.Sprintf("publicRoots[%d]", idx)
+		for apIdx, ap := range publicRoot.AccessPoints {
+			if err := validateAccessPoint(
+				ap,
+				fmt.Sprintf("%s.accessPoints[%d]", fieldPrefix, apIdx),
+				true,
+			); err != nil {
+				return err
+			}
+		}
+		if err := validateRootValencies(
+			fieldPrefix,
+			publicRoot.WarmValency,
+			publicRoot.Valency,
+			len(publicRoot.AccessPoints),
+		); err != nil {
+			return err
+		}
+	}
+
+	for idx, bootstrapPeer := range t.BootstrapPeers {
+		if err := validateAccessPoint(
+			bootstrapPeer,
+			fmt.Sprintf("bootstrapPeers[%d]", idx),
+			true,
+		); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func NewPeerSnapshotConfigFromFile(
