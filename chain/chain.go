@@ -870,6 +870,28 @@ func (c *Chain) addRawBlocks(
 					if !c.persistent {
 						c.blocks = savedBlocks
 					}
+				} else {
+					// Skipping the restore is the correct choice -- writing
+					// the snapshot over whatever moved the chain is the
+					// divergence this guard exists to prevent -- but it
+					// leaves the in-memory chain holding a batch the commit
+					// discarded. Record it, so the missing block or inflated
+					// fork depth it later surfaces as is attributable to this
+					// commit failure instead of appearing without a cause.
+					slog.Default().Error(
+						"skipped in-memory restore after batch commit failure: chain moved under the batch",
+						"component", "chain",
+						"chain_id", c.id,
+						"applied_tip_block_index", appliedTipBlockIndex,
+						"tip_block_index", c.tipBlockIndex,
+						"applied_generation", appliedGeneration,
+						"mutation_generation", c.mutationGeneration,
+						"applied_tip_slot", appliedTip.Point.Slot,
+						"applied_tip_hash", hex.EncodeToString(appliedTip.Point.Hash),
+						"tip_slot", c.currentTip.Point.Slot,
+						"tip_hash", hex.EncodeToString(c.currentTip.Point.Hash),
+						"error", err,
+					)
 				}
 				c.manager.mutex.Unlock()
 				c.mutex.Unlock()

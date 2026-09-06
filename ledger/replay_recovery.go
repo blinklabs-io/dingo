@@ -798,13 +798,24 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 	ls.transactionEventMutex.Lock()
 	defer ls.transactionEventMutex.Unlock()
 
-	// Refuse to truncate anything toward a target the store does not hold:
+	// Refuse to truncate anything toward a target the chain does not hold:
 	// the descent commits each step as it goes, so discovering the target is
 	// unreachable part-way leaves the chain shortened for nothing.
-	if point.Slot > 0 || len(point.Hash) > 0 {
-		if _, err := database.BlockByPoint(ls.db, point); err != nil {
-			return fmt.Errorf("lookup recovery target: %w", err)
-		}
+	//
+	// This has to establish primary-chain membership, not store presence. A
+	// store lookup passes for a target the store still holds but the chain
+	// has abandoned -- the retained-index shape rollbackPointBlock documents
+	// -- and the descent then commits every intermediate step before
+	// Chain.Rollback refuses the final one with ErrRollbackPointNotOnChain,
+	// which is the outcome this check exists to prevent.
+	// Chain.ValidateRollback runs the chain's own membership check.
+	//
+	// Its over-K refusal is the one outcome that must not stop the descent:
+	// a recovery target deeper than the security parameter is precisely what
+	// this function windows, and every step is validated again on its own.
+	if err := ls.chain.ValidateRollback(point); err != nil &&
+		!errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+		return fmt.Errorf("validate recovery target: %w", err)
 	}
 
 	window := uint64(securityParam) //nolint:gosec // positive, checked above
