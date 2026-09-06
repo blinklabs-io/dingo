@@ -3062,6 +3062,23 @@ func TestIteratorPostRollbackBlockDelivery(t *testing.T) {
 			rollbackPoint.Slot, rollbackPoint.Hash,
 		)
 	}
+	if len(next.RollbackBlocks) != len(testBlocks)-2 {
+		t.Fatalf(
+			"rollback payload length: got %d, want %d",
+			len(next.RollbackBlocks), len(testBlocks)-2,
+		)
+	}
+	for idx, block := range testBlocks[2:] {
+		got := next.RollbackBlocks[len(next.RollbackBlocks)-1-idx]
+		if got.Slot != block.SlotNumber() ||
+			!bytes.Equal(got.Hash, block.Hash().Bytes()) {
+			t.Fatalf(
+				"rollback payload %d: got %d.%x, want %d.%x",
+				idx, got.Slot, got.Hash,
+				block.SlotNumber(), block.Hash().Bytes(),
+			)
+		}
+	}
 
 	// After the rollback signal the chain is at testBlocks[1].
 	// Add testBlocks[2] back onto the chain.
@@ -3087,5 +3104,75 @@ func TestIteratorPostRollbackBlockDelivery(t *testing.T) {
 	// Should be at tip again.
 	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainTip) {
 		t.Fatalf("expected ErrIteratorChainTip, got: %v", err)
+	}
+}
+
+func TestIteratorCoalescedRollbackDoesNotIncludeUndeliveredBlocks(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	c := cm.PrimaryChain()
+	for _, b := range testBlocks {
+		if err := c.AddBlock(b, nil); err != nil {
+			t.Fatalf("AddBlock: %v", err)
+		}
+	}
+
+	iter, err := c.FromPoint(ocommon.NewPointOrigin(), false)
+	if err != nil {
+		t.Fatalf("FromPoint: %v", err)
+	}
+	defer iter.Cancel()
+	for range testBlocks {
+		if _, err := iter.Next(false); err != nil {
+			t.Fatalf("draining: %v", err)
+		}
+	}
+
+	firstTarget := ocommon.NewPoint(
+		testBlocks[3].SlotNumber(), testBlocks[3].Hash().Bytes(),
+	)
+	if err := c.Rollback(firstTarget); err != nil {
+		t.Fatalf("first Rollback: %v", err)
+	}
+	// Regrow the same suffix before the iterator consumes its pending marker.
+	// These blocks are removed by the second rollback but were not delivered
+	// after the first marker, so they must not be appended to its undo payload.
+	for _, b := range testBlocks[4:] {
+		if err := c.AddBlock(b, nil); err != nil {
+			t.Fatalf("regrow: %v", err)
+		}
+	}
+	secondTarget := ocommon.NewPoint(
+		testBlocks[1].SlotNumber(), testBlocks[1].Hash().Bytes(),
+	)
+	if err := c.Rollback(secondTarget); err != nil {
+		t.Fatalf("second Rollback: %v", err)
+	}
+
+	next, err := iter.Next(false)
+	if err != nil {
+		t.Fatalf("Next (coalesced rollback): %v", err)
+	}
+	if next == nil || !next.Rollback {
+		t.Fatalf("expected rollback result, got: %+v", next)
+	}
+	if !reflect.DeepEqual(next.Point, secondTarget) {
+		t.Fatalf("rollback point: got %+v, want %+v", next.Point, secondTarget)
+	}
+	if len(next.RollbackBlocks) != 2 {
+		t.Fatalf("rollback payload length: got %d, want 2", len(next.RollbackBlocks))
+	}
+	for idx, block := range testBlocks[4:6] {
+		got := next.RollbackBlocks[len(next.RollbackBlocks)-1-idx]
+		if got.Slot != block.SlotNumber() ||
+			!bytes.Equal(got.Hash, block.Hash().Bytes()) {
+			t.Fatalf(
+				"rollback payload %d: got %d.%x, want %d.%x",
+				idx, got.Slot, got.Hash,
+				block.SlotNumber(), block.Hash().Bytes(),
+			)
+		}
 	}
 }
