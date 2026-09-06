@@ -237,3 +237,52 @@ func TestBuildBlockWithNoCandidatesSkipsValidationSession(t *testing.T) {
 	require.Empty(t, block.Transactions())
 	require.Zero(t, validator.sessions)
 }
+
+// TestBuildBlockEmptyBodySkipsMempoolSnapshot keeps the fallback cheap.
+// Taking a mempool snapshot is not free -- on a large or DAG-backed
+// mempool that single call can consume what is left of the slot -- and the
+// fallback exists precisely because the slot budget has already run out.
+// A build that is going to carry no transactions must not ask for them.
+func TestBuildBlockEmptyBodySkipsMempoolSnapshot(t *testing.T) {
+	mempool := threeTxMempoolForSelection(t)
+	builder := newSelectionTestBuilder(
+		t,
+		mempool,
+		selectionTestChainTip(),
+		&sessionMockTxValidator{},
+	)
+
+	generation := builder.creds.acquireCredentialGeneration()
+	defer generation.release()
+	block, _, err := builder.buildBlockWithCredentialGeneration(
+		1001,
+		0,
+		LeiosBlockData{},
+		generation,
+		blockSelectionConstraints{emptyBody: true},
+	)
+	require.NoError(t, err)
+	require.Empty(t, block.Transactions())
+	require.Zero(
+		t,
+		mempool.calls,
+		"the empty-body fallback must not snapshot the mempool",
+	)
+}
+
+// TestBuildBlockSnapshotsMempoolForNormalBuild is the negative case: an
+// ordinary build still reads the mempool exactly once.
+func TestBuildBlockSnapshotsMempoolForNormalBuild(t *testing.T) {
+	mempool := threeTxMempoolForSelection(t)
+	builder := newSelectionTestBuilder(
+		t,
+		mempool,
+		selectionTestChainTip(),
+		&sessionMockTxValidator{},
+	)
+
+	block, _, err := builder.BuildBlock(1001, 0)
+	require.NoError(t, err)
+	require.Len(t, block.Transactions(), 3)
+	require.Equal(t, 1, mempool.calls)
+}

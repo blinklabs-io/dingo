@@ -374,22 +374,27 @@ func (b *DefaultBlockBuilder) buildBlock(
 		"max_ex_units", maxExUnits,
 	)
 
-	mempoolTxs := b.mempool.Transactions()
-	if leiosCert != nil {
-		// A prototype CertRB carries the Leios certificate and no Dijkstra
-		// transactions; node-to-client later inlines the certified EB txs.
-		mempoolTxs = nil
-	} else if constraints.emptyBody {
+	// Decide whether this block can carry transactions at all before
+	// asking the mempool for any. Taking the snapshot is not free -- on a
+	// large or DAG-backed mempool that single call can consume what is
+	// left of the slot -- and the empty-body fallback in particular runs
+	// only because the slot budget has already run out.
+	var mempoolTxs []MempoolTransaction
+	switch {
+	case constraints.emptyBody:
 		// Empty-body fallback: no selection pass could complete against
 		// a stable snapshot inside the slot, so the block is built from
 		// the current tip with no transactions rather than not at all.
-		mempoolTxs = nil
-	} else if leios.Announcement != nil {
+	case leiosCert != nil:
+		// A prototype CertRB carries the Leios certificate and no Dijkstra
+		// transactions; node-to-client later inlines the certified EB txs.
+	case leios.Announcement != nil:
 		// An announcing slot carries either the endorser block or ranking-block
 		// transactions, never both. The endorser block is applied before its
 		// ranking block, so putting any mempool transaction in the RB would make
 		// both transaction sets apply at the same slot.
-		mempoolTxs = nil
+	default:
+		mempoolTxs = b.mempool.Transactions()
 	}
 	b.logger.Debug(
 		"found transactions in mempool",
