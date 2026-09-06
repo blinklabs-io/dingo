@@ -6737,7 +6737,9 @@ never the reverse.
   lag in publishing `/account_reward_history` for a just-closed epoch the
   same way it can lag on any other endpoint) both fall back to
   `reference_lag` within the grace window rather than only the
-  Koios-side direction.
+  Koios-side direction. The zero-value test runs first and wins: a one-sided
+  row worth zero is `acct_zero_reward_row` even inside the grace window,
+  because a zero row is not a value the other side can still publish later.
 - **Strict-mode propagation.** An account-level `FAIL` flows through
   `DetermineStatus` (any `acct_only_dingo`/`acct_only_koios`/`acct_duplicate`
   forces `FAIL`, exactly like the pool-level categories — except a one-sided

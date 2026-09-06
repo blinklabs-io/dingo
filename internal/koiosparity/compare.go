@@ -693,14 +693,26 @@ type accountRewardKey struct {
 // is not masked by the duplicate report.
 //
 // The union of the two (deduplicated) keysets is then walked: present only
-// in Koios -> CategoryAcctOnlyKoios (or CategoryReferenceLag within
-// graceHours of epochEndTime, mirroring ComparePoolEpoch's identical
-// pattern), present only in Dingo -> CategoryAcctOnlyDingo, present on both
-// sides with differing amounts -> CategoryValueMismatch (compared as exact
-// integers via lovelaceEqual, never as floats/rationals), present on both
-// sides with equal amounts -> no mismatch. A zero-reward account present
-// identically on both sides is therefore a pass, exactly like any other
-// equal-amount case.
+// in Koios -> CategoryAcctOnlyKoios, present only in Dingo ->
+// CategoryAcctOnlyDingo, present on both sides with differing amounts ->
+// CategoryValueMismatch (compared as exact integers via lovelaceEqual, never
+// as floats/rationals), present on both sides with equal amounts -> no
+// mismatch. A zero-reward account present identically on both sides is
+// therefore a pass, exactly like any other equal-amount case.
+//
+// Two things reclassify a one-sided row before it is emitted, in this order:
+//
+//   - The row is worth zero. The two sides then agree on what was credited
+//     (nothing) and disagree only about whether to store a row saying so, so
+//     it is CategoryAcctZeroRewardRow — informational — rather than either
+//     acct_only_* category. This takes precedence over the grace window
+//     below, because a zero row is not a value the other side can still
+//     publish later.
+//   - The check is inside graceHours of epochEndTime. Koios can lag in
+//     publishing /account_reward_history for a just-closed epoch, and Dingo
+//     can commit ahead of it, so a nonzero one-sided row is
+//     CategoryReferenceLag until the window closes — mirroring
+//     ComparePoolEpoch's identical pattern.
 //
 // graceHours/epochEndTime/now/network/epoch all mirror ComparePoolEpoch's
 // identical parameters and meaning.
