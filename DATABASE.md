@@ -404,7 +404,7 @@ The truncate deletion range ends at the newest block in the indexed blob chain, 
 
 Two further optional `CloudDestination` capabilities, meaningful on a destination parsed from a *specific snapshot's own* URI (`JoinCloudURI(base, snapshotID)`), not a base destination: `CloudManifestFetcher.FetchManifest(ctx)` fetches just that one snapshot's manifest (used to cheaply check "does this snapshot exist here" without a full `DownloadDir`), and `CloudDeleter.Delete(ctx)` removes everything at that location (both refuse outright on an empty prefix, to avoid a misuse that would otherwise list/delete an entire bucket). `lifecycle.FetchCloudManifest`/`lifecycle.DeleteCloudSnapshot` are the corresponding package-level helpers, each with an `ok bool` return distinguishing "destination type doesn't support this" from a real failure. When `ok=true`, a non-nil `err` from `FetchCloudManifest` means an actual fetch was attempted: `errors.Is(err, lifecycle.ErrCloudSnapshotNotFound)` distinguishes a confirmed-absent manifest (both S3's `NoSuchKey`/`NotFound` and GCS's `storage.ErrObjectNotExist` are wrapped in this sentinel by their respective `FetchManifest` implementations) from a real communication failure (auth, network, timeout) that happens to occur while checking — bark's `cloudSnapshotExists` uses exactly this distinction so a snapshot whose cloud probe merely *failed* is reported as `CodeUnavailable`, not folded into the same `CodeNotFound` a genuinely-absent snapshot gets (which would otherwise be indistinguishable from real data loss to an operator). Together these are what let bark's `Restore`/`VerifySnapshot`/`DeleteSnapshot` handlers act on a snapshot whose local copy is gone (deleted, or never synced to this node) but whose cloud mirror still exists — see `ARCHITECTURE.md`'s Bark section.
 
-**Truncate.** `database.TruncateAfterSlot` (`database/truncate.go`) is the shared metadata+blob-referenced-UTxO/tx sweep — deleting certificates, account/pool/DRep state, protocol parameters, governance, epochs, reward state, block nonces, network state, and UTxOs/transactions added after a slot, restoring UTxOs spent after that slot — factored out of `ledger.LedgerState.rollback` so both the bounded, security-parameter-respecting live rollback path and `lifecycle.Truncate`'s unbounded disaster-recovery path share one implementation. `RestorePoolStateAtSlot` runs *before* `DeleteCertificatesAfterSlot` in this sweep, not after: it detects which pools need their denormalized `pledge`/`cost`/`margin`/VRF/reward-account fields reverted by querying `PoolRegistration` rows with `added_slot > slot` — the very rows `DeleteCertificatesAfterSlot` removes, so restoring first (while those rows still exist) is what lets it find the surviving prior registration to revert to, rather than silently leaving every re-registered pool's discarded values in place. `database.MithrilTrustBoundarySlot` reads the persisted Mithril trust-boundary sync-state key so an offline truncate can enforce the same floor the live ledger does, without needing a running `*LedgerState`; it treats a failed read the same as "no boundary recorded" (returns 0, logging the failure), which is the right fail-open behavior for its other caller (a consumed-UTxO recovery heuristic) but wrong for a safety check — `MithrilTrustBoundarySlotStrict` is the fail-closed variant `lifecycle.Truncate` actually uses for its boundary check, propagating a read error instead of silently treating it as "no boundary" and letting an unverifiable truncate through.
+**Truncate.** `database.TruncateAfterSlot` (`database/truncate.go`) is the shared metadata+blob-referenced-UTxO/tx sweep — deleting certificates, account/pool/DRep state, protocol parameters, governance, epochs, reward state, block nonces, network state, and UTxOs/transactions added after a slot, restoring UTxOs spent after that slot — factored out of `ledger.LedgerState.rollback` so both the bounded, security-parameter-respecting live rollback path and `lifecycle.Truncate`'s unbounded disaster-recovery path share one implementation. The UTxO and transaction portions of the sweep are keyed on slot alone (`added_slot > slot`, `deleted_slot > slot`), unlike `DeleteBlockNoncesAfterPoint`, which is point-aware (`slot > ? OR (slot = ? AND hash <> ?)`) so same-slot competitors cannot survive. Because those UTxO/tx predicates cannot express a same-slot competitor, a rollback target at the applied tip's slot with a different hash would restore and delete nothing at that slot; `ledger.LedgerState.rollback` is what prevents that, redirecting below the contested slot rather than the sweep handling it (issue #3678). `RestorePoolStateAtSlot` runs *before* `DeleteCertificatesAfterSlot` in this sweep, not after: it detects which pools need their denormalized `pledge`/`cost`/`margin`/VRF/reward-account fields reverted by querying `PoolRegistration` rows with `added_slot > slot` — the very rows `DeleteCertificatesAfterSlot` removes, so restoring first (while those rows still exist) is what lets it find the surviving prior registration to revert to, rather than silently leaving every re-registered pool's discarded values in place. `database.MithrilTrustBoundarySlot` reads the persisted Mithril trust-boundary sync-state key so an offline truncate can enforce the same floor the live ledger does, without needing a running `*LedgerState`; it treats a failed read the same as "no boundary recorded" (returns 0, logging the failure), which is the right fail-open behavior for its other caller (a consumed-UTxO recovery heuristic) but wrong for a safety check — `MithrilTrustBoundarySlotStrict` is the fail-closed variant `lifecycle.Truncate` actually uses for its boundary check, propagating a read error instead of silently treating it as "no boundary" and letting an unverifiable truncate through.
 
 `lifecycle.Truncate` additionally removes blob-store blocks above the target via `lifecycle.DeleteBlocksAfter`, which batches deletes across many blob transactions (`DefaultBlockDeleteBatchSize`, 10,000 blocks per transaction) rather than the one-transaction-per-block pattern `Chain.Rollback`/`ChainManager.removeBlockByIndex` use — adequate for a normal bounded rollback, too slow for a truncate spanning a large fraction of the chain. Iterator errors are checked both before and after each batch walk so an S3/GCS listing failure cannot be mistaken for a genuinely empty range and followed by metadata truncation. Failed-batch counts follow backend transaction semantics: Badger rolls the batch back and reports only earlier committed batches, while the GCS/S3 transaction handles implement `types.IrreversibleTxn`, making already-issued object deletions explicit and countable even when the batch later fails. Target resolution (`lifecycle.ResolveTargetByHash`/`ResolveTargetBySlot`/`ResolveTargetByNumber`) accepts a block hash, a slot (resolved to the highest existing block at or before it, since most slots have no block of their own), or a block number (binary-searched over the blob store's internal block ID space, since block number/height is not itself an indexed blob key). That ID space is not guaranteed contiguous: a chain bootstrapped or drain-imported from a Mithril snapshot can leave gaps of never-imported IDs, so `ResolveTargetBySlot`/`ResolveTargetByNumber`'s binary search probes via `database.BlockAtOrAfterIndex` (seeks forward to the next actually-indexed block on a gap) rather than `BlockByIndex` (fails outright on any missing ID) — the same recovery `chain.go`'s forward iterator already uses for the same kind of gap. `ResolveTargetBySlot`/`ResolveTargetByNumber` are structurally guaranteed to return a block on the current genesis-to-tip lineage, since they binary-search that same ID space; `ResolveTargetByHash` resolves purely through the hash index and has no such guarantee. `Truncate` itself cross-checks this regardless of which resolver was used — reading `target.ID`'s block back via `BlockByIndex` and requiring both its slot and hash match `target.Slot`/`target.Hash` — because `DeleteBlocksAfter` deletes blob-store blocks by ID range while `TruncateAfterSlot` deletes metadata using `target.Slot` directly as the cutoff (not `target.ID`), and the two only describe the same rollback when `target`'s ID, slot, and hash all genuinely match the same block on the current chain; checking hash alone would still let a target with a valid ID/hash pair but a forged or otherwise-wrong slot cut blob and metadata history at two different points. A mismatch on either field fails closed (`ErrTruncateNotStarted`) before any deletion, rather than letting blob and metadata history diverge. Unlike `Chain.Rollback`, truncate does not reject a target beyond the configured security parameter: that guard protects *automatic* rollback during normal sync, while an operator explicitly invoking truncate (the CIP-0135 disaster-recovery case — a network partition longer than Ouroboros Praos's rollback limit) is the informed-consent replacement for it. `lifecycle.Truncate` returns the number of blocks `DeleteBlocksAfter` actually reports having deleted, not `tipBlock.ID - target.ID`: with a sparse ID space, that difference is only an upper bound on how many blocks exist in the range, not a count of how many actually do. This is what surfaces as `blocks_removed` in the `dingo database truncate` CLI output and bark's `GetTruncateStatus` RPC.
 
@@ -582,7 +582,7 @@ erDiagram
 | `network_donation` | `id`, `slot`, `epoch`, `amount` | PK `id`; unique `slot`; index `epoch` | Per-block Conway treasury donation, tagged with its epoch. `amount` is a plain integer column (not `types.Uint64`) so `SUM` aggregates directly across backends. All donation sources applied under the same block slot, including Leios endorser-block effects recorded under a ranking block, are accumulated before this per-slot row is written. Donations accumulate during an epoch and are moved into `network_state.treasury` at the next epoch boundary; rows are kept (not deleted on apply) so a rollback drops them by slot and re-application re-derives the same total. |
 | `pparams` | `id`, `cbor`, `added_slot`, `epoch`, `era_id` | PK `id`; index `added_slot` | CBOR protocol parameters. Query by `epoch <= ?` and matching `era_id`. Dijkstra's on-chain CBOR intentionally omits the genesis-only `CommitteeStakeCoverage` and `QuorumStakeThreshold` fields. Ledger reconstruction rehydrates any absent values from the configured Dijkstra genesis through `loadPersistedProtocolParameters` and validates the reconstructed pair before publishing it; an invalid configured pair therefore fails restart instead of entering consensus or Leios state. A Mithril ledger-state import writes the snapshot epoch's current parameters and any distinct previous parameters compatible with the preceding epoch's actual era in one metadata transaction, while reusing an already-satisfying row on re-entry. A translated new-era previous payload is never stored under the old era; the dependent imported reward basis and any stale provisional inputs are removed instead. |
 | `pparam_update` | `id`, `genesis_hash`, `cbor`, `added_slot`, `epoch` | PK `id`; index `added_slot` | Proposed protocol-parameter updates. `epoch` is the SUBMISSION epoch carried by the on-chain `[proposed_updates, epoch]` structure (gouroboros `Update.Epoch`), stored verbatim at ingest. Per the Shelley update system a proposal submitted in epoch `e` is enacted as epoch `e+1`'s parameters at the `e -> e+1` boundary; enactment (`ComputeAndApplyPParamUpdates`) therefore filters by submission epoch `e` while writing the resulting `pparams` row for the enactment epoch `e+1`. |
-| `sync_state` | `sync_key`, `value` | PK `sync_key` | Key/value state for sync/load work. `sync_status` (`in_progress`/`backfill`/cleared; unknown non-empty values are treated as incomplete) is ephemeral and cleared on completion. Mithril stores `mithril_ledger_slot` plus `mithril_ledger_hash` as the trusted replay/intersect boundary point. For new imports this is the selected ledger-state point at or below the certificate-backed ImmutableDB tip; the metadata `tip` remains at the same point so later raw blocks undergo ordinary ledger replay. Ancillary-only volatile state is never recorded as trusted. `mithril_immutable_max` persists the highest immutable file number a Mithril sync imported (written *after* the completion clear, since clearing wipes all `sync_state`) so a later `dingo mithril sync` catch-up can skip already-present immutable archives when the marker exists. `mithril_catchup_active` is ephemeral (set when a catch-up import starts mutating, wiped on completion): it routes an interrupted catch-up back through catch-up semantics (reconcile) on the next run, which a markerless catch-up otherwise leaves no trace of. `deferred_header_validation:<slot>:<hash>` is written when blockfetch defers stateful header checks to ledger apply; the value is `true` and the row is deleted after the strict apply-time check passes. `forge_fence:<poolid>` is the block producer's last-forged-slot fence (`forging.NewSyncStateForgeFenceStore`, `ledger/forging/store.go`): a JSON record (`format_version`, `pool_id`, `last_forged_slot`) written *before* the header for a slot is signed, so a crash between signing and adoption still leaves the slot recorded. The forger refuses any slot at or below it, which is the only duplicate-slot protection that survives a restart or a rolled-back tip. It is namespaced by pool id so a node re-keyed to different credentials is not gated by a fence it never signed under, it only ever moves forward (a lower slot leaves the stronger value in place), and a record that fails to decode or whose `pool_id`/`format_version` does not match is an error rather than "no fence", since reporting no fence would let a slot be signed twice. A chain rollback never lowers it: a rollback does not un-sign a block that may already have reached peers. A Mithril import that completes with a full `ClearSyncState` (`mithril/sync_import.go`) does drop it, so a block producer that bootstraps from a snapshot restarts with no fence and is protected only by the chain-tip check until it next forges (issue #3736). `delegator_inactivity_activated` guards the CIP-0163 one-time activation stamp (`ledger.LedgerState.activateDelegatorInactivityIfNeeded`): its value is the activation epoch `A` (the entered epoch, stored as a decimal string), and any non-empty value means activation has run, so later rollovers skip it even after a restart. It is durable but not permanent: a chain rollback to before epoch `A` clears it (`recomputeAccountExpirationsAfterRollback` calls `DeleteSyncState` alongside `ResetAccountExpirationActivation`), so a subsequent re-sync re-runs activation. The stored epoch is read back (`ledger.LedgerState.delegatorInactivityActivationEpoch`) as the activation floor the rollback recompute clamps expirations up to, since the activation stamp writes `A + DelegatorInactivity` without leaving a witness. |
+| `sync_state` | `sync_key`, `value` | PK `sync_key` | Key/value state for sync/load work. `sync_status` (`in_progress`/`backfill`/cleared; unknown non-empty values are treated as incomplete) is ephemeral and cleared on completion. Mithril stores `mithril_ledger_slot` plus `mithril_ledger_hash` as the trusted replay/intersect boundary point. For new imports this is the selected ledger-state point at or below the certificate-backed ImmutableDB tip; the metadata `tip` remains at the same point so later raw blocks undergo ordinary ledger replay. Ancillary-only volatile state is never recorded as trusted. `mithril_immutable_max` persists the highest immutable file number a Mithril sync imported (written *after* the completion clear, since clearing wipes all `sync_state`) so a later `dingo mithril sync` catch-up can skip already-present immutable archives when the marker exists. `mithril_catchup_active` is ephemeral (set when a catch-up import starts mutating, wiped on completion): it routes an interrupted catch-up back through catch-up semantics (reconcile) on the next run, which a markerless catch-up otherwise leaves no trace of. `deferred_header_validation:<slot>:<hash>` is written when blockfetch defers stateful header checks to ledger apply; the value is `true` and the row is deleted after the strict apply-time check passes. `forge_fence:<poolid>` is the block producer's last-forged-slot fence (`forging.NewSyncStateForgeFenceStore`, `ledger/forging/store.go`): a JSON record (`format_version`, `pool_id`, `last_forged_slot`) written *before* the header for a slot is signed, so a crash between signing and adoption still leaves the slot recorded. The forger refuses any slot at or below it, which is the only duplicate-slot protection that survives a restart or a rolled-back tip. It is namespaced by pool id so a node re-keyed to different credentials is not gated by a fence it never signed under, it only ever moves forward (a lower slot leaves the stronger value in place), and a record that fails to decode or whose `pool_id`/`format_version` does not match is an error rather than "no fence", since reporting no fence would let a slot be signed twice. A chain rollback never lowers it: a rollback does not un-sign a block that may already have reached peers. A Mithril import that completes with a full `ClearSyncState` (`mithril/sync_import.go`) does drop it, so a block producer that bootstraps from a snapshot restarts with no fence and is protected only by the chain-tip check until it next forges (issue #3736). `delegator_inactivity_activated` guards the CIP-0163 one-time activation stamp (`ledger.LedgerState.activateDelegatorInactivityIfNeeded`): its value is the activation epoch `A` (the entered epoch, stored as a decimal string), and any non-empty value means activation has run, so later rollovers skip it even after a restart. It is durable but not permanent: a chain rollback to before epoch `A` clears it (`recomputeAccountExpirationsAfterRollback` calls `DeleteSyncState` alongside `ResetAccountExpirationActivation`), so a subsequent re-sync re-runs activation. The stored epoch is read back (`ledger.LedgerState.delegatorInactivityActivationEpoch`) as the activation floor the rollback recompute clamps expirations up to, since the activation stamp writes `A + DelegatorInactivity` without leaving a witness. `synthetic_v2_cost_model` (`database.SyntheticV2CostModelSyncKey`) records whether the PlutusV2 cost model currently in force is still `HardForkBabbage`'s fabricated default (`"true"`) rather than real governance/protocol-update data (`"false"`); an absent value falls back to comparing the current cost model directly against the known fabricated default (`ledger.resolveSyntheticV2CostModel`), which is what makes a database that predates this key behave correctly instead of silently defaulting to "not synthetic." `synthetic_v2_cost_model_cleared_epoch` (`database.SyntheticV2CostModelClearedEpochSyncKey`) is the companion provenance marker: its value is the epoch at which real PlutusV2 cost-model data was last confirmed written (decimal string; absent means never confirmed), set alongside `synthetic_v2_cost_model` = `"false"` whenever CIP-1694 governance enactment or a pre-Conway Shelley-style protocol-parameter update explicitly writes the cost model (not merely carries an unchanged value forward). Like `delegator_inactivity_activated`, it is durable but not permanent: `database.RecomputeSyntheticV2CostModelMarkerAfterTruncate` (mirroring the CIP-0163 pattern, called from both `ledger.LedgerState.rollback` and `database/lifecycle.Truncate`) deletes it and restores `synthetic_v2_cost_model` to `"true"` when a rollback or truncate crosses back before the confirming epoch, so a re-sync onto a fork that never re-enacts the write re-derives synthetic status instead of trusting a stale confirmation. |
 | `backfill_checkpoint` | `id`, `phase`, `last_slot`, `total_slots`, `started_at`, `updated_at`, `completed` | PK `id`; unique `phase` | Durable application-level backfill progress keyed by `phase`; `metadata` tracks API-mode historical metadata backfill, and `midnight` tracks the last slot the Midnight indexer committed (written by both its startup backfill and its live block-event path, and used as the resume point for the next startup sweep). Schema/data upgrade checkpoints belong to `schema_migrations` instead. |
 | `import_checkpoint` | `id`, `import_key`, `phase` | PK `id`; unique `import_key` | Mithril snapshot import resume state. `import_key` is usually `{digest}:{slot}`. Catch-up imports leave `import_key` empty to force a full pass. |
 
@@ -1285,7 +1285,7 @@ flowchart LR
 | `u` + tx hash bytes + big-endian output index `uint32` | UTxO CBOR or a 52-byte `DOFF` CBOR-offset reference into a block | UTxO resolution and history expiry |
 | `t` + tx hash bytes | Transaction CBOR offset bytes. Current writers store 52-byte `DOFF`; readers also support 69-byte `DTXP` tx-part offsets. | Transaction CBOR lookup |
 | `em` + endorser-block hash bytes (32) + big-endian slot `uint64` (8 bytes) | The raw endorser-block manifest CBOR received over leios-fetch `MsgBlock`. Written by `Database.SetLeiosEB` (the merged manifest+txs single-commit writer) on the asynchronous background persistence writer, off the leios-fetch hot path; the granular `Database.SetLeiosEBManifest` remains available. Read by `Database.GetLeiosEBManifest`. Used so a synced node can serve historical EB manifests to downstream peers via leios-fetch `MsgBlockRequest` after the in-memory 10-minute TTL has expired. Keyed by (hash, slot) together, matching the in-memory `Ouroboros.leiosEndorserBlocks` cache: the manifest is content-addressed and can be a live, independently required occurrence at more than one slot at once, and a hash-only key would let a second occurrence's persist silently overwrite the first (issue #3513 review; see `ARCHITECTURE.md`'s Leios Networking section). The slot is part of the key rather than the value now, so `GetLeiosEBManifest`/`GetLeiosEBTxs` take the caller's expected slot and resolve exactly that occurrence rather than reporting one and letting the caller compare. `GetLeiosEBManifest` falls back to the pre-issue-#3513 legacy key (`types.LegacyLeiosEBManifestKey`, hash only, value `slot(8) + manifest`) on a miss, so a manifest persisted by a node running before this key format changed remains readable after an upgrade instead of silently orphaned; the legacy value's embedded slot must match the requested slot. | Leios EB manifest serving |
-| `et` + endorser-block hash bytes (32) + big-endian slot `uint64` (8 bytes) | CBOR-encoded `[]cbor.RawMessage` — the complete transaction-body list from leios-fetch `MsgBlockTxs` (CBOR-in-CBOR wrapped, matching the wire format). Written by `Database.SetLeiosEB` in the same blob transaction as the `em` manifest, only when the tx cache is complete (`txCount` txs fetched), on the asynchronous background persistence writer; the granular `Database.SetLeiosEBTxs` remains available. Missing key means txs were never fully fetched, the best-effort historical-serving write was dropped under a full queue, or the node predates this key. Read by `Database.GetLeiosEBTxs`; the Ouroboros reload path revalidates every body hash and encoded size against the corresponding `em` manifest reference before caching it, and discards a stale or corrupted transaction list so the normal by-point path can fetch a verified replacement. Used so a synced node can serve historical EB transactions to downstream peers via leios-fetch `MsgBlockTxsRequest`. Same (hash, slot) keying and legacy-key fallback (`types.LegacyLeiosEBTxsKey`) as `em` above; the legacy fallback is gated on the legacy `em` record's own embedded slot matching, since the pre-issue-#3513 format paired exactly one `em`/`et` record per hash. | Leios EB tx-body serving |
+| `et` + endorser-block hash bytes (32) + big-endian slot `uint64` (8 bytes) | CBOR-encoded `[]cbor.RawMessage` — the complete transaction-body list from leios-fetch `MsgBlockTxs` (CBOR-in-CBOR wrapped, matching the wire format). Written by `Database.SetLeiosEB` in the same blob transaction as the `em` manifest, only when the tx cache is complete (`txCount` txs fetched), on the asynchronous background persistence writer; the granular `Database.SetLeiosEBTxs` remains available. A missing key is not by itself evidence of any one cause: txs may never have been fully fetched, the endorser block may carry no transactions, the best-effort historical-serving write may have been dropped because the writer's queue was at its entry-count or aggregate-byte bound, the blob-store write may have failed, or the node may predate this key. Read by `Database.GetLeiosEBTxs`; the Ouroboros reload path revalidates every body hash and encoded size against the corresponding `em` manifest reference before caching it, and discards a stale or corrupted transaction list so the normal by-point path can fetch a verified replacement. Used so a synced node can serve historical EB transactions to downstream peers via leios-fetch `MsgBlockTxsRequest`. Same (hash, slot) keying and legacy-key fallback (`types.LegacyLeiosEBTxsKey`) as `em` above; the legacy fallback is gated on the legacy `em` record's own embedded slot matching, since the pre-issue-#3513 format paired exactly one `em`/`et` record per hash. | Leios EB tx-body serving |
 | `metadata_commit_timestamp` | Big-endian timestamp integer bytes | Commit consistency check with SQL `commit_timestamp` |
 | `nodesettings/storeid` | Opaque `uuid.NewString()` bytes, minted on first use and never overwritten thereafter | This blob store's identity for the `blob_store_id` node settings gate (`Database.blobStoreID`), compared only for equality against the value latched in `node_settings_gate` |
 
@@ -2510,16 +2510,33 @@ Pools whose effective retirement takes effect at a given epoch, with the reward
 account and deposit needed to refund their POOLREAP deposit at the epoch
 boundary. A pool is included when, as of the boundary slot, its latest
 retirement certificate names the target epoch and has not been cancelled by a
-later re-registration (same-slot disambiguation uses `block_index` then
-`cert_index`). Unlike `GetActivePoolKeyHashesAtSlot`, this query does not rank
-synthetic reconcile retirements (`certificate_id = 0`) first: those rows carry
-the catch-up tip as `epoch`/`added_slot`, so the `added_slot < $boundarySlot`
-and `epoch = $epoch` filters exclude them from boundary refund processing by
-design — a reconcile-retired pool gets no POOLREAP refund because its real
-retirement (or lack of one) was already settled in the imported snapshot's
-ledger state. The deposit and reward account come from the latest
-registration. Backends differ only in identifier quoting (`"transaction"` on
-SQLite/Postgres, `` `transaction` `` on MySQL).
+later re-registration (same-slot disambiguation ranks synthetic reconcile
+retirements first, then compares `block_index`, then `cert_index`). Like
+`GetActivePoolKeyHashesAtSlot`, this query ranks synthetic reconcile
+retirements (`certificate_id = 0`) ahead of certificate-backed rows at the same
+slot and exempts them from the cancellation clauses. Such a row has no
+`certs`/`transaction` join, so its `COALESCE(..., 0)` indices are the lowest
+possible and it would otherwise lose every same-slot tie-break to a
+certificate-backed row — the opposite of what the ledger state it encodes says,
+and the shape `ledgerstate`'s snapshot import writes routinely (`ImportPool`
+followed by `RetirePools` at one slot). All four latest-retirement resolutions
+in the tree — `GetActivePoolKeyHashesAtSlot`, this query,
+`GetPoolKeyHashesRetiredByEpoch` and `DingoDB.GetPoolsRetiredByEpoch` — now
+share one ordering, so the active pool set, the POOLREAP refund and both Koios
+parity routes cannot disagree about which retirement is a pool's latest.
+
+Ranking those rows does not admit them to boundary refund processing. A
+reconcile row carries the catch-up tip as `epoch`/`added_slot`: the boundary
+into that same epoch has already passed by the time the row is written, so
+`added_slot < $boundarySlot` is false for it, and every later boundary asks for
+a different `$epoch`. A reconcile-retired pool therefore still gets no POOLREAP
+refund, because its real retirement (or lack of one) was already settled in the
+imported snapshot's ledger state — that exclusion now rests on those two
+filters alone rather than on the row losing a tie-break, and
+`TestGetPoolsRetiringAtEpochSameSlotResolution` pins both halves. The deposit
+and reward account come from the latest registration. Backends differ only in
+identifier quoting (`"transaction"` on SQLite/Postgres, `` `transaction` `` on
+MySQL).
 
 ```sql
 WITH latest_reg AS (
@@ -2538,11 +2555,13 @@ WITH latest_reg AS (
 ),
 latest_ret AS (
   SELECT rt.pool_id, rt.added_slot, rt.epoch,
+    CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END AS synthetic_ret,
     COALESCE(t.block_index, 0) AS blk_idx,
     COALESCE(c.cert_index, 0)  AS cert_idx,
     ROW_NUMBER() OVER (
       PARTITION BY rt.pool_id
-      ORDER BY rt.added_slot DESC, COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
+      ORDER BY rt.added_slot DESC, CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC,
+               COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
     ) AS rn
   FROM pool_retirement rt
   LEFT JOIN certs c ON c.id = rt.certificate_id
@@ -2557,8 +2576,9 @@ INNER JOIN latest_ret lrt ON lrt.pool_id = p.id AND lrt.rn = 1
 WHERE lrt.epoch = $epoch
   AND NOT (
     lrt.added_slot < lr.added_slot
-    OR (lrt.added_slot = lr.added_slot AND lrt.blk_idx < lr.blk_idx)
-    OR (lrt.added_slot = lr.added_slot AND lrt.blk_idx = lr.blk_idx AND lrt.cert_idx < lr.cert_idx)
+    OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0 AND lrt.blk_idx < lr.blk_idx)
+    OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0 AND lrt.blk_idx = lr.blk_idx
+        AND lrt.cert_idx < lr.cert_idx)
   );
 ```
 
@@ -2570,6 +2590,80 @@ to the registered, active reward account, or added to `network_state.treasury`
 when that account is missing or inactive. Both writes are slot-keyed (the
 `account_reward_delta` journal and the boundary `network_state` row), so a
 rollback past the boundary reverts them and re-application is deterministic.
+
+### `GetPoolKeyHashesRetiredByEpoch`
+
+Key hashes of pools whose effective retirement had already taken effect by a
+given epoch. Same latest-certificate resolution and same cancellation rule as
+`GetPoolsRetiringAtEpoch` — a pool is included only when, as of the boundary
+slot, its latest certificate is a retirement and no later registration
+supersedes it, with the same synthetic-reconcile ranking and the same
+`synthetic_ret = 0` exemption on the cancellation clauses — but the epoch
+comparison is `<=` rather than `=`, and no registration columns are selected
+because no deposit refund is being applied.
+
+The two queries answer different questions. `GetPoolsRetiringAtEpoch` asks
+which pools leave at one exact boundary, which is what POOLREAP needs. This one
+asks which pools had already left by an epoch, which is what the Koios parity
+checker needs when it reaches an epoch long after the node passed it. The
+distinction matters because a pool that retired effective epoch 243 is still
+departed at 244 and 245, and `= $epoch` matches none of those later epochs.
+
+`pool_registration` and `pool_retirement` are retained for the life of the
+database, while `pool_stake_snapshot` is pruned to `currentEpoch - 3` by
+`Manager.cleanupOldSnapshots`. That is why this query, and not a pool-set
+membership read, is the departure evidence available to an observer running
+behind the node. Backends differ only in identifier quoting (`"transaction"` on
+SQLite/Postgres, `` `transaction` `` on MySQL).
+
+```sql
+WITH latest_reg AS (
+  SELECT pr.pool_id, pr.added_slot,
+    COALESCE(t.block_index, 0) AS blk_idx,
+    COALESCE(c.cert_index, 0)  AS cert_idx,
+    ROW_NUMBER() OVER (
+      PARTITION BY pr.pool_id
+      ORDER BY pr.added_slot DESC, COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
+    ) AS rn
+  FROM pool_registration pr
+  LEFT JOIN certs c ON c.id = pr.certificate_id
+  LEFT JOIN "transaction" t ON t.id = c.transaction_id
+  WHERE pr.added_slot < $boundarySlot
+),
+latest_ret AS (
+  SELECT rt.pool_id, rt.added_slot, rt.epoch,
+    CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END AS synthetic_ret,
+    COALESCE(t.block_index, 0) AS blk_idx,
+    COALESCE(c.cert_index, 0)  AS cert_idx,
+    ROW_NUMBER() OVER (
+      PARTITION BY rt.pool_id
+      ORDER BY rt.added_slot DESC, CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC,
+               COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
+    ) AS rn
+  FROM pool_retirement rt
+  LEFT JOIN certs c ON c.id = rt.certificate_id
+  LEFT JOIN "transaction" t ON t.id = c.transaction_id
+  WHERE rt.added_slot < $boundarySlot
+)
+SELECT p.pool_key_hash
+FROM pool p
+INNER JOIN latest_reg lr  ON lr.pool_id = p.id  AND lr.rn = 1
+INNER JOIN latest_ret lrt ON lrt.pool_id = p.id AND lrt.rn = 1
+WHERE lrt.epoch <= $epoch
+  AND NOT (
+    lrt.added_slot < lr.added_slot
+    OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0 AND lrt.blk_idx < lr.blk_idx)
+    OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0 AND lrt.blk_idx = lr.blk_idx
+        AND lrt.cert_idx < lr.cert_idx)
+  );
+```
+
+The Koios parity checker reaches this through `RewardParitySource`, which has
+two implementations: `DatabaseSource` calls this store method directly, and the
+standalone-CLI `DingoDB` runs the same SQL against a separately synced metadata
+database. Both feed `poolDepartedAtParamEpoch`, which treats membership in this
+result as proof of departure and so downgrades a missing K+1 `reward_pool_input`
+row from `dingo_db_missing` to the informational `pool_departed`.
 
 ### `GetMIRCertsInSlotRange`
 
