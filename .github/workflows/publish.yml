@@ -511,3 +511,127 @@ jobs:
       #- name: Pull new module version
       #  if: startsWith(github.ref, 'refs/tags/')
       #  uses: andrewslotin/go-proxy-pull-action@e5aea3b8b3478fc5b76befda4390513868ed2dc8 # v1.4.0 https://github.com/andrewslotin/go-proxy-pull-action/releases/tag/v1.4.0
+
+  # Bump the dingo formula in the blinklabs-io/homebrew-cardano tap.
+  #
+  # Deliberately NON-BLOCKING: it runs only after the release is fully
+  # published, nothing depends on it, and `continue-on-error: true` keeps the
+  # workflow green even if the tap PR cannot be opened. A broken tap must never
+  # hold back a shipped release.
+  #
+  # Authenticates to the tap with the org-level ORG_PROJECT_PAT secret, a token
+  # with `contents: write` and `pull-requests: write` on
+  # blinklabs-io/homebrew-cardano. The default GITHUB_TOKEN only scopes to this
+  # repository and cannot push a branch or open a PR on the tap. When the secret
+  # is absent (e.g. forks), the job no-ops instead of failing.
+  update-homebrew:
+    runs-on: ubuntu-latest
+    needs: [finalize-release]
+    if: always() && github.ref_type == 'tag' && needs.finalize-release.result == 'success'
+    continue-on-error: true
+    permissions:
+      contents: read
+    env:
+      TAP_REPO: blinklabs-io/homebrew-cardano
+      HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.ORG_PROJECT_PAT }}
+    steps:
+      - name: Check tap token
+        id: gate
+        run: |
+          if [ -z "${HOMEBREW_TAP_GITHUB_TOKEN}" ]; then
+            echo "HOMEBREW_TAP_GITHUB_TOKEN not set; skipping homebrew tap update."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Compute release facts
+        id: facts
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          tarball_url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${RELEASE_TAG}.tar.gz"
+          # GitHub source tarballs for a tag are byte-stable, so this sha256
+          # pins the exact release the formula builds from.
+          sha256="$(curl -fsSL "$tarball_url" | sha256sum | cut -d' ' -f1)"
+          {
+            echo "tarball_url=$tarball_url"
+            echo "sha256=$sha256"
+            # Match the release build convention (Makefile derives COMMIT_HASH
+            # from `git rev-parse --short=7 HEAD`) so the Homebrew build stamps
+            # the same 7-char version.CommitHash as the released binaries.
+            echo "short_commit=${COMMIT_SHA:0:7}"
+          } >> "$GITHUB_OUTPUT"
+      - name: Checkout homebrew tap
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          repository: ${{ env.TAP_REPO }}
+          token: ${{ env.HOMEBREW_TAP_GITHUB_TOKEN }}
+          path: homebrew-tap
+      - name: Update formula
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          TARBALL_URL: ${{ steps.facts.outputs.tarball_url }}
+          SHA256: ${{ steps.facts.outputs.sha256 }}
+          SHORT_COMMIT: ${{ steps.facts.outputs.short_commit }}
+        run: |
+          set -euo pipefail
+          formula="homebrew-tap/Formula/dingo.rb"
+          # Move the three release-pinned fields together, exactly as the
+          # formula documents: the source tarball url, its sha256, and the
+          # CommitHash stamped into the version package (version.Version comes
+          # from the formula's own #{version}, so it needs no edit here).
+          sed -i -E \
+            -e "s#^  url \".*\"#  url \"${TARBALL_URL}\"#" \
+            -e "s#^  sha256 \".*\"#  sha256 \"${SHA256}\"#" \
+            -e "s#(version\.CommitHash=)[0-9a-f]+#\1${SHORT_COMMIT}#" \
+            "$formula"
+          # sed exits 0 even when a pattern matches nothing. If the tap renames
+          # a field or changes its indentation a substitution silently no-ops,
+          # the next step sees a clean tree and ships a stale formula. Assert
+          # each expected value is present so a missed edit fails the job loudly.
+          for expected in "${TARBALL_URL}" "${SHA256}" "version.CommitHash=${SHORT_COMMIT}"; do
+            if ! grep -qF -- "$expected" "$formula"; then
+              echo "::error::formula field not updated: $expected"
+              exit 1
+            fi
+          done
+          echo "::group::Updated formula"
+          cat "$formula"
+          echo "::endgroup::"
+      - name: Open tap pull request
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ env.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd homebrew-tap
+          if git diff --quiet -- Formula/dingo.rb; then
+            echo "Formula already up to date for ${RELEASE_TAG}; nothing to do."
+            exit 0
+          fi
+          branch="dingo-${RELEASE_TAG}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$branch"
+          git add Formula/dingo.rb
+          git commit -m "dingo ${RELEASE_TAG}"
+          # A retried tag run may find the tap branch already on the remote. The
+          # tap was checked out on its default branch, so there is no
+          # origin/$branch tracking ref for --force-with-lease to compare
+          # against and the push would be rejected as stale. Fetch the existing
+          # branch first so the lease has a real base to check.
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch"
+          fi
+          git push --force-with-lease origin "$branch"
+          # Reuse an existing open PR for this tag if a prior run created one.
+          if [ -z "$(gh pr list --repo "$TAP_REPO" --head "$branch" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --repo "$TAP_REPO" --base main --head "$branch" \
+              --title "dingo ${RELEASE_TAG}" \
+              --body "Automated formula bump for [dingo ${RELEASE_TAG}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG})."
+          else
+            echo "Open PR already exists for ${branch}; pushed updated formula to it."
+          fi
