@@ -381,6 +381,8 @@ func (n *Node) initBlockForger(
 		ForgeSyncToleranceSlots:           n.config.forgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots:       n.config.forgeStaleGapThresholdSlots,
 		ForgeHeaderFrontierToleranceSlots: n.config.forgeHeaderFrontierToleranceSlots,
+		ForgeUpstreamStalenessSlots:       n.config.forgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:     n.config.forgeAppliedTipStalenessSlots,
 		// Closure, not a method value: n.ouroboros is rebuilt live, so this
 		// resolves the current instance when the forge loop asks.
 		LeiosVerifiedEbSlot: func() uint64 {

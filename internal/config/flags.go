@@ -685,6 +685,16 @@ var flagSpecs = []flagSpec{
 		"forge-header-frontier-tolerance-slots",
 		"max slots the ledger-applied tip may trail this node's own header frontier before skipping block forging",
 	),
+	uint64Flag(
+		"ForgeUpstreamStalenessSlots",
+		"forge-upstream-staleness-slots",
+		"max slots the newest block this node holds may trail the corroborated upstream target before skipping block forging",
+	),
+	uint64Flag(
+		"ForgeAppliedTipStalenessSlots",
+		"forge-applied-tip-staleness-slots",
+		"max slots the newest block this node holds may be older than the current slot before skipping block forging (0 disables)",
+	),
 	boolFlag(
 		"ValidateForgedBlock",
 		"validate-forged-block",

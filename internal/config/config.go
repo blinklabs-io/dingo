@@ -97,10 +97,22 @@ const (
 	// to describe the same chain position, unlike ForgeSyncToleranceSlots
 	// which tolerates trailing the network while catching up.
 	DefaultForgeHeaderFrontierToleranceSlots = 5
-	DefaultMempoolCapacityPraos              = 1048576  // 1 MiB
-	DefaultMempoolCapacityLeios              = 26214400 // 25 MiB
-	DefaultMempoolRevalidationDeltaCap       = 64
-	DefaultMempoolImplementation             = "fifo"
+	// DefaultForgeUpstreamStalenessSlots bounds how far the newest block this
+	// node holds may trail the corroborated upstream target before forging is
+	// refused. It catches the case the frontier tolerance cannot see: header
+	// admission and ledger application stalling together, where the two local
+	// tips agree and the gap reads 0 while the node is far behind the network.
+	DefaultForgeUpstreamStalenessSlots = 5
+	// DefaultForgeAppliedTipStalenessSlots is 0, which disables the wall-clock
+	// staleness backstop. It is off by default because "how old is my newest
+	// block" tracks the block interval, so any fixed bound refuses constantly
+	// on a low-throughput chain; set it only where the block interval is known
+	// and bounded.
+	DefaultForgeAppliedTipStalenessSlots = 0
+	DefaultMempoolCapacityPraos          = 1048576  // 1 MiB
+	DefaultMempoolCapacityLeios          = 26214400 // 25 MiB
+	DefaultMempoolRevalidationDeltaCap   = 64
+	DefaultMempoolImplementation         = "fifo"
 )
 
 // RunMode represents the operational mode of the dingo node
@@ -690,7 +702,19 @@ type Config struct {
 	// deployment; raising it lets the node forge blocks whose contents were
 	// chosen against an older chain position than their parent.
 	ForgeHeaderFrontierToleranceSlots uint64 `yaml:"forgeHeaderFrontierToleranceSlots" envconfig:"DINGO_FORGE_HEADER_FRONTIER_TOLERANCE_SLOTS"`
-	ValidateForgedBlock               bool   `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
+	// ForgeUpstreamStalenessSlots bounds how far the newest block this node
+	// holds may trail the corroborated upstream sync target before forging is
+	// skipped. Unlike ForgeHeaderFrontierToleranceSlots this stays meaningful
+	// when header admission and ledger application stall together, which is
+	// exactly when the frontier gap reads 0 on a node that is far behind.
+	ForgeUpstreamStalenessSlots uint64 `yaml:"forgeUpstreamStalenessSlots" envconfig:"DINGO_FORGE_UPSTREAM_STALENESS_SLOTS"`
+	// ForgeAppliedTipStalenessSlots bounds how many slots older than the
+	// current slot the newest block this node holds may be before forging is
+	// skipped. 0 (the default) disables this wall-clock backstop; it is
+	// off by default because on a low-throughput chain a fixed bound refuses
+	// constantly. Set it only where the block interval is known and bounded.
+	ForgeAppliedTipStalenessSlots uint64 `yaml:"forgeAppliedTipStalenessSlots" envconfig:"DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS"`
+	ValidateForgedBlock           bool   `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
 
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. Consensus-affecting
@@ -1133,6 +1157,8 @@ var globalConfig = &Config{
 	ForgeSyncToleranceSlots:           DefaultForgeSyncToleranceSlots,
 	ForgeStaleGapThresholdSlots:       DefaultForgeStaleGapThresholdSlots,
 	ForgeHeaderFrontierToleranceSlots: DefaultForgeHeaderFrontierToleranceSlots,
+	ForgeUpstreamStalenessSlots:       DefaultForgeUpstreamStalenessSlots,
+	ForgeAppliedTipStalenessSlots:     DefaultForgeAppliedTipStalenessSlots,
 }
 
 // deepCopyPluginValue duplicates the reference-typed values a YAML plugin
@@ -1500,6 +1526,12 @@ func (c *Config) ApplyDefaults() {
 	if c.ForgeHeaderFrontierToleranceSlots == 0 {
 		c.ForgeHeaderFrontierToleranceSlots = DefaultForgeHeaderFrontierToleranceSlots
 	}
+	if c.ForgeUpstreamStalenessSlots == 0 {
+		c.ForgeUpstreamStalenessSlots = DefaultForgeUpstreamStalenessSlots
+	}
+	// ForgeAppliedTipStalenessSlots is deliberately absent here: 0 is the
+	// "disabled" value for the wall-clock backstop, not "unset", so filling it
+	// with a default would turn a feature on that an operator never asked for.
 	// Only an unset (zero) frequency takes the default; an explicitly
 	// negative value is preserved so Validate can reject it instead of
 	// the node silently starting the expiry worker on the default cadence

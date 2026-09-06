@@ -66,6 +66,8 @@ func resetGlobalConfig() {
 		ForgeSyncToleranceSlots:           DefaultForgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots:       DefaultForgeStaleGapThresholdSlots,
 		ForgeHeaderFrontierToleranceSlots: DefaultForgeHeaderFrontierToleranceSlots,
+		ForgeUpstreamStalenessSlots:       DefaultForgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:     DefaultForgeAppliedTipStalenessSlots,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,
@@ -83,9 +85,29 @@ func unsetDebugBindAddrEnv(t *testing.T) {
 	require.NoError(t, os.Unsetenv("DINGO_DEBUG_BIND_ADDR"))
 }
 
+// unsetForgeGateEnv clears the forge-gate overrides so tests that assert the
+// built-in defaults cannot inherit a value from the caller's environment.
+// LoadConfig runs envconfig AFTER the YAML merge, so an exported
+// DINGO_FORGE_* variable silently overrides both the fixture and the default,
+// and the assertion then fails for a reason unrelated to the code under test.
+func unsetForgeGateEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{
+		"DINGO_FORGE_HEADER_FRONTIER_TOLERANCE_SLOTS",
+		"DINGO_FORGE_UPSTREAM_STALENESS_SLOTS",
+		"DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS",
+	} {
+		// t.Setenv registers the restore; Unsetenv then removes it for the
+		// duration of the test, which is what envconfig must not see.
+		t.Setenv(k, "")
+		require.NoError(t, os.Unsetenv(k))
+	}
+}
+
 func TestLoad_CompareFullStruct(t *testing.T) {
 	resetGlobalConfig()
 	unsetDebugBindAddrEnv(t)
+	unsetForgeGateEnv(t)
 	yamlContent := `
 plugins:
   mempool:
@@ -212,8 +234,12 @@ mithril:
 		},
 		ForgeSyncToleranceSlots:     321,
 		ForgeStaleGapThresholdSlots: 654,
-		// Not set by the fixture's YAML/env, so ApplyDefaults fills it.
+		// Not set by the fixture's YAML/env, so ApplyDefaults fills them --
+		// except the applied-tip backstop, whose 0 means "disabled" rather
+		// than "unset", so it stays 0.
 		ForgeHeaderFrontierToleranceSlots: DefaultForgeHeaderFrontierToleranceSlots,
+		ForgeUpstreamStalenessSlots:       DefaultForgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:     DefaultForgeAppliedTipStalenessSlots,
 		Mithril: MithrilConfig{
 			Enabled:                false,
 			AggregatorURL:          "https://mithril.example.net",
@@ -267,6 +293,7 @@ func TestLoad_DAGMempoolProvider(t *testing.T) {
 func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	resetGlobalConfig()
 	unsetDebugBindAddrEnv(t)
+	unsetForgeGateEnv(t)
 
 	// Without Config file
 	cfg, err := LoadConfig("")
@@ -321,6 +348,8 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		ForgeSyncToleranceSlots:           DefaultForgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots:       DefaultForgeStaleGapThresholdSlots,
 		ForgeHeaderFrontierToleranceSlots: DefaultForgeHeaderFrontierToleranceSlots,
+		ForgeUpstreamStalenessSlots:       DefaultForgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:     DefaultForgeAppliedTipStalenessSlots,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,
