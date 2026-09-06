@@ -1437,6 +1437,13 @@ func (c *Chain) IntersectPoints(count int) []ocommon.Point {
 	if c == nil || count <= 0 {
 		return nil
 	}
+	// Read K before taking any chain lock: SetLedger can run while the node
+	// is serving chainsync, and the accessor takes the manager lock, which
+	// must not be acquired underneath the block-index read locks below.
+	securityRung := uint64(0)
+	if k := c.manager.SecurityParam(); k > 0 {
+		securityRung = uint64(k) //nolint:gosec // guarded positive
+	}
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	unlockBlockIndexReadLocks := c.lockBlockIndexReadLocks()
@@ -1502,13 +1509,6 @@ func (c *Chain) IntersectPoints(count int) []ocommon.Point {
 	// FindIntersect message stays the same size in practice (the list is
 	// capped by count).
 	//
-	// securityParam is written once by ChainManager.SetLedger during
-	// startup and read without the manager lock elsewhere on this path
-	// (see MaxQueuedHeaders); a zero value simply skips the extra rung.
-	securityRung := uint64(0)
-	if c.manager != nil && c.manager.securityParam > 0 {
-		securityRung = uint64(c.manager.securityParam) //nolint:gosec // guarded positive
-	}
 	for offset := uint64(denseCount); len(points) < count; offset *= 2 { //nolint:gosec // denseCount is bounded to non-negative values
 		if offset == 0 || offset >= c.tipBlockIndex {
 			break

@@ -422,3 +422,29 @@ func TestHandleEventChainsyncRollbackRejectsPeerTipEqualToOurs(t *testing.T) {
 		t.Fatal("expected over-K rejection for a peer at our own tip")
 	}
 }
+
+// The reported lag must come from our own chain, not from the block number the
+// peer attached to its tip: the tip point is verified to be on our chain, but
+// the number riding along with it is untrusted peer input, and it is what an
+// operator reads out of the log and the metric.
+func TestChainsyncPeerBehindDepthIgnoresAdvertisedBlockNumber(t *testing.T) {
+	f := newBehindPeerFixture(t)
+
+	peerTip := f.tipAtDepth(6)
+	for _, advertised := range []uint64{peerTip.BlockNumber, 0, 1} {
+		peerTip.BlockNumber = advertised
+		depth, behind := f.ls.chainsyncPeerBehindOnOurChain(ChainsyncEvent{
+			ConnectionId: f.connId,
+			Point:        f.pointAtDepth(12),
+			Tip:          peerTip,
+		})
+		require.Truef(t, behind, "advertised block number %d", advertised)
+		assert.Equalf(
+			t,
+			uint64(6),
+			depth,
+			"advertised block number %d must not change the measured lag",
+			advertised,
+		)
+	}
+}

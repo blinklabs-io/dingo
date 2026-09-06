@@ -15,7 +15,6 @@
 package chain_test
 
 import (
-	"errors"
 	"testing"
 
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -137,12 +136,10 @@ func TestIntersectPointsStillExceedKForPeerBehindBeyondK(t *testing.T) {
 		behindPeerDepth(headers, answer),
 		uint64(behindPeerSecurityParam),
 	)
-	require.True(
+	require.ErrorIs(
 		t,
-		errors.Is(
-			c.ValidateRollback(answer),
-			chain.ErrRollbackExceedsSecurityParam,
-		),
+		c.ValidateRollback(answer),
+		chain.ErrRollbackExceedsSecurityParam,
 		"expected the chain layer to refuse a rollback deeper than K",
 	)
 }

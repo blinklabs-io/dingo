@@ -16,6 +16,11 @@ package ledger
 
 import (
 	"encoding/hex"
+	"errors"
+
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // chainsyncPeerBehindOnOurChain reports whether a chainsync peer that asked us
@@ -67,7 +72,7 @@ func (ls *LedgerState) chainsyncPeerBehindOnOurChain(
 	if e.Point.Slot > peerTip.Slot {
 		return 0, false
 	}
-	onChain, err := ls.primaryChainContainsPoint(peerTip)
+	peerBlock, onChain, err := ls.primaryChainBlockAtPoint(peerTip)
 	if err != nil {
 		ls.logChainsyncBehindLookupError(e, "peer tip", err)
 		return 0, false
@@ -83,12 +88,39 @@ func (ls *LedgerState) chainsyncPeerBehindOnOurChain(
 	if !onChain {
 		return 0, false
 	}
+	// Measure the lag against the block number our own chain records for the
+	// peer's tip, not the one the peer advertised: the point is verified to be
+	// on our chain, but the block number riding along with it is not, and this
+	// value is what the operator reads.
 	var depth uint64
-	if localTip.BlockNumber > 0 && e.Tip.BlockNumber > 0 &&
-		localTip.BlockNumber >= e.Tip.BlockNumber {
-		depth = localTip.BlockNumber - e.Tip.BlockNumber
+	if localTip.BlockNumber > peerBlock.Number {
+		depth = localTip.BlockNumber - peerBlock.Number
 	}
 	return depth, true
+}
+
+// primaryChainBlockAtPoint returns the block our primary chain currently holds
+// at point. Blob presence alone is not authoritative — abandoned-fork blocks
+// stay in the append-only store — so membership is confirmed the same way
+// primaryChainContainsPoint confirms it.
+func (ls *LedgerState) primaryChainBlockAtPoint(
+	point ocommon.Point,
+) (models.Block, bool, error) {
+	if ls.db == nil {
+		return models.Block{}, false, nil
+	}
+	block, err := database.BlockByPoint(ls.db, point)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return models.Block{}, false, nil
+		}
+		return models.Block{}, false, err
+	}
+	onChain, err := ls.primaryChainContainsBlock(block, point)
+	if err != nil {
+		return models.Block{}, false, err
+	}
+	return block, onChain, nil
 }
 
 // logChainsyncBehindLookupError records a failed primary-chain membership
