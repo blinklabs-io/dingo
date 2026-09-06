@@ -418,16 +418,41 @@ func (s *State) GetClientConnId() *ouroboros.ConnectionId {
 
 // SetClientConnId sets the active chainsync client connection
 // ID. This is used when chain selection determines a new best
-// peer.
+// peer. A stale selection for an unavailable client is ignored.
 func (s *State) SetClientConnId(connId ouroboros.ConnectionId) {
 	s.clientConnIdMutex.Lock()
 	defer s.clientConnIdMutex.Unlock()
 	s.activeClientConnId = &connId
 }
 
-// RemoveClientConnId removes a connection from tracking. If
-// this was the active client, promotes the client with the
-// highest tip slot as the new primary.
+// TrySetClientConnId sets the active chainsync client after a chain-selection
+// decision and reports whether the client was still tracked and eligible.
+func (s *State) TrySetClientConnId(connId ouroboros.ConnectionId) bool {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	tc, exists := s.trackedClients[connId]
+	if !exists || tc == nil || tc.ObservabilityOnly || tc.HeadersRecv == 0 {
+		return false
+	}
+	s.activeClientConnId = &connId
+	return true
+}
+
+// ClearClientConnId clears connId as the active chainsync client. The
+// compare-and-clear behavior prevents a stale selected-to-none event from
+// clearing a newer chain-selection decision.
+func (s *State) ClearClientConnId(connId ouroboros.ConnectionId) {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	if s.activeClientConnId != nil && *s.activeClientConnId == connId {
+		s.activeClientConnId = nil
+	}
+}
+
+// RemoveClientConnId removes a connection from tracking. If this was the
+// active client, the active selection is cleared. Selecting a replacement is
+// deliberately left to ChainSelector, which has the authoritative tracked-tip,
+// liveness, eligibility, and corroboration state.
 func (s *State) RemoveClientConnId(
 	connId ouroboros.ConnectionId,
 ) {
@@ -443,7 +468,6 @@ func (s *State) RemoveClientConnId(
 	s.clearObservedHeaderHistory(connId)
 	if wasPrimary {
 		s.activeClientConnId = nil
-		s.promoteBestClientLocked()
 	}
 	// Emit client removed event
 	if wasEligible && s.eventBus != nil {
@@ -478,52 +502,9 @@ func (s *State) HandleClientRemoveRequestedEvent(evt event.Event) {
 	s.RemoveClientConnId(e.ConnId)
 }
 
-// promoteBestClientLocked selects the tracked client with the
-// highest tip slot as the new active client. Healthy (syncing
-// or synced) clients are preferred. If no healthy client exists,
-// the stalled client with the most recent activity is promoted
-// as a fallback — receiving a header will transition it back to
-// syncing, breaking the deadlock where nil active selection
-// prevents any client from making progress.
-// Caller must hold clientConnIdMutex.
-func (s *State) promoteBestClientLocked() {
-	var bestId *ouroboros.ConnectionId
-	var bestSlot uint64
-	var bestStalledId *ouroboros.ConnectionId
-	var bestStalledActivity time.Time
-	for id, tc := range s.trackedClients {
-		if tc.ObservabilityOnly || tc.Status == ClientStatusFailed {
-			continue
-		}
-		if tc.Status == ClientStatusStalled {
-			if bestStalledId == nil ||
-				tc.LastActivity.After(bestStalledActivity) {
-				idCopy := id
-				bestStalledId = &idCopy
-				bestStalledActivity = tc.LastActivity
-			}
-			continue
-		}
-		if bestId == nil || tc.Tip.Point.Slot > bestSlot {
-			idCopy := id
-			bestId = &idCopy
-			bestSlot = tc.Tip.Point.Slot
-		}
-	}
-	if bestId != nil {
-		s.activeClientConnId = bestId
-	} else if bestStalledId != nil {
-		// All clients stalled — promote the most recently active
-		// one to prevent permanent nil-selection deadlock.
-		s.activeClientConnId = bestStalledId
-	} else {
-		s.activeClientConnId = nil
-	}
-}
-
-// addTrackedClientLocked registers a new tracked client. It
-// initialises the TrackedClient, sets it as active if none
-// exists, and emits a ClientAddedEvent.
+// addTrackedClientLocked registers a new tracked client and emits a
+// ClientAddedEvent. Registration alone does not make the client active: it has
+// not delivered a tip for ChainSelector to validate yet.
 // Caller must hold clientConnIdMutex.
 func (s *State) addTrackedClientLocked(
 	connId ouroboros.ConnectionId,
@@ -536,10 +517,6 @@ func (s *State) addTrackedClientLocked(
 		ObservabilityOnly: observabilityOnly,
 		StartedAsOutbound: startedAsOutbound,
 		LastActivity:      time.Now(),
-	}
-	// Set as active if there's no active client
-	if !observabilityOnly && s.activeClientConnId == nil {
-		s.activeClientConnId = &connId
 	}
 	// Emit client added event
 	if !observabilityOnly && s.eventBus != nil {
@@ -559,8 +536,8 @@ func (s *State) addTrackedClientLocked(
 // AddClientConnId adds a connection ID to the set of tracked
 // chainsync clients, enforcing the configured MaxClients limit.
 // Returns true if the client was added, false if rejected
-// (already tracked or at capacity). If no active client exists,
-// this connection is automatically set as the active client.
+// (already tracked or at capacity). ChainSelector sets the active client after
+// observing and validating a tip from the connection.
 // The client is recorded as outbound (StartedAsOutbound=true).
 func (s *State) AddClientConnId(
 	connId ouroboros.ConnectionId,
@@ -753,16 +730,8 @@ func (s *State) SetClientObservabilityOnly(
 		*s.activeClientConnId == connId
 	wasEligible := !tc.ObservabilityOnly
 	tc.ObservabilityOnly = observabilityOnly
-	needPromote := false
 	if wasPrimary && observabilityOnly {
 		s.activeClientConnId = nil
-		needPromote = true
-	}
-	if !observabilityOnly && s.activeClientConnId == nil {
-		needPromote = true
-	}
-	if needPromote {
-		s.promoteBestClientLocked()
 	}
 
 	if s.eventBus == nil {
@@ -805,20 +774,48 @@ func (s *State) UpdateClientTip(
 	point ocommon.Point,
 	tip ochainsync.Tip,
 ) bool {
-	return s.updateClientTip(connId, point, tip, true)
+	if !s.updateTrackedClientTip(connId, point, tip) {
+		return true
+	}
+	return s.RecordHeaderForDedup(connId, point)
 }
 
 // UpdateClientTipWithoutDedup updates the cursor, tip, and
-// activity tracking for a tracked client without recording the
-// header in the shared dedup cache. This is used for peers that
-// should not drive ledger ingress, so they do not suppress
-// later delivery of the same header from an eligible peer.
+// activity tracking for a tracked client without recording the header in the
+// shared dedup cache. The Ouroboros ingress path uses this before synchronous
+// chain selection so a switch event can verify that the client has delivered a
+// tip. It records the header for deduplication separately, and only when the
+// post-selection apply gate admits it. It reports whether the client was still
+// tracked and updated.
 func (s *State) UpdateClientTipWithoutDedup(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
 	tip ochainsync.Tip,
-) {
-	s.updateClientTip(connId, point, tip, false)
+) bool {
+	return s.updateTrackedClientTip(connId, point, tip)
+}
+
+// RecordHeaderForDedup records a tracked header in the shared cross-peer
+// deduplication and fork-detection cache. Callers that update the tracked tip
+// before a synchronous selection decision use this after the apply gate, so a
+// withheld Genesis header cannot suppress a later eligible delivery.
+func (s *State) RecordHeaderForDedup(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) bool {
+	isNew := s.processHeader(connId, point)
+	// Prune stale observations on the normal progress path so the dedup cache
+	// stays bounded over long-running nodes.
+	s.maybePruneSeenHeaders()
+	return isNew
+}
+
+// RecordHeader records a header in the cross-peer deduplication cache after
+// the caller has completed any synchronous eligibility checks.
+func (s *State) RecordHeader(connId ouroboros.ConnectionId, point ocommon.Point) bool {
+	isNew := s.processHeader(connId, point)
+	s.maybePruneSeenHeaders()
+	return isNew
 }
 
 // RewindTrackedClientsTo rewinds tracked client cursors that sit ahead of the
@@ -936,17 +933,16 @@ func (s *State) ClearObservedHeaderHistory(
 	s.clearObservedHeaderHistory(connId)
 }
 
-func (s *State) updateClientTip(
+func (s *State) updateTrackedClientTip(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
 	tip ochainsync.Tip,
-	dedup bool,
 ) bool {
 	s.clientConnIdMutex.Lock()
 	tc, exists := s.trackedClients[connId]
 	if !exists {
 		s.clientConnIdMutex.Unlock()
-		return true
+		return false
 	}
 	tc.Cursor = point
 	tc.Tip = tip
@@ -956,16 +952,7 @@ func (s *State) updateClientTip(
 		tc.Status = ClientStatusSyncing
 	}
 	s.clientConnIdMutex.Unlock()
-
-	if !dedup {
-		return true
-	}
-	// Header deduplication and fork detection
-	isNew := s.processHeader(connId, point)
-	// Prune stale observations on the normal progress path so the dedup
-	// cache stays bounded over long-running nodes.
-	s.maybePruneSeenHeaders()
-	return isNew
+	return true
 }
 
 // processHeader checks whether the header at the given point
@@ -1098,11 +1085,11 @@ func (s *State) MarkClientSynced(
 	}
 }
 
-// CheckStalledClients scans all tracked clients and marks any
-// that have exceeded the stall timeout. If the primary client
-// is stalled, a failover to the next best client is triggered.
-// Returns the list of connection IDs that were newly marked as
-// stalled.
+// CheckStalledClients scans all tracked clients and marks any that have
+// exceeded the stall timeout. It does not change the active connection;
+// ChainSelector owns selection, and the recycler closes stalled connections so
+// selection can move using the same liveness and eligibility contract.
+// Returns the list of connection IDs that were newly marked as stalled.
 func (s *State) CheckStalledClients() []ouroboros.ConnectionId {
 	s.clientConnIdMutex.Lock()
 	defer s.clientConnIdMutex.Unlock()
@@ -1131,14 +1118,6 @@ func (s *State) CheckStalledClients() []ouroboros.ConnectionId {
 				)
 			}
 		}
-	}
-
-	// Check if the primary client was stalled
-	if len(stalled) > 0 &&
-		s.activeClientConnId != nil &&
-		slices.Contains(stalled, *s.activeClientConnId) {
-		s.activeClientConnId = nil
-		s.promoteBestClientLocked()
 	}
 
 	return stalled
