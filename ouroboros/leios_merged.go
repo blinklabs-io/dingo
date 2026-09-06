@@ -618,6 +618,18 @@ func (o *Ouroboros) publishLeiosEndorserBlock(
 	blockHash lcommon.Blake2b256,
 	data *leiosEndorserBlockData,
 ) {
+	// Record the corroborated slot as a lower bound on how far the chain has
+	// advanced. An endorser block shares the slot of the ranking block that
+	// announces it, so a verified occurrence at slot S is proof a ranking
+	// block exists at S -- knowledge the block producer may hold before the
+	// header itself arrives. See MaxVerifiedEndorserBlockSlot.
+	for {
+		prev := o.leiosMaxVerifiedEbSlot.Load()
+		if point.Slot <= prev ||
+			o.leiosMaxVerifiedEbSlot.CompareAndSwap(prev, point.Slot) {
+			break
+		}
+	}
 	// Queue manifest and (when complete) txs for asynchronous persistence to
 	// the blob store so they can be served to downstream peers after the
 	// in-memory cache expires. Best-effort and off the hot path: the write
@@ -634,6 +646,22 @@ func (o *Ouroboros) publishLeiosEndorserBlock(
 	if o.leiosPipeline != nil {
 		o.leiosPipeline.ObserveEndorserBlock(point.Slot, blockHash)
 	}
+}
+
+// MaxVerifiedEndorserBlockSlot returns the highest slot for which this node
+// has corroborated an endorser block, or 0 if none. Because an endorser block
+// shares its announcing ranking block's slot, this is proof that a ranking
+// block exists at that slot.
+//
+// It is a monotonic lower bound on chain progress, never a tip: it is not
+// rolled back on a fork, because the question it answers -- "is there a block
+// out there at least this recent?" -- stays true regardless of which fork
+// wins. Callers must treat it as advisory and must not use it as a parent.
+func (o *Ouroboros) MaxVerifiedEndorserBlockSlot() uint64 {
+	if o == nil {
+		return 0
+	}
+	return o.leiosMaxVerifiedEbSlot.Load()
 }
 
 // bindLeiosEndorserBlockSlot reconciles a cached (slot, hash) occurrence
