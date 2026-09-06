@@ -1345,6 +1345,13 @@ the requested `bp` key's hash, and its own slot matches the requested slot
 (a hash match alone does not pin the point). Badger's local `GetBlock`
 trusts its own on-disk storage and is not changed.
 
+`blockverify.Hash` decodes via `models.Block.Decode` rather than calling
+`gledger.NewBlockFromCbor` directly, so a Conway-tagged block carrying the
+Musashi/Leios prototype's extended 12-field header body (see
+`models.DecodeConwayBlock`) is accepted the same way the rest of the
+storage stack already accepts it, instead of this check alone rejecting it
+as undecodable.
+
 `blockverify.Hash` does not independently re-derive the type recorded in
 `bp..._metadata` from the decoded header. An earlier version did, mirroring
 bark's `verifyArchiveBlock`/`blockEraFromHeader`: for Shelley and later

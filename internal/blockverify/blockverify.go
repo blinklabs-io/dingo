@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 )
 
@@ -46,6 +47,12 @@ var ErrSlotMismatch = errors.New("block content slot mismatch")
 // success. blockType is a decode hint, but is not trusted on its own: a
 // wrong type usually either fails to decode (ErrUndecodable) or yields a
 // different hash (ErrHashMismatch).
+//
+// Decoding goes through models.Block.Decode rather than calling
+// gledger.NewBlockFromCbor directly, so a Conway-tagged block carrying the
+// Musashi/Leios prototype's extended header (see DecodeConwayBlock) is
+// accepted the same way the rest of the storage stack already accepts it,
+// instead of this check alone rejecting it as undecodable.
 //
 // Hash does not independently re-derive blockType from the decoded header.
 // An earlier version of this check did, via gledger.DetermineBlockType, to
@@ -97,7 +104,7 @@ func Hash(
 	cborData []byte,
 	wantHash []byte,
 ) (gledger.Block, error) {
-	decoded, err := gledger.NewBlockFromCbor(blockType, cborData)
+	decoded, err := models.Block{Type: blockType, Cbor: cborData}.Decode()
 	if err != nil {
 		return nil, fmt.Errorf(
 			"%w: type %d: %w",

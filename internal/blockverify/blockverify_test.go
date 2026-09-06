@@ -18,6 +18,8 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/ouroboros-mock/fixtures"
@@ -56,6 +58,37 @@ func TestHashAcceptsMatchingContent(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, hash, decoded.Hash())
+}
+
+// TestHashAcceptsLeiosExtendedConwayHeader proves Hash accepts a
+// Musashi/Leios-tagged Conway block whose header body carries the
+// leios_certified/leios_announcement extension fields (a 12-field header
+// body, over gouroboros' strict 10-field Conway decoder), the same way the
+// rest of the storage stack already does via models.Block.Decode /
+// DecodeConwayBlock, rather than rejecting it as undecodable.
+func TestHashAcceptsLeiosExtendedConwayHeader(t *testing.T) {
+	standardRaw := testutil.BuildDecodableConwayBlockBytes(t, testSlot, 7)
+	extendedRaw := testutil.ExtendConwayHeaderWithLeios(t, standardRaw)
+
+	// The strict gouroboros Conway decoder must reject the extended header,
+	// otherwise this test would not exercise the Musashi/Leios fallback path
+	// at all.
+	_, err := gledger.NewBlockFromCbor(gledger.BlockTypeConway, extendedRaw)
+	require.Error(t, err,
+		"fixture invariant: gouroboros' strict Conway decode must reject "+
+			"the 12-field header for this test to be meaningful")
+
+	decoded, err := models.Block{
+		Type: gledger.BlockTypeConway,
+		Cbor: extendedRaw,
+	}.Decode()
+	require.NoError(t, err,
+		"fixture invariant: the Leios-aware decoder must accept it")
+	hash := decoded.Hash()
+
+	verified, err := Hash(gledger.BlockTypeConway, testSlot, extendedRaw, hash[:])
+	require.NoError(t, err)
+	require.Equal(t, hash, verified.Hash())
 }
 
 // TestHashRejectsContentMismatch proves a remote store that hands back a
