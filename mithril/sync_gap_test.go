@@ -459,13 +459,17 @@ func TestProcessGapBlockTransactionsProcessesGovernance(
 		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
 	}
 
+	conwayPParams := testGapConwayProtocolParameters()
 	err = processGapBlockTransactions(
 		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		point,
 		[]lcommon.Transaction{proposalTx, voteTx},
 		offsets,
 		100,
-		testGapConwayProtocolParameters(),
+		conway.EraIdConway,
+		conwayPParams,
+		conwayPParams,
 	)
 	require.NoError(t, err)
 

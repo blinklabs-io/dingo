@@ -65,6 +65,7 @@ func (s *Store) applyTransactionCertificates(
 	point ocommon.Point,
 	blockIndex uint32,
 	deposits map[int]uint64,
+	allowUnknownDeposits bool,
 ) ([]models.StakeCredentialRef, error) {
 	if len(certificates) == 0 {
 		return nil, nil
@@ -115,7 +116,11 @@ RETURNING id`,
 		if value, found := deposits[certIndex]; found {
 			deposit = &value
 		}
-		if certificateRequiresDeposit(certificate) && deposits == nil {
+		// A gap block may legitimately arrive with no deposit map at all;
+		// SetGapBlockTransaction says so. Unknown then stays unknown (NULL)
+		// rather than being rejected, while the live path keeps the guard.
+		if certificateRequiresDeposit(certificate) && deposits == nil &&
+			!allowUnknownDeposits {
 			return nil, fmt.Errorf(
 				"missing certDeposits for deposit-bearing certificate at index %d",
 				certIndex,

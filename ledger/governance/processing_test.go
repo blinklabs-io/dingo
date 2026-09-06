@@ -586,6 +586,7 @@ func TestProcessVotesRepairsMissingGovernanceProposal(t *testing.T) {
 				proposalTx,
 				proposalPoint,
 				0,
+				nil,
 				offsets,
 				txn,
 			); err != nil {
@@ -768,6 +769,7 @@ func TestProcessVotesRepairsMissingDijkstraGovernanceProposal(t *testing.T) {
 			proposalTx,
 			proposalPoint,
 			0,
+			nil,
 			offsets,
 			txn,
 		); err != nil {

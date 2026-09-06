@@ -250,6 +250,7 @@ RETURNING id`,
 					point,
 					index,
 					certDeposits,
+					false,
 				)
 				if err != nil {
 					return err
@@ -418,11 +419,20 @@ func (s *Store) SetGapBlockTransaction(
 	transaction lcommon.Transaction,
 	point ocommon.Point,
 	index uint32,
+	certDeposits map[int]uint64,
 	txn types.Txn,
 ) error {
-	// Gap ingestion intentionally has no available input state. Persisting only
-	// the transaction and produced outputs is equivalent to SetTransaction
-	// after suppressing the consumed-input update.
+	// Gap ingestion intentionally has no available input state, so this is
+	// equivalent to SetTransaction with the consumed-input update suppressed.
+	// The transaction, its certificates, and its produced outputs are all
+	// persisted.
+	//
+	// certDeposits may be partial or nil: the caller calculates it from the
+	// era's CertDepositFunc, which has no entry for a certificate whose
+	// deposit it could not derive (and none at all before Shelley). A
+	// certificate with no entry records NULL rather than a fabricated zero,
+	// so the two stay distinguishable in the row even though today's readers
+	// map both to 0.
 	if transaction == nil {
 		return errors.New("set gap transaction: nil transaction")
 	}
@@ -460,8 +470,18 @@ RETURNING id`,
 			if err != nil {
 				return err
 			}
-			collateralReturn := transaction.CollateralReturn()
 			stakeRefs := make([]models.StakeCredentialRef, 0)
+			if transaction.IsValid() {
+				certificateRefs, err := s.applyTransactionCertificates(
+					ctx, db, transactionID, transaction.Certificates(),
+					point, index, certDeposits, true,
+				)
+				if err != nil {
+					return err
+				}
+				stakeRefs = append(stakeRefs, certificateRefs...)
+			}
+			collateralReturn := transaction.CollateralReturn()
 			for _, produced := range transaction.Produced() {
 				model, err := models.UtxoLedgerToModel(produced, point.Slot)
 				if err != nil {
@@ -723,6 +743,11 @@ SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			// Snapshot imports can create an output before its producer
 			// transaction is replayed. Once that transaction is known, fill in
 			// the provenance without overwriting an already-linked output.
+			//
+			// The stake credential deliberately is not repaired here. A
+			// pointer address's credential is not stored on the row at all
+			// (see pointer_stake.go); every other address form carries its
+			// credential in the address, so an imported row already has it.
 			_, err = db.ExecContext(ctx, `
 UPDATE utxo
 SET transaction_id = COALESCE(transaction_id, ?),
@@ -738,6 +763,14 @@ WHERE id = ?`,
 		return err
 	}
 	utxo.ID = uint(id)
+	// A pointer address names a certificate position rather than carrying a
+	// credential, so the position is recorded alongside the output and
+	// resolved when stake is computed (dingo #3854). This runs on the
+	// conflict path too: an output a snapshot import created before its
+	// producing transaction was replayed has no pointer row yet.
+	if err := persistUtxoPointer(ctx, db, id, utxo.Pointer); err != nil {
+		return err
+	}
 	q := s.operationalQueries(db)
 	for i := range utxo.Assets {
 		asset := &utxo.Assets[i]

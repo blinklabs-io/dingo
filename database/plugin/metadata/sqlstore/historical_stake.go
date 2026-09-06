@@ -428,12 +428,10 @@ func (s *Store) getStakeByPoolsAtSlot(
 			inactivityPeriod,
 			"active_delegation.pool_key_hash IN ("+
 				bindPlaceholders(end-start)+")",
+			byteSliceArgs(poolKeyHashes[start:end]),
 		)
 		if err != nil {
 			return nil, nil, err
-		}
-		for _, hash := range poolKeyHashes[start:end] {
-			args = append(args, hash)
 		}
 		rows, err := db.QueryContext(ctx, query+`
 SELECT pool_key_hash, credential_tag, staking_key, utxo_amount
@@ -535,12 +533,10 @@ func (s *Store) GetPoolOwnerStakeAtSlot(
 			"active_delegation.credential_tag = 0 AND "+
 				"active_delegation.staking_key IN ("+
 				bindPlaceholders(end-start)+")",
+			byteSliceArgs(ownerKeys[start:end]),
 		)
 		if err != nil {
 			return nil, err
-		}
-		for _, key := range ownerKeys[start:end] {
-			args = append(args, key)
 		}
 		rows, err := db.QueryContext(ctx, query+`
 SELECT pool_key_hash, staking_key, credential_tag, utxo_amount
@@ -674,12 +670,10 @@ func (s *Store) getRewardStakeInputsForPools(
 			inactivityPeriod,
 			"active_delegation.pool_key_hash IN ("+
 				bindPlaceholders(end-start)+")",
+			byteSliceArgs(poolKeyHashes[start:end]),
 		)
 		if err != nil {
 			return nil, err
-		}
-		for _, hash := range poolKeyHashes[start:end] {
-			args = append(args, hash)
 		}
 		rows, err := db.QueryContext(ctx, query+`
 SELECT pool_key_hash, credential_tag, staking_key, utxo_amount
@@ -765,6 +759,9 @@ ORDER BY pool_key_hash, credential_tag, staking_key`,
 	return ret, nil
 }
 
+// historicalStakeCTE builds the delegated-stake CTE evaluated at slot.
+// predicateArgs supplies the bind values for predicate; they are bound once per
+// occurrence, and predicate appears twice when pointer stake is counted.
 func (s *Store) historicalStakeCTE(
 	ctx context.Context,
 	db queryer,
@@ -772,8 +769,26 @@ func (s *Store) historicalStakeCTE(
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
 	predicate string,
+	predicateArgs []any,
 ) (string, []any, error) {
 	query, args := activeDelegationSQL(slot)
+	// Stake held at a pointer address reaches its credential only in the eras
+	// that count it, and only through the position recorded in utxo_pointer.
+	// When it is not counted the query is exactly what it was before pointer
+	// resolution existed, and when no output uses a pointer address the extra
+	// branch produces no rows.
+	countPointerStake, err := pointerStakeCounted(ctx, db, slot)
+	if err != nil {
+		return "", nil, err
+	}
+	if countPointerStake {
+		resolution, resolutionArgs, err := pointerResolutionSQL(slot)
+		if err != nil {
+			return "", nil, err
+		}
+		query += resolution
+		args = append(args, resolutionArgs...)
+	}
 	expiryJoin := ""
 	expiryPredicate := ""
 	if expiryEpoch > 0 {
@@ -814,13 +829,53 @@ active_delegator_stake AS (
   AND utxo.added_slot <= ?
   AND (utxo.deleted_slot = 0 OR utxo.deleted_slot > ?)
 ` + expiryJoin + `
- WHERE ` + expiryPredicate + predicate + `
-)`
+ WHERE ` + expiryPredicate + predicate
 	args = append(args, slot, slot)
 	if expiryEpoch > 0 {
 		args = append(args, expiryEpoch)
 	}
+	args = append(args, predicateArgs...)
+	if countPointerStake {
+		// A pointer-held UTxO carries no staking_key, so it never joins the
+		// branch above and cannot be counted twice. Rows are summed per
+		// (pool, credential) by the callers, so UNION ALL adds stake without
+		// disturbing the delegator count.
+		query += `
+ UNION ALL
+ SELECT active_delegation.pool_key_hash,
+        active_delegation.credential_tag,
+        active_delegation.staking_key,
+        utxo.amount AS utxo_amount
+ FROM active_delegation
+ JOIN pointer_resolution
+   ON pointer_resolution.credential_tag = active_delegation.credential_tag
+  AND pointer_resolution.staking_key = active_delegation.staking_key
+ JOIN utxo
+   ON utxo.id = pointer_resolution.utxo_id
+  AND utxo.added_slot <= ?
+  AND (utxo.deleted_slot = 0 OR utxo.deleted_slot > ?)
+` + expiryJoin + `
+ WHERE ` + expiryPredicate + predicate
+		args = append(args, slot, slot)
+		if expiryEpoch > 0 {
+			args = append(args, expiryEpoch)
+		}
+		args = append(args, predicateArgs...)
+	}
+	query += `
+)`
 	return query, args, nil
+}
+
+// byteSliceArgs binds a chunk of credential or pool hashes as query arguments.
+// historicalStakeCTE may emit its predicate more than once, so the values are
+// handed to it rather than appended to the returned args by the caller.
+func byteSliceArgs(values [][]byte) []any {
+	ret := make([]any, 0, len(values))
+	for _, value := range values {
+		ret = append(ret, value)
+	}
+	return ret
 }
 
 func activeDelegationSQL(slot uint64) (string, []any) {
