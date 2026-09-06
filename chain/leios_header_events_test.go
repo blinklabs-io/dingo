@@ -384,6 +384,7 @@ func TestRollbackInvalidationRoutedThroughSequencer(t *testing.T) {
 		first.hash,
 		second.hash,
 	}
+	var lastAnnouncedSeq uint64
 	for _, want := range wantAnnouncements {
 		evt := testutil.RequireReceive(
 			t, ch, 2*time.Second, "announcement before the rollback",
@@ -391,6 +392,7 @@ func TestRollbackInvalidationRoutedThroughSequencer(t *testing.T) {
 		data, ok := evt.Data.(chain.ChainHeaderAnnouncementEvent)
 		require.True(t, ok, "got %T, want an announcement", evt.Data)
 		assert.Equal(t, want, data.RbHash)
+		lastAnnouncedSeq = data.Seq
 	}
 	evt := testutil.RequireReceive(
 		t, ch, 2*time.Second, "invalidation",
@@ -403,6 +405,43 @@ func TestRollbackInvalidationRoutedThroughSequencer(t *testing.T) {
 		evt.Data,
 	)
 	assert.Equal(t, chain.HeaderInvalidationRollback, invalid.Reason)
+	// The rollback must draw a real sequence number from the same counter as
+	// the announcements it voids, not the unsequenced zero. Seq 0 is not
+	// inert: the vote manager reads it as "supersedes nothing"
+	// (rollbackProtectedLocked), so a zero-sequenced rollback protects
+	// nothing and prunes the REPLACEMENT chain's announcement, vote, tally
+	// and dedup record at the same slot -- the exact over-prune the sequence
+	// guard exists to stop, after which the node cannot re-vote a slot it
+	// had already voted on correctly.
+	//
+	// The "sequenced after the rollback" assertion further down cannot see
+	// that: every real sequence number is greater than zero, so it holds
+	// either way. The earlier side is the half that catches it.
+	assert.Greater(
+		t,
+		invalid.Seq,
+		lastAnnouncedSeq,
+		"the invalidation is sequenced after the announcements it voids",
+	)
+	// The guard works by pairing: handleRollback compares the Seq on the
+	// ChainRollbackEvent against what the header stream has already applied,
+	// so the two events describing this one mutation have to carry the same
+	// number. Pin that here, at the producer, rather than trusting the
+	// manager-side tests -- those pass a Seq to handleRollback directly and
+	// so pin the consumer's use of a number, never its issuing.
+	var sawRollback bool
+	for _, e := range evts {
+		if data, ok := e.Data.(chain.ChainRollbackEvent); ok {
+			sawRollback = true
+			assert.Equal(
+				t,
+				invalid.Seq,
+				data.Seq,
+				"the rollback and its invalidation describe one mutation and must share its sequence",
+			)
+		}
+	}
+	require.True(t, sawRollback, "the rollback removed a block")
 
 	evt = testutil.RequireReceive(
 		t, ch, 2*time.Second, "announcement after the rollback",
