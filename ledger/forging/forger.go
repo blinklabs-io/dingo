@@ -1770,32 +1770,99 @@ func (f *BlockForger) SlotTracker() *SlotTracker {
 	return f.slotTracker
 }
 
+// slotClockPosition places a slot-clock reading relative to the slot
+// being forged.
+type slotClockPosition int
+
+const (
+	// slotClockInSlot: the clock is still inside the slot being forged,
+	// so its next-boundary answer describes that slot's own end.
+	slotClockInSlot slotClockPosition = iota
+	// slotClockPastSlot: the clock has already left the slot, so the
+	// slot ended at or before now.
+	slotClockPastSlot
+	// slotClockBeforeSlot: the forge is ahead of the clock, so the
+	// next-boundary answer belongs to an earlier slot and says nothing
+	// about this one.
+	slotClockBeforeSlot
+)
+
+func positionOfSlotClock(observed, slot uint64) slotClockPosition {
+	switch {
+	case observed > slot:
+		return slotClockPastSlot
+	case observed < slot:
+		return slotClockBeforeSlot
+	default:
+		return slotClockInSlot
+	}
+}
+
 // slotEndTime returns the instant the slot being forged ends. ok is false
-// when the slot clock cannot answer, which leaves the caller to pick its
-// own bound rather than guessing at one.
+// when the slot clock cannot answer for this slot, which leaves the caller
+// to pick its own bound rather than guessing at one.
+//
+// NextSlotTime is derived from the clock's own current slot, so a reading
+// taken on either side of it can belong to a different slot than the one
+// being forged. The clock slot is therefore read before and after: only a
+// reading that brackets NextSlotTime inside the forged slot proves the
+// boundary belongs to it. A clock that has moved past the slot reports an
+// end of now -- the tightest bound that can be proven, and enough for
+// every caller, all of which only ask whether the slot is over.
 func (f *BlockForger) slotEndTime(slot uint64) (time.Time, bool) {
 	if f.slotClock == nil {
 		return time.Time{}, false
 	}
-	clockSlot, err := f.slotClock.CurrentSlot()
+	before, err := f.slotClock.CurrentSlot()
 	if err != nil {
 		return time.Time{}, false
 	}
-	if clockSlot != slot {
-		// The wall clock has already left the slot being forged, so
-		// NextSlotTime describes a later slot's boundary and would hand
-		// this forge a budget it does not have.
+	switch positionOfSlotClock(before, slot) {
+	case slotClockPastSlot:
 		return f.now(), true
+	case slotClockBeforeSlot:
+		return time.Time{}, false
+	case slotClockInSlot:
+		// The boundary read below can still be trusted; fall through.
 	}
 	slotEnd, err := f.slotClock.NextSlotTime()
 	if err != nil || slotEnd.IsZero() {
 		return time.Time{}, false
 	}
+	after, err := f.slotClock.CurrentSlot()
+	if err != nil {
+		return time.Time{}, false
+	}
+	switch positionOfSlotClock(after, slot) {
+	case slotClockPastSlot:
+		// The clock crossed the boundary while it was being read, so
+		// slotEnd is the *next* slot's end -- a budget this forge does
+		// not have.
+		return f.now(), true
+	case slotClockBeforeSlot:
+		return time.Time{}, false
+	case slotClockInSlot:
+		// Both readings bracket NextSlotTime inside the forged slot,
+		// so the boundary belongs to it.
+	}
 	return slotEnd, true
 }
 
-// ebSelectionDeadline returns the instant endorser-block selection must
-// stop at, always bounded when the slot clock can answer at all.
+// ebSelectionBudget returns the instant endorser-block selection must stop
+// at for the given slot, and whether the slot's window has already closed.
+//
+// expired is true when the slot is over. No endorser block is produced
+// then: its hash is committed into the ranking-block header, so selecting
+// after the slot has closed only delays the block that actually extends
+// the chain, and it buys nothing -- the endorser block is announced by
+// that same ranking block, so if the ranking block is orphaned for being
+// late the endorser block cannot be certified through it either.
+//
+// When the slot clock cannot place this forge in its slot, the deadline is
+// a minimal fixed budget instead. Unbounded is never an option: every
+// candidate costs a full ledger re-validation, so a pass over a deep
+// mempool runs for seconds, and it is no more acceptable without a clock
+// than with one.
 //
 // The reserve is what ranking-block assembly, signing, adoption and
 // broadcast get after the endorser block is finished, and it is taken from
@@ -1803,29 +1870,20 @@ func (f *BlockForger) slotEndTime(slot uint64) (time.Time, bool) {
 // whose slots are shorter than the configured reserve a fixed subtraction
 // would put the deadline before the slot began, leaving selection no
 // budget at all.
-//
-// A slot whose window has already closed still gets a bound. Leaving the
-// pass unbounded there would let a producer that woke late start a full
-// mempool re-validation -- seconds of work, finishing even further outside
-// the slot -- which is the failure this whole change exists to remove.
-func (f *BlockForger) ebSelectionDeadline(slot uint64) (time.Time, bool) {
+func (f *BlockForger) ebSelectionBudget(slot uint64) (time.Time, bool) {
 	slotEnd, ok := f.slotEndTime(slot)
 	if !ok {
-		return time.Time{}, false
+		return f.now().Add(f.forgeEBSelectionReserve), false
 	}
-	now := f.now()
-	remaining := slotEnd.Sub(now)
+	remaining := slotEnd.Sub(f.now())
 	if remaining <= 0 {
-		// Late slot: a minimal fixed budget. The endorser block still
-		// feeds the pipeline even when its ranking block loses the
-		// race, so producing a small one beats producing none.
-		return now.Add(f.forgeEBSelectionReserve), true
+		return time.Time{}, true
 	}
 	reserve := f.forgeEBSelectionReserve
 	if half := remaining / 2; reserve > half {
 		reserve = half
 	}
-	return slotEnd.Add(-reserve), true
+	return slotEnd.Add(-reserve), false
 }
 
 // checkAndForgeLeiosEB attempts to produce and broadcast a Leios endorser
@@ -1851,6 +1909,24 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		return nil, nil
 	}
 
+	// Bound selection by the slot before touching the mempool. Every
+	// candidate costs a full ledger re-validation, so an unbounded pass
+	// over a deep mempool runs for seconds -- and because the endorser
+	// block's hash is committed into the ranking-block header, all of
+	// that time is spent before the block that actually extends the
+	// chain can be signed.
+	selectionDeadline, slotExpired := f.ebSelectionBudget(slot)
+	if slotExpired {
+		f.logger.Debug(
+			"leios EB skipped: slot window already closed",
+			"slot", slot,
+		)
+		if f.metrics != nil {
+			f.metrics.leiosEbSkipped.WithLabelValues("slot_expired").Inc()
+		}
+		return nil, nil
+	}
+
 	allTxs := f.leiosMempool.Transactions()
 	txs := allTxs
 	if len(excludedTxHashes) > 0 {
@@ -1869,20 +1945,7 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		}
 		return nil, nil
 	}
-	// Bound selection by the slot. Every candidate costs a full ledger
-	// re-validation, so an unbounded pass over a deep mempool runs for
-	// seconds -- and because the endorser block's hash is committed into
-	// the ranking-block header, all of that time is spent before the block
-	// that actually extends the chain can be signed.
-	limits := leiosSelectionLimits{now: f.now}
-	if deadline, ok := f.ebSelectionDeadline(slot); ok {
-		limits.deadline = deadline
-	} else {
-		// No usable slot clock. Bound the pass anyway: an unbounded
-		// re-validation of the whole mempool is the failure being fixed,
-		// and it is no more acceptable without a clock than with one.
-		limits.deadline = f.now().Add(f.forgeEBSelectionReserve)
-	}
+	limits := leiosSelectionLimits{now: f.now, deadline: selectionDeadline}
 	candidateCount := len(txs)
 	selectStart := f.now()
 	validatedTxs, truncated, err := selectValidLeiosTransactions(
@@ -2107,6 +2170,12 @@ func buildLeiosEB(
 	prealloc := len(txs)
 	if caps.maxRefs > 0 && uint64(prealloc) > caps.maxRefs {
 		prealloc = int(caps.maxRefs) // #nosec G115 -- bounded by prealloc above
+	}
+	// Every admitted transaction carries at least one byte, so the byte
+	// cap bounds the reference count too. Without this a disabled
+	// reference cap still preallocated for the whole mempool.
+	if caps.maxBytes > 0 && uint64(prealloc) > caps.maxBytes {
+		prealloc = int(caps.maxBytes) // #nosec G115 -- bounded by prealloc above
 	}
 	refs := make([]lcommon.LeiosTransactionReference, 0, prealloc)
 	// bodies holds each referenced transaction's raw CBOR, in the same order

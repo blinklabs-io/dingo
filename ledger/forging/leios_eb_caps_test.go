@@ -113,6 +113,66 @@ func TestBuildLeiosEBBoundsPreallocation(t *testing.T) {
 	)
 }
 
+// TestBuildLeiosEBBoundsPreallocationByTheByteCap is the same bound on the
+// other cap. With references uncapped, a deep mempool would still dictate
+// the allocation; every admitted transaction carries at least one byte, so
+// the byte cap bounds the reference count too.
+func TestBuildLeiosEBBoundsPreallocationByTheByteCap(t *testing.T) {
+	txs := leiosCandidateTxs(t, 500)
+	// One candidate's worth of bytes: enough to admit a reference, far
+	// below the 500 the mempool would otherwise dictate.
+	maxBytes := uint64(len(txs[0].Cbor))
+	_, _, bodies, err := buildLeiosEB(txs, leiosEBCaps{maxBytes: maxBytes})
+	require.NoError(t, err)
+	require.NotEmpty(t, bodies)
+	require.Less(
+		t,
+		cap(bodies),
+		500,
+		"capacity must follow the byte cap, not the mempool depth",
+	)
+	require.LessOrEqual(t, uint64(cap(bodies)), maxBytes)
+}
+
+// TestNewBlockForgerDefaultsTheEBSelectionReserve covers the same embedder
+// path for the reserve: a ForgerConfig that never mentions it gets the
+// built-in fallback rather than a zero budget, which would leave selection
+// no time at all.
+func TestNewBlockForgerDefaultsTheEBSelectionReserve(t *testing.T) {
+	forger := newCapDefaultsForger(t, nil, nil)
+	require.Equal(
+		t,
+		defaultForgeEBSelectionReserve,
+		forger.forgeEBSelectionReserve,
+	)
+}
+
+// TestNewBlockForgerHonoursAConfiguredEBSelectionReserve is the other
+// half, and the last hop of the operator-facing path: yaml/env/CLI ->
+// internal/config -> buildDingoConfig -> dingo.Config -> ForgerConfig ->
+// this field.
+func TestNewBlockForgerHonoursAConfiguredEBSelectionReserve(t *testing.T) {
+	block := newForgerTestBlock(10, 2)
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     &forgerTestBuilder{block: block, cbor: block.cbor},
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		SlotClock: &ebTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      9,
+			slotsPerKESPeriod: 100,
+			slotEnd:           time.Now().Add(time.Hour),
+		},
+		ForgeEBSelectionReserve: 750 * time.Millisecond,
+		PromRegistry:            prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, 750*time.Millisecond, forger.forgeEBSelectionReserve)
+}
+
 // TestNewBlockForgerAppliesEBCapDefaults covers the embedder path: a
 // ForgerConfig that never mentions the caps must still get the backstop,
 // rather than silently running uncapped because the zero value means
@@ -170,4 +230,5 @@ func newCapDefaultsForger(
 func TestForgeEBCapDefaultsArePinned(t *testing.T) {
 	require.Equal(t, uint64(20000), defaultForgeEBMaxTxRefs)
 	require.Equal(t, uint64(25165824), defaultForgeEBMaxBytes)
+	require.Equal(t, 300*time.Millisecond, defaultForgeEBSelectionReserve)
 }

@@ -58,6 +58,7 @@ func newEBTimingForger(
 	clock *ebTestSlotClock,
 	validator TxValidator,
 	caster *forgerTestLeiosCaster,
+	broadcaster *forgerTestBroadcaster,
 	txs []MempoolTransaction,
 ) *BlockForger {
 	t.Helper()
@@ -68,7 +69,7 @@ func newEBTimingForger(
 		Credentials:         setupTestCredentials(t),
 		LeaderChecker:       forgerTestLeader{},
 		BlockBuilder:        &forgerTestBuilder{block: block, cbor: block.cbor},
-		BlockBroadcaster:    &forgerTestBroadcaster{},
+		BlockBroadcaster:    broadcaster,
 		SlotClock:           clock,
 		LeiosProduceChecker: &forgerTestLeiosChecker{allowed: true},
 		LeiosEBBroadcaster:  caster,
@@ -97,6 +98,7 @@ func TestLeiosEBProducedLineCarriesTimingBreakdown(t *testing.T) {
 		},
 		&sessionMockTxValidator{},
 		&forgerTestLeiosCaster{},
+		&forgerTestBroadcaster{},
 		leiosCandidateTxs(t, 4),
 	)
 
@@ -123,11 +125,18 @@ func TestLeiosEBProducedLineCarriesTimingBreakdown(t *testing.T) {
 	)
 }
 
-// TestLeiosEBSelectionTruncationIsCounted gives operators the signal that
-// the slot budget, not the mempool, is deciding endorser-block size.
+// TestLeiosEBSelectionTruncationIsCounted follows the runtime composition
+// path -- checkAndForgeProduction -> checkAndForgeLeiosEB ->
+// selectValidLeiosTransactions -- and proves that the slot deadline
+// reaches the pass that spends the slot, that operators get the signal
+// that the slot budget (not the mempool) decided endorser-block size, and
+// that the ranking block is still forged. A deadline that exists in the
+// forger but never arrives at selection bounds nothing.
 func TestLeiosEBSelectionTruncationIsCounted(t *testing.T) {
 	var logs bytes.Buffer
 	validator := &sessionMockTxValidator{}
+	caster := &forgerTestLeiosCaster{}
+	broadcaster := &forgerTestBroadcaster{}
 	forger := newEBTimingForger(
 		t,
 		&logs,
@@ -138,9 +147,12 @@ func TestLeiosEBSelectionTruncationIsCounted(t *testing.T) {
 			slotEnd:           time.Now().Add(time.Second),
 		},
 		validator,
-		&forgerTestLeiosCaster{},
+		caster,
+		broadcaster,
 		leiosCandidateTxs(t, 10),
 	)
+	// Every candidate consumes a tenth of a second of the budget, so the
+	// pass cannot get through all ten inside the slot.
 	fakeNow := time.Now()
 	forger.now = func() time.Time { return fakeNow }
 	validator.onValidate = func(int) {
@@ -148,6 +160,13 @@ func TestLeiosEBSelectionTruncationIsCounted(t *testing.T) {
 	}
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	require.NotEmpty(t, caster.txBodies)
+	require.Less(
+		t,
+		len(caster.txBodies),
+		10,
+		"endorser-block selection must stop when the slot budget is gone",
+	)
 	require.Equal(
 		t,
 		float64(1),
@@ -157,5 +176,11 @@ func TestLeiosEBSelectionTruncationIsCounted(t *testing.T) {
 		t,
 		uint64(1),
 		histogramSampleCount(t, forger.metrics.leiosEbSelectionSeconds),
+	)
+	require.Equal(
+		t,
+		1,
+		broadcaster.calls,
+		"the ranking block must still be forged and broadcast",
 	)
 }

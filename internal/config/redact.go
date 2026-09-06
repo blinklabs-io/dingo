@@ -145,6 +145,7 @@ var logPlainConfigFields = []string{
 	"DelegatorInactivityEnabled",
 	"ForgeStaleGapThresholdSlots",
 	"ForgeSyncToleranceSlots",
+	"ForgeEBSelectionReserve",
 	"ForgeEBMaxTxRefs",
 	"ForgeEBMaxBytes",
 	"FullPotRewardsEnabled",

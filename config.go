@@ -249,6 +249,7 @@ type Config struct {
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
 	forgeEBMaxTxRefs, forgeEBMaxBytes                                                   *uint64
+	forgeEBSelectionReserve                                                             time.Duration
 	validateForgedBlock                                                                 bool
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
@@ -826,6 +827,7 @@ func (c *Config) syncCompatFields() {
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
 	c.forgeEBMaxTxRefs, c.forgeEBMaxBytes = c.cfg.ForgeEBMaxTxRefs, c.cfg.ForgeEBMaxBytes
+	c.forgeEBSelectionReserve = c.cfg.ForgeEBSelectionReserve
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
@@ -1456,6 +1458,15 @@ func WithForgeSyncToleranceSlots(slots uint64) ConfigOptionFunc {
 func WithForgeStaleGapThresholdSlots(slots uint64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ForgeStaleGapThresholdSlots = slots
+	}
+}
+
+// WithForgeEBSelectionReserve sets how much of the slot Leios
+// endorser-block selection must leave for ranking-block assembly, signing
+// and broadcast. Zero falls back to the built-in default.
+func WithForgeEBSelectionReserve(d time.Duration) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ForgeEBSelectionReserve = d
 	}
 }
 
@@ -2205,6 +2216,12 @@ func (c *Config) ShelleyOperationalCertificate() string {
 // ForgeSyncToleranceSlots returns the sync tolerance for block forging.
 func (c *Config) ForgeSyncToleranceSlots() uint64 {
 	return c.cfg.ForgeSyncToleranceSlots
+}
+
+// ForgeEBSelectionReserve returns the slot time reserved for
+// ranking-block assembly after endorser-block selection.
+func (c *Config) ForgeEBSelectionReserve() time.Duration {
+	return c.cfg.ForgeEBSelectionReserve
 }
 
 // ForgeEBMaxTxRefs returns the endorser-block transaction reference cap.

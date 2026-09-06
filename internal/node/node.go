@@ -696,6 +696,7 @@ func buildDingoConfig(
 		dingo.WithForgeStaleGapThresholdSlots(
 			cfg.ForgeStaleGapThresholdSlots,
 		),
+		dingo.WithForgeEBSelectionReserve(cfg.ForgeEBSelectionReserve),
 		dingo.WithForgeEBMaxTxRefs(
 			forgeEBCap(cfg.ForgeEBMaxTxRefs, config.DefaultForgeEBMaxTxRefs),
 		),

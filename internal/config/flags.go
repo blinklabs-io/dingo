@@ -680,6 +680,11 @@ var flagSpecs = []flagSpec{
 		"forge-stale-gap-threshold-slots",
 		"slot gap threshold for stale slot clock alerts",
 	),
+	durationFlag(
+		"ForgeEBSelectionReserve",
+		"forge-eb-selection-reserve",
+		"slot time reserved for ranking-block assembly after Leios endorser-block selection",
+	),
 	uint64PtrFlag(
 		"ForgeEBMaxTxRefs",
 		"forge-eb-max-tx-refs",
@@ -1161,8 +1166,16 @@ func uint64PtrFlag(field, name, help string) flagSpec {
 	return flagSpec{
 		field: field,
 		name:  name,
-		register: func(f *pflag.FlagSet, _ *Config) {
-			f.Uint64(name, 0, help)
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			// Report the value that omitting the flag actually
+			// produces, not the zero value of the pointer. The
+			// Changed check below still lets an explicit 0 through
+			// to disable the cap.
+			var def uint64
+			if v := defaultValue(defaults, field); !v.IsNil() {
+				def = v.Elem().Uint()
+			}
+			f.Uint64(name, def, help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
 			if !f.Changed(name) {
