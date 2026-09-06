@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -1054,4 +1055,134 @@ func TestVoteManagerLocalBlockInvalidationKeepsUnnamedAnnouncements(
 	assert.Contains(t, fixture.mgr.announcements, keptRb)
 	assert.Contains(t, fixture.mgr.voteRecords, keptVoteId)
 	assert.Contains(t, fixture.mgr.acquiredEbs, keptEb)
+}
+
+// TestVoteManagerSameSlotLocalForgeStillVotes is the regression test for the
+// competing same-slot forge. The node votes for a peer's announcing header at
+// slot S, occupying the (slot, voter) vote id; it then forges its own
+// announcing block at the same slot, which discards that peer header.
+//
+// Arming the forged block's announcement before the invalidation frees the id
+// gets its vote rejected as a duplicate, and nothing retries it -- the producer
+// silently misses its own vote. The chain therefore announces a forged block on
+// the ordered header stream immediately behind the invalidation, so the id is
+// always free by the time the announcement is armed. This test delivers the
+// two in that order and requires the local vote.
+func TestVoteManagerSameSlotLocalForgeStillVotes(t *testing.T) {
+	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
+	fixture := newHeaderArmingFixture(t, slots)
+	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
+
+	peerRb := lcommon.NewBlake2b256([]byte("peer-rb"))
+	peerEb := lcommon.NewBlake2b256([]byte("peer-eb"))
+	localRb := lcommon.NewBlake2b256([]byte("local-rb"))
+	localEb := lcommon.NewBlake2b256([]byte("local-eb"))
+	voteId := lcommon.LeiosVoteId{
+		SlotNo:  headerArmingRbSlot,
+		VoterId: headerArmingSeatedVoterId,
+	}
+
+	// The peer's header wins first and takes the vote id.
+	peerVote := armAndVote(
+		t, fixture, emittedCh, headerArmingRbSlot, peerRb, peerEb, 1,
+	)
+	assert.Equal(t, peerRb, peerVote.Vote.AnnouncingRbHash)
+	require.Len(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{voteId}), 1)
+
+	// The local block's endorser block is already in hand when it is forged.
+	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, localEb)
+
+	// The apply-driven backstop arms the forged block first, while the id is
+	// still held by the peer vote. The attempt is rejected, but it must not
+	// mark the announcement as voted.
+	fixture.mgr.ObserveAnnouncement(headerArmingRbSlot, localRb, localEb)
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		300*time.Millisecond,
+		"the vote id is still held by the peer vote",
+	)
+
+	// Chain-mutation order on the header stream: the invalidation naming the
+	// discarded peer header, then the forged block's own announcement.
+	publishHeaderInvalidationNaming(
+		fixture,
+		headerArmingRbSlot,
+		chain.HeaderInvalidationLocalBlock,
+		2,
+		[]lcommon.Blake2b256{peerRb},
+	)
+	publishHeaderAnnouncement(
+		fixture, headerArmingRbSlot, localRb, localEb, 3,
+	)
+
+	emitted := testutil.RequireReceive(
+		t,
+		emittedCh,
+		2*time.Second,
+		"the forged block's own vote is emitted once the id is freed",
+	)
+	local, ok := emitted.Data.(VoteEmittedEvent)
+	require.True(t, ok)
+	assert.Equal(t, localRb, local.Vote.AnnouncingRbHash)
+
+	// Exactly one vote, and it is the local one.
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		300*time.Millisecond,
+		"exactly one vote for the slot",
+	)
+	raws := fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{voteId})
+	require.Len(t, raws, 1)
+	var stored lcommon.LeiosVote
+	_, err := cbor.Decode(raws[0], &stored)
+	require.NoError(t, err)
+	assert.Equal(t, localEb, stored.EndorserBlockHash)
+
+	fixture.mgr.mu.Lock()
+	defer fixture.mgr.mu.Unlock()
+	assert.NotContains(t, fixture.mgr.announcements, peerRb)
+	assert.NotContains(t, fixture.mgr.acquiredEbs, peerEb)
+	assert.Contains(t, fixture.mgr.announcements, localRb)
+	assert.Contains(t, fixture.mgr.votedAnnouncements, localRb)
+	for key := range fixture.mgr.tallies {
+		assert.NotEqual(
+			t,
+			peerRb,
+			key.announcingRbHash,
+			"the discarded peer announcement's tally is gone",
+		)
+	}
+}
+
+// TestVoteManagerRejectedEmissionDoesNotMarkAnnouncementVoted pins the
+// invariant the retry above depends on: an emission attempt refused by the
+// vote store must leave the announcement eligible, or freeing the vote id
+// later would have nothing to retry.
+func TestVoteManagerRejectedEmissionDoesNotMarkAnnouncementVoted(t *testing.T) {
+	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
+	fixture := newHeaderArmingFixture(t, slots)
+	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
+
+	peerRb := lcommon.NewBlake2b256([]byte("peer-rb"))
+	peerEb := lcommon.NewBlake2b256([]byte("peer-eb"))
+	localRb := lcommon.NewBlake2b256([]byte("local-rb"))
+	localEb := lcommon.NewBlake2b256([]byte("local-eb"))
+
+	armAndVote(t, fixture, emittedCh, headerArmingRbSlot, peerRb, peerEb, 1)
+	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, localEb)
+	fixture.mgr.ObserveAnnouncement(headerArmingRbSlot, localRb, localEb)
+
+	fixture.mgr.mu.Lock()
+	defer fixture.mgr.mu.Unlock()
+	assert.Contains(t, fixture.mgr.announcements, localRb)
+	assert.NotContains(
+		t,
+		fixture.mgr.votedAnnouncements,
+		localRb,
+		"a refused emission must stay retryable",
+	)
 }
