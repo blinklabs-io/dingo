@@ -45,18 +45,21 @@ type forgingMetrics struct {
 	forgeSyncSkip    prometheus.Counter
 	// Leader checks refused because this node's ledger-applied tip and its
 	// header frontier described different chain positions, by reason:
-	// "slot_gap" (the ledger trails the frontier by more than the tolerance)
-	// or "frontier_hash_diverged" (an equal-slot fork the ledger has not
-	// applied). Any increment means the ledger pipeline, not the network, was
-	// the thing behind.
+	// "slot_gap" (the ledger trails the frontier by more than the tolerance),
+	// "frontier_hash_diverged" (an equal-slot fork the ledger has not applied)
+	// or "frontier_behind_applied" (the frontier is behind the applied tip).
+	// Counted only on slots this node was actually elected to forge, so the
+	// value is lost blocks rather than leader checks. Any increment means the
+	// ledger pipeline, not the network, was the thing behind.
 	forgeStaleTipSkip *prometheus.CounterVec
 	// Pre-materialized children for the reason label values, so the leader
 	// check does not resolve a label on every skip and neither series is
 	// absent from a dashboard before the first skip.
-	forgeStaleTipSkipSlotGap      prometheus.Counter
-	forgeStaleTipSkipHashDiverged prometheus.Counter
-	slotClockErrors               prometheus.Counter
-	tipGapSlots                   prometheus.Gauge
+	forgeStaleTipSkipSlotGap        prometheus.Counter
+	forgeStaleTipSkipHashDiverged   prometheus.Counter
+	forgeStaleTipSkipFrontierBehind prometheus.Counter
+	slotClockErrors                 prometheus.Counter
+	tipGapSlots                     prometheus.Gauge
 
 	// Slots refused by the persisted last-forged-slot fence. Any
 	// increment means the node was asked to forge a slot it had
@@ -205,6 +208,9 @@ func initForgingMetrics(
 	)
 	m.forgeStaleTipSkipHashDiverged = m.forgeStaleTipSkip.WithLabelValues(
 		forgeStaleTipReasonHashDiverged,
+	)
+	m.forgeStaleTipSkipFrontierBehind = m.forgeStaleTipSkip.WithLabelValues(
+		forgeStaleTipReasonFrontierBehind,
 	)
 	m.tipGapSlots = factory.NewGauge(
 		prometheus.GaugeOpts{

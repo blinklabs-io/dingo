@@ -103,9 +103,14 @@ func (l *forgerCountingLeader) callCount() int {
 }
 
 type forgerTestSlotClock struct {
-	currentSlot       uint64
-	chainTipSlot      uint64
-	chainTipHash      []byte
+	currentSlot  uint64
+	chainTipSlot uint64
+	chainTipHash []byte
+	// frontierExplicit selects whether frontierSlot/frontierHash are used
+	// verbatim. When false the frontier mirrors the applied tip, which is the
+	// caught-up steady state and what every test that does not care about the
+	// distinction wants.
+	frontierExplicit  bool
 	frontierSlot      uint64
 	frontierHash      []byte
 	upstreamTipSlot   uint64
@@ -125,19 +130,17 @@ func (c forgerTestSlotClock) ChainTip() ocommon.Point {
 	return ocommon.Point{Slot: c.chainTipSlot, Hash: c.chainTipHash}
 }
 
-// PrimaryChainTip defaults to the applied tip in both slot and hash, so a test
-// that sets neither frontier field observes no ledger-apply backlog and no
-// equal-slot divergence.
+// PrimaryChainTip mirrors the applied tip unless the test opts in to an
+// explicit frontier. Mirroring is the caught-up steady state, so a test that
+// does not set frontierExplicit observes no backlog and no divergence. When
+// frontierExplicit is set the values are used verbatim -- including a frontier
+// BEHIND the applied tip, which is a real state the forger must handle and
+// which a clamp would silently hide.
 func (c forgerTestSlotClock) PrimaryChainTip() ocommon.Point {
-	slot := c.frontierSlot
-	if slot < c.chainTipSlot {
-		slot = c.chainTipSlot
+	if !c.frontierExplicit {
+		return ocommon.Point{Slot: c.chainTipSlot, Hash: c.chainTipHash}
 	}
-	hash := c.frontierHash
-	if hash == nil {
-		hash = c.chainTipHash
-	}
-	return ocommon.Point{Slot: slot, Hash: hash}
+	return ocommon.Point{Slot: c.frontierSlot, Hash: c.frontierHash}
 }
 
 func (forgerTestSlotClock) NextSlotTime() (time.Time, error) {
