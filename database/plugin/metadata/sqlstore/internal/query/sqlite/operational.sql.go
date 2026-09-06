@@ -641,6 +641,26 @@ func (q *Queries) DeleteEpochsAfterSlot(ctx context.Context, startSlot sql.NullI
 	return err
 }
 
+const deleteImportedEpochBlockTotalForEpoch = `-- name: DeleteImportedEpochBlockTotalForEpoch :exec
+DELETE FROM imported_epoch_block_total
+WHERE epoch = ?
+`
+
+func (q *Queries) DeleteImportedEpochBlockTotalForEpoch(ctx context.Context, epoch int64) error {
+	_, err := q.db.ExecContext(ctx, deleteImportedEpochBlockTotalForEpoch, epoch)
+	return err
+}
+
+const deleteImportedEpochBlockTotalsAfterSlot = `-- name: DeleteImportedEpochBlockTotalsAfterSlot :exec
+DELETE FROM imported_epoch_block_total
+WHERE captured_slot > ?
+`
+
+func (q *Queries) DeleteImportedEpochBlockTotalsAfterSlot(ctx context.Context, capturedSlot int64) error {
+	_, err := q.db.ExecContext(ctx, deleteImportedEpochBlockTotalsAfterSlot, capturedSlot)
+	return err
+}
+
 const deleteImportedPoolBlockCountsAfterSlot = `-- name: DeleteImportedPoolBlockCountsAfterSlot :exec
 DELETE FROM imported_pool_block_count
 WHERE captured_slot > ?
@@ -2097,6 +2117,19 @@ func (q *Queries) GetImportCheckpoint(ctx context.Context, importKey string) (Im
 	var i ImportCheckpoint
 	err := row.Scan(&i.ID, &i.ImportKey, &i.Phase)
 	return i, err
+}
+
+const getImportedEpochBlockTotal = `-- name: GetImportedEpochBlockTotal :one
+SELECT total_blocks
+FROM imported_epoch_block_total
+WHERE epoch = ?
+`
+
+func (q *Queries) GetImportedEpochBlockTotal(ctx context.Context, epoch int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, getImportedEpochBlockTotal, epoch)
+	var total_blocks int64
+	err := row.Scan(&total_blocks)
+	return total_blocks, err
 }
 
 const getImportedPoolBlockCounts = `-- name: GetImportedPoolBlockCounts :many
@@ -4007,6 +4040,26 @@ func (q *Queries) SaveEpochSummary(ctx context.Context, arg SaveEpochSummaryPara
 	var id int64
 	err := row.Scan(&id)
 	return id, err
+}
+
+const saveImportedEpochBlockTotal = `-- name: SaveImportedEpochBlockTotal :exec
+INSERT INTO imported_epoch_block_total (
+    epoch, total_blocks, captured_slot
+) VALUES (?, ?, ?)
+ON CONFLICT (epoch) DO UPDATE SET
+    total_blocks = excluded.total_blocks,
+    captured_slot = excluded.captured_slot
+`
+
+type SaveImportedEpochBlockTotalParams struct {
+	Epoch        int64
+	TotalBlocks  int64
+	CapturedSlot int64
+}
+
+func (q *Queries) SaveImportedEpochBlockTotal(ctx context.Context, arg SaveImportedEpochBlockTotalParams) error {
+	_, err := q.db.ExecContext(ctx, saveImportedEpochBlockTotal, arg.Epoch, arg.TotalBlocks, arg.CapturedSlot)
+	return err
 }
 
 const saveImportedPoolBlockCount = `-- name: SaveImportedPoolBlockCount :exec

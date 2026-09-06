@@ -504,6 +504,23 @@ WHERE epoch = ?;
 DELETE FROM imported_pool_block_count
 WHERE epoch = ?;
 
+-- name: SaveImportedEpochBlockTotal :exec
+INSERT INTO imported_epoch_block_total (
+    epoch, total_blocks, captured_slot
+) VALUES (?, ?, ?)
+ON CONFLICT (epoch) DO UPDATE SET
+    total_blocks = excluded.total_blocks,
+    captured_slot = excluded.captured_slot;
+
+-- name: GetImportedEpochBlockTotal :one
+SELECT total_blocks
+FROM imported_epoch_block_total
+WHERE epoch = ?;
+
+-- name: DeleteImportedEpochBlockTotalForEpoch :exec
+DELETE FROM imported_epoch_block_total
+WHERE epoch = ?;
+
 -- name: ReleaseFallbackRewardSnapshotGuard :execrows
 DELETE FROM reward_snapshot
 WHERE id = ? AND authoritative = FALSE;
@@ -630,6 +647,10 @@ WHERE captured_slot > ? OR boundary_slot > ?;
 
 -- name: DeleteImportedPoolBlockCountsAfterSlot :exec
 DELETE FROM imported_pool_block_count
+WHERE captured_slot > ?;
+
+-- name: DeleteImportedEpochBlockTotalsAfterSlot :exec
+DELETE FROM imported_epoch_block_total
 WHERE captured_slot > ?;
 
 -- name: DeleteRewardSeedFailuresAfterSlot :exec

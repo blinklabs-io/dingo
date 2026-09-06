@@ -2392,6 +2392,19 @@ func importBlocksMade(
 		if err := store.SaveImportedPoolBlockCounts(counts, txn); err != nil {
 			return err
 		}
+		// Written unconditionally, including for a map with no entries. An
+		// epoch in which no pool minted a block is a state the certified
+		// snapshot asserts, and without this row it would be
+		// indistinguishable from an epoch the import said nothing about --
+		// which the reward round declines rather than treats as zero.
+		if err := store.SaveImportedEpochBlockTotal(
+			imported.epoch,
+			sumBlocksMade(imported.blocks),
+			slot,
+			txn,
+		); err != nil {
+			return err
+		}
 	}
 	return nil
 }

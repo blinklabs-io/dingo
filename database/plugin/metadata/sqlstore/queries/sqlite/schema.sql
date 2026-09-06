@@ -208,6 +208,13 @@ CREATE TABLE imported_pool_block_count (
     PRIMARY KEY (epoch, pool_key_hash)
 );
 
+CREATE TABLE imported_epoch_block_total (
+    epoch INTEGER NOT NULL,
+    total_blocks INTEGER NOT NULL,
+    captured_slot INTEGER NOT NULL,
+    PRIMARY KEY (epoch)
+);
+
 CREATE TABLE reward_pool_input (
     margin TEXT,
     pool_key_hash BLOB NOT NULL,

@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 )
 
@@ -164,25 +165,93 @@ func TestImportBlocksMadePersistsBothEpochs(t *testing.T) {
 	// The expected values are spelled out rather than compared against the
 	// parsed state, so a parse that returned nothing could not satisfy this by
 	// agreeing with itself.
-	prev, err := store.GetImportedPoolBlockCounts(state.Epoch-1, nil)
+	prev, prevTotal, prevKnown, err := store.GetImportedPoolBlockCounts(
+		state.Epoch-1, nil,
+	)
 	require.NoError(t, err)
+	require.True(t, prevKnown)
 	assert.Equal(t, map[string]uint64{
 		decodeSnapshotPoolKey(t, snapshotPoolA): 63,
 		decodeSnapshotPoolKey(t, snapshotPoolB): 104,
 	}, prev)
+	assert.Equal(t, uint64(167), prevTotal)
 
-	cur, err := store.GetImportedPoolBlockCounts(state.Epoch, nil)
+	cur, curTotal, curKnown, err := store.GetImportedPoolBlockCounts(
+		state.Epoch, nil,
+	)
 	require.NoError(t, err)
+	require.True(t, curKnown)
 	assert.Equal(t, map[string]uint64{
 		decodeSnapshotPoolKey(t, snapshotPoolA): 63,
 		decodeSnapshotPoolKey(t, snapshotPoolB): 81,
 	}, cur)
+	assert.Equal(t, uint64(144), curTotal)
 
-	// An epoch the snapshot says nothing about must stay empty, so the reward
-	// round can tell "not imported" from "imported as zero".
-	older, err := store.GetImportedPoolBlockCounts(state.Epoch-2, nil)
+	// An epoch the snapshot says nothing about must read as unknown, so the
+	// reward round can tell "not imported" from "imported as zero".
+	_, _, olderKnown, err := store.GetImportedPoolBlockCounts(
+		state.Epoch-2, nil,
+	)
 	require.NoError(t, err)
-	assert.Empty(t, older)
+	assert.False(t, olderKnown)
+}
+
+// An epoch in which no pool minted a block is a state the certified snapshot
+// asserts, not an epoch the import said nothing about. Only the epoch-total
+// row can carry that, because an empty BlocksMade map writes no per-pool rows,
+// and reading it as "not imported" would decline a reward round the reference
+// runs.
+func TestImportBlocksMadeRecordsAnEmptyMapAsACertifiedZero(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	store := db.Metadata()
+
+	require.NoError(t, importBlocksMade(
+		store,
+		12,
+		map[string]uint64{},
+		map[string]uint64{},
+		400,
+		nil,
+	))
+
+	counts, total, known, err := store.GetImportedPoolBlockCounts(11, nil)
+	require.NoError(t, err)
+	assert.True(
+		t,
+		known,
+		"an empty BlocksMade map is a zero-block epoch, not an absent one",
+	)
+	assert.Empty(t, counts)
+	assert.Equal(t, uint64(0), total)
+}
+
+// The recorded total is checked against the rows rather than derived from
+// them. A per-pool set truncated by a partial write would otherwise present as
+// a smaller but self-consistent epoch, raising every surviving pool's share of
+// the blocks and over-crediting its rewards.
+func TestImportedBlockCountsRejectATotalThatDisagreesWithTheRows(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	store := db.Metadata()
+
+	poolKey := make([]byte, credentialHashSize)
+	require.NoError(t, store.SaveImportedPoolBlockCounts(
+		[]models.ImportedPoolBlockCount{
+			{
+				Epoch:          20,
+				PoolKeyHash:    poolKey,
+				BlocksProduced: 4,
+				CapturedSlot:   10,
+			},
+		},
+		nil,
+	))
+	require.NoError(t, store.SaveImportedEpochBlockTotal(20, 9, 10, nil))
+
+	_, _, _, err = store.GetImportedPoolBlockCounts(20, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sum to 4, recorded total is 9")
 }
 
 // A catch-up import carries a later anchor and a later nesBcur. Merging the
@@ -215,7 +284,9 @@ func TestImportBlocksMadeReplacesAnEpochRatherThanMerging(t *testing.T) {
 		nil,
 	))
 
-	cur, err := store.GetImportedPoolBlockCounts(9, nil)
+	cur, total, known, err := store.GetImportedPoolBlockCounts(9, nil)
 	require.NoError(t, err)
+	require.True(t, known)
 	assert.Equal(t, map[string]uint64{poolA: 5}, cur)
+	assert.Equal(t, uint64(5), total)
 }

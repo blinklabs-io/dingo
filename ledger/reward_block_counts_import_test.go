@@ -20,7 +20,9 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -93,6 +95,12 @@ func TestRewardBlockCountsMergesImportedCountsAcrossTheAnchor(t *testing.T) {
 				CapturedSlot:   anchorSlot,
 			},
 		},
+		nil,
+	))
+	require.NoError(t, meta.SaveImportedEpochBlockTotal(
+		performanceEpoch,
+		5+3+2,
+		anchorSlot,
 		nil,
 	))
 
@@ -202,6 +210,12 @@ func TestRewardBlockCountsIgnoresImportedCountsAboveTheAnchor(t *testing.T) {
 		},
 		nil,
 	))
+	require.NoError(t, meta.SaveImportedEpochBlockTotal(
+		performanceEpoch,
+		7,
+		epochStartSlot-1,
+		nil,
+	))
 
 	counts, total, known, err := ls.rewardBlockCounts(
 		meta,
@@ -242,6 +256,68 @@ func TestStakeRewardRoundDeclinedWhenAnchorHidesTheBlockCounts(t *testing.T) {
 	)
 	require.Nil(t, app)
 	assert.Contains(t, logs.String(), "no block counts for the performance epoch")
+}
+
+// A recorded anchor sits at or above slot 0 and so covers epoch 0, the
+// performance epoch of both bootstrap rounds. Those rounds must still run:
+// they distribute no pool or account rewards but do move the ADA pots, and
+// declining one would leave treasury and reserves at their genesis values for
+// the life of the chain. They are safe because epoch 0's mark snapshot holds
+// no pools, and an empty pool set is answered before the anchor is consulted;
+// the reference agrees that zero rather than unknown is the answer there,
+// since NEWEPOCH's initialRules construct the genesis state with BlocksMade
+// Map.empty. This pins that, rather than proving a fix.
+func TestBootstrapStakeRewardRoundSurvivesAMithrilAnchor(t *testing.T) {
+	ls, db := newRewardCalculationTestLedger(t)
+	meta := db.Metadata()
+
+	require.NoError(t, meta.SetEpoch(
+		0, 0, nil, nil, nil, nil, eras.ShelleyEraDesc.Id, 1, 100, nil,
+	))
+	pparamsCbor, err := cbor.Encode(&shelley.ShelleyProtocolParameters{
+		NOpt:             10,
+		A0:               rewardCalcRat(1, 2),
+		Rho:              rewardCalcRat(1, 100),
+		Tau:              rewardCalcRat(0, 1),
+		Decentralization: rewardCalcRat(0, 1),
+		ProtocolMajor:    7,
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		pparamsCbor, 0, 0, eras.ShelleyEraDesc.Id, nil,
+	))
+	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch:        0,
+		Reserves:     100_000_000,
+		CapturedSlot: 0,
+	}, nil))
+	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+		Epoch:           0,
+		SnapshotType:    "mark",
+		CapturedSlot:    0,
+		BoundarySlot:    0,
+		ProtocolVersion: 7,
+	}, nil))
+	require.NoError(t, meta.SetSyncState(
+		mithrilLedgerSlotSyncKey,
+		"50",
+		nil,
+	))
+
+	txn := db.Transaction(false)
+	defer func() { _ = txn.Rollback() }()
+	app, ok, err := ls.calculateStakeRewardApplication(txn, 1, 100, 100, true)
+	require.NoError(t, err)
+	require.True(
+		t,
+		ok,
+		"an anchor covers epoch 0 by construction; the bootstrap round still "+
+			"has to move the pots",
+	)
+	require.NotNil(t, app)
+	assert.True(t, app.epochs.bootstrap)
+	assert.Empty(t, app.poolOutputs)
+	assert.Empty(t, app.accountOutputs)
 }
 
 // The imported counts are not an approximation: for the same epoch they
@@ -306,6 +382,7 @@ func stakeRewardApplicationForTest(
 			},
 			nil,
 		))
+		require.NoError(t, meta.SaveImportedEpochBlockTotal(2, 10, 199, nil))
 	}
 	txn := db.Transaction(false)
 	t.Cleanup(func() { _ = txn.Rollback() })

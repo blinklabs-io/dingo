@@ -2860,7 +2860,7 @@ func (ls *LedgerState) mergeImportedBlockCounts(
 	if mithrilLedgerSlot < epochStartSlot {
 		return counts, totalBlocks, true, nil
 	}
-	imported, err := meta.GetImportedPoolBlockCounts(
+	imported, importedTotal, importedKnown, err := meta.GetImportedPoolBlockCounts(
 		performanceEpoch,
 		metaTxn,
 	)
@@ -2870,29 +2870,33 @@ func (ls *LedgerState) mergeImportedBlockCounts(
 			performanceEpoch, err,
 		)
 	}
-	if len(imported) == 0 {
+	if !importedKnown {
 		return nil, 0, false, nil
 	}
 	for poolKey, blocks := range imported {
-		if observed, ok := counts[poolKey]; ok {
-			merged, overflow := addRewardUint64(observed, blocks)
-			if overflow {
-				return nil, 0, false, fmt.Errorf(
-					"imported block count overflow for epoch %d pool %x",
-					performanceEpoch,
-					poolKey,
-				)
-			}
-			counts[poolKey] = merged
+		observed, ok := counts[poolKey]
+		if !ok {
+			continue
 		}
-		merged, overflow := addRewardUint64(totalBlocks, blocks)
+		merged, overflow := addRewardUint64(observed, blocks)
 		if overflow {
 			return nil, 0, false, fmt.Errorf(
-				"imported block total overflow for epoch %d",
+				"imported block count overflow for epoch %d pool %x",
 				performanceEpoch,
+				poolKey,
 			)
 		}
-		totalBlocks = merged
+		counts[poolKey] = merged
+	}
+	// The epoch total takes every imported pool, not only the ones asked
+	// about, because it is the denominator of every pool's beta and the
+	// reference sums the whole BlocksMade map to obtain it.
+	totalBlocks, overflow := addRewardUint64(totalBlocks, importedTotal)
+	if overflow {
+		return nil, 0, false, fmt.Errorf(
+			"imported block total overflow for epoch %d",
+			performanceEpoch,
+		)
 	}
 	return counts, totalBlocks, true, nil
 }

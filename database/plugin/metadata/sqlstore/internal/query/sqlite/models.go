@@ -154,6 +154,12 @@ type ImportCheckpoint struct {
 	Phase     string
 }
 
+type ImportedEpochBlockTotal struct {
+	Epoch        int64
+	TotalBlocks  int64
+	CapturedSlot int64
+}
+
 type ImportedPoolBlockCount struct {
 	Epoch          int64
 	PoolKeyHash    []byte

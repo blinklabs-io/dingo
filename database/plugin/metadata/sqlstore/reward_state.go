@@ -217,35 +217,97 @@ func (s *Store) SaveImportedPoolBlockCounts(
 	return nil
 }
 
-// GetImportedPoolBlockCounts returns the imported per-pool block counts for an
-// epoch, keyed by pool key hash. An empty result means no counts were imported
-// for that epoch, which callers must not read as "every pool minted nothing".
-func (s *Store) GetImportedPoolBlockCounts(
+// SaveImportedEpochBlockTotal records that an epoch's block counts came from a
+// bootstrap snapshot, and the total the per-pool rows sum to. The row is what
+// distinguishes a certified zero-block epoch from an epoch nothing was
+// imported for; the per-pool rows alone cannot, because a BlocksMade map with
+// no entries writes none.
+func (s *Store) SaveImportedEpochBlockTotal(
 	epoch uint64,
+	totalBlocks uint64,
+	capturedSlot uint64,
 	txn types.Txn,
-) (map[string]uint64, error) {
-	db, ctx, err := s.readDBFromTxn(txn)
+) error {
+	db, ctx, err := s.dbFromTxn(txn)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	sqlEpoch, err := checkedInt64(epoch)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	rows, err := s.operationalQueries(db).GetImportedPoolBlockCounts(
-		ctx,
-		sqlEpoch,
-	)
+	sqlTotal, err := checkedInt64(totalBlocks)
 	if err != nil {
-		return nil, fmt.Errorf("get imported pool block counts: %w", err)
+		return err
 	}
-	if len(rows) == 0 {
-		return nil, nil
+	sqlSlot, err := checkedInt64(capturedSlot)
+	if err != nil {
+		return err
+	}
+	if err := s.operationalQueries(db).SaveImportedEpochBlockTotal(
+		ctx,
+		sqlitequery.SaveImportedEpochBlockTotalParams{
+			Epoch:        sqlEpoch,
+			TotalBlocks:  sqlTotal,
+			CapturedSlot: sqlSlot,
+		},
+	); err != nil {
+		return fmt.Errorf("save imported epoch block total: %w", err)
+	}
+	return nil
+}
+
+// GetImportedPoolBlockCounts returns an epoch's imported per-pool block counts
+// keyed by pool key hash, and the epoch total they sum to. The bool reports
+// whether block counts were imported for the epoch at all; false means the
+// counts are unknown, which is not the same answer as a zero-block epoch.
+//
+// The stored total is compared against the rows rather than derived from them.
+// A per-pool set truncated by a partial write would otherwise present as a
+// smaller but self-consistent epoch, which raises every surviving pool's share
+// of the blocks and over-credits its rewards.
+func (s *Store) GetImportedPoolBlockCounts(
+	epoch uint64,
+	txn types.Txn,
+) (map[string]uint64, uint64, bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	queries := s.operationalQueries(db)
+	storedTotal, err := queries.GetImportedEpochBlockTotal(ctx, sqlEpoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, 0, false, nil
+	}
+	if err != nil {
+		return nil, 0, false, fmt.Errorf(
+			"get imported epoch block total: %w",
+			err,
+		)
+	}
+	if storedTotal < 0 {
+		return nil, 0, false, fmt.Errorf(
+			"imported block total for epoch %d is negative: %d",
+			epoch,
+			storedTotal,
+		)
+	}
+	rows, err := queries.GetImportedPoolBlockCounts(ctx, sqlEpoch)
+	if err != nil {
+		return nil, 0, false, fmt.Errorf(
+			"get imported pool block counts: %w",
+			err,
+		)
 	}
 	ret := make(map[string]uint64, len(rows))
+	var rowTotal uint64
 	for _, row := range rows {
 		if row.BlocksProduced < 0 {
-			return nil, fmt.Errorf(
+			return nil, 0, false, fmt.Errorf(
 				"imported pool block count for epoch %d pool %x is negative: %d",
 				epoch,
 				row.PoolKeyHash,
@@ -253,8 +315,17 @@ func (s *Store) GetImportedPoolBlockCounts(
 			)
 		}
 		ret[string(row.PoolKeyHash)] = uint64(row.BlocksProduced)
+		rowTotal += uint64(row.BlocksProduced)
 	}
-	return ret, nil
+	if rowTotal != uint64(storedTotal) {
+		return nil, 0, false, fmt.Errorf(
+			"imported pool block counts for epoch %d sum to %d, recorded total is %d",
+			epoch,
+			rowTotal,
+			storedTotal,
+		)
+	}
+	return ret, uint64(storedTotal), true, nil
 }
 
 // DeleteImportedPoolBlockCountsForEpoch removes an epoch's imported counts, so
@@ -271,11 +342,18 @@ func (s *Store) DeleteImportedPoolBlockCountsForEpoch(
 	if err != nil {
 		return err
 	}
-	if err := s.operationalQueries(db).DeleteImportedPoolBlockCountsForEpoch(
+	queries := s.operationalQueries(db)
+	if err := queries.DeleteImportedPoolBlockCountsForEpoch(
 		ctx,
 		sqlEpoch,
 	); err != nil {
 		return fmt.Errorf("delete imported pool block counts: %w", err)
+	}
+	if err := queries.DeleteImportedEpochBlockTotalForEpoch(
+		ctx,
+		sqlEpoch,
+	); err != nil {
+		return fmt.Errorf("delete imported epoch block total: %w", err)
 	}
 	return nil
 }
@@ -1173,6 +1251,12 @@ func (s *Store) DeleteRewardStateAfterSlot(
 				return err
 			}
 			if err := q.DeleteImportedPoolBlockCountsAfterSlot(
+				ctx,
+				sqlSlot,
+			); err != nil {
+				return err
+			}
+			if err := q.DeleteImportedEpochBlockTotalsAfterSlot(
 				ctx,
 				sqlSlot,
 			); err != nil {

@@ -2255,10 +2255,20 @@ type MetadataStore interface {
 	// performance for an epoch that ended below the trust anchor.
 	SaveImportedPoolBlockCounts([]models.ImportedPoolBlockCount, types.Txn) error
 
+	// SaveImportedEpochBlockTotal records that an epoch's block counts came
+	// from a bootstrap snapshot and the total its per-pool rows sum to. It is
+	// what tells a certified zero-block epoch from an epoch nothing was
+	// imported for, which the per-pool rows alone cannot.
+	SaveImportedEpochBlockTotal(uint64, uint64, uint64, types.Txn) error
+
 	// GetImportedPoolBlockCounts returns an epoch's imported per-pool block
-	// counts keyed by pool key hash. An empty result means nothing was imported
-	// for that epoch, which is distinct from every pool minting nothing.
-	GetImportedPoolBlockCounts(uint64, types.Txn) (map[string]uint64, error)
+	// counts keyed by pool key hash, and the epoch total. The bool reports
+	// whether counts were imported for the epoch at all; false means unknown,
+	// which is distinct from every pool minting nothing.
+	GetImportedPoolBlockCounts(
+		uint64,
+		types.Txn,
+	) (map[string]uint64, uint64, bool, error)
 
 	// DeleteImportedPoolBlockCountsForEpoch removes an epoch's imported counts
 	// so a re-import replaces rather than merges into a stale set.

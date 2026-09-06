@@ -8429,10 +8429,14 @@ at the first withdrawal of rewards the reference did credit (issue #3767). The
 snapshot carries what is missing: `NewEpochState.nesBprev` holds the blocks
 minted in epoch E-1 and `nesBcur` those minted in E up to the anchor, which are
 the performance epochs of the first two rounds after an import in E.
-`importBlocksMade` persists both into `imported_pool_block_count`, and
+`importBlocksMade` persists both into `imported_pool_block_count`, with the
+epoch total and the fact of the import in `imported_epoch_block_total`, and
 `rewardBlockCounts` adds them to the disjoint counts observed above the anchor.
-An epoch the anchor covers with no seeded counts has unknown performance, and
-the round is declined and reported rather than distributed at zero.
+The separate total row exists because a `BlocksMade` map with no entries writes
+no per-pool rows, and a certified zero-block epoch must not read as an epoch
+nothing was imported for. An epoch the anchor covers with no seeded counts has
+unknown performance, and the round is declined and reported rather than
+distributed at zero.
 
 The same imported reward window also makes protocol-parameter history part of
 the snapshot contract. The first boundary after a snapshot in epoch E consumes
