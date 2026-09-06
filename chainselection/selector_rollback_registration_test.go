@@ -431,3 +431,43 @@ func TestRollbackRegisteredPeerIsNotAPlausibilityReference(t *testing.T) {
 	assert.Equal(t, uint64(5001), peerTip.SelectionTip().BlockNumber)
 	assert.False(t, peerTip.awaitingFirstHeader)
 }
+
+// A peer registered from a rollback has delivered no header, so it must not
+// raise the Genesis exit horizon: its ObservedTip is the intersection point the
+// node itself proposed, and crediting that as delivered evidence would let any
+// peer that re-intersects at the local tip and advertises a tip within the
+// Genesis window force an immediate Genesis-to-Praos transition, dropping the
+// density protection that mode exists to provide.
+func TestRollbackRegisteredPeerDoesNotForceGenesisExit(t *testing.T) {
+	connId := newTestConnectionId(1)
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             100,
+		GenesisMode:               true,
+		GenesisWindowSlots:        300,
+		DisableEventSubscriptions: true,
+	})
+	localPoint := ocommon.Point{Slot: 5000, Hash: []byte("local")}
+	cs.SetLocalTip(ochainsync.Tip{Point: localPoint, BlockNumber: 5000})
+	require.Equal(t, SelectionModeGenesis, cs.SelectionMode())
+
+	// Intersects at the local tip and advertises a tip inside the Genesis
+	// window of it, without delivering anything.
+	cs.HandlePeerRollbackEvent(
+		newRollbackEvent(connId, localPoint, ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 5100, Hash: []byte("advertised")},
+			BlockNumber: 5100,
+		}),
+	)
+	require.Equal(t, 1, cs.PeerCount())
+
+	assert.Equal(t, SelectionModeGenesis, cs.SelectionMode())
+
+	// Once the peer actually delivers headers up to its advertisement, the
+	// horizon is real and the node exits Genesis as before.
+	deliveredTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 5100, Hash: []byte("advertised")},
+		BlockNumber: 5100,
+	}
+	require.True(t, cs.UpdatePeerTip(connId, deliveredTip, nil))
+	assert.Equal(t, SelectionModePraos, cs.SelectionMode())
+}
