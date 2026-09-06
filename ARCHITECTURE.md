@@ -6205,6 +6205,36 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   stays in the pool set leaves the counts unequal, so membership is unproven
   and the stricter classification stands (issue #3795).
 
+  Both of those routes reconstruct the whole K+1 pool set and read departure
+  as absence from it, so both can be closed at once — and on a from-genesis
+  Preview replay they were. The mark rows were pruned for every epoch the
+  observer reached, and `reward_pool_input` was consistently short of
+  `epoch_summary.total_pool_count` because a degraded active pool is omitted
+  from it, which is precisely the case the exact-match requirement exists to
+  exclude. Every ordinary pool retirement then became a `dingo_db_missing`.
+  `checkEpoch` therefore also resolves departure per pool from certificate
+  history, through `RewardParitySource.GetPoolsRetiredByEpoch` and
+  `MetadataStore.GetPoolKeyHashesRetiredByEpoch` (see DATABASE.md), read once
+  per epoch at the K+1 `epoch_summary.boundary_slot`
+  (`DingoEpochData.BoundarySlot`). A retirement effective at or before K
+  that no later registration cancelled is a positive fact about that one
+  pool, so it proves departure without any argument about set completeness,
+  and `pool_registration`/`pool_retirement` are retained for the life of the
+  database. The effective-epoch bound is K rather than the K+1 boundary the
+  certificates are resolved as of, because `epochBoundarySnapshotSlot`
+  captures the K+1 mark pool set at `boundarySlot - 1`: that slot falls in
+  epoch K, so `GetActivePoolKeyHashesAtSlot` keeps every pool retiring
+  effective K+1 and those pools still get a K+1 `reward_pool_input` row.
+  Reading them as departed would mask a genuinely missing one. This route
+  also fails closed: "a retirement certificate exists"
+  is not the predicate, because a later registration cancels a pending
+  retirement and a re-registration after one has taken effect puts the pool
+  back — such a pool is still in the pool set, and downgrading it would turn
+  a real `dingo_db_missing` into a pass. Without a K+1 boundary slot there is
+  no point in the chain to resolve each pool's latest certificate as of, so
+  the route stays closed and the stricter classification stands (issue
+  #3925).
+
   The same split applies a third time to `reward_pool_input`'s stake-epoch
   fields (`delegated_stake`/`delegator_count`/`fixed_cost`/`margin`, reported
   together as `reward_pool_input_stake` when absent) via
@@ -6313,8 +6343,9 @@ second sync:
   `epoch_summary`/`reward_ada_pots`/`reward_pool_input`/`reward_pool_output`/
   `reward_account_output` through the existing typed `MetadataStore`
   accessors (`GetEpochSummary`, `GetRewardAdaPots`, `GetRewardPoolInputs`,
-  `GetRewardPoolOutputs`, `GetRewardAccountOutputs`) inside a fresh read-only
-  transaction per call — the same tables `ledger/snapshot/rotation.go`
+  `GetRewardPoolOutputs`, `GetRewardAccountOutputs`, and
+  `GetPoolKeyHashesRetiredByEpoch` for the departure evidence above) inside a
+  fresh read-only transaction per call — the same tables `ledger/snapshot/rotation.go`
   already populates at every epoch boundary, with no new table and no
   metadata export. `GetRewardAccountOutputs` is what #3097's per-account
   exact-parity comparison (`compareEpochAccounts`, "Per-account exact parity

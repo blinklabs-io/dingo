@@ -1801,6 +1801,24 @@ type MetadataStore interface {
 		txn types.Txn,
 	) ([]models.PoolRetirementRefund, error)
 
+	// GetPoolKeyHashesRetiredByEpoch returns the key hashes of pools whose
+	// effective retirement takes effect at or *before* the given epoch,
+	// under the same cancellation rule GetPoolsRetiringAtEpoch applies: the
+	// pool's latest certificate as of the boundary slot must be a
+	// retirement, so a later re-registration puts the pool back and excludes
+	// it. Where GetPoolsRetiringAtEpoch answers "which pools leave at this
+	// exact boundary" for POOLREAP deposit refunds, this answers "which
+	// pools had already left by this epoch" -- the question the Koios parity
+	// checker asks about an epoch it reaches long after the fact.
+	// pool_registration/pool_retirement are retained for the life of the
+	// database, so this evidence outlives the pool_stake_snapshot retention
+	// window a trailing observer runs behind (dingo #3925).
+	GetPoolKeyHashesRetiredByEpoch(
+		epoch uint64,
+		boundarySlot uint64,
+		txn types.Txn,
+	) ([][]byte, error)
+
 	// GetStakeByPool returns the total delegated stake and delegator count for a pool.
 	// This aggregates all accounts delegated to the pool and sums their UTxO values.
 	GetStakeByPool(

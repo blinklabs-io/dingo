@@ -82,6 +82,26 @@ type RewardParitySource interface {
 		ctx context.Context,
 		epoch uint64,
 	) (map[string]struct{}, error)
+	// GetPoolsRetiredByEpoch returns the set of pool key hashes (hex) whose
+	// effective retirement, resolved as of boundarySlot, takes effect at or
+	// before epoch. It is the second, independent route to the departure
+	// proof GetPoolStakeSnapshotMembers provides: pool_stake_snapshot is
+	// pruned to currentEpoch-3, while pool_registration/pool_retirement are
+	// retained for the life of the database, so an observer trailing the
+	// node has only this one left (dingo #3925).
+	//
+	// Membership in this set is positive per-pool evidence rather than
+	// absence from a set, so it needs no completeness argument. Both
+	// implementations must apply the same cancellation rule
+	// MetadataStore.GetPoolKeyHashesRetiredByEpoch documents: a registration
+	// filed after the retirement puts the pool back, and treating a bare
+	// "retirement certificate exists" as departure would downgrade a real
+	// missing-input ERROR to informational.
+	GetPoolsRetiredByEpoch(
+		ctx context.Context,
+		epoch uint64,
+		boundarySlot uint64,
+	) (map[string]struct{}, error)
 	// GetRewardAccountOutputs returns every per-account reward calculation
 	// output row Dingo committed for epoch. Not yet consumed by any
 	// comparison (that is #3097's scope); exposed now so the source
@@ -198,6 +218,7 @@ func (s *DatabaseSource) GetEpochData(
 			10,
 		),
 		TotalPoolCount: summary.TotalPoolCount,
+		BoundarySlot:   summary.BoundarySlot,
 	}
 
 	pots, err := meta.GetRewardAdaPots(epoch, txn.Metadata())
@@ -252,6 +273,42 @@ func (s *DatabaseSource) GetPoolStakeSnapshotMembers(
 		members[hex.EncodeToString(row.PoolKeyHash)] = struct{}{}
 	}
 	return members, nil
+}
+
+// GetPoolsRetiredByEpoch implements RewardParitySource through the metadata
+// store's own GetPoolKeyHashesRetiredByEpoch, so the in-process observer and
+// the standalone CLI resolve departure from one shared query rather than two
+// copies of the certificate-ordering rules.
+func (s *DatabaseSource) GetPoolsRetiredByEpoch(
+	ctx context.Context,
+	epoch uint64,
+	boundarySlot uint64,
+) (map[string]struct{}, error) {
+	// See GetLatestEpoch's comment: no context-aware transaction/accessor
+	// exists to thread ctx into further, so this only guards against
+	// starting new work after ctx is already done.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	txn := s.db.Transaction(false)
+	defer txn.Release()
+	keyHashes, err := s.db.Metadata().GetPoolKeyHashesRetiredByEpoch(
+		epoch,
+		boundarySlot,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"pool_retirement through epoch %d: %w",
+			epoch,
+			err,
+		)
+	}
+	retired := make(map[string]struct{}, len(keyHashes))
+	for _, keyHash := range keyHashes {
+		retired[hex.EncodeToString(keyHash)] = struct{}{}
+	}
+	return retired, nil
 }
 
 func (s *DatabaseSource) GetPoolEpochDataMap(
