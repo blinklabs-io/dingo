@@ -2990,9 +2990,9 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			"rollback point ahead of ledger tip, skipping metadata rollback",
 			"component", "ledger",
 			"rollback_slot", point.Slot,
-			"ledger_tip_slot", currentTip.Point.Slot,
+			"ledger_tip_slot", durableTip.Point.Slot,
 			"rollback_hash", hex.EncodeToString(point.Hash),
-			"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
+			"ledger_tip_hash", hex.EncodeToString(durableTip.Point.Hash),
 		)
 		return clearRollbackIntent(ls.db)
 	}
