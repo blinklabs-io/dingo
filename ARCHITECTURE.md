@@ -5977,7 +5977,7 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   | `/epoch_info` | exact-match | `epoch_no` | The filtered response must contain exactly the requested reporting epoch K. |
   | `/epoch_info` | derived-match | `active_stake` | Exact lovelace match to `epoch_summary.total_active_stake` at K-1. |
   | `/epoch_info` | derived-match | `end_time` | Establishes closure and the reference-lag window; not a Dingo value assertion. |
-  | `/epoch_info` | unsupported | `era`, `out_sum`, `fees`, `tx_count`, `blk_count`, `start_time`, `first_block_time`, `last_block_time`, `total_rewards`, `avg_blk_reward` | Dingo has no matching persisted per-epoch aggregate. In particular, raw `fees`/`total_rewards` are not AdaPots balances. |
+  | `/epoch_info` | unsupported | `era`, `out_sum`, `fees`, `tx_count`, `blk_count`, `start_time`, `first_block_time`, `last_block_time`, `total_rewards`, `avg_blk_reward` | Dingo has no matching persisted per-epoch aggregate. In particular, raw `fees`/`total_rewards` are not AdaPots balances. `era` is the exception: Dingo does persist it, in `epoch.era_id`, and it is compared once under `/epoch_params` rather than twice. |
   | `/epoch_info` | unsupported | `pool_cnt`, `delegator_cnt` | Documented fields are not returned by Koios preview/preprod and are omitted from the response projection. |
   | `/totals` | exact-match | `epoch_no`, `treasury`, `reserves`, `fees` | Require the requested epoch and exact equality with K's `reward_ada_pots` boundary balances. |
   | `/totals` | intentionally-incomparable | `reward` | Koios reports a lagged cumulative accumulator; Dingo stores a per-epoch flow. |

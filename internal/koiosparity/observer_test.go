@@ -1266,14 +1266,23 @@ func TestObserverFetchIfNeededSurfacesPermanentErrorImmediately(t *testing.T) {
 // observer gains a parameter row for an epoch cached before parameter
 // comparison existed.
 //
-// GetUncachedEpochs reports such an epoch as cached — it has a
-// koios_epoch_info row — so fetchPoolsIfNeeded returns early. Without a gate
-// on the parameter row itself the row would never arrive, and the epoch would
-// either keep a stored PASS that compared no parameters at all, or fail every
-// check with a koios_epoch_params mismatch no fetch could resolve.
+// The test drives Start, not fetchIfNeeded, because the gap is a queuing
+// decision and not a fetching one. GetUncachedEpochs reports such an epoch as
+// cached — it has a koios_epoch_info row — and a prior PASS keeps
+// GetEpochsNeedingCheck from returning it, so nothing puts it in the backlog
+// and fetchIfNeeded is never called for it at all. Calling fetchIfNeeded
+// directly would exercise the gate while skipping the decision that has to
+// reach it.
+//
+// Every epoch in range is therefore already cached and already PASSed here:
+// the parameter row is the only thing missing, so the epoch is queued for
+// that reason or not at all.
 func TestObserverBackfillsParamsForAPreExistingCache(t *testing.T) {
 	const network = "preview"
-	const epoch = uint64(50)
+	// Epochs 0 and 1 are pre-staking; 2 is the upgraded-cache epoch under
+	// test. Dingo's latest epoch is 3, so the observer's safely-closed bound
+	// is exactly 2.
+	const epoch = uint64(2)
 
 	var paramsCalls, epochInfoCalls atomic.Int32
 	srv := httptest.NewServer(
@@ -1289,7 +1298,7 @@ func TestObserverBackfillsParamsForAPreExistingCache(t *testing.T) {
 				epochInfoCalls.Add(1)
 				w.WriteHeader(http.StatusOK)
 				_, _ = fmt.Fprintf(w, validEpochInfoTmpl,
-					strconv.FormatUint(epoch, 10))
+					r.URL.Query().Get("_epoch_no"))
 			case "/epoch_params":
 				paramsCalls.Add(1)
 				w.WriteHeader(http.StatusOK)
@@ -1307,23 +1316,41 @@ func TestObserverBackfillsParamsForAPreExistingCache(t *testing.T) {
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
 	cache, err := OpenCache(cachePath, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
-	fetchedAt := time.Now().UTC()
-	// The upgraded-cache shape: pool-level data present, no parameter row.
-	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
-		Network:      network,
-		Epoch:        epoch,
-		ActiveStake:  "12345",
-		EpochEndTime: fetchedAt,
-		FetchedAt:    fetchedAt,
-	}, nil, &KoiosTotals{
-		Treasury: "1", Reserves: "1", Fees: "1", Reward: "1",
-		FetchedAt: fetchedAt,
-	}))
+	fetchedAt := time.Now().UTC().Add(-time.Hour)
+	for e := uint64(0); e <= epoch; e++ {
+		// The upgraded-cache shape: pool-level data present, no parameter
+		// row. Epochs 0 and 1 carry the pre-staking marker, which is why
+		// they never gain a parameter row and must not be queued for one.
+		info := KoiosEpochInfo{
+			Network:      network,
+			Epoch:        e,
+			ActiveStake:  "12345",
+			EpochEndTime: fetchedAt,
+			FetchedAt:    fetchedAt,
+			PreStaking:   e < epoch,
+		}
+		require.NoError(t, cache.CommitEpochData(info, nil, &KoiosTotals{
+			Treasury: "1", Reserves: "1", Fees: "1", Reward: "1",
+			FetchedAt: fetchedAt,
+		}))
+		// A stored PASS newer than fetched_at removes the only other reason
+		// Start would queue the epoch.
+		require.NoError(t, cache.UpsertCheckEpochStatus(CheckEpochStatus{
+			Network:       network,
+			Epoch:         e,
+			LastCheckedAt: fetchedAt.Add(time.Minute),
+			Status:        StatusPass,
+		}))
+	}
 	require.NoError(t, cache.Close())
 
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
+	// Puts an epoch_summary row at epoch 3, so GetLatestEpoch is 3 and the
+	// observer's safely-closed bound is 2.
+	seedDingoEpochAggregate(t, source, 4, 1_000_000, 10, 20, 30)
+
 	o, err := NewObserver(ObserverConfig{
 		Network:            network,
 		CachePath:          cachePath,
@@ -1335,20 +1362,25 @@ func TestObserverBackfillsParamsForAPreExistingCache(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = o.Stop(context.Background()) })
 
-	require.NoError(t, o.fetchIfNeeded(context.Background(), epoch))
+	require.NoError(t, o.Start(context.Background()))
+
+	require.Eventually(t, func() bool {
+		reopened, err := OpenCache(cachePath, slog.New(slog.DiscardHandler))
+		if err != nil {
+			return false
+		}
+		defer reopened.Close() //nolint:errcheck
+		got, err := reopened.GetEpochParams(network, epoch)
+		return err == nil && got != nil
+	}, 10*time.Second, 10*time.Millisecond,
+		"Start must queue the epoch whose parameter row is missing")
 
 	require.Equal(t, int32(1), paramsCalls.Load(),
-		"the observer must backfill the missing parameter row")
+		"exactly the one epoch missing a parameter row is backfilled; the "+
+			"pre-staking epochs have no Koios parameter row to fetch")
 	require.Equal(t, int32(0), epochInfoCalls.Load(),
 		"pool-level data was already cached; the parameter backfill must "+
 			"not re-request /epoch_info")
-
-	reopened, err := OpenCache(cachePath, slog.New(slog.DiscardHandler))
-	require.NoError(t, err)
-	defer reopened.Close()
-	got, err := reopened.GetEpochParams(network, epoch)
-	require.NoError(t, err)
-	require.NotNil(t, got, "the parameter row must be committed")
 }
 
 // TestObserverFailureReportsSignificantMismatchCount is the user-visible half

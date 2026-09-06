@@ -310,7 +310,7 @@ func TestFetchBackfillsAccountsForPreExistingCache(t *testing.T) {
 	const epoch = uint64(50)
 	const koiosAddr = "stake1uzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
 
-	var epochInfoCalls, totalsCalls atomic.Int32
+	var epochInfoCalls, totalsCalls, epochParamsCalls atomic.Int32
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
@@ -329,6 +329,7 @@ func TestFetchBackfillsAccountsForPreExistingCache(t *testing.T) {
 					strconv.FormatUint(epoch, 10),
 				)
 			case r.URL.Path == "/epoch_params":
+				epochParamsCalls.Add(1)
 				w.WriteHeader(http.StatusOK)
 				_, _ = fmt.Fprintf(
 					w,
@@ -465,6 +466,25 @@ func TestFetchBackfillsAccountsForPreExistingCache(t *testing.T) {
 		info.FetchedAt,
 		time.Second,
 		"pool-level fetched_at must not be clobbered by an accounts-only backfill",
+	)
+
+	// The same upgraded cache is missing the parameter row as well as the
+	// account rows, so this run must satisfy both backfills. The two are
+	// independent properties of an epoch, not alternatives: an epoch selected
+	// for the account backfill still needs its /epoch_params request, or Fetch
+	// reports success while the next check still finds the parameters absent.
+	require.Equal(
+		t,
+		int32(1),
+		epochParamsCalls.Load(),
+		"an epoch needing both backfills must still fetch /epoch_params",
+	)
+	params, err := cache2.GetEpochParams(network, epoch)
+	require.NoError(t, err)
+	require.NotNil(
+		t,
+		params,
+		"the parameter row must be committed alongside the account backfill",
 	)
 }
 

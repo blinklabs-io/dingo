@@ -289,6 +289,28 @@ func (o *Observer) Start(ctx context.Context) error {
 			}
 			o.mu.Unlock()
 		}
+
+		// Same shape, for the same reason, one column over: an epoch cached
+		// before protocol-parameter comparison existed has a
+		// koios_epoch_info row and a stored PASS, so neither
+		// GetEpochsNeedingCheck nor GetUncachedEpochs above ever returns it.
+		// Without this seed the epoch is never queued, processEpoch never
+		// runs, and fetchIfNeeded's fetchParamsIfNeeded gate is never
+		// reached — the parameter row would never arrive for exactly the
+		// caches that need backfilling.
+		missingParams, err := o.cache.GetEpochsMissingParams(
+			o.cfg.Network,
+			0,
+			throughEpoch,
+		)
+		if err != nil {
+			return fmt.Errorf("seed koiosparity observer backlog: %w", err)
+		}
+		o.mu.Lock()
+		for _, e := range missingParams {
+			o.pending[e] = struct{}{}
+		}
+		o.mu.Unlock()
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)

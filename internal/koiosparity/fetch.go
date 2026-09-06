@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strconv"
 	"sync"
@@ -229,11 +230,26 @@ func Fetch(
 		if err != nil {
 			return nil, fmt.Errorf("get uncached epochs: %w", err)
 		}
-		if cfg.AccountsEnabled {
-			have := make(map[uint64]bool, len(epochs))
-			for _, e := range epochs {
-				have[e] = true
+		// fullFetch is the set that runs the whole pool-level fetchEpoch, and
+		// it is the only set the two backfill gates below may not overlap: an
+		// epoch already being fetched in full gets its accounts and its
+		// parameter row from that path. The backfill sets themselves are
+		// independent of each other, because missing account coverage and a
+		// missing parameter row are independent properties of a cached epoch
+		// and an upgraded cache typically has both.
+		fullFetch := make(map[uint64]bool, len(epochs))
+		for _, e := range epochs {
+			fullFetch[e] = true
+		}
+		selected := make(map[uint64]bool, len(epochs))
+		maps.Copy(selected, fullFetch)
+		selectEpoch := func(e uint64) {
+			if !selected[e] {
+				selected[e] = true
+				epochs = append(epochs, e)
 			}
+		}
+		if cfg.AccountsEnabled {
 			missingAccounts, err := cache.GetEpochsMissingAccountCoverage(
 				cfg.Network,
 				fromEpoch,
@@ -246,12 +262,11 @@ func Fetch(
 				)
 			}
 			for _, e := range missingAccounts {
-				if !have[e] {
+				if !fullFetch[e] {
 					accountOnlyEpochs[e] = true
-					epochs = append(epochs, e)
+					selectEpoch(e)
 				}
 			}
-			slices.Sort(epochs)
 		}
 		missingParams, err := cache.GetEpochsMissingParams(
 			cfg.Network,
@@ -261,19 +276,13 @@ func Fetch(
 		if err != nil {
 			return nil, fmt.Errorf("get epochs missing params: %w", err)
 		}
-		if len(missingParams) > 0 {
-			have := make(map[uint64]bool, len(epochs))
-			for _, e := range epochs {
-				have[e] = true
+		for _, e := range missingParams {
+			if !fullFetch[e] {
+				paramsOnlyEpochs[e] = true
+				selectEpoch(e)
 			}
-			for _, e := range missingParams {
-				if !have[e] {
-					paramsOnlyEpochs[e] = true
-					epochs = append(epochs, e)
-				}
-			}
-			slices.Sort(epochs)
 		}
+		slices.Sort(epochs)
 	}
 
 	if len(epochs) == 0 {
@@ -408,34 +417,39 @@ loop:
 
 			var cnt int
 			switch {
-			case paramsOnlyEpochs[epoch]:
-				// Pool-level data is fresh and only the parameter row is
-				// missing, so fetch that one request rather than re-running
-				// the whole epoch. Re-fetching /epoch_info here would also
-				// break the account-backfill guarantee this mirrors.
-				logger.Debug(
-					"koiosparity: epoch pool data already fresh, backfilling parameters only",
-					"network", cfg.Network,
-					"epoch", epoch,
-				)
-				if fetchErr := fetchEpochParamsOnly(
-					fetchCtx, koios, cache, cfg.Network, epoch,
-				); fetchErr != nil {
-					handleEpochFetchErr("params", fetchErr)
-					return
-				}
-			case accountOnlyEpochs[epoch]:
+			case paramsOnlyEpochs[epoch] || accountOnlyEpochs[epoch]:
 				// Pool-level Koios data for this epoch is already fresh —
-				// only #3097's per-account coverage is missing/incomplete —
-				// so skip the redundant pool/epoch_info/totals fetchEpoch
-				// call entirely and go straight to the account backfill
-				// below, rather than re-fetching thousands of already-fresh
-				// pool-history rows just to reach it.
-				logger.Debug(
-					"koiosparity: epoch pool data already fresh, backfilling accounts only",
-					"network", cfg.Network,
-					"epoch", epoch,
-				)
+				// only the parameter row and/or #3097's per-account coverage
+				// is missing — so skip the redundant
+				// pool/epoch_info/totals fetchEpoch call entirely rather
+				// than re-fetching thousands of already-fresh pool-history
+				// rows just to reach the backfills. Re-fetching /epoch_info
+				// here would also break the account-backfill guarantee.
+				//
+				// The two backfills are cumulative, not exclusive: an
+				// upgraded cache is typically missing both, and running only
+				// one of them would let Fetch return success while the next
+				// check still reports the other side absent.
+				if paramsOnlyEpochs[epoch] {
+					logger.Debug(
+						"koiosparity: epoch pool data already fresh, backfilling parameters only",
+						"network", cfg.Network,
+						"epoch", epoch,
+					)
+					if fetchErr := fetchEpochParamsOnly(
+						fetchCtx, koios, cache, cfg.Network, epoch,
+					); fetchErr != nil {
+						handleEpochFetchErr("params", fetchErr)
+						return
+					}
+				}
+				if accountOnlyEpochs[epoch] {
+					logger.Debug(
+						"koiosparity: epoch pool data already fresh, backfilling accounts only",
+						"network", cfg.Network,
+						"epoch", epoch,
+					)
+				}
 			default:
 				var fetchErr error
 				cnt, fetchErr = fetchEpoch(fetchCtx, koios, cache, cfg.Network, epoch, poolIDs, firstActiveEpochs, logger)
@@ -945,12 +959,6 @@ func unixTime(sec int64) time.Time {
 	return time.Unix(sec, 0).UTC()
 }
 
-// fetchEpochParamsOnly fetches and commits just the /epoch_params row for an
-// epoch whose pool-level data is already cached and fresh.
-//
-// It deliberately does not touch koios_epoch_info.fetched_at. That column is
-// the freshness marker for pool-level data, which this did not refetch, so
-// advancing it would claim a freshness this call has not established.
 // FetchEpochParams fetches and commits the /epoch_params row for one epoch.
 // Exported for the in-process Observer, which backfills parameters
 // independently of the pool-level fetch.
@@ -964,6 +972,12 @@ func FetchEpochParams(
 	return fetchEpochParamsOnly(ctx, koios, cache, network, epoch)
 }
 
+// fetchEpochParamsOnly fetches and commits just the /epoch_params row for an
+// epoch whose pool-level data is already cached and fresh.
+//
+// It deliberately does not touch koios_epoch_info.fetched_at. That column is
+// the freshness marker for pool-level data, which this did not refetch, so
+// advancing it would claim a freshness this call has not established.
 func fetchEpochParamsOnly(
 	ctx context.Context,
 	koios *KoiosClient,

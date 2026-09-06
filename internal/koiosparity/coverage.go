@@ -89,7 +89,9 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Endpoint: "/epoch_info",
 		Field:    "era",
 		Class:    CoverageUnsupported,
-		Reason:   "Dingo has no persisted per-epoch era aggregate",
+		Reason: "CompareEpochAggregates does not read the era; the same " +
+			"value is compared once against `epoch`.era_id under " +
+			"/epoch_params rather than twice",
 	},
 	{
 		Endpoint: "/epoch_info",
