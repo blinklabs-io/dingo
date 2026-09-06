@@ -66,6 +66,26 @@ type stateMetrics struct {
 	// the local applied chain. A rising value means a peer is feeding the
 	// node a continuation from a fork it never applied. See issue #3005.
 	continuationInputUnresolved prometheus.Counter
+	// Incremented when the primary-chain/ledger divergence reconciler
+	// cannot resolve one of the ledger's own applied block_nonce points to
+	// build its ledger.tx undo events, typically because chain selection
+	// already replaced that block and, after a process restart, the
+	// manager's block cache no longer retains it either. The reconciler
+	// still rolls the ledger back correctly; only the undo notification for
+	// that block is missing, so a rising value means ledger.tx subscribers
+	// may be carrying stale derived state for an abandoned branch. See
+	// issue #3516.
+	reconciliationUndoUnresolved prometheus.Counter
+	// Incremented by the block-number count the reconciler's undo-block
+	// resolution expects but has no block_nonce row for at all -- not
+	// merely unresolvable (reconciliationUndoUnresolved), but entirely
+	// absent from the query, the shape of a Byron-era applied block: Byron's
+	// BFT/PoA consensus writes no VRF nonce, so it is invisible to a
+	// block_nonce-keyed search. A rising value means an applied block's
+	// ledger.tx undo event could not even be attempted for lack of a
+	// durable per-block record, not merely because the content was no
+	// longer reachable. See issue #3778.
+	reconciliationUndoMissingRecord prometheus.Counter
 	// Observed for every Praos leader-eligibility decision on an inbound
 	// header: (threshold - leaderValue) / threshold. Positive is eligible,
 	// and the magnitude is the headroom. dingo derives its leadership stake
@@ -376,6 +396,18 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_continuation_input_unresolved_total",
 			Help: "inputs in freshly fetched continuation blocks whose producing transaction is not on the local applied chain (cross-fork splice indicator)",
+		},
+	)
+	m.reconciliationUndoUnresolved = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_reconciliation_undo_unresolved_total",
+			Help: "applied blocks the primary-chain/ledger divergence reconciler could not resolve to build ledger.tx undo events (block already replaced by chain selection and no longer cached, typically after a restart)",
+		},
+	)
+	m.reconciliationUndoMissingRecord = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_reconciliation_undo_missing_record_total",
+			Help: "applied blocks in a reconciliation undo range with no block_nonce row at all, not merely unresolvable content -- the shape of a Byron-era applied block (issue #3778)",
 		},
 	)
 	m.leaderThresholdMargin = promautoFactory.NewHistogram(
