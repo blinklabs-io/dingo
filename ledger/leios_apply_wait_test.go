@@ -66,7 +66,30 @@ const leiosWaitTestLongWindow = leiosWaitTestLongWaitSlots * leiosWaitTestSlotLe
 // slot length, which is what ensureReferencedEndorserBlocks converts the
 // slot-denominated wait window with. Without it the wait is disabled outright
 // and the timing assertions below would pass vacuously.
-func withLeiosWaitTestSlotLength(ls *LedgerState) {
+//
+// It also pins the OTHER precondition every timing assertion in this file
+// depends on: that the fixture's blocks are classified near-head rather than
+// as settled backlog. classifyEndorserBlockFetches only calls a block
+// historical when the wall-clock slot is KNOWN and more than
+// EndorserBlockWaitSlots above it, and these fixtures deliberately leave
+// ls.slotClock nil so CurrentSlot errors and wallKnown is false, which makes
+// every block near-head no matter what slot the fixture uses. That is an
+// invariant, not a coincidence: give one of these states a slot clock reading
+// past the fixture slots and the near-head path stops being exercised --
+// the shared-window test would skip the wait entirely (ls.leiosBackfill is
+// nil) and the late-arrival test would reroute its closure to fetchRequired,
+// so both would pass or fail for reasons unrelated to what they assert.
+// Assert it here, once, where the fixture is established.
+func withLeiosWaitTestSlotLength(t *testing.T, ls *LedgerState) {
+	t.Helper()
+	if _, err := ls.CurrentSlot(); err == nil {
+		t.Fatal(
+			"these tests require an unknown wall-clock slot so every " +
+				"fixture block is classified near-head; a slot clock has " +
+				"been added, so pin the fixture slots relative to it before " +
+				"trusting any wait assertion in this file",
+		)
+	}
 	ls.timeConverter = NewSlotTimeConverter(SlotTimeConverterDeps{
 		ShelleyGenesis: func() *shelley.ShelleyGenesis {
 			return &shelley.ShelleyGenesis{
@@ -148,7 +171,7 @@ func TestEnsureReferencedEndorserBlocksDoesNotBlockOnUnreadAnnouncement(
 	}
 	ls := &LedgerState{config: cfg}
 	ls.leiosBackfill = newLeiosBackfiller(cfg)
-	withLeiosWaitTestSlotLength(ls)
+	withLeiosWaitTestSlotLength(t, ls)
 	require.Equal(t, leiosWaitTestSlotLen, ls.shelleySlotLength())
 
 	start := time.Now()
@@ -257,7 +280,7 @@ func TestEnsureReferencedEndorserBlocksWaitsForCertifiedClosureArrivingLate(
 		LeiosApplyEndorserBlockTxs: false,
 	}
 	ls := &LedgerState{config: cfg}
-	withLeiosWaitTestSlotLength(ls)
+	withLeiosWaitTestSlotLength(t, ls)
 
 	start := time.Now()
 	require.NoError(t, ls.ensureReferencedEndorserBlocks(
@@ -318,7 +341,7 @@ func TestEnsureReferencedEndorserBlocksSharesOneWindowAcrossMissingBlocks(
 		LeiosApplyEndorserBlockTxs: true,
 	}
 	ls := &LedgerState{config: cfg}
-	withLeiosWaitTestSlotLength(ls)
+	withLeiosWaitTestSlotLength(t, ls)
 
 	start := time.Now()
 	require.NoError(t, ls.ensureReferencedEndorserBlocks(
@@ -637,7 +660,7 @@ func TestLeiosEbWaitCancellationLeavesCallerBehaviourUnchanged(t *testing.T) {
 			LeiosApplyEndorserBlockTxs: false,
 		},
 	}
-	withLeiosWaitTestSlotLength(ls)
+	withLeiosWaitTestSlotLength(t, ls)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -758,7 +781,7 @@ func TestEnsureReferencedEndorserBlocksAwaitsLateFetchOnCIPPath(t *testing.T) {
 	}
 	ls := &LedgerState{config: cfg}
 	ls.leiosBackfill = newLeiosBackfiller(cfg)
-	withLeiosWaitTestSlotLength(ls)
+	withLeiosWaitTestSlotLength(t, ls)
 
 	require.NoError(t, ls.ensureReferencedEndorserBlocks(
 		t.Context(),
@@ -820,7 +843,7 @@ func TestEnsureReferencedEndorserBlocksSkipsGraceOnCertDrivenPath(t *testing.T) 
 	}
 	ls := &LedgerState{config: cfg}
 	ls.leiosBackfill = newLeiosBackfiller(cfg)
-	withLeiosWaitTestSlotLength(ls)
+	withLeiosWaitTestSlotLength(t, ls)
 
 	// The closure never arrives, so the mandatory check fails -- which is the
 	// correct outcome and is what makes the grace pointless here.
@@ -873,7 +896,7 @@ func TestEnsureReferencedEndorserBlocksProceedsWhenCIPFetchFindsNothing(
 	}
 	ls := &LedgerState{config: cfg}
 	ls.leiosBackfill = newLeiosBackfiller(cfg)
-	withLeiosWaitTestSlotLength(ls)
+	withLeiosWaitTestSlotLength(t, ls)
 
 	start := time.Now()
 	require.NoError(t, ls.ensureReferencedEndorserBlocks(
@@ -1054,6 +1077,7 @@ func TestCIPFetchWaitReportsCancellationNotFailure(t *testing.T) {
 		[]leiosEbRef{ref},
 		leiosWaitTestWindow,
 		time.Millisecond,
+		leiosTipFetchHardBound,
 	)
 
 	require.NotContains(
@@ -1066,5 +1090,122 @@ func TestCIPFetchWaitReportsCancellationNotFailure(t *testing.T) {
 		t,
 		logs.String(),
 		"endorser block fetch cancelled before it completed",
+	)
+}
+
+// TestCIPFetchWaitDoesNotWarnOnRoutineUnfetchableEndorserBlock pins the log
+// level of the CIP path's most common non-cached outcome.
+//
+// awaitFetch returns for two reasons that this wait cannot otherwise tell
+// apart: the all-peers fetch cleared its in-flight marker without caching (no
+// peer holds this endorser block), or it neither cached nor cleared before the
+// hard bound. Only the second is anomalous. The first is the expected,
+// long-standing behaviour of this path -- the code this replaced logged its
+// equivalent at Debug -- and on a CIP node where endorser blocks are routinely
+// unfetchable, a WARN per reference turns normal operation into alertable
+// volume.
+func TestCIPFetchWaitDoesNotWarnOnRoutineUnfetchableEndorserBlock(
+	t *testing.T,
+) {
+	var logs leiosWaitTestLogBuffer
+	cfg := LedgerStateConfig{
+		Logger: slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		})),
+		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
+			return nil, false
+		},
+		// Fails immediately, the way a sweep that finds no peer holding the
+		// block does: the in-flight marker clears and awaitFetch returns
+		// without the hard bound ever being approached.
+		EndorserBlockFetcher: func(context.Context, uint64, []byte) error {
+			return errors.New("no peer holds it")
+		},
+	}
+	ls := &LedgerState{config: cfg}
+	ls.leiosBackfill = newLeiosBackfiller(cfg)
+
+	ref := leiosEbRef{
+		slot: 100,
+		hash: lcommon.NewBlake2b256(leiosTestHash(0xC9)),
+	}
+	ls.leiosBackfill.spawn(t.Context(), ref)
+
+	ls.awaitInFlightEndorserFetches(
+		t.Context(),
+		[]leiosEbRef{ref},
+		leiosWaitTestWindow,
+		time.Millisecond,
+		leiosWaitTestLongWindow,
+	)
+
+	require.Contains(
+		t,
+		logs.String(),
+		"endorser block could not be fetched",
+		"the outcome must still be reported, just not at WARN",
+	)
+	require.NotContains(
+		t,
+		logs.String(),
+		`"level":"WARN"`,
+		"a fetch that swept every peer and found none holding the endorser "+
+			"block is this path's expected outcome, not an alert",
+	)
+}
+
+// TestCIPFetchWaitWarnsWhenAFetchNeitherCachesNorClears is the other half:
+// the case that IS anomalous must stay at WARN. A fetch that neither caches
+// nor clears its in-flight marker held the ledger pipeline for the whole hard
+// bound and produced nothing, which is a wedged fetch rather than an absent
+// endorser block.
+func TestCIPFetchWaitWarnsWhenAFetchNeitherCachesNorClears(t *testing.T) {
+	var logs leiosWaitTestLogBuffer
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	cfg := LedgerStateConfig{
+		Logger: slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		})),
+		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
+			return nil, false
+		},
+		// Never returns while the wait runs, so the in-flight marker is still
+		// set when awaitFetch gives up at the hard bound. Released by the
+		// cleanup so the goroutine does not outlive the test.
+		EndorserBlockFetcher: func(context.Context, uint64, []byte) error {
+			<-release
+			return errors.New("released")
+		},
+	}
+	ls := &LedgerState{config: cfg}
+	ls.leiosBackfill = newLeiosBackfiller(cfg)
+
+	ref := leiosEbRef{
+		slot: 100,
+		hash: lcommon.NewBlake2b256(leiosTestHash(0xCA)),
+	}
+	// A live parent context, so the wait can only end at the hard bound --
+	// never through the cancellation branch.
+	ls.leiosBackfill.spawn(t.Context(), ref)
+
+	ls.awaitInFlightEndorserFetches(
+		t.Context(),
+		[]leiosEbRef{ref},
+		leiosWaitTestWindow,
+		time.Millisecond,
+		leiosWaitTestSlotLen,
+	)
+
+	require.Contains(
+		t,
+		logs.String(),
+		"endorser block fetch neither completed nor cached within the hard bound",
+	)
+	require.Contains(
+		t,
+		logs.String(),
+		`"level":"WARN"`,
+		"a fetch wedged for the whole hard bound is worth an alert",
 	)
 }
