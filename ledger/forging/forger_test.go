@@ -1076,6 +1076,12 @@ type forgerTestLeiosParentAnnouncement struct {
 	ok     bool
 	err    error
 	calls  int
+	// rbHashAfterFirst, when set, is returned from the second call onward.
+	// This is how a test moves the chain tip underneath an already-resolved
+	// Leios selection: the forger resolves the parent once and re-reads it
+	// before building, so a different second answer is exactly a tip that
+	// advanced while the Leios work was running.
+	rbHashAfterFirst *lcommon.Blake2b256
 }
 
 func (p *forgerTestLeiosParentAnnouncement) ParentLeiosAnnouncement() (
@@ -1085,6 +1091,9 @@ func (p *forgerTestLeiosParentAnnouncement) ParentLeiosAnnouncement() (
 	error,
 ) {
 	p.calls++
+	if p.calls > 1 && p.rbHashAfterFirst != nil {
+		return *p.rbHashAfterFirst, p.hash, p.ok, p.err
+	}
 	return p.rbHash, p.hash, p.ok, p.err
 }
 
@@ -1586,7 +1595,10 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 				require.Empty(t, leiosCaster.hash)
 			}
 			require.Equal(t, []lcommon.Blake2b256{ebHash}, leiosCerts.marked)
-			require.Equal(t, 1, parent.calls)
+			// Twice: once to resolve the parent the certificate is
+			// selected for, once to re-check it has not moved before the
+			// block is built against it.
+			require.Equal(t, 2, parent.calls)
 			// CertifiedEndorserBlockTxHashes must be called with the
 			// eligible certificate's own slot (9, from eb.SlotNo above), not
 			// the forged ranking block's slot (10) or zero: the manifest is
@@ -1679,5 +1691,99 @@ func TestCheckAndForgeProductionCertifiesOnlyParentAnnouncedLeiosEB(
 	require.Nil(t, builder.leiosData.Announcement)
 	require.Same(t, parentCert, builder.leiosData.Certificate)
 	require.Equal(t, []lcommon.Blake2b256{parentHash}, leiosCerts.marked)
-	require.Equal(t, 1, parent.calls)
+	// Resolve, then re-check before the build. See leiosParentAnnouncement.
+	require.Equal(t, 2, parent.calls)
+}
+
+// TestCheckAndForgeProductionDropsLeiosDataWhenTheParentMoves covers the gap
+// between resolving parent-dependent Leios data and building the block that
+// carries it.
+//
+// The certificate is selected for the endorser block the parent ranking block
+// announced. The builder inherits none of that: it binds the block's parent
+// from its own fresh chain-tip read. If the tip advances while the Leios work
+// runs -- endorser-block production and mempool rebasing are not instant --
+// the block ends up built on a new parent while carrying a certificate from
+// the old parent's endorser-block lineage. No peer accepts that block, and
+// this node has spent the slot's credentials signing it.
+//
+// The parent is therefore re-read immediately before the build. When it has
+// moved, the Leios data is dropped and a plain ranking block is forged, and
+// the embedded-endorser-block bookkeeping is dropped with it: leaving it set
+// would record an endorser block as embedded in a block that does not carry
+// it.
+func TestCheckAndForgeProductionDropsLeiosDataWhenTheParentMoves(t *testing.T) {
+	block := newForgerTestBlock(10, 2)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	parentHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x33}, 32))
+	parentRbHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x44}, 32))
+	// The tip the builder will actually bind, different from the one the
+	// certificate was selected for.
+	movedRbHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x66}, 32))
+	parentCert := &lcommon.LeiosEbCertificate{
+		SlotNo:              9,
+		EndorserBlockHash:   parentHash,
+		Signers:             []byte{0x80},
+		AggregatedSignature: make([]byte, lcommon.LeiosBlsSignatureSize),
+	}
+	leiosCerts := &forgerTestLeiosCerts{
+		eligible: []LeiosCertifiedEndorserBlock{
+			{
+				SlotNo:            9,
+				EndorserBlockHash: parentHash,
+				Certificate:       parentCert,
+				AnnouncingRbHash:  parentRbHash,
+			},
+		},
+	}
+	parent := &forgerTestLeiosParentAnnouncement{
+		rbHash:           parentRbHash,
+		hash:             parentHash,
+		ok:               true,
+		rbHashAfterFirst: &movedRbHash,
+	}
+
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    &forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		ForgeFence:       &fenceTestStore{},
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      9,
+			slotsPerKESPeriod: 100,
+		},
+		LeiosCertificateProvider:        leiosCerts,
+		LeiosParentAnnouncementProvider: parent,
+		PromRegistry:                    prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	// The parent was resolved once and re-checked once.
+	require.Equal(t, 2, parent.calls)
+	// A block was still forged -- dropping the Leios data costs the
+	// certificate, not the slot.
+	require.Equal(t, 1, builder.calls, "a plain ranking block is still built")
+	require.Zero(
+		t,
+		builder.leiosCalls,
+		"the Leios build path must not be taken with data resolved for the abandoned parent",
+	)
+	require.Nil(
+		t,
+		builder.leiosData.Certificate,
+		"a certificate selected for the abandoned parent must not be carried",
+	)
+	require.Nil(t, builder.leiosData.Announcement)
+	// The embedded-endorser-block bookkeeping went with it.
+	require.Empty(
+		t,
+		leiosCerts.marked,
+		"no endorser block may be recorded as embedded in a block that omits it",
+	)
 }

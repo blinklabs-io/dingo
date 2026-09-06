@@ -1128,9 +1128,25 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			"slot", currentSlot,
 		)
 	}
+	var (
+		leiosParentRb    lcommon.Blake2b256
+		leiosParentKnown bool
+	)
 	if forgeLeiosData {
+		// The parent announcement every piece of Leios data below is
+		// resolved against, captured before resolution so it can be
+		// re-checked after; see the guard ahead of the build. Only read on
+		// the live-tip path: an alternative carries no Leios data, and the
+		// provider answers for the tip, which on that path is the rival.
+		var leiosParentEb lcommon.Blake2b256
+		leiosParentRb, leiosParentEb, leiosParentKnown = f.leiosParentAnnouncement(
+			currentSlot,
+		)
 		leiosBlockData, embeddedEb, embeddedEbSlot = f.leiosBlockDataForSlot(
 			currentSlot,
+			leiosParentRb,
+			leiosParentEb,
+			leiosParentKnown,
 		)
 	}
 	if forgeLeiosData && f.leiosChecker != nil {
@@ -1175,6 +1191,38 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			} else if announcement != nil {
 				leiosBlockData.Announcement = announcement
 			}
+		}
+	}
+	// Every piece of Leios data resolved above is parent-dependent. The
+	// certificate is chosen for the endorser block the parent ranking block
+	// announced, and an announcement is built against that same parent. The
+	// builder does not inherit any of that: it binds the block's parent from
+	// its own fresh chain-tip read. A tip that moved while the Leios work
+	// above ran therefore yields a block whose certificate belongs to a
+	// different parent's endorser-block lineage -- a block no peer accepts,
+	// signed with this slot's credentials.
+	//
+	// Re-check the parent announcement and, if it moved, drop the Leios data
+	// and the embedded-endorser-block bookkeeping that goes with it, then
+	// forge a plain ranking block. Dropping is the fail-closed answer:
+	// re-resolving here would have to re-run endorser-block production for
+	// the new parent, and a second endorser block for one slot is not a thing
+	// this loop may do. Clearing embeddedEb matters as much as clearing the
+	// data -- left set, MarkEndorserBlockEmbedded would record an endorser
+	// block as embedded in a block that does not carry it.
+	if !leiosBlockData.empty() && leiosParentKnown {
+		if rb, _, ok := f.leiosParentAnnouncement(currentSlot); !ok ||
+			rb != leiosParentRb {
+			f.logger.Warn(
+				"leios data dropped: parent announcement changed while the block was being prepared",
+				"slot", currentSlot,
+				"resolved_parent_rb", leiosParentRb.String(),
+			)
+			leiosBlockData = LeiosBlockData{}
+			// embeddedEb alone: embeddedEbSlot has already served its
+			// only purpose (resolving the certified closure for the
+			// mempool rebase above) and is not read again.
+			embeddedEb = nil
 		}
 	}
 	// Leios providers, mempool access, transaction validation, and broadcaster
@@ -1360,11 +1408,17 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	return nil
 }
 
-func (f *BlockForger) leiosBlockDataForSlot(
-	slot uint64,
-) (LeiosBlockData, *lcommon.Blake2b256, uint64) {
-	if f.leiosCerts == nil {
-		return LeiosBlockData{}, nil, 0
+// leiosParentAnnouncement resolves the parent ranking block and the endorser
+// block it announced. Every parent-dependent Leios selection is made against
+// this answer, and the pre-build guard re-reads it to detect a chain tip that
+// moved underneath that selection.
+func (f *BlockForger) leiosParentAnnouncement(slot uint64) (
+	parentRbHash lcommon.Blake2b256,
+	parentHash lcommon.Blake2b256,
+	ok bool,
+) {
+	if f.leiosParent == nil {
+		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false
 	}
 	parentRbHash, parentHash, ok, err := f.leiosParent.ParentLeiosAnnouncement()
 	if err != nil {
@@ -1375,7 +1429,7 @@ func (f *BlockForger) leiosBlockDataForSlot(
 			"error",
 			err,
 		)
-		return LeiosBlockData{}, nil, 0
+		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false
 	}
 	if !ok {
 		f.logger.Debug(
@@ -1383,6 +1437,18 @@ func (f *BlockForger) leiosBlockDataForSlot(
 			"slot",
 			slot,
 		)
+		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false
+	}
+	return parentRbHash, parentHash, true
+}
+
+func (f *BlockForger) leiosBlockDataForSlot(
+	slot uint64,
+	parentRbHash lcommon.Blake2b256,
+	parentHash lcommon.Blake2b256,
+	parentKnown bool,
+) (LeiosBlockData, *lcommon.Blake2b256, uint64) {
+	if f.leiosCerts == nil || !parentKnown {
 		return LeiosBlockData{}, nil, 0
 	}
 	eligible := f.leiosCerts.EligibleCertifiedEndorserBlocks()
