@@ -620,6 +620,18 @@ func (lv *LedgerView) CostModels() map[lcommon.PlutusLanguage]lcommon.CostModel 
 	return extractCostModelsFromPParams(pp)
 }
 
+// SyntheticV2CostModelInEffect reports whether the PlutusV2 cost model
+// currently in force is still HardForkBabbage's fabricated default rather
+// than real governance/protocol-update data -- see
+// LedgerState.syntheticV2CostModel (blinklabs-io/dingo#3825,
+// blinklabs-io/dingo#3962). ledger/eras validation code (which cannot import
+// this package) type-asserts its lcommon.LedgerState parameter against a
+// locally declared interface with this exact method signature to reach it
+// without a package cycle.
+func (lv *LedgerView) SyntheticV2CostModelInEffect() bool {
+	return lv.ls.loadConsensusSnapshot().syntheticV2CostModelInEffect
+}
+
 // costModelsProvider is an optional interface implemented by
 // era-specific protocol parameter types that expose raw cost
 // model data as map[uint][]int64.
