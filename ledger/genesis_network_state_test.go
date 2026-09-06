@@ -52,6 +52,9 @@ func TestCreateGenesisBlockInitializesMusashiNetworkState(t *testing.T) {
 		},
 	}
 	require.NoError(t, ls.createGenesisBlock())
+	committee, err := db.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Len(t, committee, len(nodeCfg.ConwayGenesis().Committee.Members))
 
 	state, err := db.Metadata().GetNetworkState(nil)
 	require.NoError(t, err)
