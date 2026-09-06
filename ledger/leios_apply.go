@@ -954,7 +954,18 @@ func (ls *LedgerState) leiosEndorserBlockForApply(
 	if !present || !certified {
 		return lcommon.Blake2b256{}, 0, 0, false, nil
 	}
-	parent, perr := ls.BlockByHash(block.PrevHash().Bytes())
+	return ls.leiosCertifiedAnnouncementFromParent(block.PrevHash().Bytes())
+}
+
+// leiosCertifiedAnnouncementFromParent resolves the endorser block a certifying
+// ranking block certifies: the one its parent announced. Split out of
+// leiosEndorserBlockForApply so the cross-fork continuation audit can resolve
+// the same reference from a retained parent hash alone, without holding the
+// certifying block, and cannot drift from what apply selects.
+func (ls *LedgerState) leiosCertifiedAnnouncementFromParent(
+	prevHash []byte,
+) (hash lcommon.Blake2b256, expectedSlot, size uint64, announced bool, err error) {
+	parent, perr := ls.BlockByHash(prevHash)
 	if perr != nil {
 		return lcommon.Blake2b256{}, 0, 0, false, fmt.Errorf(
 			"resolve certifying block parent: %w",

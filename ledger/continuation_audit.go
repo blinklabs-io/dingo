@@ -17,6 +17,7 @@ package ledger
 import (
 	"encoding/hex"
 	"errors"
+	"strconv"
 
 	"github.com/blinklabs-io/dingo/database"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -88,6 +89,14 @@ const (
 	// so truncating a pathological block is preferable to delaying the
 	// blockfetch pipeline behind unbounded per-input probes.
 	continuationAuditMaxInputsPerBlock = 32
+	// continuationAuditMaxEndorserBlocksPerBlock bounds how many endorser
+	// blocks one audited body may cause to be resolved, in the same spirit as
+	// continuationAuditMaxInputsPerBlock: resolving one costs a parent-block
+	// read plus a hash of every endorser transaction, all under
+	// chainsyncBlockfetchMutex. Refs left over stay queued for a later body,
+	// and the window reports inconclusive in the meantime rather than
+	// reporting from a set it knows is short.
+	continuationAuditMaxEndorserBlocksPerBlock = 32
 )
 
 // Label values of the dingo_ledger_continuation_audit_outcomes_total metric.
@@ -96,6 +105,7 @@ const (
 	continuationAuditResultMissingProducer       = "missing_producer"
 	continuationAuditResultInconclusiveEbPending = "inconclusive_eb_pending"
 	continuationAuditResultDisarmedCap           = "disarmed_cap"
+	continuationAuditResultSkippedBudget         = "skipped_budget"
 )
 
 // continuationAuditWindow is the state of one armed audit run. It is published
@@ -116,6 +126,51 @@ type continuationAuditWindow struct {
 	// sticky for the life of the window: once a hole exists, every later
 	// input could be falling into it.
 	endorserProducersPending bool
+	// pendingEndorserRefs are endorser-block references seen in this window
+	// whose transactions have not been merged into producedTxs yet, in
+	// arrival order. Classifying a block into a reference is header-only and
+	// free; turning a reference into producers is not, so it is deferred
+	// until an input actually fails to resolve without it. Deduplicated on
+	// insert through pendingEndorserSeen, so the same closure referenced by
+	// several ranking blocks is queued once.
+	pendingEndorserRefs []continuationAuditEndorserRef
+	pendingEndorserSeen map[string]struct{}
+	// resolvedEndorserBlocks memoizes the (hash, slot) occurrences whose
+	// transaction ids are already in producedTxs, so no endorser block is
+	// hashed twice in a window.
+	resolvedEndorserBlocks map[string]struct{}
+	// endorserResolutions counts references this window actually did work
+	// for: a parent-block read and/or a provider lookup. It is the cost the
+	// audit adds to the blockfetch path, and it stays zero for a window in
+	// which nothing spends an endorser-resident output.
+	endorserResolutions int
+}
+
+// continuationAuditEndorserRef is one endorser-block reference an audited
+// ranking block carries, in the cheapest form that can be resolved later.
+//
+// A CIP-path block announces its own endorser block, which the header gives up
+// directly. A cert-driven block certifies the endorser block its parent
+// announced, which needs a parent-block read; only the parent hash is retained
+// so the referencing block itself (and its CBOR) does not have to be. Once that
+// read happens the ref is rewritten in resolved form, so a still-unfetched
+// endorser block costs at most a provider lookup on any later attempt.
+type continuationAuditEndorserRef struct {
+	certParentHash []byte
+	ebHash         lcommon.Blake2b256
+	ebSlot         uint64
+	resolved       bool
+	blockSlot      uint64
+}
+
+// key identifies a reference for dedupe: the parent hash while the reference is
+// still a deferred certified closure, the (hash, slot) occurrence once
+// resolved.
+func (r continuationAuditEndorserRef) key() string {
+	if !r.resolved {
+		return "c" + string(r.certParentHash)
+	}
+	return "d" + string(r.ebHash.Bytes()) + strconv.FormatUint(r.ebSlot, 10)
 }
 
 // armContinuationAudit starts a bounded continuation audit at a rollback point.
@@ -132,7 +187,9 @@ func (ls *LedgerState) armContinuationAudit(
 		}
 	}
 	ls.continuationAudit.Store(&continuationAuditWindow{
-		producedTxs: make(map[string]struct{}),
+		producedTxs:            make(map[string]struct{}),
+		pendingEndorserSeen:    make(map[string]struct{}),
+		resolvedEndorserBlocks: make(map[string]struct{}),
 		forkPoint: ocommon.Point{
 			Slot: point.Slot,
 			Hash: append([]byte(nil), point.Hash...),
@@ -182,30 +239,18 @@ func (ls *LedgerState) auditContinuationBlock(
 	// it has one, contributes producers too: on the cert-driven path those are
 	// the only transactions a certifying ranking block brings, its own body
 	// being empty.
-	ebTxIds := ls.continuationAuditEndorserProducers(window, e)
-	if len(window.producedTxs)+len(txs)+len(ebTxIds) >
-		continuationAuditMaxProducedTxs {
-		ls.config.Logger.Warn(
-			"disarming cross-fork continuation audit: producer set at capacity",
-			"component", "ledger",
-			"blocks_audited", window.blocksSeen,
-			"produced_txs", len(window.producedTxs),
-			"max_produced_txs", continuationAuditMaxProducedTxs,
-		)
-		ls.countContinuationAuditOutcome(
-			continuationAuditResultDisarmedCap,
-		)
+	ls.queueContinuationAuditEndorserRef(window, e)
+	producers := make([][]byte, 0, len(txs))
+	for _, tx := range txs {
+		producers = append(producers, tx.Hash().Bytes())
+	}
+	if !ls.recordContinuationAuditProducers(window, producers) {
 		window.remaining = 0
 		return
 	}
-	for _, tx := range txs {
-		window.producedTxs[string(tx.Hash().Bytes())] = struct{}{}
-	}
-	for _, id := range ebTxIds {
-		window.producedTxs[string(id)] = struct{}{}
-	}
 	reports := 0
 	inputsAudited := 0
+	endorserBudget := continuationAuditMaxEndorserBlocksPerBlock
 	for _, tx := range txs {
 		for _, input := range collectReferencedInputs(tx) {
 			if inputsAudited >= continuationAuditMaxInputsPerBlock {
@@ -225,6 +270,21 @@ func (ls *LedgerState) auditContinuationBlock(
 					"input", input.String(),
 				)
 				continue
+			}
+			// Only now, with the cheap paths exhausted, is it worth
+			// paying for the window's endorser blocks: an audited body
+			// that spends nothing endorser-resident never triggers a
+			// parent-block read or a transaction hash.
+			if !resolved && len(window.pendingEndorserRefs) > 0 {
+				if !ls.drainContinuationAuditEndorserRefs(
+					window,
+					&endorserBudget,
+					e.Point.Slot,
+				) {
+					window.remaining = 0
+					return
+				}
+				_, resolved = window.producedTxs[string(input.Id().Bytes())]
 			}
 			if resolved {
 				ls.countContinuationAuditOutcome(
@@ -317,71 +377,232 @@ func (ls *LedgerState) continuationInputHasProducer(
 	return producerTx != nil, nil
 }
 
-// continuationAuditEndorserProducers returns the transaction ids of the Leios
-// endorser block the audited ranking block applies, resolving it exactly the
-// way ledgerProcessBlock does: leiosEndorserBlockForApply picks the reference
-// (the block's own announcement on the CIP path, the parent's announcement on
-// the Musashi cert-driven path) and EndorserBlockProvider supplies the
-// transactions for that (hash, slot) occurrence.
+// recordContinuationAuditProducers adds producer transaction ids to the
+// window's set, and reports whether the set stayed inside
+// continuationAuditMaxProducedTxs.
 //
-// The endorser block is already in the provider's cache by the time the
-// referencing ranking block is fetched — leios-fetch runs well ahead of ledger
-// apply — so the common path is a cache lookup plus a hash per endorser
-// transaction, with no additional I/O beyond the parent-block lookup the
-// cert-driven path needs. When the reference cannot be resolved or the block is
-// not cached yet, the window is marked incomplete rather than left to report a
-// producer it was never given.
+// Only ids the set does not already hold count toward the cap. The cap bounds
+// the size of the producer set, not the number of ids offered to it, and
+// charging a repeat against it would disarm a window whose set never grew.
+// Repeats are ordinary on the Leios path: the same transaction can appear in
+// more than one endorser block — applyEndorserBlock carries
+// deduplicateEndorserBlockTransactionIndexes for exactly that — and an endorser
+// block is content-addressed, so the same closure can be referenced from more
+// than one ranking block inside a window.
+//
+// The cap is enforced per insert rather than per block, so the set is never
+// larger than the cap. A block that runs the set into the cap partway through
+// leaves those ids recorded, which is harmless: the window is disarmed and its
+// set is never consulted again.
+func (ls *LedgerState) recordContinuationAuditProducers(
+	window *continuationAuditWindow,
+	ids [][]byte,
+) bool {
+	for _, id := range ids {
+		key := string(id)
+		if _, ok := window.producedTxs[key]; ok {
+			continue
+		}
+		if len(window.producedTxs) >= continuationAuditMaxProducedTxs {
+			ls.config.Logger.Warn(
+				"disarming cross-fork continuation audit: producer set at capacity",
+				"component", "ledger",
+				"blocks_audited", window.blocksSeen,
+				"produced_txs", len(window.producedTxs),
+				"max_produced_txs", continuationAuditMaxProducedTxs,
+			)
+			ls.countContinuationAuditOutcome(
+				continuationAuditResultDisarmedCap,
+			)
+			return false
+		}
+		window.producedTxs[key] = struct{}{}
+	}
+	return true
+}
+
+// queueContinuationAuditEndorserRef records, in header-only work, the endorser
+// block an audited ranking block applies, so it can be turned into producers
+// later if any input needs it.
+//
+// The reference is selected exactly as the apply path selects it: the block's
+// own announcement when LeiosApplyEndorserBlockTxs is set (the CIP path,
+// bound to the block's own slot), the parent's announcement otherwise (the
+// Musashi cert-driven path). The cert-driven case retains only the parent hash;
+// leiosCertifiedAnnouncementFromParent — the same helper
+// leiosEndorserBlockForApply uses — turns it into a reference when the time
+// comes, so the two cannot select different endorser blocks.
 //
 // Non-Leios chains are unaffected: no endorser-block provider is configured,
-// and a header that neither announces nor certifies an endorser block returns
-// no reference.
-func (ls *LedgerState) continuationAuditEndorserProducers(
+// and a header that neither announces nor certifies an endorser block queues
+// nothing.
+func (ls *LedgerState) queueContinuationAuditEndorserRef(
 	window *continuationAuditWindow,
 	e BlockfetchEvent,
-) [][]byte {
-	if ls.config.EndorserBlockProvider == nil {
-		return nil
+) {
+	if ls.config.EndorserBlockProvider == nil || e.Block == nil {
+		return
 	}
-	ebHash, ebSlot, _, referenced, err := ls.leiosEndorserBlockForApply(e.Block)
-	if err != nil {
-		window.endorserProducersPending = true
-		ls.config.Logger.Debug(
-			"cross-fork continuation audit could not resolve a block's endorser block",
-			"component", "ledger",
-			"slot", e.Point.Slot,
-			"error", err,
+	var ref continuationAuditEndorserRef
+	if ls.config.LeiosApplyEndorserBlockTxs {
+		referencer, ok := e.Block.Header().(leiosEndorserBlockReferencer)
+		if !ok {
+			return
+		}
+		ebHash, _, announced := referencer.LeiosAnnouncement()
+		if !announced {
+			return
+		}
+		ref = continuationAuditEndorserRef{
+			ebHash:    ebHash,
+			ebSlot:    e.Block.SlotNumber(),
+			resolved:  true,
+			blockSlot: e.Point.Slot,
+		}
+	} else {
+		certifier, ok := e.Block.Header().(leiosEndorserBlockCertifier)
+		if !ok {
+			return
+		}
+		certified, present := certifier.LeiosCertified()
+		if !present || !certified {
+			return
+		}
+		ref = continuationAuditEndorserRef{
+			certParentHash: e.Block.PrevHash().Bytes(),
+			blockSlot:      e.Point.Slot,
+		}
+	}
+	key := ref.key()
+	if _, ok := window.pendingEndorserSeen[key]; ok {
+		return
+	}
+	if _, ok := window.resolvedEndorserBlocks[key]; ok {
+		return
+	}
+	window.pendingEndorserSeen[key] = struct{}{}
+	window.pendingEndorserRefs = append(window.pendingEndorserRefs, ref)
+}
+
+// drainContinuationAuditEndorserRefs merges queued endorser blocks into the
+// window's producer set, spending at most *budget resolutions, and reports
+// whether the window is still armed.
+//
+// Each endorser block is resolved and hashed at most once per window: the
+// queue is deduplicated on insert and the (hash, slot) occurrences already
+// merged are memoized, so the same closure referenced by several ranking
+// blocks costs one parent read, one provider lookup and one hashing pass, not
+// one per referencing block.
+//
+// A reference whose endorser block is not cached yet stays queued in resolved
+// form — a later attempt costs only the provider lookup — and marks the window
+// incomplete, so unresolved inputs read as inconclusive rather than as missing
+// producers.
+func (ls *LedgerState) drainContinuationAuditEndorserRefs(
+	window *continuationAuditWindow,
+	budget *int,
+	auditedSlot uint64,
+) bool {
+	pending := window.pendingEndorserRefs
+	window.pendingEndorserRefs = nil
+	armed := true
+	for i, ref := range pending {
+		if !armed || *budget <= 0 {
+			// Requeue what was not reached. Hitting the budget means the
+			// producer set is knowingly short for now.
+			window.pendingEndorserRefs = append(
+				window.pendingEndorserRefs,
+				pending[i:]...,
+			)
+			if armed && *budget <= 0 {
+				window.endorserProducersPending = true
+				ls.countContinuationAuditOutcome(
+					continuationAuditResultSkippedBudget,
+				)
+				ls.config.Logger.Debug(
+					"cross-fork continuation audit deferred endorser blocks past its per-block budget",
+					"component", "ledger",
+					"slot", auditedSlot,
+					"deferred", len(pending)-i,
+					"budget", continuationAuditMaxEndorserBlocksPerBlock,
+				)
+				// Only report the budget stop once per drain.
+				*budget = -1
+			}
+			continue
+		}
+		delete(window.pendingEndorserSeen, ref.key())
+		*budget--
+		window.endorserResolutions++
+		if !ref.resolved {
+			ebHash, ebSlot, _, announced, err := ls.leiosCertifiedAnnouncementFromParent(
+				ref.certParentHash,
+			)
+			if err != nil {
+				window.endorserProducersPending = true
+				ls.config.Logger.Debug(
+					"cross-fork continuation audit could not resolve a certifying block's endorser block",
+					"component", "ledger",
+					"slot", ref.blockSlot,
+					"error", err,
+				)
+				continue
+			}
+			if !announced {
+				continue
+			}
+			ref.ebHash = ebHash
+			ref.ebSlot = ebSlot
+			ref.resolved = true
+		}
+		key := ref.key()
+		if _, ok := window.resolvedEndorserBlocks[key]; ok {
+			continue
+		}
+		rawTxs, ok := ls.config.EndorserBlockProvider(
+			ref.ebHash.Bytes(),
+			ref.ebSlot,
 		)
-		return nil
+		if !ok {
+			window.endorserProducersPending = true
+			ls.config.Logger.Debug(
+				"cross-fork continuation audit: certified endorser block not fetched yet",
+				"component", "ledger",
+				"slot", ref.blockSlot,
+				"eb_slot", ref.ebSlot,
+				"eb_hash", ref.ebHash.String(),
+			)
+			// Keep it queued in resolved form: the parent read is done,
+			// and the block may be fetched before the window ends.
+			window.pendingEndorserSeen[key] = struct{}{}
+			window.pendingEndorserRefs = append(
+				window.pendingEndorserRefs,
+				ref,
+			)
+			continue
+		}
+		ids, err := endorserBlockTxIds(rawTxs)
+		if err != nil {
+			window.endorserProducersPending = true
+			ls.config.Logger.Debug(
+				"cross-fork continuation audit could not read endorser block transaction ids",
+				"component", "ledger",
+				"slot", ref.blockSlot,
+				"eb_slot", ref.ebSlot,
+				"eb_hash", ref.ebHash.String(),
+				"error", err,
+			)
+			continue
+		}
+		window.resolvedEndorserBlocks[key] = struct{}{}
+		if !ls.recordContinuationAuditProducers(window, ids) {
+			armed = false
+		}
 	}
-	if !referenced {
-		return nil
+	if *budget < 0 {
+		*budget = 0
 	}
-	rawTxs, ok := ls.config.EndorserBlockProvider(ebHash.Bytes(), ebSlot)
-	if !ok {
-		window.endorserProducersPending = true
-		ls.config.Logger.Debug(
-			"cross-fork continuation audit: certified endorser block not fetched yet",
-			"component", "ledger",
-			"slot", e.Point.Slot,
-			"eb_slot", ebSlot,
-			"eb_hash", ebHash.String(),
-		)
-		return nil
-	}
-	ids, err := endorserBlockTxIds(rawTxs)
-	if err != nil {
-		window.endorserProducersPending = true
-		ls.config.Logger.Debug(
-			"cross-fork continuation audit could not read endorser block transaction ids",
-			"component", "ledger",
-			"slot", e.Point.Slot,
-			"eb_slot", ebSlot,
-			"eb_hash", ebHash.String(),
-			"error", err,
-		)
-		return nil
-	}
-	return ids
+	return armed
 }
 
 // countContinuationAuditOutcome increments the pre-materialized outcome
@@ -398,6 +619,8 @@ func (ls *LedgerState) countContinuationAuditOutcome(result string) {
 		counter = ls.metrics.continuationAuditInconclusiveEbPending
 	case continuationAuditResultDisarmedCap:
 		counter = ls.metrics.continuationAuditDisarmedCap
+	case continuationAuditResultSkippedBudget:
+		counter = ls.metrics.continuationAuditSkippedBudget
 	}
 	if counter == nil {
 		return
