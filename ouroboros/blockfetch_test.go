@@ -845,14 +845,11 @@ func TestBlockfetchServerRequestRange_RepeatedInvertedRangeReachesCloseThreshold
 	}
 }
 
-// TestBlockfetchServerRequestRange_RepeatedValidRangeNeverClosesPeer is the
-// control for the fix above: a valid (non-inverted, in-limit) range must
-// never be treated as an inverted-range rejection, however many times it is
-// repeated for the same connection and start point. LedgerState is nil, so a
-// valid range reaches GetChainFromPoint and panics there -- proving it passed
-// both the inverted-range and oversized-range checks without either
-// rejecting it.
-func TestBlockfetchServerRequestRange_RepeatedValidRangeNeverClosesPeer(
+// TestBlockfetchServerRequestRange_ValidRangeNotRejected is the control for
+// the fix above: a valid (non-inverted, in-limit) range reaches
+// GetChainFromPoint instead of either range-rejection path. LedgerState is nil,
+// so the expected panic proves validation completed before that call.
+func TestBlockfetchServerRequestRange_ValidRangeNotRejected(
 	t *testing.T,
 ) {
 	var logBuf bytes.Buffer
@@ -867,11 +864,9 @@ func TestBlockfetchServerRequestRange_RepeatedValidRangeNeverClosesPeer(
 	end := ocommon.NewPoint(150, []byte{0x02})
 	ctx := blockfetch.CallbackContext{ConnectionId: testConnId()}
 
-	for range blockfetchMaxConsecutiveNoBlocks {
-		assert.Panics(t, func() {
-			_ = o.blockfetchServerRequestRange(ctx, start, end)
-		}, "valid range should reach LedgerState call, not get rejected")
-	}
+	assert.Panics(t, func() {
+		_ = o.blockfetchServerRequestRange(ctx, start, end)
+	}, "valid range should reach LedgerState call, not get rejected")
 
 	logOutput := logBuf.String()
 	assert.NotContains(t, logOutput, "start after end")

@@ -1076,7 +1076,7 @@ type LedgerState struct {
 	// gather-then-submit sequence (collecting raw blocks via iter.Next(),
 	// then handing them to decodeReadChainBatch, which -- when blockPipeline
 	// is non-nil -- Submits every one of them and drains their Results()
-	// before returning) against rollbackChainAndState's out-of-band
+	// before returning) against rollbackChainAndStateDeferred's out-of-band
 	// rollback path.
 	//
 	// drainBlockPipelineBeforeRollback alone is not enough for that path:
@@ -1087,13 +1087,13 @@ type LedgerState struct {
 	// WaitForDrain observes an empty pipeline and returns immediately, and
 	// the reader can then Submit and apply those raw blocks, from the very
 	// fork chain-selection just decided to abandon, after the rollback
-	// already believed it was safe to proceed. rollbackChainAndState
+	// already believed it was safe to proceed. rollbackChainAndStateDeferred
 	// (reached from chainsync per-connection handling, never from
 	// ledgerProcessBlocks) has no other way to learn the reader is
 	// mid-gather.
 	//
 	// The reader holds the read lock for exactly the gather-plus-submit
-	// span (see ledgerReadChainIterator); rollbackChainAndState holds the
+	// span (see ledgerReadChainIterator); rollbackChainAndStateDeferred holds the
 	// write lock from before it calls drainBlockPipelineBeforeRollback
 	// through ls.chain.Rollback, so no gather-then-submit cycle can start,
 	// and none already in flight can reach Submit, while a rollback is
@@ -1117,7 +1117,7 @@ type LedgerState struct {
 	// Undo publication, and primary-chain truncation. Without it, a rollback
 	// can observe a newly committed block before its AfterCommit callback has
 	// reached the ordered lane, publishing Undo before Apply. See
-	// submitBlockApplyDBTxn and rollbackChainAndState.
+	// submitBlockApplyDBTxn and rollbackChainAndStateDeferred.
 	transactionEventMutex sync.Mutex
 
 	// publishCtx is cancelled at the top of Close so a ledger.tx publish
@@ -2071,7 +2071,7 @@ var (
 	CloseBlockfetchDrainTimeout    = 10 * time.Second
 	// BlockPipelineRollbackDrainTimeout bounds how long an asynchronous
 	// rollback (chainsync fork resolution or a peer-reported rollback --
-	// see rollbackChainAndState) waits for ls.blockPipeline to drain
+	// see rollbackChainAndStateDeferred) waits for ls.blockPipeline to drain
 	// in-flight decode/validate work before proceeding. See
 	// drainBlockPipelineBeforeRollback's doc comment for what this
 	// protects against and, just as importantly, what it does not.
@@ -3272,7 +3272,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 //
 // Why this matters (issue #1894 phase 5): ledgerReadChainIterator -- the
 // pipeline's only submitter -- runs on its own goroutine, entirely
-// decoupled from the goroutine that decides a rollback. rollbackChainAndState
+// decoupled from the goroutine that decides a rollback. rollbackChainAndStateDeferred
 // in particular is reached from chainsync per-connection handling
 // (handleEventChainsyncRollback, tryResolveFork), never from
 // ledgerProcessBlocks itself. Chain-selection can decide to abandon a fork
@@ -3308,7 +3308,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 // cancellable context (e.g. processChainIteratorRollback, driven by
 // ledgerProcessBlocksFromSource's attempt context) does not block a
 // shutdown or restart on the fixed timeout. Callers with no context of
-// their own (rollbackChainAndState, reached from chainsync event handling
+// their own (rollbackChainAndStateDeferred, reached from chainsync event handling
 // with no ctx threaded through) pass context.Background(), matching
 // decodeReadChainBatch's identical, already-established choice for the
 // same reason.
@@ -3352,9 +3352,22 @@ func (ls *LedgerState) drainBlockPipelineBeforeRollback(
 	)
 }
 
-// rollbackChainAndState rewinds the primary chain and then synchronizes the
-// metadata-backed ledger state to the same point.
-func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
+// rollbackChainAndStateDeferred rewinds the primary chain and ledger state,
+// deferring the chain.update events the rewind produces rather than letting the
+// chain publish them inline. This method is reached from chainsync event
+// handling (handleEventChainsyncRollback, tryResolveFork) while chainsyncMutex
+// is held; an inline, back-pressured chain.update publish under that mutex is
+// the drain deadlock (see pendingPublishes). RollbackDeferred enqueues those
+// events on the chain's shared sequencer under c.mutex, so they are ordered
+// against concurrent blockfetch adds in true chain-mutation order (the
+// rollback-before-add guarantee is now chain-wide, not merely within this
+// handler's queue); registering the chain on pubs.chainDrains drains that
+// sequencer after the mutex is released. A nil pubs drains immediately
+// (unlocked / test path).
+func (ls *LedgerState) rollbackChainAndStateDeferred(
+	point ocommon.Point,
+	pubs *pendingPublishes,
+) error {
 	ls.RLock()
 	mithrilLedgerSlot := ls.mithrilLedgerSlot
 	ls.RUnlock()
@@ -3409,16 +3422,34 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 	// A database commit becomes visible before its AfterCommit callbacks run.
 	// Exclude that window so blocksAboveSlot can never publish an Undo for the
 	// new state before the matching Apply reaches the ordered lane.
+	var rollbackEvents []event.Event
 	err := func() error {
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
 		if err := ls.validateAndEmitRollbackUndo(point); err != nil {
 			return err
 		}
-		return ls.chain.Rollback(point)
+		evts, rbErr := ls.chain.RollbackDeferred(point)
+		if rbErr != nil {
+			return rbErr
+		}
+		rollbackEvents = evts
+		return nil
 	}()
 	if err != nil {
 		return err
+	}
+	// Publish the rollback's chain.update after chainsyncMutex is released.
+	// Under the mutex an inline back-pressured publish deadlocks the drain.
+	// RollbackDeferred has already enqueued these events on the chain's shared
+	// sequencer under c.mutex, so they are ordered against concurrent
+	// blockfetch adds in true chain-mutation order (rollback-before-add is no
+	// longer merely a within-handler property); registering the chain drains
+	// that sequencer once the mutex is released (a nil pubs drains
+	// immediately on the unlocked path). See
+	// chain.Chain.PublishPendingChainUpdates.
+	if len(rollbackEvents) > 0 {
+		pubs.drainChain(ls.chain)
 	}
 	if err := ls.rollback(point); err != nil {
 		return fmt.Errorf("synchronize ledger rollback state: %w", err)
@@ -3492,7 +3523,7 @@ func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
 // its doc comment), so nothing from *this* attempt is still in flight
 // here. The call is kept anyway as a defensive invariant guard -- issue
 // #1894 phase 5's actual cross-goroutine race is closed in
-// rollbackChainAndState instead, which is reached from chainsync handling
+// rollbackChainAndStateDeferred instead, which is reached from chainsync handling
 // on a different goroutine and has no equivalent synchronous guarantee.
 func (ls *LedgerState) processChainIteratorRollback(
 	ctx context.Context,
@@ -6847,7 +6878,7 @@ func (ls *LedgerState) reconstructTransitionInfo() {
 		// Shelley block on chain is what establishes the real boundary.
 		//
 		// This is not redundant with the currentPParams == nil check below.
-		// rollbackChainAndState calls this immediately after setting
+		// rollbackChainAndStateDeferred calls this immediately after setting
 		// currentEra, and until ppComputed replaced the old nil test there a
 		// rollback into Byron left currentPParams holding its Shelley value
 		// under a Byron era -- exactly the shape this guard rejects. The guard

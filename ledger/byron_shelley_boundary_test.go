@@ -573,7 +573,7 @@ func TestRollbackChainAndStateClearsShelleyPParamsInsideByronPrefix(
 		lastByron.SlotNumber(),
 		lastByron.Hash().Bytes(),
 	)
-	require.NoError(t, ls.rollbackChainAndState(byronPoint))
+	require.NoError(t, ls.rollbackChainAndStateDeferred(byronPoint, nil))
 
 	assert.Equal(t, byronPoint, ls.currentTip.Point)
 	assert.Equal(t, eras.ByronEraDesc.Id, ls.currentEra.Id)

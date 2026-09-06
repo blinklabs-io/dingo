@@ -510,9 +510,13 @@ func (o *Ouroboros) txsubmissionClientRequestTxIds(
 			connId.String(),
 		)
 	}
-	// Clear TX cache
+	// Forget only the acknowledged prefix of previously offered transaction
+	// bodies. TxSubmission acknowledges the offered-id window in FIFO order;
+	// clearing the whole cache here would also drop bodies for ids offered
+	// after that prefix that the peer has not acknowledged and may still
+	// request.
 	if ack > 0 {
-		consumer.ClearCache()
+		consumer.AcknowledgeOffered(int(ack))
 	}
 	// Get available TXs
 	var tmpTxs []*mempool.MempoolTransaction

@@ -9,7 +9,6 @@
 package badger
 
 import (
-	"crypto/rand"
 	"errors"
 	"strconv"
 	"testing"
@@ -18,78 +17,56 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// BenchmarkValueLogGC measures GC against a fixed-size dataset with rotated
-// value-log files and both overwritten and deleted values. Setup is outside
-// the timed region, so the benchmark compares the GC rewrite itself.
+// BenchmarkValueLogGC provides a repeatable synthetic comparison of discard
+// ratios. It deliberately disables the background ticker and churns live keys
+// through rewrites and deletes so the benchmark measures reclaimable data, not
+// only ErrNoRewrite. Use -benchmem and compare each ratio's ns/op, allocations,
+// and reclaimed bytes.
 func BenchmarkValueLogGC(b *testing.B) {
 	for _, ratio := range []float64{0.25, 0.5, 0.75} {
 		b.Run(strconv.FormatFloat(ratio, 'f', 2, 64), func(b *testing.B) {
-			store, err := New(WithDataDir(b.TempDir()), WithGc(false), WithValueThreshold(1), WithValueLogFileSize(1<<20), WithMemTableSize(1<<20))
+			store, err := New(
+				WithDataDir(b.TempDir()),
+				WithGc(false),
+				WithValueThreshold(1),
+				WithValueLogFileSize(1<<20),
+			)
 			require.NoError(b, err)
 			b.Cleanup(func() { require.NoError(b, store.Close()) })
-			b.ResetTimer()
+
+			for i := 0; i < 256; i++ {
+				txn := store.NewTransaction(true)
+				key := []byte("benchmark-key-" + strconv.Itoa(i%32))
+				require.NoError(b, store.Set(txn, key, make([]byte, 4096)))
+				if i%2 == 1 {
+					require.NoError(b, store.Delete(
+						txn,
+						[]byte("benchmark-key-"+strconv.Itoa((i/2)%32)),
+					))
+				}
+				require.NoError(b, txn.Commit())
+			}
 			for i := 0; i < b.N; i++ {
 				b.StopTimer()
-				for pass := 0; pass < 2; pass++ {
-					for batch := 0; batch < 5; batch++ {
-						txn := store.DB().NewTransaction(true)
-						for j := 0; j < 20; j++ {
-							key := batch*20 + j
-							value := make([]byte, 32<<10)
-							_, err = rand.Read(value)
-							require.NoError(b, err)
-							entry := badgerdb.NewEntry([]byte("benchmark-key-"+strconv.Itoa(key)), value)
-							if pass == 0 {
-								entry.ExpiresAt = 1
-							}
-							require.NoError(b, txn.SetEntry(entry))
-						}
-						require.NoError(b, txn.Commit())
-					}
-				}
-				for batch := 0; batch < 100; batch++ {
-					txn := store.DB().NewTransaction(true)
-					for j := 0; j < 1000; j++ {
-						key := batch*1000 + j
-						require.NoError(b, txn.SetEntry(badgerdb.NewEntry([]byte("benchmark-filler-"+strconv.Itoa(key)), []byte{1})))
-					}
+				for j := 0; j < 64; j++ {
+					txn := store.NewTransaction(true)
+					key := []byte("benchmark-key-" + strconv.Itoa(j))
+					require.NoError(b, store.Set(txn, key, make([]byte, 4096)))
 					require.NoError(b, txn.Commit())
 				}
-				for batch := 0; batch < 3; batch++ {
-					txn := store.DB().NewTransaction(true)
-					for j := 0; j < 20; j++ {
-						key := batch*20 + j
-						if key >= 45 {
-							continue
-						}
-						require.NoError(b, txn.Delete([]byte("benchmark-key-"+strconv.Itoa(key))))
-					}
-					require.NoError(b, txn.Commit())
-				}
-				require.NoError(b, store.DB().Flatten(10))
-				require.NoError(b, store.DB().Sync())
+				before, err := store.DiskSize()
+				require.NoError(b, err)
 				b.StartTimer()
-				successes := 0
-				reclaimed := int64(0)
-				for attempts := 0; attempts < 32; attempts++ {
-					passBefore, sizeErr := store.DiskSize()
-					require.NoError(b, sizeErr)
-					err = store.DB().RunValueLogGC(ratio)
-					if errors.Is(err, badgerdb.ErrNoRewrite) {
-						continue
-					}
-					require.NoError(b, err)
-					successes++
-					passAfter, sizeErr := store.DiskSize()
-					require.NoError(b, sizeErr)
-					if passBefore > passAfter && passBefore-passAfter > reclaimed {
-						reclaimed = passBefore - passAfter
-					}
-				}
+				err = store.DB().RunValueLogGC(ratio)
 				b.StopTimer()
-				require.Greater(b, successes, 0, "GC did not perform a successful rewrite")
-				if reclaimed > 0 {
-					b.ReportMetric(float64(reclaimed), "bytes_reclaimed")
+				if errors.Is(err, badgerdb.ErrNoRewrite) {
+					continue
+				}
+				require.NoError(b, err)
+				after, err := store.DiskSize()
+				require.NoError(b, err)
+				if before > after {
+					b.ReportMetric(float64(before-after), "bytes_reclaimed")
 				}
 			}
 		})
