@@ -73,14 +73,24 @@ func TestCreditedAccountRewardsReportsDecodeFailure(t *testing.T) {
 	require.Len(t, errs, 1)
 }
 
-// An uncredited row with an undecodable credential must not be reported: the
-// comparison never would have used it.
-func TestCreditedAccountRewardsIgnoresUncreditedDecodeFailure(t *testing.T) {
+// An uncredited row with an undecodable credential is still reported. The
+// narrowing is about what the comparison sees, not about what gets reported:
+// a credential that cannot be turned into a stake address is a storage
+// problem whichever row carries it.
+//
+// It also has to be reported here specifically.
+// accountLifecycleMismatches decodes the same rows through
+// dingoRewardAddressSet, but only emits a CategoryDBError for the *previous*
+// stake epoch's failures — for the current epoch it merely suppresses the
+// lifecycle diff and returns, on the stated assumption that this function
+// already reported it. Dropping the row before decoding would break that
+// assumption and take the lifecycle diff down silently with it.
+func TestCreditedAccountRewardsReportsUncreditedDecodeFailure(t *testing.T) {
 	rows, errs := creditedAccountRewards([]*models.RewardAccountOutput{
 		{StakingKey: []byte{0x01, 0x02}, RewardType: "member", Amount: 1, Spendable: false},
 	})
-	assert.Empty(t, rows)
-	assert.Empty(t, errs)
+	assert.Empty(t, rows, "an uncredited row still never enters the comparison")
+	require.Len(t, errs, 1, "but its corrupt credential is still reported")
 }
 
 func mustDecodeHex(t *testing.T, s string) []byte {

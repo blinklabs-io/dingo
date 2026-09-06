@@ -937,25 +937,30 @@ func compareEpochAccounts(
 // comparison — unlike addSpendableMemberRewards, which additionally filters to
 // member rows because it is summing a pool's member reward total specifically.
 //
-// A credential that cannot be decoded is returned as an error for the caller
-// to report, but only for a row that would have been compared: an uncredited
-// row is dropped before decoding, so a bad credential on one cannot raise a
-// database error about a row no comparison would have used.
+// Every row is decoded, credited or not, and a credential that cannot be
+// decoded is returned as an error for the caller to report. The narrowing is
+// about what the comparison sees, not about what gets reported: a credential
+// that cannot be turned into a stake address is a storage problem whichever
+// row carries it, and accountLifecycleMismatches relies on this being the
+// reporting path for the current stake epoch — it reports only the *previous*
+// epoch's decode failures itself, and otherwise merely suppresses the
+// lifecycle diff. Filtering before decoding would make an uncredited row's
+// corrupt credential vanish entirely and silently disable that diff.
 func creditedAccountRewards(
 	outputs []*models.RewardAccountOutput,
 ) ([]DingoAccountReward, []error) {
 	rows := make([]DingoAccountReward, 0, len(outputs))
 	var errs []error
 	for _, row := range outputs {
-		if !row.Spendable || row.Guarded {
-			continue
-		}
 		addr, err := StakeAddressFromCredential(
 			row.StakingKey,
 			row.CredentialTag,
 		)
 		if err != nil {
 			errs = append(errs, err)
+			continue
+		}
+		if !row.Spendable || row.Guarded {
 			continue
 		}
 		rows = append(rows, DingoAccountReward{

@@ -26,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1581,4 +1582,189 @@ INSERT INTO reward_pool_input (
 		paramEpoch,
 	).Scan(&snapshots))
 	require.Zero(t, snapshots, "the mark rows must be gone")
+}
+
+// TestCheckUncreditedDingoRowStillFailsAgainstKoios is the case that decides
+// whether this narrowing is safe, and it runs through compareEpochAccounts
+// rather than the helper: an uncredited Dingo row whose Koios counterpart
+// exists at the same (stake_address, reward_type) must still be reported.
+//
+// The filter drops only Dingo rows, so such a row cannot go quiet — it moves
+// from the value path to the presence path and comes out as acct_only_koios,
+// a FAIL. A narrowing that also swallowed the Koios side would turn a genuine
+// divergence into a PASS, which is the one outcome a parity checker must
+// never produce.
+func TestCheckUncreditedDingoRowStillFailsAgainstKoios(t *testing.T) {
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+	const stakeEpoch = koiosEpoch - 1
+
+	dingoDir, gdb := newTestDingoDB(t)
+	require.NoError(t, gdb.Create(&models.EpochSummary{
+		Epoch:            stakeEpoch,
+		TotalActiveStake: types.Uint64(5_000_000),
+		SnapshotReady:    true,
+	}).Error)
+
+	stakingKey := testPoolKeyHash(t, 0x41)
+	require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+		Epoch:       stakeEpoch,
+		StakingKey:  stakingKey,
+		PoolKeyHash: testPoolKeyHash(t, 0x22),
+		RewardType:  "member",
+		Amount:      types.Uint64(1_000_000),
+		Spendable:   false, // the ledger never credited it
+	}).Error)
+
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	addr, err := StakeAddressFromCredential(stakingKey, 0)
+	require.NoError(t, err)
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := OpenCache(cachePath, nil)
+	require.NoError(t, err)
+	defer cache.Close() //nolint:errcheck
+
+	fetchedAt := time.Now().Add(-time.Hour).UTC()
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        koiosEpoch,
+		ActiveStake:  "5000000",
+		EpochEndTime: fetchedAt,
+		FetchedAt:    fetchedAt,
+	}, nil, &KoiosTotals{
+		Network:   network,
+		Epoch:     koiosEpoch,
+		FetchedAt: fetchedAt,
+	}))
+	// Koios reports a reward for exactly the address Dingo's uncredited row
+	// names. Dingo owes an explanation for it either way.
+	require.NoError(t, cache.CommitAccountRewardsForEpoch(
+		network,
+		koiosEpoch,
+		[]KoiosAccountRewards{{
+			StakeAddress: addr,
+			RewardType:   "member",
+			Earned:       "1000000",
+			FetchedAt:    fetchedAt,
+		}},
+		1,
+		true,
+		fetchedAt,
+	))
+
+	result, err := Check(context.Background(), CheckConfig{
+		Network:         network,
+		DingoDB:         DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+		CachePath:       cachePath,
+		AccountsEnabled: true,
+	}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.Equal(t, []uint64{koiosEpoch}, result.FailEpochs,
+		"a Koios row Dingo cannot account for must still fail the epoch")
+
+	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+	require.NoError(t, err)
+	var presence []CheckMismatch
+	for _, m := range mismatches {
+		if m.Field == "account_reward_presence" {
+			presence = append(presence, m)
+		}
+	}
+	require.Len(t, presence, 1)
+	assert.Equal(t, CategoryAcctOnlyKoios, presence[0].Category)
+	assert.Equal(t, addr, presence[0].StakeAddress)
+}
+
+// TestCheckAccountDecodeErrorReachesOutput pins that the restructured decode
+// path still reports. compareEpochAccounts now appends every decode mismatch
+// ahead of the comparison rows instead of interleaving them, and nothing else
+// proved a CategoryDBError still reaches its output at all.
+//
+// Both subtests matter, and for different reasons. The credited row is the
+// behaviour the inline loop had. The uncredited row is the one this PR could
+// have lost: accountLifecycleMismatches reports only the *previous* stake
+// epoch's decode failures and, for the current epoch, merely suppresses the
+// lifecycle diff on the stated assumption that compareEpochAccounts already
+// reported it — so a filter applied before decoding would drop the row and
+// silently disable the diff with it.
+func TestCheckAccountDecodeErrorReachesOutput(t *testing.T) {
+	const network = "preview"
+	const koiosEpoch = uint64(10)
+	const stakeEpoch = koiosEpoch - 1
+
+	for _, tc := range []struct {
+		name      string
+		spendable bool
+	}{
+		{"credited row", true},
+		{"uncredited row", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dingoDir, gdb := newTestDingoDB(t)
+			require.NoError(t, gdb.Create(&models.EpochSummary{
+				Epoch:            stakeEpoch,
+				TotalActiveStake: types.Uint64(5_000_000),
+				SnapshotReady:    true,
+			}).Error)
+			// Two bytes is not a credential any address can be built from.
+			require.NoError(t, gdb.Create(&models.RewardAccountOutput{
+				Epoch:       stakeEpoch,
+				StakingKey:  []byte{0x01, 0x02},
+				PoolKeyHash: testPoolKeyHash(t, 0x22),
+				RewardType:  "member",
+				Amount:      types.Uint64(1_000_000),
+				Spendable:   tc.spendable,
+			}).Error)
+
+			sqlDB, err := gdb.DB()
+			require.NoError(t, err)
+			require.NoError(t, sqlDB.Close())
+
+			cachePath := filepath.Join(t.TempDir(), "cache.db")
+			cache, err := OpenCache(cachePath, nil)
+			require.NoError(t, err)
+			defer cache.Close() //nolint:errcheck
+
+			fetchedAt := time.Now().Add(-time.Hour).UTC()
+			require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+				Network:      network,
+				Epoch:        koiosEpoch,
+				ActiveStake:  "5000000",
+				EpochEndTime: fetchedAt,
+				FetchedAt:    fetchedAt,
+			}, nil, &KoiosTotals{
+				Network:   network,
+				Epoch:     koiosEpoch,
+				FetchedAt: fetchedAt,
+			}))
+			require.NoError(t, cache.CommitAccountRewardsForEpoch(
+				network, koiosEpoch, nil, 0, true, fetchedAt,
+			))
+
+			result, err := Check(context.Background(), CheckConfig{
+				Network:         network,
+				DingoDB:         DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+				CachePath:       cachePath,
+				AccountsEnabled: true,
+			}, slog.New(slog.DiscardHandler))
+			require.NoError(t, err)
+			require.Equal(t, []uint64{koiosEpoch}, result.ErrorEpochs,
+				"an undecodable credential is a database error, not a pass")
+
+			mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
+			require.NoError(t, err)
+			var decodeRows []CheckMismatch
+			for _, m := range mismatches {
+				if m.Field == "account_reward_address_decode" {
+					decodeRows = append(decodeRows, m)
+				}
+			}
+			require.Len(t, decodeRows, 1)
+			assert.Equal(t, CategoryDBError, decodeRows[0].Category)
+		})
+	}
 }
