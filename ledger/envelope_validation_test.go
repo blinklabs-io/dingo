@@ -299,6 +299,28 @@ func TestValidateInboundBlockEnvelopeSizes(t *testing.T) {
 	}
 }
 
+func TestValidateInboundBlockEnvelopeRejectsByronBodyProofMismatch(t *testing.T) {
+	block := &byron.ByronMainBlock{
+		BlockHeader: &byron.ByronMainBlockHeader{},
+	}
+	block.BlockHeader.SetCbor([]byte{0x80})
+	block.Body.SetCbor([]byte{0x84, 0x80, 0x80, 0x80, 0x80})
+	block.SetCbor(mustEnvelopeBlockCbor(
+		t,
+		[]byte{0x80},
+		cbor.RawMessage{0x84, 0x80, 0x80, 0x80, 0x80},
+		cbor.RawMessage{0x80},
+	))
+
+	err := validateInboundBlockEnvelope(
+		block,
+		nil,
+		envelopeParent{origin: true},
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, byron.ErrBodyProofMismatch)
+}
+
 // TestValidateInboundBlockEnvelopeOrdering checks normal block number and
 // slot ordering failures, including Byron main blocks reusing parent numbers.
 func TestValidateInboundBlockEnvelopeOrdering(t *testing.T) {
@@ -456,6 +478,9 @@ func TestValidateInboundBlockEnvelopeByronEbbOrdering(t *testing.T) {
 	}
 	ebb.BlockHeader.ConsensusData.Epoch = 1
 	ebb.BlockHeader.ConsensusData.Difficulty.Value = parent.blockNumber
+	bodyHash := lcommon.Blake2b256Hash([]byte{0x80})
+	ebb.BlockHeader.BodyProof = bodyHash.Bytes()
+	ebb.SetCbor(mustEnvelopeBlockCbor(t, []byte{0x80}, cbor.RawMessage{0x80}, cbor.RawMessage{0x80}))
 	require.NoError(t, validateInboundBlockEnvelope(ebb, nil, parent))
 
 	ebb.BlockHeader.ConsensusData.Difficulty.Value = parent.blockNumber + 1
