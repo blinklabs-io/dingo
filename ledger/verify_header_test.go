@@ -1316,6 +1316,122 @@ func TestVerifyDeferredBlockHeaderStateSurvivesRestartMarker(
 	require.Empty(t, value)
 }
 
+// TestVerifyDeferredBlockHeaderState_GenesisOverlayRevalidatedAtApply is the
+// apply-path regression for the d=1 / genesis-overlay defer (issue #3717 review,
+// wolf, verify_header.go ~560). A header at a d=1 overlay slot is deferred at
+// header-verification time because the in-memory protocol parameters (and the
+// active genesis delegation) can still describe the previous epoch while
+// blockfetch verifies ahead of apply. The classifier verdict alone is not the
+// safety property; what makes the defer safe is that the STATEFUL genesis-
+// delegate check re-runs at apply with allowStateDefer=false. This drives a
+// deferred genesis-overlay header through verifyDeferredBlockHeaderState (the
+// apply path, state.go) and proves:
+//
+//   - a header from the WRONG issuer at a d=1 overlay slot is REJECTED at apply
+//     (headerValidationError), so it cannot be adopted with the check skipped;
+//   - a header from the correct genesis delegate is re-validated and accepted,
+//     and its markers cleared; and
+//   - the marker is the sole gate: with required==false (no marker) the apply
+//     path returns nil WITHOUT running the check. That is exactly the silent-
+//     adoption a lost pin would cause, which is why marker retention (Items 1 &
+//     2 / eviction horizon) must be durable. It is NOT a validity verdict.
+//
+// Under d=1 with activeSlotsCoeff 0.99 every slot classifies as an ACTIVE
+// overlay slot (position%1==0, single genesis key), so the genesis-delegate
+// path -- not the Praos leader-eligibility path -- is authoritative here.
+func TestVerifyDeferredBlockHeaderState_GenesisOverlayRevalidatedAtApply(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{90}, 0, tamperNone)
+	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
+	delegateHash := tb.block.IssuerVkey().Hash()
+	vrfKey, ok, err := headerVrfKeyFromBodyCbor(tb.block.Header())
+	require.NoError(t, err)
+	require.True(t, ok)
+	vrfHash := lcommon.Blake2b256Hash(vrfKey)
+
+	// REJECT: the deferred header's issuer is NOT the assigned genesis delegate.
+	t.Run("wrong issuer rejected at apply", func(t *testing.T) {
+		ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+		wrongDelegate := make([]byte, lcommon.Blake2b224Size)
+		wrongDelegate[0] = 0xAB
+		ls.config.CardanoNodeConfig = newGenesisDelegateShelleyGenesisCfg(
+			t,
+			hex.EncodeToString(wrongDelegate),
+			hex.EncodeToString(vrfHash.Bytes()),
+		)
+		ls.currentPParams = &shelley.ShelleyProtocolParameters{
+			Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1)},
+		}
+		ls.publishSnapshotsLocked()
+
+		// No marker -> required == false -> the check is SKIPPED and nil is
+		// returned. This is the lost-pin silent-adoption path, asserted here so
+		// the gate is explicit; it is not a statement that the block is valid.
+		require.NoError(
+			t,
+			ls.verifyDeferredBlockHeaderState(nil, point, tb.block),
+			"no marker: required==false, stateful check skipped (lost-pin bypass)",
+		)
+
+		// With the marker present the stateful genesis-delegate check runs at
+		// apply and rejects the wrong issuer; the block cannot be adopted.
+		require.NoError(t, ls.persistDeferredHeaderValidation(point, nil))
+		ls.markDeferredHeaderValidation(point)
+		err := ls.verifyDeferredBlockHeaderState(nil, point, tb.block)
+		require.Error(t, err)
+		var hve *headerValidationError
+		require.ErrorAs(t, err, &hve)
+		assert.Contains(
+			t,
+			err.Error(),
+			"genesis overlay slot assigned to delegate",
+		)
+		// The persisted marker is NOT cleared on rejection: the header stays
+		// outstanding (its rejection is terminal via the typed rewind), never
+		// silently resolved.
+		marker, gerr := db.GetSyncState(
+			deferredHeaderValidationSyncStateKey(point), nil,
+		)
+		require.NoError(t, gerr)
+		assert.Equal(
+			t,
+			deferredHeaderValidationSyncStateValue,
+			marker,
+			"rejected header's marker must not be cleared",
+		)
+	})
+
+	// ACCEPT: the correct genesis delegate re-validates at apply and clears.
+	t.Run("correct delegate revalidated and cleared", func(t *testing.T) {
+		ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+		ls.config.CardanoNodeConfig = newGenesisDelegateShelleyGenesisCfg(
+			t,
+			hex.EncodeToString(delegateHash.Bytes()),
+			hex.EncodeToString(vrfHash.Bytes()),
+		)
+		ls.currentPParams = &shelley.ShelleyProtocolParameters{
+			Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1)},
+		}
+		ls.publishSnapshotsLocked()
+		require.NoError(t, ls.persistDeferredHeaderValidation(point, nil))
+		ls.markDeferredHeaderValidation(point)
+
+		require.NoError(
+			t,
+			ls.verifyDeferredBlockHeaderState(nil, point, tb.block),
+			"correct genesis delegate must re-validate at apply",
+		)
+		// Resolved: in-memory entry consumed and the persisted marker cleared.
+		assert.False(t, ls.consumeDeferredHeaderValidation(point))
+		v, gerr := db.GetSyncState(
+			deferredHeaderValidationSyncStateKey(point), nil,
+		)
+		require.NoError(t, gerr)
+		assert.Empty(t, v, "resolved header's persisted marker must be cleared")
+	})
+}
+
 // TestVerifyBlockHeaderCrypto_RejectsEmptyEpochCache verifies that
 // verification rejects blocks when the epoch cache is completely empty.
 func TestVerifyBlockHeaderCrypto_RejectsEmptyEpochCache(t *testing.T) {
@@ -1879,6 +1995,179 @@ func TestVerifyBlockHeaderState_GenesisDelegateNonOverlaySlotUsesPoolThreshold(
 	assert.ErrorIs(t, err, errHeaderVerificationDeferred)
 }
 
+// TestVerifyBlockHeaderState_UnavailableSnapshotRecoverableVsGenuine pins the
+// consensus-sensitive scoping of the deferral (issue #3727, finding 4). A
+// leader-stake snapshot reported unavailable is only recoverable while the
+// apply cursor is still BEHIND the header's slot (the mark snapshot has not
+// been produced yet) -> defer. Once the cursor has caught up, a still-empty
+// distribution is a genuine, permanent gap for that epoch and MUST stay a hard
+// rejection -- deferring it forever would adopt a block whose leader
+// eligibility is never checked, or loop. A producer absent from a POPULATED
+// snapshot is authoritative ineligibility (VRFKeyUnknown) and hard-rejects
+// regardless of the cursor.
+func TestVerifyBlockHeaderState_UnavailableSnapshotRecoverableVsGenuine(
+	t *testing.T,
+) {
+	dummyPool := func() []byte {
+		p := make([]byte, lcommon.Blake2b224Size)
+		p[0] = 0xEE
+		return p
+	}
+
+	t.Run(
+		"unavailable snapshot with tip BEHIND defers (recoverable)",
+		func(t *testing.T) {
+			tb := createTestBlock(t, [32]byte{60}, 0, tamperNone)
+			ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+			// Tip behind the block slot: the mark snapshot for this slot may
+			// not be computed yet, so the empty distribution is recoverable.
+			ls.currentTip = ochainsync.Tip{
+				Point: ocommon.Point{Slot: tb.block.SlotNumber() - 1},
+			}
+			ls.publishSnapshotsLocked()
+			require.True(
+				t,
+				ls.ledgerTipBehindSlot(tb.block.SlotNumber()),
+				"tip must be behind so the recoverable branch can defer",
+			)
+			seedBlockPoolRegistration(t, db, tb.block)
+
+			err := ls.verifyBlockHeaderState(tb.block, 5, true)
+			require.Error(t, err)
+			assert.True(
+				t,
+				IsHeaderVerificationDeferred(err),
+				"tip-behind unavailable snapshot must defer: %v",
+				err,
+			)
+			assert.ErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
+		},
+	)
+
+	t.Run(
+		"genuinely empty snapshot with tip AHEAD hard-rejects",
+		func(t *testing.T) {
+			tb := createTestBlock(t, [32]byte{60}, 0, tamperNone)
+			ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+			// Tip advanced PAST the slot: an epoch whose distribution is still
+			// empty here is a genuine, permanent gap -- the original hard
+			// rejection must be preserved (finding 4), NOT deferred forever.
+			ls.currentTip = ochainsync.Tip{
+				Point: ocommon.Point{Slot: tb.block.SlotNumber() + 1_000},
+			}
+			ls.publishSnapshotsLocked()
+			require.False(
+				t,
+				ls.ledgerTipBehindSlot(tb.block.SlotNumber()),
+				"tip must be ahead so the genuine-gap rejection applies",
+			)
+			seedBlockPoolRegistration(t, db, tb.block)
+			// No rows for the required mark epoch: empty/unavailable.
+
+			err := ls.verifyBlockHeaderState(tb.block, 5, true)
+			require.Error(t, err)
+			assert.False(
+				t,
+				IsHeaderVerificationDeferred(err),
+				"tip-ahead genuinely-empty snapshot must hard-reject, not defer: %v",
+				err,
+			)
+			assert.ErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
+		},
+	)
+
+	t.Run(
+		"populated snapshot absent pool hard-rejects",
+		func(t *testing.T) {
+			tb := createTestBlock(t, [32]byte{61}, 0, tamperNone)
+			ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+			ls.currentTip = ochainsync.Tip{
+				Point: ocommon.Point{Slot: tb.block.SlotNumber() + 1_000},
+			}
+			ls.publishSnapshotsLocked()
+
+			seedBlockPoolRegistration(t, db, tb.block)
+			// Populate the epoch-4 mark distribution with a DIFFERENT pool so
+			// the snapshot is present (total > 0) and the producer is
+			// genuinely absent from it -- authoritative ineligibility.
+			seedPoolStakeSnapshot(t, db, 4, dummyPool(), 1_000_000_000)
+
+			err := ls.verifyBlockHeaderState(tb.block, 5, true)
+			require.Error(t, err)
+			assert.False(
+				t,
+				IsHeaderVerificationDeferred(err),
+				"populated absent-pool header must hard-reject: %v",
+				err,
+			)
+			assert.NotErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
+			assert.Contains(t, err.Error(), "has no stake in epoch")
+		},
+	)
+}
+
+// TestOldestRequiredSnapshotEpoch covers the retention-floor provider the
+// snapshot manager consults to keep a deferred header's required snapshot from
+// being pruned (issue #3727). The floor is the minimum over all outstanding
+// deferred headers of StakeSnapshotEpoch(epochOf(slot)); with none deferred it
+// reports no pin.
+func TestOldestRequiredSnapshotEpoch(t *testing.T) {
+	tb := createTestBlock(t, [32]byte{62}, 0, tamperNone)
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+	// Build an epoch cache mapping distinct slot ranges to epochs 11, 14, 22
+	// so the required mark epochs are 10, 13, 21 (StakeSnapshotEpoch = E-1).
+	ls.epochCache = []models.Epoch{
+		{EpochId: 11, StartSlot: 1_100, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{EpochId: 14, StartSlot: 1_400, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{EpochId: 22, StartSlot: 2_200, LengthInSlots: 100, Nonce: tb.epochNonce},
+	}
+	ls.publishSnapshotsLocked()
+
+	// No deferred headers => no pin.
+	if _, ok := ls.OldestRequiredSnapshotEpoch(); ok {
+		t.Fatalf("expected no retention pin when nothing is deferred")
+	}
+
+	// Defer three headers in epochs 22, 14, 11. The oldest required snapshot
+	// epoch is StakeSnapshotEpoch(11) == 10.
+	ls.markDeferredHeaderValidation(ocommon.Point{Slot: 2_250, Hash: []byte{0x22}})
+	ls.markDeferredHeaderValidation(ocommon.Point{Slot: 1_450, Hash: []byte{0x14}})
+	ls.markDeferredHeaderValidation(ocommon.Point{Slot: 1_150, Hash: []byte{0x11}})
+
+	floor, ok := ls.OldestRequiredSnapshotEpoch()
+	require.True(t, ok, "a deferred header must produce a retention pin")
+	assert.Equal(t, uint64(10), floor)
+
+	// Resolving the epoch-11 header releases the pin up to the next-oldest
+	// required snapshot epoch, StakeSnapshotEpoch(14) == 13.
+	ls.clearDeferredHeaderValidation(ocommon.Point{Slot: 1_150, Hash: []byte{0x11}})
+	floor, ok = ls.OldestRequiredSnapshotEpoch()
+	require.True(t, ok)
+	assert.Equal(t, uint64(13), floor)
+
+	// A deferred slot outside the published epoch cache cannot be mapped to a
+	// snapshot epoch yet. While ANY deferred slot is unmappable the provider
+	// must signal retain-all (floor 0, ok true) so cleanup prunes nothing --
+	// otherwise the snapshot this header will need once the cache advances
+	// could be pruned now, looping the header on defer (issue #3727, gap 2).
+	ls.markDeferredHeaderValidation(ocommon.Point{Slot: 9_999_999, Hash: []byte{0xFF}})
+	floor, ok = ls.OldestRequiredSnapshotEpoch()
+	require.True(t, ok, "an unmappable deferred slot must still pin (retain-all)")
+	assert.Equal(
+		t,
+		uint64(0),
+		floor,
+		"unmappable deferred slot must force retain-all (floor 0)",
+	)
+
+	// Once the unmappable slot is dropped, the floor returns to the real
+	// minimum over the remaining mappable headers.
+	ls.clearDeferredHeaderValidation(ocommon.Point{Slot: 9_999_999, Hash: []byte{0xFF}})
+	floor, ok = ls.OldestRequiredSnapshotEpoch()
+	require.True(t, ok)
+	assert.Equal(t, uint64(13), floor)
+}
+
 func TestVerifyBlockHeaderState_GenesisDelegateUsesActiveDelegation(
 	t *testing.T,
 ) {
@@ -2099,7 +2388,7 @@ func captureLiveMarkSnapshot(
 		return err == nil &&
 			snapshot != nil &&
 			snapshot.CapturedSlot == snapshotSlot
-	}, 30*time.Second, "live mark snapshot should be captured")
+	}, 2*time.Second, "live mark snapshot should be captured")
 }
 
 // seedPoolRegistration registers a pool so that db.GetPool(poolKeyHash)
@@ -3244,4 +3533,739 @@ func hexPoolSet(hashes [][]byte) []string {
 		out = append(out, hex.EncodeToString(h))
 	}
 	return out
+}
+
+// TestPrunePoolSnapshotsWithRetentionFloor_SerializesAdmission is the
+// regression guard for the deferred-header admission <-> retention-floor race
+// (issue #3727, gap 1). PrunePoolSnapshotsWithRetentionFloor must hold the
+// deferred-header set stable across BOTH the floor computation and the prune,
+// so a header admitted concurrently cannot slip in between the floor read and
+// the prune and have its still-needed snapshot deleted under a stale boundary.
+// The prune sees a floor computed from the set as it was when the guard took
+// the lock, and a concurrent markDeferredHeaderValidation blocks until release.
+// TestPrunePoolSnapshotsWithRetentionFloor_FloorReadIsAtomic replaces the former
+// _SerializesAdmission test, whose contract (hold deferredHeaderValidationMu
+// across prune) is exactly the lock-order inversion that deadlocks the node
+// (issue #3717). The invariant that survives the fix is narrower but sufficient:
+// the eviction + floor read happen under ONE lock hold, so the boundary handed
+// to prune is a coherent read of the deferred set as it stood when the guard
+// took the lock -- never a mix. prune then runs with the lock RELEASED. A header
+// admitted during prune is NOT pinned by this pass; it is picked up by the next
+// cleanup pass, because the retention floor is a lower-watermark recomputed every
+// pass. That next-pass recovery is the deliberate trade for never inverting the
+// lock order.
+func TestPrunePoolSnapshotsWithRetentionFloor_FloorReadIsAtomic(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{63}, 0, tamperNone)
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+	// Map slots to epochs 11 (snapshot 10) and 14 (snapshot 13).
+	ls.epochCache = []models.Epoch{
+		{EpochId: 11, StartSlot: 1_100, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{EpochId: 14, StartSlot: 1_400, LengthInSlots: 100, Nonce: tb.epochNonce},
+	}
+	ls.publishSnapshotsLocked()
+
+	// One header is already deferred at epoch 14 (needs snapshot 13) when the
+	// guard runs.
+	ls.markDeferredHeaderValidation(
+		ocommon.Point{Slot: 1_450, Hash: []byte{0x14}},
+	)
+
+	pruneStarted := make(chan struct{})
+	admitted := make(chan struct{})
+	// Admit an epoch-11 header (needs snapshot 10) DURING prune. Because the
+	// guard has already released the lock before calling prune, this admission
+	// proceeds concurrently -- it does not (and must not) deadlock against the
+	// guard, and it does not retroactively lower this pass's boundary.
+	go func() {
+		<-pruneStarted
+		ls.markDeferredHeaderValidation(
+			ocommon.Point{Slot: 1_150, Hash: []byte{0x11}},
+		)
+		close(admitted)
+	}()
+
+	var seenBefore uint64
+	err := ls.PrunePoolSnapshotsWithRetentionFloor(
+		25,
+		0,
+		func(before uint64) error {
+			seenBefore = before
+			close(pruneStarted)
+			// Let the concurrent admission land while prune runs. On the old
+			// (buggy) code the admission would block on the still-held mutex and
+			// this receive would deadlock; on the fixed code it completes.
+			testutil.RequireReceive(
+				t,
+				admitted,
+				15*time.Second,
+				"concurrent admission blocked while the guard was pruning (lock-order inversion, issue #3717)",
+			)
+			return nil
+		},
+	)
+	require.NoError(t, err)
+
+	// The floor this invocation pruned to reflects only the epoch-14 header
+	// present when the guard took the lock (snapshot 13), NOT the epoch-11
+	// header admitted during prune: the boundary is a coherent read, never a
+	// mix of pre- and post-lock state.
+	assert.Equal(t, uint64(13), seenBefore)
+
+	// The concurrently-admitted header is now visible; the next cleanup pass
+	// pins the lower floor (snapshot 10), so no needed snapshot is lost for good.
+	floor, ok := ls.OldestRequiredSnapshotEpoch()
+	require.True(t, ok)
+	assert.Equal(t, uint64(10), floor)
+
+	var nextBefore uint64
+	require.NoError(t, ls.PrunePoolSnapshotsWithRetentionFloor(
+		25,
+		0,
+		func(before uint64) error {
+			nextBefore = before
+			return nil
+		},
+	))
+	assert.Equal(
+		t,
+		uint64(10),
+		nextBefore,
+		"next pass pins the floor of the concurrently-admitted header",
+	)
+}
+
+// TestPrunePoolSnapshotsWithRetentionFloor_RealPruneNoDeadlock is the lock-order
+// inversion regression guard for wolf31o2's blocking review on PR #3717. Unlike
+// the other guard tests -- which pass a stub prune that opens no transaction and
+// so cannot catch the bug -- this passes a REAL prune that opens the single
+// sqlite write connection via db.Transaction(true), exactly as
+// cleanupOldSnapshots' prunePoolSnapshots does. A second goroutine reproduces
+// the block-apply order: hold that write connection, THEN take
+// deferredHeaderValidationMu (as ledgerProcessBlock -> verifyDeferredBlockHeaderState
+// -> consumeDeferredHeaderValidation does inside its write txn).
+//
+// The two lock orders:
+//   - guard:  deferredHeaderValidationMu  THEN  write connection (prune)
+//   - apply:  write connection            THEN  deferredHeaderValidationMu
+//
+// If the guard holds the mutex across prune (the pre-fix code), prune blocks
+// acquiring the single write connection the apply goroutine holds, while the
+// apply goroutine blocks acquiring the mutex the guard holds: deadlock. WITHOUT
+// the fix this test times out (go test -timeout dumps the two inverted stacks);
+// WITH the fix the guard releases the mutex before prune, the apply goroutine
+// takes the mutex and releases the connection, and prune completes.
+func TestPrunePoolSnapshotsWithRetentionFloor_RealPruneNoDeadlock(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{73}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.epochCache = []models.Epoch{
+		{EpochId: 11, StartSlot: 1_100, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{EpochId: 14, StartSlot: 1_400, LengthInSlots: 100, Nonce: tb.epochNonce},
+	}
+	ls.publishSnapshotsLocked()
+
+	// A deferred header so the guard does a real floor computation under the
+	// lock, and so consume has a marker to clear on the apply side.
+	deferred := ocommon.Point{Slot: 1_450, Hash: []byte{0x14}}
+	ls.markDeferredHeaderValidation(deferred)
+	require.NoError(t, ls.persistDeferredHeaderValidation(deferred, nil))
+
+	connHeld := make(chan struct{})
+	pruneReached := make(chan struct{})
+	applyDone := make(chan struct{})
+
+	// Apply-side order: hold the single write connection, THEN take the
+	// deferred-header mutex via consumeDeferredHeaderValidation.
+	go func() {
+		applyTxn := ls.db.Transaction(true) // acquires the single write conn
+		close(connHeld)
+		// Wait until the guard is inside prune (mutex-then-conn on the buggy
+		// path) before contending for the mutex, so the inversion is forced.
+		<-pruneReached
+		ls.consumeDeferredHeaderValidation(deferred) // needs the mutex
+		_ = applyTxn.Rollback()                      // release the write conn
+		close(applyDone)
+	}()
+
+	<-connHeld // apply goroutine now holds the single write connection
+
+	guardDone := make(chan error, 1)
+	go func() {
+		guardDone <- ls.PrunePoolSnapshotsWithRetentionFloor(
+			25,
+			0,
+			func(before uint64) error {
+				// REAL prune: open the single write connection like production
+				// (cleanupOldSnapshots' prunePoolSnapshots).
+				close(pruneReached)
+				poolTxn := ls.db.Transaction(true) // blocks until apply releases it
+				defer func() { _ = poolTxn.Rollback() }()
+				return db.Metadata().DeletePoolStakeSnapshotsBeforeEpoch(
+					before,
+					poolTxn.Metadata(),
+				)
+			},
+		)
+	}()
+
+	// With the fix both goroutines complete promptly; without it they deadlock
+	// on the single write connection and these receives time out.
+	testutil.RequireReceive(
+		t,
+		applyDone,
+		15*time.Second,
+		"apply goroutine blocked taking the mutex while holding the write connection (lock-order inversion, issue #3717)",
+	)
+	err := testutil.RequireReceive(
+		t,
+		guardDone,
+		15*time.Second,
+		"retention guard blocked opening the write connection while holding the mutex (lock-order inversion, issue #3717)",
+	)
+	require.NoError(t, err)
+}
+
+// TestPrunePoolSnapshotsWithRetentionFloor_UnmappableRetainsAll is the
+// regression guard for the unmappable-deferred-slot case (issue #3727, gap 2).
+// While a deferred header's slot cannot yet be mapped to an epoch, the guard
+// must retain ALL pool snapshots (prune boundary 0) so the snapshot the header
+// will need once the epoch cache advances is not pruned in the meantime and the
+// header driven into a defer loop. Once the mapping is published, normal floor
+// pruning resumes.
+func TestPrunePoolSnapshotsWithRetentionFloor_UnmappableRetainsAll(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{64}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	// Default cache (epoch 5, slots [0, 1_000_000)) does NOT cover the deferred
+	// slot, so it is initially unmappable.
+	const deferredSlot = uint64(50_000_000)
+	ls.markDeferredHeaderValidation(
+		ocommon.Point{Slot: deferredSlot, Hash: []byte{0xAB}},
+	)
+
+	// Seed mark snapshots for epochs 0..28.
+	dummyPool := bytes.Repeat([]byte{0xEE}, lcommon.Blake2b224Size)
+	for epoch := uint64(0); epoch <= 28; epoch++ {
+		seedPoolStakeSnapshot(t, db, epoch, dummyPool, 1_000_000_000)
+	}
+	deleteBelow := func(before uint64) error {
+		return db.Metadata().DeletePoolStakeSnapshotsBeforeEpoch(before, nil)
+	}
+
+	// Unmappable: the guard must hand prune boundary 0 (retain everything).
+	var seenBefore uint64
+	require.NoError(t, ls.PrunePoolSnapshotsWithRetentionFloor(
+		25,
+		0,
+		func(before uint64) error {
+			seenBefore = before
+			return deleteBelow(before)
+		},
+	))
+	assert.Equal(
+		t,
+		uint64(0),
+		seenBefore,
+		"unmappable deferred slot must force retain-all",
+	)
+	for epoch := uint64(0); epoch <= 28; epoch++ {
+		snaps, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+			epoch, models.PoolStakeSnapshotTypeMark, nil,
+		)
+		require.NoError(t, err)
+		require.Len(
+			t,
+			snaps,
+			1,
+			"epoch %d must be retained while the deferred slot is unmappable",
+			epoch,
+		)
+	}
+
+	// Publish an epoch mapping so the deferred slot resolves to epoch 22
+	// (snapshot 21). Normal floor pruning resumes.
+	ls.epochCache = []models.Epoch{
+		{EpochId: 5, StartSlot: 0, LengthInSlots: 1_000_000, Nonce: tb.epochNonce},
+		{
+			EpochId:       22,
+			StartSlot:     49_000_000,
+			LengthInSlots: 2_000_000,
+			Nonce:         tb.epochNonce,
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	require.NoError(t, ls.PrunePoolSnapshotsWithRetentionFloor(
+		25,
+		0,
+		func(before uint64) error {
+			seenBefore = before
+			return deleteBelow(before)
+		},
+	))
+	assert.Equal(
+		t,
+		uint64(21),
+		seenBefore,
+		"mappable deferred slot pins at StakeSnapshotEpoch(22)=21",
+	)
+	for epoch := uint64(0); epoch < 21; epoch++ {
+		snaps, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+			epoch, models.PoolStakeSnapshotTypeMark, nil,
+		)
+		require.NoError(t, err)
+		require.Empty(
+			t,
+			snaps,
+			"epoch %d below the pinned floor must be pruned",
+			epoch,
+		)
+	}
+	for epoch := uint64(21); epoch <= 28; epoch++ {
+		snaps, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+			epoch, models.PoolStakeSnapshotTypeMark, nil,
+		)
+		require.NoError(t, err)
+		require.Len(
+			t,
+			snaps,
+			1,
+			"epoch %d at/above the pinned floor must be retained",
+			epoch,
+		)
+	}
+}
+
+// TestRepopulateDeferredHeaderValidation is the restart-durability regression
+// guard (issue #3727, finding 3). Deferred-header markers persisted before a
+// restart must be reloaded into the in-memory set so the retention floor
+// covers them on the first post-restart cleanup, instead of the set starting
+// empty and the needed snapshot being pruned.
+func TestRepopulateDeferredHeaderValidation(t *testing.T) {
+	tb := createTestBlock(t, [32]byte{70}, 0, tamperNone)
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.epochCache = []models.Epoch{
+		{EpochId: 11, StartSlot: 1_100, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{EpochId: 14, StartSlot: 1_400, LengthInSlots: 100, Nonce: tb.epochNonce},
+	}
+	ls.publishSnapshotsLocked()
+
+	// Persist two markers as a pre-restart node would, WITHOUT touching the
+	// in-memory map (simulating the post-restart empty set).
+	p11 := ocommon.Point{Slot: 1_150, Hash: []byte{0x11}}
+	p14 := ocommon.Point{Slot: 1_450, Hash: []byte{0x14}}
+	require.NoError(t, ls.persistDeferredHeaderValidation(p11, nil))
+	require.NoError(t, ls.persistDeferredHeaderValidation(p14, nil))
+
+	// Empty in-memory set: no pin yet.
+	if _, ok := ls.OldestRequiredSnapshotEpoch(); ok {
+		t.Fatalf("expected no pin before repopulation")
+	}
+
+	// Repopulate from persisted markers (as LedgerState.Start does).
+	require.NoError(t, ls.repopulateDeferredHeaderValidation())
+
+	floor, ok := ls.OldestRequiredSnapshotEpoch()
+	require.True(t, ok, "repopulated markers must produce a retention pin")
+	assert.Equal(t, uint64(10), floor, "floor = StakeSnapshotEpoch(11)")
+}
+
+// TestRepopulateDeferredHeaderValidation_FailsClosedOnScanError is the
+// regression guard for the swallowed marker-scan failure (issue #3727, P1
+// re-review). If the persisted-marker scan fails at startup and the error is
+// swallowed, the in-memory deferred set stays empty, the retention floor does
+// not cover pre-restart deferred headers, and the first post-restart cleanup
+// can prune a snapshot one of them needs -- after which stateful verification
+// hard-rejects the missing snapshot instead of deferring. repopulate MUST
+// surface the error so LedgerState.Start aborts rather than run unpinned.
+func TestRepopulateDeferredHeaderValidation_FailsClosedOnScanError(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{71}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+
+	// Persist a marker, then close the database so the marker scan errors.
+	require.NoError(t, ls.persistDeferredHeaderValidation(
+		ocommon.Point{Slot: 1_150, Hash: []byte{0x11}}, nil,
+	))
+	dbtest.CloseDatabase(db) //nolint:errcheck
+
+	err := ls.repopulateDeferredHeaderValidation()
+	require.Error(
+		t,
+		err,
+		"a marker-scan failure must be surfaced (fail closed), not swallowed",
+	)
+}
+
+// TestDeletePersistedDeferredMarkers_SkipsReAdmitted is the regression guard
+// for the evicted-marker delete racing a re-defer (issue #3727, P2 re-review).
+// deletePersistedDeferredMarkers runs after eviction released the in-memory
+// pin, so between eviction and the delete the same point can be re-deferred and
+// re-persisted (it is still ahead of the lagging apply cursor). Deleting the
+// marker for a point that is live in the in-memory set again would drop the
+// durable pin, so the delete must skip any key present in the set; only a key
+// that is genuinely absent (still evicted) may have its marker removed.
+func TestDeletePersistedDeferredMarkers_SkipsReAdmitted(t *testing.T) {
+	tb := createTestBlock(t, [32]byte{72}, 0, tamperNone)
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+
+	reAdmitted := ocommon.Point{Slot: 1_150, Hash: []byte{0x11}}
+	staleGone := ocommon.Point{Slot: 1_160, Hash: []byte{0x12}}
+	reAdmittedKey := headerValidationPointKey(reAdmitted)
+	staleKey := headerValidationPointKey(staleGone)
+
+	// Both points have a persisted marker (as any deferred header would).
+	require.NoError(t, ls.persistDeferredHeaderValidation(reAdmitted, nil))
+	require.NoError(t, ls.persistDeferredHeaderValidation(staleGone, nil))
+
+	// The re-admitted point is back in the in-memory set (re-deferred after the
+	// eviction that produced the delete list); the stale one is not.
+	ls.markDeferredHeaderValidation(reAdmitted)
+
+	// Cleanup runs for BOTH evicted keys.
+	ls.deletePersistedDeferredMarkers([]string{reAdmittedKey, staleKey})
+
+	remaining, err := ls.db.ListSyncStateKeysByPrefix(
+		deferredHeaderValidationSyncStatePrefix, nil,
+	)
+	require.NoError(t, err)
+	// The re-admitted point's marker MUST survive (it now backs a live pin);
+	// the genuinely-stale marker MUST be gone.
+	assert.Contains(
+		t,
+		remaining,
+		deferredHeaderValidationSyncStatePrefix+reAdmittedKey,
+		"re-deferred point's marker must not be deleted",
+	)
+	assert.NotContains(
+		t,
+		remaining,
+		deferredHeaderValidationSyncStatePrefix+staleKey,
+		"genuinely stale marker must be deleted",
+	)
+}
+
+// TestPrunePoolSnapshotsWithRetentionFloor_EvictsStaleBehindCursor is the
+// unbounded-retention-leak guard (issue #3727, finding 5). A deferred header
+// the apply cursor has already passed is abandoned (a canonical one would have
+// been consumed at apply); the retention guard must evict it so it stops
+// pinning its snapshot, and delete its persisted marker.
+func TestPrunePoolSnapshotsWithRetentionFloor_EvictsStaleBehindCursor(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{71}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.epochCache = []models.Epoch{
+		{EpochId: 11, StartSlot: 1_100, LengthInSlots: 100, Nonce: tb.epochNonce},
+	}
+	// Apply cursor is WELL AHEAD of the deferred header's slot.
+	ls.currentTip = ochainsync.Tip{Point: ocommon.Point{Slot: 500_000}}
+	ls.publishSnapshotsLocked()
+
+	stale := ocommon.Point{Slot: 1_150, Hash: []byte{0x11}}
+	ls.markDeferredHeaderValidation(stale)
+	require.NoError(t, ls.persistDeferredHeaderValidation(stale, nil))
+
+	// Before: the abandoned header pins epoch 10.
+	floor, ok := ls.OldestRequiredSnapshotEpoch()
+	require.True(t, ok)
+	assert.Equal(t, uint64(10), floor)
+
+	var seenBefore uint64
+	require.NoError(t, ls.PrunePoolSnapshotsWithRetentionFloor(
+		25, 0,
+		func(before uint64) error { seenBefore = before; return nil },
+	))
+
+	// The stale header is evicted: no pin remains, so the boundary is the
+	// default (not lowered to 10), and the persisted marker is deleted.
+	assert.Equal(t, uint64(25), seenBefore, "evicted header must not pin")
+	_, ok = ls.OldestRequiredSnapshotEpoch()
+	assert.False(t, ok, "abandoned header must be evicted from the set")
+	marker, err := db.GetSyncState(deferredHeaderValidationSyncStateKey(stale), nil)
+	require.NoError(t, err)
+	assert.Empty(t, marker, "evicted header's persisted marker must be deleted")
+}
+
+// TestPrunePoolSnapshotsWithRetentionFloor_ResolveReleasesPin proves a deferred
+// header that RESOLVES releases its pool-snapshot pin so the floor rises (issue
+// #3727, finding 5).
+func TestPrunePoolSnapshotsWithRetentionFloor_ResolveReleasesPin(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{72}, 0, tamperNone)
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+	// Both headers are AHEAD of the cursor (tip 0) so eviction does not fire.
+	ls.epochCache = []models.Epoch{
+		{EpochId: 11, StartSlot: 1_100, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{EpochId: 14, StartSlot: 1_400, LengthInSlots: 100, Nonce: tb.epochNonce},
+	}
+	ls.publishSnapshotsLocked()
+
+	p11 := ocommon.Point{Slot: 1_150, Hash: []byte{0x11}}
+	p14 := ocommon.Point{Slot: 1_450, Hash: []byte{0x14}}
+	ls.markDeferredHeaderValidation(p11)
+	ls.markDeferredHeaderValidation(p14)
+
+	var seenBefore uint64
+	record := func(before uint64) error { seenBefore = before; return nil }
+
+	require.NoError(t, ls.PrunePoolSnapshotsWithRetentionFloor(25, 0, record))
+	assert.Equal(t, uint64(10), seenBefore, "pinned to oldest (epoch 10)")
+
+	// Resolve the epoch-11 header, as apply-time consumption does.
+	require.True(t, ls.consumeDeferredHeaderValidation(p11))
+
+	require.NoError(t, ls.PrunePoolSnapshotsWithRetentionFloor(25, 0, record))
+	assert.Equal(
+		t,
+		uint64(13),
+		seenBefore,
+		"resolving the epoch-11 header must raise the pin to epoch 13",
+	)
+}
+
+// TestPrunePoolSnapshotsWithRetentionFloor_DepthCapBoundsRetention proves the
+// hard backstop: even a live (ahead-of-cursor) deferred header needing a very
+// old snapshot cannot lower pruning past minBefore, so retention is bounded
+// (issue #3727, finding 5).
+func TestPrunePoolSnapshotsWithRetentionFloor_DepthCapBoundsRetention(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{73}, 0, tamperNone)
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+	// Header maps to epoch 11 (needs snapshot 10) and is ahead of the cursor
+	// (tip 0) so it is not evicted; only the cap bounds it.
+	ls.epochCache = []models.Epoch{
+		{EpochId: 11, StartSlot: 1_100, LengthInSlots: 100, Nonce: tb.epochNonce},
+	}
+	ls.publishSnapshotsLocked()
+	ls.markDeferredHeaderValidation(ocommon.Point{Slot: 1_150, Hash: []byte{0x11}})
+
+	floor, ok := ls.OldestRequiredSnapshotEpoch()
+	require.True(t, ok)
+	assert.Equal(t, uint64(10), floor)
+
+	var seenBefore uint64
+	require.NoError(t, ls.PrunePoolSnapshotsWithRetentionFloor(
+		25, 16, // minBefore = 16: retain at most down to epoch 16
+		func(before uint64) error { seenBefore = before; return nil },
+	))
+	assert.Equal(
+		t,
+		uint64(16),
+		seenBefore,
+		"floor 10 must be clamped up to the depth-cap minBefore 16",
+	)
+}
+
+// TestPrunePoolSnapshotsWithRetentionFloor_KeepsReadoptableDeferredHeader is the
+// regression guard for the evicted-point re-adoption bypass (issue #3717
+// review). Eviction drops the durable sync_state marker along with the
+// in-memory entry, and that marker is the only thing that makes
+// deferredHeaderValidationRequired return true at apply. A point merely BEHIND
+// the tip is still re-adoptable -- chain selection can roll back and switch to
+// its fork -- so evicting it there means the block later applies with
+// required == false, verifyDeferredBlockHeaderState returns nil, and it is
+// adopted with its stateful leader-eligibility check never run. Eviction must
+// therefore fire only beyond the rollback horizon (tip minus the stability
+// window): a header inside the horizon keeps both its entry and its marker,
+// while one past it is still evicted so its snapshot pin is released.
+func TestPrunePoolSnapshotsWithRetentionFloor_KeepsReadoptableDeferredHeader(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{73}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.epochCache = []models.Epoch{
+		{
+			EpochId:       11,
+			StartSlot:     20_000,
+			LengthInSlots: 1_000,
+			Nonce:         tb.epochNonce,
+		},
+	}
+	// The test config carries no Byron genesis, so the stability window is the
+	// 50_000-slot default; with the tip at 60_000 the rollback horizon cuts off
+	// at slot 10_000.
+	ls.currentTip = ochainsync.Tip{Point: ocommon.Point{Slot: 60_000}}
+	ls.publishSnapshotsLocked()
+	require.Equal(t, uint64(50_000), ls.calculateStabilityWindow())
+
+	// Behind the tip but INSIDE the horizon: a rollback can still re-adopt it.
+	readoptable := ocommon.Point{Slot: 20_500, Hash: []byte{0x11}}
+	// Behind the tip and BEYOND the horizon: unreachable, safe to forget.
+	unreachable := ocommon.Point{Slot: 5_000, Hash: []byte{0x12}}
+	for _, p := range []ocommon.Point{readoptable, unreachable} {
+		ls.markDeferredHeaderValidation(p)
+		require.NoError(t, ls.persistDeferredHeaderValidation(p, nil))
+	}
+
+	var seenBefore uint64
+	require.NoError(t, ls.PrunePoolSnapshotsWithRetentionFloor(
+		25, 0,
+		func(before uint64) error { seenBefore = before; return nil },
+	))
+
+	// The re-adoptable header still pins its snapshot epoch (epoch 11 -> 10).
+	assert.Equal(
+		t,
+		uint64(10),
+		seenBefore,
+		"re-adoptable header must still pin its snapshot",
+	)
+	floor, ok := ls.OldestRequiredSnapshotEpoch()
+	require.True(t, ok, "re-adoptable header must stay in the deferred set")
+	assert.Equal(t, uint64(10), floor)
+
+	// ...and it keeps its durable marker, so a rollback-then-re-adopt still
+	// finds required == true at apply instead of skipping the check.
+	marker, err := db.GetSyncState(
+		deferredHeaderValidationSyncStateKey(readoptable), nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		deferredHeaderValidationSyncStateValue,
+		marker,
+		"re-adoptable header's marker must survive eviction",
+	)
+
+	// The unreachable header is still evicted, marker and all.
+	gone, err := db.GetSyncState(
+		deferredHeaderValidationSyncStateKey(unreachable), nil,
+	)
+	require.NoError(t, err)
+	assert.Empty(
+		t,
+		gone,
+		"header beyond the rollback horizon must still be evicted",
+	)
+}
+
+// TestDeleteDeferredMarkerUnlessReadmitted_RestoresMarkerReadmittedDuringDelete
+// closes the marker delete's TOCTOU window (issue #3717 review / cubic P1). The
+// membership test in deletePersistedDeferredMarkers cannot be atomic with the
+// delete -- holding deferredHeaderValidationMu across the DB write would invert
+// the lock order against block apply and deadlock the node -- so a point
+// re-deferred after that test and before the delete would lose the marker it
+// had just persisted. A restart would then miss it in
+// repopulateDeferredHeaderValidation, leaving deferredHeaderValidationRequired
+// false and skipping the stateful check for a header still outstanding. The
+// per-key delete must re-test membership afterwards and restore the marker for
+// a key that came back, while still removing a genuinely stale one.
+//
+// The re-admission is injected via the afterDeferredMarkerDeleteHook seam so it
+// lands DURING the delete window -- after DeleteSyncState, before the membership
+// re-test -- rather than before the call (wolf, verify_header_test.go review).
+// The point is NOT in the in-memory set when the call begins: the caller
+// (deletePersistedDeferredMarkers) already tested membership, saw it absent, and
+// passed the key here to be deleted. An implementation that instead tested
+// membership before deleting and skipped the delete when present would never run
+// the delete-then-restore path this asserts, and would fail it (verified by
+// removing the restore block: the marker read comes back empty).
+func TestDeleteDeferredMarkerUnlessReadmitted_RestoresMarkerReadmittedDuringDelete(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{74}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+
+	readmitted := ocommon.Point{Slot: 1_150, Hash: []byte{0x11}}
+	require.NoError(t, ls.persistDeferredHeaderValidation(readmitted, nil))
+
+	// The re-defer lands DURING the delete window, via the seam. Cleared before
+	// the stale sub-case below and on test exit.
+	t.Cleanup(func() { afterDeferredMarkerDeleteHook = nil })
+	afterDeferredMarkerDeleteHook = func() {
+		ls.markDeferredHeaderValidation(readmitted)
+	}
+
+	require.NoError(t, ls.deleteDeferredMarkerUnlessReadmitted(
+		headerValidationPointKey(readmitted),
+	))
+
+	marker, err := db.GetSyncState(
+		deferredHeaderValidationSyncStateKey(readmitted), nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		deferredHeaderValidationSyncStateValue,
+		marker,
+		"marker for a key re-admitted DURING the delete must be restored",
+	)
+
+	// A key that is NOT re-admitted (hook cleared) still has its marker removed.
+	afterDeferredMarkerDeleteHook = nil
+	stale := ocommon.Point{Slot: 1_160, Hash: []byte{0x12}}
+	require.NoError(t, ls.persistDeferredHeaderValidation(stale, nil))
+	require.NoError(t, ls.deleteDeferredMarkerUnlessReadmitted(
+		headerValidationPointKey(stale),
+	))
+	gone, err := db.GetSyncState(
+		deferredHeaderValidationSyncStateKey(stale), nil,
+	)
+	require.NoError(t, err)
+	assert.Empty(t, gone, "genuinely stale marker must be deleted")
+}
+
+// TestDeleteDeferredMarkerUnlessReadmitted_RestoreFailurePropagates proves a
+// failed restore of a re-admitted marker is NOT swallowed (issue #3717 review,
+// wolf, chainsync.go review). If the delete of a stale marker succeeds but the
+// point is re-deferred during the delete and its marker cannot be re-persisted,
+// the durable retention pin is lost: a restart would miss it, the snapshot could
+// be pruned, and the stateful header check skipped. The failure must therefore
+// propagate out of deleteDeferredMarkerUnlessReadmitted (and, through
+// deletePersistedDeferredMarkers, out of PrunePoolSnapshotsWithRetentionFloor)
+// so the node fails the cleanup rather than continuing toward that lost pin. The
+// in-memory entry must survive so the running process still holds the pin.
+func TestDeleteDeferredMarkerUnlessReadmitted_RestoreFailurePropagates(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{75}, 0, tamperNone)
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+
+	readmitted := ocommon.Point{Slot: 1_150, Hash: []byte{0x11}}
+	key := headerValidationPointKey(readmitted)
+	require.NoError(t, ls.persistDeferredHeaderValidation(readmitted, nil))
+
+	// During the delete window: re-admit the point (so the restore path runs)
+	// and close the metadata store so the restore's SetSyncState fails
+	// deterministically. DeleteSyncState has already committed by the time the
+	// hook fires, so the delete succeeds and only the restore fails.
+	t.Cleanup(func() { afterDeferredMarkerDeleteHook = nil })
+	afterDeferredMarkerDeleteHook = func() {
+		ls.markDeferredHeaderValidation(readmitted)
+		require.NoError(t, ls.db.Metadata().Close())
+	}
+
+	err := ls.deleteDeferredMarkerUnlessReadmitted(key)
+	require.Error(t, err, "a lost durable pin must not be swallowed")
+	assert.Contains(t, err.Error(), "restore re-deferred header marker")
+
+	// The running process still holds the pin: the in-memory entry survives, so
+	// the retention floor keeps covering it until a later cleanup re-persists it.
+	assert.True(
+		t,
+		ls.consumeDeferredHeaderValidation(readmitted),
+		"in-memory deferred entry must survive a restore failure",
+	)
+
+	// The same failure surfaces through the cleanup batch entry point.
+	ls2, _ := newEligibilityTestLedger(t, tb.epochNonce)
+	require.NoError(t, ls2.persistDeferredHeaderValidation(readmitted, nil))
+	afterDeferredMarkerDeleteHook = func() {
+		ls2.markDeferredHeaderValidation(readmitted)
+		require.NoError(t, ls2.db.Metadata().Close())
+	}
+	batchErr := ls2.deletePersistedDeferredMarkers([]string{key})
+	require.Error(
+		t,
+		batchErr,
+		"deletePersistedDeferredMarkers must propagate the lost-pin error",
+	)
 }
