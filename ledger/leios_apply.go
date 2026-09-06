@@ -893,6 +893,21 @@ func (ls *LedgerState) awaitInFlightEndorserFetches(
 				)
 				return
 			}
+			if ctx.Err() != nil {
+				// The pass was cancelled, not the fetch exhausted. Nothing
+				// was learned about whether any peer holds the endorser
+				// block, so saying it "could not be fetched" would be a
+				// false diagnosis emitted on every shutdown.
+				ls.config.Logger.Debug(
+					"endorser block fetch cancelled before it completed",
+					"component", "ledger",
+					"slot", r.slot,
+					"eb_hash", r.hash.String(),
+					"waited_seconds", elapsed.Seconds(),
+					"error", ctx.Err(),
+				)
+				return
+			}
 			ls.config.Logger.Warn(
 				"endorser block could not be fetched; applying its ranking block without the endorser-resident transactions",
 				"component", "ledger",
