@@ -2973,7 +2973,6 @@ func TestVerifyBlockLeaderEligibility_LiveComputedHistoricalMarkStillChecks(
 		snapshot,
 		snapshotEpoch,
 	))
-	ls.publishSnapshotsLocked()
 
 	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
 	require.Error(t, err)
