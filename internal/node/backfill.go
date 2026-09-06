@@ -562,6 +562,14 @@ func (b *Backfill) getPParams(
 
 // calculateCertDeposits computes deposit amounts for each
 // certificate in the transaction.
+//
+// An index is omitted whenever the deposit cannot be computed -- no protocol
+// parameters, an era with no CertDepositFunc, ErrIncompatibleProtocolParams,
+// or any other calculation failure. Omission is the wire for "unknown": the
+// store records NULL for an absent index rather than an authoritative zero,
+// so a later legacy stake deregistration falls back to the current KeyDeposit
+// in UtxoValidateValueNotConservedUtxo instead of being refunded zero. Do not
+// "fix" a missing entry by inserting 0 here.
 func (b *Backfill) calculateCertDeposits(
 	tx lcommon.Transaction,
 	eraId uint,

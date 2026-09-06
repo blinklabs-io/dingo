@@ -524,6 +524,9 @@ func (b *blockBroadcaster) AddBlock(
 // snapshot rotation semantics as other ledger queries.
 type stakeDistributionAdapter struct {
 	ledgerState *ledger.LedgerState
+	// afterPoolStakeReadFn is a test-only hook for coordinating a concurrent
+	// snapshot recapture after the transaction has read the numerator.
+	afterPoolStakeReadFn func()
 }
 
 func (a *stakeDistributionAdapter) getStakeDistribution(
@@ -617,6 +620,12 @@ func (a *stakeDistributionAdapter) GetPoolAndTotalActiveStake(
 			poolKey,
 			err,
 		)
+	}
+	// Test-only synchronization seam. The transaction has already observed
+	// the numerator, so a concurrent recapture can commit before the
+	// denominator query without changing this transaction's snapshot.
+	if a.afterPoolStakeReadFn != nil {
+		a.afterPoolStakeReadFn()
 	}
 	totalActiveStake, err = view.GetTotalActiveStake(epoch)
 	if err != nil {
@@ -747,6 +756,21 @@ func (a *slotClockAdapter) SlotsPerKESPeriod() uint64 {
 func (a *slotClockAdapter) ChainTipSlot() uint64 {
 	return a.ledgerState.ChainTipSlot()
 }
+
+// ChainTipHash satisfies forging.ChainTipHashProvider. It lets the
+// forger tell its own block at the current slot from a rival's by hash
+// rather than inferring it from the forge fence, which is in-memory only
+// when no fence store is wired. Both this and ChainTipSlot read the same
+// tip snapshot; a tip that moves between the two reads simply fails the
+// hash match and falls back to the fence.
+func (a *slotClockAdapter) ChainTipHash() []byte {
+	return a.ledgerState.Tip().Point.Hash
+}
+
+// The forger type-asserts for this optional interface, so losing the
+// method would silently fall back to the fence rather than fail to
+// build.
+var _ forging.ChainTipHashProvider = (*slotClockAdapter)(nil)
 
 func (a *slotClockAdapter) NextSlotTime() (time.Time, error) {
 	return a.ledgerState.NextSlotTime()
