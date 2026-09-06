@@ -150,6 +150,7 @@ var unreachablePrefixes = []netip.Prefix{
 	netip.MustParsePrefix("100::/64"),       // RFC 6666 discard-only
 	netip.MustParsePrefix("2001:2::/48"),    // RFC 5180 benchmarking
 	netip.MustParsePrefix("2001:10::/28"),   // RFC 4843 ORCHID, deprecated
+	netip.MustParsePrefix("2001:20::/28"),   // RFC 7343 ORCHIDv2
 }
 
 // IsRoutableIP reports whether an IP address is usable as a peer candidate
