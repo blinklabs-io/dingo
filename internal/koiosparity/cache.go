@@ -1498,8 +1498,8 @@ func (c *Cache) PendingKoiosSourceChange(
 	return attributed != baseURL, attributed, nil
 }
 
-// PinRecordedSource claims whatever root is currently recorded for network,
-// without recording or discarding anything.
+// PinRecordedSource claims the root network's cache is currently attributed
+// to, without recording or discarding anything.
 //
 // It is for a run that writes verdicts derived from the cache but has no Koios
 // client of its own to name a source — Check. Pinning at the start makes its
@@ -1507,8 +1507,12 @@ func (c *Cache) PendingKoiosSourceChange(
 // letting it repopulate check evidence that RecordKoiosSource just discarded,
 // now stamped with a source the verdicts were never computed against.
 //
-// A cache with nothing recorded pins nothing, so a check against a cache no
-// writer has ever stamped behaves exactly as before.
+// A cache with nothing recorded pins the public root it is attributed to, not
+// nothing: that is the very cache a first custom-host run discards, so pinning
+// nothing would leave the case this exists for unguarded. Since
+// assertClaimedSource compares attributions rather than raw rows, such a check
+// still writes freely while the cache stays unstamped, and stops only once
+// another process stamps it with a different host.
 func (c *Cache) PinRecordedSource(network string) error {
 	recordedURL, recorded, err := c.GetKoiosSource(network)
 	if err != nil {
