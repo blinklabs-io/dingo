@@ -20,6 +20,7 @@ import (
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -106,6 +107,7 @@ const (
 	continuationAuditResultInconclusiveEbPending = "inconclusive_eb_pending"
 	continuationAuditResultDisarmedCap           = "disarmed_cap"
 	continuationAuditResultSkippedBudget         = "skipped_budget"
+	continuationAuditResultRefUnresolvable       = "ref_unresolvable"
 )
 
 // continuationAuditWindow is the state of one armed audit run. It is published
@@ -119,13 +121,16 @@ type continuationAuditWindow struct {
 	forkPeer    string
 	remaining   int
 	blocksSeen  int
-	// endorserProducersPending records that at least one audited block in
-	// this window referenced a Leios endorser block whose transactions the
-	// audit could not obtain, so producedTxs is known to be incomplete and
-	// an unresolved input is not evidence of a missing producer. It is
-	// sticky for the life of the window: once a hole exists, every later
-	// input could be falling into it.
-	endorserProducersPending bool
+	// endorserRefsDropped counts endorser-block references this window gave
+	// up on for good: the parent lookup failed for a reason retrying cannot
+	// fix. Those holes never close, so they keep the producer set
+	// permanently short. A reference that is merely unresolved so far is not
+	// counted here — it is still queued, and queued references are what
+	// endorserProducersIncomplete reads.
+	endorserRefsDropped int
+	// endorserRefErrorLogged keeps a hard parent-resolution failure to one
+	// log line per window rather than one per audited body.
+	endorserRefErrorLogged bool
 	// pendingEndorserRefs are endorser-block references seen in this window
 	// whose transactions have not been merged into producedTxs yet, in
 	// arrival order. Classifying a block into a reference is header-only and
@@ -161,6 +166,11 @@ type continuationAuditEndorserRef struct {
 	ebSlot         uint64
 	resolved       bool
 	blockSlot      uint64
+	// lastProbedBlock is the value of the window's blocksSeen when this
+	// reference was last probed, so one audited body probes it at most once
+	// however many of its inputs need the drain. Nothing about the reference
+	// can change between two inputs of the same body.
+	lastProbedBlock int
 }
 
 // key identifies a reference for dedupe: the parent hash while the reference is
@@ -171,6 +181,30 @@ func (r continuationAuditEndorserRef) key() string {
 		return "c" + string(r.certParentHash)
 	}
 	return "d" + string(r.ebHash.Bytes()) + strconv.FormatUint(r.ebSlot, 10)
+}
+
+// endorserProducersIncomplete reports whether the window's producer set is
+// knowingly short of an endorser block it references, which makes an
+// unresolved input inconclusive rather than evidence of a missing producer.
+//
+// It is derived rather than latched. A reference that could not be resolved on
+// one body is requeued and retried on the next, so a window that recovers —
+// the parent block lands, or the endorser block finishes fetching — goes back
+// to being able to diagnose a genuine missing producer instead of staying
+// inconclusive for the rest of its life. Only a reference given up on for good
+// leaves a hole that never closes.
+func (w *continuationAuditWindow) endorserProducersIncomplete() bool {
+	return len(w.pendingEndorserRefs) > 0 || w.endorserRefsDropped > 0
+}
+
+// requeueEndorserRef returns a reference to the pending queue, restoring the
+// dedupe entry the drain removed when it took it, so a later audited body
+// retries it and a concurrent duplicate is still suppressed.
+func (w *continuationAuditWindow) requeueEndorserRef(
+	ref continuationAuditEndorserRef,
+) {
+	w.pendingEndorserSeen[ref.key()] = struct{}{}
+	w.pendingEndorserRefs = append(w.pendingEndorserRefs, ref)
 }
 
 // armContinuationAudit starts a bounded continuation audit at a rollback point.
@@ -298,7 +332,7 @@ func (ls *LedgerState) auditContinuationBlock(
 			// certified endorser block the node has fetched but not yet
 			// handed to the audit. Say so quietly instead of asserting
 			// ledger corruption on a healthy node.
-			if window.endorserProducersPending {
+			if window.endorserProducersIncomplete() {
 				ls.countContinuationAuditOutcome(
 					continuationAuditResultInconclusiveEbPending,
 				)
@@ -515,7 +549,6 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 				pending[i:]...,
 			)
 			if armed && *budget <= 0 {
-				window.endorserProducersPending = true
 				ls.countContinuationAuditOutcome(
 					continuationAuditResultSkippedBudget,
 				)
@@ -531,24 +564,55 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 			}
 			continue
 		}
+		// One probe per reference per audited body: nothing that could
+		// change the outcome happens between two inputs of the same body.
+		if ref.lastProbedBlock == window.blocksSeen {
+			window.requeueEndorserRef(ref)
+			continue
+		}
 		delete(window.pendingEndorserSeen, ref.key())
+		ref.lastProbedBlock = window.blocksSeen
 		*budget--
 		window.endorserResolutions++
 		if !ref.resolved {
 			ebHash, ebSlot, _, announced, err := ls.leiosCertifiedAnnouncementFromParent(
 				ref.certParentHash,
 			)
-			if err != nil {
-				window.endorserProducersPending = true
+			switch {
+			case errors.Is(err, models.ErrBlockNotFound):
+				// The parent is not in the block store yet. That is a
+				// state, not a verdict — it is exactly the read-ahead
+				// this audit exists to tolerate — so keep the reference
+				// and retry it on the next body.
 				ls.config.Logger.Debug(
-					"cross-fork continuation audit could not resolve a certifying block's endorser block",
+					"cross-fork continuation audit will retry a certifying block's parent lookup",
 					"component", "ledger",
 					"slot", ref.blockSlot,
-					"error", err,
 				)
+				window.requeueEndorserRef(ref)
+				continue
+			case err != nil:
+				// Anything else (I/O, a corrupt hash index) will not fix
+				// itself by retrying, so the hole is permanent and the
+				// window says so once rather than per body.
+				window.endorserRefsDropped++
+				ls.countContinuationAuditOutcome(
+					continuationAuditResultRefUnresolvable,
+				)
+				if !window.endorserRefErrorLogged {
+					window.endorserRefErrorLogged = true
+					ls.config.Logger.Warn(
+						"cross-fork continuation audit gave up resolving a certifying block's parent",
+						"component", "ledger",
+						"slot", ref.blockSlot,
+						"error", err,
+					)
+				}
 				continue
 			}
 			if !announced {
+				// Resolved, and there is definitively no endorser block:
+				// not a hole.
 				continue
 			}
 			ref.ebHash = ebHash
@@ -564,7 +628,6 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 			ref.ebSlot,
 		)
 		if !ok {
-			window.endorserProducersPending = true
 			ls.config.Logger.Debug(
 				"cross-fork continuation audit: certified endorser block not fetched yet",
 				"component", "ledger",
@@ -574,16 +637,15 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 			)
 			// Keep it queued in resolved form: the parent read is done,
 			// and the block may be fetched before the window ends.
-			window.pendingEndorserSeen[key] = struct{}{}
-			window.pendingEndorserRefs = append(
-				window.pendingEndorserRefs,
-				ref,
-			)
+			window.requeueEndorserRef(ref)
 			continue
 		}
 		ids, err := endorserBlockTxIds(rawTxs)
 		if err != nil {
-			window.endorserProducersPending = true
+			window.endorserRefsDropped++
+			ls.countContinuationAuditOutcome(
+				continuationAuditResultRefUnresolvable,
+			)
 			ls.config.Logger.Debug(
 				"cross-fork continuation audit could not read endorser block transaction ids",
 				"component", "ledger",
@@ -621,6 +683,8 @@ func (ls *LedgerState) countContinuationAuditOutcome(result string) {
 		counter = ls.metrics.continuationAuditDisarmedCap
 	case continuationAuditResultSkippedBudget:
 		counter = ls.metrics.continuationAuditSkippedBudget
+	case continuationAuditResultRefUnresolvable:
+		counter = ls.metrics.continuationAuditRefUnresolvable
 	}
 	if counter == nil {
 		return
