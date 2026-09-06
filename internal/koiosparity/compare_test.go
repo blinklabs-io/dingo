@@ -873,6 +873,19 @@ func TestCompareAccountEpochOutOfScopeRewardTypesFiltered(t *testing.T) {
 	require.Empty(t, ms)
 }
 
+func TestCompareAccountEpochUnknownRewardTypeIsDatabaseError(t *testing.T) {
+	now := time.Now()
+	koios := []KoiosAccountRewards{
+		{StakeAddress: "stake1a", RewardType: "unexpected", Earned: "1000000"},
+	}
+
+	ms := CompareAccountEpoch("preview", 100, koios, nil, now, 0, time.Time{})
+	require.Len(t, ms, 1)
+	require.Equal(t, CategoryDBError, ms[0].Category)
+	require.Equal(t, "account_reward_type", ms[0].Field)
+	require.Equal(t, "unexpected", ms[0].KoiosValue)
+}
+
 func TestLovelaceEqual(t *testing.T) {
 	require.True(t, lovelaceEqual("1000000", "1000000"))
 	require.True(t, lovelaceEqual("0", "0"))
