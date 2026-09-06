@@ -110,6 +110,19 @@ var errTxValidationSnapshotChanged = errors.New(
 	"transaction validation snapshot changed",
 )
 
+// blockSelectionConstraints carries per-attempt limits from the forge loop
+// into block construction. The zero value is the unconstrained build the
+// exported BuildBlock entrypoints have always performed.
+type blockSelectionConstraints struct {
+	// emptyBody builds a block with no mempool transactions at all. The
+	// forge loop sets it as a last resort when no selection pass could
+	// complete against a stable snapshot inside the slot: a
+	// transaction-free block still extends the chain, still counts as
+	// this pool's block for the slot, and still carries the Leios
+	// payload, whereas an abandoned slot yields nothing.
+	emptyBody bool
+}
+
 func withTxValidationSession(
 	validator TxValidator,
 	fn func(TxValidationFunc, func() bool) error,
@@ -188,7 +201,13 @@ func (b *DefaultBlockBuilder) BuildBlock(
 ) (ledger.Block, []byte, error) {
 	generation := b.creds.acquireCredentialGeneration()
 	defer generation.release()
-	return b.buildBlock(slot, kesPeriod, LeiosBlockData{}, generation)
+	return b.buildBlock(
+		slot,
+		kesPeriod,
+		LeiosBlockData{},
+		generation,
+		blockSelectionConstraints{},
+	)
 }
 
 // BlockForger.buildBlock discovers the Leios capability with a runtime type
@@ -210,7 +229,13 @@ func (b *DefaultBlockBuilder) BuildBlockWithLeios(
 ) (ledger.Block, []byte, error) {
 	generation := b.creds.acquireCredentialGeneration()
 	defer generation.release()
-	return b.buildBlock(slot, kesPeriod, leios, generation)
+	return b.buildBlock(
+		slot,
+		kesPeriod,
+		leios,
+		generation,
+		blockSelectionConstraints{},
+	)
 }
 
 func (b *DefaultBlockBuilder) buildBlockWithCredentialGeneration(
@@ -218,8 +243,9 @@ func (b *DefaultBlockBuilder) buildBlockWithCredentialGeneration(
 	kesPeriod uint64,
 	leios LeiosBlockData,
 	generation *credentialGeneration,
+	constraints blockSelectionConstraints,
 ) (ledger.Block, []byte, error) {
-	return b.buildBlock(slot, kesPeriod, leios, generation)
+	return b.buildBlock(slot, kesPeriod, leios, generation, constraints)
 }
 
 // errParentChangedDuringBuild indicates the chain tip moved while
@@ -245,6 +271,7 @@ func (b *DefaultBlockBuilder) buildBlock(
 	kesPeriod uint64,
 	leios LeiosBlockData,
 	credentials *credentialGeneration,
+	constraints blockSelectionConstraints,
 ) (ledger.Block, []byte, error) {
 	// Keep the protocol lifetime guard inside the generation-backed path so
 	// both exported builder entrypoints and BlockForger fail before reading the
@@ -337,6 +364,11 @@ func (b *DefaultBlockBuilder) buildBlock(
 	if leiosCert != nil {
 		// A prototype CertRB carries the Leios certificate and no Dijkstra
 		// transactions; node-to-client later inlines the certified EB txs.
+		mempoolTxs = nil
+	} else if constraints.emptyBody {
+		// Empty-body fallback: no selection pass could complete against
+		// a stable snapshot inside the slot, so the block is built from
+		// the current tip with no transactions rather than not at all.
 		mempoolTxs = nil
 	} else if leios.Announcement != nil {
 		// An announcing slot carries either the endorser block or ranking-block
@@ -639,9 +671,18 @@ func (b *DefaultBlockBuilder) buildBlock(
 	}
 
 	var selectErr error
-	if b.txValidator != nil {
+	switch {
+	case len(mempoolTxs) == 0:
+		// Nothing to select, so there is no snapshot to pin and no
+		// pinned generation for a concurrent ledger publication to
+		// invalidate. Opening a session here would let an unrelated
+		// publication reject a candidate that contains no transaction
+		// validated against anything -- which cost whole leader slots
+		// on the empty-body fallback path and on genuinely idle
+		// producers.
+	case b.txValidator != nil:
 		selectErr = withTxValidationSession(b.txValidator, selectTransactions)
-	} else {
+	default:
 		// No validator configured: skip ledger re-validation entirely
 		// (unchanged from before), but still run the same selection loop
 		// and stillCurrent trivially holds since there is no session to
