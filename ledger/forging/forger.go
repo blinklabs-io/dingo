@@ -64,6 +64,21 @@ const (
 	forgeStaleGapThresholdSlots = 1000
 )
 
+// defaultForgeEBSelectionReserve is how much of the slot endorser-block
+// construction leaves for everything that must follow it: ranking-block
+// assembly, KES signing, local adoption and broadcast. The endorser block's
+// hash is committed into the ranking-block header, so the two cannot be
+// reordered or overlapped -- the EB body must be final before the header is
+// signed. Bounding EB selection by (slot end - reserve) is therefore the
+// only way to keep the ranking block inside its slot.
+//
+// Ranking-block assembly for a certifying block measures in single-digit
+// milliseconds (its body is empty; the payload lives in the endorser
+// block), so the reserve is dominated by broadcast and adoption. 300ms is
+// two orders of magnitude above the observed cost and still leaves most of
+// a 1-second slot for selection.
+const defaultForgeEBSelectionReserve = 300 * time.Millisecond
+
 // BlockForger coordinates block production for a stake pool.
 type BlockForger struct {
 	mode   Mode
@@ -106,6 +121,14 @@ type BlockForger struct {
 	// Configurable forging tolerances
 	forgeSyncToleranceSlots     uint64
 	forgeStaleGapThresholdSlots uint64
+
+	// forgeEBSelectionReserve is the slice of the slot endorser-block
+	// selection must leave for ranking-block assembly and broadcast.
+	forgeEBSelectionReserve time.Duration
+
+	// now reads the wall clock for slot budgeting. Overridden in tests so
+	// deadline behaviour is exercised without sleeping.
+	now func() time.Time
 
 	// Optional self-validation before adoption (nil = disabled)
 	blockValidator BlockValidator
@@ -374,6 +397,12 @@ type ForgerConfig struct {
 	// chain tip is far ahead of the slot clock. Zero uses the default.
 	ForgeStaleGapThresholdSlots uint64
 
+	// ForgeEBSelectionReserve is how much of the slot endorser-block
+	// transaction selection must leave for ranking-block assembly,
+	// signing and broadcast. Zero uses
+	// defaultForgeEBSelectionReserve.
+	ForgeEBSelectionReserve time.Duration
+
 	// BlockValidator, when non-nil, validates the forged block (VRF/KES
 	// header crypto, body-hash consistency, per-tx ledger rules) before
 	// AddBlock is called. A validation failure drops the block without
@@ -423,8 +452,13 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 	if cfg.ForgeStaleGapThresholdSlots == 0 {
 		cfg.ForgeStaleGapThresholdSlots = forgeStaleGapThresholdSlots
 	}
+	if cfg.ForgeEBSelectionReserve <= 0 {
+		cfg.ForgeEBSelectionReserve = defaultForgeEBSelectionReserve
+	}
 	f.forgeSyncToleranceSlots = cfg.ForgeSyncToleranceSlots
 	f.forgeStaleGapThresholdSlots = cfg.ForgeStaleGapThresholdSlots
+	f.forgeEBSelectionReserve = cfg.ForgeEBSelectionReserve
+	f.now = time.Now
 
 	if cfg.Mode == ModeProduction {
 		if cfg.Credentials == nil || !cfg.Credentials.IsLoaded() {
@@ -1700,6 +1734,35 @@ func (f *BlockForger) SlotTracker() *SlotTracker {
 	return f.slotTracker
 }
 
+// slotSelectionDeadline returns the instant by which work for slot must
+// finish to still land inside the slot, less reserve. ok is false when the
+// slot clock cannot answer, which leaves the caller unbounded rather than
+// guessing at a budget.
+func (f *BlockForger) slotSelectionDeadline(
+	slot uint64,
+	reserve time.Duration,
+) (time.Time, bool) {
+	if f.slotClock == nil {
+		return time.Time{}, false
+	}
+	clockSlot, err := f.slotClock.CurrentSlot()
+	if err != nil {
+		return time.Time{}, false
+	}
+	if clockSlot != slot {
+		// The wall clock has already left the slot being forged, so
+		// NextSlotTime describes a later slot's boundary and would hand
+		// this forge a budget it does not have. Anchor to the slot
+		// actually being built for: none of it remains.
+		return f.now(), true
+	}
+	slotEnd, err := f.slotClock.NextSlotTime()
+	if err != nil || slotEnd.IsZero() {
+		return time.Time{}, false
+	}
+	return slotEnd.Add(-reserve), true
+}
+
 // checkAndForgeLeiosEB attempts to produce and broadcast a Leios endorser
 // block for the given slot. It is called by the slot leader before RB
 // construction so the EB can begin diffusing while the RB is assembled.
@@ -1741,9 +1804,38 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		}
 		return nil, nil
 	}
-	validatedTxs, err := selectValidLeiosTransactions(txs, f.leiosValidator)
+	// Bound selection by the slot. Every candidate costs a full ledger
+	// re-validation, so an unbounded pass over a deep mempool runs for
+	// seconds -- and because the endorser block's hash is committed into
+	// the ranking-block header, all of that time is spent before the block
+	// that actually extends the chain can be signed.
+	limits := leiosSelectionLimits{now: f.now}
+	if deadline, ok := f.slotSelectionDeadline(
+		slot,
+		f.forgeEBSelectionReserve,
+	); ok && deadline.After(f.now()) {
+		// Only bound the pass while budget remains. Once the slot is
+		// gone, enforcing the deadline would select nothing and produce
+		// no endorser block at all -- strictly worse than the unbounded
+		// pass this had before, since a late endorser block still feeds
+		// the pipeline even when its ranking block does not win.
+		limits.deadline = deadline
+	}
+	validatedTxs, truncated, err := selectValidLeiosTransactions(
+		txs,
+		f.leiosValidator,
+		limits,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("validate leios EB transactions: %w", err)
+	}
+	if truncated {
+		f.logger.Warn(
+			"leios endorser block selection stopped at the slot deadline",
+			"slot", slot,
+			"candidates", len(txs),
+			"selected", len(validatedTxs),
+		)
 	}
 	txs = validatedTxs
 	if len(txs) == 0 {
@@ -1803,10 +1895,12 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 func selectValidLeiosTransactions(
 	txs []MempoolTransaction,
 	validator TxValidator,
-) ([]MempoolTransaction, error) {
+	limits leiosSelectionLimits,
+) ([]MempoolTransaction, bool, error) {
 	if validator == nil {
-		return txs, nil
+		return txs, false, nil
 	}
+	truncated := false
 	selected := make([]MempoolTransaction, 0, len(txs))
 	err := withTxValidationSession(
 		validator,
@@ -1817,6 +1911,24 @@ func selectValidLeiosTransactions(
 			consumed := make(map[string]struct{})
 			created := make(map[string]lcommon.Utxo)
 			for _, mempoolTx := range txs {
+				if !stillCurrent() {
+					// A ledger publication landed mid-pass. Every
+					// candidate validated from here would be checked
+					// against a superseded generation and the whole
+					// selection rejected anyway.
+					return errTxValidationSnapshotChanged
+				}
+				if limits.expired() {
+					// Out of slot budget. The prefix selected so far is
+					// a valid closure: candidates are considered in
+					// mempool order and a parent's outputs are exposed
+					// only after the parent passes, so a descendant
+					// never survives without its parent. An endorser
+					// block with fewer references beats one that
+					// arrives after its slot.
+					truncated = true
+					break
+				}
 				// The EB wire reference is the transaction's only representation
 				// in this slot. Do not expose outputs from a transaction that the
 				// manifest builder will later drop as unrepresentable.
@@ -1849,7 +1961,30 @@ func selectValidLeiosTransactions(
 			return nil
 		},
 	)
-	return selected, err
+	return selected, truncated, err
+}
+
+// leiosSelectionLimits bounds one endorser-block selection pass. The zero
+// value imposes no bound, which is the behaviour every caller had before
+// the slot deadline existed.
+type leiosSelectionLimits struct {
+	// now reads the wall clock. Nil falls back to time.Now.
+	now func() time.Time
+	// deadline, when non-zero, stops selection at the given instant and
+	// builds the endorser block from what has already passed.
+	deadline time.Time
+}
+
+// expired reports whether the selection budget is gone.
+func (l leiosSelectionLimits) expired() bool {
+	if l.deadline.IsZero() {
+		return false
+	}
+	now := l.now
+	if now == nil {
+		now = time.Now
+	}
+	return !now().Before(l.deadline)
 }
 
 // buildLeiosEB assembles a LeiosEndorserBlock from mempool transactions.

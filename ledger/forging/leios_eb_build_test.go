@@ -127,10 +127,14 @@ func TestSelectValidLeiosTransactionsPreservesDependentChain(t *testing.T) {
 		},
 	}
 
-	selected, err := selectValidLeiosTransactions(txs, &leiosOverlayValidator{
-		base:   map[string]struct{}{baseKey: {}},
-		reject: map[string]struct{}{},
-	})
+	selected, _, err := selectValidLeiosTransactions(
+		txs,
+		&leiosOverlayValidator{
+			base:   map[string]struct{}{baseKey: {}},
+			reject: map[string]struct{}{},
+		},
+		leiosSelectionLimits{},
+	)
 	require.NoError(t, err)
 	require.Equal(t, txs, selected)
 }
@@ -157,12 +161,16 @@ func TestSelectValidLeiosTransactionsRejectsInvalidChain(t *testing.T) {
 		},
 	}
 
-	selected, err := selectValidLeiosTransactions(txs, &leiosOverlayValidator{
-		base: map[string]struct{}{baseKey: {}},
-		reject: map[string]struct{}{
-			parent.Hash().String(): {},
+	selected, _, err := selectValidLeiosTransactions(
+		txs,
+		&leiosOverlayValidator{
+			base: map[string]struct{}{baseKey: {}},
+			reject: map[string]struct{}{
+				parent.Hash().String(): {},
+			},
 		},
-	})
+		leiosSelectionLimits{},
+	)
 	require.NoError(t, err)
 	require.Empty(t, selected, "a rejected parent must not expose its output")
 }
@@ -179,7 +187,7 @@ func TestSelectValidLeiosTransactionsRejectsUnrepresentableParent(
 	baseInput := parent.Inputs()[0]
 	baseKey := fmt.Sprintf("%s:%d", baseInput.Id().String(), baseInput.Index())
 
-	selected, err := selectValidLeiosTransactions(
+	selected, _, err := selectValidLeiosTransactions(
 		[]MempoolTransaction{
 			{Hash: "not-hex", Cbor: parentCbor, Type: conway.TxTypeConway},
 			{
@@ -189,6 +197,7 @@ func TestSelectValidLeiosTransactionsRejectsUnrepresentableParent(
 			},
 		},
 		&leiosOverlayValidator{base: map[string]struct{}{baseKey: {}}},
+		leiosSelectionLimits{},
 	)
 	require.NoError(t, err)
 	require.Empty(t, selected)
