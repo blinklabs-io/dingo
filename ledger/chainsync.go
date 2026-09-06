@@ -4754,6 +4754,9 @@ func (ls *LedgerState) createGenesisBlock() error {
 		// the database was created with a matching genesis. Older databases
 		// may still be missing the slot-0 network-state baseline.
 		if ls.db.HasGenesisCbor(0, genesisHash[:]) {
+			if err := ls.ensureGenesisCommittee(nil); err != nil {
+				return err
+			}
 			if err := ls.ensureGenesisConstitution(nil); err != nil {
 				return err
 			}
@@ -4997,6 +5000,9 @@ func (ls *LedgerState) createGenesisBlock() error {
 				return fmt.Errorf("set genesis governance: %w", err)
 			}
 		}
+		if err := ls.ensureGenesisCommittee(txn); err != nil {
+			return err
+		}
 
 		// The Conway genesis constitution is the chain's enacted
 		// constitution until a NewConstitution action replaces it, and
@@ -5008,6 +5014,45 @@ func (ls *LedgerState) createGenesisBlock() error {
 		return nil
 	})
 	return err
+}
+
+// ensureGenesisCommittee persists the Conway genesis committee so certificate
+// validation can distinguish an authoritative committee from unavailable state.
+func (ls *LedgerState) ensureGenesisCommittee(txn *database.Txn) error {
+	genesis := ls.config.CardanoNodeConfig.ConwayGenesis()
+	if genesis == nil || len(genesis.Committee.Members) == 0 {
+		return nil
+	}
+	members := make([]*models.CommitteeMember, 0, len(genesis.Committee.Members))
+	for encoded, expiry := range genesis.Committee.Members {
+		var tag uint8
+		var hashText string
+		switch {
+		case strings.HasPrefix(encoded, "keyHash-"):
+			tag = 0
+			hashText = strings.TrimPrefix(encoded, "keyHash-")
+		case strings.HasPrefix(encoded, "scriptHash-"):
+			tag = 1
+			hashText = strings.TrimPrefix(encoded, "scriptHash-")
+		default:
+			return fmt.Errorf("invalid Conway genesis committee credential %q", encoded)
+		}
+		hash, err := hex.DecodeString(hashText)
+		if err != nil || len(hash) != 28 {
+			return fmt.Errorf("invalid Conway genesis committee credential %q", encoded)
+		}
+		members = append(members, &models.CommitteeMember{
+			ColdCredentialTag: tag,
+			ColdCredHash:      hash,
+			ExpiresEpoch:      uint64(expiry),
+			TermStartSlotSet:  true,
+			AddedSlot:         0,
+		})
+	}
+	if err := ls.db.SetCommitteeMembers(members, txn); err != nil {
+		return fmt.Errorf("set Conway genesis committee: %w", err)
+	}
+	return nil
 }
 
 // ensureGenesisConstitution records the Conway genesis constitution as the
