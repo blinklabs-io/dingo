@@ -248,6 +248,7 @@ type Config struct {
 	blockProducer                                                                       bool
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
+	forgeEBMaxTxRefs, forgeEBMaxBytes                                                   uint64
 	validateForgedBlock                                                                 bool
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
@@ -824,6 +825,7 @@ func (c *Config) syncCompatFields() {
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
+	c.forgeEBMaxTxRefs, c.forgeEBMaxBytes = c.cfg.ForgeEBMaxTxRefs, c.cfg.ForgeEBMaxBytes
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
@@ -1454,6 +1456,23 @@ func WithForgeSyncToleranceSlots(slots uint64) ConfigOptionFunc {
 func WithForgeStaleGapThresholdSlots(slots uint64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ForgeStaleGapThresholdSlots = slots
+	}
+}
+
+// WithForgeEBMaxTxRefs caps the number of transaction references a forged
+// Leios endorser block may carry. Use 0 for no cap; the slot deadline
+// remains the operative bound in normal operation.
+func WithForgeEBMaxTxRefs(refs uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ForgeEBMaxTxRefs = refs
+	}
+}
+
+// WithForgeEBMaxBytes caps the total referenced transaction bytes a forged
+// Leios endorser block may carry. Use 0 for no cap.
+func WithForgeEBMaxBytes(bytes uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ForgeEBMaxBytes = bytes
 	}
 }
 
@@ -2184,6 +2203,16 @@ func (c *Config) ShelleyOperationalCertificate() string {
 // ForgeSyncToleranceSlots returns the sync tolerance for block forging.
 func (c *Config) ForgeSyncToleranceSlots() uint64 {
 	return c.cfg.ForgeSyncToleranceSlots
+}
+
+// ForgeEBMaxTxRefs returns the endorser-block transaction reference cap.
+func (c *Config) ForgeEBMaxTxRefs() uint64 {
+	return c.cfg.ForgeEBMaxTxRefs
+}
+
+// ForgeEBMaxBytes returns the endorser-block referenced-bytes cap.
+func (c *Config) ForgeEBMaxBytes() uint64 {
+	return c.cfg.ForgeEBMaxBytes
 }
 
 // ForgeStaleGapThresholdSlots returns the stale gap threshold for warnings.

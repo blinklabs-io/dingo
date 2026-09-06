@@ -126,6 +126,10 @@ type BlockForger struct {
 	// selection must leave for ranking-block assembly and broadcast.
 	forgeEBSelectionReserve time.Duration
 
+	// Backstops on endorser-block manifest size. Zero means no cap.
+	forgeEBMaxTxRefs uint64
+	forgeEBMaxBytes  uint64
+
 	// now reads the wall clock for slot budgeting. Overridden in tests so
 	// deadline behaviour is exercised without sleeping.
 	now func() time.Time
@@ -403,6 +407,13 @@ type ForgerConfig struct {
 	// defaultForgeEBSelectionReserve.
 	ForgeEBSelectionReserve time.Duration
 
+	// ForgeEBMaxTxRefs caps the transaction references a forged endorser
+	// block may carry; ForgeEBMaxBytes caps their total size. Zero means
+	// no cap. These are backstops: the slot deadline is the operative
+	// bound whenever the slot clock can answer.
+	ForgeEBMaxTxRefs uint64
+	ForgeEBMaxBytes  uint64
+
 	// BlockValidator, when non-nil, validates the forged block (VRF/KES
 	// header crypto, body-hash consistency, per-tx ledger rules) before
 	// AddBlock is called. A validation failure drops the block without
@@ -458,6 +469,8 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 	f.forgeSyncToleranceSlots = cfg.ForgeSyncToleranceSlots
 	f.forgeStaleGapThresholdSlots = cfg.ForgeStaleGapThresholdSlots
 	f.forgeEBSelectionReserve = cfg.ForgeEBSelectionReserve
+	f.forgeEBMaxTxRefs = cfg.ForgeEBMaxTxRefs
+	f.forgeEBMaxBytes = cfg.ForgeEBMaxBytes
 	f.now = time.Now
 
 	if cfg.Mode == ModeProduction {
@@ -1847,7 +1860,10 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		return nil, nil
 	}
 
-	ebCbor, ebHash, bodies, err := buildLeiosEB(txs)
+	ebCbor, ebHash, bodies, err := buildLeiosEB(txs, leiosEBCaps{
+		maxRefs:  f.forgeEBMaxTxRefs,
+		maxBytes: f.forgeEBMaxBytes,
+	})
 	if err != nil {
 		if errors.Is(err, errNoValidTxRefs) {
 			f.logger.Debug("leios EB skipped: no valid tx refs", "slot", slot)
@@ -1991,14 +2007,28 @@ func (l leiosSelectionLimits) expired() bool {
 // Transactions with invalid hex hashes, non-32-byte hashes, zero sizes,
 // or sizes exceeding uint16 are silently dropped. Returns an error only
 // when no valid references remain after filtering.
+// leiosEBCaps bounds the manifest a single endorser block may carry. The
+// zero value imposes no cap, matching the behaviour before these existed.
+// They are a backstop for the slot deadline: when the slot clock cannot
+// answer, the deadline is absent and only these keep construction cost and
+// wire size from scaling without limit with mempool depth.
+type leiosEBCaps struct {
+	// maxRefs caps the number of transaction references.
+	maxRefs uint64
+	// maxBytes caps the total size of the referenced transactions.
+	maxBytes uint64
+}
+
 func buildLeiosEB(
 	txs []MempoolTransaction,
+	caps leiosEBCaps,
 ) (
 	cbor []byte,
 	hash []byte,
 	bodies [][]byte,
 	err error,
 ) {
+	var totalBytes uint64
 	refs := make([]lcommon.LeiosTransactionReference, 0, len(txs))
 	// bodies holds each referenced transaction's raw CBOR, in the same order
 	// as refs, so the endorser block can serve them over leios-fetch. A
@@ -2017,6 +2047,20 @@ func buildLeiosEB(
 			len(tx.Cbor) == 0 || len(tx.Cbor) > math.MaxUint16 {
 			continue
 		}
+		// Apply the manifest caps to references that would otherwise be
+		// included. Stop rather than skip: the selected order is a valid
+		// closure (a parent always precedes the descendants that spend
+		// its outputs), and skipping a transaction to fit a smaller one
+		// after it would leave a descendant referenced without its
+		// parent.
+		if caps.maxRefs > 0 && uint64(len(refs)) >= caps.maxRefs {
+			break
+		}
+		txBytes := uint64(len(tx.Cbor))
+		if caps.maxBytes > 0 && totalBytes+txBytes > caps.maxBytes {
+			break
+		}
+		totalBytes += txBytes
 		// Bounded above by the MaxUint16 check on len(tx.Cbor) above. Kept
 		// on one line so the directive stays attached to the conversion.
 		size := uint16(len(tx.Cbor)) // #nosec G115

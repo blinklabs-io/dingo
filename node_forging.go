@@ -380,6 +380,8 @@ func (n *Node) initBlockForger(
 		SlotClock:                       slotClock,
 		ForgeSyncToleranceSlots:         n.config.forgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots:     n.config.forgeStaleGapThresholdSlots,
+		ForgeEBMaxTxRefs:                n.config.forgeEBMaxTxRefs,
+		ForgeEBMaxBytes:                 n.config.forgeEBMaxBytes,
 		BlockValidator:                  blockValidator,
 		ForgeFence:                      forgeFence,
 		PromRegistry:                    n.config.promRegistry,

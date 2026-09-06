@@ -91,6 +91,13 @@ const (
 	DefaultRejectionWatermark          = 1.0
 	DefaultForgeSyncToleranceSlots     = 100
 	DefaultForgeStaleGapThresholdSlots = 1000
+	// Backstops on endorser-block construction. The slot deadline is the
+	// operative bound in normal operation; these cap the manifest when the
+	// slot clock cannot answer, and are deliberately far above the block
+	// sizes seen in practice so they never become the binding constraint
+	// on throughput.
+	DefaultForgeEBMaxTxRefs            = 20000
+	DefaultForgeEBMaxBytes             = 25165824 // 24 MiB, just under the Leios mempool default
 	DefaultMempoolCapacityPraos        = 1048576  // 1 MiB
 	DefaultMempoolCapacityLeios        = 26214400 // 25 MiB
 	DefaultMempoolRevalidationDeltaCap = 64
@@ -678,6 +685,8 @@ type Config struct {
 	ShelleyOperationalCertificate string `yaml:"shelleyOperationalCertificate" envconfig:"SHELLEY_OPERATIONAL_CERTIFICATE"`
 	ForgeSyncToleranceSlots       uint64 `yaml:"forgeSyncToleranceSlots"       envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
 	ForgeStaleGapThresholdSlots   uint64 `yaml:"forgeStaleGapThresholdSlots"   envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
+	ForgeEBMaxTxRefs              uint64 `yaml:"forgeEbMaxTxRefs"              envconfig:"DINGO_FORGE_EB_MAX_TX_REFS"`
+	ForgeEBMaxBytes               uint64 `yaml:"forgeEbMaxBytes"               envconfig:"DINGO_FORGE_EB_MAX_BYTES"`
 	ValidateForgedBlock           bool   `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
 
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
@@ -1120,6 +1129,8 @@ var globalConfig = &Config{
 	// Forging defaults
 	ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
 	ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
+	ForgeEBMaxTxRefs:            DefaultForgeEBMaxTxRefs,
+	ForgeEBMaxBytes:             DefaultForgeEBMaxBytes,
 }
 
 // deepCopyPluginValue duplicates the reference-typed values a YAML plugin
@@ -1483,6 +1494,12 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.ForgeStaleGapThresholdSlots == 0 {
 		c.ForgeStaleGapThresholdSlots = DefaultForgeStaleGapThresholdSlots
+	}
+	if c.ForgeEBMaxTxRefs == 0 {
+		c.ForgeEBMaxTxRefs = DefaultForgeEBMaxTxRefs
+	}
+	if c.ForgeEBMaxBytes == 0 {
+		c.ForgeEBMaxBytes = DefaultForgeEBMaxBytes
 	}
 	// Only an unset (zero) frequency takes the default; an explicitly
 	// negative value is preserved so Validate can reject it instead of

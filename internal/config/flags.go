@@ -680,6 +680,16 @@ var flagSpecs = []flagSpec{
 		"forge-stale-gap-threshold-slots",
 		"slot gap threshold for stale slot clock alerts",
 	),
+	uint64Flag(
+		"ForgeEBMaxTxRefs",
+		"forge-eb-max-tx-refs",
+		"maximum transaction references in a forged Leios endorser block (0 = unlimited)",
+	),
+	uint64Flag(
+		"ForgeEBMaxBytes",
+		"forge-eb-max-bytes",
+		"maximum total referenced transaction bytes in a forged Leios endorser block (0 = unlimited)",
+	),
 	boolFlag(
 		"ValidateForgedBlock",
 		"validate-forged-block",

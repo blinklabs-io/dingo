@@ -1,0 +1,97 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package forging
+
+import (
+	"context"
+	"io"
+	"log/slog"
+	"testing"
+	"time"
+
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/require"
+)
+
+// TestBuildLeiosEBRespectsRefCap bounds the endorser block independently of
+// the clock. The deadline is the operative bound in normal operation, but a
+// stalled or unavailable slot clock must not let manifest construction
+// scale without limit with mempool depth.
+func TestBuildLeiosEBRespectsRefCap(t *testing.T) {
+	txs := leiosCandidateTxs(t, 10)
+	ebCbor, _, bodies, err := buildLeiosEB(txs, leiosEBCaps{maxRefs: 4})
+	require.NoError(t, err)
+	require.Len(t, bodies, 4)
+
+	eb, err := lcommon.NewLeiosEndorserBlockFromCbor(ebCbor)
+	require.NoError(t, err)
+	require.Len(t, eb.TransactionReferences, 4)
+}
+
+// TestBuildLeiosEBRespectsByteCap bounds total referenced payload rather
+// than reference count, which is what actually has to cross the wire.
+func TestBuildLeiosEBRespectsByteCap(t *testing.T) {
+	txs := leiosCandidateTxs(t, 10)
+	// Room for exactly three transactions.
+	capBytes := uint64(3 * len(txs[0].Cbor))
+	_, _, bodies, err := buildLeiosEB(txs, leiosEBCaps{maxBytes: capBytes})
+	require.NoError(t, err)
+	require.Len(t, bodies, 3)
+}
+
+// TestBuildLeiosEBZeroCapsAreUnlimited keeps the zero value meaning what it
+// meant before caps existed.
+func TestBuildLeiosEBZeroCapsAreUnlimited(t *testing.T) {
+	txs := leiosCandidateTxs(t, 10)
+	_, _, bodies, err := buildLeiosEB(txs, leiosEBCaps{})
+	require.NoError(t, err)
+	require.Len(t, bodies, 10)
+}
+
+// TestCheckAndForgeProductionAppliesEBRefCap follows the runtime path from
+// the forger config into manifest construction.
+func TestCheckAndForgeProductionAppliesEBRefCap(t *testing.T) {
+	block := newForgerTestBlock(10, 2)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	leiosCaster := &forgerTestLeiosCaster{}
+
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		SlotClock: &ebTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      9,
+			slotsPerKESPeriod: 100,
+			slotEnd:           time.Now().Add(time.Hour),
+		},
+		LeiosProduceChecker: &forgerTestLeiosChecker{allowed: true},
+		LeiosEBBroadcaster:  leiosCaster,
+		LeiosTxValidator:    &sessionMockTxValidator{},
+		LeiosMempool: forgerTestMempoolProvider{
+			txs: leiosCandidateTxs(t, 12),
+		},
+		ForgeEBMaxTxRefs: 5,
+		PromRegistry:     prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	require.Len(t, leiosCaster.txBodies, 5)
+}
