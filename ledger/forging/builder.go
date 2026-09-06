@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"time"
 
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -121,6 +122,15 @@ type blockSelectionConstraints struct {
 	// this pool's block for the slot, and still carries the Leios
 	// payload, whereas an abandoned slot yields nothing.
 	emptyBody bool
+
+	// deadline, when non-zero, stops transaction selection at the given
+	// instant and forges whatever has been selected so far. Every
+	// candidate costs a full ledger re-validation, so an unbounded pass
+	// over a large mempool runs well past the slot it is building for --
+	// and every ledger publication inside that window invalidates the
+	// whole candidate. Truncating is safe: the transactions already
+	// selected were all validated against the same pinned snapshot.
+	deadline time.Time
 }
 
 func withTxValidationSession(
@@ -135,6 +145,9 @@ func withTxValidationSession(
 
 // DefaultBlockBuilder implements BlockBuilder using LedgerState components.
 type DefaultBlockBuilder struct {
+	// now reads the wall clock for the selection deadline. Overridden in
+	// tests so deadline behaviour is exercised without sleeping.
+	now             func() time.Time
 	logger          *slog.Logger
 	mempool         MempoolProvider
 	pparamsProvider ProtocolParamsProvider
@@ -183,6 +196,7 @@ func NewDefaultBlockBuilder(
 	}
 
 	return &DefaultBlockBuilder{
+		now:             time.Now,
 		logger:          cfg.Logger,
 		mempool:         cfg.Mempool,
 		pparamsProvider: cfg.PParamsProvider,
@@ -396,15 +410,46 @@ func (b *DefaultBlockBuilder) buildBlock(
 	// candidate lists (closed over below) until a limit is hit. It runs
 	// inside withTxValidationSession so every transaction is re-validated
 	// against the same pinned ledger snapshot and repeatable-read
-	// transaction — not a fresh one per call — and stillCurrent is
-	// checked once at the end so a ledger publication observed mid-loop
-	// rejects the whole candidate instead of yielding a block built from
-	// transactions checked against different generations.
+	// transaction — not a fresh one per call — and a ledger publication
+	// observed mid-loop rejects the whole candidate instead of yielding a
+	// block built from transactions checked against different generations.
+	//
+	// Both stillCurrent and the slot deadline are consulted before every
+	// candidate rather than once at the end. Re-validation costs
+	// milliseconds per transaction, so a pass over a large mempool runs
+	// for seconds: checking only at the end meant a producer kept paying
+	// for validations against a snapshot that had already been superseded
+	// and then threw the entire pass away.
 	selectTransactions := func(
 		validate TxValidationFunc,
 		stillCurrent func() bool,
 	) error {
 		for _, mempoolTx := range mempoolTxs {
+			if !stillCurrent() {
+				// A ledger publication landed mid-pass. Every
+				// transaction validated from here on would be checked
+				// against a superseded generation and the candidate
+				// rejected anyway, so stop now and let the forge loop
+				// re-select against the state that publication
+				// produced.
+				return errTxValidationSnapshotChanged
+			}
+			if !constraints.deadline.IsZero() &&
+				!b.now().Before(constraints.deadline) {
+				// Out of slot time. The transactions selected so far
+				// were all validated against the same pinned snapshot,
+				// so forging them is correct; continuing would produce
+				// a fuller block after the slot it belongs to has
+				// passed.
+				b.logger.Info(
+					"transaction selection stopped at the slot deadline",
+					"component", "forging",
+					"slot", slot,
+					"selected_tx_count", len(transactionBodies),
+					"mempool_tx_count", len(mempoolTxs),
+				)
+				break
+			}
 			// Use raw CBOR from the mempool transaction
 			txCbor := mempoolTx.Cbor
 			txSize := uint64(len(txCbor))
@@ -449,6 +494,83 @@ func (b *DefaultBlockBuilder) buildBlock(
 				continue
 			}
 
+			// Encode the transaction's block forms and apply the
+			// exact block-body size limit before re-validating it.
+			// Re-validation is the expensive step by orders of
+			// magnitude, so a candidate that cannot fit must not pay
+			// for it: that cost is what makes the selection window
+			// long enough for a ledger publication to land inside it.
+			// Splitting at the byte level keeps block assembly era-
+			// agnostic: we don't need typed body / witness slices once
+			// we have the canonical encoded forms. fullTx.Cbor() returns
+			// the original mempool bytes (preserved via the gouroboros
+			// types' DecodeStoreCbor / SetCborReference machinery);
+			// Dijkstra normalizes those bytes before placing the tx inline
+			// in the block body.
+			fullTxCbor := fullTx.Cbor()
+			bodyBytes, witnessBytes, extractErr := splitTxCbor(fullTxCbor)
+			if extractErr != nil {
+				b.logger.Debug(
+					"failed to split tx CBOR into body+witnesses, skipping",
+					"component", "forging",
+					"tx_hash", mempoolTx.Hash,
+					"error", extractErr,
+				)
+				continue
+			}
+			blockTxCbor := cbor.RawMessage(fullTxCbor)
+			if limits.era == eraDijkstra {
+				var normalizeErr error
+				blockTxCbor, normalizeErr = dijkstraBlockTransactionCbor(
+					fullTxCbor,
+				)
+				if normalizeErr != nil {
+					b.logger.Debug(
+						"failed to encode Dijkstra transaction block form, skipping",
+						"component",
+						"forging",
+						"tx_hash",
+						mempoolTx.Hash,
+						"error",
+						normalizeErr,
+					)
+					continue
+				}
+				candidateTransactions := make(
+					[]cbor.RawMessage,
+					0,
+					len(transactions)+1,
+				)
+				candidateTransactions = append(
+					candidateTransactions,
+					transactions...)
+				candidateTransactions = append(
+					candidateTransactions,
+					blockTxCbor,
+				)
+				candidateBodyCbor, encodeErr := encodeDijkstraBlockBodyCbor(
+					candidateTransactions,
+					[]uint{},
+					nil,
+				)
+				if encodeErr != nil {
+					return fmt.Errorf(
+						"failed to encode candidate Dijkstra block body: %w",
+						encodeErr,
+					)
+				}
+				candidateBodySize := uint64(len(candidateBodyCbor))
+				if candidateBodySize > maxBlockSize {
+					b.logger.Debug(
+						"block body size limit reached",
+						"component", "forging",
+						"candidate_body_size", candidateBodySize,
+						"tx_size", txSize,
+						"max_block_body_size", maxBlockSize,
+					)
+					break
+				}
+			}
 			// Re-validate the transaction against the current ledger
 			// state. Between mempool admission and block assembly,
 			// UTxOs may have been consumed, protocol parameters may
@@ -551,78 +673,6 @@ func (b *DefaultBlockBuilder) buildBlock(
 				}
 			}
 
-			// Add transaction to our lists for later block creation.
-			// Splitting at the byte level keeps block assembly era-
-			// agnostic: we don't need typed body / witness slices once
-			// we have the canonical encoded forms. fullTx.Cbor() returns
-			// the original mempool bytes (preserved via the gouroboros
-			// types' DecodeStoreCbor / SetCborReference machinery);
-			// Dijkstra normalizes those bytes before placing the tx inline
-			// in the block body.
-			fullTxCbor := fullTx.Cbor()
-			bodyBytes, witnessBytes, extractErr := splitTxCbor(fullTxCbor)
-			if extractErr != nil {
-				b.logger.Debug(
-					"failed to split tx CBOR into body+witnesses, skipping",
-					"component", "forging",
-					"tx_hash", mempoolTx.Hash,
-					"error", extractErr,
-				)
-				continue
-			}
-			blockTxCbor := cbor.RawMessage(fullTxCbor)
-			if limits.era == eraDijkstra {
-				var normalizeErr error
-				blockTxCbor, normalizeErr = dijkstraBlockTransactionCbor(
-					fullTxCbor,
-				)
-				if normalizeErr != nil {
-					b.logger.Debug(
-						"failed to encode Dijkstra transaction block form, skipping",
-						"component",
-						"forging",
-						"tx_hash",
-						mempoolTx.Hash,
-						"error",
-						normalizeErr,
-					)
-					continue
-				}
-				candidateTransactions := make(
-					[]cbor.RawMessage,
-					0,
-					len(transactions)+1,
-				)
-				candidateTransactions = append(
-					candidateTransactions,
-					transactions...)
-				candidateTransactions = append(
-					candidateTransactions,
-					blockTxCbor,
-				)
-				candidateBodyCbor, encodeErr := encodeDijkstraBlockBodyCbor(
-					candidateTransactions,
-					[]uint{},
-					nil,
-				)
-				if encodeErr != nil {
-					return fmt.Errorf(
-						"failed to encode candidate Dijkstra block body: %w",
-						encodeErr,
-					)
-				}
-				candidateBodySize := uint64(len(candidateBodyCbor))
-				if candidateBodySize > maxBlockSize {
-					b.logger.Debug(
-						"block body size limit reached",
-						"component", "forging",
-						"candidate_body_size", candidateBodySize,
-						"tx_size", txSize,
-						"max_block_body_size", maxBlockSize,
-					)
-					break
-				}
-			}
 			transactionBodies = append(transactionBodies, bodyBytes)
 			transactionWitnessSets = append(
 				transactionWitnessSets,

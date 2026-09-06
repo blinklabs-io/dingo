@@ -1424,6 +1424,17 @@ func (f *BlockForger) buildBlockForSlot(
 ) (ledger.Block, []byte, error) {
 	var stats forgeBuildStats
 	deadline, haveDeadline := f.slotSelectionDeadline(slot)
+	// selectionConstraints bounds each attempt's selection pass by the
+	// slot deadline. When the slot is already over the bound is dropped:
+	// truncating the block would cost transactions without buying back
+	// any of the slot, and the in-loop snapshot check still limits the
+	// work a doomed pass can waste.
+	selectionConstraints := func() blockSelectionConstraints {
+		if !haveDeadline || !time.Now().Before(deadline) {
+			return blockSelectionConstraints{}
+		}
+		return blockSelectionConstraints{deadline: deadline}
+	}
 	// lost is the end of the ladder for an attempt whose selection was
 	// aborted by the chain moving: try a transaction-free block before
 	// giving the slot up. The guards the fallback needs are already
@@ -1470,7 +1481,7 @@ func (f *BlockForger) buildBlockForSlot(
 			kesPeriod,
 			leiosData,
 			generation,
-			blockSelectionConstraints{},
+			selectionConstraints(),
 		)
 		if err == nil {
 			if stats.aborted {
@@ -1546,11 +1557,14 @@ func (f *BlockForger) buildBlock(
 			generation,
 			constraints,
 		)
-	} else if constraints != (blockSelectionConstraints{}) {
+	} else if constraints.emptyBody {
 		// Only the package-private builder path carries per-attempt
 		// constraints. An embedder-supplied BlockBuilder cannot be told
 		// to drop its transactions, so the slot is reported lost rather
-		// than silently forged under constraints that were ignored.
+		// than forged from a full mempool under a constraint that was
+		// silently ignored. A selection deadline is advisory by
+		// comparison -- ignoring it just leaves the pass unbounded, as
+		// it has always been -- so it does not disqualify a builder.
 		return nil, nil, errBlockConstraintsUnsupported
 	} else if leiosData.empty() {
 		block, blockCbor, err = f.blockBuilder.BuildBlock(slot, kesPeriod)
