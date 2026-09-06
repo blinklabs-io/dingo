@@ -7373,27 +7373,33 @@ func (ls *LedgerState) reconstructTransitionInfo() {
 	}
 }
 
-// eraShape returns the resolved hardfork.Shape for this LedgerState's
-// CardanoNodeConfig, building and caching it on first access. cfg is
-// immutable for the LedgerState's lifetime, so the cached shape is too.
-//
-// Returns an empty Shape (no error) when CardanoNodeConfig is unset or when
-// BuildShape fails; callers must treat an empty Shape as "shape unavailable"
-// and skip shape-derived work.
-func (ls *LedgerState) eraShape() hardfork.Shape {
+// eraShapeWithError returns the resolved hardfork.Shape for this LedgerState's
+// CardanoNodeConfig, building and caching it on first access. cfg is immutable
+// for the LedgerState's lifetime, so the cached shape is too.
+func (ls *LedgerState) eraShapeWithError() (hardfork.Shape, error) {
 	if s := ls.cachedShape.Load(); s != nil {
-		return *s
+		return *s, nil
 	}
 	cfg := ls.config.CardanoNodeConfig
 	if cfg == nil {
-		return hardfork.Shape{}
+		return hardfork.Shape{}, errors.New(
+			"cardano node config is unavailable",
+		)
 	}
 	s, err := eras.BuildShapeWithDijkstra(cfg, ls.config.EnableDijkstra)
 	if err != nil {
-		return hardfork.Shape{}
+		return hardfork.Shape{}, fmt.Errorf("build hard-fork shape: %w", err)
 	}
 	ls.cachedShape.CompareAndSwap(nil, &s)
-	return *ls.cachedShape.Load()
+	return *ls.cachedShape.Load(), nil
+}
+
+// eraShape returns the resolved hardfork.Shape, or an empty Shape when the
+// node configuration cannot supply one. Callers that use the shape as a
+// consensus forecast must call eraShapeWithError and fail closed instead.
+func (ls *LedgerState) eraShape() hardfork.Shape {
+	shape, _ := ls.eraShapeWithError()
+	return shape
 }
 
 // evaluateTriggerAtEpoch sets transitionInfo to TransitionKnown(e) when the

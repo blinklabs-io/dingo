@@ -280,6 +280,19 @@ func (c *SlotTimeConverter) TimeToSlot(t time.Time) (uint64, error) {
 // through the configured safe-zone horizon. Returns an error for an empty
 // cache or for slots outside that range.
 func (c *SlotTimeConverter) SlotToEpoch(slot uint64) (models.Epoch, error) {
+	cache := c.epochCache()
+	for _, cachedEpoch := range slices.Backward(cache) {
+		if slot >= cachedEpoch.StartSlot &&
+			slot < cachedEpoch.StartSlot+uint64(cachedEpoch.LengthInSlots) {
+			return epochBoundaryInfo(cachedEpoch), nil
+		}
+	}
+	if len(cache) > 0 && slot < cache[0].StartSlot {
+		return models.Epoch{}, fmt.Errorf(
+			"slot is outside the known epoch range: %w",
+			hardfork.ErrPastHorizon,
+		)
+	}
 	sum, err := c.hardForkSummary(0)
 	if err != nil {
 		return models.Epoch{}, errors.New("no epochs in cache")

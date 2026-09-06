@@ -188,32 +188,78 @@ func TestHardForkSummary_EmptyCache(t *testing.T) {
 	assert.Error(t, err)
 }
 
-// TestHardForkSummary_MissingShelleyGenesis tolerates a config without a
-// Shelley genesis: SystemStart stays at the
-// zero time. Callers that need wall-clock conversions must provide the
-// genesis, but epoch-cache-only callers (like SlotToEpoch) can still get a
-// meaningful Summary.
-func TestHardForkSummary_MissingShelleyGenesis(t *testing.T) {
-	ls := &LedgerState{
-		epochCache: []models.Epoch{
-			{
-				EpochId:       0,
-				StartSlot:     0,
-				SlotLength:    1000,
-				LengthInSlots: 100,
-				EraId:         1,
-			},
+// TestHardForkSummary_RejectsUnavailableShape verifies that consensus
+// forecasting fails closed when the current era cannot be resolved to the
+// configured hard-fork shape. Returning the cache-derived current era in any
+// of these cases would leave End nil with a zero safe zone and make every
+// future slot appear forecastable.
+func TestHardForkSummary_RejectsUnavailableShape(t *testing.T) {
+	testCases := []struct {
+		name           string
+		cfg            func(*testing.T) *cardano.CardanoNodeConfig
+		currentEra     eras.EraDesc
+		enableDijkstra bool
+		wantErr        string
+	}{
+		{
+			name:       "missing node config",
+			currentEra: eras.ConwayEraDesc,
+			wantErr:    "cardano node config is unavailable",
 		},
-		config: LedgerStateConfig{
-			CardanoNodeConfig: &cardano.CardanoNodeConfig{},
+		{
+			name: "shape construction failure",
+			cfg: func(*testing.T) *cardano.CardanoNodeConfig {
+				return &cardano.CardanoNodeConfig{}
+			},
+			currentEra: eras.ConwayEraDesc,
+			wantErr:    "Shelley genesis unavailable",
+		},
+		{
+			name: "current era outside enabled table",
+			cfg: func(t *testing.T) *cardano.CardanoNodeConfig {
+				return minimalShelleyGenesisCfg(t)
+			},
+			currentEra: eras.DijkstraEraDesc,
+			wantErr:    "Dijkstra era is unavailable in the hard-fork shape",
 		},
 	}
-	ls.publishSnapshotsLocked()
-	sum, err := ls.HardForkSummary()
-	require.NoError(t, err)
-	assert.True(t, sum.SystemStart.IsZero(),
-		"missing shelley genesis ⇒ SystemStart is zero time")
-	require.Len(t, sum.Eras, 1)
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			var cfg *cardano.CardanoNodeConfig
+			if testCase.cfg != nil {
+				cfg = testCase.cfg(t)
+			}
+			ls := &LedgerState{
+				epochCache: []models.Epoch{{
+					EpochId:       500,
+					StartSlot:     100_000,
+					SlotLength:    1_000,
+					LengthInSlots: 432_000,
+					EraId:         testCase.currentEra.Id,
+				}},
+				currentEra: testCase.currentEra,
+				currentTip: ochainsync.Tip{
+					Point: ocommon.NewPoint(200_000, []byte("tip")),
+				},
+				config: LedgerStateConfig{
+					CardanoNodeConfig: cfg,
+					EnableDijkstra:    testCase.enableDijkstra,
+				},
+			}
+			ls.publishSnapshotsLocked()
+
+			summary, err := ls.HardForkSummary()
+			require.ErrorContains(t, err, testCase.wantErr)
+			assert.Nil(t, summary)
+
+			// Drive the consensus caller too: it must reject before attempting
+			// to forecast or mutate another epoch from the incomplete shape.
+			_, err = ls.headerVerificationEpoch(1_000_000, false)
+			require.ErrorContains(t, err, testCase.wantErr)
+			assert.Len(t, ls.loadConsensusSnapshot().epochCache, 1)
+		})
+	}
 }
 
 // TestHardForkSummary_CarriesTransitionInfo ensures the current transitionInfo

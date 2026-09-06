@@ -414,8 +414,11 @@ func (ls *LedgerState) headerVerificationEpoch(
 ) (models.Epoch, error) {
 	// The epoch cache can be forecast forward for near-future headers, but it
 	// must never be advanced past the HFC safe zone or a known era boundary.
-	// Check the immutable summary first so ErrPastHorizon is surfaced before
-	// ensureEpochForSlot mutates any forecasted nonce state.
+	// Resolve known epochs without requiring forecast configuration. Only
+	// future slots need the immutable summary before cache mutation.
+	if known, err := ls.epochForSlot(blockSlot); err == nil {
+		return known, nil
+	}
 	if len(ls.loadConsensusSnapshot().epochCache) > 0 {
 		summary, err := ls.HardForkSummary()
 		if err != nil {

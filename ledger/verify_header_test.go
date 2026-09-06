@@ -958,11 +958,21 @@ func newTestShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
+		"slotLength": 1,
+		"epochLength": 432000,
 		"slotsPerKESPeriod": 129600,
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	err := cfg.LoadShelleyGenesisFromReader(
+	byronGenesisJSON := `{
+		"blockVersionData": { "slotDuration": "20000" },
+		"protocolConsts": { "k": 432 }
+	}`
+	err := cfg.LoadByronGenesisFromReader(
+		strings.NewReader(byronGenesisJSON),
+	)
+	require.NoError(t, err)
+	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	)
 	require.NoError(t, err)
@@ -1034,6 +1044,7 @@ func TestVerifyBlockHeaderCrypto_RejectsBlockOutsideKnownEpochs(
 			{
 				EpochId:       0,
 				StartSlot:     0,
+				SlotLength:    1_000,
 				LengthInSlots: 1000,
 				Nonce:         []byte{0x01, 0x02, 0x03},
 			},
@@ -1054,7 +1065,7 @@ func TestVerifyBlockHeaderCrypto_RejectsBlockOutsideKnownEpochs(
 		err,
 		"block outside known epochs must be rejected, not skipped",
 	)
-	assert.Contains(t, err.Error(), "no epoch data for slot")
+	assert.Contains(t, err.Error(), "past era horizon")
 }
 
 func TestHeaderVerificationEpochRejectsPastForecastBeforeCacheAdvance(
@@ -1146,7 +1157,7 @@ func TestVerifyBlockHeaderCrypto_RejectsBlockWithNoNonce(t *testing.T) {
 	block := &mockBabbageBlock{slot: 500}
 	err := ls.verifyBlockHeaderCrypto(block)
 	assert.Error(t, err, "block with missing nonce must be rejected")
-	assert.Contains(t, err.Error(), "has no nonce")
+	assert.Contains(t, err.Error(), "epoch nonce not available")
 }
 
 // TestVerifyBlockHeaderCrypto_EpochBoundaryUsesCorrectNonce verifies that
@@ -1529,11 +1540,16 @@ func newHighFreqShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.99,
 		"securityParam": 432,
+		"slotLength": 1,
+		"epochLength": 432000,
 		"slotsPerKESPeriod": 129600,
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	err := cfg.LoadShelleyGenesisFromReader(
+	byronGenesisJSON := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
+	err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON))
+	require.NoError(t, err)
+	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	)
 	require.NoError(t, err)
@@ -1564,6 +1580,8 @@ func newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": ` + activeSlotsCoeff + `,
 		"securityParam": 432,
+		"slotLength": 1,
+		"epochLength": 432000,
 		"slotsPerKESPeriod": 129600,
 		"systemStart": "2022-10-25T00:00:00Z",
 		"protocolParams": {
@@ -1577,7 +1595,10 @@ func newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
 		}
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
-	err := cfg.LoadShelleyGenesisFromReader(
+	byronGenesisJSON := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
+	err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON))
+	require.NoError(t, err)
+	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
 	)
 	require.NoError(t, err)
@@ -1629,7 +1650,9 @@ func newEligibilityTestLedger(
 			{
 				EpochId:       5,
 				StartSlot:     0,
+				SlotLength:    1000,
 				LengthInSlots: 1_000_000,
+				EraId:         1,
 				Nonce:         epochNonce,
 			},
 		},
@@ -3828,12 +3851,12 @@ func TestPrunePoolSnapshotsWithRetentionFloor_KeepsReadoptableDeferredHeader(
 			Nonce:         tb.epochNonce,
 		},
 	}
-	// The test config carries no Byron genesis, so the stability window is the
-	// 50_000-slot default; with the tip at 60_000 the rollback horizon cuts off
-	// at slot 10_000.
-	ls.currentTip = ochainsync.Tip{Point: ocommon.Point{Slot: 60_000}}
+	// The test config carries Byron genesis with k=432, so the stability window
+	// is 2k = 864 slots; with the tip at 21_000 the rollback horizon cuts off
+	// at slot 20_136, between the two points below.
+	ls.currentTip = ochainsync.Tip{Point: ocommon.Point{Slot: 21_000}}
 	ls.publishSnapshotsLocked()
-	require.Equal(t, uint64(50_000), ls.calculateStabilityWindow())
+	require.Equal(t, uint64(864), ls.calculateStabilityWindow())
 
 	// Behind the tip but INSIDE the horizon: a rollback can still re-adopt it.
 	readoptable := ocommon.Point{Slot: 20_500, Hash: []byte{0x11}}

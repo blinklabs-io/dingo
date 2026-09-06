@@ -72,6 +72,7 @@ func newExpiryRollbackTestLedger(
 	ls := &LedgerState{
 		db: db,
 		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
 			Logger: slog.New(
 				slog.NewTextHandler(io.Discard, nil),
 			),
