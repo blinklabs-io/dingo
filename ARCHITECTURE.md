@@ -6607,11 +6607,18 @@ never the reverse.
   `KoiosClient.ResolvedBaseURL()`, which strips userinfo — validation already
   rejects a query and a fragment, so that is the only place a credential can
   survive — which also makes a rotated key against the same host read as the
-  same oracle. The first recording for a network never discards: an existing
-  cache predates the column and is unattributed rather than wrong. `Fetch` and
-  `NewObserver` both record and log the resolved root once at startup, because
-  the node's config dump names the configured value only for the in-process
-  observer and says nothing on the `fetch`/`run`/`watch` paths.
+  same oracle. A cache with nothing recorded is attributed to the built-in
+  public root rather than to whatever root is in use now, since no build
+  without the column had an override to apply: an upgraded cache is adopted by
+  a public-host run and discarded by a custom-host one, instead of the
+  mirror silently inheriting the public host's answers. The destructive step is
+  gated on the new host answering `/tip`, so a mistyped host fails with the
+  cache intact rather than costing a full historical refetch; only a run that
+  would actually discard pays for that probe. `Fetch` and `Observer.Start`
+  both record and log the resolved root once at startup — `Start` rather than
+  `NewObserver` because the probe needs a context and a startup the caller can
+  fail — because the node's config dump names the configured value only for
+  the in-process observer and says nothing on the `fetch`/`run`/`watch` paths.
 - **Koios endpoint.** `/account_rewards` is deprecated; `/account_reward_
   history` is the replacement (`KoiosClient.GetAccountRewardHistory`), taking
   the same `stake_addresses_with_epoch_no` POST body shape via a new `post()`

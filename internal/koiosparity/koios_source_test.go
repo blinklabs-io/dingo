@@ -15,8 +15,13 @@
 package koiosparity
 
 import (
+	"context"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"regexp"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -38,15 +43,50 @@ func newSourceTestCache(t *testing.T) *Cache {
 func seedOracleRows(t *testing.T, c *Cache, network string) {
 	t.Helper()
 	now := time.Now().UTC()
-	require.NoError(t, c.UpsertEpochInfo(KoiosEpochInfo{
-		Network:      network,
-		Epoch:        7,
-		ActiveStake:  "1",
-		Fees:         "1",
-		TotalRewards: "1",
-		EpochEndTime: now,
-		FetchedAt:    now,
-	}))
+	// CommitEpochData covers koios_epoch_info, koios_pool_epoch and
+	// koios_totals in one call.
+	require.NoError(t, c.CommitEpochData(
+		KoiosEpochInfo{
+			Network:      network,
+			Epoch:        7,
+			ActiveStake:  "1",
+			Fees:         "1",
+			TotalRewards: "1",
+			EpochEndTime: now,
+			FetchedAt:    now,
+		},
+		[]KoiosPoolEpoch{{
+			Network:     network,
+			Epoch:       7,
+			PoolBech32:  "pool1seeded",
+			ActiveStake: "1",
+			FetchedAt:   now,
+		}},
+		&KoiosTotals{
+			Network:   network,
+			Epoch:     7,
+			Treasury:  "1",
+			Reserves:  "1",
+			Fees:      "1",
+			Reward:    "1",
+			FetchedAt: now,
+		},
+	))
+	// Staged chunk progress covers koios_account_fetch_staged_rows and
+	// koios_account_checked.
+	require.NoError(t, c.SaveAccountFetchChunkProgress(
+		network,
+		7,
+		"chunkseed",
+		[]KoiosAccountRewards{{
+			StakeAddress: "stake_test1seeded",
+			RewardType:   "member",
+			Earned:       "1",
+			FetchedAt:    now,
+		}},
+		[]string{"stake_test1seeded"},
+		now,
+	))
 	require.NoError(t, c.CommitAccountRewardsForEpoch(
 		network,
 		7,
@@ -242,4 +282,191 @@ func TestKoiosSourcedTablesAreBareIdentifiers(t *testing.T) {
 			"%q is not a bare identifier, so it must not be concatenated into SQL",
 			table)
 	}
+}
+
+// TestSeedOracleRowsTouchesEveryInvalidatedTable keeps the fixture honest.
+// The discard tests assert the row count reaches zero, so any table the
+// fixture never writes is only ever "invalidated" while already empty, and a
+// regression that stopped discarding it would still pass.
+func TestSeedOracleRowsTouchesEveryInvalidatedTable(t *testing.T) {
+	cache := newSourceTestCache(t)
+	seedOracleRows(t, cache, "preview")
+	for _, table := range koiosSourcedTables {
+		var n int
+		require.NoError(t, cache.db.QueryRow(
+			"SELECT COUNT(*) FROM "+table+" WHERE network = ?", "preview",
+		).Scan(&n))
+		assert.Positive(t, n,
+			"%s is invalidated on a source change but never seeded, so the discard is untested there",
+			table)
+	}
+}
+
+// TestRecordKoiosSourceFirstRunWithCustomRootDiscards is the upgrade path.
+// A cache written before koios_source existed can only hold public-host rows,
+// because no build without the column had an override to apply. Claiming them
+// for a custom root would adopt the public host's answers as the mirror's —
+// mixing two oracles on the exact path this guard exists to close.
+func TestRecordKoiosSourceFirstRunWithCustomRootDiscards(t *testing.T) {
+	cache := newSourceTestCache(t)
+	seedOracleRows(t, cache, "preview")
+	require.Positive(t, countOracleRows(t, cache, "preview"))
+
+	change, err := cache.RecordKoiosSource(
+		"preview", "https://koios.example/api/v1", time.Now().UTC(),
+	)
+	require.NoError(t, err)
+	assert.True(t, change.Changed)
+	assert.Equal(t, koiosBaseURLs["preview"], change.Previous,
+		"an unattributed cache is attributed to the built-in public root")
+	assert.Zero(t, countOracleRows(t, cache, "preview"),
+		"public-host rows must not be adopted by a custom root")
+}
+
+// TestPendingKoiosSourceChangeMatchesRecord pins the two against each other.
+// The probe gate reads Pending and the destruction happens in Record, so a
+// disagreement would either skip the probe before a discard or demand one
+// where nothing changes.
+func TestPendingKoiosSourceChangeMatchesRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		recorded string
+		next     string
+		want     bool
+	}{
+		{"unrecorded, public root", "", koiosBaseURLs["preview"], false},
+		{"unrecorded, custom root", "", "https://koios.example/api/v1", true},
+		{"recorded, same root", "https://a.example/api/v1", "https://a.example/api/v1", false},
+		{"recorded, different root", "https://a.example/api/v1", "https://b.example/api/v1", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cache := newSourceTestCache(t)
+			if tc.recorded != "" {
+				_, err := cache.RecordKoiosSource(
+					"preview", tc.recorded, time.Now().UTC(),
+				)
+				require.NoError(t, err)
+			}
+			pending, _, err := cache.PendingKoiosSourceChange("preview", tc.next)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, pending)
+
+			seedOracleRows(t, cache, "preview")
+			change, err := cache.RecordKoiosSource(
+				"preview", tc.next, time.Now().UTC(),
+			)
+			require.NoError(t, err)
+			assert.Equal(t, pending, change.Changed,
+				"PendingKoiosSourceChange must predict what RecordKoiosSource does")
+		})
+	}
+}
+
+// TestRecordKoiosSourceProbeFailureKeepsCache is the cost guard on the
+// destructive path: a mistyped or unreachable new host must not discard the
+// old host's rows, because recovering from that costs a full historical
+// refetch — the expense that made the override worth guarding at all.
+func TestRecordKoiosSourceProbeFailureKeepsCache(t *testing.T) {
+	dead := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}),
+	)
+	defer dead.Close()
+
+	cache := newSourceTestCache(t)
+	_, err := cache.RecordKoiosSource(
+		"preview", "https://koios.example/api/v1", time.Now().UTC(),
+	)
+	require.NoError(t, err)
+	seedOracleRows(t, cache, "preview")
+	before := countOracleRows(t, cache, "preview")
+	require.Positive(t, before)
+
+	// httptest serves plain HTTP, so this needs the insecure escape hatch.
+	client, err := NewKoiosClient("preview", "", dead.URL+"/api/v1", true)
+	require.NoError(t, err)
+
+	err = recordKoiosSource(
+		context.Background(), cache, "preview", client,
+		slog.New(slog.DiscardHandler),
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "did not answer")
+	assert.Equal(t, before, countOracleRows(t, cache, "preview"),
+		"a host that does not answer must not cost the cached reference data")
+
+	got, _, err := cache.GetKoiosSource("preview")
+	require.NoError(t, err)
+	assert.Equal(t, "https://koios.example/api/v1", got,
+		"the source must not move to a host that never answered")
+}
+
+// TestRecordKoiosSourceProbeSuccessSwitches is the other half: once the new
+// host answers, the switch goes through and the old oracle's rows go with it.
+func TestRecordKoiosSourceProbeSuccessSwitches(t *testing.T) {
+	live := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/v1/tip" {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write([]byte(`[{"epoch_no":42}]`))
+		}),
+	)
+	defer live.Close()
+
+	cache := newSourceTestCache(t)
+	_, err := cache.RecordKoiosSource(
+		"preview", "https://koios.example/api/v1", time.Now().UTC(),
+	)
+	require.NoError(t, err)
+	seedOracleRows(t, cache, "preview")
+	require.Positive(t, countOracleRows(t, cache, "preview"))
+
+	client, err := NewKoiosClient("preview", "", live.URL+"/api/v1", true)
+	require.NoError(t, err)
+	require.NoError(t, recordKoiosSource(
+		context.Background(), cache, "preview", client,
+		slog.New(slog.DiscardHandler),
+	))
+	assert.Zero(t, countOracleRows(t, cache, "preview"))
+
+	got, _, err := cache.GetKoiosSource("preview")
+	require.NoError(t, err)
+	assert.Equal(t, client.ResolvedBaseURL(), got)
+}
+
+// TestRecordKoiosSourceUnchangedMakesNoRequest keeps the probe off the
+// ordinary start. Every run would otherwise pay a network round-trip before
+// doing anything, and a transient blip on the common path would fail startup
+// for a source that did not change.
+func TestRecordKoiosSourceUnchangedMakesNoRequest(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			_, _ = w.Write([]byte(`[{"epoch_no":42}]`))
+		}),
+	)
+	defer srv.Close()
+
+	cache := newSourceTestCache(t)
+	client, err := NewKoiosClient("preview", "", srv.URL+"/api/v1", true)
+	require.NoError(t, err)
+
+	// First call switches away from the attributed public root and probes.
+	require.NoError(t, recordKoiosSource(
+		context.Background(), cache, "preview", client,
+		slog.New(slog.DiscardHandler),
+	))
+	require.Equal(t, int32(1), hits.Load())
+
+	// Second call changes nothing, so it must not probe again.
+	require.NoError(t, recordKoiosSource(
+		context.Background(), cache, "preview", client,
+		slog.New(slog.DiscardHandler),
+	))
+	assert.Equal(t, int32(1), hits.Load(),
+		"an unchanged source must not cost a request")
 }

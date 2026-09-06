@@ -1397,6 +1397,52 @@ var koiosSourcedTables = []string{
 	"check_mismatches",
 }
 
+// koiosSourceChanged decides whether network's cached rows came from a
+// different oracle than baseURL, given the recorded root (present only when
+// recorded is true).
+//
+// The unrecorded case is the subtle one. A cache written before koios_source
+// existed is unattributed, but "unattributed" is not "unknown": no build
+// without this column had an override to apply, so those rows can only have
+// come from the built-in public root. Claiming them for whatever root is in
+// use now is only correct when that root is the same one. A first run after
+// upgrading that also points at a self-hosted host would otherwise adopt the
+// public host's rows as its own — mixing two oracles on the exact path this
+// guard exists to close.
+func koiosSourceChanged(network, previous, baseURL string, recorded bool) bool {
+	return attributedKoiosSource(network, previous, recorded) != baseURL
+}
+
+// attributedKoiosSource is the root network's existing rows are taken to have
+// come from: the recorded one, or the built-in public root when nothing was
+// recorded. Reporting the attribution rather than an empty string is what
+// lets the invalidation log name the oracle whose rows were discarded.
+func attributedKoiosSource(network, previous string, recorded bool) string {
+	if !recorded {
+		return koiosBaseURLs[network]
+	}
+	return previous
+}
+
+// PendingKoiosSourceChange reports whether calling RecordKoiosSource with
+// baseURL would discard network's cached rows, without changing anything.
+//
+// It exists so a caller can confirm the new oracle actually answers before
+// anything is destroyed: a mistyped host would otherwise cost a full
+// historical refetch to recover from. RecordKoiosSource re-evaluates the same
+// rule inside its transaction, so a racing writer cannot turn a "no" here into
+// a silent mix.
+func (c *Cache) PendingKoiosSourceChange(
+	network, baseURL string,
+) (bool, string, error) {
+	previous, recorded, err := c.GetKoiosSource(network)
+	if err != nil {
+		return false, "", err
+	}
+	attributed := attributedKoiosSource(network, previous, recorded)
+	return attributed != baseURL, attributed, nil
+}
+
 // KoiosSourceChange describes what RecordKoiosSource found and did.
 type KoiosSourceChange struct {
 	// Previous is the API root previously recorded for this network, empty
@@ -1421,10 +1467,12 @@ type KoiosSourceChange struct {
 //
 // Invalidation is deliberately destructive rather than advisory: the rows are
 // a cache of another system's answers, rebuildable by fetching again, and any
-// weaker response leaves the mixed-oracle report reachable. baseURL must
-// already be redacted (KoiosClient.ResolvedBaseURL) — a credential has no
-// business in the cache file, and comparing redacted roots correctly treats a
-// rotated key against the same host as the same oracle.
+// weaker response leaves the mixed-oracle report reachable. Callers gate it on
+// a reachable endpoint (see PendingKoiosSourceChange) so a mistyped host does
+// not cost a refetch. baseURL must already be redacted
+// (KoiosClient.ResolvedBaseURL) — a credential has no business in the cache
+// file, and comparing redacted roots correctly treats a rotated key against
+// the same host as the same oracle.
 func (c *Cache) RecordKoiosSource(
 	network, baseURL string,
 	now time.Time,
@@ -1442,16 +1490,10 @@ func (c *Cache) RecordKoiosSource(
 		network,
 	).Scan(&previous)
 	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		// First run against this network in this cache file. Nothing to
-		// invalidate — but a pre-existing row set from before this column
-		// existed is also unattributed, so it is claimed by the current
-		// source rather than discarded: it was fetched by a build that had no
-		// override to apply.
-	case err != nil:
+	case err != nil && !errors.Is(err, sql.ErrNoRows):
 		return change, fmt.Errorf("read koios source: %w", err)
-	case previous != baseURL:
-		change.Previous = previous
+	case koiosSourceChanged(network, previous, baseURL, err == nil):
+		change.Previous = attributedKoiosSource(network, previous, err == nil)
 		change.Changed = true
 		for _, table := range koiosSourcedTables {
 			// #nosec G202 -- table comes from koiosSourcedTables, a

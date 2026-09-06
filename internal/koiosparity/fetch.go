@@ -132,12 +132,34 @@ func classifyFetchErr(err error) error {
 // record of which oracle a run actually queried. An override that failed to
 // apply is otherwise invisible.
 func recordKoiosSource(
+	ctx context.Context,
 	cache *Cache,
-	network, resolvedBaseURL string,
+	network string,
+	koios *KoiosClient,
 	logger *slog.Logger,
 ) error {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	resolvedBaseURL := koios.ResolvedBaseURL()
+	// Confirm the new oracle answers before discarding the old one's rows.
+	// Recovering from a mistyped host would otherwise cost a full historical
+	// refetch — the cost that made this option worth guarding in the first
+	// place. Only a run that would actually discard pays for the probe, so
+	// the ordinary unchanged-source start makes no extra request.
+	pending, previous, err := cache.PendingKoiosSourceChange(
+		network, resolvedBaseURL,
+	)
+	if err != nil {
+		return fmt.Errorf("check koios source: %w", err)
+	}
+	if pending {
+		if _, err := koios.GetTipEpoch(ctx); err != nil {
+			return fmt.Errorf(
+				"koios source changed from %q to %q but the new host did not answer, so the cached reference data was left intact: %w",
+				previous, resolvedBaseURL, err,
+			)
+		}
 	}
 	change, err := cache.RecordKoiosSource(
 		network, resolvedBaseURL, time.Now().UTC(),
@@ -187,7 +209,7 @@ func Fetch(
 		return nil, err
 	}
 	if err := recordKoiosSource(
-		cache, cfg.Network, koios.ResolvedBaseURL(), logger,
+		ctx, cache, cfg.Network, koios, logger,
 	); err != nil {
 		return nil, err
 	}

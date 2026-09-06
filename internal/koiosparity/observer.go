@@ -208,12 +208,6 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 		_ = cache.Close()
 		return nil, fmt.Errorf("create koios client: %w", err)
 	}
-	if err := recordKoiosSource(
-		cache, cfg.Network, koios.ResolvedBaseURL(), cfg.Logger,
-	); err != nil {
-		_ = cache.Close()
-		return nil, err
-	}
 
 	return &Observer{
 		cfg:     cfg,
@@ -245,6 +239,16 @@ func (o *Observer) Start(ctx context.Context) error {
 	}
 	o.started = true
 	o.mu.Unlock()
+
+	// Recorded here rather than in NewObserver because a source change is
+	// gated on the new host answering, and that probe needs a context and a
+	// startup the caller can fail. Start is called exactly once per Observer
+	// and before any fetch, so the stamp still lands before the first row.
+	if err := recordKoiosSource(
+		ctx, o.cache, o.cfg.Network, o.koios, o.cfg.Logger,
+	); err != nil {
+		return err
+	}
 
 	latest, err := o.cfg.Source.GetLatestEpoch(ctx)
 	if err != nil {
