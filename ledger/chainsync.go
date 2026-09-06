@@ -4803,6 +4803,13 @@ func (ls *LedgerState) createGenesisBlock() error {
 			if err := ls.ensureGenesisConstitution(nil); err != nil {
 				return err
 			}
+			// Databases created before the committee was seeded reach
+			// only this branch, so the backfill has to run here too --
+			// a node already synced from genesis is exactly the one
+			// missing its committee rows.
+			if err := ls.ensureGenesisCommittee(nil); err != nil {
+				return err
+			}
 			return ls.ensureGenesisNetworkState()
 		}
 		// Check if genesis CBOR exists but with a different hash.
@@ -5051,6 +5058,13 @@ func (ls *LedgerState) createGenesisBlock() error {
 			return err
 		}
 
+		// The Conway genesis committee is seated from the Chang hard fork
+		// and any of its members not yet touched by a later UpdateCommittee
+		// action must be recognized for hot-key authorization/resignation.
+		if err := ls.ensureGenesisCommittee(txn); err != nil {
+			return err
+		}
+
 		return nil
 	})
 	return err
@@ -5092,6 +5106,112 @@ func (ls *LedgerState) ensureGenesisConstitution(txn *database.Txn) error {
 		hex.EncodeToString(genesisConstitution.PolicyHash),
 	)
 	return nil
+}
+
+// ensureGenesisCommittee seeds the Conway genesis Constitutional Committee
+// members from conway-genesis.json's committee section for any cold
+// credential that has no committee_member row yet.
+//
+// Only two paths ever write committee_member: UpdateCommittee enactment
+// (ledger/governance/enact.go) and Mithril snapshot import
+// (ledgerstate/import.go). Neither seeds the committee actually seated at the
+// Chang hard fork (blinklabs-io/dingo#3785), so an original genesis member
+// that no later UpdateCommittee has ever touched has no row at all, and any
+// operation on its cold credential -- hot-key authorization, resignation --
+// is rejected as "not a CC member" even though the real chain has recognized
+// it since genesis.
+//
+// Checking each credential against the existing (including soft-deleted) set
+// before inserting makes this safe to call on every startup: a credential a
+// later UpdateCommittee has since re-elected or removed already has a row, so
+// its real history is left alone instead of being reverted to genesis state.
+func (ls *LedgerState) ensureGenesisCommittee(txn *database.Txn) error {
+	conwayGenesis := ls.config.CardanoNodeConfig.ConwayGenesis()
+	if conwayGenesis == nil || len(conwayGenesis.Committee.Members) == 0 {
+		return nil
+	}
+	existing, err := ls.db.GetCommitteeMembersIncludeDeleted(txn)
+	if err != nil {
+		return fmt.Errorf("get existing committee members: %w", err)
+	}
+	seen := make(map[string]struct{}, len(existing))
+	for _, member := range existing {
+		seen[(models.CommitteeCredential{
+			CredentialTag: member.ColdCredentialTag,
+			Credential:    member.ColdCredHash,
+		}).Key()] = struct{}{}
+	}
+	newMembers := make([]*models.CommitteeMember, 0, len(conwayGenesis.Committee.Members))
+	for raw, expiry := range conwayGenesis.Committee.Members {
+		tag, hash, err := parseGenesisCommitteeCredential(raw)
+		if err != nil {
+			return fmt.Errorf("genesis committee credential %q: %w", raw, err)
+		}
+		key := (models.CommitteeCredential{
+			CredentialTag: tag,
+			Credential:    hash,
+		}).Key()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		newMembers = append(newMembers, &models.CommitteeMember{
+			ColdCredentialTag: tag,
+			ColdCredHash:      hash,
+			ExpiresEpoch:      uint64(expiry),
+			TermStartSlot:     0,
+			TermStartSlotSet:  true,
+			AddedSlot:         0,
+		})
+	}
+	if len(newMembers) == 0 {
+		return nil
+	}
+	// Sort by full cold credential identity so the auto-increment ID assigned
+	// by the DB is stable across nodes (Go map iteration is random).
+	slices.SortFunc(newMembers, func(a, b *models.CommitteeMember) int {
+		if cmp := bytes.Compare(a.ColdCredHash, b.ColdCredHash); cmp != 0 {
+			return cmp
+		}
+		return int(a.ColdCredentialTag) - int(b.ColdCredentialTag)
+	})
+	if err := ls.db.SetCommitteeMembers(newMembers, txn); err != nil {
+		return fmt.Errorf("set genesis committee members: %w", err)
+	}
+	ls.config.Logger.Info(
+		fmt.Sprintf(
+			"recorded %d Conway genesis committee member(s)",
+			len(newMembers),
+		),
+		"component", "ledger",
+	)
+	return nil
+}
+
+// parseGenesisCommitteeCredential decodes a conway-genesis.json committee
+// member map key, formatted as "keyHash-<hex>" or "scriptHash-<hex>" (see
+// gouroboros's common.Credential.UnmarshalJSON, which this mirrors for the
+// bare map-key string rather than a quoted JSON value).
+func parseGenesisCommitteeCredential(raw string) (uint8, []byte, error) {
+	var tag uint8
+	var hexPart string
+	switch {
+	case strings.HasPrefix(raw, "keyHash-"):
+		tag = lcommon.CredentialTypeAddrKeyHash
+		hexPart = raw[len("keyHash-"):]
+	case strings.HasPrefix(raw, "scriptHash-"):
+		tag = lcommon.CredentialTypeScriptHash
+		hexPart = raw[len("scriptHash-"):]
+	default:
+		return 0, nil, errors.New("unknown credential prefix")
+	}
+	hash, err := hex.DecodeString(hexPart)
+	if err != nil {
+		return 0, nil, fmt.Errorf("decode credential hash: %w", err)
+	}
+	if len(hash) != 28 {
+		return 0, nil, errors.New("credential hash is wrong length")
+	}
+	return tag, hash, nil
 }
 
 // ensureGenesisNetworkState initializes the slot-0 treasury/reserves baseline
