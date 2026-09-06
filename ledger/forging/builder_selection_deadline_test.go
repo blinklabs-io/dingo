@@ -16,6 +16,8 @@ package forging
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -26,6 +28,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -269,4 +272,87 @@ func TestForgeWithCustomBuilderIgnoresTheSelectionDeadline(t *testing.T) {
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 	require.Equal(t, 1, builder.calls)
 	require.Equal(t, 1, broadcaster.calls)
+}
+
+// advancingSlotClock crosses a slot boundary between the leader check and
+// the deadline computation: the first reading is the slot being forged, and
+// every later one is the slot after it. That is the ordinary way a forge
+// runs out of slot -- the leader check, the Leios payload and the KES
+// update all happen first -- and it is the only way the clock can disagree
+// with the slot under construction, because the forge slot is that same
+// clock's first answer.
+type advancingSlotClock struct {
+	slot              uint64
+	chainTipSlot      uint64
+	slotsPerKESPeriod uint64
+	// nextSlotEnd is the boundary the clock reports once it has already
+	// left the forged slot: the end of the *following* slot, which is
+	// budget this forge does not have.
+	nextSlotEnd time.Time
+	calls       int
+}
+
+func (c *advancingSlotClock) CurrentSlot() (uint64, error) {
+	c.calls++
+	if c.calls == 1 {
+		return c.slot, nil
+	}
+	return c.slot + 1, nil
+}
+
+func (c *advancingSlotClock) SlotsPerKESPeriod() uint64 {
+	return c.slotsPerKESPeriod
+}
+
+func (c *advancingSlotClock) ChainTipSlot() uint64 { return c.chainTipSlot }
+
+func (c *advancingSlotClock) NextSlotTime() (time.Time, error) {
+	return c.nextSlotEnd, nil
+}
+
+func (c *advancingSlotClock) UpstreamTipSlot() uint64 { return 0 }
+
+func (c *advancingSlotClock) UpstreamSyncStatus() (uint64, bool) {
+	return 0, false
+}
+
+// TestForgeDropsTheSelectionDeadlineWhenTheClockHasLeftTheSlot pins the
+// guard that makes the boundary answer trustworthy. NextSlotTime is derived
+// from the clock's own current slot, so once the clock has moved on it
+// describes the *next* slot's end -- a budget the block being forged does
+// not have, and one long enough to keep selection and its retries running
+// well past the slot they belong to. Reading the clock slot first and
+// treating a mismatch as "the slot is over" is what keeps that from
+// happening; without it a late forge is handed a full extra slot.
+func TestForgeDropsTheSelectionDeadlineWhenTheClockHasLeftTheSlot(
+	t *testing.T,
+) {
+	block := newForgerTestBlock(10, 2)
+	builder := &constraintRecordingBuilder{block: block, cbor: block.cbor}
+	clock := &advancingSlotClock{
+		slot:              10,
+		chainTipSlot:      9,
+		slotsPerKESPeriod: 100,
+		nextSlotEnd:       time.Now().Add(time.Hour),
+	}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		SlotClock:        clock,
+		PromRegistry:     prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	require.Len(t, builder.constraints, 1)
+	require.True(
+		t,
+		builder.constraints[0].deadline.IsZero(),
+		"a slot the clock has already left leaves no selection budget, "+
+			"so the next slot's boundary must not become this slot's deadline",
+	)
 }

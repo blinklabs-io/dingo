@@ -19,6 +19,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -274,9 +275,10 @@ func TestForgeKeepsLeiosDataWhenParentIsUnchanged(t *testing.T) {
 		failOnce: true,
 	}
 
+	logs := &strings.Builder{}
 	forger, err := NewBlockForger(ForgerConfig{
 		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Logger:           slog.New(slog.NewJSONHandler(logs, nil)),
 		Credentials:      setupTestCredentials(t),
 		LeaderChecker:    forgerTestLeader{},
 		BlockBuilder:     builder,
@@ -296,6 +298,13 @@ func TestForgeKeepsLeiosDataWhenParentIsUnchanged(t *testing.T) {
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 	require.Len(t, builder.seen, 2)
 	require.NotNil(t, builder.seen[1].Certificate)
+	require.NotContains(
+		t,
+		logs.String(),
+		"leios payload re-resolved",
+		"an unchanged parent is not a re-resolution: reporting one would "+
+			"make the warning that flags a real parent swap unreadable",
+	)
 	require.Equal(
 		t,
 		builder.seen[0].Certificate,
