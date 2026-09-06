@@ -371,3 +371,18 @@ func TestPeerSharingReplyEmitsResolvableLiterals(t *testing.T) {
 		)
 	}
 }
+
+func TestPeerSharingReplyCollectsRequestedValidAddresses(t *testing.T) {
+	o := newOuroboros(OuroborosConfig{})
+
+	addrs := o.peerSharingReplyAddresses([]opeersharing.PeerAddress{
+		{IP: net.ParseIP("10.0.0.1"), Port: 3001},
+		mkPeerAddr("44.0.0.1", 3001),
+		mkPeerAddr("2001:4860:4860::8888", 3002),
+	}, 2)
+
+	require.Equal(t, []string{
+		"44.0.0.1:3001",
+		"[2001:4860:4860::8888]:3002",
+	}, addrs)
+}

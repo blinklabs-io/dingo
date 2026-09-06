@@ -102,12 +102,26 @@ func (o *Ouroboros) peersharingShareRequest(
 			)
 			continue
 		}
+		if !peergov.IsRoutableIP(ip) {
+			o.config.Logger.Debug(
+				"peer address is not globally routable, skipping",
+				"address", address,
+			)
+			continue
+		}
 		portNum, err := strconv.ParseUint(port, 10, 16)
 		if err != nil {
 			o.config.Logger.Debug(
 				"failed to parse peer port, skipping",
 				"address", address,
 				"error", err,
+			)
+			continue
+		}
+		if portNum == 0 {
+			o.config.Logger.Debug(
+				"peer address has no usable port, skipping",
+				"address", address,
 			)
 			continue
 		}
@@ -169,21 +183,10 @@ func (o *Ouroboros) RequestPeersFromPeer(peer *peergov.Peer) []string {
 }
 
 // peerSharingReplyAddresses converts a peer-sharing reply into peer-governor
-// candidate addresses.
-//
-// At most `requested` entries are examined. A reply longer than that violates
-// the request, and walking it would let a remote turn one 5-peer request into
-// an arbitrary number of peergov.AddPeer calls, each of which resolves the
-// address (a DNS lookup for a non-literal host) and scans the peer list.
-// Bounding the entries examined, rather than collecting `requested` valid ones
-// from an unbounded reply, keeps the work constant; a peer that pads its reply
-// with unusable entries spends its own slots doing so.
-//
-// Entries that cannot serve as a peer address are dropped. peergov.AddPeer
-// applies the same routability policy, but it treats a host that does not
-// parse as an IP as a routable hostname, so a malformed entry rendered as
-// "<nil>:3001" would be accepted there and sent to a DNS lookup. Rejecting it
-// here keeps every emitted candidate an IP literal.
+// candidate addresses. The reply is bounded to the request so a remote cannot
+// amplify one request into unbounded peer-admission work. Invalid, private,
+// reserved, and zero-port addresses are discarded before they reach DNS or
+// peergov.
 func (o *Ouroboros) peerSharingReplyAddresses(
 	peers []opeersharing.PeerAddress,
 	requested int,
@@ -191,18 +194,8 @@ func (o *Ouroboros) peerSharingReplyAddresses(
 	if requested <= 0 {
 		return nil
 	}
-	if len(peers) > requested {
-		o.config.Logger.Debug(
-			"peer sharing reply exceeds requested count, truncating",
-			"requested", requested,
-			"received", len(peers),
-		)
-		peers = peers[:requested]
-	}
-	addrs := make([]string, 0, len(peers))
+	addrs := make([]string, 0, min(len(peers), requested))
 	for _, p := range peers {
-		// Reject before net.IP.String(), which renders a nil or
-		// wrong-length address as "<nil>" or "?<hex>" rather than failing.
 		if p.IP.To16() == nil {
 			o.config.Logger.Debug(
 				"shared peer has no usable IP address, skipping",
@@ -227,6 +220,9 @@ func (o *Ouroboros) peerSharingReplyAddresses(
 		addr := net.JoinHostPort(p.IP.String(), strconv.Itoa(int(p.Port)))
 		addrs = append(addrs, addr)
 		o.config.Logger.Debug("collected peer from sharing", "addr", addr)
+		if len(addrs) == requested {
+			break
+		}
 	}
 	return addrs
 }
