@@ -47,6 +47,7 @@ type UtxorpcLedgerState interface {
 		inclusive bool,
 	) (*chain.ChainIterator, error)
 	GetCurrentPParams() lcommon.ProtocolParameters
+	GetCurrentPParamsForReporting() lcommon.ProtocolParameters
 	GetEpochs() ([]models.Epoch, error)
 	GetIntersectPoint(points []ocommon.Point) (*ocommon.Point, error)
 	GetPParamsForEpoch(

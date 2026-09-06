@@ -934,8 +934,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 			ConnClosedFunc:      n.handleConnManagerClosed,
 		},
 	)
-	n.connManagerRecycleSubId = n.eventBus.SubscribeFunc(
-		connmanager.ConnectionRecycleRequestedEventType,
+	n.connManagerRecycleSubId = n.subscribeConnectionRecycleRequests(
 		n.connManager.HandleConnectionRecycleRequestedEvent,
 	)
 

@@ -70,12 +70,17 @@ type EpochInput struct {
 type EpochOutput struct {
 	UpdatedPParams    lcommon.ProtocolParameters
 	PParamsChanged    bool
-	CostModelsChanged bool
 	EnactedCount      int
 	RatifiedCount     int
 	ExpiredCount      int
 	OrphanedCount     int
 	HardForkInitiated bool
+	// PlutusV2CostModelWritten is true when any proposal enacted this tick
+	// explicitly specified a PlutusV2 cost model, per
+	// EnactmentResult.PlutusV2CostModelWritten. See that field's doc
+	// comment for why this must come from the enacted update itself rather
+	// than from comparing UpdatedPParams's value before and after.
+	PlutusV2CostModelWritten bool
 }
 
 // ProcessEpoch runs the ordered governance tick at an epoch
@@ -166,11 +171,13 @@ func ProcessEpoch(
 		if res.PParamsChanged {
 			out.UpdatedPParams = res.UpdatedPParams
 			out.PParamsChanged = true
-			out.CostModelsChanged = out.CostModelsChanged || res.CostModelsChanged
 			if lcommon.GovActionType(proposal.ActionType) ==
 				lcommon.GovActionTypeHardForkInitiation {
 				out.HardForkInitiated = true
 			}
+		}
+		if res.PlutusV2CostModelWritten {
+			out.PlutusV2CostModelWritten = true
 		}
 	}
 	enactProposal := func(

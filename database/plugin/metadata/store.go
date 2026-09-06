@@ -1945,9 +1945,10 @@ type MetadataStore interface {
 		txn types.Txn,
 	) ([]byte, error)
 
-	// GetLatestBlockNonce returns the block_nonce row with the highest slot.
+	// GetLatestBlockNonce returns the block_nonce row with the highest slot,
+	// using its ID to preserve application order for same-slot rows.
 	// block_nonce is written in the same metadata transaction as a block's
-	// UTxO/certificate effects and the ledger tip, so the maximum slot is the
+	// UTxO/certificate effects and the ledger tip, so the latest row is the
 	// authoritative high-water mark of durably applied ledger state. The bool
 	// is false (with a zero row and nil error) when the table is empty.
 	GetLatestBlockNonce(
@@ -2218,6 +2219,18 @@ type MetadataStore interface {
 		string, // snapshotType
 		types.Txn,
 	) (*models.RewardSnapshot, error)
+
+	// SaveRewardSeedFailure records why an imported reward basis could not be
+	// persisted, allowing the later reward boundary to report the durable cause.
+	SaveRewardSeedFailure(uint64, string, string, uint64, types.Txn) error
+
+	// GetRewardSeedFailure returns the durable imported reward-basis failure,
+	// or an empty string when no failure was recorded.
+	GetRewardSeedFailure(uint64, string, types.Txn) (string, error)
+
+	// DeleteRewardSeedFailure clears a failure after successful seeding or when
+	// the corresponding imported snapshot is rolled back.
+	DeleteRewardSeedFailure(uint64, string, types.Txn) error
 
 	// DeleteProvisionalRewardSnapshot deletes a non-authoritative reward
 	// snapshot for an epoch and type. Authoritative boundary state is retained.

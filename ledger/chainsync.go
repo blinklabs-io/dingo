@@ -186,6 +186,15 @@ var ErrRollbackExceedsMithrilBoundary = errors.New(
 	"rollback exceeds Mithril trust boundary",
 )
 
+// ErrNoAppliedAncestorBelowContestedSlot reports that a rollback target shares
+// the applied tip's slot with a different hash and no applied ancestor below
+// that slot could be found to rewind to. The contested slot's effects cannot be
+// truncated in place, so the rollback fails loudly rather than reporting a
+// repair that left the UTxO set diverged.
+var ErrNoAppliedAncestorBelowContestedSlot = errors.New(
+	"no applied ancestor below contested slot",
+)
+
 type peerHeaderRecord struct {
 	// event carries only the metadata needed to reconstruct a ChainsyncEvent.
 	// Production records leave BlockHeader nil and decode headerCbor only when
@@ -5876,7 +5885,7 @@ func (ls *LedgerState) processEpochRollover(
 	if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
 		updateQuorum = shelleyGenesis.UpdateQuorum
 	}
-	newPParams, err := ls.db.ComputeAndApplyPParamUpdates(
+	newPParams, plutusV2CostModelWritten, err := ls.db.ComputeAndApplyPParamUpdates(
 		epochStartSlot,
 		currentEpoch.EpochId+1, // Target epoch for updates
 		currentEra.Id,
@@ -5884,10 +5893,25 @@ func (ls *LedgerState) processEpochRollover(
 		ownedPParams,
 		currentEra.DecodePParamsUpdateFunc,
 		currentEra.PParamsUpdateFunc,
+		currentEra.ParamUpdateHasPlutusV2CostModelFunc,
 		txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("apply pparam updates: %w", err)
+	}
+	if plutusV2CostModelWritten {
+		// The classic Shelley-style update system, not CIP-1694 governance,
+		// carried a real PlutusV2 cost model this epoch -- the same real-data
+		// confirmation the governance-enactment branch below records, just
+		// from the pre-Conway path (this is how real mainnet actually
+		// received its PlutusV2 cost model, well before Conway governance
+		// existed). See blinklabs-io/dingo#3825's PR review.
+		if err := ls.markRealV2CostModelObserved(
+			currentEpoch.EpochId+1, txn,
+		); err != nil {
+			return nil, err
+		}
+		result.RealV2CostModelObserved = true
 	}
 
 	// Apply the embedded Shelley POOLREAP transition: refund the deposits of
@@ -5967,16 +5991,13 @@ func (ls *LedgerState) processEpochRollover(
 				"persist post-enactment pparams: %w", err,
 			)
 		}
-		// A real on-chain cost-model update takes precedence over the
-		// hard-fork fallback, including when governance happens to publish
-		// the same values as the fallback.
-		if govOut.CostModelsChanged {
-			result.RealV2CostModelObserved = true
-			if err := ls.db.SetSyncState(
-				syntheticV2CostModelSyncKey, "false", txn,
+		if govOut.PlutusV2CostModelWritten {
+			if err := ls.markRealV2CostModelObserved(
+				currentEpoch.EpochId+1, txn,
 			); err != nil {
-				return nil, fmt.Errorf("persist synthetic V2 marker: %w", err)
+				return nil, err
 			}
+			result.RealV2CostModelObserved = true
 		}
 	}
 	result.NewCurrentPParams = newPParams

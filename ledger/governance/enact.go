@@ -53,9 +53,19 @@ type EnactmentContext struct {
 // the in-memory protocol parameters (ParameterChange, HardForkInitiation).
 // The caller is responsible for persisting UpdatedPParams via SetPParams.
 type EnactmentResult struct {
-	UpdatedPParams    lcommon.ProtocolParameters
-	PParamsChanged    bool
-	CostModelsChanged bool
+	UpdatedPParams lcommon.ProtocolParameters
+	PParamsChanged bool
+	// PlutusV2CostModelWritten is true when the enacted ParamUpdate itself
+	// explicitly specified a PlutusV2 cost model (map key 1), independent of
+	// what value it wrote. Checking the enacted update's own map -- rather
+	// than comparing the merged result's value before and after -- is the
+	// only correct signal here: HardForkBabbage's synthetic default
+	// (ledger/eras/babbage.go) is the real, canonical mainnet PlutusV2 cost
+	// model, so a real governance enactment writing that exact value is the
+	// common case on any real network, not a rare coincidence a
+	// value-comparison could dismiss as "unchanged, therefore not written."
+	// See blinklabs-io/dingo#3825's PR review.
+	PlutusV2CostModelWritten bool
 }
 
 // EnactProposal applies the side effects of a ratified governance
@@ -90,8 +100,9 @@ func EnactProposal(
 		}
 		result.UpdatedPParams = updated
 		result.PParamsChanged = true
-		model, ok := a.ParamUpdate.CostModels[1]
-		result.CostModelsChanged = ok && model != nil
+		if _, ok := a.ParamUpdate.CostModels[1]; ok {
+			result.PlutusV2CostModelWritten = true
+		}
 
 	case *gdijkstra.DijkstraParameterChangeGovAction:
 		updated, err := ctx.UpdateFn(ctx.PParams, a.ParamUpdate)
@@ -100,8 +111,9 @@ func EnactProposal(
 		}
 		result.UpdatedPParams = updated
 		result.PParamsChanged = true
-		model, ok := a.ParamUpdate.CostModels[1]
-		result.CostModelsChanged = ok && model != nil
+		if _, ok := a.ParamUpdate.CostModels[1]; ok {
+			result.PlutusV2CostModelWritten = true
+		}
 
 	case *lcommon.HardForkInitiationGovAction:
 		updated, err := setProtocolVersion(
@@ -471,17 +483,24 @@ func applyUpdateCommittee(
 	a *lcommon.UpdateCommitteeGovAction,
 	termStartSlot uint64,
 ) error {
-	removeCredentials := make([]models.CommitteeCredential, 0, len(a.Credentials))
+	removeCredentials := make(
+		[]models.CommitteeCredential,
+		0,
+		len(a.Credentials),
+	)
 	for _, c := range a.Credentials {
 		credentialTag, err := models.CredentialTagFromUint(c.CredType)
 		if err != nil {
 			return fmt.Errorf("remove member credential: %w", err)
 		}
 		hash := c.Credential
-		removeCredentials = append(removeCredentials, models.CommitteeCredential{
-			CredentialTag: credentialTag,
-			Credential:    hash[:],
-		})
+		removeCredentials = append(
+			removeCredentials,
+			models.CommitteeCredential{
+				CredentialTag: credentialTag,
+				Credential:    hash[:],
+			},
+		)
 	}
 	if err := ctx.DB.SoftDeleteCommitteeMembers(
 		removeCredentials, ctx.Slot, ctx.Txn,

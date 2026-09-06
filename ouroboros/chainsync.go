@@ -1106,6 +1106,16 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			BlockNumber: v.BlockNumber(),
 		}
 		if ingressEligible {
+			// Update the tracked tip before synchronous chain selection. Genesis
+			// corroboration can select this peer from the callback, and the
+			// resulting switch must see a delivered tip.
+			if o.chainsyncState != nil {
+				o.chainsyncState.UpdateClientTipWithoutDedup(
+					ctx.ConnectionId,
+					point,
+					tip,
+				)
+			}
 			peerTipUpdate := chainselection.PeerTipUpdateEvent{
 				ConnectionId: ctx.ConnectionId,
 				Tip:          tip,
@@ -1145,17 +1155,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		isNew := true
 		if o.chainsyncState != nil {
 			if applyEligible {
-				isNew = o.chainsyncState.UpdateClientTip(
-					ctx.ConnectionId,
-					point,
-					tip,
-				)
-			} else {
-				o.chainsyncState.UpdateClientTipWithoutDedup(
-					ctx.ConnectionId,
-					point,
-					tip,
-				)
+				isNew = o.chainsyncState.RecordHeader(ctx.ConnectionId, point)
 			}
 		}
 		if ingressEligible && o.chainsyncState != nil {
