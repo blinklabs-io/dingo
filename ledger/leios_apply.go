@@ -608,7 +608,12 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 				) {
 					continue
 				}
-				ls.leiosBackfill.awaitFetch(ctx, r, poll)
+				ls.leiosBackfill.awaitFetch(
+					ctx,
+					r,
+					poll,
+					leiosBackfillMaxWait,
+				)
 			}
 		}
 	}
@@ -633,6 +638,13 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// Blocking references: one shared diffusion window for the whole batch,
 	// with an active by-point fetch dispatched up front for each one.
 	ls.awaitEndorserBlocks(ctx, blockingWait, timeout, poll)
+	// CIP path only: application reads these references and nothing re-applies
+	// an endorser block that lands after the batch, so a fetch still in flight
+	// when the window elapsed gets a bounded grace to finish. See
+	// awaitInFlightEndorserFetches.
+	if !certDrivenHistorical {
+		ls.awaitInFlightEndorserFetches(ctx, blockingWait, timeout, poll)
+	}
 	// Musashi path: a certified closure is mandatory, so each required endorser
 	// block still missing after the diffusion waits gets a bounded retry across
 	// the connected peers rather than the single attempt per pipeline restart it
@@ -738,9 +750,10 @@ func (ls *LedgerState) awaitEndorserBlocks(
 		) {
 			continue
 		}
-		// The fetch is bound to ctx, not to the wait window, so an endorser
-		// block that arrives just after the window still lands in the cache
-		// for whatever needs it next instead of being abandoned.
+		// The fetch is bound to ctx, not to the wait window, so a fetch that
+		// outlives the window is not abandoned. On its own that is not enough
+		// for the CIP path -- see awaitInFlightEndorserFetches, which is what
+		// makes a late fetch actually reach this batch's application.
 		if ls.leiosBackfill != nil {
 			ls.leiosBackfill.spawn(ctx, r)
 		}
@@ -748,6 +761,64 @@ func (ls *LedgerState) awaitEndorserBlocks(
 		go func(r leiosEbRef) {
 			defer wg.Done()
 			ls.waitForEndorserBlock(ctx, r.slot, r.hash, timeout, poll)
+		}(r)
+	}
+	wg.Wait()
+}
+
+// awaitInFlightEndorserFetches gives this batch's own by-point fetches a
+// bounded chance to finish after the diffusion window has elapsed, for
+// references whose absence would otherwise be permanent.
+//
+// It exists because the diffusion window and the fetch are different clocks.
+// The window bounds how long to wait for the network to PUSH an endorser block
+// to us; it says nothing about how long our own PULL of it takes. The wait
+// dispatches that pull up front, so when the window expires the fetch is often
+// still in flight and moments from completing.
+//
+// That distinction only matters where nothing re-reads the endorser block
+// later. On the certificate-driven path a missing closure is mandatory and is
+// retried by fetchMissingRequired, and an announcement this batch does not read
+// is picked up by whichever later batch certifies it. On the CIP path neither
+// is true: application reads each ranking block's own announcement, nothing
+// re-applies an endorser block that lands afterwards, and the ranking block's
+// spends fall through to the interim trust path permanently. The previous
+// shape of this code got that right by accident -- it issued a SYNCHRONOUS
+// by-point fetch after the window, so however slow that fetch was it still
+// populated the cache before the batch was handed to ledgerProcessBlock.
+// Dispatching the fetch up front and asynchronously is strictly better for
+// latency but silently dropped that guarantee; this restores it explicitly and
+// with a bound the synchronous version never had.
+//
+// The grace is one further diffusion window, so it stays slot-denominated like
+// every other bound here and the worst case is two windows rather than the
+// unbounded-by-any-window synchronous fetch it replaces. It is usually not
+// reached at all: awaitFetch returns as soon as the endorser block is cached
+// or the in-flight marker clears, so a fetch that fails fast costs nothing.
+// The waits run concurrently, so k references cost one grace, not k.
+func (ls *LedgerState) awaitInFlightEndorserFetches(
+	ctx context.Context,
+	refs []leiosEbRef,
+	grace, poll time.Duration,
+) {
+	if ls.leiosBackfill == nil {
+		return
+	}
+	graceCtx, cancel := context.WithTimeout(ctx, grace)
+	defer cancel()
+	var wg sync.WaitGroup
+	for _, r := range refs {
+		if endorserBlockAvailableAt(
+			ls.config.EndorserBlockProvider,
+			r.hash.Bytes(),
+			r.slot,
+		) {
+			continue
+		}
+		wg.Add(1)
+		go func(r leiosEbRef) {
+			defer wg.Done()
+			ls.leiosBackfill.awaitFetch(graceCtx, r, poll, grace)
 		}(r)
 	}
 	wg.Wait()
@@ -1243,7 +1314,7 @@ func (b *leiosBackfiller) fetchOnce(
 	if _, loaded := b.inflight.LoadOrStore(key, struct{}{}); loaded {
 		// Another fetch for this endorser block is in flight; wait for it
 		// rather than starting a second one on the same connections.
-		b.awaitFetch(ctx, r, poll)
+		b.awaitFetch(ctx, r, poll, leiosBackfillMaxWait)
 		return nil
 	}
 	defer b.inflight.Delete(key)
@@ -1380,9 +1451,9 @@ const leiosBackfillMaxWait = 2 * time.Minute
 func (b *leiosBackfiller) awaitFetch(
 	ctx context.Context,
 	r leiosEbRef,
-	poll time.Duration,
+	poll, maxWait time.Duration,
 ) {
-	waitCtx, cancel := context.WithTimeout(ctx, leiosBackfillMaxWait)
+	waitCtx, cancel := context.WithTimeout(ctx, maxWait)
 	defer cancel()
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()

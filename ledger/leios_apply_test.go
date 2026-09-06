@@ -788,6 +788,7 @@ func TestLeiosBackfillerAwaitFetchDoesNotSkipFastOnDifferentSlotCompletion(
 			t.Context(),
 			leiosEbRef{slot: 200, hash: hash},
 			time.Millisecond,
+			leiosBackfillMaxWait,
 		)
 		close(done)
 	}()
