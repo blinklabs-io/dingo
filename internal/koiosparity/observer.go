@@ -289,6 +289,28 @@ func (o *Observer) Start(ctx context.Context) error {
 			}
 			o.mu.Unlock()
 		}
+
+		// Same shape, for the same reason, one column over: an epoch cached
+		// before protocol-parameter comparison existed has a
+		// koios_epoch_info row and a stored PASS, so neither
+		// GetEpochsNeedingCheck nor GetUncachedEpochs above ever returns it.
+		// Without this seed the epoch is never queued, processEpoch never
+		// runs, and fetchIfNeeded's fetchParamsIfNeeded gate is never
+		// reached — the parameter row would never arrive for exactly the
+		// caches that need backfilling.
+		missingParams, err := o.cache.GetEpochsMissingParams(
+			o.cfg.Network,
+			0,
+			throughEpoch,
+		)
+		if err != nil {
+			return fmt.Errorf("seed koiosparity observer backlog: %w", err)
+		}
+		o.mu.Lock()
+		for _, e := range missingParams {
+			o.pending[e] = struct{}{}
+		}
+		o.mu.Unlock()
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -551,10 +573,76 @@ func (o *Observer) fetchIfNeeded(ctx context.Context, epoch uint64) error {
 	if err := o.fetchPoolsIfNeeded(ctx, epoch); err != nil {
 		return err
 	}
+	if err := o.fetchParamsIfNeeded(ctx, epoch); err != nil {
+		return err
+	}
 	if !o.cfg.AccountsEnabled {
 		return nil
 	}
 	return o.fetchAccountsIfNeeded(ctx, epoch)
+}
+
+// fetchParamsIfNeeded fetches the /epoch_params reference row for epoch only
+// if the cache does not already hold one.
+//
+// It is gated on the parameter row itself rather than on GetUncachedEpochs,
+// for the same reason fetchAccountsIfNeeded is gated on account coverage: an
+// epoch cached before parameter comparison existed has a koios_epoch_info row
+// and no koios_epoch_params row, so GetUncachedEpochs reports it as cached and
+// fetchPoolsIfNeeded returns early. Without an independent gate the parameter
+// row would never arrive, and the epoch would either keep its stored PASS
+// having compared no parameters at all, or fail every check with a
+// koios_epoch_params dingo_db_missing that no fetch would ever resolve.
+//
+// Pre-staking epochs are skipped: Koios publishes no parameter row for them
+// (preprod /epoch_params returns [] for epochs 0 and 1), and fetchEpoch does
+// not request one either.
+func (o *Observer) fetchParamsIfNeeded(ctx context.Context, epoch uint64) error {
+	info, err := o.cache.GetEpochInfo(o.cfg.Network, epoch)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("get epoch info before params fetch: %w", err)
+	}
+	if info != nil && info.PreStaking {
+		return nil
+	}
+	existing, err := o.cache.GetEpochParams(o.cfg.Network, epoch)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("get epoch params: %w", err)
+	}
+	if existing != nil {
+		return nil
+	}
+	return o.fetchParamsWithRetry(ctx, epoch)
+}
+
+// fetchParamsWithRetry fetches and commits the /epoch_params row, retrying a
+// transient failure on the same schedule as the pool and account fetches. A
+// permanent Koios error is returned immediately, since retrying it only burns
+// quota.
+func (o *Observer) fetchParamsWithRetry(
+	ctx context.Context,
+	epoch uint64,
+) error {
+	var lastErr error
+	for attempt := 0; attempt < o.cfg.FetchRetryAttempts; attempt++ {
+		err := FetchEpochParams(ctx, o.koios, o.cache, o.cfg.Network, epoch)
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, ErrKoiosPermanent) {
+			return err
+		}
+		lastErr = err
+		if attempt == o.cfg.FetchRetryAttempts-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(o.cfg.FetchRetryDelay):
+		}
+	}
+	return fmt.Errorf("fetch epoch params %d: %w", epoch, lastErr)
 }
 
 // fetchPoolsIfNeeded fetches Koios pool/epoch-info/totals reference data for

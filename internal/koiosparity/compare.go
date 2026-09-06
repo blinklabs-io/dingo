@@ -15,10 +15,12 @@
 package koiosparity
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -64,14 +66,25 @@ const (
 	// (dingo #3099) report the three account dimensions #3097's merged
 	// comparison structurally cannot: CompareAccountEpoch only ever compares
 	// keys present in at least one side's row map, so an address absent from
-	// both (a confirmed-zero-reward account, since Koios never emits a row
-	// for zero reward) never enters that comparison at all, and #3097's
+	// both (a confirmed-zero-reward account, meaning Koios returned no rows
+	// for it at all — distinct from Koios returning a row whose amount is
+	// zero, which it does emit and which CategoryAcctZeroRewardRow covers)
+	// never enters that comparison at all, and #3097's
 	// address universe is a single flat list reused across every epoch in one
 	// run, with no per-epoch persisted snapshot to diff for lifecycle
 	// changes. All three are purely informational — descriptive state, not a
 	// Dingo-vs-Koios discrepancy — and must never affect Status (see
 	// DetermineStatus's dedicated no-op case for these three).
 	CategoryAcctZeroReward = "acct_zero_reward"
+	// CategoryAcctZeroRewardRow marks a reward row worth zero that exists on
+	// only one side. It corrects the premise stated above: Koios does emit a
+	// row for a zero reward — Preview publishes zero-earned leader rows —
+	// while Dingo writes no reward_account_output row at all in that case.
+	// Nothing is credited either way, so the two agree about every lovelace
+	// and the one-sided row is a representational difference, not a
+	// divergence. Purely informational, and reported rather than dropped so
+	// the difference stays visible.
+	CategoryAcctZeroRewardRow = "acct_zero_reward_row"
 	// CategoryAcctNewlyRegistered marks a stake address present in this
 	// stake epoch's Dingo-committed reward_account_output universe but
 	// absent from the previous stake epoch's — see
@@ -104,6 +117,7 @@ var AllCategories = []string{
 	CategoryAcctDuplicate,
 	CategoryAcctCoverageIncomplete,
 	CategoryAcctZeroReward,
+	CategoryAcctZeroRewardRow,
 	CategoryAcctNewlyRegistered,
 	CategoryAcctDeregistered,
 }
@@ -338,6 +352,350 @@ func CompareEpochTotals(
 	// Finding 3), not something for the parity checker to compute and paper over.
 
 	return out
+}
+
+// CompareEpochProtocolParams compares the protocol parameters Dingo has in
+// force for an epoch against Koios /epoch_params for that same epoch
+// (dingo #3931).
+//
+// Why this is its own comparison rather than more fields on
+// CompareEpochAggregates: a wrong protocol parameter is wedge-class. It
+// changes what the node accepts, so it produces the same outcome as a wrong
+// validation rule (the #3928 maxTxSize replay wedge) — a canonical block
+// rejected and the node off the chain — while every reward, stake and pool
+// comparison in this checker keeps reporting PASS right up to the rejection.
+// The execution-unit parameters are sharper still: maxTxExUnits,
+// maxBlockExUnits and the execution prices gate phase-2 validation, where a
+// divergence stays silent until a script transaction fails.
+//
+// Failure classification is deliberate, and the three cases are NOT the same
+// finding:
+//
+//   - A differing value is a real divergence: value_mismatch, i.e. FAIL. It
+//     is never downgraded by a grace window, because a parameter value is not
+//     something Dingo computes late — it is stored when the change is applied.
+//   - An unresolvable Dingo row means nothing was compared. That must not read
+//     as FAIL (no divergence was demonstrated) and must not read as PASS
+//     either, so it is dingo_db_missing (ERROR), softened to reference_lag
+//     inside the grace window after the epoch closed, exactly as
+//     CompareEpochAggregates treats an absent epoch_summary.
+//   - A failed Dingo read is dingo_db_error (ERROR), kept distinct from an
+//     absent row so an operator can tell a broken query from missing data.
+//
+// A missing Koios row is reported as "koios_epoch_params"/dingo_db_missing
+// rather than skipped, mirroring CompareEpochTotals' koios_totals handling: a
+// cache populated before this comparison existed must surface as incomplete
+// reference data, never produce a PASS that validated no parameters at all.
+//
+// Presence disagreement is a mismatch, not a skip. "" on either side means
+// "this era does not define this parameter", so both sides empty is agreement
+// and is skipped, but exactly one side empty is a disagreement about the
+// shape of the ledger state — which is precisely what an era-gating bug would
+// look like, and skipping it would let that bug read as PASS.
+//
+// Every numeric field is compared with rationalsEqual rather than string
+// equality. Dingo stores rationals exactly ("577/10000", "721/10000000") and
+// Koios publishes the same numbers as decimals, sometimes in exponent form
+// ("0.0577", "7.21e-05"); big.Rat parses all of these forms, so plain integer
+// parameters compare correctly through the same path and no field needs a
+// second code path. rationalsEqual returns false on anything that fails to
+// parse, so a malformed value on either side surfaces as a mismatch rather
+// than a false pass.
+//
+// Deliberately NOT compared, each verified against real preview data before
+// being excluded:
+//
+//   - coins_per_utxo_size. Koios reports Alonzo's per-word figure (34482 on
+//     preview epochs 0-2) where Dingo stores 4310; the two agree from Babbage
+//     onward. Which side is right for Alonzo needs its own investigation, so
+//     including it would attach an unexplained permanent FAIL to those epochs.
+//   - decentralisation and min_utxo_value. Neither exists in the Babbage or
+//     Conway parameter structs, so on every currently live era there is no
+//     Dingo-side value to compare.
+//   - The Conway governance parameters (pvt_*, dvt_*, committee_*,
+//     gov_action_*, drep_*, min_fee_ref_script_cost_per_byte). These are real
+//     and worth covering, but the reference chain available for verification
+//     is Babbage-era throughout, so their cross-side representation is
+//     unverified; adding them unverified is the failure mode this exclusion
+//     list exists to avoid.
+//
+// All three are classified in koiosCoverageMatrix so a report never implies
+// they were checked. Cost models ARE compared; see compareCostModels.
+//
+// epochEndTime is the actual epoch close time (KoiosEpochInfo.EpochEndTime);
+// zero means unknown, which disables the grace window.
+func CompareEpochProtocolParams(
+	network string,
+	epoch uint64,
+	koios *KoiosEpochParams,
+	dingoParams *DingoProtocolParams,
+	fetchErr error,
+	now time.Time,
+	graceHours int,
+	epochEndTime time.Time,
+) []CheckMismatch {
+	mismatch := func(field, dingoValue, koiosValue, category string) CheckMismatch {
+		return CheckMismatch{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      field,
+			DingoValue: dingoValue,
+			KoiosValue: koiosValue,
+			Category:   category,
+			CheckedAt:  now,
+		}
+	}
+
+	if fetchErr != nil {
+		return []CheckMismatch{mismatch(
+			"protocol_params",
+			fmt.Sprintf("error: %v", fetchErr),
+			"",
+			CategoryDBError,
+		)}
+	}
+	if koios == nil {
+		return []CheckMismatch{mismatch(
+			"koios_epoch_params",
+			"present",
+			"",
+			CategoryDBMissing,
+		)}
+	}
+	if dingoParams == nil {
+		cat := CategoryDBMissing
+		if graceHours > 0 && !epochEndTime.IsZero() &&
+			now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
+			cat = CategoryReferenceLag
+		}
+		return []CheckMismatch{mismatch("protocol_params", "", "present", cat)}
+	}
+
+	var out []CheckMismatch
+
+	// The era decides which validation rules run at all, so a disagreement
+	// about it is at least as serious as any individual parameter. Compared
+	// as an exact string: Dingo's era names (ledger/eras) and Koios's are the
+	// same words.
+	if dingoParams.EraName != koios.Era {
+		out = append(out, mismatch(
+			"pparams_era",
+			dingoParams.EraName,
+			koios.Era,
+			CategoryValueMismatch,
+		))
+	}
+
+	for _, f := range []struct {
+		field string
+		dingo string
+		koios string
+	}{
+		{"pparams_min_fee_a", dingoParams.MinFeeA, koios.MinFeeA},
+		{"pparams_min_fee_b", dingoParams.MinFeeB, koios.MinFeeB},
+		{"pparams_max_block_body_size", dingoParams.MaxBlockBodySize, koios.MaxBlockBodySize},
+		{"pparams_max_tx_size", dingoParams.MaxTxSize, koios.MaxTxSize},
+		{"pparams_max_block_header_size", dingoParams.MaxBlockHeaderSize, koios.MaxBlockHeaderSize},
+		{"pparams_key_deposit", dingoParams.KeyDeposit, koios.KeyDeposit},
+		{"pparams_pool_deposit", dingoParams.PoolDeposit, koios.PoolDeposit},
+		{"pparams_max_epoch", dingoParams.MaxEpoch, koios.MaxEpoch},
+		{"pparams_n_opt", dingoParams.NOpt, koios.NOpt},
+		{"pparams_a0", dingoParams.A0, koios.A0},
+		{"pparams_rho", dingoParams.Rho, koios.Rho},
+		{"pparams_tau", dingoParams.Tau, koios.Tau},
+		{"pparams_protocol_major", dingoParams.ProtocolMajor, koios.ProtocolMajor},
+		{"pparams_protocol_minor", dingoParams.ProtocolMinor, koios.ProtocolMinor},
+		{"pparams_min_pool_cost", dingoParams.MinPoolCost, koios.MinPoolCost},
+		{"pparams_price_mem", dingoParams.PriceMem, koios.PriceMem},
+		{"pparams_price_step", dingoParams.PriceStep, koios.PriceStep},
+		{"pparams_max_tx_ex_mem", dingoParams.MaxTxExMem, koios.MaxTxExMem},
+		{"pparams_max_tx_ex_steps", dingoParams.MaxTxExSteps, koios.MaxTxExSteps},
+		{"pparams_max_block_ex_mem", dingoParams.MaxBlockExMem, koios.MaxBlockExMem},
+		{"pparams_max_block_ex_steps", dingoParams.MaxBlockExSteps, koios.MaxBlockExSteps},
+		{"pparams_max_value_size", dingoParams.MaxValueSize, koios.MaxValueSize},
+		{"pparams_collateral_percentage", dingoParams.CollateralPercentage, koios.CollateralPercentage},
+		{"pparams_max_collateral_inputs", dingoParams.MaxCollateralInputs, koios.MaxCollateralInputs},
+	} {
+		if f.dingo == "" && f.koios == "" {
+			// Both sides agree the era does not define this parameter.
+			continue
+		}
+		if rationalsEqual(f.dingo, f.koios) {
+			continue
+		}
+		out = append(out, mismatch(
+			f.field,
+			f.dingo,
+			f.koios,
+			CategoryValueMismatch,
+		))
+	}
+
+	return append(out, compareCostModels(
+		dingoParams.CostModels,
+		koios.CostModels,
+		mismatch,
+	)...)
+}
+
+// compareCostModels compares the per-language Plutus operation prices.
+//
+// A mispriced operation is wedge-class in the same way a wrong ex-unit limit
+// is: it changes the budget a script transaction is charged, so the two sides
+// disagree about whether a transaction fits. Verified comparable on real
+// preview data — Dingo's stored CBOR decodes to map[uint][]int64 keyed 0 for
+// PlutusV1 and 1 for PlutusV2, Koios publishes the same arrays under those
+// names, and the epoch-107 models agree entry for entry across all 166 and
+// 175 entries. Note this is NOT the same thing as a Plutus budget divergence
+// in general: dingo #3935 is one where the cost models were identical, so
+// this comparison would not have caught it.
+//
+// Findings are reported per language and summarised rather than dumped: a
+// 166-integer array on each side of a mismatch row is unusable, while "entry
+// 42 = 197145 (1 of 166 entries differ)" names the operation to look at. The
+// first differing index is reported because cost-model arrays are positional,
+// so the index IS the operation's identity.
+//
+// koiosJSON is the canonical JSON written by canonicalCostModels; "" means
+// Koios priced no scripts. Text that will not parse is reported rather than
+// skipped, so a corrupt cached row can never turn the whole cost-model
+// comparison into a silent pass.
+func compareCostModels(
+	dingoModels map[string][]int64,
+	koiosJSON string,
+	mismatch func(field, dingoValue, koiosValue, category string) CheckMismatch,
+) []CheckMismatch {
+	var koiosModels map[string][]int64
+	if koiosJSON != "" {
+		if err := json.Unmarshal([]byte(koiosJSON), &koiosModels); err != nil {
+			return []CheckMismatch{mismatch(
+				"pparams_cost_models",
+				costModelSummary(dingoModels),
+				fmt.Sprintf("unparseable: %v", err),
+				CategoryValueMismatch,
+			)}
+		}
+	}
+	if len(dingoModels) == 0 && len(koiosModels) == 0 {
+		// Both sides agree this era prices no scripts.
+		return nil
+	}
+
+	languages := make([]string, 0, len(dingoModels)+len(koiosModels))
+	for language := range dingoModels {
+		languages = append(languages, language)
+	}
+	for language := range koiosModels {
+		if _, ok := dingoModels[language]; !ok {
+			languages = append(languages, language)
+		}
+	}
+	slices.Sort(languages)
+
+	var out []CheckMismatch
+	for _, language := range languages {
+		dingoModel, inDingo := dingoModels[language]
+		koiosModel, inKoios := koiosModels[language]
+		field := costModelFieldName(language)
+		switch {
+		case !inKoios:
+			// Dingo prices a language Koios does not, or vice versa below —
+			// a disagreement about which scripts can run at all.
+			out = append(out, mismatch(
+				field,
+				entryCount(dingoModel),
+				"",
+				CategoryValueMismatch,
+			))
+		case !inDingo:
+			out = append(out, mismatch(
+				field,
+				"",
+				entryCount(koiosModel),
+				CategoryValueMismatch,
+			))
+		case len(dingoModel) != len(koiosModel):
+			// A model of the wrong length misprices every operation from the
+			// first missing one on, so the count is the finding.
+			out = append(out, mismatch(
+				field,
+				entryCount(dingoModel),
+				entryCount(koiosModel),
+				CategoryValueMismatch,
+			))
+		default:
+			first, differing := firstCostModelDifference(dingoModel, koiosModel)
+			if differing == 0 {
+				continue
+			}
+			out = append(out, mismatch(
+				field,
+				fmt.Sprintf(
+					"entry %d = %d (%d of %d entries differ)",
+					first, dingoModel[first], differing, len(dingoModel),
+				),
+				fmt.Sprintf("entry %d = %d", first, koiosModel[first]),
+				CategoryValueMismatch,
+			))
+		}
+	}
+	return out
+}
+
+// firstCostModelDifference returns the lowest index at which two equal-length
+// cost models differ, and how many entries differ in total. differing == 0
+// means the models are identical.
+func firstCostModelDifference(a, b []int64) (first, differing int) {
+	first = -1
+	for i := range a {
+		if a[i] == b[i] {
+			continue
+		}
+		if first < 0 {
+			first = i
+		}
+		differing++
+	}
+	return first, differing
+}
+
+func entryCount(model []int64) string {
+	return fmt.Sprintf("%d entries", len(model))
+}
+
+// costModelSummary describes a whole cost-model set compactly, for the one
+// finding that is about the set rather than a single language.
+func costModelSummary(models map[string][]int64) string {
+	if len(models) == 0 {
+		return ""
+	}
+	languages := make([]string, 0, len(models))
+	for language := range models {
+		languages = append(
+			languages,
+			fmt.Sprintf("%s: %d entries", language, len(models[language])),
+		)
+	}
+	slices.Sort(languages)
+	return strings.Join(languages, ", ")
+}
+
+// costModelFieldName turns a Koios language name into this package's
+// snake_case mismatch field naming ("PlutusV1" -> pparams_cost_model_plutus_v1).
+// Any character that is not a lowercase letter, digit, or underscore is
+// replaced so an unexpected language name still produces a usable field.
+func costModelFieldName(language string) string {
+	name := strings.Replace(strings.ToLower(language), "plutusv", "plutus_v", 1)
+	sanitized := make([]byte, 0, len(name))
+	for i := range len(name) {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' {
+			sanitized = append(sanitized, c)
+			continue
+		}
+		sanitized = append(sanitized, '_')
+	}
+	return "pparams_cost_model_" + string(sanitized)
 }
 
 // ComparePoolEpoch compares per-pool reward-input fields from Dingo's database
@@ -697,14 +1055,26 @@ type accountRewardKey struct {
 // is not masked by the duplicate report.
 //
 // The union of the two (deduplicated) keysets is then walked: present only
-// in Koios -> CategoryAcctOnlyKoios (or CategoryReferenceLag within
-// graceHours of epochEndTime, mirroring ComparePoolEpoch's identical
-// pattern), present only in Dingo -> CategoryAcctOnlyDingo, present on both
-// sides with differing amounts -> CategoryValueMismatch (compared as exact
-// integers via lovelaceEqual, never as floats/rationals), present on both
-// sides with equal amounts -> no mismatch. A zero-reward account present
-// identically on both sides is therefore a pass, exactly like any other
-// equal-amount case.
+// in Koios -> CategoryAcctOnlyKoios, present only in Dingo ->
+// CategoryAcctOnlyDingo, present on both sides with differing amounts ->
+// CategoryValueMismatch (compared as exact integers via lovelaceEqual, never
+// as floats/rationals), present on both sides with equal amounts -> no
+// mismatch. A zero-reward account present identically on both sides is
+// therefore a pass, exactly like any other equal-amount case.
+//
+// Two things reclassify a one-sided row before it is emitted, in this order:
+//
+//   - The row is worth zero. The two sides then agree on what was credited
+//     (nothing) and disagree only about whether to store a row saying so, so
+//     it is CategoryAcctZeroRewardRow — informational — rather than either
+//     acct_only_* category. This takes precedence over the grace window
+//     below, because a zero row is not a value the other side can still
+//     publish later.
+//   - The check is inside graceHours of epochEndTime. Koios can lag in
+//     publishing /account_reward_history for a just-closed epoch, and Dingo
+//     can commit ahead of it, so a nonzero one-sided row is
+//     CategoryReferenceLag until the window closes — mirroring
+//     ComparePoolEpoch's identical pattern.
 //
 // graceHours/epochEndTime/now/network/epoch all mirror ComparePoolEpoch's
 // identical parameters and meaning.
@@ -822,10 +1192,17 @@ func CompareAccountEpoch(
 			// computed yet makes every Koios reward look absent here, which is
 			// a statement about timing rather than a divergence (issue #3857).
 			cat := CategoryAcctOnlyKoios
-			if rewardsPending {
+			switch {
+			case isZeroRewardAmount(kr.Earned):
+				// Both sides credited nothing; see
+				// CategoryAcctZeroRewardRow. This outranks either timing
+				// case: a zero row is not a value the other side can
+				// publish later, so waiting cannot change the answer.
+				cat = CategoryAcctZeroRewardRow
+			case rewardsPending:
 				cat = CategoryReferenceLag
-			} else if graceHours > 0 && !epochEndTime.IsZero() &&
-				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
+			case graceHours > 0 && !epochEndTime.IsZero() &&
+				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour:
 				cat = CategoryReferenceLag
 			}
 			out = append(out, CheckMismatch{
@@ -850,8 +1227,12 @@ func CompareAccountEpoch(
 			// hasn't published yet within graceHours is reference lag, not
 			// a real acct_only_dingo discrepancy.
 			cat := CategoryAcctOnlyDingo
-			if graceHours > 0 && !epochEndTime.IsZero() &&
-				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
+			switch {
+			case isZeroRewardAmount(dr.Amount):
+				// Symmetric with the koiosOK && !dingoOK case above.
+				cat = CategoryAcctZeroRewardRow
+			case graceHours > 0 && !epochEndTime.IsZero() &&
+				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour:
 				cat = CategoryReferenceLag
 			}
 			out = append(out, CheckMismatch{
@@ -912,14 +1293,50 @@ func lovelaceEqual(a, b string) bool {
 	// string-equality short-circuit would report two identical malformed or
 	// negative strings as "equal" without ever validating them, letting
 	// CompareAccountEpoch pass on invalid account data.
-	var x, y big.Int
-	if _, ok := x.SetString(a, 10); !ok || x.Sign() < 0 {
+	x, ok := parseLovelace(a)
+	if !ok {
 		return false
 	}
-	if _, ok := y.SetString(b, 10); !ok || y.Sign() < 0 {
+	y, ok := parseLovelace(b)
+	if !ok {
 		return false
 	}
-	return x.Cmp(&y) == 0
+	return x.Cmp(y) == 0
+}
+
+// parseLovelace is the single definition of a well-formed lovelace amount:
+// one or more ASCII digits, nothing else. No sign, no surrounding whitespace,
+// no separators.
+//
+// It exists so that lovelaceEqual and isZeroRewardAmount cannot disagree about
+// what a string means. They read the same field from the same two sides, and a
+// string one of them accepts while the other rejects gets two verdicts from the
+// same input: with a divergent parse, " 0" was agreement when the row was
+// one-sided and value_mismatch when both sides had one, and "+0" was the
+// reverse. Whether a given malformed spelling ought to be tolerated is a
+// separate question from whether the two paths answer it the same way; this
+// answers the second, strictly, so a malformed amount is always reported and
+// never waived.
+//
+// Deliberately stricter than big.Int.SetString alone, which accepts a leading
+// sign: "-0" parses to zero with a non-negative sign, so a sign check does not
+// exclude it, and a negative lovelace amount is malformed data rather than a
+// zero reward. Leading zeros are accepted ("00" is zero) because the two sides
+// format independently and a value's spelling is not the comparison's business.
+func parseLovelace(s string) (*big.Int, bool) {
+	if s == "" {
+		return nil, false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return nil, false
+		}
+	}
+	var v big.Int
+	if _, ok := v.SetString(s, 10); !ok {
+		return nil, false
+	}
+	return &v, true
 }
 
 // rationalsEqual reports whether two numeric strings represent the same
@@ -961,6 +1378,7 @@ func severityOf(category string) mismatchSeverity {
 		CategoryAcctCoverageIncomplete:
 		return severityError
 	case CategoryAcctZeroReward,
+		CategoryAcctZeroRewardRow,
 		CategoryAcctNewlyRegistered,
 		CategoryAcctDeregistered,
 		CategoryPoolDeparted:
@@ -987,6 +1405,21 @@ func CountSignificant(mismatches []CheckMismatch) int {
 		}
 	}
 	return n
+}
+
+// isZeroRewardAmount reports whether a lovelace decimal string is zero.
+//
+// Parsed rather than compared to "0": the two sides format independently, and
+// a reward that is genuinely zero must be recognised as zero however it is
+// spelled, so "00" is zero. An unparseable amount is not zero — it is a real
+// value the comparison must keep reporting rather than quietly waive, so "",
+// "abc", " 0" and "-0" all stay one-sided rows and keep failing the epoch.
+//
+// The parse is parseLovelace, the same one lovelaceEqual uses, so a string
+// cannot be zero here and malformed there.
+func isZeroRewardAmount(amount string) bool {
+	v, ok := parseLovelace(amount)
+	return ok && v.Sign() == 0
 }
 
 // DetermineStatus returns PASS, FAIL, or ERROR from a list of mismatches.
