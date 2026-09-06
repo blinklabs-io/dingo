@@ -381,15 +381,20 @@ func (n *Node) initBlockForger(
 		ForgeSyncToleranceSlots:           n.config.forgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots:       n.config.forgeStaleGapThresholdSlots,
 		ForgeHeaderFrontierToleranceSlots: n.config.forgeHeaderFrontierToleranceSlots,
-		BlockValidator:                    blockValidator,
-		ForgeFence:                        forgeFence,
-		PromRegistry:                      n.config.promRegistry,
-		LeiosProduceChecker:               leiosChecker,
-		LeiosEBBroadcaster:                leiosEBCaster,
-		LeiosMempool:                      leiosMempool,
-		LeiosTxValidator:                  n.ledgerState,
-		LeiosCertificateProvider:          leiosCerts,
-		LeiosParentAnnouncementProvider:   leiosParent,
+		// Closure, not a method value: n.ouroboros is rebuilt live, so this
+		// resolves the current instance when the forge loop asks.
+		LeiosVerifiedEbSlot: func() uint64 {
+			return n.ouroboros().MaxVerifiedEndorserBlockSlot()
+		},
+		BlockValidator:                  blockValidator,
+		ForgeFence:                      forgeFence,
+		PromRegistry:                    n.config.promRegistry,
+		LeiosProduceChecker:             leiosChecker,
+		LeiosEBBroadcaster:              leiosEBCaster,
+		LeiosMempool:                    leiosMempool,
+		LeiosTxValidator:                n.ledgerState,
+		LeiosCertificateProvider:        leiosCerts,
+		LeiosParentAnnouncementProvider: leiosParent,
 		OpCertLedgerView: blockProducerLedgerView{
 			ls: n.ledgerState,
 		},
