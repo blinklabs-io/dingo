@@ -899,10 +899,36 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 				// Roll back the registration on failure
 				o.chainsyncState.RemoveClientConnId(connId)
 				o.config.Logger.Error(
-					"failed to start chainsync client",
-					"error",
-					err,
+					"failed to start chainsync client, closing outbound connection",
+					"component", "network",
+					"connection_id", connId.String(),
+					"error", err,
 				)
+				// Close the connection so peer governance observes the
+				// failure and applies its reconnect backoff.
+				//
+				// Returning while the connection is still open strands the
+				// peer half-connected: TCP is up and peergov still counts it
+				// as connected, but no chainsync client is tracked and this
+				// function returns before txsubmission starts, so nothing
+				// retries and the peer is never replaced. Any transient
+				// failure -- an intersect-point or rollback-anchor lookup
+				// hitting a storage fault, not just a negotiation failure --
+				// would silently cost us the peer for the lifetime of the
+				// connection.
+				//
+				// The inbound handler already closes on this same failure;
+				// this makes the outbound path consistent with it.
+				if conn := o.connManager.GetConnectionById(connId); conn != nil {
+					if closeErr := conn.Close(); closeErr != nil {
+						o.config.Logger.Debug(
+							"failed to close outbound connection after chainsync start failure",
+							"component", "network",
+							"connection_id", connId.String(),
+							"error", closeErr,
+						)
+					}
+				}
 				return
 			}
 			o.config.Logger.Debug(
