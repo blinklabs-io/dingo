@@ -552,6 +552,12 @@ func (ls *LedgerState) queueContinuationAuditEndorserRef(
 // form — a later attempt costs only the provider lookup — and marks the window
 // incomplete, so unresolved inputs read as inconclusive rather than as missing
 // producers.
+//
+// *budget is owned by the audited body, not by one drain: a body drains once
+// per unresolved input and every drain spends the same allowance, which is why
+// it is passed by pointer. Once exhausted it is burned to -1 and stays there
+// for the rest of the body, so skipped_budget counts audited bodies whose
+// budget ran out — what its Help string promises — and not unresolved inputs.
 func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 	window *continuationAuditWindow,
 	budget *int,
@@ -562,15 +568,19 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 	armed := true
 	for i, ref := range pending {
 		if !armed || *budget <= 0 {
-			// Requeue what was not reached. Hitting the budget means the
-			// producer set is knowingly short for now. These references
+			// Requeue everything not reached, in one move, and stop.
+			// The remainder is a contiguous suffix, so there is nothing
+			// left for a further iteration to do: continuing here once
+			// appended an overlapping suffix per remaining reference,
+			// which grew the queue quadratically and made later bodies
+			// probe the same reference several times. These references
 			// were never taken off pendingEndorserSeen, so this is a
 			// one-for-one move and cannot duplicate a key.
 			window.pendingEndorserRefs = append(
 				window.pendingEndorserRefs,
 				pending[i:]...,
 			)
-			if armed && *budget <= 0 {
+			if armed && *budget == 0 {
 				ls.countContinuationAuditOutcome(
 					continuationAuditResultSkippedBudget,
 				)
@@ -581,10 +591,14 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 					"deferred", len(pending)-i,
 					"budget", continuationAuditMaxEndorserBlocksPerBlock,
 				)
-				// Only report the budget stop once per drain.
+				// The budget belongs to the audited body, not to this
+				// drain: one body triggers one drain per unresolved
+				// input, all sharing it. Burn it to -1 so the later
+				// drains of the same body take this branch without
+				// reporting a second stop for the one exhaustion.
 				*budget = -1
 			}
-			continue
+			break
 		}
 		// One probe per reference per audited body: nothing that could
 		// change the outcome happens between two inputs of the same body.
@@ -687,9 +701,6 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 		if !ls.recordContinuationAuditProducers(window, ids) {
 			armed = false
 		}
-	}
-	if *budget < 0 {
-		*budget = 0
 	}
 	return armed
 }
