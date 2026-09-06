@@ -392,9 +392,11 @@ func (r *Recycler) tick(
 		st.lastProgressSlot = localTipSlot
 		st.lastProgressAt = now
 	}
-	if primaryChainTipSlot > st.lastPrimaryChainTipSlot {
+	if primaryChainTipSlot != st.lastPrimaryChainTipSlot {
+		if primaryChainTipSlot > st.lastPrimaryChainTipSlot {
+			st.lastProgressAt = now
+		}
 		st.lastPrimaryChainTipSlot = primaryChainTipSlot
-		st.lastProgressAt = now
 	}
 	// During catch-up, extend stalled-client grace and recycle cooldowns to
 	// avoid churning connections while the node is making progress. The
