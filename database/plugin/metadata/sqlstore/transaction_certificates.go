@@ -109,11 +109,16 @@ RETURNING id`,
 				certIndex,
 			)
 		}
-		var depositValue any
+		// A deposit is bound as a decimal string, or as NULL when the
+		// caller could not calculate one and said so. sql.NullString rather
+		// than any keeps that the only two possibilities: an untyped bind
+		// reaches Postgres as a raw Go value with no encode plan for a text
+		// column, which SQLite's TEXT affinity would have hidden.
+		var depositValue sql.NullString
 		if found {
-			depositValue = decimalUint64(types.Uint64(deposit))
+			depositValue = validString(decimalUint64(types.Uint64(deposit)))
 		} else if !allowUnknownDeposits {
-			depositValue = decimalUint64(types.Uint64(0))
+			depositValue = validString(decimalUint64(types.Uint64(0)))
 		}
 		specializedID, ref, err := s.applySpecializedCertificate(
 			ctx,
@@ -282,7 +287,7 @@ func (s *Store) applySpecializedCertificate(
 	slot uint64,
 	blockIndex uint32,
 	certIndex uint,
-	deposit any,
+	deposit sql.NullString,
 ) (uint, *models.StakeCredentialRef, error) {
 	switch cert := certificate.(type) {
 	case *lcommon.PoolRegistrationCertificate:
@@ -337,7 +342,9 @@ RETURNING id`,
 			cert,
 			certificateID,
 			slot,
-			uint64(cert.Amount),
+			// The refund is declared by the certificate itself, so it is
+			// always known here and never NULL.
+			validString(decimalUint64(types.Uint64(cert.Amount))),
 		)
 		return id, nil, err
 	case *lcommon.UpdateDrepCertificate:
@@ -432,7 +439,7 @@ func applyAccountCertificate(
 	certificate lcommon.Certificate,
 	certificateID uint,
 	slot uint64,
-	deposit any,
+	deposit sql.NullString,
 ) (uint, *models.StakeCredentialRef, error) {
 	var (
 		stakeCredential lcommon.Credential
@@ -663,7 +670,7 @@ func applyPoolRegistrationCertificate(
 	cert *lcommon.PoolRegistrationCertificate,
 	certificateID uint,
 	slot uint64,
-	deposit any,
+	deposit sql.NullString,
 ) (uint, error) {
 	rewardTag, rewardAccount, err := certutil.PoolRewardAccount(cert)
 	if err != nil {
@@ -828,7 +835,7 @@ func applyDrepRegistrationCertificate(
 	cert *lcommon.RegistrationDrepCertificate,
 	certificateID uint,
 	slot uint64,
-	deposit any,
+	deposit sql.NullString,
 ) (uint, error) {
 	tag, err := models.CredentialTagFromUint(
 		cert.DrepCredential.CredType,
@@ -882,7 +889,7 @@ func applyDrepDeregistrationCertificate(
 	cert *lcommon.DeregistrationDrepCertificate,
 	certificateID uint,
 	slot uint64,
-	deposit any,
+	deposit sql.NullString,
 ) (uint, error) {
 	tag, err := models.CredentialTagFromUint(
 		cert.DrepCredential.CredType,

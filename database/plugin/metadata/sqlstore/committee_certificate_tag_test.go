@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -92,7 +93,7 @@ func TestCommitteeCertificateRejectsUnsupportedCredentialTag(t *testing.T) {
 				100,
 				0,
 				0,
-				0,
+				sql.NullString{},
 			)
 			require.ErrorContains(t, err, "unsupported stake credential tag")
 		})
