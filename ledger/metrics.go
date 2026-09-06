@@ -80,6 +80,7 @@ type stateMetrics struct {
 	continuationAuditInconclusiveEbPending prometheus.Counter
 	continuationAuditDisarmedCap           prometheus.Counter
 	continuationAuditSkippedBudget         prometheus.Counter
+	continuationAuditRefUnresolvable       prometheus.Counter
 	// Observed for every Praos leader-eligibility decision on an inbound
 	// header: (threshold - leaderValue) / threshold. Positive is eligible,
 	// and the magnitude is the headroom. dingo derives its leadership stake
@@ -406,6 +407,9 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	//   result="skipped_budget"          — one per audited body that had more
 	//        endorser blocks queued than continuationAuditMaxEndorserBlocksPerBlock
 	//        allows it to resolve; the rest stay queued for a later body
+	//   result="ref_unresolvable"        — an endorser-block reference given up
+	//        on for good, because resolving it failed for a reason retrying
+	//        cannot fix; that hole in the producer set never closes
 	// A node whose inconclusive count dominates is telling the operator the
 	// audit is not covering it, which is the honest reading of an
 	// endorser-block backlog.
@@ -430,6 +434,9 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	)
 	m.continuationAuditSkippedBudget = m.continuationAuditOutcomes.WithLabelValues(
 		continuationAuditResultSkippedBudget,
+	)
+	m.continuationAuditRefUnresolvable = m.continuationAuditOutcomes.WithLabelValues(
+		continuationAuditResultRefUnresolvable,
 	)
 	m.leaderThresholdMargin = promautoFactory.NewHistogram(
 		prometheus.HistogramOpts{

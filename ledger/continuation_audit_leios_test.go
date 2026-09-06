@@ -120,9 +120,31 @@ type leiosAuditFixture struct {
 	providerOK    *bool
 	providerCalls *int
 	logs          *strings.Builder
+	// announceRaw is the ranking block whose announcement the certifying
+	// block certifies, as it would be stored. Tests that exercise a parent
+	// the block store cannot resolve yet add it partway through.
+	announceRaw chain.RawBlock
+}
+
+func (f *leiosAuditFixture) addAnnouncingBlock(t *testing.T) {
+	t.Helper()
+	require.NoError(t, f.ls.chain.AddRawBlocks(
+		[]chain.RawBlock{f.announceRaw},
+	))
 }
 
 func newLeiosAuditFixture(t *testing.T) *leiosAuditFixture {
+	t.Helper()
+	return newLeiosAuditFixtureOpts(t, true)
+}
+
+// newLeiosAuditFixtureOpts optionally withholds the announcing ranking block
+// from the block store, which is how a test reproduces a certifying block whose
+// parent the audit cannot resolve at the moment it first tries.
+func newLeiosAuditFixtureOpts(
+	t *testing.T,
+	insertAnnouncingBlock bool,
+) *leiosAuditFixture {
 	t.Helper()
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
@@ -151,14 +173,20 @@ func newLeiosAuditFixture(t *testing.T) *leiosAuditFixture {
 	require.True(t, ok, "fixture parent must announce an endorser block")
 	require.Equal(t, ebHash, gotHash)
 
-	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{{
+	announceRaw := chain.RawBlock{
 		Slot:        announceSlot,
 		Hash:        announcing.Hash().Bytes(),
 		BlockNumber: 3,
 		Type:        dijkstra.BlockTypeDijkstra,
 		PrevHash:    fixture.currentTip.Point.Hash,
 		Cbor:        announceCbor,
-	}}))
+	}
+	if insertAnnouncingBlock {
+		require.NoError(
+			t,
+			ls.chain.AddRawBlocks([]chain.RawBlock{announceRaw}),
+		)
+	}
 
 	certRB := leiosAuditCertifyingBlock(t, 40, announcing.Hash())
 	require.Empty(
@@ -200,6 +228,7 @@ func newLeiosAuditFixture(t *testing.T) *leiosAuditFixture {
 		providerOK:    &providerOK,
 		providerCalls: &providerCalls,
 		logs:          logs,
+		announceRaw:   announceRaw,
 	}
 }
 
@@ -207,16 +236,25 @@ func newLeiosAuditFixture(t *testing.T) *leiosAuditFixture {
 // output of the endorser-block transaction.
 func (f *leiosAuditFixture) spenderBlock(t *testing.T) BlockfetchEvent {
 	t.Helper()
+	return f.spenderBlockAt(t, 50, "leios-audit-spender")
+}
+
+func (f *leiosAuditFixture) spenderBlockAt(
+	t *testing.T,
+	slot uint64,
+	seed string,
+) BlockfetchEvent {
+	t.Helper()
 	body := &spliceAuditBlock{
-		slot: 50,
-		hash: lcommon.NewBlake2b256(testHashBytes("leios-audit-spender")),
+		slot: slot,
+		hash: lcommon.NewBlake2b256(testHashBytes(seed)),
 		prevHash: lcommon.NewBlake2b256(
-			testHashBytes("leios-audit-spender-parent"),
+			testHashBytes(seed + "-parent"),
 		),
 		txs: []lcommon.Transaction{
 			mustSpliceAuditTx(
 				t,
-				testHashBytes("leios-audit-spender-tx"),
+				testHashBytes(seed+"-tx"),
 				[]lcommon.TransactionInput{
 					mustSpliceAuditInput(t, f.ebTx.Hash().Bytes(), 0),
 				},
@@ -267,7 +305,7 @@ func TestContinuationAuditAcceptsEndorserBlockProducer(t *testing.T) {
 	// is also silent about a real splice.
 	assert.False(
 		t,
-		window.endorserProducersPending,
+		window.endorserProducersIncomplete(),
 		"the certified endorser block was cached, so the producer set is complete",
 	)
 	assert.Contains(
@@ -777,10 +815,22 @@ func TestContinuationAuditEndorserResolutionIsBudgeted(t *testing.T) {
 	assert.Len(
 		t,
 		window.pendingEndorserRefs,
-		1,
-		"the overflow must stay queued for a later body",
+		queued,
+		"nothing may be lost: the overflow stays queued, and the probed "+
+			"references are requeued because their parents are not "+
+			"resolvable yet",
 	)
-	assert.True(t, window.endorserProducersPending)
+	assert.True(t, window.endorserProducersIncomplete())
+	assert.Equal(
+		t,
+		float64(0),
+		promtestutil.ToFloat64(
+			ls.metrics.continuationAuditOutcomes.WithLabelValues(
+				"ref_unresolvable",
+			),
+		),
+		"a parent that is merely absent is retryable, not unresolvable",
+	)
 	assert.Equal(
 		t,
 		float64(1),
@@ -896,7 +946,7 @@ func TestContinuationAuditAcceptsAnnouncedEndorserBlockProducer(t *testing.T) {
 		"no producer on the local applied chain",
 		"a producer in the endorser block this window announced must not be reported",
 	)
-	assert.False(t, window.endorserProducersPending)
+	assert.False(t, window.endorserProducersIncomplete())
 	assert.Equal(t, 1, window.endorserResolutions)
 	assert.Contains(
 		t,
@@ -904,4 +954,150 @@ func TestContinuationAuditAcceptsAnnouncedEndorserBlockProducer(t *testing.T) {
 		string(ebTx.Hash().Bytes()),
 		"the announced endorser block's transaction must be an in-window producer",
 	)
+}
+
+// TestContinuationAuditRetriesUnresolvedCertifyingParent is the regression for
+// the review finding that a transient parent lookup failure was permanent.
+//
+// A certifying ranking block names its certified closure only through its
+// parent's announcement, so resolving it needs the parent out of the block
+// store. When that lookup missed, the reference was dropped for the rest of the
+// window: no later body retried it, so the window stayed inconclusive forever
+// and could neither recognise the endorser-resident producer nor diagnose a
+// genuine missing one. A miss is a transient state, not a verdict — the parent
+// arrives — so the reference must be requeued and retried.
+func TestContinuationAuditRetriesUnresolvedCertifyingParent(t *testing.T) {
+	f := newLeiosAuditFixtureOpts(t, false)
+	ls := f.ls
+	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+	window := ls.continuationAudit.Load()
+	require.NotNil(t, window)
+
+	ls.auditContinuationBlock(BlockfetchEvent{
+		ConnectionId: f.connId,
+		Block:        f.certRB,
+		Point:        f.certPoint,
+	}, true)
+	// First attempt: the parent is not in the block store, so the closure
+	// cannot be named yet.
+	ls.auditContinuationBlock(
+		f.spenderBlockAt(t, 50, "retry-spender-before"),
+		true,
+	)
+	require.Equal(t, 0, *f.providerCalls)
+	require.True(
+		t,
+		window.endorserProducersIncomplete(),
+		"an unresolvable parent leaves the producer set knowingly short",
+	)
+	require.Len(
+		t,
+		window.pendingEndorserRefs,
+		1,
+		"the reference must stay queued for a later attempt",
+	)
+	require.NotContains(
+		t,
+		f.logs.String(),
+		"no producer on the local applied chain",
+	)
+
+	// A second certifying block over the same parent must not queue the
+	// reference a second time: the drain took the dedupe entry when it tried,
+	// and requeueing has to put it back.
+	dupCertRB := leiosAuditCertifyingBlock(t, 41, f.announceHash)
+	ls.auditContinuationBlock(BlockfetchEvent{
+		ConnectionId: f.connId,
+		Block:        dupCertRB,
+		Point: ocommon.NewPoint(
+			dupCertRB.SlotNumber(),
+			dupCertRB.Hash().Bytes(),
+		),
+	}, true)
+	require.Len(
+		t,
+		window.pendingEndorserRefs,
+		1,
+		"a requeued reference must still suppress its duplicates",
+	)
+
+	// The parent lands. The next audited body must retry and resolve.
+	f.addAnnouncingBlock(t)
+	ls.auditContinuationBlock(
+		f.spenderBlockAt(t, 51, "retry-spender-after"),
+		true,
+	)
+
+	assert.Equal(t, 1, *f.providerCalls)
+	assert.Contains(
+		t,
+		window.producedTxs,
+		string(f.ebTx.Hash().Bytes()),
+		"the retried closure's transaction must become an in-window producer",
+	)
+	assert.False(
+		t,
+		window.endorserProducersIncomplete(),
+		"with every reference resolved the producer set is complete again",
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(
+			ls.metrics.continuationAuditOutcomes.WithLabelValues("clean"),
+		),
+	)
+	assert.NotContains(
+		t,
+		f.logs.String(),
+		"no producer on the local applied chain",
+	)
+}
+
+// TestContinuationAuditRetriesParentAtMostOncePerBlock bounds the retry: a
+// reference that cannot be resolved must not be re-probed for every unresolved
+// input of the same body, only once per audited body, so a permanently absent
+// parent costs one index miss per block rather than one per input.
+func TestContinuationAuditRetriesParentAtMostOncePerBlock(t *testing.T) {
+	f := newLeiosAuditFixtureOpts(t, false)
+	ls := f.ls
+	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+	window := ls.continuationAudit.Load()
+	require.NotNil(t, window)
+
+	ls.auditContinuationBlock(BlockfetchEvent{
+		ConnectionId: f.connId,
+		Block:        f.certRB,
+		Point:        f.certPoint,
+	}, true)
+
+	// A body with three unresolvable inputs: three drains, one lookup.
+	body := &spliceAuditBlock{
+		slot: 50,
+		hash: lcommon.NewBlake2b256(testHashBytes("retry-multi-input")),
+		txs: []lcommon.Transaction{
+			mustSpliceAuditTx(
+				t,
+				testHashBytes("retry-multi-input-tx"),
+				[]lcommon.TransactionInput{
+					mustSpliceAuditInput(t, f.ebTx.Hash().Bytes(), 0),
+					mustSpliceAuditInput(t, f.ebTx.Hash().Bytes(), 1),
+					mustSpliceAuditInput(t, f.ebTx.Hash().Bytes(), 2),
+				},
+			),
+		},
+	}
+	ls.auditContinuationBlock(BlockfetchEvent{
+		ConnectionId: f.connId,
+		Block:        body,
+		Point:        ocommon.NewPoint(body.slot, body.hash.Bytes()),
+	}, true)
+
+	assert.Equal(
+		t,
+		1,
+		window.endorserResolutions,
+		"one body must probe an unresolvable parent once, not once per input",
+	)
+	assert.Len(t, window.pendingEndorserRefs, 1)
 }
