@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -115,6 +116,7 @@ type leiosAuditFixture struct {
 	certRB        *dijkstra.DijkstraBlock
 	certPoint     ocommon.Point
 	announceHash  lcommon.Blake2b256
+	ebHash        lcommon.Blake2b256
 	ebTx          lcommon.Transaction
 	ebRepeatTx    lcommon.Transaction
 	providerOK    *bool
@@ -223,6 +225,7 @@ func newLeiosAuditFixtureOpts(
 			certRB.Hash().Bytes(),
 		),
 		announceHash:  announcing.Hash(),
+		ebHash:        ebHash,
 		ebTx:          ebTx,
 		ebRepeatTx:    ebRepeatTx,
 		providerOK:    &providerOK,
@@ -1100,4 +1103,95 @@ func TestContinuationAuditRetriesParentAtMostOncePerBlock(t *testing.T) {
 		"one body must probe an unresolvable parent once, not once per input",
 	)
 	assert.Len(t, window.pendingEndorserRefs, 1)
+}
+
+// TestContinuationAuditDedupesConvergingEndorserRefs is the regression for the
+// review finding that requeueing bypassed the dedupe.
+//
+// Two certifying ranking blocks with *different* parents can certify the same
+// endorser block: the reference is (announced hash, announcing slot), so two
+// blocks at one slot on either side of a fork — which is exactly the state a
+// window is armed in — announce the same occurrence. Those two references are
+// distinct while they are still deferred parent hashes, and converge only once
+// resolved. Requeueing appended without checking, so a still-unfetched endorser
+// block ended up queued twice and was probed twice on every later body, burning
+// budget that other references needed.
+func TestContinuationAuditDedupesConvergingEndorserRefs(t *testing.T) {
+	f := newLeiosAuditFixture(t)
+	ls := f.ls
+
+	// A second announcing block, at the same slot and over the same endorser
+	// block as the fixture's, but a distinct block.
+	siblingCbor := leiosAuditAnnouncingBlockCbor(
+		t,
+		30,
+		lcommon.NewBlake2b256(testHashBytes("converging-sibling-parent")),
+		f.ebHash,
+		4096,
+	)
+	var sibling dijkstra.DijkstraBlock
+	_, err := cbor.Decode(siblingCbor, &sibling)
+	require.NoError(t, err)
+	require.NotEqual(t, f.announceHash, sibling.Hash())
+	require.NoError(t, ls.db.BlockCreate(models.Block{
+		Hash:     sibling.Hash().Bytes(),
+		PrevHash: testHashBytes("converging-sibling-parent"),
+		Cbor:     siblingCbor,
+		Slot:     30,
+		Number:   3,
+		Type:     dijkstra.BlockTypeDijkstra,
+	}, nil))
+
+	*f.providerOK = false
+	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+	window := ls.continuationAudit.Load()
+	require.NotNil(t, window)
+
+	for i, parent := range []lcommon.Blake2b256{
+		f.announceHash,
+		sibling.Hash(),
+	} {
+		certRB := leiosAuditCertifyingBlock(t, uint64(40+i), parent)
+		ls.auditContinuationBlock(BlockfetchEvent{
+			ConnectionId: f.connId,
+			Block:        certRB,
+			Point: ocommon.NewPoint(
+				certRB.SlotNumber(),
+				certRB.Hash().Bytes(),
+			),
+		}, true)
+	}
+	require.Len(
+		t,
+		window.pendingEndorserRefs,
+		2,
+		"two distinct parents must queue two deferred references",
+	)
+
+	// Resolving both converges them on one occurrence. The endorser block is
+	// still unfetched, so both are requeued -- as one reference, not two.
+	ls.auditContinuationBlock(
+		f.spenderBlockAt(t, 50, "converging-spender-one"),
+		true,
+	)
+	assert.Equal(t, 2, window.endorserResolutions)
+	require.Len(
+		t,
+		window.pendingEndorserRefs,
+		1,
+		"references that converge on one endorser block must queue once",
+	)
+
+	// And the next body probes that occurrence once, not once per reference.
+	before := *f.providerCalls
+	ls.auditContinuationBlock(
+		f.spenderBlockAt(t, 51, "converging-spender-two"),
+		true,
+	)
+	assert.Equal(
+		t,
+		1,
+		*f.providerCalls-before,
+		"one queued occurrence must cost one provider probe per body",
+	)
 }
