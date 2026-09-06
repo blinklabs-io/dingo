@@ -335,6 +335,32 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 	defer txn.Release()
 	meta := s.db.Metadata()
 
+	var tipSlot uint64
+	tipKnown := false
+	tip, tipErr := s.db.GetTip(txn)
+	if tipErr != nil {
+		return nil, fmt.Errorf("tip lookup: %w", tipErr)
+	}
+	if len(tip.Point.Hash) > 0 && tip.Point.Slot > 0 {
+		tipSlot = tip.Point.Slot
+		tipKnown = true
+	}
+
+	epochRewardsPending := false
+	if tipKnown {
+		applyEpoch, err := meta.GetEpoch(stakeEpoch+3, txn.Metadata())
+		if err != nil {
+			return nil, fmt.Errorf(
+				"epoch lookup %d: %w", stakeEpoch+3, err,
+			)
+		}
+		if applyEpoch == nil {
+			epochRewardsPending = true
+		} else {
+			epochRewardsPending = tipSlot < applyEpoch.StartSlot
+		}
+	}
+
 	stakeInputs, err := meta.GetRewardPoolInputs(stakeEpoch, txn.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -399,6 +425,7 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 			10,
 		)
 		data.PoolUnspendable = uint64(out.Unspendable)
+		data.RewardsPending = tipKnown && tipSlot < out.BoundarySlot
 	}
 
 	// The comparable member-reward quantity, formed the same way DingoDB
@@ -442,6 +469,13 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 			data.SpendableMemberRewardPresent = true
 			if data.SpendableMemberRewardTotal == "" {
 				data.SpendableMemberRewardTotal = "0"
+			}
+		}
+	}
+	if epochRewardsPending {
+		for _, data := range m {
+			if !data.MemberRewardPresent {
+				data.RewardsPending = true
 			}
 		}
 	}
