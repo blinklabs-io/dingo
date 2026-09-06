@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/blinklabs-io/dingo/consensus/leaderthreshold"
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
@@ -1152,7 +1153,7 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityWithCache(
 	}
 
 	// Compute the Praos leadership threshold and compare.
-	threshold, err := consensus.CertifiedNatThresholdWithMode(
+	threshold, err := leaderthreshold.Threshold(
 		poolStake,
 		totalStake,
 		activeSlotCoeffRat,
