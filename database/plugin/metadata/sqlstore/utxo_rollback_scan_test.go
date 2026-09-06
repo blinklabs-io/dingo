@@ -18,7 +18,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -39,16 +38,21 @@ const (
 		"staking_key FROM utxo WHERE deleted_slot > ?"
 )
 
-// newMigratedSQLiteStore opens a file-backed SQLite store carrying the real
-// migrated schema, so the utxo indexes under test (idx_utxo_added_slot,
+// newMigratedSQLiteStore opens a SQLite store carrying the real migrated
+// schema, so the utxo indexes under test (idx_utxo_added_slot,
 // idx_utxo_deleted_staking_amount, idx_utxo_staking_deleted_amount) are the
-// production ones rather than a hand-rolled CREATE TABLE.
+// production ones rather than a hand-rolled CREATE TABLE. The query planner
+// reads the schema and sqlite_stat1, not the storage backend, so the
+// in-memory database this package already uses for store tests produces the
+// same plans as a file-backed one.
 func newMigratedSQLiteStore(tb testing.TB) *Store {
 	tb.Helper()
-	path := filepath.Join(tb.TempDir(), "metadata.sqlite")
 	db, err := OpenDB(
 		"sqlite",
-		fmt.Sprintf("file:%s?_pragma=busy_timeout(30000)", path),
+		fmt.Sprintf(
+			"file:rollback_scan_%d?mode=memory&cache=shared",
+			testStoreSequence.Add(1),
+		),
 		"sqlite",
 	)
 	require.NoError(tb, err)
@@ -68,9 +72,11 @@ func newMigratedSQLiteStore(tb testing.TB) *Store {
 
 // seedRollbackUtxos inserts n utxo rows spread over stakeCredentials distinct
 // stake credentials. Rows below rolledBackFrom are "old" (added and, for half
-// of them, deleted long before the rollback point); the last rollbackRows rows
-// sit above it and are the only ones a rollback sweep has to look at. This is
-// the shape that makes the bug visible: a large settled table, a tiny window.
+// of them, spent long before the rollback point); the last rollbackRows rows
+// sit above it and are the only ones a rollback sweep has to look at, half of
+// them also spent above it so both sweep statements have rows to return. This
+// is the shape that makes the bug visible: a large settled table whose rows
+// are almost all irrelevant to the rollback, and a tiny window that is not.
 func seedRollbackUtxos(
 	tb testing.TB,
 	store *Store,
@@ -102,6 +108,12 @@ func seedRollbackUtxos(
 		deletedSlot := int64(0)
 		if i >= n-rollbackRows {
 			addedSlot = rolledBackFrom + int64(i-(n-rollbackRows)) + 1
+			if i%2 == 0 {
+				// Spent after the rollback point, so the rollback has to
+				// un-spend it: this is what SetUtxosNotDeletedAfterSlot
+				// looks for.
+				deletedSlot = addedSlot
+			}
 		} else if i%2 == 0 {
 			// A settled spend, well below the rollback point.
 			deletedSlot = addedSlot + 1
