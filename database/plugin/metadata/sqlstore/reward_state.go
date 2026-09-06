@@ -141,6 +141,93 @@ func (s *Store) SaveRewardSnapshot(
 	return nil
 }
 
+func (s *Store) SaveRewardSeedFailure(
+	epoch uint64,
+	snapshotType string,
+	reason string,
+	capturedSlot uint64,
+	txn types.Txn,
+) error {
+	db, ctx, err := s.dbFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return err
+	}
+	sqlSlot, err := checkedInt64(capturedSlot)
+	if err != nil {
+		return err
+	}
+	if err := s.operationalQueries(db).SaveRewardSeedFailure(
+		ctx,
+		sqlitequery.SaveRewardSeedFailureParams{
+			Epoch:         sqlEpoch,
+			SnapshotType:  snapshotType,
+			FailureReason: reason,
+			CapturedSlot:  sqlSlot,
+		},
+	); err != nil {
+		return fmt.Errorf("save reward seed failure: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetRewardSeedFailure(
+	epoch uint64,
+	snapshotType string,
+	txn types.Txn,
+) (string, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return "", err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return "", err
+	}
+	reason, err := s.operationalQueries(db).GetRewardSeedFailure(
+		ctx,
+		sqlitequery.GetRewardSeedFailureParams{
+			Epoch:        sqlEpoch,
+			SnapshotType: snapshotType,
+		},
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get reward seed failure: %w", err)
+	}
+	return reason, nil
+}
+
+func (s *Store) DeleteRewardSeedFailure(
+	epoch uint64,
+	snapshotType string,
+	txn types.Txn,
+) error {
+	db, ctx, err := s.dbFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return err
+	}
+	if err := s.operationalQueries(db).DeleteRewardSeedFailure(
+		ctx,
+		sqlitequery.DeleteRewardSeedFailureParams{
+			Epoch:        sqlEpoch,
+			SnapshotType: snapshotType,
+		},
+	); err != nil {
+		return fmt.Errorf("delete reward seed failure: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) DeleteProvisionalRewardSnapshot(
 	epoch uint64,
 	snapshotType string,
@@ -970,6 +1057,12 @@ func (s *Store) DeleteRewardStateAfterSlot(
 			if err := q.DeleteRewardSnapshotsAfterSlot(
 				ctx,
 				pair,
+			); err != nil {
+				return err
+			}
+			if err := q.DeleteRewardSeedFailuresAfterSlot(
+				ctx,
+				sqlSlot,
 			); err != nil {
 				return err
 			}

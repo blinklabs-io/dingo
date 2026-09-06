@@ -466,6 +466,27 @@ SELECT id, epoch, snapshot_type, total_active_stake, total_pool_count,
 FROM reward_snapshot
 WHERE epoch = ? AND snapshot_type = ?;
 
+-- name: SaveRewardSeedFailure :exec
+INSERT INTO reward_seed_failure (
+    epoch, snapshot_type, failure_reason, captured_slot
+) VALUES (?, ?, ?, ?)
+ON CONFLICT (epoch, snapshot_type) DO UPDATE SET
+    failure_reason = CASE
+        WHEN excluded.captured_slot < reward_seed_failure.captured_slot
+        THEN excluded.failure_reason
+        ELSE reward_seed_failure.failure_reason
+    END,
+    captured_slot = MIN(reward_seed_failure.captured_slot, excluded.captured_slot);
+
+-- name: GetRewardSeedFailure :one
+SELECT failure_reason
+FROM reward_seed_failure
+WHERE epoch = ? AND snapshot_type = ?;
+
+-- name: DeleteRewardSeedFailure :exec
+DELETE FROM reward_seed_failure
+WHERE epoch = ? AND snapshot_type = ?;
+
 -- name: ReleaseFallbackRewardSnapshotGuard :execrows
 DELETE FROM reward_snapshot
 WHERE id = ? AND authoritative = FALSE;
@@ -589,6 +610,10 @@ DELETE FROM reward_ada_pots WHERE captured_slot > ?;
 -- name: DeleteRewardSnapshotsAfterSlot :exec
 DELETE FROM reward_snapshot
 WHERE captured_slot > ? OR boundary_slot > ?;
+
+-- name: DeleteRewardSeedFailuresAfterSlot :exec
+DELETE FROM reward_seed_failure
+WHERE captured_slot > ?;
 
 -- name: DeleteRewardPoolInputsAfterSlot :exec
 DELETE FROM reward_pool_input

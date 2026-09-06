@@ -115,6 +115,9 @@ func (n *Node) shutdown() error {
 	// n.cancel() above asks the stall recycler to stop; wait here so it cannot
 	// race later shutdown phases that close connection, ledger, or DB state.
 	n.waitChainsyncStallRecycler()
+	// The selected-to-none worker is also context-owned. Wait for it before
+	// tearing down the selector or the chainsync state it reads.
+	n.waitChainSelectedNoneWorker()
 
 	// Stop block forger first to prevent new blocks
 	if n.blockForger != nil {

@@ -157,6 +157,17 @@ type Node struct {
 	// running, which this mutex would otherwise make indistinguishable.
 	liveLifecycleMu sync.Mutex
 
+	// A selected-to-none transition cannot be dropped while a live database
+	// lifecycle operation holds liveLifecycleMu. One node-owned worker retains
+	// only the latest contended transition and retries until the lifecycle lock
+	// is available or the node context is cancelled, bounding both queued work
+	// and goroutine count.
+	chainSelectedNoneMu         sync.Mutex
+	chainSelectedNonePending    chainselection.ChainSelectedNoneEvent
+	chainSelectedNonePendingSet bool
+	chainSelectedNoneWake       chan struct{}
+	chainSelectedNoneWorkerDone chan struct{}
+
 	// snapshotMu serializes Snapshot calls against each other and against
 	// a concurrent Restore/Truncate (which closes n.db out from under an
 	// in-progress Snapshot if not excluded), and is what enforces bark
@@ -1166,7 +1177,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			"min_corroborating_peers", n.config.genesisCorroborationPeers,
 		)
 	}
-	// Wire chain-selector event subscriptions.
+	// Wire chain-selector event subscriptions. Start the selected-to-none
+	// deferral worker first so a contended one-shot transition is never lost.
+	n.startChainSelectedNoneWorker(n.ctx)
+	started = append(started, n.waitChainSelectedNoneWorker)
 	n.subscribeChainSelectorEvents()
 	// Start the chain selector
 	if err := n.chainSelector.Start(n.ctx); err != nil { //nolint:contextcheck
@@ -1866,23 +1880,41 @@ func (n *Node) handleConnManagerClosed(
 	}
 }
 
-// subscribeConnectionEvents wires the connection-manager side of the EventBus:
-// recycle requests, connection-closed and inbound-connection delivery to
-// ouroboros, and the ledger<->connmanager event translation that keeps ledger/
-// from importing connmanager/. Subscriptions are registered before listeners
-// start so inbound connections from peers that connect immediately are not
-// lost.
-func (n *Node) subscribeConnectionEvents() {
-	// Subscriber ID captured for the same reason as chainManager's above —
-	// n.connManager is rebuilt during a live database restore/truncate.
-	n.connManagerRecycleSubId = n.eventBus.SubscribeFunc(
+// subscribeConnectionRecycleRequests subscribes handler to
+// connmanager.ConnectionRecycleRequestedEventType with lossless delivery.
+//
+// Every recycle publisher (the chainsync stall recycler, peer governance, the
+// ledger translation below) ends here, and a recycle request cannot be
+// replayed: each publisher raises exactly one request per connection and then
+// keeps its own "already asked" flag set. The leios-fetch backfill is the
+// clearest case -- a connection whose leios-fetch request slot is permanently
+// abandoned can never answer again, so dropping its single recycle request
+// leaves that connection in the pool for the rest of its life and the by-point
+// fetch keeps re-trying a corpse (dingo #3552). Detaching this subscriber under
+// backpressure would do exactly that, so it stays attached until it drains or
+// node shutdown closes it.
+func (n *Node) subscribeConnectionRecycleRequests(
+	handler event.EventHandlerFunc,
+) event.EventSubscriberId {
+	return n.eventBus.SubscribeFuncWithBufferPolicy(
 		connmanager.ConnectionRecycleRequestedEventType,
-		n.connManager.HandleConnectionRecycleRequestedEvent,
+		event.DefaultSubscriberBuffer,
+		event.SubscriberBackpressureBlock,
+		handler,
 	)
-	// Translate ledger-owned recycle events to connmanager recycle events so
-	// ledger/ does not import connmanager/.
-	n.eventBus.SubscribeFunc(
+}
+
+// subscribeLedgerConnectionRecycleTranslation translates ledger-owned recycle
+// events to connmanager recycle events so ledger/ does not import connmanager/.
+// It is the first hop of the same one-request-per-connection stream as
+// subscribeConnectionRecycleRequests above and is lossless for the same reason:
+// a detached translator silently strips every ledger- and ouroboros-side
+// recycle request out of the stream.
+func (n *Node) subscribeLedgerConnectionRecycleTranslation() {
+	n.eventBus.SubscribeFuncWithBufferPolicy(
 		ledger.ConnectionRecycleRequestedEventType,
+		event.DefaultSubscriberBuffer,
+		event.SubscriberBackpressureBlock,
 		func(evt event.Event) {
 			e, ok := evt.Data.(ledger.ConnectionRecycleRequestedEvent)
 			if !ok {
@@ -1902,6 +1934,21 @@ func (n *Node) subscribeConnectionEvents() {
 			)
 		},
 	)
+}
+
+// subscribeConnectionEvents wires the connection-manager side of the EventBus:
+// recycle requests, connection-closed and inbound-connection delivery to
+// ouroboros, and the ledger<->connmanager event translation that keeps ledger/
+// from importing connmanager/. Subscriptions are registered before listeners
+// start so inbound connections from peers that connect immediately are not
+// lost.
+func (n *Node) subscribeConnectionEvents() {
+	// Subscriber ID captured for the same reason as chainManager's above —
+	// n.connManager is rebuilt during a live database restore/truncate.
+	n.connManagerRecycleSubId = n.subscribeConnectionRecycleRequests(
+		n.connManager.HandleConnectionRecycleRequestedEvent,
+	)
+	n.subscribeLedgerConnectionRecycleTranslation()
 	// Subscribe to connection events BEFORE starting listeners so that
 	// inbound connections from peers that connect immediately are not lost.
 	//
@@ -1980,9 +2027,8 @@ func (n *Node) subscribeChainSelectorEvents() {
 		n.handleChainSwitchEvent,
 	)
 	// Subscribe to selected-to-none transitions (selection stalled, e.g. an
-	// uncorroborated Genesis fast source). Enforcement that the stalled source
-	// stops feeding the ledger is handled by the ChainsyncApplyEligible gate;
-	// this handler surfaces the stall for observability.
+	// uncorroborated Genesis fast source). The handler clears the ledger's active
+	// connection so it cannot retain a source ChainSelector no longer accepts.
 	n.eventBus.SubscribeFunc(
 		chainselection.ChainSelectedNoneEventType,
 		n.handleChainSelectedNoneEvent,
