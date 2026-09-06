@@ -94,6 +94,17 @@ const (
 	forgeSelectionResultLost = "lost"
 )
 
+// Outcome values for the per-slot "forge timing" log line.
+const (
+	// forgeTimingOutcomeForged: a completed selection pass produced the
+	// block, whether on the first attempt or a later one.
+	forgeTimingOutcomeForged = "forged"
+	// forgeTimingOutcomeEmpty: the transaction-free fallback produced it.
+	forgeTimingOutcomeEmpty = "empty"
+	// forgeTimingOutcomeLost: no block was produced for the slot.
+	forgeTimingOutcomeLost = "lost"
+)
+
 // BlockForger coordinates block production for a stake pool.
 type BlockForger struct {
 	mode   Mode
@@ -1039,6 +1050,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 
 	// We are the slot leader with the same credential generation that passed
 	// the pre-selection gate.
+	leaderCheckedAt := time.Now()
 	if f.metrics != nil {
 		f.metrics.forgeNodeIsLeader.Inc()
 	}
@@ -1157,6 +1169,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return nil
 	}
 
+	producingAt := time.Now()
 	f.logger.Info("producing block", "slot", currentSlot)
 
 	// Ensure KES key is at correct period
@@ -1169,16 +1182,40 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// selection invalidates the candidate; buildBlockForSlot re-selects
 	// against the state that publication produced while the slot lasts,
 	// instead of abandoning the slot on the first abort.
-	block, blockCbor, err := f.buildBlockForSlot(
+	block, blockCbor, buildStats, err := f.buildBlockForSlot(
 		currentSlot,
 		kesPeriod,
 		leiosBlockData,
 		generation,
 	)
+	buildDuration := time.Since(producingAt)
+	// One line per leader slot carrying the two intervals a lost or late
+	// slot is diagnosed from: how long the leader/KES/opcert gate and the
+	// Leios work took before "producing block", and how long selection
+	// then ran. Reconstructing those from block timestamps after the fact
+	// is the only reason the defect this fixes took a trace to find.
+	logForgeTiming := func(outcome string, txCount int) {
+		f.logger.Info(
+			"forge timing",
+			"slot", currentSlot,
+			"outcome", outcome,
+			"leader_check", leaderCheckedAt.Sub(forgeStartTime),
+			"pre_build", producingAt.Sub(leaderCheckedAt),
+			"build", buildDuration,
+			"attempts", buildStats.attempts,
+			"tx_count", txCount,
+		)
+	}
 	if err != nil {
+		logForgeTiming(forgeTimingOutcomeLost, 0)
 		f.incCouldNotForge()
 		return fmt.Errorf("failed to build block: %w", err)
 	}
+	forgeOutcome := forgeTimingOutcomeForged
+	if buildStats.empty {
+		forgeOutcome = forgeTimingOutcomeEmpty
+	}
+	logForgeTiming(forgeOutcome, len(block.Transactions()))
 	// Key material is no longer needed after the block is signed. Zeroize the
 	// independently owned snapshot before invoking pluggable validation,
 	// adoption, or observer callbacks.
@@ -1429,7 +1466,7 @@ func (f *BlockForger) buildBlockForSlot(
 	kesPeriod uint64,
 	leiosData LeiosBlockData,
 	generation *credentialGeneration,
-) (ledger.Block, []byte, error) {
+) (ledger.Block, []byte, forgeBuildStats, error) {
 	var stats forgeBuildStats
 	deadline, haveDeadline := f.slotSelectionDeadline(slot)
 	// selectionConstraints bounds each attempt's selection pass by the
@@ -1449,9 +1486,9 @@ func (f *BlockForger) buildBlockForSlot(
 	// established here -- the leader check and the forge-slot fence have
 	// both passed, and the builder re-reads and re-checks the parent tip
 	// for the fallback build itself.
-	lost := func(err error) (ledger.Block, []byte, error) {
+	lost := func(err error) (ledger.Block, []byte, forgeBuildStats, error) {
 		if !stats.aborted {
-			return nil, nil, err
+			return nil, nil, stats, err
 		}
 		stats.attempts++
 		block, blockCbor, emptyErr := f.buildBlock(
@@ -1470,7 +1507,7 @@ func (f *BlockForger) buildBlockForSlot(
 				"selection_error", err,
 				"error", emptyErr,
 			)
-			return nil, nil, err
+			return nil, nil, stats, err
 		}
 		stats.empty = true
 		f.observeSelectionFallback(forgeSelectionResultEmpty)
@@ -1480,7 +1517,7 @@ func (f *BlockForger) buildBlockForSlot(
 			"attempts", stats.attempts,
 			"selection_error", err,
 		)
-		return block, blockCbor, nil
+		return block, blockCbor, stats, nil
 	}
 	for {
 		stats.attempts++
@@ -1502,7 +1539,7 @@ func (f *BlockForger) buildBlockForSlot(
 					"attempts", stats.attempts,
 				)
 			}
-			return block, blockCbor, nil
+			return block, blockCbor, stats, nil
 		}
 		if !isRetriableSelectionError(err) {
 			return lost(err)
