@@ -155,6 +155,24 @@ type BootstrapConfig struct {
 	// internally by downloadImmutables on a by-value copy of the config;
 	// callers do not populate it.
 	httpClient *http.Client
+	// OnArtifactSelected, when set, is invoked once this run's aggregator
+	// artifact has been resolved, identity-checked and (when enabled)
+	// certificate-verified, and before anything is downloaded. A non-nil
+	// return aborts the bootstrap.
+	//
+	// It runs before the first download rather than after the bootstrap so the
+	// caller can record the artifact identity durably while the run still owns
+	// nothing: an interruption at any later point then has an artifact to
+	// resume against, including the artifact-keyed download cache.
+	OnArtifactSelected func(SelectedArtifact) error
+	// PinnedDigest, when set, selects that exact artifact from the aggregator
+	// instead of the latest one: the v2 backend resolves it as a Cardano
+	// database artifact hash and the v1 backend as a snapshot digest. A resumed
+	// Mithril sync sets it from the artifact pin the interrupted run recorded,
+	// so the resume imports the artifact its partial database rows and phase
+	// checkpoints belong to. Empty selects the latest artifact, the normal
+	// first-run behaviour.
+	PinnedDigest string
 	// StartImmutable is the lowest immutable file number to download and
 	// extract. Files below it are assumed already present (a Mithril v2
 	// catch-up sets this to the immutable-import marker so it only fetches the
@@ -174,6 +192,18 @@ type BootstrapConfig struct {
 	// The callback runs on a single consumer goroutine and serializes
 	// processing, so it needs no internal locking.
 	OnChunkContiguous func(chunk ContiguousChunk) error
+}
+
+// SelectedArtifact is the identity of the aggregator artifact a bootstrap run
+// resolved, reported to BootstrapConfig.OnArtifactSelected before any download
+// begins. Digest is the v2 Cardano database artifact hash or the v1 snapshot
+// digest, matching what BootstrapConfig.PinnedDigest accepts for that backend.
+type SelectedArtifact struct {
+	Backend         string
+	Network         string
+	Digest          string
+	Beacon          Beacon
+	CertificateHash string
 }
 
 // ContiguousChunk describes the contiguous immutable prefix a pipelined
@@ -400,14 +430,38 @@ func Bootstrap(
 		)
 	}
 
-	// Step 1: Fetch latest snapshot
+	// Step 1: Fetch the selected snapshot -- the pinned one for a resumed sync,
+	// otherwise the latest the aggregator publishes.
 	client := newMithrilClient(aggregatorURL, cfg.AllowInsecureHTTP)
-	snapshot, err := client.GetLatestSnapshot(ctx)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"fetching latest snapshot: %w",
-			err,
-		)
+	var snapshot *SnapshotListItem
+	var err error
+	if cfg.PinnedDigest != "" {
+		snapshot, err = client.GetSnapshot(ctx, cfg.PinnedDigest)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"fetching pinned snapshot %s: %w",
+				cfg.PinnedDigest,
+				err,
+			)
+		}
+		if snapshot != nil && snapshot.Digest != cfg.PinnedDigest {
+			return nil, fmt.Errorf(
+				"aggregator returned snapshot %s for pinned digest %s",
+				snapshot.Digest,
+				cfg.PinnedDigest,
+			)
+		}
+	} else {
+		snapshot, err = client.GetLatestSnapshot(ctx)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"fetching latest snapshot: %w",
+				err,
+			)
+		}
+	}
+	if snapshot == nil {
+		return nil, errors.New("aggregator returned no snapshot")
 	}
 	if err := validateSnapshotIdentity(
 		cfg.Network, snapshot.Network, snapshot.Digest,
@@ -556,6 +610,21 @@ func Bootstrap(
 		return nil, errors.New(
 			"verified Mithril v1 bootstrap is unsupported because it has no signed ancillary state; use the v2 backend",
 		)
+	}
+
+	// Report the selected artifact before the first download so the caller can
+	// pin it durably; an interruption anywhere below then has an identity to
+	// resume against.
+	if cfg.OnArtifactSelected != nil {
+		if err := cfg.OnArtifactSelected(SelectedArtifact{
+			Backend:         cfg.Backend,
+			Network:         snapshot.Network,
+			Digest:          snapshot.Digest,
+			Beacon:          snapshot.Beacon,
+			CertificateHash: snapshot.CertificateHash,
+		}); err != nil {
+			return nil, err
+		}
 	}
 
 	// Step 2: Set up download directory
