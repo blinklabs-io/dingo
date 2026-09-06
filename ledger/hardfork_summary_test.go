@@ -944,3 +944,106 @@ func TestHardForkSummary_HorizonAnchoredAtAppliedParent(t *testing.T) {
 		"an anchor behind the published tip must not shrink the horizon",
 	)
 }
+
+func TestWallClockSlotFromConfirmedHistory_SupportedWhenEraSpansNow(t *testing.T) {
+	// A single unbounded era whose slot length is 1s spans the real wall
+	// clock, so the method returns the true current slot. The exact slot
+	// changes every second, but it must be far larger than the warm-up
+	// overhead of a fresh epoch cache (a value that can only grow, never
+	// shrink).
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       5,
+				StartSlot:     500,
+				SlotLength:    1000,
+				LengthInSlots: 100,
+				EraId:         1,
+			},
+		},
+		currentEra:     eras.EraDesc{Id: 1, Name: "Shelley"},
+		transitionInfo: hardfork.NewTransitionKnown(7),
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(550, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+		},
+	}
+	// UnsafeIndefiniteSafeZone → End nil → now always in-era.
+	ls.cachedShape.Store(&hardfork.Shape{
+		Eras: []hardfork.ShapeEntry{{
+			EraID: 1,
+			Params: hardfork.EraParams{
+				EpochSize:     100,
+				SlotLength:    time.Second,
+				SafeZoneSlots: 0,
+			},
+		}},
+	})
+	ls.publishSnapshotsLocked()
+
+	slot, ok := ls.WallClockSlotFromConfirmedHistory()
+	require.True(t, ok, "a 1s-era covering now must resolve the wall-clock slot")
+	assert.Greater(t, slot, uint64(100_000_000),
+		"2026 wall-clock slot via 1s slots since 2022-10-25 must exceed 100M")
+}
+
+func TestWallClockSlotFromConfirmedHistory_UnsupportedWhenPastHorizon(t *testing.T) {
+	// A bounded era whose forecast horizon ends far in the past (fresh
+	// mainnet has only a single bounded Byron era) cannot resolve the
+	// current wall-clock time, so the method must return false.
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				SlotLength:    20000,
+				LengthInSlots: 21600,
+				EraId:         0,
+			},
+		},
+		currentEra: eras.EraDesc{Id: 0, Name: "Byron"},
+		transitionInfo: hardfork.TransitionInfo{
+			State: hardfork.TransitionUnknown,
+		},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(0, []byte("genesis")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+		},
+	}
+	// NormalSafeZone snaps the end well within the same epoch — far past the
+	// real wall clock in 2026.
+	ls.cachedShape.Store(&hardfork.Shape{
+		Eras: []hardfork.ShapeEntry{{
+			EraID: 0,
+			Params: hardfork.EraParams{
+				EpochSize:     21600,
+				SlotLength:    20 * time.Second,
+				SafeZoneSlots: 21600,
+			},
+			NextEraTrigger: hardfork.NewTriggerAtEpoch(1),
+		}},
+	})
+	ls.publishSnapshotsLocked()
+
+	slot, ok := ls.WallClockSlotFromConfirmedHistory()
+	assert.False(t, ok,
+		"bounded era horizon must not resolve the current wall-clock slot")
+	assert.Zero(t, slot)
+}
+
+func TestWallClockSlotFromConfirmedHistory_EmptyCache(t *testing.T) {
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	slot, ok := ls.WallClockSlotFromConfirmedHistory()
+	assert.False(t, ok, "empty epoch cache must yield unsupported")
+	assert.Zero(t, slot)
+}

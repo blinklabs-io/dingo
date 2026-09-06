@@ -158,6 +158,77 @@ func writeTestOpCert(t *testing.T, contents string) string {
 	return path
 }
 
+func TestArmKesProtocolLifetime(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	genesis := synthGenesis(
+		129600, 62, time.Second,
+		time.Date(2017, 9, 23, 21, 44, 51, 0, time.UTC),
+	)
+
+	pc := NewPoolCredentials()
+	err := pc.LoadFromFiles(vrfPath, kesPath, opCertPath)
+	require.NoError(t, err)
+
+	// Before arming there is no usable protocol lifetime.
+	assert.Zero(t, pc.OpCertExpiryPeriod())
+	assert.Zero(t, pc.PeriodsRemaining(1))
+
+	require.NoError(t, pc.ArmKesProtocolLifetime(genesis))
+	assert.Equal(t, uint64(0), pc.opCertStartKES)
+	assert.Equal(t, uint64(62), pc.maxKESEvolutions)
+	assert.Equal(t, uint64(62), pc.opCertExpiryKES)
+	assert.Equal(t, uint64(62), pc.OpCertExpiryPeriod())
+	// Periods inside the armed window count down; at/after expiry they are 0.
+	assert.Equal(t, uint64(57), pc.PeriodsRemaining(5))
+	assert.Equal(t, uint64(61), pc.PeriodsRemaining(1))
+	assert.Zero(t, pc.PeriodsRemaining(62))
+	assert.Zero(t, pc.PeriodsRemaining(100))
+	assert.True(t, pc.opCertValidated)
+}
+
+func TestArmKesProtocolLifetime_RequiresGenesis(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+
+	err := pc.ArmKesProtocolLifetime(nil)
+	require.Error(t, err)
+	// The opcert structure may validate before the genesis is consulted, but
+	// without genesis data there is no protocol lifetime to enforce.
+	assert.Zero(t, pc.maxKESEvolutions)
+	assert.Zero(t, pc.opCertExpiryKES)
+	assert.Zero(t, pc.OpCertExpiryPeriod())
+	assert.Zero(t, pc.PeriodsRemaining(1))
+}
+
+func TestArmKesProtocolLifetime_RequiresCredentials(t *testing.T) {
+	genesis := synthGenesis(
+		129600, 62, time.Second,
+		time.Date(2017, 9, 23, 21, 44, 51, 0, time.UTC),
+	)
+	pc := NewPoolCredentials()
+	err := pc.ArmKesProtocolLifetime(genesis)
+	require.Error(t, err)
+	assert.Zero(t, pc.OpCertExpiryPeriod())
+}
+
+func TestArmKesProtocolLifetime_RequiresPositiveMaxEvolutions(t *testing.T) {
+	vrfPath, kesPath, opCertPath := createTestKeys(t)
+	genesis := synthGenesis(
+		129600, 0, time.Second,
+		time.Date(2017, 9, 23, 21, 44, 51, 0, time.UTC),
+	)
+	pc := NewPoolCredentials()
+	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
+
+	err := pc.ArmKesProtocolLifetime(genesis)
+	require.Error(t, err)
+	assert.Zero(t, pc.maxKESEvolutions)
+	assert.Zero(t, pc.opCertExpiryKES)
+	assert.Zero(t, pc.OpCertExpiryPeriod())
+	assert.Zero(t, pc.PeriodsRemaining(1))
+}
+
 func TestPoolCredentialsLoadFromFiles(t *testing.T) {
 	vrfPath, kesPath, opCertPath := createTestKeys(t)
 	loadedVRF, err := loadSecretKeyFromFile(vrfPath)
