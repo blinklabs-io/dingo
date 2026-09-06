@@ -2845,7 +2845,6 @@ func validateImportedRewardPParams(
 			currentEpoch,
 		)
 	}
-
 	store := cfg.Database.Metadata()
 	currentAvailable, err := importedPParamsAvailable(
 		store,
@@ -3150,12 +3149,30 @@ func importGovState(
 	if govState == nil {
 		return nil
 	}
+	if govState.CommitteeParseError != nil {
+		return fmt.Errorf("parsing imported committee: %w", govState.CommitteeParseError)
+	}
+	if govState.EnactCommitteeParseError != nil {
+		return fmt.Errorf("parsing imported enact-state committee: %w", govState.EnactCommitteeParseError)
+	}
 	if err != nil {
 		// Non-fatal warnings from committee/proposals parsing
 		cfg.Logger.Warn(
 			"governance state parsed with warnings",
 			"component", "ledgerstate",
 			"error", err,
+		)
+	}
+	// Conway serializes the already-active committee in both cgsCommittee
+	// and RatifyState.rsEnactState. Refuse a partial import if those views
+	// disagree: rsEnacted is the *next* boundary's work and must not be
+	// applied here as a workaround for inconsistent snapshot state.
+	if govState.EnactCommitteeSet && !committeeStatesEqual(
+		govState.Committee, govState.CommitteeQuorum,
+		govState.EnactCommittee, govState.EnactCommitteeQuorum,
+	) {
+		return errors.New(
+			"governance committee disagrees between cgsCommittee and rsEnactState",
 		)
 	}
 
@@ -3429,6 +3446,38 @@ func importGovState(
 	})
 
 	return nil
+}
+
+func committeeStatesEqual(
+	left []ParsedCommitteeMember,
+	leftQuorum *cbor.Rat,
+	right []ParsedCommitteeMember,
+	rightQuorum *cbor.Rat,
+) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	leftMembers := append([]ParsedCommitteeMember(nil), left...)
+	rightMembers := append([]ParsedCommitteeMember(nil), right...)
+	sort.Slice(leftMembers, func(i, j int) bool {
+		return committeeMemberKey(leftMembers[i]) < committeeMemberKey(leftMembers[j])
+	})
+	sort.Slice(rightMembers, func(i, j int) bool {
+		return committeeMemberKey(rightMembers[i]) < committeeMemberKey(rightMembers[j])
+	})
+	for i := range leftMembers {
+		if committeeMemberKey(leftMembers[i]) != committeeMemberKey(rightMembers[i]) {
+			return false
+		}
+	}
+	if (leftQuorum == nil) != (rightQuorum == nil) {
+		return false
+	}
+	return leftQuorum == nil || leftQuorum.Rat.Cmp(rightQuorum.Rat) == 0
+}
+
+func committeeMemberKey(member ParsedCommitteeMember) string {
+	return fmt.Sprintf("%d:%x:%d", member.ColdCredential.Type, member.ColdCredential.Hash, member.ExpiresEpoch)
 }
 
 func persistImportedCommitteeCertificates(
