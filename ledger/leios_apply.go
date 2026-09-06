@@ -63,6 +63,65 @@ var errCertifiedEndorserBlockUnavailable = errors.New(
 
 const certifiedEndorserBlockRetryDelay = time.Second
 
+// decodeEndorserTxEnvelope unwraps one endorser-block transaction entry and
+// splits it into its transaction CBOR and its top-level array elements.
+//
+// leios-fetch carries each endorser transaction CBOR-in-CBOR: the tx_list entry
+// is a CBOR byte string wrapping the transaction's own CBOR
+// (LeiosTx = encodeBytes(txCbor)). A non-byte-string entry — major type != 2 —
+// is already the bare transaction. elems[0] is the transaction body, which is
+// both the transaction-offset payload and, hashed, the transaction id.
+func decodeEndorserTxEnvelope(
+	raw cbor.RawMessage,
+) (txCbor []byte, elems []cbor.RawMessage, err error) {
+	txCbor = []byte(raw)
+	if len(txCbor) > 0 && txCbor[0]>>5 == 2 {
+		var inner []byte
+		if _, err := cbor.Decode(txCbor, &inner); err != nil {
+			return nil, nil, fmt.Errorf(
+				"unwrap CBOR-in-CBOR entry: %w",
+				err,
+			)
+		}
+		txCbor = inner
+	}
+	if _, err := cbor.Decode(txCbor, &elems); err != nil {
+		return nil, nil, fmt.Errorf("decode envelope: %w", err)
+	}
+	if len(elems) < 2 {
+		return nil, nil, fmt.Errorf(
+			"envelope has %d elements, want >= 2",
+			len(elems),
+		)
+	}
+	return txCbor, elems, nil
+}
+
+// endorserBlockTxIds returns the transaction id of every transaction in an
+// endorser block, without decoding the transactions themselves.
+//
+// A Cardano transaction id is blake2b-256 over the transaction body's CBOR —
+// the definition DijkstraTransaction.Id inherits from
+// BabbageTransactionBody.Id, which hashes the body bytes it decoded, i.e.
+// exactly elems[0] here. Deriving the ids straight from the envelope keeps the
+// cross-fork continuation audit off the full per-transaction decode path: an
+// armed window can span continuationAuditBlockBudget blocks and an endorser
+// block carries thousands of transactions, and the audit runs under
+// chainsyncBlockfetchMutex, where a full decode of every endorser transaction
+// would stall the blockfetch pipeline for a diagnostic.
+func endorserBlockTxIds(rawTxs []cbor.RawMessage) ([][]byte, error) {
+	ids := make([][]byte, 0, len(rawTxs))
+	for i, raw := range rawTxs {
+		_, elems, err := decodeEndorserTxEnvelope(raw)
+		if err != nil {
+			return nil, fmt.Errorf("endorser tx %d: %w", i, err)
+		}
+		id := lcommon.Blake2b256Hash([]byte(elems[0]))
+		ids = append(ids, id.Bytes())
+	}
+	return ids, nil
+}
+
 // applyEndorserBlock decodes a Leios endorser block's standalone transactions,
 // persists them as a standalone blob, and — on the CIP-conformant path
 // (LeiosApplyEndorserBlockTxs) — applies them to the ledger ahead of the ranking
@@ -115,33 +174,9 @@ func (ls *LedgerState) applyEndorserBlock(
 	txs := make([]lcommon.Transaction, len(rawTxs))
 	bodyCbors := make([][]byte, len(rawTxs))
 	for i, raw := range rawTxs {
-		// leios-fetch carries each endorser transaction CBOR-in-CBOR: the
-		// tx_list entry is a CBOR byte string wrapping the transaction's own
-		// CBOR (LeiosTx = encodeBytes(txCbor)). Unwrap it to the inner
-		// transaction bytes before decoding. (A non-byte-string entry — major
-		// type != 2 — is already the bare transaction.)
-		txCbor := []byte(raw)
-		if len(txCbor) > 0 && txCbor[0]>>5 == 2 {
-			var inner []byte
-			if _, err := cbor.Decode(txCbor, &inner); err != nil {
-				return 0, 0, fmt.Errorf("unwrap endorser tx %d: %w", i, err)
-			}
-			txCbor = inner
-		}
-		var elems []cbor.RawMessage
-		if _, err := cbor.Decode(txCbor, &elems); err != nil {
-			return 0, 0, fmt.Errorf(
-				"decode endorser tx %d envelope: %w",
-				i,
-				err,
-			)
-		}
-		if len(elems) < 2 {
-			return 0, 0, fmt.Errorf(
-				"endorser tx %d has %d elements, want >= 2",
-				i,
-				len(elems),
-			)
+		txCbor, elems, err := decodeEndorserTxEnvelope(raw)
+		if err != nil {
+			return 0, 0, fmt.Errorf("endorser tx %d: %w", i, err)
 		}
 		// An endorser block referenced by a Dijkstra ranking block is
 		// Dijkstra-era, so decode its transactions as Dijkstra directly.
