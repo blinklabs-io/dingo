@@ -889,6 +889,16 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 		// re-reading the tip is what clears it. The retry is only taken
 		// while nothing has been emitted, so a ledger.tx consumer is never
 		// told to undo the same block twice.
+		//
+		// Record the durable rollback intent before anything is emitted or
+		// truncated, so a crash between the undo emission and ls.rollback
+		// leaves the pending target on disk for recoverRollbackIntent. One
+		// call covers both step kinds: next is the intermediate point until
+		// the descent reaches the recovery point, and the recovery point
+		// itself on the final step.
+		if err := persistRollbackIntent(ls.db, next); err != nil {
+			return stepErr(fmt.Errorf("persist rollback intent: %w", err))
+		}
 		emitted, err := ls.validateAndEmitRollbackUndoEmitted(next)
 		if err != nil {
 			if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) &&

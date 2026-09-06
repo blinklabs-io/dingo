@@ -1666,6 +1666,9 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	if err := ls.loadTip(); err != nil {
 		return fmt.Errorf("failed to load tip: %w", err)
 	}
+	if err := ls.recoverRollbackIntent(); err != nil {
+		return fmt.Errorf("failed to recover rollback intent: %w", err)
+	}
 	// Reconstruct the evolving-nonce fold across Mithril "gap blocks" (blocks
 	// between the ledger-state snapshot slot and the trust boundary) that were
 	// imported without folding their VRF output. Must run after the tip and
@@ -3151,6 +3154,9 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
 		return ErrRollbackExceedsMithrilBoundary
 	}
+	if err := persistRollbackIntent(ls.db, point); err != nil {
+		return err
+	}
 	// Bracket every rollback mutation so split reward precomputation cannot
 	// persist results that mixed pre- and post-rollback blocks, pots, protocol
 	// state, or account history. The active count also keeps overlapping
@@ -3482,6 +3488,9 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	if err := ls.enforceDurableTipFloor(); err != nil {
 		return err
 	}
+	if err := clearRollbackIntent(ls.db); err != nil {
+		return fmt.Errorf("clear durable rollback intent: %w", err)
+	}
 	return nil
 }
 
@@ -3649,7 +3658,13 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	err := func() error {
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
+		if err := persistRollbackIntent(ls.db, point); err != nil {
+			return err
+		}
 		if err := ls.validateAndEmitRollbackUndo(point); err != nil {
+			if clearErr := clearRollbackIntent(ls.db); clearErr != nil {
+				return errors.Join(err, fmt.Errorf("clear durable rollback intent: %w", clearErr))
+			}
 			return err
 		}
 		evts, rbErr := ls.chain.RollbackDeferred(point)
@@ -3676,6 +3691,9 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	}
 	if err := ls.rollback(point); err != nil {
 		return fmt.Errorf("synchronize ledger rollback state: %w", err)
+	}
+	if err := clearRollbackIntent(ls.db); err != nil {
+		return fmt.Errorf("clear durable rollback intent: %w", err)
 	}
 	// A primary chain can be ahead of the applied ledger during genesis or
 	// snapshot catch-up. In that case ls.rollback intentionally leaves the
@@ -8493,11 +8511,20 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 			"ledger_tip_hash",
 			hex.EncodeToString(ledgerTip.Point.Hash),
 		)
+		ls.transactionEventMutex.Lock()
+		defer ls.transactionEventMutex.Unlock()
+		if err := persistRollbackIntent(ls.db, chainTip.Point); err != nil {
+			return fmt.Errorf("persist rollback intent: %w", err)
+		}
+		ls.emitRollbackTransactionEvents(ls.blocksAboveSlot(chainTip.Point.Slot))
 		if err := ls.rollback(chainTip.Point); err != nil {
 			return fmt.Errorf(
 				"rollback ledger tip to primary chain tip: %w",
 				err,
 			)
+		}
+		if err := clearRollbackIntent(ls.db); err != nil {
+			return fmt.Errorf("clear durable rollback intent: %w", err)
 		}
 		return nil
 	}
@@ -8568,19 +8595,20 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		"ancestor_hash",
 		hex.EncodeToString(ancestor.Hash),
 	)
-	if err := ls.config.ChainManager.RewindPrimaryChainToPoint(
-		ancestor,
-	); err != nil {
-		return fmt.Errorf(
-			"rewind primary chain to common primary-chain ancestor: %w",
-			err,
-		)
+	ls.transactionEventMutex.Lock()
+	defer ls.transactionEventMutex.Unlock()
+	if err := persistRollbackIntent(ls.db, ancestor); err != nil {
+		return fmt.Errorf("persist rollback intent: %w", err)
+	}
+	ls.emitRollbackTransactionEvents(ls.blocksAboveSlot(ancestor.Slot))
+	if err := ls.config.ChainManager.RewindPrimaryChainToPoint(ancestor); err != nil {
+		return fmt.Errorf("rewind primary chain to common primary-chain ancestor: %w", err)
 	}
 	if err := ls.rollback(ancestor); err != nil {
-		return fmt.Errorf(
-			"rollback ledger tip to common primary-chain ancestor: %w",
-			err,
-		)
+		return fmt.Errorf("rollback ledger tip to common primary-chain ancestor: %w", err)
+	}
+	if err := clearRollbackIntent(ls.db); err != nil {
+		return fmt.Errorf("clear durable rollback intent: %w", err)
 	}
 	return nil
 }
