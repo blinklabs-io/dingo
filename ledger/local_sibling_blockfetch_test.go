@@ -17,6 +17,7 @@ package ledger
 import (
 	"testing"
 
+	"github.com/blinklabs-io/dingo/chain"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
@@ -210,6 +211,60 @@ func TestStaleBlockfetchBatchIsDiscardedAfterLocalSiblingAdoption(
 			1,
 			f.ls.blockfetchRangeFailure.count,
 			"a discarded block is not range progress",
+		)
+	})
+
+	t.Run("rollback lands after the fast path passes", func(t *testing.T) {
+		// The window the early generation test cannot cover. That test
+		// releases nothing, but it holds nothing either: the adoption
+		// that publishes a generation and truncates holds chainsyncMutex
+		// while this drain holds chainsyncBlockfetchMutex, so a rollback
+		// can land between the drain testing its batch and the chain add
+		// taking the chain mutex.
+		//
+		// Expressed sequentially -- fast path would pass, generation then
+		// moves, add is attempted -- because the guarantee under test is
+		// that the same predicate is re-evaluated at add time. That it is
+		// evaluated under the chain mutex, and so cannot itself be raced,
+		// is pinned by
+		// TestAddBlockWithPointDeferredIfEvaluatesAdmitUnderTheChainMutex.
+		f := newSiblingFixture(t)
+		continuation := newContinuation(t, f)
+		point := ocommon.NewPoint(
+			continuation.SlotNumber(),
+			continuation.Hash().Bytes(),
+		)
+		f.ls.blockfetchBatchRollbackGeneration = f.ls.blockfetchRollbackGeneration.Load()
+		require.True(
+			t,
+			f.ls.blockfetchBatchStillCurrent(),
+			"precondition: the drain's own fast path would admit this batch",
+		)
+
+		// The rollback publishes its generation, as AdoptLocalForgedSibling
+		// does before it truncates.
+		f.ls.blockfetchRollbackGeneration.Add(1)
+
+		// The block still fits the tip perfectly, so nothing the chain
+		// checks for itself can reject it.
+		require.Equal(
+			t,
+			f.rival.Hash().Bytes(),
+			f.ls.chain.Tip().Point.Hash,
+		)
+		_, err := f.ls.chain.AddBlockWithPointDeferredIf(
+			continuation,
+			point,
+			nil,
+			f.ls.blockfetchBatchStillCurrent,
+		)
+		require.ErrorIs(t, err, chain.ErrBlockAddNotAdmitted)
+		assert.Equal(
+			t,
+			f.rival.Hash().Bytes(),
+			f.ls.chain.Tip().Point.Hash,
+			"a batch superseded after the fast path must still be refused "+
+				"at the moment of the add",
 		)
 	})
 

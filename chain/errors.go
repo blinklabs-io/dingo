@@ -27,7 +27,14 @@ import (
 const DefaultMaxQueuedHeaders = 10_000
 
 var (
-	ErrIntersectNotFound            = errors.New("chain intersect not found")
+	ErrIntersectNotFound = errors.New("chain intersect not found")
+	// ErrBlockAddNotAdmitted is returned by AddBlockWithPointDeferredIf when
+	// the caller's admit predicate, evaluated under the chain mutex, declines
+	// the block. It means the add was abandoned before any chain state was
+	// read or written, not that the block was invalid.
+	ErrBlockAddNotAdmitted = errors.New(
+		"block add was not admitted by the caller's predicate",
+	)
 	ErrRollbackBeyondEphemeralChain = errors.New(
 		"cannot rollback ephemeral chain beyond memory buffer",
 	)
