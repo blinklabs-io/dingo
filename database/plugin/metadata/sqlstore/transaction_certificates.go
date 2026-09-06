@@ -102,23 +102,29 @@ RETURNING id`,
 				err,
 			)
 		}
-		deposit, found := deposits[certIndex]
-		if certificateRequiresDeposit(certificate) && deposits == nil && !allowUnknownDeposits {
+		// An absent key means the deposit is unknown, not zero: the
+		// producers omit an index whose deposit could not be computed
+		// (ledger.calculateCertificateDeposit and
+		// backfill.calculateCertDeposits both do). Defaulting it to zero
+		// records an authoritative zero, and a later legacy deregistration
+		// is then refunded zero by
+		// UtxoValidateValueNotConservedUtxo instead of falling back to the
+		// current KeyDeposit, failing value conservation on a valid
+		// transaction. Pass nil through so the column is stored NULL. A
+		// recorded zero stays a non-nil zero.
+		var deposit *uint64
+		if value, found := deposits[certIndex]; found {
+			deposit = &value
+		}
+		// A gap block may legitimately arrive with no deposit map at all;
+		// SetGapBlockTransaction says so. Unknown then stays unknown (NULL)
+		// rather than being rejected, while the live path keeps the guard.
+		if certificateRequiresDeposit(certificate) && deposits == nil &&
+			!allowUnknownDeposits {
 			return nil, fmt.Errorf(
 				"missing certDeposits for deposit-bearing certificate at index %d",
 				certIndex,
 			)
-		}
-		// A deposit is bound as a decimal string, or as NULL when the
-		// caller could not calculate one and said so. sql.NullString rather
-		// than any keeps that the only two possibilities: an untyped bind
-		// reaches Postgres as a raw Go value with no encode plan for a text
-		// column, which SQLite's TEXT affinity would have hidden.
-		var depositValue sql.NullString
-		if found {
-			depositValue = validString(decimalUint64(types.Uint64(deposit)))
-		} else if !allowUnknownDeposits {
-			depositValue = validString(decimalUint64(types.Uint64(0)))
 		}
 		specializedID, ref, err := s.applySpecializedCertificate(
 			ctx,
@@ -128,7 +134,7 @@ RETURNING id`,
 			point.Slot,
 			blockIndex,
 			uint(certIndex),
-			depositValue,
+			deposit,
 		)
 		if err != nil {
 			return nil, fmt.Errorf(
@@ -287,7 +293,7 @@ func (s *Store) applySpecializedCertificate(
 	slot uint64,
 	blockIndex uint32,
 	certIndex uint,
-	deposit sql.NullString,
+	deposit *uint64,
 ) (uint, *models.StakeCredentialRef, error) {
 	switch cert := certificate.(type) {
 	case *lcommon.PoolRegistrationCertificate:
@@ -336,15 +342,16 @@ RETURNING id`,
 		)
 		return id, nil, err
 	case *lcommon.DeregistrationDrepCertificate:
+		// A DRep deregistration carries its refund in the certificate
+		// itself, so this amount is always known and never NULL.
+		amount := uint64(cert.Amount)
 		id, err := applyDrepDeregistrationCertificate(
 			ctx,
 			db,
 			cert,
 			certificateID,
 			slot,
-			// The refund is declared by the certificate itself, so it is
-			// always known here and never NULL.
-			validString(decimalUint64(types.Uint64(cert.Amount))),
+			&amount,
 		)
 		return id, nil, err
 	case *lcommon.UpdateDrepCertificate:
@@ -433,13 +440,26 @@ RETURNING id`,
 	)
 }
 
+// nullableDecimalUint64 renders a deposit for a TEXT column that must
+// distinguish an unknown deposit from a recorded zero. A nil pointer binds as
+// a nil interface, which the driver writes as SQL NULL; a non-nil zero binds
+// as "0". This mirrors the account_import_baseline.deposit_amount binding,
+// whose migration states the rule: substituting today's protocol parameter for
+// a value the ingest never knew would invent history.
+func nullableDecimalUint64(value *uint64) any {
+	if value == nil {
+		return nil
+	}
+	return decimalUint64(types.Uint64(*value))
+}
+
 func applyAccountCertificate(
 	ctx context.Context,
 	db queryer,
 	certificate lcommon.Certificate,
 	certificateID uint,
 	slot uint64,
-	deposit sql.NullString,
+	deposit *uint64,
 ) (uint, *models.StakeCredentialRef, error) {
 	var (
 		stakeCredential lcommon.Credential
@@ -548,7 +568,7 @@ func applyAccountCertificate(
 	switch cert := certificate.(type) {
 	case *lcommon.StakeRegistrationCertificate,
 		*lcommon.RegistrationCertificate:
-		args = []any{key, tag, slot, deposit, certificateID}
+		args = []any{key, tag, slot, nullableDecimalUint64(deposit), certificateID}
 	case *lcommon.StakeDeregistrationCertificate:
 		args = []any{key, tag, slot, certificateID}
 	case *lcommon.DeregistrationCertificate:
@@ -556,13 +576,13 @@ func applyAccountCertificate(
 	case *lcommon.StakeDelegationCertificate:
 		args = []any{key, tag, state.pool, slot, certificateID}
 	case *lcommon.StakeRegistrationDelegationCertificate:
-		args = []any{key, tag, state.pool, slot, deposit, certificateID}
+		args = []any{key, tag, state.pool, slot, nullableDecimalUint64(deposit), certificateID}
 	case *lcommon.StakeVoteDelegationCertificate:
 		args = []any{key, tag, state.pool, state.drep, state.drepType, slot, certificateID}
 	case *lcommon.StakeVoteRegistrationDelegationCertificate:
-		args = []any{key, tag, state.pool, state.drep, state.drepType, slot, deposit, certificateID}
+		args = []any{key, tag, state.pool, state.drep, state.drepType, slot, nullableDecimalUint64(deposit), certificateID}
 	case *lcommon.VoteRegistrationDelegationCertificate:
-		args = []any{key, tag, state.drep, state.drepType, slot, deposit, certificateID}
+		args = []any{key, tag, state.drep, state.drepType, slot, nullableDecimalUint64(deposit), certificateID}
 	case *lcommon.VoteDelegationCertificate:
 		args = []any{key, tag, state.drep, state.drepType, slot, certificateID}
 	}
@@ -670,7 +690,7 @@ func applyPoolRegistrationCertificate(
 	cert *lcommon.PoolRegistrationCertificate,
 	certificateID uint,
 	slot uint64,
-	deposit sql.NullString,
+	deposit *uint64,
 ) (uint, error) {
 	rewardTag, rewardAccount, err := certutil.PoolRewardAccount(cert)
 	if err != nil {
@@ -739,7 +759,7 @@ RETURNING id`,
 		certificateID,
 		poolID,
 		slot,
-		deposit,
+		nullableDecimalUint64(deposit),
 		nullBytes(leiosKeyPublic),
 		nullBytes(leiosKeyPoP),
 	}, poolID, slot)
@@ -835,7 +855,7 @@ func applyDrepRegistrationCertificate(
 	cert *lcommon.RegistrationDrepCertificate,
 	certificateID uint,
 	slot uint64,
-	deposit sql.NullString,
+	deposit *uint64,
 ) (uint, error) {
 	tag, err := models.CredentialTagFromUint(
 		cert.DrepCredential.CredType,
@@ -879,7 +899,7 @@ RETURNING id`,
 		certificateID,
 		tag,
 		slot,
-		deposit,
+		nullableDecimalUint64(deposit),
 	)
 }
 
@@ -889,7 +909,7 @@ func applyDrepDeregistrationCertificate(
 	cert *lcommon.DeregistrationDrepCertificate,
 	certificateID uint,
 	slot uint64,
-	deposit sql.NullString,
+	deposit *uint64,
 ) (uint, error) {
 	tag, err := models.CredentialTagFromUint(
 		cert.DrepCredential.CredType,
@@ -920,7 +940,7 @@ RETURNING id`,
 		certificateID,
 		tag,
 		slot,
-		deposit,
+		nullableDecimalUint64(deposit),
 	)
 }
 
