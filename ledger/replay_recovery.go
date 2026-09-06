@@ -817,6 +817,17 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 		!errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
 		return fmt.Errorf("validate recovery target: %w", err)
 	}
+	// Chain.ValidateRollback reads every slot-zero point as origin and skips
+	// its membership check there, and so does Chain.Rollback: it truncates to
+	// index zero and leaves currentTip naming the point's hash. A slot-zero
+	// point carrying a hash therefore still needs the store lookup this check
+	// replaced, or the descent would truncate the chain whole toward a block
+	// that need not exist.
+	if point.Slot == 0 && len(point.Hash) > 0 {
+		if _, err := database.BlockByPoint(ls.db, point); err != nil {
+			return fmt.Errorf("lookup recovery target: %w", err)
+		}
+	}
 
 	window := uint64(securityParam) //nolint:gosec // positive, checked above
 	var (

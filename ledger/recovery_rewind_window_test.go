@@ -529,3 +529,54 @@ func TestWindowedRewindRefusesRecoveryTargetTheChainDoesNotHold(t *testing.T) {
 		"a target the chain does not hold must be refused before any step is committed",
 	)
 }
+
+// TestWindowedRewindRefusesSlotZeroTargetTheStoreDoesNotHold covers the one
+// target shape Chain.ValidateRollback cannot speak for.
+//
+// ValidateRollback reads every slot-zero point as origin and skips its
+// membership check there, and Chain.Rollback does the same: it truncates to
+// index zero and sets currentTip to the point it was given. A slot-zero point
+// carrying a hash would therefore pass the entry check and take the descent
+// all the way down, leaving the chain empty and its tip naming a block the
+// store need not hold, so the entry check keeps the store lookup for it.
+func TestWindowedRewindRefusesSlotZeroTargetTheStoreDoesNotHold(t *testing.T) {
+	const (
+		securityParam = 8
+		blockCount    = 30
+	)
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		cm.SetLedger(testSecurityParamLedger{securityParam: securityParam}),
+	)
+	pc := cm.PrimaryChain()
+	seedTestChain(t, pc, "slot-zero-target", blockCount)
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, securityParam),
+		EventBus:          bus,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.currentEra = eras.ShelleyEraDesc
+
+	target := ocommon.NewPoint(0, testHashBytes("slot-zero-target-absent"))
+	tipBefore := pc.Tip()
+	err = ls.rollbackPrimaryChainInSecurityParamWindows(target)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+	require.Equal(
+		t,
+		tipBefore,
+		pc.Tip(),
+		"a slot-zero target the store does not hold must not truncate the chain",
+	)
+}
