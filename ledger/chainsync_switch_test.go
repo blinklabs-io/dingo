@@ -1221,9 +1221,11 @@ func TestDiscardBufferedPeerHeadersDoesNotRaceBufferedHeaderIteration(
 			ls.discardBufferedPeerHeaders(connIds[i%conns])
 		}
 	}()
-	// The buffering write path. claimHeaderPipelineOwnership releases
-	// chainsyncBlockfetchMutex before this runs, so it is a genuinely
-	// unsynchronized writer without bufferedHeaderMutex.
+	// The buffering write path, which bufferedHeaderMutex alone protects.
+	// claimHeaderPipelineOwnership releases chainsyncBlockfetchMutex on
+	// return, so this write never holds that lock -- it is the case the
+	// previous, narrower fix missed, and it fails here without the
+	// dedicated mutex.
 	go func() {
 		defer wg.Done()
 		for i := range 200 {
