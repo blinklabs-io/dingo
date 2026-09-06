@@ -227,6 +227,45 @@ Cross-repo change cascades that must re-run this suite:
    bookkeeping) so each vector starts from a genuinely empty database --
    see each backend's own "Reset semantics" above for how.
 
+## Dingo validation entry point coverage
+
+A green corpus run is **not** evidence that Dingo's own transaction validation
+ran. The shared harness validates each vector with
+`common.VerifyTransaction` over `conformance.ConformanceValidationRules`, a
+list of upstream `gouroboros` rule functions. Nothing in that path reaches
+`ledger/eras`' `EraDesc.ValidateTxFunc` -- `ValidateTxByron` through
+`ValidateTxDijkstra` -- which is what the node runs against live transactions
+and which differs from the upstream list (Conway and Dijkstra substitute Dingo
+implementations for the committee-certificate, unknown-voter, Plutus, fee and
+PlutusV1/V2 feature rules; the pre-Alonzo eras replace the upstream fee and
+max-size rules outright).
+
+Stubbing `ValidateTxConway` to `return nil` leaves
+`TestRulesConformanceVectors` reporting 315/315, 100%.
+
+`entry_points_test.go` and `entry_points_replay_test.go` close that gap:
+
+- `TestConformanceVectorsExerciseDingoEraEntryPoints` replays the corpus a
+  second time, routing every vector transaction through the production entry
+  point for the era its protocol parameters select, and asserts **per vector**
+  that the entry point resolved the inputs that transaction declares through
+  live ledger state. The assertion is independent of the verdict, so it is not
+  satisfied by a validator that returns the vector fixture's own result.
+  Dingo's rule set is a superset of the corpus rule set (it keeps the fee and
+  max-size rules the corpus excludes because the vectors carry
+  Haskell-computed values), so agreement on verdicts is not asserted here.
+- `TestDingoEraRegistryExposesValidationEntryPoints` fails on a `nil`
+  `ValidateTxFunc` or a protocol-major-version gap between adjacent eras.
+- `TestDingoEraEntryPointsRejectInputlessTransaction` covers **every** era in
+  the registry, not just Conway. The corpus is Conway-only and validation
+  rules are duplicated per era, so Conway coverage says nothing about
+  `ValidateTxShelley` or `ValidateTxDijkstra`.
+- `TestEntryPointExecutionFaultDetectsBypassedValidator` and
+  `TestDingoEraEntryPointsReportsMissingValidator` prove the detectors detect,
+  by substituting a no-op validator, a fixture-only verdict, a
+  reject-without-reading validator, and a nil registry entry, and requiring
+  each to be reported.
+
 ## Corpus replay budget
 
 One full replay of the vector corpus is the single most expensive thing in this
@@ -239,6 +278,16 @@ Each backend replays the corpus **exactly once per `go test` process**, and
 every consumer reads that one memoized result set: the pass/fail gate, the
 progress statistics, and the cross-backend comparison. The vector extraction is
 shared the same way, once rather than once per replay. See `corpus_test.go`.
+
+The one deliberate exception is the SQLite-only entry-point replay described in
+[Dingo validation entry point coverage](#dingo-validation-entry-point-coverage).
+The shared harness offers no hook for a caller-supplied validator, so that
+coverage is not obtainable from the harness pass at any replay count. It is
+also memoized once per process, and it runs against SQLite only because entry
+points do not vary by storage backend. Its cost is the state replay rather than
+the validation: with the entry-point call removed the pass takes the same wall
+clock. Measured on one machine, it took the package from 23.8s to 46.1s
+uninstrumented, and from 585s to 891s under `-race`.
 
 Before this, a Linux CI run with both DSNs configured replayed the corpus eight
 times:
@@ -292,6 +341,8 @@ access patterns. That needs **one** pass per dialect, not several.
 | `state_manager_postgres.go` | `NewDingoPostgresStateManager` — same `DingoStateManager`, real Postgres connection with schema isolation (`dingo_extra_plugins` build tag) |
 | `state_manager_mysql.go` | `NewDingoMysqlStateManager` — same `DingoStateManager`, real MySQL connection with database isolation (`dingo_extra_plugins` build tag) |
 | `state_manager_backend_test.go` | Real-backend acceptance tests against the default SQLite manager: restart survival, transaction rollback, and an epoch-transition/stake-snapshot test driving `ledger/governance.ProcessEpoch` and `ledger/snapshot.Manager` end to end |
+| `entry_points_test.go` | Assertions that Dingo's production era validation entry points actually execute for the corpus, plus the per-era and detector-proving regression tests |
+| `entry_points_replay_test.go` | Entry-point replay machinery: era-registry read, observing ledger state, per-vector routing evidence, and the bypass detector predicate |
 | `state_provider.go`   | State-query adapters used by the harness -- every read queries the real backend live (see its type doc comment for the one narrow, documented exception) |
 | `docker-compose.yml`  | Local PostgreSQL and MySQL for the SQL-backed tests |
 

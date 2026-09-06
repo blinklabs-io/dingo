@@ -14,6 +14,8 @@
 
 package models
 
+import "math/big"
+
 // AccountDelegationHistoryRow holds delegation history
 // query results for a stake account.
 type AccountDelegationHistoryRow struct {
@@ -43,7 +45,17 @@ type AccountRegistrationHistoryRow struct {
 	// Deposit is the registration deposit (or refund, for
 	// deregistrations) in lovelace. Zero for certificate types
 	// that do not record an explicit deposit.
-	Deposit uint64
+	//
+	// Nil means the deposit is *unknown*: the certificate type does record
+	// one, but it could not be computed when the certificate was ingested
+	// (an era whose CertDepositFunc rejected the active protocol
+	// parameters, or a backfill that could not resolve them), so the column
+	// is NULL. Nil is not the same answer as zero, and callers must not
+	// substitute the current protocol-parameter value for it -- see
+	// AccountImportRegistration.Deposit for the same rule on baselines.
+	// A genuinely recorded zero (KeyDeposit was 0, as on the devnet) is a
+	// non-nil zero.
+	Deposit *uint64
 	// TxSlot is the slot of the transaction containing the
 	// (de)registration certificate.
 	TxSlot uint64
@@ -116,12 +128,25 @@ type AccountTransactionAssociationRow struct {
 // account, summed from persisted withdrawal and MIR state.
 type AccountSums struct {
 	// WithdrawalsSum is the total of all reward withdrawals
-	// made by the account.
+	// made by the account. Withdrawals are coin, so this total
+	// is unsigned.
 	WithdrawalsSum uint64
-	// ReservesSum is the total of all MIR transfers to the
-	// account sourced from the reserves pot.
-	ReservesSum uint64
-	// TreasurySum is the total of all MIR transfers to the
-	// account sourced from the treasury pot.
-	TreasurySum uint64
+	// ReservesSum is the signed total of all MIR deltas for the
+	// account sourced from the reserves pot. MIR deltas are
+	// delta_coin, so individual rows may be negative and the
+	// total is summed as a signed value. Never nil.
+	ReservesSum *big.Int
+	// TreasurySum is the signed total of all MIR deltas for the
+	// account sourced from the treasury pot. See ReservesSum.
+	TreasurySum *big.Int
+}
+
+// NewAccountSums returns an AccountSums with every total at zero and neither
+// signed total nil. Readers return it on their failure paths too, so the
+// non-nil guarantee does not depend on the caller checking the error first.
+func NewAccountSums() AccountSums {
+	return AccountSums{
+		ReservesSum: new(big.Int),
+		TreasurySum: new(big.Int),
+	}
 }

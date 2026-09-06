@@ -167,8 +167,8 @@ func createTestBlock(
 	// (8 BE), the raw concatenation real cardano-cli opcerts use, NOT a CBOR
 	// array. See ledger/forging/keys.go ValidateOpCert and
 	// verifyOpCertColdSignature.
-	opCertSeqNum := uint32(0)
-	opCertKesPeriod := uint32(0)
+	const opCertSeqNum = 0
+	const opCertKesPeriod = 0
 	var opCertBody [48]byte
 	copy(opCertBody[:32], kesPk)
 	binary.BigEndian.PutUint64(opCertBody[32:40], uint64(opCertSeqNum))
@@ -353,8 +353,8 @@ func createTestTPraosBlock(
 	leaderProof, leaderOutput, err := vrf.Prove(vrfSk, leaderInput)
 	require.NoError(t, err)
 
-	const opCertSeqNum = uint32(0)
-	const opCertKesPeriod = uint32(0)
+	const opCertSeqNum = 0
+	const opCertKesPeriod = 0
 	var opCertBody [48]byte
 	copy(opCertBody[:32], kesPk)
 	binary.BigEndian.PutUint64(opCertBody[32:40], uint64(opCertSeqNum))
@@ -2878,6 +2878,9 @@ func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkSkips(
 	}
 	ls.mithrilLedgerSlot = ls.epochCache[1].StartSlot + 50
 	tb.block.slot = ls.epochCache[2].StartSlot + 50
+	// Publish before asserting: the skip decision reads the published epoch
+	// cache generation, not the mutable field.
+	ls.publishSnapshotsLocked()
 
 	// The startup fallback derives historical rows from current live state and
 	// stamps them with the current epoch start. Unlike a certified imported
@@ -2915,7 +2918,6 @@ func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkSkips(
 	)
 	require.NoError(t, err)
 	require.True(t, ls.shouldSkipPostMithrilMarkEligibility(snapshot, 4))
-	ls.publishSnapshotsLocked()
 
 	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
 	require.NoError(t, err)
@@ -2934,6 +2936,10 @@ func TestVerifyBlockLeaderEligibility_LiveComputedHistoricalMarkStillChecks(
 	}
 	ls.mithrilLedgerSlot = ls.epochCache[1].StartSlot + 50
 	tb.block.slot = ls.epochCache[2].StartSlot + 50
+	// Publish before asserting: without it the negative assertion below would
+	// hold because epoch 4 is absent from the stale cache rather than because
+	// the capture precedes epoch 4's start.
+	ls.publishSnapshotsLocked()
 	seedEligibilityEpochs(t, db, append([]models.Epoch{
 		{EpochId: 2, StartSlot: 200, LengthInSlots: 100},
 	}, ls.epochCache...))
@@ -2968,7 +2974,6 @@ func TestVerifyBlockLeaderEligibility_LiveComputedHistoricalMarkStillChecks(
 		snapshot,
 		snapshotEpoch,
 	))
-	ls.publishSnapshotsLocked()
 
 	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
 	require.Error(t, err)
