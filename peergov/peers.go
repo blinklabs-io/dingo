@@ -81,56 +81,13 @@ func (p *PeerGovernor) GetPeers() []Peer {
 }
 
 // ErrUnroutableAddress is returned when a peer address resolves to a
-// non-routable or reserved IP.
+// non-routable IP (private, loopback, link-local, multicast, or
+// unspecified).
 var ErrUnroutableAddress = errors.New("unroutable peer address")
 
-// unreachablePrefixes contains address space that net.IP's class predicates
-// otherwise report as globally-unicast but that is not a usable public peer
-// address. This includes shared, protocol-assigned, benchmarking, and
-// reserved/future-use space.
-var unreachablePrefixes = []netip.Prefix{
-	netip.MustParsePrefix("0.0.0.0/8"),      // RFC 1122 this network
-	netip.MustParsePrefix("100.64.0.0/10"),  // RFC 6598 shared address space
-	netip.MustParsePrefix("192.0.0.0/24"),   // RFC 6890 IETF assignments
-	netip.MustParsePrefix("192.88.99.0/24"), // RFC 7526 deprecated 6to4
-	netip.MustParsePrefix("198.18.0.0/15"),  // RFC 2544 benchmarking
-	netip.MustParsePrefix("240.0.0.0/4"),    // RFC 1112 reserved
-	netip.MustParsePrefix("64:ff9b:1::/48"), // RFC 8215 local translation
-	netip.MustParsePrefix("100::/64"),       // RFC 6666 discard-only
-	netip.MustParsePrefix("2001:2::/48"),    // RFC 5180 benchmarking
-	netip.MustParsePrefix("2001:10::/28"),   // RFC 4843 ORCHID
-	netip.MustParsePrefix("2001:20::/28"),   // RFC 7343 ORCHIDv2
-}
-
-// IsRoutableIP reports whether an IP address is usable as a peer candidate
-// learned from the network. It rejects private, loopback, link-local,
-// multicast, unspecified, and reserved address space. An address must be a
-// valid four- or sixteen-byte IP representation; malformed net.IP values are
-// never candidates.
-func IsRoutableIP(ip net.IP) bool {
-	if ip == nil || ip.To16() == nil {
-		return false
-	}
-	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
-		return false
-	}
-	addr, ok := netip.AddrFromSlice(ip)
-	if !ok {
-		return false
-	}
-	addr = addr.Unmap()
-	for _, prefix := range unreachablePrefixes {
-		if prefix.Contains(addr) {
-			return false
-		}
-	}
-	return true
-}
-
 // isRoutableAddr checks whether the host portion of an address is a
-// publicly-routable unicast IP. It returns false for private, loopback,
-// link-local, multicast, unspecified, and reserved addresses.
+// publicly-routable unicast IP. It returns false for private (RFC 1918 /
+// RFC 4193), loopback, link-local, multicast, and unspecified addresses.
 // If the host is not a valid IP (e.g. unresolved hostname), it is
 // considered routable so that DNS-based topology peers still work.
 func isRoutableAddr(address string) bool {
@@ -145,6 +102,87 @@ func isRoutableAddr(address string) bool {
 		return true
 	}
 	return IsRoutableIP(ip)
+}
+
+// unreachablePrefixes are ranges that net.IP's own class predicates report as
+// global unicast but that cannot be a peer we meant to dial. net.IP.IsPrivate
+// covers only RFC 1918 and RFC 4193, so each of these otherwise reads as
+// routable. Every entry is marked "Globally Reachable: False" in the IANA
+// special-purpose address registries.
+//
+// Note that IsUnspecified matches only 0.0.0.0 itself, so the rest of
+// 0.0.0.0/8 needs the prefix.
+//
+// Neighbouring ranges that IANA marks globally reachable are deliberately
+// absent and pinned as accepted in TestIsRoutableIP: AS112 (192.31.196.0/24,
+// 2001:4:112::/48), AMT (192.52.193.0/24, 2001:3::/32), and NAT64
+// (64:ff9b::/96). This list has grown twice under review, which is the
+// argument in #3792 for expressing the policy as an allowlist of globally
+// routable space instead of a denylist of reserved ranges.
+//
+// RFC 6598 shared address space is the one that matters: a carrier routes it
+// internally, so dialing an advertised 100.64.0.0/10 address can reach another
+// subscriber's host rather than failing.
+//
+// The others are rejected as whole blocks. That is deliberate rather than an
+// assumption that every address in them is dark: IANA marks two /32s inside
+// 192.0.0.0/24 as globally reachable — 192.0.0.9 (Port Control Protocol
+// anycast, RFC 7723) and 192.0.0.10 (TURN anycast, RFC 8155). Neither is a
+// Cardano relay, so a peer offering one is misconfigured or probing, and the
+// block is rejected whole rather than carved up for two anycast services we
+// would never dial.
+//
+// RFC 5737 (TEST-NET) and RFC 3849 (2001:db8::/32) are absent, tracked in
+// #3792. They are not routed either, so a peer advertising one costs a failed
+// dial and a peer-list slot until the entry is dropped, rather than reaching a
+// host we did not intend. That is a weaker case than the ranges above, and
+// rejecting them requires migrating the ~113 fixtures across 19 files that use
+// them as public stand-ins, some of which depend on subnet distribution. That
+// migration is a decision in its own right, not a detail of this policy.
+var unreachablePrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),      // RFC 1122 "this network"
+	netip.MustParsePrefix("100.64.0.0/10"),  // RFC 6598 shared address space
+	netip.MustParsePrefix("192.0.0.0/24"),   // RFC 6890 IETF protocol assignments
+	netip.MustParsePrefix("192.88.99.0/24"), // RFC 7526 deprecated 6to4 anycast
+	netip.MustParsePrefix("198.18.0.0/15"),  // RFC 2544 benchmarking
+	netip.MustParsePrefix("240.0.0.0/4"),    // RFC 1112 reserved, incl. broadcast
+	netip.MustParsePrefix("64:ff9b:1::/48"), // RFC 8215 local-use translation
+	netip.MustParsePrefix("100::/64"),       // RFC 6666 discard-only
+	netip.MustParsePrefix("2001:2::/48"),    // RFC 5180 benchmarking
+	netip.MustParsePrefix("2001:10::/28"),   // RFC 4843 ORCHID, deprecated
+	netip.MustParsePrefix("2001:20::/28"),   // RFC 7343 ORCHIDv2
+}
+
+// IsRoutableIP reports whether an IP address is usable as a peer candidate
+// learned from the network. It is the single definition of the routability
+// policy applied to gossip, ledger, and peer-sharing candidates, so callers
+// that already hold a net.IP do not restate the address classes.
+//
+// An IP that is neither 4 nor 16 bytes is rejected: the net.IP class
+// predicates all report false for another length, so an unchecked value would
+// otherwise be treated as routable.
+func IsRoutableIP(ip net.IP) bool {
+	if ip == nil || ip.To16() == nil {
+		return false
+	}
+	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() ||
+		ip.IsUnspecified() {
+		return false
+	}
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	// Unmap so an IPv4-mapped IPv6 address is matched against the IPv4
+	// prefixes rather than silently missing every one of them.
+	addr = addr.Unmap()
+	for _, prefix := range unreachablePrefixes {
+		if prefix.Contains(addr) {
+			return false
+		}
+	}
+	return true
 }
 
 func (p *PeerGovernor) AddPeer(

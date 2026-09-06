@@ -67,9 +67,6 @@ func TestIsRoutableIP(t *testing.T) {
 		{"ipv6 benchmarking", "2001:2::1", false},
 		{"ipv6 local-use translation", "64:ff9b:1::1", false},
 		{"ipv6 orchid deprecated", "2001:10::1", false},
-		// Rejected like the PCP/TURN anycasts although IANA (RFC 7343) marks
-		// ORCHIDv2 globally reachable: they are HIP identifiers, never relays.
-		{"ipv6 orchidv2", "2001:20::1", false},
 
 		// IANA marks these Globally Reachable, so they must stay accepted.
 		// They sit next to rejected ranges and would be easy to sweep up.
@@ -109,6 +106,10 @@ func TestIsRoutableIP(t *testing.T) {
 			"2001:1f:ffff:ffff:ffff:ffff:ffff:ffff",
 			false,
 		},
+		{"ipv6 orchidv2", "2001:20::1", false},
+		{"ipv6 orchidv2 upper bound", "2001:2f:ffff:ffff:ffff:ffff:ffff:ffff", false},
+		{"ipv6 above orchidv2", "2001:30::", true},
+
 		// Accepted pending the decision in #3792: not routed anywhere, and
 		// used as public stand-ins across ~19 files' fixtures.
 		{"ipv4 test-net-1", "192.0.2.1", true},
