@@ -64,6 +64,36 @@ const (
 	forgeStaleGapThresholdSlots = 1000
 )
 
+const (
+	// defaultForgeSelectionRetryMargin is how much of the slot must still
+	// be ahead for a second transaction-selection attempt to be worth
+	// starting. Selection that finishes after the slot ends produces a
+	// block nobody is waiting for any more, so the margin is the point
+	// past which the forge stops re-selecting and takes the empty-block
+	// fallback instead.
+	defaultForgeSelectionRetryMargin = 250 * time.Millisecond
+
+	// defaultForgeSelectionMaxRetries caps re-selection for one slot. The
+	// ledger can publish repeatedly inside a single slot on a busy chain;
+	// without a cap a producer would spend the whole slot re-selecting and
+	// never reach the fallback.
+	defaultForgeSelectionMaxRetries = 3
+)
+
+// Result labels for dingo_forge_selection_fallback_total.
+const (
+	// forgeSelectionResultRetried: selection was aborted by a concurrent
+	// ledger publication or chain-tip move and a later attempt in the same
+	// slot produced a block.
+	forgeSelectionResultRetried = "retried"
+	// forgeSelectionResultEmpty: no attempt could complete against a
+	// stable snapshot in time, so a transaction-free block was forged to
+	// keep the slot.
+	forgeSelectionResultEmpty = "empty"
+	// forgeSelectionResultLost: the slot produced no block at all.
+	forgeSelectionResultLost = "lost"
+)
+
 // BlockForger coordinates block production for a stake pool.
 type BlockForger struct {
 	mode   Mode
@@ -106,6 +136,11 @@ type BlockForger struct {
 	// Configurable forging tolerances
 	forgeSyncToleranceSlots     uint64
 	forgeStaleGapThresholdSlots uint64
+
+	// Bounds on re-running transaction selection inside one slot after
+	// the chain moved underneath it.
+	forgeSelectionRetryMargin time.Duration
+	forgeSelectionMaxRetries  int
 
 	// Optional self-validation before adoption (nil = disabled)
 	blockValidator BlockValidator
@@ -374,6 +409,16 @@ type ForgerConfig struct {
 	// chain tip is far ahead of the slot clock. Zero uses the default.
 	ForgeStaleGapThresholdSlots uint64
 
+	// ForgeSelectionRetryMargin is how much of the slot must remain for
+	// the forger to re-run transaction selection after a concurrent
+	// ledger publication invalidated the candidate block. Zero uses
+	// defaultForgeSelectionRetryMargin.
+	ForgeSelectionRetryMargin time.Duration
+	// ForgeSelectionMaxRetries caps re-selection attempts within one
+	// slot. Zero uses defaultForgeSelectionMaxRetries; negative disables
+	// retrying.
+	ForgeSelectionMaxRetries int
+
 	// BlockValidator, when non-nil, validates the forged block (VRF/KES
 	// header crypto, body-hash consistency, per-tx ledger rules) before
 	// AddBlock is called. A validation failure drops the block without
@@ -423,8 +468,19 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 	if cfg.ForgeStaleGapThresholdSlots == 0 {
 		cfg.ForgeStaleGapThresholdSlots = forgeStaleGapThresholdSlots
 	}
+	if cfg.ForgeSelectionRetryMargin <= 0 {
+		cfg.ForgeSelectionRetryMargin = defaultForgeSelectionRetryMargin
+	}
+	if cfg.ForgeSelectionMaxRetries == 0 {
+		cfg.ForgeSelectionMaxRetries = defaultForgeSelectionMaxRetries
+	}
+	if cfg.ForgeSelectionMaxRetries < 0 {
+		cfg.ForgeSelectionMaxRetries = 0
+	}
 	f.forgeSyncToleranceSlots = cfg.ForgeSyncToleranceSlots
 	f.forgeStaleGapThresholdSlots = cfg.ForgeStaleGapThresholdSlots
+	f.forgeSelectionRetryMargin = cfg.ForgeSelectionRetryMargin
+	f.forgeSelectionMaxRetries = cfg.ForgeSelectionMaxRetries
 
 	if cfg.Mode == ModeProduction {
 		if cfg.Credentials == nil || !cfg.Credentials.IsLoaded() {
@@ -1100,8 +1156,11 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return fmt.Errorf("failed to update KES period: %w", err)
 	}
 
-	// Build the block
-	block, blockCbor, err := f.buildBlock(
+	// Build the block. A ledger publication landing during transaction
+	// selection invalidates the candidate; buildBlockForSlot re-selects
+	// against the state that publication produced while the slot lasts,
+	// instead of abandoning the slot on the first abort.
+	block, blockCbor, err := f.buildBlockForSlot(
 		currentSlot,
 		kesPeriod,
 		leiosBlockData,
@@ -1277,6 +1336,149 @@ func (f *BlockForger) leiosBlockDataForSlot(
 		return LeiosBlockData{Certificate: eb.Certificate}, &hash, eb.SlotNo
 	}
 	return LeiosBlockData{}, nil, 0
+}
+
+// isRetriableSelectionError reports whether err means the chain moved
+// underneath transaction selection rather than that the block could not be
+// built at all. Both sentinels describe the same event -- a ledger
+// publication landing mid-selection -- observed from the validation session
+// (the pinned generation moved) and from the chain tip (a new parent). The
+// correct response to either is to select again against the state that
+// publication produced, which is what the block should have been built on.
+func isRetriableSelectionError(err error) bool {
+	return errors.Is(err, errTxValidationSnapshotChanged) ||
+		errors.Is(err, errParentChangedDuringBuild)
+}
+
+// forgeBuildStats records how a slot's block was obtained.
+type forgeBuildStats struct {
+	// attempts counts full build attempts made for the slot.
+	attempts int
+	// aborted is set once an attempt was rejected because the chain moved
+	// during selection. Only then does the slot's outcome count as a
+	// selection fallback.
+	aborted bool
+}
+
+// observeSelectionFallback records how a slot whose selection was aborted
+// ended. Safe to call when metrics are nil.
+func (f *BlockForger) observeSelectionFallback(result string) {
+	if f.metrics != nil {
+		f.metrics.forgeSelectionFallback.WithLabelValues(result).Inc()
+	}
+}
+
+// slotSelectionDeadline returns the instant by which work for slot must
+// finish to still land inside the slot, less the configured retry margin.
+// ok is false when the slot clock cannot answer, which disables retrying
+// rather than guessing at a budget.
+func (f *BlockForger) slotSelectionDeadline(
+	slot uint64,
+) (time.Time, bool) {
+	if f.slotClock == nil {
+		return time.Time{}, false
+	}
+	clockSlot, err := f.slotClock.CurrentSlot()
+	if err != nil {
+		return time.Time{}, false
+	}
+	if clockSlot != slot {
+		// The wall clock has already left the slot being forged, so
+		// NextSlotTime describes a later slot's boundary and would
+		// hand this forge a budget it does not have. Anchor the
+		// deadline to the slot actually being built for: none of it
+		// remains.
+		return time.Now(), true
+	}
+	slotEnd, err := f.slotClock.NextSlotTime()
+	if err != nil || slotEnd.IsZero() {
+		return time.Time{}, false
+	}
+	return slotEnd.Add(-f.forgeSelectionRetryMargin), true
+}
+
+// buildBlockForSlot builds the block for slot, re-running transaction
+// selection when a concurrent ledger publication or chain-tip move
+// invalidated the candidate and enough of the slot remains to try again.
+//
+// The retry is bounded twice over: by the slot deadline, because a block
+// finished after its slot has passed helps nobody, and by an attempt cap,
+// because a producer applying a burst of peer blocks can invalidate
+// selection repeatedly and must still reach the fallback.
+func (f *BlockForger) buildBlockForSlot(
+	slot uint64,
+	kesPeriod uint64,
+	leiosData LeiosBlockData,
+	generation *credentialGeneration,
+) (ledger.Block, []byte, error) {
+	var stats forgeBuildStats
+	deadline, haveDeadline := f.slotSelectionDeadline(slot)
+	lost := func(err error) (ledger.Block, []byte, error) {
+		if stats.aborted {
+			f.observeSelectionFallback(forgeSelectionResultLost)
+		}
+		return nil, nil, err
+	}
+	for {
+		stats.attempts++
+		block, blockCbor, err := f.buildBlock(
+			slot,
+			kesPeriod,
+			leiosData,
+			generation,
+		)
+		if err == nil {
+			if stats.aborted {
+				f.observeSelectionFallback(
+					forgeSelectionResultRetried,
+				)
+				f.logger.Info(
+					"block transactions re-selected after the chain moved mid-selection",
+					"slot", slot,
+					"attempts", stats.attempts,
+				)
+			}
+			return block, blockCbor, nil
+		}
+		if !isRetriableSelectionError(err) {
+			return lost(err)
+		}
+		stats.aborted = true
+		if stats.attempts > f.forgeSelectionMaxRetries {
+			f.logger.Warn(
+				"forge selection retry cap reached",
+				"slot", slot,
+				"attempts", stats.attempts,
+				"error", err,
+			)
+			return lost(err)
+		}
+		if !haveDeadline {
+			f.logger.Warn(
+				"forge selection aborted and the slot clock cannot bound a retry",
+				"slot", slot,
+				"error", err,
+			)
+			return lost(err)
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			f.logger.Warn(
+				"forge selection aborted with no slot time left to re-select",
+				"slot", slot,
+				"attempts", stats.attempts,
+				"error", err,
+			)
+			return lost(err)
+		}
+		f.logger.Warn(
+			"forge selection aborted by a concurrent ledger publication, re-selecting",
+			"slot", slot,
+			"attempt", stats.attempts,
+			"slot_remaining", remaining,
+			"error", err,
+		)
+	}
 }
 
 func (f *BlockForger) buildBlock(
