@@ -24,6 +24,7 @@ import (
 	"math/big"
 	"slices"
 	"sort"
+	"strconv"
 	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -305,7 +306,7 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	if err != nil {
 		return nil, false, err
 	}
-	blockCounts, totalBlocks, err := ls.rewardBlockCounts(
+	blockCounts, totalBlocks, blockCountsKnown, err := ls.rewardBlockCounts(
 		meta,
 		metaTxn,
 		performanceEpoch,
@@ -314,6 +315,24 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	)
 	if err != nil {
 		return nil, false, err
+	}
+	// The performance epoch ended below this node's Mithril trust anchor and
+	// the snapshot's own block counts for it were not imported, so beta is
+	// unknown for every pool. Distributing the zero that an uncounted epoch
+	// yields would credit nothing and report a completed round; decline it
+	// instead, so the shortfall is visible here rather than at the first
+	// withdrawal the node then rejects (issue #3767).
+	if !blockCountsKnown {
+		if reportSkips {
+			ls.reportSkippedStakeRewards(
+				newEpoch,
+				"no block counts for the performance epoch: it ended below the"+
+					" Mithril trust anchor and the snapshot carried none",
+				"performance_epoch",
+				performanceEpoch,
+			)
+		}
+		return nil, false, nil
 	}
 	prefilterSlot, err := ls.rewardPrefilterSlot(meta, metaTxn, potsEpoch)
 	if err != nil {
@@ -861,7 +880,7 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 		return nil, false, nil
 	}
 	totalCirculation := params.MaxLovelaceSupply - uint64(pots.Reserves)
-	blockCounts, totalBlocks, err := ls.rewardBlockCounts(
+	blockCounts, totalBlocks, blockCountsKnown, err := ls.rewardBlockCounts(
 		meta,
 		metaTxn,
 		epochs.performance,
@@ -870,6 +889,12 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 	)
 	if err != nil {
 		return nil, false, err
+	}
+	// Without the performance epoch's block counts there is nothing to
+	// re-derive the stored pool rewards from, so the precomputed outputs
+	// cannot be shown to match their inputs and are not reused.
+	if !blockCountsKnown {
+		return nil, false, nil
 	}
 	poolRewardsMatch, err := precomputedRewardPoolRewardsMatchInputs(
 		poolInputs,
@@ -2717,22 +2742,37 @@ func applyFullPotConfig(params *rewards.Parameters, cfg LedgerStateConfig) {
 	params.FullPotRewardsEnabled = cfg.FullPotRewardsEnabled
 }
 
+// rewardBlockCounts resolves the per-pool and total block counts for a reward
+// round's performance epoch.
+//
+// The bool reports whether the counts are known. It is false only when part of
+// the performance epoch lies at or below the Mithril trust anchor -- where this
+// node applied no block and therefore counted none -- and the snapshot's own
+// BlocksMade for that epoch was not imported. Zero counts and unknown counts
+// are not the same answer: pool performance is beta/sigma_a with beta the
+// pool's share of the epoch's blocks, so reading an uncountable epoch as zero
+// blocks gives every pool zero performance, credits every delegator nothing,
+// and reports a completed round. The chain then contradicts that state at the
+// first withdrawal of the rewards the reference did credit.
+//
+// A node that never imported a snapshot has no trust anchor and reaches none of
+// this: its counts come from its own block history exactly as before.
 func (ls *LedgerState) rewardBlockCounts(
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
 	performanceEpoch uint64,
 	poolInputs []*models.RewardPoolInput,
 	decentralization *big.Rat,
-) (map[string]uint64, uint64, error) {
+) (map[string]uint64, uint64, bool, error) {
 	epoch, err := meta.GetEpoch(performanceEpoch, metaTxn)
 	if err != nil {
-		return nil, 0, fmt.Errorf(
+		return nil, 0, false, fmt.Errorf(
 			"get reward block-count epoch %d: %w",
 			performanceEpoch, err,
 		)
 	}
 	if epoch == nil || epoch.LengthInSlots == 0 {
-		return nil, 0, nil
+		return nil, 0, true, nil
 	}
 	startSlot := epoch.StartSlot
 	endSlot := startSlot + uint64(epoch.LengthInSlots) - 1
@@ -2747,10 +2787,12 @@ func (ls *LedgerState) rewardBlockCounts(
 		poolKeys = append(poolKeys, poolKey)
 	}
 	if len(poolKeys) == 0 {
-		return nil, 0, nil
+		return nil, 0, true, nil
 	}
+	var counts map[string]uint64
+	var total uint64
 	if decentralization != nil && decentralization.Sign() > 0 {
-		return rewardBlockCountsExcludingOverlaySlots(
+		counts, total, err = rewardBlockCountsExcludingOverlaySlots(
 			meta,
 			metaTxn,
 			poolKeys,
@@ -2758,20 +2800,120 @@ func (ls *LedgerState) rewardBlockCounts(
 			endSlot,
 			decentralization,
 		)
+	} else {
+		counts, total, err = meta.CountPoolBlocksInSlotRange(
+			poolKeys,
+			startSlot,
+			endSlot,
+			metaTxn,
+		)
+		if err != nil {
+			err = fmt.Errorf(
+				"count reward pool blocks in epoch %d: %w",
+				performanceEpoch, err,
+			)
+		}
 	}
-	counts, total, err := meta.CountPoolBlocksInSlotRange(
-		poolKeys,
+	if err != nil {
+		return nil, 0, false, err
+	}
+	return ls.mergeImportedBlockCounts(
+		meta,
+		metaTxn,
+		performanceEpoch,
 		startSlot,
-		endSlot,
+		counts,
+		total,
+	)
+}
+
+// mergeImportedBlockCounts adds the block counts carried by a bootstrap
+// snapshot to the counts this node observed for the same epoch, and reports
+// whether the epoch's counts are known at all.
+//
+// The two sources are disjoint by construction. A bootstrap applies no block at
+// or below its anchor, and CountPoolBlocksInSlotRange raises its start slot past
+// the recorded anchor for exactly that reason, so the observed counts cover
+// (anchor, epochEnd] and the imported nesBcur covers [epochStart, anchor]. For
+// the epoch before the anchor's the observed side is empty and the imported
+// nesBprev is the whole epoch. Both sides already exclude TPraos overlay slots:
+// the reference's incrBlocks skips them when it increments nesBcur, and
+// rewardBlockCountsExcludingOverlaySlots skips them here.
+//
+// The per-pool counts are merged only for pools the caller asked about, while
+// the epoch total takes every imported pool, because the total is the
+// denominator of every pool's beta and the reference sums the whole BlocksMade
+// map to obtain it.
+func (ls *LedgerState) mergeImportedBlockCounts(
+	meta metadata.MetadataStore,
+	metaTxn types.Txn,
+	performanceEpoch uint64,
+	epochStartSlot uint64,
+	counts map[string]uint64,
+	totalBlocks uint64,
+) (map[string]uint64, uint64, bool, error) {
+	// Read the anchor from the same sync state, in the same transaction, that
+	// CountPoolBlocksInSlotRange raised its start slot with, rather than from
+	// the in-memory copy: the two must agree about which slots the observed
+	// counts cover. A malformed value is an error here for the reason it is
+	// one there -- read as "no anchor" it would restore the uncounted-epoch
+	// zero at exactly the moment the anchor could not be confirmed.
+	value, err := meta.GetSyncState(mithrilLedgerSlotSyncKey, metaTxn)
+	if err != nil {
+		return nil, 0, false, fmt.Errorf(
+			"read Mithril trust boundary: %w",
+			err,
+		)
+	}
+	if value == "" {
+		return counts, totalBlocks, true, nil
+	}
+	mithrilLedgerSlot, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return nil, 0, false, fmt.Errorf(
+			"parse Mithril trust boundary %q: %w",
+			value,
+			err,
+		)
+	}
+	if mithrilLedgerSlot < epochStartSlot {
+		return counts, totalBlocks, true, nil
+	}
+	imported, err := meta.GetImportedPoolBlockCounts(
+		performanceEpoch,
 		metaTxn,
 	)
 	if err != nil {
-		return nil, 0, fmt.Errorf(
-			"count reward pool blocks in epoch %d: %w",
+		return nil, 0, false, fmt.Errorf(
+			"get imported pool block counts for epoch %d: %w",
 			performanceEpoch, err,
 		)
 	}
-	return counts, total, nil
+	if len(imported) == 0 {
+		return nil, 0, false, nil
+	}
+	for poolKey, blocks := range imported {
+		if observed, ok := counts[poolKey]; ok {
+			merged, overflow := addRewardUint64(observed, blocks)
+			if overflow {
+				return nil, 0, false, fmt.Errorf(
+					"imported block count overflow for epoch %d pool %x",
+					performanceEpoch,
+					poolKey,
+				)
+			}
+			counts[poolKey] = merged
+		}
+		merged, overflow := addRewardUint64(totalBlocks, blocks)
+		if overflow {
+			return nil, 0, false, fmt.Errorf(
+				"imported block total overflow for epoch %d",
+				performanceEpoch,
+			)
+		}
+		totalBlocks = merged
+	}
+	return counts, totalBlocks, true, nil
 }
 
 func rewardBlockCountsExcludingOverlaySlots(

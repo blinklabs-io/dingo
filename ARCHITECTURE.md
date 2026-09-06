@@ -8415,9 +8415,24 @@ snapshots are imported. It resolves each epoch against its own era rather than
 the current one: mark, set and go span three epochs, so an import landing in
 the first two epochs of a new era has set or go in the era before it, with a
 different boundary slot and epoch length. An epoch it cannot place at all is
-skipped rather than seeded from a guessed window. Block counts are not seeded and
-do not need to be — `rewardBlockCounts` derives them by scanning the imported
-chain for the performance epoch.
+skipped rather than seeded from a guessed window.
+
+Block counts are seeded, because they cannot be derived. A bootstrap applies no
+block at or below its anchor, so there is no imported chain for
+`rewardBlockCounts` to scan: `CountPoolBlocksInSlotRange` raises its start slot
+past `mithril_ledger_slot` precisely so the certified opcert rows are not
+mistaken for blocks, which leaves an epoch that ended below the anchor with a
+count of zero for every pool. Pool performance is beta/sigma_a with beta the
+pool's share of the epoch's blocks, so that zero credits nothing to anyone and
+still reports a completed round, and the chain contradicts the resulting state
+at the first withdrawal of rewards the reference did credit (issue #3767). The
+snapshot carries what is missing: `NewEpochState.nesBprev` holds the blocks
+minted in epoch E-1 and `nesBcur` those minted in E up to the anchor, which are
+the performance epochs of the first two rounds after an import in E.
+`importBlocksMade` persists both into `imported_pool_block_count`, and
+`rewardBlockCounts` adds them to the disjoint counts observed above the anchor.
+An epoch the anchor covers with no seeded counts has unknown performance, and
+the round is declined and reported rather than distributed at zero.
 
 The same imported reward window also makes protocol-parameter history part of
 the snapshot contract. The first boundary after a snapshot in epoch E consumes

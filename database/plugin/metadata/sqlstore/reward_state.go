@@ -174,6 +174,112 @@ func (s *Store) SaveRewardSeedFailure(
 	return nil
 }
 
+// SaveImportedPoolBlockCounts records the per-pool block counts a bootstrap
+// snapshot carries for one epoch. The rows are the node's only source of pool
+// performance for an epoch that ended below its trust anchor.
+func (s *Store) SaveImportedPoolBlockCounts(
+	counts []models.ImportedPoolBlockCount,
+	txn types.Txn,
+) error {
+	if len(counts) == 0 {
+		return nil
+	}
+	db, ctx, err := s.dbFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	queries := s.operationalQueries(db)
+	for _, count := range counts {
+		sqlEpoch, err := checkedInt64(count.Epoch)
+		if err != nil {
+			return err
+		}
+		sqlBlocks, err := checkedInt64(count.BlocksProduced)
+		if err != nil {
+			return err
+		}
+		sqlSlot, err := checkedInt64(count.CapturedSlot)
+		if err != nil {
+			return err
+		}
+		if err := queries.SaveImportedPoolBlockCount(
+			ctx,
+			sqlitequery.SaveImportedPoolBlockCountParams{
+				Epoch:          sqlEpoch,
+				PoolKeyHash:    count.PoolKeyHash,
+				BlocksProduced: sqlBlocks,
+				CapturedSlot:   sqlSlot,
+			},
+		); err != nil {
+			return fmt.Errorf("save imported pool block count: %w", err)
+		}
+	}
+	return nil
+}
+
+// GetImportedPoolBlockCounts returns the imported per-pool block counts for an
+// epoch, keyed by pool key hash. An empty result means no counts were imported
+// for that epoch, which callers must not read as "every pool minted nothing".
+func (s *Store) GetImportedPoolBlockCounts(
+	epoch uint64,
+	txn types.Txn,
+) (map[string]uint64, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.operationalQueries(db).GetImportedPoolBlockCounts(
+		ctx,
+		sqlEpoch,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get imported pool block counts: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	ret := make(map[string]uint64, len(rows))
+	for _, row := range rows {
+		if row.BlocksProduced < 0 {
+			return nil, fmt.Errorf(
+				"imported pool block count for epoch %d pool %x is negative: %d",
+				epoch,
+				row.PoolKeyHash,
+				row.BlocksProduced,
+			)
+		}
+		ret[string(row.PoolKeyHash)] = uint64(row.BlocksProduced)
+	}
+	return ret, nil
+}
+
+// DeleteImportedPoolBlockCountsForEpoch removes an epoch's imported counts, so
+// a re-import replaces them rather than merging into a stale set.
+func (s *Store) DeleteImportedPoolBlockCountsForEpoch(
+	epoch uint64,
+	txn types.Txn,
+) error {
+	db, ctx, err := s.dbFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return err
+	}
+	if err := s.operationalQueries(db).DeleteImportedPoolBlockCountsForEpoch(
+		ctx,
+		sqlEpoch,
+	); err != nil {
+		return fmt.Errorf("delete imported pool block counts: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) GetRewardSeedFailure(
 	epoch uint64,
 	snapshotType string,
@@ -1061,6 +1167,12 @@ func (s *Store) DeleteRewardStateAfterSlot(
 				return err
 			}
 			if err := q.DeleteRewardSeedFailuresAfterSlot(
+				ctx,
+				sqlSlot,
+			); err != nil {
+				return err
+			}
+			if err := q.DeleteImportedPoolBlockCountsAfterSlot(
 				ctx,
 				sqlSlot,
 			); err != nil {

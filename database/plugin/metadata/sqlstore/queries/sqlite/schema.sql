@@ -200,6 +200,14 @@ CREATE TABLE reward_seed_failure (
     PRIMARY KEY (epoch, snapshot_type)
 );
 
+CREATE TABLE imported_pool_block_count (
+    epoch INTEGER NOT NULL,
+    pool_key_hash BLOB NOT NULL,
+    blocks_produced INTEGER NOT NULL,
+    captured_slot INTEGER NOT NULL,
+    PRIMARY KEY (epoch, pool_key_hash)
+);
+
 CREATE TABLE reward_pool_input (
     margin TEXT,
     pool_key_hash BLOB NOT NULL,

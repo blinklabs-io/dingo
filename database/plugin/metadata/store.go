@@ -2250,6 +2250,20 @@ type MetadataStore interface {
 	// the corresponding imported snapshot is rolled back.
 	DeleteRewardSeedFailure(uint64, string, types.Txn) error
 
+	// SaveImportedPoolBlockCounts records the per-pool block counts a bootstrap
+	// snapshot carries for one epoch, which is the only source of pool
+	// performance for an epoch that ended below the trust anchor.
+	SaveImportedPoolBlockCounts([]models.ImportedPoolBlockCount, types.Txn) error
+
+	// GetImportedPoolBlockCounts returns an epoch's imported per-pool block
+	// counts keyed by pool key hash. An empty result means nothing was imported
+	// for that epoch, which is distinct from every pool minting nothing.
+	GetImportedPoolBlockCounts(uint64, types.Txn) (map[string]uint64, error)
+
+	// DeleteImportedPoolBlockCountsForEpoch removes an epoch's imported counts
+	// so a re-import replaces rather than merges into a stale set.
+	DeleteImportedPoolBlockCountsForEpoch(uint64, types.Txn) error
+
 	// DeleteProvisionalRewardSnapshot deletes a non-authoritative reward
 	// snapshot for an epoch and type. Authoritative boundary state is retained.
 	DeleteProvisionalRewardSnapshot(uint64, string, types.Txn) error

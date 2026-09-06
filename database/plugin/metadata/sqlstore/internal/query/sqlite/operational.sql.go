@@ -641,6 +641,26 @@ func (q *Queries) DeleteEpochsAfterSlot(ctx context.Context, startSlot sql.NullI
 	return err
 }
 
+const deleteImportedPoolBlockCountsAfterSlot = `-- name: DeleteImportedPoolBlockCountsAfterSlot :exec
+DELETE FROM imported_pool_block_count
+WHERE captured_slot > ?
+`
+
+func (q *Queries) DeleteImportedPoolBlockCountsAfterSlot(ctx context.Context, capturedSlot int64) error {
+	_, err := q.db.ExecContext(ctx, deleteImportedPoolBlockCountsAfterSlot, capturedSlot)
+	return err
+}
+
+const deleteImportedPoolBlockCountsForEpoch = `-- name: DeleteImportedPoolBlockCountsForEpoch :exec
+DELETE FROM imported_pool_block_count
+WHERE epoch = ?
+`
+
+func (q *Queries) DeleteImportedPoolBlockCountsForEpoch(ctx context.Context, epoch int64) error {
+	_, err := q.db.ExecContext(ctx, deleteImportedPoolBlockCountsForEpoch, epoch)
+	return err
+}
+
 const deleteMidnightAriadneParamsByEpoch = `-- name: DeleteMidnightAriadneParamsByEpoch :exec
 DELETE FROM midnight_ariadne_params WHERE epoch = ?
 `
@@ -2077,6 +2097,40 @@ func (q *Queries) GetImportCheckpoint(ctx context.Context, importKey string) (Im
 	var i ImportCheckpoint
 	err := row.Scan(&i.ID, &i.ImportKey, &i.Phase)
 	return i, err
+}
+
+const getImportedPoolBlockCounts = `-- name: GetImportedPoolBlockCounts :many
+SELECT pool_key_hash, blocks_produced
+FROM imported_pool_block_count
+WHERE epoch = ?
+`
+
+type GetImportedPoolBlockCountsRow struct {
+	PoolKeyHash    []byte
+	BlocksProduced int64
+}
+
+func (q *Queries) GetImportedPoolBlockCounts(ctx context.Context, epoch int64) ([]GetImportedPoolBlockCountsRow, error) {
+	rows, err := q.db.QueryContext(ctx, getImportedPoolBlockCounts, epoch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []GetImportedPoolBlockCountsRow{}
+	for rows.Next() {
+		var i GetImportedPoolBlockCountsRow
+		if err := rows.Scan(&i.PoolKeyHash, &i.BlocksProduced); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getLastBlockNonceInRange = `-- name: GetLastBlockNonceInRange :one
@@ -3953,6 +4007,32 @@ func (q *Queries) SaveEpochSummary(ctx context.Context, arg SaveEpochSummaryPara
 	var id int64
 	err := row.Scan(&id)
 	return id, err
+}
+
+const saveImportedPoolBlockCount = `-- name: SaveImportedPoolBlockCount :exec
+INSERT INTO imported_pool_block_count (
+    epoch, pool_key_hash, blocks_produced, captured_slot
+) VALUES (?, ?, ?, ?)
+ON CONFLICT (epoch, pool_key_hash) DO UPDATE SET
+    blocks_produced = excluded.blocks_produced,
+    captured_slot = excluded.captured_slot
+`
+
+type SaveImportedPoolBlockCountParams struct {
+	Epoch          int64
+	PoolKeyHash    []byte
+	BlocksProduced int64
+	CapturedSlot   int64
+}
+
+func (q *Queries) SaveImportedPoolBlockCount(ctx context.Context, arg SaveImportedPoolBlockCountParams) error {
+	_, err := q.db.ExecContext(ctx, saveImportedPoolBlockCount,
+		arg.Epoch,
+		arg.PoolKeyHash,
+		arg.BlocksProduced,
+		arg.CapturedSlot,
+	)
+	return err
 }
 
 const savePoolStakeSnapshot = `-- name: SavePoolStakeSnapshot :one

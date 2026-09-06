@@ -487,6 +487,23 @@ WHERE epoch = ? AND snapshot_type = ?;
 DELETE FROM reward_seed_failure
 WHERE epoch = ? AND snapshot_type = ?;
 
+-- name: SaveImportedPoolBlockCount :exec
+INSERT INTO imported_pool_block_count (
+    epoch, pool_key_hash, blocks_produced, captured_slot
+) VALUES (?, ?, ?, ?)
+ON CONFLICT (epoch, pool_key_hash) DO UPDATE SET
+    blocks_produced = excluded.blocks_produced,
+    captured_slot = excluded.captured_slot;
+
+-- name: GetImportedPoolBlockCounts :many
+SELECT pool_key_hash, blocks_produced
+FROM imported_pool_block_count
+WHERE epoch = ?;
+
+-- name: DeleteImportedPoolBlockCountsForEpoch :exec
+DELETE FROM imported_pool_block_count
+WHERE epoch = ?;
+
 -- name: ReleaseFallbackRewardSnapshotGuard :execrows
 DELETE FROM reward_snapshot
 WHERE id = ? AND authoritative = FALSE;
@@ -610,6 +627,10 @@ DELETE FROM reward_ada_pots WHERE captured_slot > ?;
 -- name: DeleteRewardSnapshotsAfterSlot :exec
 DELETE FROM reward_snapshot
 WHERE captured_slot > ? OR boundary_slot > ?;
+
+-- name: DeleteImportedPoolBlockCountsAfterSlot :exec
+DELETE FROM imported_pool_block_count
+WHERE captured_slot > ?;
 
 -- name: DeleteRewardSeedFailuresAfterSlot :exec
 DELETE FROM reward_seed_failure

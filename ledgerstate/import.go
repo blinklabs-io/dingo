@@ -82,6 +82,20 @@ type RawLedgerState struct {
 	// PoolDistrData is the deferred CBOR for the active consensus pool
 	// distribution in NewEpochState.pool-distr.
 	PoolDistrData cbor.RawMessage
+	// BlocksPrev and BlocksCur are NewEpochState.nesBprev and
+	// NewEpochState.nesBcur: the blocks each pool minted during the epoch
+	// before the snapshot's epoch, and during the snapshot's epoch up to and
+	// including the anchor block. Keys are 28-byte pool cold-key hashes
+	// encoded as strings; a pool absent from a map minted nothing.
+	//
+	// The ledger keeps both because pool performance for a reward round is
+	// beta/sigma_a with beta the pool's share of the blocks minted in the
+	// performance epoch, and a node that reconstructs its state from a
+	// snapshot has no local history for those epochs to count. nesBprev is
+	// the performance epoch of the first reward round the node crosses after
+	// the import, and nesBcur is the pre-anchor half of the second one.
+	BlocksPrev map[string]uint64
+	BlocksCur  map[string]uint64
 	// EraBounds holds the start boundaries of all eras extracted
 	// from the telescope. Each entry gives the (Slot, Epoch) at
 	// which that era began. Used to generate the full epoch
@@ -2228,6 +2242,29 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 		return err
 	}
 
+	// The BlocksMade maps are certified at the same point and describe epochs
+	// this node will never be able to count for itself, so they are persisted
+	// in the same transaction.
+	if err := importBlocksMade(
+		store,
+		cfg.State.Epoch,
+		cfg.State.BlocksPrev,
+		cfg.State.BlocksCur,
+		tip.Slot,
+		txn.Metadata(),
+	); err != nil {
+		return err
+	}
+	cfg.Logger.Info(
+		"imported certified pool block counts",
+		"component", "ledgerstate",
+		"epoch", cfg.State.Epoch,
+		"previous_epoch_pools", len(cfg.State.BlocksPrev),
+		"previous_epoch_blocks", sumBlocksMade(cfg.State.BlocksPrev),
+		"current_epoch_pools", len(cfg.State.BlocksCur),
+		"current_epoch_blocks", sumBlocksMade(cfg.State.BlocksCur),
+	)
+
 	// Store evolving nonce as the tip block nonce so that
 	// subsequent block processing starts from the correct rolling
 	// nonce. Without this, the node falls back to the Shelley
@@ -2290,6 +2327,84 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 		)
 	}
 	return nil
+}
+
+// importBlocksMade persists the snapshot's NewEpochState BlocksMade maps as
+// this node's per-pool block counts for the two epochs they describe.
+//
+// nesBprev holds the blocks minted during the epoch before the snapshot's, and
+// nesBcur the blocks minted during the snapshot's epoch up to and including the
+// anchor block. Those are exactly the two epochs a bootstrapped node cannot
+// count from its own history: pool performance is beta/sigma_a with beta the
+// pool's share of the blocks minted in the performance epoch, the first reward
+// round the node crosses has the pre-anchor epoch as its performance epoch, and
+// the round after that has the anchor's own epoch, of which the node applied no
+// block at or below the anchor.
+//
+// The reference keeps both fields for the same purpose and hands nesBprev to
+// the reward update (Cardano.Ledger.Shelley.Rules.Tick's RupdEnv bprev es), so
+// these are the ledger's own counts rather than a reconstruction from them.
+//
+// Existing rows for those epochs are dropped first: a catch-up import carries a
+// later anchor, and merging a newer map into an older one would leave counts
+// from two different anchors in one epoch.
+func importBlocksMade(
+	store metadata.MetadataStore,
+	epoch uint64,
+	blocksPrev map[string]uint64,
+	blocksCur map[string]uint64,
+	slot uint64,
+	txn types.Txn,
+) error {
+	type epochBlocks struct {
+		blocks map[string]uint64
+		epoch  uint64
+	}
+	imports := []epochBlocks{{blocks: blocksCur, epoch: epoch}}
+	// Epoch 0 has no preceding epoch, and nesBprev is empty there.
+	if epoch > 0 {
+		imports = append(
+			imports,
+			epochBlocks{blocks: blocksPrev, epoch: epoch - 1},
+		)
+	}
+	for _, imported := range imports {
+		if err := store.DeleteImportedPoolBlockCountsForEpoch(
+			imported.epoch, txn,
+		); err != nil {
+			return err
+		}
+		counts := make([]models.ImportedPoolBlockCount, 0, len(imported.blocks))
+		for poolKey, blocks := range imported.blocks {
+			if len(poolKey) != len(lcommon.PoolKeyHash{}) {
+				return fmt.Errorf(
+					"certified block count pool key has length %d, expected 28",
+					len(poolKey),
+				)
+			}
+			counts = append(counts, models.ImportedPoolBlockCount{
+				Epoch:          imported.epoch,
+				PoolKeyHash:    []byte(poolKey),
+				BlocksProduced: blocks,
+				CapturedSlot:   slot,
+			})
+		}
+		if err := store.SaveImportedPoolBlockCounts(counts, txn); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sumBlocksMade totals a BlocksMade map the way the reference does when it
+// derives the epoch's block total for pool performance (Map.foldr (+) 0 in
+// Cardano.Ledger.Shelley.LedgerState.PulsingReward.startStep).
+func sumBlocksMade(blocks map[string]uint64) uint64 {
+	var total uint64
+	for _, count := range blocks {
+		total += count
+	}
+	return total
 }
 
 func importOpCertCounters(
