@@ -360,7 +360,7 @@ func TestForgeStaleTipSkipReasonsArePreMaterialized(t *testing.T) {
 	)
 	require.Equal(
 		t,
-		3,
+		5,
 		testutil.CollectAndCount(forger.metrics.forgeStaleTipSkip),
 	)
 }
@@ -641,4 +641,176 @@ func TestForgeProceedsWhenFrontierIsUninitialised(t *testing.T) {
 		t,
 		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipFrontierBehind),
 	)
+}
+
+// newStalenessTestForger builds a production forger with the upstream target
+// and the corroborated endorser-block slot made explicit.
+func newStalenessTestForger(
+	t *testing.T,
+	currentSlot, chainTipSlot, frontierSlot, upstreamSlot uint64,
+	ebSlot uint64,
+	appliedStalenessSlots uint64,
+	logs *bytes.Buffer,
+) (*BlockForger, *forgerTestBuilder) {
+	t.Helper()
+	block := newForgerTestBlock(currentSlot, 2)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode: ModeProduction,
+		Logger: slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		})),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       currentSlot,
+			chainTipSlot:      chainTipSlot,
+			frontierExplicit:  true,
+			frontierSlot:      frontierSlot,
+			upstreamTipSlot:   upstreamSlot,
+			slotsPerKESPeriod: 100,
+		},
+		LeiosVerifiedEbSlot:           func() uint64 { return ebSlot },
+		ForgeAppliedTipStalenessSlots: appliedStalenessSlots,
+		PromRegistry:                  prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+	return forger, builder
+}
+
+// TestForgeSkipsWhenNewestKnownBlockTrailsUpstream is the ghost the frontier
+// gate could not see. When header admission and ledger application stall
+// together the frontier equals the applied tip, so the frontier gap reads 0 and
+// the gate passes -- while the node is many slots behind the network and
+// forges on a parent the network has already built past.
+//
+// Measured against the corroborated upstream target rather than the wall clock,
+// so it stays meaningful on a chain of any block rate.
+func TestForgeSkipsWhenNewestKnownBlockTrailsUpstream(t *testing.T) {
+	var logs bytes.Buffer
+	// Frontier == applied tip, so the frontier gap is 0, but the network is
+	// 19 slots ahead -- the shape observed in the field. Slot numbers are
+	// scaled down so the KES period stays inside the test operational certificate.
+	forger, builder := newStalenessTestForger(
+		t, 300, 299, 299, 318, 0, 0, &logs,
+	)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Zero(t, builder.calls)
+	require.Zero(
+		t,
+		testutil.ToFloat64(forger.metrics.tipGapSlots),
+		"the frontier gap really is 0 here; that is the point",
+	)
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipAppliedStale),
+	)
+	require.Contains(t, logs.String(), `"reason":"applied_tip_stale"`)
+	require.Contains(t, logs.String(), `"upstream_target_slot":318`)
+}
+
+// TestForgeProceedsOnAQuietChain pins that the staleness term does not punish a
+// chain with a long block interval. The newest block is 500 slots old but the
+// network agrees it is the newest, so nothing is wrong and the node must forge.
+// A wall-clock bound would refuse here, which is why the default term is
+// measured against upstream and the wall-clock one is off by default.
+func TestForgeProceedsOnAQuietChain(t *testing.T) {
+	var logs bytes.Buffer
+	forger, builder := newStalenessTestForger(
+		t, 600, 100, 100, 100, 0, 0, &logs,
+	)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Equal(t, 1, builder.calls)
+	require.Zero(
+		t,
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipAppliedStale),
+	)
+	// The forge-context line carries every input a post-mortem needs.
+	require.Contains(t, logs.String(), `"msg":"forge context"`)
+	require.Contains(t, logs.String(), `"newest_known_slot":100`)
+}
+
+// TestForgeAppliedTipStalenessKnobIsOptIn pins the wall-clock backstop: off by
+// default, and refusing once an operator sets a bound.
+func TestForgeAppliedTipStalenessKnobIsOptIn(t *testing.T) {
+	t.Run("off by default", func(t *testing.T) {
+		var logs bytes.Buffer
+		forger, builder := newStalenessTestForger(
+			t, 600, 100, 100, 0, 0, 0, &logs,
+		)
+		require.NoError(
+			t,
+			forger.checkAndForgeProduction(context.Background()),
+		)
+		require.Equal(t, 1, builder.calls)
+	})
+
+	t.Run("refuses once set", func(t *testing.T) {
+		var logs bytes.Buffer
+		forger, builder := newStalenessTestForger(
+			t, 600, 100, 100, 0, 0, 100, &logs,
+		)
+		require.NoError(
+			t,
+			forger.checkAndForgeProduction(context.Background()),
+		)
+		require.Zero(t, builder.calls)
+		require.Equal(
+			t,
+			float64(1),
+			testutil.ToFloat64(
+				forger.metrics.forgeStaleTipSkipAppliedStale,
+			),
+		)
+	})
+}
+
+// TestForgeSkipsWhenCorroboratedEndorserBlockIsAhead covers the Leios signal: a
+// corroborated endorser block shares its announcing ranking block's slot, so it
+// is proof a ranking block exists there even though no header has arrived. The
+// headers alone look caught up -- frontier equals the applied tip -- so only
+// this evidence can refuse the forge.
+func TestForgeSkipsWhenCorroboratedEndorserBlockIsAhead(t *testing.T) {
+	var logs bytes.Buffer
+	forger, builder := newStalenessTestForger(
+		t, 320, 300, 300, 0, 313, 0, &logs,
+	)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Zero(t, builder.calls)
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipEbAhead),
+	)
+	require.Contains(t, logs.String(), `"reason":"eb_manifest_ahead"`)
+	require.Contains(t, logs.String(), `"eb_slot":313`)
+}
+
+// TestForgeIgnoresEndorserBlockSlotBeyondTheCurrentSlot pins the clamp. A
+// corroborated slot ahead of the current slot means this node's clock is
+// behind, which is a different fault; laundering it into a forge refusal would
+// let a clock skew silently stop block production.
+func TestForgeIgnoresEndorserBlockSlotBeyondTheCurrentSlot(t *testing.T) {
+	var logs bytes.Buffer
+	forger, builder := newStalenessTestForger(
+		t, 310, 309, 309, 0, 400, 0, &logs,
+	)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Equal(t, 1, builder.calls)
+	require.Zero(
+		t,
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipEbAhead),
+	)
+	require.Contains(t, logs.String(), `"eb_slot":0`)
 }

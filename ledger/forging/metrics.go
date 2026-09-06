@@ -58,6 +58,8 @@ type forgingMetrics struct {
 	forgeStaleTipSkipSlotGap        prometheus.Counter
 	forgeStaleTipSkipHashDiverged   prometheus.Counter
 	forgeStaleTipSkipFrontierBehind prometheus.Counter
+	forgeStaleTipSkipAppliedStale   prometheus.Counter
+	forgeStaleTipSkipEbAhead        prometheus.Counter
 	slotClockErrors                 prometheus.Counter
 	tipGapSlots                     prometheus.Gauge
 
@@ -211,6 +213,12 @@ func initForgingMetrics(
 	)
 	m.forgeStaleTipSkipFrontierBehind = m.forgeStaleTipSkip.WithLabelValues(
 		forgeStaleTipReasonFrontierBehind,
+	)
+	m.forgeStaleTipSkipAppliedStale = m.forgeStaleTipSkip.WithLabelValues(
+		forgeStaleTipReasonAppliedStale,
+	)
+	m.forgeStaleTipSkipEbAhead = m.forgeStaleTipSkip.WithLabelValues(
+		forgeStaleTipReasonEbManifestAhead,
 	)
 	m.tipGapSlots = factory.NewGauge(
 		prometheus.GaugeOpts{
