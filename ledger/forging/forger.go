@@ -1099,9 +1099,9 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return nil
 	}
 
-	leiosBlockData, embeddedEb, embeddedEbSlot := f.leiosBlockDataForSlot(
-		currentSlot,
-	)
+	leiosState := f.leiosBlockDataForSlot(currentSlot)
+	leiosBlockData := leiosState.data
+	embeddedEb, embeddedEbSlot := leiosState.embeddedEb, leiosState.embeddedEbSlot
 	if f.leiosChecker != nil {
 		var excludedTxHashes map[string]struct{}
 		canAnnounce := true
@@ -1174,12 +1174,17 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// selection invalidates the candidate; buildBlockForSlot re-selects
 	// against the state that publication produced while the slot lasts,
 	// instead of abandoning the slot on the first abort.
+	leiosState.data = leiosBlockData
 	block, blockCbor, buildStats, err := f.buildBlockForSlot(
 		currentSlot,
 		kesPeriod,
-		leiosBlockData,
+		&leiosState,
 		generation,
 	)
+	// A retry or the empty fallback may have re-resolved the payload
+	// against a new parent; the embedded-endorser-block bookkeeping below
+	// must follow the block that was actually built.
+	embeddedEb = leiosState.embeddedEb
 	buildDuration := time.Since(producingAt)
 	// One line per leader slot carrying the two intervals a lost or late
 	// slot is diagnosed from: how long the leader/KES/opcert gate and the
@@ -1331,9 +1336,9 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 
 func (f *BlockForger) leiosBlockDataForSlot(
 	slot uint64,
-) (LeiosBlockData, *lcommon.Blake2b256, uint64) {
-	if f.leiosCerts == nil {
-		return LeiosBlockData{}, nil, 0
+) forgeLeiosState {
+	if f.leiosCerts == nil || f.leiosParent == nil {
+		return forgeLeiosState{}
 	}
 	parentRbHash, parentHash, ok, err := f.leiosParent.ParentLeiosAnnouncement()
 	if err != nil {
@@ -1344,7 +1349,7 @@ func (f *BlockForger) leiosBlockDataForSlot(
 			"error",
 			err,
 		)
-		return LeiosBlockData{}, nil, 0
+		return forgeLeiosState{}
 	}
 	if !ok {
 		f.logger.Debug(
@@ -1352,8 +1357,9 @@ func (f *BlockForger) leiosBlockDataForSlot(
 			"slot",
 			slot,
 		)
-		return LeiosBlockData{}, nil, 0
+		return forgeLeiosState{}
 	}
+	state := forgeLeiosState{parentRb: parentRbHash, parentKnown: true}
 	eligible := f.leiosCerts.EligibleCertifiedEndorserBlocks()
 	for _, eb := range eligible {
 		if eb.Certificate == nil {
@@ -1371,9 +1377,12 @@ func (f *BlockForger) leiosBlockDataForSlot(
 			"eb_slot", eb.SlotNo,
 			"eb_hash", eb.EndorserBlockHash.String(),
 		)
-		return LeiosBlockData{Certificate: eb.Certificate}, &hash, eb.SlotNo
+		state.data = LeiosBlockData{Certificate: eb.Certificate}
+		state.embeddedEb = &hash
+		state.embeddedEbSlot = eb.SlotNo
+		return state
 	}
-	return LeiosBlockData{}, nil, 0
+	return state
 }
 
 // errBlockConstraintsUnsupported reports that the configured BlockBuilder
@@ -1382,6 +1391,59 @@ func (f *BlockForger) leiosBlockDataForSlot(
 var errBlockConstraintsUnsupported = errors.New(
 	"block builder does not support per-attempt selection constraints",
 )
+
+// forgeLeiosState is the Leios payload a slot's ranking block is being
+// built with, together with the parent it was resolved against.
+//
+// Every field here is parent-dependent. leiosBlockDataForSlot matches a
+// certified endorser block against the parent ranking block's own
+// announcement, and the announcement names an endorser block this node
+// selected against that same parent's certified closure. A retry that
+// re-reads the chain tip therefore cannot reuse any of it: the block would
+// commit to a certificate that belongs to a different parent, or announce
+// an endorser block whose exclusion set no longer holds.
+type forgeLeiosState struct {
+	data           LeiosBlockData
+	embeddedEb     *lcommon.Blake2b256
+	embeddedEbSlot uint64
+	// parentRb is the parent ranking-block hash data was resolved
+	// against; parentKnown is false when no parent announcement could be
+	// read, in which case there is nothing to invalidate.
+	parentRb    lcommon.Blake2b256
+	parentKnown bool
+}
+
+// refreshLeiosForParent re-resolves state against the current parent when
+// the parent has moved since state was resolved.
+//
+// The announcement is deliberately not carried across a parent change and
+// no replacement is forged. The endorser block it names was selected
+// against the previous parent's certified closure and has already been
+// broadcast; announcing it under a different parent would commit the block
+// to an exclusion set that no longer holds, and forging a second endorser
+// block would put two of them on the wire for one slot. A ranking block
+// with no announcement is valid, so dropping it costs this slot's endorser
+// block rather than the slot itself.
+func (f *BlockForger) refreshLeiosForParent(
+	slot uint64,
+	state *forgeLeiosState,
+) {
+	refreshed := f.leiosBlockDataForSlot(slot)
+	if refreshed.parentKnown == state.parentKnown &&
+		refreshed.parentRb == state.parentRb {
+		// Same parent: everything already resolved still belongs to this
+		// block, including an announcement this slot forged.
+		return
+	}
+	f.logger.Warn(
+		"leios payload re-resolved: the parent changed during block assembly",
+		"slot", slot,
+		"had_certificate", state.data.Certificate != nil,
+		"had_announcement", state.data.Announcement != nil,
+		"now_has_certificate", refreshed.data.Certificate != nil,
+	)
+	*state = refreshed
+}
 
 // isRetriableSelectionError reports whether err means the chain moved
 // underneath transaction selection rather than that the block could not be
@@ -1456,7 +1518,7 @@ func (f *BlockForger) slotSelectionDeadline(
 func (f *BlockForger) buildBlockForSlot(
 	slot uint64,
 	kesPeriod uint64,
-	leiosData LeiosBlockData,
+	leiosState *forgeLeiosState,
 	generation *credentialGeneration,
 ) (ledger.Block, []byte, forgeBuildStats, error) {
 	var stats forgeBuildStats
@@ -1483,10 +1545,14 @@ func (f *BlockForger) buildBlockForSlot(
 			return nil, nil, stats, err
 		}
 		stats.attempts++
+		// The fallback is a fresh build against whatever the chain tip
+		// is now, so its Leios payload has to be resolved against that
+		// parent too.
+		f.refreshLeiosForParent(slot, leiosState)
 		block, blockCbor, emptyErr := f.buildBlock(
 			slot,
 			kesPeriod,
-			leiosData,
+			leiosState.data,
 			generation,
 			blockSelectionConstraints{emptyBody: true},
 		)
@@ -1516,7 +1582,7 @@ func (f *BlockForger) buildBlockForSlot(
 		block, blockCbor, err := f.buildBlock(
 			slot,
 			kesPeriod,
-			leiosData,
+			leiosState.data,
 			generation,
 			selectionConstraints(),
 		)
@@ -1571,6 +1637,12 @@ func (f *BlockForger) buildBlockForSlot(
 			"slot_remaining", remaining,
 			"error", err,
 		)
+		// The next attempt re-reads the chain tip, so anything resolved
+		// against the previous parent has to be resolved again. This
+		// covers the snapshot-changed path as well as an explicit parent
+		// change: an applied block bumps the ledger generation and moves
+		// the tip together, and the generation check fires first.
+		f.refreshLeiosForParent(slot, leiosState)
 	}
 }
 
