@@ -112,14 +112,20 @@ func TestHashRejectsSlotMismatch(t *testing.T) {
 	require.ErrorIs(t, err, ErrSlotMismatch)
 }
 
-// TestHashRejectsEraMismatch proves the case bark's verifyArchiveBlock
-// already defends against: the block hash for Shelley and later eras
-// covers the header alone, and adjacent eras share that header layout, so
-// the same bytes can decode -- with an identical hash and slot -- under
-// more than one era. The hash and slot checks alone cannot catch a caller
-// claiming the wrong era, so Hash must independently derive the era from
-// the decoded header and reject a disagreement.
-func TestHashRejectsEraMismatch(t *testing.T) {
+// TestHashAcceptsAdjacentEraMisclassification documents a known, accepted
+// residual gap rather than a defended-against attack: for Shelley and
+// later, the block hash covers only the header, and adjacent eras can
+// share that header's layout, so the same bytes can decode -- with an
+// identical hash and slot -- under more than one era. Hash does not
+// independently re-derive the era from the header to catch this (see
+// Hash's own doc comment for why: the only signal available for that,
+// gledger.DetermineBlockType's protocol-major classification, is
+// contaminated by hard-fork pre-signaling and rejects real mainnet blocks
+// at every era boundary). Content authenticity is still fully verified --
+// the bytes really are the requested, uncorrupted block -- only the
+// recorded BlockMetadata.Type could name an adjacent, layout-compatible
+// era instead of the block's genuine one.
+func TestHashAcceptsAdjacentEraMisclassification(t *testing.T) {
 	tests := []struct {
 		name        string
 		generate    func(uint64, lcommon.Blake2b256, uint64, uint64, int) ([]gledger.Block, error)
@@ -151,8 +157,8 @@ func TestHashRejectsEraMismatch(t *testing.T) {
 			hash := decoded.Hash()
 
 			// The misclassified era must still decode to the same hash and
-			// slot, otherwise this test would pass for the wrong reason
-			// (caught by the hash or slot check instead of the era check).
+			// slot, otherwise this test would not demonstrate the gap it
+			// documents.
 			crossDecoded, err := gledger.NewBlockFromCbor(tc.claimedType, raw)
 			require.NoError(t, err,
 				"cross-era decode must succeed for this test to be meaningful")
@@ -170,7 +176,10 @@ func TestHashRejectsEraMismatch(t *testing.T) {
 				raw,
 				hash[:],
 			)
-			require.ErrorIs(t, err, ErrTypeMismatch)
+			require.NoError(t, err,
+				"Hash accepts an adjacent-era misclassification: hash and "+
+					"slot alone cannot distinguish it, and re-deriving the "+
+					"era is not attempted (see Hash's doc comment)")
 		})
 	}
 }

@@ -328,7 +328,7 @@ func (t *TxCborParts) ReassembleTxCbor(blockCbor []byte) ([]byte, error) {
 	// caller passing an unexpectedly huge buffer fails loudly instead of
 	// silently wrapping into a bogus (and possibly smaller) blockLen that
 	// the bounds checks below would then validate against.
-	if len(blockCbor) > math.MaxUint32 {
+	if uint64(len(blockCbor)) > math.MaxUint32 {
 		return nil, fmt.Errorf(
 			"block CBOR length %d exceeds uint32 range",
 			len(blockCbor),

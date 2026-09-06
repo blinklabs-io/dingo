@@ -1339,24 +1339,40 @@ content has already been pruned) -- neither backend offers a
 content-addressing guarantee of its own, so corruption, an
 eventual-consistency stale read, or a misdirected request could otherwise
 return bytes for a different block than the one asked for. The check
-always verifies two things, independently derived from the decoded bytes
-rather than trusted from the caller's claim: the decoded block's own hash
-matches the requested `bp` key's hash, and its own slot matches the
-requested slot (a hash match alone does not pin the point). For Shelley
-and later eras it verifies a third: since the block hash for those eras
-covers only the header and adjacent eras share that header layout -- so
-the same bytes can decode, with an identical hash and slot, under more
-than one era -- the era independently derived from the decoded header
-(`gledger.DetermineBlockType`) must also match the type recorded in
-`bp..._metadata`. Byron is exempt from that third check because its hash
-already covers the block-type byte, binding the era without needing to
-derive it separately. Bark's archive fetch already re-verifies its downloaded
-blocks the same way (`verifyArchiveBlock`/`blockEraFromHeader`), which this
-mirrors; it closes the equivalent gap for the two cloud object-store blob
-backends. Badger's local `GetBlock` trusts its own on-disk storage and is
-not changed.
+verifies two things, independently derived from the decoded bytes rather
+than trusted from the caller's claim: the decoded block's own hash matches
+the requested `bp` key's hash, and its own slot matches the requested slot
+(a hash match alone does not pin the point). Badger's local `GetBlock`
+trusts its own on-disk storage and is not changed.
 
-One documented, accepted gap: gouroboros checks a Byron main block's
+`blockverify.Hash` does not independently re-derive the type recorded in
+`bp..._metadata` from the decoded header. An earlier version did, mirroring
+bark's `verifyArchiveBlock`/`blockEraFromHeader`: for Shelley and later
+eras the block hash covers only the header, and adjacent eras share that
+header's layout, so the same bytes can decode -- with an identical hash
+and slot -- under more than one era, which hash and slot alone cannot
+catch. That check used `gledger.DetermineBlockType` to classify era from
+the header's announced protocol-major version -- but that field is a block
+producer's hard-fork-readiness signal, not a record of which era the bytes
+are actually encoded in: a producer starts announcing the next era's
+protocol major before that era's own hard fork has triggered, so a
+genuine, correctly-encoded block in the current era can carry a protocol
+major outside the range `DetermineBlockType` expects for it. This surfaced
+concretely in this repository's own immutable-chain testdata, where
+genuine Alonzo blocks (Shelley-shaped headers) carry protocol major 7
+(Babbage's own floor) and were rejected as an era mismatch -- a functional
+regression on the primary production `GetBlock` path, recurring at every
+past and future hard-fork boundary, and worse than the narrow mislabeling
+gap the check closed. It was dropped rather than reworked: hash and slot
+together already prove the returned bytes are the genuine, uncorrupted
+content for the requested key; what dropping it leaves open is
+`bp..._metadata`'s `Type` naming an adjacent era that happens to share the
+same header layout, which a caller that decodes strictly under the
+recorded `Type` (rather than re-deriving it) is not misled by. See
+`blockverify.Hash`'s own doc comment in `blockverify.go` for the full
+account.
+
+One separate, still-accepted gap: gouroboros checks a Byron main block's
 transaction, delegation, and update proofs but not its `ssc_proof` (an
 upstream limitation -- the SSC proof hashes cardano-ledger's own encoding
 of the sub-payloads rather than the bytes carried in the block), so an
@@ -1371,7 +1387,7 @@ permanently unretrievable from an S3/GCS-backed node (needed for a
 from-genesis sync, or serving historical API queries), trading a
 narrow, single-payload, single-era gap on storage the operator already
 configured and trusted for a full functional regression. Accepted rather
-than rejected; see the comment on `checkEra` in `blockverify.go`.
+than rejected; see `Hash`'s doc comment in `blockverify.go`.
 
 Leios endorser-block storage uses the same blob-key namespace, even though an
 endorser block is not part of the ranking-block chain. When a Dijkstra ranking

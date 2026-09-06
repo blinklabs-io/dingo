@@ -41,23 +41,56 @@ var ErrHashMismatch = errors.New("block content hash mismatch")
 // were produced for a different slot than requested.
 var ErrSlotMismatch = errors.New("block content slot mismatch")
 
-// ErrTypeMismatch means the returned bytes decode and hash correctly under
-// the claimed type, but the type derived from the decoded header disagrees
-// with it.
-var ErrTypeMismatch = errors.New("block content era/type mismatch")
-
 // Hash decodes cborData as a block of blockType and verifies that it hashes
 // to wantHash and was produced at wantSlot, returning the decoded block on
 // success. blockType is a decode hint, but is not trusted on its own: a
 // wrong type usually either fails to decode (ErrUndecodable) or yields a
-// different hash (ErrHashMismatch), but the hash alone does not pin the era
-// for Shelley and later -- those hashes cover the header alone, and
-// adjacent eras share its layout, so one set of bytes can decode under
-// several eras with an identical hash and slot (see bark's
-// verifyArchiveBlock/blockEraFromHeader, which this mirrors, for the same
-// reasoning against an untrusted archive). So the era independently
-// derived from the decoded header must also agree with blockType before
-// the caller's claimed BlockMetadata.Type can be trusted.
+// different hash (ErrHashMismatch).
+//
+// Hash does not independently re-derive blockType from the decoded header.
+// An earlier version of this check did, via gledger.DetermineBlockType, to
+// catch the case bark's verifyArchiveBlock/blockEraFromHeader also guards
+// against: for Shelley and later, the block hash covers only the header,
+// and adjacent eras share that header's layout, so the same bytes can
+// decode -- with an identical hash and slot -- under more than one era.
+// That check was dropped because DetermineBlockType classifies era from
+// the header's announced protocol-major version, which is a block
+// producer's hard-fork-readiness signal, not a record of which era the
+// bytes are actually encoded in: a producer starts announcing the next
+// era's protocol major before that era's own hard fork has triggered, so a
+// genuine, correctly-encoded block in the current era can carry a protocol
+// major outside the range DetermineBlockType expects for it. That made the
+// check reject real mainnet blocks at every hard-fork boundary -- observed
+// concretely in this repository's own immutable-chain testdata, where
+// genuine Alonzo blocks (Shelley-shaped headers) carry protocol major 7
+// (Babbage's own floor) -- a functional regression on the primary
+// production GetBlock path, worse than the narrow mislabeling gap it
+// closed. The gap is accepted rather than worked around further: hash and
+// slot together already prove the returned bytes are the genuine,
+// uncorrupted content for the requested key; what an accepted era
+// disagreement could still leave open is BlockMetadata.Type naming an
+// adjacent era that happens to share the same header layout, which a
+// caller that decodes strictly under the recorded Type (rather than
+// re-deriving it) would not be misled by.
+//
+// Separately, and still accepted: for a Byron main block specifically,
+// gouroboros checks the transaction, delegation, and update proofs but not
+// ssc_proof, because the SSC proof hashes cardano-ledger's own encoding of
+// the sub-payloads rather than the bytes carried in the block -- an
+// upstream limitation, not something derivable here. An alteration
+// confined to that one payload therefore changes nothing Hash checks.
+// Bark's own archive-fetch path hits the identical gap and closes it by
+// rejecting Byron main blocks entirely (assertBodyFullyAuthenticated in
+// bark/blob.go), but bark treats a remote archive as an optional,
+// distrusted fallback behind a trusted local store, so refusing one era
+// there only costs the availability of a path that has a fallback. Hash
+// instead guards the *primary* GetBlock path for S3/GCS: rejecting Byron
+// main blocks here would make every Byron-era block permanently
+// unretrievable from an S3/GCS-backed node (needed for a from-genesis
+// sync, or serving historical API queries), a full functional regression
+// traded for closing a gap that is narrow -- confined to one payload, in
+// one era, on a store the operator already configured and trusted enough
+// to write real chain data into in the first place.
 func Hash(
 	blockType uint,
 	wantSlot uint64,
@@ -89,65 +122,5 @@ func Hash(
 			gotHash[:], decoded.SlotNumber(), wantSlot,
 		)
 	}
-	if err := checkEra(decoded, blockType); err != nil {
-		return nil, err
-	}
 	return decoded, nil
-}
-
-// checkEra independently derives blockType's decoded era from the block's
-// own header and rejects a disagreement with the type blockType claims.
-//
-// Byron is exempt: its hash is taken over the block-type byte followed by
-// the header, so its era is already bound by the hash check above and
-// there is nothing further to derive.
-//
-// Known accepted gap for Byron main blocks specifically: gouroboros checks
-// their transaction, delegation, and update proofs but not ssc_proof,
-// because the SSC proof hashes cardano-ledger's own encoding of the
-// sub-payloads rather than the bytes carried in the block -- an upstream
-// limitation, not something derivable here. An alteration confined to the
-// SSC payload therefore changes nothing Hash checks (hash, slot, and era
-// all come from the untouched header). Bark's own archive-fetch path hits
-// this identical gap and closes it by rejecting Byron main blocks
-// entirely (see assertBodyFullyAuthenticated in bark/blob.go) -- but bark
-// treats a remote archive as an optional, distrusted fallback behind a
-// trusted local store, so refusing one era there costs only availability
-// of a path that has a fallback. Hash instead guards the *primary*
-// GetBlock path for S3/GCS: rejecting Byron main blocks here would make
-// every Byron-era block permanently unretrievable from an S3/GCS-backed
-// node (needed for a from-genesis sync, or serving historical API
-// queries), a full functional regression traded for closing a gap that is
-// narrow -- confined to one payload, in one era, on a store the operator
-// already configured and trusted enough to write real chain data into in
-// the first place. Accepted as a documented risk rather than rejected.
-func checkEra(decoded gledger.Block, blockType uint) error {
-	if blockType == gledger.BlockTypeByronEbb ||
-		blockType == gledger.BlockTypeByronMain {
-		return nil
-	}
-	header := decoded.Header()
-	if header == nil {
-		return fmt.Errorf(
-			"%w: block has no header to derive the era from",
-			ErrTypeMismatch,
-		)
-	}
-	derived, err := gledger.DetermineBlockType(header.Cbor())
-	if err != nil {
-		// Fail closed: an era that cannot be derived cannot be checked,
-		// and falling back to the claimed type would hand era selection
-		// back to whatever supplied blockType in the first place.
-		return fmt.Errorf(
-			"%w: deriving era from header: %w",
-			ErrTypeMismatch, err,
-		)
-	}
-	if derived != blockType {
-		return fmt.Errorf(
-			"%w: header is era %d, claimed %d",
-			ErrTypeMismatch, derived, blockType,
-		)
-	}
-	return nil
 }

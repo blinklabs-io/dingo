@@ -65,16 +65,15 @@ func seedBlobMigrationDataset(
 ) blobMigrationDataset {
 	t.Helper()
 	// A real block, with its own genuinely matching hash/type/slot, not
-	// arbitrary placeholders: S3 and GCS independently re-derive all
-	// three from the CBOR before returning it (blockverify.Hash), so a
-	// migrated block whose stored key doesn't actually match its bytes
-	// would fail that check on read-back instead of exercising the
-	// migration path this test is for. loadMigrationFixtureBlock (not a
-	// plain loadImmutableBlocks(1)) is what guarantees that: see its own
-	// doc comment for why the first block in this testdata set specifically
-	// would not.
-	block, err := loadMigrationFixtureBlock()
+	// arbitrary placeholders: S3 and GCS independently re-derive both from
+	// the CBOR before returning it (blockverify.Hash), so a migrated block
+	// whose stored key doesn't actually match its bytes would fail that
+	// check on read-back instead of exercising the migration path this
+	// test is for.
+	blocks, err := loadImmutableBlocks(1)
 	require.NoError(t, err)
+	require.Len(t, blocks, 1)
+	block := blocks[0]
 
 	dataset := blobMigrationDataset{
 		blockSlot:     block.Slot,

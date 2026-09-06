@@ -118,58 +118,35 @@ func loadBlockData(numBlocks int) ([][]byte, error) {
 // runs -- would accept, by calling it directly rather than maintaining a
 // second copy of its logic. Checking only that block.Cbor decodes under
 // block.Type would not be enough on its own: NewBlockFromCbor treats Type
-// as a decode hint, and for Shelley and later eras the block hash covers
-// only the header, which adjacent eras share the layout of, so decoding
-// under an adjacent-but-wrong era can still succeed and reproduce the
-// same hash and slot -- exactly the case blockverify.Hash's own era check
-// exists to catch.
+// as a decode hint, and blockverify.Hash independently re-derives the hash
+// and slot rather than trusting the caller's claim.
 func verifyBlockSelfConsistent(block immutable.Block) error {
 	_, err := blockverify.Hash(block.Type, block.Slot, block.Cbor, block.Hash)
 	return err
 }
 
-// loadMigrationFixtureBlock returns a real testdata block that passes
-// verifyBlockSelfConsistent, for a caller (storage_migration_test.go's
-// blob dataset) that needs one whose (hash, type, slot) as a set are what
-// blockverify.Hash would accept -- not just one that decodes successfully
-// under its own recorded Type, which verifyBlockSelfConsistent's own doc
-// comment explains is not the same thing.
-//
-// A plain loadImmutableBlocks(1) is not enough on its own: this testdata
-// set's first ~20 blocks decode fine under their recorded Type and
-// reproduce the right hash/slot, but carry a protocol-version field
-// DetermineBlockType can't place in any known era's range ("unknown proto
-// major 7 for Shelley-like") -- evidently placeholder data left over from
-// however this fixture set was originally generated, not a genuine era
-// disagreement. Scanning forward for the first block that passes every
-// check, rather than assuming the first block in iteration order will,
-// is what keeps this independent of exactly which testdata blocks happen
-// to carry that placeholder.
-func loadMigrationFixtureBlock() (immutable.Block, error) {
-	const scanLimit = 50
-	blocks, err := loadImmutableBlocks(scanLimit)
-	if err != nil {
-		return immutable.Block{}, err
-	}
-	for _, block := range blocks {
-		if err := verifyBlockSelfConsistent(block); err == nil {
-			return block, nil
-		}
-	}
-	return immutable.Block{}, fmt.Errorf(
-		"no self-consistent block found in the first %d testdata blocks",
-		scanLimit,
-	)
-}
-
-// TestLoadImmutableBlocksAreSelfConsistent proves loadMigrationFixtureBlock
-// actually returns a block whose (hash, type, slot) blockverify.Hash would
-// accept -- see verifyBlockSelfConsistent's own doc comment for what that
-// means and why checking hash and slot alone would not be enough.
+// TestLoadImmutableBlocksAreSelfConsistent proves every block this testdata
+// set's loadImmutableBlocks loads has a (hash, type, slot) that
+// blockverify.Hash accepts -- see verifyBlockSelfConsistent's own doc
+// comment for what that means. blockverify.Hash used to also independently
+// re-derive era from the header (gledger.DetermineBlockType) and reject a
+// disagreement with the recorded Type; some of this testdata set's earlier
+// blocks failed that check ("unknown proto major 7 for Shelley-like") even
+// though they are genuine, correctly-encoded blocks -- DetermineBlockType
+// classifies era from the header's announced protocol-major version, which
+// a block producer bumps ahead of an upcoming hard fork, before that
+// fork's own era actually begins. blockverify.Hash's own doc comment has
+// the full account of why that check was dropped; this test now covers
+// every loaded block rather than scanning for the first one that happens
+// to pass, since there is no longer a known-bad subset to scan past.
 func TestLoadImmutableBlocksAreSelfConsistent(t *testing.T) {
-	block, err := loadMigrationFixtureBlock()
+	const numBlocks = 50
+	blocks, err := loadImmutableBlocks(numBlocks)
 	require.NoError(t, err)
-	require.NoError(t, verifyBlockSelfConsistent(block))
+	for _, block := range blocks {
+		require.NoErrorf(t, verifyBlockSelfConsistent(block),
+			"block at slot %d, type %d", block.Slot, block.Type)
+	}
 }
 
 // storageBenchBackend is one storage backend under benchmark: a display name,
