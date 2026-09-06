@@ -38,14 +38,24 @@ import (
 // slot-denominated diffusion window (EndorserBlockWaitSlots) converts to a
 // wall-clock window short enough to assert on but long enough to separate
 // "returned immediately" from "waited a window" without flaking.
-const leiosWaitTestSlotLen = 10 * time.Millisecond
+const leiosWaitTestSlotLen = 20 * time.Millisecond
 
 // leiosWaitTestWaitSlots matches the production default
 // (CertifyByDeadlineSlots), so the window under test is
-// leiosWaitTestWaitSlots * leiosWaitTestSlotLen = 200ms.
+// leiosWaitTestWaitSlots * leiosWaitTestSlotLen = 400ms.
 const leiosWaitTestWaitSlots = 20
 
 const leiosWaitTestWindow = leiosWaitTestWaitSlots * leiosWaitTestSlotLen
+
+// leiosWaitTestLongWaitSlots gives a 10s window, used by tests where the wait
+// must be ended by something other than the deadline. It is far larger than
+// any plausible scheduling delay on a loaded runner, so the deadline can never
+// win the race against the event the test is actually exercising -- unlike a
+// timer racing a short window, which is the classic flake in this file's
+// shape. Nothing waits 10s: the wait ends as soon as that event fires.
+const leiosWaitTestLongWaitSlots = 500
+
+const leiosWaitTestLongWindow = leiosWaitTestLongWaitSlots * leiosWaitTestSlotLen
 
 // withLeiosWaitTestSlotLength gives a bare-constructed LedgerState a Shelley
 // slot length, which is what ensureReferencedEndorserBlocks converts the
@@ -168,7 +178,12 @@ func TestEnsureReferencedEndorserBlocksWaitsForCertifiedClosureArrivingLate(
 	t *testing.T,
 ) {
 	parent, certifier, ebHash := leiosTestCertifiedBlockPair(t)
-	var available atomic.Bool
+	// The endorser block becomes available on the arrivalPoll-th poll rather
+	// than after a wall-clock delay, so "arrives part-way through the window"
+	// is driven by the wait's own progress and cannot lose a race with the
+	// deadline on a loaded runner.
+	const arrivalPoll = 5
+	var polls atomic.Int64
 	cfg := LedgerStateConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EndorserBlockProvider: func(
@@ -181,31 +196,26 @@ func TestEnsureReferencedEndorserBlocksWaitsForCertifiedClosureArrivingLate(
 			if string(hash) != string(ebHash.Bytes()) {
 				return nil, false
 			}
-			return nil, available.Load()
+			return nil, polls.Add(1) >= arrivalPoll
 		},
-		EndorserBlockWaitSlots:     leiosWaitTestWaitSlots,
+		EndorserBlockWaitSlots:     leiosWaitTestLongWaitSlots,
 		LeiosApplyEndorserBlockTxs: false,
 	}
 	ls := &LedgerState{config: cfg}
 	withLeiosWaitTestSlotLength(ls)
-
-	arrival := leiosWaitTestWindow / 4
-	timer := time.AfterFunc(arrival, func() { available.Store(true) })
-	defer timer.Stop()
 
 	start := time.Now()
 	require.NoError(t, ls.ensureReferencedEndorserBlocks(
 		t.Context(),
 		[]gledger.Block{parent, certifier},
 	))
-	elapsed := time.Since(start)
 	require.GreaterOrEqual(
 		t,
-		elapsed,
-		arrival,
+		polls.Load(),
+		int64(arrivalPoll),
 		"mandatory certified closure must be waited for, not skipped",
 	)
-	require.Less(t, elapsed, leiosWaitTestWindow)
+	require.Less(t, time.Since(start), leiosWaitTestLongWindow)
 }
 
 // TestEnsureReferencedEndorserBlocksSharesOneWindowAcrossMissingBlocks is the
@@ -429,17 +439,15 @@ func TestLeiosEbWaitMetricsRecordOutcomeAndDuration(t *testing.T) {
 	require.Zero(t, leiosWaitTestHistogram(t, reg, "arrived"))
 
 	// Arrival: recorded as arrived, and does not increment the timeout
-	// counter.
-	timer := time.AfterFunc(
-		leiosWaitTestWindow/4,
-		func() { available.Store(true) },
-	)
-	defer timer.Stop()
+	// counter. The endorser block is made available by the provider's own
+	// second call rather than by a timer racing the deadline, and the window
+	// is long enough that the deadline cannot fire first regardless of load.
+	available.Store(true)
 	ls.waitForEndorserBlock(
 		t.Context(),
 		100,
 		ebHash,
-		leiosWaitTestWindow,
+		leiosWaitTestLongWindow,
 		time.Millisecond,
 	)
 	require.Equal(t, uint64(1), leiosWaitTestHistogram(t, reg, "arrived"))
@@ -458,59 +466,88 @@ func TestLeiosEbWaitMetricsRecordOutcomeAndDuration(t *testing.T) {
 // counting it as one inflates the timeout rate exactly when a node is shutting
 // down or restarting its pipeline, which is when the metric is most likely to
 // be read.
+//
+// Neither case uses a timer. Cancellation is either already in effect before
+// the wait starts, or is driven by the wait's own polling, and the window is
+// large enough that the deadline cannot win either race on a loaded runner.
+// A timer firing at a fraction of a short window is precisely the flake this
+// avoids: if it landed late the outcome would be "timeout" and the assertions
+// below would fail for reasons that have nothing to do with the code.
 func TestLeiosEbWaitCancellationIsNotCountedAsTimeout(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-			EndorserBlockProvider: func(
-				[]byte,
-				uint64,
-			) ([]cbor.RawMessage, bool) {
-				// Never arrives, so only a cancellation or the window can end
-				// the wait.
-				return nil, false
-			},
-		},
+	// cancelWhen selects how the parent context is cancelled relative to the
+	// wait: before it starts, or from inside the availability poll once the
+	// wait is already running.
+	for name, cancelOnPoll := range map[string]int64{
+		"cancelled before the wait starts": 0,
+		"cancelled during the wait":        3,
+	} {
+		t.Run(name, func(t *testing.T) {
+			reg := prometheus.NewRegistry()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			var polls atomic.Int64
+			ls := &LedgerState{
+				config: LedgerStateConfig{
+					Logger: slog.New(
+						slog.NewJSONHandler(io.Discard, nil),
+					),
+					EndorserBlockProvider: func(
+						[]byte,
+						uint64,
+					) ([]cbor.RawMessage, bool) {
+						if cancelOnPoll > 0 &&
+							polls.Add(1) == cancelOnPoll {
+							cancel()
+						}
+						// Never arrives, so only a cancellation or the
+						// window can end the wait.
+						return nil, false
+					},
+				},
+			}
+			ls.metrics.init(reg)
+
+			// Every outcome series exists before any wait.
+			require.Equal(
+				t,
+				3,
+				testutil.CollectAndCount(ls.metrics.leiosEbWaitSeconds),
+			)
+
+			if cancelOnPoll == 0 {
+				cancel()
+			}
+
+			start := time.Now()
+			ls.waitForEndorserBlock(
+				ctx,
+				100,
+				lcommon.NewBlake2b256(leiosTestHash(0xE8)),
+				leiosWaitTestLongWindow,
+				time.Millisecond,
+			)
+			require.Less(
+				t,
+				time.Since(start),
+				leiosWaitTestLongWindow,
+				"the wait must end on parent cancellation, not run out the window",
+			)
+
+			require.Equal(
+				t,
+				uint64(1),
+				leiosWaitTestHistogram(t, reg, "cancelled"),
+			)
+			require.Zero(t, leiosWaitTestHistogram(t, reg, "timeout"))
+			require.Zero(t, leiosWaitTestHistogram(t, reg, "arrived"))
+			require.Zero(
+				t,
+				testutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
+				"a cancelled pass must not be counted as a diffusion-window timeout",
+			)
+		})
 	}
-	ls.metrics.init(reg)
-
-	// All three outcome series exist before any wait.
-	require.Equal(
-		t,
-		3,
-		testutil.CollectAndCount(ls.metrics.leiosEbWaitSeconds),
-	)
-
-	ctx, cancel := context.WithCancel(t.Context())
-	timer := time.AfterFunc(leiosWaitTestWindow/4, cancel)
-	defer timer.Stop()
-	defer cancel()
-
-	start := time.Now()
-	ls.waitForEndorserBlock(
-		ctx,
-		100,
-		lcommon.NewBlake2b256(leiosTestHash(0xE8)),
-		leiosWaitTestWindow,
-		time.Millisecond,
-	)
-	elapsed := time.Since(start)
-	require.Less(
-		t,
-		elapsed,
-		leiosWaitTestWindow,
-		"the wait must end on parent cancellation, not run out the window",
-	)
-
-	require.Equal(t, uint64(1), leiosWaitTestHistogram(t, reg, "cancelled"))
-	require.Zero(t, leiosWaitTestHistogram(t, reg, "timeout"))
-	require.Zero(t, leiosWaitTestHistogram(t, reg, "arrived"))
-	require.Zero(
-		t,
-		testutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
-		"a cancelled pass must not be counted as a diffusion-window timeout",
-	)
 }
 
 // TestLeiosEbWaitCancellationLeavesCallerBehaviourUnchanged pins that the new
