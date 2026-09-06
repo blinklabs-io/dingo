@@ -66,6 +66,8 @@ func resetGlobalConfig() {
 		ForgeSyncToleranceSlots:           DefaultForgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots:       DefaultForgeStaleGapThresholdSlots,
 		ForgeHeaderFrontierToleranceSlots: DefaultForgeHeaderFrontierToleranceSlots,
+		ForgeUpstreamStalenessSlots:       DefaultForgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:     DefaultForgeAppliedTipStalenessSlots,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,
@@ -97,27 +99,12 @@ func unsetDebugBindAddrEnv(t *testing.T) {
 // LoadConfig runs envconfig AFTER the YAML merge, so an exported
 // DINGO_FORGE_* variable silently overrides both the fixture and the default,
 // and the assertion then fails for a reason unrelated to the code under test.
-//
-// Both spellings of every forge-gate knob are cleared. LoadConfig calls
-// envconfig.Process("cardano", cfg), so the name envconfig looks up FIRST is
-// the prefixed CARDANO_DINGO_... form; the bare DINGO_... name in the
-// envconfig struct tag is only the alt name it falls back to. Guarding one
-// spelling leaves the other able to override the value under test.
 func unsetForgeGateEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
-		"DINGO_FORGE_PRIMARY_CHAIN_TIP_TOLERANCE_SLOTS",
-		"CARDANO_DINGO_FORGE_PRIMARY_CHAIN_TIP_TOLERANCE_SLOTS",
-		"DINGO_FORGE_SYNC_TOLERANCE_SLOTS",
-		"CARDANO_DINGO_FORGE_SYNC_TOLERANCE_SLOTS",
-		"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS",
-		"CARDANO_DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS",
+		"DINGO_FORGE_HEADER_FRONTIER_TOLERANCE_SLOTS",
 		"DINGO_FORGE_UPSTREAM_STALENESS_SLOTS",
-		"CARDANO_DINGO_FORGE_UPSTREAM_STALENESS_SLOTS",
 		"DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS",
-		"CARDANO_DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS",
-		"DINGO_FORGE_ENDORSER_BLOCK_STALENESS_SLOTS",
-		"CARDANO_DINGO_FORGE_ENDORSER_BLOCK_STALENESS_SLOTS",
 	} {
 		// t.Setenv registers the restore; Unsetenv then removes it for the
 		// duration of the test, which is what envconfig must not see.
@@ -258,8 +245,12 @@ mithril:
 		},
 		ForgeSyncToleranceSlots:     321,
 		ForgeStaleGapThresholdSlots: 654,
-		// Not set by the fixture's YAML/env, so ApplyDefaults fills it.
+		// Not set by the fixture's YAML/env, so ApplyDefaults fills them --
+		// except the applied-tip backstop, whose 0 means "disabled" rather
+		// than "unset", so it stays 0.
 		ForgeHeaderFrontierToleranceSlots: DefaultForgeHeaderFrontierToleranceSlots,
+		ForgeUpstreamStalenessSlots:       DefaultForgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:     DefaultForgeAppliedTipStalenessSlots,
 		Mithril: MithrilConfig{
 			Enabled:                false,
 			AggregatorURL:          "https://mithril.example.net",
@@ -370,6 +361,8 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		ForgeSyncToleranceSlots:           DefaultForgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots:       DefaultForgeStaleGapThresholdSlots,
 		ForgeHeaderFrontierToleranceSlots: DefaultForgeHeaderFrontierToleranceSlots,
+		ForgeUpstreamStalenessSlots:       DefaultForgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:     DefaultForgeAppliedTipStalenessSlots,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,

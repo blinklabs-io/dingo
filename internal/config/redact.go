@@ -136,6 +136,7 @@ var logPlainConfigFields = []string{
 	"DebugPort",
 	"DelegatorInactivity",
 	"DelegatorInactivityEnabled",
+	"ForgeAppliedTipStalenessSlots",
 	"ForgeHeaderFrontierToleranceSlots",
 	"ForgeStaleGapThresholdSlots",
 	"ForgeSyncToleranceSlots",
