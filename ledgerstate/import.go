@@ -3022,6 +3022,10 @@ func importGovState(
 	if govState == nil {
 		return nil
 	}
+	var committeeErr CommitteeParseError
+	if errors.As(err, &committeeErr) {
+		return fmt.Errorf("authoritative committee state is invalid: %w", committeeErr)
+	}
 	var keyCredentialCount, scriptCredentialCount int
 	for _, member := range govState.Committee {
 		if member.ColdCredential.Type == CredentialTypeScript {

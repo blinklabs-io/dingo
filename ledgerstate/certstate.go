@@ -1929,6 +1929,14 @@ type ParsedCommitteeMember struct {
 	ExpiresEpoch   uint64
 }
 
+// CommitteeParseError marks malformed committee state. Committee state is
+// authoritative when present in a Conway snapshot, so import must not
+// checkpoint a partial state after this error.
+type CommitteeParseError struct{ Err error }
+
+func (e CommitteeParseError) Error() string { return e.Err.Error() }
+func (e CommitteeParseError) Unwrap() error { return e.Err }
+
 // ParsedGovProposal holds a decoded governance proposal.
 type ParsedGovProposal struct {
 	TxHash       []byte // 32 bytes
@@ -2046,9 +2054,9 @@ func ParseGovState(
 	// Parse committee (field 1) — best-effort
 	committee, quorum, err := parseCommittee(fields[1])
 	if err != nil {
-		warnings = append(warnings, fmt.Errorf(
+		warnings = append(warnings, CommitteeParseError{Err: fmt.Errorf(
 			"parsing committee: %w", err,
-		))
+		)})
 	}
 	result.Committee = committee
 	result.CommitteeQuorum = quorum
