@@ -87,6 +87,32 @@ type Chain struct {
 	pendingUpdates      []event.Event
 	pendingUpdatesMutex sync.Mutex
 	publishMutex        sync.Mutex
+
+	// batchCommitMutex keeps a rollback from resolving block indices that a
+	// chain-owned batch transaction has already applied to the in-memory
+	// chain but has not yet committed.
+	//
+	// addRawBlocks and AddBlocks advance c.tipBlockIndex, c.currentTip,
+	// c.headers and c.blocks inside their transaction's closure while holding
+	// c.mutex, and txn.Do only commits after that closure has returned and
+	// both chain locks have been released. Anything that takes c.mutex in the
+	// window between the two observes a tip index whose block the store
+	// cannot serve yet: ChainManager.removeBlockByIndex opens its own
+	// transaction, and no transaction can see another's uncommitted writes.
+	// rollbackLocked's removal loop starts at c.tipBlockIndex, so it failed
+	// its very first iteration with models.ErrBlockNotFound at an index the
+	// in-memory chain legitimately holds.
+	//
+	// A batch holds this for read from before it mutates memory until its
+	// transaction has concluded; rollbackLocked holds it for write, so the
+	// removal loop only ever runs against a store that has caught up with
+	// memory. Go's RWMutex is writer-preferring, so a waiting rollback also
+	// blocks further batches from starting rather than being starved by them.
+	//
+	// It covers only the transactions the chain itself owns. addBlockInternal
+	// takes a caller-supplied transaction whose commit the chain neither
+	// performs nor observes, so the same window remains open there.
+	batchCommitMutex sync.RWMutex
 }
 
 type queuedHeader struct {
@@ -519,6 +545,11 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 		// This prevents subscribers from observing rolled-back data
 		// when a later block in the batch fails.
 		pendingEvents := make([]event.Event, 0, batchSize)
+		// Hold the batch-commit barrier from before this batch mutates the
+		// in-memory chain until its transaction has concluded, so a
+		// concurrent rollback cannot resolve an index the store has yet to
+		// commit. See the batchCommitMutex field.
+		c.batchCommitMutex.RLock()
 		txn := c.manager.db.BlobTxn(true)
 		err := txn.Do(func(txn *database.Txn) error {
 			c.mutex.Lock()
@@ -545,6 +576,7 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 			}
 			return nil
 		})
+		c.batchCommitMutex.RUnlock()
 		if err != nil {
 			return err
 		}
@@ -731,6 +763,11 @@ func (c *Chain) addRawBlocks(
 		// publish them only after the transaction commits
 		// successfully.
 		pendingEvents := make([]event.Event, 0, batchSize)
+		// Hold the batch-commit barrier from before this batch mutates the
+		// in-memory chain until its transaction has concluded, so a
+		// concurrent rollback cannot resolve an index the store has yet to
+		// commit. See the batchCommitMutex field.
+		c.batchCommitMutex.RLock()
 		txn := c.manager.db.BlobTxn(true)
 		// addRawBlockLocked mutates c.currentTip, c.tipBlockIndex,
 		// c.headers, and c.blocks before the txn commits. If a
@@ -837,8 +874,10 @@ func (c *Chain) addRawBlocks(
 				c.manager.mutex.Unlock()
 				c.mutex.Unlock()
 			}
+			c.batchCommitMutex.RUnlock()
 			return fmt.Errorf("add raw block batch: %w", err)
 		}
+		c.batchCommitMutex.RUnlock()
 		c.notifyWaitingIterators()
 		// Publish events (only when eventBus is set). Not reached under a
 		// ledger mutex, so an inline Publish is safe here.
@@ -1132,6 +1171,12 @@ func (c *Chain) rollbackLocked(
 	point ocommon.Point,
 	deferred bool,
 ) ([]event.Event, error) {
+	// Wait for any chain-owned batch transaction that has already applied to
+	// the in-memory chain to conclude, so the removal loop below cannot ask
+	// the store for an index whose write has not committed yet. See the
+	// batchCommitMutex field.
+	c.batchCommitMutex.Lock()
+	defer c.batchCommitMutex.Unlock()
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	// We get a write lock on the manager to cover the integrity checks and block deletions
