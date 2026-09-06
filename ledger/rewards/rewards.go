@@ -933,9 +933,16 @@ func validateSnapshot(snapshot Snapshot) error {
 			)
 		}
 	}
-	if totalDelegated != snapshot.TotalActiveStake {
+	// TotalActiveStake is the sigma_a denominator: the stake of every
+	// registered credential with a delegation, whether or not the pool it
+	// delegates to is present in Pools. A pool the caller could not resolve
+	// carries no reward but keeps contributing its delegators' stake to that
+	// denominator (cardano-ledger ssTotalActiveStake), so the pools passed here
+	// may sum to less than it. Summing to more means the caller's pool set and
+	// its declared active stake disagree.
+	if totalDelegated > snapshot.TotalActiveStake {
 		return fmt.Errorf(
-			"%w: total delegated stake %d does not match active stake %d",
+			"%w: total delegated stake %d exceeds active stake %d",
 			ErrInvalidParameters,
 			totalDelegated,
 			snapshot.TotalActiveStake,
