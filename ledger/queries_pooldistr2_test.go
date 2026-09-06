@@ -480,6 +480,8 @@ func TestQueryShelleyPoolDistr2_PrefersRegistrationVrfKey(t *testing.T) {
 func TestQueryShelleyPoolDistr2_VrfKeyMatchesHeaderValidation(t *testing.T) {
 	tb := createTestBlock(t, [32]byte{91}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.epochCache = previewEpochs(0, 5, tb.epochNonce)
+	ls.publishSnapshotsLocked()
 
 	headerVrfKey, ok, err := headerVrfKeyFromBodyCbor(tb.block.Header())
 	require.NoError(t, err)
@@ -511,9 +513,22 @@ func TestQueryShelleyPoolDistr2_VrfKeyMatchesHeaderValidation(t *testing.T) {
 		nil,
 	))
 
+	// Save the mark snapshot used by epoch 5 before validation. The non-zero
+	// capture slot forces the snapshot-aligned historical lookup.
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:        4,
+			SnapshotType: snapshotTypeMark,
+			PoolKeyHash:  pkh.Bytes(),
+			TotalStake:   dbtypes.Uint64(2_000_000),
+			CapturedSlot: 4_000_100,
+		},
+		nil,
+	))
+
 	// The premise: this block passes the validator. Whatever key that took is
 	// the key an operator's schedule has to be computed against.
-	require.NoError(t, ls.verifyRegisteredVrfKey(tb.block),
+	require.NoError(t, ls.verifyRegisteredVrfKey(tb.block, blockEpochId(t, ls, tb.block)),
 		"fixture must be a block the validator accepts")
 
 	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(

@@ -168,7 +168,7 @@ ORDER BY id`,
 				rewardRows.Close()
 				return nil, err
 			}
-			reward.Amount, err = parseNullUint64("MIR reward", amount)
+			reward.Amount, err = parseNullBigInt("MIR reward", amount)
 			if err != nil {
 				rewardRows.Close()
 				return nil, err

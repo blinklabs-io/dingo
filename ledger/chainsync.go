@@ -2211,6 +2211,23 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			skipRollback = false
 		}
 		if skipRollback {
+			// A peer that is merely behind on our own chain repeats
+			// the same intersect on every reconnect by construction,
+			// so it reaches this threshold without anything having
+			// diverged. Skipping its rollback is right; reporting it
+			// as unrecoverable divergence (which advises the operator
+			// to re-bootstrap from a Mithril snapshot) and forcing a
+			// fresh connection are not.
+			if depth, behind := ls.chainsyncPeerBehindOnOurChain(
+				e,
+			); behind {
+				ls.noteChainsyncPeerBehind(
+					e,
+					depth,
+					"rollback loop detected",
+				)
+				return nil
+			}
 			// Surface the stuck condition through the point-keyed tracker
 			// that survives the resync reset+reconnect cycle. Without this
 			// the skip silently breaks the loop and the #2728 escalation
@@ -2345,6 +2362,26 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			}
 			if reconciled {
 				ls.resetChainsyncResyncState()
+				ls.setChainsyncState(SyncingChainsyncState)
+				return nil
+			}
+			// A peer whose advertised tip is a strict ancestor of
+			// ours holds a prefix of our chain: it is behind, not
+			// forked, and the over-K depth is only our intersect
+			// ladder's granularity (see
+			// chainsyncPeerBehindOnOurChain). Keep it attached and
+			// unselected until it catches up instead of rejecting,
+			// denying and escalating it — with a single configured
+			// upstream, evicting it is a self-inflicted outage.
+			if depth, behind := ls.chainsyncPeerBehindOnOurChain(
+				e,
+			); behind {
+				ls.noteChainsyncPeerBehind(
+					e,
+					depth,
+					"rollback exceeds security parameter K",
+				)
+				// No rollback occurred, so we are still syncing.
 				ls.setChainsyncState(SyncingChainsyncState)
 				return nil
 			}
