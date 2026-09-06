@@ -15,7 +15,9 @@
 package chainselection
 
 import (
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -470,4 +472,78 @@ func TestRollbackRegisteredPeerDoesNotForceGenesisExit(t *testing.T) {
 	}
 	require.True(t, cs.UpdatePeerTip(connId, deliveredTip, nil))
 	assert.Equal(t, SelectionModePraos, cs.SelectionMode())
+}
+
+// ConnectionLive is supplied by the composition layer and reaches into the
+// connection manager, so the registration path must evaluate it before taking
+// cs.mutex. Holding the selector lock across that callback lets connection
+// teardown ordering block -- or re-enter -- the chain-selection event path.
+//
+// The callback here re-enters the selector on the registration check and
+// blocks until that re-entry completes, so if HandlePeerRollbackEvent held
+// cs.mutex the whole handler would deadlock and the timeout below would fire.
+func TestHandlePeerRollbackEvaluatesLivenessWithoutSelectorLock(t *testing.T) {
+	connId := newTestConnectionId(1)
+	var calls atomic.Int32
+	reentered := make(chan struct{})
+	var cs *ChainSelector
+	cs = NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2160,
+		DisableEventSubscriptions: true,
+		ConnectionLive: func(ouroboros.ConnectionId) bool {
+			// Only the first call is the registration check; later calls come
+			// from the evaluation path, which holds the lock by design.
+			if calls.Add(1) != 1 {
+				return true
+			}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_ = cs.PeerCount()
+				_ = cs.GetAllPeerTips()
+			}()
+			select {
+			case <-done:
+				close(reentered)
+			case <-time.After(5 * time.Second):
+			}
+			return true
+		},
+	})
+
+	handled := make(chan struct{})
+	go func() {
+		defer close(handled)
+		cs.HandlePeerRollbackEvent(
+			newRollbackEvent(
+				connId,
+				ocommon.Point{Slot: 2614270, Hash: []byte("intersect")},
+				ochainsync.Tip{
+					Point: ocommon.Point{
+						Slot: 2614276,
+						Hash: []byte("peer-tip"),
+					},
+					BlockNumber: 2614276,
+				},
+			),
+		)
+	}()
+
+	select {
+	case <-handled:
+	case <-time.After(20 * time.Second):
+		t.Fatal(
+			"HandlePeerRollbackEvent deadlocked: ConnectionLive must be " +
+				"evaluated before cs.mutex is taken",
+		)
+	}
+	select {
+	case <-reentered:
+	default:
+		t.Fatal(
+			"the selector lock was held while ConnectionLive ran: a callback " +
+				"that touches the selector could not make progress",
+		)
+	}
+	assert.Equal(t, 1, cs.PeerCount())
 }

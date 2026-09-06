@@ -1824,12 +1824,44 @@ func (cs *ChainSelector) HandlePeerRollbackEvent(evt event.Event) {
 		return
 	}
 
+	// Fast path: a tracked peer needs no liveness decision, so the rollback is
+	// applied in place under a single lock acquisition.
+	if cs.applyRollbackToTrackedPeer(e) {
+		cs.EvaluateAndSwitch()
+		return
+	}
+
+	// Unknown connection. Evaluate liveness BEFORE taking cs.mutex:
+	// ConnectionLive is supplied by the composition layer and reaches into the
+	// connection manager, so calling it under the selector lock lets connection
+	// teardown ordering block -- or re-enter -- the chain-selection event path.
+	// updatePeerTipObservedPraosView checks liveness outside the lock for the
+	// same reason. A rollback can race the ConnectionClosedEvent that removed
+	// the peer, and re-registering a dead connection would resurrect an entry
+	// nothing will clean up except the stale-peer sweep.
+	if cs.config.ConnectionLive != nil &&
+		!cs.config.ConnectionLive(e.ConnectionId) {
+		cs.config.Logger.Debug(
+			"ignoring rollback from closed connection",
+			"connection_id", e.ConnectionId.String(),
+			"slot", e.Point.Slot,
+		)
+		if cs.config.OnRollbackRegistration != nil {
+			cs.config.OnRollbackRegistration(
+				RollbackRegistrationClosedConnection,
+			)
+		}
+		return
+	}
+
 	var shouldEvaluate bool
 	var evictedConn *ouroboros.ConnectionId
 	var outcome RollbackRegistrationOutcome
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
+		// Re-check under the lock: a concurrent roll forward (or another
+		// rollback) may have created the entry while liveness was evaluated.
 		if peerTip, exists := cs.peerTips[e.ConnectionId]; exists {
 			peerTip.ApplyRollback(e.Point, e.Tip)
 			shouldEvaluate = true
@@ -1859,6 +1891,20 @@ func (cs *ChainSelector) HandlePeerRollbackEvent(evt event.Event) {
 	}
 }
 
+// applyRollbackToTrackedPeer applies a rollback to an already-tracked peer and
+// reports whether it did. It takes cs.mutex itself and calls no configured
+// callback while holding it.
+func (cs *ChainSelector) applyRollbackToTrackedPeer(e PeerRollbackEvent) bool {
+	cs.mutex.Lock()
+	defer cs.mutex.Unlock()
+	peerTip, exists := cs.peerTips[e.ConnectionId]
+	if !exists {
+		return false
+	}
+	peerTip.ApplyRollback(e.Point, e.Tip)
+	return true
+}
+
 // registerPeerFromRollbackLocked registers a peer that reported a rollback on a
 // connection the selector is not tracking. On a fresh connection the client
 // sends MsgFindIntersect, the server answers MsgIntersectFound, and the first
@@ -1872,27 +1918,18 @@ func (cs *ChainSelector) HandlePeerRollbackEvent(evt event.Event) {
 // outage, with the header frontier frozen while the ledger keeps applying.
 //
 // Registration applies the same admission checks the roll-forward path applies
-// to a new peer -- connection liveness, tip plausibility, and tracked-peer
-// capacity -- and records only the confirmed intersection point as the
-// delivered frontier (see newPeerChainTipFromRollback). It returns any evicted
+// to a new peer -- connection liveness (checked by the caller, outside the
+// lock), tip plausibility, and tracked-peer capacity -- and records only the
+// confirmed intersection point as the delivered frontier (see
+// newPeerChainTipFromRollback). It returns any evicted
 // connection, for the caller to publish outside the lock, and the outcome.
-// Callers must hold cs.mutex.
+// Callers must hold cs.mutex, and must have established that the connection is
+// live before acquiring it (HandlePeerRollbackEvent does); no configured
+// callback is invoked from here, so nothing under the lock can re-enter the
+// selector or block on the connection manager.
 func (cs *ChainSelector) registerPeerFromRollbackLocked(
 	e PeerRollbackEvent,
 ) (*ouroboros.ConnectionId, RollbackRegistrationOutcome) {
-	// A rollback can race the ConnectionClosedEvent that removed the peer, so
-	// re-registering a dead connection would resurrect an entry nothing will
-	// ever clean up except the stale-peer sweep. The roll-forward path drops
-	// tip updates from closed connections for the same reason.
-	if cs.config.ConnectionLive != nil &&
-		!cs.config.ConnectionLive(e.ConnectionId) {
-		cs.config.Logger.Debug(
-			"ignoring rollback from closed connection",
-			"connection_id", e.ConnectionId.String(),
-			"slot", e.Point.Slot,
-		)
-		return nil, RollbackRegistrationClosedConnection
-	}
 	if !cs.checkPeerTipPlausibleLocked(
 		e.ConnectionId,
 		e.Tip,
