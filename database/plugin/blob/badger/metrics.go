@@ -99,7 +99,7 @@ func canonicalRegistererKey(reg prometheus.Registerer) (string, bool) {
 		if value.Kind() == reflect.Interface {
 			return key(value.Elem())
 		}
-		if value.Kind() == reflect.Ptr {
+		if value.Kind() == reflect.Pointer {
 			if value.IsNil() {
 				return "", false
 			}
