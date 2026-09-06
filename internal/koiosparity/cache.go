@@ -1634,6 +1634,7 @@ var koiosSourcedTables = []string{
 	"koios_epoch_info",
 	"koios_pool_epoch",
 	"koios_totals",
+	"koios_epoch_params",
 	"koios_account_rewards",
 	"koios_account_coverage",
 	"koios_account_fetch_staged_rows",

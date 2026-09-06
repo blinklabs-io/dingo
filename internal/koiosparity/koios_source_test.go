@@ -125,6 +125,14 @@ func seedOracleRows(t *testing.T, c *Cache, network string) {
 	require.NoError(t, c.SaveAccountUniverse(
 		network, []string{"stake_test1seeded"}, now,
 	))
+	// koios_epoch_params is Koios-sourced too, so the discard has to be
+	// exercised there as well.
+	require.NoError(t, c.UpsertEpochParams(KoiosEpochParams{
+		Network: network,
+		Epoch:   7,
+		Era:     "conway",
+	}))
+
 }
 
 func countOracleRows(t *testing.T, c *Cache, network string) int {
