@@ -488,6 +488,46 @@ be read from the committed state. If rollback wins, truncation and the ledger
 rewind make the waiting block batch stale, and the tip recheck rejects it
 instead of publishing Apply after Undo.
 
+Both mutation paths stage their in-memory state against the durable commit.
+`Chain.AddBlocks` and `Chain.addRawBlocks` advance `currentTip`,
+`tipBlockIndex`, the queued headers, and the ephemeral block buffer per block
+inside the batch transaction, so they snapshot those fields first and restore
+them on either failure mode.
+Without the restore a rolled-back batch leaves the chain naming a tip whose
+block the database no longer holds.
+
+The two failure modes are restored in different places, and the difference
+matters. A block the closure rejects is restored **inside the closure**, under
+the same `c.mutex` / `c.manager.mutex` the mutation held, so the rejected
+batch's tip is never published: no reader observes it, and no concurrent
+mutation can be overwritten by the restore. A `Commit` failure cannot be
+handled that way — `txn.Do` runs `Commit` after the closure's deferred unlocks
+— so the commit-failure path re-acquires both locks, and a mutation can have
+landed in between. Every chain mutation takes `c.mutex` and bumps
+`mutationGeneration`, which is what `batchRestoreIsSafeLocked` tests (it
+compares the staged fields too, as a fail-safe for a path that ever forgets to
+bump; the counter is the test that works, because a retry re-committing the
+same blocks reproduces every field exactly).
+
+The rollback halves cannot be staged the same way, because they commit
+separately: `rollbackChainAndStateDeferred` truncates the primary chain first
+(`chain.RollbackDeferred`, whose per-block deletions commit as they go) and
+rolls the ledger back second (`LedgerState.rollback`). A ledger failure after
+that point cannot be undone, so it is invalidated explicitly instead — the
+continuation-audit window is discarded and the failure is reported as
+`ErrChainTruncatedLedgerRollbackFailed`. That identity is deliberately distinct
+from the refusals that mean no state changed (`models.ErrBlockNotFound`,
+`chain.ErrRollbackExceedsSecurityParam`, `ErrRollbackExceedsMithrilBoundary`),
+each of which `handleEventChainsyncRollback` and `tryResolveFork` recover from
+with a plain re-intersect; recovering that way here would resume from a ledger
+tip whose block the chain has already deleted.
+
+That reporting is scoped to an actual split. `LedgerState.rollback` can also
+fail with the ledger tip already **on** the rollback point — both
+`enforceDurableTipFloor` call sites do — and there the two halves agree, so the
+failure keeps the ordinary wrapped error and the recovery it has always had.
+The check is the same `pointMatches(ls.Tip().Point, point)` test the success
+path uses to decide whether to arm the continuation audit.
 `LedgerState.rollback` will not accept a target that shares the applied tip's
 slot with a different hash. The UTxO and transaction predicates in
 `database.TruncateAfterSlot` are slot-only (`added_slot > slot`,

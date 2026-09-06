@@ -1220,9 +1220,12 @@ func (c *Chain) ValidateRollback(point ocommon.Point) error {
 			return nil
 		}
 	}
-	// Lookup block for rollback point
+	// Lookup block for rollback point. Slot 0 is a real slot, so a point is
+	// only "names no block" when it carries neither a slot nor a hash --
+	// gating on the slot alone let a hash-bearing point at slot 0 skip
+	// membership validation and resolve against block index zero.
 	var rollbackBlockIndex uint64
-	if point.Slot > 0 {
+	if point.Slot > 0 || len(point.Hash) > 0 {
 		tmpBlock, err := c.rollbackPointBlock(point)
 		if err != nil {
 			return err
@@ -1291,10 +1294,13 @@ func (c *Chain) rollbackLocked(
 			return nil, nil
 		}
 	}
-	// Lookup block for rollback point
+	// Lookup block for rollback point. See ValidateRollback: a point at slot
+	// 0 that carries a hash still names a block, and skipping the lookup for
+	// it deletes the chain tail while setting currentTip to a point whose
+	// block is not retained.
 	var rollbackBlockIndex uint64
 	var tmpBlock models.Block
-	if point.Slot > 0 {
+	if point.Slot > 0 || len(point.Hash) > 0 {
 		var err error
 		tmpBlock, err = c.rollbackPointBlock(point)
 		if err != nil {
@@ -2044,7 +2050,8 @@ func (c *Chain) iterNext(
 			ret.Rollback = true
 			iter.lastPoint = iter.rollbackPoint
 			iter.needsRollback = false
-			if iter.rollbackPoint.Slot > 0 {
+			if iter.rollbackPoint.Slot > 0 ||
+				len(iter.rollbackPoint.Hash) > 0 {
 				// Lookup block index for rollback point
 				tmpBlock, err := c.manager.blockByPoint(
 					iter.rollbackPoint,

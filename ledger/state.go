@@ -3675,7 +3675,25 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 		pubs.drainChain(ls.chain)
 	}
 	if err := ls.rollback(point); err != nil {
-		return fmt.Errorf("synchronize ledger rollback state: %w", err)
+		// ls.rollback can fail with the ledger already sitting on the
+		// rollback point: the no-op branch it takes when the tip
+		// already matches returns enforceDurableTipFloor's error
+		// directly, and the full path runs enforceDurableTipFloor again
+		// after committing the truncation and publishing the new tip.
+		// Neither leaves the halves disagreeing -- the chain truncated
+		// to point and the ledger is at point -- so those keep the
+		// ordinary wrapped error and the recovery it has always had.
+		// Only a ledger that did not reach the point is the divergence
+		// ErrChainTruncatedLedgerRollbackFailed exists to report. This
+		// is the same both-sides-reached-it test the success path below
+		// uses to decide whether to arm the continuation audit.
+		if pointMatches(ls.Tip().Point, point) {
+			return fmt.Errorf(
+				"synchronize ledger rollback state: %w",
+				err,
+			)
+		}
+		return ls.reportFailedLedgerRollbackAfterTruncation(point, err)
 	}
 	// A primary chain can be ahead of the applied ledger during genesis or
 	// snapshot catch-up. In that case ls.rollback intentionally leaves the
@@ -3689,6 +3707,66 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 		ls.continuationAudit.Store(nil)
 	}
 	return nil
+}
+
+// reportFailedLedgerRollbackAfterTruncation handles the one rollback failure
+// that cannot leave the node where it found it. rollbackChainAndStateDeferred
+// applies the two halves of a rollback in sequence, and by the time ls.rollback
+// runs the chain truncation is already durable: chain.rollbackLocked deleted
+// the abandoned blocks through their own committed transactions. There is
+// nothing left to restore -- the blocks are gone -- so the stale half is
+// invalidated explicitly instead.
+//
+// The caller reaches this only for a ledger that did not arrive at the rollback
+// point. A failure raised once the ledger tip is already at the point (both
+// enforceDurableTipFloor call sites in ls.rollback) leaves the two halves
+// agreeing and keeps the ordinary wrapped error.
+//
+// Invalidating means two things. The continuation-audit window is discarded:
+// arming it presumes the chain and the ledger both reached the rollback point
+// (see armContinuationAudit), and here the ledger did not, so every block above
+// the point would be reported as missing a producer. And the failure is
+// re-identified. ls.rollback can fail with models.ErrBlockNotFound, with
+// ErrRollbackExceedsMithrilBoundary (it re-reads mithrilLedgerSlot, which the
+// Mithril bootstrap can raise while this rollback waits on
+// blockPipelineGatherMutex and drainBlockPipelineBeforeRollback), or with
+// anything the metadata/blob truncation sweep returns. The first two are
+// exactly the identities handleEventChainsyncRollback and tryResolveFork treat
+// as "the rollback was refused, no state changed, re-intersect and carry on" --
+// a recovery that here resumes from a ledger tip naming a block the chain has
+// deleted. The cause is kept in the message but deliberately kept out of the
+// errors.Is chain so it cannot be classified that way;
+// ErrChainTruncatedLedgerRollbackFailed falls through to those callers'
+// hard-failure paths instead.
+func (ls *LedgerState) reportFailedLedgerRollbackAfterTruncation(
+	point ocommon.Point,
+	cause error,
+) error {
+	ls.continuationAudit.Store(nil)
+	ledgerTip := ls.Tip()
+	ls.config.Logger.Error(
+		"primary chain truncated but ledger rollback failed; "+
+			"ledger tip is no longer on the chain",
+		"component", "ledger",
+		"error", cause,
+		"rollback_slot", point.Slot,
+		"rollback_hash", hex.EncodeToString(point.Hash),
+		"chain_tip_slot", ls.chain.Tip().Point.Slot,
+		"ledger_tip_slot", ledgerTip.Point.Slot,
+		"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
+	)
+	// cause is rendered as text, not wrapped: wrapping would put its
+	// identity back in the errors.Is chain, which is precisely what the
+	// callers must not be able to match on here.
+	return fmt.Errorf(
+		"%w: chain truncated to %d.%s, ledger tip left at %d.%s: %s",
+		ErrChainTruncatedLedgerRollbackFailed,
+		point.Slot,
+		hex.EncodeToString(point.Hash),
+		ledgerTip.Point.Slot,
+		hex.EncodeToString(ledgerTip.Point.Hash),
+		cause.Error(),
+	)
 }
 
 // processChainIteratorRollback applies a rollback emitted by the primary
