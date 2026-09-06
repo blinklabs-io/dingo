@@ -11,6 +11,34 @@ behavior, and persisted formats are unchanged. Library callers of Mithril
 `Sync` or `NeedsSync` may leave `SyncConfig.StoragePlugins` unset to select the
 local `badger` blob and `sqlite` metadata providers.
 
+The blob-store reference can be replaced while the database is live.
+`Database.SetBlobStore` installs the new store and returns the one it replaced
+together with a drain func. Operations already in flight keep running against
+the store they pinned: a `Txn` pins the blob store it opened on for its whole
+lifetime and exposes it as `Txn.BlobStore()`, and blob work outside a
+transaction brackets itself with `Database.PinBlob`. The drain func returns
+once every operation pinned on the replaced store has finished, which is the
+point at which that store may be closed — `SetBlobStore` never closes it, and a
+caller that intends to close the replaced store must not install it again
+before drain returns, because a second installation of the same store counts
+its pins separately. The two production callers (`node.go` and
+`node_lifecycle.go`, the latter on the live reconfigure path) install a
+`bark.BlobStoreBark` wrapper over the store they were handed and keep it alive
+inside the wrapper, so they have nothing to drain. `Database.Blob()` returns
+the currently installed store without a pin, for callers that only need to
+identify, wrap, or ask a whole-store question of it; it must be used within the
+call that obtained it.
+
+Partial-commit recovery depends on the same "never closes" rule. When a commit
+returns `types.ErrPartialCommit` the blob transaction has committed and the
+metadata has not; the transaction releases its pin as it finishes, and the
+recovery that trims the blob store back to the metadata tip runs later, from
+the caller, against the store installed at that point. No pin spans that gap,
+because recovery is caller-scheduled and unbounded and holding one would block
+`drain` indefinitely. The replaced store must therefore stay open and reachable
+until recovery has run, which is what wrapping rather than retiring it
+achieves.
+
 The Badger provider threads the host's stop context through its close path.
 Stopping periodic value-log GC prevents a successful rewrite from starting a
 second pass. Badger does not expose cancellation for a rewrite already in
@@ -251,8 +279,9 @@ The Go model `models.Block` has `TableName() == "block"`, but it is not migrated
 
 Use the Go APIs when code runs inside Dingo:
 
-- `database.Database` in `database/database.go` owns both stores and exposes `Blob()`, `Metadata()`, `Transaction()`, `BlobTxn()`, `MetadataTxn()`, `StorageMode()`, and `Close()`.
-- `database.Txn` in `database/txn.go` coordinates sibling metadata/blob transactions. Write commits update commit timestamps in both stores, commit the blob transaction first, then commit metadata.
+- `database.Database` in `database/database.go` owns both stores and exposes `Blob()`, `PinBlob()`, `SetBlobStore()`, `Metadata()`, `Transaction()`, `BlobTxn()`, `MetadataTxn()`, `StorageMode()`, and `Close()`. `Blob()`, `PinBlob()`, and `SetBlobStore()` are the only readers and writer of the installed blob store; see "Storage provider ownership" for the pin/drain rules that make replacement safe.
+- `database.CborCache()` returns the `TieredCborCache`. Its cold-path entry points `ResolveUtxoCbor(txId, outputIdx, txn ...*Txn)` and `ResolveTxCbor(txn *Txn, txHash)` take the database transaction, not a bare `types.Txn` handle: an optional transaction makes uncommitted writes visible, and the cold read has to run against the store that transaction was opened on rather than whichever store is installed when the resolve happens.
+- `database.Txn` in `database/txn.go` coordinates sibling metadata/blob transactions. Write commits update commit timestamps in both stores, commit the blob transaction first, then commit metadata. `Txn.BlobStore()` returns the blob store the transaction was opened on — the store its `Blob()` handle belongs to, and the one every blob call inside the transaction must use.
 - `metadata.MetadataStore` in `database/plugin/metadata/store.go` is the
   compatibility composition of the SQL-facing capabilities. New components
   should accept the narrowest one they use rather than the composition.
@@ -921,7 +950,7 @@ again.
 | `pool_registration_owner` | `id`, `pool_registration_id`, `pool_id`, `key_hash` | PK `id`; indexes `pool_registration_id`, `pool_id` | Owners for a pool registration. Join `pool_registration_id -> pool_registration.id`; `pool_id -> pool.id`. |
 | `pool_registration_relay` | `id`, `pool_registration_id`, `pool_id`, `ipv4`, `ipv6`, `hostname`, `port` | PK `id`; indexes `pool_registration_id`, `pool_id` | Relay addresses for a pool registration. |
 | `pool_retirement` | `id`, `pool_id`, `pool_key_hash`, `certificate_id`, `epoch`, `added_slot` | PK `id`; indexes `pool_id`, `pool_key_hash`, `certificate_id`, `added_slot` | Pool retirement certificate. Synthetic retirements written by a Mithril v2 catch-up (reconcile) or by the initial Mithril bootstrap import have `certificate_id = 0` and no `certs` row (`epoch`/`added_slot` are the catch-up or snapshot point); joins on `certificate_id` must be LEFT JOINs to keep them visible, and active-pool queries rank them ahead of certificate-backed rows at the same slot. The bootstrap case covers a pool that appears in the imported active pool distribution (`pool_stake_snapshot` `"actv"`) but is absent from the certified live pool params: it retired at the snapshot's epoch boundary yet still leads the current epoch's already-fixed schedule, so the import synthesizes a `pool`/`pool_registration` pair carrying only its pool key hash and pool-distr `vrf_key_hash` (pledge/cost/margin/reward-account left zero) plus this retirement tombstone. That keeps the producer resolvable via `GetPool(includeInactive=true)` for the header VRF-key binding check while the tombstone excludes it from active-pool and stake queries. Imported reward seeding separately intersects its shared registration fallback with each target snapshot's positive-stake delegated pool keys before the target snapshot's complete parameters overlay it. A synthesized pool that belongs only to another snapshot therefore cannot leak into this epoch's reward inputs, while an actually referenced pool remains subject to the all-or-nothing reconciliation gate if neither source supplies complete economics. This matches how a genesis-synced node retains a retired pool without treating it as active. |
-| `pool_opcert_sequence` | `id`, `pool_key_hash`, `slot`, `sequence` | PK `id`; unique `(pool_key_hash, slot)`; index `slot`; index `(pool_key_hash, sequence)` | Observed operational certificate sequence by slot. Read before write inside the block-apply transaction to enforce inbound opcert counter monotonicity; per-slot rows let rollback drop entries past the rollback slot and recompute `pool.latest_op_cert_sequence`. A Mithril restore imports the certified HeaderState counter map at its trusted tip; validation selects observations strictly after that boundary, falls back to the certified row at the boundary, and ignores stale pre-boundary rows. Those imported rows are counters, not blocks — a bootstrap applies no block at or below its anchor, and one slot cannot hold a block from every pool — so `CountPoolBlocksInSlotRange` and `GetPoolBlockIssuersInSlotRange`, the two readers that mean "blocks minted", raise their start slot past the recorded `mithril_ledger_slot` before reading. Without that they credit every pool holding a certified counter with a block it never minted and inflate the epoch total by the size of the pool set, which reaches pool reward performance, the `reward_pool_input` counts seeded at the epoch boundary, and Blockfrost `blocks_minted`. `LatestPoolOpCertSequenceAtOrBefore` uses the same rows to provide Leios announcement validation with the highest issuer counter no later than the selected chain's immutable-tip slot; absence by that bound is distinct from counter zero and classifies the dangling announcement as stale. Reward calculation can read the ordered raw issuer rows for an ended epoch and exclude TPraos overlay slots before deriving pool performance. `LatestPoolOpCertSequences` reduces the whole table to one highest `sequence` per `pool_key_hash` (`GROUP BY pool_key_hash`) for the `GetChainDepState` query; because the table is keyed by issuer rather than joined to `pool`, that set includes cold keys whose pool has left the active set, which is what the chain still enforces against. That aggregate has no slot bound available to narrow it — the table takes a row per block minted, is pruned only by rollback, and holds nothing above the tip — so `(pool_key_hash, sequence)` exists to serve it from an index alone: SQLite and PostgreSQL fold it without reading a table row, and MySQL can skip through the index a pool at a time. It is declared by migration `v1alpha1`. The cost is one further index maintained per minted block. |
+| `pool_opcert_sequence` | `id`, `pool_key_hash`, `slot`, `sequence` | PK `id`; unique `(pool_key_hash, slot)`; index `slot`; index `(pool_key_hash, sequence)` | Observed operational certificate sequence by slot. Read before write inside the block-apply transaction to enforce inbound opcert counter monotonicity; per-slot rows let rollback drop entries past the rollback slot and recompute `pool.latest_op_cert_sequence`. A Mithril restore imports the certified HeaderState counter map at its trusted tip; validation selects observations strictly after that boundary, falls back to the certified row at the boundary, and ignores stale pre-boundary rows. Those imported rows are counters, not blocks — a bootstrap applies no block at or below its anchor, and one slot cannot hold a block from every pool — so `CountPoolBlocksInSlotRange` and `GetPoolBlockIssuersInSlotRange`, the two readers that mean "blocks minted", raise their start slot past the recorded `mithril_ledger_slot` before reading. Without that they credit every pool holding a certified counter with a block it never minted and inflate the epoch total by the size of the pool set, which reaches pool reward performance, the `reward_pool_input` counts seeded at the epoch boundary, and Blockfrost `blocks_minted`. `LatestPoolOpCertSequenceAtOrBefore` uses the same rows to provide Leios announcement validation with the highest issuer counter no later than the selected chain's immutable-tip slot; absence by that bound is distinct from counter zero and classifies the dangling announcement as stale. Reward calculation can read the ordered raw issuer rows for an ended epoch and exclude TPraos overlay slots before deriving pool performance. `LatestPoolOpCertSequences` reduces the whole table to one highest `sequence` per `pool_key_hash` (`GROUP BY pool_key_hash`) for the `GetChainDepState` query; because the table is keyed by issuer rather than joined to `pool`, that set includes cold keys whose pool has left the active set, which is what the chain still enforces against. That aggregate has no slot bound available to narrow it — the table takes a row per block minted, is pruned only by rollback, and holds nothing above the tip — so `(pool_key_hash, sequence)` exists to serve it from an index alone: SQLite and PostgreSQL fold it without reading a table row, and MySQL can skip through the index a pool at a time. It is declared by migration `v1alpha1`. The cost is one further index maintained per minted block. `sequence` is a signed engine integer, so the recorded counter domain is `[0, 2^63-1]` even though the reference decodes the operational certificate counter as an unbounded `Word64`. That column carries the monotonicity ordering as well as the value -- the `MAX(sequence)` reads above, the `latest_op_cert_sequence < ?` guard on the denormalized `pool` maximum, and the `(pool_key_hash, sequence)` index -- so a counter above the domain would order below every smaller one. `eras.MaxPersistableOpCertCounter` names the bound and block application refuses a higher counter before applying the block, rather than failing this write part-way through. Every row written before that bound was named is inside it: `checkedInt64` has always refused a higher value, so no row needs rewriting. |
 
 ### DReps, Governance, and Committee
 
@@ -2503,6 +2532,30 @@ slot. Such rows have no `certs`/`transaction` join, so without the
 `CASE WHEN` key their `COALESCE(..., 0)` values could lose the same-slot
 tie-break to a registration, incorrectly keeping the pool active for stake
 snapshots and reward inputs.
+
+### `GetPoolVrfKeyHashAtSlot` and `GetPoolEarliestVrfKeyHashAtSlot`
+
+Two lookups over the same rows, differing only in direction, used by header
+VRF-key verification to reconstruct the key a stake snapshot froze.
+
+`GetPoolVrfKeyHashAtSlot` returns the **latest** registration at or before a
+slot, ordered by `(added_slot, block_index, cert_index)` descending.
+`GetPoolEarliestVrfKeyHashAtSlot` returns the **earliest** at or before a slot,
+with the same ordering ascending. Both LEFT JOIN `certs` and `"transaction"`,
+so a registration synthesized by a Mithril import — which has no `certs` row —
+still ranks via `COALESCE(..., 0)`.
+
+The pair exists because cardano-ledger's POOL rule treats a first registration
+and a re-registration differently: a first registration is inserted into
+`psStakePools` immediately, while a re-registration goes to
+`psFutureStakePoolParams` and is merged only after SNAP has run. So the
+parameters a snapshot carries are those in force one epoch before its capture,
+and the key is resolved at that parameter cutoff with the *latest* lookup. A
+pool that first registered inside the captured epoch has no registration at
+that cutoff but is nonetheless in `psStakePools`; its key is then resolved with
+the *earliest* lookup at or before the capture slot. Earliest rather than
+latest, because a pool that also re-registered within that same epoch had the
+re-registration deferred, so the snapshot still carries the first one.
 
 ### `GetPoolsRetiringAtEpoch`
 
