@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -27,6 +28,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	_ "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -450,6 +453,31 @@ func TestStoreMaintenanceLifecycle(t *testing.T) {
 	}
 	require.NoError(t, store.Close())
 	require.Equal(t, uint32(1), calls.Load())
+}
+
+func TestStoreMaintenancePrunesAfterOptionalMaintenanceError(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	const coldTag = uint8(lcommon.CredentialTypeAddrKeyHash)
+	cold := credentialHash(0xc6)
+	for i := 1; i <= committeeAuthPruneBatch*2; i++ {
+		seedAuthorization(
+			t, store, coldTag, cold,
+			uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0x74, i),
+			uint64(i), uint64(i), // #nosec G115
+		)
+	}
+	require.NoError(t, store.SetTip(ochainsync.Tip{
+		Point: ocommon.Point{Slot: preprodTipSlot, Hash: []byte("tip")},
+	}, nil))
+	maintenanceErr := errors.New("optional maintenance failed")
+	store.maintenance = func(context.Context) error {
+		return maintenanceErr
+	}
+
+	err := store.runMaintenance(context.Background())
+	require.ErrorIs(t, err, maintenanceErr)
+	require.Equal(t, 1, authRowCountFor(t, store, coldTag, cold))
 }
 
 func TestStoreStartsForPostgresDialect(t *testing.T) {

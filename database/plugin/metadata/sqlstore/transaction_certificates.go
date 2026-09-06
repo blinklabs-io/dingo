@@ -387,7 +387,23 @@ RETURNING id`,
 			certificateID,
 			slot,
 		)
-		return id, nil, err
+		if err != nil {
+			return id, nil, err
+		}
+		// This row supersedes the credential's older authorizations. Drop a
+		// batch of the ones now outside the rollback window so the table
+		// tracks the committee instead of the whole certificate history; see
+		// committee_prune.go for the retention rule.
+		if _, err := s.pruneCommitteeHotAuthorizations(
+			ctx,
+			db,
+			coldTag,
+			cert.ColdCredential.Credential[:],
+			slot,
+		); err != nil {
+			return id, nil, err
+		}
+		return id, nil, nil
 	case *lcommon.ResignCommitteeColdCertificate:
 		var anchorURL string
 		var anchorHash []byte
