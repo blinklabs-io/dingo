@@ -4452,6 +4452,33 @@ rather than relying solely on step 7's `Chain.AddLocalBlock` check, which
 still runs as the final backstop against any race not closed here.
 
 The forger tracks slot battles (competing blocks at the same slot) and skips forging when the node is not sufficiently synced, controlled by `forgeSyncToleranceSlots` and `forgeStaleGapThresholdSlots`.
+
+The forger additionally refuses to forge when the node's own two views of its
+chain disagree. Block production reads both: the builder takes the forged
+block's parent from the primary chain tip (the header frontier), while
+transaction selection and validation, protocol parameters, the epoch nonce and
+leader eligibility all come from the ledger, which is at the applied tip. While
+the ledger pipeline works through admitted blocks it has not applied yet, the
+frontier runs ahead, and forging then signs a block whose contents were chosen
+against an older chain position than its parent.
+
+`forgeHeaderFrontierToleranceSlots` (default 5, flag
+`--forge-header-frontier-tolerance-slots`, env
+`CARDANO_DINGO_FORGE_HEADER_FRONTIER_TOLERANCE_SLOTS`) bounds that gap. It is
+much smaller than `forgeSyncToleranceSlots` because both tips are local and are
+meant to describe the same chain position, whereas the sync tolerance
+deliberately allows trailing the network while catching up; it is not zero
+because the ledger pipeline commits in batches, so a slot or two of gap is the
+normal steady state at the head of a fast chain. The gate also compares tip
+identity, not just position: an equal-slot fork the ledger has not applied has
+a gap of zero but still means the two views describe different blocks. Skips
+are logged at `WARN` (`forge skip: ledger tip stale vs header frontier`) and
+counted by `dingo_forge_stale_tip_skip_total`, labelled `reason="slot_gap"` or
+`reason="frontier_hash_diverged"`. The ledger-apply backlog itself is reported
+on every leader check by `dingo_forge_tip_gap_slots`. Raising the tolerance
+lets the node forge blocks whose contents were chosen against an older chain
+position than their parent, so raise it only where the ledger pipeline is
+known to be legitimately slow.
 KES periods are computed from the era-aware absolute slot (`currentSlot / slotsPerKESPeriod`) for both startup opcert validation and forge-time signing, so networks with Byron-era prefixes do not skew the current KES period by converting wall-clock duration directly through the Shelley slot length.
 Successful startup validation captures Shelley genesis `MaxKESEvolutions` on
 the loaded credentials together with the opcert start and overflow-checked

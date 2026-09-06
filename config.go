@@ -248,6 +248,7 @@ type Config struct {
 	blockProducer                                                                       bool
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
+	forgeHeaderFrontierToleranceSlots                                                   uint64
 	validateForgedBlock                                                                 bool
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
@@ -824,6 +825,7 @@ func (c *Config) syncCompatFields() {
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
+	c.forgeHeaderFrontierToleranceSlots = c.cfg.ForgeHeaderFrontierToleranceSlots
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
@@ -1446,6 +1448,14 @@ func WithLeiosPipelineTiming(timing leios.PipelineTiming) ConfigOptionFunc {
 func WithForgeSyncToleranceSlots(slots uint64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ForgeSyncToleranceSlots = slots
+	}
+}
+
+// WithForgeHeaderFrontierToleranceSlots sets how far the ledger-applied tip may
+// trail this node's own header frontier before forging is skipped.
+func WithForgeHeaderFrontierToleranceSlots(slots uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ForgeHeaderFrontierToleranceSlots = slots
 	}
 }
 
@@ -2184,6 +2194,12 @@ func (c *Config) ShelleyOperationalCertificate() string {
 // ForgeSyncToleranceSlots returns the sync tolerance for block forging.
 func (c *Config) ForgeSyncToleranceSlots() uint64 {
 	return c.cfg.ForgeSyncToleranceSlots
+}
+
+// ForgeHeaderFrontierToleranceSlots returns how far the ledger-applied tip may
+// trail this node's own header frontier before forging is skipped.
+func (c *Config) ForgeHeaderFrontierToleranceSlots() uint64 {
+	return c.cfg.ForgeHeaderFrontierToleranceSlots
 }
 
 // ForgeStaleGapThresholdSlots returns the stale gap threshold for warnings.
