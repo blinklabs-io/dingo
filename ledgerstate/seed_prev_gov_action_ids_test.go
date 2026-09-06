@@ -163,6 +163,7 @@ func drepPulsingStateWithRatified(
 func drepPulsingStateWithEnactCommittee(
 	t *testing.T,
 	committee any,
+	proposals ...any,
 ) any {
 	t.Helper()
 	// RatifyState.rsEnactState is an EnactState whose first field is the
@@ -171,7 +172,7 @@ func drepPulsingStateWithEnactCommittee(
 	enactState := []any{committee, nil, nil, nil, nil, nil, nil}
 	return []any{
 		[]any{[]any{}, map[uint64]uint64{}, map[uint64]uint64{}, map[uint64]uint64{}},
-		[]any{enactState, []any{}, []any{}, false},
+		[]any{enactState, proposals, []any{}, false},
 	}
 }
 
@@ -205,6 +206,30 @@ func TestParseGovStateCommitteeMatchesEnactState(t *testing.T) {
 	require.Len(t, parsed.EnactCommittee, 1)
 	assert.Equal(t, parsed.Committee, parsed.EnactCommittee)
 	assert.Equal(t, parsed.CommitteeQuorum.Rat, parsed.EnactCommitteeQuorum.Rat)
+}
+
+func TestParseGovStateEnactProposalWarningDoesNotInvalidateCommittee(t *testing.T) {
+	committee := committeeWithMember(t, bytes.Repeat([]byte{0x42}, 28), 700)
+	rootsAny := encodeRootsAsAny(t, [4]*ParsedGovActionId{})
+	data, err := cbor.Encode([]any{
+		[]any{rootsAny, []any{}}, committee,
+		[]any{[]any{"https://example.com/constitution", bytes.Repeat([]byte{0xAA}, 32)}, nil},
+		map[uint64]uint64{}, map[uint64]uint64{}, map[uint64]uint64{},
+		drepPulsingStateWithEnactCommittee(t, committee),
+	})
+	require.NoError(t, err)
+	// Keep the active committee valid while making rsEnacted contain a
+	// malformed action. The warning must not become a committee error.
+	data, err = cbor.Encode([]any{
+		[]any{rootsAny, []any{}}, committee,
+		[]any{[]any{"https://example.com/constitution", bytes.Repeat([]byte{0xAA}, 32)}, nil},
+		map[uint64]uint64{}, map[uint64]uint64{}, map[uint64]uint64{},
+		drepPulsingStateWithEnactCommittee(t, committee, cbor.RawMessage{0x01}),
+	})
+	require.NoError(t, err)
+	parsed, err := ParseGovState(data, EraConway)
+	require.Error(t, err)
+	assert.Nil(t, parsed.EnactCommitteeParseError)
 }
 
 func TestImportGovStateRejectsCommitteeMismatch(t *testing.T) {
