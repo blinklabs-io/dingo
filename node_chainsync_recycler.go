@@ -256,6 +256,7 @@ func (n *Node) handleChainSelectedNoneEventLocked(
 		"previous_connection", prevConn,
 		"genesis_corroboration", e.GenesisCorroboration,
 	)
+	n.recordChainSelectionStall(e.GenesisCorroboration)
 	if n.chainSelector == nil {
 		// Direct callers without a selector cannot perform the current-selection
 		// recheck above, so retain the event's compare-and-clear behavior.
