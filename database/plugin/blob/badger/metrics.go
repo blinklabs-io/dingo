@@ -61,11 +61,13 @@ type badgerGCCollectorCache struct {
 	mu            sync.Mutex
 	comparable    map[prometheus.Registerer]*badgerGCMetricCollectors
 	nonComparable []badgerGCCollectorCacheEntry
+	canonical     map[string]*badgerGCMetricCollectors
 }
 
 var (
 	badgerGCCollectors = badgerGCCollectorCache{
 		comparable: make(map[prometheus.Registerer]*badgerGCMetricCollectors),
+		canonical:  make(map[string]*badgerGCMetricCollectors),
 	}
 	nextBadgerStoreID atomic.Uint64
 )
@@ -88,6 +90,36 @@ func registerExistingOrNew(
 	return c
 }
 
+func canonicalRegistererKey(reg prometheus.Registerer) (string, bool) {
+	var key func(reflect.Value) (string, bool)
+	key = func(value reflect.Value) (string, bool) {
+		if !value.IsValid() {
+			return "", false
+		}
+		if value.Kind() == reflect.Interface {
+			return key(value.Elem())
+		}
+		if value.Kind() == reflect.Ptr {
+			if value.IsNil() {
+				return "", false
+			}
+			if value.Type() == reflect.TypeOf(&prometheus.Registry{}) {
+				return fmt.Sprintf("registry:%x", value.Pointer()), true
+			}
+			return key(value.Elem())
+		}
+		if value.Kind() == reflect.Struct && value.Type().Name() == "wrappingRegisterer" {
+			wrapped, ok := key(value.FieldByName("wrappedRegisterer"))
+			if !ok {
+				return "", false
+			}
+			return fmt.Sprintf("wrap:%s:%v:%v", wrapped, value.FieldByName("labels"), value.FieldByName("prefix")), true
+		}
+		return "", false
+	}
+	return key(reflect.ValueOf(reg))
+}
+
 func registerCollector[T prometheus.Collector](
 	reg prometheus.Registerer,
 	c prometheus.Collector,
@@ -107,6 +139,9 @@ func safeRegister(reg prometheus.Registerer, c prometheus.Collector) {
 func (c *badgerGCCollectorCache) get(
 	reg prometheus.Registerer,
 ) *badgerGCMetricCollectors {
+	if key, ok := canonicalRegistererKey(reg); ok {
+		return c.canonical[key]
+	}
 	value := reflect.ValueOf(reg)
 	if value.IsValid() && value.Type().Comparable() {
 		return c.comparable[reg]
@@ -123,6 +158,10 @@ func (c *badgerGCCollectorCache) put(
 	reg prometheus.Registerer,
 	collectors *badgerGCMetricCollectors,
 ) {
+	if key, ok := canonicalRegistererKey(reg); ok {
+		c.canonical[key] = collectors
+		return
+	}
 	value := reflect.ValueOf(reg)
 	if value.IsValid() && value.Type().Comparable() {
 		c.comparable[reg] = collectors
