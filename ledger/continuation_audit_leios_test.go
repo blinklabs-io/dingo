@@ -777,6 +777,24 @@ func TestContinuationAuditSkipsEndorserResolutionWithoutEndorserSpends(
 	)
 }
 
+// queueContinuationAuditTestRefs queues n synthetic deferred certified
+// references whose parents are absent from the block store, so each one costs a
+// resolution attempt that resolves to "not stored yet".
+func queueContinuationAuditTestRefs(
+	window *continuationAuditWindow,
+	seed string,
+	n int,
+) {
+	for i := range n {
+		ref := continuationAuditEndorserRef{
+			certParentHash: testHashBytes(seed + strconv.Itoa(i)),
+			blockSlot:      uint64(60 + i),
+		}
+		window.pendingEndorserRefs = append(window.pendingEndorserRefs, ref)
+		window.pendingEndorserSeen[ref.key()] = struct{}{}
+	}
+}
+
 // TestContinuationAuditEndorserResolutionIsBudgeted pins the per-block bound on
 // endorser-block resolution, the analogue of continuationAuditMaxInputsPerBlock
 // for the endorser path: one audited body may not resolve an unbounded number
@@ -790,22 +808,14 @@ func TestContinuationAuditEndorserResolutionIsBudgeted(t *testing.T) {
 	window := ls.continuationAudit.Load()
 	require.NotNil(t, window)
 
-	// Queue one more distinct certified closure than a single body may
+	// Queue three more distinct certified closures than a single body may
 	// resolve. Their parents are absent from the chain, so each resolution
-	// attempt is spent and accounted without needing a provider entry.
-	queued := continuationAuditMaxEndorserBlocksPerBlock + 1
-	for i := range queued {
-		window.pendingEndorserRefs = append(
-			window.pendingEndorserRefs,
-			continuationAuditEndorserRef{
-				certParentHash: testHashBytes(
-					"budget-parent-" + strconv.Itoa(i),
-				),
-				blockSlot: uint64(60 + i),
-			},
-		)
-		window.pendingEndorserSeen[window.pendingEndorserRefs[i].key()] = struct{}{}
-	}
+	// attempt is spent and accounted without needing a provider entry. The
+	// overflow is deliberately longer than one: with a single leftover the
+	// requeue-the-remainder path cannot show whether it requeues the tail
+	// once or once per remaining reference.
+	queued := continuationAuditMaxEndorserBlocksPerBlock + 3
+	queueContinuationAuditTestRefs(window, "budget-parent-", queued)
 
 	ls.auditContinuationBlock(f.spenderBlock(t), true)
 
@@ -819,9 +829,9 @@ func TestContinuationAuditEndorserResolutionIsBudgeted(t *testing.T) {
 		t,
 		window.pendingEndorserRefs,
 		queued,
-		"nothing may be lost: the overflow stays queued, and the probed "+
-			"references are requeued because their parents are not "+
-			"resolvable yet",
+		"nothing may be lost and nothing may be duplicated: the overflow "+
+			"is requeued once, and the probed references are requeued "+
+			"because their parents are not resolvable yet",
 	)
 	assert.True(t, window.endorserProducersIncomplete())
 	assert.Equal(
@@ -1193,5 +1203,67 @@ func TestContinuationAuditDedupesConvergingEndorserRefs(t *testing.T) {
 		1,
 		*f.providerCalls-before,
 		"one queued occurrence must cost one provider probe per body",
+	)
+}
+
+// TestContinuationAuditBudgetStopIsCountedOncePerBody is the regression for the
+// review finding that `skipped_budget` counted per unresolved input rather than
+// per audited body, which is what its Help string promises.
+//
+// The budget is a per-body allowance shared by every drain that body triggers,
+// one per unresolved input. The exhaustion sentinel was reset at the end of
+// each drain, so the next input's drain re-entered the budget-limited branch
+// and counted again — a body with thirty unresolvable inputs reported thirty
+// budget stops for one exhausted budget.
+func TestContinuationAuditBudgetStopIsCountedOncePerBody(t *testing.T) {
+	f := newLeiosAuditFixture(t)
+	ls := f.ls
+	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+	window := ls.continuationAudit.Load()
+	require.NotNil(t, window)
+	queueContinuationAuditTestRefs(
+		window,
+		"once-per-body-parent-",
+		continuationAuditMaxEndorserBlocksPerBlock+3,
+	)
+
+	// One body, four unresolvable inputs: four drains against one budget.
+	body := &spliceAuditBlock{
+		slot: 50,
+		hash: lcommon.NewBlake2b256(testHashBytes("once-per-body-spender")),
+		txs: []lcommon.Transaction{
+			mustSpliceAuditTx(
+				t,
+				testHashBytes("once-per-body-spender-tx"),
+				[]lcommon.TransactionInput{
+					mustSpliceAuditInput(t, f.ebTx.Hash().Bytes(), 0),
+					mustSpliceAuditInput(t, f.ebTx.Hash().Bytes(), 1),
+					mustSpliceAuditInput(t, f.ebTx.Hash().Bytes(), 2),
+					mustSpliceAuditInput(t, f.ebTx.Hash().Bytes(), 3),
+				},
+			),
+		},
+	}
+	ls.auditContinuationBlock(BlockfetchEvent{
+		ConnectionId: f.connId,
+		Block:        body,
+		Point:        ocommon.NewPoint(body.slot, body.hash.Bytes()),
+	}, true)
+
+	assert.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(
+			ls.metrics.continuationAuditOutcomes.WithLabelValues(
+				"skipped_budget",
+			),
+		),
+		"one body with one exhausted budget is one budget stop",
+	)
+	assert.Equal(
+		t,
+		continuationAuditMaxEndorserBlocksPerBlock,
+		window.endorserResolutions,
+		"the budget must not be replenished between inputs of one body",
 	)
 }
