@@ -397,12 +397,12 @@ func (b *Backfill) resolvePParams(
 			if era != nil &&
 				era.DecodePParamsUpdateFunc != nil &&
 				era.PParamsUpdateFunc != nil {
-				newPP, ppErr := b.db.ComputeAndApplyPParamUpdates(
+				newPP, _, ppErr := b.db.ComputeAndApplyPParamUpdates(
 					ep.StartSlot, ep.EpochId,
 					ep.EraId, quorum,
 					b.currentPParams,
 					era.DecodePParamsUpdateFunc,
-					era.PParamsUpdateFunc, nil,
+					era.PParamsUpdateFunc, nil, nil,
 				)
 				if ppErr != nil {
 					b.logger.Warn(
@@ -562,6 +562,14 @@ func (b *Backfill) getPParams(
 
 // calculateCertDeposits computes deposit amounts for each
 // certificate in the transaction.
+//
+// An index is omitted whenever the deposit cannot be computed -- no protocol
+// parameters, an era with no CertDepositFunc, ErrIncompatibleProtocolParams,
+// or any other calculation failure. Omission is the wire for "unknown": the
+// store records NULL for an absent index rather than an authoritative zero,
+// so a later legacy stake deregistration falls back to the current KeyDeposit
+// in UtxoValidateValueNotConservedUtxo instead of being refunded zero. Do not
+// "fix" a missing entry by inserting 0 here.
 func (b *Backfill) calculateCertDeposits(
 	tx lcommon.Transaction,
 	eraId uint,

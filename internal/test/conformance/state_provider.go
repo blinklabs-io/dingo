@@ -180,10 +180,24 @@ func (p *DingoStateProvider) IsStakeCredentialRegistered(
 	return account.Active
 }
 
-// StakeCredentialDeposit returns the deposit recorded for the active stake
-// credential. Initial state and snapshot imports are represented by a virtual
-// registration baseline; certificate history supersedes that baseline once it
-// has been established later than the import boundary.
+// StakeCredentialDeposit returns the deposit recorded when the stake
+// credential registered, or nil when the credential is not registered or the
+// recorded deposit is unknown.
+//
+// Without this method the harness does not satisfy
+// common.StakeCredentialDepositState, so
+// UtxoValidateValueNotConservedUtxo's optional type assertion misses and
+// every legacy stake deregistration in the corpus is refunded at the current
+// KeyDeposit. The corpus then cannot distinguish a correct recorded refund
+// from the fallback, which is the gap #3831 covers.
+//
+// This mirrors ledger.LedgerView.StakeCredentialDeposit: the account lookup
+// gates on the same live registration state as
+// IsStakeCredentialRegistered above, the registration history carries the
+// deposit actually paid, and the import baseline stands in for a credential
+// established by a vector's initial state rather than by a certificate in
+// that vector. A nil return is preserved rather than coerced to zero, because
+// the rule treats any non-nil value as authoritative.
 func (p *DingoStateProvider) StakeCredentialDeposit(
 	cred common.Credential,
 ) (*uint64, error) {
@@ -205,31 +219,38 @@ func (p *DingoStateProvider) StakeCredentialDeposit(
 	if account == nil || !account.Active {
 		return nil, nil
 	}
-
-	history, err := withBadConnRetry(func() ([]models.AccountRegistrationHistoryRow, error) {
-		return p.manager.db.GetAccountRegistrationHistoryByCredential(
-			credentialTag, cred.Credential[:], 1, 0, "desc", nil,
-		)
-	})
+	history, err := withBadConnRetry(
+		func() ([]models.AccountRegistrationHistoryRow, error) {
+			return p.manager.db.GetAccountRegistrationHistoryByCredential(
+				credentialTag, cred.Credential[:], 1, 0, "desc", nil,
+			)
+		},
+	)
 	if err != nil {
 		return nil, fmt.Errorf("lookup stake registration history: %w", err)
 	}
-	importRegistration, err := withBadConnRetry(func() (*models.AccountImportRegistration, error) {
-		return p.manager.db.GetAccountImportRegistrationByCredential(
-			credentialTag, cred.Credential[:], nil,
-		)
-	})
+	importRegistration, err := withBadConnRetry(
+		func() (*models.AccountImportRegistration, error) {
+			return p.manager.db.GetAccountImportRegistrationByCredential(
+				credentialTag, cred.Credential[:], nil,
+			)
+		},
+	)
 	if err != nil {
 		return nil, fmt.Errorf("lookup stake import registration: %w", err)
 	}
+	// A vector's initial-state registration is seeded as an import baseline,
+	// so it wins unless the vector's own certificates registered the
+	// credential more recently.
 	if importRegistration != nil &&
-		(len(history) == 0 || importRegistration.AddedSlot >= history[0].AddedSlot) {
+		(len(history) == 0 ||
+			importRegistration.AddedSlot >= history[0].AddedSlot) {
 		return importRegistration.Deposit, nil
 	}
 	if len(history) == 0 || history[0].Action != "registered" {
 		return nil, nil
 	}
-	return &history[0].Deposit, nil
+	return history[0].Deposit, nil
 }
 
 // ========== common.SlotState ==========
@@ -1065,4 +1086,10 @@ var _ eras.CommitteeCredentialState = (*DingoStateProvider)(nil)
 // cover, matching ledger.LedgerView's guard for the production path.
 var _ common.DRepDelegationState = (*DingoStateProvider)(nil)
 
+// conformance.StateProvider does not include StakeCredentialDepositState
+// either. UtxoValidateValueNotConservedUtxo discovers it with an optional type
+// assertion and silently falls back to the current KeyDeposit when it misses,
+// so a signature drift here would not fail a vector -- it would quietly stop
+// exercising the recorded-deposit refund the corpus is supposed to cover.
+// Mirrors ledger.LedgerView's guard for the production path.
 var _ common.StakeCredentialDepositState = (*DingoStateProvider)(nil)

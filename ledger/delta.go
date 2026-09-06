@@ -172,7 +172,12 @@ func (d *LedgerDelta) applyWithDonationRecording(
 				certDepositsMapPool.Put(certDeposits)
 				return fmt.Errorf("calculate certificate deposit: %w", err)
 			}
-			certDeposits[i] = deposit
+			// A nil deposit is unknown, not zero. Leave the index absent so
+			// the store records NULL rather than an authoritative zero that
+			// would later be refunded as zero by value conservation.
+			if deposit != nil {
+				certDeposits[i] = *deposit
+			}
 		}
 
 		setErr := ls.db.SetTransactionWithOpts(

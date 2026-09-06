@@ -18,21 +18,32 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/blinklabs-io/gouroboros/ledger/common"
+	common "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
 
+// The corpus documents keyDeposit=2000000 for its stake vectors, and every
+// registration it declares was made at that value, so a corpus vector alone
+// cannot tell a recorded refund from the KeyDeposit fallback -- the two
+// numbers coincide. These constants deliberately separate them: the state is
+// seeded at a recorded deposit that is not the KeyDeposit in effect during
+// validation, so the two candidate refunds give opposite value-conservation
+// outcomes.
 const (
-	recordedStakeDeposit = uint64(5_000_000)
-	currentKeyDeposit    = uint64(2_000_000)
+	stakeDepositVectorRecorded   = uint64(5_000_000)
+	stakeDepositVectorKeyDeposit = uint64(2_000_000)
 )
 
-func recordedDepositVectorParameters(keyDeposit uint64) *conway.ConwayProtocolParameters {
+func stakeDepositVectorPparams(
+	keyDeposit uint64,
+) *conway.ConwayProtocolParameters {
 	return &conway.ConwayProtocolParameters{
-		ProtocolVersion: common.ProtocolParametersProtocolVersion{Major: 9},
+		ProtocolVersion: common.ProtocolParametersProtocolVersion{
+			Major: 9,
+		},
 		//nolint:gosec // G115: test-scoped constants do not overflow
 		KeyDeposit:           uint(keyDeposit),
 		MaxTxSize:            16_384,
@@ -42,7 +53,7 @@ func recordedDepositVectorParameters(keyDeposit uint64) *conway.ConwayProtocolPa
 	}
 }
 
-func recordedDepositVectorCredential() common.Credential {
+func stakeDepositVectorCredential() common.Credential {
 	return common.Credential{
 		CredType: common.CredentialTypeAddrKeyHash,
 		Credential: common.NewBlake2b224(
@@ -51,13 +62,18 @@ func recordedDepositVectorCredential() common.Credential {
 	}
 }
 
-func loadRecordedDepositVector(
+// loadStakeDepositVector seeds a vector-shaped initial state declaring the
+// credential already registered, with the given KeyDeposit in force. The
+// deposit recorded for the credential is derived from these protocol
+// parameters, matching how the harness seeds every corpus vector.
+func loadStakeDepositVector(
 	t *testing.T,
 	m *DingoStateManager,
-	credential common.Credential,
+	cred common.Credential,
+	keyDeposit uint64,
 ) {
 	t.Helper()
-	key := mockledger.NewRewardAccountKey(credential)
+	key := mockledger.NewRewardAccountKey(cred)
 	require.NoError(t, m.LoadInitialState(
 		&conformance.ParsedInitialState{
 			CurrentEpoch: 1,
@@ -68,12 +84,15 @@ func loadRecordedDepositVector(
 				key: 0,
 			},
 		},
-		recordedDepositVectorParameters(recordedStakeDeposit),
+		stakeDepositVectorPparams(keyDeposit),
 	))
 }
 
-func recordedDepositVectorTransaction(
-	credential common.Credential,
+// stakeDepositVectorTx is a legacy stake deregistration with no inputs and no
+// outputs, so value conservation reduces to "refund must equal fee" and
+// isolates the recorded-deposit lookup from every other term.
+func stakeDepositVectorTx(
+	cred common.Credential,
 	fee uint64,
 ) *conway.ConwayTransaction {
 	return &conway.ConwayTransaction{
@@ -82,10 +101,14 @@ func recordedDepositVectorTransaction(
 			TxFee: fee,
 			TxCertificates: []common.CertificateWrapper{
 				{
-					Type: uint(common.CertificateTypeStakeDeregistration),
+					Type: uint(
+						common.CertificateTypeStakeDeregistration,
+					),
 					Certificate: &common.StakeDeregistrationCertificate{
-						CertType:        uint(common.CertificateTypeStakeDeregistration),
-						StakeCredential: credential,
+						CertType: uint(
+							common.CertificateTypeStakeDeregistration,
+						),
+						StakeCredential: cred,
 					},
 				},
 			},
@@ -93,34 +116,95 @@ func recordedDepositVectorTransaction(
 	}
 }
 
-// TestConformanceProviderRefundsRecordedStakeDeposit covers the legacy stake
-// deregistration refund path with a real Dingo backend and gouroboros rule.
-// The seeded deposit is 5 ADA, while validation uses a 2 ADA KeyDeposit, so
-// the result distinguishes the recorded refund from the fallback.
-func TestConformanceProviderRefundsRecordedStakeDeposit(t *testing.T) {
+// TestConformanceProviderRefundsRecordedStakeDepositNotKeyDeposit is the
+// regression test for #3831. It runs gouroboros'
+// UtxoValidateValueNotConservedUtxo against the conformance state provider
+// with a recorded deposit of 5 ADA while the KeyDeposit in force during
+// validation is 2 ADA.
+//
+// Without DingoStateProvider.StakeCredentialDeposit the rule's optional type
+// assertion misses, the refund silently becomes the 2 ADA KeyDeposit, and the
+// 5 ADA transaction fails value conservation. That is the gap the issue
+// describes: the corpus could not distinguish a correct recorded refund from
+// the fallback.
+func TestConformanceProviderRefundsRecordedStakeDepositNotKeyDeposit(
+	t *testing.T,
+) {
+	require.NotEqual(
+		t,
+		stakeDepositVectorKeyDeposit,
+		stakeDepositVectorRecorded,
+		"the recorded deposit must differ from KeyDeposit for this vector to discriminate",
+	)
+
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
 
-	credential := recordedDepositVectorCredential()
-	loadRecordedDepositVector(t, m, credential)
+	cred := stakeDepositVectorCredential()
+	// Seed the registration at the recorded deposit.
+	loadStakeDepositVector(t, m, cred, stakeDepositVectorRecorded)
 	provider := m.GetStateProvider()
-	require.True(t, provider.IsStakeCredentialRegistered(credential))
+	require.True(t, provider.IsStakeCredentialRegistered(cred))
 
-	validationParameters := recordedDepositVectorParameters(currentKeyDeposit)
+	// Validate under a *different* KeyDeposit, so the recorded value and the
+	// fallback disagree.
+	validationPparams := stakeDepositVectorPparams(
+		stakeDepositVectorKeyDeposit,
+	)
+
+	// Refunded at the recorded 5 ADA: a 5 ADA fee conserves value.
 	require.NoError(t, conway.UtxoValidateValueNotConservedUtxo(
-		recordedDepositVectorTransaction(credential, recordedStakeDeposit),
+		stakeDepositVectorTx(cred, stakeDepositVectorRecorded),
 		200,
 		provider,
-		validationParameters,
+		validationPparams,
 	))
 
-	// If the rule uses the current KeyDeposit instead of the recorded amount,
-	// this transaction is incorrectly accepted because its fee is 2 ADA.
+	// Refunded at the 2 ADA KeyDeposit instead: rejected. This is the
+	// assertion that fails when the provider lacks the capability, because
+	// the fallback would make this the accepted case and the one above the
+	// rejected one.
 	require.ErrorContains(t, conway.UtxoValidateValueNotConservedUtxo(
-		recordedDepositVectorTransaction(credential, currentKeyDeposit),
+		stakeDepositVectorTx(cred, stakeDepositVectorKeyDeposit),
 		200,
 		provider,
-		validationParameters,
+		validationPparams,
 	), "value not conserved")
+
+	// Supporting evidence, discovered exactly the way the rule discovers it:
+	// a runtime type assertion on the value the harness passes as the ledger
+	// state. If this assertion misses, the rule takes its silent fallback.
+	depositState, ok := provider.(common.StakeCredentialDepositState)
+	require.True(
+		t,
+		ok,
+		"the conformance provider must satisfy StakeCredentialDepositState, or the corpus never exercises the recorded refund",
+	)
+	recorded, err := depositState.StakeCredentialDeposit(cred)
+	require.NoError(t, err)
+	require.NotNil(t, recorded)
+	require.Equal(t, stakeDepositVectorRecorded, *recorded)
+}
+
+// TestConformanceProviderStakeDepositAbsentForUnregisteredCredential pins the
+// nil contract the rule depends on: an unregistered credential reports
+// absence, which is what sends value conservation to its KeyDeposit fallback
+// rather than to a refund of zero.
+func TestConformanceProviderStakeDepositAbsentForUnregisteredCredential(
+	t *testing.T,
+) {
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+
+	cred := stakeDepositVectorCredential()
+	provider := m.GetStateProvider()
+	require.False(t, provider.IsStakeCredentialRegistered(cred))
+
+	depositState, ok := provider.(common.StakeCredentialDepositState)
+	require.True(t, ok)
+	recorded, err := depositState.StakeCredentialDeposit(cred)
+	require.NoError(t, err)
+	require.Nil(t, recorded)
 }

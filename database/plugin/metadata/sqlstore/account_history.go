@@ -721,6 +721,18 @@ func accountRegistrationHistoryQuery(
 	parts := make([]string, 0, len(accountRegistrationHistorySources))
 	args := make([]any, 0, len(accountRegistrationHistorySources)*4)
 	for _, source := range accountRegistrationHistorySources {
+		// A source with no deposit column selects the text literal '0':
+		// that certificate type carries no deposit field at all. A source
+		// with a column selects it raw, without COALESCE, so a NULL
+		// survives to the caller as an unknown deposit rather than being
+		// erased into zero.
+		//
+		// The literal is quoted because the deposit columns are TEXT
+		// decimal strings in every dialect (the schema translation rewrites
+		// integer and blob but leaves text alone). A bare 0 makes Postgres
+		// reject the whole union with "UNION types integer and text cannot
+		// be matched", and the COALESCE this replaced failed the same way
+		// with "COALESCE types text and integer cannot be matched".
 		deposit := "'0'"
 		if source.depositColumn != "" {
 			deposit = source.table + "." + source.depositColumn
@@ -731,7 +743,7 @@ SELECT %[1]s.added_slot AS added_slot,
        certs.cert_index AS cert_index,
        tx.hash AS tx_hash,
        ? AS action,
-       COALESCE(%[2]s, '0') AS deposit,
+       %[2]s AS deposit,
        tx.slot AS tx_slot,
        tx.block_hash AS block_hash
 FROM %[1]s
