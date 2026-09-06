@@ -1987,6 +1987,13 @@ type ParsedGovState struct {
 	Proposals            []ParsedGovProposal
 	PrevGovActionIds     *ParsedPrevGovActionIds
 	RatifiedGovActionIds []ParsedGovActionId
+	// EnactCommittee and EnactCommitteeQuorum are the committee values
+	// carried by RatifyState.rsEnactState.  This is the state already
+	// enacted at the snapshot boundary, independent of rsEnacted (which
+	// is applied at the next boundary).
+	EnactCommittee       []ParsedCommitteeMember
+	EnactCommitteeQuorum *cbor.Rat
+	EnactCommitteeSet    bool
 }
 
 // ParseGovState decodes governance state from raw CBOR.
@@ -2064,7 +2071,7 @@ func ParseGovState(
 	result.PrevGovActionIds = prevIds
 
 	if len(fields) >= 7 {
-		ratifiedIds, err := parseDRepPulsingStateRatifiedIds(
+		enactCommittee, enactQuorum, enactSet, ratifiedIds, err := parseDRepPulsingState(
 			fields[6],
 		)
 		if err != nil {
@@ -2072,6 +2079,9 @@ func ParseGovState(
 				"parsing drep pulsing state: %w", err,
 			))
 		}
+		result.EnactCommittee = enactCommittee
+		result.EnactCommitteeQuorum = enactQuorum
+		result.EnactCommitteeSet = enactSet
 		result.RatifiedGovActionIds = ratifiedIds
 	}
 
@@ -2360,23 +2370,23 @@ func parseProposals(data []byte) (
 // The enacted field is a sequence of GovActionState values in the same
 // representation used by cgsProposals, so parseGovActionState can
 // recover the exact action IDs without decoding the full enact state.
-func parseDRepPulsingStateRatifiedIds(
+func parseDRepPulsingState(
 	data []byte,
-) ([]ParsedGovActionId, error) {
+) ([]ParsedCommitteeMember, *cbor.Rat, bool, []ParsedGovActionId, error) {
 	if len(data) == 0 {
-		return nil, nil
+		return nil, nil, false, nil, nil
 	}
 	fields, err := decodeRawArray(data)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, nil, false, nil, fmt.Errorf(
 			"decoding DRepPulsingState: %w", err,
 		)
 	}
 	if len(fields) == 0 {
-		return nil, nil
+		return nil, nil, false, nil, nil
 	}
 	if len(fields) < 2 {
-		return nil, fmt.Errorf(
+		return nil, nil, false, nil, fmt.Errorf(
 			"DRepPulsingState has %d elements, expected 2",
 			len(fields),
 		)
@@ -2384,25 +2394,38 @@ func parseDRepPulsingStateRatifiedIds(
 
 	ratifyState, err := decodeRawArray(fields[1])
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, nil, false, nil, fmt.Errorf(
 			"decoding RatifyState: %w", err,
 		)
 	}
 	if len(ratifyState) < 2 {
-		return nil, fmt.Errorf(
+		return nil, nil, false, nil, fmt.Errorf(
 			"RatifyState has %d elements, expected 4",
 			len(ratifyState),
 		)
 	}
+	var committee []ParsedCommitteeMember
+	var quorum *cbor.Rat
+	committeeSet := false
+	var errs []error
+	enactFields, enactErr := decodeRawArray(ratifyState[0])
+	if enactErr != nil {
+		errs = append(errs, fmt.Errorf("decoding RatifyState enact state: %w", enactErr))
+	} else if len(enactFields) > 0 {
+		committeeSet = true
+		committee, quorum, enactErr = parseCommittee(enactFields[0])
+		if enactErr != nil {
+			errs = append(errs, fmt.Errorf("decoding enact-state committee: %w", enactErr))
+		}
+	}
 
 	enacted, err := decodeRawArray(ratifyState[1])
 	if err != nil {
-		return nil, fmt.Errorf(
+		return committee, quorum, committeeSet, nil, errors.Join(append(errs, fmt.Errorf(
 			"decoding RatifyState enacted proposals: %w", err,
-		)
+		))...)
 	}
 	ratifiedIds := make([]ParsedGovActionId, 0, len(enacted))
-	var errs []error
 	for _, item := range enacted {
 		prop, err := parseGovActionState(item)
 		if err != nil {
@@ -2417,7 +2440,14 @@ func parseDRepPulsingStateRatifiedIds(
 		})
 	}
 
-	return ratifiedIds, errors.Join(errs...)
+	return committee, quorum, committeeSet, ratifiedIds, errors.Join(errs...)
+}
+
+// parseDRepPulsingStateRatifiedIds is retained for callers that only need
+// rsEnacted action IDs.
+func parseDRepPulsingStateRatifiedIds(data []byte) ([]ParsedGovActionId, error) {
+	_, _, _, ids, err := parseDRepPulsingState(data)
+	return ids, err
 }
 
 // parseProposalsRoots decodes the GovRelation StrictMaybe at the

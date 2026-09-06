@@ -160,6 +160,53 @@ func drepPulsingStateWithRatified(
 	}
 }
 
+func drepPulsingStateWithEnactCommittee(
+	t *testing.T,
+	committee any,
+) any {
+	t.Helper()
+	// RatifyState.rsEnactState is an EnactState whose first field is the
+	// committee StrictMaybe. The remaining fields are irrelevant here, but
+	// are retained to match Conway's seven-field encoding.
+	enactState := []any{committee, nil, nil, nil, nil, nil, nil}
+	return []any{
+		[]any{[]any{}, map[uint64]uint64{}, map[uint64]uint64{}, map[uint64]uint64{}},
+		[]any{enactState, []any{}, []any{}, false},
+	}
+}
+
+func committeeWithMember(t *testing.T, hash []byte, expiry uint64) any {
+	t.Helper()
+	// Credential array keys must be kept as raw CBOR map keys; encoding a
+	// Go map with []byte keys would produce a bytestring key instead.
+	key, err := cbor.Encode([]any{uint64(0), hash})
+	require.NoError(t, err)
+	value, err := cbor.Encode(expiry)
+	require.NoError(t, err)
+	memberMap := cbor.RawMessage(append(append([]byte{0xa1}, key...), value...))
+	return []any{[]any{memberMap, cbor.Rat{Rat: big.NewRat(2, 3)}}}
+}
+
+func TestParseGovStateCommitteeMatchesEnactState(t *testing.T) {
+	hash := bytes.Repeat([]byte{0x42}, 28)
+	committee := committeeWithMember(t, hash, 700)
+	rootsAny := encodeRootsAsAny(t, [4]*ParsedGovActionId{})
+	data, err := cbor.Encode([]any{
+		[]any{rootsAny, []any{}},
+		committee,
+		[]any{[]any{"https://example.com/constitution", bytes.Repeat([]byte{0xAA}, 32)}, nil},
+		map[uint64]uint64{}, map[uint64]uint64{}, map[uint64]uint64{},
+		drepPulsingStateWithEnactCommittee(t, committee),
+	})
+	require.NoError(t, err)
+	parsed, err := ParseGovState(data, EraConway)
+	require.NoError(t, err)
+	require.Len(t, parsed.Committee, 1)
+	require.Len(t, parsed.EnactCommittee, 1)
+	assert.Equal(t, parsed.Committee, parsed.EnactCommittee)
+	assert.Equal(t, parsed.CommitteeQuorum.Rat, parsed.EnactCommitteeQuorum.Rat)
+}
+
 func TestImportGovStateSeedsPrevGovActionIds(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
