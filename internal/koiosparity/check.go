@@ -946,35 +946,23 @@ func compareEpochAccounts(
 	}
 
 	var out []CheckMismatch
-	dingoRows := make([]DingoAccountReward, 0, len(dingoOutputs))
-	for _, row := range dingoOutputs {
-		addr, addrErr := StakeAddressFromCredential(
-			row.StakingKey,
-			row.CredentialTag,
+	dingoRows, decodeErrs := creditedAccountRewards(dingoOutputs)
+	for _, decodeErr := range decodeErrs {
+		logger.Warn(
+			"koiosparity: failed to decode reward_account_output credential",
+			"epoch",
+			stakeEpoch,
+			"error",
+			decodeErr,
 		)
-		if addrErr != nil {
-			logger.Warn(
-				"koiosparity: failed to decode reward_account_output credential",
-				"epoch",
-				stakeEpoch,
-				"error",
-				addrErr,
-			)
-			out = append(out, CheckMismatch{
-				Network:    network,
-				Epoch:      epoch,
-				Field:      "account_reward_address_decode",
-				DingoValue: fmt.Sprintf("error: %v", addrErr),
-				KoiosValue: "",
-				Category:   CategoryDBError,
-				CheckedAt:  now,
-			})
-			continue
-		}
-		dingoRows = append(dingoRows, DingoAccountReward{
-			StakeAddress: addr,
-			RewardType:   row.RewardType,
-			Amount:       strconv.FormatUint(uint64(row.Amount), 10),
+		out = append(out, CheckMismatch{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "account_reward_address_decode",
+			DingoValue: fmt.Sprintf("error: %v", decodeErr),
+			KoiosValue: "",
+			Category:   CategoryDBError,
+			CheckedAt:  now,
 		})
 	}
 
@@ -997,6 +985,59 @@ func compareEpochAccounts(
 		)...,
 	)
 	return out
+}
+
+// creditedAccountRewards converts Dingo's per-account reward calculation rows
+// into the shape CompareAccountEpoch expects, keeping only the rewards the
+// ledger actually credited.
+//
+// reward_account_output records every reward the calculation produced,
+// credited or not. The ledger's own application (ledger/reward_calculation.go)
+// skips a reward that is not spendable and one whose reward account is guarded
+// by CIP-0163 expiry, so neither ever reaches an account balance and Koios
+// never reports either. Comparing them makes Dingo look like it paid a reward
+// nobody received: Preview epoch 197 held exactly three unspendable member
+// rows, and all three were reported as acct_only_dingo against three stake
+// addresses Koios knows only as "not registered".
+//
+// The filter is on crediting, not on reward type. A leader reward is credited
+// to the pool's reward account and Koios reports it, so it belongs in the
+// comparison — unlike addSpendableMemberRewards, which additionally filters to
+// member rows because it is summing a pool's member reward total specifically.
+//
+// Every row is decoded, credited or not, and a credential that cannot be
+// decoded is returned as an error for the caller to report. The narrowing is
+// about what the comparison sees, not about what gets reported: a credential
+// that cannot be turned into a stake address is a storage problem whichever
+// row carries it, and accountLifecycleMismatches relies on this being the
+// reporting path for the current stake epoch — it reports only the *previous*
+// epoch's decode failures itself, and otherwise merely suppresses the
+// lifecycle diff. Filtering before decoding would make an uncredited row's
+// corrupt credential vanish entirely and silently disable that diff.
+func creditedAccountRewards(
+	outputs []*models.RewardAccountOutput,
+) ([]DingoAccountReward, []error) {
+	rows := make([]DingoAccountReward, 0, len(outputs))
+	var errs []error
+	for _, row := range outputs {
+		addr, err := StakeAddressFromCredential(
+			row.StakingKey,
+			row.CredentialTag,
+		)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if !row.Spendable || row.Guarded {
+			continue
+		}
+		rows = append(rows, DingoAccountReward{
+			StakeAddress: addr,
+			RewardType:   row.RewardType,
+			Amount:       strconv.FormatUint(uint64(row.Amount), 10),
+		})
+	}
+	return rows, errs
 }
 
 // accountLifecycleMismatches (dingo #3099) reports the two account
