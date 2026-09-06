@@ -1923,7 +1923,12 @@ type orphanedBlock struct {
 // This handles the case where blob committed successfully but metadata failed,
 // leaving orphaned blocks in the blob store.
 func (ls *LedgerState) cleanupOrphanedBlobs(tipSlot uint64) error {
-	blobStore := ls.db.Blob()
+	// Pin rather than reading the installed store: this runs a scan, a
+	// separate write transaction, and a commit against one store, so it has
+	// to keep that store alive for the whole operation rather than sample
+	// whichever is installed at each step.
+	blobStore, releaseBlob := ls.db.PinBlob()
+	defer releaseBlob()
 	if blobStore == nil {
 		return nil // No blob store configured
 	}
