@@ -516,6 +516,36 @@ func checkEpoch(
 		CompareEpochTotals(network, epoch, koiosTotals, dingoEpochPots, now)...,
 	)
 
+	// 1d. Compare the per-epoch protocol parameters (dingo #3931). Read at
+	// `epoch` itself, with no stake-epoch offset: /epoch_params?_epoch_no=K
+	// reports the parameters in force during K, and Dingo's effective
+	// `pparams` row for K is the same thing — unlike total_active_stake,
+	// nothing here is a delayed reward-calculation input. A wrong value is
+	// wedge-class (it changes what the node accepts), so it is a
+	// value_mismatch/FAIL, while an unresolvable row or a failed read stay
+	// ERROR; see CompareEpochProtocolParams for the full classification and
+	// for the fields deliberately excluded.
+	dingoParams, paramsErr := dingo.GetProtocolParams(ctx, epoch)
+	if paramsErr != nil {
+		dingoParams = nil
+	}
+	koiosParams, koiosParamsErr := cache.GetEpochParams(network, epoch)
+	if koiosParamsErr != nil && !errors.Is(koiosParamsErr, sql.ErrNoRows) {
+		return nil, fmt.Errorf("get koios epoch params: %w", koiosParamsErr)
+	}
+	allMismatches = append(allMismatches,
+		CompareEpochProtocolParams(
+			network,
+			epoch,
+			koiosParams,
+			dingoParams,
+			paramsErr,
+			now,
+			graceHours,
+			koiosEpoch.EpochEndTime,
+		)...,
+	)
+
 	// 2. Bulk-load all pool reward data for this epoch from Dingo's DB,
 	// spread across stakeEpoch (active stake/delegator count/member rewards,
 	// plus margin/fixed cost) and paramEpoch (blocks produced) — see

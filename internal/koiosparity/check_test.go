@@ -432,6 +432,8 @@ func TestCheckAlignsRewardScheduleEpochsEndToEnd(t *testing.T) {
 		Fees:     types.Uint64(300),
 	}).Error)
 
+	seedDingoBabbageProtocolParams(t, gdb, koiosEpoch)
+
 	sqlDB, err := gdb.DB()
 	require.NoError(t, err)
 	require.NoError(t, sqlDB.Close())
@@ -471,6 +473,7 @@ func TestCheckAlignsRewardScheduleEpochsEndToEnd(t *testing.T) {
 			FetchedAt: fetchedAt,
 		},
 	))
+	seedKoiosBabbageProtocolParams(t, cache, network, koiosEpoch)
 
 	result, err := Check(context.Background(), CheckConfig{
 		Network:   network,
@@ -532,6 +535,12 @@ func TestCheckDetectsMissingKoiosTotalsOnUpgradedCache(t *testing.T) {
 		Fees:     types.Uint64(300),
 	}).Error)
 
+	// Protocol parameters are seeded on both sides so the ONE mismatch this
+	// test asserts on stays the missing /totals row. The equivalent
+	// upgraded-cache case for /epoch_params has its own test:
+	// TestCheckDetectsMissingKoiosEpochParamsOnUpgradedCache.
+	seedDingoBabbageProtocolParams(t, gdb, koiosEpoch)
+
 	sqlDB, err := gdb.DB()
 	require.NoError(t, err)
 	require.NoError(t, sqlDB.Close())
@@ -555,6 +564,7 @@ func TestCheckDetectsMissingKoiosTotalsOnUpgradedCache(t *testing.T) {
 		nil,
 		nil,
 	))
+	seedKoiosBabbageProtocolParams(t, cache, network, koiosEpoch)
 
 	result, err := Check(context.Background(), CheckConfig{
 		Network:   network,
@@ -1033,6 +1043,8 @@ func seedPoolPresenceFixture(
 		BlocksProduced: &newBlocks,
 	}).Error)
 
+	seedDingoBabbageProtocolParams(t, gdb, koiosEpoch)
+
 	sqlDB, err := gdb.DB()
 	require.NoError(t, err)
 	require.NoError(t, sqlDB.Close())
@@ -1073,6 +1085,7 @@ func seedPoolPresenceFixture(
 			FetchedAt: fetchedAt,
 		},
 	))
+	seedKoiosBabbageProtocolParams(t, cache, network, koiosEpoch)
 	return dingoDir, cachePath
 }
 
@@ -1303,6 +1316,8 @@ func seedDepartureFixtureWithCount(
 		}).Error)
 	}
 
+	seedDingoBabbageProtocolParams(t, gdb, koiosEpoch)
+
 	sqlDB, err := gdb.DB()
 	require.NoError(t, err)
 	require.NoError(t, sqlDB.Close())
@@ -1340,6 +1355,7 @@ func seedDepartureFixtureWithCount(
 			FetchedAt: fetchedAt,
 		},
 	))
+	seedKoiosBabbageProtocolParams(t, cache, network, koiosEpoch)
 	require.NoError(t, cache.Close())
 	return dingoDir, cachePath, poolBech32
 }
