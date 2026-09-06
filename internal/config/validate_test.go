@@ -40,6 +40,8 @@ func validTestConfig() *Config {
 		RelayPort:            3001,
 		PrivatePort:          3002,
 		MetricsPort:          12798,
+		HealthPort:           DefaultHealthPort,
+		HealthReadyGapSlots:  DefaultHealthReadyGapSlots,
 		DebugBindAddr:        DefaultDebugBindAddr,
 		ShutdownTimeout:      DefaultShutdownTimeout,
 		LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
@@ -238,6 +240,31 @@ func TestValidate(t *testing.T) {
 				c.DebugPort = 13000
 				c.Midnight.Host = "127.0.0.2"
 				c.Midnight.Port = 13000
+			},
+			wantErr: "is assigned to both",
+		},
+		{
+			// The health listener binds BindAddr, like metrics, so two of
+			// them on one port is a real bind failure at startup.
+			name: "health port collides with metrics port",
+			modify: func(c *Config) {
+				c.HealthPort = c.MetricsPort
+			},
+			wantErr: "is assigned to both",
+		},
+		{
+			name: "health port disabled with zero",
+			modify: func(c *Config) {
+				c.HealthPort = 0
+			},
+		},
+		{
+			// The health listener is not storage-gated, unlike the API
+			// listeners, so its collision is reported in core mode too.
+			name: "core mode still validates health port collision",
+			modify: func(c *Config) {
+				c.StorageMode = storageModeCore
+				c.HealthPort = c.RelayPort
 			},
 			wantErr: "is assigned to both",
 		},

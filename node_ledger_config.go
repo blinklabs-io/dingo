@@ -59,6 +59,7 @@ func (n *Node) chainsyncSyncTarget(
 // n.chainSelector are all replaced by a live rebuild -- a method value
 // would pin the rebuilt ledger to the outgoing instance.
 func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
+	healthGeneration := n.health.currentGeneration()
 	return ledger.LedgerStateConfig{
 		ChainManager:       n.chainManager,
 		Database:           n.db,
@@ -287,6 +288,14 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 				return false, 0
 			}
 			return n.chainSelector.GenesisSelectionState()
+		},
+		// Feeds the node's readiness probe (internal/health) the same
+		// wall-clock-to-tip gap the dingo_tip_gap_slots gauge carries, so
+		// /readyz needs neither the Prometheus listener nor a live
+		// n.ledgerState pointer. A closure over n, not a method value on
+		// n.ledgerState, so a live rebuild keeps reporting.
+		ReportTipGapFunc: func(gapSlots uint64) {
+			n.health.recordTipGap(healthGeneration, gapSlots)
 		},
 		FatalErrorFunc: func(err error) {
 			n.config.logger.Error(

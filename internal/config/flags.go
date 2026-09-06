@@ -175,6 +175,16 @@ var flagSpecs = []flagSpec{
 		"pprof bind address (wildcard exposure requires an explicit override)",
 	),
 	uintFlag("DebugPort", "debug-port", "debug pprof port (0 = disabled)"),
+	uintFlag(
+		"HealthPort",
+		"health-port",
+		"liveness/readiness probe port (0 = disabled)",
+	),
+	uintFlag(
+		"HealthReadyGapSlots",
+		"health-ready-gap-slots",
+		"slots the chain tip may trail the wall clock and still be ready",
+	),
 	boolPtrFlag(
 		"PeerSharing",
 		"peer-sharing",

@@ -108,6 +108,12 @@ The following environment variables modify Dingo's behavior:
 - `DINGO_BARK_OPERATOR_CERTIFICATE_FINGERPRINTS`
   - Comma-separated SHA-256 client certificate fingerprints authorized for
     destructive Bark DatabaseService RPCs.
+- `DINGO_HEALTH_PORT`
+  - TCP port for the liveness/readiness probe listener (default: `12799`,
+    `0` disables). Binds `bindAddr`, like the relay and metrics listeners.
+- `DINGO_HEALTH_READY_GAP_SLOTS`
+  - Slots the chain tip may trail the wall-clock slot while `/readyz` still
+    reports ready (default: `1000`)
 - `DINGO_DEBUG_BIND_ADDR`
   - IP address to bind for unauthenticated pprof endpoints (default:
     `127.0.0.1`)
@@ -211,12 +217,66 @@ The image is based on Debian bookworm-slim and includes `cardano-cli`, `nview`, 
 | 3001 | Ouroboros NtN (node-to-node) | Enabled |
 | 3002 | Ouroboros NtC over TCP | Enabled |
 | 12798 | Prometheus metrics | Enabled |
+| 12799 | Health probes (`/health`, `/healthz`, `/readyz`) | Enabled |
 | 3000 | Blockfrost REST API | Disabled |
 | 8080 | Mesh (Rosetta) REST API | Disabled |
 | 9090 | UTxO RPC (gRPC) | Disabled |
 | 50051 | Midnight state (gRPC) | Disabled |
 | — | Bark archive (gRPC) | Disabled (example when enabled: 9091) |
 | — | pprof debug endpoints | Disabled (`DINGO_DEBUG_PORT=0`; loopback when enabled) |
+
+## Health Probes
+
+Dingo serves liveness and readiness on a listener of its own
+(`healthPort`, default `12799`), separate from Prometheus metrics, pprof,
+and every API listener. It starts in both storage modes and whether or not
+the Blockfrost, Mesh, and UTxO RPC APIs are enabled, so the probe is
+available in the default `core` relay configuration that the shipped
+`docker-compose.yml` runs.
+
+| Path | Meaning | 200 when | Non-200 when |
+|------|---------|----------|--------------|
+| `/healthz` (and `/health`) | Liveness | The process is up and the listener is serving | Never, while the process can answer |
+| `/readyz` | Readiness | The chain tip is within `healthReadyGapSlots` (default `1000`) of the wall-clock slot | Starting up, bootstrapping from Mithril, catching up, or the tip has frozen |
+
+Both return JSON carrying the readiness verdict, a reason, and the observed
+tip gap in slots:
+
+```json
+{"live":true,"ready":false,"reason":"tip gap 4211 slots exceeds tolerance of 1000 slots","tipGapSlots":4211,"status":"unhealthy"}
+```
+
+The split is deliberate, because an orchestrator acts on the two
+differently. Docker, Swarm, and ECS replace an unhealthy container, and
+Kubernetes restarts a container whose `livenessProbe` fails; a node doing an
+initial sync is legitimately not useful for hours or days, and none of the
+conditions that freeze a tip are repaired by a restart loop. So liveness
+stays independent of sync state and is what the image's `HEALTHCHECK`
+probes. Readiness is the signal that catches a frozen tip, and failing it
+removes a pod from a Service or a target from a load balancer without
+killing the node.
+
+Kubernetes:
+
+```yaml
+livenessProbe:
+  httpGet: { path: /healthz, port: 12799 }
+  periodSeconds: 30
+readinessProbe:
+  httpGet: { path: /readyz, port: 12799 }
+  periodSeconds: 15
+```
+
+The readiness tolerance matches `forgeStaleGapThresholdSlots`: both answer
+"has this node stopped following the chain?", and a probe that flapped more
+readily than the forger's own staleness gate would evict a node the forger
+still considers current. Raise `healthReadyGapSlots` on a network with a
+lower active slot coefficient, or lower it to detect a stall sooner at the
+cost of flapping on quiet stretches of chain.
+
+The tip gap is read from the ledger's slot clock — the same value the
+`dingo_tip_gap_slots` gauge exports — so readiness does not depend on the
+Prometheus listener.
 
 ## Storage Modes
 
