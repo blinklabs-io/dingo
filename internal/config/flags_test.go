@@ -236,6 +236,54 @@ func TestBlockPipelineValidateEnabledEnvBinding(t *testing.T) {
 	}
 }
 
+// TestSkipRewardLiveStakeBackfillCheckEnvBinding pins the environment
+// variable that controls the reward_live_stake startup check. The field
+// carries split_words with no explicit envconfig tag, so envconfig derives
+// the name from the field name under the "cardano" prefix -- CARDANO_, not
+// the DINGO_ prefix some neighbouring options use via an explicit tag.
+func TestSkipRewardLiveStakeBackfillCheckEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CARDANO_SKIP_REWARD_LIVE_STAKE_BACKFILL_CHECK", "true")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.SkipRewardLiveStakeBackfillCheck {
+		t.Fatal("expected env var to skip the reward_live_stake check")
+	}
+}
+
+// TestSkipRewardLiveStakeBackfillCheckDefaultsToRunningTheCheck pins the
+// safe default. The check is what catches a stale or pre-migration
+// reward_live_stake table, so an operator has to opt out deliberately; it
+// must never become skipped by default.
+func TestSkipRewardLiveStakeBackfillCheckDefaultsToRunningTheCheck(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if cfg.SkipRewardLiveStakeBackfillCheck {
+		t.Fatal("the reward_live_stake check must run unless opted out")
+	}
+}
+
 func TestDatabasePathEnvironmentShortcut(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())

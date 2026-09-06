@@ -2140,7 +2140,24 @@ func (n *Node) nodeSettingsGateValues() nodesettings.Values {
 // stake aggregate existed. It runs after commit-timestamp recovery and before
 // ledger processing can advance the chain, so the next epoch-boundary snapshot
 // cannot observe a partially populated aggregate.
+//
+// SkipRewardLiveStakeBackfillCheck bypasses this entirely. The consistency
+// check itself -- not just a genuine repair -- scans the whole live UTxO
+// table every call, so on a mainnet-scale database it costs as much as a
+// full rebuild on every single startup regardless of whether one is needed.
+// This is for advanced/diagnostic use only: skipping it is safe when the
+// database is already known to be consistent (e.g. repeated restarts during
+// investigation of an unrelated issue), but unsafe to leave enabled
+// permanently since it is what catches a stale or pre-migration
+// reward_live_stake table.
 func (n *Node) backfillRewardLiveStake() error {
+	if n.config.skipRewardLiveStakeBackfillCheck {
+		n.config.logger.Warn(
+			"skipping reward_live_stake backfill consistency check",
+			"component", "node",
+		)
+		return nil
+	}
 	return n.db.MetadataTxn(true).Do(func(txn *database.Txn) error {
 		needed, err := n.db.Metadata().RewardLiveStakeNeedsBackfill(
 			txn.Metadata(),

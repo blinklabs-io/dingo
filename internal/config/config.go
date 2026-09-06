@@ -575,6 +575,15 @@ type Config struct {
 	// Mithril snapshot should explicitly opt out when pre-intersect UTxOs are
 	// intentionally unavailable.
 	StrictUtxoValidation bool `yaml:"strictUtxoValidation"                                                                         split_words:"true"`
+	// SkipRewardLiveStakeBackfillCheck skips the startup consistency check
+	// between reward_live_stake and the live UTxO/account set. That check
+	// scans the entire live UTxO table every startup regardless of whether
+	// anything needs fixing, which is expensive on a mainnet-scale database.
+	// Unsafe to leave enabled permanently -- it exists to catch a stale or
+	// pre-migration reward_live_stake table -- so this is for advanced/
+	// diagnostic use only (e.g. repeated restarts against a database already
+	// known to be consistent).
+	SkipRewardLiveStakeBackfillCheck bool `yaml:"skipRewardLiveStakeBackfillCheck"                                                             split_words:"true"`
 	// Tracing enables OpenTelemetry tracing. Disabled by default: with no
 	// collector listening, the OTLP exporter logs noisy connection errors.
 	// Spans are sent via OTLP HTTP; configure the destination with the

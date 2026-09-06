@@ -525,6 +525,22 @@ blockPipelineValidateEnabled: false
 # CLI: --strict-utxo-validation
 strictUtxoValidation: true
 
+# Skip the startup consistency check between reward_live_stake and the live
+# UTxO/account set (default: false, i.e. the check runs).
+#
+# The check scans the entire live UTxO table on every startup, whether or not
+# anything actually needs repairing, so on a mainnet-scale database it costs
+# as much as a full rebuild each time the node starts. Advanced/diagnostic use
+# only: skipping is safe when the database is already known to be consistent,
+# such as repeated restarts while investigating an unrelated issue. It is
+# unsafe to leave enabled permanently, because this check is what catches a
+# stale or pre-migration reward_live_stake table.
+#
+# Can be overridden with the CARDANO_SKIP_REWARD_LIVE_STAKE_BACKFILL_CHECK
+# environment variable
+# CLI: --skip-reward-live-stake-backfill-check
+skipRewardLiveStakeBackfillCheck: false
+
 # Peer targets - target number of peers in each state
 # Known, established, and active peer targets are goals, not hard limits.
 # A positive root target limits newly selected public roots; local roots remain.
