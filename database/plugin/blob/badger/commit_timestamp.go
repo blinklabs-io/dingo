@@ -18,8 +18,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"math/big"
 
+	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/committimestamp"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
@@ -43,10 +43,10 @@ func (b *BlobStoreBadger) GetCommitTimestamp() (int64, error) {
 		return 0, fmt.Errorf("failed to read commit timestamp: %w", err)
 	}
 	if len(val) == 8 {
-		//nolint:gosec // Unix timestamps are always positive and within int64 range.
-		return int64(binary.BigEndian.Uint64(val)), nil
+		return committimestamp.FromFixedWidth(binary.BigEndian.Uint64(val))
 	}
-	return new(big.Int).SetBytes(val).Int64(), nil
+	// Legacy variable-length encoding.
+	return committimestamp.DecodeLegacy(val)
 }
 
 func (b *BlobStoreBadger) SetCommitTimestamp(

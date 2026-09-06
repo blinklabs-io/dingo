@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"math"
 	"math/big"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -169,14 +170,27 @@ func (p *DatabaseWorkerPool) worker() {
 	}
 }
 
+// executeOperation follows the same panic contract as database.Txn.Do (see
+// the doc comment above database.NewTxnPanicError): a panic in OpFunc is
+// recovered, logged with its stack trace, and converted into a
+// database.ErrTxnPanic-wrapped result.Error rather than crashing the worker
+// goroutine, since this operation's submitter is synchronously waiting on
+// ResultChan for exactly this outcome.
 func (p *DatabaseWorkerPool) executeOperation(op DatabaseOperation) {
 	defer p.operationDone()
 
 	result := DatabaseResult{}
 	defer func() {
 		if r := recover(); r != nil {
-			result.Error = fmt.Errorf("panic: %v", r)
-			slog.Error("worker panic during operation", "panic", r)
+			result.Error = database.NewTxnPanicError(
+				"database worker operation",
+				r,
+			)
+			slog.Error(
+				"panic in database worker operation",
+				"panic", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()),
+			)
 		}
 		p.sendResult(op, result)
 	}()
@@ -9925,7 +9939,11 @@ func (ls *LedgerState) UtxosByRefs(
 func (ls *LedgerState) UtxosByAddress(
 	addrs []ledger.Address,
 ) ([]models.Utxo, error) {
-	utxos, err := ls.db.UtxosByAddress(addrs, nil)
+	utxos, err := ls.db.UtxosByAddress(
+		addrs,
+		database.MaxUtxosByAddressResults,
+		nil,
+	)
 	if err != nil {
 		return nil, err
 	}

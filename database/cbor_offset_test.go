@@ -16,6 +16,7 @@ package database
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"testing"
 
@@ -837,6 +838,40 @@ func TestDecodeTxCborPartsInvalidMagic(t *testing.T) {
 		"magic",
 		"error message should mention magic",
 	)
+}
+
+// TestDecodeTxCborPartsRejectsNoncanonicalIsValid proves a validity byte
+// other than the canonical 0/1 that Encode ever produces is rejected rather
+// than silently coerced to true by a `!= 0` check. IsTxCborPartsStorage
+// deliberately still recognizes the data as DTXP-shaped (format, not
+// content, validation): a UTxO-recovery caller must reach this decode
+// error rather than take a not-DTXP-shaped fallback path that would
+// silently treat the corrupted record as simply absent.
+func TestDecodeTxCborPartsRejectsNoncanonicalIsValid(t *testing.T) {
+	for _, isValidByte := range []byte{2, 0x7f, 0x80, 0xfe, 0xff} {
+		t.Run(
+			fmt.Sprintf("byte value %d", isValidByte),
+			func(t *testing.T) {
+				data := (&TxCborParts{IsValid: true}).Encode()
+				data[68] = isValidByte
+
+				decoded, err := DecodeTxCborParts(data)
+				assert.Error(
+					t,
+					err,
+					"decode should reject a noncanonical IsValid byte",
+				)
+				assert.Nil(t, decoded, "decoded should be nil on error")
+				assert.True(
+					t,
+					IsTxCborPartsStorage(data),
+					"format recognition must still see this as DTXP-shaped "+
+						"so a recovery caller reaches the decode error "+
+						"above instead of a not-DTXP-shaped fallback path",
+				)
+			},
+		)
+	}
 }
 
 func TestIsTxCborPartsStorage(t *testing.T) {

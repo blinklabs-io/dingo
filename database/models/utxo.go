@@ -44,6 +44,9 @@ var (
 	ErrOffsetRequiresCoarseMatch = errors.New(
 		"offset requires address patterns that do not need exact-address CBOR filtering",
 	)
+	ErrTooManyUtxoResults = errors.New(
+		"utxo query exceeded the requested maxResults bound",
+	)
 )
 
 // UtxoAddressPattern carries explicit address-match intent through the shared
