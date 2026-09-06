@@ -102,7 +102,8 @@ func TestLiveLifecycleTeardownForgetsTipGap(t *testing.T) {
 	n := &Node{
 		config: Config{cfg: &internalconfig.Config{}},
 	}
-	n.ledgerStateConfig().ReportTipGapFunc(3)
+	initial := n.ledgerStateConfig()
+	initial.ReportTipGapFunc(3)
 	gap, ok := n.TipGapSlots()
 	require.True(t, ok)
 	require.Equal(t, uint64(3), gap)
@@ -117,6 +118,13 @@ func TestLiveLifecycleTeardownForgetsTipGap(t *testing.T) {
 		ok,
 		"a torn-down ledger must leave the tip gap unknown, not stale",
 	)
+	assert.Zero(t, gap)
+
+	// A tick already dequeued by the old ledger can arrive after Close returns.
+	// It must not restore the stale reading into the new lifecycle generation.
+	initial.ReportTipGapFunc(9)
+	gap, ok = n.TipGapSlots()
+	assert.False(t, ok)
 	assert.Zero(t, gap)
 
 	// The rebuilt ledger reports into the same state and restores it.

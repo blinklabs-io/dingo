@@ -14,7 +14,10 @@
 
 package dingo
 
-import "sync/atomic"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // nodeHealth holds the cheap always-available signals the node's readiness
 // probe classifies. It is a value field on Node rather than a pointer, and
@@ -26,13 +29,20 @@ import "sync/atomic"
 // goroutine is swapping. The rebuilt ledger reports into the same struct
 // because ledgerStateConfig closes over n, not over the ledger.
 type nodeHealth struct {
+	mu          sync.Mutex
+	generation  uint64
 	tipGapSlots atomic.Uint64
 	tipGapKnown atomic.Bool
 }
 
 // recordTipGap stores the wall-clock-to-tip distance observed on a slot tick.
-func (h *nodeHealth) recordTipGap(gapSlots uint64) {
+func (h *nodeHealth) recordTipGap(generation uint64, gapSlots uint64) {
 	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if generation != h.generation {
 		return
 	}
 	h.tipGapSlots.Store(gapSlots)
@@ -48,8 +58,25 @@ func (h *nodeHealth) forgetTipGap() {
 	if h == nil {
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.generation++
 	h.tipGapKnown.Store(false)
 	h.tipGapSlots.Store(0)
+}
+
+// currentGeneration identifies the ledger instance allowed to report health.
+// The caller captures it when building that ledger's callbacks; teardown
+// advances it before clearing the old reading. The mutex makes the generation
+// check and reading update one operation, so a buffered tick cannot restore a
+// stale value after teardown.
+func (h *nodeHealth) currentGeneration() uint64 {
+	if h == nil {
+		return 0
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.generation
 }
 
 // TipGapSlots reports the distance in slots between the wall-clock slot and
@@ -63,6 +90,8 @@ func (n *Node) TipGapSlots() (uint64, bool) {
 	if n == nil {
 		return 0, false
 	}
+	n.health.mu.Lock()
+	defer n.health.mu.Unlock()
 	if !n.health.tipGapKnown.Load() {
 		return 0, false
 	}

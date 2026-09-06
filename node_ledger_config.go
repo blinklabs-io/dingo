@@ -59,6 +59,7 @@ func (n *Node) chainsyncSyncTarget(
 // n.chainSelector are all replaced by a live rebuild -- a method value
 // would pin the rebuilt ledger to the outgoing instance.
 func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
+	healthGeneration := n.health.currentGeneration()
 	return ledger.LedgerStateConfig{
 		ChainManager:       n.chainManager,
 		Database:           n.db,
@@ -294,7 +295,7 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// n.ledgerState pointer. A closure over n, not a method value on
 		// n.ledgerState, so a live rebuild keeps reporting.
 		ReportTipGapFunc: func(gapSlots uint64) {
-			n.health.recordTipGap(gapSlots)
+			n.health.recordTipGap(healthGeneration, gapSlots)
 		},
 		FatalErrorFunc: func(err error) {
 			n.config.logger.Error(
