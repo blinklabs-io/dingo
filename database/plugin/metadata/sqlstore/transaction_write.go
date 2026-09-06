@@ -419,13 +419,20 @@ func (s *Store) SetGapBlockTransaction(
 	transaction lcommon.Transaction,
 	point ocommon.Point,
 	index uint32,
+	certDeposits map[int]uint64,
 	txn types.Txn,
 ) error {
 	// Gap ingestion intentionally has no available input state, so this is
 	// equivalent to SetTransaction with the consumed-input update suppressed.
 	// The transaction, its certificates, and its produced outputs are all
-	// persisted; certificates are applied without calculated deposits, which
-	// the gap path cannot supply.
+	// persisted.
+	//
+	// certDeposits may be partial or nil: the caller calculates it from the
+	// era's CertDepositFunc, which has no entry for a certificate whose
+	// deposit it could not derive (and none at all before Shelley). A
+	// certificate with no entry records NULL rather than a fabricated zero,
+	// so the two stay distinguishable in the row even though today's readers
+	// map both to 0.
 	if transaction == nil {
 		return errors.New("set gap transaction: nil transaction")
 	}
@@ -465,11 +472,9 @@ RETURNING id`,
 			}
 			stakeRefs := make([]models.StakeCredentialRef, 0)
 			if transaction.IsValid() {
-				// Gap blocks do not carry calculated deposits. Preserve NULL for
-				// unknown deposit-bearing certificates; zero is a real value.
 				certificateRefs, err := s.applyTransactionCertificates(
 					ctx, db, transactionID, transaction.Certificates(),
-					point, index, nil, true,
+					point, index, certDeposits, true,
 				)
 				if err != nil {
 					return err

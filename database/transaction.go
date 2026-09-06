@@ -414,6 +414,7 @@ func (d *Database) SetGapBlockTransaction(
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	idx uint32,
+	certDeposits map[int]uint64,
 	offsets *BlockIngestionResult,
 	txn *Txn,
 ) error {
@@ -485,7 +486,7 @@ func (d *Database) SetGapBlockTransaction(
 	}
 
 	if err := d.transactionStore().SetGapBlockTransaction(
-		tx, point, idx, txn.Metadata(),
+		tx, point, idx, certDeposits, txn.Metadata(),
 	); err != nil {
 		return fmt.Errorf(
 			"set gap block transaction metadata: %w", err,
