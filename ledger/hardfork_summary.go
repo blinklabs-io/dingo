@@ -233,3 +233,28 @@ func (ls *LedgerState) hardForkSummaryAnchoredAt(
 	}
 	return &summary, nil
 }
+
+// WallClockSlotFromConfirmedHistory returns the absolute slot corresponding to
+// the current wall-clock time derived only from the confirmed era history, and
+// false when the wall clock falls past that history's forecast horizon.
+//
+// In the false case CurrentSlot can only extrapolate the wall clock through
+// the newest confirmed era's slot length, which does not reflect chains whose
+// later eras have not been applied yet: a mainnet node importing from genesis
+// judges the wall clock with Byron's 20s slots even though the real chain
+// moved to one-second slots at epoch 208. Operational callers that must make a
+// time-sensitive judgement against the wall-clock slot — such as the block
+// producer's operational-certificate KES-period preflight — should use this
+// instead of the extrapolated CurrentSlot, and defer the judgement until the
+// confirmed era history spans the wall clock again.
+func (ls *LedgerState) WallClockSlotFromConfirmedHistory() (uint64, bool) {
+	sum, err := ls.HardForkSummary()
+	if err != nil {
+		return 0, false
+	}
+	slot, err := sum.TimeToSlot(time.Now())
+	if err != nil {
+		return 0, false
+	}
+	return slot, true
+}
