@@ -327,6 +327,16 @@ func (cs *ChainSelector) bestKnownGenesisSlotLocked() uint64 {
 		if !cs.isPeerSelectableLocked(connId, pt, false) {
 			continue
 		}
+		// A peer registered from a rollback has delivered no header: its
+		// ObservedTip is the intersection point the node itself proposed, so
+		// crediting it as delivered evidence would let any peer that
+		// re-intersects at the local tip and advertises a tip within the
+		// window force an immediate Genesis exit. That is precisely what the
+		// delivered-vs-advertised guard below exists to prevent, so such a
+		// peer raises no exit horizon until its first header arrives.
+		if pt.awaitingFirstHeader {
+			continue
+		}
 		advertised := pt.Tip.Point.Slot
 		delivered := pt.ObservedTip.Point.Slot
 		// Ignore an advertised tip the peer has not delivered headers up to:
