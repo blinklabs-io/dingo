@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
@@ -71,6 +72,14 @@ type Txn struct {
 	readWrite   bool
 	afterCommit []func()
 	dispatching bool
+
+	// onFinish holds the callbacks registered through OnFinish, and
+	// onFinishArmed reports whether any were ever registered so the terminal
+	// paths can skip the drain -- and its lock acquisition -- entirely for the
+	// overwhelming majority of transactions that register none. onFinish is
+	// guarded by lock; onFinishArmed is read without it.
+	onFinish      []func()
+	onFinishArmed atomic.Bool
 
 	// barrierHeld records whether this Txn holds the shared side of
 	// db.commitBarrier (see acquireCommitBarrier). Guarded by lock.
@@ -336,6 +345,87 @@ func (t *Txn) runAfterCommitCallback(fn func()) {
 	fn()
 }
 
+// OnFinish registers fn to run once this transaction has reached its terminal
+// state, on every path that gets it there: a successful commit, a failed
+// commit, an explicit Rollback, a Release, and the rollback Commit performs for
+// a read-only transaction. Callbacks run in registration order, exactly once,
+// without the transaction lock held.
+//
+// It is deliberately weaker than AfterCommit, and that is the point. AfterCommit
+// carries a durability claim ("this transaction committed") and so does not fire
+// on rollback; OnFinish carries only a lifetime claim ("this transaction is
+// over"). Anything acquired for the transaction's lifetime -- a lock, a lease, a
+// barrier hold -- must be released from OnFinish, because releasing it from
+// AfterCommit strands it for good on every rollback, and a stranded hold is a
+// deadlock rather than the bounded loss a missing side effect would be.
+//
+// Registration on an already-finished transaction runs fn immediately rather
+// than dropping it, so an acquire-then-register sequence cannot lose its release
+// to a transaction that concluded in between. A callback that panics has its
+// panic recovered and logged: it neither reaches the goroutine that finished the
+// transaction nor stops the remaining callbacks from running, so one caller's
+// bug cannot strand another caller's hold.
+func (t *Txn) OnFinish(fn func()) {
+	if fn == nil {
+		return
+	}
+	t.lock.Lock()
+	if t.finished {
+		t.lock.Unlock()
+		t.runFinishCallback(fn)
+		return
+	}
+	t.onFinish = append(t.onFinish, fn)
+	t.onFinishArmed.Store(true)
+	t.lock.Unlock()
+}
+
+// dispatchOnFinish drains the OnFinish callbacks. Every terminal path calls it
+// after releasing t.lock, so callbacks may take locks of their own and may call
+// back into the transaction. It re-checks finished under the lock because
+// Commit's deferred cleanup also runs on the path where a provider panicked
+// mid-commit: there the transaction is not terminal yet -- the recovery rollback
+// still owns that transition -- and firing "this transaction is over" before it
+// actually is would release a hold the transaction still needs. Draining in a
+// loop picks up callbacks a callback registers. Concurrent drains take disjoint
+// callbacks, so exactly-once holds without a dispatching flag.
+func (t *Txn) dispatchOnFinish() {
+	if !t.onFinishArmed.Load() {
+		return
+	}
+	for {
+		t.lock.Lock()
+		if !t.finished {
+			t.lock.Unlock()
+			return
+		}
+		callbacks := t.onFinish
+		t.onFinish = nil
+		t.lock.Unlock()
+		if len(callbacks) == 0 {
+			return
+		}
+		for _, fn := range callbacks {
+			t.runFinishCallback(fn)
+		}
+	}
+}
+
+// runFinishCallback runs a single OnFinish callback, recovering and logging any
+// panic. See OnFinish for why a panicking callback must not escape.
+func (t *Txn) runFinishCallback(fn func()) {
+	defer func() {
+		if r := recover(); r != nil && t.db != nil {
+			t.db.logger.Error(
+				"panic in transaction finish callback",
+				"panic", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()),
+			)
+		}
+	}()
+	fn()
+}
+
 type savepointTxn interface {
 	SavePoint(string) error
 	RollbackTo(string) error
@@ -428,6 +518,11 @@ func (t *Txn) Commit() error {
 		// releases it once the rollback concludes.
 		t.releaseCommitBarrierLocked()
 		t.lock.Unlock()
+		// Release lifetime holds before running after-commit side effects:
+		// dispatchOnFinish is a no-op unless the transaction actually reached
+		// its terminal state, and an after-commit callback that blocks must not
+		// hold a lifetime hold open behind it.
+		t.dispatchOnFinish()
 		if dispatchAfterUnlock {
 			t.dispatchAfterCommit()
 		}
@@ -539,9 +634,18 @@ func (t *Txn) Commit() error {
 }
 
 func (t *Txn) Rollback() error {
-	t.lock.Lock()
-	defer t.lock.Unlock()
-	return t.rollback()
+	// The unlock stays deferred: a store's own Rollback can panic, and losing
+	// the unlock to that panic would wedge every later call on this transaction
+	// -- including the recovery Rollback that Do issues. Only the dispatch moves
+	// outside the lock, because OnFinish callbacks may take locks of their own.
+	// See OnFinish.
+	err := func() error {
+		t.lock.Lock()
+		defer t.lock.Unlock()
+		return t.rollback()
+	}()
+	t.dispatchOnFinish()
+	return err
 }
 
 func (t *Txn) rollback() error {

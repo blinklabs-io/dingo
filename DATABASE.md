@@ -1230,6 +1230,22 @@ process's lifetime, with no later call able to repair it, and the next
 releases while the barrier's writer preference blocked every read-write `Txn`
 constructed behind it.
 
+`Txn.OnFinish` exposes that same terminal transition to callers. It registers a
+callback that runs exactly once when the transaction reaches its terminal state
+on any path -- a successful commit, a failed commit, an explicit `Rollback`, a
+`Release`, and the rollback `Commit` performs for a read-only transaction --
+dispatched from `finishLocked` without the transaction lock held, so a callback
+may take locks of its own. It is deliberately weaker than `AfterCommit`:
+`AfterCommit` carries a durability claim and so does not fire on rollback, which
+makes it the wrong hook for anything acquired for the transaction's *lifetime* --
+a lock, a lease, a barrier hold -- because releasing such a hold from
+`AfterCommit` strands it for good on every rollback. Registration against an
+already-finished transaction runs the callback immediately rather than dropping
+it, so an acquire-then-register sequence cannot lose its release to a
+transaction that concluded in between, and a panicking callback is recovered and
+logged so one caller's bug cannot strand another caller's hold. `Chain.pendingAdds`
+is the in-tree consumer; see `ARCHITECTURE.md`.
+
 Plugins whose writes are already durable on commit implement `Sync` as a no-op:
 an S3 object is durable once `PutObject` is acknowledged, and a GCS object once
 its writer closes successfully.
