@@ -157,6 +157,17 @@ type Node struct {
 	// running, which this mutex would otherwise make indistinguishable.
 	liveLifecycleMu sync.Mutex
 
+	// A selected-to-none transition cannot be dropped while a live database
+	// lifecycle operation holds liveLifecycleMu. One node-owned worker retains
+	// only the latest contended transition and retries until the lifecycle lock
+	// is available or the node context is cancelled, bounding both queued work
+	// and goroutine count.
+	chainSelectedNoneMu         sync.Mutex
+	chainSelectedNonePending    chainselection.ChainSelectedNoneEvent
+	chainSelectedNonePendingSet bool
+	chainSelectedNoneWake       chan struct{}
+	chainSelectedNoneWorkerDone chan struct{}
+
 	// snapshotMu serializes Snapshot calls against each other and against
 	// a concurrent Restore/Truncate (which closes n.db out from under an
 	// in-progress Snapshot if not excluded), and is what enforces bark
@@ -734,6 +745,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		if err != nil {
 			return fmt.Errorf("failed to create bark blob store: %w", err)
 		}
+		// The wrapper's upstream is the store it replaces and its Close
+		// forwards there, so the replaced store stays in use: there is
+		// nothing to drain and nothing to close. Both results are
+		// deliberately discarded.
 		n.db.SetBlobStore(barkBlobStore)
 	}
 
@@ -1162,7 +1177,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			"min_corroborating_peers", n.config.genesisCorroborationPeers,
 		)
 	}
-	// Wire chain-selector event subscriptions.
+	// Wire chain-selector event subscriptions. Start the selected-to-none
+	// deferral worker first so a contended one-shot transition is never lost.
+	n.startChainSelectedNoneWorker(n.ctx)
+	started = append(started, n.waitChainSelectedNoneWorker)
 	n.subscribeChainSelectorEvents()
 	// Start the chain selector
 	if err := n.chainSelector.Start(n.ctx); err != nil { //nolint:contextcheck
@@ -2009,9 +2027,8 @@ func (n *Node) subscribeChainSelectorEvents() {
 		n.handleChainSwitchEvent,
 	)
 	// Subscribe to selected-to-none transitions (selection stalled, e.g. an
-	// uncorroborated Genesis fast source). Enforcement that the stalled source
-	// stops feeding the ledger is handled by the ChainsyncApplyEligible gate;
-	// this handler surfaces the stall for observability.
+	// uncorroborated Genesis fast source). The handler clears the ledger's active
+	// connection so it cannot retain a source ChainSelector no longer accepts.
 	n.eventBus.SubscribeFunc(
 		chainselection.ChainSelectedNoneEventType,
 		n.handleChainSelectedNoneEvent,
