@@ -38,6 +38,10 @@ type Querier interface {
 	DeleteConstitutionsAddedAfterSlot(ctx context.Context, addedSlot int64) error
 	DeleteEpochSummariesAfterEpoch(ctx context.Context, epoch int64) error
 	DeleteEpochsAfterSlot(ctx context.Context, startSlot sql.NullInt64) error
+	DeleteImportedEpochBlockTotalForEpoch(ctx context.Context, epoch int64) error
+	DeleteImportedEpochBlockTotalsAfterSlot(ctx context.Context, capturedSlot int64) error
+	DeleteImportedPoolBlockCountsAfterSlot(ctx context.Context, capturedSlot int64) error
+	DeleteImportedPoolBlockCountsForEpoch(ctx context.Context, epoch int64) error
 	DeleteMidnightAriadneParamsByEpoch(ctx context.Context, epoch int64) error
 	DeleteMidnightAriadneRollbacksBeforeBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightAriadneRollbacksByBlock(ctx context.Context, blockNumber int64) error
@@ -64,6 +68,8 @@ type Querier interface {
 	DeleteRewardPoolInputsForEpoch(ctx context.Context, epoch int64) error
 	DeleteRewardPoolOutputsAfterSlot(ctx context.Context, arg DeleteRewardPoolOutputsAfterSlotParams) error
 	DeleteRewardPoolOutputsForEpoch(ctx context.Context, epoch int64) error
+	DeleteRewardSeedFailure(ctx context.Context, arg DeleteRewardSeedFailureParams) error
+	DeleteRewardSeedFailuresAfterSlot(ctx context.Context, capturedSlot int64) error
 	DeleteRewardSnapshotsAfterSlot(ctx context.Context, arg DeleteRewardSnapshotsAfterSlotParams) error
 	DeleteRewardStakeInputsAfterSlot(ctx context.Context, arg DeleteRewardStakeInputsAfterSlotParams) error
 	DeleteRewardStakeInputsBeforeEpoch(ctx context.Context, epoch int64) error
@@ -104,6 +110,8 @@ type Querier interface {
 	GetEpochsByEra(ctx context.Context, eraID sql.NullInt64) ([]GetEpochsByEraRow, error)
 	GetExpiredDReps(ctx context.Context, expiryEpoch sql.NullInt64) ([]Drep, error)
 	GetImportCheckpoint(ctx context.Context, importKey string) (ImportCheckpoint, error)
+	GetImportedEpochBlockTotal(ctx context.Context, epoch int64) (int64, error)
+	GetImportedPoolBlockCounts(ctx context.Context, epoch int64) ([]GetImportedPoolBlockCountsRow, error)
 	GetLastBlockNonceInRange(ctx context.Context, arg GetLastBlockNonceInRangeParams) ([]byte, error)
 	GetLatestEpochSummary(ctx context.Context) (EpochSummary, error)
 	GetLatestMidnightAriadneParams(ctx context.Context) (MidnightAriadneParam, error)
@@ -132,6 +140,7 @@ type Querier interface {
 	GetRewardAdaPots(ctx context.Context, epoch int64) (RewardAdaPot, error)
 	GetRewardPoolInputs(ctx context.Context, epoch int64) ([]RewardPoolInput, error)
 	GetRewardPoolOutputs(ctx context.Context, epoch int64) ([]RewardPoolOutput, error)
+	GetRewardSeedFailure(ctx context.Context, arg GetRewardSeedFailureParams) (string, error)
 	GetRewardSnapshot(ctx context.Context, arg GetRewardSnapshotParams) (RewardSnapshot, error)
 	GetRewardStakeInputs(ctx context.Context, epoch int64) ([]RewardStakeInput, error)
 	GetScript(ctx context.Context, hash []byte) (Script, error)
@@ -169,11 +178,14 @@ type Querier interface {
 	RestoreCommitteeMembersDeletedAfterSlot(ctx context.Context, deletedSlot sql.NullInt64) error
 	RestoreConstitutionsDeletedAfterSlot(ctx context.Context, deletedSlot sql.NullInt64) error
 	SaveEpochSummary(ctx context.Context, arg SaveEpochSummaryParams) (int64, error)
+	SaveImportedEpochBlockTotal(ctx context.Context, arg SaveImportedEpochBlockTotalParams) error
+	SaveImportedPoolBlockCount(ctx context.Context, arg SaveImportedPoolBlockCountParams) error
 	SavePoolStakeSnapshot(ctx context.Context, arg SavePoolStakeSnapshotParams) (int64, error)
 	SaveRewardAccountOutput(ctx context.Context, arg SaveRewardAccountOutputParams) (int64, error)
 	SaveRewardAdaPots(ctx context.Context, arg SaveRewardAdaPotsParams) (int64, error)
 	SaveRewardPoolInput(ctx context.Context, arg SaveRewardPoolInputParams) (int64, error)
 	SaveRewardPoolOutput(ctx context.Context, arg SaveRewardPoolOutputParams) (int64, error)
+	SaveRewardSeedFailure(ctx context.Context, arg SaveRewardSeedFailureParams) error
 	SaveRewardSnapshot(ctx context.Context, arg SaveRewardSnapshotParams) (int64, error)
 	SaveRewardStakeInput(ctx context.Context, arg SaveRewardStakeInputParams) (int64, error)
 	SetBackfillCheckpoint(ctx context.Context, arg SetBackfillCheckpointParams) (int64, error)

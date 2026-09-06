@@ -309,7 +309,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 			newDB: func(t *testing.T) *Database {
 				logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 				return &Database{
-					blob:     &mockBlobStore{},
+					blobRef:  newBlobStoreRef(&mockBlobStore{}),
 					metadata: &commitFailingMetadata{err: injected},
 					logger:   logger,
 					config:   &Config{Logger: logger},
