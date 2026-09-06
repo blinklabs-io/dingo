@@ -1913,7 +1913,7 @@ func (m *Mempool) RemoveTxsByHash(hashes []string) {
 	if len(removedHashes) > 0 {
 		m.recordMutationLocked(mempoolMutation{removed: removedHashes})
 		for hash := range removedHashes {
-			m.logger.Debug(
+			m.logger.Info(
 				"confirmed transaction",
 				"component", "mempool",
 				"tx_hash", hash,

@@ -15,6 +15,7 @@
 package mempool
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -3562,6 +3563,31 @@ func TestMempool_RemovalsContinueDuringRevalidation(t *testing.T) {
 			assert.Empty(t, m.overlay.applied)
 		})
 	}
+}
+
+func TestMempool_ConfirmedTransactionLogVisibleAtInfoLevel(t *testing.T) {
+	var buf bytes.Buffer
+	m, err := NewMempool(MempoolConfig{
+		Logger: slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{
+			Level: slog.LevelInfo,
+		})),
+		EventBus:        event.NewEventBus(nil, nil),
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       newMockValidator(),
+		MempoolCapacity: 1024 * 1024,
+	})
+	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
+	defer m.Stop(context.Background())
+
+	require.NoError(
+		t,
+		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+	)
+	hash := m.Transactions()[0].Hash
+	m.RemoveTxsByHash([]string{hash})
+
+	assert.Contains(t, buf.String(), "confirmed transaction")
 }
 
 func TestMempool_EvictionIsReconciledDuringRevalidation(t *testing.T) {
