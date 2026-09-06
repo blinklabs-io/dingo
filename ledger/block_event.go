@@ -228,22 +228,41 @@ func (ls *LedgerState) publishBlockEvent(
 // It does not close the window completely: the chain can still grow between
 // this validation and the rollback and push the rollback past the security
 // parameter, and an I/O failure mid-truncation is not predictable at all.
-// Both leave the chain needing recovery regardless.
+// Both leave the chain needing recovery regardless -- see
+// validateAndEmitRollbackUndoEmitted for the one caller that can retry the
+// first of those instead.
 func (ls *LedgerState) validateAndEmitRollbackUndo(
 	point ocommon.Point,
 ) error {
+	_, err := ls.validateAndEmitRollbackUndoEmitted(point)
+	return err
+}
+
+// validateAndEmitRollbackUndoEmitted is validateAndEmitRollbackUndo, also
+// reporting whether it read any block to undo.
+//
+// A caller that retries the same rollback after the chain rejects it needs
+// that answer. Retrying is only sound while nothing was published: a second
+// pass emits undo events for blocks the first pass already covered, so a
+// ledger.tx consumer would be told to undo them twice. Reporting the read
+// rather than the publish is deliberately conservative -- a block that decodes
+// to no transactions publishes nothing, and a caller that treats it as emitted
+// merely declines a retry it could have taken.
+func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(
+	point ocommon.Point,
+) (bool, error) {
 	if err := ls.chain.ValidateRollback(point); err != nil {
-		return err
+		return false, err
 	}
 	blocks, err := ls.readBlocksAboveSlot(point.Slot)
 	if err != nil {
-		return fmt.Errorf("read rollback undo blocks: %w", err)
+		return false, fmt.Errorf("read rollback undo blocks: %w", err)
 	}
 	if err := persistRollbackIntent(ls.db, point, blocks); err != nil {
-		return err
+		return false, err
 	}
 	ls.emitRollbackTransactionEvents(blocks)
-	return nil
+	return len(blocks) > 0, nil
 }
 
 // readBlocksAboveSlot returns the blocks a rollback to slot would discard,

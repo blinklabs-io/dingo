@@ -235,6 +235,21 @@ func newTestConnId(local, remote string) ouroboros.ConnectionId {
 	}
 }
 
+func selectTrackedChainsyncClient(
+	t testing.TB,
+	state *dchainsync.State,
+	connId ouroboros.ConnectionId,
+) {
+	t.Helper()
+	point := ocommon.NewPoint(1, []byte("selected-client"))
+	state.UpdateClientTipWithoutDedup(
+		connId,
+		point,
+		ochainsync.Tip{Point: point},
+	)
+	require.True(t, state.TrySetClientConnId(connId))
+}
+
 type testSecurityParamLedger struct {
 	securityParam int
 }
@@ -957,8 +972,10 @@ func TestChainsyncClientRollForwardSyncObservationOrdersApplyGate(
 	connB := newTestConnId("127.0.0.1:6000", "10.0.0.2:3001")
 	require.True(t, state.AddClientConnId(connA))
 	require.True(t, state.AddClientConnId(connB))
-	// connA drives, so it may replay a duplicate header first seen from connB.
-	state.SetClientConnId(connA)
+	// Prefer connA at an equal corroborated frontier so its first delivered
+	// header is also the first selectable switch to connA.
+	cs.SetConnectionPriority(connA, 1)
+	var switchAccepted bool
 
 	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
@@ -969,9 +986,18 @@ func TestChainsyncClientRollForwardSyncObservationOrdersApplyGate(
 		ChainsyncObservePeerTip: func(
 			e chainselection.PeerTipUpdateEvent,
 		) bool {
+			previousBest := cs.GetBestPeer()
 			cs.HandlePeerTipUpdateEvent(
 				event.NewEvent(chainselection.PeerTipUpdateEventType, e),
 			)
+			best := cs.GetBestPeer()
+			if previousBest == nil && best != nil {
+				// This is the same synchronous callback ordering as the node's
+				// ChainSwitchEvent handler: the newly selected client must already
+				// show a delivered tip, or TrySetClientConnId rejects the one-shot
+				// switch with no retry.
+				switchAccepted = state.TrySetClientConnId(*best)
+			}
 			return true
 		},
 		ChainsyncApplyEligible: cs.ShouldApplyIngress,
@@ -1019,6 +1045,15 @@ func TestChainsyncClientRollForwardSyncObservationOrdersApplyGate(
 			"corroborating header must be applied in the same roll-forward",
 		)
 	}
+	require.True(t, switchAccepted,
+		"the first corroborated switch must accept its delivered client")
+	active := state.GetClientConnId()
+	require.NotNil(t, active)
+	require.Equal(t, connA, *active)
+	trackedA := state.GetTrackedClient(connA)
+	require.NotNil(t, trackedA)
+	require.Equal(t, uint64(1), trackedA.HeadersRecv,
+		"pre-selection tracking must not double-count the delivered header")
 }
 
 func TestChainsyncClientRollForwardReplaysDuplicateFromSelectedPeerSeenElsewhere(
@@ -1033,7 +1068,7 @@ func TestChainsyncClientRollForwardReplaysDuplicateFromSelectedPeerSeenElsewhere
 	connB := newTestConnId("127.0.0.1:6000", "2.2.2.2:3001")
 	require.True(t, state.AddClientConnId(connA))
 	require.True(t, state.AddClientConnId(connB))
-	state.SetClientConnId(connA)
+	selectTrackedChainsyncClient(t, state, connA)
 
 	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
@@ -1095,7 +1130,7 @@ func TestChainsyncClientRollForwardReplaysDuplicateFromEquivalentSelectedPeerSee
 	require.True(t, state.AddClientConnId(connA))
 	require.True(t, state.AddClientConnId(connADup))
 	require.True(t, state.AddClientConnId(connB))
-	state.SetClientConnId(connA)
+	selectTrackedChainsyncClient(t, state, connA)
 
 	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
@@ -1153,7 +1188,7 @@ func TestChainsyncClientRollForwardDropsDuplicateFromSameSelectedPeer(
 	state := dchainsync.NewState(bus, nil)
 	connA := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
 	require.True(t, state.AddClientConnId(connA))
-	state.SetClientConnId(connA)
+	selectTrackedChainsyncClient(t, state, connA)
 
 	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
@@ -1217,7 +1252,7 @@ func TestChainsyncClientRollForward_ParallelMultiPeerNoDoubleIngress(
 	connB := newTestConnId("127.0.0.1:6000", "2.2.2.2:3001")
 	require.True(t, state.AddClientConnId(connA))
 	require.True(t, state.AddClientConnId(connB))
-	state.SetClientConnId(connA)
+	selectTrackedChainsyncClient(t, state, connA)
 
 	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
@@ -1438,8 +1473,7 @@ func TestRegisterTrackedChainsyncClient_ObservabilityOnlyDoesNotConsumePool(
 	require.Equal(t, 1, state.ClientConnCount())
 
 	active := state.GetClientConnId()
-	require.NotNil(t, active)
-	require.Equal(t, connEligible, *active)
+	require.Nil(t, active)
 }
 
 func TestRegisterTrackedChainsyncClient_PromotedObservedKeepsDirection(
@@ -1483,7 +1517,7 @@ func TestHandlePeerEligibilityChangedEvent_DemotesObservedIngress(
 	state := dchainsync.NewState(bus, nil)
 	require.True(t, state.AddClientConnId(connA))
 	require.True(t, state.AddClientConnId(connB))
-	state.SetClientConnId(connA)
+	selectTrackedChainsyncClient(t, state, connA)
 	state.UpdateClientTip(
 		connA,
 		ocommon.NewPoint(200, []byte("ha")),
@@ -1510,8 +1544,7 @@ func TestHandlePeerEligibilityChangedEvent_DemotesObservedIngress(
 	require.True(t, observabilityOnly)
 
 	active := state.GetClientConnId()
-	require.NotNil(t, active)
-	require.Equal(t, connB, *active)
+	require.Nil(t, active)
 }
 
 func TestChainsyncClientRollForward_UntrackedPeerDoesNotPublishToLedger(
