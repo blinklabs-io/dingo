@@ -407,14 +407,15 @@ func (d *Database) SetTransactionMetadataOnly(
 }
 
 // SetGapBlockTransaction stores a transaction from a mithril gap block.
-// It records blob offsets (TX and UTxO) for CBOR resolution and creates
-// a minimal metadata record, but does NOT look up or consume input
-// UTxOs because the mithril snapshot already reflects the correct
-// spent/unspent state.
+// It records blob offsets (TX and UTxO) for CBOR resolution and creates the
+// transaction, certificate, and output metadata records, but does NOT look
+// up or consume input UTxOs because the mithril snapshot already reflects the
+// correct spent/unspent state.
 func (d *Database) SetGapBlockTransaction(
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	idx uint32,
+	certDeposits map[int]uint64,
 	offsets *BlockIngestionResult,
 	txn *Txn,
 ) error {
@@ -486,7 +487,7 @@ func (d *Database) SetGapBlockTransaction(
 	}
 
 	if err := d.transactionStore().SetGapBlockTransaction(
-		tx, point, idx, txn.Metadata(),
+		tx, point, idx, certDeposits, txn.Metadata(),
 	); err != nil {
 		return fmt.Errorf(
 			"set gap block transaction metadata: %w", err,
