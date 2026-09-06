@@ -349,6 +349,20 @@ func chainsyncResyncRequiresFreshConnection(reason string) bool {
 	}
 }
 
+// chainsyncResyncDeniesPeer lists the re-sync reasons that also put the peer
+// in peer governance's deny list for chainsyncDivergentPeerCooldown.
+//
+// A peer that is merely behind on our own chain is deliberately absent: the
+// ledger now classifies it before any of these reasons is published (see
+// LedgerState.chainsyncPeerBehindOnOurChain) and publishes no re-sync at all,
+// so the connection is kept and the peer resumes on its own once it catches
+// up. Denying such a peer is what turns a lagging upstream into an outage on a
+// node whose valency is one. Do not add a behind-peer reason here.
+//
+// ChainsyncResyncReasonPeerTipBehindMithril stays, even though that peer is
+// also just behind: unlike the case above we still close its connection,
+// because we cannot follow it below the trust anchor, and without the cooldown
+// it is redialed and rejected again within a second, forever.
 func chainsyncResyncDeniesPeer(reason string) bool {
 	switch reason {
 	case event.ChainsyncResyncReasonRollbackExceedsK,
