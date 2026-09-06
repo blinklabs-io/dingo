@@ -1020,7 +1020,9 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	if sameConnectionId(ls.shadowBlockfetchConnId, e.ConnectionId) {
 		ls.shadowBlockfetchConnId = ouroboros.ConnectionId{}
 	}
+	ls.bufferedHeaderMutex.Lock()
 	delete(ls.bufferedHeaderEvents, connIdKey(e.ConnectionId))
+	ls.bufferedHeaderMutex.Unlock()
 	delete(ls.peerHeaderHistory, connIdKey(e.ConnectionId))
 	// Cancel in-flight blockfetch if the dead connection owns it.
 	// Without this, chainsyncBlockfetchReadyChan stays non-nil and
@@ -1220,9 +1222,11 @@ func (ls *LedgerState) handoffPipelineOnSwitchLocked(
 		return ouroboros.ConnectionId{}, nil
 	}
 
+	ls.bufferedHeaderMutex.Lock()
 	hasBufferedHeadersForNewConn := len(
 		ls.bufferedHeaderEvents[connIdKey(newConnId)],
 	) > 0
+	ls.bufferedHeaderMutex.Unlock()
 
 	// When a blockfetch batch is already in progress on a different connection,
 	// let it complete rather than canceling it. The fetched blocks are canonical
@@ -1307,7 +1311,10 @@ func (ls *LedgerState) chainSwitchNeedsFreshCursorLocked(
 	if ls.chain != nil && ls.chain.HeaderCount() > 0 {
 		return false
 	}
-	if len(ls.bufferedHeaderEvents[connIdKey(connId)]) > 0 {
+	ls.bufferedHeaderMutex.Lock()
+	hasBuffered := len(ls.bufferedHeaderEvents[connIdKey(connId)]) > 0
+	ls.bufferedHeaderMutex.Unlock()
+	if hasBuffered {
 		return false
 	}
 	newObservedTip, ok := ls.chainSwitchObservedTipForConnection(e, connId)
@@ -1355,6 +1362,12 @@ func chainSwitchNewObservedTip(
 }
 
 func (ls *LedgerState) bufferHeaderEvent(e ChainsyncEvent) {
+	// Reached from the chainsync dispatch goroutine, which holds only
+	// chainsyncMutex: claimHeaderPipelineOwnership released
+	// chainsyncBlockfetchMutex on return, so this write is otherwise
+	// unprotected against nextBufferedHeaderConnId's iteration.
+	ls.bufferedHeaderMutex.Lock()
+	defer ls.bufferedHeaderMutex.Unlock()
 	if ls.bufferedHeaderEvents == nil {
 		ls.bufferedHeaderEvents = make(
 			map[string][]ChainsyncEvent,
@@ -1842,7 +1855,9 @@ func (ls *LedgerState) requestChainsyncResync(
 ) {
 	ls.headerMismatchCount = 0
 	ls.rollbackHistory = nil
+	ls.bufferedHeaderMutex.Lock()
 	delete(ls.bufferedHeaderEvents, connIdKey(connId))
+	ls.bufferedHeaderMutex.Unlock()
 	pending.add(
 		ls.config.EventBus,
 		event.ChainsyncResyncEventType,
@@ -1986,6 +2001,8 @@ func (ls *LedgerState) nextBufferedHeaderConnId() (
 	ouroboros.ConnectionId,
 	bool,
 ) {
+	ls.bufferedHeaderMutex.Lock()
+	defer ls.bufferedHeaderMutex.Unlock()
 	if key := connIdKey(ls.selectedBlockfetchConnId); key != "" {
 		if events := ls.bufferedHeaderEvents[key]; len(events) > 0 {
 			return events[len(events)-1].ConnectionId, true
@@ -2057,7 +2074,13 @@ func (ls *LedgerState) replayBufferedHeaderEvents(
 	pending *pendingPublishes,
 ) error {
 	key := connIdKey(connId)
+	// Take the events and clear the entry under the lock, then replay
+	// outside it: the replay calls back into
+	// handleEventChainsyncBlockHeaderWithPending, which can buffer more
+	// headers and would deadlock on a lock still held here.
+	ls.bufferedHeaderMutex.Lock()
 	if len(ls.bufferedHeaderEvents[key]) == 0 {
+		ls.bufferedHeaderMutex.Unlock()
 		return nil
 	}
 	events := append(
@@ -2065,6 +2088,7 @@ func (ls *LedgerState) replayBufferedHeaderEvents(
 		ls.bufferedHeaderEvents[key]...,
 	)
 	delete(ls.bufferedHeaderEvents, key)
+	ls.bufferedHeaderMutex.Unlock()
 	for _, evt := range events {
 		if err := ls.handleEventChainsyncBlockHeaderWithPending(evt, pending); err != nil {
 			return err
@@ -2080,12 +2104,19 @@ func (ls *LedgerState) replayBufferedHeaderEvents(
 // chainsyncBlockfetchMutex. Taking it here too, self-contained, closes that
 // gap without widening handleEventBlockfetch's own critical section to
 // cover chainsyncMutex as well.
+//
+// The bufferedHeaderEvents delete belongs inside that lock for the same
+// reason: handleEventBlockfetch holds chainsyncBlockfetchMutex while
+// nextBufferedHeaderConnId ranges over the map, so deleting from this
+// goroutine under a different mutex is a concurrent iteration and write.
 func (ls *LedgerState) discardBufferedPeerHeaders(
 	connId ouroboros.ConnectionId,
 ) {
-	delete(ls.bufferedHeaderEvents, connIdKey(connId))
 	ls.chainsyncBlockfetchMutex.Lock()
 	defer ls.chainsyncBlockfetchMutex.Unlock()
+	ls.bufferedHeaderMutex.Lock()
+	delete(ls.bufferedHeaderEvents, connIdKey(connId))
+	ls.bufferedHeaderMutex.Unlock()
 	if sameConnectionId(ls.headerPipelineConnId, connId) {
 		ls.clearQueuedHeaders()
 	}
@@ -2554,13 +2585,15 @@ func (ls *LedgerState) clearRollbackHistoryForPoint(point ocommon.Point) {
 func (ls *LedgerState) resetChainsyncResyncState() {
 	ls.rollbackHistory = nil
 	ls.headerMismatchCount = 0
-	ls.bufferedHeaderEvents = nil
 	ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.chainsyncBlockfetchMutex.Lock()
 	// clearQueuedHeaders mutates headerPipelineConnId, which every other
 	// mutator guards with chainsyncBlockfetchMutex -- moved inside this
 	// lock (rather than called before it, as this used to) to close that
-	// gap.
+	// gap. bufferedHeaderEvents has its own lock; see bufferedHeaderMutex.
+	ls.bufferedHeaderMutex.Lock()
+	ls.bufferedHeaderEvents = nil
+	ls.bufferedHeaderMutex.Unlock()
 	ls.clearQueuedHeaders()
 	ls.blockfetchRequestRangeCleanup()
 	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
