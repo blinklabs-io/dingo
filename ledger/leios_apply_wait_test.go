@@ -940,6 +940,27 @@ func TestLeiosGraceDetectorIgnoresSharedAwaitFetch(t *testing.T) {
 	)
 }
 
+// leiosWaitTestLogBuffer is a concurrency-safe log sink. The waits under test
+// dispatch a goroutine per reference and the backfiller logs from its own
+// fetch goroutine, so a bare bytes.Buffer is written from several goroutines
+// at once -- which the race detector correctly flags.
+type leiosWaitTestLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *leiosWaitTestLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *leiosWaitTestLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // TestFetchRequiredReportsCancellationNotBudgetExpiry covers the second site
 // with the same defect the diffusion wait had: the retry budget is a timeout
 // CHILD of the block-processing context, so its Done also closes when the
@@ -948,7 +969,7 @@ func TestLeiosGraceDetectorIgnoresSharedAwaitFetch(t *testing.T) {
 // serve the endorser block when nothing was asked of them, and it is loudest
 // exactly when a node is shutting down.
 func TestFetchRequiredReportsCancellationNotBudgetExpiry(t *testing.T) {
-	var logs bytes.Buffer
+	var logs leiosWaitTestLogBuffer
 	cfg := LedgerStateConfig{
 		Logger: slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{
 			Level: slog.LevelDebug,
@@ -998,7 +1019,7 @@ func TestFetchRequiredReportsCancellationNotBudgetExpiry(t *testing.T) {
 // which case nothing was learned about whether any peer holds the block and
 // the line would be a false diagnosis emitted on every shutdown.
 func TestCIPFetchWaitReportsCancellationNotFailure(t *testing.T) {
-	var logs bytes.Buffer
+	var logs leiosWaitTestLogBuffer
 	cfg := LedgerStateConfig{
 		Logger: slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{
 			Level: slog.LevelDebug,
