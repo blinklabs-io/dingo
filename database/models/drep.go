@@ -43,6 +43,14 @@ type Drep struct {
 	Active      bool
 }
 
+// DrepDepositKey builds the map key that GetDrepLastRegistrationDeposits
+// returns deposits under. A DRep is identified by the credential bytes
+// together with their tag -- the same bytes can appear under a key-hash and
+// a script-hash credential -- so both have to be in the key.
+func DrepDepositKey(credentialTag uint8, credential []byte) string {
+	return string([]byte{credentialTag}) + string(credential)
+}
+
 // DrepListRow is a Drep row extended with the credential's first
 // on-chain appearance slot, as returned by GetDreps for
 // registration-order listings.

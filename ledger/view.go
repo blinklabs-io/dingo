@@ -1276,22 +1276,20 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get active dreps: %w", err)
 	}
+	// One batched read rather than a deposit query per DRep: mainnet has
+	// thousands of active DReps and this is on the validation path.
+	deposits, err := lv.ls.db.GetDrepLastRegistrationDeposits(lv.txn)
+	if err != nil {
+		return nil, fmt.Errorf("get drep last registration deposits: %w", err)
+	}
 	registrations := make([]lcommon.DRepRegistration, 0, len(dreps))
 	for _, drep := range dreps {
-		deposit, err := lv.ls.db.GetDrepLastRegistrationDeposit(
-			drep.CredentialTag,
-			drep.Credential,
-			lv.txn,
-		)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"get drep last registration deposit: %w",
-				err,
-			)
-		}
 		reg := lcommon.DRepRegistration{
 			Credential: lcommon.NewBlake2b224(drep.Credential),
-			Deposit:    deposit,
+			Deposit: deposits[models.DrepDepositKey(
+				drep.CredentialTag,
+				drep.Credential,
+			)],
 		}
 		if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 			if len(drep.AnchorHash) != 32 {

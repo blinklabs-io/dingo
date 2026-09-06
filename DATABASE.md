@@ -2264,13 +2264,15 @@ LIMIT 1;
 ```
 
 Note the absence of `GetDrepLastRegistrationSlot`'s
-`certificate_id IS NOT NULL AND certificate_id != 0` filter. That filter is
-correct for an activity display, which should not show bootstrap or
-recovery-inserted placeholder rows, but wrong for refund validation: a row
-inserted by `InsertDrepIfAbsent` carries `certificate_id = 0` and still
-records the real deposit owed on deregistration. Filtering it out yields an
-expected refund of 0 against a certificate that legitimately supplies the
-deposit, and the block is rejected.
+`certificate_id IS NOT NULL AND certificate_id != 0` filter. Those
+`certificate_id = 0` rows are the ones the Mithril ledger-state import writes
+at the bootstrap slot via `ImportDrepRegistration`, described above. Excluding
+them is correct for an activity listing, which should not present a synthetic
+bootstrap row as chain activity, but wrong for refund validation: the imported
+row carries the real `deposit_amount` the DRep paid, and on a
+Mithril-bootstrapped node it is frequently the only registration row a DRep
+has. Filtering it out yields an expected refund of 0 against a certificate
+that legitimately supplies the deposit, and the block is rejected.
 
 `GetPredefinedDrepFirstSeenSlots` returns the earliest delegation slot
 per predefined DRep type (2 = AlwaysAbstain, 3 = AlwaysNoConfidence),
