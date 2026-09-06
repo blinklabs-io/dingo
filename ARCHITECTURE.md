@@ -3670,6 +3670,14 @@ Two Prometheus metrics capture the outcome: `dingo_leios_ntc_certrb_total{outcom
 
 The `PeerGovernor` (`peergov/peergov.go`) manages peer selection and topology:
 
+Network-learned gossip, ledger, and peer-sharing candidates are admitted only
+when their literal or resolved address passes `peergov.IsRoutableIP`. This
+rejects private, loopback, link-local, multicast, unspecified, reserved,
+benchmarking, and documentation-only ranges such as RFC 5737 TEST-NET and
+RFC 3849 `2001:db8::/32`. Operator-configured topology peers intentionally
+retain their separate exemption for private addresses, and an already
+established inbound peer is not reclassified by this admission check.
+
 Peer targets configured directly by Dingo through YAML, environment variables,
 or CLI flags take precedence over the corresponding Cardano configuration.
 When Dingo's root-peer target is unset, composition applies

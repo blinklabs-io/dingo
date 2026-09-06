@@ -1285,10 +1285,24 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 	// inputs stay consumed, created outputs stay created. When peers
 	// re-deliver the block we just rewound past, ledger validation
 	// looks up its inputs, finds them already marked consumed, and
-	// returns bad input(s) and value not conserved (consumed 0)
-	// again, looping the recovery indefinitely until
-	// process restart. Primary-chain rollback only touches the chain
-	// store — the matching ledger rollback must be explicit.
+	// fails UtxoValidateBadInputsUtxo and
+	// UtxoValidateValueNotConservedUtxo ("bad input(s)" and "value not
+	// conserved (consumed 0)") again, looping the recovery indefinitely
+	// until process restart. Primary-chain rollback only touches the
+	// chain store — the matching ledger rollback must be explicit.
+	//
+	// Match on the rule names above, not on the number the wrapped error
+	// prints. That number is this era's index into the upstream
+	// gouroboros validation-rule slice, so it shifts whenever upstream
+	// inserts or reorders a rule -- twice in recent memory: v0.202.5
+	// inserted UtxoValidateRequiredRedeemers (22/24 became 29/32) and
+	// v0.202.6 inserted UtxoValidateCurrentTreasuryValue at index 0,
+	// shifting everything by one again (29/32 became 30/33). On the
+	// currently pinned v0.202.6 they print as rule 30 and rule 33, but
+	// treat that as a fact about the pin rather than about the rules, and
+	// re-measure after any gouroboros bump instead of trusting this line.
+	// Stale numbers here have twice pointed diagnosis at the wrong root
+	// cause (#3165, #3678).
 	if err := ls.rollback(rewindPoint); err != nil {
 		return false, fmt.Errorf(
 			"rollback ledger state after validation failure: %w",
