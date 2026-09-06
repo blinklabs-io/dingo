@@ -42,18 +42,18 @@ import (
 // applyContractRecorder records every ApplyFunc invocation, in call order,
 // and detects any concurrent overlap between invocations.
 type applyContractRecorder struct {
-	mu        sync.Mutex
-	sequences []uint64
-	inFlight  atomic.Int32
-	overlaps  atomic.Int32
+	mu             sync.Mutex
+	sequences      []uint64
+	inFlight       atomic.Int32
+	overlaps       atomic.Int32
+	blockStarted   chan struct{}
+	blockStartOnce sync.Once
+	blockRelease   <-chan struct{}
 	// failAt makes ApplyFunc return an error for that one sequence number,
 	// but only when failSet is true.
-	failAt   uint64
-	failSet  bool
-	applyErr error
-	// blockFor makes each apply take measurable time, so a drain barrier
-	// can be observed waiting for it.
-	blockFor  time.Duration
+	failAt    uint64
+	failSet   bool
+	applyErr  error
 	callCount atomic.Int32
 }
 
@@ -68,8 +68,9 @@ func (r *applyContractRecorder) applyFunc(item *pipeline.BlockItem) error {
 	r.mu.Lock()
 	r.sequences = append(r.sequences, item.SequenceNumber())
 	r.mu.Unlock()
-	if r.blockFor > 0 {
-		time.Sleep(r.blockFor)
+	if r.blockRelease != nil {
+		r.blockStartOnce.Do(func() { close(r.blockStarted) })
+		<-r.blockRelease
 	}
 	if r.failSet && item.SequenceNumber() == r.failAt {
 		return r.applyErr
@@ -286,7 +287,14 @@ func TestPipelineApplyFuncSkipsUndecodableBlockButAppliesTheNext(t *testing.T) {
 // a rollback run while blocks were still being applied to the ledger --
 // exactly the "mutation survives a rollback" class of #3771/#3840.
 func TestPipelineWaitForDrainCoversApplyFunc(t *testing.T) {
-	rec := &applyContractRecorder{blockFor: 50 * time.Millisecond}
+	blockStarted := make(chan struct{})
+	blockRelease := make(chan struct{})
+	release := sync.OnceFunc(func() { close(blockRelease) })
+	defer release()
+	rec := &applyContractRecorder{
+		blockStarted: blockStarted,
+		blockRelease: blockRelease,
+	}
 	p, _ := startApplyContractPipeline(t, rec, 2)
 	const numBlocks = 4
 	for i := range numBlocks {
@@ -296,6 +304,12 @@ func TestPipelineWaitForDrainCoversApplyFunc(t *testing.T) {
 			testutil.BuildDecodableConwayBlockBytes(t, slot, slot+1),
 		)
 	}
+	testutil.RequireReceive(
+		t,
+		blockStarted,
+		5*time.Second,
+		"ApplyFunc did not start",
+	)
 	// A drain barrier shorter than the apply work it covers times out.
 	shortCtx, shortCancel := context.WithTimeout(
 		t.Context(), 10*time.Millisecond,
@@ -314,6 +328,7 @@ func TestPipelineWaitForDrainCoversApplyFunc(t *testing.T) {
 		"apply was still in progress when the short barrier expired",
 	)
 	// The same barrier with enough time covers every apply.
+	release()
 	require.NoError(t, p.WaitForDrain(t.Context()))
 	require.Equal(t, numBlocks, int(rec.callCount.Load()))
 }
