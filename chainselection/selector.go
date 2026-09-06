@@ -618,7 +618,7 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 			PeerEvictedEventType,
 			PeerEvictedEvent{ConnectionId: *evictedConn},
 		)
-		cs.config.EventBus.Publish(PeerEvictedEventType, evt)
+		cs.publishSelection(PeerEvictedEventType, evt)
 	}
 
 	if !accepted {
@@ -798,7 +798,7 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 	// Publish event outside the lock to prevent deadlock if subscribers
 	// call back into ChainSelector
 	if switchEvent != nil {
-		cs.config.EventBus.Publish(ChainSwitchEventType, *switchEvent)
+		cs.publishSelection(ChainSwitchEventType, *switchEvent)
 	}
 	cs.publishPendingGenesisExitEvent()
 	cs.publishPendingSelectedNoneEvent()
@@ -1321,6 +1321,48 @@ func (cs *ChainSelector) triggerEvaluation() {
 	}
 }
 
+// publishSelection hands a chain-selection event to the EventBus without
+// parking the calling goroutine on a subscriber that has stopped draining.
+//
+// Every chainselection event is produced on a goroutine that has to keep
+// making progress: the EventBus dispatch goroutines for the internal
+// peer_activity, peer_tip_update and conn_closed subscriptions, and the
+// selector's own evaluation loop. EventBus.Publish hands the event to each
+// subscriber channel inline and waits for buffer capacity, so a subscriber
+// that stops draining stops its producer too.
+//
+// blinklabs-io/dingo#3550 is that chain end to end: a
+// chainselection.chain_switch consumer stopped draining, TouchPeerActivity
+// parked inside publishSelectionEvents -> EventBus.Publish, the internal
+// chainselection.peer_activity subscriber therefore stopped draining, and
+// once its 1024-slot buffer filled every keepalive response parked a
+// gouroboros protocol goroutine in ouroboros.keepaliveClientResponse.
+//
+// PublishOrdered keeps both delivery and publisher order: each event type has
+// its own FIFO lane drained by exactly one worker, so events of a type reach
+// subscribers in the order they were handed to PublishOrdered, and a
+// subscriber that blocks parks only that lane's worker. Every chainselection
+// publication goes through this helper precisely so a queued chain switch can
+// never be overtaken by one published directly.
+//
+// The order preserved is the order publications arrive here, not the order the
+// switches were decided in. Every producer decides under cs.mutex and
+// publishes after releasing it -- EvaluateAndSwitch and TouchPeerActivity both
+// do -- so two goroutines can decide A then B and still enqueue B then A, and
+// a subscriber sees B before A. That window is unchanged from the inline
+// Publish this replaced, and closing it would mean publishing while holding
+// cs.mutex, which is the deadlock shape #3550 is about avoiding (wolf31o2
+// review).
+func (cs *ChainSelector) publishSelection(
+	eventType event.EventType,
+	evt event.Event,
+) {
+	if cs.config.EventBus == nil {
+		return
+	}
+	cs.config.EventBus.PublishOrdered(eventType, evt)
+}
+
 func (cs *ChainSelector) publishSelectionEvents(
 	switchEvent *event.Event,
 	selectionEvent *event.Event,
@@ -1330,13 +1372,13 @@ func (cs *ChainSelector) publishSelectionEvents(
 		return
 	}
 	if switchEvent != nil {
-		cs.config.EventBus.Publish(ChainSwitchEventType, *switchEvent)
+		cs.publishSelection(ChainSwitchEventType, *switchEvent)
 	}
 	if selectionEvent != nil {
-		cs.config.EventBus.Publish(ChainSelectionEventType, *selectionEvent)
+		cs.publishSelection(ChainSelectionEventType, *selectionEvent)
 	}
 	if corroborationEvent != nil {
-		cs.config.EventBus.Publish(
+		cs.publishSelection(
 			GenesisCorroborationFailedEventType,
 			*corroborationEvent,
 		)
@@ -1356,7 +1398,7 @@ func (cs *ChainSelector) publishPendingGenesisExitEvent() {
 	cs.pendingGenesisExit = nil
 	cs.mutex.Unlock()
 	if pending != nil {
-		cs.config.EventBus.Publish(
+		cs.publishSelection(
 			GenesisModeExitedEventType,
 			event.NewEvent(GenesisModeExitedEventType, *pending),
 		)
@@ -1390,7 +1432,7 @@ func (cs *ChainSelector) publishPendingSelectedNoneEvent() {
 	cs.pendingSelectedNone = nil
 	cs.mutex.Unlock()
 	if pending != nil {
-		cs.config.EventBus.Publish(
+		cs.publishSelection(
 			ChainSelectedNoneEventType,
 			event.NewEvent(ChainSelectedNoneEventType, *pending),
 		)
@@ -1959,7 +2001,7 @@ func (cs *ChainSelector) cleanupStalePeers() {
 	// Publish event outside the lock to prevent deadlock if subscribers
 	// call back into ChainSelector
 	if switchEvent != nil {
-		cs.config.EventBus.Publish(ChainSwitchEventType, *switchEvent)
+		cs.publishSelection(ChainSwitchEventType, *switchEvent)
 	}
 	cs.publishPendingGenesisExitEvent()
 	cs.publishPendingSelectedNoneEvent()
