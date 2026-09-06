@@ -160,6 +160,32 @@ type DingoPoolEpochData struct {
 	// by construction.
 	PoolUnspendable uint64
 
+	// RewardsPending reports that the node has NOT yet reached the boundary at
+	// which this stake epoch's rewards are applied -- three epochs after the
+	// stake epoch, taken from reward_pool_output.boundary_slot when that row
+	// exists and derived from the epoch table when it does not.
+	//
+	// The derived form is what covers a *missing* row. A reward_pool_output row
+	// for stake epoch E is not written until well after E closes, so an
+	// observer running close to the tip asks about epochs Dingo has not
+	// computed yet. The wall-clock grace window cannot recognise that during a
+	// replay, where every epoch closed years ago, so the absence was reported
+	// as dingo_db_missing against a node that was simply not there yet
+	// (issue #3857).
+	//
+	// Before that boundary the per-account spendable flags are provisional: a
+	// reward computed for a credential that deregisters in the meantime is
+	// still marked spendable, and only the application flips it. Koios reports
+	// rewards that were actually distributed, so comparing earlier makes Dingo
+	// read high by exactly the forfeitures that have not happened yet
+	// (dingo #3852). A difference before the boundary is a statement about
+	// timing, not about correctness.
+	//
+	// The sense is deliberately negative so the zero value compares strictly.
+	// A source that cannot establish the boundary must not silently downgrade
+	// a real divergence to a lag; reporting a spurious mismatch is the safer
+	// failure for a verification tool than hiding a true one.
+	RewardsPending bool
 	// SpendableMemberRewardPresent reports that reward_account_output rows
 	// exist for the stake epoch at all, which is what makes a per-pool
 	// spendable sum meaningful: a pool with no rows then genuinely earned no
@@ -643,9 +669,64 @@ func (d *DingoDB) GetPoolEpochDataMap(
 	}
 	_ = rows.Close() //nolint:sqlclosecheck
 
+	// The tip decides whether this stake epoch's rewards have been applied;
+	// see DingoPoolEpochData.RewardsPending. An unreadable or empty tip table
+	// leaves tipKnown false, which keeps the comparison strict rather than
+	// downgrading a real divergence on incomplete information.
+	var tipSlot uint64
+	tipKnown := false
+	if tipRow := d.queryRow(
+		ctx, `SELECT slot, hash FROM tip ORDER BY id DESC LIMIT 1`,
+	); tipRow != nil {
+		var slot sql.NullInt64
+		var hash []byte
+		// A hash is required as well as a slot, matching DatabaseSource: a row
+		// carrying a slot but no hash is incomplete metadata, not a chain tip,
+		// and accepting it would let a real divergence read as a lag.
+		if err := tipRow.Scan(&slot, &hash); err == nil && slot.Valid &&
+			slot.Int64 > 0 && len(hash) > 0 {
+			tipSlot = uint64(slot.Int64)
+			tipKnown = true
+		}
+	}
+
+	// Rewards for stake epoch E are applied at the boundary into E+3, so before
+	// the node reaches that slot their absence is expected rather than a gap.
+	// An epoch missing from the table means the node has plainly not reached
+	// it. Mirrors DatabaseSource; see DingoPoolEpochData.RewardsPending.
+	//
+	// The three outcomes below are three different claims and are kept apart.
+	// Only an absent row asserts "the node has not reached E+3"; a failed read
+	// or a row whose start slot is unusable asserts nothing at all, and per
+	// RewardsPending's contract a source that cannot establish the boundary
+	// must leave the comparison strict rather than downgrade a real divergence
+	// to a lag. That is the same direction the tip read above takes when it
+	// cannot establish a tip.
+	epochRewardsPending := false
+	if tipKnown {
+		var startSlot sql.NullInt64
+		err := d.queryRow(
+			ctx, `SELECT start_slot FROM epoch WHERE epoch_id = ?`,
+			stakeEpoch+3,
+		).Scan(&startSlot)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			// The applying epoch is not in the table: the node has plainly
+			// not reached it.
+			epochRewardsPending = true
+		case err != nil:
+			// The read failed. Nothing is known about the boundary.
+		case !startSlot.Valid || startSlot.Int64 < 0:
+			// A NULL or negative start slot is not a representable boundary,
+			// so the row is unusable — again, nothing is known.
+		default:
+			epochRewardsPending = tipSlot < uint64(startSlot.Int64)
+		}
+	}
+
 	rows, err = d.query(
 		ctx,
-		`SELECT pool_key_hash, member_reward_total, unspendable FROM reward_pool_output WHERE epoch = ?`,
+		`SELECT pool_key_hash, member_reward_total, unspendable, boundary_slot FROM reward_pool_output WHERE epoch = ?`,
 		stakeEpoch,
 	)
 	if err != nil {
@@ -660,7 +741,10 @@ func (d *DingoDB) GetPoolEpochDataMap(
 		var poolHash []byte
 		var reward types.Uint64
 		var unspendable types.Uint64
-		if err := rows.Scan(&poolHash, &reward, &unspendable); err != nil {
+		var boundarySlot uint64
+		if err := rows.Scan(
+			&poolHash, &reward, &unspendable, &boundarySlot,
+		); err != nil {
 			return nil, err
 		}
 		key := hex.EncodeToString(poolHash)
@@ -672,9 +756,20 @@ func (d *DingoDB) GetPoolEpochDataMap(
 		data.MemberRewardPresent = true
 		data.MemberRewardTotal = strconv.FormatUint(uint64(reward), 10)
 		data.PoolUnspendable = uint64(unspendable)
+		data.RewardsPending = tipKnown && tipSlot < boundarySlot
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+
+	// Entries with no reward_pool_output row keep the epoch-derived answer; the
+	// loop above has already set those that have one from their own boundary.
+	if epochRewardsPending {
+		for _, data := range m {
+			if !data.MemberRewardPresent {
+				data.RewardsPending = true
+			}
+		}
 	}
 
 	if err := d.addSpendableMemberRewards(ctx, m, stakeEpoch); err != nil {

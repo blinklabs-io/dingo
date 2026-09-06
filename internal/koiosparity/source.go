@@ -335,6 +335,45 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 	defer txn.Release()
 	meta := s.db.Metadata()
 
+	// The tip decides whether this stake epoch's rewards have been applied
+	// yet; see DingoPoolEpochData.RewardsPending. When the tip cannot be read
+	// the flag is left unset, so the comparison stays strict rather than
+	// downgrading a possible divergence on incomplete information.
+	var tipSlot uint64
+	tipKnown := false
+	if tip, tipErr := s.db.GetTip(txn); tipErr == nil &&
+		len(tip.Point.Hash) > 0 {
+		// GetTip reports sql.ErrNoRows as a zero Tip with a nil error, so a
+		// nil error alone would accept slot 0 as a real tip and mark every
+		// epoch pending. A genuine tip always carries a block hash.
+		tipSlot = tip.Point.Slot
+		tipKnown = true
+	}
+
+	// Rewards for stake epoch E are applied at the boundary into E+3, so
+	// before the node reaches that slot their absence is expected rather than a
+	// gap. When that epoch is not in the table at all the node has plainly not
+	// reached it, which is the common case for an observer near the tip.
+	//
+	// A failed read is a different claim from an absent row and is kept
+	// separate: GetEpoch reports "no such epoch" as (nil, nil), so a non-nil
+	// error means the boundary could not be established at all. Per
+	// RewardsPending's contract that must leave the comparison strict rather
+	// than downgrade a real divergence to a lag — the same direction the tip
+	// read above takes. Mirrors DingoDB.
+	epochRewardsPending := false
+	if tipKnown {
+		applyEpoch, err := meta.GetEpoch(stakeEpoch+3, txn.Metadata())
+		switch {
+		case err != nil:
+			// Nothing is known about the boundary.
+		case applyEpoch == nil:
+			epochRewardsPending = true
+		default:
+			epochRewardsPending = tipSlot < applyEpoch.StartSlot
+		}
+	}
+
 	stakeInputs, err := meta.GetRewardPoolInputs(stakeEpoch, txn.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -399,6 +438,8 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 			10,
 		)
 		data.PoolUnspendable = uint64(out.Unspendable)
+		// The row exists, so its own boundary is authoritative.
+		data.RewardsPending = tipKnown && tipSlot < out.BoundarySlot
 	}
 
 	// The comparable member-reward quantity, formed the same way DingoDB
@@ -416,6 +457,16 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 			err,
 		)
 	}
+	// Entries with no reward_pool_output row keep the epoch-derived answer;
+	// the loop above has already overridden those that have one.
+	if epochRewardsPending {
+		for _, data := range m {
+			if !data.MemberRewardPresent {
+				data.RewardsPending = true
+			}
+		}
+	}
+
 	if len(accountOutputs) > 0 {
 		totals := make(map[string]uint64, len(m))
 		for _, out := range accountOutputs {

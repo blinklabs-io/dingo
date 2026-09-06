@@ -30,7 +30,7 @@ func TestZeroEarnedKoiosRowIsNotDivergence(t *testing.T) {
 			},
 		},
 		nil,
-		now, 0, time.Time{},
+		now, 0, time.Time{}, false,
 	)
 	require.Len(t, out, 1, "the row should still be reported, not dropped")
 	assert.Equal(t, CategoryAcctZeroRewardRow, out[0].Category)
@@ -53,7 +53,7 @@ func TestZeroAmountDingoRowIsNotDivergence(t *testing.T) {
 				Amount:       "0",
 			},
 		},
-		now, 0, time.Time{},
+		now, 0, time.Time{}, false,
 	)
 	require.Len(t, out, 1)
 	assert.Equal(t, CategoryAcctZeroRewardRow, out[0].Category)
@@ -74,7 +74,7 @@ func TestNonZeroKoiosOnlyRowStillFails(t *testing.T) {
 			},
 		},
 		nil,
-		now, 0, time.Time{},
+		now, 0, time.Time{}, false,
 	)
 	require.Len(t, out, 1)
 	assert.Equal(t, CategoryAcctOnlyKoios, out[0].Category)
@@ -93,7 +93,7 @@ func TestZeroOnBothSidesReportsNothing(t *testing.T) {
 		[]DingoAccountReward{
 			{StakeAddress: zeroRewardAddr, RewardType: "leader", Amount: "0"},
 		},
-		now, 0, time.Time{},
+		now, 0, time.Time{}, false,
 	)
 	assert.Empty(t, out)
 }
@@ -137,7 +137,7 @@ func TestZeroRewardRowAmountSpellings(t *testing.T) {
 					Earned:       tc.earned,
 				}},
 				nil,
-				time.Now(), 0, time.Time{},
+				time.Now(), 0, time.Time{}, false,
 			)
 			require.Len(t, out, 1)
 			assert.Equal(t, tc.category, out[0].Category)

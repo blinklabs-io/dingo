@@ -6214,7 +6214,37 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   either: within `--grace-hours` of the epoch closing it is `reference_lag`
   (reward calculation may simply not have finished yet); past that window it is
   `dingo_db_missing` (a genuine gap in Dingo's own computation). Both are
-  `ERROR`, never a silent `PASS`. `ComparePoolEpoch` applies the identical
+  `ERROR`, never a silent `PASS`.
+
+  **Reward timing (dingo #3852/#3857).** `reference_lag` has a second trigger
+  that is a chain position rather than a wall clock:
+  `DingoPoolEpochData.RewardsPending`, set when the node's tip has not yet
+  reached the boundary at which stake epoch E's rewards are applied (the
+  boundary into E+3, or the pool's own `reward_pool_output.boundary_slot`).
+  Before that point Dingo's reward figures are still provisional — the
+  spendable flags are not final, so Dingo reads high by forfeitures that have
+  not happened yet — and a row it has not written yet is absent for a reason
+  that is not a divergence. Both `ComparePoolEpoch` and `CompareAccountEpoch`
+  fold that into `reference_lag`, for presence and for amount alike.
+
+  The wall-clock window alone is not enough because it compares against the
+  epoch's real close time: during a from-genesis replay that is years in the
+  past, so the grace window can never fire and every not-yet-computed row
+  reads as a hard gap. The chain-position form is the one that survives a
+  replay.
+
+  A source that cannot establish the boundary must never set the flag: an
+  unreadable tip, a failed epoch lookup, or an epoch row whose start slot is
+  NULL or negative all leave the comparison strict, because none of them is
+  evidence that the rewards are pending. Only a genuinely absent applying-epoch
+  row asserts that the node has not reached it. At account granularity,
+  `checkEpoch`'s `accountRewardsPending` requires *every* pool entry to report
+  pending before it downgrades the epoch's account comparison, so one pool
+  sitting before its own boundary cannot waive the rest, and an empty or
+  nil-bearing map claims nothing.
+
+  Both categories stay `ERROR`, so this only ever moves a `FAIL` to an
+  `ERROR` — never to a `PASS`. `ComparePoolEpoch` applies the identical
   presence/grace split to `reward_pool_input`'s param-epoch field
   (`blocks_produced` alone, reported as `reward_pool_input_params` when
   absent) via `DingoPoolEpochData.ParamsPresent`, for the same reason: a
@@ -6313,8 +6343,10 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
 
 **Mismatch categories:** `value_mismatch`, `pool_only_dingo`, `pool_only_koios`,
 `dingo_db_missing` (epoch/pool row not yet computed by Dingo), `dingo_db_error`
-(DB query failed), `reference_lag` (epoch closed within --grace-hours; absence
-may be transient), `pool_departed` (informational: the pool left the pool set
+(DB query failed), `reference_lag` (absence may be transient — either the epoch
+closed within --grace-hours, or the chain tip has not yet reached the boundary
+that applies this stake epoch's rewards; see "Reward timing" below),
+`pool_departed` (informational: the pool left the pool set
 at K+1, so its epoch-K block count has no row to live on), plus #3097's
 per-account categories: `acct_only_dingo`,
 `acct_only_koios`, `acct_duplicate` (a genuine duplicate (stake_address,
@@ -6803,9 +6835,14 @@ never the reverse.
   lag in publishing `/account_reward_history` for a just-closed epoch the
   same way it can lag on any other endpoint) both fall back to
   `reference_lag` within the grace window rather than only the
-  Koios-side direction. The zero-value test runs first and wins: a one-sided
-  row worth zero is `acct_zero_reward_row` even inside the grace window,
-  because a zero row is not a value the other side can still publish later.
+  Koios-side direction. Three tests apply, in this order. The zero-value test
+  runs first and wins: a one-sided row worth zero is `acct_zero_reward_row`
+  even inside the grace window, because a zero row is not a value the other
+  side can still publish later. Next is the chain-position trigger described
+  under "Reward timing" above, for presence and amount alike, via
+  `checkEpoch`'s `accountRewardsPending`; it precedes the wall-clock grace
+  window because it is the form that survives a replay, where the epoch's real
+  close time is years in the past and the window can never fire.
 - **Strict-mode propagation.** An account-level `FAIL` flows through
   `DetermineStatus` (any `acct_only_dingo`/`acct_only_koios`/`acct_duplicate`
   forces `FAIL`, exactly like the pool-level categories — except a one-sided
