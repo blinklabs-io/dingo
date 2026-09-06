@@ -319,7 +319,13 @@ func (s *Server) handleConstructionMetadata(
 		return
 	}
 
-	pparams := s.config.LedgerState.GetCurrentPParams()
+	// GetCurrentPParamsForReporting matches every other "report the current
+	// protocol parameters" surface (LocalStateQuery, Blockfrost, UTXORPC) --
+	// see blinklabs-io/dingo#3825. This handler only reads MinFeeCoefficient/
+	// MinFeeConstant from the result today, so the filter has no effect on
+	// its response, but using the reporting accessor here keeps this
+	// endpoint correct if it ever surfaces more of the converted value.
+	pparams := s.config.LedgerState.GetCurrentPParamsForReporting()
 	if pparams == nil {
 		writeError(w, wrapErr(
 			ErrUnavailable,

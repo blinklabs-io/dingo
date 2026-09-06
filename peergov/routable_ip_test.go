@@ -23,9 +23,8 @@ import (
 
 // TestIsRoutableIP pins the routability policy shared by gossip, ledger, and
 // peer-sharing candidates. The accepted cases are as load-bearing as the
-// rejected ones: RFC 5737 and RFC 3849 addresses stay accepted pending #3792,
-// so a tightening that breaks the fixtures in ledger_dial_security_test.go and
-// elsewhere fails here first, with the reason and the tracking issue.
+// rejected ones: RFC 5737 and RFC 3849 documentation addresses are rejected,
+// so a policy regression breaks this test before it reaches the dial path.
 func TestIsRoutableIP(t *testing.T) {
 	tests := []struct {
 		name string
@@ -110,12 +109,21 @@ func TestIsRoutableIP(t *testing.T) {
 		{"ipv6 orchidv2 upper bound", "2001:2f:ffff:ffff:ffff:ffff:ffff:ffff", false},
 		{"ipv6 above orchidv2", "2001:30::", true},
 
-		// Accepted pending the decision in #3792: not routed anywhere, and
-		// used as public stand-ins across ~19 files' fixtures.
-		{"ipv4 test-net-1", "192.0.2.1", true},
-		{"ipv4 test-net-2", "198.51.100.1", true},
-		{"ipv4 test-net-3", "203.0.113.1", true},
-		{"ipv6 documentation", "2001:db8::1", true},
+		// Documentation-only ranges are not valid peer candidates.
+		{"ipv4 test-net-1", "192.0.2.1", false},
+		{"ipv4 test-net-2", "198.51.100.1", false},
+		{"ipv4 test-net-3", "203.0.113.1", false},
+		{"ipv6 documentation", "2001:db8::1", false},
+
+		// The policy must stop at each documentation prefix boundary.
+		{"just below test-net-1", "192.0.1.255", true},
+		{"just above test-net-1", "192.0.3.0", true},
+		{"just below test-net-2", "198.51.99.255", true},
+		{"just above test-net-2", "198.51.101.0", true},
+		{"just below test-net-3", "203.0.112.255", true},
+		{"just above test-net-3", "203.0.114.0", true},
+		{"just below documentation", "2001:db7:ffff:ffff:ffff:ffff:ffff:ffff", true},
+		{"just above documentation", "2001:db9::1", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
