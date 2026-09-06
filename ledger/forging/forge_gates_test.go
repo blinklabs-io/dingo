@@ -724,9 +724,12 @@ func TestEqualSlotOwnBlockIsIdentifiedByHashNotByFence(t *testing.T) {
 
 // forgerMovingTipSlotClock is a slot clock whose chain tip moves between
 // the read at the top of a forge cycle and the read taken next to the
-// tip hash. The first ChainTipSlot call answers chainTipSlot, every
-// later one answers movedTipSlot, which is what a rival block landing
-// mid-cycle looks like to the forger.
+// tip hash. The first ChainTip call answers a point at chainTipSlot, every
+// later one a point at movedTipSlot, which is what a rival block landing
+// mid-cycle looks like to the forger. Both points carry chainTipHash: the
+// slot is what moves, and tipBlockOwnership still reads the hash separately
+// through ChainTipHashProvider, so its two reads remain non-atomic and this
+// double still exercises that.
 type forgerMovingTipSlotClock struct {
 	currentSlot       uint64
 	chainTipSlot      uint64
