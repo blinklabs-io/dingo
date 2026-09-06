@@ -241,12 +241,38 @@ func (d *Database) SetTransactionWithOpts(
 	// transactions (collateral return at index len(Outputs()))
 	// UTxO offsets MUST be available - no fallback to full CBOR storage
 	produced := tx.Produced()
+	// Producing no UTxOs is a legal shape: a valid transaction can spend its
+	// whole input on deposits plus the fee and return no change (issue #3932),
+	// and an invalid transaction without a collateral return produces nothing
+	// either. Produced() is Outputs() for a valid transaction and the
+	// collateral return for an invalid one, so an empty set means outputs were
+	// dropped before storage only when the matching declaration is non-empty.
+	// Each branch reports its own declaration: the two are different fields, so
+	// one shared message would name the wrong one for half the warnings.
 	if len(produced) == 0 {
-		d.logger.Warn(
-			"transaction has no produced outputs",
-			"txHash", hex.EncodeToString(ledgerHashPrefix(txHash)),
-			"slot", point.Slot,
-		)
+		// Each accessor is read once into a local: every era's Outputs()
+		// allocates a fresh slice per call, and reading CollateralReturn()
+		// once closes the gap between the nil test and the dereference.
+		outputs := tx.Outputs()
+		collateralReturn := tx.CollateralReturn()
+		txHashHex := hex.EncodeToString(ledgerHashPrefix(txHash))
+		switch {
+		case tx.IsValid() && len(outputs) > 0:
+			d.logger.Warn(
+				"valid transaction produced no UTxOs despite declaring outputs",
+				"txHash", txHashHex,
+				"outputs", len(outputs),
+				"slot", point.Slot,
+			)
+		case !tx.IsValid() && collateralReturn != nil:
+			d.logger.Warn(
+				"invalid transaction produced no UTxOs despite "+
+					"declaring a collateral return",
+				"txHash", txHashHex,
+				"collateralReturnLovelace", collateralReturn.Amount().String(),
+				"slot", point.Slot,
+			)
+		}
 	}
 	for _, utxo := range produced {
 		txId := ledgerInputIDBytes(utxo.Id)

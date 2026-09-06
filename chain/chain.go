@@ -54,19 +54,12 @@ type Chain struct {
 	iterators            []*ChainIterator
 	currentTip           ochainsync.Tip
 	tipBlockIndex        uint64
+	mutationGeneration   uint64
 	lastCommonBlockIndex uint64
-	// mutationSeq counts mutations of the fields chainStateSnapshot stages:
-	// currentTip, tipBlockIndex, headers and blocks. Every one of them runs
-	// under c.mutex and ends in markMutatedLocked, which is what lets
-	// restoreAfterCommitFailure tell whether the chain is still exactly what
-	// its batch published. Comparing the fields cannot answer that on its
-	// own: a concurrent retry of the same blocks reproduces them value for
-	// value while its writes are durable and the failed batch's are not.
-	mutationSeq      uint64
-	id               ChainId
-	mutex            sync.RWMutex
-	waitingChanMutex sync.Mutex
-	persistent       bool
+	id                   ChainId
+	mutex                sync.RWMutex
+	waitingChanMutex     sync.Mutex
+	persistent           bool
 
 	// pendingUpdates is the chain-level sequencer for deferred chain.update
 	// / chain.fork publication. The mutex-holding ledger paths (blockfetch
@@ -175,12 +168,6 @@ func (c *Chain) AddVerifiedBlockHeader(header ledger.BlockHeader) error {
 	return c.addBlockHeader(header, true)
 }
 
-// markMutatedLocked records that a field chainStateSnapshot stages has
-// changed. Callers must hold c.mutex.
-func (c *Chain) markMutatedLocked() {
-	c.mutationSeq++
-}
-
 func (c *Chain) addBlockHeader(
 	header ledger.BlockHeader,
 	cryptoVerified bool,
@@ -239,7 +226,7 @@ func (c *Chain) addBlockHeader(
 	}
 	// Add header
 	c.headers = append(c.headers, queued)
-	c.markMutatedLocked()
+	c.mutationGeneration++
 	return nil
 }
 
@@ -496,7 +483,7 @@ func (c *Chain) addBlockLocked(
 		BlockNumber: blockNumber,
 	}
 	c.tipBlockIndex = newBlockIndex
-	c.markMutatedLocked()
+	c.mutationGeneration++
 	if notifyWaiters {
 		c.notifyWaitingIterators()
 	}
@@ -512,145 +499,6 @@ func (c *Chain) addBlockLocked(
 		},
 	)
 	return evt, nil
-}
-
-// chainStateSnapshot stages the in-memory chain state that a batch add
-// mutates so a failed batch can put it back. addBlockLocked and
-// addRawBlockLocked advance c.currentTip, c.tipBlockIndex, c.headers and
-// c.blocks per block, but nothing they write is durable until txn.Do commits,
-// and both batch paths have two failure modes:
-//
-//   - the closure rejects a later block in the batch, which rolls back every
-//     block the transaction already wrote; and
-//   - the closure returns nil and txn.Do's Commit then fails, which rolls the
-//     same writes back *after* the closure's deferred unlocks have released
-//     the chain locks.
-//
-// The first is restored inside the closure, under the locks that guarded the
-// mutation, so no reader ever observes a tip whose block the batch no longer
-// stores. The second cannot be: Commit runs unlocked, so the restore has to
-// re-acquire the locks, and publishLocked records what the closure handed to
-// Commit so restoreAfterCommitFailure can tell whether it is still undoing its
-// own work.
-type chainStateSnapshot struct {
-	taken         bool
-	tip           ochainsync.Tip
-	tipBlockIndex uint64
-	headers       []queuedHeader
-	blocks        []ocommon.Point
-
-	// published is the state the closure left for Commit, recorded only on
-	// the success path. A closure that restored its own mutation clears it,
-	// so the outer restore knows there is nothing left to undo.
-	published          bool
-	publishedTip       ochainsync.Tip
-	publishedIndex     uint64
-	publishedHeaders   int
-	publishedBlocksLen int
-	publishedSeq       uint64
-}
-
-// captureLocked records the pre-batch state. Callers must hold c.mutex and
-// c.manager.mutex.
-func (s *chainStateSnapshot) captureLocked(c *Chain) {
-	s.tip = c.currentTip
-	s.tipBlockIndex = c.tipBlockIndex
-	s.headers = slices.Clone(c.headers)
-	if !c.persistent {
-		s.blocks = slices.Clone(c.blocks)
-	}
-	s.taken = true
-	s.published = false
-}
-
-// restoreLocked puts the captured state back. Callers must hold c.mutex and
-// c.manager.mutex.
-func (s *chainStateSnapshot) restoreLocked(c *Chain) {
-	c.currentTip = s.tip
-	c.tipBlockIndex = s.tipBlockIndex
-	c.headers = s.headers
-	if !c.persistent {
-		c.blocks = s.blocks
-	}
-	c.markMutatedLocked()
-	s.published = false
-}
-
-// publishLocked records the post-batch state the closure is handing to Commit.
-// Callers must hold c.mutex and c.manager.mutex.
-func (s *chainStateSnapshot) publishLocked(c *Chain) {
-	if !s.taken {
-		return
-	}
-	s.publishedTip = c.currentTip
-	s.publishedIndex = c.tipBlockIndex
-	s.publishedHeaders = len(c.headers)
-	s.publishedBlocksLen = len(c.blocks)
-	s.publishedSeq = c.mutationSeq
-	s.published = true
-}
-
-// mutatedSincePublishLocked reports whether anything changed the chain after
-// the closure handed its batch to Commit. The mutation counter is the test that
-// works: a retry that re-commits the same blocks leaves every staged field
-// identical, so comparing values alone would not see it. The field comparison
-// is kept alongside as a fail-safe, so a mutation path that ever forgets
-// markMutatedLocked is still noticed. Callers must hold c.mutex and
-// c.manager.mutex.
-func (s *chainStateSnapshot) mutatedSincePublishLocked(c *Chain) bool {
-	unchanged := c.mutationSeq == s.publishedSeq &&
-		c.tipBlockIndex == s.publishedIndex &&
-		c.currentTip.Point.Slot == s.publishedTip.Point.Slot &&
-		bytes.Equal(
-			c.currentTip.Point.Hash,
-			s.publishedTip.Point.Hash,
-		) &&
-		len(c.headers) == s.publishedHeaders &&
-		len(c.blocks) == s.publishedBlocksLen
-	return !unchanged
-}
-
-// ErrChainStateChangedDuringCommit reports a batch whose Commit failed while
-// another chain mutation had already landed. The batch's writes are gone from
-// storage, so undoing its in-memory effects can discard that later mutation --
-// but leaving them in place would be worse (see restoreAfterCommitFailure), so
-// the undo happens and this reports that the chain cannot be trusted. The
-// caller must not treat it as a plain retryable batch error.
-var ErrChainStateChangedDuringCommit = errors.New(
-	"chain mutated concurrently with a failed batch commit",
-)
-
-// restoreAfterCommitFailure undoes a batch whose Commit failed. txn.Do calls
-// Commit after the closure's deferred unlocks have run, so this re-acquires
-// c.mutex and c.manager.mutex, and a mutation can have landed in between --
-// every chain mutation takes c.mutex and bumps mutationSeq, which is how that
-// is detected.
-//
-// The undo happens either way, because the two failure states are not
-// symmetric. Skipping it leaves the in-memory chain naming a tip whose blocks
-// the rolled-back transaction never stored -- the ahead-of-storage state this
-// whole path exists to prevent, and the one startup reconciliation cannot
-// repair, since it can trim a blob store that leads but cannot rebuild blocks
-// missing beneath the ledger tip. Performing it can instead leave the chain
-// behind a mutation that did commit, which is the repairable direction. Neither
-// is recoverable in place once a mutation has interleaved, so the point of
-// detecting it is to report it rather than to choose a different in-memory
-// outcome: the caller gets ErrChainStateChangedDuringCommit alongside the
-// commit error and must treat the chain as untrusted.
-func (c *Chain) restoreAfterCommitFailure(s *chainStateSnapshot) error {
-	if !s.taken || !s.published {
-		return nil
-	}
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.manager.mutex.Lock()
-	defer c.manager.mutex.Unlock()
-	mutated := s.mutatedSincePublishLocked(c)
-	s.restoreLocked(c)
-	if mutated {
-		return ErrChainStateChangedDuringCommit
-	}
-	return nil
 }
 
 func (c *Chain) AddBlocks(blocks []ledger.Block) error {
@@ -673,10 +521,21 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 		// when a later block in the batch fails.
 		pendingEvents := make([]event.Event, 0, batchSize)
 		txn := c.manager.db.BlobTxn(true)
-		// Stage the pre-batch state so both failure modes can be undone
-		// -- see chainStateSnapshot, and addRawBlocks, which stages the
-		// same way.
-		var snapshot chainStateSnapshot
+		// addBlockLocked mutates c.currentTip, c.tipBlockIndex,
+		// c.headers, and c.blocks before the txn commits, exactly as
+		// addRawBlocks' batch does, so stage the same fields here and
+		// restore them on both failure modes.
+		var (
+			savedTip             ochainsync.Tip
+			savedTipBlockIndex   uint64
+			savedGeneration      uint64
+			savedHeaders         []queuedHeader
+			savedBlocks          []ocommon.Point
+			batchApplied         bool
+			appliedTip           ochainsync.Tip
+			appliedTipBlockIndex uint64
+			appliedGeneration    uint64
+		)
 		err := txn.Do(func(txn *database.Txn) error {
 			c.mutex.Lock()
 			defer c.mutex.Unlock()
@@ -685,7 +544,13 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 			if err := c.reconcile(); err != nil {
 				return fmt.Errorf("reconcile chain: %w", err)
 			}
-			snapshot.captureLocked(c)
+			savedTip = c.currentTip
+			savedTipBlockIndex = c.tipBlockIndex
+			savedGeneration = c.mutationGeneration
+			savedHeaders = slices.Clone(c.headers)
+			if !c.persistent {
+				savedBlocks = slices.Clone(c.blocks)
+			}
 			for _, tmpBlock := range blocks[batchOffset : batchOffset+batchSize] {
 				evt, err := c.addBlockLocked(
 					tmpBlock,
@@ -701,27 +566,64 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 					// observe the rejected batch's tip and
 					// no concurrent mutation can be
 					// overwritten by the restore.
-					snapshot.restoreLocked(c)
+					c.currentTip = savedTip
+					c.tipBlockIndex = savedTipBlockIndex
+					c.mutationGeneration = savedGeneration
+					c.headers = savedHeaders
+					if !c.persistent {
+						c.blocks = savedBlocks
+					}
 					return err
 				}
 				if evt.Type != "" {
 					pendingEvents = append(pendingEvents, evt)
 				}
 			}
-			snapshot.publishLocked(c)
+			// Record what this batch leaves behind so the
+			// Commit-failure path below can tell its own state
+			// from someone else's.
+			batchApplied = true
+			appliedTip = c.currentTip
+			appliedTipBlockIndex = c.tipBlockIndex
+			appliedGeneration = c.mutationGeneration
 			return nil
 		})
 		if err != nil {
-			// Only the Commit-failure path reaches a still-advanced
-			// chain here; a closure error already restored itself.
-			if restoreErr := c.restoreAfterCommitFailure(
-				&snapshot,
-			); restoreErr != nil {
-				return fmt.Errorf(
-					"%w: %w",
-					restoreErr,
-					err,
+			// Cover the Commit-failure path: the closure returned
+			// nil but txn.Do's later Commit failed, so memory still
+			// reflects the post-batch tip while the DB rolled back.
+			// Re-acquire the locks and restore -- but only while the
+			// chain still shows exactly what this batch left behind
+			// (see batchRestoreIsSafeLocked). A closure-internal
+			// error already restored under the lock.
+			if batchApplied {
+				c.mutex.Lock()
+				c.manager.mutex.Lock()
+				// The undo is unconditional; the predicate only
+				// decides whether the caller is told the chain
+				// is untrusted. See
+				// ErrChainStateChangedDuringCommit.
+				mutated := !c.batchRestoreIsSafeLocked(
+					appliedTip,
+					appliedTipBlockIndex,
+					appliedGeneration,
 				)
+				c.currentTip = savedTip
+				c.tipBlockIndex = savedTipBlockIndex
+				c.mutationGeneration = savedGeneration
+				c.headers = savedHeaders
+				if !c.persistent {
+					c.blocks = savedBlocks
+				}
+				c.manager.mutex.Unlock()
+				c.mutex.Unlock()
+				if mutated {
+					err = fmt.Errorf(
+						"%w: %w",
+						ErrChainStateChangedDuringCommit,
+						err,
+					)
+				}
 			}
 			return err
 		}
@@ -820,7 +722,7 @@ func (c *Chain) addRawBlockLocked(
 		BlockNumber: rb.BlockNumber,
 	}
 	c.tipBlockIndex = newBlockIndex
-	c.markMutatedLocked()
+	c.mutationGeneration++
 	// Build event for deferred publication (same pattern as
 	// addBlockLocked — publish after the transaction commits).
 	if c.eventBus != nil {
@@ -866,6 +768,45 @@ func (c *Chain) AddRawBlocksWithCallback(
 	return c.addRawBlocks(blocks, callback)
 }
 
+// ErrChainStateChangedDuringCommit reports a batch whose Commit failed while
+// another chain mutation had already landed. The batch's writes are gone from
+// storage, so undoing its in-memory effects can discard that later mutation --
+// but leaving them in place is worse: it leaves the chain naming a tip whose
+// blocks the rolled-back transaction never stored, the ahead-of-storage state
+// startup reconciliation cannot repair (it can trim a blob store that leads,
+// but cannot rebuild blocks missing beneath the ledger tip). Undoing can only
+// leave the chain behind a committed mutation, which is the repairable
+// direction. So the undo always happens and this reports that the chain must be
+// treated as untrusted.
+var ErrChainStateChangedDuringCommit = errors.New(
+	"chain mutated concurrently with a failed batch commit",
+)
+
+// batchRestoreIsSafeLocked reports whether a failed add batch may write its
+// pre-batch snapshot back over the current chain state.
+//
+// It may only do so while the chain still shows exactly what that batch left
+// behind. addRawBlocks releases c.mutex and c.manager.mutex when its
+// transaction closure returns, before txn.Do commits, so any other goroutine
+// can move the chain before the Commit-failure path runs -- and rolling the
+// primary chain back while blockfetch appends to it is what every ledger
+// recovery rewind does. Writing the snapshot over a rollback's result raises
+// tipBlockIndex back above blocks that rollback deleted, leaving the chain
+// claiming a tip it does not store: the next rollback measures an inflated
+// fork depth against it, and any lookup in the resurrected span reports the
+// block as missing.
+//
+// Callers must hold c.mutex and c.manager.mutex.
+func (c *Chain) batchRestoreIsSafeLocked(
+	appliedTip ochainsync.Tip,
+	appliedTipBlockIndex uint64,
+	appliedGeneration uint64,
+) bool {
+	return c.tipBlockIndex == appliedTipBlockIndex &&
+		c.mutationGeneration == appliedGeneration &&
+		bytes.Equal(c.currentTip.Point.Hash, appliedTip.Point.Hash)
+}
+
 func (c *Chain) addRawBlocks(
 	blocks []RawBlock,
 	callback func(RawBlock, *database.Txn) error,
@@ -884,10 +825,25 @@ func (c *Chain) addRawBlocks(
 		// successfully.
 		pendingEvents := make([]event.Event, 0, batchSize)
 		txn := c.manager.db.BlobTxn(true)
-		// Stage the pre-batch state so both failure modes can be undone
-		// -- see chainStateSnapshot, and AddBlocks, which stages the
-		// same way.
-		var snapshot chainStateSnapshot
+		// addRawBlockLocked mutates c.currentTip, c.tipBlockIndex,
+		// c.headers, and c.blocks before the txn commits. If a
+		// later block in the batch fails the closure restores the
+		// pre-batch state, but txn.Do also runs Commit *after* the
+		// closure returns and after the chain locks are released —
+		// a Commit failure rolls back the persistent state while
+		// leaving the in-memory chain advanced. Capture the
+		// snapshot here so we can also restore on Commit failure.
+		var (
+			savedTip             ochainsync.Tip
+			savedTipBlockIndex   uint64
+			savedGeneration      uint64
+			savedHeaders         []queuedHeader
+			savedBlocks          []ocommon.Point
+			batchApplied         bool
+			appliedTip           ochainsync.Tip
+			appliedTipBlockIndex uint64
+			appliedGeneration    uint64
+		)
 		err := txn.Do(func(txn *database.Txn) error {
 			batch := blocks[batchOffset : batchOffset+batchSize]
 			c.mutex.Lock()
@@ -897,7 +853,13 @@ func (c *Chain) addRawBlocks(
 			if err := c.reconcile(); err != nil {
 				return fmt.Errorf("reconcile: %w", err)
 			}
-			snapshot.captureLocked(c)
+			savedTip = c.currentTip
+			savedTipBlockIndex = c.tipBlockIndex
+			savedGeneration = c.mutationGeneration
+			savedHeaders = slices.Clone(c.headers)
+			if !c.persistent {
+				savedBlocks = slices.Clone(c.blocks)
+			}
 			for _, rb := range batch {
 				evt, err := c.addRawBlockLocked(
 					rb,
@@ -905,7 +867,13 @@ func (c *Chain) addRawBlocks(
 					callback,
 				)
 				if err != nil {
-					snapshot.restoreLocked(c)
+					c.currentTip = savedTip
+					c.tipBlockIndex = savedTipBlockIndex
+					c.mutationGeneration = savedGeneration
+					c.headers = savedHeaders
+					if !c.persistent {
+						c.blocks = savedBlocks
+					}
 					return err
 				}
 				if evt.Type != "" {
@@ -914,20 +882,63 @@ func (c *Chain) addRawBlocks(
 					)
 				}
 			}
-			snapshot.publishLocked(c)
+			// Record what this batch leaves behind so the Commit-failure
+			// path below can tell its own state from someone else's.
+			batchApplied = true
+			appliedTip = c.currentTip
+			appliedTipBlockIndex = c.tipBlockIndex
+			appliedGeneration = c.mutationGeneration
 			return nil
 		})
 		if err != nil {
-			// Only the Commit-failure path reaches a still-advanced
-			// chain here; a closure error already restored itself.
-			if restoreErr := c.restoreAfterCommitFailure(
-				&snapshot,
-			); restoreErr != nil {
-				return fmt.Errorf(
-					"add raw block batch: %w: %w",
-					restoreErr,
-					err,
+			// Cover the Commit-failure path: closure returned nil
+			// but txn.Do's later Commit failed, so memory still
+			// reflects the post-batch tip while the DB rolled
+			// back. Re-acquire the locks and restore -- but only
+			// while the chain still shows exactly what this batch
+			// left behind.
+			//
+			// The locks are released when the closure returns, so
+			// another goroutine can move the chain before this runs,
+			// and rolling the primary chain back while blockfetch
+			// appends to it is a normal pairing rather than a corner
+			// case: it is what every ledger recovery rewind does.
+			// Writing the pre-batch snapshot over a rollback's result
+			// raises tipBlockIndex back above blocks that rollback
+			// deleted, leaving the chain claiming a tip it does not
+			// store -- an inflated fork depth on the next rollback and
+			// a not-found lookup for any index in the resurrected
+			// span. A closure-internal error already restored under
+			// the lock, so there is nothing left to do for it here
+			// either.
+			if batchApplied {
+				c.mutex.Lock()
+				c.manager.mutex.Lock()
+				// The undo is unconditional; the predicate only
+				// decides whether the caller is told the chain
+				// is untrusted. See
+				// ErrChainStateChangedDuringCommit.
+				mutated := !c.batchRestoreIsSafeLocked(
+					appliedTip,
+					appliedTipBlockIndex,
+					appliedGeneration,
 				)
+				c.currentTip = savedTip
+				c.tipBlockIndex = savedTipBlockIndex
+				c.mutationGeneration = savedGeneration
+				c.headers = savedHeaders
+				if !c.persistent {
+					c.blocks = savedBlocks
+				}
+				c.manager.mutex.Unlock()
+				c.mutex.Unlock()
+				if mutated {
+					err = fmt.Errorf(
+						"%w: %w",
+						ErrChainStateChangedDuringCommit,
+						err,
+					)
+				}
 			}
 			return fmt.Errorf("add raw block batch: %w", err)
 		}
@@ -1248,7 +1259,7 @@ func (c *Chain) rollbackLocked(
 			// Rollback point is a queued header. Drop only the headers
 			// after it and leave the matched header itself queued.
 			c.headers = slices.Delete(c.headers, idx+1, len(c.headers))
-			c.markMutatedLocked()
+			c.mutationGeneration++
 			return nil, nil
 		}
 	}
@@ -1351,7 +1362,7 @@ func (c *Chain) rollbackLocked(
 		BlockNumber: tmpBlock.Number,
 	}
 	c.tipBlockIndex = rollbackBlockIndex
-	c.markMutatedLocked()
+	c.mutationGeneration++
 	// Update iterators for rollback
 	for _, iter := range c.iterators {
 		// Reverse iterators never deliver rollback markers, but if a
@@ -1444,7 +1455,7 @@ func (c *Chain) ClearHeaders() {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	c.headers = c.headers[:0]
-	c.markMutatedLocked()
+	c.mutationGeneration++
 }
 
 // RecentPoints returns up to count recent chain points in descending
@@ -2113,7 +2124,7 @@ func (c *Chain) reconcile() error {
 			// Adjust our chain-local blocks and offset point from primary chain
 			c.blocks = slices.Delete(c.blocks, 0, i+1)
 			c.lastCommonBlockIndex = tmpBlock.ID
-			c.markMutatedLocked()
+			c.mutationGeneration++
 			return nil
 		}
 		if blockIndex == 0 {
@@ -2188,7 +2199,7 @@ func (c *Chain) reconcile() error {
 		// Reverse newBlocks since they were collected in reverse order
 		slices.Reverse(newBlocks)
 		c.blocks = slices.Concat(newBlocks, c.blocks)
-		c.markMutatedLocked()
+		c.mutationGeneration++
 	}
 	return nil
 }
