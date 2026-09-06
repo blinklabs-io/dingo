@@ -35,7 +35,7 @@ import (
 
 // BindAttempts bounds how many ports a test tries before giving up when
 // racing another process for a loopback port (see FreePort). Shared by
-// every built-in API provider's TLS/auth test suite (Blockfrost, Mesh,
+// every built-in API provider's TLS/auth test suite (Blockfrost, Kupo, Mesh,
 // UTxO RPC).
 const BindAttempts = 8
 
@@ -68,7 +68,7 @@ func InsecureHTTPClient() *http.Client {
 // GenerateTestTLSCertKey generates a throwaway self-signed certificate/key
 // pair valid for 127.0.0.1 and writes them as PEM files under a fresh
 // t.TempDir(), returning their paths. Used to exercise a listener's TLS
-// startup path (Blockfrost, Mesh, UTxORPC, Bark) without depending on any
+// startup path (Blockfrost, Kupo, Mesh, UTxORPC, Bark) without depending on any
 // fixed certificate checked into the repo.
 func GenerateTestTLSCertKey(t *testing.T) (certPath, keyPath string) {
 	t.Helper()

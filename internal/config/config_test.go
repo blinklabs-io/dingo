@@ -1180,6 +1180,10 @@ plugins:
       provider: builtin
       config:
         port: 8080
+    kupo:
+      provider: builtin
+      config:
+        port: 1443
     utxorpc:
       provider: builtin
       config:
@@ -1209,6 +1213,9 @@ network: "preview"
 			"expected Blockfrost port to be 8080, got %d",
 			port,
 		)
+	}
+	if port := APIPluginPort(cfg.Plugins.API.Kupo); port != 1443 {
+		t.Errorf("expected Kupo port to be 1443, got %d", port)
 	}
 	if port := APIPluginPort(cfg.Plugins.API.Utxorpc); port != 9090 {
 		t.Errorf(
@@ -1299,6 +1306,9 @@ func TestLoad_APIPortsDefault(t *testing.T) {
 			"expected BlockfrostPort default to be 3000, got %d",
 			port,
 		)
+	}
+	if port := APIPluginPort(cfg.Plugins.API.Kupo); port != 0 {
+		t.Errorf("expected KupoPort default to be disabled, got %d", port)
 	}
 	if port := APIPluginPort(cfg.Plugins.API.Utxorpc); port != 9090 {
 		t.Errorf(

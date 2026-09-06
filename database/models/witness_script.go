@@ -20,6 +20,7 @@ package models
 // 1=PlutusV1 (ScriptRefTypePlutusV1)
 // 2=PlutusV2 (ScriptRefTypePlutusV2)
 // 3=PlutusV3 (ScriptRefTypePlutusV3)
+// 4=PlutusV4 (ScriptRefTypePlutusV4)
 //
 // To avoid storing duplicate script data for the same script used in multiple
 // transactions, we store only the script hash here. The actual script content

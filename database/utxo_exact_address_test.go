@@ -329,6 +329,228 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 	assert.True(t, hasEnterpriseTx)
 }
 
+func TestUtxosWithHistoryLoadsCborAndPreservesExactAddressIdentity(
+	t *testing.T,
+) {
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+
+	payment := bytes.Repeat([]byte{0xbc}, lcommon.AddressHashSize)
+	enterprise, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	pointer := exactAddressTestPointer(t, payment, 0x01)
+	enterpriseUtxo := seedExactAddressUtxo(
+		t,
+		db,
+		raw,
+		enterprise,
+		10,
+		0x71,
+	)
+	seedExactAddressUtxo(t, db, raw, pointer, 20, 0x72)
+
+	spenderHash := bytes.Repeat([]byte{0x73}, 32)
+	spenderBlockHash := bytes.Repeat([]byte{0x74}, 32)
+	_, err = raw.Exec(`
+INSERT INTO "transaction" (
+    id, hash, block_hash, slot, block_index, type, fee, collateral_fee,
+    ttl, valid
+) VALUES (30, ?, ?, 30, 0, 0, '0', '0', '0', TRUE)`,
+		spenderHash,
+		spenderBlockHash,
+	)
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+UPDATE utxo SET spent_at_tx_id = ?, deleted_slot = 30 WHERE tx_id = ?`,
+		spenderHash,
+		enterpriseUtxo.TxId,
+	)
+	require.NoError(t, err)
+
+	pattern, err := models.ExactUtxoAddressPattern(enterprise)
+	require.NoError(t, err)
+	got, err := db.UtxosWithHistory(&models.UtxoHistoryQuery{
+		AddressPatterns: []models.UtxoAddressPattern{pattern},
+	}, nil)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, enterpriseUtxo.TxId, got[0].TxId)
+	require.NotEmpty(t, got[0].Cbor)
+	require.Equal(t, uint64(30), got[0].DeletedSlot)
+	require.Equal(t, spenderBlockHash, got[0].SpentBlockHash)
+}
+
+// TestUtxosWithHistoryExactAddressLimitFillsPage proves Limit applies after
+// exact-address matching. The coarse SQL predicate intentionally admits 130
+// pointer-address siblings sharing the enterprise address's payment
+// credential, enough to cross the coordinated scan's 128-row batch boundary.
+// The bounded query must continue through those candidates to fill a two-row
+// exact page, then preserve the caller's keyset order when retrieving the
+// remaining exact match.
+func TestUtxosWithHistoryExactAddressLimitFillsPage(t *testing.T) {
+	tests := []struct {
+		name        string
+		descending  bool
+		targetSlots map[uint64]bool
+		wantSlots   []uint64
+	}{
+		{
+			name:        "ascending",
+			targetSlots: map[uint64]bool{131: true, 132: true, 133: true},
+			wantSlots:   []uint64{131, 132, 133},
+		},
+		{
+			name:        "descending",
+			descending:  true,
+			targetSlots: map[uint64]bool{1: true, 2: true, 3: true},
+			wantSlots:   []uint64{3, 2, 1},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db := openTestDB(t)
+			raw := rawSQLiteMetadataFixture(t, db)
+
+			payment := bytes.Repeat(
+				[]byte{0xbd},
+				lcommon.AddressHashSize,
+			)
+			target, err := lcommon.NewAddressFromParts(
+				lcommon.AddressTypeKeyNone,
+				lcommon.AddressNetworkTestnet,
+				payment,
+				nil,
+			)
+			require.NoError(t, err)
+			sibling := exactAddressTestPointer(t, payment, 0x01)
+
+			for slot := uint64(1); slot <= 133; slot++ {
+				addr := sibling
+				if test.targetSlots[slot] {
+					addr = target
+				}
+				seedExactAddressUtxo(
+					t,
+					db,
+					raw,
+					addr,
+					slot,
+					byte(slot),
+				)
+			}
+
+			pattern, err := models.ExactUtxoAddressPattern(target)
+			require.NoError(t, err)
+			query := &models.UtxoHistoryQuery{
+				AddressPatterns: []models.UtxoAddressPattern{pattern},
+				Descending:      test.descending,
+				Limit:           2,
+			}
+			first, err := db.UtxosWithHistory(query, nil)
+			require.NoError(t, err)
+			require.Len(t, first, 2)
+			last := first[len(first)-1]
+			query.After = &models.UtxoOrderingCursor{
+				Slot:       last.TxSlot,
+				BlockIndex: last.TxBlockIndex,
+				OutputIdx:  last.OutputIdx,
+				TxId:       last.TxId,
+			}
+			second, err := db.UtxosWithHistory(query, nil)
+			require.NoError(t, err)
+			require.Len(t, second, 1)
+
+			got := append(first, second...)
+			for i := range got {
+				assert.Equal(t, test.wantSlots[i], got[i].TxSlot)
+			}
+		})
+	}
+}
+
+// TestUtxosWithHistoryExactAddressHasNoTotalCandidateCap proves a bounded
+// exact-address page is not failed merely because more than 10,000 coarse
+// credential-sharing candidates precede its first match. The old coordinated
+// scan returned errExactAddressCandidateScanLimit before reaching targetSlot;
+// fixed-size keyset batches bound per-query work without hiding that match.
+func TestUtxosWithHistoryExactAddressHasNoTotalCandidateCap(t *testing.T) {
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+
+	payment := bytes.Repeat([]byte{0xbe}, lcommon.AddressHashSize)
+	target, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	sibling := exactAddressTestPointer(t, payment, 0x01)
+	siblingCbor, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: sibling,
+		OutputAmount:  1_000_000,
+	})
+	require.NoError(t, err)
+	targetCbor, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: target,
+		OutputAmount:  1_000_000,
+	})
+	require.NoError(t, err)
+
+	const siblingCount = 10_001
+	const targetSlot = siblingCount + 1
+	require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
+		metadataTxn, err := raw.Begin()
+		if err != nil {
+			return err
+		}
+		defer metadataTxn.Rollback() //nolint:errcheck
+		for slot := uint64(1); slot <= targetSlot; slot++ {
+			txHash := make([]byte, 32)
+			binary.BigEndian.PutUint64(txHash[24:], slot)
+			outputCbor := siblingCbor
+			if slot == targetSlot {
+				outputCbor = targetCbor
+			}
+			if _, err := metadataTxn.Exec(`
+INSERT INTO utxo (
+    transaction_id, tx_id, payment_key, staking_key, credential_tag,
+    added_slot, deleted_slot, amount, output_idx, payment_script
+) VALUES (NULL, ?, ?, NULL, 0, ?, 0, '1000000', 0, FALSE)`,
+				txHash,
+				payment,
+				slot,
+			); err != nil {
+				return err
+			}
+			if err := db.Blob().SetUtxo(
+				txn.Blob(),
+				txHash,
+				0,
+				outputCbor,
+			); err != nil {
+				return err
+			}
+		}
+		return metadataTxn.Commit()
+	}))
+
+	pattern, err := models.ExactUtxoAddressPattern(target)
+	require.NoError(t, err)
+	got, err := db.UtxosWithHistory(&models.UtxoHistoryQuery{
+		AddressPatterns: []models.UtxoAddressPattern{pattern},
+		Limit:           1,
+	}, nil)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, uint64(targetSlot), got[0].TxSlot)
+}
+
 // TestCountAndPageUtxosByAddressWithOrderingCoarseMatch seeds a stake
 // credential with a large number of live UTxOs (standing in for a "large
 // address", the scenario dingo/3520 flags for unbounded pagination work) and

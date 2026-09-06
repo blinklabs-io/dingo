@@ -69,6 +69,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/api/blockfrost"
+	"github.com/blinklabs-io/dingo/api/kupo"
 	"github.com/blinklabs-io/dingo/api/mesh"
 	"github.com/blinklabs-io/dingo/api/utxorpc"
 	"github.com/blinklabs-io/dingo/bark"
@@ -296,7 +297,7 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 		)
 		n.koiosParitySubId = 0
 	}
-	// utxorpc/blockfrost/mesh are API-capability plugin providers with no
+	// utxorpc/blockfrost/kupo/mesh are API-capability plugin providers with no
 	// service kept on Node (see node.go's Run()) -- StopCapability is a
 	// no-op if the capability was never resolved (e.g. non-API storage
 	// mode or a zero configured port).
@@ -336,6 +337,14 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 			err = errors.Join(
 				err,
 				fmt.Errorf("blockfrost API shutdown: %w", stopErr),
+			)
+		}
+		if stopErr := n.pluginHost.StopCapability(
+			ctx, plugin.CapabilityAPIKupo,
+		); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("kupo API shutdown: %w", stopErr),
 			)
 		}
 		if stopErr := n.pluginHost.StopCapability(
@@ -1071,7 +1080,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 }
 
 // reinitializeAPIServers rebuilds the optional, storage-mode/config-gated API
-// servers (utxorpc, midnightServer, blockfrostAPI, meshAPI,
+// servers (utxorpc, midnightServer, blockfrostAPI, kupoAPI, meshAPI,
 // offchainMetadataFetcher), matching Run()'s gating exactly. The Bark blob-
 // store client (n.config.barkBaseUrl) is handled in reinitializeCoreStorage
 // since it wires directly onto n.db, not a separate server object.
@@ -1174,6 +1183,30 @@ func (n *Node) reinitializeAPIServers() error {
 		)
 		if err != nil {
 			return fmt.Errorf("restarting blockfrost API: %w", err)
+		}
+	}
+
+	kupoSelection, kupoPort, err := n.apiPluginSelection(
+		plugin.CapabilityAPIKupo,
+	)
+	if err != nil {
+		return err
+	}
+	if n.config.storageMode.IsAPI() && kupoPort > 0 {
+		adapter, err := kupo.NewNodeAdapter(n.ledgerState)
+		if err != nil {
+			return fmt.Errorf("recreating kupo node adapter: %w", err)
+		}
+		err = plugin.ResolveProvider(
+			n.ctx, n.pluginHost, plugin.CapabilityAPIKupo,
+			kupoSelection.Provider, kupoSelection.Config,
+			kupo.ProviderDependencies{
+				Node: adapter, Logger: n.config.logger, Host: n.config.bindAddr,
+				CORSAllowedOrigins: n.config.corsAllowedOrigins,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("restarting kupo API: %w", err)
 		}
 	}
 

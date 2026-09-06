@@ -151,6 +151,14 @@ func (s *Store) applyTransactionAPIDetails(
 	); err != nil {
 		return err
 	}
+	if err := storeTransactionIndexedScripts(
+		ctx,
+		db,
+		transaction,
+		slot,
+	); err != nil {
+		return err
+	}
 	if err := storeTransactionDatumIndex(ctx, db, transaction, slot); err != nil {
 		return err
 	}
@@ -373,89 +381,115 @@ func storeTransactionWitnesses(
 		}
 	}
 	witnesses := transaction.Witnesses()
-	if witnesses == nil {
-		return nil
-	}
-	for _, witness := range witnesses.Vkey() {
-		if _, err := db.ExecContext(ctx, `
+	// Key/bootstrap witnesses and redeemers keep their existing top-level
+	// transaction semantics. Nested witness sets extend only the script and
+	// datum indexes consumed by chain-index APIs.
+	if witnesses != nil {
+		for _, witness := range witnesses.Vkey() {
+			if _, err := db.ExecContext(ctx, `
 INSERT INTO key_witness (
     vkey, signature, transaction_id, type
 ) VALUES (?, ?, ?, ?)`,
-			witness.Vkey,
-			witness.Signature,
-			transactionID,
-			models.KeyWitnessTypeVkey,
-		); err != nil {
-			return fmt.Errorf("create vkey witness: %w", err)
+				witness.Vkey,
+				witness.Signature,
+				transactionID,
+				models.KeyWitnessTypeVkey,
+			); err != nil {
+				return fmt.Errorf("create vkey witness: %w", err)
+			}
 		}
-	}
-	for _, witness := range witnesses.Bootstrap() {
-		if _, err := db.ExecContext(ctx, `
+		for _, witness := range witnesses.Bootstrap() {
+			if _, err := db.ExecContext(ctx, `
 INSERT INTO key_witness (
     signature, public_key, chain_code, attributes, transaction_id, type
 ) VALUES (?, ?, ?, ?, ?, ?)`,
-			witness.Signature,
-			witness.PublicKey,
-			witness.ChainCode,
-			witness.Attributes,
-			transactionID,
-			models.KeyWitnessTypeBootstrap,
-		); err != nil {
-			return fmt.Errorf("create bootstrap witness: %w", err)
+				witness.Signature,
+				witness.PublicKey,
+				witness.ChainCode,
+				witness.Attributes,
+				transactionID,
+				models.KeyWitnessTypeBootstrap,
+			); err != nil {
+				return fmt.Errorf("create bootstrap witness: %w", err)
+			}
 		}
 	}
-	if err := storeWitnessScripts(
-		ctx,
-		db,
-		transactionID,
-		uint8(lcommon.ScriptRefTypeNativeScript),
-		witnesses.NativeScripts(),
-		slot,
-	); err != nil {
-		return err
-	}
-	if err := storeWitnessScripts(
-		ctx,
-		db,
-		transactionID,
-		uint8(lcommon.ScriptRefTypePlutusV1),
-		witnesses.PlutusV1Scripts(),
-		slot,
-	); err != nil {
-		return err
-	}
-	if err := storeWitnessScripts(
-		ctx,
-		db,
-		transactionID,
-		uint8(lcommon.ScriptRefTypePlutusV2),
-		witnesses.PlutusV2Scripts(),
-		slot,
-	); err != nil {
-		return err
-	}
-	if err := storeWitnessScripts(
-		ctx,
-		db,
-		transactionID,
-		uint8(lcommon.ScriptRefTypePlutusV3),
-		witnesses.PlutusV3Scripts(),
-		slot,
-	); err != nil {
-		return err
-	}
-	if transaction.IsValid() {
-		for _, datum := range witnesses.PlutusData() {
+
+	seenScripts := make(map[witnessScriptKey]struct{})
+	seenData := make(map[string]struct{})
+	for _, witnessSet := range allTransactionWitnessSets(transaction) {
+		if err := storeWitnessScripts(
+			ctx,
+			db,
+			transactionID,
+			uint8(lcommon.ScriptRefTypeNativeScript),
+			witnessSet.NativeScripts(),
+			slot,
+			seenScripts,
+		); err != nil {
+			return err
+		}
+		if err := storeWitnessScripts(
+			ctx,
+			db,
+			transactionID,
+			uint8(lcommon.ScriptRefTypePlutusV4),
+			lcommon.PlutusV4ScriptsFromWitnessSet(witnessSet),
+			slot,
+			seenScripts,
+		); err != nil {
+			return err
+		}
+		if err := storeWitnessScripts(
+			ctx,
+			db,
+			transactionID,
+			uint8(lcommon.ScriptRefTypePlutusV1),
+			witnessSet.PlutusV1Scripts(),
+			slot,
+			seenScripts,
+		); err != nil {
+			return err
+		}
+		if err := storeWitnessScripts(
+			ctx,
+			db,
+			transactionID,
+			uint8(lcommon.ScriptRefTypePlutusV2),
+			witnessSet.PlutusV2Scripts(),
+			slot,
+			seenScripts,
+		); err != nil {
+			return err
+		}
+		if err := storeWitnessScripts(
+			ctx,
+			db,
+			transactionID,
+			uint8(lcommon.ScriptRefTypePlutusV3),
+			witnessSet.PlutusV3Scripts(),
+			slot,
+			seenScripts,
+		); err != nil {
+			return err
+		}
+		for _, datum := range witnessSet.PlutusData() {
+			raw := datum.Cbor()
+			key := string(raw)
+			if _, ok := seenData[key]; ok {
+				continue
+			}
+			seenData[key] = struct{}{}
 			if _, err := db.ExecContext(ctx, `
 INSERT INTO plutus_data (data, transaction_id) VALUES (?, ?)`,
-				datum.Cbor(),
+				raw,
 				transactionID,
 			); err != nil {
 				return fmt.Errorf("create Plutus data: %w", err)
 			}
 		}
 	}
-	if witnesses.Redeemers() != nil {
+	if witnesses != nil && witnesses.Redeemers() != nil {
 		for key, value := range witnesses.Redeemers().Iter() {
 			if _, err := db.ExecContext(ctx, `
 INSERT INTO redeemer (
@@ -475,6 +509,36 @@ INSERT INTO redeemer (
 	return nil
 }
 
+func allTransactionWitnessSets(
+	transaction lcommon.Transaction,
+) []lcommon.TransactionWitnessSet {
+	if transaction == nil {
+		return nil
+	}
+	subTransactionWitnesses := lcommon.SubTransactionWitnessSetsFromTransaction(
+		transaction,
+	)
+	ret := make(
+		[]lcommon.TransactionWitnessSet,
+		0,
+		1+len(subTransactionWitnesses),
+	)
+	if witnesses := transaction.Witnesses(); witnesses != nil {
+		ret = append(ret, witnesses)
+	}
+	for _, witnesses := range subTransactionWitnesses {
+		if witnesses != nil {
+			ret = append(ret, witnesses)
+		}
+	}
+	return ret
+}
+
+type witnessScriptKey struct {
+	hash       lcommon.ScriptHash
+	scriptType uint8
+}
+
 func storeWitnessScripts[T lcommon.Script](
 	ctx context.Context,
 	db queryer,
@@ -482,31 +546,175 @@ func storeWitnessScripts[T lcommon.Script](
 	scriptType uint8,
 	scripts []T,
 	slot uint64,
+	seen map[witnessScriptKey]struct{},
 ) error {
 	for _, script := range scripts {
-		hash := script.Hash().Bytes()
+		hash := script.Hash()
+		key := witnessScriptKey{hash: hash, scriptType: scriptType}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
 		if _, err := db.ExecContext(ctx, `
 INSERT INTO witness_scripts (script_hash, transaction_id, type)
 VALUES (?, ?, ?)`,
-			hash,
+			hash.Bytes(),
 			transactionID,
 			scriptType,
 		); err != nil {
 			return fmt.Errorf("create witness script: %w", err)
 		}
-		if _, err := db.ExecContext(ctx, `
-INSERT INTO script (hash, content, created_slot, type)
-VALUES (?, ?, ?, ?)
-ON CONFLICT (hash) DO NOTHING`,
-			hash,
-			script.RawScriptBytes(),
-			slot,
-			scriptType,
-		); err != nil {
-			return fmt.Errorf("create script content: %w", err)
+		if err := storeScriptContent(ctx, db, script, scriptType, slot); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func storeScriptContent[T lcommon.Script](
+	ctx context.Context,
+	db queryer,
+	script T,
+	scriptType uint8,
+	slot uint64,
+) error {
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO script (hash, content, created_slot, type)
+VALUES (?, ?, ?, ?)
+ON CONFLICT (hash) DO NOTHING`,
+		script.Hash().Bytes(),
+		script.RawScriptBytes(),
+		slot,
+		scriptType,
+	); err != nil {
+		return fmt.Errorf("create script content: %w", err)
+	}
+	return nil
+}
+
+func storeTransactionIndexedScripts(
+	ctx context.Context,
+	db queryer,
+	transaction lcommon.Transaction,
+	slot uint64,
+) error {
+	outputs := make([]lcommon.TransactionOutput, 0)
+	for _, produced := range transaction.Produced() {
+		if produced.Output != nil {
+			outputs = append(outputs, produced.Output)
+		}
+	}
+	outputs = append(
+		outputs,
+		lcommon.SubTransactionOutputsFromTransaction(transaction)...,
+	)
+	if collateralReturn := transaction.CollateralReturn(); collateralReturn != nil {
+		outputs = append(outputs, collateralReturn)
+	}
+	for _, output := range outputs {
+		if output == nil {
+			continue
+		}
+		script := output.ScriptRef()
+		if script == nil {
+			continue
+		}
+		scriptType, err := ledgerScriptType(script)
+		if err != nil {
+			return err
+		}
+		if err := storeScriptContent(ctx, db, script, scriptType, slot); err != nil {
+			return fmt.Errorf("store reference script: %w", err)
+		}
+	}
+	auxiliary := transaction.AuxiliaryData()
+	if auxiliary == nil {
+		return nil
+	}
+	type scriptsWithType struct {
+		scriptType uint8
+		scripts    []lcommon.Script
+	}
+	groups := make([]scriptsWithType, 0, 5)
+	native, err := auxiliary.NativeScripts()
+	if err != nil {
+		return fmt.Errorf("decode auxiliary native scripts: %w", err)
+	}
+	groups = append(groups, scriptsWithType{
+		scriptType: uint8(lcommon.ScriptRefTypeNativeScript),
+		scripts:    scriptsAsInterfaces(native),
+	})
+	plutusV1, err := auxiliary.PlutusV1Scripts()
+	if err != nil {
+		return fmt.Errorf("decode auxiliary Plutus V1 scripts: %w", err)
+	}
+	groups = append(groups, scriptsWithType{
+		scriptType: uint8(lcommon.ScriptRefTypePlutusV1),
+		scripts:    scriptsAsInterfaces(plutusV1),
+	})
+	plutusV2, err := auxiliary.PlutusV2Scripts()
+	if err != nil {
+		return fmt.Errorf("decode auxiliary Plutus V2 scripts: %w", err)
+	}
+	groups = append(groups, scriptsWithType{
+		scriptType: uint8(lcommon.ScriptRefTypePlutusV2),
+		scripts:    scriptsAsInterfaces(plutusV2),
+	})
+	plutusV3, err := auxiliary.PlutusV3Scripts()
+	if err != nil {
+		return fmt.Errorf("decode auxiliary Plutus V3 scripts: %w", err)
+	}
+	groups = append(groups, scriptsWithType{
+		scriptType: uint8(lcommon.ScriptRefTypePlutusV3),
+		scripts:    scriptsAsInterfaces(plutusV3),
+	})
+	plutusV4, err := auxiliary.PlutusV4Scripts()
+	if err != nil {
+		return fmt.Errorf("decode auxiliary Plutus V4 scripts: %w", err)
+	}
+	groups = append(groups, scriptsWithType{
+		scriptType: uint8(lcommon.ScriptRefTypePlutusV4),
+		scripts:    scriptsAsInterfaces(plutusV4),
+	})
+	for _, group := range groups {
+		for _, script := range group.scripts {
+			if err := storeScriptContent(
+				ctx,
+				db,
+				script,
+				group.scriptType,
+				slot,
+			); err != nil {
+				return fmt.Errorf("store auxiliary script: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+func scriptsAsInterfaces[T lcommon.Script](scripts []T) []lcommon.Script {
+	ret := make([]lcommon.Script, len(scripts))
+	for i := range scripts {
+		ret[i] = scripts[i]
+	}
+	return ret
+}
+
+func ledgerScriptType(script lcommon.Script) (uint8, error) {
+	switch script.(type) {
+	case lcommon.NativeScript:
+		return uint8(lcommon.ScriptRefTypeNativeScript), nil
+	case lcommon.PlutusV1Script:
+		return uint8(lcommon.ScriptRefTypePlutusV1), nil
+	case lcommon.PlutusV2Script:
+		return uint8(lcommon.ScriptRefTypePlutusV2), nil
+	case lcommon.PlutusV3Script:
+		return uint8(lcommon.ScriptRefTypePlutusV3), nil
+	case lcommon.PlutusV4Script:
+		return uint8(lcommon.ScriptRefTypePlutusV4), nil
+	default:
+		return 0, fmt.Errorf("unsupported script type %T", script)
+	}
 }
 
 func storeTransactionDatumIndex(
@@ -515,19 +723,35 @@ func storeTransactionDatumIndex(
 	transaction lcommon.Transaction,
 	slot uint64,
 ) error {
+	seen := make(map[lcommon.Blake2b256]struct{})
 	for _, output := range transaction.Produced() {
-		if err := storeDatumIndexRow(ctx, db, output.Output.Datum(), slot); err != nil {
+		if output.Output == nil {
+			continue
+		}
+		if err := storeDatumIndexRow(
+			ctx,
+			db,
+			output.Output.Datum(),
+			slot,
+			seen,
+		); err != nil {
 			return err
 		}
 	}
-	witnesses := transaction.Witnesses()
-	if witnesses == nil || !transaction.IsValid() {
-		return nil
-	}
-	for _, datum := range witnesses.PlutusData() {
-		copy := datum
-		if err := storeDatumIndexRow(ctx, db, &copy, slot); err != nil {
+	for _, output := range lcommon.SubTransactionOutputsFromTransaction(transaction) {
+		if output == nil {
+			continue
+		}
+		if err := storeDatumIndexRow(ctx, db, output.Datum(), slot, seen); err != nil {
 			return err
+		}
+	}
+	for _, witnesses := range allTransactionWitnessSets(transaction) {
+		for _, datum := range witnesses.PlutusData() {
+			copy := datum
+			if err := storeDatumIndexRow(ctx, db, &copy, slot, seen); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -538,6 +762,7 @@ func storeDatumIndexRow(
 	db queryer,
 	datum *lcommon.Datum,
 	slot uint64,
+	seen map[lcommon.Blake2b256]struct{},
 ) error {
 	if datum == nil {
 		return nil
@@ -554,6 +779,10 @@ func storeDatumIndexRow(
 		return nil
 	}
 	hash := lcommon.Blake2b256Hash(raw)
+	if _, ok := seen[hash]; ok {
+		return nil
+	}
+	seen[hash] = struct{}{}
 	if _, err := db.ExecContext(ctx, `
 INSERT INTO datum (hash, raw_datum, added_slot)
 VALUES (?, ?, ?)

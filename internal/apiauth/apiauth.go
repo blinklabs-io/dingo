@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Package apiauth is the single credential-verification implementation
-// shared by every built-in API provider (Blockfrost, Mesh, UTxORPC). Only
+// shared by every built-in API provider (Blockfrost, Kupo, Mesh, UTxORPC). Only
 // the wire transport differs per protocol: http.go adapts it to HTTP
 // request headers (failing closed with 401), connect.go adapts it to
 // Connect/gRPC request/streaming headers (failing closed with

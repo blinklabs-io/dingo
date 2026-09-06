@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -1182,6 +1183,206 @@ ORDER BY ` + slotExpr + ` ` + orderDir + `, ` + blockIndexExpr + ` ` + orderDir 
 	return ret, nil
 }
 
+// GetUtxosWithHistory returns the retained lifecycle of matching outputs,
+// rather than limiting the query to the live UTxO set. The transaction joins
+// are deliberately separate: transaction_id or collateral_return_for_tx_id
+// identifies the producing row, while spent_at_tx_id stores the consuming
+// transaction hash.
+func (s *Store) GetUtxosWithHistory(
+	query *models.UtxoHistoryQuery,
+	txn types.Txn,
+) ([]models.UtxoWithHistory, error) {
+	if query == nil {
+		return nil, fmt.Errorf(
+			"GetUtxosWithHistory: %w",
+			models.ErrNilUtxoHistoryQuery,
+		)
+	}
+	if query.Status > models.UtxoHistoryStatusSpent {
+		return nil, fmt.Errorf(
+			"GetUtxosWithHistory: %w: %d",
+			models.ErrInvalidUtxoHistoryStatus,
+			query.Status,
+		)
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+
+	createdSlotExpr := `COALESCE(created_transaction.slot, utxo.added_slot)`
+	createdBlockIndexExpr := `COALESCE(created_transaction.block_index, 0)`
+	predicate := "1 = 1"
+	args := []any{}
+	switch {
+	case query.MatchAllAddresses:
+	case len(query.AddressPatterns) == 0:
+		predicate += " AND 1 = 0"
+	default:
+		branches := []string{}
+		for _, pattern := range query.AddressPatterns {
+			if err := models.AppendUtxoAddressPatternOrBranch(
+				&branches,
+				&args,
+				pattern,
+			); err != nil {
+				return nil, fmt.Errorf("GetUtxosWithHistory: %w", err)
+			}
+		}
+		if len(branches) == 0 {
+			predicate += " AND 1 = 0"
+		} else {
+			predicate += " AND (" + strings.Join(branches, " OR ") + ")"
+		}
+	}
+
+	switch query.Status {
+	case models.UtxoHistoryStatusAll:
+	case models.UtxoHistoryStatusUnspent:
+		predicate += " AND utxo.deleted_slot = 0"
+	case models.UtxoHistoryStatusSpent:
+		predicate += " AND utxo.deleted_slot != 0"
+	}
+	if query.FilterByAsset {
+		if len(query.AssetPolicyID) == 0 {
+			return nil, fmt.Errorf(
+				"GetUtxosWithHistory: %w",
+				models.ErrEmptyAssetPolicyID,
+			)
+		}
+		predicate += `
+ AND EXISTS (
+     SELECT 1 FROM asset
+     WHERE asset.utxo_id = utxo.id AND asset.policy_id = ?`
+		args = append(args, query.AssetPolicyID)
+		if query.AssetName != nil {
+			predicate += " AND asset.name = ?"
+			args = append(args, query.AssetName)
+		}
+		predicate += ")"
+	}
+	if len(query.TransactionID) > 0 {
+		predicate += " AND utxo.tx_id = ?"
+		args = append(args, query.TransactionID)
+	}
+	if query.OutputIndex != nil {
+		predicate += " AND utxo.output_idx = ?"
+		args = append(args, *query.OutputIndex)
+	}
+	if query.MetadataLabel != nil {
+		predicate += `
+ AND EXISTS (
+     SELECT 1 FROM transaction_metadata_label AS metadata_label
+     WHERE metadata_label.transaction_id = COALESCE(
+         utxo.transaction_id,
+         utxo.collateral_return_for_tx_id
+     )
+       AND metadata_label.label = ?
+ )`
+		args = append(args, strconv.FormatUint(*query.MetadataLabel, 10))
+	}
+	if query.CreatedAfter != nil {
+		predicate += " AND " + createdSlotExpr + " >= ?"
+		args = append(args, *query.CreatedAfter)
+	}
+	if query.CreatedBefore != nil {
+		predicate += " AND " + createdSlotExpr + " <= ?"
+		args = append(args, *query.CreatedBefore)
+	}
+	if query.SpentAfter != nil || query.SpentBefore != nil {
+		// deleted_slot = 0 is the live sentinel and must not match an
+		// inclusive spent bound at slot zero.
+		predicate += " AND utxo.deleted_slot != 0"
+	}
+	if query.SpentAfter != nil {
+		predicate += " AND utxo.deleted_slot >= ?"
+		args = append(args, *query.SpentAfter)
+	}
+	if query.SpentBefore != nil {
+		predicate += " AND utxo.deleted_slot <= ?"
+		args = append(args, *query.SpentBefore)
+	}
+	if query.After != nil {
+		comparison := ">"
+		if query.Descending {
+			comparison = "<"
+		}
+		predicate += `
+ AND (
+     ` + createdSlotExpr + ` ` + comparison + ` ?
+     OR (` + createdSlotExpr + ` = ? AND ` + createdBlockIndexExpr + ` ` + comparison + ` ?)
+     OR (` + createdSlotExpr + ` = ? AND ` + createdBlockIndexExpr + ` = ?
+         AND utxo.output_idx ` + comparison + ` ?)
+     OR (` + createdSlotExpr + ` = ? AND ` + createdBlockIndexExpr + ` = ?
+         AND utxo.output_idx = ? AND utxo.tx_id ` + comparison + ` ?)
+ )`
+		args = append(
+			args,
+			query.After.Slot,
+			query.After.Slot,
+			query.After.BlockIndex,
+			query.After.Slot,
+			query.After.BlockIndex,
+			query.After.OutputIdx,
+			query.After.Slot,
+			query.After.BlockIndex,
+			query.After.OutputIdx,
+			query.After.TxId,
+		)
+	}
+
+	orderDirection := "ASC"
+	if query.Descending {
+		orderDirection = "DESC"
+	}
+	statement := `
+SELECT ` + qualifiedSQLiteUtxoColumns + `,
+       ` + createdSlotExpr + `,
+       ` + createdBlockIndexExpr + `,
+       created_transaction.block_hash,
+       spent_transaction.block_hash
+FROM utxo
+LEFT JOIN "transaction" AS created_transaction
+    ON COALESCE(utxo.transaction_id, utxo.collateral_return_for_tx_id) = created_transaction.id
+LEFT JOIN "transaction" AS spent_transaction
+    ON utxo.spent_at_tx_id = spent_transaction.hash
+WHERE ` + predicate + `
+ORDER BY ` + createdSlotExpr + ` ` + orderDirection + `,
+         ` + createdBlockIndexExpr + ` ` + orderDirection + `,
+         utxo.output_idx ` + orderDirection + `,
+         utxo.tx_id ` + orderDirection
+	statement, args = addLimitOffset(statement, args, query.Limit, 0)
+	rows, err := db.QueryContext(
+		ctx,
+		s.dialect.Rebind(statement),
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ret := []models.UtxoWithHistory{}
+	for rows.Next() {
+		item, err := scanUtxoWithHistory(rows)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	pointers := make([]*models.Utxo, len(ret))
+	for i := range ret {
+		pointers[i] = &ret[i].Utxo
+	}
+	if err := s.loadUtxoAssets(ctx, db, pointers); err != nil {
+		return nil, err
+	}
+	return ret, nil
+}
+
 // CountUtxosByAddressWithOrdering returns the number of live UTxOs matching
 // query's coarse SQL predicate (address patterns and asset filter), without
 // materializing rows. It rejects a query whose address patterns require
@@ -1705,6 +1906,52 @@ func scanUtxoWithOrdering(
 		Utxo:         *utxo,
 		TxSlot:       uint64(slot.Int64),
 		TxBlockIndex: uint32(blockIndex.Int64),
+	}, nil
+}
+
+func scanUtxoWithHistory(
+	rows *sql.Rows,
+) (models.UtxoWithHistory, error) {
+	var raw sqlitequery.Utxo
+	var slot sql.NullInt64
+	var blockIndex sql.NullInt64
+	var createdBlockHash []byte
+	var spentBlockHash []byte
+	err := rows.Scan(
+		&raw.TransactionID,
+		&raw.CollateralReturnForTxID,
+		&raw.TxID,
+		&raw.PaymentKey,
+		&raw.StakingKey,
+		&raw.CredentialTag,
+		&raw.DatumHash,
+		&raw.SpentAtTxID,
+		&raw.ReferencedByTxID,
+		&raw.CollateralByTxID,
+		&raw.ID,
+		&raw.AddedSlot,
+		&raw.DeletedSlot,
+		&raw.Amount,
+		&raw.OutputIdx,
+		&raw.PaymentScript,
+		&slot,
+		&blockIndex,
+		&createdBlockHash,
+		&spentBlockHash,
+	)
+	if err != nil {
+		return models.UtxoWithHistory{}, err
+	}
+	utxo, err := utxoFromSQLite(raw)
+	if err != nil {
+		return models.UtxoWithHistory{}, err
+	}
+	return models.UtxoWithHistory{
+		Utxo:             *utxo,
+		TxSlot:           uint64(slot.Int64),
+		TxBlockIndex:     uint32(blockIndex.Int64),
+		CreatedBlockHash: createdBlockHash,
+		SpentBlockHash:   spentBlockHash,
 	}, nil
 }
 

@@ -3046,6 +3046,22 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 	}
 }
 
+// withDestructiveDatabaseTransition keeps coordinated API and lifecycle
+// snapshots from opening while a logical rollback deletes primary-chain blobs
+// in one transaction and truncates the metadata they back in a later one.
+// Ordinary writes keep using the commit barrier independently; this scope is
+// only for the cross-transaction destructive boundary.
+func (ls *LedgerState) withDestructiveDatabaseTransition(
+	op func() error,
+) error {
+	if ls.db == nil {
+		return op()
+	}
+	finish := ls.db.BeginDestructiveTransition()
+	defer finish()
+	return op()
+}
+
 func (ls *LedgerState) rollback(point ocommon.Point) error {
 	// Rolling back to the point we already sit at is a no-op. Skip
 	// it entirely so we don't publish a "local ledger rollback"
@@ -3644,22 +3660,42 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	)
 	// A database commit becomes visible before its AfterCommit callbacks run.
 	// Exclude that window so blocksAboveSlot can never publish an Undo for the
-	// new state before the matching Apply reaches the ordered lane.
+	// new state before the matching Apply reaches the ordered lane. After the
+	// undo is emitted, hold the database destructive-transition barrier from
+	// the blob-only chain truncation through the matching metadata rollback so
+	// a coordinated API or lifecycle snapshot cannot open in between them.
 	var rollbackEvents []event.Event
 	err := func() error {
 		ls.transactionEventMutex.Lock()
-		defer ls.transactionEventMutex.Unlock()
+		transactionEventLocked := true
+		defer func() {
+			if transactionEventLocked {
+				ls.transactionEventMutex.Unlock()
+			}
+		}()
 		if err := ls.validateAndEmitRollbackUndo(point); err != nil {
 			return err
+		}
+		if ls.db != nil {
+			finishTransition := ls.db.BeginDestructiveTransition()
+			defer finishTransition()
 		}
 		evts, rbErr := ls.chain.RollbackDeferred(point)
 		if rbErr != nil {
 			return rbErr
 		}
 		rollbackEvents = evts
+		ls.transactionEventMutex.Unlock()
+		transactionEventLocked = false
+		if err := ls.rollback(point); err != nil {
+			return fmt.Errorf("synchronize ledger rollback state: %w", err)
+		}
 		return nil
 	}()
 	if err != nil {
+		if len(rollbackEvents) > 0 {
+			pubs.drainChain(ls.chain)
+		}
 		return err
 	}
 	// Publish the rollback's chain.update after chainsyncMutex is released.
@@ -3673,9 +3709,6 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	// chain.Chain.PublishPendingChainUpdates.
 	if len(rollbackEvents) > 0 {
 		pubs.drainChain(ls.chain)
-	}
-	if err := ls.rollback(point); err != nil {
-		return fmt.Errorf("synchronize ledger rollback state: %w", err)
 	}
 	// A primary chain can be ahead of the applied ledger during genesis or
 	// snapshot catch-up. In that case ls.rollback intentionally leaves the
@@ -8568,21 +8601,23 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		"ancestor_hash",
 		hex.EncodeToString(ancestor.Hash),
 	)
-	if err := ls.config.ChainManager.RewindPrimaryChainToPoint(
-		ancestor,
-	); err != nil {
-		return fmt.Errorf(
-			"rewind primary chain to common primary-chain ancestor: %w",
-			err,
-		)
-	}
-	if err := ls.rollback(ancestor); err != nil {
-		return fmt.Errorf(
-			"rollback ledger tip to common primary-chain ancestor: %w",
-			err,
-		)
-	}
-	return nil
+	return ls.withDestructiveDatabaseTransition(func() error {
+		if err := ls.config.ChainManager.RewindPrimaryChainToPoint(
+			ancestor,
+		); err != nil {
+			return fmt.Errorf(
+				"rewind primary chain to common primary-chain ancestor: %w",
+				err,
+			)
+		}
+		if err := ls.rollback(ancestor); err != nil {
+			return fmt.Errorf(
+				"rollback ledger tip to common primary-chain ancestor: %w",
+				err,
+			)
+		}
+		return nil
+	})
 }
 
 // ReconcileLivePrimaryChainLedgerDivergence is the exported entry

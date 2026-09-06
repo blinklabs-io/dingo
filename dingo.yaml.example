@@ -80,6 +80,10 @@ plugins:
         #   keyFilePath: "/run/secrets/blockfrost.key"
         # auth:
         #   mode: disabled
+    kupo:
+      provider: "builtin"
+      config:
+        port: 1442
     mesh:
       provider: "builtin"
       config:
@@ -90,7 +94,7 @@ plugins:
         port: 9090
 
 # Shared TLS and authentication defaults for every selected plugins.api.*
-# provider (Blockfrost, Mesh, UTxO RPC). Each field resolves independently:
+# provider (Blockfrost, Kupo, Mesh, UTxO RPC). Each field resolves independently:
 # plugins.api.<name>.config.tls/config.auth overrides any field for that
 # provider only (see the commented example above). The default everywhere
 # is "disabled", so leaving this section out changes nothing for an
