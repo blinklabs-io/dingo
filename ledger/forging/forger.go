@@ -827,6 +827,8 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			gap := uint64(0)
 			if upstreamTip > tipSlot {
 				gap = upstreamTip - tipSlot
+			} else if upstreamTip == 0 && currentSlot > tipSlot {
+				gap = currentSlot - tipSlot
 			}
 			f.metrics.forgeSyncSkip.Inc()
 			f.metrics.tipGapSlots.Set(

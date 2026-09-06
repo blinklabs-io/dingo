@@ -327,6 +327,12 @@ func TestForgeStillWaitsForUnknownUpstreamTargetWhileTipIsStale(
 		float64(1),
 		testutil.ToFloat64(forger.metrics.forgeSyncSkip),
 	)
+	assert.Equal(
+		t,
+		float64(991),
+		testutil.ToFloat64(forger.metrics.tipGapSlots),
+		"unknown upstream targets report the local tip lag",
+	)
 }
 
 // forgerScheduleAwareLeader reports a fixed set of scheduled leader
