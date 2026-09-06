@@ -2483,6 +2483,8 @@ transaction the reference node rejects.
 
 Where Phase 2 does run, the Plutus script context (`TxInfo`) is constructed only for transactions that carry at least one redeemer (`txHasRedeemers`, `ledger/eras/validation.go`); `ValidateTxAlonzo`, `ValidateTxBabbage`, `EvaluateTxAlonzo`, `EvaluateTxBabbage`, and `EvaluateTxConway` skip the build for the rest. Redeemers are what drive Phase 2, so a transaction without any runs no Plutus script, and the context is not merely unused work for it: the context embeds the transaction's validity interval translated to wall-clock time, so building it converts the transaction's TTL through the bounded HFC forecast horizon (see "Header Forecast Horizon") and returns `hardfork.ErrPastHorizon` for a TTL past that horizon. A script-free transaction was therefore rejected during replay whenever its TTL reached past the current era's safe zone, and the tx-validation recovery path read that as inconsistent local ledger state. cardano-ledger performs the translation only while assembling the context for the Plutus scripts a transaction actually needs (`collectPlutusScriptsWithContext`). The horizon itself is unchanged: a transaction that does carry redeemers still translates its validity interval per redeemer language and still fails past the horizon, matching cardano-ledger's `TimeTranslationPastHorizon`.
 
+What that horizon is measured *from* is where Dingo had to change. `LedgerState.HardForkSummary` anchors the safe zone at the published tip, which only advances once a whole block batch commits, while cardano-node ticks from the applied block's immediate predecessor (`epochInfoLedger` on the state that predecessor left). `applySafeZone` snaps the bound up to an epoch boundary, so the difference is not proportional to the lag: on Preview a tip trailing by one block (slot 3516450 instead of 3516496) put the horizon a whole epoch earlier, at slot 3542400 instead of 3628800, and refused a canonical Plutus transaction whose `invalidHereafter` was 3593399. Its outputs were never created, the next block that spent them tripped missing-input recovery, and the replay wedged. `LedgerView` therefore carries a `horizonAnchorSlot`; `ledgerProcessBlock` sets it to the applied block's parent slot (`envelopeParent`), and `LedgerView.SlotToTime` routes through `SlotTimeConverter.SlotToTimeWithHorizonFrom`, which builds the summary with the safe zone measured from `max(published tip, anchor)` and keeps the bound. Views built without an applied block (mempool validation, standalone evaluation) leave the anchor at zero and stay on the published tip. Unlike the operational slot clock, this path never extrapolates in-era past its bound: a bound past the anchored horizon is a translation failure, and converting it anyway would accept blocks the network rejects.
+
 ### Checkpoint Enforcement
 
 When a network config supplies a `CheckpointsFile` (mainnet and preview ship one), `config/cardano` verifies its `CheckpointsFileHash` and loads it into a block-number to block-hash map, exposed via `CardanoNodeConfig.Checkpoints()`. `LedgerState` caches the map at construction, and `ledgerProcessBlock` (`ledger/state.go`) rejects any inbound block whose height matches a checkpoint but whose hash differs, in every validation mode, before header or transaction validation runs. This is an envelope-validity guard against following a chain that diverges from the known-good chain at a checkpointed height; honest chains always agree with the shipped checkpoints, so the rule never rejects a canonical block. Byron epoch boundary blocks share the preceding block's number and are skipped to avoid a false mismatch.
@@ -6203,6 +6205,36 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   stays in the pool set leaves the counts unequal, so membership is unproven
   and the stricter classification stands (issue #3795).
 
+  Both of those routes reconstruct the whole K+1 pool set and read departure
+  as absence from it, so both can be closed at once — and on a from-genesis
+  Preview replay they were. The mark rows were pruned for every epoch the
+  observer reached, and `reward_pool_input` was consistently short of
+  `epoch_summary.total_pool_count` because a degraded active pool is omitted
+  from it, which is precisely the case the exact-match requirement exists to
+  exclude. Every ordinary pool retirement then became a `dingo_db_missing`.
+  `checkEpoch` therefore also resolves departure per pool from certificate
+  history, through `RewardParitySource.GetPoolsRetiredByEpoch` and
+  `MetadataStore.GetPoolKeyHashesRetiredByEpoch` (see DATABASE.md), read once
+  per epoch at the K+1 `epoch_summary.boundary_slot`
+  (`DingoEpochData.BoundarySlot`). A retirement effective at or before K
+  that no later registration cancelled is a positive fact about that one
+  pool, so it proves departure without any argument about set completeness,
+  and `pool_registration`/`pool_retirement` are retained for the life of the
+  database. The effective-epoch bound is K rather than the K+1 boundary the
+  certificates are resolved as of, because `epochBoundarySnapshotSlot`
+  captures the K+1 mark pool set at `boundarySlot - 1`: that slot falls in
+  epoch K, so `GetActivePoolKeyHashesAtSlot` keeps every pool retiring
+  effective K+1 and those pools still get a K+1 `reward_pool_input` row.
+  Reading them as departed would mask a genuinely missing one. This route
+  also fails closed: "a retirement certificate exists"
+  is not the predicate, because a later registration cancels a pending
+  retirement and a re-registration after one has taken effect puts the pool
+  back — such a pool is still in the pool set, and downgrading it would turn
+  a real `dingo_db_missing` into a pass. Without a K+1 boundary slot there is
+  no point in the chain to resolve each pool's latest certificate as of, so
+  the route stays closed and the stricter classification stands (issue
+  #3925).
+
   The same split applies a third time to `reward_pool_input`'s stake-epoch
   fields (`delegated_stake`/`delegator_count`/`fixed_cost`/`margin`, reported
   together as `reward_pool_input_stake` when absent) via
@@ -6311,8 +6343,9 @@ second sync:
   `epoch_summary`/`reward_ada_pots`/`reward_pool_input`/`reward_pool_output`/
   `reward_account_output` through the existing typed `MetadataStore`
   accessors (`GetEpochSummary`, `GetRewardAdaPots`, `GetRewardPoolInputs`,
-  `GetRewardPoolOutputs`, `GetRewardAccountOutputs`) inside a fresh read-only
-  transaction per call — the same tables `ledger/snapshot/rotation.go`
+  `GetRewardPoolOutputs`, `GetRewardAccountOutputs`, and
+  `GetPoolKeyHashesRetiredByEpoch` for the departure evidence above) inside a
+  fresh read-only transaction per call — the same tables `ledger/snapshot/rotation.go`
   already populates at every epoch boundary, with no new table and no
   metadata export. `GetRewardAccountOutputs` is what #3097's per-account
   exact-parity comparison (`compareEpochAccounts`, "Per-account exact parity

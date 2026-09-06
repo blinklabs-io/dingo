@@ -2486,18 +2486,34 @@ Pools whose effective retirement takes effect at a given epoch, with the reward
 account and deposit needed to refund their POOLREAP deposit at the epoch
 boundary. A pool is included when, as of the boundary slot, its latest
 retirement certificate names the target epoch and has not been cancelled by a
-later re-registration (same-slot disambiguation uses `block_index` then
-`cert_index`). Unlike `GetActivePoolKeyHashesAtSlot`, this query does not rank
-synthetic reconcile retirements (`certificate_id = 0`) first: those rows carry
-the catch-up tip as `epoch`/`added_slot`, so the `added_slot < $boundarySlot`
-and `epoch = $epoch` filters exclude them from boundary refund processing by
-design — a reconcile-retired pool gets no POOLREAP refund because its real
-retirement (or lack of one) was already settled in the imported snapshot's
-ledger state. The reward account comes from the latest registration. The
-refund amount is `COALESCE(pr.deposit_held, pr.deposit_amount)`, preserving
-the legacy fallback for rows that predate the v11 migration. Backends differ
-only in identifier quoting (`"transaction"` on
-SQLite/Postgres, `` `transaction` `` on MySQL).
+later re-registration (same-slot disambiguation ranks synthetic reconcile
+retirements first, then compares `block_index`, then `cert_index`). Like
+`GetActivePoolKeyHashesAtSlot`, this query ranks synthetic reconcile
+retirements (`certificate_id = 0`) ahead of certificate-backed rows at the same
+slot and exempts them from the cancellation clauses. Such a row has no
+`certs`/`transaction` join, so its `COALESCE(..., 0)` indices are the lowest
+possible and it would otherwise lose every same-slot tie-break to a
+certificate-backed row — the opposite of what the ledger state it encodes says,
+and the shape `ledgerstate`'s snapshot import writes routinely (`ImportPool`
+followed by `RetirePools` at one slot). All four latest-retirement resolutions
+in the tree — `GetActivePoolKeyHashesAtSlot`, this query,
+`GetPoolKeyHashesRetiredByEpoch` and `DingoDB.GetPoolsRetiredByEpoch` — now
+share one ordering, so the active pool set, the POOLREAP refund and both Koios
+parity routes cannot disagree about which retirement is a pool's latest.
+
+Ranking those rows does not admit them to boundary refund processing. A
+reconcile row carries the catch-up tip as `epoch`/`added_slot`: the boundary
+into that same epoch has already passed by the time the row is written, so
+`added_slot < $boundarySlot` is false for it, and every later boundary asks for
+a different `$epoch`. A reconcile-retired pool therefore still gets no POOLREAP
+refund, because its real retirement (or lack of one) was already settled in the
+imported snapshot's ledger state — that exclusion now rests on those two
+filters alone rather than on the row losing a tie-break, and
+`TestGetPoolsRetiringAtEpochSameSlotResolution` pins both halves. The deposit
+and reward account come from the latest registration. The refund amount is
+`COALESCE(pr.deposit_held, pr.deposit_amount)`, preserving the legacy fallback
+for rows that predate migration `v11`. Backends differ only in identifier
+quoting (`"transaction"` on SQLite/Postgres, `` `transaction` `` on MySQL).
 
 ```sql
 WITH latest_reg AS (
@@ -2517,11 +2533,13 @@ WITH latest_reg AS (
 ),
 latest_ret AS (
   SELECT rt.pool_id, rt.added_slot, rt.epoch,
+    CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END AS synthetic_ret,
     COALESCE(t.block_index, 0) AS blk_idx,
     COALESCE(c.cert_index, 0)  AS cert_idx,
     ROW_NUMBER() OVER (
       PARTITION BY rt.pool_id
-      ORDER BY rt.added_slot DESC, COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
+      ORDER BY rt.added_slot DESC, CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC,
+               COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
     ) AS rn
   FROM pool_retirement rt
   LEFT JOIN certs c ON c.id = rt.certificate_id
@@ -2536,8 +2554,9 @@ INNER JOIN latest_ret lrt ON lrt.pool_id = p.id AND lrt.rn = 1
 WHERE lrt.epoch = $epoch
   AND NOT (
     lrt.added_slot < lr.added_slot
-    OR (lrt.added_slot = lr.added_slot AND lrt.blk_idx < lr.blk_idx)
-    OR (lrt.added_slot = lr.added_slot AND lrt.blk_idx = lr.blk_idx AND lrt.cert_idx < lr.cert_idx)
+    OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0 AND lrt.blk_idx < lr.blk_idx)
+    OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0 AND lrt.blk_idx = lr.blk_idx
+        AND lrt.cert_idx < lr.cert_idx)
   );
 ```
 
@@ -2549,6 +2568,80 @@ to the registered, active reward account, or added to `network_state.treasury`
 when that account is missing or inactive. Both writes are slot-keyed (the
 `account_reward_delta` journal and the boundary `network_state` row), so a
 rollback past the boundary reverts them and re-application is deterministic.
+
+### `GetPoolKeyHashesRetiredByEpoch`
+
+Key hashes of pools whose effective retirement had already taken effect by a
+given epoch. Same latest-certificate resolution and same cancellation rule as
+`GetPoolsRetiringAtEpoch` — a pool is included only when, as of the boundary
+slot, its latest certificate is a retirement and no later registration
+supersedes it, with the same synthetic-reconcile ranking and the same
+`synthetic_ret = 0` exemption on the cancellation clauses — but the epoch
+comparison is `<=` rather than `=`, and no registration columns are selected
+because no deposit refund is being applied.
+
+The two queries answer different questions. `GetPoolsRetiringAtEpoch` asks
+which pools leave at one exact boundary, which is what POOLREAP needs. This one
+asks which pools had already left by an epoch, which is what the Koios parity
+checker needs when it reaches an epoch long after the node passed it. The
+distinction matters because a pool that retired effective epoch 243 is still
+departed at 244 and 245, and `= $epoch` matches none of those later epochs.
+
+`pool_registration` and `pool_retirement` are retained for the life of the
+database, while `pool_stake_snapshot` is pruned to `currentEpoch - 3` by
+`Manager.cleanupOldSnapshots`. That is why this query, and not a pool-set
+membership read, is the departure evidence available to an observer running
+behind the node. Backends differ only in identifier quoting (`"transaction"` on
+SQLite/Postgres, `` `transaction` `` on MySQL).
+
+```sql
+WITH latest_reg AS (
+  SELECT pr.pool_id, pr.added_slot,
+    COALESCE(t.block_index, 0) AS blk_idx,
+    COALESCE(c.cert_index, 0)  AS cert_idx,
+    ROW_NUMBER() OVER (
+      PARTITION BY pr.pool_id
+      ORDER BY pr.added_slot DESC, COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
+    ) AS rn
+  FROM pool_registration pr
+  LEFT JOIN certs c ON c.id = pr.certificate_id
+  LEFT JOIN "transaction" t ON t.id = c.transaction_id
+  WHERE pr.added_slot < $boundarySlot
+),
+latest_ret AS (
+  SELECT rt.pool_id, rt.added_slot, rt.epoch,
+    CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END AS synthetic_ret,
+    COALESCE(t.block_index, 0) AS blk_idx,
+    COALESCE(c.cert_index, 0)  AS cert_idx,
+    ROW_NUMBER() OVER (
+      PARTITION BY rt.pool_id
+      ORDER BY rt.added_slot DESC, CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC,
+               COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
+    ) AS rn
+  FROM pool_retirement rt
+  LEFT JOIN certs c ON c.id = rt.certificate_id
+  LEFT JOIN "transaction" t ON t.id = c.transaction_id
+  WHERE rt.added_slot < $boundarySlot
+)
+SELECT p.pool_key_hash
+FROM pool p
+INNER JOIN latest_reg lr  ON lr.pool_id = p.id  AND lr.rn = 1
+INNER JOIN latest_ret lrt ON lrt.pool_id = p.id AND lrt.rn = 1
+WHERE lrt.epoch <= $epoch
+  AND NOT (
+    lrt.added_slot < lr.added_slot
+    OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0 AND lrt.blk_idx < lr.blk_idx)
+    OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0 AND lrt.blk_idx = lr.blk_idx
+        AND lrt.cert_idx < lr.cert_idx)
+  );
+```
+
+The Koios parity checker reaches this through `RewardParitySource`, which has
+two implementations: `DatabaseSource` calls this store method directly, and the
+standalone-CLI `DingoDB` runs the same SQL against a separately synced metadata
+database. Both feed `poolDepartedAtParamEpoch`, which treats membership in this
+result as proof of departure and so downgrades a missing K+1 `reward_pool_input`
+row from `dingo_db_missing` to the informational `pool_departed`.
 
 ### `GetMIRCertsInSlotRange`
 

@@ -2134,11 +2134,13 @@ WITH latest_reg AS (
 ),
 latest_ret AS (
     SELECT rt.pool_id, rt.added_slot, rt.epoch,
+           CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END synthetic_ret,
            COALESCE(t.block_index, 0) block_index,
            COALESCE(c.cert_index, 0) cert_index,
            ROW_NUMBER() OVER (
                PARTITION BY rt.pool_id
                ORDER BY rt.added_slot DESC,
+                        CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC,
                         COALESCE(t.block_index, 0) DESC,
                         COALESCE(c.cert_index, 0) DESC
            ) rn
@@ -2155,9 +2157,9 @@ JOIN latest_ret ret ON ret.pool_id = p.id AND ret.rn = 1
 WHERE ret.epoch = ?
   AND NOT (
       ret.added_slot < reg.added_slot
-      OR (ret.added_slot = reg.added_slot
+      OR (ret.added_slot = reg.added_slot AND ret.synthetic_ret = 0
           AND ret.block_index < reg.block_index)
-      OR (ret.added_slot = reg.added_slot
+      OR (ret.added_slot = reg.added_slot AND ret.synthetic_ret = 0
           AND ret.block_index = reg.block_index
           AND ret.cert_index < reg.cert_index)
   )`,
@@ -2190,6 +2192,105 @@ WHERE ret.epoch = ?
 		}
 		refund.DepositHeld = types.Uint64(value)
 		ret = append(ret, refund)
+	}
+	return ret, rows.Err()
+}
+
+// GetPoolKeyHashesRetiredByEpoch is GetPoolsRetiringAtEpoch's "at or before"
+// sibling: same latest-certificate resolution and same cancellation rule, but
+// it matches every retirement effective up to and including epoch rather than
+// only the one landing on it, and returns bare key hashes because no deposit
+// refund is being applied. See MetadataStore's doc comment for why the parity
+// checker needs the wider comparison (dingo #3925).
+//
+// "Same resolution" includes the synthetic-retirement key every
+// latest-retirement query in the tree shares. A reconcile retirement
+// (certificate_id = 0) has no certs/transaction join, so its COALESCE'd
+// block_index/cert_index are both zero: without ranking it first and exempting
+// it from the same-slot cancellation clauses it would lose the tie-break to any
+// certificate-backed registration in its own slot, and the pool would be
+// reported as still active. ledgerstate's snapshot import writes exactly that
+// shape — ImportPool followed by RetirePools at one slot — so this is the
+// ordinary bootstrap case, not an edge case. DingoDB.GetPoolsRetiredByEpoch
+// carries the same three elements, and koiosparity's
+// implementations-agree test runs both against one database to pin them
+// against drift.
+func (s *Store) GetPoolKeyHashesRetiredByEpoch(
+	epoch uint64,
+	boundarySlot uint64,
+	txn types.Txn,
+) ([][]byte, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetPoolKeyHashesRetiredByEpoch: resolve db: %w",
+			err,
+		)
+	}
+	rows, err := db.QueryContext(ctx, `
+WITH latest_reg AS (
+    SELECT pr.pool_id, pr.added_slot,
+           COALESCE(t.block_index, 0) block_index,
+           COALESCE(c.cert_index, 0) cert_index,
+           ROW_NUMBER() OVER (
+               PARTITION BY pr.pool_id
+               ORDER BY pr.added_slot DESC,
+                        COALESCE(t.block_index, 0) DESC,
+                        COALESCE(c.cert_index, 0) DESC
+           ) rn
+    FROM pool_registration pr
+    LEFT JOIN certs c ON c.id = pr.certificate_id
+    LEFT JOIN "transaction" t ON t.id = c.transaction_id
+    WHERE pr.added_slot < ?
+),
+latest_ret AS (
+    SELECT rt.pool_id, rt.added_slot, rt.epoch,
+           CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END synthetic_ret,
+           COALESCE(t.block_index, 0) block_index,
+           COALESCE(c.cert_index, 0) cert_index,
+           ROW_NUMBER() OVER (
+               PARTITION BY rt.pool_id
+               ORDER BY rt.added_slot DESC,
+                        CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC,
+                        COALESCE(t.block_index, 0) DESC,
+                        COALESCE(c.cert_index, 0) DESC
+           ) rn
+    FROM pool_retirement rt
+    LEFT JOIN certs c ON c.id = rt.certificate_id
+    LEFT JOIN "transaction" t ON t.id = c.transaction_id
+    WHERE rt.added_slot < ?
+)
+SELECT p.pool_key_hash
+FROM pool p
+JOIN latest_reg reg ON reg.pool_id = p.id AND reg.rn = 1
+JOIN latest_ret ret ON ret.pool_id = p.id AND ret.rn = 1
+WHERE ret.epoch <= ?
+  AND NOT (
+      ret.added_slot < reg.added_slot
+      OR (ret.added_slot = reg.added_slot AND ret.synthetic_ret = 0
+          AND ret.block_index < reg.block_index)
+      OR (ret.added_slot = reg.added_slot AND ret.synthetic_ret = 0
+          AND ret.block_index = reg.block_index
+          AND ret.cert_index < reg.cert_index)
+  )`,
+		boundarySlot,
+		boundarySlot,
+		epoch,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetPoolKeyHashesRetiredByEpoch: query pools: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+	ret := [][]byte{}
+	for rows.Next() {
+		var poolKeyHash []byte
+		if err := rows.Scan(&poolKeyHash); err != nil {
+			return nil, err
+		}
+		ret = append(ret, poolKeyHash)
 	}
 	return ret, rows.Err()
 }
