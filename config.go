@@ -226,6 +226,7 @@ type Config struct {
 	corsAllowedOrigins                                                                  []string
 	networkMagic                                                                        uint32
 	intersectTip, peerSharing, validateHistorical, strictUtxoValidation                 bool
+	skipRewardLiveStakeBackfillCheck                                                    bool
 	runMode                                                                             string
 	startEra                                                                            internalconfig.StartEra
 	shutdownTimeout                                                                     time.Duration
@@ -734,6 +735,7 @@ func (c *Config) syncCompatFields() {
 	c.corsAllowedOrigins, c.intersectTip = c.cfg.CORSAllowedOrigins, c.cfg.IntersectTip
 	c.peerSharing = c.cfg.PeerSharing != nil && *c.cfg.PeerSharing
 	c.validateHistorical, c.strictUtxoValidation = c.cfg.ValidateHistorical, c.cfg.StrictUtxoValidation
+	c.skipRewardLiveStakeBackfillCheck = c.cfg.SkipRewardLiveStakeBackfillCheck
 	c.runMode, c.startEra, c.storageMode = string(
 		c.cfg.RunMode,
 	), c.cfg.StartEra, StorageMode(
