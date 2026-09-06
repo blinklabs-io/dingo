@@ -350,6 +350,49 @@ func TestHandleEventChainsyncRollbackRejectsPeerTipAheadOfUs(t *testing.T) {
 	}
 }
 
+// The behind-peer classification is observable: an operator seeing repeated
+// over-K rejections needs to tell "our upstreams are lagging us" from "someone
+// is offering a competing chain", and the counter is the signal that
+// distinguishes them.
+func TestHandleEventChainsyncRollbackBehindPeerCounter(t *testing.T) {
+	f := newBehindPeerFixture(t)
+
+	require.NoError(t, f.ls.handleEventChainsyncRollback(
+		ChainsyncEvent{
+			ConnectionId: f.connId,
+			Point:        f.pointAtDepth(12),
+			Tip:          f.tipAtDepth(6),
+		},
+		nil,
+	))
+	assert.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(f.ls.metrics.chainsyncBehindPeers),
+	)
+
+	// A genuinely divergent peer must not be counted as behind.
+	divergent := newBehindPeerFixture(t)
+	require.NoError(t, divergent.ls.handleEventChainsyncRollback(
+		ChainsyncEvent{
+			ConnectionId: divergent.connId,
+			Point:        divergent.pointAtDepth(12),
+			Tip: ochainsync.Tip{
+				Point: ocommon.NewPoint(
+					divergent.pointAtDepth(6).Slot,
+					testHashBytes("counter-competing-fork-tip"),
+				),
+				BlockNumber: divergent.tipAtDepth(6).BlockNumber,
+			},
+		},
+		nil,
+	))
+	assert.Zero(
+		t,
+		promtestutil.ToFloat64(divergent.ls.metrics.chainsyncBehindPeers),
+	)
+}
+
 // Control: a peer advertising exactly our own tip is not behind us. Asking for
 // a rollback past K from there is intersect drift, not a lagging peer, and must
 // keep the existing rejection.
