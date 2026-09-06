@@ -1832,6 +1832,31 @@ func (q *Queries) GetDrepByHash(ctx context.Context, credential []byte) (Drep, e
 	return i, err
 }
 
+const getDrepLastRegistrationDeposit = `-- name: GetDrepLastRegistrationDeposit :one
+SELECT deposit_amount
+FROM registration_drep
+WHERE credential_tag = ? AND drep_credential = ?
+ORDER BY added_slot DESC
+LIMIT 1
+`
+
+type GetDrepLastRegistrationDepositParams struct {
+	CredentialTag  int64
+	DrepCredential []byte
+}
+
+// Unlike GetDrepLastRegistrationSlot, this does not exclude certificate_id
+// = 0 rows: those are bootstrap/recovery-inserted registrations (see
+// InsertDrepIfAbsent), and their deposit_amount is still the real amount
+// owed on deregistration, not a placeholder to be filtered out of a
+// user-facing activity display.
+func (q *Queries) GetDrepLastRegistrationDeposit(ctx context.Context, arg GetDrepLastRegistrationDepositParams) (sql.NullString, error) {
+	row := q.db.QueryRowContext(ctx, getDrepLastRegistrationDeposit, arg.CredentialTag, arg.DrepCredential)
+	var deposit_amount sql.NullString
+	err := row.Scan(&deposit_amount)
+	return deposit_amount, err
+}
+
 const getDrepLastRegistrationSlot = `-- name: GetDrepLastRegistrationSlot :one
 SELECT CAST(COALESCE(MAX(added_slot), 0) AS INTEGER)
 FROM registration_drep

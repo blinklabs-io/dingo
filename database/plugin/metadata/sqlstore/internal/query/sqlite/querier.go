@@ -102,6 +102,12 @@ type Querier interface {
 	GetDatum(ctx context.Context, hash []byte) (Datum, error)
 	GetDrepByCredential(ctx context.Context, arg GetDrepByCredentialParams) (Drep, error)
 	GetDrepByHash(ctx context.Context, credential []byte) (Drep, error)
+	// Unlike GetDrepLastRegistrationSlot, this does not exclude certificate_id
+	// = 0 rows: those are bootstrap/recovery-inserted registrations (see
+	// InsertDrepIfAbsent), and their deposit_amount is still the real amount
+	// owed on deregistration, not a placeholder to be filtered out of a
+	// user-facing activity display.
+	GetDrepLastRegistrationDeposit(ctx context.Context, arg GetDrepLastRegistrationDepositParams) (sql.NullString, error)
 	GetDrepLastRegistrationSlot(ctx context.Context, arg GetDrepLastRegistrationSlotParams) (int64, error)
 	GetEpoch(ctx context.Context, epochID sql.NullInt64) (GetEpochRow, error)
 	GetEpochBySlot(ctx context.Context, arg GetEpochBySlotParams) (GetEpochBySlotRow, error)

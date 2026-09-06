@@ -126,6 +126,25 @@ func (d *Database) GetActiveDreps(
 	return d.governanceStore().GetActiveDreps(txn.Metadata())
 }
 
+// GetDrepLastRegistrationDeposit returns the deposit amount recorded
+// against the most recent registration certificate for the DRep
+// credential, or 0 when no registration certificate history exists.
+func (d *Database) GetDrepLastRegistrationDeposit(
+	credentialTag uint8,
+	credential []byte,
+	txn *Txn,
+) (uint64, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	return d.governanceStore().GetDrepLastRegistrationDeposit(
+		credentialTag,
+		credential,
+		txn.Metadata(),
+	)
+}
+
 // InsertDrepIfAbsent inserts a minimal DRep row when no record exists
 // for the given credential. Existing rows are left untouched so real
 // registration metadata (added_slot, anchor_url, anchor_hash, active)

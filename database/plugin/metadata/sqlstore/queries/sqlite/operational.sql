@@ -1175,6 +1175,18 @@ FROM registration_drep
 WHERE credential_tag = ? AND drep_credential = ?
   AND certificate_id IS NOT NULL AND certificate_id != 0;
 
+-- name: GetDrepLastRegistrationDeposit :one
+-- Unlike GetDrepLastRegistrationSlot, this does not exclude certificate_id
+-- = 0 rows: those are bootstrap/recovery-inserted registrations (see
+-- InsertDrepIfAbsent), and their deposit_amount is still the real amount
+-- owed on deregistration, not a placeholder to be filtered out of a
+-- user-facing activity display.
+SELECT deposit_amount
+FROM registration_drep
+WHERE credential_tag = ? AND drep_credential = ?
+ORDER BY added_slot DESC
+LIMIT 1;
+
 -- name: GetTransactionByHash :one
 SELECT hash, block_hash, metadata, slot, type, id, fee, collateral_fee,
        ttl, block_index, valid

@@ -1241,8 +1241,17 @@ func (lv *LedgerView) DRepRegistration(
 		}
 		return nil, fmt.Errorf("get drep: %w", err)
 	}
+	deposit, err := lv.ls.db.GetDrepLastRegistrationDeposit(
+		drep.CredentialTag,
+		credential[:],
+		lv.txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get drep last registration deposit: %w", err)
+	}
 	reg := &lcommon.DRepRegistration{
 		Credential: credential,
+		Deposit:    deposit,
 	}
 	if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 		if len(drep.AnchorHash) != 32 {
@@ -1269,8 +1278,20 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 	}
 	registrations := make([]lcommon.DRepRegistration, 0, len(dreps))
 	for _, drep := range dreps {
+		deposit, err := lv.ls.db.GetDrepLastRegistrationDeposit(
+			drep.CredentialTag,
+			drep.Credential,
+			lv.txn,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"get drep last registration deposit: %w",
+				err,
+			)
+		}
 		reg := lcommon.DRepRegistration{
 			Credential: lcommon.NewBlake2b224(drep.Credential),
+			Deposit:    deposit,
 		}
 		if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 			if len(drep.AnchorHash) != 32 {

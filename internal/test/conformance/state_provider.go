@@ -882,7 +882,21 @@ func (p *DingoStateProvider) DRepRegistration(
 			return nil, fmt.Errorf("lookup drep registration: %w", err)
 		}
 		if drep != nil && drep.Active {
-			return &common.DRepRegistration{Credential: credential}, nil
+			deposit, err := withBadConnRetry(func() (uint64, error) {
+				return p.manager.db.GetDrepLastRegistrationDeposit(
+					tag, credential[:], nil,
+				)
+			})
+			if err != nil {
+				return nil, fmt.Errorf(
+					"lookup drep last registration deposit: %w",
+					err,
+				)
+			}
+			return &common.DRepRegistration{
+				Credential: credential,
+				Deposit:    deposit,
+			}, nil
 		}
 	}
 	return nil, nil

@@ -718,6 +718,39 @@ func (s *Store) GetDrepLastRegistrationSlot(
 	return uint64(slot), nil
 }
 
+func (s *Store) GetDrepLastRegistrationDeposit(
+	credentialTag uint8,
+	credential []byte,
+	txn types.Txn,
+) (uint64, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return 0, err
+	}
+	q := s.operationalQueries(db)
+	raw, err := q.GetDrepLastRegistrationDeposit(
+		ctx,
+		sqlitequery.GetDrepLastRegistrationDepositParams{
+			CredentialTag:  int64(credentialTag),
+			DrepCredential: credential,
+		},
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("get drep last registration deposit: %w", err)
+	}
+	if !raw.Valid {
+		return 0, nil
+	}
+	deposit, err := parseUint64("drep last registration deposit", raw.String)
+	if err != nil {
+		return 0, err
+	}
+	return deposit, nil
+}
+
 func (s *Store) GetDreps(
 	txn types.Txn,
 ) ([]models.DrepListRow, error) {

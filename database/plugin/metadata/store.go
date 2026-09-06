@@ -518,6 +518,19 @@ type GovernanceStore interface {
 		types.Txn,
 	) (uint64, error)
 
+	// GetDrepLastRegistrationDeposit returns the deposit amount recorded
+	// against the most recent registration certificate for the DRep
+	// credential, or 0 when no registration certificate history exists.
+	// The live drep row does not carry a deposit amount (registration and
+	// deregistration certificates supply/refund it, but nothing persists
+	// it on the current-state row), so deregistration-refund validation
+	// must read it from the registration_drep history instead.
+	GetDrepLastRegistrationDeposit(
+		uint8, // credentialTag
+		[]byte, // credential
+		types.Txn,
+	) (uint64, error)
+
 	// CreateDrep inserts a Drep row directly. Used by callers (e.g.
 	// fixture seeding from outside the plugin packages) that already
 	// have a fully-populated model and want a single-row insert without
