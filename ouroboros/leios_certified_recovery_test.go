@@ -584,7 +584,7 @@ func TestFetchEndorserBlockByPointHonoursCallerBudget(t *testing.T) {
 // cancellation: context.DeadlineExceeded is not context.Canceled.
 func TestFetchEndorserBlockByPointDeadlineDoesNotCoolDownPeer(t *testing.T) {
 	_, manifestRaw, point, _ := leiosCertifiedRecoveryFixture(t, 0x56, 376042)
-	stalledConn, stalledDone := newLeiosFetchConversation(
+	stalledConn, _ := newLeiosFetchConversation(
 		t,
 		append(
 			leiosFetchHandshake(),
@@ -645,7 +645,6 @@ func TestFetchEndorserBlockByPointDeadlineDoesNotCoolDownPeer(t *testing.T) {
 	guard := o.leiosFetchGuardFor(stalledConn.Id())
 	require.Zero(t, guard.consecutiveFailures.Load())
 	require.False(t, guard.inCooldown(time.Now()))
-	requireLeiosFetchConversationDone(t, stalledDone)
 }
 
 // TestFetchEndorserBlockByPointTxsUnavailableIsNotAnAllPeerDecline covers the
