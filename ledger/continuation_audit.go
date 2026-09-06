@@ -197,13 +197,33 @@ func (w *continuationAuditWindow) endorserProducersIncomplete() bool {
 	return len(w.pendingEndorserRefs) > 0 || w.endorserRefsDropped > 0
 }
 
-// requeueEndorserRef returns a reference to the pending queue, restoring the
-// dedupe entry the drain removed when it took it, so a later audited body
-// retries it and a concurrent duplicate is still suppressed.
+// requeueEndorserRef returns a reference the drain took and could not finish to
+// the pending queue, restoring the dedupe entry that was removed with it.
+//
+// It dedupes, because resolution can make two references converge. A deferred
+// certified reference is keyed by its parent hash, and two ranking blocks with
+// different parents can certify the same endorser block: the reference is
+// (announced hash, announcing slot), so two blocks at one slot on either side
+// of a fork — the state a window is armed in — name the same occurrence. Those
+// keys differ while the references are deferred and become equal once resolved.
+// Appending unconditionally then queued the same still-unfetched endorser block
+// twice, and every later body probed it twice, spending budget other references
+// needed.
+//
+// Only callers that took a reference off the queue may use it. The drain's
+// once-per-body and budget paths never take the dedupe entry, so they move
+// their references back directly instead; routing them through here would see
+// their own entry and drop them. An already-merged occurrence cannot reach
+// here either: the drain consults resolvedEndorserBlocks before the provider,
+// which is the only step after which a merged reference could be requeued.
 func (w *continuationAuditWindow) requeueEndorserRef(
 	ref continuationAuditEndorserRef,
 ) {
-	w.pendingEndorserSeen[ref.key()] = struct{}{}
+	key := ref.key()
+	if _, ok := w.pendingEndorserSeen[key]; ok {
+		return
+	}
+	w.pendingEndorserSeen[key] = struct{}{}
 	w.pendingEndorserRefs = append(w.pendingEndorserRefs, ref)
 }
 
@@ -543,7 +563,9 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 	for i, ref := range pending {
 		if !armed || *budget <= 0 {
 			// Requeue what was not reached. Hitting the budget means the
-			// producer set is knowingly short for now.
+			// producer set is knowingly short for now. These references
+			// were never taken off pendingEndorserSeen, so this is a
+			// one-for-one move and cannot duplicate a key.
 			window.pendingEndorserRefs = append(
 				window.pendingEndorserRefs,
 				pending[i:]...,
@@ -566,8 +588,13 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 		}
 		// One probe per reference per audited body: nothing that could
 		// change the outcome happens between two inputs of the same body.
+		// Its dedupe entry was never taken, so this moves the reference
+		// back one-for-one rather than going through requeueEndorserRef.
 		if ref.lastProbedBlock == window.blocksSeen {
-			window.requeueEndorserRef(ref)
+			window.pendingEndorserRefs = append(
+				window.pendingEndorserRefs,
+				ref,
+			)
 			continue
 		}
 		delete(window.pendingEndorserSeen, ref.key())

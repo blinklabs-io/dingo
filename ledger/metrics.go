@@ -416,7 +416,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.continuationAuditOutcomes = promautoFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_continuation_audit_outcomes_total",
-			Help: "cross-fork continuation audit verdicts by result; clean/missing_producer/inconclusive_eb_pending count audited inputs, skipped_budget counts audited blocks, disarmed_cap counts audit windows",
+			Help: "cross-fork continuation audit verdicts by result; clean/missing_producer/inconclusive_eb_pending count audited inputs, skipped_budget counts audited blocks, ref_unresolvable counts abandoned endorser-block references, disarmed_cap counts audit windows",
 		},
 		[]string{"result"},
 	)
