@@ -23,6 +23,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -148,6 +149,33 @@ type nodeTestLogSignalHandler struct {
 	seen    chan struct{}
 }
 
+type nodeTestLogCountHandler struct {
+	message string
+	count   *atomic.Int32
+}
+
+func (h nodeTestLogCountHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h nodeTestLogCountHandler) Handle(
+	_ context.Context,
+	record slog.Record,
+) error {
+	if record.Message == h.message {
+		h.count.Add(1)
+	}
+	return nil
+}
+
+func (h nodeTestLogCountHandler) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h nodeTestLogCountHandler) WithGroup(string) slog.Handler {
+	return h
+}
+
 func (h nodeTestLogSignalHandler) Enabled(context.Context, slog.Level) bool {
 	return true
 }
@@ -196,13 +224,13 @@ func TestHandleChainSwitchEventUpdatesActiveConnection(t *testing.T) {
 	connB := newNodeTestConnId(3002)
 	state.AddClientConnId(connA)
 	state.AddClientConnId(connB)
-	state.SetClientConnId(connA)
 	pointA := ocommon.NewPoint(100, []byte("hash-a"))
 	pointB := ocommon.NewPoint(200, []byte("hash-b"))
 	tipA := ochainsync.Tip{Point: pointA, BlockNumber: 10}
 	tipB := ochainsync.Tip{Point: pointB, BlockNumber: 20}
 	state.UpdateClientTip(connA, pointA, tipA)
 	state.UpdateClientTip(connB, pointB, tipB)
+	state.SetClientConnId(connA)
 	n := &Node{
 		config: Config{
 			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -232,6 +260,271 @@ func TestHandleChainSwitchEventUpdatesActiveConnection(t *testing.T) {
 	assert.Equal(t, pointB, clientB.Cursor)
 	assert.Equal(t, uint64(1), clientA.HeadersRecv)
 	assert.Equal(t, uint64(1), clientB.HeadersRecv)
+}
+
+func TestChainSelectionDoesNotPromoteUntrackedFallback(t *testing.T) {
+	for _, selectorFirst := range []bool{true, false} {
+		name := "state-removal-first"
+		if selectorFirst {
+			name = "selector-removal-first"
+		}
+		t.Run(name, func(t *testing.T) {
+			state := chainsync.NewStateWithConfig(
+				nil,
+				nil,
+				chainsync.DefaultConfig(),
+			)
+			selector := chainselection.NewChainSelector(
+				chainselection.ChainSelectorConfig{},
+			)
+			selected := newNodeTestConnId(3101)
+			fallback := newNodeTestConnId(3102)
+			require.True(t, state.AddClientConnId(selected))
+			require.True(t, state.AddClientConnId(fallback))
+
+			selectedPoint := ocommon.NewPoint(100, []byte("selected"))
+			selectedTip := ochainsync.Tip{
+				Point:       selectedPoint,
+				BlockNumber: 10,
+			}
+			state.UpdateClientTip(selected, selectedPoint, selectedTip)
+			require.True(t, selector.UpdatePeerTip(selected, selectedTip, nil))
+			state.SetClientConnId(selected)
+			best := selector.GetBestPeer()
+			require.NotNil(t, best)
+			require.Equal(t, selected, *best)
+			trackedFallback := state.GetTrackedClient(fallback)
+			require.NotNil(t, trackedFallback)
+			require.Zero(
+				t, trackedFallback.HeadersRecv,
+				"fallback must still be connected but untracked by ChainSync",
+			)
+
+			n := &Node{
+				config: Config{
+					logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+				},
+				chainsyncState: state,
+				chainSelector:  selector,
+			}
+			removeFromSelector := func() {
+				selector.RemovePeer(selected)
+				require.Nil(t, selector.GetBestPeer())
+				n.handleChainSelectedNoneEvent(event.NewEvent(
+					chainselection.ChainSelectedNoneEventType,
+					chainselection.ChainSelectedNoneEvent{
+						PreviousConnectionId: selected,
+					},
+				))
+			}
+			if selectorFirst {
+				removeFromSelector()
+				state.RemoveClientConnId(selected)
+			} else {
+				state.RemoveClientConnId(selected)
+				removeFromSelector()
+			}
+
+			require.Nil(
+				t,
+				state.GetClientConnId(),
+				"an untracked fallback must not become the ledger source",
+			)
+
+			fallbackPoint := ocommon.NewPoint(110, []byte("fallback"))
+			fallbackTip := ochainsync.Tip{
+				Point:       fallbackPoint,
+				BlockNumber: 11,
+			}
+			state.UpdateClientTip(fallback, fallbackPoint, fallbackTip)
+			require.True(t, selector.UpdatePeerTip(fallback, fallbackTip, nil))
+			best = selector.GetBestPeer()
+			require.NotNil(t, best)
+			require.Equal(t, fallback, *best)
+			n.handleChainSwitchEvent(event.NewEvent(
+				chainselection.ChainSwitchEventType,
+				chainselection.ChainSwitchEvent{
+					PreviousConnectionId: selected,
+					NewConnectionId:      fallback,
+					NewTip:               fallbackTip,
+				},
+			))
+			active := state.GetClientConnId()
+			require.NotNil(t, active)
+			require.Equal(t, fallback, *active)
+		})
+	}
+}
+
+func TestHandleChainSelectedNoneEventDoesNotClearReselectedConnection(
+	t *testing.T,
+) {
+	state := chainsync.NewStateWithConfig(
+		nil,
+		nil,
+		chainsync.DefaultConfig(),
+	)
+	selector := chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{},
+	)
+	conn := newNodeTestConnId(3103)
+	require.True(t, state.AddClientConnId(conn))
+	tipPoint := ocommon.NewPoint(120, []byte("reselected"))
+	state.UpdateClientTip(conn, tipPoint, ochainsync.Tip{Point: tipPoint})
+	require.True(t, state.TrySetClientConnId(conn))
+	tip := ochainsync.Tip{
+		Point:       tipPoint,
+		BlockNumber: 12,
+	}
+	require.True(t, selector.UpdatePeerTip(conn, tip, nil))
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		chainsyncState: state,
+		chainSelector:  selector,
+	}
+
+	n.handleChainSelectedNoneEvent(event.NewEvent(
+		chainselection.ChainSelectedNoneEventType,
+		chainselection.ChainSelectedNoneEvent{
+			PreviousConnectionId: conn,
+		},
+	))
+
+	active := state.GetClientConnId()
+	require.NotNil(t, active)
+	require.Equal(t, conn, *active)
+}
+
+func TestHandleChainSelectedNoneEventCoalescesLifecycleContention(
+	t *testing.T,
+) {
+	state := chainsync.NewStateWithConfig(
+		nil,
+		nil,
+		chainsync.DefaultConfig(),
+	)
+	conn := newNodeTestConnId(3104)
+	newerPrevious := newNodeTestConnId(3106)
+	require.True(t, state.AddClientConnId(conn))
+	point := ocommon.NewPoint(130, []byte("selected"))
+	state.UpdateClientTip(conn, point, ochainsync.Tip{Point: point})
+	require.True(t, state.TrySetClientConnId(conn))
+
+	selector := chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{},
+	)
+	var logCount atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	n := &Node{
+		config: Config{
+			logger: slog.New(nodeTestLogCountHandler{
+				message: "chain selection stalled: no selectable peer",
+				count:   &logCount,
+			}),
+		},
+		chainsyncState: state,
+		chainSelector:  selector,
+	}
+	n.startChainSelectedNoneWorker(ctx)
+	t.Cleanup(func() {
+		cancel()
+		n.waitChainSelectedNoneWorker()
+	})
+
+	n.liveLifecycleMu.Lock()
+	for i := range 64 {
+		previous := conn
+		if i == 63 {
+			// A newer coalesced transition can name a peer whose intervening
+			// switch was skipped while the lifecycle lock was held. Selection is
+			// still none, so the older registry-active peer must still be cleared.
+			previous = newerPrevious
+		}
+		n.handleChainSelectedNoneEvent(event.NewEvent(
+			chainselection.ChainSelectedNoneEventType,
+			chainselection.ChainSelectedNoneEvent{
+				PreviousConnectionId: previous,
+			},
+		))
+	}
+	n.liveLifecycleMu.Unlock()
+
+	require.Eventually(t, func() bool {
+		return logCount.Load() == 1 && state.GetClientConnId() == nil
+	}, 5*time.Second, time.Millisecond)
+	require.Never(t, func() bool {
+		return logCount.Load() > 1
+	}, 100*time.Millisecond, time.Millisecond,
+		"a contended event burst must be handled by one coalesced worker")
+}
+
+func TestChainSelectedNoneWorkerCancelsDuringLifecycleContention(
+	t *testing.T,
+) {
+	state := chainsync.NewStateWithConfig(
+		nil,
+		nil,
+		chainsync.DefaultConfig(),
+	)
+	conn := newNodeTestConnId(3105)
+	require.True(t, state.AddClientConnId(conn))
+	point := ocommon.NewPoint(140, []byte("selected"))
+	state.UpdateClientTip(conn, point, ochainsync.Tip{Point: point})
+	require.True(t, state.TrySetClientConnId(conn))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		chainsyncState: state,
+		chainSelector: chainselection.NewChainSelector(
+			chainselection.ChainSelectorConfig{},
+		),
+	}
+	n.startChainSelectedNoneWorker(ctx)
+	n.liveLifecycleMu.Lock()
+	n.handleChainSelectedNoneEvent(event.NewEvent(
+		chainselection.ChainSelectedNoneEventType,
+		chainselection.ChainSelectedNoneEvent{
+			PreviousConnectionId: conn,
+		},
+	))
+	cancel()
+	n.waitChainSelectedNoneWorker()
+	n.liveLifecycleMu.Unlock()
+
+	active := state.GetClientConnId()
+	require.NotNil(t, active)
+	require.Equal(t, conn, *active)
+}
+
+func TestChainSelectedNoneRetryBackoffCaps(t *testing.T) {
+	delay := chainSelectedNoneInitialRetryInterval
+	delays := make([]time.Duration, 0, 10)
+	for range 10 {
+		delays = append(delays, delay)
+		delay = nextChainSelectedNoneRetryInterval(delay, false)
+	}
+	require.Equal(t, []time.Duration{
+		10 * time.Millisecond,
+		20 * time.Millisecond,
+		40 * time.Millisecond,
+		80 * time.Millisecond,
+		160 * time.Millisecond,
+		320 * time.Millisecond,
+		640 * time.Millisecond,
+		time.Second,
+		time.Second,
+		time.Second,
+	}, delays)
+	require.Equal(t,
+		chainSelectedNoneInitialRetryInterval,
+		nextChainSelectedNoneRetryInterval(delay, true),
+		"a successful acquisition must restart the next contention ramp",
+	)
 }
 
 // TestHandleChainSwitchEventNilChainsyncStateDoesNotPanic covers the window
@@ -280,7 +573,11 @@ func TestHandleChainSwitchEventSkipsUpdateDuringLiveLifecycleOp(t *testing.T) {
 	connB := newNodeTestConnId(3002)
 	state.AddClientConnId(connA)
 	state.AddClientConnId(connB)
-	state.SetClientConnId(connA)
+	pointA := ocommon.NewPoint(100, []byte("hash-a"))
+	state.UpdateClientTipWithoutDedup(
+		connA, pointA, ochainsync.Tip{Point: pointA},
+	)
+	require.True(t, state.TrySetClientConnId(connA))
 	n := &Node{
 		config: Config{
 			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -318,7 +615,12 @@ func TestLedgerStateConfigSkipsChainsyncReadDuringLiveLifecycleOp(
 		chainsync.DefaultConfig(),
 	)
 	connId := newNodeTestConnId(3001)
-	state.SetClientConnId(connId)
+	require.True(t, state.AddClientConnId(connId))
+	point := ocommon.NewPoint(100, []byte("header"))
+	state.UpdateClientTipWithoutDedup(
+		connId, point, ochainsync.Tip{Point: point},
+	)
+	require.True(t, state.TrySetClientConnId(connId))
 	n := &Node{
 		chainsyncState: state,
 		config:         Config{cfg: &internalconfig.Config{}},
