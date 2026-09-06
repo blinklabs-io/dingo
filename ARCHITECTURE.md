@@ -4510,9 +4510,20 @@ counter is recorded for every applied block -- naming the bound, rather than
 letting the block fail inside `UpdatePoolOpCertSequence` once its
 transactions are already applied. The forge loop's pre-flight and the block
 builder refuse the same counter, so the node never forges a block it could
-not then apply. The bound is unreachable from Babbage onward, where Praos
-rejects a counter more than one past the last seen; only the TPraos eras,
-which enforce monotonicity alone, admit an arbitrary first counter.
+not then apply. `ledgerstate.importOpCertCounters` refuses it too: the
+certified HeaderState counter map is decoded at the reference's full
+`uint64` width (`decodeOpCertCounters`), so a Mithril restore is the one
+write path into `pool_opcert_sequence` whose counters were never checked
+against a chain rule first. `Store.UpdatePoolOpCertSequence` holds the only
+insert into that table, and block application and the Mithril import are its
+only non-test callers, so those two plus the forging pre-flight and the block
+builder are every place the bound has to be named; the rollback recompute
+derives `pool`.`latest_op_cert_sequence` from rows already inside it, and
+`ImportPool` and the pool registration and retirement certificates write that
+column as zero. The bound is unreachable through block application from
+Babbage onward, where Praos rejects a counter more than one past the last
+seen; only the TPraos eras, which enforce monotonicity alone, admit an
+arbitrary first counter.
 
 `LedgerState.LatestOpCertSequence` -- the `LedgerView` method both this
 gate and startup's `PoolCredentials.ValidateAgainstLedger` read through --
