@@ -718,6 +718,39 @@ func (s *Store) GetDrepLastRegistrationSlot(
 	return uint64(slot), nil
 }
 
+func (s *Store) GetDrepLastRegistrationDeposit(
+	credentialTag uint8,
+	credential []byte,
+	txn types.Txn,
+) (uint64, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return 0, err
+	}
+	q := s.operationalQueries(db)
+	raw, err := q.GetDrepLastRegistrationDeposit(
+		ctx,
+		sqlitequery.GetDrepLastRegistrationDepositParams{
+			CredentialTag:  int64(credentialTag),
+			DrepCredential: credential,
+		},
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("get drep last registration deposit: %w", err)
+	}
+	if !raw.Valid {
+		return 0, nil
+	}
+	deposit, err := parseUint64("drep last registration deposit", raw.String)
+	if err != nil {
+		return 0, err
+	}
+	return deposit, nil
+}
+
 func (s *Store) GetDreps(
 	txn types.Txn,
 ) ([]models.DrepListRow, error) {
@@ -1018,4 +1051,41 @@ func validString(value string) sql.NullString {
 
 func validBool(value bool) sql.NullBool {
 	return sql.NullBool{Bool: value, Valid: true}
+}
+
+// GetDrepLastRegistrationDeposits returns every DRep credential's most
+// recent registration deposit in one query, keyed by
+// models.DrepDepositKey. See GetDrepLastRegistrationDeposit for why
+// bootstrap-slot import rows are not filtered out.
+func (s *Store) GetDrepLastRegistrationDeposits(
+	txn types.Txn,
+) (map[string]uint64, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	q := s.operationalQueries(db)
+	rows, err := q.GetDrepLastRegistrationDeposits(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get drep last registration deposits: %w", err)
+	}
+	deposits := make(map[string]uint64, len(rows))
+	for _, row := range rows {
+		if !row.DepositAmount.Valid {
+			continue
+		}
+		deposit, err := parseUint64(
+			"drep last registration deposit",
+			row.DepositAmount.String,
+		)
+		if err != nil {
+			return nil, err
+		}
+		tag, err := checkedUint8(row.CredentialTag)
+		if err != nil {
+			return nil, err
+		}
+		deposits[models.DrepDepositKey(tag, row.DrepCredential)] = deposit
+	}
+	return deposits, nil
 }

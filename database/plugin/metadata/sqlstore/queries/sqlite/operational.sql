@@ -1175,6 +1175,35 @@ FROM registration_drep
 WHERE credential_tag = ? AND drep_credential = ?
   AND certificate_id IS NOT NULL AND certificate_id != 0;
 
+-- name: GetDrepLastRegistrationDeposit :one
+-- Unlike GetDrepLastRegistrationSlot, this does not exclude certificate_id
+-- = 0 rows: those are the Mithril ledger-state import's bootstrap-slot
+-- registrations (see ImportDrepRegistration), and their deposit_amount is
+-- the real amount owed on deregistration. On a bootstrapped node such a
+-- row is often a DRep's only registration, so excluding it here would
+-- compute a refund of 0 for a deposit that was actually paid.
+SELECT deposit_amount
+FROM registration_drep
+WHERE credential_tag = ? AND drep_credential = ?
+ORDER BY added_slot DESC
+LIMIT 1;
+
+-- name: GetDrepLastRegistrationDeposits :many
+-- The set form of GetDrepLastRegistrationDeposit, for listing every active
+-- DRep's deposit in one round trip instead of one query per DRep. Same
+-- certificate_id treatment: bootstrap-slot import rows count, because their
+-- deposit_amount is the real amount owed.
+SELECT r.credential_tag, r.drep_credential, r.deposit_amount
+FROM registration_drep r
+JOIN (
+    SELECT credential_tag, drep_credential, MAX(added_slot) AS added_slot
+    FROM registration_drep
+    GROUP BY credential_tag, drep_credential
+) latest
+  ON latest.credential_tag = r.credential_tag
+ AND latest.drep_credential = r.drep_credential
+ AND latest.added_slot = r.added_slot;
+
 -- name: GetTransactionByHash :one
 SELECT hash, block_hash, metadata, slot, type, id, fee, collateral_fee,
        ttl, block_index, valid

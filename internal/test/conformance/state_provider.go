@@ -882,7 +882,21 @@ func (p *DingoStateProvider) DRepRegistration(
 			return nil, fmt.Errorf("lookup drep registration: %w", err)
 		}
 		if drep != nil && drep.Active {
-			return &common.DRepRegistration{Credential: credential}, nil
+			deposit, err := withBadConnRetry(func() (uint64, error) {
+				return p.manager.db.GetDrepLastRegistrationDeposit(
+					tag, credential[:], nil,
+				)
+			})
+			if err != nil {
+				return nil, fmt.Errorf(
+					"lookup drep last registration deposit: %w",
+					err,
+				)
+			}
+			return &common.DRepRegistration{
+				Credential: credential,
+				Deposit:    deposit,
+			}, nil
 		}
 	}
 	return nil, nil
@@ -944,8 +958,25 @@ func (p *DingoStateProvider) DRepRegistrations() ([]common.DRepRegistration, err
 	}
 	result := make([]common.DRepRegistration, 0, len(dreps))
 	for _, drep := range dreps {
+		// Report the recorded deposit here too. Production's
+		// ledger.LedgerView.DRepRegistrations does, and a vector that
+		// validates a deregistration refund through this plural view
+		// would otherwise be judged against a deposit of 0 -- passing
+		// for the same reason the bug existed.
+		deposit, err := withBadConnRetry(func() (uint64, error) {
+			return p.manager.db.GetDrepLastRegistrationDeposit(
+				drep.CredentialTag, drep.Credential, nil,
+			)
+		})
+		if err != nil {
+			return nil, fmt.Errorf(
+				"lookup drep last registration deposit: %w",
+				err,
+			)
+		}
 		result = append(result, common.DRepRegistration{
 			Credential: common.NewBlake2b224(drep.Credential),
+			Deposit:    deposit,
 		})
 	}
 	return result, nil

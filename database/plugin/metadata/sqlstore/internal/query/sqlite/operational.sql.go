@@ -1832,6 +1832,78 @@ func (q *Queries) GetDrepByHash(ctx context.Context, credential []byte) (Drep, e
 	return i, err
 }
 
+const getDrepLastRegistrationDeposit = `-- name: GetDrepLastRegistrationDeposit :one
+SELECT deposit_amount
+FROM registration_drep
+WHERE credential_tag = ? AND drep_credential = ?
+ORDER BY added_slot DESC
+LIMIT 1
+`
+
+type GetDrepLastRegistrationDepositParams struct {
+	CredentialTag  int64
+	DrepCredential []byte
+}
+
+// Unlike GetDrepLastRegistrationSlot, this does not exclude certificate_id
+// = 0 rows: those are the Mithril ledger-state import's bootstrap-slot
+// registrations (see ImportDrepRegistration), and their deposit_amount is
+// the real amount owed on deregistration. On a bootstrapped node such a
+// row is often a DRep's only registration, so excluding it here would
+// compute a refund of 0 for a deposit that was actually paid.
+func (q *Queries) GetDrepLastRegistrationDeposit(ctx context.Context, arg GetDrepLastRegistrationDepositParams) (sql.NullString, error) {
+	row := q.db.QueryRowContext(ctx, getDrepLastRegistrationDeposit, arg.CredentialTag, arg.DrepCredential)
+	var deposit_amount sql.NullString
+	err := row.Scan(&deposit_amount)
+	return deposit_amount, err
+}
+
+const getDrepLastRegistrationDeposits = `-- name: GetDrepLastRegistrationDeposits :many
+SELECT r.credential_tag, r.drep_credential, r.deposit_amount
+FROM registration_drep r
+JOIN (
+    SELECT credential_tag, drep_credential, MAX(added_slot) AS added_slot
+    FROM registration_drep
+    GROUP BY credential_tag, drep_credential
+) latest
+  ON latest.credential_tag = r.credential_tag
+ AND latest.drep_credential = r.drep_credential
+ AND latest.added_slot = r.added_slot
+`
+
+type GetDrepLastRegistrationDepositsRow struct {
+	CredentialTag  int64
+	DrepCredential []byte
+	DepositAmount  sql.NullString
+}
+
+// The set form of GetDrepLastRegistrationDeposit, for listing every active
+// DRep's deposit in one round trip instead of one query per DRep. Same
+// certificate_id treatment: bootstrap-slot import rows count, because their
+// deposit_amount is the real amount owed.
+func (q *Queries) GetDrepLastRegistrationDeposits(ctx context.Context) ([]GetDrepLastRegistrationDepositsRow, error) {
+	rows, err := q.db.QueryContext(ctx, getDrepLastRegistrationDeposits)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []GetDrepLastRegistrationDepositsRow{}
+	for rows.Next() {
+		var i GetDrepLastRegistrationDepositsRow
+		if err := rows.Scan(&i.CredentialTag, &i.DrepCredential, &i.DepositAmount); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getDrepLastRegistrationSlot = `-- name: GetDrepLastRegistrationSlot :one
 SELECT CAST(COALESCE(MAX(added_slot), 0) AS INTEGER)
 FROM registration_drep
