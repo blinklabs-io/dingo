@@ -17,6 +17,7 @@ package koiosparity
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -1058,6 +1059,11 @@ func creditedAccountRewards(
 			errs = append(errs, err)
 			continue
 		}
+		poolID, err := PoolKeyHashHexToBech32(hex.EncodeToString(row.PoolKeyHash))
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
 		if !row.Spendable || row.Guarded {
 			continue
 		}
@@ -1065,6 +1071,7 @@ func creditedAccountRewards(
 			StakeAddress: addr,
 			RewardType:   row.RewardType,
 			Amount:       strconv.FormatUint(uint64(row.Amount), 10),
+			PoolIDBech32: poolID,
 		})
 	}
 	return rows, errs

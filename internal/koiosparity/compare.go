@@ -1022,6 +1022,7 @@ type DingoAccountReward struct {
 	StakeAddress string
 	RewardType   string
 	Amount       string // lovelace decimal string
+	PoolIDBech32 string // source pool for shared reward-account aggregation
 }
 
 // accountRewardKey identifies one (stake_address, reward_type) reward row
@@ -1031,6 +1032,17 @@ type DingoAccountReward struct {
 type accountRewardKey struct {
 	address string
 	rtype   string
+}
+
+type accountRewardSourceKey struct {
+	accountRewardKey
+	poolID string
+}
+
+type accountRewardTotal struct {
+	StakeAddress string
+	RewardType   string
+	Amount       string
 }
 
 // CompareAccountEpoch compares every Koios /account_reward_history reference
@@ -1080,62 +1092,9 @@ func CompareAccountEpoch(
 	graceHours int,
 	epochEndTime time.Time,
 ) []CheckMismatch {
-	var out []CheckMismatch
-
-	koiosByKey := make(map[accountRewardKey]KoiosAccountRewards, len(koiosRows))
-	koiosSeen := make(map[accountRewardKey]int, len(koiosRows))
-	for _, r := range koiosRows {
-		if koiosAccountRewardTypesOutOfScope[r.RewardType] {
-			continue
-		}
-		k := accountRewardKey{r.StakeAddress, r.RewardType}
-		koiosSeen[k]++
-		if koiosSeen[k] > 1 {
-			out = append(out, CheckMismatch{
-				Network:      network,
-				Epoch:        epoch,
-				StakeAddress: r.StakeAddress,
-				Field:        "account_reward_duplicate",
-				DingoValue:   "",
-				KoiosValue: fmt.Sprintf(
-					"reward_type=%s amount=%s duplicated in koios reference data (occurrence %d)",
-					r.RewardType,
-					r.Earned,
-					koiosSeen[k],
-				),
-				Category:  CategoryAcctDuplicate,
-				CheckedAt: now,
-			})
-			continue
-		}
-		koiosByKey[k] = r
-	}
-
-	dingoByKey := make(map[accountRewardKey]DingoAccountReward, len(dingoRows))
-	dingoSeen := make(map[accountRewardKey]int, len(dingoRows))
-	for _, r := range dingoRows {
-		k := accountRewardKey{r.StakeAddress, r.RewardType}
-		dingoSeen[k]++
-		if dingoSeen[k] > 1 {
-			out = append(out, CheckMismatch{
-				Network:      network,
-				Epoch:        epoch,
-				StakeAddress: r.StakeAddress,
-				Field:        "account_reward_duplicate",
-				DingoValue: fmt.Sprintf(
-					"reward_type=%s amount=%s duplicated in dingo committed state (occurrence %d)",
-					r.RewardType,
-					r.Amount,
-					dingoSeen[k],
-				),
-				KoiosValue: "",
-				Category:   CategoryAcctDuplicate,
-				CheckedAt:  now,
-			})
-			continue
-		}
-		dingoByKey[k] = r
-	}
+	koiosByKey, koiosMismatches := aggregateKoiosAccountRewards(network, epoch, koiosRows, now)
+	dingoByKey, dingoMismatches := aggregateDingoAccountRewards(network, epoch, dingoRows, now)
+	out := append(koiosMismatches, dingoMismatches...)
 
 	allKeys := make([]accountRewardKey, 0, len(koiosByKey)+len(dingoByKey))
 	seenKey := make(map[accountRewardKey]bool, len(koiosByKey)+len(dingoByKey))
@@ -1177,7 +1136,7 @@ func CompareAccountEpoch(
 		case koiosOK && !dingoOK:
 			cat := CategoryAcctOnlyKoios
 			switch {
-			case isZeroRewardAmount(kr.Earned):
+			case isZeroRewardAmount(kr.Amount):
 				// Both sides credited nothing; see
 				// CategoryAcctZeroRewardRow.
 				cat = CategoryAcctZeroRewardRow
@@ -1193,7 +1152,7 @@ func CompareAccountEpoch(
 				DingoValue:   "",
 				KoiosValue: fmt.Sprintf(
 					"%s (type=%s)",
-					kr.Earned,
+					kr.Amount,
 					kr.RewardType,
 				),
 				Category:  cat,
@@ -1230,14 +1189,14 @@ func CompareAccountEpoch(
 				CheckedAt:  now,
 			})
 		default:
-			if !lovelaceEqual(dr.Amount, kr.Earned) {
+			if !lovelaceEqual(dr.Amount, kr.Amount) {
 				out = append(out, CheckMismatch{
 					Network:      network,
 					Epoch:        epoch,
 					StakeAddress: k.address,
 					Field:        "account_reward_amount",
 					DingoValue:   dr.Amount,
-					KoiosValue:   kr.Earned,
+					KoiosValue:   kr.Amount,
 					Category:     CategoryValueMismatch,
 					CheckedAt:    now,
 				})
@@ -1246,6 +1205,103 @@ func CompareAccountEpoch(
 	}
 
 	return out
+}
+
+func aggregateKoiosAccountRewards(
+	network string,
+	epoch uint64,
+	rows []KoiosAccountRewards,
+	now time.Time,
+) (map[accountRewardKey]accountRewardTotal, []CheckMismatch) {
+	totals := make(map[accountRewardKey]*big.Int, len(rows))
+	seen := make(map[accountRewardSourceKey]int, len(rows))
+	var out []CheckMismatch
+	for _, row := range rows {
+		if koiosAccountRewardTypesOutOfScope[row.RewardType] {
+			continue
+		}
+		if row.RewardType != "member" && row.RewardType != "leader" {
+			out = append(out, CheckMismatch{Network: network, Epoch: epoch, StakeAddress: row.StakeAddress, Field: "account_reward_type", KoiosValue: row.RewardType, Category: CategoryDBError, CheckedAt: now})
+			continue
+		}
+		poolID, ok := normalizeAccountPoolID(row.PoolIDBech32)
+		if !ok {
+			out = append(out, CheckMismatch{Network: network, Epoch: epoch, StakeAddress: row.StakeAddress, Field: "account_reward_pool_decode", KoiosValue: row.PoolIDBech32, Category: CategoryDBError, CheckedAt: now})
+			continue
+		}
+		amount, ok := parseLovelace(row.Earned)
+		if !ok {
+			out = append(out, CheckMismatch{Network: network, Epoch: epoch, StakeAddress: row.StakeAddress, Field: "account_reward_amount", KoiosValue: row.Earned, Category: CategoryDBError, CheckedAt: now})
+			continue
+		}
+		key := accountRewardKey{row.StakeAddress, row.RewardType}
+		source := accountRewardSourceKey{key, poolID}
+		seen[source]++
+		if seen[source] > 1 {
+			out = append(out, CheckMismatch{Network: network, Epoch: epoch, StakeAddress: row.StakeAddress, Field: "account_reward_duplicate", KoiosValue: row.Earned, Category: CategoryAcctDuplicate, CheckedAt: now})
+			continue
+		}
+		if totals[key] == nil {
+			totals[key] = new(big.Int)
+		}
+		totals[key].Add(totals[key], amount)
+	}
+	return formatAccountRewardTotals(totals), out
+}
+
+func aggregateDingoAccountRewards(
+	network string,
+	epoch uint64,
+	rows []DingoAccountReward,
+	now time.Time,
+) (map[accountRewardKey]accountRewardTotal, []CheckMismatch) {
+	totals := make(map[accountRewardKey]*big.Int, len(rows))
+	seen := make(map[accountRewardSourceKey]int, len(rows))
+	var out []CheckMismatch
+	for _, row := range rows {
+		poolID, ok := normalizeAccountPoolID(row.PoolIDBech32)
+		if !ok {
+			out = append(out, CheckMismatch{Network: network, Epoch: epoch, StakeAddress: row.StakeAddress, Field: "account_reward_pool_decode", DingoValue: row.PoolIDBech32, Category: CategoryDBError, CheckedAt: now})
+			continue
+		}
+		amount, ok := parseLovelace(row.Amount)
+		if !ok {
+			out = append(out, CheckMismatch{Network: network, Epoch: epoch, StakeAddress: row.StakeAddress, Field: "account_reward_amount", DingoValue: row.Amount, Category: CategoryDBError, CheckedAt: now})
+			continue
+		}
+		key := accountRewardKey{row.StakeAddress, row.RewardType}
+		source := accountRewardSourceKey{key, poolID}
+		seen[source]++
+		if seen[source] > 1 {
+			out = append(out, CheckMismatch{Network: network, Epoch: epoch, StakeAddress: row.StakeAddress, Field: "account_reward_duplicate", DingoValue: row.Amount, Category: CategoryAcctDuplicate, CheckedAt: now})
+			continue
+		}
+		if totals[key] == nil {
+			totals[key] = new(big.Int)
+		}
+		totals[key].Add(totals[key], amount)
+	}
+	return formatAccountRewardTotals(totals), out
+}
+
+func formatAccountRewardTotals(totals map[accountRewardKey]*big.Int) map[accountRewardKey]accountRewardTotal {
+	result := make(map[accountRewardKey]accountRewardTotal, len(totals))
+	for key, amount := range totals {
+		result[key] = accountRewardTotal{StakeAddress: key.address, RewardType: key.rtype, Amount: amount.String()}
+	}
+	return result
+}
+
+func normalizeAccountPoolID(poolID string) (string, bool) {
+	if poolID == "" {
+		return "", true
+	}
+	keyHex, err := PoolKeyHashHex(poolID)
+	if err != nil {
+		return "", false
+	}
+	normalized, err := PoolKeyHashHexToBech32(keyHex)
+	return normalized, err == nil
 }
 
 // lovelaceEqual reports whether a and b represent the same non-negative

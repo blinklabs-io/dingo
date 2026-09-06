@@ -1135,7 +1135,8 @@ const accountListLogEveryPages = 50
 // KoiosAccountRewardHistoryItem is one row from /account_reward_history,
 // covering every documented field. PoolIDBech32 is null for reward types with
 // no associated pool (treasury/reserves/refund; see CompareAccountEpoch's
-// doc comment on which Koios reward types are currently in scope).
+// doc comment on which Koios reward types are currently in scope). For
+// in-scope rows it identifies the pool contribution used during aggregation.
 //
 // /account_rewards (the older endpoint some Koios docs still reference) is
 // deprecated; /account_reward_history is the replacement, taking the same

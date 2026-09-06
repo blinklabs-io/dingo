@@ -202,7 +202,8 @@ type KoiosAccountRewards struct {
 	// not yet compared against anything in Dingo's schema.
 	SpendableEpoch uint64
 	// PoolIDBech32 is Koios's pool_id_bech32 — null/empty for reward types
-	// with no associated pool. Stored for reference only.
+	// with no associated pool. It identifies the source contribution during
+	// CompareAccountEpoch aggregation.
 	PoolIDBech32 string
 	FetchedAt    time.Time
 }
@@ -1760,9 +1761,9 @@ GROUP BY network`); err != nil {
 			err,
 		)
 	}
-	// idx_kar_net_epoch_addr_type must be non-unique: Koios can legitimately
-	// return duplicate (network, epoch, stake_address, reward_type) rows
-	// (see CategoryAcctDuplicate's doc comment), and a unique constraint
+	// idx_kar_net_epoch_addr_type must be non-unique: multiple pool
+	// contributions can legitimately share (network, epoch, stake_address,
+	// reward_type), and a unique constraint
 	// would abort CommitAccountRewardsForEpoch's insert with a constraint
 	// error before CompareAccountEpoch ever gets a chance to detect and
 	// report the duplicate as an acct_duplicate FAIL. Explicitly drop any

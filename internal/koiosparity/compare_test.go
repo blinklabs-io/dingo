@@ -15,6 +15,7 @@
 package koiosparity
 
 import (
+	"encoding/hex"
 	"testing"
 	"time"
 
@@ -599,6 +600,126 @@ func TestCompareAccountEpochExactMatch(t *testing.T) {
 	require.Equal(t, StatusPass, DetermineStatus(ms))
 }
 
+// TestCompareAccountEpochAggregatesSharedRewardAccounts proves that Koios and
+// Dingo contributions from multiple pools are compared as one account/type
+// total. A reward account can be shared by pools, so two rows with the same
+// (stake address, reward type) are not automatically duplicates when their
+// pool identities differ.
+func TestCompareAccountEpochAggregatesSharedRewardAccounts(t *testing.T) {
+	now := time.Now()
+	poolOneID, err := PoolKeyHashHexToBech32(
+		hex.EncodeToString(testPoolKeyHash(t, 0x01)),
+	)
+	require.NoError(t, err)
+	poolTwoID, err := PoolKeyHashHexToBech32(
+		hex.EncodeToString(testPoolKeyHash(t, 0x02)),
+	)
+	require.NoError(t, err)
+	koios := []KoiosAccountRewards{
+		{
+			StakeAddress: "stake1shared",
+			RewardType:   "member",
+			Earned:       "100",
+			PoolIDBech32: poolOneID,
+		},
+		{
+			StakeAddress: "stake1shared",
+			RewardType:   "member",
+			Earned:       "200",
+			PoolIDBech32: poolTwoID,
+		},
+	}
+	dingo := []DingoAccountReward{
+		{
+			StakeAddress: "stake1shared",
+			RewardType:   "member",
+			Amount:       "100",
+			PoolIDBech32: poolOneID,
+		},
+		{
+			StakeAddress: "stake1shared",
+			RewardType:   "member",
+			Amount:       "200",
+			PoolIDBech32: poolTwoID,
+		},
+	}
+
+	require.Empty(
+		t,
+		CompareAccountEpoch("preview", 100, koios, dingo, now, 0, time.Time{}),
+	)
+
+	// Aggregation must not hide a genuine difference in the shared total.
+	koios[1].Earned = "201"
+	ms := CompareAccountEpoch("preview", 100, koios, dingo, now, 0, time.Time{})
+	require.Len(t, ms, 1)
+	require.Equal(t, CategoryValueMismatch, ms[0].Category)
+	require.Equal(t, "300", ms[0].DingoValue)
+	require.Equal(t, "301", ms[0].KoiosValue)
+}
+
+// TestCompareAccountEpochRejectsMalformedAggregatedAmount proves a malformed
+// contribution cannot disappear while account rows are being aggregated.
+func TestCompareAccountEpochRejectsMalformedAggregatedAmount(t *testing.T) {
+	now := time.Now()
+	poolOneID, err := PoolKeyHashHexToBech32(
+		hex.EncodeToString(testPoolKeyHash(t, 0x01)),
+	)
+	require.NoError(t, err)
+	poolTwoID, err := PoolKeyHashHexToBech32(
+		hex.EncodeToString(testPoolKeyHash(t, 0x02)),
+	)
+	require.NoError(t, err)
+	koios := []KoiosAccountRewards{
+		{
+			StakeAddress: "stake1shared",
+			RewardType:   "member",
+			Earned:       "100",
+			PoolIDBech32: poolOneID,
+		},
+		{
+			StakeAddress: "stake1shared",
+			RewardType:   "member",
+			Earned:       "not-a-number",
+			PoolIDBech32: poolTwoID,
+		},
+	}
+	dingo := []DingoAccountReward{
+		{
+			StakeAddress: "stake1shared",
+			RewardType:   "member",
+			Amount:       "100",
+			PoolIDBech32: poolOneID,
+		},
+	}
+
+	ms := CompareAccountEpoch("preview", 100, koios, dingo, now, 0, time.Time{})
+	require.Len(t, ms, 1)
+	require.Equal(t, CategoryDBError, ms[0].Category)
+	require.Equal(t, StatusError, DetermineStatus(ms))
+}
+
+func TestCompareAccountEpochRejectsMalformedPoolID(t *testing.T) {
+	ms := CompareAccountEpoch(
+		"preview",
+		100,
+		[]KoiosAccountRewards{{
+			StakeAddress: "stake1shared",
+			RewardType:   "member",
+			Earned:       "100",
+			PoolIDBech32: "not-a-pool-id",
+		}},
+		nil,
+		time.Now(),
+		0,
+		time.Time{},
+	)
+	require.Len(t, ms, 1)
+	require.Equal(t, CategoryDBError, ms[0].Category)
+	require.Equal(t, "account_reward_pool_decode", ms[0].Field)
+	require.Equal(t, StatusError, DetermineStatus(ms))
+}
+
 func TestCompareAccountEpochZeroRewardBothSidesPasses(t *testing.T) {
 	now := time.Now()
 	koios := []KoiosAccountRewards{
@@ -750,6 +871,19 @@ func TestCompareAccountEpochOutOfScopeRewardTypesFiltered(t *testing.T) {
 	}
 	ms := CompareAccountEpoch("preview", 100, koios, nil, now, 0, time.Time{})
 	require.Empty(t, ms)
+}
+
+func TestCompareAccountEpochUnknownRewardTypeIsDatabaseError(t *testing.T) {
+	now := time.Now()
+	koios := []KoiosAccountRewards{
+		{StakeAddress: "stake1a", RewardType: "unexpected", Earned: "1000000"},
+	}
+
+	ms := CompareAccountEpoch("preview", 100, koios, nil, now, 0, time.Time{})
+	require.Len(t, ms, 1)
+	require.Equal(t, CategoryDBError, ms[0].Category)
+	require.Equal(t, "account_reward_type", ms[0].Field)
+	require.Equal(t, "unexpected", ms[0].KoiosValue)
 }
 
 func TestLovelaceEqual(t *testing.T) {

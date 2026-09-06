@@ -192,10 +192,11 @@ func TestCommitAccountRewardsForEpoch(t *testing.T) {
 // idx_kar_net_epoch_addr_type's widening from unique to non-unique actually
 // lets CommitAccountRewardsForEpoch insert two rows sharing the exact same
 // (network, epoch, stake_address, reward_type) key without erroring — the
-// real-world case is Koios itself legitimately returning a duplicate
-// /account_reward_history row (see CategoryAcctDuplicate's doc comment), not
-// just two rows with different reward_type values for the same address
-// (already covered by TestCommitAccountRewardsForEpoch). Before the index was
+// real-world case is multiple pool contributions sharing the same key, plus a
+// literal duplicate that CompareAccountEpoch must report (see
+// CategoryAcctDuplicate's doc comment), not just two rows with different
+// reward_type values for the same address (already covered by
+// TestCommitAccountRewardsForEpoch). Before the index was
 // widened to non-unique, this insert would have failed with a UNIQUE
 // constraint violation before CompareAccountEpoch ever got a chance to flag
 // the duplicate as acct_duplicate.
