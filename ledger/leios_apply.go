@@ -644,7 +644,13 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// awaitInFlightEndorserFetches; timeout is the reporting threshold, not the
 	// bound.
 	if !certDrivenHistorical {
-		ls.awaitInFlightEndorserFetches(ctx, blockingWait, timeout, poll)
+		ls.awaitInFlightEndorserFetches(
+			ctx,
+			blockingWait,
+			timeout,
+			poll,
+			leiosTipFetchHardBound,
+		)
 	}
 	// Musashi path: a certified closure is mandatory, so each required endorser
 	// block still missing after the diffusion waits gets a bounded retry across
@@ -799,7 +805,8 @@ const leiosTipFetchHardBound = leiosBackfillMaxWait
 // fetch was still running, which lost exactly the transactions it was added to
 // protect, just one window later. awaitFetch returns as soon as the endorser
 // block is cached or the in-flight marker clears, so a fetch that fails fast
-// costs nothing; leiosTipFetchHardBound is only a backstop. softWarn is a
+// costs nothing; hardBound (leiosTipFetchHardBound in production) is only a
+// backstop against a fetch that neither caches nor clears. softWarn is a
 // reporting threshold, not a deadline: crossing it means this batch is holding
 // the ledger pipeline on a slow fetch, which is worth a log line, and it is the
 // signal an operator needs to distinguish this from the pre-fetch stall.
@@ -815,7 +822,7 @@ const leiosTipFetchHardBound = leiosBackfillMaxWait
 func (ls *LedgerState) awaitInFlightEndorserFetches(
 	ctx context.Context,
 	refs []leiosEbRef,
-	softWarn, poll time.Duration,
+	softWarn, poll, hardBound time.Duration,
 ) {
 	if ls.leiosBackfill == nil {
 		return
@@ -837,7 +844,7 @@ func (ls *LedgerState) awaitInFlightEndorserFetches(
 				ctx,
 				r,
 				poll,
-				leiosTipFetchHardBound,
+				hardBound,
 			)
 			elapsed := time.Since(start)
 			cached := endorserBlockAvailableAt(
@@ -873,7 +880,30 @@ func (ls *LedgerState) awaitInFlightEndorserFetches(
 				)
 				return
 			}
-			ls.config.Logger.Warn(
+			// Two very different outcomes reach here, and only one is
+			// anomalous. awaitFetch returns either because the all-peers
+			// fetch CLEARED its in-flight marker without caching -- no peer
+			// holds this endorser block -- or because it neither cached nor
+			// cleared before hardBound. The first is the expected,
+			// long-standing behaviour of this path (see the function comment
+			// above); the code this replaced logged its equivalent at Debug,
+			// and on a CIP node where endorser blocks are routinely
+			// unfetchable a WARN per reference is normal operation escalated
+			// to alertable volume. The second means a fetch is wedged and the
+			// pipeline was held for the full backstop, which is worth waking
+			// someone for. The in-flight marker is what distinguishes them,
+			// so read it rather than inferring from elapsed time.
+			if ls.leiosBackfill.fetchInFlight(r) {
+				ls.config.Logger.Warn(
+					"endorser block fetch neither completed nor cached within the hard bound; applying its ranking block without the endorser-resident transactions",
+					"component", "ledger",
+					"slot", r.slot,
+					"eb_hash", r.hash.String(),
+					"waited_seconds", elapsed.Seconds(),
+				)
+				return
+			}
+			ls.config.Logger.Debug(
 				"endorser block could not be fetched; applying its ranking block without the endorser-resident transactions",
 				"component", "ledger",
 				"slot", r.slot,
@@ -1529,6 +1559,15 @@ const leiosBackfillMaxWait = 2 * time.Minute
 // leiosBackfillMaxWait is a backstop against a fetch that neither caches nor
 // clears (the fetch itself is bounded by the leios-fetch timeout, so this is
 // rarely reached).
+// fetchInFlight reports whether the by-point fetch for r is still marked
+// in flight. awaitFetch returning while this is true means it hit its bound
+// rather than observing the fetch finish, which is the difference between a
+// wedged fetch and the routine "no peer holds this endorser block".
+func (b *leiosBackfiller) fetchInFlight(r leiosEbRef) bool {
+	_, inFlight := b.inflight.Load(leiosEbRefKey(r))
+	return inFlight
+}
+
 func (b *leiosBackfiller) awaitFetch(
 	ctx context.Context,
 	r leiosEbRef,
