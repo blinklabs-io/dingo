@@ -207,6 +207,37 @@ func TestParseGovStateCommitteeMatchesEnactState(t *testing.T) {
 	assert.Equal(t, parsed.CommitteeQuorum.Rat, parsed.EnactCommitteeQuorum.Rat)
 }
 
+func TestImportGovStateRejectsCommitteeMismatch(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	left := committeeWithMember(t, bytes.Repeat([]byte{0x42}, 28), 700)
+	right := committeeWithMember(t, bytes.Repeat([]byte{0x43}, 28), 700)
+	rootsAny := encodeRootsAsAny(t, [4]*ParsedGovActionId{})
+	govStateData, err := cbor.Encode([]any{
+		[]any{rootsAny, []any{}},
+		left,
+		[]any{[]any{"https://example.com/constitution", bytes.Repeat([]byte{0xAA}, 32)}, nil},
+		map[uint64]uint64{}, map[uint64]uint64{}, map[uint64]uint64{},
+		drepPulsingStateWithEnactCommittee(t, right),
+	})
+	require.NoError(t, err)
+	cfg := ImportConfig{
+		Database: db,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		State: &RawLedgerState{
+			GovStateData:  govStateData,
+			Epoch:         500,
+			EraIndex:      EraConway,
+			EraBoundEpoch: 100,
+			EraBoundSlot:  10_000,
+		},
+		EpochLength: func(uint) (uint, uint, error) { return 1, 100, nil },
+	}
+	err = importGovState(context.Background(), cfg, func(ImportProgress) {})
+	require.EqualError(t, err,
+		"governance committee disagrees between cgsCommittee and rsEnactState")
+}
+
 func TestImportGovStateSeedsPrevGovActionIds(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
