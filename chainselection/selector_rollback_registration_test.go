@@ -547,3 +547,64 @@ func TestHandlePeerRollbackEvaluatesLivenessWithoutSelectorLock(t *testing.T) {
 	}
 	assert.Equal(t, 1, cs.PeerCount())
 }
+
+// The registration outcome is reported after cs.mutex is released, so a
+// subscriber can read selector state (for example to log the resulting peer
+// count) from the callback without deadlocking. This is the same invariant as
+// the liveness check above, for the other callback the registration path
+// invokes: no configured callback may run with the selector lock held.
+func TestHandlePeerRollbackReportsOutcomeWithoutSelectorLock(t *testing.T) {
+	connId := newTestConnectionId(1)
+	var observedPeers atomic.Int32
+	var observedOutcome atomic.Value
+	var cs *ChainSelector
+	cs = NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2160,
+		DisableEventSubscriptions: true,
+		ConnectionLive:            func(ouroboros.ConnectionId) bool { return true },
+		OnRollbackRegistration: func(o RollbackRegistrationOutcome) {
+			observedOutcome.Store(o)
+			// Blocks forever if the outcome were reported under cs.mutex.
+			// #nosec G115 -- a tracked-peer count fits int32 in this test.
+			observedPeers.Store(int32(cs.PeerCount()))
+		},
+	})
+
+	handled := make(chan struct{})
+	go func() {
+		defer close(handled)
+		cs.HandlePeerRollbackEvent(
+			newRollbackEvent(
+				connId,
+				ocommon.Point{Slot: 2614270, Hash: []byte("intersect")},
+				ochainsync.Tip{
+					Point: ocommon.Point{
+						Slot: 2614276,
+						Hash: []byte("peer-tip"),
+					},
+					BlockNumber: 2614276,
+				},
+			),
+		)
+	}()
+
+	select {
+	case <-handled:
+	case <-time.After(20 * time.Second):
+		t.Fatal(
+			"HandlePeerRollbackEvent deadlocked: OnRollbackRegistration must " +
+				"be reported outside cs.mutex",
+		)
+	}
+	assert.Equal(
+		t,
+		RollbackRegistrationRegistered,
+		observedOutcome.Load(),
+	)
+	assert.Equal(
+		t,
+		int32(1),
+		observedPeers.Load(),
+		"the callback must observe the peer it was told about",
+	)
+}
