@@ -336,6 +336,9 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 	}
 	primaryChainRewound := false
 	if rewindPrimaryChain && !primaryChainAlreadyHeld {
+		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
+			return false, err
+		}
 		if err := ls.rewindPrimaryChainForRecovery(
 			rewindPoint,
 		); err != nil {
@@ -366,6 +369,33 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		ls.armContinuationAudit(rewindPoint, "replay recovery rewind")
 	}
 	return true, nil
+}
+
+// checkReplayRecoveryRollbackFloor preserves the refuse-before-chain-moves
+// invariant for recovery paths that rewind the primary chain before rolling
+// back ledger metadata. The metadata rollback has the same guard, but it is
+// too late to protect the primary chain from being truncated first.
+func (ls *LedgerState) checkReplayRecoveryRollbackFloor(
+	point ocommon.Point,
+) error {
+	belowPruneFloor, pruneFloor, err := ls.rollbackBelowConsumedUtxoPruneFloor(
+		point,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"check replay recovery rollback against consumed UTxO prune floor: %w",
+			err,
+		)
+	}
+	if belowPruneFloor {
+		return fmt.Errorf(
+			"replay recovery rollback target slot %d is below consumed UTxO prune floor %d: %w",
+			point.Slot,
+			pruneFloor,
+			ErrRollbackBelowUtxoPruneFloor,
+		)
+	}
+	return nil
 }
 
 // isDeterministicTxValidationError identifies validation failures that cannot
@@ -641,6 +671,9 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 			"error",
 			validationErr.Cause,
 		)
+	}
+	if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
+		return false, err
 	}
 	if err := ls.rewindPrimaryChainForRecovery(rewindPoint); err != nil {
 		if errors.Is(err, chain.ErrRollbackPointNotOnChain) {
@@ -1487,6 +1520,9 @@ func (ls *LedgerState) rejectRecoveryAtMithrilBoundary(
 		return fmt.Errorf("%s: %w", errContext, errHaltLedgerPipeline)
 	}
 	logRejection(mithrilLedgerSlot, rewindPoint)
+	if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
+		return err
+	}
 	if err := ls.rewindPrimaryChainForRecovery(rewindPoint); err != nil {
 		return fmt.Errorf(
 			"rewind primary chain to Mithril trust boundary: %w",

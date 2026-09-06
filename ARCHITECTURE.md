@@ -3882,6 +3882,9 @@ resolution exceeding the security parameter K, and both Mithril
 trust-boundary reasons) place the peer on the deny list for a cooldown in
 addition to closing the connection, so the node does not redial a peer that
 will deterministically be rejected again moments later.
+A rollback below the consumed-UTxO prune floor also closes the bearer for a
+fresh intersection, but does not deny the peer: another chain from that peer
+may still be usable.
 
 An outbound handshake refusal that proves the remote address belongs to a
 different Cardano network is denied for the lifetime of the in-memory peer
@@ -3906,7 +3909,8 @@ rollback does not accumulate toward the threshold. Second, even when a point
 does reach the threshold, the detector only breaks the loop if the rollback is
 genuinely un-crossable: `rollbackIsAppliable` mirrors the pre-checks
 `rollbackChainAndStateDeferred` uses (target block present and within the security
-parameter K via `chain.ValidateRollback`, and at/above the Mithril anchor),
+parameter K via `chain.ValidateRollback`, at/above the Mithril anchor, and
+at/above the consumed-UTxO prune floor),
 and a rollback that would succeed is applied even on the repeat rather than
 suppressed. Only a rollback the node cannot cross takes the skip path, which
 would otherwise wedge the node in a reconnect loop behind a legitimately
@@ -4069,6 +4073,9 @@ Replay recovery engages only for the failure it can repair. `txValidationError`
 carries every referenced input of the failing transaction regardless of what
 the transaction failed on, so a failure with nothing missing — a script data
 hash mismatch, say — arrived at the candidate search with a full input list.
+Before any replay recovery path rewinds the primary chain, it checks the
+consumed-UTxO prune floor; a target below that floor is refused while both the
+primary chain and ledger metadata remain untouched.
 `resolveReplayRecoveryProducer` returns a nil producer both for an input that
 is present in the UTxO set (nothing to find) and for one that is missing with
 no producer locatable, and folding the two together made every input of such a
