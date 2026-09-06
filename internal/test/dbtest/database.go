@@ -118,9 +118,10 @@ type Options struct {
 // once a package built several stores. See issue #3980.
 const boundedBadgerFileBytes = 8 << 20
 
-// BoundedBadgerConfig returns the Badger provider config a test database uses
-// when the caller supplies none. It bounds only the on-disk reservation; a test
-// that needs production sizing can pass its own StorageProvider.Config.
+// BoundedBadgerConfig returns the Badger sizing a test database applies by
+// default. It bounds only the on-disk reservation, and a caller's own
+// StorageProvider.Config wins key by key, so a test that genuinely needs
+// production sizing can still ask for it explicitly.
 func BoundedBadgerConfig() map[string]any {
 	return map[string]any{
 		"valueLogFileSize": uint64(boundedBadgerFileBytes),
@@ -161,8 +162,16 @@ func NewDatabaseWithOptions(
 		blobRegister = badger.RegisterProvider
 	}
 	blobConfig := opts.Blob.Config
-	if blobConfig == nil && blobName == "badger" {
-		blobConfig = BoundedBadgerConfig()
+	if blobName == "badger" {
+		// Apply the bounded sizes as defaults rather than only when the
+		// caller supplied no config at all: a config that sets some other
+		// knob and says nothing about sizes would otherwise fall back to
+		// the production defaults and restore the 2GiB reservation.
+		merged := BoundedBadgerConfig()
+		for k, v := range blobConfig {
+			merged[k] = v
+		}
+		blobConfig = merged
 	}
 	metadataName := opts.Metadata.Name
 	if metadataName == "" {

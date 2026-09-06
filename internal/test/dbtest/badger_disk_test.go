@@ -53,3 +53,45 @@ func TestNewDatabaseBoundsBadgerFileReservation(t *testing.T) {
 		largest, largestPath,
 	)
 }
+
+// A test that supplies its own Blob.Config for unrelated knobs must still get
+// the bounded sizes; otherwise the production defaults silently come back.
+func TestBoundedBadgerSizesSurviveAPartialCallerConfig(t *testing.T) {
+	dataDir := t.TempDir()
+	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
+		Config: &database.Config{DataDir: dataDir},
+		Blob: dbtest.StorageProvider{
+			// Sets an unrelated knob and says nothing about sizes.
+			Config: map[string]any{"gc": false},
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, db)
+
+	var largest int64
+	var largestPath string
+	require.NoError(t, filepath.WalkDir(dataDir,
+		func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				return nil
+			}
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			if info.Size() > largest {
+				largest, largestPath = info.Size(), path
+			}
+			return nil
+		}))
+
+	t.Logf("largest reserved file: %s (%d bytes)", largestPath, largest)
+	require.LessOrEqualf(
+		t, largest, int64(maxTestBlobFileBytes),
+		"a partial caller config reserved %d bytes for %s; bounded sizes must still apply",
+		largest, largestPath,
+	)
+}
