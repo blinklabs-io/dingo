@@ -11,6 +11,34 @@ behavior, and persisted formats are unchanged. Library callers of Mithril
 `Sync` or `NeedsSync` may leave `SyncConfig.StoragePlugins` unset to select the
 local `badger` blob and `sqlite` metadata providers.
 
+The blob-store reference can be replaced while the database is live.
+`Database.SetBlobStore` installs the new store and returns the one it replaced
+together with a drain func. Operations already in flight keep running against
+the store they pinned: a `Txn` pins the blob store it opened on for its whole
+lifetime and exposes it as `Txn.BlobStore()`, and blob work outside a
+transaction brackets itself with `Database.PinBlob`. The drain func returns
+once every operation pinned on the replaced store has finished, which is the
+point at which that store may be closed — `SetBlobStore` never closes it, and a
+caller that intends to close the replaced store must not install it again
+before drain returns, because a second installation of the same store counts
+its pins separately. The two production callers (`node.go` and
+`node_lifecycle.go`, the latter on the live reconfigure path) install a
+`bark.BlobStoreBark` wrapper over the store they were handed and keep it alive
+inside the wrapper, so they have nothing to drain. `Database.Blob()` returns
+the currently installed store without a pin, for callers that only need to
+identify, wrap, or ask a whole-store question of it; it must be used within the
+call that obtained it.
+
+Partial-commit recovery depends on the same "never closes" rule. When a commit
+returns `types.ErrPartialCommit` the blob transaction has committed and the
+metadata has not; the transaction releases its pin as it finishes, and the
+recovery that trims the blob store back to the metadata tip runs later, from
+the caller, against the store installed at that point. No pin spans that gap,
+because recovery is caller-scheduled and unbounded and holding one would block
+`drain` indefinitely. The replaced store must therefore stay open and reachable
+until recovery has run, which is what wrapping rather than retiring it
+achieves.
+
 The Badger provider threads the host's stop context through its close path.
 Stopping periodic value-log GC prevents a successful rewrite from starting a
 second pass. Badger does not expose cancellation for a rewrite already in
@@ -251,8 +279,9 @@ The Go model `models.Block` has `TableName() == "block"`, but it is not migrated
 
 Use the Go APIs when code runs inside Dingo:
 
-- `database.Database` in `database/database.go` owns both stores and exposes `Blob()`, `Metadata()`, `Transaction()`, `BlobTxn()`, `MetadataTxn()`, `StorageMode()`, and `Close()`.
-- `database.Txn` in `database/txn.go` coordinates sibling metadata/blob transactions. Write commits update commit timestamps in both stores, commit the blob transaction first, then commit metadata.
+- `database.Database` in `database/database.go` owns both stores and exposes `Blob()`, `PinBlob()`, `SetBlobStore()`, `Metadata()`, `Transaction()`, `BlobTxn()`, `MetadataTxn()`, `StorageMode()`, and `Close()`. `Blob()`, `PinBlob()`, and `SetBlobStore()` are the only readers and writer of the installed blob store; see "Storage provider ownership" for the pin/drain rules that make replacement safe.
+- `database.CborCache()` returns the `TieredCborCache`. Its cold-path entry points `ResolveUtxoCbor(txId, outputIdx, txn ...*Txn)` and `ResolveTxCbor(txn *Txn, txHash)` take the database transaction, not a bare `types.Txn` handle: an optional transaction makes uncommitted writes visible, and the cold read has to run against the store that transaction was opened on rather than whichever store is installed when the resolve happens.
+- `database.Txn` in `database/txn.go` coordinates sibling metadata/blob transactions. Write commits update commit timestamps in both stores, commit the blob transaction first, then commit metadata. `Txn.BlobStore()` returns the blob store the transaction was opened on — the store its `Blob()` handle belongs to, and the one every blob call inside the transaction must use.
 - `metadata.MetadataStore` in `database/plugin/metadata/store.go` is the
   compatibility composition of the SQL-facing capabilities. New components
   should accept the narrowest one they use rather than the composition.
@@ -2503,6 +2532,30 @@ slot. Such rows have no `certs`/`transaction` join, so without the
 `CASE WHEN` key their `COALESCE(..., 0)` values could lose the same-slot
 tie-break to a registration, incorrectly keeping the pool active for stake
 snapshots and reward inputs.
+
+### `GetPoolVrfKeyHashAtSlot` and `GetPoolEarliestVrfKeyHashAtSlot`
+
+Two lookups over the same rows, differing only in direction, used by header
+VRF-key verification to reconstruct the key a stake snapshot froze.
+
+`GetPoolVrfKeyHashAtSlot` returns the **latest** registration at or before a
+slot, ordered by `(added_slot, block_index, cert_index)` descending.
+`GetPoolEarliestVrfKeyHashAtSlot` returns the **earliest** at or before a slot,
+with the same ordering ascending. Both LEFT JOIN `certs` and `"transaction"`,
+so a registration synthesized by a Mithril import — which has no `certs` row —
+still ranks via `COALESCE(..., 0)`.
+
+The pair exists because cardano-ledger's POOL rule treats a first registration
+and a re-registration differently: a first registration is inserted into
+`psStakePools` immediately, while a re-registration goes to
+`psFutureStakePoolParams` and is merged only after SNAP has run. So the
+parameters a snapshot carries are those in force one epoch before its capture,
+and the key is resolved at that parameter cutoff with the *latest* lookup. A
+pool that first registered inside the captured epoch has no registration at
+that cutoff but is nonetheless in `psStakePools`; its key is then resolved with
+the *earliest* lookup at or before the capture slot. Earliest rather than
+latest, because a pool that also re-registered within that same epoch had the
+re-registration deferred, so the snapshot still carries the first one.
 
 ### `GetPoolsRetiringAtEpoch`
 
