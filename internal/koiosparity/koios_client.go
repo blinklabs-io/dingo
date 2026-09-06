@@ -139,6 +139,66 @@ type KoiosPoolHistoryItem struct {
 	EpochRos       float64  `json:"epoch_ros"`
 }
 
+// KoiosEpochParamsResp is the Koios /epoch_params response shape for the
+// per-epoch protocol parameters (dingo #3931). A wrong stored protocol
+// parameter changes what the node accepts, so it is wedge-class in exactly
+// the way a wrong validation rule is (#3928) — and nothing else in this
+// checker looked at it.
+//
+// Every numeric field is a json.Number rather than a concrete Go numeric
+// type. Koios publishes rationals as decimals, sometimes in exponent form
+// (price_step is "7.21e-05"), while Dingo stores them as exact rationals
+// ("721/10000000"). Keeping Koios's literal text means the value reaching
+// the comparison has been through no float round-trip at all, and
+// rationalsEqual reconciles the two forms exactly.
+//
+// Pointers mark fields Koios returns as null on eras that do not define the
+// parameter (everything from price_mem down is null before Alonzo). "" in the
+// cached KoiosEpochParams means exactly that "not defined", never zero.
+//
+// Deliberately not modeled: the Conway governance parameters
+// (pvt_*/dvt_*/committee_*/gov_action_*/drep_*/min_fee_ref_script_cost_per_byte),
+// and nonce/block_hash/extra_entropy. Both are classified explicitly in
+// koiosCoverageMatrix; see CompareEpochProtocolParams for why each is left to
+// follow-up work rather than compared unverified.
+type KoiosEpochParamsResp struct {
+	EpochNo uint64 `json:"epoch_no"`
+	Era     string `json:"era"`
+
+	MinFeeA            *json.Number `json:"min_fee_a"`
+	MinFeeB            *json.Number `json:"min_fee_b"`
+	MaxBlockSize       *json.Number `json:"max_block_size"`
+	MaxTxSize          *json.Number `json:"max_tx_size"`
+	MaxBhSize          *json.Number `json:"max_bh_size"`
+	KeyDeposit         *string      `json:"key_deposit"`
+	PoolDeposit        *string      `json:"pool_deposit"`
+	MaxEpoch           *json.Number `json:"max_epoch"`
+	OptimalPoolCount   *json.Number `json:"optimal_pool_count"`
+	Influence          *json.Number `json:"influence"`
+	MonetaryExpandRate *json.Number `json:"monetary_expand_rate"`
+	TreasuryGrowthRate *json.Number `json:"treasury_growth_rate"`
+	Decentralisation   *json.Number `json:"decentralisation"`
+	ProtocolMajor      *json.Number `json:"protocol_major"`
+	ProtocolMinor      *json.Number `json:"protocol_minor"`
+	MinUtxoValue       *string      `json:"min_utxo_value"`
+	MinPoolCost        *string      `json:"min_pool_cost"`
+	// CostModels is Koios's name-keyed dict of per-language Plutus operation
+	// prices ("PlutusV1", "PlutusV2", ...). Kept as a raw map of arrays so
+	// the fetch layer can normalise it without committing to a language set.
+	CostModels map[string][]int64 `json:"cost_models"`
+
+	PriceMem            *json.Number `json:"price_mem"`
+	PriceStep           *json.Number `json:"price_step"`
+	MaxTxExMem          *json.Number `json:"max_tx_ex_mem"`
+	MaxTxExSteps        *json.Number `json:"max_tx_ex_steps"`
+	MaxBlockExMem       *json.Number `json:"max_block_ex_mem"`
+	MaxBlockExSteps     *json.Number `json:"max_block_ex_steps"`
+	MaxValSize          *json.Number `json:"max_val_size"`
+	CollateralPercent   *json.Number `json:"collateral_percent"`
+	MaxCollateralInputs *json.Number `json:"max_collateral_inputs"`
+	CoinsPerUtxoSize    *string      `json:"coins_per_utxo_size"`
+}
+
 // KoiosTipResp is the shape of /tip.
 type KoiosTipResp struct {
 	EpochNo uint64 `json:"epoch_no"`
@@ -755,6 +815,48 @@ func (k *KoiosClient) GetTotals(
 	if len(items) != 1 || items[0].EpochNo != epoch {
 		return nil, fmt.Errorf(
 			"koios /totals: requested epoch %d, got %d row(s) beginning with epoch %d",
+			epoch,
+			len(items),
+			items[0].EpochNo,
+		)
+	}
+	return &items[0], nil
+}
+
+// GetEpochParams fetches the protocol parameters in force for a specific
+// epoch. Mirrors GetTotals' single-row contract exactly: a response that is
+// empty, has more than one row, or names a different epoch is an error rather
+// than something silently accepted, so a cached parameter set can never
+// belong to the wrong epoch.
+func (k *KoiosClient) GetEpochParams(
+	ctx context.Context,
+	epoch uint64,
+) (*KoiosEpochParamsResp, error) {
+	path := fmt.Sprintf("/epoch_params?_epoch_no=%d", epoch)
+	resp, err := k.get(ctx, path, -1, -1)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf(
+			"koios /epoch_params: status %d body: %s",
+			resp.StatusCode,
+			resp.Body,
+		)
+	}
+	var items []KoiosEpochParamsResp
+	if err := json.Unmarshal(resp.Body, &items); err != nil {
+		return nil, fmt.Errorf("koios /epoch_params decode: %w", err)
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf(
+			"koios /epoch_params: no data for epoch %d",
+			epoch,
+		)
+	}
+	if len(items) != 1 || items[0].EpochNo != epoch {
+		return nil, fmt.Errorf(
+			"koios /epoch_params: requested epoch %d, got %d row(s) beginning with epoch %d",
 			epoch,
 			len(items),
 			items[0].EpochNo,

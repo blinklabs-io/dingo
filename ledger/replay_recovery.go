@@ -798,10 +798,32 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 	ls.transactionEventMutex.Lock()
 	defer ls.transactionEventMutex.Unlock()
 
-	// Refuse to truncate anything toward a target the store does not hold:
+	// Refuse to truncate anything toward a target the chain does not hold:
 	// the descent commits each step as it goes, so discovering the target is
 	// unreachable part-way leaves the chain shortened for nothing.
-	if point.Slot > 0 || len(point.Hash) > 0 {
+	//
+	// This has to establish primary-chain membership, not store presence. A
+	// store lookup passes for a target the store still holds but the chain
+	// has abandoned -- the retained-index shape rollbackPointBlock documents
+	// -- and the descent then commits every intermediate step before
+	// Chain.Rollback refuses the final one with ErrRollbackPointNotOnChain,
+	// which is the outcome this check exists to prevent.
+	// Chain.ValidateRollback runs the chain's own membership check.
+	//
+	// Its over-K refusal is the one outcome that must not stop the descent:
+	// a recovery target deeper than the security parameter is precisely what
+	// this function windows, and every step is validated again on its own.
+	if err := ls.chain.ValidateRollback(point); err != nil &&
+		!errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+		return fmt.Errorf("validate recovery target: %w", err)
+	}
+	// Chain.ValidateRollback reads every slot-zero point as origin and skips
+	// its membership check there, and so does Chain.Rollback: it truncates to
+	// index zero and leaves currentTip naming the point's hash. A slot-zero
+	// point carrying a hash therefore still needs the store lookup this check
+	// replaced, or the descent would truncate the chain whole toward a block
+	// that need not exist.
+	if point.Slot == 0 && len(point.Hash) > 0 {
 		if _, err := database.BlockByPoint(ls.db, point); err != nil {
 			return fmt.Errorf("lookup recovery target: %w", err)
 		}
@@ -1933,15 +1955,20 @@ func (ls *LedgerState) durableAppliedFloorAnchorIndex() (uint64, bool, error) {
 func (ls *LedgerState) replayRecoveryBlockFromTxBlob(
 	txHash []byte,
 ) (models.Block, bool, error) {
-	blob := ls.db.Blob()
-	if blob == nil {
-		return models.Block{}, false, nil
-	}
 	txn := ls.db.BlobTxn(false)
-	if txn == nil || txn.Blob() == nil {
+	if txn == nil {
 		return models.Block{}, false, nil
 	}
 	defer txn.Rollback() //nolint:errcheck
+	// The store the transaction was opened on, not whichever is installed
+	// now: the handle below only means anything to that store, and the
+	// transaction's pin is what keeps it alive for this call. Reading
+	// ls.db.Blob() separately could pair a handle from one installation with
+	// a store from another across a concurrent SetBlobStore.
+	blob := txn.BlobStore()
+	if blob == nil || txn.Blob() == nil {
+		return models.Block{}, false, nil
+	}
 
 	txData, err := blob.GetTx(txn.Blob(), txHash)
 	if err != nil {

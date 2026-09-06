@@ -16,9 +16,11 @@ package koiosparity
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strconv"
 	"sync"
@@ -215,6 +217,10 @@ func Fetch(
 	// per-epoch worker skips the redundant pool/epoch_info/totals fetchEpoch
 	// call for these and fetches only account rewards.
 	accountOnlyEpochs := make(map[uint64]bool)
+	// paramsOnlyEpochs marks epochs whose pool-level data is already fresh but
+	// which predate parameter caching. They need only the single
+	// /epoch_params request, not a whole fetchEpoch.
+	paramsOnlyEpochs := make(map[uint64]bool)
 	if cfg.ForceRefresh {
 		for e := fromEpoch; e <= throughEpoch; e++ {
 			epochs = append(epochs, e)
@@ -224,11 +230,26 @@ func Fetch(
 		if err != nil {
 			return nil, fmt.Errorf("get uncached epochs: %w", err)
 		}
-		if cfg.AccountsEnabled {
-			have := make(map[uint64]bool, len(epochs))
-			for _, e := range epochs {
-				have[e] = true
+		// fullFetch is the set that runs the whole pool-level fetchEpoch, and
+		// it is the only set the two backfill gates below may not overlap: an
+		// epoch already being fetched in full gets its accounts and its
+		// parameter row from that path. The backfill sets themselves are
+		// independent of each other, because missing account coverage and a
+		// missing parameter row are independent properties of a cached epoch
+		// and an upgraded cache typically has both.
+		fullFetch := make(map[uint64]bool, len(epochs))
+		for _, e := range epochs {
+			fullFetch[e] = true
+		}
+		selected := make(map[uint64]bool, len(epochs))
+		maps.Copy(selected, fullFetch)
+		selectEpoch := func(e uint64) {
+			if !selected[e] {
+				selected[e] = true
+				epochs = append(epochs, e)
 			}
+		}
+		if cfg.AccountsEnabled {
 			missingAccounts, err := cache.GetEpochsMissingAccountCoverage(
 				cfg.Network,
 				fromEpoch,
@@ -241,13 +262,27 @@ func Fetch(
 				)
 			}
 			for _, e := range missingAccounts {
-				if !have[e] {
+				if !fullFetch[e] {
 					accountOnlyEpochs[e] = true
-					epochs = append(epochs, e)
+					selectEpoch(e)
 				}
 			}
-			slices.Sort(epochs)
 		}
+		missingParams, err := cache.GetEpochsMissingParams(
+			cfg.Network,
+			fromEpoch,
+			throughEpoch,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("get epochs missing params: %w", err)
+		}
+		for _, e := range missingParams {
+			if !fullFetch[e] {
+				paramsOnlyEpochs[e] = true
+				selectEpoch(e)
+			}
+		}
+		slices.Sort(epochs)
 	}
 
 	if len(epochs) == 0 {
@@ -381,19 +416,41 @@ loop:
 			}
 
 			var cnt int
-			if accountOnlyEpochs[epoch] {
+			switch {
+			case paramsOnlyEpochs[epoch] || accountOnlyEpochs[epoch]:
 				// Pool-level Koios data for this epoch is already fresh —
-				// only #3097's per-account coverage is missing/incomplete —
-				// so skip the redundant pool/epoch_info/totals fetchEpoch
-				// call entirely and go straight to the account backfill
-				// below, rather than re-fetching thousands of already-fresh
-				// pool-history rows just to reach it.
-				logger.Debug(
-					"koiosparity: epoch pool data already fresh, backfilling accounts only",
-					"network", cfg.Network,
-					"epoch", epoch,
-				)
-			} else {
+				// only the parameter row and/or #3097's per-account coverage
+				// is missing — so skip the redundant
+				// pool/epoch_info/totals fetchEpoch call entirely rather
+				// than re-fetching thousands of already-fresh pool-history
+				// rows just to reach the backfills. Re-fetching /epoch_info
+				// here would also break the account-backfill guarantee.
+				//
+				// The two backfills are cumulative, not exclusive: an
+				// upgraded cache is typically missing both, and running only
+				// one of them would let Fetch return success while the next
+				// check still reports the other side absent.
+				if paramsOnlyEpochs[epoch] {
+					logger.Debug(
+						"koiosparity: epoch pool data already fresh, backfilling parameters only",
+						"network", cfg.Network,
+						"epoch", epoch,
+					)
+					if fetchErr := fetchEpochParamsOnly(
+						fetchCtx, koios, cache, cfg.Network, epoch,
+					); fetchErr != nil {
+						handleEpochFetchErr("params", fetchErr)
+						return
+					}
+				}
+				if accountOnlyEpochs[epoch] {
+					logger.Debug(
+						"koiosparity: epoch pool data already fresh, backfilling accounts only",
+						"network", cfg.Network,
+						"epoch", epoch,
+					)
+				}
+			default:
 				var fetchErr error
 				cnt, fetchErr = fetchEpoch(fetchCtx, koios, cache, cfg.Network, epoch, poolIDs, firstActiveEpochs, logger)
 				if fetchErr != nil {
@@ -668,9 +725,30 @@ func fetchEpoch(
 		return 0, classifyFetchErr(fmt.Errorf("get totals: %w", err))
 	}
 
+	// 1c. Fetch /epoch_params — the per-epoch protocol parameters
+	// (dingo #3931). Another single sequential request, treated exactly like
+	// /totals above: any failure aborts the epoch rather than caching
+	// epoch_info and pool rows with a permanently missing parameter row.
+	paramsResp, err := koios.GetEpochParams(ctx, epoch)
+	if err != nil {
+		return 0, classifyFetchErr(fmt.Errorf("get epoch params: %w", err))
+	}
+
 	now := time.Now()
 
-	// 1c. Skip pools that could not possibly have any history yet this
+	// The parameter row is committed BEFORE CommitEpochData, not inside it.
+	// CommitEpochData advances koios_epoch_info.fetched_at, which is the
+	// freshness marker GetEpochsNeedingCheck compares against; writing the
+	// parameters first means a process killed between the two writes leaves
+	// the epoch looking unfetched and it is simply re-fetched. Committing
+	// them after would advance fetched_at with no parameter row behind it.
+	if err := cache.UpsertEpochParams(
+		epochParamsFromKoios(network, epoch, paramsResp, now),
+	); err != nil {
+		return 0, fmt.Errorf("commit epoch params: %w", err)
+	}
+
+	// 1d. Skip pools that could not possibly have any history yet this
 	// epoch — cuts wasted requests substantially on early epochs, when most
 	// of the network's ever-registered pools (firstActiveEpochs is hoisted
 	// once for the whole historical pool set) don't exist yet.
@@ -862,6 +940,9 @@ outer:
 		ReservesWithdrawal: totalsResp.ReservesWithdrawal,
 		FetchedAt:          now,
 	}); err != nil {
+		if invalidateErr := cache.DeleteEpochParams(network, epoch); invalidateErr != nil {
+			return 0, fmt.Errorf("commit epoch: %w; invalidate params: %w", err, invalidateErr)
+		}
 		return 0, fmt.Errorf("commit epoch: %w", err)
 	}
 
@@ -876,6 +957,128 @@ func unixTime(sec int64) time.Time {
 		return time.Time{}
 	}
 	return time.Unix(sec, 0).UTC()
+}
+
+// FetchEpochParams fetches and commits the /epoch_params row for one epoch.
+// Exported for the in-process Observer, which backfills parameters
+// independently of the pool-level fetch.
+func FetchEpochParams(
+	ctx context.Context,
+	koios *KoiosClient,
+	cache *Cache,
+	network string,
+	epoch uint64,
+) error {
+	return fetchEpochParamsOnly(ctx, koios, cache, network, epoch)
+}
+
+// fetchEpochParamsOnly fetches and commits just the /epoch_params row for an
+// epoch whose pool-level data is already cached and fresh.
+//
+// It deliberately does not touch koios_epoch_info.fetched_at. That column is
+// the freshness marker for pool-level data, which this did not refetch, so
+// advancing it would claim a freshness this call has not established.
+func fetchEpochParamsOnly(
+	ctx context.Context,
+	koios *KoiosClient,
+	cache *Cache,
+	network string,
+	epoch uint64,
+) error {
+	paramsResp, err := koios.GetEpochParams(ctx, epoch)
+	if err != nil {
+		return classifyFetchErr(fmt.Errorf("get epoch params: %w", err))
+	}
+	if err := cache.UpsertEpochParams(
+		epochParamsFromKoios(network, epoch, paramsResp, time.Now().UTC()),
+	); err != nil {
+		return fmt.Errorf("commit epoch params: %w", err)
+	}
+	return nil
+}
+
+// epochParamsFromKoios flattens a /epoch_params response into the cache row.
+//
+// Every value is carried across as the literal text Koios published — a
+// json.Number keeps its own digits, so "7.21e-05" is stored exactly as sent
+// with no float round-trip — and a null becomes "", which
+// CompareEpochProtocolParams reads as "this era does not define this
+// parameter" rather than as zero.
+func epochParamsFromKoios(
+	network string,
+	epoch uint64,
+	resp *KoiosEpochParamsResp,
+	now time.Time,
+) KoiosEpochParams {
+	if resp == nil {
+		return KoiosEpochParams{Network: network, Epoch: epoch, FetchedAt: now}
+	}
+	return KoiosEpochParams{
+		Network:              network,
+		Epoch:                epoch,
+		Era:                  resp.Era,
+		MinFeeA:              numOrEmpty(resp.MinFeeA),
+		MinFeeB:              numOrEmpty(resp.MinFeeB),
+		MaxBlockBodySize:     numOrEmpty(resp.MaxBlockSize),
+		MaxTxSize:            numOrEmpty(resp.MaxTxSize),
+		MaxBlockHeaderSize:   numOrEmpty(resp.MaxBhSize),
+		KeyDeposit:           strOrEmpty(resp.KeyDeposit),
+		PoolDeposit:          strOrEmpty(resp.PoolDeposit),
+		MaxEpoch:             numOrEmpty(resp.MaxEpoch),
+		NOpt:                 numOrEmpty(resp.OptimalPoolCount),
+		A0:                   numOrEmpty(resp.Influence),
+		Rho:                  numOrEmpty(resp.MonetaryExpandRate),
+		Tau:                  numOrEmpty(resp.TreasuryGrowthRate),
+		ProtocolMajor:        numOrEmpty(resp.ProtocolMajor),
+		ProtocolMinor:        numOrEmpty(resp.ProtocolMinor),
+		MinPoolCost:          strOrEmpty(resp.MinPoolCost),
+		PriceMem:             numOrEmpty(resp.PriceMem),
+		PriceStep:            numOrEmpty(resp.PriceStep),
+		MaxTxExMem:           numOrEmpty(resp.MaxTxExMem),
+		MaxTxExSteps:         numOrEmpty(resp.MaxTxExSteps),
+		MaxBlockExMem:        numOrEmpty(resp.MaxBlockExMem),
+		MaxBlockExSteps:      numOrEmpty(resp.MaxBlockExSteps),
+		MaxValueSize:         numOrEmpty(resp.MaxValSize),
+		CollateralPercentage: numOrEmpty(resp.CollateralPercent),
+		MaxCollateralInputs:  numOrEmpty(resp.MaxCollateralInputs),
+		CostModels:           canonicalCostModels(resp.CostModels),
+		Decentralisation:     numOrEmpty(resp.Decentralisation),
+		MinUtxoValue:         strOrEmpty(resp.MinUtxoValue),
+		CoinsPerUtxoSize:     strOrEmpty(resp.CoinsPerUtxoSize),
+		FetchedAt:            now,
+	}
+}
+
+// canonicalCostModels renders Koios's cost models as canonical JSON for the
+// cache: encoding/json sorts map keys, so the same models always produce the
+// same text and a cached row can be compared or diffed without re-parsing
+// order-sensitivity into it. "" when Koios published none (every pre-Alonzo
+// era), which CompareEpochProtocolParams reads as "this era prices no
+// scripts".
+//
+// A marshal failure is impossible for map[string][]int64, but is turned into
+// a deliberately unparseable marker rather than "" so it can never be
+// mistaken for "Koios published no cost models" and quietly skip the
+// comparison.
+func canonicalCostModels(models map[string][]int64) string {
+	if len(models) == 0 {
+		return ""
+	}
+	encoded, err := json.Marshal(models)
+	if err != nil {
+		return "unparseable: " + err.Error()
+	}
+	return string(encoded)
+}
+
+// numOrEmpty dereferences a nullable Koios JSON number, preserving its
+// literal text (json.Number) so no decimal or exponent value is ever routed
+// through a float64. Returns "" when Koios published null.
+func numOrEmpty(n *json.Number) string {
+	if n == nil {
+		return ""
+	}
+	return n.String()
 }
 
 // strOrEmpty dereferences a nullable Koios string field, returning "" when nil.

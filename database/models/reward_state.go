@@ -55,6 +55,23 @@ type RewardSnapshot struct {
 	CalculationVersion uint
 }
 
+// ImportedPoolBlockCount records how many blocks one pool minted during one
+// epoch, taken from a bootstrap snapshot's NewEpochState BlocksMade rather
+// than counted from blocks this node applied.
+//
+// A bootstrapped node holds no block history below its trust anchor, so for
+// the epochs preceding the anchor it cannot count blocks at all. Pool reward
+// performance is beta/sigma_a with beta the pool's share of the blocks minted
+// in the performance epoch, so those epochs have no performance without these
+// rows -- and an absent count is not zero blocks, it is an unknown the reward
+// round must decline rather than distribute.
+type ImportedPoolBlockCount struct {
+	PoolKeyHash    []byte
+	Epoch          uint64
+	BlocksProduced uint64
+	CapturedSlot   uint64
+}
+
 // RewardPoolInput captures per-pool inputs needed by reward calculation.
 type RewardPoolInput struct {
 	Margin                     *types.Rat

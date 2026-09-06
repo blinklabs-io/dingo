@@ -49,7 +49,7 @@ func newSyncBarrierTestDB(
 	require.NoError(t, err)
 	require.NoError(t, sqliteStore.Start(context.Background()))
 	db := &Database{
-		blob:     store,
+		blobRef:  newBlobStoreRef(store),
 		metadata: sqliteStore,
 		logger:   logger,
 		config:   &Config{Logger: logger},

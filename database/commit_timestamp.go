@@ -49,8 +49,15 @@ func (b *Database) checkCommitTimestamp() error {
 			metadataErr,
 		)
 	}
-	// Get value from blob
-	blobTimestamp, blobErr := b.Blob().GetCommitTimestamp()
+	// Get value from blob. Pin it: this runs from init, concurrently with
+	// whatever else already holds the database, and the read must not race a
+	// replacement.
+	blobStore, releaseBlob := b.PinBlob()
+	defer releaseBlob()
+	if blobStore == nil {
+		return types.ErrBlobStoreUnavailable
+	}
+	blobTimestamp, blobErr := blobStore.GetCommitTimestamp()
 	if blobErr != nil {
 		return fmt.Errorf(
 			"failed to get blob timestamp from plugin: %w",
@@ -76,9 +83,14 @@ func (b *Database) updateCommitTimestamp(txn *Txn, timestamp int64) error {
 	if err := b.Metadata().SetCommitTimestamp(timestamp, metaTxn); err != nil {
 		return err
 	}
-	// Update blob
+	// Update blob. The timestamp has to land in the store this transaction's
+	// blob handle belongs to, not whichever store is installed now.
 	blobTxn := txn.Blob()
-	if err := b.Blob().SetCommitTimestamp(timestamp, blobTxn); err != nil {
+	blobStore := txn.BlobStore()
+	if blobStore == nil {
+		return types.ErrBlobStoreUnavailable
+	}
+	if err := blobStore.SetCommitTimestamp(timestamp, blobTxn); err != nil {
 		return err
 	}
 	return nil

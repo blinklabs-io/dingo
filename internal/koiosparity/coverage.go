@@ -89,7 +89,9 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Endpoint: "/epoch_info",
 		Field:    "era",
 		Class:    CoverageUnsupported,
-		Reason:   "Dingo has no persisted per-epoch era aggregate",
+		Reason: "CompareEpochAggregates does not read the era; the same " +
+			"value is compared once against `epoch`.era_id under " +
+			"/epoch_params rather than twice",
 	},
 	{
 		Endpoint: "/epoch_info",
@@ -343,6 +345,380 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Field:    "epoch_ros",
 		Class:    CoverageUnsupported,
 		Reason:   "Dingo has no persisted annualised return-on-stake aggregate",
+	},
+
+	// /epoch_params (dingo #3931): CompareEpochProtocolParams compares the
+	// effective pparams row for the epoch — resolved from the epoch's own era,
+	// since the table holds one row per parameter change — against every
+	// parameter below classified exact-match. Numeric comparison goes through
+	// rationalsEqual, so Koios's decimal/exponent forms and Dingo's exact
+	// num/denom rationals reconcile without either side being rounded.
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "epoch_no",
+		Class:      CoverageExactMatch,
+		DingoField: "reporting epoch",
+		Reason:     "response identity must equal the requested epoch",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "era",
+		Class:      CoverageExactMatch,
+		DingoField: "epoch era from the `epoch` table",
+		Reason:     "the era decides which validation rules run at all",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "min_fee_a",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams min_fee_a",
+		Reason:     "exact value equality against the effective pparams row",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "min_fee_b",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams min_fee_b",
+		Reason:     "exact value equality against the effective pparams row",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "max_block_size",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams max_block_body_size",
+		Reason:     "exact value equality against the effective pparams row",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "max_tx_size",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams max_tx_size",
+		Reason:     "exact value equality; a wrong value is the #3928 wedge",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "max_bh_size",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams max_block_header_size",
+		Reason:     "exact value equality against the effective pparams row",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "key_deposit",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams key_deposit",
+		Reason:     "exact value equality against the effective pparams row",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "pool_deposit",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams pool_deposit",
+		Reason:     "exact value equality against the effective pparams row",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "max_epoch",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams max_epoch",
+		Reason:     "exact value equality against the effective pparams row",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "optimal_pool_count",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams n_opt",
+		Reason:     "exact value equality against the effective pparams row",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "influence",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams a0",
+		Reason:     "rational equality: Koios publishes 0.3 for Dingo's 3/10",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "monetary_expand_rate",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams rho",
+		Reason:     "rational equality: Koios publishes 0.003 for Dingo's 3/1000",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "treasury_growth_rate",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams tau",
+		Reason:     "rational equality: Koios publishes 0.2 for Dingo's 1/5",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "protocol_major",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams protocol_major",
+		Reason:     "exact value equality against the effective pparams row",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "protocol_minor",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams protocol_minor",
+		Reason:     "exact value equality against the effective pparams row",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "min_pool_cost",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams min_pool_cost",
+		Reason:     "exact value equality against the effective pparams row",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "price_mem",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams execution_costs.mem_price",
+		Reason:     "rational equality: Koios publishes 0.0577 for Dingo's 577/10000",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "price_step",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams execution_costs.step_price",
+		Reason:     "rational equality: Koios publishes 7.21e-05 for Dingo's 721/10000000",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "max_tx_ex_mem",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams max_tx_ex_units.memory",
+		Reason:     "gates phase-2 validation; a divergence is silent until a script tx fails",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "max_tx_ex_steps",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams max_tx_ex_units.steps",
+		Reason:     "gates phase-2 validation; a divergence is silent until a script tx fails",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "max_block_ex_mem",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams max_block_ex_units.memory",
+		Reason:     "gates phase-2 validation; a divergence is silent until a script tx fails",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "max_block_ex_steps",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams max_block_ex_units.steps",
+		Reason:     "gates phase-2 validation; a divergence is silent until a script tx fails",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "max_val_size",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams max_value_size",
+		Reason:     "exact value equality against the effective pparams row",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "collateral_percent",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams collateral_percentage",
+		Reason:     "gates phase-2 collateral validation",
+	},
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "max_collateral_inputs",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams max_collateral_inputs",
+		Reason:     "gates phase-2 collateral validation",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "decentralisation",
+		Class:    CoverageUnsupported,
+		Reason:   "no Babbage or Conway parameter struct defines it, so no live era has a Dingo value; cached for reference",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "min_utxo_value",
+		Class:    CoverageUnsupported,
+		Reason:   "a Shelley-era parameter absent from every live era's struct; cached for reference",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "coins_per_utxo_size",
+		Class:    CoverageUnsupported,
+		Reason:   "Koios reports Alonzo's per-word figure where Dingo stores per-byte (34482 vs 4310 on preview epochs 0-2); cached for reference pending its own investigation",
+	},
+
+	// cost_models is modeled and compared; the fields after it are documented
+	// /epoch_params fields this checker does not model at all, classified
+	// here so a report never implies they were checked.
+	{
+		Endpoint:   "/epoch_params",
+		Field:      "cost_models",
+		Class:      CoverageExactMatch,
+		DingoField: "pparams cost_models",
+		Reason:     "entry-for-entry equality per Plutus language; Dingo's numeric keys (0, 1) map to Koios's PlutusV1/PlutusV2 names and the positional arrays agree exactly",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "nonce",
+		Class:    CoverageUnsupported,
+		Reason:   "epoch identity, not a protocol parameter",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "block_hash",
+		Class:    CoverageUnsupported,
+		Reason:   "epoch identity, not a protocol parameter",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "extra_entropy",
+		Class:    CoverageUnsupported,
+		Reason:   "a Shelley-era nonce field absent from every live era's parameter struct",
+	},
+
+	// Conway governance and reference-script parameters. These are real
+	// consensus-relevant values and worth covering, but the reference chain
+	// available to verify their cross-side representation is Babbage-era
+	// throughout, so they are left to follow-up work rather than compared on
+	// an unverified assumption.
+	{
+		Endpoint: "/epoch_params",
+		Field:    "pvt_motion_no_confidence",
+		Class:    CoverageUnsupported,
+		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "pvt_committee_normal",
+		Class:    CoverageUnsupported,
+		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "pvt_committee_no_confidence",
+		Class:    CoverageUnsupported,
+		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "pvt_hard_fork_initiation",
+		Class:    CoverageUnsupported,
+		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "pvtpp_security_group",
+		Class:    CoverageUnsupported,
+		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "dvt_motion_no_confidence",
+		Class:    CoverageUnsupported,
+		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "dvt_committee_normal",
+		Class:    CoverageUnsupported,
+		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "dvt_committee_no_confidence",
+		Class:    CoverageUnsupported,
+		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "dvt_update_to_constitution",
+		Class:    CoverageUnsupported,
+		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "dvt_hard_fork_initiation",
+		Class:    CoverageUnsupported,
+		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "dvt_p_p_network_group",
+		Class:    CoverageUnsupported,
+		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "dvt_p_p_economic_group",
+		Class:    CoverageUnsupported,
+		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "dvt_p_p_technical_group",
+		Class:    CoverageUnsupported,
+		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "dvt_p_p_gov_group",
+		Class:    CoverageUnsupported,
+		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "dvt_treasury_withdrawal",
+		Class:    CoverageUnsupported,
+		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "committee_min_size",
+		Class:    CoverageUnsupported,
+		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "committee_max_term_length",
+		Class:    CoverageUnsupported,
+		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "gov_action_lifetime",
+		Class:    CoverageUnsupported,
+		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "gov_action_deposit",
+		Class:    CoverageUnsupported,
+		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "drep_deposit",
+		Class:    CoverageUnsupported,
+		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "drep_activity",
+		Class:    CoverageUnsupported,
+		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
+	},
+	{
+		Endpoint: "/epoch_params",
+		Field:    "min_fee_ref_script_cost_per_byte",
+		Class:    CoverageUnsupported,
+		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
 	},
 
 	// /account_reward_history (#3097): CompareAccountEpoch compares every

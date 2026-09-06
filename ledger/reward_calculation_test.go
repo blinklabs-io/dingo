@@ -4943,7 +4943,7 @@ func TestRewardBlockCountsTotalIncludesPoolsOutsideSnapshot(t *testing.T) {
 		))
 	}
 
-	counts, total, err := ls.rewardBlockCounts(
+	counts, total, known, err := ls.rewardBlockCounts(
 		meta,
 		nil,
 		performanceEpoch,
@@ -4953,6 +4953,7 @@ func TestRewardBlockCountsTotalIncludesPoolsOutsideSnapshot(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
+	require.True(t, known)
 	require.Equal(t, uint64(3), counts[string(poolKey)])
 	require.Equal(t, uint64(5), total)
 }
@@ -5002,7 +5003,7 @@ func TestRewardBlockCountsSkipsOverlaySlots(t *testing.T) {
 	require.True(t, rewardIsOverlaySlot(100, decentralization, 102))
 	require.False(t, rewardIsOverlaySlot(100, decentralization, 103))
 
-	counts, total, err := ls.rewardBlockCounts(
+	counts, total, known, err := ls.rewardBlockCounts(
 		meta,
 		nil,
 		performanceEpoch,
@@ -5012,6 +5013,7 @@ func TestRewardBlockCountsSkipsOverlaySlots(t *testing.T) {
 		decentralization,
 	)
 	require.NoError(t, err)
+	require.True(t, known)
 	require.Equal(t, uint64(2), counts[string(poolKey)])
 	require.Equal(t, uint64(3), total)
 }

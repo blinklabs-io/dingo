@@ -745,6 +745,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		if err != nil {
 			return fmt.Errorf("failed to create bark blob store: %w", err)
 		}
+		// The wrapper's upstream is the store it replaces and its Close
+		// forwards there, so the replaced store stays in use: there is
+		// nothing to drain and nothing to close. Both results are
+		// deliberately discarded.
 		n.db.SetBlobStore(barkBlobStore)
 	}
 
