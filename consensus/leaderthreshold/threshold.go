@@ -28,7 +28,8 @@ import (
 // Gouroboros performs the exact-rational and bounded-precision calculation,
 // including the strict-comparison ceiling and consensus-mode validation.
 // Keep this wrapper as the Dingo-owned boundary so callers do not duplicate
-// the protocol calculation.
+// the protocol calculation. The returned ceiling is used unchanged; adding
+// to it would admit the ceiling itself, which the real-valued rule rejects.
 func Threshold(
 	poolStake uint64,
 	totalStake uint64,
