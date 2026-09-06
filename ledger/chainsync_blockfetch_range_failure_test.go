@@ -314,7 +314,11 @@ func TestBlockfetchBatchDoneDoesNotBlockSubscriberOnContinuation(t *testing.T) {
 		activeBlockfetchConnId:       connId,
 		selectedBlockfetchConnId:     connId,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
-		batchBlocksReceived:          1,
+		// A batch that made progress: it delivered a block and that block
+		// extended the chain, so the continuation runs rather than the
+		// unobtained-range recovery.
+		batchBlocksReceived: 1,
+		batchBlocksApplied:  1,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			BlockfetchRequestRangeFunc: func(
@@ -1030,6 +1034,7 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchStreakResetsOnProgress(
 		// Stand in for a delivered block: handleEventBlockfetchBlock both
 		// counts the block and discards that range's failure record.
 		ls.batchBlocksReceived = 1
+		ls.batchBlocksApplied = 1
 		ls.noteBlockfetchRangeProgress(queuedStart)
 		require.NoError(
 			t,

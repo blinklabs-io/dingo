@@ -777,15 +777,13 @@ func (ls *LedgerState) publishReplayRecoveryNonConvergingResync(
 // replay or finish rolling metadata back to that valid primary-chain tip.
 //
 // Every step's target is read from the chain's live tip (Chain.PointAtDepth),
-// not from a schedule computed once at entry. Nothing serialises this descent
-// against chain growth -- it holds transactionEventMutex while blockfetch
-// appends under chainsyncMutex -- so a schedule fixed up front goes stale as
-// soon as one block lands: the next target is then window+n below the tip
-// Chain.Rollback measures fork depth against, and the whole rewind is refused
-// for exceeding K. That is issue #3889, where recovery recomputed the same
+// not from a schedule computed once at entry. The descent holds both locks
+// which serialize it against blockfetch appends and block-apply publication,
+// so each target remains within the security parameter when it is validated
+// and truncated. That is issue #3889, where recovery recomputed the same
 // doomed descent on every pipeline restart for nine hours and never truncated
 // the chain at all. Reading the tip per step makes each rollback K-bounded by
-// construction however far the chain has moved.
+// construction while the locks keep the chain and event stream ordered.
 func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 	point ocommon.Point,
 ) error {
@@ -793,8 +791,19 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 	if securityParam <= 0 {
 		return chain.ErrSecurityParamNotConfigured
 	}
-	// Keep every Undo enqueue and its corresponding chain truncation atomic
-	// with respect to a block-apply commit's AfterCommit Apply publication.
+	// Match rollbackChainAndStateDeferred's lock order. Hold both locks for the
+	// complete windowed operation so every Undo enqueue and chain truncation is
+	// ordered against block-apply AfterCommit callbacks, including between
+	// intermediate windows. Chain updates are published after both locks are
+	// released because delivery may backpressure or re-enter synchronization.
+	var pendingChainUpdates bool
+	defer func() {
+		if pendingChainUpdates {
+			ls.chain.PublishPendingChainUpdates()
+		}
+	}()
+	ls.chainsyncBlockfetchMutex.Lock()
+	defer ls.chainsyncBlockfetchMutex.Unlock()
 	ls.transactionEventMutex.Lock()
 	defer ls.transactionEventMutex.Unlock()
 
@@ -889,6 +898,7 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 		// re-reading the tip is what clears it. The retry is only taken
 		// while nothing has been emitted, so a ledger.tx consumer is never
 		// told to undo the same block twice.
+		ls.chainRollbackGeneration.Add(1)
 		emitted, err := ls.validateAndEmitRollbackUndoEmitted(next)
 		if err != nil {
 			if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) &&
@@ -898,7 +908,7 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 			}
 			return stepErr(err)
 		}
-		if err := ls.chain.Rollback(next); err != nil {
+		if _, err := ls.chain.RollbackDeferred(next); err != nil {
 			if !emitted &&
 				errors.Is(err, chain.ErrRollbackExceedsSecurityParam) &&
 				overKRetries < maxWindowedRewindRetries {
@@ -907,6 +917,7 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 			}
 			return stepErr(err)
 		}
+		pendingChainUpdates = true
 		if final {
 			return nil
 		}
