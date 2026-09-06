@@ -369,3 +369,54 @@ func TestRootPeerTargetComposition(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildDingoConfigWiresForgeTolerances asserts that the forge tolerances a
+// loaded internal/config.Config carries actually reach the dingo.Config that
+// Run hands to dingo.New. This is the composition path the binary really
+// takes: buildDingoConfig calls dingo.NewConfig with an explicit option list
+// and NewConfig starts from a fresh internal config, so a field that has no
+// With... entry here is silently dropped no matter how completely it is
+// plumbed through YAML, env, flags, defaults and the accessor.
+//
+// ForgeHeaderFrontierToleranceSlots was exactly that: parsed, defaulted,
+// flagged, documented and asserted at every other layer, yet absent from this
+// list, so an operator's value was discarded and the forger always fell back
+// to its built-in default. The neighbouring tolerances are asserted alongside
+// it so a future option-list edit that drops any of them fails here.
+func TestBuildDingoConfigWiresForgeTolerances(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		ForgeSyncToleranceSlots:           321,
+		ForgeStaleGapThresholdSlots:       654,
+		ForgeHeaderFrontierToleranceSlots: 42,
+	}
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+
+	built := buildDingoConfig(
+		cfg,
+		logger,
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+
+	if got := built.ForgeSyncToleranceSlots(); got != 321 {
+		t.Fatalf("expected forgeSyncToleranceSlots 321, got %d", got)
+	}
+	if got := built.ForgeStaleGapThresholdSlots(); got != 654 {
+		t.Fatalf("expected forgeStaleGapThresholdSlots 654, got %d", got)
+	}
+	if got := built.ForgeHeaderFrontierToleranceSlots(); got != 42 {
+		t.Fatalf(
+			"expected forgeHeaderFrontierToleranceSlots 42, got %d; the "+
+				"loaded value never reached dingo.Config, so the forger "+
+				"silently uses its built-in default",
+			got,
+		)
+	}
+}
