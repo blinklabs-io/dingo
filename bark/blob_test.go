@@ -21,6 +21,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -54,6 +55,16 @@ type fakeArchive struct {
 	oversize       bool
 	substituteBody []byte
 
+	// serveNotFound models the archive answering a well-formed request for
+	// a block it does not hold: an empty blocks list with the reference
+	// echoed under not_found, rather than a transport error.
+	serveNotFound bool
+
+	// notFoundRef, when set alongside serveNotFound, is echoed under
+	// not_found in place of the reference that was asked about. It models
+	// a confused or hostile archive answering about a different block.
+	notFoundRef *archive.BlockRef
+
 	fetchCalls int
 }
 
@@ -65,6 +76,14 @@ func (a *fakeArchive) FetchBlock(
 	resp := &archive.FetchBlockResponse{}
 	for _, b := range req.Msg.GetBlocks() {
 		hashHex := b.GetHash()
+		if a.serveNotFound {
+			missing := a.notFoundRef
+			if missing == nil {
+				missing = &archive.BlockRef{Hash: b.Hash, Slot: b.Slot}
+			}
+			resp.NotFound = append(resp.NotFound, missing)
+			continue
+		}
 		if _, ok := a.blocks[hashHex]; !ok {
 			a.t.Fatalf("fakeArchive: unexpected block requested: %s", hashHex)
 		}
@@ -1032,4 +1051,114 @@ func TestBarkIterator_PassesThroughLiveValues(t *testing.T) {
 
 	assert.Zero(t, archiveSrv.fetchCalls,
 		"no archive call must occur when no tombstones are present")
+}
+
+// TestGetBlock_ReportsArchiveNotFoundAsMissingKey pins the client half of
+// the batched archive contract: a block the archive does not hold now comes
+// back as an ordinary response carrying a not_found reference, not as a
+// transport error, and the wrapper has to translate that into the same
+// types.ErrBlobKeyNotFound a local blob store reports so callers can tell a
+// missing block from a broken archive.
+func TestGetBlock_ReportsArchiveNotFoundAsMissingKey(t *testing.T) {
+	db := newTestDB(t)
+	block := archiveBlockFixtures(t, 1)[0]
+
+	blocks, configure := serveArchiveBlock(t, block)
+	baseURL, fakeArch, httpClient := startFakeArchive(t, blocks)
+	configure(fakeArch)
+	fakeArch.serveNotFound = true
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	hash := block.Hash()
+	_, _, err := store.GetBlock(rTxn, block.SlotNumber(), hash[:])
+	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
+}
+
+// TestGetBlock_RejectsArchiveNotFoundForDifferentBlock pins the other half
+// of that translation. A block the archive returns is re-verified against
+// the requested slot and hash by verifyArchiveBlock, but nothing
+// re-verifies an absence, so an archive echoing a reference that was never
+// asked about must not be able to make this node record the requested
+// block as missing. Each case below answers about some other block, and
+// none of them may map to types.ErrBlobKeyNotFound.
+func TestGetBlock_RejectsArchiveNotFoundForDifferentBlock(t *testing.T) {
+	block := archiveBlockFixtures(t, 1)[0]
+	hash := block.Hash()
+	hashHex := hex.EncodeToString(hash[:])
+	slot := block.SlotNumber()
+
+	for _, testCase := range []struct {
+		name string
+		ref  *archive.BlockRef
+	}{
+		{
+			name: "different hash",
+			ref: &archive.BlockRef{
+				Hash: new(strings.Repeat("ab", 32)),
+				Slot: new(slot),
+			},
+		},
+		{
+			name: "different slot",
+			ref: &archive.BlockRef{
+				Hash: new(hashHex),
+				Slot: new(slot + 1),
+			},
+		},
+		{
+			name: "hash omitted",
+			ref:  &archive.BlockRef{Slot: new(slot)},
+		},
+		{
+			name: "slot omitted",
+			ref:  &archive.BlockRef{Hash: new(hashHex)},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			db := newTestDB(t)
+			blocks, configure := serveArchiveBlock(t, block)
+			baseURL, fakeArch, httpClient := startFakeArchive(t, blocks)
+			configure(fakeArch)
+			fakeArch.serveNotFound = true
+			fakeArch.notFoundRef = testCase.ref
+
+			store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+			rTxn := store.NewTransaction(false)
+			t.Cleanup(func() { _ = rTxn.Rollback() })
+
+			_, _, err := store.GetBlock(rTxn, slot, hash[:])
+			require.Error(t, err)
+			require.NotErrorIs(t, err, types.ErrBlobKeyNotFound)
+		})
+	}
+}
+
+// TestGetBlock_AcceptsArchiveNotFoundWithDifferentHashCase pins that the
+// echoed hash is compared as hex text rather than as bytes of a string:
+// the field is case-insensitive hex, and an archive that upper-cases it is
+// still answering about the block that was requested.
+func TestGetBlock_AcceptsArchiveNotFoundWithDifferentHashCase(t *testing.T) {
+	db := newTestDB(t)
+	block := archiveBlockFixtures(t, 1)[0]
+	hash := block.Hash()
+	slot := block.SlotNumber()
+
+	blocks, configure := serveArchiveBlock(t, block)
+	baseURL, fakeArch, httpClient := startFakeArchive(t, blocks)
+	configure(fakeArch)
+	fakeArch.serveNotFound = true
+	fakeArch.notFoundRef = &archive.BlockRef{
+		Hash: new(strings.ToUpper(hex.EncodeToString(hash[:]))),
+		Slot: new(slot),
+	}
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	_, _, err := store.GetBlock(rTxn, slot, hash[:])
+	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
 }

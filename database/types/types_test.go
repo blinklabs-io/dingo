@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/binary"
 	"errors"
 	"math/big"
 	"reflect"
@@ -248,6 +249,51 @@ func TestNullableHashScan(t *testing.T) {
 
 	if err := h.Scan(123); err == nil {
 		t.Fatal("Scan(int) should error")
+	}
+}
+
+// TestUnmarshalBlockMetadataRejectsOversizedPrevHash pins the decoder half
+// of the previous-hash bound. MarshalBlockMetadataInto refuses to write one
+// longer than a block hash, but a stored value can also be corrupt, and a
+// decoder that trusted the length prefix would hand its caller a
+// BlockMetadata the encoder could never have produced -- which then
+// propagates into a block record as if it were real.
+func TestUnmarshalBlockMetadataRejectsOversizedPrevHash(t *testing.T) {
+	const oversized = types.BlockMetadataPrevHashMaxLen + 1
+	data := make([]byte, types.BlockMetadataBinaryHeaderLen+oversized)
+	copy(data[:4], types.BlockMetadataBinaryMagic[:])
+	binary.BigEndian.PutUint64(data[4:12], 7)
+	binary.BigEndian.PutUint64(data[12:20], 1)
+	binary.BigEndian.PutUint64(data[20:28], 42)
+	binary.BigEndian.PutUint32(data[28:32], oversized)
+
+	// The value is self-consistent -- its declared length matches its
+	// actual length -- so only the bound rejects it.
+	if _, err := types.UnmarshalBlockMetadata(data); err == nil {
+		t.Fatal("UnmarshalBlockMetadata accepted an oversized prev hash")
+	}
+}
+
+// TestBlockMetadataCompactRoundTrip pins the encoding both the badger
+// plugin and the block-number search depend on, at the shared boundary
+// they now share it across.
+func TestBlockMetadataCompactRoundTrip(t *testing.T) {
+	want := types.BlockMetadata{
+		ID:       9,
+		Type:     4,
+		Height:   1234,
+		PrevHash: bytes.Repeat([]byte{0xab}, 32),
+	}
+	buf := make([]byte, types.BlockMetadataBinarySize(want.PrevHash))
+	if err := types.MarshalBlockMetadataInto(buf, want); err != nil {
+		t.Fatalf("MarshalBlockMetadataInto: %v", err)
+	}
+	got, err := types.UnmarshalBlockMetadata(buf)
+	if err != nil {
+		t.Fatalf("UnmarshalBlockMetadata: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("round trip = %+v, want %+v", got, want)
 	}
 }
 

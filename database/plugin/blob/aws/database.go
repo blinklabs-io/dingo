@@ -416,6 +416,23 @@ func (it *s3StreamIterator) reset(seek []byte) {
 	} else if it.store.prefix != "" {
 		input.Prefix = aws.String(it.store.prefix)
 	}
+	// Bound the listing server-side at the seek key. Without this, Seek lists
+	// the whole prefix and discards keys below the seek in advance() -- and
+	// bark's unauthenticated ArchiveService drives a seek into the full "bi"
+	// prefix on every probe of its height binary search, so one anonymous
+	// request costs order N keys per probe. gcs bounds the same listing with
+	// query.StartOffset.
+	//
+	// StartAfter is exclusive, so it cannot be the seek key itself. A strict
+	// prefix of the seek key is strictly less than the seek key and than every
+	// key after it, so it is a safe lower bound; it can admit a handful of keys
+	// sharing that prefix but sorting below the seek, which advance() drops.
+	if len(seek) > 0 {
+		full := it.store.fullKey(string(seek))
+		if bound := full[:len(full)-1]; bound > aws.ToString(input.Prefix) {
+			input.StartAfter = aws.String(bound)
+		}
+	}
 	it.paginator = s3.NewListObjectsV2Paginator(it.store.client, input)
 	it.page = nil
 	it.pageIdx = 0
