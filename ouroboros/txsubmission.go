@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -45,6 +46,90 @@ var (
 		"txsubmission admission wait stopped",
 	)
 )
+
+type validatedTxsubmissionBody struct {
+	body txsubmission.TxBody
+	tx   ledger.Transaction
+}
+
+// validateTxsubmissionReply verifies the complete reply before its first
+// transaction is admitted. The advertised sizes are part of the request
+// budget, so each body must have the exact size the peer advertised.
+func validateTxsubmissionReply(
+	requested []txsubmission.TxIdAndSize,
+	returned []txsubmission.TxBody,
+) ([]validatedTxsubmissionBody, error) {
+	if len(returned) > len(requested) {
+		return nil, fmt.Errorf(
+			"txsubmission reply count exceeds request: requested %d, received %d",
+			len(requested),
+			len(returned),
+		)
+	}
+	ret := make([]validatedTxsubmissionBody, 0, len(returned))
+	var requestedBytes uint64
+	for _, requestedTx := range requested {
+		requestedBytes += uint64(requestedTx.Size)
+	}
+	var returnedBytes uint64
+	nextRequested := 0
+	for i, txBody := range returned {
+		returnedBytes += uint64(len(txBody.TxBody))
+		if returnedBytes > requestedBytes {
+			return nil, fmt.Errorf(
+				"txsubmission reply exceeds byte limit: requested %d, received at least %d",
+				requestedBytes,
+				returnedBytes,
+			)
+		}
+		tx, err := ledger.NewTransactionFromCbor(
+			uint(txBody.EraId),
+			txBody.TxBody,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"txsubmission reply transaction %d decode failed: %w",
+				i,
+				err,
+			)
+		}
+		txHash := tx.Hash()
+		matched := -1
+		for requestedIdx := nextRequested; requestedIdx < len(requested); requestedIdx++ {
+			if bytes.Equal(txHash[:], requested[requestedIdx].TxId.TxId[:]) {
+				matched = requestedIdx
+				break
+			}
+		}
+		if matched < 0 {
+			return nil, fmt.Errorf(
+				"txsubmission reply hash or order mismatch at index %d: received %x",
+				i,
+				txHash,
+			)
+		}
+		want := requested[matched]
+		if txBody.EraId != want.TxId.EraId {
+			return nil, fmt.Errorf(
+				"txsubmission reply era mismatch at index %d: requested %d, received %d",
+				i,
+				want.TxId.EraId,
+				txBody.EraId,
+			)
+		}
+		if uint64(len(txBody.TxBody)) != uint64(want.Size) {
+			return nil, fmt.Errorf(
+				"txsubmission reply size mismatch at index %d: requested %d, received %d",
+				i,
+				want.Size,
+				len(txBody.TxBody),
+			)
+		}
+		nextRequested = matched + 1
+		ret = append(ret, validatedTxsubmissionBody{body: txBody, tx: tx})
+	}
+	return ret, nil
+}
 
 // txsubmissionBackoffDuration returns the exponential backoff duration
 // for the given number of consecutive rate limit hits, capped at max.
@@ -321,7 +406,11 @@ func (o *Ouroboros) txsubmissionServerInit(
 				} else {
 					consecutiveRateLimits = 0
 				}
-				requestTxIds := make([]txsubmission.TxId, 0, len(txIds))
+				requestedTxs := make(
+					[]txsubmission.TxIdAndSize,
+					0,
+					len(txIds),
+				)
 				if limitAdmission {
 					if int64(txIds[0].Size) >
 						headroom.MaxAdmissionHeadroomBytes() {
@@ -358,15 +447,20 @@ func (o *Ouroboros) txsubmissionServerInit(
 					) {
 						return
 					}
-					requestTxIds = append(requestTxIds, txIds[0].TxId)
+					requestedTxs = append(requestedTxs, txIds[0])
 				} else {
-					// Unwrap inner TxId from TxIdAndSize.
-					for _, txId := range txIds {
-						requestTxIds = append(requestTxIds, txId.TxId)
-					}
+					requestedTxs = append(requestedTxs, txIds...)
 				}
-				if len(requestTxIds) == 0 {
+				if len(requestedTxs) == 0 {
 					continue
+				}
+				requestTxIds := make(
+					[]txsubmission.TxId,
+					0,
+					len(requestedTxs),
+				)
+				for _, requestedTx := range requestedTxs {
+					requestTxIds = append(requestTxIds, requestedTx.TxId)
 				}
 				// Request TX content for TxIds from above
 				txs, err := ctx.Server.RequestTxs(requestTxIds)
@@ -383,32 +477,24 @@ func (o *Ouroboros) txsubmissionServerInit(
 					)
 					return
 				}
-				for txIdx, txBody := range txs {
-					// Decode TX from CBOR
-					tx, err := ledger.NewTransactionFromCbor(
-						uint(txBody.EraId),
-						txBody.TxBody,
+				validatedTxs, err := validateTxsubmissionReply(
+					requestedTxs,
+					txs,
+				)
+				if err != nil {
+					o.config.Logger.Error(
+						"rejected mismatched txsubmission reply",
+						"component", "network",
+						"protocol", "tx-submission",
+						"role", "server",
+						"connection_id", ctx.ConnectionId.String(),
+						"error", err,
 					)
-					if err != nil {
-						var txId string
-						if len(txs) == len(requestTxIds) {
-							txId = hex.EncodeToString(
-								requestTxIds[txIdx].TxId[:],
-							)
-						}
-						o.config.Logger.Error(
-							fmt.Sprintf(
-								"failed to parse transaction CBOR: %s",
-								err,
-							),
-							"component", "network",
-							"protocol", "tx-submission",
-							"role", "server",
-							"connection_id", ctx.ConnectionId.String(),
-							"tx_id", txId,
-						)
-						continue
-					}
+					return
+				}
+				for _, validatedTx := range validatedTxs {
+					txBody := validatedTx.body
+					tx := validatedTx.tx
 					o.config.Logger.Debug(
 						"received tx",
 						"tx_hash", tx.Hash(),

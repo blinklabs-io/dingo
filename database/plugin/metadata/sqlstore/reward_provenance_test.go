@@ -208,6 +208,36 @@ func TestStakeCalculationVersionRoundTrip(t *testing.T) {
 	)
 }
 
+func TestRewardSeedFailureRoundTripAndRollback(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	require.NoError(t, store.SaveRewardSeedFailure(
+		10, "mark", "pool has no reward account", 100, nil,
+	))
+	reason, err := store.GetRewardSeedFailure(10, "mark", nil)
+	require.NoError(t, err)
+	require.Equal(t, "pool has no reward account", reason)
+	require.NoError(t, store.SaveRewardSeedFailure(
+		12, "mark", "pool has no reward account", 50, nil,
+	))
+	require.NoError(t, store.SaveRewardSeedFailure(
+		12, "mark", "pool has no parameters", 200, nil,
+	))
+	require.NoError(t, store.SaveRewardSeedFailure(
+		11, "mark", "missing parameters", 200, nil,
+	))
+	require.NoError(t, store.DeleteRewardStateAfterSlot(150, nil))
+	reason, err = store.GetRewardSeedFailure(10, "mark", nil)
+	require.NoError(t, err)
+	require.Equal(t, "pool has no reward account", reason)
+	reason, err = store.GetRewardSeedFailure(12, "mark", nil)
+	require.NoError(t, err)
+	require.Equal(t, "pool has no reward account", reason)
+	reason, err = store.GetRewardSeedFailure(11, "mark", nil)
+	require.NoError(t, err)
+	require.Empty(t, reason)
+}
+
 func TestV1Alpha1AddressTransactionIndex(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)

@@ -30,7 +30,31 @@ import (
 // hardfork.BuildSummary with the safe zone from the configured era Shape and
 // the ledger's current TransitionInfo. This gives in-memory callers the same
 // bounded forecast inputs used by the NtC HardForkEraHistory query.
+//
+// The forecast horizon is measured from the published tip. Callers that know a
+// more recent applied block must use hardForkSummaryAnchoredAt instead.
 func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
+	return ls.hardForkSummaryAnchoredAt(0)
+}
+
+// hardForkSummaryAnchoredAt is HardForkSummary with the current era's forecast
+// horizon measured from max(published tip slot, horizonAnchorSlot).
+//
+// The published tip only advances when a whole block batch commits (batchSize
+// blocks), so during replay it can trail the block actually being applied by
+// up to a full batch. The reference implementation measures the safe zone from
+// the applied block's immediate predecessor
+// (Ouroboros.Consensus.HardFork.Combinator.State.Infra.reconstructSummary,
+// reached from applyChainTickLedgerResult's epochInfoLedger on the state left
+// by that predecessor). Because applySafeZone snaps the bound up to an epoch
+// boundary, a tip that trails by even one block can cost a whole epoch of
+// horizon and reject a transaction the reference accepts (issue #3844).
+//
+// horizonAnchorSlot 0 keeps the published tip, which is what every caller
+// without an applied block in hand wants.
+func (ls *LedgerState) hardForkSummaryAnchoredAt(
+	horizonAnchorSlot uint64,
+) (*hardfork.Summary, error) {
 	// SystemStart is sourced from the Shelley genesis when available. When it
 	// isn't (e.g. SlotToEpoch-style callers that work from the epoch cache
 	// alone), SystemStart stays at the zero time.Time and callers must avoid
@@ -45,7 +69,7 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 	consensusState, tipState := ls.loadStateSnapshots()
 	cache := consensusState.epochCache
 	transitionInfo := consensusState.transitionInfo
-	tipSlot := tipState.currentTip.Point.Slot
+	tipSlot := max(tipState.currentTip.Point.Slot, horizonAnchorSlot)
 
 	if len(cache) == 0 {
 		return nil, errors.New("ledger: no epochs in cache")

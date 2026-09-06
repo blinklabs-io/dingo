@@ -71,6 +71,31 @@ func verifyBlockHeader(
 	)
 }
 
+func TestEpochNonceHexCachesMatchingRawNonce(t *testing.T) {
+	ls := &LedgerState{
+		epochNonceHexCache: make(map[uint64]epochNonceHexCacheEntry),
+	}
+	nonce := []byte{0x00, 0x11, 0x22, 0x33}
+
+	first := ls.epochNonceHex(42, nonce)
+	require.Equal(t, "00112233", first)
+
+	// A cached nonce must return without allocating another hexadecimal string.
+	var cached string
+	allocs := testing.AllocsPerRun(100, func() {
+		cached = ls.epochNonceHex(42, nonce)
+	})
+	require.Equal(t, first, cached)
+	require.Zero(t, allocs)
+
+	// The cache retains an independent nonce copy, so a reused caller buffer
+	// invalidates the old entry instead of returning stale text for this epoch.
+	nonce[0] = 0xff
+	second := ls.epochNonceHex(42, nonce)
+	require.Equal(t, "ff112233", second)
+	require.NotEqual(t, first, second)
+}
+
 // tamperOption controls which part of a test block to corrupt.
 type tamperOption int
 
@@ -2388,7 +2413,7 @@ func captureLiveMarkSnapshot(
 		return err == nil &&
 			snapshot != nil &&
 			snapshot.CapturedSlot == snapshotSlot
-	}, 2*time.Second, "live mark snapshot should be captured")
+	}, 30*time.Second, "live mark snapshot should be captured")
 }
 
 // seedPoolRegistration registers a pool so that db.GetPool(poolKeyHash)

@@ -256,7 +256,10 @@ func (s *queryServiceServer) ReadParams(
 	)
 	resp := &query.ReadParamsResponse{}
 
-	protoParams := s.utxorpc.config.LedgerState.GetCurrentPParams()
+	// GetCurrentPParamsForReporting omits any synthetic (not-yet-real)
+	// PlutusV2 cost model from this reporting reply, matching what a real
+	// cardano-node reports -- see blinklabs-io/dingo#3825.
+	protoParams := s.utxorpc.config.LedgerState.GetCurrentPParamsForReporting()
 	if protoParams == nil {
 		// Byron carries no protocol-parameter CBOR, so a genuine Byron
 		// prefix reaches this during a from-genesis sync. FailedPrecondition
