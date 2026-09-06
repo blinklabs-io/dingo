@@ -16,6 +16,7 @@ package ouroboros
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"runtime"
 	"testing"
@@ -34,6 +35,7 @@ import (
 	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 )
 
 // newOutboundStartTestOuroboros builds an Ouroboros wired with every
@@ -132,9 +134,20 @@ func TestOutboundChainsyncStartFailureClosesConnection(t *testing.T) {
 	bus := event.NewEventBus(nil, logger)
 	defer bus.Close()
 
-	baselineGoroutines := runtime.NumGoroutine()
-
 	o, connManager, connId := newOutboundStartTestOuroboros(t, logger, bus)
+
+	// Snapshot AFTER the harness has started its own workers (mempool,
+	// event bus, connection manager, mock connection) so only goroutines
+	// created from here on are attributed to the code under test.
+	//
+	// IgnoreCurrent is what makes goleak usable in this package: a bare
+	// goleak call inspects the whole process and would trip on unrelated
+	// pre-existing goroutines from other tests. A NumGoroutine baseline was
+	// tried first and is not sensitive enough here -- tearing the connection
+	// down frees several goroutines, so the total lands below the baseline
+	// and a single stranded goroutine hides inside that slack.
+	leakOpt := goleak.IgnoreCurrent()
+	baselineGoroutines := runtime.NumGoroutine()
 
 	// A ledger whose database is closed makes the rollback-anchor lookup
 	// return a storage error rather than "no anchor".
@@ -177,15 +190,125 @@ func TestOutboundChainsyncStartFailureClosesConnection(t *testing.T) {
 		"failed to start chainsync client, closing outbound connection",
 	)
 
-	// The torn-down connection must not strand goroutines. A small margin
-	// absorbs the test harness's own workers (mempool, event bus).
+	// The torn-down connection must not strand goroutines. The count must
+	// come back to (or below) the post-setup baseline; teardown is
+	// asynchronous, hence the poll.
 	require.Eventually(
 		t,
-		func() bool { return runtime.NumGoroutine() <= baselineGoroutines+8 },
-		5*time.Second,
+		func() bool { return runtime.NumGoroutine() <= baselineGoroutines },
+		10*time.Second,
 		50*time.Millisecond,
-		"goroutines leaked after the failed chainsync start (baseline %d, now %d)",
+		"goroutines did not return to the post-setup baseline after the failed chainsync start (baseline %d, now %d)",
 		baselineGoroutines,
 		runtime.NumGoroutine(),
 	)
+	// And, unlike the count above, this catches a single stranded goroutine.
+	goleak.VerifyNone(t, leakOpt)
+}
+
+// TestCloseOutboundConnAfterChainsyncFailureClosesStartedConn covers the
+// ordinary case: the connection chainsync failed on is still the manager's
+// current connection for its id, so it is closed and peer governance can
+// reconnect.
+func TestCloseOutboundConnAfterChainsyncFailureClosesStartedConn(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	bus := event.NewEventBus(nil, logger)
+	defer bus.Close()
+
+	o, connManager, connId := newOutboundStartTestOuroboros(t, logger, bus)
+	startedConn := connManager.GetConnectionById(connId)
+	require.NotNil(t, startedConn)
+
+	o.closeOutboundConnAfterChainsyncFailure(connId, startedConn)
+
+	require.Eventually(
+		t,
+		func() bool { return connManager.GetConnectionById(connId) == nil },
+		2*time.Second,
+		20*time.Millisecond,
+		"the connection chainsync failed on must be closed",
+	)
+}
+
+// TestCloseOutboundConnAfterChainsyncFailureSparesReplacement is the
+// regression test for closing the wrong connection.
+//
+// ConnectionId is a (local addr, remote addr) pair, so a reconnect to the same
+// peer can produce the same id. If the connection we started on has already
+// been replaced by the time the failed start returns, closing whatever now
+// holds the id would tear down a healthy peer for its predecessor's failure.
+//
+// The replacement is modelled by handing the helper a connection that is not
+// the one the manager currently holds for that id, which is exactly the state
+// the guard has to detect.
+func TestCloseOutboundConnAfterChainsyncFailureSparesReplacement(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	bus := event.NewEventBus(nil, logger)
+	defer bus.Close()
+
+	o, connManager, connId := newOutboundStartTestOuroboros(t, logger, bus)
+	replacement := connManager.GetConnectionById(connId)
+	require.NotNil(t, replacement)
+
+	// A different connection object, standing in for the one we started on
+	// before it was replaced under the same id.
+	staleConn, err := ouroboros.New(
+		ouroboros.WithConnection(
+			ouroboros_mock.NewConnection(
+				ouroboros_mock.ProtocolRoleClient,
+				ouroboros_mock.ConversationKeepAlive,
+			),
+		),
+		ouroboros.WithNetworkMagic(ouroboros_mock.MockNetworkMagic),
+		ouroboros.WithNodeToNode(true),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = staleConn.Close() })
+	require.NotSame(t, replacement, staleConn)
+
+	o.closeOutboundConnAfterChainsyncFailure(connId, staleConn)
+
+	// The replacement must be left strictly alone. Removal from the manager
+	// is asynchronous, so assert the connection never disappears over a
+	// window rather than checking once: an immediate NotNil would pass even
+	// if the helper had just closed it.
+	require.Never(
+		t,
+		func() bool { return connManager.GetConnectionById(connId) == nil },
+		2*time.Second,
+		50*time.Millisecond,
+		"the replacement connection must not be closed",
+	)
+	require.Same(t, replacement, connManager.GetConnectionById(connId))
+}
+
+// TestCloseOutboundConnAfterChainsyncFailureHandlesMissingConn verifies the
+// helper is a no-op when there was no connection to start with, and when the
+// connection has already gone away entirely.
+func TestCloseOutboundConnAfterChainsyncFailureHandlesMissingConn(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	bus := event.NewEventBus(nil, logger)
+	defer bus.Close()
+
+	o, connManager, connId := newOutboundStartTestOuroboros(t, logger, bus)
+
+	// Nil started connection: nothing to close, must not panic.
+	require.NotPanics(t, func() {
+		o.closeOutboundConnAfterChainsyncFailure(connId, nil)
+	})
+	require.NotNil(t, connManager.GetConnectionById(connId))
+
+	// Connection already gone: the id no longer resolves, so the guard sees
+	// current == nil != startedConn and leaves well alone.
+	startedConn := connManager.GetConnectionById(connId)
+	require.NoError(t, startedConn.Close())
+	require.Eventually(
+		t,
+		func() bool { return connManager.GetConnectionById(connId) == nil },
+		2*time.Second,
+		20*time.Millisecond,
+	)
+	require.NotPanics(t, func() {
+		o.closeOutboundConnAfterChainsyncFailure(connId, startedConn)
+	})
 }

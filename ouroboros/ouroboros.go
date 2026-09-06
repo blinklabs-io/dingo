@@ -895,6 +895,13 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 			true, // startedAsOutbound
 		)
 		if shouldStartChainsync {
+			// Capture the connection we are about to start chainsync on.
+			// The failure path below must close *this* connection, not
+			// whatever holds the id by the time the start returns: a
+			// reconnect can reuse the same local/remote address pair, and
+			// ConnectionId is exactly that pair, so a replacement can take
+			// over the id while the start is in flight.
+			startedConn := o.connManager.GetConnectionById(connId)
 			if err := o.chainsyncClientStart(connId); err != nil {
 				// Roll back the registration on failure
 				o.chainsyncState.RemoveClientConnId(connId)
@@ -919,16 +926,10 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 				//
 				// The inbound handler already closes on this same failure;
 				// this makes the outbound path consistent with it.
-				if conn := o.connManager.GetConnectionById(connId); conn != nil {
-					if closeErr := conn.Close(); closeErr != nil {
-						o.config.Logger.Debug(
-							"failed to close outbound connection after chainsync start failure",
-							"component", "network",
-							"connection_id", connId.String(),
-							"error", closeErr,
-						)
-					}
-				}
+				o.closeOutboundConnAfterChainsyncFailure(
+					connId,
+					startedConn,
+				)
 				return
 			}
 			o.config.Logger.Debug(
@@ -984,6 +985,42 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 // inbound connections. When the remote peer negotiated InitiatorAndResponder
 // mode, a single TCP connection can carry both directions of the Ouroboros
 // protocols, matching cardano-node's connection manager behavior.
+// closeOutboundConnAfterChainsyncFailure closes the connection that chainsync
+// failed to start on, so peer governance observes the failure and applies its
+// reconnect backoff.
+//
+// It closes startedConn only if that is still the connection manager's current
+// connection for this id. ConnectionId is a (local addr, remote addr) pair, so
+// a reconnect to the same peer can legitimately produce the same id: looking
+// the connection up again after the start returned could hand back a healthy
+// replacement, and closing that would tear down a good peer for a failure that
+// belonged to its predecessor.
+func (o *Ouroboros) closeOutboundConnAfterChainsyncFailure(
+	connId ouroboros.ConnectionId,
+	startedConn *ouroboros.Connection,
+) {
+	if startedConn == nil {
+		return
+	}
+	if current := o.connManager.GetConnectionById(connId); current != startedConn {
+		o.config.Logger.Debug(
+			"outbound connection no longer current after chainsync start failure, not closing",
+			"component", "network",
+			"connection_id", connId.String(),
+			"replaced", current != nil,
+		)
+		return
+	}
+	if closeErr := startedConn.Close(); closeErr != nil {
+		o.config.Logger.Debug(
+			"failed to close outbound connection after chainsync start failure",
+			"component", "network",
+			"connection_id", connId.String(),
+			"error", closeErr,
+		)
+	}
+}
+
 func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 	e, ok := evt.Data.(connmanager.InboundConnectionEvent)
 	if !ok {
