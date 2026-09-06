@@ -21,7 +21,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
@@ -168,8 +167,9 @@ func TestSkippedBatchRestoreIsRecorded(t *testing.T) {
 			defer wg.Done()
 			moved <- pc.AddBlock(mover, nil)
 		}()
-		// Give the add time to park on the chain lock the batch holds.
-		time.Sleep(5 * time.Millisecond)
+		// Release the batch only once the add is queued on the chain lock it
+		// holds, so the add runs before the batch's restore reacquires it.
+		waitUntilParkedIn(t, "chain.(*Chain).addBlockInternal")
 		close(release)
 		wg.Wait()
 		if <-moved == nil {

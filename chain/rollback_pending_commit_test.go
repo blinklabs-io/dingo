@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
@@ -133,10 +132,10 @@ func TestRollbackDoesNotResolveUncommittedBlockIndex(t *testing.T) {
 			defer wg.Done()
 			rollbackErr = pc.Rollback(ocommon.Point{})
 		}()
-		// Give the rollback time to park on the lock the batch holds, so it
-		// runs in the window between the batch releasing that lock and its
-		// transaction committing.
-		time.Sleep(10 * time.Millisecond)
+		// Release the batch only once the rollback is queued on the lock it
+		// holds, so the rollback runs in the window between that lock being
+		// handed over and the batch's transaction committing.
+		waitUntilParkedIn(t, "chain.(*Chain).rollbackLocked")
 		close(release)
 		wg.Wait()
 		if errors.Is(rollbackErr, models.ErrBlockNotFound) {
