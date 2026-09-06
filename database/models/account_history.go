@@ -43,7 +43,17 @@ type AccountRegistrationHistoryRow struct {
 	// Deposit is the registration deposit (or refund, for
 	// deregistrations) in lovelace. Zero for certificate types
 	// that do not record an explicit deposit.
-	Deposit uint64
+	//
+	// Nil means the deposit is *unknown*: the certificate type does record
+	// one, but it could not be computed when the certificate was ingested
+	// (an era whose CertDepositFunc rejected the active protocol
+	// parameters, or a backfill that could not resolve them), so the column
+	// is NULL. Nil is not the same answer as zero, and callers must not
+	// substitute the current protocol-parameter value for it -- see
+	// AccountImportRegistration.Deposit for the same rule on baselines.
+	// A genuinely recorded zero (KeyDeposit was 0, as on the devnet) is a
+	// non-nil zero.
+	Deposit *uint64
 	// TxSlot is the slot of the transaction containing the
 	// (de)registration certificate.
 	TxSlot uint64

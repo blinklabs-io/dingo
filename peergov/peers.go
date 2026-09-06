@@ -81,13 +81,14 @@ func (p *PeerGovernor) GetPeers() []Peer {
 }
 
 // ErrUnroutableAddress is returned when a peer address resolves to a
-// non-routable IP (private, loopback, link-local, multicast, or
-// unspecified).
+// non-routable or reserved/documentation-only IP (private, loopback,
+// link-local, multicast, or unspecified).
 var ErrUnroutableAddress = errors.New("unroutable peer address")
 
 // isRoutableAddr checks whether the host portion of an address is a
 // publicly-routable unicast IP. It returns false for private (RFC 1918 /
-// RFC 4193), loopback, link-local, multicast, and unspecified addresses.
+// RFC 4193), loopback, link-local, multicast, unspecified, and
+// documentation-only addresses.
 // If the host is not a valid IP (e.g. unresolved hostname), it is
 // considered routable so that DNS-based topology peers still work.
 func isRoutableAddr(address string) bool {
@@ -132,25 +133,26 @@ func isRoutableAddr(address string) bool {
 // block is rejected whole rather than carved up for two anycast services we
 // would never dial.
 //
-// RFC 5737 (TEST-NET) and RFC 3849 (2001:db8::/32) are absent, tracked in
-// #3792. They are not routed either, so a peer advertising one costs a failed
-// dial and a peer-list slot until the entry is dropped, rather than reaching a
-// host we did not intend. That is a weaker case than the ranges above, and
-// rejecting them requires migrating the ~113 fixtures across 19 files that use
-// them as public stand-ins, some of which depend on subnet distribution. That
-// migration is a decision in its own right, not a detail of this policy.
+// RFC 5737 (TEST-NET) and RFC 3849 (2001:db8::/32) are documentation-only,
+// so they are not valid network peer candidates even though they are useful
+// in tests and documentation. They are rejected here rather than consuming a
+// peer-list slot and causing a failed dial.
 var unreachablePrefixes = []netip.Prefix{
-	netip.MustParsePrefix("0.0.0.0/8"),      // RFC 1122 "this network"
-	netip.MustParsePrefix("100.64.0.0/10"),  // RFC 6598 shared address space
-	netip.MustParsePrefix("192.0.0.0/24"),   // RFC 6890 IETF protocol assignments
-	netip.MustParsePrefix("192.88.99.0/24"), // RFC 7526 deprecated 6to4 anycast
-	netip.MustParsePrefix("198.18.0.0/15"),  // RFC 2544 benchmarking
-	netip.MustParsePrefix("240.0.0.0/4"),    // RFC 1112 reserved, incl. broadcast
-	netip.MustParsePrefix("64:ff9b:1::/48"), // RFC 8215 local-use translation
-	netip.MustParsePrefix("100::/64"),       // RFC 6666 discard-only
-	netip.MustParsePrefix("2001:2::/48"),    // RFC 5180 benchmarking
-	netip.MustParsePrefix("2001:10::/28"),   // RFC 4843 ORCHID, deprecated
-	netip.MustParsePrefix("2001:20::/28"),   // RFC 7343 ORCHIDv2
+	netip.MustParsePrefix("0.0.0.0/8"),       // RFC 1122 "this network"
+	netip.MustParsePrefix("100.64.0.0/10"),   // RFC 6598 shared address space
+	netip.MustParsePrefix("192.0.0.0/24"),    // RFC 6890 IETF protocol assignments
+	netip.MustParsePrefix("192.0.2.0/24"),    // RFC 5737 TEST-NET-1
+	netip.MustParsePrefix("198.51.100.0/24"), // RFC 5737 TEST-NET-2
+	netip.MustParsePrefix("203.0.113.0/24"),  // RFC 5737 TEST-NET-3
+	netip.MustParsePrefix("192.88.99.0/24"),  // RFC 7526 deprecated 6to4 anycast
+	netip.MustParsePrefix("198.18.0.0/15"),   // RFC 2544 benchmarking
+	netip.MustParsePrefix("240.0.0.0/4"),     // RFC 1112 reserved, incl. broadcast
+	netip.MustParsePrefix("64:ff9b:1::/48"),  // RFC 8215 local-use translation
+	netip.MustParsePrefix("100::/64"),        // RFC 6666 discard-only
+	netip.MustParsePrefix("2001:2::/48"),     // RFC 5180 benchmarking
+	netip.MustParsePrefix("2001:10::/28"),    // RFC 4843 ORCHID, deprecated
+	netip.MustParsePrefix("2001:20::/28"),    // RFC 7343 ORCHIDv2
+	netip.MustParsePrefix("2001:db8::/32"),   // RFC 3849 documentation
 }
 
 // IsRoutableIP reports whether an IP address is usable as a peer candidate

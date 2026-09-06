@@ -18,6 +18,7 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/consensus/leaderthreshold"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
@@ -120,7 +121,7 @@ func TestCalculateScheduleUsesExactRationalActiveSlotCoeff(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, schedule)
 
-	wantThreshold, err := consensus.CertifiedNatThresholdWithMode(
+	wantThreshold, err := leaderthreshold.Threshold(
 		poolStake, totalStake, exactCoeff, consensus.ConsensusModeCPraos,
 	)
 	require.NoError(t, err)
@@ -161,7 +162,7 @@ func TestCalculateScheduleFallsBackToFloatActiveSlotCoeff(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, schedule.Threshold)
 
-	wantThreshold, err := consensus.CertifiedNatThresholdWithMode(
+	wantThreshold, err := leaderthreshold.Threshold(
 		poolStake,
 		totalStake,
 		new(big.Rat).SetFloat64(0.05),

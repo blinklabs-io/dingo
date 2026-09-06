@@ -112,7 +112,9 @@ type ConnectionManagerConfig struct {
 	ListenersProvider        func() []ListenerConfig
 	OutboundConnOptsProvider func() []ouroboros.ConnectionOptionFunc
 	OutboundSourcePort       uint
-	MaxInboundConns          int // 0 means use DefaultMaxInboundConnections
+	// OutboundDialer overrides TCP dialing for controlled tests.
+	OutboundDialer  func(context.Context, string) (net.Conn, error)
+	MaxInboundConns int // 0 means use DefaultMaxInboundConnections
 	// MaxConnectionsPerIP limits the number of concurrent inbound
 	// connections from the same IP address. IPv6 addresses are grouped
 	// by /64 prefix. A value of 0 means use DefaultMaxConnectionsPerIP.
