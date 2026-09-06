@@ -85,13 +85,20 @@ func newConwayDivergenceTx(
 // ValidateTxConway). The indexes are positions in the gouroboros
 // conway.UtxoValidationRules slice, so an upstream insertion silently
 // renumbers every operator-visible diagnostic and every issue report written
-// against the old numbering. UtxoValidateRequiredRedeemers was inserted at 31
-// in gouroboros v0.202.5, which moved value-not-conserved from 31 to 32.
+// against the old numbering.
+//
+// The pinned values are the positions gouroboros actually composes, confirmed
+// against the emitted diagnostic rather than derived by counting: a genuinely
+// missing input reports "conway utxo validation rule 30" and an unbalanced
+// transaction reports "rule 33". They were first committed as 29 and 32, which
+// matched no gouroboros version dingo has used — the composed list is
+// identical at v0.202.8 and v0.202.9 (60 rules) — so the guard failed from the
+// commit that introduced it (issue #3976).
 func TestConwayUtxoValidationRuleIndexesArePinned(t *testing.T) {
 	rules := conway.UtxoValidationRules
 	for idx, want := range map[int]string{
-		29: "UtxoValidateBadInputsUtxo",
-		32: "UtxoValidateValueNotConservedUtxo",
+		30: "UtxoValidateBadInputsUtxo",
+		33: "UtxoValidateValueNotConservedUtxo",
 	} {
 		require.Greater(t, len(rules), idx)
 		name := utxoValidationRuleName(rules[idx])
@@ -110,7 +117,7 @@ func TestConwayUtxoValidationRuleIndexesArePinned(t *testing.T) {
 // TestValidateTxConwayGenuinelyMissingInputStillRejected is the negative case
 // for the rollback restore fix in LedgerState.rollback: an input that is
 // genuinely absent from the ledger must still be rejected as a bad input, and
-// must still be reported under rule index 29. A restore fix that made input
+// must still be reported under rule index 30. A restore fix that made input
 // resolution more permissive would turn this into a consensus hazard.
 func TestValidateTxConwayGenuinelyMissingInputStillRejected(t *testing.T) {
 	tx := newConwayDivergenceTx(t, 0xaa, 200_000, 0)
@@ -127,13 +134,13 @@ func TestValidateTxConwayGenuinelyMissingInputStillRejected(t *testing.T) {
 	require.ErrorAs(t, err, &badInputs)
 	require.Len(t, badInputs.Inputs, 1)
 	assert.Equal(t, tx.Inputs()[0].String(), badInputs.Inputs[0].String())
-	assert.Contains(t, err.Error(), "conway utxo validation rule 29:")
+	assert.Contains(t, err.Error(), "conway utxo validation rule 30:")
 }
 
 // TestValidateTxConwayGenuinelyUnbalancedStillRejected is the negative case for
 // the value-conservation half of issue #3678: a transaction whose inputs all
 // resolve but whose consumed and produced values genuinely differ must still be
-// rejected, and must still be reported under rule index 32.
+// rejected, and must still be reported under rule index 33.
 func TestValidateTxConwayGenuinelyUnbalancedStillRejected(t *testing.T) {
 	tx := newConwayDivergenceTx(t, 0xbb, 200_000, 200_000)
 
@@ -159,7 +166,7 @@ func TestValidateTxConwayGenuinelyUnbalancedStillRejected(t *testing.T) {
 		"consumed should be the resolved input value",
 	)
 	assert.Equal(t, big.NewInt(400_000), notConserved.Produced)
-	assert.Contains(t, err.Error(), "conway utxo validation rule 32:")
+	assert.Contains(t, err.Error(), "conway utxo validation rule 33:")
 
 	// The input resolved, so bad-inputs must NOT also fire. This is what
 	// separates a genuinely unbalanced transaction from the single-cause

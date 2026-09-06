@@ -45,7 +45,7 @@ func ForEachBlockInRange(
 	if blobTxn == nil {
 		return types.ErrNilTxn
 	}
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}

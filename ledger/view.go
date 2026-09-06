@@ -62,6 +62,14 @@ type LedgerView struct {
 	// skipPhase2Validation is set for accepted block replay, where
 	// the producer's isValid flag is authoritative for Phase-2 results.
 	skipPhase2Validation bool
+	// horizonAnchorSlot is the slot the era forecast horizon is measured
+	// from when this view converts slots to time. Block application sets it
+	// to the applied block's immediate predecessor, which is what the
+	// reference implementation ticks from; the published tip trails that by
+	// up to a whole block batch during replay. Zero leaves the published tip
+	// in charge, which is correct for every caller with no applied block in
+	// hand (mempool validation, standalone evaluation).
+	horizonAnchorSlot uint64
 }
 
 func (lv *LedgerView) pinCommitteeState(
@@ -119,6 +127,16 @@ var _ lcommon.DRepDelegationState = (*LedgerView)(nil)
 // ByronProtocolMagic would reject every Byron transaction carrying those
 // witnesses rather than fail to build.
 var _ eras.ByronProtocolMagicProvider = (*LedgerView)(nil)
+
+// UtxoValidateValueNotConservedUtxo discovers this capability with a runtime
+// type assertion and, unlike the assertions above, degrades rather than fails
+// when it misses: a failed assertion silently refunds a legacy stake
+// deregistration at the current KeyDeposit instead of the deposit actually
+// recorded at registration. Value conservation then passes on the wrong
+// number for every credential registered under a different KeyDeposit, with
+// no error anywhere. A missed assertion is therefore invisible at runtime,
+// which is exactly why it has to be a compile error here.
+var _ lcommon.StakeCredentialDepositState = (*LedgerView)(nil)
 
 func (lv *LedgerView) NetworkId() uint {
 	genesis := lv.ls.config.CardanoNodeConfig.ShelleyGenesis()
@@ -296,8 +314,13 @@ func (lv *LedgerView) StakeCredentialDeposit(
 	if len(history) == 0 || history[0].Action != "registered" {
 		return nil, nil
 	}
-	deposit := history[0].Deposit
-	return &deposit, nil
+	// A NULL deposit_amount reaches here as a nil Deposit and must stay nil:
+	// the registration was ingested without a computable deposit, so the
+	// recorded value is unknown and value conservation has to fall back to the
+	// current KeyDeposit. A recorded zero is a non-nil zero and is returned as
+	// an authoritative zero -- the devnet's "keyDeposit": 0 makes that the
+	// normal case there, so the two must not be conflated.
+	return history[0].Deposit, nil
 }
 
 // It returns the most recent active pool registration certificate
@@ -463,9 +486,16 @@ func (lv *LedgerView) IsVrfKeyInUse(
 	), nil
 }
 
-// SlotToTime returns the current time for a given slot based on known epochs
+// SlotToTime returns the current time for a given slot based on known epochs.
+//
+// This is the converter transaction validation sees, and a Plutus script
+// context must convert the transaction's validity interval through it. The
+// forecast horizon stays in force, matching cardano-ledger's
+// TimeTranslationPastHorizon failure, but it is measured from this view's
+// horizon anchor so a block being applied is judged against its own
+// predecessor rather than a tip that has not been published yet (issue #3844).
 func (lv *LedgerView) SlotToTime(slot uint64) (time.Time, error) {
-	return lv.ls.SlotToTime(slot)
+	return lv.ls.SlotToTimeWithHorizonFrom(lv.horizonAnchorSlot, slot)
 }
 
 // TimeToSlot returns the slot number for a given time based on known epochs

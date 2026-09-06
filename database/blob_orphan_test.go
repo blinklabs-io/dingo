@@ -27,7 +27,7 @@ import (
 
 func newBlobOrphanTestDB(store *mockBlobStore) *Database {
 	return &Database{
-		blob: store,
+		blobRef: newBlobStoreRef(store),
 		logger: slog.New(
 			slog.NewJSONHandler(
 				io.Discard,
@@ -114,7 +114,7 @@ func TestDeleteTxBlobsCountsNoOrphansOnSuccess(t *testing.T) {
 // it, so the condition is visible rather than a silent no-op.
 func TestDeleteUtxoBlobsWithoutBlobStoreIsReported(t *testing.T) {
 	db := newBlobOrphanTestDB(nil)
-	db.blob = nil
+	db.SetBlobStore(nil)
 
 	err := deleteUtxoBlobs(db, []models.Utxo{
 		{TxId: []byte{0x04}, OutputIdx: 0},
@@ -131,11 +131,11 @@ func TestDeleteUtxoBlobsWithoutBlobStoreIsReported(t *testing.T) {
 // strands anything.
 func TestBlobOrphansAreNotCountedUntilMetadataCommits(t *testing.T) {
 	db := openTestDB(t)
-	db.blob = &mockBlobStore{
+	db.SetBlobStore(&mockBlobStore{
 		deleteUtxoErrs: map[string]error{
 			"05:0": errors.New("blob store unavailable"),
 		},
-	}
+	})
 	txn := db.Transaction(true)
 	before := BlobOrphanCount()
 
@@ -157,11 +157,11 @@ func TestBlobOrphansAreNotCountedUntilMetadataCommits(t *testing.T) {
 // reachable and must not be counted.
 func TestBlobOrphansAreNotCountedOnRollback(t *testing.T) {
 	db := openTestDB(t)
-	db.blob = &mockBlobStore{
+	db.SetBlobStore(&mockBlobStore{
 		deleteTxErrs: map[string]error{
 			string([]byte{0xDD}): errors.New("blob store unavailable"),
 		},
-	}
+	})
 	txn := db.Transaction(true)
 	before := BlobOrphanCount()
 
