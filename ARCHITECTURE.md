@@ -3931,6 +3931,29 @@ batch left behind; otherwise a concurrent rollback's result would be overwritten
 with a tip index above the blocks that rollback deleted, leaving the chain
 claiming a tip it does not store.
 
+The same release also opens a commit-lag window on the store side, and the chain
+closes it with two barriers that the block-deleting paths -- `rollbackLocked`
+and `ChainManager.RewindPrimaryChainToPoint` -- both take before their removal
+loops run. `Chain.addRawBlocks` and `Chain.AddBlocks` advance `tipBlockIndex`
+inside their transaction's closure and commit only after both chain locks are
+released, so anything taking `Chain.mutex` in between sees a tip index whose
+block the store cannot serve: `ChainManager.removeBlockByIndex` opens its own
+transaction, and no transaction sees another's uncommitted writes. Those two
+hold `Chain.batchCommitMutex` for read across their whole `txn.Do`, and the
+removal paths hold it for write. `Chain.addBlockInternal` cannot use that shape,
+because with a caller-supplied `*database.Txn` the chain neither performs nor
+observes the commit; it instead records the transaction in `Chain.pendingAdds`
+before mutating memory and releases the record from `database.Txn.OnFinish`,
+which fires on commit *and* on rollback. The removal paths' write hold excludes
+a new record from appearing, and `awaitPendingCallerAdds` then waits for the
+records already in flight. That wait is bounded (`pendingAddDrainTimeout`) and
+logs at ERROR on expiry rather than blocking forever, so a caller that abandons
+its transaction -- or rolls the chain back from inside one it has not finished
+-- leaves that one removal exposed to the original window instead of wedging
+every chain mutation behind it. Every in-tree add passes a nil transaction, for
+which `Database.BlockCreate` opens and commits its own before the tip advances,
+so the live blockfetch and forging paths record nothing.
+
 All five recovery rewinds go through `rewindPrimaryChainForRecovery`, which
 carries the one classification a pipeline restart cannot help with. A rewind
 the chain refuses for exceeding `k`, or a descent that cannot gain on its
