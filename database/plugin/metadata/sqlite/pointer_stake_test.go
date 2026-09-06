@@ -20,6 +20,7 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -141,13 +142,15 @@ func (f *pointerStakeFixture) apply(
 	))
 }
 
-// applyGap writes one transaction through the Mithril gap path, which carries
-// no calculated deposits and no consumed-input state.
+// applyGap writes one transaction through the Mithril gap path, which has no
+// consumed-input state. deposits is what mithril's gapCertDeposits derives from
+// the epoch's protocol parameters; a certificate absent from it records NULL.
 func (f *pointerStakeFixture) applyGap(
 	t *testing.T,
 	slot uint64,
 	blockIndex uint32,
 	certificates []lcommon.Certificate,
+	deposits map[int]uint64,
 ) {
 	t.Helper()
 	hash := lcommon.Blake2b256{}
@@ -161,6 +164,7 @@ func (f *pointerStakeFixture) applyGap(
 		},
 		ocommon.Point{Slot: slot, Hash: bytes.Repeat([]byte{0xc3}, 32)},
 		blockIndex,
+		deposits,
 		nil,
 	))
 }
@@ -528,7 +532,11 @@ func TestPointerAddressStakeResolvesAnInGapRegistration(t *testing.T) {
 	paymentKey := bytes.Repeat([]byte{0x22}, lcommon.AddressHashSize)
 
 	// Both the registration and the delegation arrive through the gap path.
-	f.applyGap(t, 100, 0, []lcommon.Certificate{f.register(), f.delegate()})
+	f.applyGap(
+		t, 100, 0,
+		[]lcommon.Certificate{f.register(), f.delegate()},
+		map[int]uint64{0: 2_000_000},
+	)
 	f.apply(t, 200, 0, nil,
 		f.output(600, newPointerAddress(t, paymentKey, 100, 0, 0)))
 
@@ -576,4 +584,60 @@ func TestPointerAddressStakeToleratesAnUnrepresentablePosition(t *testing.T) {
 				"an unrepresentable pointer position confers no stake")
 		})
 	}
+}
+
+// createUtxo writes one output through Store.CreateUtxo, the direct-write path
+// snapshot import and the conformance harness use, rather than through a block
+// apply. It performs the same models.UtxoLedgerToModel conversion the block
+// path does, so anything the conversion produces has to survive this write too.
+func (f *pointerStakeFixture) createUtxo(
+	t *testing.T,
+	slot uint64,
+	output lcommon.TransactionOutput,
+) {
+	t.Helper()
+	hash := lcommon.Blake2b256{}
+	hash[0] = f.nextTx
+	f.nextTx++
+	model, err := models.UtxoLedgerToModel(
+		lcommon.Utxo{
+			Id:     mockTransactionInput{hash: hash, index: 0},
+			Output: output,
+		},
+		slot,
+	)
+	require.NoError(t, err)
+	require.NoError(t, f.store.CreateUtxo(nil, &model))
+}
+
+// TestPointerAddressStakeSurvivesCreateUtxo pins the pointer position across
+// Store.CreateUtxo, not only across the block-apply path.
+//
+// A pointer address's stake reference is a position rather than a credential,
+// so it is persisted in utxo_pointer rather than in a utxo column.
+// UtxoLedgerToModel sets it for every caller, but only the block-apply path
+// wrote it: CreateUtxo built its row from createUtxoParams, which has no
+// pointer field, and dropped the position silently. Snapshot import and
+// internal/test/conformance both write produced outputs this way, so a pointer
+// output written through them conferred no stake -- and the conformance
+// harness, which states that it reuses the production conversion, could not
+// observe pointer stake at all.
+func TestPointerAddressStakeSurvivesCreateUtxo(t *testing.T) {
+	t.Parallel()
+	f := newPointerStakeFixture(t)
+	f.setEra(t, babbage.EraIdBabbage)
+	paymentKey := bytes.Repeat([]byte{0x22}, lcommon.AddressHashSize)
+
+	// The registration this pointer names, at (100, 0, 0), and the
+	// delegation putting the credential under the pool.
+	f.apply(t, 100, 0, []lcommon.Certificate{f.register(), f.delegate()})
+	// A base-address output written the same way, so the assertion
+	// isolates the pointer's contribution rather than CreateUtxo as such.
+	f.createUtxo(t, 150, f.output(700, f.baseAddress(t)))
+	f.createUtxo(t, 200,
+		f.output(600, newPointerAddress(t, paymentKey, 100, 0, 0)))
+
+	require.Equal(t, uint64(1_300), f.stakeAt(t, 300),
+		"a pointer output written through CreateUtxo must reach the "+
+			"credential its position designates")
 }

@@ -60,6 +60,16 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 				return err
 			}
 			utxo.ID = uint(id)
+			// A pointer address carries its stake reference as a
+			// position rather than a credential, so it lives in
+			// utxo_pointer rather than in a utxo column. Writing the
+			// utxo row alone would silently drop it -- the same
+			// omission insertUtxoModel avoids on the block-apply path.
+			if err := persistUtxoPointer(
+				ctx, db, id, utxo.Pointer,
+			); err != nil {
+				return err
+			}
 			for i := range utxo.Assets {
 				asset := &utxo.Assets[i]
 				asset.UtxoID = utxo.ID
@@ -530,6 +540,14 @@ func (s *Store) importUtxos(
 					}
 				} else if err != nil {
 					return fmt.Errorf("import UTxO: %w", err)
+				}
+				// See CreateUtxo: the pointer position is a separate
+				// row, and persistUtxoPointer converges, so an output
+				// already imported keeps the same position.
+				if err := persistUtxoPointer(
+					ctx, db, id, item.Pointer,
+				); err != nil {
+					return err
 				}
 				for j := range item.Assets {
 					asset := item.Assets[j]
