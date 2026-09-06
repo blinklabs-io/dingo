@@ -24,10 +24,10 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/consensus/leaderthreshold"
+	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/stretchr/testify/require"
-
-	"github.com/blinklabs-io/dingo/consensus/praos"
 )
 
 const (
@@ -179,7 +179,7 @@ func TestComputeSchedulePrefersExactGenesisActiveSlotCoeff(t *testing.T) {
 	require.NotNil(t, schedule)
 	require.NotNil(t, schedule.Threshold)
 
-	want, err := consensus.CertifiedNatThresholdWithMode(
+	want, err := leaderthreshold.Threshold(
 		sigmaAuditPoolStake,
 		sigmaAuditTotalStake,
 		exact,
@@ -209,7 +209,7 @@ func TestComputeScheduleWithoutExactCoeffUsesFloatFallback(t *testing.T) {
 	require.NotNil(t, schedule)
 	require.NotNil(t, schedule.Threshold)
 
-	want, err := consensus.CertifiedNatThresholdWithMode(
+	want, err := leaderthreshold.Threshold(
 		sigmaAuditPoolStake,
 		sigmaAuditTotalStake,
 		new(big.Rat).SetFloat64(0.05),

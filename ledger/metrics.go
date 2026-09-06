@@ -44,6 +44,12 @@ type stateMetrics struct {
 	// we cannot cross to (local chain diverged), so a stuck node surfaces
 	// as a metric instead of only a WARN loop. See issue #2728.
 	unrecoverableRollbacks prometheus.Counter
+	// Incremented when a chainsync peer asks for a rollback we refuse, but
+	// its own advertised tip is a strict ancestor of ours on our primary
+	// chain: the peer is behind, not forked, and is kept attached instead
+	// of being rejected and denied. A rising value with a flat local tip
+	// means our upstreams are lagging us, not that anything diverged.
+	chainsyncBehindPeers prometheus.Counter
 	// Incremented when at-tip validation recovery detects a non-converging,
 	// descending series of distinct failures and holds at the ledger tip
 	// instead of rewinding the primary chain ever deeper. A rising value
@@ -346,6 +352,12 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_chainsync_unrecoverable_rollback_total",
 			Help: "times a peer repeatedly requested a rollback we cannot cross to (local chain diverged, operator intervention required)",
+		},
+	)
+	m.chainsyncBehindPeers = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_chainsync_behind_peers_total",
+			Help: "times a chainsync peer asked for a rollback past the security parameter while its own tip was a strict ancestor of ours (peer behind on our chain, kept attached rather than denied)",
 		},
 	)
 	m.atTipRecoveryNonConverging = promautoFactory.NewCounter(

@@ -905,7 +905,7 @@ type TransactionStore interface {
 		lcommon.Transaction,
 		ocommon.Point,
 		uint32, // idx
-		map[int]uint64, // certDeposits: indexed by certificate position in tx.Certificates(); absent keys are treated as zero/no deposit
+		map[int]uint64, // certDeposits: indexed by certificate position in tx.Certificates(); an absent key means the deposit is unknown and is stored as NULL, not zero
 		bool, // skipWithdrawalWitness: elide the CIP-0163 account_withdrawal_witness insert (see BatchedTxIngestOpts.SkipWithdrawalWitnessWrite)
 		types.Txn,
 	) error
@@ -1790,6 +1790,16 @@ type MetadataStore interface {
 	// for the requested slot. Callers should use errors.Is() to check.
 	GetActivePoolKeyHashesAtSlot(uint64, types.Txn) ([][]byte, error)
 
+	// GetPoolVrfKeyHashAtSlot returns the VRF key hash the pool had
+	// registered as of a slot, using the same latest-certificate-wins
+	// ordering as GetActivePoolKeyHashesAtSlot. The bool reports whether any
+	// registration exists at or before that slot.
+	GetPoolVrfKeyHashAtSlot(
+		[]byte, // poolKeyHash
+		uint64, // slot
+		types.Txn,
+	) ([]byte, bool, error)
+
 	// GetPoolsRetiringAtEpoch returns the pools whose effective retirement
 	// (the latest retirement not cancelled by a later re-registration, as of
 	// the boundary slot) takes effect at the given epoch, along with the
@@ -1800,6 +1810,19 @@ type MetadataStore interface {
 		boundarySlot uint64,
 		txn types.Txn,
 	) ([]models.PoolRetirementRefund, error)
+
+	// GetPoolEarliestVrfKeyHashAtSlot returns the VRF key hash from the
+	// pool's earliest registration at or before the given slot, which is what
+	// cardano-ledger's psStakePools holds for a pool that first registered
+	// inside the captured epoch: the POOL rule inserts a first registration
+	// directly and defers only a re-registration through
+	// psFutureStakePoolParams. Contrast GetPoolVrfKeyHashAtSlot, which
+	// returns the latest such registration.
+	GetPoolEarliestVrfKeyHashAtSlot(
+		[]byte, // poolKeyHash
+		uint64, // slot
+		types.Txn,
+	) ([]byte, bool, error)
 
 	// GetPoolKeyHashesRetiredByEpoch returns the key hashes of pools whose
 	// effective retirement takes effect at or *before* the given epoch,
