@@ -251,6 +251,7 @@ func (r *Recycler) loop(ctx context.Context) {
 func (r *Recycler) initProgressBaseline(st *tickState) {
 	r.config.Components.WithLiveComponents(func(live LiveComponents) {
 		st.lastProgressSlot = live.Ledger.Tip().Point.Slot
+		st.lastPrimaryChainTipSlot = live.Ledger.PrimaryChainTipSlot()
 	})
 	st.lastProgressAt = time.Now()
 }
@@ -306,9 +307,12 @@ type tickState struct {
 	recycleAt map[string]time.Time
 	// lastRecycled is the recycle cooldown clock per connection.
 	lastRecycled map[string]time.Time
-	// lastProgressSlot/lastProgressAt track local tip plateau duration.
-	lastProgressSlot uint64
-	lastProgressAt   time.Time
+	// lastProgressSlot and lastPrimaryChainTipSlot track forward progress in
+	// the applied ledger and downloaded primary chain. lastProgressAt is the
+	// most recent advance of either tip.
+	lastProgressSlot        uint64
+	lastPrimaryChainTipSlot uint64
+	lastProgressAt          time.Time
 }
 
 func newTickState() *tickState {
@@ -383,15 +387,20 @@ func (r *Recycler) tick(
 	live LiveComponents,
 	localTipSlot uint64,
 ) {
+	primaryChainTipSlot := live.Ledger.PrimaryChainTipSlot()
 	if localTipSlot > st.lastProgressSlot {
 		st.lastProgressSlot = localTipSlot
 		st.lastProgressAt = now
 	}
+	if primaryChainTipSlot > st.lastPrimaryChainTipSlot {
+		st.lastPrimaryChainTipSlot = primaryChainTipSlot
+		st.lastProgressAt = now
+	}
 	// During catch-up, extend stalled-client grace and recycle cooldowns to
-	// avoid churning connections while the node is making progress. The local
-	// tip plateau threshold is intentionally not extended: this path only runs
-	// after the local tip stopped progressing, so catch-up is not evidence that
-	// the plateau is healthy.
+	// avoid churning connections while the node is making progress. The
+	// plateau clock above resets when either the applied tip or downloaded
+	// primary chain advances, so catch-up alone is not evidence that a stall is
+	// healthy and does not extend the plateau threshold.
 	multiplier := 1
 	if !live.Ledger.IsAtTip() {
 		multiplier = catchUpMultiplier
@@ -431,6 +440,7 @@ func (r *Recycler) tick(
 		st,
 		live,
 		localTipSlot,
+		primaryChainTipSlot,
 		trackedClients,
 		eligibleCount,
 		effectivePlateau,
@@ -455,6 +465,7 @@ func (r *Recycler) checkLocalTipPlateau(
 	st *tickState,
 	live LiveComponents,
 	localTipSlot uint64,
+	primaryChainTipSlot uint64,
 	trackedClients []chainsync.TrackedClient,
 	eligibleCount int,
 	effectivePlateau time.Duration,
@@ -546,7 +557,6 @@ func (r *Recycler) checkLocalTipPlateau(
 	// backpressure, and TIME_WAIT/goroutine growth. Only trust this heuristic
 	// after the local reconcile had a chance to repair, or at least rule out,
 	// a primary-chain / ledger divergence.
-	primaryChainTipSlot := live.Ledger.PrimaryChainTipSlot()
 	if !reconcileFailed && isLedgerApplicationBacklog(
 		localTipSlot,
 		primaryChainTipSlot,
