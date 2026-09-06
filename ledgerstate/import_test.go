@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
@@ -81,6 +82,72 @@ func TestImportOpCertCountersStoresCertifiedBaseline(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, uint64(490), sequence)
+}
+
+// TestImportOpCertCountersRefusesUnpersistableCounter covers the one write
+// path into pool_opcert_sequence carrying counters that were never checked
+// against a chain rule. decodeOpCertCounters decodes the certified
+// HeaderState map at the reference's full uint64 width, so a counter above
+// eras.MaxPersistableOpCertCounter reaches this path and must be refused by
+// name, not at checkedInt64, whose message reports only that an unsigned SQL
+// value exceeds int64.
+func TestImportOpCertCountersRefusesUnpersistableCounter(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	poolKeyHash := bytes.Repeat([]byte{0x78}, 28)
+	txn := db.MetadataTxn(true)
+	err = importOpCertCounters(
+		db.Metadata(),
+		map[string]uint64{
+			string(poolKeyHash): eras.MaxPersistableOpCertCounter + 1,
+		},
+		100,
+		txn.Metadata(),
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "9223372036854775807")
+	require.Contains(t, err.Error(), "pool_opcert_sequence")
+	require.NotContains(t, err.Error(), "exceeds int64")
+	require.NoError(t, txn.Rollback())
+	txn.Release()
+
+	sequence, found, err := db.LatestPoolOpCertSequence(
+		testPoolKeyHash(poolKeyHash), nil,
+	)
+	require.NoError(t, err)
+	require.False(t, found)
+	require.Equal(t, uint64(0), sequence)
+}
+
+// TestImportOpCertCountersStoresCounterAtBound is the other side of that
+// boundary: the highest counter the metadata store records must still import,
+// so the new check cannot be satisfied by refusing more than it should.
+func TestImportOpCertCountersStoresCounterAtBound(t *testing.T) {
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	poolKeyHash := bytes.Repeat([]byte{0x79}, 28)
+	txn := db.MetadataTxn(true)
+	require.NoError(t, importOpCertCounters(
+		db.Metadata(),
+		map[string]uint64{
+			string(poolKeyHash): eras.MaxPersistableOpCertCounter,
+		},
+		100,
+		txn.Metadata(),
+	))
+	require.NoError(t, txn.Commit())
+	txn.Release()
+
+	sequence, found, err := db.LatestPoolOpCertSequence(
+		testPoolKeyHash(poolKeyHash), nil,
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, eras.MaxPersistableOpCertCounter, sequence)
 }
 
 func TestSnapshotImportTargetsAlignWithRotation(t *testing.T) {

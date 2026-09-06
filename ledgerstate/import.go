@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -2435,6 +2436,22 @@ func importOpCertCounters(
 		}
 		var poolKeyHash lcommon.PoolKeyHash
 		copy(poolKeyHash[:], poolKey)
+		// decodeOpCertCounters decodes the certified counter map at the
+		// reference's full uint64 width, independently of the header types
+		// the gouroboros pin declares, so this is the one write path into
+		// pool_opcert_sequence whose counters were never narrowed or checked
+		// against a chain rule first. Refuse an unrecordable counter here,
+		// naming the bound the way block application and forging name it,
+		// rather than letting it reach checkedInt64 and abort the import
+		// with a message that reports only that an unsigned SQL value
+		// exceeds int64.
+		if err := eras.ValidateOpCertPersistableCounter(sequence); err != nil {
+			return fmt.Errorf(
+				"storing certified opcert counter for pool %x: %w",
+				poolKeyHash,
+				err,
+			)
+		}
 		if err := store.UpdatePoolOpCertSequence(
 			poolKeyHash, sequence, slot, txn,
 		); err != nil {
