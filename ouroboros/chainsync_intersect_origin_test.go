@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -418,4 +419,98 @@ func TestRollbackWindowIntersectAnchorPropagatesStorageError(t *testing.T) {
 	_, hasAnchor, err := ls.RollbackWindowIntersectAnchor()
 	require.Error(t, err, "storage failure must not be reported as no anchor")
 	assert.False(t, hasAnchor)
+}
+
+// TestBuildDefaultChainsyncIntersectPointsOffersRollbackPointInWindow is the
+// end-to-end composition test for the rollback window, driven through the
+// function the chainsync client actually calls rather than through
+// finalizeChainsyncIntersectPoints directly.
+//
+// Every other test in this file supplies the intersect points and the anchor
+// itself, so none of them pins the runtime path
+// buildDefaultChainsyncIntersectPoints takes: LedgerState.IntersectPoints ->
+// finalizeChainsyncIntersectPoints -> the list handed to MsgFindIntersect. This
+// one drives a ledger genuinely in the window (ledger tip row absent, primary
+// chain tip strictly below the ledger tip) and asserts what goes on the wire.
+func TestBuildDefaultChainsyncIntersectPointsOffersRollbackPointInWindow(
+	t *testing.T,
+) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	bus := event.NewEventBus(nil, logger)
+	defer bus.Close()
+
+	o, _, connId := newOutboundStartTestOuroboros(t, logger, bus)
+	ls, _ := newTestLedgerStateWithChain(t, 5)
+	o.ledgerState = ls
+
+	// The window: the chain has been rewound to slot 5 while the ledger tip
+	// still names a block at slot 9 whose row the rewind removed.
+	ls.SetTipForTesting(ochainsync.Tip{
+		Point:       ocommon.NewPoint(9, ledgerTipHashAbsentFromChain),
+		BlockNumber: 9,
+	})
+
+	chainTip := ls.PrimaryChainTip()
+	require.Equal(t, uint64(5), chainTip.Point.Slot)
+	_, err := ls.GetBlock(ocommon.NewPoint(9, ledgerTipHashAbsentFromChain))
+	require.Error(t, err, "fixture requires the ledger tip row to be absent")
+
+	points, err := o.buildDefaultChainsyncIntersectPoints(connId)
+	require.NoError(t, err)
+
+	// What actually matters on the wire: we must not ask the peer to replay
+	// from genesis, and the newest point offered must be the rollback point.
+	require.NotEmpty(t, points)
+	require.False(
+		t,
+		len(points) == 1 && isOriginPoint(points[0]),
+		"a node holding a chain must never send an origin-only FindIntersect",
+	)
+	assert.Equal(t, chainTip.Point.Slot, points[0].Slot)
+	assert.Equal(t, chainTip.Point.Hash, points[0].Hash)
+	assert.True(
+		t,
+		isOriginPoint(points[len(points)-1]),
+		"origin must remain the appended last resort",
+	)
+
+	// No point may name a block above the rollback point.
+	for _, point := range points {
+		if isOriginPoint(point) {
+			continue
+		}
+		assert.LessOrEqual(t, point.Slot, chainTip.Point.Slot)
+	}
+}
+
+// TestBuildDefaultChainsyncIntersectPointsStaysOriginOnlyOnAheadFork drives the
+// #2309 shape through the real call site: the primary chain is ahead of the
+// ledger tip on a fork that does not contain it, and the ledger tip row is
+// missing. Nothing may be advertised, so the wire request is origin-only.
+func TestBuildDefaultChainsyncIntersectPointsStaysOriginOnlyOnAheadFork(
+	t *testing.T,
+) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	bus := event.NewEventBus(nil, logger)
+	defer bus.Close()
+
+	o, _, connId := newOutboundStartTestOuroboros(t, logger, bus)
+	ls, _ := newTestLedgerStateWithChain(t, 5)
+	o.ledgerState = ls
+
+	ls.SetTipForTesting(ochainsync.Tip{
+		Point:       ocommon.NewPoint(2, ledgerTipHashAbsentFromChain),
+		BlockNumber: 2,
+	})
+	require.Greater(t, ls.PrimaryChainTip().Point.Slot, uint64(2))
+
+	points, err := o.buildDefaultChainsyncIntersectPoints(connId)
+	require.NoError(t, err)
+
+	require.Len(t, points, 1)
+	assert.True(
+		t,
+		isOriginPoint(points[0]),
+		"unapplied ahead-fork state must not be advertised (#2309)",
+	)
 }
