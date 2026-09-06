@@ -76,6 +76,7 @@ type Node struct {
 	poolRelayProvider       *ledger.PoolRelayProvider
 	chainsyncState          *chainsync.State
 	chainSelector           *chainselection.ChainSelector
+	chainSelectionMetrics   *chainSelectionMetrics
 	eventBus                *event.EventBus
 	pluginHost              *plugin.Host
 	destinationRegistry     *lifecycle.DestinationRegistry
@@ -251,6 +252,7 @@ func New(cfg Config) (*Node, error) {
 	n.configWrapPromRegistry()
 	n.registerBuildInfo()
 	n.registerRTSMetrics()
+	n.registerChainSelectionMetrics()
 	// NewEventBus starts background async-worker goroutines, so create the bus
 	// only after configuration validates. If it were created earlier, a
 	// validation failure would return a nil Node while leaving those goroutines
@@ -1154,24 +1156,11 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		!n.config.intersectTip &&
 		len(n.config.intersectPoints) == 0
 	n.chainSelector = chainselection.NewChainSelector(
-		chainselection.ChainSelectorConfig{
-			Logger:                n.config.logger,
-			EventBus:              n.eventBus,
-			SecurityParam:         chainSelectorSecurityParam,
-			GenesisMode:           genesisSelectionMode,
-			GenesisWindowSlots:    genesisWindowSlots,
-			MinCorroboratingPeers: n.config.genesisCorroborationPeers,
-			ConnectionLive: func(connId ouroboros.ConnectionId) bool {
-				return n.connManager != nil &&
-					n.connManager.GetConnectionById(connId) != nil
-			},
-			BlockfetchLatency: func(connId ouroboros.ConnectionId) (time.Duration, bool) {
-				if n.chainsyncState == nil {
-					return 0, false
-				}
-				return n.chainsyncState.BlockfetchLatency(connId)
-			},
-		},
+		n.buildChainSelectorConfig(
+			chainSelectorSecurityParam,
+			genesisSelectionMode,
+			genesisWindowSlots,
+		),
 	)
 	// Seed chain selection from the applied ledger tip before peers connect.
 	// Without this initial observation, the plausibility guard treats the
@@ -1993,6 +1982,36 @@ func (n *Node) subscribeConnectionEvents() {
 		connmanager.InboundConnectionEventType,
 		func(evt event.Event) { n.ouroboros().HandleInboundConnEvent(evt) },
 	)
+}
+
+// buildChainSelectorConfig assembles the ChainSelectorConfig this node passes
+// to chainselection.NewChainSelector. It is the single composition site for
+// the selector's callbacks, so a hook that is not set here is silently absent
+// at runtime no matter what the chainselection package offers.
+func (n *Node) buildChainSelectorConfig(
+	securityParam uint64,
+	genesisMode bool,
+	genesisWindowSlots uint64,
+) chainselection.ChainSelectorConfig {
+	return chainselection.ChainSelectorConfig{
+		Logger:                n.config.logger,
+		EventBus:              n.eventBus,
+		SecurityParam:         securityParam,
+		GenesisMode:           genesisMode,
+		GenesisWindowSlots:    genesisWindowSlots,
+		MinCorroboratingPeers: n.config.genesisCorroborationPeers,
+		ConnectionLive: func(connId ouroboros.ConnectionId) bool {
+			return n.connManager != nil &&
+				n.connManager.GetConnectionById(connId) != nil
+		},
+		BlockfetchLatency: func(connId ouroboros.ConnectionId) (time.Duration, bool) {
+			if n.chainsyncState == nil {
+				return 0, false
+			}
+			return n.chainsyncState.BlockfetchLatency(connId)
+		},
+		OnRollbackRegistration: n.recordRollbackRegistration,
+	}
 }
 
 // subscribeChainSelectorEvents wires the EventBus subscriptions that feed the
