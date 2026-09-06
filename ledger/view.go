@@ -314,8 +314,13 @@ func (lv *LedgerView) StakeCredentialDeposit(
 	if len(history) == 0 || history[0].Action != "registered" {
 		return nil, nil
 	}
-	deposit := history[0].Deposit
-	return &deposit, nil
+	// A NULL deposit_amount reaches here as a nil Deposit and must stay nil:
+	// the registration was ingested without a computable deposit, so the
+	// recorded value is unknown and value conservation has to fall back to the
+	// current KeyDeposit. A recorded zero is a non-nil zero and is returned as
+	// an authoritative zero -- the devnet's "keyDeposit": 0 makes that the
+	// normal case there, so the two must not be conflated.
+	return history[0].Deposit, nil
 }
 
 // It returns the most recent active pool registration certificate
