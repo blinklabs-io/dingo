@@ -522,6 +522,35 @@ func TestStopWaitsForLiveLifecycleOperation(t *testing.T) {
 	}
 }
 
+func TestStopCancelsBeforeLiveLifecycleGateTimeout(t *testing.T) {
+	cancelCalled := make(chan struct{})
+	var cancelOnce sync.Once
+	n := &Node{
+		config: NewConfig(
+			WithShutdownTimeout(50*time.Millisecond),
+			WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		),
+		cancel: func() { cancelOnce.Do(func() { close(cancelCalled) }) },
+	}
+
+	n.liveLifecycleMu.Lock()
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { n.liveLifecycleMu.Unlock() }) }
+	defer release()
+
+	err := n.Stop()
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	testutil.RequireReceive(
+		t,
+		cancelCalled,
+		time.Second,
+		"shutdown must cancel the node even when a lifecycle gate times out",
+	)
+
+	release()
+	require.NoError(t, n.Stop())
+}
+
 func TestShutdownClosesEventBusBeforeFinalCleanup(t *testing.T) {
 	const eventType event.EventType = "test.shutdown.order"
 

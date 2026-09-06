@@ -1167,11 +1167,16 @@ completes or has unwound its LIFO rollback stack. Normal shutdown takes the
 same gate before its phase-ordered teardown begins. A SIGINT/SIGTERM received
 while components are still starting can therefore cancel startup without
 letting `Node.Stop` concurrently close a partially initialized component; the
-normal shutdown waits until rollback has finished. Shutdown then takes the
-live-lifecycle and snapshot gates in that order, matching `Restore` and
-`Truncate`, before cancelling workers or closing storage. A stop request that
-arrives during either operation therefore waits for the operation to finish
-instead of racing its storage teardown.
+normal shutdown waits until rollback has finished. Shutdown cancels the node
+context before waiting for the live-lifecycle and snapshot gates, then takes
+those gates in that order, matching `Restore` and `Truncate`, before closing
+storage. A stop request that arrives during either operation therefore gives
+the operation a chance to unwind without racing its storage teardown. The
+configured shutdown timeout is one absolute deadline shared by gate waits and
+phase-ordered teardown. If a lifecycle gate still has not been released when
+that deadline expires, `Node.Stop` returns the gate timeout after cancellation;
+that failure remains retryable so a later stop can acquire the gates and finish
+teardown once the live operation releases them.
 
 The node creates one shutdown context from the configured `shutdownTimeout`
 and passes it through every phase. PeerGovernor shutdown cancels its internal

@@ -24,11 +24,37 @@ import (
 	"github.com/blinklabs-io/dingo/plugin"
 )
 
+var errShutdownLifecycleGate = errors.New("shutdown lifecycle gate")
+
 func (n *Node) Stop() error {
-	n.shutdownOnce.Do(func() {
-		n.shutdownErr = n.shutdown()
-	})
-	return n.shutdownErr
+	n.shutdownMu.Lock()
+	if n.shutdownDone {
+		err := n.shutdownErr
+		n.shutdownMu.Unlock()
+		return err
+	}
+	if n.shutdownRunning {
+		wait := n.shutdownWait
+		n.shutdownMu.Unlock()
+		<-wait
+		return n.Stop()
+	}
+	n.shutdownRunning = true
+	n.shutdownWait = make(chan struct{})
+	wait := n.shutdownWait
+	n.shutdownMu.Unlock()
+
+	err := n.shutdown()
+
+	n.shutdownMu.Lock()
+	n.shutdownErr = err
+	n.shutdownRunning = false
+	if !errors.Is(err, errShutdownLifecycleGate) {
+		n.shutdownDone = true
+	}
+	close(wait)
+	n.shutdownMu.Unlock()
+	return err
 }
 
 func lockMutexContext(ctx context.Context, mutex *sync.Mutex) error {
@@ -104,17 +130,25 @@ func (n *Node) configuredShutdownTimeout() time.Duration {
 
 func (n *Node) shutdown() error {
 	shutdownTimeout := n.configuredShutdownTimeout()
-	lockCtx, cancelLocks := context.WithTimeout(
-		context.Background(), shutdownTimeout,
-	)
-	defer cancelLocks()
+	deadline := time.Now().Add(shutdownTimeout)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	shutdownStart := time.Now()
+
+	// Signal the node before waiting on lifecycle gates. A live restore,
+	// truncate, or snapshot may need the node context to be cancelled before
+	// it can release its gate; waiting first would strand cancellation and
+	// leave the node running when the shutdown deadline expires.
+	if n.cancel != nil {
+		n.cancel()
+	}
 
 	// Run holds this gate until startup has either completed or rolled back.
 	// In particular, a signal can reach Stop while Run is still unwinding a
 	// failed startup; waiting here keeps the phase-ordered shutdown from
 	// concurrently closing a component the startup stack is stopping.
-	if err := lockMutexContext(lockCtx, &n.startupLifecycleMu); err != nil {
-		return fmt.Errorf("shutdown startup lifecycle lock: %w", err)
+	if err := lockMutexContext(ctx, &n.startupLifecycleMu); err != nil {
+		return fmt.Errorf("shutdown startup lifecycle lock: %w: %w", errShutdownLifecycleGate, err)
 	}
 	defer n.startupLifecycleMu.Unlock()
 	// Restore and Truncate hold these gates while quiescing, closing, and
@@ -122,22 +156,14 @@ func (n *Node) shutdown() error {
 	// gates, in the same order, before cancelling those components or closing
 	// their storage; otherwise a concurrent live operation can use a resource
 	// while shutdown tears it down.
-	if err := lockMutexContext(lockCtx, &n.liveLifecycleMu); err != nil {
-		return fmt.Errorf("shutdown live lifecycle lock: %w", err)
+	if err := lockMutexContext(ctx, &n.liveLifecycleMu); err != nil {
+		return fmt.Errorf("shutdown live lifecycle lock: %w: %w", errShutdownLifecycleGate, err)
 	}
 	defer n.liveLifecycleMu.Unlock()
-	if err := lockMutexContext(lockCtx, &n.snapshotMu); err != nil {
-		return fmt.Errorf("shutdown snapshot lock: %w", err)
+	if err := lockMutexContext(ctx, &n.snapshotMu); err != nil {
+		return fmt.Errorf("shutdown snapshot lock: %w: %w", errShutdownLifecycleGate, err)
 	}
 	defer n.snapshotMu.Unlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	shutdownStart := time.Now()
-
-	if n.cancel != nil {
-		n.cancel()
-	}
 
 	var err error
 

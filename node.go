@@ -115,7 +115,10 @@ type Node struct {
 	cancel                       context.CancelFunc
 	fatalErrMu                   sync.Mutex
 	fatalErr                     error
-	shutdownOnce                 sync.Once
+	shutdownMu                   sync.Mutex
+	shutdownWait                 chan struct{}
+	shutdownRunning              bool
+	shutdownDone                 bool
 	shutdownErr                  error
 	// startupLifecycleMu keeps the startup rollback and normal shutdown from
 	// operating on the same partially initialized component concurrently. Run
