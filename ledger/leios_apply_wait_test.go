@@ -19,6 +19,8 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -169,21 +171,54 @@ func TestEnsureReferencedEndorserBlocksDoesNotBlockOnUnreadAnnouncement(
 	require.Positive(t, fetched.Load())
 }
 
+// leiosWaitTestPolledFromWait reports whether the current call stack passes
+// through waitForEndorserBlock, i.e. whether the endorser-block provider is
+// being polled by the WAIT itself rather than by one of the gate's
+// availability checks that run before the wait starts.
+//
+// A test that instead counts provider calls and flips availability on the Nth
+// one is silently coupled to how many pre-wait checks the gate happens to
+// make. If that count ever grows past the threshold, the endorser block
+// becomes available before the wait is entered, the reference is treated as
+// already cached, no wait happens at all -- and the test still passes, having
+// stopped testing the thing it names. Keying on the caller instead makes the
+// phase explicit and immune to that drift.
+func leiosWaitTestPolledFromWait() bool {
+	pcs := make([]uintptr, 64)
+	n := runtime.Callers(2, pcs)
+	frames := runtime.CallersFrames(pcs[:n])
+	for {
+		frame, more := frames.Next()
+		if strings.Contains(frame.Function, "waitForEndorserBlock") {
+			return true
+		}
+		if !more {
+			return false
+		}
+	}
+}
+
 // TestEnsureReferencedEndorserBlocksWaitsForCertifiedClosureArrivingLate pins
 // the other half of the contract: a certifying ranking block's closure IS read
 // at apply time and committing without it would permanently omit the endorser
 // block's effects, so that wait is load-bearing and is kept. An endorser block
 // that lands part-way through the window must be picked up, not skipped.
+//
+// The endorser block is unavailable to every check the gate makes before the
+// wait, and becomes available only on the wait's own Nth poll. That makes the
+// arrival late by construction -- it cannot be satisfied by a pre-wait check,
+// however many of those there are -- and it is driven by the wait's progress
+// rather than the wall clock, so it cannot lose a race with the deadline on a
+// loaded runner. The test then asserts that the arrival really was observed
+// inside the wait, which is what stops it passing vacuously if the wait is
+// skipped.
 func TestEnsureReferencedEndorserBlocksWaitsForCertifiedClosureArrivingLate(
 	t *testing.T,
 ) {
 	parent, certifier, ebHash := leiosTestCertifiedBlockPair(t)
-	// The endorser block becomes available on the arrivalPoll-th poll rather
-	// than after a wall-clock delay, so "arrives part-way through the window"
-	// is driven by the wait's own progress and cannot lose a race with the
-	// deadline on a loaded runner.
-	const arrivalPoll = 5
-	var polls atomic.Int64
+	const arrivalWaitPoll = 3
+	var preWaitPolls, waitPolls atomic.Int64
+	var arrivedInsideWait atomic.Bool
 	cfg := LedgerStateConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EndorserBlockProvider: func(
@@ -196,7 +231,24 @@ func TestEnsureReferencedEndorserBlocksWaitsForCertifiedClosureArrivingLate(
 			if string(hash) != string(ebHash.Bytes()) {
 				return nil, false
 			}
-			return nil, polls.Add(1) >= arrivalPoll
+			// Once it has arrived it stays available to every caller, as a
+			// real endorser block landing in the cache would -- including the
+			// gate's mandatory-closure checks, which run after the wait and
+			// outside its call stack.
+			if arrivedInsideWait.Load() {
+				return nil, true
+			}
+			if !leiosWaitTestPolledFromWait() {
+				// Every check before the wait sees it missing, so the wait is
+				// always entered and the arrival is always "late".
+				preWaitPolls.Add(1)
+				return nil, false
+			}
+			if waitPolls.Add(1) < arrivalWaitPoll {
+				return nil, false
+			}
+			arrivedInsideWait.Store(true)
+			return nil, true
 		},
 		EndorserBlockWaitSlots:     leiosWaitTestLongWaitSlots,
 		LeiosApplyEndorserBlockTxs: false,
@@ -209,11 +261,24 @@ func TestEnsureReferencedEndorserBlocksWaitsForCertifiedClosureArrivingLate(
 		t.Context(),
 		[]gledger.Block{parent, certifier},
 	))
+	require.True(
+		t,
+		arrivedInsideWait.Load(),
+		"the closure must have been picked up by the wait; if it was never "+
+			"polled from inside waitForEndorserBlock the gate did not wait "+
+			"at all and this test would otherwise pass vacuously",
+	)
 	require.GreaterOrEqual(
 		t,
-		polls.Load(),
-		int64(arrivalPoll),
+		waitPolls.Load(),
+		int64(arrivalWaitPoll),
 		"mandatory certified closure must be waited for, not skipped",
+	)
+	require.Positive(
+		t,
+		preWaitPolls.Load(),
+		"the gate is expected to check availability before waiting; if it "+
+			"stops doing so this test's phase split needs revisiting",
 	)
 	require.Less(t, time.Since(start), leiosWaitTestLongWindow)
 }
