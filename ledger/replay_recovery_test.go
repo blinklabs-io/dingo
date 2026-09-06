@@ -2530,3 +2530,157 @@ func TestResolveReplayRecoveryProducerReportsPresentInput(t *testing.T) {
 	assert.False(t, present, "a missing UTxO is not present")
 	assert.Nil(t, resolved)
 }
+
+// A missing redeemer is deterministic for transaction-owned script purposes,
+// but spend-purpose errors remain state-dependent because replay can change
+// whether the input resolves to a script output.
+func TestReplayRecoveryRejectsDeterministicMissingRedeemer(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		tag           lcommon.RedeemerTag
+		deterministic bool
+	}{
+		{
+			name:          "spend purpose",
+			tag:           lcommon.RedeemerTagSpend,
+			deterministic: false,
+		},
+		{
+			name:          "mint purpose",
+			tag:           lcommon.RedeemerTagMint,
+			deterministic: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireMissingRedeemerRecovery(t, tc.tag, tc.deterministic)
+		})
+	}
+}
+
+func requireMissingRedeemerRecovery(
+	t *testing.T,
+	tag lcommon.RedeemerTag,
+	deterministic bool,
+) {
+	t.Helper()
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		// The same failing block the producer-resolution path recovers from
+		// in TestReplayRecoveryArmsAuditAfterPrimaryAndLedgerRewind, so the
+		// rewind path is genuinely available here and the classification is
+		// what routes the rejection away from it.
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("missing-redeemer-tx"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{
+				txId: testHashBytes("missing-redeemer-producer"),
+			},
+		},
+		Cause: fmt.Errorf(
+			"conway plutus redeemer validation: %w",
+			lcommon.MissingRedeemerForScriptError{
+				ScriptHash: lcommon.Blake2b224Hash(
+					[]byte("missing-redeemer-script"),
+				),
+				Tag:   tag,
+				Index: 0,
+				RedeemerKey: lcommon.RedeemerKey{
+					Tag:   tag,
+					Index: 0,
+				},
+			},
+		),
+	})
+	require.NoError(t, err)
+	require.True(t, recovered)
+
+	if deterministic {
+		// The deterministic branch holds the applied tip and rewinds the
+		// primary chain to meet it, rather than descending to a producer's
+		// parent.
+		assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+		assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
+		assert.Nil(t, ls.lastAtTipRecovery)
+		assert.Nil(t, ls.continuationAudit.Load())
+
+		resync := testutil.RequireReceive(
+			t,
+			resyncCh,
+			2*time.Second,
+			"deterministic missing-redeemer rejection must request a fresh "+
+				"ChainSync intersection",
+		)
+		assert.Equal(t, ls.Tip().Point, resync.Point)
+		return
+	}
+
+	// Spend redeemer requirements depend on the resolved input, so this
+	// rejection must stay on the state-dependent rewind path.
+	assert.NotNil(
+		t,
+		ls.continuationAudit.Load(),
+		"spend missing-redeemer rejection must take the rewind path",
+	)
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		250*time.Millisecond,
+		"spend missing-redeemer rejection must not request a fresh "+
+			"ChainSync intersection",
+	)
+}
+
+// The control for the classification above. A bad-input verdict is exactly the
+// state-dependent case replay recovery exists for: the input is absent from
+// this node's UTxO window, and rebuilding that window from the producer's
+// branch can make the same block valid. It must keep taking the
+// producer-resolution rewind, so classifying rejections wholesale -- or
+// widening isDeterministicTxValidationError past what a transaction alone
+// decides -- fails here rather than passing quietly.
+func TestReplayRecoveryKeepsBadInputsOnTheRewindPath(t *testing.T) {
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		TxHash:     testHashBytes("bad-inputs-tx"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{
+				txId: testHashBytes("bad-inputs-producer"),
+			},
+		},
+		Cause: fmt.Errorf(
+			"shelley utxo validation rule 8: %w",
+			shelley.BadInputsUtxoError{},
+		),
+	})
+	require.NoError(t, err)
+	require.True(t, recovered)
+
+	// armContinuationAudit runs only on the producer-resolution rewind, so an
+	// armed window is proof this rejection did not take the deterministic
+	// branch.
+	require.NotNil(
+		t,
+		ls.continuationAudit.Load(),
+		"a state-dependent rejection must take the rewind path",
+	)
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		250*time.Millisecond,
+		"a state-dependent rejection must not use the deterministic "+
+			"fresh-intersection path",
+	)
+	require.False(
+		t,
+		isDeterministicTxValidationError(shelley.BadInputsUtxoError{}),
+		"a missing input is decided by local UTxO state, not by the tx",
+	)
+}

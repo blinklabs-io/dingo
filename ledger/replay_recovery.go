@@ -389,12 +389,39 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 // a wire-level duplicate cardano-node coalesces and this verdict rejects
 // (preview slot 1462320; blinklabs-io/gouroboros#1989). Recovery must stay
 // non-terminal for that duplicate verdict for exactly that reason.
+//
+// A missing redeemer is deterministic for transaction-owned script purposes,
+// but not for spending inputs. Rebuilding the local UTxO window can change
+// whether a spending input resolves to a script output and therefore whether
+// the spend redeemer rule applies. Keep spend errors on the state-dependent
+// rewind path; the other purposes do not depend on local UTxO state.
+//
+// Three paths report it, all as the one common type:
+// script.ValidateRequiredRedeemers behind babbage/conway/dijkstra
+// UtxoValidateRequiredRedeemers, common.ValidateScriptWitnesses behind
+// UtxoValidateScriptWitnesses, and Dingo's own
+// validateConwayRequiredPlutusRedeemers in ledger/eras. The conway and babbage
+// names are aliases of lcommon.MissingRedeemerForScriptError rather than
+// distinct types, so matching the common type covers all of them.
 func isDeterministicTxValidationError(err error) bool {
 	if _, ok := errors.AsType[shelley.DuplicateInputError](err); ok {
 		return true
 	}
 	if _, ok := errors.AsType[conway.PlutusScriptFailedError](err); ok {
 		return true
+	}
+	if missing, ok := errors.AsType[lcommon.MissingRedeemerForScriptError](err); ok {
+		switch missing.Tag {
+		case lcommon.RedeemerTagMint,
+			lcommon.RedeemerTagCert,
+			lcommon.RedeemerTagReward,
+			lcommon.RedeemerTagVoting,
+			lcommon.RedeemerTagProposing,
+			lcommon.RedeemerTagGuarding:
+			return true
+		default:
+			return false
+		}
 	}
 	if isRewardWithdrawalMismatch(err) {
 		return true
