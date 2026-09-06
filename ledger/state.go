@@ -6706,6 +6706,17 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 		opCertIssueNumber = opCert.IssueNumber
 		opCertPoolKeyHash = lcommon.PoolKeyHash(block.IssuerVkey().Hash())
+		// The counter is recorded for every applied block, validated or not,
+		// so the bound on what the metadata store can record is checked here
+		// rather than beside the era rule below: an unvalidated replay would
+		// otherwise reach UpdatePoolOpCertSequence with a counter it cannot
+		// write and fail after the block's transactions had been processed,
+		// with the width limit named nowhere.
+		if err := eras.ValidateOpCertPersistableCounter(
+			opCertIssueNumber,
+		); err != nil {
+			return nil, fmt.Errorf("pool %x: %w", opCertPoolKeyHash, err)
+		}
 		// Counter monotonicity is the stateful half of inbound opcert
 		// validation: read the pool's last-seen counter before processing this
 		// block, inside the same validation transaction. A backward counter

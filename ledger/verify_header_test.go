@@ -166,8 +166,8 @@ func createTestBlock(
 	// (8 BE), the raw concatenation real cardano-cli opcerts use, NOT a CBOR
 	// array. See ledger/forging/keys.go ValidateOpCert and
 	// verifyOpCertColdSignature.
-	opCertSeqNum := uint32(0)
-	opCertKesPeriod := uint32(0)
+	const opCertSeqNum = 0
+	const opCertKesPeriod = 0
 	var opCertBody [48]byte
 	copy(opCertBody[:32], kesPk)
 	binary.BigEndian.PutUint64(opCertBody[32:40], uint64(opCertSeqNum))
@@ -352,8 +352,8 @@ func createTestTPraosBlock(
 	leaderProof, leaderOutput, err := vrf.Prove(vrfSk, leaderInput)
 	require.NoError(t, err)
 
-	const opCertSeqNum = uint32(0)
-	const opCertKesPeriod = uint32(0)
+	const opCertSeqNum = 0
+	const opCertKesPeriod = 0
 	var opCertBody [48]byte
 	copy(opCertBody[:32], kesPk)
 	binary.BigEndian.PutUint64(opCertBody[32:40], uint64(opCertSeqNum))
