@@ -114,8 +114,23 @@ func (cm *ChainManager) SetLedger(
 			k,
 		)
 	}
+	cm.mutex.Lock()
+	defer cm.mutex.Unlock()
 	cm.securityParam = k
 	return nil
+}
+
+// SecurityParam returns the configured Ouroboros security parameter K, or zero
+// before SetLedger has run. SetLedger is not confined to startup — the state
+// database can be reloaded while the node is serving chainsync — so readers
+// outside the manager lock must go through here.
+func (cm *ChainManager) SecurityParam() int {
+	if cm == nil {
+		return 0
+	}
+	cm.mutex.RLock()
+	defer cm.mutex.RUnlock()
+	return cm.securityParam
 }
 
 func (cm *ChainManager) PrimaryChain() *Chain {

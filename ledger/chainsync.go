@@ -186,6 +186,15 @@ var ErrRollbackExceedsMithrilBoundary = errors.New(
 	"rollback exceeds Mithril trust boundary",
 )
 
+// ErrNoAppliedAncestorBelowContestedSlot reports that a rollback target shares
+// the applied tip's slot with a different hash and no applied ancestor below
+// that slot could be found to rewind to. The contested slot's effects cannot be
+// truncated in place, so the rollback fails loudly rather than reporting a
+// repair that left the UTxO set diverged.
+var ErrNoAppliedAncestorBelowContestedSlot = errors.New(
+	"no applied ancestor below contested slot",
+)
+
 type peerHeaderRecord struct {
 	// event carries only the metadata needed to reconstruct a ChainsyncEvent.
 	// Production records leave BlockHeader nil and decode headerCbor only when
@@ -2275,6 +2284,23 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			skipRollback = false
 		}
 		if skipRollback {
+			// A peer that is merely behind on our own chain repeats
+			// the same intersect on every reconnect by construction,
+			// so it reaches this threshold without anything having
+			// diverged. Skipping its rollback is right; reporting it
+			// as unrecoverable divergence (which advises the operator
+			// to re-bootstrap from a Mithril snapshot) and forcing a
+			// fresh connection are not.
+			if depth, behind := ls.chainsyncPeerBehindOnOurChain(
+				e,
+			); behind {
+				ls.noteChainsyncPeerBehind(
+					e,
+					depth,
+					"rollback loop detected",
+				)
+				return nil
+			}
 			// Surface the stuck condition through the point-keyed tracker
 			// that survives the resync reset+reconnect cycle. Without this
 			// the skip silently breaks the loop and the #2728 escalation
@@ -2421,6 +2447,26 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			}
 			if reconciled {
 				ls.resetChainsyncResyncState()
+				ls.setChainsyncState(SyncingChainsyncState)
+				return nil
+			}
+			// A peer whose advertised tip is a strict ancestor of
+			// ours holds a prefix of our chain: it is behind, not
+			// forked, and the over-K depth is only our intersect
+			// ladder's granularity (see
+			// chainsyncPeerBehindOnOurChain). Keep it attached and
+			// unselected until it catches up instead of rejecting,
+			// denying and escalating it — with a single configured
+			// upstream, evicting it is a self-inflicted outage.
+			if depth, behind := ls.chainsyncPeerBehindOnOurChain(
+				e,
+			); behind {
+				ls.noteChainsyncPeerBehind(
+					e,
+					depth,
+					"rollback exceeds security parameter K",
+				)
+				// No rollback occurred, so we are still syncing.
 				ls.setChainsyncState(SyncingChainsyncState)
 				return nil
 			}
@@ -5917,7 +5963,7 @@ func (ls *LedgerState) processEpochRollover(
 	if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
 		updateQuorum = shelleyGenesis.UpdateQuorum
 	}
-	newPParams, err := ls.db.ComputeAndApplyPParamUpdates(
+	newPParams, plutusV2CostModelWritten, err := ls.db.ComputeAndApplyPParamUpdates(
 		epochStartSlot,
 		currentEpoch.EpochId+1, // Target epoch for updates
 		currentEra.Id,
@@ -5925,10 +5971,25 @@ func (ls *LedgerState) processEpochRollover(
 		ownedPParams,
 		currentEra.DecodePParamsUpdateFunc,
 		currentEra.PParamsUpdateFunc,
+		currentEra.ParamUpdateHasPlutusV2CostModelFunc,
 		txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("apply pparam updates: %w", err)
+	}
+	if plutusV2CostModelWritten {
+		// The classic Shelley-style update system, not CIP-1694 governance,
+		// carried a real PlutusV2 cost model this epoch -- the same real-data
+		// confirmation the governance-enactment branch below records, just
+		// from the pre-Conway path (this is how real mainnet actually
+		// received its PlutusV2 cost model, well before Conway governance
+		// existed). See blinklabs-io/dingo#3825's PR review.
+		if err := ls.markRealV2CostModelObserved(
+			currentEpoch.EpochId+1, txn,
+		); err != nil {
+			return nil, err
+		}
+		result.RealV2CostModelObserved = true
 	}
 
 	// Apply the embedded Shelley POOLREAP transition: refund the deposits of
@@ -6007,6 +6068,14 @@ func (ls *LedgerState) processEpochRollover(
 			return nil, fmt.Errorf(
 				"persist post-enactment pparams: %w", err,
 			)
+		}
+		if govOut.PlutusV2CostModelWritten {
+			if err := ls.markRealV2CostModelObserved(
+				currentEpoch.EpochId+1, txn,
+			); err != nil {
+				return nil, err
+			}
+			result.RealV2CostModelObserved = true
 		}
 	}
 	result.NewCurrentPParams = newPParams

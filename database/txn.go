@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
@@ -55,6 +56,15 @@ type Txn struct {
 	db          *Database
 	blobTxn     types.Txn
 	metadataTxn types.Txn
+	// blobStore is the blob store this transaction opened blobTxn on, and
+	// the store every blob operation inside the transaction must use. It
+	// is set once at construction and never cleared, so it stays readable
+	// (and correct) even after the transaction is finished. blobPin is the
+	// pin that keeps that store from being drained out from under the
+	// transaction; it is guarded by lock and cleared by
+	// releaseBlobPinLocked. See blob_store.go.
+	blobStore   blob.BlobStore
+	blobPin     *blobStoreRef
 	lock        sync.Mutex
 	finished    bool
 	committed   bool
@@ -130,12 +140,29 @@ func (t *Txn) releaseCommitBarrierLocked() {
 func (t *Txn) finishLocked() {
 	t.finished = true
 	t.releaseCommitBarrierLocked()
+	t.releaseBlobPinLocked()
+}
+
+// releaseBlobPinLocked drops this transaction's pin on the blob store it
+// opened on, if still held. Like releaseCommitBarrierLocked it clears the
+// field before releasing, so routing it through finishLocked from every
+// terminal path releases exactly once rather than panicking on an unmatched
+// WaitGroup.Done. t.blobStore is deliberately left set: BlobStore must keep
+// answering after the transaction finishes. Callers must hold t.lock.
+func (t *Txn) releaseBlobPinLocked() {
+	if t.blobPin == nil {
+		return
+	}
+	pin := t.blobPin
+	t.blobPin = nil
+	pin.release()
 }
 
 func NewTxn(db *Database, readWrite bool) *Txn {
 	t := &Txn{db: db, readWrite: readWrite}
 	acquireCommitBarrier(t, db.Metadata() != nil)
-	if bs := db.Blob(); bs != nil {
+	pinBlobStoreForTxn(t, db)
+	if bs := t.blobStore; bs != nil {
 		t.blobTxn = bs.NewTransaction(readWrite)
 	}
 	if ms := db.Metadata(); ms != nil {
@@ -170,7 +197,8 @@ func NewTxn(db *Database, readWrite bool) *Txn {
 func NewBlobOnlyTxn(db *Database, readWrite bool) *Txn {
 	t := &Txn{db: db, readWrite: readWrite}
 	acquireCommitBarrier(t, false)
-	if bs := db.Blob(); bs != nil {
+	pinBlobStoreForTxn(t, db)
+	if bs := t.blobStore; bs != nil {
 		t.blobTxn = bs.NewTransaction(readWrite)
 	}
 	return t
@@ -179,6 +207,12 @@ func NewBlobOnlyTxn(db *Database, readWrite bool) *Txn {
 func NewMetadataOnlyTxn(db *Database, readWrite bool) *Txn {
 	t := &Txn{db: db, readWrite: readWrite}
 	acquireCommitBarrier(t, db.Metadata() != nil)
+	// A metadata-only transaction opens no blob transaction, but it still
+	// pins: BlobStore has to answer for it too, because helpers that take a
+	// *Txn (recordBlobOrphansOnCommit and the blob-delete paths it counts
+	// for) are reached with whichever transaction the caller happens to
+	// hold.
+	pinBlobStoreForTxn(t, db)
 	if ms := db.Metadata(); ms != nil {
 		// See NewTxn's matching comment: context.Background() here is the
 		// current propagation boundary, not a metadata-store-internal gap.
@@ -196,8 +230,30 @@ func NewMetadataOnlyTxn(db *Database, readWrite bool) *Txn {
 	return t
 }
 
+// pinBlobStoreForTxn pins db's currently installed blob store for t's
+// lifetime and records which store that was. Every constructor calls it
+// before opening anything, so a transaction's blob work and the store that
+// work runs against are chosen together, once — re-reading Database.Blob
+// later could hand back a different store than the one blobTxn belongs to.
+func pinBlobStoreForTxn(t *Txn, db *Database) {
+	if db == nil {
+		return
+	}
+	t.blobPin = db.pinBlobStore()
+	t.blobStore = t.blobPin.blobStore()
+}
+
 func (t *Txn) DB() *Database {
 	return t.db
+}
+
+// BlobStore returns the blob store this transaction was opened on, which is
+// the store its Blob transaction handle belongs to and the one every blob
+// operation in the transaction must use. It is stable for the transaction's
+// lifetime even if the database's installed store is replaced meanwhile, and
+// it is nil when no blob store was installed at construction.
+func (t *Txn) BlobStore() blob.BlobStore {
+	return t.blobStore
 }
 
 // Metadata returns the underlying metadata transaction handle
@@ -364,6 +420,12 @@ func (t *Txn) Commit() error {
 		// mark the transaction finished here: the recovery rollback still owns
 		// that transition. releaseCommitBarrierLocked is idempotent, so normal
 		// terminal paths may already have released it through finishLocked.
+		// The blob-store pin is deliberately not released here: that recovery
+		// rollback still rolls back blobTxn, which belongs to the pinned
+		// store, so dropping the pin early could let a concurrent
+		// SetBlobStore's drain return -- and its caller close that store --
+		// while the rollback is still running against it. finishLocked
+		// releases it once the rollback concludes.
 		t.releaseCommitBarrierLocked()
 		t.lock.Unlock()
 		if dispatchAfterUnlock {
@@ -419,7 +481,7 @@ func (t *Txn) Commit() error {
 		// commit. Only combined transactions pay the cost -- blob-only bulk
 		// paths sync at their own barriers, and Sync is a store-wide flush, so
 		// the next combined commit also makes those batches durable.
-		if blobStore := t.db.Blob(); blobStore != nil && t.metadataTxn != nil {
+		if blobStore := t.blobStore; blobStore != nil && t.metadataTxn != nil {
 			if syncErr := blobStore.Sync(); syncErr != nil {
 				_ = t.metadataTxn.Rollback()
 				t.finishLocked()

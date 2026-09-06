@@ -54,6 +54,7 @@ type Chain struct {
 	iterators            []*ChainIterator
 	currentTip           ochainsync.Tip
 	tipBlockIndex        uint64
+	mutationGeneration   uint64
 	lastCommonBlockIndex uint64
 	id                   ChainId
 	mutex                sync.RWMutex
@@ -481,6 +482,7 @@ func (c *Chain) addBlockLocked(
 		BlockNumber: blockNumber,
 	}
 	c.tipBlockIndex = newBlockIndex
+	c.mutationGeneration++
 	if notifyWaiters {
 		c.notifyWaitingIterators()
 	}
@@ -641,6 +643,7 @@ func (c *Chain) addRawBlockLocked(
 		BlockNumber: rb.BlockNumber,
 	}
 	c.tipBlockIndex = newBlockIndex
+	c.mutationGeneration++
 	// Build event for deferred publication (same pattern as
 	// addBlockLocked — publish after the transaction commits).
 	if c.eventBus != nil {
@@ -686,6 +689,31 @@ func (c *Chain) AddRawBlocksWithCallback(
 	return c.addRawBlocks(blocks, callback)
 }
 
+// batchRestoreIsSafeLocked reports whether a failed add batch may write its
+// pre-batch snapshot back over the current chain state.
+//
+// It may only do so while the chain still shows exactly what that batch left
+// behind. addRawBlocks releases c.mutex and c.manager.mutex when its
+// transaction closure returns, before txn.Do commits, so any other goroutine
+// can move the chain before the Commit-failure path runs -- and rolling the
+// primary chain back while blockfetch appends to it is what every ledger
+// recovery rewind does. Writing the snapshot over a rollback's result raises
+// tipBlockIndex back above blocks that rollback deleted, leaving the chain
+// claiming a tip it does not store: the next rollback measures an inflated
+// fork depth against it, and any lookup in the resurrected span reports the
+// block as missing.
+//
+// Callers must hold c.mutex and c.manager.mutex.
+func (c *Chain) batchRestoreIsSafeLocked(
+	appliedTip ochainsync.Tip,
+	appliedTipBlockIndex uint64,
+	appliedGeneration uint64,
+) bool {
+	return c.tipBlockIndex == appliedTipBlockIndex &&
+		c.mutationGeneration == appliedGeneration &&
+		bytes.Equal(c.currentTip.Point.Hash, appliedTip.Point.Hash)
+}
+
 func (c *Chain) addRawBlocks(
 	blocks []RawBlock,
 	callback func(RawBlock, *database.Txn) error,
@@ -713,11 +741,15 @@ func (c *Chain) addRawBlocks(
 		// leaving the in-memory chain advanced. Capture the
 		// snapshot here so we can also restore on Commit failure.
 		var (
-			snapshotTaken      bool
-			savedTip           ochainsync.Tip
-			savedTipBlockIndex uint64
-			savedHeaders       []queuedHeader
-			savedBlocks        []ocommon.Point
+			savedTip             ochainsync.Tip
+			savedTipBlockIndex   uint64
+			savedGeneration      uint64
+			savedHeaders         []queuedHeader
+			savedBlocks          []ocommon.Point
+			batchApplied         bool
+			appliedTip           ochainsync.Tip
+			appliedTipBlockIndex uint64
+			appliedGeneration    uint64
 		)
 		err := txn.Do(func(txn *database.Txn) error {
 			batch := blocks[batchOffset : batchOffset+batchSize]
@@ -730,11 +762,11 @@ func (c *Chain) addRawBlocks(
 			}
 			savedTip = c.currentTip
 			savedTipBlockIndex = c.tipBlockIndex
+			savedGeneration = c.mutationGeneration
 			savedHeaders = slices.Clone(c.headers)
 			if !c.persistent {
 				savedBlocks = slices.Clone(c.blocks)
 			}
-			snapshotTaken = true
 			for _, rb := range batch {
 				evt, err := c.addRawBlockLocked(
 					rb,
@@ -744,6 +776,7 @@ func (c *Chain) addRawBlocks(
 				if err != nil {
 					c.currentTip = savedTip
 					c.tipBlockIndex = savedTipBlockIndex
+					c.mutationGeneration = savedGeneration
 					c.headers = savedHeaders
 					if !c.persistent {
 						c.blocks = savedBlocks
@@ -756,23 +789,50 @@ func (c *Chain) addRawBlocks(
 					)
 				}
 			}
+			// Record what this batch leaves behind so the Commit-failure
+			// path below can tell its own state from someone else's.
+			batchApplied = true
+			appliedTip = c.currentTip
+			appliedTipBlockIndex = c.tipBlockIndex
+			appliedGeneration = c.mutationGeneration
 			return nil
 		})
 		if err != nil {
 			// Cover the Commit-failure path: closure returned nil
 			// but txn.Do's later Commit failed, so memory still
 			// reflects the post-batch tip while the DB rolled
-			// back. Re-acquire the locks and restore. Restoring
-			// after a closure-internal error path is a safe no-op
-			// because the closure already wrote the same values.
-			if snapshotTaken {
+			// back. Re-acquire the locks and restore -- but only
+			// while the chain still shows exactly what this batch
+			// left behind.
+			//
+			// The locks are released when the closure returns, so
+			// another goroutine can move the chain before this runs,
+			// and rolling the primary chain back while blockfetch
+			// appends to it is a normal pairing rather than a corner
+			// case: it is what every ledger recovery rewind does.
+			// Writing the pre-batch snapshot over a rollback's result
+			// raises tipBlockIndex back above blocks that rollback
+			// deleted, leaving the chain claiming a tip it does not
+			// store -- an inflated fork depth on the next rollback and
+			// a not-found lookup for any index in the resurrected
+			// span. A closure-internal error already restored under
+			// the lock, so there is nothing left to do for it here
+			// either.
+			if batchApplied {
 				c.mutex.Lock()
 				c.manager.mutex.Lock()
-				c.currentTip = savedTip
-				c.tipBlockIndex = savedTipBlockIndex
-				c.headers = savedHeaders
-				if !c.persistent {
-					c.blocks = savedBlocks
+				if c.batchRestoreIsSafeLocked(
+					appliedTip,
+					appliedTipBlockIndex,
+					appliedGeneration,
+				) {
+					c.currentTip = savedTip
+					c.tipBlockIndex = savedTipBlockIndex
+					c.mutationGeneration = savedGeneration
+					c.headers = savedHeaders
+					if !c.persistent {
+						c.blocks = savedBlocks
+					}
 				}
 				c.manager.mutex.Unlock()
 				c.mutex.Unlock()
@@ -1221,6 +1281,7 @@ func (c *Chain) rollbackLocked(
 		BlockNumber: tmpBlock.Number,
 	}
 	c.tipBlockIndex = rollbackBlockIndex
+	c.mutationGeneration++
 	// Update iterators for rollback
 	for _, iter := range c.iterators {
 		// Reverse iterators never deliver rollback markers, but if a
@@ -1399,6 +1460,13 @@ func (c *Chain) IntersectPoints(count int) []ocommon.Point {
 	if c == nil || count <= 0 {
 		return nil
 	}
+	// Read K before taking any chain lock: SetLedger can run while the node
+	// is serving chainsync, and the accessor takes the manager lock, which
+	// must not be acquired underneath the block-index read locks below.
+	securityRung := uint64(0)
+	if k := c.manager.SecurityParam(); k > 0 {
+		securityRung = uint64(k) //nolint:gosec // guarded positive
+	}
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	unlockBlockIndexReadLocks := c.lockBlockIndexReadLocks()
@@ -1452,11 +1520,42 @@ func (c *Chain) IntersectPoints(count int) []ocommon.Point {
 	if c.tipBlockIndex <= initialBlockIndex {
 		return points
 	}
+	// Beyond the dense band the ladder doubles, so a peer L blocks behind
+	// resolves its FindIntersect to the next rung at or past L. Once that
+	// rung passes the security parameter K, the rollback the peer asks for
+	// is refused as an over-K fork even though the peer's chain is a strict
+	// prefix of ours: at K=108 the first rung past K is 128, so a peer only
+	// 65 blocks behind is already refused. Offering the rung at exactly K
+	// closes that band — with a point at offset K, every peer within K of
+	// our tip holds it, so the shallowest rung it can match is at most K
+	// deep and stays crossable. It costs exactly one extra point, so the
+	// FindIntersect message stays the same size in practice (the list is
+	// capped by count).
+	//
 	for offset := uint64(denseCount); len(points) < count; offset *= 2 { //nolint:gosec // denseCount is bounded to non-negative values
 		if offset == 0 || offset >= c.tipBlockIndex {
 			break
 		}
+		// Keep the list descending: emit the K rung before the first
+		// doubling rung that would overshoot it.
+		if securityRung > 0 && securityRung < offset {
+			if securityRung < c.tipBlockIndex {
+				appendBlockPoint(c.tipBlockIndex - securityRung)
+			}
+			securityRung = 0
+			if len(points) >= count {
+				break
+			}
+		}
 		appendBlockPoint(c.tipBlockIndex - offset)
+	}
+	// The doubling loop can stop before reaching the K rung when the chain
+	// is shorter than the next rung. Every offset it emitted is then at or
+	// below K (a smaller K would have been emitted inside the loop), so
+	// appending it here keeps the list descending.
+	if securityRung > 0 && securityRung < c.tipBlockIndex &&
+		len(points) < count {
+		appendBlockPoint(c.tipBlockIndex - securityRung)
 	}
 	if len(points) < count {
 		appendBlockPoint(initialBlockIndex)

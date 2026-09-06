@@ -222,19 +222,42 @@ func (ls *LedgerState) publishBlockEvent(
 // It does not close the window completely: the chain can still grow between
 // this validation and the rollback and push the rollback past the security
 // parameter, and an I/O failure mid-truncation is not predictable at all.
-// Both leave the chain needing recovery regardless. The same shape --
-// LedgerState.rollback as a separate call after the emit, which can itself
-// fail -- exists in reconcilePrimaryChainTipWithLedgerTip (issue #3516); a
-// true durable, atomic handoff across every rollback path is tracked as
-// issue #3817, not fixed piecemeal per call site.
+// Both leave the chain needing recovery regardless -- see
+// validateAndEmitRollbackUndoEmitted for the one caller that can retry the
+// first of those instead. rollbackChainAndState (this function's caller)
+// still separately calls LedgerState.rollback after the emit, which can
+// itself fail -- reconcilePrimaryChainTipWithLedgerTip had the identical
+// shape (issue #3516) until it was closed by decoupling
+// LedgerState.rollback's durable commit from its resync-event publish
+// (wolf31o2 review, PR #3611: see rollbackWithResync/rollbackWithoutResync
+// and the reconciler's two branches). Whether the same decoupling is safe
+// to adopt here too remains tracked as issue #3817.
 func (ls *LedgerState) validateAndEmitRollbackUndo(
 	point ocommon.Point,
 ) error {
+	_, err := ls.validateAndEmitRollbackUndoEmitted(point)
+	return err
+}
+
+// validateAndEmitRollbackUndoEmitted is validateAndEmitRollbackUndo, also
+// reporting whether it read any block to undo.
+//
+// A caller that retries the same rollback after the chain rejects it needs
+// that answer. Retrying is only sound while nothing was published: a second
+// pass emits undo events for blocks the first pass already covered, so a
+// ledger.tx consumer would be told to undo them twice. Reporting the read
+// rather than the publish is deliberately conservative -- a block that decodes
+// to no transactions publishes nothing, and a caller that treats it as emitted
+// merely declines a retry it could have taken.
+func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(
+	point ocommon.Point,
+) (bool, error) {
 	if err := ls.chain.ValidateRollback(point); err != nil {
-		return err
+		return false, err
 	}
-	ls.emitRollbackTransactionEvents(ls.blocksAboveSlot(point.Slot))
-	return nil
+	blocks := ls.blocksAboveSlot(point.Slot)
+	ls.emitRollbackTransactionEvents(blocks)
+	return len(blocks) > 0, nil
 }
 
 // blocksAboveSlot returns the blocks a rollback to slot would discard,
