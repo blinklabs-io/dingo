@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -936,5 +937,113 @@ func TestLeiosGraceDetectorIgnoresSharedAwaitFetch(t *testing.T) {
 		t,
 		sawGrace.Load(),
 		"awaitFetch alone must not be mistaken for the post-window wait",
+	)
+}
+
+// TestFetchRequiredReportsCancellationNotBudgetExpiry covers the second site
+// with the same defect the diffusion wait had: the retry budget is a timeout
+// CHILD of the block-processing context, so its Done also closes when the
+// PARENT is cancelled -- node shutdown, or the pass being aborted. Reporting
+// that as "the retry budget elapsed" tells an operator that peers failed to
+// serve the endorser block when nothing was asked of them, and it is loudest
+// exactly when a node is shutting down.
+func TestFetchRequiredReportsCancellationNotBudgetExpiry(t *testing.T) {
+	var logs bytes.Buffer
+	cfg := LedgerStateConfig{
+		Logger: slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		})),
+		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
+			return nil, false
+		},
+		EndorserBlockFetcher: func(
+			_ context.Context,
+			_ uint64,
+			_ []byte,
+		) error {
+			return errors.New("no peer holds it")
+		},
+	}
+	b := newLeiosBackfiller(cfg)
+	require.NotNil(t, b)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := b.fetchRequired(
+		ctx,
+		leiosEbRef{
+			slot: 100,
+			hash: lcommon.NewBlake2b256(leiosTestHash(0xC7)),
+		},
+		time.Millisecond,
+	)
+	require.Error(t, err)
+	require.NotContains(
+		t,
+		logs.String(),
+		"certified leios endorser block fetch budget elapsed",
+		"a cancelled pass must not be reported as peers failing to serve",
+	)
+	require.Contains(
+		t,
+		logs.String(),
+		"certified leios endorser block fetch cancelled",
+	)
+}
+
+// TestCIPFetchWaitReportsCancellationNotFailure covers the third site. On the
+// CIP path a fetch that finishes without caching is reported as "could not be
+// fetched", which is a real diagnosis -- unless the pass was cancelled, in
+// which case nothing was learned about whether any peer holds the block and
+// the line would be a false diagnosis emitted on every shutdown.
+func TestCIPFetchWaitReportsCancellationNotFailure(t *testing.T) {
+	var logs bytes.Buffer
+	cfg := LedgerStateConfig{
+		Logger: slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		})),
+		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
+			return nil, false
+		},
+		EndorserBlockFetcher: func(
+			ctx context.Context,
+			_ uint64,
+			_ []byte,
+		) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	}
+	ls := &LedgerState{config: cfg}
+	ls.leiosBackfill = newLeiosBackfiller(cfg)
+
+	ref := leiosEbRef{
+		slot: 100,
+		hash: lcommon.NewBlake2b256(leiosTestHash(0xC8)),
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	// Dispatch the fetch, then cancel: the fetch is in flight and will end
+	// only because of the cancellation.
+	ls.leiosBackfill.spawn(ctx, ref)
+	cancel()
+
+	ls.awaitInFlightEndorserFetches(
+		ctx,
+		[]leiosEbRef{ref},
+		leiosWaitTestWindow,
+		time.Millisecond,
+	)
+
+	require.NotContains(
+		t,
+		logs.String(),
+		"endorser block could not be fetched",
+		"a cancelled pass must not be reported as an unfetchable endorser block",
+	)
+	require.Contains(
+		t,
+		logs.String(),
+		"endorser block fetch cancelled before it completed",
 	)
 }

@@ -858,6 +858,21 @@ func (ls *LedgerState) awaitInFlightEndorserFetches(
 				)
 				return
 			}
+			if ctx.Err() != nil {
+				// The pass was cancelled, not the fetch exhausted. Nothing
+				// was learned about whether any peer holds the endorser
+				// block, so saying it "could not be fetched" would be a
+				// false diagnosis emitted on every shutdown.
+				ls.config.Logger.Debug(
+					"endorser block fetch cancelled before it completed",
+					"component", "ledger",
+					"slot", r.slot,
+					"eb_hash", r.hash.String(),
+					"waited_seconds", elapsed.Seconds(),
+					"error", ctx.Err(),
+				)
+				return
+			}
 			ls.config.Logger.Warn(
 				"endorser block could not be fetched; applying its ranking block without the endorser-resident transactions",
 				"component", "ledger",
@@ -1316,6 +1331,26 @@ func (b *leiosBackfiller) fetchRequired(
 			timer.Stop()
 			if lastErr == nil {
 				lastErr = budgetCtx.Err()
+			}
+			// budgetCtx is a timeout child of ctx, so its Done also closes
+			// when the PARENT is cancelled -- node shutdown, or the
+			// block-processing pass being aborted. Reporting that as "the
+			// retry budget elapsed" tells an operator the peers failed to
+			// serve the endorser block when in fact nothing was asked of
+			// them, and it is loudest exactly when a node is shutting down.
+			// Same discrimination as waitForEndorserBlock: the child's error
+			// is stable once resolved, so a deadline that fires first stays
+			// DeadlineExceeded even if the parent is cancelled straight after.
+			if !errors.Is(budgetCtx.Err(), context.DeadlineExceeded) {
+				b.logger.Debug(
+					"certified leios endorser block fetch cancelled",
+					"component", "ledger",
+					"slot", r.slot,
+					"eb_hash", r.hash.String(),
+					"attempts", attempt,
+					"error", lastErr,
+				)
+				return lastErr
 			}
 			b.logger.Warn(
 				"certified leios endorser block fetch budget elapsed",
