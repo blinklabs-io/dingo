@@ -204,6 +204,17 @@ func TestSetGapBlockTransactionRestoresConsumedInputsOnRollback(
 	defer db.Close()
 
 	candidate := findGapRollbackCandidate(t)
+	// The fixture contains three stake registrations and three pool
+	// registrations. Preserve their protocol deposits instead of recording
+	// an authoritative zero for the first certificate only.
+	certificateDeposits := map[int]uint64{
+		0: 2_000_000,
+		1: 500_000_000,
+		3: 2_000_000,
+		4: 500_000_000,
+		6: 2_000_000,
+		7: 500_000_000,
+	}
 	for _, block := range candidate.producerBlocks {
 		storeBlockOffsetsOnly(t, db, block)
 	}
@@ -215,7 +226,7 @@ func TestSetGapBlockTransactionRestoresConsumedInputsOnRollback(
 			candidate.consumerTx,
 			candidate.consumerPoint,
 			0,
-			map[int]uint64{0: 0},
+			certificateDeposits,
 			mustBlockOffsets(t, candidate.consumerBlock),
 			nil,
 		),
@@ -912,6 +923,14 @@ func TestSetGapBlockTransactionSpendsLiveProducedInputs(t *testing.T) {
 	defer db.Close()
 
 	candidate := findGapConsumeCandidate(t)
+	certificateDeposits := map[int]uint64{
+		0: 2_000_000,
+		1: 500_000_000,
+		3: 2_000_000,
+		4: 500_000_000,
+		6: 2_000_000,
+		7: 500_000_000,
+	}
 
 	// Store blob offsets for all producer blocks plus the consumer
 	// block so SetGapBlockTransaction can look up and persist
@@ -1028,7 +1047,7 @@ func TestSetGapBlockTransactionSpendsLiveProducedInputs(t *testing.T) {
 			candidate.consumerTx,
 			candidate.consumerPoint,
 			0,
-			map[int]uint64{0: 0},
+			certificateDeposits,
 			mustBlockOffsets(t, candidate.consumerBlock),
 			nil,
 		),
