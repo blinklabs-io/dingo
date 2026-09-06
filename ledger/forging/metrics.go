@@ -60,6 +60,12 @@ type forgingMetrics struct {
 	// selection, validation, publication), by phase.
 	forgePanicRecovered *prometheus.CounterVec
 
+	// Outcomes of forge attempts whose first transaction selection was
+	// aborted by the chain moving underneath it, by result. Only
+	// incremented when the abort happened, so a quiet producer reports
+	// zero on every series.
+	forgeSelectionFallback *prometheus.CounterVec
+
 	// Leios EB forging outcomes
 	leiosEbForged  prometheus.Counter
 	leiosEbSkipped *prometheus.CounterVec
@@ -209,6 +215,22 @@ func initForgingMetrics(
 		},
 		[]string{"phase"},
 	)
+	m.forgeSelectionFallback = factory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dingo_forge_selection_fallback_total",
+			Help: "forge attempts whose transaction selection was aborted by a concurrent ledger publication or chain-tip move, by how the slot ended: retried (a later selection attempt succeeded), empty (a transaction-free block was forged instead), lost (no block was produced)",
+		},
+		[]string{"result"},
+	)
+	// Materialize every result so dashboards and alerts see a zero series
+	// before the first abort rather than a missing one.
+	for _, result := range []string{
+		forgeSelectionResultRetried,
+		forgeSelectionResultEmpty,
+		forgeSelectionResultLost,
+	} {
+		m.forgeSelectionFallback.WithLabelValues(result)
+	}
 	m.leiosEbForged = factory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_metrics_leios_forge_eb_forged_total",
