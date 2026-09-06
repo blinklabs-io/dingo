@@ -32,12 +32,12 @@ func (d *Database) SetLeiosEBManifest(
 	hash []byte,
 	manifestRaw []byte,
 ) error {
-	blob := d.Blob()
+	txn := d.BlobTxn(true)
+	defer txn.Rollback() //nolint:errcheck
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
-	txn := d.BlobTxn(true)
-	defer txn.Rollback() //nolint:errcheck
 	blobTxn := txn.Blob()
 	if blobTxn == nil {
 		return types.ErrNilTxn
@@ -67,12 +67,12 @@ func (d *Database) GetLeiosEBManifest(
 	hash []byte,
 	slot uint64,
 ) (manifestRaw []byte, err error) {
-	blob := d.Blob()
+	txn := d.BlobTxn(false)
+	defer txn.Rollback() //nolint:errcheck
+	blob := txn.BlobStore()
 	if blob == nil {
 		return nil, types.ErrBlobStoreUnavailable
 	}
-	txn := d.BlobTxn(false)
-	defer txn.Rollback() //nolint:errcheck
 	blobTxn := txn.Blob()
 	if blobTxn == nil {
 		return nil, types.ErrNilTxn
@@ -118,12 +118,12 @@ func (d *Database) SetLeiosEBTxs(
 	if txsRaw == nil {
 		txsRaw = []cbor.RawMessage{}
 	}
-	blob := d.Blob()
+	txn := d.BlobTxn(true)
+	defer txn.Rollback() //nolint:errcheck
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
-	txn := d.BlobTxn(true)
-	defer txn.Rollback() //nolint:errcheck
 	blobTxn := txn.Blob()
 	if blobTxn == nil {
 		return types.ErrNilTxn
@@ -156,12 +156,12 @@ func (d *Database) GetLeiosEBTxs(
 	hash []byte,
 	slot uint64,
 ) ([]cbor.RawMessage, error) {
-	blob := d.Blob()
+	txn := d.BlobTxn(false)
+	defer txn.Rollback() //nolint:errcheck
+	blob := txn.BlobStore()
 	if blob == nil {
 		return nil, types.ErrBlobStoreUnavailable
 	}
-	txn := d.BlobTxn(false)
-	defer txn.Rollback() //nolint:errcheck
 	blobTxn := txn.Blob()
 	if blobTxn == nil {
 		return nil, types.ErrNilTxn
@@ -219,12 +219,12 @@ func (d *Database) SetLeiosEB(
 	manifestRaw []byte,
 	txsRaw []cbor.RawMessage,
 ) error {
-	blob := d.Blob()
+	txn := d.BlobTxn(true)
+	defer txn.Rollback() //nolint:errcheck
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
-	txn := d.BlobTxn(true)
-	defer txn.Rollback() //nolint:errcheck
 	blobTxn := txn.Blob()
 	if blobTxn == nil {
 		return types.ErrNilTxn
