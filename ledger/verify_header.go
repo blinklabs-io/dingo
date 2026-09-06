@@ -1494,20 +1494,34 @@ func (ls *LedgerState) maxKESEvolutions() uint64 {
 	return uint64(shelleyGenesis.MaxKESEvolutions) // #nosec G115 -- guarded > 0
 }
 
+// epochNonceHexCacheEntry keeps the nonce that produced its hexadecimal form.
+// The nonce is copied at insertion because callers can reuse their backing
+// storage after verification returns.
+type epochNonceHexCacheEntry struct {
+	nonce []byte
+	hex   string
+}
+
 func (ls *LedgerState) epochNonceHex(epochId uint64, nonce []byte) string {
-	nonceHex := hex.EncodeToString(nonce)
 	ls.RLock()
 	cachedNonce, ok := ls.epochNonceHexCache[epochId]
 	ls.RUnlock()
-	if ok && cachedNonce == nonceHex {
-		return cachedNonce
+	if ok && bytes.Equal(cachedNonce.nonce, nonce) {
+		return cachedNonce.hex
 	}
 	ls.Lock()
 	defer ls.Unlock()
-	if ls.epochNonceHexCache == nil {
-		ls.epochNonceHexCache = make(map[uint64]string)
+	if cachedNonce, ok := ls.epochNonceHexCache[epochId]; ok && bytes.Equal(cachedNonce.nonce, nonce) {
+		return cachedNonce.hex
 	}
-	ls.epochNonceHexCache[epochId] = nonceHex
+	nonceHex := hex.EncodeToString(nonce)
+	if ls.epochNonceHexCache == nil {
+		ls.epochNonceHexCache = make(map[uint64]epochNonceHexCacheEntry)
+	}
+	ls.epochNonceHexCache[epochId] = epochNonceHexCacheEntry{
+		nonce: slices.Clone(nonce),
+		hex:   nonceHex,
+	}
 	return nonceHex
 }
 

@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"math/big"
 	"time"
@@ -32,6 +33,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
 // ErrNilDecodedOutput is returned when a decoded UTxO output is nil.
@@ -60,6 +62,14 @@ type LedgerView struct {
 	// skipPhase2Validation is set for accepted block replay, where
 	// the producer's isValid flag is authoritative for Phase-2 results.
 	skipPhase2Validation bool
+	// horizonAnchorSlot is the slot the era forecast horizon is measured
+	// from when this view converts slots to time. Block application sets it
+	// to the applied block's immediate predecessor, which is what the
+	// reference implementation ticks from; the published tip trails that by
+	// up to a whole block batch during replay. Zero leaves the published tip
+	// in charge, which is correct for every caller with no applied block in
+	// hand (mempool validation, standalone evaluation).
+	horizonAnchorSlot uint64
 }
 
 func (lv *LedgerView) pinCommitteeState(
@@ -117,6 +127,16 @@ var _ lcommon.DRepDelegationState = (*LedgerView)(nil)
 // ByronProtocolMagic would reject every Byron transaction carrying those
 // witnesses rather than fail to build.
 var _ eras.ByronProtocolMagicProvider = (*LedgerView)(nil)
+
+// UtxoValidateValueNotConservedUtxo discovers this capability with a runtime
+// type assertion and, unlike the assertions above, degrades rather than fails
+// when it misses: a failed assertion silently refunds a legacy stake
+// deregistration at the current KeyDeposit instead of the deposit actually
+// recorded at registration. Value conservation then passes on the wrong
+// number for every credential registered under a different KeyDeposit, with
+// no error anywhere. A missed assertion is therefore invisible at runtime,
+// which is exactly why it has to be a compile error here.
+var _ lcommon.StakeCredentialDepositState = (*LedgerView)(nil)
 
 func (lv *LedgerView) NetworkId() uint {
 	genesis := lv.ls.config.CardanoNodeConfig.ShelleyGenesis()
@@ -414,6 +434,24 @@ func (lv *LedgerView) PoolCurrentState(
 	return currentReg, pendingEpoch, nil
 }
 
+// EpochForSlot returns the epoch containing the given slot, satisfying
+// gouroboros' optional common.EpochState capability.
+//
+// Several ledger rules are expressed relative to the current epoch and degrade
+// to a weaker check when the ledger state cannot supply one. Without this the
+// pool-deposit decision cannot tell a retired pool from a registered one, so a
+// registration for an already-retired pool is charged no deposit and the
+// transaction fails value conservation by exactly that amount
+// (issue #3908); the retirement-epoch bound on pool retirement certificates is
+// skipped for the same reason.
+func (lv *LedgerView) EpochForSlot(slot uint64) (uint64, error) {
+	epoch, err := lv.ls.epochForSlot(slot)
+	if err != nil {
+		return 0, err
+	}
+	return epoch.EpochId, nil
+}
+
 // IsPoolRegistered checks if a pool is currently registered
 func (lv *LedgerView) IsPoolRegistered(pkh lcommon.PoolKeyHash) bool {
 	reg, _, err := lv.PoolCurrentState(pkh)
@@ -443,9 +481,16 @@ func (lv *LedgerView) IsVrfKeyInUse(
 	), nil
 }
 
-// SlotToTime returns the current time for a given slot based on known epochs
+// SlotToTime returns the current time for a given slot based on known epochs.
+//
+// This is the converter transaction validation sees, and a Plutus script
+// context must convert the transaction's validity interval through it. The
+// forecast horizon stays in force, matching cardano-ledger's
+// TimeTranslationPastHorizon failure, but it is measured from this view's
+// horizon anchor so a block being applied is judged against its own
+// predecessor rather than a tip that has not been published yet (issue #3844).
 func (lv *LedgerView) SlotToTime(slot uint64) (time.Time, error) {
-	return lv.ls.SlotToTime(slot)
+	return lv.ls.SlotToTimeWithHorizonFrom(lv.horizonAnchorSlot, slot)
 }
 
 // TimeToSlot returns the slot number for a given time based on known epochs
@@ -615,6 +660,10 @@ func extractCostModelsFromPParams(
 // extractRawCostModels retrieves the raw cost model data from
 // protocol parameters. It tries the costModelsProvider interface
 // first, then falls back to type assertions for known era types.
+//
+// A concrete-typed nil (pp holding e.g. a nil *conway.ConwayProtocolParameters)
+// still matches its type's case below; every case guards against nil before
+// dereferencing, matching withoutSyntheticV2CostModel's identical guard.
 func extractRawCostModels(
 	pp lcommon.ProtocolParameters,
 ) map[uint][]int64 {
@@ -628,14 +677,123 @@ func extractRawCostModels(
 	// Fall back to concrete era type assertions.
 	switch p := pp.(type) {
 	case *alonzo.AlonzoProtocolParameters:
+		if p == nil {
+			return nil
+		}
 		return p.CostModels
 	case *babbage.BabbageProtocolParameters:
+		if p == nil {
+			return nil
+		}
 		return p.CostModels
 	case *conway.ConwayProtocolParameters:
+		if p == nil {
+			return nil
+		}
+		return p.CostModels
+	case *dijkstra.DijkstraProtocolParameters:
+		if p == nil {
+			return nil
+		}
 		return p.CostModels
 	default:
 		return nil
 	}
+}
+
+// withoutSyntheticV2CostModel returns pp unchanged unless synthetic is true,
+// in which case it returns a shallow copy with the PlutusV2 cost model (map
+// key 1) removed.
+//
+// See LedgerState.syntheticV2CostModel (blinklabs-io/dingo#3825): the real
+// struct backing pp always carries HardForkBabbage's fabricated PlutusV2
+// cost model once real data hasn't yet replaced it, because internal script
+// validation needs it (a real V2 script can arrive before a real update
+// does). This is called only at the LocalStateQuery reply boundary, so a
+// caller asking "what are the current protocol parameters" sees only what
+// the chain has actually committed to -- matching what a real cardano-node
+// reports during the same window -- without touching the live struct
+// internal validation still reads.
+//
+// The shallow copy (`modified := *p`) is safe: it produces a new struct
+// value referencing the original's other fields, then replaces only
+// CostModels with a freshly built map, so the original -- still reachable
+// from ls.currentPParams / the published snapshot -- is never mutated.
+//
+// logger receives a warning when synthetic is true but pp's concrete type
+// matches none of the cases below: unlike every other branch, that combination
+// returns pp unfiltered, silently reintroducing #3825 for a future era type
+// this switch hasn't been taught yet. logger may be nil (e.g. in tests that
+// don't care about this diagnostic).
+func withoutSyntheticV2CostModel(
+	pp lcommon.ProtocolParameters,
+	synthetic bool,
+	logger *slog.Logger,
+) lcommon.ProtocolParameters {
+	if !synthetic {
+		return pp
+	}
+	// A concrete-typed nil (pp holding e.g. a nil *conway.ConwayProtocolParameters)
+	// still matches its type's case below; guard every case before
+	// dereferencing rather than relying on the interface-level pp == nil
+	// check callers already do elsewhere in this file.
+	switch p := pp.(type) {
+	case *alonzo.AlonzoProtocolParameters:
+		if p == nil {
+			return pp
+		}
+		modified := *p
+		modified.CostModels = withoutV2CostModelKey(p.CostModels)
+		return &modified
+	case *babbage.BabbageProtocolParameters:
+		if p == nil {
+			return pp
+		}
+		modified := *p
+		modified.CostModels = withoutV2CostModelKey(p.CostModels)
+		return &modified
+	case *conway.ConwayProtocolParameters:
+		if p == nil {
+			return pp
+		}
+		modified := *p
+		modified.CostModels = withoutV2CostModelKey(p.CostModels)
+		return &modified
+	case *dijkstra.DijkstraProtocolParameters:
+		if p == nil {
+			return pp
+		}
+		modified := *p
+		modified.CostModels = withoutV2CostModelKey(p.CostModels)
+		return &modified
+	default:
+		if logger != nil {
+			logger.Warn(
+				"synthetic PlutusV2 cost model filter does not recognize this protocol-parameters type; returning it unfiltered",
+				"component", "ledger",
+				"type", fmt.Sprintf("%T", pp),
+			)
+		}
+		return pp
+	}
+}
+
+// withoutV2CostModelKey returns a new map holding every entry of m except
+// the PlutusV2 key (1).
+func withoutV2CostModelKey(
+	m map[uint][]int64,
+) map[uint][]int64 {
+	if m == nil {
+		return nil
+	}
+	out := make(map[uint][]int64, len(m))
+	for k, v := range m {
+		if k == 1 {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // CommitteeStateAvailable reports whether this view can authoritatively answer

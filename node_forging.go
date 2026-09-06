@@ -163,6 +163,22 @@ func (n *Node) validateBlockProducerLedgerWithView(
 	if creds == nil {
 		return errors.New("nil pool credentials")
 	}
+	// Startup deliberately checks only for a stale counter, not the
+	// era-scoped no-gap rule the forge loop and block application enforce.
+	// The era for "now" would have to come from LedgerState.CurrentSlot,
+	// which is wall-clock and valid regardless of sync state; the baseline
+	// comes from LatestOpCertSequence, which reflects only the applied
+	// chain. On a node whose applied tip is behind wall-clock time (an
+	// interrupted initial sync, a resume after downtime, a restore to an
+	// older snapshot), those two can disagree: the era resolves to
+	// whatever the wall clock says while the baseline is still the stale,
+	// pre-catch-up counter, so a pool several rotations into its life
+	// would look gapped and fail startup -- unable to then sync to the
+	// point that would make the baseline correct. The forge loop's own
+	// gate does not have this problem: it runs after the upstream-sync
+	// skip and the leader check, so both its era and its baseline come
+	// from near-tip state, and it fails closed per slot rather than
+	// refusing to start the node at all.
 	registered, vrfMatched, err := creds.ValidateAgainstLedger(view)
 	if err != nil {
 		if errors.Is(err, forging.ErrVRFKeyHashMismatch) &&
@@ -373,6 +389,10 @@ func (n *Node) initBlockForger(
 		LeiosTxValidator:                n.ledgerState,
 		LeiosCertificateProvider:        leiosCerts,
 		LeiosParentAnnouncementProvider: leiosParent,
+		OpCertLedgerView: blockProducerLedgerView{
+			ls: n.ledgerState,
+		},
+		EraParams: n.ledgerState,
 	})
 	if err != nil {
 		// Stop election to prevent goroutine leak
@@ -504,6 +524,9 @@ func (b *blockBroadcaster) AddBlock(
 // snapshot rotation semantics as other ledger queries.
 type stakeDistributionAdapter struct {
 	ledgerState *ledger.LedgerState
+	// afterPoolStakeReadFn is a test-only hook for coordinating a concurrent
+	// snapshot recapture after the transaction has read the numerator.
+	afterPoolStakeReadFn func()
 }
 
 func (a *stakeDistributionAdapter) getStakeDistribution(
@@ -597,6 +620,12 @@ func (a *stakeDistributionAdapter) GetPoolAndTotalActiveStake(
 			poolKey,
 			err,
 		)
+	}
+	// Test-only synchronization seam. The transaction has already observed
+	// the numerator, so a concurrent recapture can commit before the
+	// denominator query without changing this transaction's snapshot.
+	if a.afterPoolStakeReadFn != nil {
+		a.afterPoolStakeReadFn()
 	}
 	totalActiveStake, err = view.GetTotalActiveStake(epoch)
 	if err != nil {
