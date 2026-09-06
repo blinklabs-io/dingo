@@ -63,6 +63,47 @@ func TestCreateGenesisBlockSeedsCommittee(t *testing.T) {
 	}
 }
 
+// TestCreateGenesisBlockSeedsCommitteeOnExistingDatabase covers the upgrade
+// path, which is the population that actually has the bug: a node already
+// synced from genesis on a build that never seeded the committee.
+//
+// Such a database has matching genesis CBOR and a nonzero tip, so
+// createGenesisBlock takes its early-return branch and never reaches the
+// genesis-creation transaction. Seeding only from that transaction would
+// therefore fix new nodes and leave every existing one broken.
+func TestCreateGenesisBlockSeedsCommitteeOnExistingDatabase(t *testing.T) {
+	ls, db := genesisConstitutionTestState(t)
+
+	// Stand in for a database written by a build with no committee seed:
+	// genesis CBOR present and matching, a tip well past zero, and no
+	// committee_member rows at all.
+	genesisHash, err := GenesisBlockHash(ls.config.CardanoNodeConfig)
+	require.NoError(t, err)
+	require.NoError(t, db.SetGenesisCbor(0, genesisHash[:], []byte{0x80}, nil))
+	ls.currentTip.Point = ocommon.Point{Slot: 1_000_000}
+	require.Equal(t, 0, committeeMemberRowCount(t, db))
+
+	require.NoError(t, ls.createGenesisBlock())
+
+	lv := &LedgerView{ls: ls}
+	for _, coldKeyHex := range musashiGenesisCommitteeColdKeys {
+		coldKey, err := hex.DecodeString(coldKeyHex)
+		require.NoError(t, err)
+		member, err := lv.CommitteeCredentialMember(lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.NewBlake2b224(coldKey),
+		})
+		require.NoError(t, err)
+		require.NotNil(
+			t,
+			member,
+			"genesis committee member %s must be backfilled on an existing database",
+			coldKeyHex,
+		)
+		require.Equal(t, uint64(musashiGenesisCommitteeExpiry), member.ExpiryEpoch)
+	}
+}
+
 // TestCreateGenesisBlockCommitteeReplayIdempotent proves re-running genesis
 // initialization over a store that already holds the genesis committee
 // leaves a single row per member rather than a duplicate soft-delete/insert

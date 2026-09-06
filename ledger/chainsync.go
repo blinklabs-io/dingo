@@ -4803,6 +4803,13 @@ func (ls *LedgerState) createGenesisBlock() error {
 			if err := ls.ensureGenesisConstitution(nil); err != nil {
 				return err
 			}
+			// Databases created before the committee was seeded reach
+			// only this branch, so the backfill has to run here too --
+			// a node already synced from genesis is exactly the one
+			// missing its committee rows.
+			if err := ls.ensureGenesisCommittee(nil); err != nil {
+				return err
+			}
 			return ls.ensureGenesisNetworkState()
 		}
 		// Check if genesis CBOR exists but with a different hash.
