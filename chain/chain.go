@@ -294,6 +294,9 @@ func leiosAnnouncementEvent(
 	headerHash lcommon.Blake2b256,
 	seq uint64,
 ) (event.Event, bool) {
+	if header == nil {
+		return event.Event{}, false
+	}
 	announcer, ok := header.(interface {
 		LeiosAnnouncement() (lcommon.Blake2b256, uint64, bool)
 	})
@@ -638,6 +641,25 @@ func (c *Chain) addBlockLocked(
 			c.nextHeaderSeqLocked(),
 			discardedHeaders,
 		))
+	}
+	// A locally forged block never passes through addBlockHeader, so its own
+	// announcement would otherwise be armed only from ChainUpdateEventType,
+	// on a topic the consumer selects independently of this one. That is a
+	// race it cannot win when the block competes with a discarded peer
+	// header at the same slot: the peer's vote occupies the (slot, voter)
+	// vote id, the block's arming arrives first and its vote is rejected as
+	// a duplicate, and the invalidation above then frees the id with nothing
+	// left to retry. Announcing it here, sequenced immediately behind that
+	// invalidation, means the id is always free before the consumer arms it.
+	// The apply-driven path stays as an idempotent backstop.
+	if !matchPendingHeader {
+		if evt, ok := leiosAnnouncementEvent(
+			block.Header(),
+			lcommon.NewBlake2b256(blockHashBytes),
+			c.nextHeaderSeqLocked(),
+		); ok {
+			c.queueDeferredEventLocked(evt)
+		}
 	}
 	if notifyWaiters {
 		c.notifyWaitingIterators()

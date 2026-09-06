@@ -483,7 +483,8 @@ func TestNonDeferredRollbackPublishesInvalidation(t *testing.T) {
 }
 
 // localForgedBlock is the minimum a locally forged block needs to reach
-// AddLocalBlock's header-discard path.
+// AddLocalBlock's header-discard path. Embedding announcingStreamHeader lets a
+// test forge a block that itself announces an endorser block.
 type localForgedBlock struct {
 	announcingStreamHeader
 }
@@ -581,35 +582,171 @@ func TestAddLocalBlockInvalidatesDiscardedPeerHeaders(t *testing.T) {
 	)
 }
 
-// TestAddLocalBlockWithNoQueuedHeadersPublishesNothing keeps the ordinary
-// forging path free of spurious invalidations.
-func TestAddLocalBlockWithNoQueuedHeadersPublishesNothing(t *testing.T) {
+// TestAddLocalBlockNonAnnouncingPublishesNoAnnouncement covers what a forged
+// block that announces nothing must and must not put on the header stream. The
+// two cases are kept together because they share a setup and differ only in
+// whether there are queued peer headers to discard; separating them produced
+// two tests that were indistinguishable in practice.
+func TestAddLocalBlockNonAnnouncingPublishesNoAnnouncement(t *testing.T) {
+	newFixture := func(t *testing.T) (
+		*chain.Chain,
+		<-chan event.Event,
+		[]lcommon.Block,
+	) {
+		t.Helper()
+		c, bus := newHeaderStreamChain(t)
+		subId, ch := bus.Subscribe(chain.ChainHeaderEventType)
+		t.Cleanup(func() {
+			bus.Unsubscribe(chain.ChainHeaderEventType, subId)
+		})
+		blocks, err := testfixtures.GenerateConwayChain(1)
+		require.NoError(t, err)
+		_, err = c.AddBlockWithPointDeferred(blocks[0], ocommon.Point{
+			Slot: blocks[0].SlotNumber(),
+			Hash: blocks[0].Hash().Bytes(),
+		}, nil)
+		require.NoError(t, err)
+		c.PublishPendingChainUpdates()
+		return c, ch, blocks
+	}
+	nonAnnouncingBlock := func(parent lcommon.Block) localForgedBlock {
+		return localForgedBlock{
+			announcingStreamHeader: announcingStreamHeader{
+				headerStreamHeader: headerStreamHeader{
+					hash:        lcommon.NewBlake2b256([]byte("local-hdr")),
+					prevHash:    parent.Hash(),
+					blockNumber: parent.BlockNumber() + 1,
+					slot:        parent.SlotNumber() + 1,
+				},
+				announces: false,
+			},
+		}
+	}
+
+	t.Run("nothing to discard publishes nothing at all", func(t *testing.T) {
+		c, ch, blocks := newFixture(t)
+		require.NoError(t, c.AddLocalBlock(nonAnnouncingBlock(blocks[0])))
+		testutil.RequireNoReceive(
+			t,
+			ch,
+			300*time.Millisecond,
+			"forging with an empty header queue and no announcement publishes nothing",
+		)
+	})
+
+	t.Run("discarding headers publishes only the invalidation", func(t *testing.T) {
+		c, ch, blocks := newFixture(t)
+		peerHeader := announcingStreamHeader{
+			headerStreamHeader: headerStreamHeader{
+				hash:        lcommon.NewBlake2b256([]byte("peer-hdr")),
+				prevHash:    blocks[0].Hash(),
+				blockNumber: blocks[0].BlockNumber() + 1,
+				slot:        blocks[0].SlotNumber() + 1,
+			},
+			ebHash:    lcommon.NewBlake2b256([]byte("peer-eb")),
+			ebSize:    4096,
+			announces: true,
+		}
+		require.NoError(t, c.AddBlockHeader(peerHeader))
+		c.PublishPendingChainUpdates()
+		testutil.RequireReceive(
+			t, ch, 2*time.Second, "peer announcement",
+		)
+
+		require.NoError(t, c.AddLocalBlock(nonAnnouncingBlock(blocks[0])))
+		evt := testutil.RequireReceive(
+			t, ch, 2*time.Second, "invalidation for the discarded header",
+		)
+		invalid, ok := evt.Data.(chain.ChainHeaderInvalidationEvent)
+		require.True(t, ok, "got %T", evt.Data)
+		assert.Contains(t, invalid.RbHashes, peerHeader.hash)
+		testutil.RequireNoReceive(
+			t,
+			ch,
+			300*time.Millisecond,
+			"a forged block that announces nothing adds no announcement",
+		)
+	})
+}
+
+// TestAddLocalBlockAnnouncesItselfAfterInvalidation pins the ordering that
+// makes a same-slot forge safe. A locally forged block never passes through
+// AddBlockHeader, so its own announcement would otherwise reach the consumer
+// only on the block-update topic, which is selected independently of this one.
+// When the block competes with a discarded peer header at the same slot, the
+// peer's vote holds the (slot, voter) vote id: arming the local announcement
+// before the invalidation frees that id gets the local vote rejected as a
+// duplicate, and nothing retries it.
+//
+// Announcing the forged block on this stream, immediately behind the
+// invalidation, makes the id free before the consumer ever arms it.
+func TestAddLocalBlockAnnouncesItselfAfterInvalidation(t *testing.T) {
 	c, bus := newHeaderStreamChain(t)
 	subId, ch := bus.Subscribe(chain.ChainHeaderEventType)
 	defer bus.Unsubscribe(chain.ChainHeaderEventType, subId)
 
-	blocks, err := testfixtures.GenerateConwayChain(1)
+	blocks, err := testfixtures.GenerateConwayChain(2)
 	require.NoError(t, err)
-	_, err = c.AddBlockWithPointDeferred(blocks[0], ocommon.Point{
-		Slot: blocks[0].SlotNumber(),
-		Hash: blocks[0].Hash().Bytes(),
-	}, nil)
-	require.NoError(t, err)
+	for i := range blocks {
+		_, addErr := c.AddBlockWithPointDeferred(blocks[i], ocommon.Point{
+			Slot: blocks[i].SlotNumber(),
+			Hash: blocks[i].Hash().Bytes(),
+		}, nil)
+		require.NoError(t, addErr)
+	}
 	c.PublishPendingChainUpdates()
 
+	// A competing peer header at the slot the local block will occupy.
+	sameSlot := blocks[1].SlotNumber() + 1
+	peerHeader := announcingStreamHeader{
+		headerStreamHeader: headerStreamHeader{
+			hash:        lcommon.NewBlake2b256([]byte("peer-hdr")),
+			prevHash:    blocks[1].Hash(),
+			blockNumber: blocks[1].BlockNumber() + 1,
+			slot:        sameSlot,
+		},
+		ebHash:    lcommon.NewBlake2b256([]byte("peer-eb")),
+		ebSize:    4096,
+		announces: true,
+	}
+	require.NoError(t, c.AddBlockHeader(peerHeader))
+	c.PublishPendingChainUpdates()
+	testutil.RequireReceive(t, ch, 2*time.Second, "peer announcement")
+
+	localEb := lcommon.NewBlake2b256([]byte("local-eb"))
 	local := localForgedBlock{announcingStreamHeader: announcingStreamHeader{
 		headerStreamHeader: headerStreamHeader{
 			hash:        lcommon.NewBlake2b256([]byte("local-hdr")),
-			prevHash:    blocks[0].Hash(),
-			blockNumber: blocks[0].BlockNumber() + 1,
-			slot:        blocks[0].SlotNumber() + 1,
+			prevHash:    blocks[1].Hash(),
+			blockNumber: blocks[1].BlockNumber() + 1,
+			slot:        sameSlot,
 		},
+		ebHash:    localEb,
+		ebSize:    4096,
+		announces: true,
 	}}
 	require.NoError(t, c.AddLocalBlock(local))
-	testutil.RequireNoReceive(
+
+	// Invalidation first, then the forged block's own announcement.
+	invalidation := testutil.RequireReceive(
+		t, ch, 2*time.Second, "invalidation for the discarded peer header",
+	)
+	invalid, ok := invalidation.Data.(chain.ChainHeaderInvalidationEvent)
+	require.True(t, ok, "the invalidation must come first, got %T", invalidation.Data)
+	assert.Contains(t, invalid.RbHashes, peerHeader.hash)
+
+	announcement := testutil.RequireReceive(
+		t, ch, 2*time.Second, "the forged block announces itself",
+	)
+	announced, ok := announcement.Data.(chain.ChainHeaderAnnouncementEvent)
+	require.True(t, ok, "got %T", announcement.Data)
+	assert.Equal(t, local.hash, announced.RbHash)
+	assert.Equal(t, localEb, announced.EbHash)
+	assert.Equal(t, sameSlot, announced.Slot)
+	assert.Greater(
 		t,
-		ch,
-		300*time.Millisecond,
-		"forging with an empty header queue publishes no invalidation",
+		announced.Seq,
+		invalid.Seq,
+		"the forged block is announced behind the invalidation that frees the vote id",
 	)
 }
