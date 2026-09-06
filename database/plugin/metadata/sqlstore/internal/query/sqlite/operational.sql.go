@@ -912,6 +912,31 @@ func (q *Queries) DeleteRewardPoolOutputsForEpoch(ctx context.Context, epoch int
 	return err
 }
 
+const deleteRewardSeedFailure = `-- name: DeleteRewardSeedFailure :exec
+DELETE FROM reward_seed_failure
+WHERE epoch = ? AND snapshot_type = ?
+`
+
+type DeleteRewardSeedFailureParams struct {
+	Epoch        int64
+	SnapshotType string
+}
+
+func (q *Queries) DeleteRewardSeedFailure(ctx context.Context, arg DeleteRewardSeedFailureParams) error {
+	_, err := q.db.ExecContext(ctx, deleteRewardSeedFailure, arg.Epoch, arg.SnapshotType)
+	return err
+}
+
+const deleteRewardSeedFailuresAfterSlot = `-- name: DeleteRewardSeedFailuresAfterSlot :exec
+DELETE FROM reward_seed_failure
+WHERE captured_slot > ?
+`
+
+func (q *Queries) DeleteRewardSeedFailuresAfterSlot(ctx context.Context, capturedSlot int64) error {
+	_, err := q.db.ExecContext(ctx, deleteRewardSeedFailuresAfterSlot, capturedSlot)
+	return err
+}
+
 const deleteRewardSnapshotsAfterSlot = `-- name: DeleteRewardSnapshotsAfterSlot :exec
 DELETE FROM reward_snapshot
 WHERE captured_slot > ? OR boundary_slot > ?
@@ -2977,6 +3002,24 @@ func (q *Queries) GetRewardPoolOutputs(ctx context.Context, epoch int64) ([]Rewa
 	return items, nil
 }
 
+const getRewardSeedFailure = `-- name: GetRewardSeedFailure :one
+SELECT failure_reason
+FROM reward_seed_failure
+WHERE epoch = ? AND snapshot_type = ?
+`
+
+type GetRewardSeedFailureParams struct {
+	Epoch        int64
+	SnapshotType string
+}
+
+func (q *Queries) GetRewardSeedFailure(ctx context.Context, arg GetRewardSeedFailureParams) (string, error) {
+	row := q.db.QueryRowContext(ctx, getRewardSeedFailure, arg.Epoch, arg.SnapshotType)
+	var failure_reason string
+	err := row.Scan(&failure_reason)
+	return failure_reason, err
+}
+
 const getRewardSnapshot = `-- name: GetRewardSnapshot :one
 SELECT id, epoch, snapshot_type, total_active_stake, total_pool_count,
        total_delegators, captured_slot, boundary_slot, epoch_nonce,
@@ -4167,6 +4210,36 @@ func (q *Queries) SaveRewardPoolOutput(ctx context.Context, arg SaveRewardPoolOu
 	var id int64
 	err := row.Scan(&id)
 	return id, err
+}
+
+const saveRewardSeedFailure = `-- name: SaveRewardSeedFailure :exec
+INSERT INTO reward_seed_failure (
+    epoch, snapshot_type, failure_reason, captured_slot
+) VALUES (?, ?, ?, ?)
+ON CONFLICT (epoch, snapshot_type) DO UPDATE SET
+    failure_reason = CASE
+        WHEN excluded.captured_slot < reward_seed_failure.captured_slot
+        THEN excluded.failure_reason
+        ELSE reward_seed_failure.failure_reason
+    END,
+    captured_slot = MIN(reward_seed_failure.captured_slot, excluded.captured_slot)
+`
+
+type SaveRewardSeedFailureParams struct {
+	Epoch         int64
+	SnapshotType  string
+	FailureReason string
+	CapturedSlot  int64
+}
+
+func (q *Queries) SaveRewardSeedFailure(ctx context.Context, arg SaveRewardSeedFailureParams) error {
+	_, err := q.db.ExecContext(ctx, saveRewardSeedFailure,
+		arg.Epoch,
+		arg.SnapshotType,
+		arg.FailureReason,
+		arg.CapturedSlot,
+	)
+	return err
 }
 
 const saveRewardSnapshot = `-- name: SaveRewardSnapshot :one
