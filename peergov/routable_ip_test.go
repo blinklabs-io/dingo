@@ -105,9 +105,9 @@ func TestIsRoutableIP(t *testing.T) {
 			"2001:1f:ffff:ffff:ffff:ffff:ffff:ffff",
 			false,
 		},
-		// ORCHIDv2 directly abuts the deprecated ORCHID block and IANA marks
-		// it globally reachable, so the /28 must not spill into it.
-		{"ipv6 orchidv2", "2001:20::1", true},
+		{"ipv6 orchidv2", "2001:20::1", false},
+		{"ipv6 orchidv2 upper bound", "2001:2f:ffff:ffff:ffff:ffff:ffff:ffff", false},
+		{"ipv6 above orchidv2", "2001:30::", true},
 
 		// Documentation-only ranges are not valid peer candidates.
 		{"ipv4 test-net-1", "192.0.2.1", false},
