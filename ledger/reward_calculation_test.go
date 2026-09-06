@@ -38,10 +38,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func rewardCalcUint64Ptr(value uint64) *uint64 {
-	return &value
-}
-
 func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
@@ -158,8 +154,6 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 			DelegatedStake:             1_000,
 			OwnerStake:                 500,
 			DelegatorCount:             2,
-			BlocksProduced:             rewardCalcUint64Ptr(10),
-			TotalBlocksInEpoch:         rewardCalcUint64Ptr(10),
 			CapturedSlot:               100,
 			BoundarySlot:               100,
 		},
@@ -312,27 +306,6 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	require.Equal(t, int64(2), deltas)
 }
 
-func TestValidateRewardPoolInputBlockCounts(t *testing.T) {
-	t.Parallel()
-
-	blocks, total := uint64(2), uint64(10)
-	complete := &models.RewardPoolInput{
-		BlocksProduced:     &blocks,
-		TotalBlocksInEpoch: &total,
-	}
-	require.NoError(t, validateRewardPoolInputBlockCounts([]*models.RewardPoolInput{complete}))
-	err := validateRewardPoolInputBlockCounts([]*models.RewardPoolInput{{
-		BlocksProduced: &blocks,
-	}})
-	require.EqualError(t, err, "pool input 0 is missing block counts")
-	err = validateRewardPoolInputBlockCounts([]*models.RewardPoolInput{{
-		TotalBlocksInEpoch: &total,
-	}})
-	require.EqualError(t, err, "pool input 0 is missing block counts")
-	err = validateRewardPoolInputBlockCounts([]*models.RewardPoolInput{nil})
-	require.EqualError(t, err, "pool input 0 is missing block counts")
-}
-
 // guardExpiredLeaderResult captures the post-application state a Task 10
 // scenario run produces, so gate-on and gate-off runs can be compared.
 type guardExpiredLeaderResult struct {
@@ -461,8 +434,6 @@ func applyGuardExpiredLeaderScenario(
 			DelegatedStake:             1_000,
 			OwnerStake:                 500,
 			DelegatorCount:             2,
-			BlocksProduced:             rewardCalcUint64Ptr(10),
-			TotalBlocksInEpoch:         rewardCalcUint64Ptr(10),
 			CapturedSlot:               100,
 			BoundarySlot:               100,
 		},
@@ -1437,8 +1408,6 @@ func TestApplyStakeRewardsUsesPrecomputedOutputs(t *testing.T) {
 			DelegatedStake:             1_000,
 			OwnerStake:                 500,
 			DelegatorCount:             2,
-			BlocksProduced:             rewardCalcUint64Ptr(10),
-			TotalBlocksInEpoch:         rewardCalcUint64Ptr(10),
 			CapturedSlot:               100,
 			BoundarySlot:               100,
 		},
@@ -1642,8 +1611,6 @@ func TestApplyPrecomputedStakeRewardsChecksFinalAccountRegistration(
 			DelegatedStake:             1_000,
 			OwnerStake:                 500,
 			DelegatorCount:             2,
-			BlocksProduced:             rewardCalcUint64Ptr(10),
-			TotalBlocksInEpoch:         rewardCalcUint64Ptr(10),
 			CapturedSlot:               100,
 			BoundarySlot:               100,
 		},
@@ -1948,7 +1915,6 @@ func TestPrecomputedStakeRewardsFinalEligibilityDoesNotMergeCredentialTags(
 	)
 	poolKey := rewardCalcHash(0x4a)
 	sharedStakeHash := rewardCalcHash(0x77)
-	blocksProduced, totalBlocks := uint64(10), uint64(10)
 	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
@@ -2006,8 +1972,6 @@ WHERE epoch = ? AND snapshot_type = 'mark'`,
 			DelegatedStake:             1_000,
 			OwnerStake:                 0,
 			DelegatorCount:             1,
-			BlocksProduced:             &blocksProduced,
-			TotalBlocksInEpoch:         &totalBlocks,
 			CapturedSlot:               100,
 			BoundarySlot:               100,
 		},
@@ -5601,7 +5565,6 @@ func seedRewardPrecomputeTimingState(
 	poolKey := rewardCalcHash(0x4a)
 	rewardAccount := rewardCalcHash(0x5a)
 	member := rewardCalcHash(0x6a)
-	blocksProduced, totalBlocks := uint64(10), uint64(10)
 	var poolID lcommon.PoolKeyHash
 	copy(poolID[:], poolKey)
 
@@ -5683,8 +5646,6 @@ func seedRewardPrecomputeTimingState(
 			DelegatedStake:             1_000,
 			OwnerStake:                 500,
 			DelegatorCount:             2,
-			BlocksProduced:             &blocksProduced,
-			TotalBlocksInEpoch:         &totalBlocks,
 			CapturedSlot:               100,
 			BoundarySlot:               100,
 		},

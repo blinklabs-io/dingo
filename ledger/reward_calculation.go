@@ -759,13 +759,6 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 			err,
 		)
 	}
-	if err := validateRewardPoolInputBlockCounts(poolInputs); err != nil {
-		return nil, false, fmt.Errorf(
-			"precomputed reward snapshot %d has incomplete block production counts: %w",
-			epochs.snapshot,
-			err,
-		)
-	}
 	inputsMatchSnapshot, err := precomputedRewardPoolInputsMatchSnapshot(
 		rewardSnapshot,
 		poolInputs,
@@ -1021,18 +1014,6 @@ func precomputedRewardPoolOutputsMatchInputs(
 		delete(expectedOwnerStake, key)
 	}
 	return len(expectedOwnerStake) == 0
-}
-
-func validateRewardPoolInputBlockCounts(
-	poolInputs []*models.RewardPoolInput,
-) error {
-	for i, input := range poolInputs {
-		if input == nil || input.BlocksProduced == nil ||
-			input.TotalBlocksInEpoch == nil {
-			return fmt.Errorf("pool input %d is missing block counts", i)
-		}
-	}
-	return nil
 }
 
 // precomputedRewardPoolRewardsMatchInputs re-derives each persisted pool's
