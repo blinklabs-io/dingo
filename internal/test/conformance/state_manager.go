@@ -332,14 +332,33 @@ func (m *DingoStateManager) LoadInitialState(
 	txn := m.db.Transaction(true)
 	defer txn.Release()
 
+	// A vector's initial-state registration has no registration certificate
+	// in this database, which is exactly what an import baseline stands in
+	// for. Seeding it through ImportAccount rather than CreateAccount records
+	// the deposit alongside the account row, so
+	// DingoStateProvider.StakeCredentialDeposit can report the deposit the
+	// credential registered with instead of returning absence and sending
+	// UtxoValidateValueNotConservedUtxo down its KeyDeposit fallback for
+	// every vector.
+	//
+	// The vector's parsed initial state does not carry a per-credential
+	// deposit (ouroboros-mock's state parser keeps only the reward half of
+	// the UMap pair), so the deposit is the KeyDeposit in effect for this
+	// vector -- what a registration at that initial state would have paid,
+	// and the value the corpus documents for these credentials.
+	initialDeposit := m.initialStakeDepositLocked()
 	for credential, balance := range resolveInitialStakeRegistrations(state) {
 		account := &models.Account{
 			StakingKey:    credential.Credential[:],
 			CredentialTag: conformanceCredentialTag(credential.AsCredential()),
 			Active:        true,
 			Reward:        types.Uint64(balance),
+			ImportDeposit: initialDeposit,
 		}
-		if err := m.db.CreateAccount(txn, account); err != nil {
+		if err := m.db.Metadata().ImportAccount(
+			account,
+			txn.Metadata(),
+		); err != nil {
 			return fmt.Errorf("seed account: %w", err)
 		}
 	}
@@ -603,7 +622,9 @@ func (m *DingoStateManager) createUtxo(
 	if err := m.db.CreateUtxo(txn, &utxoModel); err != nil {
 		return fmt.Errorf("create utxo metadata: %w", err)
 	}
-	if blobStore := m.db.Blob(); blobStore != nil {
+	// The transaction's own store, so the handle and the store it is used
+	// with always come from the same installation.
+	if blobStore := txn.BlobStore(); blobStore != nil {
 		if err := blobStore.SetUtxo(
 			txn.Blob(), utxoModel.TxId, utxoModel.OutputIdx,
 			utxo.Output.Cbor(),
@@ -677,6 +698,26 @@ func (m *DingoStateManager) certDepositsFor(
 		}
 	}
 	return deposits
+}
+
+// initialStakeDepositLocked returns the deposit to record for a credential a
+// vector declares as already registered, as *types.Uint64 for
+// models.Account.ImportDeposit. It is the KeyDeposit from the vector's own
+// protocol parameters, or nil when those parameters do not expose one -- nil
+// meaning the recorded deposit is unknown, which correctly sends value
+// conservation back to its KeyDeposit fallback rather than inventing a zero.
+func (m *DingoStateManager) initialStakeDepositLocked() *types.Uint64 {
+	// A typed-nil *conway.ConwayProtocolParameters satisfies the assertion,
+	// so guard the pointer as well -- the same "!ok || nil" shape
+	// ledger/eras uses before dereferencing era parameters. Reporting nil
+	// here is the correct answer anyway: with no usable parameters the
+	// deposit is unknown.
+	conwayPP, ok := m.protocolParams.(*conway.ConwayProtocolParameters)
+	if !ok || conwayPP == nil {
+		return nil
+	}
+	deposit := types.Uint64(conwayPP.KeyDeposit)
+	return &deposit
 }
 
 // depositAmount converts a certificate's signed deposit amount (gouroboros
@@ -1010,6 +1051,8 @@ func (m *DingoStateManager) ProcessEpochBoundary(newEpoch uint64) error {
 		}
 	}
 
+	m.pruneCommitteeResignations()
+
 	// Phase 2: ratify proposals that meet threshold requirements.
 	if err := m.ratifyProposals(txn, newEpoch, boundarySlot); err != nil {
 		return fmt.Errorf("ratify proposals: %w", err)
@@ -1030,6 +1073,37 @@ func (m *DingoStateManager) ProcessEpochBoundary(newEpoch uint64) error {
 	}
 
 	return txn.Commit()
+}
+
+// pruneCommitteeResignations drops the resignation recorded for a cold
+// credential that holds no committee seat in the pre-validation govState
+// mirror.
+//
+// cardano-ledger keeps resignations and hot-key authorizations in one
+// committee credential map and intersects that map with the current
+// committee at every epoch boundary
+// (eras/conway/impl/src/Cardano/Ledger/Conway/Rules/Epoch.hs
+// updateCommitteeState), so a resignation lives exactly as long as the seat
+// it was filed against: a member an UpdateCommittee action removed carries
+// none forward, and a later re-election seats a member that may authorize a
+// hot key again. Without this, a cold credential that resigns once is
+// treated as resigned for the rest of the vector, which rejects that second
+// authorization.
+//
+// Only the resignation is pruned. Hot-key authorizations are left alone
+// because this mirror's simplified ratification (see the ProcessEpochBoundary
+// doc comment) does not seat every member the vectors elect, so intersecting
+// those as well would withdraw voting rights a vector still exercises.
+func (m *DingoStateManager) pruneCommitteeResignations() {
+	for coldKey := range m.govState.CommitteeResignations {
+		if _, ok := m.govState.CommitteeMembersByCredential[coldKey]; ok {
+			continue
+		}
+		if _, ok := m.govState.CommitteeMembers[coldKey.Credential]; ok {
+			continue
+		}
+		delete(m.govState.CommitteeResignations, coldKey)
+	}
 }
 
 // ratifyProposals performs the harness's simplified proposal ratification

@@ -78,7 +78,7 @@ func TestNewReadSnapshotContextAnchorsMetadataBeforeBlob(t *testing.T) {
 	wantTip := ochainsync.Tip{BlockNumber: 42}
 	db := &Database{
 		metadata: &orderedSnapshotMetadata{events: &events, tip: wantTip},
-		blob:     &orderedSnapshotBlob{events: &events},
+		blobRef:  newBlobStoreRef(&orderedSnapshotBlob{events: &events}),
 	}
 
 	txn, tip, err := NewReadSnapshotContext(t.Context(), db)
@@ -102,7 +102,7 @@ func TestNewReadSnapshotContextReleasesBarrierOnAnchorError(t *testing.T) {
 			events: &events,
 			tipErr: anchorErr,
 		},
-		blob: &orderedSnapshotBlob{events: &events},
+		blobRef: newBlobStoreRef(&orderedSnapshotBlob{events: &events}),
 	}
 
 	txn, _, err := NewReadSnapshotContext(t.Context(), db)
@@ -291,7 +291,7 @@ func TestNewReadSnapshotContextDoesNotStraddleDestructiveCommit(t *testing.T) {
 		state:                 state,
 		destructiveCommitDone: destructiveCommitDone,
 	}
-	db := &Database{metadata: metadataStore, blob: blobStore}
+	db := &Database{metadata: metadataStore, blobRef: newBlobStoreRef(blobStore)}
 
 	// Construct the writer first so it already holds the shared side of the
 	// commit barrier when snapshot construction begins.
@@ -375,10 +375,10 @@ func TestNewReadSnapshotContextWaitsForLogicalDestructiveTransition(
 	}
 	db := &Database{
 		metadata: &destructiveReadSnapshotMetadata{state: state},
-		blob: &destructiveReadSnapshotBlob{
+		blobRef: newBlobStoreRef(&destructiveReadSnapshotBlob{
 			state:                 state,
 			destructiveCommitDone: destructiveCommitDone,
-		},
+		}),
 	}
 
 	finishTransition := db.BeginDestructiveTransition()

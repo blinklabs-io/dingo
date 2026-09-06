@@ -238,6 +238,14 @@ type Ouroboros struct {
 	leiosPersistStarted  atomic.Bool
 	leiosPersistMu       sync.Mutex
 	leiosPersistPending  map[string]*leiosPersistJob
+	// leiosPersistBytes is the aggregate reserved size of the queue: the sum
+	// of leiosPersistPending's job sizes plus every reservation whose payload
+	// copy is still in flight. leiosPersistReserved counts those in-flight
+	// reservations so they also occupy a leiosPersistMaxPending slot. Both
+	// are guarded by leiosPersistMu and are reset with the pending map in
+	// startLeiosPersistWriter; see leiosPersistMaxQueueBytes.
+	leiosPersistBytes    int
+	leiosPersistReserved int
 	leiosPersistSignal   chan struct{}
 	leiosPersistStop     chan struct{}
 	leiosPersistDone     chan struct{}

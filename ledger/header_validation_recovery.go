@@ -175,7 +175,7 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 	}
 
 	transitionErr := ls.withDestructiveDatabaseTransition(func() error {
-		if err := ls.rollbackPrimaryChainInSecurityParamWindows(
+		if err := ls.rewindPrimaryChainForRecovery(
 			rewindPoint,
 		); err != nil {
 			return fmt.Errorf(
