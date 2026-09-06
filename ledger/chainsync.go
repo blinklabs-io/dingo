@@ -2080,12 +2080,17 @@ func (ls *LedgerState) replayBufferedHeaderEvents(
 // chainsyncBlockfetchMutex. Taking it here too, self-contained, closes that
 // gap without widening handleEventBlockfetch's own critical section to
 // cover chainsyncMutex as well.
+//
+// The bufferedHeaderEvents delete belongs inside that lock for the same
+// reason: handleEventBlockfetch holds chainsyncBlockfetchMutex while
+// nextBufferedHeaderConnId ranges over the map, so deleting from this
+// goroutine under a different mutex is a concurrent iteration and write.
 func (ls *LedgerState) discardBufferedPeerHeaders(
 	connId ouroboros.ConnectionId,
 ) {
-	delete(ls.bufferedHeaderEvents, connIdKey(connId))
 	ls.chainsyncBlockfetchMutex.Lock()
 	defer ls.chainsyncBlockfetchMutex.Unlock()
+	delete(ls.bufferedHeaderEvents, connIdKey(connId))
 	if sameConnectionId(ls.headerPipelineConnId, connId) {
 		ls.clearQueuedHeaders()
 	}
@@ -2554,13 +2559,15 @@ func (ls *LedgerState) clearRollbackHistoryForPoint(point ocommon.Point) {
 func (ls *LedgerState) resetChainsyncResyncState() {
 	ls.rollbackHistory = nil
 	ls.headerMismatchCount = 0
-	ls.bufferedHeaderEvents = nil
 	ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.chainsyncBlockfetchMutex.Lock()
-	// clearQueuedHeaders mutates headerPipelineConnId, which every other
-	// mutator guards with chainsyncBlockfetchMutex -- moved inside this
-	// lock (rather than called before it, as this used to) to close that
-	// gap.
+	// bufferedHeaderEvents is read under chainsyncBlockfetchMutex (see
+	// nextBufferedHeaderConnId, which ranges over it), so clearing it must
+	// happen inside this lock rather than before it. clearQueuedHeaders
+	// mutates headerPipelineConnId, which every other mutator guards with
+	// chainsyncBlockfetchMutex -- moved inside this lock (rather than
+	// called before it, as this used to) to close that gap.
+	ls.bufferedHeaderEvents = nil
 	ls.clearQueuedHeaders()
 	ls.blockfetchRequestRangeCleanup()
 	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}

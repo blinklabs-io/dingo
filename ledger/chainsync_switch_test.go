@@ -1160,6 +1160,70 @@ func TestShouldBufferHeaderEventDoesNotRaceDiscardBufferedPeerHeaders(
 	wg.Wait()
 }
 
+// TestDiscardBufferedPeerHeadersDoesNotRaceBufferedHeaderIteration guards the
+// bufferedHeaderEvents map itself, which is a different field from the
+// headerPipelineConnId race above.
+//
+// handleEventBlockfetch holds chainsyncBlockfetchMutex for its whole batch-done
+// path, and nextBufferedHeaderConnId ranges over bufferedHeaderEvents inside
+// it. discardBufferedPeerHeaders runs on handleEventChainsync's dispatch
+// goroutine, which holds only chainsyncMutex, and used to delete from that same
+// map before taking chainsyncBlockfetchMutex -- a concurrent map iteration and
+// map write, which is fatal at runtime rather than merely racy. It was observed
+// killing a mainnet block producer inside nextBufferedHeaderConnId.
+//
+// This runs both paths concurrently under go test -race; a clean run is the
+// pass condition, so there is nothing else to assert.
+func TestDiscardBufferedPeerHeadersDoesNotRaceBufferedHeaderIteration(
+	t *testing.T,
+) {
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	// Several connections so the range in nextBufferedHeaderConnId has real
+	// work to do and overlaps the concurrent deletes.
+	const conns = 50
+	connIds := make([]ouroboros.ConnectionId, conns)
+	for i := range connIds {
+		connIds[i] = ouroboros.ConnectionId{
+			LocalAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+			RemoteAddr: &net.TCPAddr{
+				IP:   net.ParseIP("127.0.0.1"),
+				Port: 3001 + i,
+			},
+		}
+		ls.bufferHeaderEvent(ChainsyncEvent{
+			ConnectionId: connIds[i],
+			Point:        ocommon.NewPoint(uint64(i), []byte("hdr")),
+		})
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	// Mirrors handleEventBlockfetch: the read side holds
+	// chainsyncBlockfetchMutex across the iteration.
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			ls.chainsyncBlockfetchMutex.Lock()
+			ls.nextBufferedHeaderConnId()
+			ls.chainsyncBlockfetchMutex.Unlock()
+		}
+	}()
+	// Mirrors handleEventChainsync's dispatch goroutine.
+	go func() {
+		defer wg.Done()
+		for i := range 200 {
+			ls.discardBufferedPeerHeaders(connIds[i%conns])
+		}
+	}()
+	wg.Wait()
+}
+
 func TestHandleChainSwitchEventReplaysBufferedHeadersForSelectedConnection(
 	t *testing.T,
 ) {
