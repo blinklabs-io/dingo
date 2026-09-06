@@ -197,9 +197,11 @@ type Result struct {
 	Unspendable      uint64
 	TotalCirculation uint64
 	TotalBlocks      uint64
-	ExpectedBlocks   *big.Rat
-	pendingRewards   []pendingReward
-	poolAccounted    []uint64
+	// ExpectedBlocks is the ledger-specified integer expectation represented
+	// as a rational for compatibility with the existing result contract.
+	ExpectedBlocks *big.Rat
+	pendingRewards []pendingReward
+	poolAccounted  []uint64
 }
 
 type PoolReward struct {
@@ -931,9 +933,16 @@ func validateSnapshot(snapshot Snapshot) error {
 			)
 		}
 	}
-	if totalDelegated != snapshot.TotalActiveStake {
+	// TotalActiveStake is the sigma_a denominator: the stake of every
+	// registered credential with a delegation, whether or not the pool it
+	// delegates to is present in Pools. A pool the caller could not resolve
+	// carries no reward but keeps contributing its delegators' stake to that
+	// denominator (cardano-ledger ssTotalActiveStake), so the pools passed here
+	// may sum to less than it. Summing to more means the caller's pool set and
+	// its declared active stake disagree.
+	if totalDelegated > snapshot.TotalActiveStake {
 		return fmt.Errorf(
-			"%w: total delegated stake %d does not match active stake %d",
+			"%w: total delegated stake %d exceeds active stake %d",
 			ErrInvalidParameters,
 			totalDelegated,
 			snapshot.TotalActiveStake,
@@ -1201,9 +1210,12 @@ func ApportionFullPot(baseRewards []uint64, availableRewards uint64) []uint64 {
 
 func expectedBlocks(params Parameters) *big.Rat {
 	nonObftSlots := new(big.Rat).Sub(oneRat(), params.Decentralization)
-	return new(big.Rat).Mul(
+	expected := new(big.Rat).Mul(
 		new(big.Rat).Mul(nonObftSlots, params.ActiveSlotsCoeff),
 		uintRat(params.EpochLength),
+	)
+	return new(big.Rat).SetInt(
+		new(big.Int).Quo(expected.Num(), expected.Denom()),
 	)
 }
 
