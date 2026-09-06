@@ -6632,6 +6632,81 @@ never the reverse.
   long crawl is distinguishable from a stalled one; the logger is a parameter
   rather than a client field because the same client serves the concurrent
   chunk fetchers.
+- **Koios host.** `koiosBaseURLs` maps the network to the public
+  `*.koios.rest` v1 root, and `KoiosParityConfig.BaseURL`
+  (`--koios-parity-base-url`, `DINGO_KOIOS_PARITY_BASE_URL`, and `--koios-url`
+  / `KOIOS_URL` on the standalone CLI) overrides it for a self-hosted or
+  mirrored instance. A custom host also drops the burst cap:
+  `koiosBurstLimitSafe` describes koios.rest's own published Public/Free
+  window and says nothing about another deployment, so applying it there would
+  throttle against a limit that does not exist. Per-request retry, timeout and
+  429 backoff are unchanged, so a host that *does* rate-limit still behaves
+  correctly. `NewKoiosClient` runs `validateKoiosNetwork` before it applies the
+  override, so an override cannot be used to reach a network the tool does not
+  support — that check is what keeps `StakeAddressFromCredential`, which
+  hardcodes the testnet address network ID, from being handed a network it
+  would silently generate wrong-network stake addresses for. The override
+  itself is validated too: a custom host must be `https`, since `get` and
+  `post` attach the API key as a Bearer token to every request and forged
+  reference data can make a comparison report a false PASS. `AllowInsecureHTTP` is the local dev/test escape
+  hatch, mirroring `Mithril.AllowInsecureHTTP` —
+  `--koios-parity-allow-insecure-http` on the node, and
+  `--koios-allow-insecure-http` / `KOIOS_ALLOW_INSECURE_HTTP` on the standalone
+  CLI, where an explicitly-set flag beats the environment per CLAUDE.md's
+  CLI > env rule. A custom root must also carry no query string or fragment,
+  since `get` and `post` append an endpoint path and their own query to it and
+  would otherwise reach a different endpoint than intended. Validation errors
+  never echo the URL, because the value they describe is the one
+  `logURIConfigFields` exists to keep out of logs. `KoiosParity.BaseURL` is classified as
+  a URI field for logging (`logURIConfigFields`), not a plain one, because an
+  operator can embed credentials in it.
+- **Koios source provenance.** Every Koios table is keyed by `(network,
+  epoch)` and records nothing about which deployment answered, so once a row is
+  written a self-hosted mirror's answer and the public host's answer are the
+  same row. Left alone, that makes a run against the wrong oracle produce a
+  report indistinguishable from a run against the right one — the failure mode
+  the override introduces. `koios_source` records the resolved API root per
+  network, and `Cache.RecordKoiosSource` discards that network's Koios and
+  derived check rows (`koiosSourcedTables`) when the root changes, rather than
+  silently mixing two oracles in one comparison. Invalidation is destructive on
+  purpose: the rows are a cache of another system's answers and are rebuildable
+  by fetching again, whereas anything weaker leaves the mixed-oracle report
+  reachable. It is scoped to the network whose source changed, since the root
+  is resolved per network. The recorded value is
+  `KoiosClient.ResolvedBaseURL()`, which strips userinfo — validation already
+  rejects a query and a fragment, so that is the only place a credential can
+  survive — which also makes a rotated key against the same host read as the
+  same oracle. A cache with nothing recorded is attributed to the built-in
+  public root rather than to whatever root is in use now, since no build
+  without the column had an override to apply: an upgraded cache is adopted by
+  a public-host run and discarded by a custom-host one, instead of the
+  mirror silently inheriting the public host's answers. The destructive step is
+  gated on the new host answering `/tip`, so a mistyped host fails with the
+  cache intact rather than costing a full historical refetch; only a run that
+  would actually discard pays for that probe. `Fetch` and `Observer.Start`
+  both record and log the resolved root once at startup — `Start` rather than
+  `NewObserver` because the probe needs a context and a startup the caller can
+  fail — because the node's config dump names the configured value only for
+  the in-process observer and says nothing on the `fetch`/`run`/`watch` paths.
+  Recording alone only invalidates the rows present when it runs, so the four
+  bulk writes (`CommitEpochData`, `CommitAccountRewardsForEpoch`,
+  `SaveAccountFetchChunkProgress`, `SaveAccountUniverse`) also verify, inside
+  their own transaction, that the cache still holds the root this handle
+  claimed. The default cache path is shared across the standalone commands and
+  the in-process observer, so an observer on one host and a `fetch
+  --koios-url` on another are a reachable pair; without the check the older
+  client would go on appending its host's answers under the newer host's
+  marker. A handle that never recorded a source enforces nothing, which keeps
+  `status` and `explain` working against a cache someone else stamped. `Check`
+  writes verdicts derived from the cache but has no client to name a source, so
+  it calls `PinRecordedSource` at startup and claims whatever is recorded: the
+  same re-point that discards check evidence then fails the in-flight run's
+  `CommitEpochMismatches`/`UpsertCheckEpochStatus`/`InsertCheckRun` instead of
+  letting it repopulate them under a source its verdicts never saw. An
+  unstamped cache pins the public root it is attributed to rather than pinning
+  nothing, and `assertClaimedSource` compares attributions rather than raw
+  rows, so a legacy cache keeps writing while it stays unstamped and stops the
+  moment another process stamps it with a different host.
 - **Koios endpoint.** `/account_rewards` is deprecated; `/account_reward_
   history` is the replacement (`KoiosClient.GetAccountRewardHistory`), taking
   the same `stake_addresses_with_epoch_no` POST body shape via a new `post()`

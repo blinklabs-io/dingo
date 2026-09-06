@@ -30,13 +30,19 @@ import (
 
 // FetchConfig holds parameters for a Koios fetch run.
 type FetchConfig struct {
-	Network      string
-	APIKey       string
-	CachePath    string
-	Concurrency  int
-	FromEpoch    uint64 // 0 = resume from last cached + 1
-	ThroughEpoch uint64 // 0 = tip - 1
-	ForceRefresh bool   // re-fetch epochs already in cache (overwrite); implies FromEpoch is a hard start
+	Network string
+	APIKey  string
+	// BaseURL overrides the public koios.rest host for the network; see
+	// NewKoiosClient. Empty selects the public host.
+	BaseURL string
+	// AllowInsecureHTTP permits a plain-HTTP BaseURL; see
+	// NewKoiosClient. Local dev and test only.
+	AllowInsecureHTTP bool
+	CachePath         string
+	Concurrency       int
+	FromEpoch         uint64 // 0 = resume from last cached + 1
+	ThroughEpoch      uint64 // 0 = tip - 1
+	ForceRefresh      bool   // re-fetch epochs already in cache (overwrite); implies FromEpoch is a hard start
 	// AccountsEnabled additionally fetches #3097's per-account Koios
 	// reference data (FetchAccountRewardsForEpoch) for every epoch this run
 	// fetches. False by default: per-account fetching issues far more Koios
@@ -118,6 +124,72 @@ func classifyFetchErr(err error) error {
 	return transientErr(err)
 }
 
+// recordKoiosSource stamps the resolved Koios API root on the cache and logs
+// it once, for the two entry points that write Koios rows (Fetch and
+// NewObserver).
+//
+// The log line is the other half of the guard: the node's startup config dump
+// names the configured value only for the in-process observer, and says
+// nothing on the fetch/run/watch paths, so without this an operator has no
+// record of which oracle a run actually queried. An override that failed to
+// apply is otherwise invisible.
+func recordKoiosSource(
+	ctx context.Context,
+	cache *Cache,
+	network string,
+	koios *KoiosClient,
+	logger *slog.Logger,
+) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	resolvedBaseURL := koios.ResolvedBaseURL()
+	// Confirm the new oracle answers before discarding the old one's rows.
+	// Recovering from a mistyped host would otherwise cost a full historical
+	// refetch — the cost that made this option worth guarding in the first
+	// place. Only a run that would actually discard pays for the probe, so
+	// the ordinary unchanged-source start makes no extra request.
+	pending, previous, err := cache.PendingKoiosSourceChange(
+		network, resolvedBaseURL,
+	)
+	if err != nil {
+		return fmt.Errorf("check koios source: %w", err)
+	}
+	if pending {
+		if _, err := koios.GetTipEpoch(ctx); err != nil {
+			return fmt.Errorf(
+				"koios source changed from %q to %q but the new host did not answer, so the cached reference data was left intact: %w",
+				previous, resolvedBaseURL, err,
+			)
+		}
+	}
+	change, err := cache.RecordKoiosSource(
+		network, resolvedBaseURL, time.Now().UTC(),
+	)
+	if err != nil {
+		return fmt.Errorf("record koios source: %w", err)
+	}
+	if change.Changed {
+		logger.Warn(
+			"koiosparity: koios source changed, discarding cached reference data",
+			"network", network,
+			"previous_base_url", change.Previous,
+			// A legacy cache recorded no source, so the previous host is the
+			// public root those rows must have come from rather than one this
+			// cache ever stated. Saying which keeps the log from presenting an
+			// inference as a record.
+			"previous_base_url_inferred", change.PreviousInferred,
+			"base_url", resolvedBaseURL,
+			"rows_discarded", change.RowsDiscarded,
+		)
+	}
+	logger.Info("koiosparity: koios source",
+		"network", network,
+		"base_url", resolvedBaseURL,
+	)
+	return nil
+}
+
 // Fetch pulls Koios data into the cache, resuming from the last cached epoch.
 func Fetch(
 	ctx context.Context,
@@ -134,8 +206,18 @@ func Fetch(
 	}
 	defer cache.Close() //nolint:errcheck
 
-	koios, err := NewKoiosClient(cfg.Network, cfg.APIKey)
+	koios, err := NewKoiosClient(
+		cfg.Network,
+		cfg.APIKey,
+		cfg.BaseURL,
+		cfg.AllowInsecureHTTP,
+	)
 	if err != nil {
+		return nil, err
+	}
+	if err := recordKoiosSource(
+		ctx, cache, cfg.Network, koios, logger,
+	); err != nil {
 		return nil, err
 	}
 
