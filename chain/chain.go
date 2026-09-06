@@ -1148,22 +1148,18 @@ func (c *Chain) rollbackLocked(
 					"remove block at index %d: %w", i, err,
 				)
 			}
-			if c.eventBus != nil {
-				rolledBackBlocks = append(rolledBackBlocks, block)
-			}
+			rolledBackBlocks = append(rolledBackBlocks, block)
 		} else {
 			// Collect block for event emission before deletion
-			if c.eventBus != nil {
-				block, err := c.blockByIndexLocked(i)
-				if err != nil {
-					slog.Default().Warn(
-						"failed to get block for rollback event",
-						"index", i,
-						"error", err,
-					)
-				} else {
-					rolledBackBlocks = append(rolledBackBlocks, block)
-				}
+			block, err := c.blockByIndexLocked(i)
+			if err != nil {
+				slog.Default().Warn(
+					"failed to get block for rollback event",
+					"index", i,
+					"error", err,
+				)
+			} else {
+				rolledBackBlocks = append(rolledBackBlocks, block)
 			}
 			// Blocks at or below the fork point belong to the
 			// common prefix held by the primary chain, not to this
@@ -1226,6 +1222,11 @@ func (c *Chain) rollbackLocked(
 			// Don't update rollback point if the iterator already has an older one pending
 			if iter.needsRollback && point.Slot > iter.rollbackPoint.Slot {
 				continue
+			}
+			if iter.needsRollback {
+				iter.rollbackBlocks = append(iter.rollbackBlocks, rolledBackBlocks...)
+			} else {
+				iter.rollbackBlocks = slices.Clone(rolledBackBlocks)
 			}
 			iter.rollbackPoint = point
 			iter.needsRollback = true
@@ -1811,8 +1812,10 @@ func (c *Chain) iterNext(
 			ret := &ChainIteratorResult{}
 			ret.Point = iter.rollbackPoint
 			ret.Rollback = true
+			ret.RollbackBlocks = iter.rollbackBlocks
 			iter.lastPoint = iter.rollbackPoint
 			iter.needsRollback = false
+			iter.rollbackBlocks = nil
 			if iter.rollbackPoint.Slot > 0 {
 				// Lookup block index for rollback point
 				tmpBlock, err := c.manager.blockByPoint(
