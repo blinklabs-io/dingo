@@ -21,6 +21,7 @@ import (
 	"math/big"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -644,4 +645,161 @@ func TestLeiosEbWaitCancellationLeavesCallerBehaviourUnchanged(t *testing.T) {
 		[]gledger.Block{parent, certifier},
 	)
 	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+}
+
+// leiosWaitTestPolledFromGrace reports whether the provider is being polled by
+// the post-window grace phase (awaitInFlightEndorserFetches, via awaitFetch)
+// rather than by the diffusion wait or by one of the gate's other checks.
+func leiosWaitTestPolledFromGrace() bool {
+	pcs := make([]uintptr, 64)
+	n := runtime.Callers(2, pcs)
+	frames := runtime.CallersFrames(pcs[:n])
+	for {
+		frame, more := frames.Next()
+		if strings.Contains(frame.Function, "awaitFetch") {
+			return true
+		}
+		if !more {
+			return false
+		}
+	}
+}
+
+// TestEnsureReferencedEndorserBlocksAwaitsLateFetchOnCIPPath covers the
+// regression the review found in the CIP-conformant path. Application there
+// reads each ranking block's own announcement and nothing re-applies an
+// endorser block that lands afterwards, so if the by-point fetch is still in
+// flight when the diffusion window elapses, the ranking block is applied
+// without the endorser-resident outputs and its spends fall through to the
+// interim trust path permanently.
+//
+// The previous code got this right by accident: it issued a SYNCHRONOUS
+// by-point fetch after the window, so however slow the fetch was it still
+// populated the cache before the batch reached ledgerProcessBlock. Dispatching
+// the fetch up front and asynchronously is better for latency but dropped that
+// guarantee. The grace phase restores it.
+//
+// The fetch is released by the grace phase's own first poll rather than by a
+// timer, so "slower than the window, faster than the grace" holds by
+// construction and cannot flake: until the grace phase runs, the fetch cannot
+// complete, so it is always later than the window.
+func TestEnsureReferencedEndorserBlocksAwaitsLateFetchOnCIPPath(t *testing.T) {
+	ebHash := lcommon.NewBlake2b256(leiosTestHash(0xF1))
+	block := leiosWaitTestAnnouncingBlock(t, 1, 100, ebHash)
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	var cached, sawGracePhase, fetchCompleted atomic.Bool
+
+	cfg := LedgerStateConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EndorserBlockProvider: func(
+			hash []byte,
+			slot uint64,
+		) ([]cbor.RawMessage, bool) {
+			if slot != 100 || string(hash) != string(ebHash.Bytes()) {
+				return nil, false
+			}
+			if leiosWaitTestPolledFromGrace() {
+				// The diffusion window has elapsed and the grace phase is
+				// running, so let the in-flight fetch finish.
+				sawGracePhase.Store(true)
+				releaseOnce.Do(func() { close(release) })
+			}
+			return nil, cached.Load()
+		},
+		EndorserBlockFetcher: func(
+			ctx context.Context,
+			_ uint64,
+			_ []byte,
+		) error {
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(10 * time.Second):
+				// Backstop so a regression that never runs the grace phase
+				// fails the assertions below instead of hanging.
+				return nil
+			}
+			cached.Store(true)
+			fetchCompleted.Store(true)
+			return nil
+		},
+		// CIP-conformant path: application reads the announcement.
+		EndorserBlockWaitSlots:     leiosWaitTestWaitSlots,
+		LeiosApplyEndorserBlockTxs: true,
+	}
+	ls := &LedgerState{config: cfg}
+	ls.leiosBackfill = newLeiosBackfiller(cfg)
+	withLeiosWaitTestSlotLength(ls)
+
+	require.NoError(t, ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{block},
+	))
+
+	require.True(
+		t,
+		sawGracePhase.Load(),
+		"the post-window grace phase must run on the CIP path",
+	)
+	require.True(t, fetchCompleted.Load(), "the in-flight fetch must finish")
+	require.True(
+		t,
+		endorserBlockAvailableAt(
+			ls.config.EndorserBlockProvider,
+			ebHash.Bytes(),
+			100,
+		),
+		"the endorser block must be cached before the batch is applied; "+
+			"otherwise the ranking block commits without its endorser-resident "+
+			"outputs and nothing ever re-applies them",
+	)
+}
+
+// TestEnsureReferencedEndorserBlocksSkipsGraceOnCertDrivenPath pins that the
+// grace is CIP-only, exercised against a MANDATORY certified closure so the
+// blocking set is non-empty and the guard is what decides. On this path a
+// missing closure is already retried by the bounded fetch that follows, so
+// paying a second diffusion window here would add head-of-line blocking on the
+// pipeline for nothing -- exactly what this PR removes.
+func TestEnsureReferencedEndorserBlocksSkipsGraceOnCertDrivenPath(t *testing.T) {
+	parent, certifier, _ := leiosTestCertifiedBlockPair(t)
+
+	var sawGracePhase atomic.Bool
+	cfg := LedgerStateConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
+			if leiosWaitTestPolledFromGrace() {
+				sawGracePhase.Store(true)
+			}
+			return nil, false
+		},
+		EndorserBlockFetcher: func(
+			_ context.Context,
+			_ uint64,
+			_ []byte,
+		) error {
+			return nil
+		},
+		EndorserBlockWaitSlots:     leiosWaitTestWaitSlots,
+		LeiosApplyEndorserBlockTxs: false,
+	}
+	ls := &LedgerState{config: cfg}
+	ls.leiosBackfill = newLeiosBackfiller(cfg)
+	withLeiosWaitTestSlotLength(ls)
+
+	// The closure never arrives, so the mandatory check fails -- which is the
+	// correct outcome and is what makes the grace pointless here.
+	err := ls.ensureReferencedEndorserBlocks(
+		t.Context(),
+		[]gledger.Block{parent, certifier},
+	)
+	require.ErrorIs(t, err, errCertifiedEndorserBlockUnavailable)
+	require.False(
+		t,
+		sawGracePhase.Load(),
+		"the post-window grace must not run on the certificate-driven path",
+	)
 }
