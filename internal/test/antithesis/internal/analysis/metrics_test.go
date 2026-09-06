@@ -206,6 +206,22 @@ func TestMetrics_MempoolCount(t *testing.T) {
 	require.Equal(t, 7, snap.MempoolTxCount)
 }
 
+func TestMetrics_TracksConfirmedTransactionsAndDuplicateSubmissions(t *testing.T) {
+	m := NewMetrics()
+	m.RecordEvent(&BlockEvent{Type: EventTxSubmitted, TxID: "tx1", TxType: "payment"})
+	m.RecordEvent(&BlockEvent{Type: EventTxSubmitted, TxID: "tx1", TxType: "payment"})
+	m.RecordEvent(&BlockEvent{Type: EventTxConfirmed, TxID: "tx1"})
+	m.RecordEvent(&BlockEvent{Type: EventTxConfirmed, TxID: "node-tx"})
+	m.RecordEvent(&BlockEvent{Type: EventTxConfirmed, TxID: "tx2"})
+	m.RecordEvent(&BlockEvent{Type: EventTxSubmitted, TxID: "tx2", TxType: "payment"})
+
+	snap := m.Snapshot()
+	require.Equal(t, 3, snap.MempoolConfirmedCount)
+	require.Equal(t, 2, snap.ConfirmedSubmittedTxCount)
+	require.Equal(t, 1, snap.DuplicateSubmissions)
+	require.Equal(t, 2, snap.SubmittedTxIDs["tx1"])
+}
+
 func TestMetrics_TxSubmittedCounts(t *testing.T) {
 	tests := []struct {
 		name            string

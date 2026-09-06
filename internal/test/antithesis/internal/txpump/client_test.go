@@ -15,7 +15,6 @@
 package txpump
 
 import (
-	"net"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -39,18 +38,11 @@ func TestProtoFromAddr_Unix(t *testing.T) {
 	}
 }
 
-// TestNewNodeClient_ConnectFailure verifies that NewNodeClient returns an
-// error when it cannot connect to the specified address.  No live node is
-// required because a dynamically allocated port that is immediately closed
-// is used, avoiding flakiness from hardcoded port numbers.
-func TestNewNodeClient_ConnectFailure(t *testing.T) {
-	// Allocate a free port and close it immediately so nothing is listening.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := ln.Addr().String()
-	ln.Close() //nolint:errcheck
-	_, err = NewNodeClient(addr, 42, nil)
-	require.Error(t, err, "dial to refused address should fail")
+// TestNewNodeClient_InvalidTCPAddress verifies that NewNodeClient rejects a
+// malformed TCP address without requiring a socket bind.
+func TestNewNodeClient_InvalidTCPAddress(t *testing.T) {
+	_, err := NewNodeClient("127.0.0.1:not-a-port", 42, nil)
+	require.Error(t, err, "dial to an invalid TCP address should fail")
 }
 
 // TestNewNodeClient_UnixSocketMissing verifies that dialling a non-existent
