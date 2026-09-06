@@ -106,8 +106,10 @@ type Chain struct {
 	// A batch holds this for read from before it mutates memory until its
 	// transaction has concluded; rollbackLocked holds it for write, so the
 	// removal loop only ever runs against a store that has caught up with
-	// memory. Go's RWMutex is writer-preferring, so a waiting rollback also
-	// blocks further batches from starting rather than being starved by them.
+	// memory. The batch's read hold is deferred until txn.Do returns, so a
+	// transaction panic cannot leak the hold or strand a later rollback.
+	// Go's RWMutex is writer-preferring, so a waiting rollback also blocks
+	// further batches from starting rather than being starved by them.
 	//
 	// It covers only the transactions the chain itself owns. addBlockInternal
 	// takes a caller-supplied transaction whose commit the chain neither
