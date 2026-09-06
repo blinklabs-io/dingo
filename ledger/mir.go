@@ -18,6 +18,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"math/big"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -52,8 +53,16 @@ const (
 //	availableTreasury = treasury + deltaTreasury
 //	if totR <= availableReserves && totT <= availableTreasury then ... else ...
 //
-// Distribution MIR (credential→amount map):
-//   - Registered, active reward accounts are credited from the source pot.
+// Distribution MIR (credential→delta map):
+//   - A MIR delta is delta_coin, so it carries a sign. Every certificate of the
+//     ended epoch is folded per (pot, credential) before anything is credited,
+//     matching cardano-ledger's `iRReserves`/`iRTreasury` InstantaneousRewards
+//     maps, which `delegTransition` accumulates across the epoch
+//     (`Cardano.Ledger.Shelley.Rules.Deleg`) and which this rule credits once
+//     at the boundary. A negative delta therefore reduces an earlier positive
+//     one for the same credential and pot rather than being applied on its own.
+//   - Registered, active reward accounts are credited the folded total from the
+//     source pot.
 //   - Credentials without a registered account are silently skipped — unlike
 //     POOLREAP, there is no fallback routing to the treasury. They are also
 //     excluded from the pot totals, matching the `Map.intersection accountsMap`
@@ -65,6 +74,15 @@ const (
 //   - Source=1 (Treasury) moves OtherPot lovelace from treasury to reserves.
 //   - Transfers are folded into the available pot balances before the capacity
 //     check, so they fund distributions made at the same boundary.
+//
+// A folded total that is negative, or too large for the reward-account credit
+// path, discards the boundary the same way. cardano-ledger cannot reach either
+// state: DELEG rejects the transaction whose certificate would drive an
+// accumulated entry below zero (`MIRProducesNegativeUpdate` in
+// `Cardano.Ledger.Shelley.Rules.Deleg.delegTransition`), and an entry above the
+// pot fails the capacity check. Dingo does not run the DELEG
+// accumulation check, so the boundary reports the condition and discards rather
+// than crediting a debit it cannot represent.
 //
 // When either pot cannot cover its total the whole boundary is a no-op: no
 // credit, no debit and no transfer is written, and the epoch rollover still
@@ -90,6 +108,15 @@ func (ls *LedgerState) applyMIRCerts(
 	boundary, err := ls.collectMIRBoundary(txn, effects)
 	if err != nil {
 		return err
+	}
+	if boundary.discard != "" {
+		ls.config.Logger.Warn(
+			"discarding uncreditable MIR at epoch boundary",
+			"slot", boundarySlot,
+			"reason", boundary.discard,
+			"component", "ledger",
+		)
+		return nil
 	}
 	if boundary.isEmpty() {
 		return nil
@@ -140,13 +167,23 @@ func (ls *LedgerState) applyMIRCerts(
 }
 
 // mirCredit is one registered-account credit selected for application at an
-// epoch boundary.
+// epoch boundary. amount is the fold of every delta the ended epoch carried for
+// this (pot, credential), and is non-negative by construction.
 type mirCredit struct {
-	mirID         uint
 	pot           uint
 	credentialTag uint8
 	credential    []byte
 	amount        uint64
+}
+
+// mirPendingKey identifies one entry of the accumulated InstantaneousRewards
+// map. The pot is part of the key because cardano-ledger keeps `iRReserves`
+// and `iRTreasury` as two maps, so the same credential can hold an independent
+// pending amount in each.
+type mirPendingKey struct {
+	pot        uint
+	tag        uint8
+	credential string
 }
 
 // mirBoundary is the aggregate of every MIR certificate in one ended epoch,
@@ -162,6 +199,10 @@ type mirBoundary struct {
 	reservesOut   uint64
 	treasuryIn    uint64
 	treasuryOut   uint64
+	// discard, when non-empty, names why the folded boundary cannot be
+	// credited at all. It carries the same consequence as failing the
+	// capacity check: the whole boundary is dropped.
+	discard string
 }
 
 // isEmpty reports whether the boundary carries no pot movement at all, in
@@ -172,8 +213,11 @@ func (b *mirBoundary) isEmpty() bool {
 		b.treasuryIn == 0 && b.treasuryOut == 0
 }
 
-// addCredit records a credit against its source pot, keeping the per-pot total
-// that the capacity check compares against the pot.
+// addCredit records one folded credit against its source pot, keeping the
+// per-pot total that the capacity check compares against the pot. The total
+// stays unsigned: every credit reaching here is the non-negative fold of the
+// epoch's deltas for one credential, so it is `fold` over cardano-ledger's
+// restricted InstantaneousRewards map.
 func (b *mirBoundary) addCredit(credit mirCredit) error {
 	total := &b.totalReserves
 	if credit.pot == mirPotTreasury {
@@ -215,8 +259,16 @@ func (b *mirBoundary) addTransfer(sourcePot uint, amount uint64) error {
 }
 
 // collectMIRBoundary folds every effect for the ended epoch into a single
-// mirBoundary without mutating any state. Distribution credits are restricted
-// to registered, active reward accounts, resolved in one batched lookup.
+// mirBoundary without mutating any state. Distribution deltas are accumulated
+// per (pot, credential) as signed values first, then resolved into credits, so
+// a negative delta reduces an earlier positive one instead of being applied as
+// a debit the reward-account path cannot represent. Credits are restricted to
+// registered, active reward accounts, resolved in one batched lookup.
+//
+// The accumulation preserves first-appearance order. Effects arrive ordered by
+// added_slot then row ID and each certificate's rewards by row ID, so the
+// resulting credit order — and therefore the reward journal — is deterministic
+// for a given stored epoch.
 func (ls *LedgerState) collectMIRBoundary(
 	txn *database.Txn,
 	effects []models.MIREffect,
@@ -226,6 +278,8 @@ func (ls *LedgerState) collectMIRBoundary(
 		return nil, err
 	}
 	boundary := &mirBoundary{}
+	pending := make(map[mirPendingKey]*big.Int)
+	order := make([]mirPendingKey, 0, len(effects))
 	for _, effect := range effects {
 		if effect.OtherPot > 0 {
 			if err := boundary.addTransfer(
@@ -245,15 +299,58 @@ func (ls *LedgerState) collectMIRBoundary(
 			if !registered[ref.MapKey()] {
 				continue
 			}
-			if err := boundary.addCredit(mirCredit{
-				mirID:         effect.ID,
-				pot:           effect.Pot,
-				credentialTag: reward.CredentialTag,
-				credential:    reward.Credential,
-				amount:        reward.Amount,
-			}); err != nil {
-				return nil, err
+			if reward.Amount == nil {
+				return nil, fmt.Errorf(
+					"MIR %d carries no delta for credential %x",
+					effect.ID,
+					reward.Credential,
+				)
 			}
+			key := mirPendingKey{
+				pot:        effect.Pot,
+				tag:        reward.CredentialTag,
+				credential: string(reward.Credential),
+			}
+			total, ok := pending[key]
+			if !ok {
+				total = new(big.Int)
+				pending[key] = total
+				order = append(order, key)
+			}
+			total.Add(total, reward.Amount)
+		}
+	}
+	for _, key := range order {
+		net := pending[key]
+		if net.Sign() == 0 {
+			continue
+		}
+		if net.Sign() < 0 {
+			boundary.discard = fmt.Sprintf(
+				"MIR deltas for pot %d credential %x net to %s, "+
+					"which no reward account can carry",
+				key.pot,
+				key.credential,
+				net,
+			)
+			return boundary, nil
+		}
+		if !net.IsUint64() {
+			boundary.discard = fmt.Sprintf(
+				"MIR deltas for pot %d credential %x net to %s, which exceeds any Ada pot",
+				key.pot,
+				key.credential,
+				net,
+			)
+			return boundary, nil
+		}
+		if err := boundary.addCredit(mirCredit{
+			pot:           key.pot,
+			credentialTag: key.tag,
+			credential:    []byte(key.credential),
+			amount:        net.Uint64(),
+		}); err != nil {
+			return nil, err
 		}
 	}
 	return boundary, nil
@@ -319,11 +416,13 @@ func (ls *LedgerState) applyMIRCredits(
 			credit.amount,
 			boundarySlot,
 			// MIR has no transaction hash in this processed effect, so
-			// the MIR row ID is encoded as a synthetic discriminator.
-			// That keeps two MIR certs crediting the same account in
-			// one epoch as distinct journal rows while still mapping a
-			// crash-replayed boundary to the same row.
-			mirRewardSourceHash(credit.mirID),
+			// the source pot is encoded as a synthetic discriminator.
+			// One credit per (pot, credential) is written per boundary,
+			// matching the two InstantaneousRewards maps, so this keeps
+			// a reserves and a treasury credit to the same account at
+			// one boundary as distinct journal rows while still mapping
+			// a replayed boundary to the same row.
+			mirRewardSourceHash(credit.pot),
 		)
 		if err != nil {
 			return 0, 0, fmt.Errorf(
@@ -375,12 +474,12 @@ func mirAvailablePot(
 	return available - out, true, nil
 }
 
-func mirRewardSourceHash(mirID uint) []byte {
+func mirRewardSourceHash(pot uint) []byte {
 	out := make([]byte, len(mirRewardSourcePrefix)+8)
 	copy(out, mirRewardSourcePrefix)
 	binary.BigEndian.PutUint64(
 		out[len(mirRewardSourcePrefix):],
-		uint64(mirID),
+		uint64(pot),
 	)
 	return out
 }

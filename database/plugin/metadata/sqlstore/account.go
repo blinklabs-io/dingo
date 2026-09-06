@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math/big"
 	"strconv"
 	"strings"
 
@@ -817,7 +818,10 @@ func (s *Store) GetAccountSumsByCredential(
 	stakingKey []byte,
 	txn types.Txn,
 ) (models.AccountSums, error) {
-	var ret models.AccountSums
+	ret := models.AccountSums{
+		ReservesSum: new(big.Int),
+		TreasurySum: new(big.Int),
+	}
 	if len(stakingKey) == 0 {
 		return ret, nil
 	}
@@ -827,6 +831,11 @@ func (s *Store) GetAccountSumsByCredential(
 	}
 	sum := func(query string, args ...any) (uint64, error) {
 		return sumUint64Rows(ctx, db, s.dialect.Rebind(query), args...)
+	}
+	// MIR amounts are delta_coin, so the two pot totals are summed as signed
+	// values. A withdrawal is coin and stays unsigned.
+	sumSigned := func(query string, args ...any) (*big.Int, error) {
+		return sumSignedRows(ctx, db, s.dialect.Rebind(query), args...)
 	}
 	ret.WithdrawalsSum, err = sum(`
 SELECT amount
@@ -841,7 +850,7 @@ WHERE withdrawal = TRUE AND credential_tag = ? AND staking_key = ?`,
 			err,
 		)
 	}
-	ret.ReservesSum, err = sum(`
+	ret.ReservesSum, err = sumSigned(`
 SELECT reward.amount
 FROM move_instantaneous_rewards_reward reward
 JOIN move_instantaneous_rewards mir ON mir.id = reward.mir_id
@@ -856,7 +865,7 @@ WHERE mir.pot = 0 AND reward.credential_tag = ?
 			err,
 		)
 	}
-	ret.TreasurySum, err = sum(`
+	ret.TreasurySum, err = sumSigned(`
 SELECT reward.amount
 FROM move_instantaneous_rewards_reward reward
 JOIN move_instantaneous_rewards mir ON mir.id = reward.mir_id
