@@ -1287,24 +1287,6 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return nil
 	}
 
-	// One line per forge with every input the gates just weighed, so a
-	// post-mortem of an orphaned block does not have to reconstruct them from
-	// surrounding chatter. Info, not Debug: this is at most one line per block
-	// this node actually produces.
-	f.logger.Info(
-		"forge context",
-		"current_slot", currentSlot,
-		"tip_slot", tipSlot,
-		"frontier_slot", frontier.Slot,
-		"eb_slot", ebSlot,
-		"newest_known_slot", newestKnown,
-		"upstream_target_slot", upstreamTarget,
-		"staleness_ref_slot", stalenessRef,
-		"staleness_ref_source", stalenessSrc,
-		"gap_slots", applyGap,
-		"effective_gap_slots", effectiveGap,
-	)
-
 	// The credential snapshot owns its secret material, so the callback above
 	// never holds a writer-blocking lease. A reload still invalidates this
 	// attempt before any Leios or block-construction work begins.
@@ -1374,6 +1356,25 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		)
 		return nil
 	}
+
+	// One line per forge with every input the gates weighed, so a post-mortem
+	// of an orphaned block does not have to reconstruct them from surrounding
+	// chatter. Emitted after the LAST gate that can still refuse, so it is
+	// never followed by a skip for this slot; Info, not Debug, because it is
+	// at most one line per block this node actually produces.
+	f.logger.Info(
+		"forge context",
+		"current_slot", currentSlot,
+		"tip_slot", tipSlot,
+		"frontier_slot", frontier.Slot,
+		"eb_slot", ebSlot,
+		"newest_known_slot", newestKnown,
+		"upstream_target_slot", upstreamTarget,
+		"staleness_ref_slot", stalenessRef,
+		"staleness_ref_source", stalenessSrc,
+		"gap_slots", applyGap,
+		"effective_gap_slots", effectiveGap,
+	)
 
 	// Commit to this slot before any signing happens for it, including
 	// the Leios endorser block below. The tip check above only rejects

@@ -494,10 +494,9 @@ func TestForgeSkipsWhenFrontierIsAheadOfTheCurrentSlot(t *testing.T) {
 
 // TestForgeSkipsWhenAppliedTipAlreadyHasTheCurrentSlot pins that narrowing the
 // past-slot comparison to a strict inequality did not re-open the plain
-// equal-applied-tip case. That case is still refused here; #3955 replaces this
-// block with a contested-slot branch that can tell this node's own block from
-// a rival's, which is why equal slots must reach it rather than being consumed
-// by the comparison above.
+// equal-applied-tip case. Equal slots now fall through to the contested-slot
+// handling, which is exactly why the comparison had to stop consuming them,
+// and that handling still refuses the slot.
 func TestForgeSkipsWhenAppliedTipAlreadyHasTheCurrentSlot(t *testing.T) {
 	var logs bytes.Buffer
 	forger, builder, broadcaster := newStaleTipTestForger(
@@ -512,7 +511,11 @@ func TestForgeSkipsWhenAppliedTipAlreadyHasTheCurrentSlot(t *testing.T) {
 
 	require.Zero(t, builder.calls)
 	require.Zero(t, broadcaster.calls)
-	require.Contains(t, logs.String(), "forge skip: slot already has block")
+	require.Contains(
+		t,
+		logs.String(),
+		"forge skip: leader slot already holds another block",
+	)
 }
 
 // TestForgeStaleTipSkipCountsLostBlocksNotLeaderChecks pins that the stale-tip
