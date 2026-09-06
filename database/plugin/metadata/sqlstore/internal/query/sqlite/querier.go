@@ -64,6 +64,8 @@ type Querier interface {
 	DeleteRewardPoolInputsForEpoch(ctx context.Context, epoch int64) error
 	DeleteRewardPoolOutputsAfterSlot(ctx context.Context, arg DeleteRewardPoolOutputsAfterSlotParams) error
 	DeleteRewardPoolOutputsForEpoch(ctx context.Context, epoch int64) error
+	DeleteRewardSeedFailure(ctx context.Context, arg DeleteRewardSeedFailureParams) error
+	DeleteRewardSeedFailuresAfterSlot(ctx context.Context, capturedSlot int64) error
 	DeleteRewardSnapshotsAfterSlot(ctx context.Context, arg DeleteRewardSnapshotsAfterSlotParams) error
 	DeleteRewardStakeInputsAfterSlot(ctx context.Context, arg DeleteRewardStakeInputsAfterSlotParams) error
 	DeleteRewardStakeInputsBeforeEpoch(ctx context.Context, epoch int64) error
@@ -132,6 +134,7 @@ type Querier interface {
 	GetRewardAdaPots(ctx context.Context, epoch int64) (RewardAdaPot, error)
 	GetRewardPoolInputs(ctx context.Context, epoch int64) ([]RewardPoolInput, error)
 	GetRewardPoolOutputs(ctx context.Context, epoch int64) ([]RewardPoolOutput, error)
+	GetRewardSeedFailure(ctx context.Context, arg GetRewardSeedFailureParams) (string, error)
 	GetRewardSnapshot(ctx context.Context, arg GetRewardSnapshotParams) (RewardSnapshot, error)
 	GetRewardStakeInputs(ctx context.Context, epoch int64) ([]RewardStakeInput, error)
 	GetScript(ctx context.Context, hash []byte) (Script, error)
@@ -174,6 +177,7 @@ type Querier interface {
 	SaveRewardAdaPots(ctx context.Context, arg SaveRewardAdaPotsParams) (int64, error)
 	SaveRewardPoolInput(ctx context.Context, arg SaveRewardPoolInputParams) (int64, error)
 	SaveRewardPoolOutput(ctx context.Context, arg SaveRewardPoolOutputParams) (int64, error)
+	SaveRewardSeedFailure(ctx context.Context, arg SaveRewardSeedFailureParams) error
 	SaveRewardSnapshot(ctx context.Context, arg SaveRewardSnapshotParams) (int64, error)
 	SaveRewardStakeInput(ctx context.Context, arg SaveRewardStakeInputParams) (int64, error)
 	SetBackfillCheckpoint(ctx context.Context, arg SetBackfillCheckpointParams) (int64, error)

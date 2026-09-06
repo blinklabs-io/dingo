@@ -36,12 +36,19 @@ var DijkstraEraDesc = EraDesc{
 	DecodePParamsFunc:       DecodePParamsDijkstra,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateDijkstra,
 	PParamsUpdateFunc:       PParamsUpdateDijkstra,
-	HardForkFunc:            HardForkDijkstra,
-	EpochLengthFunc:         EpochLengthShelley,
-	CalculateEtaVFunc:       CalculateEtaVDijkstra,
-	CertDepositFunc:         CertDepositDijkstra,
-	ValidateTxFunc:          ValidateTxDijkstra,
-	EvaluateTxFunc:          EvaluateTxDijkstra,
+	ParamUpdateHasPlutusV2CostModelFunc: func(u any) bool {
+		upd, ok := u.(gdijkstra.DijkstraProtocolParameterUpdate)
+		if !ok {
+			return false
+		}
+		return paramUpdateHasPlutusV2CostModel(upd.CostModels)
+	},
+	HardForkFunc:      HardForkDijkstra,
+	EpochLengthFunc:   EpochLengthShelley,
+	CalculateEtaVFunc: CalculateEtaVDijkstra,
+	CertDepositFunc:   CertDepositDijkstra,
+	ValidateTxFunc:    ValidateTxDijkstra,
+	EvaluateTxFunc:    EvaluateTxDijkstra,
 }
 
 func DecodePParamsDijkstra(data []byte) (lcommon.ProtocolParameters, error) {
@@ -288,30 +295,26 @@ func ValidateTxDijkstra(
 var dijkstraPhase1UtxoValidationRules = buildDijkstraValidationRules()
 
 func buildDijkstraValidationRules() []indexedUtxoValidationRule {
-	skips := []utxoValidationRuleSkip{
-		{
-			validationFunc: gdijkstra.UtxoValidatePlutusScripts,
-			name:           "dijkstra.UtxoValidatePlutusScripts",
-		},
-		{
-			validationFunc: conway.
-				UtxoValidateCommitteeCertificates,
-			name: "conway.UtxoValidateCommitteeCertificates",
-		},
-		{
-			validationFunc: conway.UtxoValidateUnknownVoters,
-			name:           "conway.UtxoValidateUnknownVoters",
-		},
+	// Skips are resolved by upstream rule Id, never by validation function.
+	// Dijkstra reimplements several rules that Conway owned in earlier
+	// releases, so the package a rule's function lives in is not stable
+	// either.
+	skipRuleIds := []lcommon.UtxoValidationRuleId{
+		lcommon.UtxoValidationRulePlutusScripts,
+		lcommon.UtxoValidationRuleCommitteeCertificates,
+		lcommon.UtxoValidationRuleUnknownVoters,
 	}
-	indexes := make([]int, len(skips))
-	for i := range skips {
+	descriptors := gdijkstra.UtxoValidationRuleDescriptors()
+	indexes := make([]int, len(skipRuleIds))
+	for i := range skipRuleIds {
 		indexes[i] = resolveUtxoValidationSkipIndex(
-			gdijkstra.UtxoValidationRules, skips[i].validationFunc, skips[i].name,
+			descriptors, gdijkstra.UtxoValidationRules, skipRuleIds[i],
 		)
 	}
 	ret := buildIndexedUtxoValidationRulesWithSkips(
+		descriptors,
 		gdijkstra.UtxoValidationRules,
-		skips,
+		skipRuleIds,
 	)
 	ret = append(ret,
 		indexedUtxoValidationRule{

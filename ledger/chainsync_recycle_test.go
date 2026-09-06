@@ -344,11 +344,11 @@ func TestBlockfetchStatefulHeaderVerificationDefersUntilLedgerApply(
 	ls.chain = &chain.Chain{}
 
 	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
-	err := ls.handleEventBlockfetchBlock(BlockfetchEvent{
+	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
 		ConnectionId: connId,
 		Block:        tb.block,
 		Point:        point,
-	})
+	}, nil)
 	require.NoError(t, err)
 	require.Len(t, ls.pendingBlockfetchEvents, 1)
 	assert.True(t, ls.consumeDeferredHeaderValidation(point))
