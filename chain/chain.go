@@ -693,15 +693,11 @@ func (c *Chain) AddRawBlocksWithCallback(
 // pre-batch snapshot back over the current chain state.
 //
 // It may only do so while the chain still shows exactly what that batch left
-// behind. addRawBlocks releases c.mutex and c.manager.mutex when its
-// transaction closure returns, before txn.Do commits, so any other goroutine
-// can move the chain before the Commit-failure path runs -- and rolling the
-// primary chain back while blockfetch appends to it is what every ledger
-// recovery rewind does. Writing the snapshot over a rollback's result raises
-// tipBlockIndex back above blocks that rollback deleted, leaving the chain
-// claiming a tip it does not store: the next rollback measures an inflated
-// fork depth against it, and any lookup in the resurrected span reports the
-// block as missing.
+// behind. addRawBlocks holds c.mutex and c.manager.mutex through the
+// transaction commit, so no other chain mutation can interleave between the
+// in-memory batch update and durable block visibility. The generation check
+// remains a second guard for future callers that may restore after releasing
+// the locks.
 //
 // Callers must hold c.mutex and c.manager.mutex.
 func (c *Chain) batchRestoreIsSafeLocked(
@@ -735,11 +731,9 @@ func (c *Chain) addRawBlocks(
 		// addRawBlockLocked mutates c.currentTip, c.tipBlockIndex,
 		// c.headers, and c.blocks before the txn commits. If a
 		// later block in the batch fails the closure restores the
-		// pre-batch state, but txn.Do also runs Commit *after* the
-		// closure returns and after the chain locks are released —
-		// a Commit failure rolls back the persistent state while
-		// leaving the in-memory chain advanced. Capture the
-		// snapshot here so we can also restore on Commit failure.
+		// pre-batch state, but txn.Do also runs Commit after the
+		// closure returns. Capture the snapshot here so we can also
+		// restore on a commit failure.
 		var (
 			savedTip             ochainsync.Tip
 			savedTipBlockIndex   uint64
@@ -751,52 +745,59 @@ func (c *Chain) addRawBlocks(
 			appliedTipBlockIndex uint64
 			appliedGeneration    uint64
 		)
-		err := txn.Do(func(txn *database.Txn) error {
-			batch := blocks[batchOffset : batchOffset+batchSize]
+		err := func() error {
+			// Keep the chain and manager locks held through txn.Do's commit.
+			// The transaction callback updates the in-memory tip before Do
+			// makes the block durable; releasing these locks at callback return
+			// lets a concurrent rollback delete a block that is not committed
+			// yet, leaving the chain tip ahead of the database.
 			c.mutex.Lock()
 			defer c.mutex.Unlock()
 			c.manager.mutex.Lock()
 			defer c.manager.mutex.Unlock()
-			if err := c.reconcile(); err != nil {
-				return fmt.Errorf("reconcile: %w", err)
-			}
-			savedTip = c.currentTip
-			savedTipBlockIndex = c.tipBlockIndex
-			savedGeneration = c.mutationGeneration
-			savedHeaders = slices.Clone(c.headers)
-			if !c.persistent {
-				savedBlocks = slices.Clone(c.blocks)
-			}
-			for _, rb := range batch {
-				evt, err := c.addRawBlockLocked(
-					rb,
-					txn,
-					callback,
-				)
-				if err != nil {
-					c.currentTip = savedTip
-					c.tipBlockIndex = savedTipBlockIndex
-					c.mutationGeneration = savedGeneration
-					c.headers = savedHeaders
-					if !c.persistent {
-						c.blocks = savedBlocks
-					}
-					return err
+			return txn.Do(func(txn *database.Txn) error {
+				batch := blocks[batchOffset : batchOffset+batchSize]
+				if err := c.reconcile(); err != nil {
+					return fmt.Errorf("reconcile: %w", err)
 				}
-				if evt.Type != "" {
-					pendingEvents = append(
-						pendingEvents, evt,
+				savedTip = c.currentTip
+				savedTipBlockIndex = c.tipBlockIndex
+				savedGeneration = c.mutationGeneration
+				savedHeaders = slices.Clone(c.headers)
+				if !c.persistent {
+					savedBlocks = slices.Clone(c.blocks)
+				}
+				for _, rb := range batch {
+					evt, err := c.addRawBlockLocked(
+						rb,
+						txn,
+						callback,
 					)
+					if err != nil {
+						c.currentTip = savedTip
+						c.tipBlockIndex = savedTipBlockIndex
+						c.mutationGeneration = savedGeneration
+						c.headers = savedHeaders
+						if !c.persistent {
+							c.blocks = savedBlocks
+						}
+						return err
+					}
+					if evt.Type != "" {
+						pendingEvents = append(
+							pendingEvents, evt,
+						)
+					}
 				}
-			}
-			// Record what this batch leaves behind so the Commit-failure
-			// path below can tell its own state from someone else's.
-			batchApplied = true
-			appliedTip = c.currentTip
-			appliedTipBlockIndex = c.tipBlockIndex
-			appliedGeneration = c.mutationGeneration
-			return nil
-		})
+				// Record what this batch leaves behind so the Commit-failure
+				// path below can tell its own state from someone else's.
+				batchApplied = true
+				appliedTip = c.currentTip
+				appliedTipBlockIndex = c.tipBlockIndex
+				appliedGeneration = c.mutationGeneration
+				return nil
+			})
+		}()
 		if err != nil {
 			// Cover the Commit-failure path: closure returned nil
 			// but txn.Do's later Commit failed, so memory still
@@ -805,19 +806,10 @@ func (c *Chain) addRawBlocks(
 			// while the chain still shows exactly what this batch
 			// left behind.
 			//
-			// The locks are released when the closure returns, so
-			// another goroutine can move the chain before this runs,
-			// and rolling the primary chain back while blockfetch
-			// appends to it is a normal pairing rather than a corner
-			// case: it is what every ledger recovery rewind does.
-			// Writing the pre-batch snapshot over a rollback's result
-			// raises tipBlockIndex back above blocks that rollback
-			// deleted, leaving the chain claiming a tip it does not
-			// store -- an inflated fork depth on the next rollback and
-			// a not-found lookup for any index in the resurrected
-			// span. A closure-internal error already restored under
-			// the lock, so there is nothing left to do for it here
-			// either.
+			// A closure-internal error already restored under the lock, so
+			// there is nothing left to do for it here either. The guard is
+			// retained for commit failures and future callers that may
+			// restore after releasing the locks.
 			if batchApplied {
 				c.mutex.Lock()
 				c.manager.mutex.Lock()
