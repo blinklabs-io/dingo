@@ -297,6 +297,7 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		)
 		return nil, false, nil
 	}
+
 	pparams, params, performanceDecentralization, err := ls.rewardParameters(
 		txn,
 		performanceEpoch,
