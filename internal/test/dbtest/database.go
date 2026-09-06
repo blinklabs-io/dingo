@@ -110,6 +110,25 @@ type Options struct {
 	InMemoryMetadata bool
 }
 
+// boundedBadgerFileBytes caps the value log and memtable a test database
+// reserves. Badger truncates both to their configured size when it opens the
+// store, and rounds the value log up, so the production defaults (1GiB value
+// log, 128MiB memtable) reserve 2GiB per store. A sparse filesystem hides that
+// cost; NTFS does not, which is why only the Windows CI job ran out of disk
+// once a package built several stores. See issue #3980.
+const boundedBadgerFileBytes = 8 << 20
+
+// BoundedBadgerConfig returns the Badger sizing a test database applies by
+// default. It bounds only the on-disk reservation, and a caller's own
+// StorageProvider.Config wins key by key, so a test that genuinely needs
+// production sizing can still ask for it explicitly.
+func BoundedBadgerConfig() map[string]any {
+	return map[string]any{
+		"valueLogFileSize": uint64(boundedBadgerFileBytes),
+		"memTableSize":     uint64(boundedBadgerFileBytes),
+	}
+}
+
 // NewDatabase composes Badger and SQLite for a test. The database is closed
 // before its provider host during the cleanup registered with tb.
 func NewDatabase(
@@ -142,6 +161,18 @@ func NewDatabaseWithOptions(
 	if blobRegister == nil {
 		blobRegister = badger.RegisterProvider
 	}
+	blobConfig := opts.Blob.Config
+	if blobName == "badger" {
+		// Apply the bounded sizes as defaults rather than only when the
+		// caller supplied no config at all: a config that sets some other
+		// knob and says nothing about sizes would otherwise fall back to
+		// the production defaults and restore the 2GiB reservation.
+		merged := BoundedBadgerConfig()
+		for k, v := range blobConfig {
+			merged[k] = v
+		}
+		blobConfig = merged
+	}
 	metadataName := opts.Metadata.Name
 	if metadataName == "" {
 		metadataName = "sqlite"
@@ -159,7 +190,7 @@ func NewDatabaseWithOptions(
 	}
 	blobStore, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
-		plugin.CapabilityStorageBlob, blobName, opts.Blob.Config,
+		plugin.CapabilityStorageBlob, blobName, blobConfig,
 		blob.ProviderDependencies{
 			DataDir: config.DataDir, RunMode: opts.RunMode,
 			StorageMode: config.StorageMode,
