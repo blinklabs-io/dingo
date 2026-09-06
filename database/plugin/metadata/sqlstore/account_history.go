@@ -249,7 +249,7 @@ func (s *Store) GetAccountRegistrationHistoryByCredential(
 		); err != nil {
 			return nil, err
 		}
-		row.Deposit, err = parseNullableUint64(
+		row.Deposit, err = parseNullUint64(
 			"account registration deposit",
 			deposit,
 		)
