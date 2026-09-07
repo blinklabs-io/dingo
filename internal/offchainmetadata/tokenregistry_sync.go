@@ -24,6 +24,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -352,7 +353,7 @@ func (s *TokenRegistrySync) runOnce(ctx context.Context) {
 		// last successful sync produced.
 		s.logger.Warn(
 			"token registry sync failed",
-			"url", s.sourceURL,
+			"url", registryLogURL(s.sourceURL),
 			"error", err,
 		)
 		return
@@ -360,7 +361,7 @@ func (s *TokenRegistrySync) runOnce(ctx context.Context) {
 	if written > 0 {
 		s.logger.Info(
 			"token registry sync complete",
-			"url", s.sourceURL,
+			"url", registryLogURL(s.sourceURL),
 			"entries", written,
 		)
 	}
@@ -421,7 +422,7 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	if err := validateURL(s.sourceURL, s.allowPrivate); err != nil {
-		return 0, fmt.Errorf("token registry source URL: %w", err)
+		return 0, &registryRequestError{operation: "validate token registry source URL", cause: err}
 	}
 	req, err := http.NewRequestWithContext(
 		ctx,
@@ -430,7 +431,7 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 		nil,
 	)
 	if err != nil {
-		return 0, fmt.Errorf("build token registry request: %w", err)
+		return 0, &registryRequestError{operation: "build token registry request", cause: err}
 	}
 	req.Header.Set("User-Agent", s.userAgent)
 	req.Header.Set("Accept", "application/gzip")
@@ -439,7 +440,7 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("fetch token registry: %w", err)
+		return 0, &registryRequestError{operation: "fetch token registry", cause: err}
 	}
 	// http.Client.Do documents a non-nil response whenever err is nil, but the
 	// per-URL fetcher guards this the same way rather than trusting a
@@ -454,7 +455,7 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 	if resp.StatusCode == http.StatusNotModified {
 		s.logger.Debug(
 			"token registry unchanged",
-			"url", s.sourceURL,
+			"url", registryLogURL(s.sourceURL),
 			"etag", previousETag,
 		)
 		return 0, nil
@@ -515,7 +516,7 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 		s.logger.Warn(
 			"token registry snapshot contained no usable mappings; keeping existing entries and retrying next interval",
 			"url",
-			s.sourceURL,
+			registryLogURL(s.sourceURL),
 		)
 		return 0, nil
 	}
@@ -532,7 +533,7 @@ func (s *TokenRegistrySync) SyncOnce(ctx context.Context) (int, error) {
 			"skipped",
 			skipped,
 			"url",
-			s.sourceURL,
+			registryLogURL(s.sourceURL),
 		)
 		return written, nil
 	}
@@ -851,3 +852,33 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	c.read += int64(n)
 	return n, err
 }
+
+// registryLogURL omits all opaque credential-bearing URL components. A malformed
+// URL has no safe parsed representation, so never fall back to the input.
+func registryLogURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "[invalid URL]"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	u.RawFragment = ""
+	// Opaque URLs have no independently identifiable host/path components.
+	if u.Opaque != "" {
+		return "[invalid URL]"
+	}
+	return u.String()
+}
+
+// registryRequestError preserves error identity without formatting an HTTP or
+// URL parser error, which can contain credentials from the source or a redirect.
+// Callers can still use errors.Is/As for cancellation and transport diagnosis.
+type registryRequestError struct {
+	operation string
+	cause     error
+}
+
+func (e *registryRequestError) Error() string { return e.operation + " failed" }
+func (e *registryRequestError) Unwrap() error { return e.cause }

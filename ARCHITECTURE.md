@@ -1839,6 +1839,11 @@ why it lives beside the fetcher rather than in its own package: an
 operator-supplied registry URL is exactly the kind of input the SSRF guard
 exists for, and a second copy of that guard would be free to rot.
 
+Registry sync logs omit URL user information, query parameters, and fragments.
+Request and URL-validation failures expose the operation without rendering the
+underlying error, since HTTP errors can repeat credential-bearing source or
+redirect URLs. Error unwrapping remains available for programmatic diagnosis.
+
 The two workers differ in shape. The fetcher resolves many small per-URL
 documents discovered from on-chain pointers; the registry sync pulls one bulk
 artifact that is identical for every node. That difference is what makes it
