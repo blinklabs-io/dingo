@@ -15,12 +15,15 @@
 package eras
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/plutigo/lang"
 	"github.com/stretchr/testify/require"
 )
@@ -493,4 +496,158 @@ func TestValidateTxDijkstraAllowsNonPlutusV2TxWhenSynthetic(t *testing.T) {
 	)
 
 	require.NoError(t, err)
+}
+
+// TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticSubTransaction covers a
+// Cubic finding on blinklabs-io/dingo#3962's PR: the earlier Dijkstra tests
+// all used a *mockConwayFeeTx (not a concrete *gdijkstra.DijkstraTransaction),
+// which takes usedPlutusVersions' plain witness-set-scan fallback rather
+// than the dijkstraScriptLevels resolution a real Dijkstra transaction
+// actually goes through -- leaving the sub-transaction and reference-script
+// resolution paths dijkstraSyntheticV2CostModelGuard's doc comment claims to
+// cover unverified. This uses a real concrete transaction with the PlutusV2
+// script witnessed and needed only inside a sub-transaction's own spend
+// input, empirically confirming dijkstraScriptLevels' per-level Needed
+// computation (which dijkstraConwayFeatureTransaction scopes to each level's
+// own body/witnesses) folds a sub-transaction's needed languages into the
+// top-level usedPlutusVersions result -- the same mechanism
+// UtxoValidatePlutusScripts itself already depends on to enforce
+// UnsupportedScriptInSubtransactionError, so this guard's coverage cannot
+// regress silently if that upstream mechanism ever changed.
+func TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticSubTransaction(
+	t *testing.T,
+) {
+	disablePhase1RulesForTest(t)
+
+	plutusV2Script := lcommon.PlutusV2Script([]byte{0x01})
+	scriptAddr := newTestScriptAddress(t, plutusV2Script)
+	subTxInput := shelley.NewShelleyTransactionInput(
+		strings.Repeat("ab", 32),
+		0,
+	)
+
+	ls := newMockLedgerState()
+	ls.syntheticV2CostModel = true
+	ls.skipPhase2Validation = true
+	ls.utxos[subTxInput.Id().String()+"#0"] = lcommon.Utxo{
+		Id: subTxInput,
+		Output: testAddressOutput{
+			testOutput: newTestOutput(1_000_000),
+			addr:       scriptAddr,
+		},
+	}
+
+	tx := &gdijkstra.DijkstraTransaction{
+		Body: gdijkstra.DijkstraTransactionBody{
+			TxSubTransactions: cbor.NewSetType(
+				[]gdijkstra.DijkstraSubTransaction{{
+					Body: gdijkstra.DijkstraSubTransactionBody{
+						TxInputs: conway.NewConwayTransactionInputSet(
+							[]shelley.ShelleyTransactionInput{subTxInput},
+						),
+					},
+					WitnessSet: gdijkstra.DijkstraTransactionWitnessSet{
+						WsPlutusV2Scripts: cbor.NewSetType(
+							[]lcommon.PlutusV2Script{plutusV2Script},
+							false,
+						),
+						WsRedeemers: gdijkstra.DijkstraRedeemers{
+							Redeemers: map[lcommon.RedeemerKey]lcommon.RedeemerValue{
+								{Tag: lcommon.RedeemerTagSpend, Index: 0}: {
+									ExUnits: lcommon.ExUnits{
+										Steps:  1,
+										Memory: 1,
+									},
+								},
+							},
+						},
+					},
+				}},
+				false,
+			),
+		},
+		TxIsValid: true,
+	}
+
+	err := ValidateTxDijkstra(
+		tx,
+		0,
+		ls,
+		dijkstraGuardPParams(),
+	)
+
+	require.ErrorIs(t, err, ErrNoCostModelForPlutusV2)
+}
+
+// TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticReferenceScript is
+// TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticSubTransaction's
+// counterpart for the reference-script resolution path: a real concrete
+// transaction whose PlutusV2 script is never directly witnessed, only
+// resolved from a reference input, and needed by a separate spend input at
+// that script's address.
+func TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticReferenceScript(
+	t *testing.T,
+) {
+	disablePhase1RulesForTest(t)
+
+	plutusV2Script := lcommon.PlutusV2Script([]byte{0x01})
+	scriptAddr := newTestScriptAddress(t, plutusV2Script)
+	spendInput := shelley.NewShelleyTransactionInput(
+		strings.Repeat("cd", 32),
+		0,
+	)
+	refInput := shelley.NewShelleyTransactionInput(
+		strings.Repeat("ef", 32),
+		0,
+	)
+
+	ls := newMockLedgerState()
+	ls.syntheticV2CostModel = true
+	ls.skipPhase2Validation = true
+	ls.utxos[spendInput.Id().String()+"#0"] = lcommon.Utxo{
+		Id: spendInput,
+		Output: testAddressOutput{
+			testOutput: newTestOutput(1_000_000),
+			addr:       scriptAddr,
+		},
+	}
+	ls.utxos[refInput.Id().String()+"#0"] = lcommon.Utxo{
+		Id: refInput,
+		Output: testAddressScriptOutput{
+			testOutput: newTestOutput(1_000_000),
+			addr:       newTestKeyAddress(t),
+			scriptRef:  plutusV2Script,
+		},
+	}
+
+	tx := &gdijkstra.DijkstraTransaction{
+		Body: gdijkstra.DijkstraTransactionBody{
+			TxInputs: conway.NewConwayTransactionInputSet(
+				[]shelley.ShelleyTransactionInput{spendInput},
+			),
+			TxReferenceInputs: cbor.NewSetType(
+				[]shelley.ShelleyTransactionInput{refInput},
+				false,
+			),
+		},
+		WitnessSet: gdijkstra.DijkstraTransactionWitnessSet{
+			WsRedeemers: gdijkstra.DijkstraRedeemers{
+				Redeemers: map[lcommon.RedeemerKey]lcommon.RedeemerValue{
+					{Tag: lcommon.RedeemerTagSpend, Index: 0}: {
+						ExUnits: lcommon.ExUnits{Steps: 1, Memory: 1},
+					},
+				},
+			},
+		},
+		TxIsValid: true,
+	}
+
+	err := ValidateTxDijkstra(
+		tx,
+		0,
+		ls,
+		dijkstraGuardPParams(),
+	)
+
+	require.ErrorIs(t, err, ErrNoCostModelForPlutusV2)
 }
