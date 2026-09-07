@@ -13,13 +13,18 @@ services:
   #
   # No API listener runs here. storageMode stays at its "core" default, and
   # the Blockfrost, Mesh, and UTxO RPC listeners only start under storageMode
-  # "api". Turning one on needs DINGO_STORAGE_MODE=api and a container-side
+  # "api". Turning one on means editing this file, not setting a shell
+  # variable: unlike CARDANO_NETWORK above, neither DINGO_STORAGE_MODE nor
+  # DINGO_API_BIND_ADDR is forwarded from the host, and no shell variable can
+  # add a port publish either. Add DINGO_STORAGE_MODE=api and a container-side
   # wildcard bind -- DINGO_API_BIND_ADDR=0.0.0.0, or
-  # DINGO_PLUGINS_API_<NAME>_CONFIG_HOST=0.0.0.0 for a single listener --
-  # because those listeners bind loopback by default, and a container's
-  # loopback is reachable only from inside that container: neither a
-  # published port nor a sibling container on the same Docker network can
-  # reach it. examples/docker-compose.yml is a working API node.
+  # DINGO_PLUGINS_API_<NAME>_CONFIG_HOST=0.0.0.0 for a single listener -- to
+  # the environment below, and publish that listener's port. Both edits are
+  # needed: those listeners bind loopback by default, and a container's
+  # loopback is reachable only from inside that container, so neither a
+  # published port nor a sibling container on the same Docker network reaches
+  # a listener still on 127.0.0.1. examples/docker-compose.yml is a working
+  # API node with all three listeners wired up.
   # --------------------------------------------------------------------------
   dingo:
     build:
@@ -33,8 +38,11 @@ services:
       - DINGO_SOCKET_PATH=/ipc/dingo.socket
       # Uncomment to enable debug logging
       # - DINGO_DEBUG=1
-      # Uncomment to bootstrap from Mithril snapshot on first run
-      # - RESTORE_SNAPSHOT=1
+      # Forwarded from the host only when set, per the header's
+      # "RESTORE_SNAPSHOT=1 docker compose up -d". A bare name is passed
+      # through when the host sets it and omitted entirely when it does not,
+      # so this adds no snapshot bootstrap by default.
+      - RESTORE_SNAPSHOT
     ports:
       # Ouroboros Node-to-Node (relay port)
       - "3001:3001"
