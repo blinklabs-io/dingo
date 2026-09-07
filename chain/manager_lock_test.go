@@ -32,6 +32,7 @@ func TestRewindPrimaryChainToPointDoesNotDeadlockWithIterator(t *testing.T) {
 	}
 	primaryChain := cm.PrimaryChain()
 	primaryChain.persistent = true
+	cm.securityParam = 10
 
 	cm.mutex.Lock()
 	iter := &ChainIterator{

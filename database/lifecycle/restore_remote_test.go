@@ -223,6 +223,11 @@ func (d *remoteTestDatabase) close(t *testing.T) {
 
 func readBlobContents(t *testing.T, db *database.Database) map[string][]byte {
 	t.Helper()
+	// db.Blob() is non-nil: database.New rejects a nil or typed-nil blob
+	// store (database/database.go), so the nil-receiver branch of
+	// blobStoreRef.blobStore that nilaway traces is unreachable for any
+	// constructed database.
+	//nolint:nilaway // database.New requires a non-nil blob store
 	txn := db.Blob().NewTransaction(false)
 	defer txn.Rollback() //nolint:errcheck
 	it := db.Blob().NewIterator(txn, types.BlobIteratorOptions{})

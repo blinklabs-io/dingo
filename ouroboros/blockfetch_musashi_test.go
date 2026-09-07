@@ -621,6 +621,9 @@ func TestDecodeBlockfetchBlockType8NeedsNoMusashiScope(t *testing.T) {
 		require.EqualValues(t, dijkstra.EraIdDijkstra, block.Era().Id)
 		hashes = append(hashes, block.Hash().String())
 	}
+	// The loop above ranges a two-element literal and appends once per
+	// iteration, so both indexes exist; nilaway does not track that.
+	//nolint:nilaway // the loop above appends exactly two entries
 	require.Equal(t, hashes[0], hashes[1])
 }
 

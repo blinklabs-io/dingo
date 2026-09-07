@@ -51,7 +51,7 @@ func seedAccountsForBench(
 	)
 	require.NoError(b, err)
 	refs := make([]models.StakeCredentialRef, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		key := make([]byte, 28)
 		key[0] = byte(i >> 16)
 		key[1] = byte(i >> 8)

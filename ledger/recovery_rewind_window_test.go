@@ -150,9 +150,7 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 	// re-reads the live tip still converges.
 	stop := make(chan struct{})
 	var appender sync.WaitGroup
-	appender.Add(1)
-	go func() {
-		defer appender.Done()
+	appender.Go(func() {
 		lastPoint := pc.Tip().Point
 		for seq := 0; ; seq++ {
 			select {
@@ -182,7 +180,7 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 			}
 			lastPoint = ocommon.NewPoint(next.Slot, next.Hash)
 		}
-	}()
+	})
 
 	target := ocommon.NewPoint(raw[0].Slot, raw[0].Hash)
 	rewindErr := ls.rollbackPrimaryChainInSecurityParamWindows(target)
@@ -401,6 +399,9 @@ func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
 			validationErr,
 		)
 		require.ErrorIs(t, lastErr, chain.ErrRollbackExceedsSecurityParam)
+		// require.ErrorIs above fails the test on a nil lastErr, which nilaway
+		// does not model.
+		//nolint:nilaway // non-nil per the require.ErrorIs above
 		seenTargets[lastErr.Error()] = struct{}{}
 		if errors.Is(lastErr, errHaltLedgerPipeline) {
 			halted = true
@@ -445,6 +446,9 @@ func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
 	)
 	require.Greater(
 		t,
+		// maxAttempts is a positive constant, so the loop above appended at
+		// least one tip; nilaway does not reason about the loop bound.
+		//nolint:nilaway // the loop above appends at least one entry
 		chainTips[len(chainTips)-1],
 		chainTips[0],
 		"the fork must extend while the applied ledger tip stays pinned",
