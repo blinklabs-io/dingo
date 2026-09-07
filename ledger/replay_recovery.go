@@ -412,6 +412,9 @@ func isDeterministicTxValidationError(err error) bool {
 	}
 	if missing, ok := errors.AsType[lcommon.MissingRedeemerForScriptError](err); ok {
 		switch missing.Tag {
+		case lcommon.RedeemerTagSpend:
+			// Spending errors can be combined with state-dependent withdrawal
+			// mismatches, so continue to the shared mismatch classification.
 		case lcommon.RedeemerTagMint,
 			lcommon.RedeemerTagCert,
 			lcommon.RedeemerTagReward,
@@ -419,8 +422,6 @@ func isDeterministicTxValidationError(err error) bool {
 			lcommon.RedeemerTagProposing,
 			lcommon.RedeemerTagGuarding:
 			return true
-		default:
-			return false
 		}
 	}
 	if isRewardWithdrawalMismatch(err) {
