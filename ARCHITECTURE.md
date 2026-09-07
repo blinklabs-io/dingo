@@ -3116,10 +3116,12 @@ and go stake are all zero are omitted; without a pool filter, the result
 contains the union of pools present in those snapshots and the corresponding
 totals.
 
-Query paths that retain database work per resolved item are bounded by
-`ledger.MaxLocalStateQueryItems` (currently 1000). This applies to
-`GetDRepState` and `GetStakeDelegDeposits`. Explicit oversized filters are
-rejected before database or consensus-state access. The empty `GetDRepState`
+Credential filters are bounded by `ledger.MaxLocalStateQueryItems` (currently
+1000) for `GetDRepState`, `GetStakeDelegDeposits`,
+`GetFilteredDelegationsAndRewardAccounts`, and `GetFilteredVoteDelegatees`.
+Explicit oversized filters, including duplicate entries, are rejected before
+database or consensus-state access. Accepted results are never truncated.
+The empty `GetDRepState`
 form remains unrestricted: it loads active DReps once and obtains their
 delegators through chunked account reads instead of one read per DRep.
 `allDRepDelegators` (`ledger/queries.go`) additionally hydrates those
@@ -3131,11 +3133,12 @@ temporary hydrated-`Account`-row memory — the `GetAccountsByCredential`
 result map, the larger share of retained memory since it holds full rows
 rather than the two fields (`Drep`, `DrepType`) actually read — is bounded
 to the batch size instead of the active-account count. Filtered
-`GetStakeSnapshots` and
-`GetFilteredVoteDelegatees` likewise use existing batch database operations,
-removing their per-item read
-amplification without a client-visible item limit. Existing result
-ordering and partial-result behavior remain unchanged.
+`GetStakeSnapshots` uses existing batch database operations without a
+client-visible item limit. `GetFilteredVoteDelegatees` and
+`GetFilteredDelegationsAndRewardAccounts` retain their batch database reads
+within the credential-filter limit, bounding temporary account maps as well
+as query work. Existing result ordering and unknown/inactive credential
+filtering remain unchanged.
 
 Both the empty `GetDRepState` form and `GetFilteredVoteDelegatees` batch
 through `MetadataStore.GetAccountsByCredential`, which groups the requested
