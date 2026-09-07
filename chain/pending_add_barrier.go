@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // pendingAddDrainTimeout bounds how long a rollback waits for block adds whose
@@ -72,8 +74,20 @@ type pendingAddBarrier struct {
 	// callback releases all of them at once. drained is closed when pending
 	// empties, and is nil whenever pending is empty.
 	mu      sync.Mutex
-	pending map[*database.Txn]struct{}
+	pending map[*database.Txn][]callerTxnAdd
 	drained chan struct{}
+}
+
+// callerTxnAdd records the chain state immediately before one block was added
+// through a caller-owned transaction. If that transaction aborts, restoring
+// the last compatible snapshot keeps the in-memory tip from naming a block
+// that the store never committed.
+type callerTxnAdd struct {
+	tip        ochainsync.Tip
+	tipIndex   uint64
+	generation uint64
+	headers    []queuedHeader
+	blocks     []ocommon.Point
 }
 
 // holds reports whether txn is currently recorded as carrying an in-flight add.
@@ -96,13 +110,27 @@ func (b *pendingAddBarrier) hold(txn *database.Txn) bool {
 		return false
 	}
 	if b.pending == nil {
-		b.pending = make(map[*database.Txn]struct{})
+		b.pending = make(map[*database.Txn][]callerTxnAdd)
 	}
 	if len(b.pending) == 0 {
 		b.drained = make(chan struct{})
 	}
-	b.pending[txn] = struct{}{}
+	b.pending[txn] = nil
 	return true
+}
+
+func (b *pendingAddBarrier) record(txn *database.Txn, add callerTxnAdd) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok := b.pending[txn]; ok {
+		b.pending[txn] = append(b.pending[txn], add)
+	}
+}
+
+func (b *pendingAddBarrier) adds(txn *database.Txn) []callerTxnAdd {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]callerTxnAdd(nil), b.pending[txn]...)
 }
 
 // release drops txn's hold. A release for a transaction that holds nothing is a
@@ -181,9 +209,58 @@ func (c *Chain) beginCallerTxnAdd(txn *database.Txn) func() {
 	}
 	c.batchCommitMutex.RLock()
 	if c.pendingAdds.hold(txn) {
-		txn.OnFinish(func() { c.pendingAdds.release(txn) })
+		txn.OnFinish(func() { c.finishCallerTxnAdd(txn) })
 	}
 	return c.batchCommitMutex.RUnlock
+}
+
+// recordCallerTxnAdd saves the pre-add chain state. The caller must hold
+// c.mutex, and must have begun the caller-transaction barrier already.
+func (c *Chain) recordCallerTxnAdd(txn *database.Txn) {
+	if txn == nil || !c.persistent {
+		return
+	}
+	c.pendingAdds.record(txn, callerTxnAdd{
+		tip:        c.currentTip,
+		tipIndex:   c.tipBlockIndex,
+		generation: c.mutationGeneration,
+		headers:    append([]queuedHeader(nil), c.headers...),
+	})
+}
+
+// finishCallerTxnAdd releases the barrier and restores state for an aborted
+// caller transaction. Restoration is conditional: another chain mutation may
+// have advanced the tip after this add, in which case overwriting it would
+// resurrect a state that no longer describes the store.
+func (c *Chain) finishCallerTxnAdd(txn *database.Txn) {
+	adds := c.pendingAdds.adds(txn)
+	if txn.IsCommitted() || len(adds) == 0 {
+		c.pendingAdds.release(txn)
+		return
+	}
+	c.mutex.Lock()
+	for i := len(adds) - 1; i >= 0; i-- {
+		add := adds[i]
+		if c.tipBlockIndex != add.tipIndex+1 || c.mutationGeneration != add.generation+1 {
+			slog.Default().Error(
+				"skipped in-memory restore after caller transaction rollback: chain moved under the add",
+				"component", "chain",
+				"chain_id", c.id,
+				"add_tip_block_index", add.tipIndex+1,
+				"tip_block_index", c.tipBlockIndex,
+			)
+			break
+		}
+		c.currentTip = add.tip
+		c.tipBlockIndex = add.tipIndex
+		c.mutationGeneration = add.generation
+		c.headers = add.headers
+		if !c.persistent {
+			c.blocks = add.blocks
+		}
+	}
+	c.mutex.Unlock()
+	c.pendingAdds.release(txn)
 }
 
 // awaitPendingCallerAdds waits for the adds whose store write is still in a

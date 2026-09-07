@@ -420,6 +420,7 @@ func (c *Chain) addBlockInternal(
 	// We get a write lock on the manager to cover the integrity checks and adding the block below
 	c.manager.mutex.Lock()
 	defer c.manager.mutex.Unlock()
+	c.recordCallerTxnAdd(txn)
 	// Verify chain integrity
 	if err := c.reconcile(); err != nil {
 		return event.Event{}, fmt.Errorf("reconcile chain: %w", err)

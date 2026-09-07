@@ -280,6 +280,15 @@ func (t *Txn) IsReadWrite() bool {
 	return t.readWrite
 }
 
+// IsCommitted reports whether this transaction reached a successful commit.
+// It is safe to call from an OnFinish callback, which runs after the
+// transaction lock has been released.
+func (t *Txn) IsCommitted() bool {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+	return t.committed
+}
+
 // AfterCommit registers fn to run after this transaction commits durably.
 // Callbacks run in registration order, once, only on a successful Commit; a
 // rollback or a failed commit never fires them. Use it for side effects that

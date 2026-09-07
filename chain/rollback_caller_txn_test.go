@@ -168,11 +168,17 @@ func TestRollbackResumesWhenCallerTransactionRollsBack(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- c.Rollback(rollbackPoint()) }()
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("rollback after caller transaction rollback: %v", err)
+		}
 	case <-time.After(15 * time.Second):
 		t.Fatal(
 			"rollback did not resume after the caller transaction rolled back: " +
 				"the barrier is released only on commit",
 		)
+	}
+	if tip := c.Tip(); tip.Point.Slot != testBlocks[2].SlotNumber() {
+		t.Fatalf("unexpected tip after rollback of caller transaction: %+v", tip)
 	}
 }
