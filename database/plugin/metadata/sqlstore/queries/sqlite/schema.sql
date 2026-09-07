@@ -192,6 +192,29 @@ CREATE TABLE reward_snapshot (
     UNIQUE (epoch, snapshot_type)
 );
 
+CREATE TABLE reward_seed_failure (
+    epoch INTEGER NOT NULL,
+    snapshot_type TEXT NOT NULL,
+    failure_reason TEXT NOT NULL,
+    captured_slot INTEGER NOT NULL,
+    PRIMARY KEY (epoch, snapshot_type)
+);
+
+CREATE TABLE imported_pool_block_count (
+    epoch INTEGER NOT NULL,
+    pool_key_hash BLOB NOT NULL,
+    blocks_produced INTEGER NOT NULL,
+    captured_slot INTEGER NOT NULL,
+    PRIMARY KEY (epoch, pool_key_hash)
+);
+
+CREATE TABLE imported_epoch_block_total (
+    epoch INTEGER NOT NULL,
+    total_blocks INTEGER NOT NULL,
+    captured_slot INTEGER NOT NULL,
+    PRIMARY KEY (epoch)
+);
+
 CREATE TABLE reward_pool_input (
     margin TEXT,
     pool_key_hash BLOB NOT NULL,
