@@ -157,6 +157,9 @@ type Querier interface {
 	GetUtxoIDByRef(ctx context.Context, arg GetUtxoIDByRefParams) (int64, error)
 	GetUtxoIncludingSpent(ctx context.Context, arg GetUtxoIncludingSpentParams) (Utxo, error)
 	GetUtxoRefsBySlot(ctx context.Context, addedSlot sql.NullInt64) ([]GetUtxoRefsBySlotRow, error)
+	// Order by added_slot before id so the sort is the reverse of
+	// idx_utxo_added_slot's own order; ordering by id alone costs a full table
+	// scan. See the Store wrapper for the full rationale.
 	GetUtxosAddedAfterSlot(ctx context.Context, addedSlot sql.NullInt64) ([]Utxo, error)
 	GetUtxosDeletedBeforeSlot(ctx context.Context, arg GetUtxosDeletedBeforeSlotParams) ([]Utxo, error)
 	ImportAccount(ctx context.Context, arg ImportAccountParams) (int64, error)

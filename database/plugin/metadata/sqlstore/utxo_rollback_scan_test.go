@@ -18,6 +18,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -453,6 +455,233 @@ func BenchmarkRollbackStakeRefQueries(b *testing.B) {
 						rolledBackFrom,
 					); err != nil {
 						b.Fatal(err)
+					}
+				}
+			})
+		}
+	}
+}
+
+// namedQueryFromSource returns the body of a named sqlc query, read from the
+// .sql file sqlc generates the store from. Reading the shipped source rather
+// than restating the SQL in the test means the plan assertions below cannot
+// drift away from the statement the node actually runs.
+func namedQueryFromSource(tb testing.TB, name string) string {
+	tb.Helper()
+	source, err := os.ReadFile(
+		filepath.Join("queries", "sqlite", "operational.sql"),
+	)
+	require.NoError(tb, err)
+	marker := "-- name: " + name + " :"
+	start := strings.Index(string(source), marker)
+	require.GreaterOrEqual(tb, start, 0, "query %q not found in source", name)
+	// Skip the "-- name:" line itself, then take everything up to the
+	// statement terminator.
+	body := string(source)[start:]
+	body = body[strings.Index(body, "\n")+1:]
+	end := strings.Index(body, ";")
+	require.GreaterOrEqual(tb, end, 0, "query %q is unterminated", name)
+	return strings.TrimSpace(body[:end])
+}
+
+// withOrderByIDDesc rewrites a statement's trailing ORDER BY to the
+// "ORDER BY id DESC" GetUtxosAddedAfterSlot used to carry, so the tests can
+// show in the same run that ordering by the rowid alone is what costs the
+// table scan. It is deliberately not a check on the shipped text: the plan
+// assertion is the contract, so reverting the statement has to fail on the
+// plan, not on a string comparison.
+func withOrderByIDDesc(tb testing.TB, query string) string {
+	tb.Helper()
+	idx := strings.LastIndex(query, "ORDER BY")
+	require.GreaterOrEqual(tb, idx, 0, "statement has no ORDER BY: %s", query)
+	return query[:idx] + "ORDER BY id DESC"
+}
+
+// TestGetUtxosAddedAfterSlotUsesSlotIndex pins the SQLite query plan of the
+// other utxo statement the rollback sweep runs: UtxosDeleteRolledback calls
+// GetUtxosAddedAfterSlot to collect the blobs to drop, immediately before
+// DeleteUtxosAfterSlot.
+//
+// The statement used to end in "ORDER BY id DESC". id is the rowid, so SQLite
+// produced that order by walking the table backwards -- a full SCAN, and a
+// descending one, so readahead does not help -- instead of range-searching
+// idx_utxo_added_slot. Like the DISTINCT sweep queries, the cost then tracks
+// the size of the utxo table rather than the depth of the rollback.
+//
+// Ordering by added_slot first makes the requested order the reverse of
+// idx_utxo_added_slot's own order ((added_slot, rowid), and id is the rowid),
+// so the range search serves it directly with no sorter -- with or without
+// planner statistics, which is what the two sub-tests check.
+func TestGetUtxosAddedAfterSlotUsesSlotIndex(t *testing.T) {
+	t.Parallel()
+	const rolledBackFrom = int64(2_656_808)
+	query := namedQueryFromSource(t, "GetUtxosAddedAfterSlot")
+	legacyQuery := withOrderByIDDesc(t, query)
+
+	for _, stats := range []struct {
+		name    string
+		analyze bool
+	}{
+		{name: "without_planner_stats"},
+		{name: "with_planner_stats", analyze: true},
+	} {
+		t.Run(stats.name, func(t *testing.T) {
+			t.Parallel()
+			store := newMigratedSQLiteStore(t)
+			seedRollbackUtxos(t, store, 20_000, 64, rolledBackFrom, 40)
+			if stats.analyze {
+				analyzeStore(t, store)
+			}
+
+			plan := queryPlan(t, store.writeDB, query, rolledBackFrom)
+			legacyPlan := queryPlan(
+				t,
+				store.writeDB,
+				legacyQuery,
+				rolledBackFrom,
+			)
+			t.Logf("plan ordered by added_slot: %s", plan)
+			t.Logf("plan ordered by id:         %s", legacyPlan)
+
+			require.Contains(
+				t,
+				plan,
+				"SEARCH utxo USING INDEX idx_utxo_added_slot (added_slot>?)",
+				"blob-collect query must range-search the slot index: %s",
+				plan,
+			)
+			require.NotContains(
+				t,
+				plan,
+				"SCAN",
+				"blob-collect query must not scan the table: %s",
+				plan,
+			)
+			require.NotContains(
+				t,
+				plan,
+				"TEMP B-TREE",
+				"the requested order is the index order, so no sorter is "+
+					"needed: %s",
+				plan,
+			)
+		})
+	}
+}
+
+// TestGetUtxosAddedAfterSlotReturnsSameRows proves the reordering changed only
+// the order, not the set: the shipped statement returns exactly the ids the
+// old "ORDER BY id DESC" statement returned, and returns them newest first.
+func TestGetUtxosAddedAfterSlotReturnsSameRows(t *testing.T) {
+	t.Parallel()
+	const rolledBackFrom = int64(2_656_808)
+	store := newMigratedSQLiteStore(t)
+	seedRollbackUtxos(t, store, 2_000, 16, rolledBackFrom, 60)
+
+	query := namedQueryFromSource(t, "GetUtxosAddedAfterSlot")
+	legacyQuery := withOrderByIDDesc(t, query)
+
+	type row struct {
+		id        int64
+		addedSlot int64
+	}
+	read := func(q string) []row {
+		rows, err := store.writeDB.Query(q, rolledBackFrom)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, rows.Close()) }()
+		cols, err := rows.Columns()
+		require.NoError(t, err)
+		idIdx, slotIdx := -1, -1
+		for i, c := range cols {
+			switch c {
+			case "id":
+				idIdx = i
+			case "added_slot":
+				slotIdx = i
+			}
+		}
+		require.GreaterOrEqual(t, idIdx, 0)
+		require.GreaterOrEqual(t, slotIdx, 0)
+		var out []row
+		for rows.Next() {
+			cells := make([]any, len(cols))
+			for i := range cells {
+				cells[i] = new(sql.RawBytes)
+			}
+			var id, slot sql.NullInt64
+			cells[idIdx] = &id
+			cells[slotIdx] = &slot
+			require.NoError(t, rows.Scan(cells...))
+			out = append(out, row{id: id.Int64, addedSlot: slot.Int64})
+		}
+		require.NoError(t, rows.Err())
+		return out
+	}
+
+	got := read(query)
+	legacy := read(legacyQuery)
+	require.NotEmpty(t, got, "fixture must return rows above the slot")
+	require.ElementsMatch(
+		t,
+		legacy,
+		got,
+		"reordering must not change which rows are returned",
+	)
+
+	for i := 1; i < len(got); i++ {
+		prev, cur := got[i-1], got[i]
+		require.True(
+			t,
+			prev.addedSlot > cur.addedSlot ||
+				(prev.addedSlot == cur.addedSlot && prev.id > cur.id),
+			"rows must be newest first: %+v before %+v",
+			prev,
+			cur,
+		)
+		require.Greater(
+			t,
+			cur.addedSlot,
+			rolledBackFrom,
+			"only rows above the rollback point may be returned",
+		)
+	}
+}
+
+// BenchmarkGetUtxosAddedAfterSlot measures the blob-collect statement in both
+// forms against the same seeded table, the timing counterpart to the plan
+// assertion above.
+func BenchmarkGetUtxosAddedAfterSlot(b *testing.B) {
+	for _, n := range []int{100_000, 500_000} {
+		const rolledBackFrom = int64(4_000_000)
+		store := newMigratedSQLiteStore(b)
+		seedRollbackUtxos(b, store, n, 512, rolledBackFrom, 40)
+		query := namedQueryFromSource(b, "GetUtxosAddedAfterSlot")
+		legacyQuery := withOrderByIDDesc(b, query)
+		for _, tc := range []struct {
+			name  string
+			query string
+		}{
+			{name: "order_by_added_slot", query: query},
+			{name: "order_by_id", query: legacyQuery},
+		} {
+			b.Run(fmt.Sprintf("n=%d/%s", n, tc.name), func(b *testing.B) {
+				for b.Loop() {
+					rows, err := store.writeDB.Query(tc.query, rolledBackFrom)
+					if err != nil {
+						b.Fatal(err)
+					}
+					count := 0
+					for rows.Next() {
+						count++
+					}
+					if err := rows.Err(); err != nil {
+						b.Fatal(err)
+					}
+					if err := rows.Close(); err != nil {
+						b.Fatal(err)
+					}
+					if count != 40 {
+						b.Fatalf("got %d rows, want 40", count)
 					}
 				}
 			})

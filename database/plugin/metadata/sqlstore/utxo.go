@@ -885,6 +885,22 @@ func dedupeUtxoIDs(ids []models.UtxoId) []models.UtxoId {
 	return ret
 }
 
+// GetUtxosAddedAfterSlot returns every UTxO added after slot, newest first.
+//
+// The rollback sweep calls this (through UtxosDeleteRolledback) immediately
+// before DeleteUtxosAfterSlot, to hand the blob store the objects it has to
+// drop. The statement used to end in "ORDER BY id DESC". id is the rowid, so
+// SQLite satisfied that by walking the table backwards -- a full SCAN, with
+// readahead defeated by the descending direction -- rather than
+// range-searching idx_utxo_added_slot, and the sweep read the entire utxo
+// table to return the handful of rows a rollback actually touches.
+//
+// Ordering by added_slot first fixes it without giving up a deterministic
+// order: idx_utxo_added_slot is (added_slot, rowid) and id is the rowid, so
+// "ORDER BY added_slot DESC, id DESC" is exactly that index's reverse order.
+// SQLite walks the matching range backwards and needs no sorter, at every
+// table size and whether or not ANALYZE has run.
+// TestGetUtxosAddedAfterSlotUsesSlotIndex pins the plan.
 func (s *Store) GetUtxosAddedAfterSlot(
 	slot uint64,
 	txn types.Txn,
