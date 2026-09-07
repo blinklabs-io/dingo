@@ -2113,10 +2113,14 @@ func ParseGovState(
 	// below; a truncated record simply leaves EnactCommitteeSet false and
 	// the corroboration unavailable.
 	if len(fields) < 7 {
-		warnings = append(warnings, fmt.Errorf(
+		result.PulsingStateParseError = fmt.Errorf(
 			"GovState has %d elements, expected 7; "+
 				"cgsDRepPulsingState is absent",
 			len(fields),
+		)
+		warnings = append(warnings, fmt.Errorf(
+			"parsing drep pulsing state: %w",
+			result.PulsingStateParseError,
 		))
 	} else {
 		pulsing, err := parseDRepPulsingState(fields[6])
@@ -2162,7 +2166,7 @@ func parseConstitution(data []byte) (
 			"decoding constitution: %w", err,
 		)
 	}
-	if len(fields) < 2 {
+	if len(fields) != 2 {
 		return nil, fmt.Errorf(
 			"constitution has %d elements, expected 2",
 			len(fields),
@@ -2468,7 +2472,7 @@ func parseDRepPulsingState(
 		)
 		return result, nil
 	}
-	if len(ratifyState) < 2 {
+	if len(ratifyState) != 4 {
 		result.CommitteeErr = fmt.Errorf(
 			"RatifyState has %d elements, expected 4",
 			len(ratifyState),
@@ -2483,9 +2487,10 @@ func parseDRepPulsingState(
 		)
 		return result, nil
 	}
-	if len(enactFields) == 0 {
-		result.CommitteeErr = errors.New(
-			"RatifyState enact state has 0 elements, expected 7",
+	if len(enactFields) != 7 {
+		result.CommitteeErr = fmt.Errorf(
+			"RatifyState enact state has %d elements, expected 7",
+			len(enactFields),
 		)
 		return result, nil
 	}

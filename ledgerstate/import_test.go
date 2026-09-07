@@ -1635,6 +1635,10 @@ func testGovStateData(
 			},
 			nil,
 		},
+		map[uint64]uint64{},
+		map[uint64]uint64{},
+		map[uint64]uint64{},
+		drepPulsingStateWithEnactCommittee(t, []any{}),
 	}
 	data, err := cbor.Encode(govState)
 	require.NoError(t, err)

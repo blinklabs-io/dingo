@@ -35,8 +35,8 @@ import (
 // committeePresent: true for a 1-element StrictMaybe Committee
 // wrapper with a 2/3 quorum and empty members; false for SNothing.
 //
-// The shape mirrors testGovStateData but exposes the roots so
-// tests can assert seeding behavior end to end.
+// The shape mirrors Conway's seven-field GovState encoding but exposes the
+// roots so tests can assert seeding behavior end to end.
 func govStateWithRoots(
 	t *testing.T,
 	roots [4]*ParsedGovActionId,
@@ -89,15 +89,18 @@ func govStateWithRootsAndProposals(
 			nil,
 		},
 	}
-	if drepPulsingState != nil {
-		govState = append(
-			govState,
-			map[uint64]uint64{},
-			map[uint64]uint64{},
-			map[uint64]uint64{},
-			drepPulsingState,
+	if drepPulsingState == nil {
+		drepPulsingState = drepPulsingStateWithEnactCommittee(
+			t, committee,
 		)
 	}
+	govState = append(
+		govState,
+		map[uint64]uint64{},
+		map[uint64]uint64{},
+		map[uint64]uint64{},
+		drepPulsingState,
+	)
 	data, err := cbor.Encode(govState)
 	require.NoError(t, err)
 	return data
