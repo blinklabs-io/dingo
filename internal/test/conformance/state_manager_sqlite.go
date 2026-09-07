@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"strings"
 
@@ -35,6 +36,36 @@ const sqliteMetadataFileName = "metadata.sqlite"
 // sqliteMetadataPath returns the metadata database path inside dataDir.
 func sqliteMetadataPath(dataDir string) string {
 	return filepath.Join(dataDir, sqliteMetadataFileName)
+}
+
+// sqliteResetFileURI converts an OS path to the file URI form SQLite expects.
+// It mirrors sqliteFileURI in database/plugin/metadata/sqlite, which is
+// unexported; the resetter must address exactly the file the metadata store
+// opened, so the two constructions have to agree.
+//
+// Three things a bare "file:"+ToSlash concatenation gets wrong, all of which
+// this package would hit: a relative path is not resolved, a Windows volume
+// needs the leading slash that makes "C:/x" into "/C:/x" (the untagged
+// Windows CI job builds this package), and a path containing a URI-reserved
+// character -- a '?' or a space in TMPDIR -- would otherwise run into the
+// '?'-terminated pragma string and misparse.
+//
+// TestSqliteResetPreservesMigrationLedger is the cross-platform guard that
+// this really does open the store's own file: it reads schema_migrations back
+// through the resetter's connection, which only exists if both addressed the
+// same database.
+func sqliteResetFileURI(databasePath string) string {
+	if !filepath.IsAbs(databasePath) {
+		if absolutePath, err := filepath.Abs(databasePath); err == nil {
+			databasePath = absolutePath
+		}
+	}
+	path := filepath.ToSlash(databasePath)
+	if filepath.VolumeName(databasePath) != "" &&
+		!strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return (&url.URL{Scheme: "file", Path: path}).String()
 }
 
 // newSqliteResetter builds the wipeMetadata hook for the local SQLite
@@ -67,7 +98,7 @@ func newSqliteResetter(databasePath string) (*backendResetter, error) {
 	// busy_timeout leads because github.com/glebarez/go-sqlite applies
 	// _pragma options in order and anything ahead of it runs with no busy
 	// handler installed.
-	dsn := "file:" + filepath.ToSlash(databasePath) +
+	dsn := sqliteResetFileURI(databasePath) +
 		"?_pragma=busy_timeout(30000)" +
 		"&_pragma=foreign_keys(0)"
 	db, err := sql.Open("sqlite", dsn)

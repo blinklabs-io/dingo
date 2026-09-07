@@ -66,8 +66,29 @@ func TestSqliteResetterTruncatesOnlyDirtyTables(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = resetter.Close() })
 
+	// Record what truncate is actually asked to empty. Row counts alone
+	// cannot show this: `clean` starts empty, so it reads 0 whether or not
+	// the resetter touched it, and a regression that emptied every table
+	// would pass on counts.
+	var truncated []string
+	inner := resetter.truncate
+	resetter.truncate = func(
+		ctx context.Context,
+		db *sql.DB,
+		qualified []string,
+	) error {
+		truncated = append(truncated, qualified...)
+		return inner(ctx, db, qualified)
+	}
+
 	require.NoError(t, resetter.reset(context.Background()))
 
+	require.Equal(
+		t,
+		[]string{`"dirty"`},
+		truncated,
+		"only the table holding rows may be truncated",
+	)
 	require.Equal(t, 0, sqliteRowCount(t, db, "dirty"))
 	require.Equal(t, 0, sqliteRowCount(t, db, "clean"))
 
@@ -164,6 +185,20 @@ func TestSqliteResetterExcludesInternalAndMigrationTables(t *testing.T) {
 	resetter, err := newSqliteResetter(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = resetter.Close() })
+
+	// Both excluded names must actually exist in this database, or
+	// NotContains below would pass for the wrong reason.
+	for _, name := range []string{"schema_migrations", "sqlite_sequence"} {
+		var found string
+		require.NoError(
+			t,
+			db.QueryRow(
+				`SELECT name FROM sqlite_master WHERE type='table' AND name=?`,
+				name,
+			).Scan(&found),
+			"precondition: %s must exist to be meaningfully excluded", name,
+		)
+	}
 
 	tables, err := resetter.cachedTables(context.Background())
 	require.NoError(t, err)

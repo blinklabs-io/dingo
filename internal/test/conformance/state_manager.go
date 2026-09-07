@@ -294,14 +294,20 @@ func (m *DingoStateManager) Reset() error {
 	//
 	// reopenBackend remains the fallback for any future backend that sets
 	// neither hook.
-	if m.wipeMetadata != nil {
-		if err := m.wipeMetadata(); err != nil {
-			return err
+	// The two hooks are checked independently: a backend that sets only one
+	// still gets that half emptied, rather than silently skipping it because
+	// its partner is nil.
+	if m.wipeMetadata != nil || m.wipeBlob != nil {
+		var errs []error
+		if m.wipeMetadata != nil {
+			errs = append(errs, m.wipeMetadata())
 		}
+		// Runs even when wipeMetadata failed: leaving the blob store
+		// populated as well would compound a half-cleared backend.
 		if m.wipeBlob != nil {
-			return m.wipeBlob()
+			errs = append(errs, m.wipeBlob())
 		}
-		return nil
+		return errors.Join(errs...)
 	}
 	return m.reopenBackend()
 }
