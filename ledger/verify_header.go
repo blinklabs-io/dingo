@@ -1398,25 +1398,47 @@ func (ls *LedgerState) leaderEligibilityStakeWithCache(
 	if ls.shouldSkipPostMithrilMarkEligibilityWithCache(
 		snapshot, snapshotEpoch, epochCache,
 	) {
-		if ls.config.Logger != nil {
-			ls.config.Logger.Warn(
-				"skipping leader eligibility check: post-Mithril mark snapshot was reconstructed after the target boundary",
-				"slot",
-				block.SlotNumber(),
-				"epoch",
-				epochId,
-				"snapshot_epoch",
-				snapshotEpoch,
-				"snapshot_type",
-				snapshotType,
-				"captured_slot",
-				snapshot.CapturedSlot,
-				"component",
-				"ledger",
-			)
+		// The reconstructed row makes a hard threshold *comparison* unsafe,
+		// but that means eligibility is unevaluable, not automatically
+		// satisfied. Mirror the zero-active-stake and missing-coefficient
+		// guards above: only the explicitly selected prototype profile may
+		// trust the block anyway; a standard profile must reject (wrapped so
+		// header verification running ahead of the ledger apply cursor
+		// defers instead).
+		if ls.config.SkipLeaderStakeThresholdCheck {
+			if ls.config.Logger != nil {
+				ls.config.Logger.Warn(
+					"skipping leader eligibility check: post-Mithril mark snapshot was reconstructed after the target boundary (prototype profile)",
+					"slot",
+					block.SlotNumber(),
+					"epoch",
+					epochId,
+					"snapshot_epoch",
+					snapshotEpoch,
+					"snapshot_type",
+					snapshotType,
+					"captured_slot",
+					snapshot.CapturedSlot,
+					"component",
+					"ledger",
+				)
+			}
+			return uint64(snapshot.TotalStake), 0, snapshotEpoch, snapshotType,
+				true, nil
 		}
-		return uint64(snapshot.TotalStake), 0, snapshotEpoch, snapshotType,
-			true, nil
+		return 0, 0, snapshotEpoch, snapshotType, false,
+			fmt.Errorf(
+				"%w: block header verification rejected at slot %d: "+
+					"post-Mithril mark snapshot for epoch %d was "+
+					"reconstructed after the target boundary "+
+					"(captured slot %d); leader eligibility for "+
+					"producer pool %x cannot be evaluated",
+				errLeaderStakeSnapshotUnavailable,
+				block.SlotNumber(),
+				snapshotEpoch,
+				snapshot.CapturedSlot,
+				poolKeyHash[:],
+			)
 	}
 	totalStake, err := ls.db.Metadata().GetTotalActiveStake(
 		snapshotEpoch,

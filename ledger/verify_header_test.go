@@ -2863,7 +2863,18 @@ func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkChecks(
 	assert.NotContains(t, logBuf.String(), "skipping leader eligibility check")
 }
 
-func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkSkips(
+// TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkRejectsStandardProfile
+// verifies that a standard profile does not silently trust a block whose
+// eligibility could not be evaluated. The startup fallback derives historical
+// rows from current live state and stamps them with the current epoch start;
+// unlike a certified imported row, this capture is neither the target
+// boundary nor the Mithril anchor, so a hard threshold *comparison* against it
+// is unsafe. That makes eligibility unevaluable, not automatically satisfied:
+// only the explicitly selected prototype profile (SkipLeaderStakeThresholdCheck)
+// may trust the block anyway (see the Prototype sibling below); a standard
+// profile must reject, deferring while the ledger apply cursor is still
+// catching up.
+func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkRejectsStandardProfile(
 	t *testing.T,
 ) {
 	tb := createTestBlock(t, [32]byte{40}, 0, tamperNone)
@@ -2881,10 +2892,6 @@ func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkSkips(
 	// cache generation, not the mutable field.
 	ls.publishSnapshotsLocked()
 
-	// The startup fallback derives historical rows from current live state and
-	// stamps them with the current epoch start. Unlike a certified imported
-	// row, this capture is neither the target boundary nor the Mithril anchor,
-	// so hard threshold rejection remains unsafe.
 	reconstructedCaptureSlot := ls.epochCache[1].StartSlot
 	poolKeyHash := tb.block.IssuerVkey().Hash()
 	seedPoolStakeSnapshotOfTypeAtSlot(
@@ -2919,7 +2926,64 @@ func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkSkips(
 	require.True(t, ls.shouldSkipPostMithrilMarkEligibility(snapshot, 4))
 
 	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
-	require.NoError(t, err)
+	require.Error(
+		t,
+		err,
+		"an unevaluable reconstructed mark row must not be accepted on a standard profile",
+	)
+	assert.ErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
+	assert.NotContains(t, logBuf.String(), "skipping leader eligibility check")
+}
+
+// TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkPrototypeAccepts
+// pins the one profile that may still bypass an unevaluable reconstructed
+// mark row: the explicitly selected Musashi prototype
+// (SkipLeaderStakeThresholdCheck), mirroring the other eligibility guards'
+// Rejects/PrototypeAccepts pairs in this file.
+func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkPrototypeAccepts(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{41}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.config.SkipLeaderStakeThresholdCheck = true
+	var logBuf bytes.Buffer
+	ls.config.Logger = slog.New(slog.NewTextHandler(&logBuf, nil))
+	ls.epochCache = []models.Epoch{
+		{EpochId: 3, StartSlot: 300, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{EpochId: 4, StartSlot: 400, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{EpochId: 5, StartSlot: 500, LengthInSlots: 100, Nonce: tb.epochNonce},
+	}
+	ls.mithrilLedgerSlot = ls.epochCache[1].StartSlot + 50
+	tb.block.slot = ls.epochCache[2].StartSlot + 50
+	ls.publishSnapshotsLocked()
+
+	reconstructedCaptureSlot := ls.epochCache[1].StartSlot
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshotOfTypeAtSlot(
+		t,
+		db,
+		4,
+		models.PoolStakeSnapshotTypeMark,
+		poolKeyHash[:],
+		1,
+		0,
+		reconstructedCaptureSlot,
+	)
+	dummyHash := make([]byte, 28)
+	dummyHash[0] = 0xFF
+	seedPoolStakeSnapshotOfTypeAtSlot(
+		t,
+		db,
+		4,
+		models.PoolStakeSnapshotTypeMark,
+		dummyHash,
+		1_000_000_000_000_000_000,
+		0,
+		reconstructedCaptureSlot,
+	)
+
+	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	assert.NoError(t, err, "prototype profile keeps its documented bypass")
 	assert.Contains(t, logBuf.String(), "skipping leader eligibility check")
 }
 
