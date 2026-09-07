@@ -1008,6 +1008,18 @@ func TestLiveTruncateCancelsInsteadOfResumingWhenStorageDrainUnconfirmed(
 	require.ErrorContains(t, err, "close storage")
 	require.ErrorContains(t, err, "could not confirm")
 
+	// A cancelled live operation is followed by the node's normal shutdown
+	// path. That path must preserve the failed LedgerState.Close result;
+	// otherwise its idempotent second Close reports success and shutdown
+	// closes storage underneath the still-running worker above.
+	shutdownErr := n.Stop()
+	require.Error(t, shutdownErr)
+	require.ErrorContains(
+		t,
+		shutdownErr,
+		"database close skipped: ledger state drain unconfirmed",
+	)
+
 	// The node must have been brought down for a supervised restart, not
 	// resumed against the same data directory the still-running worker
 	// above may still be using.

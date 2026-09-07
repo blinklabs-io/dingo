@@ -229,6 +229,30 @@ func TestDerivedRewardInputsReportsAllIncompleteReferencedPools(t *testing.T) {
 	require.ErrorContains(t, err, "397411504 lovelace delegated stake")
 }
 
+func TestDerivedRewardInputsBoundsIncompletePoolDiagnostic(t *testing.T) {
+	const poolCount = maxRewardSeedFailurePools + 8
+	snapshot := &ParsedSnapShot{
+		Stake:       make(map[string]uint64, poolCount),
+		Delegations: make(map[string][]byte, poolCount),
+	}
+	params := make(map[string]*ParsedPool, poolCount)
+	for i := 0; i < poolCount; i++ {
+		credential := hash28(byte(i + 1))
+		poolKey := hash28(byte(i + 100))
+		credentialHex := hex.EncodeToString(credential)
+		poolHex := hex.EncodeToString(poolKey)
+		snapshot.Stake[credentialHex] = 1
+		snapshot.Delegations[credentialHex] = poolKey
+		params[poolHex] = &ParsedPool{PoolKeyHash: poolKey}
+	}
+
+	bundle := deriveRewardInputs(snapshot, params, 1, 1, 0)
+	err := bundle.validate()
+	require.Error(t, err)
+	require.ErrorContains(t, err, "additional pools omitted")
+	require.LessOrEqual(t, len(err.Error()), 4_096)
+}
+
 func scopedRewardTestPool(poolByte, rewardByte byte) *ParsedPool {
 	return &ParsedPool{
 		PoolKeyHash:   hash28(poolByte),

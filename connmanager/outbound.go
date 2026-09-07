@@ -56,7 +56,13 @@ func (c *ConnectionManager) CreateOutboundConn(
 		"establishing TCP connection to: "+address,
 		"role", "client",
 	)
-	tmpConn, err := dialer.DialContext(ctx, "tcp", address)
+	var tmpConn net.Conn
+	var err error
+	if c.config.OutboundDialer != nil {
+		tmpConn, err = c.config.OutboundDialer(ctx, address)
+	} else {
+		tmpConn, err = dialer.DialContext(ctx, "tcp", address)
+	}
 	if err != nil {
 		return nil, err
 	}

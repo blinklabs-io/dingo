@@ -15,6 +15,7 @@
 package forging
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -77,6 +78,8 @@ type BlockForger struct {
 	blockForged      BlockForgedObserver
 	slotClock        SlotClockProvider
 	slotDuration     time.Duration
+	opCertLedgerView LedgerView
+	eraParams        ProtocolParamsProvider
 
 	// Slot battle detection
 	slotTracker *SlotTracker
@@ -291,6 +294,20 @@ type SlotClockProvider interface {
 	UpstreamSyncStatus() (targetSlot uint64, active bool)
 }
 
+// ChainTipHashProvider is an optional extension of SlotClockProvider.
+// When the wired slot clock implements it, the forger can identify the
+// block sitting at the chain tip by hash instead of inferring ownership
+// of a slot from the forge fence alone.
+//
+// It is deliberately a separate, optional interface so that existing
+// SlotClockProvider implementations outside this repository keep
+// compiling; a clock that does not implement it falls back to the fence.
+type ChainTipHashProvider interface {
+	// ChainTipHash returns the block hash of the current chain tip, or
+	// nil when the chain is empty or the hash is unavailable.
+	ChainTipHash() []byte
+}
+
 // ForgerConfig holds configuration for the block forger.
 type ForgerConfig struct {
 	Mode         Mode
@@ -306,6 +323,25 @@ type ForgerConfig struct {
 	ConfirmedTxs     ConfirmedTxRemover
 	BlockForged      BlockForgedObserver
 	SlotClock        SlotClockProvider
+
+	// OpCertLedgerView supplies the highest OpCert issue-number counter the
+	// ledger has observed on chain for this pool. When non-nil, the forge
+	// loop pre-flights the candidate counter against it using the same
+	// era-scoped rule block application enforces (see
+	// ledger/verify_opcert.go validateOpCertCounter), after leader
+	// selection but before Leios work and the forge-slot fence -- a stale
+	// or gapped counter is rejected there instead of reaching an
+	// `AddLocalBlock` call the chain would discard anyway. Nil disables
+	// the check (dev mode, embedders without ledger wiring). Requires
+	// EraParams.
+	OpCertLedgerView LedgerView
+	// EraParams supplies the era-defining protocol parameters in effect for
+	// the slot being forged, so OpCertLedgerView's counter check applies
+	// the correct era-scoped rule: TPraos (Shelley-Alonzo) accepts any
+	// forward counter movement, Praos (Babbage onward) additionally
+	// rejects one that skips ahead of the last-seen value by more than
+	// one. Required whenever OpCertLedgerView is set.
+	EraParams ProtocolParamsProvider
 
 	// ForgeFence persists the last-forged-slot fence so a restart cannot
 	// sign a second block for a slot this node already used. Nil
@@ -378,6 +414,8 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		leiosParent:      cfg.LeiosParentAnnouncementProvider,
 		blockValidator:   cfg.BlockValidator,
 		fenceStore:       cfg.ForgeFence,
+		opCertLedgerView: cfg.OpCertLedgerView,
+		eraParams:        cfg.EraParams,
 	}
 	if cfg.ForgeSyncToleranceSlots == 0 {
 		cfg.ForgeSyncToleranceSlots = forgeSyncToleranceSlots
@@ -435,6 +473,11 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		cfg.LeiosParentAnnouncementProvider == nil {
 		return nil, errors.New(
 			"leios certificate provider requires LeiosParentAnnouncementProvider",
+		)
+	}
+	if cfg.OpCertLedgerView != nil && cfg.EraParams == nil {
+		return nil, errors.New(
+			"OpCertLedgerView requires EraParams to resolve the era-scoped opcert counter rule",
 		)
 	}
 
@@ -649,10 +692,12 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 
 	tipSlot := f.slotClock.ChainTipSlot()
 
-	// Skip if a block already exists at the current slot.
-	// When tipSlot >= currentSlot, the chain already has a block at
-	// this slot (possibly from a peer). Producing another would create
-	// a competing block and fork the chain.
+	// Skip if the chain has already moved PAST the current slot.
+	// A tip beyond currentSlot means any block we produced would fork
+	// the chain below its own tip. A tip AT currentSlot is the
+	// contested case and is handled after leader selection below:
+	// ouroboros-consensus mkCurrentBlockContext declines only for GT
+	// and treats EQ as a slot battle.
 	// Count every slot check (matches cardano-node
 	// Forge.about_to_lead)
 	if f.metrics != nil {
@@ -660,33 +705,113 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		f.metrics.tipGapSlots.Set(0)
 	}
 
-	if currentSlot <= tipSlot {
+	if currentSlot < tipSlot {
 		// Detect stale data: if the tip is far ahead of the slot clock,
 		// the database likely contains chain data from a different genesis.
-		// Use subtraction (safe here since tipSlot >= currentSlot from
+		// Use subtraction (safe here since tipSlot > currentSlot from
 		// the outer check) to avoid uint64 overflow on the addition.
 		gap := tipSlot - currentSlot
 		if f.metrics != nil {
 			f.metrics.tipGapSlots.Set(float64(gap))
 		}
 		if gap > f.forgeStaleGapThresholdSlots {
-			f.logger.Error(
-				"chain tip is far ahead of slot clock; database may contain data from a different genesis",
+			// This gate also runs before leader selection, so it
+			// swallows a scheduled leader slot as silently as the
+			// skips routed through logGateSkip. The stale-genesis
+			// diagnosis stays at Error, but carry the same
+			// leader_slot marker so a lost block is still
+			// attributable. Reuse isScheduledLeaderSlot rather
+			// than repeating the schedule lookup.
+			attrs := []any{
 				"current_slot",
 				currentSlot,
 				"tip_slot",
 				tipSlot,
 				"slot_gap",
 				gap,
+			}
+			if f.isScheduledLeaderSlot(currentSlot) {
+				attrs = append(attrs, "leader_slot", true)
+			}
+			f.logger.Error(
+				"chain tip is far ahead of slot clock; database may contain data from a different genesis",
+				attrs...,
 			)
 		} else {
-			f.logger.Debug(
-				"forge skip: slot already has block",
+			f.logGateSkip(
+				currentSlot,
+				"forge skip: chain tip is ahead of the current slot",
 				"current_slot", currentSlot,
 				"tip_slot", tipSlot,
 			)
 		}
 		return nil
+	}
+
+	// The tip is at the current slot. Before treating that as a
+	// contested slot, work out whether the block sitting there is one
+	// this node produced.
+	if currentSlot == tipSlot {
+		ownership, ourHash, tipHash := f.tipBlockOwnership(currentSlot)
+		fenceCovers := f.fenceLoaded && currentSlot <= f.lastForgedSlot
+		switch {
+		case ownership == tipOwnershipOurs:
+			// The slot-aligned loop has simply re-entered a slot
+			// whose block is provably ours. Not a contested slot,
+			// and the fence would refuse it anyway.
+			f.logger.Debug(
+				"forge skip: slot already has our own block",
+				"current_slot", currentSlot,
+				"tip_slot", tipSlot,
+				"last_forged_slot", f.lastForgedSlot,
+				"matched_by", "forged_block_hash",
+			)
+			return nil
+		case ownership == tipOwnershipRival && fenceCovers:
+			// We committed to this slot and a rival's block is what
+			// the chain adopted for it. The fence still forbids
+			// forging: a second, different block for a slot whose
+			// first block may already have reached peers is
+			// equivocation, and losing a battle is not a licence to
+			// equivocate. But this is a slot battle we lost, not
+			// "the tip block is ours", and dropping it at Debug is
+			// exactly the silent loss this change exists to remove.
+			//
+			// slotBattlesTotal is deliberately NOT incremented here.
+			// Reaching this case means a block other than ours was
+			// accepted at a slot SlotTracker says we forged, and the
+			// only path that accepts a peer's block already ran
+			// LedgerState.checkSlotBattle over the same tracker
+			// (node wiring points ForgedBlockChecker at this
+			// forger's SlotTracker and SlotBattleRecorder at this
+			// forger), which found the same hash mismatch and
+			// counted the battle. chainsync owns that count;
+			// counting it again here would double it.
+			f.incCouldNotForge()
+			f.logger.Warn(
+				"slot battle lost: rival block at tip for a slot this node already forged",
+				"current_slot", currentSlot,
+				"tip_slot", tipSlot,
+				"last_forged_slot", f.lastForgedSlot,
+				"our_block_hash", hex.EncodeToString(ourHash),
+				"tip_block_hash", hex.EncodeToString(tipHash),
+			)
+			return nil
+		case fenceCovers:
+			// Ownership is inconclusive, but the fence says this
+			// node already committed to the slot, so it is not
+			// available regardless of who holds the tip.
+			f.logger.Debug(
+				"forge skip: slot already has our own block",
+				"current_slot", currentSlot,
+				"tip_slot", tipSlot,
+				"last_forged_slot", f.lastForgedSlot,
+				"matched_by", "forge_fence",
+			)
+			return nil
+		}
+		// Neither signal claims the slot: fall through and let leader
+		// selection and the contested-slot branch account for it.
 	}
 
 	// Skip if the chain is still syncing from a peer.
@@ -709,7 +834,8 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 				float64(gap),
 			)
 		}
-		f.logger.Debug(
+		f.logGateSkip(
+			currentSlot,
 			"chain syncing from peer, skipping forge",
 			"current_slot", currentSlot,
 			"tip_slot", tipSlot,
@@ -794,6 +920,33 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return nil
 	}
 
+	// Pre-flight the OpCert counter against the ledger's observed on-chain
+	// state and the era-scoped rule block application enforces (see
+	// checkOpCertSequence). This covers genesis/era context the KES-lifetime
+	// gate above does not: LatestOpCertSequence advances as blocks are
+	// applied (this node's own or a peer's for the same pool), so a key
+	// state that was fine at startup or on an earlier slot can become stale,
+	// or -- from Babbage onward -- gapped, by the time a later slot is won.
+	// Checked only for the winning slot -- after the cheap leader check --
+	// rather than on every KES-valid slot, since the check performs a real
+	// ledger read that would otherwise run regardless of whether this pool
+	// is even leader for the slot.
+	if f.opCertLedgerView != nil {
+		if err := f.checkOpCertSequence(currentSlot, generation); err != nil {
+			f.incCouldNotForge()
+			f.logger.Error(
+				"forge skip: operational certificate counter is not valid for chain state",
+				"slot",
+				currentSlot,
+				"credential_generation",
+				generation.id,
+				"error",
+				err,
+			)
+			return nil
+		}
+	}
+
 	// The credential snapshot owns its secret material, so the callback above
 	// never holds a writer-blocking lease. A reload still invalidates this
 	// attempt before any Leios or block-construction work begins.
@@ -825,6 +978,43 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// the pre-selection gate.
 	if f.metrics != nil {
 		f.metrics.forgeNodeIsLeader.Inc()
+	}
+
+	// A rival block already occupies this leader slot. This is a slot
+	// battle, not a reason to treat the slot as spent: the reference
+	// implementation forges an alternative here (same block number, the
+	// tip's predecessor as parent) and lets the leader VRF and chain
+	// selection arbitrate.
+	//
+	// Dingo cannot build that alternative yet. BlockBuilder binds the
+	// parent to the live chain tip, so a block forged now would name a
+	// parent whose slot equals its own and be rejected by
+	// ledger.validateBlockOrder; binding the tip's predecessor instead
+	// needs a block that does not extend the local tip, which
+	// chain.addBlockLocked refuses. Until that path exists, record the
+	// battle we are declining rather than dropping the slot silently.
+	//
+	// Unlike the rival-under-fence case in the equal-slot gate above,
+	// counting the battle here does not double up with
+	// LedgerState.checkSlotBattle. Reaching this point means the gate
+	// found no fence covering the slot, which in turn means
+	// reserveForgeSlot never ran for it, which means SlotTracker holds
+	// no record of it either — the fence is written before signing and
+	// RecordForgedBlock only after adoption, so a tracker record cannot
+	// exist without a fence. checkSlotBattle returns early when
+	// WasForgedByUs says we never forged the slot, so this is the only
+	// place the battle is counted.
+	if currentSlot == tipSlot {
+		if f.metrics != nil {
+			f.metrics.slotBattlesTotal.Inc()
+		}
+		f.incCouldNotForge()
+		f.logger.Warn(
+			"forge skip: leader slot already holds another block; forging an alternative is not supported",
+			"current_slot", currentSlot,
+			"tip_slot", tipSlot,
+		)
+		return nil
 	}
 
 	// Commit to this slot before any signing happens for it, including
@@ -1172,10 +1362,175 @@ func (f *BlockForger) reserveForgeSlot(slot uint64) (bool, error) {
 	return true, nil
 }
 
+// tipOwnership is the outcome of comparing the block sitting at the
+// chain tip against the block this node forged for a given slot.
+type tipOwnership int
+
+const (
+	// tipOwnershipUnknown means the comparison could not be made: no
+	// recorded hash for the slot, a slot clock that cannot report a tip
+	// hash, an empty hash on either side, or a tip that moved between
+	// the two reads. The caller must fall back to the fence.
+	tipOwnershipUnknown tipOwnership = iota
+	// tipOwnershipOurs means the tip block is byte-for-byte the block
+	// this node forged for the slot.
+	tipOwnershipOurs
+	// tipOwnershipRival means the tip holds a different block for a slot
+	// this node forged for: a slot battle this node lost.
+	tipOwnershipRival
+)
+
+// tipBlockOwnership reports whether the block at the chain tip for slot
+// is the one this node forged, a rival's, or indeterminate, together
+// with the two hashes it compared (nil when indeterminate).
+//
+// This is identity rather than bookkeeping. SlotTracker already records
+// the hash of every block this node forged and adopted, so comparing it
+// against the hash at the tip distinguishes "we re-entered our own slot"
+// from "we lost this slot to a rival". The forge fence cannot make that
+// distinction: it is a high-water mark over slots this node committed
+// to, so it reports both cases identically, and it is durable only
+// through a ForgeFenceStore, so where none is wired (see fenceStore
+// above) it can be silent about a slot this node demonstrably forged.
+//
+// The fence is not replaced by this, and the caller must keep consulting
+// it. It covers the window the tracker cannot: reserveForgeSlot writes
+// the fence *before* the header for a slot is signed, while
+// RecordForgedBlock runs only after adoption, so between those two
+// points the slot is already ours but has no recorded hash yet. More
+// importantly, a fence that covers the slot forbids forging even when
+// this function answers tipOwnershipRival — losing a slot battle is not
+// a licence to sign a second block for a slot whose first block may
+// already have reached peers.
+//
+// Neither signal survives a process restart on its own: the tracker is
+// in-memory, and the fence is durable only through a store.
+//
+// The result can only choose between skipping quietly and skipping
+// loudly; no branch of the equal-slot gate forges, so a wrong answer
+// here cannot produce a block.
+func (f *BlockForger) tipBlockOwnership(
+	slot uint64,
+) (tipOwnership, []byte, []byte) {
+	if f.slotTracker == nil {
+		return tipOwnershipUnknown, nil, nil
+	}
+	forgedHash, ok := f.slotTracker.WasForgedByUs(slot)
+	if !ok || len(forgedHash) == 0 {
+		return tipOwnershipUnknown, nil, nil
+	}
+	provider, hasTipHash := f.slotClock.(ChainTipHashProvider)
+	if !hasTipHash {
+		return tipOwnershipUnknown, nil, nil
+	}
+	tipHash := provider.ChainTipHash()
+	if len(tipHash) == 0 {
+		return tipOwnershipUnknown, nil, nil
+	}
+	// The caller's tipSlot was sampled at the top of the forge cycle and
+	// the chain can move underneath it, so this hash need not belong to
+	// the slot being decided. Re-read the tip slot next to the hash and
+	// refuse to conclude anything if the tip is no longer at this slot.
+	// The two reads are still not atomic, so this narrows the window
+	// rather than closing it; every remaining disagreement resolves to
+	// tipOwnershipUnknown or to a Warn, never to a forge.
+	if f.slotClock.ChainTipSlot() != slot {
+		return tipOwnershipUnknown, nil, nil
+	}
+	if bytes.Equal(tipHash, forgedHash) {
+		return tipOwnershipOurs, forgedHash, tipHash
+	}
+	return tipOwnershipRival, forgedHash, tipHash
+}
+
 func (f *BlockForger) incCouldNotForge() {
 	if f.metrics != nil {
 		f.metrics.forgeCouldNot.Inc()
 	}
+}
+
+// checkOpCertSequence resolves the era in effect for slot and validates the
+// generation's OpCert counter against the ledger's on-chain observed value
+// using that era's rule (validateOpCertSequence). Called only when
+// f.opCertLedgerView is set; NewBlockForger guarantees f.eraParams is then
+// also non-nil.
+func (f *BlockForger) checkOpCertSequence(
+	slot uint64,
+	generation *credentialGeneration,
+) error {
+	opCert := generation.opCert()
+	if opCert == nil {
+		return errors.New("operational certificate not loaded")
+	}
+	credsPoolID := f.creds.GetPoolID()
+	var poolID [28]byte
+	copy(poolID[:], credsPoolID[:])
+	stored, found, err := f.opCertLedgerView.LatestOpCertSequence(poolID)
+	if err != nil {
+		return fmt.Errorf("opcert sequence lookup: %w", err)
+	}
+	pparams := f.eraParams.ProtocolParamsForSlot(slot)
+	if pparams == nil {
+		return fmt.Errorf(
+			"protocol parameters unavailable for slot %d",
+			slot,
+		)
+	}
+	// extractPParamsLimits also rejects a typed-nil pointer of a known
+	// era's type stored in this interface, which the plain nil check above
+	// cannot see (see its doc comment in eras.go).
+	limits, err := extractPParamsLimits(pparams)
+	if err != nil {
+		return fmt.Errorf("resolve era for opcert counter rule: %w", err)
+	}
+	return validateOpCertSequence(
+		stored,
+		found,
+		opCert.IssueNumber,
+		!limits.era.isTPraos(),
+	)
+}
+
+// logGateSkip logs a slot dropped by a gate that runs before leader
+// selection. Such skips are routine and stay at Debug, but one that
+// swallows a slot this node was scheduled to lead is a lost block, and
+// nothing downstream will ever mention that slot again, so it is raised
+// to Warn.
+func (f *BlockForger) logGateSkip(
+	slot uint64,
+	msg string,
+	attrs ...any,
+) {
+	if f.isScheduledLeaderSlot(slot) {
+		f.logger.Warn(msg, append(attrs, "leader_slot", true)...)
+		return
+	}
+	f.logger.Debug(msg, attrs...)
+}
+
+// isScheduledLeaderSlot reports whether slot is one this node is
+// scheduled to lead, by consulting the precomputed VRF leader schedule
+// rather than running leader selection. Election.NextLeaderSlot is a
+// read-locked scan of the cached schedule for the slot's epoch, so it
+// is cheap enough to call on a skip path.
+//
+// It only decides a log level, so it fails quiet: a checker with no
+// cached schedule for that epoch reports false and the skip stays at
+// Debug. A panic in the pluggable checker is recovered for the same
+// reason checkLeaderSafe recovers one — it must not take down the
+// producer-loop goroutine.
+func (f *BlockForger) isScheduledLeaderSlot(slot uint64) (scheduled bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			scheduled = false
+			f.reportForgeCallbackPanic("schedule", r)
+		}
+	}()
+	if f.leaderChecker == nil {
+		return false
+	}
+	next, ok := f.leaderChecker.NextLeaderSlot(slot)
+	return ok && next == slot
 }
 
 // checkLeaderSafe calls the pluggable LeaderChecker, recovering any

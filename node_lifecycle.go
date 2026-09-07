@@ -657,6 +657,10 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to recreate bark blob store: %w", err)
 		}
+		// The wrapper's upstream is the store it replaces and its Close
+		// forwards there, so the replaced store stays in use: there is
+		// nothing to drain and nothing to close. Both results are
+		// deliberately discarded.
 		n.db.SetBlobStore(barkBlobStore)
 	}
 
@@ -934,8 +938,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 			ConnClosedFunc:      n.handleConnManagerClosed,
 		},
 	)
-	n.connManagerRecycleSubId = n.eventBus.SubscribeFunc(
-		connmanager.ConnectionRecycleRequestedEventType,
+	n.connManagerRecycleSubId = n.subscribeConnectionRecycleRequests(
 		n.connManager.HandleConnectionRecycleRequestedEvent,
 	)
 

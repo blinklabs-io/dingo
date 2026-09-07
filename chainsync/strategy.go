@@ -35,8 +35,9 @@ const (
 	// peer, failing over to another eligible peer when it stalls or
 	// disconnects. A new header from any eligible peer is published, and the
 	// active peer replays a header first observed from another peer so it
-	// stays the contiguous ingress driver. This is the default and preserves
-	// the behavior from before the strategy gate existed.
+	// stays the contiguous ingress driver. ChainSelector owns failover so the
+	// replacement has a validated, selectable tip. This is the default and
+	// preserves the behavior from before the strategy gate existed.
 	HeaderSyncStrategyPrimary HeaderSyncStrategy = iota
 	// HeaderSyncStrategyParallel lets every eligible peer drive ledger
 	// ingress concurrently. The first peer to report a header drives it;

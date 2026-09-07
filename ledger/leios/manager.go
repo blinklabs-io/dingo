@@ -66,11 +66,40 @@ const (
 	// the same window. Both keep the forgeable vote-id space (window x
 	// committee size) small.
 	slotWindowFutureTolerance = 60
+	// committeeInFlightMaxEpochs bounds how many distinct epochs may be
+	// computing a committee at once, so the coalescing map in
+	// committeeAndParamsForEpoch is size-bounded like every other admission
+	// structure here rather than growing with whatever epochs peers ask
+	// about. With the slot window enforced (production always wires a
+	// SlotProvider; see node_leios.go) the reachable set is the two epochs a
+	// vote window can straddle plus the announcement epoch, so this is well
+	// clear of legitimate demand -- it only bites in the private
+	// harness/devnet mode where slotProvider is nil and EpochForSlot
+	// projects arbitrarily far.
+	committeeInFlightMaxEpochs = 16
 )
 
 // ErrVoteManagerStopped is returned by blocking calls when the vote
-// manager is not running.
+// manager is not running. committeeAndParamsForEpoch also returns it to a
+// caller waiting on another caller's in-flight committee computation when the
+// manager stops before that computation finishes.
 var ErrVoteManagerStopped = errors.New("leios vote manager stopped")
+
+// ErrCommitteeComputationBacklog is returned when committeeInFlightMaxEpochs
+// distinct epochs are already computing a committee, so a further distinct
+// epoch is refused rather than admitted into unbounded concurrent work. It is
+// not memoized: the next caller retries.
+var ErrCommitteeComputationBacklog = errors.New(
+	"too many leios committee computations in flight",
+)
+
+// ErrCommitteeComputationAborted is delivered to waiters when a committee
+// computation panics, so they are released with a failure instead of parked
+// on a claim nobody will ever complete. The panic itself keeps unwinding to
+// the leader's caller.
+var ErrCommitteeComputationAborted = errors.New(
+	"leios committee computation aborted",
+)
 
 // VotingConfigurationStatus reports the outcome of configuring local Leios
 // vote emission.
@@ -285,6 +314,30 @@ type epochEntry struct {
 	onChainKeys map[string]*bls12381.G2Affine
 }
 
+// committeeComputation is one epoch's in-flight committee computation. Waiters park
+// on done and read result once it closes; the close is the happens-before edge
+// that makes result safe to read without the manager lock.
+//
+// There is one unbuffered done channel per epoch, not one channel per waiter;
+// completeCommitteeComputation closes it once for every waiter.
+type committeeComputation struct {
+	done   chan struct{}
+	result committeeResult
+	// waiters counts callers that have parked on done. Read under the
+	// manager lock; used by tests to observe that a follower joined the
+	// leader's computation rather than starting its own.
+	waiters int
+}
+
+type committeeResult struct {
+	entry *epochEntry
+	err   error
+}
+
+// committeeResult carries a committee computation's outcome directly to the
+// callers waiting on it, rather than having each of them re-read m.committees
+// after waking. Exactly one of entry/err is meaningful.
+
 // VoteManager collects, validates, serves, and emits Leios votes. It
 // memoizes per-epoch voting committees from stake snapshots, tallies vote
 // stake per endorser block, and builds a certificate when verified votes
@@ -332,18 +385,39 @@ type VoteManager struct {
 	loopWg              sync.WaitGroup
 	subs                []managerSubscription
 
-	committees         map[uint64]*epochEntry
-	votesById          map[lcommon.LeiosVoteId]*storedVote
-	voteLog            []*storedVote // ascending seq order
-	voteRecords        map[lcommon.LeiosVoteId]voteRecord
-	nextSeq            uint64
-	cursors            map[string]uint64 // connection key -> next seq to serve
-	wakeCh             chan struct{}     // closed and replaced on every insert
-	tallies            map[tallyKey]*ebTally
-	announcements      map[lcommon.Blake2b256]announcementRecord
-	acquiredEbs        map[lcommon.Blake2b256]acquiredEbRecord
-	votedAnnouncements map[lcommon.Blake2b256]struct{}
-	pendingVotes       map[lcommon.Blake2b256]map[uint64][]pendingPrototypeVote
+	committees map[uint64]*epochEntry
+	// committeeInFlight coalesces concurrent computation of one epoch's
+	// committee: the presence of an epoch key means some caller has claimed
+	// the computation, and its committeeComputation carries the one
+	// completion channel every waiter for that epoch parks on. The entry is
+	// deleted and that channel closed by completeCommitteeComputation -- on
+	// success, on error, and on panic unwind alike -- after which each waiter
+	// reads the result inline rather than re-reading the memo. Bounded by
+	// committeeInFlightMaxEpochs.
+	committeeInFlight map[uint64]*committeeComputation
+	// committeeStopCh releases committeeInFlight waiters at shutdown so one
+	// cannot stay parked on a leader blocked in a provider call. Closed by
+	// stopLocked and recreated by Start, like wakeCh.
+	committeeStopCh chan struct{}
+	// committeeGeneration is bumped by handleRollback when it clears the
+	// committee memo, and by stopLocked. A computation records the generation
+	// it started under and is not installed if the generation has moved on,
+	// so neither a rollback's invalidation nor a lifecycle boundary can be
+	// undone by an in-flight computation landing afterwards -- the rollback
+	// case derived from a pre-rollback stake snapshot, the stop case from the
+	// stopped lifecycle's providers.
+	committeeGeneration uint64
+	votesById           map[lcommon.LeiosVoteId]*storedVote
+	voteLog             []*storedVote // ascending seq order
+	voteRecords         map[lcommon.LeiosVoteId]voteRecord
+	nextSeq             uint64
+	cursors             map[string]uint64 // connection key -> next seq to serve
+	wakeCh              chan struct{}     // closed and replaced on every insert
+	tallies             map[tallyKey]*ebTally
+	announcements       map[lcommon.Blake2b256]announcementRecord
+	acquiredEbs         map[lcommon.Blake2b256]acquiredEbRecord
+	votedAnnouncements  map[lcommon.Blake2b256]struct{}
+	pendingVotes        map[lcommon.Blake2b256]map[uint64][]pendingPrototypeVote
 	// pendingVoteCount is the sum of all pending candidate slices;
 	// pendingVoteCountByConn partitions that same total by origin connection.
 	// Every admission and removal must update both counters together.
@@ -420,6 +494,8 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 		maxVotes:           voteStoreMaxEntries,
 		maxRecords:         voteRecordMaxEntries,
 		committees:         make(map[uint64]*epochEntry),
+		committeeInFlight:  make(map[uint64]*committeeComputation),
+		committeeStopCh:    make(chan struct{}),
 		votesById:          make(map[lcommon.LeiosVoteId]*storedVote),
 		voteLog:            make([]*storedVote, 0),
 		voteRecords:        make(map[lcommon.LeiosVoteId]voteRecord),
@@ -465,6 +541,7 @@ func (m *VoteManager) Start(ctx context.Context) error {
 	m.cancel = cancel
 	m.running = true
 	m.wakeCh = make(chan struct{})
+	m.committeeStopCh = make(chan struct{})
 
 	epochSubId, epochCh := m.eventBus.Subscribe(
 		event.EpochTransitionEventType,
@@ -505,6 +582,23 @@ func (m *VoteManager) stopLocked() {
 	m.subs = nil
 	// Wake any blocked NextVotes callers so they observe the stop
 	close(m.wakeCh)
+	// Release anyone waiting on another caller's in-flight committee
+	// computation. The leader may be blocked inside the stake or key
+	// provider on a read with no deadline, and a waiter must not hold a
+	// protocol worker there past shutdown.
+	close(m.committeeStopCh)
+	// Drop the claims too. A leader blocked in a provider outlives this
+	// Stop, and leaving its claim in the map would let a caller in the NEXT
+	// lifecycle join the previous lifecycle's computation and park on the
+	// fresh stop channel until that leader returned -- or forever, if it
+	// never does. The leader still completes and still closes its own call.
+	m.committeeInFlight = make(map[uint64]*committeeComputation)
+	// Advance the generation for the same reason the rollback path does:
+	// clearing the claim stops a NEW caller joining the old leader, but not
+	// the old leader from installing. That result was derived under the
+	// stopped lifecycle's providers and configuration, and must not become
+	// the next lifecycle's memoized committee.
+	m.committeeGeneration++
 }
 
 // Stop stops the vote manager and unblocks any NextVotes waiters.
@@ -1024,6 +1118,16 @@ func (m *VoteManager) CommitteeForEpoch(epoch uint64) (*Committee, error) {
 // computing it from the stake snapshot on first use. Failures (snapshot
 // unavailable, invalid parameters) are not memoized so later calls can
 // recover.
+//
+// Concurrent callers for the same epoch share one computation. Every path
+// into this function is peer-driven (HandleVote and
+// handleResolvedPrototypeVote run on the connection's protocol worker), so
+// on a cold memo one endorser-block announcement diffused to N peers used to
+// start N identical computations: N parameter lookups, N stake-distribution
+// database reads, N committee sorts, and N x committee-size proof-of-
+// possession pairing verifications at roughly 0.75ms each, of which N-1
+// results were then discarded by the install-time double check. Coalescing
+// makes the cost independent of peer count. See dingo #3661.
 func (m *VoteManager) committeeAndParamsForEpoch(
 	epoch uint64,
 ) (*epochEntry, error) {
@@ -1032,12 +1136,109 @@ func (m *VoteManager) committeeAndParamsForEpoch(
 		m.mu.Unlock()
 		return entry, nil
 	}
+	if call, claimed := m.committeeInFlight[epoch]; claimed {
+		call.waiters++
+		stopCh := m.committeeStopCh
+		m.mu.Unlock()
+		select {
+		case <-call.done:
+			result := call.result
+			// The outcome is delivered inline rather than re-read from
+			// m.committees after waking: handleRollback clears that map
+			// wholesale, and it can do so between the leader's install and a
+			// descheduled waiter resuming, which would leave the waiter
+			// observing a miss instead of the result it waited for.
+			return result.entry, result.err
+		case <-stopCh:
+			// Released, not left parked. The leader can be blocked inside the
+			// stake or key provider -- a database read carrying no deadline of
+			// its own -- and a waiter must not hold a connection's protocol
+			// worker there across shutdown. The leader still runs to
+			// completion and still releases its claim; done is closed when the
+			// leader finishes, and the waiter returns here on stop.
+			return nil, ErrVoteManagerStopped
+		}
+	}
+	if len(m.committeeInFlight) >= committeeInFlightMaxEpochs {
+		m.mu.Unlock()
+		return nil, fmt.Errorf(
+			"%w: %d epochs already computing",
+			ErrCommitteeComputationBacklog,
+			committeeInFlightMaxEpochs,
+		)
+	}
+	// Claim the epoch.
+	call := &committeeComputation{done: make(chan struct{})}
+	m.committeeInFlight[epoch] = call
+	// The generation this computation is derived from. handleRollback bumps
+	// it when it clears the memo, so a computation that started before a
+	// rollback can tell that its inputs may no longer be current.
+	generation := m.committeeGeneration
 	m.mu.Unlock()
 
-	// Compute outside the lock: stake lookup hits the database
+	completed := false
+	defer func() {
+		if completed {
+			return
+		}
+		// A panic unwinding through the leader must not leave the epoch
+		// claimed (which would make it permanently uncomputable: every later
+		// caller would join a computation that no longer exists) or its
+		// waiters parked. Release them with an error and let the panic keep
+		// unwinding: unlike a CBOR decode panic on adversarial bytes, which
+		// decodeCache.getOrDecode deliberately converts into a cached
+		// "these bytes do not decode" result, a panic in parameter, stake, or
+		// key resolution is a defect in this node's own ledger handling
+		// rather than a fact about untrusted input, so it must not be
+		// laundered into a routine per-epoch error that hides it.
+		m.completeCommitteeComputation(
+			epoch,
+			call,
+			generation,
+			nil,
+			ErrCommitteeComputationAborted,
+		)
+	}()
+	entry, snapshotEpoch, err := m.computeCommitteeEntry(epoch)
+	completed = true
+	result, installed := m.completeCommitteeComputation(
+		epoch,
+		call,
+		generation,
+		entry,
+		err,
+	)
+	if !installed {
+		return result.entry, result.err
+	}
+	// Metrics and logging stay outside m.mu, and are reached only by the
+	// leader that actually installed the memo, so they are not amplified by
+	// the callers it served.
+	if m.metrics != nil {
+		m.metrics.committeeSize.Set(float64(result.entry.committee.Size()))
+	}
+	m.logger.Info(
+		"computed leios voting committee",
+		"epoch", epoch,
+		"snapshot_epoch", snapshotEpoch,
+		"members", result.entry.committee.Size(),
+		"committee_stake", result.entry.committee.CommitteeStake,
+		"total_active_stake", result.entry.committee.TotalActiveStake,
+	)
+	return result.entry, result.err
+}
+
+// computeCommitteeEntry builds an epoch's entry from the stake snapshot. It
+// touches no VoteManager state and holds no lock: the parameter lookup, the
+// stake-distribution read, and the proof-of-possession verifications all
+// reach the database or the pairing engine, and none of them may run under
+// m.mu. It also returns the snapshot epoch it used, for the caller's log.
+func (m *VoteManager) computeCommitteeEntry(
+	epoch uint64,
+) (*epochEntry, uint64, error) {
 	sigmaC, tau, err := m.paramsProvider.LeiosCommitteeParameters()
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, 0, fmt.Errorf(
 			"leios committee parameters: %w",
 			err,
 		)
@@ -1047,7 +1248,7 @@ func (m *VoteManager) committeeAndParamsForEpoch(
 		snapshotEpoch,
 	)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, snapshotEpoch, fmt.Errorf(
 			"stake distribution for snapshot epoch %d: %w",
 			snapshotEpoch,
 			err,
@@ -1061,7 +1262,7 @@ func (m *VoteManager) committeeAndParamsForEpoch(
 		sigmaC,
 	)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, snapshotEpoch, fmt.Errorf(
 			"compute committee for epoch %d: %w",
 			epoch,
 			err,
@@ -1089,36 +1290,64 @@ func (m *VoteManager) committeeAndParamsForEpoch(
 	// error instead means the next call retries from scratch.
 	onChainKeys, err := m.resolveOnChainKeys(snapshotEpoch, poolKeyHashes)
 	if err != nil {
-		return nil, err
+		return nil, snapshotEpoch, err
 	}
-
-	m.mu.Lock()
-	if entry, ok := m.committees[epoch]; ok {
-		// Another caller computed it concurrently; both results are
-		// deterministic and identical, keep the first.
-		m.mu.Unlock()
-		return entry, nil
-	}
-	entry := &epochEntry{
+	return &epochEntry{
 		committee:   committee,
 		tau:         tau,
 		onChainKeys: onChainKeys,
-	}
-	m.committees[epoch] = entry
-	m.mu.Unlock()
+	}, snapshotEpoch, nil
+}
 
-	if m.metrics != nil {
-		m.metrics.committeeSize.Set(float64(committee.Size()))
+// completeCommitteeComputation installs a successful computation in the memo,
+// releases the epoch's in-flight claim, and hands the outcome to every waiter
+// parked on that claim. It is the single exit for a leader: the normal-return
+// path and the panic-unwind path both go through it, so neither can leave the
+// claim held or a waiter parked. installed reports whether the memo was
+// actually written.
+//
+// A failure is released to waiters but never memoized, preserving the
+// contract that a transient snapshot or key-store failure is retried by the
+// next caller instead of pinning the epoch to a keyless committee.
+func (m *VoteManager) completeCommitteeComputation(
+	epoch uint64,
+	call *committeeComputation,
+	generation uint64,
+	entry *epochEntry,
+	err error,
+) (committeeResult, bool) {
+	installed := false
+	m.mu.Lock()
+	switch {
+	case err != nil:
+		// Not memoized; see the function comment.
+	case m.committeeGeneration != generation:
+		// A rollback cleared the memo while this computation was in flight,
+		// so its stake snapshot may be one the rollback invalidated.
+		// Installing it now would silently undo that invalidation and pin the
+		// stale committee for the rest of the epoch. The value is still
+		// handed to this call and its waiters -- they are no worse off than a
+		// caller that completed just before the rollback landed -- and the
+		// next caller recomputes from the post-rollback snapshot.
+	default:
+		m.committees[epoch] = entry
+		installed = true
 	}
-	m.logger.Info(
-		"computed leios voting committee",
-		"epoch", epoch,
-		"snapshot_epoch", snapshotEpoch,
-		"members", committee.Size(),
-		"committee_stake", committee.CommitteeStake,
-		"total_active_stake", committee.TotalActiveStake,
-	)
-	return entry, nil
+	// Identity-checked: stopLocked clears the map wholesale, and a later
+	// lifecycle may have claimed this epoch again. Deleting by key alone
+	// would drop the new lifecycle's claim and make the epoch permanently
+	// uncomputable.
+	if m.committeeInFlight[epoch] == call {
+		delete(m.committeeInFlight, epoch)
+	}
+	result := committeeResult{entry: entry, err: err}
+	call.result = result
+	m.mu.Unlock()
+	// Releases every waiter at once, including waiters of a lifecycle that
+	// has already stopped -- they left through committeeStopCh and read
+	// nothing.
+	close(call.done)
+	return result, installed
 }
 
 // resolveOnChainKeys fetches raw registered Leios keys from keyProvider for
@@ -2420,6 +2649,13 @@ func (m *VoteManager) handleRollback(evt chain.ChainRollbackEvent) {
 	}
 	m.updateRecordsGaugeLocked()
 	m.committees = make(map[uint64]*epochEntry)
+	// Bumping the generation extends the memo clear to computations already
+	// in flight: one that started before this rollback read a stake snapshot
+	// the rollback may have invalidated, and completeCommitteeComputation
+	// declines to install it rather than letting it repopulate the memo that
+	// was just cleared. In-flight claims themselves are left alone so their
+	// waiters are still served and released.
+	m.committeeGeneration++
 	m.logger.Debug(
 		"pruned leios vote state after rollback",
 		"rollback_slot", evt.Point.Slot,

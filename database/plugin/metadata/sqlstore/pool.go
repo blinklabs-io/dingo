@@ -1023,6 +1023,115 @@ ORDER BY item.added_slot ASC, tx.block_index ASC, c.cert_index ASC`,
 	return registrations, retirements, nil
 }
 
+// GetPoolVrfKeyHashAtSlot returns the VRF key hash the pool had registered as
+// of slot, which is not necessarily the one it has registered now.
+//
+// A pool may rotate its VRF key, and a re-registration does not retroactively
+// change the key it was elected under: the leader schedule for an epoch is
+// built from a stake snapshot captured at an earlier boundary, and a block's
+// header carries the key registered at that capture. Validating a header
+// against the current registration rejects every block the pool makes for the
+// rest of the epoch it rotated in (issue #3842).
+//
+// The selection is the same latest-certificate-wins ordering
+// GetActivePoolKeyHashesAtSlot uses -- later added_slot, then later block
+// index, then later certificate index -- so the two agree on which
+// registration was in force.
+//
+// The bool reports whether any registration exists at or before slot. False
+// means the pool had not registered yet, which is a different answer from a
+// pool with no VRF key recorded.
+func (s *Store) GetPoolVrfKeyHashAtSlot(
+	poolKeyHash []byte,
+	slot uint64,
+	txn types.Txn,
+) ([]byte, bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, false, fmt.Errorf(
+			"GetPoolVrfKeyHashAtSlot: resolve db: %w",
+			err,
+		)
+	}
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, false, fmt.Errorf("GetPoolVrfKeyHashAtSlot: %w", err)
+	}
+	var vrfKeyHash []byte
+	err = db.QueryRowContext(ctx, `
+SELECT pr.vrf_key_hash
+FROM pool_registration pr
+JOIN pool p ON p.id = pr.pool_id
+LEFT JOIN certs c ON c.id = pr.certificate_id
+LEFT JOIN "transaction" t ON t.id = c.transaction_id
+WHERE p.pool_key_hash = ?
+  AND pr.added_slot <= ?
+ORDER BY pr.added_slot DESC,
+         COALESCE(t.block_index, 0) DESC,
+         COALESCE(c.cert_index, 0) DESC
+LIMIT 1`,
+		poolKeyHash,
+		slotValue,
+	).Scan(&vrfKeyHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("GetPoolVrfKeyHashAtSlot: %w", err)
+	}
+	return vrfKeyHash, true, nil
+}
+
+// GetPoolEarliestVrfKeyHashAtSlot returns the VRF key hash from the pool's
+// earliest registration at or before the given slot.
+//
+// This is the key cardano-ledger's psStakePools holds for a pool that first
+// registered inside the captured epoch. The POOL rule inserts a first
+// registration into psStakePools directly and defers only a re-registration
+// through psFutureStakePoolParams, so when both land in that epoch the
+// snapshot carries the first one's key. GetPoolVrfKeyHashAtSlot answers the
+// opposite question and would resolve the deferred key.
+func (s *Store) GetPoolEarliestVrfKeyHashAtSlot(
+	poolKeyHash []byte,
+	slot uint64,
+	txn types.Txn,
+) ([]byte, bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, false, fmt.Errorf(
+			"GetPoolEarliestVrfKeyHashAtSlot: resolve db: %w",
+			err,
+		)
+	}
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, false, fmt.Errorf("GetPoolEarliestVrfKeyHashAtSlot: %w", err)
+	}
+	var vrfKeyHash []byte
+	err = db.QueryRowContext(ctx, `
+SELECT pr.vrf_key_hash
+FROM pool_registration pr
+JOIN pool p ON p.id = pr.pool_id
+LEFT JOIN certs c ON c.id = pr.certificate_id
+LEFT JOIN "transaction" t ON t.id = c.transaction_id
+WHERE p.pool_key_hash = ?
+  AND pr.added_slot <= ?
+ORDER BY pr.added_slot ASC,
+         COALESCE(t.block_index, 0) ASC,
+         COALESCE(c.cert_index, 0) ASC
+LIMIT 1`,
+		poolKeyHash,
+		slotValue,
+	).Scan(&vrfKeyHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("GetPoolEarliestVrfKeyHashAtSlot: %w", err)
+	}
+	return vrfKeyHash, true, nil
+}
+
 func (s *Store) GetActivePoolKeyHashesAtSlot(
 	slot uint64,
 	txn types.Txn,
@@ -1851,11 +1960,13 @@ WITH latest_reg AS (
 ),
 latest_ret AS (
     SELECT rt.pool_id, rt.added_slot, rt.epoch,
+           CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END synthetic_ret,
            COALESCE(t.block_index, 0) block_index,
            COALESCE(c.cert_index, 0) cert_index,
            ROW_NUMBER() OVER (
                PARTITION BY rt.pool_id
                ORDER BY rt.added_slot DESC,
+                        CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC,
                         COALESCE(t.block_index, 0) DESC,
                         COALESCE(c.cert_index, 0) DESC
            ) rn
@@ -1872,9 +1983,9 @@ JOIN latest_ret ret ON ret.pool_id = p.id AND ret.rn = 1
 WHERE ret.epoch = ?
   AND NOT (
       ret.added_slot < reg.added_slot
-      OR (ret.added_slot = reg.added_slot
+      OR (ret.added_slot = reg.added_slot AND ret.synthetic_ret = 0
           AND ret.block_index < reg.block_index)
-      OR (ret.added_slot = reg.added_slot
+      OR (ret.added_slot = reg.added_slot AND ret.synthetic_ret = 0
           AND ret.block_index = reg.block_index
           AND ret.cert_index < reg.cert_index)
   )`,
@@ -1907,6 +2018,105 @@ WHERE ret.epoch = ?
 		}
 		refund.DepositAmount = types.Uint64(value)
 		ret = append(ret, refund)
+	}
+	return ret, rows.Err()
+}
+
+// GetPoolKeyHashesRetiredByEpoch is GetPoolsRetiringAtEpoch's "at or before"
+// sibling: same latest-certificate resolution and same cancellation rule, but
+// it matches every retirement effective up to and including epoch rather than
+// only the one landing on it, and returns bare key hashes because no deposit
+// refund is being applied. See MetadataStore's doc comment for why the parity
+// checker needs the wider comparison (dingo #3925).
+//
+// "Same resolution" includes the synthetic-retirement key every
+// latest-retirement query in the tree shares. A reconcile retirement
+// (certificate_id = 0) has no certs/transaction join, so its COALESCE'd
+// block_index/cert_index are both zero: without ranking it first and exempting
+// it from the same-slot cancellation clauses it would lose the tie-break to any
+// certificate-backed registration in its own slot, and the pool would be
+// reported as still active. ledgerstate's snapshot import writes exactly that
+// shape — ImportPool followed by RetirePools at one slot — so this is the
+// ordinary bootstrap case, not an edge case. DingoDB.GetPoolsRetiredByEpoch
+// carries the same three elements, and koiosparity's
+// implementations-agree test runs both against one database to pin them
+// against drift.
+func (s *Store) GetPoolKeyHashesRetiredByEpoch(
+	epoch uint64,
+	boundarySlot uint64,
+	txn types.Txn,
+) ([][]byte, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetPoolKeyHashesRetiredByEpoch: resolve db: %w",
+			err,
+		)
+	}
+	rows, err := db.QueryContext(ctx, `
+WITH latest_reg AS (
+    SELECT pr.pool_id, pr.added_slot,
+           COALESCE(t.block_index, 0) block_index,
+           COALESCE(c.cert_index, 0) cert_index,
+           ROW_NUMBER() OVER (
+               PARTITION BY pr.pool_id
+               ORDER BY pr.added_slot DESC,
+                        COALESCE(t.block_index, 0) DESC,
+                        COALESCE(c.cert_index, 0) DESC
+           ) rn
+    FROM pool_registration pr
+    LEFT JOIN certs c ON c.id = pr.certificate_id
+    LEFT JOIN "transaction" t ON t.id = c.transaction_id
+    WHERE pr.added_slot < ?
+),
+latest_ret AS (
+    SELECT rt.pool_id, rt.added_slot, rt.epoch,
+           CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END synthetic_ret,
+           COALESCE(t.block_index, 0) block_index,
+           COALESCE(c.cert_index, 0) cert_index,
+           ROW_NUMBER() OVER (
+               PARTITION BY rt.pool_id
+               ORDER BY rt.added_slot DESC,
+                        CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC,
+                        COALESCE(t.block_index, 0) DESC,
+                        COALESCE(c.cert_index, 0) DESC
+           ) rn
+    FROM pool_retirement rt
+    LEFT JOIN certs c ON c.id = rt.certificate_id
+    LEFT JOIN "transaction" t ON t.id = c.transaction_id
+    WHERE rt.added_slot < ?
+)
+SELECT p.pool_key_hash
+FROM pool p
+JOIN latest_reg reg ON reg.pool_id = p.id AND reg.rn = 1
+JOIN latest_ret ret ON ret.pool_id = p.id AND ret.rn = 1
+WHERE ret.epoch <= ?
+  AND NOT (
+      ret.added_slot < reg.added_slot
+      OR (ret.added_slot = reg.added_slot AND ret.synthetic_ret = 0
+          AND ret.block_index < reg.block_index)
+      OR (ret.added_slot = reg.added_slot AND ret.synthetic_ret = 0
+          AND ret.block_index = reg.block_index
+          AND ret.cert_index < reg.cert_index)
+  )`,
+		boundarySlot,
+		boundarySlot,
+		epoch,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetPoolKeyHashesRetiredByEpoch: query pools: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+	ret := [][]byte{}
+	for rows.Next() {
+		var poolKeyHash []byte
+		if err := rows.Scan(&poolKeyHash); err != nil {
+			return nil, err
+		}
+		ret = append(ret, poolKeyHash)
 	}
 	return ret, rows.Err()
 }

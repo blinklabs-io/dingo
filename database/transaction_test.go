@@ -296,7 +296,7 @@ func TestDeleteTxBlobsUsesCallerBlobTxn(t *testing.T) {
 
 	store := &mockBlobStore{}
 	db := &Database{
-		blob: store,
+		blobRef: newBlobStoreRef(store),
 		logger: slog.New(
 			slog.NewJSONHandler(
 				io.Discard,
@@ -322,7 +322,7 @@ func TestDeleteTxBlobsCountsFailedBatchCommit(t *testing.T) {
 	var logs bytes.Buffer
 	store := &mockBlobStore{commitErrs: []error{errors.New("commit failed")}}
 	db := &Database{
-		blob: store,
+		blobRef: newBlobStoreRef(store),
 		logger: slog.New(
 			slog.NewJSONHandler(
 				&logs,
@@ -349,7 +349,7 @@ func TestDeleteUtxoBlobsCountsFailedBatchCommit(t *testing.T) {
 	var logs bytes.Buffer
 	store := &mockBlobStore{commitErrs: []error{errors.New("commit failed")}}
 	db := &Database{
-		blob: store,
+		blobRef: newBlobStoreRef(store),
 		logger: slog.New(
 			slog.NewJSONHandler(
 				&logs,
@@ -401,7 +401,7 @@ func TestTransactionsDeleteRolledbackLogsBlobFailureAndDeletesMetadata(
 		},
 	}
 	db := &Database{
-		blob:     store,
+		blobRef:  newBlobStoreRef(store),
 		metadata: sqliteStore,
 		logger:   logger,
 		config:   &Config{DataDir: dataDir, Logger: logger},
@@ -461,7 +461,7 @@ func TestUtxosDeleteRolledbackLogsBlobFailureAndDeletesMetadata(t *testing.T) {
 		},
 	}
 	db := &Database{
-		blob:     store,
+		blobRef:  newBlobStoreRef(store),
 		metadata: sqliteStore,
 		logger:   logger,
 		config:   &Config{DataDir: dataDir, Logger: logger},

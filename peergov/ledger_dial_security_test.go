@@ -52,20 +52,20 @@ func TestResolveLedgerDialTarget_LockedInIPUnaffectedByRebindAttempt(
 	pg := newDialSpreadGovernor()
 	peer := &Peer{
 		Address:           "relay.example.com:3001",
-		NormalizedAddress: "198.51.100.7:3001", // resolved at discovery time
+		NormalizedAddress: "44.0.0.7:3001", // resolved at discovery time
 		Source:            PeerSourceP2PLedger,
 	}
 
 	got, err := pg.resolveLedgerDialTarget(context.Background(), peer)
 	require.NoError(t, err)
-	assert.Equal(t, "198.51.100.7:3001", got)
+	assert.Equal(t, "44.0.0.7:3001", got)
 	assert.Equal(
 		t,
 		0,
 		calls,
 		"a locked-in IP must not trigger a fresh DNS lookup",
 	)
-	assert.Equal(t, "198.51.100.7:3001", peer.NormalizedAddress)
+	assert.Equal(t, "44.0.0.7:3001", peer.NormalizedAddress)
 }
 
 // TestResolveLedgerDialTarget_LocksInResolutionOnFallbackHostname verifies the
@@ -80,7 +80,7 @@ func TestResolveLedgerDialTarget_LocksInResolutionOnFallbackHostname(
 	oldLookupIPAddr := lookupIPAddr
 	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
 		calls++
-		return []net.IP{net.ParseIP("203.0.113.5")}, nil
+		return []net.IP{net.ParseIP("44.0.0.5")}, nil
 	}
 	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
 
@@ -94,9 +94,9 @@ func TestResolveLedgerDialTarget_LocksInResolutionOnFallbackHostname(
 
 	got, err := pg.resolveLedgerDialTarget(context.Background(), peer)
 	require.NoError(t, err)
-	assert.Equal(t, "203.0.113.5:3001", got)
+	assert.Equal(t, "44.0.0.5:3001", got)
 	assert.Equal(t, 1, calls)
-	assert.Equal(t, "203.0.113.5:3001", peer.NormalizedAddress)
+	assert.Equal(t, "44.0.0.5:3001", peer.NormalizedAddress)
 
 	// Change the resolver to return a different address entirely. A second
 	// call must still return the locked-in result without consulting it.
@@ -106,7 +106,7 @@ func TestResolveLedgerDialTarget_LocksInResolutionOnFallbackHostname(
 	}
 	got, err = pg.resolveLedgerDialTarget(context.Background(), peer)
 	require.NoError(t, err)
-	assert.Equal(t, "203.0.113.5:3001", got)
+	assert.Equal(t, "44.0.0.5:3001", got)
 	assert.Equal(t, 1, calls, "resolution must not happen again once locked in")
 }
 
@@ -180,7 +180,7 @@ func TestCreateOutboundConnection_LedgerPeerDialsLockedIPNotRebindTarget(
 	oldLookupIPAddr := lookupIPAddr
 	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
 		calls++
-		return []net.IP{net.ParseIP("203.0.113.9")}, nil
+		return []net.IP{net.ParseIP("44.0.0.9")}, nil
 	}
 	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
 
@@ -212,8 +212,8 @@ func TestCreateOutboundConnection_LedgerPeerDialsLockedIPNotRebindTarget(
 	pg.peers = []*Peer{
 		target,
 		{
-			Address:           "203.0.113.10:3001",
-			NormalizedAddress: "203.0.113.10:3001",
+			Address:           "44.0.0.10:3001",
+			NormalizedAddress: "44.0.0.10:3001",
 			Source:            PeerSourceTopologyLocalRoot,
 			State:             PeerStateHot,
 			Connection:        &PeerConnection{IsClient: true},
@@ -278,7 +278,7 @@ func (b *safeLogBuffer) String() string {
 func TestCreateOutboundConnection_LedgerPeerFallbackDialsExactRoutabilityCheckedIP(
 	t *testing.T,
 ) {
-	const resolvedIP = "203.0.113.77"
+	const resolvedIP = "44.0.0.77"
 	const resolvedAddr = resolvedIP + ":3001"
 
 	oldLookupIPAddr := lookupIPAddr
@@ -305,7 +305,13 @@ func TestCreateOutboundConnection_LedgerPeerFallbackDialsExactRoutabilityChecked
 		Logger:   logger,
 		EventBus: newMockEventBus(),
 		ConnManager: connmanager.NewConnectionManager(
-			connmanager.ConnectionManagerConfig{Logger: logger},
+			connmanager.ConnectionManagerConfig{
+				Logger: logger,
+				OutboundDialer: func(_ context.Context, address string) (net.Conn, error) {
+					assert.Equal(t, resolvedAddr, address)
+					return nil, errors.New("controlled dial failure")
+				},
+			},
 		),
 		DenyDuration: 30 * time.Minute,
 	})
@@ -360,8 +366,8 @@ func TestResolveLedgerDialTarget_FallbackPrefersLocallySupportedFamily(
 		// AAAA record ordered first, mirroring real-world DNS answers that
 		// are not sorted by local reachability.
 		return []net.IP{
-			net.ParseIP("2001:db8::1"),
-			net.ParseIP("198.51.100.9"),
+			net.ParseIP("2001:4860:4860::8888"),
+			net.ParseIP("44.0.0.9"),
 		}, nil
 	}
 	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
@@ -378,11 +384,11 @@ func TestResolveLedgerDialTarget_FallbackPrefersLocallySupportedFamily(
 	require.NoError(t, err)
 	assert.Equal(
 		t,
-		"198.51.100.9:3001",
+		"44.0.0.9:3001",
 		got,
 		"must lock in the IPv4 record on a v4-only host, not the first (IPv6) DNS answer",
 	)
-	assert.Equal(t, "198.51.100.9:3001", peer.NormalizedAddress)
+	assert.Equal(t, "44.0.0.9:3001", peer.NormalizedAddress)
 }
 
 // TestResolveLedgerDialTarget_DoesNotStealNormalizedAddressFromExistingPeer
@@ -399,14 +405,14 @@ func TestResolveLedgerDialTarget_DoesNotStealNormalizedAddressFromExistingPeer(
 ) {
 	oldLookupIPAddr := lookupIPAddr
 	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
-		return []net.IP{net.ParseIP("198.51.100.42")}, nil
+		return []net.IP{net.ParseIP("44.0.0.42")}, nil
 	}
 	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
 
 	pg := newDialSpreadGovernor()
 	existing := &Peer{
-		Address:           "198.51.100.42:3001",
-		NormalizedAddress: "198.51.100.42:3001",
+		Address:           "44.0.0.42:3001",
+		NormalizedAddress: "44.0.0.42:3001",
 		Source:            PeerSourceP2PGossip,
 	}
 	ledgerPeer := &Peer{
@@ -420,7 +426,7 @@ func TestResolveLedgerDialTarget_DoesNotStealNormalizedAddressFromExistingPeer(
 	require.NoError(t, err)
 	assert.Equal(
 		t,
-		"198.51.100.42:3001",
+		"44.0.0.42:3001",
 		got,
 		"this attempt must still dial the resolved, routability-checked IP",
 	)
@@ -436,7 +442,7 @@ func TestResolveLedgerDialTarget_DoesNotStealNormalizedAddressFromExistingPeer(
 		pg.peers[0],
 		"existing peer entry must be untouched",
 	)
-	assert.Equal(t, "198.51.100.42:3001", existing.NormalizedAddress)
+	assert.Equal(t, "44.0.0.42:3001", existing.NormalizedAddress)
 }
 
 // TestAddLedgerPeerPrefersLocallySupportedFamily verifies the common
@@ -454,8 +460,8 @@ func TestAddLedgerPeerPrefersLocallySupportedFamily(t *testing.T) {
 	oldLookupIPAddr := lookupIPAddr
 	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
 		return []net.IP{
-			net.ParseIP("2001:db8::1"), // AAAA returned first
-			net.ParseIP("198.51.100.9"),
+			net.ParseIP("2001:4860:4860::8888"), // AAAA returned first
+			net.ParseIP("44.0.0.9"),
 		}, nil
 	}
 	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
@@ -465,14 +471,14 @@ func TestAddLedgerPeerPrefersLocallySupportedFamily(t *testing.T) {
 	require.Len(t, pg.peers, 1)
 	assert.Equal(
 		t,
-		"198.51.100.9:3001",
+		"44.0.0.9:3001",
 		pg.peers[0].NormalizedAddress,
 		"must store the IPv4 record on a v4-only host, not the first (IPv6) DNS answer",
 	)
 
 	got, err := pg.resolveLedgerDialTarget(t.Context(), pg.peers[0])
 	require.NoError(t, err)
-	assert.Equal(t, "198.51.100.9:3001", got)
+	assert.Equal(t, "44.0.0.9:3001", got)
 }
 
 // TestAddLedgerPeerContextRejectsCancellationDuringResolution covers the

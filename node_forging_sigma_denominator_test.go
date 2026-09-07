@@ -17,7 +17,9 @@ package dingo
 import (
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -306,4 +308,134 @@ func TestStakeDistributionProviderForbidsTornSigmaRead(t *testing.T) {
 				"(dingo #3815)",
 		)
 	}
+}
+
+func replaceSigmaSnapshotAtomically(
+	t *testing.T,
+	db *database.Database,
+	poolKeyHash []byte,
+	poolStake, totalStake uint64,
+	capturedSlot uint64,
+) {
+	t.Helper()
+	txn := db.Transaction(true)
+	defer func() { require.NoError(t, txn.Rollback()) }()
+
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshots(
+		[]*models.PoolStakeSnapshot{{
+			Epoch:          sigmaDenomEpoch,
+			SnapshotType:   models.PoolStakeSnapshotTypeMark,
+			PoolKeyHash:    poolKeyHash,
+			TotalStake:     dbtypes.Uint64(poolStake),
+			DelegatorCount: 1,
+			CapturedSlot:   capturedSlot,
+		}},
+		txn.Metadata(),
+	))
+	require.NoError(t, db.Metadata().SaveEpochSummary(
+		&models.EpochSummary{
+			Epoch:            sigmaDenomEpoch,
+			TotalActiveStake: dbtypes.Uint64(totalStake),
+			TotalPoolCount:   2,
+			TotalDelegators:  2,
+			BoundarySlot:     capturedSlot,
+			SnapshotReady:    true,
+		},
+		txn.Metadata(),
+	))
+	require.NoError(t, txn.Commit())
+}
+
+// TestStakeDistributionAdapterKeepsSigmaConsistentAcrossRecapture proves the
+// reader's transaction is the consistency boundary for the sigma pair.
+//
+// The hook releases an atomic recapture after the numerator query has fixed the
+// read transaction's snapshot but before the denominator query. A reader that
+// opens one transaction per half can combine generation one and generation two;
+// the paired accessor must return generation one in full.
+func TestStakeDistributionAdapterKeepsSigmaConsistentAcrossRecapture(
+	t *testing.T,
+) {
+	ledgerState, db := newSigmaDenominatorLedger(t)
+	poolA := sigmaDenomPoolKeyHash(0x41)
+	poolB := sigmaDenomPoolKeyHash(0x42)
+	replaceSigmaSnapshotAtomically(
+		t, db, poolA,
+		sigmaDenomPoolAStake, sigmaDenomSummaryTotal, 1,
+	)
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshots(
+		[]*models.PoolStakeSnapshot{{
+			Epoch:          sigmaDenomEpoch,
+			SnapshotType:   models.PoolStakeSnapshotTypeMark,
+			PoolKeyHash:    poolB,
+			TotalStake:     dbtypes.Uint64(sigmaDenomPoolBStake),
+			DelegatorCount: 1,
+			CapturedSlot:   1,
+		}},
+		nil,
+	))
+
+	readStarted := make(chan struct{})
+	releaseRead := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseRead) }) }
+	defer release()
+	result := make(chan struct {
+		poolStake  uint64
+		totalStake uint64
+		err        error
+	}, 1)
+	adapter := &stakeDistributionAdapter{
+		ledgerState: ledgerState,
+		afterPoolStakeReadFn: func() {
+			close(readStarted)
+			<-releaseRead
+		},
+	}
+	go func() {
+		poolStake, totalStake, err := adapter.GetPoolAndTotalActiveStake(
+			sigmaDenomEpoch,
+			poolA,
+		)
+		result <- struct {
+			poolStake  uint64
+			totalStake uint64
+			err        error
+		}{poolStake, totalStake, err}
+	}()
+
+	select {
+	case <-readStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sigma reader did not reach the coordinated recapture point")
+	}
+	// Generation two changes both halves while the reader is paused between
+	// its two SQL statements. The write is one transaction, matching the
+	// snapshot publication path in ledger/snapshot/rotation.go.
+	replaceSigmaSnapshotAtomically(
+		t, db, poolA,
+		sigmaDenomPoolAStake*2, sigmaDenomSummaryTotal*2, 2,
+	)
+	release()
+
+	var got struct {
+		poolStake  uint64
+		totalStake uint64
+		err        error
+	}
+	select {
+	case got = <-result:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sigma reader did not finish after recapture")
+	}
+	require.NoError(t, got.err)
+	require.Equal(t, sigmaDenomPoolAStake, got.poolStake,
+		"the numerator must remain from the reader's snapshot generation")
+	require.Equal(t, sigmaDenomSummaryTotal, got.totalStake,
+		"the denominator must not come from the recaptured generation")
+	require.Equal(t,
+		got.poolStake*sigmaDenomSummaryTotal,
+		got.totalStake*sigmaDenomPoolAStake,
+		"a sigma read must use one committed snapshot generation",
+	)
 }
