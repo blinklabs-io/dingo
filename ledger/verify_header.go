@@ -728,10 +728,18 @@ func (ls *LedgerState) genesisOverlayDelegationForBlock(
 	block ledger.Block,
 	shelleyGenesis *shelley.ShelleyGenesis,
 ) (genesisDelegation, genesisOverlaySlotStatus, error) {
+	pparams := ls.genesisOverlayProtocolParamsForBlock(block)
+	if pparams == nil {
+		return genesisDelegation{}, genesisOverlayNone, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"protocol parameters unavailable for genesis overlay",
+			block.SlotNumber(),
+		)
+	}
 	return ls.genesisOverlayDelegationForSlotWithParams(
 		block.SlotNumber(),
 		shelleyGenesis,
-		ls.genesisOverlayProtocolParamsForBlock(block),
+		pparams,
 	)
 }
 

@@ -9875,6 +9875,8 @@ func (ls *LedgerState) GetCurrentPParamsForReporting() lcommon.ProtocolParameter
 // schedule was produced — administrative overrides, on-chain update
 // proposals, or HardForkInitiation gov actions all surface as
 // TriggerAtEpoch entries on the shape.
+// A future epoch whose configured shape or current era is unavailable returns
+// nil so callers cannot forge or verify it using stale current parameters.
 func (ls *LedgerState) ProtocolParamsForSlot(
 	slot uint64,
 ) lcommon.ProtocolParameters {
@@ -9916,9 +9918,12 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 	if slotEpoch <= currentEpoch.EpochId {
 		return currentPParams
 	}
-	shape := ls.eraShape()
-	if len(shape.Eras) == 0 {
-		return currentPParams
+	shape, err := ls.eraShapeWithError()
+	if err != nil {
+		return nil
+	}
+	if _, ok := shape.EraForID(currentEra.Id); !ok {
+		return nil
 	}
 	pparams := currentPParams
 	// Before walking any era hard fork, apply the pending in-era
@@ -9933,9 +9938,13 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 	// the already-collected proposals, so it does not depend on the
 	// target epoch's pparams row being persisted yet (it is not, during
 	// from-genesis before the node has ticked into that epoch).
-	if updated := ls.forecastPendingPParamUpdate(
+	updated, err := ls.forecastPendingPParamUpdate(
 		currentEra, currentEpoch.EpochId+1, pparams,
-	); updated != nil {
+	)
+	if err != nil {
+		return nil
+	}
+	if updated != nil {
 		pparams = updated
 	}
 	// Walk forward from the current era, applying each successor's
@@ -9956,7 +9965,7 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 		nextID := eraID + 1
 		nextEraPtr, ok := ls.eraById(nextID)
 		if !ok || nextEraPtr == nil {
-			break
+			return nil
 		}
 		nextEra := *nextEraPtr
 		if nextEra.HardForkFunc == nil {
@@ -9976,7 +9985,7 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 				"to_era", nextID,
 				"error", err,
 			)
-			return currentPParams
+			return nil
 		}
 		pparams = newPParams
 		eraID = nextID
@@ -9992,17 +10001,18 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 // snapshot is never touched, and it performs no writes. It returns nil when
 // there is nothing to apply — no DB, missing era update funcs, or no
 // proposal meeting quorum for targetEpoch — in which case the caller keeps
-// the era-fork-only forecast, identical to prior behavior.
+// the era-fork-only forecast. Database, decode, clone, and apply failures return
+// an error so the caller cannot mistake a failed forecast for no pending update.
 func (ls *LedgerState) forecastPendingPParamUpdate(
 	era eras.EraDesc,
 	targetEpoch uint64,
 	pparams lcommon.ProtocolParameters,
-) lcommon.ProtocolParameters {
+) (lcommon.ProtocolParameters, error) {
 	if ls.db == nil ||
 		pparams == nil ||
 		era.DecodePParamsUpdateFunc == nil ||
 		era.PParamsUpdateFunc == nil {
-		return nil
+		return nil, nil
 	}
 	// Quorum is the Shelley-genesis updateQuorum, exactly as the rollover
 	// uses when enacting the same proposals (processEpochRollover).
@@ -10034,9 +10044,9 @@ func (ls *LedgerState) forecastPendingPParamUpdate(
 			"era", era.Id,
 			"error", err,
 		)
-		return nil
+		return nil, err
 	}
-	return updated
+	return updated, nil
 }
 
 // CurrentEpoch returns the current epoch number.
