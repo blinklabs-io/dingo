@@ -2282,21 +2282,17 @@ N+1 round trips:
 
 ```sql
 SELECT r.credential_tag, r.drep_credential, r.deposit_amount
-FROM registration_drep r
-JOIN (
-    SELECT reg.credential_tag AS credential_tag,
-           reg.drep_credential AS drep_credential,
-           MAX(reg.added_slot) AS added_slot
-    FROM registration_drep reg
-    JOIN drep d
-      ON d.credential_tag = reg.credential_tag
-     AND d.credential = reg.drep_credential
-    WHERE d.active = TRUE
-    GROUP BY reg.credential_tag, reg.drep_credential
-) latest
-  ON latest.credential_tag = r.credential_tag
- AND latest.drep_credential = r.drep_credential
- AND latest.added_slot = r.added_slot;
+FROM drep d
+JOIN registration_drep r
+  ON r.id = (
+      SELECT reg.id
+      FROM registration_drep reg
+      WHERE reg.credential_tag = d.credential_tag
+        AND reg.drep_credential = d.credential
+      ORDER BY reg.added_slot DESC, reg.id DESC
+      LIMIT 1
+  )
+WHERE d.active = TRUE;
 ```
 
 Four properties external callers depend on:
@@ -2306,9 +2302,9 @@ Four properties external callers depend on:
   concatenation `string([]byte{credentialTag}) + string(credential)` — not hex,
   and tag-qualified, so a key and script credential sharing a hash stay
   distinct.
-- **Latest-row rule.** The self-join reproduces the singular query's "most
-  recent registration certificate" selection via `MAX(added_slot)` grouped by
-  `(credential_tag, drep_credential)`, and like the singular query it
+- **Latest-row rule.** The correlated lookup reproduces the singular query's
+  "most recent registration certificate" selection by ordering on
+  `added_slot DESC, id DESC`, and like the singular query it
   deliberately does **not** apply the
   `certificate_id IS NOT NULL AND certificate_id != 0` filter — bootstrap import
   rows carry the real deposit and are frequently a DRep's only registration row
@@ -2324,12 +2320,6 @@ Four properties external callers depend on:
   stored, so both read back as 0 from a map lookup. That matches the singular
   query, which returns `(0, nil)` for `sql.ErrNoRows` and for a NULL deposit.
   Callers therefore index the map directly instead of testing for presence.
-
-Neither form needs a tie-break. `registration_drep` carries
-`UNIQUE (credential_tag, drep_credential, added_slot)` (`idx_drep_reg_cred_slot`
-in the v1 expand migration), so at most one row per credential can hold the
-`MAX(added_slot)` the join matches, and the singular query's
-`ORDER BY added_slot DESC LIMIT 1` has nothing to choose between.
 
 `GetPredefinedDrepFirstSeenSlots` returns the earliest delegation slot
 per predefined DRep type (2 = AlwaysAbstain, 3 = AlwaysNoConfidence),
