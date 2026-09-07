@@ -16,6 +16,7 @@ package migrations
 
 import (
 	"context"
+	"database/sql"
 	"embed"
 	"errors"
 	"fmt"
@@ -42,6 +43,7 @@ const (
 	committeeTermStartPresenceSchemaRelease    = "committee-term-start-presence"
 	rewardSeedFailureSchemaRelease             = "reward-seed-failure"
 	importedPoolBlockCountSchemaRelease        = "imported-pool-block-count"
+	poolDepositHeldSchemaRelease               = "pool-registration-deposit-held"
 )
 
 // schemaVersions names every migration in ascending version order.
@@ -69,6 +71,7 @@ var schemaVersions = []struct {
 	},
 	{Version: 10, Name: rewardSeedFailureSchemaRelease, Dir: "v10"},
 	{Version: 11, Name: importedPoolBlockCountSchemaRelease, Dir: "v11"},
+	{Version: 12, Name: poolDepositHeldSchemaRelease, Dir: "v12"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -138,9 +141,288 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.BackfillRevision = "1"
 			migration.Backfill = committeeTermStartBackfill
 		}
+		if version.Name == poolDepositHeldSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = poolDepositHeldBackfill
+		}
 		ret = append(ret, migration)
 	}
 	return ret, nil
+}
+
+type poolDepositPosition struct {
+	slot, blockIndex, certIndex int64
+}
+
+type poolDepositRegistration struct {
+	id              int64
+	position        poolDepositPosition
+	historyComplete bool
+	held            sql.NullString
+	amount          sql.NullString
+}
+
+type poolDepositRetirement struct {
+	position        poolDepositPosition
+	historyComplete bool
+	epoch           int64
+}
+
+func poolDepositPositionBeforeOrEqual(a, b poolDepositPosition) bool {
+	if a.slot != b.slot {
+		return a.slot < b.slot
+	}
+	if a.blockIndex != b.blockIndex {
+		return a.blockIndex < b.blockIndex
+	}
+	return a.certIndex <= b.certIndex
+}
+
+// poolDepositHeldBackfill reconstructs psDeposits from the persisted
+// registration and retirement history. A registration after a completed reap
+// starts a new deposit cycle; all other registrations carry the preceding
+// cycle's held amount. The pool ID cursor makes each batch independently
+// resumable, and the NULL predicate makes replay non-destructive.
+func poolDepositHeldBackfill(ctx context.Context, batch Batch) (BatchResult, error) {
+	lastID := int64(0)
+	if batch.Cursor != "" {
+		parsed, err := strconv.ParseInt(batch.Cursor, 10, 64)
+		if err != nil {
+			return BatchResult{}, fmt.Errorf("parse pool deposit backfill cursor: %w", err)
+		}
+		lastID = parsed
+	}
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(
+		"SELECT id FROM pool WHERE id > ? ORDER BY id LIMIT ?",
+	), lastID, batch.Limit)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	defer rows.Close()
+	var poolIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return BatchResult{}, err
+		}
+		poolIDs = append(poolIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return BatchResult{}, err
+	}
+	if len(poolIDs) == 0 {
+		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	for _, poolID := range poolIDs {
+		if err := backfillPoolDeposits(ctx, batch, poolID); err != nil {
+			return BatchResult{}, err
+		}
+	}
+	return BatchResult{
+		Cursor: strconv.FormatInt(poolIDs[len(poolIDs)-1], 10),
+		Rows:   int64(len(poolIDs)),
+	}, nil
+}
+
+func backfillPoolDeposits(ctx context.Context, batch Batch, poolID int64) error {
+	regs, err := poolDepositRegistrations(ctx, batch, poolID)
+	if err != nil {
+		return err
+	}
+	rets, err := poolDepositRetirements(ctx, batch, poolID)
+	if err != nil {
+		return err
+	}
+	var previous poolDepositRegistration
+	var havePrevious bool
+	for _, reg := range regs {
+		if reg.held.Valid {
+			if _, err := parsePoolDeposit(reg.held.String); err != nil {
+				return fmt.Errorf("pool %d registration %d: %w", poolID, reg.id, err)
+			}
+			previous = reg
+			havePrevious = true
+			continue
+		}
+		var held uint64
+		if !havePrevious {
+			held, err = parsePoolDepositValue(reg.amount)
+		} else {
+			held, err = previousHeld(previous)
+		}
+		if err != nil {
+			return fmt.Errorf("pool %d registration %d: %w", poolID, reg.id, err)
+		}
+		if havePrevious {
+			retirement, found := latestPoolRetirement(rets, reg.position)
+			if found && poolDepositPositionBeforeOrEqual(previous.position, retirement.position) {
+				epoch, resolved, epochErr := poolDepositEpochAtSlot(ctx, batch, reg.position.slot)
+				if epochErr != nil {
+					return epochErr
+				}
+				if !resolved {
+					return fmt.Errorf(
+						"resync required: cannot reconstruct pool %d registration %d without epoch history at slot %d",
+						poolID,
+						reg.id,
+						reg.position.slot,
+					)
+				}
+				if epoch >= retirement.epoch {
+					held, err = parsePoolDepositValue(reg.amount)
+				} else {
+					held, err = previousHeld(previous)
+				}
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("pool %d registration %d: %w", poolID, reg.id, err)
+		}
+		if _, err := batch.Tx.ExecContext(ctx, batch.Rebind(
+			"UPDATE pool_registration SET deposit_held = ? WHERE id = ? AND deposit_held IS NULL",
+		), strconv.FormatUint(held, 10), reg.id); err != nil {
+			return fmt.Errorf("pool %d registration %d: write held deposit: %w", poolID, reg.id, err)
+		}
+		reg.held = sql.NullString{String: strconv.FormatUint(held, 10), Valid: true}
+		previous = reg
+		havePrevious = true
+	}
+	return nil
+}
+
+func poolDepositRegistrations(ctx context.Context, batch Batch, poolID int64) ([]poolDepositRegistration, error) {
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(`
+SELECT pr.id, pr.added_slot, COALESCE(t.block_index, 0),
+       COALESCE(c.cert_index, 0),
+       CASE WHEN pr.certificate_id IS NULL OR pr.certificate_id = 0
+            OR (c.id IS NOT NULL AND t.id IS NOT NULL) THEN 1 ELSE 0 END,
+       pr.deposit_held, pr.deposit_amount
+FROM pool_registration pr
+LEFT JOIN certs c ON c.id = pr.certificate_id
+LEFT JOIN "transaction" t ON t.id = c.transaction_id
+WHERE pr.pool_id = ?
+ORDER BY pr.added_slot,
+         CASE WHEN pr.certificate_id IS NULL OR pr.certificate_id = 0 THEN 1 ELSE 0 END,
+         COALESCE(t.block_index, 0), COALESCE(c.cert_index, 0), pr.id`), poolID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ret []poolDepositRegistration
+	for rows.Next() {
+		var row poolDepositRegistration
+		if err := rows.Scan(
+			&row.id,
+			&row.position.slot,
+			&row.position.blockIndex,
+			&row.position.certIndex,
+			&row.historyComplete,
+			&row.held,
+			&row.amount,
+		); err != nil {
+			return nil, err
+		}
+		if !row.historyComplete {
+			return nil, fmt.Errorf(
+				"resync required: incomplete certificate history for pool %d registration %d",
+				poolID,
+				row.id,
+			)
+		}
+		ret = append(ret, row)
+	}
+	return ret, rows.Err()
+}
+
+func poolDepositRetirements(ctx context.Context, batch Batch, poolID int64) ([]poolDepositRetirement, error) {
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(`
+SELECT rt.added_slot, COALESCE(t.block_index, 0), COALESCE(c.cert_index, 0),
+       CASE WHEN rt.certificate_id IS NULL OR rt.certificate_id = 0
+            OR (c.id IS NOT NULL AND t.id IS NOT NULL) THEN 1 ELSE 0 END,
+       rt.epoch
+FROM pool_retirement rt
+LEFT JOIN certs c ON c.id = rt.certificate_id
+LEFT JOIN "transaction" t ON t.id = c.transaction_id
+WHERE rt.pool_id = ?
+	ORDER BY rt.added_slot, COALESCE(t.block_index, 0),
+		CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END,
+		COALESCE(c.cert_index, 0)`), poolID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ret []poolDepositRetirement
+	for rows.Next() {
+		var row poolDepositRetirement
+		if err := rows.Scan(
+			&row.position.slot,
+			&row.position.blockIndex,
+			&row.position.certIndex,
+			&row.historyComplete,
+			&row.epoch,
+		); err != nil {
+			return nil, err
+		}
+		if !row.historyComplete {
+			return nil, fmt.Errorf(
+				"resync required: incomplete certificate history for pool %d retirement at slot %d",
+				poolID,
+				row.position.slot,
+			)
+		}
+		ret = append(ret, row)
+	}
+	return ret, rows.Err()
+}
+
+func latestPoolRetirement(retirements []poolDepositRetirement, at poolDepositPosition) (poolDepositRetirement, bool) {
+	var latest poolDepositRetirement
+	found := false
+	for _, retirement := range retirements {
+		if poolDepositPositionBeforeOrEqual(retirement.position, at) {
+			latest, found = retirement, true
+		}
+	}
+	return latest, found
+}
+
+func poolDepositEpochAtSlot(ctx context.Context, batch Batch, slot int64) (int64, bool, error) {
+	var epoch, start, length sql.NullInt64
+	err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+SELECT epoch_id, start_slot, length_in_slots FROM epoch
+WHERE start_slot <= ? ORDER BY start_slot DESC LIMIT 1`), slot).Scan(&epoch, &start, &length)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("resolve epoch for pool deposit backfill at slot %d: %w", slot, err)
+	}
+	if !epoch.Valid || !start.Valid || !length.Valid || slot >= start.Int64+length.Int64 {
+		return 0, false, nil
+	}
+	return epoch.Int64, true, nil
+}
+
+func parsePoolDeposit(value string) (uint64, error) {
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid deposit %q: %w", value, err)
+	}
+	return parsed, nil
+}
+
+func parsePoolDepositValue(value sql.NullString) (uint64, error) {
+	if !value.Valid || value.String == "" {
+		return 0, nil
+	}
+	return parsePoolDeposit(value.String)
+}
+
+func previousHeld(reg poolDepositRegistration) (uint64, error) {
+	if !reg.held.Valid {
+		return parsePoolDepositValue(reg.amount)
+	}
+	return parsePoolDeposit(reg.held.String)
 }
 
 // committeeTermStartBackfill is deliberately data-driven rather than a

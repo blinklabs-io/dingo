@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -647,21 +648,74 @@ func execDDL(
 // parseAddColumnStatement extracts the table and column named by an
 // ALTER TABLE <table> ADD COLUMN <column> ... statement. Identifier quoting
 // differs per dialect, so every supported quote character is trimmed.
-func parseAddColumnStatement(statement string) (string, string, bool) {
+func parseAddColumnStatement(statement string) (string, string, string, bool) {
 	fields := strings.Fields(strings.TrimSuffix(strings.TrimSpace(statement), ";"))
 	if len(fields) < 6 ||
 		!strings.EqualFold(fields[0], "ALTER") ||
 		!strings.EqualFold(fields[1], "TABLE") ||
 		!strings.EqualFold(fields[3], "ADD") ||
 		!strings.EqualFold(fields[4], "COLUMN") {
-		return "", "", false
+		return "", "", "", false
 	}
 	table := strings.Trim(fields[2], "`\"")
 	column := strings.Trim(fields[5], "`\"")
 	if table == "" || column == "" {
-		return "", "", false
+		return "", "", "", false
 	}
-	return table, column, true
+	return table, column, strings.TrimSpace(strings.Join(fields[6:], " ")), true
+}
+
+var columnConstraintKeywords = map[string]struct{}{
+	"as": {}, "auto_increment": {}, "check": {}, "collate": {},
+	"comment": {}, "constraint": {}, "default": {}, "generated": {},
+	"not": {}, "null": {}, "primary": {}, "references": {}, "unique": {},
+}
+
+var columnTypeAliases = map[string]string{
+	"character varying":           "varchar",
+	"timestamp with time zone":    "timestamptz",
+	"timestamp without time zone": "timestamp",
+}
+
+var columnTypeArgsPattern = regexp.MustCompile(`\s*\([^)]*\)`)
+
+func declaredColumnType(definition string) string {
+	fields := strings.Fields(definition)
+	end := len(fields)
+	for index, field := range fields {
+		name, _, _ := strings.Cut(field, "(")
+		if _, stop := columnConstraintKeywords[strings.ToLower(name)]; stop {
+			end = index
+			break
+		}
+	}
+	return strings.Join(fields[:end], " ")
+}
+
+func normalizeColumnType(value string) string {
+	normalized := columnTypeArgsPattern.ReplaceAllString(strings.ToLower(value), "")
+	normalized = strings.Join(strings.Fields(normalized), " ")
+	if alias, ok := columnTypeAliases[normalized]; ok {
+		return alias
+	}
+	return normalized
+}
+
+func addColumnTypeMatches(reported sql.NullString, definition string) bool {
+	return reported.Valid && normalizeColumnType(reported.String) ==
+		normalizeColumnType(declaredColumnType(definition))
+}
+
+func mysqlColumnTypeMatches(reported sql.NullString, definition string) bool {
+	if !reported.Valid {
+		return false
+	}
+	actual := normalizeColumnType(reported.String)
+	declared := normalizeColumnType(declaredColumnType(definition))
+	if declared == "boolean" {
+		declared = "tinyint"
+	}
+	return actual == declared
 }
 
 // isPostgresDDLAlreadyAppliedOnConn reports whether an ADD COLUMN statement
@@ -693,21 +747,21 @@ func isPostgresDDLAlreadyAppliedOnConn(
 		// unrelated duplicate-definition error into a no-op.
 		return false
 	}
-	table, column, ok := parseAddColumnStatement(statement)
+	table, column, definition, ok := parseAddColumnStatement(statement)
 	if !ok {
 		return false
 	}
-	var found int
+	var reported sql.NullString
 	if queryErr := conn.QueryRowContext(
 		ctx,
-		`SELECT 1 FROM information_schema.columns
+		`SELECT data_type FROM information_schema.columns
 WHERE table_name = $1 AND column_name = $2`,
 		table,
 		column,
-	).Scan(&found); queryErr != nil {
+	).Scan(&reported); queryErr != nil {
 		return false
 	}
-	return found == 1
+	return addColumnTypeMatches(reported, definition)
 }
 
 func isSQLiteDDLAlreadyAppliedOnConn(
@@ -719,20 +773,20 @@ func isSQLiteDDLAlreadyAppliedOnConn(
 	if !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
 		return false
 	}
-	table, column, ok := parseAddColumnStatement(statement)
+	table, column, definition, ok := parseAddColumnStatement(statement)
 	if !ok {
 		return false
 	}
-	var found int
+	var reported sql.NullString
 	if queryErr := conn.QueryRowContext(
 		ctx,
-		"SELECT 1 FROM pragma_table_info(?) WHERE name = ?",
+		"SELECT type FROM pragma_table_info(?) WHERE name = ?",
 		table,
 		column,
-	).Scan(&found); queryErr != nil {
+	).Scan(&reported); queryErr != nil {
 		return false
 	}
-	return found == 1
+	return addColumnTypeMatches(reported, definition)
 }
 
 func boundedCursor(cursor string) string {

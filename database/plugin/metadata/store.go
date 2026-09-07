@@ -1803,8 +1803,11 @@ type MetadataStore interface {
 	// GetPoolsRetiringAtEpoch returns the pools whose effective retirement
 	// (the latest retirement not cancelled by a later re-registration, as of
 	// the boundary slot) takes effect at the given epoch, along with the
-	// reward account and deposit from their active registration. Used to apply
-	// POOLREAP deposit refunds at the epoch boundary.
+	// reward account from their active registration and the deposit that
+	// registration holds -- the amount paid by the first registration since
+	// the pool's most recent completed reap, not what the current protocol
+	// parameters would charge. Used to apply POOLREAP deposit refunds at the
+	// epoch boundary.
 	GetPoolsRetiringAtEpoch(
 		epoch uint64,
 		boundarySlot uint64,

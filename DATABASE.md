@@ -951,7 +951,7 @@ again.
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
 | `pool` | `id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `reward_account_credential_tag`, `latest_op_cert_sequence`, `pledge`, `cost`, `margin`, `leios_key_public`, `leios_key_possession_proof` | PK `id`; unique `pool_key_hash` | Current pool state. Historical registrations and retirements are separate rows. `reward_account_credential_tag`: 0 key hash, 1 script hash for the pool reward account. `leios_key_public` (96-byte BLS12-381 G2 public key) and `leios_key_possession_proof` (48-byte G1 signature) are the pool's registered Dijkstra/Leios voting key from an on-chain `leios_key` pool-cert field (migration `v2`, added for issue #3148); both are NULL only when the pool has no `leios_key`. Storage here never checks the proof -- a key with an invalid proof is still written as-is, so a value here means "seen on-chain," not "trusted." Committee verification does not read these mutable columns directly: SNAP copies the effective registration into the epoch's `pool_stake_snapshot`, and `ledger.LedgerView.GetLeiosKeys` reads that historical row. The actual proof-of-possession check happens one layer up, in `ledger/leios`'s `resolveOnChainKeys` (`VerifyLeiosKeyProofOfPossession`), which is allowed to depend on `ledger/leios`'s BLS primitives while this package is not (`internal/architecture/import_boundary_test.go` forbids `database` importing `ledger`). |
-| `pool_registration` | `id`, `pool_id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `cost`, `margin`, `metadata_url`, `metadata_hash`, `certificate_id`, `added_slot`, `deposit_amount`, `leios_key_public`, `leios_key_possession_proof` | PK `id`; unique `(pool_id, added_slot)`; indexes `pool_key_hash`, `certificate_id` | Pool registration certificate. Join `pool_id -> pool.id` and `certificate_id -> certs.id`. `reward_account_credential_tag`: 0 key hash, 1 script hash. `leios_key_public`/`leios_key_possession_proof` mirror `pool`'s columns of the same name for this specific registration (see above). Genesis staking replay reuses the existing slot-0 row and replaces its owner/relay children from the immutable genesis configuration, making startup repair a partially-written genesis registration instead of inserting children against a missing parent. This behavior is covered by the SQLite metadata contract suite. |
+| `pool_registration` | `id`, `pool_id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `cost`, `margin`, `metadata_url`, `metadata_hash`, `certificate_id`, `added_slot`, `deposit_amount`, `deposit_held`, `leios_key_public`, `leios_key_possession_proof` | PK `id`; unique `(pool_id, added_slot)`; indexes `pool_key_hash`, `certificate_id` | Pool registration certificate. Join `pool_id -> pool.id` and `certificate_id -> certs.id`. `reward_account_credential_tag`: 0 key hash, 1 script hash. `deposit_amount` is the protocol parameter in force for that certificate; nullable `deposit_held` is the amount actually retained for the registration cycle and refunded by POOLREAP. Migration `v12` reconstructs legacy rows from registration, retirement, and epoch history, carries deposits across re-registrations, starts a new cycle after a completed reap, preserves populated values on replay, and fails closed with a resync-required error when a reap cannot be placed safely. `leios_key_public`/`leios_key_possession_proof` mirror `pool`'s columns of the same name for this specific registration (see above). Genesis staking replay reuses the existing slot-0 row and replaces its owner/relay children from the immutable genesis configuration, making startup repair a partially-written genesis registration instead of inserting children against a missing parent. This behavior is covered by the SQLite metadata contract suite. |
 | `pool_registration_owner` | `id`, `pool_registration_id`, `pool_id`, `key_hash` | PK `id`; indexes `pool_registration_id`, `pool_id` | Owners for a pool registration. Join `pool_registration_id -> pool_registration.id`; `pool_id -> pool.id`. |
 | `pool_registration_relay` | `id`, `pool_registration_id`, `pool_id`, `ipv4`, `ipv6`, `hostname`, `port` | PK `id`; indexes `pool_registration_id`, `pool_id` | Relay addresses for a pool registration. |
 | `pool_retirement` | `id`, `pool_id`, `pool_key_hash`, `certificate_id`, `epoch`, `added_slot` | PK `id`; indexes `pool_id`, `pool_key_hash`, `certificate_id`, `added_slot` | Pool retirement certificate. Synthetic retirements written by a Mithril v2 catch-up (reconcile) or by the initial Mithril bootstrap import have `certificate_id = 0` and no `certs` row (`epoch`/`added_slot` are the catch-up or snapshot point); joins on `certificate_id` must be LEFT JOINs to keep them visible, and active-pool queries rank them ahead of certificate-backed rows at the same slot. The bootstrap case covers a pool that appears in the imported active pool distribution (`pool_stake_snapshot` `"actv"`) but is absent from the certified live pool params: it retired at the snapshot's epoch boundary yet still leads the current epoch's already-fixed schedule, so the import synthesizes a `pool`/`pool_registration` pair carrying only its pool key hash and pool-distr `vrf_key_hash` (pledge/cost/margin/reward-account left zero) plus this retirement tombstone. That keeps the producer resolvable via `GetPool(includeInactive=true)` for the header VRF-key binding check while the tombstone excludes it from active-pool and stake queries. Imported reward seeding separately intersects its shared registration fallback with each target snapshot's positive-stake delegated pool keys before the target snapshot's complete parameters overlay it. A synthesized pool that belongs only to another snapshot therefore cannot leak into this epoch's reward inputs, while an actually referenced pool remains subject to the all-or-nothing reconciliation gate if neither source supplies complete economics. This matches how a genesis-synced node retains a retired pool without treating it as active. |
@@ -2605,14 +2605,16 @@ refund, because its real retirement (or lack of one) was already settled in the
 imported snapshot's ledger state — that exclusion now rests on those two
 filters alone rather than on the row losing a tie-break, and
 `TestGetPoolsRetiringAtEpochSameSlotResolution` pins both halves. The deposit
-and reward account come from the latest registration. Backends differ only in
-identifier quoting (`"transaction"` on SQLite/Postgres, `` `transaction` `` on
-MySQL).
+and reward account come from the latest registration. The refund amount is
+`COALESCE(pr.deposit_held, pr.deposit_amount)`, preserving the legacy fallback
+for rows that predate migration `v12`. Backends differ only in identifier
+quoting (`"transaction"` on SQLite/Postgres, `` `transaction` `` on MySQL).
 
 ```sql
 WITH latest_reg AS (
   SELECT pr.pool_id, pr.added_slot, pr.reward_account,
-    pr.reward_account_credential_tag, pr.deposit_amount,
+    pr.reward_account_credential_tag,
+    COALESCE(pr.deposit_held, pr.deposit_amount) AS deposit_held,
     COALESCE(t.block_index, 0) AS blk_idx,
     COALESCE(c.cert_index, 0)  AS cert_idx,
     ROW_NUMBER() OVER (
@@ -2640,7 +2642,7 @@ latest_ret AS (
   WHERE rt.added_slot < $boundarySlot
 )
 SELECT p.pool_key_hash, lr.reward_account, lr.reward_account_credential_tag,
-  lr.deposit_amount
+  lr.deposit_held
 FROM pool p
 INNER JOIN latest_reg lr  ON lr.pool_id = p.id  AND lr.rn = 1
 INNER JOIN latest_ret lrt ON lrt.pool_id = p.id AND lrt.rn = 1
