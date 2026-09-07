@@ -1619,6 +1619,29 @@ func (f *BlockForger) buildBlockForSlot(
 		)
 		return block, blockCbor, stats, nil
 	}
+	// The first attempt needs the same guarantee the retries below get. The
+	// Leios payload was resolved before this slot's endorser-block production
+	// and the KES step, and the chain tip can move across that work, so the
+	// first build is no more entitled to reuse it than a retry is: the
+	// builder reads the tip when it starts, and a tip that moved before the
+	// build began produces no parent-change error to catch -- it just builds
+	// on the new parent while carrying the previous parent's certificate and
+	// announcement.
+	//
+	// Gated on there being something parent-bound to protect, because the
+	// re-resolve is not free: ParentLeiosAnnouncement fetches and decodes the
+	// parent block, and this runs inside the leader slot. A block with
+	// neither a certificate nor an announcement carries nothing a parent
+	// change could invalidate, so the check is skipped -- which is every slot
+	// on a chain with no Leios traffic. When there is something to protect,
+	// one extra parent resolution is the price of not committing the block to
+	// a certificate that belongs to a different parent. Re-resolving is a
+	// no-op when the parent is unchanged, so an announcement forged for this
+	// slot survives the ordinary case.
+	if leiosState.data.Certificate != nil ||
+		leiosState.data.Announcement != nil {
+		f.refreshLeiosForParent(slot, leiosState)
+	}
 	for {
 		stats.attempts++
 		block, blockCbor, err := f.buildBlock(

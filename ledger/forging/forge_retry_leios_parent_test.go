@@ -450,3 +450,104 @@ func TestForgeKeepsAnnouncementWhenParentIsUnchanged(t *testing.T) {
 		"an unchanged parent keeps the endorser block already announced",
 	)
 }
+
+// TestForgeReResolvesLeiosDataWhenParentChangesBeforeTheFirstBuild covers the
+// half of the parent-change problem that no retry can reach.
+//
+// The Leios payload is resolved before this slot's endorser-block production
+// and the KES step, and the chain tip can move across that work. On the retry
+// path a moved tip announces itself as errParentChangedDuringBuild, which is
+// what triggers the re-resolve. Before the first build there is no such
+// signal: the builder reads the tip when it starts, so a tip that moved
+// beforehand simply becomes the parent, and the build succeeds on the first
+// attempt while carrying the previous parent's certificate. The block is then
+// committed to a certificate that does not belong to it, with no error and no
+// retry anywhere in the trace.
+func TestForgeReResolvesLeiosDataWhenParentChangesBeforeTheFirstBuild(
+	t *testing.T,
+) {
+	oldParentRb := leiosHash(0xC1)
+	oldEb := leiosHash(0xD1)
+	newParentRb := leiosHash(0xC2)
+
+	parent := &forgerTestLeiosParentAnnouncement{
+		rbHash: oldParentRb,
+		hash:   oldEb,
+		ok:     true,
+	}
+	certs := &forgerTestLeiosCerts{
+		eligible: []LeiosCertifiedEndorserBlock{
+			{
+				EndorserBlockHash: oldEb,
+				AnnouncingRbHash:  oldParentRb,
+				SlotNo:            9,
+				Certificate:       leiosTestCertificate(oldEb, 9),
+			},
+		},
+		// The certified closure resolves, so endorser-block production is
+		// reached rather than skipped -- that is the window this test needs.
+		txHashesOK: true,
+	}
+	block := newForgerTestBlock(10, 2)
+	// Succeeds on the first attempt: there is no retry in this scenario,
+	// which is the whole point.
+	builder := &parentSwapBuilder{block: block, cbor: block.cbor}
+
+	// The parent moves during endorser-block production, which runs between
+	// the Leios resolution and the first build.
+	leiosChecker := &forgerTestLeiosChecker{
+		reason: "not eligible",
+		callback: func() error {
+			parent.rbHash = newParentRb
+			parent.hash = leiosHash(0xD2)
+			return nil
+		},
+	}
+
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		SlotClock: &retryTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      9,
+			slotsPerKESPeriod: 100,
+			slotEnd:           time.Now().Add(time.Hour),
+		},
+		LeiosCertificateProvider:        certs,
+		LeiosParentAnnouncementProvider: parent,
+		LeiosProduceChecker:             leiosChecker,
+		LeiosEBBroadcaster:              &forgerTestLeiosCaster{},
+		LeiosMempool:                    forgerTestMempoolProvider{},
+		LeiosTxValidator:                &mockTxValidator{},
+		PromRegistry:                    prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	require.Equal(
+		t,
+		1,
+		leiosChecker.calls,
+		"the parent must have moved during endorser-block production",
+	)
+	require.Len(
+		t,
+		builder.seen,
+		1,
+		"the first build succeeds, so nothing retries and nothing else can re-resolve",
+	)
+	require.Nil(
+		t,
+		builder.seen[0].Certificate,
+		"the first build must not carry the previous parent's certificate",
+	)
+	require.Empty(
+		t,
+		certs.marked,
+		"no endorser block was embedded, so none may be marked embedded",
+	)
+}

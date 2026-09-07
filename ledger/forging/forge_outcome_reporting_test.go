@@ -18,11 +18,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"log/slog"
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -80,41 +78,6 @@ func TestForgeLostSlotErrorCarriesTheFallbackFailure(t *testing.T) {
 	require.Contains(t, err.Error(), errFallbackBuilderRefused.Error())
 }
 
-// newOutcomeForger builds a production forger whose logs land in logs and
-// whose optional self-validation and adoption steps can be made to fail.
-func newOutcomeForger(
-	t *testing.T,
-	logs *bytes.Buffer,
-	clock *retryTestSlotClock,
-	builder BlockBuilder,
-	broadcaster *forgerTestBroadcaster,
-	validator BlockValidator,
-) *BlockForger {
-	t.Helper()
-	forger, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(logs, nil)),
-		Credentials:      setupTestCredentials(t),
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     builder,
-		BlockBroadcaster: broadcaster,
-		BlockValidator:   validator,
-		SlotClock:        clock,
-		PromRegistry:     prometheus.NewRegistry(),
-	})
-	require.NoError(t, err)
-	return forger
-}
-
-func newOutcomeClock() *retryTestSlotClock {
-	return &retryTestSlotClock{
-		currentSlot:       10,
-		chainTipSlot:      9,
-		slotsPerKESPeriod: 100,
-		slotEnd:           time.Now().Add(time.Second),
-	}
-}
-
 // TestForgeTimingReportsAdoptionForASuccessfulSlot pins the shape of the line
 // for the ordinary case, so the adopted field the failure cases below rely on
 // is known to be true when the block really reaches the chain.
@@ -122,10 +85,10 @@ func TestForgeTimingReportsAdoptionForASuccessfulSlot(t *testing.T) {
 	block := newForgerTestBlock(10, 2)
 	builder := &retryTestBuilder{block: block, cbor: block.cbor}
 	var logs bytes.Buffer
-	forger := newOutcomeForger(
+	forger := newTimingForger(
 		t,
 		&logs,
-		newOutcomeClock(),
+		newTimingClock(),
 		builder,
 		&forgerTestBroadcaster{},
 		nil,
@@ -151,10 +114,10 @@ func TestForgeTimingDoesNotClaimSuccessWhenSelfValidationDropsTheBlock(
 	builder := &retryTestBuilder{block: block, cbor: block.cbor}
 	broadcaster := &forgerTestBroadcaster{}
 	var logs bytes.Buffer
-	forger := newOutcomeForger(
+	forger := newTimingForger(
 		t,
 		&logs,
-		newOutcomeClock(),
+		newTimingClock(),
 		builder,
 		broadcaster,
 		&forgerTestValidator{err: errors.New("bad VRF proof")},
@@ -186,10 +149,10 @@ func TestForgeTimingDoesNotClaimSuccessWhenAdoptionFails(t *testing.T) {
 		err: errors.New("block does not fit on the current chain tip"),
 	}
 	var logs bytes.Buffer
-	forger := newOutcomeForger(
+	forger := newTimingForger(
 		t,
 		&logs,
-		newOutcomeClock(),
+		newTimingClock(),
 		builder,
 		broadcaster,
 		nil,
@@ -219,7 +182,7 @@ func TestForgeTimingIsEmittedWhenTheEmptyFallbackIsAdopted(t *testing.T) {
 		slotsPerKESPeriod: 100,
 		slotEnd:           time.Now(),
 	}
-	forger := newOutcomeForger(
+	forger := newTimingForger(
 		t,
 		&logs,
 		clock,

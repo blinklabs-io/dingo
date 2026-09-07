@@ -43,12 +43,15 @@ func forgeTimingRecord(t *testing.T, logs string) map[string]any {
 	return nil
 }
 
+// newTimingForger builds a production forger whose logs land in logs. validator
+// may be nil for the tests that do not exercise self-validation.
 func newTimingForger(
 	t *testing.T,
 	logs *bytes.Buffer,
 	clock *retryTestSlotClock,
 	builder BlockBuilder,
 	broadcaster *forgerTestBroadcaster,
+	validator BlockValidator,
 ) *BlockForger {
 	t.Helper()
 	forger, err := NewBlockForger(ForgerConfig{
@@ -58,11 +61,23 @@ func newTimingForger(
 		LeaderChecker:    forgerTestLeader{},
 		BlockBuilder:     builder,
 		BlockBroadcaster: broadcaster,
+		BlockValidator:   validator,
 		SlotClock:        clock,
 		PromRegistry:     prometheus.NewRegistry(),
 	})
 	require.NoError(t, err)
 	return forger
+}
+
+// newTimingClock is the slot clock the timing tests share: slot 10, a chain
+// tip one slot behind, and a slot that has not run out.
+func newTimingClock() *retryTestSlotClock {
+	return &retryTestSlotClock{
+		currentSlot:       10,
+		chainTipSlot:      9,
+		slotsPerKESPeriod: 100,
+		slotEnd:           time.Now().Add(time.Second),
+	}
 }
 
 // TestForgeLogsTimingForEveryForge records what the field trace behind this
@@ -85,6 +100,7 @@ func TestForgeLogsTimingForEveryForge(t *testing.T) {
 		clock,
 		builder,
 		&forgerTestBroadcaster{},
+		nil,
 	)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
@@ -124,6 +140,7 @@ func TestForgeTimingReportsTheEmptyFallbackOutcome(t *testing.T) {
 		clock,
 		builder,
 		&forgerTestBroadcaster{},
+		nil,
 	)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
@@ -155,6 +172,7 @@ func TestForgeTimingReportsALostSlot(t *testing.T) {
 		clock,
 		builder,
 		&forgerTestBroadcaster{},
+		nil,
 	)
 
 	require.Error(t, forger.checkAndForgeProduction(context.Background()))
