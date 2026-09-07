@@ -6095,6 +6095,10 @@ Two contracts follow from that boundary:
 
 ### UTxO RPC (`api/utxorpc/`)
 
+Plutus datum and redeemer integer projections use the signed `int` variant
+within int64, positive magnitude bytes above it, and CBOR tag-3 magnitude
+`-1-n` for larger negative values. Projection does not mutate the source data.
+
 Each Connect message is bounded to `DefaultMaxRequestBody` (1 MiB) with
 Connect's `WithReadMaxBytes` option. The limit applies to both compressed wire
 bytes and decompressed message bytes before unary decoding reaches the
