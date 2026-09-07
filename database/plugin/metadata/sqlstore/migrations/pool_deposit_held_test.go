@@ -112,9 +112,9 @@ func TestDepositHeldBackfillCreditsRecordedDeposit(t *testing.T) {
 }
 
 // A legacy registration with no recorded deposit -- what the genesis and
-// Mithril-import paths write -- is credited with zero rather than left NULL, so
-// the refund reads a definite amount.
-func TestDepositHeldBackfillCreditsZeroForNullDeposit(t *testing.T) {
+// Mithril-import paths write -- remains unknown rather than being rewritten as
+// an authoritative zero.
+func TestDepositHeldBackfillLeavesUnknownDepositUnpopulated(t *testing.T) {
 	t.Parallel()
 	db, runTo := depositHeldBackfillDB(t)
 	keyHash := []byte("legacy-pool-key-hash-0000002")
@@ -125,8 +125,7 @@ func TestDepositHeldBackfillCreditsZeroForNullDeposit(t *testing.T) {
 	runTo(registry)
 
 	held := depositHeldValue(t, db, keyHash)
-	require.True(t, held.Valid)
-	require.Equal(t, "0", held.String)
+	require.False(t, held.Valid)
 }
 
 // A re-registration does not pay a second deposit. The backfill must carry
