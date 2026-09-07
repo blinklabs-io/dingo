@@ -105,6 +105,13 @@ const (
 	forgeTimingOutcomeLost = "lost"
 )
 
+// The "forge timing" line also carries an "adopted" field. outcome describes
+// what block production produced; adopted describes whether it reached the
+// chain. A block that is built and then dropped by self-validation or
+// rejected by AddBlock is outcome=forged/empty with adopted=false, which is
+// the combination an operator chasing a slot that yielded nothing needs to
+// tell apart from a slot that never built anything at all.
+
 // BlockForger coordinates block production for a stake pool.
 type BlockForger struct {
 	mode   Mode
@@ -1172,6 +1179,37 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	producingAt := time.Now()
 	f.logger.Info("producing block", "slot", currentSlot)
 
+	// One line per leader slot carrying the two intervals a lost or late
+	// slot is diagnosed from: how long the leader/KES/opcert gate and the
+	// Leios work took before "producing block", and how long selection
+	// then ran. Reconstructing those from block timestamps after the fact
+	// is the only reason the defect this fixes took a trace to find.
+	//
+	// Emitted from a defer so the line reports the slot's final outcome
+	// rather than an intermediate one. Every path from here on either
+	// adopts a block or loses the slot, and the ones that lose it late --
+	// a KES period that will not advance, self-validation dropping the
+	// block, AddBlock rejecting it -- used to emit nothing or, worse, a
+	// line claiming the block was forged.
+	forgeOutcome := forgeTimingOutcomeLost
+	forgeAdopted := false
+	forgeTxCount := 0
+	var buildStats forgeBuildStats
+	var buildDuration time.Duration
+	defer func() {
+		f.logger.Info(
+			"forge timing",
+			"slot", currentSlot,
+			"outcome", forgeOutcome,
+			"adopted", forgeAdopted,
+			"leader_check", leaderCheckedAt.Sub(forgeStartTime),
+			"pre_build", producingAt.Sub(leaderCheckedAt),
+			"build", buildDuration,
+			"attempts", buildStats.attempts,
+			"tx_count", forgeTxCount,
+		)
+	}()
+
 	// Ensure KES key is at correct period
 	if err := generation.updateKESPeriod(kesPeriod); err != nil {
 		f.incCouldNotForge()
@@ -1183,7 +1221,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// against the state that publication produced while the slot lasts,
 	// instead of abandoning the slot on the first abort.
 	leiosState.data = leiosBlockData
-	block, blockCbor, buildStats, err := f.buildBlockForSlot(
+	block, blockCbor, stats, err := f.buildBlockForSlot(
 		currentSlot,
 		kesPeriod,
 		&leiosState,
@@ -1193,34 +1231,17 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// against a new parent; the embedded-endorser-block bookkeeping below
 	// must follow the block that was actually built.
 	embeddedEb = leiosState.embeddedEb
-	buildDuration := time.Since(producingAt)
-	// One line per leader slot carrying the two intervals a lost or late
-	// slot is diagnosed from: how long the leader/KES/opcert gate and the
-	// Leios work took before "producing block", and how long selection
-	// then ran. Reconstructing those from block timestamps after the fact
-	// is the only reason the defect this fixes took a trace to find.
-	logForgeTiming := func(outcome string, txCount int) {
-		f.logger.Info(
-			"forge timing",
-			"slot", currentSlot,
-			"outcome", outcome,
-			"leader_check", leaderCheckedAt.Sub(forgeStartTime),
-			"pre_build", producingAt.Sub(leaderCheckedAt),
-			"build", buildDuration,
-			"attempts", buildStats.attempts,
-			"tx_count", txCount,
-		)
-	}
+	buildStats = stats
+	buildDuration = time.Since(producingAt)
 	if err != nil {
-		logForgeTiming(forgeTimingOutcomeLost, 0)
 		f.incCouldNotForge()
 		return fmt.Errorf("failed to build block: %w", err)
 	}
-	forgeOutcome := forgeTimingOutcomeForged
+	forgeOutcome = forgeTimingOutcomeForged
 	if buildStats.empty {
 		forgeOutcome = forgeTimingOutcomeEmpty
 	}
-	logForgeTiming(forgeOutcome, len(block.Transactions()))
+	forgeTxCount = len(block.Transactions())
 	// Key material is no longer needed after the block is signed. Zeroize the
 	// independently owned snapshot before invoking pluggable validation,
 	// adoption, or observer callbacks.
@@ -1287,6 +1308,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		f.incCouldNotForge()
 		return fmt.Errorf("failed to add block: %w", addErr)
 	}
+	forgeAdopted = true
 
 	// Publish only after durable acceptance. The observer republishes the
 	// block on the event bus and enqueues its Leios announcement for
@@ -1573,7 +1595,19 @@ func (f *BlockForger) buildBlockForSlot(
 				"selection_error", err,
 				"error", emptyErr,
 			)
-			return nil, nil, stats, err
+			// Report both halves of the failure. The selection
+			// abort explains why the fallback was reached, but it
+			// is the fallback's own error that explains why the
+			// slot produced nothing -- an embedder's BlockBuilder
+			// rejecting the empty-body constraint, say, or missing
+			// key material. Returning only the selection error
+			// leaves the caller's errors.Is/As blind to the actual
+			// cause and points whoever reads it at the mempool.
+			return nil, nil, stats, fmt.Errorf(
+				"%w; the transaction-free fallback also failed: %w",
+				err,
+				emptyErr,
+			)
 		}
 		stats.empty = true
 		f.observeSelectionFallback(forgeSelectionResultEmpty)
