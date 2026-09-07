@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -115,6 +116,15 @@ type Chain struct {
 	// takes a caller-supplied transaction whose commit the chain neither
 	// performs nor observes, so the same window remains open there.
 	batchCommitMutex sync.RWMutex
+
+	// headerSeq numbers the chain mutations that affect the header queue.
+	// It is stamped on ChainHeaderEventType events and, for a rollback,
+	// on the matching ChainRollbackEvent, so a consumer subscribed to both
+	// event types -- which the bus delivers on independent channels, with
+	// no ordering between them -- can still tell which mutation came
+	// first. Guarded by c.mutex, so the numbering matches the order the
+	// sequencer publishes in.
+	headerSeq uint64
 }
 
 type queuedHeader struct {
@@ -254,7 +264,105 @@ func (c *Chain) addBlockHeader(
 	}
 	// Add header
 	c.headers = append(c.headers, queued)
+	// Surface a Leios endorser-block announcement the moment its ranking
+	// block's header enters the queue. The apply-driven ChainUpdateEventType
+	// cannot serve this: applying an EB-announcing ranking block waits on
+	// fetching that same endorser block, so it lands long after the Leios
+	// vote window (measured from the announcing ranking block's slot) has
+	// closed. Emitting here rather than at the chainsync call site also
+	// covers the fork-resolution path, which queues headers through this
+	// same method and returns before the caller's ordinary bookkeeping.
+	// Enqueued under c.mutex so it is ordered against the invalidations
+	// emitted by rollbackLocked and ClearHeaders.
+	if evt, ok := leiosAnnouncementEvent(
+		header,
+		headerHash,
+		c.nextHeaderSeqLocked(),
+	); ok {
+		c.queueDeferredEventLocked(evt)
+	}
 	return nil
+}
+
+// leiosAnnouncementEvent builds the header-arrival event for a ranking-block
+// header that announces a Leios endorser block. Headers from eras without
+// announcements, and announcement-capable headers that announce nothing,
+// return false, so a chain carrying no Leios traffic pays one type assertion
+// per header and enqueues nothing.
+func leiosAnnouncementEvent(
+	header ledger.BlockHeader,
+	headerHash lcommon.Blake2b256,
+	seq uint64,
+) (event.Event, bool) {
+	if header == nil {
+		return event.Event{}, false
+	}
+	announcer, ok := header.(interface {
+		LeiosAnnouncement() (lcommon.Blake2b256, uint64, bool)
+	})
+	if !ok {
+		return event.Event{}, false
+	}
+	ebHash, ebSize, ok := announcer.LeiosAnnouncement()
+	if !ok {
+		return event.Event{}, false
+	}
+	return event.NewEvent(
+		ChainHeaderEventType,
+		ChainHeaderAnnouncementEvent{
+			Slot:   header.SlotNumber(),
+			RbHash: lcommon.NewBlake2b256(headerHash.Bytes()),
+			EbHash: ebHash,
+			EbSize: ebSize,
+			Seq:    seq,
+		},
+	), true
+}
+
+// headerInvalidationEvent builds the counterpart to leiosAnnouncementEvent:
+// every announcement above point describes a ranking block that is no longer
+// on our chain.
+func headerInvalidationEvent(
+	point ocommon.Point,
+	reason string,
+	seq uint64,
+	rbHashes []lcommon.Blake2b256,
+) event.Event {
+	return event.NewEvent(
+		ChainHeaderEventType,
+		ChainHeaderInvalidationEvent{
+			Point:    point,
+			RbHashes: rbHashes,
+			Reason:   reason,
+			Seq:      seq,
+		},
+	)
+}
+
+// queuedHeaderHashes names the headers currently in the queue, for an
+// invalidation that must identify them individually. Callers must hold
+// c.mutex.
+func (c *Chain) queuedHeaderHashes() []lcommon.Blake2b256 {
+	if len(c.headers) == 0 {
+		return nil
+	}
+	hashes := make([]lcommon.Blake2b256, 0, len(c.headers))
+	for _, queued := range c.headers {
+		hashes = append(
+			hashes,
+			lcommon.NewBlake2b256(queued.point.Hash),
+		)
+	}
+	return hashes
+}
+
+// nextHeaderSeqLocked stamps the next chain-mutation sequence number. Callers
+// must hold c.mutex, so the number orders mutations exactly as the sequencer
+// orders the events they produce. It starts at 1: zero means "unsequenced" to
+// consumers.
+func (c *Chain) nextHeaderSeqLocked() uint64 {
+	c.headerSeq++
+	return c.headerSeq
 }
 
 func (c *Chain) AddBlock(
@@ -292,6 +400,12 @@ func (c *Chain) AddLocalBlock(block ledger.Block) error {
 	if err != nil {
 		return err
 	}
+	// addBlockLocked queued a header invalidation for the peer headers this
+	// block discarded on the chain-level sequencer. Drain it here, with
+	// c.mutex released: forging is the only caller, it runs on the scheduler
+	// goroutine rather than under a ledger mutex, and nothing else on this
+	// path is guaranteed to drain afterwards.
+	c.PublishPendingChainUpdates()
 	if c.eventBus != nil && evt.Type != "" {
 		c.eventBus.Publish(ChainUpdateEventType, evt)
 	}
@@ -499,9 +613,11 @@ func (c *Chain) addBlockLocked(
 		c.blocks = append(c.blocks, tmpPoint)
 	}
 	// Remove matching header entry, if any
+	var discardedHeaders []lcommon.Blake2b256
 	if matchPendingHeader && len(c.headers) > 0 {
 		c.headers = slices.Delete(c.headers, 0, 1)
 	} else if !matchPendingHeader {
+		discardedHeaders = c.queuedHeaderHashes()
 		c.headers = c.headers[:0]
 	}
 	// Update tip
@@ -511,6 +627,40 @@ func (c *Chain) addBlockLocked(
 	}
 	c.tipBlockIndex = newBlockIndex
 	c.mutationGeneration++
+	// A locally forged block discards the queued peer headers without
+	// rolling anything back, so nothing else voids the Leios announcements
+	// they carried: the chain.update this produces is a block add, not a
+	// rollback. The chain grew, so those headers can sit at or below the
+	// new tip and Point cannot name them -- RbHashes does. Enqueued under
+	// c.mutex like every other header-lifecycle event, so it stays ordered
+	// against the announcements addBlockHeader queues.
+	if len(discardedHeaders) > 0 {
+		c.queueDeferredEventLocked(headerInvalidationEvent(
+			c.currentTip.Point,
+			HeaderInvalidationLocalBlock,
+			c.nextHeaderSeqLocked(),
+			discardedHeaders,
+		))
+	}
+	// A locally forged block never passes through addBlockHeader, so its own
+	// announcement would otherwise be armed only from ChainUpdateEventType,
+	// on a topic the consumer selects independently of this one. That is a
+	// race it cannot win when the block competes with a discarded peer
+	// header at the same slot: the peer's vote occupies the (slot, voter)
+	// vote id, the block's arming arrives first and its vote is rejected as
+	// a duplicate, and the invalidation above then frees the id with nothing
+	// left to retry. Announcing it here, sequenced immediately behind that
+	// invalidation, means the id is always free before the consumer arms it.
+	// The apply-driven path stays as an idempotent backstop.
+	if !matchPendingHeader {
+		if evt, ok := leiosAnnouncementEvent(
+			block.Header(),
+			lcommon.NewBlake2b256(blockHashBytes),
+			c.nextHeaderSeqLocked(),
+		); ok {
+			c.queueDeferredEventLocked(evt)
+		}
+	}
 	if notifyWaiters {
 		c.notifyWaitingIterators()
 	}
@@ -993,20 +1143,16 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 	if c == nil {
 		return errors.New("chain is nil")
 	}
-	pendingEvents, err := c.rollbackLocked(point, false)
-	if err != nil {
+	if _, err := c.rollbackLocked(point); err != nil {
 		return err
 	}
-	// Publish events after locks are released to prevent deadlocks
-	// when subscribers call back into chain/manager state. The
-	// mutex-holding ledger rollback path uses RollbackDeferred instead,
-	// which returns these events for the ledger to publish after it
-	// releases chainsyncMutex.
-	if c.eventBus != nil {
-		for _, evt := range pendingEvents {
-			c.eventBus.Publish(evt.Type, evt)
-		}
-	}
+	// rollbackLocked queued this rollback's events on the chain-level
+	// sequencer under c.mutex, so draining here -- with the lock released,
+	// to avoid deadlocking a subscriber that calls back into chain/manager
+	// state -- publishes them in true chain-mutation order relative to any
+	// concurrent deferred add. Publishing them inline instead would let an
+	// add that mutated the chain after this rollback be published before it.
+	c.PublishPendingChainUpdates()
 	return nil
 }
 
@@ -1032,7 +1178,7 @@ func (c *Chain) RollbackDeferred(
 	if c == nil {
 		return nil, errors.New("chain is nil")
 	}
-	return c.rollbackLocked(point, true)
+	return c.rollbackLocked(point)
 }
 
 // rollbackForkDepth returns the number of blocks a rollback to
@@ -1254,9 +1400,12 @@ func (c *Chain) ValidateRollback(point ocommon.Point) error {
 
 // rollbackLocked performs all rollback logic under locks and returns
 // events to be published by the caller after locks are released.
+// rollbackLocked performs the rollback and enqueues the resulting events on the
+// chain-level sequencer. Both entry points publish through that sequencer; they
+// differ only in who drains it -- RollbackDeferred's caller once it releases
+// its outer ledger mutex, or Rollback itself before it returns.
 func (c *Chain) rollbackLocked(
 	point ocommon.Point,
-	deferred bool,
 ) ([]event.Event, error) {
 	// Wait for any chain-owned batch transaction that has already applied to
 	// the in-memory chain to conclude, so the removal loop below cannot ask
@@ -1287,7 +1436,22 @@ func (c *Chain) rollbackLocked(
 		if idx >= 0 {
 			// Rollback point is a queued header. Drop only the headers
 			// after it and leave the matched header itself queued.
+			discarded := c.queuedHeaderHashes()[idx+1:]
+			dropped := len(discarded)
 			c.headers = slices.Delete(c.headers, idx+1, len(c.headers))
+			// Those headers never become blocks, so any announcement
+			// they carried is void. This path returns no chain.update
+			// event at all -- no block was removed -- so without this
+			// the announcements would stay armed with nothing left to
+			// void them.
+			if dropped > 0 {
+				c.queueDeferredEventLocked(headerInvalidationEvent(
+					point,
+					HeaderInvalidationRollback,
+					c.nextHeaderSeqLocked(),
+					discarded,
+				))
+			}
 			return nil, nil
 		}
 	}
@@ -1383,6 +1547,7 @@ func (c *Chain) rollbackLocked(
 		c.lastCommonBlockIndex = rollbackBlockIndex
 	}
 	// Clear out any headers
+	discardedHeaders := c.queuedHeaderHashes()
 	c.headers = slices.Delete(c.headers, 0, len(c.headers))
 	// Update tip
 	c.currentTip = ochainsync.Tip{
@@ -1429,6 +1594,24 @@ func (c *Chain) rollbackLocked(
 	c.notifyWaitingIterators()
 	// Build events for caller to publish after locks are released
 	var pendingEvents []event.Event
+	// The header invalidation always goes on the chain-level sequencer,
+	// deferred or not, and is never handed back to the caller. Its only
+	// ordering requirement is against the announcements queued by
+	// addBlockHeader, which are on that same sequencer; publishing it
+	// inline from Rollback would bypass the sequencer and could place it
+	// ahead of an announcement that was queued before it. Non-deferred
+	// Rollback drains the sequencer itself once the lock is released.
+	//
+	// It is emitted even when only queued headers were dropped: a header
+	// that never became a block still published an announcement, and the
+	// ChainRollbackEvent below is deliberately block-only.
+	rollbackSeq := c.nextHeaderSeqLocked()
+	c.queueDeferredEventLocked(headerInvalidationEvent(
+		point,
+		HeaderInvalidationRollback,
+		rollbackSeq,
+		discardedHeaders,
+	))
 	if len(rolledBackBlocks) > 0 {
 		// Rollback event - only emit when blocks were actually removed
 		pendingEvents = append(
@@ -1438,6 +1621,7 @@ func (c *Chain) rollbackLocked(
 				ChainRollbackEvent{
 					Point:            point,
 					RolledBackBlocks: rolledBackBlocks,
+					Seq:              rollbackSeq,
 				},
 			),
 		)
@@ -1457,18 +1641,22 @@ func (c *Chain) rollbackLocked(
 			)
 		}
 	}
-	// Deferred callers (the mutex-holding chainsync rollback path) publish
-	// through the chain-level sequencer rather than inline. Enqueue while
+	// Both modes publish through the chain-level sequencer. Enqueue while
 	// c.mutex is still held so this rollback is sequenced against concurrent
 	// blockfetch adds in true mutation order -- the rollback's chain.update
 	// then cannot be published ahead of an add that mutated the chain before
-	// it, or behind one that mutated after. The caller drains after releasing
-	// chainsyncMutex. See the pendingUpdates field and
-	// PublishPendingChainUpdates.
-	if deferred {
-		for _, evt := range pendingEvents {
-			c.queueDeferredEventLocked(evt)
-		}
+	// it, or behind one that mutated after.
+	//
+	// The non-deferred entry point used to publish these inline after
+	// draining, which reintroduced exactly that inversion: a deferred add
+	// that mutated the chain *after* this rollback is already on the
+	// sequencer, so the drain published it first and the rollback followed,
+	// inverting mutation order for the chain.update subscriber. Deferred
+	// callers drain after releasing their outer ledger mutex; Rollback drains
+	// itself. The slice is still returned for callers and tests that inspect
+	// it. See the pendingUpdates field and PublishPendingChainUpdates.
+	for _, evt := range pendingEvents {
+		c.queueDeferredEventLocked(evt)
 	}
 	return pendingEvents, nil
 }
@@ -1482,7 +1670,21 @@ func (c *Chain) ClearHeaders() {
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	discarded := c.queuedHeaderHashes()
+	hadHeaders := len(discarded) > 0
 	c.headers = c.headers[:0]
+	// Discarded headers never become blocks, so any announcement they
+	// carried is void, and no rollback is published for them because no
+	// block was ever added. Everything at or below the block tip survives;
+	// the queue held only what was above it.
+	if hadHeaders {
+		c.queueDeferredEventLocked(headerInvalidationEvent(
+			c.currentTip.Point,
+			HeaderInvalidationQueueCleared,
+			c.nextHeaderSeqLocked(),
+			discarded,
+		))
+	}
 }
 
 // RecentPoints returns up to count recent chain points in descending

@@ -20,18 +20,21 @@ import (
 )
 
 type voteManagerMetrics struct {
-	votesReceivedTotal     prometheus.Counter
-	votesRejectedTotal     *prometheus.CounterVec
-	votesEquivocationTotal prometheus.Counter
-	ebQuorumReachedTotal   prometheus.Counter
-	certificatesBuiltTotal prometheus.Counter
-	committeeSize          prometheus.Gauge
-	voteRecordsCount       prometheus.Gauge
+	votesReceivedTotal   prometheus.Counter
+	votesRejectedTotal   *prometheus.CounterVec
+	votesNotEmittedTotal *prometheus.CounterVec
+	//nolint:lll
+	headerStreamResubscribeTotal prometheus.Counter
+	votesEquivocationTotal       prometheus.Counter
+	ebQuorumReachedTotal         prometheus.Counter
+	certificatesBuiltTotal       prometheus.Counter
+	committeeSize                prometheus.Gauge
+	voteRecordsCount             prometheus.Gauge
 }
 
 func initVoteManagerMetrics(reg prometheus.Registerer) *voteManagerMetrics {
 	factory := promauto.With(reg)
-	return &voteManagerMetrics{
+	m := &voteManagerMetrics{
 		votesReceivedTotal: factory.NewCounter(prometheus.CounterOpts{
 			Name: "dingo_metrics_leios_votes_received_total",
 			Help: "number of leios votes received from peers or produced locally",
@@ -40,6 +43,14 @@ func initVoteManagerMetrics(reg prometheus.Registerer) *voteManagerMetrics {
 			Name: "dingo_metrics_leios_votes_rejected_total",
 			Help: "number of leios votes rejected, by reason",
 		}, []string{"reason"}),
+		votesNotEmittedTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "dingo_metrics_leios_votes_not_emitted_total",
+			Help: "number of times this node declined to emit its own leios vote, by reason",
+		}, []string{"reason"}),
+		headerStreamResubscribeTotal: factory.NewCounter(prometheus.CounterOpts{
+			Name: "dingo_metrics_leios_header_stream_resubscribe_total",
+			Help: "number of times the ordered leios header stream closed unexpectedly and was resubscribed",
+		}),
 		votesEquivocationTotal: factory.NewCounter(prometheus.CounterOpts{
 			Name: "dingo_metrics_leios_votes_equivocation_total",
 			Help: "number of equivocating leios votes dropped (same voter and slot, different endorser block)",
@@ -61,6 +72,14 @@ func initVoteManagerMetrics(reg prometheus.Registerer) *voteManagerMetrics {
 			Help: "current size of the vote dedup record ledger",
 		}),
 	}
+	// Materialize every reason label so rate()/increase() have a series
+	// from startup rather than only after the first occurrence. The whole
+	// point of this counter is to answer "why is this node not voting?" on
+	// a node that has never voted.
+	for _, reason := range voteNotEmittedReasons {
+		m.votesNotEmittedTotal.WithLabelValues(reason).Add(0)
+	}
+	return m
 }
 
 type pipelineMetrics struct {

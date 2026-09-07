@@ -77,7 +77,57 @@ const (
 	// harness/devnet mode where slotProvider is nil and EpochForSlot
 	// projects arbitrarily far.
 	committeeInFlightMaxEpochs = 16
+	// slotWindowWarnInterval throttles the seated-but-outside-vote-window
+	// warning so catching up cannot flood the log; the
+	// dingo_metrics_leios_votes_not_emitted_total counter carries the rate.
+	slotWindowWarnInterval = 30 * time.Second
 )
+
+// Reasons recorded by dingo_metrics_leios_votes_not_emitted_total. They
+// partition every path on which this node declines to emit its own vote for
+// an announcement it has both observed and acquired the endorser block for.
+const (
+	// voteNotEmittedDuplicate: a vote for this announcing ranking block was
+	// already emitted. Expected -- an announcement is armed from the header
+	// and again when the block applies.
+	voteNotEmittedDuplicate = "duplicate"
+	// voteNotEmittedNoKey: local vote emission is not configured (no pool
+	// key hash or no signing key).
+	voteNotEmittedNoKey = "no_key"
+	// voteNotEmittedSlotWindow: the announcing ranking block is outside the
+	// vote window.
+	voteNotEmittedSlotWindow = "slot_window"
+	// voteNotEmittedCommitteeUnavailable: the epoch's committee could not be
+	// computed.
+	voteNotEmittedCommitteeUnavailable = "committee_unavailable"
+	// voteNotEmittedNotSeated: the local pool holds no seat this epoch.
+	voteNotEmittedNotSeated = "not_seated"
+	// voteNotEmittedUnknownMember: the resolved voter id has no committee
+	// member entry.
+	voteNotEmittedUnknownMember = "unknown_member"
+	// voteNotEmittedKeyMismatch: the configured key no longer matches the
+	// public key resolved for this pool.
+	voteNotEmittedKeyMismatch = "key_mismatch"
+	// voteNotEmittedSigningFailed: signing the vote failed.
+	voteNotEmittedSigningFailed = "signing_failed"
+	// voteNotEmittedNotInserted: the signed vote was refused by the store
+	// (dedup or equivocation guard).
+	voteNotEmittedNotInserted = "not_inserted"
+)
+
+// voteNotEmittedReasons is every label the counter can carry, so all of them
+// can be materialized at startup.
+var voteNotEmittedReasons = []string{
+	voteNotEmittedDuplicate,
+	voteNotEmittedNoKey,
+	voteNotEmittedSlotWindow,
+	voteNotEmittedCommitteeUnavailable,
+	voteNotEmittedNotSeated,
+	voteNotEmittedUnknownMember,
+	voteNotEmittedKeyMismatch,
+	voteNotEmittedSigningFailed,
+	voteNotEmittedNotInserted,
+}
 
 // ErrVoteManagerStopped is returned by blocking calls when the vote
 // manager is not running. committeeAndParamsForEpoch also returns it to a
@@ -258,6 +308,14 @@ type announcementRecord struct {
 	epoch  uint64
 	ebHash lcommon.Blake2b256
 	seenAt time.Time
+	// headerSeq is the chain-mutation sequence number of the header
+	// admission that armed this announcement, or zero when it was armed
+	// from the apply-path backstop rather than the ordered header stream.
+	// It is what lets handleRollback tell state belonging to the chain
+	// this rollback abandons from state belonging to the chain that
+	// replaced it. Never decreases: re-observing the same announcing
+	// ranking block keeps the highest sequence seen.
+	headerSeq uint64
 }
 
 type readyAnnouncement struct {
@@ -441,6 +499,18 @@ type VoteManager struct {
 	// configuration. Every initial lookup or retry receives a generation when
 	// it starts; only the newest generation may change voting state.
 	votingLookupGeneration uint64
+
+	// lastSlotWindowWarn throttles the seated-but-outside-vote-window
+	// warning. Guarded by mu.
+	lastSlotWindowWarn time.Time
+
+	// lastHeaderStreamSeq is the highest chain-mutation sequence number
+	// applied from the ordered header stream. Because that stream is a
+	// single event type, everything up to this number has been applied in
+	// chain-mutation order, which is what lets handleRollback tell a
+	// rollback it has already superseded from one it has not. Guarded by
+	// mu.
+	lastHeaderStreamSeq uint64
 }
 
 type managerSubscription struct {
@@ -547,12 +617,14 @@ func (m *VoteManager) Start(ctx context.Context) error {
 		event.EpochTransitionEventType,
 	)
 	chainSubId, chainCh := m.eventBus.Subscribe(chain.ChainUpdateEventType)
+	headerSubId, headerCh := m.subscribeHeaderStream()
 	m.subs = []managerSubscription{
 		{eventType: event.EpochTransitionEventType, id: epochSubId},
 		{eventType: chain.ChainUpdateEventType, id: chainSubId},
+		{eventType: chain.ChainHeaderEventType, id: headerSubId},
 	}
 	m.loopWg.Go(func() {
-		m.eventLoop(childCtx, epochCh, chainCh)
+		m.eventLoop(childCtx, epochCh, chainCh, headerCh)
 		// If the loop exits because the parent context was cancelled
 		// (not via Stop), reset running and unsubscribe so Start can
 		// be called again without leaking a stale subscriber.
@@ -2342,19 +2414,46 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 	votingGeneration := m.votingLookupGeneration
 	_, alreadyVoted := m.votedAnnouncements[rbHash]
 	m.mu.Unlock()
-	if len(votingPool) == 0 || votingKey == nil || alreadyVoted {
+	if alreadyVoted {
+		m.noteVoteNotEmitted(voteNotEmittedDuplicate)
+		return
+	}
+	if len(votingPool) == 0 || votingKey == nil {
+		m.noteVoteNotEmitted(voteNotEmittedNoKey)
 		return
 	}
 	if err := m.slotWindowCheck(record.slot); err != nil {
-		m.logger.Debug(
-			"announcing ranking block outside vote window, not voting",
-			"slot", record.slot,
-			"error", err,
-		)
+		m.noteVoteNotEmitted(voteNotEmittedSlotWindow)
+		// A seated node holding a key that never votes is otherwise
+		// silently green: committee size, key loaded, EBs observed and
+		// certificates built all read healthy. Warn in that case, but
+		// throttle it -- catch-up replays every announcement it passes
+		// -- and let the counter carry the true rate.
+		//
+		// The throttle is checked before the seating lookup: computing a
+		// committee can hit the stake provider, and a failed lookup is
+		// deliberately not memoized.
+		if m.slotWindowWarnDue() &&
+			m.seatedForEpoch(record.epoch, votingPool) {
+			m.markSlotWindowWarned()
+			m.logger.Warn(
+				"announcing ranking block outside vote window, not voting; this node is seated on the leios committee and holds a voting key",
+				"slot", record.slot,
+				"epoch", record.epoch,
+				"error", err,
+			)
+		} else {
+			m.logger.Debug(
+				"announcing ranking block outside vote window, not voting",
+				"slot", record.slot,
+				"error", err,
+			)
+		}
 		return
 	}
 	entry, err := m.committeeAndParamsForEpoch(record.epoch)
 	if err != nil {
+		m.noteVoteNotEmitted(voteNotEmittedCommitteeUnavailable)
 		m.logger.Debug(
 			"leios committee unavailable, not voting",
 			"slot", record.slot,
@@ -2366,6 +2465,7 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 	committee := entry.committee
 	voterId, ok := committee.VoterIdFor(votingPool)
 	if !ok {
+		m.noteVoteNotEmitted(voteNotEmittedNotSeated)
 		m.logger.Debug(
 			"local pool is not a leios committee member, not voting",
 			"slot", record.slot,
@@ -2375,6 +2475,7 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 	}
 	member, ok := committee.Member(voterId)
 	if !ok {
+		m.noteVoteNotEmitted(voteNotEmittedUnknownMember)
 		return
 	}
 	// A vote this node marks verified=true is trusted without a
@@ -2386,6 +2487,7 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 	// signature check would accept.
 	resolved, resolvedOK := m.resolveVoterKey(entry, member.PoolKeyHash)
 	if !resolvedOK || !resolved.Equal(votingKey.PublicKey()) {
+		m.noteVoteNotEmitted(voteNotEmittedKeyMismatch)
 		m.logger.Error(
 			"configured leios voting key no longer matches the resolved public key for this pool, not voting",
 			"slot",
@@ -2398,6 +2500,7 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 	msg := PrototypeVoteMessageBytes(rbHash)
 	sig, err := m.signVote(votingKey, msg)
 	if err != nil {
+		m.noteVoteNotEmitted(voteNotEmittedSigningFailed)
 		m.logger.Error(
 			"failed to sign leios vote",
 			"slot", record.slot,
@@ -2440,8 +2543,57 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 				VoteSignature:    sig,
 			}},
 		))
+	} else {
+		m.noteVoteNotEmitted(voteNotEmittedNotInserted)
 	}
 	m.prototypeEmissionMu.Unlock()
+}
+
+// noteVoteNotEmitted counts one declined local vote emission. The reasons
+// partition every early return in emitPrototypeVoteLocked, so the sum of this
+// counter plus dingo_metrics_leios_votes_received_total's locally produced
+// votes accounts for every announcement this node considered voting on.
+func (m *VoteManager) noteVoteNotEmitted(reason string) {
+	if m.metrics == nil {
+		return
+	}
+	m.metrics.votesNotEmittedTotal.WithLabelValues(reason).Inc()
+}
+
+// seatedForEpoch reports whether votingPool holds a seat on the epoch's
+// committee. It is used only to decide log severity, so any lookup failure is
+// reported as "not seated" rather than surfaced.
+func (m *VoteManager) seatedForEpoch(epoch uint64, votingPool []byte) bool {
+	if len(votingPool) == 0 {
+		return false
+	}
+	entry, err := m.committeeAndParamsForEpoch(epoch)
+	if err != nil || entry == nil || entry.committee == nil {
+		return false
+	}
+	_, ok := entry.committee.VoterIdFor(votingPool)
+	return ok
+}
+
+// slotWindowWarnDue rate-limits the seated-but-not-voting warning. Catching up
+// replays every announcement between the local tip and the network tip, and
+// every one of those is legitimately outside the vote window.
+//
+// Peek and commit are separate so the seating lookup, which can reach the
+// stake provider, only runs for a declination that is actually going to be
+// logged. Two emissions racing between the two calls costs at most an extra
+// warning line.
+func (m *VoteManager) slotWindowWarnDue() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastSlotWindowWarn.IsZero() ||
+		m.now().Sub(m.lastSlotWindowWarn) >= slotWindowWarnInterval
+}
+
+func (m *VoteManager) markSlotWindowWarned() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastSlotWindowWarn = m.now()
 }
 
 // RemoveConnection drops the vote-serving cursor for a closed connection.
@@ -2451,12 +2603,13 @@ func (m *VoteManager) RemoveConnection(connKey string) {
 	delete(m.cursors, connKey)
 }
 
-// eventLoop processes epoch transition and chain update events until the
-// context is cancelled or both subscriptions close.
+// eventLoop processes epoch transition, chain update and header announcement
+// events until the context is cancelled or a subscription closes.
 func (m *VoteManager) eventLoop(
 	ctx context.Context,
 	epochCh <-chan event.Event,
 	chainCh <-chan event.Event,
+	headerCh <-chan event.Event,
 ) {
 	for {
 		select {
@@ -2480,10 +2633,261 @@ func (m *VoteManager) eventLoop(
 			case chain.ChainBlockEvent:
 				m.handleChainBlock(data)
 			}
+		case evt, ok := <-headerCh:
+			if !ok {
+				// The header stream is ordering-critical: losing it
+				// silently would put the node back to never voting,
+				// which is the failure this stream exists to fix. It
+				// is subscribed with SubscriberBackpressureBlock so
+				// the bus does not detach it under load, leaving Stop
+				// (which closes it after clearing running) as the
+				// expected closer. Anything else is recovered.
+				replacement, ok := m.replaceHeaderStream()
+				if !ok {
+					return
+				}
+				headerCh = replacement
+				continue
+			}
+			switch data := evt.Data.(type) {
+			case chain.ChainHeaderAnnouncementEvent:
+				m.handleChainHeaderAnnouncement(data)
+			case chain.ChainHeaderInvalidationEvent:
+				m.handleChainHeaderInvalidation(data)
+			}
 		}
 	}
 }
 
+// subscribeHeaderStream subscribes to the ordered header-lifecycle stream.
+//
+// The buffer and the blocking backpressure policy match what ledger/state.go
+// uses for chain.update, and for the same reason: this stream is
+// ordering-critical. An announcement and the invalidation that voids it are
+// only safe to act on in the order the chain produced them, so a subscriber
+// that the bus detached mid-stream (the default policy) could arm a vote for a
+// ranking block that had already left our chain. Blocking backpressures the
+// publisher instead, and the buffer is sized for bulk catch-up, where every
+// admitted header is replayed through this stream.
+func (m *VoteManager) subscribeHeaderStream() (
+	event.EventSubscriberId,
+	<-chan event.Event,
+) {
+	return m.eventBus.SubscribeWithBufferPolicy(
+		chain.ChainHeaderEventType,
+		event.EventQueueSize,
+		event.SubscriberBackpressureBlock,
+	)
+}
+
+// replaceHeaderStream re-subscribes after the header channel closed
+// unexpectedly. It reports false when the manager is stopping or the bus is
+// gone, in which case the closure was the expected teardown and the event loop
+// should exit.
+func (m *VoteManager) replaceHeaderStream() (<-chan event.Event, bool) {
+	m.mu.Lock()
+	stopping := m.stopping || !m.running
+	m.mu.Unlock()
+	if stopping {
+		return nil, false
+	}
+	subId, ch := m.subscribeHeaderStream()
+	if ch == nil {
+		// The bus is stopped or closed; nothing to recover to.
+		return nil, false
+	}
+	m.mu.Lock()
+	replaced := false
+	for i := range m.subs {
+		if m.subs[i].eventType == chain.ChainHeaderEventType {
+			m.subs[i].id = subId
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		m.subs = append(m.subs, managerSubscription{
+			eventType: chain.ChainHeaderEventType,
+			id:        subId,
+		})
+	}
+	m.mu.Unlock()
+	if m.metrics != nil {
+		m.metrics.headerStreamResubscribeTotal.Inc()
+	}
+	m.logger.Warn(
+		"leios header stream closed unexpectedly, resubscribed; announcements in the gap are armed only when their ranking block applies",
+	)
+	return ch, true
+}
+
+// handleChainHeaderInvalidation drops announcements for ranking blocks that
+// left our chain without becoming blocks -- a rollback, or the header queue
+// being discarded -- together with everything derived from them: the votes
+// this node emitted for them, their tallies, their dedup records, and the
+// endorser-block acquisitions no surviving announcement still needs. See
+// dropAnnouncementDerivedStateLocked, which does that cleanup keyed by
+// announcing ranking block rather than by slot.
+//
+// It is the counterpart to handleChainHeaderAnnouncement and arrives on the
+// same event type, so the two can never be observed out of order: an
+// announcement re-armed after an invalidation was genuinely re-admitted to the
+// chain, and one armed before it is genuinely gone.
+//
+// The block-level rollback on chain.update (handleRollback) still performs its
+// own slot-keyed sweep for state this handler cannot see -- peer votes for
+// slots above the rollback point that no local announcement accounts for. The
+// two are delivered on independent channels, so neither may depend on running
+// before the other; both are therefore idempotent, and handleRollback is
+// additionally sequence-guarded so it cannot undo what this handler has
+// already let through.
+func (m *VoteManager) handleChainHeaderInvalidation(
+	evt chain.ChainHeaderInvalidationEvent,
+) {
+	// prototypeEmissionMu linearizes this against an in-flight local
+	// emission, exactly as handleRollback does: without it a vote being
+	// signed for an announcement invalidated here could be committed after
+	// the cleanup ran.
+	m.prototypeEmissionMu.Lock()
+	defer m.prototypeEmissionMu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if evt.Seq > m.lastHeaderStreamSeq {
+		m.lastHeaderStreamSeq = evt.Seq
+	}
+	// Two rules, because a chain can lose headers by shrinking or by
+	// growing past them. Point covers the shrink (rollback, discarded
+	// queue): everything above it is gone. RbHashes covers the grow (a
+	// locally forged block replacing queued peer headers), where the
+	// discarded headers can sit at or below the new tip and no point-based
+	// rule can name them.
+	named := make(map[lcommon.Blake2b256]struct{}, len(evt.RbHashes))
+	for _, rbHash := range evt.RbHashes {
+		named[rbHash] = struct{}{}
+	}
+	invalidated := make(map[lcommon.Blake2b256]struct{})
+	for rbHash, record := range m.announcements {
+		_, byHash := named[rbHash]
+		if !byHash && record.slot <= evt.Point.Slot {
+			continue
+		}
+		delete(m.announcements, rbHash)
+		delete(m.votedAnnouncements, rbHash)
+		m.removePendingAnnouncementLocked(rbHash)
+		invalidated[rbHash] = struct{}{}
+	}
+	if len(invalidated) == 0 {
+		return
+	}
+	droppedVotes := m.dropAnnouncementDerivedStateLocked(invalidated)
+	m.updateRecordsGaugeLocked()
+	m.logger.Debug(
+		"dropped leios announcements for headers no longer on our chain",
+		"point_slot", evt.Point.Slot,
+		"reason", evt.Reason,
+		"named_headers", len(evt.RbHashes),
+		"dropped_announcements", len(invalidated),
+		"dropped_votes", droppedVotes,
+	)
+}
+
+// dropAnnouncementDerivedStateLocked removes the votes, tallies and dedup
+// records that belong to the given announcing ranking blocks, and the
+// endorser-block acquisitions those announcements were the only reason to
+// keep. Callers must hold mu.
+//
+// It is keyed by announcing ranking block, not by slot, so a competing
+// announcement at the same slot -- the replacement chain's -- keeps its own
+// vote, tally and record. That is stricter than the slot-wide sweep
+// handleRollback performs for block rollbacks, and it is what frees the
+// (slot, voter) vote id so a re-vote on the replacement chain is accepted
+// rather than being read as equivocation.
+//
+// A local vote already published to peers is not retracted: the prototype has
+// no vote-retraction message, and none is needed. A vote names the announcing
+// ranking block, so a peer whose chain does not hold that block does not tally
+// it; peers that do hold it are on the fork we abandoned. Dropping the local
+// copy is what matters, because it is what would otherwise keep occupying the
+// vote id and be served to peers as if it were current.
+func (m *VoteManager) dropAnnouncementDerivedStateLocked(
+	invalidated map[lcommon.Blake2b256]struct{},
+) int {
+	droppedIds := make(map[lcommon.LeiosVoteId]struct{})
+	keptEbs := make(map[lcommon.Blake2b256]struct{})
+	for id, rec := range m.voteRecords {
+		if _, ok := invalidated[rec.announcingRbHash]; ok {
+			delete(m.voteRecords, id)
+			droppedIds[id] = struct{}{}
+		}
+	}
+	for key := range m.tallies {
+		if _, ok := invalidated[key.announcingRbHash]; ok {
+			delete(m.tallies, key)
+		}
+	}
+	if len(droppedIds) > 0 {
+		m.filterVotesLocked(func(sv *storedVote) bool {
+			_, dropped := droppedIds[lcommon.LeiosVoteId{
+				SlotNo:  sv.vote.SlotNo,
+				VoterId: sv.vote.VoterId,
+			}]
+			return !dropped
+		})
+	}
+	// An acquired endorser block is kept while any surviving announcement
+	// still refers to it: the same EB can be announced by more than one
+	// ranking block, and re-fetching it would be wasted work.
+	for _, record := range m.announcements {
+		keptEbs[record.ebHash] = struct{}{}
+	}
+	for _, rec := range m.voteRecords {
+		keptEbs[rec.ebHash] = struct{}{}
+	}
+	for ebHash := range m.acquiredEbs {
+		if _, keep := keptEbs[ebHash]; !keep {
+			delete(m.acquiredEbs, ebHash)
+		}
+	}
+	return len(droppedIds)
+}
+
+// handleChainHeaderAnnouncement arms an announcement from the chainsync
+// roll-forward header, roughly thirty slots before the announcing ranking
+// block finishes applying.
+//
+// The announcing ranking block has not been validated or applied here and may
+// still be rolled back. That is deliberate and matches what a Leios vote
+// attests to: the vote binds the announced endorser block to the announcing
+// ranking block's hash, not to that block's ledger validity. If the header is
+// later rolled back, handleRollback drops the announcement, the emitted vote,
+// and its dedup marker together, exactly as it already does for announcements
+// armed from block application, which also permits a re-vote on the
+// replacement chain.
+func (m *VoteManager) handleChainHeaderAnnouncement(
+	evt chain.ChainHeaderAnnouncementEvent,
+) {
+	m.advanceHeaderStreamSeq(evt.Seq)
+	m.observeAnnouncement(evt.Slot, evt.RbHash, evt.EbHash, evt.Seq)
+}
+
+// advanceHeaderStreamSeq records how far the ordered header stream has been
+// applied.
+func (m *VoteManager) advanceHeaderStreamSeq(seq uint64) {
+	if seq == 0 {
+		return
+	}
+	m.mu.Lock()
+	if seq > m.lastHeaderStreamSeq {
+		m.lastHeaderStreamSeq = seq
+	}
+	m.mu.Unlock()
+}
+
+// handleChainBlock arms an announcement from an applied ranking block. It is a
+// backstop for blocks that reach the chain without a chainsync roll-forward
+// header (local forging, block replay); for announcements that did arrive by
+// header, ObserveAnnouncement is idempotent and emitPrototypeVoteLocked
+// dedups, so this is a no-op.
 func (m *VoteManager) handleChainBlock(evt chain.ChainBlockEvent) {
 	block, err := evt.Block.Decode()
 	if err != nil {
@@ -2516,6 +2920,18 @@ func (m *VoteManager) ObserveAnnouncement(
 	rbHash lcommon.Blake2b256,
 	ebHash lcommon.Blake2b256,
 ) {
+	m.observeAnnouncement(slot, rbHash, ebHash, 0)
+}
+
+// observeAnnouncement is ObserveAnnouncement with the chain-mutation sequence
+// number of the header admission that produced it. headerSeq is zero for
+// announcements that did not come from the ordered header stream.
+func (m *VoteManager) observeAnnouncement(
+	slot uint64,
+	rbHash lcommon.Blake2b256,
+	ebHash lcommon.Blake2b256,
+	headerSeq uint64,
+) {
 	epoch, err := m.epochProvider.EpochForSlot(slot)
 	if err != nil {
 		m.logger.Debug(
@@ -2527,9 +2943,17 @@ func (m *VoteManager) ObserveAnnouncement(
 	}
 	record := announcementRecord{
 		slot: slot, epoch: epoch, ebHash: ebHash, seenAt: m.now(),
+		headerSeq: headerSeq,
 	}
 	m.mu.Lock()
 	m.prunePrototypeStateLocked(record.seenAt)
+	// The apply-path backstop re-observes announcements the header stream
+	// already armed; keep the sequence that records where on the chain
+	// this announcement came from rather than clearing it to zero.
+	if existing, ok := m.announcements[rbHash]; ok &&
+		existing.headerSeq > record.headerSeq {
+		record.headerSeq = existing.headerSeq
+	}
 	m.announcements[rbHash] = record
 	_, acquired := m.acquiredEbs[ebHash]
 	pendingMap := m.removePendingAnnouncementLocked(rbHash)
@@ -2610,6 +3034,40 @@ func (m *VoteManager) handleEpochTransition(
 	)
 }
 
+// rollbackProtectedLocked returns the announcing ranking blocks, vote ids and
+// endorser blocks that belong to announcements the ordered header stream armed
+// *after* the chain mutation numbered rollbackSeq -- that is, state belonging
+// to the chain that replaced the one being rolled back. A zero rollbackSeq
+// means the rollback carries no sequence number and supersedes nothing, so
+// nothing is protected. Callers must hold mu.
+func (m *VoteManager) rollbackProtectedLocked(rollbackSeq uint64) (
+	map[lcommon.Blake2b256]struct{},
+	map[lcommon.LeiosVoteId]struct{},
+	map[lcommon.Blake2b256]struct{},
+) {
+	rbs := make(map[lcommon.Blake2b256]struct{})
+	ids := make(map[lcommon.LeiosVoteId]struct{})
+	ebs := make(map[lcommon.Blake2b256]struct{})
+	if rollbackSeq == 0 {
+		return rbs, ids, ebs
+	}
+	for rbHash, record := range m.announcements {
+		if record.headerSeq > rollbackSeq {
+			rbs[rbHash] = struct{}{}
+			ebs[record.ebHash] = struct{}{}
+		}
+	}
+	if len(rbs) == 0 {
+		return rbs, ids, ebs
+	}
+	for id, rec := range m.voteRecords {
+		if _, ok := rbs[rec.announcingRbHash]; ok {
+			ids[id] = struct{}{}
+		}
+	}
+	return rbs, ids, ebs
+}
+
 // handleRollback drops votes and tallies past the rollback point and
 // clears the committee memo: a rollback across an epoch boundary can
 // change the stake snapshots committees derive from, and recomputation is
@@ -2619,33 +3077,73 @@ func (m *VoteManager) handleRollback(evt chain.ChainRollbackEvent) {
 	defer m.prototypeEmissionMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// chain.update and the ordered header stream are delivered on
+	// independent channels, so this rollback can arrive after the header
+	// stream has already applied the matching invalidation *and* re-armed
+	// the replacement chain's announcements -- which is systematic during
+	// fork resolution, since it rolls back and then re-queues the peer's
+	// fork headers. Everything below is keyed by slot, and the replacement
+	// chain occupies the same slots, so an unguarded sweep would delete the
+	// replacement chain's announcement, its vote, its tally and its dedup
+	// record, leaving the node unable to re-vote for a slot it had already
+	// voted on correctly.
+	//
+	// Protect exactly the state whose announcement the header stream armed
+	// after this rollback. An unsequenced rollback (Seq 0) supersedes
+	// nothing and protects nothing, so it prunes exactly as before.
+	protectedRbs, protectedIds, protectedEbs := m.rollbackProtectedLocked(
+		evt.Seq,
+	)
 	m.filterVotesLocked(func(sv *storedVote) bool {
-		return sv.vote.SlotNo <= evt.Point.Slot
+		if sv.vote.SlotNo <= evt.Point.Slot {
+			return true
+		}
+		_, protected := protectedIds[lcommon.LeiosVoteId{
+			SlotNo:  sv.vote.SlotNo,
+			VoterId: sv.vote.VoterId,
+		}]
+		return protected
 	})
 	for key := range m.tallies {
-		if key.slotNo > evt.Point.Slot {
-			delete(m.tallies, key)
+		if key.slotNo <= evt.Point.Slot {
+			continue
 		}
+		if _, protected := protectedRbs[key.announcingRbHash]; protected {
+			continue
+		}
+		delete(m.tallies, key)
 	}
 	// Records share the tally predicate, so record/tally pairs are
 	// dropped together and a re-vote for the replacement chain is
 	// accepted instead of being mistaken for equivocation.
-	for id := range m.voteRecords {
-		if id.SlotNo > evt.Point.Slot {
-			delete(m.voteRecords, id)
+	for id, rec := range m.voteRecords {
+		if id.SlotNo <= evt.Point.Slot {
+			continue
 		}
+		if _, protected := protectedRbs[rec.announcingRbHash]; protected {
+			continue
+		}
+		delete(m.voteRecords, id)
 	}
 	for rbHash, record := range m.announcements {
-		if record.slot > evt.Point.Slot {
-			delete(m.announcements, rbHash)
-			delete(m.votedAnnouncements, rbHash)
-			m.removePendingAnnouncementLocked(rbHash)
+		if record.slot <= evt.Point.Slot {
+			continue
 		}
+		if _, protected := protectedRbs[rbHash]; protected {
+			continue
+		}
+		delete(m.announcements, rbHash)
+		delete(m.votedAnnouncements, rbHash)
+		m.removePendingAnnouncementLocked(rbHash)
 	}
 	for ebHash, record := range m.acquiredEbs {
-		if record.slot > evt.Point.Slot {
-			delete(m.acquiredEbs, ebHash)
+		if record.slot <= evt.Point.Slot {
+			continue
 		}
+		if _, protected := protectedEbs[ebHash]; protected {
+			continue
+		}
+		delete(m.acquiredEbs, ebHash)
 	}
 	m.updateRecordsGaugeLocked()
 	m.committees = make(map[uint64]*epochEntry)
