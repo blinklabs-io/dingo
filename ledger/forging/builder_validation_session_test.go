@@ -42,6 +42,10 @@ type sessionMockTxValidator struct {
 	// parameter change) landing while transaction selection is still in
 	// progress.
 	staleAfterCalls int
+	// alwaysStale makes stillCurrent() report false from the moment the
+	// session opens, so a test can prove a candidate that validates
+	// nothing never consults it.
+	alwaysStale bool
 	// onValidate, when set, runs synchronously inside each validate call
 	// with the 1-indexed call number. Tests use it to mutate shared state
 	// (e.g. the chain tip) partway through selection, deterministically,
@@ -76,7 +80,7 @@ func (v *sessionMockTxValidator) WithTxValidationSession(
 	) error,
 ) error {
 	v.sessions++
-	stale := false
+	stale := v.alwaysStale
 	validate := func(
 		_ ledger.Transaction,
 		_ map[string]struct{},

@@ -64,6 +64,47 @@ const (
 	forgeStaleGapThresholdSlots = 1000
 )
 
+const (
+	// defaultForgeSelectionRetryMargin is how much of the slot must still
+	// be ahead for a second transaction-selection attempt to be worth
+	// starting. Selection that finishes after the slot ends produces a
+	// block nobody is waiting for any more, so the margin is the point
+	// past which the forge stops re-selecting and takes the empty-block
+	// fallback instead.
+	defaultForgeSelectionRetryMargin = 250 * time.Millisecond
+
+	// defaultForgeSelectionMaxRetries caps re-selection for one slot. The
+	// ledger can publish repeatedly inside a single slot on a busy chain;
+	// without a cap a producer would spend the whole slot re-selecting and
+	// never reach the fallback.
+	defaultForgeSelectionMaxRetries = 3
+)
+
+// Result labels for dingo_forge_selection_fallback_total.
+const (
+	// forgeSelectionResultRetried: selection was aborted by a concurrent
+	// ledger publication or chain-tip move and a later attempt in the same
+	// slot produced a block.
+	forgeSelectionResultRetried = "retried"
+	// forgeSelectionResultEmpty: no attempt could complete against a
+	// stable snapshot in time, so a transaction-free block was forged to
+	// keep the slot.
+	forgeSelectionResultEmpty = "empty"
+	// forgeSelectionResultLost: the slot produced no block at all.
+	forgeSelectionResultLost = "lost"
+)
+
+// Outcome values for the per-slot "forge timing" log line.
+const (
+	// forgeTimingOutcomeForged: a completed selection pass produced the
+	// block, whether on the first attempt or a later one.
+	forgeTimingOutcomeForged = "forged"
+	// forgeTimingOutcomeEmpty: the transaction-free fallback produced it.
+	forgeTimingOutcomeEmpty = "empty"
+	// forgeTimingOutcomeLost: no block was produced for the slot.
+	forgeTimingOutcomeLost = "lost"
+)
+
 // BlockForger coordinates block production for a stake pool.
 type BlockForger struct {
 	mode   Mode
@@ -106,6 +147,11 @@ type BlockForger struct {
 	// Configurable forging tolerances
 	forgeSyncToleranceSlots     uint64
 	forgeStaleGapThresholdSlots uint64
+
+	// Bounds on re-running transaction selection inside one slot after
+	// the chain moved underneath it.
+	forgeSelectionRetryMargin time.Duration
+	forgeSelectionMaxRetries  int
 
 	// Optional self-validation before adoption (nil = disabled)
 	blockValidator BlockValidator
@@ -172,6 +218,7 @@ type credentialGenerationBlockBuilder interface {
 		kesPeriod uint64,
 		leios LeiosBlockData,
 		generation *credentialGeneration,
+		constraints blockSelectionConstraints,
 	) (ledger.Block, []byte, error)
 }
 
@@ -374,6 +421,16 @@ type ForgerConfig struct {
 	// chain tip is far ahead of the slot clock. Zero uses the default.
 	ForgeStaleGapThresholdSlots uint64
 
+	// ForgeSelectionRetryMargin is how much of the slot must remain for
+	// the forger to re-run transaction selection after a concurrent
+	// ledger publication invalidated the candidate block. Zero uses
+	// defaultForgeSelectionRetryMargin.
+	ForgeSelectionRetryMargin time.Duration
+	// ForgeSelectionMaxRetries caps re-selection attempts within one
+	// slot. Zero uses defaultForgeSelectionMaxRetries; negative disables
+	// retrying.
+	ForgeSelectionMaxRetries int
+
 	// BlockValidator, when non-nil, validates the forged block (VRF/KES
 	// header crypto, body-hash consistency, per-tx ledger rules) before
 	// AddBlock is called. A validation failure drops the block without
@@ -423,8 +480,19 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 	if cfg.ForgeStaleGapThresholdSlots == 0 {
 		cfg.ForgeStaleGapThresholdSlots = forgeStaleGapThresholdSlots
 	}
+	if cfg.ForgeSelectionRetryMargin <= 0 {
+		cfg.ForgeSelectionRetryMargin = defaultForgeSelectionRetryMargin
+	}
+	if cfg.ForgeSelectionMaxRetries == 0 {
+		cfg.ForgeSelectionMaxRetries = defaultForgeSelectionMaxRetries
+	}
+	if cfg.ForgeSelectionMaxRetries < 0 {
+		cfg.ForgeSelectionMaxRetries = 0
+	}
 	f.forgeSyncToleranceSlots = cfg.ForgeSyncToleranceSlots
 	f.forgeStaleGapThresholdSlots = cfg.ForgeStaleGapThresholdSlots
+	f.forgeSelectionRetryMargin = cfg.ForgeSelectionRetryMargin
+	f.forgeSelectionMaxRetries = cfg.ForgeSelectionMaxRetries
 
 	if cfg.Mode == ModeProduction {
 		if cfg.Credentials == nil || !cfg.Credentials.IsLoaded() {
@@ -976,6 +1044,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 
 	// We are the slot leader with the same credential generation that passed
 	// the pre-selection gate.
+	leaderCheckedAt := time.Now()
 	if f.metrics != nil {
 		f.metrics.forgeNodeIsLeader.Inc()
 	}
@@ -1030,9 +1099,9 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return nil
 	}
 
-	leiosBlockData, embeddedEb, embeddedEbSlot := f.leiosBlockDataForSlot(
-		currentSlot,
-	)
+	leiosState := f.leiosBlockDataForSlot(currentSlot)
+	leiosBlockData := leiosState.data
+	embeddedEb, embeddedEbSlot := leiosState.embeddedEb, leiosState.embeddedEbSlot
 	if f.leiosChecker != nil {
 		var excludedTxHashes map[string]struct{}
 		canAnnounce := true
@@ -1092,6 +1161,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return nil
 	}
 
+	producingAt := time.Now()
 	f.logger.Info("producing block", "slot", currentSlot)
 
 	// Ensure KES key is at correct period
@@ -1100,17 +1170,49 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return fmt.Errorf("failed to update KES period: %w", err)
 	}
 
-	// Build the block
-	block, blockCbor, err := f.buildBlock(
+	// Build the block. A ledger publication landing during transaction
+	// selection invalidates the candidate; buildBlockForSlot re-selects
+	// against the state that publication produced while the slot lasts,
+	// instead of abandoning the slot on the first abort.
+	leiosState.data = leiosBlockData
+	block, blockCbor, buildStats, err := f.buildBlockForSlot(
 		currentSlot,
 		kesPeriod,
-		leiosBlockData,
+		&leiosState,
 		generation,
 	)
+	// A retry or the empty fallback may have re-resolved the payload
+	// against a new parent; the embedded-endorser-block bookkeeping below
+	// must follow the block that was actually built.
+	embeddedEb = leiosState.embeddedEb
+	buildDuration := time.Since(producingAt)
+	// One line per leader slot carrying the two intervals a lost or late
+	// slot is diagnosed from: how long the leader/KES/opcert gate and the
+	// Leios work took before "producing block", and how long selection
+	// then ran. Reconstructing those from block timestamps after the fact
+	// is the only reason the defect this fixes took a trace to find.
+	logForgeTiming := func(outcome string, txCount int) {
+		f.logger.Info(
+			"forge timing",
+			"slot", currentSlot,
+			"outcome", outcome,
+			"leader_check", leaderCheckedAt.Sub(forgeStartTime),
+			"pre_build", producingAt.Sub(leaderCheckedAt),
+			"build", buildDuration,
+			"attempts", buildStats.attempts,
+			"tx_count", txCount,
+		)
+	}
 	if err != nil {
+		logForgeTiming(forgeTimingOutcomeLost, 0)
 		f.incCouldNotForge()
 		return fmt.Errorf("failed to build block: %w", err)
 	}
+	forgeOutcome := forgeTimingOutcomeForged
+	if buildStats.empty {
+		forgeOutcome = forgeTimingOutcomeEmpty
+	}
+	logForgeTiming(forgeOutcome, len(block.Transactions()))
 	// Key material is no longer needed after the block is signed. Zeroize the
 	// independently owned snapshot before invoking pluggable validation,
 	// adoption, or observer callbacks.
@@ -1234,9 +1336,9 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 
 func (f *BlockForger) leiosBlockDataForSlot(
 	slot uint64,
-) (LeiosBlockData, *lcommon.Blake2b256, uint64) {
-	if f.leiosCerts == nil {
-		return LeiosBlockData{}, nil, 0
+) forgeLeiosState {
+	if f.leiosCerts == nil || f.leiosParent == nil {
+		return forgeLeiosState{}
 	}
 	parentRbHash, parentHash, ok, err := f.leiosParent.ParentLeiosAnnouncement()
 	if err != nil {
@@ -1247,7 +1349,7 @@ func (f *BlockForger) leiosBlockDataForSlot(
 			"error",
 			err,
 		)
-		return LeiosBlockData{}, nil, 0
+		return forgeLeiosState{}
 	}
 	if !ok {
 		f.logger.Debug(
@@ -1255,8 +1357,9 @@ func (f *BlockForger) leiosBlockDataForSlot(
 			"slot",
 			slot,
 		)
-		return LeiosBlockData{}, nil, 0
+		return forgeLeiosState{}
 	}
+	state := forgeLeiosState{parentRb: parentRbHash, parentKnown: true}
 	eligible := f.leiosCerts.EligibleCertifiedEndorserBlocks()
 	for _, eb := range eligible {
 		if eb.Certificate == nil {
@@ -1274,9 +1377,273 @@ func (f *BlockForger) leiosBlockDataForSlot(
 			"eb_slot", eb.SlotNo,
 			"eb_hash", eb.EndorserBlockHash.String(),
 		)
-		return LeiosBlockData{Certificate: eb.Certificate}, &hash, eb.SlotNo
+		state.data = LeiosBlockData{Certificate: eb.Certificate}
+		state.embeddedEb = &hash
+		state.embeddedEbSlot = eb.SlotNo
+		return state
 	}
-	return LeiosBlockData{}, nil, 0
+	return state
+}
+
+// errBlockConstraintsUnsupported reports that the configured BlockBuilder
+// cannot honour the per-attempt constraints the forge loop asked for, so
+// the attempt must not be made rather than made incorrectly.
+var errBlockConstraintsUnsupported = errors.New(
+	"block builder does not support per-attempt selection constraints",
+)
+
+// forgeLeiosState is the Leios payload a slot's ranking block is being
+// built with, together with the parent it was resolved against.
+//
+// Every field here is parent-dependent. leiosBlockDataForSlot matches a
+// certified endorser block against the parent ranking block's own
+// announcement, and the announcement names an endorser block this node
+// selected against that same parent's certified closure. A retry that
+// re-reads the chain tip therefore cannot reuse any of it: the block would
+// commit to a certificate that belongs to a different parent, or announce
+// an endorser block whose exclusion set no longer holds.
+type forgeLeiosState struct {
+	data           LeiosBlockData
+	embeddedEb     *lcommon.Blake2b256
+	embeddedEbSlot uint64
+	// parentRb is the parent ranking-block hash data was resolved
+	// against; parentKnown is false when no parent announcement could be
+	// read, in which case there is nothing to invalidate.
+	parentRb    lcommon.Blake2b256
+	parentKnown bool
+}
+
+// refreshLeiosForParent re-resolves state against the current parent when
+// the parent has moved since state was resolved.
+//
+// The announcement is deliberately not carried across a parent change and
+// no replacement is forged. The endorser block it names was selected
+// against the previous parent's certified closure and has already been
+// broadcast; announcing it under a different parent would commit the block
+// to an exclusion set that no longer holds, and forging a second endorser
+// block would put two of them on the wire for one slot. A ranking block
+// with no announcement is valid, so dropping it costs this slot's endorser
+// block rather than the slot itself.
+func (f *BlockForger) refreshLeiosForParent(
+	slot uint64,
+	state *forgeLeiosState,
+) {
+	refreshed := f.leiosBlockDataForSlot(slot)
+	if refreshed.parentKnown == state.parentKnown &&
+		refreshed.parentRb == state.parentRb {
+		// Same parent: everything already resolved still belongs to this
+		// block, including an announcement this slot forged.
+		return
+	}
+	f.logger.Warn(
+		"leios payload re-resolved: the parent changed during block assembly",
+		"slot", slot,
+		"had_certificate", state.data.Certificate != nil,
+		"had_announcement", state.data.Announcement != nil,
+		"now_has_certificate", refreshed.data.Certificate != nil,
+	)
+	*state = refreshed
+}
+
+// isRetriableSelectionError reports whether err means the chain moved
+// underneath transaction selection rather than that the block could not be
+// built at all. Both sentinels describe the same event -- a ledger
+// publication landing mid-selection -- observed from the validation session
+// (the pinned generation moved) and from the chain tip (a new parent). The
+// correct response to either is to select again against the state that
+// publication produced, which is what the block should have been built on.
+func isRetriableSelectionError(err error) bool {
+	return errors.Is(err, errTxValidationSnapshotChanged) ||
+		errors.Is(err, errParentChangedDuringBuild)
+}
+
+// forgeBuildStats records how a slot's block was obtained.
+type forgeBuildStats struct {
+	// attempts counts full build attempts made for the slot.
+	attempts int
+	// aborted is set once an attempt was rejected because the chain moved
+	// during selection. Only then does the slot's outcome count as a
+	// selection fallback.
+	aborted bool
+	// empty is set when the block was produced by the transaction-free
+	// fallback rather than by a completed selection pass.
+	empty bool
+}
+
+// observeSelectionFallback records how a slot whose selection was aborted
+// ended. Safe to call when metrics are nil.
+func (f *BlockForger) observeSelectionFallback(result string) {
+	if f.metrics != nil {
+		f.metrics.forgeSelectionFallback.WithLabelValues(result).Inc()
+	}
+}
+
+// slotSelectionDeadline returns the instant by which work for slot must
+// finish to still land inside the slot, less the configured retry margin.
+// ok is false when the slot clock cannot answer, which disables retrying
+// rather than guessing at a budget.
+func (f *BlockForger) slotSelectionDeadline(
+	slot uint64,
+) (time.Time, bool) {
+	if f.slotClock == nil {
+		return time.Time{}, false
+	}
+	clockSlot, err := f.slotClock.CurrentSlot()
+	if err != nil {
+		return time.Time{}, false
+	}
+	if clockSlot != slot {
+		// The wall clock has already left the slot being forged, so
+		// NextSlotTime describes a later slot's boundary and would
+		// hand this forge a budget it does not have. Anchor the
+		// deadline to the slot actually being built for: none of it
+		// remains.
+		return time.Now(), true
+	}
+	slotEnd, err := f.slotClock.NextSlotTime()
+	if err != nil || slotEnd.IsZero() {
+		return time.Time{}, false
+	}
+	return slotEnd.Add(-f.forgeSelectionRetryMargin), true
+}
+
+// buildBlockForSlot builds the block for slot, re-running transaction
+// selection when a concurrent ledger publication or chain-tip move
+// invalidated the candidate and enough of the slot remains to try again.
+//
+// The retry is bounded twice over: by the slot deadline, because a block
+// finished after its slot has passed helps nobody, and by an attempt cap,
+// because a producer applying a burst of peer blocks can invalidate
+// selection repeatedly and must still reach the fallback.
+func (f *BlockForger) buildBlockForSlot(
+	slot uint64,
+	kesPeriod uint64,
+	leiosState *forgeLeiosState,
+	generation *credentialGeneration,
+) (ledger.Block, []byte, forgeBuildStats, error) {
+	var stats forgeBuildStats
+	deadline, haveDeadline := f.slotSelectionDeadline(slot)
+	// selectionConstraints bounds each attempt's selection pass by the
+	// slot deadline. When the slot is already over the bound is dropped:
+	// truncating the block would cost transactions without buying back
+	// any of the slot, and the in-loop snapshot check still limits the
+	// work a doomed pass can waste.
+	selectionConstraints := func() blockSelectionConstraints {
+		if !haveDeadline || !time.Now().Before(deadline) {
+			return blockSelectionConstraints{}
+		}
+		return blockSelectionConstraints{deadline: deadline}
+	}
+	// lost is the end of the ladder for an attempt whose selection was
+	// aborted by the chain moving: try a transaction-free block before
+	// giving the slot up. The guards the fallback needs are already
+	// established here -- the leader check and the forge-slot fence have
+	// both passed, and the builder re-reads and re-checks the parent tip
+	// for the fallback build itself.
+	lost := func(err error) (ledger.Block, []byte, forgeBuildStats, error) {
+		if !stats.aborted {
+			return nil, nil, stats, err
+		}
+		stats.attempts++
+		// The fallback is a fresh build against whatever the chain tip
+		// is now, so its Leios payload has to be resolved against that
+		// parent too.
+		f.refreshLeiosForParent(slot, leiosState)
+		block, blockCbor, emptyErr := f.buildBlock(
+			slot,
+			kesPeriod,
+			leiosState.data,
+			generation,
+			blockSelectionConstraints{emptyBody: true},
+		)
+		if emptyErr != nil {
+			f.observeSelectionFallback(forgeSelectionResultLost)
+			f.logger.Error(
+				"leader slot lost: selection was aborted and no empty block could be built",
+				"slot", slot,
+				"attempts", stats.attempts,
+				"selection_error", err,
+				"error", emptyErr,
+			)
+			return nil, nil, stats, err
+		}
+		stats.empty = true
+		f.observeSelectionFallback(forgeSelectionResultEmpty)
+		f.logger.Warn(
+			"forging a transaction-free block: selection could not complete inside the slot",
+			"slot", slot,
+			"attempts", stats.attempts,
+			"selection_error", err,
+		)
+		return block, blockCbor, stats, nil
+	}
+	for {
+		stats.attempts++
+		block, blockCbor, err := f.buildBlock(
+			slot,
+			kesPeriod,
+			leiosState.data,
+			generation,
+			selectionConstraints(),
+		)
+		if err == nil {
+			if stats.aborted {
+				f.observeSelectionFallback(
+					forgeSelectionResultRetried,
+				)
+				f.logger.Info(
+					"block transactions re-selected after the chain moved mid-selection",
+					"slot", slot,
+					"attempts", stats.attempts,
+				)
+			}
+			return block, blockCbor, stats, nil
+		}
+		if !isRetriableSelectionError(err) {
+			return lost(err)
+		}
+		stats.aborted = true
+		if stats.attempts > f.forgeSelectionMaxRetries {
+			f.logger.Warn(
+				"forge selection retry cap reached",
+				"slot", slot,
+				"attempts", stats.attempts,
+				"error", err,
+			)
+			return lost(err)
+		}
+		if !haveDeadline {
+			f.logger.Warn(
+				"forge selection aborted and the slot clock cannot bound a retry",
+				"slot", slot,
+				"error", err,
+			)
+			return lost(err)
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			f.logger.Warn(
+				"forge selection aborted with no slot time left to re-select",
+				"slot", slot,
+				"attempts", stats.attempts,
+				"error", err,
+			)
+			return lost(err)
+		}
+		f.logger.Warn(
+			"forge selection aborted by a concurrent ledger publication, re-selecting",
+			"slot", slot,
+			"attempt", stats.attempts,
+			"slot_remaining", remaining,
+			"error", err,
+		)
+		// The next attempt re-reads the chain tip, so anything resolved
+		// against the previous parent has to be resolved again. This
+		// covers the snapshot-changed path as well as an explicit parent
+		// change: an applied block bumps the ledger generation and moves
+		// the tip together, and the generation check fires first.
+		f.refreshLeiosForParent(slot, leiosState)
+	}
 }
 
 func (f *BlockForger) buildBlock(
@@ -1284,6 +1651,7 @@ func (f *BlockForger) buildBlock(
 	kesPeriod uint64,
 	leiosData LeiosBlockData,
 	generation *credentialGeneration,
+	constraints blockSelectionConstraints,
 ) (ledger.Block, []byte, error) {
 	var (
 		block     ledger.Block
@@ -1296,7 +1664,17 @@ func (f *BlockForger) buildBlock(
 			kesPeriod,
 			leiosData,
 			generation,
+			constraints,
 		)
+	} else if constraints.emptyBody {
+		// Only the package-private builder path carries per-attempt
+		// constraints. An embedder-supplied BlockBuilder cannot be told
+		// to drop its transactions, so the slot is reported lost rather
+		// than forged from a full mempool under a constraint that was
+		// silently ignored. A selection deadline is advisory by
+		// comparison -- ignoring it just leaves the pass unbounded, as
+		// it has always been -- so it does not disqualify a builder.
+		return nil, nil, errBlockConstraintsUnsupported
 	} else if leiosData.empty() {
 		block, blockCbor, err = f.blockBuilder.BuildBlock(slot, kesPeriod)
 	} else {
