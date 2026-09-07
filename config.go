@@ -1472,7 +1472,8 @@ func WithForgePrimaryChainTipToleranceSlots(slots uint64) ConfigOptionFunc {
 // WithForgeUpstreamStalenessSlots sets how far the newest block this node holds
 // may trail the corroborated upstream sync target before forging is skipped.
 // 0 (the default) DISABLES the bound -- it is not "fall back to a built-in
-// default", and nothing fills it in: see DefaultForgeUpstreamStalenessSlots.
+// default", and nothing fills it in: see
+// internal/config.DefaultForgeUpstreamStalenessSlots, which is itself 0.
 func WithForgeUpstreamStalenessSlots(slots uint64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ForgeUpstreamStalenessSlots = slots
