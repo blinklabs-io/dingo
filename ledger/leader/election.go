@@ -313,6 +313,12 @@ func (e *Election) SetPromRegistry(reg prometheus.Registerer) {
 // slot-aligned loop without delay. The next epoch is queued later, once the
 // ledger reports that its nonce has reached the stability cutoff.
 func (e *Election) Start(ctx context.Context) error {
+	return e.start(ctx, nil)
+}
+
+// start accepts a test scheduling hook after generation completion, before
+// reacquiring the lifecycle mutex. Production callers always pass nil.
+func (e *Election) start(ctx context.Context, afterWait func()) error {
 	e.mu.Lock()
 	for e.lifecycleDone != nil {
 		if e.running && e.lifecycleCtx.Err() == nil {
@@ -323,10 +329,17 @@ func (e *Election) Start(ctx context.Context) error {
 		e.mu.Unlock()
 		select {
 		case <-done:
+			if afterWait != nil {
+				afterWait()
+			}
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 		e.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			e.mu.Unlock()
+			return err
+		}
 	}
 	defer e.mu.Unlock()
 	if err := ctx.Err(); err != nil {

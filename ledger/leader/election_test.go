@@ -1392,3 +1392,39 @@ func TestElectionParentCancellationWaitsForGeneration(t *testing.T) {
 		t.Fatal("restarted generation did not stop")
 	}
 }
+
+// gatedElectionContext signals when Start evaluates its cancellation select.
+type gatedElectionContext struct {
+	context.Context
+	entered chan struct{}
+}
+
+func (c *gatedElectionContext) Done() <-chan struct{} {
+	close(c.entered)
+	return c.Context.Done()
+}
+
+func TestElectionCanceledWaiterAfterReplacement(t *testing.T) {
+	oldCtx, cancelOld := context.WithCancel(t.Context())
+	cancelOld()
+	oldDone := make(chan struct{})
+	e := &Election{lifecycleCtx: oldCtx, lifecycleDone: oldDone}
+	waitCtx, cancelWait := context.WithCancel(t.Context())
+	defer cancelWait()
+	ctx := &gatedElectionContext{Context: waitCtx, entered: make(chan struct{})}
+	afterWait := func() {
+		// This waiter selected generation completion before cancellation. A
+		// second caller installs a healthy replacement before it reacquires mu.
+		e.mu.Lock()
+		e.running = true
+		e.lifecycleCtx = t.Context()
+		e.lifecycleDone = make(chan struct{})
+		cancelWait()
+		e.mu.Unlock()
+	}
+	result := make(chan error, 1)
+	go func() { result <- e.start(ctx, afterWait) }()
+	<-ctx.entered
+	close(oldDone)
+	require.ErrorIs(t, <-result, context.Canceled)
+}
