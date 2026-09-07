@@ -33,38 +33,39 @@ import (
 func resetGlobalConfig() {
 	midnightYAMLFields = nil
 	globalConfig = &Config{
-		Plugins:                     defaultPluginsConfig(),
-		BindAddr:                    "0.0.0.0",
-		CardanoConfig:               "", // Will be set dynamically based on network
-		DatabasePath:                ".dingo",
-		SocketPath:                  "dingo.socket",
-		IntersectTip:                false,
-		ValidateHistorical:          true,
-		StrictUtxoValidation:        true,
-		Network:                     "preview",
-		MetricsPort:                 12798,
-		DebugBindAddr:               DefaultDebugBindAddr,
-		PrivateBindAddr:             "127.0.0.1",
-		PrivatePort:                 3002,
-		RelayPort:                   3001,
-		CORSAllowedOrigins:          []string{"*"},
-		Topology:                    "",
-		TlsCertFilePath:             "",
-		TlsKeyFilePath:              "",
-		RunMode:                     RunModeServe,
-		StartEra:                    StartEraDefault,
-		ImmutableDbPath:             "",
-		ShutdownTimeout:             DefaultShutdownTimeout,
-		LedgerCatchupTimeout:        DefaultLedgerCatchupTimeout,
-		DatabaseWorkers:             5,
-		DatabaseQueueSize:           50,
-		BackfillBatchSize:           100,
-		GenesisBootstrap:            DefaultGenesisBootstrapConfig(),
-		HistoryExpiry:               DefaultHistoryExpiryConfig(),
-		KoiosParity:                 DefaultKoiosParityConfig(),
-		Midnight:                    DefaultMidnightConfig(),
-		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
-		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
+		Plugins:                           defaultPluginsConfig(),
+		BindAddr:                          "0.0.0.0",
+		CardanoConfig:                     "", // Will be set dynamically based on network
+		DatabasePath:                      ".dingo",
+		SocketPath:                        "dingo.socket",
+		IntersectTip:                      false,
+		ValidateHistorical:                true,
+		StrictUtxoValidation:              true,
+		Network:                           "preview",
+		MetricsPort:                       12798,
+		DebugBindAddr:                     DefaultDebugBindAddr,
+		PrivateBindAddr:                   "127.0.0.1",
+		PrivatePort:                       3002,
+		RelayPort:                         3001,
+		CORSAllowedOrigins:                []string{"*"},
+		Topology:                          "",
+		TlsCertFilePath:                   "",
+		TlsKeyFilePath:                    "",
+		RunMode:                           RunModeServe,
+		StartEra:                          StartEraDefault,
+		ImmutableDbPath:                   "",
+		ShutdownTimeout:                   DefaultShutdownTimeout,
+		LedgerCatchupTimeout:              DefaultLedgerCatchupTimeout,
+		DatabaseWorkers:                   5,
+		DatabaseQueueSize:                 50,
+		BackfillBatchSize:                 100,
+		GenesisBootstrap:                  DefaultGenesisBootstrapConfig(),
+		HistoryExpiry:                     DefaultHistoryExpiryConfig(),
+		KoiosParity:                       DefaultKoiosParityConfig(),
+		Midnight:                          DefaultMidnightConfig(),
+		ForgeSyncToleranceSlots:           DefaultForgeSyncToleranceSlots,
+		ForgeStaleGapThresholdSlots:       DefaultForgeStaleGapThresholdSlots,
+		ForgeHeaderFrontierToleranceSlots: DefaultForgeHeaderFrontierToleranceSlots,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,
@@ -82,9 +83,27 @@ func unsetDebugBindAddrEnv(t *testing.T) {
 	require.NoError(t, os.Unsetenv("DINGO_DEBUG_BIND_ADDR"))
 }
 
+// unsetForgeGateEnv clears the forge-gate overrides so tests that assert the
+// built-in defaults cannot inherit a value from the caller's environment.
+// LoadConfig runs envconfig AFTER the YAML merge, so an exported
+// DINGO_FORGE_* variable silently overrides both the fixture and the default,
+// and the assertion then fails for a reason unrelated to the code under test.
+func unsetForgeGateEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{
+		"DINGO_FORGE_HEADER_FRONTIER_TOLERANCE_SLOTS",
+	} {
+		// t.Setenv registers the restore; Unsetenv then removes it for the
+		// duration of the test, which is what envconfig must not see.
+		t.Setenv(k, "")
+		require.NoError(t, os.Unsetenv(k))
+	}
+}
+
 func TestLoad_CompareFullStruct(t *testing.T) {
 	resetGlobalConfig()
 	unsetDebugBindAddrEnv(t)
+	unsetForgeGateEnv(t)
 	yamlContent := `
 plugins:
   mempool:
@@ -211,6 +230,8 @@ mithril:
 		},
 		ForgeSyncToleranceSlots:     321,
 		ForgeStaleGapThresholdSlots: 654,
+		// Not set by the fixture's YAML/env, so ApplyDefaults fills it.
+		ForgeHeaderFrontierToleranceSlots: DefaultForgeHeaderFrontierToleranceSlots,
 		Mithril: MithrilConfig{
 			Enabled:                false,
 			AggregatorURL:          "https://mithril.example.net",
@@ -264,6 +285,7 @@ func TestLoad_DAGMempoolProvider(t *testing.T) {
 func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	resetGlobalConfig()
 	unsetDebugBindAddrEnv(t)
+	unsetForgeGateEnv(t)
 
 	// Without Config file
 	cfg, err := LoadConfig("")
@@ -315,8 +337,9 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 			m.Host = DefaultMidnightConfig().Host
 			return m
 		}(),
-		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
-		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
+		ForgeSyncToleranceSlots:           DefaultForgeSyncToleranceSlots,
+		ForgeStaleGapThresholdSlots:       DefaultForgeStaleGapThresholdSlots,
+		ForgeHeaderFrontierToleranceSlots: DefaultForgeHeaderFrontierToleranceSlots,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,

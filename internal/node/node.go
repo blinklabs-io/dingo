@@ -695,6 +695,9 @@ func buildDingoConfig(
 		dingo.WithForgeStaleGapThresholdSlots(
 			cfg.ForgeStaleGapThresholdSlots,
 		),
+		dingo.WithForgeHeaderFrontierToleranceSlots(
+			cfg.ForgeHeaderFrontierToleranceSlots,
+		),
 		dingo.WithValidateForgedBlock(cfg.ValidateForgedBlock),
 		// CIP-0163 reward-account inactivity expiry (consensus-affecting)
 		dingo.WithDelegatorInactivity(

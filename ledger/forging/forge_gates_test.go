@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -327,11 +328,28 @@ func TestForgeStillWaitsForUnknownUpstreamTargetWhileTipIsStale(
 		float64(1),
 		testutil.ToFloat64(forger.metrics.forgeSyncSkip),
 	)
+	// #4013 asserted 991 here, the local tip's lag behind the wall clock,
+	// because the sync-skip path was then the only writer that could make
+	// dingo_forge_tip_gap_slots non-zero on this branch. This PR gives that
+	// gauge a single meaning -- the ledger-apply backlog, primary chain tip
+	// minus applied tip -- and sets it once per leader check instead, so the
+	// skip paths no longer overwrite it. The frontier mirrors the applied tip
+	// on this fixture, so the backlog is 0 and the gauge says so.
+	//
+	// The lag itself is not lost: ledger exports it continuously as
+	// dingo_tip_gap_slots ("slots between wall-clock slot and chain tip",
+	// ledger/state.go), on every slot tick rather than only on a leader-slot
+	// skip, and the gate's own log line carries current_slot and tip_slot.
+	// What this test pins is unchanged -- a stale tip still stops the forge
+	// when the upstream target is unknown; see
+	// TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip for the at-tip
+	// half of that pair.
 	assert.Equal(
 		t,
-		float64(991),
+		float64(0),
 		testutil.ToFloat64(forger.metrics.tipGapSlots),
-		"unknown upstream targets report the local tip lag",
+		"dingo_forge_tip_gap_slots reports the ledger-apply backlog, "+
+			"not the wall-clock lag",
 	)
 }
 
@@ -755,9 +773,12 @@ func TestEqualSlotOwnBlockIsIdentifiedByHashNotByFence(t *testing.T) {
 
 // forgerMovingTipSlotClock is a slot clock whose chain tip moves between
 // the read at the top of a forge cycle and the read taken next to the
-// tip hash. The first ChainTipSlot call answers chainTipSlot, every
-// later one answers movedTipSlot, which is what a rival block landing
-// mid-cycle looks like to the forger.
+// tip hash. The first ChainTip call answers a point at chainTipSlot, every
+// later one a point at movedTipSlot, which is what a rival block landing
+// mid-cycle looks like to the forger. Both points carry chainTipHash: the
+// slot is what moves, and tipBlockOwnership still reads the hash separately
+// through ChainTipHashProvider, so its two reads remain non-atomic and this
+// double still exercises that.
 type forgerMovingTipSlotClock struct {
 	currentSlot       uint64
 	chainTipSlot      uint64
@@ -778,14 +799,30 @@ func (c *forgerMovingTipSlotClock) SlotsPerKESPeriod() uint64 {
 	return c.slotsPerKESPeriod
 }
 
-func (c *forgerMovingTipSlotClock) ChainTipSlot() uint64 {
+// ChainTip models a tip that moves between reads: the first read sees the
+// original slot and every later one sees the moved slot. tipBlockOwnership
+// still reads the hash through the separate ChainTipHashProvider, so the two
+// reads it makes remain non-atomic and this double still exercises that.
+func (c *forgerMovingTipSlotClock) ChainTip() ocommon.Point {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.tipReads++
+	slot := c.movedTipSlot
 	if c.tipReads == 1 {
-		return c.chainTipSlot
+		slot = c.chainTipSlot
 	}
-	return c.movedTipSlot
+	return ocommon.Point{Slot: slot, Hash: c.chainTipHash}
+}
+
+// PrimaryChainTip is pinned to the ORIGINAL tip and never moves. This double
+// exists to model the applied tip shifting between the two reads
+// tipBlockOwnership makes; letting the frontier follow it would put the
+// frontier ahead of the current slot and trip the past-slot guard before the
+// contested-slot branch this test is about.
+func (c *forgerMovingTipSlotClock) PrimaryChainTip() ocommon.Point {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return ocommon.Point{Slot: c.chainTipSlot, Hash: c.chainTipHash}
 }
 
 func (c *forgerMovingTipSlotClock) ChainTipHash() []byte {
