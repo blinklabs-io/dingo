@@ -1020,7 +1020,9 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	if sameConnectionId(ls.shadowBlockfetchConnId, e.ConnectionId) {
 		ls.shadowBlockfetchConnId = ouroboros.ConnectionId{}
 	}
+	ls.bufferedHeaderMutex.Lock()
 	delete(ls.bufferedHeaderEvents, connIdKey(e.ConnectionId))
+	ls.bufferedHeaderMutex.Unlock()
 	delete(ls.peerHeaderHistory, connIdKey(e.ConnectionId))
 	// Cancel in-flight blockfetch if the dead connection owns it.
 	// Without this, chainsyncBlockfetchReadyChan stays non-nil and
@@ -1220,9 +1222,11 @@ func (ls *LedgerState) handoffPipelineOnSwitchLocked(
 		return ouroboros.ConnectionId{}, nil
 	}
 
+	ls.bufferedHeaderMutex.Lock()
 	hasBufferedHeadersForNewConn := len(
 		ls.bufferedHeaderEvents[connIdKey(newConnId)],
 	) > 0
+	ls.bufferedHeaderMutex.Unlock()
 
 	// When a blockfetch batch is already in progress on a different connection,
 	// let it complete rather than canceling it. The fetched blocks are canonical
@@ -1307,7 +1311,10 @@ func (ls *LedgerState) chainSwitchNeedsFreshCursorLocked(
 	if ls.chain != nil && ls.chain.HeaderCount() > 0 {
 		return false
 	}
-	if len(ls.bufferedHeaderEvents[connIdKey(connId)]) > 0 {
+	ls.bufferedHeaderMutex.Lock()
+	hasBuffered := len(ls.bufferedHeaderEvents[connIdKey(connId)]) > 0
+	ls.bufferedHeaderMutex.Unlock()
+	if hasBuffered {
 		return false
 	}
 	newObservedTip, ok := ls.chainSwitchObservedTipForConnection(e, connId)
@@ -1355,6 +1362,12 @@ func chainSwitchNewObservedTip(
 }
 
 func (ls *LedgerState) bufferHeaderEvent(e ChainsyncEvent) {
+	// Reached from the chainsync dispatch goroutine, which holds only
+	// chainsyncMutex: claimHeaderPipelineOwnership released
+	// chainsyncBlockfetchMutex on return, so this write is otherwise
+	// unprotected against nextBufferedHeaderConnId's iteration.
+	ls.bufferedHeaderMutex.Lock()
+	defer ls.bufferedHeaderMutex.Unlock()
 	if ls.bufferedHeaderEvents == nil {
 		ls.bufferedHeaderEvents = make(
 			map[string][]ChainsyncEvent,
@@ -1842,7 +1855,9 @@ func (ls *LedgerState) requestChainsyncResync(
 ) {
 	ls.headerMismatchCount = 0
 	ls.rollbackHistory = nil
+	ls.bufferedHeaderMutex.Lock()
 	delete(ls.bufferedHeaderEvents, connIdKey(connId))
+	ls.bufferedHeaderMutex.Unlock()
 	pending.add(
 		ls.config.EventBus,
 		event.ChainsyncResyncEventType,
@@ -1986,6 +2001,8 @@ func (ls *LedgerState) nextBufferedHeaderConnId() (
 	ouroboros.ConnectionId,
 	bool,
 ) {
+	ls.bufferedHeaderMutex.Lock()
+	defer ls.bufferedHeaderMutex.Unlock()
 	if key := connIdKey(ls.selectedBlockfetchConnId); key != "" {
 		if events := ls.bufferedHeaderEvents[key]; len(events) > 0 {
 			return events[len(events)-1].ConnectionId, true
@@ -2057,7 +2074,13 @@ func (ls *LedgerState) replayBufferedHeaderEvents(
 	pending *pendingPublishes,
 ) error {
 	key := connIdKey(connId)
+	// Take the events and clear the entry under the lock, then replay
+	// outside it: the replay calls back into
+	// handleEventChainsyncBlockHeaderWithPending, which can buffer more
+	// headers and would deadlock on a lock still held here.
+	ls.bufferedHeaderMutex.Lock()
 	if len(ls.bufferedHeaderEvents[key]) == 0 {
+		ls.bufferedHeaderMutex.Unlock()
 		return nil
 	}
 	events := append(
@@ -2065,6 +2088,7 @@ func (ls *LedgerState) replayBufferedHeaderEvents(
 		ls.bufferedHeaderEvents[key]...,
 	)
 	delete(ls.bufferedHeaderEvents, key)
+	ls.bufferedHeaderMutex.Unlock()
 	for _, evt := range events {
 		if err := ls.handleEventChainsyncBlockHeaderWithPending(evt, pending); err != nil {
 			return err
@@ -2080,15 +2104,105 @@ func (ls *LedgerState) replayBufferedHeaderEvents(
 // chainsyncBlockfetchMutex. Taking it here too, self-contained, closes that
 // gap without widening handleEventBlockfetch's own critical section to
 // cover chainsyncMutex as well.
+//
+// The bufferedHeaderEvents delete belongs inside that lock for the same
+// reason: handleEventBlockfetch holds chainsyncBlockfetchMutex while
+// nextBufferedHeaderConnId ranges over the map, so deleting from this
+// goroutine under a different mutex is a concurrent iteration and write.
 func (ls *LedgerState) discardBufferedPeerHeaders(
 	connId ouroboros.ConnectionId,
 ) {
-	delete(ls.bufferedHeaderEvents, connIdKey(connId))
 	ls.chainsyncBlockfetchMutex.Lock()
 	defer ls.chainsyncBlockfetchMutex.Unlock()
+	ls.bufferedHeaderMutex.Lock()
+	delete(ls.bufferedHeaderEvents, connIdKey(connId))
+	ls.bufferedHeaderMutex.Unlock()
 	if sameConnectionId(ls.headerPipelineConnId, connId) {
 		ls.clearQueuedHeaders()
 	}
+}
+
+// handleMithrilBoundaryRollback rejects a rollback at or below the local
+// Mithril trust boundary and requests a fresh chainsync intersection.
+//
+// The Mithril snapshot is the local trust anchor. Blocks at or below its
+// boundary were certified as a single ledger state, so we cannot
+// reconstruct intermediate UTxO states for a replacement fork below that
+// point. Refuse the rollback and force a fresh intersection instead.
+//
+// The peer's reported tip (e.Tip.Point.Slot) distinguishes two situations
+// that both surface here as a rollback below the boundary:
+//   - tip below the boundary: the peer is simply behind (still syncing or
+//     stuck) and its FindIntersect matched an old rung of our intersect
+//     ladder — stale, not a competing fork;
+//   - tip at/above the boundary: the peer's chain does not contain our
+//     certified boundary block (always offered as an intersect point), so
+//     it genuinely diverges below the trust anchor.
+//
+// A zero tip means the peer's tip is unknown; treat it as divergent to
+// fail safe.
+//
+// Shared by handleEventChainsyncRollback's own direct rollback failure and
+// its over-K-then-reconcile path: reconcilePrimaryChainTipWithLedgerTip's
+// own Mithril pre-check (issue #3516) can return
+// ErrRollbackExceedsMithrilBoundary from reconcileLivePrimaryChainLedgerDivergence
+// just as directly as an ordinary chain.Rollback call can, and both must
+// resolve to the same classified resync, not a generic propagated error
+// (wolf31o2 review, PR #3611).
+func (ls *LedgerState) handleMithrilBoundaryRollback(
+	e ChainsyncEvent,
+	pending *pendingPublishes,
+) error {
+	mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
+	reason := event.ChainsyncResyncReasonRollbackExceedsMithril
+	peerTipSlot := e.Tip.Point.Slot
+	if peerTipSlot > 0 && peerTipSlot < mithrilLedgerSlot {
+		reason = event.ChainsyncResyncReasonPeerTipBehindMithril
+		ls.config.Logger.Warn(
+			"chainsync peer tip behind Mithril trust boundary, treating peer chain as stale",
+			"component",
+			"ledger",
+			"slot",
+			e.Point.Slot,
+			"hash",
+			hex.EncodeToString(e.Point.Hash),
+			"peer_tip_slot",
+			peerTipSlot,
+			"mithril_ledger_slot",
+			mithrilLedgerSlot,
+			"connection_id",
+			e.ConnectionId.String(),
+		)
+	} else {
+		ls.config.Logger.Error(
+			"chainsync rollback exceeds Mithril trust boundary, rejecting peer chain",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"hash", hex.EncodeToString(e.Point.Hash),
+			"peer_tip_slot", peerTipSlot,
+			"mithril_ledger_slot", mithrilLedgerSlot,
+			"connection_id", e.ConnectionId.String(),
+		)
+	}
+	ls.reportUnrecoverableRollbackIfStuck(
+		e.Point,
+		reason,
+		e.ConnectionId,
+	)
+	ls.resetChainsyncResyncState()
+	ls.setChainsyncState(SyncingChainsyncState)
+	pending.add(
+		ls.config.EventBus,
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				ConnectionId: e.ConnectionId,
+				Reason:       reason,
+			},
+		),
+	)
+	return nil
 }
 
 func (ls *LedgerState) handleEventChainsyncRollback(
@@ -2345,6 +2459,18 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 				e.ConnectionId,
 			)
 			if reconcileErr != nil {
+				if errors.Is(reconcileErr, ErrRollbackExceedsMithrilBoundary) {
+					// The common ancestor reconciliation found sits at
+					// or below the Mithril boundary: the same
+					// rejection a direct rollback attempt hits above,
+					// just discovered one level deeper (issue #3516
+					// review; wolf31o2 review, PR #3611). Route it
+					// through the identical classified resync instead
+					// of propagating a generic reconciliation error
+					// the caller's over-K fallthrough below is not
+					// equipped to interpret.
+					return ls.handleMithrilBoundaryRollback(e, pending)
+				}
 				return fmt.Errorf(
 					"reconcile primary chain and ledger after over-K rollback: %w",
 					reconcileErr,
@@ -2414,74 +2540,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			return nil
 		}
 		if errors.Is(err, ErrRollbackExceedsMithrilBoundary) {
-			// The Mithril snapshot is the local trust anchor. Blocks at
-			// or below its boundary were certified as a single ledger
-			// state, so we cannot reconstruct intermediate UTxO states
-			// for a replacement fork below that point. Refuse the
-			// rollback and force a fresh intersection instead.
-			//
-			// The peer's reported tip distinguishes two situations that
-			// both surface here as a rollback below the boundary:
-			//   - tip below the boundary: the peer is simply behind
-			//     (still syncing or stuck) and its FindIntersect matched
-			//     an old rung of our intersect ladder — stale, not a
-			//     competing fork;
-			//   - tip at/above the boundary: the peer's chain does not
-			//     contain our certified boundary block (always offered
-			//     as an intersect point), so it genuinely diverges below
-			//     the trust anchor.
-			// A zero tip means the peer's tip is unknown; treat it as
-			// divergent to fail safe.
-			mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
-			reason := event.ChainsyncResyncReasonRollbackExceedsMithril
-			peerTipSlot := e.Tip.Point.Slot
-			if peerTipSlot > 0 && peerTipSlot < mithrilLedgerSlot {
-				reason = event.ChainsyncResyncReasonPeerTipBehindMithril
-				ls.config.Logger.Warn(
-					"chainsync peer tip behind Mithril trust boundary, treating peer chain as stale",
-					"component",
-					"ledger",
-					"slot",
-					e.Point.Slot,
-					"hash",
-					hex.EncodeToString(e.Point.Hash),
-					"peer_tip_slot",
-					peerTipSlot,
-					"mithril_ledger_slot",
-					mithrilLedgerSlot,
-					"connection_id",
-					e.ConnectionId.String(),
-				)
-			} else {
-				ls.config.Logger.Error(
-					"chainsync rollback exceeds Mithril trust boundary, rejecting peer chain",
-					"component", "ledger",
-					"slot", e.Point.Slot,
-					"hash", hex.EncodeToString(e.Point.Hash),
-					"peer_tip_slot", peerTipSlot,
-					"mithril_ledger_slot", mithrilLedgerSlot,
-					"connection_id", e.ConnectionId.String(),
-				)
-			}
-			ls.reportUnrecoverableRollbackIfStuck(
-				e.Point,
-				reason,
-				e.ConnectionId,
-			)
-			ls.resetChainsyncResyncState()
-			ls.setChainsyncState(SyncingChainsyncState)
-			pending.add(
-				ls.config.EventBus,
-				event.ChainsyncResyncEventType,
-				event.NewEvent(
-					event.ChainsyncResyncEventType,
-					event.ChainsyncResyncEvent{
-						ConnectionId: e.ConnectionId,
-						Reason:       reason,
-					},
-				),
-			)
-			return nil
+			return ls.handleMithrilBoundaryRollback(e, pending)
 		}
 		return fmt.Errorf("chain rollback failed: %w", err)
 	}
@@ -2554,13 +2613,15 @@ func (ls *LedgerState) clearRollbackHistoryForPoint(point ocommon.Point) {
 func (ls *LedgerState) resetChainsyncResyncState() {
 	ls.rollbackHistory = nil
 	ls.headerMismatchCount = 0
-	ls.bufferedHeaderEvents = nil
 	ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.chainsyncBlockfetchMutex.Lock()
 	// clearQueuedHeaders mutates headerPipelineConnId, which every other
 	// mutator guards with chainsyncBlockfetchMutex -- moved inside this
 	// lock (rather than called before it, as this used to) to close that
-	// gap.
+	// gap. bufferedHeaderEvents has its own lock; see bufferedHeaderMutex.
+	ls.bufferedHeaderMutex.Lock()
+	ls.bufferedHeaderEvents = nil
+	ls.bufferedHeaderMutex.Unlock()
 	ls.clearQueuedHeaders()
 	ls.blockfetchRequestRangeCleanup()
 	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
@@ -3829,6 +3890,19 @@ func (ls *LedgerState) tryResolveFork(
 				e.ConnectionId,
 			)
 			if reconcileErr != nil {
+				if errors.Is(reconcileErr, ErrRollbackExceedsMithrilBoundary) {
+					// Same reasoning as handleEventChainsyncRollback's
+					// matching branch: the common ancestor
+					// reconciliation found here sits at or below the
+					// Mithril boundary, so route it through the
+					// identical classified resync rather than a
+					// generic reconciliation error (wolf31o2 review,
+					// PR #3611).
+					return true, ls.handleMithrilBoundaryRollback(
+						e,
+						pending,
+					)
+				}
 				return false, fmt.Errorf(
 					"reconcile primary chain and ledger after over-K fork resolution: %w",
 					reconcileErr,
