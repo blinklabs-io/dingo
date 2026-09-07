@@ -1667,6 +1667,11 @@ INSERT INTO genesis_delegation (
 // with an epoch cache that places any slot in [0, 1_000_000) at epoch 5
 // (so snapshotEpoch = 3). The Shelley genesis uses activeSlotsCoeff=0.99
 // to match createTestBlock's VRF eligibility threshold.
+//
+// currentEra matches the cache's EraId. Leaving it at the zero value made it
+// Byron, which has no Praos leader election at all, so era-keyed code read
+// under this fixture (calculateStabilityWindow, for one) took the Byron branch
+// while the cache and the genesis it was configured from said Shelley.
 func newEligibilityTestLedger(
 	t *testing.T,
 	epochNonce []byte,
@@ -1686,10 +1691,11 @@ func newEligibilityTestLedger(
 				StartSlot:     0,
 				SlotLength:    1000,
 				LengthInSlots: 1_000_000,
-				EraId:         1,
+				EraId:         eras.ShelleyEraDesc.Id,
 				Nonce:         epochNonce,
 			},
 		},
+		currentEra: eras.ShelleyEraDesc,
 		config: LedgerStateConfig{
 			CardanoNodeConfig: newHighFreqShelleyGenesisCfg(t),
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -3887,15 +3893,16 @@ func TestPrunePoolSnapshotsWithRetentionFloor_KeepsReadoptableDeferredHeader(
 			EpochId:       11,
 			StartSlot:     20_000,
 			LengthInSlots: 1_000,
+			EraId:         eras.ShelleyEraDesc.Id,
 			Nonce:         tb.epochNonce,
 		},
 	}
-	// The test config carries Byron genesis with k=432, so the stability window
-	// is 2k = 864 slots; with the tip at 21_000 the rollback horizon cuts off
-	// at slot 20_136, between the two points below.
+	// The fixture is Shelley (k=432, f=0.99), so the stability window is
+	// ceil(3k/f) = 1_310 slots; with the tip at 21_000 the rollback horizon
+	// cuts off at slot 19_690, between the two points below.
 	ls.currentTip = ochainsync.Tip{Point: ocommon.Point{Slot: 21_000}}
 	ls.publishSnapshotsLocked()
-	require.Equal(t, uint64(864), ls.calculateStabilityWindow())
+	require.Equal(t, uint64(1_310), ls.calculateStabilityWindow())
 
 	// Behind the tip but INSIDE the horizon: a rollback can still re-adopt it.
 	readoptable := ocommon.Point{Slot: 20_500, Hash: []byte{0x11}}
