@@ -182,3 +182,53 @@ func TestRollbackResumesWhenCallerTransactionRollsBack(t *testing.T) {
 		t.Fatalf("unexpected tip after rollback of caller transaction: %+v", tip)
 	}
 }
+
+// TestStandaloneAddDoesNotBuildOnAbortedCallerAdd ensures a committed
+// standalone add cannot extend a block that is still held by a caller
+// transaction. The caller rollback restores the tip before the standalone add
+// proceeds, so the dependent block is rejected against the restored parent.
+func TestStandaloneAddDoesNotBuildOnAbortedCallerAdd(t *testing.T) {
+	db, c := callerTxnChain(t)
+	txn := addOnCallerTxn(t, db, c)
+
+	result := make(chan error, 1)
+	go func() { result <- c.AddBlock(testBlocks[5], nil) }()
+	select {
+	case err := <-result:
+		t.Fatalf("dependent standalone add completed before caller transaction: %v", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	if err := txn.Rollback(); err != nil {
+		t.Fatalf("rollback caller transaction: %v", err)
+	}
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("dependent standalone add succeeded after caller transaction rollback")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("dependent standalone add did not resume after caller transaction rollback")
+	}
+	if tip := c.Tip(); tip.Point.Slot != testBlocks[3].SlotNumber() {
+		t.Fatalf("unexpected tip after dependent add: %+v", tip)
+	}
+}
+
+// TestRejectedCallerAddDoesNotHideEarlierAdd ensures a rejected add does not
+// leave a no-op snapshot in front of the successful add it follows. Otherwise
+// rollback restoration stops at the rejected attempt and leaves memory ahead
+// of the store when the transaction aborts.
+func TestRejectedCallerAddDoesNotHideEarlierAdd(t *testing.T) {
+	db, c := callerTxnChain(t)
+	txn := addOnCallerTxn(t, db, c)
+	if err := c.AddBlock(testBlocks[4], txn); err == nil {
+		t.Fatalf("expected repeated caller add to fail")
+	}
+	if err := txn.Rollback(); err != nil {
+		t.Fatalf("rollback caller transaction: %v", err)
+	}
+	if tip := c.Tip(); tip.Point.Slot != testBlocks[3].SlotNumber() {
+		t.Fatalf("unexpected tip after rejected caller add: %+v", tip)
+	}
+}

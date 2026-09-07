@@ -405,6 +405,15 @@ func (c *Chain) addBlockInternal(
 	if c == nil {
 		return event.Event{}, errors.New("chain is nil")
 	}
+	if txn == nil && c.persistent {
+		endStandalone, err := c.beginStandaloneAdd()
+		if err != nil {
+			return event.Event{}, fmt.Errorf(
+				"wait for caller transaction adds: %w", err,
+			)
+		}
+		defer endStandalone()
+	}
 	// A caller-supplied transaction carries the block's store write out of the
 	// chain's sight: addBlockLocked advances the tip under c.mutex, and the
 	// caller commits at a moment the chain neither performs nor observes.
@@ -433,6 +442,7 @@ func (c *Chain) addBlockInternal(
 		matchPendingHeader,
 	)
 	if err != nil {
+		c.pendingAdds.discardLast(txn)
 		return event.Event{}, err
 	}
 	// Deferred callers (the mutex-holding blockfetch drain) publish through the
@@ -1304,6 +1314,24 @@ func (c *Chain) rollbackLocked(
 	// batchCommitMutex field.
 	c.batchCommitMutex.Lock()
 	defer c.batchCommitMutex.Unlock()
+	// A queued-header rollback does not remove persistent blocks and therefore
+	// must not wait for unrelated caller transactions. Check that case before
+	// waiting; the full check is repeated below after the wait because headers
+	// can change while a caller transaction concludes.
+	c.mutex.Lock()
+	if len(c.headers) > 0 {
+		idx, err := c.findQueuedHeader(point)
+		if err != nil {
+			c.mutex.Unlock()
+			return nil, err
+		}
+		if idx >= 0 {
+			c.headers = slices.Delete(c.headers, idx+1, len(c.headers))
+			c.mutex.Unlock()
+			return nil, nil
+		}
+	}
+	c.mutex.Unlock()
 	// The write hold above excludes further caller-transaction adds; this waits
 	// for the ones already recorded, so no index the removal loop reaches is
 	// one the store has yet to be given. See pendingAddBarrier.

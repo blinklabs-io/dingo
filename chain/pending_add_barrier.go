@@ -127,6 +127,16 @@ func (b *pendingAddBarrier) record(txn *database.Txn, add callerTxnAdd) {
 	}
 }
 
+func (b *pendingAddBarrier) discardLast(txn *database.Txn) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	adds, ok := b.pending[txn]
+	if !ok || len(adds) == 0 {
+		return
+	}
+	b.pending[txn] = adds[:len(adds)-1]
+}
+
 func (b *pendingAddBarrier) adds(txn *database.Txn) []callerTxnAdd {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -212,6 +222,19 @@ func (c *Chain) beginCallerTxnAdd(txn *database.Txn) func() {
 		txn.OnFinish(func() { c.finishCallerTxnAdd(txn) })
 	}
 	return c.batchCommitMutex.RUnlock
+}
+
+// beginStandaloneAdd prevents a standalone add from being built on a
+// caller-owned block that may later roll back. The write side remains held
+// through the add, so a caller add cannot interpose between the wait and the
+// standalone add's c.mutex acquisition.
+func (c *Chain) beginStandaloneAdd() (func(), error) {
+	c.batchCommitMutex.Lock()
+	if err := c.awaitPendingCallerAdds(); err != nil {
+		c.batchCommitMutex.Unlock()
+		return nil, err
+	}
+	return c.batchCommitMutex.Unlock, nil
 }
 
 // recordCallerTxnAdd saves the pre-add chain state. The caller must hold
