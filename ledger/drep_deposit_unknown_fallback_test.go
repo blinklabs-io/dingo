@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/require"
 )
 
@@ -329,6 +330,67 @@ func TestDrepRegistrationReportsAbsenceWithoutAPublishedSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, reg)
 	require.Nil(t, reg.Deposit)
+
+	require.ErrorContains(
+		t,
+		conway.UtxoValidateCertificateDeposits(
+			drepDeregistrationTx(cred, drepRefundTestPparamDeposit),
+			200,
+			lv,
+			drepRefundTestPparams(),
+		),
+		inconsistentDepositSubstring,
+	)
+}
+
+// TestDrepRegistrationReportsAbsenceForTypedNilParams covers the other way the
+// capability assertion can be satisfied without a usable deposit behind it.
+//
+// A typed-nil *DijkstraProtocolParameters implements drepDepositParams, so the
+// call-site guard admits it; CertDepositDijkstra then asserted the type
+// successfully and dereferenced nil, panicking inside DRep view construction.
+// It now reports ErrIncompatibleProtocolParams, which currentDRepDeposit turns
+// into absence, so gouroboros fails closed as it does for every other
+// no-deposit-available case.
+//
+// The two guards are complementary and both are asserted here: the era helper
+// is what stops the panic, and the call-site capability check is what keeps a
+// pre-Conway era from reaching it at all.
+func TestDrepRegistrationReportsAbsenceForTypedNilParams(t *testing.T) {
+	ls, db := newRewardCalculationTestLedger(t)
+	ls.currentEra = eras.DijkstraEraDesc
+	ls.currentPParams = (*dijkstra.DijkstraProtocolParameters)(nil)
+	ls.publishSnapshotsLocked()
+	lv := &LedgerView{ls: ls}
+
+	// The typed nil really does satisfy the capability the call-site guard
+	// tests, so this case reaches the era helper rather than stopping early.
+	_, implements := ls.currentPParams.(drepDepositParams)
+	require.True(
+		t,
+		implements,
+		"a typed-nil pointer must still satisfy drepDepositParams for this test to exercise the era helper",
+	)
+
+	cred := drepRefundTestCredential(0xe9)
+	seedActiveDrepWithoutRegistration(t, db, cred, 100)
+
+	require.NotPanics(t, func() {
+		reg, err := lv.DRepRegistration(cred.Credential)
+		require.NoError(t, err)
+		require.NotNil(t, reg)
+		require.Nil(
+			t,
+			reg.Deposit,
+			"unusable parameters must report absence, not a fabricated deposit",
+		)
+	})
+	require.NotPanics(t, func() {
+		registrations, err := lv.DRepRegistrations()
+		require.NoError(t, err)
+		require.Len(t, registrations, 1)
+		require.Nil(t, registrations[0].Deposit)
+	})
 
 	require.ErrorContains(
 		t,
