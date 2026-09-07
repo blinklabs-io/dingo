@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -69,6 +70,52 @@ type mockChainTip struct {
 
 func (m *mockChainTip) Tip() ochainsync.Tip {
 	return m.tip
+}
+
+type advancingChainTip struct {
+	initial   ochainsync.Tip
+	advanced  ochainsync.Tip
+	advanceAt int
+	calls     int
+}
+
+func (m *advancingChainTip) Tip() ochainsync.Tip {
+	m.calls++
+	if m.calls >= m.advanceAt {
+		return m.advanced
+	}
+	return m.initial
+}
+
+type lockedChainTip struct {
+	mu              sync.Mutex
+	initial         ochainsync.Tip
+	advanced        ochainsync.Tip
+	withTipCalls    int
+	advanceRequest  chan struct{}
+	advanceComplete chan struct{}
+}
+
+func (m *lockedChainTip) Tip() ochainsync.Tip {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.initial
+}
+
+func (m *lockedChainTip) WithTip(fn func(ochainsync.Tip) error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.withTipCalls++
+	close(m.advanceRequest)
+	return fn(m.initial)
+}
+
+func (m *lockedChainTip) requestAdvance() {
+	<-m.advanceRequest
+	m.mu.Lock()
+	m.initial = m.advanced
+	m.mu.Unlock()
+	close(m.advanceComplete)
 }
 
 type reentrantChainTip struct {
@@ -491,6 +538,108 @@ func TestBuildBlockEmptyMempool(t *testing.T) {
 	assert.Equal(t, uint64(1001), block.SlotNumber())
 	assert.Equal(t, uint64(101), block.BlockNumber())
 	assert.Equal(t, 0, len(block.Transactions()))
+}
+
+func TestBuildBlockRejectsTipChangeBeforeSigning(t *testing.T) {
+	creds := setupTestCredentials(t)
+	initial := ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: 1000,
+			Hash: bytes.Repeat([]byte{0x01}, 32),
+		},
+		BlockNumber: 100,
+	}
+	advanced := ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: 1001,
+			Hash: bytes.Repeat([]byte{0x02}, 32),
+		},
+		BlockNumber: 101,
+	}
+	chainTip := &advancingChainTip{
+		initial:   initial,
+		advanced:  advanced,
+		advanceAt: 3,
+	}
+	pparams := &conway.ConwayProtocolParameters{
+		MaxTxSize:        16384,
+		MaxBlockBodySize: 90112,
+		MaxBlockExUnits: lcommon.ExUnits{
+			Memory: 62000000,
+			Steps:  20000000000,
+		},
+	}
+	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+		Mempool:         &mockMempool{},
+		PParamsProvider: &mockPParamsProvider{pparams: pparams},
+		ChainTip:        chainTip,
+		EpochNonce: &mockEpochNonceProvider{
+			epoch: 1,
+			nonce: make([]byte, 32),
+		},
+		Credentials: creds,
+	})
+	require.NoError(t, err)
+
+	block, blockCbor, err := builder.BuildBlock(1001, 0)
+	require.ErrorIs(t, err, errParentChangedDuringBuild)
+	assert.Nil(t, block)
+	assert.Nil(t, blockCbor)
+	assert.Equal(t, 3, chainTip.calls)
+}
+
+func TestBuildBlockBindsSigningToTipLock(t *testing.T) {
+	creds := setupTestCredentials(t)
+	initial := ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: 1000,
+			Hash: bytes.Repeat([]byte{0x01}, 32),
+		},
+		BlockNumber: 100,
+	}
+	chainTip := &lockedChainTip{
+		initial: initial,
+		advanced: ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: 1001,
+				Hash: bytes.Repeat([]byte{0x02}, 32),
+			},
+			BlockNumber: 101,
+		},
+		advanceRequest:  make(chan struct{}),
+		advanceComplete: make(chan struct{}),
+	}
+	go chainTip.requestAdvance()
+	pparams := &conway.ConwayProtocolParameters{
+		MaxTxSize:        16384,
+		MaxBlockBodySize: 90112,
+		MaxBlockExUnits: lcommon.ExUnits{
+			Memory: 62000000,
+			Steps:  20000000000,
+		},
+	}
+	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+		Mempool:         &mockMempool{},
+		PParamsProvider: &mockPParamsProvider{pparams: pparams},
+		ChainTip:        chainTip,
+		EpochNonce: &mockEpochNonceProvider{
+			epoch: 1,
+			nonce: make([]byte, 32),
+		},
+		Credentials: creds,
+	})
+	require.NoError(t, err)
+
+	block, blockCbor, err := builder.BuildBlock(1001, 0)
+	require.NoError(t, err)
+	require.NotNil(t, block)
+	require.NotEmpty(t, blockCbor)
+	assert.Equal(t, 1, chainTip.withTipCalls)
+	select {
+	case <-chainTip.advanceComplete:
+	case <-time.After(time.Second):
+		t.Fatal("tip advance did not wait for signing critical section")
+	}
 }
 
 func TestBuildBlockUsesSlotEpochForVRFNonce(t *testing.T) {

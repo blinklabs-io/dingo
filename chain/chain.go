@@ -134,6 +134,19 @@ func (c *Chain) Tip() ochainsync.Tip {
 	return c.currentTip
 }
 
+// WithTip runs fn while holding the chain mutex. It is intended for operations
+// that must bind a result to the exact tip snapshot they observed, such as
+// signing a block header. fn must not call back into c or block on a chain
+// operation.
+func (c *Chain) WithTip(fn func(ochainsync.Tip) error) error {
+	if c == nil {
+		return errors.New("chain is nil")
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	return fn(c.currentTip)
+}
+
 func (c *Chain) HeaderTip() ochainsync.Tip {
 	if c == nil {
 		return ochainsync.Tip{}
