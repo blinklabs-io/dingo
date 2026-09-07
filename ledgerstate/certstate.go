@@ -1988,14 +1988,47 @@ type ParsedGovState struct {
 	Proposals            []ParsedGovProposal
 	PrevGovActionIds     *ParsedPrevGovActionIds
 	RatifiedGovActionIds []ParsedGovActionId
-	// EnactCommittee and EnactCommitteeQuorum are the committee values
-	// carried by RatifyState.rsEnactState.  This is the state already
-	// enacted at the snapshot boundary, independent of rsEnacted (which
-	// is applied at the next boundary).
-	EnactCommittee           []ParsedCommitteeMember
-	EnactCommitteeQuorum     *cbor.Rat
-	EnactCommitteeSet        bool
-	EnactCommitteeParseError error
+	// EnactCommittee and EnactCommitteeQuorum are the committee carried
+	// by RatifyState.rsEnactState. That is not a second copy of
+	// cgsCommittee: RATIFY folds every accepted action into rsEnactState
+	// and ConwayEPOCH copies the result into cgsCommittee at the next
+	// epoch boundary. See EnactedCommitteeChange.
+	EnactCommittee       []ParsedCommitteeMember
+	EnactCommitteeQuorum *cbor.Rat
+	// EnactCommitteeSet reports that cgsDRepPulsingState was present and
+	// decoded far enough to yield rsEnactState's committee field.
+	EnactCommitteeSet bool
+	// EnactedCommitteeChange reports that RatifyState.rsEnacted carries
+	// an action whose enactment rewrites EnactState.ensCommittee, namely
+	// NoConfidence (which clears it) or UpdateCommittee. Those are the
+	// only two, so cgsCommittee and EnactCommittee are required to agree
+	// only when this is false.
+	EnactedCommitteeChange bool
+	// EnactedActionTypesUnknown reports that at least one rsEnacted
+	// proposal could not be decoded, so EnactedCommitteeChange is a
+	// lower bound rather than the full answer.
+	EnactedActionTypesUnknown bool
+	// PulsingStateParseError is set when cgsDRepPulsingState could not be
+	// decoded far enough to recover rsEnactState's committee. Fatal for an
+	// import: the imported committee then has no second view to
+	// corroborate it.
+	PulsingStateParseError error
+}
+
+// parsedPulsingState holds the parts of cgsDRepPulsingState the importer
+// consumes. Its committee error is a named field rather than a second
+// bare return value because the two error channels are not
+// interchangeable: CommitteeErr is fail-closed, while a failure to decode
+// an individual rsEnacted proposal is warning-grade and is returned as
+// the bare error alongside the struct.
+type parsedPulsingState struct {
+	EnactCommittee            []ParsedCommitteeMember
+	EnactCommitteeQuorum      *cbor.Rat
+	EnactCommitteeSet         bool
+	EnactedCommitteeChange    bool
+	EnactedActionTypesUnknown bool
+	RatifiedGovActionIds      []ParsedGovActionId
+	CommitteeErr              error
 }
 
 // ParseGovState decodes governance state from raw CBOR.
@@ -2073,22 +2106,41 @@ func ParseGovState(
 	result.Proposals = proposals
 	result.PrevGovActionIds = prevIds
 
-	if len(fields) >= 7 {
-		enactCommittee, enactQuorum, enactSet, ratifiedIds, committeeErr, err := parseDRepPulsingState(
-			fields[6],
-		)
+	// ConwayGovState encodes exactly seven fields, so a shorter record is
+	// malformed. It is reported as a warning rather than rejected here
+	// because field-count enforcement for the whole record belongs with
+	// GovState shape validation, not with the committee corroboration
+	// below; a truncated record simply leaves EnactCommitteeSet false and
+	// the corroboration unavailable.
+	if len(fields) < 7 {
+		warnings = append(warnings, fmt.Errorf(
+			"GovState has %d elements, expected 7; "+
+				"cgsDRepPulsingState is absent",
+			len(fields),
+		))
+	} else {
+		pulsing, err := parseDRepPulsingState(fields[6])
 		if err != nil {
 			warnings = append(warnings, fmt.Errorf(
 				"parsing drep pulsing state: %w", err,
 			))
 		}
-		result.EnactCommittee = enactCommittee
-		result.EnactCommitteeQuorum = enactQuorum
-		result.EnactCommitteeSet = enactSet
-		if committeeErr != nil {
-			result.EnactCommitteeParseError = committeeErr
+		result.EnactCommittee = pulsing.EnactCommittee
+		result.EnactCommitteeQuorum = pulsing.EnactCommitteeQuorum
+		result.EnactCommitteeSet = pulsing.EnactCommitteeSet
+		result.EnactedCommitteeChange = pulsing.EnactedCommitteeChange
+		result.EnactedActionTypesUnknown = pulsing.EnactedActionTypesUnknown
+		result.RatifiedGovActionIds = pulsing.RatifiedGovActionIds
+		if pulsing.CommitteeErr != nil {
+			// Keep the dedicated field for the importer's fail-closed
+			// check and surface it through the returned error so every
+			// caller of this exported function still sees the failure.
+			result.PulsingStateParseError = pulsing.CommitteeErr
+			warnings = append(warnings, fmt.Errorf(
+				"parsing drep pulsing state: %w",
+				pulsing.CommitteeErr,
+			))
 		}
-		result.RatifiedGovActionIds = ratifiedIds
 	}
 
 	return result, errors.Join(warnings...)
@@ -2376,78 +2428,111 @@ func parseProposals(data []byte) (
 // The enacted field is a sequence of GovActionState values in the same
 // representation used by cgsProposals, so parseGovActionState can
 // recover the exact action IDs without decoding the full enact state.
+//
+// Every shape below the top-level array is fixed in Conway, so a
+// missing or short element is malformed input rather than an optional
+// encoding: DRepPulsingState always encodes two elements (a pulsing
+// pulser is completed before being written), RatifyState always four,
+// and EnactState always seven with the committee first. Those shapes are
+// therefore recorded in CommitteeErr, which the importer treats as
+// fatal, instead of being skipped silently.
 func parseDRepPulsingState(
 	data []byte,
-) ([]ParsedCommitteeMember, *cbor.Rat, bool, []ParsedGovActionId, error, error) {
+) (parsedPulsingState, error) {
+	var result parsedPulsingState
 	if len(data) == 0 {
-		return nil, nil, false, nil, nil, nil
+		result.CommitteeErr = errors.New(
+			"DRepPulsingState is empty",
+		)
+		return result, nil
 	}
 	fields, err := decodeRawArray(data)
 	if err != nil {
-		return nil, nil, false, nil, fmt.Errorf(
+		result.CommitteeErr = fmt.Errorf(
 			"decoding DRepPulsingState: %w", err,
-		), nil
-	}
-	if len(fields) == 0 {
-		return nil, nil, false, nil, nil, nil
+		)
+		return result, nil
 	}
 	if len(fields) < 2 {
-		return nil, nil, false, nil, fmt.Errorf(
+		result.CommitteeErr = fmt.Errorf(
 			"DRepPulsingState has %d elements, expected 2",
 			len(fields),
-		), nil
+		)
+		return result, nil
 	}
 
 	ratifyState, err := decodeRawArray(fields[1])
 	if err != nil {
-		return nil, nil, false, nil, fmt.Errorf(
+		result.CommitteeErr = fmt.Errorf(
 			"decoding RatifyState: %w", err,
-		), nil
+		)
+		return result, nil
 	}
 	if len(ratifyState) < 2 {
-		return nil, nil, false, nil, fmt.Errorf(
+		result.CommitteeErr = fmt.Errorf(
 			"RatifyState has %d elements, expected 4",
 			len(ratifyState),
-		), nil
+		)
+		return result, nil
 	}
-	var committee []ParsedCommitteeMember
-	var quorum *cbor.Rat
-	committeeSet := false
-	var committeeErr error
-	var idErrs []error
-	enactFields, enactErr := decodeRawArray(ratifyState[0])
-	if enactErr != nil {
-		committeeErr = fmt.Errorf("decoding RatifyState enact state: %w", enactErr)
-	} else if len(enactFields) > 0 {
-		committeeSet = true
-		committee, quorum, enactErr = parseCommittee(enactFields[0])
-		if enactErr != nil {
-			committeeErr = fmt.Errorf("decoding enact-state committee: %w", enactErr)
-		}
+
+	enactFields, err := decodeRawArray(ratifyState[0])
+	if err != nil {
+		result.CommitteeErr = fmt.Errorf(
+			"decoding RatifyState enact state: %w", err,
+		)
+		return result, nil
 	}
+	if len(enactFields) == 0 {
+		result.CommitteeErr = errors.New(
+			"RatifyState enact state has 0 elements, expected 7",
+		)
+		return result, nil
+	}
+	committee, quorum, err := parseCommittee(enactFields[0])
+	if err != nil {
+		result.CommitteeErr = fmt.Errorf(
+			"decoding enact-state committee: %w", err,
+		)
+		return result, nil
+	}
+	result.EnactCommittee = committee
+	result.EnactCommitteeQuorum = quorum
+	result.EnactCommitteeSet = true
 
 	enacted, err := decodeRawArray(ratifyState[1])
 	if err != nil {
-		return committee, quorum, committeeSet, nil, committeeErr, fmt.Errorf(
+		result.EnactedActionTypesUnknown = true
+		return result, fmt.Errorf(
 			"decoding RatifyState enacted proposals: %w", err,
 		)
 	}
+	var idErrs []error
 	ratifiedIds := make([]ParsedGovActionId, 0, len(enacted))
 	for _, item := range enacted {
 		prop, err := parseGovActionState(item)
 		if err != nil {
+			// The action type is unrecoverable for this entry, so
+			// whether a committee action was enacted is no longer
+			// decidable from rsEnacted.
+			result.EnactedActionTypesUnknown = true
 			idErrs = append(idErrs, fmt.Errorf(
 				"decoding enacted proposal: %w", err,
 			))
 			continue
+		}
+		if prop.ActionType == govActionTypeNoConfidence ||
+			prop.ActionType == govActionTypeUpdateCommittee {
+			result.EnactedCommitteeChange = true
 		}
 		ratifiedIds = append(ratifiedIds, ParsedGovActionId{
 			TxHash:      append([]byte(nil), prop.TxHash...),
 			ActionIndex: prop.ActionIndex,
 		})
 	}
+	result.RatifiedGovActionIds = ratifiedIds
 
-	return committee, quorum, committeeSet, ratifiedIds, committeeErr, errors.Join(idErrs...)
+	return result, errors.Join(idErrs...)
 }
 
 // parseProposalsRoots decodes the GovRelation StrictMaybe at the
