@@ -153,16 +153,20 @@ func (l *leiosForgedEBLog) append(entry leiosForgedEBEntry) {
 	close(wake)
 }
 
-// next reserves and returns the next unserved entry for connKey and the
-// current wake channel. If no entry is available it returns (nil, wakeCh); the
-// caller should wait on wakeCh and retry. A connKey that has never called next
-// is registered at the current tail unless a failed delivery is awaiting
-// retry.
-func (l *leiosForgedEBLog) next(
+// nextWhileConnected reserves the next unserved entry and returns the wake
+// channel when none is available. Cancellation is checked under the cursor
+// lock so a closed request cannot recreate a cursor removed by disconnect.
+func (l *leiosForgedEBLog) nextWhileConnected(
 	connKey string,
+	done <-chan struct{},
 ) (*leiosForgedEBEntry, chan struct{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	select {
+	case <-done:
+		return nil, l.wakeCh
+	default:
+	}
 	if reserved, ok := l.reservations[connKey]; ok {
 		idx := reserved.index - l.base
 		if idx >= 0 && idx < len(l.items) {
@@ -1879,7 +1883,11 @@ func (o *Ouroboros) leiosnotifyServerRequestNext(
 		return nil, nil
 	}
 	connKey := leiosConnectionIdString(ctx.ConnectionId)
-	done := ctx.Server.DoneChan()
+	// Protocol completion waits for this callback to return. Use the
+	// connection manager's independent close notification instead.
+	done, cancel := o.registerLeiosServeWaiter(ctx.ConnectionId)
+	protocolDone := ctx.Server.DoneChan()
+	defer cancel()
 
 	// If the connection is already closing, return without touching the
 	// cursor map. This prevents re-registering a stale cursor after
@@ -1887,11 +1895,13 @@ func (o *Ouroboros) leiosnotifyServerRequestNext(
 	select {
 	case <-done:
 		return nil, nil
+	case <-protocolDone:
+		return nil, nil
 	default:
 	}
 
 	for {
-		entry, wakeCh := o.leiosEBLog.next(connKey)
+		entry, wakeCh := o.leiosEBLog.nextWhileConnected(connKey, done)
 		if entry != nil {
 			if msg := leiosForgedEBOffer(entry); msg != nil {
 				return msg, nil
@@ -1901,6 +1911,8 @@ func (o *Ouroboros) leiosnotifyServerRequestNext(
 		case <-wakeCh:
 			// new EB appended — re-check
 		case <-done:
+			return nil, nil
+		case <-protocolDone:
 			return nil, nil
 		}
 	}
