@@ -1010,9 +1010,13 @@ func (ls *LedgerState) ledgerTipBehindSlot(slot uint64) bool {
 // even when the decentralization parameter enables overlay slots elsewhere in
 // the same epoch.
 //
-// Byron blocks are skipped (PBFT). A missing total-stake or unavailable active
-// slot coefficient is logged and skipped rather than rejecting, to tolerate
-// early-chain bootstrap states where the genesis snapshot is not yet written.
+// Byron blocks are skipped (PBFT). A state that leaves the threshold
+// unevaluable -- a zero total active stake, a missing or non-positive active
+// slot coefficient, or a post-Mithril mark row reconstructed after its target
+// boundary -- is rejected rather than skipped; only the explicitly selected
+// prototype profile logs it and trusts the block. The snapshot cases carry
+// errLeaderStakeSnapshotUnavailable, so header verification running ahead of
+// the ledger apply cursor defers instead of rejecting.
 //
 // epochCacheSnapshot returns the published epoch cache, or nil when no
 // snapshot has been published. The test-helper wrappers that pin a cache for
