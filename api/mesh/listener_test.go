@@ -502,6 +502,8 @@ func TestRequestBodyAtLimitIsAccepted(t *testing.T) {
 
 // TestServerTimeoutsAreConfigured pins the listener timeouts, which
 // bound how long a slow or idle client can hold a connection.
+// ReadTimeout is the backstop for a request whose body no handler
+// reads, which the per-request deadline in decodeRequest never sees.
 func TestServerTimeoutsAreConfigured(t *testing.T) {
 	srv, _ := startTestServer(t, newTestDeps())
 
@@ -511,8 +513,23 @@ func TestServerTimeoutsAreConfigured(t *testing.T) {
 	require.Equal(
 		t, 60*time.Second, httpServer.ReadHeaderTimeout,
 	)
+	require.Equal(
+		t, listenerReadTimeout, httpServer.ReadTimeout,
+	)
+	require.Positive(t, httpServer.ReadTimeout)
 	require.Equal(t, 30*time.Second, httpServer.WriteTimeout)
 	require.Equal(t, 120*time.Second, httpServer.IdleTimeout)
+}
+
+// TestDefaultRequestBodyTimeoutIsApplied asserts a server built
+// without an explicit body deadline still gets one, so the bound
+// cannot be lost by composition code that never sets it.
+func TestDefaultRequestBodyTimeoutIsApplied(t *testing.T) {
+	srv := newTestServer(t, newTestDeps())
+
+	require.Equal(
+		t, defaultRequestBodyTimeout, srv.config.requestBodyTimeout,
+	)
 }
 
 // --- routing ------------------------------------------------------------

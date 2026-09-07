@@ -60,29 +60,29 @@ func opCertFromHeader(header ledger.BlockHeader) (*ledger.OpCert, bool) {
 	case *shelley.ShelleyBlockHeader:
 		return shelleyOpCert(
 			h.Body.OpCertHotVkey,
-			h.Body.OpCertSequenceNumber,
-			h.Body.OpCertKesPeriod,
+			uint64(h.Body.OpCertSequenceNumber),
+			uint64(h.Body.OpCertKesPeriod),
 			h.Body.OpCertSignature,
 		), true
 	case *allegra.AllegraBlockHeader:
 		return shelleyOpCert(
 			h.Body.OpCertHotVkey,
-			h.Body.OpCertSequenceNumber,
-			h.Body.OpCertKesPeriod,
+			uint64(h.Body.OpCertSequenceNumber),
+			uint64(h.Body.OpCertKesPeriod),
 			h.Body.OpCertSignature,
 		), true
 	case *mary.MaryBlockHeader:
 		return shelleyOpCert(
 			h.Body.OpCertHotVkey,
-			h.Body.OpCertSequenceNumber,
-			h.Body.OpCertKesPeriod,
+			uint64(h.Body.OpCertSequenceNumber),
+			uint64(h.Body.OpCertKesPeriod),
 			h.Body.OpCertSignature,
 		), true
 	case *alonzo.AlonzoBlockHeader:
 		return shelleyOpCert(
 			h.Body.OpCertHotVkey,
-			h.Body.OpCertSequenceNumber,
-			h.Body.OpCertKesPeriod,
+			uint64(h.Body.OpCertSequenceNumber),
+			uint64(h.Body.OpCertKesPeriod),
 			h.Body.OpCertSignature,
 		), true
 	case *babbage.BabbageBlockHeader:
@@ -94,16 +94,22 @@ func opCertFromHeader(header ledger.BlockHeader) (*ledger.OpCert, bool) {
 	}
 }
 
+// shelleyOpCert takes the counter and KES period as uint64 because that is
+// what cardano-ledger decodes them as (Word64 and KESPeriod{Word}) and what
+// ledger.OpCert already carries. The TPraos header bodies they come from are
+// gouroboros types whose declared width is the release's to choose, so the
+// call sites convert; widening this signature keeps that conversion the only
+// place a release change is visible and keeps it lossless in either direction.
 func shelleyOpCert(
 	hotVkey []byte,
-	sequenceNumber uint32,
-	kesPeriod uint32,
+	sequenceNumber uint64,
+	kesPeriod uint64,
 	signature []byte,
 ) *ledger.OpCert {
 	return &ledger.OpCert{
 		KesVkey:       hotVkey,
-		IssueNumber:   uint64(sequenceNumber),
-		KesPeriod:     uint64(kesPeriod),
+		IssueNumber:   sequenceNumber,
+		KesPeriod:     kesPeriod,
 		ColdSignature: signature,
 	}
 }

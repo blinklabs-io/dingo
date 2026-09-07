@@ -68,18 +68,17 @@ func addLeiosOCINChainBlocks(
 
 func leiosOCINHeader(
 	issuer lcommon.IssuerVkey,
-	sequence uint32,
+	sequence uint64,
 ) *dijkstra.DijkstraBlockHeader {
-	return &dijkstra.DijkstraBlockHeader{
+	header := &dijkstra.DijkstraBlockHeader{
 		BabbageBlockHeader: babbage.BabbageBlockHeader{
 			Body: babbage.BabbageBlockHeaderBody{
 				IssuerVkey: issuer,
-				OpCert: babbage.BabbageOpCert{
-					SequenceNumber: sequence,
-				},
 			},
 		},
 	}
+	setOpCertSequenceNumber(&header.Body.OpCert.SequenceNumber, sequence)
+	return header
 }
 
 // TestOpCertFromHeader_Babbage verifies the per-era extractor pulls the opcert
@@ -327,7 +326,7 @@ func TestLeiosAnnouncementOCINStalenessUsesImmutableTip(t *testing.T) {
 	tests := []struct {
 		name      string
 		issuer    lcommon.IssuerVkey
-		candidate uint32
+		candidate uint64
 		want      LeiosAnnouncementOCINStaleness
 	}{
 		{

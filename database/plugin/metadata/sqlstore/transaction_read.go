@@ -890,3 +890,20 @@ func parseNullUint64(name string, value sql.NullString) (uint64, error) {
 	}
 	return parseUint64(name, value.String)
 }
+
+// parseNullableUint64 decodes a decimal TEXT column that distinguishes an
+// absent value from zero, returning nil for SQL NULL instead of collapsing it
+// to zero the way parseNullUint64 does. Use it wherever a stored zero and an
+// unknown value are different answers -- a registration deposit of NULL must
+// fall back to the current KeyDeposit in value conservation, while a recorded
+// zero must be refunded as zero.
+func parseNullableUint64(name string, value sql.NullString) (*uint64, error) {
+	if !value.Valid || value.String == "" {
+		return nil, nil
+	}
+	parsed, err := parseUint64(name, value.String)
+	if err != nil {
+		return nil, err
+	}
+	return &parsed, nil
+}
