@@ -28,6 +28,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	gcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // ErrUndecodable means the returned bytes could not be decoded as a block
@@ -80,31 +81,36 @@ var ErrSlotMismatch = errors.New("block content slot mismatch")
 // caller that decodes strictly under the recorded Type (rather than
 // re-deriving it) would not be misled by.
 //
-// Separately, and still accepted: for a Byron main block specifically,
-// gouroboros checks the transaction, delegation, and update proofs but not
-// ssc_proof, because the SSC proof hashes cardano-ledger's own encoding of
-// the sub-payloads rather than the bytes carried in the block -- an
-// upstream limitation, not something derivable here. An alteration
-// confined to that one payload therefore changes nothing Hash checks.
-// Bark's own archive-fetch path hits the identical gap and closes it by
-// rejecting Byron main blocks entirely (assertBodyFullyAuthenticated in
-// bark/blob.go), but bark treats a remote archive as an optional,
-// distrusted fallback behind a trusted local store, so refusing one era
-// there only costs the availability of a path that has a fallback. Hash
-// instead guards the *primary* GetBlock path for S3/GCS: rejecting Byron
-// main blocks here would make every Byron-era block permanently
-// unretrievable from an S3/GCS-backed node (needed for a from-genesis
-// sync, or serving historical API queries), a full functional regression
-// traded for closing a gap that is narrow -- confined to one payload, in
-// one era, on a store the operator already configured and trusted enough
-// to write real chain data into in the first place.
+// Separately: for a Byron main block specifically, gouroboros's default
+// decode checks the transaction and delegation/update proofs but only the
+// *shape* of ssc_proof, not its hash, because ssc_proof's hash construction
+// has no upstream reference implementation to cross-check against (see
+// common.VerifyConfig.EnableByronSscProofHashValidation's doc comment) --
+// so gouroboros itself leaves the full comparison opt-in rather than
+// decode-gating by default. Byron's block hash covers the header, which
+// carries ssc_proof's claimed hash, but not the body bytes ssc_proof
+// itself authenticates -- so hash and slot alone would leave the ssc
+// payload as the one thing a hostile store could still substitute
+// undetected. A remote store is exactly the untrusted case gouroboros's
+// opt-in exists for, so Hash sets EnableByronSscProofHashValidation to
+// fully authenticate ssc_proof against the header here. The residual risk
+// is upstream's, not this package's: that hash construction is confirmed
+// against only a handful of real mainnet blocks covering two of Byron
+// main's four SSC payload types, so a genuine block exercising an
+// unverified code path could in principle be rejected -- accepted here
+// because the alternative, matching bark's own archive-fetch path
+// (assertBodyFullyAuthenticated in bark/blob.go) by rejecting every Byron
+// main block outright, would make Byron-era history permanently
+// unretrievable from an S3/GCS-backed node instead.
 func Hash(
 	blockType uint,
 	wantSlot uint64,
 	cborData []byte,
 	wantHash []byte,
 ) (gledger.Block, error) {
-	decoded, err := models.Block{Type: blockType, Cbor: cborData}.Decode()
+	decoded, err := models.Block{Type: blockType, Cbor: cborData}.Decode(
+		gcommon.VerifyConfig{EnableByronSscProofHashValidation: true},
+	)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"%w: type %d: %w",

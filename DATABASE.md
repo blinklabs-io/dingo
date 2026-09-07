@@ -1379,22 +1379,28 @@ recorded `Type` (rather than re-deriving it) is not misled by. See
 `blockverify.Hash`'s own doc comment in `blockverify.go` for the full
 account.
 
-One separate, still-accepted gap: gouroboros checks a Byron main block's
-transaction, delegation, and update proofs but not its `ssc_proof` (an
-upstream limitation -- the SSC proof hashes cardano-ledger's own encoding
-of the sub-payloads rather than the bytes carried in the block), so an
-alteration confined to that one payload changes nothing the checks above
-verify. Bark's archive-fetch path hits the identical gap and closes it by
-rejecting Byron main blocks outright, but bark treats a remote archive as
-an optional, distrusted fallback behind a trusted local store, so refusing
-one era there only costs the availability of a path that has a fallback.
-`blockverify.Hash` guards the *primary* `GetBlock` path for S3/GCS instead:
-rejecting Byron main blocks there would make every Byron-era block
-permanently unretrievable from an S3/GCS-backed node (needed for a
-from-genesis sync, or serving historical API queries), trading a
-narrow, single-payload, single-era gap on storage the operator already
-configured and trusted for a full functional regression. Accepted rather
-than rejected; see `Hash`'s doc comment in `blockverify.go`.
+Separately, for a Byron main block specifically: gouroboros's default
+decode checks the transaction and delegation/update proofs but only the
+*shape* of `ssc_proof`, not its hash, since gouroboros itself has no
+upstream reference implementation to cross-check that hash construction
+against and so leaves the full comparison opt-in
+(`common.VerifyConfig.EnableByronSscProofHashValidation`) rather than
+decode-gating by default. Byron's block hash covers the header, which
+carries `ssc_proof`'s claimed hash, but not the body bytes `ssc_proof`
+itself authenticates -- so hash and slot alone would leave the SSC payload
+as the one thing a hostile store could still substitute undetected.
+`blockverify.Hash` sets `EnableByronSscProofHashValidation` so a Byron main
+block's `ssc_proof` is fully authenticated here, rather than accepting the
+gap the way an earlier version of this check (and bark's archive-fetch
+path, `assertBodyFullyAuthenticated` in `bark/blob.go`, which rejects Byron
+main blocks outright instead) both did. The residual risk is upstream's,
+not this package's: that hash construction is confirmed against only a
+handful of real mainnet blocks covering two of Byron main's four SSC
+payload types, so a genuine block exercising an unverified code path could
+in principle be rejected -- accepted here because rejecting every Byron
+main block outright, as bark's archive-fetch path does, would make
+Byron-era history permanently unretrievable from an S3/GCS-backed node
+instead. See `Hash`'s doc comment in `blockverify.go` for the full account.
 
 Leios endorser-block storage uses the same blob-key namespace, even though an
 endorser block is not part of the ranking-block chain. When a Dijkstra ranking

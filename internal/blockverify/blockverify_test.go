@@ -20,6 +20,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/ouroboros-mock/fixtures"
@@ -87,6 +88,118 @@ func TestHashAcceptsLeiosExtendedConwayHeader(t *testing.T) {
 	hash := decoded.Hash()
 
 	verified, err := Hash(gledger.BlockTypeConway, testSlot, extendedRaw, hash[:])
+	require.NoError(t, err)
+	require.Equal(t, hash, verified.Hash())
+}
+
+// byronMainFixture returns the CBOR and true block type of the bundled
+// mainnet Byron main block golden fixture.
+func byronMainFixture(t *testing.T) ([]byte, uint) {
+	t.Helper()
+	root, err := fixtures.ExtractEmbeddedFixtures(t.TempDir())
+	require.NoError(t, err)
+	f, err := fixtures.NewFixture(
+		root,
+		root+"/ouroboros-consensus/ouroboros-consensus-cardano/golden/"+
+			"cardano/CardanoNodeToNodeVersion2/Block_Byron_regular",
+	)
+	require.NoError(t, err)
+	raw, err := f.ConsensusLedgerBlockBytes()
+	require.NoError(t, err)
+	blockType, err := f.LedgerBlockType()
+	require.NoError(t, err)
+	require.Equal(t, uint(gledger.BlockTypeByronMain), blockType,
+		"fixture invariant: must be a Byron main block")
+	return raw, blockType
+}
+
+// tamperByronSscCertificates rewrites a Byron main block's ssc_proof
+// payload (a CertificatesPayload, ssc = [3, ssccerts]) to carry one
+// fabricated VSS certificate entry instead of its real content, without
+// touching the header. Byron's block hash covers only the header, so the
+// tampered block still decodes to the same hash and slot as the original --
+// modeling a hostile store returning a genuine header with a substituted
+// body. The entry only needs a non-empty byte-string in its pubkey field
+// (index 3, decodeIdentitySet's only shape requirement) to decode; its
+// other fields are unchecked filler.
+func tamperByronSscCertificates(t *testing.T, blockCbor []byte) []byte {
+	t.Helper()
+	var block []cbor.RawMessage
+	_, err := cbor.Decode(blockCbor, &block)
+	require.NoError(t, err)
+	require.Len(t, block, 3, "byron main block is [header, body, extra]")
+
+	var body []cbor.RawMessage
+	_, err = cbor.Decode(block[1], &body)
+	require.NoError(t, err)
+	require.Len(t, body, 4, "byron main block body is [tx, ssc, dlg, upd]")
+
+	entry, err := cbor.Encode([]any{
+		[]byte{},
+		uint64(0),
+		[]byte{},
+		[]byte("tampered-certificate"),
+	})
+	require.NoError(t, err)
+	set := cbor.NewSetType([]cbor.RawMessage{cbor.RawMessage(entry)}, true)
+	setRaw, err := cbor.Encode(&set)
+	require.NoError(t, err)
+
+	newSsc, err := cbor.Encode([]any{
+		uint64(3), // SscTypeCertificates
+		cbor.RawMessage(setRaw),
+	})
+	require.NoError(t, err)
+	body[1] = cbor.RawMessage(newSsc)
+
+	newBody, err := cbor.Encode(body)
+	require.NoError(t, err)
+	block[1] = cbor.RawMessage(newBody)
+
+	tampered, err := cbor.Encode(block)
+	require.NoError(t, err)
+	return tampered
+}
+
+// TestHashRejectsTamperedByronSscProof proves Hash fully authenticates a
+// Byron main block's ssc_proof rather than only checking its shape: hash
+// and slot alone would accept the tampered block below, since Byron's
+// block hash covers only the header, which this tamper leaves untouched.
+func TestHashRejectsTamperedByronSscProof(t *testing.T) {
+	raw, blockType := byronMainFixture(t)
+	decoded, err := gledger.NewBlockFromCbor(blockType, raw)
+	require.NoError(t, err)
+	hash := decoded.Hash()
+
+	tampered := tamperByronSscCertificates(t, raw)
+
+	// The tamper must leave decode, hash, and slot unaffected, otherwise
+	// this test would be caught by ErrUndecodable/ErrHashMismatch/
+	// ErrSlotMismatch instead of exercising ssc_proof authentication.
+	tDecoded, err := gledger.NewBlockFromCbor(blockType, tampered)
+	require.NoError(t, err,
+		"fixture invariant: tampered block must still decode under the "+
+			"default (shape-only) ssc_proof check")
+	require.Equal(t, hash, tDecoded.Hash(),
+		"fixture invariant: tamper must not change the block hash")
+
+	_, err = Hash(blockType, decoded.SlotNumber(), tampered, hash[:])
+	require.Error(t, err,
+		"Hash must reject a Byron main block whose ssc_proof does not "+
+			"authenticate its own payload")
+}
+
+// TestHashAcceptsMatchingByronBlock proves the untampered Byron main
+// fixture -- ssc_proof included -- still passes Hash, so the stricter
+// ssc_proof authentication above isn't merely rejecting every Byron main
+// block outright.
+func TestHashAcceptsMatchingByronBlock(t *testing.T) {
+	raw, blockType := byronMainFixture(t)
+	decoded, err := gledger.NewBlockFromCbor(blockType, raw)
+	require.NoError(t, err)
+	hash := decoded.Hash()
+
+	verified, err := Hash(blockType, decoded.SlotNumber(), raw, hash[:])
 	require.NoError(t, err)
 	require.Equal(t, hash, verified.Hash())
 }
