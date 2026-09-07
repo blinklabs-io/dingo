@@ -184,6 +184,11 @@ type DingoPoolEpochData struct {
 	// Subtracting reward_pool_output.unspendable from member_reward_total
 	// would not be equivalent: that column accumulates unspendable leader
 	// rewards too.
+	// RewardsPending reports that the node has not reached the boundary at
+	// which this stake epoch's rewards are applied. The zero value is
+	// deliberately strict: incomplete boundary metadata must not hide a
+	// divergence.
+	RewardsPending             bool
 	SpendableMemberRewardTotal string
 }
 
@@ -318,6 +323,72 @@ func (d *DingoDB) GetEpochData(
 	}
 
 	return data, nil
+}
+
+// GetProtocolParams resolves the protocol parameters in force for epoch and
+// decodes them into the era-independent DingoProtocolParams view. Returns
+// nil, nil when Dingo has no `epoch` row for the epoch yet, or no `pparams`
+// row at or before it for that epoch's era.
+//
+// Two properties of Dingo's `pparams` table shape this query, and getting
+// either wrong silently reads back the wrong parameter set (dingo #3931):
+//
+//   - It holds one row per parameter CHANGE, not one per epoch. Preview has
+//     roughly a dozen rows spanning 400+ epochs, so the row for a given epoch
+//     is the latest one at or before it — an exact-epoch lookup finds nothing
+//     for almost every epoch.
+//   - At an era boundary the rollover path writes BOTH an old-era row
+//     (post-pparams-update) and a new-era row (transitionToEra) at the same
+//     epoch, with different CBOR shapes. Preview really does carry two epoch-2
+//     rows and two epoch-3 rows. Which one applies is decided by the era the
+//     `epoch` table records for the epoch, not by insertion order, so the era
+//     is resolved first and used both to filter the row and to pick the
+//     decoder — the same order api/blockfrost's adapter uses.
+//
+// ctx is forwarded to the DB driver so that a cancelled context aborts the
+// query.
+func (d *DingoDB) GetProtocolParams(
+	ctx context.Context,
+	epoch uint64,
+) (*DingoProtocolParams, error) {
+	tx, err := d.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("begin protocol params read: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	queryRow := func(query string, args ...any) *sql.Row {
+		return tx.QueryRowContext(ctx, rebind(query, d.dialect), args...)
+	}
+	var eraID uint
+	if err := queryRow(
+		`SELECT era_id FROM epoch WHERE epoch_id = ?`,
+		epoch,
+	).Scan(&eraID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("epoch era epoch %d: %w", epoch, err)
+	}
+
+	var (
+		cborBytes   []byte
+		sourceEpoch uint64
+	)
+	if err := queryRow(
+		`SELECT cbor, epoch FROM pparams WHERE epoch <= ? AND era_id = ?
+		 ORDER BY epoch DESC, id DESC LIMIT 1`,
+		epoch,
+		eraID,
+	).Scan(&cborBytes, &sourceEpoch); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("pparams epoch %d: %w", epoch, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit protocol params read: %w", err)
+	}
+	return decodeProtocolParams(cborBytes, eraID, sourceEpoch)
 }
 
 // GetPoolEpochDataMap returns per-pool reward data assembled for Koios
@@ -577,9 +648,53 @@ func (d *DingoDB) GetPoolEpochDataMap(
 	}
 	_ = rows.Close() //nolint:sqlclosecheck
 
+	// The tip decides whether this stake epoch's rewards have been applied.
+	// An unreadable or empty tip leaves tipKnown false, which keeps comparison
+	// strict rather than downgrading a real divergence on incomplete metadata.
+	var tipSlot uint64
+	tipKnown := false
+	if tipRow := d.queryRow(
+		ctx, `SELECT slot, hash FROM tip ORDER BY id DESC LIMIT 1`,
+	); tipRow != nil {
+		var slot sql.NullInt64
+		var hash []byte
+		err := tipRow.Scan(&slot, &hash)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("tip lookup: %w", err)
+		}
+		if err == nil && slot.Valid && slot.Int64 > 0 && len(hash) > 0 {
+			tipSlot = uint64(slot.Int64)
+			tipKnown = true
+		}
+	}
+
+	// Rewards for stake epoch E are applied at the boundary into E+3.
+	epochRewardsPending := false
+	if tipKnown {
+		var startSlot sql.NullInt64
+		err := d.queryRow(
+			ctx, `SELECT start_slot FROM epoch WHERE epoch_id = ?`,
+			stakeEpoch+3,
+		).Scan(&startSlot)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			epochRewardsPending = true
+		case err != nil:
+			return nil, fmt.Errorf(
+				"epoch lookup %d: %w", stakeEpoch+3, err,
+			)
+		case !startSlot.Valid || startSlot.Int64 < 0:
+			return nil, fmt.Errorf(
+				"epoch lookup %d: invalid start slot", stakeEpoch+3,
+			)
+		default:
+			epochRewardsPending = tipSlot < uint64(startSlot.Int64)
+		}
+	}
+
 	rows, err = d.query(
 		ctx,
-		`SELECT pool_key_hash, member_reward_total, unspendable FROM reward_pool_output WHERE epoch = ?`,
+		`SELECT pool_key_hash, member_reward_total, unspendable, boundary_slot FROM reward_pool_output WHERE epoch = ?`,
 		stakeEpoch,
 	)
 	if err != nil {
@@ -594,7 +709,10 @@ func (d *DingoDB) GetPoolEpochDataMap(
 		var poolHash []byte
 		var reward types.Uint64
 		var unspendable types.Uint64
-		if err := rows.Scan(&poolHash, &reward, &unspendable); err != nil {
+		var boundarySlot uint64
+		if err := rows.Scan(
+			&poolHash, &reward, &unspendable, &boundarySlot,
+		); err != nil {
 			return nil, err
 		}
 		key := hex.EncodeToString(poolHash)
@@ -606,9 +724,17 @@ func (d *DingoDB) GetPoolEpochDataMap(
 		data.MemberRewardPresent = true
 		data.MemberRewardTotal = strconv.FormatUint(uint64(reward), 10)
 		data.PoolUnspendable = uint64(unspendable)
+		data.RewardsPending = tipKnown && tipSlot < boundarySlot
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if epochRewardsPending {
+		for _, data := range m {
+			if !data.MemberRewardPresent {
+				data.RewardsPending = true
+			}
+		}
 	}
 
 	if err := d.addSpendableMemberRewards(ctx, m, stakeEpoch); err != nil {

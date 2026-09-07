@@ -31,6 +31,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// setOpCertSequenceNumber writes an operational certificate counter into a
+// gouroboros header's field whatever width that release declares it at.
+// cardano-ledger decodes the counter as Word64, so the test's own values are
+// uint64; the assignment is written this way rather than as a composite
+// literal so it does not have to be edited when the header type's width
+// changes.
+func setOpCertSequenceNumber[T uint32 | uint64](dst *T, value uint64) {
+	*dst = T(value) //nolint:gosec // test-only counters are small
+}
+
 // newTestDijkstraBlockCbor builds a minimal, decodable Dijkstra block (empty
 // body, plain Babbage-shaped header) and returns its CBOR. The body hash is
 // computed from the actual empty body so NewDijkstraBlockFromCbor's
@@ -40,7 +50,7 @@ func newTestDijkstraBlockCbor(
 	t *testing.T,
 	slot, blockNumber uint64,
 	issuerFirstByte byte,
-	opCertSeqNo uint32,
+	opCertSeqNo uint64,
 	vrfOutput []byte,
 ) []byte {
 	t.Helper()
@@ -55,12 +65,13 @@ func newTestDijkstraBlockCbor(
 				IssuerVkey:    issuer,
 				VrfResult:     lcommon.VrfResult{Output: vrfOutput},
 				BlockBodyHash: body.Hash(),
-				OpCert: babbage.BabbageOpCert{
-					SequenceNumber: opCertSeqNo,
-				},
 			},
 		},
 	}
+	setOpCertSequenceNumber(
+		&header.Body.OpCert.SequenceNumber,
+		opCertSeqNo,
+	)
 	block := &dijkstra.DijkstraBlock{BlockHeader: header, BlockBody: body}
 	cborData, err := block.MarshalCBOR()
 	require.NoError(t, err)
@@ -76,7 +87,7 @@ func insertTestDijkstraBlock(
 	slot, blockNumber uint64,
 	hash []byte,
 	issuerFirstByte byte,
-	opCertSeqNo uint32,
+	opCertSeqNo uint64,
 	vrfOutput []byte,
 ) {
 	t.Helper()

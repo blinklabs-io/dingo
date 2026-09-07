@@ -116,8 +116,8 @@ func TestBlockPointByIndexDoesNotReadBlockContent(t *testing.T) {
 	block := testIndexedBlock(42, 7, 0x42)
 	require.NoError(t, db.BlockCreate(block, nil))
 
-	store := &countingBlockReadStore{BlobStore: db.blob}
-	db.blob = store
+	store := &countingBlockReadStore{BlobStore: db.Blob()}
+	db.SetBlobStore(store)
 
 	point, err := db.BlockPointByIndex(block.ID, nil)
 	require.NoError(t, err)
@@ -135,8 +135,8 @@ func TestBlockIDByPointLocalBypassesArchiveFallback(t *testing.T) {
 	block := testIndexedBlock(42, 7, 0x42)
 	require.NoError(t, db.BlockCreate(block, nil))
 
-	store := &localBlockReadStore{BlobStore: db.blob}
-	db.blob = store
+	store := &localBlockReadStore{BlobStore: db.Blob()}
+	db.SetBlobStore(store)
 
 	blockID, err := BlockIDByPointLocal(
 		db,

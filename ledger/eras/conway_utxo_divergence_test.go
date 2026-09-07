@@ -117,7 +117,7 @@ func TestConwayUtxoValidationRuleIndexesArePinned(t *testing.T) {
 // TestValidateTxConwayGenuinelyMissingInputStillRejected is the negative case
 // for the rollback restore fix in LedgerState.rollback: an input that is
 // genuinely absent from the ledger must still be rejected as a bad input, and
-// must still be reported under rule index 29. A restore fix that made input
+// must still be reported under rule index 30. A restore fix that made input
 // resolution more permissive would turn this into a consensus hazard.
 func TestValidateTxConwayGenuinelyMissingInputStillRejected(t *testing.T) {
 	tx := newConwayDivergenceTx(t, 0xaa, 200_000, 0)
@@ -140,7 +140,7 @@ func TestValidateTxConwayGenuinelyMissingInputStillRejected(t *testing.T) {
 // TestValidateTxConwayGenuinelyUnbalancedStillRejected is the negative case for
 // the value-conservation half of issue #3678: a transaction whose inputs all
 // resolve but whose consumed and produced values genuinely differ must still be
-// rejected, and must still be reported under rule index 32.
+// rejected, and must still be reported under rule index 33.
 func TestValidateTxConwayGenuinelyUnbalancedStillRejected(t *testing.T) {
 	tx := newConwayDivergenceTx(t, 0xbb, 200_000, 200_000)
 

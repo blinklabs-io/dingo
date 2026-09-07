@@ -83,3 +83,34 @@ func TestLedgerPipelineBackoffIsMonotonic(t *testing.T) {
 		prev = backoff
 	}
 }
+
+// Rejected blocks and unavailable certified blocks share the same no-progress
+// budget. The latter has a minimum retry delay, but it must still enter the
+// escalating cap; otherwise a deterministic rejection can spin forever at its
+// fixed cadence.
+func TestLedgerPipelineRetryDelayIsBounded(t *testing.T) {
+	minimum := 250 * time.Millisecond
+	previous := time.Duration(0)
+	for consecutive := range noProgressStuckThreshold + 64 {
+		delay, stuck := ledgerPipelineRetryDelay(consecutive, minimum)
+		require.GreaterOrEqual(t, delay, minimum)
+		require.GreaterOrEqual(t, delay, previous,
+			"retry delay dipped at %d consecutive rejections", consecutive)
+		if consecutive < noProgressStuckThreshold {
+			require.False(t, stuck)
+		}
+		previous = delay
+	}
+
+	stuckDelay, stuck := ledgerPipelineRetryDelay(
+		noProgressStuckThreshold,
+		minimum,
+	)
+	require.True(t, stuck)
+	require.Greater(t, stuckDelay, minimum,
+		"a deterministic rejection must leave its minimum retry cadence")
+	forever, stuck := ledgerPipelineRetryDelay(1_000_000, minimum)
+	require.True(t, stuck)
+	require.Equal(t, noProgressStuckBackoffMax, forever,
+		"rejection retry delay must have a finite upper bound")
+}
