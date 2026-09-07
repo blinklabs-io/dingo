@@ -20,6 +20,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/require"
@@ -249,14 +250,33 @@ func TestDrepRegistrationsFallBackForUnrecordedDeposit(t *testing.T) {
 	require.Equal(t, uint64(drepRefundTestRecordedDeposit), *got)
 }
 
-// TestDrepRegistrationReportsAbsenceWithoutADrepDeposit keeps the fallback
-// from inventing a refund where the current era charges no DRep deposit. The
-// view must still report absence there and let gouroboros fail closed rather
-// than accept a zero refund.
-func TestDrepRegistrationReportsAbsenceWithoutADrepDeposit(t *testing.T) {
-	// newStakeRefundTestView leaves the era Shelley with no published
-	// snapshot, which is exactly the no-DRep-deposit case.
-	lv, db := newStakeRefundTestView(t)
+// TestDrepRegistrationReportsAbsenceInAPreConwayEra keeps the fallback from
+// inventing a refund where the current era charges no DRep deposit.
+//
+// The era has to be published for this to mean anything. CertDepositShelley
+// through CertDepositBabbage have no *RegistrationDrepCertificate case and
+// fall through to "default: return 0, nil", so before the drepDepositParams
+// guard this reported a non-nil zero and gouroboros accepted a zero refund
+// instead of failing closed.
+func TestDrepRegistrationReportsAbsenceInAPreConwayEra(t *testing.T) {
+	ls, db := newRewardCalculationTestLedger(t)
+	ls.currentEra = eras.BabbageEraDesc
+	ls.currentPParams = &babbage.BabbageProtocolParameters{
+		KeyDeposit: 2_000_000,
+		MaxTxSize:  16_384,
+	}
+	ls.publishSnapshotsLocked()
+	lv := &LedgerView{ls: ls}
+	// The era's own deposit function really does answer zero-without-error
+	// for a DRep registration, which is what makes the guard load-bearing
+	// rather than defensive.
+	deposit, err := eras.BabbageEraDesc.CertDepositFunc(
+		&lcommon.RegistrationDrepCertificate{},
+		ls.currentPParams,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), deposit)
+
 	cred := drepRefundTestCredential(0xe7)
 	seedActiveDrepWithoutRegistration(t, db, cred, 100)
 
@@ -266,8 +286,49 @@ func TestDrepRegistrationReportsAbsenceWithoutADrepDeposit(t *testing.T) {
 	require.Nil(
 		t,
 		reg.Deposit,
-		"with no DRep deposit to fall back to, absence must be reported",
+		"a pre-Conway era has no DRep deposit to fall back to; absence must be reported",
 	)
+
+	registrations, err := lv.DRepRegistrations()
+	require.NoError(t, err)
+	require.Len(t, registrations, 1)
+	require.Nil(
+		t,
+		registrations[0].Deposit,
+		"the plural view must report absence in a pre-Conway era too",
+	)
+
+	require.ErrorContains(
+		t,
+		conway.UtxoValidateCertificateDeposits(
+			drepDeregistrationTx(cred, drepRefundTestPparamDeposit),
+			200,
+			lv,
+			drepRefundTestPparams(),
+		),
+		inconsistentDepositSubstring,
+	)
+}
+
+// TestDrepRegistrationReportsAbsenceWithoutAPublishedSnapshot covers the other
+// way the fallback has nothing to report: no consensus snapshot has been
+// published yet, so there are no current parameters to read. Kept separate
+// from the pre-Conway case because newStakeRefundTestView reaches this branch
+// and never the era one -- the era field it sets is never read.
+func TestDrepRegistrationReportsAbsenceWithoutAPublishedSnapshot(t *testing.T) {
+	lv, db := newStakeRefundTestView(t)
+	require.Nil(
+		t,
+		lv.ls.loadConsensusSnapshot(),
+		"this fixture must leave the snapshot unpublished for this test to mean what it says",
+	)
+	cred := drepRefundTestCredential(0xe8)
+	seedActiveDrepWithoutRegistration(t, db, cred, 100)
+
+	reg, err := lv.DRepRegistration(cred.Credential)
+	require.NoError(t, err)
+	require.NotNil(t, reg)
+	require.Nil(t, reg.Deposit)
 
 	require.ErrorContains(
 		t,

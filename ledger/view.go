@@ -1258,7 +1258,18 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 // so the value equals what a registration applied now would store. Absence is
 // still reported when the current era charges no DRep deposit, which leaves
 // gouroboros to fail closed rather than inventing a zero refund.
-func (lv *LedgerView) drepRegistrationDeposit(recorded *uint64) *uint64 {
+//
+// The substitution is logged because it is not free. The recorded deposit is
+// historical and this one is current, so the two agree only while dRepDeposit
+// has not changed since the DRep registered. If it has, gouroboros compares
+// the block's refund against the wrong expected value and reports
+// CertificateRefundIncorrectError, which reads as a bad block rather than as
+// the local state gap it actually is. The log line is what keeps that
+// distinguishable from a node serving a genuinely recorded deposit.
+func (lv *LedgerView) drepRegistrationDeposit(
+	credential lcommon.Blake2b224,
+	recorded *uint64,
+) *uint64 {
 	if recorded != nil {
 		return recorded
 	}
@@ -1266,18 +1277,42 @@ func (lv *LedgerView) drepRegistrationDeposit(recorded *uint64) *uint64 {
 	if !ok {
 		return nil
 	}
+	if lv.ls != nil && lv.ls.config.Logger != nil {
+		lv.ls.config.Logger.Warn(
+			"registered DRep has no recorded registration deposit; substituting the current protocol parameter",
+			"component", "ledger",
+			"drep_credential", hex.EncodeToString(credential[:]),
+			"substituted_deposit", deposit,
+		)
+	}
 	return &deposit
 }
 
 // currentDRepDeposit returns the DRep registration deposit under the current
 // era and protocol parameters, read from a single published consensus
 // snapshot so the era and the parameters cannot be torn apart. The second
-// return is false when the current era charges no DRep deposit (pre-Conway)
-// or the protocol parameters do not belong to that era.
+// return is false when there is no current DRep deposit to report.
+//
+// Whether the era carries a DRep deposit is decided by asking the protocol
+// parameters for one, not by inferring it from what the era's
+// certificate-deposit function happens to return. CertDepositShelley through
+// CertDepositBabbage have no *RegistrationDrepCertificate case and fall
+// through to "default: return 0, nil", so a pre-Conway snapshot would
+// otherwise yield (0, true) and hand gouroboros a fabricated zero refund
+// where it must fail closed instead.
+//
+// drepDepositParams is the same capability
+// conway.UtxoValidateCertificateDeposits asserts to obtain the deposit it
+// compares against, so this guard admits exactly the eras whose parameters
+// that rule can read, and a future era gains it by implementing the accessor
+// rather than by being added to a list here.
 func (lv *LedgerView) currentDRepDeposit() (uint64, bool) {
 	snapshot := lv.ls.loadConsensusSnapshot()
 	if snapshot == nil || snapshot.currentPParams == nil ||
 		snapshot.currentEra.CertDepositFunc == nil {
+		return 0, false
+	}
+	if _, ok := snapshot.currentPParams.(drepDepositParams); !ok {
 		return 0, false
 	}
 	deposit, err := snapshot.currentEra.CertDepositFunc(
@@ -1288,6 +1323,14 @@ func (lv *LedgerView) currentDRepDeposit() (uint64, bool) {
 		return 0, false
 	}
 	return deposit, true
+}
+
+// drepDepositParams is implemented by the protocol parameters of every era
+// that charges a DRep registration deposit. It mirrors the assertion
+// conway.UtxoValidateCertificateDeposits makes to read drepDeposit, so the
+// two agree on which eras have one.
+type drepDepositParams interface {
+	DRepDepositAmount() *big.Int
 }
 
 // DRepRegistration returns a DRep registration by credential.
@@ -1312,7 +1355,7 @@ func (lv *LedgerView) DRepRegistration(
 	}
 	reg := &lcommon.DRepRegistration{
 		Credential: credential,
-		Deposit:    lv.drepRegistrationDeposit(deposit),
+		Deposit:    lv.drepRegistrationDeposit(credential, deposit),
 	}
 	if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 		if len(drep.AnchorHash) != 32 {
@@ -1366,7 +1409,10 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 		}
 		reg := lcommon.DRepRegistration{
 			Credential: lcommon.NewBlake2b224(drep.Credential),
-			Deposit:    lv.drepRegistrationDeposit(depositPtr),
+			Deposit: lv.drepRegistrationDeposit(
+				lcommon.NewBlake2b224(drep.Credential),
+				depositPtr,
+			),
 		}
 		if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 			if len(drep.AnchorHash) != 32 {
