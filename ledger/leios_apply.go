@@ -852,6 +852,27 @@ func (ls *LedgerState) awaitInFlightEndorserFetches(
 				r.hash.Bytes(),
 				r.slot,
 			)
+			// This grace phase is apply-path wait time too, and it is the
+			// LONGEST one the pipeline can incur (up to hardBound), so it
+			// belongs in the same histogram as the diffusion window rather
+			// than being invisible to monitoring.
+			switch {
+			case cached:
+				ls.metrics.observeLeiosEbWait(
+					elapsed,
+					leiosEbWaitOutcomeArrived,
+				)
+			case ctx.Err() != nil:
+				ls.metrics.observeLeiosEbWait(
+					elapsed,
+					leiosEbWaitOutcomeCancelled,
+				)
+			default:
+				ls.metrics.observeLeiosEbWait(
+					elapsed,
+					leiosEbWaitOutcomeTimeout,
+				)
+			}
 			if cached && elapsed < softWarn {
 				return
 			}
@@ -1204,6 +1225,20 @@ func (ls *LedgerState) leiosEndorserBlockForApply(
 // empty manifests when hammered, so the backfill must not flood it.
 const leiosBackfillConcurrency = 8
 
+// leiosRequiredConcurrency is a SEPARATE budget for mandatory certified
+// fetches, so a best-effort fetch can never starve one.
+//
+// spawn and fetchRequired used to share leiosBackfillConcurrency. A
+// best-effort spawn holds its slot for up to leiosBackfillMaxWait, so eight
+// slow ones could block a mandatory certified closure for two minutes and fail
+// the chunk -- and this path now dispatches near-head prefetches through spawn
+// as well, which makes that far more reachable than when only historical
+// backfill used it. Mandatory fetches are few (one certified closure per
+// certifying block) so a small dedicated budget is enough, and it is separate
+// rather than carved out of the same channel because reserving inside one
+// semaphore needs two acquisitions and can deadlock.
+const leiosRequiredConcurrency = 4
+
 // leiosBackfiller fetches historical Leios endorser blocks by point, paced one
 // block-application chunk at a time, so a from-scratch sync builds a complete
 // UTxO set. It dedups in-flight fetches by (slot, hash) -- not hash alone,
@@ -1216,6 +1251,7 @@ type leiosBackfiller struct {
 	provider EndorserBlockProviderFunc
 	logger   *slog.Logger
 	sem      chan struct{}
+	reqSem   chan struct{}
 	inflight sync.Map
 }
 
@@ -1235,6 +1271,7 @@ func newLeiosBackfiller(cfg LedgerStateConfig) *leiosBackfiller {
 		provider: cfg.EndorserBlockProvider,
 		logger:   logger,
 		sem:      make(chan struct{}, leiosBackfillConcurrency),
+		reqSem:   make(chan struct{}, leiosRequiredConcurrency),
 	}
 }
 
@@ -1397,6 +1434,21 @@ func (b *leiosBackfiller) fetchRequired(
 	if lastErr == nil {
 		lastErr = errors.New("certified endorser block fetch made no progress")
 	}
+	// The retry loop can also fall out of its last attempt with the parent
+	// already cancelled, which never reaches the in-loop budgetCtx branch
+	// above. Report that as the cancellation it is rather than as peers
+	// failing to serve.
+	if !errors.Is(budgetCtx.Err(), context.DeadlineExceeded) &&
+		budgetCtx.Err() != nil {
+		b.logger.Debug(
+			"certified leios endorser block fetch cancelled",
+			"component", "ledger",
+			"slot", r.slot,
+			"eb_hash", r.hash.String(),
+			"error", lastErr,
+		)
+		return lastErr
+	}
 	// Warn, not Debug: this is the evidence an operator needs to tell a peer
 	// that does not hold the endorser block from one whose leios-fetch protocol
 	// is broken, and it was previously logged at Debug and lost.
@@ -1429,12 +1481,14 @@ func (b *leiosBackfiller) fetchOnce(
 		return nil
 	}
 	defer b.inflight.Delete(key)
+	// Reserved budget: a mandatory certified fetch must never queue behind
+	// best-effort spawns, which can hold their slots for leiosBackfillMaxWait.
 	select {
-	case b.sem <- struct{}{}:
+	case b.reqSem <- struct{}{}:
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	defer func() { <-b.sem }()
+	defer func() { <-b.reqSem }()
 	if endorserBlockAvailableAt(b.provider, r.hash.Bytes(), r.slot) {
 		return nil
 	}

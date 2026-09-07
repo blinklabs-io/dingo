@@ -145,11 +145,18 @@ func TestEnsureReferencedEndorserBlocksDoesNotBlockOnUnreadAnnouncement(
 	ebHash := lcommon.NewBlake2b256(leiosTestHash(0xA1))
 	block := leiosWaitTestAnnouncingBlock(t, 1, 100, ebHash)
 
-	var fetched atomic.Int64
+	var fetched, waitPolls atomic.Int64
 	fetchedCh := make(chan struct{}, 1)
 	cfg := LedgerStateConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
+			// Counting polls that come from INSIDE waitForEndorserBlock is
+			// what makes this test's verdict event-driven: a gate that
+			// blocked on this announcement must poll from there, and one
+			// that correctly skips it never can.
+			if leiosWaitTestPolledFromWait() {
+				waitPolls.Add(1)
+			}
 			// The endorser block never arrives.
 			return nil, false
 		},
@@ -180,11 +187,23 @@ func TestEnsureReferencedEndorserBlocksDoesNotBlockOnUnreadAnnouncement(
 		[]gledger.Block{block},
 	))
 	elapsed := time.Since(start)
+	// The load-bearing assertion is event-driven, not a stopwatch: if the gate
+	// blocked on this announcement it would have polled from inside
+	// waitForEndorserBlock. Asserting that directly cannot flake on a loaded
+	// runner, whereas a short wall-clock budget has to cover goroutine
+	// scheduling as well as the absence of a window.
+	require.Zero(
+		t,
+		waitPolls.Load(),
+		"apply gate blocked on an announcement ledger application never reads",
+	)
+	// Clock kept only as a loose backstop against a full window being spent
+	// somewhere the poll counter cannot see. Generous on purpose.
 	require.Less(
 		t,
 		elapsed,
-		leiosWaitTestWindow/2,
-		"apply gate blocked on an announcement ledger application never reads",
+		leiosWaitTestWindow,
+		"apply gate spent a whole diffusion window",
 	)
 
 	// The announcement is prefetched in the background rather than dropped, so
@@ -432,13 +451,21 @@ func TestAwaitEndorserBlocksFetchesUpFront(t *testing.T) {
 		leiosWaitTestWindow,
 		time.Millisecond,
 	)
+	// The fetch count is the event that matters: it proves the by-point fetch
+	// was dispatched up front rather than after the window. Elapsed time is a
+	// loose backstop only, so a saturated scheduler cannot fail a correct wait.
+	require.Equal(
+		t,
+		int64(1),
+		fetches.Load(),
+		"wait did not dispatch the by-point fetch",
+	)
 	require.Less(
 		t,
 		time.Since(start),
-		leiosWaitTestWindow/2,
+		leiosWaitTestWindow,
 		"wait did not dispatch the by-point fetch until the window expired",
 	)
-	require.Equal(t, int64(1), fetches.Load())
 
 	// Already cached: no second fetch, no wait.
 	start = time.Now()
@@ -448,8 +475,13 @@ func TestAwaitEndorserBlocksFetchesUpFront(t *testing.T) {
 		leiosWaitTestWindow,
 		time.Millisecond,
 	)
-	require.Less(t, time.Since(start), leiosWaitTestWindow/2)
-	require.Equal(t, int64(1), fetches.Load())
+	require.Equal(
+		t,
+		int64(1),
+		fetches.Load(),
+		"an already-cached reference must not be fetched again",
+	)
+	require.Less(t, time.Since(start), leiosWaitTestWindow)
 }
 
 // leiosWaitTestHistogram returns the sample count of
@@ -1207,5 +1239,88 @@ func TestCIPFetchWaitWarnsWhenAFetchNeitherCachesNorClears(t *testing.T) {
 		logs.String(),
 		`"level":"WARN"`,
 		"a fetch wedged for the whole hard bound is worth an alert",
+	)
+}
+
+// TestMandatoryFetchIsNotStarvedByBestEffortSpawns pins the reserved budget.
+//
+// spawn (best-effort) and fetchRequired (mandatory certified closure) used to
+// share one semaphore. A best-effort fetch holds its slot for up to
+// leiosBackfillMaxWait, so filling the semaphore with slow ones blocked a
+// mandatory fetch behind them -- and this path now dispatches near-head
+// prefetches through spawn as well, so that is far more reachable than when
+// only historical backfill used it. A mandatory fetch must proceed regardless.
+func TestMandatoryFetchIsNotStarvedByBestEffortSpawns(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	var mandatoryRan atomic.Bool
+	spawned := make(chan struct{}, leiosBackfillConcurrency)
+
+	cfg := LedgerStateConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
+			return nil, false
+		},
+		EndorserBlockFetcher: func(
+			_ context.Context,
+			slot uint64,
+			_ []byte,
+		) error {
+			if slot == 999 {
+				// The mandatory one. Reaching here at all is the point.
+				mandatoryRan.Store(true)
+				return errors.New("no peer holds it")
+			}
+			// Best-effort: occupy the slot until the test ends.
+			select {
+			case spawned <- struct{}{}:
+			default:
+			}
+			<-release
+			return nil
+		},
+	}
+	b := newLeiosBackfiller(cfg)
+	require.NotNil(t, b)
+
+	// Saturate the best-effort budget.
+	for i := range leiosBackfillConcurrency {
+		b.spawn(t.Context(), leiosEbRef{
+			slot: uint64(100 + i),
+			hash: lcommon.NewBlake2b256(leiosTestHash(byte(0xE0 + i))),
+		})
+	}
+	for range leiosBackfillConcurrency {
+		select {
+		case <-spawned:
+		case <-time.After(5 * time.Second):
+			t.Fatal("best-effort spawns never occupied the budget")
+		}
+	}
+
+	// The mandatory fetch must not queue behind them.
+	done := make(chan error, 1)
+	go func() {
+		done <- b.fetchRequired(
+			t.Context(),
+			leiosEbRef{
+				slot: 999,
+				hash: lcommon.NewBlake2b256(leiosTestHash(0xEF)),
+			},
+			time.Millisecond,
+		)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal(
+			"mandatory certified fetch was starved by best-effort spawns; " +
+				"it must have its own reserved budget",
+		)
+	}
+	require.True(
+		t,
+		mandatoryRan.Load(),
+		"the mandatory fetch never reached the fetcher",
 	)
 }
