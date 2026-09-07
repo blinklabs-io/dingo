@@ -518,3 +518,53 @@ func TestDivergentLeaderDoesNotSuppressPeersAgreeingWithAnotherLeader(
 		"a peer agreeing with one of the leading frontiers must stay selectable",
 	)
 }
+
+// TestUnadvertisedTipIsNotSameChainEvidence pins the empty-hash guard in
+// sameAdvertisedTip. Two peers that have not told us where their chains end
+// both carry a zero advertised tip, which is identical but says nothing: it is
+// the absence of an advertisement, not agreement on one. Without the guard the
+// zero tips compare equal and every such pair is granted the same-chain
+// exemption, so a peer that has advertised nothing and trails the leading
+// frontier by more than k would stay selectable on no evidence at all.
+func TestUnadvertisedTipIsNotSameChainEvidence(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: previewSecurityParam,
+	})
+
+	trailing := newTestConnectionId(1)
+	leader := newTestConnectionId(2)
+	var unadvertised ochainsync.Tip
+
+	cs.SetLocalTip(deliveredFrontier(27900))
+
+	require.True(t, cs.updatePeerTipObserved(
+		trailing,
+		unadvertised,
+		deliveredFrontier(28029),
+		nil,
+	))
+	for _, block := range []uint64{28029, 28461, 28771} {
+		require.True(t, cs.updatePeerTipObserved(
+			leader,
+			unadvertised,
+			deliveredFrontier(block),
+			nil,
+		))
+	}
+
+	// The gap is the reproduction's, and neither peer is filtered out by the
+	// k-behind-the-applied-local-tip check, so the behind-best-frontier filter
+	// is the only thing under test here.
+	require.Equal(
+		t,
+		uint64(742),
+		cs.GetPeerTip(leader).SelectionTip().BlockNumber-
+			cs.GetPeerTip(trailing).SelectionTip().BlockNumber,
+	)
+
+	assert.False(
+		t,
+		peerSelectable(t, cs, trailing),
+		"a zero advertised tip is an absent advertisement, not agreement, and must not exempt a peer from the behind-best-frontier filter",
+	)
+}
