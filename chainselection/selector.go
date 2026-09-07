@@ -1063,13 +1063,23 @@ func (cs *ChainSelector) isPeerSelectableLocked(
 	// Use securityParam (K) as the threshold — peers within K blocks
 	// of the best are acceptable (normal fork variance), but peers
 	// further behind are not useful for syncing.
+	//
+	// The gap is measured on DELIVERED frontiers, which is a transport
+	// property: it says how many headers each peer has served us so far, not
+	// what chain each peer holds. Two peers that advertise the identical
+	// canonical tip hold the same chain, so a delivered-frontier gap between
+	// them is delivery speed alone and must not make either one ineligible.
+	// Excluding the trailing peer here also excluded the incumbent, which
+	// skipped the anti-flap pin entirely (see pinIncumbentDuringCatchUpLocked)
+	// and let the active connection flap between two canonical public roots.
 	if cs.securityParam > 0 {
 		bestBlock := cs.bestKnownBlockNumber()
 		if bestBlock > 0 &&
 			safeAddUint64(
 				selectionTip.BlockNumber,
 				cs.securityParam,
-			) < bestBlock {
+			) < bestBlock &&
+			!cs.frontierLeadIsTransportOnlyLocked(peerTip, bestBlock) {
 			if logSkip {
 				cs.config.Logger.Debug(
 					"skipping peer behind best known tip",
@@ -1156,6 +1166,78 @@ func (cs *ChainSelector) bestKnownBlockNumber() uint64 {
 		}
 	}
 	return best
+}
+
+// frontierLeadIsTransportOnlyLocked reports whether peerTip's shortfall against
+// the leading delivered frontier is a delivery-speed artifact rather than a
+// chain-quality difference: some eligible, non-stale peer that holds the
+// leading frontier is on the same chain as peerTip.
+//
+// Every leader is scanned rather than one representative, so the answer does
+// not depend on map iteration order when several peers share the leading
+// frontier, and one leader on a chain of its own cannot suppress the peers that
+// agree with a different leader.
+func (cs *ChainSelector) frontierLeadIsTransportOnlyLocked(
+	peerTip *PeerChainTip,
+	bestBlock uint64,
+) bool {
+	for connId, pt := range cs.peerTips {
+		if pt == peerTip ||
+			pt.SelectionTip().BlockNumber != bestBlock {
+			continue
+		}
+		if !cs.isConnectionEligible(connId) || cs.isPeerTipStale(pt) {
+			continue
+		}
+		if sameCanonicalChain(peerTip, pt) {
+			return true
+		}
+	}
+	return false
+}
+
+// sameAdvertisedTip reports whether two peers name the identical block as their
+// chain tip. The hash must be present: an all-zero advertised tip means the
+// peer has not told us where its chain ends, which is not agreement.
+func sameAdvertisedTip(a, b ochainsync.Tip) bool {
+	return len(a.Point.Hash) > 0 && sameSelectionTip(a, b)
+}
+
+// sameCanonicalChain reports whether two peers are following the same chain, so
+// that a difference in their DELIVERED frontiers is a transport-delivery
+// artifact rather than a chain-quality difference.
+//
+// Agreement on the advertised tip is the primary signal, and it is exactly the
+// canonical-public-root case that flapped: both roots named block 4625199 at
+// slot 121697834 while their delivered frontiers differed by 742 blocks.
+//
+// The advertised tip is untrusted on its own, so it is checked against the
+// delivered evidence: if either peer's retained delivered history holds a
+// different block at the other's frontier slot, they demonstrably served
+// conflicting chains and the copied advertisement buys nothing. That check is
+// one-sided by construction (see observedHistoryConflictsAt), so this predicate
+// never grants same-chain treatment over a contradiction it can see, and never
+// invents one it cannot.
+//
+// This is a narrow allowance. It only keeps a peer in the candidate pool and
+// only holds the incumbent's pin; it never makes a peer win selection. The
+// Praos comparison still ranks candidates by their delivered frontiers, the
+// implausible-frontier bound in updatePeerTipObservedPraosView still rejects
+// delivered jumps beyond k, the k-behind-the-applied-local-tip check above
+// still drops peers that cannot serve the block the node needs, and Genesis
+// corroboration still gates a fast source on independent witnesses.
+func sameCanonicalChain(a, b *PeerChainTip) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	if !sameAdvertisedTip(a.Tip, b.Tip) {
+		return false
+	}
+	if a.observedHistoryConflictsAt(b.SelectionTip().Point) ||
+		b.observedHistoryConflictsAt(a.SelectionTip().Point) {
+		return false
+	}
+	return true
 }
 
 func (cs *ChainSelector) isConnectionEligible(
@@ -1482,9 +1564,20 @@ func (cs *ChainSelector) pinIncumbentDuringCatchUpLocked(
 	// Longer-chain escape: a challenger genuinely taller than the incumbent
 	// by more than the head margin is a real longer chain, not a sibling
 	// head-fork — release so the node converges to it promptly.
+	//
+	// "Taller" is measured on delivered frontiers, so it only means a longer
+	// chain when the two peers disagree about where the chain ends. When they
+	// advertise the identical canonical tip they hold the same chain and the
+	// challenger is merely further along in serving it to us; handing the
+	// pipeline over buys no chain and costs a chainsync/blockfetch reset plus,
+	// via the ledger's fresh-cursor path, a close of the connection we just
+	// selected. The stall escape above still releases an incumbent that stops
+	// driving local tip progress, so this cannot pin to a peer that is not
+	// actually feeding us.
 	incumbentBlock := incumbentTip.SelectionTip().BlockNumber
 	challengerBlock := challengerTip.SelectionTip().BlockNumber
-	if challengerBlock > safeAddUint64(incumbentBlock, catchUpPinHeadMargin) {
+	if challengerBlock > safeAddUint64(incumbentBlock, catchUpPinHeadMargin) &&
+		!sameCanonicalChain(incumbentTip, challengerTip) {
 		return false
 	}
 	// Otherwise this is a head micro-fork / same-height sibling: pin the
