@@ -142,33 +142,24 @@ func TestQueryShelleyUtxoWhole_EmptyLedger(t *testing.T) {
 	require.Empty(t, utxos)
 }
 
-// TestDecodeUtxoWholeRowMalformedTxIdDoesNotPanic covers a defensive fix
-// over the original implementation of this query: a row with a TxId
-// shorter than 8 bytes (corrupt data, in practice unreachable through
-// normal writes) whose stored CBOR fails to decode as a transaction output
-// must surface that decode error rather than panicking on an out-of-range
-// slice while formatting the error message.
-//
-// This calls decodeUtxoWholeRow directly with a hand-built row rather than
-// going through a real database round trip: a driver's BLOB scan can hand
-// back a slice with slack capacity beyond its logical length (observed
-// with SQLite here), which happens not to panic on a bounded slice
-// expression regardless of this fix -- exercising the fix for real
-// requires a TxId slice whose capacity is provably exactly its length,
-// which only a directly constructed value guarantees.
-func TestDecodeUtxoWholeRowMalformedTxIdDoesNotPanic(t *testing.T) {
-	shortTxId := make([]byte, 2, 2)
-	shortTxId[0], shortTxId[1] = 0x01, 0x02
-	u := &models.Utxo{
-		TxId:      shortTxId,
-		OutputIdx: 0,
-		Cbor:      []byte{0xff},
-	}
+// TestDecodeUtxoWholeCborMalformedCborSurfacesError covers a row whose
+// resolved CBOR fails to decode as a transaction output: this must surface
+// that decode error (with the ref's hex-encoded TxId in the message) rather
+// than panicking. Unlike this query's previous row-at-a-time
+// implementation, decodeUtxoWholeCbor's ref.TxId is a fixed-size
+// database.UtxoRef.TxId ([32]byte, not a variable-length slice), so a
+// too-short TxId can no longer reach this code at all -- the earlier
+// defensive fix for that case (using hex.EncodeToString instead of a
+// %x-formatted slice) is retained here since it's still correct, just no
+// longer reachable through a malformed-length input.
+func TestDecodeUtxoWholeCborMalformedCborSurfacesError(t *testing.T) {
+	ref := database.UtxoRef{OutputIdx: 0}
+	ref.TxId[0], ref.TxId[1] = 0x01, 0x02
 
 	require.NotPanics(t, func() {
-		_, _, _ = decodeUtxoWholeRow(u)
+		_, _ = decodeUtxoWholeCbor(ref, []byte{0xff})
 	})
-	_, _, err := decodeUtxoWholeRow(u)
+	_, err := decodeUtxoWholeCbor(ref, []byte{0xff})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "0102")
 }

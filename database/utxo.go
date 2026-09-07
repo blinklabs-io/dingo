@@ -1210,6 +1210,25 @@ func (d *Database) IterateLiveUtxos(
 	})
 }
 
+// IterateLiveUtxoRefs invokes fn once for each live UTxO row (DeletedSlot ==
+// 0), like IterateLiveUtxos, but does not resolve u.Cbor -- it is left as
+// the store's raw stored value (a CborOffset reference, not the referenced
+// output CBOR). For a caller that needs every live UTxO's CBOR and wants to
+// resolve it itself (e.g. across a worker pool, rather than serially via
+// IterateLiveUtxos' inline loadCbor -- see ledger.queryShelleyUtxoWhole).
+// When txn is nil a read transaction is opened internally.
+func (d *Database) IterateLiveUtxoRefs(
+	txn *Txn,
+	fn func(*models.Utxo) error,
+) error {
+	if txn != nil {
+		return d.utxoStore().IterateLiveUtxos(txn.Metadata(), fn)
+	}
+	return d.Transaction(false).Do(func(t *Txn) error {
+		return d.utxoStore().IterateLiveUtxos(t.Metadata(), fn)
+	})
+}
+
 // MarkUtxosDeletedAtSlot marks every live UTxO row matching one of
 // refs as deleted at atSlot. Refs that don't match any live row are
 // silently ignored; rollback un-deletion is handled by the existing
