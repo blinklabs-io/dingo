@@ -32,15 +32,18 @@ import (
 // userinfo or its query string. These sentinels stand in for them: none may
 // reach a log field or a returned error string.
 const (
-	redactUser     = "registry-user"
+	redactUser     = "SENTINEL-USERINFO-USER"
 	redactPassword = "SENTINEL-USERINFO-PASSWORD"
 	redactQuery    = "SENTINEL-QUERY-TOKEN"
 	redactFragment = "SENTINEL-FRAGMENT-TOKEN"
 	redactRedirect = "SENTINEL-REDIRECT-TOKEN"
 )
 
-// redactSecrets lists every sentinel that must never be rendered.
+// redactSecrets lists every sentinel that must never be rendered. The
+// username is included: userinfo is a credential component whole, and a
+// redaction that dropped only the password would still identify the account.
 var redactSecrets = []string{
+	redactUser,
 	redactPassword,
 	redactQuery,
 	redactFragment,
