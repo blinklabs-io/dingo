@@ -7127,7 +7127,11 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// using their resulting state but before its own transaction mutations.
 	// The explicitly non-validating Musashi prototype keeps its trust policy.
 	if shouldValidate && !ls.skipDijkstraTxValidation(currentEra.Id) {
-		if err := validateBlockReferenceScripts(block, pparams, &LedgerView{
+		referenceParams := pparams
+		if uint(block.Era().Id)+1 == currentEra.Id && prevEraPParams != nil {
+			referenceParams = prevEraPParams
+		}
+		if err := validateBlockReferenceScripts(block, referenceParams, &LedgerView{
 			txn: txn, ls: ls,
 		}); err != nil {
 			return nil, err

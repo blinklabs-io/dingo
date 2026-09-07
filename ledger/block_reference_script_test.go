@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -123,7 +124,7 @@ func TestBlockReferenceScriptLimitAdmission(t *testing.T) {
 			nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
 			ls := &LedgerState{
 				db:             db,
-				activeEras:     []eras.EraDesc{era},
+				activeEras:     []eras.EraDesc{era, eras.DijkstraEraDesc},
 				currentEra:     era,
 				currentPParams: pp,
 				config: LedgerStateConfig{
@@ -134,6 +135,16 @@ func TestBlockReferenceScriptLimitAdmission(t *testing.T) {
 			ls.metrics.init(prometheus.NewRegistry())
 			ls.publishSnapshotsLocked()
 			for path, run := range map[string]func() error{
+				"imported_previous_era": func() error {
+					currentParams := &dijkstra.DijkstraProtocolParameters{
+						ConwayProtocolParameters: *pp,
+						MaxRefScriptSizePerBlock: 1,
+					}
+					return db.Transaction(true).Do(func(txn *database.Txn) error {
+						_, err := ls.ledgerProcessBlock(txn, ocommon.NewPoint(1, block.Hash().Bytes()), block, true, false, false, nil, envelopeParent{origin: true}, nil, eras.DijkstraEraDesc, currentParams, pp, 0)
+						return err
+					})
+				},
 				"imported": func() error {
 					return db.Transaction(true).Do(func(txn *database.Txn) error {
 						_, err := ls.ledgerProcessBlock(txn, ocommon.NewPoint(1, block.Hash().Bytes()), block, true, false, false, nil, envelopeParent{origin: true}, nil, era, pp, nil, 0)
