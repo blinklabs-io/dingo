@@ -16,6 +16,7 @@ package server_test
 
 import (
 	"context"
+	"io"
 	"net"
 	"strconv"
 	"testing"
@@ -269,6 +270,34 @@ func TestReflectionListsService(t *testing.T) {
 }
 
 func TestReflectionDisabledByDefault(t *testing.T) {
+	stream := reflectionStreamToServerWithoutReflection(t)
+
+	sendListServices(t, stream)
+	_, err := stream.Recv()
+	require.Error(t, err)
+	require.Equal(t, codes.Unimplemented, status.Code(err))
+}
+
+// TestReflectionDisabledByDefaultWhenRejectionArrivesFirst resolves the
+// race that made the test above flaky, deterministically, the losing way:
+// the server's rejection is observed first, so the Send that follows runs
+// against a stream the server has already terminated. That is the ordering
+// CI hit, and it must be a pass -- the status is carried by Recv, and Send
+// can only report the termination as io.EOF.
+func TestReflectionDisabledByDefaultWhenRejectionArrivesFirst(t *testing.T) {
+	stream := reflectionStreamToServerWithoutReflection(t)
+
+	_, err := stream.Recv()
+	require.Error(t, err)
+	require.Equal(t, codes.Unimplemented, status.Code(err))
+
+	sendListServices(t, stream)
+}
+
+func reflectionStreamToServerWithoutReflection(
+	t *testing.T,
+) grpc.BidiStreamingClient[reflectionpb.ServerReflectionRequest, reflectionpb.ServerReflectionResponse] {
+	t.Helper()
 	addr := startTestServer(t)
 	conn := dial(t, addr)
 	readyCtx, readyCancel := context.WithTimeout(
@@ -281,20 +310,35 @@ func TestReflectionDisabledByDefault(t *testing.T) {
 		&healthpb.HealthCheckRequest{},
 	)
 	require.NoError(t, err)
-	client := reflectionpb.NewServerReflectionClient(conn)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	stream, err := client.ServerReflectionInfo(ctx)
+	t.Cleanup(cancel)
+	stream, err := reflectionpb.NewServerReflectionClient(conn).
+		ServerReflectionInfo(ctx)
 	require.NoError(t, err)
-	require.NoError(t, stream.Send(&reflectionpb.ServerReflectionRequest{
+	return stream
+}
+
+// sendListServices tolerates the io.EOF that gRPC returns from Send once
+// the server has terminated the stream, which is what an unregistered
+// reflection service does. Per the ClientStream contract, SendMsg returns
+// io.EOF on a stream the server has already completed and the real status
+// is only available from Recv -- so an io.EOF here carries no information
+// and asserting its absence just made the test lose a race with the
+// server's own rejection.
+func sendListServices(
+	t *testing.T,
+	stream grpc.BidiStreamingClient[reflectionpb.ServerReflectionRequest, reflectionpb.ServerReflectionResponse],
+) {
+	t.Helper()
+	err := stream.Send(&reflectionpb.ServerReflectionRequest{
 		MessageRequest: &reflectionpb.ServerReflectionRequest_ListServices{
 			ListServices: "*",
 		},
-	}))
-	_, err = stream.Recv()
-	require.Error(t, err)
-	require.Equal(t, codes.Unimplemented, status.Code(err))
+	})
+	if err != nil {
+		require.ErrorIs(t, err, io.EOF)
+	}
 }
 
 // New rejects a half-configured TLS pair (cert without key, or key without
