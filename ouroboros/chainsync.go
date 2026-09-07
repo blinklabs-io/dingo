@@ -336,6 +336,24 @@ func isOriginPoint(point ocommon.Point) bool {
 // for a single incident.
 const originOnlyIntersectWarnInterval = 30 * time.Second
 
+// intersectPointsHaveRealPoint reports whether points contains a point other
+// than origin.
+//
+// It is the sole definition of the condition the rollback anchor exists to
+// rescue, shared by finalizeChainsyncIntersectPoints and by the gate on the
+// anchor lookup in buildDefaultChainsyncIntersectPoints. Those two must agree:
+// if the gate were ever narrower than the rescue, the lookup would be skipped
+// for a list the rescue would have acted on, and the node would send the
+// origin-only request this whole path exists to prevent.
+func intersectPointsHaveRealPoint(points []ocommon.Point) bool {
+	for _, point := range points {
+		if !isOriginPoint(point) {
+			return true
+		}
+	}
+	return false
+}
+
 // finalizeChainsyncIntersectPoints appends origin as the last-resort intersect
 // point and refuses to offer origin *alone* while the local chain holds a
 // non-origin tip.
@@ -366,24 +384,6 @@ const originOnlyIntersectWarnInterval = 30 * time.Second
 //
 // Returns the finalized points and whether an origin-only list had to be
 // rescued, which the caller logs (throttled).
-// intersectPointsHaveRealPoint reports whether points contains a point other
-// than origin.
-//
-// It is the sole definition of the condition the rollback anchor exists to
-// rescue, shared by finalizeChainsyncIntersectPoints and by the gate on the
-// anchor lookup in buildDefaultChainsyncIntersectPoints. Those two must agree:
-// if the gate were ever narrower than the rescue, the lookup would be skipped
-// for a list the rescue would have acted on, and the node would send the
-// origin-only request this whole path exists to prevent.
-func intersectPointsHaveRealPoint(points []ocommon.Point) bool {
-	for _, point := range points {
-		if !isOriginPoint(point) {
-			return true
-		}
-	}
-	return false
-}
-
 func finalizeChainsyncIntersectPoints(
 	intersectPoints []ocommon.Point,
 	rollbackAnchor ocommon.Point,
