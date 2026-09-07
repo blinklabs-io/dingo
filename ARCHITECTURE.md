@@ -5827,7 +5827,11 @@ nonce is passed through unchanged.
 In API storage mode, the shared SQL metadata providers can defer selected query
 indexes during bulk load. Deferred indexes are classified as critical or lazy in
 `database/plugin/metadata/deferred`: critical indexes cover startup API queries
-and rollback predicates, while lazy indexes cover secondary query paths. Only
+and rollback predicates -- including the child column of an `ON DELETE CASCADE`
+foreign key whose parent rows the rollback deletes, since the engine enforces
+such a cascade with an implicit per-parent-row child delete that the parent
+statement's query plan does not show -- while lazy indexes cover secondary
+query paths. Only
 indexes no import path filters on are eligible at all — an index a per-row
 import predicate needs stays resident, since dropping it turns that predicate
 into a full scan of a table the import is still growing. Those indexes are
@@ -5844,7 +5848,11 @@ critical subset before clearing `sync_status`, then leaves the pending
 sync-state marker set. API-mode `serve` verifies the critical subset before
 startup and runs the full lazy rebuild as background maintenance; the marker is
 cleared only after the full manifest has been rebuilt. Core-mode startup still
-repairs the full manifest synchronously before serving. On MySQL, InnoDB
+repairs the full manifest synchronously before serving. Both repair entry
+points also restore any missing critical index when no cycle is pending at all:
+the marker records that a cycle was interrupted, not which indexes exist, so a
+database whose marker an older binary cleared while its own critical subset was
+smaller would otherwise carry the gap permanently. On MySQL, InnoDB
 requires indexes supporting foreign-key child columns, so the dialect leaves
 those indexes in place while deferring the remaining manifest entries.
 
