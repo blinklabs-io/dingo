@@ -312,6 +312,7 @@ func TestShouldSkipConfiguredPhase2ValidationHonorsHistoricalValidation(
 	tests := []struct {
 		name              string
 		validationEnabled bool
+		trustedReplay     bool
 		shouldValidate    bool
 		deepHistorical    bool
 		wantSkip          bool
@@ -319,28 +320,44 @@ func TestShouldSkipConfiguredPhase2ValidationHonorsHistoricalValidation(
 		{
 			name:              "historical validation keeps phase two enabled",
 			validationEnabled: true,
+			trustedReplay:     true,
 			shouldValidate:    true,
 			deepHistorical:    true,
 		},
 		{
 			name:           "trusted replay skips deep historical phase two",
+			trustedReplay:  true,
 			shouldValidate: true,
 			deepHistorical: true,
 			wantSkip:       true,
 		},
 		{
+			// Issue #3528: ValidateHistorical=false is the ordinary bulk-sync
+			// default almost every node runs with. Without an explicit
+			// TrustedReplay opt-in (set only by internal/node/load.go for a
+			// deliberate trusted-chain-dump import), the shortcut must not
+			// fire, or phase-2 evaluation would be skipped far more broadly
+			// than the narrow recovery window it's meant for.
+			name:           "ordinary historical sync without trusted replay does not skip phase two",
+			shouldValidate: true,
+			deepHistorical: true,
+		},
+		{
 			name:              "unvalidated block does not skip phase two",
 			validationEnabled: true,
+			trustedReplay:     true,
 			deepHistorical:    true,
 		},
 		{
 			name:           "disabled validation does not skip an unvalidated block",
+			trustedReplay:  true,
 			shouldValidate: false,
 			deepHistorical: true,
 		},
 		{
 			name:              "non-historical block does not skip phase two",
 			validationEnabled: true,
+			trustedReplay:     true,
 			shouldValidate:    true,
 			deepHistorical:    false,
 		},
@@ -353,6 +370,7 @@ func TestShouldSkipConfiguredPhase2ValidationHonorsHistoricalValidation(
 				test.wantSkip,
 				shouldSkipConfiguredPhase2Validation(
 					test.validationEnabled,
+					test.trustedReplay,
 					test.shouldValidate,
 					test.deepHistorical,
 				),

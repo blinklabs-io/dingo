@@ -147,10 +147,13 @@ func TestValidateChainSelectionHeaderCryptoDoesNotAdvanceEpochCache(
 }
 
 // TestShouldVerifyChainSelectionHeaderCryptoMatchesChainsyncGate proves that
-// ShouldVerifyChainSelectionHeaderCrypto shares the same fast-sync/Mithril
-// exemptions as the ledger's own chainsync header-queue gate
-// (shouldVerifyChainsyncHeaderCrypto), so a competing peer's header is exempt
-// under exactly the same conditions the applied chain already is.
+// ShouldVerifyChainSelectionHeaderCrypto shares the same Mithril exemption as
+// the ledger's own chainsync header-queue gate (shouldVerifyChainsyncHeaderCrypto),
+// so a competing peer's header is exempt under exactly the same condition the
+// applied chain already is. Issue #3528: a coarse ValidateHistorical=false
+// historical-sync toggle must not exempt header crypto -- only a slot a
+// Mithril certificate already covers may skip it, regardless of
+// validationEnabled.
 func TestShouldVerifyChainSelectionHeaderCryptoMatchesChainsyncGate(
 	t *testing.T,
 ) {
@@ -160,11 +163,11 @@ func TestShouldVerifyChainSelectionHeaderCryptoMatchesChainsyncGate(
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	slot := tb.block.SlotNumber()
 
-	assert.False(
+	assert.True(
 		t,
 		ls.ShouldVerifyChainSelectionHeaderCrypto(slot),
-		"verification must be skipped before live validation is enabled, "+
-			"matching shouldVerifyChainsyncHeaderCrypto",
+		"verification must run once the epoch nonce is cached, "+
+			"independent of validationEnabled",
 	)
 
 	ls.validationEnabled = true
@@ -172,7 +175,7 @@ func TestShouldVerifyChainSelectionHeaderCryptoMatchesChainsyncGate(
 	assert.True(
 		t,
 		ls.ShouldVerifyChainSelectionHeaderCrypto(slot),
-		"verification must run once live validation is enabled and the "+
+		"verification must still run once live validation is enabled and the "+
 			"epoch nonce is cached",
 	)
 

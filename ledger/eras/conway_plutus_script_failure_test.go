@@ -131,6 +131,7 @@ func TestConwayPhase2RejectsGenuineScriptFailureNotAsBudgetOverage(
 				Steps:  1_000_000,
 				Memory: 1_000_000,
 			},
+			CostModels: map[uint][]int64{0: {}},
 		},
 	)
 	require.Error(t, err, "a genuine Plutus failure must be rejected")

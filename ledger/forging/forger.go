@@ -377,7 +377,9 @@ type ForgerConfig struct {
 	// BlockValidator, when non-nil, validates the forged block (VRF/KES
 	// header crypto, body-hash consistency, per-tx ledger rules) before
 	// AddBlock is called. A validation failure drops the block without
-	// adopting or diffusing it. Nil disables self-validation (default).
+	// adopting or diffusing it. Nil disables self-validation; production
+	// wiring only leaves this nil when an operator explicitly opts out via
+	// ValidateForgedBlock=false.
 	BlockValidator BlockValidator
 
 	// Prometheus metrics registry (optional)

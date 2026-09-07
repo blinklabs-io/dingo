@@ -16,6 +16,8 @@ package dingo
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
@@ -44,12 +46,16 @@ import (
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
 	gouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/kes"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/blinklabs-io/gouroboros/vrf"
 	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
-	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -610,6 +616,143 @@ func registerGenesisForkTestPeer(
 	return oConn.Id()
 }
 
+// forkChainEmptyConwayBodyHash returns the block body hash for a Conway
+// block with empty transaction components, matching
+// internal/test/testutil's conwayEmptyBodyHash. It's independent of the
+// header, so every generated fork block shares it.
+func forkChainEmptyConwayBodyHash(t *testing.T) lcommon.Blake2b256 {
+	t.Helper()
+	block := &conway.ConwayBlock{BlockHeader: &conway.ConwayBlockHeader{}}
+	tmp, err := cbor.Encode(block)
+	require.NoError(t, err)
+	var comps []cbor.RawMessage
+	_, err = cbor.Decode(tmp, &comps)
+	require.NoError(t, err)
+	require.Len(t, comps, 5)
+	var concat []byte
+	for i := 1; i < 5; i++ {
+		h := lcommon.Blake2b256Hash(comps[i])
+		concat = append(concat, h.Bytes()...)
+	}
+	return lcommon.Blake2b256Hash(concat)
+}
+
+// generateValidatedConwayForkChain is fixtures.GenerateConwayChain's
+// structural counterpart with genuine VRF/KES crypto: issue #3528 made
+// header admission require real cryptographic verification (previously
+// skipped whenever ValidateHistorical was disabled, the ordinary bulk-sync
+// default), so a competing fork exercised through the normal chainsync
+// event path now needs a real, verifiable VRF proof against the ledger's
+// actual cached epoch nonce -- fixtures.GenerateConwayChain's headers carry
+// no VRF/KES material at all and are rejected outright.
+//
+// Unlike internal/test/testutil.BuildValidatedConwayBlockBytes, this proves
+// the VRF output directly for the caller-chosen slot rather than searching
+// a window for one that beats a leadership threshold: gouroboros'
+// verifyBlockHeaderOnlyCrypto path used at header admission time skips
+// stake-pool/leadership validation (VerifyConfig.SkipStakePoolValidation),
+// checking only that the VRF proof and KES signature are well-formed and
+// match the given epoch nonce -- so any real, non-degenerate keypair
+// suffices, and this chains multiple blocks by real prevHash/hash linkage
+// the way a peer's actual fork would.
+func generateValidatedConwayForkChain(
+	t *testing.T,
+	epochNonce []byte,
+	startBlockNumber uint64,
+	prevHash lcommon.Blake2b256,
+	startSlot, slotIncrement uint64,
+	count int,
+) []gledger.Block {
+	t.Helper()
+
+	var seed [32]byte
+	copy(seed[:], []byte("genesis-fork-chain-vrf-kes-seed"))
+	vrfPk, vrfSk, err := vrf.KeyGen(seed[:])
+	require.NoError(t, err)
+
+	kesSeed := seed
+	kesSeed[0] ^= 0xAA
+	kesSk, kesPk, err := kes.KeyGen(kes.CardanoKesDepth, kesSeed[:])
+	require.NoError(t, err)
+
+	coldSeed := seed
+	coldSeed[0] ^= 0xBB
+	coldPrivKey := ed25519.NewKeyFromSeed(coldSeed[:])
+	coldPubKey := coldPrivKey.Public().(ed25519.PublicKey)
+
+	const opCertSeqNum = uint32(0)
+	const opCertKesPeriod = uint32(0)
+	var opCertBody [48]byte
+	copy(opCertBody[:32], kesPk)
+	binary.BigEndian.PutUint64(opCertBody[32:40], uint64(opCertSeqNum))
+	binary.BigEndian.PutUint64(opCertBody[40:48], uint64(opCertKesPeriod))
+	opCertSig := ed25519.Sign(coldPrivKey, opCertBody[:])
+
+	bodyHash := forkChainEmptyConwayBodyHash(t)
+
+	var issuerVkey lcommon.IssuerVkey
+	copy(issuerVkey[:], coldPubKey)
+
+	blocks := make([]gledger.Block, 0, count)
+	currentPrev := prevHash
+	for i := range count {
+		slot := startSlot + uint64(i)*slotIncrement
+		blockNumber := startBlockNumber + uint64(i)
+
+		vrfInput, err := vrf.MkInputVrf(int64(slot), epochNonce) //nolint:gosec
+		require.NoError(t, err)
+		vrfProof, vrfOutput, err := vrf.Prove(vrfSk, vrfInput)
+		require.NoError(t, err)
+
+		headerBody := babbage.BabbageBlockHeaderBody{
+			BlockNumber: blockNumber,
+			Slot:        slot,
+			PrevHash:    currentPrev,
+			IssuerVkey:  issuerVkey,
+			VrfKey:      vrfPk,
+			VrfResult: lcommon.VrfResult{
+				Output: vrfOutput,
+				Proof:  vrfProof,
+			},
+			BlockBodySize: 0,
+			BlockBodyHash: bodyHash,
+			OpCert: babbage.BabbageOpCert{
+				HotVkey:        kesPk,
+				SequenceNumber: opCertSeqNum,
+				KesPeriod:      opCertKesPeriod,
+				Signature:      opCertSig,
+			},
+			ProtoVersion: babbage.BabbageProtoVersion{Major: 10},
+		}
+		headerBodyCbor, err := cbor.Encode(headerBody)
+		require.NoError(t, err)
+		// Store the CBOR on the header body so VerifyBlock's
+		// extractOriginalBodyCbor can retrieve it for KES verification.
+		headerBody.SetCbor(headerBodyCbor)
+
+		kesSig, err := kes.Sign(kesSk, uint64(opCertKesPeriod), headerBodyCbor)
+		require.NoError(t, err)
+
+		block := &conway.ConwayBlock{
+			BlockHeader: &conway.ConwayBlockHeader{
+				BabbageBlockHeader: babbage.BabbageBlockHeader{
+					Body:      headerBody,
+					Signature: kesSig,
+				},
+			},
+		}
+		raw, err := cbor.Encode(block)
+		require.NoError(t, err)
+
+		decoded, err := conway.NewConwayBlockFromCbor(raw)
+		require.NoError(t, err)
+
+		blocks = append(blocks, decoded)
+		currentPrev = decoded.Hash()
+	}
+	return blocks
+}
+
 // requireGenesisDeepForkWins drives a competing fork that only Ouroboros
 // Genesis density selection can win, and requires the ledger to switch to
 // it.
@@ -647,19 +790,32 @@ func requireGenesisDeepForkWins(
 		"the local tip must be ahead of the fork intersection for this to be a deep fork",
 	)
 
-	// Real Conway blocks from the shared ouroboros-mock fixtures rather than
-	// a locally defined header stub: their headers round-trip through CBOR,
-	// so the ledger sees the same hashes and prev-hashes a peer would send.
-	// Block numbers continue from the intersection, which keeps the branch
-	// shorter than the local chain.
-	forkBlocks, err := fixtures.GenerateConwayChain(
+	// Real, genuinely VRF/KES-signed Conway blocks rather than
+	// fixtures.GenerateConwayChain's crypto-free stubs: issue #3528 made
+	// header admission require real cryptographic verification against the
+	// ledger's actual cached epoch nonce, so a fork driven through the
+	// ordinary chainsync event path needs a real proof to be admitted at
+	// all. Their headers round-trip through CBOR, so the ledger sees the
+	// same hashes and prev-hashes a peer would send. Block numbers continue
+	// from the intersection, which keeps the branch shorter than the local
+	// chain.
+	ancestorEpoch, err := n.ledgerState.SlotToEpoch(ancestor.Slot)
+	require.NoError(t, err)
+	epochNonce := n.ledgerState.EpochNonce(ancestorEpoch.EpochId)
+	require.NotEmpty(
+		t,
+		epochNonce,
+		"ledger must have a cached nonce for the fork intersection's epoch",
+	)
+	forkBlocks := generateValidatedConwayForkChain(
+		t,
+		epochNonce,
 		uint64(ancestorIdx)+1,
 		lcommon.NewBlake2b256(ancestor.Hash),
 		ancestor.Slot+2,
 		2,
 		2,
 	)
-	require.NoError(t, err)
 	forkTipBlock := forkBlocks[len(forkBlocks)-1]
 	require.Less(
 		t,

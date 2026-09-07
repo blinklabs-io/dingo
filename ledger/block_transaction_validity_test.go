@@ -315,6 +315,7 @@ func TestLedgerProcessBlockHistoricalValidationRunsPhase2(t *testing.T) {
 	for _, tt := range []struct {
 		name              string
 		validationEnabled bool
+		trustedReplay     bool
 		wantValidationErr bool
 	}{
 		{
@@ -325,6 +326,17 @@ func TestLedgerProcessBlockHistoricalValidationRunsPhase2(t *testing.T) {
 		{
 			name:              "trusted replay keeps phase two skipped",
 			validationEnabled: false,
+			trustedReplay:     true,
+		},
+		{
+			// Issue #3528 regression: ValidateHistorical=false is the
+			// ordinary bulk-sync default. Without an explicit TrustedReplay
+			// opt-in, phase-2 evaluation must still run rather than being
+			// skipped for every deep-enough block.
+			name:              "ordinary historical sync without trusted replay evaluates phase two",
+			validationEnabled: false,
+			trustedReplay:     false,
+			wantValidationErr: true,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -398,6 +410,7 @@ func TestLedgerProcessBlockHistoricalValidationRunsPhase2(t *testing.T) {
 			}
 			skipPhase2 := shouldSkipConfiguredPhase2Validation(
 				tt.validationEnabled,
+				tt.trustedReplay,
 				true,
 				true,
 			)

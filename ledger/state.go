@@ -4595,15 +4595,24 @@ func (ls *LedgerState) shouldSkipPhase2ValidationForBlockAtCurrentTip(
 }
 
 // shouldSkipConfiguredPhase2Validation preserves the trusted-replay shortcut
-// only when historical validation is disabled. When ValidateHistorical is
-// enabled, local phase-2 evaluation is the purpose of that setting and must
-// remain active across the stability boundary.
+// only when historical validation is disabled AND the caller has explicitly
+// opted into TrustedReplay -- a deliberate operator action reserved for
+// loading an already-vetted, trusted chain dump (see
+// internal/node/load.go), not the ordinary ValidateHistorical=false setting
+// most nodes run bulk sync with. Gating on !validationEnabled alone let
+// every node doing ordinary historical sync skip phase-2 evaluation for any
+// deep-enough block indefinitely, far wider than the narrow recovery window
+// this shortcut is meant for. When ValidateHistorical is enabled, or
+// TrustedReplay was not explicitly requested, local phase-2 evaluation
+// remains active across the stability boundary.
 func shouldSkipConfiguredPhase2Validation(
 	validationEnabled bool,
+	trustedReplay bool,
 	shouldValidateBlock bool,
 	deepHistoricalBlock bool,
 ) bool {
-	return !validationEnabled && shouldValidateBlock && deepHistoricalBlock
+	return trustedReplay && !validationEnabled &&
+		shouldValidateBlock && deepHistoricalBlock
 }
 
 // StabilityWindow returns the Ouroboros security stability window for the
@@ -6561,6 +6570,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						// Process block
 						skipPhase2Validation := shouldSkipConfiguredPhase2Validation(
 							snapshotValidationEnabled,
+							ls.config.TrustedReplay,
 							shouldValidateBlock,
 							ls.shouldSkipPhase2ValidationForBlockAtCurrentTip(
 								next.BlockNumber(),

@@ -1060,6 +1060,71 @@ func TestBuildBlockBlockSizeLimit(t *testing.T) {
 	)
 }
 
+// TestBuildBlockRejectsExactBodySizeAboveApproximateLimit exercises the
+// boundary the in-loop approximate accounting cannot see: the loop sums each
+// mempool transaction's own raw CBOR length, but the assembled block body
+// re-wraps decoded fields into separate transaction-body/witness-set arrays,
+// which is not guaranteed to be the same size as the sum of raw tx CBOR. A
+// single minimal Conway tx's raw CBOR is 52 bytes while its exact assembled
+// body is 53 bytes, so a MaxBlockBodySize set to exactly the raw size passes
+// the in-loop check (which only compares raw sums) but must still be
+// rejected by the final exact-size check before the block is adopted or
+// diffused.
+func TestBuildBlockRejectsExactBodySizeAboveApproximateLimit(t *testing.T) {
+	creds := setupTestCredentials(t)
+
+	txCbor := makeMinimalTxCbor(t, 0x01, 0)
+	rawSize := uint(len(txCbor))
+
+	mempool := &mockMempool{
+		transactions: []MempoolTransaction{
+			{Hash: "tx1", Cbor: txCbor, Type: conway.TxTypeConway},
+		},
+	}
+
+	// MaxBlockBodySize equals the transaction's raw CBOR length exactly, so
+	// the in-loop approximate check (blockSize+txSize > maxBlockSize) admits
+	// it, but the exact assembled body is one byte larger.
+	pparams := &conway.ConwayProtocolParameters{
+		MaxTxSize:        rawSize,
+		MaxBlockBodySize: rawSize,
+		MaxBlockExUnits: lcommon.ExUnits{
+			Memory: 62000000,
+			Steps:  20000000000,
+		},
+	}
+	pparamsProvider := &mockPParamsProvider{pparams: pparams}
+
+	chainTip := &mockChainTip{
+		tip: ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: 1000,
+				Hash: make([]byte, 32),
+			},
+			BlockNumber: 100,
+		},
+	}
+
+	epochNonce := &mockEpochNonceProvider{epoch: 1, nonce: make([]byte, 32)}
+
+	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+		Mempool:         mempool,
+		PParamsProvider: pparamsProvider,
+		ChainTip:        chainTip,
+		EpochNonce:      epochNonce,
+		Credentials:     creds,
+	})
+	require.NoError(t, err)
+
+	_, _, err = builder.BuildBlock(1001, 0)
+	require.Error(
+		t,
+		err,
+		"exact assembled body size exceeding MaxBlockBodySize must be rejected even though the approximate in-loop sum stayed within budget",
+	)
+	assert.Contains(t, err.Error(), "exceeds MaxBlockBodySize")
+}
+
 // mockTxValidator implements TxValidator for testing. It rejects
 // transactions whose hashes appear in the rejectHashes set.
 type mockTxValidator struct {

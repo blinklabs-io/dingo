@@ -123,6 +123,7 @@ func TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 				Steps:  1_000_000,
 				Memory: 1_000_000,
 			},
+			CostModels: map[uint][]int64{0: {}},
 		},
 	)
 	require.Error(t, err)
@@ -153,10 +154,40 @@ func TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 						Steps:  1_000,
 						Memory: 100,
 					},
+					CostModels: map[uint][]int64{0: {}},
 				},
 			)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "out of budget")
+		},
+	)
+
+	t.Run(
+		"missing cost model fails closed instead of reaching evaluation",
+		func(t *testing.T) {
+			// Issue #3528: a protocol-parameters map that never populated
+			// the PlutusV1 entry (e.g. a hard-fork/governance update, or a
+			// malformed genesis) must return a configuration error rather
+			// than silently evaluating the script under plutigo's built-in
+			// default cost model. CostModels is nil here -- not merely
+			// present-but-empty, as the other subtests use -- reproducing a
+			// genuinely missing entry.
+			err := ValidateTxConway(
+				tx,
+				0,
+				newMockLedgerState(),
+				&conway.ConwayProtocolParameters{
+					ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+						Major: 9,
+					},
+					MaxTxExUnits: lcommon.ExUnits{
+						Steps:  1_000_000,
+						Memory: 1_000_000,
+					},
+				},
+			)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "missing PlutusV1 cost model")
 		},
 	)
 }

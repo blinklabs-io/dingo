@@ -385,6 +385,7 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 					&alonzo.AlonzoProtocolParameters{
 						ProtocolMajor: 5,
 						MaxTxExUnits:  maxTxExUnits,
+						CostModels:    map[uint][]int64{0: {}},
 					},
 				)
 			},
@@ -402,6 +403,7 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 					&babbage.BabbageProtocolParameters{
 						ProtocolMajor: 7,
 						MaxTxExUnits:  maxTxExUnits,
+						CostModels:    map[uint][]int64{1: {}},
 					},
 				)
 			},

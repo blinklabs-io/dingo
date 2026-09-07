@@ -21,6 +21,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestRequiredCostModelFailsClosedOnMissingEntry is a regression test for
+// issue #3528: a missing Plutus cost model must return a configuration
+// error rather than silently reaching script evaluation. Before
+// requiredCostModel existed, ledger/eras/{alonzo,babbage,conway}.go indexed
+// pp.CostModels[key] directly; a missing key returns Go's zero value (a nil
+// slice) rather than an error, and plutigo's costModelFromList treats a
+// nil/short cost-model slice as "use the built-in default cost model"
+// instead of failing -- silently evaluating scripts under the wrong,
+// not-this-network's cost parameters.
+func TestRequiredCostModelFailsClosedOnMissingEntry(t *testing.T) {
+	t.Run("missing key returns a configuration error", func(t *testing.T) {
+		_, err := requiredCostModel(nil, 2, "PlutusV3")
+		require.Error(t, err)
+		require.ErrorContains(t, err, "missing PlutusV3 cost model")
+	})
+	t.Run("present key returns its model", func(t *testing.T) {
+		model := []int64{1, 2, 3}
+		got, err := requiredCostModel(
+			map[uint][]int64{1: model},
+			1,
+			"PlutusV2",
+		)
+		require.NoError(t, err)
+		require.Equal(t, model, got)
+	})
+}
+
 // TestCostModelParameterTablesMatchLiveNetworks pins plutigo's cost model
 // parameter tables to the cost model lengths mainnet, preprod and preview all
 // publish at protocol version 11. The three networks carry byte identical

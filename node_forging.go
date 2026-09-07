@@ -358,8 +358,9 @@ func (n *Node) initBlockForger(
 		)
 	}
 
-	// Wire self-validation when the operator opts in. The validator runs
-	// header crypto, body-hash, and per-tx ledger checks before AddBlock.
+	// Wire self-validation unless the operator explicitly opts out. The
+	// validator runs header crypto, body-hash, and per-tx ledger checks
+	// before AddBlock.
 	var blockValidator forging.BlockValidator
 	if n.config.validateForgedBlock {
 		blockValidator = &forgedBlockValidatorAdapter{

@@ -14,6 +14,31 @@
 
 package eras
 
+import "fmt"
+
+// requiredCostModel returns the cost model for a Plutus language version, or
+// an error when the protocol parameters don't carry one. A plain map index
+// (pp.CostModels[key]) returns a nil slice for a missing entry, and
+// plutigo's costModelFromList silently treats a nil/short cost-model slice
+// as "use the built-in default cost model" instead of failing -- evaluating
+// a script under the wrong (default, not this network's configured) cost
+// parameters instead of refusing to evaluate it at all. Callers must use
+// this instead of indexing CostModels directly.
+func requiredCostModel(
+	costModels map[uint][]int64,
+	key uint,
+	versionName string,
+) ([]int64, error) {
+	model, ok := costModels[key]
+	if !ok {
+		return nil, fmt.Errorf(
+			"missing %s cost model in protocol parameters",
+			versionName,
+		)
+	}
+	return model, nil
+}
+
 // cloneCostModels gives hard-fork parameter conversion ownership of both the
 // map and its slice values. The upstream UpgradePParams helpers copy structs,
 // so without this step a conversion can mutate the previous era's parameters.

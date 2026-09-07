@@ -1172,13 +1172,17 @@ func evaluateConwayPlutusScript(
 			return lcommon.ExUnits{}, nil, err
 		}
 		ctx := script.NewScriptContextV3(txInfoV3, redeemer, purpose)
+		costModel, err := requiredCostModel(pp.CostModels, 2, "PlutusV3")
+		if err != nil {
+			return lcommon.ExUnits{}, nil, err
+		}
 		evalContext, err := cek.NewEvalContext(
 			lang.LanguageVersionV3,
 			cek.ProtoVersion{
 				Major: pp.ProtocolVersion.Major,
 				Minor: pp.ProtocolVersion.Minor,
 			},
-			pp.CostModels[2],
+			costModel,
 		)
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
@@ -1204,13 +1208,17 @@ func evaluateConwayPlutusScript(
 			return lcommon.ExUnits{}, nil, err
 		}
 		ctx := script.NewScriptContextV1V2(txInfoV2, purpose)
+		costModel, err := requiredCostModel(pp.CostModels, 1, "PlutusV2")
+		if err != nil {
+			return lcommon.ExUnits{}, nil, err
+		}
 		evalContext, err := cek.NewEvalContext(
 			lang.LanguageVersionV2,
 			cek.ProtoVersion{
 				Major: pp.ProtocolVersion.Major,
 				Minor: pp.ProtocolVersion.Minor,
 			},
-			pp.CostModels[1],
+			costModel,
 		)
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
@@ -1238,13 +1246,17 @@ func evaluateConwayPlutusScript(
 			return lcommon.ExUnits{}, nil, err
 		}
 		ctx := script.NewScriptContextV1V2(txInfoV1, purpose)
+		costModel, err := requiredCostModel(pp.CostModels, 0, "PlutusV1")
+		if err != nil {
+			return lcommon.ExUnits{}, nil, err
+		}
 		evalContext, err := cek.NewEvalContext(
 			lang.LanguageVersionV1,
 			cek.ProtoVersion{
 				Major: pp.ProtocolVersion.Major,
 				Minor: pp.ProtocolVersion.Minor,
 			},
-			pp.CostModels[0],
+			costModel,
 		)
 		if err != nil {
 			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)

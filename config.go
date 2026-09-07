@@ -658,6 +658,22 @@ func (n *Node) configValidate() error {
 				shelleyGenesis.NetworkMagic,
 			)
 		}
+		if byronGenesis := n.config.CardanoNodeConfig().ByronGenesis(); byronGenesis != nil {
+			byronProtocolMagic := byronGenesis.ProtocolConsts.ProtocolMagic
+			if byronProtocolMagic < 0 || byronProtocolMagic > math.MaxUint32 {
+				return fmt.Errorf(
+					"byron genesis protocol magic %d is out of uint32 range",
+					byronProtocolMagic,
+				)
+			}
+			if n.config.cfg.NetworkMagic != uint32(byronProtocolMagic) { // #nosec G115 -- range-checked above
+				return fmt.Errorf(
+					"network magic (%d) doesn't match value from Byron genesis (%d)",
+					n.config.cfg.NetworkMagic,
+					byronProtocolMagic,
+				)
+			}
+		}
 	}
 	return nil
 }
@@ -1484,11 +1500,12 @@ func WithForgeStaleGapThresholdSlots(slots uint64) ConfigOptionFunc {
 	}
 }
 
-// WithValidateForgedBlock enables self-validation of locally-forged blocks
+// WithValidateForgedBlock controls self-validation of locally-forged blocks
 // before they are adopted onto the chain and diffused to peers. When enabled,
 // the forger runs VRF/KES header crypto, body-hash consistency, and per-tx
 // ledger validation on each forged block. A failing block is dropped without
-// being adopted or diffused. Disabled by default.
+// being adopted or diffused. Enabled by default; pass false only to
+// explicitly opt out.
 func WithValidateForgedBlock(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ValidateForgedBlock = enabled

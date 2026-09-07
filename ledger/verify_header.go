@@ -161,16 +161,17 @@ func (ls *LedgerState) ValidateBlockHeaderCrypto(
 
 // ShouldVerifyChainSelectionHeaderCrypto reports whether a header at the
 // given slot is eligible to have its cryptography verified right now via
-// ValidateChainSelectionHeaderCrypto. It mirrors the same exemptions the
+// ValidateChainSelectionHeaderCrypto. It mirrors the same exemption the
 // ledger's own chainsync header-queue path already applies
-// (shouldVerifyChainsyncHeaderCrypto): verification is skipped while bulk
-// historical/catch-up loading has not yet enabled live validation, and for
+// (shouldVerifyChainsyncHeaderCrypto): verification is skipped only for
 // slots already covered by an imported Mithril snapshot, since those slots
 // were authenticated by the certificate chain during import and the
-// restored database does not retain every historical epoch nonce. A caller
-// that skips verification because this returns false must still treat the
-// header as eligible, not reject it -- the same trust boundary the ledger's
-// own pipeline already extends to this data.
+// restored database does not retain every historical epoch nonce. It is not
+// exempted merely because bulk historical/catch-up loading has not yet
+// enabled live validation (issue #3528). A caller that skips verification
+// because this returns false must still treat the header as eligible, not
+// reject it -- the same trust boundary the ledger's own pipeline already
+// extends to this data.
 func (ls *LedgerState) ShouldVerifyChainSelectionHeaderCrypto(
 	slot uint64,
 ) bool {
@@ -434,7 +435,8 @@ func (ls *LedgerState) headerVerificationEpoch(
 	// must never be advanced past the HFC safe zone or a known era boundary.
 	// Check the immutable summary first so ErrPastHorizon is surfaced before
 	// ensureEpochForSlot mutates any forecasted nonce state.
-	if len(ls.loadConsensusSnapshot().epochCache) > 0 {
+	if snapshot := ls.loadConsensusSnapshot(); snapshot != nil &&
+		len(snapshot.epochCache) > 0 {
 		summary, err := ls.HardForkSummary()
 		if err != nil {
 			return models.Epoch{}, fmt.Errorf(
@@ -1972,7 +1974,13 @@ func (ls *LedgerState) blockPipelineEta0Provider(slot uint64) (string, error) {
 //
 // Returns the matching epoch or an error if no epoch covers the slot.
 func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
-	return epochForSlotInCache(ls.loadConsensusSnapshot().epochCache, slot)
+	snapshot := ls.loadConsensusSnapshot()
+	if snapshot == nil {
+		return models.Epoch{}, errors.New(
+			"epoch cache snapshot not yet published",
+		)
+	}
+	return epochForSlotInCache(snapshot.epochCache, slot)
 }
 
 // epochForSlotInCache resolves a slot to its epoch against a caller-supplied
@@ -2238,6 +2246,9 @@ func (ls *LedgerState) ensureEpochForSlot(
 func (ls *LedgerState) advanceEpochCache() error {
 	// Read last epoch from the lock-free consensus snapshot
 	snapshot := ls.loadConsensusSnapshot()
+	if snapshot == nil {
+		return errors.New("epoch cache snapshot not yet published")
+	}
 	cache := snapshot.epochCache
 	if len(cache) == 0 {
 		return errors.New("epoch cache is empty")

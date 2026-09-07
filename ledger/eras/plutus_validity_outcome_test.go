@@ -483,6 +483,7 @@ func TestValidateTxRequiresDeclaredValidityToMatchExecution(
 							Steps:  10_000_000,
 							Memory: 10_000_000,
 						},
+						CostModels: map[uint][]int64{0: {}},
 					},
 				)
 			},
@@ -501,6 +502,7 @@ func TestValidateTxRequiresDeclaredValidityToMatchExecution(
 							Steps:  10_000_000,
 							Memory: 10_000_000,
 						},
+						CostModels: map[uint][]int64{0: {}},
 					},
 				)
 			},
@@ -519,6 +521,7 @@ func TestValidateTxRequiresDeclaredValidityToMatchExecution(
 							Steps:  10_000_000,
 							Memory: 10_000_000,
 						},
+						CostModels: map[uint][]int64{1: {}},
 					},
 				)
 			},
@@ -539,6 +542,7 @@ func TestValidateTxRequiresDeclaredValidityToMatchExecution(
 							Steps:  10_000_000,
 							Memory: 10_000_000,
 						},
+						CostModels: map[uint][]int64{0: {}},
 					},
 				)
 			},
@@ -559,6 +563,7 @@ func TestValidateTxRequiresDeclaredValidityToMatchExecution(
 							Steps:  10_000_000,
 							Memory: 10_000_000,
 						},
+						CostModels: map[uint][]int64{1: {}},
 					},
 				)
 			},

@@ -3193,12 +3193,12 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	ls.detectConnectionSwitch(pending)
 
 	// Verify header crypto before accepting it into the header queue.
-	// Skip during historical sync (validationEnabled=false) because
-	// historical blocks were already validated by the network and the
-	// epoch nonce may not be fully computed yet (e.g. Byron→Shelley).
-	// Also skip headers covered by a Mithril snapshot: those slots were
+	// Skip only headers covered by a Mithril snapshot: those slots were
 	// verified by the certificate chain during import, and the restored
 	// database intentionally does not keep every historical epoch nonce.
+	// A missing epoch nonce for any other slot (e.g. Byron->Shelley, where
+	// it may not be fully computed yet) defers verification rather than
+	// skipping it outright (issue #3528).
 	headerCryptoVerified := false
 	headerValidationRequired, headerTrusted := ls.chainsyncHeaderCryptoPolicy(
 		e.Point.Slot,
@@ -3604,17 +3604,25 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 	return true, nil
 }
 
-// chainsyncHeaderCryptoPolicy distinguishes headers trusted by an explicitly
-// disabled validation path (historical sync or Mithril coverage) from headers
-// whose crypto check must wait for an epoch nonce. Both skip verification at
-// chainsync time, but only the former may advance shared sync state.
+// chainsyncHeaderCryptoPolicy distinguishes headers trusted by Mithril
+// coverage from headers whose crypto check must wait for an epoch nonce.
+// Both skip verification at chainsync time, but only the former may advance
+// shared sync state.
+//
+// Header VRF/KES/OpCert crypto is the check that makes sync trustless in the
+// first place, so unlike per-tx ledger validation
+// (historicalBlockValidationDecision), which may legitimately skip
+// re-deriving the UTxO set for blocks the network already delivered, this is
+// not gated on ValidateHistorical/validationEnabled: a coarse
+// historical-sync toggle must not disable this entire group of checks
+// (issue #3528). The only narrower, deliberate exemption is a slot a Mithril
+// certificate already covers -- those slots were authenticated by the
+// certificate chain during import, and the restored database intentionally
+// does not retain every historical epoch nonce needed to re-verify them.
 func (ls *LedgerState) chainsyncHeaderCryptoPolicy(
 	slot uint64,
 ) (verifyNow bool, trustedWithoutVerification bool) {
-	validationEnabled, mithrilLedgerSlot := ls.validationStateSnapshot()
-	if !validationEnabled {
-		return false, true
-	}
+	mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
 	if mithrilLedgerSlot != 0 && slot <= mithrilLedgerSlot {
 		return false, true
 	}
@@ -3650,13 +3658,12 @@ func (ls *LedgerState) shouldVerifyChainsyncHeaderCrypto(slot uint64) bool {
 // shouldEnforceBlockPipelineCrypto mirrors the serial header path's
 // validation-state gates for blocks read back from the primary chain. The
 // pipeline workers still run for every submitted block, but their result must
-// not reject trusted historical/Mithril data or a block whose epoch nonce is
-// intentionally unavailable until ledger apply catches up.
+// not reject trusted Mithril data or a block whose epoch nonce is
+// intentionally unavailable until ledger apply catches up. See
+// chainsyncHeaderCryptoPolicy for why this is not gated on
+// ValidateHistorical/validationEnabled.
 func (ls *LedgerState) shouldEnforceBlockPipelineCrypto(slot uint64) bool {
-	validationEnabled, mithrilLedgerSlot := ls.validationStateSnapshot()
-	if !validationEnabled {
-		return false
-	}
+	mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
 	if mithrilLedgerSlot != 0 && slot <= mithrilLedgerSlot {
 		return false
 	}
@@ -4055,11 +4062,13 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 		}
 	}
 
-	// Verify block header cryptographic proofs (VRF, KES).
-	// Skip during historical sync (validationEnabled=false) because
-	// historical blocks were already validated by the network.
-	validationEnabled, _ := ls.validationStateSnapshot()
-	if validationEnabled {
+	// Verify block header cryptographic proofs (VRF, KES). Required for
+	// every slot except one a Mithril certificate already covers -- see
+	// chainsyncHeaderCryptoPolicy's doc comment. A coarse
+	// ValidateHistorical=false historical-sync toggle must not disable
+	// this entire group of checks (issue #3528).
+	mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
+	if mithrilLedgerSlot == 0 || e.Point.Slot > mithrilLedgerSlot {
 		var verifyErr error
 		// Chainsync may already have verified the queued header before
 		// blockfetch started. When the fetched block matches that first

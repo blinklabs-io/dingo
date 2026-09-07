@@ -695,7 +695,10 @@ type Config struct {
 	ShelleyOperationalCertificate string `yaml:"shelleyOperationalCertificate" envconfig:"SHELLEY_OPERATIONAL_CERTIFICATE"`
 	ForgeSyncToleranceSlots       uint64 `yaml:"forgeSyncToleranceSlots"       envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
 	ForgeStaleGapThresholdSlots   uint64 `yaml:"forgeStaleGapThresholdSlots"   envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
-	ValidateForgedBlock           bool   `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
+	// ValidateForgedBlock self-validates locally-forged blocks before
+	// adoption and diffusion. Defaults to true (fail closed); set to false
+	// only to explicitly opt out.
+	ValidateForgedBlock bool `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
 
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. Consensus-affecting
@@ -1139,6 +1142,9 @@ var globalConfig = &Config{
 	// Forging defaults
 	ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
 	ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
+	// Fail closed: self-validate locally-forged blocks before adoption and
+	// diffusion unless an operator explicitly opts out.
+	ValidateForgedBlock: true,
 }
 
 // deepCopyPluginValue duplicates the reference-typed values a YAML plugin
