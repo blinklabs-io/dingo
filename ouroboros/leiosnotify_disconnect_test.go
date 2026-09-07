@@ -48,10 +48,14 @@ func TestLeiosNotifyIdleRequestReleasedByDisconnect(t *testing.T) {
 	}, 5*time.Second, "idle notification request to register its cursor")
 	require.NoError(t, f.h.Disconnect())
 	testutil.RequireReceive(t, finished, 5*time.Second, "idle callback to exit on connection closure")
-	f.o.leiosEBLog.mu.Lock()
-	_, retained := f.o.leiosEBLog.cursors[key]
-	f.o.leiosEBLog.mu.Unlock()
-	require.False(t, retained, "closed connection must not retain a cursor")
+	// Releasing the callback and removing its cursor are successive close
+	// actions; callback completion alone does not acknowledge cursor cleanup.
+	testutil.WaitForCondition(t, func() bool {
+		f.o.leiosEBLog.mu.Lock()
+		defer f.o.leiosEBLog.mu.Unlock()
+		_, retained := f.o.leiosEBLog.cursors[key]
+		return !retained
+	}, 5*time.Second, "closed connection cursor to be removed")
 	select {
 	case <-server.DoneChan():
 		t.Fatal("test must not close protocol completion to release callback")
