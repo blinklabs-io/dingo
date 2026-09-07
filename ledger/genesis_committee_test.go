@@ -17,6 +17,7 @@ package ledger
 import (
 	"bytes"
 	"encoding/hex"
+	"math"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -191,6 +192,77 @@ func TestParseGenesisCommitteeCredential(t *testing.T) {
 
 	_, _, err = parseGenesisCommitteeCredential("keyHash-abcd")
 	require.Error(t, err)
+}
+
+// TestEnsureGenesisCommitteeRejectsNegativeExpiry proves a malformed Conway
+// genesis fails initialization instead of seating a member with a wrapped
+// term.
+//
+// conway-genesis.json models the committee expiry as a bare JSON number, so it
+// decodes into a signed int. Converting a negative value straight to the
+// store's unsigned epoch would wrap it to a near-maximum uint64 -- a term no
+// epoch boundary would ever expire -- so the seed must refuse it outright.
+func TestEnsureGenesisCommitteeRejectsNegativeExpiry(t *testing.T) {
+	ls, db := genesisConstitutionTestState(t)
+
+	// The embedded config is parsed fresh on every load, so mutating this
+	// state's genesis below cannot leak into the other tests in this file.
+	other, _ := genesisConstitutionTestState(t)
+	require.NotSame(
+		t,
+		ls.config.CardanoNodeConfig.ConwayGenesis(),
+		other.config.CardanoNodeConfig.ConwayGenesis(),
+		"each test state must own its genesis for the mutation below to be safe",
+	)
+
+	members := ls.config.CardanoNodeConfig.ConwayGenesis().Committee.Members
+	rawKey := "keyHash-" + musashiGenesisCommitteeColdKeys[0]
+	require.Contains(t, members, rawKey)
+	members[rawKey] = -1
+
+	err := ls.ensureGenesisCommittee(nil)
+	require.ErrorContains(t, err, "negative expiry epoch -1")
+	require.ErrorContains(t, err, musashiGenesisCommitteeColdKeys[0])
+	require.Equal(
+		t,
+		0,
+		committeeMemberRowCount(t, db),
+		"a malformed genesis committee must seat no members at all",
+	)
+}
+
+// TestGenesisCommitteeExpiryEpoch covers the signed-to-unsigned conversion
+// directly, including the most negative int, which is the value a straight
+// conversion wraps furthest.
+func TestGenesisCommitteeExpiryEpoch(t *testing.T) {
+	tests := []struct {
+		name    string
+		expiry  int
+		want    uint64
+		wantErr bool
+	}{
+		{"zero", 0, 0, false},
+		{
+			"musashi genesis expiry",
+			musashiGenesisCommitteeExpiry,
+			musashiGenesisCommitteeExpiry,
+			false,
+		},
+		{"negative one", -1, 0, true},
+		{"most negative int", math.MinInt, 0, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := genesisCommitteeExpiryEpoch(tc.expiry)
+			if tc.wantErr {
+				require.Error(t, err)
+				require.Zero(t, got)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
 }
 
 // committeeMemberRowCount returns the number of stored committee_member rows.

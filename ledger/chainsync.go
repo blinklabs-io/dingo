@@ -5154,10 +5154,14 @@ func (ls *LedgerState) ensureGenesisCommittee(txn *database.Txn) error {
 		if _, ok := seen[key]; ok {
 			continue
 		}
+		expiresEpoch, err := genesisCommitteeExpiryEpoch(expiry)
+		if err != nil {
+			return fmt.Errorf("genesis committee credential %q: %w", raw, err)
+		}
 		newMembers = append(newMembers, &models.CommitteeMember{
 			ColdCredentialTag: tag,
 			ColdCredHash:      hash,
-			ExpiresEpoch:      uint64(expiry),
+			ExpiresEpoch:      expiresEpoch,
 			TermStartSlot:     0,
 			TermStartSlotSet:  true,
 			AddedSlot:         0,
@@ -5185,6 +5189,23 @@ func (ls *LedgerState) ensureGenesisCommittee(txn *database.Txn) error {
 		"component", "ledger",
 	)
 	return nil
+}
+
+// genesisCommitteeExpiryEpoch converts a conway-genesis.json committee member
+// expiry epoch to the unsigned epoch the store records.
+//
+// The genesis committee section models the expiry as a bare JSON number, so
+// gouroboros decodes it into a signed int (conway.ConwayGenesisCommittee's
+// Members map is map[string]int). A negative value is malformed genesis: a
+// straight conversion would wrap it to a near-maximum uint64 and silently seat
+// the member with an effectively unbounded term, which no later epoch boundary
+// would ever expire. Refuse it the same way an unparseable credential is
+// refused rather than committing a term the real chain never granted.
+func genesisCommitteeExpiryEpoch(expiry int) (uint64, error) {
+	if expiry < 0 {
+		return 0, fmt.Errorf("negative expiry epoch %d", expiry)
+	}
+	return uint64(expiry), nil
 }
 
 // parseGenesisCommitteeCredential decodes a conway-genesis.json committee
