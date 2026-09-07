@@ -313,6 +313,29 @@ func getTestTxBytes(t *testing.T) []byte {
 	return txBytes
 }
 
+func TestUtxoOverlayUsesConsensusConsumedInputsForInvalidTx(t *testing.T) {
+	tx, err := gledger.NewTransactionFromCbor(
+		uint(conway.EraIdConway),
+		getTestTxBytes(t),
+	)
+	require.NoError(t, err)
+	require.False(t, tx.IsValid())
+	require.NotEmpty(t, tx.Inputs())
+	require.NotEmpty(t, tx.Collateral())
+	overlay := newUtxoOverlay()
+	overlay.applyTx(tx.Hash().String(), uint(conway.EraIdConway), tx.Cbor(), tx)
+	for _, input := range tx.Inputs() {
+		key := fmt.Sprintf("%s:%d", input.Id().String(), input.Index())
+		assert.NotContains(t, overlay.consumed, key,
+			"invalid transaction regular inputs must remain available")
+	}
+	for _, input := range tx.Collateral() {
+		key := fmt.Sprintf("%s:%d", input.Id().String(), input.Index())
+		assert.Contains(t, overlay.consumed, key,
+			"invalid transaction collateral must be consumed")
+	}
+}
+
 // =============================================================================
 // Original Test (preserved)
 // =============================================================================

@@ -15,12 +15,15 @@
 package ledger
 
 import (
+	"math"
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 	utxorpc "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
@@ -57,6 +60,7 @@ func (h *envelopeTestHeader) BlockBodyHash() lcommon.Blake2b256 {
 type envelopeTestBlock struct {
 	header *envelopeTestHeader
 	cbor   []byte
+	txs    []lcommon.Transaction
 }
 
 func (b *envelopeTestBlock) Header() lcommon.BlockHeader { return b.header }
@@ -81,8 +85,135 @@ func (b *envelopeTestBlock) BlockBodyHash() lcommon.Blake2b256 {
 }
 func (b *envelopeTestBlock) Type() int { return 0 }
 func (b *envelopeTestBlock) Transactions() []lcommon.Transaction {
-	return nil
+	return b.txs
 }
+
+func TestValidateInboundBlockExUnitsAggregatesDeclaredBudgets(t *testing.T) {
+	newTx := func(memory, steps int64) lcommon.Transaction {
+		return &mockFeeTx{
+			witnesses: &mockWitnessSet{redeemers: &mockRedeemers{entries: []struct {
+				key lcommon.RedeemerKey
+				val lcommon.RedeemerValue
+			}{
+				{val: lcommon.RedeemerValue{ExUnits: lcommon.ExUnits{
+					Memory: memory,
+					Steps:  steps,
+				}}},
+			}}},
+		}
+	}
+	pparams := &conway.ConwayProtocolParameters{
+		MaxBlockExUnits: lcommon.ExUnits{Memory: 10, Steps: 10},
+	}
+	tests := []struct {
+		name string
+		txs  []lcommon.Transaction
+		want string
+	}{
+		{name: "valid exact aggregate", txs: []lcommon.Transaction{
+			newTx(4, 4), newTx(6, 6),
+		}},
+		{name: "over budget aggregate", txs: []lcommon.Transaction{
+			newTx(5, 5), newTx(6, 5),
+		}, want: "exceed maxBlockExUnits"},
+		{name: "checked overflow", txs: []lcommon.Transaction{
+			newTx(math.MaxInt64, 0), newTx(1, 0),
+		}, want: "overflow"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			block := &envelopeTestBlock{txs: tt.txs}
+			checkParams := pparams
+			if tt.name == "checked overflow" {
+				checkParams = &conway.ConwayProtocolParameters{
+					MaxBlockExUnits: lcommon.ExUnits{
+						Memory: math.MaxInt64,
+						Steps:  math.MaxInt64,
+					},
+				}
+			}
+			err := validateBlockExUnits(block, checkParams)
+			if tt.want == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
+func TestValidateInboundBlockExUnitsIncludesDijkstraSubtransactions(
+	t *testing.T,
+) {
+	newWitnessSet := func(memory, steps int64) dijkstra.DijkstraTransactionWitnessSet {
+		return dijkstra.DijkstraTransactionWitnessSet{
+			WsRedeemers: dijkstra.DijkstraRedeemers{
+				Redeemers: map[lcommon.RedeemerKey]lcommon.RedeemerValue{
+					{}: {ExUnits: lcommon.ExUnits{
+						Memory: memory,
+						Steps:  steps,
+					}},
+				},
+			},
+		}
+	}
+	tx := &dijkstra.DijkstraTransaction{
+		Body: dijkstra.DijkstraTransactionBody{
+			TxSubTransactions: cbor.NewSetType(
+				[]dijkstra.DijkstraSubTransaction{{
+					WitnessSet: newWitnessSet(6, 7),
+				}},
+				true,
+			),
+		},
+		WitnessSet: newWitnessSet(5, 4),
+		TxIsValid:  false,
+	}
+	block := &envelopeTestBlock{txs: []lcommon.Transaction{tx}}
+
+	require.NoError(t, validateBlockExUnits(
+		block,
+		&dijkstra.DijkstraProtocolParameters{
+			ConwayProtocolParameters: conway.ConwayProtocolParameters{
+				MaxBlockExUnits: lcommon.ExUnits{Memory: 11, Steps: 11},
+			},
+		},
+	))
+	require.ErrorContains(t, validateBlockExUnits(
+		block,
+		&dijkstra.DijkstraProtocolParameters{
+			ConwayProtocolParameters: conway.ConwayProtocolParameters{
+				MaxBlockExUnits: lcommon.ExUnits{Memory: 10, Steps: 10},
+			},
+		},
+	), "11 memory/11 steps exceed maxBlockExUnits")
+
+	overflowTx := &dijkstra.DijkstraTransaction{
+		Body: dijkstra.DijkstraTransactionBody{
+			TxSubTransactions: cbor.NewSetType(
+				[]dijkstra.DijkstraSubTransaction{{
+					WitnessSet: newWitnessSet(1, 0),
+				}},
+				true,
+			),
+		},
+		WitnessSet: newWitnessSet(math.MaxInt64, 0),
+		TxIsValid:  false,
+	}
+	require.ErrorContains(t, validateBlockExUnits(
+		&envelopeTestBlock{txs: []lcommon.Transaction{overflowTx}},
+		&dijkstra.DijkstraProtocolParameters{
+			ConwayProtocolParameters: conway.ConwayProtocolParameters{
+				MaxBlockExUnits: lcommon.ExUnits{
+					Memory: math.MaxInt64,
+					Steps:  math.MaxInt64,
+				},
+			},
+		},
+	), "overflow")
+}
+
 func (b *envelopeTestBlock) Utxorpc() (*utxorpc.Block, error) {
 	return nil, nil
 }

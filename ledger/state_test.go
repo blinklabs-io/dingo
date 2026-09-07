@@ -5080,6 +5080,17 @@ func TestCloseWaitsForBlockProcessingPipelineToActuallyStop(t *testing.T) {
 	}
 }
 
+func TestCloseReplayReturnsWhenPreviousCloseIsStillRunning(t *testing.T) {
+	origTimeout := CloseResultReplayTimeout
+	CloseResultReplayTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { CloseResultReplayTimeout = origTimeout })
+
+	ls := &LedgerState{closeDone: make(chan struct{})}
+	err := ls.Close()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "previous ledger state close still in progress")
+}
+
 // TestCloseStopsDecodePipelineBeforeWaitingForBlockProcessing covers the
 // shutdown ordering required when block processing is draining the decode
 // pipeline's Results channel. That drain has no context select after a batch

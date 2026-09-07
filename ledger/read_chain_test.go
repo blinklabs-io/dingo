@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -91,6 +92,21 @@ func (m *readChainMockBlock) Utxorpc() (*utxorpc_cardano.Block, error) {
 type scriptedLedgerReadIterator struct {
 	ctx     context.Context
 	results []*chain.ChainIteratorResult
+}
+
+type failingLedgerReadIterator struct{}
+
+func (failingLedgerReadIterator) Next(bool) (*chain.ChainIteratorResult, error) {
+	return nil, errors.New("iterator storage failure")
+}
+
+func TestLedgerReadChainIteratorForwardsIteratorError(t *testing.T) {
+	resultCh := make(chan readChainResult, 1)
+	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
+	ls.ledgerReadChainIterator(t.Context(), failingLedgerReadIterator{}, resultCh)
+	result := <-resultCh
+	require.Error(t, result.err)
+	assert.Contains(t, result.err.Error(), "iterator storage failure")
 }
 
 func (s *scriptedLedgerReadIterator) Next(

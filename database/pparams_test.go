@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/assert"
@@ -87,7 +88,7 @@ func TestComputeAndApplyPParamUpdates_QuorumNotMet(
 
 	// Try to apply with quorum = 5 (only 3 proposals, below
 	// quorum)
-	result, err := db.ComputeAndApplyPParamUpdates(
+	result, _, err := db.ComputeAndApplyPParamUpdates(
 		400, // slot
 		4,   // epoch
 		2,   // era
@@ -95,6 +96,7 @@ func TestComputeAndApplyPParamUpdates_QuorumNotMet(
 		currentPParams,
 		decodeFunc,
 		updateFunc,
+		nil,
 		txn,
 	)
 	require.NoError(t, err)
@@ -165,7 +167,7 @@ func TestComputeAndApplyPParamUpdates_QuorumMet(
 	}
 
 	// Apply with quorum = 5 (exactly 5 proposals, meets quorum)
-	_, err = db.ComputeAndApplyPParamUpdates(
+	_, _, err = db.ComputeAndApplyPParamUpdates(
 		400,
 		4,
 		2,
@@ -173,6 +175,7 @@ func TestComputeAndApplyPParamUpdates_QuorumMet(
 		currentPParams,
 		decodeFunc,
 		updateFunc,
+		nil,
 		txn,
 	)
 	require.NoError(t, err)
@@ -197,6 +200,136 @@ func TestComputeAndApplyPParamUpdates_QuorumMet(
 	)
 	require.NoError(t, err)
 	require.NotNil(t, stored)
+}
+
+// TestComputeAndApplyPParamUpdates_ReportsPlutusV2CostModelWritten covers
+// blinklabs-io/dingo#3825's PR review (wolf31o2): on a network that forks
+// into Babbage before receiving a real PlutusV2 cost model, that model can
+// arrive through this classic Shelley-style update system rather than
+// CIP-1694 governance (as it did on real mainnet, well before Conway
+// governance existed). The caller needs the same real-write provenance
+// signal here that governance.EnactProposal provides for the Conway/
+// Dijkstra path, derived from hasPlutusV2CostModelFunc against the enacted
+// update itself -- not from comparing the merged result's value before and
+// after.
+func TestComputeAndApplyPParamUpdates_ReportsPlutusV2CostModelWritten(
+	t *testing.T,
+) {
+	config := &Config{DataDir: ""}
+	db, err := newTestDatabase(t, config)
+	require.NoError(t, err)
+	defer db.Close()
+
+	txn := db.Transaction(true)
+	defer txn.Commit() //nolint:errcheck
+
+	updateCbor, err := cbor.Encode(
+		&alonzo.AlonzoProtocolParameterUpdate{
+			CostModels: map[uint][]int64{1: {205665, 812, 1}},
+		},
+	)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParamUpdate(
+		[]byte{0x01}, updateCbor, 300, 3, txn,
+	))
+
+	currentPParams := &alonzo.AlonzoProtocolParameters{
+		CostModels: map[uint][]int64{0: {1, 2, 3}},
+	}
+	decodeFunc := func(data []byte) (any, error) {
+		var update alonzo.AlonzoProtocolParameterUpdate
+		_, err := cbor.Decode(data, &update)
+		return update, err
+	}
+	updateFunc := func(
+		current lcommon.ProtocolParameters,
+		update any,
+	) (lcommon.ProtocolParameters, error) {
+		return current, nil
+	}
+	hasPlutusV2CostModelFunc := func(u any) bool {
+		upd, ok := u.(alonzo.AlonzoProtocolParameterUpdate)
+		if !ok {
+			return false
+		}
+		_, ok = upd.CostModels[1]
+		return ok
+	}
+
+	_, plutusV2CostModelWritten, err := db.ComputeAndApplyPParamUpdates(
+		400, 4, 2, 1,
+		currentPParams,
+		decodeFunc,
+		updateFunc,
+		hasPlutusV2CostModelFunc,
+		txn,
+	)
+	require.NoError(t, err)
+	assert.True(t, plutusV2CostModelWritten,
+		"the enacted update explicitly specified CostModels[1]")
+}
+
+// TestComputeAndApplyPParamUpdates_FalseWhenUpdateDoesNotWritePlutusV2CostModel
+// covers the negative case: an enacted update that touches an unrelated
+// field must not report PlutusV2CostModelWritten, even though the merged
+// result may still carry a PlutusV2 cost model unchanged from before.
+func TestComputeAndApplyPParamUpdates_FalseWhenUpdateDoesNotWritePlutusV2CostModel(
+	t *testing.T,
+) {
+	config := &Config{DataDir: ""}
+	db, err := newTestDatabase(t, config)
+	require.NoError(t, err)
+	defer db.Close()
+
+	txn := db.Transaction(true)
+	defer txn.Commit() //nolint:errcheck
+
+	minFeeA := uint(100)
+	updateCbor, err := cbor.Encode(
+		&alonzo.AlonzoProtocolParameterUpdate{
+			MinFeeA: &minFeeA,
+		},
+	)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParamUpdate(
+		[]byte{0x01}, updateCbor, 300, 3, txn,
+	))
+
+	currentPParams := &alonzo.AlonzoProtocolParameters{
+		CostModels: map[uint][]int64{0: {1, 2, 3}, 1: {205665, 812, 1}},
+	}
+	decodeFunc := func(data []byte) (any, error) {
+		var update alonzo.AlonzoProtocolParameterUpdate
+		_, err := cbor.Decode(data, &update)
+		return update, err
+	}
+	updateFunc := func(
+		current lcommon.ProtocolParameters,
+		update any,
+	) (lcommon.ProtocolParameters, error) {
+		return current, nil
+	}
+	hasPlutusV2CostModelFunc := func(u any) bool {
+		upd, ok := u.(alonzo.AlonzoProtocolParameterUpdate)
+		if !ok {
+			return false
+		}
+		_, ok = upd.CostModels[1]
+		return ok
+	}
+
+	_, plutusV2CostModelWritten, err := db.ComputeAndApplyPParamUpdates(
+		400, 4, 2, 1,
+		currentPParams,
+		decodeFunc,
+		updateFunc,
+		hasPlutusV2CostModelFunc,
+		txn,
+	)
+	require.NoError(t, err)
+	assert.False(t, plutusV2CostModelWritten,
+		"this update never touched CostModels[1], even though the merged"+
+			" result still carries one unchanged")
 }
 
 func TestComputeAndApplyPParamUpdates_NilTxnCommitsWrite(
@@ -237,10 +370,11 @@ func TestComputeAndApplyPParamUpdates_NilTxnCommitsWrite(
 		return &tmp, nil
 	}
 
-	result, err := db.ComputeAndApplyPParamUpdates(
+	result, _, err := db.ComputeAndApplyPParamUpdates(
 		400, 4, 2, 5,
 		currentPParams,
 		decodeFunc, updateFunc,
+		nil,
 		nil,
 	)
 	require.NoError(t, err)
@@ -406,7 +540,7 @@ func TestComputeAndApplyPParamUpdates_FiltersEpoch(
 
 	// Quorum = 5: submission epoch 3 has 5 proposals (meets quorum) and is
 	// what enacts for target epoch 4; the epoch-2 decoys are excluded.
-	_, err = db.ComputeAndApplyPParamUpdates(
+	_, _, err = db.ComputeAndApplyPParamUpdates(
 		400,
 		4,
 		2,
@@ -414,6 +548,7 @@ func TestComputeAndApplyPParamUpdates_FiltersEpoch(
 		currentPParams,
 		decodeFunc,
 		updateFunc,
+		nil,
 		txn,
 	)
 	require.NoError(t, err)
@@ -450,10 +585,11 @@ func TestComputeAndApplyPParamUpdates_NoUpdates(
 		return current, nil
 	}
 
-	result, err := db.ComputeAndApplyPParamUpdates(
+	result, _, err := db.ComputeAndApplyPParamUpdates(
 		400, 4, 2, 5,
 		currentPParams,
 		decodeFunc, updateFunc,
+		nil,
 		txn,
 	)
 	require.NoError(t, err)
@@ -525,10 +661,11 @@ func TestComputeAndApplyPParamUpdates_DuplicateGenesis(
 	}
 
 	// Only 2 unique genesis keys, quorum is 5
-	result, err := db.ComputeAndApplyPParamUpdates(
+	result, _, err := db.ComputeAndApplyPParamUpdates(
 		400, 4, 2, 5,
 		currentPParams,
 		decodeFunc, updateFunc,
+		nil,
 		txn,
 	)
 	require.NoError(t, err)

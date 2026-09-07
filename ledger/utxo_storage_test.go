@@ -253,6 +253,11 @@ func TestUtxoStorageAndRetrieval(t *testing.T) {
 		// Step 2: Check if blob data exists
 		blob := db.Blob()
 		blobTxn := txn.Blob()
+		// db.Blob() is non-nil: database.New rejects a nil or typed-nil blob
+		// store (database/database.go), so the nil-receiver branch of
+		// blobStoreRef.blobStore that nilaway traces is unreachable for any
+		// constructed database.
+		//nolint:nilaway // database.New requires a non-nil blob store
 		blobData, err := blob.GetUtxo(blobTxn, utxoRef.txId, utxoRef.outputIdx)
 		if err != nil {
 			t.Logf("Blob error for %s#%d: %v",
