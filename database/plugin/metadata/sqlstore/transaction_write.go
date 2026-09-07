@@ -897,13 +897,31 @@ WHERE credential_tag = ? AND staking_key = ? AND active = TRUE`,
 			if !historicalBackfill {
 				return models.ErrAccountNotFound
 			}
-			// Historical API backfill can replay a withdrawal whose stake
-			// credential was valid on the canonical chain at the time but is
-			// absent from the imported Mithril snapshot's active accounts
-			// (e.g. deregistered before the snapshot was taken). Record the
-			// withdrawal history without fabricating or reactivating a
-			// current stake-registration account.
 			accountFound = false
+			// Historical API backfill can replay a withdrawal whose stake
+			// credential has no *active* account row for one of two reasons:
+			// no account row exists at all (deregistered before the imported
+			// Mithril snapshot, or never active in it -- issue #3788), or
+			// backfill's own certificate replay (applyTransactionCertificates
+			// runs unconditionally, historicalBackfill or not) has
+			// temporarily deactivated a row Mithril imported active, between
+			// a historical deregistration certificate and a later
+			// re-registration certificate for the same credential.
+			// Deregistration's account upsert never clears `reward`, so a
+			// merely-inactive row can still hold the credential's real
+			// balance; only fall back to an unknown (zero) previous balance
+			// when no row exists at all, rather than discarding a real one.
+			err = db.QueryRowContext(ctx, `
+SELECT id, reward FROM account
+WHERE credential_tag = ? AND staking_key = ?`,
+				tag,
+				stakeKey.Bytes(),
+			).Scan(&accountID, &reward)
+			if errors.Is(err, sql.ErrNoRows) {
+				reward = sql.NullString{}
+			} else if err != nil {
+				return err
+			}
 		} else if err != nil {
 			return err
 		}

@@ -239,20 +239,41 @@ func TestSharedSQLStoreWithdrawalRejectsExcessiveBalance(t *testing.T) {
 
 // TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount covers issue
 // #3788: a canonical withdrawal replayed during API-mode Mithril historical
-// backfill can name a stake credential that is absent from the imported
-// snapshot's active `account` rows entirely -- deregistered before the
-// snapshot was taken, or never active in it. Live ingestion must still
-// require an active account (`SetTransaction`, `historicalBackfill=false`);
-// historical backfill must record the withdrawal without fabricating or
-// reactivating a current stake-registration account.
+// backfill can name a stake credential with no *active* account row for two
+// distinct reasons, which must not be treated alike:
+//
+//   - No account row exists at all (deregistered before the imported
+//     snapshot, or never active in it). There is no real prior balance to
+//     record, so the journal's previous_reward is the unknown-value 0.
+//   - A row exists but is inactive. applyTransactionCertificates runs
+//     unconditionally (not gated on historicalBackfill), so backfill's own
+//     certificate replay can transiently deactivate a row Mithril imported
+//     active between a historical deregistration and a later
+//     re-registration certificate for the same credential -- and
+//     deregistration's account upsert never clears `reward`. The real
+//     reward must still be journaled, not discarded as 0, and the row must
+//     be neither mutated nor reactivated.
+//
+// Live ingestion must still require an active account (`SetTransaction`,
+// historicalBackfill=false) in both cases.
 func TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name           string
-		createInactive bool
+		name               string
+		createInactive     bool
+		inactiveReward     uint64
+		wantPreviousReward string
 	}{
-		{name: "no account row at all"},
-		{name: "account row present but inactive", createInactive: true},
+		{
+			name:               "no account row at all",
+			wantPreviousReward: "0",
+		},
+		{
+			name:               "account row present but inactive with a real balance",
+			createInactive:     true,
+			inactiveReward:     777,
+			wantPreviousReward: "777",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -261,7 +282,7 @@ func TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount(t *testing.T) 
 			if tc.createInactive {
 				require.NoError(t, store.CreateAccount(nil, &models.Account{
 					StakingKey: stakeKey,
-					Reward:     0,
+					Reward:     types.Uint64(tc.inactiveReward),
 					Active:     false,
 				}))
 			}
@@ -316,7 +337,7 @@ func TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount(t *testing.T) 
 			if tc.createInactive {
 				require.NotNil(t, account)
 				require.False(t, account.Active)
-				require.Zero(t, uint64(account.Reward))
+				require.Equal(t, tc.inactiveReward, uint64(account.Reward))
 			} else {
 				require.Nil(t, account)
 			}
@@ -328,7 +349,7 @@ func TestSharedSQLStoreHistoricalBackfillWithdrawalMissingAccount(t *testing.T) 
 				backfillHash.Bytes(),
 			).Scan(&deltas, &previousReward))
 			require.Equal(t, 1, deltas)
-			require.Equal(t, "0", previousReward)
+			require.Equal(t, tc.wantPreviousReward, previousReward)
 
 			// Replaying the same backfill transaction must not duplicate the
 			// journal row.
