@@ -233,6 +233,20 @@ func (n *Node) handleGenesisSnapshotError(err error) error {
 	)
 }
 
+// applyForgeTuning copies the operator-tunable forging knobs from the node
+// configuration onto the forger config. It is the one place that mapping
+// happens on the runtime path, so a test can assert it without standing up
+// a node: a knob dropped here reaches the forger as its zero value, which
+// silently reverts it to the built-in default and leaves yaml, env and CLI
+// with no effect at all.
+func applyForgeTuning(fc *forging.ForgerConfig, cfg *Config) {
+	fc.ForgeSyncToleranceSlots = cfg.forgeSyncToleranceSlots
+	fc.ForgeStaleGapThresholdSlots = cfg.forgeStaleGapThresholdSlots
+	fc.ForgeEBSelectionReserve = cfg.forgeEBSelectionReserve
+	fc.ForgeEBMaxTxRefs = cfg.forgeEBMaxTxRefs
+	fc.ForgeEBMaxBytes = cfg.forgeEBMaxBytes
+}
+
 // initBlockForger initializes the block forger for production mode.
 // This requires VRF, KES, and OpCert key files to be configured.
 func (n *Node) initBlockForger(
@@ -368,7 +382,7 @@ func (n *Node) initBlockForger(
 	}
 
 	// Create the block forger with the real leader election
-	forger, err := forging.NewBlockForger(forging.ForgerConfig{
+	forgerCfg := forging.ForgerConfig{
 		Mode:                            forging.ModeProduction,
 		Logger:                          n.config.logger,
 		Credentials:                     creds,
@@ -378,8 +392,6 @@ func (n *Node) initBlockForger(
 		ConfirmedTxs:                    mempoolAdapter,
 		BlockForged:                     blockForged,
 		SlotClock:                       slotClock,
-		ForgeSyncToleranceSlots:         n.config.forgeSyncToleranceSlots,
-		ForgeStaleGapThresholdSlots:     n.config.forgeStaleGapThresholdSlots,
 		BlockValidator:                  blockValidator,
 		ForgeFence:                      forgeFence,
 		PromRegistry:                    n.config.promRegistry,
@@ -393,7 +405,9 @@ func (n *Node) initBlockForger(
 			ls: n.ledgerState,
 		},
 		EraParams: n.ledgerState,
-	})
+	}
+	applyForgeTuning(&forgerCfg, &n.config)
+	forger, err := forging.NewBlockForger(forgerCfg)
 	if err != nil {
 		// Stop election to prevent goroutine leak
 		_ = election.Stop()

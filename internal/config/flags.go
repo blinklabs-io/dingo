@@ -680,6 +680,21 @@ var flagSpecs = []flagSpec{
 		"forge-stale-gap-threshold-slots",
 		"slot gap threshold for stale slot clock alerts",
 	),
+	durationFlag(
+		"ForgeEBSelectionReserve",
+		"forge-eb-selection-reserve",
+		"slot time reserved for ranking-block assembly after Leios endorser-block selection",
+	),
+	uint64PtrFlag(
+		"ForgeEBMaxTxRefs",
+		"forge-eb-max-tx-refs",
+		"maximum transaction references in a forged Leios endorser block (0 = unlimited)",
+	),
+	uint64PtrFlag(
+		"ForgeEBMaxBytes",
+		"forge-eb-max-bytes",
+		"maximum total referenced transaction bytes in a forged Leios endorser block (0 = unlimited)",
+	),
 	boolFlag(
 		"ValidateForgedBlock",
 		"validate-forged-block",
@@ -1138,6 +1153,39 @@ func uint32Flag(field, name, help string) flagSpec {
 				)
 			}
 			targetValue(cfg, field).SetUint(uint64(v))
+			return nil
+		},
+	}
+}
+
+// uint64PtrFlag binds a CLI flag to a *uint64 field. The pointer keeps an
+// explicit 0 -- which disables the cap it controls -- distinct from never
+// passing the flag at all, which takes the default. Only an explicitly
+// passed flag writes to the field, matching boolPtrFlag's contract.
+func uint64PtrFlag(field, name, help string) flagSpec {
+	return flagSpec{
+		field: field,
+		name:  name,
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			// Report the value that omitting the flag actually
+			// produces, not the zero value of the pointer. The
+			// Changed check below still lets an explicit 0 through
+			// to disable the cap.
+			var def uint64
+			if v := defaultValue(defaults, field); !v.IsNil() {
+				def = v.Elem().Uint()
+			}
+			f.Uint64(name, def, help)
+		},
+		apply: func(f *pflag.FlagSet, cfg *Config) error {
+			if !f.Changed(name) {
+				return nil
+			}
+			v, err := f.GetUint64(name)
+			if err != nil {
+				return err
+			}
+			targetValue(cfg, field).Set(reflect.ValueOf(&v))
 			return nil
 		},
 	}

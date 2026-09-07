@@ -91,6 +91,18 @@ const (
 	DefaultRejectionWatermark          = 1.0
 	DefaultForgeSyncToleranceSlots     = 100
 	DefaultForgeStaleGapThresholdSlots = 1000
+	// Backstops on endorser-block construction. The slot deadline is the
+	// operative bound in normal operation; these cap the manifest when the
+	// slot clock cannot answer, and are deliberately far above the block
+	// sizes seen in practice so they never become the binding constraint
+	// on throughput.
+	DefaultForgeEBMaxTxRefs = 20000
+	DefaultForgeEBMaxBytes  = 25165824 // 24 MiB, just under the Leios mempool default
+	// DefaultForgeEBSelectionReserve is what endorser-block selection
+	// leaves of the slot for ranking-block assembly, signing, adoption
+	// and broadcast. It is the same number as the forging package's own
+	// fallback, which the two pinning tests keep in step.
+	DefaultForgeEBSelectionReserve     = 300 * time.Millisecond
 	DefaultMempoolCapacityPraos        = 1048576  // 1 MiB
 	DefaultMempoolCapacityLeios        = 26214400 // 25 MiB
 	DefaultMempoolRevalidationDeltaCap = 64
@@ -678,7 +690,16 @@ type Config struct {
 	ShelleyOperationalCertificate string `yaml:"shelleyOperationalCertificate" envconfig:"SHELLEY_OPERATIONAL_CERTIFICATE"`
 	ForgeSyncToleranceSlots       uint64 `yaml:"forgeSyncToleranceSlots"       envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
 	ForgeStaleGapThresholdSlots   uint64 `yaml:"forgeStaleGapThresholdSlots"   envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
-	ValidateForgedBlock           bool   `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
+	// Endorser-block manifest backstops. Pointers so that "the operator
+	// never mentioned this" (nil, take the default) stays distinct from
+	// an explicit 0, which disables the cap.
+	ForgeEBMaxTxRefs *uint64 `yaml:"forgeEbMaxTxRefs" envconfig:"DINGO_FORGE_EB_MAX_TX_REFS"`
+	ForgeEBMaxBytes  *uint64 `yaml:"forgeEbMaxBytes"  envconfig:"DINGO_FORGE_EB_MAX_BYTES"`
+	// ForgeEBSelectionReserve is how much of the slot endorser-block
+	// selection must leave for the ranking block. Zero or negative takes
+	// DefaultForgeEBSelectionReserve.
+	ForgeEBSelectionReserve time.Duration `yaml:"forgeEbSelectionReserve" envconfig:"DINGO_FORGE_EB_SELECTION_RESERVE"`
+	ValidateForgedBlock     bool          `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
 
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. Consensus-affecting
@@ -1120,6 +1141,15 @@ var globalConfig = &Config{
 	// Forging defaults
 	ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
 	ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
+	ForgeEBSelectionReserve:     DefaultForgeEBSelectionReserve,
+	ForgeEBMaxTxRefs:            forgeEBCapDefault(DefaultForgeEBMaxTxRefs),
+	ForgeEBMaxBytes:             forgeEBCapDefault(DefaultForgeEBMaxBytes),
+}
+
+// forgeEBCapDefault returns a pointer to v, for the endorser-block cap
+// defaults. A nil cap means "unset"; an explicit 0 disables the cap.
+func forgeEBCapDefault(v uint64) *uint64 {
+	return &v
 }
 
 // deepCopyPluginValue duplicates the reference-typed values a YAML plugin
@@ -1213,6 +1243,14 @@ func cloneConfig(cfg *Config) *Config {
 	if cfg.PeerSharing != nil {
 		peerSharing := *cfg.PeerSharing
 		clone.PeerSharing = &peerSharing
+	}
+	if cfg.ForgeEBMaxTxRefs != nil {
+		maxTxRefs := *cfg.ForgeEBMaxTxRefs
+		clone.ForgeEBMaxTxRefs = &maxTxRefs
+	}
+	if cfg.ForgeEBMaxBytes != nil {
+		maxBytes := *cfg.ForgeEBMaxBytes
+		clone.ForgeEBMaxBytes = &maxBytes
 	}
 	clone.API.TLS = cloneTLSPolicy(cfg.API.TLS)
 	clone.API.Auth = cloneAuthPolicy(cfg.API.Auth)
@@ -1483,6 +1521,20 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.ForgeStaleGapThresholdSlots == 0 {
 		c.ForgeStaleGapThresholdSlots = DefaultForgeStaleGapThresholdSlots
+	}
+	// A reserve of zero or less leaves the ranking block no time at all,
+	// so it can only mean "unset": take the default.
+	if c.ForgeEBSelectionReserve <= 0 {
+		c.ForgeEBSelectionReserve = DefaultForgeEBSelectionReserve
+	}
+	// Only an unset (nil) cap takes the default. An explicit 0 is
+	// preserved: it means the operator switched the cap off, which the
+	// flag help and the forger contract both document.
+	if c.ForgeEBMaxTxRefs == nil {
+		c.ForgeEBMaxTxRefs = forgeEBCapDefault(DefaultForgeEBMaxTxRefs)
+	}
+	if c.ForgeEBMaxBytes == nil {
+		c.ForgeEBMaxBytes = forgeEBCapDefault(DefaultForgeEBMaxBytes)
 	}
 	// Only an unset (zero) frequency takes the default; an explicitly
 	// negative value is preserved so Validate can reject it instead of

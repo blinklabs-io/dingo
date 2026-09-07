@@ -64,6 +64,36 @@ const (
 	forgeStaleGapThresholdSlots = 1000
 )
 
+// defaultForgeEBSelectionReserve is how much of the slot endorser-block
+// construction leaves for everything that must follow it: ranking-block
+// assembly, KES signing, local adoption and broadcast. The endorser block's
+// hash is committed into the ranking-block header, so the two cannot be
+// reordered or overlapped -- the EB body must be final before the header is
+// signed. Bounding EB selection by (slot end - reserve) is therefore the
+// only way to keep the ranking block inside its slot.
+//
+// Ranking-block assembly for a certifying block measures in single-digit
+// milliseconds (its body is empty; the payload lives in the endorser
+// block), so the reserve is dominated by broadcast and adoption. 300ms is
+// two orders of magnitude above the observed cost and still leaves most of
+// a 1-second slot for selection.
+const defaultForgeEBSelectionReserve = 300 * time.Millisecond
+
+// Backstops on the endorser-block manifest, applied when ForgerConfig
+// leaves the cap unset. They exist so that an embedder constructing a
+// forger without going through the node configuration still gets a bound;
+// an explicit 0 disables the cap. Kept far above observed block sizes so
+// they never become the binding constraint on throughput -- the slot
+// deadline is the operative bound.
+//
+// internal/config declares the same numbers for its yaml/env defaults and
+// cannot import this package; TestForgeEBCapDefaultsMatchForgingPackage
+// guards the two copies against drift.
+const (
+	defaultForgeEBMaxTxRefs uint64 = 20000
+	defaultForgeEBMaxBytes  uint64 = 25165824 // 24 MiB
+)
+
 // BlockForger coordinates block production for a stake pool.
 type BlockForger struct {
 	mode   Mode
@@ -106,6 +136,18 @@ type BlockForger struct {
 	// Configurable forging tolerances
 	forgeSyncToleranceSlots     uint64
 	forgeStaleGapThresholdSlots uint64
+
+	// forgeEBSelectionReserve is the slice of the slot endorser-block
+	// selection must leave for ranking-block assembly and broadcast.
+	forgeEBSelectionReserve time.Duration
+
+	// Backstops on endorser-block manifest size. Zero means no cap.
+	forgeEBMaxTxRefs uint64
+	forgeEBMaxBytes  uint64
+
+	// now reads the wall clock for slot budgeting. Overridden in tests so
+	// deadline behaviour is exercised without sleeping.
+	now func() time.Time
 
 	// Optional self-validation before adoption (nil = disabled)
 	blockValidator BlockValidator
@@ -374,6 +416,21 @@ type ForgerConfig struct {
 	// chain tip is far ahead of the slot clock. Zero uses the default.
 	ForgeStaleGapThresholdSlots uint64
 
+	// ForgeEBSelectionReserve is how much of the slot endorser-block
+	// transaction selection must leave for ranking-block assembly,
+	// signing and broadcast. Zero uses
+	// defaultForgeEBSelectionReserve.
+	ForgeEBSelectionReserve time.Duration
+
+	// ForgeEBMaxTxRefs caps the transaction references a forged endorser
+	// block may carry; ForgeEBMaxBytes caps their total size. Nil takes
+	// the built-in default, so a forger built without node configuration
+	// is still bounded; a non-nil 0 disables the cap. These are
+	// backstops: the slot deadline is the operative bound whenever the
+	// slot clock can answer.
+	ForgeEBMaxTxRefs *uint64
+	ForgeEBMaxBytes  *uint64
+
 	// BlockValidator, when non-nil, validates the forged block (VRF/KES
 	// header crypto, body-hash consistency, per-tx ledger rules) before
 	// AddBlock is called. A validation failure drops the block without
@@ -423,8 +480,21 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 	if cfg.ForgeStaleGapThresholdSlots == 0 {
 		cfg.ForgeStaleGapThresholdSlots = forgeStaleGapThresholdSlots
 	}
+	if cfg.ForgeEBSelectionReserve <= 0 {
+		cfg.ForgeEBSelectionReserve = defaultForgeEBSelectionReserve
+	}
 	f.forgeSyncToleranceSlots = cfg.ForgeSyncToleranceSlots
 	f.forgeStaleGapThresholdSlots = cfg.ForgeStaleGapThresholdSlots
+	f.forgeEBSelectionReserve = cfg.ForgeEBSelectionReserve
+	f.forgeEBMaxTxRefs = defaultForgeEBMaxTxRefs
+	if cfg.ForgeEBMaxTxRefs != nil {
+		f.forgeEBMaxTxRefs = *cfg.ForgeEBMaxTxRefs
+	}
+	f.forgeEBMaxBytes = defaultForgeEBMaxBytes
+	if cfg.ForgeEBMaxBytes != nil {
+		f.forgeEBMaxBytes = *cfg.ForgeEBMaxBytes
+	}
+	f.now = time.Now
 
 	if cfg.Mode == ModeProduction {
 		if cfg.Credentials == nil || !cfg.Credentials.IsLoaded() {
@@ -1700,6 +1770,122 @@ func (f *BlockForger) SlotTracker() *SlotTracker {
 	return f.slotTracker
 }
 
+// slotClockPosition places a slot-clock reading relative to the slot
+// being forged.
+type slotClockPosition int
+
+const (
+	// slotClockInSlot: the clock is still inside the slot being forged,
+	// so its next-boundary answer describes that slot's own end.
+	slotClockInSlot slotClockPosition = iota
+	// slotClockPastSlot: the clock has already left the slot, so the
+	// slot ended at or before now.
+	slotClockPastSlot
+	// slotClockBeforeSlot: the forge is ahead of the clock, so the
+	// next-boundary answer belongs to an earlier slot and says nothing
+	// about this one.
+	slotClockBeforeSlot
+)
+
+func positionOfSlotClock(observed, slot uint64) slotClockPosition {
+	switch {
+	case observed > slot:
+		return slotClockPastSlot
+	case observed < slot:
+		return slotClockBeforeSlot
+	default:
+		return slotClockInSlot
+	}
+}
+
+// slotEndTime returns the instant the slot being forged ends. ok is false
+// when the slot clock cannot answer for this slot, which leaves the caller
+// to pick its own bound rather than guessing at one.
+//
+// NextSlotTime is derived from the clock's own current slot, so a reading
+// taken on either side of it can belong to a different slot than the one
+// being forged. The clock slot is therefore read before and after: only a
+// reading that brackets NextSlotTime inside the forged slot proves the
+// boundary belongs to it. A clock that has moved past the slot reports an
+// end of now -- the tightest bound that can be proven, and enough for
+// every caller, all of which only ask whether the slot is over.
+func (f *BlockForger) slotEndTime(slot uint64) (time.Time, bool) {
+	if f.slotClock == nil {
+		return time.Time{}, false
+	}
+	before, err := f.slotClock.CurrentSlot()
+	if err != nil {
+		return time.Time{}, false
+	}
+	switch positionOfSlotClock(before, slot) {
+	case slotClockPastSlot:
+		return f.now(), true
+	case slotClockBeforeSlot:
+		return time.Time{}, false
+	case slotClockInSlot:
+		// The boundary read below can still be trusted; fall through.
+	}
+	slotEnd, err := f.slotClock.NextSlotTime()
+	if err != nil || slotEnd.IsZero() {
+		return time.Time{}, false
+	}
+	after, err := f.slotClock.CurrentSlot()
+	if err != nil {
+		return time.Time{}, false
+	}
+	switch positionOfSlotClock(after, slot) {
+	case slotClockPastSlot:
+		// The clock crossed the boundary while it was being read, so
+		// slotEnd is the *next* slot's end -- a budget this forge does
+		// not have.
+		return f.now(), true
+	case slotClockBeforeSlot:
+		return time.Time{}, false
+	case slotClockInSlot:
+		// Both readings bracket NextSlotTime inside the forged slot,
+		// so the boundary belongs to it.
+	}
+	return slotEnd, true
+}
+
+// ebSelectionBudget returns the instant endorser-block selection must stop
+// at for the given slot, and whether the slot's window has already closed.
+//
+// expired is true when the slot is over. No endorser block is produced
+// then: its hash is committed into the ranking-block header, so selecting
+// after the slot has closed only delays the block that actually extends
+// the chain, and it buys nothing -- the endorser block is announced by
+// that same ranking block, so if the ranking block is orphaned for being
+// late the endorser block cannot be certified through it either.
+//
+// When the slot clock cannot place this forge in its slot, the deadline is
+// a minimal fixed budget instead. Unbounded is never an option: every
+// candidate costs a full ledger re-validation, so a pass over a deep
+// mempool runs for seconds, and it is no more acceptable without a clock
+// than with one.
+//
+// The reserve is what ranking-block assembly, signing, adoption and
+// broadcast get after the endorser block is finished, and it is taken from
+// the time actually remaining rather than as a fixed slice: on a network
+// whose slots are shorter than the configured reserve a fixed subtraction
+// would put the deadline before the slot began, leaving selection no
+// budget at all.
+func (f *BlockForger) ebSelectionBudget(slot uint64) (time.Time, bool) {
+	slotEnd, ok := f.slotEndTime(slot)
+	if !ok {
+		return f.now().Add(f.forgeEBSelectionReserve), false
+	}
+	remaining := slotEnd.Sub(f.now())
+	if remaining <= 0 {
+		return time.Time{}, true
+	}
+	reserve := f.forgeEBSelectionReserve
+	if half := remaining / 2; reserve > half {
+		reserve = half
+	}
+	return slotEnd.Add(-reserve), false
+}
+
 // checkAndForgeLeiosEB attempts to produce and broadcast a Leios endorser
 // block for the given slot. It is called by the slot leader before RB
 // construction so the EB can begin diffusing while the RB is assembled.
@@ -1723,6 +1909,24 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		return nil, nil
 	}
 
+	// Bound selection by the slot before touching the mempool. Every
+	// candidate costs a full ledger re-validation, so an unbounded pass
+	// over a deep mempool runs for seconds -- and because the endorser
+	// block's hash is committed into the ranking-block header, all of
+	// that time is spent before the block that actually extends the
+	// chain can be signed.
+	selectionDeadline, slotExpired := f.ebSelectionBudget(slot)
+	if slotExpired {
+		f.logger.Debug(
+			"leios EB skipped: slot window already closed",
+			"slot", slot,
+		)
+		if f.metrics != nil {
+			f.metrics.leiosEbSkipped.WithLabelValues("slot_expired").Inc()
+		}
+		return nil, nil
+	}
+
 	allTxs := f.leiosMempool.Transactions()
 	txs := allTxs
 	if len(excludedTxHashes) > 0 {
@@ -1741,9 +1945,31 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		}
 		return nil, nil
 	}
-	validatedTxs, err := selectValidLeiosTransactions(txs, f.leiosValidator)
+	limits := leiosSelectionLimits{now: f.now, deadline: selectionDeadline}
+	candidateCount := len(txs)
+	selectStart := f.now()
+	validatedTxs, truncated, err := selectValidLeiosTransactions(
+		txs,
+		f.leiosValidator,
+		limits,
+	)
+	selectDuration := f.now().Sub(selectStart)
+	if f.metrics != nil {
+		f.metrics.leiosEbSelectionSeconds.Observe(selectDuration.Seconds())
+		if truncated {
+			f.metrics.leiosEbSelectionTruncated.Inc()
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("validate leios EB transactions: %w", err)
+	}
+	if truncated {
+		f.logger.Warn(
+			"leios endorser block selection stopped at the slot deadline",
+			"slot", slot,
+			"candidates", len(txs),
+			"selected", len(validatedTxs),
+		)
 	}
 	txs = validatedTxs
 	if len(txs) == 0 {
@@ -1755,7 +1981,12 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		return nil, nil
 	}
 
-	ebCbor, ebHash, bodies, err := buildLeiosEB(txs)
+	buildStart := f.now()
+	ebCbor, ebHash, bodies, err := buildLeiosEB(txs, leiosEBCaps{
+		maxRefs:  f.forgeEBMaxTxRefs,
+		maxBytes: f.forgeEBMaxBytes,
+	})
+	buildDuration := f.now().Sub(buildStart)
 	if err != nil {
 		if errors.Is(err, errNoValidTxRefs) {
 			f.logger.Debug("leios EB skipped: no valid tx refs", "slot", slot)
@@ -1771,6 +2002,7 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 	// Pass the transaction bodies alongside the manifest so the endorser
 	// block can be served to peers over leios-fetch (they request the bodies
 	// after fetching the manifest).
+	broadcastStart := f.now()
 	if err := f.leiosEBCaster.BroadcastEndorserBlock(
 		slot,
 		ebHash,
@@ -1779,12 +2011,22 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 	); err != nil {
 		return nil, fmt.Errorf("broadcast leios EB: %w", err)
 	}
+	broadcastDuration := f.now().Sub(broadcastStart)
 
+	// Endorser-block construction is what a Leios leader slot is mostly
+	// spent on, and its hash has to be final before the ranking-block
+	// header can be signed, so this breakdown is where a late block is
+	// diagnosed from.
 	f.logger.Info(
 		"leios endorser block produced",
 		"slot", slot,
 		"hash", hex.EncodeToString(ebHash),
 		"tx_refs", len(bodies),
+		"candidates", candidateCount,
+		"truncated", truncated,
+		"eb_select", selectDuration,
+		"eb_build", buildDuration,
+		"eb_broadcast", broadcastDuration,
 	)
 	if f.metrics != nil {
 		f.metrics.leiosEbForged.Inc()
@@ -1803,10 +2045,12 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 func selectValidLeiosTransactions(
 	txs []MempoolTransaction,
 	validator TxValidator,
-) ([]MempoolTransaction, error) {
+	limits leiosSelectionLimits,
+) ([]MempoolTransaction, bool, error) {
 	if validator == nil {
-		return txs, nil
+		return txs, false, nil
 	}
+	truncated := false
 	selected := make([]MempoolTransaction, 0, len(txs))
 	err := withTxValidationSession(
 		validator,
@@ -1817,6 +2061,24 @@ func selectValidLeiosTransactions(
 			consumed := make(map[string]struct{})
 			created := make(map[string]lcommon.Utxo)
 			for _, mempoolTx := range txs {
+				if !stillCurrent() {
+					// A ledger publication landed mid-pass. Every
+					// candidate validated from here would be checked
+					// against a superseded generation and the whole
+					// selection rejected anyway.
+					return errTxValidationSnapshotChanged
+				}
+				if limits.expired() {
+					// Out of slot budget. The prefix selected so far is
+					// a valid closure: candidates are considered in
+					// mempool order and a parent's outputs are exposed
+					// only after the parent passes, so a descendant
+					// never survives without its parent. An endorser
+					// block with fewer references beats one that
+					// arrives after its slot.
+					truncated = true
+					break
+				}
 				// The EB wire reference is the transaction's only representation
 				// in this slot. Do not expose outputs from a transaction that the
 				// manifest builder will later drop as unrepresentable.
@@ -1849,27 +2111,78 @@ func selectValidLeiosTransactions(
 			return nil
 		},
 	)
-	return selected, err
+	return selected, truncated, err
+}
+
+// leiosSelectionLimits bounds one endorser-block selection pass. The zero
+// value imposes no bound, which is the behaviour every caller had before
+// the slot deadline existed.
+type leiosSelectionLimits struct {
+	// now reads the wall clock. Nil falls back to time.Now.
+	now func() time.Time
+	// deadline, when non-zero, stops selection at the given instant and
+	// builds the endorser block from what has already passed.
+	deadline time.Time
+}
+
+// expired reports whether the selection budget is gone.
+func (l leiosSelectionLimits) expired() bool {
+	if l.deadline.IsZero() {
+		return false
+	}
+	now := l.now
+	if now == nil {
+		now = time.Now
+	}
+	return !now().Before(l.deadline)
 }
 
 // buildLeiosEB assembles a LeiosEndorserBlock from mempool transactions.
 // Transactions with invalid hex hashes, non-32-byte hashes, zero sizes,
 // or sizes exceeding uint16 are silently dropped. Returns an error only
 // when no valid references remain after filtering.
+// leiosEBCaps bounds the manifest a single endorser block may carry. The
+// zero value imposes no cap, matching the behaviour before these existed.
+// They are a backstop for the slot deadline: when the slot clock cannot
+// answer, the deadline is absent and only these keep construction cost and
+// wire size from scaling without limit with mempool depth.
+type leiosEBCaps struct {
+	// maxRefs caps the number of transaction references.
+	maxRefs uint64
+	// maxBytes caps the total size of the referenced transactions.
+	maxBytes uint64
+}
+
 func buildLeiosEB(
 	txs []MempoolTransaction,
+	caps leiosEBCaps,
 ) (
 	cbor []byte,
 	hash []byte,
 	bodies [][]byte,
 	err error,
 ) {
-	refs := make([]lcommon.LeiosTransactionReference, 0, len(txs))
+	var totalBytes uint64
+	// Preallocate for what the caps actually admit, not for the mempool:
+	// the backstop has to bound construction memory too, or a deep
+	// mempool still dictates the allocation for a manifest capped at a
+	// handful of references.
+	prealloc := len(txs)
+	if caps.maxRefs > 0 && uint64(prealloc) > caps.maxRefs {
+		prealloc = int(caps.maxRefs) // #nosec G115 -- bounded by prealloc above
+	}
+	// Every admitted transaction carries at least one byte, so the byte
+	// cap bounds the reference count too. Without this a disabled
+	// reference cap still preallocated for the whole mempool.
+	if caps.maxBytes > 0 && uint64(prealloc) > caps.maxBytes {
+		prealloc = int(caps.maxBytes) // #nosec G115 -- bounded by prealloc above
+	}
+	refs := make([]lcommon.LeiosTransactionReference, 0, prealloc)
 	// bodies holds each referenced transaction's raw CBOR, in the same order
 	// as refs, so the endorser block can serve them over leios-fetch. A
 	// transaction dropped from refs (bad hash or size) is dropped here too,
 	// keeping body i aligned with reference i.
-	bodies = make([][]byte, 0, len(txs))
+	bodies = make([][]byte, 0, prealloc)
 	for _, tx := range txs {
 		// The manifest reference is content-addressed by (hash, size) over
 		// the FULL serialized transaction: TransactionSize is len(tx.Cbor),
@@ -1882,6 +2195,20 @@ func buildLeiosEB(
 			len(tx.Cbor) == 0 || len(tx.Cbor) > math.MaxUint16 {
 			continue
 		}
+		// Apply the manifest caps to references that would otherwise be
+		// included. Stop rather than skip: the selected order is a valid
+		// closure (a parent always precedes the descendants that spend
+		// its outputs), and skipping a transaction to fit a smaller one
+		// after it would leave a descendant referenced without its
+		// parent.
+		if caps.maxRefs > 0 && uint64(len(refs)) >= caps.maxRefs {
+			break
+		}
+		txBytes := uint64(len(tx.Cbor))
+		if caps.maxBytes > 0 && totalBytes+txBytes > caps.maxBytes {
+			break
+		}
+		totalBytes += txBytes
 		// Bounded above by the MaxUint16 check on len(tx.Cbor) above. Kept
 		// on one line so the directive stays attached to the conversion.
 		size := uint16(len(tx.Cbor)) // #nosec G115
