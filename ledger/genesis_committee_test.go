@@ -231,6 +231,37 @@ func TestEnsureGenesisCommitteeRejectsNegativeExpiry(t *testing.T) {
 	)
 }
 
+// TestEnsureGenesisCommitteeRejectsNegativeExpiryWhenAlreadySeeded proves the
+// malformed-genesis check fails closed on the upgrade path too.
+//
+// Validating the expiry only after the already-seeded check would let the same
+// malformed genesis start a node whose database happens to hold rows already
+// while refusing a fresh one, even though the genesis file is equally
+// malformed in both cases.
+func TestEnsureGenesisCommitteeRejectsNegativeExpiryWhenAlreadySeeded(
+	t *testing.T,
+) {
+	ls, db := genesisConstitutionTestState(t)
+	require.NoError(t, ls.createGenesisBlock())
+	seeded := committeeMemberRowCount(t, db)
+	require.Equal(t, len(musashiGenesisCommitteeColdKeys), seeded)
+
+	members := ls.config.CardanoNodeConfig.ConwayGenesis().Committee.Members
+	rawKey := "keyHash-" + musashiGenesisCommitteeColdKeys[0]
+	require.Contains(t, members, rawKey)
+	members[rawKey] = -7
+
+	err := ls.ensureGenesisCommittee(nil)
+	require.ErrorContains(t, err, "negative expiry epoch -7")
+	require.ErrorContains(t, err, musashiGenesisCommitteeColdKeys[0])
+	require.Equal(
+		t,
+		seeded,
+		committeeMemberRowCount(t, db),
+		"the failed check must not add or remove rows",
+	)
+}
+
 // TestGenesisCommitteeExpiryEpoch covers the signed-to-unsigned conversion
 // directly, including the most negative int, which is the value a straight
 // conversion wraps furthest.

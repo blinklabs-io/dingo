@@ -5147,16 +5147,21 @@ func (ls *LedgerState) ensureGenesisCommittee(txn *database.Txn) error {
 		if err != nil {
 			return fmt.Errorf("genesis committee credential %q: %w", raw, err)
 		}
+		// Validate the whole genesis entry before the already-seeded check, so
+		// a malformed expiry fails closed the same way on a fresh database and
+		// on one that already holds a row for this credential. Validating
+		// after the check would accept a genesis this function itself declares
+		// malformed, purely because some earlier startup got there first.
+		expiresEpoch, err := genesisCommitteeExpiryEpoch(expiry)
+		if err != nil {
+			return fmt.Errorf("genesis committee credential %q: %w", raw, err)
+		}
 		key := (models.CommitteeCredential{
 			CredentialTag: tag,
 			Credential:    hash,
 		}).Key()
 		if _, ok := seen[key]; ok {
 			continue
-		}
-		expiresEpoch, err := genesisCommitteeExpiryEpoch(expiry)
-		if err != nil {
-			return fmt.Errorf("genesis committee credential %q: %w", raw, err)
 		}
 		newMembers = append(newMembers, &models.CommitteeMember{
 			ColdCredentialTag: tag,
