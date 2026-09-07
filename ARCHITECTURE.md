@@ -6048,6 +6048,11 @@ above. CIP-68 datum metadata is not yet sourced and returns `null`.
 
 ### Mesh API (`api/mesh/`)
 
+Construction requests reject null operation, public-key, and signature elements
+before dereferencing them. Input indices must fit both the constructor's native
+integer and the serialized uint32 field; invalid inputs return the existing
+request error instead of panicking inside the handler.
+
 TLS and token authentication are configured through
 `plugins.api.mesh.config.tls`/`config.auth`; see "API security" above.
 
