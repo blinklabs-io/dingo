@@ -144,6 +144,19 @@ func (s *Store) DeleteUtxos(
 	)
 }
 
+// utxoStakeRefsAddedAfterSlotQuery and utxoStakeRefsDeletedAfterSlotQuery
+// collect the stake credentials whose live stake a rollback sweep has to
+// recompute. They are deliberately free of SQL DISTINCT so the planner keeps
+// using the index that answers the slot predicate; see
+// queryStakeRefsDeduped. TestRollbackStakeRefQueriesUseSlotIndexes pins the
+// resulting SQLite query plans.
+const (
+	utxoStakeRefsAddedAfterSlotQuery = "SELECT credential_tag, staking_key " +
+		"FROM utxo WHERE added_slot > ?"
+	utxoStakeRefsDeletedAfterSlotQuery = "SELECT credential_tag, staking_key " +
+		"FROM utxo WHERE deleted_slot > ?"
+)
+
 func (s *Store) DeleteUtxosAfterSlot(
 	slot uint64,
 	txn types.Txn,
@@ -155,11 +168,19 @@ func (s *Store) DeleteUtxosAfterSlot(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			refs, err := queryStakeRefs(
+			// No SQL DISTINCT here: it makes SQLite prefer
+			// idx_utxo_staking_deleted_amount (which already yields
+			// (credential_tag, staking_key) order, so the temp B-tree can
+			// be skipped) over the purpose-built idx_utxo_added_slot. That
+			// index has no added_slot column, so the scan is not covering
+			// and every entry costs a row lookup just to test the
+			// predicate -- a full pass over the utxo table on every
+			// rollback. Dedupe in Go instead, which also keeps the plan
+			// stable across the MySQL and Postgres dialects.
+			refs, err := queryStakeRefsDeduped(
 				ctx,
 				db,
-				"SELECT DISTINCT credential_tag, staking_key FROM utxo "+
-					"WHERE added_slot > ?",
+				utxoStakeRefsAddedAfterSlotQuery,
 				slotValue,
 			)
 			if err != nil {
@@ -260,11 +281,13 @@ func (s *Store) SetUtxosNotDeletedAfterSlot(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			refs, err := queryStakeRefs(
+			// See DeleteUtxosAfterSlot: SQL DISTINCT costs a full index
+			// scan here too, in place of a range search on
+			// idx_utxo_deleted_staking_amount.
+			refs, err := queryStakeRefsDeduped(
 				ctx,
 				db,
-				"SELECT DISTINCT credential_tag, staking_key FROM utxo "+
-					"WHERE deleted_slot > ?",
+				utxoStakeRefsDeletedAfterSlotQuery,
 				slotValue,
 			)
 			if err != nil {
@@ -709,6 +732,43 @@ func queryStakeRefs(
 		ret = append(ret, models.NewStakeCredentialRef(uint8(tag), key))
 	}
 	return ret, rows.Err()
+}
+
+// queryStakeRefsDeduped runs query and returns its stake credential
+// references with duplicates removed, preserving the order of first
+// occurrence. It exists so range-scan queries over utxo can be written
+// without a SQL DISTINCT: DISTINCT over (credential_tag, staking_key)
+// pushes SQLite onto an index that supplies that ordering rather than onto
+// the index that satisfies the WHERE clause, turning a bounded range search
+// into a full table pass. queryStakeRefs already materialises every row, so
+// deduping in Go costs one map insert per row.
+//
+// Neither the result nor the seen set is presized from len(rows): the callers
+// are rollback sweeps, where a window of thousands of rows routinely collapses
+// to a handful of credentials, so sizing for the input would reserve orders of
+// magnitude more than the output needs.
+func queryStakeRefsDeduped(
+	ctx context.Context,
+	db queryer,
+	query string,
+	args ...any,
+) ([]models.StakeCredentialRef, error) {
+	rows, err := queryStakeRefs(ctx, db, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	ret := []models.StakeCredentialRef{}
+	seen := make(map[string]struct{})
+	for _, ref := range rows {
+		// MapKey allocates, so compute it once per row.
+		key := ref.MapKey()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		ret = append(ret, ref)
+	}
+	return ret, nil
 }
 
 func utxoIDPredicate(ids []models.UtxoId) (string, []any) {
