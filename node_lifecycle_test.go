@@ -680,8 +680,8 @@ func generateValidatedConwayForkChain(
 	coldPrivKey := ed25519.NewKeyFromSeed(coldSeed[:])
 	coldPubKey := coldPrivKey.Public().(ed25519.PublicKey)
 
-	const opCertSeqNum = uint32(0)
-	const opCertKesPeriod = uint32(0)
+	const opCertSeqNum = uint64(0)
+	const opCertKesPeriod = uint64(0)
 	var opCertBody [48]byte
 	copy(opCertBody[:32], kesPk)
 	binary.BigEndian.PutUint64(opCertBody[32:40], uint64(opCertSeqNum))
