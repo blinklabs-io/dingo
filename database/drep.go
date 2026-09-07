@@ -128,12 +128,12 @@ func (d *Database) GetActiveDreps(
 
 // GetDrepLastRegistrationDeposit returns the deposit amount recorded
 // against the most recent registration certificate for the DRep
-// credential, or 0 when no registration certificate history exists.
+// credential, or nil when no recorded deposit exists.
 func (d *Database) GetDrepLastRegistrationDeposit(
 	credentialTag uint8,
 	credential []byte,
 	txn *Txn,
-) (uint64, error) {
+) (*uint64, error) {
 	if txn == nil {
 		txn = d.MetadataTxn(false)
 		defer txn.Release()

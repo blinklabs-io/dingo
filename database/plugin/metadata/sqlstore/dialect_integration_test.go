@@ -245,7 +245,8 @@ func testSQLStoreIntegration(
 		nil,
 	)
 	require.NoError(t, err)
-	require.Equal(t, uint64(500000000), drepDeposit)
+	require.NotNil(t, drepDeposit)
+	require.Equal(t, uint64(500000000), *drepDeposit)
 	drepDeposits, err := store.GetDrepLastRegistrationDeposits(nil)
 	require.NoError(t, err)
 	require.Equal(

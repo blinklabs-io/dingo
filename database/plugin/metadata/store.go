@@ -529,7 +529,7 @@ type GovernanceStore interface {
 		uint8, // credentialTag
 		[]byte, // credential
 		types.Txn,
-	) (uint64, error)
+	) (*uint64, error)
 
 	// GetDrepLastRegistrationDeposits is the set form of
 	// GetDrepLastRegistrationDeposit over the active DRep set: it returns

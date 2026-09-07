@@ -1060,6 +1060,9 @@ RETURNING id`,
 		return 0, err
 	}
 	for credential, amount := range cert.Reward.Rewards {
+		if amount.Sign() < 0 || !amount.IsUint64() {
+			return 0, fmt.Errorf("invalid MIR reward amount %s", amount.String())
+		}
 		tag, err := models.CredentialTagFromUint(credential.CredType)
 		if err != nil {
 			return 0, err
@@ -1070,7 +1073,7 @@ INSERT INTO move_instantaneous_rewards_reward (
 ) VALUES (?, ?, ?, ?)`,
 			credential.Credential[:],
 			tag,
-			decimalUint64(types.Uint64(amount)),
+			decimalUint64(types.Uint64(amount.Uint64())),
 			id,
 		); err != nil {
 			return 0, err

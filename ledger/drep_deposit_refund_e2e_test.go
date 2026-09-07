@@ -186,7 +186,8 @@ func TestDRepDeregistrationRefundsRecordedDeposit(t *testing.T) {
 	reg, err := lv.DRepRegistration(cred.Credential)
 	require.NoError(t, err)
 	require.NotNil(t, reg)
-	require.Equal(t, uint64(drepRefundTestRecordedDeposit), reg.Deposit)
+	require.NotNil(t, reg.Deposit)
+	require.Equal(t, uint64(drepRefundTestRecordedDeposit), *reg.Deposit)
 }
 
 // TestDRepRegistrationsReportRecordedDeposits covers the plural view, which
@@ -206,14 +207,15 @@ func TestDRepRegistrationsReportRecordedDeposits(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, regs, 1)
 	require.Equal(t, active.Credential, regs[0].Credential)
-	require.Equal(t, uint64(drepRefundTestRecordedDeposit), regs[0].Deposit)
+	require.NotNil(t, regs[0].Deposit)
+	require.Equal(t, uint64(drepRefundTestRecordedDeposit), *regs[0].Deposit)
 }
 
-// TestDRepRegistrationReportsZeroForUnregisteredCredential pins the absence
+// TestDRepRegistrationReportsNilForUnregisteredCredential pins the absence
 // case the batched map leaves out entirely: a DRep row with no
-// registration_drep history reports a deposit of 0 rather than an error,
-// through both views.
-func TestDRepRegistrationReportsZeroForUnregisteredCredential(t *testing.T) {
+// registration_drep history reports no deposit rather than an error, through
+// both views.
+func TestDRepRegistrationReportsNilForUnregisteredCredential(t *testing.T) {
 	lv, db := newStakeRefundTestView(t)
 	cred := drepRefundTestCredential(0xd4)
 	tag, err := models.CredentialTagFromUint(uint(cred.CredType))
@@ -228,10 +230,10 @@ func TestDRepRegistrationReportsZeroForUnregisteredCredential(t *testing.T) {
 	reg, err := lv.DRepRegistration(cred.Credential)
 	require.NoError(t, err)
 	require.NotNil(t, reg)
-	require.Zero(t, reg.Deposit)
+	require.Nil(t, reg.Deposit)
 
 	regs, err := lv.DRepRegistrations()
 	require.NoError(t, err)
 	require.Len(t, regs, 1)
-	require.Zero(t, regs[0].Deposit)
+	require.Nil(t, regs[0].Deposit)
 }

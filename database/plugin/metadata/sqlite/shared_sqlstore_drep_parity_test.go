@@ -55,7 +55,7 @@ type drepStore interface {
 	UpdateDRepActivity(uint8, []byte, uint64, uint64, types.Txn) error
 	GetExpiredDReps(uint64, types.Txn) ([]*models.Drep, error)
 	GetDrepLastRegistrationSlot(uint8, []byte, types.Txn) (uint64, error)
-	GetDrepLastRegistrationDeposit(uint8, []byte, types.Txn) (uint64, error)
+	GetDrepLastRegistrationDeposit(uint8, []byte, types.Txn) (*uint64, error)
 	GetDrepLastRegistrationDeposits(types.Txn) (map[string]uint64, error)
 	GetDRepVotingPower(uint8, []byte, uint64, types.Txn) (uint64, error)
 	GetDRepVotingPowerBatch(
@@ -91,11 +91,11 @@ type drepState struct {
 	Expired                 []*models.Drep
 	LastRegistrationSlot    uint64
 	MissingRegistrationSlot uint64
-	CertifiedDeposit        uint64
-	ImportedDeposit         uint64
-	LatestDeposit           uint64
-	InactiveDeposit         uint64
-	MissingDeposit          uint64
+	CertifiedDeposit        *uint64
+	ImportedDeposit         *uint64
+	LatestDeposit           *uint64
+	InactiveDeposit         *uint64
+	MissingDeposit          *uint64
 	Deposits                map[string]uint64
 	MissingActivityError    string
 	VotingPower             uint64
@@ -315,7 +315,8 @@ func exerciseDrepStore(t *testing.T, store drepStore) drepState {
 		nil,
 	)
 	require.NoError(t, err)
-	require.Equal(t, uint64(500000000), ret.ImportedDeposit)
+	require.NotNil(t, ret.ImportedDeposit)
+	require.Equal(t, uint64(500000000), *ret.ImportedDeposit)
 	// A row that does carry a certificate must still be found, so the
 	// query is not merely inverting the filter.
 	ret.CertifiedDeposit, err = store.GetDrepLastRegistrationDeposit(
@@ -324,7 +325,8 @@ func exerciseDrepStore(t *testing.T, store drepStore) drepState {
 		nil,
 	)
 	require.NoError(t, err)
-	require.Equal(t, uint64(500), ret.CertifiedDeposit)
+	require.NotNil(t, ret.CertifiedDeposit)
+	require.Equal(t, uint64(500), *ret.CertifiedDeposit)
 	// Two registration rows for one credential: the later one wins, so an
 	// earlier import placeholder cannot shadow a real re-registration.
 	ret.LatestDeposit, err = store.GetDrepLastRegistrationDeposit(
@@ -333,7 +335,8 @@ func exerciseDrepStore(t *testing.T, store drepStore) drepState {
 		nil,
 	)
 	require.NoError(t, err)
-	require.Equal(t, uint64(300000000), ret.LatestDeposit)
+	require.NotNil(t, ret.LatestDeposit)
+	require.Equal(t, uint64(300000000), *ret.LatestDeposit)
 	// A registered but inactive credential is still readable through the
 	// singular form, which does not consult drep.active.
 	ret.InactiveDeposit, err = store.GetDrepLastRegistrationDeposit(
@@ -342,7 +345,8 @@ func exerciseDrepStore(t *testing.T, store drepStore) drepState {
 		nil,
 	)
 	require.NoError(t, err)
-	require.Equal(t, uint64(200000000), ret.InactiveDeposit)
+	require.NotNil(t, ret.InactiveDeposit)
+	require.Equal(t, uint64(200000000), *ret.InactiveDeposit)
 	// No registration history at all reports 0 rather than erroring.
 	ret.MissingDeposit, err = store.GetDrepLastRegistrationDeposit(
 		0,
@@ -350,7 +354,7 @@ func exerciseDrepStore(t *testing.T, store drepStore) drepState {
 		nil,
 	)
 	require.NoError(t, err)
-	require.Zero(t, ret.MissingDeposit)
+	require.Nil(t, ret.MissingDeposit)
 
 	// The batched form must agree with the singular one on both rows.
 	// This is the only thing that executes its derived-table join.

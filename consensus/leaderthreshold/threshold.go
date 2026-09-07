@@ -25,11 +25,8 @@ import (
 // strictly against 1-(1-f)^sigma. For an integer leader value v, that is
 // equivalent to v < ceil(certNatMax*(1-(1-f)^sigma)), not v < floor(...).
 //
-// The gouroboros version used by Dingo currently returns floor(...). Keep its
-// rigorously calculated value as the base, and raise it by one only when exact
-// rational arithmetic proves the real cutoff is not an integer. When the
-// cutoff is integral, the returned floor is retained so the exact boundary is
-// still rejected.
+// Gouroboros returns the mathematically correct ceiling of the real-valued
+// cutoff, preserving the strict ledger inequality for integer leader values.
 func Threshold(
 	poolStake uint64,
 	totalStake uint64,
@@ -45,10 +42,7 @@ func Threshold(
 	if err != nil {
 		return nil, err
 	}
-	if cutoffIsInteger(poolStake, totalStake, activeSlotCoeff, mode) {
-		return threshold, nil
-	}
-	return new(big.Int).Add(threshold, big.NewInt(1)), nil
+	return threshold, nil
 }
 
 // cutoffIsInteger proves whether the real cutoff is an integer for the

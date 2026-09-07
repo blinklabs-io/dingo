@@ -72,6 +72,10 @@ type LedgerView struct {
 	horizonAnchorSlot uint64
 }
 
+func uint64Ptr(value uint64) *uint64 {
+	return &value
+}
+
 func (lv *LedgerView) pinCommitteeState(
 	epoch uint64,
 	pparams lcommon.ProtocolParameters,
@@ -1295,12 +1299,17 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 	}
 	registrations := make([]lcommon.DRepRegistration, 0, len(dreps))
 	for _, drep := range dreps {
+		deposit, ok := deposits[models.DrepDepositKey(
+			drep.CredentialTag,
+			drep.Credential,
+		)]
+		var depositPtr *uint64
+		if ok {
+			depositPtr = uint64Ptr(deposit)
+		}
 		reg := lcommon.DRepRegistration{
 			Credential: lcommon.NewBlake2b224(drep.Credential),
-			Deposit: deposits[models.DrepDepositKey(
-				drep.CredentialTag,
-				drep.Credential,
-			)],
+			Deposit:    depositPtr,
 		}
 		if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 			if len(drep.AnchorHash) != 32 {

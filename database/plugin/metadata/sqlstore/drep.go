@@ -722,10 +722,10 @@ func (s *Store) GetDrepLastRegistrationDeposit(
 	credentialTag uint8,
 	credential []byte,
 	txn types.Txn,
-) (uint64, error) {
+) (*uint64, error) {
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	q := s.operationalQueries(db)
 	raw, err := q.GetDrepLastRegistrationDeposit(
@@ -736,19 +736,19 @@ func (s *Store) GetDrepLastRegistrationDeposit(
 		},
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
+		return nil, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("get drep last registration deposit: %w", err)
+		return nil, fmt.Errorf("get drep last registration deposit: %w", err)
 	}
 	if !raw.Valid {
-		return 0, nil
+		return nil, nil
 	}
 	deposit, err := parseUint64("drep last registration deposit", raw.String)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return deposit, nil
+	return &deposit, nil
 }
 
 func (s *Store) GetDreps(

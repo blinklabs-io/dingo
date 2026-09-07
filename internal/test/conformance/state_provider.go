@@ -882,7 +882,7 @@ func (p *DingoStateProvider) DRepRegistration(
 			return nil, fmt.Errorf("lookup drep registration: %w", err)
 		}
 		if drep != nil && drep.Active {
-			deposit, err := withBadConnRetry(func() (uint64, error) {
+			deposit, err := withBadConnRetry(func() (*uint64, error) {
 				return p.manager.db.GetDrepLastRegistrationDeposit(
 					tag, credential[:], nil,
 				)
@@ -976,14 +976,20 @@ func (p *DingoStateProvider) DRepRegistrations() ([]common.DRepRegistration, err
 	result := make([]common.DRepRegistration, 0, len(dreps))
 	for _, drep := range dreps {
 		// A credential with no registration row is absent from the map and
-		// reports 0, which is exactly what the single-row query returned for
-		// that case (sql.ErrNoRows and a NULL deposit both yield 0, nil).
+		// reports no deposit, preserving the v0.204.0 distinction between
+		// an absent deposit and a recorded zero.
+		deposit, ok := deposits[models.DrepDepositKey(
+			drep.CredentialTag,
+			drep.Credential,
+		)]
 		result = append(result, common.DRepRegistration{
 			Credential: common.NewBlake2b224(drep.Credential),
-			Deposit: deposits[models.DrepDepositKey(
-				drep.CredentialTag,
-				drep.Credential,
-			)],
+			Deposit: func() *uint64 {
+				if !ok {
+					return nil
+				}
+				return &deposit
+			}(),
 		})
 	}
 	return result, nil
