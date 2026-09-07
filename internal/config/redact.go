@@ -107,6 +107,7 @@ var logPlainConfigFields = []string{
 	"API.Auth.TokenFilePath",
 	"API.TLS.CertFilePath",
 	"API.TLS.KeyFilePath",
+	"APIBindAddr",
 	"API.TLS.Mode",
 	"ActivePeersGossipQuota",
 	"ActivePeersLedgerQuota",

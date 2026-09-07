@@ -48,7 +48,7 @@ func validTestConfig() *Config {
 		Chainsync:            DefaultChainsyncConfig(),
 		HistoryExpiry:        DefaultHistoryExpiryConfig(),
 		Midnight:             DefaultMidnightConfig(),
-		BindAddr:             "127.0.0.1",
+		APIBindAddr:          DefaultAPIBindAddr,
 		Mithril: MithrilConfig{
 			Enabled: true,
 			Backend: "v2",
@@ -74,7 +74,7 @@ func TestValidateDefaultsPass(t *testing.T) {
 func TestValidateAPIExposureRequiresAuthOnRemoteBind(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.StorageMode = storageModeAPI
-	cfg.BindAddr = "0.0.0.0"
+	cfg.APIBindAddr = "0.0.0.0"
 
 	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
 	require.Error(t, err)
@@ -85,7 +85,7 @@ func TestValidateAPIExposureRequiresAuthOnRemoteBind(t *testing.T) {
 func TestValidateAPIExposureAllowsUnauthenticatedLoopback(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.StorageMode = storageModeAPI
-	cfg.BindAddr = "127.0.0.1"
+	cfg.APIBindAddr = "127.0.0.1"
 
 	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }
@@ -93,7 +93,7 @@ func TestValidateAPIExposureAllowsUnauthenticatedLoopback(t *testing.T) {
 func TestValidateAPIExposureAllowsAuthenticatedRemoteBind(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.StorageMode = storageModeAPI
-	cfg.BindAddr = "192.0.2.10"
+	cfg.APIBindAddr = "192.0.2.10"
 	mode := string(apiconfig.AuthModeToken)
 	tokenPath := "/run/secrets/api-token"
 	cfg.API.Auth.Mode = &mode
@@ -105,7 +105,7 @@ func TestValidateAPIExposureAllowsAuthenticatedRemoteBind(t *testing.T) {
 func TestValidateAPIExposureHonorsProviderAuthOverride(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.StorageMode = storageModeAPI
-	cfg.BindAddr = "192.0.2.10"
+	cfg.APIBindAddr = "192.0.2.10"
 	mode := string(apiconfig.AuthModeToken)
 	tokenPath := "/run/secrets/api-token"
 	cfg.API.Auth.Mode = &mode

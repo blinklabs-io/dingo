@@ -280,7 +280,9 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		(effectiveMode == RunModeDev || c.RunMode.IsDevMode() ||
 			c.StorageMode == storageModeAPI)
 	if apiListeners {
-		errs = append(errs, validateAPIExposure(c)...)
+		if err := ValidateAPIExposure(c, effectiveMode); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	midnightServer := apiListeners && c.Midnight.ServerEnabled
 	utxorpcPort := APIPluginPort(c.Plugins.API.Utxorpc)
@@ -304,14 +306,14 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		{"barkPort", c.BarkHost, c.BarkPort, serving, false},
 		{
 			"plugins.api.utxorpc.config.port",
-			c.BindAddr,
+			c.APIBindAddr,
 			utxorpcPort,
 			apiListeners,
 			false,
 		},
 		{
 			"plugins.api.blockfrost.config.port",
-			c.BindAddr,
+			c.APIBindAddr,
 			blockfrostPort,
 			apiListeners,
 			false,
@@ -810,12 +812,29 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	return errors.Join(errs...)
 }
 
-// validateAPIExposure prevents an enabled API from serving without
-// authentication on a non-loopback bind address. The API providers expose
-// mutating endpoints, so an operator must explicitly configure authentication
-// before making them reachable beyond the local host.
+// ValidateAPIExposure applies the API exposure policy to a fully merged
+// configuration. It is exported so the programmatic Node constructor can
+// enforce the same policy as the CLI path.
+// It prevents an enabled API from serving without authentication on a
+// non-loopback bind address. The API providers expose mutating endpoints, so
+// an operator must explicitly configure authentication before making them
+// reachable beyond the local host.
+func ValidateAPIExposure(c *Config, effectiveMode RunMode) error {
+	apiListeners := effectiveMode.RequiresListeners() &&
+		(effectiveMode == RunModeDev || c.RunMode.IsDevMode() ||
+			c.StorageMode == storageModeAPI)
+	if !apiListeners {
+		return nil
+	}
+	return errors.Join(validateAPIExposure(c)...)
+}
+
 func validateAPIExposure(c *Config) []error {
-	if isLoopbackAddr(c.BindAddr) {
+	bindAddr := c.APIBindAddr
+	if bindAddr == "" {
+		bindAddr = DefaultAPIBindAddr
+	}
+	if isLoopbackAddr(bindAddr) {
 		return nil
 	}
 	providers := []struct {
@@ -863,7 +882,7 @@ func validateAPIExposure(c *Config) []error {
 				"plugins.api.%s.config binds to non-loopback address %q "+
 					"without authentication: configure api.auth or a provider "+
 					"auth policy",
-				provider.name, c.BindAddr,
+				provider.name, bindAddr,
 			))
 		}
 	}

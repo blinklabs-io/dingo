@@ -5819,10 +5819,11 @@ without one.
   upgrade for any deployment that had set them only for UTxO RPC, which
   they never protected. An operator opting Blockfrost/Mesh into TLS does so
   explicitly, through `api.tls` or their own `plugins.api.<name>.config.tls`.
-  `bindAddr`, `debugBindAddr`, and `corsAllowedOrigins` are unaffected by any
-  of this and stay at the `Config` root: `bindAddr` is not API-specific (the
-  relay/NtN and metrics listeners use it too), `debugBindAddr` controls the
-  separate pprof listener, and `corsAllowedOrigins`'s single shared value
+  `bindAddr`, `apiBindAddr`, `debugBindAddr`, and `corsAllowedOrigins` are
+  unaffected by any of this and stay at the `Config` root: `bindAddr` is not
+  API-specific (the relay/NtN and metrics listeners use it too), `apiBindAddr`
+  is the separate loopback-by-default bind for the three API listeners,
+  `debugBindAddr` controls the separate pprof listener, and `corsAllowedOrigins`'s single shared value
   already applies uniformly to all three API providers today. Duplicating
   these fields under `api:` would only add a second source of truth with no
   behavioral gain.

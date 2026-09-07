@@ -1441,7 +1441,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			utxorpc.ProviderDependencies{
 				Logger: n.config.logger, EventBus: n.eventBus,
 				LedgerState: n.ledgerState, Mempool: n.mempool,
-				Host:               n.config.bindAddr,
+				Host:               n.config.apiBindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
 		)
@@ -1582,7 +1582,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			n.ctx, n.pluginHost, plugin.CapabilityAPIBlockfrost,
 			blockfrostSelection.Provider, blockfrostSelection.Config,
 			blockfrost.ProviderDependencies{
-				Node: adapter, Logger: n.config.logger, Host: n.config.bindAddr,
+				Node: adapter, Logger: n.config.logger, Host: n.config.apiBindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
 		)
@@ -1625,7 +1625,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 				Database:            mesh.NewMeshDatabase(n.db),
 				Chain:               n.ledgerState.Chain(),
 				Mempool:             n.mempool,
-				Host:                n.config.bindAddr,
+				Host:                n.config.apiBindAddr,
 				Network:             n.config.network,
 				NetworkMagic:        n.config.networkMagic,
 				GenesisHash:         genesisHash,
