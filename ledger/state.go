@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"math"
 	"math/big"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -169,14 +170,27 @@ func (p *DatabaseWorkerPool) worker() {
 	}
 }
 
+// executeOperation follows the same panic contract as database.Txn.Do (see
+// the doc comment above database.NewTxnPanicError): a panic in OpFunc is
+// recovered, logged with its stack trace, and converted into a
+// database.ErrTxnPanic-wrapped result.Error rather than crashing the worker
+// goroutine, since this operation's submitter is synchronously waiting on
+// ResultChan for exactly this outcome.
 func (p *DatabaseWorkerPool) executeOperation(op DatabaseOperation) {
 	defer p.operationDone()
 
 	result := DatabaseResult{}
 	defer func() {
 		if r := recover(); r != nil {
-			result.Error = fmt.Errorf("panic: %v", r)
-			slog.Error("worker panic during operation", "panic", r)
+			result.Error = database.NewTxnPanicError(
+				"database worker operation",
+				r,
+			)
+			slog.Error(
+				"panic in database worker operation",
+				"panic", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()),
+			)
 		}
 		p.sendResult(op, result)
 	}()
@@ -7214,8 +7228,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 					err = nil
 				}
 				if err != nil {
-					var plutusErr conway.PlutusScriptFailedError
-					if errors.As(err, &plutusErr) {
+					if plutusErr, ok := errors.AsType[conway.PlutusScriptFailedError](err); ok {
 						ls.config.Logger.Warn(
 							"Plutus evaluation disagrees with block producer (rejecting transaction)",
 							"component",
@@ -8729,8 +8742,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 			// reconciliation attempt lands right back in this same
 			// branch and retries both.
 			if err := ls.rollbackWithoutResync(chainTip.Point); err != nil {
-				var committedErr *rollbackCommittedError
-				if errors.As(err, &committedErr) {
+				if _, ok := errors.AsType[*rollbackCommittedError](err); ok {
 					ls.emitRollbackTransactionEvents(undoBlocks)
 				}
 				return err
@@ -8983,8 +8995,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		// A true durable, atomic handoff across every rollback path --
 		// not just this one -- is tracked as issue #3817.
 		if err := ls.rollbackWithoutResync(ancestor); err != nil {
-			var committedErr *rollbackCommittedError
-			if errors.As(err, &committedErr) {
+			if _, ok := errors.AsType[*rollbackCommittedError](err); ok {
 				ls.emitRollbackTransactionEvents(undoBlocks)
 			}
 			return err
@@ -9888,8 +9899,7 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 	// forecast inputs. Calling ls.SlotToEpoch here would load a second snapshot
 	// and could mix its epoch cache with currentEpoch/currentEra/currentPParams
 	// across a concurrent rollover or rollback.
-	for i := len(snapshot.epochCache) - 1; i >= 0; i-- {
-		epoch := snapshot.epochCache[i]
+	for _, epoch := range slices.Backward(snapshot.epochCache) {
 		if slot < epoch.StartSlot {
 			continue
 		}
@@ -10496,7 +10506,11 @@ func (ls *LedgerState) UtxosByRefs(
 func (ls *LedgerState) UtxosByAddress(
 	addrs []ledger.Address,
 ) ([]models.Utxo, error) {
-	utxos, err := ls.db.UtxosByAddress(addrs, nil)
+	utxos, err := ls.db.UtxosByAddress(
+		addrs,
+		database.MaxUtxosByAddressResults,
+		nil,
+	)
 	if err != nil {
 		return nil, err
 	}

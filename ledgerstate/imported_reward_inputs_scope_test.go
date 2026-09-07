@@ -236,7 +236,7 @@ func TestDerivedRewardInputsBoundsIncompletePoolDiagnostic(t *testing.T) {
 		Delegations: make(map[string][]byte, poolCount),
 	}
 	params := make(map[string]*ParsedPool, poolCount)
-	for i := 0; i < poolCount; i++ {
+	for i := range poolCount {
 		credential := hash28(byte(i + 1))
 		poolKey := hash28(byte(i + 100))
 		credentialHex := hex.EncodeToString(credential)

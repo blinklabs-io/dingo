@@ -1294,6 +1294,36 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `peergov.bootstrap_exited` | PeerGov | Exited bootstrap mode |
 | `peergov.bootstrap_recovery` | PeerGov | Bootstrap recovery |
 
+The six topics the ChainSelector publishes itself —
+`chainselection.chain_switch`, `selection`, `peer_evicted`,
+`genesis_corroboration_failed`, `genesis_mode_exited` and `selected_none` —
+go through `ChainSelector.publishSelection`, which uses `PublishOrdered` rather
+than `Publish`. The selector's producers are all goroutines that have to keep
+making progress — the EventBus dispatch goroutines for the internal
+`chainselection.peer_activity`, `chainselection.peer_tip_update` and
+`connmanager.conn_closed` subscriptions, plus the selector's own evaluation
+loop — and an inline `Publish` parks its caller on any subscriber that has
+stopped draining. Routing every selector publication through the same per-type
+lanes keeps delivery and per-topic publisher order while confining a blocked
+subscriber to that lane's worker. Publishing one of these six directly would
+reintroduce the hazard, because a queued chain switch could then be overtaken
+by one published inline.
+
+That order is the order publications reach `PublishOrdered`, not the order the
+selector decided the switches in. Every producer decides under `cs.mutex` and
+publishes after releasing it, so two goroutines can decide A then B and enqueue
+B then A, and a subscriber sees B before A. The window is unchanged from the
+inline `Publish` the lanes replaced; closing it would mean publishing under the
+lock, which is what the EventBus rule below forbids. A consumer that must not
+act on a superseded switch has to reconcile against the selector's current best
+peer rather than rely on arrival order.
+
+The other three `chainselection.*` topics are not on ordered lanes and are not
+covered by that guarantee: `chainselection.peer_tip_update` is published inline
+by the ouroboros chainsync path and by node wiring, not by the selector, and
+the two panic topics are published inline from the selector's own recovery
+paths, where the point is to report before the goroutine unwinds.
+
 ### EventBus Features
 
 - Asynchronous delivery via worker pool (4 workers, 1000-entry async queue)
@@ -1329,6 +1359,21 @@ All event types follow the `subsystem.snake_case_name` convention.
   delivery, and reports how many publishers are parked on it — every parked
   publisher observes the same stall, so a per-delivery limit made the log
   volume scale with publisher count rather than with time
+- **Handler-progress watchdog** (`event/handler_progress.go`). The stalled
+  warning above is raised by a publisher that had to wait for capacity, so it
+  cannot fire until the buffer is already full: its time to first signal is a
+  function of buffer size and event rate, not of the fault. One bus-wide
+  goroutine additionally samples every `SubscribeFunc` dispatch goroutine and
+  logs `event subscriber handler not making progress` (with `stuck_for`,
+  `queued`, `buffer`) for any handler that has not returned for
+  `handlerProgressWarnInterval` (30s), counting it in
+  `event_subscriber_handler_stalled_total` and repeating at most once per
+  interval while it stays there. Sampling runs twice per interval, so the
+  first report lands within 45s of the handler ceasing to return. Registering
+  a `SubscribeFunc` subscription materializes that counter's series at zero,
+  so "nothing has stalled" is distinguishable from "no handler was ever
+  registered for this type". `EventBus.StuckHandlerCount()` exposes the same
+  condition programmatically
 - **Never `Publish`, `PublishAsync`, `PublishOrdered`, or `PublishBlocking`
   while holding a lock that a subscriber of that event acquires.** All four can
   wait for capacity, and a subscriber that is merely slow is still allowed the
@@ -1397,7 +1442,9 @@ All event types follow the `subsystem.snake_case_name` convention.
   on the `connmanager.conn_closed` subscription above
 - Prometheus metrics for event delivery tracking and latency, including
   `event_delivery_blocked_total{type,kind}` and
-  `event_async_enqueue_blocked_total{type}` for backpressure
+  `event_async_enqueue_blocked_total{type}` for backpressure, and
+  `event_subscriber_handler_stalled_total{type}` for a handler that has
+  stopped returning
 - `Unsubscribe` only stops *future* deliveries to a `SubscribeFunc`
   subscriber; a handler already dequeued before the call can still be
   executing concurrently after it returns. `UnsubscribeAndWait` additionally
@@ -1969,8 +2016,11 @@ fallback:
 
 - An archive node uses a signed-URL-capable object-storage blob plugin (`s3` or
   `gcs`) and enables the Bark server with `barkPort`. Bark's archive service
-  maps a requested `(slot, hash)` to the blob store's `GetBlockURL`, returning
-  a signed object URL plus compact block metadata.
+  resolves each requested block reference -- by hash, slot, height, or a
+  consistent combination of them -- to a `(slot, hash)` point, maps that to the
+  blob store's `GetBlockURL`, and returns a signed object URL plus compact
+  block metadata. A reference the node does not hold comes back under
+  `not_found` without discarding the rest of the batch.
 - A node with `historyExpiry.enabled` keeps its local blob plugin and starts
   `internal/historyexpiry.Pruner`. The worker derives its safety window from
   `LedgerState.StabilityWindow()` and scans only blocks older than that window.
@@ -2117,11 +2167,48 @@ reinitialization, then calls `Commit`; a later swap failure can still call
 
 `Txn.Commit` owns its transaction lock and shared barrier hold through one
 function-scope cleanup. A storage-provider panic releases both before `Txn.Do`
-recovers, allowing its rollback to reacquire the transaction lock, finish the
-underlying stores, and re-panic instead of self-deadlocking. Successful commits
-also release both before `AfterCommit` callbacks run, while still draining those
-callbacks before `Commit` returns; failed commits and rollbacks never dispatch
-them.
+recovers, allowing its rollback to reacquire the transaction lock and finish
+the underlying stores before `Do` returns the converted error described below,
+rather than self-deadlocking. Successful commits also release both before
+`AfterCommit` callbacks run, while still draining those callbacks before
+`Commit` returns; failed commits and rollbacks never dispatch them.
+
+`database/txn.go` documents one panic contract shared by every transaction
+worker: `Txn.Do`, the after-commit dispatch loop (`runAfterCommitCallback`),
+and `ledger.DatabaseWorkerPool.executeOperation`. All three always recover a
+panic and log it (message, value, and stack trace); `Do` and
+`executeOperation` additionally convert it into an error wrapping
+`database.ErrTxnPanic` (via `database.NewTxnPanicError`) instead of letting it
+escape, so `errors.Is(err, database.ErrTxnPanic)` identifies a recovered panic
+the same way regardless of which of the two produced it. What differs,
+deliberately, is what each worker does with that outcome: `Do` attempts to
+roll back before returning it, since a synchronous caller is still on the
+stack waiting on the return value; `executeOperation` returns it on
+`DatabaseResult.Error` for the same reason, since its submitter is
+synchronously waiting on `ResultChan`. `runAfterCommitCallback` is the one
+exception with nowhere to put an error return: it runs detached on the
+dispatch loop after the registering caller has already moved on and the
+transaction has already durably committed, and it may be only one of
+several callbacks in the current drain — returning or re-panicking there
+would drop every other callback
+already dequeued for the current drain and strand every callback registered
+afterward, so it logs and continues instead.
+
+`Do`'s own recovery defer has already consumed the original panic by the
+time it calls `Rollback`, so a second, unrelated panic from `Rollback` (or
+the underlying blob/metadata store's `Rollback` it calls) would otherwise
+propagate straight out of that already-executing deferred function — the
+outermost frame in `Do` — and crash the goroutine instead of returning.
+`Do` calls `Rollback` through a nested `safeRollback` helper that recovers
+that second panic too, folding it into the returned `ErrTxnPanic`-wrapped
+error alongside the original one rather than ever re-panicking.
+`(*Txn).rollback` itself releases the transaction's terminal state and
+commit barrier hold (`finishLocked`) via a `defer`, not a plain trailing
+call, for the matching reason: a panicking provider `Rollback` would
+otherwise skip past it entirely, leaking the commit barrier hold for the
+process's lifetime exactly as an unreleased hold does after a normal
+terminal path (see `finishLocked`'s own doc comment) — the `defer` still
+runs during the panic unwind through `rollback`'s stack frame regardless.
 
 Truncate reuses `database.TruncateAfterSlot`, the same metadata+blob-referenced-UTxO/tx sweep `ledger.LedgerState.rollback` uses for ordinary in-bounds rollback, extended with a bulk blob-block-delete path for ranges too large for the one-transaction-per-block pattern `Chain.Rollback` uses. Unlike `Chain.Rollback`, it does not reject a target beyond the configured security parameter, since an operator explicitly invoking it (the CIP-0135 disaster-recovery case) is the informed-consent replacement for that guard.
 
@@ -3792,6 +3879,8 @@ When full-block header verification needs an epoch nonce that is not cached yet,
 When Leios is enabled, a certifying ranking block (CertRB) carries a Leios certificate and empty transaction segments; the certified endorser block's (EB) transactions live in the EB's transaction closure, fetched asynchronously from peers over the leiosnotify / leiosfetch client protocols and cached in `Ouroboros.leiosEndorserBlocks` (keyed by slot and hash together, TTL-, entry-, and byte-bounded — a mismatched offer size or an over-budget entry is rejected rather than cached, including one reloaded from the blob-store spillover used for historical serving, which is served to the caller but left uncached when it exceeds the per-entry budget). Before retaining any fetched transaction, Dingo checks it in its received manifest position against that reference's body hash and full-transaction size; substituted, reordered, and malformed or trailing wire values are rejected. Before serving a Dijkstra block over node-to-client chainsync, `chainsyncServerBlockCbor` resolves the certified EB (`certifiedEndorserBlockHash` reads the parent block's `leios_announcement` via the header prev-hash) and splices the cached closure into the block's empty transaction segment (`spliceEndorserTxsIntoDijkstraBlock`) so clients receive complete transactions. The header is preserved byte-for-byte, so the served block's hash is unchanged; its `block_body_hash` intentionally no longer matches, which is acceptable over NtC because local clients do not re-verify the body hash.
 
 If the closure is not yet cached when the block is served, the server waits a bounded window for the async client path to populate it — `storeLeiosEndorserBlock` wakes waiters via per-EB channels under `leiosMu`. The window is the same one ledger application uses to gate a ranking block on its endorser block: the Leios pipeline timing's `EndorserBlockWaitSlots` (the certify-by deadline) converted to wall-clock via the Shelley slot length (`LedgerState.EndorserBlockWaitDuration`), not an independent constant; `OuroborosConfig.LeiosClosureWaitTimeout` can override it. The wait is additionally bounded by the serving connection's own lifetime: `serveLeiosCertRbWithWait` registers a per-connection waiter (`registerLeiosServeWaiter`, keyed by `ConnectionId` in `Ouroboros.leiosServeWaiters`) and derives its context from `leiosConnDoneContext` wrapping that waiter's channel, so a client that disconnects while the wait is pending releases it immediately rather than leaving it parked for the rest of the window.
+
+Historical by-point backfill receives the ledger apply context through `EndorserBlockFetcherFunc`. Every manifest and transaction request, the per-connection attempt, the connection-admission wait, and the tail retry wait inherit that context; cancelling a pipeline attempt or shutting down the node therefore releases the fetch instead of leaving it to contend with the next apply attempt. A direct fetch without a caller deadline is additionally capped at two minutes, matching the ledger-side certified-closure wait.
 
 The release signal deliberately does **not** come from the chainsync server's own `Protocol.DoneChan()`. A server callback runs inside gouroboros's `recvLoop`, which closes `recvDoneChan` only in its deferred exit, and `doneChan` closes only after `recvDoneChan` does — so for as long as the callback is parked, `DoneChan()` cannot close, and binding the wait to it would leave the timeout as the only effective bound. The waiter is instead released by `Ouroboros.ReleaseLeiosServeWaiters`, called from the node's `handleConnManagerClosed`, which the connection manager drives from its per-connection `ErrorChan` watcher goroutine — independent of the protocol callback, and (unlike the NtN-only `ConnectionClosedEventType`) the only close notification an NtC connection receives. `registerLeiosServeWaiter` re-checks connection liveness after registering, so a connection whose close already ran does not produce a wait nothing will release.
 
@@ -7407,15 +7496,63 @@ services. It exposes archive access over Connect/gRPC and supplies the remote
 archive adapter used by nodes that want historical fallback.
 
 The server side (`bark.Bark`) registers the archive service, health endpoint,
-and gRPC reflection. Archive fetches validate the requested block hash, ask the
-active blob plugin for a signed block URL, and return that URL with block type,
-height, and previous-hash metadata. In practice this makes `s3` and `gcs` the
-archive-node blob backends because they can sign object-storage URLs.
+and gRPC reflection. Archive fetches ask the active blob plugin for a signed
+block URL and return it with block type, height, and previous-hash metadata. In
+practice this makes `s3` and `gcs` the archive-node blob backends because they
+can sign object-storage URLs.
+
+`FetchBlock` resolves each `BlockRef` in the batch by hash and slot together,
+then hash, then slot, then height. Hash and slot together already are the blob
+store's block key, so that case needs no index read and still resolves a block
+written before the hash index existed -- the historical range an archive
+serves. Hash alone is the only identifier unique across forks and resolves
+through the O(1) hash index; slot alone needs a bounded prefix scan; height
+alone is last because block numbers are not indexed at all and resolving one is
+a binary search over the block-ID space (`database.BlockByNumberBounded`).
+Because the point is built from the identifiers the client supplied, hash and
+slot agree with the answer by construction; height is checked against the block
+metadata afterwards.
+
+That binary search is bounded above by the highest indexed block, and reading
+that bound is a reverse iteration over the block index, which `s3` and `gcs`
+answer by listing every block-index object in the bucket. `ArchiveService` is
+registered without the operator auth interceptor, so `FetchBlock` resolves the
+bound once for the whole batch and only when the batch actually contains a
+height-only reference — resolving it per reference would let one anonymous
+request carrying `DefaultMaxFetchBlockRefs` height-only references cost that
+many full-bucket enumerations. A batch of hash+slot references touches no index
+at all.
+
+The batch is answered as a whole. A reference that names no stored block --
+absent, or carrying a height belonging to a different block -- is returned in
+`FetchBlockResponse.not_found` carrying exactly the identifiers the client
+supplied, and every other reference in the batch is still served. Each returned
+`SignedUrl.block` echoes the supplied identifiers verbatim and fills in the
+ones the client omitted, so a hash-only or height-only caller learns the full
+identity. Only a malformed request (no identifier at all, or a hash that is not
+32 hex-encoded bytes) or a genuine storage failure fails the whole call, the
+former with `InvalidArgument`.
+
+A resolved-but-unservable block is the exception to batching, and fails the
+whole call. When a reference resolved through a lookup -- hash alone, slot
+alone, or height alone -- and the blob store then reports the block missing on
+`GetBlockURL`, the index and the blob store disagree, which is a storage
+inconsistency rather than an absent block. The cloud plugins cannot express
+that difference in the error: `s3` and `gcs` return `types.ErrBlobKeyNotFound`
+both for a block that was never written and for a block whose metadata object
+was lost, so the lookup having already read the block is the only evidence
+available. The hash+slot case resolves without a lookup and so carries no such
+evidence; it is reported as an ordinary `not_found`, as is a reference that
+misses at resolution.
 
 The client side (`bark.BlobStoreBark`) wraps the configured local blob store.
 `GetBlock` and block iterators pass through local values, but resolve
 `types.ErrHistoryExpired` or missing historical block CBOR by calling the
-remote Bark archive and downloading the signed URL. Bark does not decide which
+remote Bark archive and downloading the signed URL. A block the archive answers
+under `not_found` surfaces as `types.ErrBlobKeyNotFound`, the same error a
+local blob store reports for a missing block, but only when the echoed
+reference is the `(slot, hash)` that was requested: a returned block is
+re-verified against the request, so an absence must be too. Bark does not decide which
 local blocks expire; `internal/historyexpiry.Pruner` owns that lifecycle when
 `historyExpiry.enabled` is configured.
 
