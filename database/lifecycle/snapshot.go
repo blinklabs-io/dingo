@@ -29,6 +29,10 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 )
 
+// File synchronization failures cannot be induced reliably on a healthy
+// filesystem. Keep this seam so publication failure tests exercise Snapshot.
+var syncSnapshotFile = (*os.File).Sync
+
 // BlobBackupFileName and MetadataBackupFileName are the fixed file names
 // Snapshot writes a backup's blob and metadata stores under, inside the
 // snapshot directory alongside manifest.json.
@@ -183,13 +187,12 @@ func Snapshot(
 	commitTimestamp, commitTimestampErr := db.Metadata().GetCommitTimestamp()
 	gates, gatesErr := db.Metadata().GetNodeSettingsGates()
 
-	var backupErr, closeErr, metadataErr error
+	var backupErr, metadataErr error
 	var backupWG sync.WaitGroup
 	backupWG.Add(2)
 	go func() {
 		defer backupWG.Done()
 		backupErr = blobBackuper.Backup(ctx, blobFile)
-		closeErr = blobFile.Close()
 	}()
 	go func() {
 		defer backupWG.Done()
@@ -225,11 +228,34 @@ func Snapshot(
 	if backupErr != nil {
 		return Manifest{}, fmt.Errorf("backup blob store: %w", backupErr)
 	}
-	if closeErr != nil {
-		return Manifest{}, fmt.Errorf("close %q: %w", blobPath, closeErr)
-	}
 	if metadataErr != nil {
 		return Manifest{}, fmt.Errorf("backup metadata store: %w", metadataErr)
+	}
+	// Flush after releasing the commit barrier: both backup streams are
+	// complete, so making their files durable needs no further writer pause.
+	// Blob Backuper only writes to our io.Writer; neither backup interface
+	// requires the provider to synchronize its output.
+	if err := syncSnapshotFile(blobFile); err != nil {
+		return Manifest{}, fmt.Errorf("sync %q: %w", blobPath, err)
+	}
+	if err := blobFile.Close(); err != nil {
+		return Manifest{}, fmt.Errorf("close %q: %w", blobPath, err)
+	}
+	metadataFile, err := os.OpenFile(metadataPath, os.O_WRONLY, 0)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("open %q for sync: %w", metadataPath, err)
+	}
+	metadataSyncErr := syncSnapshotFile(metadataFile)
+	metadataCloseErr := metadataFile.Close()
+	if err := errors.Join(metadataSyncErr, metadataCloseErr); err != nil {
+		return Manifest{}, fmt.Errorf("sync and close %q: %w", metadataPath, err)
+	}
+	// Persist the backup names before a manifest can make them discoverable.
+	if err := syncDir(dir); err != nil {
+		return Manifest{}, fmt.Errorf("sync snapshot directory: %w", err)
+	}
+	if err := syncDir(filepath.Dir(dir)); err != nil {
+		return Manifest{}, fmt.Errorf("sync snapshot parent: %w", err)
 	}
 
 	blobInfo, err := os.Stat(blobPath)
