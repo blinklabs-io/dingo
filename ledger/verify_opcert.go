@@ -223,7 +223,7 @@ func (ls *LedgerState) leiosAnnouncementOCINStaleness(
 	if err != nil {
 		return LeiosAnnouncementFreshOCIN, fmt.Errorf(
 			"read immutable-tip opcert counter for pool %x: %w",
-			poolKeyHash,
+			poolKeyHash.Bytes(),
 			err,
 		)
 	}

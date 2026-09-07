@@ -152,7 +152,7 @@ func validateTxsubmissionReply(
 			return nil, fmt.Errorf(
 				"txsubmission reply hash or order mismatch at index %d: received %x",
 				i,
-				txHash,
+				txHash.Bytes(),
 			)
 		}
 		want := requested[matched]
@@ -710,7 +710,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 						o.config.Logger.Error(
 							fmt.Sprintf(
 								"failed to add tx %x to mempool: %s",
-								tx.Hash(),
+								tx.Hash().Bytes(),
 								err,
 							),
 							"component", "network",

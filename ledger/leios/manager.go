@@ -1075,7 +1075,7 @@ func (m *VoteManager) ValidateVotingKey(
 	if err != nil {
 		return fmt.Errorf(
 			"resolve on-chain leios key for pool %x: %w",
-			poolKeyHash,
+			poolKeyHash.Bytes(),
 			err,
 		)
 	}
@@ -1086,18 +1086,18 @@ func (m *VoteManager) ValidateVotingKey(
 		if m.keyProvider != nil {
 			return fmt.Errorf(
 				"no usable on-chain leios voting public key for pool %x",
-				poolKeyHash,
+				poolKeyHash.Bytes(),
 			)
 		}
 		return fmt.Errorf(
 			"no static leios voting public key for pool %x in private registry mode",
-			poolKeyHash,
+			poolKeyHash.Bytes(),
 		)
 	}
 	if !registered.Equal(key.PublicKey()) {
 		return fmt.Errorf(
 			"configured leios voting key does not match the resolved public key for pool %x",
-			poolKeyHash,
+			poolKeyHash.Bytes(),
 		)
 	}
 	return nil
