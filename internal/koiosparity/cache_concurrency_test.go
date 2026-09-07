@@ -30,13 +30,12 @@ import (
 // forces any contending connection's own busy-retry loop to exhaust before
 // the slot is released — the specific condition dingo #4091 hits, as
 // opposed to ordinary contention a shorter hold resolves on its own well
-// within busy_timeout (verified separately: a 100ms hold never fails either
-// before or after the fix, because busy_timeout's retry genuinely covers
-// short waits — see the handoff for that finding).
+// within busy_timeout: a 100ms hold fails neither before nor after the fix,
+// because busy_timeout's retry genuinely covers short waits.
 const busyTimeoutMargin = 5500 * time.Millisecond
 
-// TestSaveAccountFetchChunkProgressDeferredWriteAfterConcurrentCommit is
-// dingo #4091's minimal, deterministic reproduction.
+// TestSaveAccountFetchChunkProgressWaitsOutSlowConcurrentWriter is dingo
+// #4091's minimal, deterministic reproduction.
 //
 // SaveAccountFetchChunkProgress's transaction (cache.go) always opens with
 // two DELETEs targeting a brand-new chunk_hash nothing has written before.
@@ -55,7 +54,7 @@ const busyTimeoutMargin = 5500 * time.Millisecond
 // function, so this reproduces its exact SQL rather than calling it), which
 // already claims the writer slot, and holds it for busyTimeoutMargin —
 // standing in for five real chunk workers' large-chunk Prepare/Exec work
-// colllectively outlasting busy_timeout. While A holds it, a second
+// collectively outlasting busy_timeout. While A holds it, a second
 // goroutine calls the real, unmodified SaveAccountFetchChunkProgress for a
 // different chunk of the same (network, epoch) — exactly fetch_accounts.go's
 // concurrent-worker shape.
@@ -65,7 +64,7 @@ const busyTimeoutMargin = 5500 * time.Millisecond
 // matching the issue's exact log line. Post-fix (a serialized connection
 // pool), B's Begin() instead blocks at the Go connection-pool level with no
 // fixed budget, so it simply waits for A to finish and then succeeds.
-func TestSaveAccountFetchChunkProgressDeferredWriteAfterConcurrentCommit(
+func TestSaveAccountFetchChunkProgressWaitsOutSlowConcurrentWriter(
 	t *testing.T,
 ) {
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
@@ -147,12 +146,12 @@ func TestSaveAccountFetchChunkProgressDeferredWriteAfterConcurrentCommit(
 // This is a best-effort companion to the deterministic reproduction above,
 // not the primary regression guard: at the production concurrency of 5
 // workers this defect is timing-dependent and was not observed at all
-// within a unit test's timeframe (see the handoff for measured reproduction
-// rates — it took roughly 60 concurrent workers sustained for several
-// seconds to observe any SQLITE_BUSY at all, versus production's 5). It is
-// kept because it exercises the real dispatch width and the real public
-// API, and costs little to run even when it does not reproduce the
-// failure on its own.
+// within a unit test's timeframe: measured here, 5 workers produced no
+// SQLITE_BUSY across thousands of attempts, and it took roughly 60
+// concurrent workers sustained for several seconds to see any at all
+// (29 of 71,468 attempts). It is kept because it exercises the real
+// dispatch width and the real public API, and costs little to run even
+// when it does not reproduce the failure on its own.
 func TestSaveAccountFetchChunkProgressConcurrentWritersDoNotHitSQLiteBusy(
 	t *testing.T,
 ) {
@@ -167,13 +166,12 @@ func TestSaveAccountFetchChunkProgressConcurrentWritersDoNotHitSQLiteBusy(
 	network := "preview"
 	now := time.Now().UTC()
 
-	for round := 0; round < rounds; round++ {
+	for round := range rounds {
 		epoch := uint64(round)
 		var wg sync.WaitGroup
 		errs := make([]error, workers)
 		start := make(chan struct{})
-		for w := 0; w < workers; w++ {
-			w := w
+		for w := range workers {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -209,5 +207,81 @@ func TestSaveAccountFetchChunkProgressConcurrentWritersDoNotHitSQLiteBusy(
 			}
 			require.NoError(t, err)
 		}
+	}
+}
+
+// TestOpenCacheLegacyColumnMigrationDoesNotDeadlock covers the hazard the
+// single-connection pool above creates for the rest of the package: with
+// SetMaxOpenConns(1), any code path that asks for a second connection while
+// still holding the first blocks forever, because database/sql queues the
+// request on an unbuffered channel with no deadline (OpenCache's write paths
+// use the context-free Exec/Begin, so there is nothing to cancel it).
+//
+// createCacheSchema's legacy-column migration is exactly that shape: it holds
+// an open *sql.Rows from the pragma_table_info probe (closed only by a
+// deferred Close at function exit) and issues ALTER TABLE ... DROP COLUMN on
+// the same *sql.DB while the probe row is still unread. It only reaches that
+// Exec when the legacy column is actually present, i.e. against a cache.db
+// written by an older dingo, so a fresh-file test never exercises it — the
+// node would simply hang inside OpenCache with no error and no timeout.
+//
+// The sibling probe in addColumnIfMissing is safe by contrast: it Execs only
+// when rows.Next() returned false, and an exhausted *sql.Rows has already
+// released its connection.
+func TestOpenCacheLegacyColumnMigrationDoesNotDeadlock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := OpenCache(path, nil)
+	require.NoError(t, err)
+
+	// Recreate an older cache file: the three columns createCacheSchema
+	// migrates away, as written by a dingo that still had them.
+	legacy := [][2]string{
+		{"koios_epoch_info", "pool_cnt"},
+		{"koios_epoch_info", "delegator_cnt"},
+		{"koios_totals", "deposits_d_rep"},
+	}
+	for _, col := range legacy {
+		_, err = cache.db.Exec(
+			"ALTER TABLE " + col[0] + " ADD COLUMN " + col[1] + " INTEGER",
+		)
+		require.NoError(t, err)
+	}
+	require.NoError(t, cache.Close())
+
+	reopened := make(chan *Cache, 1)
+	reopenErr := make(chan error, 1)
+	go func() {
+		c, err := OpenCache(path, nil)
+		if err != nil {
+			reopenErr <- err
+			return
+		}
+		reopened <- c
+	}()
+
+	select {
+	case err := <-reopenErr:
+		require.NoError(t, err)
+	case c := <-reopened:
+		defer c.Close() //nolint:errcheck
+		for _, col := range legacy {
+			var n int
+			require.NoError(t, c.db.QueryRow(
+				"SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?",
+				col[0], col[1],
+			).Scan(&n))
+			require.Zerof(
+				t, n,
+				"%s.%s should have been dropped by the migration",
+				col[0], col[1],
+			)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal(
+			"OpenCache did not return within 30s against a cache.db carrying " +
+				"legacy columns: createCacheSchema's DROP COLUMN Exec is " +
+				"waiting for a second connection while its pragma_table_info " +
+				"rows still hold the only one",
+		)
 	}
 }

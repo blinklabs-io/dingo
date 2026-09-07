@@ -1722,22 +1722,11 @@ func createCacheSchema(db *sql.DB) error {
 	}
 	// Older cache files may contain columns that the current structs no longer write.
 	for _, item := range [][2]string{{"koios_epoch_info", "pool_cnt"}, {"koios_epoch_info", "delegator_cnt"}, {"koios_totals", "deposits_d_rep"}} {
-		rows, err := db.Query(
-			"SELECT 1 FROM pragma_table_info(?) WHERE name = ?",
-			item[0],
-			item[1],
-		)
-		if err != nil {
+		present, err := columnExists(db, item[0], item[1])
+		if err != nil || !present {
 			continue
 		}
-		defer rows.Close()
-		present := rows.Next()
-		if err := rows.Err(); err != nil {
-			continue
-		}
-		if present {
-			_, _ = db.Exec("ALTER TABLE " + item[0] + " DROP COLUMN " + item[1])
-		}
+		_, _ = db.Exec("ALTER TABLE " + item[0] + " DROP COLUMN " + item[1])
 	}
 
 	// A cache written before koios_account_universe_state existed carries the
@@ -1816,17 +1805,8 @@ GROUP BY network`); err != nil {
 // against an older cache.db is idempotent and never errors on a column that
 // already exists.
 func addColumnIfMissing(db *sql.DB, table, column, columnDDL string) error {
-	rows, err := db.Query(
-		"SELECT 1 FROM pragma_table_info(?) WHERE name = ?",
-		table,
-		column,
-	)
+	present, err := columnExists(db, table, column)
 	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	present := rows.Next()
-	if err := rows.Err(); err != nil {
 		return err
 	}
 	if present {
@@ -1836,6 +1816,32 @@ func addColumnIfMissing(db *sql.DB, table, column, columnDDL string) error {
 		"ALTER TABLE " + table + " ADD COLUMN " + column + " " + columnDDL,
 	)
 	return err
+}
+
+// columnExists reports whether table already has a column named column.
+//
+// The pragma_table_info probe is confined to this function so its *sql.Rows is
+// always closed before the caller runs its next statement. OpenCache bounds the
+// pool to a single connection, and an open *sql.Rows holds that connection: a
+// caller that issued its ALTER TABLE while the probe was still open would wait
+// for a connection only it could release, hanging inside OpenCache with no
+// error and no timeout (the migration paths use the context-free Exec, so there
+// is nothing to cancel it either).
+func columnExists(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(
+		"SELECT 1 FROM pragma_table_info(?) WHERE name = ?",
+		table,
+		column,
+	)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	present := rows.Next()
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return present, nil
 }
 
 func scanPool(rows *sql.Rows, p *KoiosPoolEpoch) error {
