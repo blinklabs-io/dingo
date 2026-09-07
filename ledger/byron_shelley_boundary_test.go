@@ -163,16 +163,26 @@ func TestByronShelleyBoundaryEnvelopeRequiresProtocolParameters(t *testing.T) {
 			first := loadBoundaryBlock(t, tc.shelleyFile, tc.shelleyType)
 			parent := envelopeParentFromBlock(last)
 
-			// The Byron parent itself needs no parameters: Byron returns
-			// before the size checks.
+			byronConfig := newByronEnvelopeNodeConfig(
+				t,
+				len(last.Cbor()),
+				len(last.Header().Cbor()),
+			)
+			// The Byron parent itself needs no protocol parameters: its
+			// limits come from Byron genesis instead.
 			require.NoError(
 				t,
-				validateInboundBlockEnvelope(last, nil, envelopeParent{
-					origin: true,
-				}),
+				validateInboundBlockEnvelope(
+					last,
+					nil,
+					byronConfig,
+					envelopeParent{
+						origin: true,
+					},
+				),
 			)
 
-			err := validateInboundBlockEnvelope(first, nil, parent)
+			err := validateInboundBlockEnvelope(first, nil, nil, parent)
 			require.Error(t, err)
 			assert.Contains(
 				t,
@@ -184,7 +194,10 @@ func TestByronShelleyBoundaryEnvelopeRequiresProtocolParameters(t *testing.T) {
 				MaxBlockBodySize:   tc.maxBlockBodySize,
 				MaxBlockHeaderSize: tc.maxHeaderSize,
 			}
-			assert.NoError(t, validateInboundBlockEnvelope(first, pp, parent))
+			assert.NoError(
+				t,
+				validateInboundBlockEnvelope(first, pp, nil, parent),
+			)
 
 			// The block's declared body size is what the size check measures,
 			// so a limit one byte below it must reject. This keeps the
@@ -196,7 +209,7 @@ func TestByronShelleyBoundaryEnvelopeRequiresProtocolParameters(t *testing.T) {
 			}
 			assert.ErrorContains(
 				t,
-				validateInboundBlockEnvelope(first, tooSmall, parent),
+				validateInboundBlockEnvelope(first, tooSmall, nil, parent),
 				"exceeds maxBlockBodySize",
 			)
 		})

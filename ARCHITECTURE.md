@@ -2418,16 +2418,16 @@ from-genesis replay must tolerate that, and the eras that follow are unaffected
 because the transition installs Shelley parameters before the first
 post-Byron block is validated.
 
-That ordering is what lets the block-size envelope check stay strict. The first
-block of the fork epoch is a Shelley block on both networks that have a Byron
-prefix, so `ledgerProcessBlocksFromSource` ends its batch at that block, reads
-Shelley from its era, and runs the transition before the block is processed. A
-Byron epoch boundary block would not do this — it carries the Byron era and its
-parent's block number — but no EBB sits at either fork boundary: preprod block
-45 at slot 84242 is followed directly by Shelley block 46 at slot 86400, and
-mainnet block 4490510 at slot 4492799 by Shelley block 4490511 at slot
-4492800. `TestByronShelleyBoundaryHasNoEpochBoundaryBlock` pins both from the
-on-chain bytes in `ledger/testdata/`.
+That ordering is what lets the Shelley block-size envelope check stay strict.
+The first block of the fork epoch is a Shelley block on both networks that have
+a Byron prefix, so `ledgerProcessBlocksFromSource` ends its batch at that
+block, reads Shelley from its era, and runs the transition before the block is
+processed. A Byron epoch boundary block would not do this — it carries the
+Byron era and its parent's block number — but no EBB sits at either fork
+boundary: preprod block 45 at slot 84242 is followed directly by Shelley block
+46 at slot 86400, and mainnet block 4490510 at slot 4492799 by Shelley block
+4490511 at slot 4492800. `TestByronShelleyBoundaryHasNoEpochBoundaryBlock` pins
+both from the on-chain bytes in `ledger/testdata/`.
 
 Consequently `validateInboundBlockEnvelope` requires protocol parameters for
 every non-Byron block, including the first Shelley one. Exempting it would drop
@@ -2439,8 +2439,11 @@ Both validation steps in `ledgerProcessBlock` key that decision on the block or
 header in hand rather than on the ledger's era plus a nil check, so the two stay
 consistent as the boundary is crossed:
 
-- `validateInboundBlockEnvelope` returns before the size checks when
-  `block.Era().Id` is Byron.
+- `validateInboundBlockEnvelope` validates decoded Byron main and epoch
+  boundary blocks against the body proof in their header and the
+  `maxHeaderSize` and `maxBlockSize` limits in Byron genesis. It does not need
+  Shelley protocol parameters. Structured test or embedding block types with no
+  complete wire CBOR remain outside those wire-level checks.
 - `validateBlockHeaderProtocolVersion` returns before reading pparams when
   `HeaderProtocolMajor` reports no version, which is Byron -- headers there have
   no `ProtVer` field. This matters because the Byron prefix is the one era

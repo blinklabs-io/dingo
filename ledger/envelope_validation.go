@@ -75,6 +75,7 @@ func envelopeParentFromBlock(block gledger.Block) envelopeParent {
 func validateInboundBlockEnvelope(
 	block gledger.Block,
 	pparams lcommon.ProtocolParameters,
+	nodeConfig *cardano.CardanoNodeConfig,
 	parent envelopeParent,
 ) error {
 	if block == nil {
@@ -109,8 +110,10 @@ func validateInboundBlockEnvelope(
 			if err := byronBlock.ValidateBodyProof(); err != nil {
 				return fmt.Errorf("validate Byron epoch boundary body proof: %w", err)
 			}
+		default:
+			return nil
 		}
-		return nil
+		return validateByronBlockSizes(block, nodeConfig)
 	}
 	if err := validateBlockSizes(block, pparams); err != nil {
 		return err
