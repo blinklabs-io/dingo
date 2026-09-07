@@ -606,7 +606,10 @@ func TestGetUtxosAddedAfterSlotReturnsSameRows(t *testing.T) {
 		for rows.Next() {
 			cells := make([]any, len(cols))
 			for i := range cells {
-				cells[i] = new(sql.RawBytes)
+				// The fixture intentionally leaves several selected columns NULL.
+				// NullString accepts NULL and is sufficient for the columns whose
+				// values this comparison does not inspect.
+				cells[i] = new(sql.NullString)
 			}
 			var id, slot sql.NullInt64
 			cells[idIdx] = &id
