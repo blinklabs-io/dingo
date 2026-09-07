@@ -1276,8 +1276,16 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get active dreps: %w", err)
 	}
-	// One batched read rather than a deposit query per DRep: mainnet has
-	// thousands of active DReps and this is on the validation path.
+	// One batched read rather than a deposit query per DRep, because
+	// mainnet has thousands of active DReps. This method is not itself on
+	// the validation path: gouroboros declares it on common.DRepState but
+	// the Conway rules reach DRep state only through the singular
+	// DRepRegistration, and nothing in either tree calls the plural form
+	// outside gouroboros's own test mocks. The batching bounds the cost of
+	// a caller that does appear rather than one that exists today. Note the
+	// read is over every credential's latest registration, not just the
+	// active set fetched above, so constraining it to those credentials
+	// would be the next improvement if a real caller arrives.
 	deposits, err := lv.ls.db.GetDrepLastRegistrationDeposits(lv.txn)
 	if err != nil {
 		return nil, fmt.Errorf("get drep last registration deposits: %w", err)
