@@ -3943,8 +3943,25 @@ func (ls *LedgerState) transitionToEraFrom(
 			"pparams",
 			fmt.Sprintf("%#v", newPParams),
 		)
-		// Write pparams update to DB
-		pparamsCbor, err := cbor.Encode(&newPParams)
+		// Persist what a historical/reporting reader should see for
+		// startEpoch onward -- NOT newPParams itself when this hard fork is
+		// the one that fabricated a PlutusV2 default (see
+		// LedgerState.syntheticV2CostModel, blinklabs-io/dingo#3825).
+		// Persisting the fabricated value would date PlutusV2 to the era
+		// transition rather than to whatever later on-chain update actually
+		// enacts it (blinklabs-io/dingo#4127): Preview enacts PlutusV2 six
+		// epochs after its Babbage era transition, and
+		// internal/koiosparity's direct pparams-table reads caught exactly
+		// that divergence. ls.currentPParams still gets the unfiltered
+		// newPParams below (applyEraTransition), so internal script
+		// validation is unaffected -- this only changes what is written to
+		// the pparams table.
+		persistedPParams := withoutSyntheticV2CostModel(
+			newPParams,
+			result.InjectedSyntheticV2CostModel,
+			ls.config.Logger,
+		)
+		pparamsCbor, err := cbor.Encode(&persistedPParams)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode pparams: %w", err)
 		}
@@ -4099,7 +4116,27 @@ func (ls *LedgerState) applyBoundaryEraTransitions(
 	); err != nil {
 		return nil, fmt.Errorf("update transitioned epoch: %w", err)
 	}
-	pparamsCbor, err := cbor.Encode(&workingPParams)
+	// Re-derive the same filtering transitionToEraFrom already applied to
+	// each individual hop's own write: this final write persists the
+	// combined result of every hop in transitionPath for newEpoch.EpochId,
+	// so it must exclude a synthetic PlutusV2 default just as each
+	// individual hop's row did, or a multi-era boundary would reintroduce
+	// blinklabs-io/dingo#4127 through this second write. workingPParams
+	// itself is left unfiltered -- it becomes rolloverResult.NewCurrentPParams
+	// below, which internal script validation reads.
+	anySynthetic := false
+	for _, r := range transitionResults {
+		if r.InjectedSyntheticV2CostModel {
+			anySynthetic = true
+			break
+		}
+	}
+	persistedPParams := withoutSyntheticV2CostModel(
+		workingPParams,
+		anySynthetic,
+		ls.config.Logger,
+	)
+	pparamsCbor, err := cbor.Encode(&persistedPParams)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"encode transitioned protocol parameters: %w", err,
@@ -4235,6 +4272,16 @@ func (ls *LedgerState) loadSyntheticV2CostModel() {
 	}
 	ls.syntheticV2CostModel = resolveSyntheticV2CostModel(
 		value, ls.currentPParams,
+	)
+	// blinklabs-io/dingo#4127: the persisted row backing ls.currentPParams no
+	// longer carries a fabricated PlutusV2 default (transitionToEraFrom
+	// persists the pre-fabrication value instead), so a restart that lands
+	// inside the synthetic window would otherwise reload ls.currentPParams
+	// without the default a continuously running process still has. Restore
+	// it here so internal script validation is unaffected by whether the
+	// process happened to restart.
+	ls.currentPParams = withDefaultV2CostModelIfMissing(
+		ls.currentPParams, ls.syntheticV2CostModel, ls.config.Logger,
 	)
 }
 

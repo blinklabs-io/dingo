@@ -805,6 +805,92 @@ func withoutV2CostModelKey(
 	return out
 }
 
+// withDefaultV2CostModelIfMissing is the inverse of withoutSyntheticV2CostModel:
+// it returns pp unchanged unless synthetic is true AND pp's PlutusV2 cost
+// model (map key 1) is absent, in which case it returns a shallow copy with
+// eras.DefaultPlutusV2CostModel added.
+//
+// blinklabs-io/dingo#4127: transitionToEraFrom now persists the pre-fabrication
+// pparams row for a hard fork that fabricates a PlutusV2 default (matching
+// what the chain had actually enacted, for historical/reporting readers), so
+// a persisted row from inside that window no longer carries the fabricated
+// model the way ls.currentPParams does for the remainder of that process's
+// lifetime. loadSyntheticV2CostModel calls this right after resolving the
+// durable marker so that reloading ls.currentPParams from such a row --
+// at startup, after a restart that lands mid-window -- restores the same
+// fabricated default a continuously running process still has, keeping
+// internal script validation deterministic across a restart instead of
+// silently becoming stricter than it was a moment before the restart.
+//
+// A nil pp is returned unchanged without a warning: unlike an unrecognized
+// concrete type, nil is the ordinary value before pparams have been loaded
+// at all (e.g. a bare-constructed LedgerState in a test), not a missed era
+// type.
+func withDefaultV2CostModelIfMissing(
+	pp lcommon.ProtocolParameters,
+	synthetic bool,
+	logger *slog.Logger,
+) lcommon.ProtocolParameters {
+	if !synthetic || pp == nil {
+		return pp
+	}
+	if _, hasV2 := extractRawCostModels(pp)[1]; hasV2 {
+		return pp
+	}
+	switch p := pp.(type) {
+	case *alonzo.AlonzoProtocolParameters:
+		if p == nil {
+			return pp
+		}
+		modified := *p
+		modified.CostModels = withV2CostModelDefault(p.CostModels)
+		return &modified
+	case *babbage.BabbageProtocolParameters:
+		if p == nil {
+			return pp
+		}
+		modified := *p
+		modified.CostModels = withV2CostModelDefault(p.CostModels)
+		return &modified
+	case *conway.ConwayProtocolParameters:
+		if p == nil {
+			return pp
+		}
+		modified := *p
+		modified.CostModels = withV2CostModelDefault(p.CostModels)
+		return &modified
+	case *dijkstra.DijkstraProtocolParameters:
+		if p == nil {
+			return pp
+		}
+		modified := *p
+		modified.CostModels = withV2CostModelDefault(p.CostModels)
+		return &modified
+	default:
+		if logger != nil {
+			logger.Warn(
+				"synthetic PlutusV2 cost model restore does not recognize this protocol-parameters type; returning it unmodified",
+				"component", "ledger",
+				"type", fmt.Sprintf("%T", pp),
+			)
+		}
+		return pp
+	}
+}
+
+// withV2CostModelDefault returns a new map holding every entry of m plus
+// eras.DefaultPlutusV2CostModel under the PlutusV2 key (1).
+func withV2CostModelDefault(
+	m map[uint][]int64,
+) map[uint][]int64 {
+	out := make(map[uint][]int64, len(m)+1)
+	for k, v := range m {
+		out[k] = v
+	}
+	out[1] = eras.DefaultPlutusV2CostModel
+	return out
+}
+
 // CommitteeStateAvailable reports whether this view can authoritatively answer
 // committee credential queries for its snapshot.
 //
