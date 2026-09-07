@@ -86,9 +86,13 @@ type stateMetrics struct {
 	// durable per-block record, not merely because the content was no
 	// longer reachable. See issue #3778.
 	reconciliationUndoMissingRecord prometheus.Counter
-	// Cross-fork continuation audit outcomes. The first three label values
-	// count one audited input each; disarmed_cap counts one audit window
-	// each. See continuationAuditOutcome for the verdicts.
+	// Cross-fork continuation audit outcomes. clean, missing_producer and
+	// inconclusive_eb_pending count one audited input each; disarmed_cap
+	// counts one audit window; skipped_budget counts one audited body whose
+	// endorser-block budget was exhausted; ref_unresolvable counts one
+	// endorser-block reference abandoned for good. See the
+	// continuationAuditResult* constants for the label values and
+	// countContinuationAuditOutcome for the helper that records them.
 	continuationAuditOutcomes *prometheus.CounterVec
 	// Pre-materialized children of continuationAuditOutcomes, so every
 	// verdict is exported from process start (an absent series and a zero

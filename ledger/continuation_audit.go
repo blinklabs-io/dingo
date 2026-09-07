@@ -553,6 +553,15 @@ func (ls *LedgerState) queueContinuationAuditEndorserRef(
 // incomplete, so unresolved inputs read as inconclusive rather than as missing
 // producers.
 //
+// A provider lookup is not guaranteed to be I/O-free. EndorserBlockProvider
+// resolves to the ouroboros Leios cache, which on an in-memory miss falls back
+// to a blob-store manifest read, a decode and a transaction load. The audit is
+// armed exactly during an endorser-block backlog and holds
+// chainsyncBlockfetchMutex throughout, so an occurrence whose in-memory entry
+// has expired turns into that read here. It is bounded — at most *budget of
+// them per audited body, and once per (hash, slot) for the life of the window
+// — but it is a disk read, not merely a map hit.
+//
 // *budget is owned by the audited body, not by one drain: a body drains once
 // per unresolved input and every drain spends the same allowance, which is why
 // it is passed by pointer. Once exhausted it is burned to -1 and stays there
