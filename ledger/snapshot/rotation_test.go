@@ -570,7 +570,7 @@ func TestCleanupOldSnapshotsRetentionDepthCapBounds(t *testing.T) {
 	)
 
 	firstRetained := currentEpoch - poolSnapshotRetentionMaxDepth
-	for epoch := uint64(0); epoch < firstRetained; epoch++ {
+	for epoch := range firstRetained {
 		snaps, err := meta.GetPoolStakeSnapshotsByEpoch(
 			epoch, models.PoolStakeSnapshotTypeMark, nil,
 		)

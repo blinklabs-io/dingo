@@ -7214,8 +7214,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 					err = nil
 				}
 				if err != nil {
-					var plutusErr conway.PlutusScriptFailedError
-					if errors.As(err, &plutusErr) {
+					if plutusErr, ok := errors.AsType[conway.PlutusScriptFailedError](err); ok {
 						ls.config.Logger.Warn(
 							"Plutus evaluation disagrees with block producer (rejecting transaction)",
 							"component",
@@ -8729,8 +8728,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 			// reconciliation attempt lands right back in this same
 			// branch and retries both.
 			if err := ls.rollbackWithoutResync(chainTip.Point); err != nil {
-				var committedErr *rollbackCommittedError
-				if errors.As(err, &committedErr) {
+				if _, ok := errors.AsType[*rollbackCommittedError](err); ok {
 					ls.emitRollbackTransactionEvents(undoBlocks)
 				}
 				return err
@@ -8983,8 +8981,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		// A true durable, atomic handoff across every rollback path --
 		// not just this one -- is tracked as issue #3817.
 		if err := ls.rollbackWithoutResync(ancestor); err != nil {
-			var committedErr *rollbackCommittedError
-			if errors.As(err, &committedErr) {
+			if _, ok := errors.AsType[*rollbackCommittedError](err); ok {
 				ls.emitRollbackTransactionEvents(undoBlocks)
 			}
 			return err
@@ -9888,8 +9885,7 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 	// forecast inputs. Calling ls.SlotToEpoch here would load a second snapshot
 	// and could mix its epoch cache with currentEpoch/currentEra/currentPParams
 	// across a concurrent rollover or rollback.
-	for i := len(snapshot.epochCache) - 1; i >= 0; i-- {
-		epoch := snapshot.epochCache[i]
+	for _, epoch := range slices.Backward(snapshot.epochCache) {
 		if slot < epoch.StartSlot {
 			continue
 		}

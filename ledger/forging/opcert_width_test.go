@@ -43,6 +43,9 @@ func decodeCborArrayElementUint(
 	require.NoError(t, err)
 	require.Greater(t, len(elements), index)
 	var value uint64
+	// require.Greater above fails the test unless len(elements) > index,
+	// which nilaway does not model.
+	//nolint:nilaway // bounded by the require.Greater above
 	_, err = cbor.Decode(elements[index], &value)
 	require.NoError(t, err)
 	return value
