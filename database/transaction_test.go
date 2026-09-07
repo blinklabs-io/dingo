@@ -1138,3 +1138,49 @@ func TestRecoverConsumedUtxoRefusesOffPrimaryChainProducer(t *testing.T) {
 		"the gate must be the only thing refusing this producer")
 	require.ErrorContains(t, err, "decode transaction output")
 }
+
+// TestDeleteUtxoBlobsUsesCallerBlobTxn pins that UTxO blob deletes are staged
+// in the caller's transaction rather than committed on their own.
+//
+// UtxosDeleteRolledback and UtxosDeleteConsumed delete blobs before the
+// metadata delete they accompany. Committing the blob deletes separately let a
+// successful delete survive the caller's rollback, leaving metadata that points
+// at blob data which is already gone.
+func TestDeleteUtxoBlobsUsesCallerBlobTxn(t *testing.T) {
+	t.Parallel()
+
+	store := &mockBlobStore{}
+	db := &Database{
+		blobRef: newBlobStoreRef(store),
+		logger: slog.New(
+			slog.NewJSONHandler(
+				io.Discard,
+				&slog.HandlerOptions{Level: slog.LevelDebug},
+			),
+		),
+	}
+	txn := db.Transaction(true)
+
+	utxos := []models.Utxo{
+		{TxId: []byte{0x01}, OutputIdx: 0},
+		{TxId: []byte{0x02}, OutputIdx: 1},
+		{TxId: []byte{0x03}, OutputIdx: 2},
+	}
+	require.NoError(t, deleteUtxoBlobs(db, utxos, txn))
+	require.Len(
+		t,
+		store.txns,
+		1,
+		"the deletes must not open a transaction of their own",
+	)
+	require.Equal(t, []int{1, 1, 1}, store.deleteUtxoTxnIDs,
+		"every delete must run through the caller's transaction")
+	require.Zero(t, store.txns[0].commitCount,
+		"a staged delete must not be committed before the caller commits")
+	require.Zero(t, store.txns[0].rollbackCount)
+
+	// The caller rolls back, so the staged deletes must go with it.
+	require.NoError(t, txn.Rollback())
+	require.Equal(t, 1, store.txns[0].rollbackCount,
+		"the caller's rollback must discard the staged blob deletes")
+}
