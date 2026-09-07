@@ -379,10 +379,50 @@ func WithDeferredIndexes(
 	return &DeferredIndexRebuilder{manager: manager}
 }
 
+// criticalIndexRebuildLogThreshold is how long the critical-index check
+// may take before it is reported. A complete manifest costs one catalog
+// lookup per entry and stays well under it; anything slower built an index,
+// which is work an operator watching a startup should see attributed.
+const criticalIndexRebuildLogThreshold = time.Second
+
+// ensureCriticalDeferredIndexes rebuilds every missing critical manifest
+// entry, whether or not a drop/rebuild cycle is outstanding.
+//
+// The pending marker records that a cycle was interrupted; it does not
+// record which indexes exist. A binary whose critical subset was smaller
+// than this one's clears the marker with an index this manifest calls
+// critical still missing, and nothing else recreates it: the schema
+// migration that created it is recorded complete, so its
+// CREATE INDEX IF NOT EXISTS never runs again, and the newer manifest is
+// only consulted by a cycle that is no longer pending. Two
+// Mithril-bootstrapped preview nodes were found in exactly that state,
+// missing the utxo child index the rollback DELETE cascades through.
+//
+// BuildCriticalDeferredIndexes skips indexes that are present, so this is a
+// catalog lookup per entry on a healthy database, and it never touches the
+// marker.
+func ensureCriticalDeferredIndexes(
+	manager metadata.DeferredIndexManager,
+	logger *slog.Logger,
+) error {
+	start := time.Now()
+	if err := manager.BuildCriticalDeferredIndexes(); err != nil {
+		return err
+	}
+	elapsed := time.Since(start)
+	if elapsed >= criticalIndexRebuildLogThreshold {
+		logger.Info(
+			"rebuilt missing critical deferred metadata indexes",
+			"duration", elapsed,
+		)
+	}
+	return nil
+}
+
 // RepairCriticalDeferredIndexes rebuilds the API/rollback-critical
-// subset if a prior run left deferred indexes pending. It leaves the
-// pending marker in place so RepairDeferredIndexes can finish the
-// lazy remainder later.
+// subset, and reports when a prior run left deferred indexes pending. It
+// leaves the pending marker in place so RepairDeferredIndexes can finish
+// the lazy remainder later.
 func RepairCriticalDeferredIndexes(
 	db *database.Database,
 	logger *slog.Logger,
@@ -395,20 +435,23 @@ func RepairCriticalDeferredIndexes(
 	if err != nil {
 		return err
 	}
-	if !pending {
-		return nil
+	if pending {
+		logger.Warn(
+			"critical deferred metadata indexes pending from a prior run; " +
+				"rebuilding before serving API traffic",
+		)
 	}
-	logger.Warn(
-		"critical deferred metadata indexes pending from a prior run; " +
-			"rebuilding before serving API traffic",
-	)
-	return manager.BuildCriticalDeferredIndexes()
+	return ensureCriticalDeferredIndexes(manager, logger)
 }
 
 // RepairDeferredIndexes rebuilds any deferred indexes that were
 // recorded as pending by a prior interrupted run. It is safe to call
 // when no rebuild is outstanding: BuildDeferredIndexes is itself
 // idempotent and clears the marker.
+//
+// With no cycle outstanding it still restores any missing critical index,
+// because the rollback path the node is about to run depends on those and
+// the marker cannot answer whether they exist.
 func RepairDeferredIndexes(
 	db *database.Database,
 	logger *slog.Logger,
@@ -422,7 +465,7 @@ func RepairDeferredIndexes(
 		return err
 	}
 	if !pending {
-		return nil
+		return ensureCriticalDeferredIndexes(manager, logger)
 	}
 	logger.Warn(
 		"deferred metadata indexes pending from a prior run; " +
