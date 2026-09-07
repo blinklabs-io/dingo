@@ -140,6 +140,7 @@ func TestBlockReferenceScriptLimitAdmission(t *testing.T) {
 						ConwayProtocolParameters: *pp,
 						MaxRefScriptSizePerBlock: 1,
 					}
+					currentParams.ProtocolVersion.Major = dijkstra.MinProtocolVersionDijkstra
 					return db.Transaction(true).Do(func(txn *database.Txn) error {
 						_, err := ls.ledgerProcessBlock(txn, ocommon.NewPoint(1, block.Hash().Bytes()), block, true, false, false, nil, envelopeParent{origin: true}, nil, eras.DijkstraEraDesc, currentParams, pp, 0)
 						return err
