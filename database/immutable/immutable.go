@@ -620,7 +620,6 @@ func (i *ImmutableDb) getChunk(chunkName string) (*chunk, error) {
 }
 
 func (i *ImmutableDb) GetTip() (*ocommon.Point, error) {
-	var ret *ocommon.Point
 	chunkNames, err := i.getChunkNames()
 	if err != nil {
 		return nil, err
@@ -628,12 +627,28 @@ func (i *ImmutableDb) GetTip() (*ocommon.Point, error) {
 	if len(chunkNames) == 0 {
 		return nil, nil
 	}
-	secondary, err := i.getChunkSecondaryIndex(chunkNames[len(chunkNames)-1])
+	for _, chunkName := range slices.Backward(chunkNames) {
+		tip, err := i.getChunkTip(chunkName)
+		if err != nil {
+			return nil, err
+		}
+		if tip != nil {
+			return tip, nil
+		}
+	}
+	return nil, nil
+}
+
+func (i *ImmutableDb) getChunkTip(
+	chunkName string,
+) (ret *ocommon.Point, retErr error) {
+	secondary, err := i.getChunkSecondaryIndex(chunkName)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = secondary.Close() }()
-	var tmpPoint ocommon.Point
+	defer func() {
+		retErr = errors.Join(retErr, secondary.Close())
+	}()
 	for {
 		next, err := secondary.Next()
 		if err != nil {
@@ -642,11 +657,11 @@ func (i *ImmutableDb) GetTip() (*ocommon.Point, error) {
 		if next == nil {
 			break
 		}
-		tmpPoint = ocommon.NewPoint(
+		tip := ocommon.NewPoint(
 			next.BlockOrEbb,
 			next.HeaderHash[:],
 		)
-		ret = &tmpPoint
+		ret = &tip
 	}
 	return ret, nil
 }

@@ -16,14 +16,12 @@ package immutable
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -38,54 +36,19 @@ func writePointLookupChunk(
 	points []ocommon.Point,
 ) {
 	t.Helper()
-	primary := make([]byte, 1+4*(len(points)+1))
-	primary[0] = primaryIndexVersion
-	secondary := make([]byte, secondaryIndexEntrySize*len(points))
-	var chunkData []byte
-	for idx, point := range points {
-		if len(point.Hash) != 32 {
-			t.Fatalf("fixture point hash has length %d, want 32", len(point.Hash))
-		}
-		secondaryOffset := idx * secondaryIndexEntrySize
-		binary.BigEndian.PutUint32(
-			primary[1+idx*4:],
-			uint32(secondaryOffset),
-		)
-		binary.BigEndian.PutUint64(
-			secondary[secondaryOffset:],
-			uint64(len(chunkData)),
-		)
-		copy(secondary[secondaryOffset+16:secondaryOffset+48], point.Hash)
-		binary.BigEndian.PutUint64(
-			secondary[secondaryOffset+48:],
-			point.Slot,
-		)
-		encoded, err := cbor.Encode([]any{
-			uint64(1),
-			cbor.RawMessage{0x80},
-		})
-		if err != nil {
-			t.Fatalf("encode fixture block: %s", err)
-		}
-		chunkData = append(chunkData, encoded...)
+	primaryOffsets := make([]uint32, len(points)+1)
+	for idx := range primaryOffsets {
+		primaryOffsets[idx] = uint32(idx * secondaryIndexEntrySize)
 	}
-	binary.BigEndian.PutUint32(
-		primary[1+len(points)*4:],
-		uint32(len(points)*secondaryIndexEntrySize),
+	writeImmutableChunkTrio(
+		t,
+		dir,
+		name,
+		primaryIndexVersion,
+		primaryOffsets,
+		nil,
+		points,
 	)
-	for suffix, data := range map[string][]byte{
-		chunkFileExtension:     chunkData,
-		primaryFileExtension:   primary,
-		secondaryFileExtension: secondary,
-	} {
-		if err := os.WriteFile(
-			filepath.Join(dir, name+suffix),
-			data,
-			0o640,
-		); err != nil {
-			t.Fatalf("write %s%s: %s", name, suffix, err)
-		}
-	}
 }
 
 func writePointLookupFixture(t *testing.T) (string, []ocommon.Point) {
@@ -232,6 +195,13 @@ func TestGetChunkNamesFromPointSkipsEmptyChunks(t *testing.T) {
 			)
 		}
 	}
+	tip, err := imm.GetTip()
+	if err != nil {
+		t.Fatalf("get tip through trailing empty chunk: %s", err)
+	}
+	if tip == nil || tip.Slot != second.Slot || !bytes.Equal(tip.Hash, second.Hash) {
+		t.Fatalf("tip = %#v, want slot %d hash %x", tip, second.Slot, second.Hash)
+	}
 	_, err = imm.getChunkNamesFromPoint(ocommon.NewPoint(401, nil))
 	if !errors.Is(err, ErrPointBeyondLastChunk) {
 		t.Fatalf("trailing-empty lookup error = %v, want beyond-last error", err)
@@ -246,6 +216,13 @@ func TestGetChunkNamesFromPointSkipsEmptyChunks(t *testing.T) {
 	_, err = empty.getChunkNamesFromPoint(ocommon.NewPoint(1, nil))
 	if !errors.Is(err, ErrPointBeyondLastChunk) {
 		t.Fatalf("empty-chunk lookup error = %v, want beyond-last error", err)
+	}
+	tip, err = empty.GetTip()
+	if err != nil {
+		t.Fatalf("get tip from all-empty DB: %s", err)
+	}
+	if tip != nil {
+		t.Fatalf("all-empty DB tip = %#v, want nil", tip)
 	}
 }
 
