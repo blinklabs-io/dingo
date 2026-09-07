@@ -1306,7 +1306,9 @@ func (c *Chain) rollbackLocked(
 	// The write hold above excludes further caller-transaction adds; this waits
 	// for the ones already recorded, so no index the removal loop reaches is
 	// one the store has yet to be given. See pendingAddBarrier.
-	c.awaitPendingCallerAdds()
+	if err := c.awaitPendingCallerAdds(); err != nil {
+		return nil, fmt.Errorf("wait for pending caller transactions: %w", err)
+	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	// We get a write lock on the manager to cover the integrity checks and block deletions

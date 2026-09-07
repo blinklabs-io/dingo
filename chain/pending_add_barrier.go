@@ -15,6 +15,7 @@
 package chain
 
 import (
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -32,9 +33,8 @@ import (
 // transaction, or that rolls the chain back from inside one it has not
 // finished, would otherwise block that rollback -- and, because batchCommitMutex
 // is writer-preferring, every chain mutation queued behind it -- for the life of
-// the process. On expiry the wait logs at ERROR and proceeds, which leaves that
-// one rollback exposed to exactly the window this barrier closes and nothing
-// further.
+// the process. On expiry the wait returns an error so the rollback can abort
+// before it reaches the removal loop.
 const pendingAddDrainTimeout = 30 * time.Second
 
 // pendingAddBarrier keeps the rollback paths that delete blocks by index from
@@ -191,16 +191,21 @@ func (c *Chain) beginCallerTxnAdd(txn *database.Txn) func() {
 // the store for indices it has been given. Callers must already hold
 // c.batchCommitMutex for write, which is what keeps a further such add from
 // being recorded while this waits.
-func (c *Chain) awaitPendingCallerAdds() {
+func (c *Chain) awaitPendingCallerAdds() error {
 	outstanding, drained := c.pendingAdds.awaitDrained(pendingAddDrainTimeout)
 	if drained {
-		return
+		return nil
 	}
 	slog.Default().Error(
-		"proceeding with block removal while caller-supplied add transactions are still open",
+		"aborting rollback while caller-supplied add transactions are still open",
 		"component", "chain",
 		"chain_id", c.id,
 		"outstanding_transactions", outstanding,
 		"timeout", pendingAddDrainTimeout.String(),
+	)
+	return fmt.Errorf(
+		"caller-supplied add transactions still open after %s: %d outstanding",
+		pendingAddDrainTimeout,
+		outstanding,
 	)
 }
