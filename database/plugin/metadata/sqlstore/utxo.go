@@ -742,6 +742,11 @@ func queryStakeRefs(
 // the index that satisfies the WHERE clause, turning a bounded range search
 // into a full table pass. queryStakeRefs already materialises every row, so
 // deduping in Go costs one map insert per row.
+//
+// Neither the result nor the seen set is presized from len(rows): the callers
+// are rollback sweeps, where a window of thousands of rows routinely collapses
+// to a handful of credentials, so sizing for the input would reserve orders of
+// magnitude more than the output needs.
 func queryStakeRefsDeduped(
 	ctx context.Context,
 	db queryer,
@@ -752,13 +757,15 @@ func queryStakeRefsDeduped(
 	if err != nil {
 		return nil, err
 	}
-	ret := make([]models.StakeCredentialRef, 0, len(rows))
-	seen := make(map[string]struct{}, len(rows))
+	ret := []models.StakeCredentialRef{}
+	seen := make(map[string]struct{})
 	for _, ref := range rows {
-		if _, ok := seen[ref.MapKey()]; ok {
+		// MapKey allocates, so compute it once per row.
+		key := ref.MapKey()
+		if _, ok := seen[key]; ok {
 			continue
 		}
-		seen[ref.MapKey()] = struct{}{}
+		seen[key] = struct{}{}
 		ret = append(ret, ref)
 	}
 	return ret, nil

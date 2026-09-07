@@ -383,10 +383,10 @@ func TestRollbackStakeRefsDedupeMatchesSQLDistinct(t *testing.T) {
 	}
 }
 
-// TestDeleteUtxosAfterSlotDedupesStakeRefs and its SetUtxosNotDeletedAfterSlot
-// twin exercise the store methods end to end: the rollback still removes (or
-// un-spends) exactly the rows above the slot, which is the behaviour the plan
-// change must not disturb.
+// TestRollbackSweepStillTruncatesUtxos exercises DeleteUtxosAfterSlot end to
+// end: the rollback still removes exactly the rows added above the slot and
+// leaves settled rows alone, which is the behaviour the plan change must not
+// disturb.
 func TestRollbackSweepStillTruncatesUtxos(t *testing.T) {
 	t.Parallel()
 	const rolledBackFrom = uint64(200)
