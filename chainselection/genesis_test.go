@@ -159,6 +159,58 @@ func TestGenesisSelectionStateFollowsSecurityParamWindow(t *testing.T) {
 	)
 }
 
+// The cached pair must be published by whole-value replacement, never as two
+// independently stored halves: a lock-free reader that loaded the old active
+// flag and the new window across one refresh would see a pair that never
+// existed together. Both review bots on #4070 raised this; the contract is
+// enforced here so a later refactor back to per-field stores fails the build
+// or this test rather than reintroducing the mixed read.
+func TestGenesisSelectionSnapshotPublishedAsOneValue(t *testing.T) {
+	// No GenesisWindowSlots: the window follows securityParam, so the
+	// transition below changes both halves of the pair at once.
+	cs := NewChainSelector(ChainSelectorConfig{GenesisMode: true})
+
+	before := cs.genesisSelection.Load()
+	require.NotNil(t, before)
+	require.True(t, before.active)
+	require.Equal(t, defaultGenesisWindowSlots, before.window)
+
+	cs.mutex.Lock()
+	cs.securityParam = 10
+	cs.mode = SelectionModePraos
+	cs.refreshGenesisSelectionSnapshotLocked()
+	cs.mutex.Unlock()
+
+	after := cs.genesisSelection.Load()
+	require.NotSame(
+		t,
+		before,
+		after,
+		"a refresh must publish a new value rather than mutate in place",
+	)
+	assert.True(
+		t,
+		before.active,
+		"a published snapshot must stay immutable after a later refresh",
+	)
+	assert.Equal(t, defaultGenesisWindowSlots, before.window)
+
+	active, window := cs.GenesisSelectionState()
+	assert.False(t, active)
+	assert.Equal(t, uint64(30), window)
+}
+
+// A ChainSelector that never went through NewChainSelector has no published
+// snapshot. GenesisSelectionState must answer as the pre-cache implementation
+// did for that zero value rather than dereferencing a nil snapshot.
+func TestGenesisSelectionStateZeroValueSelector(t *testing.T) {
+	var cs ChainSelector
+
+	active, window := cs.GenesisSelectionState()
+	assert.False(t, active)
+	assert.Equal(t, defaultGenesisWindowSlots, window)
+}
+
 func TestChainSelectorGenesisObservedDensityTracksRollingWindow(t *testing.T) {
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:   true,

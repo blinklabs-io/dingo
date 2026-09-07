@@ -15,6 +15,8 @@
 package chainsync_test
 
 import (
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -175,14 +177,25 @@ func TestChainSelectorChainsyncLockOrderDoesNotDeadlock(t *testing.T) {
 		defer close(doneWriter)
 		st.AddClientConnId(connWriter)
 	}()
+	// Confirm the writer is genuinely parked on clientConnIdMutex before
+	// releasing Path A, by reading its stack rather than by waiting out a
+	// fixed interval: a wall-clock window cannot distinguish a goroutine
+	// blocked on the lock from one the scheduler has not run yet, and a
+	// writer that queued late would let Path A's RLock succeed and the test
+	// pass even with the inversion present.
+	require.Eventually(
+		t,
+		goroutineBlockedAddingTrackedClient,
+		5*time.Second,
+		time.Millisecond,
+		"the writer connection add must block on clientConnIdMutex behind "+
+			"Path B's held read lock for this test to exercise the "+
+			"write-preference inversion",
+	)
 	select {
 	case <-doneWriter:
-		t.Fatal(
-			"the writer connection add completed immediately; it must " +
-				"block on clientConnIdMutex behind Path B's held read lock " +
-				"for this test to exercise the write-preference inversion",
-		)
-	case <-time.After(300 * time.Millisecond):
+		t.Fatal("the writer connection add completed instead of blocking")
+	default:
 	}
 
 	// Release Path A first: its clientConnIdMutex.RLock() (inside
@@ -214,4 +227,28 @@ func TestChainSelectorChainsyncLockOrderDoesNotDeadlock(t *testing.T) {
 				"cycle once a writer queued on clientConnIdMutex (#4070)",
 		)
 	}
+}
+
+// goroutineBlockedAddingTrackedClient reports whether some goroutine is parked
+// acquiring chainsync.State.clientConnIdMutex for writing inside the tracked
+// client add path. sync.RWMutex exposes no queue-depth introspection, so a
+// stack dump is the only way to positively confirm the writer is queued on the
+// lock rather than merely not scheduled yet.
+func goroutineBlockedAddingTrackedClient() bool {
+	buf := make([]byte, 1<<16)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	for _, stack := range strings.Split(string(buf), "\n\n") {
+		if strings.Contains(stack, "sync.(*RWMutex).Lock(") &&
+			strings.Contains(stack, "AddClientConnId") {
+			return true
+		}
+	}
+	return false
 }
