@@ -583,6 +583,10 @@ type Config struct {
 	// pre-migration reward_live_stake table -- so this is for advanced/
 	// diagnostic use only (e.g. repeated restarts against a database already
 	// known to be consistent).
+	//
+	// It does not affect the stake-snapshot provenance check that runs in the
+	// same startup step: that one is cheap, indexed, and fails closed, so it
+	// runs unconditionally.
 	SkipRewardLiveStakeBackfillCheck bool `yaml:"skipRewardLiveStakeBackfillCheck"                                                             split_words:"true"`
 	// Tracing enables OpenTelemetry tracing. Disabled by default: with no
 	// collector listening, the OTLP exporter logs noisy connection errors.

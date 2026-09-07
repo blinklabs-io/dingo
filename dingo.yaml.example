@@ -536,6 +536,12 @@ strictUtxoValidation: true
 # unsafe to leave enabled permanently, because this check is what catches a
 # stale or pre-migration reward_live_stake table.
 #
+# This does not disable the stake-snapshot provenance check that runs in the
+# same startup step. That one is a pair of indexed existence probes whose cost
+# does not scale with the UTxO set, and it fails closed on a database whose
+# consensus stake snapshots came from an older accounting version, so it
+# always runs.
+#
 # Can be overridden with the CARDANO_SKIP_REWARD_LIVE_STAKE_BACKFILL_CHECK
 # environment variable
 # CLI: --skip-reward-live-stake-backfill-check

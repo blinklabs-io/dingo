@@ -265,9 +265,25 @@ func TestSkipRewardLiveStakeBackfillCheckEnvBinding(t *testing.T) {
 // safe default. The check is what catches a stale or pre-migration
 // reward_live_stake table, so an operator has to opt out deliberately; it
 // must never become skipped by default.
+//
+// The variable is explicitly cleared rather than assumed absent. A developer
+// who exported it to work around a slow startup would otherwise see this test
+// fail for reasons that have nothing to do with the default it pins.
+// t.Setenv cannot express "unset", so the previous value is saved and
+// restored by hand; t.Setenv("HOME", ...) below already bars t.Parallel, so
+// mutating the process environment directly is safe here.
 func TestSkipRewardLiveStakeBackfillCheckDefaultsToRunningTheCheck(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())
+	const skipEnvVar = "CARDANO_SKIP_REWARD_LIVE_STAKE_BACKFILL_CHECK"
+	if prev, ok := os.LookupEnv(skipEnvVar); ok {
+		t.Cleanup(func() { os.Setenv(skipEnvVar, prev) })
+	} else {
+		t.Cleanup(func() { os.Unsetenv(skipEnvVar) })
+	}
+	if err := os.Unsetenv(skipEnvVar); err != nil {
+		t.Fatalf("failed to clear %s: %v", skipEnvVar, err)
+	}
 
 	tmpDir := t.TempDir()
 	configFile := filepath.Join(tmpDir, "dingo.yaml")
