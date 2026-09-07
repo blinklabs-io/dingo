@@ -389,14 +389,14 @@ func TestBlockfetchServerSendBatch_BatchDoneAtChainTip(t *testing.T) {
 		conn,
 	)
 
-	assert.NoError(t, err)
+	assert.Error(t, err)
 	assert.Equal(t, 1, server.startBatchCalls)
-	assert.Equal(t, 1, server.batchDoneCalls)
-	assert.Equal(t, 0, conn.closeCalls)
+	assert.Equal(t, 0, server.batchDoneCalls)
+	assert.Equal(t, 1, conn.closeCalls)
 	assert.Equal(t, 1, iter.cancelCalls)
 }
 
-func TestBlockfetchServerSendBatch_RollbackEndsBatchWithoutServingBlock(
+func TestBlockfetchServerSendBatch_RollbackClosesConnectionWithoutServingBlock(
 	t *testing.T,
 ) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -433,16 +433,38 @@ func TestBlockfetchServerSendBatch_RollbackEndsBatchWithoutServingBlock(
 		conn,
 	)
 
-	assert.NoError(t, err)
+	assert.Error(t, err)
 	assert.Equal(t, 1, server.startBatchCalls)
 	// The rollback sentinel must NOT be streamed as a block.
 	assert.Equal(t, 0, server.blockCalls,
 		"rollback sentinel must not be streamed as a block")
-	// The batch ends cleanly so the client re-requests against its updated
-	// chain (blockfetch has no rollback message).
-	assert.Equal(t, 1, server.batchDoneCalls)
-	assert.Equal(t, 0, conn.closeCalls)
+	// BatchDone would falsely report completion against the pre-rollback
+	// chain, so close the transport and let the client retry.
+	assert.Equal(t, 0, server.batchDoneCalls)
+	assert.Equal(t, 1, conn.closeCalls)
 	assert.Equal(t, 1, iter.cancelCalls)
+}
+
+func TestBlockfetchServerSendBatch_RejectsEndHashMismatch(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	o := newOuroboros(OuroborosConfig{Logger: logger})
+	iter := &stubBlockfetchIterator{steps: []blockfetchIteratorStep{
+		{result: testBlockfetchIteratorBlock(100)},
+	}}
+	server := &stubBlockfetchBatchServer{}
+	conn := &stubBlockfetchConnection{errChan: make(chan error)}
+	start := ocommon.NewPoint(100, []byte{100})
+	end := ocommon.NewPoint(100, []byte{0xff})
+
+	err := o.blockfetchServerSendBatch(
+		testConnId().String(), start, end, iter, server, conn,
+	)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "end hash mismatch")
+	assert.Equal(t, 0, server.blockCalls)
+	assert.Equal(t, 0, server.batchDoneCalls)
+	assert.Equal(t, 1, conn.closeCalls)
 }
 
 func TestBlockfetchServerSendBatch_WaitsForSendDrainBetweenMessages(
@@ -464,7 +486,7 @@ func TestBlockfetchServerSendBatch_WaitsForSendDrainBetweenMessages(
 		errChan: make(chan error),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
-	end := ocommon.NewPoint(101, []byte{0x02})
+	end := ocommon.NewPoint(101, []byte{101})
 
 	err := o.blockfetchServerSendBatch(
 		testConnId().String(),
@@ -508,7 +530,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionWhenSendDrainStalls(
 		errChan: make(chan error),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
-	end := ocommon.NewPoint(101, []byte{0x02})
+	end := ocommon.NewPoint(101, []byte{101})
 
 	err := o.blockfetchServerSendBatch(
 		testConnId().String(),

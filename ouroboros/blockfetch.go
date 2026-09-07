@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"time"
@@ -342,6 +343,7 @@ func (o *Ouroboros) blockfetchServerSendBatch(
 	); err != nil {
 		return err
 	}
+	reachedEnd := false
 Loop:
 	for {
 		select {
@@ -376,13 +378,38 @@ Loop:
 				// Serving it would stream a [0, null] block that a fetching
 				// peer decodes as a nil-header Byron EBB and crashes
 				// dereferencing it in SlotNumber(). Blockfetch has no
-				// rollback message, so end the batch cleanly; the client
-				// re-requests against its updated chain. Mirrors the
-				// next.Rollback handling in chainsync.
-				break Loop
+				// rollback message, so close the transport; the client can
+				// re-request against its updated chain. Mirrors the
+				// next.Rollback handling in chainsync without reporting
+				// successful completion.
+				o.closeBlockfetchConnection(
+					conn,
+					connectionID,
+					"rollback during blockfetch range",
+				)
+				return fmt.Errorf("blockfetch chain rolled back during range")
 			}
 			if next.Block.Slot > end.Slot {
-				break Loop
+				o.closeBlockfetchConnection(
+					conn,
+					connectionID,
+					"blockfetch range end was not reached",
+				)
+				return fmt.Errorf("blockfetch range end was not reached")
+			}
+			if next.Block.Slot == end.Slot {
+				if !bytes.Equal(next.Point.Hash, end.Hash) {
+					o.closeBlockfetchConnection(
+						conn,
+						connectionID,
+						"blockfetch range end hash mismatch",
+					)
+					return fmt.Errorf(
+						"blockfetch range end hash mismatch at slot %d",
+						next.Block.Slot,
+					)
+				}
+				reachedEnd = true
 			}
 			blockBytes := next.Block.Cbor
 			err := server.Block(
@@ -421,10 +448,18 @@ Loop:
 				return err
 			}
 			// Make sure we don't hang waiting for the next block if we've already hit the end
-			if next.Block.Slot == end.Slot {
+			if reachedEnd {
 				break Loop
 			}
 		}
+	}
+	if !reachedEnd {
+		o.closeBlockfetchConnection(
+			conn,
+			connectionID,
+			"blockfetch range end was not reached",
+		)
+		return fmt.Errorf("blockfetch range end was not reached")
 	}
 	// Signal batch completion
 	if err := server.BatchDone(); err != nil {
