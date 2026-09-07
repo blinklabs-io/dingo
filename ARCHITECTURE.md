@@ -2679,6 +2679,15 @@ The experimental N2N Leios protocols (`Config.experimentalLeiosNetworkingEnabled
 
 For the current respun prototype, the notify vote dialect is specifically the three-field `(announcing_rb_hash, voter_id, signature)` form. The selected-chain `chain.update` path records an announcement only after its ranking block is adopted; merely observing an eligible ChainSync header cannot make a local vote eligible. A bounded TTL queue holds votes that race ahead of adoption and retains a bounded set of alternate signatures per voter, so an invalid first candidate cannot suppress a later valid vote. Local votes use that same LeiosNotify stream; each outbound response reserves its log entry and commits the per-peer cursor only after gouroboros reports a successful send. Failed or aborted sends release the reservation into a counted retry set retained across reconnects; a reconnect advances through every pending retry on its stream rather than clearing only the first failed entry. The transitional offered-ID and four-field forms remain decode-compatible only.
 
+Configured LeiosFetch vote serving accepts at most 1,000 requested IDs per
+request, including duplicate and unknown IDs. Larger requests fail before
+dispatch to the vote manager, bounding lookup and response-cloning work under
+its shared lock. This is a local serving limit; clients must split larger
+queries into batches. An over-limit configured request produces a protocol
+error and terminates the requesting connection. If the optional vote manager
+is absent, requests still receive the empty `MsgVotes` response. The limit is
+per request, not a per-peer rate limit or a decoder allocation bound.
+
 Before header cryptography or body deltas run, the inbound consensus-envelope
 validator enforces the era's block body/header limits and, for Alonzo and later,
 the aggregate `MaxBlockExUnits` budget. The aggregate contains every declared
