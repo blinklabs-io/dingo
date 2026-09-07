@@ -3530,10 +3530,16 @@ pin to a dead/minority peer:
 - Longer-chain escape: the challenger is genuinely taller than the incumbent by
   more than `catchUpPinHeadMargin` (= 2 blocks) — a real longer chain, not a
   head micro-fork. Height here is the delivered frontier, so this escape does
-  not fire when the two peers advertise the identical tip: they hold the same
-  chain and the challenger is only further along in serving it, which is
-  transport speed rather than a longer chain. The progress-stall escape below
-  still releases an incumbent that stops driving local tip progress.
+  not fire when the two peers advertise the identical tip: they are TREATED AS
+  the same chain unless either one's retained `k+1` delivered history holds a
+  different block at the other's frontier slot, and the challenger is then read
+  as only further along in serving that chain, which is transport speed rather
+  than a longer chain. The classification is an allowance, not proof: a frontier
+  slot outside the retained window cannot be checked, so the allowance can rest
+  on the advertisement alone. The progress-stall escape below is evaluated
+  first and still releases an incumbent that stops driving local tip progress,
+  which is what bounds a peer that copies an advertisement it cannot be
+  contradicted on.
 - Progress-stall escape: the applied local tip has stopped advancing for at
   least `catchUpPinStallTimeout` (= 20s wall-clock, not 20 slots). `SetLocalTip`
   records the timestamp of the last FORWARD progress (block number advancing);

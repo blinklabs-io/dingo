@@ -1067,8 +1067,10 @@ func (cs *ChainSelector) isPeerSelectableLocked(
 	// The gap is measured on DELIVERED frontiers, which is a transport
 	// property: it says how many headers each peer has served us so far, not
 	// what chain each peer holds. Two peers that advertise the identical
-	// canonical tip hold the same chain, so a delivered-frontier gap between
-	// them is delivery speed alone and must not make either one ineligible.
+	// canonical tip are TREATED AS the same chain unless retained delivered
+	// history contradicts them (see sameCanonicalChain), so a delivered-frontier
+	// gap between them is read as delivery speed and must not make either one
+	// ineligible.
 	// Excluding the trailing peer here also excluded the incumbent, which
 	// skipped the anti-flap pin entirely (see pinIncumbentDuringCatchUpLocked)
 	// and let the active connection flap between two canonical public roots.
@@ -1169,9 +1171,10 @@ func (cs *ChainSelector) bestKnownBlockNumber() uint64 {
 }
 
 // frontierLeadIsTransportOnlyLocked reports whether peerTip's shortfall against
-// the leading delivered frontier is a delivery-speed artifact rather than a
-// chain-quality difference: some eligible, non-stale peer that holds the
-// leading frontier is on the same chain as peerTip.
+// the leading delivered frontier can be attributed to delivery speed rather
+// than chain quality: some eligible, non-stale peer holding the leading
+// frontier classifies as same-chain with peerTip under sameCanonicalChain.
+// That classification is an allowance, not proof — see its doc comment.
 //
 // Every leader is scanned rather than one representative, so the answer does
 // not depend on map iteration order when several peers share the leading
@@ -1203,25 +1206,37 @@ func sameAdvertisedTip(a, b ochainsync.Tip) bool {
 	return len(a.Point.Hash) > 0 && sameSelectionTip(a, b)
 }
 
-// sameCanonicalChain reports whether two peers are following the same chain, so
-// that a difference in their DELIVERED frontiers is a transport-delivery
-// artifact rather than a chain-quality difference.
+// sameCanonicalChain classifies two peers as the same canonical chain, so that
+// a difference in their DELIVERED frontiers may be attributed to transport
+// delivery rather than chain quality.
+//
+// This is an ALLOWANCE, not proof of chain identity. It is granted when the
+// peers name the identical advertised tip and neither one's retained delivered
+// history contradicts the other, and withdrawn as soon as a contradiction is
+// visible. It is never positive confirmation that the two peers hold the same
+// chain: observedHistoryConflictsAt is one-sided by construction, so when the
+// other peer's frontier slot falls outside the retained k+1 history window
+// there is nothing to check and the allowance stands on the advertisement
+// alone.
 //
 // Agreement on the advertised tip is the primary signal, and it is exactly the
 // canonical-public-root case that flapped: both roots named block 4625199 at
 // slot 121697834 while their delivered frontiers differed by 742 blocks.
 //
 // The advertised tip is untrusted on its own, so it is checked against the
-// delivered evidence: if either peer's retained delivered history holds a
-// different block at the other's frontier slot, they demonstrably served
-// conflicting chains and the copied advertisement buys nothing. That check is
-// one-sided by construction (see observedHistoryConflictsAt), so this predicate
-// never grants same-chain treatment over a contradiction it can see, and never
-// invents one it cannot.
+// delivered evidence that is available: if either peer's retained delivered
+// history holds a different block at the other's frontier slot, they
+// demonstrably served conflicting chains and the copied advertisement buys
+// nothing. The predicate never grants the allowance over a contradiction it can
+// see, and never invents one it cannot.
 //
-// This is a narrow allowance. It only keeps a peer in the candidate pool and
-// only holds the incumbent's pin; it never makes a peer win selection. The
-// Praos comparison still ranks candidates by their delivered frontiers, the
+// The allowance is deliberately narrow, which is what bounds a peer that copies
+// an advertisement it cannot be contradicted on. It only keeps a peer in the
+// candidate pool and only holds the incumbent's pin; it never makes a peer win
+// selection, and it cannot hold a pin across a catchUpPinStallTimeout window in
+// which the incumbent drove no local tip progress, because the progress-stall
+// escape is evaluated before the longer-chain escape. The Praos comparison
+// still ranks candidates by their delivered frontiers, the
 // implausible-frontier bound in updatePeerTipObservedPraosView still rejects
 // delivered jumps beyond k, the k-behind-the-applied-local-tip check above
 // still drops peers that cannot serve the block the node needs, and Genesis
@@ -1567,8 +1582,10 @@ func (cs *ChainSelector) pinIncumbentDuringCatchUpLocked(
 	//
 	// "Taller" is measured on delivered frontiers, so it only means a longer
 	// chain when the two peers disagree about where the chain ends. When they
-	// advertise the identical canonical tip they hold the same chain and the
-	// challenger is merely further along in serving it to us; handing the
+	// advertise the identical canonical tip they are treated as the same chain
+	// unless retained delivered history contradicts them (sameCanonicalChain is
+	// an allowance, not proof), and the challenger is then read as merely
+	// further along in serving that chain to us; handing the
 	// pipeline over buys no chain and costs a chainsync/blockfetch reset plus,
 	// via the ledger's fresh-cursor path, a close of the connection we just
 	// selected. The stall escape above still releases an incumbent that stops
