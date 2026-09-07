@@ -93,6 +93,72 @@ func TestGenesisSelectionStateTransitionsAtomically(t *testing.T) {
 	assert.Equal(t, uint64(30), window)
 }
 
+// The cached snapshot GenesisSelectionState reads (#4070) is only correct if
+// every site that mutates cs.mode refreshes it. Drive the real one-way
+// Genesis-to-Praos transition through SetLocalTip rather than by writing
+// cs.mode directly, and assert the lock-free reader observes it: without the
+// refresh in advanceSelectionModeLocked the snapshot reports Genesis forever
+// while SelectionMode() correctly reports Praos.
+func TestGenesisSelectionStateFollowsRealModeTransition(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: 10, // window = 3k = 30
+	})
+
+	connId := newTestConnectionId(1)
+	cs.UpdatePeerTip(connId, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("peer")},
+		BlockNumber: 100,
+	}, nil)
+	active, window := cs.GenesisSelectionState()
+	require.True(t, active)
+	require.Equal(t, uint64(30), window)
+
+	// A local tip inside the window (100 - 30) exits Genesis mode.
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 75, Hash: []byte("local-75")},
+		BlockNumber: 75,
+	})
+	require.Equal(t, SelectionModePraos, cs.SelectionMode())
+
+	active, window = cs.GenesisSelectionState()
+	assert.False(
+		t,
+		active,
+		"the cached snapshot must follow the real mode transition",
+	)
+	assert.Equal(t, uint64(30), window)
+}
+
+// The cached window is derived from cs.securityParam whenever no explicit
+// GenesisWindowSlots is configured, so SetSecurityParam must refresh the
+// snapshot even when it does not transition the mode (#4070).
+func TestGenesisSelectionStateFollowsSecurityParamWindow(t *testing.T) {
+	// No GenesisWindowSlots: the window derives from the security param.
+	cs := NewChainSelector(ChainSelectorConfig{GenesisMode: true})
+
+	active, window := cs.GenesisSelectionState()
+	require.True(t, active)
+	require.Equal(t, defaultGenesisWindowSlots, window)
+
+	cs.SetSecurityParam(10)
+	require.Equal(
+		t,
+		SelectionModeGenesis,
+		cs.SelectionMode(),
+		"no peer tips, so this must not transition the mode",
+	)
+
+	active, window = cs.GenesisSelectionState()
+	assert.True(t, active)
+	assert.Equal(
+		t,
+		uint64(30),
+		window,
+		"the cached window must follow securityParam without a transition",
+	)
+}
+
 func TestChainSelectorGenesisObservedDensityTracksRollingWindow(t *testing.T) {
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:   true,
