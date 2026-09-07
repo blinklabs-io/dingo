@@ -387,7 +387,7 @@ Loop:
 					connectionID,
 					"rollback during blockfetch range",
 				)
-				return fmt.Errorf("blockfetch chain rolled back during range")
+				return errors.New("blockfetch chain rolled back during range")
 			}
 			if next.Block.Slot > end.Slot {
 				o.closeBlockfetchConnection(
@@ -395,7 +395,7 @@ Loop:
 					connectionID,
 					"blockfetch range end was not reached",
 				)
-				return fmt.Errorf("blockfetch range end was not reached")
+				return errors.New("blockfetch range end was not reached")
 			}
 			if next.Block.Slot == end.Slot {
 				if !bytes.Equal(next.Point.Hash, end.Hash) {
@@ -459,7 +459,7 @@ Loop:
 			connectionID,
 			"blockfetch range end was not reached",
 		)
-		return fmt.Errorf("blockfetch range end was not reached")
+		return errors.New("blockfetch range end was not reached")
 	}
 	// Signal batch completion
 	if err := server.BatchDone(); err != nil {
