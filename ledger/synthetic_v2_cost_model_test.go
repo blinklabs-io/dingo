@@ -545,12 +545,31 @@ func TestResolveSyntheticV2CostModel_BootstrapsFromValueWhenMarkerAbsent(
 		"an absent marker with a value that differs from the synthetic"+
 			" default must resolve to real, not synthetic")
 
+	// blinklabs-io/dingo#4127 changed this case's answer deliberately.
+	// transitionToEraFrom now strips the fabricated default before
+	// persisting, so a Babbage-or-later row with no PlutusV2 key at all is
+	// what an epoch INSIDE the synthetic window looks like on disk rather
+	// than evidence of real data. Resolving it as not-synthetic is durable
+	// and self-confirming: it is only reachable with the boolean marker
+	// absent, and the deep rollback that deleted it
+	// (database.RecomputeSyntheticV2CostModelMarkerAfterTruncate) reopened
+	// the window it now denies.
 	noV2 := &conway.ConwayProtocolParameters{
 		CostModels: map[uint][]int64{0: {1, 2, 3}},
 	}
-	assert.False(t, resolveSyntheticV2CostModel("", noV2),
-		"an absent marker with no PlutusV2 key at all must resolve to"+
-			" not-synthetic")
+	assert.True(t, resolveSyntheticV2CostModel("", noV2),
+		"an absent marker with no PlutusV2 key at all, in an era the"+
+			" fabricated default applies to, must resolve to synthetic")
+
+	// Pre-Babbage eras keep the original answer: Alonzo predates the
+	// fabrication, so its missing PlutusV2 entry is the genuine chain state
+	// and never a filtered row.
+	alonzoNoV2 := &alonzo.AlonzoProtocolParameters{
+		CostModels: map[uint][]int64{0: {1, 2, 3}},
+	}
+	assert.False(t, resolveSyntheticV2CostModel("", alonzoNoV2),
+		"an absent marker with no PlutusV2 key at all must still resolve"+
+			" to not-synthetic in an era that predates the fabrication")
 
 	assert.False(t, resolveSyntheticV2CostModel("", nil),
 		"an absent marker with nil pparams must resolve to not-synthetic")

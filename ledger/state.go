@@ -3430,6 +3430,18 @@ func (ls *LedgerState) rollbackWithResync(
 	newSyntheticV2CostModel := resolveSyntheticV2CostModel(
 		newSyntheticV2CostModelValue, newPParams,
 	)
+	// blinklabs-io/dingo#4127: mirror loadSyntheticV2CostModel's restore on
+	// this sibling reload path. The persisted row reloaded above no longer
+	// carries HardForkBabbage's fabricated PlutusV2 default (transitionToEraFrom
+	// strips it), so without this a rollback landing inside the synthetic
+	// window silently drops the cost model internal script validation needs,
+	// making validation depend on whether a rollback happened. Applied after
+	// resolveSyntheticV2CostModel and never before it: the absent-marker
+	// fallback reads these same parameters, and restoring first would let it
+	// confirm its own injected value.
+	newPParams = withDefaultV2CostModelIfMissing(
+		newPParams, newSyntheticV2CostModel, ls.config.Logger,
+	)
 	newTipDensity := ls.chainFragmentDensity(
 		newTip,
 		ls.securityParamForEraOrDefault(newCurrentEra.Id),
@@ -4232,8 +4244,25 @@ func resolveSyntheticV2CostModel(
 	pp lcommon.ProtocolParameters,
 ) bool {
 	if value == "" {
-		v2, hasV2 := extractRawCostModels(pp)[1]
-		return hasV2 && slices.Equal(v2, eras.DefaultPlutusV2CostModel)
+		if v2, hasV2 := extractRawCostModels(pp)[1]; hasV2 {
+			return slices.Equal(v2, eras.DefaultPlutusV2CostModel)
+		}
+		// blinklabs-io/dingo#4127: no PlutusV2 cost model at all, in an era
+		// the fabricated default applies to, is exactly the shape
+		// transitionToEraFrom now persists for an epoch INSIDE the synthetic
+		// window -- so it re-derives as synthetic rather than as real data.
+		// Reaching this branch on a post-#4127 database means the boolean
+		// marker was deleted by
+		// database.RecomputeSyntheticV2CostModelMarkerAfterTruncate, i.e. a
+		// rollback or truncate crossed back before the epoch real data was
+		// confirmed and the window is open again. Answering "not synthetic"
+		// there is durable and self-confirming: the marker stays absent, so
+		// every later restart re-derives the same wrong answer, and the era
+		// transition that would set it true again is long past.
+		// Pre-Babbage eras keep the old answer via
+		// pparamsCanCarrySyntheticV2CostModel, since their missing PlutusV2
+		// entry is the genuine chain state.
+		return pparamsCanCarrySyntheticV2CostModel(pp)
 	}
 	return value == "true"
 }

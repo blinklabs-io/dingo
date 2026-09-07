@@ -710,6 +710,30 @@ func extractRawCostModels(
 	}
 }
 
+// pparamsCanCarrySyntheticV2CostModel reports whether pp's concrete type is
+// one HardForkBabbage's fabricated PlutusV2 default can apply to: Babbage and
+// later, the eras reached through that hard fork.
+//
+// Alonzo is deliberately excluded even though it also has a CostModels map
+// (which is why extractRawCostModels handles it): it predates the fabrication,
+// so an Alonzo parameter set with no PlutusV2 entry is the genuine chain
+// state, never a row the write-side filter stripped. Byron and Shelley-era
+// types have no cost models at all and fall through to false.
+func pparamsCanCarrySyntheticV2CostModel(
+	pp lcommon.ProtocolParameters,
+) bool {
+	switch p := pp.(type) {
+	case *babbage.BabbageProtocolParameters:
+		return p != nil
+	case *conway.ConwayProtocolParameters:
+		return p != nil
+	case *dijkstra.DijkstraProtocolParameters:
+		return p != nil
+	default:
+		return false
+	}
+}
+
 // withoutSyntheticV2CostModel returns pp unchanged unless synthetic is true,
 // in which case it returns a shallow copy with the PlutusV2 cost model (map
 // key 1) removed.
