@@ -1538,3 +1538,23 @@ func TestValidateOpCertSequence(t *testing.T) {
 		})
 	}
 }
+
+// TestArmKesProtocolLifetime_RequiresSigningMaterial pins that Arm reports
+// failure when it cannot arm anything. With an opcert present but no signing
+// material the certificate cannot be validated, so the protocol lifetime
+// would be unreadable; returning nil there would tell the block producer the
+// per-slot forge gate has data to enforce when it has none.
+func TestArmKesProtocolLifetime_RequiresSigningMaterial(t *testing.T) {
+	genesis := synthGenesis(
+		129600, 62, time.Second,
+		time.Date(2017, 9, 23, 21, 44, 51, 0, time.UTC),
+	)
+	pc := &PoolCredentials{opCert: &OpCert{KESPeriod: 1}}
+	require.False(t, pc.IsLoaded())
+
+	err := pc.ArmKesProtocolLifetime(genesis)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "signing material not loaded")
+	assert.Zero(t, pc.OpCertExpiryPeriod())
+	assert.Zero(t, pc.PeriodsRemaining(1))
+}

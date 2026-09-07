@@ -983,7 +983,8 @@ func TestWallClockSlotFromConfirmedHistory_SupportedWhenEraSpansNow(t *testing.T
 	})
 	ls.publishSnapshotsLocked()
 
-	slot, ok := ls.WallClockSlotFromConfirmedHistory()
+	slot, ok, err := ls.WallClockSlotFromConfirmedHistory()
+	require.NoError(t, err)
 	require.True(t, ok, "a 1s-era covering now must resolve the wall-clock slot")
 	assert.Greater(t, slot, uint64(100_000_000),
 		"2026 wall-clock slot via 1s slots since 2022-10-25 must exceed 100M")
@@ -1029,7 +1030,9 @@ func TestWallClockSlotFromConfirmedHistory_UnsupportedWhenPastHorizon(t *testing
 	})
 	ls.publishSnapshotsLocked()
 
-	slot, ok := ls.WallClockSlotFromConfirmedHistory()
+	slot, ok, err := ls.WallClockSlotFromConfirmedHistory()
+	require.NoError(t, err,
+		"past-horizon is the deferral signal, not an internal failure")
 	assert.False(t, ok,
 		"bounded era horizon must not resolve the current wall-clock slot")
 	assert.Zero(t, slot)
@@ -1043,7 +1046,12 @@ func TestWallClockSlotFromConfirmedHistory_EmptyCache(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 
-	slot, ok := ls.WallClockSlotFromConfirmedHistory()
-	assert.False(t, ok, "empty epoch cache must yield unsupported")
+	// An empty epoch cache is an internal failure, not the past-horizon
+	// deferral signal. It must surface as an error: reporting it as
+	// unsupported would let the block producer downgrade a hard startup
+	// failure into a warning and carry on with an unjudged certificate.
+	slot, ok, err := ls.WallClockSlotFromConfirmedHistory()
+	require.Error(t, err, "empty epoch cache must not masquerade as deferral")
+	assert.False(t, ok)
 	assert.Zero(t, slot)
 }

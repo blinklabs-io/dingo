@@ -1059,12 +1059,21 @@ func (pc *PoolCredentials) ArmKesProtocolLifetime(
 		return errors.New("operational certificate not loaded")
 	}
 	pc.opCertStartKES = pc.opCert.KESPeriod
-	if pc.isLoadedUnsafe() {
-		if err := pc.validateOpCertUnsafe(); err != nil {
-			return fmt.Errorf("validate operational certificate: %w", err)
-		}
-		pc.opCertValidated = true
+	// Without signing material the certificate cannot be validated, so
+	// opCertValidated would stay false and OpCertExpiryPeriod would report 0
+	// however far the rest of this function got. Fail rather than return
+	// nil: a method named Arm that reports success and arms nothing leaves
+	// the caller believing the per-slot forge gate has data to enforce when
+	// it does not. Unreachable from the block producer startup path, where
+	// LoadFromFiles precedes this, but this is exported API on an exported
+	// type.
+	if !pc.isLoadedUnsafe() {
+		return errors.New("signing material not loaded")
 	}
+	if err := pc.validateOpCertUnsafe(); err != nil {
+		return fmt.Errorf("validate operational certificate: %w", err)
+	}
+	pc.opCertValidated = true
 	if genesis == nil {
 		return errors.New("shelley genesis is required")
 	}
