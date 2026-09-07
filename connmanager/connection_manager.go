@@ -52,6 +52,7 @@ const (
 
 type connectionInfo struct {
 	conn      *ouroboros.Connection
+	onClose   func()
 	peerAddr  string
 	isInbound bool
 	isNtC     bool   // true for node-to-client (local) connections
@@ -732,6 +733,9 @@ func (c *ConnectionManager) addConnectionImpl(
 	c.goroutineWg.Add(1)
 	c.listenersMutex.Unlock()
 
+	if onClose != nil {
+		onClose = sync.OnceFunc(onClose)
+	}
 	connId := conn.Id()
 	c.connectionsMutex.Lock()
 
@@ -800,6 +804,9 @@ func (c *ConnectionManager) addConnectionImpl(
 			if existingIPKey != "" {
 				c.releaseIPSlot(existingIPKey)
 			}
+			if existing.onClose != nil {
+				existing.onClose()
+			}
 			// The evicted connection's own error-watcher goroutine cannot
 			// deliver this: by the time its ErrorChan fires, RemoveConnection
 			// finds either no entry or the replacement's entry for connId
@@ -844,6 +851,9 @@ func (c *ConnectionManager) addConnectionImpl(
 			if existingIPKey != "" {
 				c.releaseIPSlot(existingIPKey)
 			}
+			if existing.onClose != nil {
+				existing.onClose()
+			}
 			c.notifyEvictedConnectionClosed(connId, existingIsNtC)
 			c.connectionsMutex.Lock()
 		}
@@ -851,6 +861,7 @@ func (c *ConnectionManager) addConnectionImpl(
 
 	c.connections[connId] = &connectionInfo{
 		conn:      conn,
+		onClose:   onClose,
 		isInbound: isInbound,
 		isNtC:     isNtC,
 		peerAddr:  peerAddr,
@@ -968,6 +979,9 @@ func (c *ConnectionManager) RemoveConnection(
 	// Decrement per-IP counter if the connection had a tracked IP key
 	if info != nil && info.ipKey != "" {
 		c.releaseIPSlot(info.ipKey)
+	}
+	if info.onClose != nil {
+		info.onClose()
 	}
 	c.updateConnectionMetrics()
 	return true
