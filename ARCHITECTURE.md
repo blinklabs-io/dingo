@@ -6095,6 +6095,11 @@ Two contracts follow from that boundary:
 
 ### UTxO RPC (`api/utxorpc/`)
 
+Transaction `MintsAsset` predicates inspect nonzero signed quantities in the
+transaction mint field, matching both minting and burning. A policy-only pattern
+matches any nonzero asset under that policy. Transfers alone do not satisfy this
+predicate; `MovesAsset` retains its output and resolved-input matching behavior.
+
 Each Connect message is bounded to `DefaultMaxRequestBody` (1 MiB) with
 Connect's `WithReadMaxBytes` option. The limit applies to both compressed wire
 bytes and decompressed message bytes before unary decoding reaches the

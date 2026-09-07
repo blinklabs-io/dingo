@@ -530,7 +530,7 @@ func (u *Utxorpc) matchesTxPattern(
 		parts = append(parts, u.txPatternMatchHasAddress(tx, pattern))
 	}
 	if p := pattern.GetMintsAsset(); p != nil {
-		parts = append(parts, u.txPatternMatchAsset(tx, p))
+		parts = append(parts, txPatternMatchMint(tx, p))
 	}
 	if p := pattern.GetMovesAsset(); p != nil {
 		parts = append(parts, u.txPatternMatchAsset(tx, p))
@@ -798,6 +798,37 @@ func (u *Utxorpc) txPatternMatchHasAddress(
 	}
 	if sawUnevaluable {
 		return predUnevaluable
+	}
+	return predNoMatch
+}
+
+// txPatternMatchMint matches minting and burning from the signed mint field.
+// An omitted asset name matches any nonzero quantity under the policy.
+func txPatternMatchMint(
+	tx gledger.Transaction,
+	pattern *cardano.AssetPattern,
+) predOutcome {
+	if pattern == nil {
+		return predUnevaluable
+	}
+	mint := tx.AssetMint()
+	if mint == nil {
+		return predNoMatch
+	}
+	for _, policy := range mint.Policies() {
+		if !bytes.Equal(policy.Bytes(), pattern.GetPolicyId()) {
+			continue
+		}
+		for _, name := range mint.Assets(policy) {
+			if len(pattern.GetAssetName()) > 0 &&
+				!bytes.Equal(name, pattern.GetAssetName()) {
+				continue
+			}
+			quantity := mint.Asset(policy, name)
+			if quantity != nil && quantity.Sign() != 0 {
+				return predMatch
+			}
+		}
 	}
 	return predNoMatch
 }
