@@ -200,7 +200,7 @@ func poolRegistrationDepositHeld(
 	}
 	// Retirement still pending at this slot: this registration cancels it and
 	// the pool keeps holding the earlier deposit.
-		return previous.held, nil
+	return previous.held, nil
 }
 
 type poolRegistrationDepositRow struct {
