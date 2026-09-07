@@ -710,6 +710,46 @@ func TestDownloadSnapshotSizeMismatch(t *testing.T) {
 	require.Contains(t, err.Error(), "download size mismatch")
 }
 
+func TestDownloadSnapshotBoundsResponseRead(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		expect  int64
+		wantErr bool
+	}{
+		{name: "exact boundary", body: "abc", expect: 3},
+		{name: "over boundary", body: "abcd", expect: 3, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Deliberately omit Content-Length so the streaming limit is
+				// exercised rather than the header preflight.
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			t.Cleanup(server.Close)
+			path, err := DownloadSnapshot(context.Background(), DownloadConfig{
+				URL:                 server.URL + "/snapshot.tar.zst",
+				AllowInsecureHTTP:   true,
+				DestDir:             t.TempDir(),
+				Filename:            "bounded.tar.zst",
+				ExpectedSize:        tc.expect,
+				MaxTransientRetries: -1,
+			})
+			if tc.wantErr {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), "exceeds expected size")
+				require.Empty(t, path)
+				return
+			}
+			require.NoError(t, err)
+			data, readErr := os.ReadFile(path)
+			require.NoError(t, readErr)
+			require.Equal(t, tc.body, string(data))
+		})
+	}
+}
+
 // TestDownloadSnapshotRejectsPreexistingSymlinkEscape proves the TOCTOU
 // fix for issue #3147: a symlink placed at the download destination
 // path *before* the download starts, pointing outside DestDir, must

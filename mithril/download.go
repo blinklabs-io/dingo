@@ -766,6 +766,12 @@ func downloadSnapshotOnce(
 		if resp.ContentLength > 0 {
 			totalSize = resp.ContentLength
 		}
+		if cfg.ExpectedSize > 0 && resp.ContentLength > cfg.ExpectedSize {
+			return "", fmt.Errorf(
+				"download response exceeds expected size: got at least %d bytes, expected %d bytes",
+				resp.ContentLength, cfg.ExpectedSize,
+			)
+		}
 		file, err = root.OpenFile(
 			filename,
 			os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
@@ -881,6 +887,13 @@ func downloadSnapshotOnce(
 			if resp.ContentLength > 0 {
 				totalSize = existingSize + resp.ContentLength
 			}
+			if cfg.ExpectedSize > 0 &&
+				resp.ContentLength > cfg.ExpectedSize-existingSize {
+				return "", fmt.Errorf(
+					"download response exceeds expected size: got at least %d bytes, expected %d bytes",
+					totalSize, cfg.ExpectedSize,
+				)
+			}
 			file, err = root.OpenFile(
 				filename,
 				os.O_APPEND|os.O_WRONLY,
@@ -987,7 +1000,17 @@ func downloadSnapshotOnce(
 	body := newIdleTimeoutReader(resp.Body, idleTimeout, func() {
 		cancelDownload(downloadIdleTimeoutCause(idleTimeout))
 	})
-	if _, err := io.Copy(pw, body); err != nil {
+	limitedBody := io.Reader(body)
+	if cfg.ExpectedSize > 0 && cfg.ExpectedSize >= existingSize {
+		// Read at most one byte beyond the expected boundary. That byte
+		// distinguishes an oversized response from an exact-boundary body
+		// without allowing the response to be copied in full first.
+		limitedBody = io.LimitReader(
+			body,
+			cfg.ExpectedSize-existingSize+1,
+		)
+	}
+	if _, err := io.Copy(pw, limitedBody); err != nil {
 		body.Stop()
 		file.Close()
 		file = nil
@@ -1000,6 +1023,15 @@ func downloadSnapshotOnce(
 		return "", fmt.Errorf("writing snapshot data: %w", err)
 	}
 	body.Stop()
+	if cfg.ExpectedSize > 0 && pw.written > cfg.ExpectedSize {
+		file.Close()
+		file = nil
+		root.Remove(filename) //nolint:errcheck
+		return "", fmt.Errorf(
+			"download response exceeds expected size: got more than %d bytes",
+			cfg.ExpectedSize,
+		)
+	}
 
 	// Close the file explicitly so write errors (e.g. ENOSPC
 	// during a deferred flush) are not silently ignored.
