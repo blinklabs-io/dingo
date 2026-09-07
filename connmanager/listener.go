@@ -262,22 +262,23 @@ func (c *ConnectionManager) startListener(
 				continue
 			}
 
-			// NtC connections bypass the inbound slot budget and per-IP
-			// limiting. Their handshake is still moved off the accept loop.
-			if l.UseNtC {
-				c.goroutineWg.Go(func() {
-					c.setupAcceptedConnection(
-						ctx,
-						conn,
-						l,
-						defaultConnOpts,
-						false,
-					)
-				})
+			// Reserve admission before moving any handshake off the accept loop.
+			// This covers NtC as well as NtN: a peer that never completes its
+			// handshake must not consume unbounded setup goroutines.
+			if !c.tryReserveInboundSlot() {
+				c.config.Logger.Warn(
+					fmt.Sprintf(
+						"listener: inbound connection limit reached (%d), rejecting connection from %s",
+						c.config.MaxInboundConns,
+						conn.RemoteAddr(),
+					),
+				)
+				_ = conn.Close()
+				c.untrackPendingConnection(conn)
 				continue
 			}
 
-			// N2N path: when source-port reuse is in use, force RST
+			// When source-port reuse is in use, force RST
 			// on close so the 4-tuple does not get stuck in TIME_WAIT
 			// and block a subsequent outbound dial to the same peer
 			// with EADDRNOTAVAIL on the matching local-listen-port
@@ -294,21 +295,6 @@ func (c *ConnectionManager) startListener(
 				}
 			}
 
-			// N2N path: reserve an inbound slot before spawning setup. The
-			// handshake is intentionally outside this accept loop: one silent
-			// peer must not prevent the listener from accepting another peer.
-			if !c.tryReserveInboundSlot() {
-				c.config.Logger.Warn(
-					fmt.Sprintf(
-						"listener: inbound connection limit reached (%d), rejecting connection from %s",
-						c.config.MaxInboundConns,
-						conn.RemoteAddr(),
-					),
-				)
-				_ = conn.Close()
-				c.untrackPendingConnection(conn)
-				continue
-			}
 			c.goroutineWg.Go(func() {
 				c.setupAcceptedConnection(
 					ctx,
@@ -469,7 +455,8 @@ func (c *ConnectionManager) setupAcceptedConnection(
 			"remote_addr",
 			peerAddr,
 		)
-		if !c.addNtCConnectionWithIPKey(oConn, true, peerAddr, "") {
+		c.consumeInboundSlot()
+		if !c.addNtCConnectionWithIPKey(oConn, true, peerAddr, ipKey) {
 			return
 		}
 	} else {

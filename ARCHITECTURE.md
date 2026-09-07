@@ -607,8 +607,10 @@ connection wrapper caps the muxer's per-segment read deadline at the listener's
 negotiation, returning read-deadline ownership to the muxer for the normal
 long-lived session. Helpers needing the concrete socket type (SO_LINGER, Unix
 peer credentials) unwrap through the wrapper, so wrapping an accepted connection
-never silently disables them. Cancellation closes an in-flight bearer, and failed
-setup releases its reserved inbound and per-IP slots.
+never silently disables them. The configured inbound connection and per-IP caps
+apply to both NtC and N2N bearers before handshake setup begins, so silent
+handshakes cannot consume unbounded admission goroutines. Cancellation closes an
+in-flight bearer, and failed setup releases its reserved inbound and per-IP slots.
 
 ```mermaid
 graph TB

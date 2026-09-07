@@ -20,10 +20,12 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -260,6 +262,65 @@ func newMockConnWithAddr(ip string, port int) *mockConnWithAddr {
 	return mc
 }
 
+type blockingMockConn struct {
+	localAddr  net.Addr
+	remoteAddr net.Addr
+	closeCh    chan struct{}
+	closeOnce  sync.Once
+}
+
+func newBlockingMockConn(ip string, port int) *blockingMockConn {
+	return &blockingMockConn{
+		localAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345},
+		remoteAddr: &net.TCPAddr{IP: net.ParseIP(ip), Port: port},
+		closeCh:    make(chan struct{}),
+	}
+}
+
+func (c *blockingMockConn) Read(_ []byte) (int, error) {
+	<-c.closeCh
+	return 0, net.ErrClosed
+}
+
+func (c *blockingMockConn) Write(data []byte) (int, error) {
+	select {
+	case <-c.closeCh:
+		return 0, net.ErrClosed
+	default:
+		return len(data), nil
+	}
+}
+
+func (c *blockingMockConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closeCh) })
+	return nil
+}
+
+func (c *blockingMockConn) isClosed() bool {
+	select {
+	case <-c.closeCh:
+		return true
+	default:
+		return false
+	}
+}
+
+func inboundAdmissionCountForTest(cm *ConnectionManager) int {
+	count := 0
+	for _, info := range cm.connections {
+		if info != nil && info.isInbound {
+			count++
+		}
+	}
+	return count
+}
+
+func (c *blockingMockConn) LocalAddr() net.Addr              { return c.localAddr }
+func (c *blockingMockConn) RemoteAddr() net.Addr             { return c.remoteAddr }
+func (c *blockingMockConn) SetDeadline(time.Time) error      { return nil }
+func (c *blockingMockConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *blockingMockConn) SetWriteDeadline(time.Time) error { return nil }
+
 func (c *mockConnWithAddr) RemoteAddr() net.Addr {
 	return c.remoteAddr
 }
@@ -305,6 +366,97 @@ func (m *rateLimitMockListener) Addr() net.Addr {
 
 func (m *rateLimitMockListener) ProvideConnection(conn net.Conn) {
 	m.connCh <- conn
+}
+
+// TestNtCAdmissionLimitsPendingConnections proves that NtC handshakes consume
+// both admission controls before protocol setup can block. The first accepted
+// handshake remains pending while the second connection is offered.
+func TestNtCAdmissionLimitsPendingConnections(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	tests := []struct {
+		name       string
+		maxInbound int
+		maxPerIP   int
+	}{
+		{
+			name:       "total inbound limit",
+			maxInbound: 1,
+			maxPerIP:   10,
+		},
+		{
+			name:       "per IP limit",
+			maxInbound: 10,
+			maxPerIP:   1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			listener := newRateLimitMockListener()
+			cm := NewConnectionManager(ConnectionManagerConfig{
+				Logger:              slog.New(slog.NewJSONHandler(io.Discard, nil)),
+				PromRegistry:        prometheus.NewRegistry(),
+				MaxInboundConns:     tt.maxInbound,
+				MaxConnectionsPerIP: tt.maxPerIP,
+				Listeners: []ListenerConfig{{
+					Listener: listener,
+					ConnectionOpts: []ouroboros.ConnectionOptionFunc{
+						ouroboros.WithNetworkMagic(1),
+					},
+					UseNtC: true,
+				}},
+			})
+			require.NoError(t, cm.Start(context.Background()))
+
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				require.NoError(t, cm.Stop(ctx))
+			})
+
+			first := newBlockingMockConn("192.0.2.10", 4001)
+			ipKey := ipKeyFromAddr(first.RemoteAddr())
+			require.Equal(t, "192.0.2.10", ipKey)
+			if tt.name == "per IP limit" {
+				require.True(t, cm.acquireIPSlot(ipKey))
+				listener.ProvideConnection(first)
+				require.Eventually(t, first.isClosed, time.Second, time.Millisecond,
+					"NtC connection over the per-IP limit should be closed",
+				)
+				require.Eventually(t, func() bool {
+					cm.connectionsMutex.Lock()
+					defer cm.connectionsMutex.Unlock()
+					return cm.inboundReserved == 0
+				}, time.Second, time.Millisecond)
+				require.Equal(t, 1, cm.IPConnCount(ipKey))
+				return
+			}
+			listener.ProvideConnection(first)
+			require.Eventually(t, func() bool {
+				cm.connectionsMutex.Lock()
+				defer cm.connectionsMutex.Unlock()
+				return inboundAdmissionCountForTest(cm)+cm.inboundReserved == 1
+			}, time.Second, time.Millisecond,
+				"first NtC connection should occupy an inbound slot",
+			)
+			require.Eventually(t, func() bool {
+				return cm.IPConnCount(ipKey) == 1
+			}, time.Second, time.Millisecond,
+				"first pending NtC handshake should reserve its IP slot",
+			)
+
+			second := newBlockingMockConn("192.0.2.10", 4002)
+			listener.ProvideConnection(second)
+			require.Eventually(t, func() bool {
+				cm.connectionsMutex.Lock()
+				defer cm.connectionsMutex.Unlock()
+				return inboundAdmissionCountForTest(cm)+cm.inboundReserved == 1
+			}, time.Second, time.Millisecond,
+				"rejected pending NtC handshake must not exceed the inbound limit",
+			)
+			require.Equal(t, 1, cm.IPConnCount(ipKey))
+		})
+	}
 }
 
 // TestIPRateLimitInAcceptLoop tests the per-IP rate limiting in the

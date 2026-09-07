@@ -198,6 +198,19 @@ func (c *ConnectionManager) inboundCountLocked() int {
 	return c.inboundCount
 }
 
+// inboundAdmissionCountLocked returns all active inbound connections, including
+// NtC connections that are intentionally excluded from N2N metrics.
+// The caller must hold connectionsMutex.
+func (c *ConnectionManager) inboundAdmissionCountLocked() int {
+	count := 0
+	for _, info := range c.connections {
+		if info != nil && info.isInbound {
+			count++
+		}
+	}
+	return count
+}
+
 // InboundCount returns the current number of inbound connections.
 func (c *ConnectionManager) InboundCount() int {
 	c.connectionsMutex.Lock()
@@ -215,7 +228,7 @@ func (c *ConnectionManager) InboundCount() int {
 func (c *ConnectionManager) tryReserveInboundSlot() bool {
 	c.connectionsMutex.Lock()
 	defer c.connectionsMutex.Unlock()
-	if c.inboundCountLocked()+c.inboundReserved >= c.config.MaxInboundConns {
+	if c.inboundAdmissionCountLocked()+c.inboundReserved >= c.config.MaxInboundConns {
 		return false
 	}
 	c.inboundReserved++
