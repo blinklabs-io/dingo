@@ -22,7 +22,10 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 )
 
-const maxHardForkSlotLengthMilliseconds = uint64(1<<63-1) / uint64(time.Millisecond)
+const (
+	maxHardForkDurationNanoseconds    = uint64(1<<63 - 1)
+	maxHardForkSlotLengthMilliseconds = maxHardForkDurationNanoseconds / uint64(time.Millisecond)
+)
 
 func hardForkCachedEraParams(
 	lengthInSlots uint,
@@ -42,6 +45,30 @@ func hardForkCachedEraParams(
 		return hardfork.EraParams{}, err
 	}
 	return params, nil
+}
+
+func hardForkCachedEpochDuration(
+	lengthInSlots uint,
+	slotLengthMilliseconds uint,
+) (time.Duration, error) {
+	params, err := hardForkCachedEraParams(
+		lengthInSlots,
+		slotLengthMilliseconds,
+	)
+	if err != nil {
+		return 0, err
+	}
+	slotLengthNanoseconds := uint64(params.SlotLength)
+	if uint64(lengthInSlots) >
+		maxHardForkDurationNanoseconds/slotLengthNanoseconds {
+		return 0, fmt.Errorf(
+			"epoch duration overflows time.Duration: length=%d slots, slot length=%s",
+			lengthInSlots,
+			params.SlotLength,
+		)
+	}
+	// #nosec G115 -- the checked product is bounded by MaxInt64.
+	return time.Duration(uint64(lengthInSlots) * slotLengthNanoseconds), nil
 }
 
 // HardForkSummary constructs a hardfork.Summary describing the chain's era
@@ -136,10 +163,11 @@ func (ls *LedgerState) hardForkSummaryAnchoredAt(
 		j := i
 		for j < len(cache) && cache[j].EraId == eraID {
 			ep := cache[j]
-			if _, err := hardForkCachedEraParams(
+			epochDuration, err := hardForkCachedEpochDuration(
 				ep.LengthInSlots,
 				ep.SlotLength,
-			); err != nil {
+			)
+			if err != nil {
 				return nil, fmt.Errorf(
 					"ledger: cached epoch %d (era %d) params invalid: %w",
 					ep.EpochId,
@@ -147,8 +175,15 @@ func (ls *LedgerState) hardForkSummaryAnchoredAt(
 					err,
 				)
 			}
-			relTime += time.Duration(ep.LengthInSlots) *
-				time.Duration(ep.SlotLength) * time.Millisecond
+			if uint64(relTime) >
+				maxHardForkDurationNanoseconds-uint64(epochDuration) {
+				return nil, fmt.Errorf(
+					"ledger: cumulative cached epoch duration overflows time.Duration at epoch %d (era %d)",
+					ep.EpochId,
+					eraID,
+				)
+			}
+			relTime += epochDuration
 			j++
 		}
 

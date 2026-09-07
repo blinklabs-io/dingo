@@ -292,6 +292,91 @@ func TestHardForkSummary_ValidatesEveryCachedEpoch(t *testing.T) {
 	require.ErrorContains(t, err, "cached epoch 1")
 }
 
+func TestHardForkSummary_RejectsEpochDurationOverflow(t *testing.T) {
+	const slotLengthMilliseconds = uint64(1)
+	maxDurationMilliseconds := uint64(1<<63-1) / uint64(time.Millisecond)
+	if uint64(^uint(0)) < maxDurationMilliseconds+1 {
+		t.Skip("uint cannot represent the overflow boundary")
+	}
+
+	testCases := []struct {
+		name          string
+		lengthInSlots uint64
+		wantErr       bool
+	}{
+		{
+			name:          "maximum representable duration",
+			lengthInSlots: maxDurationMilliseconds,
+		},
+		{
+			name:          "multiplication overflow",
+			lengthInSlots: maxDurationMilliseconds + 1,
+			wantErr:       true,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			ls := &LedgerState{
+				epochCache: []models.Epoch{{
+					EpochId:       0,
+					StartSlot:     0,
+					SlotLength:    uint(slotLengthMilliseconds),
+					LengthInSlots: uint(testCase.lengthInSlots),
+					EraId:         1,
+				}},
+				currentTip: ochainsync.Tip{
+					Point: ocommon.NewPoint(0, []byte("tip")),
+				},
+			}
+			ls.publishSnapshotsLocked()
+
+			_, err := ls.HardForkSummary()
+			if testCase.wantErr {
+				require.Error(t, err)
+				require.ErrorContains(t, err, "duration")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestHardForkSummary_RejectsCumulativeDurationOverflow(t *testing.T) {
+	maxDurationMilliseconds := uint64(1<<63-1) / uint64(time.Millisecond)
+	perEpochLength := maxDurationMilliseconds/2 + 1
+	if uint64(^uint(0)) < perEpochLength {
+		t.Skip("uint cannot represent the overflow boundary")
+	}
+
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				SlotLength:    1,
+				LengthInSlots: uint(perEpochLength),
+				EraId:         1,
+			},
+			{
+				EpochId:       1,
+				StartSlot:     perEpochLength,
+				SlotLength:    1,
+				LengthInSlots: uint(perEpochLength),
+				EraId:         1,
+			},
+		},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(0, []byte("tip")),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	_, err := ls.HardForkSummary()
+	require.Error(t, err)
+	require.ErrorContains(t, err, "duration")
+}
+
 // TestHardForkSummary_MissingShelleyGenesis tolerates a config without a
 // Shelley genesis: SystemStart stays at the
 // zero time. Callers that need wall-clock conversions must provide the
