@@ -1053,9 +1053,10 @@ func validBool(value bool) sql.NullBool {
 	return sql.NullBool{Bool: value, Valid: true}
 }
 
-// GetDrepLastRegistrationDeposits returns every DRep credential's most
-// recent registration deposit in one query, keyed by
-// models.DrepDepositKey. See GetDrepLastRegistrationDeposit for why
+// GetDrepLastRegistrationDeposits returns the most recent registration
+// deposit of every active DRep in one query, keyed by
+// models.DrepDepositKey. Credentials with no registration_drep row are
+// absent from the map. See GetDrepLastRegistrationDeposit for why
 // bootstrap-slot import rows are not filtered out.
 func (s *Store) GetDrepLastRegistrationDeposits(
 	txn types.Txn,

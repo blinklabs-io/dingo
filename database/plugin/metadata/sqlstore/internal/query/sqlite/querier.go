@@ -109,10 +109,13 @@ type Querier interface {
 	// row is often a DRep's only registration, so excluding it here would
 	// compute a refund of 0 for a deposit that was actually paid.
 	GetDrepLastRegistrationDeposit(ctx context.Context, arg GetDrepLastRegistrationDepositParams) (sql.NullString, error)
-	// The set form of GetDrepLastRegistrationDeposit, for listing every active
-	// DRep's deposit in one round trip instead of one query per DRep. Same
-	// certificate_id treatment: bootstrap-slot import rows count, because their
-	// deposit_amount is the real amount owed.
+	// The set form of GetDrepLastRegistrationDeposit, for reading the deposits
+	// of the active DReps GetActiveDreps returns in one round trip instead of
+	// one query per DRep. Same certificate_id treatment: bootstrap-slot import
+	// rows count, because their deposit_amount is the real amount owed.
+	// The join to drep restricts the grouped scan to the active credential set,
+	// so registration history left behind by DReps that have since deregistered
+	// neither enlarges the result nor grows the work.
 	GetDrepLastRegistrationDeposits(ctx context.Context) ([]GetDrepLastRegistrationDepositsRow, error)
 	GetDrepLastRegistrationSlot(ctx context.Context, arg GetDrepLastRegistrationSlotParams) (int64, error)
 	GetEpoch(ctx context.Context, epochID sql.NullInt64) (GetEpochRow, error)

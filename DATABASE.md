@@ -2284,9 +2284,15 @@ N+1 round trips:
 SELECT r.credential_tag, r.drep_credential, r.deposit_amount
 FROM registration_drep r
 JOIN (
-    SELECT credential_tag, drep_credential, MAX(added_slot) AS added_slot
-    FROM registration_drep
-    GROUP BY credential_tag, drep_credential
+    SELECT reg.credential_tag AS credential_tag,
+           reg.drep_credential AS drep_credential,
+           MAX(reg.added_slot) AS added_slot
+    FROM registration_drep reg
+    JOIN drep d
+      ON d.credential_tag = reg.credential_tag
+     AND d.credential = reg.drep_credential
+    WHERE d.active = TRUE
+    GROUP BY reg.credential_tag, reg.drep_credential
 ) latest
   ON latest.credential_tag = r.credential_tag
  AND latest.drep_credential = r.drep_credential
@@ -2307,20 +2313,23 @@ Four properties external callers depend on:
   `certificate_id IS NOT NULL AND certificate_id != 0` filter — bootstrap import
   rows carry the real deposit and are frequently a DRep's only registration row
   on a Mithril-bootstrapped node, for the reason described above.
-- **Scope is the full registration history, not the active set.** Every
-  credential that has ever appeared in `registration_drep` gets an entry,
-  including retired and deregistered DReps. Callers listing active DReps
-  intersect the map against their own list rather than iterating it.
+- **Scope is the active DRep set.** The inner join to `drep` on
+  `active = TRUE` restricts both the grouped scan and the result to the
+  credentials `GetActiveDreps` reports, so a credential that has appeared in
+  `registration_drep` but is no longer active gets no entry and its history
+  does not enlarge the work. Callers list that same set, so they index the map
+  by credential rather than iterating it.
 - **Absent means zero.** A credential with no registration row is simply absent
   from the map, and rows whose `deposit_amount` is NULL are skipped rather than
   stored, so both read back as 0 from a map lookup. That matches the singular
   query, which returns `(0, nil)` for `sql.ErrNoRows` and for a NULL deposit.
   Callers therefore index the map directly instead of testing for presence.
 
-Ties are arbitrary in both forms: if a credential somehow has two registration
-rows at the same `added_slot`, the join emits both and the map retains whichever
-is scanned last, the same unspecified choice the singular query's
-`ORDER BY added_slot DESC LIMIT 1` makes.
+Neither form needs a tie-break. `registration_drep` carries
+`UNIQUE (credential_tag, drep_credential, added_slot)` (`idx_drep_reg_cred_slot`
+in the v1 expand migration), so at most one row per credential can hold the
+`MAX(added_slot)` the join matches, and the singular query's
+`ORDER BY added_slot DESC LIMIT 1` has nothing to choose between.
 
 `GetPredefinedDrepFirstSeenSlots` returns the earliest delegation slot
 per predefined DRep type (2 = AlwaysAbstain, 3 = AlwaysNoConfidence),

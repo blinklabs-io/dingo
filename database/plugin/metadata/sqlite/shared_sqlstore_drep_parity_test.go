@@ -93,6 +93,8 @@ type drepState struct {
 	MissingRegistrationSlot uint64
 	CertifiedDeposit        uint64
 	ImportedDeposit         uint64
+	LatestDeposit           uint64
+	InactiveDeposit         uint64
 	MissingDeposit          uint64
 	Deposits                map[string]uint64
 	MissingActivityError    string
@@ -128,6 +130,13 @@ func exerciseDrepStore(t *testing.T, store drepStore) drepState {
 	// mistake, and it would show up here as a refund of 0 rather than as
 	// a missing method.
 	importOnlyCredential := bytes.Repeat([]byte{0x44}, 28)
+	// Two registration rows for one credential, so the latest-row rule is
+	// exercised rather than assumed from a single row.
+	rereggedCredential := bytes.Repeat([]byte{0x45}, 28)
+	// Registered, with a real deposit, but no longer active. Readable
+	// through the singular form and excluded from the batched one, which
+	// is scoped to the active set its callers list.
+	inactiveCredential := bytes.Repeat([]byte{0x46}, 28)
 
 	created := &models.Drep{
 		Credential: createdCredential, AddedSlot: 10,
@@ -174,6 +183,44 @@ func exerciseDrepStore(t *testing.T, store drepStore) drepState {
 			AddedSlot:      22,
 			AnchorURL:      "import-only",
 			DepositAmount:  500000000,
+		},
+		nil,
+	))
+	require.NoError(t, store.ImportDrep(
+		&models.Drep{
+			Credential: rereggedCredential, AddedSlot: 23,
+			Active: true,
+		},
+		&models.RegistrationDrep{
+			DrepCredential: rereggedCredential,
+			AddedSlot:      23,
+			DepositAmount:  400000000,
+		},
+		nil,
+	))
+	require.NoError(t, store.ImportDrep(
+		&models.Drep{
+			Credential: rereggedCredential, AddedSlot: 44,
+			Active: true,
+		},
+		&models.RegistrationDrep{
+			DrepCredential: rereggedCredential,
+			AddedSlot:      44,
+			CertificateID:  11,
+			DepositAmount:  300000000,
+		},
+		nil,
+	))
+	require.NoError(t, store.ImportDrep(
+		&models.Drep{
+			Credential: inactiveCredential, AddedSlot: 24,
+			Active: false,
+		},
+		&models.RegistrationDrep{
+			DrepCredential: inactiveCredential,
+			AddedSlot:      24,
+			CertificateID:  12,
+			DepositAmount:  200000000,
 		},
 		nil,
 	))
@@ -278,6 +325,24 @@ func exerciseDrepStore(t *testing.T, store drepStore) drepState {
 	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(500), ret.CertifiedDeposit)
+	// Two registration rows for one credential: the later one wins, so an
+	// earlier import placeholder cannot shadow a real re-registration.
+	ret.LatestDeposit, err = store.GetDrepLastRegistrationDeposit(
+		0,
+		rereggedCredential,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(300000000), ret.LatestDeposit)
+	// A registered but inactive credential is still readable through the
+	// singular form, which does not consult drep.active.
+	ret.InactiveDeposit, err = store.GetDrepLastRegistrationDeposit(
+		0,
+		inactiveCredential,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(200000000), ret.InactiveDeposit)
 	// No registration history at all reports 0 rather than erroring.
 	ret.MissingDeposit, err = store.GetDrepLastRegistrationDeposit(
 		0,
@@ -305,6 +370,19 @@ func exerciseDrepStore(t *testing.T, store drepStore) drepState {
 		t,
 		ret.Deposits,
 		models.DrepDepositKey(0, missingCredential),
+	)
+	// The batched form is scoped to the active set, so the exact map is
+	// what pins that down: the inactive credential is excluded even though
+	// it has a registration row with a real deposit, and the created
+	// credential is excluded because it has none.
+	require.Equal(
+		t,
+		map[string]uint64{
+			models.DrepDepositKey(1, importedCredential):   500,
+			models.DrepDepositKey(0, importOnlyCredential): 500000000,
+			models.DrepDepositKey(0, rereggedCredential):   300000000,
+		},
+		ret.Deposits,
 	)
 	err = store.UpdateDRepActivity(0, missingCredential, 1, 1, nil)
 	require.Error(t, err)

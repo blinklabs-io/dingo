@@ -532,9 +532,15 @@ type GovernanceStore interface {
 	) (uint64, error)
 
 	// GetDrepLastRegistrationDeposits is the set form of
-	// GetDrepLastRegistrationDeposit, returning every DRep credential's
-	// most recent registration deposit keyed by models.DrepDepositKey.
-	// Listing every active DRep otherwise costs one query per DRep.
+	// GetDrepLastRegistrationDeposit over the active DRep set: it returns
+	// the most recent registration deposit of every DRep GetActiveDreps
+	// reports, keyed by models.DrepDepositKey. Credentials with no
+	// registration_drep row are absent from the map, which reads back as
+	// the same 0 the singular form returns. Restricting it to the active
+	// set matches the callers, which are all listing exactly that set, and
+	// keeps the scan from growing with the registration history of DReps
+	// that have since deregistered. Listing them one at a time otherwise
+	// costs one query per DRep.
 	GetDrepLastRegistrationDeposits(
 		types.Txn,
 	) (map[string]uint64, error)

@@ -342,9 +342,10 @@ func (d *Database) GetExpiredDReps(
 	return d.governanceStore().GetExpiredDReps(epoch, txn.Metadata())
 }
 
-// GetDrepLastRegistrationDeposits returns every DRep credential's most
-// recent registration deposit keyed by models.DrepDepositKey, so a caller
-// listing all active DReps does not need one query per DRep.
+// GetDrepLastRegistrationDeposits returns the most recent registration
+// deposit of every active DRep, keyed by models.DrepDepositKey, so a caller
+// listing all active DReps does not need one query per DRep. Credentials
+// with no registration_drep row are absent from the map.
 func (d *Database) GetDrepLastRegistrationDeposits(
 	txn *Txn,
 ) (map[string]uint64, error) {

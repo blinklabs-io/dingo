@@ -1862,9 +1862,15 @@ const getDrepLastRegistrationDeposits = `-- name: GetDrepLastRegistrationDeposit
 SELECT r.credential_tag, r.drep_credential, r.deposit_amount
 FROM registration_drep r
 JOIN (
-    SELECT credential_tag, drep_credential, MAX(added_slot) AS added_slot
-    FROM registration_drep
-    GROUP BY credential_tag, drep_credential
+    SELECT reg.credential_tag AS credential_tag,
+           reg.drep_credential AS drep_credential,
+           MAX(reg.added_slot) AS added_slot
+    FROM registration_drep reg
+    JOIN drep d
+      ON d.credential_tag = reg.credential_tag
+     AND d.credential = reg.drep_credential
+    WHERE d.active = TRUE
+    GROUP BY reg.credential_tag, reg.drep_credential
 ) latest
   ON latest.credential_tag = r.credential_tag
  AND latest.drep_credential = r.drep_credential
@@ -1877,10 +1883,13 @@ type GetDrepLastRegistrationDepositsRow struct {
 	DepositAmount  sql.NullString
 }
 
-// The set form of GetDrepLastRegistrationDeposit, for listing every active
-// DRep's deposit in one round trip instead of one query per DRep. Same
-// certificate_id treatment: bootstrap-slot import rows count, because their
-// deposit_amount is the real amount owed.
+// The set form of GetDrepLastRegistrationDeposit, for reading the deposits
+// of the active DReps GetActiveDreps returns in one round trip instead of
+// one query per DRep. Same certificate_id treatment: bootstrap-slot import
+// rows count, because their deposit_amount is the real amount owed.
+// The join to drep restricts the grouped scan to the active credential set,
+// so registration history left behind by DReps that have since deregistered
+// neither enlarges the result nor grows the work.
 func (q *Queries) GetDrepLastRegistrationDeposits(ctx context.Context) ([]GetDrepLastRegistrationDepositsRow, error) {
 	rows, err := q.db.QueryContext(ctx, getDrepLastRegistrationDeposits)
 	if err != nil {
