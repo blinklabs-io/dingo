@@ -470,6 +470,8 @@ func TestBuildDingoConfigWiresForgeTolerances(t *testing.T) {
 		ForgeSyncToleranceSlots:            321,
 		ForgeStaleGapThresholdSlots:        654,
 		ForgePrimaryChainTipToleranceSlots: 42,
+		ForgeUpstreamStalenessSlots:        17,
+		ForgeAppliedTipStalenessSlots:      9,
 	}
 	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
 
@@ -496,6 +498,22 @@ func TestBuildDingoConfigWiresForgeTolerances(t *testing.T) {
 			"expected forgePrimaryChainTipToleranceSlots 42, got %d; the "+
 				"loaded value never reached dingo.Config, so the forger "+
 				"silently uses its built-in default",
+			got,
+		)
+	}
+	if got := built.ForgeUpstreamStalenessSlots(); got != 17 {
+		t.Fatalf(
+			"expected forgeUpstreamStalenessSlots 17, got %d; the loaded "+
+				"value never reached dingo.Config, so the forger silently "+
+				"uses its built-in default",
+			got,
+		)
+	}
+	if got := built.ForgeAppliedTipStalenessSlots(); got != 9 {
+		t.Fatalf(
+			"expected forgeAppliedTipStalenessSlots 9, got %d; the loaded "+
+				"value never reached dingo.Config, so the wall-clock "+
+				"staleness backstop stays off however it is configured",
 			got,
 		)
 	}

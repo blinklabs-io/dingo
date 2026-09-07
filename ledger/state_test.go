@@ -5513,3 +5513,53 @@ func TestWarnOnPreByronPrefixEpochCache(t *testing.T) {
 		assert.NotContains(t, logs.String(), warning)
 	})
 }
+
+// TestUpstreamSyncStatusReachableStates pins every (target, active) pair the
+// real LedgerState can return from UpstreamSyncStatus, which is the value the
+// forge staleness gate reads.
+//
+// It exists because a gate was written against a state this type cannot
+// produce. An earlier revision fell back to the admitted-header frontier when
+// UpstreamSyncStatus returned a zero target, on the belief that a live upstream
+// with no published target reported (0, false). It reports (0, true) -- and the
+// pre-existing sync gate already refuses that slot -- so the fallback was
+// unreachable in production. It passed review only because a test double could
+// express (0, false) alongside a non-zero admitted frontier, which is the one
+// combination the adapter cannot produce.
+//
+// Assert the adapter's own outputs, not a double's: a double is only evidence
+// about the double.
+func TestUpstreamSyncStatusReachableStates(t *testing.T) {
+	conn := testChainsyncConnId(6000, 3094)
+	activeConn := conn
+	live := true
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				if !live {
+					return nil
+				}
+				return &activeConn
+			},
+		},
+	}
+
+	// Live upstream, no target published -- the state the removed fallback
+	// was written for. It is (0, TRUE), not (0, false).
+	ls.advanceUpstreamTipSlot(318)
+	target, active := ls.UpstreamSyncStatus()
+	assert.Zero(t, target)
+	assert.True(
+		t,
+		active,
+		"a live upstream with no published target is (0, true); the "+
+			"pre-existing sync gate refuses this slot before the stale-tip "+
+			"gate runs, so no stale-tip branch may be written for it",
+	)
+
+	// No live upstream -- (0, false).
+	live = false
+	target, active = ls.UpstreamSyncStatus()
+	assert.Zero(t, target)
+	assert.False(t, active)
+}

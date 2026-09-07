@@ -156,6 +156,19 @@ type Ouroboros struct {
 	// package to Leios prototype protocols.
 	leiosEndorserBlocks map[string]*leiosEndorserBlockData
 	leiosMu             sync.RWMutex
+	// leiosMaxVerifiedEbSlot is the highest slot for which an endorser block
+	// has been corroborated -- see publishLeiosEndorserBlock. It is proof that
+	// a ranking block exists at that slot, which the forge gate uses as a
+	// lower bound on the header frontier.
+	//
+	// VERIFIED occurrences only. A peer-offered manifest carries that
+	// connection's unverified claim about which slot it belongs to, and this
+	// value can only ever make the node REFUSE to forge, so trusting an
+	// unverified claim would let one peer suppress block production by
+	// offering a manifest bound to a slot near the current one. Corroboration
+	// comes from a validated ranking-block announcement or the ledger's own
+	// chain-derived reference, neither of which a peer controls.
+	leiosMaxVerifiedEbSlot atomic.Uint64
 	// leiosEndorserBlockSeq is a monotonic counter assigned to a cache entry
 	// while leiosMu is held, so eviction order reflects actual insertion order
 	// even when a delayed goroutine captured an earlier wall-clock insertedAt

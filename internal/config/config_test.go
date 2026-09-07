@@ -66,6 +66,8 @@ func resetGlobalConfig() {
 		ForgeSyncToleranceSlots:            DefaultForgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots:        DefaultForgeStaleGapThresholdSlots,
 		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
+		ForgeUpstreamStalenessSlots:        DefaultForgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,
@@ -103,6 +105,10 @@ func unsetForgeGateEnv(t *testing.T) {
 		"CARDANO_DINGO_FORGE_SYNC_TOLERANCE_SLOTS",
 		"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS",
 		"CARDANO_DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS",
+		"DINGO_FORGE_UPSTREAM_STALENESS_SLOTS",
+		"CARDANO_DINGO_FORGE_UPSTREAM_STALENESS_SLOTS",
+		"DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS",
+		"CARDANO_DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS",
 	} {
 		// t.Setenv registers the restore; Unsetenv then removes it for the
 		// duration of the test, which is what envconfig must not see.
@@ -241,8 +247,12 @@ mithril:
 		},
 		ForgeSyncToleranceSlots:     321,
 		ForgeStaleGapThresholdSlots: 654,
-		// Not set by the fixture's YAML/env, so ApplyDefaults fills it.
+		// Not set by the fixture's YAML/env, so ApplyDefaults fills them --
+		// except the applied-tip backstop, whose 0 means "disabled" rather
+		// than "unset", so it stays 0.
 		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
+		ForgeUpstreamStalenessSlots:        DefaultForgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,
 		Mithril: MithrilConfig{
 			Enabled:                false,
 			AggregatorURL:          "https://mithril.example.net",
@@ -351,6 +361,8 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		ForgeSyncToleranceSlots:            DefaultForgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots:        DefaultForgeStaleGapThresholdSlots,
 		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
+		ForgeUpstreamStalenessSlots:        DefaultForgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,

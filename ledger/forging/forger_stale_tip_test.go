@@ -381,9 +381,11 @@ func TestForgeProceedsWhenEitherTipHashIsEmpty(t *testing.T) {
 // exists before the first skip, so a dashboard is not looking at an absent
 // series.
 //
-// Four series: the three post-leader-check disagreements (slot_gap,
-// primary_tip_hash_diverged, primary_tip_behind_applied) plus the pre-leader
-// -check unapplied_rival_at_leader_slot.
+// Six series: the three tip disagreements (slot_gap,
+// primary_tip_hash_diverged, primary_tip_behind_applied), the pre-leader-check
+// unapplied_rival_at_leader_slot, and the two staleness bounds
+// (eb_manifest_ahead, applied_tip_stale), which are pre-materialized even
+// though both of applied_tip_stale's sources are off by default.
 func TestForgeStaleTipSkipReasonsArePreMaterialized(t *testing.T) {
 	var logs bytes.Buffer
 	hash := bytes.Repeat([]byte{0xAA}, 32)
@@ -395,7 +397,7 @@ func TestForgeStaleTipSkipReasonsArePreMaterialized(t *testing.T) {
 	)
 	require.Equal(
 		t,
-		4,
+		6,
 		testutil.CollectAndCount(forger.metrics.forgeStaleTipSkip),
 	)
 }
@@ -788,4 +790,244 @@ func TestForgeCountsLeaderSlotLostToUnappliedRival(t *testing.T) {
 			)
 		})
 	}
+}
+
+// newStalenessTestForger builds a production forger with the upstream target
+// and the corroborated endorser-block slot made explicit.
+// newStalenessTestForger builds a production forger for the staleness gates.
+//
+// upstreamStalenessSlots is explicit and every caller that exercises the
+// upstream bound must pass a non-zero value: the bound is opt-in, so a helper
+// that defaulted it would hide the very regression
+// TestForgeUpstreamStalenessIsOffByDefault exists to catch.
+func newStalenessTestForger(
+	t *testing.T,
+	currentSlot, chainTipSlot, frontierSlot, upstreamSlot uint64,
+	ebSlot uint64,
+	appliedStalenessSlots uint64,
+	upstreamStalenessSlots uint64,
+	logs *bytes.Buffer,
+) (*BlockForger, *forgerTestBuilder) {
+	t.Helper()
+	block := newForgerTestBlock(currentSlot, 2)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode: ModeProduction,
+		Logger: slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		})),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       currentSlot,
+			chainTipSlot:      chainTipSlot,
+			frontierExplicit:  true,
+			frontierSlot:      frontierSlot,
+			upstreamTipSlot:   upstreamSlot,
+			slotsPerKESPeriod: 100,
+		},
+		LeiosVerifiedEbSlot:           func() uint64 { return ebSlot },
+		ForgeAppliedTipStalenessSlots: appliedStalenessSlots,
+		ForgeUpstreamStalenessSlots:   upstreamStalenessSlots,
+		PromRegistry:                  prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+	return forger, builder
+}
+
+// TestForgeSkipsWhenNewestKnownBlockTrailsUpstream is the ghost the frontier
+// gate could not see. When header admission and ledger application stall
+// together the frontier equals the applied tip, so the frontier gap reads 0 and
+// the gate passes -- while the node is many slots behind the network and
+// forges on a parent the network has already built past.
+//
+// Measured against the corroborated upstream target rather than the wall clock,
+// so it stays meaningful on a chain of any block rate.
+//
+// The bound is opt-in, so this test sets it explicitly. It cannot by itself
+// distinguish "the network is 19 slots ahead" from "the block 19 slots after
+// mine was just admitted and its body is still in flight" -- the upstream
+// target is published at header admission while newestKnown counts blocks --
+// which is precisely why the bound is not defaulted on. See
+// TestForgeUpstreamStalenessIsOffByDefault.
+func TestForgeSkipsWhenNewestKnownBlockTrailsUpstream(t *testing.T) {
+	var logs bytes.Buffer
+	// Primary chain tip == applied tip, so the gap is 0, but the network is
+	// 19 slots ahead. Slot numbers are scaled down so the KES period stays
+	// inside the test operational certificate.
+	forger, builder := newStalenessTestForger(
+		t, 300, 299, 299, 318, 0, 0, 5, &logs,
+	)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Zero(t, builder.calls)
+	require.Zero(
+		t,
+		testutil.ToFloat64(forger.metrics.tipGapSlots),
+		"the frontier gap really is 0 here; that is the point",
+	)
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipAppliedStale),
+	)
+	require.Contains(t, logs.String(), `"reason":"applied_tip_stale"`)
+	require.Contains(t, logs.String(), `"upstream_target_slot":318`)
+}
+
+// TestForgeProceedsOnAQuietChain pins that the staleness term does not punish a
+// chain with a long block interval. The newest block is 500 slots old but the
+// network agrees it is the newest, so nothing is wrong and the node must forge.
+// A wall-clock bound would refuse here, which is why the default term is
+// measured against upstream and the wall-clock one is off by default.
+func TestForgeProceedsOnAQuietChain(t *testing.T) {
+	var logs bytes.Buffer
+	forger, builder := newStalenessTestForger(
+		t, 600, 100, 100, 100, 0, 0, 5, &logs,
+	)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Equal(t, 1, builder.calls)
+	require.Zero(
+		t,
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipAppliedStale),
+	)
+	// The forge-context line carries every input a post-mortem needs.
+	require.Contains(t, logs.String(), `"msg":"forge context"`)
+	require.Contains(t, logs.String(), `"newest_known_slot":100`)
+}
+
+// TestForgeAppliedTipStalenessKnobIsOptIn pins the wall-clock backstop: off by
+// default, and refusing once an operator sets a bound.
+func TestForgeAppliedTipStalenessKnobIsOptIn(t *testing.T) {
+	t.Run("off by default", func(t *testing.T) {
+		var logs bytes.Buffer
+		forger, builder := newStalenessTestForger(
+			t, 600, 100, 100, 0, 0, 0, 0, &logs,
+		)
+		require.NoError(
+			t,
+			forger.checkAndForgeProduction(context.Background()),
+		)
+		require.Equal(t, 1, builder.calls)
+	})
+
+	t.Run("refuses once set", func(t *testing.T) {
+		var logs bytes.Buffer
+		forger, builder := newStalenessTestForger(
+			t, 600, 100, 100, 0, 0, 100, 0, &logs,
+		)
+		require.NoError(
+			t,
+			forger.checkAndForgeProduction(context.Background()),
+		)
+		require.Zero(t, builder.calls)
+		require.Equal(
+			t,
+			float64(1),
+			testutil.ToFloat64(
+				forger.metrics.forgeStaleTipSkipAppliedStale,
+			),
+		)
+	})
+}
+
+// TestForgeSkipsWhenCorroboratedEndorserBlockIsAhead covers the Leios signal: a
+// corroborated endorser block shares its announcing ranking block's slot, so it
+// is proof a ranking block exists there even though no header has arrived. The
+// headers alone look caught up -- frontier equals the applied tip -- so only
+// this evidence can refuse the forge.
+func TestForgeSkipsWhenCorroboratedEndorserBlockIsAhead(t *testing.T) {
+	var logs bytes.Buffer
+	forger, builder := newStalenessTestForger(
+		t, 320, 300, 300, 0, 313, 0, 0, &logs,
+	)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Zero(t, builder.calls)
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipEbAhead),
+	)
+	require.Contains(t, logs.String(), `"reason":"eb_manifest_ahead"`)
+	require.Contains(t, logs.String(), `"eb_slot":313`)
+}
+
+// TestForgeIgnoresEndorserBlockSlotBeyondTheCurrentSlot pins the clamp. A
+// corroborated slot ahead of the current slot means this node's clock is
+// behind, which is a different fault; laundering it into a forge refusal would
+// let a clock skew silently stop block production.
+func TestForgeIgnoresEndorserBlockSlotBeyondTheCurrentSlot(t *testing.T) {
+	var logs bytes.Buffer
+	forger, builder := newStalenessTestForger(
+		t, 310, 309, 309, 0, 400, 0, 0, &logs,
+	)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Equal(t, 1, builder.calls)
+	require.Zero(
+		t,
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipEbAhead),
+	)
+	require.Contains(t, logs.String(), `"eb_slot":0`)
+}
+
+// TestForgeStalenessDoesNotBlockWithoutAReference pins that a forge with no
+// upstream reference proceeds rather than being refused. A node with no
+// published target must not be prevented from forging by a bound that has
+// nothing to measure against.
+func TestForgeStalenessDoesNotBlockWithoutAReference(t *testing.T) {
+	var logs bytes.Buffer
+	forger, builder := newStalenessTestForger(
+		t, 300, 299, 299, 0, 0, 0, 5, &logs,
+	)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Equal(t, 1, builder.calls, "no reference must not block forging")
+	require.Contains(t, logs.String(), `"msg":"forge context"`)
+}
+
+// TestForgeUpstreamStalenessIsOffByDefault is the regression guard for a
+// default-on bound that forfeited leader slots during ordinary operation.
+//
+// newestKnown counts BLOCKS this node holds; the upstream target is published
+// when a HEADER is admitted (recordAdmittedHeaderFrontier advances both the
+// admitted frontier and the published target). Between a header's admission at
+// slot S and its body being applied, the target reads S while newestKnown is
+// still the previous block's slot -- a difference equal to the inter-block gap,
+// which is normal operation, not staleness.
+//
+// With the bound defaulted to 5 every gap above 5 slots refused the leader
+// slot: for exponentially distributed gaps with a 20-slot mean that is roughly
+// 78% of blocks, on every network. So the default is 0 (disabled), and this
+// test pins that a forger built without the knob forges in exactly that shape.
+func TestForgeUpstreamStalenessIsOffByDefault(t *testing.T) {
+	var logs bytes.Buffer
+	// The ordinary header-ahead-of-body window: a header at 318 has been
+	// admitted and published as the target, our newest BLOCK is still 299.
+	forger, builder := newStalenessTestForger(
+		t, 300, 299, 299, 318, 0, 0, 0, &logs,
+	)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Equal(
+		t,
+		1,
+		builder.calls,
+		"a header admitted ahead of its body is normal operation; with no "+
+			"bound configured it must not cost the leader slot",
+	)
+	require.Zero(
+		t,
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipAppliedStale),
+	)
 }
