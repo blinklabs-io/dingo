@@ -946,6 +946,22 @@ deletes those delta and withdrawal-witness rows and refreshes
 no stale logical withdrawal row and deterministically applies the subtraction
 again.
 
+API-mode Mithril historical metadata backfill (`historicalBackfill`) replays
+already-ledger-validated canonical withdrawals from before the imported
+snapshot, so it skips both the era-neutral upper-bound check and the
+`account.reward` debit -- the imported snapshot balance already reflects every
+credit and debit through the snapshot's boundary, and re-subtracting a
+pre-boundary withdrawal from it would double-count. The withdrawal is still
+required to resolve an `account` row for the credential during live ingestion;
+during historical backfill it is not, because a withdrawal that was valid on
+the canonical chain can have a stake credential that is absent from the
+imported snapshot's active accounts entirely (deregistered, or never active,
+before the snapshot was taken -- issue #3788). In that case the backfill
+records the `account_reward_delta` row with `previous_reward = 0` from the
+credential alone and neither creates nor reactivates an `account` row: the
+journal's join to `account` is already unenforced (see above), so the history
+is retained without fabricating current stake-registration state.
+
 ### Pools
 
 | Table | Columns | Keys / indexes | Relationships and notes |

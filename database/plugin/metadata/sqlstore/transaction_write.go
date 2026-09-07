@@ -892,10 +892,19 @@ WHERE credential_tag = ? AND staking_key = ? AND active = TRUE`,
 			tag,
 			stakeKey.Bytes(),
 		).Scan(&accountID, &reward)
+		accountFound := true
 		if errors.Is(err, sql.ErrNoRows) {
-			return models.ErrAccountNotFound
-		}
-		if err != nil {
+			if !historicalBackfill {
+				return models.ErrAccountNotFound
+			}
+			// Historical API backfill can replay a withdrawal whose stake
+			// credential was valid on the canonical chain at the time but is
+			// absent from the imported Mithril snapshot's active accounts
+			// (e.g. deregistered before the snapshot was taken). Record the
+			// withdrawal history without fabricating or reactivating a
+			// current stake-registration account.
+			accountFound = false
+		} else if err != nil {
 			return err
 		}
 		var exists bool
@@ -932,7 +941,11 @@ SELECT EXISTS (
 		// Historical API backfill replays withdrawals before the imported
 		// snapshot balance's intervening credits are available. Record the
 		// withdrawal history, but leave that trusted boundary balance untouched.
-		if !historicalBackfill {
+		// accountFound is guaranteed true here whenever historicalBackfill is
+		// false (the account lookup above returns early otherwise); the extra
+		// check keeps this update from ever reactivating or fabricating a
+		// current stake-registration account.
+		if !historicalBackfill && accountFound {
 			rewardAfter := previous - amount.Uint64()
 			if _, err := db.ExecContext(ctx, `
 UPDATE account SET reward = ? WHERE id = ?`,
