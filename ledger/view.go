@@ -1233,6 +1233,63 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 	return members, nil
 }
 
+// drepRegistrationDeposit resolves the deposit reported to gouroboros for a
+// DRep registration.
+//
+// A recorded deposit -- including a recorded zero -- is authoritative and is
+// passed through unchanged. When nothing is recorded, this reports the DRep
+// deposit under the current era and protocol parameters instead of the
+// absence.
+//
+// The absence is not a harmless nil. gouroboros fails closed on it: a
+// DeregistrationDrepCertificate against a registration with Deposit == nil
+// returns DRepDepositStateInconsistentError, so the block is rejected and a
+// node that reaches it stops making progress. The reference ledger's DRepState
+// carries a non-optional deposit, so a registration without one is a state
+// only this implementation can produce -- and it does: InsertDrepIfAbsent
+// (ledger/governance/processing.go, the vote-replay recovery path) writes an
+// active drep row and no registration_drep row at all when a valid DRep vote
+// proves a credential exists but the metadata row was lost. That DRep is
+// active, can be deregistered, and has no recorded deposit.
+//
+// Reporting the current parameter is the same answer the write path would have
+// recorded: it runs the era's certificate-deposit function over the same
+// registration certificate type that ledger.calculateCertificateDeposit does,
+// so the value equals what a registration applied now would store. Absence is
+// still reported when the current era charges no DRep deposit, which leaves
+// gouroboros to fail closed rather than inventing a zero refund.
+func (lv *LedgerView) drepRegistrationDeposit(recorded *uint64) *uint64 {
+	if recorded != nil {
+		return recorded
+	}
+	deposit, ok := lv.currentDRepDeposit()
+	if !ok {
+		return nil
+	}
+	return &deposit
+}
+
+// currentDRepDeposit returns the DRep registration deposit under the current
+// era and protocol parameters, read from a single published consensus
+// snapshot so the era and the parameters cannot be torn apart. The second
+// return is false when the current era charges no DRep deposit (pre-Conway)
+// or the protocol parameters do not belong to that era.
+func (lv *LedgerView) currentDRepDeposit() (uint64, bool) {
+	snapshot := lv.ls.loadConsensusSnapshot()
+	if snapshot == nil || snapshot.currentPParams == nil ||
+		snapshot.currentEra.CertDepositFunc == nil {
+		return 0, false
+	}
+	deposit, err := snapshot.currentEra.CertDepositFunc(
+		&lcommon.RegistrationDrepCertificate{},
+		snapshot.currentPParams,
+	)
+	if err != nil {
+		return 0, false
+	}
+	return deposit, true
+}
+
 // DRepRegistration returns a DRep registration by credential.
 // Returns nil if the credential is not registered as an active DRep.
 func (lv *LedgerView) DRepRegistration(
@@ -1255,7 +1312,7 @@ func (lv *LedgerView) DRepRegistration(
 	}
 	reg := &lcommon.DRepRegistration{
 		Credential: credential,
-		Deposit:    deposit,
+		Deposit:    lv.drepRegistrationDeposit(deposit),
 	}
 	if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 		if len(drep.AnchorHash) != 32 {
@@ -1309,7 +1366,7 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 		}
 		reg := lcommon.DRepRegistration{
 			Credential: lcommon.NewBlake2b224(drep.Credential),
-			Deposit:    depositPtr,
+			Deposit:    lv.drepRegistrationDeposit(depositPtr),
 		}
 		if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 			if len(drep.AnchorHash) != 32 {
