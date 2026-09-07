@@ -1198,6 +1198,13 @@ while components are still starting can therefore cancel startup without
 letting `Node.Stop` concurrently close a partially initialized component; the
 normal shutdown waits until rollback has finished.
 
+Midnight indexer startup and live reconstruction share their enablement gate
+and configuration builder. Both require indexing to be enabled in API storage
+mode, bound backfill using the current database's persisted ledger tip, and
+record the first fatal cause before cancelling the node. This is independent
+of Midnight server enablement; callbacks resolve replaced node components when
+invoked.
+
 The node creates one shutdown context from the configured `shutdownTimeout`
 and passes it through every phase. PeerGovernor shutdown cancels its internal
 run context, which interrupts ledger-peer DNS discovery and outbound work,
