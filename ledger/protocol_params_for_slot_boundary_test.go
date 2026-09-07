@@ -145,7 +145,7 @@ func TestProtocolParamsForSlot_UsesMultiEraEpochs(t *testing.T) {
 
 	cfg := newMultiEraForecastCfg(t, shelleyEpoch+1)
 	epochCache := make([]models.Epoch, 0, int(shelleyEpoch)+1)
-	for epoch := uint64(0); epoch < byronEpochs; epoch++ {
+	for epoch := range uint64(byronEpochs) {
 		epochCache = append(epochCache, models.Epoch{
 			EpochId:       epoch,
 			StartSlot:     epoch * uint64(byronEpochLength),

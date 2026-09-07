@@ -1294,6 +1294,36 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `peergov.bootstrap_exited` | PeerGov | Exited bootstrap mode |
 | `peergov.bootstrap_recovery` | PeerGov | Bootstrap recovery |
 
+The six topics the ChainSelector publishes itself —
+`chainselection.chain_switch`, `selection`, `peer_evicted`,
+`genesis_corroboration_failed`, `genesis_mode_exited` and `selected_none` —
+go through `ChainSelector.publishSelection`, which uses `PublishOrdered` rather
+than `Publish`. The selector's producers are all goroutines that have to keep
+making progress — the EventBus dispatch goroutines for the internal
+`chainselection.peer_activity`, `chainselection.peer_tip_update` and
+`connmanager.conn_closed` subscriptions, plus the selector's own evaluation
+loop — and an inline `Publish` parks its caller on any subscriber that has
+stopped draining. Routing every selector publication through the same per-type
+lanes keeps delivery and per-topic publisher order while confining a blocked
+subscriber to that lane's worker. Publishing one of these six directly would
+reintroduce the hazard, because a queued chain switch could then be overtaken
+by one published inline.
+
+That order is the order publications reach `PublishOrdered`, not the order the
+selector decided the switches in. Every producer decides under `cs.mutex` and
+publishes after releasing it, so two goroutines can decide A then B and enqueue
+B then A, and a subscriber sees B before A. The window is unchanged from the
+inline `Publish` the lanes replaced; closing it would mean publishing under the
+lock, which is what the EventBus rule below forbids. A consumer that must not
+act on a superseded switch has to reconcile against the selector's current best
+peer rather than rely on arrival order.
+
+The other three `chainselection.*` topics are not on ordered lanes and are not
+covered by that guarantee: `chainselection.peer_tip_update` is published inline
+by the ouroboros chainsync path and by node wiring, not by the selector, and
+the two panic topics are published inline from the selector's own recovery
+paths, where the point is to report before the goroutine unwinds.
+
 ### EventBus Features
 
 - Asynchronous delivery via worker pool (4 workers, 1000-entry async queue)
@@ -1329,6 +1359,21 @@ All event types follow the `subsystem.snake_case_name` convention.
   delivery, and reports how many publishers are parked on it — every parked
   publisher observes the same stall, so a per-delivery limit made the log
   volume scale with publisher count rather than with time
+- **Handler-progress watchdog** (`event/handler_progress.go`). The stalled
+  warning above is raised by a publisher that had to wait for capacity, so it
+  cannot fire until the buffer is already full: its time to first signal is a
+  function of buffer size and event rate, not of the fault. One bus-wide
+  goroutine additionally samples every `SubscribeFunc` dispatch goroutine and
+  logs `event subscriber handler not making progress` (with `stuck_for`,
+  `queued`, `buffer`) for any handler that has not returned for
+  `handlerProgressWarnInterval` (30s), counting it in
+  `event_subscriber_handler_stalled_total` and repeating at most once per
+  interval while it stays there. Sampling runs twice per interval, so the
+  first report lands within 45s of the handler ceasing to return. Registering
+  a `SubscribeFunc` subscription materializes that counter's series at zero,
+  so "nothing has stalled" is distinguishable from "no handler was ever
+  registered for this type". `EventBus.StuckHandlerCount()` exposes the same
+  condition programmatically
 - **Never `Publish`, `PublishAsync`, `PublishOrdered`, or `PublishBlocking`
   while holding a lock that a subscriber of that event acquires.** All four can
   wait for capacity, and a subscriber that is merely slow is still allowed the
@@ -1397,7 +1442,9 @@ All event types follow the `subsystem.snake_case_name` convention.
   on the `connmanager.conn_closed` subscription above
 - Prometheus metrics for event delivery tracking and latency, including
   `event_delivery_blocked_total{type,kind}` and
-  `event_async_enqueue_blocked_total{type}` for backpressure
+  `event_async_enqueue_blocked_total{type}` for backpressure, and
+  `event_subscriber_handler_stalled_total{type}` for a handler that has
+  stopped returning
 - `Unsubscribe` only stops *future* deliveries to a `SubscribeFunc`
   subscriber; a handler already dequeued before the call can still be
   executing concurrently after it returns. `UnsubscribeAndWait` additionally
@@ -1480,6 +1527,121 @@ tip. Rollback and held replay recovery use that floor when it is on the current
 primary chain, while same-slot hash mismatches are repaired rather than treated
 as already covered. A floor from an abandoned fork is ignored so chain
 selection can recover the canonical branch.
+
+When the ledger tip is not on the primary chain at all (the fork-beyond-the-
+ledger shape, as opposed to the blob-behind-metadata shape above),
+reconciliation instead prunes the primary chain back to their common
+ancestor with `ChainManager.RewindPrimaryChainToPoint`, once
+`ChainManager.SecurityParamConfigured()` reports K is set. That call shares
+its bound and side effects with a live `Chain.Rollback` rather than deleting
+blocks directly: it is rejected outright, without touching any state, when
+the ancestor sits more than the security parameter K behind the chain tip,
+and a rewind it does perform publishes `ChainRollbackEvent`/`ChainForkEvent`
+and wakes/marks chain iterators exactly once — the same rollback and
+iterator signal NtC clients rely on for a live rollback, rather than
+truncating the chain out from under them silently. `reconcileLivePrimaryChainLedgerDivergence`
+treats that rejection the same as "no divergence found," leaving the caller's
+existing over-K handling (chainsync re-sync, or connection recycling from the
+plateau watchdog above) to recover instead (issue #3516).
+
+This same reconciliation also runs from `NewLedgerState` at startup, before
+`node.go` (or `internal/node/load.go`'s load-mode composition) has called
+`ChainManager.SetLedger` — the state load that constructs `LedgerState`
+runs first, and `SetLedger` needs that constructed value to read
+`SecurityParam()` from, so it necessarily runs after. Before that call
+`SecurityParamConfigured()` is false, and `RewindPrimaryChainToPoint` would
+return `ErrSecurityParamNotConfigured` rather than silently pruning without
+a bound — which would fail node startup outright over a local,
+already-durable divergence that has nothing to do with an untrusted peer.
+For that case reconciliation instead calls
+`ChainManager.RewindPrimaryChainAtStartup` (`Chain.RollbackUnbounded`
+underneath), which skips only the K-configured and K-exceeded checks and
+otherwise behaves identically — same header/block deletion, same
+`ChainRollbackEvent`/`ChainForkEvent` publish, same iterator wake. Nothing
+reachable from an untrusted peer may ever call the unbounded path: every
+chainsync-driven caller of this reconciliation runs after `SetLedger`, since
+`node.go` constructs the ouroboros layer — and every chainsync-reachable
+goroutine with it — only once `SetLedger` has already returned (issue #3516
+review).
+
+A third caller, `ledgerReadChain`'s own retry loop (used when the reader's
+next chain iterator can't find its start point), reaches this same
+reconciliation and can hit the same over-K rejection — a case
+`RewindPrimaryChainToPoint` could never previously produce, since it had no
+bound at all. Unlike `reconcileLivePrimaryChainLedgerDivergence`'s callers,
+this reader has no `ChainsyncEvent`/connection to fall back on, so on an
+over-K rejection it publishes the same `ChainsyncResyncEventType`/
+`ChainsyncResyncReasonRollbackExceedsK` those callers use directly. It
+handles a rewind below the Mithril trust boundary
+(`ErrRollbackExceedsMithrilBoundary`) the same way, publishing
+`ChainsyncResyncReasonRollbackExceedsMithril` — the reason
+`handleEventChainsyncRollback` uses for a peer-driven rollback that hits
+the same boundary (Cubic review, PR #3611). This reader has no peer or
+advertised tip to distinguish "peer merely behind the boundary" from
+"genuinely diverges below it" the way that handler's own Mithril branch
+does, so it always reports the latter, the safer default.
+
+Every other give-up path in `ledgerReadChain`/`ledgerReadChainIterator`
+returns without ever sending a `readChainResult` on `resultCh`, which
+`ledgerProcessBlocksFromSource`'s closed-channel-with-nothing-sent case
+turns into a nil error — `ledgerProcessBlocksWithAttempt`'s `err == nil`
+branch then exits its retry loop for good, and since `ledgerProcessBlocks`
+is started once, from `Start`, with no supervisor restarting it, this
+permanently and silently stops all ledger block processing. That is a
+pre-existing pattern spanning multiple give-up paths, tracked separately in
+issue #3776 rather than fixed here. These two branches are different: this
+PR is what makes them reachable at all, so neither joins that deferred
+list. Instead each sends a non-nil `readChainResult` (wrapping the
+originating error) on `resultCh` before returning.
+`tryRecoverFromHeaderValidationError` declines it (neither is a
+`*headerValidationError`), so `ledgerProcessBlocksFromSource` returns it as
+a real error, and `ledgerProcessBlocksWithAttempt` treats it like any other
+recoverable read-chain failure: back off (`ledgerPipelineBackoff`) and start
+a fresh reader attempt, rather than exiting for good. Each retry
+re-reconciles from the (possibly by-then-advanced) tip; until connection
+management acts on the resync event and the primary chain is rewound within
+K and above the Mithril boundary, every retry fails the same way and backs
+off further like any other deterministic no-progress restart, surfacing
+the existing stuck-pipeline signal instead of a silent halt.
+
+The shared `reconcileLivePrimaryChainLedgerDivergence` helper (called
+directly by `handleEventChainsyncRollback` and `tryResolveFork`; called
+through the `ReconcileLivePrimaryChainLedgerDivergence` exported wrapper
+by the plateau watchdog) only special-cases `ErrRollbackExceedsSecurityParam`
+itself — returning `(false, nil)` so the caller's own existing over-K
+resync handling fires, rather than a generic propagated error a caller's
+classification does not expect. It propagates `ErrRollbackExceedsMithrilBoundary`
+as a plain error instead of also special-casing it the same way: a naive
+matching special-case, also returning `(false, nil)`, would misclassify it
+through that same over-K fallthrough, since the caller's over-K branch
+publishes `ChainsyncResyncReasonRollbackExceedsK` unconditionally once
+reconciliation declines, reproducing the exact reason-misclassification
+class issue #3035 already fixed elsewhere (wolf31o2 review, PR #3611).
+
+Each of the three live callers classifies that propagated error itself,
+using whatever context it has available:
+
+- `handleEventChainsyncRollback` and `tryResolveFork` each already handle
+  a *direct* `ErrRollbackExceedsMithrilBoundary` (from their own initial
+  rollback attempt, before ever calling the reconciler) via the
+  peer-tip-based `ChainsyncResyncReasonRollbackExceedsMithril`/
+  `ChainsyncResyncReasonPeerTipBehindMithril` classification described
+  above. That logic is now the shared `handleMithrilBoundaryRollback(e,
+  pending)` helper, and each caller's over-K branch calls it too when
+  `reconcileLivePrimaryChainLedgerDivergence` returns this error — the
+  identical resync as a direct rollback hitting the same boundary.
+- The plateau watchdog (`internal/chainsyncrecycler`) has no pending
+  event batch or peer rollback handler of its own to classify this with,
+  and deliberately does not import `ledger` to inspect the error type
+  (see that package's own doc comment on staying constructible without a
+  node). Its only path to the reconciler is the exported
+  `ReconcileLivePrimaryChainLedgerDivergence` wrapper, so that wrapper
+  classifies `ErrRollbackExceedsMithrilBoundary` and publishes
+  `ChainsyncResyncReasonRollbackExceedsMithril` itself, swallowing the
+  error back to `(false, nil)` afterward — the same self-classifying
+  shape `reconcileLivePrimaryChainLedgerDivergence` itself used to have
+  for every caller, narrowed to just this one wrapper now that the other
+  two callers classify it with richer, peer-aware context of their own.
 
 Ordering the commits is not sufficient on its own: a commit is not durable.
 SQLite fsyncs at WAL checkpoints while Badger buffers committed writes in a
@@ -1854,8 +2016,11 @@ fallback:
 
 - An archive node uses a signed-URL-capable object-storage blob plugin (`s3` or
   `gcs`) and enables the Bark server with `barkPort`. Bark's archive service
-  maps a requested `(slot, hash)` to the blob store's `GetBlockURL`, returning
-  a signed object URL plus compact block metadata.
+  resolves each requested block reference -- by hash, slot, height, or a
+  consistent combination of them -- to a `(slot, hash)` point, maps that to the
+  blob store's `GetBlockURL`, and returns a signed object URL plus compact
+  block metadata. A reference the node does not hold comes back under
+  `not_found` without discarding the rest of the batch.
 - A node with `historyExpiry.enabled` keeps its local blob plugin and starts
   `internal/historyexpiry.Pruner`. The worker derives its safety window from
   `LedgerState.StabilityWindow()` and scans only blocks older than that window.
@@ -3639,7 +3804,7 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
 - Stall detection with configurable timeout
 - Grace period before recycling stalled connections
 - Cooldown to prevent rapid reconnection flapping
-- Plateau detection: if the local tip stops advancing while peers are ahead, the recycler first asks ledger to reconcile any live primary-chain/ledger divergence (`ReconcileLivePrimaryChainLedgerDivergence`). When that local repair succeeds, connection-level recovery is skipped so ledger replay can resume from the repaired tip. If no divergence is found, the active chainsync connection is recycled — except when the primary (header) chain has already caught up to the peer and the gap is dominated by downloaded-but-not-yet-applied blocks (`isLedgerApplicationBacklog`, `internal/chainsyncrecycler/recycler.go`). That plateau is a ledger-application backlog, not a chainsync stall, so the healthy connection is left running and the condition is logged at INFO instead of recycling (recycling cannot advance the applied tip and only churns the connection)
+- Plateau detection: if the local tip stops advancing while peers are ahead, the recycler first asks ledger to reconcile any live primary-chain/ledger divergence (`ReconcileLivePrimaryChainLedgerDivergence`). When that local repair succeeds, connection-level recovery is skipped so ledger replay can resume from the repaired tip. If no divergence is found, or the divergence's common ancestor sits more than the security parameter K behind the primary chain tip — a rewind that far is declined rather than forced through, per the bound below — the active chainsync connection is recycled — except when the primary (header) chain has already caught up to the peer and the gap is dominated by downloaded-but-not-yet-applied blocks (`isLedgerApplicationBacklog`, `internal/chainsyncrecycler/recycler.go`). That plateau is a ledger-application backlog, not a chainsync stall, so the healthy connection is left running and the condition is logged at INFO instead of recycling (recycling cannot advance the applied tip and only churns the connection)
 - The recycler itself is `internal/chainsyncrecycler.Recycler`, a `Start`/`Stop` background component that owns only the stall/plateau decision logic. It never reads node fields: the node passes a `ComponentProvider` (`nodeRecyclerComponents`, `node_chainsync_recycler.go`) that hands each tick the live `LedgerSource`, `ChainsyncState`, and `ChainSelector`, plus an `EventPublisher` for the recycle/resync/client-remove requests it decides on. Those are interfaces defined in the recycler package and satisfied structurally by `ledger.LedgerState`, `chainsync.State`, `chainselection.ChainSelector`, and the `EventBus`, so the dependency only goes one way and the whole component is exercised against fakes without constructing a node
 - Every tick `TryLock`s `n.liveLifecycleMu` (the mutex a live Restore/Truncate holds for its entire quiesce-through-reinitialize duration, since those calls actually nil/rebuild `n.ledgerState`/`n.chainsyncState`) (in the provider, for the whole callback) and skips entirely on contention, rather than just nil-checking those fields once up front: they are plain, unsynchronized fields a live restore/truncate reassigns, and the tick dereferences them many more times after any initial check, so holding the lock for the whole tick — not only the check — is what actually closes the race rather than merely narrowing its window. Snapshot deliberately does *not* hold `liveLifecycleMu` (it takes a separate `snapshotMu` instead, excluding a concurrent Restore/Truncate without contending with this tick) — see `snapshotMu`'s doc comment (`node.go`) — since Snapshot never touches either field and blocking this tick for its whole local-copy-plus-cloud-upload duration would contradict Snapshot's own documented "keeps syncing normally" behavior
 - Ledger callbacks that need the replaceable chainsync state use the same lock through `withLiveChainsyncState`. Both `Run()`'s initial publication and a Restore/Truncate's replacement hold that lock while constructing and assigning the state. Callbacks skip while the lock is held instead of blocking: the lifecycle operation can be waiting for the ledger goroutine to stop, so a blocking lock would deadlock quiesce.
@@ -3677,6 +3842,8 @@ When full-block header verification needs an epoch nonce that is not cached yet,
 When Leios is enabled, a certifying ranking block (CertRB) carries a Leios certificate and empty transaction segments; the certified endorser block's (EB) transactions live in the EB's transaction closure, fetched asynchronously from peers over the leiosnotify / leiosfetch client protocols and cached in `Ouroboros.leiosEndorserBlocks` (keyed by slot and hash together, TTL-, entry-, and byte-bounded — a mismatched offer size or an over-budget entry is rejected rather than cached, including one reloaded from the blob-store spillover used for historical serving, which is served to the caller but left uncached when it exceeds the per-entry budget). Before retaining any fetched transaction, Dingo checks it in its received manifest position against that reference's body hash and full-transaction size; substituted, reordered, and malformed or trailing wire values are rejected. Before serving a Dijkstra block over node-to-client chainsync, `chainsyncServerBlockCbor` resolves the certified EB (`certifiedEndorserBlockHash` reads the parent block's `leios_announcement` via the header prev-hash) and splices the cached closure into the block's empty transaction segment (`spliceEndorserTxsIntoDijkstraBlock`) so clients receive complete transactions. The header is preserved byte-for-byte, so the served block's hash is unchanged; its `block_body_hash` intentionally no longer matches, which is acceptable over NtC because local clients do not re-verify the body hash.
 
 If the closure is not yet cached when the block is served, the server waits a bounded window for the async client path to populate it — `storeLeiosEndorserBlock` wakes waiters via per-EB channels under `leiosMu`. The window is the same one ledger application uses to gate a ranking block on its endorser block: the Leios pipeline timing's `EndorserBlockWaitSlots` (the certify-by deadline) converted to wall-clock via the Shelley slot length (`LedgerState.EndorserBlockWaitDuration`), not an independent constant; `OuroborosConfig.LeiosClosureWaitTimeout` can override it. The wait is additionally bounded by the serving connection's own lifetime: `serveLeiosCertRbWithWait` registers a per-connection waiter (`registerLeiosServeWaiter`, keyed by `ConnectionId` in `Ouroboros.leiosServeWaiters`) and derives its context from `leiosConnDoneContext` wrapping that waiter's channel, so a client that disconnects while the wait is pending releases it immediately rather than leaving it parked for the rest of the window.
+
+Historical by-point backfill receives the ledger apply context through `EndorserBlockFetcherFunc`. Every manifest and transaction request, the per-connection attempt, the connection-admission wait, and the tail retry wait inherit that context; cancelling a pipeline attempt or shutting down the node therefore releases the fetch instead of leaving it to contend with the next apply attempt. A direct fetch without a caller deadline is additionally capped at two minutes, matching the ledger-side certified-closure wait.
 
 The release signal deliberately does **not** come from the chainsync server's own `Protocol.DoneChan()`. A server callback runs inside gouroboros's `recvLoop`, which closes `recvDoneChan` only in its deferred exit, and `doneChan` closes only after `recvDoneChan` does — so for as long as the callback is parked, `DoneChan()` cannot close, and binding the wait to it would leave the timeout as the only effective bound. The waiter is instead released by `Ouroboros.ReleaseLeiosServeWaiters`, called from the node's `handleConnManagerClosed`, which the connection manager drives from its per-connection `ErrorChan` watcher goroutine — independent of the protocol callback, and (unlike the NtN-only `ConnectionClosedEventType`) the only close notification an NtC connection receives. `registerLeiosServeWaiter` re-checks connection liveness after registering, so a connection whose close already ran does not produce a wait nothing will release.
 
@@ -7269,15 +7436,63 @@ services. It exposes archive access over Connect/gRPC and supplies the remote
 archive adapter used by nodes that want historical fallback.
 
 The server side (`bark.Bark`) registers the archive service, health endpoint,
-and gRPC reflection. Archive fetches validate the requested block hash, ask the
-active blob plugin for a signed block URL, and return that URL with block type,
-height, and previous-hash metadata. In practice this makes `s3` and `gcs` the
-archive-node blob backends because they can sign object-storage URLs.
+and gRPC reflection. Archive fetches ask the active blob plugin for a signed
+block URL and return it with block type, height, and previous-hash metadata. In
+practice this makes `s3` and `gcs` the archive-node blob backends because they
+can sign object-storage URLs.
+
+`FetchBlock` resolves each `BlockRef` in the batch by hash and slot together,
+then hash, then slot, then height. Hash and slot together already are the blob
+store's block key, so that case needs no index read and still resolves a block
+written before the hash index existed -- the historical range an archive
+serves. Hash alone is the only identifier unique across forks and resolves
+through the O(1) hash index; slot alone needs a bounded prefix scan; height
+alone is last because block numbers are not indexed at all and resolving one is
+a binary search over the block-ID space (`database.BlockByNumberBounded`).
+Because the point is built from the identifiers the client supplied, hash and
+slot agree with the answer by construction; height is checked against the block
+metadata afterwards.
+
+That binary search is bounded above by the highest indexed block, and reading
+that bound is a reverse iteration over the block index, which `s3` and `gcs`
+answer by listing every block-index object in the bucket. `ArchiveService` is
+registered without the operator auth interceptor, so `FetchBlock` resolves the
+bound once for the whole batch and only when the batch actually contains a
+height-only reference — resolving it per reference would let one anonymous
+request carrying `DefaultMaxFetchBlockRefs` height-only references cost that
+many full-bucket enumerations. A batch of hash+slot references touches no index
+at all.
+
+The batch is answered as a whole. A reference that names no stored block --
+absent, or carrying a height belonging to a different block -- is returned in
+`FetchBlockResponse.not_found` carrying exactly the identifiers the client
+supplied, and every other reference in the batch is still served. Each returned
+`SignedUrl.block` echoes the supplied identifiers verbatim and fills in the
+ones the client omitted, so a hash-only or height-only caller learns the full
+identity. Only a malformed request (no identifier at all, or a hash that is not
+32 hex-encoded bytes) or a genuine storage failure fails the whole call, the
+former with `InvalidArgument`.
+
+A resolved-but-unservable block is the exception to batching, and fails the
+whole call. When a reference resolved through a lookup -- hash alone, slot
+alone, or height alone -- and the blob store then reports the block missing on
+`GetBlockURL`, the index and the blob store disagree, which is a storage
+inconsistency rather than an absent block. The cloud plugins cannot express
+that difference in the error: `s3` and `gcs` return `types.ErrBlobKeyNotFound`
+both for a block that was never written and for a block whose metadata object
+was lost, so the lookup having already read the block is the only evidence
+available. The hash+slot case resolves without a lookup and so carries no such
+evidence; it is reported as an ordinary `not_found`, as is a reference that
+misses at resolution.
 
 The client side (`bark.BlobStoreBark`) wraps the configured local blob store.
 `GetBlock` and block iterators pass through local values, but resolve
 `types.ErrHistoryExpired` or missing historical block CBOR by calling the
-remote Bark archive and downloading the signed URL. Bark does not decide which
+remote Bark archive and downloading the signed URL. A block the archive answers
+under `not_found` surfaces as `types.ErrBlobKeyNotFound`, the same error a
+local blob store reports for a missing block, but only when the echoed
+reference is the `(slot, hash)` that was requested: a returned block is
+re-verified against the request, so an absence must be too. Bark does not decide which
 local blocks expire; `internal/historyexpiry.Pruner` owns that lifecycle when
 `historyExpiry.enabled` is configured.
 
@@ -9808,6 +10023,174 @@ Emitting before truncating matters for the opposite reason (see
 `emitRollbackTransactionEvents`'s ordering contract): the block-apply
 goroutine can start applying the post-rollback chain, and publish forward
 events on the same `ledger.tx` lane, the moment `ls.chain.Rollback` lands.
+
+`reconcilePrimaryChainTipWithLedgerTip`'s common-ancestor rewind (used by
+startup reconciliation and by the live primary-chain/ledger divergence
+reconciler, see "Ledger/chain reconciliation") follows the same
+`blockPipelineGatherMutex`, then `drainBlockPipelineBeforeRollback`, then
+`transactionEventMutex` shape `rollbackChainAndState` uses, so it excludes
+an in-flight gathered block the same way rather than truncating silently
+(issue #3516). Taking `blockPipelineGatherMutex`'s write lock here is safe
+even though this reconciler is reachable from `ledgerReadChain` itself (the
+reader's own goroutine, on a missing chain-iterator start point): that call
+happens before `ledgerReadChain` ever creates the iterator
+`ledgerReadChainIterator` reads under the read lock, and `ledgerReadChain`
+returns immediately afterward without looping back, so the reader never
+holds that read lock while this runs.
+
+Unlike `rollbackChainAndState`, it does not pair a dry-run
+`ValidateRollback` with a separately-locked `RewindPrimaryChainToPoint`
+call: it resolves what to undo (`reconciliationUndoBlocks`, below) only
+after taking `transactionEventMutex`, then calls `RewindPrimaryChainToPoint`
+directly with no earlier check, and only calls
+`emitRollbackTransactionEvents` after that single call returns success. A
+validate-then-separately-truncate pairing leaves a real gap
+open in between the two locked calls: `AddBlock`/`AddBlockWithPoint`
+(blockfetch delivering a new block) takes only the chain's own
+`c.mutex`/`c.manager.mutex`, independent of `transactionEventMutex`, so the
+primary chain can grow enough between the two calls to invalidate what
+`ValidateRollback` found, letting a two-call caller publish undo events for
+a rewind that a moment later gets rejected as exceeding the security
+parameter (issue #3516 review). `RewindPrimaryChainToPoint`'s own K-check
+and truncation already run under one continuous hold of those locks (see
+`Chain.rollbackLocked`), so calling it alone, with nothing external to
+invalidate, is already atomic — no second, separately-timed check is
+needed, and none is taken.
+
+The emit is deliberately placed after that call returns, not threaded into
+it as a callback run while still holding `c.mutex`/`c.manager.mutex`: an
+earlier version of this fix did exactly that, and `emitRollbackTransactionEvents`
+can publish `LedgerErrorEventType` via `EventBus.Publish`, which invokes
+subscribers synchronously on the caller's own goroutine — precisely the
+reentrancy `Chain.Rollback` itself avoids by publishing its own
+`ChainRollbackEvent`/`ChainForkEvent` only after releasing those locks
+(see the comment on that publish). A future `LedgerErrorEventType`
+subscriber calling back into any chain method taking those locks would
+deadlock against a callback run from inside them. Emitting strictly after
+`RewindPrimaryChainToPoint` returns keeps this call symmetric with
+`rollbackChainAndState`'s own emit, which likewise runs after
+`ValidateRollback` has already released the chain's locks. Both still
+share `transactionEventMutex` with `submitBlockApplyDBTxn`'s forward-apply
+commit, which is what keeps the undo ahead of any forward `ledger.tx` event
+on the same ordered lane, regardless of this internal before/after
+ordering relative to the truncation itself.
+
+The emit still runs before `ls.rollback` — the separate call, made outside
+this closure, that durably updates `ls.currentTip` and the ledger's own
+metadata — so a failure in that later call leaves a narrow inconsistency:
+subscribers already believe these blocks are undone while durable ledger
+metadata still shows them applied (Cubic and wolf31o2 review, PR #3611).
+This is not a shape unique to this reconciler: `rollbackChainAndState` —
+the pre-existing, far-more-frequently exercised peer-driven rollback path
+— has the identical structure (`validateAndEmitRollbackUndo`'s emit inside
+`transactionEventMutex`, `ls.rollback` as a separate call afterward that
+can fail), and `validateAndEmitRollbackUndo`'s own doc comment already
+accepts this exact class of window: "an I/O failure mid-truncation is not
+predictable at all ... leaves the chain needing recovery regardless."
+Closing it here alone, differently from that canonical path, would leave
+the two rollback contracts inconsistent for no benefit.
+
+Neither alternative ordering is free of its own hazard, either: running
+`ls.rollback` inside this closure, before the emit, would risk a real
+reentrancy hazard the placement above already avoids — `ls.rollback` can
+publish `ChainsyncResyncEventType`/`ChainsyncResyncReasonLocalLedgerRollback`
+synchronously via `EventBus.Publish`, and `Ouroboros.SubscribeChainsyncResync`
+(`ouroboros/chainsync.go`) subscribes to exactly that reason and calls the
+substantial `LedgerState.RecoverAfterLocalRollback`, whose own locking has
+not been audited for safety under `transactionEventMutex` — while
+deferring the emit until after `ls.rollback` returns (outside
+`transactionEventMutex`) would let a concurrent forward apply's
+`ledger.tx` event land first on the same ordered lane, reopening exactly
+what holding `transactionEventMutex` across the emit prevents.
+
+The window is narrowed, not merely bounded: both branches now pre-check
+the one deterministic rejection `ls.rollback` could otherwise hit — the
+Mithril boundary — before ever resolving or emitting an undo, the same way
+`rollbackChainAndState` checks it before calling
+`validateAndEmitRollbackUndo` at all. Proven by
+`TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmitting`:
+a target below the boundary is declined immediately, with no undo
+published and no primary-chain truncation attempted either. That leaves
+`ls.rollback`'s only remaining failure mode a genuine, unpredictable DB
+error, logged at ERROR with the inconsistency called out if it happens; the
+next reconciliation attempt then lands in the "ledger tip ahead of primary
+chain tip" branch below (see its own doc comment), which retries both the
+(idempotent) undo notification and this same rollback — proven by
+`TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewindAndEmit`.
+A true durable, atomic handoff across every rollback path in this file,
+not a fix scoped to this one reconciler, is tracked as issue #3817.
+
+That resolution is also where the reconciler's undo events diverge from
+`blocksAboveSlot`'s: by the time this rewind runs, chain selection has
+already replaced the primary chain's content between the ancestor and the
+ledger's old tip with a different, competing branch, so reading whatever
+the blob store currently holds at those slots (`blocksAboveSlot`) would
+build undo events for blocks the ledger never applied. `reconciliationUndoBlocks`
+(`ledger/block_event.go`) instead reads the ledger's own `block_nonce`
+rows for the applied points in that range and resolves each one via
+`ChainManager.BlockByPoint`, which checks the manager's retained
+block-cache before the database — so an abandoned block chain selection
+already removed from the active index still resolves as long as the cache
+still holds it.
+
+The upper bound of that range must itself be read fresh, under
+`transactionEventMutex`, not taken from the `ledgerTip` snapshotted at the
+top of this function with no lock held: `submitBlockApplyDBTxn`'s
+forward-apply commit also takes `transactionEventMutex` around updating
+`ls.currentTip` and its own `block_nonce` write, so a commit landing in the
+otherwise-unguarded window between that early snapshot and this
+resolution advances the ledger's applied tip and writes a row the stale
+snapshot's upper bound would never query for — yet the primary chain
+extends together with that same apply, so the rewind still removes the
+newly-applied block, with no undo ever published for it (issue #3516
+review). Re-reading `ls.currentTip.Point.Slot` after `transactionEventMutex`
+is already held closes this the same way the chain-growth fix above does:
+nothing that also needs that mutex can advance the applied tip again until
+this section releases it, so the fresh read stays valid through the
+`RewindPrimaryChainToPoint` call that follows. `beforeReconciliationUndoSnapshot`
+(`ledger/state.go`) is a test-only hook, run right after the top-of-function
+snapshot, that lets a test force this interleaving deterministically rather
+than relying on goroutine scheduling.
+
+A crash between `RewindPrimaryChainToPoint` returning success (primary
+chain truncated, durable) and `emitRollbackTransactionEvents` completing
+(an in-memory `EventBus` publish, not durable on its own) loses that undo
+notification for good if nothing else attempts it again (wolf31o2 review,
+PR #3611). Recovery does not happen by re-entering this same branch: after
+such a crash, `ls.currentTip` is still the stale pre-crash value (this
+closure's caller only calls `ls.rollback(ancestor)`, which updates it,
+after the closure returns), while `ls.chain.Tip()` already reports the
+truncated point, so the next reconciliation attempt instead takes the
+earlier `chainTip.Point.Slot < ledgerTip.Point.Slot` branch ("ledger tip
+ahead of primary chain tip"). That branch now runs the same
+`reconciliationUndoBlocks`/`emitRollbackTransactionEvents` sequence, under
+the same `blockPipelineGatherMutex`/drain/`transactionEventMutex`
+protections, before calling `ls.rollback`, so a crash-interrupted attempt's
+undo notification is retried on the very next reconciliation attempt
+(startup or live — this branch is reachable from all three callers, the
+same as the common-ancestor branch), subject to the same block-cache-
+eviction resolution limits `reconciliationUndoBlocks` already documents and
+counts via `reconciliationUndoUnresolved`, rather than being silently and
+permanently lost. This also fixes that branch's ordinary, non-crash case:
+it previously called `ls.rollback` directly with no undo emission at all,
+live or at startup, whenever the primary chain was simply behind the
+ledger tip for any reason.
+
+`reconciliationUndoBlocks` also detects, and counts separately via
+`reconciliationUndoMissingRecord`, an applied block with no `block_nonce`
+row at all in its undo range — the shape of a Byron-era block, since
+Byron's BFT/PoA consensus writes no VRF nonce — distinct from
+`reconciliationUndoUnresolved`'s "has a row, content unreachable" gap
+(issue #3778, wolf31o2 review). It cannot name or resolve that block (there
+is no row to read a hash from, and falling back to whatever the primary
+chain's blob store currently holds at that slot would risk resolving the
+wrong branch's block, the exact failure mode this function exists to
+avoid), but it can detect that one is missing: it resolves the ancestor's
+own block for its `BlockNumber` and compares the resulting
+`ledgerTipBlockNumber - ancestorBlockNumber` delta — independent of
+`block_nonce` entirely — against how many nonce rows accounted for it. A
+shortfall means the reconciler had no durable record of that many applied
+blocks' existence at all, not merely of their content.
 
 `blockPipelineGatherMutex` (`ledger/state.go`) closes a narrower, earlier
 gap in the same window: `drainBlockPipelineBeforeRollback` only accounts

@@ -31,8 +31,10 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -630,6 +632,582 @@ func TestRejectedRollbackEmitsNoUndoEvents(t *testing.T) {
 		ls.chain.Tip().Point.Slot,
 		"chain must be untouched by a rejected rollback",
 	)
+}
+
+// TestReconciliationUndoBlocksCoversConcurrentlyAppliedBlock covers issue
+// #3516's review: reconciliationUndoBlocks used to build its list from the
+// ledgerTip snapshotted at the very top of reconcilePrimaryChainTipWithLedgerTip,
+// with no lock held between that snapshot and the later,
+// transactionEventMutex-guarded resolution. A concurrent
+// submitBlockApplyDBTxn commit landing in that window advances the ledger's
+// applied tip and writes a new block_nonce row that the stale snapshot's
+// upper bound would never see -- yet the primary chain extends together
+// with that same apply, so the rewind still removes the new block, with no
+// undo ever published for it. beforeReconciliationUndoSnapshot forces
+// exactly that interleaving deterministically.
+func TestReconciliationUndoBlocksCoversConcurrentlyAppliedBlock(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+
+	txSubID, _ := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), txSubID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
+
+	errSubID, errCh := bus.SubscribeWithBuffer(LedgerErrorEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), errSubID)
+	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
+
+	// Diverge the primary chain exactly as in the sibling tests: the
+	// ledger tip is no longer on it, but the fixture's ancestor still
+	// is, so reconciliation rewinds to it.
+	forkHash := testHashBytes("reconcile-undo-race-fork")
+	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        forkHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+
+	// Force a concurrent block-apply commit into the window between the
+	// reconciler's ledgerTip snapshot and its later undo-block
+	// resolution: extend the primary chain past forkHash and advance
+	// the ledger's own applied tip to it, exactly what
+	// submitBlockApplyDBTxn's commit would do had it genuinely raced
+	// this call.
+	raceHash := testHashBytes("reconcile-undo-race-applied")
+	raceTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			fixture.currentTip.Point.Slot+10,
+			raceHash,
+		),
+		BlockNumber: fixture.currentTip.BlockNumber + 2,
+	}
+	raceNonce := []byte("nonce-race-applied")
+	ls.beforeReconciliationUndoSnapshot = func() {
+		require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
+			{
+				Slot:        raceTip.Point.Slot,
+				Hash:        raceTip.Point.Hash,
+				BlockNumber: raceTip.BlockNumber,
+				Type:        1,
+				PrevHash:    forkHash,
+				Cbor:        []byte{0x80},
+			},
+		}))
+		require.NoError(t, ls.db.SetBlockNonce(
+			raceTip.Point.Hash,
+			raceTip.Point.Slot,
+			raceNonce,
+			false,
+			nil,
+		))
+		ls.Lock()
+		ls.currentTip = raceTip
+		ls.currentTipBlockNonce = append([]byte(nil), raceNonce...)
+		ls.Unlock()
+	}
+
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+
+	// Both the originally-applied block and the one applied during the
+	// race must have been considered for undo: each is unresolvable
+	// through blocksAboveSlot's old (blob-scan) path but resolvable as
+	// a decode failure here, so seeing both decode errors is proof both
+	// were included, in newest-first order.
+	first := testutil.RequireReceive(
+		t, errCh, 2*time.Second,
+		"undo-event decode error for the race-applied block",
+	)
+	firstEvt, ok := first.Data.(LedgerErrorEvent)
+	require.True(t, ok, "unexpected payload %T", first.Data)
+	require.Equal(t, raceTip.Point.Slot, firstEvt.Point.Slot)
+	require.Equal(t, raceTip.Point.Hash, firstEvt.Point.Hash)
+
+	second := testutil.RequireReceive(
+		t, errCh, 2*time.Second,
+		"undo-event decode error for the originally-applied block",
+	)
+	secondEvt, ok := second.Data.(LedgerErrorEvent)
+	require.True(t, ok, "unexpected payload %T", second.Data)
+	require.Equal(t, fixture.currentTip.Point.Slot, secondEvt.Point.Slot)
+	require.Equal(t, fixture.currentTip.Point.Hash, secondEvt.Point.Hash)
+
+	testutil.RequireNoReceive(
+		t, errCh, 250*time.Millisecond,
+		"expected exactly two undo decode errors",
+	)
+	require.Equal(t, fixture.ancestorTip, ls.currentTip)
+}
+
+// TestReconcilePrimaryChainTipWithLedgerTipEmitsUndoEventsBeforeTruncating
+// covers the live primary-chain/ledger divergence reconciler
+// (issue #3516): rewinding the primary chain to their common ancestor must
+// follow the same validate-then-emit-then-truncate contract
+// rollbackChainAndState uses for a peer-driven rollback, so ledger.tx
+// subscribers still see an undo for blocks this reconciliation discards.
+// Before this fix the reconciler called RewindPrimaryChainToPoint directly
+// and never read blocksAboveSlot at all, so this decode error -- proof the
+// undo path ran -- was never emitted.
+func TestReconcilePrimaryChainTipWithLedgerTipEmitsUndoEventsBeforeTruncating(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+
+	txSubID, _ := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), txSubID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
+
+	errSubID, errCh := bus.SubscribeWithBuffer(LedgerErrorEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), errSubID)
+	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
+
+	// Put the primary chain on a same-height fork of the ledger's current
+	// tip: the ledger tip is no longer on the primary chain, but the
+	// fixture's ancestor still is, so reconciliation rewinds to it. This
+	// also removes fixture.currentTip -- the block the ledger actually
+	// applied -- from the primary chain's active index, retaining it
+	// only in the manager's block cache.
+	forkHash := testHashBytes("reconcile-undo-fork")
+	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        forkHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+
+	evt := testutil.RequireReceive(
+		t, errCh, 2*time.Second,
+		"undo-event decode error for the block the ledger actually applied",
+	)
+	le, ok := evt.Data.(LedgerErrorEvent)
+	require.True(t, ok, "unexpected payload %T", evt.Data)
+	require.Equal(t, "rollback_tx_undo_decode", le.Operation)
+	// The undo must be built from fixture.currentTip -- what the ledger
+	// applied and is rolling back -- not from forkHash, the replacement
+	// branch's block the ledger never applied at all.
+	require.Equal(t, fixture.currentTip.Point.Slot, le.Point.Slot)
+	require.Equal(t, fixture.currentTip.Point.Hash, le.Point.Hash)
+	// The undo notification is published only after the durable metadata
+	// rollback succeeds, so subscribers never observe an undo ahead of the
+	// ledger tip that records it.
+	require.Equal(t, fixture.ancestorTip, ls.currentTip)
+	dbTip, err := ls.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, fixture.ancestorTip, dbTip)
+	testutil.RequireNoReceive(
+		t, errCh, 250*time.Millisecond,
+		"expected exactly one undo decode error",
+	)
+}
+
+// TestReconciliationUndoDegradesGracefullyAfterRestart covers the restart
+// case reconciliationUndoBlocks cannot fully solve: the manager's block
+// cache is purely in-memory, so a process restart after chain selection
+// already replaced an applied block leaves that block resolvable through
+// neither the primary chain's active index nor the cache. Reconciliation
+// must still complete and roll the ledger back correctly -- refusing to
+// reconcile over a missing notification would, at this function's call
+// sites, mean refusing to start the node or halting the block-processing
+// reader goroutine, considerably worse than an incomplete notification
+// (issue #3516 review). The gap must be observable, not silent: an
+// error-level log and the reconciliationUndoUnresolved counter.
+func TestReconciliationUndoDegradesGracefullyAfterRestart(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+
+	txSubID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), txSubID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
+
+	errSubID, errCh := bus.SubscribeWithBuffer(LedgerErrorEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), errSubID)
+	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
+
+	// Diverge the primary chain exactly as in the test above: this
+	// removes fixture.currentTip from the active index, retaining it
+	// only in the (about to be discarded) manager's block cache.
+	forkHash := testHashBytes("reconcile-undo-restart-fork")
+	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        forkHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+
+	// Simulate a restart: a brand new ChainManager over the same
+	// database has an empty block cache, so it cannot answer for a
+	// block chain selection already replaced before this process
+	// started, the same as after a real process restart.
+	restartedCM, err := chain.NewManager(fixture.ls.db, nil)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		restartedCM.SetLedger(testSecurityParamLedger{securityParam: 2}),
+	)
+	ls.config.ChainManager = restartedCM
+	ls.chain = restartedCM.PrimaryChain()
+
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+
+	// The reconciliation still lands: the ledger tip moves to the
+	// ancestor even though its undo notification could not be built.
+	require.Equal(t, fixture.ancestorTip, ls.currentTip)
+	dbTip, err := ls.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, fixture.ancestorTip, dbTip)
+
+	// No undo event of any kind was published for the unresolvable
+	// block: there is nothing to decode-fail on, since it could not be
+	// read at all. Silence here is correct; the gap must show up
+	// through the log and the counter instead, not as a fabricated or
+	// wrong-branch event.
+	testutil.RequireNoReceive(
+		t, txCh, 250*time.Millisecond,
+		"no transaction event for an unresolvable block",
+	)
+	testutil.RequireNoReceive(
+		t, errCh, 250*time.Millisecond,
+		"no decode-failure event for an unresolvable block",
+	)
+	require.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(ls.metrics.reconciliationUndoUnresolved),
+		"reconciliationUndoUnresolved must count the unresolvable block",
+	)
+}
+
+// TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewindAndEmit
+// covers wolf31o2's P1 finding on PR #3611: the common-ancestor branch
+// truncates the primary chain (RewindPrimaryChainToPoint) before
+// publishing ledger.tx undo events (emitRollbackTransactionEvents). A
+// crash between those two steps leaves the primary chain already
+// truncated -- durable -- while ls.currentTip (also durable, updated only
+// by the caller's own ls.rollback(ancestor) after this closure returns)
+// still names the stale, now-discarded blocks, and the undo events for
+// them were never published.
+//
+// The next reconciliation attempt after such a crash does not land back
+// in the common-ancestor branch: chain.Tip() is now behind the stale
+// ls.currentTip, so it lands in the "ledger tip ahead of primary chain
+// tip" branch instead. That branch must still attempt the same
+// reconciliationUndoBlocks/emitRollbackTransactionEvents delivery, or the
+// notification is lost for good rather than merely delayed to the next
+// reconciliation attempt.
+func TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewindAndEmit(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+
+	errSubID, errCh := bus.SubscribeWithBuffer(LedgerErrorEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), errSubID)
+	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
+
+	// Diverge the primary chain exactly as the sibling tests above: the
+	// ledger tip (fixture.currentTip) is no longer on the primary chain,
+	// but the common ancestor (fixture.ancestorTip) still is.
+	forkHash := testHashBytes("reconcile-undo-crash-recovery-fork")
+	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        forkHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+
+	// Simulate the crash itself: truncate the primary chain to the
+	// ancestor directly, the same call RewindPrimaryChainToPoint makes
+	// internally, but stop there -- without ever reaching
+	// emitRollbackTransactionEvents and without updating ls.currentTip.
+	// This is exactly the durable state a process is left in immediately
+	// after that call succeeds but before the event publish that follows
+	// it runs.
+	require.NoError(
+		t,
+		ls.config.ChainManager.RewindPrimaryChainToPoint(
+			fixture.ancestorTip.Point,
+		),
+	)
+	require.Equal(
+		t, fixture.currentTip, ls.currentTip,
+		"ls.currentTip must still be the stale, pre-crash value, exactly "+
+			"as it would be immediately after a crash",
+	)
+
+	// The "restarted" reconciliation attempt.
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+
+	evt := testutil.RequireReceive(
+		t, errCh, 2*time.Second,
+		"the recovery attempt must still try to deliver an undo "+
+			"notification for the block truncated before the crash",
+	)
+	le, ok := evt.Data.(LedgerErrorEvent)
+	require.True(t, ok, "unexpected payload %T", evt.Data)
+	require.Equal(t, "rollback_tx_undo_decode", le.Operation)
+	require.Equal(t, fixture.currentTip.Point.Slot, le.Point.Slot)
+	require.Equal(t, fixture.currentTip.Point.Hash, le.Point.Hash)
+
+	require.Equal(t, fixture.ancestorTip, ls.currentTip)
+}
+
+// TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmitting
+// covers wolf31o2's fourth-round review on PR #3611: rollbackChainAndState
+// pre-checks the Mithril boundary before it ever calls
+// validateAndEmitRollbackUndo, so its own ls.rollback call can never
+// observe ErrRollbackExceedsMithrilBoundary in practice. This reconciler
+// did not have the matching pre-check, so it could reach an emit for a
+// rollback ls.rollback would then deterministically reject -- exactly the
+// predictable half of the "emit before ls.rollback can fail" finding.
+// Adding the same pre-check here closes that predictable half outright
+// (proven below: no undo published, no primary-chain truncation
+// attempted, ls.currentTip untouched) and leaves only a genuine,
+// unpredictable DB error as ls.rollback's residual failure mode -- see
+// TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewindAndEmit
+// for that remaining case's retry/redelivery proof.
+func TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmitting(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+
+	errSubID, errCh := bus.SubscribeWithBuffer(LedgerErrorEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), errSubID)
+	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
+
+	// Diverge the primary chain exactly as the sibling tests above.
+	forkHash := testHashBytes("reconcile-mithril-boundary-fork")
+	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        forkHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+
+	// The ancestor sits below this Mithril boundary, so ls.rollback would
+	// reject this target deterministically -- the same rejection
+	// rollbackChainAndState pre-checks before it ever calls
+	// validateAndEmitRollbackUndo. reconcilePrimaryChainTipWithLedgerTip
+	// must pre-check it the same way, before resolving or emitting any
+	// undo event, and before ever calling RewindPrimaryChainToPoint.
+	ls.mithrilLedgerSlot = fixture.ancestorTip.Point.Slot + 1
+
+	err := ls.reconcilePrimaryChainTipWithLedgerTip()
+	require.ErrorIs(t, err, ErrRollbackExceedsMithrilBoundary)
+
+	// No undo notification for a rollback that is rejected outright, not
+	// merely delayed -- publishing one here would tell subscribers about
+	// an undo that never happens at all.
+	testutil.RequireNoReceive(
+		t, errCh, 250*time.Millisecond,
+		"a deterministically rejected rollback must not publish an undo "+
+			"notification at all",
+	)
+
+	require.Equal(
+		t, fixture.currentTip, ls.currentTip,
+		"a declined rollback must not have moved ls.currentTip",
+	)
+	require.Equal(
+		t, forkHash, ls.chain.Tip().Point.Hash,
+		"a declined rollback must not have touched the primary chain "+
+			"either -- the pre-check runs before RewindPrimaryChainToPoint",
+	)
+}
+
+// TestReconciliationUndoBlocksIncludesNilNonceRecords covers a durable
+// applied-point row with no evolving nonce, as used by Byron-like blocks.
+func TestReconciliationUndoBlocksIncludesNilNonceRecords(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+	txSubID, _ := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), txSubID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
+
+	// Extend the still-intact primary chain (no divergence here -- this
+	// test calls reconciliationUndoBlocks directly, not the full
+	// reconciler) with one more Byron-like applied block. Its durable
+	// applied-point row intentionally has no evolving nonce.
+	byronLikeHash := testHashBytes("byron-like-no-nonce-row")
+	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        byronLikeHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.currentTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+	require.NoError(t, ls.db.SetBlockNonce(
+		byronLikeHash,
+		fixture.currentTip.Point.Slot+5,
+		nil,
+		false,
+		nil,
+	))
+
+	blocks := ls.reconciliationUndoBlocks(
+		fixture.ancestorTip.Point,
+		fixture.currentTip.Point.Slot+5,
+		fixture.currentTip.BlockNumber+1,
+	)
+
+	// Both applied points are candidates; the Byron-like row is retained
+	// even though its nonce is nil.
+	require.Len(t, blocks, 2)
+	require.Equal(t, byronLikeHash, blocks[0].Hash)
+	require.Equal(t, fixture.currentTip.Point.Hash, blocks[1].Hash)
+
+	require.Equal(
+		t,
+		float64(0),
+		promtestutil.ToFloat64(ls.metrics.reconciliationUndoMissingRecord),
+		"a durable nil-nonce applied point must not be counted as missing",
+	)
+	require.Equal(
+		t,
+		float64(0),
+		promtestutil.ToFloat64(ls.metrics.reconciliationUndoUnresolved),
+		"a missing record is a different gap from an unresolvable one and "+
+			"must not double-count into it",
+	)
+}
+
+// TestReconciliationUndoBlocksDetectsMissingBlockNonceRecords covers the
+// absent-row path for an applied block. Byron-era processing historically
+// produced this shape, so the block-number delta must still make the gap
+// observable through reconciliationUndoMissingRecord without fabricating an
+// undo block from the replacement chain.
+func TestReconciliationUndoBlocksDetectsMissingBlockNonceRecords(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+	txSubID, _ := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	require.NotEqual(t, event.EventSubscriberId(0), txSubID)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
+
+	byronLikeHash := testHashBytes("byron-like-absent-nonce-row")
+	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{{
+		Slot:        fixture.currentTip.Point.Slot + 5,
+		Hash:        byronLikeHash,
+		BlockNumber: fixture.currentTip.BlockNumber + 1,
+		Type:        1,
+		PrevHash:    fixture.currentTip.Point.Hash,
+		Cbor:        []byte{0x80},
+	}}))
+
+	blocks := ls.reconciliationUndoBlocks(
+		fixture.ancestorTip.Point,
+		fixture.currentTip.Point.Slot+5,
+		fixture.currentTip.BlockNumber+1,
+	)
+
+	require.Len(t, blocks, 1)
+	require.Equal(t, fixture.currentTip.Point.Hash, blocks[0].Hash)
+	require.Equal(t, float64(1), promtestutil.ToFloat64(ls.metrics.reconciliationUndoMissingRecord))
+	require.Equal(t, float64(0), promtestutil.ToFloat64(ls.metrics.reconciliationUndoUnresolved))
+}
+
+// TestReconcilePrimaryChainTipWithLedgerTipSucceedsBeforeSetLedger covers a
+// startup regression: NewLedgerState calls reconcilePrimaryChainTipWithLedgerTip
+// before node.go's ChainManager.SetLedger has configured the security
+// parameter K (see node.go: state, err := ledger.NewLedgerState(...) runs,
+// then n.chainManager.SetLedger(n.ledgerState) -- in that order). Routing
+// the ancestor rewind through RewindPrimaryChainToPoint unconditionally
+// would return ErrSecurityParamNotConfigured here and fail node startup
+// outright for exactly the local, already-durable divergence this function
+// exists to repair (issue #3516 review). Reconciliation must still land.
+func TestReconcilePrimaryChainTipWithLedgerTipSucceedsBeforeSetLedger(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+
+	// Diverge the primary chain exactly as in the tests above.
+	forkHash := testHashBytes("reconcile-undo-presetledger-fork")
+	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        forkHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+
+	// Simulate the pre-SetLedger startup window: a brand new
+	// ChainManager over the same database, with SetLedger never
+	// called, the same as NewLedgerState sees it in node.go.
+	presetupCM, err := chain.NewManager(fixture.ls.db, nil)
+	require.NoError(t, err)
+	require.False(t, presetupCM.SecurityParamConfigured())
+	ls.config.ChainManager = presetupCM
+	ls.chain = presetupCM.PrimaryChain()
+
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+
+	require.Equal(t, fixture.ancestorTip, ls.currentTip)
+	dbTip, err := ls.db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, fixture.ancestorTip, dbTip)
 }
 
 // TestBlocksAboveSlotServesLedgerErrorOnlySubscribers guards the

@@ -1316,7 +1316,7 @@ flowchart LR
 | Logical key | Value | Used by |
 |---|---|---|
 | `bp` + big-endian slot `uint64` + block hash bytes | Raw block CBOR, or expired-history marker `DBT1` | `BlobStore.SetBlock`, `GetBlock`, `TombstoneBlock`, block iterators |
-| `bp..._metadata` | `types.BlockMetadata`: `id`, `type`, `height`, `prev_hash` encoded as CBOR; Badger can use compact `DBM1` binary metadata | `GetBlock` and archive-proxy/history-expiry paths |
+| `bp..._metadata` | `types.BlockMetadata`: `id`, `type`, `height`, `prev_hash` encoded as CBOR; Badger can use compact `DBM1` binary metadata (run mode `serve`/`leios` with storage mode `core`). Which encoding is present depends on the configuration of the node that wrote the block, so decode with `types.UnmarshalBlockMetadata` rather than as CBOR — code outside the plugins reads this key directly. | `GetBlock`, the block-number search, and archive-proxy/history-expiry paths |
 | `bi` + big-endian internal block ID `uint64` | The corresponding `bp...` block key | Block iteration and block-by-index lookup |
 | `bh` + block hash bytes | The corresponding `bp...` block key | Fast block-by-hash lookup |
 | `u` + tx hash bytes + big-endian output index `uint32` | UTxO CBOR or a 52-byte `DOFF` CBOR-offset reference into a block | UTxO resolution and history expiry |
@@ -1591,6 +1591,43 @@ directly, so it neither consults the index nor scans, and it returns the block
 on a database whose index has not been backfilled. Reserve the by-hash lookup
 for callers that genuinely have only a hash, and treat its `ErrBlockNotFound`
 as "not reachable by hash" rather than "not present".
+
+### Block Number Lookup
+
+`BlockByNumber` resolves a block from its chain block number (height). Block
+number is not an indexed blob key — only slot (`bp`), hash (`bh`), and the
+internal sequential ID (`bi`) are — so the lookup binary-searches the ID space
+that block numbers increase with, bounded above by the highest indexed block,
+and seeks to the next indexed entry at or after each probe so a gap left by a
+Mithril bootstrap or drain import does not end the search early. A number no
+block carries returns `models.ErrBlockNotFound`. It costs O(log n) blob reads
+where a slot or hash lookup costs one, so prefer either of those when the
+caller has one; bark's `ArchiveService.FetchBlock` uses it only for a reference
+that supplies height alone.
+
+The upper bound is a separate value, `BlockNumberBound`, resolved by
+`ResolveBlockNumberBound` and passed to `BlockByNumberBounded`. Resolving it
+reads the newest `bi` entry through a **reverse** iterator, and the `s3` and
+`gcs` plugins implement a reverse iterator as a full listing of every object
+under the prefix with no early break (`listKeysToFile`) — one resolution
+enumerates every block-index object in the bucket. A caller answering more than
+one block number must therefore resolve the bound once and reuse it;
+`BlockByNumber` resolves its own and is a single-lookup convenience. The zero
+`BlockNumberBound` is unresolved and matches nothing, so a forgotten resolution
+fails closed with `ErrBlockNotFound` rather than searching an empty ID space.
+
+Search probes read the ordered `bi` entry and the block's `_metadata` object,
+never the block CBOR: a probe needs only the block's ID and height to decide
+which way to move, and reading it through the block itself would download a
+whole block object from cloud storage per probe. Only the one matching block is
+read in full. Because the `_metadata` object is read directly rather than
+through `GetBlock`, it is decoded with `types.UnmarshalBlockMetadata`, which
+accepts both the CBOR and the compact `DBM1` encodings. The block CBOR itself
+is unaffected: the matching block is still read through `GetBlock`.
+
+`lifecycle.ResolveTargetByNumber` keeps its own tip-bounded search rather than
+calling this: a truncate target must not resolve past the persisted tip, while
+a read should serve any block the blob store actually holds.
 
 ## SQL Examples Mirroring the Go API
 
@@ -2248,6 +2285,80 @@ FROM registration_drep
 WHERE credential_tag = $1 AND drep_credential = decode($2, 'hex')
   AND certificate_id IS NOT NULL AND certificate_id != 0;
 ```
+
+`GetDrepLastRegistrationDeposit` is the read side of DRep deregistration
+refund validation. The live `drep` row has no `deposit_amount` column --
+only the `registration_drep`/`deregistration_drep` history tables record
+it -- so `ledger.LedgerView.DRepRegistration`/`DRepRegistrations` (the
+`common.DRepState` implementation gouroboros calls to validate a
+`DeregistrationDrepCertificate`'s refund) must look it up from the most
+recent registration certificate rather than the current-state row:
+
+```sql
+SELECT deposit_amount
+FROM registration_drep
+WHERE credential_tag = $1 AND drep_credential = decode($2, 'hex')
+ORDER BY added_slot DESC
+LIMIT 1;
+```
+
+Note the absence of `GetDrepLastRegistrationSlot`'s
+`certificate_id IS NOT NULL AND certificate_id != 0` filter. Those
+`certificate_id = 0` rows are the ones the Mithril ledger-state import writes
+at the bootstrap slot via `ImportDrepRegistration`, described above. Excluding
+them is correct for an activity listing, which should not present a synthetic
+bootstrap row as chain activity, but wrong for refund validation: the imported
+row carries the real `deposit_amount` the DRep paid, and on a
+Mithril-bootstrapped node it is frequently the only registration row a DRep
+has. Filtering it out yields an expected refund of 0 against a certificate
+that legitimately supplies the deposit, and the block is rejected.
+
+`GetDrepLastRegistrationDeposits` is the set form, for callers that need the
+deposit for every DRep they are listing. `DRepRegistrations` (both
+`ledger.LedgerView`'s and the conformance harness's) would otherwise issue one
+`GetDrepLastRegistrationDeposit` per DRep, so a list of N active DReps costs
+N+1 round trips:
+
+```sql
+SELECT r.credential_tag, r.drep_credential, r.deposit_amount
+FROM drep d
+JOIN registration_drep r
+  ON r.id = (
+      SELECT reg.id
+      FROM registration_drep reg
+      WHERE reg.credential_tag = d.credential_tag
+        AND reg.drep_credential = d.credential
+      ORDER BY reg.added_slot DESC, reg.id DESC
+      LIMIT 1
+  )
+WHERE d.active = TRUE;
+```
+
+Four properties external callers depend on:
+
+- **Result key.** The returned `map[string]uint64` is keyed by
+  `models.DrepDepositKey(credentialTag, credential)`, which is the raw
+  concatenation `string([]byte{credentialTag}) + string(credential)` — not hex,
+  and tag-qualified, so a key and script credential sharing a hash stay
+  distinct.
+- **Latest-row rule.** The correlated lookup reproduces the singular query's
+  "most recent registration certificate" selection by ordering on
+  `added_slot DESC, id DESC`, and like the singular query it
+  deliberately does **not** apply the
+  `certificate_id IS NOT NULL AND certificate_id != 0` filter — bootstrap import
+  rows carry the real deposit and are frequently a DRep's only registration row
+  on a Mithril-bootstrapped node, for the reason described above.
+- **Scope is the active DRep set.** The inner join to `drep` on
+  `active = TRUE` restricts both the grouped scan and the result to the
+  credentials `GetActiveDreps` reports, so a credential that has appeared in
+  `registration_drep` but is no longer active gets no entry and its history
+  does not enlarge the work. Callers list that same set, so they index the map
+  by credential rather than iterating it.
+- **Absent means zero.** A credential with no registration row is simply absent
+  from the map, and rows whose `deposit_amount` is NULL are skipped rather than
+  stored, so both read back as 0 from a map lookup. That matches the singular
+  query, which returns `(0, nil)` for `sql.ErrNoRows` and for a NULL deposit.
+  Callers therefore index the map directly instead of testing for presence.
 
 `GetPredefinedDrepFirstSeenSlots` returns the earliest delegation slot
 per predefined DRep type (2 = AlwaysAbstain, 3 = AlwaysNoConfidence),
