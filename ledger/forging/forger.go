@@ -898,8 +898,15 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			ebSlot = s
 		}
 	}
-	// newestKnown is the most recent block this node has ANY evidence of: an
-	// applied block, an admitted header, or a corroborated endorser block.
+	// newestKnown is the most recent block this node has evidence of from the
+	// two sources this gate can see: a block on the primary chain (applied or
+	// merely added) and a corroborated endorser block.
+	//
+	// It does NOT include the admitted header frontier -- parentSlot comes
+	// from chain.Tip(), not chain.HeaderTip(). That omission is the whole
+	// reason the upstream staleness bound below is opt-in: the value it is
+	// compared against IS published at header admission, so the two are not
+	// like for like.
 	newestKnown := max(parentSlot, ebSlot)
 	effectiveGap := uint64(0)
 	if newestKnown > tipSlot {

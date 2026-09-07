@@ -4813,9 +4813,11 @@ cannot see:
 header admission and ledger application stalling *together*. Both local tips
 then agree, every gap above reads 0, and the node forges on a parent the
 network has long built past. Two further bounds catch it, both measured
-against `newestKnown` -- the most recent block this node has any evidence of,
-whether applied, admitted as a header, or corroborated as a Leios endorser
-block:
+against `newestKnown` -- the most recent block this node has evidence of from
+the two sources this gate can see: a block on the primary chain (`chain.Tip()`,
+applied or merely added) and a corroborated Leios endorser block. It
+deliberately does **not** include the admitted header frontier
+(`chain.HeaderTip()`), which is why the first bound below must be opt-in:
 
 - `forgeUpstreamStalenessSlots` (**default 0 = disabled**, flag
   `--forge-upstream-staleness-slots`, env

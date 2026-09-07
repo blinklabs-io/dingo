@@ -247,9 +247,10 @@ mithril:
 		},
 		ForgeSyncToleranceSlots:     321,
 		ForgeStaleGapThresholdSlots: 654,
-		// Not set by the fixture's YAML/env, so ApplyDefaults fills them --
-		// except the applied-tip backstop, whose 0 means "disabled" rather
-		// than "unset", so it stays 0.
+		// These come from the globalConfig clone seeded by resetGlobalConfig,
+		// not from ApplyDefaults: this test never calls it, and LoadConfig
+		// only parses and merges. Both staleness bounds are 0 there because
+		// 0 means "disabled" for them rather than "unset".
 		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
 		ForgeUpstreamStalenessSlots:        DefaultForgeUpstreamStalenessSlots,
 		ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,

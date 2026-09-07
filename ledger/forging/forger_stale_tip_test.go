@@ -792,9 +792,8 @@ func TestForgeCountsLeaderSlotLostToUnappliedRival(t *testing.T) {
 	}
 }
 
-// newStalenessTestForger builds a production forger with the upstream target
-// and the corroborated endorser-block slot made explicit.
-// newStalenessTestForger builds a production forger for the staleness gates.
+// newStalenessTestForger builds a production forger for the staleness gates,
+// with the upstream target and the corroborated endorser-block slot explicit.
 //
 // upstreamStalenessSlots is explicit and every caller that exercises the
 // upstream bound must pass a non-zero value: the bound is opt-in, so a helper
