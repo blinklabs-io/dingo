@@ -15,6 +15,7 @@
 package immutable
 
 import (
+	"bytes"
 	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
@@ -431,60 +432,107 @@ func (i *ImmutableDb) getChunkNamesFromPoint(
 		)
 	}
 	// Return all chunks for the origin
-	if point.Slot == 0 {
+	if point.Slot == 0 && len(point.Hash) == 0 {
 		return chunkNames, nil
 	}
 	lowerBound := 0
 	upperBound := len(chunkNames) - 1
+	candidate := len(chunkNames)
 	for lowerBound <= upperBound {
-		// Get chunk in the middle of the current bounds
 		middlePoint := (lowerBound + upperBound) / 2
-		middleChunkName := chunkNames[middlePoint]
-		middleSecondary, err := i.getChunkSecondaryIndex(middleChunkName)
-		if err != nil {
-			return nil, err
-		}
-		defer func() { _ = middleSecondary.Close() }()
-		next, err := middleSecondary.Next()
-		if err != nil {
-			return nil, err
-		}
-		if next == nil {
-			break
-		}
-		startSlot := next.BlockOrEbb
-		var endSlot uint64
-		for {
-			next, err := middleSecondary.Next()
+		pivot := -1
+		var startSlot, endSlot uint64
+		// An immutable range can contain empty chunks. Find the nearest
+		// non-empty pivot without letting an empty midpoint terminate the
+		// search or become the first candidate returned to GetBlock.
+		for distance := 0; pivot < 0; distance++ {
+			left := middlePoint - distance
+			right := middlePoint + distance
+			if left < lowerBound && right > upperBound {
+				break
+			}
+			if left >= lowerBound {
+				start, end, found, err := i.chunkSlotRange(chunkNames[left])
+				if err != nil {
+					return nil, err
+				}
+				if found {
+					pivot = left
+					startSlot = start
+					endSlot = end
+					break
+				}
+			}
+			if distance == 0 || right > upperBound {
+				continue
+			}
+			start, end, found, err := i.chunkSlotRange(chunkNames[right])
 			if err != nil {
 				return nil, err
 			}
-			if next == nil {
-				break
+			if found {
+				pivot = right
+				startSlot = start
+				endSlot = end
 			}
-			endSlot = next.BlockOrEbb
+		}
+		if pivot < 0 {
+			break
 		}
 		if point.Slot < startSlot {
 			// The slot we're looking for is less than the first slot in the chunk, so
 			// we can eliminate all later chunks
-			upperBound = middlePoint - 1
+			candidate = pivot
+			upperBound = pivot - 1
 		} else if point.Slot > endSlot {
 			// The slot we're looking for is greater than the last slot in the chunk, so
 			// we can eliminate all earlier chunks
-			lowerBound = middlePoint + 1
+			lowerBound = pivot + 1
 		} else {
 			// We found the chunk that (probably) has the requested point
+			candidate = pivot
 			break
 		}
 	}
-	if lowerBound >= len(chunkNames) {
+	if candidate >= len(chunkNames) {
 		return nil, fmt.Errorf(
 			"immutable DB: slot %d is beyond the last chunk: %w",
 			point.Slot,
 			ErrPointBeyondLastChunk,
 		)
 	}
-	return chunkNames[lowerBound:], nil
+	return chunkNames[candidate:], nil
+}
+
+func (i *ImmutableDb) chunkSlotRange(
+	chunkName string,
+) (start uint64, end uint64, found bool, retErr error) {
+	secondary, err := i.getChunkSecondaryIndex(chunkName)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	defer func() {
+		retErr = errors.Join(retErr, secondary.Close())
+	}()
+	entry, err := secondary.Next()
+	if err != nil {
+		return 0, 0, false, err
+	}
+	if entry == nil {
+		return 0, 0, false, nil
+	}
+	start = entry.BlockOrEbb
+	end = start
+	for {
+		entry, err = secondary.Next()
+		if err != nil {
+			return 0, 0, false, err
+		}
+		if entry == nil {
+			return start, end, true, nil
+		}
+		end = entry.BlockOrEbb
+	}
 }
 
 func (i *ImmutableDb) getChunkPrimaryIndex(
@@ -645,12 +693,18 @@ func (i *ImmutableDb) LastSlotInChunk(
 }
 
 func (i *ImmutableDb) GetBlock(point ocommon.Point) (*Block, error) {
-	var err error
 	chunkNames, err := i.getChunkNamesFromPoint(point)
 	if err != nil {
 		return nil, err
 	}
-	chunk, err := i.getChunk(chunkNames[0])
+	return i.getBlockFromChunk(chunkNames[0], point)
+}
+
+func (i *ImmutableDb) getBlockFromChunk(
+	chunkName string,
+	point ocommon.Point,
+) (*Block, error) {
+	chunk, err := i.getChunk(chunkName)
 	if err != nil {
 		return nil, err
 	}
@@ -667,7 +721,7 @@ func (i *ImmutableDb) GetBlock(point ocommon.Point) (*Block, error) {
 		if tmpBlock.Slot != point.Slot {
 			continue
 		}
-		if string(tmpBlock.Hash) != string(point.Hash) {
+		if !bytes.Equal(tmpBlock.Hash, point.Hash) {
 			continue
 		}
 		return tmpBlock, nil
@@ -680,15 +734,45 @@ func (i *ImmutableDb) TruncateChunksFromPoint(point ocommon.Point) error {
 	if err != nil {
 		return err
 	}
+	if point.Slot != 0 || len(point.Hash) != 0 {
+		block, err := i.getBlockFromChunk(chunkNames[0], point)
+		if err != nil {
+			return fmt.Errorf("validate immutable truncation point: %w", err)
+		}
+		if block == nil {
+			return fmt.Errorf(
+				"immutable DB: point at slot %d with hash %x not found; "+
+					"refusing truncation",
+				point.Slot,
+				point.Hash,
+			)
+		}
+	}
+	removedEntries := 0
 	for _, chunkName := range chunkNames {
-		if err := i.removeEntry(chunkName + chunkFileExtension); err != nil {
-			return err
-		}
-		if err := i.removeEntry(chunkName + secondaryFileExtension); err != nil {
-			return err
-		}
-		if err := i.removeEntry(chunkName + primaryFileExtension); err != nil {
-			return err
+		for _, suffix := range []string{
+			chunkFileExtension,
+			secondaryFileExtension,
+			primaryFileExtension,
+		} {
+			entryName := chunkName + suffix
+			if err := i.removeEntry(entryName); err != nil {
+				if removedEntries == 0 {
+					return fmt.Errorf(
+						"immutable DB: truncation did not start; remove %s: %w",
+						entryName,
+						err,
+					)
+				}
+				return fmt.Errorf(
+					"immutable DB: truncation is partial after removing %d "+
+						"entries; remove %s: %w",
+					removedEntries,
+					entryName,
+					err,
+				)
+			}
+			removedEntries++
 		}
 	}
 	return nil
