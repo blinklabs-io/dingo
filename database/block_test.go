@@ -293,3 +293,178 @@ func TestBlockBeforeSlotSyntheticOnlyNotFound(t *testing.T) {
 	_, err := BlockBeforeSlot(db, 120)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }
+
+// TestBlockByNumberResolvesEveryIndexedBlock pins the height-identifier
+// lookup the bark archive service needs: block numbers are not indexed in
+// the blob store, so the resolution is a binary search over the block-ID
+// space and every number in the chain must come back as its own block.
+func TestBlockByNumberResolvesEveryIndexedBlock(t *testing.T) {
+	db := newTestDB(t)
+	blocks := make([]models.Block, 0, 5)
+	for i := uint64(1); i <= 5; i++ {
+		block := testIndexedBlock(i*10, i, byte(i))
+		require.NoError(t, db.BlockCreate(block, nil))
+		blocks = append(blocks, block)
+	}
+
+	for _, want := range blocks {
+		got, err := BlockByNumber(db, want.Number)
+		require.NoError(t, err)
+		require.Equal(t, want.ID, got.ID)
+		require.Equal(t, want.Slot, got.Slot)
+		require.True(t, bytes.Equal(want.Hash, got.Hash))
+	}
+}
+
+// TestBlockByNumberSkipsSparseIndexGap proves the search tolerates gaps in
+// the block-ID space, which a Mithril bootstrap or drain import leaves
+// behind, rather than treating a missing probe as the end of the range. A
+// target above the gap is the discriminating case: a fallback that merely
+// shrinks the upper bound on a missing probe converges into the low range
+// and never finds it.
+func TestBlockByNumberSkipsSparseIndexGap(t *testing.T) {
+	db := newTestDB(t)
+	ids := []uint64{1, 2, 3, 1000, 1001, 1002}
+	blocks := make([]models.Block, 0, len(ids))
+	for i, id := range ids {
+		// #nosec G115 -- fixed small test fixture values.
+		block := testIndexedBlock(id*10, id, byte(i+1))
+		require.NoError(t, db.BlockCreate(block, nil))
+		blocks = append(blocks, block)
+	}
+
+	below, err := BlockByNumber(db, blocks[1].Number)
+	require.NoError(t, err)
+	require.Equal(t, blocks[1].ID, below.ID)
+
+	above, err := BlockByNumber(db, blocks[4].Number)
+	require.NoError(t, err)
+	require.Equal(t, blocks[4].ID, above.ID)
+}
+
+// TestResolveBlockNumberBoundIsSeparableFromTheSearch pins the split that
+// keeps a batch of block-number lookups from re-reading the chain tip once
+// per number. Resolving the bound is a reverse iteration over the block
+// index, which the s3 and gcs plugins answer by listing every block-index
+// object in the bucket, so the bound is resolved by the caller and carried
+// into each search.
+func TestResolveBlockNumberBoundIsSeparableFromTheSearch(t *testing.T) {
+	db := newTestDB(t)
+
+	empty, err := ResolveBlockNumberBound(db)
+	require.NoError(t, err)
+	require.False(t, empty.Resolved, "an empty chain bounds nothing")
+
+	blocks := make([]models.Block, 0, 5)
+	for i := uint64(1); i <= 5; i++ {
+		block := testIndexedBlock(i*10, i, byte(i))
+		require.NoError(t, db.BlockCreate(block, nil))
+		blocks = append(blocks, block)
+	}
+
+	bound, err := ResolveBlockNumberBound(db)
+	require.NoError(t, err)
+	require.True(t, bound.Resolved)
+	require.Equal(t, blocks[4].ID, bound.HighestID)
+	require.Equal(t, blocks[4].Number, bound.HighestNumber)
+
+	// One bound answers every number in the chain.
+	for _, want := range blocks {
+		got, err := BlockByNumberBounded(db, want.Number, bound)
+		require.NoError(t, err)
+		require.Equal(t, want.ID, got.ID)
+		require.Equal(t, want.Slot, got.Slot)
+		require.True(t, bytes.Equal(want.Hash, got.Hash))
+	}
+
+	_, err = BlockByNumberBounded(db, blocks[4].Number+1, bound)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
+
+// TestBlockByNumberResolvesCompactBlockMetadata pins the height lookup
+// against the other block-metadata encoding. The badger plugin writes a
+// compact binary value instead of CBOR for run mode "serve" or "leios"
+// with storage mode "core", and the search reads that value directly
+// rather than through GetBlock, so decoding it as CBOR would fail every
+// height lookup and every bound resolution on exactly the configurations
+// a production node runs.
+func TestBlockByNumberResolvesCompactBlockMetadata(t *testing.T) {
+	db, err := newTestDatabaseWithRunMode(
+		t,
+		&Config{DataDir: "", StorageMode: types.StorageModeCore},
+		"serve",
+	)
+	require.NoError(t, err)
+
+	blocks := make([]models.Block, 0, 5)
+	for i := uint64(1); i <= 5; i++ {
+		block := testIndexedBlock(i*10, i, byte(i))
+		require.NoError(t, db.BlockCreate(block, nil))
+		blocks = append(blocks, block)
+	}
+
+	// The stored value really is the compact encoding, not CBOR -- without
+	// this the test would still pass if the plugin silently fell back.
+	txn := db.BlobTxn(false)
+	t.Cleanup(func() { _ = txn.Rollback() })
+	raw, err := db.Blob().Get(
+		txn.Blob(),
+		types.BlockBlobMetadataKey(
+			types.BlockBlobKey(blocks[0].Slot, blocks[0].Hash),
+		),
+	)
+	require.NoError(t, err)
+	require.True(
+		t,
+		bytes.HasPrefix(raw, types.BlockMetadataBinaryMagic[:]),
+		"expected compact block metadata for run mode serve and storage mode core",
+	)
+
+	bound, err := ResolveBlockNumberBound(db)
+	require.NoError(t, err)
+	require.True(t, bound.Resolved)
+	require.Equal(t, blocks[4].ID, bound.HighestID)
+	require.Equal(t, blocks[4].Number, bound.HighestNumber)
+
+	for _, want := range blocks {
+		got, err := BlockByNumber(db, want.Number)
+		require.NoError(t, err)
+		require.Equal(t, want.ID, got.ID)
+		require.Equal(t, want.Slot, got.Slot)
+		require.True(t, bytes.Equal(want.Hash, got.Hash))
+	}
+}
+
+// TestBlockByNumberBoundedRejectsUnresolvedBound pins the fail-closed zero
+// value: a caller that never resolved a bound must get ErrBlockNotFound
+// rather than a search over an ID space the bound says is empty, which
+// would report the same thing for the wrong reason.
+func TestBlockByNumberBoundedRejectsUnresolvedBound(t *testing.T) {
+	db := newTestDB(t)
+	for i := uint64(1); i <= 3; i++ {
+		block := testIndexedBlock(i*10, i, byte(i))
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	_, err := BlockByNumberBounded(db, 1, BlockNumberBound{})
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
+
+// TestBlockByNumberReportsMissingNumbersAsNotFound proves an absent height
+// is reported as models.ErrBlockNotFound rather than a generic error, which
+// is what lets the bark archive service classify it as a not_found
+// reference instead of failing the whole batch.
+func TestBlockByNumberReportsMissingNumbersAsNotFound(t *testing.T) {
+	db := newTestDB(t)
+
+	_, err := BlockByNumber(db, 1)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+
+	for i := uint64(1); i <= 3; i++ {
+		block := testIndexedBlock(i*10, i, byte(i))
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	_, err = BlockByNumber(db, 99)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
