@@ -2987,6 +2987,125 @@ func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkPrototypeAccept
 	assert.Contains(t, logBuf.String(), "skipping leader eligibility check")
 }
 
+// TestVerifyBlockHeaderState_ReconstructedMarkDefersThenRejects pins the
+// defer/reject boundary for the unevaluable reconstructed mark row on the path
+// header verification actually takes (verifyBlockHeaderState, reached from
+// blockfetch through verifyBlockHeaderStateWithEpochAdvance). Rejecting the
+// header outright while the ledger apply cursor is still behind its slot would
+// stall a node catching up after a Mithril restore, so the rejection must
+// carry errLeaderStakeSnapshotUnavailable and defer there, hardening into a
+// rejection only once the cursor has passed the slot or the apply-time
+// recheck runs with deferral disabled. Mirrors the zero-total-active-stake
+// sibling in TestVerifyBlockHeaderState_UnavailableSnapshotRecoverableVsGenuine.
+func TestVerifyBlockHeaderState_ReconstructedMarkDefersThenRejects(
+	t *testing.T,
+) {
+	newReconstructedMarkLedger := func(
+		t *testing.T,
+		tipSlot uint64,
+	) (*LedgerState, *realBabbageBlock) {
+		t.Helper()
+		tb := createTestBlock(t, [32]byte{43}, 0, tamperNone)
+		ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+		ls.epochCache = []models.Epoch{
+			{
+				EpochId:       3,
+				StartSlot:     300,
+				LengthInSlots: 100,
+				Nonce:         tb.epochNonce,
+			},
+			{
+				EpochId:       4,
+				StartSlot:     400,
+				LengthInSlots: 100,
+				Nonce:         tb.epochNonce,
+			},
+			{
+				EpochId:       5,
+				StartSlot:     500,
+				LengthInSlots: 100,
+				Nonce:         tb.epochNonce,
+			},
+		}
+		ls.mithrilLedgerSlot = ls.epochCache[1].StartSlot + 50
+		tb.block.slot = ls.epochCache[2].StartSlot + 50
+		ls.currentTip = ochainsync.Tip{
+			Point: ocommon.Point{Slot: tipSlot},
+		}
+		ls.publishSnapshotsLocked()
+
+		seedBlockPoolRegistration(t, db, tb.block)
+		reconstructedCaptureSlot := ls.epochCache[1].StartSlot
+		poolKeyHash := tb.block.IssuerVkey().Hash()
+		seedPoolStakeSnapshotOfTypeAtSlot(
+			t,
+			db,
+			4,
+			models.PoolStakeSnapshotTypeMark,
+			poolKeyHash[:],
+			1,
+			0,
+			reconstructedCaptureSlot,
+		)
+		dummyHash := make([]byte, lcommon.Blake2b224Size)
+		dummyHash[0] = 0xFF
+		seedPoolStakeSnapshotOfTypeAtSlot(
+			t,
+			db,
+			4,
+			models.PoolStakeSnapshotTypeMark,
+			dummyHash,
+			1_000_000_000_000_000_000,
+			0,
+			reconstructedCaptureSlot,
+		)
+		return ls, tb.block
+	}
+
+	t.Run("tip behind the slot defers", func(t *testing.T) {
+		ls, block := newReconstructedMarkLedger(t, 549)
+		require.True(t, ls.ledgerTipBehindSlot(block.SlotNumber()))
+
+		err := ls.verifyBlockHeaderState(block, 5, true)
+		require.Error(t, err)
+		assert.True(
+			t,
+			IsHeaderVerificationDeferred(err),
+			"a catching-up node must defer, not reject: %v",
+			err,
+		)
+		assert.ErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
+		assert.Contains(
+			t,
+			err.Error(),
+			"reconstructed after the target boundary",
+		)
+
+		// The apply-time recheck runs with deferral disabled: the same state
+		// is a hard rejection there, so the deferred header is not silently
+		// adopted later.
+		err = ls.verifyBlockHeaderState(block, 5, false)
+		require.Error(t, err)
+		assert.False(t, IsHeaderVerificationDeferred(err))
+		assert.ErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
+	})
+
+	t.Run("tip caught up rejects", func(t *testing.T) {
+		ls, block := newReconstructedMarkLedger(t, 1550)
+		require.False(t, ls.ledgerTipBehindSlot(block.SlotNumber()))
+
+		err := ls.verifyBlockHeaderState(block, 5, true)
+		require.Error(t, err)
+		assert.False(
+			t,
+			IsHeaderVerificationDeferred(err),
+			"a caught-up cursor must not defer forever: %v",
+			err,
+		)
+		assert.ErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
+	})
+}
+
 func TestVerifyBlockLeaderEligibility_LiveComputedHistoricalMarkStillChecks(
 	t *testing.T,
 ) {
