@@ -148,10 +148,9 @@ func poolPositionPredicate(
 //
 // A nil `charged` means the era's deposit function could not compute an
 // amount, and a nil return carries that through so the column stores NULL
-// rather than an authoritative zero (dingo #3829). A carried-forward amount is
-// always known -- it was read from an earlier row -- so only the branches that
-// return `charged` can be nil, and a NULL written here reads back through the
-// same deposit_amount fallback a row predating the column takes.
+// rather than an authoritative zero (dingo #3829). A carried-forward amount
+// may also be unknown when both deposit columns on the earlier row are NULL;
+// preserve that absence rather than turning unknown into zero.
 func poolRegistrationDepositHeld(
 	ctx context.Context,
 	db queryer,
@@ -180,7 +179,7 @@ func poolRegistrationDepositHeld(
 		// registration and its retirement tombstone both sit at the snapshot
 		// slot with no certs join to separate them, and the tombstone is what
 		// says the pool is gone.
-		return &previous.held, nil
+		return previous.held, nil
 	}
 	epoch, resolved, err := epochAtSlot(ctx, db, at.slot)
 	if err != nil {
@@ -201,12 +200,12 @@ func poolRegistrationDepositHeld(
 	}
 	// Retirement still pending at this slot: this registration cancels it and
 	// the pool keeps holding the earlier deposit.
-	return &previous.held, nil
+		return previous.held, nil
 }
 
 type poolRegistrationDepositRow struct {
 	position poolCertPosition
-	held     uint64
+	held     *uint64
 }
 
 func latestPoolRegistrationBefore(
@@ -254,7 +253,7 @@ LIMIT 1`,
 	if !source.Valid {
 		source = charged
 	}
-	value, err := parseNullUint64("pool registration deposit held", source)
+	value, err := parseNullableUint64("pool registration deposit held", source)
 	if err != nil {
 		return row, false, err
 	}

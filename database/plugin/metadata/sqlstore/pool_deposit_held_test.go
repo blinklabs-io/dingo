@@ -134,6 +134,27 @@ func writeDepositHeldCert(
 	cert lcommon.Certificate,
 	deposit uint64,
 ) {
+	writeDepositHeldCertWithDeposits(t, store, slot, blockIndex, cert, map[int]uint64{0: deposit})
+}
+
+func writeDepositHeldCertUnknown(
+	t *testing.T,
+	store *Store,
+	slot uint64,
+	blockIndex uint32,
+	cert lcommon.Certificate,
+) {
+	writeDepositHeldCertWithDeposits(t, store, slot, blockIndex, cert, map[int]uint64{})
+}
+
+func writeDepositHeldCertWithDeposits(
+	t *testing.T,
+	store *Store,
+	slot uint64,
+	blockIndex uint32,
+	cert lcommon.Certificate,
+	deposits map[int]uint64,
+) {
 	t.Helper()
 	hash := make([]byte, 32)
 	hash[0] = byte(slot)
@@ -146,7 +167,7 @@ func writeDepositHeldCert(
 		tx,
 		ocommon.Point{Slot: slot, Hash: hash},
 		blockIndex,
-		map[int]uint64{0: deposit},
+		deposits,
 		false,
 		nil,
 	))
@@ -393,6 +414,23 @@ UPDATE pool_registration SET deposit_held = NULL WHERE pool_key_hash = ?`,
 	require.Equal(
 		t,
 		uint64(500),
+		depositHeldRefund(t, store, pool, 3, 3_000),
+	)
+}
+
+func TestPoolDepositHeldUnknownDepositFallsBackToReregistration(t *testing.T) {
+	t.Parallel()
+	store := newDepositHeldStore(t)
+	depositHeldEpochs(t, store, 5)
+	pool := depositHeldPoolKey(0xab)
+
+	writeDepositHeldCertUnknown(t, store, 100, 0, depositHeldRegistration(pool))
+	writeDepositHeldCert(t, store, 1_100, 0, depositHeldRegistration(pool), 800)
+	writeDepositHeldCert(t, store, 1_200, 0, depositHeldRetirement(pool, 3), 0)
+
+	require.Equal(
+		t,
+		uint64(800),
 		depositHeldRefund(t, store, pool, 3, 3_000),
 	)
 }

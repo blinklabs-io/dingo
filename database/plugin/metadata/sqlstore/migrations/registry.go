@@ -244,9 +244,11 @@ func backfillPoolDeposits(ctx context.Context, batch Batch, poolID int64) error 
 			havePrevious = true
 			continue
 		}
-		var held uint64
+		var held *uint64
+		unknownPrevious := false
 		if !havePrevious {
 			held, err = parsePoolDepositValue(reg.amount)
+			unknownPrevious = held == nil
 		} else {
 			held, err = previousHeld(previous)
 		}
@@ -278,12 +280,19 @@ func backfillPoolDeposits(ctx context.Context, batch Batch, poolID int64) error 
 		if err != nil {
 			return fmt.Errorf("pool %d registration %d: %w", poolID, reg.id, err)
 		}
+		if held == nil {
+			previous = reg
+			havePrevious = true
+			continue
+		}
 		if _, err := batch.Tx.ExecContext(ctx, batch.Rebind(
 			"UPDATE pool_registration SET deposit_held = ? WHERE id = ? AND deposit_held IS NULL",
-		), strconv.FormatUint(held, 10), reg.id); err != nil {
+		), strconv.FormatUint(*held, 10), reg.id); err != nil {
 			return fmt.Errorf("pool %d registration %d: write held deposit: %w", poolID, reg.id, err)
 		}
-		reg.held = sql.NullString{String: strconv.FormatUint(held, 10), Valid: true}
+		if !unknownPrevious {
+			reg.held = sql.NullString{String: strconv.FormatUint(*held, 10), Valid: true}
+		}
 		previous = reg
 		havePrevious = true
 	}
@@ -411,18 +420,26 @@ func parsePoolDeposit(value string) (uint64, error) {
 	return parsed, nil
 }
 
-func parsePoolDepositValue(value sql.NullString) (uint64, error) {
+func parsePoolDepositValue(value sql.NullString) (*uint64, error) {
 	if !value.Valid || value.String == "" {
-		return 0, nil
+		return nil, nil
 	}
-	return parsePoolDeposit(value.String)
+	parsed, err := parsePoolDeposit(value.String)
+	if err != nil {
+		return nil, err
+	}
+	return &parsed, nil
 }
 
-func previousHeld(reg poolDepositRegistration) (uint64, error) {
+func previousHeld(reg poolDepositRegistration) (*uint64, error) {
 	if !reg.held.Valid {
 		return parsePoolDepositValue(reg.amount)
 	}
-	return parsePoolDeposit(reg.held.String)
+	parsed, err := parsePoolDeposit(reg.held.String)
+	if err != nil {
+		return nil, err
+	}
+	return &parsed, nil
 }
 
 // committeeTermStartBackfill is deliberately data-driven rather than a

@@ -156,6 +156,32 @@ WHERE pool_key_hash = ? ORDER BY added_slot DESC LIMIT 1`, keyHash).Scan(&held))
 	require.Equal(t, "500000000", held)
 }
 
+func TestDepositHeldBackfillLeavesUnknownReregistrationUnpopulated(t *testing.T) {
+	t.Parallel()
+	db, runTo := depositHeldBackfillDB(t)
+	keyHash := []byte("legacy-pool-key-hash-0000006")
+	seedLegacyPoolRegistration(t, db, keyHash, 100, nil)
+	var poolID int64
+	require.NoError(t, db.QueryRowContext(context.Background(),
+		"SELECT id FROM pool WHERE pool_key_hash = ?", keyHash).Scan(&poolID))
+	_, err := db.ExecContext(context.Background(), `
+INSERT INTO pool_registration (pool_id, pool_key_hash, added_slot, deposit_amount)
+VALUES (?, ?, ?, ?)`, poolID, keyHash, 200, "800000000")
+	require.NoError(t, err)
+
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	runTo(registry)
+
+	var held, amount sql.NullString
+	require.NoError(t, db.QueryRowContext(context.Background(), `
+SELECT deposit_held, deposit_amount FROM pool_registration
+WHERE pool_key_hash = ? ORDER BY added_slot DESC LIMIT 1`, keyHash).Scan(&held, &amount))
+	require.False(t, held.Valid)
+	require.True(t, amount.Valid)
+	require.Equal(t, "800000000", amount.String)
+}
+
 // The backfill statement is re-runnable: an upgrade interrupted after the
 // backfill committed but before its phase row advanced replays it, and it must
 // not overwrite a held amount that carry-forward has since written.
