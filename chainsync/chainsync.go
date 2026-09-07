@@ -856,6 +856,18 @@ func (s *State) RecordObservedHeader(h ObservedHeader) {
 		return
 	}
 
+	// A raw header callback can still be in flight when the connection is
+	// removed. RemoveClientConnId deletes the tracked client and clears this
+	// history under clientConnIdMutex, so the tracked check is held across
+	// the observed-header write in the same order: a late callback for a
+	// connection that is gone would otherwise recreate an entry that nothing
+	// removes again, leaking one per disconnect.
+	s.clientConnIdMutex.RLock()
+	defer s.clientConnIdMutex.RUnlock()
+	if _, tracked := s.trackedClients[h.ConnectionId]; !tracked {
+		return
+	}
+
 	s.observedHeadersMutex.Lock()
 	defer s.observedHeadersMutex.Unlock()
 
