@@ -139,6 +139,8 @@ github.com/blinklabs-io/gouroboros v0.202.10 h1:pWfOUTxTGys58s8vbZ5yW1qVbgYbipuv
 github.com/blinklabs-io/gouroboros v0.202.10/go.mod h1:QUrXbiy0I3EIYj2T7w+P3RUSbp3GwW7Yh5bhfaA286o=
 github.com/blinklabs-io/gouroboros v0.203.0 h1:FtrHjFjvHZZM3Mc56hzDntRGpn6J6M0RI2sOKvEnIII=
 github.com/blinklabs-io/gouroboros v0.203.0/go.mod h1:QUrXbiy0I3EIYj2T7w+P3RUSbp3GwW7Yh5bhfaA286o=
+github.com/blinklabs-io/gouroboros v0.204.0 h1:z3N2A+4UqERe5A8Okw5m650GKNOQkrZjzAYmUZIFyvQ=
+github.com/blinklabs-io/gouroboros v0.204.0/go.mod h1:QUrXbiy0I3EIYj2T7w+P3RUSbp3GwW7Yh5bhfaA286o=
 github.com/blinklabs-io/ouroboros-mock v0.18.0 h1:m7f7jUhkxp6NlVF86BLxGDNaATjbhQXcWIFqJ4HFyh8=
 github.com/blinklabs-io/ouroboros-mock v0.18.0/go.mod h1:6YjKLLIaSTSrl8RJTg584f+W5NwniLNn/GHja2ijic0=
 github.com/blinklabs-io/ouroboros-mock v0.19.0 h1:f4ej1znSUxCNWfPW6asOd/+mjxBwtMzYAw8nmHHuvtw=
