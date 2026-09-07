@@ -6118,6 +6118,11 @@ already queued ahead of an undo may still produce a confirmation; the undo is
 ignored because the UTxO RPC stage stream has no reversal message and does not
 retract a confirmation already sent.
 
+`FollowTip` and `WatchTx` reject intersection lists longer than `MaxBlockRefs`
+(default 100), using the same invalid-argument error as `FetchBlock`. The cap
+applies before logging, point allocation, or ledger lookup, including duplicate
+references. Empty lists retain the current-tip fallback.
+
 `WatchTx` retains up to 256 forward blocks in a per-stream undo history. A
 rollback within that history builds its `Undo` responses without reading
 persisted blocks. A deeper rollback walks persisted predecessors synchronously
