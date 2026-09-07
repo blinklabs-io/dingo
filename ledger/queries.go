@@ -127,7 +127,7 @@ func (ls *LedgerState) querySystemStart() (any, error) {
 		int64(utc.Nanosecond())*1000
 	ret := olocalstatequery.SystemStartResult{
 		Year:        *big.NewInt(int64(utc.Year())),
-		Day:         utc.YearDay(),
+		Day:         int64(utc.YearDay()),
 		Picoseconds: *big.NewInt(dayPicoseconds),
 	}
 	return ret, nil
