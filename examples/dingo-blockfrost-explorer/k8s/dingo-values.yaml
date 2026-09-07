@@ -12,6 +12,11 @@ environment:
   CARDANO_NETWORK: "preview"
   CARDANO_DATABASE_PATH: "/data"
   DINGO_STORAGE_MODE: "api"
+  # A Service (and the LoadBalancer in blockfrost-loadbalancer.yaml) reaches
+  # the pod's own IP, not its loopback, so the API listeners -- which bind
+  # 127.0.0.1 by default -- have to bind the pod interface. Pair this with a
+  # NetworkPolicy or api.auth if the cluster is not trusted.
+  DINGO_API_BIND_ADDR: "0.0.0.0"
   DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT: "9090"
   DINGO_PLUGINS_API_BLOCKFROST_CONFIG_PORT: "3000"
   DINGO_PLUGINS_API_MESH_CONFIG_PORT: "8080"

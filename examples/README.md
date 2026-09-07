@@ -51,7 +51,13 @@ SUNDAE_PREVIEW_PORT=15174 \
 docker compose up -d
 ```
 
-Set `DINGO_BIND_ADDR=127.0.0.1` if Dingo API ports should be local-only.
+`DINGO_BIND_ADDR` is the *host* address the Dingo ports are published on;
+set it to `127.0.0.1` if they should be local-only. It is not the address
+Dingo binds inside its container. The API listeners bind `127.0.0.1` by
+default and a container's loopback is reachable only from inside that
+container, so the stack sets `DINGO_API_BIND_ADDR=0.0.0.0` in the shared
+Dingo environment — without it neither the published ports nor the
+`blockfrost-explorer` and `sundae-preview` services could reach the API.
 
 Reset the shared Dingo/Postgres state:
 

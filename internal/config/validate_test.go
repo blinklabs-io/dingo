@@ -275,6 +275,34 @@ func TestValidate(t *testing.T) {
 			wantErr: "is assigned to both",
 		},
 		{
+			// The split moved only the three API providers onto
+			// apiBindAddr; the relay/NtN and metrics listeners still
+			// bind bindAddr. With the two addresses distinct,
+			// relayPort == metricsPort still collides -- which holds
+			// only while both of those entries read bindAddr.
+			name: "relay and metrics still contend on bindAddr",
+			modify: func(c *Config) {
+				c.BindAddr = "127.0.0.2"
+				c.APIBindAddr = "127.0.0.3"
+				c.MetricsPort = c.RelayPort
+			},
+			wantErr: "is assigned to both",
+		},
+		{
+			// The complementary direction: an API listener may take the
+			// relay's own port, because it binds apiBindAddr rather
+			// than bindAddr. This fails if an API entry is moved back
+			// onto bindAddr, and equally if the relay entry is moved
+			// onto apiBindAddr.
+			name: "api listener may share the relay port",
+			modify: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.BindAddr = "127.0.0.2"
+				c.APIBindAddr = "127.0.0.3"
+				setPluginPort(&c.Plugins.API.Blockfrost, c.RelayPort)
+			},
+		},
+		{
 			name: "cardano config path traversal",
 			modify: func(c *Config) {
 				c.CardanoConfig = "configs/../../etc/passwd"

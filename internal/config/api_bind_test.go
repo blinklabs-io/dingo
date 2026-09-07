@@ -168,7 +168,9 @@ func TestCORSAllowedOriginsWildcardStaysExplicit(t *testing.T) {
 
 // TestAPIPluginHostFromPluginEnvironment asserts the generic plugin
 // environment reaches a provider's host override, so one listener can be
-// widened without a config file. docker-compose.yml depends on this path.
+// widened without a config file -- the path a container or Helm values
+// file uses when it wants one API reachable and the other two on
+// loopback.
 func TestAPIPluginHostFromPluginEnvironment(t *testing.T) {
 	resetGlobalConfig()
 	unsetDebugBindAddrEnv(t)
@@ -223,4 +225,73 @@ func TestAPIPluginHostPerProviderOverride(t *testing.T) {
 		DefaultAPIBindAddr,
 		APIPluginHost(noHost, DefaultAPIBindAddr),
 	)
+}
+
+// TestAPIBindAddressExplicitlyEmptyResolvesToLoopback pins the fallback
+// that an *explicitly* empty apiBindAddr depends on. The absent-key cases
+// above never reach it -- globalConfig already carries DefaultAPIBindAddr,
+// so nothing there is empty by the time ApplyDefaults runs. Without this
+// test, the ApplyDefaults and APIListenHost branches whose deletion turns
+// every API listener back into a wildcard are unguarded.
+func TestAPIBindAddressExplicitlyEmptyResolvesToLoopback(t *testing.T) {
+	tests := []struct {
+		name string
+		// setup arranges the explicitly empty value and returns the
+		// config file LoadConfig should read ("" for none).
+		setup func(t *testing.T) string
+	}{
+		{
+			name: "yaml",
+			setup: func(t *testing.T) string {
+				t.Helper()
+				configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+				require.NoError(t, os.WriteFile(
+					configFile,
+					[]byte("apiBindAddr: \"\"\n"),
+					0o600,
+				))
+				return configFile
+			},
+		},
+		{
+			name: "environment",
+			setup: func(t *testing.T) string {
+				t.Helper()
+				t.Setenv("DINGO_API_BIND_ADDR", "")
+				return ""
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			resetGlobalConfig()
+			unsetDebugBindAddrEnv(t)
+			unsetAPIExposureEnv(t)
+			t.Setenv("HOME", t.TempDir())
+			configFile := test.setup(t)
+
+			cfg, err := LoadConfig(configFile)
+			require.NoError(t, err)
+			require.Empty(
+				t,
+				cfg.APIBindAddr,
+				"the explicitly empty value must survive loading, "+
+					"otherwise this test never reaches the fallback",
+			)
+
+			// Fail-safe before ApplyDefaults too: a listener resolved
+			// from a Config that never ran it still binds loopback,
+			// never the wildcard bindAddr uses.
+			require.Equal(
+				t,
+				DefaultAPIBindAddr,
+				cfg.APIListenHost(cfg.Plugins.API.Blockfrost),
+			)
+
+			cfg.ApplyDefaults()
+			require.Equal(t, DefaultAPIBindAddr, cfg.APIBindAddr)
+			require.Equal(t, "127.0.0.1", cfg.APIBindAddr)
+		})
+	}
 }

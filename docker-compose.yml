@@ -10,6 +10,16 @@
 services:
   # --------------------------------------------------------------------------
   # Basic relay node
+  #
+  # No API listener runs here. storageMode stays at its "core" default, and
+  # the Blockfrost, Mesh, and UTxO RPC listeners only start under storageMode
+  # "api". Turning one on needs DINGO_STORAGE_MODE=api and a container-side
+  # wildcard bind -- DINGO_API_BIND_ADDR=0.0.0.0, or
+  # DINGO_PLUGINS_API_<NAME>_CONFIG_HOST=0.0.0.0 for a single listener --
+  # because those listeners bind loopback by default, and a container's
+  # loopback is reachable only from inside that container: neither a
+  # published port nor a sibling container on the same Docker network can
+  # reach it. examples/docker-compose.yml is a working API node.
   # --------------------------------------------------------------------------
   dingo:
     build:
@@ -21,14 +31,6 @@ services:
       - CARDANO_NETWORK=${CARDANO_NETWORK:-preview}
       - CARDANO_DATABASE_PATH=/data/db
       - DINGO_SOCKET_PATH=/ipc/dingo.socket
-      # API listeners bind loopback by default, which a container port
-      # mapping cannot reach. Widen only the listener this file publishes;
-      # a container-side bind is reachable by every other container on the
-      # same Docker network, so apiBindAddr stays on loopback and
-      # Blockfrost/Mesh stay unreachable rather than being widened along
-      # with it. Set DINGO_PLUGINS_API_<NAME>_CONFIG_HOST per listener, or
-      # DINGO_API_BIND_ADDR to widen all three at once.
-      - DINGO_PLUGINS_API_UTXORPC_CONFIG_HOST=0.0.0.0
       # Uncomment to enable debug logging
       # - DINGO_DEBUG=1
       # Uncomment to bootstrap from Mithril snapshot on first run
@@ -36,10 +38,8 @@ services:
     ports:
       # Ouroboros Node-to-Node (relay port)
       - "3001:3001"
-      # Prometheus metrics (localhost only by default)
+      # Prometheus metrics (localhost only on the host)
       - "127.0.0.1:12798:12798"
-      # UTxO RPC (gRPC, localhost only by default)
-      - "127.0.0.1:9090:9090"
     volumes:
       # Persistent database storage
       - dingo-data:/data/db

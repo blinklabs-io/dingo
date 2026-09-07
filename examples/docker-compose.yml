@@ -44,6 +44,15 @@ services:
       DINGO_DATABASE_WORKERS: ${DINGO_DATABASE_WORKERS:-16}
       DINGO_DATABASE_QUEUE_SIZE: ${DINGO_DATABASE_QUEUE_SIZE:-500}
       DINGO_BACKFILL_BATCH_SIZE: ${DINGO_BACKFILL_BATCH_SIZE:-1000}
+      # The API listeners bind loopback by default, and a container's
+      # loopback is reachable only from inside that container. This stack
+      # needs them on the container's network interface for both hops:
+      # blockfrost-explorer reaches http://dingo:3000 and sundae-preview
+      # reaches http://dingo:9090 across the Compose network, and the
+      # published ports below cannot forward to a loopback-bound listener
+      # either. Host-side exposure stays under DINGO_BIND_ADDR in the ports
+      # list, which is the host address the ports are published on.
+      DINGO_API_BIND_ADDR: "0.0.0.0"
       DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT: "${DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT:-9090}"
       DINGO_PLUGINS_API_BLOCKFROST_CONFIG_PORT: "${DINGO_PLUGINS_API_BLOCKFROST_CONFIG_PORT:-3000}"
       DINGO_PLUGINS_API_MESH_CONFIG_PORT: "${DINGO_PLUGINS_API_MESH_CONFIG_PORT:-8080}"

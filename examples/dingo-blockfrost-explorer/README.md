@@ -66,7 +66,9 @@ kubectl apply -f k8s/blockfrost-loadbalancer.yaml
 ```
 
 The LoadBalancer manifest exposes Blockfrost `3000`, UTxO RPC `9090`, Mesh
-`8080`, and metrics `12798`.
+`8080`, and metrics `12798`. The values set `DINGO_API_BIND_ADDR=0.0.0.0`
+because a Service reaches the pod's own IP rather than its loopback, and the
+API listeners bind `127.0.0.1` by default.
 
 ### Docker Compose
 
@@ -81,9 +83,13 @@ cp .env.example .env
 docker compose up -d
 ```
 
-Open `http://127.0.0.1:5173`. Set `DINGO_BIND_ADDR=127.0.0.1` or
-`BLOCKFROST_EXPLORER_BIND_ADDR=127.0.0.1` before `docker compose up` if you
-want local-only bindings.
+Open `http://127.0.0.1:5173`. `DINGO_BIND_ADDR` and
+`BLOCKFROST_EXPLORER_BIND_ADDR` are the *host* addresses the ports are
+published on; set either to `127.0.0.1` before `docker compose up` for
+local-only bindings. Neither is the address Dingo binds inside its
+container: the API listeners bind `127.0.0.1` by default and a container's
+loopback is reachable only from inside that container, so the stack sets
+`DINGO_API_BIND_ADDR=0.0.0.0` in the shared Dingo environment.
 
 ## Frontend
 

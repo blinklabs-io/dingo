@@ -338,10 +338,20 @@ headers at all. Set it explicitly — to specific origins, or to `["*"]` — to
 allow browser access.
 
 > **Upgrading:** a deployment that relied on the previous `0.0.0.0` API
-> default (for example, a container publishing an API port to the host) must
-> now set `apiBindAddr` — or that provider's own `host` — explicitly. A
-> deployment that relied on the previous wildcard CORS default must set
-> `corsAllowedOrigins` explicitly.
+> default must now set `apiBindAddr` — or that provider's own `host` —
+> explicitly. A deployment that relied on the previous wildcard CORS default
+> must set `corsAllowedOrigins` explicitly.
+>
+> **Containers and pods break silently.** A container has its own loopback,
+> so a listener bound to `127.0.0.1` inside it is unreachable from
+> everything outside: publishing the port (`-p 9090:9090`, or
+> `-p 127.0.0.1:9090:9090`) does not reach it, another container on the same
+> Docker network does not reach it, and a Kubernetes Service does not reach
+> it either, because it targets the pod IP. A containerised deployment
+> therefore needs `DINGO_API_BIND_ADDR=0.0.0.0` — or a per-provider `host` —
+> set *inside* the container, however the host-side mapping is written.
+> Restricting exposure is then the host mapping's job
+> (`-p 127.0.0.1:9090:9090`), or a NetworkPolicy's, plus `api.auth`.
 
 ### API TLS and Authentication
 

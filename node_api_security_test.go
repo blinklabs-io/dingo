@@ -293,3 +293,19 @@ func TestCORSDefaultsToDisabled(t *testing.T) {
 	wildcard := NewConfig(WithCORSAllowedOrigins([]string{"*"}))
 	assert.Equal(t, []string{"*"}, wildcard.CORSAllowedOrigins())
 }
+
+// TestAPIBindAddrExplicitlyEmptyResolvesToLoopback pins
+// syncCompatFields' fallback on the programmatic path: a Config whose
+// apiBindAddr is explicitly cleared -- WithAPIBindAddr(""), or a caller
+// that assembled Config without the internal defaults -- still binds
+// loopback rather than inheriting the wildcard bindAddr uses. Deleting
+// that branch is what turns the three listeners back into wildcards.
+func TestAPIBindAddrExplicitlyEmptyResolvesToLoopback(t *testing.T) {
+	cfg := NewConfig(
+		WithBindAddr("0.0.0.0"),
+		WithAPIBindAddr(""),
+	)
+
+	assert.Equal(t, internalconfig.DefaultAPIBindAddr, cfg.APIBindAddr())
+	assert.Equal(t, "0.0.0.0", cfg.BindAddr())
+}
