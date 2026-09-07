@@ -79,6 +79,8 @@ func mtlsHTTPClient(t *testing.T, certPath, keyPath string) *http.Client {
 // the generated client can decode. This starts a real server and drives
 // it with the generated databaseconnect.DatabaseServiceClient.
 func TestDatabaseServiceOverRealHTTP(t *testing.T) {
+	t.Parallel()
+
 	// bark's own DB (kept open for GetDatabaseInfo) and the Service's
 	// target (opened and closed per call by Service.Snapshot/Truncate)
 	// must be separate directories: Badger's exclusive file lock refuses

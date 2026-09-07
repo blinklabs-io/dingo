@@ -46,6 +46,8 @@ func (t *panicCommitTxn) Rollback() error {
 // must then be able to pause commits, and a writer queued behind that pause
 // must open promptly after resume.
 func TestTxnDoCommitPanicReleasesLockAndBarrier(t *testing.T) {
+	t.Parallel()
+
 	db := &Database{
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -145,6 +147,8 @@ func (*panicCommitAndRollbackTxn) Rollback() error {
 func TestTxnDoCommitAndRollbackBothPanicReturnsErrorAndReleasesBarrier(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := &Database{
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -230,6 +234,8 @@ func (t *trackingRollbackTxn) Rollback() error {
 // silently leaking its connection/transaction for the process's lifetime
 // with no way to ever retry it.
 func TestTxnRollbackAttemptsBothStoresWhenOnePanics(t *testing.T) {
+	t.Parallel()
+
 	metadataTxn := &trackingRollbackTxn{}
 	txn := &Txn{
 		db: &Database{
@@ -268,6 +274,8 @@ func TestTxnRollbackAttemptsBothStoresWhenOnePanics(t *testing.T) {
 func TestTxnDoOrdinaryErrorThenRollbackPanicIsIdentifiableAsTxnPanic(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	txn := &Txn{
 		db: &Database{
 			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -298,6 +306,8 @@ func (*panicFnTxn) Rollback() error { return nil }
 // panic(err) (a common Go pattern) must still produce an error that
 // identifies as ErrTxnPanic and preserves the original error's text.
 func TestTxnDoFunctionPanicWrapsNonStringValue(t *testing.T) {
+	t.Parallel()
+
 	db := &Database{
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -316,6 +326,8 @@ func TestTxnDoFunctionPanicWrapsNonStringValue(t *testing.T) {
 // returns deliberately -- the two failure modes stay distinguishable via
 // errors.Is.
 func TestTxnDoOrdinaryErrorIsNotWrappedAsPanic(t *testing.T) {
+	t.Parallel()
+
 	db := &Database{
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}

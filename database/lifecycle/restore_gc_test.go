@@ -44,6 +44,8 @@ import (
 // Restore's flow (metadata restore, blob restore, post-restore
 // validation) runs exactly as it would in production.
 func TestRestoreResolvesBlobStoreWithLoadRunMode(t *testing.T) {
+	t.Parallel()
+
 	src := newTestDB(t)
 	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
 

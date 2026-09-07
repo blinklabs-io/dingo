@@ -32,6 +32,8 @@ import (
 func TestLocalTxSubmissionServerSubmitTx_NonByteContentReturnsError(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	o := &Ouroboros{
 		config: OuroborosConfig{
 			Logger: slog.New(slog.DiscardHandler),
@@ -60,6 +62,8 @@ func TestLocalTxSubmissionServerSubmitTx_NonByteContentReturnsError(
 func TestLocalTxSubmissionRejectReason_FallbackIsHardForkApplyTxErr(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	for _, era := range []uint16{
 		gledger.EraIdShelley,
 		gledger.EraIdAllegra,
@@ -90,6 +94,8 @@ func TestLocalTxSubmissionRejectReason_FallbackIsHardForkApplyTxErr(
 }
 
 func TestLocalTxSubmissionRejectReason_PreservesTypedReason(t *testing.T) {
+	t.Parallel()
+
 	typed := &gledger.EraMismatch{
 		OtherEra: gledger.EraInfo{
 			Index: gledger.EraIdShelley,

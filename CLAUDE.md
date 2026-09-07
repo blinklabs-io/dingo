@@ -8,6 +8,7 @@ Go Cardano node (Ouroboros). Derivable info (build targets, flags, package layou
   - `WaitForCondition` / `require.Eventually` — 2–5s timeout, 5–10ms interval, lock shared state inside the condition fn
   - `RequireReceive` / `RequireNoReceive` for channel assertions
   - `context.WithTimeout` for graceful shutdown
+- Top-level tests call `t.Parallel()` in most packages, including every one that dominates the suite; new tests there should too. Keep a test sequential — with a `// Not t.Parallel: ...` comment — when it swaps a package-level seam (`syncDir`, `cleanupConsumedUtxosInterval`, `deliveryStallWarnInterval`, `leiosPersistMaxQueueBytes`, a fake-cloud backing directory), swaps another package's variable (`ledger.Close*Timeout`), publishes process-global state (`config.PublishConfig`), or takes a process-wide measurement (`testing.AllocsPerRun`, `runtime.NumGoroutine`, `testing.Benchmark`, `goleak.VerifyNone`). `internal/settingsresolve` and `bark/database_cloud_test.go` stay fully sequential: their fixtures rewrite a process-global (`globalConfig`, `barkFakeCloudDir`) that concurrent tests would observe.
 - Live two-node lifecycle integration tests use the shared `dingo_db_integration` build tag; run them with `make test-live-lifecycle`.
 - The default `make` target formats and builds; tests are a separate target.
 - `make test` runs with `-race`.

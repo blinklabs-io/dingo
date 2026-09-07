@@ -31,6 +31,8 @@ import (
 func TestHandleEventChainsyncRollbackClearsLoopHistoryForCrossedPoint(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	err := fixture.ls.handleEventChainsyncRollback(ChainsyncEvent{
@@ -56,6 +58,8 @@ func TestHandleEventChainsyncRollbackClearsLoopHistoryForCrossedPoint(
 func TestHandleEventChainsyncRollbackAppliesRepeatedCrossableRollback(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	require.NoError(t, fixture.ls.handleEventChainsyncRollback(ChainsyncEvent{
@@ -99,6 +103,8 @@ func TestHandleEventChainsyncRollbackAppliesRepeatedCrossableRollback(
 func TestHandleEventChainsyncRollbackSkipReportsUnrecoverableRollback(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	// A rollback point the node cannot cross to (a fork block below our tip
@@ -146,6 +152,8 @@ func TestHandleEventChainsyncRollbackSkipReportsUnrecoverableRollback(
 func TestHandleEventChainsyncRollbackAppliesCrossableRollbackAtLoopThreshold(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	// Seed a prior rollback to the (crossable) shared ancestor so this call

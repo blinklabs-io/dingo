@@ -355,6 +355,8 @@ func (f *chainsyncServerFixture) drainInitialRollback(
 func TestChainsyncServerFindIntersectEmitsFoundAndRegistersClient(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 	block, point := f.appendBlock(t, 1, 1, 0x01)
 	f.setTip(block, point)
@@ -398,6 +400,8 @@ func TestChainsyncServerFindIntersectEmitsFoundAndRegistersClient(
 func TestChainsyncServerFindIntersectEmitsNotFoundForUnknownPoint(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 	block, point := f.appendBlock(t, 10, 1, 0x01)
 	f.setTip(block, point)
@@ -429,6 +433,8 @@ func TestChainsyncServerFindIntersectEmitsNotFoundForUnknownPoint(
 // chain intersects any in-bounds request at origin, so IntersectFound at
 // origin proves the cap did not short-circuit the request.
 func TestChainsyncServerFindIntersectAcceptsPointListAtLimit(t *testing.T) {
+	t.Parallel()
+
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 
 	points := makeFindIntersectPoints(chainsyncMaxFindIntersectPoints)
@@ -451,6 +457,8 @@ func TestChainsyncServerFindIntersectAcceptsPointListAtLimit(t *testing.T) {
 // lookup would otherwise have matched origin, so IntersectNotFound here proves
 // the cap short-circuited the request.
 func TestChainsyncServerFindIntersectRejectsPointListOverLimit(t *testing.T) {
+	t.Parallel()
+
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 
 	points := makeFindIntersectPoints(chainsyncMaxFindIntersectPoints + 1)
@@ -474,6 +482,8 @@ func TestChainsyncServerFindIntersectRejectsPointListOverLimit(t *testing.T) {
 // TestChainsyncServerFindIntersectAcceptsNormalPointList verifies the point
 // count a well-behaved client actually sends is served normally.
 func TestChainsyncServerFindIntersectAcceptsNormalPointList(t *testing.T) {
+	t.Parallel()
+
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 
 	points := makeFindIntersectPoints(chainsyncIntersectPointCount)
@@ -492,6 +502,8 @@ func TestChainsyncServerFindIntersectAcceptsNormalPointList(t *testing.T) {
 func TestChainsyncServerFindIntersectDeduplicatesRepeatedPointsForBudget(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 
 	// An empty chain intersects any in-bounds request at origin, so
@@ -533,6 +545,8 @@ func TestChainsyncServerFindIntersectDeduplicatesRepeatedPointsForBudget(
 func TestChainsyncServerFindIntersectRateLimitsRepeatedRequests(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	f.o.chainsyncFindIntersectLimiter.nowFunc = func() time.Time {
@@ -566,6 +580,8 @@ func TestChainsyncServerFindIntersectRateLimitsRepeatedRequests(
 func TestChainsyncServerRequestNextEmitsInitialRollbackToIntersect(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 	block, point := f.appendBlock(t, 1, 1, 0x01)
 	f.setTip(block, point)
@@ -607,6 +623,8 @@ func TestChainsyncServerRequestNextEmitsInitialRollbackToIntersect(
 func TestChainsyncServerRequestNextEmitsRollForwardWithExactBlock(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 	f.drainInitialRollback(t, csmock.OriginPoint())
 
@@ -637,6 +655,8 @@ func TestChainsyncServerRequestNextEmitsRollForwardWithExactBlock(
 func TestChainsyncServerRequestNextEmitsRollBackwardOnChainRollback(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 	f.drainInitialRollback(t, csmock.OriginPoint())
 
@@ -688,6 +708,8 @@ func TestChainsyncServerRequestNextEmitsRollBackwardOnChainRollback(
 func TestChainsyncServerRequestNextEmitsAwaitReplyThenAsyncRollForward(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 	f.drainInitialRollback(t, csmock.OriginPoint())
 
@@ -716,6 +738,8 @@ func TestChainsyncServerRequestNextEmitsAwaitReplyThenAsyncRollForward(
 // that happens while the peer is parked in AwaitReply is served
 // asynchronously as a RollBackward carrying the exact rollback point.
 func TestChainsyncServerRequestNextEmitsAsyncRollBackward(t *testing.T) {
+	t.Parallel()
+
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 	f.drainInitialRollback(t, csmock.OriginPoint())
 
@@ -749,6 +773,8 @@ func TestChainsyncServerRequestNextEmitsAsyncRollBackward(t *testing.T) {
 func TestChainsyncServerRequestNextAsyncRollForwardFailureClosesConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 	f.drainInitialRollback(t, csmock.OriginPoint())
 
@@ -771,6 +797,8 @@ func TestChainsyncServerRequestNextAsyncRollForwardFailureClosesConnection(
 func TestChainsyncServerRequestNextAsyncRollBackwardFailureClosesConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 	f.drainInitialRollback(t, csmock.OriginPoint())
 
@@ -801,6 +829,8 @@ func TestChainsyncServerRequestNextAsyncRollBackwardFailureClosesConnection(
 func TestChainsyncServerRequestNextIteratorCancelDoesNotCloseConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 	clientState := f.registerClientAtOrigin(t)
 
@@ -831,6 +861,8 @@ func TestChainsyncServerRequestNextIteratorCancelDoesNotCloseConnection(
 // sentinel (which would silently park the peer instead of surfacing the
 // fault).
 func TestChainsyncServerRequestNextSyncIteratorErrorPropagates(t *testing.T) {
+	t.Parallel()
+
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 	f.registerClientAtOrigin(t)
 
@@ -848,6 +880,8 @@ func TestChainsyncServerRequestNextSyncIteratorErrorPropagates(t *testing.T) {
 // AwaitReply send failure is returned from the callback, so the protocol layer
 // tears the connection down instead of arming an async wait on a dead peer.
 func TestChainsyncServerRequestNextAwaitReplyErrorPropagates(t *testing.T) {
+	t.Parallel()
+
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 	f.registerClientAtOrigin(t)
 
@@ -864,6 +898,8 @@ func TestChainsyncServerRequestNextAwaitReplyErrorPropagates(t *testing.T) {
 func TestChainsyncServerRequestNextMissingConnectionAfterAwaitReply(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	f := newChainsyncServerFixture(t, csmock.ModeNtC)
 	f.registerClientAtOrigin(t)
 

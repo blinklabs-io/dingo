@@ -251,18 +251,27 @@ type utxoIterFunc func() (
 )
 
 // processBatchedUTxOsWithProgress reads key/value pairs from next,
-// parses each entry, and delivers them to the callback in batches
-// of utxoBatchSize. An optional progress function is called after
-// each batch with the running total of processed entries.
+// parses each entry, and delivers them to the callback in batches of
+// batchSize. An optional progress function is called after each batch
+// with the running total of processed entries.
+//
+// batchSize is a parameter rather than utxoBatchSize directly for the
+// same reason parseIndefiniteUTxOMapWithProgressLimit takes limit: a
+// test that has to observe a full batch reaching the callback can do it
+// with a handful of entries instead of a production-sized 10,000.
 func processBatchedUTxOsWithProgress(
 	next utxoIterFunc,
 	callback UTxOCallback,
 	progress func(int),
+	batchSize int,
 ) (int, error) {
 	if callback == nil {
 		return 0, errors.New("nil UTxO callback")
 	}
-	batch := make([]ParsedUTxO, 0, utxoBatchSize)
+	if batchSize <= 0 {
+		return 0, errors.New("non-positive UTxO batch size")
+	}
+	batch := make([]ParsedUTxO, 0, batchSize)
 	totalCount := 0
 
 	for {
@@ -286,7 +295,7 @@ func processBatchedUTxOsWithProgress(
 		batch = append(batch, *parsed)
 		totalCount++
 
-		if len(batch) >= utxoBatchSize {
+		if len(batch) >= batchSize {
 			if err := callback(batch); err != nil {
 				return totalCount, fmt.Errorf(
 					"UTxO callback error at entry %d: %w",
@@ -297,7 +306,7 @@ func processBatchedUTxOsWithProgress(
 			if progress != nil {
 				progress(totalCount)
 			}
-			batch = make([]ParsedUTxO, 0, utxoBatchSize)
+			batch = make([]ParsedUTxO, 0, batchSize)
 		}
 	}
 
@@ -415,6 +424,7 @@ func parseUTxOsStreamingWithProgress(
 				Percent:          percent,
 			})
 		},
+		utxoBatchSize,
 	)
 }
 
@@ -748,7 +758,7 @@ func parseIndefiniteUTxOMapWithProgress(
 	progress func(UTxOParseProgress),
 ) (int, error) {
 	return parseIndefiniteUTxOMapWithProgressLimit(
-		data, callback, progress, maxUTxOMapEntries,
+		data, callback, progress, maxUTxOMapEntries, utxoBatchSize,
 	)
 }
 
@@ -763,6 +773,7 @@ func parseIndefiniteUTxOMapWithProgressLimit(
 	callback UTxOCallback,
 	progress func(UTxOParseProgress),
 	limit int,
+	batchSize int,
 ) (int, error) {
 	if len(data) < 2 || data[0] != 0xbf {
 		return 0, errors.New("expected indefinite map (0xbf)")
@@ -852,6 +863,7 @@ func parseIndefiniteUTxOMapWithProgressLimit(
 				Percent:          percent,
 			})
 		},
+		batchSize,
 	)
 }
 

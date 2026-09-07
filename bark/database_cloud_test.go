@@ -128,6 +128,12 @@ var (
 	_ lifecycle.CloudDeleter         = &barkFakeCloudDestination{}
 )
 
+// barkFakeCloudDir is process-global and only momentarily locked, so the
+// scheme registered below resolves against whichever test wrote it last.
+// Every test in this file therefore runs sequentially -- none of them
+// calls t.Parallel. Giving the fixture a per-test identity (or the
+// serializing gate database/lifecycle's equivalent uses) is what would
+// let them run in parallel.
 var (
 	barkFakeCloudMu  sync.Mutex
 	barkFakeCloudDir string
@@ -148,6 +154,18 @@ func init() {
 			barkFakeCloudMu.Lock()
 			base := barkFakeCloudDir
 			barkFakeCloudMu.Unlock()
+			if base == "" {
+				// A resolution with no backing directory set would
+				// filepath.Join against "" and write the URI path
+				// relative to the package directory. Fail instead: the
+				// only way to get here is a resolution that outlived the
+				// test that set the fixture (bark runs snapshot and
+				// restore work on background goroutines), and that
+				// should error, not leave files in the checkout.
+				return nil, errors.New(
+					"barkfaketest: no backing directory set for this test",
+				)
+			}
 			return &barkFakeCloudDestination{
 				dir: filepath.Join(base, strings.TrimPrefix(uri.Path, "/")),
 			}, nil
@@ -211,6 +229,18 @@ func init() {
 			barkFakeCloudNoDeleteMu.Lock()
 			base := barkFakeCloudNoDeleteDir
 			barkFakeCloudNoDeleteMu.Unlock()
+			if base == "" {
+				// A resolution with no backing directory set would
+				// filepath.Join against "" and write the URI path
+				// relative to the package directory. Fail instead: the
+				// only way to get here is a resolution that outlived the
+				// test that set the fixture (bark runs snapshot and
+				// restore work on background goroutines), and that
+				// should error, not leave files in the checkout.
+				return nil, errors.New(
+					"barkfaketest-nodelete: no backing directory set for this test",
+				)
+			}
 			return &barkFakeCloudDestinationNoDelete{
 				dir: filepath.Join(base, strings.TrimPrefix(uri.Path, "/")),
 			}, nil
@@ -292,6 +322,25 @@ func init() {
 // loudly. Each subtest's t.Cleanup (registered by the respective setter)
 // runs synchronously before t.Run returns, so both globals must already
 // be reset by the time this checks them.
+// TestBarkFakeCloudSchemeRequiresBackingDir proves the fake schemes refuse to
+// resolve once no test owns the fixture. bark performs snapshot and restore
+// work on background goroutines (database.go), so a resolution can outlive the
+// t.Cleanup that reset the backing directory; joining the URI path onto an
+// empty base then wrote "prefix/cloud-a/..." into the package directory, which
+// a full `go test ./...` run reproduced.
+func TestBarkFakeCloudSchemeRequiresBackingDir(t *testing.T) {
+	for _, scheme := range []string{"barkfaketest", "barkfaketest-nodelete"} {
+		_, err := lifecycle.ParseCloudDestination(
+			testDestinationRegistry,
+			scheme+"://bucket/prefix",
+		)
+		require.Error(
+			t, err,
+			"%s must not resolve with no backing directory set", scheme,
+		)
+	}
+}
+
 func TestBarkFakeCloudBackingDirsResetBetweenTests(t *testing.T) {
 	t.Run("sets them", func(t *testing.T) {
 		setBarkFakeCloudBackingDir(t, t.TempDir())

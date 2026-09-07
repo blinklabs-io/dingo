@@ -68,6 +68,8 @@ func (b *lockedBuffer) String() string {
 // the add wins -- what the assertion pins is that when it does, the skip is on
 // the record.
 func TestSkippedBatchRestoreIsRecorded(t *testing.T) {
+	t.Parallel()
+
 	const (
 		securityParam = 100
 		rounds        = 40

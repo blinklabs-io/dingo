@@ -95,6 +95,8 @@ func (f *testCommitteeFixture) signVotes(
 }
 
 func TestBuildEbCertificateBitfieldMapping(t *testing.T) {
+	t.Parallel()
+
 	fixture := newTestCommitteeFixture(t, 10)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	votes := fixture.signVotes(t, 77, ebHash, 0, 2, 9)
@@ -124,6 +126,8 @@ func TestBuildEbCertificateBitfieldMapping(t *testing.T) {
 }
 
 func TestBuildEbCertificateUnusedBitsZero(t *testing.T) {
+	t.Parallel()
+
 	// Committee size not divisible by 8 leaves unused bits in the last
 	// byte that must remain zero.
 	fixture := newTestCommitteeFixture(t, 5)
@@ -137,6 +141,8 @@ func TestBuildEbCertificateUnusedBitsZero(t *testing.T) {
 }
 
 func TestBuildEbCertificateRejectsInvalidVotes(t *testing.T) {
+	t.Parallel()
+
 	fixture := newTestCommitteeFixture(t, 10)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 
@@ -163,6 +169,8 @@ func TestBuildEbCertificateRejectsInvalidVotes(t *testing.T) {
 }
 
 func TestValidateEbCertificateRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	fixture := newTestCommitteeFixture(t, 10)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	// Top 5 members hold 100+90+80+70+60 = 400 of 550 total stake;
@@ -179,6 +187,8 @@ func TestValidateEbCertificateRoundTrip(t *testing.T) {
 }
 
 func TestValidateEbCertificateQuorumFailure(t *testing.T) {
+	t.Parallel()
+
 	fixture := newTestCommitteeFixture(t, 10)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	// Bottom 2 members hold 20+10 = 30 of 550: far below tau = 3/4.
@@ -193,6 +203,8 @@ func TestValidateEbCertificateQuorumFailure(t *testing.T) {
 }
 
 func TestValidateEbCertificateUnknownSignerSkipsSigCheck(t *testing.T) {
+	t.Parallel()
+
 	fixture := newTestCommitteeFixture(t, 10)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	votes := fixture.signVotes(t, 77, ebHash, 0, 1, 2, 3, 4)
@@ -219,6 +231,8 @@ func TestValidateEbCertificateUnknownSignerSkipsSigCheck(t *testing.T) {
 }
 
 func TestValidateEbCertificateTamperedSignature(t *testing.T) {
+	t.Parallel()
+
 	fixture := newTestCommitteeFixture(t, 10)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	votes := fixture.signVotes(t, 77, ebHash, 0, 1, 2, 3, 4)
@@ -237,6 +251,8 @@ func TestValidateEbCertificateTamperedSignature(t *testing.T) {
 }
 
 func TestValidateEbCertificateWrongBitfieldSize(t *testing.T) {
+	t.Parallel()
+
 	fixture := newTestCommitteeFixture(t, 10)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	votes := fixture.signVotes(t, 77, ebHash, 0, 1, 2, 3, 4)

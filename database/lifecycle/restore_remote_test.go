@@ -334,6 +334,8 @@ func runRemoteRestoreFailureRollback(
 func TestRestoreRecoverableRetainsHandleWhenAutomaticRollbackFails(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ctx := context.Background()
 	remoteDir := filepath.Join(t.TempDir(), "remote")
 	original := openRemoteTestDatabase(t, remoteDir)
@@ -382,6 +384,8 @@ func TestRestoreRecoverableRetainsHandleWhenAutomaticRollbackFails(
 }
 
 func TestRestoreFailureRollsBackPopulatedRemoteStoresExactly(t *testing.T) {
+	t.Parallel()
+
 	t.Run("provider failure", func(t *testing.T) {
 		runRemoteRestoreFailureRollback(
 			t,
@@ -422,6 +426,8 @@ func TestRestoreFailureRollsBackPopulatedRemoteStoresExactly(t *testing.T) {
 func TestRestoreSuccessfulRemoteReplacementRemainsRecoverableUntilCommit(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ctx := context.Background()
 	remoteDir := filepath.Join(t.TempDir(), "remote")
 	original := openRemoteTestDatabase(t, remoteDir)

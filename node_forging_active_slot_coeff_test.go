@@ -30,6 +30,8 @@ import (
 // the float64 approximation, which yields a strictly larger leadership threshold
 // than the reference node's (dingo #2798).
 func TestEpochInfoAdapterProvidesExactActiveSlotCoeff(t *testing.T) {
+	t.Parallel()
+
 	var adapter any = &epochInfoAdapter{}
 	if _, ok := adapter.(leader.EpochInfoProvider); !ok {
 		t.Fatal("epochInfoAdapter must satisfy leader.EpochInfoProvider")

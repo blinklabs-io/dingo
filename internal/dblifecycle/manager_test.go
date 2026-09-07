@@ -143,6 +143,8 @@ func publishEpochTransition(eb *event.EventBus, newEpoch uint64) {
 // TestManagerDisabledByDefaultDoesNothing verifies that with
 // SnapshotEnabled false, an epoch-transition event never triggers a snapshot.
 func TestManagerDisabledByDefaultDoesNothing(t *testing.T) {
+	t.Parallel()
+
 	db := newManagerTestDB(t)
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
@@ -170,6 +172,8 @@ func TestManagerDisabledByDefaultDoesNothing(t *testing.T) {
 func TestManagerRejectsCloudPrimaryAutomaticSnapshotsButManualSnapshotsRemainAvailable(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	for _, blobPluginName := range []string{"s3", "gcs"} {
 		t.Run(blobPluginName, func(t *testing.T) {
 			var backupCalled atomic.Bool
@@ -237,6 +241,8 @@ func TestManagerRejectsCloudPrimaryAutomaticSnapshotsButManualSnapshotsRemainAva
 func TestManagerRejectsBadgerAutomaticSnapshotsButManualSnapshotsRemainAvailable(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newManagerTestDB(t)
 	eb := event.NewEventBus(nil, nil)
 	t.Cleanup(eb.Stop)
@@ -277,6 +283,8 @@ func TestManagerRejectsBadgerAutomaticSnapshotsButManualSnapshotsRemainAvailable
 // TestManagerCapturesSnapshotOnEpochBoundary verifies that an
 // epoch-transition event captures a real snapshot under epoch-<N>.
 func TestManagerCapturesSnapshotOnEpochBoundary(t *testing.T) {
+	t.Parallel()
+
 	db := newManagerTestDB(t)
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
@@ -303,6 +311,8 @@ func TestManagerCapturesSnapshotOnEpochBoundary(t *testing.T) {
 // TestManagerRespectsEveryNEpochsGating verifies that with
 // SnapshotEveryNEpochs=2, only an epoch divisible by 2 is captured.
 func TestManagerRespectsEveryNEpochsGating(t *testing.T) {
+	t.Parallel()
+
 	db := newManagerTestDB(t)
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
@@ -332,6 +342,8 @@ func TestManagerRespectsEveryNEpochsGating(t *testing.T) {
 // TestManagerRedeliveredEventIsNotFatal verifies that publishing the same
 // epoch's transition event twice does not crash or stall the manager.
 func TestManagerRedeliveredEventIsNotFatal(t *testing.T) {
+	t.Parallel()
+
 	db := newManagerTestDB(t)
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
@@ -369,6 +381,8 @@ func TestManagerRedeliveredEventIsNotFatal(t *testing.T) {
 // TestManagerPrunesOldSnapshotsBeyondRetention verifies that with
 // SnapshotRetention=2, capturing a 3rd snapshot deletes the oldest one.
 func TestManagerPrunesOldSnapshotsBeyondRetention(t *testing.T) {
+	t.Parallel()
+
 	db := newManagerTestDB(t)
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
@@ -497,6 +511,8 @@ func setManagerFakeCloudBackingDir(t *testing.T, dir string) {
 // working cloud destination configured, pruning an epoch beyond
 // retention must also delete that epoch's cloud mirror.
 func TestManagerPruningDeletesCloudMirror(t *testing.T) {
+	t.Parallel()
+
 	db := newManagerTestDB(t)
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
@@ -654,6 +670,8 @@ func init() {
 // unaffected by whatever epoch triggered the panic, a later epoch must
 // still be captured normally.
 func TestManagerSurvivesHandlerPanic(t *testing.T) {
+	t.Parallel()
+
 	db := newManagerTestDB(t)
 	logBuf := &syncBuffer{}
 	logger := slog.New(slog.NewTextHandler(logBuf, nil))
@@ -745,6 +763,8 @@ func (b *syncBuffer) String() string {
 // keeps this test valid even if EventBus's own logging (e.g. a
 // SubscribeFunc handler panic) ever became relevant to what it checks.
 func TestManagerCloudUploadFailureIsNotSwallowed(t *testing.T) {
+	t.Parallel()
+
 	db := newManagerTestDB(t)
 
 	logBuf := &syncBuffer{}
@@ -831,6 +851,10 @@ func init() {
 // running against it. This is exactly the shape of a real node shutdown:
 // the top-level context gets cancelled, and Stop() is called on every
 // subsystem separately with no guaranteed ordering between the two.
+// Not t.Parallel: this and the other manager tests below drive package-level
+// fake-cloud fixtures (blockingCloudDest, flakyCloud3Failed,
+// permanentUploadFailureTarget, managerFakeCloudDir, flakyDeleteCloudFail)
+// that a concurrent test would observe.
 func TestManagerStopWaitsForInFlightHandlerAfterExternalContextCancellation(
 	t *testing.T,
 ) {
@@ -979,6 +1003,8 @@ func init() {
 func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	resetFlakyCloudState(&flakyCloudFailed, &flakyCloudMu)
 	db := newManagerTestDB(t)
 
@@ -1071,6 +1097,8 @@ func init() {
 func TestManagerRetriesUnmirroredSnapshotOnLaterEpochWithoutRedelivery(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	resetFlakyCloudState(&flakyCloud2Failed, &flakyCloud2Mu)
 	db := newManagerTestDB(t)
 
@@ -1477,6 +1505,8 @@ func TestManagerCloudDestinationPrefixIsIncorporatedIntoUploadPath(
 }
 
 func TestManagerRejectsUnsafeCloudDestinationPrefix(t *testing.T) {
+	t.Parallel()
+
 	for _, prefix := range []string{"..", ".", "nodes/a", `nodes\a`} {
 		t.Run(prefix, func(t *testing.T) {
 			eb := event.NewEventBus(nil, nil)
@@ -1513,6 +1543,8 @@ func TestManagerRejectsUnsafeCloudDestinationPrefix(t *testing.T) {
 // two nodes sharing one destination silently collide at the same
 // deterministic epoch-<N> remote key.
 func TestManagerWarnsWhenCloudDestinationConfiguredWithoutPrefix(t *testing.T) {
+	t.Parallel()
+
 	db := newManagerTestDB(t)
 	logBuf := &syncBuffer{}
 	logger := slog.New(slog.NewTextHandler(logBuf, nil))
@@ -1541,6 +1573,8 @@ func TestManagerWarnsWhenCloudDestinationConfiguredWithoutPrefix(t *testing.T) {
 // case: once a distinguishing prefix is configured, Start must not warn
 // about the same missing-prefix collision risk.
 func TestManagerDoesNotWarnWhenCloudDestinationPrefixIsSet(t *testing.T) {
+	t.Parallel()
+
 	db := newManagerTestDB(t)
 	logBuf := &syncBuffer{}
 	logger := slog.New(slog.NewTextHandler(logBuf, nil))

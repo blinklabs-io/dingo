@@ -34,6 +34,8 @@ import (
 
 /*
 func TestConnectionManagerTagString(t *testing.T) {
+	t.Parallel()
+
 	testDefs := map[connmanager.ConnectionManagerTag]string{
 		connmanager.ConnectionManagerTagHostP2PLedger: "HostP2PLedger",
 		connmanager.ConnectionManagerTagHostP2PGossip: "HostP2PGossip",
@@ -204,6 +206,9 @@ func TestConnectionManagerConnClosed(t *testing.T) {
 	}
 }
 
+// Not t.Parallel: this and the other goleak.VerifyNone tests in this
+// package assert on the whole process's goroutine set, which a pending
+// parallel test is part of.
 func TestConnectionManager_Stop(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
