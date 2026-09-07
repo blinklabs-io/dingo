@@ -17,12 +17,14 @@ package ledger
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -99,4 +101,41 @@ func TestHeaderVerificationEpoch_ForecastBuildFailureDeferred(t *testing.T) {
 	require.ErrorIs(t, err, errHeaderVerificationDeferred,
 		"an unbuildable forecast must not be reported as a peer fault")
 	require.True(t, IsHeaderVerificationDeferred(err))
+}
+
+// TestSlotToTime_CachedSlotWithoutForecast pins SlotToTime against
+// SlotToEpoch: a slot the epoch cache already covers has known era parameters
+// and must convert without a forecast. Returning the summary-build error
+// verbatim leaves the slot clock (ledger/slot_clock.go) unable to resolve a
+// slot boundary, retrying every 100ms for the life of the process.
+func TestSlotToTime_CachedSlotWithoutForecast(t *testing.T) {
+	ls := newShelleyOnlyForecastLedger(t)
+
+	// SlotToEpoch already answers from the cache alone.
+	epoch, err := ls.SlotToEpoch(200_000)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(500), epoch.EpochId)
+
+	// The same slot must convert to a time without a forecast. The cache
+	// anchors relative time at its first entry's StartSlot, exactly as
+	// hardForkSummaryAnchoredAt does, so slot 200_000 is 100_000 slots of
+	// 1000ms past SystemStart.
+	when, err := ls.SlotToTime(200_000)
+	require.NoError(t, err,
+		"a slot inside the epoch cache must not require a forecast")
+	assert.Equal(
+		t,
+		time.Date(2022, 10, 25, 0, 0, 0, 0, time.UTC).
+			Add(100_000*time.Second),
+		when.UTC(),
+	)
+
+	// The absence case: a slot the cache does NOT cover has no known era
+	// parameters, so it must still fail rather than be extrapolated.
+	_, err = ls.SlotToTime(532_000)
+	require.Error(t, err,
+		"a slot past the epoch cache must not be answered without a forecast")
+	_, err = ls.SlotToTime(99_999)
+	require.Error(t, err,
+		"a slot before the epoch cache must not be answered without a forecast")
 }

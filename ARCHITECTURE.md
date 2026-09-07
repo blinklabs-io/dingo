@@ -2783,9 +2783,15 @@ supply; the safety argument above does not depend on it, because apply-time
 re-validation is authoritative regardless.)
 
 Slot/epoch query adapters preserve `hardfork.ErrPastHorizon` in their error
-chains so callers can defer until the ledger advances. `EpochInfo` serves an
-already materialized epoch directly from the immutable epoch cache before
-forecasting. The operational slot clock is the deliberate exception to
+chains so callers can defer until the ledger advances. `EpochInfo` and
+`SlotToEpoch` serve an already materialized epoch directly from the immutable
+epoch cache before forecasting. `SlotToTime` does the same when no summary can
+be built: it walks the cache for the covering epoch and accumulates relative
+time from the first entry's `StartSlot`, the same anchor
+`hardForkSummaryAnchoredAt` uses, so a slot whose era parameters are already
+known converts without a forecast rather than dropping the slot clock into its
+retry loop. A slot the cache does not cover has no era parameters to read and
+still fails, subject only to the near-now fallback below. The operational slot clock is the deliberate exception to
 wall-clock forecast refusal: near-now `TimeToSlot` and `SlotToTime` calls
 extrapolate the current era while a stale node catches up, but arbitrary time
 queries and all header validation remain bounded. The accepted window is one
