@@ -973,6 +973,10 @@ func ComparePoolEpoch(
 				dingoValue = dingoPool.MemberRewardTotal
 			}
 			if dingoValue != koiosPool.MemberRewards {
+				// Before the rewards are applied the spendable flags are
+				// provisional, so Dingo reads high by the forfeitures that
+				// have not happened yet. That is a timing statement, not a
+				// divergence, and must not be reported as one (dingo #3852).
 				cat := CategoryValueMismatch
 				if dingoPool.RewardsPending {
 					cat = CategoryReferenceLag

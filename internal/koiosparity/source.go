@@ -335,12 +335,20 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 	defer txn.Release()
 	meta := s.db.Metadata()
 
+	// The tip decides whether this stake epoch's rewards have been applied
+	// yet; see DingoPoolEpochData.RewardsPending. A read failure is reported
+	// rather than guessed at, and an empty tip leaves tipKnown false, so the
+	// comparison stays strict rather than downgrading a possible divergence on
+	// incomplete metadata.
 	var tipSlot uint64
 	tipKnown := false
 	tip, tipErr := s.db.GetTip(txn)
 	if tipErr != nil {
 		return nil, fmt.Errorf("tip lookup: %w", tipErr)
 	}
+	// GetTip reports sql.ErrNoRows as a zero Tip with a nil error, so a nil
+	// error alone would accept slot 0 as a real tip and mark every epoch
+	// pending. A genuine tip always carries a block hash.
 	if len(tip.Point.Hash) > 0 && tip.Point.Slot > 0 {
 		tipSlot = tip.Point.Slot
 		tipKnown = true

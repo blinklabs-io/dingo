@@ -184,12 +184,26 @@ type DingoPoolEpochData struct {
 	// Subtracting reward_pool_output.unspendable from member_reward_total
 	// would not be equivalent: that column accumulates unspendable leader
 	// rewards too.
-	// RewardsPending reports that the node has not reached the boundary at
-	// which this stake epoch's rewards are applied. The zero value is
-	// deliberately strict: incomplete boundary metadata must not hide a
-	// divergence.
-	RewardsPending             bool
 	SpendableMemberRewardTotal string
+
+	// RewardsPending reports that the node has NOT yet reached the boundary at
+	// which this stake epoch's rewards are applied, taken from the tip and
+	// reward_pool_output.boundary_slot — or, for a pool with no
+	// reward_pool_output row yet, from the start slot of the epoch the rewards
+	// are applied into.
+	//
+	// Before that boundary the per-account spendable flags are provisional: a
+	// reward computed for a credential that deregisters in the meantime is
+	// still marked spendable, and only the application flips it. Koios reports
+	// rewards that were actually distributed, so comparing earlier makes Dingo
+	// read high by the forfeitures that have not happened yet (dingo #3852). A
+	// difference before the boundary is a timing statement, not a divergence.
+	//
+	// The sense is deliberately negative so the zero value compares strictly.
+	// A source that cannot establish the boundary must not silently downgrade
+	// a real divergence to a lag; reporting a spurious mismatch is safer than
+	// hiding a true one.
+	RewardsPending bool
 }
 
 // rewardTypeMember is the reward_account_output.reward_type value Dingo writes
@@ -648,9 +662,11 @@ func (d *DingoDB) GetPoolEpochDataMap(
 	}
 	_ = rows.Close() //nolint:sqlclosecheck
 
-	// The tip decides whether this stake epoch's rewards have been applied.
-	// An unreadable or empty tip leaves tipKnown false, which keeps comparison
-	// strict rather than downgrading a real divergence on incomplete metadata.
+	// The tip decides whether this stake epoch's rewards have been applied;
+	// see DingoPoolEpochData.RewardsPending. A read failure is reported rather
+	// than guessed at, and an empty tip leaves tipKnown false, which keeps the
+	// comparison strict rather than downgrading a real divergence on
+	// incomplete metadata.
 	var tipSlot uint64
 	tipKnown := false
 	if tipRow := d.queryRow(
@@ -662,6 +678,8 @@ func (d *DingoDB) GetPoolEpochDataMap(
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("tip lookup: %w", err)
 		}
+		// A hash is required as well as a slot: a row carrying a slot but no
+		// hash is incomplete metadata, not a chain tip.
 		if err == nil && slot.Valid && slot.Int64 > 0 && len(hash) > 0 {
 			tipSlot = uint64(slot.Int64)
 			tipKnown = true
