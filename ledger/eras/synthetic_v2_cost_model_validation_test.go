@@ -20,6 +20,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/plutigo/lang"
 	"github.com/stretchr/testify/require"
 )
@@ -35,14 +36,17 @@ func disablePhase1RulesForTest(t *testing.T) {
 	origBabbage := babbageUtxoValidationRules
 	origConwayAll := conwayUtxoValidationRules
 	origConwayPhase1 := conwayPhase1UtxoValidationRules
+	origDijkstra := dijkstraPhase1UtxoValidationRules
 	t.Cleanup(func() {
 		babbageUtxoValidationRules = origBabbage
 		conwayUtxoValidationRules = origConwayAll
 		conwayPhase1UtxoValidationRules = origConwayPhase1
+		dijkstraPhase1UtxoValidationRules = origDijkstra
 	})
 	babbageUtxoValidationRules = nil
 	conwayUtxoValidationRules = nil
 	conwayPhase1UtxoValidationRules = nil
+	dijkstraPhase1UtxoValidationRules = nil
 }
 
 // TestValidateTxBabbageRejectsPlutusV2WhenSynthetic covers blinklabs-io/dingo#3962:
@@ -385,6 +389,107 @@ func TestEvaluateTxConwayAllowsPlutusV2WhenNotSynthetic(t *testing.T) {
 				Memory: 10_000_000,
 			},
 		},
+	)
+
+	require.NoError(t, err)
+}
+
+// dijkstraSyntheticV2Tx returns a minimal lcommon.Transaction -- not a
+// concrete *gdijkstra.DijkstraTransaction -- witnessing a PlutusV2 script.
+// dijkstraSyntheticV2CostModelGuard's version detection
+// (gdijkstra.UtxoValidateCostModelsPresent's usedPlutusVersions) falls back
+// to a plain witness-set scan for any non-concrete transaction type, so this
+// avoids needing a fully-shaped Dijkstra transaction with real spend/redeemer
+// wiring just to prove the guard fires.
+func dijkstraSyntheticV2Tx() *mockConwayFeeTx {
+	return &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			witnesses: &mockWitnessSet{
+				plutusV2Scripts: []lcommon.PlutusV2Script{{0x01}},
+			},
+		},
+	}
+}
+
+// dijkstraGuardPParams returns Dijkstra protocol parameters carrying a
+// PlutusV2 cost model, standing in for HardForkBabbage's fabricated default
+// that dijkstraSyntheticV2CostModelGuard prunes before checking presence.
+func dijkstraGuardPParams() *gdijkstra.DijkstraProtocolParameters {
+	return &gdijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: gdijkstra.MinProtocolVersionDijkstra,
+			},
+			CostModels: map[uint][]int64{
+				1: {1, 2, 3},
+			},
+		},
+	}
+}
+
+// TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticNormalPath covers a
+// human-reviewer finding on blinklabs-io/dingo#3962's PR: ValidateTxDijkstra
+// delegates phase-2 validation entirely to
+// gdijkstra.UtxoValidatePlutusScripts, which has no idea about Dingo's
+// synthetic marker -- without dijkstraSyntheticV2CostModelGuard, a
+// transaction using a synthetic-cost-model PlutusV2 script would reach that
+// delegate and be priced against the fabricated value instead of rejected.
+func TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticNormalPath(
+	t *testing.T,
+) {
+	disablePhase1RulesForTest(t)
+
+	ls := newMockLedgerState()
+	ls.syntheticV2CostModel = true
+
+	err := ValidateTxDijkstra(
+		dijkstraSyntheticV2Tx(),
+		0,
+		ls,
+		dijkstraGuardPParams(),
+	)
+
+	require.ErrorIs(t, err, ErrNoCostModelForPlutusV2)
+}
+
+// TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticSkipPhase2Path covers
+// the other half of the same finding: shouldSkipPhase2Validation returns nil
+// before ever reaching the delegate, so the guard must run before that
+// shortcut too, not only before the delegation call.
+func TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticSkipPhase2Path(
+	t *testing.T,
+) {
+	disablePhase1RulesForTest(t)
+
+	ls := newMockLedgerState()
+	ls.syntheticV2CostModel = true
+	ls.skipPhase2Validation = true
+
+	err := ValidateTxDijkstra(
+		dijkstraSyntheticV2Tx(),
+		0,
+		ls,
+		dijkstraGuardPParams(),
+	)
+
+	require.ErrorIs(t, err, ErrNoCostModelForPlutusV2)
+}
+
+// TestValidateTxDijkstraAllowsNonPlutusV2TxWhenSynthetic proves the guard is
+// additive: a transaction that never witnesses a PlutusV2 script is not
+// rejected merely because the synthetic marker happens to be set.
+func TestValidateTxDijkstraAllowsNonPlutusV2TxWhenSynthetic(t *testing.T) {
+	disablePhase1RulesForTest(t)
+
+	ls := newMockLedgerState()
+	ls.syntheticV2CostModel = true
+	ls.skipPhase2Validation = true
+
+	err := ValidateTxDijkstra(
+		&mockConwayFeeTx{},
+		0,
+		ls,
+		dijkstraGuardPParams(),
 	)
 
 	require.NoError(t, err)

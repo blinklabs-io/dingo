@@ -10099,21 +10099,32 @@ into `ledgerProcessBlock` as an explicit parameter rather than letting
 that lock, so a live read inside `ledgerProcessBlock` could pair the wrong
 marker with the already-snapshotted `pparams` it validates against.
 
-**Known gap, not fixed here:** once the chain's active era is Dijkstra,
-`ValidateTxDijkstra` delegates phase-2 script validation entirely to
-gouroboros's own `dijkstra.UtxoValidatePlutusScripts` (which itself falls
-back to gouroboros's own `conway.UtxoValidatePlutusScripts` for
+**Dijkstra:** `ValidateTxDijkstra` delegates phase-2 script validation
+entirely to gouroboros's own `dijkstra.UtxoValidatePlutusScripts` (which
+itself falls back to gouroboros's own `conway.UtxoValidatePlutusScripts` for
 non-Dijkstra-shaped transactions) — neither of which is Dingo's
-`ledger/eras/conway.go` code, so this check does not run there. Since
-`LedgerState.syntheticV2CostModel` persists across era transitions until
-real data actually clears it, a chain that reaches Dijkstra without ever
-receiving a real PlutusV2 update remains exposed for transactions validated
-in that era. Fixing this would require either an upstream gouroboros change
-or a Dijkstra-side reimplementation of the check; deferred as a follow-up
-rather than attempted here. In practice this only matters for a synthetic
-devnet that skips straight through eras without a real update — any real
-network reaching Dijkstra will have had a real PlutusV2 cost model for
-years already.
+`ledger/eras/conway.go` code, and neither type-asserts its `LedgerState`
+against `syntheticV2CostModelReporter`, so the Babbage/Conway-style check
+cannot reach either path directly. Since `LedgerState.syntheticV2CostModel`
+persists across era transitions until real data actually clears it, a chain
+that reaches Dijkstra without ever receiving a real PlutusV2 update would
+otherwise remain exposed for transactions validated in that era, including
+past `shouldSkipPhase2Validation`'s early return (which runs before the
+delegate is ever reached).
+
+`ValidateTxDijkstra` instead calls `dijkstraSyntheticV2CostModelGuard`
+(`ledger/eras/dijkstra.go`) before both that early return and the
+delegation, whenever the synthetic marker is set. Rather than
+reimplementing gouroboros's reference-script and Dijkstra sub-transaction
+script resolution locally, the guard reuses gouroboros's own exported
+`dijkstra.UtxoValidateCostModelsPresent` — the same `NoCostModel` rule
+Babbage/Conway's local phase-2 evaluation encodes by hand, already handling
+directly-witnessed scripts, reference scripts, and Dijkstra sub-transaction
+levels — against a pruned copy of `pp` with the PlutusV2 entry (cost-models
+map key 1) removed, translating a resulting `MissingCostModelError{Version:
+1}` into `ErrNoCostModelForPlutusV2` for consistency with the other eras.
+Any other language's missing-cost-model error passes through unchanged,
+since only PlutusV2 is ever fabricated.
 
 ### Live Restore/Truncate LedgerStateConfig Parity
 
