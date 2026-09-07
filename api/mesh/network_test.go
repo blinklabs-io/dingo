@@ -16,7 +16,9 @@ package mesh
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -262,5 +264,51 @@ func networkValidatedRoutes() []string {
 		"/construction/parse",
 		"/construction/hash",
 		"/construction/submit",
+	}
+}
+
+func TestRequestRequiresSingleJSONValue(t *testing.T) {
+	for _, route := range []struct{ path, body string }{
+		{"/network/list", "{}"},
+		{"/network/options", `{"network_identifier":{"blockchain":"cardano","network":"preview"}}`},
+	} {
+		t.Run(route.path, func(t *testing.T) {
+			for _, tc := range []struct {
+				name, suffix string
+				valid        bool
+			}{
+				{"single", "", true},
+				{"whitespace", " \t\r\n", true},
+				{"second_object", "{}", false},
+				{"second_null", " null", false},
+				{"trailing_garbage", " invalid", false},
+				{"truncated_second_object", " {", false},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					h := newTestHandler(t, newTestDeps())
+					rec := postRaw(t, h, route.path, route.body+tc.suffix)
+					if tc.valid {
+						require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+					} else {
+						requireMeshError(t, rec, ErrInvalidRequest, http.StatusBadRequest)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestRequestTrailingWhitespaceByteLimit(t *testing.T) {
+	for _, delta := range []int{-1, 0, 1} {
+		t.Run(fmt.Sprintf("limit%+d", delta), func(t *testing.T) {
+			h := newTestHandler(t, newTestDeps())
+			body := "{}" + strings.Repeat(" ", maxRequestBody-2+delta)
+			rec := postRaw(t, h, "/network/list", body)
+			if delta <= 0 {
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			} else {
+				requireMeshError(t, rec, ErrInvalidRequest, http.StatusBadRequest)
+			}
+		})
 	}
 }

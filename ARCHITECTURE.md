@@ -6048,6 +6048,11 @@ above. CIP-68 datum metadata is not yet sourced and returns `null`.
 
 ### Mesh API (`api/mesh/`)
 
+Mesh requests contain exactly one JSON value followed only by optional
+whitespace. Complete body consumption shares the existing byte cap and read
+deadline; additional values, trailing garbage, and oversized padding return the
+stable invalid-request response before the handler processes the request.
+
 TLS and token authentication are configured through
 `plugins.api.mesh.config.tls`/`config.auth`; see "API security" above.
 
