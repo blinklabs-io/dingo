@@ -610,6 +610,18 @@ peer credentials) unwrap through the wrapper, so wrapping an accepted connection
 never silently disables them. Cancellation closes an in-flight bearer, and failed
 setup releases its reserved inbound and per-IP slots.
 
+Node-to-client listeners share a separate admission budget across all their
+transports: `ConnectionManagerConfig.MaxNtCConns` defaults to 100 pending or
+established sessions. TCP clients also share a separate per-source budget,
+`MaxNtCConnectionsPerIP`, defaulting to five sessions per IPv4 address or IPv6
+/64. Nonpositive settings use these defaults. Unix sockets and named pipes
+consume the total NtC budget without per-IP accounting. NtC admission never
+consumes N2N slots or N2N per-IP capacity. Admission reserves both budgets
+before launching a handshake worker; failed setup releases the reservation,
+and successful setup transfers its release to the connection's close watcher.
+The `cardano_node_metrics_connectionManager_ntcRejectedConns_total` counter
+records rejections with `total_limit` or `per_ip_limit` as its `reason` label.
+
 ```mermaid
 graph TB
     subgraph "Peer Governor"
