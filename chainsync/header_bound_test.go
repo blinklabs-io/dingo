@@ -16,14 +16,15 @@ package chainsync
 
 import (
 	"encoding/binary"
+	"testing"
+	"time"
+
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
-	"testing"
-	"time"
 )
 
 func TestHeaderAlternativeBound(t *testing.T) {
