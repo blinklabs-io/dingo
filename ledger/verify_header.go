@@ -2127,11 +2127,11 @@ func (ls *LedgerState) PrunePoolSnapshotsWithRetentionFloor(
 // slotFromHeaderValidationKey extracts the slot from a deferred-header map key,
 // which headerValidationPointKey formats as "<slot>:<hex-hash>".
 func slotFromHeaderValidationKey(key string) (uint64, error) {
-	sep := strings.IndexByte(key, ':')
-	if sep < 0 {
+	before, _, ok := strings.Cut(key, ":")
+	if !ok {
 		return 0, fmt.Errorf("malformed header validation key %q", key)
 	}
-	return strconv.ParseUint(key[:sep], 10, 64)
+	return strconv.ParseUint(before, 10, 64)
 }
 
 // ensureEpochForSlot advances the epoch cache until it covers the target

@@ -1516,6 +1516,9 @@ func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
 		VoterId:           member.VoterId,
 		VoteSignature:     sig,
 	}))
+	// keyProvider is assigned by the customize closure the fixture builder
+	// above invokes synchronously; nilaway does not follow that callback.
+	//nolint:nilaway // assigned by the fixture closure above
 	keyProvider.mu.Lock()
 	resolvedSnapshotEpoch := keyProvider.snapshotEpoch
 	keyProvider.mu.Unlock()

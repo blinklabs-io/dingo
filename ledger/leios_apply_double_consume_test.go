@@ -363,6 +363,9 @@ func leiosApplyTestApplyRankingDelta(
 	copy(ebHash[:], leiosApplyTestEbHash(0x00))
 	_, offsets, err := buildEndorserBlockBlob(
 		[]lcommon.Transaction{tx},
+		// elems holds the decoded array of the caller-built rawTx, which the
+		// require.NoError above proves decoded, so index 0 exists.
+		//nolint:nilaway // rawTx decodes to a non-empty CBOR array
 		[][]byte{[]byte(elems[0])},
 		rbPoint.Slot,
 		ebHash,

@@ -990,10 +990,27 @@ func (c *Chain) notifyWaitingIterators() {
 }
 
 func (c *Chain) Rollback(point ocommon.Point) error {
+	return c.rollback(point, false)
+}
+
+// RollbackUnbounded behaves like Rollback, but does not require the security
+// parameter K to be configured and does not reject a rollback for exceeding
+// it. It exists for reconciling a persistent chain against a caller's own
+// prior local state -- e.g. the primary chain against the ledger's own
+// applied tip at startup, before ChainManager.SetLedger has configured K --
+// where the depth is whatever the two locally-durable stores drifted, not a
+// peer-supplied point subject to the same-security-guarantee K exists to
+// enforce. Follow-on rollbacks initiated by an untrusted peer must always use
+// Rollback, never this.
+func (c *Chain) RollbackUnbounded(point ocommon.Point) error {
+	return c.rollback(point, true)
+}
+
+func (c *Chain) rollback(point ocommon.Point, unbounded bool) error {
 	if c == nil {
 		return errors.New("chain is nil")
 	}
-	pendingEvents, err := c.rollbackLocked(point, false)
+	pendingEvents, err := c.rollbackLocked(point, unbounded, false)
 	if err != nil {
 		return err
 	}
@@ -1032,7 +1049,7 @@ func (c *Chain) RollbackDeferred(
 	if c == nil {
 		return nil, errors.New("chain is nil")
 	}
-	return c.rollbackLocked(point, true)
+	return c.rollbackLocked(point, false, true)
 }
 
 // rollbackForkDepth returns the number of blocks a rollback to
@@ -1257,8 +1274,12 @@ func (c *Chain) ValidateRollback(point ocommon.Point) error {
 
 // rollbackLocked performs all rollback logic under locks and returns
 // events to be published by the caller after locks are released.
+//
+// unbounded skips both the security-parameter-configured check and the
+// rollback-depth bound itself -- see RollbackUnbounded.
 func (c *Chain) rollbackLocked(
 	point ocommon.Point,
+	unbounded bool,
 	deferred bool,
 ) ([]event.Event, error) {
 	// Wait for any chain-owned batch transaction that has already applied to
@@ -1276,12 +1297,13 @@ func (c *Chain) rollbackLocked(
 	if err := c.reconcile(); err != nil {
 		return nil, fmt.Errorf("reconcile chain: %w", err)
 	}
-	if c.persistent && c.manager.securityParam <= 0 {
+	if c.persistent && c.manager.securityParam <= 0 && !unbounded {
 		return nil, ErrSecurityParamNotConfigured
 	}
 	// Check headers for rollback point. The scan itself does not mutate
 	// c.headers, so a not-found error leaves the queue untouched; headers
-	// are only deleted once we know the rollback will actually apply.
+	// are only deleted once we know the rollback will actually apply
+	// (issue #3516 review; issue #3809).
 	if len(c.headers) > 0 {
 		idx, err := c.findQueuedHeader(point)
 		if err != nil {
@@ -1314,9 +1336,10 @@ func (c *Chain) rollbackLocked(
 	// the persistent chain. Ephemeral (fork-tracking) chains are
 	// not subject to this limit. When the chain is shorter than K
 	// blocks (initial sync), the entire chain can be safely
-	// replaced during sync.
+	// replaced during sync. An unbounded rollback skips this bound
+	// too -- see RollbackUnbounded.
 	securityParam := c.manager.securityParam
-	if c.persistent &&
+	if c.persistent && !unbounded &&
 		c.tipBlockIndex >= uint64(securityParam) && //nolint:gosec
 		forkDepth > uint64(securityParam) { //nolint:gosec
 		slog.Default().Warn(

@@ -107,9 +107,7 @@ func TestRollbackDoesNotResolveUncommittedBlockIndex(t *testing.T) {
 		release := make(chan struct{})
 		var once sync.Once
 		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			// The callback runs inside the batch transaction, under both
 			// chain locks, so it marks the point at which the in-memory
 			// chain has started moving ahead of the store.
@@ -125,14 +123,12 @@ func TestRollbackDoesNotResolveUncommittedBlockIndex(t *testing.T) {
 			); err != nil {
 				t.Errorf("round %d: AddRawBlocksWithCallback: %v", round, err)
 			}
-		}()
+		})
 		<-applying
 		var rollbackErr error
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			rollbackErr = pc.Rollback(ocommon.Point{})
-		}()
+		})
 		// Release the batch only once the rollback is queued on the lock it
 		// holds, so the rollback runs in the window between that lock being
 		// handed over and the batch's transaction committing.

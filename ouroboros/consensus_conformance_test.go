@@ -17,9 +17,11 @@ package ouroboros
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -132,13 +134,33 @@ func TestConsensusConformanceKGuardIsLive(t *testing.T) {
 const (
 	tipEventBuffer    = 4096
 	switchEventBuffer = 1024
+	// switchBarrierTimeout bounds the wait for the barrier below. It is a
+	// deadlock bound, not a settling delay: the barrier is already queued
+	// behind the switches when the wait starts, so the normal cost is one
+	// lane hand-off.
+	switchBarrierTimeout = 30 * time.Second
 )
+
+// switchBarrier is a sentinel published through the chain-switch ordered lane
+// so Stabilize can tell "no switch was decided" from "the switch has not been
+// delivered yet".
+//
+// ChainSelector.publishSelection routes chain switches through
+// EventBus.PublishOrdered (blinklabs-io/dingo#3550), so EvaluateAndSwitch
+// returns before the lane worker has handed them to subscribers. A lane is a
+// FIFO drained by exactly one worker, so a sentinel enqueued after those
+// switches is delivered after them: receiving it back is proof that every
+// switch published earlier on this goroutine has already reached the
+// subscription. Its Data type is not ChainSwitchEvent, so it is skipped rather
+// than recorded as a decision.
+type switchBarrier struct{}
 
 // replayAdapter implements consensus.Replayer by driving dingo's real
 // chainsync handlers and chain selector. The harness identifies peers by
 // the vector's peer_id; the adapter synthesizes a stable ConnectionId per
 // peer_id.
 type replayAdapter struct {
+	t        *testing.T
 	o        *Ouroboros
 	cs       *chainselection.ChainSelector
 	bus      *event.EventBus
@@ -195,6 +217,7 @@ func newReplayAdapter(
 	})
 	o.eventBus = bus
 	return &replayAdapter{
+		t:        t,
 		o:        o,
 		cs:       cs,
 		bus:      bus,
@@ -249,24 +272,62 @@ func (a *replayAdapter) RollBackward(
 }
 
 func (a *replayAdapter) Stabilize() {
+	a.t.Helper()
 	// Drain queued peer-tip updates into the selector, force a synchronous
-	// evaluation, then collect any switch decisions it emitted. All
-	// synchronous: no sleeps, no races.
+	// evaluation, then collect any switch decisions it emitted. No sleeps
+	// and no polling.
+	//
+	// chainselection.peer_tip_update is still published inline, on this
+	// goroutine, by chainsyncClientRollForward, so every tip update is
+	// already queued by the time Stabilize runs and a non-blocking drain
+	// sees all of them. Chain switches are not: they go through an ordered
+	// lane, so they need the barrier below.
 	drainEvents(a.tipCh, func(evt event.Event) {
 		a.tipEventsSeen++
 		a.cs.HandlePeerTipUpdateEvent(evt)
 	})
 	a.cs.EvaluateAndSwitch()
-	drainEvents(a.switchCh, func(evt event.Event) {
-		e, ok := evt.Data.(chainselection.ChainSwitchEvent)
-		if !ok {
+	a.collectSwitchesThroughBarrier()
+}
+
+// collectSwitchesThroughBarrier records every chain switch the selector has
+// published so far, using a sentinel enqueued behind them as the drain barrier.
+// See switchBarrier for why a non-blocking drain is not one.
+func (a *replayAdapter) collectSwitchesThroughBarrier() {
+	a.t.Helper()
+	if !a.bus.PublishOrdered(
+		chainselection.ChainSwitchEventType,
+		event.NewEvent(chainselection.ChainSwitchEventType, switchBarrier{}),
+	) {
+		a.t.Fatal("event bus refused the chain-switch barrier")
+	}
+	for {
+		evt := testutil.RequireReceive(
+			a.t,
+			a.switchCh,
+			switchBarrierTimeout,
+			"chain-switch barrier",
+		)
+		switch e := evt.Data.(type) {
+		case switchBarrier:
 			return
+		case chainselection.ChainSwitchEvent:
+			a.switches = append(a.switches, format.SwitchEvent{
+				PreviousTip: fromGouroborosTip(e.PreviousTip),
+				NewTip:      fromGouroborosTip(e.NewTip),
+			})
+		default:
+			// Only the selector and the barrier above publish on this
+			// lane, so anything else is a bug in one of them. Skipping it
+			// would still terminate -- the barrier is behind it in the
+			// same FIFO -- but it would drop a switch decision the
+			// harness then reports as "never switched", which is a much
+			// worse diagnosis than naming the payload.
+			a.t.Fatalf(
+				"unexpected %T on the chain_switch lane", evt.Data,
+			)
 		}
-		a.switches = append(a.switches, format.SwitchEvent{
-			PreviousTip: fromGouroborosTip(e.PreviousTip),
-			NewTip:      fromGouroborosTip(e.NewTip),
-		})
-	})
+	}
 }
 
 func (a *replayAdapter) BestTip() (format.Tip, bool) {
