@@ -86,6 +86,18 @@ const (
 // Reasons recorded by dingo_metrics_leios_votes_not_emitted_total. They
 // partition every path on which this node declines to emit its own vote for
 // an announcement it has both observed and acquired the endorser block for.
+//
+// The reason is first-match in the order the checks run, not the full set of
+// reasons that apply, and the order is chosen by cost: the cheap local checks
+// come before the ones that can reach the stake provider. In particular
+// slot_window is evaluated before seating, so a node that is both outside the
+// window and unseated is counted as slot_window. That matters when reading the
+// metric on a node that is not on the committee -- a syncing relay is almost
+// always outside the window, so its silence is attributed to timing, and
+// not_seated counts only the announcements it did see inside the window.
+// Deciding seating first would put a committee computation, and so a possible
+// stake-provider read, on every out-of-window announcement; catch-up replays
+// every announcement, which is the load this ordering exists to avoid.
 const (
 	// voteNotEmittedDuplicate: a vote for this announcing ranking block was
 	// already emitted. Expected -- an announcement is armed from the header
@@ -2702,7 +2714,40 @@ func (m *VoteManager) replaceHeaderStream() (<-chan event.Event, bool) {
 		// The bus is stopped or closed; nothing to recover to.
 		return nil, false
 	}
+	if !m.registerReplacementHeaderSubscription(subId) {
+		return nil, false
+	}
+	if m.metrics != nil {
+		m.metrics.headerStreamResubscribeTotal.Inc()
+	}
+	m.logger.Warn(
+		"leios header stream closed unexpectedly, resubscribed; announcements in the gap are armed only when their ranking block applies",
+	)
+	return ch, true
+}
+
+// registerReplacementHeaderSubscription records subId as the manager's header
+// subscription, reporting false when the manager stopped while the
+// subscription was being created.
+//
+// The lifecycle check in replaceHeaderStream is made before subscribing, and
+// the lock is released across the subscribe call, so a Stop landing in that
+// gap has already snapshotted and unsubscribed m.subs without this id in it.
+// Registering it then would leave a subscriber nothing drains, and because the
+// header stream is subscribed with SubscriberBackpressureBlock the bus does
+// not detach it under load: the next publisher on this event type would block
+// on the orphan forever instead of having its event dropped. So the check is
+// repeated here, under the same lock that guards the registration, and the
+// subscription is undone rather than recorded.
+func (m *VoteManager) registerReplacementHeaderSubscription(
+	subId event.EventSubscriberId,
+) bool {
 	m.mu.Lock()
+	if m.stopping || !m.running {
+		m.mu.Unlock()
+		m.eventBus.Unsubscribe(chain.ChainHeaderEventType, subId)
+		return false
+	}
 	replaced := false
 	for i := range m.subs {
 		if m.subs[i].eventType == chain.ChainHeaderEventType {
@@ -2718,13 +2763,7 @@ func (m *VoteManager) replaceHeaderStream() (<-chan event.Event, bool) {
 		})
 	}
 	m.mu.Unlock()
-	if m.metrics != nil {
-		m.metrics.headerStreamResubscribeTotal.Inc()
-	}
-	m.logger.Warn(
-		"leios header stream closed unexpectedly, resubscribed; announcements in the gap are armed only when their ranking block applies",
-	)
-	return ch, true
+	return true
 }
 
 // handleChainHeaderInvalidation drops announcements for ranking blocks that

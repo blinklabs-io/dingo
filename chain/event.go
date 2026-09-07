@@ -62,20 +62,32 @@ type ChainForkEvent struct {
 	CanonicalHead ocommon.Point
 }
 
-// ChainHeaderAnnouncementEvent is published when a ranking-block header that
-// announces a Leios endorser block is admitted to the header queue. It is a
-// header-arrival signal, not an apply signal: the announcing ranking block has
-// not been fetched, validated or applied when this is published, and it may
-// still be rolled back.
+// ChainHeaderAnnouncementEvent is published when a ranking block announcing a
+// Leios endorser block enters the chain, by either of the two routes a ranking
+// block can take. Applied says which, and the two carry different guarantees:
+//
+//   - Applied false, the ordinary case: a peer's header was admitted to the
+//     header queue. This is a header-arrival signal, not an apply signal. The
+//     announcing ranking block has not been fetched, validated or applied when
+//     this is published, and it may still be rolled back.
+//   - Applied true: a locally forged block was added to the chain. A local
+//     block never passes through the header queue, so its announcement is
+//     emitted from the add itself, by which point the block is validated and
+//     on the chain. It can still be rolled back later, so the invalidation
+//     counterpart still applies, but it is not provisional in the way an
+//     unfetched peer header is.
+//
+// A consumer that must not treat an applied local block as an unfetched header
+// arrival should branch on Applied.
 //
 // It exists because the Leios vote window is measured from the announcing
 // ranking block's slot, while applying an EB-announcing ranking block waits on
 // fetching that same endorser block. Consumers that must act inside the vote
 // window cannot wait for ChainUpdateEventType.
 //
-// Its counterpart is ChainHeaderInvalidationEvent: because the announcement is
-// provisional, a consumer must process both, and they are delivered on one
-// event type precisely so it can never see them out of order.
+// Its counterpart is ChainHeaderInvalidationEvent: because a ranking block can
+// leave the chain either way, a consumer must process both, and they are
+// delivered on one event type precisely so it can never see them out of order.
 type ChainHeaderAnnouncementEvent struct {
 	// Slot is the announcing ranking block's slot.
 	Slot uint64
@@ -87,6 +99,13 @@ type ChainHeaderAnnouncementEvent struct {
 	EbSize uint64
 	// Seq is this header admission's chain-mutation sequence number.
 	Seq uint64
+	// Applied reports that the announcing ranking block was already on the
+	// chain when this was published, which is the case for a locally forged
+	// block: it never passes through the header queue, so its announcement
+	// is emitted from the block add rather than from a header arrival. False
+	// for the ordinary peer-header case, where the block has not been
+	// fetched, validated or applied. See the type comment.
+	Applied bool
 }
 
 // ChainHeaderInvalidationEvent is published when queued headers leave the

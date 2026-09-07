@@ -4742,6 +4742,19 @@ func (ls *LedgerState) startQueuedBlockfetchFromEventLocked(
 	go func() {
 		defer ls.blockfetchContinuationWG.Done()
 		var pending pendingPublishes
+		// This worker owns its pendingPublishes, so the drain registered
+		// by the handler that scheduled it does not cover anything this
+		// worker clears. Several paths below discard the header queue --
+		// the explicit failure branch, and noteBlockfetchRangeUnavailable
+		// reached through startQueuedBlockfetchOnLocked -- and
+		// Chain.ClearHeaders enqueues the announcements' invalidation on
+		// the chain-level sequencer. Undrained, those invalidations never
+		// reach the vote manager, which goes on holding votes armed for
+		// announcements whose ranking blocks were discarded. Registered
+		// here rather than beside each clear, as handleEventChainsync
+		// does, because the registration is idempotent per chain and the
+		// flush below already runs outside chainsyncBlockfetchMutex.
+		pending.drainChain(ls.chain)
 		ls.chainsyncBlockfetchMutex.Lock()
 		if ls.closed.Load() {
 			ls.blockfetchContinuationPending = false

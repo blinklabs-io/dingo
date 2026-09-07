@@ -278,6 +278,7 @@ func (c *Chain) addBlockHeader(
 		header,
 		headerHash,
 		c.nextHeaderSeqLocked(),
+		false, // provisional: the block has not been fetched or applied
 	); ok {
 		c.queueDeferredEventLocked(evt)
 	}
@@ -293,6 +294,7 @@ func leiosAnnouncementEvent(
 	header ledger.BlockHeader,
 	headerHash lcommon.Blake2b256,
 	seq uint64,
+	applied bool,
 ) (event.Event, bool) {
 	if header == nil {
 		return event.Event{}, false
@@ -310,11 +312,12 @@ func leiosAnnouncementEvent(
 	return event.NewEvent(
 		ChainHeaderEventType,
 		ChainHeaderAnnouncementEvent{
-			Slot:   header.SlotNumber(),
-			RbHash: lcommon.NewBlake2b256(headerHash.Bytes()),
-			EbHash: ebHash,
-			EbSize: ebSize,
-			Seq:    seq,
+			Slot:    header.SlotNumber(),
+			RbHash:  lcommon.NewBlake2b256(headerHash.Bytes()),
+			EbHash:  ebHash,
+			EbSize:  ebSize,
+			Seq:     seq,
+			Applied: applied,
 		},
 	), true
 }
@@ -373,6 +376,15 @@ func (c *Chain) AddBlock(
 	if err != nil {
 		return err
 	}
+	// addBlockLocked queued a header invalidation on the chain-level
+	// sequencer for any peer headers this block discarded, and a queued
+	// announcing header may have left its announcement there too. Drain
+	// before publishing the block, as AddLocalBlock does and for the same
+	// reason: nothing else on this path is guaranteed to drain, so the vote
+	// manager would keep votes armed for announcements whose ranking blocks
+	// are gone. Safe here because, as below, this path's callers are not
+	// under a ledger mutex.
+	c.PublishPendingChainUpdates()
 	// Publish event immediately for standalone (non-batched) callers.
 	// forgeBlock reaches this on the scheduler goroutine, not under a ledger
 	// mutex, so a backpressured Publish here cannot stall the chainsync
@@ -424,6 +436,10 @@ func (c *Chain) AddBlockWithPoint(
 	if err != nil {
 		return err
 	}
+	// As in AddBlock: drain the sequencer this add may have written to
+	// before publishing the block. Callers that hold a ledger mutex must use
+	// AddBlockWithPointDeferred, which is what the blockfetch drain does.
+	c.PublishPendingChainUpdates()
 	if c.eventBus != nil && evt.Type != "" {
 		c.eventBus.Publish(ChainUpdateEventType, evt)
 	}
@@ -657,6 +673,7 @@ func (c *Chain) addBlockLocked(
 			block.Header(),
 			lcommon.NewBlake2b256(blockHashBytes),
 			c.nextHeaderSeqLocked(),
+			true, // the block is on the chain by the time this publishes
 		); ok {
 			c.queueDeferredEventLocked(evt)
 		}
