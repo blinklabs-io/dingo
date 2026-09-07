@@ -22,7 +22,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -98,7 +97,10 @@ func TestTokenRegistryRedactsReturnedRequestError(t *testing.T) {
 	})
 	require.NoError(t, err)
 	_, err = syncer.SyncOnce(context.Background())
+	if err == nil {
+		t.Fatal("expected a request error")
+	}
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.NotContains(t, err.Error(), "secret")
-	require.True(t, strings.Contains(err.Error(), "fetch token registry"))
+	require.Contains(t, err.Error(), "fetch token registry")
 }
