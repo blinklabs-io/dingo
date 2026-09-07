@@ -1431,7 +1431,10 @@ func precomputedRewardPoolInputsMatchSnapshot(
 			)
 		}
 	}
-	if totalDelegated != uint64(snapshot.TotalActiveStake) {
+	// Same bound as validateRewardCalculatorInputs: pools excluded for degraded
+	// registration data keep their stake in the snapshot's sigma_a denominator
+	// but contribute no reward_pool_input row.
+	if totalDelegated > uint64(snapshot.TotalActiveStake) {
 		return false, nil
 	}
 	if totalDelegators != snapshot.TotalDelegators {
@@ -3212,9 +3215,15 @@ func validateRewardCalculatorInputs(
 			return errors.New("reward pool input delegator count overflow")
 		}
 	}
-	if totalPoolStake != uint64(snapshot.TotalActiveStake) {
+	// reward_snapshot.total_active_stake is the sigma_a denominator and covers
+	// every delegating credential observed at the boundary, including those
+	// whose pool was excluded from reward_pool_input for degraded registration
+	// data (see snapshot.buildRewardStateInputs). The rows may therefore sum to
+	// less than it; summing to more means the row set and the snapshot describe
+	// different boundaries.
+	if totalPoolStake > uint64(snapshot.TotalActiveStake) {
 		return fmt.Errorf(
-			"reward pool input total delegated stake %d does not match snapshot active stake %d",
+			"reward pool input total delegated stake %d exceeds snapshot active stake %d",
 			totalPoolStake,
 			uint64(snapshot.TotalActiveStake),
 		)

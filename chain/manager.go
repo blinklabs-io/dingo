@@ -438,6 +438,12 @@ func (cm *ChainManager) RewindPrimaryChainToPoint(
 	if err != nil {
 		return err
 	}
+	// This deletes blocks by index the same way rollbackLocked does, so it
+	// takes the same barrier: a batch that has applied to the in-memory
+	// chain but not yet committed leaves indices the store cannot serve.
+	// See Chain.batchCommitMutex.
+	primaryChain.batchCommitMutex.Lock()
+	defer primaryChain.batchCommitMutex.Unlock()
 	primaryChain.mutex.Lock()
 	defer primaryChain.mutex.Unlock()
 	cm.mutex.Lock()

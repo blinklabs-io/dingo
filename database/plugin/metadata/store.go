@@ -2078,7 +2078,9 @@ type MetadataStore interface {
 	) (int, error)
 
 	// GetAccountSumsByCredential retrieves the aggregated withdrawal, reserves,
-	// and treasury lovelace totals for a stake credential tag/hash pair.
+	// and treasury lovelace totals for a stake credential tag/hash pair. The
+	// withdrawal total is coin and unsigned; the two MIR pot totals are
+	// delta_coin and signed, and are never returned nil.
 	GetAccountSumsByCredential(
 		uint8, // credentialTag
 		[]byte, // stakingKey
