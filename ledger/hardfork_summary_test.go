@@ -188,6 +188,110 @@ func TestHardForkSummary_EmptyCache(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestHardForkSummary_ValidatesCachedEraParams(t *testing.T) {
+	testCases := []struct {
+		name          string
+		lengthInSlots uint
+		slotLength    uint
+		wantErr       bool
+	}{
+		{
+			name:          "minimum valid parameters",
+			lengthInSlots: 1,
+			slotLength:    1,
+		},
+		{
+			name:       "zero epoch size",
+			slotLength: 1_000,
+			wantErr:    true,
+		},
+		{
+			name:          "zero slot length",
+			lengthInSlots: 100,
+			wantErr:       true,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			ls := &LedgerState{
+				epochCache: []models.Epoch{
+					{
+						EpochId:       0,
+						StartSlot:     0,
+						SlotLength:    testCase.slotLength,
+						LengthInSlots: testCase.lengthInSlots,
+						EraId:         0,
+					},
+					{
+						EpochId:       1,
+						StartSlot:     100,
+						SlotLength:    1_000,
+						LengthInSlots: 100,
+						EraId:         1,
+					},
+				},
+				currentEra: eras.EraDesc{Id: 1, Name: "Shelley"},
+				currentTip: ochainsync.Tip{
+					Point: ocommon.NewPoint(150, []byte("tip")),
+				},
+				config: LedgerStateConfig{
+					CardanoNodeConfig: minimalShelleyGenesisCfg(t),
+				},
+			}
+			ls.publishSnapshotsLocked()
+
+			_, err := ls.HardForkSummary()
+			if testCase.wantErr {
+				require.Error(t, err)
+				require.ErrorContains(t, err, "cached")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestHardForkSummary_ValidatesEveryCachedEpoch(t *testing.T) {
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				SlotLength:    1_000,
+				LengthInSlots: 100,
+				EraId:         0,
+			},
+			{
+				EpochId:       1,
+				StartSlot:     100,
+				SlotLength:    0,
+				LengthInSlots: 100,
+				EraId:         0,
+			},
+			{
+				EpochId:       2,
+				StartSlot:     200,
+				SlotLength:    1_000,
+				LengthInSlots: 100,
+				EraId:         1,
+			},
+		},
+		currentEra: eras.EraDesc{Id: 1, Name: "Shelley"},
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(250, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	_, err := ls.HardForkSummary()
+	require.Error(t, err)
+	require.ErrorContains(t, err, "cached epoch 1")
+}
+
 // TestHardForkSummary_MissingShelleyGenesis tolerates a config without a
 // Shelley genesis: SystemStart stays at the
 // zero time. Callers that need wall-clock conversions must provide the

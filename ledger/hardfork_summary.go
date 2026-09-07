@@ -16,10 +16,33 @@ package ledger
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 )
+
+const maxHardForkSlotLengthMilliseconds = uint64(1<<63-1) / uint64(time.Millisecond)
+
+func hardForkCachedEraParams(
+	lengthInSlots uint,
+	slotLengthMilliseconds uint,
+) (hardfork.EraParams, error) {
+	if uint64(slotLengthMilliseconds) > maxHardForkSlotLengthMilliseconds {
+		return hardfork.EraParams{}, fmt.Errorf(
+			"slot length %dms overflows time.Duration",
+			slotLengthMilliseconds,
+		)
+	}
+	params := hardfork.EraParams{
+		EpochSize:  uint64(lengthInSlots),
+		SlotLength: time.Duration(slotLengthMilliseconds) * time.Millisecond,
+	}
+	if err := params.Validate(); err != nil {
+		return hardfork.EraParams{}, err
+	}
+	return params, nil
+}
 
 // HardForkSummary constructs a hardfork.Summary describing the chain's era
 // history from the LedgerState's current epoch cache, tip, current era, and
@@ -87,10 +110,20 @@ func (ls *LedgerState) hardForkSummaryAnchoredAt(
 		eraID := first.EraId
 		// Per-epoch params within an era are expected to be constant; we use
 		// the first epoch's values as the era-level params.
-		// first.SlotLength is protocol-bounded (milliseconds per slot).
-		// #nosec G115
-		slotLen := time.Duration(first.SlotLength) * time.Millisecond
-		epochSize := uint64(first.LengthInSlots)
+		eraParams, err := hardForkCachedEraParams(
+			first.LengthInSlots,
+			first.SlotLength,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"ledger: cached epoch %d (era %d) params invalid: %w",
+				first.EpochId,
+				eraID,
+				err,
+			)
+		}
+		slotLen := eraParams.SlotLength
+		epochSize := eraParams.EpochSize
 
 		start := hardfork.Bound{
 			RelativeTime: relTime,
@@ -103,8 +136,17 @@ func (ls *LedgerState) hardForkSummaryAnchoredAt(
 		j := i
 		for j < len(cache) && cache[j].EraId == eraID {
 			ep := cache[j]
-			// LengthInSlots and SlotLength are protocol-bounded uints.
-			// #nosec G115
+			if _, err := hardForkCachedEraParams(
+				ep.LengthInSlots,
+				ep.SlotLength,
+			); err != nil {
+				return nil, fmt.Errorf(
+					"ledger: cached epoch %d (era %d) params invalid: %w",
+					ep.EpochId,
+					eraID,
+					err,
+				)
+			}
 			relTime += time.Duration(ep.LengthInSlots) *
 				time.Duration(ep.SlotLength) * time.Millisecond
 			j++
