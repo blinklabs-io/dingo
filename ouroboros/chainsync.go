@@ -17,6 +17,7 @@ package ouroboros
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -328,6 +329,102 @@ func isOriginPoint(point ocommon.Point) bool {
 	return point.Slot == 0 && len(point.Hash) == 0
 }
 
+// originOnlyIntersectWarnInterval throttles the "intersect points collapsed to
+// origin" warning. The condition that produces it (an in-flight ledger
+// rollback) is re-evaluated on every reconnect, and peer governance reconnects
+// every second or so, so an unthrottled warning would emit hundreds of lines
+// for a single incident.
+const originOnlyIntersectWarnInterval = 30 * time.Second
+
+// finalizeChainsyncIntersectPoints appends origin as the last-resort intersect
+// point and refuses to offer origin *alone* while the local chain holds a
+// non-origin tip.
+//
+// Origin is always appended so FindIntersect still succeeds against a peer that
+// follows a divergent fork (e.g. a multi-producer DevNet) -- without it such
+// peers have no common point at all. But an origin-ONLY list is a different
+// request: it asks the peer to replay the chain from genesis. A synced node
+// cannot accept that reply. Genesis-era headers fail leader-eligibility
+// verification (the genesis-era producer has no entry in the epoch-0 stake
+// snapshot), which publishes ConnectionRecycleRequestedEvent and tears the
+// connection down milliseconds after it opened, so the node makes no chainsync
+// progress with any peer for as long as the condition lasts.
+//
+// The condition does occur on a healthy node: while a rollback's metadata
+// truncation is in flight the ledger tip names a block the chain rewind has
+// already deleted, and the ledger can return no points. In that case the
+// ledger can still name a point it has applied, so seed the list with it and
+// let origin stay the fallback it was meant to be.
+//
+// rollbackAnchor MUST come from LedgerState.RollbackWindowIntersectAnchor,
+// never from the primary chain tip directly. An empty point list can also mean
+// the primary chain is ahead of the ledger on a fork that does not descend
+// from the applied ledger tip; seeding from that raw chain tip would advertise
+// unapplied fork state and break the primary-chain ancestor invariant (#2309).
+// The ledger returns hasRollbackAnchor=false for that case, so it stays
+// origin-only exactly as before.
+//
+// Returns the finalized points and whether an origin-only list had to be
+// rescued, which the caller logs (throttled).
+func finalizeChainsyncIntersectPoints(
+	intersectPoints []ocommon.Point,
+	rollbackAnchor ocommon.Point,
+	hasRollbackAnchor bool,
+) ([]ocommon.Point, bool) {
+	rescued := false
+	hasRealPoint := false
+	for _, point := range intersectPoints {
+		if !isOriginPoint(point) {
+			hasRealPoint = true
+			break
+		}
+	}
+	if !hasRealPoint && hasRollbackAnchor && !isOriginPoint(rollbackAnchor) {
+		intersectPoints = normalizeIntersectPoints(
+			append(
+				[]ocommon.Point{rollbackAnchor},
+				intersectPoints...,
+			),
+		)
+		rescued = true
+	}
+	// Always include origin as the last intersect point. This
+	// ensures FindIntersect succeeds even when the peer follows
+	// a different fork (e.g. multi-producer DevNet). Without
+	// origin, peers on divergent chains have no common point.
+	if len(intersectPoints) == 0 ||
+		!isOriginPoint(intersectPoints[len(intersectPoints)-1]) {
+		intersectPoints = append(intersectPoints, ocommon.NewPointOrigin())
+	}
+	return intersectPoints, rescued
+}
+
+// warnOriginOnlyIntersectRescued reports, at most once per
+// originOnlyIntersectWarnInterval, that we were about to ask a peer to replay
+// from genesis on a node that is not at genesis.
+func (o *Ouroboros) warnOriginOnlyIntersectRescued(
+	connId ouroboros.ConnectionId,
+	rollbackAnchor ocommon.Point,
+) {
+	now := time.Now()
+	last := o.lastOriginOnlyIntersectWarn.Load()
+	if last != 0 &&
+		now.Sub(time.Unix(0, last)) < originOnlyIntersectWarnInterval {
+		return
+	}
+	if !o.lastOriginOnlyIntersectWarn.CompareAndSwap(last, now.UnixNano()) {
+		return
+	}
+	o.config.Logger.Warn(
+		"chainsync intersect points collapsed to origin on a non-origin chain, using rollback anchor instead",
+		"component", "ouroboros",
+		"connection_id", connId.String(),
+		"anchor_slot", rollbackAnchor.Slot,
+		"anchor_hash", hex.EncodeToString(rollbackAnchor.Hash),
+		"reason", "ledger returned no intersect points (rollback truncation in flight)",
+	)
+}
+
 func chainsyncResyncRequiresFreshConnection(reason string) bool {
 	switch reason {
 	case event.ChainsyncResyncReasonLocalTipPlateau,
@@ -444,13 +541,23 @@ func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
 		}
 	}
 	intersectPoints = normalizeIntersectPoints(intersectPoints)
-	// Always include origin as the last intersect point. This
-	// ensures FindIntersect succeeds even when the peer follows
-	// a different fork (e.g. multi-producer DevNet). Without
-	// origin, peers on divergent chains have no common point.
-	if len(intersectPoints) == 0 ||
-		!isOriginPoint(intersectPoints[len(intersectPoints)-1]) {
-		intersectPoints = append(intersectPoints, ocommon.NewPointOrigin())
+	rollbackAnchor, hasRollbackAnchor, err := o.ledgerState.RollbackWindowIntersectAnchor()
+	if err != nil {
+		// Surfaced like any other intersect-point failure above: a storage
+		// fault must fail the chainsync start so the caller retries, not be
+		// downgraded into "no anchor" and sent to the peer as origin-only.
+		return nil, fmt.Errorf(
+			"LedgerState.RollbackWindowIntersectAnchor failed: %w",
+			err,
+		)
+	}
+	intersectPoints, rescued := finalizeChainsyncIntersectPoints(
+		intersectPoints,
+		rollbackAnchor,
+		hasRollbackAnchor,
+	)
+	if rescued {
+		o.warnOriginOnlyIntersectRescued(connId, rollbackAnchor)
 	}
 	return intersectPoints, nil
 }
