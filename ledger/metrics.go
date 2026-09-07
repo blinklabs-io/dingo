@@ -39,9 +39,12 @@ type stateMetrics struct {
 	epochLengthSlots    prometheus.Gauge
 	shadowGateDecisions *prometheus.CounterVec
 	// Wall-clock time the ledger apply path spent waiting for a referenced
-	// Leios endorser block, by outcome ("arrived", "timeout" or "cancelled"). This wait is
-	// taken ahead of the batch's DB transaction on the single ledger pipeline,
-	// so it is time every block queued behind the batch also spends waiting.
+	// Leios endorser block, by outcome ("arrived", "timeout", "cancelled" or
+	// "unavailable"). It covers both waits the apply path can take: the
+	// diffusion window, and the CIP grace phase that waits out an in-flight
+	// by-point fetch. This wait is taken ahead of the batch's DB transaction
+	// on the single ledger pipeline, so it is time every block queued behind
+	// the batch also spends waiting.
 	// Only references ledger application actually reads are waited on (see
 	// leiosApplyReadsOwnAnnouncement); the rest are prefetched in the
 	// background and never observed here.
@@ -176,8 +179,14 @@ func (m *stateMetrics) observeLeaderThresholdMargin(margin float64) {
 // Outcome label values for dingo_metrics_leios_eb_wait_seconds.
 //
 //   - arrived:   the endorser block became available during the wait.
-//   - timeout:   the diffusion window elapsed without it. This is the outcome
-//     that means the wait cost apply latency and bought nothing.
+//   - timeout:   a bound elapsed without it -- the diffusion window, or the
+//     CIP grace phase's hard bound. This is the outcome that means the wait
+//     cost apply latency and bought nothing.
+//   - unavailable: the CIP grace phase's by-point fetch COMPLETED without
+//     caching, because no peer holds the endorser block. Nothing timed out,
+//     and this is the common ending on a CIP node, so it is deliberately not
+//     folded into timeout: doing so would inflate the timeout rate and its
+//     counter on routine operation.
 //   - cancelled: the wait ended because the block-processing context was
 //     cancelled (node shutdown, or the pass being aborted and restarted).
 //     Nothing was learned about the endorser block's availability, so this is
@@ -418,7 +427,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.leiosEbWaitSeconds = promautoFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "dingo_metrics_leios_eb_wait_seconds",
-			Help: "wall-clock time the ledger apply path spent waiting for a referenced Leios endorser block, by outcome",
+			Help: "wall-clock time the ledger apply path spent waiting for a referenced Leios endorser block, across both the diffusion window and the CIP in-flight-fetch grace phase, by outcome (arrived, timeout, cancelled, unavailable)",
 			// 5ms to ~82s: the wait is bounded by the certify-by deadline
 			// converted to wall clock, so the useful range spans sub-slot
 			// arrivals up to several stacked protocol windows.
