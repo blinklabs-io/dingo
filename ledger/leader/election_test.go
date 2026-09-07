@@ -1397,10 +1397,11 @@ func TestElectionParentCancellationWaitsForGeneration(t *testing.T) {
 type gatedElectionContext struct {
 	context.Context
 	entered chan struct{}
+	once    sync.Once
 }
 
 func (c *gatedElectionContext) Done() <-chan struct{} {
-	close(c.entered)
+	c.once.Do(func() { close(c.entered) })
 	return c.Context.Done()
 }
 
@@ -1424,7 +1425,16 @@ func TestElectionCanceledWaiterAfterReplacement(t *testing.T) {
 	}
 	result := make(chan error, 1)
 	go func() { result <- e.start(ctx, afterWait) }()
-	<-ctx.entered
+	select {
+	case <-ctx.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not wait for generation completion")
+	}
 	close(oldDone)
-	require.ErrorIs(t, <-result, context.Canceled)
+	select {
+	case err := <-result:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not return after generation completion")
+	}
 }
