@@ -795,6 +795,29 @@ func (s *State) UpdateClientTipWithoutDedup(
 	return s.updateTrackedClientTip(connId, point, tip)
 }
 
+// UpdateClientRollback updates an existing client's cursor, advertised tip,
+// activity, and syncing status atomically. Rollbacks do not count as delivered
+// headers or enter the header deduplication cache.
+func (s *State) UpdateClientRollback(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+	tip ochainsync.Tip,
+) bool {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	tc, exists := s.trackedClients[connId]
+	if !exists {
+		return false
+	}
+	point.Hash = cloneBytes(point.Hash)
+	tip.Point.Hash = cloneBytes(tip.Point.Hash)
+	tc.Cursor = point
+	tc.Tip = tip
+	tc.LastActivity = time.Now()
+	tc.Status = ClientStatusSyncing
+	return true
+}
+
 // RecordHeaderForDedup records a tracked header in the shared cross-peer
 // deduplication and fork-detection cache. Callers that update the tracked tip
 // before a synchronous selection decision use this after the apply gate, so a

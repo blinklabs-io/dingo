@@ -2322,3 +2322,54 @@ func TestChainsyncResyncMithrilReasonsDenyPeerAndRequireFreshConnection(
 		}
 	}
 }
+
+func TestChainsyncClientRollBackwardUpdatesTrackedClient(t *testing.T) {
+	for _, origin := range []bool{false, true} {
+		t.Run(fmt.Sprint(origin), func(t *testing.T) {
+			bus := event.NewEventBus(nil, nil)
+			defer bus.Close()
+			state := dchainsync.NewState(bus, nil)
+			connID := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
+			require.True(t, state.AddClientConnId(connID))
+			previous := ocommon.NewPoint(100, []byte("previous"))
+			state.UpdateClientTip(connID, previous, ochainsync.Tip{Point: previous})
+			state.MarkClientSynced(connID)
+			before := state.GetTrackedClient(connID)
+			point := ocommon.NewPoint(90, []byte("rollback"))
+			if origin {
+				point = ocommon.NewPointOrigin()
+			}
+			tip := ochainsync.Tip{Point: ocommon.NewPoint(110, []byte("tip")), BlockNumber: 10}
+			observed := false
+			o := newOuroboros(OuroborosConfig{
+				ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool { return true },
+				ChainsyncApplyEligible:   func(ouroboros.ConnectionId) bool { return false },
+				ChainsyncObservePeerRollback: func(chainselection.PeerRollbackEvent) bool {
+					observed = true
+					current := state.GetTrackedClient(connID)
+					require.Equal(t, point, current.Cursor)
+					require.Equal(t, tip, current.Tip)
+					require.Equal(t, dchainsync.ClientStatusSyncing, current.Status)
+					require.False(t, current.LastActivity.Before(before.LastActivity))
+					require.Equal(t, before.HeadersRecv, current.HeadersRecv)
+					return true
+				},
+			})
+			o.chainsyncState = state
+			o.eventBus = bus
+			require.NoError(t, o.chainsyncClientRollBackward(
+				ochainsync.CallbackContext{ConnectionId: connID}, point, tip,
+			))
+			require.True(t, observed)
+			// Rollback points are not headers and must not enter the dedup cache.
+			require.True(t, state.RecordHeaderForDedup(connID, point))
+			state.RemoveClientConnId(connID)
+			observed = false
+			require.NoError(t, o.chainsyncClientRollBackward(
+				ochainsync.CallbackContext{ConnectionId: connID}, point, tip,
+			))
+			require.False(t, observed)
+			require.Nil(t, state.GetTrackedClient(connID))
+		})
+	}
+}

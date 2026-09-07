@@ -909,6 +909,11 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	) {
 		return nil
 	}
+	if o.chainsyncState != nil && !o.chainsyncState.UpdateClientRollback(
+		ctx.ConnectionId, point, tip,
+	) {
+		return nil
+	}
 	// Observe the rollback for chain selection FIRST — it trims the peer's
 	// observed frontier (ApplyRollback), which can change its corroboration
 	// status, so the apply gate below must reflect it. If the hook handles it
