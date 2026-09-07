@@ -1316,3 +1316,79 @@ func TestElectionConcurrentAccess(t *testing.T) {
 		<-done
 	}
 }
+
+// Parent cancellation must join the worker generation before any concurrent
+// Stop returns or a new Start can replace the worker channels.
+func TestElectionParentCancellationWaitsForGeneration(t *testing.T) {
+	pool := lcommon.PoolKeyHash{}
+	inner := newMockStakeProvider()
+	inner.totalStake = 10000
+	inner.poolStakes[string(pool[:])] = 1000
+	blocked := &blockingStakeProvider{mockStakeProvider: inner, started: make(chan struct{}), release: make(chan struct{})}
+	var release sync.Once
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Stop()
+	defer release.Do(func() { close(blocked.release) })
+	e := NewElection(pool, electionTestVRFSeed, blocked, newMockEpochProvider(), bus, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	require.NoError(t, e.Start(parent))
+	select {
+	case <-blocked.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not reach provider")
+	}
+	cancel()
+	// Start must inspect the canceled generation context, even before its
+	// coordinator has acquired the election mutex and marked it stopped.
+	restarted := make(chan error, 1)
+	go func() { restarted <- e.Start(t.Context()) }()
+	select {
+	case <-restarted:
+		t.Fatal("Start replaced an undrained canceled generation")
+	case <-time.After(50 * time.Millisecond):
+	}
+	require.Eventually(t, func() bool {
+		e.mu.RLock()
+		defer e.mu.RUnlock()
+		return !e.running
+	}, time.Second, time.Millisecond)
+	canceled, cancelWait := context.WithCancel(t.Context())
+	cancelWait()
+	require.ErrorIs(t, e.Start(canceled), context.Canceled)
+	stopped := make(chan error, 2)
+	for range 2 {
+		go func() { stopped <- e.Stop() }()
+	}
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned before canceled generation drained")
+	case <-time.After(50 * time.Millisecond):
+	}
+	release.Do(func() { close(blocked.release) })
+	for range 2 {
+		select {
+		case err := <-stopped:
+			require.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("Stop did not complete after canceled worker drained")
+		}
+	}
+	select {
+	case err := <-restarted:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("restart did not complete after canceled worker drained")
+	}
+	e.mu.RLock()
+	running := e.running
+	e.mu.RUnlock()
+	require.True(t, running, "old generation waiters must not stop the restart")
+	go func() { stopped <- e.Stop() }()
+	select {
+	case err := <-stopped:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("restarted generation did not stop")
+	}
+}
