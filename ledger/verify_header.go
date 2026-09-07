@@ -416,10 +416,8 @@ func (ls *LedgerState) headerVerificationEpoch(
 	// must never be advanced past the HFC safe zone or a known era boundary.
 	// Resolve known epochs without requiring forecast configuration. Only
 	// future slots need the immutable summary before cache mutation.
-	if known, err := ls.epochForSlot(blockSlot); err == nil {
-		return known, nil
-	}
-	if len(ls.loadConsensusSnapshot().epochCache) > 0 {
+	_, cachedEpochErr := ls.epochForSlot(blockSlot)
+	if cachedEpochErr != nil && len(ls.loadConsensusSnapshot().epochCache) > 0 {
 		summary, err := ls.HardForkSummary()
 		if err != nil {
 			return models.Epoch{}, fmt.Errorf(

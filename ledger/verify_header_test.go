@@ -20,6 +20,7 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -1133,6 +1134,39 @@ func TestValidateBlockHeaderCryptoDoesNotAdvanceEpochCache(t *testing.T) {
 		"header-only validation must not advance the shared epoch cache")
 }
 
+// Cached epoch resolution bypasses forecasting, but must not bypass the
+// nonce-availability contract shared by crypto and state verification callers.
+func TestHeaderVerificationEpoch_CachedNonceWithoutForecastConfig(t *testing.T) {
+	for _, allowAdvance := range []bool{false, true} {
+		for _, tc := range []struct {
+			name  string
+			nonce []byte
+		}{
+			{name: "missing nonce"},
+			{name: "available nonce", nonce: bytes.Repeat([]byte{1}, 32)},
+		} {
+			t.Run(tc.name+fmt.Sprint("/advance=", allowAdvance), func(t *testing.T) {
+				ls := &LedgerState{
+					epochCache: []models.Epoch{{
+						EpochId: 5, StartSlot: 500, LengthInSlots: 100,
+						EraId: eras.BabbageEraDesc.Id, Nonce: tc.nonce,
+					}},
+				}
+				ls.publishSnapshotsLocked()
+				epoch, err := ls.headerVerificationEpoch(550, allowAdvance)
+				if len(tc.nonce) == 0 {
+					require.ErrorIs(t, err, errEpochNonceUnavailable,
+						"cached lookup must retain the nonce-availability contract")
+					return
+				}
+				require.NoError(t, err, "known epochs do not need forecast configuration")
+				assert.Equal(t, uint64(5), epoch.EpochId)
+				assert.Equal(t, tc.nonce, epoch.Nonce)
+			})
+		}
+	}
+}
+
 // TestVerifyBlockHeaderCrypto_RejectsBlockWithNoNonce verifies that a block
 // in an epoch that has no nonce (e.g., epoch rollover not yet processed)
 // is rejected.
@@ -1156,8 +1190,8 @@ func TestVerifyBlockHeaderCrypto_RejectsBlockWithNoNonce(t *testing.T) {
 	ls.publishSnapshotsLocked()
 	block := &mockBabbageBlock{slot: 500}
 	err := ls.verifyBlockHeaderCrypto(block)
-	assert.Error(t, err, "block with missing nonce must be rejected")
-	assert.Contains(t, err.Error(), "epoch nonce not available")
+	require.ErrorIs(t, err, errEpochNonceUnavailable,
+		"missing nonce must be classified before downstream crypto checks")
 }
 
 // TestVerifyBlockHeaderCrypto_EpochBoundaryUsesCorrectNonce verifies that
