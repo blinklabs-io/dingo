@@ -673,6 +673,15 @@ graph TB
 
 The block production pipeline from leader election through broadcast.
 
+For Shelley through Conway, transaction selection accounts incrementally for
+the exact encoded body components: raw bodies and witnesses, array headers,
+auxiliary data with its transaction-index keys and map header, and the era's
+empty invalid-transaction list. Each candidate adds constant-time accounting;
+previously selected transactions are not re-encoded or hashed during selection.
+Selection stops before the first candidate that exceeds `MaxBlockBodySize`,
+preserving the accepted prefix. The final encoding and body hash still provide
+an independent size check. Dijkstra retains its separate inline-body sizing.
+
 Two invariants keep the forger from advertising or repeating a block it has
 not durably adopted:
 
