@@ -39,8 +39,9 @@ type spoNonVoterRatificationCase struct {
 	silentVote           *uint8
 }
 
+//go:fix inline
 func votePointer(vote uint8) *uint8 {
-	return &vote
+	return new(vote)
 }
 
 // TestProcessEpochSPONonVoterDenominators matches the same 60/40 stake

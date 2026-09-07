@@ -150,9 +150,7 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 	// re-reads the live tip still converges.
 	stop := make(chan struct{})
 	var appender sync.WaitGroup
-	appender.Add(1)
-	go func() {
-		defer appender.Done()
+	appender.Go(func() {
 		lastPoint := pc.Tip().Point
 		for seq := 0; ; seq++ {
 			select {
@@ -182,7 +180,7 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 			}
 			lastPoint = ocommon.NewPoint(next.Slot, next.Hash)
 		}
-	}()
+	})
 
 	target := ocommon.NewPoint(raw[0].Slot, raw[0].Hash)
 	rewindErr := ls.rollbackPrimaryChainInSecurityParamWindows(target)

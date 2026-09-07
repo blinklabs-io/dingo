@@ -278,11 +278,9 @@ func TestSyncStateForgeFenceStoreConcurrentStoresKeepHighest(t *testing.T) {
 	const highest = 500
 	var wg sync.WaitGroup
 	for slot := 1; slot <= highest; slot++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			assert.NoError(t, store.StoreLastForgedSlot(uint64(slot)))
-		}()
+		})
 	}
 	wg.Wait()
 

@@ -86,9 +86,7 @@ func TestSetBlobStoreConcurrentWithReaders(t *testing.T) {
 	start := make(chan struct{})
 
 	for range readers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			for range iterations {
 				// Bare accessor read.
@@ -126,12 +124,10 @@ func TestSetBlobStoreConcurrentWithReaders(t *testing.T) {
 				txn := db.Transaction(false)
 				txn.Release()
 			}
-		}()
+		})
 	}
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		<-start
 		for i := range iterations {
 			if i%2 == 0 {
@@ -140,7 +136,7 @@ func TestSetBlobStoreConcurrentWithReaders(t *testing.T) {
 				db.SetBlobStore(base)
 			}
 		}
-	}()
+	})
 
 	close(start)
 	wg.Wait()
