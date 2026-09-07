@@ -44,9 +44,9 @@ const busyTimeoutMargin = 5500 * time.Millisecond
 // if it ultimately touches nothing) and, under c.db.Begin()'s default
 // DEFERRED mode, grabs SQLite's single per-database WAL writer slot right
 // there — and holds it for the rest of the transaction, not just its final
-// COMMIT. OpenCache never bounds the connection pool, so
-// accountFetchConcurrency's five chunk workers really do run on five
-// distinct connections that then contend for that one slot.
+// COMMIT. Before this fix OpenCache left the connection pool unbounded, so
+// accountFetchConcurrency's five chunk workers really did run on five
+// distinct connections that then contended for that one slot.
 //
 // This test drives exactly that: connection A opens a transaction and runs
 // SaveAccountFetchChunkProgress's own two opening DELETE statements
@@ -217,17 +217,19 @@ func TestSaveAccountFetchChunkProgressConcurrentWritersDoNotHitSQLiteBusy(
 // request on an unbuffered channel with no deadline (OpenCache's write paths
 // use the context-free Exec/Begin, so there is nothing to cancel it).
 //
-// createCacheSchema's legacy-column migration is exactly that shape: it holds
-// an open *sql.Rows from the pragma_table_info probe (closed only by a
-// deferred Close at function exit) and issues ALTER TABLE ... DROP COLUMN on
-// the same *sql.DB while the probe row is still unread. It only reaches that
-// Exec when the legacy column is actually present, i.e. against a cache.db
-// written by an older dingo, so a fresh-file test never exercises it — the
-// node would simply hang inside OpenCache with no error and no timeout.
+// createCacheSchema's legacy-column migration was exactly that shape: it held
+// an open *sql.Rows from its pragma_table_info probe — closed only by a
+// deferred Close at function exit — while issuing ALTER TABLE ... DROP COLUMN
+// on the same *sql.DB. It reaches that Exec only when the legacy column is
+// actually present, i.e. against a cache.db written by an older dingo, so a
+// fresh-file test never exercised it and the node would simply hang inside
+// OpenCache with no error and no timeout. The probe now lives in
+// columnExists, whose rows are closed before it returns.
 //
-// The sibling probe in addColumnIfMissing is safe by contrast: it Execs only
+// The sibling probe in addColumnIfMissing was safe by contrast: it Execs only
 // when rows.Next() returned false, and an exhausted *sql.Rows has already
-// released its connection.
+// released its connection. It shares columnExists so the invariant holds in
+// one place rather than by accident in two.
 func TestOpenCacheLegacyColumnMigrationDoesNotDeadlock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache.db")
 	cache, err := OpenCache(path, nil)
