@@ -153,33 +153,48 @@ func (n *Node) validateBlockProducerLedger(
 	creds *forging.PoolCredentials,
 ) error {
 	view := blockProducerLedgerView{ls: n.ledgerState}
-	return n.validateBlockProducerLedgerWithView(creds, view)
+	currentSlot, err := n.ledgerState.CurrentSlot()
+	if err != nil {
+		if !errors.Is(err, ledger.ErrBeforeGenesis) {
+			return fmt.Errorf("compute current slot: %w", err)
+		}
+		currentSlot = 0
+	}
+	return n.validateBlockProducerLedgerWithViewAtSlot(
+		creds,
+		view,
+		n.ledgerState,
+		currentSlot,
+	)
 }
 
 func (n *Node) validateBlockProducerLedgerWithView(
 	creds *forging.PoolCredentials,
 	view forging.LedgerView,
 ) error {
+	return n.validateBlockProducerLedgerWithViewAtSlot(creds, view, nil, 0)
+}
+
+func (n *Node) validateBlockProducerLedgerWithViewAtSlot(
+	creds *forging.PoolCredentials,
+	view forging.LedgerView,
+	params forging.ProtocolParamsProvider,
+	slot uint64,
+) error {
 	if creds == nil {
 		return errors.New("nil pool credentials")
 	}
-	// Startup deliberately checks only for a stale counter, not the
-	// era-scoped no-gap rule the forge loop and block application enforce.
-	// The era for "now" would have to come from LedgerState.CurrentSlot,
-	// which is wall-clock and valid regardless of sync state; the baseline
-	// comes from LatestOpCertSequence, which reflects only the applied
-	// chain. On a node whose applied tip is behind wall-clock time (an
-	// interrupted initial sync, a resume after downtime, a restore to an
-	// older snapshot), those two can disagree: the era resolves to
-	// whatever the wall clock says while the baseline is still the stale,
-	// pre-catch-up counter, so a pool several rotations into its life
-	// would look gapped and fail startup -- unable to then sync to the
-	// point that would make the baseline correct. The forge loop's own
-	// gate does not have this problem: it runs after the upstream-sync
-	// skip and the leader check, so both its era and its baseline come
-	// from near-tip state, and it fails closed per slot rather than
-	// refusing to start the node at all.
-	registered, vrfMatched, err := creds.ValidateAgainstLedger(view)
+	var registered, vrfMatched bool
+	var err error
+	if params == nil {
+		registered, vrfMatched, err = creds.ValidateAgainstLedger(view)
+	} else {
+		registered, vrfMatched, err = creds.ValidateAgainstLedgerAtSlot(
+			view,
+			params,
+			slot,
+		)
+	}
 	if err != nil {
 		if errors.Is(err, forging.ErrVRFKeyHashMismatch) &&
 			n.config.network == "devnet" {

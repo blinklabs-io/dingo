@@ -673,8 +673,14 @@ graph TB
 
 The block production pipeline from leader election through broadcast.
 
-Two invariants keep the forger from advertising or repeating a block it has
-not durably adopted:
+The producer validates its credentials before starting and only advertises
+blocks it has durably adopted:
+
+- **Validate the producer counter for the active era.** Before the node starts
+  block production, `node_forging.go` resolves protocol parameters for the
+  current slot and checks the loaded OpCert issue number against the observed
+  on-chain counter. TPraos permits forward counter movement; Praos-era startup
+  rejects gapped counters before the producer is enabled.
 
 - **Publish after acceptance.** `BlockForgedEvent` and the Leios
   announcement enqueued alongside it (`node_forging.go`) run only after
