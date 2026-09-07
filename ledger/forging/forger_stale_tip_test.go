@@ -155,8 +155,16 @@ func TestForgeStaleTipToleranceIsConfigurable(t *testing.T) {
 		BlockBuilder:     wideBuilder,
 		BlockBroadcaster: &forgerTestBroadcaster{},
 		SlotClock: forgerTestSlotClock{
-			currentSlot:       200,
-			chainTipSlot:      100,
+			currentSlot:  200,
+			chainTipSlot: 100,
+			// Explicit, not merely non-zero: this test's whole verdict is
+			// that a 20-slot gap is tolerated at a 50-slot bound, so it must
+			// not depend on the double's value-based opt-in rule. If that
+			// rule were ever tightened back to frontierExplicit alone the
+			// frontier would mirror the applied tip, the gap would collapse
+			// to 0, and this test would still pass while the tolerance knob
+			// had stopped being honoured.
+			frontierExplicit:  true,
 			frontierSlot:      120,
 			slotsPerKESPeriod: 100,
 		},
