@@ -840,34 +840,41 @@ func (ls *LedgerState) awaitInFlightEndorserFetches(
 		go func(r leiosEbRef) {
 			defer wg.Done()
 			start := time.Now()
-			ls.leiosBackfill.awaitFetch(
+			outcome := ls.leiosBackfill.awaitFetch(
 				ctx,
 				r,
 				poll,
 				hardBound,
 			)
 			elapsed := time.Since(start)
-			cached := endorserBlockAvailableAt(
-				ls.config.EndorserBlockProvider,
-				r.hash.Bytes(),
-				r.slot,
-			)
+			cached := outcome == leiosFetchWaitCached
 			// This grace phase is apply-path wait time too, and it is the
 			// LONGEST one the pipeline can incur (up to hardBound), so it
 			// belongs in the same histogram as the diffusion window rather
 			// than being invisible to monitoring.
-			switch {
-			case cached:
+			//
+			// Classified from the wait's OWN termination cause, not from
+			// re-reading the cache and the context afterwards: by then a
+			// bound that expired just before a shutdown looks like a
+			// cancellation, and a fetch that completed without caching looks
+			// like a timeout.
+			switch outcome {
+			case leiosFetchWaitCached:
 				ls.metrics.observeLeiosEbWait(
 					elapsed,
 					leiosEbWaitOutcomeArrived,
 				)
-			case ctx.Err() != nil:
+			case leiosFetchWaitUnavailable:
+				ls.metrics.observeLeiosEbWait(
+					elapsed,
+					leiosEbWaitOutcomeUnavailable,
+				)
+			case leiosFetchWaitCancelled:
 				ls.metrics.observeLeiosEbWait(
 					elapsed,
 					leiosEbWaitOutcomeCancelled,
 				)
-			default:
+			case leiosFetchWaitDeadline:
 				ls.metrics.observeLeiosEbWait(
 					elapsed,
 					leiosEbWaitOutcomeTimeout,
@@ -886,7 +893,7 @@ func (ls *LedgerState) awaitInFlightEndorserFetches(
 				)
 				return
 			}
-			if ctx.Err() != nil {
+			if outcome == leiosFetchWaitCancelled {
 				// The pass was cancelled, not the fetch exhausted. Nothing
 				// was learned about whether any peer holds the endorser
 				// block, so saying it "could not be fetched" would be a
@@ -914,7 +921,7 @@ func (ls *LedgerState) awaitInFlightEndorserFetches(
 			// pipeline was held for the full backstop, which is worth waking
 			// someone for. The in-flight marker is what distinguishes them,
 			// so read it rather than inferring from elapsed time.
-			if ls.leiosBackfill.fetchInFlight(r) {
+			if outcome == leiosFetchWaitDeadline {
 				ls.config.Logger.Warn(
 					"endorser block fetch neither completed nor cached within the hard bound; applying its ranking block without the endorser-resident transactions",
 					"component", "ledger",
@@ -1600,6 +1607,26 @@ func (ls *LedgerState) waitForEndorserBlock(
 // because a from-scratch backfill is throughput-bound, not diffusion-bound.
 const leiosBackfillMaxWait = 2 * time.Minute
 
+// leiosFetchWaitOutcome is why awaitFetch returned. The caller cannot infer it
+// afterwards: the in-flight marker and the parent context are both racy by the
+// time it looks, so a hard bound that expired just before a shutdown would be
+// reported as a cancellation and a fetch that completed without caching would
+// be reported as a timeout. Returning the cause removes the guess.
+type leiosFetchWaitOutcome int
+
+const (
+	// leiosFetchWaitCached: the endorser block is available.
+	leiosFetchWaitCached leiosFetchWaitOutcome = iota
+	// leiosFetchWaitUnavailable: the all-peers fetch COMPLETED without
+	// caching. Nothing timed out; no peer holds the block.
+	leiosFetchWaitUnavailable
+	// leiosFetchWaitDeadline: maxWait elapsed with the fetch neither caching
+	// nor clearing its marker.
+	leiosFetchWaitDeadline
+	// leiosFetchWaitCancelled: the parent context was cancelled.
+	leiosFetchWaitCancelled
+)
+
 // awaitFetch waits for the in-flight by-point fetch of the endorser block
 // referenced by r to finish (it has already been spawned). The spawned fetch
 // (FetchEndorserBlockByPoint) tries every connected peer in turn before
@@ -1613,20 +1640,12 @@ const leiosBackfillMaxWait = 2 * time.Minute
 // leiosBackfillMaxWait is a backstop against a fetch that neither caches nor
 // clears (the fetch itself is bounded by the leios-fetch timeout, so this is
 // rarely reached).
-// fetchInFlight reports whether the by-point fetch for r is still marked
-// in flight. awaitFetch returning while this is true means it hit its bound
-// rather than observing the fetch finish, which is the difference between a
-// wedged fetch and the routine "no peer holds this endorser block".
-func (b *leiosBackfiller) fetchInFlight(r leiosEbRef) bool {
-	_, inFlight := b.inflight.Load(leiosEbRefKey(r))
-	return inFlight
-}
 
 func (b *leiosBackfiller) awaitFetch(
 	ctx context.Context,
 	r leiosEbRef,
 	poll, maxWait time.Duration,
-) {
+) leiosFetchWaitOutcome {
 	waitCtx, cancel := context.WithTimeout(ctx, maxWait)
 	defer cancel()
 	ticker := time.NewTicker(poll)
@@ -1634,14 +1653,33 @@ func (b *leiosBackfiller) awaitFetch(
 	key := leiosEbRefKey(r)
 	for {
 		if endorserBlockAvailableAt(b.provider, r.hash.Bytes(), r.slot) {
-			return // cached: the referencing block can apply it
+			return leiosFetchWaitCached
+		}
+		// Checked BEFORE the in-flight marker, because cancelling the pass
+		// also makes spawn clear that marker. Looking at the marker first
+		// would race, and would report a shutdown as "no peer holds it" --
+		// the false diagnosis this classification exists to avoid.
+		if waitCtx.Err() != nil {
+			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				return leiosFetchWaitDeadline
+			}
+			return leiosFetchWaitCancelled
 		}
 		if _, inFlight := b.inflight.Load(key); !inFlight {
-			return // the all-peers fetch finished without caching: skip fast
+			// The all-peers fetch finished without caching: skip fast.
+			return leiosFetchWaitUnavailable
 		}
 		select {
 		case <-waitCtx.Done():
-			return
+			// waitCtx is a timeout child of ctx, so its Done also closes on a
+			// PARENT cancellation. Discriminate on the child's own error,
+			// which is stable once resolved: a deadline that fires first
+			// stays DeadlineExceeded even if the parent is cancelled straight
+			// after, so a real bound is never reported as a shutdown.
+			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				return leiosFetchWaitDeadline
+			}
+			return leiosFetchWaitCancelled
 		case <-ticker.C:
 		}
 	}

@@ -535,12 +535,13 @@ func TestLeiosEbWaitMetricsRecordOutcomeAndDuration(t *testing.T) {
 	// Every outcome series is pre-materialized at init, before any wait.
 	require.Equal(
 		t,
-		3,
+		4,
 		testutil.CollectAndCount(ls.metrics.leiosEbWaitSeconds),
 	)
 	require.Zero(t, leiosWaitTestHistogram(t, reg, "arrived"))
 	require.Zero(t, leiosWaitTestHistogram(t, reg, "timeout"))
 	require.Zero(t, leiosWaitTestHistogram(t, reg, "cancelled"))
+	require.Zero(t, leiosWaitTestHistogram(t, reg, "unavailable"))
 	require.Zero(t, testutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts))
 
 	ebHash := lcommon.NewBlake2b256(leiosTestHash(0xE7))
@@ -634,7 +635,7 @@ func TestLeiosEbWaitCancellationIsNotCountedAsTimeout(t *testing.T) {
 			// Every outcome series exists before any wait.
 			require.Equal(
 				t,
-				3,
+				4,
 				testutil.CollectAndCount(ls.metrics.leiosEbWaitSeconds),
 			)
 
@@ -1322,5 +1323,63 @@ func TestMandatoryFetchIsNotStarvedByBestEffortSpawns(t *testing.T) {
 		t,
 		mandatoryRan.Load(),
 		"the mandatory fetch never reached the fetcher",
+	)
+}
+
+// TestCIPGraceUnavailableIsNotRecordedAsATimeout pins the grace phase's metric
+// classification against the two ways inferring it after the fact goes wrong.
+//
+// Re-reading the cache and the context once awaitFetch has returned cannot
+// tell a fetch that COMPLETED without caching (routine on a CIP node: no peer
+// holds the block) from one that ran to the hard bound, so the routine case
+// was recorded as a timeout -- inflating both the timeout histogram and
+// dingo_metrics_leios_eb_wait_timeouts_total on every unfetchable block.
+// awaitFetch now reports its own termination cause instead.
+func TestCIPGraceUnavailableIsNotRecordedAsATimeout(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	cfg := LedgerStateConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EndorserBlockProvider: func([]byte, uint64) ([]cbor.RawMessage, bool) {
+			return nil, false
+		},
+		// Completes immediately without caching: the in-flight marker clears
+		// long before the hard bound, so nothing timed out.
+		EndorserBlockFetcher: func(context.Context, uint64, []byte) error {
+			return errors.New("no peer holds it")
+		},
+	}
+	ls := &LedgerState{config: cfg}
+	ls.metrics.init(reg)
+	ls.leiosBackfill = newLeiosBackfiller(cfg)
+
+	ref := leiosEbRef{
+		slot: 100,
+		hash: lcommon.NewBlake2b256(leiosTestHash(0xF1)),
+	}
+	ls.leiosBackfill.spawn(t.Context(), ref)
+
+	ls.awaitInFlightEndorserFetches(
+		t.Context(),
+		[]leiosEbRef{ref},
+		leiosWaitTestWindow,
+		time.Millisecond,
+		leiosWaitTestLongWindow,
+	)
+
+	require.Equal(
+		t,
+		uint64(1),
+		leiosWaitTestHistogram(t, reg, "unavailable"),
+		"a fetch that completed without caching is its own outcome",
+	)
+	require.Zero(
+		t,
+		leiosWaitTestHistogram(t, reg, "timeout"),
+		"nothing timed out: the hard bound was never approached",
+	)
+	require.Zero(
+		t,
+		testutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
+		"the timeout counter must not move for a routine unfetchable block",
 	)
 }

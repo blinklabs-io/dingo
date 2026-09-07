@@ -48,9 +48,10 @@ type stateMetrics struct {
 	leiosEbWaitSeconds *prometheus.HistogramVec
 	// Pre-materialized observers for the outcome label values, so the apply
 	// path does not resolve a label on every wait.
-	leiosEbWaitArrived   prometheus.Observer
-	leiosEbWaitTimedOut  prometheus.Observer
-	leiosEbWaitCancelled prometheus.Observer
+	leiosEbWaitArrived     prometheus.Observer
+	leiosEbWaitTimedOut    prometheus.Observer
+	leiosEbWaitCancelled   prometheus.Observer
+	leiosEbWaitUnavailable prometheus.Observer
 	// Waits that ran to the full diffusion window without the endorser block
 	// arriving. A rising value against a flat leios_eb_wait_seconds "arrived"
 	// count means the wait is buying nothing and is pure apply latency.
@@ -187,6 +188,12 @@ const (
 	leiosEbWaitOutcomeArrived   = "arrived"
 	leiosEbWaitOutcomeTimeout   = "timeout"
 	leiosEbWaitOutcomeCancelled = "cancelled"
+	// leiosEbWaitOutcomeUnavailable is the CIP grace phase's routine ending:
+	// the by-point fetch COMPLETED without caching, because no peer holds the
+	// endorser block. Nothing timed out and nothing was cancelled, so folding
+	// it into either would overstate both -- and it is the most common ending
+	// on a CIP node, so it would overstate them badly.
+	leiosEbWaitOutcomeUnavailable = "unavailable"
 )
 
 // observeLeiosEbWait records one apply-path endorser-block wait under the
@@ -209,6 +216,8 @@ func (m *stateMetrics) observeLeiosEbWait(d time.Duration, outcome string) {
 		}
 	case leiosEbWaitOutcomeCancelled:
 		obs = m.leiosEbWaitCancelled
+	case leiosEbWaitOutcomeUnavailable:
+		obs = m.leiosEbWaitUnavailable
 	}
 	if obs != nil {
 		obs.Observe(d.Seconds())
@@ -425,6 +434,9 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	)
 	m.leiosEbWaitCancelled = m.leiosEbWaitSeconds.WithLabelValues(
 		leiosEbWaitOutcomeCancelled,
+	)
+	m.leiosEbWaitUnavailable = m.leiosEbWaitSeconds.WithLabelValues(
+		leiosEbWaitOutcomeUnavailable,
 	)
 	m.leiosEbWaitTimeouts = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
