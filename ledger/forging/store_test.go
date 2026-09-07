@@ -99,6 +99,10 @@ func TestSyncStateForgeFenceStoreIsPerPool(t *testing.T) {
 	first := NewSyncStateForgeFenceStore(backing, storeTestPoolID("poolA"))
 	second := NewSyncStateForgeFenceStore(backing, storeTestPoolID("poolB"))
 
+	// NewSyncStateForgeFenceStore returns nil only for a nil store
+	// (ledger/forging/store.go), and newMockSyncStateStore never returns
+	// nil, so the fence stores built above are non-nil.
+	//nolint:nilaway // newMockSyncStateStore returns a non-nil store
 	require.NoError(t, first.StoreLastForgedSlot(500))
 
 	slot, ok, err := second.LoadLastForgedSlot()

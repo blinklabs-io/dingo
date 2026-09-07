@@ -926,6 +926,11 @@ func TestUpstreamIterator_SurfacesTypedHistoryExpiredError(t *testing.T) {
 	}))
 
 	upstream := db.Blob()
+	// db.Blob() is non-nil: database.New rejects a nil or typed-nil blob
+	// store (database/database.go), so the nil-receiver branch of
+	// blobStoreRef.blobStore that nilaway traces is unreachable for any
+	// constructed database.
+	//nolint:nilaway // database.New requires a non-nil blob store
 	rTxn := upstream.NewTransaction(false)
 	t.Cleanup(func() { _ = rTxn.Rollback() })
 	it := upstream.NewIterator(rTxn, types.BlobIteratorOptions{

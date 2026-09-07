@@ -938,6 +938,12 @@ func (cs *ChainSelector) GetPeerSyncTarget(
 		return ochainsync.Tip{}, false
 	}
 	observed := peerTip.SelectionTip()
+	// peerTip is nil when connId has no entry, but isPeerSelectableLocked
+	// returns false for a nil tip through peerLiveEligibleNonStaleLocked
+	// (chainselection/genesis_corroboration.go), so the early return above
+	// covers the absent-key case. nilaway does not correlate that guard
+	// across the two functions.
+	//nolint:nilaway // guarded by isPeerSelectableLocked above
 	advertised := peerTip.Tip
 	if safeAddUint64(
 		observed.Point.Slot,

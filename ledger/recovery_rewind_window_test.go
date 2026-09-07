@@ -401,6 +401,9 @@ func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
 			validationErr,
 		)
 		require.ErrorIs(t, lastErr, chain.ErrRollbackExceedsSecurityParam)
+		// require.ErrorIs above fails the test on a nil lastErr, which nilaway
+		// does not model.
+		//nolint:nilaway // non-nil per the require.ErrorIs above
 		seenTargets[lastErr.Error()] = struct{}{}
 		if errors.Is(lastErr, errHaltLedgerPipeline) {
 			halted = true
@@ -445,6 +448,9 @@ func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
 	)
 	require.Greater(
 		t,
+		// maxAttempts is a positive constant, so the loop above appended at
+		// least one tip; nilaway does not reason about the loop bound.
+		//nolint:nilaway // the loop above appends at least one entry
 		chainTips[len(chainTips)-1],
 		chainTips[0],
 		"the fork must extend while the applied ledger tip stays pinned",
