@@ -1860,21 +1860,17 @@ func (q *Queries) GetDrepLastRegistrationDeposit(ctx context.Context, arg GetDre
 
 const getDrepLastRegistrationDeposits = `-- name: GetDrepLastRegistrationDeposits :many
 SELECT r.credential_tag, r.drep_credential, r.deposit_amount
-FROM registration_drep r
-JOIN (
-    SELECT reg.credential_tag AS credential_tag,
-           reg.drep_credential AS drep_credential,
-           MAX(reg.added_slot) AS added_slot
-    FROM registration_drep reg
-    JOIN drep d
-      ON d.credential_tag = reg.credential_tag
-     AND d.credential = reg.drep_credential
-    WHERE d.active = TRUE
-    GROUP BY reg.credential_tag, reg.drep_credential
-) latest
-  ON latest.credential_tag = r.credential_tag
- AND latest.drep_credential = r.drep_credential
- AND latest.added_slot = r.added_slot
+FROM drep d
+JOIN registration_drep r
+  ON r.id = (
+      SELECT reg.id
+      FROM registration_drep reg
+      WHERE reg.credential_tag = d.credential_tag
+        AND reg.drep_credential = d.credential
+      ORDER BY reg.added_slot DESC, reg.id DESC
+      LIMIT 1
+  )
+WHERE d.active = TRUE
 `
 
 type GetDrepLastRegistrationDepositsRow struct {
@@ -1887,9 +1883,9 @@ type GetDrepLastRegistrationDepositsRow struct {
 // of the active DReps GetActiveDreps returns in one round trip instead of
 // one query per DRep. Same certificate_id treatment: bootstrap-slot import
 // rows count, because their deposit_amount is the real amount owed.
-// The join to drep restricts the grouped scan to the active credential set,
-// so registration history left behind by DReps that have since deregistered
-// neither enlarges the result nor grows the work.
+// Drive this lookup from active drep rows. The correlated lookup uses the
+// registration credential index for each active DRep, so history left behind
+// by DReps that have since deregistered does not become the outer scan.
 func (q *Queries) GetDrepLastRegistrationDeposits(ctx context.Context) ([]GetDrepLastRegistrationDepositsRow, error) {
 	rows, err := q.db.QueryContext(ctx, getDrepLastRegistrationDeposits)
 	if err != nil {

@@ -113,9 +113,9 @@ type Querier interface {
 	// of the active DReps GetActiveDreps returns in one round trip instead of
 	// one query per DRep. Same certificate_id treatment: bootstrap-slot import
 	// rows count, because their deposit_amount is the real amount owed.
-	// The join to drep restricts the grouped scan to the active credential set,
-	// so registration history left behind by DReps that have since deregistered
-	// neither enlarges the result nor grows the work.
+	// Drive this lookup from active drep rows. The correlated lookup uses the
+	// registration credential index for each active DRep, so history left behind
+	// by DReps that have since deregistered does not become the outer scan.
 	GetDrepLastRegistrationDeposits(ctx context.Context) ([]GetDrepLastRegistrationDepositsRow, error)
 	GetDrepLastRegistrationSlot(ctx context.Context, arg GetDrepLastRegistrationSlotParams) (int64, error)
 	GetEpoch(ctx context.Context, epochID sql.NullInt64) (GetEpochRow, error)
