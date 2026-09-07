@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/assert"
@@ -47,6 +48,7 @@ func validTestConfig() *Config {
 		Chainsync:            DefaultChainsyncConfig(),
 		HistoryExpiry:        DefaultHistoryExpiryConfig(),
 		Midnight:             DefaultMidnightConfig(),
+		BindAddr:             "127.0.0.1",
 		Mithril: MithrilConfig{
 			Enabled: true,
 			Backend: "v2",
@@ -67,6 +69,55 @@ func setMempoolSetting(c *Config, name string, value any) {
 func TestValidateDefaultsPass(t *testing.T) {
 	cfg := validTestConfig()
 	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+}
+
+func TestValidateAPIExposureRequiresAuthOnRemoteBind(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.StorageMode = storageModeAPI
+	cfg.BindAddr = "0.0.0.0"
+
+	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "without authentication")
+	assert.Contains(t, err.Error(), "blockfrost")
+}
+
+func TestValidateAPIExposureAllowsUnauthenticatedLoopback(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.StorageMode = storageModeAPI
+	cfg.BindAddr = "127.0.0.1"
+
+	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+}
+
+func TestValidateAPIExposureAllowsAuthenticatedRemoteBind(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.StorageMode = storageModeAPI
+	cfg.BindAddr = "192.0.2.10"
+	mode := string(apiconfig.AuthModeToken)
+	tokenPath := "/run/secrets/api-token"
+	cfg.API.Auth.Mode = &mode
+	cfg.API.Auth.TokenFilePath = &tokenPath
+
+	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+}
+
+func TestValidateAPIExposureHonorsProviderAuthOverride(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.StorageMode = storageModeAPI
+	cfg.BindAddr = "192.0.2.10"
+	mode := string(apiconfig.AuthModeToken)
+	tokenPath := "/run/secrets/api-token"
+	cfg.API.Auth.Mode = &mode
+	cfg.API.Auth.TokenFilePath = &tokenPath
+	cfg.Plugins.API.Mesh.Config["auth"] = map[string]any{
+		"mode": "disabled",
+	}
+
+	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plugins.api.mesh.config")
+	assert.Contains(t, err.Error(), "without authentication")
 }
 
 func TestValidate(t *testing.T) {

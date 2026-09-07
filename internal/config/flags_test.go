@@ -832,7 +832,7 @@ func TestPipeline_EmptyMidnightHostUsesLoopbackDefault(t *testing.T) {
 
 	cfg, err := loadConfigThroughPipeline(
 		t,
-		"storageMode: \"api\"\n",
+		"bindAddr: 127.0.0.1\nstorageMode: \"api\"\n",
 		nil,
 	)
 	if err != nil {
