@@ -438,8 +438,21 @@ func (ls *LedgerState) headerVerificationEpoch(
 	if cachedEpochErr != nil && len(ls.loadConsensusSnapshot().epochCache) > 0 {
 		summary, err := ls.HardForkSummary()
 		if err != nil {
+			// A summary that cannot be BUILT says nothing about the header:
+			// the era shape, the genesis it is derived from, or the epoch
+			// cache is unavailable, all of which are local faults. Byron
+			// genesis alone is enough to reach here, because
+			// eras.BuildShapeForEras builds Byron era params for every
+			// config while ByronGenesisFile is optional. Since
+			// ouroboros/chainsync.go routes every non-deferred header error
+			// to ConnectionRecycleRequestedEvent, returning this unwrapped
+			// recycles the honest peer that served the header and stalls
+			// catch-up at each epoch boundary. Classify it as deferred so
+			// the block stays queued for in-order re-verification instead.
 			return models.Epoch{}, fmt.Errorf(
-				"block header verification rejected: build forecast for slot %d: %w",
+				"%w: block header verification deferred: "+
+					"build forecast for slot %d: %w",
+				errHeaderVerificationDeferred,
 				blockSlot,
 				err,
 			)

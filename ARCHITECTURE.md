@@ -2661,6 +2661,14 @@ advance the issuer window.
 Cached epochs resolve without forecast configuration, but still require a
 published nonce. Before forecasting an uncached epoch for a live header,
 `headerVerificationEpoch` checks the slot against `LedgerState.HardForkSummary`.
+A summary that cannot be *built* at all is classified as deferred rather than
+rejected, separately from a slot past a horizon a built summary reports: the
+shape, the genesis behind it, and the epoch cache are all local inputs, and
+`ouroboros/chainsync.go` routes every non-deferred header error to
+`ConnectionRecycleRequestedEvent`, so reporting a local fault as a header
+rejection recycles the honest peer that served the header. `ByronGenesisFile` is
+optional while `eras.BuildShapeForEras` builds Byron era params for every
+config, so a Shelley-only config reaches that branch for every uncached slot.
 An unavailable configured shape or current era also makes future-slot protocol
 parameters unavailable, as do a missing scheduled successor, a failed hard fork,
 or a failed pending-parameter update. The forger and genesis-overlay validation
