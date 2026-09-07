@@ -55,11 +55,15 @@ type stateMetrics struct {
 	leiosEbWaitTimedOut    prometheus.Observer
 	leiosEbWaitCancelled   prometheus.Observer
 	leiosEbWaitUnavailable prometheus.Observer
-	// Waits that ran to the full diffusion window without the endorser block
-	// arriving. A rising value against a flat leios_eb_wait_seconds "arrived"
-	// count means the wait is buying nothing and is pure apply latency.
-	// Cancellations are deliberately excluded: they say nothing about
-	// endorser-block availability.
+	// Waits that ran to a full bound without the endorser block arriving --
+	// the diffusion window, or the CIP grace phase's hard bound. A rising
+	// value against a flat leios_eb_wait_seconds "arrived" count means the
+	// wait is buying nothing and is pure apply latency.
+	//
+	// Two outcomes are deliberately excluded because neither is a bound
+	// expiring: "cancelled" says nothing about endorser-block availability,
+	// and "unavailable" means the fetch COMPLETED without caching, which is
+	// routine on a CIP node and would swamp the counter.
 	leiosEbWaitTimeouts prometheus.Counter
 	// Incremented when a stored governance proposal's CBOR fails to
 	// decode during the mid-epoch ratifiability check, so the failures
@@ -428,10 +432,14 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.HistogramOpts{
 			Name: "dingo_metrics_leios_eb_wait_seconds",
 			Help: "wall-clock time the ledger apply path spent waiting for a referenced Leios endorser block, across both the diffusion window and the CIP in-flight-fetch grace phase, by outcome (arrived, timeout, cancelled, unavailable)",
-			// 5ms to ~82s: the wait is bounded by the certify-by deadline
-			// converted to wall clock, so the useful range spans sub-slot
-			// arrivals up to several stacked protocol windows.
-			Buckets: prometheus.ExponentialBuckets(0.005, 2, 15),
+			// 5ms to ~164s. The lower end covers sub-slot arrivals; the
+			// upper end must clear the LONGEST wait this histogram now
+			// records, the CIP grace phase's leiosTipFetchHardBound
+			// (leiosBackfillMaxWait, 120s). At 15 buckets the top edge was
+			// ~82s, so every wedged-fetch wait -- the most anomalous ones,
+			// and the reason the grace phase is instrumented at all --
+			// collapsed into +Inf with no resolution.
+			Buckets: prometheus.ExponentialBuckets(0.005, 2, 16),
 		},
 		[]string{"outcome"},
 	)
@@ -450,7 +458,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.leiosEbWaitTimeouts = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_metrics_leios_eb_wait_timeouts_total",
-			Help: "ledger apply-path waits for a referenced Leios endorser block that ran to the full diffusion window without it arriving",
+			Help: "ledger apply-path waits for a referenced Leios endorser block that ran to a full bound without it arriving: the diffusion window, or the CIP in-flight-fetch grace phase hard bound",
 		},
 	)
 	m.governanceProposalDecodeFailures = promautoFactory.NewCounter(
