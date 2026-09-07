@@ -101,9 +101,25 @@ RETURNING id`,
 				err,
 			)
 		}
+		// An absent key means the deposit is unknown, not zero: the
+		// producers omit an index whose deposit could not be computed
+		// (ledger.calculateCertificateDeposit and
+		// backfill.calculateCertDeposits both do). Defaulting it to zero
+		// records an authoritative zero, and a later legacy deregistration
+		// is then refunded zero by
+		// UtxoValidateValueNotConservedUtxo instead of falling back to the
+		// current KeyDeposit, failing value conservation on a valid
+		// transaction. Pass nil through so the column is stored NULL. A
+		// recorded zero stays a non-nil zero.
 		var deposit *uint64
 		if value, found := deposits[certIndex]; found {
 			deposit = &value
+		}
+		if certificateRequiresDeposit(certificate) && deposits == nil {
+			return nil, fmt.Errorf(
+				"missing certDeposits for deposit-bearing certificate at index %d",
+				certIndex,
+			)
 		}
 		specializedID, ref, err := s.applySpecializedCertificate(
 			ctx,
@@ -201,13 +217,19 @@ WHERE mir_id IN (
 	return nil
 }
 
-// nullableDecimalUint64 preserves unknown deposits as SQL NULL while keeping
-// an authoritative zero deposit distinct from an unknown value.
-func nullableDecimalUint64(value *uint64) any {
-	if value == nil {
-		return nil
+func certificateRequiresDeposit(certificate lcommon.Certificate) bool {
+	switch certificate.(type) {
+	case *lcommon.PoolRegistrationCertificate,
+		*lcommon.RegistrationCertificate,
+		*lcommon.RegistrationDrepCertificate,
+		*lcommon.StakeRegistrationCertificate,
+		*lcommon.StakeRegistrationDelegationCertificate,
+		*lcommon.StakeVoteRegistrationDelegationCertificate,
+		*lcommon.VoteRegistrationDelegationCertificate:
+		return true
+	default:
+		return false
 	}
-	return decimalUint64(types.Uint64(*value))
 }
 
 func certificateType(certificate lcommon.Certificate) (uint, error) {
@@ -315,8 +337,8 @@ RETURNING id`,
 		)
 		return id, nil, err
 	case *lcommon.DeregistrationDrepCertificate:
-		// The refund is carried by the certificate, so this deposit is always
-		// known and never uses the nullable legacy fallback.
+		// A DRep deregistration carries its refund in the certificate
+		// itself, so this amount is always known and never NULL.
 		amount := uint64(cert.Amount)
 		id, err := applyDrepDeregistrationCertificate(
 			ctx,
@@ -411,6 +433,19 @@ RETURNING id`,
 		slot,
 		deposit,
 	)
+}
+
+// nullableDecimalUint64 renders a deposit for a TEXT column that must
+// distinguish an unknown deposit from a recorded zero. A nil pointer binds as
+// a nil interface, which the driver writes as SQL NULL; a non-nil zero binds
+// as "0". This mirrors the account_import_baseline.deposit_amount binding,
+// whose migration states the rule: substituting today's protocol parameter for
+// a value the ingest never knew would invent history.
+func nullableDecimalUint64(value *uint64) any {
+	if value == nil {
+		return nil
+	}
+	return decimalUint64(types.Uint64(*value))
 }
 
 func applyAccountCertificate(
@@ -1024,10 +1059,25 @@ RETURNING id`,
 	if err != nil {
 		return 0, err
 	}
-	for credential, amount := range cert.Reward.Rewards {
+	// A MIR reward is delta_coin, so the amount column carries its own sign
+	// and the delta is persisted as written. Whether a negative delta is
+	// permitted, and whether the deltas for one credential net to a
+	// creditable amount, are decided by the DELEG and INSTANT rules, not
+	// here. RewardsAmount projects the reward map to *big.Int on every
+	// gouroboros release, so the sign survives regardless of the width of
+	// the underlying field.
+	for credential, amount := range cert.Reward.RewardsAmount() {
 		tag, err := models.CredentialTagFromUint(credential.CredType)
 		if err != nil {
 			return 0, err
+		}
+		delta, err := signedDecimal("MIR reward delta", amount)
+		if err != nil {
+			return 0, fmt.Errorf(
+				"%w for credential %x",
+				err,
+				credential.Credential[:],
+			)
 		}
 		if _, err := db.ExecContext(ctx, `
 INSERT INTO move_instantaneous_rewards_reward (
@@ -1035,7 +1085,7 @@ INSERT INTO move_instantaneous_rewards_reward (
 ) VALUES (?, ?, ?, ?)`,
 			credential.Credential[:],
 			tag,
-			decimalUint64(types.Uint64(amount)),
+			delta,
 			id,
 		); err != nil {
 			return 0, err
