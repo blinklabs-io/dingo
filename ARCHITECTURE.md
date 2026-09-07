@@ -5438,12 +5438,13 @@ The forger tracks slot battles (competing blocks at the same slot) and skips for
 
 The forger additionally refuses to forge when the node's own two views of its
 chain disagree. Block production reads both: the builder takes the forged
-block's parent from the primary chain tip (the header frontier), while
+block's parent from the primary chain tip -- `chain.Tip()`, the newest
+block added to the chain, NOT the header frontier `chain.HeaderTip()` -- while
 transaction selection and validation, protocol parameters, the epoch nonce and
 leader eligibility all come from the ledger, which is at the applied tip. While
-the ledger pipeline works through admitted blocks it has not applied yet, the
-frontier runs ahead, and forging then signs a block whose contents were chosen
-against an older chain position than its parent.
+the ledger pipeline works through blocks it has added to the chain but not yet
+applied, the primary chain tip runs ahead, and forging then signs a block whose
+contents were chosen against an older chain position than its parent.
 
 `forgeHeaderFrontierToleranceSlots` (default 5, flag
 `--forge-header-frontier-tolerance-slots`, env
@@ -5455,7 +5456,7 @@ because the ledger pipeline commits in batches, so a slot or two of gap is the
 normal steady state at the head of a fast chain. The gate also compares tip
 identity, not just position: an equal-slot fork the ledger has not applied has
 a gap of zero but still means the two views describe different blocks. Skips
-are logged at `WARN` (`forge skip: ledger tip stale vs header frontier`) and
+are logged at `WARN` (`forge skip: ledger tip stale vs primary chain tip`) and
 counted by `dingo_forge_stale_tip_skip_total`. The ledger-apply backlog itself
 is reported on every leader check by `dingo_forge_tip_gap_slots`. Raising the
 tolerance lets the node forge blocks whose contents were chosen against an
@@ -5470,15 +5471,31 @@ against `newestKnown` -- the most recent block this node has any evidence of,
 whether applied, admitted as a header, or corroborated as a Leios endorser
 block:
 
-- `forgeUpstreamStalenessSlots` (default 5, flag
+- `forgeUpstreamStalenessSlots` (**default 0 = disabled**, flag
   `--forge-upstream-staleness-slots`, env
   `CARDANO_DINGO_FORGE_UPSTREAM_STALENESS_SLOTS`) bounds how far `newestKnown`
-  may trail the corroborated upstream sync target. When chain selection has
-  not published a target -- routine between batches and after an
-  active-connection handoff -- it falls back to the frontier of headers this
-  node itself admitted, which is authenticated rather than claimed. Measured
-  against the network rather than the wall clock on purpose: "how far behind
-  the network am I" is ~0 on a quiet chain however long blocks take.
+  may trail the corroborated upstream sync target. Measured against the network
+  rather than the wall clock on purpose: "how far behind the network am I" is
+  ~0 on a quiet chain however long blocks take.
+
+  It is opt-in because the two sides are not sampled at the same pipeline
+  stage. `newestKnown` counts BLOCKS this node holds, while the upstream target
+  is published when a HEADER is admitted (`recordAdmittedHeaderFrontier`
+  advances the admitted frontier and publishes the target together). From a
+  header's admission at slot S until its body is fetched and applied, the
+  target reads S while `newestKnown` is still the previous block's slot -- a
+  difference equal to the inter-block gap, which is ordinary operation rather
+  than staleness. A small always-on bound therefore refuses leader slots
+  routinely: for exponentially distributed gaps with a 20-slot mean, a bound of
+  5 fires for roughly 78% of blocks. Set it well above the expected gap for the
+  network, or leave it off until the admitted header frontier is folded into
+  `newestKnown`.
+
+  There is deliberately no fallback for a live upstream that has not published
+  a target. `UpstreamSyncStatus` reports that state as `(0, true)`, and the
+  pre-existing sync gate already refuses the slot on
+  `upstreamActive && upstreamTip == 0`, so it never reaches this gate.
+  `TestUpstreamSyncStatusReachableStates` pins the reachable pairs.
 - `forgeAppliedTipStalenessSlots` (default 0 = disabled, flag
   `--forge-applied-tip-staleness-slots`, env
   `CARDANO_DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS`) is a wall-clock backstop
@@ -5492,11 +5509,11 @@ each from a different pair of inputs:
 
 | `reason` | Meaning | Inputs |
 | --- | --- | --- |
-| `slot_gap` | The applied tip trails the header frontier by more than `forgeHeaderFrontierToleranceSlots`. | applied tip slot, frontier slot |
-| `frontier_hash_diverged` | Frontier and applied tip are at the same slot but name different blocks -- an equal-slot fork the ledger has not applied. | applied tip hash, frontier hash |
-| `frontier_behind_applied` | The frontier is at a lower slot than the applied tip, so the builder's parent is a block the ledger has already built past. | applied tip slot, frontier slot |
-| `eb_manifest_ahead` | The headers alone looked fine; only a corroborated Leios endorser block pushed the gap over the tolerance, proving a ranking block exists at a slot whose header this node has not admitted. | applied tip slot, frontier slot, highest corroborated endorser-block slot |
-| `applied_tip_stale` | The local tips agree, but `newestKnown` is too old: it trails the corroborated upstream target (or the admitted-header frontier) by more than `forgeUpstreamStalenessSlots`, or trails the current slot by more than a configured `forgeAppliedTipStalenessSlots`. | `newestKnown`, upstream sync target or admitted-header frontier, current slot |
+| `slot_gap` | The applied tip trails the primary chain tip by more than `forgeHeaderFrontierToleranceSlots`. | applied tip slot, primary chain tip slot |
+| `primary_tip_hash_diverged` | Primary chain tip and applied tip are at the same slot but name different blocks -- an equal-slot fork the ledger has not applied. | applied tip hash, primary chain tip hash |
+| `primary_tip_behind_applied` | The primary chain tip is at a lower slot than the applied tip, so the builder's parent is a block the ledger has already built past. | applied tip slot, primary chain tip slot |
+| `eb_manifest_ahead` | The local tips alone looked fine; only a corroborated Leios endorser block pushed the gap over the tolerance, proving a ranking block exists at a slot whose header this node has not admitted. | applied tip slot, primary chain tip slot, highest corroborated endorser-block slot |
+| `applied_tip_stale` | The local tips agree, but `newestKnown` is too old. **Both sources are opt-in and off by default**, so this series stays at 0 unless an operator sets a bound: trailing the upstream target by more than `forgeUpstreamStalenessSlots`, or trailing the current slot by more than `forgeAppliedTipStalenessSlots`. | `newestKnown`, upstream sync target, current slot |
 
 Every reason except `applied_tip_stale` means the ledger pipeline, not the
 network, was the thing behind; `applied_tip_stale` means this node was behind

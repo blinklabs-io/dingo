@@ -48,28 +48,30 @@ type forgingMetrics struct {
 	// each from a different pair of inputs:
 	//
 	//   - "slot_gap": the ledger-applied tip trails this node's header
-	//     frontier by more than ForgeHeaderFrontierToleranceSlots. Inputs:
-	//     applied tip slot, frontier slot.
-	//   - "frontier_hash_diverged": frontier and applied tip sit at the SAME
+	//     primary chain tip by more than ForgeHeaderFrontierToleranceSlots.
+	//     Inputs: applied tip slot, primary tip slot.
+	//   - "primary_tip_hash_diverged": primary chain tip and applied tip sit at the SAME
 	//     slot but name different blocks -- an equal-slot fork the ledger has
-	//     not applied. Inputs: applied tip hash, frontier hash.
-	//   - "frontier_behind_applied": the frontier is at a LOWER slot than the
+	//     not applied. Inputs: applied tip hash, primary chain tip hash.
+	//   - "primary_tip_behind_applied": the primary chain tip is at a LOWER slot than the
 	//     applied tip, so the parent the builder would use is one the ledger
-	//     has already built past. Inputs: applied tip slot, frontier slot.
+	//     has already built past. Inputs: applied tip slot, primary tip slot.
 	//   - "eb_manifest_ahead": the headers alone looked fine, and only a
 	//     corroborated Leios endorser block pushed the gap over the
 	//     tolerance -- proof a ranking block exists at a slot whose header
-	//     this node has not admitted. Inputs: applied tip slot, frontier
+	//     this node has not admitted. Inputs: applied tip slot, primary tip
 	//     slot, highest corroborated endorser-block slot.
 	//   - "applied_tip_stale": the newest block this node holds by ANY
-	//     evidence is too old, with the local tips in agreement. Two
-	//     independent sources: trailing the corroborated upstream target (or,
-	//     when no sync target is published, the admitted-header frontier) by
-	//     more than ForgeUpstreamStalenessSlots, or -- only when an operator
-	//     sets ForgeAppliedTipStalenessSlots -- trailing the current
-	//     wall-clock slot by more than that bound. This is the reason that
-	//     fires when header admission and ledger application stall TOGETHER,
-	//     which is exactly when every gap above reads 0.
+	//     evidence is too old, with the local tips in agreement. BOTH of its
+	//     sources are opt-in and off by default, so this series stays at 0
+	//     unless an operator sets a bound: trailing the corroborated upstream
+	//     target by more than ForgeUpstreamStalenessSlots, or trailing the
+	//     current wall-clock slot by more than ForgeAppliedTipStalenessSlots.
+	//     It is the only reason that fires when header admission and ledger
+	//     application stall TOGETHER, which is exactly when every gap above
+	//     reads 0 -- but note the upstream bound compares a BLOCK this node
+	//     holds against a target published at HEADER admission, so it must be
+	//     set well above the expected inter-block gap.
 	//
 	// Counted only on slots this node was actually elected to forge, so the
 	// value is lost blocks rather than leader checks. Any increment except
@@ -226,7 +228,7 @@ func initForgingMetrics(
 	m.forgeStaleTipSkip = factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "dingo_forge_stale_tip_skip_total",
-			Help: "forging attempts skipped because this node's ledger-applied tip, its own header frontier and its corroborated endorser-block evidence did not describe the same chain position, or because the newest block it holds was stale; by reason (slot_gap, frontier_hash_diverged, frontier_behind_applied, eb_manifest_ahead, applied_tip_stale)",
+			Help: "forging attempts skipped because this node's ledger-applied tip, its own primary chain tip and its corroborated endorser-block evidence did not describe the same chain position, or because the newest block it holds was stale; by reason (slot_gap, primary_tip_hash_diverged, primary_tip_behind_applied, eb_manifest_ahead, applied_tip_stale)",
 		},
 		[]string{"reason"},
 	)
@@ -248,7 +250,7 @@ func initForgingMetrics(
 	m.tipGapSlots = factory.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "dingo_forge_tip_gap_slots",
-			Help: "ledger-apply backlog in slots at the last leader check (header frontier minus ledger-applied tip)",
+			Help: "ledger-apply backlog in slots at the last leader check (primary chain tip minus ledger-applied tip)",
 		},
 	)
 	m.forgeValidationDuration = factory.NewHistogram(

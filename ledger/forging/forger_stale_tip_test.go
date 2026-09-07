@@ -94,7 +94,7 @@ func TestForgeSkipsWhenLedgerTipTrailsHeaderFrontier(t *testing.T) {
 	require.Contains(
 		t,
 		logs.String(),
-		"forge skip: ledger tip stale vs header frontier",
+		"forge skip: ledger tip stale vs primary chain tip",
 	)
 	require.Contains(t, logs.String(), `"level":"WARN"`)
 }
@@ -128,7 +128,7 @@ func TestForgeProceedsWithinHeaderFrontierTolerance(t *testing.T) {
 	require.NotContains(
 		t,
 		logs.String(),
-		"forge skip: ledger tip stale vs header frontier",
+		"forge skip: ledger tip stale vs primary chain tip",
 	)
 }
 
@@ -270,9 +270,9 @@ func TestForgeSkipsOnEqualSlotFrontierDivergence(t *testing.T) {
 	require.Contains(
 		t,
 		logs.String(),
-		"forge skip: ledger tip stale vs header frontier",
+		"forge skip: ledger tip stale vs primary chain tip",
 	)
-	require.Contains(t, logs.String(), `"reason":"frontier_hash_diverged"`)
+	require.Contains(t, logs.String(), `"reason":"primary_tip_hash_diverged"`)
 	require.Contains(t, logs.String(), `"level":"WARN"`)
 	// The gauge is a slot gap and there is none; the divergence shows on the
 	// counter, not here.
@@ -302,7 +302,7 @@ func TestForgeProceedsWhenFrontierMatchesAppliedTip(t *testing.T) {
 	require.NotContains(
 		t,
 		logs.String(),
-		"forge skip: ledger tip stale vs header frontier",
+		"forge skip: ledger tip stale vs primary chain tip",
 	)
 }
 
@@ -453,7 +453,7 @@ func TestForgeSkipsWhenFrontierAlreadyHasTheCurrentSlot(t *testing.T) {
 	require.Contains(
 		t,
 		logs.String(),
-		"forge skip: header frontier already has a block at this slot",
+		"forge skip: primary chain tip already has a block at this slot",
 	)
 	// Warned, not Debug: this gate runs before leader selection, so a slot
 	// this node was scheduled to lead would otherwise vanish silently.
@@ -548,7 +548,7 @@ func TestForgeStaleTipSkipCountsLostBlocksNotLeaderChecks(t *testing.T) {
 		require.NotContains(
 			t,
 			logs.String(),
-			"forge skip: ledger tip stale vs header frontier",
+			"forge skip: ledger tip stale vs primary chain tip",
 		)
 		// The backlog is still reported on every leader check.
 		require.Equal(
@@ -582,7 +582,7 @@ func TestForgeStaleTipSkipCountsLostBlocksNotLeaderChecks(t *testing.T) {
 		require.Contains(
 			t,
 			logs.String(),
-			"forge skip: ledger tip stale vs header frontier",
+			"forge skip: ledger tip stale vs primary chain tip",
 		)
 	})
 }
@@ -619,7 +619,7 @@ func TestForgeSkipsWhenFrontierIsBehindTheAppliedTip(t *testing.T) {
 		t,
 		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipSlotGap),
 	)
-	require.Contains(t, logs.String(), `"reason":"frontier_behind_applied"`)
+	require.Contains(t, logs.String(), `"reason":"primary_tip_behind_applied"`)
 	require.Contains(t, logs.String(), `"level":"WARN"`)
 }
 
@@ -648,11 +648,18 @@ func TestForgeProceedsWhenFrontierIsUninitialised(t *testing.T) {
 
 // newStalenessTestForger builds a production forger with the upstream target
 // and the corroborated endorser-block slot made explicit.
+// newStalenessTestForger builds a production forger for the staleness gates.
+//
+// upstreamStalenessSlots is explicit and every caller that exercises the
+// upstream bound must pass a non-zero value: the bound is opt-in, so a helper
+// that defaulted it would hide the very regression
+// TestForgeUpstreamStalenessIsOffByDefault exists to catch.
 func newStalenessTestForger(
 	t *testing.T,
 	currentSlot, chainTipSlot, frontierSlot, upstreamSlot uint64,
 	ebSlot uint64,
 	appliedStalenessSlots uint64,
+	upstreamStalenessSlots uint64,
 	logs *bytes.Buffer,
 ) (*BlockForger, *forgerTestBuilder) {
 	t.Helper()
@@ -677,6 +684,7 @@ func newStalenessTestForger(
 		},
 		LeiosVerifiedEbSlot:           func() uint64 { return ebSlot },
 		ForgeAppliedTipStalenessSlots: appliedStalenessSlots,
+		ForgeUpstreamStalenessSlots:   upstreamStalenessSlots,
 		PromRegistry:                  prometheus.NewRegistry(),
 	})
 	require.NoError(t, err)
@@ -691,13 +699,20 @@ func newStalenessTestForger(
 //
 // Measured against the corroborated upstream target rather than the wall clock,
 // so it stays meaningful on a chain of any block rate.
+//
+// The bound is opt-in, so this test sets it explicitly. It cannot by itself
+// distinguish "the network is 19 slots ahead" from "the block 19 slots after
+// mine was just admitted and its body is still in flight" -- the upstream
+// target is published at header admission while newestKnown counts blocks --
+// which is precisely why the bound is not defaulted on. See
+// TestForgeUpstreamStalenessIsOffByDefault.
 func TestForgeSkipsWhenNewestKnownBlockTrailsUpstream(t *testing.T) {
 	var logs bytes.Buffer
-	// Frontier == applied tip, so the frontier gap is 0, but the network is
-	// 19 slots ahead -- the shape observed in the field. Slot numbers are
-	// scaled down so the KES period stays inside the test operational certificate.
+	// Primary chain tip == applied tip, so the gap is 0, but the network is
+	// 19 slots ahead. Slot numbers are scaled down so the KES period stays
+	// inside the test operational certificate.
 	forger, builder := newStalenessTestForger(
-		t, 300, 299, 299, 318, 0, 0, &logs,
+		t, 300, 299, 299, 318, 0, 0, 5, &logs,
 	)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
@@ -725,7 +740,7 @@ func TestForgeSkipsWhenNewestKnownBlockTrailsUpstream(t *testing.T) {
 func TestForgeProceedsOnAQuietChain(t *testing.T) {
 	var logs bytes.Buffer
 	forger, builder := newStalenessTestForger(
-		t, 600, 100, 100, 100, 0, 0, &logs,
+		t, 600, 100, 100, 100, 0, 0, 5, &logs,
 	)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
@@ -746,7 +761,7 @@ func TestForgeAppliedTipStalenessKnobIsOptIn(t *testing.T) {
 	t.Run("off by default", func(t *testing.T) {
 		var logs bytes.Buffer
 		forger, builder := newStalenessTestForger(
-			t, 600, 100, 100, 0, 0, 0, &logs,
+			t, 600, 100, 100, 0, 0, 0, 0, &logs,
 		)
 		require.NoError(
 			t,
@@ -758,7 +773,7 @@ func TestForgeAppliedTipStalenessKnobIsOptIn(t *testing.T) {
 	t.Run("refuses once set", func(t *testing.T) {
 		var logs bytes.Buffer
 		forger, builder := newStalenessTestForger(
-			t, 600, 100, 100, 0, 0, 100, &logs,
+			t, 600, 100, 100, 0, 0, 100, 0, &logs,
 		)
 		require.NoError(
 			t,
@@ -783,7 +798,7 @@ func TestForgeAppliedTipStalenessKnobIsOptIn(t *testing.T) {
 func TestForgeSkipsWhenCorroboratedEndorserBlockIsAhead(t *testing.T) {
 	var logs bytes.Buffer
 	forger, builder := newStalenessTestForger(
-		t, 320, 300, 300, 0, 313, 0, &logs,
+		t, 320, 300, 300, 0, 313, 0, 0, &logs,
 	)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
@@ -805,7 +820,7 @@ func TestForgeSkipsWhenCorroboratedEndorserBlockIsAhead(t *testing.T) {
 func TestForgeIgnoresEndorserBlockSlotBeyondTheCurrentSlot(t *testing.T) {
 	var logs bytes.Buffer
 	forger, builder := newStalenessTestForger(
-		t, 310, 309, 309, 0, 400, 0, &logs,
+		t, 310, 309, 309, 0, 400, 0, 0, &logs,
 	)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
@@ -818,81 +833,55 @@ func TestForgeIgnoresEndorserBlockSlotBeyondTheCurrentSlot(t *testing.T) {
 	require.Contains(t, logs.String(), `"eb_slot":0`)
 }
 
-// TestForgeStalenessFallsBackToAdmittedHeaders is the production shape that
-// made the staleness term inert. The advertised sync target is published only
-// when chain selection resolved one; routinely -- between batches, and right
-// after an active-connection handoff -- it is 0 while a healthy peer is
-// connected. Field logs showed upstream_target_slot=0 on every refusal and on
-// a ghosted forge, so the term never fired at all.
-//
-// The admitted-header frontier is available whenever headers are flowing and
-// is authenticated by this node rather than claimed by a peer, so it is the
-// right fallback reference.
-func TestForgeStalenessFallsBackToAdmittedHeaders(t *testing.T) {
-	var logs bytes.Buffer
-	block := newForgerTestBlock(300, 2)
-	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
-	forger, err := NewBlockForger(ForgerConfig{
-		Mode: ModeProduction,
-		Logger: slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{
-			Level: slog.LevelDebug,
-		})),
-		Credentials:      setupTestCredentials(t),
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     builder,
-		BlockBroadcaster: &forgerTestBroadcaster{},
-		SlotClock: forgerTestSlotClock{
-			currentSlot:      300,
-			chainTipSlot:     299,
-			frontierExplicit: true,
-			frontierSlot:     299,
-			// No advertised target and no live-upstream signal -- the
-			// shape seen in the field, where UpstreamSyncStatus reported
-			// (0, false) while a healthy peer was connected.
-			upstreamTipSlot: 0,
-			upstreamActive:  false,
-			// Headers are flowing, and we are 19 slots behind them.
-			admittedTipSlot:   318,
-			slotsPerKESPeriod: 100,
-		},
-		PromRegistry: prometheus.NewRegistry(),
-	})
-	require.NoError(t, err)
-
-	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
-
-	require.Zero(
-		t,
-		builder.calls,
-		"the admitted-header frontier must serve as the staleness reference "+
-			"when no sync target has been published",
-	)
-	require.Equal(
-		t,
-		float64(1),
-		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipAppliedStale),
-	)
-	require.Contains(t, logs.String(), `"staleness_ref_slot":318`)
-	require.Contains(
-		t,
-		logs.String(),
-		`"staleness_ref_source":"admitted_headers"`,
-	)
-}
-
-// TestForgeStalenessReportsWhenNoReferenceIsAvailable pins that a forge with
-// no staleness reference at all says so, rather than silently proceeding as if
-// the check had passed. Without this an operator cannot tell "we are in sync"
-// from "we have no idea".
-func TestForgeStalenessReportsWhenNoReferenceIsAvailable(t *testing.T) {
+// TestForgeStalenessDoesNotBlockWithoutAReference pins that a forge with no
+// upstream reference proceeds rather than being refused. A node with no
+// published target must not be prevented from forging by a bound that has
+// nothing to measure against.
+func TestForgeStalenessDoesNotBlockWithoutAReference(t *testing.T) {
 	var logs bytes.Buffer
 	forger, builder := newStalenessTestForger(
-		t, 300, 299, 299, 0, 0, 0, &logs,
+		t, 300, 299, 299, 0, 0, 0, 5, &logs,
 	)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 
 	require.Equal(t, 1, builder.calls, "no reference must not block forging")
 	require.Contains(t, logs.String(), `"msg":"forge context"`)
-	require.Contains(t, logs.String(), `"staleness_ref_source":"none"`)
+}
+
+// TestForgeUpstreamStalenessIsOffByDefault is the regression guard for a
+// default-on bound that forfeited leader slots during ordinary operation.
+//
+// newestKnown counts BLOCKS this node holds; the upstream target is published
+// when a HEADER is admitted (recordAdmittedHeaderFrontier advances both the
+// admitted frontier and the published target). Between a header's admission at
+// slot S and its body being applied, the target reads S while newestKnown is
+// still the previous block's slot -- a difference equal to the inter-block gap,
+// which is normal operation, not staleness.
+//
+// With the bound defaulted to 5 every gap above 5 slots refused the leader
+// slot: for exponentially distributed gaps with a 20-slot mean that is roughly
+// 78% of blocks, on every network. So the default is 0 (disabled), and this
+// test pins that a forger built without the knob forges in exactly that shape.
+func TestForgeUpstreamStalenessIsOffByDefault(t *testing.T) {
+	var logs bytes.Buffer
+	// The ordinary header-ahead-of-body window: a header at 318 has been
+	// admitted and published as the target, our newest BLOCK is still 299.
+	forger, builder := newStalenessTestForger(
+		t, 300, 299, 299, 318, 0, 0, 0, &logs,
+	)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Equal(
+		t,
+		1,
+		builder.calls,
+		"a header admitted ahead of its body is normal operation; with no "+
+			"bound configured it must not cost the leader slot",
+	)
+	require.Zero(
+		t,
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipAppliedStale),
+	)
 }

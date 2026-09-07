@@ -921,7 +921,10 @@ func (a *slotClockAdapter) ChainTipHash() []byte {
 
 var _ forging.ChainTipHashProvider = (*slotClockAdapter)(nil)
 
-// PrimaryChainTip returns this node's header frontier. The primary chain
+// PrimaryChainTip returns the primary chain's BLOCK tip -- chain.Tip(), the
+// newest block added to the chain, which runs ahead of the ledger-applied tip
+// while the pipeline replays. It is NOT the header frontier: that is
+// chain.HeaderTip(), and nothing in the forge gate reads it. The primary chain
 // returns its tip under one lock, so the returned slot and hash are always
 // from the same tip.
 func (a *slotClockAdapter) PrimaryChainTip() ocommon.Point {
@@ -934,10 +937,6 @@ func (a *slotClockAdapter) NextSlotTime() (time.Time, error) {
 
 func (a *slotClockAdapter) UpstreamTipSlot() uint64 {
 	return a.ledgerState.UpstreamTipSlot()
-}
-
-func (a *slotClockAdapter) UpstreamAdmittedTipSlot() uint64 {
-	return a.ledgerState.UpstreamAdmittedTipSlot()
 }
 
 func (a *slotClockAdapter) UpstreamSyncStatus() (uint64, bool) {

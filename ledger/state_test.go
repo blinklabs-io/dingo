@@ -5486,47 +5486,52 @@ func TestWarnOnPreByronPrefixEpochCache(t *testing.T) {
 	})
 }
 
-// TestUpstreamAdmittedTipSlotIsAvailableWithoutAPublishedTarget pins the
-// distinction that made the forge staleness check inert in the field.
+// TestUpstreamSyncStatusReachableStates pins every (target, active) pair the
+// real LedgerState can return from UpstreamSyncStatus, which is the value the
+// forge staleness gate reads.
 //
-// The advertised sync target is published only when chain selection resolved
-// one, so it reads 0 routinely -- between batches and across an
-// active-connection handoff -- while a healthy peer is connected and headers
-// are flowing. The admitted-header frontier is advanced by header admission
-// itself, so it is available in exactly those windows, and it reports what this
-// node authenticated rather than what a peer claimed.
-func TestUpstreamAdmittedTipSlotIsAvailableWithoutAPublishedTarget(
-	t *testing.T,
-) {
+// It exists because a gate was written against a state this type cannot
+// produce. An earlier revision fell back to the admitted-header frontier when
+// UpstreamSyncStatus returned a zero target, on the belief that a live upstream
+// with no published target reported (0, false). It reports (0, true) -- and the
+// pre-existing sync gate already refuses that slot -- so the fallback was
+// unreachable in production. It passed review only because a test double could
+// express (0, false) alongside a non-zero admitted frontier, which is the one
+// combination the adapter cannot produce.
+//
+// Assert the adapter's own outputs, not a double's: a double is only evidence
+// about the double.
+func TestUpstreamSyncStatusReachableStates(t *testing.T) {
 	conn := testChainsyncConnId(6000, 3094)
 	activeConn := conn
+	live := true
 	ls := &LedgerState{
 		config: LedgerStateConfig{
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				if !live {
+					return nil
+				}
 				return &activeConn
 			},
 		},
 	}
 
-	assert.Zero(t, ls.UpstreamAdmittedTipSlot())
-
-	// Header admission advances it, with no sync target published at all.
+	// Live upstream, no target published -- the state the removed fallback
+	// was written for. It is (0, TRUE), not (0, false).
 	ls.advanceUpstreamTipSlot(318)
-	assert.Equal(t, uint64(318), ls.UpstreamAdmittedTipSlot())
-	assert.Zero(
+	target, active := ls.UpstreamSyncStatus()
+	assert.Zero(t, target)
+	assert.True(
 		t,
-		ls.UpstreamTipSlot(),
-		"no target was published, which is exactly the field condition",
+		active,
+		"a live upstream with no published target is (0, true); the "+
+			"pre-existing sync gate refuses this slot before the stale-tip "+
+			"gate runs, so no stale-tip branch may be written for it",
 	)
 
-	// Monotonic: an older admission does not move it back.
-	ls.advanceUpstreamTipSlot(300)
-	assert.Equal(t, uint64(318), ls.UpstreamAdmittedTipSlot())
-
-	// Bound to a live upstream: with no active connection there is no
-	// reference to report.
-	ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
-		return nil
-	}
-	assert.Zero(t, ls.UpstreamAdmittedTipSlot())
+	// No live upstream -- (0, false).
+	live = false
+	target, active = ls.UpstreamSyncStatus()
+	assert.Zero(t, target)
+	assert.False(t, active)
 }

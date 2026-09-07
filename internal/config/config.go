@@ -97,12 +97,12 @@ const (
 	// to describe the same chain position, unlike ForgeSyncToleranceSlots
 	// which tolerates trailing the network while catching up.
 	DefaultForgeHeaderFrontierToleranceSlots = 5
-	// DefaultForgeUpstreamStalenessSlots bounds how far the newest block this
-	// node holds may trail the corroborated upstream target before forging is
-	// refused. It catches the case the frontier tolerance cannot see: header
-	// admission and ledger application stalling together, where the two local
-	// tips agree and the gap reads 0 while the node is far behind the network.
-	DefaultForgeUpstreamStalenessSlots = 5
+	// DefaultForgeUpstreamStalenessSlots is 0, which disables the upstream
+	// staleness bound. It is opt-in because the newest block this node holds
+	// is a BLOCK while the upstream target is published at HEADER admission,
+	// so the two legitimately differ by the inter-block gap and a small
+	// always-on bound refuses leader slots during ordinary operation.
+	DefaultForgeUpstreamStalenessSlots = 0
 	// DefaultForgeAppliedTipStalenessSlots is 0, which disables the wall-clock
 	// staleness backstop. It is off by default because "how old is my newest
 	// block" tracks the block interval, so any fixed bound refuses constantly
@@ -737,9 +737,12 @@ type Config struct {
 	ForgeHeaderFrontierToleranceSlots uint64 `yaml:"forgeHeaderFrontierToleranceSlots" envconfig:"DINGO_FORGE_HEADER_FRONTIER_TOLERANCE_SLOTS"`
 	// ForgeUpstreamStalenessSlots bounds how far the newest block this node
 	// holds may trail the corroborated upstream sync target before forging is
-	// skipped. Unlike ForgeHeaderFrontierToleranceSlots this stays meaningful
-	// when header admission and ledger application stall together, which is
-	// exactly when the frontier gap reads 0 on a node that is far behind.
+	// skipped. 0 (the default) disables it.
+	//
+	// Opt-in because the comparison is not like-for-like: the newest block
+	// this node holds is a BLOCK, while the upstream target is published when
+	// a HEADER is admitted, so the two differ by the inter-block gap during
+	// ordinary operation. Set it well above the expected gap for the network.
 	ForgeUpstreamStalenessSlots uint64 `yaml:"forgeUpstreamStalenessSlots" envconfig:"DINGO_FORGE_UPSTREAM_STALENESS_SLOTS"`
 	// ForgeAppliedTipStalenessSlots bounds how many slots older than the
 	// current slot the newest block this node holds may be before forging is
@@ -1550,12 +1553,9 @@ func (c *Config) ApplyDefaults() {
 	if c.ForgeHeaderFrontierToleranceSlots == 0 {
 		c.ForgeHeaderFrontierToleranceSlots = DefaultForgeHeaderFrontierToleranceSlots
 	}
-	if c.ForgeUpstreamStalenessSlots == 0 {
-		c.ForgeUpstreamStalenessSlots = DefaultForgeUpstreamStalenessSlots
-	}
-	// ForgeAppliedTipStalenessSlots is deliberately absent here: 0 is the
-	// "disabled" value for the wall-clock backstop, not "unset", so filling it
-	// with a default would turn a feature on that an operator never asked for.
+	// Neither staleness bound is defaulted here: for both, 0 is the "disabled"
+	// value rather than "unset", so filling one with a default would turn on a
+	// forge refusal an operator never asked for.
 	// Only an unset (zero) frequency takes the default; an explicitly
 	// negative value is preserved so Validate can reject it instead of
 	// the node silently starting the expiry worker on the default cadence

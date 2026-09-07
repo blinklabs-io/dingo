@@ -110,14 +110,10 @@ type forgerTestSlotClock struct {
 	// verbatim. When false the frontier mirrors the applied tip, which is the
 	// caught-up steady state and what every test that does not care about the
 	// distinction wants.
-	frontierExplicit bool
-	frontierSlot     uint64
-	frontierHash     []byte
-	upstreamTipSlot  uint64
-	// admittedTipSlot is the admitted-header frontier. Zero mirrors
-	// upstreamTipSlot, which is the healthy case; a test that wants the
-	// advertised target unavailable while headers still flow sets them apart.
-	admittedTipSlot   uint64
+	frontierExplicit  bool
+	frontierSlot      uint64
+	frontierHash      []byte
+	upstreamTipSlot   uint64
 	upstreamActive    bool
 	slotsPerKESPeriod uint64
 }
@@ -167,13 +163,6 @@ func (c forgerTestSlotClock) ChainTipHash() []byte {
 }
 
 func (c forgerTestSlotClock) UpstreamTipSlot() uint64 {
-	return c.upstreamTipSlot
-}
-
-func (c forgerTestSlotClock) UpstreamAdmittedTipSlot() uint64 {
-	if c.admittedTipSlot != 0 {
-		return c.admittedTipSlot
-	}
 	return c.upstreamTipSlot
 }
 
