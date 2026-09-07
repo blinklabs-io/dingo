@@ -50,7 +50,9 @@ func TestLocalStateQueryItemLimitBoundary(t *testing.T) {
 	// which nilaway does not model.
 	//nolint:nilaway // assigned by the require.ErrorAs above
 	require.Equal(t, "boundary", limitErr.QueryName)
+	//nolint:nilaway // assigned by the require.ErrorAs above
 	require.Equal(t, MaxLocalStateQueryItems+1, limitErr.SubmittedItemCount)
+	//nolint:nilaway // assigned by the require.ErrorAs above
 	require.Equal(t, MaxLocalStateQueryItems, limitErr.MaximumAllowedItemCount)
 }
 

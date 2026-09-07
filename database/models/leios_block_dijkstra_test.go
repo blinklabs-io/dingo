@@ -151,15 +151,11 @@ func TestDecodeConwayBlockRejectsUnextendedDijkstraShape(t *testing.T) {
 	_, err := cbor.Decode(raw, &components)
 	require.NoError(t, err)
 	var headerParts []cbor.RawMessage
-	// components is the two-element array musashiDijkstraBlock builds, and
-	// the require.NoError above proves it decoded, so index 0 exists.
-	//nolint:nilaway // fixture decodes to a two-component block
+	require.Len(t, components, 2)
 	_, err = cbor.Decode(components[0], &headerParts)
 	require.NoError(t, err)
 	var bodyElems []cbor.RawMessage
-	// headerParts is the two-element header musashiDijkstraBlock builds,
-	// and the require.NoError above proves it decoded, so index 0 exists.
-	//nolint:nilaway // fixture decodes to a two-part header
+	require.Len(t, headerParts, 2)
 	_, err = cbor.Decode(headerParts[0], &bodyElems)
 	require.NoError(t, err)
 	require.Len(t, bodyElems, 12)
