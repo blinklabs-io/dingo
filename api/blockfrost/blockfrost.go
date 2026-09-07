@@ -16,6 +16,7 @@ package blockfrost
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -34,11 +35,15 @@ import (
 // compatibility decision.
 const blockfrostProjectIDHeader = "project_id"
 
+// Leave time to report a stalled body before the 30-second write deadline.
+const defaultRequestBodyTimeout = 15 * time.Second
+
 // Blockfrost is the Blockfrost-compatible REST API server.
 type Blockfrost struct {
-	config BlockfrostConfig
-	logger *slog.Logger
-	node   BlockfrostNode
+	config             BlockfrostConfig
+	logger             *slog.Logger
+	requestBodyTimeout time.Duration
+	node               BlockfrostNode
 	// listener owns the start/stop protocol, including releasing the
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
@@ -62,10 +67,11 @@ func New(
 		cfg.ListenAddress = ":3000"
 	}
 	return &Blockfrost{
-		config:   cfg,
-		logger:   logger,
-		node:     node,
-		listener: apilistener.New("Blockfrost API", logger),
+		config:             cfg,
+		requestBodyTimeout: defaultRequestBodyTimeout,
+		logger:             logger,
+		node:               node,
+		listener:           apilistener.New("Blockfrost API", logger),
 	}
 }
 
@@ -316,6 +322,7 @@ func (b *Blockfrost) Start(
 			Addr:              b.config.ListenAddress,
 			Handler:           b.handler(),
 			ReadHeaderTimeout: 60 * time.Second,
+			ReadTimeout:       60 * time.Second,
 			WriteTimeout:      30 * time.Second,
 			IdleTimeout:       120 * time.Second,
 		}
@@ -392,4 +399,29 @@ func (b *Blockfrost) Stop(
 	}
 	b.logger.Debug("shutting down Blockfrost API server")
 	return b.listener.Shutdown(ctx, job, apilistener.Graceful)
+}
+
+// readRequestBody bounds both bytes and time before transaction processing.
+func (b *Blockfrost) readRequestBody(
+	w http.ResponseWriter,
+	r *http.Request,
+	limit int64,
+) ([]byte, error) {
+	rc := http.NewResponseController(w)
+	setDeadline := func(deadline time.Time) {
+		if err := rc.SetReadDeadline(deadline); err != nil &&
+			!errors.Is(err, http.ErrNotSupported) {
+			b.logger.Debug("could not bound request body read", "error", err)
+		}
+	}
+	setDeadline(time.Now().Add(b.requestBodyTimeout))
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	body, err := io.ReadAll(r.Body)
+	if err == nil {
+		// A completed read must not expire during transaction processing or
+		// a later request. Preserve failed-read deadlines: net/http can still
+		// drain the unread body before sending the error response.
+		setDeadline(time.Time{})
+	}
+	return body, err
 }

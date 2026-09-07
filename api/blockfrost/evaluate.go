@@ -19,7 +19,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"mime"
 	"net/http"
 	"strings"
@@ -142,7 +141,7 @@ func (b *Blockfrost) handleTransactionEvaluate(
 	if !requireOgmiosVersion(w, r) {
 		return
 	}
-	payload, ok := readEvaluationBody(w, r)
+	payload, ok := b.readEvaluationBody(w, r)
 	if !ok {
 		return
 	}
@@ -162,7 +161,7 @@ func (b *Blockfrost) handleTransactionEvaluateUtxos(
 	if !requireOgmiosVersion(w, r) {
 		return
 	}
-	body, ok := readEvaluationBody(w, r)
+	body, ok := b.readEvaluationBody(w, r)
 	if !ok {
 		return
 	}
@@ -309,12 +308,11 @@ func requireOgmiosVersion(w http.ResponseWriter, r *http.Request) bool {
 
 // readEvaluationBody reads a size-limited evaluation request body, writing
 // the error response itself when the body cannot be used.
-func readEvaluationBody(
+func (b *Blockfrost) readEvaluationBody(
 	w http.ResponseWriter,
 	r *http.Request,
 ) ([]byte, bool) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxTxPayloadSize)
-	body, err := io.ReadAll(r.Body)
+	body, err := b.readRequestBody(w, r, maxTxPayloadSize)
 	if err != nil {
 		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			writeError(
