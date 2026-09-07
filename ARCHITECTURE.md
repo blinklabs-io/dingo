@@ -6053,6 +6053,12 @@ TLS and token authentication are configured through
 
 Implements the Mesh (formerly Rosetta) API specification for wallet integration and chain analysis. Provides endpoints for network status, account balances, block queries, transaction construction, and mempool access.
 
+Mesh `network/status` reports `synced` only when the optional ledger sync
+progress capability reports 1: the applied ledger has caught up with its known
+upstream target. Missing or unknown progress reports false. This is not a
+peer-freshness or node-readiness check; the response retains its current block
+identifier independently of the applied-ledger progress.
+
 Request bodies are bounded in two dimensions, because either bound alone
 leaves a handler goroutine reachable indefinitely. `maxRequestBody` (1 MiB)
 caps how many bytes a client may send; `defaultRequestBodyTimeout` (30s),
