@@ -798,10 +798,32 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 	ls.transactionEventMutex.Lock()
 	defer ls.transactionEventMutex.Unlock()
 
-	// Refuse to truncate anything toward a target the store does not hold:
+	// Refuse to truncate anything toward a target the chain does not hold:
 	// the descent commits each step as it goes, so discovering the target is
 	// unreachable part-way leaves the chain shortened for nothing.
-	if point.Slot > 0 || len(point.Hash) > 0 {
+	//
+	// This has to establish primary-chain membership, not store presence. A
+	// store lookup passes for a target the store still holds but the chain
+	// has abandoned -- the retained-index shape rollbackPointBlock documents
+	// -- and the descent then commits every intermediate step before
+	// Chain.Rollback refuses the final one with ErrRollbackPointNotOnChain,
+	// which is the outcome this check exists to prevent.
+	// Chain.ValidateRollback runs the chain's own membership check.
+	//
+	// Its over-K refusal is the one outcome that must not stop the descent:
+	// a recovery target deeper than the security parameter is precisely what
+	// this function windows, and every step is validated again on its own.
+	if err := ls.chain.ValidateRollback(point); err != nil &&
+		!errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+		return fmt.Errorf("validate recovery target: %w", err)
+	}
+	// Chain.ValidateRollback reads every slot-zero point as origin and skips
+	// its membership check there, and so does Chain.Rollback: it truncates to
+	// index zero and leaves currentTip naming the point's hash. A slot-zero
+	// point carrying a hash therefore still needs the store lookup this check
+	// replaced, or the descent would truncate the chain whole toward a block
+	// that need not exist.
+	if point.Slot == 0 && len(point.Hash) > 0 {
 		if _, err := database.BlockByPoint(ls.db, point); err != nil {
 			return fmt.Errorf("lookup recovery target: %w", err)
 		}
@@ -1285,10 +1307,24 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 	// inputs stay consumed, created outputs stay created. When peers
 	// re-deliver the block we just rewound past, ledger validation
 	// looks up its inputs, finds them already marked consumed, and
-	// returns "rule 22 bad input(s) ... rule 24 value not conserved
-	// (consumed 0)" again, looping the recovery indefinitely until
-	// process restart. Primary-chain rollback only touches the chain
-	// store — the matching ledger rollback must be explicit.
+	// fails UtxoValidateBadInputsUtxo and
+	// UtxoValidateValueNotConservedUtxo ("bad input(s)" and "value not
+	// conserved (consumed 0)") again, looping the recovery indefinitely
+	// until process restart. Primary-chain rollback only touches the
+	// chain store — the matching ledger rollback must be explicit.
+	//
+	// Match on the rule names above, not on the number the wrapped error
+	// prints. That number is this era's index into the upstream
+	// gouroboros validation-rule slice, so it shifts whenever upstream
+	// inserts or reorders a rule -- twice in recent memory: v0.202.5
+	// inserted UtxoValidateRequiredRedeemers (22/24 became 29/32) and
+	// v0.202.6 inserted UtxoValidateCurrentTreasuryValue at index 0,
+	// shifting everything by one again (29/32 became 30/33). On the
+	// currently pinned v0.202.6 they print as rule 30 and rule 33, but
+	// treat that as a fact about the pin rather than about the rules, and
+	// re-measure after any gouroboros bump instead of trusting this line.
+	// Stale numbers here have twice pointed diagnosis at the wrong root
+	// cause (#3165, #3678).
 	if err := ls.rollback(rewindPoint); err != nil {
 		return false, fmt.Errorf(
 			"rollback ledger state after validation failure: %w",
@@ -1919,15 +1955,20 @@ func (ls *LedgerState) durableAppliedFloorAnchorIndex() (uint64, bool, error) {
 func (ls *LedgerState) replayRecoveryBlockFromTxBlob(
 	txHash []byte,
 ) (models.Block, bool, error) {
-	blob := ls.db.Blob()
-	if blob == nil {
-		return models.Block{}, false, nil
-	}
 	txn := ls.db.BlobTxn(false)
-	if txn == nil || txn.Blob() == nil {
+	if txn == nil {
 		return models.Block{}, false, nil
 	}
 	defer txn.Rollback() //nolint:errcheck
+	// The store the transaction was opened on, not whichever is installed
+	// now: the handle below only means anything to that store, and the
+	// transaction's pin is what keeps it alive for this call. Reading
+	// ls.db.Blob() separately could pair a handle from one installation with
+	// a store from another across a concurrent SetBlobStore.
+	blob := txn.BlobStore()
+	if blob == nil || txn.Blob() == nil {
+		return models.Block{}, false, nil
+	}
 
 	txData, err := blob.GetTx(txn.Blob(), txHash)
 	if err != nil {

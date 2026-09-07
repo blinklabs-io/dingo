@@ -27,7 +27,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 11)
+	require.Len(t, registry, 12)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -103,9 +103,16 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Contains(t, registry[9].SQL["sqlite"].Expand[0],
 		"CREATE TABLE IF NOT EXISTS `reward_seed_failure`")
 	require.Equal(t, 11, registry[10].Version)
-	require.Equal(t, "pool-registration-deposit-held", registry[10].Name)
-	require.Len(t, registry[10].SQL["sqlite"].Expand, 1)
-	require.NotNil(t, registry[10].Backfill)
+	require.Equal(t, "imported-pool-block-count", registry[10].Name)
+	require.Len(t, registry[10].SQL["sqlite"].Expand, 2)
+	require.Contains(t, registry[10].SQL["sqlite"].Expand[0],
+		"CREATE TABLE IF NOT EXISTS `imported_pool_block_count`")
+	require.Contains(t, registry[10].SQL["sqlite"].Expand[1],
+		"CREATE TABLE IF NOT EXISTS `imported_epoch_block_total`")
+	require.Equal(t, 12, registry[11].Version)
+	require.Equal(t, "pool-registration-deposit-held", registry[11].Name)
+	require.Len(t, registry[11].SQL["sqlite"].Expand, 1)
+	require.NotNil(t, registry[11].Backfill)
 }
 
 func TestCommitteeCredentialMigrationTranslatesForProviders(t *testing.T) {
@@ -198,7 +205,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 11)
+	require.Len(t, registry, 12)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

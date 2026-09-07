@@ -16,6 +16,7 @@ package eras
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -878,13 +879,37 @@ func sortedConwayWithdrawalAddresses(
 	for addr := range withdrawals {
 		ret = append(ret, addr)
 	}
+	// cardano-ledger keys withdrawals by RewardAccount, whose derived Ord
+	// compares Network then Credential, and whose Credential constructors are
+	// declared ScriptHashObj before KeyHashObj
+	// (libs/cardano-ledger-core/src/Cardano/Ledger/Credential.hs). Reward
+	// address bytes carry the credential type in the header nibble, so raw
+	// byte order puts key-hash (0xe0/0xe1) before script-hash (0xf0/0xf1) and
+	// inverts the ledger's order whenever a transaction withdraws from both
+	// credential types. The Rewarding redeemer index is this position, so the
+	// comparator has to match script.BuildScriptPurpose, which maps an index
+	// back to a credential using the same order.
 	slices.SortFunc(ret, func(a, b *lcommon.Address) int {
-		aBytes, aErr := a.Bytes()
-		bBytes, bErr := b.Bytes()
+		if a == nil {
+			return -1
+		}
+		if b == nil {
+			return 1
+		}
+		aCred, aErr := a.RewardAccountCredential()
+		bCred, bErr := b.RewardAccountCredential()
 		if aErr != nil || bErr != nil {
 			return strings.Compare(a.String(), b.String())
 		}
-		return bytes.Compare(aBytes, bBytes)
+		if c := cmp.Compare(a.NetworkId(), b.NetworkId()); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(aCred.CredType, bCred.CredType); c != 0 {
+			// Credential's numeric order is key before script, while
+			// cardano-ledger's Ord instance places ScriptHashObj first.
+			return -c
+		}
+		return bytes.Compare(aCred.Credential[:], bCred.Credential[:])
 	})
 	return ret
 }

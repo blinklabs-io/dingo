@@ -145,16 +145,23 @@ func poolPositionPredicate(
 // chain up to this certificate: a rollback that deletes later rows and a
 // replay that rewrites them reproduce the same held amount, and a restart
 // reads it back from the column.
+//
+// A nil `charged` means the era's deposit function could not compute an
+// amount, and a nil return carries that through so the column stores NULL
+// rather than an authoritative zero (dingo #3829). A carried-forward amount is
+// always known -- it was read from an earlier row -- so only the branches that
+// return `charged` can be nil, and a NULL written here reads back through the
+// same deposit_amount fallback a row predating the column takes.
 func poolRegistrationDepositHeld(
 	ctx context.Context,
 	db queryer,
 	poolID int64,
 	at poolCertPosition,
-	charged uint64,
-) (uint64, error) {
+	charged *uint64,
+) (*uint64, error) {
 	previous, found, err := latestPoolRegistrationBefore(ctx, db, poolID, at)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if !found {
 		// Nothing earlier to hold a deposit: this registration pays it.
@@ -162,7 +169,7 @@ func poolRegistrationDepositHeld(
 	}
 	retirement, found, err := latestPoolRetirementBefore(ctx, db, poolID, at)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if !found || retirement.position.before(previous.position) {
 		// The pool has never been retired, or the retirement was already
@@ -173,11 +180,11 @@ func poolRegistrationDepositHeld(
 		// registration and its retirement tombstone both sit at the snapshot
 		// slot with no certs join to separate them, and the tombstone is what
 		// says the pool is gone.
-		return previous.held, nil
+		return &previous.held, nil
 	}
 	epoch, resolved, err := epochAtSlot(ctx, db, at.slot)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if !resolved {
 		// Without epoch data the reap cannot be placed. Charging the
@@ -194,7 +201,7 @@ func poolRegistrationDepositHeld(
 	}
 	// Retirement still pending at this slot: this registration cancels it and
 	// the pool keeps holding the earlier deposit.
-	return previous.held, nil
+	return &previous.held, nil
 }
 
 type poolRegistrationDepositRow struct {
@@ -240,7 +247,7 @@ LIMIT 1`,
 		)
 	}
 	// A row written before the deposit_held column existed falls back to its
-	// own deposit_amount, the same rule the v8 backfill applies, so an
+	// own deposit_amount, the same rule the v12 backfill applies, so an
 	// interrupted or skipped backfill still reproduces the pre-change refund
 	// instead of collapsing the held amount to zero.
 	source := held
@@ -1303,6 +1310,115 @@ ORDER BY item.added_slot ASC, tx.block_index ASC, c.cert_index ASC`,
 		)
 	}
 	return registrations, retirements, nil
+}
+
+// GetPoolVrfKeyHashAtSlot returns the VRF key hash the pool had registered as
+// of slot, which is not necessarily the one it has registered now.
+//
+// A pool may rotate its VRF key, and a re-registration does not retroactively
+// change the key it was elected under: the leader schedule for an epoch is
+// built from a stake snapshot captured at an earlier boundary, and a block's
+// header carries the key registered at that capture. Validating a header
+// against the current registration rejects every block the pool makes for the
+// rest of the epoch it rotated in (issue #3842).
+//
+// The selection is the same latest-certificate-wins ordering
+// GetActivePoolKeyHashesAtSlot uses -- later added_slot, then later block
+// index, then later certificate index -- so the two agree on which
+// registration was in force.
+//
+// The bool reports whether any registration exists at or before slot. False
+// means the pool had not registered yet, which is a different answer from a
+// pool with no VRF key recorded.
+func (s *Store) GetPoolVrfKeyHashAtSlot(
+	poolKeyHash []byte,
+	slot uint64,
+	txn types.Txn,
+) ([]byte, bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, false, fmt.Errorf(
+			"GetPoolVrfKeyHashAtSlot: resolve db: %w",
+			err,
+		)
+	}
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, false, fmt.Errorf("GetPoolVrfKeyHashAtSlot: %w", err)
+	}
+	var vrfKeyHash []byte
+	err = db.QueryRowContext(ctx, `
+SELECT pr.vrf_key_hash
+FROM pool_registration pr
+JOIN pool p ON p.id = pr.pool_id
+LEFT JOIN certs c ON c.id = pr.certificate_id
+LEFT JOIN "transaction" t ON t.id = c.transaction_id
+WHERE p.pool_key_hash = ?
+  AND pr.added_slot <= ?
+ORDER BY pr.added_slot DESC,
+         COALESCE(t.block_index, 0) DESC,
+         COALESCE(c.cert_index, 0) DESC
+LIMIT 1`,
+		poolKeyHash,
+		slotValue,
+	).Scan(&vrfKeyHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("GetPoolVrfKeyHashAtSlot: %w", err)
+	}
+	return vrfKeyHash, true, nil
+}
+
+// GetPoolEarliestVrfKeyHashAtSlot returns the VRF key hash from the pool's
+// earliest registration at or before the given slot.
+//
+// This is the key cardano-ledger's psStakePools holds for a pool that first
+// registered inside the captured epoch. The POOL rule inserts a first
+// registration into psStakePools directly and defers only a re-registration
+// through psFutureStakePoolParams, so when both land in that epoch the
+// snapshot carries the first one's key. GetPoolVrfKeyHashAtSlot answers the
+// opposite question and would resolve the deferred key.
+func (s *Store) GetPoolEarliestVrfKeyHashAtSlot(
+	poolKeyHash []byte,
+	slot uint64,
+	txn types.Txn,
+) ([]byte, bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, false, fmt.Errorf(
+			"GetPoolEarliestVrfKeyHashAtSlot: resolve db: %w",
+			err,
+		)
+	}
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, false, fmt.Errorf("GetPoolEarliestVrfKeyHashAtSlot: %w", err)
+	}
+	var vrfKeyHash []byte
+	err = db.QueryRowContext(ctx, `
+SELECT pr.vrf_key_hash
+FROM pool_registration pr
+JOIN pool p ON p.id = pr.pool_id
+LEFT JOIN certs c ON c.id = pr.certificate_id
+LEFT JOIN "transaction" t ON t.id = c.transaction_id
+WHERE p.pool_key_hash = ?
+  AND pr.added_slot <= ?
+ORDER BY pr.added_slot ASC,
+         COALESCE(t.block_index, 0) ASC,
+         COALESCE(c.cert_index, 0) ASC
+LIMIT 1`,
+		poolKeyHash,
+		slotValue,
+	).Scan(&vrfKeyHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("GetPoolEarliestVrfKeyHashAtSlot: %w", err)
+	}
+	return vrfKeyHash, true, nil
 }
 
 func (s *Store) GetActivePoolKeyHashesAtSlot(

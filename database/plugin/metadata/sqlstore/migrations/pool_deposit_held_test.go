@@ -27,7 +27,7 @@ import (
 
 // depositHeldBackfillDB returns a database migrated to the version before the
 // pool deposit-held column exists, so a test can seed the legacy registration
-// rows the v11 backfill reads.
+// rows the v12 backfill reads.
 func depositHeldBackfillDB(
 	t *testing.T,
 ) (*sql.DB, func(versions []migrations.Migration)) {
@@ -39,7 +39,7 @@ func depositHeldBackfillDB(
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 11)
+	require.Len(t, registry, 12)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -181,7 +181,7 @@ WHERE pool_key_hash = ?`,
 	_, err = db.ExecContext(context.Background(), `
 UPDATE schema_migrations
 SET phase = 'backfill', cursor = '', dirty = 1, completed_at = NULL
-WHERE version = 11`)
+WHERE version = 12`)
 	require.NoError(t, err)
 	runTo(registry)
 
@@ -206,13 +206,13 @@ func TestDepositHeldExpandPhaseReplaysAfterInterruptedUpgrade(t *testing.T) {
 	runTo(registry)
 
 	ctx := context.Background()
-	// Rewind version 11 to the durable state such an interruption leaves: the
+	// Rewind version 12 to the durable state such an interruption leaves: the
 	// column exists because its ALTER committed, the phase row still says
 	// expand, and the backfill has not run.
 	_, err = db.ExecContext(ctx, `
 UPDATE schema_migrations
 SET phase = 'expand', cursor = '', dirty = 1, completed_at = NULL
-	WHERE version = 11`)
+	WHERE version = 12`)
 	require.NoError(t, err)
 	_, err = db.ExecContext(
 		ctx,
@@ -235,7 +235,7 @@ SET phase = 'expand', cursor = '', dirty = 1, completed_at = NULL
 	var dirty bool
 	var completed sql.NullInt64
 	require.NoError(t, db.QueryRowContext(ctx, `
-	SELECT phase, dirty, completed_at FROM schema_migrations WHERE version = 11`,
+	SELECT phase, dirty, completed_at FROM schema_migrations WHERE version = 12`,
 	).Scan(&phase, &dirty, &completed))
 	require.Equal(t, "complete", phase)
 	require.False(t, dirty)

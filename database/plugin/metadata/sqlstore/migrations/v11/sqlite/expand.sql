@@ -1,10 +1,21 @@
--- The pool deposit a registration retains, as distinct from `deposit_amount`,
--- which is what the block era's certificate deposit function computed from the
--- protocol parameters in force at that registration's slot. The two differ for
--- a re-registration: cardano-ledger's POOL rule charges a deposit only when the
--- pool is not already registered, so a re-registration leaves `psDeposits`
--- alone and the pool keeps holding the deposit its first registration paid.
--- POOLREAP refunds `psDeposits`, so refunding `deposit_amount` created or
--- destroyed ledger value whenever a poolDeposit parameter change landed between
--- a pool's first and last registration.
-ALTER TABLE `pool_registration` ADD COLUMN `deposit_held` text;
+-- Persist the per-pool block counts a bootstrap snapshot carries for the epochs
+-- preceding its anchor, which no local block history can supply, so pool reward
+-- performance for those epochs is computed rather than read as zero.
+CREATE TABLE IF NOT EXISTS `imported_pool_block_count` (
+    `epoch` integer NOT NULL,
+    `pool_key_hash` blob NOT NULL,
+    `blocks_produced` integer NOT NULL,
+    `captured_slot` integer NOT NULL,
+    PRIMARY KEY (`epoch`, `pool_key_hash`)
+);
+
+-- Records that an epoch's block counts came from a bootstrap snapshot, and the
+-- epoch total the per-pool rows must sum to. A BlocksMade map with no entries
+-- is a certified zero-block epoch, not an absent one, and only a row here can
+-- tell those apart.
+CREATE TABLE IF NOT EXISTS `imported_epoch_block_total` (
+    `epoch` integer NOT NULL,
+    `total_blocks` integer NOT NULL,
+    `captured_slot` integer NOT NULL,
+    PRIMARY KEY (`epoch`)
+);

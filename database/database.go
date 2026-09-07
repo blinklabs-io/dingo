@@ -83,10 +83,16 @@ func isNilStore(store any) bool {
 
 // Database represents our data storage services
 type Database struct {
-	config          *Config
-	logger          *slog.Logger
-	blob            blob.BlobStore
-	metadata        metadata.MetadataStore
+	config   *Config
+	logger   *slog.Logger
+	metadata metadata.MetadataStore
+	// blobRef is the installed blob store, guarded by blobMu. See
+	// blob_store.go for the ownership, locking, and replacement rules that
+	// apply to both fields; nothing outside that file touches blobRef
+	// directly.
+	blobRef *blobStoreRef
+	blobMu  sync.RWMutex
+
 	cborCache       *TieredCborCache
 	sizeMetricsStop chan struct{}
 	sizeMetricsDone chan struct{}
@@ -112,11 +118,6 @@ type Database struct {
 	// phantom queued writer). Its zero value is directly usable, same as
 	// the sync.RWMutex it replaces, so no constructor change is needed.
 	commitBarrier cancellableBarrier
-}
-
-// Blob returns the underling blob store instance
-func (d *Database) Blob() blob.BlobStore {
-	return d.blob
 }
 
 // PauseCommits blocks until every currently open read-write Txn that
@@ -294,7 +295,7 @@ func New(config *Config, stores Stores) (*Database, error) {
 		return nil, errors.New("metadata store is required")
 	}
 	db := &Database{
-		blob:     stores.Blob,
+		blobRef:  newBlobStoreRef(stores.Blob),
 		metadata: stores.Metadata,
 		logger:   configCopy.Logger,
 		config:   configCopy,
@@ -358,11 +359,23 @@ func New(config *Config, stores Stores) (*Database, error) {
 				case <-db.sizeMetricsStop:
 					return
 				case <-ticker.C:
-					if db.blob != nil {
-						if size, err := db.blob.DiskSize(); err == nil {
+					// Pin rather than reading the field: this loop
+					// outlives any SetBlobStore call (it starts here,
+					// inside New, and node.go/node_lifecycle.go replace
+					// the store afterwards), so it must both read the
+					// reference under the lock and keep the store it
+					// sampled alive for the duration of the DiskSize
+					// call.
+					func() {
+						store, release := db.PinBlob()
+						defer release()
+						if store == nil {
+							return
+						}
+						if size, err := store.DiskSize(); err == nil {
 							blobSizeGauge.Set(float64(size))
 						}
-					}
+					}()
 					if db.metadata != nil {
 						if size, err := db.metadata.DiskSize(); err == nil {
 							metadataSizeGauge.Set(float64(size))
@@ -388,8 +401,4 @@ func (d *Database) StorageMode() string {
 // This can be used for metrics registration or direct cache access.
 func (d *Database) CborCache() *TieredCborCache {
 	return d.cborCache
-}
-
-func (d *Database) SetBlobStore(b blob.BlobStore) {
-	d.blob = b
 }

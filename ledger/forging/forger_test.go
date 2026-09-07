@@ -104,6 +104,7 @@ func (l *forgerCountingLeader) callCount() int {
 type forgerTestSlotClock struct {
 	currentSlot       uint64
 	chainTipSlot      uint64
+	chainTipHash      []byte
 	upstreamTipSlot   uint64
 	upstreamActive    bool
 	slotsPerKESPeriod uint64
@@ -123,6 +124,13 @@ func (c forgerTestSlotClock) ChainTipSlot() uint64 {
 
 func (forgerTestSlotClock) NextSlotTime() (time.Time, error) {
 	return time.Now(), nil
+}
+
+// ChainTipHash satisfies the optional ChainTipHashProvider. It returns
+// nil unless a test sets chainTipHash, so every existing test keeps the
+// fence-only behaviour.
+func (c forgerTestSlotClock) ChainTipHash() []byte {
+	return c.chainTipHash
 }
 
 func (c forgerTestSlotClock) UpstreamTipSlot() uint64 {

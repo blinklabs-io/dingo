@@ -86,6 +86,13 @@ func testSchema(includePools bool) []string {
 		// per-pool reward tables; TestDingoDBGetRewardAccountOutputs seeds no
 		// pool rows at all, so gating this behind includePools would force
 		// that test to opt into unrelated schema it doesn't use.
+		// epoch and pparams mirror Dingo's real metadata schema (column
+		// names and types copied from a synced preview metadata.sqlite) so
+		// GetProtocolParams is exercised against the same shape it reads in
+		// production, including the nullable integer columns.
+		`CREATE TABLE epoch (nonce BLOB, evolving_nonce BLOB, candidate_nonce BLOB, last_epoch_block_nonce BLOB, id INTEGER PRIMARY KEY AUTOINCREMENT, epoch_id INTEGER, start_slot INTEGER, era_id INTEGER, slot_length INTEGER, length_in_slots INTEGER)`,
+		`CREATE UNIQUE INDEX idx_epoch_epoch_id ON epoch(epoch_id)`,
+		`CREATE TABLE pparams (cbor BLOB, id INTEGER PRIMARY KEY AUTOINCREMENT, added_slot INTEGER, epoch INTEGER, era_id INTEGER)`,
 		`CREATE TABLE reward_account_output (staking_key BLOB NOT NULL, pool_key_hash BLOB NOT NULL, reward_type TEXT NOT NULL, id INTEGER PRIMARY KEY, epoch INTEGER NOT NULL, credential_tag INTEGER NOT NULL DEFAULT 0, amount TEXT NOT NULL, spendable BOOLEAN NOT NULL, guarded BOOLEAN NOT NULL DEFAULT FALSE, captured_slot INTEGER NOT NULL, boundary_slot INTEGER NOT NULL, UNIQUE (epoch, credential_tag, staking_key, pool_key_hash, reward_type))`,
 		// The pool certificate tables back DingoDB.GetPoolsRetiredByEpoch.
 		// Created unconditionally for the same reason as
@@ -102,6 +109,7 @@ func testSchema(includePools bool) []string {
 		ret = append(
 			ret,
 			`CREATE TABLE reward_pool_input (margin TEXT, pool_key_hash BLOB NOT NULL, reward_account BLOB, blocks_produced INTEGER, total_blocks_in_epoch INTEGER, id INTEGER PRIMARY KEY AUTOINCREMENT, epoch INTEGER NOT NULL, pledge TEXT NOT NULL DEFAULT '0', delegated_stake TEXT NOT NULL DEFAULT '0', owner_stake TEXT NOT NULL DEFAULT '0', cost TEXT NOT NULL DEFAULT '0', delegator_count INTEGER NOT NULL DEFAULT 0, reward_account_credential_tag INTEGER NOT NULL DEFAULT 0, captured_slot INTEGER NOT NULL DEFAULT 0, boundary_slot INTEGER NOT NULL DEFAULT 0)`,
+			`CREATE TABLE tip (hash BLOB, id INTEGER PRIMARY KEY AUTOINCREMENT, slot INTEGER, block_number INTEGER)`,
 			`CREATE TABLE reward_pool_output (apparent_performance TEXT, pool_key_hash BLOB NOT NULL, id INTEGER PRIMARY KEY AUTOINCREMENT, epoch INTEGER NOT NULL, optimal_reward TEXT NOT NULL DEFAULT '0', total_reward TEXT NOT NULL DEFAULT '0', leader_reward TEXT NOT NULL DEFAULT '0', member_reward_total TEXT NOT NULL DEFAULT '0', owner_stake TEXT NOT NULL DEFAULT '0', undistributed TEXT NOT NULL DEFAULT '0', unspendable TEXT NOT NULL DEFAULT '0', captured_slot INTEGER NOT NULL DEFAULT 0, boundary_slot INTEGER NOT NULL DEFAULT 0)`,
 		)
 	}

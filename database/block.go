@@ -103,7 +103,7 @@ func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 	if blobTxn == nil {
 		return types.ErrNilTxn
 	}
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
@@ -152,7 +152,7 @@ func (d *Database) SetGenesisCbor(
 	if blobTxn == nil {
 		return types.ErrNilTxn
 	}
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
@@ -192,12 +192,12 @@ func (d *Database) SetGenesisCbor(
 // blob key for the given slot and hash. This is used to validate that
 // existing chain data matches the current genesis configuration.
 func (d *Database) HasGenesisCbor(slot uint64, hash []byte) bool {
-	blob := d.Blob()
+	txn := d.BlobTxn(false)
+	defer txn.Rollback() //nolint:errcheck
+	blob := txn.BlobStore()
 	if blob == nil {
 		return false
 	}
-	txn := d.BlobTxn(false)
-	defer txn.Rollback() //nolint:errcheck
 	key := types.BlockBlobKey(slot, hash)
 	_, err := blob.Get(txn.Blob(), key)
 	return err == nil
@@ -208,12 +208,12 @@ func (d *Database) HasGenesisCbor(slot uint64, hash []byte) bool {
 // "no genesis CBOR" (e.g., after Mithril bootstrap) and "genesis CBOR
 // exists but with a different hash" (true network mismatch).
 func (d *Database) HasAnyGenesisCbor(slot uint64) bool {
-	blob := d.Blob()
+	txn := d.BlobTxn(false)
+	defer txn.Rollback() //nolint:errcheck
+	blob := txn.BlobStore()
 	if blob == nil {
 		return false
 	}
-	txn := d.BlobTxn(false)
-	defer txn.Rollback() //nolint:errcheck
 	prefix := slices.Concat(
 		[]byte(types.BlockBlobKeyPrefix),
 		types.BlockBlobKeyUint64ToBytes(slot),
@@ -250,7 +250,7 @@ func BlockDeleteTxn(txn *Txn, block models.Block) error {
 	if blobTxn == nil {
 		return types.ErrNilTxn
 	}
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
@@ -281,7 +281,7 @@ func BlockIDByPointLocal(
 	if txn.Blob() == nil {
 		return 0, types.ErrNilTxn
 	}
-	store := db.Blob()
+	store := txn.BlobStore()
 	if store == nil {
 		return 0, types.ErrBlobStoreUnavailable
 	}
@@ -357,7 +357,7 @@ func BlockURL(
 			return types.ErrNilTxn
 		}
 
-		blob := txn.DB().Blob()
+		blob := txn.BlobStore()
 		if blob == nil {
 			return types.ErrBlobStoreUnavailable
 		}
@@ -386,7 +386,7 @@ func blockByKey(txn *Txn, blockKey []byte) (models.Block, error) {
 			"parsing block key: %w", err,
 		)
 	}
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return models.Block{}, types.ErrBlobStoreUnavailable
 	}
@@ -422,7 +422,7 @@ func BlockByHashTxn(txn *Txn, hash []byte) (models.Block, error) {
 	if blobTxn == nil {
 		return models.Block{}, types.ErrNilTxn
 	}
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return models.Block{}, types.ErrBlobStoreUnavailable
 	}
@@ -474,7 +474,7 @@ func BlockBySlotTxn(txn *Txn, slot uint64) (models.Block, error) {
 	if blobTxn == nil {
 		return models.Block{}, types.ErrNilTxn
 	}
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return models.Block{}, types.ErrBlobStoreUnavailable
 	}
@@ -545,7 +545,7 @@ func (d *Database) blockKeyByIndex(
 	if blobTxn == nil {
 		return nil, types.ErrNilTxn
 	}
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return nil, types.ErrBlobStoreUnavailable
 	}
@@ -616,7 +616,7 @@ func (d *Database) BlockAtOrAfterIndex(
 	if blobTxn == nil {
 		return models.Block{}, types.ErrNilTxn
 	}
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return models.Block{}, types.ErrBlobStoreUnavailable
 	}
@@ -690,7 +690,7 @@ func BlocksRecentTxn(txn *Txn, count int) ([]models.Block, error) {
 	if blobTxn == nil {
 		return ret, types.ErrNilTxn
 	}
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return ret, types.ErrBlobStoreUnavailable
 	}
@@ -756,7 +756,7 @@ func BlockBeforeSlotTxn(txn *Txn, slotNumber uint64) (models.Block, error) {
 	if blobTxn == nil {
 		return models.Block{}, types.ErrNilTxn
 	}
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return models.Block{}, types.ErrBlobStoreUnavailable
 	}
@@ -827,7 +827,7 @@ func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]models.Block, error) {
 	if blobTxn == nil {
 		return ret, types.ErrNilTxn
 	}
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return ret, types.ErrBlobStoreUnavailable
 	}
@@ -914,7 +914,7 @@ func (d *Database) CountBlocksAndOldestSlot(
 	if blobTxn == nil {
 		return 0, 0, types.ErrNilTxn
 	}
-	blob := d.Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return 0, 0, types.ErrBlobStoreUnavailable
 	}
