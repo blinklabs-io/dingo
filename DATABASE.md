@@ -2274,6 +2274,54 @@ Mithril-bootstrapped node it is frequently the only registration row a DRep
 has. Filtering it out yields an expected refund of 0 against a certificate
 that legitimately supplies the deposit, and the block is rejected.
 
+`GetDrepLastRegistrationDeposits` is the set form, for callers that need the
+deposit for every DRep they are listing. `DRepRegistrations` (both
+`ledger.LedgerView`'s and the conformance harness's) would otherwise issue one
+`GetDrepLastRegistrationDeposit` per DRep, so a list of N active DReps costs
+N+1 round trips:
+
+```sql
+SELECT r.credential_tag, r.drep_credential, r.deposit_amount
+FROM registration_drep r
+JOIN (
+    SELECT credential_tag, drep_credential, MAX(added_slot) AS added_slot
+    FROM registration_drep
+    GROUP BY credential_tag, drep_credential
+) latest
+  ON latest.credential_tag = r.credential_tag
+ AND latest.drep_credential = r.drep_credential
+ AND latest.added_slot = r.added_slot;
+```
+
+Four properties external callers depend on:
+
+- **Result key.** The returned `map[string]uint64` is keyed by
+  `models.DrepDepositKey(credentialTag, credential)`, which is the raw
+  concatenation `string([]byte{credentialTag}) + string(credential)` — not hex,
+  and tag-qualified, so a key and script credential sharing a hash stay
+  distinct.
+- **Latest-row rule.** The self-join reproduces the singular query's "most
+  recent registration certificate" selection via `MAX(added_slot)` grouped by
+  `(credential_tag, drep_credential)`, and like the singular query it
+  deliberately does **not** apply the
+  `certificate_id IS NOT NULL AND certificate_id != 0` filter — bootstrap import
+  rows carry the real deposit and are frequently a DRep's only registration row
+  on a Mithril-bootstrapped node, for the reason described above.
+- **Scope is the full registration history, not the active set.** Every
+  credential that has ever appeared in `registration_drep` gets an entry,
+  including retired and deregistered DReps. Callers listing active DReps
+  intersect the map against their own list rather than iterating it.
+- **Absent means zero.** A credential with no registration row is simply absent
+  from the map, and rows whose `deposit_amount` is NULL are skipped rather than
+  stored, so both read back as 0 from a map lookup. That matches the singular
+  query, which returns `(0, nil)` for `sql.ErrNoRows` and for a NULL deposit.
+  Callers therefore index the map directly instead of testing for presence.
+
+Ties are arbitrary in both forms: if a credential somehow has two registration
+rows at the same `added_slot`, the join emits both and the map retains whichever
+is scanned last, the same unspecified choice the singular query's
+`ORDER BY added_slot DESC LIMIT 1` makes.
+
 `GetPredefinedDrepFirstSeenSlots` returns the earliest delegation slot
 per predefined DRep type (2 = AlwaysAbstain, 3 = AlwaysNoConfidence),
 used to interleave the special DReps into the same listing:
