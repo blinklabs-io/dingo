@@ -139,3 +139,62 @@ func TestSnapshotInterruptedBeforeManifest(t *testing.T) {
 		})
 	}
 }
+
+func TestSnapshotDurableAncestors(t *testing.T) {
+	for _, failAt := range []string{"", "outer", "base"} {
+		t.Run("failure_"+failAt, func(t *testing.T) {
+			db := newRestoreInternalTestDB(t)
+			base := t.TempDir()
+			outer := filepath.Join(base, "outer")
+			parent := filepath.Join(outer, "inner")
+			dir := filepath.Join(parent, "snapshot")
+			original := syncDir
+			t.Cleanup(func() { syncDir = original })
+			injected := errors.New("ancestor sync failed")
+			var calls []string
+			syncDir = func(path string) error {
+				calls = append(calls, path)
+				_, err := ReadManifest(dir)
+				require.ErrorIs(
+					t,
+					err,
+					os.ErrNotExist,
+					"manifest precedes ancestor durability",
+				)
+				if (failAt == "outer" && path == outer) ||
+					(failAt == "base" && path == base) {
+					return injected
+				}
+				return original(path)
+			}
+			_, err := Snapshot(
+				context.Background(),
+				db,
+				dir,
+				TriggerManual,
+				"test",
+				"badger",
+				"sqlite",
+			)
+			if failAt != "" {
+				require.ErrorIs(
+					t,
+					err,
+					injected,
+					"snapshot succeeded without durable ancestors",
+				)
+				require.NoDirExists(t, dir)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(
+				t,
+				[]string{dir, parent, outer, base},
+				calls,
+				"new ancestor entries were not all synchronized",
+			)
+			_, err = ReadManifest(dir)
+			require.NoError(t, err)
+		})
+	}
+}

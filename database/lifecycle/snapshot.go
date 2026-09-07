@@ -105,6 +105,20 @@ func Snapshot(
 	// the other (possibly still in-flight, possibly already-succeeded)
 	// caller's backup files out from under it. Only the call that
 	// actually wins Mkdir's exclusive creation may remove dir on failure.
+	// Record missing ancestors before creation. A concurrent creator may
+	// win a MkdirAll race; synchronizing its entry as well is harmless.
+	var newParents []string
+	for parent := filepath.Dir(dir); ; parent = filepath.Dir(parent) {
+		if _, err := os.Stat(parent); err == nil {
+			break
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return Manifest{}, fmt.Errorf("stat snapshot parent %q: %w", parent, err)
+		}
+		newParents = append(newParents, parent)
+		if filepath.Dir(parent) == parent {
+			break
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 		return Manifest{}, fmt.Errorf(
 			"create snapshot parent directory %q: %w", filepath.Dir(dir), err,
@@ -248,7 +262,11 @@ func Snapshot(
 	metadataSyncErr := syncSnapshotFile(metadataFile)
 	metadataCloseErr := metadataFile.Close()
 	if err := errors.Join(metadataSyncErr, metadataCloseErr); err != nil {
-		return Manifest{}, fmt.Errorf("sync and close %q: %w", metadataPath, err)
+		return Manifest{}, fmt.Errorf(
+			"sync and close %q: %w",
+			metadataPath,
+			err,
+		)
 	}
 	// Persist the backup names before a manifest can make them discoverable.
 	if err := syncDir(dir); err != nil {
@@ -256,6 +274,15 @@ func Snapshot(
 	}
 	if err := syncDir(filepath.Dir(dir)); err != nil {
 		return Manifest{}, fmt.Errorf("sync snapshot parent: %w", err)
+	}
+	for _, parent := range newParents {
+		if err := syncDir(filepath.Dir(parent)); err != nil {
+			return Manifest{}, fmt.Errorf(
+				"sync snapshot ancestor %q: %w",
+				parent,
+				err,
+			)
+		}
 	}
 
 	blobInfo, err := os.Stat(blobPath)
