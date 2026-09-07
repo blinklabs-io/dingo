@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/consensus"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
@@ -138,4 +139,69 @@ func TestSlotToTime_CachedSlotWithoutForecast(t *testing.T) {
 	_, err = ls.SlotToTime(99_999)
 	require.Error(t, err,
 		"a slot before the epoch cache must not be answered without a forecast")
+}
+
+// TestConsensusModeForEpoch_UnresolvableShapeFailsClosed pins the
+// forward-looking era walk as fail-closed. An unavailable shape breaks the
+// walk, and answering with the CURRENT era's mode for a future epoch reports
+// exactly what a scheduled hard fork changes. The control fixes Babbage at
+// epoch 501 under the same current era (Alonzo, TPraos), so the two cases
+// differ by mode and not merely by error: with the shape resolvable the
+// forecast is CPraos.
+func TestConsensusModeForEpoch_UnresolvableShapeFailsClosed(t *testing.T) {
+	newLedger := func(cfg *cardano.CardanoNodeConfig) *LedgerState {
+		enabled := true
+		cfg.ExperimentalHardForksEnabled = &enabled
+		babbage := uint64(501)
+		cfg.TestBabbageHardForkAtEpoch = &babbage
+		ls := &LedgerState{
+			epochCache: []models.Epoch{{
+				EpochId:       500,
+				StartSlot:     100_000,
+				SlotLength:    1_000,
+				LengthInSlots: 432_000,
+				EraId:         eras.AlonzoEraDesc.Id,
+			}},
+			currentEra: eras.AlonzoEraDesc,
+			currentEpoch: models.Epoch{
+				EpochId:       500,
+				StartSlot:     100_000,
+				LengthInSlots: 432_000,
+			},
+			currentTip: ochainsync.Tip{
+				Point: ocommon.NewPoint(200_000, []byte("tip")),
+			},
+			config: LedgerStateConfig{CardanoNodeConfig: cfg},
+		}
+		ls.publishSnapshotsLocked()
+		return ls
+	}
+
+	// Control: with a resolvable shape the walk crosses the scheduled
+	// Babbage boundary and reports CPraos for the future epoch.
+	control := newLedger(newTestEraHistoryCfg(t))
+	mode, err := control.ConsensusModeForEpoch(600)
+	require.NoError(t, err)
+	assert.Equal(t, consensus.ConsensusModeCPraos, mode,
+		"the scheduled Babbage fork must be reflected in the forecast")
+
+	broken := newLedger(shelleyOnlyGenesisCfg(t))
+	_, shapeErr := broken.eraShapeWithError()
+	require.Error(t, shapeErr, "the premise: no shape can be built")
+
+	// An epoch the cache already covers is not a forecast and still answers.
+	mode, err = broken.ConsensusModeForEpoch(500)
+	require.NoError(t, err)
+	assert.Equal(t, consensus.ConsensusModeTPraos, mode)
+
+	// The current epoch and earlier read applied state and still answer.
+	mode, err = broken.ConsensusModeForEpoch(499)
+	require.NoError(t, err)
+	assert.Equal(t, consensus.ConsensusModeTPraos, mode)
+
+	// The future epoch needs the walk, so it must fail closed instead of
+	// reporting Alonzo's TPraos across the scheduled Babbage boundary.
+	_, err = broken.ConsensusModeForEpoch(600)
+	require.Error(t, err,
+		"a future-epoch consensus mode must fail closed without a shape")
 }

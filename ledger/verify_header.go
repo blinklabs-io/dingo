@@ -1154,7 +1154,20 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityWithCache(
 	}
 
 	// Consensus mode determines the VRF leader-value derivation path.
-	mode := ls.ConsensusModeForEpoch(epochId)
+	mode, modeErr := ls.ConsensusModeForEpoch(epochId)
+	if modeErr != nil {
+		// The mode selects both the leader-value derivation and the
+		// threshold, so without it eligibility cannot be evaluated. The era
+		// shape it is resolved from comes from the local node configuration,
+		// so an unresolvable mode is not the peer's fault: defer instead of
+		// recycling the connection that served the header.
+		return fmt.Errorf(
+			"%w: block header verification deferred at slot %d: %w",
+			errHeaderVerificationDeferred,
+			block.SlotNumber(),
+			modeErr,
+		)
+	}
 
 	// Extract the VRF output from the header body CBOR.
 	vrfResult, ok, err := headerVrfResultFromBodyCbor(block.Header())

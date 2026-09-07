@@ -10075,9 +10075,17 @@ func (ls *LedgerState) CurrentEpoch() uint64 {
 //     overrides surface here too), advancing once per scheduled
 //     boundary at-or-before the target epoch.
 //  4. Fall back to the current era if nothing applies.
+//
+// Step 3 is a forecast, so it fails closed: an era shape the node
+// configuration cannot supply returns an error rather than the current
+// era's mode. Silently answering with the current era's mode for a future
+// epoch is what a scheduled hard fork changes, and the wrong mode changes
+// both the VRF leader-value derivation and the threshold, so callers must
+// decline to answer instead of producing a mode nothing established.
+// Steps 1, 2 and 4 read state the node already holds and never error.
 func (ls *LedgerState) ConsensusModeForEpoch(
 	epoch uint64,
-) consensus.ConsensusMode {
+) (consensus.ConsensusMode, error) {
 	snapshot := ls.loadConsensusSnapshot()
 	cache := snapshot.epochCache
 	currentEra := snapshot.currentEra
@@ -10086,12 +10094,12 @@ func (ls *LedgerState) ConsensusModeForEpoch(
 
 	for _, e := range cache {
 		if e.EpochId == epoch {
-			return consensusModeForEraID(e.EraId)
+			return consensusModeForEraID(e.EraId), nil
 		}
 	}
 
 	if epoch <= currentEpoch.EpochId {
-		return consensusModeForEraID(currentEra.Id)
+		return consensusModeForEraID(currentEra.Id), nil
 	}
 
 	// HardForkInitiation path: if a confirmed transition pins the next
@@ -10104,15 +10112,33 @@ func (ls *LedgerState) ConsensusModeForEpoch(
 		epoch >= transitionInfo.KnownEpoch {
 		nextID := currentEra.Id + 1
 		if _, ok := ls.eraById(nextID); ok {
-			return consensusModeForEraID(nextID)
+			return consensusModeForEraID(nextID), nil
 		}
 	}
 
-	shape := ls.eraShape()
+	shape, err := ls.eraShapeWithError()
+	if err != nil {
+		return 0, fmt.Errorf(
+			"consensus mode for epoch %d is unresolvable: %w",
+			epoch,
+			err,
+		)
+	}
 	eraID := currentEra.Id
 	for {
 		entry, ok := shape.EraForID(eraID)
-		if !ok || entry.NextEraTrigger.Kind != hardfork.TriggerAtEpoch {
+		if !ok {
+			// An era missing from the shape stops the walk before it can
+			// rule out a scheduled fork at or before the target epoch, so
+			// the forecast is unresolvable rather than "no fork".
+			return 0, fmt.Errorf(
+				"consensus mode for epoch %d is unresolvable: "+
+					"era %d is unavailable in the hard-fork shape",
+				epoch,
+				eraID,
+			)
+		}
+		if entry.NextEraTrigger.Kind != hardfork.TriggerAtEpoch {
 			break
 		}
 		if entry.NextEraTrigger.Epoch > epoch {
@@ -10124,7 +10150,7 @@ func (ls *LedgerState) ConsensusModeForEpoch(
 		}
 		eraID = nextID
 	}
-	return consensusModeForEraID(eraID)
+	return consensusModeForEraID(eraID), nil
 }
 
 // consensusModeForEraID maps an era ID to its Praos consensus variant.

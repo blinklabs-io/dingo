@@ -98,6 +98,9 @@ type mockEpochProvider struct {
 	// epochSlotRange, when set, overrides EpochSlotRange's default fixed
 	// range so tests can model Byron-era offsets or variable epoch lengths.
 	epochSlotRange func(epoch uint64) (EpochSlotRange, error)
+	// consensusModeErr, when set, makes ConsensusModeForEpoch fail so tests
+	// can model an unresolvable era forecast.
+	consensusModeErr error
 }
 
 func newMockEpochProvider() *mockEpochProvider {
@@ -168,8 +171,11 @@ func (m *mockEpochProvider) ActiveSlotCoeff() float64 {
 
 func (m *mockEpochProvider) ConsensusModeForEpoch(
 	epoch uint64,
-) consensus.ConsensusMode {
-	return consensus.ConsensusModeTPraos
+) (consensus.ConsensusMode, error) {
+	if m.consensusModeErr != nil {
+		return 0, m.consensusModeErr
+	}
+	return consensus.ConsensusModeTPraos, nil
 }
 
 func (m *mockEpochProvider) SetEpochNonce(nonce []byte) {
@@ -1315,4 +1321,40 @@ func TestElectionConcurrentAccess(t *testing.T) {
 	for range 20 {
 		<-done
 	}
+}
+
+// TestComputeScheduleDeclinesUnresolvableConsensusMode pins the caller half of
+// the fail-closed consensus-mode forecast. The mode selects both the VRF input
+// construction and the threshold, so a schedule computed from a substituted
+// default is a leader-slot list cardano-node will reject. computeSchedule must
+// return the resolution error rather than produce one.
+func TestComputeScheduleDeclinesUnresolvableConsensusMode(t *testing.T) {
+	poolId := lcommon.PoolKeyHash{}
+	stakeProvider := newMockStakeProvider()
+	stakeProvider.totalStake = 1_000_000
+	stakeProvider.poolStakes[string(poolId[:])] = 1_000_000
+
+	epochProvider := newMockEpochProvider()
+	epochProvider.consensusModeErr = errors.New("era shape unavailable")
+
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	election := NewElection(
+		poolId,
+		electionTestVRFSeed,
+		stakeProvider,
+		epochProvider,
+		eventBus,
+		slog.New(slog.DiscardHandler),
+	)
+
+	schedule, err := election.computeSchedule(
+		context.Background(),
+		epochProvider.CurrentEpoch(),
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "era shape unavailable")
+	require.Nil(t, schedule,
+		"no schedule may be produced from an unresolved consensus mode")
 }
