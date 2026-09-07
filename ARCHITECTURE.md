@@ -412,6 +412,15 @@ graph LR
 
 How blocks flow from the network through validation and into storage.
 
+The Ouroboros block-fetch and chain-sync decoders initialize the decoded
+block/header hash before returning to the shared decode cache. This includes
+Musashi dispatch and the legacy full-Byron-EBB header fallback. The cache's
+mutex and waiter channels publish the initialized hash before another peer
+can use the same object; computing it in the receiving handler is too late.
+Consumers must treat cached decoded objects as immutable. Hash initialization
+remains inside the cache's panic-recovery boundary, and failed decodes retain
+their existing error, TTL, and eviction behavior.
+
 ```mermaid
 sequenceDiagram
     participant Peer
