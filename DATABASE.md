@@ -1,5 +1,23 @@
 # Dingo Database
 
+## Snapshot manifest limits
+
+Snapshot manifest I/O defaults to a 1 MiB encoded size limit before JSON
+decoding. Library callers can pass `lifecycle.WithManifestMaxBytes(n)` to
+manifest read/write/parse, label, catalog, snapshot, and restore operations.
+Use the same option for creation and consumption; zero selects 1 MiB and
+negative values fail before I/O. Cloud callers pass the option when
+registering S3/GCS destinations to set their catalog and fetch defaults.
+`PeekManifest` and `FetchCloudManifest` also accept per-call options; a custom
+destination must implement `ConfigurableCloudManifestFetcher` to honor
+those options, otherwise an explicit error is returned. The optional
+arguments change exported Go function types; direct existing calls retain
+their default behavior. Manifest encoding and checksums are unchanged.
+These limits bound manifest I/O, not bulk cloud snapshot downloads.
+Limit violations wrap `lifecycle.ErrManifestTooLarge`. Bark snapshot verify
+and restore report this as `ResourceExhausted` for local and cloud manifests,
+distinct from missing snapshots, checksum corruption, or cloud transport errors.
+
 ## Storage provider ownership
 
 Blob and metadata stores are constructed by the application plugin host and

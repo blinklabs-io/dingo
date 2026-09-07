@@ -48,10 +48,68 @@ const ManifestFormatVersion = 1
 // directory.
 const ManifestFileName = "manifest.json"
 
-// MaxManifestBytes bounds manifest inputs before JSON decoding. Manifests are
+// MaxManifestBytes is the default bound before JSON decoding. Manifests are
 // small metadata files; accepting an arbitrarily large object here would let
 // a malformed local or cloud snapshot consume memory before validation.
 const MaxManifestBytes = 1 << 20
+
+// ErrManifestTooLarge marks a manifest that exceeds its encoded byte budget.
+// Callers can distinguish this resource rejection from missing or corrupt data.
+var ErrManifestTooLarge = errors.New("manifest size limit exceeded")
+
+// ManifestOption configures manifest I/O. The same options should be used
+// when creating, listing, labeling, and restoring a snapshot.
+type ManifestOption func(*manifestConfig)
+
+type manifestConfig struct {
+	maxBytes int64
+}
+
+// WithManifestMaxBytes sets the maximum encoded manifest size. Zero uses
+// MaxManifestBytes (1 MiB); negative values are rejected before I/O.
+func WithManifestMaxBytes(maxBytes int64) ManifestOption {
+	return func(cfg *manifestConfig) { cfg.maxBytes = maxBytes }
+}
+
+func manifestByteLimit(opts []ManifestOption) (int64, error) {
+	cfg := manifestConfig{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	if cfg.maxBytes < 0 {
+		return 0, errors.New("manifest maximum must be >= 0")
+	}
+	if cfg.maxBytes == 0 {
+		return MaxManifestBytes, nil
+	}
+	return cfg.maxBytes, nil
+}
+
+// readManifestData applies the byte limit before allocating or decoding a
+// complete input. Probe separately so MaxInt64 does not overflow at limit+1.
+func readManifestData(r io.Reader, opts []ManifestOption) ([]byte, error) {
+	limit, err := manifestByteLimit(opts)
+	if err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(io.LimitReader(r, limit))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) == limit {
+		var probe [1]byte
+		n, probeErr := io.ReadFull(r, probe[:])
+		if n > 0 {
+			return nil, fmt.Errorf("manifest size exceeds maximum %d bytes: %w", limit, ErrManifestTooLarge)
+		}
+		if !errors.Is(probeErr, io.EOF) {
+			return nil, probeErr
+		}
+	}
+	return data, nil
+}
 
 // ErrManifestCorrupted marks a manifest that was found and read but failed
 // checksum validation — i.e. it (or the snapshot it belongs to) exists but
@@ -302,7 +360,11 @@ func (m Manifest) CheckCompatibility(
 // over the target is atomic on the same filesystem, so a reader always
 // observes either the complete old manifest or the complete new one,
 // never a partial one.
-func WriteManifest(dir string, m Manifest) error {
+func WriteManifest(dir string, m Manifest, opts ...ManifestOption) error {
+	limit, err := manifestByteLimit(opts)
+	if err != nil {
+		return err
+	}
 	m.FormatVersion = ManifestFormatVersion
 	sum, err := m.checksum()
 	if err != nil {
@@ -313,10 +375,10 @@ func WriteManifest(dir string, m Manifest) error {
 	if err != nil {
 		return fmt.Errorf("marshal manifest: %w", err)
 	}
-	if len(data) > MaxManifestBytes {
+	if int64(len(data)) > limit {
 		return fmt.Errorf(
-			"manifest size %d exceeds maximum %d bytes",
-			len(data), MaxManifestBytes,
+			"manifest size %d exceeds maximum %d bytes: %w",
+			len(data), limit, ErrManifestTooLarge,
 		)
 	}
 	path := filepath.Join(dir, ManifestFileName)
@@ -361,24 +423,21 @@ func WriteManifest(dir string, m Manifest) error {
 // ReadManifest reads and validates the manifest at dir/ManifestFileName,
 // rejecting it if the checksum doesn't match its contents or if its
 // format version is newer than this build understands.
-func ReadManifest(dir string) (Manifest, error) {
+func ReadManifest(dir string, opts ...ManifestOption) (Manifest, error) {
+	if _, err := manifestByteLimit(opts); err != nil {
+		return Manifest{}, err
+	}
 	path := filepath.Join(dir, ManifestFileName)
 	file, err := os.Open(path)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("read manifest %q: %w", path, err)
 	}
 	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, MaxManifestBytes+1))
+	data, err := readManifestData(file, opts)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("read manifest %q: %w", path, err)
 	}
-	if len(data) > MaxManifestBytes {
-		return Manifest{}, fmt.Errorf(
-			"read manifest %q: size exceeds maximum %d bytes",
-			path, MaxManifestBytes,
-		)
-	}
-	m, err := ParseManifest(data)
+	m, err := ParseManifest(data, opts...)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("%s: %w", path, err)
 	}
@@ -390,11 +449,15 @@ func ReadManifest(dir string) (Manifest, error) {
 // against bytes fetched however the caller obtained them (e.g. a cloud
 // destination's ListSnapshots fetching a single remote manifest.json
 // object without downloading the whole snapshot).
-func ParseManifest(data []byte) (Manifest, error) {
-	if len(data) > MaxManifestBytes {
+func ParseManifest(data []byte, opts ...ManifestOption) (Manifest, error) {
+	limit, err := manifestByteLimit(opts)
+	if err != nil {
+		return Manifest{}, err
+	}
+	if int64(len(data)) > limit {
 		return Manifest{}, fmt.Errorf(
-			"manifest size %d exceeds maximum %d bytes",
-			len(data), MaxManifestBytes,
+			"manifest size %d exceeds maximum %d bytes: %w",
+			len(data), limit, ErrManifestTooLarge,
 		)
 	}
 	var m Manifest
@@ -425,12 +488,12 @@ func ParseManifest(data []byte) (Manifest, error) {
 // label after Snapshot has already produced dir (e.g. bark's
 // CreateSnapshot RPC receives name/description in the same request but
 // Snapshot itself has no such parameters).
-func LabelSnapshot(dir string, name string, description string) error {
-	m, err := ReadManifest(dir)
+func LabelSnapshot(dir string, name string, description string, opts ...ManifestOption) error {
+	m, err := ReadManifest(dir, opts...)
 	if err != nil {
 		return err
 	}
 	m.Name = name
 	m.Description = description
-	return WriteManifest(dir, m)
+	return WriteManifest(dir, m, opts...)
 }

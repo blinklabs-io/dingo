@@ -179,9 +179,11 @@ func Restore(
 	snapshotDir string,
 	targetDataDir string,
 	storageConfig RestoreStorageConfig,
+	opts ...ManifestOption,
 ) (Manifest, error) {
 	return RestoreValidated(
 		ctx, host, registry, snapshotDir, targetDataDir, nil, storageConfig,
+		opts...,
 	)
 }
 
@@ -233,6 +235,7 @@ func RestoreValidated(
 	targetDataDir string,
 	validate func(Manifest) error,
 	storageConfig RestoreStorageConfig,
+	opts ...ManifestOption,
 ) (Manifest, error) {
 	return restoreValidated(
 		ctx,
@@ -243,6 +246,7 @@ func RestoreValidated(
 		validate,
 		storageConfig,
 		nil,
+		opts...,
 	)
 }
 
@@ -267,6 +271,7 @@ func RestoreRecoverable(
 	targetDataDir string,
 	validate func(Manifest) error,
 	storageConfig RestoreStorageConfig,
+	opts ...ManifestOption,
 ) (Manifest, *RestoreRecovery, error) {
 	var recovery *RestoreRecovery
 	manifest, err := restoreValidated(
@@ -278,6 +283,7 @@ func RestoreRecoverable(
 		validate,
 		storageConfig,
 		&recovery,
+		opts...,
 	)
 	return manifest, recovery, err
 }
@@ -291,11 +297,13 @@ func restoreValidated(
 	validate func(Manifest) error,
 	storageConfig RestoreStorageConfig,
 	retainRecovery **RestoreRecovery,
+	opts ...ManifestOption,
 ) (m Manifest, err error) {
 	manifest, snapshotDir, cleanup, err := resolveManifest(
 		ctx,
 		registry,
 		snapshotDir,
+		opts...,
 	)
 	if cleanup != nil {
 		defer cleanup()
@@ -513,11 +521,15 @@ func PeekManifest(
 	ctx context.Context,
 	registry *DestinationRegistry,
 	snapshotDir string,
+	opts ...ManifestOption,
 ) (Manifest, error) {
-	if m, ok, err := FetchCloudManifest(ctx, registry, snapshotDir); ok {
+	if _, err := manifestByteLimit(opts); err != nil {
+		return Manifest{}, err
+	}
+	if m, ok, err := FetchCloudManifest(ctx, registry, snapshotDir, opts...); ok {
 		return m, err
 	}
-	manifest, _, cleanup, err := resolveManifest(ctx, registry, snapshotDir)
+	manifest, _, cleanup, err := resolveManifest(ctx, registry, snapshotDir, opts...)
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -534,7 +546,11 @@ func resolveManifest(
 	ctx context.Context,
 	registry *DestinationRegistry,
 	snapshotDir string,
+	opts ...ManifestOption,
 ) (manifest Manifest, resolvedDir string, cleanup func(), err error) {
+	if _, err := manifestByteLimit(opts); err != nil {
+		return Manifest{}, "", nil, err
+	}
 	resolvedDir = snapshotDir
 	if _, ok := recognizedCloudScheme(registry, snapshotDir); ok {
 		localSnapshotDir, cloudCleanup, downloadErr := downloadCloudSnapshot(
@@ -548,7 +564,7 @@ func resolveManifest(
 		resolvedDir = localSnapshotDir
 		cleanup = cloudCleanup
 	}
-	manifest, err = ReadManifest(resolvedDir)
+	manifest, err = ReadManifest(resolvedDir, opts...)
 	if err != nil {
 		if cleanup != nil {
 			cleanup()

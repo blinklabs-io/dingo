@@ -144,6 +144,10 @@ type BootstrapConfig struct {
 	// DownloadMaxIdleRetries is the number of consecutive idle retries
 	// allowed without additional bytes. Zero uses the downloader default.
 	DownloadMaxIdleRetries int
+	// DownloadMaxBytes bounds each compressed object, including resumed
+	// bytes. Zero uses DefaultMaxDownloadBytes. It is not a cumulative
+	// budget across archives, mirrors, or retries.
+	DownloadMaxBytes int64
 	// DownloadMaxTransientRetries is the maximum number of retry attempts
 	// for transient network errors (TLS handshake failures, connection
 	// resets, HTTP 429, HTTP 5xx) per download. Zero uses the downloader
@@ -336,6 +340,9 @@ func Bootstrap(
 	ctx context.Context,
 	cfg BootstrapConfig,
 ) (*BootstrapResult, error) {
+	if err := (DownloadConfig{MaxBytes: cfg.DownloadMaxBytes}).Validate(); err != nil {
+		return nil, err
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -589,6 +596,11 @@ func Bootstrap(
 	archivePath := filepath.Join(downloadDir, archiveFilename)
 	snapshotCacheKey := snapshot.Digest
 
+	if err := (DownloadConfig{
+		MaxBytes: cfg.DownloadMaxBytes, ExpectedSize: snapshot.Size,
+	}).Validate(); err != nil {
+		return nil, err
+	}
 	if isFileComplete(archivePath, snapshot.Size) {
 		cfg.Logger.Info(
 			"snapshot archive already downloaded, skipping",
@@ -604,6 +616,7 @@ func Bootstrap(
 					DestDir:             downloadDir,
 					Filename:            archiveFilename,
 					ExpectedSize:        snapshot.Size,
+					MaxBytes:            cfg.DownloadMaxBytes,
 					Logger:              cfg.Logger,
 					OnProgress:          cfg.OnProgress,
 					IdleTimeout:         cfg.DownloadIdleTimeout,
@@ -879,6 +892,7 @@ func downloadAncillary(
 				DestDir:      downloadDir,
 				Filename:     ancillaryFilename,
 				ExpectedSize: snapshot.AncillarySize,
+				MaxBytes:     cfg.DownloadMaxBytes,
 				Logger:       cfg.Logger,
 				OnProgress: withProgressContext(
 					cfg.OnProgress,

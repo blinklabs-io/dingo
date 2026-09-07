@@ -787,6 +787,12 @@ func (h *databaseServiceHandler) resolveSnapshotSource(
 	if localErr == nil {
 		return localDir, nil
 	}
+	if errors.Is(localErr, lifecycle.ErrManifestTooLarge) {
+		return "", connect.NewError(
+			connect.CodeResourceExhausted,
+			fmt.Errorf("snapshot %q manifest exceeds size limit: %w", snapshotID, localErr),
+		)
+	}
 	// A corrupted/hand-edited manifest means the snapshot IS there, just
 	// unusable — report that distinctly rather than falling through to
 	// "not found", which would otherwise be indistinguishable from a
@@ -803,8 +809,12 @@ func (h *databaseServiceHandler) resolveSnapshotSource(
 	}
 	cloudURI, exists, cloudErr := h.cloudSnapshotExists(ctx, snapshotID)
 	if cloudErr != nil {
+		code := connect.CodeUnavailable
+		if errors.Is(cloudErr, lifecycle.ErrManifestTooLarge) {
+			code = connect.CodeResourceExhausted
+		}
 		return "", connect.NewError(
-			connect.CodeUnavailable,
+			code,
 			fmt.Errorf(
 				"check cloud destination for snapshot %q: %w",
 				snapshotID,

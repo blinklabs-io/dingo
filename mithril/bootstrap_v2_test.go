@@ -726,6 +726,51 @@ func TestBootstrapV2(t *testing.T) {
 	assert.Positive(t, int(progressCalled.Load()))
 }
 
+func TestV2ArchiveByteLimits(t *testing.T) {
+	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 0})
+	for _, kind := range []string{"digests", "immutable", "ancillary"} {
+		for _, oversized := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/oversized=%t", kind, oversized), func(t *testing.T) {
+				dir := t.TempDir()
+				cfg := fixture.bootstrapConfig(dir)
+				cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+				var size int
+				switch kind {
+				case "digests":
+					size = len(fixture.digestArchive)
+				case "immutable":
+					size = len(fixture.immutableArchives[0])
+				case "ancillary":
+					size = len(fixture.ancillaryArchive)
+				}
+				cfg.DownloadMaxBytes = int64(size)
+				if oversized {
+					cfg.DownloadMaxBytes--
+				}
+				var err error
+				switch kind {
+				case "digests":
+					_, err = downloadDigestsArchive(context.Background(), cfg, fixture.server.URL+"/files/digests.tar.zst", fixture.artifact, dir)
+				case "immutable":
+					location := fixture.artifact.Immutables.Locations[0]
+					err = fetchImmutableArchive(context.Background(), cfg, cfg.Logger, &location, 0, filepath.Join(dir, "archives"), filepath.Join(dir, "extracted"))
+				case "ancillary":
+					var verified *vettedDir
+					verified, _, _, err = downloadAncillaryV2(context.Background(), cfg, fixture.artifact, dir)
+					if verified != nil {
+						verified.Close()
+					}
+				}
+				if oversized {
+					require.ErrorIs(t, err, ErrDownloadTooLarge)
+				} else {
+					require.NoError(t, err)
+				}
+			})
+		}
+	}
+}
+
 func TestBootstrapV2NoCertVerification(t *testing.T) {
 	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
 	cfg := fixture.bootstrapConfig(t.TempDir())

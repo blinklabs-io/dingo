@@ -69,7 +69,11 @@ func Snapshot(
 	dingoVersion string,
 	blobPluginName string,
 	metadataPluginName string,
+	opts ...ManifestOption,
 ) (m Manifest, err error) {
+	if _, err := manifestByteLimit(opts); err != nil {
+		return Manifest{}, err
+	}
 	blobBackuper, ok := db.Blob().(blob.Backuper)
 	if !ok {
 		return Manifest{}, fmt.Errorf(
@@ -253,7 +257,7 @@ func Snapshot(
 		BlobBytes:       blobInfo.Size(),
 		MetadataBytes:   metadataInfo.Size(),
 	}
-	if err := WriteManifest(dir, manifest); err != nil {
+	if err := WriteManifest(dir, manifest, opts...); err != nil {
 		return Manifest{}, err
 	}
 	// WriteManifest computes the checksum (and fills in FormatVersion) on
@@ -261,7 +265,7 @@ func Snapshot(
 	// here is never updated, so re-read what was actually written rather
 	// than return a Manifest whose Checksum/FormatVersion don't match the
 	// file this function just produced.
-	written, err := ReadManifest(dir)
+	written, err := ReadManifest(dir, opts...)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("re-read manifest after write: %w", err)
 	}

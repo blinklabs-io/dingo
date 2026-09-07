@@ -39,8 +39,14 @@ import (
 // startup) calls this explicitly when GCS cloud destination support should
 // be available, rather than this package registering itself
 // process-globally via init().
-func RegisterGCS(registry *DestinationRegistry) {
-	registry.Register("gcs", newGCSDestination)
+func RegisterGCS(registry *DestinationRegistry, opts ...ManifestOption) {
+	limit, err := manifestByteLimit(opts)
+	registry.Register("gcs", func(uri *url.URL) (CloudDestination, error) {
+		if err != nil {
+			return nil, err
+		}
+		return newGCSDestination(uri, WithManifestMaxBytes(limit))
+	})
 }
 
 // gcsDestination uploads/downloads a snapshot directory's files as flat GCS
@@ -48,12 +54,17 @@ func RegisterGCS(registry *DestinationRegistry) {
 // Credentials — same convention as database/plugin/blob/gcs, no explicit
 // service-account config here.
 type gcsDestination struct {
-	client *storage.Client
-	bucket *storage.BucketHandle
-	prefix string
+	client           *storage.Client
+	bucket           *storage.BucketHandle
+	prefix           string
+	maxManifestBytes int64
 }
 
-func newGCSDestination(uri *url.URL) (CloudDestination, error) {
+func newGCSDestination(uri *url.URL, opts ...ManifestOption) (CloudDestination, error) {
+	limit, err := manifestByteLimit(opts)
+	if err != nil {
+		return nil, err
+	}
 	bucketName := uri.Host
 	if bucketName == "" {
 		return nil, fmt.Errorf(
@@ -75,9 +86,10 @@ func newGCSDestination(uri *url.URL) (CloudDestination, error) {
 		)
 	}
 	return &gcsDestination{
-		client: client,
-		bucket: client.Bucket(bucketName),
-		prefix: prefix,
+		client:           client,
+		bucket:           client.Bucket(bucketName),
+		prefix:           prefix,
+		maxManifestBytes: limit,
 	}, nil
 }
 
@@ -296,11 +308,12 @@ func (d *gcsDestination) fetchManifest(
 		return Manifest{}, fmt.Errorf("open gcs object %q: %w", key, err)
 	}
 	defer r.Close()
-	data, err := io.ReadAll(io.LimitReader(r, MaxManifestBytes+1))
+	opts := []ManifestOption{WithManifestMaxBytes(d.maxManifestBytes)}
+	data, err := readManifestData(r, opts)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("read gcs object %q: %w", key, err)
 	}
-	return ParseManifest(data)
+	return ParseManifest(data, opts...)
 }
 
 // FetchManifest implements CloudManifestFetcher: it fetches and parses
@@ -310,6 +323,16 @@ func (d *gcsDestination) fetchManifest(
 // of it.
 func (d *gcsDestination) FetchManifest(ctx context.Context) (Manifest, error) {
 	return d.fetchManifest(ctx, "")
+}
+
+func (d *gcsDestination) FetchManifestWithOptions(ctx context.Context, opts ...ManifestOption) (Manifest, error) {
+	limit, err := manifestByteLimit(opts)
+	if err != nil {
+		return Manifest{}, err
+	}
+	configured := *d
+	configured.maxManifestBytes = limit
+	return configured.FetchManifest(ctx)
 }
 
 // Delete implements CloudDeleter: it removes every object under this

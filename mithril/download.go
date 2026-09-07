@@ -81,6 +81,10 @@ func withProgressContext(
 }
 
 const (
+	// DefaultMaxDownloadBytes bounds each compressed archive, including any
+	// resumed prefix. It matches the existing 1 TiB extraction budget.
+	DefaultMaxDownloadBytes int64 = 1 << 40
+
 	defaultDownloadIdleTimeout = 2 * time.Minute
 	defaultDownloadIdleRetries = 12
 
@@ -90,6 +94,10 @@ const (
 )
 
 var (
+	// ErrDownloadTooLarge identifies a configured or expected size limit.
+	// It is terminal: retrying cannot increase the permitted file size.
+	ErrDownloadTooLarge = errors.New("download size limit exceeded")
+
 	errDownloadIdleTimeout = errors.New("download idle timeout")
 	// errDownloadTransient is wrapped into errors returned by
 	// downloadSnapshotOnce for HTTP 429 and HTTP 5xx responses so that
@@ -122,6 +130,11 @@ type DownloadConfig struct {
 	// the downloaded file size is verified after download. A
 	// mismatch returns an error.
 	ExpectedSize int64
+	// MaxBytes bounds the complete downloaded file, including resumed bytes,
+	// even when ExpectedSize or Content-Length is absent. Zero selects
+	// DefaultMaxDownloadBytes; negative values are invalid. This is a
+	// per-object bound, not an aggregate bootstrap or transfer-byte budget.
+	MaxBytes int64
 	// Logger is used for logging download progress.
 	Logger *slog.Logger
 	// OnProgress is called periodically with download progress.
@@ -155,6 +168,13 @@ type DownloadConfig struct {
 
 // Validate checks DownloadConfig values before use.
 func (cfg DownloadConfig) Validate() error {
+	if cfg.MaxBytes < 0 {
+		return errors.New("download config MaxBytes must be >= 0")
+	}
+	if cfg.ExpectedSize > cfg.maxBytes() {
+		return fmt.Errorf("%w: expected size %d exceeds maximum %d bytes",
+			ErrDownloadTooLarge, cfg.ExpectedSize, cfg.maxBytes())
+	}
 	if cfg.MaxIdleRetries < 0 {
 		return fmt.Errorf(
 			"download config MaxIdleRetries must be >= 0, got %d",
@@ -167,6 +187,30 @@ func (cfg DownloadConfig) Validate() error {
 		}
 	}
 	return nil
+}
+
+func (cfg DownloadConfig) maxBytes() int64 {
+	if cfg.MaxBytes > 0 {
+		return cfg.MaxBytes
+	}
+	return DefaultMaxDownloadBytes
+}
+
+func (cfg DownloadConfig) sizeLimit() int64 {
+	limit := cfg.maxBytes()
+	if cfg.ExpectedSize > 0 && cfg.ExpectedSize < limit {
+		limit = cfg.ExpectedSize
+	}
+	return limit
+}
+
+func (cfg DownloadConfig) sizeLimitError() error {
+	if cfg.ExpectedSize > 0 && cfg.ExpectedSize <= cfg.maxBytes() {
+		return fmt.Errorf("%w: download response exceeds expected size %d bytes",
+			ErrDownloadTooLarge, cfg.ExpectedSize)
+	}
+	return fmt.Errorf("%w: download response exceeds maximum %d bytes",
+		ErrDownloadTooLarge, cfg.maxBytes())
 }
 
 type idleTimeoutReader struct {
@@ -694,6 +738,10 @@ func downloadSnapshotOnce(
 	var existingSize int64
 	if fi, err := root.Stat(filename); err == nil {
 		existingSize = fi.Size()
+		if existingSize > cfg.sizeLimit() {
+			root.Remove(filename) //nolint:errcheck
+			return "", cfg.sizeLimitError()
+		}
 	}
 
 	req, err := http.NewRequestWithContext(
@@ -766,11 +814,8 @@ func downloadSnapshotOnce(
 		if resp.ContentLength > 0 {
 			totalSize = resp.ContentLength
 		}
-		if cfg.ExpectedSize > 0 && resp.ContentLength > cfg.ExpectedSize {
-			return "", fmt.Errorf(
-				"download response exceeds expected size: got at least %d bytes, expected %d bytes",
-				resp.ContentLength, cfg.ExpectedSize,
-			)
+		if resp.ContentLength > cfg.sizeLimit() {
+			return "", cfg.sizeLimitError()
 		}
 		file, err = root.OpenFile(
 			filename,
@@ -879,20 +924,20 @@ func downloadSnapshotOnce(
 			// Replace the original response body with the
 			// fresh full-download stream.
 			resp.Body = resp2.Body
+			if resp2.ContentLength > cfg.sizeLimit() {
+				file.Close()
+				return "", cfg.sizeLimitError()
+			}
 			if resp2.ContentLength > 0 {
 				totalSize = resp2.ContentLength
 			}
 		} else {
 			// Resume supported with matching offset
+			if resp.ContentLength > cfg.sizeLimit()-existingSize {
+				return "", cfg.sizeLimitError()
+			}
 			if resp.ContentLength > 0 {
 				totalSize = existingSize + resp.ContentLength
-			}
-			if cfg.ExpectedSize > 0 &&
-				resp.ContentLength > cfg.ExpectedSize-existingSize {
-				return "", fmt.Errorf(
-					"download response exceeds expected size: got at least %d bytes, expected %d bytes",
-					totalSize, cfg.ExpectedSize,
-				)
 			}
 			file, err = root.OpenFile(
 				filename,
@@ -1000,38 +1045,36 @@ func downloadSnapshotOnce(
 	body := newIdleTimeoutReader(resp.Body, idleTimeout, func() {
 		cancelDownload(downloadIdleTimeoutCause(idleTimeout))
 	})
-	limitedBody := io.Reader(body)
-	if cfg.ExpectedSize > 0 && cfg.ExpectedSize >= existingSize {
-		// Read at most one byte beyond the expected boundary. That byte
-		// distinguishes an oversized response from an exact-boundary body
-		// without allowing the response to be copied in full first.
-		limitedBody = io.LimitReader(
-			body,
-			cfg.ExpectedSize-existingSize+1,
-		)
+	// Copy only the remaining file budget, then probe one byte without
+	// writing it. Separate probing avoids limit+1 overflow at MaxInt64.
+	_, copyErr := io.Copy(pw, io.LimitReader(body, cfg.sizeLimit()-existingSize))
+	if copyErr == nil && pw.written == cfg.sizeLimit() {
+		var probe [1]byte
+		var n int
+		n, copyErr = io.ReadFull(body, probe[:])
+		if n > 0 {
+			copyErr = cfg.sizeLimitError()
+		} else if errors.Is(copyErr, io.EOF) {
+			copyErr = nil
+		}
 	}
-	if _, err := io.Copy(pw, limitedBody); err != nil {
+	if copyErr != nil {
 		body.Stop()
 		file.Close()
 		file = nil
+		if errors.Is(copyErr, ErrDownloadTooLarge) {
+			root.Remove(filename) //nolint:errcheck
+			return "", copyErr
+		}
 		if cause := context.Cause(downloadCtx); errors.Is(
 			cause,
 			errDownloadIdleTimeout,
 		) {
 			return "", fmt.Errorf("writing snapshot data: %w", cause)
 		}
-		return "", fmt.Errorf("writing snapshot data: %w", err)
+		return "", fmt.Errorf("writing snapshot data: %w", copyErr)
 	}
 	body.Stop()
-	if cfg.ExpectedSize > 0 && pw.written > cfg.ExpectedSize {
-		file.Close()
-		file = nil
-		root.Remove(filename) //nolint:errcheck
-		return "", fmt.Errorf(
-			"download response exceeds expected size: got more than %d bytes",
-			cfg.ExpectedSize,
-		)
-	}
 
 	// Close the file explicitly so write errors (e.g. ENOSPC
 	// during a deferred flush) are not silently ignored.
