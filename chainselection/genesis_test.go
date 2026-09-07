@@ -77,8 +77,15 @@ func TestGenesisSelectionStateTransitionsAtomically(t *testing.T) {
 	require.True(t, active)
 	assert.Equal(t, uint64(30), window)
 
+	// GenesisSelectionState reads a cached snapshot rather than re-deriving
+	// from cs.mode under cs.mutex on every call (#4070: taking cs.mutex here
+	// created a lock-order inversion with chainsync.State.clientConnIdMutex).
+	// Every real mutation site refreshes that snapshot in the same critical
+	// section that changes cs.mode; mirror that here after the direct-field
+	// mutation this test uses to simulate the transition.
 	cs.mutex.Lock()
 	cs.mode = SelectionModePraos
+	cs.refreshGenesisSelectionSnapshotLocked()
 	cs.mutex.Unlock()
 
 	active, window = cs.GenesisSelectionState()
