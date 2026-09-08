@@ -44,7 +44,7 @@ type forgingMetrics struct {
 	blockTxCount     prometheus.Histogram
 	forgeSyncSkip    prometheus.Counter
 	// Leader checks refused because this node's own two views of its chain did
-	// not agree. Three reasons, each from a different pair of inputs:
+	// not agree. Four reasons, each from a different pair of inputs:
 	//
 	//   - "slot_gap": the ledger-applied tip trails this node's primary
 	//     chain tip by more than ForgePrimaryChainTipToleranceSlots.
@@ -55,15 +55,28 @@ type forgingMetrics struct {
 	//   - "primary_tip_behind_applied": the primary chain tip is at a LOWER slot than the
 	//     applied tip, so the parent the builder would use is one the ledger
 	//     has already built past. Inputs: applied tip slot, primary tip slot.
+	//   - "unapplied_rival_at_leader_slot": the primary chain tip already holds
+	//     a block AT this slot that the ledger has not applied, so forging
+	//     would parent a block for slot S on a tip already at slot S.
+	//     Inputs: current slot, applied tip slot, primary tip slot.
 	//
-	// Counted only on slots this node was actually elected to forge, so the
-	// value is lost blocks rather than leader checks. Any increment means the
-	// fault is local rather than in the network, but the reasons do not share
-	// a diagnosis: "slot_gap" and "primary_tip_hash_diverged" mean the ledger
-	// pipeline is behind the primary chain, while "primary_tip_behind_applied"
-	// is the opposite -- the ledger is AHEAD of the primary chain, which is
-	// chain/ledger reconciliation rather than an apply backlog. See
-	// ARCHITECTURE.md, "Block Production".
+	// Every value counts lost blocks rather than leader checks, but they do
+	// not establish leadership the same way. The first three are counted after
+	// leader selection has proven this node elected. The fourth is refused
+	// BEFORE the leader check -- it is the one gate that can drop a scheduled
+	// leader slot without moving node_is_leader, not_leader or
+	// could_not_forge -- so it is counted from the precomputed VRF schedule
+	// (isScheduledLeaderSlot), the same read that raises its log line to WARN.
+	// That basis fails quiet when no schedule is cached for the epoch, so it
+	// can under-count, never over-count.
+	//
+	// Any increment means the fault is local rather than in the network, but
+	// the reasons do not share a diagnosis: "slot_gap",
+	// "primary_tip_hash_diverged" and "unapplied_rival_at_leader_slot" mean
+	// the ledger pipeline is behind the primary chain, while
+	// "primary_tip_behind_applied" is the opposite -- the ledger is AHEAD of
+	// the primary chain, which is chain/ledger reconciliation rather than an
+	// apply backlog. See ARCHITECTURE.md, "Block Production".
 	forgeStaleTipSkip *prometheus.CounterVec
 	// Pre-materialized children for the reason label values, so the leader
 	// check does not resolve a label on every skip and neither series is
@@ -71,6 +84,7 @@ type forgingMetrics struct {
 	forgeStaleTipSkipSlotGap          prometheus.Counter
 	forgeStaleTipSkipHashDiverged     prometheus.Counter
 	forgeStaleTipSkipPrimaryTipBehind prometheus.Counter
+	forgeStaleTipSkipUnappliedRival   prometheus.Counter
 	slotClockErrors                   prometheus.Counter
 	tipGapSlots                       prometheus.Gauge
 
@@ -212,7 +226,7 @@ func initForgingMetrics(
 	m.forgeStaleTipSkip = factory.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "dingo_forge_stale_tip_skip_total",
-			Help: "forging attempts skipped because this node's ledger-applied tip and its own primary chain tip did not describe the same chain position; by reason (slot_gap, primary_tip_hash_diverged, primary_tip_behind_applied)",
+			Help: "forging attempts skipped because this node's ledger-applied tip and its own primary chain tip did not describe the same chain position; by reason (slot_gap, primary_tip_hash_diverged, primary_tip_behind_applied, unapplied_rival_at_leader_slot)",
 		},
 		[]string{"reason"},
 	)
@@ -224,6 +238,9 @@ func initForgingMetrics(
 	)
 	m.forgeStaleTipSkipPrimaryTipBehind = m.forgeStaleTipSkip.WithLabelValues(
 		forgeStaleTipReasonPrimaryTipBehind,
+	)
+	m.forgeStaleTipSkipUnappliedRival = m.forgeStaleTipSkip.WithLabelValues(
+		forgeStaleTipReasonUnappliedRival,
 	)
 	m.tipGapSlots = factory.NewGauge(
 		prometheus.GaugeOpts{

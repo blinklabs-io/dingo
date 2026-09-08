@@ -128,6 +128,16 @@ const (
 	forgeStaleTipReasonSlotGap          = "slot_gap"
 	forgeStaleTipReasonHashDiverged     = "primary_tip_hash_diverged"
 	forgeStaleTipReasonPrimaryTipBehind = "primary_tip_behind_applied"
+	// The fourth reason is recorded from a PRE-leader-check refusal: the
+	// primary chain tip already holds a block at the current slot that the
+	// ledger has not applied, so forging would parent a block for slot S on a
+	// tip already at slot S. The other three are counted after leader
+	// selection has proven this node elected; this one is counted from the
+	// precomputed VRF schedule (isScheduledLeaderSlot), which the path already
+	// consults to choose its log level. That basis fails quiet -- a checker
+	// with no cached schedule for the epoch reports false -- so the series can
+	// under-count, never over-count.
+	forgeStaleTipReasonUnappliedRival = "unapplied_rival_at_leader_slot"
 )
 
 // BlockForger coordinates block production for a stake pool.
@@ -1006,9 +1016,33 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	//
 	// Routed through logGateSkip because this runs before leader selection, so
 	// a slot this node was scheduled to lead would otherwise vanish at Debug.
+	//
+	// The schedule lookup is also what the counter is taken from. This is the
+	// one refusal the gate adds that can lose a scheduled leader slot without
+	// moving any parity counter: it returns before checkLeaderSafe, so
+	// about_to_lead has already incremented and none of node_is_leader,
+	// not_leader or could_not_forge ever will. The same real-world event --
+	// a rival block at our leader slot -- reaches the contested-slot branch
+	// above when the ledger has applied it, where it moves both
+	// slotBattlesTotal and could_not_forge, and lands here when it has not, so
+	// without a counter a dashboard would see the lost block in one case and
+	// not the other purely on pipeline timing.
+	//
+	// Counted on the stale-tip vector because it is the same disagreement the
+	// vector already reports -- applied tip behind primary chain tip -- and a
+	// dashboard summing the reasons then has every locally-caused lost slot in
+	// one series. It is the only reason counted from the VRF schedule rather
+	// than from a completed leader check; see forgeStaleTipReasonUnappliedRival.
 	if currentSlot == parentSlot && parentSlot > tipSlot {
-		f.logGateSkip(
-			currentSlot,
+		// One schedule read, shared by the counter and the log level, so a
+		// skip does not run the lookup (or the panic recovery around it)
+		// twice.
+		leaderSlot := f.isScheduledLeaderSlot(currentSlot)
+		if leaderSlot && f.metrics != nil {
+			f.metrics.forgeStaleTipSkipUnappliedRival.Inc()
+		}
+		f.logGateSkipScheduled(
+			leaderSlot,
 			"forge skip: primary chain tip already has a block at this slot",
 			"current_slot", currentSlot,
 			"tip_slot", tipSlot,
@@ -1840,7 +1874,19 @@ func (f *BlockForger) logGateSkip(
 	msg string,
 	attrs ...any,
 ) {
-	if f.isScheduledLeaderSlot(slot) {
+	f.logGateSkipScheduled(f.isScheduledLeaderSlot(slot), msg, attrs...)
+}
+
+// logGateSkipScheduled is logGateSkip for a caller that has already read
+// isScheduledLeaderSlot for the slot -- because it also counts the skip -- so
+// the schedule lookup, and the panic recovery around the pluggable checker
+// inside it, run once per skip rather than twice.
+func (f *BlockForger) logGateSkipScheduled(
+	scheduled bool,
+	msg string,
+	attrs ...any,
+) {
+	if scheduled {
 		f.logger.Warn(msg, append(attrs, "leader_slot", true)...)
 		return
 	}

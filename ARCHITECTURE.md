@@ -4808,7 +4808,7 @@ rather than from the dense-chain "a slot or two" steady state. Expressing the
 bound in blocks, or as an ancestry predicate over the unapplied span, is
 tracked in #4143.
 
-`dingo_forge_stale_tip_skip_total` carries a `reason` label with three values,
+`dingo_forge_stale_tip_skip_total` carries a `reason` label with four values,
 each from a different pair of inputs:
 
 | `reason` | Meaning | Inputs |
@@ -4816,9 +4816,11 @@ each from a different pair of inputs:
 | `slot_gap` | The applied tip trails the primary chain tip by more than `forgePrimaryChainTipToleranceSlots`. | applied tip slot, primary chain tip slot |
 | `primary_tip_hash_diverged` | Primary chain tip and applied tip are at the same slot but name different blocks -- an equal-slot fork the ledger has not applied. | applied tip hash, primary chain tip hash |
 | `primary_tip_behind_applied` | The primary chain tip is at a lower slot than the applied tip, so the builder's parent is a block the ledger has already built past. | applied tip slot, primary chain tip slot |
+| `unapplied_rival_at_leader_slot` | The primary chain tip already holds a block at this slot that the ledger has not applied, so forging would parent a block for slot S on a tip already at slot S. | current slot, applied tip slot, primary chain tip slot |
 
 Every reason means the fault is local rather than in the network, but they do
-not all point at the same component. `slot_gap` and `primary_tip_hash_diverged`
+not all point at the same component. `slot_gap`,
+`primary_tip_hash_diverged` and `unapplied_rival_at_leader_slot`
 mean the ledger pipeline is behind the primary chain -- blocks admitted and
 selected but not yet applied. `primary_tip_behind_applied` is the opposite: the
 ledger is ahead of the primary chain, which is chain/ledger reconciliation
@@ -4826,8 +4828,19 @@ ledger is ahead of the primary chain, which is chain/ledger reconciliation
 apply backlog. Reading it as a lagging pipeline sends an operator to the wrong
 place.
 
-All three are counted only on slots this node was actually elected to forge, so
-the counter reads as lost blocks rather than as leader checks.
+All four count lost blocks rather than leader checks, but they do not establish
+leadership the same way. The first three are counted after leader selection has
+proven this node elected. `unapplied_rival_at_leader_slot` is refused *before*
+the leader check -- it is the one gate that can drop a scheduled leader slot
+without moving `Forge_node_is_leader`, `Forge_node_not_leader` or
+`Forge_could_not_forge` -- so it is counted from the precomputed VRF schedule
+(`isScheduledLeaderSlot`), the same read that raises its log line to `WARN`
+with `leader_slot=true`. That read fails quiet when no schedule is cached for
+the epoch, so the series can under-count and never over-counts. It exists
+because one real-world event splits across two paths purely on pipeline
+timing: a rival block at our leader slot that the ledger has applied is
+counted as a slot battle and a could-not-forge, while the same rival still
+unapplied is refused here.
 
 KES periods are computed from the era-aware absolute slot (`currentSlot / slotsPerKESPeriod`) for both startup opcert validation and forge-time signing, so networks with Byron-era prefixes do not skew the current KES period by converting wall-clock duration directly through the Shelley slot length.
 Successful startup validation captures Shelley genesis `MaxKESEvolutions` on

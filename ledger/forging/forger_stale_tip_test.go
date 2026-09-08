@@ -380,6 +380,10 @@ func TestForgeProceedsWhenEitherTipHashIsEmpty(t *testing.T) {
 // TestForgeStaleTipSkipReasonsArePreMaterialized pins that every reason series
 // exists before the first skip, so a dashboard is not looking at an absent
 // series.
+//
+// Four series: the three post-leader-check disagreements (slot_gap,
+// primary_tip_hash_diverged, primary_tip_behind_applied) plus the pre-leader
+// -check unapplied_rival_at_leader_slot.
 func TestForgeStaleTipSkipReasonsArePreMaterialized(t *testing.T) {
 	var logs bytes.Buffer
 	hash := bytes.Repeat([]byte{0xAA}, 32)
@@ -391,7 +395,7 @@ func TestForgeStaleTipSkipReasonsArePreMaterialized(t *testing.T) {
 	)
 	require.Equal(
 		t,
-		3,
+		4,
 		testutil.CollectAndCount(forger.metrics.forgeStaleTipSkip),
 	)
 }
@@ -675,4 +679,113 @@ func TestForgeProceedsWhenFrontierIsUninitialised(t *testing.T) {
 		t,
 		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipPrimaryTipBehind),
 	)
+}
+
+// TestForgeCountsLeaderSlotLostToUnappliedRival pins the counter on the one
+// refusal this gate adds that runs BEFORE leader selection: the primary chain
+// tip already holds a block at the current slot while the ledger has not
+// applied it. That path returns before checkLeaderSafe, so a slot this node
+// was scheduled to lead moves about_to_lead and nothing else -- no
+// node_is_leader, no not_leader, no could_not_forge.
+//
+// It matters because one real-world event splits across two paths purely on
+// pipeline timing. A rival block at our leader slot that the ledger HAS
+// applied reaches the contested-slot branch above and moves both
+// slotBattlesTotal and could_not_forge; the same rival still unapplied lands
+// here. Without this counter a dashboard sees the lost block in the first case
+// and not in the second.
+//
+// The count is taken from isScheduledLeaderSlot, which this path already
+// consults to pick the log level, so the counter moves on exactly the slots
+// the WARN marks and never on an ordinary slot.
+func TestForgeCountsLeaderSlotLostToUnappliedRival(t *testing.T) {
+	const leaderSlot = uint64(200)
+	for _, tc := range []struct {
+		name      string
+		scheduled map[uint64]struct{}
+		wantCount float64
+		wantLevel string
+	}{
+		{
+			// Not a slot this node was due to lead: nothing was lost,
+			// so nothing is counted and the skip stays routine.
+			name:      "ordinary slot counts nothing",
+			scheduled: map[uint64]struct{}{},
+			wantCount: 0,
+			wantLevel: `"level":"DEBUG"`,
+		},
+		{
+			// A scheduled leader slot: a block this node would have
+			// forged, dropped by a gate that no parity counter covers.
+			name: "scheduled leader slot counts one",
+			scheduled: map[uint64]struct{}{
+				leaderSlot: {},
+			},
+			wantCount: 1,
+			wantLevel: `"level":"WARN"`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			// The applied tip is 2 slots back -- inside the tolerance, so
+			// the post-leader-check stale-tip gate does not fire -- while
+			// the primary chain tip already carries a block at the current
+			// slot.
+			forger, builder, broadcaster := newStaleTipTestForgerWithLeader(
+				t,
+				&forgerScheduleAwareLeader{scheduled: tc.scheduled},
+				leaderSlot,   // current slot
+				leaderSlot-2, // ledger-applied tip, still behind
+				leaderSlot,   // primary chain tip holds this slot already
+				bytes.Repeat([]byte{0xAA}, 32),
+				bytes.Repeat([]byte{0xBB}, 32),
+				&logs,
+			)
+			require.LessOrEqual(
+				t,
+				uint64(2),
+				forger.forgePrimaryChainTipToleranceSlots,
+				"this test needs the 2-slot gap to be inside the tolerance",
+			)
+
+			require.NoError(
+				t,
+				forger.checkAndForgeProduction(context.Background()),
+			)
+
+			require.Zero(t, builder.calls)
+			require.Zero(t, broadcaster.calls)
+			require.Contains(
+				t,
+				logs.String(),
+				"forge skip: primary chain tip already has a block at this slot",
+			)
+			require.Contains(t, logs.String(), tc.wantLevel)
+			require.Equal(
+				t,
+				tc.wantCount,
+				testutil.ToFloat64(
+					forger.metrics.forgeStaleTipSkipUnappliedRival,
+				),
+			)
+			// The three post-leader-check reasons describe a different
+			// refusal and must not move on this path.
+			require.Zero(
+				t,
+				testutil.ToFloat64(forger.metrics.forgeStaleTipSkipSlotGap),
+			)
+			require.Zero(
+				t,
+				testutil.ToFloat64(
+					forger.metrics.forgeStaleTipSkipHashDiverged,
+				),
+			)
+			require.Zero(
+				t,
+				testutil.ToFloat64(
+					forger.metrics.forgeStaleTipSkipPrimaryTipBehind,
+				),
+			)
+		})
+	}
 }
