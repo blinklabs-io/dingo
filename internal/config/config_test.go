@@ -33,39 +33,39 @@ import (
 func resetGlobalConfig() {
 	midnightYAMLFields = nil
 	globalConfig = &Config{
-		Plugins:                           defaultPluginsConfig(),
-		BindAddr:                          "0.0.0.0",
-		CardanoConfig:                     "", // Will be set dynamically based on network
-		DatabasePath:                      ".dingo",
-		SocketPath:                        "dingo.socket",
-		IntersectTip:                      false,
-		ValidateHistorical:                true,
-		StrictUtxoValidation:              true,
-		Network:                           "preview",
-		MetricsPort:                       12798,
-		DebugBindAddr:                     DefaultDebugBindAddr,
-		PrivateBindAddr:                   "127.0.0.1",
-		PrivatePort:                       3002,
-		RelayPort:                         3001,
-		CORSAllowedOrigins:                []string{"*"},
-		Topology:                          "",
-		TlsCertFilePath:                   "",
-		TlsKeyFilePath:                    "",
-		RunMode:                           RunModeServe,
-		StartEra:                          StartEraDefault,
-		ImmutableDbPath:                   "",
-		ShutdownTimeout:                   DefaultShutdownTimeout,
-		LedgerCatchupTimeout:              DefaultLedgerCatchupTimeout,
-		DatabaseWorkers:                   5,
-		DatabaseQueueSize:                 50,
-		BackfillBatchSize:                 100,
-		GenesisBootstrap:                  DefaultGenesisBootstrapConfig(),
-		HistoryExpiry:                     DefaultHistoryExpiryConfig(),
-		KoiosParity:                       DefaultKoiosParityConfig(),
-		Midnight:                          DefaultMidnightConfig(),
-		ForgeSyncToleranceSlots:           DefaultForgeSyncToleranceSlots,
-		ForgeStaleGapThresholdSlots:       DefaultForgeStaleGapThresholdSlots,
-		ForgeHeaderFrontierToleranceSlots: DefaultForgeHeaderFrontierToleranceSlots,
+		Plugins:                            defaultPluginsConfig(),
+		BindAddr:                           "0.0.0.0",
+		CardanoConfig:                      "", // Will be set dynamically based on network
+		DatabasePath:                       ".dingo",
+		SocketPath:                         "dingo.socket",
+		IntersectTip:                       false,
+		ValidateHistorical:                 true,
+		StrictUtxoValidation:               true,
+		Network:                            "preview",
+		MetricsPort:                        12798,
+		DebugBindAddr:                      DefaultDebugBindAddr,
+		PrivateBindAddr:                    "127.0.0.1",
+		PrivatePort:                        3002,
+		RelayPort:                          3001,
+		CORSAllowedOrigins:                 []string{"*"},
+		Topology:                           "",
+		TlsCertFilePath:                    "",
+		TlsKeyFilePath:                     "",
+		RunMode:                            RunModeServe,
+		StartEra:                           StartEraDefault,
+		ImmutableDbPath:                    "",
+		ShutdownTimeout:                    DefaultShutdownTimeout,
+		LedgerCatchupTimeout:               DefaultLedgerCatchupTimeout,
+		DatabaseWorkers:                    5,
+		DatabaseQueueSize:                  50,
+		BackfillBatchSize:                  100,
+		GenesisBootstrap:                   DefaultGenesisBootstrapConfig(),
+		HistoryExpiry:                      DefaultHistoryExpiryConfig(),
+		KoiosParity:                        DefaultKoiosParityConfig(),
+		Midnight:                           DefaultMidnightConfig(),
+		ForgeSyncToleranceSlots:            DefaultForgeSyncToleranceSlots,
+		ForgeStaleGapThresholdSlots:        DefaultForgeStaleGapThresholdSlots,
+		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,
@@ -88,10 +88,21 @@ func unsetDebugBindAddrEnv(t *testing.T) {
 // LoadConfig runs envconfig AFTER the YAML merge, so an exported
 // DINGO_FORGE_* variable silently overrides both the fixture and the default,
 // and the assertion then fails for a reason unrelated to the code under test.
+//
+// Both spellings of every forge-gate knob are cleared. LoadConfig calls
+// envconfig.Process("cardano", cfg), so the name envconfig looks up FIRST is
+// the prefixed CARDANO_DINGO_... form; the bare DINGO_... name in the
+// envconfig struct tag is only the alt name it falls back to. Guarding one
+// spelling leaves the other able to override the value under test.
 func unsetForgeGateEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
-		"DINGO_FORGE_HEADER_FRONTIER_TOLERANCE_SLOTS",
+		"DINGO_FORGE_PRIMARY_CHAIN_TIP_TOLERANCE_SLOTS",
+		"CARDANO_DINGO_FORGE_PRIMARY_CHAIN_TIP_TOLERANCE_SLOTS",
+		"DINGO_FORGE_SYNC_TOLERANCE_SLOTS",
+		"CARDANO_DINGO_FORGE_SYNC_TOLERANCE_SLOTS",
+		"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS",
+		"CARDANO_DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS",
 	} {
 		// t.Setenv registers the restore; Unsetenv then removes it for the
 		// duration of the test, which is what envconfig must not see.
@@ -231,7 +242,7 @@ mithril:
 		ForgeSyncToleranceSlots:     321,
 		ForgeStaleGapThresholdSlots: 654,
 		// Not set by the fixture's YAML/env, so ApplyDefaults fills it.
-		ForgeHeaderFrontierToleranceSlots: DefaultForgeHeaderFrontierToleranceSlots,
+		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
 		Mithril: MithrilConfig{
 			Enabled:                false,
 			AggregatorURL:          "https://mithril.example.net",
@@ -337,9 +348,9 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 			m.Host = DefaultMidnightConfig().Host
 			return m
 		}(),
-		ForgeSyncToleranceSlots:           DefaultForgeSyncToleranceSlots,
-		ForgeStaleGapThresholdSlots:       DefaultForgeStaleGapThresholdSlots,
-		ForgeHeaderFrontierToleranceSlots: DefaultForgeHeaderFrontierToleranceSlots,
+		ForgeSyncToleranceSlots:            DefaultForgeSyncToleranceSlots,
+		ForgeStaleGapThresholdSlots:        DefaultForgeStaleGapThresholdSlots,
+		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,

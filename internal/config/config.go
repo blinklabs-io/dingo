@@ -91,16 +91,16 @@ const (
 	DefaultRejectionWatermark          = 1.0
 	DefaultForgeSyncToleranceSlots     = 100
 	DefaultForgeStaleGapThresholdSlots = 1000
-	// DefaultForgeHeaderFrontierToleranceSlots bounds how far the
-	// ledger-applied tip may trail this node's own header frontier before
+	// DefaultForgePrimaryChainTipToleranceSlots bounds how far the
+	// ledger-applied tip may trail this node's own primary chain tip before
 	// forging is skipped. Small by design: both tips are local and are meant
 	// to describe the same chain position, unlike ForgeSyncToleranceSlots
 	// which tolerates trailing the network while catching up.
-	DefaultForgeHeaderFrontierToleranceSlots = 5
-	DefaultMempoolCapacityPraos              = 1048576  // 1 MiB
-	DefaultMempoolCapacityLeios              = 26214400 // 25 MiB
-	DefaultMempoolRevalidationDeltaCap       = 64
-	DefaultMempoolImplementation             = "fifo"
+	DefaultForgePrimaryChainTipToleranceSlots = 5
+	DefaultMempoolCapacityPraos               = 1048576  // 1 MiB
+	DefaultMempoolCapacityLeios               = 26214400 // 25 MiB
+	DefaultMempoolRevalidationDeltaCap        = 64
+	DefaultMempoolImplementation              = "fifo"
 )
 
 // RunMode represents the operational mode of the dingo node
@@ -696,13 +696,13 @@ type Config struct {
 	ShelleyOperationalCertificate string `yaml:"shelleyOperationalCertificate" envconfig:"SHELLEY_OPERATIONAL_CERTIFICATE"`
 	ForgeSyncToleranceSlots       uint64 `yaml:"forgeSyncToleranceSlots"       envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
 	ForgeStaleGapThresholdSlots   uint64 `yaml:"forgeStaleGapThresholdSlots"   envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
-	// ForgeHeaderFrontierToleranceSlots bounds how far the ledger-applied tip
-	// may trail this node's own header frontier before forging is skipped.
+	// ForgePrimaryChainTipToleranceSlots bounds how far the ledger-applied tip
+	// may trail this node's own primary chain tip before forging is skipped.
 	// Raise it only if the ledger pipeline is legitimately slow on this
 	// deployment; raising it lets the node forge blocks whose contents were
 	// chosen against an older chain position than their parent.
-	ForgeHeaderFrontierToleranceSlots uint64 `yaml:"forgeHeaderFrontierToleranceSlots" envconfig:"DINGO_FORGE_HEADER_FRONTIER_TOLERANCE_SLOTS"`
-	ValidateForgedBlock               bool   `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
+	ForgePrimaryChainTipToleranceSlots uint64 `yaml:"forgePrimaryChainTipToleranceSlots" envconfig:"DINGO_FORGE_PRIMARY_CHAIN_TIP_TOLERANCE_SLOTS"`
+	ValidateForgedBlock                bool   `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
 
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. Consensus-affecting
@@ -1142,9 +1142,9 @@ var globalConfig = &Config{
 		SnapshotEveryNEpochs: 1,
 	},
 	// Forging defaults
-	ForgeSyncToleranceSlots:           DefaultForgeSyncToleranceSlots,
-	ForgeStaleGapThresholdSlots:       DefaultForgeStaleGapThresholdSlots,
-	ForgeHeaderFrontierToleranceSlots: DefaultForgeHeaderFrontierToleranceSlots,
+	ForgeSyncToleranceSlots:            DefaultForgeSyncToleranceSlots,
+	ForgeStaleGapThresholdSlots:        DefaultForgeStaleGapThresholdSlots,
+	ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
 }
 
 // deepCopyPluginValue duplicates the reference-typed values a YAML plugin
@@ -1509,8 +1509,8 @@ func (c *Config) ApplyDefaults() {
 	if c.ForgeStaleGapThresholdSlots == 0 {
 		c.ForgeStaleGapThresholdSlots = DefaultForgeStaleGapThresholdSlots
 	}
-	if c.ForgeHeaderFrontierToleranceSlots == 0 {
-		c.ForgeHeaderFrontierToleranceSlots = DefaultForgeHeaderFrontierToleranceSlots
+	if c.ForgePrimaryChainTipToleranceSlots == 0 {
+		c.ForgePrimaryChainTipToleranceSlots = DefaultForgePrimaryChainTipToleranceSlots
 	}
 	// Only an unset (zero) frequency takes the default; an explicitly
 	// negative value is preserved so Validate can reject it instead of

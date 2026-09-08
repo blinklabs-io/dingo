@@ -27,7 +27,7 @@ import (
 
 // newStaleTipTestForger builds a production forger whose leader check always
 // says "leader", so the only thing that can stop it forging is a gate.
-// frontierSlot is this node's own header frontier; chainTipSlot is the
+// frontierSlot is this node's own primary chain tip; chainTipSlot is the
 // ledger-applied tip a forged block would be built on.
 func newStaleTipTestForger(
 	t *testing.T,
@@ -60,9 +60,9 @@ func newStaleTipTestForger(
 	return forger, builder, broadcaster
 }
 
-// TestForgeSkipsWhenLedgerTipTrailsHeaderFrontier is the stale-tip-forge
+// TestForgeSkipsWhenLedgerTipTrailsPrimaryChainTip is the stale-tip-forge
 // regression. The forge loop takes its parent from the LEDGER-APPLIED tip.
-// When this node's own header frontier is further ahead, that parent is a
+// When this node's own primary chain tip is further ahead, that parent is a
 // block the node has already superseded, so the forged block enters a fork
 // race it has already lost and is orphaned. The upstream sync guard does not
 // catch it: it compares the applied tip against the network with a tolerance
@@ -70,14 +70,14 @@ func newStaleTipTestForger(
 // own ledger pipeline is the thing behind.
 //
 // Before the fix the forger built and broadcast the block regardless.
-func TestForgeSkipsWhenLedgerTipTrailsHeaderFrontier(t *testing.T) {
+func TestForgeSkipsWhenLedgerTipTrailsPrimaryChainTip(t *testing.T) {
 	var logs bytes.Buffer
 	// Applied tip 83 slots behind the frontier: the field case.
 	forger, builder, broadcaster := newStaleTipTestForger(
 		t,
 		200, // current slot
 		100, // ledger-applied tip
-		183, // header frontier
+		183, // primary chain tip
 		&logs,
 	)
 
@@ -99,17 +99,36 @@ func TestForgeSkipsWhenLedgerTipTrailsHeaderFrontier(t *testing.T) {
 	require.Contains(t, logs.String(), `"level":"WARN"`)
 }
 
-// TestForgeProceedsWithinHeaderFrontierTolerance pins the other side of the
+// TestStaleTipSkipCountsCouldNotForge pins the cardano-node parity counters
+// across this refusal. The gate runs after checkLeaderSafe and before
+// forgeNodeIsLeader.Inc(), so a lost leader slot moves about_to_lead at the
+// top of the check and then nothing: node_is_leader never increments,
+// not_leader counts only !isLeader, and without this the Dingo-specific
+// dingo_forge_stale_tip_skip_total would be the sole record of the loss. An
+// operator alerting on could_not_forge -- registered as "slots where forging
+// failed (syncing, build error, etc)" -- would see a flat line while the
+// producer stopped forging.
+func TestStaleTipSkipCountsCouldNotForge(t *testing.T) {
+	var logs bytes.Buffer
+	forger, builder, _ := newStaleTipTestForger(t, 200, 100, 183, &logs)
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	require.Zero(t, builder.calls)
+	require.Equal(t, float64(1),
+		testutil.ToFloat64(forger.metrics.forgeCouldNot),
+		"lost leader slot must move cardano_node_metrics_Forge_could_not_forge_int")
+}
+
+// TestForgeProceedsWithinPrimaryChainTipTolerance pins the other side of the
 // bound: the ledger pipeline commits in batches, so a gap of a slot or two is
 // the normal steady state at the head of a fast chain and must not suppress
 // forging.
-func TestForgeProceedsWithinHeaderFrontierTolerance(t *testing.T) {
+func TestForgeProceedsWithinPrimaryChainTipTolerance(t *testing.T) {
 	var logs bytes.Buffer
 	forger, builder, broadcaster := newStaleTipTestForger(
 		t,
 		200,
 		100,
-		100+forgeHeaderFrontierToleranceSlots,
+		100+forgePrimaryChainTipToleranceSlots,
 		&logs,
 	)
 
@@ -130,6 +149,10 @@ func TestForgeProceedsWithinHeaderFrontierTolerance(t *testing.T) {
 		logs.String(),
 		"forge skip: ledger tip stale vs primary chain tip",
 	)
+	// The post-mortem line survives the forge path. It is emitted below the
+	// credential recheck, i.e. after the last gate that can still refuse the
+	// slot, so a "forge context" line is never followed by a skip for it.
+	require.Contains(t, logs.String(), "forge context")
 }
 
 // TestForgeStaleTipToleranceIsConfigurable pins that the bound is a named,
@@ -139,8 +162,8 @@ func TestForgeStaleTipToleranceIsConfigurable(t *testing.T) {
 	forger, builder, _ := newStaleTipTestForger(t, 200, 100, 120, &logs)
 	require.Equal(
 		t,
-		uint64(forgeHeaderFrontierToleranceSlots),
-		forger.forgeFrontierToleranceSlots,
+		uint64(forgePrimaryChainTipToleranceSlots),
+		forger.forgePrimaryChainTipToleranceSlots,
 	)
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 	require.Zero(t, builder.calls)
@@ -168,8 +191,8 @@ func TestForgeStaleTipToleranceIsConfigurable(t *testing.T) {
 			frontierSlot:      120,
 			slotsPerKESPeriod: 100,
 		},
-		ForgeHeaderFrontierToleranceSlots: 50,
-		PromRegistry:                      prometheus.NewRegistry(),
+		ForgePrimaryChainTipToleranceSlots: 50,
+		PromRegistry:                       prometheus.NewRegistry(),
 	})
 	require.NoError(t, err)
 	require.NoError(t, wide.checkAndForgeProduction(context.Background()))
@@ -211,7 +234,7 @@ func TestTipGapGaugeReportsApplyBacklogOnEveryLeaderCheck(t *testing.T) {
 }
 
 // newEqualSlotForkTestForger builds a production forger whose applied tip and
-// header frontier sit at the SAME slot but carry the given hashes.
+// primary chain tip sit at the SAME slot but carry the given hashes.
 func newEqualSlotForkTestForger(
 	t *testing.T,
 	appliedHash, frontierHash []byte,
@@ -446,7 +469,7 @@ func TestForgeSkipsWhenFrontierAlreadyHasTheCurrentSlot(t *testing.T) {
 	require.LessOrEqual(
 		t,
 		uint64(2),
-		forger.forgeFrontierToleranceSlots,
+		forger.forgePrimaryChainTipToleranceSlots,
 		"this test needs the 2-slot gap to be inside the tolerance",
 	)
 

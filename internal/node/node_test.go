@@ -458,7 +458,7 @@ func nodeSourceForKoiosParity(t *testing.T) string {
 // With... entry here is silently dropped no matter how completely it is
 // plumbed through YAML, env, flags, defaults and the accessor.
 //
-// ForgeHeaderFrontierToleranceSlots was exactly that: parsed, defaulted,
+// ForgePrimaryChainTipToleranceSlots was exactly that: parsed, defaulted,
 // flagged, documented and asserted at every other layer, yet absent from this
 // list, so an operator's value was discarded and the forger always fell back
 // to its built-in default. The neighbouring tolerances are asserted alongside
@@ -467,9 +467,9 @@ func TestBuildDingoConfigWiresForgeTolerances(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{
-		ForgeSyncToleranceSlots:           321,
-		ForgeStaleGapThresholdSlots:       654,
-		ForgeHeaderFrontierToleranceSlots: 42,
+		ForgeSyncToleranceSlots:            321,
+		ForgeStaleGapThresholdSlots:        654,
+		ForgePrimaryChainTipToleranceSlots: 42,
 	}
 	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
 
@@ -491,9 +491,9 @@ func TestBuildDingoConfigWiresForgeTolerances(t *testing.T) {
 	if got := built.ForgeStaleGapThresholdSlots(); got != 654 {
 		t.Fatalf("expected forgeStaleGapThresholdSlots 654, got %d", got)
 	}
-	if got := built.ForgeHeaderFrontierToleranceSlots(); got != 42 {
+	if got := built.ForgePrimaryChainTipToleranceSlots(); got != 42 {
 		t.Fatalf(
-			"expected forgeHeaderFrontierToleranceSlots 42, got %d; the "+
+			"expected forgePrimaryChainTipToleranceSlots 42, got %d; the "+
 				"loaded value never reached dingo.Config, so the forger "+
 				"silently uses its built-in default",
 			got,

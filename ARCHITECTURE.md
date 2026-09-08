@@ -4771,9 +4771,9 @@ the ledger pipeline works through blocks it has added to the chain but not yet
 applied, the primary chain tip runs ahead, and forging then signs a block whose
 contents were chosen against an older chain position than its parent.
 
-`forgeHeaderFrontierToleranceSlots` (default 5, flag
-`--forge-header-frontier-tolerance-slots`, env
-`CARDANO_DINGO_FORGE_HEADER_FRONTIER_TOLERANCE_SLOTS`) bounds that gap. It is
+`forgePrimaryChainTipToleranceSlots` (default 5, flag
+`--forge-primary-chain-tip-tolerance-slots`, env
+`CARDANO_DINGO_FORGE_PRIMARY_CHAIN_TIP_TOLERANCE_SLOTS`) bounds that gap. It is
 much smaller than `forgeSyncToleranceSlots` because both tips are local and are
 meant to describe the same chain position, whereas the sync tolerance
 deliberately allows trailing the network while catching up; it is not zero
@@ -4793,7 +4793,7 @@ each from a different pair of inputs:
 
 | `reason` | Meaning | Inputs |
 | --- | --- | --- |
-| `slot_gap` | The applied tip trails the primary chain tip by more than `forgeHeaderFrontierToleranceSlots`. | applied tip slot, primary chain tip slot |
+| `slot_gap` | The applied tip trails the primary chain tip by more than `forgePrimaryChainTipToleranceSlots`. | applied tip slot, primary chain tip slot |
 | `primary_tip_hash_diverged` | Primary chain tip and applied tip are at the same slot but name different blocks -- an equal-slot fork the ledger has not applied. | applied tip hash, primary chain tip hash |
 | `primary_tip_behind_applied` | The primary chain tip is at a lower slot than the applied tip, so the builder's parent is a block the ledger has already built past. | applied tip slot, primary chain tip slot |
 

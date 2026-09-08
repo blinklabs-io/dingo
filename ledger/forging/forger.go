@@ -64,18 +64,19 @@ const (
 	// the database contains data from a different genesis.
 	forgeStaleGapThresholdSlots = 1000
 
-	// forgeHeaderFrontierToleranceSlots is how far the ledger-applied tip may
-	// lag this node's own primary chain tip -- the newest block added to the
-	// i.e. blocks the node has already admitted and selected but whose ledger
-	// application has not finished -- before the forger refuses to forge.
+	// forgePrimaryChainTipToleranceSlots is how far the ledger-applied tip may
+	// lag this node's own primary chain tip -- chain.Tip(), the newest block
+	// added to the chain, i.e. blocks the node has already admitted and
+	// selected but whose ledger application has not finished -- before the
+	// forger refuses to forge.
 	//
 	// The two tips feed different halves of block production and must agree.
 	// The builder takes the forged block's PARENT from the primary chain tip
 	// (BlockBuilderConfig.ChainTip), while transaction selection and
 	// validation, protocol parameters, the epoch nonce and leader eligibility
 	// all come from the LEDGER, which is at the applied tip. When the applied
-	// tip trails the frontier, the node signs a block that declares the
-	// frontier as its parent while its contents were chosen against a chain
+	// tip trails the primary chain tip, the node signs a block that declares
+	// that tip as its parent while its contents were chosen against a chain
 	// state tens of slots older -- transactions validated against a stale UTxO
 	// set, on top of a parent whose effects the node has not applied.
 	//
@@ -90,7 +91,7 @@ const (
 	// a few pipeline batches' worth of headroom while still being far below
 	// the tens-of-slots staleness measured on producers that then had their
 	// blocks orphaned.
-	forgeHeaderFrontierToleranceSlots = 5
+	forgePrimaryChainTipToleranceSlots = 5
 
 	// Reasons for a forge skipped by the primary-chain-tip gate, used as the
 	// "reason" label on dingo_forge_stale_tip_skip_total and in the log line.
@@ -139,9 +140,9 @@ type BlockForger struct {
 	metrics *forgingMetrics
 
 	// Configurable forging tolerances
-	forgeSyncToleranceSlots     uint64
-	forgeFrontierToleranceSlots uint64
-	forgeStaleGapThresholdSlots uint64
+	forgeSyncToleranceSlots            uint64
+	forgePrimaryChainTipToleranceSlots uint64
+	forgeStaleGapThresholdSlots        uint64
 
 	// Optional self-validation before adoption (nil = disabled)
 	blockValidator BlockValidator
@@ -416,10 +417,10 @@ type ForgerConfig struct {
 	// ForgeSyncToleranceSlots controls how far the local chain can lag the
 	// upstream tip before forging is skipped. Zero uses the default.
 	ForgeSyncToleranceSlots uint64
-	// ForgeHeaderFrontierToleranceSlots controls how far the ledger-applied
+	// ForgePrimaryChainTipToleranceSlots controls how far the ledger-applied
 	// tip may lag this node's own primary chain tip before the forger refuses
-	// to build on it. Zero selects forgeHeaderFrontierToleranceSlots.
-	ForgeHeaderFrontierToleranceSlots uint64
+	// to build on it. Zero selects forgePrimaryChainTipToleranceSlots.
+	ForgePrimaryChainTipToleranceSlots uint64
 	// ForgeStaleGapThresholdSlots controls when to log an error if the
 	// chain tip is far ahead of the slot clock. Zero uses the default.
 	ForgeStaleGapThresholdSlots uint64
@@ -473,12 +474,12 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 	if cfg.ForgeStaleGapThresholdSlots == 0 {
 		cfg.ForgeStaleGapThresholdSlots = forgeStaleGapThresholdSlots
 	}
-	if cfg.ForgeHeaderFrontierToleranceSlots == 0 {
-		cfg.ForgeHeaderFrontierToleranceSlots = forgeHeaderFrontierToleranceSlots
+	if cfg.ForgePrimaryChainTipToleranceSlots == 0 {
+		cfg.ForgePrimaryChainTipToleranceSlots = forgePrimaryChainTipToleranceSlots
 	}
 	f.forgeSyncToleranceSlots = cfg.ForgeSyncToleranceSlots
 	f.forgeStaleGapThresholdSlots = cfg.ForgeStaleGapThresholdSlots
-	f.forgeFrontierToleranceSlots = cfg.ForgeHeaderFrontierToleranceSlots
+	f.forgePrimaryChainTipToleranceSlots = cfg.ForgePrimaryChainTipToleranceSlots
 
 	if cfg.Mode == ModeProduction {
 		if cfg.Credentials == nil || !cfg.Credentials.IsLoaded() {
@@ -804,7 +805,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		staleTipReason = forgeStaleTipReasonFrontierBehind
 	case frontierDiverged:
 		staleTipReason = forgeStaleTipReasonHashDiverged
-	case applyGap > f.forgeFrontierToleranceSlots:
+	case applyGap > f.forgePrimaryChainTipToleranceSlots:
 		staleTipReason = forgeStaleTipReasonSlotGap
 	}
 
@@ -1145,8 +1146,18 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	//
 	// Skip loudly rather than silently: a lost leader slot is worth a warning,
 	// and an operator whose pipeline is lagging needs to see it.
-	// See forgeHeaderFrontierToleranceSlots.
+	// See forgePrimaryChainTipToleranceSlots.
 	if staleTipReason != "" {
+		// Count it as could-not-forge before anything else. This refusal runs
+		// after checkLeaderSafe and before forgeNodeIsLeader.Inc(), so without
+		// this the cardano-node parity counters stop balancing on a lost
+		// leader slot: about_to_lead has already moved, node_is_leader never
+		// will, and not_leader increments only on !isLeader. An operator
+		// alerting on could_not_forge would watch a flat line while the
+		// producer stopped forging -- the failure mode this gate is most
+		// likely to cause. Every other post-leader-check refusal in this
+		// function does the same.
+		f.incCouldNotForge()
 		if f.metrics != nil {
 			switch staleTipReason {
 			case forgeStaleTipReasonSlotGap:
@@ -1166,7 +1177,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			"tip_hash", hex.EncodeToString(appliedTip.Hash),
 			"primary_tip_hash", hex.EncodeToString(frontier.Hash),
 			"gap_slots", applyGap,
-			"tolerance_slots", f.forgeFrontierToleranceSlots,
+			"tolerance_slots", f.forgePrimaryChainTipToleranceSlots,
 		)
 		return nil
 	}
@@ -1243,19 +1254,6 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return nil
 	}
 
-	// One line per forge with every input the gates weighed, so a post-mortem
-	// of an orphaned block does not have to reconstruct them from surrounding
-	// chatter. Emitted after the LAST gate that can still refuse, so it is
-	// never followed by a skip for this slot; Info, not Debug, because it is
-	// at most one line per block this node actually produces.
-	f.logger.Info(
-		"forge context",
-		"current_slot", currentSlot,
-		"tip_slot", tipSlot,
-		"primary_tip_slot", frontier.Slot,
-		"gap_slots", applyGap,
-	)
-
 	// Commit to this slot before any signing happens for it, including
 	// the Leios endorser block below. The tip check above only rejects
 	// slots the local chain already covers; it cannot see a slot whose
@@ -1330,6 +1328,26 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		)
 		return nil
 	}
+
+	// One line per forge with every input the gates weighed, so a post-mortem
+	// of an orphaned block does not have to reconstruct them from surrounding
+	// chatter. Deliberately placed here, below the credential recheck above
+	// rather than next to the slot-battle gate: that recheck logs
+	// "forge skip: credentials changed during Leios processing" and returns,
+	// and the slot reservation before it can decline the slot too, so emitting
+	// earlier would leave a "forge context" line followed by a skip for the
+	// same slot. From here on nothing else refuses the slot; what can still go
+	// wrong is block production itself (KES period update, buildBlock,
+	// self-validation, addBlockSafe), and each of those logs its own failure.
+	// Info, not Debug, because it is at most one line per block this node
+	// attempts to produce.
+	f.logger.Info(
+		"forge context",
+		"current_slot", currentSlot,
+		"tip_slot", tipSlot,
+		"primary_tip_slot", frontier.Slot,
+		"gap_slots", applyGap,
+	)
 
 	f.logger.Info("producing block", "slot", currentSlot)
 

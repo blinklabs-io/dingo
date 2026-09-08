@@ -21,7 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestForgeHeaderFrontierToleranceSlotsIsOperatorTunable covers the config
+// TestForgePrimaryChainTipToleranceSlotsIsOperatorTunable covers the config
 // plumbing for the header-frontier forge gate. The bound decides whether a
 // block producer forges or skips, so an operator whose ledger pipeline is
 // legitimately slow on their deployment must be able to reach it without
@@ -37,14 +37,14 @@ import (
 // NOT take it -- internal/node.buildDingoConfig composes dingo.Config via
 // dingo.NewConfig from an explicit With... list, and a field missing from that
 // list is dropped no matter how green this test is. That is exactly how
-// ForgeHeaderFrontierToleranceSlots shipped inert while every layer here
+// ForgePrimaryChainTipToleranceSlots shipped inert while every layer here
 // asserted green. The runtime composition path is covered by
 // TestBuildDingoConfigWiresForgeTolerances in internal/node; presence of a
 // field at each layer is not wiring.
-func TestForgeHeaderFrontierToleranceSlotsIsOperatorTunable(t *testing.T) {
+func TestForgePrimaryChainTipToleranceSlotsIsOperatorTunable(t *testing.T) {
 	t.Run("explicit value survives every hop", func(t *testing.T) {
 		loaded := &internalconfig.Config{
-			ForgeHeaderFrontierToleranceSlots: 42,
+			ForgePrimaryChainTipToleranceSlots: 42,
 		}
 		c := &Config{cfg: loaded}
 		// syncCompatFields is what the loaded-config constructor runs to
@@ -53,22 +53,22 @@ func TestForgeHeaderFrontierToleranceSlotsIsOperatorTunable(t *testing.T) {
 		require.Equal(
 			t,
 			uint64(42),
-			c.ForgeHeaderFrontierToleranceSlots(),
+			c.ForgePrimaryChainTipToleranceSlots(),
 			"loaded config value must reach the accessor",
 		)
 		require.Equal(
 			t,
 			uint64(42),
-			c.forgeHeaderFrontierToleranceSlots,
+			c.forgePrimaryChainTipToleranceSlots,
 			"the node Config snapshot the forger reads must carry it",
 		)
 	})
 
 	t.Run("option func sets it", func(t *testing.T) {
-		c := NewConfig(WithForgeHeaderFrontierToleranceSlots(17))
-		require.Equal(t, uint64(17), c.ForgeHeaderFrontierToleranceSlots())
+		c := NewConfig(WithForgePrimaryChainTipToleranceSlots(17))
+		require.Equal(t, uint64(17), c.ForgePrimaryChainTipToleranceSlots())
 		c.syncCompatFields()
-		require.Equal(t, uint64(17), c.forgeHeaderFrontierToleranceSlots)
+		require.Equal(t, uint64(17), c.forgePrimaryChainTipToleranceSlots)
 	})
 
 	t.Run("defaults fill an unset value", func(t *testing.T) {
@@ -76,26 +76,26 @@ func TestForgeHeaderFrontierToleranceSlotsIsOperatorTunable(t *testing.T) {
 		loaded.ApplyDefaults()
 		require.Equal(
 			t,
-			uint64(internalconfig.DefaultForgeHeaderFrontierToleranceSlots),
-			loaded.ForgeHeaderFrontierToleranceSlots,
+			uint64(internalconfig.DefaultForgePrimaryChainTipToleranceSlots),
+			loaded.ForgePrimaryChainTipToleranceSlots,
 		)
 		require.Equal(
 			t,
 			uint64(5),
-			loaded.ForgeHeaderFrontierToleranceSlots,
+			loaded.ForgePrimaryChainTipToleranceSlots,
 			"the documented default must not drift silently",
 		)
 	})
 
 	t.Run("an explicit value is not overwritten by defaults", func(t *testing.T) {
 		loaded := internalconfig.Config{
-			ForgeHeaderFrontierToleranceSlots: 9,
+			ForgePrimaryChainTipToleranceSlots: 9,
 		}
 		loaded.ApplyDefaults()
 		require.Equal(
 			t,
 			uint64(9),
-			loaded.ForgeHeaderFrontierToleranceSlots,
+			loaded.ForgePrimaryChainTipToleranceSlots,
 		)
 	})
 }

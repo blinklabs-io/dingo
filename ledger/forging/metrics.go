@@ -47,7 +47,7 @@ type forgingMetrics struct {
 	// not agree. Three reasons, each from a different pair of inputs:
 	//
 	//   - "slot_gap": the ledger-applied tip trails this node's primary
-	//     chain tip by more than ForgeHeaderFrontierToleranceSlots.
+	//     chain tip by more than ForgePrimaryChainTipToleranceSlots.
 	//     Inputs: applied tip slot, primary tip slot.
 	//   - "primary_tip_hash_diverged": primary chain tip and applied tip sit at the SAME
 	//     slot but name different blocks -- an equal-slot fork the ledger has

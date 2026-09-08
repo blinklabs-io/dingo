@@ -253,7 +253,7 @@ type Config struct {
 	blockProducer                                                                       bool
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
-	forgeHeaderFrontierToleranceSlots                                                   uint64
+	forgePrimaryChainTipToleranceSlots                                                  uint64
 	validateForgedBlock                                                                 bool
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
@@ -832,7 +832,7 @@ func (c *Config) syncCompatFields() {
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
-	c.forgeHeaderFrontierToleranceSlots = c.cfg.ForgeHeaderFrontierToleranceSlots
+	c.forgePrimaryChainTipToleranceSlots = c.cfg.ForgePrimaryChainTipToleranceSlots
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
@@ -1458,11 +1458,12 @@ func WithForgeSyncToleranceSlots(slots uint64) ConfigOptionFunc {
 	}
 }
 
-// WithForgeHeaderFrontierToleranceSlots sets how far the ledger-applied tip may
-// trail this node's own header frontier before forging is skipped.
-func WithForgeHeaderFrontierToleranceSlots(slots uint64) ConfigOptionFunc {
+// WithForgePrimaryChainTipToleranceSlots sets how far the ledger-applied tip may
+// trail this node's own primary chain tip before forging is skipped.
+// Use 0 to fall back to the built-in default.
+func WithForgePrimaryChainTipToleranceSlots(slots uint64) ConfigOptionFunc {
 	return func(c *Config) {
-		c.cfg.ForgeHeaderFrontierToleranceSlots = slots
+		c.cfg.ForgePrimaryChainTipToleranceSlots = slots
 	}
 }
 
@@ -2205,10 +2206,10 @@ func (c *Config) ForgeSyncToleranceSlots() uint64 {
 	return c.cfg.ForgeSyncToleranceSlots
 }
 
-// ForgeHeaderFrontierToleranceSlots returns how far the ledger-applied tip may
-// trail this node's own header frontier before forging is skipped.
-func (c *Config) ForgeHeaderFrontierToleranceSlots() uint64 {
-	return c.cfg.ForgeHeaderFrontierToleranceSlots
+// ForgePrimaryChainTipToleranceSlots returns how far the ledger-applied tip may
+// trail this node's own primary chain tip before forging is skipped.
+func (c *Config) ForgePrimaryChainTipToleranceSlots() uint64 {
+	return c.cfg.ForgePrimaryChainTipToleranceSlots
 }
 
 // ForgeStaleGapThresholdSlots returns the stale gap threshold for warnings.

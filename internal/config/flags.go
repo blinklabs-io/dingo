@@ -692,9 +692,9 @@ var flagSpecs = []flagSpec{
 		"slot gap threshold for stale slot clock alerts",
 	),
 	uint64Flag(
-		"ForgeHeaderFrontierToleranceSlots",
-		"forge-header-frontier-tolerance-slots",
-		"max slots the ledger-applied tip may trail this node's own header frontier before skipping block forging",
+		"ForgePrimaryChainTipToleranceSlots",
+		"forge-primary-chain-tip-tolerance-slots",
+		"max slots the ledger-applied tip may trail this node's own primary chain tip (chain.Tip()) before skipping block forging",
 	),
 	boolFlag(
 		"ValidateForgedBlock",
