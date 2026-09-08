@@ -182,8 +182,10 @@ func TestCascadeChildColumnsIndexedAfterCriticalRebuild(t *testing.T) {
 
 	// The Mithril bootstrap sequence: drop the manifest for the bulk load,
 	// then rebuild only the critical subset before the database is marked
-	// ready. The lazy remainder is finished later, or on a core-mode node
-	// whose pending marker an older binary already cleared, never.
+	// ready. The lazy remainder is finished by later maintenance, and on a
+	// database whose pending marker the sync's own ClearSyncState wiped,
+	// never — so whatever the rollback path needs has to be in this
+	// subset.
 	require.NoError(t, store.DropDeferredIndexes())
 	require.NoError(t, store.BuildCriticalDeferredIndexes())
 

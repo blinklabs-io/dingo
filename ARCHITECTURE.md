@@ -5846,13 +5846,24 @@ manifest. The metadata plugin exposes
 `BuildDeferredIndexes` for the full manifest. Mithril sync rebuilds the
 critical subset before clearing `sync_status`, then leaves the pending
 sync-state marker set. API-mode `serve` verifies the critical subset before
-startup and runs the full lazy rebuild as background maintenance; the marker is
-cleared only after the full manifest has been rebuilt. Core-mode startup still
+startup and runs the full lazy rebuild as background maintenance; the rebuild
+paths clear the marker only after the full manifest has been rebuilt, but they
+are not the only writer of that row. `ClearSyncState`
+(`DELETE FROM sync_state`, no `WHERE`) removes it too, and Mithril sync runs
+that clear through `updateMithrilReadyState` immediately after the critical
+rebuild. It therefore re-writes every row a completed sync still needs —
+`mithril_ledger_slot`, `mithril_ledger_hash`, and the deferred-index marker —
+back after the clear; without the last of those, every Mithril-bootstrapped
+database loses the marker moments after `BuildCritical` set it and never builds
+the lazy manifest entries at all. Core-mode startup still
 repairs the full manifest synchronously before serving. Both repair entry
 points also restore any missing critical index when no cycle is pending at all:
-the marker records that a cycle was interrupted, not which indexes exist, so a
-database whose marker an older binary cleared while its own critical subset was
-smaller would otherwise carry the gap permanently. On MySQL, InnoDB
+the marker records that a cycle was interrupted, not which indexes exist, and a
+database bootstrapped by a binary that predates the marker being carried across
+the clear has the critical subset built, the lazy remainder dropped, and no
+record of either — it would otherwise carry that gap permanently, since the
+schema migration that created those indexes is recorded complete and never
+re-runs. On MySQL, InnoDB
 requires indexes supporting foreign-key child columns, so the dialect leaves
 those indexes in place while deferring the remaining manifest entries.
 
