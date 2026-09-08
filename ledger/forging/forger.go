@@ -85,12 +85,42 @@ const (
 	// are local and are meant to describe the same chain, so the bound is
 	// small.
 	//
-	// It is not zero because the ledger pipeline commits in batches, so a gap
-	// of a slot or two is the normal steady state at the head of a fast chain
-	// and a zero tolerance would suppress forging continuously. Five slots is
-	// a few pipeline batches' worth of headroom while still being far below
-	// the tens-of-slots staleness measured on producers that then had their
-	// blocks orphaned.
+	// It is not zero because the ledger pipeline commits in batches, so on a
+	// chain whose blocks arrive every slot or two a gap of a slot or two is
+	// the normal steady state at the head and a zero tolerance would suppress
+	// forging continuously.
+	//
+	// The bound is measured in SLOTS, but the hazard is per unapplied BLOCK:
+	// each block that has been added to the chain and not yet applied is one
+	// block's worth of divergence between the parent the builder would use
+	// and the ledger state the block's contents were chosen against. How many
+	// blocks a given slot bound admits is therefore decided by the chain's
+	// BLOCK DENSITY, and the two ends of that behave very differently:
+	//
+	//   - On a dense chain -- blocks every slot or two, as on the Leios devnet
+	//     in #3973 -- five slots can span several unapplied blocks. That is a
+	//     bounded amount of exactly the incoherence this gate exists to
+	//     prevent, which is why the default is not smaller.
+	//   - On a sparse chain -- mainnet's active slot coefficient puts
+	//     consecutive blocks roughly 20 slots apart -- a SINGLE in-flight
+	//     block already leaves a gap near 20 and trips "slot_gap" on its own.
+	//     Five slots gives such a chain no headroom at all, and the effective
+	//     skip rate there is set by ledger apply latency rather than by this
+	//     constant.
+	//
+	// Both ends err safe (the sparse end refuses more often than the per-block
+	// hazard requires), so this is not an argument for a larger default, and
+	// the default stays calibrated for fast, dense chains. An operator sizing
+	// it for a sparser chain should derive it from that chain's expected block
+	// spacing and the number of unapplied blocks they are willing to forge on
+	// top of -- roughly blocks_tolerated * slots_per_block -- rather than from
+	// the dense-chain "a slot or two" steady state above. Expressing the bound
+	// in blocks, or as an ancestry predicate over the unapplied span, is
+	// tracked in #4143.
+	//
+	// Five slots is a few pipeline batches' worth of headroom on a dense chain
+	// while still being far below the tens-of-slots staleness measured on
+	// producers that then had their blocks orphaned.
 	forgePrimaryChainTipToleranceSlots = 5
 
 	// Reasons for a forge skipped by the primary-chain-tip gate, used as the

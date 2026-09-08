@@ -4777,16 +4777,36 @@ contents were chosen against an older chain position than its parent.
 much smaller than `forgeSyncToleranceSlots` because both tips are local and are
 meant to describe the same chain position, whereas the sync tolerance
 deliberately allows trailing the network while catching up; it is not zero
-because the ledger pipeline commits in batches, so a slot or two of gap is the
-normal steady state at the head of a fast chain. The gate also compares tip
-identity, not just position: an equal-slot fork the ledger has not applied has
-a gap of zero but still means the two views describe different blocks. Skips
-are logged at `WARN` (`forge skip: ledger tip stale vs primary chain tip`) and
-counted by `dingo_forge_stale_tip_skip_total`. The ledger-apply backlog itself
+because the ledger pipeline commits in batches, so on a chain whose blocks
+arrive every slot or two a slot or two of gap is the normal steady state at the
+head. The gate also compares tip identity, not just position: an equal-slot
+fork the ledger has not applied has a gap of zero but still means the two views
+describe different blocks. Skips are logged at `WARN` (`forge skip: ledger
+tip stale vs primary chain tip`) and counted by `dingo_forge_stale_tip_skip_total`. The ledger-apply backlog itself
 is reported on every leader check by `dingo_forge_tip_gap_slots`. Raising the
 tolerance lets the node forge blocks whose contents were chosen against an
 older chain position than their parent, so raise it only where the ledger
 pipeline is known to be legitimately slow.
+
+The bound is measured in slots, but the hazard is per unapplied *block*: each
+block added to the chain and not yet applied is one block's worth of divergence
+between the parent the builder would use and the ledger state the contents were
+chosen against. How many blocks a slot bound admits is decided by the chain's
+block density, so the same default means different things at the two ends. On a
+dense chain -- blocks every slot or two, as on the Leios devnet -- five slots can
+span several unapplied blocks, which is why the default is not smaller. On a
+sparse chain -- mainnet's active slot coefficient puts consecutive blocks
+roughly 20 slots apart -- a single in-flight block already leaves a gap near 20
+and trips `slot_gap` on its own, so five slots gives such a chain no headroom
+and the effective skip rate there is set by ledger apply latency rather than by
+the tolerance. Both ends err safe, so this is not an argument for a larger
+default: the default is calibrated for fast, dense chains, and an operator
+sizing it for a sparser chain (mainnet included) should derive it from that
+chain's expected block spacing and the number of unapplied blocks they are
+willing to forge on top of -- roughly `blocks_tolerated * slots_per_block` --
+rather than from the dense-chain "a slot or two" steady state. Expressing the
+bound in blocks, or as an ancestry predicate over the unapplied span, is
+tracked in #4143.
 
 `dingo_forge_stale_tip_skip_total` carries a `reason` label with three values,
 each from a different pair of inputs:
