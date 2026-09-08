@@ -65,9 +65,11 @@ var resolveLiveUtxoRefsTestHook func(ref UtxoRef)
 //
 // A ref that cannot be resolved (types.ErrBlobKeyNotFound) is silently
 // skipped, matching queryShelleyUtxoWhole's existing tolerance for a
-// stale/racing live-set snapshot. ctx is checked between dispatched jobs so
-// a long pass can be cancelled promptly; a job already dispatched to a
-// worker still runs to completion.
+// stale/racing live-set snapshot. ctx is checked before the (synchronous,
+// single-transaction) live-ref enumeration and again between dispatched
+// jobs, so an already-cancelled pass neither pays for a full scan of the
+// live set nor starts resolving it; a job already dispatched to a worker
+// still runs to completion.
 func (d *Database) ResolveLiveUtxoRefsConcurrent(
 	ctx context.Context,
 	workers int,
@@ -75,6 +77,9 @@ func (d *Database) ResolveLiveUtxoRefsConcurrent(
 ) error {
 	if workers <= 0 {
 		workers = WarmHotUtxoCacheDefaultWorkers
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 
 	var live []UtxoRef

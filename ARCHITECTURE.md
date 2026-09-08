@@ -2166,8 +2166,10 @@ UTxO set rather than populated purely on demand (blinklabs-io/dingo#4082):
 
 Because eviction is now driven by actual spends, `Cache.HotUtxoEntries`'
 default was raised from 50000 to 10000000 — comfortably above Preview's
-measured ~3.17M live UTxOs and mainnet's larger live set — so a live UTxO is
-not silently evicted by LRU/LFU capacity pressure while still live, which
+measured ~3.17M live UTxOs (mainnet's live-set size has not been measured
+against this limit; an operator on a network whose live set exceeds it
+should raise `Cache.HotUtxoEntries` accordingly) — so a live UTxO is not
+silently evicted by LRU/LFU capacity pressure while still live, which
 would reintroduce #4082's cold-extraction cost. The cache remains
 count-bounded (not fully unbounded) as a guard against any future write path
 that spends UTxOs without going through the eviction hook above.
