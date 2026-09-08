@@ -45,9 +45,11 @@ func newBlobOrphanTestDB(store *mockBlobStore) *Database {
 // reclaims it. Returning nil there reports a clean deletion to the caller and
 // leaves the object to accumulate silently, so the failure has to reach the
 // caller and be counted.
+// Not t.Parallel: this and the other tests below assert on a delta of the
+// process-wide blobOrphans counter (BlobOrphanCount before and after), so a
+// concurrent test's recordBlobOrphans lands inside the window. Running just
+// these with -count=3 and t.Parallel reproduces it every time.
 func TestDeleteUtxoBlobsReportsUnreachableObjects(t *testing.T) {
-	t.Parallel()
-
 	store := &mockBlobStore{
 		deleteUtxoErrs: map[string]error{
 			"01:0": errors.New("blob store unavailable"),
@@ -71,8 +73,6 @@ func TestDeleteUtxoBlobsReportsUnreachableObjects(t *testing.T) {
 // run must not report an error or inflate the orphan counter, or the metric
 // is useless as an alerting signal.
 func TestDeleteUtxoBlobsCountsNoOrphansOnSuccess(t *testing.T) {
-	t.Parallel()
-
 	store := &mockBlobStore{}
 	db := newBlobOrphanTestDB(store)
 	before := BlobOrphanCount()
@@ -88,8 +88,6 @@ func TestDeleteUtxoBlobsCountsNoOrphansOnSuccess(t *testing.T) {
 // TestDeleteTxBlobsReportsUnreachableObjects is the transaction-blob half of
 // the same contract.
 func TestDeleteTxBlobsReportsUnreachableObjects(t *testing.T) {
-	t.Parallel()
-
 	store := &mockBlobStore{
 		deleteTxErrs: map[string]error{
 			string([]byte{0xAA}): errors.New("blob store unavailable"),
@@ -107,8 +105,6 @@ func TestDeleteTxBlobsReportsUnreachableObjects(t *testing.T) {
 
 // TestDeleteTxBlobsCountsNoOrphansOnSuccess is the negative case for tx blobs.
 func TestDeleteTxBlobsCountsNoOrphansOnSuccess(t *testing.T) {
-	t.Parallel()
-
 	store := &mockBlobStore{}
 	db := newBlobOrphanTestDB(store)
 	before := BlobOrphanCount()
@@ -140,8 +136,6 @@ func TestDeleteUtxoBlobsWithoutBlobStoreIsReported(t *testing.T) {
 // count it again when the caller retries. Only a durable metadata removal
 // strands anything.
 func TestBlobOrphansAreNotCountedUntilMetadataCommits(t *testing.T) {
-	t.Parallel()
-
 	db := openTestDB(t)
 	db.SetBlobStore(&mockBlobStore{
 		deleteUtxoErrs: map[string]error{
@@ -168,8 +162,6 @@ func TestBlobOrphansAreNotCountedUntilMetadataCommits(t *testing.T) {
 // transaction leaves the metadata row in place, so the blob is still named and
 // reachable and must not be counted.
 func TestBlobOrphansAreNotCountedOnRollback(t *testing.T) {
-	t.Parallel()
-
 	db := openTestDB(t)
 	db.SetBlobStore(&mockBlobStore{
 		deleteTxErrs: map[string]error{

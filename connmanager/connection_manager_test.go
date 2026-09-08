@@ -34,8 +34,6 @@ import (
 
 /*
 func TestConnectionManagerTagString(t *testing.T) {
-	t.Parallel()
-
 	testDefs := map[connmanager.ConnectionManagerTag]string{
 		connmanager.ConnectionManagerTagHostP2PLedger: "HostP2PLedger",
 		connmanager.ConnectionManagerTagHostP2PGossip: "HostP2PGossip",

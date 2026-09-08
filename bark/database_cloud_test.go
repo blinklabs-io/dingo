@@ -147,24 +147,42 @@ var (
 // removed package-global process registry.
 var testDestinationRegistry = lifecycle.NewDestinationRegistry()
 
+// fakeCloudBackingDir reads a fake scheme's backing directory under mu and
+// refuses to resolve when none is set.
+//
+// A resolution with no backing directory would filepath.Join against "" and
+// write the URI path relative to the package directory. The only way to get
+// there is a resolution that outlived the test that set the fixture -- bark
+// runs snapshot and restore work on background goroutines -- and that should
+// error rather than leave files in the checkout.
+//
+// Shared by both fake schemes so the two registrations cannot drift.
+func fakeCloudBackingDir(
+	mu *sync.Mutex,
+	dir *string,
+	scheme string,
+) (string, error) {
+	mu.Lock()
+	base := *dir
+	mu.Unlock()
+	if base == "" {
+		return "", fmt.Errorf(
+			"%s: no backing directory set for this test",
+			scheme,
+		)
+	}
+	return base, nil
+}
+
 func init() {
 	testDestinationRegistry.Register(
 		"barkfaketest",
 		func(uri *url.URL) (lifecycle.CloudDestination, error) {
-			barkFakeCloudMu.Lock()
-			base := barkFakeCloudDir
-			barkFakeCloudMu.Unlock()
-			if base == "" {
-				// A resolution with no backing directory set would
-				// filepath.Join against "" and write the URI path
-				// relative to the package directory. Fail instead: the
-				// only way to get here is a resolution that outlived the
-				// test that set the fixture (bark runs snapshot and
-				// restore work on background goroutines), and that
-				// should error, not leave files in the checkout.
-				return nil, errors.New(
-					"barkfaketest: no backing directory set for this test",
-				)
+			base, err := fakeCloudBackingDir(
+				&barkFakeCloudMu, &barkFakeCloudDir, "barkfaketest",
+			)
+			if err != nil {
+				return nil, err
 			}
 			return &barkFakeCloudDestination{
 				dir: filepath.Join(base, strings.TrimPrefix(uri.Path, "/")),
@@ -226,20 +244,13 @@ func init() {
 	testDestinationRegistry.Register(
 		"barkfaketest-nodelete",
 		func(uri *url.URL) (lifecycle.CloudDestination, error) {
-			barkFakeCloudNoDeleteMu.Lock()
-			base := barkFakeCloudNoDeleteDir
-			barkFakeCloudNoDeleteMu.Unlock()
-			if base == "" {
-				// A resolution with no backing directory set would
-				// filepath.Join against "" and write the URI path
-				// relative to the package directory. Fail instead: the
-				// only way to get here is a resolution that outlived the
-				// test that set the fixture (bark runs snapshot and
-				// restore work on background goroutines), and that
-				// should error, not leave files in the checkout.
-				return nil, errors.New(
-					"barkfaketest-nodelete: no backing directory set for this test",
-				)
+			base, err := fakeCloudBackingDir(
+				&barkFakeCloudNoDeleteMu,
+				&barkFakeCloudNoDeleteDir,
+				"barkfaketest-nodelete",
+			)
+			if err != nil {
+				return nil, err
 			}
 			return &barkFakeCloudDestinationNoDelete{
 				dir: filepath.Join(base, strings.TrimPrefix(uri.Path, "/")),
