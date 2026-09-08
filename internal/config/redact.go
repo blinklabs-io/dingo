@@ -125,6 +125,8 @@ var logPlainConfigFields = []string{
 	"Cache.HotTxEntries",
 	"Cache.HotTxMaxBytes",
 	"Cache.HotUtxoEntries",
+	"Cache.HotUtxoWarmupEnabled",
+	"Cache.HotUtxoWarmupWorkers",
 	"Cache.WarmupBlocks",
 	"Cache.WarmupSync",
 	"CardanoConfig",

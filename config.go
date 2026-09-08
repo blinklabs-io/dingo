@@ -264,6 +264,8 @@ type Config struct {
 	storageMode                                                                         StorageMode
 	cacheBlockLRUEntries, cacheHotUtxoEntries, cacheHotTxEntries                        int
 	cacheHotTxMaxBytes                                                                  int64
+	cacheHotUtxoWarmupEnabled                                                           bool
+	cacheHotUtxoWarmupWorkers                                                           int
 }
 
 // configPopulateNetworkMagic uses the named network (if specified) to determine the network magic value (if not specified)
@@ -831,6 +833,7 @@ func (c *Config) syncCompatFields() {
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
 	c.leiosVoteSigningKeyFile = c.cfg.LeiosVoteSigningKeyFile
 	c.cacheBlockLRUEntries, c.cacheHotUtxoEntries, c.cacheHotTxEntries, c.cacheHotTxMaxBytes = c.cfg.Cache.BlockLRUEntries, c.cfg.Cache.HotUtxoEntries, c.cfg.Cache.HotTxEntries, c.cfg.Cache.HotTxMaxBytes
+	c.cacheHotUtxoWarmupEnabled, c.cacheHotUtxoWarmupWorkers = c.cfg.Cache.HotUtxoWarmupEnabled, c.cfg.Cache.HotUtxoWarmupWorkers
 	c.pluginSelections = map[hostplugin.Capability]hostplugin.Selection{
 		hostplugin.CapabilityStorageBlob: c.cfg.Plugins.Storage.Blob, hostplugin.CapabilityStorageMetadata: c.cfg.Plugins.Storage.Metadata,
 		hostplugin.CapabilityMempool: c.cfg.Plugins.Mempool, hostplugin.CapabilityAPIBlockfrost: c.cfg.Plugins.API.Blockfrost,

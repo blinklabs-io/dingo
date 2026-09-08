@@ -991,6 +991,15 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			)
 		}
 	})
+	// Warm the hot UTxO cache for whatever is already live, in the
+	// background, so a freshly started (or freshly Mithril-bootstrapped)
+	// node is not left cold on its first whole-UTxO-set query. n.ctx is
+	// cancelled on shutdown, which bounds this pass without an entry in the
+	// `started` cleanup stack -- see warmHotUtxoCacheInBackground's doc
+	// comment.
+	if n.config.cacheHotUtxoWarmupEnabled {
+		n.warmHotUtxoCacheInBackground()
+	}
 	// Register midnight indexer cleanup after LedgerState so it is torn down
 	// first (reverse order): midnight.Stop() → ledgerState.Close().
 	if n.midnightIndexer != nil {

@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database/types"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -744,6 +745,50 @@ func (c *TieredCborCache) ResolveTxCborBatch(
 // Metrics returns the cache metrics for monitoring and observability.
 func (c *TieredCborCache) Metrics() *CacheMetrics {
 	return c.metrics
+}
+
+// ForgetUtxo evicts one UTxO's hot-cache entry, if present. Exported for
+// callers outside this package that need to force a resolve past the hot
+// tier — for example, a test simulating blob-store data loss for a UTxO
+// that write-path warming (see warmHotUtxoCache in transaction.go) has
+// already made hot: without this, ResolveUtxoCbor's Tier 1 check would keep
+// serving the cached bytes and never observe the missing blob entry, so a
+// recovery/self-heal path that only runs on a cache miss would never
+// exercise. Ordinary production code should not need this; eviction on a
+// real spend is handled by evictHotUtxoCache, called automatically from the
+// write path.
+func (c *TieredCborCache) ForgetUtxo(txId []byte, outputIdx uint32) {
+	c.hotUtxo.Remove(makeUtxoKey(txId, outputIdx))
+}
+
+// warmHotUtxoCache populates the hot UTxO cache with a freshly produced
+// output's CBOR bytes, so a later resolve for this ref is a pure in-memory
+// hit rather than a cold blob-store/block extraction the first time it is
+// ever queried. cbor may be empty for a caller with no bytes in hand; an
+// empty slice is silently skipped rather than caching an entry that would
+// wrongly satisfy a later ResolveUtxoCbor call with zero-length data. See
+// transaction.go's SetTransactionWithOpts and SetGapBlockTransaction, the
+// write-path half of blinklabs-io/dingo#4082's fix.
+func (d *Database) warmHotUtxoCache(txId []byte, outputIdx uint32, cbor []byte) {
+	if d.cborCache == nil || len(cbor) == 0 {
+		return
+	}
+	d.cborCache.hotUtxo.Put(makeUtxoKey(txId, outputIdx), cbor)
+}
+
+// evictHotUtxoCache removes each of the given now-spent inputs' entries from
+// the hot UTxO cache, if present. Keeping eviction driven by actual spends
+// (rather than relying solely on LRU/LFU capacity pressure) is what lets the
+// hot cache's membership track the live UTxO set instead of growing with
+// total historical chain volume. See warmHotUtxoCache's doc comment.
+func (d *Database) evictHotUtxoCache(consumed []lcommon.TransactionInput) {
+	if d.cborCache == nil {
+		return
+	}
+	for _, input := range consumed {
+		id := input.Id()
+		d.cborCache.hotUtxo.Remove(makeUtxoKey(id.Bytes(), input.Index()))
+	}
 }
 
 // SetLogger wires a logger into both hot caches for update-retry-budget

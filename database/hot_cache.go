@@ -414,6 +414,27 @@ func (c *HotCache) Put(key []byte, cbor []byte) {
 	c.recordSuccessfulCommit(backoffTime)
 }
 
+// Remove evicts one key from the cache if present, and is a no-op otherwise.
+// Like Put, admission into the serialized update path is a bounded,
+// non-blocking attempt (see beginUpdate); under sustained Put/Remove
+// contention a Remove can be dropped after exhausting its retry budget, the
+// same way a Put can. This is safe for this cache's caller (see
+// SetTransactionWithOpts's UTxO-spend eviction hook in transaction.go): a
+// dropped Remove only leaves a stale entry to be reclaimed later by ordinary
+// LRU/LFU eviction pressure, rather than corrupting any persisted state --
+// HotCache is a resolve-performance cache, not a source of truth.
+func (c *HotCache) Remove(key []byte) {
+	backoffTime, ok := c.beginUpdate()
+	if !ok {
+		c.writersAborted.Add(1)
+		c.logWriterAborted("remove")
+		return
+	}
+	defer c.updateMu.Unlock()
+	c.removeEntryLocked(string(key))
+	c.recordSuccessfulCommit(backoffTime)
+}
+
 // beginUpdate makes update admission best-effort and bounded while keeping
 // the global size and byte counters serialized. The historical CAS counters
 // now report these non-blocking lock attempts so existing dashboards retain

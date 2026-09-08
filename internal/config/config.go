@@ -437,17 +437,40 @@ type CacheConfig struct {
 	WarmupBlocks int `yaml:"warmupBlocks"    envconfig:"DINGO_CACHE_WARMUP_BLOCKS"`
 	// WarmupSync blocks startup until cache warmup is complete when true.
 	WarmupSync bool `yaml:"warmupSync"      envconfig:"DINGO_CACHE_WARMUP_SYNC"`
+	// HotUtxoWarmupEnabled controls whether the node runs a background pass
+	// after startup that resolves every currently-live UTxO's CBOR into the
+	// hot UTxO cache (database.Database.WarmHotUtxoCache), so a freshly
+	// started or freshly Mithril-bootstrapped node is not left cold on its
+	// first whole-UTxO-set query. Ordinary chain-sync going forward keeps
+	// the cache warm on its own; this only covers whatever was already live
+	// before this process started. See blinklabs-io/dingo#4082.
+	HotUtxoWarmupEnabled bool `yaml:"hotUtxoWarmupEnabled" envconfig:"DINGO_CACHE_HOT_UTXO_WARMUP_ENABLED"`
+	// HotUtxoWarmupWorkers bounds concurrency for the HotUtxoWarmupEnabled
+	// background pass. 0 uses database.WarmHotUtxoCacheDefaultWorkers.
+	HotUtxoWarmupWorkers int `yaml:"hotUtxoWarmupWorkers" envconfig:"DINGO_CACHE_HOT_UTXO_WARMUP_WORKERS"`
 }
 
 // DefaultCacheConfig returns the default cache configuration values.
 func DefaultCacheConfig() CacheConfig {
 	return CacheConfig{
-		HotUtxoEntries:  50000,
-		HotTxEntries:    10000,
-		HotTxMaxBytes:   268435456, // 256 MB
-		BlockLRUEntries: 500,
-		WarmupBlocks:    1000,
-		WarmupSync:      true,
+		// A live UTxO's hot-cache entry is now evicted on spend (see
+		// database/cbor_cache.go's evictHotUtxoCache, wired from
+		// database/transaction.go), so this only needs to comfortably
+		// exceed the live-set size of the networks this matters on rather
+		// than bound total memory the way an LRU traditionally would.
+		// Preview alone was measured at ~3.17M live UTxOs
+		// (blinklabs-io/dingo#4082); mainnet's live set is larger still.
+		// 50000 (the previous default) was two orders of magnitude below
+		// that, so nearly every entry was evicted by capacity pressure
+		// long before it could ever be reused -- see #4082's root cause.
+		HotUtxoEntries:       10000000,
+		HotTxEntries:         10000,
+		HotTxMaxBytes:        268435456, // 256 MB
+		BlockLRUEntries:      500,
+		WarmupBlocks:         1000,
+		WarmupSync:           true,
+		HotUtxoWarmupEnabled: true,
+		HotUtxoWarmupWorkers: 0,
 	}
 }
 

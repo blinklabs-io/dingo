@@ -557,6 +557,16 @@ var flagSpecs = []flagSpec{
 		"cache-warmup-sync",
 		"wait for cache warmup before serving",
 	),
+	boolFlag(
+		"Cache.HotUtxoWarmupEnabled",
+		"cache-hot-utxo-warmup-enabled",
+		"warm the hot UTxO cache for the live set in the background at startup",
+	),
+	intFlag(
+		"Cache.HotUtxoWarmupWorkers",
+		"cache-hot-utxo-warmup-workers",
+		"hot UTxO cache warmup worker pool size (0 = default)",
+	),
 
 	// Chainsync
 	intFlag(

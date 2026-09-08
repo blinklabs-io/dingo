@@ -93,6 +93,46 @@ func TestHotCacheGetPut(t *testing.T) {
 	}
 }
 
+// TestHotCacheRemove covers HotCache.Remove: it evicts a present key (Get
+// afterward misses), is a silent no-op for a key that was never present,
+// and keeps size/byte accounting exact -- the eviction hook
+// evictHotUtxoCache (database/cbor_cache.go) relies on Remove for
+// blinklabs-io/dingo#4082's hot-cache-tracks-live-set fix, and a leak in
+// either counter here would silently reintroduce the "cache grows with
+// total historical volume rather than the live set" bug that fix targets.
+func TestHotCacheRemove(t *testing.T) {
+	cache := NewHotCache(100, 0)
+
+	key1 := []byte("key1")
+	cache.Put(key1, []byte("value1"))
+	_, ok := cache.Get(key1)
+	require.True(t, ok, "setup: key1 must be present before Remove")
+
+	cache.Remove(key1)
+	_, ok = cache.Get(key1)
+	assert.False(t, ok, "key1 must be gone after Remove")
+
+	snap := snapshotHotCache(cache)
+	assert.Zero(t, snap.totalBytes, "totalBytes must be reclaimed on Remove")
+	assert.Empty(t, snap.entries, "entries must be empty after Remove")
+
+	// Removing an absent key is a silent no-op, not an error/panic.
+	assert.NotPanics(t, func() {
+		cache.Remove([]byte("never-existed"))
+	})
+
+	// Remove one of several keys and confirm only that one is affected.
+	key2, key3 := []byte("key2"), []byte("key3")
+	cache.Put(key2, []byte("value2"))
+	cache.Put(key3, []byte("value3"))
+	cache.Remove(key2)
+	_, ok = cache.Get(key2)
+	assert.False(t, ok, "key2 must be gone after Remove")
+	got3, ok := cache.Get(key3)
+	require.True(t, ok, "key3 must be unaffected by removing key2")
+	assert.Equal(t, []byte("value3"), got3)
+}
+
 func TestHotCacheMutationIsolation(t *testing.T) {
 	cache := NewHotCache(10, 0)
 	key := []byte("key")

@@ -302,7 +302,24 @@ func (d *Database) SetTransactionWithOpts(
 				err,
 			)
 		}
+		// Warm the hot UTxO cache with this output's CBOR now, while it is
+		// already in hand from decoding this block -- rather than leaving
+		// TieredCborCache to backfill it lazily on first read (see
+		// blinklabs-io/dingo#4082). This is the going-forward half of the
+		// fix: it keeps the hot cache in lockstep with the live set instead
+		// of forcing every never-before-queried UTxO through cold block
+		// extraction on a whole-UTxO-set query. See the matching eviction
+		// on spend below.
+		d.warmHotUtxoCache(txId, outputIdx, utxo.Output.Cbor())
 	}
+
+	// Evict this transaction's spent inputs from the hot UTxO cache. tx.
+	// Consumed() is exactly the set the metadata store marks deleted_slot
+	// for (see sqlstore's transaction_write.go SetTransaction), so this
+	// keeps the hot cache's membership matching the live set: it no longer
+	// grows with total historical volume, and a spent UTxO's memory is
+	// reclaimed immediately rather than waiting on LRU/LFU pressure.
+	d.evictHotUtxoCache(tx.Consumed())
 
 	if err := d.ensureTransactionConsumedUtxos(tx, point, txn, nil, opts); err != nil {
 		return err
@@ -483,6 +500,11 @@ func (d *Database) SetGapBlockTransaction(
 				bytePrefix(txId), outputIdx, err,
 			)
 		}
+		// Warm the hot UTxO cache the same way SetTransactionWithOpts does
+		// for the ordinary chainsync path: this output's CBOR is already in
+		// hand from decoding the gap block, so cache it now rather than
+		// leaving the first future query to pay a cold extraction.
+		d.warmHotUtxoCache(txId, outputIdx, utxo.Output.Cbor())
 	}
 
 	if err := d.transactionStore().SetGapBlockTransaction(
@@ -502,6 +524,10 @@ func (d *Database) SetGapBlockTransaction(
 	); err != nil {
 		return err
 	}
+	// Evict this transaction's spent inputs from the hot UTxO cache -- see
+	// SetTransactionWithOpts's matching eviction and warmHotUtxoCache's doc
+	// comment.
+	d.evictHotUtxoCache(tx.Consumed())
 	// For a phase-2-invalid transaction the consumed set is its collateral
 	// inputs. SetGapBlockTransaction above computed the collateral fee before
 	// ensureGapConsumedUtxos recovered those inputs from the blob store, so

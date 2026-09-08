@@ -2105,6 +2105,53 @@ Contention remains observable through the compatibility API
 compatibility; they now count non-blocking update-lock attempts. A configured
 logger also receives rate-limited warnings when an update is dropped.
 
+### Hot UTxO Cache: Write-Path Warming and Live-Set-Driven Eviction
+
+The hot UTxO tier (`hotUtxo`, Tier 1 above) is kept in lockstep with the live
+UTxO set rather than populated purely on demand (blinklabs-io/dingo#4082):
+
+- **Write-path warming.** `database/transaction.go`'s `SetTransactionWithOpts`
+  and `SetGapBlockTransaction` call `warmHotUtxoCache` (`database/cbor_cache.go`)
+  for every produced output as it is applied — the output's CBOR is already
+  decoded from the block being applied, so this is a pure in-memory `Put`, no
+  extra I/O. A later resolve of that ref is therefore a hot-cache hit rather
+  than a cold Tier 3 extraction the first time anyone ever queries it.
+- **Write-path eviction.** The same two call sites call `evictHotUtxoCache` for
+  every input `tx.Consumed()` reports, immediately after applying a
+  transaction's effects — this is the same set the metadata store marks
+  `deleted_slot` for (see `DATABASE.md`), so hot-cache membership tracks
+  "currently live" instead of growing with total historical chain volume.
+  `HotCache.Remove` (`database/hot_cache.go`) is the underlying primitive,
+  symmetric with `Put`: a bounded, best-effort, non-blocking update-lock
+  attempt. Both warm and evict are best-effort: a dropped update, or a
+  warm/evict issued inside a transaction that later rolls back, only costs a
+  later cache miss or a stray unused entry, never correctness — `HotCache` is
+  a resolve-performance cache, not a source of truth.
+- **Startup/bootstrap warming.** `database.Database.WarmHotUtxoCache`
+  (`database/warm_hot_cache.go`) resolves every currently-live UTxO once, in
+  the background, across a bounded worker pool
+  (`ResolveLiveUtxoRefsConcurrent`, the same concurrency shape
+  `ledger.queryShelleyUtxoWhole` uses to answer `GetUTxOWhole`), discarding
+  the result and keeping only the cache-population side effect. `node.go`
+  kicks this off right after `ledgerState.Start` succeeds, gated by
+  `Cache.HotUtxoWarmupEnabled` (default `true`) and bounded by
+  `Cache.HotUtxoWarmupWorkers` (default: `database.WarmHotUtxoCacheDefaultWorkers`,
+  8 — deliberately lower than the 16-worker foreground query pool, since this
+  pass runs for much longer in the background and competes with real
+  chain-sync/validation I/O rather than a single blocking NtC client). This
+  covers whatever was already live before write-path warming had a chance to
+  see it: a Mithril-bootstrapped snapshot, or resuming an existing data dir
+  written by a pre-#4082 binary. The pass is cancelled promptly on node
+  shutdown (`n.ctx`) between dispatched jobs.
+
+Because eviction is now driven by actual spends, `Cache.HotUtxoEntries`'
+default was raised from 50000 to 10000000 — comfortably above Preview's
+measured ~3.17M live UTxOs and mainnet's larger live set — so a live UTxO is
+not silently evicted by LRU/LFU capacity pressure while still live, which
+would reintroduce #4082's cold-extraction cost. The cache remains
+count-bounded (not fully unbounded) as a guard against any future write path
+that spends UTxOs without going through the eviction hook above.
+
 ### CborOffset Structure
 
 Each CBOR reference is a fixed 52-byte `CborOffset` struct with magic prefix:

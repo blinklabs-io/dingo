@@ -729,6 +729,17 @@ func TestUtxoByRefRecoversMissingBlobFromProducerBlock(t *testing.T) {
 					return nil
 				})
 				require.NoError(t, err)
+				// The SetTransaction call above (blinklabs-io/dingo#4082) now
+				// warms this UTxO's hot cache immediately as it is produced,
+				// so without forgetting it here, the ResolveUtxoCbor call
+				// below would be served from the hot tier and never observe
+				// the blob deletion above -- defeating the point of this
+				// test, which is recovery from a missing blob entry. Forget
+				// it to simulate the realistic precondition this test
+				// intends: a UTxO whose blob data is gone and whose hot
+				// cache entry, for whatever reason (a different process, or
+				// eviction), is not populated either.
+				db.CborCache().ForgetUtxo(txId, outputIdx)
 
 				metaUtxo, err := db.Metadata().GetUtxo(txId, outputIdx, nil)
 				require.NoError(t, err)
