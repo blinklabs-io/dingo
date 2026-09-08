@@ -312,39 +312,35 @@ func NewPeerSnapshotConfigFromReader(
 func validateAccessPoint(
 	ap TopologyConfigP2PAccessPoint,
 	field string,
-	requirePort bool,
 ) error {
 	if strings.TrimSpace(ap.Address) == "" {
 		return fmt.Errorf("%s.address must not be empty", field)
 	}
-	if requirePort {
-		if ap.Port == 0 || ap.Port > maxAccessPointPort {
-			return fmt.Errorf("%s.port must be in range 1-65535", field)
-		}
-		return nil
-	}
-	if ap.Port > maxAccessPointPort {
-		return fmt.Errorf("%s.port must be in range 0-65535", field)
+	if ap.Port == 0 || ap.Port > maxAccessPointPort {
+		return fmt.Errorf("%s.port must be in range 1-65535", field)
 	}
 	return nil
 }
 
+// validateRootValencies checks that valency (the hot/active target) does not
+// exceed warmValency (the warm/established target), matching the
+// ouroboros-network invariant that the warm target must be >= the hot target
+// (LocalRootPeers.hs: getWarmValency w >= getHotValency h). A warmValency of
+// zero means it was not set in the config; cardano-node's parser defaults it
+// to valency in that case, so no comparison is needed.
+//
+// Note: valency is intentionally not bounded by the number of configured
+// access points here. An access point may be a DNS name that resolves to
+// multiple addresses, and the upstream bound applies to that resolved group,
+// not to the raw access-point count.
 func validateRootValencies(
 	fieldPrefix string,
 	warmValency uint,
 	valency uint,
-	accessPointCount int,
 ) error {
-	if warmValency > valency {
+	if warmValency != 0 && valency > warmValency {
 		return fmt.Errorf(
-			"%s.warmValency must be <= %s.valency",
-			fieldPrefix,
-			fieldPrefix,
-		)
-	}
-	if accessPointCount > 0 && valency > uint(accessPointCount) {
-		return fmt.Errorf(
-			"%s.valency must be <= len(%s.accessPoints)",
+			"%s.valency must be <= %s.warmValency",
 			fieldPrefix,
 			fieldPrefix,
 		)
@@ -359,7 +355,6 @@ func (t *TopologyConfig) validate() error {
 			if err := validateAccessPoint(
 				ap,
 				fmt.Sprintf("%s.accessPoints[%d]", fieldPrefix, apIdx),
-				true,
 			); err != nil {
 				return err
 			}
@@ -368,7 +363,6 @@ func (t *TopologyConfig) validate() error {
 			fieldPrefix,
 			localRoot.WarmValency,
 			localRoot.Valency,
-			len(localRoot.AccessPoints),
 		); err != nil {
 			return err
 		}
@@ -380,7 +374,6 @@ func (t *TopologyConfig) validate() error {
 			if err := validateAccessPoint(
 				ap,
 				fmt.Sprintf("%s.accessPoints[%d]", fieldPrefix, apIdx),
-				true,
 			); err != nil {
 				return err
 			}
@@ -389,7 +382,6 @@ func (t *TopologyConfig) validate() error {
 			fieldPrefix,
 			publicRoot.WarmValency,
 			publicRoot.Valency,
-			len(publicRoot.AccessPoints),
 		); err != nil {
 			return err
 		}
@@ -399,7 +391,6 @@ func (t *TopologyConfig) validate() error {
 		if err := validateAccessPoint(
 			bootstrapPeer,
 			fmt.Sprintf("bootstrapPeers[%d]", idx),
-			true,
 		); err != nil {
 			return err
 		}

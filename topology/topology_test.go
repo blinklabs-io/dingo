@@ -383,29 +383,17 @@ func TestNewTopologyConfigFromReader_ValidationErrors(t *testing.T) {
 			wantErr: "localRoots[0].accessPoints[0].port must be in range 1-65535",
 		},
 		{
-			name: "local root warm valency exceeds valency",
+			name: "local root valency exceeds warm valency",
 			json: `{
   "localRoots": [
     {
       "accessPoints": [{"address": "127.0.0.1", "port": 3001}],
-			"valency": 1,
-			"warmValency": 2
+			"valency": 2,
+			"warmValency": 1
     }
   ]
 }`,
-			wantErr: "localRoots[0].warmValency must be <= localRoots[0].valency",
-		},
-		{
-			name: "local root valency exceeds access points",
-			json: `{
-  "localRoots": [
-    {
-      "accessPoints": [{"address": "127.0.0.1", "port": 3001}],
-      "valency": 2
-    }
-  ]
-}`,
-			wantErr: "localRoots[0].valency must be <= len(localRoots[0].accessPoints)",
+			wantErr: "localRoots[0].valency must be <= localRoots[0].warmValency",
 		},
 		{
 			name: "public root empty address",
@@ -432,29 +420,17 @@ func TestNewTopologyConfigFromReader_ValidationErrors(t *testing.T) {
 			wantErr: "publicRoots[0].accessPoints[0].port must be in range 1-65535",
 		},
 		{
-			name: "public root valency exceeds warm valency when set",
+			name: "public root valency exceeds warm valency",
 			json: `{
   "publicRoots": [
     {
       "accessPoints": [{"address": "public.example.com", "port": 3001}],
-			"valency": 1,
-			"warmValency": 2
+			"valency": 2,
+			"warmValency": 1
     }
   ]
 }`,
-			wantErr: "publicRoots[0].warmValency must be <= publicRoots[0].valency",
-		},
-		{
-			name: "public root valency exceeds access points",
-			json: `{
-  "publicRoots": [
-    {
-      "accessPoints": [{"address": "public.example.com", "port": 3001}],
-      "valency": 2
-    }
-  ]
-}`,
-			wantErr: "publicRoots[0].valency must be <= len(publicRoots[0].accessPoints)",
+			wantErr: "publicRoots[0].valency must be <= publicRoots[0].warmValency",
 		},
 		{
 			name: "bootstrap peer empty address",
@@ -507,7 +483,7 @@ func TestNewTopologyConfigFromReader_AllowsEmptyAccessPointsWithValency(t *testi
 	require.NoError(t, err)
 }
 
-func TestNewTopologyConfigFromReader_AllowsWarmValencyBelowValency(t *testing.T) {
+func TestNewTopologyConfigFromReader_RejectsWarmValencyBelowValency(t *testing.T) {
 	jsonData := `{
 	"localRoots": [
 		{
@@ -522,10 +498,50 @@ func TestNewTopologyConfigFromReader_AllowsWarmValencyBelowValency(t *testing.T)
 }`
 
 	_, err := topology.NewTopologyConfigFromReader(strings.NewReader(jsonData))
+	require.Error(t, err)
+	require.Contains(
+		t,
+		err.Error(),
+		"localRoots[0].valency must be <= localRoots[0].warmValency",
+	)
+}
+
+func TestNewTopologyConfigFromReader_AllowsValencyBelowWarmValency(t *testing.T) {
+	jsonData := `{
+	"localRoots": [
+		{
+			"accessPoints": [
+				{"address": "127.0.0.1", "port": 3001}
+			],
+			"valency": 1,
+			"warmValency": 2
+		}
+	]
+}`
+
+	_, err := topology.NewTopologyConfigFromReader(strings.NewReader(jsonData))
 	require.NoError(t, err)
 }
 
-func TestNewPeerSnapshotConfigFromReader_AllowsMissingRelayPort(t *testing.T) {
+// Access points may be DNS names that resolve to multiple addresses, so
+// valency is not bounded by the configured access-point count.
+func TestNewTopologyConfigFromReader_AllowsValencyAboveAccessPointCount(t *testing.T) {
+	jsonData := `{
+	"localRoots": [
+		{
+			"accessPoints": [{"address": "relays.pool.example", "port": 3001}],
+			"valency": 2
+		}
+	]
+}`
+
+	_, err := topology.NewTopologyConfigFromReader(strings.NewReader(jsonData))
+	require.NoError(t, err)
+}
+
+func TestNewPeerSnapshotConfigFromReader_ParsesButValidateRejectsMissingRelayPort(
+	t *testing.T,
+) {
 	jsonData := `{
 	"NetworkMagic": 1,
 	"NodeToClientVersion": 23,
@@ -539,8 +555,11 @@ func TestNewPeerSnapshotConfigFromReader_AllowsMissingRelayPort(t *testing.T) {
 	]
 }`
 
-	_, err := topology.NewPeerSnapshotConfigFromReader(strings.NewReader(jsonData))
+	cfg, err := topology.NewPeerSnapshotConfigFromReader(strings.NewReader(jsonData))
 	require.NoError(t, err)
+	// SRV relay mode (no port) is not supported; Validate must reject it even
+	// though plain JSON decoding succeeds.
+	require.Error(t, cfg.Validate(1))
 }
 
 // TestPeerSnapshotConfigValidate verifies that snapshot identity, format,
