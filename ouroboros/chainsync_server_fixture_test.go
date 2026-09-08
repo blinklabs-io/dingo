@@ -1076,22 +1076,24 @@ func newChainsyncServerFixtureLogging(
 }
 
 // TestChainsyncServerAwaitedWaiterClosesOnConnectionError covers the waiter's
-// error-channel exit: it gives up on the connection while the peer it parked is
-// still in MustReply, so it must drop the transport rather than return
-// silently. Nothing else closes it -- the waiter returned silently and
-// ConnectionManager.RemoveConnection only unregisters -- so before the fix the
-// peer stayed parked whichever consumer took the error.
+// error-channel exit: it consumes an error for the connection it is serving and
+// must close the transport rather than return silently. Closing is the whole
+// point of the exit -- once MsgAwaitReply is on the wire the server holds
+// agency in MustReply and nothing else releases the peer: an error-channel send
+// does not, a silent return does not, and ConnectionManager.RemoveConnection
+// only unregisters.
 //
-// The waiter is driven directly, over a single-consumer stand-in for the
-// connection whose Close is the real one, rather than through a peer parked by
-// the protocol. Parking arms the production waiter on the real error channel,
-// and a test cannot address one consumer of that shared channel, so the error
-// would still have to go to a second waiter -- which would then be a second
-// goroutine driving the same ChainIter. The end-to-end release of a genuinely
-// parked peer is covered by
+// The waiter is driven directly here, over a single-consumer stand-in for the
+// connection whose Close is the real one; the test does not park a peer through
+// the protocol. Parking would arm the production waiter on the real error
+// channel, and since a test cannot address one consumer of that shared channel
+// the error would still have to be delivered to a second waiter -- a second
+// goroutine driving the same ChainIter. So the assertion here is the waiter's
+// own behavior on an error it has received, plus the transport actually going
+// away. A peer parked by the protocol is covered by
 // TestChainsyncServerRequestNextIteratorErrorAfterAwaitReplyUnparksClient and
 // TestChainsyncServerRequestNextNilBlockAfterAwaitReplyUnparksClient, which
-// park through the protocol and drive the serve path on the real connection.
+// park for real and drive the serve path on the real connection.
 func TestChainsyncServerAwaitedWaiterClosesOnConnectionError(
 	t *testing.T,
 ) {
@@ -1116,8 +1118,9 @@ func TestChainsyncServerAwaitedWaiterClosesOnConnectionError(
 	)
 	f.requireClientUnparked(
 		t,
-		"a connection error consumed by the parked waiter must drop the "+
-			"transport, not leave the peer parked in MustReply",
+		"a connection error consumed by the waiter must drop the transport, "+
+			"which is the only thing that releases a peer the server has "+
+			"parked in MustReply",
 	)
 	require.Equal(
 		t,
@@ -1141,11 +1144,11 @@ func TestChainsyncServerAwaitedWaiterClosesOnConnectionError(
 // either way, so what is distinct here is the reason -- the nil must not reach
 // the log as an empty or malformed error.
 //
-// Like its sibling it drives the waiter directly rather than through a parked
-// peer, which here is also what makes the reason attributable: a parked peer
-// arms the production waiter on the real error channel, and the delegated Close
-// would wake that waiter with a closure of its own whose teardown reason is
-// textually identical to the one under test.
+// Like its sibling it drives the waiter directly rather than through a peer
+// parked by the protocol, which here is also what makes the reason
+// attributable: a parked peer arms the production waiter on the real error
+// channel, and the delegated Close would wake that waiter with a closure of its
+// own whose teardown reason is textually identical to the one under test.
 func TestChainsyncServerAwaitedWaiterClosesOnErrorChannelClosure(
 	t *testing.T,
 ) {
@@ -1169,8 +1172,8 @@ func TestChainsyncServerAwaitedWaiterClosesOnErrorChannelClosure(
 	)
 	f.requireClientUnparked(
 		t,
-		"a closed error channel must drop the transport, not leave the "+
-			"waiter's peer able to park indefinitely",
+		"a closed error channel must drop the transport, which is the only "+
+			"thing that releases a peer the server has parked in MustReply",
 	)
 	require.Equal(
 		t,
