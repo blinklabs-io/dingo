@@ -55,6 +55,27 @@ var testDestinationRegistry = lifecycle.NewDestinationRegistry()
 // backup path can capture a version without holding the commit barrier. The
 // manager tests below exercise event handling and retention with a real
 // Badger-backed database; the policy itself has a focused test below.
+// snapshotWait bounds a wait on the manager actually doing its work: a
+// badger backup, a sqlite VACUUM INTO, a manifest write, and for the cloud
+// tests an upload and a pruning pass. That is real disk I/O, not the
+// in-memory signal the repository's 2-5s WaitForCondition convention is
+// written for, and nothing in the product promises it inside any particular
+// deadline -- so this bound exists only to stop a hung test running forever.
+//
+// It used to vary between 5s, 15s and 30s across this file with no reason
+// for the difference, and the short ones were flaky: a snapshot of an empty
+// database that finishes in under a second on a workstation took the full
+// five seconds on CI. Both observed failures were 5s waits and looked like
+// two different bugs -- on one run the snapshot landed just after the last
+// poll, on another it was still inside VACUUM INTO when the deferred Stop
+// cancelled its context and SQLite returned "interrupted (9)". Neither was
+// a manager defect. The 15s and 30s waits in the same file never failed.
+//
+// A genuine hang still fails, 30s later, and the package timeout still
+// backstops it. Keep every wait on manager-driven work on this constant so
+// the spread cannot come back.
+const snapshotWait = 30 * time.Second
+
 const testManagerBlobPlugin = "badger-test"
 
 func newManagerTestDB(t *testing.T) *database.Database {
@@ -297,7 +318,7 @@ func TestManagerCapturesSnapshotOnEpochBoundary(t *testing.T) {
 			filepath.Join(snapshotDir, "epoch-5", "manifest.json"),
 		)
 		return err == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 }
 
 // TestManagerRespectsEveryNEpochsGating verifies that with
@@ -324,7 +345,7 @@ func TestManagerRespectsEveryNEpochsGating(t *testing.T) {
 			filepath.Join(snapshotDir, "epoch-4", "manifest.json"),
 		)
 		return err == nil
-	}, 30*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 
 	require.NoDirExists(t, filepath.Join(snapshotDir, "epoch-3"))
 }
@@ -351,7 +372,7 @@ func TestManagerRedeliveredEventIsNotFatal(t *testing.T) {
 			filepath.Join(snapshotDir, "epoch-7", "manifest.json"),
 		)
 		return err == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 
 	// Redeliver the same epoch's event (simulating a restart replay) —
 	// must not crash the loop or leave it stuck; a later, new epoch must
@@ -363,7 +384,7 @@ func TestManagerRedeliveredEventIsNotFatal(t *testing.T) {
 			filepath.Join(snapshotDir, "epoch-8", "manifest.json"),
 		)
 		return err == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 }
 
 // TestManagerPrunesOldSnapshotsBeyondRetention verifies that with
@@ -396,13 +417,13 @@ func TestManagerPrunesOldSnapshotsBeyondRetention(t *testing.T) {
 				"manifest.json",
 			))
 			return err == nil
-		}, 30*time.Second, 10*time.Millisecond)
+		}, snapshotWait, 10*time.Millisecond)
 	}
 
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(filepath.Join(snapshotDir, "epoch-1"))
 		return os.IsNotExist(err)
-	}, 30*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 	require.DirExists(t, filepath.Join(snapshotDir, "epoch-2"))
 	require.DirExists(t, filepath.Join(snapshotDir, "epoch-3"))
 }
@@ -544,7 +565,7 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 		testutil.RequireReceive(
 			t,
 			uploaded,
-			30*time.Second,
+			snapshotWait,
 			"startup cloud-mirror retry scan did not reach its probe",
 		),
 	)
@@ -558,7 +579,7 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 		require.Equal(t, epochDir, testutil.RequireReceive(
 			t,
 			uploaded,
-			30*time.Second,
+			snapshotWait,
 			"automatic snapshot cloud upload did not complete",
 		))
 		require.FileExists(t, filepath.Join(epochDir, "manifest.json"))
@@ -573,7 +594,7 @@ func TestManagerPruningDeletesCloudMirror(t *testing.T) {
 	testutil.WaitForCondition(t, func() bool {
 		_, err := os.Stat(filepath.Join(snapshotDir, "epoch-1"))
 		return os.IsNotExist(err)
-	}, 30*time.Second, "automatic snapshot local prune did not complete")
+	}, snapshotWait, "automatic snapshot local prune did not complete")
 	// Stop is the manager's drain barrier and proves the same handler has
 	// fully completed before inspecting either retained set.
 	require.NoError(t, m.Stop())
@@ -686,7 +707,7 @@ func TestManagerSurvivesHandlerPanic(t *testing.T) {
 			logBuf.String(),
 			"SubscribeFunc handler panicked",
 		)
-	}, 5*time.Second, 10*time.Millisecond, "the panic must be caught and logged by the EventBus")
+	}, snapshotWait, 10*time.Millisecond, "the panic must be caught and logged by the EventBus")
 
 	// The manager's dispatch must still be alive and fully, normally
 	// functional afterward -- not stuck, not dead, and not itself still
@@ -701,7 +722,7 @@ func TestManagerSurvivesHandlerPanic(t *testing.T) {
 			filepath.Join(snapshotDir, "epoch-21", "manifest.json"),
 		)
 		return err == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 	require.Equal(
 		t, 1,
 		strings.Count(logBuf.String(), "SubscribeFunc handler panicked"),
@@ -769,7 +790,7 @@ func TestManagerCloudUploadFailureIsNotSwallowed(t *testing.T) {
 			logBuf.String(),
 			"automatic database snapshot failed",
 		)
-	}, 15*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 
 	require.NotContains(
 		t,
@@ -881,7 +902,7 @@ func TestManagerStopWaitsForInFlightHandlerAfterExternalContextCancellation(
 
 	publishEpochTransition(eb, 3)
 	testutil.RequireReceive(
-		t, dest.started, 5*time.Second,
+		t, dest.started, snapshotWait,
 		"the snapshot handler must have entered UploadDir",
 	)
 
@@ -1005,7 +1026,7 @@ func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(
 			logBuf.String(),
 			"automatic database snapshot failed",
 		)
-	}, 5*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 
 	entries, err := os.ReadDir(snapshotDir)
 	require.NoError(t, err)
@@ -1032,7 +1053,7 @@ func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(
 		// coalesced by the bus.
 		publishEpochTransition(eb, 9)
 		return lifecycle.IsCloudMirrored(destDir)
-	}, 15*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 
 	require.True(
 		t, lifecycle.IsCloudMirrored(destDir),
@@ -1096,7 +1117,7 @@ func TestManagerRetriesUnmirroredSnapshotOnLaterEpochWithoutRedelivery(
 			logBuf.String(),
 			"automatic database snapshot failed",
 		)
-	}, 15*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 
 	destDir := filepath.Join(snapshotDir, "epoch-9")
 	require.False(
@@ -1109,7 +1130,7 @@ func TestManagerRetriesUnmirroredSnapshotOnLaterEpochWithoutRedelivery(
 	publishEpochTransition(eb, 10)
 	require.Eventually(t, func() bool {
 		return lifecycle.IsCloudMirrored(destDir)
-	}, 15*time.Second, 10*time.Millisecond,
+	}, snapshotWait, 10*time.Millisecond,
 		"epoch 9's stuck snapshot must be retried when epoch 10 transitions, "+
 			"without epoch 9's own event ever being redelivered",
 	)
@@ -1190,7 +1211,7 @@ func TestManagerRetriesUnmirroredSnapshotOnRestart(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return lifecycle.IsCloudMirrored(destDir)
-	}, 15*time.Second, 10*time.Millisecond,
+	}, snapshotWait, 10*time.Millisecond,
 		"restart's startup scan must retry epoch 9's stuck snapshot "+
 			"without any epoch-transition event being delivered",
 	)
@@ -1373,7 +1394,7 @@ func TestManagerPruningPreservesNeverMirroredSnapshotLocally(t *testing.T) {
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(filepath.Join(epoch1Dir, "manifest.json"))
 		return err == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 	require.False(
 		t, lifecycle.IsCloudMirrored(epoch1Dir),
 		"must not be marked mirrored after a failed upload",
@@ -1390,7 +1411,7 @@ func TestManagerPruningPreservesNeverMirroredSnapshotLocally(t *testing.T) {
 			filepath.Join(cloudPrefixDir, "epoch-2", "manifest.json"),
 		)
 		return err == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 
 	require.DirExists(
 		t,
@@ -1406,13 +1427,13 @@ func TestManagerPruningPreservesNeverMirroredSnapshotLocally(t *testing.T) {
 	publishEpochTransition(eb, 3)
 	require.Eventually(t, func() bool {
 		return lifecycle.IsCloudMirrored(epoch1Dir)
-	}, 15*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 
 	require.Eventually(t, func() bool {
 		_, localErr := os.Stat(epoch1Dir)
 		_, cloudErr := os.Stat(filepath.Join(cloudPrefixDir, "epoch-1"))
 		return os.IsNotExist(localErr) && os.IsNotExist(cloudErr)
-	}, 15*time.Second, 10*time.Millisecond,
+	}, snapshotWait, 10*time.Millisecond,
 		"once mirrored for real, a later pruning pass must finish removing "+
 			"both copies of the now-retired epoch-1 snapshot",
 	)
@@ -1467,7 +1488,7 @@ func TestManagerCloudDestinationPrefixIsIncorporatedIntoUploadPath(
 			"manifest.json",
 		))
 		return err == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 
 	require.NoDirExists(
 		t,
@@ -1607,7 +1628,7 @@ func TestManagerPruningKeepsLocalCopyUntilCloudDeleteSucceeds(t *testing.T) {
 				"manifest.json",
 			))
 			return err == nil
-		}, 5*time.Second, 10*time.Millisecond)
+		}, snapshotWait, 10*time.Millisecond)
 	}
 
 	// epoch-1 is beyond retention (2): pruning must have attempted to
@@ -1616,7 +1637,7 @@ func TestManagerPruningKeepsLocalCopyUntilCloudDeleteSucceeds(t *testing.T) {
 	require.Eventually(t, func() bool {
 		_, localErr := os.Stat(filepath.Join(snapshotDir, "epoch-1"))
 		return localErr == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 	require.DirExists(
 		t,
 		filepath.Join(cloudPrefixDir, "epoch-1"),
@@ -1639,13 +1660,13 @@ func TestManagerPruningKeepsLocalCopyUntilCloudDeleteSucceeds(t *testing.T) {
 			"manifest.json",
 		))
 		return err == nil
-	}, 5*time.Second, 10*time.Millisecond)
+	}, snapshotWait, 10*time.Millisecond)
 
 	require.Eventually(t, func() bool {
 		_, localErr := os.Stat(filepath.Join(snapshotDir, "epoch-1"))
 		_, cloudErr := os.Stat(filepath.Join(cloudPrefixDir, "epoch-1"))
 		return os.IsNotExist(localErr) && os.IsNotExist(cloudErr)
-	}, 5*time.Second, 10*time.Millisecond,
+	}, snapshotWait, 10*time.Millisecond,
 		"once the cloud outage clears, a later pruning pass must finish "+
 			"removing both the local and cloud copies of the retried epoch",
 	)
