@@ -1618,6 +1618,37 @@ func (ls *LedgerState) electingVrfKeyHashWithCache(
 			copy(hash[:], vrfKeyHash)
 			return hash, true, nil
 		}
+		// Both lookups missed. That is ordinarily the unanswerable gap the
+		// error below reports, but it is also exactly what a Mithril
+		// bootstrap produces for the epoch boundary the node crosses right
+		// after import: the snapshot import writes only the pool's live
+		// registration, stamped at the import slot, and never replays the
+		// certificate history that produced it. So a pool that has in fact
+		// been continuously registered the whole time has no row at or
+		// before a cutoff/capture slot that predates the import (issue
+		// #4047).
+		//
+		// mithrilLedgerSlot pins that import slot for the life of the
+		// process (set once at startup, like the other reads of this field
+		// in this file), so a capture at or below it is diagnostic: the
+		// snapshot that elected this pool was captured no later than the
+		// bootstrap boundary, which only a bootstrap-created gap explains.
+		// Falling back to the live registration here is the same trust
+		// electingVrfKeyHashWithCache already extends when ok is false --
+		// no snapshot at all -- applied to the narrower case of a snapshot
+		// whose registration history the import could not carry. It is not
+		// the general "no history found" fallback #3842 removed: outside
+		// this bootstrap-anchor window, a genuine gap still hard-rejects
+		// rather than resolving the pool's current (possibly rotated) key.
+		if ls.mithrilLedgerSlot != 0 && capturedSlot <= ls.mithrilLedgerSlot {
+			pool, poolErr := ls.db.GetPool(poolKeyHash, true, nil)
+			if poolErr != nil && !errors.Is(poolErr, models.ErrPoolNotFound) {
+				return lcommon.Blake2b256{}, false, poolErr
+			}
+			if hash, ok := registeredPoolVrfKeyHash(pool); ok {
+				return hash, true, nil
+			}
+		}
 		return lcommon.Blake2b256{}, false, fmt.Errorf(
 			"%w at cutoff slot %d or capture slot %d for pool %x",
 			errVrfKeyRegistrationHistoryUnavailable,

@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -329,4 +330,143 @@ func TestLeaderEligibilityStakeSkipDecisionUsesTheSuppliedEpochCache(
 	assert.Equal(t, uint64(1_000), poolStake)
 	assert.Equal(t, uint64(10_000), totalStake,
 		"not skipping means the threshold's denominator is actually read")
+}
+
+// TestElectingVrfKeyHashResolvesBelowMithrilBootstrapAnchor is the dingo #4047
+// regression: a Mithril-bootstrapped node wedges at its first epoch boundary
+// because the pool's only registration row is stamped at the bootstrap
+// anchor slot, which is later than the parameter cutoff and stake-snapshot
+// capture slots the electing snapshot resolves against.
+//
+// A Mithril snapshot import writes the pool's live-at-anchor registration
+// (ImportPool) -- it never replays the certificate history that produced it
+// -- so seedPoolRegistrationAtSlot here models exactly one such bootstrap
+// row, at anchor slot 3_200_000: after mark(37)'s capture (3_196_799) and
+// cutoff (3_110_399), which elect epoch 38. ls.mithrilLedgerSlot is set to
+// the same anchor, the way LedgerState restores it from the persisted
+// mithril_ledger_slot sync-state key at startup.
+//
+// Before the fix, both GetPoolVrfKeyHashAtSlot(cutoff) and
+// GetPoolEarliestVrfKeyHashAtSlot(capture) miss -- the only row about this
+// pool is time-stamped after both slots -- and electingVrfKeyHash returns
+// errVrfKeyRegistrationHistoryUnavailable. That is what wedges the node: the
+// error is unconditional once the ledger tip has caught up to the checked
+// slot, which is exactly the epoch-boundary case being validated live. The
+// fix recognizes capturedSlot <= mithrilLedgerSlot as diagnostic of that
+// bootstrap gap and falls back to the pool's live registration instead.
+func TestElectingVrfKeyHashResolvesBelowMithrilBootstrapAnchor(t *testing.T) {
+	nonce := bytes.Repeat([]byte{0x07}, 32)
+	tb := createTestBlock(t, [32]byte{56}, 56, tamperNone)
+	ls, db := newEligibilityTestLedger(t, nonce)
+	ls.epochCache = previewEpochs(35, 39, nonce)
+
+	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x11}, 28))
+	vrfKey := bytes.Repeat([]byte{0xB5}, 32)
+
+	// The bootstrap's only registration row for this pool: no history below
+	// it, matching a Mithril import that never saw the pool's real,
+	// pre-anchor registration certificate.
+	const anchorSlot = 3_200_000
+	seedPoolRegistrationAtSlot(t, db, pool[:], vrfKey, anchorSlot)
+	ls.mithrilLedgerSlot = anchorSlot
+	ls.publishSnapshotsLocked()
+
+	// mark(37) elects epoch 38. Its capture (3_196_799) and the resulting
+	// parameter cutoff (3_110_399, the last slot of epoch 36) both precede
+	// the anchor, reproducing the reported gap.
+	seedPoolStakeSnapshotOfTypeAtSlot(t, db, 37,
+		models.PoolStakeSnapshotTypeMark, pool[:], 1_000, 10_000, 3_196_799)
+
+	cutoff, captured, ok, err := ls.electingPoolParamsCutoffSlot(
+		tb.block, 38, pool,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Less(t, cutoff, uint64(anchorSlot),
+		"the fixture must reproduce the reported gap: cutoff below the anchor")
+	require.Less(t, captured, uint64(anchorSlot),
+		"the fixture must reproduce the reported gap: capture below the anchor")
+
+	gotKey, ok, err := ls.electingVrfKeyHash(tb.block, 38, pool)
+	require.NoError(t, err,
+		"a bootstrap-only registration below the anchor must not raise "+
+			"errVrfKeyRegistrationHistoryUnavailable for a pool that has, "+
+			"in fact, always been registered")
+	require.True(t, ok)
+	assert.Equal(t, vrfKey, gotKey.Bytes())
+}
+
+// TestElectingVrfKeyHashStillRejectsAPoolWithNoRegistrationAtAll pins the
+// boundary the #4047 fix must not erase: on a Mithril-bootstrapped node, a
+// pool with no registration row at all still raises
+// errVrfKeyRegistrationHistoryUnavailable rather than silently resolving.
+// The fallback reads the pool's live registration; a pool nothing was ever
+// imported or registered for has none, so GetPool finds nothing and the
+// fallback yields ok == false, falling through to the same error as before
+// the fix.
+func TestElectingVrfKeyHashStillRejectsAPoolWithNoRegistrationAtAll(
+	t *testing.T,
+) {
+	nonce := bytes.Repeat([]byte{0x07}, 32)
+	tb := createTestBlock(t, [32]byte{57}, 57, tamperNone)
+	ls, db := newEligibilityTestLedger(t, nonce)
+	ls.epochCache = previewEpochs(35, 39, nonce)
+	ls.mithrilLedgerSlot = 3_200_000
+	ls.publishSnapshotsLocked()
+
+	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x11}, 28))
+	// No seedPoolRegistrationAtSlot call: this pool has no registration row
+	// anywhere in the database.
+
+	seedPoolStakeSnapshotOfTypeAtSlot(t, db, 37,
+		models.PoolStakeSnapshotTypeMark, pool[:], 1_000, 10_000, 3_196_799)
+
+	_, _, err := ls.electingVrfKeyHash(tb.block, 38, pool)
+	require.Error(t, err)
+	assert.True(t,
+		errors.Is(err, errVrfKeyRegistrationHistoryUnavailable),
+		"a pool with no registration history at all must still be rejected: "+
+			"got %v",
+		err,
+	)
+}
+
+// TestElectingVrfKeyHashDoesNotFallBackWithoutAMithrilBoundary pins the other
+// half of the boundary: on a node with no Mithril bootstrap
+// (mithrilLedgerSlot == 0, e.g. a genesis sync), a missing-history gap must
+// still hard-reject even though the pool has a resolvable live registration.
+// This is the #3842 guarantee the fix must not erase: falling back to the
+// live registration whenever history merely looks incomplete reintroduces
+// the VRF-rotation wedge that issue fixed. The fallback here fires only when
+// mithrilLedgerSlot pins a bootstrap boundary that explains the gap.
+func TestElectingVrfKeyHashDoesNotFallBackWithoutAMithrilBoundary(
+	t *testing.T,
+) {
+	nonce := bytes.Repeat([]byte{0x07}, 32)
+	tb := createTestBlock(t, [32]byte{58}, 58, tamperNone)
+	ls, db := newEligibilityTestLedger(t, nonce)
+	ls.epochCache = previewEpochs(35, 39, nonce)
+	// mithrilLedgerSlot left at its zero value: no Mithril bootstrap.
+	ls.publishSnapshotsLocked()
+
+	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x11}, 28))
+	vrfKey := bytes.Repeat([]byte{0xB5}, 32)
+
+	// A live, resolvable registration exists, but only after both the
+	// cutoff and the capture -- the same "both lookups miss" shape as the
+	// bootstrap gap, reached here by a certificate genuinely arriving late
+	// rather than by an import never seeing one at all.
+	seedPoolRegistrationAtSlot(t, db, pool[:], vrfKey, 3_300_000)
+
+	seedPoolStakeSnapshotOfTypeAtSlot(t, db, 37,
+		models.PoolStakeSnapshotTypeMark, pool[:], 1_000, 10_000, 3_196_799)
+
+	_, _, err := ls.electingVrfKeyHash(tb.block, 38, pool)
+	require.Error(t, err,
+		"without a Mithril boundary, a history gap must hard-reject rather "+
+			"than fall back to the pool's live (later) registration")
+	assert.True(t,
+		errors.Is(err, errVrfKeyRegistrationHistoryUnavailable),
+		"got %v", err,
+	)
 }
