@@ -762,59 +762,79 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 	if conn == nil {
 		return fmt.Errorf("connection %s not found", ctx.ConnectionId.String())
 	}
-	go func() {
-		// Wait for next block in a separate goroutine so we can
-		// also monitor the connection for errors. This avoids
-		// leaking the monitor goroutine when Next returns first.
-		done := make(chan struct{})
-		var next *chain.ChainIteratorResult
-		var nextErr error
-		go func() {
-			defer close(done)
-			next, nextErr = clientState.ChainIter.Next(true)
-		}()
-		select {
-		case <-done:
-			// Iterator returned
-		case connErr := <-o.chainsyncServerConnErrorChan(conn):
-			// Abandoning the wait here leaves the peer parked in MustReply
-			// with the server holding agency, so the transport has to be
-			// dropped: an error-channel send alone does not unpark it. See
-			// closeChainsyncServerConn.
-			//
-			// conn.ErrorChan() is one buffered channel shared with blockfetch,
-			// tx-submission and the connection manager's own teardown watcher,
-			// so the error taken here may belong to another mini-protocol --
-			// in which case the manager never sees it and would not tear the
-			// connection down at all. Closing is correct either way: it is
-			// what the manager would have done with that error, and it wakes
-			// the manager's watcher through the closed error channel.
-			clientState.ChainIter.Cancel()
-			o.closeChainsyncServerConn(
-				conn,
-				ctx.ConnectionId.String(),
-				fmt.Errorf(
-					"connection error while peer awaited a reply: %w",
-					orErrConnectionClosed(connErr),
-				),
-			)
-			return
-		}
-		o.chainsyncServerServeAwaited(ctx, conn, next, nextErr)
-	}()
+	go o.chainsyncServerAwaitNext(ctx, conn, clientState)
 	return nil
 }
 
-// chainsyncServerConnErrorChan returns the channel the post-AwaitReply waiter
-// watches for connection failures: conn.ErrorChan() unless a test has supplied
-// a single-consumer stand-in. See Ouroboros.chainsyncServerConnErrors.
-func (o *Ouroboros) chainsyncServerConnErrorChan(
-	conn *ouroboros.Connection,
-) <-chan error {
-	if o.chainsyncServerConnErrors != nil {
-		return o.chainsyncServerConnErrors(conn)
+// chainsyncServerConnection is the connection surface the post-AwaitReply
+// ChainSync server waiter needs: the error channel it watches while the peer is
+// parked in MustReply, and the Close that is the only thing that releases it.
+//
+// It is an interface for the same reason blockfetchConnection is: conn's error
+// channel is a single buffered channel shared with blockfetch, tx-submission
+// and the connection manager's teardown watcher, and delivery goes to whichever
+// consumer the runtime picks, so a test cannot address this waiter on the real
+// one. Taking the two methods the waiter actually uses keeps that seam in the
+// signature instead of in a production field only tests write.
+//
+// *ouroboros.Connection satisfies it, and the RequestNext callback above passes
+// exactly that.
+type chainsyncServerConnection interface {
+	ErrorChan() chan error
+	Close() error
+}
+
+// chainsyncServerAwaitNext is the post-AwaitReply waiter. It runs as its own
+// goroutine once the server has parked the peer in MustReply, and either serves
+// the block the iterator eventually yields or drops the transport.
+func (o *Ouroboros) chainsyncServerAwaitNext(
+	ctx ochainsync.CallbackContext,
+	conn chainsyncServerConnection,
+	clientState *chainsync.ChainsyncClientState,
+) {
+	// Wait for next block in a separate goroutine so we can
+	// also monitor the connection for errors. This avoids
+	// leaking the monitor goroutine when Next returns first.
+	done := make(chan struct{})
+	var next *chain.ChainIteratorResult
+	var nextErr error
+	go func() {
+		defer close(done)
+		next, nextErr = clientState.ChainIter.Next(true)
+	}()
+	select {
+	case <-done:
+		// Iterator returned
+	case connErr := <-conn.ErrorChan():
+		// Abandoning the wait here leaves the peer parked in MustReply
+		// with the server holding agency, so the transport has to be
+		// dropped: an error-channel send alone does not unpark it. See
+		// closeChainsyncServerConn.
+		//
+		// conn.ErrorChan() is one buffered channel shared with blockfetch,
+		// tx-submission and the connection manager's own teardown watcher,
+		// so the error taken here may belong to another mini-protocol --
+		// in which case the manager never sees it and would not tear the
+		// connection down at all. Closing is correct either way: it is
+		// what the manager would have done with that error, and it wakes
+		// the manager's watcher through the closed error channel.
+		//
+		// A closed channel delivers a nil error and is the ordinary way in:
+		// gouroboros' Connection.shutdown closes the channel it owns, so
+		// every consumer wakes at once. orErrConnectionClosed keeps the
+		// logged reason meaningful in that case.
+		clientState.ChainIter.Cancel()
+		o.closeChainsyncServerConn(
+			conn,
+			ctx.ConnectionId.String(),
+			fmt.Errorf(
+				"connection error while peer awaited a reply: %w",
+				orErrConnectionClosed(connErr),
+			),
+		)
+		return
 	}
-	return conn.ErrorChan()
+	o.chainsyncServerServeAwaited(ctx, conn, next, nextErr)
 }
 
 // errChainsyncAwaitConnectionClosed stands in for the nil value a closed
@@ -845,7 +865,7 @@ func orErrConnectionClosed(err error) error {
 // silently is not a third option.
 func (o *Ouroboros) chainsyncServerServeAwaited(
 	ctx ochainsync.CallbackContext,
-	conn *ouroboros.Connection,
+	conn chainsyncServerConnection,
 	next *chain.ChainIteratorResult,
 	nextErr error,
 ) {
@@ -930,7 +950,7 @@ func (o *Ouroboros) chainsyncServerServeAwaited(
 }
 
 func (o *Ouroboros) reportChainsyncServerAsyncError(
-	conn *ouroboros.Connection,
+	conn chainsyncServerConnection,
 	connectionID string,
 	operation string,
 	err error,
@@ -966,7 +986,7 @@ func (o *Ouroboros) reportChainsyncServerAsyncError(
 // point. It also closes the gouroboros-owned error channel, which wakes the
 // connmanager watcher without racing a Dingo send against channel closure.
 func (o *Ouroboros) closeChainsyncServerConn(
-	conn *ouroboros.Connection,
+	conn chainsyncServerConnection,
 	connectionID string,
 	err error,
 ) {

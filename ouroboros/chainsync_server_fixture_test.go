@@ -997,6 +997,84 @@ func TestChainsyncServerRequestNextNilBlockAfterAwaitReplyUnparksClient(
 	)
 }
 
+// The post-AwaitReply waiter takes a chainsyncServerConnection, and the only
+// production caller hands it the *ouroboros.Connection the connection manager
+// resolved. Restating that here keeps the stand-in below from drifting away
+// from the type production actually passes.
+var _ chainsyncServerConnection = (*ouroboros.Connection)(nil)
+
+// stubChainsyncServerConnection is a single-consumer stand-in for the
+// connection the post-AwaitReply waiter watches, mirroring
+// stubBlockfetchConnection (blockfetch_test.go), which exists for the same
+// reason.
+//
+// The real conn.ErrorChan() is one buffered channel shared with the connection
+// manager's teardown watcher (and, in production, blockfetch and
+// tx-submission), and delivery goes to whichever consumer the runtime picks, so
+// a test cannot address this waiter on it. Publishing an extra error to cover
+// the other consumers is not an option either: the consumer that wins closes
+// the connection, and gouroboros' Connection.shutdown closes the error channel
+// it owns, so the extra send would race that closure.
+//
+// closeFn delegates to the real connection, so closing the stand-in still drops
+// the actual transport and the harness can observe the parked peer being
+// released.
+type stubChainsyncServerConnection struct {
+	errChan chan error
+	closeFn func() error
+
+	mu         sync.Mutex
+	closeCalls int
+}
+
+func newStubChainsyncServerConnection(
+	closeFn func() error,
+) *stubChainsyncServerConnection {
+	return &stubChainsyncServerConnection{
+		errChan: make(chan error, 1),
+		closeFn: closeFn,
+	}
+}
+
+func (c *stubChainsyncServerConnection) ErrorChan() chan error {
+	return c.errChan
+}
+
+func (c *stubChainsyncServerConnection) Close() error {
+	c.mu.Lock()
+	c.closeCalls++
+	c.mu.Unlock()
+	if c.closeFn != nil {
+		return c.closeFn()
+	}
+	return nil
+}
+
+func (c *stubChainsyncServerConnection) closeCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closeCalls
+}
+
+// newChainsyncServerFixtureLogging is newChainsyncServerFixture with the
+// Ouroboros logger redirected into a buffer, for the two tests whose assertion
+// includes the reason the waiter logged for a teardown.
+func newChainsyncServerFixtureLogging(
+	t *testing.T,
+) (*chainsyncServerFixture, *lockedBuffer) {
+	t.Helper()
+	logBuf := &lockedBuffer{}
+	f := newChainsyncServerFixtureWithConfig(
+		t,
+		csmock.ModeNtC,
+		OuroborosConfig{},
+		func(o *Ouroboros) {
+			o.config.Logger = slog.New(slog.NewJSONHandler(logBuf, nil))
+		},
+	)
+	return f, logBuf
+}
+
 // TestChainsyncServerRequestNextConnErrorAfterAwaitReplyUnparksClient covers
 // the error-channel exit: the waiter gives up on the connection while the peer
 // is parked, so it must drop the transport rather than return silently. Neither
@@ -1004,60 +1082,120 @@ func TestChainsyncServerRequestNextNilBlockAfterAwaitReplyUnparksClient(
 // ConnectionManager.RemoveConnection only unregisters -- so before the fix the
 // peer stayed parked whichever consumer won.
 //
-// The waiter is given a single-consumer stand-in for conn.ErrorChan(). The real
-// channel is shared with the connection manager's teardown watcher (and, in
-// production, blockfetch and tx-submission) and delivery goes to whichever
-// consumer the runtime picks, so a test cannot address this waiter on it.
-// Publishing an extra error to cover the other consumers is not an option
-// either: the consumer that wins closes the connection, and gouroboros'
-// Connection.shutdown closes the error channel it owns, so the extra send would
-// race that closure. What the waiter does with an error it has received is the
-// same either way, and that is what this asserts.
+// The peer is parked through the real protocol first, so this is the genuine
+// MustReply state; the waiter is then driven over a single-consumer stand-in
+// for the connection (see stubChainsyncServerConnection) whose Close is the
+// real one. What the waiter does with an error it has received is the same
+// either way, and that is what this asserts.
 func TestChainsyncServerRequestNextConnErrorAfterAwaitReplyUnparksClient(
 	t *testing.T,
 ) {
-	connErrs := make(chan error, 1)
-	f := newChainsyncServerFixtureWithConfig(
-		t,
-		csmock.ModeNtC,
-		OuroborosConfig{},
-		func(o *Ouroboros) {
-			o.chainsyncServerConnErrors = func(
-				*ouroboros.Connection,
-			) <-chan error {
-				return connErrs
-			}
-		},
-	)
+	const connErrText = "simulated protocol error for the parked waiter"
+	f, logBuf := newChainsyncServerFixtureLogging(t)
 	f.parkInAwaitReply(t)
+	observed, ok := f.observedConnId()
+	require.True(t, ok, "the server callbacks must have run")
+	require.Equal(t, f.conn.Id(), observed)
+	// AddClient returns the state the parked RequestNext registered rather
+	// than a second one, so the waiter below shares the peer's real iterator.
+	clientState, err := f.o.chainsyncState.AddClient(
+		f.conn.Id(),
+		ocommon.NewPointOrigin(),
+	)
+	require.NoError(t, err)
 
-	connErrs <- errors.New("simulated protocol error for the parked waiter")
+	conn := newStubChainsyncServerConnection(f.conn.Close)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.o.chainsyncServerAwaitNext(f.callbackContext(), conn, clientState)
+	}()
 
+	conn.ErrorChan() <- errors.New(connErrText)
+
+	testutil.RequireReceive(
+		t,
+		done,
+		10*time.Second,
+		"the waiter must return once it has consumed a connection error",
+	)
 	f.requireClientUnparked(
 		t,
 		"a connection error consumed by the parked waiter must drop the "+
 			"transport, not leave the peer parked in MustReply",
 	)
+	require.Equal(
+		t,
+		1,
+		conn.closeCount(),
+		"the waiter itself must close the connection",
+	)
+	require.Contains(
+		t,
+		logBuf.String(),
+		connErrText,
+		"the teardown must be logged with the error that caused it",
+	)
 }
 
-// TestChainsyncServerConnErrorChanDefaultsToTheConnection pins the production
-// wiring of that seam, so the test above cannot pass against a waiter that
-// never watches the real connection.
-func TestChainsyncServerConnErrorChanDefaultsToTheConnection(t *testing.T) {
-	f := newChainsyncServerFixture(t, csmock.ModeNtC)
+// TestChainsyncServerAwaitedWaiterClosesOnErrorChannelClosure is the sibling of
+// the test above for the err == nil branch, which is the shape that fires most
+// often in production: gouroboros' Connection.shutdown closes the error channel
+// it owns, and every consumer then receives the zero value, whereas a live
+// error delivered to THIS consumer is the rarer race. Behavior is a Close()
+// either way, so what is distinct here is the reason -- the nil must not reach
+// the log as an empty or malformed error.
+//
+// Unlike the test above this one does not park the peer through the protocol,
+// deliberately: a parked peer arms the production waiter on the real error
+// channel, which the delegated Close would then wake with a closure of its own,
+// and its teardown reason is textually identical to the one under test. With no
+// second waiter the logged reason is attributable to this one.
+func TestChainsyncServerAwaitedWaiterClosesOnErrorChannelClosure(
+	t *testing.T,
+) {
+	f, logBuf := newChainsyncServerFixtureLogging(t)
+	clientState := f.registerClientAtOrigin(t)
 
-	require.Nil(
+	conn := newStubChainsyncServerConnection(f.conn.Close)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.o.chainsyncServerAwaitNext(f.callbackContext(), conn, clientState)
+	}()
+
+	close(conn.ErrorChan())
+
+	testutil.RequireReceive(
 		t,
-		f.o.chainsyncServerConnErrors,
-		"production must not install a stand-in error channel",
+		done,
+		10*time.Second,
+		"the waiter must return once its error channel is closed",
 	)
-	got := f.o.chainsyncServerConnErrorChan(f.conn)
-	require.NotNil(t, got)
-
-	// Comparing the channels directly is the assertion: a waiter given any
-	// other channel would never see the connection's errors.
-	var want <-chan error = f.conn.ErrorChan()
-	require.Equal(t, want, got, "the waiter must watch conn.ErrorChan()")
+	f.requireClientUnparked(
+		t,
+		"a closed error channel must drop the transport, not leave the "+
+			"waiter's peer able to park indefinitely",
+	)
+	require.Equal(
+		t,
+		1,
+		conn.closeCount(),
+		"the waiter itself must close the connection",
+	)
+	logged := logBuf.String()
+	require.Contains(
+		t,
+		logged,
+		errChainsyncAwaitConnectionClosed.Error(),
+		"a closed error channel must be reported as a closed connection",
+	)
+	require.NotContains(
+		t,
+		logged,
+		"%!w(<nil>)",
+		"the nil a closed channel yields must never reach the log verbatim",
+	)
 }
 
 // TestChainsyncServerServeAwaitedCancelledDoesNotCloseConnection pins the one
