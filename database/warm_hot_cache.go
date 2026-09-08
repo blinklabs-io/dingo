@@ -166,7 +166,10 @@ func (d *Database) ResolveLiveUtxoRefsConcurrent(
 // transaction.go); this pass only matters for whatever was already live
 // before this process's write-path warming had a chance to see it. See
 // blinklabs-io/dingo#4082.
-func (d *Database) WarmHotUtxoCache(ctx context.Context, workers int) (int, error) {
+func (d *Database) WarmHotUtxoCache(
+	ctx context.Context,
+	workers int,
+) (int, error) {
 	if d.cborCache == nil {
 		return 0, types.ErrBlobStoreUnavailable
 	}

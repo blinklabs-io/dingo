@@ -769,7 +769,11 @@ func (c *TieredCborCache) ForgetUtxo(txId []byte, outputIdx uint32) {
 // wrongly satisfy a later ResolveUtxoCbor call with zero-length data. See
 // transaction.go's SetTransactionWithOpts and SetGapBlockTransaction, the
 // write-path half of blinklabs-io/dingo#4082's fix.
-func (d *Database) warmHotUtxoCache(txId []byte, outputIdx uint32, cbor []byte) {
+func (d *Database) warmHotUtxoCache(
+	txId []byte,
+	outputIdx uint32,
+	cbor []byte,
+) {
 	if d.cborCache == nil || len(cbor) == 0 {
 		return
 	}

@@ -424,19 +424,19 @@ func DefaultHistoryExpiryConfig() HistoryExpiryConfig {
 type CacheConfig struct {
 	// HotUtxoEntries is the maximum number of UTxO CBOR entries in the hot
 	// cache.
-	HotUtxoEntries int `yaml:"hotUtxoEntries"  envconfig:"DINGO_CACHE_HOT_UTXO_ENTRIES"`
+	HotUtxoEntries int `yaml:"hotUtxoEntries"       envconfig:"DINGO_CACHE_HOT_UTXO_ENTRIES"`
 	// HotTxEntries is the maximum number of transaction CBOR entries in the hot
 	// cache.
-	HotTxEntries int `yaml:"hotTxEntries"    envconfig:"DINGO_CACHE_HOT_TX_ENTRIES"`
+	HotTxEntries int `yaml:"hotTxEntries"         envconfig:"DINGO_CACHE_HOT_TX_ENTRIES"`
 	// HotTxMaxBytes is the maximum memory in bytes for the hot transaction
 	// cache.
-	HotTxMaxBytes int64 `yaml:"hotTxMaxBytes"   envconfig:"DINGO_CACHE_HOT_TX_MAX_BYTES"`
+	HotTxMaxBytes int64 `yaml:"hotTxMaxBytes"        envconfig:"DINGO_CACHE_HOT_TX_MAX_BYTES"`
 	// BlockLRUEntries is the maximum number of blocks in the LRU cache.
-	BlockLRUEntries int `yaml:"blockLruEntries" envconfig:"DINGO_CACHE_BLOCK_LRU_ENTRIES"`
+	BlockLRUEntries int `yaml:"blockLruEntries"      envconfig:"DINGO_CACHE_BLOCK_LRU_ENTRIES"`
 	// WarmupBlocks is the number of recent blocks to scan during cache warmup.
-	WarmupBlocks int `yaml:"warmupBlocks"    envconfig:"DINGO_CACHE_WARMUP_BLOCKS"`
+	WarmupBlocks int `yaml:"warmupBlocks"         envconfig:"DINGO_CACHE_WARMUP_BLOCKS"`
 	// WarmupSync blocks startup until cache warmup is complete when true.
-	WarmupSync bool `yaml:"warmupSync"      envconfig:"DINGO_CACHE_WARMUP_SYNC"`
+	WarmupSync bool `yaml:"warmupSync"           envconfig:"DINGO_CACHE_WARMUP_SYNC"`
 	// HotUtxoWarmupEnabled controls whether the node runs a background pass
 	// after startup that resolves every currently-live UTxO's CBOR into the
 	// hot UTxO cache (database.Database.WarmHotUtxoCache), so a freshly

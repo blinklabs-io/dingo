@@ -987,7 +987,8 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			ledgerStateDrainConfirmed = false
 			n.config.logger.Error(
 				"ledger state did not fully shut down; skipping database close because a background goroutine may still be using it",
-				"error", err,
+				"error",
+				err,
 			)
 		}
 	})
