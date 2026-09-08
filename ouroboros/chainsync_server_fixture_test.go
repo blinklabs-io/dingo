@@ -16,6 +16,7 @@ package ouroboros
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
@@ -152,10 +153,14 @@ func newChainsyncServerFixture(
 // closes over the o variable rather than a value because the manager has to
 // exist before newOuroboros can be given it; it can only fire after
 // AddConnection below, by which point o is assigned.
+// tweaks are applied to the Ouroboros instance after it is constructed and
+// before the harness exists, so a test can adjust an internal seam without
+// racing the protocol goroutine that will read it.
 func newChainsyncServerFixtureWithConfig(
 	t *testing.T,
 	mode csmock.Mode,
 	cfg OuroborosConfig,
+	tweaks ...func(*Ouroboros),
 ) *chainsyncServerFixture {
 	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -194,6 +199,9 @@ func newChainsyncServerFixtureWithConfig(
 	o = newOuroboros(cfg)
 	o.ledgerState = ledgerState
 	o.chainsyncState = dchainsync.NewState(bus, ledgerState)
+	for _, tweak := range tweaks {
+		tweak(o)
+	}
 
 	f := &chainsyncServerFixture{o: o}
 
@@ -326,6 +334,34 @@ func (f *chainsyncServerFixture) requireConnectionClosed(
 		"close must be published as a graceful lifecycle event, not an "+
 			"error pushed onto the connection's error channel",
 	)
+}
+
+// requireClientUnparked asserts the server dropped the transport, which is the
+// only thing that releases a peer the server has parked in MustReply short of
+// gouroboros' randomized 135-269s MustReply timer. The harness surfaces the
+// drop by closing its observed-message stream, so Observe returns
+// csmock.ErrClosed; a server that abandons the wait silently instead leaves
+// Observe blocking until the deadline.
+func (f *chainsyncServerFixture) requireClientUnparked(
+	t *testing.T,
+	msg string,
+) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := f.h.Observe(ctx)
+	require.ErrorIs(t, err, csmock.ErrClosed, msg)
+}
+
+// parkInAwaitReply drives the fixture to the state this file's abandonment
+// tests all start from: the downstream client has intersected at origin, taken
+// its initial rollback, and asked for a block the server does not have yet, so
+// the server has sent AwaitReply and armed the asynchronous waiter.
+func (f *chainsyncServerFixture) parkInAwaitReply(t *testing.T) {
+	t.Helper()
+	f.drainInitialRollback(t, csmock.OriginPoint())
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
 }
 
 // drainInitialRollback performs the intersect-then-rollback handshake every
@@ -908,4 +944,147 @@ func TestChainsyncServerRequestNextMissingConnectionAfterAwaitReply(
 	err := f.o.chainsyncServerRequestNext(f.callbackContext())
 
 	require.ErrorContains(t, err, "not found")
+}
+
+// =============================================================================
+// RequestNext: abandoning the peer after AwaitReply
+//
+// Once AwaitReply is on the wire the server holds agency in MustReply, so a
+// waiter that gives up without a reply must drop the transport. Every test
+// below asserts the client was released rather than left to gouroboros'
+// randomized 135-269s MustReply timeout, which is what produced the observed
+// reconnect-and-park loop.
+// =============================================================================
+
+// TestChainsyncServerRequestNextIteratorErrorAfterAwaitReplyUnparksClient
+// covers the exit taken when the blocking chain iterator fails after the peer
+// has been parked. Before the fix the goroutine logged at Debug and returned,
+// leaving the peer parked with the server still holding agency.
+func TestChainsyncServerRequestNextIteratorErrorAfterAwaitReplyUnparksClient(
+	t *testing.T,
+) {
+	f := newChainsyncServerFixture(t, csmock.ModeNtC)
+	f.parkInAwaitReply(t)
+
+	// Break the backing store, then wake the parked iterator so its next
+	// lookup fails for real rather than returning the chain-tip sentinel.
+	require.NoError(t, dbtest.CloseDatabase(f.o.ledgerState.Database()))
+	f.o.ledgerState.Chain().NotifyIterators()
+
+	f.requireClientUnparked(
+		t,
+		"an iterator failure after AwaitReply must drop the transport, not "+
+			"leave the peer parked in MustReply",
+	)
+}
+
+// TestChainsyncServerRequestNextNilBlockAfterAwaitReplyUnparksClient covers the
+// nil-result exit. ChainIterator.Next maps an empty non-error result to
+// ErrIteratorChainTip, so the real iterator cannot produce it and the handler
+// is invoked directly against the fixture's real connection and server.
+func TestChainsyncServerRequestNextNilBlockAfterAwaitReplyUnparksClient(
+	t *testing.T,
+) {
+	f := newChainsyncServerFixture(t, csmock.ModeNtC)
+	f.parkInAwaitReply(t)
+
+	f.o.chainsyncServerServeAwaited(f.callbackContext(), f.conn, nil, nil)
+
+	f.requireClientUnparked(
+		t,
+		"a nil iterator result after AwaitReply must drop the transport, not "+
+			"leave the peer parked in MustReply",
+	)
+}
+
+// TestChainsyncServerRequestNextConnErrorAfterAwaitReplyUnparksClient covers
+// the error-channel exit: the waiter gives up on the connection while the peer
+// is parked, so it must drop the transport rather than return silently. Neither
+// consumer of the error closes it otherwise -- the waiter returned silently and
+// ConnectionManager.RemoveConnection only unregisters -- so before the fix the
+// peer stayed parked whichever consumer won.
+//
+// The waiter is given a single-consumer stand-in for conn.ErrorChan(). The real
+// channel is shared with the connection manager's teardown watcher (and, in
+// production, blockfetch and tx-submission) and delivery goes to whichever
+// consumer the runtime picks, so a test cannot address this waiter on it.
+// Publishing an extra error to cover the other consumers is not an option
+// either: the consumer that wins closes the connection, and gouroboros'
+// Connection.shutdown closes the error channel it owns, so the extra send would
+// race that closure. What the waiter does with an error it has received is the
+// same either way, and that is what this asserts.
+func TestChainsyncServerRequestNextConnErrorAfterAwaitReplyUnparksClient(
+	t *testing.T,
+) {
+	connErrs := make(chan error, 1)
+	f := newChainsyncServerFixtureWithConfig(
+		t,
+		csmock.ModeNtC,
+		OuroborosConfig{},
+		func(o *Ouroboros) {
+			o.chainsyncServerConnErrors = func(
+				*ouroboros.Connection,
+			) <-chan error {
+				return connErrs
+			}
+		},
+	)
+	f.parkInAwaitReply(t)
+
+	connErrs <- errors.New("simulated protocol error for the parked waiter")
+
+	f.requireClientUnparked(
+		t,
+		"a connection error consumed by the parked waiter must drop the "+
+			"transport, not leave the peer parked in MustReply",
+	)
+}
+
+// TestChainsyncServerConnErrorChanDefaultsToTheConnection pins the production
+// wiring of that seam, so the test above cannot pass against a waiter that
+// never watches the real connection.
+func TestChainsyncServerConnErrorChanDefaultsToTheConnection(t *testing.T) {
+	f := newChainsyncServerFixture(t, csmock.ModeNtC)
+
+	require.Nil(
+		t,
+		f.o.chainsyncServerConnErrors,
+		"production must not install a stand-in error channel",
+	)
+	got := f.o.chainsyncServerConnErrorChan(f.conn)
+	require.NotNil(t, got)
+
+	// Comparing the channels directly is the assertion: a waiter given any
+	// other channel would never see the connection's errors.
+	var want <-chan error = f.conn.ErrorChan()
+	require.Equal(t, want, got, "the waiter must watch conn.ErrorChan()")
+}
+
+// TestChainsyncServerServeAwaitedCancelledDoesNotCloseConnection pins the one
+// exit that must stay silent: a context.Canceled iterator result. The server
+// client's iterator is only cancelled from chainsync.State.RemoveClient, which
+// connection-closed handling drives, so the transport is already gone and
+// there is no parked peer to release. This is the invariant
+// TestChainsyncServerRequestNextIteratorCancelDoesNotCloseConnection asserts
+// end to end, restated at the handler so the abandonment fix cannot turn every
+// ordinary disconnect into a connection-recycling warning.
+func TestChainsyncServerServeAwaitedCancelledDoesNotCloseConnection(
+	t *testing.T,
+) {
+	f := newChainsyncServerFixture(t, csmock.ModeNtC)
+	f.parkInAwaitReply(t)
+
+	f.o.chainsyncServerServeAwaited(
+		f.callbackContext(),
+		f.conn,
+		nil,
+		context.Canceled,
+	)
+
+	testutil.RequireNoReceive(
+		t,
+		f.closedCh,
+		100*time.Millisecond,
+		"a cancelled iterator is ordinary teardown and must not recycle the connection",
+	)
 }

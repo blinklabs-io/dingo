@@ -151,6 +151,18 @@ type Ouroboros struct {
 	txSubmissionRateLimiter *txSubmissionRateLimiter
 	// Per-peer work-budget limiter for ChainSync FindIntersect
 	chainsyncFindIntersectLimiter *chainsyncFindIntersectRateLimiter
+	// Source of the connection-error channel the post-AwaitReply ChainSync
+	// server waiter watches. Nil means conn.ErrorChan(), which is what
+	// production uses.
+	//
+	// It is overridable because conn.ErrorChan() is a single buffered channel
+	// shared with blockfetch, tx-submission and the connection manager's
+	// teardown watcher, and delivery goes to whichever consumer the runtime
+	// picks. A test cannot address this waiter on it, and cannot publish an
+	// extra error to cover the other consumers either: the consumer that wins
+	// closes the connection, and gouroboros' Connection.shutdown closes the
+	// error channel it owns, so the extra send races that closure.
+	chainsyncServerConnErrors func(*ouroboros.Connection) <-chan error
 	// Cached Leios EB material fetched from peers. This lets NtC
 	// ChainSync serve merged RB+EB blocks without coupling the chain
 	// package to Leios prototype protocols.
