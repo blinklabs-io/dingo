@@ -259,7 +259,7 @@ boundary reports the durable import cause instead of guessing that the basis
 predates bootstrap. Successful seeding clears the marker, and rollback removes
 markers captured after its target slot.
 
-Migration `v11` (`pointer-address-stake`, integer version 11) adds
+Migration `v12` (`pointer-address-stake`, integer version 12) adds
 `utxo_pointer`. It records the certificate position a pointer address names so
 stake held at such an address can reach its credential (blinklabs-io/dingo#3854).
 Rows are written only for outputs applied after the upgrade: the `utxo` table
