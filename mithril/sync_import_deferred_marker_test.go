@@ -16,7 +16,6 @@ package mithril
 
 import (
 	"bytes"
-	"database/sql"
 	"io"
 	"log/slog"
 	"testing"
@@ -107,19 +106,6 @@ func newMithrilFileTestDB(t *testing.T) *database.Database {
 	return db
 }
 
-// lazyManifestIndex names a manifest entry the critical rebuild does not
-// build, so the test states the property rather than one index name.
-func lazyManifestIndex(t *testing.T) string {
-	t.Helper()
-	for _, index := range deferred.Manifest {
-		if !index.Critical {
-			return index.Name
-		}
-	}
-	t.Fatal("manifest has no lazy entry to test with")
-	return ""
-}
-
 // TestMithrilSyncLeavesLazyManifestForTheFirstServe walks the composition a
 // Mithril-bootstrapped node actually takes: sync drops the manifest, rebuilds
 // the critical subset, and calls updateMithrilReadyState; the first
@@ -135,7 +121,7 @@ func TestMithrilSyncLeavesLazyManifestForTheFirstServe(t *testing.T) {
 	db := newMithrilFileTestDB(t)
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
-	lazy := lazyManifestIndex(t)
+	lazy := dbtest.LazyManifestIndex(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// The sync: drop for the bulk load, rebuild the critical subset only.
@@ -143,7 +129,7 @@ func TestMithrilSyncLeavesLazyManifestForTheFirstServe(t *testing.T) {
 	require.NoError(t, deferredIndexes.BuildCritical())
 	require.False(
 		t,
-		metadataIndexExists(t, raw, lazy),
+		dbtest.MetadataIndexExists(t, raw, lazy),
 		"precondition: %s is lazy and the critical rebuild skips it",
 		lazy,
 	)
@@ -161,7 +147,7 @@ func TestMithrilSyncLeavesLazyManifestForTheFirstServe(t *testing.T) {
 
 	require.True(
 		t,
-		metadataIndexExists(t, raw, lazy),
+		dbtest.MetadataIndexExists(t, raw, lazy),
 		"the first serve after a Mithril sync must finish the lazy "+
 			"manifest entry %s",
 		lazy,
@@ -174,14 +160,4 @@ func TestMithrilSyncLeavesLazyManifestForTheFirstServe(t *testing.T) {
 		t, pending,
 		"the full rebuild clears the marker it consumed",
 	)
-}
-
-func metadataIndexExists(t *testing.T, raw *sql.DB, name string) bool {
-	t.Helper()
-	var count int
-	require.NoError(t, raw.QueryRow(
-		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?",
-		name,
-	).Scan(&count))
-	return count == 1
 }

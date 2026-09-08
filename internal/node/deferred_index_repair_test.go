@@ -54,7 +54,7 @@ func seedClearedMarkerWithMissingCriticalIndex(
 	require.NoError(t, err)
 	require.False(
 		t,
-		metadataIndexExists(t, raw, rollbackCascadeIndex),
+		dbtest.MetadataIndexExists(t, raw, rollbackCascadeIndex),
 		"%s must be absent for this to test the repair",
 		rollbackCascadeIndex,
 	)
@@ -64,16 +64,6 @@ func seedClearedMarkerWithMissingCriticalIndex(
 	)
 	require.NoError(t, err)
 	return raw
-}
-
-func metadataIndexExists(t *testing.T, raw *sql.DB, name string) bool {
-	t.Helper()
-	var count int
-	require.NoError(t, raw.QueryRow(
-		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?",
-		name,
-	).Scan(&count))
-	return count == 1
 }
 
 // TestRepairDeferredIndexesRestoresCriticalIndexWithoutMarker covers the
@@ -96,7 +86,7 @@ func TestRepairDeferredIndexesRestoresCriticalIndexWithoutMarker(
 
 	require.True(
 		t,
-		metadataIndexExists(t, raw, rollbackCascadeIndex),
+		dbtest.MetadataIndexExists(t, raw, rollbackCascadeIndex),
 		"core-mode serve must restore %s before the node can roll back",
 		rollbackCascadeIndex,
 	)
@@ -118,7 +108,7 @@ func TestRepairCriticalDeferredIndexesRestoresCriticalIndexWithoutMarker(
 
 	require.True(
 		t,
-		metadataIndexExists(t, raw, rollbackCascadeIndex),
+		dbtest.MetadataIndexExists(t, raw, rollbackCascadeIndex),
 		"the critical repair must restore %s",
 		rollbackCascadeIndex,
 	)
@@ -150,7 +140,7 @@ func TestRepairDeferredIndexesFinishesPendingCycle(t *testing.T) {
 	db := newFileTestDB(t)
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
-	lazy := lazyManifestIndex(t)
+	lazy := dbtest.LazyManifestIndex(t)
 	for _, name := range []string{rollbackCascadeIndex, lazy} {
 		_, err = raw.Exec("DROP INDEX IF EXISTS " + name)
 		require.NoError(t, err)
@@ -168,27 +158,13 @@ func TestRepairDeferredIndexesFinishesPendingCycle(t *testing.T) {
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	))
 
-	require.True(t, metadataIndexExists(t, raw, rollbackCascadeIndex))
+	require.True(t, dbtest.MetadataIndexExists(t, raw, rollbackCascadeIndex))
 	require.True(
 		t,
-		metadataIndexExists(t, raw, lazy),
+		dbtest.MetadataIndexExists(t, raw, lazy),
 		"a pending cycle must still finish the lazy remainder",
 	)
 	requireNoPendingMarker(t, raw)
-}
-
-// lazyManifestIndex returns the name of a non-critical manifest entry, so the
-// test above distinguishes the full rebuild from the critical subset without
-// pinning a specific index the manifest may reclassify later.
-func lazyManifestIndex(t *testing.T) string {
-	t.Helper()
-	for _, index := range deferred.Manifest {
-		if !index.Critical {
-			return index.Name
-		}
-	}
-	t.Fatal("the manifest must keep at least one lazy entry")
-	return ""
 }
 
 // namedMissingManager is a DeferredIndexManager that also lists its missing
@@ -288,7 +264,7 @@ func TestRepairDeferredIndexesNamesMissingIndexAgainstRealStore(t *testing.T) {
 
 	require.NoError(t, RepairDeferredIndexes(db, logger))
 
-	require.True(t, metadataIndexExists(t, raw, rollbackCascadeIndex))
+	require.True(t, dbtest.MetadataIndexExists(t, raw, rollbackCascadeIndex))
 	require.Contains(
 		t,
 		buf.String(),
