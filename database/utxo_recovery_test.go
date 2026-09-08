@@ -39,7 +39,22 @@ func TestResolveUtxoCborWithRecoveryReconstructsMissingBlob(t *testing.T) {
 	candidate := findGapConsumeCandidateWithoutCertificates(t)
 	require.NotEmpty(t, candidate.producers)
 	producer := candidate.producers[0]
-	seedLiveProducerForWarmTest(t, db, producer)
+	// Write the block, blob offsets, and metadata rows directly -- bypassing
+	// Database.SetTransaction/SetGapBlockTransaction -- the same bypass
+	// TestSetTransactionRecoveryPopulatesProducerFK uses, so the produced
+	// UTxO is live with an offset reference before its blob entry is
+	// deleted below.
+	storeBlockOffsetsOnly(t, db, producer.block)
+	metaTxn := db.MetadataTxn(true)
+	require.NoError(
+		t,
+		metaTxn.Do(func(txn *Txn) error {
+			return db.Metadata().SetGapBlockTransaction(
+				producer.tx, producer.point, 0, txn.Metadata(),
+			)
+		}),
+	)
+	metaTxn.Release()
 
 	produced := producer.tx.Produced()
 	require.NotEmpty(t, produced)
