@@ -14,55 +14,44 @@
 
 package eras
 
-import (
-	"fmt"
-
-	"github.com/blinklabs-io/plutigo/lang"
-)
-
-// costModelKeyVersions maps the CostModels map's language-version key (as
-// used by protocol parameters: 0=PlutusV1, 1=PlutusV2, 2=PlutusV3) to
-// plutigo's typed LanguageVersion, so requiredCostModel can check a supplied
-// cost model against the exact parameter count that version requires.
-var costModelKeyVersions = map[uint]lang.LanguageVersion{
-	0: lang.LanguageVersionV1,
-	1: lang.LanguageVersionV2,
-	2: lang.LanguageVersionV3,
-}
+import "fmt"
 
 // requiredCostModel returns the cost model for a Plutus language version, or
-// an error when the protocol parameters don't carry a complete one. A plain
-// map index (pp.CostModels[key]) returns a nil slice for a missing entry,
-// and plutigo's costModelFromList treats a nil, empty, or short cost-model
-// slice as "use the built-in default cost model for whatever parameters the
-// data didn't cover" instead of failing -- evaluating a script under the
-// wrong (default, not this network's configured) cost parameters instead of
-// refusing to evaluate it at all. A present-but-undersized list has exactly
-// the same problem: costModelFromList silently default-fills whatever
-// parameters run past the end of a short list. Callers must use this
-// instead of indexing CostModels directly.
+// an error when the protocol parameters don't carry one at all. A plain map
+// index (pp.CostModels[key]) returns a nil slice for a missing entry, and
+// plutigo's costModelFromList treats a nil or empty cost-model slice as "use
+// the built-in default cost model" instead of failing -- evaluating a
+// script under the wrong (default, not this network's configured) cost
+// parameters instead of refusing to evaluate it at all. Callers must use
+// this instead of indexing CostModels directly.
+//
+// This deliberately does NOT reject a present-but-short list against
+// plutigo's current (protocol-version-11) parameter-table length
+// (lang.GetParamNamesForVersion): the cost-model parameter count has grown
+// across hard forks, and a shorter list is the CORRECT, complete shape for
+// an earlier protocol version, not a truncated one. Real shipped genesis
+// data proves this: config/cardano/{mainnet,preprod,preview}/alonzo-genesis.json
+// each carry a 166-entry PlutusV1 model (Alonzo's actual param count before
+// later hard forks added more), and babbage.go's DefaultPlutusV2CostModel
+// (the real canonical mainnet value used before an on-chain V2 model
+// lands) is 175 entries -- both legitimately far short of the current
+// 332-parameter table, and both must still validate to keep replaying
+// mainnet/testnet history from genesis (a length floor against the current
+// table rejected both and stalled sync at the first Alonzo/Babbage Plutus
+// transaction). Matches the equivalent presence check gouroboros' own
+// UtxoValidateCostModelsPresent rule already performs
+// (!ok || len(model) == 0) elsewhere in the validation pipeline.
 func requiredCostModel(
 	costModels map[uint][]int64,
 	key uint,
 	versionName string,
 ) ([]int64, error) {
 	model, ok := costModels[key]
-	if !ok {
+	if !ok || len(model) == 0 {
 		return nil, fmt.Errorf(
 			"missing %s cost model in protocol parameters",
 			versionName,
 		)
-	}
-	if version, versionOk := costModelKeyVersions[key]; versionOk {
-		want := len(lang.GetParamNamesForVersion(version))
-		if len(model) < want {
-			return nil, fmt.Errorf(
-				"%s cost model in protocol parameters has %d parameters, want at least %d",
-				versionName,
-				len(model),
-				want,
-			)
-		}
 	}
 	return model, nil
 }

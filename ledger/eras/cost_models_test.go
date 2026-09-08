@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/plutigo/lang"
 	"github.com/stretchr/testify/require"
 )
@@ -37,21 +38,41 @@ func TestRequiredCostModelFailsClosedOnMissingEntry(t *testing.T) {
 		require.Error(t, err)
 		require.ErrorContains(t, err, "missing PlutusV3 cost model")
 	})
-	t.Run("present but undersized model returns a configuration error", func(t *testing.T) {
-		// Three entries is nowhere near PlutusV2's 332 required parameters.
-		// costModelFromList would silently default-fill the other 329, the
-		// same "wrong, not this network's configured cost parameters"
-		// problem a missing key has -- requiredCostModel must reject this
-		// the same way.
+	t.Run("present but empty model returns a configuration error", func(t *testing.T) {
 		_, err := requiredCostModel(
-			map[uint][]int64{1: {1, 2, 3}},
+			map[uint][]int64{1: {}},
 			1,
 			"PlutusV2",
 		)
 		require.Error(t, err)
-		require.ErrorContains(t, err, "PlutusV2 cost model")
-		require.ErrorContains(t, err, "has 3 parameters")
+		require.ErrorContains(t, err, "missing PlutusV2 cost model")
 	})
+	t.Run(
+		"present, short-but-real-for-its-era model is accepted",
+		func(t *testing.T) {
+			// Regression test for a human-review finding: requiredCostModel
+			// must NOT reject a cost model just because it is shorter than
+			// plutigo's current (protocol-version-11) parameter table
+			// (lang.GetParamNamesForVersion). The parameter count has grown
+			// across hard forks, and a shorter list can be the correct,
+			// complete shape for an earlier protocol version. Three entries
+			// is nowhere near a complete model for any real era, but it is
+			// non-empty, which is all this function can safely require --
+			// see requiredCostModel's doc comment for why a length floor
+			// against the current table is unsafe (it rejects the real
+			// mainnet/preprod/preview Alonzo genesis's 166-entry PlutusV1
+			// model, proven by TestRequiredCostModelAcceptsRealAlonzoGenesisModel
+			// below).
+			model := []int64{1, 2, 3}
+			got, err := requiredCostModel(
+				map[uint][]int64{1: model},
+				1,
+				"PlutusV2",
+			)
+			require.NoError(t, err)
+			require.Equal(t, model, got)
+		},
+	)
 	t.Run("present, complete model returns it unchanged", func(t *testing.T) {
 		model := syntheticFullCostModel(t, lang.LanguageVersionV2)
 		got, err := requiredCostModel(
@@ -62,6 +83,39 @@ func TestRequiredCostModelFailsClosedOnMissingEntry(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, model, got)
 	})
+}
+
+// TestRequiredCostModelAcceptsRealAlonzoGenesisModel is a regression test
+// for a human-review finding: requiredCostModel's earlier length floor
+// (checked against plutigo's current, protocol-version-11 parameter table)
+// rejected the PlutusV1 cost model this repository's own shipped mainnet
+// genesis carries, stalling replay from genesis at the first Alonzo-era
+// Plutus transaction. Decodes the real genesis file through
+// AlonzoProtocolParameters.UpdateFromGenesis -- the actual production
+// loading path -- rather than a synthetic fixture, so this can't pass by
+// accident the way a hand-padded fixture could.
+func TestRequiredCostModelAcceptsRealAlonzoGenesisModel(t *testing.T) {
+	genesis, err := alonzo.NewAlonzoGenesisFromFile(
+		"../../config/cardano/mainnet/alonzo-genesis.json",
+	)
+	require.NoError(t, err)
+
+	pp := &alonzo.AlonzoProtocolParameters{}
+	require.NoError(t, pp.UpdateFromGenesis(&genesis))
+
+	model, ok := pp.CostModels[0]
+	require.True(t, ok, "genesis must populate a PlutusV1 cost model")
+	// The real, historically-correct Alonzo PlutusV1 parameter count --
+	// far short of plutigo's current 332-parameter table.
+	require.Len(t, model, 166)
+
+	got, err := requiredCostModel(pp.CostModels, 0, "PlutusV1")
+	require.NoError(
+		t,
+		err,
+		"a real, complete-for-its-era genesis cost model must be accepted",
+	)
+	require.Equal(t, model, got)
 }
 
 // syntheticFullCostModel returns a cost model of exactly the length

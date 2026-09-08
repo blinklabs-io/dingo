@@ -3205,7 +3205,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	)
 	if headerValidationRequired {
 		if err := ls.verifyBlockHeaderOnlyCrypto(e.BlockHeader); err != nil {
-			if errors.Is(err, errHeaderVerificationDeferred) {
+			if IsHeaderVerificationDeferred(err) {
 				ls.config.Logger.Debug(
 					"deferring chainsync header crypto verification until blockfetch",
 					"component",
@@ -4093,7 +4093,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 			)
 		}
 		if verifyErr != nil {
-			if errors.Is(verifyErr, errHeaderVerificationDeferred) {
+			if IsHeaderVerificationDeferred(verifyErr) {
 				ls.markDeferredHeaderValidation(e.Point)
 				if err := ls.persistDeferredHeaderValidation(e.Point, nil); err != nil {
 					ls.clearDeferredHeaderValidation(e.Point)

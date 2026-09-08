@@ -371,3 +371,49 @@ func TestBlockfetchStatefulHeaderVerificationDefersUntilLedgerApply(
 	require.NoError(t, err)
 	assert.Equal(t, deferredHeaderValidationSyncStateValue, value)
 }
+
+// TestBlockfetchHeaderVerificationEmptyEpochNonceDefersNotFails is a
+// regression test for a human-review finding: handleEventBlockfetchBlockDeferred
+// checked errors.Is(verifyErr, errHeaderVerificationDeferred) directly
+// instead of the exported IsHeaderVerificationDeferred, so a covered epoch
+// with no published nonce yet (errEpochNonceUnavailable, which
+// IsHeaderVerificationDeferred was broadened to recognize) was still
+// treated as a hard crypto failure at this call site. Unlike the chainsync
+// admission gate (chainsyncHeaderCryptoPolicy), which skips calling verify
+// entirely when the nonce isn't cached, this path only flushes pending
+// blocks once and rechecks whether the header was verified elsewhere before
+// falling through to verify regardless -- so it reaches this exact case in
+// practice, and an honest peer's block would otherwise have its connection
+// recycled over a transient local gap.
+func TestBlockfetchHeaderVerificationEmptyEpochNonceDefersNotFails(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const targetSlot = uint64(1000)
+	connId := testRecycleConnId()
+	// A nil epoch nonce (covered epoch, nonce not yet published) rather
+	// than a real one from createTestBlock: headerVerificationEpoch checks
+	// epoch/nonce availability before ever touching the VRF proof, so the
+	// block's own crypto content doesn't matter for this case.
+	ls, _ := newEligibilityTestLedger(t, nil)
+	ls.validationEnabled = true
+	ls.activeBlockfetchConnId = connId
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	ls.chain = &chain.Chain{}
+
+	block := &mockBabbageBlock{slot: targetSlot}
+	point := ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
+	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+		ConnectionId: connId,
+		Block:        block,
+		Point:        point,
+	}, nil)
+	require.NoError(
+		t,
+		err,
+		"an unpublished epoch nonce must defer, not hard-fail, block header verification",
+	)
+	require.Len(t, ls.pendingBlockfetchEvents, 1)
+	assert.True(t, ls.consumeDeferredHeaderValidation(point))
+}

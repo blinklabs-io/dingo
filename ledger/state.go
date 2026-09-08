@@ -4564,16 +4564,23 @@ func (ls *LedgerState) securityParamForCurrentEraSnapshot() int {
 
 // Issue #3528: the historical-sync phase-2 shortcut that used to live here
 // (shouldSkipPhase2ValidationForBlock, shouldSkipPhase2ValidationForBlockAtCurrentTip,
-// shouldSkipConfiguredPhase2Validation) was meant to skip re-running Plutus
-// evaluation only for a deep, already-immutable block during a deliberate
-// TrustedReplay import. It was provably unreachable: historicalBlockValidationDecision
-// forces shouldValidateBlock to false whenever TrustedReplay is true (loading
-// a trusted dump skips per-tx validation, phase 1 and phase 2, entirely), so
-// no input combination could ever make "skip phase 2 but still run phase 1
-// during trusted replay" true. Removed rather than reworked, since making it
-// reachable would require changing TrustedReplay's own all-or-nothing
-// validation skip, which is unrelated to this issue. Phase 2 now always
-// evaluates whenever per-tx validation runs at all.
+// shouldSkipConfiguredPhase2Validation) skipped re-running Plutus evaluation
+// for a deep, already-immutable block whenever ValidateHistorical was
+// disabled -- the ordinary ValidateHistorical=false bulk-sync case, not a
+// TrustedReplay import; the original condition (!validationEnabled &&
+// shouldValidateBlock && deepHistoricalBlock) never tested TrustedReplay at
+// all, and historicalBlockValidationDecision's validationEnabled==false
+// branch already made shouldValidateBlock true for exactly this catch-up
+// case, so it was genuinely reachable in production. A later revision here
+// added a trustedReplay requirement, which -- because
+// historicalBlockValidationDecision forces shouldValidateBlock to false
+// whenever TrustedReplay is true -- made that specific 4-way combination
+// unreachable; that dead 4-way form, not the original mechanism, is what
+// got removed. Phase 2 now always evaluates whenever per-tx validation runs
+// at all, which is the safer contract issue #3528 asks for, but it has a
+// real cost worth naming plainly: an operator running
+// ValidateHistorical=false now pays Plutus phase-2 evaluation on every deep
+// historical block, where it was previously skipped.
 
 // StabilityWindow returns the Ouroboros security stability window for the
 // current era in slots. For Byron the window is 2k; for Shelley+ it is 3k/f.
