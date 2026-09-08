@@ -17,11 +17,13 @@ package sqlstore
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"math"
 	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -343,4 +345,62 @@ func TestGetUtxosByAddressWithOrderingSkipAssets(t *testing.T) {
 	require.Empty(t, skipped[0].Assets)
 	// Row identity is unaffected by SkipAssets.
 	require.Equal(t, withAssets[0].TxId, skipped[0].TxId)
+}
+
+// TestUtxoIsLive proves UtxoIsLive answers true for a live row, false for a
+// spent or never-existing one, and does not itself load asset rows (its
+// entire reason for existing instead of a GetUtxo(...)!=nil check --
+// database/warm_hot_cache.go's per-ref liveness recheck runs this once per
+// live UTxO at multi-million scale and cannot afford GetUtxo's separate
+// asset-loading query for a result it would discard anyway).
+func TestUtxoIsLive(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+
+	var policyId lcommon.Blake2b224
+	policyId[0] = 0xbb
+	multiAsset := lcommon.NewMultiAsset[lcommon.MultiAssetTypeOutput](
+		map[lcommon.Blake2b224]map[cbor.ByteString]lcommon.MultiAssetTypeOutput{
+			policyId: {
+				cbor.NewByteString([]byte("token")): big.NewInt(1),
+			},
+		},
+	)
+	txId, err := hex.DecodeString(
+		"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+	)
+	require.NoError(t, err)
+	utxo := ledger.Utxo{
+		Id: shelley.NewShelleyTransactionInput(hex.EncodeToString(txId), 0),
+		Output: &mary.MaryTransactionOutput{
+			OutputAmount: mary.MaryTransactionOutputValue{
+				Amount: 1_000_000,
+				Assets: &multiAsset,
+			},
+		},
+	}
+	require.NoError(
+		t,
+		store.AddUtxos([]models.UtxoSlot{{Utxo: utxo, Slot: 1}}, nil),
+	)
+
+	live, err := store.UtxoIsLive(txId, 0, nil)
+	require.NoError(t, err)
+	require.True(t, live, "a just-added UTxO must report live")
+
+	live, err = store.UtxoIsLive(txId, 1, nil)
+	require.NoError(t, err)
+	require.False(t, live, "a never-added output index must not report live")
+
+	require.NoError(
+		t,
+		store.MarkUtxosDeletedAtSlot(
+			nil,
+			[]types.UtxoKey{{TxId: txId, OutputIdx: 0}},
+			2,
+		),
+	)
+	live, err = store.UtxoIsLive(txId, 0, nil)
+	require.NoError(t, err)
+	require.False(t, live, "a spent UTxO must no longer report live")
 }

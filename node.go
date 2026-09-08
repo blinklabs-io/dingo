@@ -1009,12 +1009,18 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	})
 	// Warm the hot UTxO cache for whatever is already live, in the
 	// background, so a freshly started (or freshly Mithril-bootstrapped)
-	// node is not left cold on its first whole-UTxO-set query. n.ctx is
-	// cancelled on shutdown, which bounds this pass without an entry in the
-	// `started` cleanup stack -- see warmHotUtxoCacheInBackground's doc
-	// comment.
+	// node is not left cold on its first whole-UTxO-set query. Registered in
+	// the `started` cleanup stack (unlike most goroutines here) because it
+	// holds n.db read transactions: on a startup failure, cancelling n.ctx
+	// alone does not wait for it to actually exit before the db.Close/
+	// pluginHost.Stop cleanups registered earlier in this stack run, so
+	// storage could be closed out from under it -- stopHotCacheWarmup
+	// cancels it and waits, exactly like the ordinary shutdown and live
+	// restore/truncate paths (see warmHotUtxoCacheInBackground's doc
+	// comment).
 	if n.config.cacheHotUtxoWarmupEnabled {
 		n.warmHotUtxoCacheInBackground()
+		started = append(started, func() { _ = n.stopHotCacheWarmup() })
 	}
 	// Register midnight indexer cleanup after LedgerState so it is torn down
 	// first (reverse order): midnight.Stop() → ledgerState.Close().

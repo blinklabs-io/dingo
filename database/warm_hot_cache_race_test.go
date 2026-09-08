@@ -57,6 +57,11 @@ func TestWarmHotUtxoCacheDoesNotResurrectConcurrentlySpentRef(t *testing.T) {
 	ref.OutputIdx = utxo.Id.Index()
 
 	t.Cleanup(func() { resolveLiveUtxoRefsTestHook = nil })
+	// require inside this hook would only stop the worker goroutine it runs
+	// on (via runtime.Goexit), not the test itself, and WarmHotUtxoCache
+	// could still report success -- capture the error instead and assert it
+	// from the test goroutine below, after WarmHotUtxoCache returns.
+	var hookErr error
 	resolveLiveUtxoRefsTestHook = func(hookRef UtxoRef) {
 		if hookRef != ref {
 			return
@@ -66,15 +71,16 @@ func TestWarmHotUtxoCacheDoesNotResurrectConcurrentlySpentRef(t *testing.T) {
 		// call does) right in the window between this worker's resolve
 		// (which already re-populated the hot cache) and its liveness
 		// recheck below.
-		require.NoError(t, db.MarkUtxosDeletedAtSlot(
+		hookErr = db.MarkUtxosDeletedAtSlot(
 			nil,
 			[]types.UtxoKey{{TxId: ref.TxId[:], OutputIdx: ref.OutputIdx}},
 			producer.point.Slot+1,
-		))
+		)
 	}
 
 	warmed, err := db.WarmHotUtxoCache(context.Background(), 1)
 	require.NoError(t, err)
+	require.NoError(t, hookErr)
 	require.Zero(
 		t,
 		warmed,

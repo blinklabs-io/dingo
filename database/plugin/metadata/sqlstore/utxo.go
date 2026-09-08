@@ -790,6 +790,36 @@ func (s *Store) GetUtxo(
 	return s.getUtxo(txID, index, txn, false)
 }
 
+// UtxoIsLive reports whether a live row exists for the reference. It calls
+// the same GetLiveUtxo query getUtxo does, but skips its loadUtxoAssets
+// follow-up call -- a caller that only needs the liveness bool should not
+// pay for a second query per ref.
+func (s *Store) UtxoIsLive(
+	txID []byte,
+	index uint32,
+	txn types.Txn,
+) (bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return false, err
+	}
+	q := s.operationalQueries(db)
+	_, err = q.GetLiveUtxo(ctx, sqlitequery.GetLiveUtxoParams{
+		TxID: txID,
+		OutputIdx: sql.NullInt64{
+			Int64: int64(index),
+			Valid: true,
+		},
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check UTxO liveness %x#%d: %w", txID, index, err)
+	}
+	return true, nil
+}
+
 func (s *Store) GetUtxoIncludingSpent(
 	txID []byte,
 	index uint32,

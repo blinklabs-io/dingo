@@ -116,6 +116,7 @@ var utxoStoreMethods = []string{
 	"ImportUtxos",
 	"GetUtxoBalanceByAddress",
 	"GetUtxo",
+	"UtxoIsLive",
 	"GetUtxoIncludingSpent",
 	"GetUtxosByRefs",
 	"GetUtxosAddedAfterSlot",

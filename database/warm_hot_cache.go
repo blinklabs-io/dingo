@@ -148,8 +148,13 @@ func (d *Database) ResolveLiveUtxoRefsConcurrent(
 				if resolveLiveUtxoRefsTestHook != nil {
 					resolveLiveUtxoRefsTestHook(ref)
 				}
-				liveUtxo, liveErr := d.utxoStore().
-					GetUtxo(ref.TxId[:], ref.OutputIdx, txn.Metadata())
+				// UtxoIsLive, not GetUtxo: this recheck runs once per live
+				// UTxO at multi-million scale, and only needs the liveness
+				// bool -- GetUtxo would also load this row's (possibly
+				// empty, but still a separate query) multi-asset rows for
+				// no reason.
+				live, liveErr := d.utxoStore().
+					UtxoIsLive(ref.TxId[:], ref.OutputIdx, txn.Metadata())
 				if liveErr != nil {
 					select {
 					case results <- resolved{err: fmt.Errorf(
@@ -160,7 +165,7 @@ func (d *Database) ResolveLiveUtxoRefsConcurrent(
 					}
 					continue
 				}
-				if liveUtxo == nil {
+				if !live {
 					d.cborCache.ForgetUtxo(ref.TxId[:], ref.OutputIdx)
 					continue
 				}

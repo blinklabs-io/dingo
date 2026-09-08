@@ -589,6 +589,17 @@ type UtxoStore interface {
 		types.Txn,
 	) (*models.Utxo, error)
 
+	// UtxoIsLive reports whether a live (unspent) row is recorded for the
+	// reference, without loading its multi-asset rows the way GetUtxo does.
+	// A caller that only needs a liveness bool -- e.g. warm_hot_cache.go's
+	// post-resolve recheck, run once per live UTxO at multi-million scale --
+	// pays for one query instead of two.
+	UtxoIsLive(
+		[]byte, // txId
+		uint32, // idx
+		types.Txn,
+	) (bool, error)
+
 	// GetUtxoIncludingSpent retrieves a transaction output by
 	// transaction ID and index, including spent outputs.
 	GetUtxoIncludingSpent(

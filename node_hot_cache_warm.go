@@ -100,6 +100,16 @@ func (n *Node) warmHotUtxoCacheInBackground() {
 // (node_shutdown.go), where n.ctx cancellation already asks the pass to
 // stop; a live restore/truncate never cancels n.ctx, so it must use
 // stopHotCacheWarmup instead.
+//
+// This wait is not bounded by shutdown's own configured timeout, the same
+// way node_shutdown.go's waitChainsyncStallRecycler and
+// waitChainSelectedNoneWorker calls immediately around this one are not: all
+// three are context-owned phase-1 workers this codebase already accepts
+// waiting on unconditionally before phase-1 proceeds. The practical bound
+// here is the slowest in-flight resolve job at the moment of cancellation
+// (ResolveLiveUtxoRefsConcurrent's ctx check runs between dispatched jobs,
+// not inside one), not an indefinite hang -- there is no lock cycle back to
+// anything shutdown itself holds.
 func (n *Node) waitHotCacheWarmup() {
 	n.hotCacheWarmupMu.Lock()
 	done := n.hotCacheWarmupDone
