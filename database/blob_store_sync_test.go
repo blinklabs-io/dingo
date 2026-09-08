@@ -65,6 +65,8 @@ func drainAsync(drain func()) <-chan struct{} {
 // still return the value written before the replacement started, because each
 // installed store resolves to the same underlying badger store.
 func TestSetBlobStoreConcurrentWithReaders(t *testing.T) {
+	t.Parallel()
+
 	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	base := db.Blob()
@@ -149,6 +151,8 @@ func TestSetBlobStoreConcurrentWithReaders(t *testing.T) {
 // after the replacement runs against the new store and must not hold the old
 // one open.
 func TestSetBlobStoreDrainWaitsForOpenTransaction(t *testing.T) {
+	t.Parallel()
+
 	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	base := db.Blob()
@@ -219,6 +223,8 @@ func TestSetBlobStoreDrainWaitsForOpenTransaction(t *testing.T) {
 // TestSetBlobStoreDrainWaitsForPinBlob is the same contract for blob work that
 // runs outside a transaction, which is what PinBlob exists for.
 func TestSetBlobStoreDrainWaitsForPinBlob(t *testing.T) {
+	t.Parallel()
+
 	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	base := db.Blob()
@@ -252,6 +258,8 @@ func TestSetBlobStoreDrainWaitsForPinBlob(t *testing.T) {
 // caller that wants to close the previous store is never made to wait for work
 // that is not there.
 func TestSetBlobStoreDrainReturnsWhenIdle(t *testing.T) {
+	t.Parallel()
+
 	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	base := db.Blob()
@@ -274,6 +282,8 @@ func TestSetBlobStoreDrainReturnsWhenIdle(t *testing.T) {
 // pair that handle with a different store. BlobStore must keep naming the
 // original, and the transaction must still commit correctly through it.
 func TestTxnKeepsBlobStoreAcrossReplacement(t *testing.T) {
+	t.Parallel()
+
 	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	base := db.Blob()
@@ -348,6 +358,8 @@ func (s *pairingProbeBlobStore) GetUtxo(
 // installed store instead would send that handle into a store replaced in
 // between, which is what this test forbids.
 func TestResolveTxCborUsesTransactionStore(t *testing.T) {
+	t.Parallel()
+
 	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	base := db.Blob()
@@ -385,6 +397,8 @@ func TestResolveTxCborUsesTransactionStore(t *testing.T) {
 // entry point, which loadCbor reaches with the transaction validation is
 // running under.
 func TestResolveUtxoCborUsesTransactionStore(t *testing.T) {
+	t.Parallel()
+
 	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	base := db.Blob()
@@ -438,6 +452,8 @@ func (s *missingBlockBlobStore) GetBlock(
 // CBOR is missing as skippable and logs a warning, so a replacement between
 // the two would drop blocks from the iteration silently rather than failing.
 func TestBlobIteratorKeepsBatchStoreAcrossReplacement(t *testing.T) {
+	t.Parallel()
+
 	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	base := db.Blob()

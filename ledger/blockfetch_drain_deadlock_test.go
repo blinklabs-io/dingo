@@ -59,6 +59,8 @@ func newChainUpdateEvent() event.Event {
 // publish AFTER the mutex is released rather than publishing it inline. Both
 // older approaches would block here and fail the timeout.
 func TestBlockfetchDrainDefersChainUpdatePastLedgerMutex(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	// Stop releases the goroutines parked on the stalled subscriber / full
 	// lane at the end of the test. Run it under a bounded wait: if Stop's

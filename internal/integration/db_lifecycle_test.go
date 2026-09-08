@@ -88,6 +88,8 @@ func setupLifecycleTestChain(
 // TestDatabaseLifecycleSnapshotRestoreRoundTrip verifies that a snapshot
 // of a real multi-block chain restores byte-for-byte, tip included.
 func TestDatabaseLifecycleSnapshotRestoreRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 60
 	db, points := setupLifecycleTestChain(t, t.TempDir(), numBlocks)
 	defer db.Close()
@@ -145,6 +147,8 @@ func TestDatabaseLifecycleSnapshotRestoreRoundTrip(t *testing.T) {
 // from this package's lighter chain-manager-only harness is out of scope
 // here).
 func TestDatabaseLifecycleTruncateRealChain(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 60
 	db, points := setupLifecycleTestChain(t, t.TempDir(), numBlocks)
 	defer db.Close()
@@ -193,6 +197,8 @@ func TestDatabaseLifecycleTruncateRealChain(t *testing.T) {
 // TestDatabaseLifecycleTruncateRejectsBeyondMithrilBoundary verifies that
 // a truncate target before the recorded Mithril trust boundary is rejected.
 func TestDatabaseLifecycleTruncateRejectsBeyondMithrilBoundary(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 60
 	db, points := setupLifecycleTestChain(t, t.TempDir(), numBlocks)
 	defer db.Close()

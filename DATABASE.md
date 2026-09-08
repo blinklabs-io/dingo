@@ -282,7 +282,7 @@ The Go model `models.Block` has `TableName() == "block"`, but it is not migrated
 Use the Go APIs when code runs inside Dingo:
 
 - `database.Database` in `database/database.go` owns both stores and exposes `Blob()`, `PinBlob()`, `SetBlobStore()`, `Metadata()`, `Transaction()`, `BlobTxn()`, `MetadataTxn()`, `StorageMode()`, and `Close()`. `Blob()`, `PinBlob()`, and `SetBlobStore()` are the only readers and writer of the installed blob store; see "Storage provider ownership" for the pin/drain rules that make replacement safe.
-- `database.CborCache()` returns the `TieredCborCache`. Its cold-path entry points `ResolveUtxoCbor(txId, outputIdx, txn ...*Txn)` and `ResolveTxCbor(txn *Txn, txHash)` take the database transaction, not a bare `types.Txn` handle: an optional transaction makes uncommitted writes visible, and the cold read has to run against the store that transaction was opened on rather than whichever store is installed when the resolve happens. The hot UTxO tier is also written proactively rather than purely on demand: `SetTransactionWithOpts`/`SetGapBlockTransaction` warm it for every produced output and evict it for every consumed input as blocks are applied, and `Database.WarmHotUtxoCache`/`ResolveLiveUtxoRefsConcurrent` (`database/warm_hot_cache.go`) run a one-time background pass over the already-live set at startup, rechecking each ref's liveness once resolved and forgetting it if a concurrent spend won the race — no on-disk format changes; see ARCHITECTURE.md's "Hot UTxO Cache: Write-Path Warming and Live-Set-Driven Eviction". That liveness recheck (and any other caller that only needs the bool) should use `UtxoStore.UtxoIsLive(txId, outputIdx, txn)` rather than `GetUtxo`: both run the same `GetLiveUtxo` query, but `GetUtxo` additionally loads the row's multi-asset rows in a second query, which a liveness-only check at multi-million-UTxO scale should not pay for.
+- `database.CborCache()` returns the `TieredCborCache`. Its cold-path entry points `ResolveUtxoCbor(txId, outputIdx, txn ...*Txn)` and `ResolveTxCbor(txn *Txn, txHash)` take the database transaction, not a bare `types.Txn` handle: an optional transaction makes uncommitted writes visible, and the cold read has to run against the store that transaction was opened on rather than whichever store is installed when the resolve happens. `Database.ResolveUtxoCborWithRecovery(txId, outputIdx, txn)` wraps `ResolveUtxoCbor` for a caller that only has a bare ref (not a `*models.Utxo` already loaded via `GetUtxo`) and must not silently treat a recoverable missing blob as absent: on `types.ErrBlobKeyNotFound` it falls back to the same producing-block reconstruction `loadCbor` performs for `UtxoByRef`/`IterateLiveUtxos`, returning `ErrUtxoCborUnavailable` only once that recovery itself confirms the CBOR cannot be rebuilt. `ledger.queryShelleyUtxoWhole` (answering `GetUTxOWhole`) uses this rather than the bare cache call for exactly that reason. The hot UTxO tier is also written proactively rather than purely on demand: `SetTransactionWithOpts`/`SetGapBlockTransaction` warm it for every produced output and evict it for every consumed input as blocks are applied, and `Database.WarmHotUtxoCache`/`ResolveLiveUtxoRefsConcurrent` (`database/warm_hot_cache.go`) run a one-time background pass over the already-live set at startup, rechecking each ref's liveness once resolved and forgetting it if a concurrent spend won the race — no on-disk format changes; see ARCHITECTURE.md's "Hot UTxO Cache: Write-Path Warming and Live-Set-Driven Eviction". That liveness recheck (and any other caller that only needs the bool) should use `UtxoStore.UtxoIsLive(txId, outputIdx, txn)` rather than `GetUtxo`: both run the same `GetLiveUtxo` query, but `GetUtxo` additionally loads the row's multi-asset rows in a second query, which a liveness-only check at multi-million-UTxO scale should not pay for.
 - `database.Txn` in `database/txn.go` coordinates sibling metadata/blob transactions. Write commits update commit timestamps in both stores, commit the blob transaction first, then commit metadata. `Txn.BlobStore()` returns the blob store the transaction was opened on — the store its `Blob()` handle belongs to, and the one every blob call inside the transaction must use.
 - `metadata.MetadataStore` in `database/plugin/metadata/store.go` is the
   compatibility composition of the SQL-facing capabilities. New components
@@ -2808,6 +2808,41 @@ that cutoff but is nonetheless in `psStakePools`; its key is then resolved with
 the *earliest* lookup at or before the capture slot. Earliest rather than
 latest, because a pool that also re-registered within that same epoch had the
 re-registration deferred, so the snapshot still carries the first one.
+
+A Mithril snapshot import writes a pool's registration (`ImportPool`) stamped
+at the import slot, because the snapshot carries only the pool's current
+parameters, not the certificate history that produced them. Both lookups
+above filter `added_slot <= slot`, so for any cutoff or capture slot before
+that import slot -- which the very first post-bootstrap epoch boundary's
+cutoff and capture necessarily are, since that boundary's electing snapshot
+was captured no later than the anchor the node just bootstrapped from --
+neither query finds a row for a pool that has in fact been continuously
+registered the whole time, and `electingVrfKeyHashWithCache`
+(`ledger/verify_header.go`) raised `errVrfKeyRegistrationHistoryUnavailable`
+unconditionally (issue #4047; the deferred-retry path in
+`verifyBlockHeaderStateWithCache` only covers a ledger tip still catching up,
+not this permanent gap).
+
+The fix lives in `electingVrfKeyHashWithCache`, not in these two queries or in
+`ImportPool`: when both lookups miss, and this is a Mithril-bootstrapped node
+(`ls.mithrilLedgerSlot != 0`) whose stake-snapshot capture slot is at or below
+that boundary, the gap is known to be exactly this bootstrap shape rather than
+a genuine missing-registration bug, so the caller falls back to the pool's
+current live registration (`GetPool(includeInactive=true)`) the same way it
+already does when `electingPoolParamsCutoffSlotWithCache` reports no snapshot
+at all (`ok == false`). An earlier version of this fix instead seeded a second,
+`added_slot = 0` "floor" registration row at import time so the existing
+queries would resolve on their own; that synthetic row also satisfied
+`GetPoolRegistrationsEffectiveForEpoch`'s in-epoch registration window
+whenever a processed epoch's start slot was small, letting it outrank the
+pool's real, owner-populated registration under that query's ascending
+"earliest first-in-epoch" ordering and zeroing out the pool's owner stake in
+reward-input seeding -- caught by
+`TestHandleEpochTransitionCapturesSelfDelegatedOwnerStake` and its
+neighboring `ledger/snapshot` tests. Resolving the gap only where the
+consensus-critical question is actually asked, using the boundary the node
+already persists for exactly this purpose, avoids adding a row that other
+`added_slot`-scoped readers have to reason about.
 
 ### `GetPoolsRetiringAtEpoch`
 

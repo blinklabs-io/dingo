@@ -208,6 +208,8 @@ func cleanupBlobMigrationDataset(
 // (MinIO in CI) nor GCS (real bucket + ADC only, no local emulator exists)
 // is configured.
 func TestBlobStoreMigration(t *testing.T) {
+	t.Parallel()
+
 	destinations := cloudStorageBenchmarkBackends(t.TempDir(), t.Name())
 	if len(destinations) == 0 {
 		t.Skip(
@@ -335,6 +337,8 @@ func requireMetadataDatasetMatches(
 // database/plugin/metadata/postgres/conformance_test.go and
 // internal/test/conformance use, so this runs automatically in CI.
 func TestMetadataStoreMigrationSQLiteToPostgres(t *testing.T) {
+	t.Parallel()
+
 	if os.Getenv("POSTGRES_PASSWORD") == "" && os.Getenv("POSTGRES_DSN") == "" {
 		t.Skip(
 			"Skipping postgres migration test: postgres not configured " +
@@ -422,6 +426,8 @@ func postgresMigrationDSN() string {
 // database/plugin/metadata/mysql/conformance_test.go and
 // internal/test/conformance use, so this runs automatically in CI.
 func TestMetadataStoreMigrationSQLiteToMySQL(t *testing.T) {
+	t.Parallel()
+
 	if os.Getenv("MYSQL_ROOT_PASSWORD") == "" && os.Getenv("MYSQL_DSN") == "" {
 		t.Skip(
 			"Skipping mysql migration test: mysql not configured " +

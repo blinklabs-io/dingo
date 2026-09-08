@@ -92,6 +92,8 @@ func (stalledBlockSubscriber) Close() {}
 // a node-wide fatal error. The EventBus has already isolated and removed the
 // stalled subscriber when it returns this error.
 func TestPublishBlockEventIgnoresOptionalSubscriberDetachment(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Stop)
 	require.NotZero(
@@ -275,6 +277,8 @@ func TestRollbackTxEventsPrecedeLaterForwardTxEvents(t *testing.T) {
 // before its Apply unless block-apply commit and rollback emission share a
 // serializer.
 func TestRollbackWaitsForCommittedApplyPublication(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
@@ -369,6 +373,8 @@ func TestRollbackWaitsForCommittedApplyPublication(t *testing.T) {
 }
 
 func TestBlockApplyCandidatePointUsesLastExaminedBlock(t *testing.T) {
+	t.Parallel()
+
 	blockHash := func(value byte) []byte {
 		ret := make([]byte, 32)
 		ret[0] = value
@@ -438,6 +444,8 @@ func TestBlockApplyCandidatePointUsesLastExaminedBlock(t *testing.T) {
 }
 
 func TestBlockApplyRejectsRolledBackCandidate(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	rolledBackCandidate := fixture.currentTip.Point
 	require.NoError(
@@ -549,6 +557,8 @@ func TestRollbackAndForwardTxEventsStayOrderedAcrossRepeatedCycles(
 // the block, which it can only do before the truncation. Wire the emitter in
 // after chain.Rollback instead and no event is produced at all.
 func TestRollbackChainAndStateEmitsUndoEventsBeforeTruncating(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
@@ -589,6 +599,8 @@ func TestRollbackChainAndStateEmitsUndoEventsBeforeTruncating(t *testing.T) {
 // stay applied. Emitting has to happen before the truncation for ordering, so
 // the rejection is checked first.
 func TestRejectedRollbackEmitsNoUndoEvents(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
@@ -646,6 +658,8 @@ func TestRejectedRollbackEmitsNoUndoEvents(t *testing.T) {
 // undo ever published for it. beforeReconciliationUndoSnapshot forces
 // exactly that interleaving deterministically.
 func TestReconciliationUndoBlocksCoversConcurrentlyAppliedBlock(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
@@ -760,6 +774,8 @@ func TestReconciliationUndoBlocksCoversConcurrentlyAppliedBlock(t *testing.T) {
 func TestReconcilePrimaryChainTipWithLedgerTipEmitsUndoEventsBeforeTruncating(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
@@ -833,6 +849,8 @@ func TestReconcilePrimaryChainTipWithLedgerTipEmitsUndoEventsBeforeTruncating(
 // (issue #3516 review). The gap must be observable, not silent: an
 // error-level log and the reconciliationUndoUnresolved counter.
 func TestReconciliationUndoDegradesGracefullyAfterRestart(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
@@ -927,6 +945,8 @@ func TestReconciliationUndoDegradesGracefullyAfterRestart(t *testing.T) {
 func TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewindAndEmit(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
@@ -1007,6 +1027,8 @@ func TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewin
 func TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmitting(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
@@ -1066,6 +1088,8 @@ func TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmit
 // TestReconciliationUndoBlocksIncludesNilNonceRecords covers a durable
 // applied-point row with no evolving nonce, as used by Byron-like blocks.
 func TestReconciliationUndoBlocksIncludesNilNonceRecords(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
@@ -1132,6 +1156,8 @@ func TestReconciliationUndoBlocksIncludesNilNonceRecords(t *testing.T) {
 // observable through reconciliationUndoMissingRecord without fabricating an
 // undo block from the replacement chain.
 func TestReconciliationUndoBlocksDetectsMissingBlockNonceRecords(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
@@ -1176,6 +1202,8 @@ func TestReconciliationUndoBlocksDetectsMissingBlockNonceRecords(t *testing.T) {
 func TestReconcilePrimaryChainTipWithLedgerTipSucceedsBeforeSetLedger(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
@@ -1214,6 +1242,8 @@ func TestReconcilePrimaryChainTipWithLedgerTipSucceedsBeforeSetLedger(
 // no-subscriber fast path against suppressing decode failures: a consumer
 // watching only ledger.error still needs to see them.
 func TestBlocksAboveSlotServesLedgerErrorOnlySubscribers(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
@@ -1252,6 +1282,8 @@ func TestBlocksAboveSlotServesLedgerErrorOnlySubscribers(t *testing.T) {
 // and is much larger. A rewind past 2 blocks therefore reaches the emit and is
 // then rejected -- exactly the shape the guard exists for.
 func TestRejectedWindowedRollbackEmitsNoUndoEvents(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)

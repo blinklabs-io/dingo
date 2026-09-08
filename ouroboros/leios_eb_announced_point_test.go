@@ -150,6 +150,8 @@ func testEbHash(point ocommon.Point) lcommon.Blake2b256 {
 func TestStoreLeiosEndorserBlockAcceptsDifferentSlotOfSameHashWhileFirstIsLive(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 7, 1)
 	second := ocommon.Point{Slot: point.Slot + 1, Hash: point.Hash}
 	txsRaw := []cbor.RawMessage{mustCbor(t, "tx0")}
@@ -224,6 +226,8 @@ func TestStoreLeiosEndorserBlockAcceptsDifferentSlotOfSameHashWhileFirstIsLive(
 func TestStoreLeiosEndorserBlockAcceptsAnnouncedPointAndIsIdempotent(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 11)
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
@@ -267,6 +271,8 @@ func TestStoreLeiosEndorserBlockAcceptsAnnouncedPointAndIsIdempotent(
 func TestStoreLeiosEndorserBlockCrossConnectionDifferentSlotsCoexistRegardlessOfOrder(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	for _, secondFirst := range []bool{false, true} {
 		name := "first-then-second"
 		if secondFirst {
@@ -333,6 +339,8 @@ func TestStoreLeiosEndorserBlockCrossConnectionDifferentSlotsCoexistRegardlessOf
 // stored while no announcement exists yet. Nothing keyed on the peer-supplied
 // slot may be published until an announcement corroborates it.
 func TestPeerOfferedStoreWithheldUntilAnnouncementBindsIt(t *testing.T) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 41)
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
@@ -383,6 +391,8 @@ func TestPeerOfferedStoreWithheldUntilAnnouncementBindsIt(t *testing.T) {
 func TestPeerOfferedStoreUnderFabricatedSlotStaysPermanentlyUnverified(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 41)
 	fabricated := ocommon.Point{Slot: 42, Hash: point.Hash}
 
@@ -439,6 +449,8 @@ func TestPeerOfferedStoreUnderFabricatedSlotStaysPermanentlyUnverified(
 func TestEndorserBlockTxsByHashWithholdsUnverifiedSlotFromLedger(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 21, 1)
 	txsRaw := []cbor.RawMessage{mustCbor(t, "tx0")}
 
@@ -483,6 +495,8 @@ func TestEndorserBlockTxsByHashWithholdsUnverifiedSlotFromLedger(
 // must reconstruct the reload as already bound, since the blob store is
 // only ever written from a verified entry in the first place.
 func TestEndorserBlockTxsByHashAvailableAfterDBReload(t *testing.T) {
+	t.Parallel()
+
 	tx0, ref0 := testLeiosManifestTx(t, 0)
 	blockRaw, err := lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{ref0},
@@ -523,6 +537,8 @@ func TestEndorserBlockTxsByHashAvailableAfterDBReload(t *testing.T) {
 // already holds. Concurrent unlocked reads of that already-held pointer must
 // see it unmodified.
 func TestBindLeiosEndorserBlockSlotDoesNotMutateSharedEntry(t *testing.T) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 63)
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
@@ -575,6 +591,8 @@ func TestBindLeiosEndorserBlockSlotDoesNotMutateSharedEntry(t *testing.T) {
 // stuck unverified forever. Run across many independent hashes concurrently
 // under -race to exercise both interleavings.
 func TestStoreAndAnnouncementRaceAlwaysEndsVerified(t *testing.T) {
+	t.Parallel()
+
 	const n = 64
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 
@@ -641,6 +659,8 @@ func TestStoreAndAnnouncementRaceAlwaysEndsVerified(t *testing.T) {
 // binding as still live -- a peer-offered store for that same slot must be
 // left merely unverified, the same as a hash with no binding at all.
 func TestLeiosAnnouncementBindsSlotIgnoresExpiredBinding(t *testing.T) {
+	t.Parallel()
+
 	ledger := &fakeLeiosAnnouncementLedger{
 		// SlotToTime always answers as if the binding's slot occurred long
 		// enough ago to have aged out of leiosNotifyMaxAnnouncementAge.
@@ -685,6 +705,8 @@ func TestLeiosAnnouncementBindsSlotIgnoresExpiredBinding(t *testing.T) {
 // must still compare that slot against the one it was actually asked about
 // before treating the reload as already satisfying the request.
 func TestFetchEndorserBlockByPointRejectsStaleReloadedSlot(t *testing.T) {
+	t.Parallel()
+
 	tx0, ref0 := testLeiosManifestTx(t, 0)
 	blockRaw, err := lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{ref0},
@@ -752,6 +774,8 @@ func TestFetchEndorserBlockByPointRejectsStaleReloadedSlot(t *testing.T) {
 func TestStoreLeiosEndorserBlockAuthoritativeAndAnnouncedOccurrencesCoexist(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 300)
 	ebHash := testEbHash(point)
 	announced := ocommon.Point{Slot: point.Slot - 50, Hash: point.Hash}
@@ -799,6 +823,8 @@ func TestStoreLeiosEndorserBlockAuthoritativeAndAnnouncedOccurrencesCoexist(
 // exclusion list, so a complete-but-unbound entry must read as unavailable
 // there too, not just from the tx-body provider.
 func TestEndorserBlockTxHashesByHashWithholdsUnverifiedSlot(t *testing.T) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 22, 1)
 	txsRaw := []cbor.RawMessage{mustCbor(t, "tx0")}
 
@@ -841,6 +867,8 @@ func TestEndorserBlockTxHashesByHashWithholdsUnverifiedSlot(t *testing.T) {
 // waits on this same closure) could consume an unverified slot the same way
 // EndorserBlockTxsByHash could before issue #3513.
 func TestLeiosClosureCompleteLockedWithholdsUnverifiedEntry(t *testing.T) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 71)
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
@@ -948,6 +976,8 @@ func (l *lockProbingVoteHandler) HandleEndorserBlock(
 func TestRecordLeiosAnnouncementPublishesAfterReleasingAnnouncementsLock(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 250)
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	votes := &lockProbingVoteHandler{

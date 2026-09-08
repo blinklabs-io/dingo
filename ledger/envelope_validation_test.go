@@ -89,6 +89,8 @@ func (b *envelopeTestBlock) Transactions() []lcommon.Transaction {
 }
 
 func TestValidateInboundBlockExUnitsAggregatesDeclaredBudgets(t *testing.T) {
+	t.Parallel()
+
 	newTx := func(memory, steps int64) lcommon.Transaction {
 		return &mockFeeTx{
 			witnesses: &mockWitnessSet{redeemers: &mockRedeemers{entries: []struct {
@@ -146,6 +148,8 @@ func TestValidateInboundBlockExUnitsAggregatesDeclaredBudgets(t *testing.T) {
 func TestValidateInboundBlockExUnitsIncludesDijkstraSubtransactions(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	newWitnessSet := func(memory, steps int64) dijkstra.DijkstraTransactionWitnessSet {
 		return dijkstra.DijkstraTransactionWitnessSet{
 			WsRedeemers: dijkstra.DijkstraRedeemers{
@@ -221,6 +225,8 @@ func (b *envelopeTestBlock) Utxorpc() (*utxorpc.Block, error) {
 // TestValidateInboundBlockEnvelopeSizes covers header/body size limits and
 // the requirement that the declared body size matches serialized block CBOR.
 func TestValidateInboundBlockEnvelopeSizes(t *testing.T) {
+	t.Parallel()
+
 	parent := envelopeParent{slot: 9, blockNumber: 41}
 	pparams := &shelley.ShelleyProtocolParameters{
 		MaxBlockBodySize:   3,
@@ -302,6 +308,8 @@ func TestValidateInboundBlockEnvelopeSizes(t *testing.T) {
 // TestValidateInboundBlockEnvelopeOrdering checks normal block number and
 // slot ordering failures, including Byron main blocks reusing parent numbers.
 func TestValidateInboundBlockEnvelopeOrdering(t *testing.T) {
+	t.Parallel()
+
 	parent := envelopeParent{slot: 10, blockNumber: 5}
 	pparams := &shelley.ShelleyProtocolParameters{
 		MaxBlockBodySize:   3,
@@ -365,6 +373,8 @@ func TestValidateInboundBlockEnvelopeOrdering(t *testing.T) {
 // TestValidateBlockOrderAllowsOriginParent verifies the first block is not
 // compared against a synthetic parent when the chain tip is origin.
 func TestValidateBlockOrderAllowsOriginParent(t *testing.T) {
+	t.Parallel()
+
 	block := &envelopeTestBlock{
 		header: &envelopeTestHeader{
 			slot:   0,
@@ -379,6 +389,8 @@ func TestValidateBlockOrderAllowsOriginParent(t *testing.T) {
 // TestValidateBlockOrderAllowsByronMainBlockAfterEbb verifies that the main
 // block at a Byron epoch boundary may share the EBB parent's slot.
 func TestValidateBlockOrderAllowsByronMainBlockAfterEbb(t *testing.T) {
+	t.Parallel()
+
 	block := &envelopeTestBlock{
 		header: &envelopeTestHeader{
 			slot:   10,
@@ -399,6 +411,8 @@ func TestValidateBlockOrderAllowsByronMainBlockAfterEbb(t *testing.T) {
 // parent from persisted tip metadata keeps the same-slot Byron main-block
 // exception after the EBB has already been committed.
 func TestEnvelopeParentFromTipPreservesByronEbb(t *testing.T) {
+	t.Parallel()
+
 	parent := envelopeParentFromTip(
 		byron.ByronSlotsPerEpoch,
 		5,
@@ -421,6 +435,8 @@ func TestEnvelopeParentFromTipPreservesByronEbb(t *testing.T) {
 func TestEnvelopeParentFromTipDoesNotAssumeByronEbbWhenTypeUnavailable(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	parent := envelopeParentFromTip(
 		byron.ByronSlotsPerEpoch,
 		5,
@@ -447,6 +463,8 @@ func TestEnvelopeParentFromTipDoesNotAssumeByronEbbWhenTypeUnavailable(
 // TestValidateInboundBlockEnvelopeByronEbbOrdering covers the Byron EBB rule
 // that an EBB shares its parent's block number instead of incrementing it.
 func TestValidateInboundBlockEnvelopeByronEbbOrdering(t *testing.T) {
+	t.Parallel()
+
 	parent := envelopeParent{
 		slot:        byron.ByronSlotsPerEpoch,
 		blockNumber: 7,
@@ -467,6 +485,8 @@ func TestValidateInboundBlockEnvelopeByronEbbOrdering(t *testing.T) {
 // TestValidateByronEbbPlacementRejectsNilHeader ensures malformed Byron EBBs
 // fail before placement or ordering logic reads header consensus data.
 func TestValidateByronEbbPlacementRejectsNilHeader(t *testing.T) {
+	t.Parallel()
+
 	err := validateByronEbbPlacement(&byron.ByronEpochBoundaryBlock{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "nil header")
@@ -483,6 +503,8 @@ func TestValidateByronEbbPlacementRejectsNilHeader(t *testing.T) {
 // TestValidateInboundBlockEnvelopeRejectsNilHeader ensures malformed non-Byron
 // blocks fail before ordering or size validation can dereference the header.
 func TestValidateInboundBlockEnvelopeRejectsNilHeader(t *testing.T) {
+	t.Parallel()
+
 	err := validateInboundBlockEnvelope(
 		&envelopeTestBlock{},
 		&shelley.ShelleyProtocolParameters{},

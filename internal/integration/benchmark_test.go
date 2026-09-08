@@ -140,6 +140,8 @@ func verifyBlockSelfConsistent(block immutable.Block) error {
 // every loaded block rather than scanning for the first one that happens
 // to pass, since there is no longer a known-bad subset to scan past.
 func TestLoadImmutableBlocksAreSelfConsistent(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 50
 	blocks, err := loadImmutableBlocks(numBlocks)
 	require.NoError(t, err)

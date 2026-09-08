@@ -38,6 +38,8 @@ import (
 // is split into koiosAccountChunkSize-sized requests and every returned row
 // is committed atomically, with coverage marked complete.
 func TestFetchAccountRewardsForEpochChunksAndCommits(t *testing.T) {
+	t.Parallel()
+
 	var reqCount atomic.Int32
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -122,6 +124,8 @@ func TestFetchAccountRewardsForEpochChunksAndCommits(t *testing.T) {
 // address universe still commits a complete coverage record rather than
 // leaving the epoch perpetually "not fetched".
 func TestFetchAccountRewardsForEpochEmptyUniverseCommitsComplete(t *testing.T) {
+	t.Parallel()
+
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
@@ -153,6 +157,8 @@ func TestFetchAccountRewardsForEpochEmptyUniverseCommitsComplete(t *testing.T) {
 func TestFetchAccountRewardsForEpochTransientChunkFailureCommitsNothing(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -190,6 +196,8 @@ func TestFetchAccountRewardsForEpochTransientChunkFailureCommitsNothing(
 func TestFetchAccountRewardsForEpochPermanentErrorAbortsImmediately(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -229,6 +237,8 @@ func TestFetchAccountRewardsForEpochPermanentErrorAbortsImmediately(
 func TestFetchAccountRewardsForEpochZeroRowsWithinGraceLeavesIncomplete(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -272,6 +282,8 @@ func TestFetchAccountRewardsForEpochZeroRowsWithinGraceLeavesIncomplete(
 func TestFetchAccountRewardsForEpochZeroRowsPastGraceMarksComplete(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -315,6 +327,8 @@ func TestFetchAccountRewardsForEpochZeroRowsPastGraceMarksComplete(
 func TestFetchAccountRewardsForEpochZeroRowsGraceDisabledMarksComplete(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -352,6 +366,8 @@ func TestFetchAccountRewardsForEpochZeroRowsGraceDisabledMarksComplete(
 // to pass it explicitly), so the grace-window gate above actually applies
 // end-to-end through the caller every real Fetch/Observer path uses.
 func TestFetchEpochAccountsWithAddrsLooksUpEpochEndTimeFromCache(t *testing.T) {
+	t.Parallel()
+
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -407,6 +423,8 @@ func TestFetchEpochAccountsWithAddrsLooksUpEpochEndTimeFromCache(t *testing.T) {
 // dingo_db_test.go/check_test.go use, per this tool's "no local mocks"
 // testing convention.
 func TestBuildAccountAddressUniverseUnionsKoiosAndDingo(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 
@@ -441,6 +459,8 @@ func TestBuildAccountAddressUniverseUnionsKoiosAndDingo(t *testing.T) {
 // (no Dingo DB access configured) still returns Koios's list alone rather
 // than erroring.
 func TestBuildAccountAddressUniverseNilSourceIsKoiosOnly(t *testing.T) {
+	t.Parallel()
+
 	universe, err := BuildAccountAddressUniverse(
 		context.Background(),
 		nil,
@@ -503,6 +523,8 @@ func TestBuildAccountAddressUniverseNilSourceIsKoiosOnly(t *testing.T) {
 // test's job is to confirm the dispatcher never violates the invariant under
 // real adversarial concurrent execution, not to force that one specific
 // interleaving to occur.
+// Not t.Parallel: swaps the package-level afterChunkCancelForTest hook,
+// which every concurrent chunked fetch in this package would observe.
 func TestFetchAccountRewardsForEpochStopsDispatchingAfterFirstChunkError(
 	t *testing.T,
 ) {

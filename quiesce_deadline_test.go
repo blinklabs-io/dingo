@@ -128,6 +128,8 @@ func TestStopWithDeadlineIgnoresCallerCancellation(t *testing.T) {
 // stopHotCacheWarmup is always safe to call even when no warmup pass was
 // ever started.
 func TestQuiesceComponentStopsCoverEveryUnboundedStop(t *testing.T) {
+	t.Parallel()
+
 	n := &Node{
 		blockForger:          &forging.BlockForger{},
 		leaderElection:       &leader.Election{},
@@ -157,6 +159,8 @@ func TestQuiesceComponentStopsCoverEveryUnboundedStop(t *testing.T) {
 // non-block-producing or non-Leios node. "hot UTxO cache warmup" still shows
 // up here since it is unconditional (see quiesceComponentStops).
 func TestQuiesceComponentStopsSkipsAbsentComponents(t *testing.T) {
+	t.Parallel()
+
 	n := &Node{snapshotMgr: &snapshot.Manager{}}
 
 	stops := n.quiesceComponentStops()
@@ -174,6 +178,7 @@ func TestQuiesceComponentStopsSkipsAbsentComponents(t *testing.T) {
 // errStorageDrainUnconfirmed to force a supervised restart instead of
 // reopening storage, so a quiesce that swallowed or never reached it would let
 // them resume on a database a live goroutine may still be using.
+// Not t.Parallel: swaps the package-level componentStopsForQuiesce seam.
 func TestQuiesceEscalatesAStopThatNeverReturns(t *testing.T) {
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })

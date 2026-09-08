@@ -650,6 +650,13 @@ type LedgerStateConfig struct {
 	// on musashi, false otherwise) via Config.prototypeTrustBypassesEnabled,
 	// which requires an unambiguous Musashi identity so this can never be
 	// reached from a preview/preprod/mainnet configuration.
+	//
+	// The same flag also gates every other path where the stake-derived
+	// threshold cannot be evaluated at all (zero total active stake, a
+	// missing/nonpositive active-slot coefficient, a post-Mithril mark
+	// snapshot reconstructed after its target boundary): standard profiles
+	// reject rather than trust an unevaluated producer, and this flag is the
+	// only way to bypass that.
 	SkipLeaderStakeThresholdCheck bool
 	// SkipDijkstraTxValidation, when true, skips the Dijkstra per-transaction
 	// validation rule set entirely. On the Haskell-conformant Musashi path,

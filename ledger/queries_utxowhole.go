@@ -22,7 +22,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
@@ -128,15 +127,23 @@ func (ls *LedgerState) queryShelleyUtxoWhole() (any, error) {
 			txn := ls.db.Transaction(false)
 			defer txn.Release()
 			for u := range jobs {
-				cborBytes, err := ls.db.CborCache().ResolveUtxoCbor(
+				// WithRecovery, not the tiered cache's bare ResolveUtxoCbor:
+				// a missing blob is not necessarily gone for good --
+				// IterateLiveUtxos' inline loadCbor reconstructs it from
+				// the producing block when possible, and this reply must
+				// not silently regress to omitting a row that path would
+				// have recovered.
+				cborBytes, err := ls.db.ResolveUtxoCborWithRecovery(
 					u.ref.TxId[:],
 					u.ref.OutputIdx,
 					txn,
 				)
 				if err != nil {
-					if errors.Is(err, types.ErrBlobKeyNotFound) {
-						// A ref that can't be resolved is silently dropped
-						// rather than failing the whole reply over one row.
+					if errors.Is(err, database.ErrUtxoCborUnavailable) {
+						// Recovery itself confirmed this ref's CBOR cannot
+						// be reconstructed (e.g. the producing block is
+						// gone) -- only now is dropping it rather than
+						// failing the whole reply appropriate.
 						continue
 					}
 					results <- resolved{err: fmt.Errorf(
