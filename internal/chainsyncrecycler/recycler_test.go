@@ -15,6 +15,7 @@
 package chainsyncrecycler
 
 import (
+	"log/slog"
 	"testing"
 	"time"
 
@@ -1102,6 +1103,163 @@ func TestTickPlateauIgnoresAdvertisedTipOfAReplacedConnection(t *testing.T) {
 		pub.byType(event.ChainsyncResyncEventType),
 		"a stale peer tip must not authorize recycling the replacement "+
 			"connection that merely renders the same",
+	)
+}
+
+// plateauBacklogLogMsg is the INFO line the backlog branch logs in place of
+// recycling a healthy chainsync stream.
+const plateauBacklogLogMsg = "local tip plateau is a ledger-application backlog; header chain already caught up, not recycling chainsync"
+
+// TestTickPlateauFallbackFeedsTheBacklogClassifier covers the interaction the
+// other fallback cases leave untouched: the substituted advertised tip does not
+// only decide whether the plateau arms, it flows on into
+// isLedgerApplicationBacklog as bestPeerTipSlot and therefore sets headerGap
+// and the backlog-versus-stall classification. Every other fallback case pins
+// primaryChainTipSlot at the applied tip, which returns false on that
+// predicate's first branch before headerGap is ever computed.
+//
+// Here the primary chain has covered the bulk of the distance to the
+// advertised tip (applied 100, primary chain 900, advertised 1000), so the
+// apply backlog of 800 dominates the residual header gap of 100: the plateau is
+// real but the header stream is healthy and the ledger pipeline is simply
+// draining. It must be logged, not recycled.
+func TestTickPlateauFallbackFeedsTheBacklogClassifier(t *testing.T) {
+	const (
+		appliedSlot      = 100
+		primaryChainSlot = 900
+		advertisedSlot   = 1000
+	)
+	connId := testConnId(10)
+	active := connId
+	ledger := &fakeLedger{
+		tip:                 testTip(appliedSlot, 50),
+		primaryChainTipSlot: primaryChainSlot,
+		atTip:               true,
+	}
+	state := &fakeChainsyncState{
+		tracked: []chainsync.TrackedClient{
+			activeClient(connId, primaryChainSlot),
+		},
+		activeConn: &active,
+	}
+	best := connId
+	peerTip := rollbackRegisteredPeer(connId, appliedSlot, advertisedSlot)
+	require.True(t, peerTip.AwaitingFirstHeader())
+	require.Equal(
+		t,
+		uint64(appliedSlot),
+		peerTip.SelectionTip().Point.Slot,
+		"fixture must pin the delivered frontier at the applied tip",
+	)
+	selector := &fakeChainSelector{
+		bestPeer: &best,
+		peerTips: map[string]*chainselection.PeerChainTip{
+			connId.String(): peerTip,
+		},
+	}
+	pub := newFakePublisher()
+	logs := newLogSignalHandler(plateauBacklogLogMsg)
+	r, _ := newTestRecycler(t, ledger, state, selector, pub, Config{
+		Logger: slog.New(logs),
+	})
+
+	now := time.Now()
+	st := newTestTickState(appliedSlot, now.Add(-25*time.Minute))
+	st.lastPrimaryChainTipSlot = ledger.primaryChainTipSlot
+
+	runTickWith(r, st, LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+		ChainSelector:  selector,
+	}, now, appliedSlot)
+
+	// Without the fallback the delivered frontier equals the applied tip, the
+	// plateau returns before reconciling and this count is zero -- which is
+	// what makes this a regression test for the substitution rather than a
+	// restatement of the backlog heuristic.
+	require.Equal(
+		t,
+		1,
+		ledger.reconcileCallCount(),
+		"the advertised tip must arm the plateau far enough to reconcile",
+	)
+	assert.Empty(
+		t,
+		pub.all(),
+		"an apply backlog that dominates the residual header gap must not "+
+			"recycle a healthy chainsync stream",
+	)
+	select {
+	case <-logs.signal(plateauBacklogLogMsg):
+	default:
+		t.Fatal("backlog plateau must be surfaced, not silently swallowed")
+	}
+	assert.Equal(t, now, st.lastProgressAt)
+}
+
+// TestTickPlateauFallbackResyncsWhenHeaderGapDominates is the other side of
+// that classification. With the same applied tip and advertised tip but a
+// primary chain that has barely moved (applied 100, primary chain 200,
+// advertised 1000) the residual header gap of 800 dominates the apply backlog
+// of 100: headers really are missing, so the substituted advertised tip must
+// carry the plateau all the way to a resync rather than being absorbed by the
+// backlog heuristic.
+func TestTickPlateauFallbackResyncsWhenHeaderGapDominates(t *testing.T) {
+	const (
+		appliedSlot      = 100
+		primaryChainSlot = 200
+		advertisedSlot   = 1000
+	)
+	connId := testConnId(11)
+	active := connId
+	ledger := &fakeLedger{
+		tip:                 testTip(appliedSlot, 50),
+		primaryChainTipSlot: primaryChainSlot,
+		atTip:               true,
+	}
+	state := &fakeChainsyncState{
+		tracked: []chainsync.TrackedClient{
+			activeClient(connId, primaryChainSlot),
+		},
+		activeConn: &active,
+	}
+	best := connId
+	peerTip := rollbackRegisteredPeer(connId, appliedSlot, advertisedSlot)
+	require.True(t, peerTip.AwaitingFirstHeader())
+	selector := &fakeChainSelector{
+		bestPeer: &best,
+		peerTips: map[string]*chainselection.PeerChainTip{
+			connId.String(): peerTip,
+		},
+	}
+	pub := newFakePublisher()
+	r, _ := newTestRecycler(t, ledger, state, selector, pub, Config{})
+
+	now := time.Now()
+	st := newTestTickState(appliedSlot, now.Add(-25*time.Minute))
+	st.lastPrimaryChainTipSlot = ledger.primaryChainTipSlot
+
+	runTickWith(r, st, LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+		ChainSelector:  selector,
+	}, now, appliedSlot)
+
+	events := pub.byType(event.ChainsyncResyncEventType)
+	require.Len(
+		t,
+		events,
+		1,
+		"a header gap that dominates the apply backlog must still resync, "+
+			"even though the gap is only visible via the advertised tip",
+	)
+	resyncEvt, ok := events[0].evt.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	assert.Equal(t, connId, resyncEvt.ConnectionId)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonLocalTipPlateau,
+		resyncEvt.Reason,
 	)
 }
 
