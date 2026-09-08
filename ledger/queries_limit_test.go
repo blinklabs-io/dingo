@@ -33,6 +33,8 @@ import (
 // item count is accepted and that the first over-limit size returns both the
 // stable sentinel error and the structured request details.
 func TestLocalStateQueryItemLimitBoundary(t *testing.T) {
+	t.Parallel()
+
 	require.NoError(t, checkLocalStateQueryItemLimit(
 		"boundary",
 		MaxLocalStateQueryItems,
@@ -60,6 +62,8 @@ func TestLocalStateQueryItemLimitBoundary(t *testing.T) {
 // every query handler with per-item database work rejects oversized input
 // before accessing database or consensus state.
 func TestLocalStateQueryPerItemHandlersRejectOverLimitBeforeWork(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	itemCount := MaxLocalStateQueryItems + 1
 
@@ -112,6 +116,8 @@ func TestLocalStateQueryPerItemHandlersRejectOverLimitBeforeWork(t *testing.T) {
 // empty-filter form can return more DReps than the caller-list limit because
 // its delegators are loaded in batches instead of with one read per DRep.
 func TestLocalStateQueryEmptyDRepStateRemainsUnrestricted(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	txn := db.MetadataTxn(true)
 	t.Cleanup(func() { txn.Rollback() }) //nolint:errcheck
@@ -147,6 +153,8 @@ func TestLocalStateQueryEmptyDRepStateRemainsUnrestricted(t *testing.T) {
 // never had to: an assertion built from a single DRep or delegator can't tell
 // a correct group-by from one that drops or misattributes a row.
 func TestLocalStateQueryEmptyDRepStateMatchesPerDRepDelegators(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	txn := db.MetadataTxn(true)
 	t.Cleanup(func() { txn.Rollback() }) //nolint:errcheck
@@ -219,6 +227,8 @@ func TestLocalStateQueryEmptyDRepStateMatchesPerDRepDelegators(t *testing.T) {
 // allDRepDelegatorsBatchSize hydration batch, so the batch loop can't
 // silently drop or double-count a delegator at the boundary between batches.
 func TestAllDRepDelegatorsCrossesBatchBoundary(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	txn := db.MetadataTxn(true)
 
@@ -273,6 +283,8 @@ func TestAllDRepDelegatorsCrossesBatchBoundary(t *testing.T) {
 // use internally, so a chunk that drops, duplicates, or cross-contaminates
 // results would fail these assertions.
 func TestLocalStateQueryLargeBatchHandlers(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	itemCount := MaxLocalStateQueryItems + 1
 
@@ -370,6 +382,8 @@ func TestLocalStateQueryLargeBatchHandlers(t *testing.T) {
 // repeated oversized requests are rejected consistently and do not prevent a
 // subsequent normal-sized request from being accepted.
 func TestLocalStateQueryRepeatedOverLimitRequestsRemainBounded(t *testing.T) {
+	t.Parallel()
+
 	for range 100 {
 		err := checkLocalStateQueryItemLimit(
 			"repeated",

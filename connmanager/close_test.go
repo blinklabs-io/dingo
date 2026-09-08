@@ -38,6 +38,8 @@ func (f *fakeCloser) Close() error {
 // any caller-supplied attributes (e.g. the peer address) all need to make it
 // into the log line, or a real cleanup failure would be undiagnosable.
 func TestCloseConnAndLogLogsOnCloseError(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 	logger := slog.New(
 		slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}),
@@ -67,6 +69,8 @@ func TestCloseConnAndLogLogsOnCloseError(t *testing.T) {
 // routine connection teardown would bury the genuine failures this helper
 // exists to surface.
 func TestCloseConnAndLogStaysQuietOnSuccess(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 	logger := slog.New(
 		slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}),
@@ -91,6 +95,8 @@ func TestCloseConnAndLogStaysQuietOnSuccess(t *testing.T) {
 // GetConnectionById, which returns nil for an unknown connection ID.
 // closeConnAndLog must treat a nil closer as a no-op rather than panic.
 func TestCloseConnAndLogHandlesNilCloser(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 	logger := slog.New(
 		slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}),
@@ -111,6 +117,8 @@ func TestCloseConnAndLogHandlesNilCloser(t *testing.T) {
 // the socket was never actually released. Neither may be dropped for the
 // other.
 func TestJoinCloseErrJoinsOnCloseFailure(t *testing.T) {
+	t.Parallel()
+
 	origErr := errors.New("dial failed")
 	closeErr := errors.New("already closed")
 
@@ -127,6 +135,8 @@ func TestJoinCloseErrJoinsOnCloseFailure(t *testing.T) {
 // A clean close must not manufacture a joined error out of nothing -- the
 // caller's original error should come back unwrapped.
 func TestJoinCloseErrReturnsOriginalOnCloseSuccess(t *testing.T) {
+	t.Parallel()
+
 	origErr := errors.New("dial failed")
 
 	got := joinCloseErr(origErr, &fakeCloser{err: nil})

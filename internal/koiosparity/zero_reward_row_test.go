@@ -19,6 +19,8 @@ const zeroRewardAddr = "stake_test1uzf5lwsf37wsxmq9rdpq0v9tepk0g36vqmxr974lenzwc
 // was credited on either side, so no lovelace differs — but the presence test
 // read the row as a reward Dingo had missed and failed epoch 222.
 func TestZeroEarnedKoiosRowIsNotDivergence(t *testing.T) {
+	t.Parallel()
+
 	now := time.Now()
 	out := CompareAccountEpoch(
 		"preview", 222,
@@ -42,6 +44,8 @@ func TestZeroEarnedKoiosRowIsNotDivergence(t *testing.T) {
 // zero-amount rows today, but the two presence branches are deliberately
 // symmetric and a future zero row must not fail an epoch for the same reason.
 func TestZeroAmountDingoRowIsNotDivergence(t *testing.T) {
+	t.Parallel()
+
 	now := time.Now()
 	out := CompareAccountEpoch(
 		"preview", 222,
@@ -63,6 +67,8 @@ func TestZeroAmountDingoRowIsNotDivergence(t *testing.T) {
 // TestNonZeroKoiosOnlyRowStillFails is the discrimination check: the change
 // must turn off only the zero case, never one-sided rows generally.
 func TestNonZeroKoiosOnlyRowStillFails(t *testing.T) {
+	t.Parallel()
+
 	now := time.Now()
 	out := CompareAccountEpoch(
 		"preview", 222,
@@ -84,6 +90,8 @@ func TestNonZeroKoiosOnlyRowStillFails(t *testing.T) {
 // A zero-earned row on both sides is an ordinary match and reports nothing —
 // the zero handling must not start manufacturing rows for agreeing pairs.
 func TestZeroOnBothSidesReportsNothing(t *testing.T) {
+	t.Parallel()
+
 	now := time.Now()
 	out := CompareAccountEpoch(
 		"preview", 222,
@@ -109,6 +117,8 @@ func TestZeroOnBothSidesReportsNothing(t *testing.T) {
 // pinned. A waived row is the one outcome this category can produce that a
 // parity checker must never produce by accident.
 func TestZeroRewardRowAmountSpellings(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name     string
 		earned   string
@@ -157,6 +167,8 @@ func TestZeroRewardRowAmountSpellings(t *testing.T) {
 // — the same input, two verdicts, depending only on whether the other side
 // happened to have a row.
 func TestZeroRewardRowAgreesWithValueComparison(t *testing.T) {
+	t.Parallel()
+
 	for _, amount := range []string{
 		"0", "00", "", "abc", "-0", "+0", " 0", "0 ", "1",
 	} {

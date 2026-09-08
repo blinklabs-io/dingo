@@ -12,6 +12,8 @@ import "testing"
 // with "invalid network magic value provided: 0". This affects any network
 // started by name (devnet, preview, ...), not just devnet.
 func TestConfigPopulateNetworkMagicSyncsCompatField(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		network string
 		want    uint32

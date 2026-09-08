@@ -76,6 +76,8 @@ func seedBabbageUtxo(
 // small set of live UTxOs, proving the query decodes every row's address
 // and amount correctly and keys the result by (tx hash, output index).
 func TestQueryShelleyUtxoWhole_ReturnsLiveUtxos(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	addrA, err := lcommon.NewAddressFromParts(
@@ -128,6 +130,8 @@ func TestQueryShelleyUtxoWhole_ReturnsLiveUtxos(t *testing.T) {
 // TestQueryShelleyUtxoWhole_EmptyLedger covers a chain with no UTxOs at
 // all: the query must return an empty, non-nil map rather than failing.
 func TestQueryShelleyUtxoWhole_EmptyLedger(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 
@@ -153,6 +157,8 @@ func TestQueryShelleyUtxoWhole_EmptyLedger(t *testing.T) {
 // %x-formatted slice) is retained here since it's still correct, just no
 // longer reachable through a malformed-length input.
 func TestDecodeUtxoWholeCborMalformedCborSurfacesError(t *testing.T) {
+	t.Parallel()
+
 	ref := database.UtxoRef{OutputIdx: 0}
 	ref.TxId[0], ref.TxId[1] = 0x01, 0x02
 

@@ -80,6 +80,8 @@ func observeCanonicalRb(
 }
 
 func TestStageFor(t *testing.T) {
+	t.Parallel()
+
 	// Default timing: produce<1, diffuse<5, vote<10, certify<20,
 	// inclusion<40, ttl<100 (cumulative offsets from the produce slot).
 	tm := DefaultPipelineTiming()
@@ -114,6 +116,8 @@ func TestStageFor(t *testing.T) {
 }
 
 func TestPipelineTimingValidate(t *testing.T) {
+	t.Parallel()
+
 	require.NoError(t, DefaultPipelineTiming().Validate())
 
 	zero := DefaultPipelineTiming()
@@ -127,6 +131,8 @@ func TestPipelineTimingValidate(t *testing.T) {
 }
 
 func TestNewPipelineManagerValidation(t *testing.T) {
+	t.Parallel()
+
 	good := PipelineManagerConfig{
 		EventBus:      event.NewEventBus(nil, nil),
 		SlotProvider:  &fakeSlotProvider{},
@@ -148,6 +154,8 @@ func TestNewPipelineManagerValidation(t *testing.T) {
 }
 
 func TestMayProduceEndorserBlock(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	const slot = 500
 
@@ -182,6 +190,8 @@ func TestMayProduceEndorserBlock(t *testing.T) {
 }
 
 func TestObserveEndorserBlockRejectsFutureSlots(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	f.slot.slot = 1000
 
@@ -218,6 +228,8 @@ func TestObserveEndorserBlockRejectsFutureSlots(t *testing.T) {
 }
 
 func TestObserveAndCertifySingleEb(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	const slot = 300
 	hash := ebHashFor("eb-a")
@@ -254,6 +266,8 @@ func TestObserveAndCertifySingleEb(t *testing.T) {
 }
 
 func TestMarkEmbeddedExcludesEb(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	const slot = 300
 	hash := ebHashFor("eb-a")
@@ -272,6 +286,8 @@ func TestMarkEmbeddedExcludesEb(t *testing.T) {
 }
 
 func TestEbEquivocationExcludesFromEligibility(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	const slot = 300
 	hashA := ebHashFor("eb-a")
@@ -303,6 +319,8 @@ func TestEbEquivocationExcludesFromEligibility(t *testing.T) {
 }
 
 func TestEbEquivocationMetricCountsOncePerSlot(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	mgr, err := NewPipelineManager(PipelineManagerConfig{
 		EventBus:      event.NewEventBus(nil, nil),
@@ -328,6 +346,8 @@ func TestEbEquivocationMetricCountsOncePerSlot(t *testing.T) {
 }
 
 func TestEbCertifiedMetricCountsEbOnceAcrossAnnouncementContexts(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	mgr, err := NewPipelineManager(PipelineManagerConfig{
 		EventBus:      event.NewEventBus(nil, nil),
@@ -370,6 +390,8 @@ func TestEbCertifiedMetricCountsEbOnceAcrossAnnouncementContexts(t *testing.T) {
 }
 
 func TestEbQuorumPastCertifyDeadlineRejected(t *testing.T) {
+	t.Parallel()
+
 	tm := DefaultPipelineTiming()
 	const slot = 300
 	hash := ebHashFor("eb-late")
@@ -406,6 +428,8 @@ func TestEbQuorumPastCertifyDeadlineRejected(t *testing.T) {
 }
 
 func TestLateCertMetricCounted(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	tm := DefaultPipelineTiming()
 	mgr, err := NewPipelineManager(PipelineManagerConfig{
@@ -432,6 +456,8 @@ func TestLateCertMetricCounted(t *testing.T) {
 }
 
 func TestStageGaugesReflectUncertifiedStages(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	mgr, err := NewPipelineManager(PipelineManagerConfig{
 		EventBus:      event.NewEventBus(nil, nil),
@@ -462,6 +488,8 @@ func TestStageGaugesReflectUncertifiedStages(t *testing.T) {
 }
 
 func TestStageOf(t *testing.T) {
+	t.Parallel()
+
 	tm := DefaultPipelineTiming()
 	f := newPipelineFixture(t, tm)
 	const slot = 500
@@ -485,6 +513,8 @@ func TestStageOf(t *testing.T) {
 }
 
 func TestEbQuorumForUnobservedEb(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	const slot = 200
 	hash := ebHashFor("eb-unseen")
@@ -509,6 +539,8 @@ func TestEbQuorumForUnobservedEb(t *testing.T) {
 }
 
 func TestEpochTransitionFlush(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	// slot 50 -> epoch 0, slot 120 -> epoch 1 (fake epoch provider).
 	f.slot.slot = 50
@@ -532,6 +564,8 @@ func TestEpochTransitionFlush(t *testing.T) {
 }
 
 func TestRollbackFlush(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	f.slot.slot = 80
 	f.mgr.ObserveEndorserBlock(50, ebHashFor("eb-kept"))
@@ -576,6 +610,8 @@ func newMetricsPipelineFixture(
 // state handleRollback dropped, because the replacement chain re-produces an
 // endorser block for the same produce slot (#3600).
 func TestStaleQuorumAfterRollbackRejected(t *testing.T) {
+	t.Parallel()
+
 	f := newMetricsPipelineFixture(t, DefaultPipelineTiming())
 	const (
 		rollbackSlot = 400
@@ -664,6 +700,8 @@ func TestStaleQuorumAfterRollbackRejected(t *testing.T) {
 // quorum event handled before the rollback certifies the EB, and the rollback
 // then prunes it like any other instance past the rollback point.
 func TestQuorumThenRollbackLeavesInstancePruned(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	const (
 		rollbackSlot = 400
@@ -706,6 +744,8 @@ func TestQuorumThenRollbackLeavesInstancePruned(t *testing.T) {
 // certificate that ranking block's votes signed from being honored, even when
 // the endorser block itself was never observed locally.
 func TestQuorumWithCanonicalAnnouncementSurvivesRollback(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	const (
 		ebSlot       = 300
@@ -752,6 +792,8 @@ func TestQuorumWithCanonicalAnnouncementSurvivesRollback(t *testing.T) {
 // quorum sequence through the running event loop, where the chain updates and
 // the quorum event arrive on separate subscriptions.
 func TestStaleQuorumRejectedThroughEventLoop(t *testing.T) {
+	t.Parallel()
+
 	f := newMetricsPipelineFixture(t, DefaultPipelineTiming())
 	const (
 		rollbackSlot = 400
@@ -820,6 +862,8 @@ func TestStaleQuorumRejectedThroughEventLoop(t *testing.T) {
 // local production for it. An already-tracked EB still stays tracked (see
 // TestEbQuorumPastCertifyDeadlineRejected).
 func TestLateQuorumForUnobservedEbCreatesNoState(t *testing.T) {
+	t.Parallel()
+
 	tm := DefaultPipelineTiming()
 	f := newMetricsPipelineFixture(t, tm)
 	const ebSlot = 300
@@ -871,6 +915,8 @@ func TestLateQuorumForUnobservedEbCreatesNoState(t *testing.T) {
 // TestCanonicalRbsPrunedByTtl bounds the canonical ranking-block record set:
 // entries fall out once they are an instance TTL behind the current slot.
 func TestCanonicalRbsPrunedByTtl(t *testing.T) {
+	t.Parallel()
+
 	tm := DefaultPipelineTiming()
 	f := newPipelineFixture(t, tm)
 	const rbSlot = 500
@@ -892,6 +938,8 @@ func TestCanonicalRbsPrunedByTtl(t *testing.T) {
 // register the zero hash that legacy (non-prototype) quorum events carry as
 // their announcing ranking block.
 func TestChainBlockWithShortHashIgnored(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	f.slot.slot = 600
 	f.mgr.handleChainBlock(chain.ChainBlockEvent{
@@ -918,6 +966,8 @@ func TestChainBlockWithShortHashIgnored(t *testing.T) {
 }
 
 func TestPruneExpiredInstances(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	f.slot.slot = 10
 	f.mgr.ObserveEndorserBlock(10, ebHashFor("eb"))
@@ -937,6 +987,8 @@ func TestPruneExpiredInstances(t *testing.T) {
 }
 
 func TestPipelineLifecycleAndEventDispatch(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	require.NoError(t, f.mgr.Start(context.Background()))
 	// Start is idempotent.

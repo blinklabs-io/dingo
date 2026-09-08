@@ -35,6 +35,8 @@ func rat(num, denom int64) *cbor.Rat {
 // reference-script parameters are mapped from the native ledger type and
 // surfaced in the Blockfrost response.
 func TestProtocolParamsResponseConway(t *testing.T) {
+	t.Parallel()
+
 	pp := &conway.ConwayProtocolParameters{
 		MinFeeA:            44,
 		MinFeeB:            155381,
@@ -188,6 +190,8 @@ func TestProtocolParamsResponseConway(t *testing.T) {
 // (Shelley) parameter response carries the Conway governance fields as JSON
 // null rather than omitting them or filling placeholders.
 func TestProtocolParamsResponseShelleyGovernanceNull(t *testing.T) {
+	t.Parallel()
+
 	pp := &shelley.ShelleyProtocolParameters{
 		MinFeeA:            44,
 		MinFeeB:            155381,

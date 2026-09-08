@@ -33,6 +33,8 @@ import (
 // (reproduced against watchSession, which shares this exact pattern) rather
 // than returning within the bound this test asserts.
 func TestDial_CancelledContextUnblocksStalledHandshake(t *testing.T) {
+	t.Parallel()
+
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })
@@ -92,6 +94,8 @@ func TestDial_CancelledContextUnblocksStalledHandshake(t *testing.T) {
 // adversarially against that version, which did not return within
 // dialTimeout+margin.
 func TestDial_HandshakeStallIsBoundedByDialTimeout(t *testing.T) {
+	t.Parallel()
+
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })
@@ -139,6 +143,8 @@ func TestDial_HandshakeStallIsBoundedByDialTimeout(t *testing.T) {
 // needed), Dial must return a working, closeable connection rather than
 // only ever being exercised through its failure paths.
 func TestDial_SucceedsAgainstARealServer(t *testing.T) {
+	t.Parallel()
+
 	server := newTestChainSyncServer(t, 1)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)

@@ -57,6 +57,8 @@ func sourceSQLDB(t *testing.T, db *database.Database) *testDB {
 }
 
 func TestNewDatabaseSourceRejectsNilDatabase(t *testing.T) {
+	t.Parallel()
+
 	_, err := NewDatabaseSource(nil)
 	require.Error(t, err)
 }
@@ -67,6 +69,8 @@ func TestNewDatabaseSourceRejectsNilDatabase(t *testing.T) {
 // (a separate read-only transaction against the same live database, not a
 // second connection) and confirms every field lands exactly as committed.
 func TestDatabaseSourceGetEpochData(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 
@@ -104,6 +108,8 @@ func TestDatabaseSourceGetEpochData(t *testing.T) {
 // write Dingo will repair later) -- both must read back as (nil, nil), never
 // an error and never a spurious zero-value comparison.
 func TestDatabaseSourceGetEpochDataMissingOrNotReady(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	source, err := NewDatabaseSource(db)
@@ -129,6 +135,8 @@ func TestDatabaseSourceGetEpochDataMissingOrNotReady(t *testing.T) {
 // false (a real dingo_db_missing mismatch upstream), not as legitimately
 // empty/zero pots.
 func TestDatabaseSourceGetEpochDataRewardAdaPotsAbsent(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	require.NoError(t, sqlDB.Create(&models.EpochSummary{
@@ -152,6 +160,8 @@ func TestDatabaseSourceGetEpochDataRewardAdaPotsAbsent(t *testing.T) {
 // MemberRewardTotal from stakeEpoch's reward_pool_output -- each field
 // group's *Present flag reflects only whether its own row existed.
 func TestDatabaseSourceGetPoolEpochDataMap(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	poolKeyHash := []byte("POOLKEYHASH-28-BYTES-LONG!!!")
@@ -211,6 +221,8 @@ func TestDatabaseSourceGetPoolEpochDataMap(t *testing.T) {
 // *Present flag must reflect only whether its own row actually exists, not
 // whether any row exists for the pool at all.
 func TestDatabaseSourceGetPoolEpochDataMapPartialPresence(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	poolKeyHash := []byte("POOLKEYHASH-28-BYTES-LONG!!!")
@@ -244,6 +256,8 @@ func TestDatabaseSourceGetPoolEpochDataMapPartialPresence(t *testing.T) {
 }
 
 func TestDatabaseSourceGetLatestEpoch(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -262,6 +276,8 @@ func TestDatabaseSourceGetLatestEpoch(t *testing.T) {
 }
 
 func TestDatabaseSourceGetRewardAccountOutputs(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	stakingKey := []byte("STAKING-KEY-28-BYTES-LONG!!!")
@@ -302,6 +318,8 @@ func TestDatabaseSourceGetRewardAccountOutputs(t *testing.T) {
 // late is indistinguishable from reading an epoch that was simply never
 // computed.
 func TestDatabaseSourceCoreModePruningTiming(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	poolKeyHash := []byte("POOLKEYHASH-28-BYTES-LONG!!!")
@@ -354,6 +372,8 @@ func TestDatabaseSourceCoreModePruningTiming(t *testing.T) {
 func TestDatabaseSourceGetPoolEpochDataMapTracksChangingPoolParams(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -425,6 +445,8 @@ func TestDatabaseSourceGetPoolEpochDataMapTracksChangingPoolParams(
 // asserted from one seeding, so a query that simply returned every pool with
 // a retirement row would fail on the re-registered pool.
 func TestDatabaseSourceGetPoolsRetiredByEpoch(t *testing.T) {
+	t.Parallel()
+
 	const (
 		queryEpoch   = uint64(7)
 		boundarySlot = uint64(1_000)
@@ -595,6 +617,8 @@ INSERT INTO pool_retirement (
 // slot — would have the standalone CLI and the in-process observer classify
 // the same pool differently.
 func TestGetPoolsRetiredByEpochImplementationsAgree(t *testing.T) {
+	t.Parallel()
+
 	const (
 		queryEpoch   = uint64(7)
 		boundarySlot = uint64(1_000)
