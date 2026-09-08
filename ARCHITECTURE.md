@@ -3700,12 +3700,12 @@ it. Dingo implements this as a **corroboration gate**
   ingress-eligible peer — not only the currently apply-eligible one, since a
   competing candidate's headers never reach the ledger's own chainsync
   header-queue verification (that only runs for headers actually applied).
-  Verification is skipped under the same fast-sync/Mithril-import exemptions
-  the ledger's own header-queue path already applies, and a result showing
-  local state has not caught up to the header's slot
-  (`IsHeaderVerificationDeferred`) still leaves the header eligible — both
-  preserve legitimate catch-up behavior. Only a definite failure excludes the
-  header from observation and publishes
+  Verification is skipped only for a slot an imported Mithril snapshot
+  already covers, the same exemption the ledger's own header-queue path
+  applies (issue #3528); a result showing local state has not caught up to
+  the header's slot (`IsHeaderVerificationDeferred`) still leaves the header
+  eligible — both preserve legitimate catch-up behavior. Only a definite
+  failure excludes the header from observation and publishes
   `ledger.ConnectionRecycleRequestedEventType`
   (`"header_verification_failure"`, translated to a connmanager recycle by
   node composition, the same as the ledger's own header-queue failures).

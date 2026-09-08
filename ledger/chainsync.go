@@ -380,6 +380,15 @@ func (ls *LedgerState) mithrilLedgerSlotSnapshot() uint64 {
 	return ls.mithrilLedgerSlot
 }
 
+// slotCoveredByMithril reports whether slot falls within an imported
+// Mithril snapshot's certified range -- the single exemption shared by
+// ShouldVerifyChainSelectionHeaderCrypto, shouldEnforceBlockPipelineCrypto,
+// and handleEventBlockfetchBlockDeferred's header-crypto gate (issue #3528).
+func (ls *LedgerState) slotCoveredByMithril(slot uint64) bool {
+	mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
+	return mithrilLedgerSlot != 0 && slot <= mithrilLedgerSlot
+}
+
 func headerValidationPointKey(point ocommon.Point) string {
 	return fmt.Sprintf("%d:%s", point.Slot, hex.EncodeToString(point.Hash))
 }
@@ -3659,8 +3668,7 @@ func (ls *LedgerState) recordAdmittedHeaderFrontier(
 // chainsyncHeaderCryptoPolicy for why this is not gated on
 // ValidateHistorical/validationEnabled.
 func (ls *LedgerState) shouldEnforceBlockPipelineCrypto(slot uint64) bool {
-	mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
-	if mithrilLedgerSlot != 0 && slot <= mithrilLedgerSlot {
+	if ls.slotCoveredByMithril(slot) {
 		return false
 	}
 	return ls.hasCachedEpochNonceForSlot(slot)
@@ -4063,8 +4071,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferred(
 	// chainsyncHeaderCryptoPolicy's doc comment. A coarse
 	// ValidateHistorical=false historical-sync toggle must not disable
 	// this entire group of checks (issue #3528).
-	mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
-	if mithrilLedgerSlot == 0 || e.Point.Slot > mithrilLedgerSlot {
+	if !ls.slotCoveredByMithril(e.Point.Slot) {
 		var verifyErr error
 		// Chainsync may already have verified the queued header before
 		// blockfetch started. When the fetched block matches that first

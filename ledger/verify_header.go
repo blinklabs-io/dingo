@@ -191,8 +191,7 @@ func (ls *LedgerState) ValidateBlockHeaderCrypto(
 func (ls *LedgerState) ShouldVerifyChainSelectionHeaderCrypto(
 	slot uint64,
 ) bool {
-	mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
-	return mithrilLedgerSlot == 0 || slot > mithrilLedgerSlot
+	return !ls.slotCoveredByMithril(slot)
 }
 
 // ValidateChainSelectionHeaderCrypto verifies a header's VRF/KES cryptography
@@ -1900,8 +1899,9 @@ func registeredPoolVrfKeyHash(
 
 // maxKESEvolutions returns the maximum number of KES evolutions allowed before
 // an operational certificate expires, from Shelley genesis. Returns 0 when the
-// genesis is unavailable, in which case opcert KES-period expiry is left to the
-// lighter future-cert guard inside VerifyBlock.
+// genesis is unavailable or carries a non-positive value; the caller,
+// verifyOpCertHeaderCrypto, treats that 0 as a configuration error and fails
+// closed rather than falling back to a lighter guard (issue #3528).
 func (ls *LedgerState) maxKESEvolutions() uint64 {
 	if ls.config.CardanoNodeConfig == nil {
 		return 0
