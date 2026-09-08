@@ -20,10 +20,9 @@ import (
 )
 
 type voteManagerMetrics struct {
-	votesReceivedTotal   prometheus.Counter
-	votesRejectedTotal   *prometheus.CounterVec
-	votesNotEmittedTotal *prometheus.CounterVec
-	//nolint:lll
+	votesReceivedTotal           prometheus.Counter
+	votesRejectedTotal           *prometheus.CounterVec
+	votesNotEmittedTotal         *prometheus.CounterVec
 	headerStreamResubscribeTotal prometheus.Counter
 	votesEquivocationTotal       prometheus.Counter
 	ebQuorumReachedTotal         prometheus.Counter

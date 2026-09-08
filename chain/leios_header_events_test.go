@@ -122,11 +122,14 @@ func TestAddBlockHeaderQueuesLeiosAnnouncement(t *testing.T) {
 			subId, ch := bus.Subscribe(chain.ChainHeaderEventType)
 			defer bus.Unsubscribe(chain.ChainHeaderEventType, subId)
 
+			// Verified admission: only a crypto-verified header
+			// announces. The gate itself is covered by
+			// TestHeaderAnnouncementRequiresCryptoVerifiedHeader.
 			switch h := tc.header.(type) {
 			case announcingStreamHeader:
-				require.NoError(t, c.AddBlockHeader(h))
+				require.NoError(t, c.AddVerifiedBlockHeader(h))
 			case headerStreamHeader:
-				require.NoError(t, c.AddBlockHeader(h))
+				require.NoError(t, c.AddVerifiedBlockHeader(h))
 			default:
 				t.Fatalf("unexpected header type %T", h)
 			}
@@ -149,7 +152,6 @@ func TestAddBlockHeaderQueuesLeiosAnnouncement(t *testing.T) {
 			assert.Equal(t, uint64(577), data.Slot)
 			assert.Equal(t, base.hash, data.RbHash)
 			assert.Equal(t, ebHash, data.EbHash)
-			assert.Equal(t, uint64(4096), data.EbSize)
 			assert.NotZero(t, data.Seq)
 		})
 	}
@@ -166,7 +168,7 @@ func TestClearHeadersQueuesHeaderInvalidation(t *testing.T) {
 	subId, ch := bus.Subscribe(chain.ChainHeaderEventType)
 	defer bus.Unsubscribe(chain.ChainHeaderEventType, subId)
 
-	require.NoError(t, c.AddBlockHeader(announcingStreamHeader{
+	require.NoError(t, c.AddVerifiedBlockHeader(announcingStreamHeader{
 		headerStreamHeader: headerStreamHeader{
 			hash:        lcommon.NewBlake2b256([]byte("hdr-1")),
 			prevHash:    lcommon.NewBlake2b256(nil),
@@ -244,8 +246,8 @@ func TestRollbackToQueuedHeaderInvalidatesLaterHeaders(t *testing.T) {
 		ebSize:    4096,
 		announces: true,
 	}
-	require.NoError(t, c.AddBlockHeader(first))
-	require.NoError(t, c.AddBlockHeader(second))
+	require.NoError(t, c.AddVerifiedBlockHeader(first))
+	require.NoError(t, c.AddVerifiedBlockHeader(second))
 	c.PublishPendingChainUpdates()
 	for range 2 {
 		testutil.RequireReceive(t, ch, 2*time.Second, "announcement")
@@ -339,8 +341,8 @@ func TestRollbackInvalidationRoutedThroughSequencer(t *testing.T) {
 	second.prevHash = first.hash
 	second.blockNumber = first.blockNumber + 1
 	second.slot = first.slot + 1
-	require.NoError(t, c.AddBlockHeader(first))
-	require.NoError(t, c.AddBlockHeader(second))
+	require.NoError(t, c.AddVerifiedBlockHeader(first))
+	require.NoError(t, c.AddVerifiedBlockHeader(second))
 
 	evts, err := c.RollbackDeferred(ocommon.Point{
 		Slot: blocks[0].SlotNumber(),
@@ -374,7 +376,7 @@ func TestRollbackInvalidationRoutedThroughSequencer(t *testing.T) {
 		ebSize:    4096,
 		announces: true,
 	}
-	require.NoError(t, c.AddBlockHeader(third))
+	require.NoError(t, c.AddVerifiedBlockHeader(third))
 
 	c.PublishPendingChainUpdates()
 
@@ -486,8 +488,8 @@ func TestNonDeferredRollbackPublishesInvalidation(t *testing.T) {
 		ebSize:    4096,
 		announces: true,
 	}
-	require.NoError(t, c.AddBlockHeader(first))
-	require.NoError(t, c.AddBlockHeader(second))
+	require.NoError(t, c.AddVerifiedBlockHeader(first))
+	require.NoError(t, c.AddVerifiedBlockHeader(second))
 	require.NoError(t, c.Rollback(ocommon.NewPoint(
 		first.slot,
 		first.hash.Bytes(),
@@ -575,7 +577,7 @@ func TestAddLocalBlockInvalidatesDiscardedPeerHeaders(t *testing.T) {
 		ebSize:    4096,
 		announces: true,
 	}
-	require.NoError(t, c.AddBlockHeader(peerHeader))
+	require.NoError(t, c.AddVerifiedBlockHeader(peerHeader))
 	c.PublishPendingChainUpdates()
 	announcement := testutil.RequireReceive(
 		t, ch, 2*time.Second, "peer header announcement",
@@ -686,7 +688,7 @@ func TestAddLocalBlockNonAnnouncingPublishesNoAnnouncement(t *testing.T) {
 			ebSize:    4096,
 			announces: true,
 		}
-		require.NoError(t, c.AddBlockHeader(peerHeader))
+		require.NoError(t, c.AddVerifiedBlockHeader(peerHeader))
 		c.PublishPendingChainUpdates()
 		testutil.RequireReceive(
 			t, ch, 2*time.Second, "peer announcement",
@@ -748,7 +750,7 @@ func TestAddLocalBlockAnnouncesItselfAfterInvalidation(t *testing.T) {
 		ebSize:    4096,
 		announces: true,
 	}
-	require.NoError(t, c.AddBlockHeader(peerHeader))
+	require.NoError(t, c.AddVerifiedBlockHeader(peerHeader))
 	c.PublishPendingChainUpdates()
 	testutil.RequireReceive(t, ch, 2*time.Second, "peer announcement")
 

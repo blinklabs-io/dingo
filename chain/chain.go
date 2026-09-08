@@ -117,13 +117,12 @@ type Chain struct {
 	// performs nor observes, so the same window remains open there.
 	batchCommitMutex sync.RWMutex
 
-	// headerSeq numbers the chain mutations that affect the header queue.
-	// It is stamped on ChainHeaderEventType events and, for a rollback,
-	// on the matching ChainRollbackEvent, so a consumer subscribed to both
-	// event types -- which the bus delivers on independent channels, with
-	// no ordering between them -- can still tell which mutation came
-	// first. Guarded by c.mutex, so the numbering matches the order the
-	// sequencer publishes in.
+	// headerSeq is the fallback chain-mutation counter used only by a Chain
+	// built without a ChainManager, which nothing outside this package's
+	// tests does. Every chain the manager builds stamps from the
+	// manager-owned counter instead, so the sequence is a total order
+	// across all publishers on the shared event bus; see
+	// nextHeaderSeqLocked and ChainManager.headerSeq. Guarded by c.mutex.
 	headerSeq uint64
 }
 
@@ -274,13 +273,32 @@ func (c *Chain) addBlockHeader(
 	// same method and returns before the caller's ordinary bookkeeping.
 	// Enqueued under c.mutex so it is ordered against the invalidations
 	// emitted by rollbackLocked and ClearHeaders.
-	if evt, ok := leiosAnnouncementEvent(
-		header,
-		headerHash,
-		c.nextHeaderSeqLocked(),
-		false, // provisional: the block has not been fetched or applied
-	); ok {
-		c.queueDeferredEventLocked(evt)
+	//
+	// Only a crypto-verified header announces. AddBlockHeader admits headers
+	// whose VRF/KES nobody has checked: chainsync queues a header unverified
+	// whenever the epoch nonce for its slot is not cached, deferring
+	// verification to blockfetch. Arming a Leios announcement from one would
+	// let any chainsync peer make this node sign and publish a BLS vote for a
+	// ranking block it never authenticated, and that vote occupies the
+	// (slot, voterId) pair, so the honest block's own vote for the same slot
+	// is then refused -- the "seated member does not vote" outcome this path
+	// exists to prevent.
+	//
+	// No votable announcement is lost by the gate. The other two unverified
+	// admissions are the validation-disabled and Mithril-covered paths, both
+	// of which are far enough behind the tip that VoteManager.slotWindowCheck
+	// declines anyway, and every unverified header that does turn out to be
+	// real is still announced from ChainUpdateEventType once its block is
+	// fetched, validated and applied (VoteManager.handleChainBlock), which is
+	// where all arming happened before the header stream existed.
+	if cryptoVerified {
+		if evt, ok := leiosAnnouncementEvent(
+			header,
+			headerHash,
+			c.nextHeaderSeqLocked(),
+		); ok {
+			c.queueDeferredEventLocked(evt)
+		}
 	}
 	return nil
 }
@@ -294,7 +312,6 @@ func leiosAnnouncementEvent(
 	header ledger.BlockHeader,
 	headerHash lcommon.Blake2b256,
 	seq uint64,
-	applied bool,
 ) (event.Event, bool) {
 	if header == nil {
 		return event.Event{}, false
@@ -305,19 +322,17 @@ func leiosAnnouncementEvent(
 	if !ok {
 		return event.Event{}, false
 	}
-	ebHash, ebSize, ok := announcer.LeiosAnnouncement()
+	ebHash, _, ok := announcer.LeiosAnnouncement()
 	if !ok {
 		return event.Event{}, false
 	}
 	return event.NewEvent(
 		ChainHeaderEventType,
 		ChainHeaderAnnouncementEvent{
-			Slot:    header.SlotNumber(),
-			RbHash:  lcommon.NewBlake2b256(headerHash.Bytes()),
-			EbHash:  ebHash,
-			EbSize:  ebSize,
-			Seq:     seq,
-			Applied: applied,
+			Slot:   header.SlotNumber(),
+			RbHash: lcommon.NewBlake2b256(headerHash.Bytes()),
+			EbHash: ebHash,
+			Seq:    seq,
 		},
 	), true
 }
@@ -360,10 +375,25 @@ func (c *Chain) queuedHeaderHashes() []lcommon.Blake2b256 {
 }
 
 // nextHeaderSeqLocked stamps the next chain-mutation sequence number. Callers
-// must hold c.mutex, so the number orders mutations exactly as the sequencer
-// orders the events they produce. It starts at 1: zero means "unsequenced" to
+// must hold c.mutex, so the number orders this chain's mutations exactly as
+// the sequencer orders the events they produce.
+//
+// The counter belongs to the ChainManager rather than to the Chain because
+// ChainHeaderEventType is one topic on the one event bus the manager hands to
+// every chain it builds, and a consumer compares the sequence numbers it
+// receives as a single total order. A per-chain counter would restart at 1 on
+// any second publishing chain, so that consumer would protect or prune state
+// belonging to the wrong mutation. It starts at 1: zero means "unsequenced" to
 // consumers.
+//
+// A Chain constructed without a manager -- only this package's tests do that,
+// by building the struct literal directly -- falls back to a chain-local
+// counter. Such a chain shares no bus with any other, so a local counter is
+// already a complete order for it.
 func (c *Chain) nextHeaderSeqLocked() uint64 {
+	if c.manager != nil {
+		return c.manager.nextHeaderSeq()
+	}
 	c.headerSeq++
 	return c.headerSeq
 }
@@ -673,7 +703,6 @@ func (c *Chain) addBlockLocked(
 			block.Header(),
 			lcommon.NewBlake2b256(blockHashBytes),
 			c.nextHeaderSeqLocked(),
-			true, // the block is on the chain by the time this publishes
 		); ok {
 			c.queueDeferredEventLocked(evt)
 		}

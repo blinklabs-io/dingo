@@ -263,7 +263,7 @@ func TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow(
 		},
 	}
 
-	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil)
+	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil, false)
 	require.NoError(t, err)
 	require.False(
 		t,
@@ -359,7 +359,7 @@ func TestEnsureBlockfetchDrainingAfterForkQueueFailureRecoversWhenStartFails(
 	// nil pending: pendingPublishes.add publishes immediately on a nil
 	// receiver, which is what lets the subscription above observe the
 	// resync request synchronously.
-	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil)
+	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil, false)
 	require.NoError(t, err)
 	require.False(t, resolved)
 
@@ -476,7 +476,7 @@ func TestTryResolveForkExtensionDoesNotThrashAlreadyRunningBlockfetch(
 		},
 	}
 
-	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil)
+	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil, false)
 	require.NoError(t, err)
 	require.False(t, resolved)
 

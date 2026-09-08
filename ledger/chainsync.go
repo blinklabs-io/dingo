@@ -3420,7 +3420,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			// chain and the peer's chain is ahead, we roll back to
 			// the common ancestor so chainsync can continue.
 			resolved, resolveErr := ls.tryResolveFork(
-				e, notFitErr, pending,
+				e, notFitErr, pending, headerCryptoVerified,
 			)
 			if resolveErr != nil {
 				if ls.headerMismatchCount > 0 {
@@ -3726,6 +3726,32 @@ func (ls *LedgerState) hasCachedEpochNonceForSlot(slot uint64) bool {
 	return err == nil && len(epoch.Nonce) > 0
 }
 
+// addForkPathHeader re-queues one header of a resolved fork path, carrying the
+// incoming header's crypto verdict but no other's.
+//
+// Only the header this ChainsyncEvent delivered was put through
+// chainsyncHeaderCryptoPolicy and verifyBlockHeaderOnlyCrypto by the admission
+// path above. The rest of forkPath is replayed out of recorded peer header
+// history, which does not retain a per-header verdict, so those are admitted
+// unverified exactly as they were before -- they are below the incoming header
+// and are announced, if at all, once blockfetch validates their blocks.
+//
+// This matters because Chain.addBlockHeader arms a Leios announcement only for
+// a crypto-verified header. Re-queueing the incoming header unverified here
+// would silently drop the announcement on the fork-resolution path, which is
+// precisely the near-tip reorg case where the vote window is still open.
+func (ls *LedgerState) addForkPathHeader(
+	forkEvent ChainsyncEvent,
+	incomingPoint ocommon.Point,
+	incomingCryptoVerified bool,
+) error {
+	if incomingCryptoVerified &&
+		pointMatches(forkEvent.Point, incomingPoint) {
+		return ls.chain.AddVerifiedBlockHeader(forkEvent.BlockHeader)
+	}
+	return ls.chain.AddBlockHeader(forkEvent.BlockHeader)
+}
+
 // tryResolveFork attempts to resolve a chain fork when an incoming header
 // doesn't fit the local chain tip. The incoming header's prevHash identifies
 // a block that exists on our local chain. If the peer's immediate prevHash
@@ -3742,6 +3768,7 @@ func (ls *LedgerState) tryResolveFork(
 	e ChainsyncEvent,
 	notFitErr chain.BlockNotFitChainTipError,
 	pending *pendingPublishes,
+	incomingCryptoVerified bool,
 ) (bool, error) {
 	localTip := ls.chain.Tip()
 	praosComparison := ls.compareIncomingHeaderToLocalTip(
@@ -3863,7 +3890,9 @@ func (ls *LedgerState) tryResolveFork(
 			"connection_id", e.ConnectionId.String(),
 		)
 		for _, forkEvent := range forkPath {
-			if err := ls.chain.AddBlockHeader(forkEvent.BlockHeader); err != nil {
+			if err := ls.addForkPathHeader(
+				forkEvent, e.Point, incomingCryptoVerified,
+			); err != nil {
 				ls.config.Logger.Warn(
 					"failed to queue header from fork extension",
 					"component", "ledger",
@@ -4029,7 +4058,9 @@ func (ls *LedgerState) tryResolveFork(
 	// works for one-block forks but fails once the winning fork is already
 	// several headers ahead.
 	for _, forkEvent := range forkPath {
-		if err := ls.chain.AddBlockHeader(forkEvent.BlockHeader); err != nil {
+		if err := ls.addForkPathHeader(
+			forkEvent, e.Point, incomingCryptoVerified,
+		); err != nil {
 			ls.config.Logger.Warn(
 				"failed to queue header after fork rollback",
 				"component", "ledger",

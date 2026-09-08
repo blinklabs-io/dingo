@@ -109,7 +109,6 @@ func publishHeaderAnnouncement(
 				Slot:   slot,
 				RbHash: rbHash,
 				EbHash: ebHash,
-				EbSize: 1024,
 				Seq:    seq,
 			},
 		),

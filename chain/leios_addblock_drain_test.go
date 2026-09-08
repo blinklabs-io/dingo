@@ -77,7 +77,7 @@ func TestStandaloneBlockAddsDrainQueuedHeaderEvents(t *testing.T) {
 			// block to match the first pending header, and this is the
 			// sequence the finding describes -- an announcing header
 			// admitted, then applied.
-			require.NoError(t, c.AddBlockHeader(announcingStreamHeader{
+			require.NoError(t, c.AddVerifiedBlockHeader(announcingStreamHeader{
 				headerStreamHeader: headerStreamHeader{
 					hash:        blocks[0].Hash(),
 					prevHash:    blocks[0].PrevHash(),
@@ -109,79 +109,109 @@ func TestStandaloneBlockAddsDrainQueuedHeaderEvents(t *testing.T) {
 	}
 }
 
-// TestHeaderAnnouncementAppliedDistinguishesLocalBlocksFromHeaderArrivals pins
-// the source indicator on the announcement.
+// TestHeaderAnnouncementRequiresCryptoVerifiedHeader is the regression test
+// for arming a Leios vote from a header nobody authenticated.
 //
-// The event documents itself as a header-arrival signal whose block "has not
-// been fetched, validated or applied". That holds for a peer header entering
-// the queue, but a locally forged block never passes through the queue, so its
-// announcement is emitted from the block add -- by which point the block is
-// validated and on the chain. Both arrive on one event type, so without a
-// discriminator a consumer cannot tell an applied local block from a
-// provisional peer header and would have to treat the stronger case as the
-// weaker one.
-func TestHeaderAnnouncementAppliedDistinguishesLocalBlocksFromHeaderArrivals(
-	t *testing.T,
-) {
-	t.Run("peer header arrival is provisional", func(t *testing.T) {
+// chainsync admits a roll-forward header through AddBlockHeader, not
+// AddVerifiedBlockHeader, whenever chainsyncHeaderCryptoPolicy declines to
+// verify it now: the epoch nonce for its slot is not cached, so VRF/KES
+// verification is deferred to blockfetch. Publishing an announcement for such
+// a header lets any chainsync peer make this node sign and publish a BLS vote
+// for a ranking block it never checked. That vote then occupies the
+// (slot, voterId) pair, so the honest block's vote for the same slot is
+// refused as a duplicate -- the same "seated member does not vote" outcome the
+// header stream exists to fix, handed to a peer.
+//
+// The verified header must still announce: that is the path this PR adds, and
+// gating it away would restore the missed votes.
+func TestHeaderAnnouncementRequiresCryptoVerifiedHeader(t *testing.T) {
+	announcing := func(tag string, slot uint64) announcingStreamHeader {
+		return announcingStreamHeader{
+			headerStreamHeader: headerStreamHeader{
+				hash:        lcommon.NewBlake2b256([]byte(tag)),
+				prevHash:    lcommon.NewBlake2b256(nil),
+				blockNumber: 1,
+				slot:        slot,
+			},
+			ebHash:    lcommon.NewBlake2b256([]byte(tag + "-eb")),
+			ebSize:    4096,
+			announces: true,
+		}
+	}
+
+	t.Run("unverified queued header does not announce", func(t *testing.T) {
 		c, bus := newHeaderStreamChain(t)
 		subId, headerCh := bus.Subscribe(chain.ChainHeaderEventType)
 		defer bus.Unsubscribe(chain.ChainHeaderEventType, subId)
 
-		require.NoError(t, c.AddBlockHeader(announcingStreamHeader{
-			headerStreamHeader: headerStreamHeader{
-				hash:        lcommon.NewBlake2b256([]byte("peer-hdr")),
-				prevHash:    lcommon.NewBlake2b256(nil),
-				blockNumber: 1,
-				slot:        10,
-			},
-			ebHash:    lcommon.NewBlake2b256([]byte("peer-eb")),
-			ebSize:    4096,
-			announces: true,
-		}))
+		require.NoError(t, c.AddBlockHeader(announcing("unverified", 10)))
+		c.PublishPendingChainUpdates()
+
+		requireNoAnnouncement(t, headerCh)
+	})
+
+	t.Run("verified header announces", func(t *testing.T) {
+		c, bus := newHeaderStreamChain(t)
+		subId, headerCh := bus.Subscribe(chain.ChainHeaderEventType)
+		defer bus.Unsubscribe(chain.ChainHeaderEventType, subId)
+
+		header := announcing("verified", 11)
+		require.NoError(t, c.AddVerifiedBlockHeader(header))
 		c.PublishPendingChainUpdates()
 
 		announcement := nextAnnouncement(t, headerCh)
-		require.False(
-			t,
-			announcement.Applied,
-			"a queued peer header names a block that has not been applied",
-		)
+		require.Equal(t, uint64(11), announcement.Slot)
+		require.Equal(t, header.Hash(), announcement.RbHash)
+		require.Equal(t, header.ebHash, announcement.EbHash)
+		require.NotZero(t, announcement.Seq)
 	})
 
-	t.Run("locally forged block is applied", func(t *testing.T) {
+	// A locally forged block never passes through the header queue, so the
+	// gate must not reach it: its announcement is emitted from the block add,
+	// by which point the block is validated and on our chain.
+	t.Run("locally forged block still announces", func(t *testing.T) {
 		c, bus := newHeaderStreamChain(t)
 		subId, headerCh := bus.Subscribe(chain.ChainHeaderEventType)
 		defer bus.Unsubscribe(chain.ChainHeaderEventType, subId)
 
 		const localHash = "00000000000000000000000000000000" +
 			"000000000000000000000000000000ff"
+		header := announcing("local-blk", 12)
 		require.NoError(t, c.AddLocalBlock(announcingStreamBlock{
 			MockBlock: &MockBlock{
 				MockBlockNumber: 1,
-				MockSlot:        11,
+				MockSlot:        12,
 				MockHash:        localHash,
 			},
-			header: announcingStreamHeader{
-				headerStreamHeader: headerStreamHeader{
-					hash:        lcommon.NewBlake2b256([]byte("local-blk")),
-					prevHash:    lcommon.NewBlake2b256(nil),
-					blockNumber: 1,
-					slot:        11,
-				},
-				ebHash:    lcommon.NewBlake2b256([]byte("local-eb")),
-				ebSize:    2048,
-				announces: true,
-			},
+			header: header,
 		}))
 
 		announcement := nextAnnouncement(t, headerCh)
-		require.True(
-			t,
-			announcement.Applied,
-			"a locally forged block is on the chain when its announcement publishes",
-		)
+		require.Equal(t, uint64(12), announcement.Slot)
+		require.Equal(t, header.ebHash, announcement.EbHash)
 	})
+}
+
+// requireNoAnnouncement fails if any announcement reaches the stream. It
+// drains other header-stream events (invalidations) rather than accepting the
+// first event as proof, so it cannot pass for the wrong reason.
+func requireNoAnnouncement(t *testing.T, ch <-chan event.Event) {
+	t.Helper()
+	deadline := time.After(500 * time.Millisecond)
+	for {
+		select {
+		case evt := <-ch:
+			if a, ok := evt.Data.(chain.ChainHeaderAnnouncementEvent); ok {
+				t.Fatalf(
+					"unverified header announced eb %s at slot %d; a peer can arm a vote for a block we never authenticated",
+					a.EbHash.String(),
+					a.Slot,
+				)
+			}
+		case <-deadline:
+			return
+		}
+	}
 }
 
 func nextAnnouncement(

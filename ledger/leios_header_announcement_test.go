@@ -104,46 +104,86 @@ func announcingHeader(
 	}
 }
 
-// TestChainsyncHeaderAdmissionPublishesLeiosAnnouncement pins the ordinary
-// roll-forward path: admitting an announcing header surfaces the announcement
-// without waiting for the block body, which is what puts the vote attempt
-// inside the Leios vote window.
-func TestChainsyncHeaderAdmissionPublishesLeiosAnnouncement(t *testing.T) {
-	fixture := newHeaderStreamLedger(t)
+// TestChainsyncHeaderAdmissionAnnouncesOnlyWhenCryptoVerified pins the ledger
+// half of the crypto gate on the header stream.
+//
+// chainsyncHeaderCryptoPolicy admits a roll-forward header without verifying
+// its VRF/KES on three paths: live validation not yet enabled, a slot covered
+// by an imported Mithril snapshot, and no cached epoch nonce for the slot
+// (verification deferred to blockfetch). All three reach
+// chain.AddBlockHeader, not AddVerifiedBlockHeader. Announcing such a header
+// would let a chainsync peer make this node sign and publish a BLS vote for a
+// ranking block it never authenticated, taking the (slot, voterId) pair the
+// honest block's own vote needs.
+func TestChainsyncHeaderAdmissionAnnouncesOnlyWhenCryptoVerified(
+	t *testing.T,
+) {
 	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
 	header := announcingHeader(
 		577, "hdr-1", lcommon.NewBlake2b256(nil), 1, ebHash,
 	)
+	point := ocommon.NewPoint(header.slot, header.hash.Bytes())
 
-	require.NoError(
-		t,
-		fixture.ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
-			ConnectionId: fixture.connId,
-			BlockHeader:  header,
-			Point: ocommon.NewPoint(
-				header.slot,
-				header.hash.Bytes(),
-			),
-			Tip: ochainsync.Tip{
-				Point:       ocommon.NewPoint(60001, []byte("tip-1")),
-				BlockNumber: 60001,
-			},
-		}),
-	)
-	require.Equal(t, 1, fixture.ls.chain.HeaderCount())
+	// The fixture's ledger has validation not yet enabled, so the policy
+	// returns trustedWithoutVerification and the handler takes the
+	// AddBlockHeader branch -- the real end-to-end unverified admission.
+	t.Run("unverified admission is queued, not announced", func(t *testing.T) {
+		fixture := newHeaderStreamLedger(t)
+		verifyNow, trusted := fixture.ls.chainsyncHeaderCryptoPolicy(
+			header.slot,
+		)
+		require.False(t, verifyNow, "fixture must exercise the unverified path")
+		require.True(t, trusted)
 
-	evt := testutil.RequireReceive(
-		t,
-		fixture.ch,
-		2*time.Second,
-		"announcement published from header admission",
-	)
-	data, ok := evt.Data.(chain.ChainHeaderAnnouncementEvent)
-	require.True(t, ok)
-	assert.Equal(t, uint64(577), data.Slot)
-	assert.Equal(t, header.hash, data.RbHash)
-	assert.Equal(t, ebHash, data.EbHash)
-	assert.NotZero(t, data.Seq)
+		require.NoError(
+			t,
+			fixture.ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+				ConnectionId: fixture.connId,
+				BlockHeader:  header,
+				Point:        point,
+				Tip: ochainsync.Tip{
+					Point:       ocommon.NewPoint(60001, []byte("tip-1")),
+					BlockNumber: 60001,
+				},
+			}),
+		)
+		require.Equal(t, 1, fixture.ls.chain.HeaderCount())
+
+		testutil.RequireNoReceive(
+			t,
+			fixture.ch,
+			500*time.Millisecond,
+			"an unverified header must not arm a vote",
+		)
+	})
+
+	// The verified branch of the same handler is one call:
+	// ls.chain.AddVerifiedBlockHeader(e.BlockHeader). It is driven directly
+	// here because a header that both announces a Leios endorser block and
+	// passes real VRF/KES cannot be synthesized in this suite: gouroboros
+	// VerifyBlock dispatches on the concrete era header type, so wrapping a
+	// valid Babbage header to add LeiosAnnouncement fails verification with
+	// "unsupported block type for VRF verification". The gate itself is
+	// covered from both sides in chain:
+	// TestHeaderAnnouncementRequiresCryptoVerifiedHeader.
+	t.Run("verified admission announces", func(t *testing.T) {
+		fixture := newHeaderStreamLedger(t)
+		require.NoError(t, fixture.ls.chain.AddVerifiedBlockHeader(header))
+		fixture.ls.chain.PublishPendingChainUpdates()
+
+		evt := testutil.RequireReceive(
+			t,
+			fixture.ch,
+			2*time.Second,
+			"announcement published from verified header admission",
+		)
+		data, ok := evt.Data.(chain.ChainHeaderAnnouncementEvent)
+		require.True(t, ok)
+		assert.Equal(t, uint64(577), data.Slot)
+		assert.Equal(t, header.hash, data.RbHash)
+		assert.Equal(t, ebHash, data.EbHash)
+		assert.NotZero(t, data.Seq)
+	})
 }
 
 // TestChainsyncHeaderQueueClearedInvalidatesAnnouncement covers the case where
@@ -152,123 +192,187 @@ func TestChainsyncHeaderAdmissionPublishesLeiosAnnouncement(t *testing.T) {
 // Without the invalidation on the same stream, the announcement would outlive
 // the header and the vote manager could vote for a ranking block that is not
 // on our chain.
+//
+// The announcing header is admitted verified (the only kind that announces);
+// the header that drives the handler into its failing blockfetch start chains
+// onto it and announces nothing of its own, so the single announcement under
+// test is unambiguous.
 func TestChainsyncHeaderQueueClearedInvalidatesAnnouncement(t *testing.T) {
 	fixture := newHeaderStreamLedger(t)
 	// No BlockfetchRequestRangeFunc is wired, so every blockfetch start
 	// attempt fails and the handler exhausts its fallbacks.
 	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
-	header := announcingHeader(
+	announcing := announcingHeader(
 		577, "hdr-1", lcommon.NewBlake2b256(nil), 1, ebHash,
 	)
-	point := ocommon.NewPoint(header.slot, header.hash.Bytes())
+	require.NoError(t, fixture.ls.chain.AddVerifiedBlockHeader(announcing))
+
+	follower := mockHeader{
+		hash:        lcommon.NewBlake2b256([]byte("hdr-2")),
+		prevHash:    announcing.hash,
+		blockNumber: 2,
+		slot:        578,
+	}
+	point := ocommon.NewPoint(follower.slot, follower.hash.Bytes())
 
 	require.NoError(
 		t,
 		fixture.ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 			ConnectionId: fixture.connId,
-			BlockHeader:  header,
+			BlockHeader:  follower,
 			Point:        point,
 			// Tip equal to the header keeps the handler out of the
 			// header-accumulation branches so it reaches blockfetch.
-			Tip: ochainsync.Tip{Point: point, BlockNumber: 1},
+			Tip: ochainsync.Tip{Point: point, BlockNumber: 2},
 		}),
 	)
 	assert.Zero(
 		t,
 		fixture.ls.chain.HeaderCount(),
-		"failed blockfetch start discards the queued header",
+		"failed blockfetch start discards the queued headers",
 	)
 
 	announcement := testutil.RequireReceive(
 		t, fixture.ch, 2*time.Second, "announcement",
 	)
 	announced, ok := announcement.Data.(chain.ChainHeaderAnnouncementEvent)
-	require.True(t, ok)
+	require.True(t, ok, "got %T", announcement.Data)
+	assert.Equal(t, announcing.hash, announced.RbHash)
 
 	invalidation := testutil.RequireReceive(
 		t, fixture.ch, 2*time.Second, "invalidation for the discarded header",
 	)
 	invalid, ok := invalidation.Data.(chain.ChainHeaderInvalidationEvent)
-	require.True(t, ok)
+	require.True(t, ok, "got %T", invalidation.Data)
 	assert.Equal(t, chain.HeaderInvalidationQueueCleared, invalid.Reason)
+	assert.Contains(t, invalid.RbHashes, announcing.hash)
 	assert.Greater(t, invalid.Seq, announced.Seq)
 }
 
-// TestForkResolutionPublishesLeiosAnnouncement covers the second way an
-// announcing header reaches the header queue. A header that does not fit the
-// current tip is queued by tryResolveFork rather than by the direct admission
-// path, and that branch returns before the caller's ordinary bookkeeping runs.
-// Emitting from the chain's own header-queue mutation is what keeps this path
-// covered.
-func TestForkResolutionPublishesLeiosAnnouncement(t *testing.T) {
-	bus := event.NewEventBus(nil, nil)
-	t.Cleanup(bus.Stop)
-	fixture := newChainsyncRollbackFixtureWithBus(t, bus)
-	subId, ch := bus.Subscribe(chain.ChainHeaderEventType)
-	defer bus.Unsubscribe(chain.ChainHeaderEventType, subId)
-	// Keep the test at header admission; no blockfetch worker is needed.
-	fixture.ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+// TestForkResolutionAnnouncesOnlyTheVerifiedIncomingHeader covers the second
+// way an announcing header reaches the header queue. A header that does not
+// fit the current tip is queued by tryResolveFork rather than by the direct
+// admission path, and that branch returns before the caller's ordinary
+// bookkeeping runs. Emitting from the chain's own header-queue mutation is
+// what keeps this path covered.
+//
+// tryResolveFork re-queues a whole fork path: the header this event delivered,
+// plus earlier headers replayed from recorded peer history. Only the delivered
+// one carries a crypto verdict, so only it may be admitted verified, and only
+// a verified admission announces (see addForkPathHeader). Both halves are
+// asserted here at that composition site.
+func TestForkResolutionAnnouncesOnlyTheVerifiedIncomingHeader(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		cryptoVerified bool
+		wantAnnounce   bool
+	}{
+		{
+			name:           "verified incoming header announces",
+			cryptoVerified: true,
+			wantAnnounce:   true,
+		},
+		{
+			name:           "unverified incoming header does not announce",
+			cryptoVerified: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bus := event.NewEventBus(nil, nil)
+			t.Cleanup(bus.Stop)
+			fixture := newChainsyncRollbackFixtureWithBus(t, bus)
+			subId, ch := bus.Subscribe(chain.ChainHeaderEventType)
+			defer bus.Unsubscribe(chain.ChainHeaderEventType, subId)
+			// Keep the test at header admission; no blockfetch worker is
+			// needed.
+			fixture.ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 
-	ebHash := lcommon.NewBlake2b256([]byte("fork-announced-eb"))
-	header := announcingHeader(
-		fixture.currentTip.Point.Slot+10,
-		"fork-announcing-header",
-		lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
-		fixture.ancestorTip.BlockNumber+1,
-		ebHash,
-	)
-	advertisedSlot := ^uint64(0)
+			ebHash := lcommon.NewBlake2b256([]byte("fork-announced-eb"))
+			header := announcingHeader(
+				fixture.currentTip.Point.Slot+10,
+				"fork-announcing-header",
+				lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+				fixture.ancestorTip.BlockNumber+1,
+				ebHash,
+			)
+			// The header does not fit the current tip; that failure is the
+			// condition tryResolveFork exists to handle.
+			var notFitErr chain.BlockNotFitChainTipError
+			require.ErrorAs(
+				t,
+				fixture.ls.chain.AddBlockHeader(header),
+				&notFitErr,
+			)
+			advertisedSlot := ^uint64(0)
 
-	require.NoError(
-		t,
-		fixture.ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
-			ConnectionId: fixture.connId,
-			Point: ocommon.NewPoint(
-				header.slot,
-				header.hash.Bytes(),
-			),
-			BlockHeader: header,
-			Tip: ochainsync.Tip{
-				Point: ocommon.NewPoint(
-					advertisedSlot,
-					[]byte("unbound-fork-tip"),
-				),
-				BlockNumber: advertisedSlot,
-			},
-		}),
-	)
-	// The header was queued through fork resolution, not direct admission.
-	require.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
-	require.Equal(t, 1, fixture.ls.chain.HeaderCount())
+			resolved, err := fixture.ls.tryResolveFork(
+				ChainsyncEvent{
+					ConnectionId: fixture.connId,
+					Point: ocommon.NewPoint(
+						header.slot,
+						header.hash.Bytes(),
+					),
+					BlockHeader: header,
+					Tip: ochainsync.Tip{
+						Point: ocommon.NewPoint(
+							advertisedSlot,
+							[]byte("unbound-fork-tip"),
+						),
+						BlockNumber: advertisedSlot,
+					},
+				},
+				notFitErr,
+				nil,
+				tc.cryptoVerified,
+			)
+			require.NoError(t, err)
+			require.True(t, resolved)
+			// The header was queued through fork resolution, not direct
+			// admission.
+			require.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+			require.Equal(t, 1, fixture.ls.chain.HeaderCount())
+			fixture.ls.chain.PublishPendingChainUpdates()
 
-	// The rollback's invalidation precedes the announcement it does not
-	// cover, and the announcing header is published exactly once.
-	invalidation := testutil.RequireReceive(
-		t, ch, 2*time.Second, "rollback invalidation",
-	)
-	invalid, ok := invalidation.Data.(chain.ChainHeaderInvalidationEvent)
-	require.True(t, ok)
-	assert.Equal(t, chain.HeaderInvalidationRollback, invalid.Reason)
+			// The rollback's invalidation precedes anything the fork
+			// resolution queued after it.
+			invalidation := testutil.RequireReceive(
+				t, ch, 2*time.Second, "rollback invalidation",
+			)
+			invalid, ok := invalidation.Data.(chain.ChainHeaderInvalidationEvent)
+			require.True(t, ok, "got %T", invalidation.Data)
+			assert.Equal(t, chain.HeaderInvalidationRollback, invalid.Reason)
 
-	announcement := testutil.RequireReceive(
-		t, ch, 2*time.Second, "announcement from the fork-resolution path",
-	)
-	announced, ok := announcement.Data.(chain.ChainHeaderAnnouncementEvent)
-	require.True(t, ok)
-	assert.Equal(t, header.hash, announced.RbHash)
-	assert.Equal(t, ebHash, announced.EbHash)
-	assert.Greater(
-		t,
-		announced.Seq,
-		invalid.Seq,
-		"the fork header is admitted after the rollback that made room for it",
-	)
-	testutil.RequireNoReceive(
-		t,
-		ch,
-		300*time.Millisecond,
-		"the incoming fork header must be announced exactly once",
-	)
+			if !tc.wantAnnounce {
+				testutil.RequireNoReceive(
+					t,
+					ch,
+					500*time.Millisecond,
+					"an unverified fork header must not arm a vote",
+				)
+				return
+			}
+
+			announcement := testutil.RequireReceive(
+				t, ch, 2*time.Second, "announcement from fork resolution",
+			)
+			announced, ok := announcement.Data.(chain.ChainHeaderAnnouncementEvent)
+			require.True(t, ok, "got %T", announcement.Data)
+			assert.Equal(t, header.hash, announced.RbHash)
+			assert.Equal(t, ebHash, announced.EbHash)
+			assert.Greater(
+				t,
+				announced.Seq,
+				invalid.Seq,
+				"the fork header is admitted after the rollback that made room for it",
+			)
+			testutil.RequireNoReceive(
+				t,
+				ch,
+				300*time.Millisecond,
+				"the incoming fork header must be announced exactly once",
+			)
+		})
+	}
 }
 
 // newChainsyncRollbackFixtureWithBus mirrors newChainsyncRollbackFixture but
@@ -375,7 +479,7 @@ func TestConnectionClosedPublishesHeaderInvalidation(t *testing.T) {
 	header := announcingHeader(
 		577, "hdr-1", lcommon.NewBlake2b256(nil), 1, ebHash,
 	)
-	require.NoError(t, fixture.ls.chain.AddBlockHeader(header))
+	require.NoError(t, fixture.ls.chain.AddVerifiedBlockHeader(header))
 	fixture.ls.headerPipelineConnId = fixture.connId
 	require.Equal(t, 1, fixture.ls.chain.HeaderCount())
 
@@ -417,7 +521,7 @@ func TestBlockfetchTimeoutDrainsHeaderSequencer(t *testing.T) {
 	header := announcingHeader(
 		577, "hdr-1", lcommon.NewBlake2b256(nil), 1, ebHash,
 	)
-	require.NoError(t, fixture.ls.chain.AddBlockHeader(header))
+	require.NoError(t, fixture.ls.chain.AddVerifiedBlockHeader(header))
 
 	var pending pendingPublishes
 	func() {

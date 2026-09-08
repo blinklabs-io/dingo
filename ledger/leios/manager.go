@@ -517,11 +517,16 @@ type VoteManager struct {
 	lastSlotWindowWarn time.Time
 
 	// lastHeaderStreamSeq is the highest chain-mutation sequence number
-	// applied from the ordered header stream. Because that stream is a
-	// single event type, everything up to this number has been applied in
-	// chain-mutation order, which is what lets handleRollback tell a
-	// rollback it has already superseded from one it has not. Guarded by
-	// mu.
+	// applied from the ordered header stream. It is a progress watermark
+	// only: no manager logic reads it. Deciding whether a rollback has
+	// already been superseded is rollbackProtectedLocked's job, comparing
+	// the rollback's own Seq against each announcement record's headerSeq.
+	//
+	// Its readers are tests, which use it as a barrier to wait until a
+	// published header event has been applied before asserting on what it
+	// did. Only an invalidation's sequence is a sound barrier -- see
+	// waitForAnnouncement in manager_header_arming_test.go for why an
+	// announcement's is not. Guarded by mu.
 	lastHeaderStreamSeq uint64
 }
 
@@ -2903,7 +2908,10 @@ func (m *VoteManager) dropAnnouncementDerivedStateLocked(
 // The announcing ranking block has not been validated or applied here and may
 // still be rolled back. That is deliberate and matches what a Leios vote
 // attests to: the vote binds the announced endorser block to the announcing
-// ranking block's hash, not to that block's ledger validity. If the header is
+// ranking block's hash, not to that block's ledger validity. The header's
+// *cryptography* is not optional, though: chain.Chain publishes this event
+// only for a header it was given as crypto-verified, so a peer cannot arm a
+// vote here for a ranking block nobody authenticated. If the header is
 // later rolled back, handleRollback drops the announcement, the emitted vote,
 // and its dedup marker together, exactly as it already does for announcements
 // armed from block application, which also permits a re-vote on the
