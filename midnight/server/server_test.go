@@ -16,6 +16,7 @@ package server_test
 
 import (
 	"context"
+	"io"
 	"net"
 	"strconv"
 	"testing"
@@ -287,11 +288,23 @@ func TestReflectionDisabledByDefault(t *testing.T) {
 	defer cancel()
 	stream, err := client.ServerReflectionInfo(ctx)
 	require.NoError(t, err)
-	require.NoError(t, stream.Send(&reflectionpb.ServerReflectionRequest{
+	// With reflection unregistered the server terminates this stream as soon
+	// as it sees it, so Send races that rejection. grpc documents SendMsg as
+	// returning once "the stream is done" and directs callers to take the
+	// real status from RecvMsg rather than from Send, so io.EOF here is a
+	// valid outcome rather than a failure. Requiring NoError made the test
+	// fail whenever the rejection won, which the race detector's slower
+	// scheduling makes markedly more likely -- observed on the
+	// go-test (Linux, race) job while the same commit passed unraced.
+	if err := stream.Send(&reflectionpb.ServerReflectionRequest{
 		MessageRequest: &reflectionpb.ServerReflectionRequest_ListServices{
 			ListServices: "*",
 		},
-	}))
+	}); err != nil {
+		require.ErrorIs(t, err, io.EOF)
+	}
+	// The status is asserted here either way: this is the check that actually
+	// proves reflection is disabled.
 	_, err = stream.Recv()
 	require.Error(t, err)
 	require.Equal(t, codes.Unimplemented, status.Code(err))
