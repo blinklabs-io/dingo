@@ -298,7 +298,14 @@ func TestForgeSkipsOnEqualSlotFrontierDivergence(t *testing.T) {
 		t,
 		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipSlotGap),
 	)
+	// Reason-specific message: an equal-slot divergence is not a stale
+	// ledger tip, and the shared message used to say it was.
 	require.Contains(
+		t,
+		logs.String(),
+		"forge skip: primary chain tip diverged from the applied tip at the same slot",
+	)
+	require.NotContains(
 		t,
 		logs.String(),
 		"forge skip: ledger tip stale vs primary chain tip",
@@ -795,16 +802,18 @@ func TestForgeCountsLeaderSlotLostToUnappliedRival(t *testing.T) {
 // newStalenessTestForger builds a production forger for the staleness gates,
 // with the upstream target and the corroborated endorser-block slot explicit.
 //
-// upstreamStalenessSlots is explicit and every caller that exercises the
-// upstream bound must pass a non-zero value: the bound is opt-in, so a helper
-// that defaulted it would hide the very regression
-// TestForgeUpstreamStalenessIsOffByDefault exists to catch.
+// upstreamStalenessSlots and ebStalenessSlots are explicit and every caller
+// that exercises those bounds must pass a non-zero value: all three bounds are
+// opt-in, so a helper that defaulted any of them would hide the very
+// regressions TestForgeUpstreamStalenessIsOffByDefault and
+// TestForgeEndorserBlockStalenessIsOffByDefault exist to catch.
 func newStalenessTestForger(
 	t *testing.T,
 	currentSlot, chainTipSlot, frontierSlot, upstreamSlot uint64,
 	ebSlot uint64,
 	appliedStalenessSlots uint64,
 	upstreamStalenessSlots uint64,
+	ebStalenessSlots uint64,
 	logs *bytes.Buffer,
 ) (*BlockForger, *forgerTestBuilder) {
 	t.Helper()
@@ -827,10 +836,11 @@ func newStalenessTestForger(
 			upstreamTipSlot:   upstreamSlot,
 			slotsPerKESPeriod: 100,
 		},
-		LeiosVerifiedEbSlot:           func() uint64 { return ebSlot },
-		ForgeAppliedTipStalenessSlots: appliedStalenessSlots,
-		ForgeUpstreamStalenessSlots:   upstreamStalenessSlots,
-		PromRegistry:                  prometheus.NewRegistry(),
+		LeiosVerifiedEbSlot:              func() uint64 { return ebSlot },
+		ForgeAppliedTipStalenessSlots:    appliedStalenessSlots,
+		ForgeUpstreamStalenessSlots:      upstreamStalenessSlots,
+		ForgeEndorserBlockStalenessSlots: ebStalenessSlots,
+		PromRegistry:                     prometheus.NewRegistry(),
 	})
 	require.NoError(t, err)
 	return forger, builder
@@ -857,7 +867,7 @@ func TestForgeSkipsWhenNewestKnownBlockTrailsUpstream(t *testing.T) {
 	// 19 slots ahead. Slot numbers are scaled down so the KES period stays
 	// inside the test operational certificate.
 	forger, builder := newStalenessTestForger(
-		t, 300, 299, 299, 318, 0, 0, 5, &logs,
+		t, 300, 299, 299, 318, 0, 0, 5, 0, &logs,
 	)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
@@ -875,6 +885,20 @@ func TestForgeSkipsWhenNewestKnownBlockTrailsUpstream(t *testing.T) {
 	)
 	require.Contains(t, logs.String(), `"reason":"applied_tip_stale"`)
 	require.Contains(t, logs.String(), `"upstream_target_slot":318`)
+	// applied_tip_stale is reached from two independent bounds. Both are
+	// logged, and stale_source names the one that fired, so a post-mortem
+	// does not have to guess which term refused the slot.
+	require.Contains(t, logs.String(), `"stale_source":"upstream"`)
+	require.Contains(t, logs.String(), `"upstream_staleness_slots":5`)
+	require.Contains(t, logs.String(), `"applied_staleness_slots":0`)
+	// Reason-specific message: both local tips agree here, so the shared
+	// "ledger tip stale vs primary chain tip" named the wrong pair.
+	require.Contains(t, logs.String(), "forge skip: newest known block is stale")
+	require.NotContains(
+		t,
+		logs.String(),
+		"forge skip: ledger tip stale vs primary chain tip",
+	)
 }
 
 // TestForgeProceedsOnAQuietChain pins that the staleness term does not punish a
@@ -885,7 +909,7 @@ func TestForgeSkipsWhenNewestKnownBlockTrailsUpstream(t *testing.T) {
 func TestForgeProceedsOnAQuietChain(t *testing.T) {
 	var logs bytes.Buffer
 	forger, builder := newStalenessTestForger(
-		t, 600, 100, 100, 100, 0, 0, 5, &logs,
+		t, 600, 100, 100, 100, 0, 0, 5, 0, &logs,
 	)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
@@ -906,7 +930,7 @@ func TestForgeAppliedTipStalenessKnobIsOptIn(t *testing.T) {
 	t.Run("off by default", func(t *testing.T) {
 		var logs bytes.Buffer
 		forger, builder := newStalenessTestForger(
-			t, 600, 100, 100, 0, 0, 0, 0, &logs,
+			t, 600, 100, 100, 0, 0, 0, 0, 0, &logs,
 		)
 		require.NoError(
 			t,
@@ -918,7 +942,7 @@ func TestForgeAppliedTipStalenessKnobIsOptIn(t *testing.T) {
 	t.Run("refuses once set", func(t *testing.T) {
 		var logs bytes.Buffer
 		forger, builder := newStalenessTestForger(
-			t, 600, 100, 100, 0, 0, 100, 0, &logs,
+			t, 600, 100, 100, 0, 0, 100, 0, 0, &logs,
 		)
 		require.NoError(
 			t,
@@ -932,6 +956,12 @@ func TestForgeAppliedTipStalenessKnobIsOptIn(t *testing.T) {
 				forger.metrics.forgeStaleTipSkipAppliedStale,
 			),
 		)
+		// The other half of the pair: the wall-clock term fired, and the
+		// line says so rather than logging an upstream bound of 0 with no
+		// way to tell the two apart.
+		require.Contains(t, logs.String(), `"stale_source":"wall_clock"`)
+		require.Contains(t, logs.String(), `"applied_staleness_slots":100`)
+		require.Contains(t, logs.String(), `"upstream_staleness_slots":0`)
 	})
 }
 
@@ -940,10 +970,15 @@ func TestForgeAppliedTipStalenessKnobIsOptIn(t *testing.T) {
 // is proof a ranking block exists there even though no header has arrived. The
 // headers alone look caught up -- frontier equals the applied tip -- so only
 // this evidence can refuse the forge.
+//
+// The bound is opt-in, so this test sets ForgeEndorserBlockStalenessSlots
+// explicitly. It used to borrow forgePrimaryChainTipToleranceSlots and passed
+// with both staleness bounds at 0, which is exactly the always-on refusal
+// TestForgeEndorserBlockStalenessIsOffByDefault now forbids.
 func TestForgeSkipsWhenCorroboratedEndorserBlockIsAhead(t *testing.T) {
 	var logs bytes.Buffer
 	forger, builder := newStalenessTestForger(
-		t, 320, 300, 300, 0, 313, 0, 0, &logs,
+		t, 320, 300, 300, 0, 313, 0, 0, 5, &logs,
 	)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
@@ -956,6 +991,122 @@ func TestForgeSkipsWhenCorroboratedEndorserBlockIsAhead(t *testing.T) {
 	)
 	require.Contains(t, logs.String(), `"reason":"eb_manifest_ahead"`)
 	require.Contains(t, logs.String(), `"eb_slot":313`)
+	// The refusal names its own bound and its own gap, not the local
+	// block-against-block tolerance it used to borrow.
+	require.Contains(t, logs.String(), `"eb_gap_slots":13`)
+	require.Contains(t, logs.String(), `"eb_staleness_slots":5`)
+	// Reason-specific message: the applied tip and the primary chain tip are
+	// in exact agreement here, so "ledger tip stale vs primary chain tip"
+	// would point an operator at the one pair of values that is fine.
+	require.Contains(
+		t,
+		logs.String(),
+		"forge skip: corroborated endorser block is ahead of the applied tip",
+	)
+	require.NotContains(
+		t,
+		logs.String(),
+		"forge skip: ledger tip stale vs primary chain tip",
+	)
+	require.Contains(t, logs.String(), `"gap_slots":0`)
+}
+
+// TestForgeEndorserBlockStalenessIsOffByDefault is the regression guard for the
+// always-on endorser-block refusal, and the sibling of
+// TestForgeUpstreamStalenessIsOffByDefault.
+//
+// The endorser-block watermark is a NETWORK-stage value: it advances at
+// leios-notify announcement time, before a header for that slot has to arrive.
+// It is also monotonic and never lowered on a fork. Compared against the
+// locally applied tip with an always-on bound, an endorser block corroborated
+// for a chain this node does not adopt refuses every leader slot for as long
+// as the local chain sits below that slot -- with the applied tip and the
+// primary chain tip in agreement and gap_slots reading 0, so every local
+// indicator says the node is healthy while the producer goes quiet.
+//
+// So the bound is 0 (disabled) by default and the path never refuses without
+// it. The shape below is the one that used to refuse: watermark far ahead,
+// both local tips agreeing, both other staleness bounds off.
+func TestForgeEndorserBlockStalenessIsOffByDefault(t *testing.T) {
+	var logs bytes.Buffer
+	forger, builder := newStalenessTestForger(
+		t, 900, 300, 300, 0, 360, 0, 0, 0, &logs,
+	)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Equal(
+		t,
+		1,
+		builder.calls,
+		"with no endorser-block bound configured, an advisory watermark "+
+			"ahead of the local chain must not cost the leader slot",
+	)
+	require.Zero(
+		t,
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipEbAhead),
+	)
+	require.NotContains(t, logs.String(), `"reason":"eb_manifest_ahead"`)
+}
+
+// TestForgeProceedsWhenEndorserBlockIsWithinItsBound is the negative case for
+// the endorser-block path: with the bound ON, a corroborated endorser block
+// that leads the applied tip by less than the bound still forges.
+//
+// Without this, nothing distinguished "the bound refuses when it should" from
+// "the path refuses whenever any endorser block is ahead at all".
+func TestForgeProceedsWhenEndorserBlockIsWithinItsBound(t *testing.T) {
+	var logs bytes.Buffer
+	// eb 304 leads the applied tip at 300 by 4, under the bound of 5.
+	forger, builder := newStalenessTestForger(
+		t, 320, 300, 300, 0, 304, 0, 0, 5, &logs,
+	)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Equal(
+		t,
+		1,
+		builder.calls,
+		"an endorser block within the configured bound must still forge",
+	)
+	require.Zero(
+		t,
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipEbAhead),
+	)
+	require.Contains(t, logs.String(), `"msg":"forge context"`)
+	require.Contains(t, logs.String(), `"eb_slot":304`)
+}
+
+// TestForgeEndorserBlockBoundDoesNotBorrowThePrimaryChainTipTolerance pins that
+// the two knobs are independent in both directions: widening the local
+// tolerance must not silence the endorser-block bound, and setting the
+// endorser-block bound must not tighten the local coherence check.
+func TestForgeEndorserBlockBoundDoesNotBorrowThePrimaryChainTipTolerance(
+	t *testing.T,
+) {
+	var logs bytes.Buffer
+	forger, builder := newStalenessTestForger(
+		t, 320, 300, 300, 0, 313, 0, 0, 5, &logs,
+	)
+	// Local tolerance wide open; only the endorser-block bound is tight.
+	forger.forgePrimaryChainTipToleranceSlots = 1000
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Zero(
+		t,
+		builder.calls,
+		"the endorser-block bound is its own knob; widening the local "+
+			"tolerance must not disable it",
+	)
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipEbAhead),
+	)
+	require.Contains(t, logs.String(), `"tolerance_slots":1000`)
+	require.Contains(t, logs.String(), `"eb_staleness_slots":5`)
 }
 
 // TestForgeIgnoresEndorserBlockSlotBeyondTheCurrentSlot pins the clamp. A
@@ -965,7 +1116,7 @@ func TestForgeSkipsWhenCorroboratedEndorserBlockIsAhead(t *testing.T) {
 func TestForgeIgnoresEndorserBlockSlotBeyondTheCurrentSlot(t *testing.T) {
 	var logs bytes.Buffer
 	forger, builder := newStalenessTestForger(
-		t, 310, 309, 309, 0, 400, 0, 0, &logs,
+		t, 310, 309, 309, 0, 400, 0, 0, 5, &logs,
 	)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
@@ -985,7 +1136,7 @@ func TestForgeIgnoresEndorserBlockSlotBeyondTheCurrentSlot(t *testing.T) {
 func TestForgeStalenessDoesNotBlockWithoutAReference(t *testing.T) {
 	var logs bytes.Buffer
 	forger, builder := newStalenessTestForger(
-		t, 300, 299, 299, 0, 0, 0, 5, &logs,
+		t, 300, 299, 299, 0, 0, 0, 5, 0, &logs,
 	)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
@@ -1084,7 +1235,7 @@ func TestForgeUpstreamStalenessIsOffByDefault(t *testing.T) {
 	// The ordinary header-ahead-of-body window: a header at 318 has been
 	// admitted and published as the target, our newest BLOCK is still 299.
 	forger, builder := newStalenessTestForger(
-		t, 300, 299, 299, 318, 0, 0, 0, &logs,
+		t, 300, 299, 299, 318, 0, 0, 0, 0, &logs,
 	)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))

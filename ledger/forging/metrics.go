@@ -60,11 +60,14 @@ type forgingMetrics struct {
 	//     a block AT this slot that the ledger has not applied, so forging
 	//     would parent a block for slot S on a tip already at slot S.
 	//     Inputs: current slot, applied tip slot, primary tip slot.
-	//   - "eb_manifest_ahead": the headers alone looked fine, and only a
-	//     corroborated Leios endorser block pushed the gap over the
-	//     tolerance -- proof a ranking block exists at a slot whose header
-	//     this node has not admitted. Inputs: applied tip slot, primary tip
-	//     slot, highest corroborated endorser-block slot.
+	//   - "eb_manifest_ahead": the headers alone looked fine, and a
+	//     corroborated Leios endorser block leads the applied tip by more
+	//     than ForgeEndorserBlockStalenessSlots -- proof a ranking block
+	//     exists at a slot whose header this node has not admitted. Opt-in
+	//     and off by default, and governed by that bound ALONE rather than by
+	//     the local ForgePrimaryChainTipToleranceSlots, so this series stays
+	//     at 0 unless an operator sets it. Inputs: applied tip slot, highest
+	//     corroborated endorser-block slot.
 	//   - "applied_tip_stale": the newest block this node holds by ANY
 	//     evidence is too old, with the local tips in agreement. BOTH of its
 	//     sources are opt-in and off by default, so this series stays at 0
@@ -92,9 +95,11 @@ type forgingMetrics struct {
 	// the ledger pipeline is behind this node's own primary chain;
 	// "primary_tip_behind_applied" is the opposite -- the ledger is AHEAD of
 	// the primary chain, which is chain/ledger reconciliation rather than an
-	// apply backlog; "eb_manifest_ahead" and "applied_tip_stale" mean this
-	// node is behind the NETWORK, both firing on evidence of a block it does
-	// not hold. See ARCHITECTURE.md, "Block Production".
+	// apply backlog. Those three are local checks. "eb_manifest_ahead" and
+	// "applied_tip_stale" are not: they mean this node is behind the NETWORK,
+	// both firing on evidence of a block it does not hold, and both are
+	// opt-in so they stay at 0 on a default configuration. See
+	// ARCHITECTURE.md, "Block Production".
 	forgeStaleTipSkip *prometheus.CounterVec
 	// Pre-materialized children for the reason label values, so the leader
 	// check does not resolve a label on every skip and neither series is

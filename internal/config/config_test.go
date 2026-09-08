@@ -68,6 +68,7 @@ func resetGlobalConfig() {
 		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
 		ForgeUpstreamStalenessSlots:        DefaultForgeUpstreamStalenessSlots,
 		ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,
+		ForgeEndorserBlockStalenessSlots:   DefaultForgeEndorserBlockStalenessSlots,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,
@@ -109,6 +110,8 @@ func unsetForgeGateEnv(t *testing.T) {
 		"CARDANO_DINGO_FORGE_UPSTREAM_STALENESS_SLOTS",
 		"DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS",
 		"CARDANO_DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS",
+		"DINGO_FORGE_ENDORSER_BLOCK_STALENESS_SLOTS",
+		"CARDANO_DINGO_FORGE_ENDORSER_BLOCK_STALENESS_SLOTS",
 	} {
 		// t.Setenv registers the restore; Unsetenv then removes it for the
 		// duration of the test, which is what envconfig must not see.
@@ -254,6 +257,7 @@ mithril:
 		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
 		ForgeUpstreamStalenessSlots:        DefaultForgeUpstreamStalenessSlots,
 		ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,
+		ForgeEndorserBlockStalenessSlots:   DefaultForgeEndorserBlockStalenessSlots,
 		Mithril: MithrilConfig{
 			Enabled:                false,
 			AggregatorURL:          "https://mithril.example.net",
@@ -364,6 +368,7 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
 		ForgeUpstreamStalenessSlots:        DefaultForgeUpstreamStalenessSlots,
 		ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,
+		ForgeEndorserBlockStalenessSlots:   DefaultForgeEndorserBlockStalenessSlots,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,

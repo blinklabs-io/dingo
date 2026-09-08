@@ -109,10 +109,20 @@ const (
 	// on a low-throughput chain; set it only where the block interval is known
 	// and bounded.
 	DefaultForgeAppliedTipStalenessSlots = 0
-	DefaultMempoolCapacityPraos          = 1048576  // 1 MiB
-	DefaultMempoolCapacityLeios          = 26214400 // 25 MiB
-	DefaultMempoolRevalidationDeltaCap   = 64
-	DefaultMempoolImplementation         = "fifo"
+	// DefaultForgeEndorserBlockStalenessSlots is 0, which disables the
+	// endorser-block staleness bound. It is opt-in for the same reason the
+	// other two are: the corroborated endorser-block slot is a network-stage
+	// watermark published at leios-notify announcement time, while the applied
+	// tip is a locally applied BLOCK, so the two legitimately differ during
+	// ordinary operation. The watermark is also monotonic and never lowered on
+	// a fork, so an always-on bound can withhold leader slots for as long as
+	// the local chain sits below a slot corroborated for a chain this node
+	// does not adopt.
+	DefaultForgeEndorserBlockStalenessSlots = 0
+	DefaultMempoolCapacityPraos             = 1048576  // 1 MiB
+	DefaultMempoolCapacityLeios             = 26214400 // 25 MiB
+	DefaultMempoolRevalidationDeltaCap      = 64
+	DefaultMempoolImplementation            = "fifo"
 )
 
 // RunMode represents the operational mode of the dingo node
@@ -729,7 +739,18 @@ type Config struct {
 	// off by default because on a low-throughput chain a fixed bound refuses
 	// constantly. Set it only where the block interval is known and bounded.
 	ForgeAppliedTipStalenessSlots uint64 `yaml:"forgeAppliedTipStalenessSlots" envconfig:"DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS"`
-	ValidateForgedBlock           bool   `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
+	// ForgeEndorserBlockStalenessSlots bounds how far a corroborated Leios
+	// endorser block may lead the ledger-applied tip before forging is
+	// skipped. 0 (the default) disables it.
+	//
+	// Opt-in and separate from ForgePrimaryChainTipToleranceSlots, which
+	// bounds a purely local block-against-block comparison. This one compares
+	// a network-stage announcement watermark against a local applied tip, and
+	// that watermark is monotonic and never lowered, so an always-on bound
+	// sharing the local tolerance would tie two unrelated risk budgets to one
+	// number and could withhold leader slots indefinitely.
+	ForgeEndorserBlockStalenessSlots uint64 `yaml:"forgeEndorserBlockStalenessSlots" envconfig:"DINGO_FORGE_ENDORSER_BLOCK_STALENESS_SLOTS"`
+	ValidateForgedBlock              bool   `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
 
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. Consensus-affecting
@@ -1174,6 +1195,7 @@ var globalConfig = &Config{
 	ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
 	ForgeUpstreamStalenessSlots:        DefaultForgeUpstreamStalenessSlots,
 	ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,
+	ForgeEndorserBlockStalenessSlots:   DefaultForgeEndorserBlockStalenessSlots,
 }
 
 // deepCopyPluginValue duplicates the reference-typed values a YAML plugin

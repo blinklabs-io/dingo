@@ -142,6 +142,31 @@ const (
 	forgeStaleTipReasonUnappliedRival = "unapplied_rival_at_leader_slot"
 )
 
+// forgeStaleTipMessage renders the refusal's log message for a reason.
+//
+// One shared message for all five reasons pointed an operator at the wrong
+// pair of values: "ledger tip stale vs primary chain tip" is only true of
+// slot_gap, while eb_manifest_ahead and applied_tip_stale both fire with the
+// applied tip and the primary chain tip in exact agreement and gap_slots at 0.
+// The message now names the comparison that actually refused the slot; the
+// "forge skip: " prefix is kept so existing log filters still match.
+func forgeStaleTipMessage(reason string) string {
+	switch reason {
+	case forgeStaleTipReasonSlotGap:
+		return "forge skip: ledger tip stale vs primary chain tip"
+	case forgeStaleTipReasonHashDiverged:
+		return "forge skip: primary chain tip diverged from the applied tip at the same slot"
+	case forgeStaleTipReasonPrimaryTipBehind:
+		return "forge skip: primary chain tip is behind the applied tip"
+	case forgeStaleTipReasonAppliedStale:
+		return "forge skip: newest known block is stale"
+	case forgeStaleTipReasonEbManifestAhead:
+		return "forge skip: corroborated endorser block is ahead of the applied tip"
+	default:
+		return "forge skip: " + reason
+	}
+}
+
 // BlockForger coordinates block production for a stake pool.
 type BlockForger struct {
 	mode   Mode
@@ -186,6 +211,7 @@ type BlockForger struct {
 	forgePrimaryChainTipToleranceSlots uint64
 	forgeUpstreamStalenessSlots        uint64
 	forgeAppliedStalenessSlots         uint64
+	forgeEbStalenessSlots              uint64
 	leiosVerifiedEbSlot                func() uint64
 	forgeStaleGapThresholdSlots        uint64
 
@@ -497,6 +523,29 @@ type ForgerConfig struct {
 	// every peer reporting a stale target -- for which several times the mean
 	// block interval is a sane starting point.
 	ForgeAppliedTipStalenessSlots uint64
+	// ForgeEndorserBlockStalenessSlots controls how far a corroborated Leios
+	// endorser block may lead the ledger-applied tip before forging is
+	// refused. Zero (the default) DISABLES the bound, and with it the whole
+	// endorser-block refusal path.
+	//
+	// It has its own bound rather than borrowing
+	// ForgePrimaryChainTipToleranceSlots, which is documented at its
+	// definition as bounding a purely LOCAL block-against-block comparison
+	// and defaults to 5. LeiosVerifiedEbSlot is a network-stage value: it
+	// advances at leios-notify announcement time, before any header for that
+	// slot has to arrive. Sharing one number would tie two unrelated risk
+	// budgets together -- widening it to tolerate an endorser-block gap would
+	// equally loosen the local coherence check that stops stale-parent
+	// forging.
+	//
+	// Off by default also because the watermark is monotonic and is never
+	// lowered on a fork. An endorser block corroborated for a chain this node
+	// does not adopt leaves the watermark above the local tip, and an
+	// always-on bound would then refuse leader slots for as long as the local
+	// chain sits below that slot -- with every local indicator reading
+	// healthy. Operators who enable it should set it well above the expected
+	// announcement-to-apply lag.
+	ForgeEndorserBlockStalenessSlots uint64
 	// LeiosVerifiedEbSlot optionally reports the highest slot for which this
 	// node has corroborated a Leios endorser block, which is proof a ranking
 	// block exists at that slot even if its header has not arrived. Advisory
@@ -563,6 +612,7 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 	f.forgePrimaryChainTipToleranceSlots = cfg.ForgePrimaryChainTipToleranceSlots
 	f.forgeUpstreamStalenessSlots = cfg.ForgeUpstreamStalenessSlots
 	f.forgeAppliedStalenessSlots = cfg.ForgeAppliedTipStalenessSlots
+	f.forgeEbStalenessSlots = cfg.ForgeEndorserBlockStalenessSlots
 	f.leiosVerifiedEbSlot = cfg.LeiosVerifiedEbSlot
 
 	if cfg.Mode == ModeProduction {
@@ -956,6 +1006,24 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	appliedStale := f.forgeAppliedStalenessSlots > 0 &&
 		currentSlot > newestKnown &&
 		currentSlot-newestKnown > f.forgeAppliedStalenessSlots
+	// How far the corroborated endorser block leads the APPLIED tip. Measured
+	// against ebSlot alone rather than effectiveGap so this refusal can only
+	// ever be caused by endorser-block evidence: effectiveGap also carries the
+	// primary chain tip, so with a bound tighter than
+	// forgePrimaryChainTipToleranceSlots it would label a purely local gap
+	// "eb_manifest_ahead" when no endorser block was involved at all.
+	ebGap := uint64(0)
+	if ebSlot > tipSlot {
+		ebGap = ebSlot - tipSlot
+	}
+	// Opt-in only, and with its OWN bound rather than the local
+	// block-against-block tolerance. See ForgeEndorserBlockStalenessSlots for
+	// why sharing that number is wrong in both directions: it ties two
+	// unrelated risk budgets to one knob, and it makes a monotonic,
+	// never-lowered, advisory watermark into an always-on refusal that a node
+	// on a chain the watermark has moved past cannot clear.
+	ebStale := f.forgeEbStalenessSlots > 0 &&
+		ebGap > f.forgeEbStalenessSlots
 
 	// Selected once here, acted on after the leader check below.
 	staleTipReason := ""
@@ -966,9 +1034,10 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		staleTipReason = forgeStaleTipReasonHashDiverged
 	case applyGap > f.forgePrimaryChainTipToleranceSlots:
 		staleTipReason = forgeStaleTipReasonSlotGap
-	case effectiveGap > f.forgePrimaryChainTipToleranceSlots:
-		// Only the endorser-block evidence pushed the gap over the bound: the
-		// headers alone looked fine.
+	case ebStale:
+		// Only the endorser-block evidence refuses here: the headers alone
+		// looked fine, and this case is unreachable unless an operator has
+		// set ForgeEndorserBlockStalenessSlots.
 		staleTipReason = forgeStaleTipReasonEbManifestAhead
 	case upstreamStale, appliedStale:
 		staleTipReason = forgeStaleTipReasonAppliedStale
@@ -1362,9 +1431,23 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 				f.metrics.forgeStaleTipSkipEbAhead.Inc()
 			}
 		}
+		// applied_tip_stale is reached from two independent bounds. Log both,
+		// plus which one actually fired, so a post-mortem does not have to
+		// guess: with only upstream_staleness_slots present a wall-clock
+		// refusal logged a bound of 0 and no way to tell them apart.
+		staleSource := ""
+		switch {
+		case upstreamStale && appliedStale:
+			staleSource = "upstream+wall_clock"
+		case upstreamStale:
+			staleSource = "upstream"
+		case appliedStale:
+			staleSource = "wall_clock"
+		}
 		f.logger.Warn(
-			"forge skip: ledger tip stale vs primary chain tip",
+			forgeStaleTipMessage(staleTipReason),
 			"reason", staleTipReason,
+			"stale_source", staleSource,
 			"current_slot", currentSlot,
 			"tip_slot", tipSlot,
 			"primary_tip_slot", primaryTip.Slot,
@@ -1375,8 +1458,11 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			"primary_tip_hash", hex.EncodeToString(primaryTip.Hash),
 			"gap_slots", applyGap,
 			"effective_gap_slots", effectiveGap,
+			"eb_gap_slots", ebGap,
 			"tolerance_slots", f.forgePrimaryChainTipToleranceSlots,
 			"upstream_staleness_slots", f.forgeUpstreamStalenessSlots,
+			"applied_staleness_slots", f.forgeAppliedStalenessSlots,
+			"eb_staleness_slots", f.forgeEbStalenessSlots,
 		)
 		return nil
 	}

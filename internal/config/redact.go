@@ -145,6 +145,7 @@ var logPlainConfigFields = []string{
 	"DelegatorInactivity",
 	"DelegatorInactivityEnabled",
 	"ForgeAppliedTipStalenessSlots",
+	"ForgeEndorserBlockStalenessSlots",
 	"ForgePrimaryChainTipToleranceSlots",
 	"ForgeStaleGapThresholdSlots",
 	"ForgeSyncToleranceSlots",

@@ -472,6 +472,7 @@ func TestBuildDingoConfigWiresForgeTolerances(t *testing.T) {
 		ForgePrimaryChainTipToleranceSlots: 42,
 		ForgeUpstreamStalenessSlots:        17,
 		ForgeAppliedTipStalenessSlots:      9,
+		ForgeEndorserBlockStalenessSlots:   23,
 	}
 	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
 
@@ -514,6 +515,15 @@ func TestBuildDingoConfigWiresForgeTolerances(t *testing.T) {
 			"expected forgeAppliedTipStalenessSlots 9, got %d; the loaded "+
 				"value never reached dingo.Config, so the wall-clock "+
 				"staleness backstop stays off however it is configured",
+			got,
+		)
+	}
+	if got := built.ForgeEndorserBlockStalenessSlots(); got != 23 {
+		t.Fatalf(
+			"expected forgeEndorserBlockStalenessSlots 23, got %d; the "+
+				"loaded value never reached dingo.Config, so the "+
+				"endorser-block staleness bound stays off however it is "+
+				"configured",
 			got,
 		)
 	}

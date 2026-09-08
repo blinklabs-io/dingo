@@ -706,6 +706,11 @@ var flagSpecs = []flagSpec{
 		"forge-applied-tip-staleness-slots",
 		"max slots the newest block this node holds may be older than the current slot before skipping block forging (0 disables)",
 	),
+	uint64Flag(
+		"ForgeEndorserBlockStalenessSlots",
+		"forge-endorser-block-staleness-slots",
+		"max slots a corroborated Leios endorser block may lead the ledger-applied tip before skipping block forging (0 disables)",
+	),
 	boolFlag(
 		"ValidateForgedBlock",
 		"validate-forged-block",

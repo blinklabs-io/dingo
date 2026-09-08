@@ -657,6 +657,35 @@ func (o *Ouroboros) publishLeiosEndorserBlock(
 // rolled back on a fork, because the question it answers -- "is there a block
 // out there at least this recent?" -- stays true regardless of which fork
 // wins. Callers must treat it as advisory and must not use it as a parent.
+//
+// LIFECYCLE. The watermark has no lifecycle beyond that monotonic advance, and
+// the two ends fail in opposite directions, so a consumer must handle both:
+//
+//   - It is NOT raised at startup. The value lives in this process only and
+//     advances solely in publishLeiosEndorserBlock, so after a restart or a
+//     cache eviction it reads 0 until the next endorser block is verified,
+//     even though persisted occurrences prove otherwise. A cold watermark
+//     therefore fails OPEN: it under-reports chain progress, so a consumer
+//     that uses it as evidence simply sees no evidence. Raising it from
+//     persisted occurrences at startup means scanning the blob store during
+//     initialisation with its own scope and failure questions; it has not
+//     been done.
+//
+//   - It is NEVER lowered. An endorser block corroborated for a chain this
+//     node does not adopt leaves the watermark above the local tip
+//     permanently. Consumed as a hard comparison against a local tip, that
+//     fails CLOSED and stays closed for as long as the local chain sits below
+//     that slot -- while every local indicator reads healthy.
+//
+// Consequently a consumer must either treat the value as purely advisory
+// (logging, metrics, hints) or bound it with its own explicitly configured
+// tolerance. It must not be turned into an unconditional gate.
+//
+// The one gating consumer, the forge staleness check in ledger/forging, does
+// the latter: it is opt-in behind ForgeEndorserBlockStalenessSlots, which
+// defaults to 0 (disabled), so the refusal path does not exist unless an
+// operator sets a bound, and the bound is its own knob rather than the local
+// primary-chain-tip tolerance.
 func (o *Ouroboros) MaxVerifiedEndorserBlockSlot() uint64 {
 	if o == nil {
 		return 0
