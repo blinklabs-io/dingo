@@ -46,8 +46,8 @@ type forgingMetrics struct {
 	// Leader checks refused because this node's own two views of its chain did
 	// not agree. Three reasons, each from a different pair of inputs:
 	//
-	//   - "slot_gap": the ledger-applied tip trails this node's header
-	//     primary chain tip by more than ForgeHeaderFrontierToleranceSlots.
+	//   - "slot_gap": the ledger-applied tip trails this node's primary
+	//     chain tip by more than ForgeHeaderFrontierToleranceSlots.
 	//     Inputs: applied tip slot, primary tip slot.
 	//   - "primary_tip_hash_diverged": primary chain tip and applied tip sit at the SAME
 	//     slot but name different blocks -- an equal-slot fork the ledger has
@@ -58,7 +58,11 @@ type forgingMetrics struct {
 	//
 	// Counted only on slots this node was actually elected to forge, so the
 	// value is lost blocks rather than leader checks. Any increment means the
-	// ledger pipeline, not the network, was the thing behind. See
+	// fault is local rather than in the network, but the reasons do not share
+	// a diagnosis: "slot_gap" and "primary_tip_hash_diverged" mean the ledger
+	// pipeline is behind the primary chain, while "primary_tip_behind_applied"
+	// is the opposite -- the ledger is AHEAD of the primary chain, which is
+	// chain/ledger reconciliation rather than an apply backlog. See
 	// ARCHITECTURE.md, "Block Production".
 	forgeStaleTipSkip *prometheus.CounterVec
 	// Pre-materialized children for the reason label values, so the leader

@@ -4797,7 +4797,15 @@ each from a different pair of inputs:
 | `primary_tip_hash_diverged` | Primary chain tip and applied tip are at the same slot but name different blocks -- an equal-slot fork the ledger has not applied. | applied tip hash, primary chain tip hash |
 | `primary_tip_behind_applied` | The primary chain tip is at a lower slot than the applied tip, so the builder's parent is a block the ledger has already built past. | applied tip slot, primary chain tip slot |
 
-Every reason means the ledger pipeline, not the network, was the thing behind.
+Every reason means the fault is local rather than in the network, but they do
+not all point at the same component. `slot_gap` and `primary_tip_hash_diverged`
+mean the ledger pipeline is behind the primary chain -- blocks admitted and
+selected but not yet applied. `primary_tip_behind_applied` is the opposite: the
+ledger is ahead of the primary chain, which is chain/ledger reconciliation
+(the state the ledger resolves at startup by rolling its own tip back), not an
+apply backlog. Reading it as a lagging pipeline sends an operator to the wrong
+place.
+
 All three are counted only on slots this node was actually elected to forge, so
 the counter reads as lost blocks rather than as leader checks.
 
