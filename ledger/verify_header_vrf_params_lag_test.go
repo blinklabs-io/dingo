@@ -65,6 +65,8 @@ func previewEpochs(from, to uint64, nonce []byte) []models.Epoch {
 // Only the parameter cutoff, the last slot of the epoch preceding the capture,
 // resolves oldKey for both epochs.
 func TestElectingVrfKeyHashLagsPoolParamsByOneEpoch(t *testing.T) {
+	t.Parallel()
+
 	nonce := bytes.Repeat([]byte{0x07}, 32)
 	tb := createTestBlock(t, [32]byte{51}, 51, tamperNone)
 	ls, db := newEligibilityTestLedger(t, nonce)
@@ -157,6 +159,8 @@ func blockEpochId(
 func TestElectingVrfKeyHashResolvesTheEarlierKeyWhenAReRegistrationFollowsTheCutoff(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	nonce := bytes.Repeat([]byte{0x07}, 32)
 	tb := createTestBlock(t, [32]byte{51}, 51, tamperNone)
 	ls, db := newEligibilityTestLedger(t, nonce)
@@ -211,6 +215,8 @@ func TestElectingVrfKeyHashResolvesTheEarlierKeyWhenAReRegistrationFollowsTheCut
 // cannot place the Mithril boundary at all, so reading it fails the lookup
 // outright rather than returning a merely different answer.
 func TestElectingPoolParamsCutoffSlotUsesTheSuppliedEpochCache(t *testing.T) {
+	t.Parallel()
+
 	nonce := bytes.Repeat([]byte{0x07}, 32)
 	tb := createTestBlock(t, [32]byte{53}, 53, tamperNone)
 	tb.block.slot = 3_400_000
@@ -247,6 +253,8 @@ func TestElectingPoolParamsCutoffSlotUsesTheSuppliedEpochCache(t *testing.T) {
 // which is what resolving the boundary against the live cache produces here --
 // finds nothing and rejects.
 func TestLeaderEligibilityStakeUsesTheSuppliedEpochCache(t *testing.T) {
+	t.Parallel()
+
 	nonce := bytes.Repeat([]byte{0x07}, 32)
 	tb := createTestBlock(t, [32]byte{54}, 54, tamperNone)
 	tb.block.slot = 3_400_000
@@ -295,6 +303,8 @@ func TestLeaderEligibilityStakeUsesTheSuppliedEpochCache(t *testing.T) {
 func TestLeaderEligibilityStakeSkipDecisionUsesTheSuppliedEpochCache(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	nonce := bytes.Repeat([]byte{0x07}, 32)
 	tb := createTestBlock(t, [32]byte{55}, 55, tamperNone)
 	tb.block.slot = 3_400_000

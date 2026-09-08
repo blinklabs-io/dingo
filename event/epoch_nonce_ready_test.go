@@ -25,6 +25,8 @@ import (
 )
 
 func TestEpochNonceReadyEventType(t *testing.T) {
+	t.Parallel()
+
 	assert.Equal(
 		t,
 		event.EventType("epoch.nonce_ready"),
@@ -33,6 +35,8 @@ func TestEpochNonceReadyEventType(t *testing.T) {
 }
 
 func TestEpochNonceReadyEventPublishSubscribe(t *testing.T) {
+	t.Parallel()
+
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 

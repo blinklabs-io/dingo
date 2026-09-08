@@ -95,6 +95,8 @@ func drepStateQueryDeposits(
 // TestQueryDRepStateReportsRecordedDepositUnrestricted covers the
 // empty-filter form, which reads the deposits in one batched query.
 func TestQueryDRepStateReportsRecordedDepositUnrestricted(t *testing.T) {
+	t.Parallel()
+
 	drepStateQueryDeposits(t, nil)
 }
 
@@ -103,6 +105,8 @@ func TestQueryDRepStateReportsRecordedDepositUnrestricted(t *testing.T) {
 // are covered because they source the deposit through different queries, and
 // a fix applied to one leaves the other reporting the parameter.
 func TestQueryDRepStateReportsRecordedDepositFiltered(t *testing.T) {
+	t.Parallel()
+
 	drepStateQueryDeposits(t, []lcommon.Credential{
 		drepRefundTestCredential(0xe1),
 		drepRefundTestCredential(0xe2),

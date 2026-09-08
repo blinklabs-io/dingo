@@ -43,6 +43,8 @@ func deriveRequest(pk *PublicKey) ConstructionDeriveRequest {
 }
 
 func TestConstructionDerive(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 	pub, _ := testKeyPair(t, 0x11)
 
@@ -77,6 +79,8 @@ func TestConstructionDerive(t *testing.T) {
 // TestConstructionDeriveMainnet asserts the address network follows the
 // configured network magic rather than a compile-time default.
 func TestConstructionDeriveMainnet(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(
 		t,
 		newTestDeps(),
@@ -114,6 +118,8 @@ func TestConstructionDeriveMainnet(t *testing.T) {
 }
 
 func TestConstructionDeriveInvalidPublicKey(t *testing.T) {
+	t.Parallel()
+
 	pub, _ := testKeyPair(t, 0x13)
 	tests := map[string]*PublicKey{
 		"missing public key": nil,
@@ -150,6 +156,8 @@ func TestConstructionDeriveInvalidPublicKey(t *testing.T) {
 // --- /construction/preprocess ------------------------------------------
 
 func TestConstructionPreprocess(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 	addr := testAddress(
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x14), nil,
@@ -203,6 +211,8 @@ func TestConstructionPreprocess(t *testing.T) {
 }
 
 func TestConstructionPreprocessNoOperations(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 
 	rec := postJSON(t, h, "/construction/preprocess",
@@ -229,6 +239,8 @@ func metadataRequest() ConstructionMetadataRequest {
 }
 
 func TestConstructionMetadata(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	deps.ledger.pparams = testPParams(44, 155381)
 	h := newTestHandler(t, deps)
@@ -255,6 +267,8 @@ func TestConstructionMetadata(t *testing.T) {
 // loaded protocol parameters: clients must get a retriable error rather
 // than a zero fee they would sign into a transaction.
 func TestConstructionMetadataUnavailable(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 
 	rec := postJSON(
@@ -318,6 +332,8 @@ func payloadsRequest(
 }
 
 func TestConstructionPayloads(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 	addr := testAddress(
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x15), nil,
@@ -358,6 +374,8 @@ func TestConstructionPayloads(t *testing.T) {
 // emitted per unique signing key, with the derived account attached so
 // the client knows which key to use.
 func TestConstructionPayloadsPerSignerPayloads(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 	addr := testAddress(
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x16), nil,
@@ -392,6 +410,8 @@ func TestConstructionPayloadsPerSignerPayloads(t *testing.T) {
 }
 
 func TestConstructionPayloadsTTL(t *testing.T) {
+	t.Parallel()
+
 	tests := map[string]struct {
 		ttl     any
 		wantTTL uint64
@@ -434,6 +454,8 @@ func TestConstructionPayloadsTTL(t *testing.T) {
 }
 
 func TestConstructionPayloadsInvalidRequest(t *testing.T) {
+	t.Parallel()
+
 	validCoin := hexString(testHash(0xb2)) + ":0"
 
 	tests := map[string]struct {
@@ -653,6 +675,8 @@ func TestConstructionPayloadsInvalidRequest(t *testing.T) {
 // TestConstructionPayloadsInvalidPublicKey asserts a malformed signing
 // key is rejected rather than producing a payload no client can sign.
 func TestConstructionPayloadsInvalidPublicKey(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 	addr := testAddress(
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x1b), nil,
@@ -712,6 +736,8 @@ func combineRequest(
 }
 
 func TestConstructionCombine(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 	addr := testAddress(
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x1c), nil,
@@ -748,6 +774,8 @@ func TestConstructionCombine(t *testing.T) {
 }
 
 func TestConstructionCombineInvalidRequest(t *testing.T) {
+	t.Parallel()
+
 	pub, _ := testKeyPair(t, 0x1e)
 	validSig := hexString(make([]byte, 64))
 
@@ -858,6 +886,8 @@ func parseRequest(
 }
 
 func TestConstructionParseSigned(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 	addr := testAddress(
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x20), nil,
@@ -885,6 +915,8 @@ func TestConstructionParseSigned(t *testing.T) {
 }
 
 func TestConstructionParseUnsigned(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 	addr := testAddress(
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x22), nil,
@@ -908,6 +940,8 @@ func TestConstructionParseUnsigned(t *testing.T) {
 // converter recognizes: each supported certificate becomes exactly one
 // operation, and unsupported ones are dropped rather than mis-typed.
 func TestConstructionParseCertificates(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 	addr := testAddress(
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x23), nil,
@@ -999,6 +1033,8 @@ func TestConstructionParseCertificates(t *testing.T) {
 }
 
 func TestConstructionParseInvalid(t *testing.T) {
+	t.Parallel()
+
 	tests := map[string]struct {
 		tx     string
 		signed bool
@@ -1030,6 +1066,8 @@ func TestConstructionParseInvalid(t *testing.T) {
 // --- /construction/hash ------------------------------------------------
 
 func TestConstructionHash(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 	addr := testAddress(
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x26), nil,
@@ -1054,6 +1092,8 @@ func TestConstructionHash(t *testing.T) {
 }
 
 func TestConstructionHashInvalid(t *testing.T) {
+	t.Parallel()
+
 	for name, tx := range map[string]string{
 		"non-hex": "zz",
 		"garbage": "ffffff",
@@ -1091,6 +1131,8 @@ func submitRequest(tx string) ConstructionSubmitRequest {
 }
 
 func TestConstructionSubmit(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	h := newTestHandler(t, deps)
 	addr := testAddress(
@@ -1120,6 +1162,8 @@ func TestConstructionSubmit(t *testing.T) {
 // transaction: the client must get the retriable submit-failed error
 // with the underlying reason, not a success.
 func TestConstructionSubmitRejected(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	deps.mempool.addErr = errors.New("fee too small")
 	h := newTestHandler(t, deps)
@@ -1141,6 +1185,8 @@ func TestConstructionSubmitRejected(t *testing.T) {
 }
 
 func TestConstructionSubmitInvalid(t *testing.T) {
+	t.Parallel()
+
 	for name, tx := range map[string]string{
 		"non-hex": "zz",
 		"garbage": "ffffff",
@@ -1171,6 +1217,8 @@ func TestConstructionSubmitInvalid(t *testing.T) {
 // back to the operations that were requested, and hash and submit report
 // the same transaction identifier.
 func TestConstructionRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	deps.ledger.pparams = testPParams(44, 155381)
 	h := newTestHandler(t, deps)
@@ -1331,6 +1379,8 @@ func signPayload(
 // the parse path: each asset in an output becomes its own operation
 // with a sub-coin identifier, alongside the output's ADA operation.
 func TestConstructionParseNativeAssetOutputs(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 	addr := testAddress(
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x2b), nil,
@@ -1391,6 +1441,8 @@ func TestConstructionParseNativeAssetOutputs(t *testing.T) {
 // that cannot be converted for the response: the endpoint must report a
 // server error rather than emitting a zero suggested fee.
 func TestConstructionMetadataConversionFailure(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	// A nil A0 makes the utxorpc conversion fail.
 	pparams := testPParams(44, 155381)

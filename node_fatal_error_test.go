@@ -23,6 +23,8 @@ import (
 )
 
 func TestCancelForFatalMakesShutdownReturnError(t *testing.T) {
+	t.Parallel()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	n := &Node{ctx: ctx, cancel: cancel}
 	want := errors.New("strict parity mismatch")
@@ -33,6 +35,8 @@ func TestCancelForFatalMakesShutdownReturnError(t *testing.T) {
 }
 
 func TestParentCancellationRemainsCleanShutdown(t *testing.T) {
+	t.Parallel()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	n := &Node{ctx: ctx, cancel: cancel}
 
@@ -42,6 +46,8 @@ func TestParentCancellationRemainsCleanShutdown(t *testing.T) {
 }
 
 func TestFatalDuringStartupOverridesCancellationError(t *testing.T) {
+	t.Parallel()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	n := &Node{ctx: ctx, cancel: cancel}
 	want := errors.New("strict parity mismatch during startup")

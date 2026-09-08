@@ -24,6 +24,8 @@ import (
 )
 
 func TestPendingPublishesFlushesInOrder(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -75,6 +77,8 @@ func TestPendingPublishesFlushesInOrder(t *testing.T) {
 }
 
 func TestPendingPublishesIgnoresNilBus(t *testing.T) {
+	t.Parallel()
+
 	var pending pendingPublishes
 	pending.add(nil, LedgerErrorEventType, event.NewEvent(
 		LedgerErrorEventType,
@@ -90,6 +94,8 @@ func TestPendingPublishesIgnoresNilBus(t *testing.T) {
 // buffer is full. Publishing directly would park both sides forever;
 // queueing and flushing after the unlock lets the subscriber drain.
 func TestPendingPublishesBreaksLockCycle(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
