@@ -644,7 +644,7 @@ func TestForgeSkipsWhenFrontierIsBehindTheAppliedTip(t *testing.T) {
 	require.Equal(
 		t,
 		float64(1),
-		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipFrontierBehind),
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipPrimaryTipBehind),
 	)
 	require.Zero(
 		t,
@@ -673,6 +673,6 @@ func TestForgeProceedsWhenFrontierIsUninitialised(t *testing.T) {
 	require.Equal(t, 1, builder.calls)
 	require.Zero(
 		t,
-		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipFrontierBehind),
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipPrimaryTipBehind),
 	)
 }

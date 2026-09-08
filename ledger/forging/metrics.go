@@ -68,11 +68,11 @@ type forgingMetrics struct {
 	// Pre-materialized children for the reason label values, so the leader
 	// check does not resolve a label on every skip and neither series is
 	// absent from a dashboard before the first skip.
-	forgeStaleTipSkipSlotGap        prometheus.Counter
-	forgeStaleTipSkipHashDiverged   prometheus.Counter
-	forgeStaleTipSkipFrontierBehind prometheus.Counter
-	slotClockErrors                 prometheus.Counter
-	tipGapSlots                     prometheus.Gauge
+	forgeStaleTipSkipSlotGap          prometheus.Counter
+	forgeStaleTipSkipHashDiverged     prometheus.Counter
+	forgeStaleTipSkipPrimaryTipBehind prometheus.Counter
+	slotClockErrors                   prometheus.Counter
+	tipGapSlots                       prometheus.Gauge
 
 	// Slots refused by the persisted last-forged-slot fence. Any
 	// increment means the node was asked to forge a slot it had
@@ -222,8 +222,8 @@ func initForgingMetrics(
 	m.forgeStaleTipSkipHashDiverged = m.forgeStaleTipSkip.WithLabelValues(
 		forgeStaleTipReasonHashDiverged,
 	)
-	m.forgeStaleTipSkipFrontierBehind = m.forgeStaleTipSkip.WithLabelValues(
-		forgeStaleTipReasonFrontierBehind,
+	m.forgeStaleTipSkipPrimaryTipBehind = m.forgeStaleTipSkip.WithLabelValues(
+		forgeStaleTipReasonPrimaryTipBehind,
 	)
 	m.tipGapSlots = factory.NewGauge(
 		prometheus.GaugeOpts{
