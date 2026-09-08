@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -646,6 +647,461 @@ func TestTickResyncsOnLocalTipPlateau(t *testing.T) {
 		connId,
 		reconciledConn,
 		"reconcile must be attributed to the plateaued connection",
+	)
+}
+
+// rollbackRegisteredPeer builds the chain-selection state a peer is left in
+// immediately after a plateau resync: the connection was closed for a fresh
+// chainsync, the peer re-intersected at the local tip and sent exactly one
+// post-intersect RollBackward, so its DELIVERED frontier is that intersection
+// point with no block number while its ADVERTISED tip is well ahead. This is
+// the shape ApplyRollback produces for any rollback point outside the retained
+// delivered-header history, and the shape #3989's rollback registration
+// records for a peer chain selection has not seen a header from at all.
+func rollbackRegisteredPeer(
+	connId ouroboros.ConnectionId,
+	intersectSlot uint64,
+	advertisedSlot uint64,
+) *chainselection.PeerChainTip {
+	advertised := testTip(advertisedSlot, advertisedSlot/2)
+	peerTip := chainselection.NewPeerChainTip(connId, advertised, nil)
+	peerTip.ApplyRollback(
+		ocommon.NewPoint(intersectSlot, []byte("intersect")),
+		advertised,
+	)
+	return peerTip
+}
+
+// TestTickResyncsOnPlateauWhenBestPeerAwaitsFirstHeader is the watchdog's
+// self-blinding case: the previous plateau resync reconnected the only
+// upstream, which then delivered nothing but its post-intersect rollback. The
+// peer's delivered frontier is therefore the stalled local tip, and comparing
+// against it would disarm the watchdog for as long as the starvation lasts --
+// three plateau cycles in twenty minutes were observed doing nothing at all.
+// The peer's advertised tip is ahead and correct throughout, so the plateau
+// must still fire.
+func TestTickResyncsOnPlateauWhenBestPeerAwaitsFirstHeader(t *testing.T) {
+	const (
+		stalledSlot    = 2810012
+		advertisedSlot = 2810823
+	)
+	connId := testConnId(3)
+	active := connId
+	ledger := &fakeLedger{
+		tip:                 testTip(stalledSlot, 50),
+		primaryChainTipSlot: stalledSlot,
+		atTip:               true,
+	}
+	state := &fakeChainsyncState{
+		tracked:    []chainsync.TrackedClient{activeClient(connId, stalledSlot)},
+		activeConn: &active,
+	}
+	best := connId
+	peerTip := rollbackRegisteredPeer(connId, stalledSlot, advertisedSlot)
+	require.True(
+		t,
+		peerTip.AwaitingFirstHeader(),
+		"fixture must reproduce a peer that has delivered no header",
+	)
+	require.Equal(
+		t,
+		uint64(stalledSlot),
+		peerTip.SelectionTip().Point.Slot,
+		"fixture must pin the delivered frontier at the stalled local tip",
+	)
+	selector := &fakeChainSelector{
+		bestPeer: &best,
+		peerTips: map[string]*chainselection.PeerChainTip{
+			connId.String(): peerTip,
+		},
+	}
+	pub := newFakePublisher()
+	r, _ := newTestRecycler(t, ledger, state, selector, pub, Config{})
+
+	now := time.Now()
+	st := newTestTickState(stalledSlot, now.Add(-25*time.Minute))
+	st.lastPrimaryChainTipSlot = ledger.primaryChainTipSlot
+
+	runTickWith(r, st, LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+		ChainSelector:  selector,
+	}, now, stalledSlot)
+
+	events := pub.byType(event.ChainsyncResyncEventType)
+	require.Len(
+		t,
+		events,
+		1,
+		"the plateau must still fire when the best peer has delivered no "+
+			"header since the last resync",
+	)
+	resyncEvt, ok := events[0].evt.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	assert.Equal(t, connId, resyncEvt.ConnectionId)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonLocalTipPlateau,
+		resyncEvt.Reason,
+	)
+}
+
+// TestTickDoesNotResyncWhenAwaitingPeerAdvertisesNoProgress pins the other
+// side of the fallback: an advertised tip is only substituted when it is ahead
+// of the local tip. A peer that has delivered no header and claims nothing
+// beyond where we already are gives the watchdog no reason to act, so the
+// untrusted advertised tip cannot manufacture a plateau on its own.
+func TestTickDoesNotResyncWhenAwaitingPeerAdvertisesNoProgress(t *testing.T) {
+	const stalledSlot = 2810012
+	connId := testConnId(4)
+	active := connId
+	ledger := &fakeLedger{
+		tip:                 testTip(stalledSlot, 50),
+		primaryChainTipSlot: stalledSlot,
+		atTip:               true,
+	}
+	state := &fakeChainsyncState{
+		tracked:    []chainsync.TrackedClient{activeClient(connId, stalledSlot)},
+		activeConn: &active,
+	}
+	best := connId
+	peerTip := rollbackRegisteredPeer(connId, stalledSlot, stalledSlot)
+	require.True(t, peerTip.AwaitingFirstHeader())
+	selector := &fakeChainSelector{
+		bestPeer: &best,
+		peerTips: map[string]*chainselection.PeerChainTip{
+			connId.String(): peerTip,
+		},
+	}
+	pub := newFakePublisher()
+	r, _ := newTestRecycler(t, ledger, state, selector, pub, Config{})
+
+	now := time.Now()
+	st := newTestTickState(stalledSlot, now.Add(-25*time.Minute))
+	st.lastPrimaryChainTipSlot = ledger.primaryChainTipSlot
+
+	runTickWith(r, st, LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+		ChainSelector:  selector,
+	}, now, stalledSlot)
+
+	assert.Empty(
+		t,
+		pub.byType(event.ChainsyncResyncEventType),
+		"a peer advertising no progress must not trigger a plateau resync",
+	)
+	assert.Equal(t, 0, ledger.reconcileCallCount())
+}
+
+// TestTickIgnoresAdvertisedTipOnceBestPeerHasDeliveredAHeader pins that the
+// fallback is confined to the awaiting-first-header window. Once a peer has
+// delivered a header its delivered frontier is real evidence, and a peer that
+// advertises a far tip while its chainsync cursor lags must not be able to
+// drive the watchdog off that frontier -- the reason SelectionTip prefers the
+// delivered value in the first place.
+func TestTickIgnoresAdvertisedTipOnceBestPeerHasDeliveredAHeader(
+	t *testing.T,
+) {
+	const stalledSlot = 2810012
+	connId := testConnId(5)
+	active := connId
+	ledger := &fakeLedger{
+		tip:                 testTip(stalledSlot, 50),
+		primaryChainTipSlot: stalledSlot,
+		atTip:               true,
+	}
+	state := &fakeChainsyncState{
+		tracked:    []chainsync.TrackedClient{activeClient(connId, stalledSlot)},
+		activeConn: &active,
+	}
+	best := connId
+	// Delivered frontier at the local tip WITH a block number: the peer has
+	// shown us this header, so it is not awaiting its first one.
+	peerTip := chainselection.NewPeerChainTip(
+		connId,
+		testTip(stalledSlot, 1405006),
+		nil,
+	)
+	peerTip.UpdateTipWithObserved(
+		testTip(stalledSlot+811, 1405411),
+		testTip(stalledSlot, 1405006),
+		nil,
+	)
+	require.False(t, peerTip.AwaitingFirstHeader())
+	selector := &fakeChainSelector{
+		bestPeer: &best,
+		peerTips: map[string]*chainselection.PeerChainTip{
+			connId.String(): peerTip,
+		},
+	}
+	pub := newFakePublisher()
+	r, _ := newTestRecycler(t, ledger, state, selector, pub, Config{})
+
+	now := time.Now()
+	st := newTestTickState(stalledSlot, now.Add(-25*time.Minute))
+	st.lastPrimaryChainTipSlot = ledger.primaryChainTipSlot
+
+	runTickWith(r, st, LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+		ChainSelector:  selector,
+	}, now, stalledSlot)
+
+	assert.Empty(
+		t,
+		pub.byType(event.ChainsyncResyncEventType),
+		"a delivered frontier that is not ahead of the local tip must keep "+
+			"the watchdog disarmed, advertised tip notwithstanding",
+	)
+}
+
+// TestTickPlateauFallbackNeverLowersTheBestPeerTip pins the fallback as
+// strictly widening. A peer's advertised tip is untrusted input and nothing
+// forces it to be consistent with the rollback point it just sent, so
+// substituting it unconditionally would let a peer that rolled us forward
+// while advertising a tip behind our own local tip disarm a watchdog that
+// fires on main. The substitution therefore only ever raises the comparison
+// value.
+func TestTickPlateauFallbackNeverLowersTheBestPeerTip(t *testing.T) {
+	const (
+		localSlot      = 100
+		rollbackSlot   = 200
+		advertisedSlot = 50
+	)
+	connId := testConnId(6)
+	active := connId
+	ledger := &fakeLedger{
+		tip:                 testTip(localSlot, 50),
+		primaryChainTipSlot: localSlot,
+		atTip:               true,
+	}
+	state := &fakeChainsyncState{
+		tracked:    []chainsync.TrackedClient{activeClient(connId, localSlot)},
+		activeConn: &active,
+	}
+	best := connId
+	peerTip := rollbackRegisteredPeer(connId, rollbackSlot, advertisedSlot)
+	require.True(t, peerTip.AwaitingFirstHeader())
+	require.Equal(
+		t,
+		uint64(rollbackSlot),
+		peerTip.SelectionTip().Point.Slot,
+		"fixture must put the delivered frontier ahead of the advertised tip",
+	)
+	selector := &fakeChainSelector{
+		bestPeer: &best,
+		peerTips: map[string]*chainselection.PeerChainTip{
+			connId.String(): peerTip,
+		},
+	}
+	pub := newFakePublisher()
+	r, _ := newTestRecycler(t, ledger, state, selector, pub, Config{})
+
+	now := time.Now()
+	st := newTestTickState(localSlot, now.Add(-25*time.Minute))
+	st.lastPrimaryChainTipSlot = ledger.primaryChainTipSlot
+
+	runTickWith(r, st, LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+		ChainSelector:  selector,
+	}, now, localSlot)
+
+	require.Len(
+		t,
+		pub.byType(event.ChainsyncResyncEventType),
+		1,
+		"a lower advertised tip must not suppress a plateau the delivered "+
+			"frontier already justifies",
+	)
+}
+
+// TestTickPlateauIgnoresAdvertisedTipOfAThirdPartyPeer pins the blast radius of
+// trusting an advertised tip. The recycle targets the ACTIVE chainsync client,
+// which need not be the peer that made the claim, so a peer that intersects at
+// our local tip, fabricates a high advertised tip and then delivers nothing
+// could otherwise drive a recycle of a different, honest upstream once per
+// cooldown. The substitution is therefore confined to the connection the
+// plateau would actually recycle: an awaiting peer can only ever spend its
+// advertised tip on itself.
+func TestTickPlateauIgnoresAdvertisedTipOfAThirdPartyPeer(t *testing.T) {
+	const (
+		stalledSlot    = 2810012
+		fabricatedSlot = 9999999
+	)
+	liar := testConnId(7)
+	// The honest upstream carrying our chainsync stream, which is NOT the peer
+	// making the claim.
+	activeConn := testConnId(8)
+	active := activeConn
+	ledger := &fakeLedger{
+		tip:                 testTip(stalledSlot, 50),
+		primaryChainTipSlot: stalledSlot,
+		atTip:               true,
+	}
+	state := &fakeChainsyncState{
+		tracked: []chainsync.TrackedClient{
+			activeClient(activeConn, stalledSlot),
+		},
+		activeConn: &active,
+	}
+	best := liar
+	peerTip := rollbackRegisteredPeer(liar, stalledSlot, fabricatedSlot)
+	require.True(t, peerTip.AwaitingFirstHeader())
+	selector := &fakeChainSelector{
+		bestPeer: &best,
+		peerTips: map[string]*chainselection.PeerChainTip{
+			liar.String(): peerTip,
+		},
+	}
+	pub := newFakePublisher()
+	r, _ := newTestRecycler(t, ledger, state, selector, pub, Config{})
+
+	now := time.Now()
+	st := newTestTickState(stalledSlot, now.Add(-25*time.Minute))
+	st.lastPrimaryChainTipSlot = ledger.primaryChainTipSlot
+
+	runTickWith(r, st, LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+		ChainSelector:  selector,
+	}, now, stalledSlot)
+
+	assert.Empty(
+		t,
+		pub.byType(event.ChainsyncResyncEventType),
+		"an unverified advertised tip must not recycle a different peer's "+
+			"connection",
+	)
+	assert.Equal(t, 0, ledger.reconcileCallCount())
+}
+
+// TestTickPlateauUsesAdvertisedTipWithNoActiveClient covers the other half of
+// that condition: with no active chainsync client the plateau falls back to the
+// best peer as its target, so the awaiting peer is again the connection that
+// gets recycled and its advertised tip is spent on itself. This is also the
+// state a node reaches when the previous resync left it with no promoted
+// client at all.
+func TestTickPlateauUsesAdvertisedTipWithNoActiveClient(t *testing.T) {
+	const (
+		stalledSlot    = 2810012
+		advertisedSlot = 2810823
+	)
+	connId := testConnId(9)
+	ledger := &fakeLedger{
+		tip:                 testTip(stalledSlot, 50),
+		primaryChainTipSlot: stalledSlot,
+		atTip:               true,
+	}
+	state := &fakeChainsyncState{
+		tracked: []chainsync.TrackedClient{
+			activeClient(connId, stalledSlot),
+		},
+	}
+	best := connId
+	selector := &fakeChainSelector{
+		bestPeer: &best,
+		peerTips: map[string]*chainselection.PeerChainTip{
+			connId.String(): rollbackRegisteredPeer(
+				connId,
+				stalledSlot,
+				advertisedSlot,
+			),
+		},
+	}
+	pub := newFakePublisher()
+	r, _ := newTestRecycler(t, ledger, state, selector, pub, Config{})
+
+	now := time.Now()
+	st := newTestTickState(stalledSlot, now.Add(-25*time.Minute))
+	st.lastPrimaryChainTipSlot = ledger.primaryChainTipSlot
+
+	runTickWith(r, st, LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+		ChainSelector:  selector,
+	}, now, stalledSlot)
+
+	events := pub.byType(event.ChainsyncResyncEventType)
+	require.Len(t, events, 1)
+	resyncEvt, ok := events[0].evt.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	assert.Equal(
+		t,
+		connId,
+		resyncEvt.ConnectionId,
+		"with no active client the plateau recycles the awaiting peer itself",
+	)
+}
+
+// TestTickPlateauIgnoresAdvertisedTipOfAReplacedConnection pins that the
+// own-connection check is ConnectionId equality, not the rendered address
+// string. A replacement connection to the same peer (listen-port reuse) renders
+// identically to the one it replaced while being a distinct connection, and
+// chainselection keys peerTips by ConnectionId, so the selector can still be
+// exposing the OLD peer's tip. Matching on the rendering would let that stale
+// tip authorize recycling the replacement — which is the honest, active
+// connection. The cooldown map keys on the rendering on purpose; an
+// authorization must not.
+func TestTickPlateauIgnoresAdvertisedTipOfAReplacedConnection(t *testing.T) {
+	const (
+		stalledSlot    = 2810012
+		fabricatedSlot = 9999999
+	)
+	stale := testConnId(7)
+	replacement := testConnId(7)
+	require.Equal(
+		t,
+		stale.String(),
+		replacement.String(),
+		"fixture must render identically to exercise the string-match trap",
+	)
+	require.False(
+		t,
+		stale == replacement,
+		"fixture must be a distinct connection identity",
+	)
+
+	active := replacement
+	ledger := &fakeLedger{
+		tip:                 testTip(stalledSlot, 50),
+		primaryChainTipSlot: stalledSlot,
+		atTip:               true,
+	}
+	state := &fakeChainsyncState{
+		tracked: []chainsync.TrackedClient{
+			activeClient(replacement, stalledSlot),
+		},
+		activeConn: &active,
+	}
+	best := stale
+	peerTip := rollbackRegisteredPeer(stale, stalledSlot, fabricatedSlot)
+	require.True(t, peerTip.AwaitingFirstHeader())
+	selector := &fakeChainSelector{
+		bestPeer: &best,
+		peerTips: map[string]*chainselection.PeerChainTip{
+			stale.String(): peerTip,
+		},
+	}
+	pub := newFakePublisher()
+	r, _ := newTestRecycler(t, ledger, state, selector, pub, Config{})
+
+	now := time.Now()
+	st := newTestTickState(stalledSlot, now.Add(-25*time.Minute))
+	st.lastPrimaryChainTipSlot = ledger.primaryChainTipSlot
+
+	runTickWith(r, st, LiveComponents{
+		Ledger:         ledger,
+		ChainsyncState: state,
+		ChainSelector:  selector,
+	}, now, stalledSlot)
+
+	assert.Empty(
+		t,
+		pub.byType(event.ChainsyncResyncEventType),
+		"a stale peer tip must not authorize recycling the replacement "+
+			"connection that merely renders the same",
 	)
 }
 
