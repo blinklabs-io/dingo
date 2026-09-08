@@ -1075,34 +1075,29 @@ func newChainsyncServerFixtureLogging(
 	return f, logBuf
 }
 
-// TestChainsyncServerRequestNextConnErrorAfterAwaitReplyUnparksClient covers
-// the error-channel exit: the waiter gives up on the connection while the peer
-// is parked, so it must drop the transport rather than return silently. Neither
-// consumer of the error closes it otherwise -- the waiter returned silently and
+// TestChainsyncServerAwaitedWaiterClosesOnConnectionError covers the waiter's
+// error-channel exit: it gives up on the connection while the peer it parked is
+// still in MustReply, so it must drop the transport rather than return
+// silently. Nothing else closes it -- the waiter returned silently and
 // ConnectionManager.RemoveConnection only unregisters -- so before the fix the
-// peer stayed parked whichever consumer won.
+// peer stayed parked whichever consumer took the error.
 //
-// The peer is parked through the real protocol first, so this is the genuine
-// MustReply state; the waiter is then driven over a single-consumer stand-in
-// for the connection (see stubChainsyncServerConnection) whose Close is the
-// real one. What the waiter does with an error it has received is the same
-// either way, and that is what this asserts.
-func TestChainsyncServerRequestNextConnErrorAfterAwaitReplyUnparksClient(
+// The waiter is driven directly, over a single-consumer stand-in for the
+// connection whose Close is the real one, rather than through a peer parked by
+// the protocol. Parking arms the production waiter on the real error channel,
+// and a test cannot address one consumer of that shared channel, so the error
+// would still have to go to a second waiter -- which would then be a second
+// goroutine driving the same ChainIter. The end-to-end release of a genuinely
+// parked peer is covered by
+// TestChainsyncServerRequestNextIteratorErrorAfterAwaitReplyUnparksClient and
+// TestChainsyncServerRequestNextNilBlockAfterAwaitReplyUnparksClient, which
+// park through the protocol and drive the serve path on the real connection.
+func TestChainsyncServerAwaitedWaiterClosesOnConnectionError(
 	t *testing.T,
 ) {
 	const connErrText = "simulated protocol error for the parked waiter"
 	f, logBuf := newChainsyncServerFixtureLogging(t)
-	f.parkInAwaitReply(t)
-	observed, ok := f.observedConnId()
-	require.True(t, ok, "the server callbacks must have run")
-	require.Equal(t, f.conn.Id(), observed)
-	// AddClient returns the state the parked RequestNext registered rather
-	// than a second one, so the waiter below shares the peer's real iterator.
-	clientState, err := f.o.chainsyncState.AddClient(
-		f.conn.Id(),
-		ocommon.NewPointOrigin(),
-	)
-	require.NoError(t, err)
+	clientState := f.registerClientAtOrigin(t)
 
 	conn := newStubChainsyncServerConnection(f.conn.Close)
 	done := make(chan struct{})
@@ -1146,11 +1141,11 @@ func TestChainsyncServerRequestNextConnErrorAfterAwaitReplyUnparksClient(
 // either way, so what is distinct here is the reason -- the nil must not reach
 // the log as an empty or malformed error.
 //
-// Unlike the test above this one does not park the peer through the protocol,
-// deliberately: a parked peer arms the production waiter on the real error
-// channel, which the delegated Close would then wake with a closure of its own,
-// and its teardown reason is textually identical to the one under test. With no
-// second waiter the logged reason is attributable to this one.
+// Like its sibling it drives the waiter directly rather than through a parked
+// peer, which here is also what makes the reason attributable: a parked peer
+// arms the production waiter on the real error channel, and the delegated Close
+// would wake that waiter with a closure of its own whose teardown reason is
+// textually identical to the one under test.
 func TestChainsyncServerAwaitedWaiterClosesOnErrorChannelClosure(
 	t *testing.T,
 ) {
