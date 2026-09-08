@@ -123,7 +123,9 @@ func TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 				Steps:  1_000_000,
 				Memory: 1_000_000,
 			},
-			CostModels: map[uint][]int64{0: {}},
+			CostModels: map[uint][]int64{
+				0: defaultMachineCostModel(t, lang.LanguageVersionV1),
+			},
 		},
 	)
 	require.Error(t, err)
@@ -154,7 +156,9 @@ func TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 						Steps:  1_000,
 						Memory: 100,
 					},
-					CostModels: map[uint][]int64{0: {}},
+					CostModels: map[uint][]int64{
+						0: defaultMachineCostModel(t, lang.LanguageVersionV1),
+					},
 				},
 			)
 			require.Error(t, err)

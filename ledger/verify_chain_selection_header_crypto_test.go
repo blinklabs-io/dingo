@@ -146,6 +146,50 @@ func TestValidateChainSelectionHeaderCryptoDoesNotAdvanceEpochCache(
 	)
 }
 
+// TestValidateChainSelectionHeaderCryptoDefersOnUnpublishedNonce is a
+// regression test for a bot-review finding: a cached epoch entry that
+// genuinely covers the header's slot but has no published nonce yet (a
+// post-Byron epoch transiently, or Byron always) must defer, not hard-fail.
+// ShouldVerifyChainSelectionHeaderCrypto now returns true for every
+// non-Mithril slot (see TestShouldVerifyChainSelectionHeaderCryptoIgnoresMissingNonce),
+// so this case is reachable in practice: without IsHeaderVerificationDeferred
+// also recognizing errEpochNonceUnavailable, an honest peer whose header
+// simply arrived before the local nonce was published would be treated as
+// invalid and have its connection recycled.
+func TestValidateChainSelectionHeaderCryptoDefersOnUnpublishedNonce(
+	t *testing.T,
+) {
+	const targetSlot = uint64(500)
+	ls := &LedgerState{
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{Point: ocommon.NewPoint(500, []byte("tip"))},
+		epochCache: []models.Epoch{{
+			EpochId:       0,
+			StartSlot:     0,
+			SlotLength:    1_000,
+			LengthInSlots: 1_000,
+			EraId:         eras.ConwayEraDesc.Id,
+			Nonce:         nil,
+		}},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	err := ls.ValidateChainSelectionHeaderCrypto(
+		&mockBabbageBlock{slot: targetSlot},
+	)
+	require.Error(t, err)
+	assert.True(
+		t,
+		IsHeaderVerificationDeferred(err),
+		"a covered epoch with no published nonce yet must defer, not "+
+			"hard-fail an honest header",
+	)
+}
+
 // TestShouldVerifyChainSelectionHeaderCryptoMatchesChainsyncGate proves that
 // ShouldVerifyChainSelectionHeaderCrypto shares the same Mithril exemption as
 // the ledger's own chainsync header-queue gate (shouldEnforceBlockPipelineCrypto),

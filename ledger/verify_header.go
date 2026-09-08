@@ -101,9 +101,18 @@ var (
 
 // IsHeaderVerificationDeferred reports whether header-only verification could
 // not proceed because required ledger state, epoch data, or stake snapshot
-// data is not available yet.
+// data is not available yet. errEpochNonceUnavailable is included: a cached
+// epoch entry with no published nonce yet (Byron always, or a post-Byron
+// epoch transiently) is the same "not ready, not proof of invalidity"
+// condition as a slot outside the published cache entirely -- treating it as
+// a hard failure would let a chain-selection or Leios-announcement caller
+// wrongly reject and recycle an honest peer over a transient local gap
+// instead of retrying once the nonce is published (matches how
+// errBlockPipelineEta0Unavailable, which wraps the same sentinel, is already
+// treated as non-fatal on the block-pipeline path).
 func IsHeaderVerificationDeferred(err error) bool {
-	return errors.Is(err, errHeaderVerificationDeferred)
+	return errors.Is(err, errHeaderVerificationDeferred) ||
+		errors.Is(err, errEpochNonceUnavailable)
 }
 
 func (b headerOnlyBlock) Header() ledger.BlockHeader { return b.header }

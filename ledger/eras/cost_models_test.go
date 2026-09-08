@@ -15,6 +15,7 @@
 package eras
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/plutigo/lang"
@@ -36,8 +37,23 @@ func TestRequiredCostModelFailsClosedOnMissingEntry(t *testing.T) {
 		require.Error(t, err)
 		require.ErrorContains(t, err, "missing PlutusV3 cost model")
 	})
-	t.Run("present key returns its model", func(t *testing.T) {
-		model := []int64{1, 2, 3}
+	t.Run("present but undersized model returns a configuration error", func(t *testing.T) {
+		// Three entries is nowhere near PlutusV2's 332 required parameters.
+		// costModelFromList would silently default-fill the other 329, the
+		// same "wrong, not this network's configured cost parameters"
+		// problem a missing key has -- requiredCostModel must reject this
+		// the same way.
+		_, err := requiredCostModel(
+			map[uint][]int64{1: {1, 2, 3}},
+			1,
+			"PlutusV2",
+		)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "PlutusV2 cost model")
+		require.ErrorContains(t, err, "has 3 parameters")
+	})
+	t.Run("present, complete model returns it unchanged", func(t *testing.T) {
+		model := syntheticFullCostModel(t, lang.LanguageVersionV2)
 		got, err := requiredCostModel(
 			map[uint][]int64{1: model},
 			1,
@@ -46,6 +62,88 @@ func TestRequiredCostModelFailsClosedOnMissingEntry(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, model, got)
 	})
+}
+
+// syntheticFullCostModel returns a cost model of exactly the length
+// requiredCostModel requires for the given version, with every parameter
+// set to the same placeholder value. It exists so tests across this package
+// that need a complete (non-fallback) cost model to satisfy
+// requiredCostModel's length check -- but aren't about cost-model realism,
+// only about exercising phase-2 evaluation, budget comparison, or error
+// classification -- don't have to hand-maintain a 332/350-entry literal
+// pinned to a real network. Tests that assert specific CPU/memory numbers
+// must treat those numbers as tied to this specific placeholder value, not
+// to any real network's cost model.
+func syntheticFullCostModel(
+	t testing.TB,
+	version lang.LanguageVersion,
+) []int64 {
+	t.Helper()
+	names := lang.GetParamNamesForVersion(version)
+	model := make([]int64, len(names))
+	for i := range model {
+		model[i] = 100
+	}
+	return model
+}
+
+// defaultMachineCostMachineCosts pins plutigo's cek.DefaultMachineCosts
+// (cpu, mem), keyed by the "cek<Name>Cost" parameter prefix
+// MachineCosts.update matches on. plutigo has no public API to read
+// DefaultMachineCosts, so these are copied from cek/cost_model_machine.go's
+// literal; a future plutigo bump that changes them would need this updated
+// too, same as TestCostModelParameterTablesMatchLiveNetworks already
+// tracks plutigo's parameter-table shape.
+var defaultMachineCostMachineCosts = map[string][2]int64{
+	"cekStartupCost": {100, 100},
+	"cekVarCost":     {16000, 100},
+	"cekConstCost":   {16000, 100},
+	"cekLamCost":     {16000, 100},
+	"cekDelayCost":   {16000, 100},
+	"cekForceCost":   {16000, 100},
+	"cekApplyCost":   {16000, 100},
+	"cekBuiltinCost": {16000, 100},
+	"cekConstrCost":  {16000, 100},
+	"cekCaseCost":    {16000, 100},
+}
+
+// defaultMachineCostModel returns a complete cost model for the given
+// version that reproduces plutigo's real DefaultMachineCosts for every CEK
+// machine-step parameter, and a placeholder for every builtin-function cost
+// parameter. A test whose script never invokes an actual Plutus builtin
+// function (only constants/lambdas/application, no e.g. addInteger) gets
+// the exact same evaluated cost plutigo's empty-cost-model fallback used to
+// silently produce -- matching known-good, externally-verified reference
+// numbers -- while still supplying requiredCostModel a complete,
+// non-fallback-triggering list. A script that does invoke a builtin
+// function needs its own model with real values for that builtin, since
+// this helper's builtin-cost entries are placeholders.
+func defaultMachineCostModel(
+	t testing.TB,
+	version lang.LanguageVersion,
+) []int64 {
+	t.Helper()
+	names := lang.GetParamNamesForVersion(version)
+	model := make([]int64, len(names))
+	for i, name := range names {
+		prefix, suffix, ok := strings.Cut(name, "-")
+		if costs, isMachineCost := defaultMachineCostMachineCosts[prefix]; ok &&
+			isMachineCost {
+			switch suffix {
+			case "exBudgetCPU":
+				model[i] = costs[0]
+				continue
+			case "exBudgetMemory":
+				model[i] = costs[1]
+				continue
+			}
+		}
+		// Builtin-function cost parameter: callers use scripts that never
+		// invoke an actual builtin, so this value doesn't affect the
+		// evaluated cost -- any valid placeholder works.
+		model[i] = 100
+	}
+	return model
 }
 
 // TestCostModelParameterTablesMatchLiveNetworks pins plutigo's cost model

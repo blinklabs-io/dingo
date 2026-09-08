@@ -14,16 +14,33 @@
 
 package eras
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/blinklabs-io/plutigo/lang"
+)
+
+// costModelKeyVersions maps the CostModels map's language-version key (as
+// used by protocol parameters: 0=PlutusV1, 1=PlutusV2, 2=PlutusV3) to
+// plutigo's typed LanguageVersion, so requiredCostModel can check a supplied
+// cost model against the exact parameter count that version requires.
+var costModelKeyVersions = map[uint]lang.LanguageVersion{
+	0: lang.LanguageVersionV1,
+	1: lang.LanguageVersionV2,
+	2: lang.LanguageVersionV3,
+}
 
 // requiredCostModel returns the cost model for a Plutus language version, or
-// an error when the protocol parameters don't carry one. A plain map index
-// (pp.CostModels[key]) returns a nil slice for a missing entry, and
-// plutigo's costModelFromList silently treats a nil/short cost-model slice
-// as "use the built-in default cost model" instead of failing -- evaluating
-// a script under the wrong (default, not this network's configured) cost
-// parameters instead of refusing to evaluate it at all. Callers must use
-// this instead of indexing CostModels directly.
+// an error when the protocol parameters don't carry a complete one. A plain
+// map index (pp.CostModels[key]) returns a nil slice for a missing entry,
+// and plutigo's costModelFromList treats a nil, empty, or short cost-model
+// slice as "use the built-in default cost model for whatever parameters the
+// data didn't cover" instead of failing -- evaluating a script under the
+// wrong (default, not this network's configured) cost parameters instead of
+// refusing to evaluate it at all. A present-but-undersized list has exactly
+// the same problem: costModelFromList silently default-fills whatever
+// parameters run past the end of a short list. Callers must use this
+// instead of indexing CostModels directly.
 func requiredCostModel(
 	costModels map[uint][]int64,
 	key uint,
@@ -35,6 +52,17 @@ func requiredCostModel(
 			"missing %s cost model in protocol parameters",
 			versionName,
 		)
+	}
+	if version, versionOk := costModelKeyVersions[key]; versionOk {
+		want := len(lang.GetParamNamesForVersion(version))
+		if len(model) < want {
+			return nil, fmt.Errorf(
+				"%s cost model in protocol parameters has %d parameters, want at least %d",
+				versionName,
+				len(model),
+				want,
+			)
+		}
 	}
 	return model, nil
 }

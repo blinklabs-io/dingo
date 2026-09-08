@@ -356,16 +356,15 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 	// that batch on a successful return, producing the complete 112100 CPU / 800
 	// memory cost.
 	//
-	// The empty-but-present CostModels entries below deliberately rely on
-	// plutigo's built-in default cost model (see requiredCostModel in
-	// cost_models.go): they satisfy the fail-closed "key present" check this
-	// issue (#3528) added, but the pinned 112100/800 assertions still measure
-	// whatever plutigo's default table prices, not a real network's
-	// configured cost model. That's fine here -- this test is about slippage-
-	// batch budget accounting, not cost-model realism -- but it means these
-	// numbers would change if plutigo's default table ever changes, and this
-	// test cannot detect a real network's cost model silently drifting from
-	// that default.
+	// The CostModels entries below use defaultMachineCostModel, which pins
+	// plutigo's real cek.DefaultMachineCosts values (see that helper's doc
+	// comment): this script never invokes an actual builtin function, only
+	// CEK machine steps, so it reproduces the exact 112100/800 numbers
+	// plutigo's own default cost model already produced before
+	// requiredCostModel (issue #3528) started rejecting the incomplete
+	// cost models that used to silently trigger that fallback. These
+	// numbers would still change if plutigo's DefaultMachineCosts changes,
+	// same as before.
 	program := &syn.Program[syn.DeBruijn]{
 		Version: lang.LanguageVersionV1,
 		Term: &syn.Lambda[syn.DeBruijn]{
@@ -396,7 +395,9 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 					&alonzo.AlonzoProtocolParameters{
 						ProtocolMajor: 5,
 						MaxTxExUnits:  maxTxExUnits,
-						CostModels:    map[uint][]int64{0: {}},
+						CostModels: map[uint][]int64{
+							0: defaultMachineCostModel(t, lang.LanguageVersionV1),
+						},
 					},
 				)
 			},
@@ -414,7 +415,9 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 					&babbage.BabbageProtocolParameters{
 						ProtocolMajor: 7,
 						MaxTxExUnits:  maxTxExUnits,
-						CostModels:    map[uint][]int64{1: {}},
+						CostModels: map[uint][]int64{
+							1: defaultMachineCostModel(t, lang.LanguageVersionV2),
+						},
 					},
 				)
 			},
