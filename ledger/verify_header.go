@@ -161,9 +161,7 @@ func (ls *LedgerState) ValidateBlockHeaderCrypto(
 
 // ShouldVerifyChainSelectionHeaderCrypto reports whether a header at the
 // given slot is eligible to have its cryptography verified right now via
-// ValidateChainSelectionHeaderCrypto. It mirrors the same exemption the
-// ledger's own chainsync header-queue path already applies
-// (shouldVerifyChainsyncHeaderCrypto): verification is skipped only for
+// ValidateChainSelectionHeaderCrypto. Verification is skipped only for
 // slots already covered by an imported Mithril snapshot, since those slots
 // were authenticated by the certificate chain during import and the
 // restored database does not retain every historical epoch nonce. It is not
@@ -172,10 +170,20 @@ func (ls *LedgerState) ValidateBlockHeaderCrypto(
 // because this returns false must still treat the header as eligible, not
 // reject it -- the same trust boundary the ledger's own pipeline already
 // extends to this data.
+//
+// Unlike shouldEnforceBlockPipelineCrypto (the ledger's own chainsync
+// header-queue gate), this does NOT also skip when the epoch nonce isn't
+// cached yet: that gate can rely on a later retry once the nonce becomes
+// available, but chain selection has no such retry -- a header this
+// returns false for is never re-verified. ValidateChainSelectionHeaderCrypto
+// already handles a not-yet-available epoch by returning a deferred error
+// (see IsHeaderVerificationDeferred) rather than failing, so it's always
+// safe to attempt verification here and let the verifier decide.
 func (ls *LedgerState) ShouldVerifyChainSelectionHeaderCrypto(
 	slot uint64,
 ) bool {
-	return ls.shouldVerifyChainsyncHeaderCrypto(slot)
+	mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
+	return mithrilLedgerSlot == 0 || slot > mithrilLedgerSlot
 }
 
 // ValidateChainSelectionHeaderCrypto verifies a header's VRF/KES cryptography

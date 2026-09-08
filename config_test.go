@@ -180,6 +180,18 @@ func TestNewConfigDoesNotDefaultCustomMempoolConfig(t *testing.T) {
 	assert.Empty(t, selection.Config)
 }
 
+// TestNewConfigDefaultsValidateForgedBlock is a regression test for issue
+// #3528: NewConfig builds its own internalconfig.Config literal rather than
+// starting from internalconfig.DefaultConfig, so the fail-closed
+// ValidateForgedBlock=true default had to be set in both places. A caller
+// using the programmatic/library API (NewConfig) rather than the
+// YAML/env-loaded path must still get self-validation of forged blocks
+// enabled by default.
+func TestNewConfigDefaultsValidateForgedBlock(t *testing.T) {
+	cfg := NewConfig()
+	assert.True(t, cfg.cfg.ValidateForgedBlock)
+}
+
 func TestWithPluginSelectionSnapshotsConfig(t *testing.T) {
 	t.Parallel()
 

@@ -4562,58 +4562,18 @@ func (ls *LedgerState) securityParamForCurrentEraSnapshot() int {
 	return ls.securityParamForEraOrDefault(eraId)
 }
 
-// shouldSkipPhase2ValidationForBlock reports whether a block is deep enough
-// behind the reference tip that its producer-supplied isValid flag can be
-// trusted for replay-only Plutus Phase 2 results.
-func (ls *LedgerState) shouldSkipPhase2ValidationForBlock(
-	blockNumber uint64,
-	referenceBlockNumber uint64,
-	eraId uint,
-) bool {
-	securityParam, ok := ls.securityParamForEra(eraId)
-	if !ok || referenceBlockNumber < securityParam {
-		return false
-	}
-	immutableBlockNumber := referenceBlockNumber - securityParam
-	return blockNumber <= immutableBlockNumber
-}
-
-// shouldSkipPhase2ValidationForBlockAtCurrentTip samples the primary chain tip
-// for this specific block. The chain can advance or roll back while ledger
-// processing drains a read batch, so callers must not reuse a sub-batch-start
-// reference tip for all blocks in the transaction.
-func (ls *LedgerState) shouldSkipPhase2ValidationForBlockAtCurrentTip(
-	blockNumber uint64,
-	eraId uint,
-) bool {
-	referenceTip := ls.chain.Tip()
-	return ls.shouldSkipPhase2ValidationForBlock(
-		blockNumber,
-		referenceTip.BlockNumber,
-		eraId,
-	)
-}
-
-// shouldSkipConfiguredPhase2Validation preserves the trusted-replay shortcut
-// only when historical validation is disabled AND the caller has explicitly
-// opted into TrustedReplay -- a deliberate operator action reserved for
-// loading an already-vetted, trusted chain dump (see
-// internal/node/load.go), not the ordinary ValidateHistorical=false setting
-// most nodes run bulk sync with. Gating on !validationEnabled alone let
-// every node doing ordinary historical sync skip phase-2 evaluation for any
-// deep-enough block indefinitely, far wider than the narrow recovery window
-// this shortcut is meant for. When ValidateHistorical is enabled, or
-// TrustedReplay was not explicitly requested, local phase-2 evaluation
-// remains active across the stability boundary.
-func shouldSkipConfiguredPhase2Validation(
-	validationEnabled bool,
-	trustedReplay bool,
-	shouldValidateBlock bool,
-	deepHistoricalBlock bool,
-) bool {
-	return trustedReplay && !validationEnabled &&
-		shouldValidateBlock && deepHistoricalBlock
-}
+// Issue #3528: the historical-sync phase-2 shortcut that used to live here
+// (shouldSkipPhase2ValidationForBlock, shouldSkipPhase2ValidationForBlockAtCurrentTip,
+// shouldSkipConfiguredPhase2Validation) was meant to skip re-running Plutus
+// evaluation only for a deep, already-immutable block during a deliberate
+// TrustedReplay import. It was provably unreachable: historicalBlockValidationDecision
+// forces shouldValidateBlock to false whenever TrustedReplay is true (loading
+// a trusted dump skips per-tx validation, phase 1 and phase 2, entirely), so
+// no input combination could ever make "skip phase 2 but still run phase 1
+// during trusted replay" true. Removed rather than reworked, since making it
+// reachable would require changing TrustedReplay's own all-or-nothing
+// validation skip, which is unrelated to this issue. Phase 2 now always
+// evaluates whenever per-tx validation runs at all.
 
 // StabilityWindow returns the Ouroboros security stability window for the
 // current era in slots. For Byron the window is 2k; for Shelley+ it is 3k/f.
@@ -6567,16 +6527,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							blocksProcessed++
 							continue
 						}
-						// Process block
-						skipPhase2Validation := shouldSkipConfiguredPhase2Validation(
-							snapshotValidationEnabled,
-							ls.config.TrustedReplay,
-							shouldValidateBlock,
-							ls.shouldSkipPhase2ValidationForBlockAtCurrentTip(
-								next.BlockNumber(),
-								snapshotEra.Id,
-							),
-						)
+						// Process block. Phase 2 (Plutus evaluation) always
+						// runs when per-tx validation runs at all -- see the
+						// issue #3528 removal note above
+						// historicalBlockValidationDecision for why the old
+						// historical-sync/TrustedReplay phase-2 shortcut was
+						// deleted rather than reworked.
+						const skipPhase2Validation = false
 						delta, err = ls.ledgerProcessBlock(
 							txn,
 							tmpPoint,

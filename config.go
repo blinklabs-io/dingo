@@ -687,18 +687,24 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 	// Start with a default internal config
 	c := Config{
 		cfg: &internalconfig.Config{
-			BindAddr:           "0.0.0.0",
-			APIBindAddr:        internalconfig.DefaultAPIBindAddr,
-			StorageMode:        string(StorageModeCore),
-			RunMode:            internalconfig.RunModeServe,
-			Cache:              internalconfig.DefaultCacheConfig(),
-			Chainsync:          internalconfig.DefaultChainsyncConfig(),
-			GenesisBootstrap:   internalconfig.DefaultGenesisBootstrapConfig(),
-			HistoryExpiry:      internalconfig.DefaultHistoryExpiryConfig(),
-			KoiosParity:        internalconfig.DefaultKoiosParityConfig(),
-			Logging:            internalconfig.DefaultLoggingConfig(),
-			Midnight:           internalconfig.DefaultMidnightConfig(),
-			CORSAllowedOrigins: []string{"*"},
+			BindAddr:    "0.0.0.0",
+			APIBindAddr: internalconfig.DefaultAPIBindAddr,
+			StorageMode: string(StorageModeCore),
+			RunMode:     internalconfig.RunModeServe,
+			// Fail closed: self-validate locally-forged blocks before
+			// adoption and diffusion unless an operator explicitly opts
+			// out. Mirrors internalconfig.DefaultConfig's forging default
+			// -- this literal is a separate default source, not backfilled
+			// from DefaultConfig, so it must be set here too.
+			ValidateForgedBlock: true,
+			Cache:               internalconfig.DefaultCacheConfig(),
+			Chainsync:           internalconfig.DefaultChainsyncConfig(),
+			GenesisBootstrap:    internalconfig.DefaultGenesisBootstrapConfig(),
+			HistoryExpiry:       internalconfig.DefaultHistoryExpiryConfig(),
+			KoiosParity:         internalconfig.DefaultKoiosParityConfig(),
+			Logging:             internalconfig.DefaultLoggingConfig(),
+			Midnight:            internalconfig.DefaultMidnightConfig(),
+			CORSAllowedOrigins:  []string{"*"},
 			Plugins: internalconfig.PluginsConfig{
 				Storage: internalconfig.StoragePluginsConfig{
 					Blob: hostplugin.Selection{

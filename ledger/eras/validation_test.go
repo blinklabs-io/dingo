@@ -355,6 +355,17 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 	// that its CEK steps remain in the trailing slippage batch. Haskell flushes
 	// that batch on a successful return, producing the complete 112100 CPU / 800
 	// memory cost.
+	//
+	// The empty-but-present CostModels entries below deliberately rely on
+	// plutigo's built-in default cost model (see requiredCostModel in
+	// cost_models.go): they satisfy the fail-closed "key present" check this
+	// issue (#3528) added, but the pinned 112100/800 assertions still measure
+	// whatever plutigo's default table prices, not a real network's
+	// configured cost model. That's fine here -- this test is about slippage-
+	// batch budget accounting, not cost-model realism -- but it means these
+	// numbers would change if plutigo's default table ever changes, and this
+	// test cannot detect a real network's cost model silently drifting from
+	// that default.
 	program := &syn.Program[syn.DeBruijn]{
 		Version: lang.LanguageVersionV1,
 		Term: &syn.Lambda[syn.DeBruijn]{

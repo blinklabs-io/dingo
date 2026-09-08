@@ -39,6 +39,7 @@ import (
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -616,27 +617,6 @@ func registerGenesisForkTestPeer(
 	return oConn.Id()
 }
 
-// forkChainEmptyConwayBodyHash returns the block body hash for a Conway
-// block with empty transaction components, matching
-// internal/test/testutil's conwayEmptyBodyHash. It's independent of the
-// header, so every generated fork block shares it.
-func forkChainEmptyConwayBodyHash(t *testing.T) lcommon.Blake2b256 {
-	t.Helper()
-	block := &conway.ConwayBlock{BlockHeader: &conway.ConwayBlockHeader{}}
-	tmp, err := cbor.Encode(block)
-	require.NoError(t, err)
-	var comps []cbor.RawMessage
-	_, err = cbor.Decode(tmp, &comps)
-	require.NoError(t, err)
-	require.Len(t, comps, 5)
-	var concat []byte
-	for i := 1; i < 5; i++ {
-		h := lcommon.Blake2b256Hash(comps[i])
-		concat = append(concat, h.Bytes()...)
-	}
-	return lcommon.Blake2b256Hash(concat)
-}
-
 // generateValidatedConwayForkChain is fixtures.GenerateConwayChain's
 // structural counterpart with genuine VRF/KES crypto: issue #3528 made
 // header admission require real cryptographic verification (previously
@@ -688,7 +668,7 @@ func generateValidatedConwayForkChain(
 	binary.BigEndian.PutUint64(opCertBody[40:48], uint64(opCertKesPeriod))
 	opCertSig := ed25519.Sign(coldPrivKey, opCertBody[:])
 
-	bodyHash := forkChainEmptyConwayBodyHash(t)
+	bodyHash := testutil.ConwayEmptyBodyHash(t)
 
 	var issuerVkey lcommon.IssuerVkey
 	copy(issuerVkey[:], coldPubKey)

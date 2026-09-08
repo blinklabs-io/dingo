@@ -148,7 +148,7 @@ func TestValidateChainSelectionHeaderCryptoDoesNotAdvanceEpochCache(
 
 // TestShouldVerifyChainSelectionHeaderCryptoMatchesChainsyncGate proves that
 // ShouldVerifyChainSelectionHeaderCrypto shares the same Mithril exemption as
-// the ledger's own chainsync header-queue gate (shouldVerifyChainsyncHeaderCrypto),
+// the ledger's own chainsync header-queue gate (shouldEnforceBlockPipelineCrypto),
 // so a competing peer's header is exempt under exactly the same condition the
 // applied chain already is. Issue #3528: a coarse ValidateHistorical=false
 // historical-sync toggle must not exempt header crypto -- only a slot a
@@ -185,5 +185,53 @@ func TestShouldVerifyChainSelectionHeaderCryptoMatchesChainsyncGate(
 		t,
 		ls.ShouldVerifyChainSelectionHeaderCrypto(slot),
 		"a Mithril-covered slot must be exempt, matching the applied-chain gate",
+	)
+}
+
+// TestShouldVerifyChainSelectionHeaderCryptoIgnoresMissingNonce is a
+// regression test for a bot-review finding: ShouldVerifyChainSelectionHeaderCrypto
+// used to delegate to shouldEnforceBlockPipelineCrypto, which also returns
+// false when the epoch nonce isn't cached yet -- a condition the chainsync
+// header-queue path can safely retry later, but chain selection cannot (a
+// header it skips verifying is never re-verified). That let an unverified
+// peer header influence Genesis density/corroboration silently, with no
+// later check. It must instead return true for any non-Mithril slot and let
+// ValidateChainSelectionHeaderCrypto's own deferred-error handling decide,
+// which is safe to call unconditionally.
+func TestShouldVerifyChainSelectionHeaderCryptoIgnoresMissingNonce(
+	t *testing.T,
+) {
+	const futureSlot = uint64(999_999)
+	ls := &LedgerState{
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{Point: ocommon.NewPoint(500, []byte("tip"))},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	require.False(
+		t,
+		ls.hasCachedEpochNonceForSlot(futureSlot),
+		"test setup: this slot's epoch nonce must not be cached",
+	)
+	assert.True(
+		t,
+		ls.ShouldVerifyChainSelectionHeaderCrypto(futureSlot),
+		"a missing epoch nonce must not exempt a non-Mithril slot from "+
+			"verification -- ValidateChainSelectionHeaderCrypto must be given "+
+			"the chance to return a deferred error instead",
+	)
+
+	err := ls.ValidateChainSelectionHeaderCrypto(
+		&mockBabbageBlock{slot: futureSlot},
+	)
+	require.Error(t, err)
+	assert.True(
+		t,
+		IsHeaderVerificationDeferred(err),
+		"missing epoch data must defer, not silently pass or hard-reject",
 	)
 }
