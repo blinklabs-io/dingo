@@ -1252,3 +1252,153 @@ func TestForgeUpstreamStalenessIsOffByDefault(t *testing.T) {
 		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipAppliedStale),
 	)
 }
+
+// forgeStalenessPanicEbSource is a LeiosVerifiedEbSlot callback that panics,
+// standing in for an embedder-supplied implementation that misbehaves. The
+// callback is exported configuration, so the forger cannot assume it returns.
+type forgeStalenessPanicEbSource struct{ calls int }
+
+func (s *forgeStalenessPanicEbSource) slot() uint64 {
+	s.calls++
+	panic("endorser-block source boom")
+}
+
+// TestForgeRecoversPanicFromEndorserBlockSource pins that a panicking
+// LeiosVerifiedEbSlot cannot take down the producer-loop goroutine, the same
+// contract every other pluggable forging callback has. A recovered panic means
+// "no corroborated endorser block", which is the state a node without the
+// signal is in anyway, so the forge proceeds on the remaining evidence rather
+// than being refused by a fault in an optional input.
+func TestForgeRecoversPanicFromEndorserBlockSource(t *testing.T) {
+	var logs bytes.Buffer
+	source := &forgeStalenessPanicEbSource{}
+	block := newForgerTestBlock(300, 2)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode: ModeProduction,
+		Logger: slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		})),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		SlotClock: forgerTestSlotClock{
+			currentSlot:       300,
+			chainTipSlot:      299,
+			frontierExplicit:  true,
+			frontierSlot:      299,
+			slotsPerKESPeriod: 100,
+		},
+		LeiosVerifiedEbSlot: source.slot,
+		// Both bounds on, so a recovered panic cannot be mistaken for the
+		// gates simply being disabled.
+		ForgeUpstreamStalenessSlots:      50,
+		ForgeAppliedTipStalenessSlots:    50,
+		ForgeEndorserBlockStalenessSlots: 50,
+		PromRegistry:                     prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	require.NotPanics(t, func() {
+		require.NoError(
+			t,
+			forger.checkAndForgeProduction(context.Background()),
+		)
+	})
+
+	require.Equal(t, 1, source.calls)
+	require.Equal(
+		t,
+		1,
+		builder.calls,
+		"a panicking optional signal must not cost the leader slot",
+	)
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			forger.metrics.forgePanicRecovered.WithLabelValues(
+				"endorser_block_slot",
+			),
+		),
+	)
+	require.Contains(t, logs.String(), "forge callback panic recovered")
+}
+
+// forgeStalenessCountingUpstreamClock answers UpstreamSyncStatus with a
+// DIFFERENT value on every call, so a forge cycle that reads it twice cannot
+// agree with itself.
+type forgeStalenessCountingUpstreamClock struct {
+	forgerTestSlotClock
+	calls    *int
+	statuses []uint64
+}
+
+func (c forgeStalenessCountingUpstreamClock) UpstreamSyncStatus() (
+	uint64,
+	bool,
+) {
+	i := *c.calls
+	*c.calls++
+	if i < len(c.statuses) {
+		return c.statuses[i], true
+	}
+	return c.statuses[len(c.statuses)-1], true
+}
+
+// TestForgeReadsUpstreamSyncStatusOncePerCycle pins the single-read contract.
+//
+// The staleness bound and the pre-existing sync gate both need (target,
+// active). Reading the clock twice let one forge cycle evaluate the two
+// against different pairs -- LedgerState derives them from the active
+// connection and syncUpstreamState, both of which move -- so the
+// upstream_target_slot on a refusal could name a target the sync gate never
+// saw, and the two gates could disagree about whether the node was behind.
+//
+// The double returns 0 first and a far-ahead target second. With one read the
+// cycle sees only the zero, which is "no target published yet" and no evidence
+// of staleness, so the node at tip forges. With two reads the sync gate would
+// see the second value and refuse.
+func TestForgeReadsUpstreamSyncStatusOncePerCycle(t *testing.T) {
+	var logs bytes.Buffer
+	calls := 0
+	block := newForgerTestBlock(300, 2)
+	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode: ModeProduction,
+		Logger: slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		})),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		SlotClock: forgeStalenessCountingUpstreamClock{
+			forgerTestSlotClock: forgerTestSlotClock{
+				currentSlot:       300,
+				chainTipSlot:      299,
+				frontierExplicit:  true,
+				frontierSlot:      299,
+				slotsPerKESPeriod: 100,
+			},
+			calls:    &calls,
+			statuses: []uint64{0, 100000},
+		},
+		ForgeUpstreamStalenessSlots: 5,
+		PromRegistry:                prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	require.Equal(
+		t,
+		1,
+		calls,
+		"one forge cycle must read UpstreamSyncStatus once, so the "+
+			"staleness bound, the sync gate and the log line all describe "+
+			"the same upstream snapshot",
+	)
+	require.Equal(t, 1, builder.calls)
+}

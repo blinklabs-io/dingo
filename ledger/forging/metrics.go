@@ -95,11 +95,16 @@ type forgingMetrics struct {
 	// the ledger pipeline is behind this node's own primary chain;
 	// "primary_tip_behind_applied" is the opposite -- the ledger is AHEAD of
 	// the primary chain, which is chain/ledger reconciliation rather than an
-	// apply backlog. Those three are local checks. "eb_manifest_ahead" and
-	// "applied_tip_stale" are not: they mean this node is behind the NETWORK,
-	// both firing on evidence of a block it does not hold, and both are
-	// opt-in so they stay at 0 on a default configuration. See
-	// ARCHITECTURE.md, "Block Production".
+	// apply backlog. Those are local checks. "eb_manifest_ahead", and
+	// "applied_tip_stale" when its UPSTREAM-TARGET bound fires, are not: they
+	// mean this node is behind the NETWORK, both firing on evidence of a block
+	// it does not hold. "applied_tip_stale" from its WALL-CLOCK bound is
+	// neither -- it reports AGE, not network progress: no block for that many
+	// slots is the chain being quiet as readily as this node missing one, and
+	// it is a backstop for the case with no upstream target to compare
+	// against. The "stale_source" field on the log line says which of the two
+	// fired. All three are opt-in and stay at 0 on a default configuration.
+	// See ARCHITECTURE.md, "Block Production".
 	forgeStaleTipSkip *prometheus.CounterVec
 	// Pre-materialized children for the reason label values, so the leader
 	// check does not resolve a label on every skip and neither series is

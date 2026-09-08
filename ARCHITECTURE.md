@@ -4919,11 +4919,19 @@ opt-in:
   primary chain. That is chain/ledger reconciliation, the state the ledger
   resolves at startup by rolling its own tip back to the chain tip, not an
   apply backlog.
-- `eb_manifest_ahead` and `applied_tip_stale` are **not local checks**: both
-  mean this node is **behind the network**, and both fire on evidence of a
-  block the node does not hold -- a corroborated endorser block whose header
-  has not been admitted, or a `newestKnown` that trails the corroborated
-  upstream target or the wall clock. Neither can fire unless an operator has
+- `eb_manifest_ahead` and the upstream-target half of `applied_tip_stale` are
+  **not local checks**: both mean this node is **behind the network**, and
+  both fire on evidence of a block the node does not hold -- a corroborated
+  endorser block whose header has not been admitted, or a `newestKnown` that
+  trails the corroborated upstream target.
+- The wall-clock half of `applied_tip_stale` (`forgeAppliedTipStalenessSlots`)
+  is neither. It reports **age**, not network progress: `newestKnown` trailing
+  the current slot proves only that no block has arrived for that many slots,
+  which on a quiet chain is the chain being quiet rather than this node
+  missing anything. It is a backstop for the case no other reason can see --
+  header admission and ledger application stalled together, with no upstream
+  target to compare against -- and `stale_source` on the log line says which
+  of the two bounds fired. None of these three can fire unless an operator has
   set the bound that governs it, so on a default configuration both series
   stay at 0. When one does fire, the applied tip and the primary chain tip are
   typically in agreement and `gap_slots` reads 0 -- the local pair of values is

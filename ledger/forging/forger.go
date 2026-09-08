@@ -943,10 +943,8 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// would mean this node's clock is behind, which is a different fault and
 	// must not be laundered into a forge refusal.
 	ebSlot := uint64(0)
-	if f.leiosVerifiedEbSlot != nil {
-		if s := f.leiosVerifiedEbSlot(); s <= currentSlot {
-			ebSlot = s
-		}
+	if s := f.verifiedEbSlotSafe(); s <= currentSlot {
+		ebSlot = s
 	}
 	// newestKnown is the most recent block this node has evidence of from the
 	// two sources this gate can see: a block on the primary chain (applied or
@@ -1250,7 +1248,14 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// with the peer's chain, causing persistent header mismatches
 	// and resync loops.
 	// See forgeSyncToleranceSlots for the tolerance rationale.
-	upstreamTip, upstreamActive := f.slotClock.UpstreamSyncStatus()
+	//
+	// The snapshot is the one read once near the top of this cycle, not a
+	// second read. LedgerState derives (target, active) from the active
+	// connection and syncUpstreamState, both of which move, so two reads let
+	// one forge cycle evaluate the staleness bound and this gate against
+	// different pairs -- and let a refusal log an upstream_target_slot this
+	// gate never saw. See TestForgeReadsUpstreamSyncStatusOncePerCycle.
+	upstreamTip, upstreamActive := upstreamTarget, upstreamLive
 	if upstreamActive &&
 		f.upstreamSyncSkipsForge(currentSlot, tipSlot, upstreamTip) {
 		if f.metrics != nil {
@@ -2139,6 +2144,29 @@ func (f *BlockForger) isScheduledLeaderSlot(slot uint64) (scheduled bool) {
 	}
 	next, ok := f.leaderChecker.NextLeaderSlot(slot)
 	return ok && next == slot
+}
+
+// verifiedEbSlotSafe calls the optional LeiosVerifiedEbSlot callback,
+// recovering any panic so an embedder-supplied implementation cannot terminate
+// the forger's producer-loop goroutine -- the same contract every other
+// pluggable forging callback has.
+//
+// A recovered panic reports slot 0, which is "no corroborated endorser block":
+// the state a node without the signal is in anyway. The signal is optional
+// evidence, so a fault inside it must not refuse a leader slot; the remaining
+// evidence (the primary chain tip and the applied tip) still gates the forge.
+// An unset callback reports 0 for the same reason.
+func (f *BlockForger) verifiedEbSlotSafe() (slot uint64) {
+	defer func() {
+		if r := recover(); r != nil {
+			slot = 0
+			f.reportForgeCallbackPanic("endorser_block_slot", r)
+		}
+	}()
+	if f.leiosVerifiedEbSlot == nil {
+		return 0
+	}
+	return f.leiosVerifiedEbSlot()
 }
 
 // checkLeaderSafe calls the pluggable LeaderChecker, recovering any
