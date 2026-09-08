@@ -348,11 +348,11 @@ func TestGetUtxosByAddressWithOrderingSkipAssets(t *testing.T) {
 }
 
 // TestUtxoIsLive proves UtxoIsLive answers true for a live row, false for a
-// spent or never-existing one, and does not itself load asset rows (its
-// entire reason for existing instead of a GetUtxo(...)!=nil check --
-// database/warm_hot_cache.go's per-ref liveness recheck runs this once per
-// live UTxO at multi-million scale and cannot afford GetUtxo's separate
-// asset-loading query for a result it would discard anyway).
+// spent or never-existing one. (UtxoIsLive intentionally avoids GetUtxo's
+// loadUtxoAssets follow-up -- database/warm_hot_cache.go's per-ref liveness
+// recheck runs this once per live UTxO at multi-million scale -- but the
+// no-asset-load property is not asserted here; it is enforced by the
+// implementation in UtxoIsLive, not by this test.)
 func TestUtxoIsLive(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)
