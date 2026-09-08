@@ -545,7 +545,7 @@ func TestNewPeerSnapshotConfigFromReader_ParsesButValidateRejectsMissingRelayPor
 	jsonData := `{
 	"NetworkMagic": 1,
 	"NodeToClientVersion": 23,
-	"Point": {"blockPointHash": "abc", "blockPointSlot": 1},
+	"Point": {"blockPointHash": "` + strings.Repeat("ab", 32) + `", "blockPointSlot": 1},
 	"allLedgerPools": [
 		{
 			"relays": [
@@ -558,8 +558,12 @@ func TestNewPeerSnapshotConfigFromReader_ParsesButValidateRejectsMissingRelayPor
 	cfg, err := topology.NewPeerSnapshotConfigFromReader(strings.NewReader(jsonData))
 	require.NoError(t, err)
 	// SRV relay mode (no port) is not supported; Validate must reject it even
-	// though plain JSON decoding succeeds.
-	require.Error(t, cfg.Validate(1))
+	// though plain JSON decoding succeeds. Use a valid point hash so the
+	// error actually comes from the relay port check, not from point
+	// validation.
+	err = cfg.Validate(1)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "SRV relay mode is not supported")
 }
 
 // TestPeerSnapshotConfigValidate verifies that snapshot identity, format,
