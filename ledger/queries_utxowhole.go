@@ -36,7 +36,21 @@ import (
 // than a runtime.NumCPU()-scaled value, since the bottleneck this
 // parallelizes (badger reads for cold blocks scattered across the whole
 // chain) isn't a CPU resource.
-const utxoWholeResolveWorkers = 8
+//
+// 16 was chosen from a controlled sweep (4/8/12/16/24 workers, two
+// interleaved trials each) against a real Preview node's 3.17M live
+// UTxOs: 16 workers had the lowest mean resolve time (~113.4s vs 8
+// workers' ~146.2s) and won every one of its 8 head-to-head trials
+// against 4, 8, 12, and 24 workers. A CPU profile at 16 workers put
+// ~23% of cumulative samples in badger's own levelHandler.get ->
+// table.Iterator.seek -> table.Table.block path (locating and decoding
+// an SSTable block for a cold key) and another ~18% in GC mark work --
+// neither is lock contention, which is why more workers stop helping
+// past a point (24 workers, like an earlier 32-worker trial, measured
+// worse than 16): badger's own per-lookup block-index seek cost
+// dominates over any further parallelism this pool can extract. See
+// blinklabs-io/dingo#4082 for the full sweep data.
+const utxoWholeResolveWorkers = 16
 
 // queryShelleyUtxoWhole answers GetUTxOWhole: every live UTxO in the
 // current ledger state.
@@ -61,13 +75,19 @@ const utxoWholeResolveWorkers = 8
 // Measured against a real Preview node (3.17M live UTxOs): the
 // row-at-a-time path took roughly 5 minutes and exceeded gouroboros' NtC
 // mux read timeout (120s) before completing; see blinklabs-io/dingo#1900's
-// node-parity tool, which is what surfaced this. This worker-pool version
-// measured around 2 minutes for the same data -- a real improvement, but
-// not a complete fix: it does not yet reliably clear the 120s ceiling, and
-// further tuning attempts (grouping lookups by originating block, avoiding
-// hot-cache writes for entries this one-shot query never rereads) produced
-// inconsistent results in testing rather than a further, reliable
-// improvement. See the linked issue for the full investigation.
+// node-parity tool, which is what surfaced this. An 8-worker pool measured
+// ~127s -- real, but still over the ceiling. Two further tuning attempts
+// (grouping lookups by originating block via the batch resolve API;
+// avoiding hot-cache writes for entries this one-shot query never
+// rereads) did not produce a reliable further improvement. A later,
+// controlled worker-count sweep (see utxoWholeResolveWorkers' doc
+// comment) resolved that inconsistency: 16 workers is reliably faster
+// than 8 (~113s mean resolve time, best single trial ~124s total), but
+// every trial from 4 to 24 workers still finished over 120s -- the
+// remaining cost is badger's own per-lookup block-index seek, which a
+// worker pool cannot parallelize away. This is not yet a complete fix;
+// see the linked issue for the full investigation and a recommended next
+// step (streaming the reply instead of fully materializing it).
 func (ls *LedgerState) queryShelleyUtxoWhole() (any, error) {
 	type liveUtxo struct {
 		id  olocalstatequery.UtxoId
