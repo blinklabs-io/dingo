@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
@@ -164,6 +165,8 @@ func newRemoteRestoreHost(
 				badger.WithDataDir(blobDir),
 				badger.WithDeferOpen(),
 				badger.WithGc(false),
+				badger.WithValueLogFileSize(testutil.TestBadgerValueLogFileSize),
+				badger.WithMemTableSize(testutil.TestBadgerMemTableSize),
 			)
 			if err != nil {
 				return nil, nil, err
@@ -196,6 +199,8 @@ func openRemoteTestDatabase(
 	blobStore, err := badger.New(
 		badger.WithDataDir(filepath.Join(dataRoot, "blob")),
 		badger.WithGc(false),
+		badger.WithValueLogFileSize(testutil.TestBadgerValueLogFileSize),
+		badger.WithMemTableSize(testutil.TestBadgerMemTableSize),
 	)
 	require.NoError(t, err)
 	metadataStore, err := sqlite.NewSQLStore(

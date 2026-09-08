@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
@@ -52,7 +53,7 @@ func newTestDatabaseAt(
 	}
 	blobStore, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
-		plugin.CapabilityStorageBlob, "badger", nil,
+		plugin.CapabilityStorageBlob, "badger", testutil.BadgerBlobConfig(),
 		blob.ProviderDependencies{
 			DataDir: blobDir, StorageMode: config.StorageMode,
 			Logger: config.Logger, PromRegistry: config.PromRegistry,
@@ -105,7 +106,7 @@ func storesWithFreshBlob(tb testing.TB, metaDir string) Stores {
 	require.NoError(tb, sqlite.RegisterProvider(host))
 	blobStore, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
-		plugin.CapabilityStorageBlob, "badger", nil,
+		plugin.CapabilityStorageBlob, "badger", testutil.BadgerBlobConfig(),
 		blob.ProviderDependencies{DataDir: tb.TempDir()},
 	)
 	require.NoError(tb, err)

@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -202,6 +203,8 @@ func registerSignedURLBlobProvider(
 				badger.WithDataDir(deps.DataDir),
 				badger.WithLogger(deps.Logger),
 				badger.WithDeferOpen(),
+				badger.WithValueLogFileSize(testutil.TestBadgerValueLogFileSize),
+				badger.WithMemTableSize(testutil.TestBadgerMemTableSize),
 			)
 			if err != nil {
 				return nil, nil, err

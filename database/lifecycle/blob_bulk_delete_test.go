@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -290,7 +291,7 @@ func newCountingTestDB(t *testing.T) (*database.Database, *countingBlobStore) {
 
 	realBlob, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
-		plugin.CapabilityStorageBlob, "badger", nil,
+		plugin.CapabilityStorageBlob, "badger", testutil.BadgerBlobConfig(),
 		blob.ProviderDependencies{DataDir: config.DataDir},
 	)
 	require.NoError(t, err)
@@ -419,7 +420,7 @@ func newErroringIteratorTestDB(
 
 	realBlob, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
-		plugin.CapabilityStorageBlob, "badger", nil,
+		plugin.CapabilityStorageBlob, "badger", testutil.BadgerBlobConfig(),
 		blob.ProviderDependencies{DataDir: config.DataDir},
 	)
 	require.NoError(t, err)
@@ -545,7 +546,7 @@ func newMidWalkErrorTestDB(
 
 	realBlob, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
-		plugin.CapabilityStorageBlob, "badger", nil,
+		plugin.CapabilityStorageBlob, "badger", testutil.BadgerBlobConfig(),
 		blob.ProviderDependencies{DataDir: config.DataDir},
 	)
 	require.NoError(t, err)
@@ -834,7 +835,7 @@ func newCloudLikeTestDB(t *testing.T) *database.Database {
 
 	realBlob, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
-		plugin.CapabilityStorageBlob, "badger", nil,
+		plugin.CapabilityStorageBlob, "badger", testutil.BadgerBlobConfig(),
 		blob.ProviderDependencies{DataDir: config.DataDir},
 	)
 	require.NoError(t, err)
@@ -1013,7 +1014,7 @@ func newPartialCommitTestDB(
 
 	realBlob, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
-		plugin.CapabilityStorageBlob, "badger", nil,
+		plugin.CapabilityStorageBlob, "badger", testutil.BadgerBlobConfig(),
 		blob.ProviderDependencies{DataDir: config.DataDir},
 	)
 	require.NoError(t, err)

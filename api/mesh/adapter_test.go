@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
@@ -50,7 +51,7 @@ func newAdapterDatabase(t *testing.T) *database.Database {
 		host,
 		plugin.CapabilityStorageBlob,
 		"badger",
-		nil,
+		testutil.BadgerBlobConfig(),
 		blob.ProviderDependencies{
 			DataDir: dataDir,
 			Logger:  logger,
