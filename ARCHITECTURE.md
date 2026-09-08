@@ -2141,8 +2141,28 @@ UTxO set rather than populated purely on demand (blinklabs-io/dingo#4082):
   chain-sync/validation I/O rather than a single blocking NtC client). This
   covers whatever was already live before write-path warming had a chance to
   see it: a Mithril-bootstrapped snapshot, or resuming an existing data dir
-  written by a pre-#4082 binary. The pass is cancelled promptly on node
-  shutdown (`n.ctx`) between dispatched jobs.
+  written by a pre-#4082 binary. The pass runs on its own context, derived
+  from but independently cancellable from `n.ctx`: it holds `n.db` read
+  transactions for as long as it runs, and a live database restore/truncate
+  (`node_lifecycle.go`'s `quiesceForLiveLifecycleOp`) closes `n.db` without
+  ever cancelling `n.ctx`, so relying on `n.ctx` alone would let it keep
+  reading straight through that teardown. `stopHotCacheWarmup`
+  (`node_hot_cache_warm.go`) cancels the pass and waits for it to exit, is
+  included unconditionally in `quiesceComponentStops`, and is re-armed via
+  `warmHotUtxoCacheInBackground` after a restore/truncate rebuilds `n.db` —
+  the restored/truncated live set is new, so it needs the same warmup a
+  fresh process start gets. Ordinary shutdown (`node_shutdown.go`) instead
+  waits via `waitHotCacheWarmup`, since `n.ctx` cancellation elsewhere
+  already asks the pass to stop there.
+- **Resolve-time liveness recheck during warmup.** A ref the startup pass
+  resolves can be spent by a concurrent write-path transaction strictly
+  between `IterateLiveUtxoRefs`' snapshot and the worker's resolve — the
+  write path's `evictHotUtxoCache` may already have run before the worker's
+  `Put`, which would otherwise resurrect a now-spent ref into `hotUtxo` with
+  no further spend event left to ever evict it.
+  `ResolveLiveUtxoRefsConcurrent` (`database/warm_hot_cache.go`) closes this
+  by rechecking metadata liveness immediately after each resolve and calling
+  `ForgetUtxo` when the ref is no longer live.
 
 Because eviction is now driven by actual spends, `Cache.HotUtxoEntries`'
 default was raised from 50000 to 10000000 — comfortably above Preview's

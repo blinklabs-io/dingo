@@ -122,6 +122,11 @@ func TestStopWithDeadlineIgnoresCallerCancellation(t *testing.T) {
 // sync.WaitGroup with no deadline of its own, so a call site that went back to
 // calling Stop directly would drop out of this list and escape the bound —
 // which is exactly what happened to the database lifecycle manager before.
+//
+// "hot UTxO cache warmup" is included unconditionally rather than gated on a
+// nil check like the others (see quiesceComponentStops), since
+// stopHotCacheWarmup is always safe to call even when no warmup pass was
+// ever started.
 func TestQuiesceComponentStopsCoverEveryUnboundedStop(t *testing.T) {
 	n := &Node{
 		blockForger:          &forging.BlockForger{},
@@ -143,18 +148,21 @@ func TestQuiesceComponentStopsCoverEveryUnboundedStop(t *testing.T) {
 		"leios vote manager",
 		"snapshot manager",
 		"database lifecycle manager",
+		"hot UTxO cache warmup",
 	}, names)
 }
 
 // TestQuiesceComponentStopsSkipsAbsentComponents covers a node that never
 // built the optional components, which is the ordinary case for a
-// non-block-producing or non-Leios node.
+// non-block-producing or non-Leios node. "hot UTxO cache warmup" still shows
+// up here since it is unconditional (see quiesceComponentStops).
 func TestQuiesceComponentStopsSkipsAbsentComponents(t *testing.T) {
 	n := &Node{snapshotMgr: &snapshot.Manager{}}
 
 	stops := n.quiesceComponentStops()
-	require.Len(t, stops, 1)
+	require.Len(t, stops, 2)
 	assert.Equal(t, "snapshot manager", stops[0].name)
+	assert.Equal(t, "hot UTxO cache warmup", stops[1].name)
 }
 
 // TestQuiesceEscalatesAStopThatNeverReturns drives the production quiesce path

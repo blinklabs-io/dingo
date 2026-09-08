@@ -186,6 +186,21 @@ type Node struct {
 	// rebuild re-registers fresh ones under the same names. See
 	// metrics_registerer.go.
 	rebuildableMetrics *rebuildableRegisterer
+
+	// The background hot-UTxO-cache warmup pass (node_hot_cache_warm.go)
+	// holds n.db read transactions for as long as it runs. It runs on its
+	// own cancellable context (derived from, but independently cancellable
+	// from, n.ctx) precisely because a live database restore/truncate
+	// (node_lifecycle.go's quiesceForLiveLifecycleOp) closes n.db out from
+	// under it WITHOUT ever cancelling n.ctx -- unlike normal shutdown
+	// (node_shutdown.go), which cancels n.ctx first. Either teardown path
+	// must be able to stop this pass and confirm it has actually exited
+	// before proceeding. Mirrors the chainSelectedNoneWorkerDone pattern
+	// above: hotCacheWarmupCancel asks it to stop, hotCacheWarmupDone is
+	// closed when the goroutine exits.
+	hotCacheWarmupMu     sync.Mutex
+	hotCacheWarmupCancel context.CancelFunc
+	hotCacheWarmupDone   chan struct{}
 }
 
 func New(cfg Config) (*Node, error) {

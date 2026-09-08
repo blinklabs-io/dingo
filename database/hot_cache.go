@@ -418,11 +418,21 @@ func (c *HotCache) Put(key []byte, cbor []byte) {
 // Like Put, admission into the serialized update path is a bounded,
 // non-blocking attempt (see beginUpdate); under sustained Put/Remove
 // contention a Remove can be dropped after exhausting its retry budget, the
-// same way a Put can. This is safe for this cache's caller (see
-// SetTransactionWithOpts's UTxO-spend eviction hook in transaction.go): a
-// dropped Remove only leaves a stale entry to be reclaimed later by ordinary
-// LRU/LFU eviction pressure, rather than corrupting any persisted state --
-// HotCache is a resolve-performance cache, not a source of truth.
+// same way a Put can.
+//
+// This is an accepted trade-off for this cache's spend-eviction caller (see
+// evictHotUtxoCache in database/cbor_cache.go, called from
+// SetTransactionWithOpts/SetGapBlockTransaction in transaction.go): a
+// dropped spend-eviction Remove does not reintroduce a cold miss for any
+// live UTxO, because nothing looks up a spent ref again -- IterateLiveUtxoRefs
+// and every metadata-gated resolver (UtxoByRef, GetUTxOWhole) only ever ask
+// for refs a live metadata row still names. The entry just sits unused in
+// the cache, occupying one slot, until ordinary LRU/LFU pressure reclaims
+// it -- bounded by Cache.HotUtxoEntries' now-generous default (see
+// internal/config/config.go's DefaultCacheConfig), not unbounded growth.
+// HotCache is a resolve-performance cache, not a source of truth, so this
+// trade favors bounded, self-correcting memory growth over blocking a
+// write-path caller on cache-internal lock contention.
 func (c *HotCache) Remove(key []byte) {
 	backoffTime, ok := c.beginUpdate()
 	if !ok {

@@ -161,6 +161,17 @@ func (n *Node) quiesceComponentStops() []namedStop {
 			stop: n.dbLifecycleMgr.Stop,
 		})
 	}
+	// The hot-UTxO-cache warmup pass (node_hot_cache_warm.go) holds n.db
+	// read transactions for as long as it runs, and -- unlike every other
+	// component in this list -- does not watch n.ctx (this path never
+	// cancels it); stopHotCacheWarmup cancels its own independent context
+	// and waits for it to exit. Included unconditionally (not gated on a
+	// nil check like the others) since it is always safe to call even when
+	// no pass was ever started or the previous one already finished.
+	stops = append(stops, namedStop{
+		name: "hot UTxO cache warmup",
+		stop: n.stopHotCacheWarmup,
+	})
 	return stops
 }
 
@@ -826,6 +837,14 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 
 	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to restart ledger: %w", err)
+	}
+	// Mirrors Run()'s post-ledgerState.Start hook: the restored/truncated
+	// live set is new, so it needs the same background warmup a freshly
+	// started process gets. quiesceForLiveLifecycleOp's stopHotCacheWarmup
+	// call above already confirmed any previous pass (against the
+	// now-replaced n.db) has exited before this rebuild ran.
+	if n.config.cacheHotUtxoWarmupEnabled {
+		n.warmHotUtxoCacheInBackground()
 	}
 
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {

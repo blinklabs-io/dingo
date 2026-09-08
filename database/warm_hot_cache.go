@@ -33,6 +33,14 @@ import (
 // it should stay a lower-priority consumer of that shared resource.
 const WarmHotUtxoCacheDefaultWorkers = 8
 
+// resolveLiveUtxoRefsTestHook runs, if set, after a worker's ResolveUtxoCbor
+// call and before its liveness recheck, keyed by ref. It exists solely so a
+// test can deterministically inject a concurrent spend into that exact
+// window (see warm_hot_cache_race_test.go) -- there is no other way to force
+// that interleaving without relying on timing. Left nil (a no-op) in
+// production.
+var resolveLiveUtxoRefsTestHook func(ref UtxoRef)
+
 // ResolveLiveUtxoRefsConcurrent iterates every live UTxO ref (database.
 // IterateLiveUtxoRefs) and resolves its CBOR bytes across a bounded worker
 // pool of independent read transactions, invoking fn once for each
@@ -44,6 +52,16 @@ const WarmHotUtxoCacheDefaultWorkers = 8
 // TieredCborCache.ResolveUtxoCbor always populates the hot cache as a side
 // effect (see cbor_cache.go), so a caller that only wants that side effect
 // can pass a no-op fn -- see WarmHotUtxoCache below.
+//
+// queryShelleyUtxoWhole does not route through this helper and keeps its
+// own, separately maintained worker pool: unifying them was considered, but
+// deferred as a deliberate risk trade-off -- that pool is existing,
+// well-tested, latency-critical (racing gouroboros' 120s NtC mux timeout)
+// code, and folding this pass's ctx-cancellation and liveness-recheck
+// behavior into it during the same change that introduced both felt like
+// more risk than the duplication justified. A future change unifying them
+// (e.g. giving this helper a result callback queryShelleyUtxoWhole could use
+// to build its reply map) would remove the duplication cleanly.
 //
 // A ref that cannot be resolved (types.ErrBlobKeyNotFound) is silently
 // skipped, matching queryShelleyUtxoWhole's existing tolerance for a
@@ -110,6 +128,40 @@ func (d *Database) ResolveLiveUtxoRefsConcurrent(
 					)}:
 					case <-ctx.Done():
 					}
+					continue
+				}
+				// ResolveUtxoCbor's hot-cache Put above is not gated on the
+				// live-set snapshot IterateLiveUtxoRefs took: if this ref
+				// was spent by a concurrent write-path transaction between
+				// that snapshot and this resolve, the write path's own
+				// evictHotUtxoCache call could have already run (removing
+				// any prior hot entry) before this Put ran, which would
+				// otherwise silently resurrect a now-spent ref into the hot
+				// cache with no further spend event left to evict it.
+				// Rechecking liveness now, using this same worker's
+				// transaction, and forgetting the just-warmed entry when
+				// it is no longer live closes that window for everything
+				// but an infinitesimally narrow race against this very
+				// check -- acceptable for a best-effort resolve cache that
+				// is never a source of truth (see ForgetUtxo's doc
+				// comment).
+				if resolveLiveUtxoRefsTestHook != nil {
+					resolveLiveUtxoRefsTestHook(ref)
+				}
+				liveUtxo, liveErr := d.utxoStore().
+					GetUtxo(ref.TxId[:], ref.OutputIdx, txn.Metadata())
+				if liveErr != nil {
+					select {
+					case results <- resolved{err: fmt.Errorf(
+						"recheck utxo liveness %x#%d: %w",
+						ref.TxId[:8], ref.OutputIdx, liveErr,
+					)}:
+					case <-ctx.Done():
+					}
+					continue
+				}
+				if liveUtxo == nil {
+					d.cborCache.ForgetUtxo(ref.TxId[:], ref.OutputIdx)
 					continue
 				}
 				select {

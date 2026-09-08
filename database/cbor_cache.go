@@ -769,6 +769,19 @@ func (c *TieredCborCache) ForgetUtxo(txId []byte, outputIdx uint32) {
 // wrongly satisfy a later ResolveUtxoCbor call with zero-length data. See
 // transaction.go's SetTransactionWithOpts and SetGapBlockTransaction, the
 // write-path half of blinklabs-io/dingo#4082's fix.
+//
+// This Put is not gated on the surrounding database transaction's eventual
+// commit: if the caller's transaction later fails or rolls back, this
+// output's produced-row and blob-offset writes roll back with it, but this
+// hot-cache entry does not. That is safe only because it is unreachable by
+// construction: every current caller of ResolveUtxoCbor for a UTxO ref
+// (loadCbor's callers UtxoByRef/UtxosByRefs, and
+// ledger.queryShelleyUtxoWhole via IterateLiveUtxoRefs) first confirms a
+// live metadata row exists for that exact ref, and a rolled-back produce
+// never creates one -- so nothing ever asks for the orphaned ref again. If
+// a future caller ever resolves a UTxO ref without first checking metadata
+// liveness, this invariant would need revisiting (e.g. staging the Put
+// until commit, or invalidating on rollback).
 func (d *Database) warmHotUtxoCache(
 	txId []byte,
 	outputIdx uint32,

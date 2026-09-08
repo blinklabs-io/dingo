@@ -118,6 +118,10 @@ func (n *Node) shutdown() error {
 	// The selected-to-none worker is also context-owned. Wait for it before
 	// tearing down the selector or the chainsync state it reads.
 	n.waitChainSelectedNoneWorker()
+	// The hot-UTxO-cache warmup pass is also context-owned and holds n.db
+	// read transactions for as long as it runs. Wait for it before any later
+	// phase closes n.db out from under it.
+	n.waitHotCacheWarmup()
 
 	// Stop block forger first to prevent new blocks
 	if n.blockForger != nil {
