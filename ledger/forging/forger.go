@@ -918,13 +918,27 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// precisely when that gap reads 0 while the node is many slots behind.
 	//
 	// There is deliberately no fallback for a live upstream that has not
-	// published a target. That state is (0, true) from UpstreamSyncStatus, and
-	// the pre-existing sync gate below already refuses the slot on
-	// upstreamActive && upstreamTip == 0, so it never reaches this gate. An
-	// earlier revision fell back to the admitted-header frontier here; it was
-	// unreachable in production and only appeared to work because a test
-	// double could express (0, false) with a non-zero admitted frontier, which
-	// LedgerState cannot. See TestUpstreamSyncStatusReachableStates.
+	// published a target -- (0, true) from UpstreamSyncStatus, the window
+	// between an active-connection switch and the new peer's first admitted
+	// trusted header.
+	//
+	// That state now REACHES this gate. Before #4013 the sync gate below
+	// refused every slot with upstreamActive && upstreamTip == 0, so it could
+	// not; #4013 bounded that branch by the local tip's lag instead, precisely
+	// so a node at tip forges and its header ends the window. A node at tip
+	// therefore arrives here with a live upstream and a zero target, and what
+	// keeps this bound quiet is the upstreamTarget > newestKnown term below,
+	// which a zero target cannot satisfy -- not the gate underneath.
+	//
+	// Filling the zero in from somewhere would break that. An earlier revision
+	// fell back to the admitted-header frontier; it was unreachable then and
+	// is actively wrong now, because it would compare a HEADER-stage value
+	// against newestKnown's BLOCK-stage one -- the same mismatch that makes
+	// this bound opt-in -- and would refuse leader slots in exactly the window
+	// #4013 opened them up for, re-creating the #4010 wedge on any operator
+	// who enabled the knob. See TestUpstreamSyncStatusReachableStates for the
+	// reachable pairs and
+	// TestForgeUpstreamStalenessIgnoresUnknownUpstreamTarget for this case.
 	upstreamTarget, upstreamLive := f.slotClock.UpstreamSyncStatus()
 	// Opt-in only. newestKnown counts BLOCKS this node holds, while
 	// upstreamTarget is published at HEADER admission, so between a header's

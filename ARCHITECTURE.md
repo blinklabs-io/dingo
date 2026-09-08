@@ -4840,10 +4840,19 @@ deliberately does **not** include the admitted header frontier
   `newestKnown`.
 
   There is deliberately no fallback for a live upstream that has not published
-  a target. `UpstreamSyncStatus` reports that state as `(0, true)`, and the
-  pre-existing sync gate already refuses the slot on
-  `upstreamActive && upstreamTip == 0`, so it never reaches this gate.
-  `TestUpstreamSyncStatusReachableStates` pins the reachable pairs.
+  a target -- `(0, true)` from `UpstreamSyncStatus`, the window between an
+  active-connection switch and the new peer's first admitted trusted header.
+  That state *does* reach this gate: #4013 replaced the sync gate's blanket
+  refusal on `upstreamActive && upstreamTip == 0` with a bound on the local
+  tip's lag, so a node at tip passes it and forges, and the header it produces
+  is what ends the window. What keeps this bound quiet there is its own
+  `upstreamTarget > newestKnown` term, which a zero target cannot satisfy.
+  Filling the zero in from the admitted header frontier would compare a
+  header-stage value against `newestKnown`'s block-stage one and refuse leader
+  slots in exactly the window #4013 opened up, re-creating the #4010 wedge for
+  any operator who enabled the knob.
+  `TestUpstreamSyncStatusReachableStates` pins the reachable pairs;
+  `TestForgeUpstreamStalenessIgnoresUnknownUpstreamTarget` pins this case.
 - `forgeAppliedTipStalenessSlots` (default 0 = disabled, flag
   `--forge-applied-tip-staleness-slots`, env
   `CARDANO_DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS`) is a wall-clock backstop

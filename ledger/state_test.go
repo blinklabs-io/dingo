@@ -5521,11 +5521,20 @@ func TestWarnOnPreByronPrefixEpochCache(t *testing.T) {
 // It exists because a gate was written against a state this type cannot
 // produce. An earlier revision fell back to the admitted-header frontier when
 // UpstreamSyncStatus returned a zero target, on the belief that a live upstream
-// with no published target reported (0, false). It reports (0, true) -- and the
-// pre-existing sync gate already refuses that slot -- so the fallback was
-// unreachable in production. It passed review only because a test double could
-// express (0, false) alongside a non-zero admitted frontier, which is the one
-// combination the adapter cannot produce.
+// with no published target reported (0, false). It reports (0, true), so the
+// fallback was written for a state that never occurs. It passed review only
+// because a test double could express (0, false) alongside a non-zero admitted
+// frontier, which is the one combination the adapter cannot produce.
+//
+// (0, true) is now doubly worth pinning. It used to be unreachable at the
+// staleness gate as well, because the sync gate refused every slot on
+// upstreamActive && upstreamTip == 0; #4013 replaced that blanket refusal with
+// a bound on the local tip's lag, so a node at tip passes it and the staleness
+// gate does see this pair. What keeps the bound quiet there is its own
+// upstreamTarget > newestKnown term -- see
+// TestForgeUpstreamStalenessIgnoresUnknownUpstreamTarget -- which is only
+// sound while this test holds that the target really is 0 and not something
+// substituted for it.
 //
 // Assert the adapter's own outputs, not a double's: a double is only evidence
 // about the double.
