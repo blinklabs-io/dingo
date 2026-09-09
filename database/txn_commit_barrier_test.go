@@ -144,6 +144,8 @@ func requireCommitBarrierFree(t *testing.T, db *Database) {
 // reader that would never release, and writer preference then blocked
 // every read-write Txn constructed behind it.
 func TestFailedBlobSyncDoesNotBlockTheNextWriter(t *testing.T) {
+	t.Parallel()
+
 	syncErr := errors.New("fsync failed")
 	store := &mockBlobStore{syncErr: syncErr}
 	db := newSyncBarrierTestDB(t, store)
@@ -183,6 +185,8 @@ func TestFailedBlobSyncDoesNotBlockTheNextWriter(t *testing.T) {
 // negative, which cancellableBarrier.RUnlock panics on, so the "exactly
 // once" invariant is checked in both directions.
 func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
+	t.Parallel()
+
 	injected := errors.New("injected failure")
 
 	for _, tc := range []struct {
@@ -309,7 +313,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 			newDB: func(t *testing.T) *Database {
 				logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 				return &Database{
-					blob:     &mockBlobStore{},
+					blobRef:  newBlobStoreRef(&mockBlobStore{}),
 					metadata: &commitFailingMetadata{err: injected},
 					logger:   logger,
 					config:   &Config{Logger: logger},
@@ -389,6 +393,8 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 // PauseCommits issued afterwards still acquires. A leak leaves the count
 // high; an over-release panics in RUnlock.
 func TestCommitBarrierSurvivesConcurrentFailingCommits(t *testing.T) {
+	t.Parallel()
+
 	store := &serializedBlobStore{
 		mockBlobStore: &mockBlobStore{syncErr: errors.New("fsync failed")},
 	}

@@ -36,7 +36,7 @@ func TestGetAccountsByCredentialGroupedByTag(t *testing.T) {
 	// IN list for each tag must itself be chunked (twice over per tag).
 	const perTag = 1200
 	refs := make([]models.StakeCredentialRef, 0, perTag*2)
-	for tag := uint8(0); tag < 2; tag++ {
+	for tag := range uint8(2) {
 		for i := range perTag {
 			key := make([]byte, 28)
 			key[0] = tag

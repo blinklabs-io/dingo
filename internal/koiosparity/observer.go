@@ -107,6 +107,11 @@ type ObserverConfig struct {
 	// concurrently with itself.
 	OnResult func(*EpochCompareResult)
 	Logger   *slog.Logger
+	// baseURL overrides the network's Koios base URL. It is unexported
+	// so only this package can set it: tests point it at an httptest
+	// server instead of rewriting the process-wide koiosBaseURLs map,
+	// which every concurrently constructed client reads.
+	baseURL string
 }
 
 // Observer drives Koios fetch+check for each closed epoch as Dingo's own
@@ -192,7 +197,7 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open koios parity cache: %w", err)
 	}
-	koios, err := NewKoiosClient(cfg.Network, cfg.APIKey)
+	koios, err := newKoiosClient(cfg.Network, cfg.APIKey, cfg.baseURL)
 	if err != nil {
 		_ = cache.Close()
 		return nil, fmt.Errorf("create koios client: %w", err)

@@ -190,8 +190,14 @@ func minimalLedgerState(t *testing.T, slot uint64, hash []byte) []byte {
 		cbor.RawMessage(emptyMap),
 	})
 	require.NoError(t, err)
+	// nesBprev and nesBcur are BlocksMade, which the reference encodes as a
+	// bare map of pool key hash to count; an empty one is a map with no
+	// entries, not an empty array.
 	newEpochState, err := cbor.Encode([]any{
-		uint64(0), []any{}, []any{}, cbor.RawMessage(epochState),
+		uint64(0),
+		cbor.RawMessage(emptyMap),
+		cbor.RawMessage(emptyMap),
+		cbor.RawMessage(epochState),
 		[]any{}, cbor.RawMessage(emptyMap), []any{},
 	})
 	require.NoError(t, err)
@@ -261,13 +267,22 @@ type v2FixtureOptions struct {
 	digestsCloud404      bool
 	digestsCloudBadRoot  bool
 	immutableBadMirror   bool
+	// signedImmutableQuery appends a pre-signed-style query string to the
+	// immutable location templates, the way cloud-storage locations carry
+	// their credentials. The mux routes on path only, so it changes nothing
+	// but what an error is at risk of quoting.
+	signedImmutableQuery bool
 	missingAncillary     bool
 	validImmutable       bool
 	fallbackLedgerState  bool
 }
 
 type v2Fixture struct {
-	server               *httptest.Server
+	server *httptest.Server
+	// artifactsByHash serves the artifact detail endpoint. It starts holding
+	// only the fixture's own artifact; publishNewerArtifact adds to it so a
+	// test can make the aggregator advance mid-run the way a live one does.
+	artifactsByHash      map[string]*CardanoDatabaseSnapshot
 	artifact             *CardanoDatabaseSnapshot
 	listItems            []CardanoDatabaseSnapshotListItem
 	certs                map[string]Certificate
@@ -290,6 +305,7 @@ type v2Fixture struct {
 func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 	t.Helper()
 	fixture := &v2Fixture{
+		artifactsByHash:      map[string]*CardanoDatabaseSnapshot{},
 		certs:                map[string]Certificate{},
 		immutableArchives:    map[uint64][]byte{},
 		badImmutableArchives: map[uint64][]byte{},
@@ -415,13 +431,17 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 	ancillaryFiles[ancillaryManifestFilename] = manifestJSON
 	fixture.ancillaryArchive = buildTarZst(t, ancillaryFiles)
 
+	signedQuery := ""
+	if opts.signedImmutableQuery {
+		signedQuery = "?X-Amz-Credential=AKIAFIXTURE&X-Amz-Signature=deadbeef"
+	}
 	immutableLocations := []CardanoDatabaseLocation{}
 	if opts.immutableBadMirror {
 		immutableLocations = append(
 			immutableLocations,
 			CardanoDatabaseLocation{
 				Type:                 locationTypeCloudStorage,
-				URITemplate:          baseURL + "/files/imm-bad/{immutable_file_number}.tar.zst",
+				URITemplate:          baseURL + "/files/imm-bad/{immutable_file_number}.tar.zst" + signedQuery,
 				CompressionAlgorithm: "zstandard",
 			},
 		)
@@ -430,7 +450,7 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 		immutableLocations,
 		CardanoDatabaseLocation{
 			Type:                 locationTypeCloudStorage,
-			URITemplate:          baseURL + "/files/imm/{immutable_file_number}.tar.zst",
+			URITemplate:          baseURL + "/files/imm/{immutable_file_number}.tar.zst" + signedQuery,
 			CompressionAlgorithm: "zstandard",
 		},
 	)
@@ -485,6 +505,7 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 		artifact.Hash = strings.Repeat("d", 64)
 	}
 	fixture.artifact = artifact
+	fixture.artifactsByHash[artifact.Hash] = artifact
 
 	// Certificate chain (genesis <- leaf), full STM verification
 	genesisVKey, genesisPrivateKey := testGenesisKeyPair(t)
@@ -573,8 +594,14 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 				writeJSON(w, fixture.listItems)
 			case p == "/artifact/cardano-database/digests":
 				writeJSON(w, fixture.digestEntries)
-			case p == "/artifact/cardano-database/"+artifact.Hash:
-				writeJSON(w, fixture.artifact)
+			case strings.HasPrefix(p, "/artifact/cardano-database/"):
+				hash := strings.TrimPrefix(p, "/artifact/cardano-database/")
+				detail, ok := fixture.artifactsByHash[hash]
+				if !ok {
+					http.NotFound(w, r)
+					return
+				}
+				writeJSON(w, detail)
 			case p == "/files/digests.tar.zst":
 				if opts.digestsCloud404 {
 					http.NotFound(w, r)
@@ -660,6 +687,34 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 	return fixture
 }
 
+// publishNewerArtifact advertises a newer artifact for the same chain content
+// and returns it, the way a live aggregator does between one sync run and the
+// next. It reuses the fixture's certified digest list, merkle root, locations
+// and ancillary archive, changing only the beacon epoch — so the new artifact
+// hash (sha256(epoch || merkle root)) is genuinely different. Certificate
+// verification is disabled by callers of this fixture because the reused
+// certificate belongs to the original beacon.
+func (f *v2Fixture) publishNewerArtifact(
+	t *testing.T,
+) *CardanoDatabaseSnapshot {
+	t.Helper()
+	newer := *f.artifact
+	newer.Beacon.Epoch = f.artifact.Beacon.Epoch + 1
+	newer.Hash = newer.ComputeHash()
+	require.NotEqual(t, f.artifact.Hash, newer.Hash)
+	f.artifactsByHash[newer.Hash] = &newer
+	f.listItems = append(f.listItems, CardanoDatabaseSnapshotListItem{
+		Hash:                    newer.Hash,
+		MerkleRoot:              newer.MerkleRoot,
+		Beacon:                  newer.Beacon,
+		CertificateHash:         newer.CertificateHash,
+		TotalDbSizeUncompressed: newer.TotalDbSizeUncompressed,
+		CardanoNodeVersion:      newer.CardanoNodeVersion,
+		CreatedAt:               newer.CreatedAt,
+	})
+	return &newer
+}
+
 func (f *v2Fixture) bootstrapConfig(downloadDir string) BootstrapConfig {
 	return BootstrapConfig{
 		Network:                  "preprod",
@@ -674,6 +729,8 @@ func (f *v2Fixture) bootstrapConfig(downloadDir string) BootstrapConfig {
 }
 
 func TestBootstrapV2(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 2})
 	downloadDir := t.TempDir()
 
@@ -727,6 +784,8 @@ func TestBootstrapV2(t *testing.T) {
 }
 
 func TestBootstrapV2NoCertVerification(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
 	cfg := fixture.bootstrapConfig(t.TempDir())
 	cfg.VerifyCertificateChain = false
@@ -739,6 +798,8 @@ func TestBootstrapV2NoCertVerification(t *testing.T) {
 }
 
 func TestSyncV2NoCertVerificationUsesExtractDirLedgerState(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		missingAncillary:    true,
 		validImmutable:      true,
@@ -759,6 +820,8 @@ func TestSyncV2NoCertVerificationUsesExtractDirLedgerState(t *testing.T) {
 }
 
 func TestBootstrapV2DigestsAggregatorFallback(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		immutableFileNumber: 1,
 		digestsCloud404:     true,
@@ -772,6 +835,8 @@ func TestBootstrapV2DigestsAggregatorFallback(t *testing.T) {
 }
 
 func TestBootstrapV2DigestsMerkleMismatchFallsBack(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		immutableFileNumber: 1,
 		digestsCloudBadRoot: true,
@@ -785,6 +850,8 @@ func TestBootstrapV2DigestsMerkleMismatchFallsBack(t *testing.T) {
 }
 
 func TestBootstrapV2MerkleRootMismatch(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		immutableFileNumber: 1,
 		tamperDigestList:    true,
@@ -798,6 +865,8 @@ func TestBootstrapV2MerkleRootMismatch(t *testing.T) {
 }
 
 func TestBootstrapV2ArtifactHashMismatch(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		immutableFileNumber: 1,
 		tamperArtifactHash:  true,
@@ -811,6 +880,8 @@ func TestBootstrapV2ArtifactHashMismatch(t *testing.T) {
 }
 
 func TestBootstrapV2CertLeafMerkleRootMismatch(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		immutableFileNumber:  1,
 		tamperCertMerkleRoot: true,
@@ -824,6 +895,8 @@ func TestBootstrapV2CertLeafMerkleRootMismatch(t *testing.T) {
 }
 
 func TestBootstrapV2ImmutableDigestMismatch(t *testing.T) {
+	t.Parallel()
+
 	for _, tamperImmutable := range []uint64{0, 1} {
 		t.Run(
 			fmt.Sprintf("immutable_%05d", tamperImmutable),
@@ -859,6 +932,8 @@ func TestBootstrapV2ImmutableDigestMismatch(t *testing.T) {
 }
 
 func TestBootstrapV2ImmutableValidationFallsBackToMirror(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		immutableFileNumber: 1,
 		immutableBadMirror:  true,
@@ -877,6 +952,8 @@ func TestBootstrapV2ImmutableValidationFallsBackToMirror(t *testing.T) {
 }
 
 func TestBootstrapV2AncillaryBadSignature(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		immutableFileNumber: 1,
 		badAncillarySig:     true,
@@ -891,6 +968,8 @@ func TestBootstrapV2AncillaryBadSignature(t *testing.T) {
 }
 
 func TestBootstrapV2RejectsNetworkMismatchBeforeDownload(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
 	cfg := fixture.bootstrapConfig(t.TempDir())
 	cfg.Network = "preview"
@@ -907,6 +986,8 @@ func TestBootstrapV2RejectsNetworkMismatchBeforeDownload(t *testing.T) {
 // downloaded — artifact.Hash alone isn't enough to trust the metadata,
 // since Network is a separate, unconstrained field.
 func TestBootstrapV2RejectsPathTraversalInArtifactNetwork(t *testing.T) {
+	t.Parallel()
+
 	// Use the full fixture (real digest/immutable/ancillary/cert wiring) so
 	// that, if validateSnapshotIdentity were removed, the bootstrap would
 	// actually reach and attempt the immutable download this test guards
@@ -931,6 +1012,8 @@ func TestBootstrapV2RejectsPathTraversalInArtifactNetwork(t *testing.T) {
 }
 
 func TestBootstrapV2VerifiedRequiresAncillaryKey(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
 	cfg := fixture.bootstrapConfig(t.TempDir())
 	cfg.AncillaryVerificationKey = ""
@@ -941,6 +1024,8 @@ func TestBootstrapV2VerifiedRequiresAncillaryKey(t *testing.T) {
 }
 
 func TestBootstrapV2ResumeVerifiesCachedAncillary(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
 	downloadDir := t.TempDir()
 	candidateDir := filepath.Join(
@@ -1012,6 +1097,8 @@ func TestBootstrapV2ResumeVerifiesCachedAncillary(t *testing.T) {
 // different tree, which is only safe for as long as every one of those steps
 // happens to re-check the signature.
 func TestVerifyAncillaryExtractionIsAboutTheInspectedTree(t *testing.T) {
+	t.Parallel()
+
 	pub, priv, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
 	cfg := BootstrapConfig{
@@ -1097,6 +1184,8 @@ func TestVerifyAncillaryExtractionIsAboutTheInspectedTree(t *testing.T) {
 }
 
 func TestBootstrapV2Resume(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 2})
 	downloadDir := t.TempDir()
 	cfg := fixture.bootstrapConfig(downloadDir)
@@ -1118,6 +1207,8 @@ func TestBootstrapV2Resume(t *testing.T) {
 }
 
 func TestBootstrapEmptyBackendDefaultsToV2(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
 	cfg := fixture.bootstrapConfig(t.TempDir())
 	cfg.Backend = ""
@@ -1128,6 +1219,8 @@ func TestBootstrapEmptyBackendDefaultsToV2(t *testing.T) {
 }
 
 func TestBootstrapUnsupportedBackend(t *testing.T) {
+	t.Parallel()
+
 	_, err := Bootstrap(context.Background(), BootstrapConfig{
 		Network: "preprod",
 		Backend: "v3",
@@ -1220,6 +1313,8 @@ func (t *swapDirOnDownloadCompleteTransport) RoundTrip(
 func TestFetchImmutableArchiveSurvivesArchiveDirSwapAfterDownload(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	probeLink := filepath.Join(t.TempDir(), "probe")
 	requireSymlinkSupport(t, t.TempDir(), probeLink)
 	// The response-body callback stages the swap synchronously through io.Copy
@@ -1328,6 +1423,8 @@ func TestFetchImmutableArchiveSurvivesArchiveDirSwapAfterDownload(
 func TestFetchImmutableArchiveCleansUpThroughRootOnExtractionFailure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	probeLink := filepath.Join(t.TempDir(), "probe")
 	requireSymlinkSupport(t, t.TempDir(), probeLink)
 	// The response-body callback stages the swap synchronously through io.Copy
@@ -1407,6 +1504,8 @@ func TestFetchImmutableArchiveCleansUpThroughRootOnExtractionFailure(
 // somebody else's files as the cost of a failed download, so the symlink is
 // refused up front instead.
 func TestOpenImmutableRootRefusesSymlinkedDir(t *testing.T) {
+	t.Parallel()
+
 	root := t.TempDir()
 	outside := filepath.Join(root, "outside")
 	require.NoError(t, os.MkdirAll(outside, 0o750))
@@ -1429,6 +1528,8 @@ func TestOpenImmutableRootRefusesSymlinkedDir(t *testing.T) {
 // resolves through the immutable directory's handle, so it can only unlink
 // files in the directory the download wrote into.
 func TestRemoveImmutableTrioStaysInsideRoot(t *testing.T) {
+	t.Parallel()
+
 	root := t.TempDir()
 	outside := filepath.Join(root, "outside")
 	require.NoError(t, os.MkdirAll(outside, 0o750))
@@ -1479,6 +1580,8 @@ func TestRemoveImmutableTrioStaysInsideRoot(t *testing.T) {
 // root was created through the symlink first, and only the later extraction
 // noticed.
 func TestOpenImmutableRootRefusesSymlinkedExtractDir(t *testing.T) {
+	t.Parallel()
+
 	root := t.TempDir()
 	outside := filepath.Join(root, "outside")
 	require.NoError(t, os.MkdirAll(outside, 0o750))
@@ -1503,6 +1606,8 @@ func TestOpenImmutableRootRefusesSymlinkedExtractDir(t *testing.T) {
 // be carried as AncillaryVerified while nothing had verified it — the flag
 // would be a claim about a directory the check never saw.
 func TestBootstrapV2CarriesTheVerifiedAncillaryHandle(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
 	downloadDir := t.TempDir()
 

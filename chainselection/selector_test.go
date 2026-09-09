@@ -292,6 +292,34 @@ func TestChainSelectorRemoveBestPeer(t *testing.T) {
 	assert.Nil(t, cs.GetBestPeer())
 }
 
+// drainChainSwitchesUntilBest consumes chain switch events up to and including
+// the one that selects wantConn.
+//
+// ChainSelector.publishSelection hands events to an EventBus ordered lane
+// instead of delivering them inline, so "whatever is queued at this instant"
+// is not a barrier: a drain written as len(ch) can run ahead of the setup
+// switches and then read one of them as the event under test. The switch to
+// the peer the test has just asserted is best is a real barrier.
+func drainChainSwitchesUntilBest(
+	t *testing.T,
+	evtCh <-chan event.Event,
+	wantConn ouroboros.ConnectionId,
+) {
+	t.Helper()
+	for {
+		evt := testutil.RequireReceive(
+			t,
+			evtCh,
+			5*time.Second,
+			"chain switch event selecting the expected best peer",
+		)
+		data, ok := evt.Data.(ChainSwitchEvent)
+		if ok && data.NewConnectionId.String() == wantConn.String() {
+			return
+		}
+	}
+}
+
 func TestChainSelectorRemoveBestPeerEmitsChainSwitchEvent(t *testing.T) {
 	eventBus := event.NewEventBus(nil, nil)
 	cs := NewChainSelector(ChainSelectorConfig{
@@ -320,10 +348,8 @@ func TestChainSelectorRemoveBestPeerEmitsChainSwitchEvent(t *testing.T) {
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, connId1, *cs.GetBestPeer())
 
-	// Drain any events from the initial selection
-	for len(evtCh) > 0 {
-		<-evtCh
-	}
+	// Drain the events from the initial selection
+	drainChainSwitchesUntilBest(t, evtCh, connId1)
 
 	// Remove the best peer - this should emit ChainSwitchEvent
 	cs.RemovePeer(connId1)
@@ -333,16 +359,17 @@ func TestChainSelectorRemoveBestPeerEmitsChainSwitchEvent(t *testing.T) {
 	assert.Equal(t, connId2, *cs.GetBestPeer())
 
 	// Verify ChainSwitchEvent was emitted
-	select {
-	case evt := <-evtCh:
-		switchEvt, ok := evt.Data.(ChainSwitchEvent)
-		require.True(t, ok, "expected ChainSwitchEvent")
-		assert.Equal(t, connId1, switchEvt.PreviousConnectionId)
-		assert.Equal(t, connId2, switchEvt.NewConnectionId)
-		assert.Equal(t, tip2.BlockNumber, switchEvt.NewTip.BlockNumber)
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("expected ChainSwitchEvent was not emitted")
-	}
+	evt := testutil.RequireReceive(
+		t,
+		evtCh,
+		5*time.Second,
+		"expected ChainSwitchEvent was not emitted",
+	)
+	switchEvt, ok := evt.Data.(ChainSwitchEvent)
+	require.True(t, ok, "expected ChainSwitchEvent")
+	assert.Equal(t, connId1, switchEvt.PreviousConnectionId)
+	assert.Equal(t, connId2, switchEvt.NewConnectionId)
+	assert.Equal(t, tip2.BlockNumber, switchEvt.NewTip.BlockNumber)
 }
 
 func TestChainSelectorSelectBestChain(t *testing.T) {
@@ -903,10 +930,8 @@ func TestChainSelectorStalePeerCleanupEmitsChainSwitchEvent(t *testing.T) {
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, connId1, *cs.GetBestPeer())
 
-	// Drain any events from the initial selection
-	for len(evtCh) > 0 {
-		<-evtCh
-	}
+	// Drain the events from the initial selection
+	drainChainSwitchesUntilBest(t, evtCh, connId1)
 
 	// Wait for peer1 to become "very stale" (2x threshold = 100ms)
 	// cleanupStalePeers uses 2x StaleTipThreshold for removal
@@ -917,11 +942,6 @@ func TestChainSelectorStalePeerCleanupEmitsChainSwitchEvent(t *testing.T) {
 
 	// Keep peer2 fresh
 	cs.UpdatePeerTip(connId2, tip2, nil)
-
-	// Drain any events from tip update
-	for len(evtCh) > 0 {
-		<-evtCh
-	}
 
 	// Trigger cleanup - this should emit ChainSwitchEvent when best peer is
 	// removed
@@ -934,16 +954,17 @@ func TestChainSelectorStalePeerCleanupEmitsChainSwitchEvent(t *testing.T) {
 	assert.Equal(t, connId2, *cs.GetBestPeer())
 
 	// Verify ChainSwitchEvent was emitted
-	select {
-	case evt := <-evtCh:
-		switchEvt, ok := evt.Data.(ChainSwitchEvent)
-		require.True(t, ok, "expected ChainSwitchEvent")
-		assert.Equal(t, connId1, switchEvt.PreviousConnectionId)
-		assert.Equal(t, connId2, switchEvt.NewConnectionId)
-		assert.Equal(t, tip2.BlockNumber, switchEvt.NewTip.BlockNumber)
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("expected ChainSwitchEvent was not emitted")
-	}
+	evt := testutil.RequireReceive(
+		t,
+		evtCh,
+		5*time.Second,
+		"expected ChainSwitchEvent was not emitted",
+	)
+	switchEvt, ok := evt.Data.(ChainSwitchEvent)
+	require.True(t, ok, "expected ChainSwitchEvent")
+	assert.Equal(t, connId1, switchEvt.PreviousConnectionId)
+	assert.Equal(t, connId2, switchEvt.NewConnectionId)
+	assert.Equal(t, tip2.BlockNumber, switchEvt.NewTip.BlockNumber)
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
 	_, eligibleFound := cs.eligible[connId1]
@@ -1168,9 +1189,7 @@ func TestChainSelectorTouchPeerActivityEmitsChainSwitchEvent(t *testing.T) {
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, revivedConn, *cs.GetBestPeer())
 
-	for len(evtCh) > 0 {
-		<-evtCh
-	}
+	drainChainSwitchesUntilBest(t, evtCh, revivedConn)
 
 	require.Eventually(t, func() bool {
 		peerTip := cs.GetPeerTip(revivedConn)
@@ -1182,29 +1201,21 @@ func TestChainSelectorTouchPeerActivityEmitsChainSwitchEvent(t *testing.T) {
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, incumbentConn, *cs.GetBestPeer())
 
-	for len(evtCh) > 0 {
-		<-evtCh
-	}
+	drainChainSwitchesUntilBest(t, evtCh, incumbentConn)
 
 	cs.TouchPeerActivity(revivedConn)
 
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, revivedConn, *cs.GetBestPeer())
 
-	var switchEvt ChainSwitchEvent
-	require.Eventually(t, func() bool {
-		select {
-		case evt := <-evtCh:
-			data, ok := evt.Data.(ChainSwitchEvent)
-			if !ok {
-				return false
-			}
-			switchEvt = data
-			return true
-		default:
-			return false
-		}
-	}, time.Second, 5*time.Millisecond, "activity-driven switch should emit event")
+	activityEvt := testutil.RequireReceive(
+		t,
+		evtCh,
+		5*time.Second,
+		"activity-driven switch should emit event",
+	)
+	switchEvt, ok := activityEvt.Data.(ChainSwitchEvent)
+	require.True(t, ok, "expected ChainSwitchEvent")
 
 	assert.Equal(t, incumbentConn, switchEvt.PreviousConnectionId)
 	assert.Equal(t, revivedConn, switchEvt.NewConnectionId)

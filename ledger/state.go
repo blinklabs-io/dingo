@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"math"
 	"math/big"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -169,14 +170,27 @@ func (p *DatabaseWorkerPool) worker() {
 	}
 }
 
+// executeOperation follows the same panic contract as database.Txn.Do (see
+// the doc comment above database.NewTxnPanicError): a panic in OpFunc is
+// recovered, logged with its stack trace, and converted into a
+// database.ErrTxnPanic-wrapped result.Error rather than crashing the worker
+// goroutine, since this operation's submitter is synchronously waiting on
+// ResultChan for exactly this outcome.
 func (p *DatabaseWorkerPool) executeOperation(op DatabaseOperation) {
 	defer p.operationDone()
 
 	result := DatabaseResult{}
 	defer func() {
 		if r := recover(); r != nil {
-			result.Error = fmt.Errorf("panic: %v", r)
-			slog.Error("worker panic during operation", "panic", r)
+			result.Error = database.NewTxnPanicError(
+				"database worker operation",
+				r,
+			)
+			slog.Error(
+				"panic in database worker operation",
+				"panic", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()),
+			)
 		}
 		p.sendResult(op, result)
 	}()
@@ -636,6 +650,13 @@ type LedgerStateConfig struct {
 	// on musashi, false otherwise) via Config.prototypeTrustBypassesEnabled,
 	// which requires an unambiguous Musashi identity so this can never be
 	// reached from a preview/preprod/mainnet configuration.
+	//
+	// The same flag also gates every other path where the stake-derived
+	// threshold cannot be evaluated at all (zero total active stake, a
+	// missing/nonpositive active-slot coefficient, a post-Mithril mark
+	// snapshot reconstructed after its target boundary): standard profiles
+	// reject rather than trust an unevaluated producer, and this flag is the
+	// only way to bypass that.
 	SkipLeaderStakeThresholdCheck bool
 	// SkipDijkstraTxValidation, when true, skips the Dijkstra per-transaction
 	// validation rule set entirely. On the Haskell-conformant Musashi path,
@@ -941,9 +962,17 @@ type LedgerState struct {
 	chainsyncMutex                sync.Mutex
 	chainsyncBlockfetchMutex      sync.Mutex
 	chainsyncBlockfetchReadyMutex sync.Mutex
-	chainsyncBlockfetchReadyChan  chan struct{}
-	activeBlockfetchConnId        ouroboros.ConnectionId // connection used for current blockfetch pipeline
-	shadowBlockfetchConnId        ouroboros.ConnectionId // shadow peer dispatched for parallel blockfetch
+	// bufferedHeaderMutex guards bufferedHeaderEvents alone. That map is
+	// reached from both the chainsync dispatch goroutine (which holds
+	// chainsyncMutex) and the blockfetch path (which holds
+	// chainsyncBlockfetchMutex), so neither of those locks covers every
+	// access and a concurrent iteration and write is fatal at runtime.
+	// Where both are held, acquire this one last; nothing calls out to
+	// other ledger code while holding it, so the order stays fixed.
+	bufferedHeaderMutex          sync.Mutex
+	chainsyncBlockfetchReadyChan chan struct{}
+	activeBlockfetchConnId       ouroboros.ConnectionId // connection used for current blockfetch pipeline
+	shadowBlockfetchConnId       ouroboros.ConnectionId // shadow peer dispatched for parallel blockfetch
 	// blockfetchPrimaryRequestGeneration identifies the currently running
 	// primary request. A timeout may fire while the request is blocked in the
 	// protocol client; keeping its generation lets the timeout wait instead of
@@ -995,6 +1024,9 @@ type LedgerState struct {
 	deferredHeaderValidationMu sync.Mutex
 	checkpointWrittenForEpoch  bool
 	closed                     atomic.Bool
+	closeMu                    sync.Mutex
+	closeDone                  chan struct{}
+	closeErr                   error
 	inRecovery                 bool // guards against recursive recovery in SubmitAsyncDBTxn
 	lastAtTipRecovery          *atTipRecoveryAttempt
 	// At-tip recovery non-convergence tracking (issue #2939). A descending
@@ -1165,6 +1197,14 @@ type LedgerState struct {
 	// production; tests use it to hold the exact post-commit/pre-publication
 	// window without relying on scheduler timing.
 	beforeTransactionApplyPublish func()
+	// beforeReconciliationUndoSnapshot is a test-only sequencing hook, nil
+	// in production. It runs in reconcilePrimaryChainTipWithLedgerTip right
+	// after the ledgerTip snapshot at the top of that function, so a test
+	// can deterministically force a concurrent block-apply commit into the
+	// window between that snapshot and the later, transactionEventMutex-
+	// held undo-block resolution, without relying on scheduler timing.
+	beforeReconciliationUndoSnapshot func()
+
 	// beforeReadResultDoneSignal is a test-only hook called once per
 	// ledgerProcessBlocksFromSource outer-loop pass, immediately before that
 	// pass decides whether to signal the current readChainResult's done
@@ -1367,11 +1407,26 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	// altogether, so no pipeline is constructed for that mode -- leaving
 	// blockPipeline non-nil but permanently unstarted otherwise.
 	if cfg.BlockPipelineEnabled && !cfg.ManualBlockProcessing {
-		// ApplyFunc is left nil in every case -- actual ledger apply
-		// continues to happen downstream in ledgerProcessBlocksFromSource
-		// exactly as it does today; the pipeline's apply stage here only
-		// re-sequences decoded (and, if enabled, validated) results back
-		// into submission order.
+		// ApplyFunc is deliberately left nil in every case -- actual
+		// ledger apply continues to happen downstream in
+		// ledgerProcessBlocksFromSource exactly as it does today; the
+		// pipeline's apply stage here only re-sequences decoded (and, if
+		// enabled, validated) results back into submission order, which
+		// is the whole job dingo needs from it.
+		//
+		// This is a recorded decision, not an unfinished phase of #1894:
+		// see ARCHITECTURE.md, "Why dingo's ledger apply is not wired into
+		// pipeline.ApplyFunc" (issue #3227). In short, pipeline.ApplyStage
+		// applies one block at a time and keeps going after a failure --
+		// a failed or undecodable block only records its own error and
+		// consumes its sequence slot, and every later block is applied
+		// anyway. A ledger cannot do that, and the failure never reaches
+		// the submitter synchronously, so errRestartLedgerPipeline /
+		// errStaleChainIterator cannot be expressed through it. Those
+		// upstream properties are pinned by the contract tests in
+		// ledger/block_pipeline_apply_contract_test.go; if a gouroboros
+		// bump makes any of them fail, revisit the decision rather than
+		// the test.
 		pipelineOpts := []pipeline.PipelineOption{
 			pipeline.WithDecodeWorkers(blockPipelineDecodeWorkers),
 		}
@@ -1923,7 +1978,12 @@ type orphanedBlock struct {
 // This handles the case where blob committed successfully but metadata failed,
 // leaving orphaned blocks in the blob store.
 func (ls *LedgerState) cleanupOrphanedBlobs(tipSlot uint64) error {
-	blobStore := ls.db.Blob()
+	// Pin rather than reading the installed store: this runs a scan, a
+	// separate write transaction, and a commit against one store, so it has
+	// to keep that store alive for the whole operation rather than sample
+	// whichever is installed at each step.
+	blobStore, releaseBlob := ls.db.PinBlob()
+	defer releaseBlob()
 	if blobStore == nil {
 		return nil // No blob store configured
 	}
@@ -2138,6 +2198,7 @@ var (
 	CloseProcessBlocksDrainTimeout = 20 * time.Second
 	CloseBlockPipelineDrainTimeout = 10 * time.Second
 	CloseBlockfetchDrainTimeout    = 10 * time.Second
+	CloseResultReplayTimeout       = 10 * time.Second
 	// BlockPipelineRollbackDrainTimeout bounds how long an asynchronous
 	// rollback (chainsync fork resolution or a peer-reported rollback --
 	// see rollbackChainAndStateDeferred) waits for ls.blockPipeline to drain
@@ -2149,14 +2210,49 @@ var (
 	BlockPipelineRollbackDrainTimeout = 5 * time.Second
 )
 
-func (ls *LedgerState) Close() error {
+func (ls *LedgerState) Close() (retErr error) {
+	// Close can be called once by the live lifecycle operation and again by
+	// the node's normal shutdown after that operation cancels the node. Keep
+	// the first result visible to every caller: returning nil from the second
+	// call would make shutdown close storage after the first call reported an
+	// unconfirmed drain.
+	ls.closeMu.Lock()
+	if ls.closeDone != nil {
+		done := ls.closeDone
+		ls.closeMu.Unlock()
+		select {
+		case <-done:
+		case <-time.After(CloseResultReplayTimeout):
+			return errors.New("previous ledger state close still in progress")
+		}
+		ls.closeMu.Lock()
+		retErr = ls.closeErr
+		ls.closeMu.Unlock()
+		return retErr
+	}
+	ls.closeDone = make(chan struct{})
+	done := ls.closeDone
+	if ls.closed.Load() {
+		// A few low-level tests mark closed directly to model a lifecycle
+		// state that has already begun closing. There is no close result to
+		// replay in that case, so publish the completed no-op explicitly.
+		close(done)
+		ls.closeMu.Unlock()
+		return nil
+	}
+	ls.closed.Store(true)
+	ls.closeMu.Unlock()
+	defer func() {
+		ls.closeMu.Lock()
+		ls.closeErr = retErr
+		close(done)
+		ls.closeMu.Unlock()
+	}()
+
 	// Release any ledger.tx publish parked on a full ordered lane before
 	// waiting on the goroutines that might be doing the publishing.
 	if ls.publishCancel != nil {
 		ls.publishCancel()
-	}
-	if !ls.closed.CompareAndSwap(false, true) {
-		return nil
 	}
 
 	// Accumulates errors from the two bounded waits below (rollback
@@ -3003,6 +3099,44 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 }
 
 func (ls *LedgerState) rollback(point ocommon.Point) error {
+	return ls.rollbackWithResync(point, true)
+}
+
+// rollbackCommittedError reports an error found after the metadata rollback
+// transaction and in-memory tip update have committed. Callers that publish
+// side effects separately must not treat this as an all-or-nothing failure.
+type rollbackCommittedError struct {
+	err error
+}
+
+func (e *rollbackCommittedError) Error() string { return e.err.Error() }
+
+func (e *rollbackCommittedError) Unwrap() error { return e.err }
+
+func (ls *LedgerState) rollbackWithoutResync(point ocommon.Point) error {
+	return ls.rollbackWithResync(point, false)
+}
+
+func (ls *LedgerState) publishLocalLedgerRollback(point ocommon.Point) {
+	if ls.config.EventBus == nil {
+		return
+	}
+	ls.config.EventBus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				Reason: event.ChainsyncResyncReasonLocalLedgerRollback,
+				Point:  point,
+			},
+		),
+	)
+}
+
+func (ls *LedgerState) rollbackWithResync(
+	point ocommon.Point,
+	publishResync bool,
+) error {
 	// Rolling back to the point we already sit at is a no-op. Skip
 	// it entirely so we don't publish a "local ledger rollback"
 	// resync event for a rollback that didn't move the ledger. That
@@ -3191,7 +3325,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		return err
 	}
 	// Notify subscribers that pool state has been restored (e.g., for cache invalidation)
-	if ls.config.EventBus != nil {
+	if publishResync && ls.config.EventBus != nil {
 		ls.config.EventBus.PublishAsync(
 			PoolStateRestoredEventType,
 			event.NewEvent(
@@ -3408,17 +3542,8 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	ls.updateTipMetrics(newTipDensity)
 	ls.publishSnapshotsLocked()
 	ls.Unlock()
-	if ls.config.EventBus != nil {
-		ls.config.EventBus.Publish(
-			event.ChainsyncResyncEventType,
-			event.NewEvent(
-				event.ChainsyncResyncEventType,
-				event.ChainsyncResyncEvent{
-					Reason: event.ChainsyncResyncReasonLocalLedgerRollback,
-					Point:  point,
-				},
-			),
-		)
+	if publishResync {
+		ls.publishLocalLedgerRollback(point)
 	}
 	var hash string
 	if point.Slot == 0 {
@@ -3436,7 +3561,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		"ledger",
 	)
 	if err := ls.enforceDurableTipFloor(); err != nil {
-		return err
+		return &rollbackCommittedError{err: err}
 	}
 	return nil
 }
@@ -4573,6 +4698,125 @@ func (ls *LedgerState) ledgerReadChain(
 				hex.EncodeToString(startPoint.Hash),
 			)
 			if reconcileErr := ls.reconcilePrimaryChainTipWithLedgerTip(); reconcileErr != nil {
+				if errors.Is(reconcileErr, chain.ErrRollbackExceedsSecurityParam) {
+					// The common ancestor sits more than K blocks
+					// behind the primary chain tip: this reader cannot
+					// safely reconcile locally, the same over-K
+					// boundary a peer-driven rollback is refused for
+					// (chainsync.go). Surface it through the same
+					// ChainsyncResyncEventType/reason those call sites
+					// use rather than only a generic error log, so
+					// connection management gets the same signal to
+					// reconnect and negotiate a fresh intersection.
+					//
+					// Every other give-up path in this function still
+					// returns without ever sending a readChainResult,
+					// which ledgerProcessBlocksFromSource's
+					// closed-channel case turns into a nil error that
+					// permanently stops ledgerProcessBlocksWithAttempt's
+					// retry loop -- tracked as that general,
+					// pre-existing pattern in issue #3776. This branch
+					// is different: this PR is what makes it reachable
+					// at all (RewindPrimaryChainToPoint had no bound
+					// before), so it is fixed directly below instead of
+					// deferred, by sending a non-nil readChainResult
+					// before returning.
+					ls.config.Logger.Error(
+						"missing chain iterator start point requires a "+
+							"rewind beyond the security parameter K, "+
+							"requesting a fresh chainsync intersection",
+						"start_slot", startPoint.Slot,
+						"start_hash", hex.EncodeToString(startPoint.Hash),
+					)
+					if ls.config.EventBus != nil {
+						ls.config.EventBus.PublishAsync(
+							event.ChainsyncResyncEventType,
+							event.NewEvent(
+								event.ChainsyncResyncEventType,
+								event.ChainsyncResyncEvent{
+									Reason: event.ChainsyncResyncReasonRollbackExceedsK,
+									Point:  startPoint,
+								},
+							),
+						)
+					}
+					// Report the failure through the channel rather
+					// than just closing it, so
+					// ledgerProcessBlocksFromSource sees a real error
+					// (recovered=false from
+					// tryRecoverFromHeaderValidationError, since this
+					// isn't a *headerValidationError) and returns it;
+					// ledgerProcessBlocksWithAttempt then treats this
+					// like any other recoverable read-chain failure --
+					// back off and start a fresh reader attempt --
+					// instead of exiting for good. The next attempt
+					// re-reconciles from the (possibly by-then
+					// advanced) tip; until connection management acts
+					// on the resync event above, it fails the same way
+					// and backs off further, exactly like any other
+					// deterministic no-progress restart.
+					select {
+					case resultCh <- readChainResult{
+						err: fmt.Errorf(
+							"reconcile primary chain tip with ledger tip: %w",
+							reconcileErr,
+						),
+					}:
+					case <-ctx.Done():
+					}
+					return
+				}
+				if errors.Is(reconcileErr, ErrRollbackExceedsMithrilBoundary) {
+					// The common ancestor sits at or below the local
+					// Mithril trust boundary: the same rejection
+					// reconcilePrimaryChainTipWithLedgerTip's own
+					// pre-check now declines before ever emitting an
+					// undo (Cubic review, PR #3611), and the same
+					// boundary a peer-driven rollback is refused for in
+					// handleEventChainsyncRollback. Surface it through
+					// the matching ChainsyncResyncReasonRollbackExceedsMithril
+					// reason rather than only a generic error log, so
+					// connection management gets the same signal to
+					// negotiate a fresh intersection. Unlike
+					// handleEventChainsyncRollback this reader has no
+					// peer or advertised tip to distinguish "peer merely
+					// behind" from "genuinely diverges below the
+					// boundary", so it always reports the latter, the
+					// safer default.
+					ls.config.Logger.Error(
+						"missing chain iterator start point requires a "+
+							"rewind at or below the Mithril trust "+
+							"boundary, requesting a fresh chainsync "+
+							"intersection",
+						"start_slot", startPoint.Slot,
+						"start_hash", hex.EncodeToString(startPoint.Hash),
+					)
+					if ls.config.EventBus != nil {
+						ls.config.EventBus.PublishAsync(
+							event.ChainsyncResyncEventType,
+							event.NewEvent(
+								event.ChainsyncResyncEventType,
+								event.ChainsyncResyncEvent{
+									Reason: event.ChainsyncResyncReasonRollbackExceedsMithril,
+									Point:  startPoint,
+								},
+							),
+						)
+					}
+					// See the matching comment on the over-K branch
+					// above for why this reports the failure through
+					// resultCh rather than just returning.
+					select {
+					case resultCh <- readChainResult{
+						err: fmt.Errorf(
+							"reconcile primary chain tip with ledger tip: %w",
+							reconcileErr,
+						),
+					}:
+					case <-ctx.Done():
+					}
+					return
+				}
 				ls.config.Logger.Error(
 					"failed to recover missing chain iterator start point",
 					"error", reconcileErr,
@@ -5210,6 +5454,14 @@ func ledgerPipelineBackoff(consecutiveNoProgress int) (time.Duration, bool) {
 	), true
 }
 
+func ledgerPipelineRetryDelay(
+	consecutiveNoProgress int,
+	minimum time.Duration,
+) (time.Duration, bool) {
+	backoff, stuck := ledgerPipelineBackoff(consecutiveNoProgress)
+	return max(backoff, minimum), stuck
+}
+
 // certifiedEndorserBlockPipelineRetryDelay returns how long the pipeline waits
 // before restarting after a certified Leios endorser block was unavailable.
 //
@@ -5223,10 +5475,10 @@ func ledgerPipelineBackoff(consecutiveNoProgress int) (time.Duration, bool) {
 func certifiedEndorserBlockPipelineRetryDelay(
 	consecutiveNoProgress int,
 ) time.Duration {
-	delay := certifiedEndorserBlockRetryDelay
-	if backoff, _ := ledgerPipelineBackoff(consecutiveNoProgress); backoff > delay {
-		delay = backoff
-	}
+	delay, _ := ledgerPipelineRetryDelay(
+		consecutiveNoProgress,
+		certifiedEndorserBlockRetryDelay,
+	)
 	return delay
 }
 
@@ -6376,19 +6628,21 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							isCheckpoint = true
 							localCheckpointWritten = true
 						}
-						// Store block nonce in the DB
+						// Store an applied point for every block. Byron blocks do
+						// not have an evolving nonce, but reconciliation still
+						// needs their durable point to build rollback notifications.
+						err = ls.db.SetBlockNonce(
+							tmpPoint.Hash,
+							tmpPoint.Slot,
+							blockNonce,
+							isCheckpoint,
+							txn,
+						)
+						if err != nil {
+							deltaBatch.Release()
+							return err
+						}
 						if len(blockNonce) > 0 {
-							err = ls.db.SetBlockNonce(
-								tmpPoint.Hash,
-								tmpPoint.Slot,
-								blockNonce,
-								isCheckpoint,
-								txn,
-							)
-							if err != nil {
-								deltaBatch.Release()
-								return err
-							}
 							// Track pending nonce (will be committed after txn succeeds)
 							pendingNonce = blockNonce
 						}
@@ -6680,6 +6934,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 		if err := validateInboundBlockEnvelope(
 			block,
 			pparams,
+			ls.config.CardanoNodeConfig,
 			parent,
 		); err != nil {
 			return nil, err
@@ -6706,6 +6961,17 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 		opCertIssueNumber = opCert.IssueNumber
 		opCertPoolKeyHash = lcommon.PoolKeyHash(block.IssuerVkey().Hash())
+		// The counter is recorded for every applied block, validated or not,
+		// so the bound on what the metadata store can record is checked here
+		// rather than beside the era rule below: an unvalidated replay would
+		// otherwise reach UpdatePoolOpCertSequence with a counter it cannot
+		// write and fail after the block's transactions had been processed,
+		// with the width limit named nowhere.
+		if err := eras.ValidateOpCertPersistableCounter(
+			opCertIssueNumber,
+		); err != nil {
+			return nil, fmt.Errorf("pool %x: %w", opCertPoolKeyHash, err)
+		}
 		// Counter monotonicity is the stateful half of inbound opcert
 		// validation: read the pool's last-seen counter before processing this
 		// block, inside the same validation transaction. A backward counter
@@ -6985,8 +7251,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 					err = nil
 				}
 				if err != nil {
-					var plutusErr conway.PlutusScriptFailedError
-					if errors.As(err, &plutusErr) {
+					if plutusErr, ok := errors.AsType[conway.PlutusScriptFailedError](err); ok {
 						ls.config.Logger.Warn(
 							"Plutus evaluation disagrees with block producer (rejecting transaction)",
 							"component",
@@ -8411,6 +8676,9 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 	ls.RLock()
 	ledgerTip := ls.currentTip
 	ls.RUnlock()
+	if ls.beforeReconciliationUndoSnapshot != nil {
+		ls.beforeReconciliationUndoSnapshot()
+	}
 	chainTip := ls.chain.Tip()
 	if chainTip.Point.Slot == ledgerTip.Point.Slot &&
 		bytes.Equal(chainTip.Point.Hash, ledgerTip.Point.Hash) {
@@ -8418,7 +8686,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 	}
 	if chainTip.Point.Slot < ledgerTip.Point.Slot {
 		ls.config.Logger.Warn(
-			"ledger tip ahead of primary chain tip at startup, rolling back metadata to chain tip",
+			"ledger tip ahead of primary chain tip, rolling back metadata to chain tip",
 			"component",
 			"ledger",
 			"chain_tip_slot",
@@ -8430,12 +8698,94 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 			"ledger_tip_hash",
 			hex.EncodeToString(ledgerTip.Point.Hash),
 		)
-		if err := ls.rollback(chainTip.Point); err != nil {
+		// This branch is not only the ordinary "primary chain got
+		// shortened out from under an ahead ledger tip" case -- it is
+		// also exactly what a *second* run of this reconciler lands in
+		// after a crash between the common-ancestor branch's
+		// RewindPrimaryChainToPoint succeeding (primary chain already
+		// truncated, durable) and its emitRollbackTransactionEvents
+		// running (in-memory only, lost on crash): ls.currentTip is
+		// still the stale pre-crash value, chain.Tip() already reports
+		// the truncated point, so chainTip.Point.Slot < ledgerTip.Point.Slot
+		// here and undo events for that already-truncated range would
+		// otherwise never be attempted at all (wolf31o2 review, PR
+		// #3611). Reusing reconciliationUndoBlocks/
+		// emitRollbackTransactionEvents here, under the same
+		// gather-exclude/drain/transactionEventMutex sequencing the
+		// common-ancestor branch below uses, makes that recovery
+		// attempt happen instead of being silently skipped -- subject
+		// to the same, already-documented restart/cache-eviction
+		// resolution gap reconciliationUndoBlocks accepts and counts
+		// via reconciliationUndoUnresolved. This branch is also
+		// reachable live (not just at startup), from the same three
+		// callers as the common-ancestor branch, so the same
+		// protection against a concurrent apply or in-flight gathered
+		// block applies here too.
+		ls.blockPipelineGatherMutex.Lock()
+		defer ls.blockPipelineGatherMutex.Unlock()
+		//nolint:contextcheck // no ctx threaded through this call chain, same as rollbackChainAndState
+		ls.drainBlockPipelineBeforeRollback(
+			context.Background(),
+			"primary-chain/ledger reconciliation",
+		)
+		if err := func() error {
+			ls.transactionEventMutex.Lock()
+			defer ls.transactionEventMutex.Unlock()
+			ls.RLock()
+			currentLedgerTip := ls.currentTip
+			mithrilLedgerSlot := ls.mithrilLedgerSlot
+			ls.RUnlock()
+			// Pre-check the one deterministic rejection ls.rollback
+			// below can still hit, the same way rollbackChainAndState
+			// checks it before ever calling validateAndEmitRollbackUndo
+			// (wolf31o2 review, PR #3611): skip the notification
+			// entirely rather than publish an undo for a rollback that
+			// is rejected outright, not merely delayed. This narrows
+			// ls.rollback's remaining failure mode below to a genuine,
+			// unpredictable DB I/O error -- the same residual risk
+			// validateAndEmitRollbackUndo's own doc comment already
+			// accepts for the canonical path (issue #3817 tracks
+			// closing that fully).
+			if mithrilLedgerSlot > 0 &&
+				chainTip.Point.Slot < mithrilLedgerSlot {
+				return ErrRollbackExceedsMithrilBoundary
+			}
+			undoBlocks := ls.reconciliationUndoBlocks(
+				chainTip.Point,
+				currentLedgerTip.Point.Slot,
+				currentLedgerTip.BlockNumber,
+			)
+			// See the matching comment on the common-ancestor branch's
+			// own emit below for the full reasoning (Cubic and
+			// wolf31o2 review, PR #3611; issue #3817 tracks the real
+			// fix): the inconsistency window a failing ls.rollback
+			// would leave here is bounded the same way, matches the
+			// pre-existing rollbackChainAndState/
+			// validateAndEmitRollbackUndo contract, and the next
+			// reconciliation attempt lands right back in this same
+			// branch and retries both.
+			if err := ls.rollbackWithoutResync(chainTip.Point); err != nil {
+				if _, ok := errors.AsType[*rollbackCommittedError](err); ok {
+					ls.emitRollbackTransactionEvents(undoBlocks)
+				}
+				return err
+			}
+			ls.emitRollbackTransactionEvents(undoBlocks)
+			return nil
+		}(); err != nil {
+			ls.config.Logger.Error(
+				"failed to roll back ledger metadata to primary chain tip",
+				"component", "ledger",
+				"error", err,
+				"chain_tip_slot", chainTip.Point.Slot,
+				"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
+			)
 			return fmt.Errorf(
 				"rollback ledger tip to primary chain tip: %w",
 				err,
 			)
 		}
+		ls.publishLocalLedgerRollback(chainTip.Point)
 		return nil
 	}
 	containsLedgerTip, err := ls.primaryChainContainsPoint(ledgerTip.Point)
@@ -8505,37 +8855,237 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		"ancestor_hash",
 		hex.EncodeToString(ancestor.Hash),
 	)
-	if err := ls.config.ChainManager.RewindPrimaryChainToPoint(
-		ancestor,
-	); err != nil {
+	// Rewind the primary chain to the common ancestor through the same
+	// gather-exclude, then drain sequencing rollbackChainAndState uses
+	// for a peer-driven rollback, so no in-flight gathered-but-not-yet-
+	// submitted block can commit past the rewind with no matching undo.
+	//
+	// blockPipelineGatherMutex's write lock is safe to take from every
+	// caller of this reconciler: ledgerReadChain (the reader's own
+	// goroutine) only reaches this call before ever creating the chain
+	// iterator that ledgerReadChainIterator then reads under the read
+	// lock, and always returns immediately afterward without looping
+	// back, so the reader never holds that read lock while this runs.
+	// The other callers (reconcileLivePrimaryChainLedgerDivergence, from
+	// chainsync per-connection handling and the plateau watchdog) are the
+	// same category of caller rollbackChainAndState already takes this
+	// lock from.
+	ls.blockPipelineGatherMutex.Lock()
+	defer ls.blockPipelineGatherMutex.Unlock()
+	//nolint:contextcheck // no ctx threaded through this call chain, same as rollbackChainAndState
+	ls.drainBlockPipelineBeforeRollback(
+		context.Background(),
+		"primary-chain/ledger reconciliation",
+	)
+	if err := func() error {
+		ls.transactionEventMutex.Lock()
+		defer ls.transactionEventMutex.Unlock()
+		// Resolve the ledger's own applied blocks between the ancestor
+		// and the CURRENT applied tip only now, holding
+		// transactionEventMutex: submitBlockApplyDBTxn's forward-apply
+		// commit also takes this mutex around updating ls.currentTip
+		// and its own AfterCommit publish, so holding it here guarantees
+		// no commit in flight when this section started can land, and
+		// none can start, until this section releases it. Building this
+		// list from the ledgerTip snapshotted at the top of this
+		// function -- taken with no lock held between there and here --
+		// would miss any block a concurrent apply committed in that
+		// window: the rewind below would still remove it (the primary
+		// chain extends together with the ledger's applied tip), but
+		// with no matching entry in an undoBlocks list sized to the
+		// stale tip, so it would silently get no undo (issue #3516
+		// review). ChainManager.BlockByPoint (called via
+		// reconciliationUndoBlocks) takes only cm.mutex, unrelated to
+		// and released well before the chain-locked rewind call below,
+		// so calling it here is not the reentrancy
+		// emitRollbackTransactionEvents must still avoid (see below).
+		ls.RLock()
+		currentLedgerTip := ls.currentTip
+		mithrilLedgerSlot := ls.mithrilLedgerSlot
+		ls.RUnlock()
+		// Pre-check the one deterministic rejection ls.rollback below
+		// can still hit, the same way rollbackChainAndState checks it
+		// before ever calling validateAndEmitRollbackUndo (wolf31o2
+		// review, PR #3611): skip straight to the rewind without
+		// resolving or emitting an undo for a rollback that is
+		// rejected outright, not merely delayed. This narrows
+		// ls.rollback's remaining failure mode below to a genuine,
+		// unpredictable DB I/O error -- the same residual risk
+		// validateAndEmitRollbackUndo's own doc comment already
+		// accepts for the canonical path (issue #3817 tracks closing
+		// that fully).
+		if mithrilLedgerSlot > 0 && ancestor.Slot < mithrilLedgerSlot {
+			return ErrRollbackExceedsMithrilBoundary
+		}
+		undoBlocks := ls.reconciliationUndoBlocks(
+			ancestor,
+			currentLedgerTip.Point.Slot,
+			currentLedgerTip.BlockNumber,
+		)
+		// RewindPrimaryChainToPoint's own K-check and truncation run
+		// under one continuous hold of the chain's own locks (see
+		// Chain.rollbackLocked), so calling it directly here -- with no
+		// separate dry-run pre-check -- is already atomic with respect
+		// to a concurrent AddBlock/AddBlockWithPoint growing the primary
+		// chain: nothing can invalidate an acceptance this call itself
+		// just decided. A dry-run ValidateRollback followed by a
+		// separately locked truncation leaves exactly that gap open
+		// (issue #3516 review): the chain can grow enough in between to
+		// invalidate what validation found, so publishing undo events
+		// from a hook run before this call returns can outrun a rewind
+		// that the same growth then causes to be rejected.
+		//
+		// Emitting the precomputed undoBlocks only strictly after this
+		// call returns success -- not from inside it -- also keeps
+		// emitRollbackTransactionEvents from running while c.mutex/
+		// c.manager.mutex are held: it can publish LedgerErrorEventType
+		// synchronously (EventBus.Publish invokes subscribers on the
+		// caller's own goroutine), and the chain package itself only
+		// ever publishes its own events after releasing those same
+		// locks for exactly this reason (see Chain.Rollback). Both
+		// calls still share transactionEventMutex with
+		// submitBlockApplyDBTxn's forward-apply commit, which is what
+		// keeps the undo ahead of any forward ledger.tx event on the
+		// same ordered lane regardless of this internal ordering.
+		//
+		// This reconciler runs both at startup (from NewLedgerState,
+		// before node.go's ChainManager.SetLedger has configured the
+		// security parameter K) and live (always after SetLedger), so
+		// it cannot unconditionally require K the way a peer-driven
+		// rollback must: RewindPrimaryChainToPoint alone would return
+		// ErrSecurityParamNotConfigured and fail node startup outright
+		// for exactly the local, already-durable divergence this
+		// function exists to repair (issue #3516 review).
+		// RewindPrimaryChainAtStartup skips the K bound for that
+		// pre-SetLedger case only -- it is never reachable from an
+		// untrusted peer, since every chainsync-driven path runs after
+		// SetLedger.
+		rewindErr := func() error {
+			if ls.config.ChainManager.SecurityParamConfigured() {
+				return ls.config.ChainManager.RewindPrimaryChainToPoint(
+					ancestor,
+				)
+			}
+			return ls.config.ChainManager.RewindPrimaryChainAtStartup(
+				ancestor,
+			)
+		}()
+		if rewindErr != nil {
+			return rewindErr
+		}
+		// Publishing here, before ls.rollback below runs, leaves a
+		// narrow inconsistency window if that separate call then fails:
+		// subscribers have already been told these blocks are undone,
+		// while ls.currentTip -- updated only by ls.rollback -- still
+		// durably shows them applied (Cubic and wolf31o2 review, PR
+		// #3611). This is not a shape unique to this function:
+		// rollbackChainAndState -- the pre-existing, far-more-frequently
+		// exercised peer-driven rollback path -- has the identical
+		// structure (validateAndEmitRollbackUndo's emit inside
+		// transactionEventMutex, ls.rollback as a separate call
+		// afterward that can fail), and validateAndEmitRollbackUndo's
+		// own doc comment already accepts this exact class of window:
+		// "an I/O failure mid-truncation is not predictable at all ...
+		// leaves the chain needing recovery regardless." Closing it here
+		// alone, differently from that canonical path, would leave the
+		// two rollback contracts inconsistent for no benefit. Closing it
+		// outright would also mean either running ls.rollback here,
+		// still holding transactionEventMutex -- risking a real
+		// reentrancy hazard emitRollbackTransactionEvents's own
+		// placement above already avoids: ls.rollback can itself publish
+		// ChainsyncResyncEventType/ChainsyncResyncReasonLocalLedgerRollback
+		// synchronously via EventBus.Publish, and
+		// Ouroboros.SubscribeChainsyncResync subscribes to exactly that
+		// reason and calls the substantial RecoverAfterLocalRollback,
+		// whose own locking has not been audited for this -- or
+		// deferring this emit until after ls.rollback returns, which
+		// would let a concurrent forward apply's ledger.tx event land
+		// first on the same ordered lane, reopening exactly what holding
+		// transactionEventMutex across this emit prevents. The window is
+		// bounded rather than permanent here: the one deterministic
+		// rejection ls.rollback could otherwise hit (the Mithril
+		// boundary) is pre-checked above, before this emit, exactly
+		// as rollbackChainAndState pre-checks it before
+		// validateAndEmitRollbackUndo (proven by
+		// TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmitting),
+		// so ls.rollback's only remaining failure mode here is a
+		// genuine, unpredictable DB error. If it still fails, the
+		// next reconciliation attempt lands in the "ledger tip ahead
+		// of primary chain tip" branch below, which retries both the
+		// (idempotent) undo notification and this same rollback
+		// (proven by
+		// TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewindAndEmit).
+		// A true durable, atomic handoff across every rollback path --
+		// not just this one -- is tracked as issue #3817.
+		if err := ls.rollbackWithoutResync(ancestor); err != nil {
+			if _, ok := errors.AsType[*rollbackCommittedError](err); ok {
+				ls.emitRollbackTransactionEvents(undoBlocks)
+			}
+			return err
+		}
+		ls.emitRollbackTransactionEvents(undoBlocks)
+		return nil
+	}(); err != nil {
 		return fmt.Errorf(
 			"rewind primary chain to common primary-chain ancestor: %w",
 			err,
 		)
 	}
-	if err := ls.rollback(ancestor); err != nil {
-		return fmt.Errorf(
-			"rollback ledger tip to common primary-chain ancestor: %w",
-			err,
-		)
-	}
+	ls.publishLocalLedgerRollback(ancestor)
 	return nil
 }
 
 // ReconcileLivePrimaryChainLedgerDivergence is the exported entry
 // point into the live-divergence reconciler. The plateau watchdog
-// calls this when local tip has not advanced for plateau_duration
-// while peers report a higher tip: if primary chain has advanced but
-// the ledger pipeline is stuck on an abandoned same-slot fork, this
-// rolls back the ledger to the latest common ancestor so forward
-// application from the canonical chain can resume without a process
-// or container restart. Returns (true, nil) when reconciliation
-// happened, (false, nil) when no divergence was found.
+// (internal/chainsyncrecycler) calls this when local tip has not
+// advanced for plateau_duration while peers report a higher tip: if
+// primary chain has advanced but the ledger pipeline is stuck on an
+// abandoned same-slot fork, this rolls back the ledger to the latest
+// common ancestor so forward application from the canonical chain can
+// resume without a process or container restart. Returns (true, nil)
+// when reconciliation happened, (false, nil) when no divergence was
+// found.
+//
+// reconcileLivePrimaryChainLedgerDivergence propagates
+// ErrRollbackExceedsMithrilBoundary as a plain error, since its other two
+// callers (handleEventChainsyncRollback, tryResolveFork -- both call it
+// directly, not through this wrapper) classify and publish the matching
+// resync themselves via handleMithrilBoundaryRollback, using peer-tip
+// context this wrapper's only caller does not have. The plateau watchdog
+// has no pending event batch or peer rollback handler of its own to
+// classify this with, and chainsyncrecycler deliberately does not import
+// ledger to inspect the error type (see that package's own doc comment),
+// so this wrapper classifies and publishes it here instead, the same way
+// reconcileLivePrimaryChainLedgerDivergence itself used to before that
+// responsibility moved to each caller (wolf31o2, PR #3611).
 func (ls *LedgerState) ReconcileLivePrimaryChainLedgerDivergence(
 	reason string,
 	connId ouroboros.ConnectionId,
 ) (bool, error) {
-	return ls.reconcileLivePrimaryChainLedgerDivergence(reason, connId)
+	reconciled, err := ls.reconcileLivePrimaryChainLedgerDivergence(
+		reason,
+		connId,
+	)
+	if err != nil && errors.Is(err, ErrRollbackExceedsMithrilBoundary) {
+		if ls.config.EventBus != nil {
+			ls.RLock()
+			point := ls.currentTip.Point
+			ls.RUnlock()
+			ls.config.EventBus.PublishAsync(
+				event.ChainsyncResyncEventType,
+				event.NewEvent(
+					event.ChainsyncResyncEventType,
+					event.ChainsyncResyncEvent{
+						ConnectionId: connId,
+						Reason:       event.ChainsyncResyncReasonRollbackExceedsMithril,
+						Point:        point,
+					},
+				),
+			)
+		}
+		return false, nil
+	}
+	return reconciled, err
 }
 
 func (ls *LedgerState) reconcileLivePrimaryChainLedgerDivergence(
@@ -8589,6 +9139,35 @@ func (ls *LedgerState) reconcileLivePrimaryChainLedgerDivergence(
 		hex.EncodeToString(ledgerTip.Point.Hash),
 	)
 	if err := ls.reconcilePrimaryChainTipWithLedgerTip(); err != nil {
+		if errors.Is(err, ErrRollbackExceedsMithrilBoundary) {
+			// Let each live caller classify and publish the boundary
+			// resync through its normal pending-event path.
+			return false, err
+		}
+		if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+			// The common ancestor sits more than K blocks behind the
+			// primary chain tip. Rewinding that far live is exactly what
+			// issue #3516 bounds against, so treat this the same as "no
+			// safe reconciliation available" and let the caller's
+			// existing over-K handling (chainsync.go) reject the peer
+			// chain and force a fresh intersection instead of silently
+			// truncating the chain past K.
+			ls.config.Logger.Error(
+				"primary chain and ledger diverged beyond security "+
+					"parameter K, declining to reconcile live",
+				"component",
+				"ledger",
+				"reason",
+				reason,
+				"connection_id",
+				connId.String(),
+				"chain_tip_slot",
+				chainTip.Point.Slot,
+				"ledger_tip_slot",
+				ledgerTip.Point.Slot,
+			)
+			return false, nil
+		}
 		return false, err
 	}
 	return true, nil
@@ -9335,7 +9914,32 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 	if currentPParams == nil || currentEpoch.LengthInSlots == 0 {
 		return currentPParams
 	}
-	slotEpoch := slot / uint64(currentEpoch.LengthInSlots)
+	// Epoch lengths can change at an era boundary. Resolve the target slot
+	// through the multi-era converter so a Byron prefix does not make a
+	// future Shelley slot appear to belong to an early epoch.
+	slotEpoch := currentEpoch.EpochId
+	// Use the epoch cache from the same immutable snapshot as the other
+	// forecast inputs. Calling ls.SlotToEpoch here would load a second snapshot
+	// and could mix its epoch cache with currentEpoch/currentEra/currentPParams
+	// across a concurrent rollover or rollback.
+	for _, epoch := range slices.Backward(snapshot.epochCache) {
+		if slot < epoch.StartSlot {
+			continue
+		}
+		slotEpoch = epoch.EpochId
+		if epoch.LengthInSlots != 0 {
+			slotEpoch += (slot - epoch.StartSlot) /
+				uint64(epoch.LengthInSlots)
+		}
+		break
+	}
+	if len(snapshot.epochCache) == 0 && slot >= currentEpoch.StartSlot {
+		// With no cache, project from the captured current epoch. This retains
+		// the absolute epoch offset while preserving the existing bare-state
+		// forecast behavior.
+		slotEpoch += (slot - currentEpoch.StartSlot) /
+			uint64(currentEpoch.LengthInSlots)
+	}
 	if slotEpoch <= currentEpoch.EpochId {
 		return currentPParams
 	}
@@ -9925,7 +10529,11 @@ func (ls *LedgerState) UtxosByRefs(
 func (ls *LedgerState) UtxosByAddress(
 	addrs []ledger.Address,
 ) ([]models.Utxo, error) {
-	utxos, err := ls.db.UtxosByAddress(addrs, nil)
+	utxos, err := ls.db.UtxosByAddress(
+		addrs,
+		database.MaxUtxosByAddressResults,
+		nil,
+	)
 	if err != nil {
 		return nil, err
 	}

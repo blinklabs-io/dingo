@@ -23,6 +23,8 @@ import (
 
 // A restart that made progress is not backed off at all, and is never stuck.
 func TestLedgerPipelineBackoffProgressResets(t *testing.T) {
+	t.Parallel()
+
 	for _, consecutive := range []int{0, -1} {
 		backoff, stuck := ledgerPipelineBackoff(consecutive)
 		require.Zero(t, backoff)
@@ -34,6 +36,8 @@ func TestLedgerPipelineBackoffProgressResets(t *testing.T) {
 // pipeline restarting a handful of times is normal (a rollback racing the
 // iterator, a peer dropping mid-batch) and must not raise an operator alarm.
 func TestLedgerPipelineBackoffTransientFailuresAreNotStuck(t *testing.T) {
+	t.Parallel()
+
 	prev := time.Duration(0)
 	for consecutive := 1; consecutive < noProgressStuckThreshold; consecutive++ {
 		backoff, stuck := ledgerPipelineBackoff(consecutive)
@@ -56,6 +60,8 @@ func TestLedgerPipelineBackoffTransientFailuresAreNotStuck(t *testing.T) {
 // pipeline is declared stuck and the wait escalates well beyond the transient
 // ceiling.
 func TestLedgerPipelineBackoffDeterministicFailureEscalates(t *testing.T) {
+	t.Parallel()
+
 	_, stuck := ledgerPipelineBackoff(noProgressStuckThreshold)
 	require.True(t, stuck, "the stuck threshold should report stuck")
 
@@ -75,6 +81,8 @@ func TestLedgerPipelineBackoffDeterministicFailureEscalates(t *testing.T) {
 
 // Monotonic across the transient/stuck boundary: the escalation must not dip.
 func TestLedgerPipelineBackoffIsMonotonic(t *testing.T) {
+	t.Parallel()
+
 	prev := time.Duration(0)
 	for consecutive := range noProgressStuckThreshold + 64 {
 		backoff, _ := ledgerPipelineBackoff(consecutive)
@@ -82,4 +90,37 @@ func TestLedgerPipelineBackoffIsMonotonic(t *testing.T) {
 			"backoff dipped at %d consecutive restarts", consecutive)
 		prev = backoff
 	}
+}
+
+// Rejected blocks and unavailable certified blocks share the same no-progress
+// budget. The latter has a minimum retry delay, but it must still enter the
+// escalating cap; otherwise a deterministic rejection can spin forever at its
+// fixed cadence.
+func TestLedgerPipelineRetryDelayIsBounded(t *testing.T) {
+	t.Parallel()
+
+	minimum := 250 * time.Millisecond
+	previous := time.Duration(0)
+	for consecutive := range noProgressStuckThreshold + 64 {
+		delay, stuck := ledgerPipelineRetryDelay(consecutive, minimum)
+		require.GreaterOrEqual(t, delay, minimum)
+		require.GreaterOrEqual(t, delay, previous,
+			"retry delay dipped at %d consecutive rejections", consecutive)
+		if consecutive < noProgressStuckThreshold {
+			require.False(t, stuck)
+		}
+		previous = delay
+	}
+
+	stuckDelay, stuck := ledgerPipelineRetryDelay(
+		noProgressStuckThreshold,
+		minimum,
+	)
+	require.True(t, stuck)
+	require.Greater(t, stuckDelay, minimum,
+		"a deterministic rejection must leave its minimum retry cadence")
+	forever, stuck := ledgerPipelineRetryDelay(1_000_000, minimum)
+	require.True(t, stuck)
+	require.Equal(t, noProgressStuckBackoffMax, forever,
+		"rejection retry delay must have a finite upper bound")
 }

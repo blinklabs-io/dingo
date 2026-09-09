@@ -26,6 +26,8 @@ import (
 func TestGetEpochsNeedingCheckDoesNotRequeueCheckedPreStakingEpoch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
@@ -63,6 +65,8 @@ func TestGetEpochsNeedingCheckDoesNotRequeueCheckedPreStakingEpoch(
 // real migrated column for every field, so this has to run against a real
 // DB, not just construct the struct in memory.
 func TestCommitEpochDataWithTotals(t *testing.T) {
+	t.Parallel()
+
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
@@ -114,6 +118,8 @@ func TestCommitEpochDataWithTotals(t *testing.T) {
 // widened (network, epoch, stake_address, reward_type) key that lets one
 // account carry both a member and a leader row in the same epoch.
 func TestCommitAccountRewardsForEpoch(t *testing.T) {
+	t.Parallel()
+
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
@@ -200,6 +206,8 @@ func TestCommitAccountRewardsForEpoch(t *testing.T) {
 // constraint violation before CompareAccountEpoch ever got a chance to flag
 // the duplicate as acct_duplicate.
 func TestCommitAccountRewardsForEpochAllowsLiteralDuplicateKey(t *testing.T) {
+	t.Parallel()
+
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
@@ -250,6 +258,8 @@ func TestCommitAccountRewardsForEpochAllowsLiteralDuplicateKey(t *testing.T) {
 // pool_id_bech32 — the #1875 schema-only shape) forward without errors or
 // data loss, and that the widened unique index is in place afterward.
 func TestAccountRewardsAdditiveColumnMigration(t *testing.T) {
+	t.Parallel()
+
 	path := filepath.Join(t.TempDir(), "cache.db")
 
 	// Build the pre-#3097 shape directly, bypassing createCacheSchema.
@@ -320,6 +330,8 @@ func TestAccountRewardsAdditiveColumnMigration(t *testing.T) {
 // first row of the replacement batch inserts fine and the second aborts the
 // whole transaction, without touching the production schema.
 func TestCommitEpochMismatchesRollsBackOnFailedInsert(t *testing.T) {
+	t.Parallel()
+
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck

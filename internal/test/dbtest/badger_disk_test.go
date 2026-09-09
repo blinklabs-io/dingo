@@ -7,15 +7,22 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
 // maxTestBlobFileBytes bounds any single file a test database is allowed to
 // reserve. Badger truncates its memtable and value log to their configured
 // sizes up front; on NTFS that truncation actually allocates, so production
-// defaults (1GiB value log, 128MiB memtable) exhaust the Windows runner's
-// disk once a package builds several stores. See issue #3980.
-const maxTestBlobFileBytes = 32 << 20
+// defaults (1GiB value log, 128MiB memtable) exhaust the Windows runner's disk
+// once a package builds several stores. See issue #3980.
+//
+// The value log is the larger of the two and badger opens it at twice
+// ValueLogFileSize so the last entry always fits (badger/v4 value.go:536), so
+// the bound is derived from testutil's sizing the same way
+// TestNewDatabaseReservesASmallValueLog derives its own. Deriving it keeps the
+// two from disagreeing about what the reservation rule is.
+const maxTestBlobFileBytes = 2 * testutil.TestBadgerValueLogFileSize
 
 // largestFile reports the biggest file under dir and its path. Badger truncates
 // its value log and memtable to their configured sizes on open, and os.Stat
@@ -48,7 +55,12 @@ func largestFile(t *testing.T, dir string) (int64, string) {
 	return size, path
 }
 
+// TestNewDatabaseReservesASmallValueLog stats the value log alone. This walks
+// the whole data directory, so it also bounds the memtable WAL -- the file
+// #3980 actually failed to open on the Windows runner.
 func TestNewDatabaseBoundsBadgerFileReservation(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dataDir})
 	require.NoError(t, err)
@@ -67,6 +79,8 @@ func TestNewDatabaseBoundsBadgerFileReservation(t *testing.T) {
 // A test that supplies its own Blob.Config for unrelated knobs must still get
 // the bounded sizes; otherwise the production defaults silently come back.
 func TestBoundedBadgerSizesSurviveAPartialCallerConfig(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
 		Config: &database.Config{DataDir: dataDir},

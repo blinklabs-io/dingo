@@ -38,6 +38,10 @@ type Querier interface {
 	DeleteConstitutionsAddedAfterSlot(ctx context.Context, addedSlot int64) error
 	DeleteEpochSummariesAfterEpoch(ctx context.Context, epoch int64) error
 	DeleteEpochsAfterSlot(ctx context.Context, startSlot sql.NullInt64) error
+	DeleteImportedEpochBlockTotalForEpoch(ctx context.Context, epoch int64) error
+	DeleteImportedEpochBlockTotalsAfterSlot(ctx context.Context, capturedSlot int64) error
+	DeleteImportedPoolBlockCountsAfterSlot(ctx context.Context, capturedSlot int64) error
+	DeleteImportedPoolBlockCountsForEpoch(ctx context.Context, epoch int64) error
 	DeleteMidnightAriadneParamsByEpoch(ctx context.Context, epoch int64) error
 	DeleteMidnightAriadneRollbacksBeforeBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightAriadneRollbacksByBlock(ctx context.Context, blockNumber int64) error
@@ -98,6 +102,21 @@ type Querier interface {
 	GetDatum(ctx context.Context, hash []byte) (Datum, error)
 	GetDrepByCredential(ctx context.Context, arg GetDrepByCredentialParams) (Drep, error)
 	GetDrepByHash(ctx context.Context, credential []byte) (Drep, error)
+	// Unlike GetDrepLastRegistrationSlot, this does not exclude certificate_id
+	// = 0 rows: those are the Mithril ledger-state import's bootstrap-slot
+	// registrations (see ImportDrepRegistration), and their deposit_amount is
+	// the real amount owed on deregistration. On a bootstrapped node such a
+	// row is often a DRep's only registration, so excluding it here would
+	// compute a refund of 0 for a deposit that was actually paid.
+	GetDrepLastRegistrationDeposit(ctx context.Context, arg GetDrepLastRegistrationDepositParams) (sql.NullString, error)
+	// The set form of GetDrepLastRegistrationDeposit, for reading the deposits
+	// of the active DReps GetActiveDreps returns in one round trip instead of
+	// one query per DRep. Same certificate_id treatment: bootstrap-slot import
+	// rows count, because their deposit_amount is the real amount owed.
+	// Drive this lookup from active drep rows. The correlated lookup uses the
+	// registration credential index for each active DRep, so history left behind
+	// by DReps that have since deregistered does not become the outer scan.
+	GetDrepLastRegistrationDeposits(ctx context.Context) ([]GetDrepLastRegistrationDepositsRow, error)
 	GetDrepLastRegistrationSlot(ctx context.Context, arg GetDrepLastRegistrationSlotParams) (int64, error)
 	GetEpoch(ctx context.Context, epochID sql.NullInt64) (GetEpochRow, error)
 	GetEpochBySlot(ctx context.Context, arg GetEpochBySlotParams) (GetEpochBySlotRow, error)
@@ -106,6 +125,8 @@ type Querier interface {
 	GetEpochsByEra(ctx context.Context, eraID sql.NullInt64) ([]GetEpochsByEraRow, error)
 	GetExpiredDReps(ctx context.Context, expiryEpoch sql.NullInt64) ([]Drep, error)
 	GetImportCheckpoint(ctx context.Context, importKey string) (ImportCheckpoint, error)
+	GetImportedEpochBlockTotal(ctx context.Context, epoch int64) (int64, error)
+	GetImportedPoolBlockCounts(ctx context.Context, epoch int64) ([]GetImportedPoolBlockCountsRow, error)
 	GetLastBlockNonceInRange(ctx context.Context, arg GetLastBlockNonceInRangeParams) ([]byte, error)
 	GetLatestEpochSummary(ctx context.Context) (EpochSummary, error)
 	GetLatestMidnightAriadneParams(ctx context.Context) (MidnightAriadneParam, error)
@@ -151,6 +172,9 @@ type Querier interface {
 	GetUtxoIDByRef(ctx context.Context, arg GetUtxoIDByRefParams) (int64, error)
 	GetUtxoIncludingSpent(ctx context.Context, arg GetUtxoIncludingSpentParams) (Utxo, error)
 	GetUtxoRefsBySlot(ctx context.Context, addedSlot sql.NullInt64) ([]GetUtxoRefsBySlotRow, error)
+	// Order by added_slot before id so the sort is the reverse of
+	// idx_utxo_added_slot's own order; ordering by id alone costs a full table
+	// scan. See the Store wrapper for the full rationale.
 	GetUtxosAddedAfterSlot(ctx context.Context, addedSlot sql.NullInt64) ([]Utxo, error)
 	GetUtxosDeletedBeforeSlot(ctx context.Context, arg GetUtxosDeletedBeforeSlotParams) ([]Utxo, error)
 	ImportAccount(ctx context.Context, arg ImportAccountParams) (int64, error)
@@ -172,6 +196,8 @@ type Querier interface {
 	RestoreCommitteeMembersDeletedAfterSlot(ctx context.Context, deletedSlot sql.NullInt64) error
 	RestoreConstitutionsDeletedAfterSlot(ctx context.Context, deletedSlot sql.NullInt64) error
 	SaveEpochSummary(ctx context.Context, arg SaveEpochSummaryParams) (int64, error)
+	SaveImportedEpochBlockTotal(ctx context.Context, arg SaveImportedEpochBlockTotalParams) error
+	SaveImportedPoolBlockCount(ctx context.Context, arg SaveImportedPoolBlockCountParams) error
 	SavePoolStakeSnapshot(ctx context.Context, arg SavePoolStakeSnapshotParams) (int64, error)
 	SaveRewardAccountOutput(ctx context.Context, arg SaveRewardAccountOutputParams) (int64, error)
 	SaveRewardAdaPots(ctx context.Context, arg SaveRewardAdaPotsParams) (int64, error)

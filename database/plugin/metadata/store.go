@@ -518,6 +518,33 @@ type GovernanceStore interface {
 		types.Txn,
 	) (uint64, error)
 
+	// GetDrepLastRegistrationDeposit returns the deposit amount recorded
+	// against the most recent registration certificate for the DRep
+	// credential, or 0 when no registration certificate history exists.
+	// The live drep row does not carry a deposit amount (registration and
+	// deregistration certificates supply/refund it, but nothing persists
+	// it on the current-state row), so deregistration-refund validation
+	// must read it from the registration_drep history instead.
+	GetDrepLastRegistrationDeposit(
+		uint8, // credentialTag
+		[]byte, // credential
+		types.Txn,
+	) (*uint64, error)
+
+	// GetDrepLastRegistrationDeposits is the set form of
+	// GetDrepLastRegistrationDeposit over the active DRep set: it returns
+	// the most recent registration deposit of every DRep GetActiveDreps
+	// reports, keyed by models.DrepDepositKey. Credentials with no
+	// registration_drep row are absent from the map, which reads back as
+	// the same 0 the singular form returns. Restricting it to the active
+	// set matches the callers, which are all listing exactly that set, and
+	// keeps the scan from growing with the registration history of DReps
+	// that have since deregistered. Listing them one at a time otherwise
+	// costs one query per DRep.
+	GetDrepLastRegistrationDeposits(
+		types.Txn,
+	) (map[string]uint64, error)
+
 	// CreateDrep inserts a Drep row directly. Used by callers (e.g.
 	// fixture seeding from outside the plugin packages) that already
 	// have a fully-populated model and want a single-row insert without
@@ -609,9 +636,13 @@ type UtxoStore interface {
 	// GetUtxosByAddressWithOrdering). The database layer performs full
 	// exact-address CBOR filtering when ExactAddress is set. An empty
 	// patterns slice returns (nil, nil), matching the coordinated
-	// Database.UtxosByAddress's empty-input handling.
+	// Database.UtxosByAddress's empty-input handling. maxResults is a
+	// required, positive bound on the number of candidate rows returned;
+	// exceeding it yields models.ErrTooManyUtxoResults instead of an
+	// unbounded or silently truncated result.
 	GetUtxosByAddress(
 		[]models.UtxoAddressPattern,
+		int,
 		types.Txn,
 	) ([]models.Utxo, error)
 
@@ -2078,7 +2109,9 @@ type MetadataStore interface {
 	) (int, error)
 
 	// GetAccountSumsByCredential retrieves the aggregated withdrawal, reserves,
-	// and treasury lovelace totals for a stake credential tag/hash pair.
+	// and treasury lovelace totals for a stake credential tag/hash pair. The
+	// withdrawal total is coin and unsigned; the two MIR pot totals are
+	// delta_coin and signed, and are never returned nil.
 	GetAccountSumsByCredential(
 		uint8, // credentialTag
 		[]byte, // stakingKey
@@ -2272,6 +2305,30 @@ type MetadataStore interface {
 	// DeleteRewardSeedFailure clears a failure after successful seeding or when
 	// the corresponding imported snapshot is rolled back.
 	DeleteRewardSeedFailure(uint64, string, types.Txn) error
+
+	// SaveImportedPoolBlockCounts records the per-pool block counts a bootstrap
+	// snapshot carries for one epoch, which is the only source of pool
+	// performance for an epoch that ended below the trust anchor.
+	SaveImportedPoolBlockCounts([]models.ImportedPoolBlockCount, types.Txn) error
+
+	// SaveImportedEpochBlockTotal records that an epoch's block counts came
+	// from a bootstrap snapshot and the total its per-pool rows sum to. It is
+	// what tells a certified zero-block epoch from an epoch nothing was
+	// imported for, which the per-pool rows alone cannot.
+	SaveImportedEpochBlockTotal(uint64, uint64, uint64, types.Txn) error
+
+	// GetImportedPoolBlockCounts returns an epoch's imported per-pool block
+	// counts keyed by pool key hash, and the epoch total. The bool reports
+	// whether counts were imported for the epoch at all; false means unknown,
+	// which is distinct from every pool minting nothing.
+	GetImportedPoolBlockCounts(
+		uint64,
+		types.Txn,
+	) (map[string]uint64, uint64, bool, error)
+
+	// DeleteImportedPoolBlockCountsForEpoch removes an epoch's imported counts
+	// so a re-import replaces rather than merges into a stale set.
+	DeleteImportedPoolBlockCountsForEpoch(uint64, types.Txn) error
 
 	// DeleteProvisionalRewardSnapshot deletes a non-authoritative reward
 	// snapshot for an epoch and type. Authoritative boundary state is retained.

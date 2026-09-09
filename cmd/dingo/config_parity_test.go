@@ -45,6 +45,8 @@ import (
 // TestChainsyncStrategyWhitelistParity checks config.AcceptedChainsyncStrategies
 // against chainsync.ParseHeaderSyncStrategy.
 func TestChainsyncStrategyWhitelistParity(t *testing.T) {
+	t.Parallel()
+
 	assertWhitelistParity(
 		t,
 		"chainsync.strategy",
@@ -60,6 +62,8 @@ func TestChainsyncStrategyWhitelistParity(t *testing.T) {
 // TestMithrilBackendWhitelistParity checks config.AcceptedMithrilBackends
 // against resolveMithrilBackend.
 func TestMithrilBackendWhitelistParity(t *testing.T) {
+	t.Parallel()
+
 	// resolveMithrilBackend accepts mithril.AcceptedBackends plus the
 	// empty string, which selects the default (v2).
 	canonical := append([]string{""}, mithril.AcceptedBackends()...)

@@ -67,6 +67,8 @@ func writeLegacyLeiosEB(
 // still be able to read manifests it persisted under the old hash-only key,
 // rather than that data becoming silently unreachable.
 func TestGetLeiosEBManifestFallsBackToLegacyKey(t *testing.T) {
+	t.Parallel()
+
 	d := newTestDB(t)
 	hash := []byte("0123456789abcdef0123456789abcdef")[:32]
 	slot := uint64(12345)
@@ -90,6 +92,8 @@ func TestGetLeiosEBManifestFallsBackToLegacyKey(t *testing.T) {
 // still be readable after upgrading, gated on the legacy manifest's own
 // embedded slot matching the request.
 func TestGetLeiosEBTxsFallsBackToLegacyKey(t *testing.T) {
+	t.Parallel()
+
 	d := newTestDB(t)
 	hash := []byte("fedcba9876543210fedcba9876543210")[:32]
 	slot := uint64(54321)
@@ -113,16 +117,18 @@ func TestGetLeiosEBTxsFallsBackToLegacyKey(t *testing.T) {
 // ordinary ErrBlobKeyNotFound and look like the manifest was simply never
 // persisted.
 func TestGetLeiosEBManifestPropagatesRealLegacyReadError(t *testing.T) {
+	t.Parallel()
+
 	d := newTestDB(t)
 	hash := []byte("0123456789abcdef0123456789abcdef")[:32]
 	slot := uint64(111)
 	readErr := errors.New("legacy read: storage unavailable")
 
-	d.blob = &mockBlobStore{
+	d.SetBlobStore(&mockBlobStore{
 		getErrs: map[string]error{
 			string(types.LegacyLeiosEBManifestKey(hash)): readErr,
 		},
-	}
+	})
 
 	_, err := d.GetLeiosEBManifest(hash, slot)
 	require.ErrorIs(t, err, readErr)
@@ -132,16 +138,18 @@ func TestGetLeiosEBManifestPropagatesRealLegacyReadError(t *testing.T) {
 // TestGetLeiosEBTxsPropagatesRealLegacyReadError is the transaction-body
 // half of the same regression.
 func TestGetLeiosEBTxsPropagatesRealLegacyReadError(t *testing.T) {
+	t.Parallel()
+
 	d := newTestDB(t)
 	hash := []byte("fedcba9876543210fedcba9876543210")[:32]
 	slot := uint64(222)
 	readErr := errors.New("legacy read: storage unavailable")
 
-	d.blob = &mockBlobStore{
+	d.SetBlobStore(&mockBlobStore{
 		getErrs: map[string]error{
 			string(types.LegacyLeiosEBManifestKey(hash)): readErr,
 		},
-	}
+	})
 
 	_, err := d.GetLeiosEBTxs(hash, slot)
 	require.ErrorIs(t, err, readErr)

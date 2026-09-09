@@ -70,6 +70,11 @@ type FetchConfig struct {
 	// Unused when AccountsEnabled is false.
 	AccountChunkSize     int
 	AccountChunkMaxBytes int
+	// baseURL overrides the network's Koios base URL. It is unexported
+	// so only this package can set it: tests point it at an httptest
+	// server instead of rewriting the process-wide koiosBaseURLs map,
+	// which every concurrently constructed client reads.
+	baseURL string
 }
 
 // FetchResult summarises a completed fetch run.
@@ -134,7 +139,7 @@ func Fetch(
 	}
 	defer cache.Close() //nolint:errcheck
 
-	koios, err := NewKoiosClient(cfg.Network, cfg.APIKey)
+	koios, err := newKoiosClient(cfg.Network, cfg.APIKey, cfg.baseURL)
 	if err != nil {
 		return nil, err
 	}
