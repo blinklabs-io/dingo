@@ -77,6 +77,11 @@ func TestStartupOpCertCounterRequiresEraParameters(t *testing.T) {
 		{"missing provider", nil, "provider is nil"},
 		{"typed nil provider", typedNilProvider, "provider is nil"},
 		{
+			"typed nil provider",
+			(*mockPParamsProvider)(nil),
+			"provider is nil",
+		},
+		{
 			"missing parameters",
 			&mockPParamsProvider{},
 			"parameters unavailable",

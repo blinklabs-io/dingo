@@ -1089,6 +1089,10 @@ func (pc *PoolCredentials) ValidateAgainstLedgerAtSlot(
 	if params == nil || isNilProtocolParamsProvider(params) {
 		return false, false, errors.New("protocol parameters provider is nil")
 	}
+	providerValue := reflect.ValueOf(params)
+	if providerValue.Kind() == reflect.Pointer && providerValue.IsNil() {
+		return false, false, errors.New("protocol parameters provider is nil")
+	}
 	pparams := params.ProtocolParamsForSlot(slot)
 	if pparams == nil {
 		return false, false, fmt.Errorf(
