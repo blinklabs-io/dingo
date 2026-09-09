@@ -120,6 +120,8 @@ func openTestDB(t *testing.T) *Database {
 func TestSetTransactionBatchedWithOpts_SkipsAllProducedUtxoWrites(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	candidate := findBatchedCrossBlockSpendCandidate(t)
@@ -180,6 +182,8 @@ func TestSetTransactionBatchedWithOpts_SkipsAllProducedUtxoWrites(
 // Addresses reviewer feedback that the prior assertion was tautological
 // because storeBlockOffsetsOnly had already seeded the tx key.
 func TestSetTransactionBatchedWithOpts_TxOffsetStillWritten(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	candidate := findBatchedCrossBlockSpendCandidate(t)
@@ -242,6 +246,8 @@ func TestSetTransactionBatchedWithOpts_TxOffsetStillWritten(t *testing.T) {
 // TestSetTransactionBatchedWithOpts_DefaultBehaviorOverwrites confirms the
 // default (zero-value) options still write produced-UTxO offset blobs.
 func TestSetTransactionBatchedWithOpts_DefaultBehaviorOverwrites(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	candidate := findBatchedCrossBlockSpendCandidate(t)
@@ -294,6 +300,8 @@ func TestSetTransactionBatchedWithOpts_DefaultBehaviorOverwrites(t *testing.T) {
 func TestSetTransactionBatchedWithOpts_RequiresOffsetsEvenWhenSkipping(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	candidate := findBatchedCrossBlockSpendCandidate(t)
@@ -345,6 +353,8 @@ func TestSetTransactionBatchedWithOpts_RequiresOffsetsEvenWhenSkipping(
 // inputs are guaranteed to already exist from earlier producer transactions.
 // This test ensures the skip path counts inputs that would have been checked.
 func TestSetTransactionBatchedWithOpts_SkipConsumedInputRecovery(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	candidate := findBatchedCrossBlockSpendCandidate(t)
@@ -417,6 +427,8 @@ func TestSetTransactionBatchedWithOpts_SkipConsumedInputRecovery(t *testing.T) {
 func TestSetTransactionBatchedWithOpts_DefaultDoesNotSkipInputRecovery(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	candidate := findBatchedCrossBlockSpendCandidate(t)

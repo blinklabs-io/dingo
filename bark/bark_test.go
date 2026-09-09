@@ -36,11 +36,15 @@ func newTestBark(t *testing.T, db *database.Database) *Bark {
 }
 
 func TestBarkListenAddrSupportsIPv6(t *testing.T) {
+	t.Parallel()
+
 	require.Equal(t, "[::1]:9091", barkListenAddr("::1", 9091))
 	require.Equal(t, "127.0.0.1:9091", barkListenAddr("127.0.0.1", 9091))
 }
 
 func TestBarkServerTimeoutsSupportStreaming(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name   string
 		useTLS bool
@@ -90,6 +94,8 @@ func TestBarkServerTimeoutsSupportStreaming(t *testing.T) {
 // database was set at construction time, so Acquire hands it back with a
 // working release func.
 func TestAcquireReturnsCurrentDB(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	b := newTestBark(t, db)
 
@@ -109,6 +115,8 @@ func TestAcquireReturnsCurrentDB(t *testing.T) {
 // request for the whole restore/truncate duration) or handing out a
 // pointer that's about to be closed.
 func TestAcquireFailsFastWhilePaused(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	b := newTestBark(t, db)
 
@@ -129,6 +137,8 @@ func TestAcquireFailsFastWhilePaused(t *testing.T) {
 // therefore a caller closing the database it guards doesn't proceed — until
 // every Acquire holder in flight when it was called has released.
 func TestPauseDBWaitsForInFlightAcquire(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	b := newTestBark(t, db)
 
@@ -154,6 +164,8 @@ func TestPauseDBWaitsForInFlightAcquire(t *testing.T) {
 // a (possibly different) *database.Database for future Acquire calls and
 // releases the pause PauseDB put in place.
 func TestResumeDBPublishesNewDBAndUnpauses(t *testing.T) {
+	t.Parallel()
+
 	oldDB := newTestDB(t)
 	newDB := newTestDB(t)
 	b := newTestBark(t, oldDB)
@@ -180,6 +192,8 @@ func TestResumeDBPublishesNewDBAndUnpauses(t *testing.T) {
 // stop/restart cycle) could be misled into believing a dead address was
 // still live.
 func TestAddrClearsAfterStop(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	b, err := NewBark(
 		BarkConfig{DB: db, Host: "127.0.0.1", Port: freeTCPPort(t)},
@@ -226,6 +240,8 @@ func TestAddrClearsAfterStop(t *testing.T) {
 // reliable by giving it several independent chances instead of one
 // arbitrarily-padded one.
 func TestAddrClearsAfterStopTimesOut(t *testing.T) {
+	t.Parallel()
+
 	const maxAttempts = 20
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		db := newTestDB(t)
@@ -285,6 +301,8 @@ func TestAddrClearsAfterStopTimesOut(t *testing.T) {
 // cancelled directly (not a separate call to Stop) triggers the same
 // auto-shutdown goroutine, which must clear listenerAddr the same way.
 func TestAddrClearsWhenStartContextIsCancelled(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	b, err := NewBark(
 		BarkConfig{DB: db, Host: "127.0.0.1", Port: freeTCPPort(t)},
@@ -320,6 +338,8 @@ func TestAddrClearsWhenStartContextIsCancelled(t *testing.T) {
 // exercising the deadlock window at all. A bounded timeout on every wait
 // makes a regression fail loudly instead of hanging the test suite.
 func TestStopDoesNotDeadlockWithInFlightAcquire(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	b := newTestBark(t, db)
 

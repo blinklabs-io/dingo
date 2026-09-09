@@ -37,6 +37,8 @@ import (
 // unexported chainsync handlers directly — no exported test hooks leak
 // into production code.
 func TestConsensusConformanceVectors(t *testing.T) {
+	t.Parallel()
+
 	vectors, err := consensus.CapturedVectors()
 	if err != nil {
 		t.Fatalf("CapturedVectors: %v", err)
@@ -74,6 +76,8 @@ func TestConsensusConformanceVectors(t *testing.T) {
 // and fail the final_tip assertion. If this passed, the main conformance
 // run would be a vacuous k=0 test in disguise.
 func TestConsensusConformanceKGuardIsLive(t *testing.T) {
+	t.Parallel()
+
 	vectors, err := consensus.CapturedVectors()
 	if err != nil {
 		t.Fatalf("CapturedVectors: %v", err)

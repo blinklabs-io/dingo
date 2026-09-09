@@ -39,6 +39,8 @@ import (
 //
 // It also re-runs createGenesisBlock to confirm idempotency.
 func TestCreateGenesisBlockFileBackedNoFKError(t *testing.T) {
+	t.Parallel()
+
 	networks := []struct {
 		name       string
 		configPath string

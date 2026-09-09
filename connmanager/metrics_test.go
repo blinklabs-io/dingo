@@ -10,6 +10,8 @@ import (
 )
 
 func TestUpdateConnectionMetricsRebuildsState(t *testing.T) {
+	t.Parallel()
+
 	cm := NewConnectionManager(ConnectionManagerConfig{
 		PromRegistry: prometheus.NewRegistry(),
 	})
@@ -50,6 +52,8 @@ func TestUpdateConnectionMetricsRebuildsState(t *testing.T) {
 }
 
 func TestUpdatePeerConnectivityLockedNormalizesPeerAddress(t *testing.T) {
+	t.Parallel()
+
 	cm := NewConnectionManager(ConnectionManagerConfig{})
 
 	cm.updatePeerConnectivityLocked("Relay.Example.Com:3001", true, true)

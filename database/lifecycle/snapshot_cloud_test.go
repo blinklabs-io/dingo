@@ -32,6 +32,8 @@ import (
 // cloud-mirrored marker already records that destination as done, so
 // nothing would ever retry the upload to pick up a label applied later.
 func TestSnapshotToCloudLabelsBeforeMirroring(t *testing.T) {
+	t.Parallel()
+
 	backingDir := t.TempDir()
 	setFakeCloudBackingDir(t, backingDir)
 
@@ -77,6 +79,8 @@ func TestSnapshotToCloudLabelsBeforeMirroring(t *testing.T) {
 // configured now" -- that destination has never actually received this
 // snapshot.
 func TestIsCloudMirroredToDetectsChangedDestination(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 
 	require.False(

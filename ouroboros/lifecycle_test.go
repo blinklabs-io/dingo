@@ -32,6 +32,8 @@ import (
 // collector handles are kept to unregister. Close must make a replacement
 // instance constructible against the same registry.
 func TestCloseAllowsReconstructionWithSameRegistry(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	registry := prometheus.NewRegistry()
 	newInstance := func() *Ouroboros {
@@ -58,6 +60,8 @@ func TestCloseAllowsReconstructionWithSameRegistry(t *testing.T) {
 // and a single published event is handled once per accumulated cycle — the
 // same leak node_leios.go captures subscription IDs to avoid.
 func TestCloseUnsubscribesFromEventBus(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	bus := newWiringTestEventBus(t)
 	o := newOuroboros(OuroborosConfig{
@@ -78,6 +82,8 @@ func TestCloseUnsubscribesFromEventBus(t *testing.T) {
 // and an explicit live-restore teardown can both fire without the second
 // call double-unregistering collectors owned by a replacement instance.
 func TestCloseIsIdempotent(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := newOuroboros(OuroborosConfig{
 		Logger:       logger,

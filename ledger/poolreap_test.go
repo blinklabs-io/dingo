@@ -112,6 +112,8 @@ func runApplyPoolRetirements(
 // the new epoch with a registered, active reward account has its deposit
 // refunded to that account; the treasury is untouched.
 func TestApplyPoolRetirements_CreditsRegisteredRewardAccount(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newPoolreapTestLedger(t)
 
 	const (
@@ -158,6 +160,8 @@ func TestApplyPoolRetirements_CreditsRegisteredRewardAccount(t *testing.T) {
 // no reward account, and one with an inactive account, both route their
 // deposit to the treasury.
 func TestApplyPoolRetirements_UnregisteredAccountToTreasury(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newPoolreapTestLedger(t)
 
 	const (
@@ -224,6 +228,8 @@ func TestApplyPoolRetirements_UnregisteredAccountToTreasury(t *testing.T) {
 // TestApplyPoolRetirements_WrongEpoch: a pool whose retirement epoch is not the
 // new epoch is left untouched.
 func TestApplyPoolRetirements_WrongEpoch(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newPoolreapTestLedger(t)
 
 	rewardAccount := reapCred28(0x11)
@@ -253,6 +259,8 @@ func TestApplyPoolRetirements_WrongEpoch(t *testing.T) {
 // rolling back past the boundary restores the prior reward balance and
 // treasury so re-application is deterministic.
 func TestApplyPoolRetirements_Rollback(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newPoolreapTestLedger(t)
 
 	const (
@@ -335,6 +343,8 @@ func TestApplyPoolRetirements_Rollback(t *testing.T) {
 // scoped to the pools actually reaped at this boundary rather than to every
 // pool carrying a retirement certificate.
 func TestApplyPoolRetirements_ClearsDelegationsToReapedPool(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newPoolreapTestLedger(t)
 
 	const (
@@ -391,6 +401,8 @@ func TestApplyPoolRetirements_ClearsDelegationsToReapedPool(t *testing.T) {
 func TestApplyPoolRetirements_ClearsLiveStakeAttributionForReapedPool(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db, gdb := newPoolreapTestLedger(t)
 
 	const (
@@ -456,6 +468,8 @@ WHERE credential_tag = 0 AND staking_key = ?`,
 // — otherwise a rollback to before the reap leaves the account un-delegated
 // with no certificate saying so.
 func TestApplyPoolRetirements_ClearedDelegationIsRollbackSafe(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newPoolreapTestLedger(t)
 
 	const (
@@ -497,6 +511,8 @@ func TestApplyPoolRetirements_ClearedDelegationIsRollbackSafe(t *testing.T) {
 // delegation, which the certificate derivation already does; that is covered by
 // TestRestoreAccountStateRevivesDelegationRolledBackBeforeReap below.
 func TestRestoreAccountStateDoesNotRevivePoolReapedBeforeRollback(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newPoolreapTestLedger(t)
 
 	const (
@@ -543,6 +559,8 @@ func TestRestoreAccountStateDoesNotRevivePoolReapedBeforeRollback(t *testing.T) 
 // direction: rolling back past the boundary undoes the reap along with every
 // other write it made, so the delegation certificate is authoritative again.
 func TestRestoreAccountStateRevivesDelegationRolledBackBeforeReap(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newPoolreapTestLedger(t)
 
 	const (
@@ -630,6 +648,8 @@ INSERT INTO stake_delegation (
 // boundary. The rollback derivation has to agree, or it clears a delegation the
 // forward path never cleared.
 func TestRestoreAccountStateHonoursSupersedingRetirement(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newPoolreapTestLedger(t)
 
 	const (
