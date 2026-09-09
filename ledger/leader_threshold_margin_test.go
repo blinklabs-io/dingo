@@ -23,6 +23,8 @@ import (
 )
 
 func TestLeaderThresholdMarginSignsTheDecision(t *testing.T) {
+	t.Parallel()
+
 	threshold := big.NewInt(1000)
 
 	tests := []struct {
@@ -49,6 +51,8 @@ func TestLeaderThresholdMarginSignsTheDecision(t *testing.T) {
 // 256-bit threshold against a 256-bit leader value. A float64 conversion done
 // before the division would lose the distinction entirely.
 func TestLeaderThresholdMarginAtRealMagnitudes(t *testing.T) {
+	t.Parallel()
+
 	// A threshold near the real one for a 1.35% sigma pool at f=0.05:
 	// 2^256 * 6.9e-4.
 	twoTo256 := new(big.Int).Exp(big.NewInt(2), big.NewInt(256), nil)
@@ -74,6 +78,8 @@ func TestLeaderThresholdMarginAtRealMagnitudes(t *testing.T) {
 }
 
 func TestLeaderThresholdMarginDegenerateInputs(t *testing.T) {
+	t.Parallel()
+
 	require.Equal(t, 0.0, leaderThresholdMargin(nil, big.NewInt(10)))
 	require.Equal(t, 0.0, leaderThresholdMargin(big.NewInt(10), nil))
 	require.Equal(t, 0.0, leaderThresholdMargin(big.NewInt(1), big.NewInt(0)))
@@ -85,6 +91,8 @@ func TestLeaderThresholdMarginDegenerateInputs(t *testing.T) {
 // mirrors: for a range of outputs, the sign of the margin must agree with
 // IsVRFOutputBelowThresholdWithMode in both consensus modes.
 func TestLeaderValueForModeAgreesWithTheDecision(t *testing.T) {
+	t.Parallel()
+
 	modes := []consensus.ConsensusMode{
 		consensus.ConsensusModeCPraos,
 		consensus.ConsensusModeTPraos,
@@ -121,6 +129,8 @@ func TestLeaderValueForModeAgreesWithTheDecision(t *testing.T) {
 }
 
 func TestLeaderValueForModeEmptyOutput(t *testing.T) {
+	t.Parallel()
+
 	require.Nil(t, leaderValueForMode(nil, consensus.ConsensusModeCPraos))
 	require.Nil(
 		t,

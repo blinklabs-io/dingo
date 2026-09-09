@@ -115,6 +115,8 @@ func loadBlocksFromImmutable(
 }
 
 func TestRollbackToSecurityParamDepth(t *testing.T) {
+	t.Parallel()
+
 	// Set up temporary directory for test database
 	tmpDir := t.TempDir()
 
@@ -223,6 +225,8 @@ func TestRollbackToSecurityParamDepth(t *testing.T) {
 }
 
 func TestRollbackBeyondSecurityParam(t *testing.T) {
+	t.Parallel()
+
 	// Set up temporary directory for test database
 	tmpDir := t.TempDir()
 
@@ -336,6 +340,8 @@ func TestRollbackBeyondSecurityParam(t *testing.T) {
 }
 
 func TestRollbackStateRestoration(t *testing.T) {
+	t.Parallel()
+
 	// Set up temporary directory for test database
 	tmpDir := t.TempDir()
 
@@ -524,6 +530,8 @@ func TestRollbackStateRestoration(t *testing.T) {
 }
 
 func TestRollbackToOrigin(t *testing.T) {
+	t.Parallel()
+
 	// Set up temporary directory for test database
 	tmpDir := t.TempDir()
 
@@ -604,6 +612,8 @@ func TestRollbackToOrigin(t *testing.T) {
 }
 
 func TestChainIteratorAfterRollback(t *testing.T) {
+	t.Parallel()
+
 	// Set up temporary directory for test database
 	tmpDir := t.TempDir()
 

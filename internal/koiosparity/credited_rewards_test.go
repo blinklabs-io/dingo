@@ -18,6 +18,8 @@ import (
 // reports either — feeding them to the comparison makes Dingo look like it
 // paid a reward nobody received.
 func TestCreditedAccountRewardsSkipsUncredited(t *testing.T) {
+	t.Parallel()
+
 	// Real credentials from Preview epoch 197, where all three of the epoch's
 	// unspendable rows were reported as acct_only_dingo.
 	unspendable := mustDecodeHex(
@@ -50,6 +52,8 @@ func TestCreditedAccountRewardsSkipsUncredited(t *testing.T) {
 // the pool-level member-total path, which filters by type because it is
 // summing member stake rewards specifically.
 func TestCreditedAccountRewardsKeepsLeaderRewards(t *testing.T) {
+	t.Parallel()
+
 	key := mustDecodeHex(
 		t,
 		"F8ADA2B9A94FDD95D35D482BDDDF5A66FFA5B330B539B4613255C1DC",
@@ -66,6 +70,8 @@ func TestCreditedAccountRewardsKeepsLeaderRewards(t *testing.T) {
 // surfacing that the inline loop had: a credential that cannot be turned into
 // a stake address is a database problem worth reporting, not a row to drop.
 func TestCreditedAccountRewardsReportsDecodeFailure(t *testing.T) {
+	t.Parallel()
+
 	rows, errs := creditedAccountRewards([]*models.RewardAccountOutput{
 		{StakingKey: []byte{0x01, 0x02}, RewardType: "member", Amount: 1, Spendable: true},
 	})
@@ -86,6 +92,8 @@ func TestCreditedAccountRewardsReportsDecodeFailure(t *testing.T) {
 // already reported it. Dropping the row before decoding would break that
 // assumption and take the lifecycle diff down silently with it.
 func TestCreditedAccountRewardsReportsUncreditedDecodeFailure(t *testing.T) {
+	t.Parallel()
+
 	rows, errs := creditedAccountRewards([]*models.RewardAccountOutput{
 		{StakingKey: []byte{0x01, 0x02}, RewardType: "member", Amount: 1, Spendable: false},
 	})

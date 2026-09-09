@@ -433,6 +433,7 @@ func CompareEpochProtocolParams(
 	now time.Time,
 	graceHours int,
 	epochEndTime time.Time,
+	_ ...bool,
 ) []CheckMismatch {
 	mismatch := func(field, dingoValue, koiosValue, category string) CheckMismatch {
 		return CheckMismatch{
@@ -1091,7 +1092,9 @@ func CompareAccountEpoch(
 	now time.Time,
 	graceHours int,
 	epochEndTime time.Time,
+	rewardsPendingArg ...bool,
 ) []CheckMismatch {
+	rewardsPending := len(rewardsPendingArg) > 0 && rewardsPendingArg[0]
 	koiosByKey, koiosMismatches := aggregateKoiosAccountRewards(network, epoch, koiosRows, now)
 	dingoByKey, dingoMismatches := aggregateDingoAccountRewards(network, epoch, dingoRows, now)
 	out := append(koiosMismatches, dingoMismatches...)

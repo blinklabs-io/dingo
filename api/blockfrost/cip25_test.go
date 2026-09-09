@@ -22,6 +22,8 @@ import (
 )
 
 func TestParseCIP25Metadata(t *testing.T) {
+	t.Parallel()
+
 	const policyID = "00112233445566778899aabbccddeeff00112233445566778899aabb"
 	assetName := []byte("token") // ascii "token" -> hex 746f6b656e
 

@@ -58,6 +58,10 @@ const defaultSeenHeadersRetention = 2500 * 20
 // slots of observed headers.
 const seenHeadersPruneInterval = 1000
 
+// maxSeenHeadersPerSlot bounds deduplication records and fork notifications
+// within a retained slot. It is a cache limit, not a consensus validity rule.
+const maxSeenHeadersPerSlot = 32
+
 // ClientStatus represents the sync status of a chainsync client.
 type ClientStatus int
 
@@ -795,6 +799,29 @@ func (s *State) UpdateClientTipWithoutDedup(
 	return s.updateTrackedClientTip(connId, point, tip)
 }
 
+// UpdateClientRollback updates an existing client's cursor, advertised tip,
+// activity, and syncing status atomically. Rollbacks do not count as delivered
+// headers or enter the header deduplication cache.
+func (s *State) UpdateClientRollback(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+	tip ochainsync.Tip,
+) bool {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	tc, exists := s.trackedClients[connId]
+	if !exists {
+		return false
+	}
+	point.Hash = cloneBytes(point.Hash)
+	tip.Point.Hash = cloneBytes(tip.Point.Hash)
+	tc.Cursor = point
+	tc.Tip = tip
+	tc.LastActivity = time.Now()
+	tc.Status = ClientStatusSyncing
+	return true
+}
+
 // RecordHeaderForDedup records a tracked header in the shared cross-peer
 // deduplication and fork-detection cache. Callers that update the tracked tip
 // before a synchronous selection decision use this after the apply gate, so a
@@ -853,6 +880,18 @@ func (s *State) RecordObservedHeader(h ObservedHeader) {
 	}
 	prevHash := h.BlockHeader.PrevHash().Bytes()
 	if len(prevHash) == 0 {
+		return
+	}
+
+	// A raw header callback can still be in flight when the connection is
+	// removed. RemoveClientConnId deletes the tracked client and clears this
+	// history under clientConnIdMutex, so the tracked check is held across
+	// the observed-header write in the same order: a late callback for a
+	// connection that is gone would otherwise recreate an entry that nothing
+	// removes again, leaking one per disconnect.
+	s.clientConnIdMutex.RLock()
+	defer s.clientConnIdMutex.RUnlock()
+	if _, tracked := s.trackedClients[h.ConnectionId]; !tracked {
 		return
 	}
 
@@ -958,7 +997,9 @@ func (s *State) updateTrackedClientTip(
 // processHeader checks whether the header at the given point
 // has already been seen. If another client reported a different
 // hash at the same slot, a fork detection event is emitted.
-// Returns true if this is a new (non-duplicate) header.
+// Returns true if the header is absent from the bounded deduplication cache.
+// Saturated slots retain the first alternatives and the latest header, and
+// suppress further fork notifications until the slot is pruned or cleared.
 func (s *State) processHeader(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
@@ -979,6 +1020,13 @@ func (s *State) processHeader(
 	newRec := headerRecord{
 		hash:   hashClone,
 		connId: connId,
+	}
+	if len(records) >= maxSeenHeadersPerSlot {
+		// Keep the first observations stable, but deduplicate consecutive
+		// deliveries of an overflow header too. An unseen header must remain
+		// eligible for ledger validation: cache saturation is not invalidity.
+		records[len(records)-1] = newRec
+		return true
 	}
 	s.seenHeaders[point.Slot] = append(records, newRec)
 	if point.Slot > s.seenHeadersMaxSlot {
