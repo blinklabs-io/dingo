@@ -18,8 +18,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 )
 
 // benchConwayBlockFixture and benchConwayHeaderFixture mirror
@@ -28,26 +28,52 @@ import (
 // functions.
 func benchConwayBlockFixture(b *testing.B) (blockType uint, raw []byte) {
 	b.Helper()
-	blocks, err := testfixtures.GenerateConwayChain(1)
+	root, err := fixtures.ExtractEmbeddedFixtures(b.TempDir())
 	if err != nil {
-		b.Fatalf("generate fixture: %v", err)
+		b.Fatalf("extract fixtures: %v", err)
 	}
-	if len(blocks) != 1 {
-		b.Fatalf("expected one generated block, got %d", len(blocks))
+	fixture, err := fixtures.NewFixture(
+		root,
+		root+"/ouroboros-consensus/ouroboros-consensus-cardano/golden/"+
+			"cardano/CardanoNodeToNodeVersion2/Block_Conway",
+	)
+	if err != nil {
+		b.Fatalf("load fixture: %v", err)
 	}
-	return uint(blocks[0].Type()), blocks[0].Cbor()
+	blockType, err = fixture.LedgerBlockType()
+	if err != nil {
+		b.Fatalf("block type: %v", err)
+	}
+	raw, err = fixture.LedgerBlockBytes()
+	if err != nil {
+		b.Fatalf("block bytes: %v", err)
+	}
+	return blockType, raw
 }
 
 func benchConwayHeaderFixture(b *testing.B) (headerType uint, raw []byte) {
 	b.Helper()
-	blocks, err := testfixtures.GenerateConwayChain(1)
+	root, err := fixtures.ExtractEmbeddedFixtures(b.TempDir())
 	if err != nil {
-		b.Fatalf("generate fixture: %v", err)
+		b.Fatalf("extract fixtures: %v", err)
 	}
-	if len(blocks) != 1 {
-		b.Fatalf("expected one generated block, got %d", len(blocks))
+	fixture, err := fixtures.NewFixture(
+		root,
+		root+"/ouroboros-consensus/ouroboros-consensus-cardano/golden/"+
+			"cardano/CardanoNodeToNodeVersion2/Header_Conway",
+	)
+	if err != nil {
+		b.Fatalf("load fixture: %v", err)
 	}
-	return uint(blocks[0].Type()), blocks[0].Header().Cbor()
+	headerType, err = fixture.LedgerHeaderType()
+	if err != nil {
+		b.Fatalf("header type: %v", err)
+	}
+	raw, err = fixture.LedgerHeaderBytes()
+	if err != nil {
+		b.Fatalf("header bytes: %v", err)
+	}
+	return headerType, raw
 }
 
 // --- Blocks -----------------------------------------------------------

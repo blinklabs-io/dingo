@@ -305,13 +305,7 @@ func TestEvaluateRatifiableHardForkInitiation_DelegatorInactivityParity(
 	))
 
 	gateOff := NewStabilityCheckInputs(
-		db,
-		nil,
-		stabilityTestEpoch,
-		false,
-		stabilityConwayPParams(10),
-		nil,
-		nil,
+		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(10), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(gateOff)
 	require.NoError(t, err)
@@ -391,13 +385,7 @@ func TestEvaluateRatifiableHardForkInitiation_MultipleRatifiable_PicksLowestAdde
 	seedHardForkCommitteeAndSPOVotes(t, db, store, early, late)
 
 	in := NewStabilityCheckInputs(
-		db,
-		nil,
-		stabilityTestEpoch,
-		false,
-		stabilityConwayPParams(10),
-		nil,
-		nil,
+		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(10), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)

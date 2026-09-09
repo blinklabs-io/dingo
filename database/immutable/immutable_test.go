@@ -751,8 +751,7 @@ func TestNewFromRootVerifiedStopsAtTheChunkLimit(t *testing.T) {
 	if boundedTip.Slot >= fullTip.Slot {
 		t.Fatalf(
 			"the bound must hold the tip inside the prefix: bounded %d, full %d",
-			boundedTip.Slot,
-			fullTip.Slot,
+			boundedTip.Slot, fullTip.Slot,
 		)
 	}
 }

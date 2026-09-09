@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/internal/test/conformance"
 	"github.com/blinklabs-io/dingo/internal/test/storagetest"
 	"github.com/stretchr/testify/require"
 )
@@ -70,12 +71,12 @@ func postgresAdminDSN() string {
 	}
 	return fmt.Sprintf(
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
-		storagetest.EscapeLibpqValue(host),
-		storagetest.EscapeLibpqValue(port),
-		storagetest.EscapeLibpqValue(user),
-		storagetest.EscapeLibpqValue(os.Getenv("POSTGRES_PASSWORD")),
-		storagetest.EscapeLibpqValue(database),
-		storagetest.EscapeLibpqValue(sslMode),
+		conformance.EscapeLibpqValue(host),
+		conformance.EscapeLibpqValue(port),
+		conformance.EscapeLibpqValue(user),
+		conformance.EscapeLibpqValue(os.Getenv("POSTGRES_PASSWORD")),
+		conformance.EscapeLibpqValue(database),
+		conformance.EscapeLibpqValue(sslMode),
 	)
 }
 
@@ -86,7 +87,7 @@ func postgresAdminDSN() string {
 // the same dingo_test database concurrently as separate `go test ./...`
 // processes.
 func postgresConformanceDSN(schema string) string {
-	return storagetest.PostgresDSNWithSearchPath(postgresAdminDSN(), schema)
+	return conformance.PostgresDSNWithSearchPath(postgresAdminDSN(), schema)
 }
 
 func TestMetadataStoreConformance(t *testing.T) {
@@ -243,10 +244,10 @@ func TestMetadataStoreBadCredentialsFailsCleanly(t *testing.T) {
 	dsn := fmt.Sprintf(
 		"host=%s port=%s user=%s password=storagetest-wrong-password "+
 			"dbname=%s sslmode=disable",
-		storagetest.EscapeLibpqValue(host),
-		storagetest.EscapeLibpqValue(port),
-		storagetest.EscapeLibpqValue(user),
-		storagetest.EscapeLibpqValue(database),
+		conformance.EscapeLibpqValue(host),
+		conformance.EscapeLibpqValue(port),
+		conformance.EscapeLibpqValue(user),
+		conformance.EscapeLibpqValue(database),
 	)
 
 	store, err := openStore(

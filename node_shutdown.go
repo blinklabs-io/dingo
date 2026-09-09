@@ -129,26 +129,12 @@ func (n *Node) configuredShutdownTimeout() time.Duration {
 }
 
 func (n *Node) shutdown() error {
-	shutdownTimeout := n.configuredShutdownTimeout()
-	deadline := time.Now().Add(shutdownTimeout)
-	ctx, cancel := context.WithDeadline(context.Background(), deadline)
-	defer cancel()
 	shutdownStart := time.Now()
-
-	// Signal the node before waiting on lifecycle gates. A live restore,
-	// truncate, or snapshot may need the node context to be cancelled before
-	// it can release its gate; waiting first would strand cancellation and
-	// leave the node running when the shutdown deadline expires.
+	shutdownTimeout := n.configuredShutdownTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
 	if n.cancel != nil {
 		n.cancel()
-	}
-
-	// Run holds this gate until startup has either completed or rolled back.
-	// In particular, a signal can reach Stop while Run is still unwinding a
-	// failed startup; waiting here keeps the phase-ordered shutdown from
-	// concurrently closing a component the startup stack is stopping.
-	if err := lockMutexContext(ctx, &n.startupLifecycleMu); err != nil {
-		return fmt.Errorf("shutdown startup lifecycle lock: %w: %w", errShutdownLifecycleGate, err)
 	}
 	defer n.startupLifecycleMu.Unlock()
 	// Restore and Truncate hold these gates while quiescing, closing, and
@@ -186,6 +172,10 @@ func (n *Node) shutdown() error {
 	if n.blockForger != nil {
 		n.blockForger.Stop()
 	}
+	// Wipe any KES key material held by the agent client.
+	if n.kesAgentClient != nil {
+		n.kesAgentClient.Close()
+	}
 
 	// Stop leader election to clean up resources
 	if n.leaderElection != nil {
@@ -203,10 +193,7 @@ func (n *Node) shutdown() error {
 
 	if n.peerGov != nil {
 		if stopErr := n.peerGov.Stop(ctx); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("peer governor shutdown: %w", stopErr),
-			)
+			err = errors.Join(err, fmt.Errorf("peer governor shutdown: %w", stopErr))
 		}
 	}
 

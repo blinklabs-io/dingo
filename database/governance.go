@@ -280,43 +280,6 @@ func (d *Database) SetGovernanceProposal(
 	return nil
 }
 
-// ClearGovernanceProposalRatification moves a proposal back to the active,
-// pending state at transitionSlot. Governance epoch processing uses it when a
-// legacy ratified row fails a deterministic enactment precondition.
-func (d *Database) ClearGovernanceProposalRatification(
-	txHash []byte,
-	actionIndex uint32,
-	transitionSlot uint64,
-	txn *Txn,
-) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer txn.Release()
-	}
-	if err := d.governanceStore().ClearGovernanceProposalRatification(
-		txHash,
-		actionIndex,
-		transitionSlot,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to clear governance proposal ratification: %w",
-			err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf(
-				"failed to commit proposal ratification clear: %w",
-				err,
-			)
-		}
-	}
-	return nil
-}
-
 // GetChildGovernanceProposals returns all active proposals whose parent is
 // the given proposal (parentTxHash + parentActionIdx). Only proposals not
 // yet enacted, expired, or soft-deleted are returned. Used during epoch

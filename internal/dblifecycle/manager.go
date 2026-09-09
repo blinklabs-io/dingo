@@ -51,18 +51,6 @@ var ErrCloudPrimaryAutomaticSnapshots = errors.New(
 	"automatic snapshots are unsupported with a cloud primary blob store",
 )
 
-// ErrBadgerAutomaticSnapshots is returned when automatic snapshots are
-// enabled with Badger as the primary blob store. Badger's native backup API
-// combines selecting its MVCC view and streaming every retained version into
-// one operation; it has no public way to capture the view quickly and resume
-// the stream after the commit barrier is released. Holding that barrier for
-// the full local backup is therefore unbounded at production cardinality.
-// Manual snapshots remain available because this restriction applies only to
-// the epoch-boundary manager.
-var ErrBadgerAutomaticSnapshots = errors.New(
-	"automatic snapshots are unsupported with a Badger primary blob store",
-)
-
 // Manager captures automatic database snapshots at epoch boundaries. It
 // subscribes to event.EpochTransitionEventType on the EventBus — the same
 // async, decoupled pattern ledger/snapshot.Manager uses for stake/reward
@@ -146,12 +134,6 @@ func (m *Manager) Start(ctx context.Context) error {
 			"%w (%q); disable databaseLifecycle.snapshotEnabled or use a local primary blob store",
 			ErrCloudPrimaryAutomaticSnapshots,
 			m.blobPluginName,
-		)
-	}
-	if m.blobPluginName == "badger" {
-		return fmt.Errorf(
-			"%w; disable databaseLifecycle.snapshotEnabled until a bounded Badger snapshot path is available",
-			ErrBadgerAutomaticSnapshots,
 		)
 	}
 	if prefix := m.cfg.SnapshotCloudDestinationPrefix; prefix != "" &&

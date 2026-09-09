@@ -83,10 +83,8 @@ func (c *Calculator) CalculateStakeDistribution(
 				// Calculation failed; join cleanup error for diagnostics.
 				c.logger.Warn(
 					"read-only transaction cleanup failed after calculation error",
-					"cleanup_error",
-					commitErr,
-					"calculation_error",
-					err,
+					"cleanup_error", commitErr,
+					"calculation_error", err,
 				)
 				err = errors.Join(err, commitErr)
 			} else {
@@ -105,14 +103,7 @@ func (c *Calculator) CalculateStakeDistribution(
 	// nonzero expiryEpoch. This query keeps expiryEpoch == 0 (gate off), and
 	// boundarySlot == 0 so it stays a plain "stake at slot" reconstruction with
 	// no epoch-boundary reward semantics.
-	dist, err = c.calculateHistoricalStakeDistributionInTxn(
-		ctx,
-		txn,
-		slot,
-		0,
-		0,
-		0,
-	)
+	dist, err = c.calculateHistoricalStakeDistributionInTxn(ctx, txn, slot, 0, 0, 0)
 	return dist, err
 }
 

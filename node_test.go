@@ -22,8 +22,6 @@ import (
 	"log/slog"
 	"net"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,7 +31,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
-	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -626,39 +623,6 @@ func TestHandleChainSwitchEventSkipsUpdateDuringLiveLifecycleOp(t *testing.T) {
 	assert.Equal(t, connA, *active)
 }
 
-func TestLedgerStateConfigSkipsChainsyncReadDuringLiveLifecycleOp(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	state := chainsync.NewStateWithConfig(
-		nil,
-		nil,
-		chainsync.DefaultConfig(),
-	)
-	connId := newNodeTestConnId(3001)
-	require.True(t, state.AddClientConnId(connId))
-	point := ocommon.NewPoint(100, []byte("header"))
-	state.UpdateClientTipWithoutDedup(
-		connId, point, ochainsync.Tip{Point: point},
-	)
-	require.True(t, state.TrySetClientConnId(connId))
-	n := &Node{
-		chainsyncState: state,
-		config:         Config{cfg: &internalconfig.Config{}},
-	}
-	config := n.ledgerStateConfig()
-
-	active := config.GetActiveConnectionFunc()
-	require.NotNil(t, active)
-	assert.Equal(t, connId, *active)
-
-	n.liveLifecycleMu.Lock()
-	active = config.GetActiveConnectionFunc()
-	n.liveLifecycleMu.Unlock()
-	assert.Nil(t, active)
-}
-
 func TestChainsyncIngressEligibilityCacheDefaultsAndUpdates(t *testing.T) {
 	t.Parallel()
 
@@ -709,176 +673,6 @@ func TestStopReturnsSameShutdownErrorAfterFirstCall(t *testing.T) {
 	require.ErrorIs(t, firstErr, wantErr)
 	require.ErrorIs(t, secondErr, wantErr)
 	require.Equal(t, firstErr, secondErr)
-}
-
-// TestStartupFailureCleanupCancelsBeforeAllowingShutdown verifies the
-// signal-during-startup lifecycle boundary. Run owns startupLifecycleMu while
-// it unwinds its LIFO stack; shutdown must wait for that rollback rather than
-// closing the same partially initialized resource concurrently.
-func TestStartupFailureCleanupCancelsBeforeAllowingShutdown(t *testing.T) {
-	t.Parallel()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	rollbackStarted := make(chan struct{})
-	releaseRollback := make(chan struct{})
-	var releaseRollbackOnce sync.Once
-	release := func() { releaseRollbackOnce.Do(func() { close(releaseRollback) }) }
-	defer release()
-	rollbackDone := make(chan struct{})
-	shutdownFuncStarted := make(chan struct{})
-	shutdownDone := make(chan error, 1)
-
-	n := &Node{
-		config: Config{
-			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
-		ctx:    ctx,
-		cancel: cancel,
-		shutdownFuncs: []func(context.Context) error{
-			func(context.Context) error {
-				close(shutdownFuncStarted)
-				return nil
-			},
-		},
-	}
-
-	// Match Run's startup section: cleanupFailedStartup owns the gate until
-	// every started component's rollback completes.
-	n.startupLifecycleMu.Lock()
-	go func() {
-		defer close(rollbackDone)
-		n.cleanupFailedStartup([]func(){func() {
-			close(rollbackStarted)
-			<-releaseRollback
-		}})
-	}()
-	testutil.RequireReceive(
-		t,
-		rollbackStarted,
-		time.Second,
-		"startup rollback to begin",
-	)
-	require.ErrorIs(t, ctx.Err(), context.Canceled)
-
-	go func() {
-		shutdownDone <- n.shutdown()
-	}()
-	// If shutdown did not take the same gate, its phase-four callback would
-	// run while the startup rollback is intentionally blocked above.
-	testutil.RequireNoReceive(
-		t,
-		shutdownFuncStarted,
-		50*time.Millisecond,
-		"normal shutdown while startup rollback owns the lifecycle gate",
-	)
-
-	release()
-	testutil.RequireReceive(
-		t,
-		rollbackDone,
-		time.Second,
-		"startup rollback completion",
-	)
-	testutil.RequireReceive(
-		t,
-		shutdownFuncStarted,
-		time.Second,
-		"normal shutdown after startup rollback completion",
-	)
-	require.NoError(t, <-shutdownDone)
-}
-
-// TestStopWaitsForLiveLifecycleOperation protects the shared storage lifecycle
-// boundary. Restore and Truncate hold liveLifecycleMu and snapshotMu while
-// they stop readers, close the old database, and rebuild its dependents. A
-// concurrent Stop must wait for both gates before cancelling those readers or
-// closing the database; otherwise the two teardown paths can use and close
-// the same storage concurrently under suite load.
-func TestStopWaitsForLiveLifecycleOperation(t *testing.T) {
-	tests := []struct {
-		name   string
-		lock   func(*Node)
-		unlock func(*Node)
-	}{
-		{
-			name:   "restore or truncate",
-			lock:   func(n *Node) { n.liveLifecycleMu.Lock() },
-			unlock: func(n *Node) { n.liveLifecycleMu.Unlock() },
-		},
-		{
-			name:   "snapshot",
-			lock:   func(n *Node) { n.snapshotMu.Lock() },
-			unlock: func(n *Node) { n.snapshotMu.Unlock() },
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			phaseStarted := make(chan struct{}, 1)
-			n := &Node{
-				config: Config{
-					logger: slog.New(nodeTestLogSignalHandler{
-						message: "shutdown phase 1: stopping new work",
-						seen:    phaseStarted,
-					}),
-				},
-			}
-			test.lock(n)
-			var releaseOnce sync.Once
-			release := func() { releaseOnce.Do(func() { test.unlock(n) }) }
-			t.Cleanup(release)
-
-			stopDone := make(chan error, 1)
-			go func() { stopDone <- n.Stop() }()
-
-			// Shutdown must not reach phase 1 until the live operation has
-			// released the gate it owns.
-			testutil.RequireNoReceive(
-				t,
-				phaseStarted,
-				50*time.Millisecond,
-				"shutdown must wait for the live lifecycle gate",
-			)
-
-			release()
-			testutil.RequireReceive(
-				t,
-				phaseStarted,
-				time.Second,
-				"shutdown phase 1 after the live lifecycle gate",
-			)
-			require.NoError(t, <-stopDone)
-		})
-	}
-}
-
-func TestStopCancelsBeforeLiveLifecycleGateTimeout(t *testing.T) {
-	cancelCalled := make(chan struct{})
-	var cancelOnce sync.Once
-	n := &Node{
-		config: NewConfig(
-			WithShutdownTimeout(50*time.Millisecond),
-			WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
-		),
-		cancel: func() { cancelOnce.Do(func() { close(cancelCalled) }) },
-	}
-
-	n.liveLifecycleMu.Lock()
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { n.liveLifecycleMu.Unlock() }) }
-	defer release()
-
-	err := n.Stop()
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-	testutil.RequireReceive(
-		t,
-		cancelCalled,
-		time.Second,
-		"shutdown must cancel the node even when a lifecycle gate times out",
-	)
-
-	release()
-	require.NoError(t, n.Stop())
 }
 
 func TestShutdownClosesEventBusBeforeFinalCleanup(t *testing.T) {
@@ -967,11 +761,7 @@ func TestCloseWithShutdownTimeoutReturnsTimeoutError(t *testing.T) {
 // can time out while a database worker is still using the database; normal
 // shutdown must not close the database or its provider-owned stores in that
 // state.
-// Not t.Parallel: swaps ledger.CloseDBWorkerPoolShutdownTimeout, a variable
-// in another package that every concurrent LedgerState close would observe.
-func TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed(
-	t *testing.T,
-) {
+func TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed(t *testing.T) {
 	n, _ := newLiveLifecycleTestNodeWithGenesis(
 		t,
 		1,
@@ -988,22 +778,15 @@ func TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed(
 	workerDone := make(chan struct{})
 	defer func() {
 		close(release)
-		testutil.RequireReceive(
-			t,
-			workerDone,
-			time.Second,
-			"database worker drain",
-		)
+		testutil.RequireReceive(t, workerDone, time.Second, "database worker drain")
 	}()
 	go func() {
 		defer close(workerDone)
-		_ = n.ledgerState.SubmitAsyncDBOperation(
-			func(*database.Database) error {
-				close(started)
-				<-release
-				return nil
-			},
-		)
+		_ = n.ledgerState.SubmitAsyncDBOperation(func(*database.Database) error {
+			close(started)
+			<-release
+			return nil
+		})
 	}()
 	<-started
 

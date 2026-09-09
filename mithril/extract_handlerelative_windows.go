@@ -96,8 +96,7 @@ func openRelativeForDeletion(
 	// about to replace, so the restrictive-ACL case that recipe's own
 	// DELETE-only fallback exists for does not apply here.
 	handle, err := openRelative(
-		dir,
-		name,
+		dir, name,
 		windows.FILE_READ_ATTRIBUTES|windows.DELETE,
 		windows.FILE_OPEN_REPARSE_POINT|windows.FILE_OPEN_FOR_BACKUP_INTENT|typeOption,
 	)
@@ -214,10 +213,7 @@ type fileDispositionInformation struct {
 // FILE_READ_ATTRIBUTES is added beyond it for the same reason
 // openRelativeForDeletion needs it: rejectReparsePoint's
 // GetFileInformationByHandle call below requires it.
-func openRelativeForRename(
-	dir windows.Handle,
-	name string,
-) (windows.Handle, error) {
+func openRelativeForRename(dir windows.Handle, name string) (windows.Handle, error) {
 	handle, err := openRelative(
 		dir, name,
 		windows.DELETE|windows.SYNCHRONIZE|windows.FILE_READ_ATTRIBUTES,
@@ -253,13 +249,11 @@ func renameRelativeHandle(
 		return err
 	}
 	var iosb windows.IO_STATUS_BLOCK
-	// A rename request buffer never approaches 4GiB.
-	infoLen := uint32(len(info)) //nolint:gosec // G115
 	err = windows.NtSetInformationFile(
 		source,
 		&iosb,
 		&info[0],
-		infoLen,
+		uint32(len(info)), //nolint:gosec // G115: a rename request buffer never approaches 4GiB
 		windows.FileRenameInformation,
 	)
 	if err != nil {
@@ -302,11 +296,7 @@ func buildRenameInformation(
 
 	var probe fileRenameInformationHeader
 	nameOffset := int(
-		unsafe.Offsetof(
-			probe.FileNameLength,
-		) + unsafe.Sizeof(
-			probe.FileNameLength,
-		),
+		unsafe.Offsetof(probe.FileNameLength) + unsafe.Sizeof(probe.FileNameLength),
 	)
 	buf := make([]byte, nameOffset+nameBytes)
 	hdr := (*fileRenameInformationHeader)(unsafe.Pointer(&buf[0]))
@@ -315,10 +305,7 @@ func buildRenameInformation(
 	//nolint:gosec // G115: nameBytes is a path component length, far below uint32 range
 	hdr.FileNameLength = uint32(nameBytes)
 	if nameBytes > 0 {
-		dst := unsafe.Slice(
-			(*uint16)(unsafe.Pointer(&buf[nameOffset])),
-			len(name16),
-		)
+		dst := unsafe.Slice((*uint16)(unsafe.Pointer(&buf[nameOffset])), len(name16))
 		copy(dst, name16)
 	}
 	return buf, nil

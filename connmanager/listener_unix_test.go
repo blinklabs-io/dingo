@@ -252,10 +252,7 @@ func TestStartListener_UnixSocket_ErrorOnLiveSocket(t *testing.T) {
 	cm := NewConnectionManager(cfg)
 	err = cm.Start(context.Background())
 	if err == nil {
-		stopCtx, cancel := context.WithTimeout(
-			context.Background(),
-			2*time.Second,
-		)
+		stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		require.NoError(t, cm.Stop(stopCtx))
 	}

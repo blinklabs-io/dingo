@@ -163,7 +163,6 @@ func (s *Store) GetPoolStakeSnapshotsByEpoch(
 // expects, in the order it scans them.
 const poolStakeSnapshotColumns = `id, epoch, snapshot_type, pool_key_hash,
 total_stake, stake_denominator, delegator_count, captured_slot,
-leios_key_public, leios_key_possession_proof,
 calculation_version, reward_account_auto_vote,
 reward_account_auto_vote_resolved`
 
@@ -267,8 +266,6 @@ func (s *Store) scanPoolStakeSnapshots(
 			&row.StakeDenominator,
 			&row.DelegatorCount,
 			&row.CapturedSlot,
-			&row.LeiosKeyPublic,
-			&row.LeiosKeyPossessionProof,
 			&row.CalculationVersion,
 			&row.RewardAccountAutoVote,
 			&row.RewardAccountAutoVoteResolved,
@@ -529,8 +526,6 @@ type poolStakeSnapshotQueryParams struct {
 	StakeDenominator              string
 	DelegatorCount                int64
 	CapturedSlot                  int64
-	LeiosKeyPublic                []byte
-	LeiosKeyPossessionProof       []byte
 	CalculationVersion            int64
 	RewardAccountAutoVote         int64
 	RewardAccountAutoVoteResolved bool
@@ -564,14 +559,8 @@ func poolStakeSnapshotParams(
 			uint64(snapshot.StakeDenominator),
 			10,
 		),
-		DelegatorCount: delegatorCount,
-		CapturedSlot:   capturedSlot,
-		LeiosKeyPublic: append(
-			[]byte(nil), snapshot.LeiosKeyPublic...,
-		),
-		LeiosKeyPossessionProof: append(
-			[]byte(nil), snapshot.LeiosKeyPossessionProof...,
-		),
+		DelegatorCount:     delegatorCount,
+		CapturedSlot:       capturedSlot,
 		CalculationVersion: calculationVersion,
 		RewardAccountAutoVote: int64(
 			snapshot.RewardAccountAutoVote,
@@ -604,12 +593,6 @@ func poolStakeSnapshotFromSQLite(
 		StakeDenominator: types.Uint64(stakeDenominator),
 		DelegatorCount:   uint64(row.DelegatorCount),
 		CapturedSlot:     uint64(row.CapturedSlot),
-		LeiosKeyPublic: append(
-			[]byte(nil), row.LeiosKeyPublic...,
-		),
-		LeiosKeyPossessionProof: append(
-			[]byte(nil), row.LeiosKeyPossessionProof...,
-		),
 		CalculationVersion: uint(
 			row.CalculationVersion,
 		),

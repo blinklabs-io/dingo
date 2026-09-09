@@ -22,7 +22,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
-	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
 // bootstrapProtocolVersion is the Conway protocol major version during which
@@ -44,15 +43,12 @@ type RatifyDecision struct {
 }
 
 // RatifyInputs is the decoded-action-aware shape callers pass to
-// ShouldRatify. GovAction carries the proposal body for action-specific
-// predicates, while ParameterChange selects precise Conway or Dijkstra
-// parameter-group thresholds.
+// ShouldRatify. The paramUpdate pointer is consulted for ParameterChange
+// proposals so DRep and SPO thresholds can be selected precisely.
 type RatifyInputs struct {
 	Tally                 *ProposalTally
 	PParams               *conway.ConwayProtocolParameters
-	ParameterChange       lcommon.ParameterChangeGovAction
-	GovAction             lcommon.GovAction
-	CurrentEpoch          uint64
+	ParamUpdate           *conway.ConwayProtocolParameterUpdate
 	ActiveDRepCount       int // reserved for future min-DRep-count gate
 	ActiveCCCount         int
 	CCQuorum              *big.Rat
@@ -105,27 +101,11 @@ func ShouldRatify(in RatifyInputs) RatifyDecision {
 		}
 	}
 
-	if actionType == lcommon.GovActionTypeUpdateCommittee {
-		updateCommittee, ok := in.GovAction.(*lcommon.UpdateCommitteeGovAction)
-		if !ok || updateCommittee == nil {
-			decision.FailureReason = "missing update committee action"
-			return decision
-		}
-		if !committeeTermsWithinLimit(
-			updateCommittee,
-			in.CurrentEpoch,
-			in.PParams.CommitteeTermLimit,
-		) {
-			decision.FailureReason = "committee member term exceeds limit"
-			return decision
-		}
-	}
-
 	// DRep approval: actions with no DRep gate or a zero threshold pass
 	// automatically. Otherwise requires
 	// yesStake/(totalStake-abstainStake) >= threshold per CIP-1694.
 	drepThreshold := getDRepThreshold(
-		actionType, in.PParams, in.ParameterChange, in.CommitteeNoConfidence,
+		actionType, in.PParams, in.ParamUpdate, in.CommitteeNoConfidence,
 	)
 	if inBootstrap || drepThreshold == nil || drepThreshold.Sign() == 0 {
 		decision.DRepApproved = true
@@ -138,7 +118,7 @@ func ShouldRatify(in RatifyInputs) RatifyDecision {
 	// threshold is nil and approval is automatic. Others require
 	// yesStake/(totalStake-abstainStake) >= threshold of the pool snapshot.
 	spoThreshold := getSPOThreshold(
-		actionType, in.PParams, in.ParameterChange, in.CommitteeNoConfidence,
+		actionType, in.PParams, in.ParamUpdate, in.CommitteeNoConfidence,
 	)
 	if spoThreshold == nil || spoThreshold.Sign() == 0 {
 		decision.SPOApproved = true
@@ -188,35 +168,16 @@ func ShouldRatify(in RatifyInputs) RatifyDecision {
 	return decision
 }
 
-// committeeTermsWithinLimit implements Conway RATIFY's
-// validCommitteeTerm predicate. Subtraction after the greater-than check is
-// equivalent to expiry <= currentEpoch + termLimit without overflowing the
-// epoch sum. An empty member map satisfies the universal predicate.
-func committeeTermsWithinLimit(
-	action *lcommon.UpdateCommitteeGovAction,
-	currentEpoch uint64,
-	termLimit uint64,
-) bool {
-	for _, expiry := range action.CredEpochs {
-		expiryEpoch := uint64(expiry)
-		if expiryEpoch > currentEpoch &&
-			expiryEpoch-currentEpoch > termLimit {
-			return false
-		}
-	}
-	return true
-}
-
 // getDRepThreshold returns the DRep yes-ratio threshold for the action
 // type, or nil if DReps do not vote on this action. For ParameterChange
-// the threshold depends on which parameter groups the decoded action touches;
-// a nil action selects the most restrictive group.
+// the threshold depends on which parameter groups are touched; paramUpdate
+// may be nil when the caller just wants the most restrictive group.
 // committeeNoConfidence selects CommitteeNoConfidence over CommitteeNormal
 // for UpdateCommittee when the committee is in a no-confidence state.
 func getDRepThreshold(
 	actionType lcommon.GovActionType,
 	pparams *conway.ConwayProtocolParameters,
-	parameterChange lcommon.ParameterChangeGovAction,
+	paramUpdate *conway.ConwayProtocolParameterUpdate,
 	committeeNoConfidence bool,
 ) *big.Rat {
 	t := &pparams.DRepVotingThresholds
@@ -240,7 +201,7 @@ func getDRepThreshold(
 	case lcommon.GovActionTypeTreasuryWithdrawal:
 		return rateToRat(t.TreasuryWithdrawal)
 	case lcommon.GovActionTypeParameterChange:
-		return mostRestrictiveDRepParamThreshold(t, parameterChange)
+		return mostRestrictiveDRepParamThreshold(t, paramUpdate)
 	case lcommon.GovActionTypeInfo:
 		return nil
 	default:
@@ -254,14 +215,14 @@ func getDRepThreshold(
 // getSPOThreshold returns the SPO yes-ratio threshold for the action
 // type. SPOs vote on a limited subset of actions; nil means SPOs do
 // not vote and approval is automatic. For ParameterChange, the SPO
-// threshold only applies when the decoded action touches the security
-// parameter group; callers without the decoded action receive nil.
+// threshold only applies when the update touches the security
+// parameter group; callers without the decoded update receive nil.
 // committeeNoConfidence selects CommitteeNoConfidence over CommitteeNormal
 // for UpdateCommittee when the committee is in a no-confidence state.
 func getSPOThreshold(
 	actionType lcommon.GovActionType,
 	pparams *conway.ConwayProtocolParameters,
-	parameterChange lcommon.ParameterChangeGovAction,
+	paramUpdate *conway.ConwayProtocolParameterUpdate,
 	committeeNoConfidence bool,
 ) *big.Rat {
 	t := &pparams.PoolVotingThresholds
@@ -280,8 +241,7 @@ func getSPOThreshold(
 	case lcommon.GovActionTypeHardForkInitiation:
 		return rateToRat(t.HardForkInitiation)
 	case lcommon.GovActionTypeParameterChange:
-		if parameterChange == nil ||
-			len(parameterChange.SecurityGroupFields()) == 0 {
+		if paramUpdate == nil || !touchesSecurityGroup(paramUpdate) {
 			return nil
 		}
 		return rateToRat(t.PpSecurityGroup)
@@ -295,6 +255,24 @@ func getSPOThreshold(
 		// without an explicit case being added here.
 		return big.NewRat(1, 1)
 	}
+}
+
+// touchesSecurityGroup reports whether the parameter update changes any
+// security-relevant parameter per CIP-1694: max block body size, max tx
+// size, max block header size, max value size, max block ex-units, min
+// fee coefficients, UTxO cost per byte, governance action deposit, and
+// min fee ref script cost per byte.
+func touchesSecurityGroup(u *conway.ConwayProtocolParameterUpdate) bool {
+	return u.MaxBlockBodySize != nil ||
+		u.MaxTxSize != nil ||
+		u.MaxBlockHeaderSize != nil ||
+		u.MaxValueSize != nil ||
+		u.MaxBlockExUnits != nil ||
+		u.MinFeeA != nil ||
+		u.MinFeeB != nil ||
+		u.AdaPerUtxoByte != nil ||
+		u.GovActionDeposit != nil ||
+		u.MinFeeRefScriptCostPerByte != nil
 }
 
 // needsCCApproval returns true if the action type requires
@@ -324,7 +302,7 @@ func needsCCApproval(actionType lcommon.GovActionType) bool {
 // matches the documented intent ("most restrictive").
 func mostRestrictiveDRepParamThreshold(
 	t *conway.DRepVotingThresholds,
-	parameterChange lcommon.ParameterChangeGovAction,
+	update *conway.ConwayProtocolParameterUpdate,
 ) *big.Rat {
 	var best *big.Rat
 	consider := func(r cbor.Rat) {
@@ -333,24 +311,23 @@ func mostRestrictiveDRepParamThreshold(
 			best = candidate
 		}
 	}
-	groups := parameterChangeDRepGroups(parameterChange)
-	if groups == allDRepParameterGroups {
+	if update == nil {
 		consider(t.PpNetworkGroup)
 		consider(t.PpEconomicGroup)
 		consider(t.PpTechnicalGroup)
 		consider(t.PpGovGroup)
 		return best
 	}
-	if groups&drepParameterGroupNetwork != 0 {
+	if touchesNetworkGroup(update) {
 		consider(t.PpNetworkGroup)
 	}
-	if groups&drepParameterGroupEconomic != 0 {
+	if touchesEconomicGroup(update) {
 		consider(t.PpEconomicGroup)
 	}
-	if groups&drepParameterGroupTechnical != 0 {
+	if touchesTechnicalGroup(update) {
 		consider(t.PpTechnicalGroup)
 	}
-	if groups&drepParameterGroupGovernance != 0 {
+	if touchesGovGroup(update) {
 		consider(t.PpGovGroup)
 	}
 	if best == nil {
@@ -359,106 +336,6 @@ func mostRestrictiveDRepParamThreshold(
 		return rateToRat(t.PpGovGroup)
 	}
 	return best
-}
-
-type drepParameterGroups uint8
-
-const (
-	drepParameterGroupNetwork drepParameterGroups = 1 << iota
-	drepParameterGroupEconomic
-	drepParameterGroupTechnical
-	drepParameterGroupGovernance
-	allDRepParameterGroups = drepParameterGroupNetwork |
-		drepParameterGroupEconomic |
-		drepParameterGroupTechnical |
-		drepParameterGroupGovernance
-)
-
-// parameterChangeDRepGroups classifies the fields touched by a concrete
-// Conway or Dijkstra parameter-change action. Dijkstra keys 34 through 37 are
-// network-group parameters for DRep voting and security-group parameters for
-// SPO voting (the latter is supplied by SecurityGroupFields above).
-func parameterChangeDRepGroups(
-	action lcommon.ParameterChangeGovAction,
-) drepParameterGroups {
-	if action == nil {
-		return allDRepParameterGroups
-	}
-	var update *conway.ConwayProtocolParameterUpdate
-	groups := drepParameterGroups(0)
-	switch a := action.(type) {
-	case *conway.ConwayParameterChangeGovAction:
-		if a == nil {
-			return allDRepParameterGroups
-		}
-		update = &a.ParamUpdate
-	case *gdijkstra.DijkstraParameterChangeGovAction:
-		if a == nil {
-			return allDRepParameterGroups
-		}
-		update = conwayFieldsFromDijkstraUpdate(&a.ParamUpdate)
-		if a.ParamUpdate.MaxRefScriptSizePerBlock != nil ||
-			a.ParamUpdate.MaxRefScriptSizePerTx != nil ||
-			a.ParamUpdate.RefScriptCostStride != nil ||
-			a.ParamUpdate.RefScriptCostMultiplier != nil ||
-			a.ParamUpdate.CommitteeStakeCoverage != nil ||
-			a.ParamUpdate.QuorumStakeThreshold != nil {
-			groups |= drepParameterGroupNetwork
-		}
-	default:
-		return allDRepParameterGroups
-	}
-	if touchesNetworkGroup(update) {
-		groups |= drepParameterGroupNetwork
-	}
-	if touchesEconomicGroup(update) {
-		groups |= drepParameterGroupEconomic
-	}
-	if touchesTechnicalGroup(update) {
-		groups |= drepParameterGroupTechnical
-	}
-	if touchesGovGroup(update) {
-		groups |= drepParameterGroupGovernance
-	}
-	return groups
-}
-
-func conwayFieldsFromDijkstraUpdate(
-	update *gdijkstra.DijkstraProtocolParameterUpdate,
-) *conway.ConwayProtocolParameterUpdate {
-	return &conway.ConwayProtocolParameterUpdate{
-		MinFeeA:                    update.MinFeeA,
-		MinFeeB:                    update.MinFeeB,
-		MaxBlockBodySize:           update.MaxBlockBodySize,
-		MaxTxSize:                  update.MaxTxSize,
-		MaxBlockHeaderSize:         update.MaxBlockHeaderSize,
-		KeyDeposit:                 update.KeyDeposit,
-		PoolDeposit:                update.PoolDeposit,
-		MaxEpoch:                   update.MaxEpoch,
-		NOpt:                       update.NOpt,
-		A0:                         update.A0,
-		Rho:                        update.Rho,
-		Tau:                        update.Tau,
-		ProtocolVersion:            update.ProtocolVersion,
-		MinPoolCost:                update.MinPoolCost,
-		AdaPerUtxoByte:             update.AdaPerUtxoByte,
-		CostModels:                 update.CostModels,
-		ExecutionCosts:             update.ExecutionCosts,
-		MaxTxExUnits:               update.MaxTxExUnits,
-		MaxBlockExUnits:            update.MaxBlockExUnits,
-		MaxValueSize:               update.MaxValueSize,
-		CollateralPercentage:       update.CollateralPercentage,
-		MaxCollateralInputs:        update.MaxCollateralInputs,
-		PoolVotingThresholds:       update.PoolVotingThresholds,
-		DRepVotingThresholds:       update.DRepVotingThresholds,
-		MinCommitteeSize:           update.MinCommitteeSize,
-		CommitteeTermLimit:         update.CommitteeTermLimit,
-		GovActionValidityPeriod:    update.GovActionValidityPeriod,
-		GovActionDeposit:           update.GovActionDeposit,
-		DRepDeposit:                update.DRepDeposit,
-		DRepInactivityPeriod:       update.DRepInactivityPeriod,
-		MinFeeRefScriptCostPerByte: update.MinFeeRefScriptCostPerByte,
-	}
 }
 
 // touchesNetworkGroup covers max block body/tx/header size, max value

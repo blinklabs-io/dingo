@@ -12,6 +12,8 @@ Monitoring dashboards for [Dingo](https://github.com/blinklabs-io/dingo), the Go
 | **Mempool** | `mempool.json` | Pending TXs, mempool size, TX lifecycle, CBOR cache, event bus |
 | **Resource Usage** | `resources.json` | CPU, memory, GC heatmap, disk I/O, IOPS, PSI pressure, Badger, file descriptors |
 
+`full-panel.json` contains the standalone Business Text header panel for embedding into custom dashboards.
+
 ## Prerequisites
 
 Before you begin, make sure you have:
@@ -87,8 +89,7 @@ After restarting, go to **Dashboards → Browse** in the Grafana UI and search f
 1. Open Grafana in your browser
 2. Go to **Dashboards → New → Import**
 3. Upload each JSON file
-
-Dashboards use your default Prometheus datasource automatically — see [Datasource](#datasource) below.
+4. Select your Prometheus datasource when prompted
 
 ### 4. Alert rules (optional)
 
@@ -115,7 +116,7 @@ sudo systemctl reload prometheus
 
 ## Datasource
 
-All dashboards reference their Prometheus datasource with UID `default`, Grafana's built-in alias for whichever datasource is currently marked as default. As long as you have a Prometheus datasource configured (and it's your only one, or you've marked it default under **Connections → Data sources**), the dashboards resolve it automatically — no UID renaming needed.
+All dashboards expect a Prometheus datasource with UID `prometheus`. If your datasource has a different UID, update it before importing or recreate the datasource with UID `prometheus`.
 
 ## Template variables
 
@@ -165,6 +166,7 @@ docs/dashboards/
   peer-health.json         Peer Health dashboard
   mempool.json             Mempool dashboard
   resources.json           Resource Usage dashboard
+  full-panel.json          Business Text header panel (standalone)
   provisioning.yaml        Grafana provisioning config
   prometheus.yaml          Prometheus scrape config snippet
   alerts.yaml              Prometheus alert rules
@@ -180,7 +182,7 @@ Install the plugin (step 1 above) and restart Grafana. If running in a managed e
 Check that Prometheus is scraping your Dingo node: open Prometheus in the browser, go to **Status → Targets**, and confirm the `dingo` job is up. Also verify the `$network` and `$instance` template variables at the top of the dashboard are set to the correct values.
 
 **Datasource UID mismatch ("datasource not found")**
-All JSON files reference the datasource UID `default`, which Grafana resolves to whichever datasource is marked default. If you have multiple Prometheus datasources and the wrong one is default, mark the correct one as default in **Connections → Data sources**, or do a find-and-replace of `"default"` with your actual datasource UID in the JSON files before importing.
+All JSON files use the datasource UID `prometheus`. If your Prometheus datasource has a different UID, either rename it to `prometheus` in **Connections → Data sources**, or do a find-and-replace of `"prometheus"` with your actual UID in the JSON files before importing.
 
 **Dashboards not appearing after provisioning**
 Confirm `/etc/grafana/provisioning/dashboards/dingo.yaml` references the correct path. Grafana auto-reloads provisioned dashboards every 30 seconds; if it hasn't appeared after a minute, check the Grafana log (`journalctl -u grafana-server`) for errors.

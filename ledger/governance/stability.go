@@ -98,11 +98,8 @@ func EvaluateRatifiableHardForkInitiation(
 	if in.DB == nil {
 		return nil, errors.New("nil database")
 	}
-	conwayPParams, err := conwayGovernanceProtocolParameters(in.PParams)
-	if err != nil {
-		return nil, err
-	}
-	if conwayPParams == nil {
+	conwayPParams, ok := in.PParams.(*conway.ConwayProtocolParameters)
+	if !ok {
 		// Pre-Conway: no governance state machine exists, so no
 		// HardForkInitiation can be in flight.
 		return nil, nil
@@ -135,7 +132,6 @@ func EvaluateRatifiableHardForkInitiation(
 		Txn:                   in.Txn,
 		StakeEpoch:            stakeEpochFor(in.CurrentEpoch),
 		CurrentEpoch:          in.CurrentEpoch,
-		MajorVersion:          conwayPParams.ProtocolVersion.Major,
 		DelegatorInactivityOn: in.DelegatorInactivityOn,
 	}
 
@@ -181,17 +177,6 @@ func EvaluateRatifiableHardForkInitiation(
 		if !validateParentChain(proposal, hardForkRoot) {
 			continue
 		}
-		// Decode before ratification so the same decoded-action-aware input
-		// shape is used by this mid-epoch check and the boundary RATIFY loop.
-		action, err := decodeGovAction(
-			proposal.GovActionCbor, proposal.ActionType,
-		)
-		if err != nil {
-			if in.OnProposalDecodeFailure != nil {
-				in.OnProposalDecodeFailure(proposal, err)
-			}
-			continue
-		}
 		tally, err := TallyProposal(tallyCtx, proposal)
 		if err != nil {
 			return nil, fmt.Errorf("tally proposal: %w", err)
@@ -199,8 +184,7 @@ func EvaluateRatifiableHardForkInitiation(
 		decision := ShouldRatify(RatifyInputs{
 			Tally:                 tally,
 			PParams:               conwayPParams,
-			GovAction:             action,
-			CurrentEpoch:          in.CurrentEpoch,
+			ParamUpdate:           nil, // not used for HardForkInitiation
 			ActiveDRepCount:       activeDRepCount,
 			ActiveCCCount:         committeeState.ActiveMemberCount,
 			CCQuorum:              ccQuorum,
@@ -208,6 +192,19 @@ func EvaluateRatifiableHardForkInitiation(
 			CommitteeNoConfidence: committeeNoConfidence,
 		})
 		if !decision.Ratified {
+			continue
+		}
+		// Decode to extract the target protocol version; an active
+		// HardForkInitiation that fails to decode here is a
+		// data-integrity bug, but the conservative behaviour is to
+		// skip it rather than abort the whole check.
+		action, err := decodeGovAction(
+			proposal.GovActionCbor, proposal.ActionType,
+		)
+		if err != nil {
+			if in.OnProposalDecodeFailure != nil {
+				in.OnProposalDecodeFailure(proposal, err)
+			}
 			continue
 		}
 		hf, ok := action.(*lcommon.HardForkInitiationGovAction)

@@ -16,11 +16,13 @@ package conformance
 
 import (
 	"testing"
+
+	"github.com/blinklabs-io/ouroboros-mock/conformance"
+	"github.com/stretchr/testify/require"
 )
 
-// TestRulesConformanceVectors runs the Amaru ledger rules conformance test
-// vectors using Dingo's ledger implementation via the shared harness from
-// ouroboros-mock/conformance.
+// TestRulesConformanceVectors runs the Amaru ledger rules conformance test vectors
+// using Dingo's ledger implementation via the shared harness from ouroboros-mock/conformance.
 //
 // The test vectors exercise Conway era ledger rules including:
 // - UTxO validation (inputs, outputs, fees, collateral)
@@ -28,12 +30,74 @@ import (
 // - Governance (proposals, voting, enactment)
 // - Script execution (native scripts, Plutus V1/V2/V3)
 //
-// Test vectors are embedded in the ouroboros-mock module and extracted at test
-// time. This asserts and reports from a single corpus replay; see
-// corpus_test.go for why the replay is memoized per backend and what the
-// previous separate statistics pass cost.
+// Test vectors are embedded in the ouroboros-mock module and extracted at test time.
 func TestRulesConformanceVectors(t *testing.T) {
-	results := sqliteCorpusResults(t)
-	reportCorpus(t, "sqlite", results)
-	assertCorpus(t, "sqlite", results)
+	testdataRoot, err := conformance.ExtractEmbeddedTestdata(t.TempDir())
+	require.NoError(t, err, "failed to extract embedded testdata")
+
+	sm, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer sm.Close()
+
+	harness := conformance.NewHarness(sm, conformance.HarnessConfig{
+		TestdataRoot: testdataRoot,
+		Debug:        testing.Verbose(),
+	})
+
+	harness.RunAllVectors(t)
+}
+
+// TestRulesConformanceVectorsWithResults runs the conformance tests and reports
+// detailed statistics. This is useful for tracking implementation progress.
+func TestRulesConformanceVectorsWithResults(t *testing.T) {
+	testdataRoot, err := conformance.ExtractEmbeddedTestdata(t.TempDir())
+	require.NoError(t, err, "failed to extract embedded testdata")
+
+	sm, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer sm.Close()
+
+	harness := conformance.NewHarness(sm, conformance.HarnessConfig{
+		TestdataRoot: testdataRoot,
+		Debug:        false,
+	})
+
+	results, err := harness.RunAllVectorsWithResults()
+	if err != nil {
+		t.Fatalf("failed to run vectors: %v", err)
+	}
+
+	var successes, failures int
+	for _, result := range results {
+		if result.Success {
+			successes++
+		} else {
+			failures++
+		}
+	}
+
+	t.Logf("Conformance Test Results:")
+	t.Logf("  Total vectors: %d", len(results))
+	t.Logf("  Passed: %d", successes)
+	t.Logf("  Failed: %d", failures)
+	if len(results) > 0 {
+		t.Logf(
+			"  Pass rate: %.1f%%",
+			float64(successes)/float64(len(results))*100,
+		)
+	}
+
+	if failures > 0 && testing.Verbose() {
+		t.Log("First failures:")
+		failCount := 0
+		for _, result := range results {
+			if !result.Success && failCount < 5 {
+				t.Logf("  %s: %v", result.Title, result.Error)
+				failCount++
+			}
+		}
+		if failures > 5 {
+			t.Logf("  ... and %d more failures", failures-5)
+		}
+	}
 }

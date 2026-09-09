@@ -205,16 +205,6 @@ func (s *Store) SetCommitteeMembers(
 				if err != nil {
 					return err
 				}
-				termStartSlot := member.TermStartSlot
-				termStartSlotSet := member.TermStartSlotSet
-				if !termStartSlotSet {
-					termStartSlot = member.AddedSlot
-					termStartSlotSet = true
-				}
-				sqlTermStartSlot, err := checkedInt64(termStartSlot)
-				if err != nil {
-					return err
-				}
 				addedSlot, err := checkedInt64(member.AddedSlot)
 				if err != nil {
 					return err
@@ -223,29 +213,13 @@ func (s *Store) SetCommitteeMembers(
 				if err != nil {
 					return err
 				}
-				if err := queries.SoftDeleteCommitteeMember(
-					ctx,
-					sqlitequery.SoftDeleteCommitteeMemberParams{
-						DeletedSlot: sql.NullInt64{
-							Int64: addedSlot,
-							Valid: true,
-						},
-						ColdCredentialTag: int64(member.ColdCredentialTag),
-						ColdCredHash:      member.ColdCredHash,
-					},
-				); err != nil {
-					return err
-				}
 				id, err := queries.SetCommitteeMember(
 					ctx,
 					sqlitequery.SetCommitteeMemberParams{
-						ColdCredentialTag: int64(member.ColdCredentialTag),
-						ColdCredHash:      member.ColdCredHash,
-						ExpiresEpoch:      expiresEpoch,
-						TermStartSlot:     sqlTermStartSlot,
-						TermStartSlotSet:  termStartSlotSet,
-						AddedSlot:         addedSlot,
-						DeletedSlot:       deletedSlot,
+						ColdCredHash: member.ColdCredHash,
+						ExpiresEpoch: expiresEpoch,
+						AddedSlot:    addedSlot,
+						DeletedSlot:  deletedSlot,
 					},
 				)
 				if err != nil {
@@ -377,11 +351,11 @@ func (s *Store) getCommitteeMembers(
 }
 
 func (s *Store) SoftDeleteCommitteeMembers(
-	coldCredentials []models.CommitteeCredential,
+	coldCredHashes [][]byte,
 	slot uint64,
 	txn types.Txn,
 ) error {
-	if len(coldCredentials) == 0 {
+	if len(coldCredHashes) == 0 {
 		return nil
 	}
 	sqlSlot, err := checkedInt64(slot)
@@ -392,7 +366,7 @@ func (s *Store) SoftDeleteCommitteeMembers(
 		txn,
 		func(db queryer, ctx context.Context) error {
 			queries := s.operationalQueries(db)
-			for _, credential := range coldCredentials {
+			for _, hash := range coldCredHashes {
 				if err := queries.SoftDeleteCommitteeMember(
 					ctx,
 					sqlitequery.SoftDeleteCommitteeMemberParams{
@@ -400,8 +374,7 @@ func (s *Store) SoftDeleteCommitteeMembers(
 							Int64: sqlSlot,
 							Valid: true,
 						},
-						ColdCredentialTag: int64(credential.CredentialTag),
-						ColdCredHash:      credential.Credential,
+						ColdCredHash: hash,
 					},
 				); err != nil {
 					return err
@@ -491,14 +464,11 @@ func committeeMemberFromSQLite(
 	row sqlitequery.CommitteeMember,
 ) *models.CommitteeMember {
 	return &models.CommitteeMember{
-		ID:                uint(row.ID),
-		ColdCredentialTag: uint8(row.ColdCredentialTag),
-		ColdCredHash:      row.ColdCredHash,
-		ExpiresEpoch:      uint64(row.ExpiresEpoch),
-		TermStartSlot:     uint64(row.TermStartSlot),
-		TermStartSlotSet:  row.TermStartSlotSet,
-		AddedSlot:         uint64(row.AddedSlot),
-		DeletedSlot:       uint64Pointer(row.DeletedSlot),
+		ID:           uint(row.ID),
+		ColdCredHash: row.ColdCredHash,
+		ExpiresEpoch: uint64(row.ExpiresEpoch),
+		AddedSlot:    uint64(row.AddedSlot),
+		DeletedSlot:  uint64Pointer(row.DeletedSlot),
 	}
 }
 

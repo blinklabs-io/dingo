@@ -530,9 +530,6 @@ func buildDingoConfig(
 		dingo.WithBarkPort(cfg.BarkPort),
 		dingo.WithBarkHost(cfg.BarkHost),
 		dingo.WithBarkClientCAFilePath(cfg.BarkClientCAFilePath),
-		dingo.WithBarkOperatorCertificateFingerprints(
-			cfg.BarkOperatorCertificateFingerprints,
-		),
 		dingo.WithHistoryExpiry(dingo.HistoryExpiryConfig{
 			Enabled:   cfg.HistoryExpiry.Enabled,
 			Frequency: cfg.HistoryExpiry.Frequency,
@@ -706,5 +703,6 @@ func buildDingoConfig(
 		dingo.WithLeiosVoteSigningKeyFile(
 			cfg.LeiosVoteSigningKeyFile,
 		),
+		dingo.WithLeiosVoterPublicKeys(cfg.LeiosVoterPublicKeys),
 	)
 }

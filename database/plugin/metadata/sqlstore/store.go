@@ -269,7 +269,6 @@ func (s *Store) Start(ctx context.Context) error {
 			Registry: s.migrations,
 			Locker:   s.migrationLocker,
 			Logger:   s.logger,
-			Rebind:   s.dialect.Rebind,
 		}
 		if err := runner.Run(ctx); err != nil {
 			return fmt.Errorf("sqlstore: metadata upgrade: %w", err)

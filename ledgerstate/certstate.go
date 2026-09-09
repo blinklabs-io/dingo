@@ -62,13 +62,11 @@ func parseCertState3(
 	result := &ParsedCertState{}
 	var warnings []error
 
-	dreps, hotKeys, resignations, err := parseVState(certState[0])
+	dreps, err := parseVState(certState[0])
 	if err != nil {
 		return nil, fmt.Errorf("parsing VState: %w", err)
 	}
 	result.DReps = dreps
-	result.CommitteeHotKeys = hotKeys
-	result.CommitteeResignations = resignations
 
 	pools, err := parsePState(certState[1])
 	if err != nil {
@@ -167,13 +165,6 @@ func parseCertStateConway(
 		},
 	)
 	for _, mc := range mapCandidates {
-		// ccHotKeys is also credential-keyed, so size alone would pick it when
-		// DState is empty or the smaller of the two. Its values are
-		// credentials, which an account state is not, so skip it here and let
-		// the committee scan below claim it.
-		if looksLikeCommitteeCredentialMap(certState[mc.idx]) {
-			continue
-		}
 		if looksLikeCredentialMap(certState[mc.idx]) {
 			dIdx = mc.idx
 			break
@@ -186,7 +177,6 @@ func parseCertStateConway(
 	// We call parseDRepMap directly because the raw element is a
 	// DRep map, not a VState array [drepMap, ccHotKeys, ...].
 	drepFound := false
-	drepIdx := -1
 	for i, elem := range certState {
 		if len(elem) == 0 || i == pIdx || i == dIdx {
 			continue
@@ -207,29 +197,10 @@ func parseCertStateConway(
 			}
 			result.DReps = dreps
 			drepFound = true
-			drepIdx = i
 			break
 		}
 	}
 	_ = drepFound
-
-	// Recover the committee hot-key authorizations and resignations. The
-	// flattened layout inlines the VState fields into the top-level array, so
-	// they are not reached by parseVState the way the 3-element layout is.
-	// Try each remaining element as the start of a committee state and keep the
-	// first that yields any committee data.
-	for i, elem := range certState {
-		if len(elem) == 0 || i == pIdx || i == dIdx || i == drepIdx {
-			continue
-		}
-		hotKeys, resignations := parseCommitteeVState(certState[i:])
-		if len(hotKeys) == 0 && len(resignations) == 0 {
-			continue
-		}
-		result.CommitteeHotKeys = hotKeys
-		result.CommitteeResignations = resignations
-		break
-	}
 
 	// Parse PState if found
 	if pIdx >= 0 {
@@ -498,7 +469,7 @@ func parseConwayAccountState(
 	}
 
 	acct.Reward = reward
-	acct.Deposit = &deposit
+	acct.Deposit = deposit
 
 	partial := false
 	if len(elem) > 2 {
@@ -538,7 +509,7 @@ func parseShelleyAccountState(
 	}
 
 	acct.Reward = reward
-	acct.Deposit = &deposit
+	acct.Deposit = deposit
 
 	poolHash, ok := parsePoolDelegation(elem[3])
 	if ok {
@@ -564,7 +535,7 @@ func parseLegacyUMElem(
 
 	acct.Reward = rdPair[0]
 	if len(rdPair) > 1 {
-		acct.Deposit = &rdPair[1]
+		acct.Deposit = rdPair[1]
 	}
 
 	partial := false
@@ -1155,23 +1126,20 @@ func parsePoolParamsOrDistr(
 //	2  owners (set of addr_keyhash)
 //	3  reserved: a second stake-shaped figure, unused here
 //	4  vrf_keyhash
-//	5  optional Leios key (w32 and later only)
-//	6  pledge (coin)
-//	7  cost (coin)
-//	8  margin (unit interval)
-//	9  reserved: a small counter, unused here
-//	10 reward account credential
-//
-// Pre-w32 records omit field 5 and therefore contain ten fields.
-const (
-	snapshotPoolParamsFieldsLegacy = 10
-	snapshotPoolParamsFieldsLeios  = 11
-)
+//	5  pledge (coin)
+//	6  cost (coin)
+//	7  margin (unit interval)
+//	8  reserved: a small counter, unused here
+//	9  reward account credential
+const snapshotPoolParamsFields = 10
 
 const (
-	snapshotPoolOwnersIdx   = 2
-	snapshotPoolVrfIdx      = 4
-	snapshotPoolLeiosKeyIdx = 5
+	snapshotPoolOwnersIdx        = 2
+	snapshotPoolVrfIdx           = 4
+	snapshotPoolPledgeIdx        = 5
+	snapshotPoolCostIdx          = 6
+	snapshotPoolMarginIdx        = 7
+	snapshotPoolRewardAccountIdx = 9
 )
 
 // parseSnapshotPoolParams decodes the registration parameters a UTxO-HD
@@ -1197,32 +1165,12 @@ func parseSnapshotPoolParams(
 	poolKeyHash []byte,
 	fields [][]byte,
 ) (*ParsedPool, error) {
-	if len(fields) != snapshotPoolParamsFieldsLegacy &&
-		len(fields) != snapshotPoolParamsFieldsLeios {
+	if len(fields) != snapshotPoolParamsFields {
 		return nil, fmt.Errorf(
-			"%w: snapshot pool params has %d fields, expected %d or %d",
-			ErrNotPoolParams,
-			len(fields),
-			snapshotPoolParamsFieldsLegacy,
-			snapshotPoolParamsFieldsLeios,
+			"%w: snapshot pool params has %d fields, expected %d",
+			ErrNotPoolParams, len(fields), snapshotPoolParamsFields,
 		)
 	}
-	leiosOffset := 0
-	var leiosKey *lcommon.LeiosKey
-	if len(fields) == snapshotPoolParamsFieldsLeios {
-		leiosOffset = 1
-		var err error
-		leiosKey, err = decodeOptionalLeiosKey(
-			fields[snapshotPoolLeiosKeyIdx],
-		)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrNotPoolParams, err)
-		}
-	}
-	pledgeIdx := 5 + leiosOffset
-	costIdx := 6 + leiosOffset
-	marginIdx := 7 + leiosOffset
-	rewardAccountIdx := 9 + leiosOffset
 
 	var vrfKeyHash []byte
 	if _, err := cbor.Decode(
@@ -1236,20 +1184,20 @@ func parseSnapshotPoolParams(
 
 	var pledge, cost uint64
 	if _, err := cbor.Decode(
-		fields[pledgeIdx], &pledge,
+		fields[snapshotPoolPledgeIdx], &pledge,
 	); err != nil {
 		return nil, fmt.Errorf(
 			"%w: decoding pledge: %w", ErrNotPoolParams, err,
 		)
 	}
-	if _, err := cbor.Decode(fields[costIdx], &cost); err != nil {
+	if _, err := cbor.Decode(fields[snapshotPoolCostIdx], &cost); err != nil {
 		return nil, fmt.Errorf(
 			"%w: decoding cost: %w", ErrNotPoolParams, err,
 		)
 	}
 
 	marginNum, marginDen, ok := parseRational(
-		fields[marginIdx],
+		fields[snapshotPoolMarginIdx],
 	)
 	// A margin outside [0,1] means this field is not a margin. The gate
 	// downstream rejects such a basis anyway; failing here instead keeps a
@@ -1257,17 +1205,17 @@ func parseSnapshotPoolParams(
 	if !ok || marginDen == 0 || marginNum > marginDen {
 		return nil, fmt.Errorf(
 			"%w: field %d is not a unit interval",
-			ErrNotPoolParams, marginIdx,
+			ErrNotPoolParams, snapshotPoolMarginIdx,
 		)
 	}
 
 	rewardAccount, err := parseCredential(
-		fields[rewardAccountIdx],
+		fields[snapshotPoolRewardAccountIdx],
 	)
 	if err != nil || len(rewardAccount.Hash) != credentialHashSize {
 		return nil, fmt.Errorf(
 			"%w: field %d is not a credential",
-			ErrNotPoolParams, rewardAccountIdx,
+			ErrNotPoolParams, snapshotPoolRewardAccountIdx,
 		)
 	}
 
@@ -1278,7 +1226,7 @@ func parseSnapshotPoolParams(
 		)
 	}
 
-	pool := &ParsedPool{
+	return &ParsedPool{
 		PoolKeyHash:   slices.Clone(poolKeyHash),
 		VrfKeyHash:    vrfKeyHash,
 		Pledge:        pledge,
@@ -1289,41 +1237,7 @@ func parseSnapshotPoolParams(
 		// #nosec G115 -- credential type is 0 or 1
 		RewardAccountCredentialTag: uint8(rewardAccount.Type),
 		Owners:                     owners,
-	}
-	if leiosKey != nil {
-		pool.LeiosKeyPublic = append([]byte(nil), leiosKey.PublicKey...)
-		pool.LeiosKeyPossessionProof = append(
-			[]byte(nil), leiosKey.PossessionProof...,
-		)
-	}
-	return pool, nil
-}
-
-func decodeOptionalLeiosKey(data []byte) (*lcommon.LeiosKey, error) {
-	if len(data) == 0 || (len(data) == 1 && data[0] == 0xf6) {
-		return nil, nil
-	}
-	fields, err := decodeRawArray(data)
-	if err != nil {
-		return nil, fmt.Errorf("decoding optional Leios key: %w", err)
-	}
-	if len(fields) == 0 {
-		return nil, nil
-	}
-	keyData := data
-	if len(fields) == 1 {
-		keyData = fields[0]
-	} else if len(fields) != 2 {
-		return nil, fmt.Errorf(
-			"optional Leios key has %d fields, expected 0 or 1",
-			len(fields),
-		)
-	}
-	var key lcommon.LeiosKey
-	if _, err := cbor.Decode(keyData, &key); err != nil {
-		return nil, fmt.Errorf("decoding Leios key: %w", err)
-	}
-	return &key, nil
+	}, nil
 }
 
 // parseSnapshotPoolOwners decodes the owner set, which is a CBOR set (tag
@@ -1529,117 +1443,17 @@ func parsePoolMetadata(
 
 // parseVState decodes the voting/DRep state.
 // VState = [dreps, ccHotKeys, numDormantEpochs, ...]
-func parseVState(data []byte) (
-	[]ParsedDRep, []ParsedCommitteeHotKey, []Credential, error,
-) {
+func parseVState(data []byte) ([]ParsedDRep, error) {
 	vs, err := decodeRawElements(data)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("decoding VState: %w", err)
+		return nil, fmt.Errorf("decoding VState: %w", err)
 	}
 	if len(vs) < 1 {
-		return nil, nil, nil, nil
-	}
-
-	// Parse DRep registrations (index 0). Conway's VState stores committee
-	// hot-key authorizations and resignations alongside the DRep map; retain
-	// the credential tags so imported state cannot alias key and script hashes.
-	dreps, warning := parseDRepMap(vs[0])
-	hotKeys, resignations := parseCommitteeVState(vs[1:])
-	return dreps, hotKeys, resignations, warning
-}
-
-// looksLikeCommitteeCredentialMap reports whether a map's entries pair a
-// credential key with a credential value, which is the committee hot-key shape.
-// DState pairs a credential with an account state, so this separates the two
-// regardless of which is larger.
-//
-// The map is homogeneous, so the first entry settles it. Reading only that
-// entry keeps this off the allocation path for a mainnet-scale DState, which
-// this classifier is run against before the DState scans.
-func looksLikeCommitteeCredentialMap(data []byte) bool {
-	entry, ok := firstMapEntry(data)
-	if !ok {
-		return false
-	}
-	if _, err := parseCredential(entry.KeyRaw); err != nil {
-		return false
-	}
-	_, err := parseCommitteeHotCredential(entry.ValueRaw)
-	return err == nil
-}
-
-// isCborArray reports whether data begins a definite or indefinite CBOR array.
-func isCborArray(data []byte) bool {
-	if len(data) == 0 {
-		return false
-	}
-	return data[0]>>5 == 4 || data[0] == 0x9f
-}
-
-func parseCommitteeVState(
-	fields [][]byte,
-) ([]ParsedCommitteeHotKey, []Credential) {
-	var hotKeys []ParsedCommitteeHotKey
-	var resignations []Credential
-	if len(fields) == 0 {
 		return nil, nil
 	}
-	// The canonical shape is [ccHotKeys, ccRes]. Some historical encoders wrap
-	// those two fields in one committee-state array, which may itself be
-	// followed by dormant-epoch or extension fields. Detect the wrapper by its
-	// own shape rather than by the absence of trailing fields: ccHotKeys is a
-	// map, so an array here can only be the wrapper.
-	committeeFields := fields
-	if isCborArray(fields[0]) {
-		if nested, err := decodeRawElements(fields[0]); err == nil &&
-			len(nested) >= 2 {
-			committeeFields = nested
-		}
-	}
-	entries, err := decodeMapEntries(committeeFields[0])
-	if err == nil {
-		for _, entry := range entries {
-			cold, coldErr := parseCredential(entry.KeyRaw)
-			hot, hotErr := parseCommitteeHotCredential(entry.ValueRaw)
-			if coldErr != nil || hotErr != nil {
-				continue
-			}
-			hotKeys = append(hotKeys, ParsedCommitteeHotKey{Cold: cold, Hot: hot})
-		}
-	}
-	if len(committeeFields) < 2 {
-		return hotKeys, nil
-	}
-	resignationEntries, resignationErr := decodeMapEntries(committeeFields[1])
-	if resignationErr == nil {
-		for _, entry := range resignationEntries {
-			cold, coldErr := parseCredential(entry.KeyRaw)
-			if coldErr == nil {
-				resignations = append(resignations, cold)
-			}
-		}
-		return hotKeys, resignations
-	}
-	if values, arrayErr := decodeRawArray(committeeFields[1]); arrayErr == nil {
-		for _, value := range values {
-			cold, coldErr := parseCredential(value)
-			if coldErr == nil {
-				resignations = append(resignations, cold)
-			}
-		}
-	}
-	return hotKeys, resignations
-}
 
-func parseCommitteeHotCredential(data []byte) (Credential, error) {
-	if credential, err := parseCredential(data); err == nil {
-		return credential, nil
-	}
-	wrapped, err := decodeRawArray(data)
-	if err != nil || len(wrapped) != 1 {
-		return Credential{}, errors.New("decoding committee hot credential")
-	}
-	return parseCredential(wrapped[0])
+	// Parse DRep registrations (index 0)
+	return parseDRepMap(vs[0])
 }
 
 // parseDRepMap decodes a DRep credential -> DRepState map.

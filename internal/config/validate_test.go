@@ -19,7 +19,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 
@@ -347,6 +346,55 @@ func TestValidate(t *testing.T) {
 				c.ShelleyKESKey = "/keys/kes.skey"
 				c.ShelleyOperationalCertificate = "/keys/node.cert"
 			},
+		},
+		{
+			name: "block producer with local and agent KES keys",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "/keys/vrf.skey"
+				c.ShelleyKESKey = "/keys/kes.skey"
+				c.ShelleyKESAgentSocket = "/run/kes-agent.sock"
+				c.ShelleyOperationalCertificate = "/keys/node.cert"
+			},
+			wantErr: "cannot set both shelleyKesKey and shelleyKesAgentSocket",
+		},
+		{
+			name:    "invalid KES agent mode",
+			modify:  func(c *Config) { c.ShelleyKESAgentMode = "signing" },
+			wantErr: "invalid shelleyKesAgentMode",
+		},
+		{
+			name: "negative KES agent sign timeout",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = -time.Second
+			},
+			wantErr: "shelleyKesAgentSignTimeout",
+		},
+		{
+			name: "explicit KES agent sign timeout",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = 300 * time.Millisecond
+			},
+		},
+		{
+			name: "KES agent sign timeout defaults at zero",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = 0
+			},
+		},
+		{
+			name: "KES agent sign timeout at slot boundary",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = time.Second
+			},
+			wantErr: "shelleyKesAgentSignTimeout",
+		},
+		{
+			name: "KES agent sign timeout above slot boundary",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = time.Second + time.Nanosecond
+			},
+			wantErr: "shelleyKesAgentSignTimeout",
 		},
 		{
 			name: "no network and no magic",
@@ -947,9 +995,6 @@ func TestValidateDatabaseLifecycleSnapshotDirWritability(t *testing.T) {
 			cfg.DatabaseLifecycle.SnapshotDir = dir
 			cfg.BarkPort = 8091
 			cfg.BarkClientCAFilePath = "/certs/ca.crt"
-			cfg.BarkOperatorCertificateFingerprints = []string{
-				strings.Repeat("00", 32),
-			}
 			cfg.TlsCertFilePath = "/certs/tls.crt"
 			cfg.TlsKeyFilePath = "/certs/tls.key"
 			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
@@ -960,58 +1005,6 @@ func TestValidateDatabaseLifecycleSnapshotDirWritability(t *testing.T) {
 			}
 		},
 	)
-}
-
-func TestValidateBarkDatabaseServiceSecurity(t *testing.T) {
-	newConfig := func(t *testing.T) *Config {
-		t.Helper()
-		cfg := validTestConfig()
-		cfg.BarkPort = 8091
-		cfg.DatabaseLifecycle.SnapshotDir = t.TempDir()
-		cfg.BarkClientCAFilePath = "/certs/ca.crt"
-		cfg.BarkOperatorCertificateFingerprints = []string{
-			strings.Repeat("AB:", 31) + "AB",
-		}
-		cfg.TlsCertFilePath = "/certs/tls.crt"
-		cfg.TlsKeyFilePath = "/certs/tls.key"
-		return cfg
-	}
-
-	t.Run("complete policy", func(t *testing.T) {
-		require.NoError(
-			t,
-			newConfig(t).validate(RunModeServe, minUnprivilegedPort),
-		)
-	})
-
-	t.Run("missing client CA", func(t *testing.T) {
-		cfg := newConfig(t)
-		cfg.BarkClientCAFilePath = ""
-		err := cfg.validate(RunModeServe, minUnprivilegedPort)
-		require.ErrorContains(t, err, "barkClientCaFilePath is required")
-	})
-
-	t.Run("missing operator allowlist", func(t *testing.T) {
-		cfg := newConfig(t)
-		cfg.BarkOperatorCertificateFingerprints = nil
-		err := cfg.validate(RunModeServe, minUnprivilegedPort)
-		require.ErrorContains(
-			t,
-			err,
-			"barkOperatorCertificateFingerprints requires at least one",
-		)
-	})
-
-	t.Run("invalid operator fingerprint", func(t *testing.T) {
-		cfg := newConfig(t)
-		cfg.BarkOperatorCertificateFingerprints = []string{"not-a-fingerprint"}
-		err := cfg.validate(RunModeServe, minUnprivilegedPort)
-		require.ErrorContains(
-			t,
-			err,
-			"must be a 32-byte SHA-256 certificate fingerprint",
-		)
-	})
 }
 
 func TestValidateDatabaseLifecycleSnapshotCloudDestinationPrefix(t *testing.T) {

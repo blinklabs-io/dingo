@@ -7659,7 +7659,6 @@ func TestAddLedgerPeer_RejectsNonRoutable(t *testing.T) {
 	assert.False(t, added)
 
 	assert.Empty(t, pg.GetPeers())
-	assert.Empty(t, pg.ledgerKnownAddrs)
 }
 
 func TestAddLedgerPeer_AcceptsRoutable(t *testing.T) {
@@ -7670,8 +7669,6 @@ func TestAddLedgerPeer_AcceptsRoutable(t *testing.T) {
 	added := pg.addLedgerPeer("44.0.0.1:3001")
 	assert.True(t, added)
 	assert.Len(t, pg.GetPeers(), 1)
-	_, retained := pg.ledgerKnownAddrs["44.0.0.1:3001"]
-	assert.True(t, retained, "accepted ledger peer must be retained")
 }
 
 // --- Phase 2: inbound admission metadata & identity ---------------------

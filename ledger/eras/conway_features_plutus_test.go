@@ -104,8 +104,7 @@ func TestConwayFeaturesRuleRejectsNeededPlutusV1V2(t *testing.T) {
 func conwayFeaturesRule(t *testing.T) lcommon.UtxoValidationRuleFunc {
 	t.Helper()
 	for _, rule := range conwayUtxoValidationRules {
-		if utxoValidationRuleName(rule.validationFunc) ==
-			utxoValidationRuleName(validateConwayFeaturesWithNeededPlutusV1V2) {
+		if rule.index == conwayUtxoValidateConwayFeaturesRuleIndex {
 			return rule.validationFunc
 		}
 	}

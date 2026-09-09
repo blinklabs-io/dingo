@@ -282,8 +282,8 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 		if eraDesc.DecodePParamsFunc == nil {
 			continue
 		}
-		pp, ppErr := ls.loadPersistedProtocolParameters(
-			lastEp.EpochId, eraDesc, nil,
+		pp, ppErr := ls.db.GetPParams(
+			lastEp.EpochId, eraDesc.Id, eraDesc.DecodePParamsFunc, nil,
 		)
 		if ppErr != nil {
 			return nil, fmt.Errorf(
@@ -548,53 +548,16 @@ func (ls *LedgerState) queryShelleyCbor(
 	if err != nil {
 		return nil, err
 	}
-	// Two different, shape-indistinguishable conventions collide at
-	// exactly one element. Most handlers return []any{value} where value
-	// IS the complete result the client decodes directly (e.g.
-	// GetStakeSnapshots' []any{result}, where the direct reply's own
-	// client-side type is a one-element slice of the result struct) --
-	// GetCBOR's tag-24 content there must be cbor.Encode(value) (unwrapping
-	// the outer slice), which strips exactly the slice-of-one wrapping
-	// that direct reply needed but GetCBOR does not. This is pinned
-	// against real cardano-node wire bytes by
-	// TestQueryStakeSnapshotSpecificPool, which fails if this case is
-	// changed to keep the outer slice.
-	//
-	// queryShelleyPoolDistr2 and queryShelleyStakeDistribution instead
-	// destructure their result struct's own fields directly into values
-	// (so that struct's StructAsArray encoding doesn't nest inside an
-	// extra wrapping array on their direct, non-GetCBOR reply, whose
-	// client-side type decodes the bare struct with no slice-of-one
-	// wrapping, unlike GetStakeSnapshots). For those, GetCBOR's content
-	// must be cbor.Encode(values) (the whole slice, reconstructing that
-	// struct's array-of-fields encoding exactly) regardless of field
-	// count -- proven for the 2-field case (queryShelleyPoolDistr2) by
-	// TestQueryShelleyPoolDistr2_ViaGetCBOR and for the 1-field case
-	// (queryShelleyStakeDistribution) by
-	// TestQueryShelleyStakeDistribution_ViaGetCBOR, which fails if this
-	// case is unwrapped like the general one above instead.
-	//
-	// Slice length alone cannot tell the two conventions apart when there
-	// is exactly one field/value, so the destructured-fields query types
-	// are named explicitly here rather than guessed from shape.
+	// Inner handlers return the result in the single-element MsgResult wire
+	// form ([]any{value}); GetCBOR serialises just the wrapped value.
 	values, ok := inner.([]any)
-	if !ok || len(values) == 0 {
+	if !ok || len(values) != 1 {
 		return nil, fmt.Errorf(
 			"unexpected inner query result shape for GetCBOR: %T",
 			inner,
 		)
 	}
-	var content any = values
-	switch q.Query.(type) {
-	case *olocalstatequery.ShelleyPoolDistr2Query,
-		*olocalstatequery.ShelleyStakeDistributionQuery:
-		// content stays the whole slice; see comment above.
-	default:
-		if len(values) == 1 {
-			content = values[0]
-		}
-	}
-	encoded, err := cbor.Encode(content)
+	encoded, err := cbor.Encode(values[0])
 	if err != nil {
 		return nil, err
 	}

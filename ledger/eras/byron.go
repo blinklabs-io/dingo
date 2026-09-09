@@ -331,9 +331,7 @@ func byronValidateWitnesses(
 			txHash := tx.Hash()
 			protocolMagicProvider, ok := ls.(ByronProtocolMagicProvider)
 			if !ok {
-				return errors.New(
-					"ledger state does not provide Byron protocol magic",
-				)
+				return errors.New("ledger state does not provide Byron protocol magic")
 			}
 			protocolMagic, err := protocolMagicProvider.ByronProtocolMagic()
 			if err != nil {
@@ -401,12 +399,7 @@ func byronValidateWitnesses(
 	if len(redeemWitnesses) == 0 && len(bootstrapWitnesses) == 0 {
 		return lcommon.ValidateInputVKeyWitnesses(tx, ls)
 	}
-	return validateByronInputWitnesses(
-		tx,
-		ls,
-		redeemWitnesses,
-		bootstrapWitnesses,
-	)
+	return validateByronInputWitnesses(tx, ls, redeemWitnesses, bootstrapWitnesses)
 }
 
 func byronSignatureMessage(
@@ -539,8 +532,7 @@ func validateByronInputWitnesses(
 						witness.Vkey,
 						addr.ByronAttr(),
 					)
-					if err == nil &&
-						redeemAddr.PaymentKeyHash() == payload.Hash {
+					if err == nil && redeemAddr.PaymentKeyHash() == payload.Hash {
 						matched = true
 						break
 					}
@@ -647,10 +639,7 @@ func byronAddressRootForParts(
 		cbor.RawMessage(attributes),
 	})
 	if err != nil {
-		return lcommon.Blake2b224{}, fmt.Errorf(
-			"encode Byron address root: %w",
-			err,
-		)
+		return lcommon.Blake2b224{}, fmt.Errorf("encode Byron address root: %w", err)
 	}
 	hash := sha3.Sum256(root)
 	return lcommon.Blake2b224Hash(hash[:]), nil

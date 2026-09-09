@@ -608,16 +608,8 @@ func TestApplyFlags_MidnightServerPolicy(t *testing.T) {
 	cfg, err := LoadConfig(configFile)
 	require.NoError(t, err)
 	require.False(t, cfg.Midnight.ServerEnabled, "environment overrides YAML")
-	require.False(
-		t,
-		cfg.Midnight.ReflectionEnabled,
-		"environment overrides YAML",
-	)
-	require.False(
-		t,
-		cfg.Midnight.AllowInsecureRemote,
-		"environment overrides YAML",
-	)
+	require.False(t, cfg.Midnight.ReflectionEnabled, "environment overrides YAML")
+	require.False(t, cfg.Midnight.AllowInsecureRemote, "environment overrides YAML")
 
 	cmd := &cobra.Command{Use: "dingo"}
 	RegisterFlags(cmd)
@@ -629,11 +621,7 @@ func TestApplyFlags_MidnightServerPolicy(t *testing.T) {
 	require.NoError(t, ApplyFlags(cmd, cfg))
 	require.True(t, cfg.Midnight.ServerEnabled, "CLI overrides environment")
 	require.True(t, cfg.Midnight.ReflectionEnabled, "CLI overrides environment")
-	require.True(
-		t,
-		cfg.Midnight.AllowInsecureRemote,
-		"CLI overrides environment",
-	)
+	require.True(t, cfg.Midnight.AllowInsecureRemote, "CLI overrides environment")
 }
 
 func TestApplyFlags_NetworkOverrideReappliesMidnightDefaults(t *testing.T) {
@@ -823,6 +811,33 @@ func loadConfigThroughPipeline(
 	return cfg, nil
 }
 
+func TestPipeline_KESAgentSignTimeoutBounds(t *testing.T) {
+	_, err := loadConfigThroughPipeline(
+		t,
+		"",
+		[]string{"--shelley-kes-agent-sign-timeout=1s"},
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "shelleyKesAgentSignTimeout") {
+		t.Fatalf("CLI accepted a one-slot KES agent sign timeout: %v", err)
+	}
+
+	cfg, err := loadConfigThroughPipeline(
+		t,
+		"",
+		[]string{"--shelley-kes-agent-sign-timeout=999ms"},
+	)
+	if err != nil {
+		t.Fatalf("CLI rejected a sub-slot KES agent sign timeout: %v", err)
+	}
+	if cfg.ShelleyKESAgentSignTimeout != 999*time.Millisecond {
+		t.Fatalf(
+			"CLI sign timeout = %s, want 999ms",
+			cfg.ShelleyKESAgentSignTimeout,
+		)
+	}
+}
+
 // TestPipeline_EmptyMidnightHostUsesLoopbackDefault pins the merged-config
 // defaulting contract: an explicitly empty higher-precedence environment value
 // must resolve to the same safe loopback host that the Midnight server uses.
@@ -836,10 +851,7 @@ func TestPipeline_EmptyMidnightHostUsesLoopbackDefault(t *testing.T) {
 		nil,
 	)
 	if err != nil {
-		t.Fatalf(
-			"expected empty Midnight host to use loopback default: %v",
-			err,
-		)
+		t.Fatalf("expected empty Midnight host to use loopback default: %v", err)
 	}
 	wantHost := DefaultMidnightConfig().Host
 	if cfg.Midnight.Host != wantHost {

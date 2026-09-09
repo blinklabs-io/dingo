@@ -86,9 +86,7 @@ func configureLoadChainSecurityParam(
 // use LedgerState.SecurityParam: before Start that method samples the
 // zero-value Byron era and intentionally substitutes its runtime fallback for
 // unavailable or invalid values.
-func loadSecurityParamForConfig(
-	nodeCfg *cardano.CardanoNodeConfig,
-) (int, error) {
+func loadSecurityParamForConfig(nodeCfg *cardano.CardanoNodeConfig) (int, error) {
 	if nodeCfg == nil {
 		return 0, fmt.Errorf(
 			"%w: cardano node config is required",
@@ -536,7 +534,6 @@ func LoadWithDB(
 			ChainManager:       cm,
 			Logger:             logger,
 			CardanoNodeConfig:  nodeCfg,
-			Network:            cfg.Network,
 			ValidateHistorical: cfg.ValidateHistorical,
 			// CIP-0163 full-pot reward distribution is consensus-affecting and
 			// deterministically changes the reward state written during replay,

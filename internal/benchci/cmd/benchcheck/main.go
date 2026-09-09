@@ -45,17 +45,11 @@ func main() {
 
 func run(args []string) error {
 	if len(args) != 3 {
-		return errors.New(
-			"usage: benchcheck <old-file> <new-file> <report-output-path>",
-		)
+		return errors.New("usage: benchcheck <old-file> <new-file> <report-output-path>")
 	}
 	oldFile, newFile, reportPath := args[0], args[1], args[2]
 
-	report, regressed, err := benchci.Compare(
-		oldFile,
-		newFile,
-		benchci.TrackedBenchmarks,
-	)
+	report, regressed, err := benchci.Compare(oldFile, newFile, benchci.TrackedBenchmarks)
 	if err != nil {
 		return fmt.Errorf("comparing %s to %s: %w", oldFile, newFile, err)
 	}

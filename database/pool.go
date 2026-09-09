@@ -150,43 +150,6 @@ func (d *Database) LatestPoolOpCertSequence(
 	return d.metadata.LatestPoolOpCertSequence(pkh, txn.Metadata())
 }
 
-// LatestPoolOpCertSequenceAfter returns the highest observed op-cert sequence
-// for a pool strictly after afterSlot.
-func (d *Database) LatestPoolOpCertSequenceAfter(
-	pkh lcommon.PoolKeyHash,
-	afterSlot uint64,
-	txn *Txn,
-) (uint64, bool, error) {
-	if txn == nil {
-		txn = d.Transaction(false)
-		defer txn.Release()
-	}
-	return d.metadata.LatestPoolOpCertSequenceAfter(
-		pkh,
-		afterSlot,
-		txn.Metadata(),
-	)
-}
-
-// LatestPoolOpCertSequenceAtOrBefore returns the highest observed op-cert
-// sequence for a pool at or before slot. It provides a historical
-// chain-dependent view without changing or restoring the live database tip.
-func (d *Database) LatestPoolOpCertSequenceAtOrBefore(
-	pkh lcommon.PoolKeyHash,
-	slot uint64,
-	txn *Txn,
-) (uint64, bool, error) {
-	if txn == nil {
-		txn = d.Transaction(false)
-		defer txn.Release()
-	}
-	return d.metadata.LatestPoolOpCertSequenceAtOrBefore(
-		pkh,
-		slot,
-		txn.Metadata(),
-	)
-}
-
 // LatestPoolOpCertSequences returns the highest observed op-cert sequence for
 // every pool that has issued a block, keyed by pool key hash. This backs the
 // GetChainDepState local-state-query, whose counters cover every cold key the

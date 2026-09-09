@@ -131,9 +131,7 @@ func TestStartQueuedBlockfetchReleasesMutexAroundRequest(t *testing.T) {
 		case <-acquired:
 			return nil
 		case <-time.After(time.Second):
-			return errors.New(
-				"blockfetch request ran while blockfetch mutex was held",
-			)
+			return errors.New("blockfetch request ran while blockfetch mutex was held")
 		}
 	}
 
@@ -178,9 +176,7 @@ func TestStartQueuedBlockfetchCancelsPriorRequestWaitDuringShutdown(
 				ocommon.Point,
 				ocommon.Point,
 			) error {
-				t.Fatal(
-					"blockfetch request started before shutdown wait was canceled",
-				)
+				t.Fatal("blockfetch request started before shutdown wait was canceled")
 				return nil
 			},
 		},
@@ -351,12 +347,7 @@ func TestBlockfetchBatchDoneDoesNotBlockSubscriberOnContinuation(t *testing.T) {
 		time.Second,
 		"blockfetch subscriber remained blocked in continuation request",
 	)
-	testutil.RequireReceive(
-		t,
-		requestStarted,
-		time.Second,
-		"continuation request did not start",
-	)
+	testutil.RequireReceive(t, requestStarted, time.Second, "continuation request did not start")
 
 	close(releaseRequest)
 	ls.blockfetchContinuationMu.Lock()

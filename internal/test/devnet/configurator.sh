@@ -163,17 +163,6 @@ config_topology_json "$number_of_pools"
 compute_start_time
 echo "system start: ${SYSTEM_START_ISO} (unix: ${SYSTEM_START_UNIX})"
 
-# Publish the actual runtime start (which overrides the generator's short
-# delay) for txpump. Docker can mark every node healthy before this timestamp,
-# so service health alone is not a safe transaction-submission barrier. The
-# shared UTxO volume carries this generated file to txpump without introducing
-# another volume solely for runtime metadata.
-cp /testnet.yaml /configs/utxo-keys/runtime-genesis
-# genesis.Load reads systemStartUnix from the first YAML document. Preserve the
-# original testnet specification and add the exact timestamp used above.
-sed -i "/^systemStartDelay:/a systemStartUnix: ${SYSTEM_START_UNIX}" \
-  /configs/utxo-keys/runtime-genesis
-
 for pool in $pools; do
   echo "pool: $pool"
   set_start_time "$pool"

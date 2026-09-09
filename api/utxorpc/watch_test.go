@@ -17,7 +17,7 @@ package utxorpc
 import (
 	"testing"
 
-	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -47,19 +47,23 @@ func TestWatchTxBuildRollbackMessages_EmitsUndoWhenPointNotFound(t *testing.T) {
 
 func TestWatchTxBuildMessages_IdleOnEmptyBlock(t *testing.T) {
 	t.Parallel()
-	blocks, err := testfixtures.GenerateConwayChain(1)
+	imm, err := immutable.New("../../database/immutable/testdata")
 	require.NoError(t, err)
-	require.Len(t, blocks, 1)
-	block := blocks[0]
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	require.NoError(t, err)
+	defer iter.Close()
+	immBlock, err := iter.Next()
+	require.NoError(t, err)
+	require.NotNil(t, immBlock)
 
-	blk, err := ledger.NewBlockFromCbor(uint(block.Type()), block.Cbor())
+	blk, err := ledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
 	require.NoError(t, err)
 	require.Empty(t, blk.Transactions())
 
 	wantHash := append([]byte(nil), blk.Hash().Bytes()...)
 	appliedTxs, out, err := watchTxBuildForwardMessages(
-		uint(block.Type()),
-		block.Cbor(),
+		uint(immBlock.Type),
+		immBlock.Cbor,
 		blk.SlotNumber(),
 		blk.BlockNumber(),
 		blk.Hash().Bytes(),
@@ -77,18 +81,31 @@ func TestWatchTxBuildMessages_IdleOnEmptyBlock(t *testing.T) {
 
 func TestWatchTxBuildMessages_IdleWhenNoPredicateMatch(t *testing.T) {
 	t.Parallel()
-	blocks, err := testfixtures.GenerateConwayChainWithTransactions(1)
+	imm, err := immutable.New("../../database/immutable/testdata")
 	require.NoError(t, err)
-	require.Len(t, blocks, 1)
-	block := blocks[0]
-	blk, err := ledger.NewBlockFromCbor(uint(block.Type()), block.Cbor())
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	require.NoError(t, err)
+	defer iter.Close()
+	// Slot 0 is empty; advance to first block with transactions
+	var immBlock *immutable.Block
+	for {
+		immBlock, err = iter.Next()
+		require.NoError(t, err)
+		require.NotNil(t, immBlock)
+		blk, err := ledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
+		require.NoError(t, err)
+		if len(blk.Transactions()) > 0 {
+			break
+		}
+	}
+	blk, err := ledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
 	require.NoError(t, err)
 	require.NotEmpty(t, blk.Transactions())
 
 	metaHash := append([]byte(nil), blk.Hash().Bytes()...)
 	appliedTxs, out, err := watchTxBuildForwardMessages(
-		uint(block.Type()),
-		block.Cbor(),
+		uint(immBlock.Type),
+		immBlock.Cbor,
 		blk.SlotNumber(),
 		blk.BlockNumber(),
 		metaHash,
@@ -106,16 +123,28 @@ func TestWatchTxBuildMessages_IdleWhenNoPredicateMatch(t *testing.T) {
 
 func TestWatchTxBuildMessages_ApplyWhenMatching(t *testing.T) {
 	t.Parallel()
-	blocks, err := testfixtures.GenerateConwayChainWithTransactions(1)
+	imm, err := immutable.New("../../database/immutable/testdata")
 	require.NoError(t, err)
-	require.Len(t, blocks, 1)
-	block := blocks[0]
-	blk, err := ledger.NewBlockFromCbor(uint(block.Type()), block.Cbor())
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	require.NoError(t, err)
+	defer iter.Close()
+	var immBlock *immutable.Block
+	for {
+		immBlock, err = iter.Next()
+		require.NoError(t, err)
+		require.NotNil(t, immBlock)
+		blk, err := ledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
+		require.NoError(t, err)
+		if len(blk.Transactions()) > 0 {
+			break
+		}
+	}
+	blk, err := ledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
 	require.NoError(t, err)
 
 	appliedTxs, out, err := watchTxBuildForwardMessages(
-		uint(block.Type()),
-		block.Cbor(),
+		uint(immBlock.Type),
+		immBlock.Cbor,
 		blk.SlotNumber(),
 		blk.BlockNumber(),
 		blk.Hash().Bytes(),

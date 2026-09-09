@@ -60,7 +60,7 @@ INSERT INTO account (
 	)
 	require.NoError(t, err)
 
-	runTo(registry[:4])
+	runTo(registry)
 
 	var (
 		pool, drep []byte
@@ -99,7 +99,7 @@ func baselineBackfillDB(
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(registry), 4)
+	require.Len(t, registry, 4)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -136,32 +136,6 @@ SELECT COUNT(*) FROM account_import_baseline`).Scan(&rows))
 	return rows
 }
 
-func TestAccountImportDepositMigrationKeepsLegacyBaselineUnknown(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	db, runTo := baselineBackfillDB(t)
-	key := []byte{0x44, 0x55}
-	_, err := db.ExecContext(ctx, `
-INSERT INTO account (
-    staking_key, credential_tag, added_slot, created_slot, active
-) VALUES (?, 0, 100, 0, 1)`, key)
-	require.NoError(t, err)
-
-	registry, err := migrations.SQLiteRegistry()
-	require.NoError(t, err)
-	runTo(registry[:5])
-	require.Equal(t, 1, baselineRowCount(t, db))
-	// The deposit migration is v7; main's governance history migration took v6.
-	runTo(registry[:7])
-
-	var deposit sql.NullString
-	require.NoError(t, db.QueryRowContext(ctx, `
-SELECT deposit_amount
-FROM account_import_baseline
-WHERE credential_tag = 0 AND staking_key = ?`, key).Scan(&deposit))
-	require.False(t, deposit.Valid)
-}
-
 // A legacy account row with a NULL staking key is skipped rather than
 // backfilled. Its baseline could never be read back -- credential equality
 // matches no NULL -- and inserting it would break re-runnability, because the
@@ -180,7 +154,7 @@ INSERT INTO account (
 
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	runTo(registry[:4])
+	runTo(registry)
 
 	require.Equal(t, 0, baselineRowCount(t, db))
 	replayBaselineExpand(t, db)
@@ -225,7 +199,7 @@ INSERT INTO stake_delegation (
 
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	runTo(registry[:4])
+	runTo(registry)
 
 	require.Equal(t, 1, baselineRowCount(t, db))
 	var key []byte
@@ -276,7 +250,7 @@ VALUES (?, 0, 400)`,
 
 			registry, err := migrations.SQLiteRegistry()
 			require.NoError(t, err)
-			runTo(registry[:4])
+			runTo(registry)
 
 			require.Equal(t, 0, baselineRowCount(t, db))
 		})

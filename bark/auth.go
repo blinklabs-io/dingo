@@ -20,10 +20,8 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"connectrpc.com/connect"
 	databaseconnect "github.com/blinklabs-io/bark/proto/v1alpha1/database/databasev1alpha1connect"
@@ -55,10 +53,14 @@ var destructiveDatabaseProcedures = map[string]bool{
 	databaseconnect.DatabaseServiceCancelOperationProcedure: true,
 }
 
-// readOnlyDatabaseProcedures is the set of authenticated DatabaseService
-// procedures that do not additionally require operator authorization. This is
-// deliberately an allowlist: a procedure absent from both maps is treated as
-// destructive and therefore requires an allowed operator fingerprint.
+// readOnlyDatabaseProcedures is the only set of DatabaseService procedures
+// operatorAuthInterceptor.authorize exempts from requiring a verified mTLS
+// client certificate. This is deliberately an allowlist, not the inverse of
+// destructiveDatabaseProcedures: a procedure absent from BOTH maps — e.g. a
+// new DatabaseService RPC added to the proto without updating either one —
+// is still required to authenticate, the same as a known-destructive one.
+// See authorize's doc comment for why the runtime check is structured this
+// way.
 var readOnlyDatabaseProcedures = map[string]bool{
 	databaseconnect.DatabaseServiceGetSnapshotStatusProcedure:       true,
 	databaseconnect.DatabaseServiceListSnapshotsProcedure:           true,
@@ -71,9 +73,9 @@ var readOnlyDatabaseProcedures = map[string]bool{
 }
 
 // peerIdentity is what peerCertContextMiddleware extracts from a verified
-// mTLS client certificate and stashes in the request context — just enough to
-// authenticate every DatabaseService request, authorize destructive calls by
-// fingerprint, and identify callers in audit logs.
+// mTLS client certificate and stashes in the request context — just enough
+// to authorize (Verified) and audit-log (CommonName/Fingerprint) a
+// destructive call, not a general certificate representation.
 type peerIdentity struct {
 	Verified    bool
 	CommonName  string
@@ -146,46 +148,22 @@ func peerCertContextMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// errAnonymousDatabaseCall is returned for every DatabaseService call whose
-// connection presented no verified client certificate.
-var errAnonymousDatabaseCall = errors.New(
-	"DatabaseService RPCs require a verified mTLS client certificate",
+// errAnonymousDestructiveCall is returned by newOperatorAuthInterceptor for
+// any destructive DatabaseService call whose connection presented no
+// verified client certificate.
+var errAnonymousDestructiveCall = errors.New(
+	"this RPC requires a verified mTLS client certificate: destructive " +
+		"DatabaseService operations cannot be called anonymously",
 )
 
-var errOperatorPermissionDenied = errors.New(
-	"the authenticated client certificate is not authorized for destructive " +
-		"DatabaseService operations",
-)
-
-func normalizeOperatorCertificateFingerprints(
-	values []string,
-) (map[string]struct{}, error) {
-	ret := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		normalized := strings.ReplaceAll(strings.TrimSpace(value), ":", "")
-		decoded, err := hex.DecodeString(normalized)
-		if err != nil {
-			return nil, fmt.Errorf("%q is not hexadecimal: %w", value, err)
-		}
-		if len(decoded) != sha256.Size {
-			return nil, fmt.Errorf(
-				"%q decodes to %d bytes, expected %d",
-				value,
-				len(decoded),
-				sha256.Size,
-			)
-		}
-		ret[hex.EncodeToString(decoded)] = struct{}{}
-	}
-	return ret, nil
-}
-
-// newOperatorAuthInterceptor enforces DatabaseService's two-stage policy:
-// every call requires a verified client certificate, and every non-read-only
-// call additionally requires its fingerprint in operatorFingerprints.
-// Destructive calls are logged with the caller's certificate identity so an
-// operator can audit who ran a Restore/Truncate/DeleteSnapshot/etc. after the
-// fact; GetOperationHistory has no caller identity of its own to fall back on.
+// newOperatorAuthInterceptor returns a connect.Interceptor that rejects any
+// call to a procedure not in readOnly with connect.CodeUnauthenticated
+// unless peerCertContextMiddleware recorded a verified client certificate
+// on the request's connection. Every non-read-only call — accepted or
+// rejected — is logged with the caller's certificate identity (or its
+// absence), so an operator can audit who ran a Restore/Truncate/
+// DeleteSnapshot/etc. after the fact; GetOperationHistory (database.go) has
+// no notion of caller identity of its own to fall back on.
 //
 // Implements the full connect.Interceptor interface — including
 // WrapStreamingHandler/WrapStreamingClient, which are no-ops for every
@@ -197,49 +175,40 @@ func newOperatorAuthInterceptor(
 	logger *slog.Logger,
 	destructive map[string]bool,
 	readOnly map[string]bool,
-	operatorFingerprints map[string]struct{},
 ) connect.Interceptor {
 	return &operatorAuthInterceptor{
-		logger:               logger,
-		destructive:          destructive,
-		readOnly:             readOnly,
-		operatorFingerprints: operatorFingerprints,
+		logger:      logger,
+		destructive: destructive,
+		readOnly:    readOnly,
 	}
 }
 
 type operatorAuthInterceptor struct {
-	logger               *slog.Logger
-	destructive          map[string]bool
-	readOnly             map[string]bool
-	operatorFingerprints map[string]struct{}
+	logger      *slog.Logger
+	destructive map[string]bool
+	readOnly    map[string]bool
 }
 
-// authorize is deliberately deny-by-default. Every procedure requires a
-// verified certificate. A procedure absent from both classification maps —
-// most plausibly a new RPC added without updating this file — additionally
-// requires operator authorization exactly like a known destructive RPC.
+// authorize is deliberately deny-by-default: it allows a procedure through
+// unauthenticated only if readOnly explicitly names it, not merely because
+// destructive doesn't. That means a DatabaseService RPC absent from BOTH
+// maps — most plausibly a new one added to the proto without updating
+// either — still requires a verified certificate, the same as a known
+// destructive one, instead of silently passing through unauthenticated the
+// way an "allow unless listed as destructive" check would. This mirrors
+// peerCertContextMiddleware's own fail-closed default (an absent/failed
+// verification leaves peerIdentity.Verified false, never true).
 // TestDestructiveDatabaseProcedures_CoversEveryGeneratedMethod keeps
 // destructive/readOnly's classification of every current method accurate
 // and pins that neither map is ever missing one, but this function's
 // runtime behavior does not depend on that test having run: an
 // unclassified procedure here is logged (so an operator notices and fixes
-// the classification) and still requires operator authorization.
+// the classification) and still authenticated exactly like a known
+// destructive one, never allowed through by default.
 func (i *operatorAuthInterceptor) authorize(
 	ctx context.Context,
 	procedure string,
 ) error {
-	id := peerIdentityFromContext(ctx)
-	if !id.Verified {
-		i.logger.Warn(
-			"rejected anonymous call to DatabaseService RPC",
-			"component", "bark",
-			"procedure", procedure,
-		)
-		return connect.NewError(
-			connect.CodeUnauthenticated,
-			errAnonymousDatabaseCall,
-		)
-	}
 	if i.readOnly[procedure] {
 		return nil
 	}
@@ -253,21 +222,16 @@ func (i *operatorAuthInterceptor) authorize(
 			procedure,
 		)
 	}
-	if _, ok := i.operatorFingerprints[id.Fingerprint]; !ok {
+	id := peerIdentityFromContext(ctx)
+	if !id.Verified {
 		i.logger.Warn(
-			"rejected destructive DatabaseService RPC from non-operator identity",
-			"component",
-			"bark",
-			"procedure",
-			procedure,
-			"client_cn",
-			id.CommonName,
-			"client_cert_fingerprint",
-			id.Fingerprint,
+			"rejected anonymous call to destructive DatabaseService RPC",
+			"component", "bark",
+			"procedure", procedure,
 		)
 		return connect.NewError(
-			connect.CodePermissionDenied,
-			errOperatorPermissionDenied,
+			connect.CodeUnauthenticated,
+			errAnonymousDestructiveCall,
 		)
 	}
 	i.logger.Info(

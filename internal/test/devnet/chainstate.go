@@ -1,5 +1,3 @@
-//go:build linux
-
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,10 +16,10 @@
 // against a private Cardano DevNet consisting of Dingo and cardano-node
 // instances connected via Docker Compose.
 //
-// The chain-observation types in this file carry only the package-wide Linux
-// constraint, so the state machine driving the DevNet scenarios is covered by
-// an ordinary Linux `go test ./...` run without Docker. The pieces that dial
-// real nodes additionally require the `devnet` tag.
+// The chain-observation types in this file carry no build tag so the
+// state machine driving the DevNet scenarios is unit-tested on every
+// ordinary `go test ./...` run, without Docker. The pieces that dial real
+// nodes are gated behind the `devnet` tag.
 package devnet
 
 import (

@@ -17,7 +17,6 @@ package bark
 import (
 	"context"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -216,23 +215,6 @@ func (a *archiveServiceHandler) FetchBlock(
 	req *connect.Request[archive.FetchBlockRequest],
 ) (*connect.Response[archive.FetchBlockResponse], error) {
 	resp := &archive.FetchBlockResponse{}
-	blocks := req.Msg.GetBlocks()
-	if len(blocks) == 0 {
-		return nil, connect.NewError(
-			connect.CodeInvalidArgument,
-			errors.New("at least one block reference is required"),
-		)
-	}
-	if len(blocks) > DefaultMaxFetchBlockRefs {
-		return nil, connect.NewError(
-			connect.CodeResourceExhausted,
-			fmt.Errorf(
-				"block reference count %d exceeds maximum %d",
-				len(blocks),
-				DefaultMaxFetchBlockRefs,
-			),
-		)
-	}
 
 	// Validate the whole batch before acquiring the database, so a
 	// malformed request costs no storage work.
@@ -254,20 +236,8 @@ func (a *archiveServiceHandler) FetchBlock(
 	}
 	defer release()
 
-	// Height is the one identifier nothing is keyed by, so resolving one is
-	// a binary search bounded above by the highest indexed block. Reading
-	// that bound is a reverse iteration over the block-index prefix, and on
-	// s3 and gcs -- the only backends that sign URLs, so the only ones this
-	// handler is reachable on -- a reverse iterator lists every object under
-	// the prefix with no early break. ArchiveService is unauthenticated, so
-	// resolving the bound per reference let one anonymous request carrying
-	// DefaultMaxFetchBlockRefs height-only references cost that many
-	// full-bucket enumerations. Resolve it once for the batch, and only when
-	// the batch actually contains a reference that needs it: a batch of
-	// hash+slot references still touches no index at all.
-	var bound database.BlockNumberBound
-	if slices.ContainsFunc(refs, blockRefRequest.resolvesByHeight) {
-		bound, err = database.ResolveBlockNumberBound(db)
+	for _, b := range req.Msg.GetBlocks() {
+		hash, err := hex.DecodeString(b.GetHash())
 		if err != nil {
 			return nil, fmt.Errorf(
 				"failed resolving highest indexed block: %w",

@@ -247,9 +247,7 @@ WHERE credential_tag = 0 AND staking_key = ?`, key)
 
 // The same shape with the deregistration still in effect at the rollback slot
 // stays deregistered, and its delegation is cleared.
-func TestSnapshotAccountRollbackWithoutBaselineKeepsDeregistration(
-	t *testing.T,
-) {
+func TestSnapshotAccountRollbackWithoutBaselineKeepsDeregistration(t *testing.T) {
 	t.Parallel()
 	store := newManagementTestStore(t)
 	key := snapshotStakingKey(0x71)
@@ -330,12 +328,9 @@ func TestDeactivateAccountsClearsBaseline(t *testing.T) {
 	poolA := []byte{0xaa, 0xaa}
 	importSnapshotAccount(t, store, key, poolA, nil, 0, 100)
 
-	require.NoError(
-		t,
-		store.DeactivateAccounts(nil, []models.StakeCredentialRef{
-			models.NewStakeCredentialRef(0, key),
-		}),
-	)
+	require.NoError(t, store.DeactivateAccounts(nil, []models.StakeCredentialRef{
+		models.NewStakeCredentialRef(0, key),
+	}))
 	execAccountSQL(t, store, `
 UPDATE account SET added_slot = 200
 WHERE credential_tag = 0 AND staking_key = ?`, key)

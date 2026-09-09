@@ -178,12 +178,8 @@ func (ls *LedgerState) publishBlockEvent(
 		event.NewEvent(BlockEventType, evt),
 	); err != nil {
 		// ErrEventBusStopped is expected during teardown when the bus shuts
-		// down before LedgerState finishes draining its last events. An ordinary
-		// subscriber may also be detached after it stops draining; that is an
-		// isolated optional-consumer failure, not a reason to stop the node or
-		// report the block as unpublished to the lossless subscribers.
-		if errors.Is(err, event.ErrEventBusStopped) ||
-			errors.Is(err, event.ErrEventSubscriberStalled) {
+		// down before LedgerState finishes draining its last events.
+		if errors.Is(err, event.ErrEventBusStopped) {
 			return
 		}
 		publishErr := fmt.Errorf(

@@ -108,28 +108,10 @@ type BatchedTxIngestOpts struct {
 	// explicitly rather than assumed. Defaults to false here, preserving the
 	// unconditional write for any caller that does not opt in.
 	SkipWithdrawalWitnessWrite bool
-
-	// HistoricalBackfill records already-ledger-validated historical
-	// withdrawals without replaying account state over the imported snapshot.
-	// Live ledger ingestion leaves this false and enforces balance sufficiency.
-	HistoricalBackfill bool
 }
 
 type batchStatsSetter interface {
 	SetBackfillStats(*types.BackfillHotPathStats)
-}
-
-type transactionStoreHistoricalBackfill interface {
-	SetTransactionBatchedHistorical(
-		lcommon.Transaction,
-		ocommon.Point,
-		uint32,
-		map[int]uint64,
-		bool,
-		bool,
-		BatchAccumulator,
-		types.Txn,
-	) error
 }
 
 // inFlightProducerLookup is implemented by accumulators that index the
@@ -303,21 +285,10 @@ func (d *Database) SetTransactionBatchedWithOpts(
 	if setter, ok := acc.(batchStatsSetter); ok {
 		setter.SetBackfillStats(opts.Stats)
 	}
-	var metadataErr error
-	if store, ok := d.transactionStore().(transactionStoreHistoricalBackfill); ok {
-		metadataErr = store.SetTransactionBatchedHistorical(
-			tx, point, idx, certDeposits,
-			opts.SkipWithdrawalWitnessWrite,
-			opts.HistoricalBackfill,
-			acc, metadataTxn,
-		)
-	} else {
-		metadataErr = d.transactionStore().SetTransactionBatched(
-			tx, point, idx, certDeposits,
-			opts.SkipWithdrawalWitnessWrite, acc, metadataTxn,
-		)
-	}
-	if err := metadataErr; err != nil {
+	if err := d.transactionStore().SetTransactionBatched(
+		tx, point, idx, certDeposits,
+		opts.SkipWithdrawalWitnessWrite, acc, metadataTxn,
+	); err != nil {
 		return fmt.Errorf(
 			"set transaction metadata for tx %s (batch idx %d, slot %d): %w",
 			tx.Hash(), idx, point.Slot, err,

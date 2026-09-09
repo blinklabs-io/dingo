@@ -97,8 +97,7 @@ func (ls *LedgerState) applyIntraEraHardForkRule(
 			if total > math.MaxUint64-reserves {
 				return fmt.Errorf(
 					"AVVM reserve credit overflows uint64: reserves %d, credit %d",
-					reserves,
-					total,
+					reserves, total,
 				)
 			}
 			if err := ls.db.Metadata().SetNetworkState(

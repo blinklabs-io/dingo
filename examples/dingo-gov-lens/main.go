@@ -489,7 +489,7 @@ func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
 		serverError(w, r, "query commit timestamp", err)
 		return
 	}
-	writeJSON(w, ret)
+	writeJSON(w, http.StatusOK, ret)
 }
 
 func voteBackfillPending(
@@ -587,9 +587,6 @@ func (a *app) handleProposals(w http.ResponseWriter, r *http.Request) {
 	}
 	args = append(args, limit)
 
-	// Every element of `where` is a literal fragment or a generated $N
-	// placeholder, and all values bind through args.
-	//nolint:gosec // G202: no user input is concatenated into this query.
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT
 			gp.id,
@@ -667,7 +664,7 @@ func (a *app) handleProposals(w http.ResponseWriter, r *http.Request) {
 		serverError(w, r, "read proposals", err)
 		return
 	}
-	writeJSON(w, items)
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (a *app) handleProposalDetail(w http.ResponseWriter, r *http.Request) {
@@ -730,7 +727,7 @@ func (a *app) handleProposalDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	enrichProposal(&ret.Proposal, a.govtoolURL)
-	if parentTx.Valid && parentIdx.Valid && parentIdx.Int64 >= 0 {
+	if parentTx.Valid && parentIdx.Valid {
 		ret.Parent = &actionRef{
 			TxHash:      parentTx.String,
 			ActionIndex: uint64(parentIdx.Int64),
@@ -745,14 +742,14 @@ func (a *app) handleProposalDetail(w http.ResponseWriter, r *http.Request) {
 	ret.Votes = votes
 	ret.Summary = summary
 	ret.Proposal.Votes = summary
-	writeJSON(w, ret)
+	writeJSON(w, http.StatusOK, ret)
 }
 
 func (a *app) handleDreps(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	active := r.URL.Query().Get("active")
 	limit := boundedLimit(r.URL.Query().Get("limit"), 100, 250)
-	args := make([]any, 0, 1)
+	args := []any{}
 	where := []string{"1 = 1"}
 	switch active {
 	case "true":
@@ -778,9 +775,6 @@ func (a *app) handleDreps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	args = append(args, limit)
-	// Every element of `where` is a literal fragment or a generated $N
-	// placeholder, and all values bind through args.
-	//nolint:gosec // G202: no user input is concatenated into this query.
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT
 			encode(d.credential, 'hex'),
@@ -838,7 +832,7 @@ func (a *app) handleDreps(w http.ResponseWriter, r *http.Request) {
 		serverError(w, r, "read dreps", err)
 		return
 	}
-	writeJSON(w, items)
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (a *app) handleDrepDetail(w http.ResponseWriter, r *http.Request) {
@@ -935,7 +929,7 @@ func (a *app) handleDrepDetail(w http.ResponseWriter, r *http.Request) {
 		ret.DRep.ExpiryEpoch,
 		latestEpoch,
 	)
-	writeJSON(w, ret)
+	writeJSON(w, http.StatusOK, ret)
 }
 
 func (a *app) handleStakeLookup(w http.ResponseWriter, r *http.Request) {
@@ -1010,7 +1004,7 @@ func (a *app) handleStakeLookup(w http.ResponseWriter, r *http.Request) {
 		serverError(w, r, "query account withdrawals", err)
 		return
 	}
-	writeJSON(w, ret)
+	writeJSON(w, http.StatusOK, ret)
 }
 
 func (a *app) handleEpochs(w http.ResponseWriter, r *http.Request) {
@@ -1082,7 +1076,7 @@ func (a *app) handleEpochs(w http.ResponseWriter, r *http.Request) {
 		serverError(w, r, "read epochs", err)
 		return
 	}
-	writeJSON(w, items)
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (a *app) proposalVotes(
@@ -1647,25 +1641,10 @@ func voteName(v int64) string {
 	}
 }
 
-func writeJSON(w http.ResponseWriter, data any) {
+func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	// The status line is already sent, so a failed encode can only be
-	// reported, not turned into an error response.
-	if err := json.NewEncoder(w).Encode(data); err != nil {
-		log.Printf("encode JSON response: %v", err)
-	}
-}
-
-// sanitizeLogValue strips control characters from a request-controlled value
-// so it cannot inject line breaks and forge additional log records.
-func sanitizeLogValue(v string) string {
-	return strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return -1
-		}
-		return r
-	}, v)
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(data)
 }
 
 func serverError(
@@ -1674,16 +1653,7 @@ func serverError(
 	operation string,
 	err error,
 ) {
-	// gosec's taint analysis does not follow values through strings.Map, so
-	// it still reports the sanitized arguments as request-controlled.
-	//nolint:gosec // G706: both request values are sanitized above.
-	log.Printf(
-		"%q %q: %s: %v",
-		sanitizeLogValue(r.Method),
-		sanitizeLogValue(r.URL.Path),
-		operation,
-		err,
-	)
+	log.Printf("%s %s: %s: %v", r.Method, r.URL.Path, operation, err)
 	http.Error(w, "internal server error", http.StatusInternalServerError)
 }
 

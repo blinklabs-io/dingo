@@ -39,22 +39,6 @@ import (
 	"github.com/blinklabs-io/dingo/internal/tlsutil"
 )
 
-const (
-	// DefaultMaxRequestBody bounds each incoming Connect message before it is
-	// decoded or authenticated. Connect applies this per-message limit to both
-	// compressed wire bytes and the decompressed message.
-	DefaultMaxRequestBody = 1 << 20 // 1 MiB
-	// DefaultMaxResponseBody bounds each outgoing Connect message without
-	// imposing a whole-stream limit on StreamOperationProgress.
-	DefaultMaxResponseBody = 1 << 20 // 1 MiB
-	// DefaultMaxFetchBlockRefs bounds the storage/signing work and response
-	// growth driven by one anonymous ArchiveService request.
-	DefaultMaxFetchBlockRefs = 100
-	// DefaultRequestReadTimeout bounds request headers and bodies while leaving
-	// response writes unbounded for long-lived server streams.
-	DefaultRequestReadTimeout = 60 * time.Second
-)
-
 type Bark struct {
 	// mu protects server and listenerAddr, plus config.DB writes (ResumeDB
 	// takes it too). It must never be held across a blocking call whose
@@ -66,10 +50,6 @@ type Bark struct {
 	server       *http.Server
 	config       BarkConfig
 	listenerAddr net.Addr
-	// operatorFingerprints is immutable after construction. A verified client
-	// identity must also appear here before a destructive DatabaseService RPC
-	// is authorized.
-	operatorFingerprints map[string]struct{}
 	// dbGate guards config.DB across a live Restore/Truncate's close-and-
 	// replace window: PauseDB write-locks it before the old database is
 	// closed, ResumeDB publishes the replacement and unlocks it. Acquire
@@ -111,21 +91,14 @@ type BarkConfig struct {
 	// DeleteSnapshot, VerifySnapshot, Restore, Truncate, CancelOperation)
 	// refuse any request whose connection didn't present a certificate
 	// verified against this CA — see newOperatorAuthInterceptor in auth.go.
-	// ArchiveService remains public, but every DatabaseService RPC requires a
-	// verified certificate. Destructive DatabaseService RPCs additionally
-	// require a fingerprint in OperatorCertificateFingerprints. Requires
-	// TlsCertFilePath/TlsKeyFilePath to also be set, since mTLS has no meaning
-	// without the server's own TLS listener underneath it. Start (not NewBark)
-	// fails closed if Lifecycle is set without these policies.
+	// Read-only RPCs (status/catalog/Archive) never require one. Requires
+	// TlsCertFilePath/TlsKeyFilePath to also be set, since mTLS has no
+	// meaning without the server's own TLS listener underneath it. Start
+	// (not NewBark) fails closed if Lifecycle is set without this — see
+	// Start's doc comment for why the check lives there.
 	TlsClientCAFilePath string
-	// OperatorCertificateFingerprints is the explicit authorization policy for
-	// destructive DatabaseService calls. Values are SHA-256 fingerprints of
-	// client certificate DER bytes; hexadecimal values may contain colons and
-	// are matched case-insensitively. Read-only DatabaseService calls require a
-	// verified client certificate but do not require membership in this list.
-	OperatorCertificateFingerprints []string
-	Host                            string
-	Port                            uint
+	Host                string
+	Port                uint
 	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
 	// Empty disables CORS.
 	CORSAllowedOrigins []string
@@ -232,15 +205,6 @@ func NewBark(cfg BarkConfig) (*Bark, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
-	operatorFingerprints, err := normalizeOperatorCertificateFingerprints(
-		cfg.OperatorCertificateFingerprints,
-	)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"bark: invalid operator certificate fingerprint: %w",
-			err,
-		)
-	}
 	if cfg.Host == "" {
 		cfg.Host = "0.0.0.0"
 	}
@@ -248,8 +212,7 @@ func NewBark(cfg BarkConfig) (*Bark, error) {
 		cfg.Port = 9091
 	}
 	return &Bark{
-		config:               cfg,
-		operatorFingerprints: operatorFingerprints,
+		config: cfg,
 	}, nil
 }
 
@@ -290,42 +253,27 @@ func (b *Bark) Start(ctx context.Context) error {
 				"no meaning without the server's own TLS listener",
 		)
 	}
-	if b.config.Lifecycle != nil && len(b.operatorFingerprints) == 0 {
-		b.mu.Unlock()
-		return errors.New(
-			"bark: at least one OperatorCertificateFingerprint is required to " +
-				"start with lifecycle set — verified client identity alone does " +
-				"not authorize destructive DatabaseService RPCs",
-		)
-	}
 
 	mux := http.NewServeMux()
-	commonHandlerOptions := connect.WithOptions(
-		connect.WithCompressMinBytes(1024),
-		connect.WithReadMaxBytes(DefaultMaxRequestBody),
-		connect.WithSendMaxBytes(DefaultMaxResponseBody),
-	)
+	compress1KB := connect.WithCompressMinBytes(1024)
 
 	serviceNames := []string{archiveconnect.ArchiveServiceName}
 
 	archivePath, archiveHandler := archiveconnect.NewArchiveServiceHandler(
 		&archiveServiceHandler{bark: b},
-		commonHandlerOptions,
+		compress1KB,
 	)
 	mux.Handle(archivePath, archiveHandler)
 
 	if b.config.Lifecycle != nil {
 		databasePath, databaseHandler := databaseconnect.NewDatabaseServiceHandler(
 			newDatabaseServiceHandler(b),
-			connect.WithOptions(
-				commonHandlerOptions,
-				connect.WithInterceptors(newOperatorAuthInterceptor(
-					b.config.Logger,
-					destructiveDatabaseProcedures,
-					readOnlyDatabaseProcedures,
-					b.operatorFingerprints,
-				)),
-			),
+			compress1KB,
+			connect.WithInterceptors(newOperatorAuthInterceptor(
+				b.config.Logger,
+				destructiveDatabaseProcedures,
+				readOnlyDatabaseProcedures,
+			)),
 		)
 		mux.Handle(databasePath, databaseHandler)
 		serviceNames = append(serviceNames, databaseconnect.DatabaseServiceName)
@@ -334,13 +282,13 @@ func (b *Bark) Start(ctx context.Context) error {
 	mux.Handle(
 		grpchealth.NewHandler(
 			grpchealth.NewStaticChecker(serviceNames...),
-			commonHandlerOptions,
+			compress1KB,
 		),
 	)
 	mux.Handle(
 		grpcreflect.NewHandlerV1(
 			grpcreflect.NewStaticReflector(serviceNames...),
-			commonHandlerOptions,
+			compress1KB,
 		),
 	)
 
@@ -361,7 +309,6 @@ func (b *Bark) Start(ctx context.Context) error {
 			Addr:              listenAddr,
 			Handler:           handler,
 			ReadHeaderTimeout: 60 * time.Second,
-			ReadTimeout:       DefaultRequestReadTimeout,
 			IdleTimeout:       120 * time.Second,
 		}
 	} else {
@@ -373,7 +320,6 @@ func (b *Bark) Start(ctx context.Context) error {
 			Handler:           handler,
 			Protocols:         unencryptedHTTP2Protocols(),
 			ReadHeaderTimeout: 60 * time.Second,
-			ReadTimeout:       DefaultRequestReadTimeout,
 			IdleTimeout:       120 * time.Second,
 		}
 	}
@@ -481,10 +427,10 @@ func (b *Bark) startServer(server *http.Server) error {
 			}
 			server.TLSConfig.ClientCAs = pool
 			// VerifyClientCertIfGiven, not RequireAndVerifyClientCert: this
-			// listener also serves the public ArchiveService, which must keep
-			// working without a client certificate. Every DatabaseService
-			// procedure requires a verified identity, and destructive ones also
-			// require an allowed fingerprint; both checks are enforced per RPC by
+			// listener also serves read-only RPCs (status/catalog/Archive)
+			// that must keep working for a caller with no client cert at
+			// all. Only the destructive DatabaseService procedures actually
+			// require one — enforced per-request by
 			// newOperatorAuthInterceptor (auth.go), not at the handshake.
 			// Go's TLS stack still fully chain-verifies any cert that IS
 			// presented against ClientCAs during the handshake itself, so a

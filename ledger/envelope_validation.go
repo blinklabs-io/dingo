@@ -56,8 +56,7 @@ func envelopeParentFromTip(
 		slot:        slot,
 		blockNumber: blockNumber,
 		origin:      origin,
-		byronEbb: !origin && blockTypeLoaded &&
-			blockType == uint(gledger.BlockTypeByronEbb),
+		byronEbb:    !origin && blockTypeLoaded && blockType == uint(gledger.BlockTypeByronEbb),
 	}
 }
 

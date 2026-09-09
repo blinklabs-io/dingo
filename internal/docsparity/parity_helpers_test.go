@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -41,7 +40,7 @@ var contributorDocs = []string{
 	"ARCHITECTURE.md",
 	"DATABASE.md",
 	"GENESIS_SYNC.md",
-	"internal/test/devnet/README.md",
+	filepath.Join("internal", "test", "devnet", "README.md"),
 }
 
 // historicalDocs record past measurements or shipped releases. They describe
@@ -101,66 +100,29 @@ func filesMatching(
 	t.Helper()
 
 	var found []string
-	rootAbs, err := canonicalDiscoveryPath(root)
+	rootAbs, err := filepath.Abs(root)
 	if err != nil {
 		return filesMatchingWalk(t, root, match)
 	}
-	topLevel, err := exec.Command("git", "-C", root, "rev-parse", "--show-toplevel").
-		Output()
-	if err != nil ||
-		!sameDiscoveryRoot(rootAbs, strings.TrimSpace(string(topLevel))) {
-		return filesMatchingWalk(t, rootAbs, match)
+	topLevel, err := exec.Command("git", "-C", root, "rev-parse", "--show-toplevel").Output()
+	if err != nil || filepath.Clean(strings.TrimSpace(string(topLevel))) != filepath.Clean(rootAbs) {
+		return filesMatchingWalk(t, root, match)
 	}
 	cmd := exec.Command("git", "-C", root, "ls-files", "-z")
 	output, err := cmd.Output()
 	if err != nil {
-		return filesMatchingWalk(t, rootAbs, match)
+		return filesMatchingWalk(t, root, match)
 	}
 	for rel := range strings.SplitSeq(string(output), "\x00") {
 		if rel == "" {
 			continue
 		}
-		rel = normalizeDiscoveryPath(rel)
+		rel = filepath.FromSlash(rel)
 		if match(rel) {
 			found = append(found, rel)
 		}
 	}
 	return found
-}
-
-// canonicalDiscoveryPath resolves aliases and symlinks before comparing
-// repository roots. os.SameFile is used by sameDiscoveryRoot when possible,
-// which handles aliases whose spelling differs even after filepath.Clean.
-func canonicalDiscoveryPath(root string) (string, error) {
-	abs, err := filepath.Abs(root)
-	if err != nil {
-		return "", err
-	}
-	resolved, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Clean(resolved), nil
-}
-
-func sameDiscoveryRoot(canonicalRoot, gitRoot string) bool {
-	canonicalGitRoot, err := canonicalDiscoveryPath(gitRoot)
-	if err != nil {
-		return false
-	}
-	if rootInfo, err := os.Stat(canonicalRoot); err == nil {
-		if gitInfo, err := os.Stat(canonicalGitRoot); err == nil {
-			return os.SameFile(rootInfo, gitInfo)
-		}
-	}
-	// Windows paths are case-insensitive. EqualFold also makes the fallback
-	// comparison robust when Git and the process use different path casing.
-	left := filepath.ToSlash(filepath.Clean(canonicalRoot))
-	right := filepath.ToSlash(filepath.Clean(canonicalGitRoot))
-	if filepath.Separator == '\\' {
-		return strings.EqualFold(left, right)
-	}
-	return left == right
 }
 
 func filesMatchingWalk(
@@ -170,85 +132,36 @@ func filesMatchingWalk(
 ) []string {
 	t.Helper()
 
+	skippedDirs := map[string]bool{
+		".git":         true,
+		".worktrees":   true,
+		".tools":       true,
+		"node_modules": true,
+	}
 	var found []string
-	err := filepath.WalkDir(
-		root,
-		func(path string, entry os.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			rel, err := filepath.Rel(root, path)
-			if err != nil {
-				return err
-			}
-			rel = normalizeDiscoveryPath(rel)
-			if entry.IsDir() {
-				if isExcludedDiscoveryPath(rel) {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if isExcludedDiscoveryPath(rel) {
-				return nil
-			}
-			if match(rel) {
-				found = append(found, rel)
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if skippedDirs[entry.Name()] {
+				return filepath.SkipDir
 			}
 			return nil
-		},
-	)
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if match(rel) {
+			found = append(found, rel)
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatalf("walk %s: %v", root, err)
 	}
 	return found
-}
-
-// excludedDiscoveryRoots are generated or dependency trees that are not part
-// of a source checkout's documentation/configuration surface. They are
-// expressed with slash separators because repository-relative paths use Git's
-// format regardless of the host platform.
-var excludedDiscoveryRoots = []string{
-	".agents/worktrees",
-	".claude/worktrees",
-	".codex/worktrees",
-	".tools",
-	".worktrees",
-}
-
-// excludedDiscoveryDirectories are generic dependency and VCS directories
-// that may occur below any fallback-discovery root. Unlike generated worktree
-// roots, these must be excluded recursively at every path depth.
-var excludedDiscoveryDirectories = []string{
-	".git",
-	"node_modules",
-}
-
-// normalizeDiscoveryPath converts a repository-relative path to the stable
-// slash-separated form used by every discovery predicate. Replacing both
-// separators before path.Clean keeps synthetic Windows paths testable on Unix
-// and avoids filepath semantics changing the parity contract by host OS.
-func normalizeDiscoveryPath(rel string) string {
-	rel = strings.ReplaceAll(rel, `\`, "/")
-	rel = path.Clean(rel)
-	if rel == "." {
-		return ""
-	}
-	return strings.TrimPrefix(rel, "./")
-}
-
-func isExcludedDiscoveryPath(rel string) bool {
-	rel = normalizeDiscoveryPath(rel)
-	for component := range strings.SplitSeq(rel, "/") {
-		if slices.Contains(excludedDiscoveryDirectories, component) {
-			return true
-		}
-	}
-	for _, root := range excludedDiscoveryRoots {
-		if rel == root || strings.HasPrefix(rel, root+"/") {
-			return true
-		}
-	}
-	return false
 }
 
 // markdownFiles returns every non-historical markdown document in the tree.
@@ -260,7 +173,7 @@ func markdownFiles(t *testing.T, root string) []string {
 	})
 	kept := make([]string, 0, len(all))
 	for _, rel := range all {
-		if historicalDocs[path.Base(rel)] {
+		if historicalDocs[filepath.Base(rel)] {
 			continue
 		}
 		kept = append(kept, rel)
@@ -273,7 +186,7 @@ func dockerfiles(t *testing.T, root string) []string {
 	t.Helper()
 
 	return filesMatching(t, root, func(rel string) bool {
-		name := path.Base(rel)
+		name := filepath.Base(rel)
 		return name == "Dockerfile" || strings.HasPrefix(name, "Dockerfile.")
 	})
 }
@@ -285,44 +198,8 @@ func workflowFiles(t *testing.T, root string) []string {
 	return filesMatching(t, root, func(rel string) bool {
 		return (strings.HasSuffix(rel, ".yml") ||
 			strings.HasSuffix(rel, ".yaml")) &&
-			path.Dir(rel) == ".github/workflows"
+			filepath.Dir(rel) == filepath.Join(".github", "workflows")
 	})
-}
-
-func TestNormalizeDiscoveryPathIsPlatformIndependent(t *testing.T) {
-	tests := map[string]struct {
-		input    string
-		excluded bool
-	}{
-		"windows agent worktree": {
-			input:    `.codex\\worktrees\\scratch\\notes.md`,
-			excluded: true,
-		},
-		"unix agent worktree": {
-			input:    `.claude/worktrees/scratch/notes.md`,
-			excluded: true,
-		},
-		"similar name remains": {
-			input:    `.codex/worktree-notes/notes.md`,
-			excluded: false,
-		},
-		"tracked repository file": {
-			input:    `docs\\guide.md`,
-			excluded: false,
-		},
-	}
-	for name, tt := range tests {
-		t.Run(name, func(t *testing.T) {
-			if got := isExcludedDiscoveryPath(tt.input); got != tt.excluded {
-				t.Fatalf(
-					"isExcludedDiscoveryPath(%q) = %v, want %v",
-					tt.input,
-					got,
-					tt.excluded,
-				)
-			}
-		})
-	}
 }
 
 func TestDocumentationDiscoveryIgnoresUntrackedFiles(t *testing.T) {
@@ -334,22 +211,17 @@ func TestDocumentationDiscoveryIgnoresUntrackedFiles(t *testing.T) {
 	writeTestFile(t, root, ".github/workflows/tracked.yml")
 	writeTestFile(t, root, ".claude/worktrees/scratch/ignored.md")
 	writeTestFile(t, root, ".claude/worktrees/scratch/Dockerfile")
-	writeTestFile(t, root, ".codex/worktrees/tracked.md")
 	writeTestFile(t, root, ".github/workflows/ignored.yaml")
 	runGit(
 		t,
 		root,
 		"add",
-		".codex/worktrees/tracked.md",
 		"docs/tracked.md",
 		"Dockerfile",
 		".github/workflows/tracked.yml",
 	)
 
-	got, want := markdownFiles(t, root), []string{
-		".codex/worktrees/tracked.md",
-		"docs/tracked.md",
-	}
+	got, want := markdownFiles(t, root), []string{"docs/tracked.md"}
 	if !slices.Equal(got, want) {
 		t.Errorf("markdownFiles() = %v, want %v", got, want)
 	}
@@ -358,7 +230,7 @@ func TestDocumentationDiscoveryIgnoresUntrackedFiles(t *testing.T) {
 		t.Errorf("dockerfiles() = %v, want %v", got, want)
 	}
 	got, want = workflowFiles(t, root), []string{
-		".github/workflows/tracked.yml",
+		filepath.Join(".github", "workflows", "tracked.yml"),
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("workflowFiles() = %v, want %v", got, want)
@@ -368,153 +240,9 @@ func TestDocumentationDiscoveryIgnoresUntrackedFiles(t *testing.T) {
 	runGit(t, parent, "init")
 	nested := filepath.Join(parent, "nested")
 	writeTestFile(t, nested, "docs/archive.md")
-	writeTestFile(t, nested, "Dockerfile")
-	writeTestFile(t, nested, ".github/workflows/archive.yml")
-	writeTestFile(t, nested, ".claude/worktrees/scratch/ignored.md")
-	writeTestFile(t, nested, ".claude/worktrees/scratch/Dockerfile")
-	writeTestFile(
-		t,
-		nested,
-		".codex/worktrees/scratch/.github/workflows/ignored.yml",
-	)
 	got, want = markdownFiles(t, nested), []string{"docs/archive.md"}
 	if !slices.Equal(got, want) {
 		t.Errorf("nested markdownFiles() = %v, want %v", got, want)
-	}
-	got, want = dockerfiles(t, nested), []string{"Dockerfile"}
-	if !slices.Equal(got, want) {
-		t.Errorf("nested dockerfiles() = %v, want %v", got, want)
-	}
-	got, want = workflowFiles(
-		t,
-		nested,
-	), []string{
-		".github/workflows/archive.yml",
-	}
-	if !slices.Equal(got, want) {
-		t.Errorf("nested workflowFiles() = %v, want %v", got, want)
-	}
-
-	archive := t.TempDir()
-	writeTestFile(t, archive, "docs/tracked.md")
-	writeTestFile(t, archive, ".claude/worktrees/scratch/ignored.md")
-	writeTestFile(t, archive, ".codex/worktrees/scratch/ignored.md")
-	writeTestFile(t, archive, ".codex/worktrees/scratch/Dockerfile")
-	writeTestFile(
-		t,
-		archive,
-		".codex/worktrees/scratch/.github/workflows/ignored.yml",
-	)
-	writeTestFile(t, archive, ".agents/worktrees/scratch/ignored.md")
-	writeTestFile(t, archive, ".worktrees/scratch/ignored.md")
-	writeTestFile(t, archive, ".tools/scratch/ignored.md")
-	writeTestFile(t, archive, "vendor/project/.git/config")
-	writeTestFile(t, archive, "vendor/project/.git/README.md")
-	writeTestFile(t, archive, "vendor/project/node_modules/pkg/README.md")
-	writeTestFile(t, archive, "vendor/project/node_modules/pkg/Dockerfile")
-	got, want = markdownFiles(t, archive), []string{"docs/tracked.md"}
-	if !slices.Equal(got, want) {
-		t.Errorf("archive markdownFiles() = %v, want %v", got, want)
-	}
-	got, want = dockerfiles(t, archive), []string{}
-	if !slices.Equal(got, want) {
-		t.Errorf("archive dockerfiles() = %v, want %v", got, want)
-	}
-
-	// Use a matcher broader than workflowFiles so the fallback walk reaches a
-	// workflow nested inside a generated worktree. The parent implementation
-	// walked this path and returned it because it did not exclude .codex.
-	got, want = filesMatching(t, archive, func(rel string) bool {
-		return strings.HasSuffix(rel, "/.github/workflows/ignored.yml")
-	}), []string{}
-	if !slices.Equal(got, want) {
-		t.Errorf("archive nested workflow files = %v, want %v", got, want)
-	}
-}
-
-func TestDocumentationDiscoveryRecognizesAliasedRepositoryRoot(t *testing.T) {
-	root := t.TempDir()
-	runGit(t, root, "init")
-	writeTestFile(t, root, "docs/tracked.md")
-	writeTestFile(t, root, ".github/workflows/tracked.yml")
-	writeTestFile(t, root, "Dockerfile")
-	writeTestFile(t, root, ".codex/worktrees/ignored.md")
-	writeTestFile(t, root, "untracked.md")
-	writeTestFile(t, root, ".github/workflows/untracked.yaml")
-	writeTestFile(
-		t,
-		root,
-		".codex/worktrees/scratch/.github/workflows/ignored.yml",
-	)
-	runGit(
-		t,
-		root,
-		"add",
-		"docs/tracked.md",
-		".github/workflows/tracked.yml",
-		"Dockerfile",
-	)
-
-	alias := filepath.Join(t.TempDir(), "repo-alias")
-	if err := os.Symlink(root, alias); err != nil {
-		t.Skipf("directory symlinks unavailable: %v", err)
-	}
-
-	if got, want := markdownFiles(t, alias), []string{"docs/tracked.md"}; !slices.Equal(
-		got,
-		want,
-	) {
-		t.Errorf("aliased markdownFiles() = %v, want %v", got, want)
-	}
-	if got, want := dockerfiles(t, alias), []string{"Dockerfile"}; !slices.Equal(
-		got,
-		want,
-	) {
-		t.Errorf("aliased dockerfiles() = %v, want %v", got, want)
-	}
-	if got, want := workflowFiles(t, alias), []string{".github/workflows/tracked.yml"}; !slices.Equal(
-		got,
-		want,
-	) {
-		t.Errorf("aliased workflowFiles() = %v, want %v", got, want)
-	}
-}
-
-func TestDocumentationDiscoveryFollowsAliasedSourceArchive(t *testing.T) {
-	archive := t.TempDir()
-	writeTestFile(t, archive, "docs/source.md")
-	writeTestFile(t, archive, "Dockerfile")
-	writeTestFile(t, archive, ".github/workflows/source.yml")
-	writeTestFile(t, archive, ".codex/worktrees/scratch/ignored.md")
-	writeTestFile(t, archive, ".codex/worktrees/scratch/Dockerfile")
-	writeTestFile(
-		t,
-		archive,
-		".codex/worktrees/scratch/.github/workflows/ignored.yml",
-	)
-
-	alias := filepath.Join(t.TempDir(), "archive-alias")
-	if err := os.Symlink(archive, alias); err != nil {
-		t.Skipf("directory symlinks unavailable: %v", err)
-	}
-
-	if got, want := markdownFiles(t, alias), []string{"docs/source.md"}; !slices.Equal(
-		got,
-		want,
-	) {
-		t.Errorf("aliased archive markdownFiles() = %v, want %v", got, want)
-	}
-	if got, want := dockerfiles(t, alias), []string{"Dockerfile"}; !slices.Equal(
-		got,
-		want,
-	) {
-		t.Errorf("aliased archive dockerfiles() = %v, want %v", got, want)
-	}
-	if got, want := workflowFiles(t, alias), []string{".github/workflows/source.yml"}; !slices.Equal(
-		got,
-		want,
-	) {
-		t.Errorf("aliased archive workflowFiles() = %v, want %v", got, want)
 	}
 }
 
