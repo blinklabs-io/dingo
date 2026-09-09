@@ -59,7 +59,7 @@ func TestNtCConnectionCloseDoesNotPublishPeerEvent(t *testing.T) {
 
 	require.True(
 		t,
-		cm.addNtCConnectionWithIPKey(conn, true, "127.0.0.1:3002", ""),
+		cm.addConnectionImpl(conn, true, true, "127.0.0.1:3002", "", nil),
 	)
 
 	conn.ErrorChan() <- errors.New("ntc connection closed")
@@ -105,7 +105,7 @@ func TestNtCConnectionCloseStillRemovesConnection(t *testing.T) {
 
 	require.True(
 		t,
-		cm.addNtCConnectionWithIPKey(conn, true, "127.0.0.1:3002", ""),
+		cm.addConnectionImpl(conn, true, true, "127.0.0.1:3002", "", nil),
 	)
 	require.NotNil(t, cm.GetConnectionById(conn.Id()))
 

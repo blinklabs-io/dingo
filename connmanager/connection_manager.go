@@ -696,15 +696,6 @@ func (c *ConnectionManager) addConnectionWithIPKey(
 	return c.addConnectionImpl(conn, isInbound, false, peerAddr, ipKey, nil)
 }
 
-func (c *ConnectionManager) addNtCConnectionWithIPKey(
-	conn *ouroboros.Connection,
-	isInbound bool,
-	peerAddr string,
-	ipKey string,
-) bool {
-	return c.addConnectionImpl(conn, isInbound, true, peerAddr, ipKey, nil)
-}
-
 func (c *ConnectionManager) addConnectionImpl(
 	conn *ouroboros.Connection,
 	isInbound bool,
