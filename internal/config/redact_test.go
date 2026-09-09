@@ -17,6 +17,7 @@ package config
 import (
 	"bytes"
 	"log/slog"
+	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -24,6 +25,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/stretchr/testify/require"
 )
 
 // configLeafFieldPaths returns the dotted Go field path of every exported
@@ -378,8 +381,7 @@ func TestRedactURICredentials(t *testing.T) {
 		{
 			name: "ambiguous unquoted dsn keeps query-shaped suffix secret",
 			in:   "password=secret?network=preview&apiKey=key",
-			want: "password=" + redactedPlaceholder +
-				"?network=preview&apiKey=" + redactedPlaceholder,
+			want: "password=" + redactedPlaceholder,
 		},
 		{
 			name: "unquoted dsn retains whitespace-delimited database",
@@ -543,6 +545,35 @@ func TestRedactURICredentials(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRedactKeywordDSNMatchesPgxValueBoundary(t *testing.T) {
+	const dsn = "host=localhost user=dingo dbname=dingo sslmode=disable " +
+		"connect_timeout=5 password=secret?network=preview&apiKey=key"
+
+	for _, name := range []string{
+		"PGSERVICE", "PGSERVICEFILE", "PGPASSFILE", "PGTARGETSESSIONATTRS",
+		"PGSSLMODE", "PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGOPTIONS",
+		"PGCONNECT_TIMEOUT",
+	} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("PGSERVICEFILE", os.DevNull)
+	t.Setenv("PGPASSFILE", os.DevNull)
+	parsed, err := pgconn.ParseConfig(dsn)
+	require.NoError(t, err)
+	require.Equal(t, "secret?network=preview&apiKey=key", parsed.Password)
+	require.Equal(
+		t,
+		"host=localhost user=dingo dbname=dingo sslmode=disable "+
+			"connect_timeout=5 password="+redactedPlaceholder,
+		redactURICredentials(dsn),
+	)
+	require.Equal(
+		t,
+		"path=value?network=preview&apiKey="+redactedPlaceholder,
+		redactURICredentials("path=value?network=preview&apiKey=key"),
+	)
 }
 
 // TestProviderConfigUnknownKeyIsRedacted pins the fail-safe default for a
