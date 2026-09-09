@@ -47,6 +47,8 @@ func freshUnrecoverableConnId(port int) ouroboros.ConnectionId {
 // The point-keyed unrecoverableRollbacks tracker must accumulate instead, so
 // the stuck condition is eventually recognised.
 func TestUnrecoverableRollbackTrackerSurvivesResyncReset(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -116,6 +118,8 @@ func TestUnrecoverableRollbackTrackerSurvivesResyncReset(t *testing.T) {
 // condition is surfaced via the dedicated metric instead of only the
 // per-attempt WARN that otherwise loops forever.
 func TestReportUnrecoverableRollbackSurfacesOperatorSignal(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),

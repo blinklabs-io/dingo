@@ -38,6 +38,8 @@ func newSettingsTestDB(
 }
 
 func TestNodeSettingsPersistence(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 
 	// First open: persists settings
@@ -58,6 +60,8 @@ func TestNodeSettingsPersistence(t *testing.T) {
 }
 
 func TestNodeSettingsRejectStorageModeChange(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 
 	db, err := newSettingsTestDB(t, dataDir, "core", "preview")
@@ -77,6 +81,8 @@ func TestNodeSettingsRejectStorageModeChange(t *testing.T) {
 }
 
 func TestNodeSettingsRejectNetworkChange(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 
 	db, err := newSettingsTestDB(t, dataDir, "core", "preview")
@@ -96,6 +102,8 @@ func TestNodeSettingsRejectNetworkChange(t *testing.T) {
 }
 
 func TestNodeSettingsAllowOpenWithoutConfiguredNetwork(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 
 	db, err := newSettingsTestDB(t, dataDir, "core", "preview")
@@ -108,6 +116,8 @@ func TestNodeSettingsAllowOpenWithoutConfiguredNetwork(t *testing.T) {
 }
 
 func TestNodeSettingsAllowDeferredNetworkInitialization(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 
 	db, err := newSettingsTestDB(t, dataDir, "core", "")
@@ -132,6 +142,8 @@ func TestNodeSettingsAllowDeferredNetworkInitialization(t *testing.T) {
 }
 
 func TestNodeSettingsRejectStorageModeChangeWhenNetworkUnset(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 
 	db, err := newSettingsTestDB(t, dataDir, "core", "")
@@ -150,6 +162,8 @@ func TestNodeSettingsRejectStorageModeChangeWhenNetworkUnset(t *testing.T) {
 }
 
 func TestNodeSettingsRejectBothChanged(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 
 	db, err := newSettingsTestDB(t, dataDir, "core", "preview")
@@ -168,6 +182,8 @@ func TestNodeSettingsRejectBothChanged(t *testing.T) {
 }
 
 func TestNodeSettingsAPIMode(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 
 	// First open with "api" + "mainnet"
@@ -194,6 +210,8 @@ func TestNodeSettingsAPIMode(t *testing.T) {
 }
 
 func TestNodeSettingsMetadataSetDoesNotOverwrite(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 
 	db, err := newSettingsTestDB(t, dataDir, "core", "preview")

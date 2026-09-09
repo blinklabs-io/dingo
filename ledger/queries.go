@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
@@ -33,9 +34,9 @@ import (
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
-// MaxLocalStateQueryItems bounds caller-controlled collections on query paths
-// that perform database work for each requested item. Explicit over-limit
-// filters are rejected before database access.
+// MaxLocalStateQueryItems bounds caller-controlled credential filters on query
+// paths that perform per-item work or build account maps from batched reads.
+// Explicit over-limit filters are rejected before database access.
 const MaxLocalStateQueryItems = 1000
 
 // ErrLocalStateQueryLimitExceeded identifies a LocalStateQuery request whose
@@ -1238,7 +1239,11 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 	if len(addrs) == 0 {
 		return []any{ret}, nil
 	}
-	utxos, err := ls.db.UtxosByAddress(addrs, nil)
+	utxos, err := ls.db.UtxosByAddress(
+		addrs,
+		database.MaxUtxosByAddressResults,
+		nil,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1275,6 +1280,12 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 	creds []olocalstatequery.StakeCredential,
 ) (any, error) {
+	if err := checkLocalStateQueryItemLimit(
+		"GetFilteredDelegationsAndRewardAccounts",
+		len(creds),
+	); err != nil {
+		return nil, err
+	}
 	delegations := make(map[olocalstatequery.StakeCredential]ledger.Blake2b224)
 	rewards := make(map[olocalstatequery.StakeCredential]uint64)
 	if len(creds) == 0 {
@@ -1375,6 +1386,12 @@ func (ls *LedgerState) queryShelleyStakeDelegDeposits(
 func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
 	creds []lcommon.Credential,
 ) (any, error) {
+	if err := checkLocalStateQueryItemLimit(
+		"GetFilteredVoteDelegatees",
+		len(creds),
+	); err != nil {
+		return nil, err
+	}
 	ret := make(olocalstatequery.FilteredVoteDelegateesResult)
 	refs := make([]models.StakeCredentialRef, 0, len(creds))
 	// Carried alongside creds so the second loop can reuse the tag each

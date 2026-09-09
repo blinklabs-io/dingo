@@ -159,6 +159,8 @@ func (p *startupLeiosReplayProvider) recover() {
 // returning nil, which is what lets committee formation and certification
 // proceed.
 func TestLeiosCommitteeParamsFromPParamsDefaultsWhenBothUnset(t *testing.T) {
+	t.Parallel()
+
 	pp := &gdijkstra.DijkstraProtocolParameters{}
 	sigmaC, tau, err := leiosCommitteeParamsFromPParams(pp)
 	require.NoError(t, err)
@@ -172,6 +174,8 @@ func TestLeiosCommitteeParamsFromPParamsDefaultsWhenBothUnset(t *testing.T) {
 // configured tau is preserved while an unset sigma_c falls back to its
 // default (tau=1/2 < default sigma_c=0.99 holds).
 func TestLeiosCommitteeParamsFromPParamsDefaultsMissingCoverage(t *testing.T) {
+	t.Parallel()
+
 	pp := &gdijkstra.DijkstraProtocolParameters{
 		QuorumStakeThreshold: &cbor.Rat{Rat: big.NewRat(1, 2)},
 	}
@@ -187,6 +191,8 @@ func TestLeiosCommitteeParamsFromPParamsDefaultsMissingCoverage(t *testing.T) {
 // configured sigma_c is preserved while an unset tau falls back to its
 // default (default tau=0.75 < sigma_c=0.99 holds).
 func TestLeiosCommitteeParamsFromPParamsDefaultsMissingQuorum(t *testing.T) {
+	t.Parallel()
+
 	pp := &gdijkstra.DijkstraProtocolParameters{
 		CommitteeStakeCoverage: &cbor.Rat{Rat: big.NewRat(99, 100)},
 	}
@@ -204,6 +210,8 @@ func TestLeiosCommitteeParamsFromPParamsDefaultsMissingQuorum(t *testing.T) {
 func TestLeiosCommitteeParamsFromPParamsReturnsBothWhenConfigured(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pp := &gdijkstra.DijkstraProtocolParameters{
 		CommitteeStakeCoverage: &cbor.Rat{Rat: big.NewRat(95, 100)},
 		QuorumStakeThreshold:   &cbor.Rat{Rat: big.NewRat(3, 5)},
@@ -221,6 +229,8 @@ func TestLeiosCommitteeParamsFromPParamsReturnsBothWhenConfigured(
 func TestLeiosCommitteeParamsFromPParamsRejectsInvariantViolation(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pp := &gdijkstra.DijkstraProtocolParameters{
 		CommitteeStakeCoverage: &cbor.Rat{Rat: big.NewRat(3, 4)},
 		QuorumStakeThreshold:   &cbor.Rat{Rat: big.NewRat(3, 4)},
@@ -235,6 +245,8 @@ func TestLeiosCommitteeParamsFromPParamsRejectsInvariantViolation(
 func TestLeiosCommitteeParamsFromPParamsRejectsDefaultInvariantViolation(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pp := &gdijkstra.DijkstraProtocolParameters{
 		CommitteeStakeCoverage: &cbor.Rat{Rat: big.NewRat(1, 2)},
 	}
@@ -243,6 +255,8 @@ func TestLeiosCommitteeParamsFromPParamsRejectsDefaultInvariantViolation(
 }
 
 func TestEnableLeiosVotingDefersUntilOnChainKeyAvailable(t *testing.T) {
+	t.Parallel()
+
 	vrfPath, kesPath, opcertPath := devnetCredPaths(t)
 	creds := forging.NewPoolCredentials()
 	require.NoError(
@@ -302,6 +316,8 @@ func TestEnableLeiosVotingDefersUntilOnChainKeyAvailable(t *testing.T) {
 }
 
 func TestEnableLeiosVotingReportsSupersededConfiguration(t *testing.T) {
+	t.Parallel()
+
 	vrfPath, kesPath, opcertPath := devnetCredPaths(t)
 	creds := forging.NewPoolCredentials()
 	require.NoError(
@@ -387,6 +403,8 @@ func TestEnableLeiosVotingReportsSupersededConfiguration(t *testing.T) {
 }
 
 func TestEnableLeiosVotingRetriesFailedImmediateReplay(t *testing.T) {
+	t.Parallel()
+
 	vrfPath, kesPath, opcertPath := devnetCredPaths(t)
 	creds := forging.NewPoolCredentials()
 	require.NoError(
@@ -514,6 +532,8 @@ func TestEnableLeiosVotingRetriesFailedImmediateReplay(t *testing.T) {
 func TestInitLeiosVoteManagerUnsubscribesAcrossLiveLifecycleCycles(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	n, _ := newLiveLifecycleTestNode(t, 1)
 
 	const cycles = 3

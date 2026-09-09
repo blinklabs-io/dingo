@@ -293,7 +293,7 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 				"fatal ledger error, initiating shutdown",
 				"error", err,
 			)
-			n.cancel()
+			n.cancelForFatal(err)
 		},
 	}
 }

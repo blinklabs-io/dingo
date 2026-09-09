@@ -27,6 +27,8 @@ import (
 )
 
 func TestPeerSharingConfigSetsLocalDisabledFromNodeConfig(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name              string
 		peerSharing       bool
@@ -63,6 +65,8 @@ func TestPeerSharingConfigSetsLocalDisabledFromNodeConfig(t *testing.T) {
 // are skipped without consuming the requested reply count and that every
 // returned peer has a valid IP address and port.
 func TestPeerSharingShareRequestBoundsValidPeers(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	peerGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
 		Logger:          logger,
@@ -159,6 +163,8 @@ func TestPeerSharingShareRequestBoundsValidPeers(t *testing.T) {
 // whose relative order would silently decide which callback answers
 // incoming ShareRequest messages.
 func TestPeerSharingConfigRegistersShareRequestFuncOnce(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	peerGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
 		Logger:          logger,
@@ -184,6 +190,8 @@ func TestPeerSharingConfigRegistersShareRequestFuncOnce(t *testing.T) {
 // TestPeerSharingShareRequestWithoutGovernor verifies that peer sharing is
 // safe during startup before the peer governor has been wired.
 func TestPeerSharingShareRequestWithoutGovernor(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{})
 
 	peers, err := o.peersharingShareRequest(
@@ -207,6 +215,8 @@ func mkPeerAddr(ip string, port uint16) opeersharing.PeerAddress {
 // batch of peer-governor candidates, each of which costs a DNS resolution and
 // a linear dedup scan in peergov.AddPeer.
 func TestPeerSharingReplyBoundsRequestedCount(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{})
 
 	// A reply far larger than any request we make.
@@ -284,6 +294,8 @@ func TestPeerSharingReplyBoundsRequestedCount(t *testing.T) {
 // pairs the rejected entry with a valid public IPv4 and IPv6 control, so a
 // helper that rejected everything could not pass.
 func TestPeerSharingReplyRejectsAddressClasses(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{})
 
 	const (
@@ -353,6 +365,8 @@ func TestPeerSharingReplyRejectsAddressClasses(t *testing.T) {
 // parse as an IP as a routable hostname, so a malformed entry rendered as
 // "<nil>:3001" would be accepted there and then sent to a DNS lookup.
 func TestPeerSharingReplyEmitsResolvableLiterals(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{})
 
 	reply := []opeersharing.PeerAddress{

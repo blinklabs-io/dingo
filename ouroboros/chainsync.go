@@ -909,6 +909,11 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	) {
 		return nil
 	}
+	if o.chainsyncState != nil && !o.chainsyncState.UpdateClientRollback(
+		ctx.ConnectionId, point, tip,
+	) {
+		return nil
+	}
 	// Observe the rollback for chain selection FIRST — it trims the peer's
 	// observed frontier (ApplyRollback), which can change its corroboration
 	// status, so the apply gate below must reflect it. If the hook handles it
@@ -1796,12 +1801,17 @@ func (o *Ouroboros) instrumentChainsyncRollBackward(
 func (o *Ouroboros) decodeChainsyncHeader(
 	blockType uint,
 	raw []byte,
-) (gledger.BlockHeader, error) {
+) (header gledger.BlockHeader, err error) {
+	defer func() {
+		if err == nil && header != nil {
+			header.Hash()
+		}
+	}()
 	if o.config.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic &&
 		blockType == gledger.BlockTypeConway {
 		return gdijkstra.NewDijkstraBlockHeaderFromCbor(raw)
 	}
-	header, err := gledger.NewBlockHeaderFromCbor(blockType, raw)
+	header, err = gledger.NewBlockHeaderFromCbor(blockType, raw)
 	if err == nil || blockType != gledger.BlockTypeByronEbb {
 		return header, err
 	}

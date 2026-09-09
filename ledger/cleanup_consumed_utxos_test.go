@@ -101,6 +101,8 @@ func newLedgerStateForCleanup(
 // retention test below could pass by accident if the cleanup loop were
 // silently dead for both modes.
 func TestCleanupConsumedUtxos_CoreModePrunes(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDBForCleanup(t, types.StorageModeCore)
 	txId := bytes.Repeat([]byte{0xA1}, 32)
 	const (
@@ -127,6 +129,8 @@ func TestCleanupConsumedUtxos_CoreModePrunes(t *testing.T) {
 }
 
 func TestCleanupConsumedUtxos_ProcessesOneBoundedBatch(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDBForCleanup(t, types.StorageModeCore)
 	mdTxn := db.MetadataTxn(true)
 	require.NoError(t, mdTxn.Do(func(txn *database.Txn) error {
@@ -168,6 +172,8 @@ func TestCleanupConsumedUtxos_ProcessesOneBoundedBatch(t *testing.T) {
 }
 
 func TestCleanupConsumedUtxos_DefersDuringCatchup(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDBForCleanup(t, types.StorageModeCore)
 	txId := bytes.Repeat([]byte{0xA3}, 32)
 	const (
@@ -196,6 +202,8 @@ func TestCleanupConsumedUtxos_DefersDuringCatchup(t *testing.T) {
 // no error, no crash. Cleanup ran off the local tip alone before the deferral
 // existed, so that is the behavior an unknown upstream tip falls back to.
 func TestCleanupConsumedUtxos_RunsWithoutKnownUpstreamTip(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDBForCleanup(t, types.StorageModeCore)
 	txId := bytes.Repeat([]byte{0xB4}, 32)
 	const (
@@ -231,6 +239,8 @@ func TestCleanupConsumedUtxos_RunsWithoutKnownUpstreamTip(t *testing.T) {
 // can resolve input / collateral / reference-input associations via
 // spent_at_tx_id, collateral_by_tx_id, and referenced_by_tx_id.
 func TestCleanupConsumedUtxos_APIModeRetains(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDBForCleanup(t, types.StorageModeAPI)
 	txId := bytes.Repeat([]byte{0xA2}, 32)
 	const (

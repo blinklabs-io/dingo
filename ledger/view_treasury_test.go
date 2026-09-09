@@ -51,6 +51,8 @@ func requireTreasuryValue(
 }
 
 func TestLedgerViewTreasuryValueReadsValidationTransaction(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newTreasuryViewTestLedger(t, "")
 	require.NoError(t, db.Metadata().SetNetworkState(100, 900, 10, nil))
 	requireTreasuryValue(t, ls, nil, 100)
@@ -72,6 +74,8 @@ func TestLedgerViewTreasuryValueReadsValidationTransaction(t *testing.T) {
 }
 
 func TestLedgerViewTreasuryValueTracksChainRollback(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newTreasuryViewTestLedger(t, "")
 	require.NoError(t, db.Metadata().SetNetworkState(100, 900, 10, nil))
 	require.NoError(t, db.Metadata().SetNetworkState(60, 900, 20, nil))
@@ -95,6 +99,8 @@ func TestLedgerViewTreasuryValueTracksChainRollback(t *testing.T) {
 }
 
 func TestLedgerViewTreasuryValueSurvivesRestart(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	ls, db := newTreasuryViewTestLedger(t, dataDir)
 	require.NoError(t, db.Metadata().SetNetworkState(777, 223, 42, nil))
@@ -107,6 +113,8 @@ func TestLedgerViewTreasuryValueSurvivesRestart(t *testing.T) {
 }
 
 func TestLedgerViewTreasuryValueReadsMithrilBootstrapState(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newTreasuryViewTestLedger(t, "")
 	paramsData, err := cbor.Encode(mithrilRewardConwayPParams())
 	require.NoError(t, err)
@@ -145,6 +153,8 @@ func TestLedgerViewTreasuryValueReadsMithrilBootstrapState(t *testing.T) {
 }
 
 func TestLedgerViewTreasuryValueFailsClosedWithoutNetworkState(t *testing.T) {
+	t.Parallel()
+
 	ls, _ := newTreasuryViewTestLedger(t, "")
 	value, err := ls.NewView(nil).TreasuryValue()
 	require.ErrorContains(t, err, "network state is unavailable")
@@ -152,6 +162,8 @@ func TestLedgerViewTreasuryValueFailsClosedWithoutNetworkState(t *testing.T) {
 }
 
 func TestLedgerViewTreasuryValuePropagatesStorageErrors(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newTreasuryViewTestLedger(t, t.TempDir())
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)

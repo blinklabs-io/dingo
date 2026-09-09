@@ -37,6 +37,8 @@ import (
 // TestUtxoStorageAndRetrieval tests that UTxOs from regular blocks are stored
 // and retrieved correctly using the offset-based storage system.
 func TestUtxoStorageAndRetrieval(t *testing.T) {
+	t.Parallel()
+
 	// Create temp directory for database
 	tmpDir, err := os.MkdirTemp("", "utxo_storage_test")
 	require.NoError(t, err)
@@ -523,6 +525,8 @@ func tryStoreBlockFirstTx(
 // TestUtxoByRefAfterSetTransaction verifies that UtxoByRef works immediately
 // after SetTransaction within the same transaction.
 func TestUtxoByRefAfterSetTransaction(t *testing.T) {
+	t.Parallel()
+
 	db := newUtxoStorageTestDB(t)
 	iter := newUtxoStorageTestIterator(t)
 	block, blockCbor := nextProducingBlock(t, db, iter)
@@ -562,6 +566,8 @@ func TestUtxoByRefAfterSetTransaction(t *testing.T) {
 // that doesn't correspond to any live UTxO rather than erroring the whole
 // batch (see #392).
 func TestUtxosByRefsAfterSetTransaction(t *testing.T) {
+	t.Parallel()
+
 	db := newUtxoStorageTestDB(t)
 	iter := newUtxoStorageTestIterator(t)
 	block, blockCbor := nextProducingBlock(t, db, iter)
@@ -618,6 +624,8 @@ func TestUtxosByRefsAfterSetTransaction(t *testing.T) {
 }
 
 func TestUtxoByRefRecoversMissingBlobFromProducerBlock(t *testing.T) {
+	t.Parallel()
+
 	for _, deleteTxBlob := range []bool{false, true} {
 		t.Run(
 			fmt.Sprintf("delete_tx_blob=%t", deleteTxBlob),
