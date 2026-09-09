@@ -1224,7 +1224,16 @@ completes or has unwound its LIFO rollback stack. Normal shutdown takes the
 same gate before its phase-ordered teardown begins. A SIGINT/SIGTERM received
 while components are still starting can therefore cancel startup without
 letting `Node.Stop` concurrently close a partially initialized component; the
-normal shutdown waits until rollback has finished.
+normal shutdown waits until rollback has finished. Shutdown cancels the node
+context before waiting for the live-lifecycle and snapshot gates, then takes
+those gates in that order, matching `Restore` and `Truncate`, before closing
+storage. A stop request that arrives during either operation therefore gives
+the operation a chance to unwind without racing its storage teardown. The
+configured shutdown timeout is one absolute deadline shared by gate waits and
+phase-ordered teardown. If a lifecycle gate still has not been released when
+that deadline expires, `Node.Stop` returns the gate timeout after cancellation;
+that failure remains retryable so a later stop can acquire the gates and finish
+teardown once the live operation releases them.
 
 The ledger fatal-error callback records its cause before cancelling the node.
 `Node.Run` returns that cause on normal shutdown and cancellation-shaped startup
@@ -4044,6 +4053,14 @@ unreachable even once is almost certainly dead and endless redials to it waste
 dial capacity; local-root and bootstrap peers, and any peer that has connected
 at least once, keep retrying, and the drop is suppressed while the node has no
 eligible upstream so its last leads back onto the network are never discarded.
+
+Peer sharing is an address-validation boundary in both directions. The server
+callback exports only sharable, nonzero-port IP literals accepted by the shared
+peer-governor routability policy; operator-configured private peers remain
+usable locally but are not advertised. A received reply is capped to the
+requested count and is rechecked for valid, routable, non-reserved IP and port
+values before it reaches peer admission, so malformed or internal targets do
+not trigger DNS or outbound dialing.
 
 Ledger-peer discovery is demand-driven so the pool never collapses in the
 first place. While the node has fewer chain-selection-eligible upstreams than
@@ -7331,17 +7348,19 @@ every one of #3097's own tests passes unmodified.
   them and only re-fetches whatever never completed, instead of redoing the
   whole epoch from scratch. Once every chunk in the current plan is
   checkpointed, `Cache.GetStagedAccountRows` reads them all back and calls
-  the existing, unmodified `Cache.CommitAccountRewardsForEpoch` exactly
+  `Cache.CommitAccountRewardsForEpoch` exactly
   once — the same atomic replace-and-gate #3097 always used, now fed from
-  durable staging instead of an in-memory slice. **Neither staging table is
-  ever bulk-cleared after a successful commit** — `koios_account_checked`
-  must persist indefinitely since the zero-reward/lifecycle reporting below
-  reads it long after the fetch completes, and `koios_account_fetch_staged_rows`
-  must persist too so a later idempotent re-run of an already-complete epoch
-  with an unchanged universe finds real rows to re-commit instead of
-  committing an empty set over the correct one; the two tables grow at the
-  same rate `koios_account_rewards` itself already does, which is an accepted
-  characteristic of this cache, not a new problem. `--force-refresh`
+  durable staging instead of an in-memory slice. The two checkpoint tables
+  are retained through the successful commit so a same-epoch idempotent
+  retry can reuse them, then `Cache.PruneAccountCoverage` evicts both tables
+  outside the rolling four-epoch account checkpoint window after the batch
+  worker group has joined (or after the observer's sequential epoch check).
+  An evicted incomplete epoch is correct to refetch from scratch; retaining
+  failed checkpoints forever would make repeated backfills unbounded.
+  `koios_account_rewards` and `koios_account_coverage` are not evicted: the
+  former remains the authoritative exact-comparison input, and the latter
+  stores the exact zero-reward count plus a capped sample for historical
+  lifecycle reporting. `--force-refresh`
   (`FetchConfig.ForceRefresh`, threaded to `fetchAccountRewardsForEpoch` as
   `forceRefresh`) is the one caller that deliberately bypasses the "trust an
   already-checkpointed chunk" behavior — without it, an unchanged address
@@ -7463,10 +7482,12 @@ every one of #3097's own tests passes unmodified.
   compares keys present in at least one side's row map, so a
   confirmed-zero-reward address (Koios answered, no reward, so no row is
   ever emitted for it) never enters that comparison at all — this half is
-  read from `koios_account_checked` (`Cache.GetZeroRewardAccountsForEpoch`).
-  That is a distinct case from a row Koios *does* emit whose amount is zero,
-  which reaches `CompareAccountEpoch` normally and is reported as
-  `acct_zero_reward_row`; preview publishes zero-earned leader rows.
+  read from the coverage row's exact count and capped sample
+  (`Cache.GetZeroRewardSummary`), with a bounded legacy fallback to
+  `koios_account_checked` (`Cache.GetZeroRewardAccountsForEpoch`). That is a
+  distinct case from a row Koios *does* emit whose amount is zero, which reaches
+  `CompareAccountEpoch` normally and is reported as `acct_zero_reward_row`;
+  preview publishes zero-earned leader rows.
   Newly-registered/deregistered accounts are diffed from **Dingo's own
   epoch-scoped `reward_account_output` rows** at the current and previous
   stake epoch (`dingo.GetRewardAccountOutputs`, decoded via
