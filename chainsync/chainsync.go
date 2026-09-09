@@ -58,6 +58,10 @@ const defaultSeenHeadersRetention = 2500 * 20
 // slots of observed headers.
 const seenHeadersPruneInterval = 1000
 
+// maxSeenHeadersPerSlot bounds deduplication records and fork notifications
+// within a retained slot. It is a cache limit, not a consensus validity rule.
+const maxSeenHeadersPerSlot = 32
+
 // ClientStatus represents the sync status of a chainsync client.
 type ClientStatus int
 
@@ -970,7 +974,9 @@ func (s *State) updateTrackedClientTip(
 // processHeader checks whether the header at the given point
 // has already been seen. If another client reported a different
 // hash at the same slot, a fork detection event is emitted.
-// Returns true if this is a new (non-duplicate) header.
+// Returns true if the header is absent from the bounded deduplication cache.
+// Saturated slots retain the first alternatives and the latest header, and
+// suppress further fork notifications until the slot is pruned or cleared.
 func (s *State) processHeader(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
@@ -991,6 +997,13 @@ func (s *State) processHeader(
 	newRec := headerRecord{
 		hash:   hashClone,
 		connId: connId,
+	}
+	if len(records) >= maxSeenHeadersPerSlot {
+		// Keep the first observations stable, but deduplicate consecutive
+		// deliveries of an overflow header too. An unseen header must remain
+		// eligible for ledger validation: cache saturation is not invalidity.
+		records[len(records)-1] = newRec
+		return true
 	}
 	s.seenHeaders[point.Slot] = append(records, newRec)
 	if point.Slot > s.seenHeadersMaxSlot {
