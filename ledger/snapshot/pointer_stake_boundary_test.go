@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -245,4 +246,110 @@ func rewardLiveStakeTotalStake(
 	value, err := strconv.ParseUint(total, 10, 64)
 	require.NoError(t, err)
 	return value
+}
+
+// seedEpochRow writes one epoch row with an explicit era, inside the caller's
+// transaction when one is supplied. seedEpochs hardcodes Shelley and always
+// commits on its own, neither of which can express an era cutover reached part
+// way through a rollover transaction.
+func seedEpochRow(
+	t *testing.T,
+	db *database.Database,
+	txn *database.Txn,
+	startSlot uint64,
+	epochID uint64,
+	lengthInSlots uint,
+	eraID uint,
+) {
+	t.Helper()
+	require.NoError(t, db.SetEpoch(
+		startSlot,
+		epochID,
+		nil, nil, nil, nil,
+		eraID,
+		1,
+		lengthInSlots,
+		txn,
+	), "seed epoch %d", epochID)
+}
+
+// TestCaptureEpochBoundaryAgreesOnPointerStakeAcrossTheEraCutover pins the
+// capture routes against each other at the one boundary the era gate exists
+// for.
+//
+// cardano-ledger's hard-fork combinator translates the ledger state into the
+// incoming era in extendToSlot before ticking into that era's first slot
+// (ouroboros-consensus HardFork/Combinator/Ledger.hs,
+// applyChainTickLedgerResult), and the Babbage->Conway translation rebuilds the
+// instant stake as `ConwayInstantStake . sisCredentialStake`
+// (Conway/Translation.hs), dropping sisPtrStake. SNAP runs inside that Conway
+// TICK, so the mark snapshot taken at a Babbage->Conway boundary carries no
+// pointer-address stake.
+//
+// The two routes reach that boundary at different points of the rollover:
+// processEpochRollover's SNAP read (ComputeEpochBoundarySnapshot) runs at step 3
+// of its documented ordering, while the incoming epoch's row is written near the
+// end of the same transaction -- so a gate that resolves the incoming era from
+// the epoch table sees only the outgoing epoch's row on the authoritative route
+// and both rows on the persist-time route. Both must still report the incoming
+// era's answer.
+func TestCaptureEpochBoundaryAgreesOnPointerStakeAcrossTheEraCutover(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		computeSnap bool
+	}{
+		{
+			name:        "authoritative SNAP-point path",
+			computeSnap: true,
+		},
+		{
+			name:        "event-driven fallback",
+			computeSnap: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupTestDB(t)
+			// Only the outgoing Babbage epoch exists when the SNAP read runs.
+			seedEpochRow(t, db, nil, 0, 0, 300, eras.BabbageEraDesc.Id)
+			poolHash := bytes.Repeat([]byte{0xb6}, 28)
+			seedPointerStakeFixture(t, db, poolHash)
+
+			mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+			evt := event.EpochTransitionEvent{
+				PreviousEpoch:   0,
+				NewEpoch:        1,
+				BoundarySlot:    300,
+				EpochNonce:      []byte{0x0a, 0x0b},
+				ProtocolVersion: 9,
+				SnapshotSlot:    299,
+			}
+
+			txn := db.Transaction(true)
+			if tc.computeSnap {
+				require.NoError(t, mgr.ComputeEpochBoundarySnapshot(
+					context.Background(), txn, evt,
+				))
+			}
+			// The rollover writes the incoming epoch's row after the SNAP read
+			// and before the persist half.
+			seedEpochRow(t, db, txn, 300, 1, 300, eras.ConwayEraDesc.Id)
+			require.NoError(t, mgr.CaptureEpochBoundarySnapshot(
+				context.Background(), txn, evt,
+			))
+			require.NoError(t, txn.Commit())
+
+			poolSnapshot, err := db.Metadata().GetPoolStakeSnapshot(
+				1, "mark", poolHash, nil,
+			)
+			require.NoError(t, err)
+			require.NotNil(t, poolSnapshot)
+			require.Equal(
+				t,
+				uint64(700),
+				uint64(poolSnapshot.TotalStake),
+				"the mark snapshot at a Babbage->Conway boundary is produced "+
+					"under ConwayInstantStake, which carries no pointer stake",
+			)
+		})
+	}
 }

@@ -810,3 +810,147 @@ func (f *pointerStakeFixture) pointerRowCount(t *testing.T) int {
 	).Scan(&n))
 	return n
 }
+
+// TestGetPointerStakeInputsForPoolsAppliesTheLiveInactivityGate pins the
+// pointer overlay to the same CIP-0163 gate GetLiveStakeInputsForPools applies
+// to the base-address side of the very same query.
+//
+// The snapshot path's live route adds the overlay's rows onto
+// GetLiveStakeInputsForPools's, so the two must agree about which credentials
+// are inactive. GetLiveStakeInputsForPools reads the mutable
+// account.expiration_epoch column, not the historical fallback's witness
+// reconstruction, and the overlay has to read the same column or a credential
+// would contribute its pointer stake to a snapshot that excluded its
+// base-address stake.
+func TestGetPointerStakeInputsForPoolsAppliesTheLiveInactivityGate(t *testing.T) {
+	t.Parallel()
+	f := newPointerStakeFixture(t)
+	f.setEra(t, babbage.EraIdBabbage)
+	paymentKey := bytes.Repeat([]byte{0x22}, lcommon.AddressHashSize)
+
+	f.apply(t, 100, 0, []lcommon.Certificate{f.register(), f.delegate()})
+	f.apply(t, 150, 0, nil, f.output(700, f.baseAddress(t)))
+	f.apply(t, 200, 0, nil,
+		f.output(600, newPointerAddress(t, paymentKey, 100, 0, 0)))
+
+	// The credential's last witness leaves it expiring at epoch 5.
+	_, err := f.db.Exec(
+		"UPDATE account SET expiration_epoch = 5 WHERE staking_key = ?",
+		f.stakeKey.Bytes(),
+	)
+	require.NoError(t, err)
+
+	pointerStake := func(expiryEpoch uint64) uint64 {
+		t.Helper()
+		inputs, err := f.store.GetPointerStakeInputsForPools(
+			[][]byte{f.pool}, 300, 0, expiryEpoch, nil,
+		)
+		require.NoError(t, err)
+		var total uint64
+		for _, input := range inputs {
+			total += uint64(input.Stake)
+		}
+		return total
+	}
+	liveStake := func(expiryEpoch uint64) uint64 {
+		t.Helper()
+		inputs, err := f.store.GetLiveStakeInputsForPools(
+			[][]byte{f.pool}, expiryEpoch, nil,
+		)
+		require.NoError(t, err)
+		var total uint64
+		for _, input := range inputs {
+			total += uint64(input.Stake)
+		}
+		return total
+	}
+
+	require.Equal(t, uint64(600), pointerStake(0),
+		"with the gate off the overlay reports the pointer stake")
+	require.Equal(t, uint64(700), liveStake(0),
+		"with the gate off the live aggregate reports the base stake")
+
+	// A snapshot for an epoch the account is still active in: both sides
+	// report.
+	require.Equal(t, uint64(600), pointerStake(5))
+	require.Equal(t, uint64(700), liveStake(5))
+
+	// A snapshot for an epoch past the expiration: both sides must drop the
+	// credential, or the two halves of one live-route snapshot disagree.
+	require.Equal(t, uint64(0), liveStake(6),
+		"the live aggregate drops an expired credential")
+	require.Equal(t, uint64(0), pointerStake(6),
+		"the overlay must drop the same credential the live aggregate did")
+}
+
+// newScriptPointerAddress builds a testnet type-5 (pointer, script payment)
+// address naming the certificate at (slot, txIndex, certIndex). Type 5 differs
+// from type 4 only in the payment credential's kind, and the staking half is
+// the same pointer payload, so the resolution must not depend on which of the
+// two an output used.
+func newScriptPointerAddress(
+	t *testing.T,
+	scriptHash []byte,
+	slot, txIndex, certIndex uint64,
+) lcommon.Address {
+	t.Helper()
+	raw := []byte{0x50}
+	raw = append(raw, scriptHash...)
+	raw = append(raw, pointerVarNat(slot)...)
+	raw = append(raw, pointerVarNat(txIndex)...)
+	raw = append(raw, pointerVarNat(certIndex)...)
+	addr, err := lcommon.NewAddressFromBytes(raw)
+	require.NoError(t, err)
+	require.IsType(t, lcommon.AddressPayloadPointer{}, addr.StakingPayload(),
+		"fixture must be a pointer address")
+	require.Equal(t, uint8(lcommon.AddressTypeScriptPointer), addr.Type(),
+		"fixture must be a type-5 pointer address")
+	return addr
+}
+
+// TestPointerAddressStakeResolvesAScriptPaymentPointer covers the type-5
+// pointer address. Both pointer address types reach the same
+// StakingPayload() branch in UtxoLedgerToModel, so an output paying a script
+// must record and resolve its pointer exactly as a key-payment one does.
+func TestPointerAddressStakeResolvesAScriptPaymentPointer(t *testing.T) {
+	t.Parallel()
+	f := newPointerStakeFixture(t)
+	f.setEra(t, babbage.EraIdBabbage)
+	scriptHash := bytes.Repeat([]byte{0x33}, lcommon.AddressHashSize)
+
+	f.apply(t, 100, 0, []lcommon.Certificate{f.register(), f.delegate()})
+	f.apply(t, 200, 0, nil, f.output(600, newScriptPointerAddress(
+		t, scriptHash, 100, 0, 0,
+	)))
+
+	require.Equal(t, uint64(600), f.stakeAt(t, 300),
+		"a type-5 pointer address resolves to the same credential a type-4 "+
+			"one naming the same position does")
+}
+
+// TestPointerAddressStakeIsNotCountedWithoutAnEraRow covers pointerStakeCounted's
+// fail-safe: a database with no epoch row covering the evaluated slot has an
+// unresolvable era, and pointer stake is not counted there. That understates a
+// pool rather than inflating it and the shared active-stake denominator, which
+// is the direction that tightens the leader threshold rather than loosening it.
+func TestPointerAddressStakeIsNotCountedWithoutAnEraRow(t *testing.T) {
+	t.Parallel()
+	f := newPointerStakeFixture(t)
+	// Deliberately no setEra: the epoch table stays empty.
+	paymentKey := bytes.Repeat([]byte{0x22}, lcommon.AddressHashSize)
+
+	f.apply(t, 100, 0, []lcommon.Certificate{f.register(), f.delegate()})
+	f.apply(t, 150, 0, nil, f.output(700, f.baseAddress(t)))
+	f.apply(t, 200, 0, nil,
+		f.output(600, newPointerAddress(t, paymentKey, 100, 0, 0)))
+
+	require.Equal(t, uint64(700), f.stakeAt(t, 300),
+		"an unresolvable era must not count pointer stake")
+
+	inputs, err := f.store.GetPointerStakeInputsForPools(
+		[][]byte{f.pool}, 300, 0, 0, nil,
+	)
+	require.NoError(t, err)
+	require.Empty(t, inputs,
+		"the live overlay applies the same fail-safe as the historical CTE")
+}

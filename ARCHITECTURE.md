@@ -8715,7 +8715,11 @@ restricted to slot and the epoch boundary, and the result is added to what this
 aggregate returned rather than folded into the aggregate. That closes a prior
 divergence between dingo's two Mark-capture routes -- the event-driven fallback
 already reconstructed historically and resolved pointer stake; the SNAP-point
-hook read only this aggregate and did not (blinklabs-io/dingo#3854). Every
+hook read only this aggregate and did not (blinklabs-io/dingo#3854). The
+SNAP-point read cannot resolve the incoming epoch's era, because it runs before
+that epoch's row is written, so the persist half discards its distribution
+whenever the boundary changes era and reconstructs historically instead; see
+`GetPointerStakeInputsForPools` in `DATABASE.md`. Every
 other consumer of this aggregate -- `GetStakeByPools`, DRep voting power, and a
 plain live `GetRewardStakeInputsForPools` query -- is unchanged and still
 attributes only base-address stake. That is correct once the live tip has

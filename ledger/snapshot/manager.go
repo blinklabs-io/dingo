@@ -127,6 +127,52 @@ func (m *Manager) takeBoundaryDistribution(
 	return pending.distribution
 }
 
+// boundaryChangesEra reports whether the epoch the boundary slot opens runs at
+// a different era than the epoch the snapshot slot closes.
+//
+// Era-sensitive stake rules are resolved against the incoming epoch's era,
+// because cardano-ledger's hard-fork combinator translates the ledger state
+// into that era in extendToSlot before the TICK whose SNAP produces the mark
+// snapshot (ouroboros-consensus HardFork/Combinator/Ledger.hs,
+// applyChainTickLedgerResult). The current such rule is the pointer-address
+// stake gate in database/plugin/metadata/sqlstore/pointer_stake.go: the
+// Babbage->Conway translation rebuilds the instant stake as
+// `ConwayInstantStake . sisCredentialStake` (Conway/Translation.hs), dropping
+// sisPtrStake, so the mark snapshot at that boundary carries no pointer stake.
+//
+// ComputeEpochBoundarySnapshot cannot apply that rule. It runs at
+// processEpochRollover's SNAP read, step 3 of its documented ordering, while
+// the incoming epoch's row -- and the enactment that decides its era -- are
+// written near the end of the same transaction. Every era lookup it makes
+// therefore resolves the outgoing epoch's era. The persist half runs after that
+// row exists, so it can detect the difference and drop a SNAP-point read that
+// was taken under the wrong era, deferring to the boundary-aware historical
+// reconstruction below, which resolves the era correctly.
+//
+// A missing epoch row on either side is not treated as a change: an era that
+// cannot be resolved at all is one no era-gated rule acts on.
+func (m *Manager) boundaryChangesEra(
+	txn *database.Txn,
+	evt event.EpochTransitionEvent,
+) (bool, error) {
+	snapshotEpoch, err := m.db.GetEpochBySlot(evt.SnapshotSlot, txn)
+	if err != nil {
+		return false, fmt.Errorf(
+			"resolve era at snapshot slot %d: %w", evt.SnapshotSlot, err,
+		)
+	}
+	boundaryEpoch, err := m.db.GetEpochBySlot(evt.BoundarySlot, txn)
+	if err != nil {
+		return false, fmt.Errorf(
+			"resolve era at boundary slot %d: %w", evt.BoundarySlot, err,
+		)
+	}
+	if snapshotEpoch == nil || boundaryEpoch == nil {
+		return false, nil
+	}
+	return snapshotEpoch.EraId != boundaryEpoch.EraId, nil
+}
+
 // NewManager creates a new snapshot manager.
 func NewManager(
 	db *database.Database,
@@ -630,6 +676,28 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 	expiryEpoch := m.expiryEpoch(evt.NewEpoch)
 
 	distribution := m.takeBoundaryDistribution(txn, evt, expiryEpoch)
+	if distribution != nil {
+		crossed, err := m.boundaryChangesEra(txn, evt)
+		if err != nil {
+			if m.metrics != nil {
+				m.metrics.captureFailureTotal.Inc()
+				m.metrics.captureDurationSeconds.Observe(
+					time.Since(start).Seconds(),
+				)
+			}
+			return err
+		}
+		if crossed {
+			m.logger.Info(
+				"discarding snap-point stake distribution across an era "+
+					"change; reconstructing at persist time",
+				"component", "snapshot",
+				"epoch", evt.NewEpoch,
+				"boundary_slot", evt.BoundarySlot,
+			)
+			distribution = nil
+		}
+	}
 	if distribution == nil {
 		m.logger.Debug(
 			"no snap-point stake distribution for boundary; reading at persist time",
