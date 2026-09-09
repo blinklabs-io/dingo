@@ -286,3 +286,73 @@ func TestBuildBlockSnapshotsMempoolForNormalBuild(t *testing.T) {
 	require.Len(t, block.Transactions(), 3)
 	require.Equal(t, 1, mempool.calls)
 }
+
+// TestForgeReportsLostSlotWhenTheBuilderCannotDropTransactions pins the
+// compatibility promise the empty-body constraint makes to embedders. Only
+// the package-private builder path carries per-attempt constraints, so an
+// embedder-supplied BlockBuilder cannot be told to drop its transactions.
+//
+// Falling through to the plain BuildBlock entrypoint there would forge from
+// a full mempool under a constraint that was silently discarded -- the
+// fallback would stop being a fallback and become an ordinary build with a
+// misleading name, at the one moment the slot has no time left for it. The
+// slot is reported lost instead, and the reason is inspectable rather than
+// hidden behind the selection abort that led to it.
+func TestForgeReportsLostSlotWhenTheBuilderCannotDropTransactions(
+	t *testing.T,
+) {
+	block := newForgerTestBlock(10, 2)
+	builder := &retryTestBuilder{
+		block:     block,
+		cbor:      block.cbor,
+		failCount: 1,
+		err:       errTxValidationSnapshotChanged,
+	}
+	broadcaster := &forgerTestBroadcaster{}
+	clock := &retryTestSlotClock{
+		currentSlot:       10,
+		chainTipSlot:      9,
+		slotsPerKESPeriod: 100,
+		// No slot time left, so the first abort goes straight to the
+		// fallback rather than to a retry the builder would satisfy.
+		slotEnd: time.Now(),
+	}
+	forger := newRetryForger(t, clock, builder, broadcaster)
+
+	err := forger.checkAndForgeProduction(context.Background())
+	require.Error(t, err)
+	require.ErrorIs(
+		t,
+		err,
+		errBlockConstraintsUnsupported,
+		"the lost slot must name the constraint the builder could not honour",
+	)
+	require.ErrorIs(
+		t,
+		err,
+		errTxValidationSnapshotChanged,
+		"and must still carry the selection abort that reached the fallback",
+	)
+	require.Equal(
+		t,
+		1,
+		builder.calls,
+		"the fallback must not re-enter a builder that cannot drop "+
+			"transactions: a second call would forge a full block",
+	)
+	require.Equal(t, 0, broadcaster.calls)
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			forger.metrics.forgeSelectionFallback.WithLabelValues("lost"),
+		),
+	)
+	require.Equal(
+		t,
+		float64(0),
+		testutil.ToFloat64(
+			forger.metrics.forgeSelectionFallback.WithLabelValues("empty"),
+		),
+	)
+}
