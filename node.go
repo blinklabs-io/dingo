@@ -233,15 +233,17 @@ func New(cfg Config) (*Node, error) {
 	if err := n.configPopulateNetworkMagic(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
+	// Invalid configuration must not leave collectors in a caller-owned
+	// registry: callers may correct it and retry construction with that registry.
+	if err := n.configValidate(); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
 	// Wrap the prometheus registry with a "network" label so all metrics
 	// registered by subsystems carry the network name automatically.
 	// This must happen before any component registers metrics.
 	n.configWrapPromRegistry()
 	n.registerBuildInfo()
 	n.registerRTSMetrics()
-	if err := n.configValidate(); err != nil {
-		return nil, fmt.Errorf("invalid configuration: %w", err)
-	}
 	// NewEventBus starts background async-worker goroutines, so create the bus
 	// only after configuration validates. If it were created earlier, a
 	// validation failure would return a nil Node while leaving those goroutines

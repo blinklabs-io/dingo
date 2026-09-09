@@ -102,6 +102,18 @@ func (s *submitServiceServer) WaitForTx(
 	stream *connect.ServerStream[submit.WaitForTxResponse],
 ) error {
 	ref := req.Msg.GetRef() // [][]byte
+	for i, hash := range ref {
+		if len(hash) != len(lcommon.Blake2b256{}) {
+			return connect.NewError(
+				connect.CodeInvalidArgument,
+				fmt.Errorf(
+					"transaction reference at index %d must be 32 bytes, got %d",
+					i,
+					len(hash),
+				),
+			)
+		}
+	}
 
 	s.utxorpc.config.Logger.Info(
 		fmt.Sprintf(
