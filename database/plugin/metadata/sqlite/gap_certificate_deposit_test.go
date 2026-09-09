@@ -127,7 +127,7 @@ func (f *gapDepositFixture) applyGap(
 }
 
 // TestGapBlockPoolRegistrationRefundsItsDeposit pins the refund POOLREAP pays a
-// pool whose most recent registration was ingested from a Mithril gap block.
+// pool whose registration was ingested from a Mithril gap block.
 //
 // GetPoolsRetiringAtEpoch takes the retiring pool's latest pool_registration
 // row and applyPoolRetirements credits that row's deposit_held as the refund.
@@ -135,48 +135,40 @@ func (f *gapDepositFixture) applyGap(
 // calculates its deposits; mithril's gapCertDeposits derives them from the
 // block's era and the epoch's protocol parameters and passes them in here.
 //
-// Without them the gap registration is the latest row and records no deposit,
-// which parseNullUint64 reads back as 0 -- indistinguishable from a pool that
-// genuinely paid nothing -- and the operator's real deposit is never refunded.
+// Without them the gap registration records no deposit, which parseNullUint64
+// reads back as 0 -- indistinguishable from a pool that genuinely paid nothing
+// -- and the operator's real deposit is never refunded.
+//
+// The gap block carries the pool's *first* registration. A gap re-registration
+// of a still-registered pool cannot exercise the supplied amount at all:
+// poolRegistrationDepositHeld returns the earlier row's held deposit and
+// ignores the charged amount, because re-registering a live pool pays no new
+// deposit. Such a case passes whether or not the gap path forwards deposits.
 func TestGapBlockPoolRegistrationRefundsItsDeposit(t *testing.T) {
 	t.Parallel()
 	const deposit = uint64(500_000_000)
 
 	for _, test := range []struct {
 		name string
-		// gapDeposits is what the gap path supplies for the
-		// re-registration at slot 200.
-		gapDeposits map[int]uint64
-		want        uint64
+		// gap reports whether the registration arrives through the Mithril
+		// gap path rather than the live block-apply path.
+		gap bool
 	}{
-		{
-			// Control: no gap re-registration at all, so the live
-			// registration at slot 100 stays the latest row. This is the
-			// refund the same pool must still receive once a gap block
-			// re-registers it.
-			name: "live registration only",
-			want: deposit,
-		},
-		{
-			name:        "gap re-registration carrying its deposit",
-			gapDeposits: map[int]uint64{0: deposit},
-			want:        deposit,
-		},
+		// Control: the live path always carries calculated deposits. This is
+		// the refund the same pool must still receive when the gap path
+		// supplies them instead.
+		{name: "live registration", gap: false},
+		{name: "gap block registration", gap: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			f := newGapDepositFixture(t)
-			f.applyLive(
-				t, 100,
-				[]lcommon.Certificate{f.registration()},
-				map[int]uint64{0: deposit},
-			)
-			if test.gapDeposits != nil {
-				f.applyGap(
-					t, 200,
-					[]lcommon.Certificate{f.registration()},
-					test.gapDeposits,
-				)
+			certificates := []lcommon.Certificate{f.registration()}
+			deposits := map[int]uint64{0: deposit}
+			if test.gap {
+				f.applyGap(t, 100, certificates, deposits)
+			} else {
+				f.applyLive(t, 100, certificates, deposits)
 			}
 			f.applyLive(
 				t, 300,
@@ -190,7 +182,7 @@ func TestGapBlockPoolRegistrationRefundsItsDeposit(t *testing.T) {
 				"the pool must be found retiring at epoch 5")
 			require.Equal(t, f.poolKey, refunds[0].PoolKeyHash)
 			require.Equal(t,
-				test.want,
+				deposit,
 				uint64(refunds[0].DepositHeld),
 				"the refund must be the deposit the pool actually paid",
 			)
