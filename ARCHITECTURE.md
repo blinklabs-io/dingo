@@ -528,6 +528,7 @@ fail with the ledger tip already **on** the rollback point — both
 failure keeps the ordinary wrapped error and the recovery it has always had.
 The check is the same `pointMatches(ls.Tip().Point, point)` test the success
 path uses to decide whether to arm the continuation audit.
+
 `LedgerState.rollback` will not accept a target that shares the applied tip's
 slot with a different hash. The UTxO and transaction predicates in
 `database.TruncateAfterSlot` are slot-only (`added_slot > slot`,

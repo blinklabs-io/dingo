@@ -339,10 +339,10 @@ func TestAddBlocksRestoresChainStateInsideClosureOnBatchFailure(t *testing.T) {
 }
 
 // TestAddRawBlocksRestoresChainStateWhenCommitFails pins the sibling path. Both
-// batch functions share chainStateSnapshot and restoreAfterCommitFailure now,
-// which is what keeps them from drifting apart again -- this PR exists because
-// the staging was added to addRawBlocks alone and AddBlocks kept advancing its
-// tip past a rolled-back batch.
+// batch functions stage the same fields and gate the commit-failure restore on
+// batchRestoreIsSafeLocked, so this test and TestAddBlocksRestoresChainStateWhenCommitFails
+// cover the two copies of that sequence -- the staging was added to addRawBlocks
+// alone, and AddBlocks kept advancing its tip past a rolled-back batch.
 func TestAddRawBlocksRestoresChainStateWhenCommitFails(t *testing.T) {
 	base := newTestDB(t)
 	commitErr := errors.New("injected blob commit failure")
