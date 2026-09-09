@@ -2,6 +2,7 @@ package connmanager
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"path/filepath"
@@ -16,6 +17,41 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
+
+func TestNtCAdmissionSlotReleasedBeforeCloseCallback(t *testing.T) {
+	closeErr := errors.New("closed")
+	callbackEntered := make(chan struct{})
+	releaseCallback := make(chan struct{})
+	var releaseCallbackOnce sync.Once
+	releaseCallbackFunc := func() {
+		releaseCallbackOnce.Do(func() { close(releaseCallback) })
+	}
+	defer releaseCallbackFunc()
+	manager := NewConnectionManager(ConnectionManagerConfig{
+		MaxNtCConns: 1,
+		ConnClosedFunc: func(_ ouroboros.ConnectionId, _ bool, _ error) {
+			close(callbackEntered)
+			<-releaseCallback
+		},
+	})
+	conn := newUnstartedConnection(t)
+	release := manager.reserveNtCSlot(nil)
+	require.NotNil(t, release)
+	require.True(t, manager.addConnectionImpl(conn, true, true, "local", "", release))
+
+	conn.ErrorChan() <- closeErr
+	select {
+	case <-callbackEntered:
+	case <-time.After(time.Second):
+		t.Fatal("close callback was not invoked")
+	}
+	manager.ntcAdmissionMutex.Lock()
+	count := manager.ntcCount
+	manager.ntcAdmissionMutex.Unlock()
+	require.Zero(t, count, "NtC admission slot remained held by a blocking callback")
+	releaseCallbackFunc()
+	waitForConnectionManagerWatchers(t, manager)
+}
 
 func startNtCAdmissionManager(
 	t *testing.T,

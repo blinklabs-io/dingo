@@ -695,15 +695,6 @@ func (c *ConnectionManager) addConnectionWithIPKey(
 	return c.addConnectionImpl(conn, isInbound, false, peerAddr, ipKey, nil)
 }
 
-func (c *ConnectionManager) addNtCConnectionWithIPKey(
-	conn *ouroboros.Connection,
-	isInbound bool,
-	peerAddr string,
-	ipKey string,
-) bool {
-	return c.addConnectionImpl(conn, isInbound, true, peerAddr, ipKey, nil)
-}
-
 func (c *ConnectionManager) addConnectionImpl(
 	conn *ouroboros.Connection,
 	isInbound bool,
@@ -867,13 +858,21 @@ func (c *ConnectionManager) addConnectionImpl(
 	c.updateConnectionMetrics()
 	go func() {
 		defer c.goroutineWg.Done()
-		if onClose != nil {
-			defer onClose()
-		}
+		defer func() {
+			if onClose != nil {
+				onClose()
+			}
+		}()
 		err := <-conn.ErrorChan()
 		// Remove connection (also releases IP slot)
 		if !c.RemoveConnection(connId, conn) {
 			return
+		}
+		// Release admission before invoking user callbacks. A callback may
+		// block while the listener still needs to admit a replacement.
+		if onClose != nil {
+			onClose()
+			onClose = nil
 		}
 		// Generate event, but only for node-to-node connections. Every
 		// subscriber to this event does node-to-node peer management --

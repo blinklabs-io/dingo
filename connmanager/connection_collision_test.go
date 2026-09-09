@@ -134,11 +134,11 @@ func TestSameDirectionCollisionNotifiesEvictedConnection(t *testing.T) {
 
 	require.True(
 		t,
-		cm.addNtCConnectionWithIPKey(first, true, "127.0.0.1:3002", ""),
+		cm.addConnectionImpl(first, true, true, "127.0.0.1:3002", "", nil),
 	)
 	require.True(
 		t,
-		cm.addNtCConnectionWithIPKey(second, true, "127.0.0.1:3002", ""),
+		cm.addConnectionImpl(second, true, true, "127.0.0.1:3002", "", nil),
 	)
 	require.Same(t, second, cm.GetConnectionById(second.Id()))
 
