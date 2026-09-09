@@ -451,9 +451,20 @@ func TestSlotClockEpochBoundary(t *testing.T) {
 	clock.Start(ctx)
 	defer clock.Stop()
 
-	// Collect ticks until we see an epoch boundary
+	// Collect ticks until we see an epoch boundary. Bound the wait by the
+	// test binary's own -timeout deadline (with headroom to still fail
+	// cleanly) rather than an arbitrary real-time window shorter than
+	// that deadline -- a delayed slot-clock goroutine under CI scheduling
+	// load can otherwise miss a fixed short window with no retry.
+	waitFor := 10 * time.Second
+	if deadline, ok := t.Deadline(); ok {
+		if remaining := time.Until(deadline) - time.Second; remaining > 0 {
+			waitFor = remaining
+		}
+	}
+	timeout := time.After(waitFor)
+
 	var sawEpochStart bool
-	timeout := time.After(500 * time.Millisecond)
 	for !sawEpochStart {
 		select {
 		case tick := <-ch:

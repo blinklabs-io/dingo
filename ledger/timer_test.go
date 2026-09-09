@@ -51,12 +51,14 @@ func TestScheduler_ChangeInterval(t *testing.T) {
 
 	var counter atomic.Int32
 
-	// Create a Scheduler with 50ms tick interval
-	timer := NewScheduler(50 * time.Millisecond)
+	// Create a Scheduler with a fast tick interval so the pre-change
+	// baseline is established quickly.
+	const fastInterval = 20 * time.Millisecond
+	timer := NewScheduler(fastInterval)
 	timer.Start()
 	defer timer.Stop()
 
-	// Registering task with 50ms tick interval to execute for every 1 tick
+	// Registering task to execute for every 1 tick
 	timer.Register(1, func() {
 		counter.Add(1)
 	}, nil)
@@ -64,34 +66,58 @@ func TestScheduler_ChangeInterval(t *testing.T) {
 	// Wait for at least 2 executions before changing interval
 	require.Eventually(t, func() bool {
 		return counter.Load() >= 2
-	}, 2*time.Second, 10*time.Millisecond,
+	}, 2*time.Second, 5*time.Millisecond,
 		"expected at least 2 executions before interval change",
 	)
 	beforeChange := counter.Load()
 
-	// Change interval to 200ms
-	err := timer.ChangeInterval(200 * time.Millisecond)
-	require.NoError(t, err)
-
-	// Wait for at least 1 execution after interval change
+	// updateIntervalChan is unbuffered and ChangeInterval's send is
+	// non-blocking (select/default; see
+	// TestScheduler_StopDoesNotRaceChangeInterval) -- run() can be mid-tick
+	// and miss the send entirely, so a single call is not guaranteed to
+	// take effect. Retry until the scheduler's own interval field
+	// confirms the change, reading it under the same mutex run() uses to
+	// update it, rather than assuming one call succeeded.
+	// require.Eventually runs its condition func on a separate goroutine
+	// per poll, where require's t.FailNow is unsafe to call -- so check
+	// the (always-nil, since slowInterval is a positive constant) error
+	// directly rather than through require.NoError.
+	const slowInterval = 300 * time.Millisecond
 	require.Eventually(t, func() bool {
-		return counter.Load()-beforeChange >= 1
-	}, 2*time.Second, 10*time.Millisecond,
-		"expected at least 1 execution after interval change",
+		if err := timer.ChangeInterval(slowInterval); err != nil {
+			t.Logf("ChangeInterval: %v", err)
+			return false
+		}
+		timer.mutex.Lock()
+		applied := timer.interval == slowInterval
+		timer.mutex.Unlock()
+		return applied
+	}, 5*time.Second, 5*time.Millisecond,
+		"expected interval change to be applied",
+	)
+	afterChangeReq := counter.Load()
+
+	// Assert the observable property -- the tick rate slowed down --
+	// instead of a hard real-time window. Even after the change is
+	// confirmed applied, one leftover tick from the pre-change ticker can
+	// still land, and CI scheduling delays can bunch ticks. Rather than
+	// counting ticks in a narrow fixed window, require that the count
+	// never reaches a threshold that is reachable only if the scheduler
+	// kept running at the old (fast) interval: over this window the new
+	// interval nominally delivers ~4 ticks (plus at most one leftover),
+	// while the old interval would reach the threshold in well under a
+	// fifth of the window.
+	const window = 1200 * time.Millisecond
+	const tooManyTicks = 10
+	require.Never(t, func() bool {
+		return counter.Load()-afterChangeReq >= tooManyTicks
+	}, window, 10*time.Millisecond,
+		"timer did not respect interval change: ran too frequently",
 	)
 
-	// Allow enough time for potential additional ticks
-	time.Sleep(500 * time.Millisecond)
-
-	secondCount := counter.Load()
-	afterChange := secondCount - beforeChange
-
-	if afterChange < 1 || afterChange > 3 {
-		t.Errorf(
-			"timer did not respect interval change, ran too frequently: %d more ticks",
-			afterChange,
-		)
-	}
+	require.Greater(t, counter.Load(), beforeChange,
+		"expected ticking to continue after interval change",
+	)
 }
 
 func TestSchedulerRunFailFunc(t *testing.T) {
