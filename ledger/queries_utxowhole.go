@@ -16,7 +16,6 @@ package ledger
 
 import (
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"sync"
 
@@ -132,20 +131,19 @@ func (ls *LedgerState) queryShelleyUtxoWhole() (any, error) {
 				// IterateLiveUtxos' inline loadCbor reconstructs it from
 				// the producing block when possible, and this reply must
 				// not silently regress to omitting a row that path would
-				// have recovered.
+				// have recovered. Even once recovery itself confirms the
+				// CBOR is unrecoverable (ErrUtxoCborUnavailable), this is
+				// still a live row GetUTxOWhole's contract can't omit --
+				// main fails the whole query on that sentinel rather than
+				// silently returning a short set, since #1900's cross-node
+				// comparison would otherwise read a dropped row as a
+				// ledger divergence rather than a storage fault.
 				cborBytes, err := ls.db.ResolveUtxoCborWithRecovery(
 					u.ref.TxId[:],
 					u.ref.OutputIdx,
 					txn,
 				)
 				if err != nil {
-					if errors.Is(err, database.ErrUtxoCborUnavailable) {
-						// Recovery itself confirmed this ref's CBOR cannot
-						// be reconstructed (e.g. the producing block is
-						// gone) -- only now is dropping it rather than
-						// failing the whole reply appropriate.
-						continue
-					}
 					results <- resolved{err: fmt.Errorf(
 						"resolve utxo cbor %x#%d: %w",
 						u.ref.TxId[:8], u.ref.OutputIdx, err,

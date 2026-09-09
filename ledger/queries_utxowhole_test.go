@@ -146,6 +146,47 @@ func TestQueryShelleyUtxoWhole_EmptyLedger(t *testing.T) {
 	require.Empty(t, utxos)
 }
 
+// TestQueryShelleyUtxoWhole_UnrecoverableRowFailsQuery covers a live UTxO
+// row whose CBOR cannot be resolved even via recovery (no blob entry and no
+// producer transaction metadata to reconstruct it from): the whole query
+// must fail rather than silently return a reply missing that row.
+// GetUTxOWhole's contract is every live UTxO, and node-parity (#1900)
+// compares this reply against a real cardano-node -- a silently short reply
+// would read as a ledger divergence rather than the storage fault it
+// actually is, exactly like IterateLiveUtxos' own loadCbor path already
+// fails rather than omits.
+func TestQueryShelleyUtxoWhole_UnrecoverableRowFailsQuery(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+
+	addrA, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xAA}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	seedBabbageUtxo(t, db, 0xA1, 0, addrA, 1_000_000)
+
+	// A live metadata row with no blob entry and no producer transaction to
+	// recover from -- ResolveUtxoCborWithRecovery must confirm this as
+	// ErrUtxoCborUnavailable rather than reconstructing it.
+	unrecoverableTxId := bytes.Repeat([]byte{0xC3}, 32)
+	txn := db.Transaction(true)
+	require.NoError(t, db.CreateUtxo(txn, &models.Utxo{
+		TxId:      unrecoverableTxId,
+		OutputIdx: 0,
+		AddedSlot: 100,
+	}))
+	require.NoError(t, txn.Commit())
+
+	ls := newPoolDistr2Ledger(t, db)
+
+	_, err = ls.queryShelleyUtxoWhole()
+	require.Error(t, err)
+}
+
 // TestDecodeUtxoWholeCborMalformedCborSurfacesError covers a row whose
 // resolved CBOR fails to decode as a transaction output: this must surface
 // that decode error (with the ref's hex-encoded TxId in the message) rather
