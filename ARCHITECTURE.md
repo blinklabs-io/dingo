@@ -5693,8 +5693,7 @@ Blockfrost, Mesh, and UTxO RPC share one TLS/authentication contract
 (dingo#2996/#2998), rather than each exposing its own ad hoc surface. A
 reverse proxy or API gateway in front of these listeners remains fully
 supported — TLS/auth here is additive, not a replacement requirement — but
-an operator can now also secure any subset of the three in-process without
-one. Startup validation
+an operator can now also secure any subset of the three in-process. Startup validation
 also refuses an enabled API on a non-loopback bind address
 when its effective authentication policy is disabled. This guard evaluates
 the shared `api.auth` policy after each provider override is merged, while
