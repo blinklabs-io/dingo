@@ -149,6 +149,13 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	txn *database.Txn,
 	recordDonations bool,
 ) error {
+	// Keep one immutable protocol-parameter snapshot for every certificate in
+	// this delta. A parameter publication between certificates must not mix
+	// deposit values in one database operation. Load it lazily because
+	// certificate-free validation deltas may run before snapshots are
+	// initialized during startup.
+	var pparams lcommon.ProtocolParameters
+	var snapshotLoaded bool
 	appliedTxs := make([]bool, len(d.Transactions))
 	for i, tr := range d.Transactions {
 		if tr.Index < 0 || tr.Index > math.MaxUint32 {
@@ -165,14 +172,34 @@ func (d *LedgerDelta) applyWithDonationRecording(
 		for k := range certDeposits {
 			delete(certDeposits, k)
 		}
+		if len(certs) > 0 && !snapshotLoaded {
+			snapshot := ls.loadConsensusSnapshot()
+			if snapshot == nil {
+				certDepositsMapPool.Put(certDeposits)
+				return errors.New(
+					"calculate certificate deposit: consensus snapshot unavailable",
+				)
+			}
+			pparams = snapshot.currentPParams
+			snapshotLoaded = true
+		}
 		for i, cert := range certs {
-			deposit, err := ls.calculateCertificateDeposit(cert, d.BlockEraId)
+			deposit, err := ls.calculateCertificateDeposit(
+				cert,
+				d.BlockEraId,
+				pparams,
+			)
 			if err != nil {
 				// Return the map to pool before returning error
 				certDepositsMapPool.Put(certDeposits)
 				return fmt.Errorf("calculate certificate deposit: %w", err)
 			}
-			certDeposits[i] = deposit
+			// A nil deposit is unknown, not zero. Leave the index absent so
+			// the store records NULL rather than an authoritative zero that
+			// would later be refunded as zero by value conservation.
+			if deposit != nil {
+				certDeposits[i] = *deposit
+			}
 		}
 
 		setErr := ls.db.SetTransactionWithOpts(

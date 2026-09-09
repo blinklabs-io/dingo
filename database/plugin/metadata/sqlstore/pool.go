@@ -53,9 +53,9 @@ const poolRegistrationInsertSQL = `
 INSERT INTO pool_registration (
     margin, metadata_url, vrf_key_hash, pool_key_hash, reward_account,
     reward_account_credential_tag, metadata_hash, pledge, cost,
-    certificate_id, pool_id, added_slot, deposit_amount,
+    certificate_id, pool_id, added_slot, deposit_amount, deposit_held,
     leios_key_public, leios_key_possession_proof
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (pool_id, added_slot) DO NOTHING
 RETURNING id`
 
@@ -74,6 +74,286 @@ func insertPoolRegistration(
 		return poolRegistrationID(ctx, db, poolID, slot)
 	}
 	return id, err
+}
+
+// poolCertPosition is a pool certificate's position on the chain: the slot it
+// was added at, the block index of its transaction, and its index within that
+// transaction's certificate sequence. cert_index resets per transaction, so
+// block_index is required to order two certificates inside one block.
+type poolCertPosition struct {
+	slot       uint64
+	blockIndex uint64
+	certIndex  uint64
+}
+
+func (p poolCertPosition) before(other poolCertPosition) bool {
+	if p.slot != other.slot {
+		return p.slot < other.slot
+	}
+	if p.blockIndex != other.blockIndex {
+		return p.blockIndex < other.blockIndex
+	}
+	return p.certIndex < other.certIndex
+}
+
+// poolPositionPredicate matches the pool certificate rows strictly before a
+// position, and returns the bind arguments for it. The joined block and
+// certificate indexes are NULL for a synthesized row with no certs row, which
+// is why both sides COALESCE to zero.
+func poolPositionPredicate(
+	table string,
+	at poolCertPosition,
+) (string, []any) {
+	args := []any{
+		at.slot,
+		at.slot, at.blockIndex,
+		at.slot, at.blockIndex, at.certIndex,
+	}
+	return `(
+      ` + table + `.added_slot < ?
+      OR (` + table + `.added_slot = ?
+          AND COALESCE(t.block_index, 0) < ?)
+      OR (` + table + `.added_slot = ?
+          AND COALESCE(t.block_index, 0) = ?
+          AND COALESCE(c.cert_index, 0) < ?)
+  )`, args
+}
+
+// poolRegistrationDepositHeld returns the deposit the pool registration being
+// written at `at` retains, given the `charged` amount the block era's
+// certificate deposit function computed from the protocol parameters in force
+// at that slot.
+//
+// cardano-ledger's POOL rule charges a pool deposit only when the pool is not
+// already registered (Shelley Rules/Pool.hs: the not-in-poolParams branch
+// inserts into psDeposits; the re-registration branch updates
+// psFutureStakePoolParams and cancels any pending retirement, leaving
+// psDeposits untouched). POOLREAP later refunds psDeposits. So the refundable
+// amount belongs to the registration that paid it, and every re-registration
+// on top of a still-registered pool carries that amount forward unchanged --
+// which is what makes a poolDeposit parameter change between a pool's first
+// and last registration value-neutral instead of minting or burning the
+// difference at the retirement boundary.
+//
+// The pool stops being registered when its retirement is reaped, at the
+// boundary into the epoch its retirement certificate names. A registration
+// after that reap is a first registration again and pays the deposit in force
+// at its own slot. A registration while a retirement is still pending cancels
+// it and pays nothing.
+//
+// Only rows strictly before `at` are read, so the value is a function of the
+// chain up to this certificate: a rollback that deletes later rows and a
+// replay that rewrites them reproduce the same held amount, and a restart
+// reads it back from the column.
+//
+// A nil `charged` means the era's deposit function could not compute an
+// amount, and a nil return carries that through so the column stores NULL
+// rather than an authoritative zero (dingo #3829). A carried-forward amount
+// may also be unknown when both deposit columns on the earlier row are NULL;
+// preserve that absence rather than turning unknown into zero.
+func poolRegistrationDepositHeld(
+	ctx context.Context,
+	db queryer,
+	poolID int64,
+	at poolCertPosition,
+	charged *uint64,
+) (*uint64, error) {
+	previous, found, err := latestPoolRegistrationBefore(ctx, db, poolID, at)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		// Nothing earlier to hold a deposit: this registration pays it.
+		return charged, nil
+	}
+	retirement, found, err := latestPoolRetirementBefore(ctx, db, poolID, at)
+	if err != nil {
+		return nil, err
+	}
+	if !found || retirement.position.before(previous.position) {
+		// The pool has never been retired, or the retirement was already
+		// cancelled by the registration whose held amount this reads, so no
+		// reap can have returned that deposit. A tie goes to the retirement,
+		// the same way GetPoolsRetiringAtEpoch resolves it: two certificate
+		// rows cannot share a position, but a Mithril import's synthesized
+		// registration and its retirement tombstone both sit at the snapshot
+		// slot with no certs join to separate them, and the tombstone is what
+		// says the pool is gone.
+		return previous.held, nil
+	}
+	epoch, resolved, err := epochAtSlot(ctx, db, at.slot)
+	if err != nil {
+		return nil, err
+	}
+	if !resolved {
+		// Without epoch data the reap cannot be placed. Charging the
+		// registration is the pre-change behavior (the refund read the latest
+		// registration's own deposit), so an unresolvable epoch cannot change
+		// the refund relative to a node that never had this column.
+		return charged, nil
+	}
+	if epoch >= retirement.epoch {
+		// The reap has happened: the earlier deposit was already refunded to
+		// the reward account or the treasury, and this registration pays a new
+		// one at the parameters in force now.
+		return charged, nil
+	}
+	// Retirement still pending at this slot: this registration cancels it and
+	// the pool keeps holding the earlier deposit.
+	return previous.held, nil
+}
+
+type poolRegistrationDepositRow struct {
+	position poolCertPosition
+	held     *uint64
+}
+
+func latestPoolRegistrationBefore(
+	ctx context.Context,
+	db queryer,
+	poolID int64,
+	at poolCertPosition,
+) (poolRegistrationDepositRow, bool, error) {
+	predicate, args := poolPositionPredicate("pr", at)
+	var (
+		row       poolRegistrationDepositRow
+		held      sql.NullString
+		charged   sql.NullString
+		blockIdx  int64
+		certIdx   int64
+		addedSlot int64
+	)
+	err := db.QueryRowContext(ctx, `
+SELECT pr.deposit_held, pr.deposit_amount, pr.added_slot,
+       COALESCE(t.block_index, 0), COALESCE(c.cert_index, 0)
+FROM pool_registration pr
+LEFT JOIN certs c ON c.id = pr.certificate_id
+LEFT JOIN "transaction" t ON t.id = c.transaction_id
+WHERE pr.pool_id = ?
+  AND `+predicate+`
+ORDER BY pr.added_slot DESC, COALESCE(t.block_index, 0) DESC,
+         COALESCE(c.cert_index, 0) DESC
+LIMIT 1`,
+		append([]any{poolID}, args...)...,
+	).Scan(&held, &charged, &addedSlot, &blockIdx, &certIdx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return row, false, nil
+	}
+	if err != nil {
+		return row, false, fmt.Errorf(
+			"pool registration deposit held: read previous registration: %w",
+			err,
+		)
+	}
+	// A row written before the deposit_held column existed falls back to its
+	// own deposit_amount, the same rule the v12 backfill applies, so an
+	// interrupted or skipped backfill still reproduces the pre-change refund
+	// instead of collapsing the held amount to zero.
+	source := held
+	if !source.Valid {
+		source = charged
+	}
+	value, err := parseNullableUint64("pool registration deposit held", source)
+	if err != nil {
+		return row, false, err
+	}
+	row.held = value
+	row.position = poolCertPosition{
+		slot:       uint64(addedSlot),
+		blockIndex: uint64(blockIdx),
+		certIndex:  uint64(certIdx),
+	}
+	return row, true, nil
+}
+
+type poolRetirementPositionRow struct {
+	position poolCertPosition
+	epoch    uint64
+}
+
+func latestPoolRetirementBefore(
+	ctx context.Context,
+	db queryer,
+	poolID int64,
+	at poolCertPosition,
+) (poolRetirementPositionRow, bool, error) {
+	predicate, args := poolPositionPredicate("rt", at)
+	var (
+		row       poolRetirementPositionRow
+		epoch     int64
+		addedSlot int64
+		blockIdx  int64
+		certIdx   int64
+	)
+	// Synthetic reconcile/bootstrap retirements (certificate_id = 0) sort ahead
+	// of certificate-backed rows at the same slot, matching
+	// GetActivePoolKeyHashesAtSlot: they carry no certs join, so their
+	// COALESCE'd indexes would otherwise lose the tie and leave a
+	// snapshot-retired pool looking still-registered.
+	err := db.QueryRowContext(ctx, `
+SELECT rt.epoch, rt.added_slot,
+       COALESCE(t.block_index, 0), COALESCE(c.cert_index, 0)
+FROM pool_retirement rt
+LEFT JOIN certs c ON c.id = rt.certificate_id
+LEFT JOIN "transaction" t ON t.id = c.transaction_id
+WHERE rt.pool_id = ?
+  AND `+predicate+`
+ORDER BY rt.added_slot DESC,
+         CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC,
+         COALESCE(t.block_index, 0) DESC,
+         COALESCE(c.cert_index, 0) DESC
+LIMIT 1`,
+		append([]any{poolID}, args...)...,
+	).Scan(&epoch, &addedSlot, &blockIdx, &certIdx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return row, false, nil
+	}
+	if err != nil {
+		return row, false, fmt.Errorf(
+			"pool registration deposit held: read previous retirement: %w",
+			err,
+		)
+	}
+	row.epoch = uint64(epoch)
+	row.position = poolCertPosition{
+		slot:       uint64(addedSlot),
+		blockIndex: uint64(blockIdx),
+		certIndex:  uint64(certIdx),
+	}
+	return row, true, nil
+}
+
+// epochAtSlot resolves the persisted epoch containing slot. It reports
+// resolved=false rather than an error when the epoch table cannot place the
+// slot -- no row starts at or before it, or the nearest row ends before it --
+// because a pool registration write must not fail on missing epoch bookkeeping.
+func epochAtSlot(
+	ctx context.Context,
+	db queryer,
+	slot uint64,
+) (uint64, bool, error) {
+	var epoch, startSlot, length sql.NullInt64
+	err := db.QueryRowContext(ctx, `
+SELECT epoch_id, start_slot, length_in_slots
+FROM epoch
+WHERE start_slot <= ?
+ORDER BY start_slot DESC
+LIMIT 1`,
+		slot,
+	).Scan(&epoch, &startSlot, &length)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("epoch at slot %d: %w", slot, err)
+	}
+	if !epoch.Valid || !startSlot.Valid || !length.Valid {
+		return 0, false, nil
+	}
+	if slot >= uint64(startSlot.Int64+length.Int64) {
+		return 0, false, nil
+	}
+	return uint64(epoch.Int64), true, nil
 }
 
 func (s *Store) ImportPool(
@@ -137,6 +417,14 @@ RETURNING id`,
 				registration.CertificateID,
 				registration.PoolID,
 				registration.AddedSlot,
+				decimalUint64(registration.DepositAmount),
+				// An import's recorded deposit is the amount the source says
+				// the pool is holding: `ledgerstate` reads it out of the
+				// snapshot's PState deposit map, and the genesis and
+				// reconcile-tombstone paths record none. Charged and held are
+				// therefore the same figure here -- there is no earlier
+				// registration in this database to carry a held amount forward
+				// from, because an import writes no certificate history.
 				decimalUint64(registration.DepositAmount),
 				nullBytes(registration.LeiosKeyPublic),
 				nullBytes(registration.LeiosKeyPossessionProof),
@@ -1023,6 +1311,115 @@ ORDER BY item.added_slot ASC, tx.block_index ASC, c.cert_index ASC`,
 	return registrations, retirements, nil
 }
 
+// GetPoolVrfKeyHashAtSlot returns the VRF key hash the pool had registered as
+// of slot, which is not necessarily the one it has registered now.
+//
+// A pool may rotate its VRF key, and a re-registration does not retroactively
+// change the key it was elected under: the leader schedule for an epoch is
+// built from a stake snapshot captured at an earlier boundary, and a block's
+// header carries the key registered at that capture. Validating a header
+// against the current registration rejects every block the pool makes for the
+// rest of the epoch it rotated in (issue #3842).
+//
+// The selection is the same latest-certificate-wins ordering
+// GetActivePoolKeyHashesAtSlot uses -- later added_slot, then later block
+// index, then later certificate index -- so the two agree on which
+// registration was in force.
+//
+// The bool reports whether any registration exists at or before slot. False
+// means the pool had not registered yet, which is a different answer from a
+// pool with no VRF key recorded.
+func (s *Store) GetPoolVrfKeyHashAtSlot(
+	poolKeyHash []byte,
+	slot uint64,
+	txn types.Txn,
+) ([]byte, bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, false, fmt.Errorf(
+			"GetPoolVrfKeyHashAtSlot: resolve db: %w",
+			err,
+		)
+	}
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, false, fmt.Errorf("GetPoolVrfKeyHashAtSlot: %w", err)
+	}
+	var vrfKeyHash []byte
+	err = db.QueryRowContext(ctx, `
+SELECT pr.vrf_key_hash
+FROM pool_registration pr
+JOIN pool p ON p.id = pr.pool_id
+LEFT JOIN certs c ON c.id = pr.certificate_id
+LEFT JOIN "transaction" t ON t.id = c.transaction_id
+WHERE p.pool_key_hash = ?
+  AND pr.added_slot <= ?
+ORDER BY pr.added_slot DESC,
+         COALESCE(t.block_index, 0) DESC,
+         COALESCE(c.cert_index, 0) DESC
+LIMIT 1`,
+		poolKeyHash,
+		slotValue,
+	).Scan(&vrfKeyHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("GetPoolVrfKeyHashAtSlot: %w", err)
+	}
+	return vrfKeyHash, true, nil
+}
+
+// GetPoolEarliestVrfKeyHashAtSlot returns the VRF key hash from the pool's
+// earliest registration at or before the given slot.
+//
+// This is the key cardano-ledger's psStakePools holds for a pool that first
+// registered inside the captured epoch. The POOL rule inserts a first
+// registration into psStakePools directly and defers only a re-registration
+// through psFutureStakePoolParams, so when both land in that epoch the
+// snapshot carries the first one's key. GetPoolVrfKeyHashAtSlot answers the
+// opposite question and would resolve the deferred key.
+func (s *Store) GetPoolEarliestVrfKeyHashAtSlot(
+	poolKeyHash []byte,
+	slot uint64,
+	txn types.Txn,
+) ([]byte, bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, false, fmt.Errorf(
+			"GetPoolEarliestVrfKeyHashAtSlot: resolve db: %w",
+			err,
+		)
+	}
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, false, fmt.Errorf("GetPoolEarliestVrfKeyHashAtSlot: %w", err)
+	}
+	var vrfKeyHash []byte
+	err = db.QueryRowContext(ctx, `
+SELECT pr.vrf_key_hash
+FROM pool_registration pr
+JOIN pool p ON p.id = pr.pool_id
+LEFT JOIN certs c ON c.id = pr.certificate_id
+LEFT JOIN "transaction" t ON t.id = c.transaction_id
+WHERE p.pool_key_hash = ?
+  AND pr.added_slot <= ?
+ORDER BY pr.added_slot ASC,
+         COALESCE(t.block_index, 0) ASC,
+         COALESCE(c.cert_index, 0) ASC
+LIMIT 1`,
+		poolKeyHash,
+		slotValue,
+	).Scan(&vrfKeyHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("GetPoolEarliestVrfKeyHashAtSlot: %w", err)
+	}
+	return vrfKeyHash, true, nil
+}
+
 func (s *Store) GetActivePoolKeyHashesAtSlot(
 	slot uint64,
 	txn types.Txn,
@@ -1835,7 +2232,8 @@ func (s *Store) GetPoolsRetiringAtEpoch(
 	rows, err := db.QueryContext(ctx, `
 WITH latest_reg AS (
     SELECT pr.pool_id, pr.added_slot, pr.reward_account,
-           pr.reward_account_credential_tag, pr.deposit_amount,
+           pr.reward_account_credential_tag,
+           COALESCE(pr.deposit_held, pr.deposit_amount) deposit_held,
            COALESCE(t.block_index, 0) block_index,
            COALESCE(c.cert_index, 0) cert_index,
            ROW_NUMBER() OVER (
@@ -1851,11 +2249,13 @@ WITH latest_reg AS (
 ),
 latest_ret AS (
     SELECT rt.pool_id, rt.added_slot, rt.epoch,
+           CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END synthetic_ret,
            COALESCE(t.block_index, 0) block_index,
            COALESCE(c.cert_index, 0) cert_index,
            ROW_NUMBER() OVER (
                PARTITION BY rt.pool_id
                ORDER BY rt.added_slot DESC,
+                        CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC,
                         COALESCE(t.block_index, 0) DESC,
                         COALESCE(c.cert_index, 0) DESC
            ) rn
@@ -1865,16 +2265,16 @@ latest_ret AS (
     WHERE rt.added_slot < ?
 )
 SELECT p.pool_key_hash, reg.reward_account,
-       reg.reward_account_credential_tag, reg.deposit_amount
+       reg.reward_account_credential_tag, reg.deposit_held
 FROM pool p
 JOIN latest_reg reg ON reg.pool_id = p.id AND reg.rn = 1
 JOIN latest_ret ret ON ret.pool_id = p.id AND ret.rn = 1
 WHERE ret.epoch = ?
   AND NOT (
       ret.added_slot < reg.added_slot
-      OR (ret.added_slot = reg.added_slot
+      OR (ret.added_slot = reg.added_slot AND ret.synthetic_ret = 0
           AND ret.block_index < reg.block_index)
-      OR (ret.added_slot = reg.added_slot
+      OR (ret.added_slot = reg.added_slot AND ret.synthetic_ret = 0
           AND ret.block_index = reg.block_index
           AND ret.cert_index < reg.cert_index)
   )`,
@@ -1905,8 +2305,107 @@ WHERE ret.epoch = ?
 		if err != nil {
 			return nil, err
 		}
-		refund.DepositAmount = types.Uint64(value)
+		refund.DepositHeld = types.Uint64(value)
 		ret = append(ret, refund)
+	}
+	return ret, rows.Err()
+}
+
+// GetPoolKeyHashesRetiredByEpoch is GetPoolsRetiringAtEpoch's "at or before"
+// sibling: same latest-certificate resolution and same cancellation rule, but
+// it matches every retirement effective up to and including epoch rather than
+// only the one landing on it, and returns bare key hashes because no deposit
+// refund is being applied. See MetadataStore's doc comment for why the parity
+// checker needs the wider comparison (dingo #3925).
+//
+// "Same resolution" includes the synthetic-retirement key every
+// latest-retirement query in the tree shares. A reconcile retirement
+// (certificate_id = 0) has no certs/transaction join, so its COALESCE'd
+// block_index/cert_index are both zero: without ranking it first and exempting
+// it from the same-slot cancellation clauses it would lose the tie-break to any
+// certificate-backed registration in its own slot, and the pool would be
+// reported as still active. ledgerstate's snapshot import writes exactly that
+// shape — ImportPool followed by RetirePools at one slot — so this is the
+// ordinary bootstrap case, not an edge case. DingoDB.GetPoolsRetiredByEpoch
+// carries the same three elements, and koiosparity's
+// implementations-agree test runs both against one database to pin them
+// against drift.
+func (s *Store) GetPoolKeyHashesRetiredByEpoch(
+	epoch uint64,
+	boundarySlot uint64,
+	txn types.Txn,
+) ([][]byte, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetPoolKeyHashesRetiredByEpoch: resolve db: %w",
+			err,
+		)
+	}
+	rows, err := db.QueryContext(ctx, `
+WITH latest_reg AS (
+    SELECT pr.pool_id, pr.added_slot,
+           COALESCE(t.block_index, 0) block_index,
+           COALESCE(c.cert_index, 0) cert_index,
+           ROW_NUMBER() OVER (
+               PARTITION BY pr.pool_id
+               ORDER BY pr.added_slot DESC,
+                        COALESCE(t.block_index, 0) DESC,
+                        COALESCE(c.cert_index, 0) DESC
+           ) rn
+    FROM pool_registration pr
+    LEFT JOIN certs c ON c.id = pr.certificate_id
+    LEFT JOIN "transaction" t ON t.id = c.transaction_id
+    WHERE pr.added_slot < ?
+),
+latest_ret AS (
+    SELECT rt.pool_id, rt.added_slot, rt.epoch,
+           CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END synthetic_ret,
+           COALESCE(t.block_index, 0) block_index,
+           COALESCE(c.cert_index, 0) cert_index,
+           ROW_NUMBER() OVER (
+               PARTITION BY rt.pool_id
+               ORDER BY rt.added_slot DESC,
+                        CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC,
+                        COALESCE(t.block_index, 0) DESC,
+                        COALESCE(c.cert_index, 0) DESC
+           ) rn
+    FROM pool_retirement rt
+    LEFT JOIN certs c ON c.id = rt.certificate_id
+    LEFT JOIN "transaction" t ON t.id = c.transaction_id
+    WHERE rt.added_slot < ?
+)
+SELECT p.pool_key_hash
+FROM pool p
+JOIN latest_reg reg ON reg.pool_id = p.id AND reg.rn = 1
+JOIN latest_ret ret ON ret.pool_id = p.id AND ret.rn = 1
+WHERE ret.epoch <= ?
+  AND NOT (
+      ret.added_slot < reg.added_slot
+      OR (ret.added_slot = reg.added_slot AND ret.synthetic_ret = 0
+          AND ret.block_index < reg.block_index)
+      OR (ret.added_slot = reg.added_slot AND ret.synthetic_ret = 0
+          AND ret.block_index = reg.block_index
+          AND ret.cert_index < reg.cert_index)
+  )`,
+		boundarySlot,
+		boundarySlot,
+		epoch,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetPoolKeyHashesRetiredByEpoch: query pools: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+	ret := [][]byte{}
+	for rows.Next() {
+		var poolKeyHash []byte
+		if err := rows.Scan(&poolKeyHash); err != nil {
+			return nil, err
+		}
+		ret = append(ret, poolKeyHash)
 	}
 	return ret, rows.Err()
 }

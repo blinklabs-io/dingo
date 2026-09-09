@@ -403,7 +403,7 @@ func FetchCloudManifest(
 	opts ...ManifestOption,
 ) (m Manifest, ok bool, err error) {
 	if _, err := manifestByteLimit(opts); err != nil {
-		return Manifest{}, true, err
+		return Manifest{}, false, err
 	}
 	dest, err := ParseCloudDestination(registry, snapshotURI)
 	if err != nil {

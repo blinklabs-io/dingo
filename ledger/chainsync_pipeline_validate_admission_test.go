@@ -33,6 +33,8 @@ import (
 func TestShouldVerifyChainsyncHeaderCryptoKeepsAdmissionGate(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{60}, 0, tamperNone)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.validationEnabled = true
@@ -73,6 +75,8 @@ func TestShouldVerifyChainsyncHeaderCryptoKeepsAdmissionGate(
 func TestHandleEventBlockfetchBlockKeepsAdmissionCryptoWhenPipelineValidates(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{61}, 0, tamperVRFProof)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.validationEnabled = true
@@ -97,7 +101,7 @@ func TestHandleEventBlockfetchBlockKeepsAdmissionCryptoWhenPipelineValidates(
 
 	// Without a validating pipeline, the tampered VRF proof is caught
 	// directly here as a genuine (non-deferred) crypto failure.
-	err := ls.handleEventBlockfetchBlock(evt)
+	err := ls.handleEventBlockfetchBlockDeferred(evt, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "crypto verification failed")
 	assert.Empty(t, ls.pendingBlockfetchEvents)
@@ -110,7 +114,7 @@ func TestHandleEventBlockfetchBlockKeepsAdmissionCryptoWhenPipelineValidates(
 	ls.blockPipeline = pipeline.NewBlockPipeline()
 	ls.config.BlockPipelineValidateEnabled = true
 
-	err = ls.handleEventBlockfetchBlock(evt)
+	err = ls.handleEventBlockfetchBlockDeferred(evt, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "crypto verification failed")
 	assert.Empty(t, ls.pendingBlockfetchEvents)
@@ -119,6 +123,8 @@ func TestHandleEventBlockfetchBlockKeepsAdmissionCryptoWhenPipelineValidates(
 func TestHandleEventBlockfetchBlockRejectsInvalidOpCertWhenPipelineValidates(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{62}, 0, tamperOpCertSig)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.validationEnabled = true
@@ -134,14 +140,14 @@ func TestHandleEventBlockfetchBlockRejectsInvalidOpCertWhenPipelineValidates(
 	ls.config.BlockPipelineValidateEnabled = true
 	ls.publishSnapshotsLocked()
 
-	err := ls.handleEventBlockfetchBlock(BlockfetchEvent{
+	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
 		ConnectionId: connId,
 		Block:        tb.block,
 		Point: ocommon.Point{
 			Slot: tb.block.SlotNumber(),
 			Hash: tb.block.Hash().Bytes(),
 		},
-	})
+	}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "opcert cold-key signature invalid")
 	assert.Empty(t, ls.pendingBlockfetchEvents)

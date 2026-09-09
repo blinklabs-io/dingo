@@ -45,7 +45,7 @@ func newTestMultiAsset(
 }
 
 // TestConvertMultiAssetToModelsMaxUint64 covers the maximum in-range value:
-// checkedUint64FromBigInt must not reject anything that legitimately fits
+// CheckedUint64FromBigInt must not reject anything that legitimately fits
 // in a uint64.
 func TestConvertMultiAssetToModelsMaxUint64(t *testing.T) {
 	var policyId lcommon.Blake2b224
@@ -99,6 +99,6 @@ func TestConvertMultiAssetToModelsNilMultiAsset(t *testing.T) {
 // a caller passing a nil *big.Int fails loudly instead of panicking inside
 // IsUint64/Uint64.
 func TestCheckedUint64FromBigIntRejectsNil(t *testing.T) {
-	_, err := checkedUint64FromBigInt(nil)
+	_, err := CheckedUint64FromBigInt(nil)
 	assert.Error(t, err)
 }

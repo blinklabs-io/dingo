@@ -95,6 +95,11 @@ type KoiosParityConfig struct {
 	// CachePath is the Koios reference cache.db path. Empty defaults to
 	// {DatabasePath}/.koios/cache.db.
 	CachePath string
+	// BaseURL overrides the public koios.rest host for the network, for a
+	// self-hosted or mirrored Koios instance. Empty selects the public host.
+	BaseURL string
+	// AllowInsecureHTTP permits a plain-HTTP BaseURL. Local dev/test only.
+	AllowInsecureHTTP bool
 	// APIKey is the Koios Bearer token for higher-rate-limit access.
 	APIKey string
 	// Strict stops/cancels the node on the first Koios/tool error or exact
@@ -558,27 +563,19 @@ func (n *Node) configValidate() error {
 			ouroboros.NetworkCardanoMusashi.NetworkMagic,
 		)
 	}
-	// A peer snapshot carries the network magic it was taken on. During
-	// Genesis selection its relays replace the configured bootstrap peers, so
-	// a snapshot from another network aims the node at that network's relays
-	// and discards the addresses that would have worked. Those relays are then
-	// each denied at the handshake for a magic mismatch, leaving the node with
-	// no peers and no route back to the bootstrap list -- an outage-shaped
-	// failure with a configuration cause. Reject it at startup instead.
+	// Peer snapshot relays replace the configured bootstrap peers during
+	// Genesis selection. Validate the snapshot as one contract before any of
+	// its endpoints can suppress those known-good peers.
 	if n.config.topologyConfig != nil &&
-		n.config.topologyConfig.PeerSnapshot != nil &&
-		internalconfig.PeerSnapshotNetworkMismatch(
-			n.config.topologyConfig.PeerSnapshot.NetworkMagic,
+		n.config.topologyConfig.PeerSnapshot != nil {
+		if err := n.config.topologyConfig.PeerSnapshot.Validate(
 			n.config.cfg.NetworkMagic,
-		) {
-		return fmt.Errorf(
-			"peer snapshot network mismatch: snapshot networkMagic %d does "+
-				"not match the configured networkMagic %d; its relays would "+
-				"replace the configured bootstrap peers and then be refused "+
-				"at the handshake",
-			n.config.topologyConfig.PeerSnapshot.NetworkMagic,
-			n.config.cfg.NetworkMagic,
-		)
+		); err != nil {
+			return fmt.Errorf(
+				"invalid peer snapshot: %w",
+				err,
+			)
+		}
 	}
 	// The block-decode pipeline's vendored decode stage
 	// (gouroboros/pipeline.DecodeStage) calls ledger.NewBlockFromCbor
@@ -768,6 +765,8 @@ func (c *Config) syncCompatFields() {
 		Network:              c.cfg.KoiosParity.Network,
 		CachePath:            c.cfg.KoiosParity.CachePath,
 		APIKey:               c.cfg.KoiosParity.APIKey,
+		BaseURL:              c.cfg.KoiosParity.BaseURL,
+		AllowInsecureHTTP:    c.cfg.KoiosParity.AllowInsecureHTTP,
 		Strict:               c.cfg.KoiosParity.Strict,
 		GraceHours:           c.cfg.KoiosParity.GraceHours,
 		Accounts:             &koiosParityAccounts,
@@ -1568,6 +1567,8 @@ func WithKoiosParity(cfg KoiosParityConfig) ConfigOptionFunc {
 			Network:              cfg.Network,
 			CachePath:            cfg.CachePath,
 			APIKey:               cfg.APIKey,
+			BaseURL:              cfg.BaseURL,
+			AllowInsecureHTTP:    cfg.AllowInsecureHTTP,
 			Strict:               cfg.Strict,
 			GraceHours:           cfg.GraceHours,
 			Accounts:             accounts,

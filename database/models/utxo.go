@@ -44,6 +44,9 @@ var (
 	ErrOffsetRequiresCoarseMatch = errors.New(
 		"offset requires address patterns that do not need exact-address CBOR filtering",
 	)
+	ErrTooManyUtxoResults = errors.New(
+		"utxo query exceeded the requested maxResults bound",
+	)
 )
 
 // UtxoAddressPattern carries explicit address-match intent through the shared
@@ -376,7 +379,7 @@ func UtxoLedgerToModel(
 	slot uint64,
 ) (Utxo, error) {
 	outAddr := utxo.Output.Address()
-	amount, err := checkedUint64FromBigInt(utxo.Output.Amount())
+	amount, err := CheckedUint64FromBigInt(utxo.Output.Amount())
 	if err != nil {
 		return Utxo{}, fmt.Errorf("utxo amount: %w", err)
 	}

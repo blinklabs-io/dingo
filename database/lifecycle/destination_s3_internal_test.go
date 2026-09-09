@@ -37,6 +37,8 @@ import (
 // TestIsS3NotFoundErrorMatchesNoSuchKey verifies the case AWS's own S3
 // actually returns from GetObject on a missing key.
 func TestIsS3NotFoundErrorMatchesNoSuchKey(t *testing.T) {
+	t.Parallel()
+
 	require.True(t, isS3NotFoundError(&types.NoSuchKey{}))
 }
 
@@ -44,6 +46,8 @@ func TestIsS3NotFoundErrorMatchesNoSuchKey(t *testing.T) {
 // s3types.NotFound check, kept even though AWS's own GetObject never
 // actually constructs one.
 func TestIsS3NotFoundErrorMatchesTypedNotFound(t *testing.T) {
+	t.Parallel()
+
 	require.True(t, isS3NotFoundError(&types.NotFound{}))
 }
 
@@ -55,6 +59,8 @@ func TestIsS3NotFoundErrorMatchesTypedNotFound(t *testing.T) {
 // would miss this, silently treating a confirmed-absent snapshot as a
 // real communication failure instead.
 func TestIsS3NotFoundErrorMatchesGenericNotFoundCode(t *testing.T) {
+	t.Parallel()
+
 	err := &smithy.GenericAPIError{Code: "NotFound", Message: "not found"}
 	require.True(t, isS3NotFoundError(err))
 }
@@ -63,6 +69,8 @@ func TestIsS3NotFoundErrorMatchesGenericNotFoundCode(t *testing.T) {
 // throttling, a generic error code that isn't "NotFound") are not
 // misclassified as a confirmed-absent object.
 func TestIsS3NotFoundErrorRejectsOtherErrors(t *testing.T) {
+	t.Parallel()
+
 	require.False(t, isS3NotFoundError(errors.New("connection reset")))
 	require.False(t, isS3NotFoundError(
 		&smithy.GenericAPIError{Code: "AccessDenied", Message: "denied"},

@@ -91,11 +91,14 @@ func ConvertMintToAssetMintBurnModels(
 	return rows
 }
 
-// checkedUint64FromBigInt converts amount to a uint64, rejecting negative
+// CheckedUint64FromBigInt converts amount to a uint64, rejecting negative
 // values and values that exceed math.MaxUint64. big.Int.Uint64 silently
 // keeps only the low 64 bits on overflow, which would otherwise let an
-// indexed asset amount wrap into an unrelated, much smaller value.
-func checkedUint64FromBigInt(amount *big.Int) (uint64, error) {
+// indexed asset amount wrap into an unrelated, much smaller value. Exported
+// so other packages indexing arbitrary-precision on-chain quantities (e.g.
+// midnight/indexer's cNIGHT amounts) share this one check rather than each
+// reimplementing it.
+func CheckedUint64FromBigInt(amount *big.Int) (uint64, error) {
 	if amount == nil {
 		return 0, errors.New("asset amount is nil")
 	}
@@ -130,7 +133,7 @@ func ConvertMultiAssetToModels(
 		// Get asset names for this policy
 		assetNames := multiAsset.Assets(policyId)
 		for _, assetNameBytes := range assetNames {
-			amount, err := checkedUint64FromBigInt(
+			amount, err := CheckedUint64FromBigInt(
 				multiAsset.Asset(policyId, assetNameBytes),
 			)
 			if err != nil {

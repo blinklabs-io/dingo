@@ -89,6 +89,7 @@ type Consumer interface {
 	GetTxFromCache(string) *MempoolTransaction
 	ClearCache()
 	RemoveTxFromCache(string)
+	AcknowledgeOffered(count int)
 }
 
 // Service is the domain-owned mempool capability consumed by node wiring,
@@ -357,7 +358,10 @@ func (o *utxoOverlay) applyTx(
 		cbor:    cbor,
 		created: make(map[string]lcommon.Utxo),
 	}
-	for _, input := range tx.Inputs() {
+	// Consumed is the consensus spent set: regular inputs for valid
+	// transactions and collateral for phase-2-invalid transactions. Using
+	// Inputs here would incorrectly reserve an input the ledger does not spend.
+	for _, input := range tx.Consumed() {
 		key := fmt.Sprintf("%s:%d", input.Id().String(), input.Index())
 		o.consumed[key] = struct{}{}
 		at.consumed = append(at.consumed, key)
@@ -816,7 +820,7 @@ func (m *Mempool) Stop(ctx context.Context) error {
 		select {
 		case <-workersDone:
 		case <-ctx.Done():
-			m.logger.Debug(
+			m.logger.Info(
 				"mempool stop cancelled before workers drained; "+
 					"skipping teardown",
 				"error", ctx.Err(),
@@ -1423,7 +1427,7 @@ func (m *Mempool) removeExpiredTransactions() {
 	expiredHashes := make(map[string]struct{})
 	for _, tx := range m.transactions {
 		if now.Sub(tx.LastSeen) > m.transactionTTL {
-			m.logger.Debug(
+			m.logger.Info(
 				"removing expired transaction",
 				"component", "mempool",
 				"tx_hash", tx.Hash,
@@ -1911,6 +1915,13 @@ func (m *Mempool) RemoveTxsByHash(hashes []string) {
 	}
 	if len(removedHashes) > 0 {
 		m.recordMutationLocked(mempoolMutation{removed: removedHashes})
+		for hash := range removedHashes {
+			m.logger.Info(
+				"confirmed transaction",
+				"component", "mempool",
+				"tx_hash", hash,
+			)
+		}
 	}
 	m.consumersMutex.Unlock()
 	m.Unlock()

@@ -600,6 +600,35 @@ func TestGetLatestBlock(t *testing.T) {
 	require.Equal(t, tip.Slot, resp.GetBlock().GetSlotNumber())
 }
 
+// TestGetLatestBlock_BlockNumberOutOfDomain verifies that a stored block
+// number above uint32 range (the Midnight wire type) is rejected with a
+// stable, generic Internal error rather than silently wrapping (uint32(v)
+// on a value one past math.MaxUint32 truncates to 0).
+func TestGetLatestBlock_BlockNumberOutOfDomain(t *testing.T) {
+	db := newTestDatabase(t)
+	badNumber := uint64(math.MaxUint32) + 1
+	insertPlaceholderBlock(t, db, badNumber, 1, 0x01)
+
+	addr := startTestServerWithConfig(
+		t,
+		server.Config{
+			Database:  server.NewDatabase(db),
+			SlotTimer: fakeSlotTimer{},
+		},
+	)
+	client := dialClient(t, addr)
+
+	_, err := client.GetLatestBlock(callCtx(t), &midnight.LatestBlockRequest{})
+	require.Equal(t, codes.Internal, status.Code(err))
+	msg := status.Convert(err).Message()
+	require.NotContains(
+		t,
+		msg,
+		"4294967296",
+		"internal error must not leak the raw stored value to the client",
+	)
+}
+
 func TestGetBlockByHash(t *testing.T) {
 	db := newTestDatabase(t)
 	blk := loadRealTestBlock(t)
@@ -779,4 +808,37 @@ func TestGetStableBlock_AsOfTimestamp(t *testing.T) {
 		"older block must be stable relative to the as-of tip",
 	)
 	require.Equal(t, uint32(older.Number), resp.GetBlock().GetBlockNumber())
+}
+
+// TestGetStableBlock_AsOfTimestampOutOfDomain verifies that an
+// AsOfTimestampUnixMillis above int64 range is rejected as InvalidArgument
+// rather than being converted with int64(v), which would silently wrap it
+// into a negative timestamp and resolve against a bogus slot.
+func TestGetStableBlock_AsOfTimestampOutOfDomain(t *testing.T) {
+	db := newTestDatabase(t)
+	blk := insertPlaceholderBlock(t, db, 10, 10, 0x01)
+
+	addr := startTestServerWithConfig(
+		t,
+		server.Config{
+			Database:  server.NewDatabase(db),
+			SlotTimer: fakeSlotTimer{},
+		},
+	)
+	client := dialClient(t, addr)
+
+	const badAsOfMillis = uint64(math.MaxInt64) + 1
+	_, err := client.GetStableBlock(callCtx(t), &midnight.StableBlockRequest{
+		BlockHash:               blk.Hash,
+		AsOfTimestampUnixMillis: badAsOfMillis,
+	})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+
+	_, err = client.GetLatestStableBlock(
+		callCtx(t),
+		&midnight.LatestStableBlockRequest{
+			AsOfTimestampUnixMillis: badAsOfMillis,
+		},
+	)
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
 }

@@ -15,11 +15,10 @@
 package ledger
 
 import (
-	"crypto/ed25519"
-	"encoding/binary"
 	"errors"
 	"fmt"
 
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -61,29 +60,29 @@ func opCertFromHeader(header ledger.BlockHeader) (*ledger.OpCert, bool) {
 	case *shelley.ShelleyBlockHeader:
 		return shelleyOpCert(
 			h.Body.OpCertHotVkey,
-			h.Body.OpCertSequenceNumber,
-			h.Body.OpCertKesPeriod,
+			uint64(h.Body.OpCertSequenceNumber),
+			uint64(h.Body.OpCertKesPeriod),
 			h.Body.OpCertSignature,
 		), true
 	case *allegra.AllegraBlockHeader:
 		return shelleyOpCert(
 			h.Body.OpCertHotVkey,
-			h.Body.OpCertSequenceNumber,
-			h.Body.OpCertKesPeriod,
+			uint64(h.Body.OpCertSequenceNumber),
+			uint64(h.Body.OpCertKesPeriod),
 			h.Body.OpCertSignature,
 		), true
 	case *mary.MaryBlockHeader:
 		return shelleyOpCert(
 			h.Body.OpCertHotVkey,
-			h.Body.OpCertSequenceNumber,
-			h.Body.OpCertKesPeriod,
+			uint64(h.Body.OpCertSequenceNumber),
+			uint64(h.Body.OpCertKesPeriod),
 			h.Body.OpCertSignature,
 		), true
 	case *alonzo.AlonzoBlockHeader:
 		return shelleyOpCert(
 			h.Body.OpCertHotVkey,
-			h.Body.OpCertSequenceNumber,
-			h.Body.OpCertKesPeriod,
+			uint64(h.Body.OpCertSequenceNumber),
+			uint64(h.Body.OpCertKesPeriod),
 			h.Body.OpCertSignature,
 		), true
 	case *babbage.BabbageBlockHeader:
@@ -95,16 +94,22 @@ func opCertFromHeader(header ledger.BlockHeader) (*ledger.OpCert, bool) {
 	}
 }
 
+// shelleyOpCert takes the counter and KES period as uint64 because that is
+// what cardano-ledger decodes them as (Word64 and KESPeriod{Word}) and what
+// ledger.OpCert already carries. The TPraos header bodies they come from are
+// gouroboros types whose declared width is the release's to choose, so the
+// call sites convert; widening this signature keeps that conversion the only
+// place a release change is visible and keeps it lossless in either direction.
 func shelleyOpCert(
 	hotVkey []byte,
-	sequenceNumber uint32,
-	kesPeriod uint32,
+	sequenceNumber uint64,
+	kesPeriod uint64,
 	signature []byte,
 ) *ledger.OpCert {
 	return &ledger.OpCert{
 		KesVkey:       hotVkey,
-		IssueNumber:   uint64(sequenceNumber),
-		KesPeriod:     uint64(kesPeriod),
+		IssueNumber:   sequenceNumber,
+		KesPeriod:     kesPeriod,
 		ColdSignature: signature,
 	}
 }
@@ -150,24 +155,7 @@ func validateOpCertCounter(
 	candidate uint64,
 	enforceNoGap bool,
 ) error {
-	if !found {
-		return nil
-	}
-	if candidate < stored {
-		return fmt.Errorf(
-			"opcert counter %d is below last seen %d (stale or stolen hot key)",
-			candidate,
-			stored,
-		)
-	}
-	if enforceNoGap && candidate > stored+1 {
-		return fmt.Errorf(
-			"opcert counter %d skips ahead of last seen %d (gapped rotation)",
-			candidate,
-			stored,
-		)
-	}
-	return nil
+	return eras.ValidateOpCertCounter(stored, found, candidate, enforceNoGap)
 }
 
 // ValidateLeiosAnnouncementHeader validates the announcement's header crypto
@@ -245,15 +233,6 @@ func (ls *LedgerState) leiosAnnouncementOCINStaleness(
 	return LeiosAnnouncementFreshOCIN, nil
 }
 
-const (
-	// opCertKesVkeySize is the length of the KES (hot) verification key carried
-	// in an operational certificate.
-	opCertKesVkeySize = 32
-	// opCertSignableSize is the length of the cardano-ledger OCertSignable
-	// representation: KES vkey || counter (uint64 BE) || KES period (uint64 BE).
-	opCertSignableSize = opCertKesVkeySize + 8 + 8
-)
-
 // verifyOpCertColdSignature verifies the pool cold-key signature over the
 // operational certificate.
 //
@@ -261,49 +240,18 @@ const (
 // raw concatenation of the KES (hot) verification key, the issue counter as a
 // big-endian uint64, and the KES period as a big-endian uint64 — NOT a CBOR
 // encoding. This matches what cardano-node signs (verified byte-for-byte
-// against a real cardano-cli NodeOperationalCertificate) and the forging-side
-// check in ledger/forging/keys.go ValidateOpCert.
+// against a real cardano-cli NodeOperationalCertificate; see
+// TestVerifyOpCertColdSignature_RealCardanoCliCert) and the forging-side check
+// in ledger/forging/keys.go ValidateOpCert.
 //
-// gouroboros' ledger.VerifyOpCertSignature is intentionally NOT used here: it
-// hashes a CBOR array ([kes_vkey, issue_number, kes_period]) instead of this
-// raw representation, which does not match real opcerts and would reject every
-// inbound block.
+// gouroboros' ledger.VerifyOpCertSignature builds this same raw
+// representation (via ledger/common.OpCertSignableBytes), so this delegates
+// to it directly instead of re-deriving the byte layout locally. That was not
+// always true: gouroboros previously hashed a CBOR array
+// ([kes_vkey, issue_number, kes_period]) here, which does not match real
+// opcerts and would have rejected every inbound block.
 func verifyOpCertColdSignature(opCert *ledger.OpCert, coldVkey []byte) error {
-	if len(coldVkey) != ed25519.PublicKeySize {
-		return fmt.Errorf(
-			"cold vkey must be %d bytes, got %d",
-			ed25519.PublicKeySize,
-			len(coldVkey),
-		)
-	}
-	if len(opCert.KesVkey) != opCertKesVkeySize {
-		return fmt.Errorf(
-			"KES vkey must be %d bytes, got %d",
-			opCertKesVkeySize,
-			len(opCert.KesVkey),
-		)
-	}
-	if len(opCert.ColdSignature) != ed25519.SignatureSize {
-		return fmt.Errorf(
-			"cold signature must be %d bytes, got %d",
-			ed25519.SignatureSize,
-			len(opCert.ColdSignature),
-		)
-	}
-	var signable [opCertSignableSize]byte
-	copy(signable[:opCertKesVkeySize], opCert.KesVkey)
-	binary.BigEndian.PutUint64(
-		signable[opCertKesVkeySize:opCertKesVkeySize+8],
-		opCert.IssueNumber,
-	)
-	binary.BigEndian.PutUint64(
-		signable[opCertKesVkeySize+8:],
-		opCert.KesPeriod,
-	)
-	if !ed25519.Verify(coldVkey, signable[:], opCert.ColdSignature) {
-		return errors.New("signature verification failed")
-	}
-	return nil
+	return ledger.VerifyOpCertSignature(opCert, coldVkey)
 }
 
 // verifyOpCertHeaderCrypto performs the stateless inbound operational

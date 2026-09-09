@@ -628,8 +628,9 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	n.chainManager = cm
 	// The contextcheck exemption below covers ledgerStateConfig's
 	// EndorserBlockFetcher callback: it is driven by the ledger's own later
-	// call, exactly as the method value it replaced was, and only defers
-	// resolving n.ouroboros() -- it does not inherit this function's ctx.
+	// call and receives that call's fetch context. The closure only defers
+	// resolving n.ouroboros() until the callback fires; it does not inherit this
+	// reinitialization function's ctx.
 	state, err := ledger.NewLedgerState(
 		n.ledgerStateConfig(), //nolint:contextcheck
 	)
@@ -657,6 +658,10 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to recreate bark blob store: %w", err)
 		}
+		// The wrapper's upstream is the store it replaces and its Close
+		// forwards there, so the replaced store stays in use: there is
+		// nothing to drain and nothing to close. Both results are
+		// deliberately discarded.
 		n.db.SetBlobStore(barkBlobStore)
 	}
 
@@ -691,13 +696,13 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	return nil
 }
 
-// reinitializeMidnightIndexer recreates the Midnight indexer (if API
-// storage mode) before n.ledgerState.Start, for the same race-avoidance
+// reinitializeMidnightIndexer recreates the enabled Midnight indexer in API
+// storage mode before n.ledgerState.Start, for the same race-avoidance
 // reason Run() creates it before starting the ledger: the synchronous
 // backfill must run while no new blocks can arrive, and the EventBus
 // subscription must exist before any BlockActionApply event can fire.
 func (n *Node) reinitializeMidnightIndexer() error {
-	if !n.config.storageMode.IsAPI() {
+	if !midnightIndexerActive(n.config.storageMode, n.config.midnight) {
 		return nil
 	}
 	if err := n.ledgerState.PrepareEpochCacheForStartup(); err != nil {
@@ -706,41 +711,7 @@ func (n *Node) reinitializeMidnightIndexer() error {
 			err,
 		)
 	}
-	midnightIdx, err := midnightindexer.New(midnightindexer.Config{
-		EventBus:                    n.eventBus,
-		Metadata:                    n.db.Metadata(),
-		SlotTimer:                   n.ledgerState,
-		Logger:                      n.config.logger,
-		PromRegistry:                n.config.promRegistry,
-		CNightPolicyID:              n.config.midnight.CNightPolicyID,
-		CNightAssetName:             n.config.midnight.CNightAssetName,
-		MappingValidatorAddress:     n.config.midnight.MappingValidatorAddress,
-		AuthTokenPolicyID:           n.config.midnight.AuthTokenPolicyID,
-		AuthTokenAssetName:          n.config.midnight.AuthTokenAssetName,
-		TechnicalCommitteeAddress:   n.config.midnight.TechnicalCommitteeAddress,
-		TechnicalCommitteePolicyID:  n.config.midnight.TechnicalCommitteePolicyID,
-		CouncilAddress:              n.config.midnight.CouncilAddress,
-		CouncilPolicyID:             n.config.midnight.CouncilPolicyID,
-		PermissionedCandidatePolicy: n.config.midnight.PermissionedCandidatePolicy,
-		CommitteeCandidateAddress:   n.config.midnight.CommitteeCandidateAddress,
-		SlotToEpoch: func(slot uint64) (uint64, error) {
-			epoch, err := n.ledgerState.SlotToEpoch(slot)
-			if err != nil {
-				return 0, err
-			}
-			return epoch.EpochId, nil
-		},
-		BlockIterator: func(startSlot, endSlot uint64, fn func(models.Block) error) error {
-			return database.ForEachBlockInRangeDB(n.db, startSlot, endSlot, fn)
-		},
-		FatalErrorFunc: func(err error) {
-			n.config.logger.Error(
-				"fatal midnight indexer error, initiating shutdown",
-				"error", err,
-			)
-			n.cancel()
-		},
-	})
+	midnightIdx, err := midnightindexer.New(n.midnightIndexerConfig())
 	if err != nil {
 		return fmt.Errorf("recreating midnight indexer: %w", err)
 	}
@@ -934,8 +905,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 			ConnClosedFunc:      n.handleConnManagerClosed,
 		},
 	)
-	n.connManagerRecycleSubId = n.eventBus.SubscribeFunc(
-		connmanager.ConnectionRecycleRequestedEventType,
+	n.connManagerRecycleSubId = n.subscribeConnectionRecycleRequests(
 		n.connManager.HandleConnectionRecycleRequestedEvent,
 	)
 

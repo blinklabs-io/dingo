@@ -80,6 +80,8 @@ func (h *captureSlogHandler) WithGroup(string) slog.Handler {
 }
 
 func TestDownloadSnapshot(t *testing.T) {
+	t.Parallel()
+
 	content := []byte("fake-snapshot-archive-data-for-testing")
 
 	server := httptest.NewServer(
@@ -128,6 +130,8 @@ func TestDownloadSnapshot(t *testing.T) {
 }
 
 func TestDownloadSnapshotRoutineLogsAtDebug(t *testing.T) {
+	t.Parallel()
+
 	content := []byte("snapshot")
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -168,6 +172,8 @@ func TestDownloadSnapshotRoutineLogsAtDebug(t *testing.T) {
 }
 
 func TestNewPooledDownloadTransportUsesHTTP1Connections(t *testing.T) {
+	t.Parallel()
+
 	transport := newPooledDownloadTransport(4)
 
 	require.False(t, transport.DisableKeepAlives)
@@ -182,6 +188,8 @@ func TestNewPooledDownloadTransportUsesHTTP1Connections(t *testing.T) {
 }
 
 func TestDownloadSnapshotResume(t *testing.T) {
+	t.Parallel()
+
 	// Full content: "AAABBB"
 	fullContent := []byte("AAABBB")
 
@@ -230,6 +238,8 @@ func TestDownloadSnapshotResume(t *testing.T) {
 }
 
 func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
+	t.Parallel()
+
 	fullContent := []byte("AAABBB")
 	var requestCount atomic.Int32
 	resumeRangeCh := make(chan string, 1)
@@ -305,6 +315,8 @@ func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
 }
 
 func TestDownloadSnapshotIdleRetriesResetAfterProgress(t *testing.T) {
+	t.Parallel()
+
 	fullContent := []byte("AAABBBCCC")
 	var requestCount atomic.Int32
 	rangeCh := make(chan string, 2)
@@ -399,6 +411,8 @@ func TestDownloadSnapshotIdleRetriesResetAfterProgress(t *testing.T) {
 }
 
 func TestDownloadSnapshotRejectsNegativeMaxIdleRetries(t *testing.T) {
+	t.Parallel()
+
 	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
 		URL:            "http://example.invalid/snapshot.tar.zst",
 		DestDir:        t.TempDir(),
@@ -414,6 +428,8 @@ func TestDownloadSnapshotRejectsNegativeMaxIdleRetries(t *testing.T) {
 // untrusted, so the scheme is checked up front rather than relying on
 // httpsOnlyRedirect, which only governs where a redirect may lead.
 func TestDownloadSnapshotRejectsPlainHTTPByDefault(t *testing.T) {
+	t.Parallel()
+
 	called := false
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -440,6 +456,8 @@ func TestDownloadSnapshotRejectsPlainHTTPByDefault(t *testing.T) {
 // DownloadConfig.AllowInsecureHTTP is a working, explicit escape hatch
 // (used throughout this package's own httptest-based tests).
 func TestDownloadSnapshotAllowsPlainHTTPWithEscapeHatch(t *testing.T) {
+	t.Parallel()
+
 	content := []byte("fake-snapshot-data")
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -465,6 +483,8 @@ func TestDownloadSnapshotAllowsPlainHTTPWithEscapeHatch(t *testing.T) {
 // against the loopback TLS test server's self-signed certificate, which
 // is expected — the point is that it isn't rejected for its scheme).
 func TestDownloadSnapshotAcceptsHTTPSByDefault(t *testing.T) {
+	t.Parallel()
+
 	server := httptest.NewTLSServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -482,6 +502,8 @@ func TestDownloadSnapshotAcceptsHTTPSByDefault(t *testing.T) {
 }
 
 func TestIdleTimeoutReaderStopsTimerBetweenReads(t *testing.T) {
+	t.Parallel()
+
 	idleCh := make(chan struct{}, 1)
 	reader := newIdleTimeoutReader(
 		bytes.NewReader([]byte("abc")),
@@ -509,6 +531,8 @@ func TestIdleTimeoutReaderStopsTimerBetweenReads(t *testing.T) {
 }
 
 func TestDownloadSnapshotContextCancel(t *testing.T) {
+	t.Parallel()
+
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Simulate a slow response that never completes
@@ -532,6 +556,8 @@ func TestDownloadSnapshotContextCancel(t *testing.T) {
 }
 
 func TestDownloadSnapshotServerError(t *testing.T) {
+	t.Parallel()
+
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			http.Error(
@@ -555,6 +581,8 @@ func TestDownloadSnapshotServerError(t *testing.T) {
 }
 
 func TestDownloadSnapshotTransientRetrySucceeds(t *testing.T) {
+	t.Parallel()
+
 	content := []byte("ok-after-transient")
 	var requestCount atomic.Int32
 
@@ -596,6 +624,8 @@ func TestDownloadSnapshotTransientRetrySucceeds(t *testing.T) {
 }
 
 func TestDownloadSnapshotTransientRetryExhausted(t *testing.T) {
+	t.Parallel()
+
 	var requestCount atomic.Int32
 
 	server := httptest.NewServer(
@@ -625,6 +655,8 @@ func TestDownloadSnapshotTransientRetryExhausted(t *testing.T) {
 }
 
 func TestIsTransientDownloadError(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name      string
 		err       error
@@ -675,6 +707,8 @@ func TestIsTransientDownloadError(t *testing.T) {
 }
 
 func TestDownloadSnapshotSizeVerification(t *testing.T) {
+	t.Parallel()
+
 	content := []byte("exact-size-content")
 
 	server := httptest.NewServer(
@@ -705,6 +739,8 @@ func TestDownloadSnapshotSizeVerification(t *testing.T) {
 }
 
 func TestDownloadSnapshotSizeMismatch(t *testing.T) {
+	t.Parallel()
+
 	content := []byte("short-content")
 
 	server := httptest.NewServer(
@@ -920,6 +956,8 @@ func TestDownloadConfigByteLimit(t *testing.T) {
 // the OS and follow such a symlink, writing attacker-controlled data
 // outside DestDir.
 func TestDownloadSnapshotRejectsPreexistingSymlinkEscape(t *testing.T) {
+	t.Parallel()
+
 	if runtime.GOOS == "windows" {
 		t.Skip("creating symlinks requires elevated privileges on windows")
 	}
@@ -962,6 +1000,8 @@ func TestDownloadSnapshotRejectsPreexistingSymlinkEscape(t *testing.T) {
 // would silently succeed and write through such a symlink, because
 // neither call inspects what it is binding to before using it.
 func TestDownloadSnapshotRefusesSymlinkedDestDir(t *testing.T) {
+	t.Parallel()
+
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("data"))
@@ -1004,6 +1044,8 @@ func TestDownloadSnapshotRefusesSymlinkedDestDir(t *testing.T) {
 // publish.yml), but this proves the behavior rather than just the
 // absence of a CVE identifier.
 func TestOsRootRejectsFinalSymlinkWithTrailingSlash(t *testing.T) {
+	t.Parallel()
+
 	if runtime.GOOS == "windows" {
 		t.Skip("creating symlinks requires elevated privileges on windows")
 	}
@@ -1031,6 +1073,8 @@ func TestOsRootRejectsFinalSymlinkWithTrailingSlash(t *testing.T) {
 }
 
 func TestDownloadSnapshotDefaultFilename(t *testing.T) {
+	t.Parallel()
+
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("data"))
@@ -1054,6 +1098,8 @@ func TestDownloadSnapshotDefaultFilename(t *testing.T) {
 }
 
 func TestParseContentRangeStart(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name   string
 		header string
@@ -1110,6 +1156,8 @@ func TestParseContentRangeStart(t *testing.T) {
 }
 
 func TestDownloadSnapshotResumeContentRangeMismatch(t *testing.T) {
+	t.Parallel()
+
 	// Server returns 206 but with the wrong Content-Range start
 	// offset. The downloader should detect this and restart from
 	// scratch.
@@ -1175,6 +1223,8 @@ func TestDownloadSnapshotResumeContentRangeMismatch(t *testing.T) {
 }
 
 func TestDownloadSnapshotResumeMissingContentRange(t *testing.T) {
+	t.Parallel()
+
 	// Server returns 206 without a Content-Range header. The
 	// downloader should treat this as a mismatch (since
 	// parseContentRangeStart returns -1) and restart from scratch.
@@ -1300,6 +1350,8 @@ func TestExtractArchiveZstdLimits(t *testing.T) {
 }
 
 func TestExtractArchive(t *testing.T) {
+	t.Parallel()
+
 	files := map[string]string{
 		"immutable/00000.chunk":     "chunk0 data",
 		"immutable/00000.primary":   "primary0 data",
@@ -1335,6 +1387,8 @@ func TestExtractArchive(t *testing.T) {
 }
 
 func TestExtractArchiveDirectoryTraversal(t *testing.T) {
+	t.Parallel()
+
 	// Create an archive with a path traversal attempt
 	archiveData := createTestArchive(t, map[string]string{
 		"../../../etc/passwd": "evil",
@@ -1352,6 +1406,8 @@ func TestExtractArchiveDirectoryTraversal(t *testing.T) {
 }
 
 func TestExtractArchiveWithDirectories(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 
 	zw, err := zstd.NewWriter(&buf)
@@ -1400,6 +1456,8 @@ func TestExtractArchiveWithDirectories(t *testing.T) {
 }
 
 func TestValidRelPath(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name  string
 		path  string

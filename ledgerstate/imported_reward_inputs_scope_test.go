@@ -37,6 +37,8 @@ import (
 // made mark and go fail validation while set passed because its own complete
 // parameters replaced the synthetic entry.
 func TestSeedImportedRewardInputsScopesFallbackToTargetSnapshot(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -161,6 +163,8 @@ func TestSeedImportedRewardInputsScopesFallbackToTargetSnapshot(t *testing.T) {
 // parameters, validation must still reject the whole epoch rather than seed
 // a partial basis that understates every other pool's reward share.
 func TestEffectiveRewardPoolParamsKeepsIncompleteReferencedPool(t *testing.T) {
+	t.Parallel()
+
 	pool := scopedRewardTestPool(0xC3, 0x41)
 	compact := &ParsedPool{
 		PoolKeyHash: pool.PoolKeyHash,
@@ -185,6 +189,8 @@ func TestEffectiveRewardPoolParamsKeepsIncompleteReferencedPool(t *testing.T) {
 // such pool and its delegated stake, though, so operators can see the whole
 // blast radius instead of whichever map entry validation visited first.
 func TestDerivedRewardInputsReportsAllIncompleteReferencedPools(t *testing.T) {
+	t.Parallel()
+
 	poolA := scopedRewardTestPoolFromKey(
 		t,
 		"102e9ff50bee440b1ef337f58d1760a5475f3ce716f2aab60e6ef424",
@@ -227,6 +233,32 @@ func TestDerivedRewardInputsReportsAllIncompleteReferencedPools(t *testing.T) {
 	require.ErrorContains(t, err,
 		"1fc372fdce61f42d31be7ddfc2bf8e343b08a54e4d3e6d64b2e328ff")
 	require.ErrorContains(t, err, "397411504 lovelace delegated stake")
+}
+
+func TestDerivedRewardInputsBoundsIncompletePoolDiagnostic(t *testing.T) {
+	t.Parallel()
+
+	const poolCount = maxRewardSeedFailurePools + 8
+	snapshot := &ParsedSnapShot{
+		Stake:       make(map[string]uint64, poolCount),
+		Delegations: make(map[string][]byte, poolCount),
+	}
+	params := make(map[string]*ParsedPool, poolCount)
+	for i := range poolCount {
+		credential := hash28(byte(i + 1))
+		poolKey := hash28(byte(i + 100))
+		credentialHex := hex.EncodeToString(credential)
+		poolHex := hex.EncodeToString(poolKey)
+		snapshot.Stake[credentialHex] = 1
+		snapshot.Delegations[credentialHex] = poolKey
+		params[poolHex] = &ParsedPool{PoolKeyHash: poolKey}
+	}
+
+	bundle := deriveRewardInputs(snapshot, params, 1, 1, 0)
+	err := bundle.validate()
+	require.Error(t, err)
+	require.ErrorContains(t, err, "additional pools omitted")
+	require.LessOrEqual(t, len(err.Error()), 4_096)
 }
 
 func scopedRewardTestPool(poolByte, rewardByte byte) *ParsedPool {
