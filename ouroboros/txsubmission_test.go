@@ -785,6 +785,71 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 	}
 }
 
+func TestValidateTxsubmissionReplyChecksByteBudgetBeforeDecode(t *testing.T) {
+	t.Parallel()
+	testCases := []struct {
+		name      string
+		sizes     []uint32
+		bodies    [][]byte
+		overLimit bool
+	}{
+		{
+			name:      "single body exceeds budget",
+			sizes:     []uint32{1},
+			bodies:    [][]byte{{0xff, 0xff}},
+			overLimit: true,
+		},
+		{
+			name:      "later body exceeds aggregate before first decode",
+			sizes:     []uint32{1, 1},
+			bodies:    [][]byte{{0xff}, {0xff, 0xff}},
+			overLimit: true,
+		},
+		{
+			name:      "zero budget",
+			sizes:     []uint32{0},
+			bodies:    [][]byte{{0xff}},
+			overLimit: true,
+		},
+		{
+			name:   "exact budget still decodes",
+			sizes:  []uint32{1},
+			bodies: [][]byte{{0xff}},
+		},
+		{
+			name:   "below budget still decodes",
+			sizes:  []uint32{2},
+			bodies: [][]byte{{0xff}},
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			requested := make([]txsubmission.TxIdAndSize, len(testCase.sizes))
+			returned := make([]txsubmission.TxBody, len(testCase.bodies))
+			for index, size := range testCase.sizes {
+				requested[index] = txsubmission.TxIdAndSize{
+					TxId: txsubmission.TxId{EraId: txsubmissionRelayTestEraId},
+					Size: size,
+				}
+				returned[index] = txsubmission.TxBody{
+					EraId:  txsubmissionRelayTestEraId,
+					TxBody: testCase.bodies[index],
+				}
+			}
+			validated, err := validateTxsubmissionReply(requested, returned)
+			require.Nil(t, validated)
+			if testCase.overLimit {
+				require.ErrorIs(t, err, errTxsubmissionReplySizeMismatch)
+				require.ErrorContains(t, err, "exceeds byte limit")
+			} else {
+				require.ErrorContains(t, err, "decode failed")
+				require.NotErrorIs(t, err, errTxsubmissionReplySizeMismatch)
+			}
+		})
+	}
+}
+
 func addTxSubmissionTestFixtures(
 	t *testing.T,
 	m mempool.Service,

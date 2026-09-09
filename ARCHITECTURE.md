@@ -4501,6 +4501,12 @@ trip, which can reduce inbound throughput on high-latency peer links. This is
 required because gouroboros acknowledges every ID returned by a peer; support
 for acknowledging only the fetched prefix would permit batched requests.
 
+TxSubmission checks reply counts and aggregate body bytes against the
+outstanding request before decoding any transaction. Replies exceeding the
+advertised byte budget are classified and counted as size mismatches. Replies
+within that budget still require ordered hash/era matching and an exact body
+or wrapped-wire size match for each transaction before any mempool admission.
+
 The selected pool manages pending transactions:
 
 ```
