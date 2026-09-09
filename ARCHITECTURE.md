@@ -2460,7 +2460,9 @@ reference-script size before validating the block's individual transactions.
 Imported blocks use the same database transaction as application, after any
 applicable endorser transactions and before the ranking block's own mutations.
 Forged blocks check a read view of the pre-block state even when full
-self-validation is disabled. The upstream era rules
+self-validation is disabled. Aggregate dispatch rejects missing or typed-nil
+era parameters with an error before the upstream rule dereferences them.
+The upstream era rules
 provide protocol-version-aware input accounting, intra-block output handling,
 and the era's aggregate limit. The explicit non-validating Musashi profile
 retains its Dijkstra validation bypass.

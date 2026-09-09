@@ -52,13 +52,28 @@ func validateBlockReferenceScripts(
 ) error {
 	switch b := block.(type) {
 	case *conway.ConwayBlock:
-		if conwayPParams, ok := pp.(*conway.ConwayProtocolParameters); ok &&
-			state != nil &&
+		conwayPParams, ok := pp.(*conway.ConwayProtocolParameters)
+		if !ok || conwayPParams == nil {
+			return errors.New("pparams are not expected type")
+		}
+		if state != nil &&
 			conwayPParams.ProtocolVersion.Major <= lcommon.ProtocolVersionPlomin {
 			state = pv10ReferenceScriptState{state: state}
 		}
 		return conway.ValidateRefScriptSizePerBlock(b, pp, state)
 	case *dijkstra.DijkstraBlock:
+		// The upstream rule accepts both parameter shapes, but dereferences
+		// either pointer. Reject typed nils before delegating.
+		switch p := pp.(type) {
+		case *dijkstra.DijkstraProtocolParameters:
+			if p == nil {
+				return errors.New("pparams are not expected type")
+			}
+		case *conway.ConwayProtocolParameters:
+			if p == nil {
+				return errors.New("pparams are not expected type")
+			}
+		}
 		return dijkstra.ValidateRefScriptSizePerBlock(b, pp, state)
 	default:
 		return nil
