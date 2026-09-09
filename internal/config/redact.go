@@ -615,6 +615,8 @@ func sortedStringKeys(v reflect.Value) []string {
 // operational value of knowing which host and database the node was
 // pointed at, which is most of the reason the configuration is logged at
 // all.
+// Ambiguous assignment-shaped inputs follow DSN value boundaries: a query-like
+// suffix inside a credential value is redacted too, since it may be secret.
 func redactURICredentials(s string) string {
 	if s == "" {
 		return s
@@ -637,6 +639,8 @@ func redactCredentialParams(s string) string {
 	// values first so a '?' inside a password cannot hide its prefix.
 	// Still scan any remaining query: a relative URI can also start with
 	// "name=value", so that shape alone must not disable query redaction.
+	// If the assignment itself is credential-named, its entire DSN value
+	// stays secret; a '?' suffix cannot safely be assumed to be a URL query.
 	if startsParam(s, skipParamSpace(s, 0), keywordDSNSyntax) {
 		s = redactParams(s, keywordDSNSyntax)
 	}

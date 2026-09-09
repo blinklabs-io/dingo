@@ -8771,6 +8771,11 @@ Inputs beginning with a keyword assignment are sanitized as keyword DSNs
 before scanning any remaining query, so a question mark inside a password
 cannot leave its prefix exposed. Remaining queries are still scanned because
 a relative URI can also begin with an assignment-shaped path.
+When that assignment is credential-named, the input is indistinguishable from
+an unquoted keyword DSN: `password=secret?network=preview` can have the entire
+`secret?network=preview` as its password. The whole value is therefore redacted,
+including its query-looking suffix. A question mark does not end a DSN value;
+preserving an apparent benign URL parameter here could disclose a password.
 A provider-config field (`plugins.*.config`, a
 free-form `map[string]any` whose keys belong to the selected provider, not
 to `Config`) is walked recursively and classified per key name, so a
