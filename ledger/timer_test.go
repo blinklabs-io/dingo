@@ -69,8 +69,6 @@ func TestScheduler_ChangeInterval(t *testing.T) {
 	}, 2*time.Second, 5*time.Millisecond,
 		"expected at least 2 executions before interval change",
 	)
-	beforeChange := counter.Load()
-
 	// updateIntervalChan is unbuffered and ChangeInterval's send is
 	// non-blocking (select/default; see
 	// TestScheduler_StopDoesNotRaceChangeInterval) -- run() can be mid-tick
@@ -115,7 +113,13 @@ func TestScheduler_ChangeInterval(t *testing.T) {
 		"timer did not respect interval change: ran too frequently",
 	)
 
-	require.Greater(t, counter.Load(), beforeChange,
+	// Anchor the lower bound at the post-change reading. Comparing
+	// against a pre-change reading is satisfied by ticks the old interval
+	// delivered while the change was being confirmed, so it passes even
+	// when ticking stopped outright at the change.
+	require.Eventually(t, func() bool {
+		return counter.Load() > afterChangeReq
+	}, 10*time.Second, 10*time.Millisecond,
 		"expected ticking to continue after interval change",
 	)
 }

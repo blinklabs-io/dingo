@@ -426,14 +426,12 @@ func TestSlotClockReceivesTicks(t *testing.T) {
 	clock.Start(ctx)
 	defer clock.Stop()
 
-	// Wait for a tick
-	select {
-	case tick := <-ch:
-		assert.GreaterOrEqual(t, tick.Slot, uint64(0))
-		assert.False(t, tick.SlotStart.IsZero())
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("timeout waiting for slot tick")
-	}
+	// Wait for a tick. The bound is a deadlock guard, not a latency
+	// budget: 200ms is four nominal slot periods, so a slot-clock
+	// goroutine delayed by CI scheduling load misses it with no retry.
+	tick := testutil.RequireReceive(t, ch, 10*time.Second, "slot tick")
+	assert.GreaterOrEqual(t, tick.Slot, uint64(0))
+	assert.False(t, tick.SlotStart.IsZero())
 }
 
 func TestSlotClockEpochBoundary(t *testing.T) {
@@ -451,14 +449,16 @@ func TestSlotClockEpochBoundary(t *testing.T) {
 	clock.Start(ctx)
 	defer clock.Stop()
 
-	// Collect ticks until we see an epoch boundary. Bound the wait by the
-	// test binary's own -timeout deadline (with headroom to still fail
-	// cleanly) rather than an arbitrary real-time window shorter than
-	// that deadline -- a delayed slot-clock goroutine under CI scheduling
-	// load can otherwise miss a fixed short window with no retry.
+	// Collect ticks until we see an epoch boundary. The bound is a
+	// deadlock guard, not a latency budget: the boundary is ~20ms away
+	// and recurs every 10 slots, so 10s admits 50 boundaries and a
+	// slot-clock goroutine delayed by CI scheduling load still passes,
+	// while a clock that stops ticking still fails promptly. Clamp to the
+	// test binary's own -timeout deadline when that is nearer, so the
+	// failure is this t.Fatal rather than a binary-wide timeout panic.
 	waitFor := 10 * time.Second
 	if deadline, ok := t.Deadline(); ok {
-		if remaining := time.Until(deadline) - time.Second; remaining > 0 {
+		if remaining := time.Until(deadline) - time.Second; remaining < waitFor {
 			waitFor = remaining
 		}
 	}
