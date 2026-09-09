@@ -154,7 +154,8 @@ func TestNetworkStatus(t *testing.T) {
 	)
 	require.NotNil(t, resp.SyncStatus)
 	require.NotNil(t, resp.SyncStatus.Synced)
-	require.True(t, *resp.SyncStatus.Synced)
+	// This ledger double does not expose sync progress.
+	require.False(t, *resp.SyncStatus.Synced)
 	require.NotNil(t, resp.Peers)
 	require.Empty(t, resp.Peers)
 }
