@@ -102,6 +102,8 @@ func (m *replayRecoveryInput) ToPlutusData() pdata.PlutusData {
 func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -232,6 +234,8 @@ func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -412,6 +416,8 @@ func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -635,6 +641,8 @@ func atTipDescentFailure(slot uint64, tag string) *txValidationError {
 func TestTryRecoverFromTxValidationErrorAtTipStopsDescendingRewindLoop(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, ledgerTip := newAtTipDescentLedger(t)
 
 	// Feed a descending series of DISTINCT failures. Each first appears
@@ -675,6 +683,8 @@ func TestTryRecoverFromTxValidationErrorAtTipStopsDescendingRewindLoop(
 func TestTryRecoverFromTxValidationErrorAtTipDoesNotHoldOnSameBlockEscalation(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, _ := newAtTipDescentLedger(t)
 
 	ferr := atTipDescentFailure(500, "stable")
@@ -705,6 +715,8 @@ func TestTryRecoverFromTxValidationErrorAtTipDoesNotHoldOnSameBlockEscalation(
 func TestTryRecoverFromTxValidationErrorAtTipResetsDescentOnForwardProgress(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, _ := newAtTipDescentLedger(t)
 
 	// Enough descending distinct failures to enter the hold state.
@@ -734,6 +746,8 @@ func TestTryRecoverFromTxValidationErrorAtTipResetsDescentOnForwardProgress(
 func TestTryRecoverFromTxValidationErrorAtTipRejectsRewindBelowMithrilBoundary(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -874,6 +888,8 @@ func TestTryRecoverFromTxValidationErrorAtTipRejectsRewindBelowMithrilBoundary(
 func TestTryRecoverFromTxValidationErrorFallsBackToTxBlobOffsets(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -981,6 +997,8 @@ func TestTryRecoverFromTxValidationErrorFallsBackToTxBlobOffsets(
 }
 
 func TestTryRecoverFromTxValidationErrorFallsBackToChainScan(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -1118,6 +1136,8 @@ func TestTryRecoverFromTxValidationErrorFallsBackToChainScan(t *testing.T) {
 func TestTryRecoverFromTxValidationErrorRecoversDependencyClosure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -1269,6 +1289,8 @@ func TestTryRecoverFromTxValidationErrorRecoversDependencyClosure(
 func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -1442,6 +1464,8 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -1702,6 +1726,8 @@ func newReplayRecoveryAuditLedger(
 }
 
 func TestReplayRecoveryArmsAuditAfterPrimaryAndLedgerRewind(t *testing.T) {
+	t.Parallel()
+
 	ls := newReplayRecoveryAuditLedger(t, true)
 
 	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
@@ -1721,6 +1747,8 @@ func TestReplayRecoveryArmsAuditAfterPrimaryAndLedgerRewind(t *testing.T) {
 }
 
 func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
+	t.Parallel()
+
 	ls := newReplayRecoveryAuditLedger(t, true)
 	activeConnId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5000},
@@ -1824,6 +1852,8 @@ func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
 // terminal on redelivery, which is what keeps a narrowing of the
 // validation-rule sibling from removing the halt altogether.
 func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
+	t.Parallel()
+
 	ls := newReplayRecoveryAuditLedger(t, true)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
@@ -1865,6 +1895,8 @@ func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
 // many times it repeats, and never reaches errHaltLedgerPipeline, which no
 // retry clears.
 func TestReplayRecoveryRejectsRepeatedIncorrectWithdrawalAmount(t *testing.T) {
+	t.Parallel()
+
 	ls := newReplayRecoveryAuditLedger(t, true)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
@@ -1934,6 +1966,8 @@ func TestReplayRecoveryRejectsRepeatedIncorrectWithdrawalAmount(t *testing.T) {
 }
 
 func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
+	t.Parallel()
+
 	ls := newReplayRecoveryAuditLedger(t, true)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
@@ -1978,6 +2012,8 @@ func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
 func TestReplayRecoveryDeterministicDuplicateAtTipSkipsDescentSchedule(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := newReplayRecoveryAuditLedger(t, true)
 	ls.reachedTip.Store(true)
 	require.True(t, ls.IsAtTip())
@@ -2033,6 +2069,8 @@ func TestReplayRecoveryDeterministicDuplicateAtTipSkipsDescentSchedule(
 // rejected; keying the latch on the tip alone denied that block the fresh
 // intersection it had never had.
 func TestReplayRecoveryDeterministicLatchIsPerFailingBlock(t *testing.T) {
+	t.Parallel()
+
 	ls := newReplayRecoveryAuditLedger(t, true)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
@@ -2079,6 +2117,8 @@ func TestReplayRecoveryDeterministicLatchIsPerFailingBlock(t *testing.T) {
 // critical section, so it is written under the same lock rather than relying
 // on both callers staying on the pipeline goroutine. Run under -race.
 func TestReplayRecoveryDeterministicLatchConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	failing := &txValidationError{
 		BlockPoint: ocommon.NewPoint(160, testHashBytes("latch-failing")),
@@ -2144,6 +2184,8 @@ func deterministicResyncChannel(
 // duplicate must take the deterministic branch instead of the state-dependent
 // unresolved-producer fallback that repeatedly rediscovers the same block.
 func TestReplayRecoveryRejectsDeterministicByronDuplicateInput(t *testing.T) {
+	t.Parallel()
+
 	ls := newReplayRecoveryAuditLedger(t, true)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
@@ -2196,6 +2238,8 @@ func TestReplayRecoveryRejectsDeterministicByronDuplicateInput(t *testing.T) {
 }
 
 func TestReplayRecoveryDoesNotArmAuditWhenPrimaryAlreadyHeld(t *testing.T) {
+	t.Parallel()
+
 	ls := newReplayRecoveryAuditLedger(t, false)
 
 	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
@@ -2220,6 +2264,8 @@ func TestReplayRecoveryDoesNotArmAuditWhenPrimaryAlreadyHeld(t *testing.T) {
 }
 
 func TestResetReplayRecoveryNonProgressRequiresNewHighWater(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	require.False(t, ls.observeReplayRecoveryTip(140))
 	require.False(t, ls.observeReplayRecoveryTip(140))
@@ -2238,6 +2284,8 @@ func TestResetReplayRecoveryNonProgressRequiresNewHighWater(t *testing.T) {
 }
 
 func TestTryRecoverFromTxValidationErrorSkipsUnknownProducer(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -2290,6 +2338,8 @@ func testRawBlock(
 // pipeline in a loop -- observed on DevNet as a producer pinned at its own
 // block 0 (slot 4) for minutes while the rest of the network advanced.
 func TestReplayRecoveryParentPointGenesisPredecessor(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -2336,6 +2386,8 @@ func TestReplayRecoveryParentPointGenesisPredecessor(t *testing.T) {
 // of any other length is malformed, and treating it as the genesis predecessor
 // would swallow the corruption instead of surfacing it as a failed lookup.
 func TestIsGenesisPrevHashRejectsMalformedHashes(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name     string
 		prevHash []byte
@@ -2396,6 +2448,8 @@ func TestIsGenesisPrevHashRejectsMalformedHashes(t *testing.T) {
 func TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -2491,6 +2545,8 @@ func TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs(
 // located — and folding both into unresolvedInputs is what let a failure with
 // nothing missing drive a rewind (dingo #3805).
 func TestResolveReplayRecoveryProducerReportsPresentInput(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	cm, err := chain.NewManager(db, nil)

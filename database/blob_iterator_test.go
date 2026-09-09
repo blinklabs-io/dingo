@@ -75,6 +75,8 @@ func insertTestBlock(
 }
 
 func TestBlobBlockIterator_EmptyDatabase(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	iter := db.BlocksFromSlot(0)
@@ -108,6 +110,8 @@ func collectIterSlots(
 }
 
 func TestBlobBlockIterator_SlotRanges(t *testing.T) {
+	t.Parallel()
+
 	seedSlots := []uint64{10, 20, 30, 40, 50}
 
 	tests := []struct {
@@ -164,6 +168,8 @@ func TestBlobBlockIterator_SlotRanges(t *testing.T) {
 func ptr[T any](v T) *T { return new(v) }
 
 func TestBlobBlockIterator_Progress(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	// Insert blocks
@@ -198,6 +204,8 @@ func TestBlobBlockIterator_Progress(t *testing.T) {
 }
 
 func TestBlobBlockIterator_ProgressNoEndSlot(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	iter := db.BlocksFromSlot(0)
@@ -208,6 +216,8 @@ func TestBlobBlockIterator_ProgressNoEndSlot(t *testing.T) {
 }
 
 func TestBlobBlockIterator_CloseMultipleTimes(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	iter := db.BlocksFromSlot(0)
@@ -224,6 +234,8 @@ func TestBlobBlockIterator_CloseMultipleTimes(t *testing.T) {
 }
 
 func TestBlobBlockIterator_CloseWhileIterating(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	// Insert blocks
@@ -249,6 +261,8 @@ func TestBlobBlockIterator_CloseWhileIterating(t *testing.T) {
 }
 
 func TestBlobBlockIterator_CborContent(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	expectedCbor := []byte{0x83, 0x01, 0x02, 0x03}
@@ -267,6 +281,8 @@ func TestBlobBlockIterator_CborContent(t *testing.T) {
 }
 
 func TestBlobBlockIterator_EmptyRange(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	// Insert blocks outside the requested range
@@ -283,6 +299,8 @@ func TestBlobBlockIterator_EmptyRange(t *testing.T) {
 }
 
 func TestBlobBlockIterator_SingleBlock(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	hash := randomHash(t)
@@ -306,6 +324,8 @@ func TestBlobBlockIterator_SingleBlock(t *testing.T) {
 }
 
 func TestBlobBlockIterator_MultiBatchResume(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	// Insert more blocks than blobIteratorBatchSize (1000) to
@@ -344,6 +364,8 @@ func TestBlobBlockIterator_MultiBatchResume(t *testing.T) {
 }
 
 func TestBlobBlockIterator_MaxEndSlot(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	hash := randomHash(t)
