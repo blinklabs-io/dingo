@@ -155,6 +155,7 @@ func handlerProgressWarningsAfter(
 
 // The report has to say which subscriber is stuck and for how long, or an
 // operator cannot tell a wedged internal consumer from ordinary slow work.
+// Not t.Parallel: swaps the package-level handlerProgressWarnInterval.
 func TestStuckHandlerReportIdentifiesSubscriber(t *testing.T) {
 	origInterval := handlerProgressWarnInterval
 	handlerProgressWarnInterval = 20 * time.Millisecond
@@ -212,6 +213,8 @@ func TestStuckHandlerReportIdentifiesSubscriber(t *testing.T) {
 // cleared on each begin cannot, because the racing write happens after the
 // clear.
 func TestStuckHandlerRateLimitIsPerInvocation(t *testing.T) {
+	t.Parallel()
+
 	const interval = time.Second
 
 	var buf lockedBuffer
@@ -280,6 +283,8 @@ func stuckHandlerWarnings(buf *lockedBuffer) int {
 // is the distinction an operator watching for a wedged internal consumer
 // needs. Registering a SubscribeFunc subscription materializes its zero.
 func TestHandlerStallSeriesExistsBeforeAnyStall(t *testing.T) {
+	t.Parallel()
+
 	const funcType EventType = "test.handler_stall.func"
 	const chanType EventType = "test.handler_stall.chan"
 
@@ -330,6 +335,8 @@ func TestHandlerStallSeriesExistsBeforeAnyStall(t *testing.T) {
 // watchdog, event/doc.go and ARCHITECTURE.md state. Sampling at most twice per
 // interval is what makes that bound hold.
 func TestHandlerProgressSamplesTwicePerInterval(t *testing.T) {
+	t.Parallel()
+
 	for _, interval := range []time.Duration{
 		time.Millisecond,
 		20 * time.Millisecond,
@@ -352,6 +359,8 @@ func TestHandlerProgressSamplesTwicePerInterval(t *testing.T) {
 // event/doc.go document for it, and twice the rate of the warning it is meant
 // to accompany.
 func TestHandlerStallCounterMatchesWarnRate(t *testing.T) {
+	t.Parallel()
+
 	const interval = time.Second
 
 	var buf lockedBuffer

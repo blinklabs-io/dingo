@@ -31,6 +31,8 @@ func signedEntityTypeFromRaw(t *testing.T, raw string) SignedEntityType {
 }
 
 func TestBuildVerificationMaterial(t *testing.T) {
+	t.Parallel()
+
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/artifact/mithril-stake-distributions":
@@ -101,6 +103,8 @@ func TestBuildVerificationMaterial(t *testing.T) {
 }
 
 func TestBuildVerificationMaterialRejectsMismatchedEpochFallback(t *testing.T) {
+	t.Parallel()
+
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/artifact/mithril-stake-distributions":
@@ -133,6 +137,8 @@ func TestBuildVerificationMaterialRejectsMismatchedEpochFallback(t *testing.T) {
 func TestBuildVerificationMaterialUsesSupportingCertificatesFromChain(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	server := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/artifact/mithril-stake-distributions":

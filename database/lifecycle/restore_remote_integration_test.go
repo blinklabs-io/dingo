@@ -422,6 +422,8 @@ func corruptRemoteIntegrationBlobBackup(
 func TestLiveRemoteRestorePostgresS3PreservesOrSwitchesBothStores(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	env := requireRemoteIntegrationEnvironment(t)
 	unique := strconv.FormatInt(time.Now().UnixNano(), 10)
 	incomingDSN := createRemoteIntegrationDatabase(t, env.postgresDSN)

@@ -68,6 +68,8 @@ func countBlockNonces(t *testing.T, db *database.Database) int {
 func TestHealMithrilGapBlockNonces_ReconstructsGapAndRefreshesTip(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -198,6 +200,8 @@ func TestHealMithrilGapBlockNonces_ReconstructsGapAndRefreshesTip(
 func TestHealMithrilGapBlockNonces_CanonicalChainExcludesForkBlob(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -288,6 +292,8 @@ func TestHealMithrilGapBlockNonces_CanonicalChainExcludesForkBlob(
 func TestHealMithrilGapBlockNonces_BoundaryCompletionRequiresTrustHash(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -385,6 +391,8 @@ func TestHealMithrilGapBlockNonces_BoundaryCompletionRequiresTrustHash(
 func TestHealMithrilGapBlockNonces_FallsBackFromNonCanonicalAnchor(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -482,6 +490,8 @@ func TestHealMithrilGapBlockNonces_FallsBackFromNonCanonicalAnchor(
 func TestHealMithrilGapBlockNonces_MalformedRowDoesNotMaskAnchor(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -543,6 +553,8 @@ func TestHealMithrilGapBlockNonces_MalformedRowDoesNotMaskAnchor(
 func TestHealMithrilGapBlockNonces_MalformedBoundaryRowDoesNotSkip(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -603,6 +615,8 @@ func TestHealMithrilGapBlockNonces_MalformedBoundaryRowDoesNotSkip(
 // TestHealMithrilGapBlockNonces_NoBoundaryNoOp verifies the heal is a no-op on
 // a non-Mithril (genesis-synced) DB, where mithrilLedgerSlot is zero.
 func TestHealMithrilGapBlockNonces_NoBoundaryNoOp(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -629,6 +643,8 @@ func TestHealMithrilGapBlockNonces_NoBoundaryNoOp(t *testing.T) {
 // This is the critical invariant for a startup heal — it must not re-fold or
 // mutate an already-correct chain.
 func TestHealMithrilGapBlockNonces_AlreadyHealedNoOp(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -662,6 +678,8 @@ func TestHealMithrilGapBlockNonces_AlreadyHealedNoOp(t *testing.T) {
 // from an unknown seed would be worse than leaving state as-is, so the heal must
 // not write anything or error.
 func TestHealMithrilGapBlockNonces_NoAnchorSkips(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -677,6 +695,8 @@ func TestHealMithrilGapBlockNonces_NoAnchorSkips(t *testing.T) {
 // act when the tip has not reached the trust boundary (an abnormal state that
 // implies no gap has been crossed yet).
 func TestHealMithrilGapBlockNonces_TipBelowBoundaryNoOp(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
