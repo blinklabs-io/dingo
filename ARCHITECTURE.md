@@ -7142,6 +7142,19 @@ never the reverse.
   check side. `UpsertEpochParams` carries it because `fetchEpochParamsOnly`
   reaches it without going through `CommitEpochData`, making the parameter
   backfill a second way Koios answers enter the cache.
+  Each verifies after its own writes and immediately before `COMMIT` rather
+  than on entry: a transaction whose first statement is a read opens as a WAL
+  reader, and its first write must then upgrade to a writer, which a
+  concurrent commit from any other handle on the same file turns into
+  `SQLITE_BUSY_SNAPSHOT` — a stale snapshot rather than lock contention, so
+  `busy_timeout` cannot wait it out. Writing first takes SQLite's writer slot
+  immediately, and the check then reads under a lock no other connection can
+  commit against, so the refusal is no less atomic against a concurrent
+  `RecordKoiosSource` and a refused write is still rolled back.
+  `RecordKoiosSource` itself has to read the previous root before it can
+  decide what to discard, so its read cannot move after its writes; it claims
+  the slot with a no-op `UPDATE` first instead. No `Cache` transaction reads
+  before it writes.
   That is the set the check is on, not every statement that reaches a
   Koios-sourced table. `PruneAccountCoverage` and
   `InvalidateStaleAccountChunks` only delete rows, `DeleteEpochParams` and
