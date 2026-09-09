@@ -1234,12 +1234,27 @@ func (f *reverseKeyFile) nextReverse() (string, bool, error) {
 	if f.pos == 0 {
 		return "", false, nil
 	}
+	// Every record has a four-byte prefix and matching trailer. Validate
+	// the frame before trusting its declared allocation size.
+	if f.pos < 8 {
+		return "", false, errors.New("truncated reverse key record")
+	}
 	trailer := make([]byte, 4)
 	if _, err := f.file.ReadAt(trailer, f.pos-4); err != nil {
 		return "", false, err
 	}
 	length := int64(binary.BigEndian.Uint32(trailer))
-	start := f.pos - 4 - length - 4
+	if length > f.pos-8 || length > math.MaxInt {
+		return "", false, errors.New("invalid reverse key record length")
+	}
+	start := f.pos - 8 - length
+	prefix := make([]byte, 4)
+	if _, err := f.file.ReadAt(prefix, start); err != nil {
+		return "", false, err
+	}
+	if int64(binary.BigEndian.Uint32(prefix)) != length {
+		return "", false, errors.New("reverse key record lengths do not match")
+	}
 	key := make([]byte, length)
 	if _, err := f.file.ReadAt(key, start+4); err != nil {
 		return "", false, err
