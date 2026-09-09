@@ -580,6 +580,7 @@ func (m *Manager) ComputeEpochBoundarySnapshot(
 		ctx,
 		txn,
 		evt.SnapshotSlot,
+		evt.BoundarySlot,
 		expiryEpoch,
 	)
 	if err != nil {

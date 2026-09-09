@@ -2147,6 +2147,37 @@ authoritative epoch-rollover capture uses this API only at the exact SNAP point,
 where its open transaction still has a tip at or before the snapshot slot and
 the live aggregate is therefore slot-exact.
 
+`GetPointerStakeInputsForPools` adds pointer-address stake back onto that fast
+live path. `reward_live_stake` never carries pointer-derived UTxO stake (see
+"Reward Metadata State" in `ARCHITECTURE.md`), so the authoritative SNAP-point
+capture (`ledger/snapshot.Manager.ComputeEpochBoundarySnapshot`, which calls
+`calculateLiveStakeDistributionInTxn`) used to disagree with the event-driven
+fallback (which reconstructs historically and did resolve pointer stake) for a
+pool holding pointer stake -- two nodes on the same chain, or one node across a
+restart that lost the SNAP-point read, could persist different Mark stake for
+that pool (blinklabs-io/dingo#3854). `GetPointerStakeInputsForPools` closes that
+gap by recomputing the same `active_delegation`/`pointer_resolution` join
+`GetStakeByPoolsAtSlot` uses, restricted to slot and boundarySlot, and its
+result is added to what `GetLiveStakeInputsForPools` returned rather than
+replacing it. Every other live consumer of `reward_live_stake` -- `GetStakeByPools`,
+DRep voting power, and a plain live `GetRewardStakeInputsForPools` query with the
+CIP-0163 gate off -- is unchanged: those still attribute only base-address
+stake, which matches Conway (where pointer addresses confer no stake) once the
+live tip has crossed the fork, and understates pre-Conway.
+
+The era gate for pointer-address stake (`pointerStakeCounted`) resolves the era
+from the *later* of `slot` and `boundarySlot` (0 when the caller has no
+boundary). This matters only at a Babbage->Conway boundary: SNAP runs inside
+TICK for the first slot of the incoming epoch, after cardano-ledger's hard-fork
+combinator has already translated the ledger state into that era in
+`extendToSlot`, so the Mark snapshot at that boundary is produced under
+`ConwayInstantStake` even though the evaluated slot (`boundarySlot-1`, the
+outgoing epoch's last slot) is still Babbage. Resolving the era from `slot`
+alone would over-attribute pointer stake for exactly one snapshot per network --
+the direction that loosens the Praos leader threshold rather than tightening
+it. A plain "stake at slot" query (`boundarySlot == 0`) is unaffected and keeps
+resolving the era at `slot`.
+
 `GetRewardStakeInputsForPools` takes the same `slot`, `expiryEpoch`, and
 `inactivityPeriod` arguments. With the gate off (`expiryEpoch == 0`) it reads the
 live reward aggregate (`reward_live_stake`), byte-identical to the pre-CIP query

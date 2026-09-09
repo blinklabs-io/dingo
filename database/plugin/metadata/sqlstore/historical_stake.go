@@ -424,6 +424,7 @@ func (s *Store) getStakeByPoolsAtSlot(
 			ctx,
 			db,
 			slot,
+			boundarySlot,
 			expiryEpoch,
 			inactivityPeriod,
 			"active_delegation.pool_key_hash IN ("+
@@ -528,6 +529,7 @@ func (s *Store) GetPoolOwnerStakeAtSlot(
 			ctx,
 			db,
 			slot,
+			0,
 			expiryEpoch,
 			inactivityPeriod,
 			"active_delegation.credential_tag = 0 AND "+
@@ -666,6 +668,7 @@ func (s *Store) getRewardStakeInputsForPools(
 			ctx,
 			db,
 			slot,
+			boundarySlot,
 			expiryEpoch,
 			inactivityPeriod,
 			"active_delegation.pool_key_hash IN ("+
@@ -762,10 +765,14 @@ ORDER BY pool_key_hash, credential_tag, staking_key`,
 // historicalStakeCTE builds the delegated-stake CTE evaluated at slot.
 // predicateArgs supplies the bind values for predicate; they are bound once per
 // occurrence, and predicate appears twice when pointer stake is counted.
+// boundarySlot is passed through to the pointer era gate; see
+// pointerStakeCounted. Pass 0 for a plain "stake at slot" query with no
+// epoch-boundary semantics.
 func (s *Store) historicalStakeCTE(
 	ctx context.Context,
 	db queryer,
 	slot uint64,
+	boundarySlot uint64,
 	expiryEpoch uint64,
 	inactivityPeriod uint64,
 	predicate string,
@@ -777,7 +784,7 @@ func (s *Store) historicalStakeCTE(
 	// When it is not counted the query is exactly what it was before pointer
 	// resolution existed, and when no output uses a pointer address the extra
 	// branch produces no rows.
-	countPointerStake, err := pointerStakeCounted(ctx, db, slot)
+	countPointerStake, err := pointerStakeCounted(ctx, db, slot, boundarySlot)
 	if err != nil {
 		return "", nil, err
 	}

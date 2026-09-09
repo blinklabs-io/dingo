@@ -417,6 +417,85 @@ func TestPointerAddressStakeIsEraGated(t *testing.T) {
 	}
 }
 
+// TestPointerAddressStakeEraGateUsesTheIncomingEpochAtTheBoundary pins the
+// era-cutover finding left open on the PR: cardano-ledger's hard-fork
+// combinator translates the ledger state into the incoming era in
+// extendToSlot, and SNAP runs inside TICK for the incoming epoch's first
+// slot -- after that translation. So the mark snapshot at a Babbage->Conway
+// boundary is produced under ConwayInstantStake, which drops sisPtrStake,
+// even though the evaluated slot (boundarySlot-1, the outgoing epoch's last
+// slot) is still Babbage.
+//
+// GetEpochBoundaryStakeByPools' contract is boundarySlot == snapshotSlot+1
+// (see GetEpochBoundaryStakeByPools and boundaryRewardSlot), so this pins the
+// era gate against the incoming epoch's era, not the outgoing one, in both
+// directions: a boundary that stays in Babbage must still count the pointer,
+// and one that crosses into Conway must not.
+func TestPointerAddressStakeEraGateUsesTheIncomingEpochAtTheBoundary(t *testing.T) {
+	t.Parallel()
+	paymentKey := bytes.Repeat([]byte{0x22}, lcommon.AddressHashSize)
+	for _, tc := range []struct {
+		name          string
+		incomingEraID uint
+		want          uint64
+	}{
+		{
+			name:          "the incoming epoch is still Babbage",
+			incomingEraID: babbage.EraIdBabbage,
+			want:          1_300,
+		},
+		{
+			name:          "the incoming epoch is Conway",
+			incomingEraID: conway.EraIdConway,
+			want:          700,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newPointerStakeFixture(t)
+			// The outgoing epoch (10, Babbage) covers every slot the fixture
+			// writes to; the incoming epoch (11) starts exactly at the
+			// boundary slot and carries the era under test.
+			require.NoError(t, f.store.SetEpoch(
+				0, 10, nil, nil, nil, nil, babbage.EraIdBabbage, 1, 300, nil,
+			))
+			require.NoError(t, f.store.SetEpoch(
+				300, 11, nil, nil, nil, nil, tc.incomingEraID, 1, 1_000_000,
+				nil,
+			))
+
+			f.apply(
+				t, 100, 0,
+				[]lcommon.Certificate{f.register(), f.delegate()},
+			)
+			f.apply(t, 150, 0, nil, f.output(700, f.baseAddress(t)))
+			f.apply(t, 200, 0, nil, f.output(600, newPointerAddress(
+				t, paymentKey, 100, 0, 0,
+			)))
+
+			// A plain "stake at slot" query for the outgoing epoch's last
+			// slot is unaffected by the boundary gate: it resolves the era
+			// at that slot directly, and that slot is still Babbage either
+			// way.
+			plainStakes, _, err := f.store.GetStakeByPoolsAtSlot(
+				[][]byte{f.pool}, 299, 0, 0, nil,
+			)
+			require.NoError(t, err)
+			require.Equal(t, uint64(1_300), plainStakes[string(f.pool)],
+				"a plain historical query at the outgoing epoch's last slot "+
+					"must still see Babbage, regardless of the incoming era")
+
+			boundaryStakes, _, err := f.store.GetEpochBoundaryStakeByPools(
+				[][]byte{f.pool}, 299, 300, 0, 0, nil,
+			)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, boundaryStakes[string(f.pool)],
+				"the epoch-boundary query must resolve the era the mark "+
+					"snapshot is actually produced under: the incoming epoch")
+		})
+	}
+}
+
 // TestPointerAddressStakeCountsAForwardPointer covers a pointer that names a
 // position no certificate occupies yet. Nothing in any era validates an
 // address's pointer payload, so an output may be produced first; the reference
@@ -491,6 +570,50 @@ func TestPointerAddressStakeStopsAtDeregistration(t *testing.T) {
 	f.apply(t, 260, 0, nil, f.output(700, f.baseAddress(t)))
 	require.Equal(t, uint64(700), f.stakeAt(t, 300),
 		"a re-registration mints a new Ptr; the old address stays dangling")
+}
+
+// TestGetPointerStakeInputsForPoolsStopsAtDeregistration covers the live
+// snapshot overlay (GetPointerStakeInputsForPools) directly, rather than only
+// through GetStakeByPoolsAtSlot's embedded CTE. It shares removePtr with the
+// historical query via the same pointerResolutionSQL: a de-registered
+// credential's old pointer stays dangling even after a re-registration
+// elsewhere.
+func TestGetPointerStakeInputsForPoolsStopsAtDeregistration(t *testing.T) {
+	t.Parallel()
+	f := newPointerStakeFixture(t)
+	f.setEra(t, babbage.EraIdBabbage)
+	paymentKey := bytes.Repeat([]byte{0x22}, lcommon.AddressHashSize)
+
+	f.apply(t, 100, 0, []lcommon.Certificate{f.register(), f.delegate()})
+	f.apply(t, 150, 0, nil,
+		f.output(600, newPointerAddress(t, paymentKey, 100, 0, 0)))
+
+	inputs, err := f.store.GetPointerStakeInputsForPools(
+		[][]byte{f.pool}, 175, 0, 0, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, inputs, 1, "the pointer resolves while its registration stands")
+	require.Equal(t, uint64(600), uint64(inputs[0].Stake))
+
+	f.apply(t, 200, 0, []lcommon.Certificate{f.deregister()})
+	inputs, err = f.store.GetPointerStakeInputsForPools(
+		[][]byte{f.pool}, 225, 0, 0, nil,
+	)
+	require.NoError(t, err)
+	require.Empty(t, inputs, "a de-registered credential holds no stake at all")
+
+	// Re-registered at a new position; the address still names the old,
+	// removed Ptr.
+	f.apply(t, 250, 0, []lcommon.Certificate{f.register(), f.delegate()})
+	inputs, err = f.store.GetPointerStakeInputsForPools(
+		[][]byte{f.pool}, 300, 0, 0, nil,
+	)
+	require.NoError(t, err)
+	require.Empty(
+		t,
+		inputs,
+		"a re-registration mints a new Ptr; the old address stays dangling",
+	)
 }
 
 // TestPointerAddressStakeResolvesTheWedgeAddress runs the real bech32 address

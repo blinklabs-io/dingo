@@ -1101,6 +1101,23 @@ type StakeSnapshotStore interface {
 		types.Txn,
 	) ([]*models.RewardStakeInput, error)
 
+	// GetPointerStakeInputsForPools returns the per-credential stake held at a
+	// pointer address for pools in poolKeyHashes, resolved and delegated as of
+	// slot. It is additive: the caller adds it to what
+	// GetLiveStakeInputsForPools returned, because reward_live_stake never
+	// carries pointer-derived UTxO stake -- attribution depends on certificate
+	// history at slot, not on anything the live aggregate's incremental
+	// maintenance can express. boundarySlot is the epoch-boundary era gate
+	// (0 = no boundary; see GetEpochBoundaryStakeByPools), and expiryEpoch
+	// drives the same live CIP-0163 gate GetLiveStakeInputsForPools applies.
+	GetPointerStakeInputsForPools(
+		[][]byte, // poolKeyHashes
+		uint64, // slot
+		uint64, // boundarySlot (0 = no boundary)
+		uint64, // expiryEpoch (0 = gate off)
+		types.Txn,
+	) ([]*models.RewardStakeInput, error)
+
 	// GetPoolOwnerStakeAtSlot returns historical stake for the requested pool
 	// owner key hashes, keyed by pool plus credential. An owner is included only
 	// when that credential was delegated to the pool at the requested slot.

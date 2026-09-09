@@ -808,7 +808,7 @@ func TestCalculateEpochBoundaryStakeLivePathExcludesExpiredAccount(
 	txn := db.Transaction(false)
 	defer func() { _ = txn.Commit() }()
 	dist, err := calc.calculateStakeDistributionInTxn(
-		context.Background(), txn, 100, 3,
+		context.Background(), txn, 100, 0, 3,
 	)
 	require.NoError(t, err)
 
@@ -1050,6 +1050,7 @@ func TestCalculateStakeDistributionRejectsPoolStakeOverflow(t *testing.T) {
 		txn,
 		1000,
 		0,
+		0,
 	)
 	require.ErrorContains(t, err, "delegated stake overflow")
 	require.Nil(t, dist)
@@ -1093,6 +1094,7 @@ func TestCalculateStakeDistributionRejectsTotalStakeOverflow(t *testing.T) {
 		context.Background(),
 		txn,
 		1000,
+		0,
 		0,
 	)
 	require.ErrorContains(t, err, "total active stake overflow")

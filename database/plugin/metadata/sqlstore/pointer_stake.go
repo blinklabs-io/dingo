@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//nolint:sqlclosecheck // Cursors are explicitly closed and close errors are propagated before dependent queries.
 package sqlstore
 
 import (
@@ -21,6 +22,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	ledger "github.com/blinklabs-io/gouroboros/ledger"
 )
 
@@ -64,16 +66,35 @@ import (
 // gone. Pointer addresses stay spendable in Conway; they simply confer no
 // stake.
 //
-// The era comes from the epoch containing slot. An unknown era is treated as
-// not counting: that is the behaviour before pointer resolution existed, so a
-// missing epoch row understates rather than inflating a pool's snapshot stake
-// and the shared active-stake denominator.
+// boundarySlot names the epoch-boundary snapshot slot is +1 into (0 when the
+// caller has no boundary, e.g. a plain "stake at slot" reconstruction). It
+// matters only at the era cutover: cardano-ledger's hard-fork combinator
+// translates the ledger state into the incoming era in extendToSlot, and SNAP
+// runs inside TICK for the first slot of that incoming epoch -- after the
+// translation. So the mark snapshot at a Babbage->Conway boundary is produced
+// by ConwayInstantStake, under the *incoming* epoch's era, even though slot
+// itself (the last slot of the outgoing epoch, boundarySlot-1) is still
+// Babbage. Resolving the era from slot alone would over-attribute pointer
+// stake for exactly that one snapshot per network -- the direction that
+// loosens the Praos leader threshold. When boundarySlot is the later of the
+// two, it is used for the era lookup instead; a plain "stake at slot" query
+// (boundarySlot == 0) is unaffected and keeps resolving the era at slot.
+//
+// The era comes from the epoch containing that slot. An unknown era is treated
+// as not counting: that is the behaviour before pointer resolution existed, so
+// a missing epoch row understates rather than inflating a pool's snapshot
+// stake and the shared active-stake denominator.
 func pointerStakeCounted(
 	ctx context.Context,
 	db queryer,
 	slot uint64,
+	boundarySlot uint64,
 ) (bool, error) {
-	slotValue, err := checkedInt64(slot)
+	eraSlot := slot
+	if boundarySlot > eraSlot {
+		eraSlot = boundarySlot
+	}
+	slotValue, err := checkedInt64(eraSlot)
 	if err != nil {
 		return false, err
 	}
@@ -92,7 +113,7 @@ LIMIT 1`,
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("resolve era for slot %d: %w", slot, err)
+		return false, fmt.Errorf("resolve era for slot %d: %w", eraSlot, err)
 	}
 	if !eraID.Valid {
 		return false, nil
@@ -207,4 +228,161 @@ pointer_resolution AS (
            AND removal.cert_index > certs.cert_index))
    )
 )`, []any{slotValue}, nil
+}
+
+// GetPointerStakeInputsForPools returns the additional per-credential stake
+// held at a pointer address, for pools in poolKeyHashes and credentials
+// resolved and delegated as of slot.
+//
+// It exists for the live snapshot path (calculateLiveStakeDistributionInTxn),
+// which otherwise reads only reward_live_stake. reward_live_stake never
+// carries pointer-derived UTxO stake: attribution is a function of
+// certificate history at the slot being evaluated -- a registration or
+// de-registration anywhere can change which credential an existing pointer
+// output belongs to -- and reward_live_stake is an incrementally maintained
+// aggregate keyed on (credential_tag, staking_key) with its own consistency
+// verifier (RewardLiveStakeNeedsBackfill) that has no notion of "as of slot".
+// Rather than teach that aggregate to react to registration/de-registration/
+// era-translation events out of band, this recomputes the same
+// activeDelegationSQL/pointerResolutionSQL join the historical fallback
+// already uses, restricted to what the live aggregate is missing, and the
+// caller adds the result to what GetLiveStakeInputsForPools returned.
+//
+// boundarySlot is threaded through to the era gate exactly as in
+// historicalStakeCTE; see pointerStakeCounted. When the era at slot (or the
+// boundary it belongs to) does not count pointer stake, this returns nil
+// without issuing a query -- the live path's SQL and result stay exactly what
+// they were before pointer resolution existed.
+func (s *Store) GetPointerStakeInputsForPools(
+	poolKeyHashes [][]byte,
+	slot uint64,
+	boundarySlot uint64,
+	expiryEpoch uint64,
+	txn types.Txn,
+) ([]*models.RewardStakeInput, error) {
+	if len(poolKeyHashes) == 0 {
+		return nil, nil
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetPointerStakeInputsForPools: resolve db: %w",
+			err,
+		)
+	}
+	counted, err := pointerStakeCounted(ctx, db, slot, boundarySlot)
+	if err != nil {
+		return nil, err
+	}
+	if !counted {
+		return nil, nil
+	}
+	poolKeyHashes = dedupeByteSlices(poolKeyHashes)
+	ret := make([]*models.RewardStakeInput, 0)
+	for start := 0; start < len(poolKeyHashes); start += 400 {
+		end := min(start+400, len(poolKeyHashes))
+		query, args := activeDelegationSQL(slot)
+		resolution, resolutionArgs, err := pointerResolutionSQL(slot)
+		if err != nil {
+			return nil, err
+		}
+		query += resolution
+		args = append(args, resolutionArgs...)
+		expiryJoin := ""
+		expiryPredicate := ""
+		if expiryEpoch > 0 {
+			// Same account.expiration_epoch gate GetLiveStakeInputsForPools
+			// applies to the base-address side, so a pointer-attributed
+			// credential is subject to the identical CIP-0163 rule as one
+			// discovered by GetLiveStakeInputsForPools's live join, not the
+			// historical fallback's witness-history reconstruction.
+			expiryJoin = `
+LEFT JOIN account acct
+  ON acct.credential_tag = active_delegation.credential_tag
+ AND acct.staking_key = active_delegation.staking_key`
+			expiryPredicate = `(acct.expiration_epoch = 0
+ OR acct.expiration_epoch >= ? OR acct.expiration_epoch IS NULL) AND `
+		}
+		query += `
+SELECT active_delegation.pool_key_hash, active_delegation.credential_tag,
+       active_delegation.staking_key, utxo.amount AS utxo_amount
+FROM active_delegation
+JOIN pointer_resolution
+  ON pointer_resolution.credential_tag = active_delegation.credential_tag
+ AND pointer_resolution.staking_key = active_delegation.staking_key
+JOIN utxo
+  ON utxo.id = pointer_resolution.utxo_id
+ AND utxo.added_slot <= ?
+ AND (utxo.deleted_slot = 0 OR utxo.deleted_slot > ?)
+` + expiryJoin + `
+WHERE ` + expiryPredicate + `active_delegation.pool_key_hash IN (` +
+			bindPlaceholders(end-start) + `)`
+		args = append(args, slot, slot)
+		if expiryEpoch > 0 {
+			args = append(args, expiryEpoch)
+		}
+		args = append(args, byteSliceArgs(poolKeyHashes[start:end])...)
+
+		rows, err := db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("query pointer stake inputs: %w", err)
+		}
+		type pointerKey struct {
+			pool string
+			tag  uint8
+			key  string
+		}
+		amounts := make(map[pointerKey]uint64)
+		for rows.Next() {
+			var pool, key []byte
+			var tag uint8
+			var rawAmount sql.NullString
+			if err := rows.Scan(&pool, &tag, &key, &rawAmount); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			ref := pointerKey{pool: string(pool), tag: tag, key: string(key)}
+			if _, ok := amounts[ref]; !ok {
+				amounts[ref] = 0
+			}
+			if rawAmount.Valid && rawAmount.String != "" {
+				value, err := parseUint64(
+					"pointer stake overlay UTxO amount",
+					rawAmount.String,
+				)
+				if err != nil {
+					rows.Close()
+					return nil, err
+				}
+				if ^uint64(0)-amounts[ref] < value {
+					rows.Close()
+					return nil, fmt.Errorf(
+						"pointer stake overlay overflow for credential %d:%x",
+						tag,
+						key,
+					)
+				}
+				amounts[ref] += value
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		for ref, amount := range amounts {
+			if amount == 0 {
+				continue
+			}
+			ret = append(ret, &models.RewardStakeInput{
+				PoolKeyHash:   []byte(ref.pool),
+				CredentialTag: ref.tag,
+				StakingKey:    []byte(ref.key),
+				Stake:         types.Uint64(amount),
+				Registered:    true,
+			})
+		}
+	}
+	return ret, nil
 }

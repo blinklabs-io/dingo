@@ -8687,20 +8687,42 @@ behavior lives in `database/plugin/metadata/sqlstore` and is exercised through
 the SQLite contract suite.
 
 `RewardLiveStake` supplies the credential-level input bundle for reward
-snapshots; the leader-election Mark snapshot remains on its independent,
-slot-aware path. Metadata write paths refresh only credentials touched by UTxO creation/spending, account
+snapshots; the leader-election Mark snapshot's authoritative SNAP-point capture
+reads it too, as its fast path (see below). The slot-aware historical
+reconstruction remains available as the fallback capture for a boundary the
+SNAP-point hook missed. Metadata write paths refresh only credentials touched by UTxO creation/spending, account
 registration or delegation, and reward credits or withdrawals, in the same
 transaction as the source change. Refresh derives total stake, registration,
 current pool delegation, and delegation certificate order; rollback therefore
 restores the aggregate from the same historical metadata used by normal account
 and UTxO repair. Malformed non-empty stake credentials are rejected before they
-enter the aggregate. The aggregate attributes only base-address stake, because
-it keys on `utxo.staking_key` and a pointer address leaves that column empty.
-The pointer position itself is retained, in `utxo_pointer`, and the
-slot-aware historical stake path resolves it; the live aggregate does not,
-which matches Conway, where pointer addresses confer no stake at all.
-Consumers must not treat `RewardLiveStake` as an exact replacement for the
-ledger stake distribution for eras where pointer-address stake matters.
+enter the aggregate. The aggregate itself attributes only base-address stake,
+because it keys on `utxo.staking_key` and a pointer address leaves that column
+empty; the pointer position is retained in `utxo_pointer` instead. Resolving it
+is inherently slot-evaluated -- a registration or de-registration anywhere can
+change which credential an existing pointer output belongs to -- which this
+aggregate's incremental, tip-keyed maintenance cannot express without reacting
+to every certificate event out of band, so `RebuildRewardLiveStake` and the
+per-write refresh both leave it out identically, on purpose, rather than one of
+the two learning it and the other not.
+
+The leader-election SNAP-point path
+(`ledger/snapshot.Calculator.calculateLiveStakeDistributionInTxn`) is the one
+consumer that still needs pointer-address stake pre-Conway, so it adds it back
+itself: `GetPointerStakeInputsForPools` recomputes the same
+`active_delegation`/`pointer_resolution` join the historical path uses,
+restricted to slot and the epoch boundary, and the result is added to what this
+aggregate returned rather than folded into the aggregate. That closes a prior
+divergence between dingo's two Mark-capture routes -- the event-driven fallback
+already reconstructed historically and resolved pointer stake; the SNAP-point
+hook read only this aggregate and did not (blinklabs-io/dingo#3854). Every
+other consumer of this aggregate -- `GetStakeByPools`, DRep voting power, and a
+plain live `GetRewardStakeInputsForPools` query -- is unchanged and still
+attributes only base-address stake. That is correct once the live tip has
+passed the Conway fork, where pointer addresses confer no stake at all, and
+understates a pre-Conway tip. Consumers must not treat `RewardLiveStake` on its
+own as an exact replacement for the ledger stake distribution for eras where
+pointer-address stake matters.
 
 `RebuildRewardLiveStake` provides a composition-neutral full rebuild from the
 union of account credentials and live UTxO stake credentials. It retains
