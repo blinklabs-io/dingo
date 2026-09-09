@@ -551,3 +551,98 @@ func TestForgeReResolvesLeiosDataWhenParentChangesBeforeTheFirstBuild(
 		"no endorser block was embedded, so none may be marked embedded",
 	)
 }
+
+// TestForgeMarksTheReResolvedEndorserBlockSlot pins the pairing of the two
+// values that identify an embedded endorser block. Since #4123 the
+// occurrence is (hash, slot), not hash alone: the same endorser-block hash
+// can be a distinct occurrence at another slot, so marking a re-resolved
+// hash against the slot of the endorser block it replaced would retire the
+// wrong occurrence.
+//
+// A retry re-resolves the whole payload against the new parent, so both
+// halves move together. Carrying only the hash back out of the retry leaves
+// the slot at the value the first attempt resolved, which is exactly the
+// mismatch #4123 exists to prevent.
+func TestForgeMarksTheReResolvedEndorserBlockSlot(t *testing.T) {
+	oldParentRb := leiosHash(0xC1)
+	oldEb := leiosHash(0xD1)
+	newParentRb := leiosHash(0xC2)
+	newEb := leiosHash(0xD2)
+
+	parent := &forgerTestLeiosParentAnnouncement{
+		rbHash: oldParentRb,
+		hash:   oldEb,
+		ok:     true,
+	}
+	certs := &forgerTestLeiosCerts{
+		eligible: []LeiosCertifiedEndorserBlock{
+			{
+				EndorserBlockHash: oldEb,
+				AnnouncingRbHash:  oldParentRb,
+				SlotNo:            9,
+				Certificate:       leiosTestCertificate(oldEb, 9),
+			},
+			{
+				EndorserBlockHash: newEb,
+				AnnouncingRbHash:  newParentRb,
+				SlotNo:            7,
+				Certificate:       leiosTestCertificate(newEb, 7),
+			},
+		},
+	}
+	block := newForgerTestBlock(10, 2)
+	builder := &parentSwapBuilder{
+		block:    block,
+		cbor:     block.cbor,
+		failOnce: true,
+		onFirst: func() {
+			// A peer block lands. The new parent announced a different
+			// endorser block, certified at a different slot, and that is
+			// the one the retry's block embeds.
+			parent.rbHash = newParentRb
+			parent.hash = newEb
+		},
+	}
+
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     builder,
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		SlotClock: &retryTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      9,
+			slotsPerKESPeriod: 100,
+			slotEnd:           time.Now().Add(time.Hour),
+		},
+		LeiosCertificateProvider:        certs,
+		LeiosParentAnnouncementProvider: parent,
+		PromRegistry:                    prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	require.Len(t, builder.seen, 2, "the forge must retry after a parent change")
+	require.NotNil(t, builder.seen[1].Certificate)
+	require.Equal(
+		t,
+		newEb,
+		builder.seen[1].Certificate.EndorserBlockHash,
+		"the retry carries the certificate selected for the new parent",
+	)
+	require.Equal(
+		t,
+		[]lcommon.Blake2b256{newEb},
+		certs.marked,
+		"the endorser block the forged block embedded is the one marked",
+	)
+	require.Equal(
+		t,
+		[]uint64{7},
+		certs.markedSlots,
+		"the marked slot must be the re-resolved endorser block's own slot, "+
+			"not the slot of the endorser block the first attempt resolved",
+	)
+}

@@ -1229,8 +1229,12 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	)
 	// A retry or the empty fallback may have re-resolved the payload
 	// against a new parent; the embedded-endorser-block bookkeeping below
-	// must follow the block that was actually built.
-	embeddedEb = leiosState.embeddedEb
+	// must follow the block that was actually built. Both halves of the
+	// occurrence move together: MarkEndorserBlockEmbedded identifies an
+	// endorser block by (hash, slot), so a re-resolved hash paired with
+	// the slot the first attempt resolved would retire a different
+	// occurrence than the one this block embedded.
+	embeddedEb, embeddedEbSlot = leiosState.embeddedEb, leiosState.embeddedEbSlot
 	buildStats = stats
 	buildDuration = time.Since(producingAt)
 	if err != nil {
