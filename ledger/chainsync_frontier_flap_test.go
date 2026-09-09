@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -138,28 +139,56 @@ func TestCanonicalFrontierCrossingDoesNotCloseAPeerAheadOfLocalTip(
 		deliver(step.conn, step.block)
 	}
 
-	// The selector publishes synchronously from the update call, so everything
-	// it decided is already buffered on the subscriber channel.
+	// The selector publishes ChainSwitchEvent through EventBus.PublishOrdered,
+	// which only enqueues onto the event type's lane before returning; a
+	// dedicated goroutine delivers to subscribers later, on its own schedule
+	// (see event/ordered.go). A non-blocking read of switchCh right after the
+	// deliver() calls return can therefore observe zero events even though the
+	// selector already decided to publish one, because nothing has forced the
+	// delivery goroutine to run yet -- that assumption is exactly what made
+	// this test flake under full-package parallelism, where CPU contention
+	// widens the gap between "enqueued" and "delivered"
+	// (blinklabs-io/dingo#4145).
+	//
+	// The fix is a handshake, not a wait: publish a sentinel ChainSwitchEvent
+	// through the same ordered lane after the deliver() calls return. The lane
+	// has exactly one worker draining it in FIFO order, so the sentinel cannot
+	// be delivered ahead of any real event already enqueued before it;
+	// receiving the sentinel is proof, not a guess, that every earlier event
+	// has already reached switchCh.
+	sentinelConnId := testChainsyncConnId(6000, 9999)
+	require.True(t, selectorBus.PublishOrdered(
+		chainselection.ChainSwitchEventType,
+		event.NewEvent(
+			chainselection.ChainSwitchEventType,
+			chainselection.ChainSwitchEvent{NewConnectionId: sentinelConnId},
+		),
+	), "sentinel publish must be accepted")
+
 	var checked int
-	for drained := false; !drained; {
-		select {
-		case evt := <-switchCh:
-			switchEvent, ok := evt.Data.(chainselection.ChainSwitchEvent)
-			require.True(t, ok)
-			checked++
-			assert.False(
-				t,
-				ls.chainSwitchNeedsFreshCursorLocked(
-					switchEvent,
-					switchEvent.NewConnectionId,
-				),
-				"a delivered-frontier crossing between peers on the same advertised chain must not close the selected connection (switch to %s at delivered block %d)",
-				switchEvent.NewConnectionId.String(),
-				switchEvent.NewObservedTip.BlockNumber,
-			)
-		default:
-			drained = true
+	for {
+		evt := testutil.RequireReceive(
+			t,
+			switchCh,
+			event.RemoteDeliverTimeout,
+			"chain switch event drain",
+		)
+		switchEvent, ok := evt.Data.(chainselection.ChainSwitchEvent)
+		require.True(t, ok)
+		if switchEvent.NewConnectionId == sentinelConnId {
+			break
 		}
+		checked++
+		assert.False(
+			t,
+			ls.chainSwitchNeedsFreshCursorLocked(
+				switchEvent,
+				switchEvent.NewConnectionId,
+			),
+			"a delivered-frontier crossing between peers on the same advertised chain must not close the selected connection (switch to %s at delivered block %d)",
+			switchEvent.NewConnectionId.String(),
+			switchEvent.NewObservedTip.BlockNumber,
+		)
 	}
 	require.Positive(
 		t,

@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 // These tests pin the transport-frontier flapping reproduction from Preview
@@ -74,25 +75,65 @@ func itoa(v uint64) string {
 	return string(buf[i:])
 }
 
-// drainChainSwitchEvents collects every ChainSwitchEvent already delivered to
-// the subscriber channel. The selector publishes synchronously from
-// EvaluateAndSwitch, so anything it decided has already been buffered by the
-// time the driving update call returns.
-func drainChainSwitchEvents(
+// chainSwitchDrainSentinelConnId names a connection no scenario in this file
+// uses. drainChainSwitchEventsSynced publishes a ChainSwitchEvent carrying it
+// through the same ordered lane the selector publishes on, to detect (by
+// receiving it) that every event enqueued earlier has already been delivered.
+var chainSwitchDrainSentinelConnId = newTestConnectionId(50000)
+
+// drainChainSwitchEventsSynced collects every ChainSwitchEvent the scenario
+// published so far, blocking until it is certain none remain in flight.
+//
+// The selector publishes ChainSwitchEvent through EventBus.PublishOrdered,
+// which only enqueues onto the event type's lane before returning -- a
+// dedicated goroutine (event.orderedWorker) delivers to subscribers later, on
+// its own schedule (see event/ordered.go). A non-blocking read of the
+// subscriber channel immediately after the driving calls return can therefore
+// observe zero events even though the selector already decided to publish
+// one: nothing has forced the delivery goroutine to run yet. That assumption
+// -- reading the channel is exactly what made this scenario's regression test
+// flake under full-package parallelism, where CPU contention widens the gap
+// between "enqueued" and "delivered" (blinklabs-io/dingo#4145).
+//
+// The fix is a handshake, not a wait: publish a sentinel ChainSwitchEvent
+// through the same ordered lane after the driving calls return. The lane has
+// exactly one worker draining it in FIFO order (event.orderedWorker), so the
+// sentinel cannot be delivered ahead of any real event already enqueued
+// before it. Receiving the sentinel is therefore proof, not a guess, that
+// every earlier event has already reached the subscriber channel.
+func drainChainSwitchEventsSynced(
 	t *testing.T,
+	eventBus *event.EventBus,
 	ch <-chan event.Event,
 ) []ChainSwitchEvent {
 	t.Helper()
+	require.True(
+		t,
+		eventBus.PublishOrdered(
+			ChainSwitchEventType,
+			event.NewEvent(
+				ChainSwitchEventType,
+				ChainSwitchEvent{
+					NewConnectionId: chainSwitchDrainSentinelConnId,
+				},
+			),
+		),
+		"sentinel publish must be accepted",
+	)
 	var out []ChainSwitchEvent
 	for {
-		select {
-		case evt := <-ch:
-			switchEvent, ok := evt.Data.(ChainSwitchEvent)
-			require.True(t, ok, "unexpected event payload on switch channel")
-			out = append(out, switchEvent)
-		default:
+		evt := testutil.RequireReceive(
+			t,
+			ch,
+			event.RemoteDeliverTimeout,
+			"chain switch event drain",
+		)
+		switchEvent, ok := evt.Data.(ChainSwitchEvent)
+		require.True(t, ok, "unexpected event payload on switch channel")
+		if switchEvent.NewConnectionId == chainSwitchDrainSentinelConnId {
 			return out
 		}
+		out = append(out, switchEvent)
 	}
 }
 
@@ -249,7 +290,7 @@ func TestCanonicalPeersWithCrossingFrontiersDoNotFlap(t *testing.T) {
 		)
 	}
 
-	switchEvents := drainChainSwitchEvents(t, switchCh)
+	switchEvents := drainChainSwitchEventsSynced(t, eventBus, switchCh)
 	require.Len(
 		t,
 		switchEvents,
