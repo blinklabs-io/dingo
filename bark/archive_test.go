@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -202,6 +203,8 @@ func registerSignedURLBlobProvider(
 				badger.WithDataDir(deps.DataDir),
 				badger.WithLogger(deps.Logger),
 				badger.WithDeferOpen(),
+				badger.WithValueLogFileSize(testutil.TestBadgerValueLogFileSize),
+				badger.WithMemTableSize(testutil.TestBadgerMemTableSize),
 			)
 			if err != nil {
 				return nil, nil, err
@@ -295,6 +298,8 @@ func fetchBlocks(
 // identifier fields echoed back verbatim rather than recomputed — the
 // upper-case hash proves the handler returns what was asked for.
 func TestArchiveFetchBlockResolvesSingleReference(t *testing.T) {
+	t.Parallel()
+
 	handler, blocks := newArchiveTestHandler(t, 3)
 	block := blocks[1]
 	requestedHash := strings.ToUpper(hex.EncodeToString(block.Hash))
@@ -339,6 +344,8 @@ func TestArchiveFetchBlockResolvesSingleReference(t *testing.T) {
 // identifiers the client did not supply so a hash-only or height-only
 // caller still learns the block's full identity.
 func TestArchiveFetchBlockResolvesIdentifierOnlyReferences(t *testing.T) {
+	t.Parallel()
+
 	handler, blocks := newArchiveTestHandler(t, 3)
 	block := blocks[2]
 	hash := hex.EncodeToString(block.Hash)
@@ -374,6 +381,8 @@ func TestArchiveFetchBlockResolvesIdentifierOnlyReferences(t *testing.T) {
 func TestArchiveFetchBlockReturnsNotFoundWithoutDiscardingBatch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	handler, blocks := newArchiveTestHandler(t, 3)
 	firstHash := hex.EncodeToString(blocks[0].Hash)
 	lastHash := hex.EncodeToString(blocks[2].Hash)
@@ -412,6 +421,8 @@ func TestArchiveFetchBlockReturnsNotFoundWithoutDiscardingBatch(
 // misses at resolution, before the blob store is asked for a URL at all.
 // Neither is evidence of an inconsistency, so neither may fail the call.
 func TestArchiveFetchBlockRejectsMissingMetadata(t *testing.T) {
+	t.Parallel()
+
 	// testBlock is deterministic, so the second seeded block's hash is
 	// known before the store that has to refuse to sign it is built.
 	lostHash := hex.EncodeToString(testBlock(2, 0x12).Hash)
@@ -464,6 +475,8 @@ func TestArchiveFetchBlockRejectsMissingMetadata(t *testing.T) {
 // answers every one of these cheaply and locally, so a regression costs no
 // measurable time here and would surface only as cloud-storage load.
 func TestArchiveFetchBlockResolvesHeightBoundOncePerBatch(t *testing.T) {
+	t.Parallel()
+
 	const blockCount = 16
 	counts := &blobOpCounts{}
 	handler, blocks := newArchiveTestHandlerWithOptions(t, blockCount,
@@ -524,6 +537,8 @@ func TestArchiveFetchBlockResolvesHeightBoundOncePerBatch(t *testing.T) {
 func TestArchiveFetchBlockTreatsInconsistentReferenceAsNotFound(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	handler, blocks := newArchiveTestHandler(t, 3)
 	first, second := blocks[0], blocks[1]
 	firstHash := hex.EncodeToString(first.Hash)
@@ -581,6 +596,8 @@ func TestArchiveFetchBlockTreatsInconsistentReferenceAsNotFound(
 // so the whole request fails with InvalidArgument instead of quietly
 // landing in not_found.
 func TestArchiveFetchBlockRejectsMalformedReference(t *testing.T) {
+	t.Parallel()
+
 	handler, blocks := newArchiveTestHandler(t, 1)
 	validHash := hex.EncodeToString(blocks[0].Hash)
 

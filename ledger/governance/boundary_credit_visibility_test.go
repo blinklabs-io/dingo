@@ -59,6 +59,8 @@ VALUES (?, '0', TRUE)`, credential)
 func TestBoundaryCreditVisibility_TreasuryWithdrawalIsExcludedFromSnapshot(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	stakeCred := testBytes(28, 0x61)
 	rewardAddr, err := lcommon.NewAddressFromParts(
@@ -93,6 +95,8 @@ func TestBoundaryCreditVisibility_TreasuryWithdrawalIsExcludedFromSnapshot(
 func TestBoundaryCreditVisibility_ProposalRefundIsExcludedFromSnapshot(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	stakeCred := testBytes(28, 0x63)
 	rewardAddrBytes := buildRewardAddr(t, stakeCred)

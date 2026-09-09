@@ -35,6 +35,8 @@ import (
 // eras.Eras (7 entries for Cardano), even when most eras have no epochs in the
 // DB. Clients rely on this shape.
 func TestQueryHardForkEraHistory_EmitsAllKnownEras(t *testing.T) {
+	t.Parallel()
+
 	const (
 		tipSlot        = uint64(200_000)
 		epochStartSlot = uint64(100_000)
@@ -103,6 +105,8 @@ func TestQueryHardForkEraHistory_EmitsAllKnownEras(t *testing.T) {
 func TestQueryHardForkEraHistory_TransitionUnknown_TipNearEpochEnd(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		epochStartSlot = uint64(100_000)
 		epochLen       = uint(432_000)
@@ -175,6 +179,8 @@ func TestQueryHardForkEraHistory_TransitionUnknown_TipNearEpochEnd(
 func TestQueryHardForkEraHistory_AtEpochOverride_SurfacesKnownEnd(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		epochId        = uint64(3)
 		epochLen       = uint(21_600)   // Byron epoch length (10k, k=2160)
@@ -254,6 +260,8 @@ func TestQueryHardForkEraHistory_AtEpochOverride_SurfacesKnownEnd(
 // catch a timespan-accumulation bug like the one the legacy code flagged with
 // a hand-written "timespan.Sub" after the transition-epoch detection.
 func TestQueryHardForkEraHistory_AdjacentErasContiguous(t *testing.T) {
+	t.Parallel()
+
 	const (
 		byronEpoch0     = uint64(0)
 		byronEpoch0Len  = uint(21_600)

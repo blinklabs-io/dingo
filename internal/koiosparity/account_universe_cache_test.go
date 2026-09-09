@@ -76,6 +76,8 @@ func newUniverseTestClient(srv *httptest.Server) *KoiosClient {
 // with a syncing node (dingo #3796). A second epoch whose end time the cached
 // crawl already covers must not touch Koios again.
 func TestResolveKoiosAccountUniverseCachedReusesCrawlAcrossEpochs(t *testing.T) {
+	t.Parallel()
+
 	var calls atomic.Int32
 	srv := newAccountListServer(t, &calls, "stake_test1a", "stake_test1b")
 	koios := newUniverseTestClient(srv)
@@ -116,6 +118,8 @@ func TestResolveKoiosAccountUniverseCachedReusesCrawlAcrossEpochs(t *testing.T) 
 // cannot be reused — a short universe silently skips accounts, which reads as
 // a pass.
 func TestResolveKoiosAccountUniverseCachedRefreshesForNewerEpoch(t *testing.T) {
+	t.Parallel()
+
 	var calls atomic.Int32
 	srv := newAccountListServer(t, &calls, "stake_test1a")
 	koios := newUniverseTestClient(srv)
@@ -145,6 +149,8 @@ func TestResolveKoiosAccountUniverseCachedRefreshesForNewerEpoch(t *testing.T) {
 // relies on: a save replaces the previous set wholesale rather than merging
 // into it, so a shrinking universe cannot leave a stale address behind.
 func TestAccountUniverseCacheRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
@@ -192,6 +198,8 @@ func TestAccountUniverseCacheRoundTrip(t *testing.T) {
 // address rows, so an empty crawl is still a cached crawl and a later epoch it
 // covers does not pay for it again.
 func TestResolveKoiosAccountUniverseCachedWithEmptyCrawl(t *testing.T) {
+	t.Parallel()
+
 	var calls atomic.Int32
 	srv := newAccountListServer(t, &calls)
 	koios := newUniverseTestClient(srv)
@@ -217,6 +225,8 @@ func TestResolveKoiosAccountUniverseCachedWithEmptyCrawl(t *testing.T) {
 // crawl against, and reusing it anyway could skip an account that registered
 // between the crawl and the epoch's close — a short universe reads as a pass.
 func TestResolveKoiosAccountUniverseCachedRefusesUnboundedReuse(t *testing.T) {
+	t.Parallel()
+
 	var calls atomic.Int32
 	srv := newAccountListServer(t, &calls, "stake_test1a")
 	koios := newUniverseTestClient(srv)
@@ -248,6 +258,8 @@ func TestResolveKoiosAccountUniverseCachedRefusesUnboundedReuse(t *testing.T) {
 // state row is not, which would read as "never crawled" and pay for a full
 // /account_list walk on first use. The schema migration backfills it.
 func TestAccountUniverseStateBackfilledOnUpgrade(t *testing.T) {
+	t.Parallel()
+
 	path := filepath.Join(t.TempDir(), "cache.db")
 	cache, err := OpenCache(path, nil)
 	require.NoError(t, err)

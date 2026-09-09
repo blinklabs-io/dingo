@@ -77,6 +77,8 @@ func dijkstraTestProtocolParameters() *gdijkstra.DijkstraProtocolParameters {
 func TestValidateTxDijkstraRejectsBelowFloorPoolMarginThroughLedgerView(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, _ := newRewardCalculationTestLedger(t)
 	ls.config.MinPoolMargin = 150 // 1.5%
 	lv := &LedgerView{ls: ls}
@@ -94,6 +96,8 @@ func TestValidateTxDijkstraRejectsBelowFloorPoolMarginThroughLedgerView(
 func TestValidateTxDijkstraAcceptsAtOrAboveFloorPoolMarginThroughLedgerView(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	t.Run("at floor", func(t *testing.T) {
 		ls, _ := newRewardCalculationTestLedger(t)
 		ls.config.MinPoolMargin = 150 // 1.5%

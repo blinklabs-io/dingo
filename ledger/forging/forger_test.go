@@ -1037,6 +1037,7 @@ type forgerTestLeiosCerts struct {
 	txHashes       []string
 	txHashesOK     bool
 	marked         []lcommon.Blake2b256
+	markedSlots    []uint64
 	gotEbSlot      uint64
 	gotEbSlotCalls int
 }
@@ -1056,8 +1057,10 @@ func (p *forgerTestLeiosCerts) CertifiedEndorserBlockTxHashes(
 
 func (p *forgerTestLeiosCerts) MarkEndorserBlockEmbedded(
 	ebHash lcommon.Blake2b256,
+	ebSlot uint64,
 ) {
 	p.marked = append(p.marked, ebHash)
+	p.markedSlots = append(p.markedSlots, ebSlot)
 }
 
 type forgerTestLeiosParentAnnouncement struct {
@@ -1576,6 +1579,7 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 				require.Empty(t, leiosCaster.hash)
 			}
 			require.Equal(t, []lcommon.Blake2b256{ebHash}, leiosCerts.marked)
+			require.Equal(t, []uint64{9}, leiosCerts.markedSlots)
 			require.Equal(t, 1, parent.calls)
 			// CertifiedEndorserBlockTxHashes must be called with the
 			// eligible certificate's own slot (9, from eb.SlotNo above), not
@@ -1669,5 +1673,6 @@ func TestCheckAndForgeProductionCertifiesOnlyParentAnnouncedLeiosEB(
 	require.Nil(t, builder.leiosData.Announcement)
 	require.Same(t, parentCert, builder.leiosData.Certificate)
 	require.Equal(t, []lcommon.Blake2b256{parentHash}, leiosCerts.marked)
+	require.Equal(t, []uint64{9}, leiosCerts.markedSlots)
 	require.Equal(t, 1, parent.calls)
 }

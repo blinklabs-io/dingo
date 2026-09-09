@@ -24,6 +24,7 @@ import (
 	"io"
 	"math"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sync"
 
@@ -1086,6 +1087,10 @@ func (pc *PoolCredentials) ValidateAgainstLedgerAtSlot(
 	slot uint64,
 ) (registered, vrfMatched bool, err error) {
 	if params == nil {
+		return false, false, errors.New("protocol parameters provider is nil")
+	}
+	providerValue := reflect.ValueOf(params)
+	if providerValue.Kind() == reflect.Pointer && providerValue.IsNil() {
 		return false, false, errors.New("protocol parameters provider is nil")
 	}
 	pparams := params.ProtocolParamsForSlot(slot)
