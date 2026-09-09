@@ -16,6 +16,7 @@ package koiosparity
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -686,4 +687,93 @@ func TestPinnedUnstampedCacheWritesUntilItIsStamped(t *testing.T) {
 	require.NoError(t, err)
 	assert.Error(t, checker.UpsertCheckEpochStatus(status),
 		"a legacy cache switched to another host mid-check must stop the check")
+}
+
+// TestClaimedSourceRefusesEpochParamsAfterAnotherWriterRepoints is the
+// parameter backfill's member of the class
+// TestClaimedSourceRefusesWritesAfterAnotherWriterRepoints covers.
+//
+// fetchEpochParamsOnly reaches UpsertEpochParams without going through
+// CommitEpochData, so it is a second way Koios answers enter the cache. A
+// backfill that started against one host and finished after another process
+// re-pointed the cache would otherwise repopulate koios_epoch_params — a table
+// RecordKoiosSource had just discarded — with the old host's answers, under
+// the new host's marker. That is the mixed-oracle state the marker exists to
+// make impossible.
+//
+// The assertion is on the rows, not on the call: the first host's parameters
+// must not be readable from the cache afterwards.
+func TestClaimedSourceRefusesEpochParamsAfterAnotherWriterRepoints(t *testing.T) {
+	const network = "preview"
+	path := filepath.Join(t.TempDir(), "cache.db")
+
+	first, err := OpenCache(path, nil)
+	require.NoError(t, err)
+	defer first.Close() //nolint:errcheck
+	_, err = first.RecordKoiosSource(
+		network, "https://first.example/api/v1", time.Now().UTC(),
+	)
+	require.NoError(t, err)
+
+	// The write lands while the first handle still owns the cache.
+	require.NoError(t, first.UpsertEpochParams(KoiosEpochParams{
+		Network: network,
+		Epoch:   7,
+		Era:     "alonzo",
+	}))
+	owned, err := first.GetEpochParams(network, 7)
+	require.NoError(t, err)
+	require.Equal(t, "alonzo", owned.Era)
+
+	// A second process re-points the same cache, discarding the first host's
+	// rows including this parameter row.
+	second, err := OpenCache(path, nil)
+	require.NoError(t, err)
+	defer second.Close() //nolint:errcheck
+	_, err = second.RecordKoiosSource(
+		network, "https://second.example/api/v1", time.Now().UTC(),
+	)
+	require.NoError(t, err)
+	_, err = second.GetEpochParams(network, 7)
+	require.ErrorIs(t, err, sql.ErrNoRows,
+		"re-pointing must discard the first host's parameter row")
+
+	// The first handle must refuse rather than repopulate.
+	err = first.UpsertEpochParams(KoiosEpochParams{
+		Network: network,
+		Epoch:   7,
+		Era:     "conway",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "refusing to write")
+
+	// The rows are what matter: the first host's parameters must not be
+	// readable from a cache now attributed to the second host.
+	_, err = second.GetEpochParams(network, 7)
+	assert.ErrorIs(t, err, sql.ErrNoRows,
+		"the first host's parameters reappeared in a cache re-pointed at another host")
+}
+
+// TestUnclaimedCacheStillWritesEpochParams keeps the new gate off the
+// read-only and legacy callers, matching TestUnclaimedCacheStillWrites.
+func TestUnclaimedCacheStillWritesEpochParams(t *testing.T) {
+	const network = "preview"
+	path := filepath.Join(t.TempDir(), "cache.db")
+
+	owner, err := OpenCache(path, nil)
+	require.NoError(t, err)
+	defer owner.Close() //nolint:errcheck
+	_, err = owner.RecordKoiosSource(
+		network, "https://first.example/api/v1", time.Now().UTC(),
+	)
+	require.NoError(t, err)
+
+	bystander, err := OpenCache(path, nil)
+	require.NoError(t, err)
+	defer bystander.Close() //nolint:errcheck
+	assert.NoError(t, bystander.UpsertEpochParams(KoiosEpochParams{
+		Network: network,
+		Epoch:   7,
+		Era:     "conway",
+	}))
 }

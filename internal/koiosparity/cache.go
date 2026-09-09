@@ -582,32 +582,34 @@ const epochParamsColumns = `network, epoch, era, min_fee_a, min_fee_b, max_block
 // re-fetched. The reverse order could advance fetched_at with no parameter
 // row, which GetEpochsNeedingCheck would then never revisit.
 func (c *Cache) UpsertEpochParams(p KoiosEpochParams) error {
-	_, err := c.db.Exec(
-		`INSERT INTO koios_epoch_params (`+epochParamsColumns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(network, epoch) DO UPDATE SET
-		 era=excluded.era, min_fee_a=excluded.min_fee_a, min_fee_b=excluded.min_fee_b,
-		 max_block_body_size=excluded.max_block_body_size, max_tx_size=excluded.max_tx_size,
-		 max_block_header_size=excluded.max_block_header_size, key_deposit=excluded.key_deposit,
-		 pool_deposit=excluded.pool_deposit, max_epoch=excluded.max_epoch, n_opt=excluded.n_opt,
-		 a0=excluded.a0, rho=excluded.rho, tau=excluded.tau, protocol_major=excluded.protocol_major,
-		 protocol_minor=excluded.protocol_minor, min_pool_cost=excluded.min_pool_cost,
-		 price_mem=excluded.price_mem, price_step=excluded.price_step, max_tx_ex_mem=excluded.max_tx_ex_mem,
-		 max_tx_ex_steps=excluded.max_tx_ex_steps, max_block_ex_mem=excluded.max_block_ex_mem,
-		 max_block_ex_steps=excluded.max_block_ex_steps, max_value_size=excluded.max_value_size,
-		 collateral_percentage=excluded.collateral_percentage,
-		 max_collateral_inputs=excluded.max_collateral_inputs, cost_models=excluded.cost_models,
-		 decentralisation=excluded.decentralisation,
-		 min_utxo_value=excluded.min_utxo_value, coins_per_utxo_size=excluded.coins_per_utxo_size,
-		 fetched_at=excluded.fetched_at`,
-		p.Network, p.Epoch, p.Era, p.MinFeeA, p.MinFeeB, p.MaxBlockBodySize, p.MaxTxSize,
-		p.MaxBlockHeaderSize, p.KeyDeposit, p.PoolDeposit, p.MaxEpoch, p.NOpt, p.A0, p.Rho, p.Tau,
-		p.ProtocolMajor, p.ProtocolMinor, p.MinPoolCost, p.PriceMem, p.PriceStep, p.MaxTxExMem,
-		p.MaxTxExSteps, p.MaxBlockExMem, p.MaxBlockExSteps, p.MaxValueSize, p.CollateralPercentage,
-		p.MaxCollateralInputs, p.CostModels, p.Decentralisation, p.MinUtxoValue, p.CoinsPerUtxoSize,
-		p.FetchedAt,
-	)
-	return err
+	return c.withClaimedSource(p.Network, func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`INSERT INTO koios_epoch_params (`+epochParamsColumns+`)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(network, epoch) DO UPDATE SET
+			 era=excluded.era, min_fee_a=excluded.min_fee_a, min_fee_b=excluded.min_fee_b,
+			 max_block_body_size=excluded.max_block_body_size, max_tx_size=excluded.max_tx_size,
+			 max_block_header_size=excluded.max_block_header_size, key_deposit=excluded.key_deposit,
+			 pool_deposit=excluded.pool_deposit, max_epoch=excluded.max_epoch, n_opt=excluded.n_opt,
+			 a0=excluded.a0, rho=excluded.rho, tau=excluded.tau, protocol_major=excluded.protocol_major,
+			 protocol_minor=excluded.protocol_minor, min_pool_cost=excluded.min_pool_cost,
+			 price_mem=excluded.price_mem, price_step=excluded.price_step, max_tx_ex_mem=excluded.max_tx_ex_mem,
+			 max_tx_ex_steps=excluded.max_tx_ex_steps, max_block_ex_mem=excluded.max_block_ex_mem,
+			 max_block_ex_steps=excluded.max_block_ex_steps, max_value_size=excluded.max_value_size,
+			 collateral_percentage=excluded.collateral_percentage,
+			 max_collateral_inputs=excluded.max_collateral_inputs, cost_models=excluded.cost_models,
+			 decentralisation=excluded.decentralisation,
+			 min_utxo_value=excluded.min_utxo_value, coins_per_utxo_size=excluded.coins_per_utxo_size,
+			 fetched_at=excluded.fetched_at`,
+			p.Network, p.Epoch, p.Era, p.MinFeeA, p.MinFeeB, p.MaxBlockBodySize, p.MaxTxSize,
+			p.MaxBlockHeaderSize, p.KeyDeposit, p.PoolDeposit, p.MaxEpoch, p.NOpt, p.A0, p.Rho, p.Tau,
+			p.ProtocolMajor, p.ProtocolMinor, p.MinPoolCost, p.PriceMem, p.PriceStep, p.MaxTxExMem,
+			p.MaxTxExSteps, p.MaxBlockExMem, p.MaxBlockExSteps, p.MaxValueSize, p.CollateralPercentage,
+			p.MaxCollateralInputs, p.CostModels, p.Decentralisation, p.MinUtxoValue, p.CoinsPerUtxoSize,
+			p.FetchedAt,
+		)
+		return err
+	})
 }
 
 // DeleteEpochParams invalidates a parameter row after a later epoch commit
