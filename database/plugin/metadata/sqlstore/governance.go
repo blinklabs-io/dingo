@@ -747,10 +747,7 @@ func (s *Store) GetResignedCommitteeMembers(
 	// MAX(added_slot) >= termStart, so the term comparison still happens per
 	// credential, just in Go.
 	latest := make(map[string]uint64, len(coldCredentials))
-	chunkSize := s.dialect.ParameterLimit() / 2
-	if chunkSize < 1 {
-		chunkSize = 1
-	}
+	chunkSize := max(s.dialect.ParameterLimit()/2, 1)
 	for start := 0; start < len(coldCredentials); start += chunkSize {
 		end := min(start+chunkSize, len(coldCredentials))
 		chunk := coldCredentials[start:end]

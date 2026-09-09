@@ -30,6 +30,8 @@ import (
 )
 
 func TestDecodeGovAction_InfoRoundtrip(t *testing.T) {
+	t.Parallel()
+
 	original := &lcommon.InfoGovAction{Type: 6}
 	encoded, err := cbor.Encode(original)
 	require.NoError(t, err)
@@ -42,6 +44,8 @@ func TestDecodeGovAction_InfoRoundtrip(t *testing.T) {
 }
 
 func TestDecodeGovAction_ParameterChangeRoundtrip(t *testing.T) {
+	t.Parallel()
+
 	fee := uint(1234)
 	original := &conway.ConwayParameterChangeGovAction{
 		Type: 0,
@@ -62,6 +66,8 @@ func TestDecodeGovAction_ParameterChangeRoundtrip(t *testing.T) {
 }
 
 func TestEnactProposal_DijkstraParameterChange(t *testing.T) {
+	t.Parallel()
+
 	db, _ := newTallyTestDB(t)
 
 	fee := uint(1234)
@@ -125,6 +131,8 @@ func TestEnactProposal_DijkstraParameterChange(t *testing.T) {
 func TestEnactProposal_ConwayParameterChangeDoesNotWritePlutusV2CostModel(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, _ := newTallyTestDB(t)
 
 	fee := uint(1234)
@@ -173,6 +181,8 @@ func TestEnactProposal_ConwayParameterChangeDoesNotWritePlutusV2CostModel(
 func TestEnactProposal_ConwayParameterChangeWritesPlutusV2CostModel(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, _ := newTallyTestDB(t)
 
 	action := &conway.ConwayParameterChangeGovAction{
@@ -221,6 +231,8 @@ func TestEnactProposal_ConwayParameterChangeWritesPlutusV2CostModel(
 func TestEnactProposal_DijkstraParameterChangeWritesPlutusV2CostModel(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, _ := newTallyTestDB(t)
 
 	action := &gdijkstra.DijkstraParameterChangeGovAction{
@@ -269,6 +281,8 @@ func TestEnactProposal_DijkstraParameterChangeWritesPlutusV2CostModel(
 }
 
 func TestDecodeGovAction_HardForkRoundtrip(t *testing.T) {
+	t.Parallel()
+
 	original := &lcommon.HardForkInitiationGovAction{Type: 1}
 	original.ProtocolVersion.Major = 10
 	original.ProtocolVersion.Minor = 0
@@ -284,6 +298,8 @@ func TestDecodeGovAction_HardForkRoundtrip(t *testing.T) {
 }
 
 func TestDecodeGovAction_TreasuryWithdrawalRoundtrip(t *testing.T) {
+	t.Parallel()
+
 	original := &lcommon.TreasuryWithdrawalGovAction{
 		Type:       2,
 		PolicyHash: []byte{0xAB, 0xCD, 0xEF},
@@ -300,6 +316,8 @@ func TestDecodeGovAction_TreasuryWithdrawalRoundtrip(t *testing.T) {
 }
 
 func TestDecodeGovAction_NoConfidenceRoundtrip(t *testing.T) {
+	t.Parallel()
+
 	original := &lcommon.NoConfidenceGovAction{Type: 3}
 	encoded, err := cbor.Encode(original)
 	require.NoError(t, err)
@@ -312,6 +330,8 @@ func TestDecodeGovAction_NoConfidenceRoundtrip(t *testing.T) {
 }
 
 func TestDecodeGovAction_UpdateCommitteeRoundtrip(t *testing.T) {
+	t.Parallel()
+
 	original := &lcommon.UpdateCommitteeGovAction{
 		Type:        4,
 		Credentials: []lcommon.Credential{},
@@ -328,6 +348,8 @@ func TestDecodeGovAction_UpdateCommitteeRoundtrip(t *testing.T) {
 }
 
 func TestDecodeGovAction_NewConstitutionRoundtrip(t *testing.T) {
+	t.Parallel()
+
 	original := &lcommon.NewConstitutionGovAction{Type: 5}
 	encoded, err := cbor.Encode(original)
 	require.NoError(t, err)
@@ -340,6 +362,8 @@ func TestDecodeGovAction_NewConstitutionRoundtrip(t *testing.T) {
 }
 
 func TestDecodeGovAction_EmptyCbor(t *testing.T) {
+	t.Parallel()
+
 	_, err := decodeGovAction(
 		nil, uint8(lcommon.GovActionTypeInfo),
 	)
@@ -347,6 +371,8 @@ func TestDecodeGovAction_EmptyCbor(t *testing.T) {
 }
 
 func TestDecodeGovAction_UnknownType(t *testing.T) {
+	t.Parallel()
+
 	_, err := decodeGovAction(
 		[]byte{0x00}, 99,
 	)
@@ -354,6 +380,8 @@ func TestDecodeGovAction_UnknownType(t *testing.T) {
 }
 
 func TestDecodeGovActionRejectsStoredAndEmbeddedTypeMismatch(t *testing.T) {
+	t.Parallel()
+
 	encoded, err := cbor.Encode(&lcommon.NoConfidenceGovAction{
 		Type: uint(lcommon.GovActionTypeUpdateCommittee),
 	})
@@ -366,6 +394,8 @@ func TestDecodeGovActionRejectsStoredAndEmbeddedTypeMismatch(t *testing.T) {
 }
 
 func TestDecodeGovActionRejectsTruncatedAndTrailingData(t *testing.T) {
+	t.Parallel()
+
 	encoded, err := cbor.Encode(&lcommon.InfoGovAction{
 		Type: uint(lcommon.GovActionTypeInfo),
 	})
@@ -386,6 +416,8 @@ func TestDecodeGovActionRejectsTruncatedAndTrailingData(t *testing.T) {
 }
 
 func TestSetProtocolVersion_ConwayParams(t *testing.T) {
+	t.Parallel()
+
 	pparams := &conway.ConwayProtocolParameters{}
 	pparams.ProtocolVersion.Major = 9
 	pparams.ProtocolVersion.Minor = 0
@@ -400,6 +432,8 @@ func TestSetProtocolVersion_ConwayParams(t *testing.T) {
 }
 
 func TestEnactProposal_DijkstraHardForkPreservesPParams(t *testing.T) {
+	t.Parallel()
+
 	db, _ := newTallyTestDB(t)
 	action := &lcommon.HardForkInitiationGovAction{
 		Type: uint(lcommon.GovActionTypeHardForkInitiation),
@@ -479,6 +513,8 @@ func TestEnactProposal_DijkstraHardForkPreservesPParams(t *testing.T) {
 }
 
 func TestEnactProposalHardForkRejectsTypedNilDijkstraPParams(t *testing.T) {
+	t.Parallel()
+
 	db, _ := newTallyTestDB(t)
 	action := &lcommon.HardForkInitiationGovAction{
 		Type: uint(lcommon.GovActionTypeHardForkInitiation),
@@ -501,6 +537,8 @@ func TestEnactProposalHardForkRejectsTypedNilDijkstraPParams(t *testing.T) {
 }
 
 func TestEnactProposalHardForkReturnsMutationIsolatedPParams(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		pparams func() lcommon.ProtocolParameters
@@ -684,6 +722,8 @@ func mutateConwayPParams(
 }
 
 func TestStakeEpochFor(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		newEpoch uint64
 		expected uint64
@@ -704,6 +744,8 @@ func TestStakeEpochFor(t *testing.T) {
 // test for a partition function here.
 
 func TestApplyUpdateCommittee_PersistsEnactedQuorum(t *testing.T) {
+	t.Parallel()
+
 	db, _ := newTallyTestDB(t)
 
 	action := &lcommon.UpdateCommitteeGovAction{
@@ -727,6 +769,8 @@ func TestApplyUpdateCommittee_PersistsEnactedQuorum(t *testing.T) {
 func TestApplyUpdateCommittee_ReelectionStartsFreshCredentialTerm(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	coldHash := testBytes(28, 41)
 	oldHotHash := testBytes(28, 42)
@@ -818,6 +862,8 @@ func TestApplyUpdateCommittee_ReelectionStartsFreshCredentialTerm(
 func TestEnactProposal_NoConfidence_ClearsCommitteeQuorum(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, _ := newTallyTestDB(t)
 
 	// Seed an enacted quorum from a prior UpdateCommittee.
@@ -860,6 +906,8 @@ func TestEnactProposal_NoConfidence_ClearsCommitteeQuorum(
 }
 
 func TestApplyUpdateCommitteePreservesZeroTermStartSlot(t *testing.T) {
+	t.Parallel()
+
 	db, _ := newTallyTestDB(t)
 	credential := &lcommon.Credential{
 		CredType:   lcommon.CredentialTypeAddrKeyHash,
@@ -887,6 +935,8 @@ func TestApplyUpdateCommitteePreservesZeroTermStartSlot(t *testing.T) {
 func TestApplyTreasuryWithdrawal_CreditsRewardsAndDebitsTreasury(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	stakeCred := testBytes(28, 1)
 	rewardAddr, err := lcommon.NewAddressFromParts(
@@ -926,6 +976,8 @@ func TestApplyTreasuryWithdrawal_CreditsRewardsAndDebitsTreasury(
 func TestApplyTreasuryWithdrawal_DistinguishesSameTxActionIndex(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	stakeCred := testBytes(28, 0x21)
 	rewardAddr, err := lcommon.NewAddressFromParts(
@@ -1024,6 +1076,8 @@ WHERE credential_tag = ? AND staking_key = ? AND added_slot = ?`,
 func TestApplyTreasuryWithdrawal_RejectsOverdrawnTreasury(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	stakeCred := testBytes(28, 2)
 	rewardAddr, err := lcommon.NewAddressFromParts(
@@ -1067,6 +1121,8 @@ func TestApplyTreasuryWithdrawal_RejectsOverdrawnTreasury(
 func TestApplyTreasuryWithdrawal_LeavesMissingRewardAccountInTreasury(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	stakeCred := testBytes(28, 2)
 	rewardAddr, err := lcommon.NewAddressFromParts(
@@ -1103,6 +1159,8 @@ func TestApplyTreasuryWithdrawal_LeavesMissingRewardAccountInTreasury(
 func TestApplyTreasuryWithdrawal_LeavesInactiveRewardAccountInTreasury(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	stakeCred := testBytes(28, 3)
 	rewardAddr, err := lcommon.NewAddressFromParts(
@@ -1151,6 +1209,8 @@ func TestApplyTreasuryWithdrawal_LeavesInactiveRewardAccountInTreasury(
 func TestApplyTreasuryWithdrawal_UnclaimedStillCountsAgainstCapacity(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	stakeCred := testBytes(28, 4)
 	rewardAddr, err := lcommon.NewAddressFromParts(

@@ -127,12 +127,16 @@ func dijkstraHeaderWithMajor(
 }
 
 func TestHeaderProtocolMajor_Shelley(t *testing.T) {
+	t.Parallel()
+
 	got, ok := HeaderProtocolMajor(shelleyHeaderWithMajor(t, 2))
 	require.True(t, ok)
 	assert.Equal(t, uint(2), got)
 }
 
 func TestHeaderProtocolMajor_Allegra(t *testing.T) {
+	t.Parallel()
+
 	h := &allegra.AllegraBlockHeader{
 		ShelleyBlockHeader: *shelleyHeaderWithMajor(t, 3),
 	}
@@ -142,6 +146,8 @@ func TestHeaderProtocolMajor_Allegra(t *testing.T) {
 }
 
 func TestHeaderProtocolMajor_Mary(t *testing.T) {
+	t.Parallel()
+
 	h := &mary.MaryBlockHeader{
 		ShelleyBlockHeader: *shelleyHeaderWithMajor(t, 4),
 	}
@@ -151,6 +157,8 @@ func TestHeaderProtocolMajor_Mary(t *testing.T) {
 }
 
 func TestHeaderProtocolMajor_Alonzo(t *testing.T) {
+	t.Parallel()
+
 	h := &alonzo.AlonzoBlockHeader{
 		ShelleyBlockHeader: *shelleyHeaderWithMajor(t, 6),
 	}
@@ -160,12 +168,16 @@ func TestHeaderProtocolMajor_Alonzo(t *testing.T) {
 }
 
 func TestHeaderProtocolMajor_Babbage(t *testing.T) {
+	t.Parallel()
+
 	got, ok := HeaderProtocolMajor(babbageHeaderWithMajor(t, 8))
 	require.True(t, ok)
 	assert.Equal(t, uint(8), got)
 }
 
 func TestHeaderProtocolMajor_Conway(t *testing.T) {
+	t.Parallel()
+
 	h := &conway.ConwayBlockHeader{
 		BabbageBlockHeader: *babbageHeaderWithMajor(t, 10),
 	}
@@ -175,6 +187,8 @@ func TestHeaderProtocolMajor_Conway(t *testing.T) {
 }
 
 func TestHeaderProtocolMajor_Dijkstra(t *testing.T) {
+	t.Parallel()
+
 	// Dijkstra headers are a distinct concrete type from Babbage/Conway.
 	// Without an explicit case the type switch falls through to default
 	// (ok=false), which disables the "too high" check for Dijkstra blocks.
@@ -184,6 +198,8 @@ func TestHeaderProtocolMajor_Dijkstra(t *testing.T) {
 }
 
 func TestHeaderProtocolMajor_Byron(t *testing.T) {
+	t.Parallel()
+
 	// Byron headers do not carry a ProtVer in the Praos sense, so the
 	// extractor reports the absence rather than fabricating a value.
 	h := &byron.ByronMainBlockHeader{}
@@ -192,6 +208,8 @@ func TestHeaderProtocolMajor_Byron(t *testing.T) {
 }
 
 func TestValidateHeaderProtocolVersion_MainnetEqual(t *testing.T) {
+	t.Parallel()
+
 	// Header pvMajor == current pvMajor is always accepted.
 	err := ValidateHeaderProtocolVersion(
 		babbageHeaderWithMajor(t, 10),
@@ -202,6 +220,8 @@ func TestValidateHeaderProtocolVersion_MainnetEqual(t *testing.T) {
 }
 
 func TestValidateHeaderProtocolVersion_MainnetOneAhead(t *testing.T) {
+	t.Parallel()
+
 	// Header pvMajor == current pvMajor + 1 is accepted (block producer
 	// is one version ahead, ready to hard fork).
 	err := ValidateHeaderProtocolVersion(
@@ -213,6 +233,8 @@ func TestValidateHeaderProtocolVersion_MainnetOneAhead(t *testing.T) {
 }
 
 func TestValidateHeaderProtocolVersion_MainnetTooHigh(t *testing.T) {
+	t.Parallel()
+
 	// Header pvMajor more than one ahead of current is rejected on mainnet.
 	err := ValidateHeaderProtocolVersion(
 		babbageHeaderWithMajor(t, 12),
@@ -227,6 +249,8 @@ func TestValidateHeaderProtocolVersion_MainnetTooHigh(t *testing.T) {
 }
 
 func TestValidateHeaderProtocolVersion_TestnetTooHighPreDijkstra(t *testing.T) {
+	t.Parallel()
+
 	// On testnets, while pre-Dijkstra (current major < 12), a header
 	// with arbitrarily high pvMajor is accepted. This is the relaxation
 	// from cardano-ledger PR 5785.
@@ -239,6 +263,8 @@ func TestValidateHeaderProtocolVersion_TestnetTooHighPreDijkstra(t *testing.T) {
 }
 
 func TestValidateHeaderProtocolVersion_TestnetTooHighAtDijkstra(t *testing.T) {
+	t.Parallel()
+
 	// On testnets, once current pvMajor reaches Dijkstra (12), the check
 	// becomes mainnet-equivalent: header more than one ahead is rejected.
 	err := ValidateHeaderProtocolVersion(
@@ -254,6 +280,8 @@ func TestValidateHeaderProtocolVersion_TestnetTooHighAtDijkstra(t *testing.T) {
 }
 
 func TestValidateHeaderProtocolVersion_TestnetOneAheadAtDijkstra(t *testing.T) {
+	t.Parallel()
+
 	// At Dijkstra on a testnet, header == current+1 is still accepted.
 	err := ValidateHeaderProtocolVersion(
 		babbageHeaderWithMajor(t, 13),
@@ -264,6 +292,8 @@ func TestValidateHeaderProtocolVersion_TestnetOneAheadAtDijkstra(t *testing.T) {
 }
 
 func TestValidateHeaderProtocolVersion_DijkstraTooHigh(t *testing.T) {
+	t.Parallel()
+
 	// Regression: a Dijkstra-era header more than one ahead of current
 	// pparams must be rejected. Before HeaderProtocolMajor had an explicit
 	// Dijkstra case, this header fell through to default (ok=false) and the
@@ -283,6 +313,8 @@ func TestValidateHeaderProtocolVersion_DijkstraTooHigh(t *testing.T) {
 }
 
 func TestValidateHeaderProtocolVersion_DijkstraOneAhead(t *testing.T) {
+	t.Parallel()
+
 	// A Dijkstra header exactly one ahead of current is still accepted.
 	err := ValidateHeaderProtocolVersion(
 		dijkstraHeaderWithMajor(t, 13),
@@ -293,6 +325,8 @@ func TestValidateHeaderProtocolVersion_DijkstraOneAhead(t *testing.T) {
 }
 
 func TestValidateHeaderProtocolVersion_Byron(t *testing.T) {
+	t.Parallel()
+
 	// Byron headers are skipped entirely - they do not carry a ProtVer
 	// in the Praos sense.
 	err := ValidateHeaderProtocolVersion(
@@ -304,6 +338,8 @@ func TestValidateHeaderProtocolVersion_Byron(t *testing.T) {
 }
 
 func TestHeaderProtocolVersionTooHighError_Message(t *testing.T) {
+	t.Parallel()
+
 	err := &HeaderProtocolVersionTooHighError{
 		Supplied: 12,
 		Expected: 11,
@@ -318,6 +354,8 @@ func TestHeaderProtocolVersionTooHighError_Message(t *testing.T) {
 // through HeaderProtocolMajor for the typical case where callers pass
 // a full block via block.Header().
 func TestHeaderProtocolMajor_ViaBlockHeader(t *testing.T) {
+	t.Parallel()
+
 	var h lcommon.BlockHeader = babbageHeaderWithMajor(t, 8)
 	got, ok := HeaderProtocolMajor(h)
 	require.True(t, ok)
@@ -325,6 +363,8 @@ func TestHeaderProtocolMajor_ViaBlockHeader(t *testing.T) {
 }
 
 func TestLedgerStateIsMainnet_True(t *testing.T) {
+	t.Parallel()
+
 	ls := newLedgerStateForNetwork(t, "Mainnet", byron.MainnetProtocolMagic)
 	got, err := ls.isMainnet()
 	require.NoError(t, err)
@@ -332,6 +372,8 @@ func TestLedgerStateIsMainnet_True(t *testing.T) {
 }
 
 func TestLedgerStateIsMainnet_FalseOnPreprod(t *testing.T) {
+	t.Parallel()
+
 	// Preprod genesis uses networkId=Testnet, magic=1.
 	ls := newLedgerStateForNetwork(t, "Testnet", 1)
 	got, err := ls.isMainnet()
@@ -340,6 +382,8 @@ func TestLedgerStateIsMainnet_FalseOnPreprod(t *testing.T) {
 }
 
 func TestLedgerStateIsMainnet_FalseOnDevnet(t *testing.T) {
+	t.Parallel()
+
 	// Devnet genesis uses networkId=Testnet, magic=42.
 	ls := newLedgerStateForNetwork(t, "Testnet", 42)
 	got, err := ls.isMainnet()
@@ -354,6 +398,8 @@ func TestLedgerStateIsMainnet_FalseOnDevnet(t *testing.T) {
 // don't slip past the header-version check on a partially initialized
 // state.
 func TestLedgerStateIsMainnet_FailClosedWhenConfigMissing(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -367,6 +413,8 @@ func TestLedgerStateIsMainnet_FailClosedWhenConfigMissing(t *testing.T) {
 // fail-closed guarantee for the case where CardanoNodeConfig is
 // present but Shelley genesis has not been loaded.
 func TestLedgerStateIsMainnet_FailClosedWhenGenesisMissing(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		config: LedgerStateConfig{
 			CardanoNodeConfig: &cardano.CardanoNodeConfig{},
@@ -382,6 +430,8 @@ func TestLedgerStateIsMainnet_FailClosedWhenGenesisMissing(t *testing.T) {
 // nor "Testnet" (typo, future enum value, corrupted file). We refuse
 // to guess in either direction.
 func TestLedgerStateIsMainnet_FailClosedOnUnknownNetworkId(t *testing.T) {
+	t.Parallel()
+
 	ls := newLedgerStateForNetwork(t, "Bogus", 42)
 	_, err := ls.isMainnet()
 	require.Error(t, err)
@@ -394,6 +444,8 @@ func TestLedgerStateIsMainnet_FailClosedOnUnknownNetworkId(t *testing.T) {
 // must be honored even with a non-canonical magic. This is the literal
 // port of cardano-ledger's `netId == Mainnet` predicate.
 func TestLedgerStateIsMainnet_NetworkIdNotMagic(t *testing.T) {
+	t.Parallel()
+
 	t.Run("Testnet wins over mainnet magic", func(t *testing.T) {
 		ls := newLedgerStateForNetwork(
 			t, "Testnet", byron.MainnetProtocolMagic,
@@ -420,6 +472,8 @@ func TestLedgerStateIsMainnet_NetworkIdNotMagic(t *testing.T) {
 // network dingo was started with is the one signal that still
 // disambiguates the two chains.
 func TestLedgerStateIsMainnet_PrimeMainnetNotRealMainnet(t *testing.T) {
+	t.Parallel()
+
 	ls := newLedgerStateForNetworkNamed(
 		t, "Mainnet", byron.MainnetProtocolMagic, "prime-mainnet",
 	)
@@ -433,6 +487,8 @@ func TestLedgerStateIsMainnet_PrimeMainnetNotRealMainnet(t *testing.T) {
 // Network="mainnet" alongside a Mainnet-identity genesis must still
 // resolve to real mainnet.
 func TestLedgerStateIsMainnet_NamedMainnetStillTrue(t *testing.T) {
+	t.Parallel()
+
 	ls := newLedgerStateForNetworkNamed(
 		t, "Mainnet", byron.MainnetProtocolMagic, "mainnet",
 	)
@@ -449,6 +505,8 @@ func TestLedgerStateIsMainnet_NamedMainnetStillTrue(t *testing.T) {
 func TestLedgerStateIsMainnet_UnknownNetworkNameFallsBackToGenesis(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := newLedgerStateForNetworkNamed(
 		t, "Mainnet", byron.MainnetProtocolMagic, "some-custom-devnet",
 	)
@@ -470,6 +528,8 @@ func TestLedgerStateIsMainnet_UnknownNetworkNameFallsBackToGenesis(
 func TestLedgerStateIsMainnet_NamedNetworkMagicMismatchStaysMainnet(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := newLedgerStateForNetworkNamed(
 		t, "Mainnet", byron.MainnetProtocolMagic, "preview",
 	)
@@ -489,6 +549,8 @@ func TestLedgerStateIsMainnet_NamedNetworkMagicMismatchStaysMainnet(
 func TestLedgerStateIsMainnet_PrimeMainnetNameWithMismatchedGenesisMagicStaysMainnet(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := newLedgerStateForNetworkNamed(
 		t, "Mainnet", 999, "prime-mainnet",
 	)
@@ -504,6 +566,8 @@ func TestLedgerStateIsMainnet_PrimeMainnetNameWithMismatchedGenesisMagicStaysMai
 func TestLedgerStateValidateBlockHeaderProtocolVersion_FailClosedOnMissingConfig(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -524,6 +588,8 @@ func TestLedgerStateValidateBlockHeaderProtocolVersion_FailClosedOnMissingConfig
 func TestLedgerStateValidateBlockHeaderProtocolVersion_MainnetRejects(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := newLedgerStateForNetwork(t, "Mainnet", byron.MainnetProtocolMagic)
 	pp := &conway.ConwayProtocolParameters{
 		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
@@ -543,6 +609,8 @@ func TestLedgerStateValidateBlockHeaderProtocolVersion_MainnetRejects(
 func TestLedgerStateValidateBlockHeaderProtocolVersion_DijkstraRejects(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	// End-to-end: a node in the Dijkstra era (pparams major 12) on mainnet
 	// must reject a Dijkstra header whose protocol major is more than one
 	// ahead, exercising the GetProtocolVersion Dijkstra case, isMainnet,
@@ -566,6 +634,8 @@ func TestLedgerStateValidateBlockHeaderProtocolVersion_DijkstraRejects(
 func TestLedgerStateValidateBlockHeaderProtocolVersion_TestnetAllows(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := newLedgerStateForNetwork(t, "Testnet", 42)
 	pp := &conway.ConwayProtocolParameters{
 		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{

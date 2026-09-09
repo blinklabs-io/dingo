@@ -21,6 +21,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -54,6 +55,16 @@ type fakeArchive struct {
 	oversize       bool
 	substituteBody []byte
 
+	// serveNotFound models the archive answering a well-formed request for
+	// a block it does not hold: an empty blocks list with the reference
+	// echoed under not_found, rather than a transport error.
+	serveNotFound bool
+
+	// notFoundRef, when set alongside serveNotFound, is echoed under
+	// not_found in place of the reference that was asked about. It models
+	// a confused or hostile archive answering about a different block.
+	notFoundRef *archive.BlockRef
+
 	fetchCalls int
 }
 
@@ -65,6 +76,14 @@ func (a *fakeArchive) FetchBlock(
 	resp := &archive.FetchBlockResponse{}
 	for _, b := range req.Msg.GetBlocks() {
 		hashHex := b.GetHash()
+		if a.serveNotFound {
+			missing := a.notFoundRef
+			if missing == nil {
+				missing = &archive.BlockRef{Hash: b.Hash, Slot: b.Slot}
+			}
+			resp.NotFound = append(resp.NotFound, missing)
+			continue
+		}
 		if _, ok := a.blocks[hashHex]; !ok {
 			a.t.Fatalf("fakeArchive: unexpected block requested: %s", hashHex)
 		}
@@ -175,6 +194,8 @@ func newBarkBlobStoreForTest(
 // TestValidateArchiveURL covers the URL security rules enforced before any
 // download is attempted: HTTPS-only, no credentials, and allowed host only.
 func TestValidateArchiveURL(t *testing.T) {
+	t.Parallel()
+
 	allowedHosts := archiveDownloadHosts(
 		"https://archive.example.com:9091",
 		[]string{"https://s3.example.com/block"},
@@ -227,6 +248,8 @@ func TestValidateArchiveURL(t *testing.T) {
 // TestGetBlock_RejectsNonHTTPS verifies that a non-HTTPS download URL returned
 // by the archive is rejected before any outbound dial is attempted.
 func TestGetBlock_RejectsNonHTTPS(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	const slot uint64 = 500
 	hash := bytes.Repeat([]byte{0x11}, 32)
@@ -249,6 +272,8 @@ func TestGetBlock_RejectsNonHTTPS(t *testing.T) {
 // TestGetBlock_RejectsEmbeddedCredentials verifies that an archive-supplied
 // URL containing user:password is rejected even when the scheme is HTTPS.
 func TestGetBlock_RejectsEmbeddedCredentials(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	const slot uint64 = 501
 	hash := bytes.Repeat([]byte{0x22}, 32)
@@ -270,6 +295,8 @@ func TestGetBlock_RejectsEmbeddedCredentials(t *testing.T) {
 // TestGetBlock_RejectsUnconfiguredHost verifies that an HTTPS URL is still
 // rejected when it points at a host outside the expected/allowlisted set.
 func TestGetBlock_RejectsUnconfiguredHost(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	const slot uint64 = 504
 	hash := bytes.Repeat([]byte{0x55}, 32)
@@ -291,6 +318,8 @@ func TestGetBlock_RejectsUnconfiguredHost(t *testing.T) {
 // TestGetBlock_RejectsRedirect verifies that the HTTP client does not follow
 // redirects returned by the download server.
 func TestGetBlock_RejectsRedirect(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	const slot uint64 = 502
 	hash := bytes.Repeat([]byte{0x33}, 32)
@@ -312,6 +341,8 @@ func TestGetBlock_RejectsRedirect(t *testing.T) {
 // TestGetBlock_CapsResponseSize verifies that a download response larger than
 // maxArchiveBlockSize is rejected rather than fully buffered into memory.
 func TestGetBlock_CapsResponseSize(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	const slot uint64 = 503
 	hash := bytes.Repeat([]byte{0x44}, 32)
@@ -374,6 +405,8 @@ func serveArchiveBlock(
 // archive reporting nothing, correct height and previous hash can only have
 // come from decoding the block bytes.
 func TestGetBlock_AcceptsVerifiedArchiveBlock(t *testing.T) {
+	t.Parallel()
+
 	// Use the second block so PrevHash is a real hash rather than zeroes.
 	block := archiveBlockFixtures(t, 2)[1]
 	hash := block.Hash()
@@ -486,6 +519,8 @@ func generatedUnclassifiableBabbageBlock(t *testing.T) ([]byte, uint) {
 // cannot police the era, and without an independent derivation the archive
 // would dictate BlockMetadata.Type.
 func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		block    func(*testing.T) ([]byte, uint)
@@ -569,6 +604,8 @@ func TestGetBlock_RejectsArchiveBlockTypeMismatch(t *testing.T) {
 // previous hash all come from the untouched header. Rather than serve bytes
 // whose body is only partly authenticated, the fetch is refused.
 func TestGetBlock_RejectsByronMainArchiveBlock(t *testing.T) {
+	t.Parallel()
+
 	raw, trueType := realEraBlock(t, "Block_Byron_regular")
 	require.Equal(t, uint(gledger.BlockTypeByronMain), trueType,
 		"fixture must be a Byron main block")
@@ -598,6 +635,8 @@ func TestGetBlock_RejectsByronMainArchiveBlock(t *testing.T) {
 // payload, so a single body hash covers the whole body and the block is fully
 // bound to its header. Refusing it too would give up history for no gain.
 func TestGetBlock_AcceptsByronEpochBoundaryArchiveBlock(t *testing.T) {
+	t.Parallel()
+
 	raw, trueType := realEraBlock(t, "Block_Byron_EBB")
 	require.Equal(t, uint(gledger.BlockTypeByronEbb), trueType,
 		"fixture must be a Byron epoch boundary block")
@@ -633,6 +672,8 @@ func TestGetBlock_AcceptsByronEpochBoundaryArchiveBlock(t *testing.T) {
 // that case would hand era selection straight back to it, so the fetch is
 // refused. A node that cannot classify a block could not process it anyway.
 func TestGetBlock_RejectsUnclassifiableEra(t *testing.T) {
+	t.Parallel()
+
 	raw, trueType := generatedUnclassifiableBabbageBlock(t)
 	decoded, err := gledger.NewBlockFromCbor(trueType, raw)
 	require.NoError(t, err)
@@ -664,6 +705,8 @@ func TestGetBlock_RejectsUnclassifiableEra(t *testing.T) {
 // different, individually valid block. The substituted block must not reach
 // the caller.
 func TestGetBlock_RejectsArchiveBlockForDifferentPoint(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	chain := archiveBlockFixtures(t, 2)
 	requested, substituted := chain[0], chain[1]
@@ -687,6 +730,8 @@ func TestGetBlock_RejectsArchiveBlockForDifferentPoint(t *testing.T) {
 // TestGetBlock_RejectsUndecodableArchiveBlock covers an archive response that
 // is not a well-formed block at all.
 func TestGetBlock_RejectsUndecodableArchiveBlock(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	block := archiveBlockFixtures(t, 1)[0]
 
@@ -707,6 +752,8 @@ func TestGetBlock_RejectsUndecodableArchiveBlock(t *testing.T) {
 // TestGetBlock_RejectsArchiveBlockSlotMismatch covers a block whose bytes are
 // genuine but which does not sit at the slot the caller asked about.
 func TestGetBlock_RejectsArchiveBlockSlotMismatch(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	block := archiveBlockFixtures(t, 1)[0]
 
@@ -727,6 +774,8 @@ func TestGetBlock_RejectsArchiveBlockSlotMismatch(t *testing.T) {
 // that contradicts the block it accompanies. The block bytes verify, so the
 // disagreement means the archive is misreporting and must not be trusted.
 func TestGetBlock_RejectsArchiveMetadataMismatch(t *testing.T) {
+	t.Parallel()
+
 	block := archiveBlockFixtures(t, 2)[1]
 	hash := block.Hash()
 
@@ -773,6 +822,8 @@ func TestGetBlock_RejectsArchiveMetadataMismatch(t *testing.T) {
 // expired-history resolution is covered by the same verification as GetBlock,
 // rather than being a second, unchecked way into archive data.
 func TestBarkIterator_RejectsArchiveBlockForDifferentPoint(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	chain := archiveBlockFixtures(t, 2)
 	requested, substituted := chain[0], chain[1]
@@ -831,6 +882,8 @@ func TestBarkIterator_RejectsArchiveBlockForDifferentPoint(t *testing.T) {
 // block, marks it expired locally, then iterates through the bark wrapper.
 // ValueCopy must surface the archive's CBOR, not the local expiry marker.
 func TestBarkIterator_ResolvesExpiredHistoryViaArchive(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	// A real block: the archive-resolved bytes are hash-verified against the
@@ -908,6 +961,8 @@ func TestBarkIterator_ResolvesExpiredHistoryViaArchive(t *testing.T) {
 // it encounters an expiry marker, so the bark wrapper can resolve via
 // errors.As without parsing any blob keys.
 func TestUpstreamIterator_SurfacesTypedHistoryExpiredError(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	const slot uint64 = 300
@@ -926,6 +981,11 @@ func TestUpstreamIterator_SurfacesTypedHistoryExpiredError(t *testing.T) {
 	}))
 
 	upstream := db.Blob()
+	// db.Blob() is non-nil: database.New rejects a nil or typed-nil blob
+	// store (database/database.go), so the nil-receiver branch of
+	// blobStoreRef.blobStore that nilaway traces is unreachable for any
+	// constructed database.
+	//nolint:nilaway // database.New requires a non-nil blob store
 	rTxn := upstream.NewTransaction(false)
 	t.Cleanup(func() { _ = rTxn.Rollback() })
 	it := upstream.NewIterator(rTxn, types.BlobIteratorOptions{
@@ -964,6 +1024,8 @@ func TestUpstreamIterator_SurfacesTypedHistoryExpiredError(t *testing.T) {
 // keys (here: bi index pointers) and at non-expired bp keys go
 // straight through without any archive call.
 func TestBarkIterator_PassesThroughLiveValues(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	const slot uint64 = 200
@@ -1032,4 +1094,120 @@ func TestBarkIterator_PassesThroughLiveValues(t *testing.T) {
 
 	assert.Zero(t, archiveSrv.fetchCalls,
 		"no archive call must occur when no tombstones are present")
+}
+
+// TestGetBlock_ReportsArchiveNotFoundAsMissingKey pins the client half of
+// the batched archive contract: a block the archive does not hold now comes
+// back as an ordinary response carrying a not_found reference, not as a
+// transport error, and the wrapper has to translate that into the same
+// types.ErrBlobKeyNotFound a local blob store reports so callers can tell a
+// missing block from a broken archive.
+func TestGetBlock_ReportsArchiveNotFoundAsMissingKey(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	block := archiveBlockFixtures(t, 1)[0]
+
+	blocks, configure := serveArchiveBlock(t, block)
+	baseURL, fakeArch, httpClient := startFakeArchive(t, blocks)
+	configure(fakeArch)
+	fakeArch.serveNotFound = true
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	hash := block.Hash()
+	_, _, err := store.GetBlock(rTxn, block.SlotNumber(), hash[:])
+	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
+}
+
+// TestGetBlock_RejectsArchiveNotFoundForDifferentBlock pins the other half
+// of that translation. A block the archive returns is re-verified against
+// the requested slot and hash by verifyArchiveBlock, but nothing
+// re-verifies an absence, so an archive echoing a reference that was never
+// asked about must not be able to make this node record the requested
+// block as missing. Each case below answers about some other block, and
+// none of them may map to types.ErrBlobKeyNotFound.
+func TestGetBlock_RejectsArchiveNotFoundForDifferentBlock(t *testing.T) {
+	t.Parallel()
+
+	block := archiveBlockFixtures(t, 1)[0]
+	hash := block.Hash()
+	hashHex := hex.EncodeToString(hash[:])
+	slot := block.SlotNumber()
+
+	for _, testCase := range []struct {
+		name string
+		ref  *archive.BlockRef
+	}{
+		{
+			name: "different hash",
+			ref: &archive.BlockRef{
+				Hash: new(strings.Repeat("ab", 32)),
+				Slot: new(slot),
+			},
+		},
+		{
+			name: "different slot",
+			ref: &archive.BlockRef{
+				Hash: new(hashHex),
+				Slot: new(slot + 1),
+			},
+		},
+		{
+			name: "hash omitted",
+			ref:  &archive.BlockRef{Slot: new(slot)},
+		},
+		{
+			name: "slot omitted",
+			ref:  &archive.BlockRef{Hash: new(hashHex)},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			db := newTestDB(t)
+			blocks, configure := serveArchiveBlock(t, block)
+			baseURL, fakeArch, httpClient := startFakeArchive(t, blocks)
+			configure(fakeArch)
+			fakeArch.serveNotFound = true
+			fakeArch.notFoundRef = testCase.ref
+
+			store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+			rTxn := store.NewTransaction(false)
+			t.Cleanup(func() { _ = rTxn.Rollback() })
+
+			_, _, err := store.GetBlock(rTxn, slot, hash[:])
+			require.Error(t, err)
+			require.NotErrorIs(t, err, types.ErrBlobKeyNotFound)
+		})
+	}
+}
+
+// TestGetBlock_AcceptsArchiveNotFoundWithDifferentHashCase pins that the
+// echoed hash is compared as hex text rather than as bytes of a string:
+// the field is case-insensitive hex, and an archive that upper-cases it is
+// still answering about the block that was requested.
+func TestGetBlock_AcceptsArchiveNotFoundWithDifferentHashCase(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	block := archiveBlockFixtures(t, 1)[0]
+	hash := block.Hash()
+	slot := block.SlotNumber()
+
+	blocks, configure := serveArchiveBlock(t, block)
+	baseURL, fakeArch, httpClient := startFakeArchive(t, blocks)
+	configure(fakeArch)
+	fakeArch.serveNotFound = true
+	fakeArch.notFoundRef = &archive.BlockRef{
+		Hash: new(strings.ToUpper(hex.EncodeToString(hash[:]))),
+		Slot: new(slot),
+	}
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	_, _, err := store.GetBlock(rTxn, slot, hash[:])
+	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
 }

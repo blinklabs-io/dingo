@@ -172,7 +172,7 @@ func initForgingMetrics(
 	m.forgeSyncSkip = factory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_forge_sync_skip_total",
-			Help: "forging attempts skipped because upstream tip is ahead",
+			Help: "forging attempts skipped because the local or upstream tip is stale",
 		},
 	)
 	m.slotClockErrors = factory.NewCounter(

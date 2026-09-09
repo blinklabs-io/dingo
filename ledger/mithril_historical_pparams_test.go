@@ -33,6 +33,8 @@ import (
 )
 
 func TestMithrilImportProvidesPreview1398RewardPParams(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	seedEligiblePreviewGoRewardBasis(t, db)
 

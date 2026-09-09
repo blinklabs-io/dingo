@@ -939,6 +939,7 @@ type LedgerState struct {
 	leiosBackfill *leiosBackfiller
 	sync.RWMutex
 	chainsyncMutex                sync.Mutex
+	bufferedHeaderMutex           sync.Mutex
 	chainsyncBlockfetchMutex      sync.Mutex
 	chainsyncBlockfetchReadyMutex sync.Mutex
 	chainsyncBlockfetchReadyChan  chan struct{}
@@ -1187,12 +1188,13 @@ type LedgerState struct {
 	// rewardPrecomputeMu serializes rewardPrecomputeWG.Add with Close's
 	// rewardPrecomputeWG.Wait and protects the latest-event coalescing state so
 	// Close cannot return while precompute is still issuing database reads/writes.
-	rewardPrecomputeMu      sync.Mutex
-	rewardPrecomputeWG      sync.WaitGroup
-	rewardPrecomputeRunning bool
-	rewardPrecomputePending *event.EpochTransitionEvent
-	rewardPrecomputeRetry   *stakeRewardPrecomputeRetry
-	validationEnabled       bool
+	rewardPrecomputeMu               sync.Mutex
+	rewardPrecomputeWG               sync.WaitGroup
+	rewardPrecomputeRunning          bool
+	rewardPrecomputePending          *event.EpochTransitionEvent
+	rewardPrecomputeRetry            *stakeRewardPrecomputeRetry
+	validationEnabled                bool
+	beforeReconciliationUndoSnapshot func()
 	// Sync progress reporting (Fix 4)
 	syncProgressLastLog  time.Time     // last time we logged sync progress
 	syncProgressLastSlot uint64        // slot at last progress log (for rate calc)
@@ -6750,6 +6752,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 		if err := validateInboundBlockEnvelope(
 			block,
 			pparams,
+			ls.config.CardanoNodeConfig,
 			parent,
 		); err != nil {
 			return nil, err
@@ -10042,7 +10045,11 @@ func (ls *LedgerState) UtxosByRefs(
 func (ls *LedgerState) UtxosByAddress(
 	addrs []ledger.Address,
 ) ([]models.Utxo, error) {
-	utxos, err := ls.db.UtxosByAddress(addrs, nil)
+	utxos, err := ls.db.UtxosByAddress(
+		addrs,
+		database.MaxUtxosByAddressResults,
+		nil,
+	)
 	if err != nil {
 		return nil, err
 	}

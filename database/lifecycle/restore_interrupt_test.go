@@ -74,6 +74,8 @@ const restoreInterruptHelperEnv = "DINGO_LIFECYCLE_RESTORE_INTERRUPT_HELPER"
 // on whatever machine runs this test. Skipped on Windows, which has no
 // POSIX FIFO equivalent this test can use the same way.
 func TestRestoreInterruptedByProcessKillLeavesTargetUntouched(t *testing.T) {
+	t.Parallel()
+
 	if os.Getenv(restoreInterruptHelperEnv) != "" {
 		runRestoreInterruptHelper()
 		return
