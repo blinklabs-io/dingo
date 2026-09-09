@@ -30,6 +30,8 @@ func registryIntPtr(v int) *int { return new(v) }
 // `metadata` field of GET /assets/{asset} to the Blockfrost CIP-26 shape:
 // name, description, ticker, url, logo, decimals.
 func TestTokenRegistryMetadataValueShape(t *testing.T) {
+	t.Parallel()
+
 	entry := &models.TokenRegistryEntry{
 		Subject:     "abc",
 		Name:        "nutcoin",
@@ -59,6 +61,8 @@ func TestTokenRegistryMetadataValueShape(t *testing.T) {
 // that declares only some properties from advertising empty strings for the
 // rest: a consumer must be able to tell "no ticker" from "empty ticker".
 func TestTokenRegistryMetadataValueOmitsAbsentProperties(t *testing.T) {
+	t.Parallel()
+
 	entry := &models.TokenRegistryEntry{
 		Subject: "abc",
 		Name:    "nutcoin",
@@ -76,6 +80,8 @@ func TestTokenRegistryMetadataValueOmitsAbsentProperties(t *testing.T) {
 // where the zero value is meaningful: decimals 0 is a real declaration and
 // must survive, unlike an absent decimals.
 func TestTokenRegistryMetadataValueKeepsZeroDecimals(t *testing.T) {
+	t.Parallel()
+
 	entry := &models.TokenRegistryEntry{
 		Subject:  "abc",
 		Decimals: new(0),
@@ -90,10 +96,14 @@ func TestTokenRegistryMetadataValueKeepsZeroDecimals(t *testing.T) {
 }
 
 func TestTokenRegistryMetadataValueNilForNilEntry(t *testing.T) {
+	t.Parallel()
+
 	require.Nil(t, tokenRegistryMetadataValue(nil))
 }
 
 func TestTokenRegistryMetadataValueNilForEmptyEntry(t *testing.T) {
+	t.Parallel()
+
 	// An all-blank entry must serialize the field as null rather than as an
 	// empty object, which would read as "the registry knows this asset".
 	require.Nil(t, tokenRegistryMetadataValue(&models.TokenRegistryEntry{
@@ -102,6 +112,8 @@ func TestTokenRegistryMetadataValueNilForEmptyEntry(t *testing.T) {
 }
 
 func TestTokenRegistrySubjectFor(t *testing.T) {
+	t.Parallel()
+
 	// The subject is the lower-case hex policy ID concatenated with the
 	// hex-encoded asset name, matching how registry mappings are keyed.
 	subject := tokenRegistrySubjectFor(
@@ -117,6 +129,8 @@ func TestTokenRegistrySubjectFor(t *testing.T) {
 }
 
 func TestTokenRegistrySubjectForEmptyAssetName(t *testing.T) {
+	t.Parallel()
+
 	subject := tokenRegistrySubjectFor(
 		"00000002df633853f6a47465c9496721d2d5b1291b8398016c0e87ae",
 		nil,
@@ -134,6 +148,8 @@ func TestTokenRegistrySubjectForEmptyAssetName(t *testing.T) {
 // off-chain `metadata` object, which was null for every asset before the
 // registry sync existed.
 func TestAssetPopulatesRegistryMetadata(t *testing.T) {
+	t.Parallel()
+
 	adapter, _, db := newDBBackedAdapter(t)
 	const policyID = "00000002df633853f6a47465c9496721d2d5b1291b8398016c0e87ae"
 	assetName := []byte("nutcoin")
@@ -170,6 +186,8 @@ func TestAssetPopulatesRegistryMetadata(t *testing.T) {
 }
 
 func TestAssetLeavesRegistryMetadataNilWhenUnknown(t *testing.T) {
+	t.Parallel()
+
 	adapter, _, _ := newDBBackedAdapter(t)
 
 	var info AssetInfo

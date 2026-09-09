@@ -28,6 +28,8 @@ import (
 )
 
 func TestBlockIndexerComputeOffsets(t *testing.T) {
+	t.Parallel()
+
 	// Load blocks from immutable test data
 	imm, err := immutable.New("immutable/testdata")
 	require.NoError(t, err, "failed to open immutable database")
@@ -180,6 +182,8 @@ func TestBlockIndexerComputeOffsets(t *testing.T) {
 }
 
 func TestBlockIndexerEmptyBlock(t *testing.T) {
+	t.Parallel()
+
 	// Test with a block that has no transactions
 	indexer := NewBlockIndexer(0, make([]byte, 32))
 
@@ -191,6 +195,8 @@ func TestBlockIndexerEmptyBlock(t *testing.T) {
 }
 
 func TestBlockIndexerNoTxBlockSkipsOffsetExtractor(t *testing.T) {
+	t.Parallel()
+
 	bodyCbor, err := fxcbor.Marshal([]gcbor.RawMessage{{0x00}, {0x01}})
 	require.NoError(t, err)
 	extraCbor, err := fxcbor.Marshal([]gcbor.RawMessage{{0x02}})
@@ -236,6 +242,8 @@ func findCborInBytes(data, target []byte) int {
 }
 
 func TestFindCborInBytes(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		data     []byte

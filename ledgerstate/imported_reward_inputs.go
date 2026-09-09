@@ -698,10 +698,7 @@ func emptyRewardSeedFailureReason(snap *ParsedSnapShot) string {
 
 func boundRewardSeedFailureReasons(reasons []string) string {
 	sort.Strings(reasons)
-	shown := len(reasons)
-	if shown > maxRewardSeedFailurePools {
-		shown = maxRewardSeedFailurePools
-	}
+	shown := min(len(reasons), maxRewardSeedFailurePools)
 	bounded := append([]string(nil), reasons[:shown]...)
 	if omitted := len(reasons) - shown; omitted > 0 {
 		bounded = append(

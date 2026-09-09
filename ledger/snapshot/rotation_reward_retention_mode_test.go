@@ -51,6 +51,8 @@ func setupTestDBWithStorageMode(
 // reward_stake_input and reward_account_output are pruned to the same
 // rotation/reward-replay window.
 func TestCleanupOldSnapshotsCoreModePrunesRewardAccountOutput(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDBWithStorageMode(t, types.StorageModeCore)
 	require.Equal(t, types.StorageModeCore, db.StorageMode())
 	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
@@ -104,6 +106,8 @@ func TestCleanupOldSnapshotsCoreModePrunesRewardAccountOutput(t *testing.T) {
 // cannot be kept and continues to be pruned to the rotation/reward-replay
 // window exactly as in core mode.
 func TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDBWithStorageMode(t, types.StorageModeAPI)
 	require.Equal(t, types.StorageModeAPI, db.StorageMode())
 	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
@@ -164,6 +168,8 @@ func TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput(t *testing.T) {
 // unconditional (it does not read storage mode at all), so this pins that
 // behavior directly rather than relying on that being true by omission.
 func TestDeleteRewardStateAfterSlotUnaffectedByAPIModeRetention(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDBWithStorageMode(t, types.StorageModeAPI)
 	meta := db.Metadata()
 

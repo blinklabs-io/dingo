@@ -26,6 +26,8 @@ import (
 )
 
 func TestFailedEnactmentClearRestoresRatificationOnRollback(t *testing.T) {
+	t.Parallel()
+
 	f := newTreasuryRolloverFixture(t, 100)
 	withdrawAddress, _, _ := f.rewardAddress(t, 0x91)
 	proposal := f.addProposal(
@@ -62,6 +64,8 @@ func TestFailedEnactmentClearRestoresRatificationOnRollback(t *testing.T) {
 }
 
 func TestNodeLocalEnactmentWriteErrorAbortsBoundary(t *testing.T) {
+	t.Parallel()
+
 	f := newTreasuryRolloverFixture(t, 100)
 	withdrawAddress, returnAddress, stakeCredential := f.rewardAddress(t, 0xa1)
 	proposal := f.addProposal(
@@ -122,6 +126,8 @@ END`)
 }
 
 func TestEnactmentWriteHealthyControlCommitsBoundary(t *testing.T) {
+	t.Parallel()
+
 	f := newTreasuryRolloverFixture(t, 100)
 	withdrawAddress, returnAddress, stakeCredential := f.rewardAddress(t, 0xb1)
 	proposal := f.addProposal(

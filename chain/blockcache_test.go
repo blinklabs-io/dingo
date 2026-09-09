@@ -34,6 +34,8 @@ func testHash(label string) []byte {
 }
 
 func TestBlockCache_BasicOperations(t *testing.T) {
+	t.Parallel()
+
 	cache := newBlockCache(3, nil)
 
 	// Test empty cache
@@ -56,6 +58,8 @@ func TestBlockCache_BasicOperations(t *testing.T) {
 }
 
 func TestBlockCache_LRUEviction(t *testing.T) {
+	t.Parallel()
+
 	cache := newBlockCache(3, nil)
 
 	// Add 3 blocks
@@ -109,6 +113,8 @@ func TestBlockCache_LRUEviction(t *testing.T) {
 }
 
 func TestBlockCache_UpdateExisting(t *testing.T) {
+	t.Parallel()
+
 	cache := newBlockCache(3, nil)
 
 	// Add a block
@@ -135,6 +141,8 @@ func TestBlockCache_UpdateExisting(t *testing.T) {
 }
 
 func TestBlockCache_AccessMovesToFront(t *testing.T) {
+	t.Parallel()
+
 	cache := newBlockCache(3, nil)
 
 	// Add 3 blocks in order
@@ -182,6 +190,8 @@ func TestBlockCache_AccessMovesToFront(t *testing.T) {
 }
 
 func TestBlockCache_DefaultCapacity(t *testing.T) {
+	t.Parallel()
+
 	// Test that 0 capacity uses default
 	cache := newBlockCache(0, nil)
 	assert.Equal(
@@ -200,6 +210,8 @@ func TestBlockCache_DefaultCapacity(t *testing.T) {
 }
 
 func TestBlockCache_Delete(t *testing.T) {
+	t.Parallel()
+
 	cache := newBlockCache(5, nil)
 
 	// Add blocks
@@ -240,6 +252,8 @@ func TestBlockCache_Delete(t *testing.T) {
 }
 
 func TestBlockCache_ConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
 	cache := newBlockCache(100, nil)
 	const goroutines = 10
 	const opsPerGoroutine = 100
@@ -307,6 +321,8 @@ func TestBlockCache_ConcurrentAccess(t *testing.T) {
 }
 
 func TestBlockCache_PrometheusMetric(t *testing.T) {
+	t.Parallel()
+
 	registry := prometheus.NewRegistry()
 	cache := newBlockCache(5, registry)
 

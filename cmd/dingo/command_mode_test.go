@@ -56,6 +56,8 @@ func findCmd(t *testing.T, root *cobra.Command, path ...string) *cobra.Command {
 }
 
 func TestEffectiveRunMode(t *testing.T) {
+	t.Parallel()
+
 	root := newTestRootCmd()
 	tests := []struct {
 		name    string
@@ -156,6 +158,8 @@ func TestEffectiveRunMode(t *testing.T) {
 }
 
 func TestIsInformationalCommand(t *testing.T) {
+	t.Parallel()
+
 	root := newTestRootCmd()
 	tests := []struct {
 		name string

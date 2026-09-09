@@ -41,6 +41,8 @@ import (
 // under backpressure would silently strip requests out of the stream, so both
 // stay attached until they drain.
 func TestConnectionRecycleSubscriptionsRemainLossless(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Stop()
 
