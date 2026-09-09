@@ -15,11 +15,32 @@
 package ledger
 
 import (
+	"errors"
+
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
+
+// pv10ReferenceScriptState applies Conway's pre-PV11 restricted-map behavior
+// only to aggregate block reference-script accounting. A missing reference
+// input contributes zero to that accounting; transaction validation still
+// resolves it through the original state and owns validity.
+type pv10ReferenceScriptState struct {
+	state lcommon.UtxoState
+}
+
+func (s pv10ReferenceScriptState) UtxoById(
+	input lcommon.TransactionInput,
+) (lcommon.Utxo, error) {
+	utxo, err := s.state.UtxoById(input)
+	if errors.Is(err, database.ErrUtxoNotFound) {
+		return lcommon.Utxo{}, nil
+	}
+	return utxo, err
+}
 
 // validateBlockReferenceScripts checks the aggregate against the UTxO state
 // before this block's own transactions. The era helpers apply protocol-version
@@ -31,6 +52,11 @@ func validateBlockReferenceScripts(
 ) error {
 	switch b := block.(type) {
 	case *conway.ConwayBlock:
+		if conwayPParams, ok := pp.(*conway.ConwayProtocolParameters); ok &&
+			state != nil &&
+			conwayPParams.ProtocolVersion.Major <= lcommon.ProtocolVersionPlomin {
+			state = pv10ReferenceScriptState{state: state}
+		}
 		return conway.ValidateRefScriptSizePerBlock(b, pp, state)
 	case *dijkstra.DijkstraBlock:
 		return dijkstra.ValidateRefScriptSizePerBlock(b, pp, state)

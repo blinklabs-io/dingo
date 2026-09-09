@@ -17,6 +17,7 @@ package ledger
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -293,10 +294,94 @@ func TestBlockReferenceScriptProducedOutputAdmission(t *testing.T) {
 				eras.ConwayEraDesc,
 				pp,
 				want,
-				tc.proto < 11 || tc.invalidProducer || tc.missing,
+				tc.invalidProducer || tc.missing,
 			)
 		})
 	}
+}
+
+type referenceScriptStateFunc func(
+	lcommon.TransactionInput,
+) (lcommon.Utxo, error)
+
+func (f referenceScriptStateFunc) UtxoById(
+	input lcommon.TransactionInput,
+) (lcommon.Utxo, error) {
+	return f(input)
+}
+
+func TestPV10ReferenceScriptStateOnlySuppressesMissing(t *testing.T) {
+	input := &shelley.ShelleyTransactionInput{}
+	wrappedMissing := fmt.Errorf("lookup: %w", database.ErrUtxoNotFound)
+	state := pv10ReferenceScriptState{
+		state: referenceScriptStateFunc(
+			func(lcommon.TransactionInput) (lcommon.Utxo, error) {
+				return lcommon.Utxo{}, wrappedMissing
+			},
+		),
+	}
+	utxo, err := state.UtxoById(input)
+	require.NoError(t, err)
+	require.Equal(t, lcommon.Utxo{}, utxo)
+
+	storageErr := errors.New("database unavailable")
+	state.state = referenceScriptStateFunc(
+		func(lcommon.TransactionInput) (lcommon.Utxo, error) {
+			return lcommon.Utxo{}, storageErr
+		},
+	)
+	_, err = state.UtxoById(input)
+	require.ErrorIs(t, err, storageErr)
+}
+
+func TestPV10AggregateReferenceScriptLookupErrors(t *testing.T) {
+	newBlock := func() *conway.ConwayBlock {
+		return &conway.ConwayBlock{
+			BlockHeader: &conway.ConwayBlockHeader{},
+			TransactionBodies: []conway.ConwayTransactionBody{{
+				TxReferenceInputs: cbor.NewSetType(
+					[]shelley.ShelleyTransactionInput{{
+						TxId: lcommon.NewBlake2b256(
+							bytes.Repeat([]byte{7}, 32),
+						),
+					}},
+					false,
+				),
+			}},
+			TransactionWitnessSets: []conway.ConwayTransactionWitnessSet{{}},
+		}
+	}
+	pp := &conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{Major: 10},
+	}
+	missing := referenceScriptStateFunc(
+		func(lcommon.TransactionInput) (lcommon.Utxo, error) {
+			return lcommon.Utxo{}, fmt.Errorf(
+				"lookup wrapper: %w",
+				database.ErrUtxoNotFound,
+			)
+		},
+	)
+	require.NoError(t, validateBlockReferenceScripts(newBlock(), pp, missing))
+
+	decodeErr := errors.New("reference output decode failed")
+	failing := referenceScriptStateFunc(
+		func(lcommon.TransactionInput) (lcommon.Utxo, error) {
+			return lcommon.Utxo{}, decodeErr
+		},
+	)
+	require.ErrorIs(
+		t,
+		validateBlockReferenceScripts(newBlock(), pp, failing),
+		decodeErr,
+	)
+
+	pp.ProtocolVersion.Major = 11
+	require.ErrorContains(
+		t,
+		validateBlockReferenceScripts(newBlock(), pp, missing),
+		"resolve consumed reference-script input",
+	)
 }
 
 func TestValidateBlockReferenceScriptsEntryControls(t *testing.T) {
