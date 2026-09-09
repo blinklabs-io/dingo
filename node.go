@@ -115,7 +115,10 @@ type Node struct {
 	cancel                       context.CancelFunc
 	fatalErrMu                   sync.Mutex
 	fatalErr                     error
-	shutdownOnce                 sync.Once
+	shutdownMu                   sync.Mutex
+	shutdownWait                 chan struct{}
+	shutdownRunning              bool
+	shutdownDone                 bool
 	shutdownErr                  error
 	// startupLifecycleMu keeps the startup rollback and normal shutdown from
 	// operating on the same partially initialized component concurrently. Run
@@ -149,6 +152,9 @@ type Node struct {
 
 	// liveLifecycleMu serializes live database Restore/Truncate calls
 	// (node_lifecycle.go) so two can never quiesce/rebuild concurrently.
+	// Shutdown takes this mutex before cancelling components or closing
+	// storage, so it cannot tear down a live operation in progress. The lock
+	// order with snapshotMu is always liveLifecycleMu, then snapshotMu.
 	// Deliberately NOT held by Snapshot (see snapshotMu): Snapshot never
 	// nils/rebuilds n.ledgerState or n.chainsyncState the way Restore/
 	// Truncate do, so a background reader like the chainsync recycler
@@ -172,8 +178,9 @@ type Node struct {
 	// a concurrent Restore/Truncate (which closes n.db out from under an
 	// in-progress Snapshot if not excluded), and is what enforces bark
 	// DatabaseService's "one operation at a time" invariant for Snapshot
-	// specifically. Restore/Truncate take both this and liveLifecycleMu;
-	// Snapshot takes only this one -- so a long-running Snapshot (a full
+	// specifically. Restore/Truncate take both this and liveLifecycleMu, and
+	// shutdown takes both in that same order; Snapshot takes only this one --
+	// so a long-running Snapshot (a full
 	// local copy plus cloud upload) never blocks a background reader that
 	// only cares about liveLifecycleMu, such as the chainsync recycler
 	// tick's stall-detection/plateau-recovery check, matching Snapshot's
