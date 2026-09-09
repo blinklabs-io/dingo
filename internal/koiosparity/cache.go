@@ -309,6 +309,27 @@ func OpenCache(path string, logger *slog.Logger) (*Cache, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open cache db: %w", err)
 	}
+	// Every Cache write path opens its transaction with c.db.Begin(), which
+	// is DEFERRED: SQLite still treats the very first statement of a write
+	// transaction as write-intending even when it matches zero rows (e.g.
+	// SaveAccountFetchChunkProgress's opening DELETEs on a brand-new chunk),
+	// and grabs SQLite's single per-database WAL writer slot right there —
+	// for the rest of the transaction, not just its final COMMIT. Left
+	// unbounded, database/sql hands accountFetchConcurrency's concurrent
+	// chunk workers (fetch_accounts.go) distinct connections that genuinely
+	// contend for that one slot; busy_timeout=5000 only covers a wait
+	// shorter than 5s; five real chunk workers' large-chunk Prepare/Exec
+	// work can collectively outlast that and fail with SQLITE_BUSY /
+	// "database is locked" (dingo #4091). Restricting the pool to one
+	// connection makes database/sql itself queue every caller for that
+	// single connection with no fixed budget, so a writer already in
+	// progress is always waited out rather than timed out on. This also
+	// serializes the cache's own reads behind any in-flight write — the
+	// cache is a process-local comparison scratch file, not a
+	// high-throughput read service, so that tradeoff is preferred over a
+	// second unbounded connection. It has no effect on dingo_db.go's
+	// separate *sql.DB against Dingo's own node database.
+	db.SetMaxOpenConns(1)
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping cache db: %w", err)
@@ -318,8 +339,11 @@ func OpenCache(path string, logger *slog.Logger) (*Cache, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("enable WAL: %w", err)
 	}
-	// Busy timeout prevents concurrent writers from failing immediately with
-	// "database is locked"; 5 s is sufficient for the parallel check workers.
+	// busy_timeout remains as a defensive backstop (e.g. a lingering
+	// external reader/writer against the same file), not the mechanism this
+	// package relies on for its own internal write concurrency — that is
+	// now SetMaxOpenConns(1) above, since a single-connection pool never
+	// gives SQLite two callers to contend with in the first place.
 	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("set busy timeout: %w", err)
@@ -2029,22 +2053,11 @@ func createCacheSchema(db *sql.DB) error {
 	}
 	// Older cache files may contain columns that the current structs no longer write.
 	for _, item := range [][2]string{{"koios_epoch_info", "pool_cnt"}, {"koios_epoch_info", "delegator_cnt"}, {"koios_totals", "deposits_d_rep"}} {
-		rows, err := db.Query(
-			"SELECT 1 FROM pragma_table_info(?) WHERE name = ?",
-			item[0],
-			item[1],
-		)
-		if err != nil {
+		present, err := columnExists(db, item[0], item[1])
+		if err != nil || !present {
 			continue
 		}
-		defer rows.Close()
-		present := rows.Next()
-		if err := rows.Err(); err != nil {
-			continue
-		}
-		if present {
-			_, _ = db.Exec("ALTER TABLE " + item[0] + " DROP COLUMN " + item[1])
-		}
+		_, _ = db.Exec("ALTER TABLE " + item[0] + " DROP COLUMN " + item[1])
 	}
 
 	// A cache written before koios_account_universe_state existed carries the
@@ -2123,17 +2136,8 @@ GROUP BY network`); err != nil {
 // against an older cache.db is idempotent and never errors on a column that
 // already exists.
 func addColumnIfMissing(db *sql.DB, table, column, columnDDL string) error {
-	rows, err := db.Query(
-		"SELECT 1 FROM pragma_table_info(?) WHERE name = ?",
-		table,
-		column,
-	)
+	present, err := columnExists(db, table, column)
 	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	present := rows.Next()
-	if err := rows.Err(); err != nil {
 		return err
 	}
 	if present {
@@ -2143,6 +2147,32 @@ func addColumnIfMissing(db *sql.DB, table, column, columnDDL string) error {
 		"ALTER TABLE " + table + " ADD COLUMN " + column + " " + columnDDL,
 	)
 	return err
+}
+
+// columnExists reports whether table already has a column named column.
+//
+// The pragma_table_info probe is confined to this function so its *sql.Rows is
+// always closed before the caller runs its next statement. OpenCache bounds the
+// pool to a single connection, and an open *sql.Rows holds that connection: a
+// caller that issued its ALTER TABLE while the probe was still open would wait
+// for a connection only it could release, hanging inside OpenCache with no
+// error and no timeout (the migration paths use the context-free Exec, so there
+// is nothing to cancel it either).
+func columnExists(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(
+		"SELECT 1 FROM pragma_table_info(?) WHERE name = ?",
+		table,
+		column,
+	)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	present := rows.Next()
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return present, nil
 }
 
 func scanPool(rows *sql.Rows, p *KoiosPoolEpoch) error {

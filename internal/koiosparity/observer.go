@@ -54,10 +54,13 @@ type ObserverConfig struct {
 	// uses Koios's unauthenticated rate limit.
 	APIKey string
 	// BaseURL overrides the public koios.rest host for the network; see
-	// NewKoiosClient. Empty selects the public host.
+	// NewKoiosClient. Empty selects the public host. Tests point it at an
+	// httptest server instead of rewriting the process-wide koiosBaseURLs
+	// map, which every concurrently constructed client reads.
 	BaseURL string
 	// AllowInsecureHTTP permits a plain-HTTP BaseURL; see
-	// NewKoiosClient. Local dev and test only.
+	// NewKoiosClient. Local dev and test only, including the httptest
+	// servers this package's own tests point BaseURL at.
 	AllowInsecureHTTP bool
 	// Source is the narrow, Dingo-supplied reward-parity source the
 	// observer compares against — typically a *DatabaseSource wrapping the

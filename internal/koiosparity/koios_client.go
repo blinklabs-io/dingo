@@ -291,6 +291,15 @@ func validateKoiosNetwork(network string) error {
 // "https://preview-koios.example.com/api/v1"; a trailing slash is trimmed so
 // the caller does not have to care. Empty selects the public host.
 //
+// The override is a parameter rather than a rewrite of this network's entry
+// in the process-wide koiosBaseURLs map, because that map is a global every
+// concurrently constructed client reads through validateKoiosNetwork. Tests
+// point a client at an httptest server through this parameter, which is what
+// lets this package's tests run in parallel.
+//
+// The network is validated before baseURL is consulted, so an unsupported
+// network is rejected whether or not an override is supplied.
+//
 // A custom host also drops the burst cap. koiosBurstLimitSafe describes
 // koios.rest's own published Public/Free tier window and says nothing about
 // another deployment, so applying it there would throttle against a limit that

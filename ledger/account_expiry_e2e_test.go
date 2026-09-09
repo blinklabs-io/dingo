@@ -399,6 +399,8 @@ func runDelegatorInactivityLifecycleScenario(
 // end-to-end lifecycle test. See the file doc comment for scope (composed
 // lifecycle, not full block replay).
 func TestDelegatorInactivityEndToEnd(t *testing.T) {
+	t.Parallel()
+
 	t.Run("GateOn", testDelegatorInactivityEndToEndGateOn)
 	t.Run("GateOff", testDelegatorInactivityEndToEndGateOff)
 }

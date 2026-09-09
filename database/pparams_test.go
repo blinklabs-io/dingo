@@ -28,6 +28,8 @@ import (
 func TestComputeAndApplyPParamUpdates_QuorumNotMet(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	config := &Config{DataDir: ""}
 	db, err := newTestDatabase(t, config)
 	require.NoError(t, err)
@@ -112,6 +114,8 @@ func TestComputeAndApplyPParamUpdates_QuorumNotMet(
 func TestComputeAndApplyPParamUpdates_QuorumMet(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	config := &Config{DataDir: ""}
 	db, err := newTestDatabase(t, config)
 	require.NoError(t, err)
@@ -215,6 +219,8 @@ func TestComputeAndApplyPParamUpdates_QuorumMet(
 func TestComputeAndApplyPParamUpdates_ReportsPlutusV2CostModelWritten(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	config := &Config{DataDir: ""}
 	db, err := newTestDatabase(t, config)
 	require.NoError(t, err)
@@ -276,6 +282,8 @@ func TestComputeAndApplyPParamUpdates_ReportsPlutusV2CostModelWritten(
 func TestComputeAndApplyPParamUpdates_FalseWhenUpdateDoesNotWritePlutusV2CostModel(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	config := &Config{DataDir: ""}
 	db, err := newTestDatabase(t, config)
 	require.NoError(t, err)
@@ -335,6 +343,8 @@ func TestComputeAndApplyPParamUpdates_FalseWhenUpdateDoesNotWritePlutusV2CostMod
 func TestComputeAndApplyPParamUpdates_NilTxnCommitsWrite(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	config := &Config{DataDir: ""}
 	db, err := newTestDatabase(t, config)
 	require.NoError(t, err)
@@ -404,6 +414,8 @@ func TestComputeAndApplyPParamUpdates_NilTxnCommitsWrite(
 }
 
 func TestApplyPParamUpdates_NilTxnCommitsWrite(t *testing.T) {
+	t.Parallel()
+
 	config := &Config{DataDir: ""}
 	db, err := newTestDatabase(t, config)
 	require.NoError(t, err)
@@ -474,6 +486,8 @@ func TestApplyPParamUpdates_NilTxnCommitsWrite(t *testing.T) {
 func TestComputeAndApplyPParamUpdates_FiltersEpoch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	config := &Config{DataDir: ""}
 	db, err := newTestDatabase(t, config)
 	require.NoError(t, err)
@@ -562,6 +576,8 @@ func TestComputeAndApplyPParamUpdates_FiltersEpoch(
 func TestComputeAndApplyPParamUpdates_NoUpdates(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	config := &Config{DataDir: ""}
 	db, err := newTestDatabase(t, config)
 	require.NoError(t, err)
@@ -604,6 +620,8 @@ func TestComputeAndApplyPParamUpdates_NoUpdates(
 func TestComputeAndApplyPParamUpdates_DuplicateGenesis(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	config := &Config{DataDir: ""}
 	db, err := newTestDatabase(t, config)
 	require.NoError(t, err)
@@ -725,6 +743,8 @@ func shelleyForecastFuncs() (
 // applies a quorum-meeting update WITHOUT persisting a pparams row and
 // WITHOUT mutating the caller's currentPParams.
 func TestForecastPParamUpdates_QuorumMetNoPersist(t *testing.T) {
+	t.Parallel()
+
 	config := &Config{DataDir: ""}
 	db, err := newTestDatabase(t, config)
 	require.NoError(t, err)
@@ -791,6 +811,8 @@ func TestForecastPParamUpdates_QuorumMetNoPersist(t *testing.T) {
 // TestForecastPParamUpdates_QuorumNotMet verifies the forecast returns the
 // caller's params unchanged when quorum is not met.
 func TestForecastPParamUpdates_QuorumNotMet(t *testing.T) {
+	t.Parallel()
+
 	config := &Config{DataDir: ""}
 	db, err := newTestDatabase(t, config)
 	require.NoError(t, err)

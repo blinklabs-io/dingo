@@ -53,6 +53,8 @@ func coinsRequest(addr string) AccountCoinsRequest {
 }
 
 func TestAccountBalance(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	paymentKey := testKeyHash(0x03)
 	addr := testAddress(
@@ -97,6 +99,8 @@ func TestAccountBalance(t *testing.T) {
 // reports an explicit zero ADA balance rather than an empty list, which
 // Mesh clients treat as a malformed response.
 func TestAccountBalanceEmptyAccount(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	addr := testAddress(
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x04), nil,
@@ -114,6 +118,8 @@ func TestAccountBalanceEmptyAccount(t *testing.T) {
 // across UTxOs and the deterministic policy/name ordering clients rely
 // on for stable diffs.
 func TestAccountBalanceAggregatesAssets(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	paymentKey := testKeyHash(0x05)
 	addr := testAddress(
@@ -181,6 +187,8 @@ func TestAccountBalanceAggregatesAssets(t *testing.T) {
 // the response must report the requested block rather than the tip, so
 // a client can tell which point the balance belongs to.
 func TestAccountBalanceHistoricalByIndex(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	paymentKey := testKeyHash(0x30)
 	addr := testAddress(
@@ -238,6 +246,8 @@ func TestAccountBalanceHistoricalByIndex(t *testing.T) {
 // TestAccountBalanceHistoricalByHash covers pinning by block hash,
 // which is the identifier a client holds after reading a block.
 func TestAccountBalanceHistoricalByHash(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	addr := testAddress(
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x34), nil,
@@ -281,6 +291,8 @@ func TestAccountBalanceHistoricalByHash(t *testing.T) {
 // identifier carrying neither hash nor index is treated as absent, so
 // clients that always send the field still get the tip balance.
 func TestAccountBalanceHistoricalEmptyIdentifier(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	addr := testAddress(
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x36), nil,
@@ -318,6 +330,8 @@ func TestAccountBalanceHistoricalEmptyIdentifier(t *testing.T) {
 // hash of a block that was rolled back: the balance must not silently
 // fall back to another point.
 func TestAccountBalanceHistoricalBlockNotFound(t *testing.T) {
+	t.Parallel()
+
 	rolledBack := testHash(0x38)
 	tests := map[string]*PartialBlockIdentifier{
 		"unknown index":    byIndex(999999),
@@ -366,6 +380,8 @@ func TestAccountBalanceHistoricalBlockNotFound(t *testing.T) {
 // historical UTxO set is reported rather than degraded to an empty
 // balance.
 func TestAccountBalanceHistoricalLedgerError(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	addr := testAddress(
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x3a), nil,
@@ -397,6 +413,8 @@ func TestAccountBalanceHistoricalLedgerError(t *testing.T) {
 }
 
 func TestAccountBalanceInvalidAccount(t *testing.T) {
+	t.Parallel()
+
 	// An absent identifier and one carrying an empty address are
 	// separate branches of parseAccountAddress, so the empty-address
 	// case sets a non-nil identifier rather than relying on
@@ -424,6 +442,8 @@ func TestAccountBalanceInvalidAccount(t *testing.T) {
 }
 
 func TestAccountBalanceLedgerError(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	addr := testAddress(
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x07), nil,
@@ -444,6 +464,8 @@ func TestAccountBalanceLedgerError(t *testing.T) {
 }
 
 func TestAccountCoins(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	paymentKey := testKeyHash(0x08)
 	addr := testAddress(
@@ -491,6 +513,8 @@ func TestAccountCoins(t *testing.T) {
 }
 
 func TestAccountCoinsEmptyAccount(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	addr := testAddress(
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x09), nil,
@@ -505,6 +529,8 @@ func TestAccountCoinsEmptyAccount(t *testing.T) {
 }
 
 func TestAccountCoinsInvalidAccount(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 
 	rec := postJSON(
@@ -517,6 +543,8 @@ func TestAccountCoinsInvalidAccount(t *testing.T) {
 }
 
 func TestAccountCoinsLedgerError(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	addr := testAddress(
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x0c), nil,
@@ -541,6 +569,8 @@ func TestAccountCoinsLedgerError(t *testing.T) {
 // a client that trusts the flag would either skip historical queries
 // the node supports, or send ones it rejects.
 func TestAccountBalanceHonorsAdvertisedCapability(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	addr := testAddress(
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x3c), nil,

@@ -628,8 +628,9 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	n.chainManager = cm
 	// The contextcheck exemption below covers ledgerStateConfig's
 	// EndorserBlockFetcher callback: it is driven by the ledger's own later
-	// call, exactly as the method value it replaced was, and only defers
-	// resolving n.ouroboros() -- it does not inherit this function's ctx.
+	// call and receives that call's fetch context. The closure only defers
+	// resolving n.ouroboros() until the callback fires; it does not inherit this
+	// reinitialization function's ctx.
 	state, err := ledger.NewLedgerState(
 		n.ledgerStateConfig(), //nolint:contextcheck
 	)
@@ -657,6 +658,10 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to recreate bark blob store: %w", err)
 		}
+		// The wrapper's upstream is the store it replaces and its Close
+		// forwards there, so the replaced store stays in use: there is
+		// nothing to drain and nothing to close. Both results are
+		// deliberately discarded.
 		n.db.SetBlobStore(barkBlobStore)
 	}
 

@@ -70,6 +70,8 @@ func verifyBlockHeader(
 	)
 }
 
+// Not t.Parallel: testing.AllocsPerRun is a process-wide measurement that
+// concurrent tests perturb.
 func TestEpochNonceHexCachesMatchingRawNonce(t *testing.T) {
 	ls := &LedgerState{
 		epochNonceHexCache: make(map[uint64]epochNonceHexCacheEntry),
@@ -166,8 +168,8 @@ func createTestBlock(
 	// (8 BE), the raw concatenation real cardano-cli opcerts use, NOT a CBOR
 	// array. See ledger/forging/keys.go ValidateOpCert and
 	// verifyOpCertColdSignature.
-	opCertSeqNum := uint32(0)
-	opCertKesPeriod := uint32(0)
+	const opCertSeqNum = 0
+	const opCertKesPeriod = 0
 	var opCertBody [48]byte
 	copy(opCertBody[:32], kesPk)
 	binary.BigEndian.PutUint64(opCertBody[32:40], uint64(opCertSeqNum))
@@ -352,8 +354,8 @@ func createTestTPraosBlock(
 	leaderProof, leaderOutput, err := vrf.Prove(vrfSk, leaderInput)
 	require.NoError(t, err)
 
-	const opCertSeqNum = uint32(0)
-	const opCertKesPeriod = uint32(0)
+	const opCertSeqNum = 0
+	const opCertKesPeriod = 0
 	var opCertBody [48]byte
 	copy(opCertBody[:32], kesPk)
 	binary.BigEndian.PutUint64(opCertBody[32:40], uint64(opCertSeqNum))
@@ -444,6 +446,8 @@ func (m *mockByronBlock) SlotNumber() uint64 {
 // are gracefully skipped during header verification since Byron uses PBFT
 // consensus instead of Praos (no VRF/KES fields).
 func TestVerifyBlockHeader_ByronBlockSkipped(t *testing.T) {
+	t.Parallel()
+
 	block := &mockByronBlock{}
 	err := verifyBlockHeader(block, nil, 129600)
 	assert.NoError(t, err, "Byron blocks should be skipped")
@@ -452,6 +456,8 @@ func TestVerifyBlockHeader_ByronBlockSkipped(t *testing.T) {
 // TestVerifyBlockHeader_MissingEpochNonce verifies that post-Byron blocks
 // fail verification when no epoch nonce is available.
 func TestVerifyBlockHeader_MissingEpochNonce(t *testing.T) {
+	t.Parallel()
+
 	block := &mockBabbageBlock{slot: 1000}
 	err := verifyBlockHeader(block, nil, 129600)
 	assert.Error(t, err, "should fail with missing epoch nonce")
@@ -461,6 +467,8 @@ func TestVerifyBlockHeader_MissingEpochNonce(t *testing.T) {
 // TestVerifyBlockHeader_EmptyEpochNonce verifies that an empty epoch
 // nonce also fails.
 func TestVerifyBlockHeader_EmptyEpochNonce(t *testing.T) {
+	t.Parallel()
+
 	block := &mockBabbageBlock{slot: 1000}
 	err := verifyBlockHeader(block, []byte{}, 129600)
 	assert.Error(t, err, "should fail with empty epoch nonce")
@@ -470,12 +478,16 @@ func TestVerifyBlockHeader_EmptyEpochNonce(t *testing.T) {
 // TestVerifyBlockHeader_ValidBlock tests that a block with valid
 // cryptographic proofs passes header verification.
 func TestVerifyBlockHeader_ValidBlock(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{1}, 0, tamperNone)
 	err := verifyBlockHeader(tb.block, tb.epochNonce, tb.slotsPerKesPeriod)
 	assert.NoError(t, err, "valid block should pass verification")
 }
 
 func TestVerifyBlockHeaderTPraosNonceVRF(t *testing.T) {
+	t.Parallel()
+
 	eras := []struct {
 		name      string
 		era       lcommon.Era
@@ -547,6 +559,8 @@ func TestVerifyBlockHeaderTPraosNonceVRF(t *testing.T) {
 // verification is driven by the original header-body CBOR, not by stale typed
 // VRF fields on the decoded header object.
 func TestVerifyBlockHeader_UsesBodyCBORVRFFields(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{5}, 11, tamperNone)
 	header := tb.block.header
 	require.NotEmpty(t, header.Body.Cbor())
@@ -587,6 +601,8 @@ func TestVerifyBlockHeader_UsesBodyCBORVRFFields(t *testing.T) {
 // TestVerifyBlockHeader_TamperedKESSignature tests that a block with a
 // tampered KES signature is rejected.
 func TestVerifyBlockHeader_TamperedKESSignature(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{2}, 42, tamperKESSig)
 	err := verifyBlockHeader(tb.block, tb.epochNonce, tb.slotsPerKesPeriod)
 	assert.Error(
@@ -599,6 +615,8 @@ func TestVerifyBlockHeader_TamperedKESSignature(t *testing.T) {
 // TestVerifyBlockHeader_TamperedVRFProof tests that a block with a
 // tampered VRF proof is rejected.
 func TestVerifyBlockHeader_TamperedVRFProof(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{3}, 99, tamperVRFProof)
 	err := verifyBlockHeader(tb.block, tb.epochNonce, tb.slotsPerKesPeriod)
 	assert.Error(
@@ -616,6 +634,8 @@ func TestVerifyBlockHeader_TamperedVRFProof(t *testing.T) {
 // alongside this path. This test pins the boundary so the two layers stay
 // distinct.
 func TestVerifyBlockHeader_TamperedOpCertSignature(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{4}, 77, tamperOpCertSig)
 	err := verifyBlockHeader(tb.block, tb.epochNonce, tb.slotsPerKesPeriod)
 	// The hex/VerifyBlock layer does not verify the OpCert signature, so
@@ -806,6 +826,8 @@ func (b *realBabbageBlock) Utxorpc() (*utxorpc_cardano.Block, error) {
 // TestEpochForSlot_EmptyCache verifies that epochForSlot returns an error
 // when the epoch cache is empty.
 func TestEpochForSlot_EmptyCache(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: nil,
 	}
@@ -818,6 +840,8 @@ func TestEpochForSlot_EmptyCache(t *testing.T) {
 // TestEpochForSlot_SlotInFirstEpoch verifies that epochForSlot returns
 // the correct epoch when the slot falls within the first epoch.
 func TestEpochForSlot_SlotInFirstEpoch(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			{
@@ -839,6 +863,8 @@ func TestEpochForSlot_SlotInFirstEpoch(t *testing.T) {
 // the correct epoch when the slot falls in the second epoch, ensuring
 // epoch-aware lookup works across epoch boundaries.
 func TestEpochForSlot_SlotInSecondEpoch(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			{
@@ -873,6 +899,8 @@ func TestEpochForSlot_SlotInSecondEpoch(t *testing.T) {
 // critical for the security fix: blocks from unknown future epochs
 // must be rejected rather than silently skipped.
 func TestEpochForSlot_SlotBeyondKnownEpochs(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			{
@@ -894,6 +922,8 @@ func TestEpochForSlot_SlotBeyondKnownEpochs(t *testing.T) {
 // should belong to epoch 0, and slot N+1 (first slot of epoch 1)
 // should belong to epoch 1.
 func TestEpochForSlot_SlotAtEpochBoundary(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			{
@@ -927,6 +957,8 @@ func TestEpochForSlot_SlotAtEpochBoundary(t *testing.T) {
 // TestEpochForSlot_SkipsZeroLengthEpochs verifies that epochs with
 // LengthInSlots == 0 are skipped during lookup.
 func TestEpochForSlot_SkipsZeroLengthEpochs(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			{
@@ -973,6 +1005,8 @@ func newTestShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 // LedgerState-level method applies the Byron PBFT path before skipping the
 // Praos-only epoch and nonce lookups.
 func TestVerifyBlockHeaderCrypto_ByronValidated(t *testing.T) {
+	t.Parallel()
+
 	stored := loadRealByronMainBlock(t)
 	block, err := stored.Decode()
 	require.NoError(t, err)
@@ -995,6 +1029,8 @@ func TestVerifyBlockHeaderCrypto_ByronValidated(t *testing.T) {
 func TestVerifyBlockHeaderOnlyCryptoRejectsTamperedByronSignature(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	stored := loadRealByronMainBlock(t)
 	block, err := stored.Decode()
 	require.NoError(t, err)
@@ -1029,6 +1065,8 @@ func TestVerifyBlockHeaderOnlyCryptoRejectsTamperedByronSignature(
 func TestVerifyBlockHeaderCrypto_RejectsBlockOutsideKnownEpochs(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			{
@@ -1060,6 +1098,8 @@ func TestVerifyBlockHeaderCrypto_RejectsBlockOutsideKnownEpochs(
 func TestHeaderVerificationEpochRejectsPastForecastBeforeCacheAdvance(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const horizonSlot = uint64(532_000)
 	ls := &LedgerState{
 		currentEra: eras.ConwayEraDesc,
@@ -1097,6 +1137,8 @@ func TestHeaderVerificationEpochRejectsPastForecastBeforeCacheAdvance(
 }
 
 func TestValidateBlockHeaderCryptoDoesNotAdvanceEpochCache(t *testing.T) {
+	t.Parallel()
+
 	const futureSlot = uint64(1001)
 	ls := &LedgerState{
 		currentEra: eras.ConwayEraDesc,
@@ -1126,6 +1168,8 @@ func TestValidateBlockHeaderCryptoDoesNotAdvanceEpochCache(t *testing.T) {
 // in an epoch that has no nonce (e.g., epoch rollover not yet processed)
 // is rejected.
 func TestVerifyBlockHeaderCrypto_RejectsBlockWithNoNonce(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			{
@@ -1160,6 +1204,8 @@ func TestVerifyBlockHeaderCrypto_RejectsBlockWithNoNonce(t *testing.T) {
 func TestVerifyBlockHeaderCrypto_EpochBoundaryUsesCorrectNonce(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	// createTestBlock uses f=0.99 to find eligible slots; use the same
 	// coefficient in the Shelley genesis so the eligibility check matches.
 	tb := createTestBlock(t, [32]byte{10}, 0, tamperNone)
@@ -1245,6 +1291,8 @@ func TestVerifyBlockHeaderCrypto_EpochBoundaryUsesCorrectNonce(
 }
 
 func TestVerifyBlockHeaderOnlyCryptoSkipsStatefulPoolChecks(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{43}, 0, tamperNone)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 
@@ -1259,6 +1307,8 @@ func TestVerifyBlockHeaderOnlyCryptoSkipsStatefulPoolChecks(t *testing.T) {
 func TestVerifyBlockHeaderCryptoBeforeApplyDefersMissingPoolState(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{44}, 0, tamperNone)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.currentTip.Point.Slot = tb.block.SlotNumber() - 1
@@ -1277,6 +1327,8 @@ func TestVerifyBlockHeaderCryptoBeforeApplyDefersMissingPoolState(
 func TestVerifyBlockHeaderCryptoBeforeApplyDefersEmptyMarkSnapshot(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{45}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.currentTip.Point.Slot = tb.block.SlotNumber() - 1
@@ -1295,6 +1347,8 @@ func TestVerifyBlockHeaderCryptoBeforeApplyDefersEmptyMarkSnapshot(
 }
 
 func TestVerifyDeferredBlockHeaderStateRunsStrictlyAtApply(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{46}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
@@ -1318,6 +1372,8 @@ func TestVerifyDeferredBlockHeaderStateRunsStrictlyAtApply(t *testing.T) {
 func TestVerifyDeferredBlockHeaderStateSurvivesRestartMarker(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{48}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
@@ -1366,6 +1422,8 @@ func TestVerifyDeferredBlockHeaderStateSurvivesRestartMarker(
 func TestVerifyDeferredBlockHeaderState_GenesisOverlayRevalidatedAtApply(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{90}, 0, tamperNone)
 	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
 	delegateHash := tb.block.IssuerVkey().Hash()
@@ -1459,6 +1517,8 @@ func TestVerifyDeferredBlockHeaderState_GenesisOverlayRevalidatedAtApply(
 // TestVerifyBlockHeaderCrypto_RejectsEmptyEpochCache verifies that
 // verification rejects blocks when the epoch cache is completely empty.
 func TestVerifyBlockHeaderCrypto_RejectsEmptyEpochCache(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: nil,
 		config: LedgerStateConfig{
@@ -1482,6 +1542,8 @@ func TestVerifyBlockHeaderCrypto_RejectsEmptyEpochCache(t *testing.T) {
 // fix, the epoch-aware lookup correctly identifies the block's epoch
 // and rejects the mismatched nonce.
 func TestVerifyBlockHeaderCrypto_WrongNonceFails(t *testing.T) {
+	t.Parallel()
+
 	// Create a valid block with nonceSeed=0 (epoch 0 nonce)
 	tb := createTestBlock(t, [32]byte{20}, 0, tamperNone)
 
@@ -1645,6 +1707,8 @@ func newEligibilityTestLedger(
 func TestVerifyBlockHeaderState_GenesisDelegateSkipsPoolChecks(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{49}, 0, tamperNone)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	delegateHash := tb.block.IssuerVkey().Hash()
@@ -1669,6 +1733,8 @@ func TestVerifyBlockHeaderState_GenesisDelegateSkipsPoolChecks(
 func TestVerifyBlockHeaderState_GenesisDelegateVRFMismatchFails(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{50}, 0, tamperNone)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	delegateHash := tb.block.IssuerVkey().Hash()
@@ -1691,6 +1757,8 @@ func TestVerifyBlockHeaderState_GenesisDelegateVRFMismatchFails(
 func TestVerifyBlockHeaderState_GenesisDelegateInactiveAtDZero(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{51}, 0, tamperNone)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	delegateHash := tb.block.IssuerVkey().Hash()
@@ -1714,6 +1782,8 @@ func TestVerifyBlockHeaderState_GenesisDelegateInactiveAtDZero(
 }
 
 func TestGenesisOverlayUsesEffectiveEpochPParamsAtBoundary(t *testing.T) {
+	t.Parallel()
+
 	genesisCfg := newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
 		t,
 		strings.Repeat("00", lcommon.Blake2b224Size),
@@ -1805,6 +1875,8 @@ func TestGenesisOverlayUsesEffectiveEpochPParamsAtBoundary(t *testing.T) {
 }
 
 func TestGenesisOverlayBoundaryBlockUsesBodyEraPParams(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{52}, 0, tamperNone)
 	delegateHash := tb.block.IssuerVkey().Hash()
 	vrfKey, ok, err := headerVrfKeyFromBodyCbor(tb.block.Header())
@@ -1877,6 +1949,8 @@ func TestGenesisOverlayBoundaryBlockUsesBodyEraPParams(t *testing.T) {
 func TestGenesisOverlayBoundaryBlockUsesBoundaryEpochPredecessorPParams(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
@@ -1936,6 +2010,8 @@ func TestGenesisOverlayBoundaryBlockUsesBoundaryEpochPredecessorPParams(
 func TestVerifyBlockHeaderState_GenesisDelegateInactiveOverlaySlotFails(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{52}, 0, tamperNone)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	delegateHash := tb.block.IssuerVkey().Hash()
@@ -1970,6 +2046,8 @@ func TestVerifyBlockHeaderState_GenesisDelegateInactiveOverlaySlotFails(
 func TestVerifyBlockHeaderState_GenesisDelegateNonOverlaySlotUsesPoolThreshold(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{54}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	delegateHash := tb.block.IssuerVkey().Hash()
@@ -2032,6 +2110,8 @@ func TestVerifyBlockHeaderState_GenesisDelegateNonOverlaySlotUsesPoolThreshold(
 func TestVerifyBlockHeaderState_UnavailableSnapshotRecoverableVsGenuine(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	dummyPool := func() []byte {
 		p := make([]byte, lcommon.Blake2b224Size)
 		p[0] = 0xEE
@@ -2136,6 +2216,8 @@ func TestVerifyBlockHeaderState_UnavailableSnapshotRecoverableVsGenuine(
 // deferred headers of StakeSnapshotEpoch(epochOf(slot)); with none deferred it
 // reports no pin.
 func TestOldestRequiredSnapshotEpoch(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{62}, 0, tamperNone)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	// Build an epoch cache mapping distinct slot ranges to epochs 11, 14, 22
@@ -2195,6 +2277,8 @@ func TestOldestRequiredSnapshotEpoch(t *testing.T) {
 func TestVerifyBlockHeaderState_GenesisDelegateUsesActiveDelegation(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{55}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	delegateHash := tb.block.IssuerVkey().Hash()
@@ -2466,6 +2550,8 @@ func seedBlockPoolRegistration(
 // TestVerifyBlockLeaderEligibility_ByronSkipped verifies that Byron blocks
 // bypass eligibility checking entirely (Byron uses PBFT, not Praos).
 func TestVerifyBlockLeaderEligibility_ByronSkipped(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{} // no db needed
 	block := &mockByronBlock{}
 	err := ls.verifyBlockLeaderEligibility(block, 5)
@@ -2478,6 +2564,8 @@ func TestVerifyBlockLeaderEligibility_ByronSkipped(t *testing.T) {
 func TestVerifyBlockLeaderEligibility_EarlyEpochUsesGenesisSnapshot(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{35}, 0, tamperNone)
 	// Use epoch 5 nonce for the genesis epoch cache entry; the actual nonce
 	// is not used by verifyBlockLeaderEligibility itself.
@@ -2510,6 +2598,8 @@ func TestVerifyBlockLeaderEligibility_EarlyEpochUsesGenesisSnapshot(
 // TestVerifyBlockLeaderEligibility_EligiblePoolPasses verifies that a block
 // from a pool with sufficient stake and an eligible VRF output passes the check.
 func TestVerifyBlockLeaderEligibility_EligiblePoolPasses(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{30}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 
@@ -2531,6 +2621,8 @@ func TestVerifyBlockLeaderEligibility_EligiblePoolPasses(t *testing.T) {
 func TestVerifyBlockLeaderEligibility_Issue2876RewardInclusiveStake(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		epoch               = uint64(1362)
 		snapshotEpoch       = uint64(1361)
@@ -2629,6 +2721,8 @@ func TestVerifyBlockLeaderEligibility_Issue2876RewardInclusiveStake(
 func TestVerifyBlockLeaderEligibility_MithrilEpochRequiresActiveDistribution(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{37}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	if tb.block.slot <= 1 {
@@ -2671,6 +2765,8 @@ func TestVerifyBlockLeaderEligibility_MithrilEpochRequiresActiveDistribution(
 func TestVerifyBlockLeaderEligibility_ActiveDistributionVRFAboveThresholdFails(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{40}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	if tb.block.slot <= 1 {
@@ -2708,6 +2804,8 @@ func TestVerifyBlockLeaderEligibility_ActiveDistributionVRFAboveThresholdFails(
 // TestVerifyBlockLeaderEligibility_PoolNotInSnapshotFails verifies that a block
 // from a pool absent from the epoch-2 mark snapshot is rejected.
 func TestVerifyBlockLeaderEligibility_PoolNotInSnapshotFails(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{31}, 0, tamperNone)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	// No snapshot seeded — pool is unknown.
@@ -2720,6 +2818,8 @@ func TestVerifyBlockLeaderEligibility_PoolNotInSnapshotFails(t *testing.T) {
 // TestVerifyBlockLeaderEligibility_ZeroStakeFails verifies that a block
 // from a pool with a zero-stake snapshot entry is rejected.
 func TestVerifyBlockLeaderEligibility_ZeroStakeFails(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{32}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 
@@ -2737,6 +2837,8 @@ func TestVerifyBlockLeaderEligibility_ZeroStakeFails(t *testing.T) {
 // but the pool only holds 1 lovelace out of 10^18 — making its threshold
 // near zero and ensuring the VRF output exceeds it.
 func TestVerifyBlockLeaderEligibility_VRFAboveThresholdFails(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{33}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 
@@ -2761,6 +2863,8 @@ func TestVerifyBlockLeaderEligibility_VRFAboveThresholdFails(t *testing.T) {
 func TestVerifyBlockHeaderCrypto_SkipLeaderStakeThresholdCheckWarnsAndAccepts(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{41}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	var logBuf bytes.Buffer
@@ -2789,6 +2893,8 @@ func TestVerifyBlockHeaderCrypto_SkipLeaderStakeThresholdCheckWarnsAndAccepts(
 }
 
 func TestVerifyBlockHeaderCrypto_EmptyMarkSnapshotDiagnostic(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{42}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	seedBlockPoolRegistration(t, db, tb.block)
@@ -2802,6 +2908,8 @@ func TestVerifyBlockHeaderCrypto_EmptyMarkSnapshotDiagnostic(t *testing.T) {
 func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkChecks(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{38}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	var logBuf bytes.Buffer
@@ -2863,9 +2971,22 @@ func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkChecks(
 	assert.NotContains(t, logBuf.String(), "skipping leader eligibility check")
 }
 
-func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkSkips(
+// TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkRejectsStandardProfile
+// verifies that a standard profile does not silently trust a block whose
+// eligibility could not be evaluated. The startup fallback derives historical
+// rows from current live state and stamps them with the current epoch start;
+// unlike a certified imported row, this capture is neither the target
+// boundary nor the Mithril anchor, so a hard threshold *comparison* against it
+// is unsafe. That makes eligibility unevaluable, not automatically satisfied:
+// only the explicitly selected prototype profile (SkipLeaderStakeThresholdCheck)
+// may trust the block anyway (see the Prototype sibling below); a standard
+// profile must reject, deferring while the ledger apply cursor is still
+// catching up.
+func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkRejectsStandardProfile(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{40}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	var logBuf bytes.Buffer
@@ -2881,10 +3002,6 @@ func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkSkips(
 	// cache generation, not the mutable field.
 	ls.publishSnapshotsLocked()
 
-	// The startup fallback derives historical rows from current live state and
-	// stamps them with the current epoch start. Unlike a certified imported
-	// row, this capture is neither the target boundary nor the Mithril anchor,
-	// so hard threshold rejection remains unsafe.
 	reconstructedCaptureSlot := ls.epochCache[1].StartSlot
 	poolKeyHash := tb.block.IssuerVkey().Hash()
 	seedPoolStakeSnapshotOfTypeAtSlot(
@@ -2919,13 +3036,191 @@ func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkSkips(
 	require.True(t, ls.shouldSkipPostMithrilMarkEligibility(snapshot, 4))
 
 	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
-	require.NoError(t, err)
+	require.Error(
+		t,
+		err,
+		"an unevaluable reconstructed mark row must not be accepted on a standard profile",
+	)
+	assert.ErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
+	assert.NotContains(t, logBuf.String(), "skipping leader eligibility check")
+}
+
+// TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkPrototypeAccepts
+// pins the one profile that may still bypass an unevaluable reconstructed
+// mark row: the explicitly selected Musashi prototype
+// (SkipLeaderStakeThresholdCheck), mirroring the other eligibility guards'
+// Rejects/PrototypeAccepts pairs in this file.
+func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkPrototypeAccepts(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{41}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.config.SkipLeaderStakeThresholdCheck = true
+	var logBuf bytes.Buffer
+	ls.config.Logger = slog.New(slog.NewTextHandler(&logBuf, nil))
+	ls.epochCache = []models.Epoch{
+		{EpochId: 3, StartSlot: 300, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{EpochId: 4, StartSlot: 400, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{EpochId: 5, StartSlot: 500, LengthInSlots: 100, Nonce: tb.epochNonce},
+	}
+	ls.mithrilLedgerSlot = ls.epochCache[1].StartSlot + 50
+	tb.block.slot = ls.epochCache[2].StartSlot + 50
+	ls.publishSnapshotsLocked()
+
+	reconstructedCaptureSlot := ls.epochCache[1].StartSlot
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshotOfTypeAtSlot(
+		t,
+		db,
+		4,
+		models.PoolStakeSnapshotTypeMark,
+		poolKeyHash[:],
+		1,
+		0,
+		reconstructedCaptureSlot,
+	)
+	dummyHash := make([]byte, 28)
+	dummyHash[0] = 0xFF
+	seedPoolStakeSnapshotOfTypeAtSlot(
+		t,
+		db,
+		4,
+		models.PoolStakeSnapshotTypeMark,
+		dummyHash,
+		1_000_000_000_000_000_000,
+		0,
+		reconstructedCaptureSlot,
+	)
+
+	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	assert.NoError(t, err, "prototype profile keeps its documented bypass")
 	assert.Contains(t, logBuf.String(), "skipping leader eligibility check")
+}
+
+// TestVerifyBlockHeaderState_ReconstructedMarkDefersThenRejects pins the
+// defer/reject boundary for the unevaluable reconstructed mark row on the path
+// header verification actually takes (verifyBlockHeaderState, reached from
+// blockfetch through verifyBlockHeaderStateWithEpochAdvance). Rejecting the
+// header outright while the ledger apply cursor is still behind its slot would
+// stall a node catching up after a Mithril restore, so the rejection must
+// carry errLeaderStakeSnapshotUnavailable and defer there, hardening into a
+// rejection only once the cursor has passed the slot or the apply-time
+// recheck runs with deferral disabled. Mirrors the zero-total-active-stake
+// sibling in TestVerifyBlockHeaderState_UnavailableSnapshotRecoverableVsGenuine.
+func TestVerifyBlockHeaderState_ReconstructedMarkDefersThenRejects(
+	t *testing.T,
+) {
+	newReconstructedMarkLedger := func(
+		t *testing.T,
+		tipSlot uint64,
+	) (*LedgerState, *realBabbageBlock) {
+		t.Helper()
+		tb := createTestBlock(t, [32]byte{43}, 0, tamperNone)
+		ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+		ls.epochCache = []models.Epoch{
+			{
+				EpochId:       3,
+				StartSlot:     300,
+				LengthInSlots: 100,
+				Nonce:         tb.epochNonce,
+			},
+			{
+				EpochId:       4,
+				StartSlot:     400,
+				LengthInSlots: 100,
+				Nonce:         tb.epochNonce,
+			},
+			{
+				EpochId:       5,
+				StartSlot:     500,
+				LengthInSlots: 100,
+				Nonce:         tb.epochNonce,
+			},
+		}
+		ls.mithrilLedgerSlot = ls.epochCache[1].StartSlot + 50
+		tb.block.slot = ls.epochCache[2].StartSlot + 50
+		ls.currentTip = ochainsync.Tip{
+			Point: ocommon.Point{Slot: tipSlot},
+		}
+		ls.publishSnapshotsLocked()
+
+		seedBlockPoolRegistration(t, db, tb.block)
+		reconstructedCaptureSlot := ls.epochCache[1].StartSlot
+		poolKeyHash := tb.block.IssuerVkey().Hash()
+		seedPoolStakeSnapshotOfTypeAtSlot(
+			t,
+			db,
+			4,
+			models.PoolStakeSnapshotTypeMark,
+			poolKeyHash[:],
+			1,
+			0,
+			reconstructedCaptureSlot,
+		)
+		dummyHash := make([]byte, lcommon.Blake2b224Size)
+		dummyHash[0] = 0xFF
+		seedPoolStakeSnapshotOfTypeAtSlot(
+			t,
+			db,
+			4,
+			models.PoolStakeSnapshotTypeMark,
+			dummyHash,
+			1_000_000_000_000_000_000,
+			0,
+			reconstructedCaptureSlot,
+		)
+		return ls, tb.block
+	}
+
+	t.Run("tip behind the slot defers", func(t *testing.T) {
+		ls, block := newReconstructedMarkLedger(t, 549)
+		require.True(t, ls.ledgerTipBehindSlot(block.SlotNumber()))
+
+		err := ls.verifyBlockHeaderState(block, 5, true)
+		require.Error(t, err)
+		assert.True(
+			t,
+			IsHeaderVerificationDeferred(err),
+			"a catching-up node must defer, not reject: %v",
+			err,
+		)
+		assert.ErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
+		assert.Contains(
+			t,
+			err.Error(),
+			"reconstructed after the target boundary",
+		)
+
+		// The apply-time recheck runs with deferral disabled: the same state
+		// is a hard rejection there, so the deferred header is not silently
+		// adopted later.
+		err = ls.verifyBlockHeaderState(block, 5, false)
+		require.Error(t, err)
+		assert.False(t, IsHeaderVerificationDeferred(err))
+		assert.ErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
+	})
+
+	t.Run("tip caught up rejects", func(t *testing.T) {
+		ls, block := newReconstructedMarkLedger(t, 1550)
+		require.False(t, ls.ledgerTipBehindSlot(block.SlotNumber()))
+
+		err := ls.verifyBlockHeaderState(block, 5, true)
+		require.Error(t, err)
+		assert.False(
+			t,
+			IsHeaderVerificationDeferred(err),
+			"a caught-up cursor must not defer forever: %v",
+			err,
+		)
+		assert.ErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
+	})
 }
 
 func TestVerifyBlockLeaderEligibility_LiveComputedHistoricalMarkStillChecks(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{39}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.epochCache = []models.Epoch{
@@ -3053,6 +3348,8 @@ func newZeroCoeffGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 func TestVerifyBlockLeaderEligibility_MissingActiveSlotsCoeffRejects(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{34}, 0, tamperNone)
 	ls := newCoeffGuardLedger(t, tb, nil, false)
 
@@ -3066,6 +3363,8 @@ func TestVerifyBlockLeaderEligibility_MissingActiveSlotsCoeffRejects(
 func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffRejects(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{36}, 0, tamperNone)
 	ls := newCoeffGuardLedger(t, tb, newZeroCoeffGenesisCfg(t), false)
 
@@ -3082,6 +3381,8 @@ func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffRejects(
 func TestVerifyBlockLeaderEligibility_MissingActiveSlotsCoeffPrototypeAccepts(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{34}, 0, tamperNone)
 	ls := newCoeffGuardLedger(t, tb, nil, true)
 
@@ -3094,6 +3395,8 @@ func TestVerifyBlockLeaderEligibility_MissingActiveSlotsCoeffPrototypeAccepts(
 func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffPrototypeAccepts(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{36}, 0, tamperNone)
 	ls := newCoeffGuardLedger(t, tb, newZeroCoeffGenesisCfg(t), true)
 
@@ -3125,6 +3428,8 @@ func seedZeroTotalActiveStakeSummary(
 func TestVerifyBlockLeaderEligibility_ZeroTotalActiveStakeRejects(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{37}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	poolKeyHash := tb.block.IssuerVkey().Hash()
@@ -3144,6 +3449,8 @@ func TestVerifyBlockLeaderEligibility_ZeroTotalActiveStakeRejects(
 func TestVerifyBlockLeaderEligibility_ZeroTotalActiveStakePrototypeAccepts(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{37}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.config.SkipLeaderStakeThresholdCheck = true
@@ -3163,6 +3470,8 @@ func TestVerifyBlockLeaderEligibility_ZeroTotalActiveStakePrototypeAccepts(
 func TestVerifyBlockHeaderCryptoBeforeApplyDefersZeroTotalActiveStake(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{38}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	seedBlockPoolRegistration(t, db, tb.block)
@@ -3218,6 +3527,8 @@ func newImportedActiveLedger(
 func TestVerifyBlockLeaderEligibility_ImportedActiveZeroDenominatorIsUnavailable(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{39}, 0, tamperNone)
 	ls, db := newImportedActiveLedger(t, tb)
 	poolKeyHash := tb.block.IssuerVkey().Hash()
@@ -3242,6 +3553,8 @@ func TestVerifyBlockLeaderEligibility_ImportedActiveZeroDenominatorIsUnavailable
 func TestVerifyBlockLeaderEligibility_ImportedActiveEmptyDistributionIsUnavailable(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{40}, 0, tamperNone)
 	ls, _ := newImportedActiveLedger(t, tb)
 
@@ -3259,6 +3572,8 @@ func TestVerifyBlockLeaderEligibility_ImportedActiveEmptyDistributionIsUnavailab
 func TestVerifyBlockLeaderEligibility_ImportedActivePoolAbsentStaysHardRejection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{41}, 0, tamperNone)
 	ls, db := newImportedActiveLedger(t, tb)
 	otherPool := make([]byte, 28)
@@ -3301,6 +3616,8 @@ func TestVerifyBlockLeaderEligibility_ImportedActivePoolAbsentStaysHardRejection
 func TestPrunePoolSnapshotsWithRetentionFloor_FloorReadIsAtomic(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{63}, 0, tamperNone)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	// Map slots to epochs 11 (snapshot 10) and 14 (snapshot 13).
@@ -3403,6 +3720,8 @@ func TestPrunePoolSnapshotsWithRetentionFloor_FloorReadIsAtomic(
 func TestPrunePoolSnapshotsWithRetentionFloor_RealPruneNoDeadlock(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{73}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.epochCache = []models.Epoch{
@@ -3482,6 +3801,8 @@ func TestPrunePoolSnapshotsWithRetentionFloor_RealPruneNoDeadlock(
 func TestPrunePoolSnapshotsWithRetentionFloor_UnmappableRetainsAll(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{64}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	// Default cache (epoch 5, slots [0, 1_000_000)) does NOT cover the deferred
@@ -3557,7 +3878,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_UnmappableRetainsAll(
 		seenBefore,
 		"mappable deferred slot pins at StakeSnapshotEpoch(22)=21",
 	)
-	for epoch := uint64(0); epoch < 21; epoch++ {
+	for epoch := range uint64(21) {
 		snaps, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
 			epoch, models.PoolStakeSnapshotTypeMark, nil,
 		)
@@ -3590,6 +3911,8 @@ func TestPrunePoolSnapshotsWithRetentionFloor_UnmappableRetainsAll(
 // covers them on the first post-restart cleanup, instead of the set starting
 // empty and the needed snapshot being pruned.
 func TestRepopulateDeferredHeaderValidation(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{70}, 0, tamperNone)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.epochCache = []models.Epoch{
@@ -3629,6 +3952,8 @@ func TestRepopulateDeferredHeaderValidation(t *testing.T) {
 func TestRepopulateDeferredHeaderValidation_FailsClosedOnScanError(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{71}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 
@@ -3655,6 +3980,8 @@ func TestRepopulateDeferredHeaderValidation_FailsClosedOnScanError(
 // durable pin, so the delete must skip any key present in the set; only a key
 // that is genuinely absent (still evicted) may have its marker removed.
 func TestDeletePersistedDeferredMarkers_SkipsReAdmitted(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{72}, 0, tamperNone)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 
@@ -3702,6 +4029,8 @@ func TestDeletePersistedDeferredMarkers_SkipsReAdmitted(t *testing.T) {
 func TestPrunePoolSnapshotsWithRetentionFloor_EvictsStaleBehindCursor(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{71}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.epochCache = []models.Epoch{
@@ -3742,6 +4071,8 @@ func TestPrunePoolSnapshotsWithRetentionFloor_EvictsStaleBehindCursor(
 func TestPrunePoolSnapshotsWithRetentionFloor_ResolveReleasesPin(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{72}, 0, tamperNone)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	// Both headers are AHEAD of the cursor (tip 0) so eviction does not fire.
@@ -3781,6 +4112,8 @@ func TestPrunePoolSnapshotsWithRetentionFloor_ResolveReleasesPin(
 func TestPrunePoolSnapshotsWithRetentionFloor_DepthCapBoundsRetention(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{73}, 0, tamperNone)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	// Header maps to epoch 11 (needs snapshot 10) and is ahead of the cursor
@@ -3823,6 +4156,8 @@ func TestPrunePoolSnapshotsWithRetentionFloor_DepthCapBoundsRetention(
 func TestPrunePoolSnapshotsWithRetentionFloor_KeepsReadoptableDeferredHeader(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{73}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.epochCache = []models.Epoch{
@@ -3912,6 +4247,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_KeepsReadoptableDeferredHeader(
 // membership before deleting and skipped the delete when present would never run
 // the delete-then-restore path this asserts, and would fail it (verified by
 // removing the restore block: the marker read comes back empty).
+// Not t.Parallel: swaps the package-level afterDeferredMarkerDeleteHook seam.
 func TestDeleteDeferredMarkerUnlessReadmitted_RestoresMarkerReadmittedDuringDelete(
 	t *testing.T,
 ) {
@@ -3967,6 +4303,7 @@ func TestDeleteDeferredMarkerUnlessReadmitted_RestoresMarkerReadmittedDuringDele
 // deletePersistedDeferredMarkers, out of PrunePoolSnapshotsWithRetentionFloor)
 // so the node fails the cleanup rather than continuing toward that lost pin. The
 // in-memory entry must survive so the running process still holds the pin.
+// Not t.Parallel: swaps the package-level afterDeferredMarkerDeleteHook seam.
 func TestDeleteDeferredMarkerUnlessReadmitted_RestoreFailurePropagates(
 	t *testing.T,
 ) {

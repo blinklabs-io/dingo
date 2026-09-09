@@ -48,6 +48,8 @@ import (
 // retired pools; the lookup here covers snapshots in the compact shape, which
 // carry only a VRF key.
 func TestSeedImportedRewardInputsResolvesParamsPerEpoch(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -131,6 +133,8 @@ func TestSeedImportedRewardInputsResolvesParamsPerEpoch(t *testing.T) {
 // remaining epochs from an answer that never came would write a basis with
 // no relation to what was asked for.
 func TestSeedImportedRewardInputsPropagatesParamsError(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -167,6 +171,8 @@ func TestSeedImportedRewardInputsPropagatesParamsError(t *testing.T) {
 func TestImportSnapShotsPrefersSnapshotPoolParamsOverRegistrations(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -307,6 +313,8 @@ func importTestPoolRegistration(
 // round without them; dropping it here would lose a round that was fully
 // derivable, which is the failure this seeding exists to prevent.
 func TestSeedImportedRewardInputsSeedsWithoutAParamsWindow(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -350,6 +358,8 @@ func TestSeedImportedRewardInputsSeedsWithoutAParamsWindow(t *testing.T) {
 // does-not-reconcile grounds as any other underivable basis, and the epochs
 // that can be derived are unaffected.
 func TestSeedImportedRewardInputsSkipsEpochsWithNoParamsWindow(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -411,6 +421,8 @@ func TestSeedImportedRewardInputsSkipsEpochsWithNoParamsWindow(t *testing.T) {
 }
 
 func TestEmptyRewardSeedFailureReasonReportsMissingParameters(t *testing.T) {
+	t.Parallel()
+
 	pools := ParsedSnapShot{
 		Stake: map[string]uint64{"credential": 1},
 		Delegations: map[string][]byte{
@@ -426,6 +438,8 @@ func TestEmptyRewardSeedFailureReasonReportsMissingParameters(t *testing.T) {
 }
 
 func TestSeedImportedRewardInputsPreservesFailureForEmptyBundle(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 

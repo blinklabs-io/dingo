@@ -99,6 +99,8 @@ func TestServeAuxiliaryListenerBindFailureIsNonFatal(t *testing.T) {
 }
 
 func TestPprofDebugServerUsesDedicatedBindAddress(t *testing.T) {
+	t.Parallel()
+
 	cfg := &config.Config{
 		BindAddr:      "0.0.0.0",
 		DebugBindAddr: "127.0.0.1",

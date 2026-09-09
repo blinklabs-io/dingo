@@ -32,6 +32,8 @@ import (
 )
 
 func TestProcessEpochSkipsPreConwayProtocolParameters(t *testing.T) {
+	t.Parallel()
+
 	pparams := &shelley.ShelleyProtocolParameters{}
 	out, err := ProcessEpoch(&EpochInput{
 		PParams: pparams,
@@ -42,6 +44,8 @@ func TestProcessEpochSkipsPreConwayProtocolParameters(t *testing.T) {
 }
 
 func TestRefundProposalDepositCreditsRewardAccount(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	stakeCred := testBytes(28, 1)
 	rewardAddr, err := lcommon.NewAddressFromParts(
@@ -73,6 +77,8 @@ func TestRefundProposalDepositCreditsRewardAccount(t *testing.T) {
 }
 
 func TestRefundProposalDeposit_DistinguishesSameTxActionIndex(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	stakeCred := testBytes(28, 0x31)
 	rewardAddrBytes := buildRewardAddr(t, stakeCred)
@@ -155,6 +161,8 @@ WHERE credential_tag = ? AND staking_key = ? AND added_slot = ?`,
 }
 
 func TestProcessEpochExpiresProposalAndRefundsDeposit(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	stakeCred := testBytes(28, 2)
 	rewardAddr, err := lcommon.NewAddressFromParts(
@@ -222,6 +230,8 @@ func TestProcessEpochExpiresProposalAndRefundsDeposit(t *testing.T) {
 func TestProcessEpochReplaysBoundaryExpiredProposalAfterStakeRewardReset(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	stakeCred := testBytes(28, 0x20)
 	rewardAddrBytes := buildRewardAddr(t, stakeCred)
@@ -286,6 +296,8 @@ func TestProcessEpochReplaysBoundaryExpiredProposalAfterStakeRewardReset(
 func TestProcessEpochReturnsMissingRewardAccountRefundToTreasury(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	stakeCred := testBytes(28, 2)
 	rewardAddr, err := lcommon.NewAddressFromParts(
@@ -358,6 +370,8 @@ func TestProcessEpochReturnsMissingRewardAccountRefundToTreasury(
 func TestProcessEpochBootstrapParameterChangeWithoutCommitteeDoesNotRatify(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, _ := newTallyTestDB(t)
 	poolDeposit := uint(1234)
 	actionCbor, err := cbor.Encode(&conway.ConwayParameterChangeGovAction{
@@ -410,6 +424,8 @@ func TestProcessEpochBootstrapParameterChangeWithoutCommitteeDoesNotRatify(
 }
 
 func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		pparams func() lcommon.ProtocolParameters
@@ -500,6 +516,8 @@ func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
 func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	maxBlock := uint32(2_000)
 	maxTx := uint32(1_000)
 	stride := uint32(128)
@@ -662,6 +680,8 @@ func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 func TestProcessEpochEnactsConwayParameterChangeReportsPlutusV2CostModelWritten(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	actionCbor, err := cbor.Encode(
 		&conway.ConwayParameterChangeGovAction{
@@ -751,6 +771,8 @@ func TestProcessEpochEnactsConwayParameterChangeReportsPlutusV2CostModelWritten(
 func TestProcessEpochReplaysBoundaryTreasuryWithdrawalAfterStakeRewardReset(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	stakeCred := testBytes(28, 0x30)
 	rewardAddr, err := lcommon.NewAddressFromParts(
@@ -846,6 +868,8 @@ func TestProcessEpochReplaysBoundaryTreasuryWithdrawalAfterStakeRewardReset(
 func TestProcessEpochUnclaimedDepositDoesNotIncreaseWithdrawalCapacity(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	missingStakeCred := testBytes(28, 5)
 	missingReturnAddr, err := lcommon.NewAddressFromParts(
@@ -968,6 +992,8 @@ func TestProcessEpochUnclaimedDepositDoesNotIncreaseWithdrawalCapacity(
 func TestRefundProposalDepositReturnsInactiveRewardAccountToTreasury(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	stakeCred := testBytes(28, 5)
 	rewardAddr, err := lcommon.NewAddressFromParts(
@@ -1012,6 +1038,8 @@ func TestRefundProposalDepositReturnsInactiveRewardAccountToTreasury(
 	assert.Equal(t, uint64(20), uint64(state.Reserves))
 }
 func TestRewardCreditsRollbackBySlot(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	stakeCred := testBytes(28, 1)
 	rewardAddr, err := lcommon.NewAddressFromParts(
@@ -1044,6 +1072,8 @@ func TestRewardCreditsRollbackBySlot(t *testing.T) {
 }
 
 func TestCountActiveDRepsFiltersExpiredDReps(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	for _, drep := range []models.Drep{
 		{
@@ -1071,6 +1101,8 @@ func TestCountActiveDRepsFiltersExpiredDReps(t *testing.T) {
 }
 
 func TestCommitteeNoConfidenceStateUsesEnactedCommitteeRoot(t *testing.T) {
+	t.Parallel()
+
 	assert.False(t, committeeNoConfidenceState(nil))
 	assert.False(t, committeeNoConfidenceState(&models.GovernanceProposal{
 		ActionType: uint8(lcommon.GovActionTypeUpdateCommittee),
@@ -1081,6 +1113,8 @@ func TestCommitteeNoConfidenceStateUsesEnactedCommitteeRoot(t *testing.T) {
 }
 
 func TestProcessEpochCommitteeTermLimit(t *testing.T) {
+	t.Parallel()
+
 	const currentEpoch = uint64(10)
 	uintPtr := func(value uint) *uint { return &value }
 	tests := []struct {
@@ -1326,6 +1360,8 @@ func buildRewardAddr(t *testing.T, stakeCred []byte) []byte {
 // TestProcessEpochEnactedChildPreserved verifies that enactment advances the
 // purpose root without removing descendants that can validly follow it.
 func TestProcessEpochEnactedChildPreserved(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 
 	stakeCred := testBytes(28, 50)
@@ -1390,6 +1426,8 @@ func TestProcessEpochEnactedChildPreserved(t *testing.T) {
 func TestProcessEpochOrphanedSiblingMissingReturnAccountGoesToTreasury(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	require.NoError(t, store.SetNetworkState(100, 20, 1, nil))
 
@@ -1461,6 +1499,8 @@ func TestProcessEpochOrphanedSiblingMissingReturnAccountGoesToTreasury(
 // cascade: when a competing root-level sibling of an enacted proposal is
 // orphaned, its own children are also swept and refunded in the same tick.
 func TestProcessEpochTransitiveOrphanRemoval(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 
 	stakeCred := testBytes(28, 57)
@@ -1532,6 +1572,8 @@ func TestProcessEpochTransitiveOrphanRemoval(t *testing.T) {
 // orphan removal, GetActiveGovernanceProposals no longer returns orphaned
 // proposals (their expired_epoch field filters them out).
 func TestProcessEpochOrphanExcludedFromActiveProposals(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 
 	stakeCred := testBytes(28, 61)
@@ -1586,6 +1628,8 @@ func TestProcessEpochOrphanExcludedFromActiveProposals(t *testing.T) {
 // back to a slot before the boundary slot restores orphaned proposals
 // (clears their expired_epoch/expired_slot) and reverses the reward credit.
 func TestProcessEpochOrphanedSiblingRestoredOnRollback(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 
 	stakeCred := testBytes(28, 64)
@@ -1658,6 +1702,8 @@ func TestProcessEpochOrphanedSiblingRestoredOnRollback(t *testing.T) {
 // TestProcessEpochOrphanAfterExpiry verifies that a proposal whose parent
 // expires naturally at this epoch boundary is also orphaned and refunded.
 func TestProcessEpochOrphanAfterExpiry(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 
 	stakeCred := testBytes(28, 67)

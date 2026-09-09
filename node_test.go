@@ -51,6 +51,8 @@ import (
 // destructive Restore/Truncate RPCs on every interface by default. An
 // operator's explicit --bark-host must still always win.
 func TestEffectiveBarkHostDefaultsToLoopbackWhenLifecycleEnabled(t *testing.T) {
+	t.Parallel()
+
 	require.Equal(t, "127.0.0.1", effectiveBarkHost("", true))
 	require.Equal(t, "", effectiveBarkHost("", false))
 	require.Equal(t, "0.0.0.0", effectiveBarkHost("0.0.0.0", true))
@@ -58,6 +60,8 @@ func TestEffectiveBarkHostDefaultsToLoopbackWhenLifecycleEnabled(t *testing.T) {
 }
 
 func TestBackfillRewardLiveStakeAtStartup(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -213,6 +217,8 @@ func newNodeTestCardanoNodeCfg(t testing.TB) *cardano.CardanoNodeConfig {
 }
 
 func TestHandleChainSwitchEventUpdatesActiveConnection(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
 	state := chainsync.NewStateWithConfig(
@@ -263,6 +269,8 @@ func TestHandleChainSwitchEventUpdatesActiveConnection(t *testing.T) {
 }
 
 func TestChainSelectionDoesNotPromoteUntrackedFallback(t *testing.T) {
+	t.Parallel()
+
 	for _, selectorFirst := range []bool{true, false} {
 		name := "state-removal-first"
 		if selectorFirst {
@@ -359,6 +367,8 @@ func TestChainSelectionDoesNotPromoteUntrackedFallback(t *testing.T) {
 func TestHandleChainSelectedNoneEventDoesNotClearReselectedConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	state := chainsync.NewStateWithConfig(
 		nil,
 		nil,
@@ -400,6 +410,8 @@ func TestHandleChainSelectedNoneEventDoesNotClearReselectedConnection(
 func TestHandleChainSelectedNoneEventCoalescesLifecycleContention(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	state := chainsync.NewStateWithConfig(
 		nil,
 		nil,
@@ -463,6 +475,8 @@ func TestHandleChainSelectedNoneEventCoalescesLifecycleContention(
 func TestChainSelectedNoneWorkerCancelsDuringLifecycleContention(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	state := chainsync.NewStateWithConfig(
 		nil,
 		nil,
@@ -502,6 +516,8 @@ func TestChainSelectedNoneWorkerCancelsDuringLifecycleContention(
 }
 
 func TestChainSelectedNoneRetryBackoffCaps(t *testing.T) {
+	t.Parallel()
+
 	delay := chainSelectedNoneInitialRetryInterval
 	delays := make([]time.Duration, 0, 10)
 	for range 10 {
@@ -533,6 +549,8 @@ func TestChainSelectedNoneRetryBackoffCaps(t *testing.T) {
 // chainSelector's evaluation loop is never paused during quiesce, so it can
 // still emit a ChainSwitchEvent in that window.
 func TestHandleChainSwitchEventNilChainsyncStateDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
 	n := &Node{
 		config: Config{
 			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -562,6 +580,8 @@ func TestHandleChainSwitchEventNilChainsyncStateDoesNotPanic(t *testing.T) {
 // than stall the EventBus dispatch goroutine behind a possibly long-running
 // operation.
 func TestHandleChainSwitchEventSkipsUpdateDuringLiveLifecycleOp(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
 	state := chainsync.NewStateWithConfig(
@@ -609,6 +629,8 @@ func TestHandleChainSwitchEventSkipsUpdateDuringLiveLifecycleOp(t *testing.T) {
 func TestLedgerStateConfigSkipsChainsyncReadDuringLiveLifecycleOp(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	state := chainsync.NewStateWithConfig(
 		nil,
 		nil,
@@ -638,6 +660,8 @@ func TestLedgerStateConfigSkipsChainsyncReadDuringLiveLifecycleOp(
 }
 
 func TestChainsyncIngressEligibilityCacheDefaultsAndUpdates(t *testing.T) {
+	t.Parallel()
+
 	connId := newNodeTestConnId(3003)
 	n := &Node{}
 
@@ -666,6 +690,8 @@ func TestChainsyncIngressEligibilityCacheDefaultsAndUpdates(t *testing.T) {
 }
 
 func TestStopReturnsSameShutdownErrorAfterFirstCall(t *testing.T) {
+	t.Parallel()
+
 	wantErr := errors.New("shutdown failed")
 	n := &Node{
 		config: Config{
@@ -690,6 +716,8 @@ func TestStopReturnsSameShutdownErrorAfterFirstCall(t *testing.T) {
 // it unwinds its LIFO stack; shutdown must wait for that rollback rather than
 // closing the same partially initialized resource concurrently.
 func TestStartupFailureCleanupCancelsBeforeAllowingShutdown(t *testing.T) {
+	t.Parallel()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	rollbackStarted := make(chan struct{})
 	releaseRollback := make(chan struct{})
@@ -761,6 +789,8 @@ func TestStartupFailureCleanupCancelsBeforeAllowingShutdown(t *testing.T) {
 }
 
 func TestShutdownClosesEventBusBeforeFinalCleanup(t *testing.T) {
+	t.Parallel()
+
 	const eventType event.EventType = "test.shutdown.order"
 
 	bus := event.NewEventBus(nil, nil)
@@ -808,6 +838,8 @@ func TestShutdownClosesEventBusBeforeFinalCleanup(t *testing.T) {
 }
 
 func TestCloseWithShutdownTimeoutReturnsTimeoutError(t *testing.T) {
+	t.Parallel()
+
 	n := &Node{
 		config: Config{
 			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -842,6 +874,8 @@ func TestCloseWithShutdownTimeoutReturnsTimeoutError(t *testing.T) {
 // can time out while a database worker is still using the database; normal
 // shutdown must not close the database or its provider-owned stores in that
 // state.
+// Not t.Parallel: swaps ledger.CloseDBWorkerPoolShutdownTimeout, a variable
+// in another package that every concurrent LedgerState close would observe.
 func TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed(
 	t *testing.T,
 ) {
@@ -916,6 +950,8 @@ func TestShutdownDoesNotCloseDatabaseWhenLedgerDrainIsUnconfirmed(
 // exercising cleanupFailedStartup with a hand-built `started` (see the
 // startup-lifecycle-gate test above) and newLiveLifecycleTestNode's own
 // documented pattern of wiring a real Node without going through Run().
+// Not t.Parallel: swaps ledger.CloseDBWorkerPoolShutdownTimeout, a variable
+// in another package that every concurrent LedgerState close would observe.
 func TestCleanupFailedStartupSkipsDatabaseCloseWhenLedgerDrainIsUnconfirmed(
 	t *testing.T,
 ) {
@@ -1017,6 +1053,8 @@ func newChainSelectorSubscriptionTestNode(
 // a PeerEligibilityChangedEvent published on the event bus must be forwarded
 // to the ChainSelector so that the now-ineligible peer is no longer selected.
 func TestNodePeerEligibilityEventUpdatesChainSelector(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
 
@@ -1062,6 +1100,8 @@ func TestNodePeerEligibilityEventUpdatesChainSelector(t *testing.T) {
 // to the ChainSelector so that the higher-priority peer wins equal-tip
 // selection.
 func TestNodePeerPriorityEventUpdatesChainSelector(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
 
@@ -1108,6 +1148,8 @@ func TestNodePeerPriorityEventUpdatesChainSelector(t *testing.T) {
 // A close/stop failure surfaced during the startup-cleanup unwind must
 // actually reach the log, not just be swallowed by the caller's `_ =`.
 func TestLogErrIfNotNilLogsOnError(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 
@@ -1129,6 +1171,8 @@ func TestLogErrIfNotNilLogsOnError(t *testing.T) {
 // The common case -- a clean stop -- must stay silent, or every successful
 // shutdown would log a spurious error line.
 func TestLogErrIfNotNilStaysQuietOnNil(t *testing.T) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 
