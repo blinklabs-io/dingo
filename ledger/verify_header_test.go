@@ -3843,7 +3843,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_UnmappableRetainsAll(
 		seenBefore,
 		"mappable deferred slot pins at StakeSnapshotEpoch(22)=21",
 	)
-	for epoch := uint64(0); epoch < 21; epoch++ {
+	for epoch := range uint64(21) {
 		snaps, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
 			epoch, models.PoolStakeSnapshotTypeMark, nil,
 		)

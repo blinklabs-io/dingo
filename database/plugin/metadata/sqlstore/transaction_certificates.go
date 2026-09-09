@@ -338,7 +338,9 @@ RETURNING id`,
 		return id, nil, err
 	case *lcommon.DeregistrationDrepCertificate:
 		// A DRep deregistration carries its refund in the certificate
-		// itself, so this amount is always known and never NULL.
+		// itself, so this amount is always known. The pointer below is
+		// never nil, so this deposit never takes nullableDecimalUint64's
+		// NULL path, which exists for a deposit the ingest never knew.
 		amount := uint64(cert.Amount)
 		id, err := applyDrepDeregistrationCertificate(
 			ctx,
