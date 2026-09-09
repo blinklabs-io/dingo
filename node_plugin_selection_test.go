@@ -163,6 +163,8 @@ func newAPISelectionNode(sel plugin.Selection) *Node {
 // (int/float64), the environment compatibility shim (uint64), or an in-code
 // selection (uint), so every accepted numeric type and every guard is checked.
 func TestAPIPluginSelectionPortDecoding(t *testing.T) {
+	t.Parallel()
+
 	t.Run("uses capability default when port absent", func(t *testing.T) {
 		n := newAPISelectionNode(
 			plugin.Selection{Provider: "builtin", Config: map[string]any{}},
@@ -237,6 +239,8 @@ func TestAPIPluginSelectionPortDecoding(t *testing.T) {
 // TestAPIPluginSelectionErrors covers the selection-level guards: an empty
 // provider and a capability absent from the selection map are both errors.
 func TestAPIPluginSelectionErrors(t *testing.T) {
+	t.Parallel()
+
 	t.Run("empty provider is rejected", func(t *testing.T) {
 		n := newAPISelectionNode(plugin.Selection{
 			Provider: "",
@@ -260,6 +264,8 @@ func TestAPIPluginSelectionErrors(t *testing.T) {
 // TestAPIPluginSelectionDefaultPortPerCapability verifies each API capability
 // falls back to its own default port when no port is configured.
 func TestAPIPluginSelectionDefaultPortPerCapability(t *testing.T) {
+	t.Parallel()
+
 	want := map[plugin.Capability]uint{
 		plugin.CapabilityAPIBlockfrost: 3000,
 		plugin.CapabilityAPIMesh:       8080,
@@ -283,6 +289,8 @@ func TestAPIPluginSelectionDefaultPortPerCapability(t *testing.T) {
 }
 
 func TestNodeRunSkipsZeroPortAPIProviders(t *testing.T) {
+	t.Parallel()
+
 	n := newAPIPluginRuntimeNode(t)
 	probes := map[plugin.Capability]*apiLifecycleProbe{
 		plugin.CapabilityAPIUtxorpc:    {},
@@ -320,6 +328,8 @@ func TestNodeRunSkipsZeroPortAPIProviders(t *testing.T) {
 }
 
 func TestNodeRunAPIStartupFailureCleansUpStartedProviders(t *testing.T) {
+	t.Parallel()
+
 	n := newAPIPluginRuntimeNode(t)
 	utxorpcProbe := &apiLifecycleProbe{}
 	blockfrostProbe := &apiLifecycleProbe{

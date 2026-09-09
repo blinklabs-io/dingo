@@ -41,6 +41,8 @@ import (
 // the substituted tree instead of the one the walk verified.
 
 func TestHandleRelativeDeletionSurvivesParentSubstitution(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(dir, "real"), 0o750))
 	require.NoError(t, os.WriteFile(
@@ -91,6 +93,8 @@ func TestHandleRelativeDeletionSurvivesParentSubstitution(t *testing.T) {
 }
 
 func TestHandleRelativeRmdirSurvivesParentSubstitution(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(dir, "real"), 0o750))
 	require.NoError(t, os.Mkdir(filepath.Join(dir, "real", "empty"), 0o750))
@@ -133,6 +137,8 @@ func TestHandleRelativeRmdirSurvivesParentSubstitution(t *testing.T) {
 }
 
 func TestHandleRelativeRenameSurvivesParentSubstitution(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	require.NoError(
 		t,

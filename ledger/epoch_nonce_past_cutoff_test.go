@@ -45,6 +45,8 @@ import (
 // (computeEpochNonceForSlot) must agree, because the first header of the
 // new epoch is verified against the eagerly-cached value.
 func TestEpochNonce_SnapshotTipPastCutoff(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)

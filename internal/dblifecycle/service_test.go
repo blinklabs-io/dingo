@@ -69,6 +69,8 @@ func seedCommitTimestampMismatch(t *testing.T, dir string) {
 // TestServiceSnapshotAndRestore verifies the offline path end to end:
 // Service.Snapshot writes a manifest, and Service.Restore reads it back.
 func TestServiceSnapshotAndRestore(t *testing.T) {
+	t.Parallel()
+
 	srcDir := filepath.Join(t.TempDir(), "src")
 	svc := dblifecycle.NewService(testConfig(srcDir), nil, nil)
 
@@ -99,6 +101,8 @@ func TestServiceSnapshotAndRestore(t *testing.T) {
 // configuration at all (only Restore's internal self-consistency check
 // against the manifest's own recorded plugins).
 func TestServiceRestoreRejectsIncompatibleTarget(t *testing.T) {
+	t.Parallel()
+
 	srcDir := filepath.Join(t.TempDir(), "src")
 	srcCfg := testConfig(srcDir)
 	svc := dblifecycle.NewService(srcCfg, nil, nil)
@@ -130,6 +134,8 @@ func TestServiceRestoreRejectsIncompatibleTarget(t *testing.T) {
 // ResolveTarget started accepting a combination of fields as long as they
 // agree on the same block (dingo#1651 follow-up).
 func TestServiceTruncateRequiresAtLeastOneTarget(t *testing.T) {
+	t.Parallel()
+
 	dir := filepath.Join(t.TempDir(), "db")
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dir})
 	require.NoError(t, err)
@@ -183,6 +189,8 @@ func buildResolveTargetTestChain(
 // mutually consistent one an operator might pass for extra safety (e.g.
 // a slot and a hash it already resolved).
 func TestResolveTargetAcceptsConsistentCombinedFields(t *testing.T) {
+	t.Parallel()
+
 	db, blocks := buildResolveTargetTestChain(t, 5)
 	target := blocks[1] // id=2, slot=20, number=2
 
@@ -201,6 +209,8 @@ func TestResolveTargetAcceptsConsistentCombinedFields(t *testing.T) {
 // happens to be authoritative for the actual lookup (hash, in both cases
 // below).
 func TestResolveTargetRejectsInconsistentCombinedFields(t *testing.T) {
+	t.Parallel()
+
 	db, blocks := buildResolveTargetTestChain(t, 5)
 	hashOfBlock2 := blocks[1].Hash
 
@@ -227,6 +237,8 @@ func TestResolveTargetRejectsInconsistentCombinedFields(t *testing.T) {
 // OpenDatabase already flagged as inconsistent between its blob and
 // metadata halves.
 func TestServiceSnapshotRefusesCommitTimestampMismatch(t *testing.T) {
+	t.Parallel()
+
 	dir := filepath.Join(t.TempDir(), "db")
 	seedCommitTimestampMismatch(t, dir)
 
@@ -245,6 +257,8 @@ func TestServiceSnapshotRefusesCommitTimestampMismatch(t *testing.T) {
 // TestServiceSnapshotRefusesCommitTimestampMismatch's counterpart for
 // Truncate, which shares the same openDatabase helper.
 func TestServiceTruncateRefusesCommitTimestampMismatch(t *testing.T) {
+	t.Parallel()
+
 	dir := filepath.Join(t.TempDir(), "db")
 	seedCommitTimestampMismatch(t, dir)
 
@@ -300,6 +314,8 @@ func (f *fakeLiveNode) Truncate(
 // TestServiceDelegatesToLiveNodeWhenSet verifies that once SetLiveNode is
 // called, Snapshot/Restore/Truncate delegate to it instead of the offline path.
 func TestServiceDelegatesToLiveNodeWhenSet(t *testing.T) {
+	t.Parallel()
+
 	svc := dblifecycle.NewService(testConfig(t.TempDir()), nil, nil)
 	live := &fakeLiveNode{}
 	svc.SetLiveNode(live)

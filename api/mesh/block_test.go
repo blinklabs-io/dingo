@@ -44,6 +44,8 @@ func byHash(hash string) *PartialBlockIdentifier {
 }
 
 func TestBlockByIndex(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	blockHash := testHash(0x11)
 	prevHash := testHash(0x10)
@@ -87,6 +89,8 @@ func TestBlockByIndex(t *testing.T) {
 }
 
 func TestBlockByHash(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	blockHash := testHash(0x22)
 	deps.database.blockByHash = func(
@@ -117,6 +121,8 @@ func TestBlockByHash(t *testing.T) {
 // client sends both fields: the hash identifies the block exactly, so it
 // must win over the ambiguous index.
 func TestBlockHashTakesPrecedenceOverIndex(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	wanted := testHash(0x33)
 	deps.database.blockByHash = func(
@@ -147,6 +153,8 @@ func TestBlockHashTakesPrecedenceOverIndex(t *testing.T) {
 // TestBlockGenesisParentIsSelf covers the Mesh requirement that the
 // genesis block reports itself as its own parent.
 func TestBlockGenesisParentIsSelf(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	genesisHash := mustDecodeHex(t, testGenesisHash)
 	deps.database.blockByIndex = func(
@@ -171,6 +179,8 @@ func TestBlockGenesisParentIsSelf(t *testing.T) {
 }
 
 func TestBlockWithTransactions(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	blockHash := testHash(0x44)
 	txHash := testHash(0x45)
@@ -230,6 +240,8 @@ func TestBlockWithTransactions(t *testing.T) {
 }
 
 func TestBlockNotFound(t *testing.T) {
+	t.Parallel()
+
 	tests := map[string]*PartialBlockIdentifier{
 		"by index": byIndex(1234),
 		"by hash":  byHash(hexString(testHash(0x55))),
@@ -262,6 +274,8 @@ func TestBlockNotFound(t *testing.T) {
 }
 
 func TestBlockInvalidIdentifier(t *testing.T) {
+	t.Parallel()
+
 	tests := map[string]*PartialBlockIdentifier{
 		"missing identifier": nil,
 		"empty identifier":   {},
@@ -284,6 +298,8 @@ func TestBlockInvalidIdentifier(t *testing.T) {
 }
 
 func TestBlockDatabaseErrors(t *testing.T) {
+	t.Parallel()
+
 	t.Run("block lookup fails", func(t *testing.T) {
 		deps := newTestDeps()
 		deps.database.blockByIndex = func(
@@ -334,6 +350,8 @@ func TestBlockDatabaseErrors(t *testing.T) {
 // holding the old identifier gets a stable not-found rather than the
 // block that replaced it at the same index.
 func TestBlockAfterRollbackIsNotFound(t *testing.T) {
+	t.Parallel()
+
 	rolledBack := testHash(0x77)
 	replacement := testHash(0x78)
 	deps := newTestDeps()
@@ -398,6 +416,8 @@ func blockTxRequest(
 }
 
 func TestBlockTransaction(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	blockHash := testHash(0x88)
 	txHash := testHash(0x89)
@@ -439,6 +459,8 @@ func TestBlockTransaction(t *testing.T) {
 // a transaction that exists but belongs to another block must not be
 // served for the requested block.
 func TestBlockTransactionWrongBlock(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	txHash := testHash(0x8a)
 	deps.database.txByHash = func(
@@ -461,6 +483,8 @@ func TestBlockTransactionWrongBlock(t *testing.T) {
 }
 
 func TestBlockTransactionNotFound(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	deps.database.txByHash = func(
 		[]byte,
@@ -479,6 +503,8 @@ func TestBlockTransactionNotFound(t *testing.T) {
 }
 
 func TestBlockTransactionInvalidRequest(t *testing.T) {
+	t.Parallel()
+
 	tests := map[string]BlockTransactionRequest{
 		"missing transaction identifier": blockTxRequest(
 			hexString(testHash(0x8f)), "",
@@ -517,6 +543,8 @@ func TestBlockTransactionInvalidRequest(t *testing.T) {
 }
 
 func TestBlockTransactionDatabaseError(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	deps.database.txByHash = func(
 		[]byte,

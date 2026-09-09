@@ -313,10 +313,9 @@ type PipelineManager struct {
 	loopWg   sync.WaitGroup
 	subs     []managerSubscription
 
-	// instances are keyed by produce slot; byHash indexes every tracked
-	// ebState by hash for O(1) quorum and embed lookups.
+	// instances are keyed by produce slot, with each instance indexing
+	// its EB hashes for O(1) occurrence lookups.
 	instances map[uint64]*pipelineInstance
-	byHash    map[lcommon.Blake2b256]*ebState
 	// canonicalRbs maps the hash of every ranking block the pipeline has
 	// seen added to the chain to that block's slot. It is the pipeline's
 	// own answer to "is this announcing ranking block still canonical?",
@@ -356,7 +355,6 @@ func NewPipelineManager(cfg PipelineManagerConfig) (*PipelineManager, error) {
 		epochProvider: cfg.EpochProvider,
 		timing:        cfg.Timing,
 		instances:     make(map[uint64]*pipelineInstance),
-		byHash:        make(map[lcommon.Blake2b256]*ebState),
 		canonicalRbs:  make(map[lcommon.Blake2b256]uint64),
 	}
 	if cfg.PromRegistry != nil {
@@ -537,7 +535,6 @@ func (m *PipelineManager) ObserveEndorserBlock(
 	}
 	eb := &ebState{hash: ebHash, slot: slot, epoch: inst.epoch}
 	inst.ebs[ebHash] = eb
-	m.byHash[ebHash] = eb
 	if m.metrics != nil {
 		m.metrics.ebObservedTotal.Inc()
 	}
@@ -557,7 +554,7 @@ func (m *PipelineManager) handleEbQuorum(evt EbQuorumEvent) {
 	defer m.mu.Unlock()
 	m.pruneExpiredLocked(cur)
 
-	eb := m.byHash[evt.EndorserBlockHash]
+	eb := m.occurrenceLocked(evt.SlotNo, evt.EndorserBlockHash)
 	if eb != nil {
 		if _, exists := eb.certificates[evt.AnnouncingRbHash]; exists {
 			return
@@ -604,9 +601,12 @@ func (m *PipelineManager) handleEbQuorum(evt EbQuorumEvent) {
 			}
 			m.logger.Warn(
 				"discarding leios certificate for non-canonical announcing ranking block",
-				"slot", evt.SlotNo,
-				"eb_hash", evt.EndorserBlockHash.String(),
-				"announcing_rb_hash", evt.AnnouncingRbHash.String(),
+				"slot",
+				evt.SlotNo,
+				"eb_hash",
+				evt.EndorserBlockHash.String(),
+				"announcing_rb_hash",
+				evt.AnnouncingRbHash.String(),
 			)
 			m.updateGaugesLocked(cur)
 			return
@@ -626,7 +626,6 @@ func (m *PipelineManager) handleEbQuorum(evt EbQuorumEvent) {
 			epoch: inst.epoch,
 		}
 		inst.ebs[evt.EndorserBlockHash] = eb
-		m.byHash[evt.EndorserBlockHash] = eb
 		m.markEquivocationLocked(inst)
 	}
 	firstCertification := !eb.certified
@@ -721,10 +720,10 @@ func (m *PipelineManager) EligibleCertifiedEbs() []EligibleEb {
 
 // MarkEmbedded records that a certified endorser block was included in a
 // ranking block, so it is not offered for inclusion again.
-func (m *PipelineManager) MarkEmbedded(ebHash lcommon.Blake2b256) {
+func (m *PipelineManager) MarkEmbedded(slot uint64, ebHash lcommon.Blake2b256) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if eb, ok := m.byHash[ebHash]; ok {
+	if eb := m.occurrenceLocked(slot, ebHash); eb != nil {
 		eb.embedded = true
 	}
 }
@@ -741,11 +740,22 @@ func (m *PipelineManager) StageOf(
 	cur := m.slotProvider.CurrentOrTipSlot()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	eb, ok := m.byHash[ebHash]
-	if !ok || eb.slot != slot {
+	eb := m.occurrenceLocked(slot, ebHash)
+	if eb == nil {
 		return StageProduce, false
 	}
 	return stageFor(slot, cur, m.timing, eb.certified), true
+}
+
+// occurrenceLocked looks up one slot/hash identity. Callers must hold m.mu.
+func (m *PipelineManager) occurrenceLocked(
+	slot uint64,
+	hash lcommon.Blake2b256,
+) *ebState {
+	if inst := m.instances[slot]; inst != nil {
+		return inst.ebs[hash]
+	}
+	return nil
 }
 
 // markEquivocationLocked flags every EB in an instance as equivocated once
@@ -786,9 +796,6 @@ func (m *PipelineManager) pruneExpiredLocked(cur uint64) {
 		}
 		if cur-inst.produceSlot < m.timing.InstanceTTLSlots {
 			continue
-		}
-		for h := range inst.ebs {
-			delete(m.byHash, h)
 		}
 		delete(m.instances, slot)
 	}
@@ -851,9 +858,6 @@ func (m *PipelineManager) handleEpochTransition(
 	defer m.mu.Unlock()
 	for slot, inst := range m.instances {
 		if inst.epoch < keepFrom {
-			for h := range inst.ebs {
-				delete(m.byHash, h)
-			}
 			delete(m.instances, slot)
 		}
 	}
@@ -875,9 +879,6 @@ func (m *PipelineManager) handleRollback(evt chain.ChainRollbackEvent) {
 	defer m.mu.Unlock()
 	for slot, inst := range m.instances {
 		if inst.produceSlot > evt.Point.Slot {
-			for h := range inst.ebs {
-				delete(m.byHash, h)
-			}
 			delete(m.instances, slot)
 		}
 	}
