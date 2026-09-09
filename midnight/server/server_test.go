@@ -16,6 +16,7 @@ package server_test
 
 import (
 	"context"
+	"io"
 	"net"
 	"strconv"
 	"testing"
@@ -287,11 +288,17 @@ func TestReflectionDisabledByDefault(t *testing.T) {
 	defer cancel()
 	stream, err := client.ServerReflectionInfo(ctx)
 	require.NoError(t, err)
-	require.NoError(t, stream.Send(&reflectionpb.ServerReflectionRequest{
+	err = stream.Send(&reflectionpb.ServerReflectionRequest{
 		MessageRequest: &reflectionpb.ServerReflectionRequest_ListServices{
 			ListServices: "*",
 		},
-	}))
+	})
+	if err != nil {
+		// When reflection is not registered, grpc-go may reject the stream
+		// during Send rather than during Recv, depending on the platform.
+		require.ErrorIs(t, err, io.EOF)
+		return
+	}
 	_, err = stream.Recv()
 	require.Error(t, err)
 	require.Equal(t, codes.Unimplemented, status.Code(err))

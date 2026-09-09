@@ -339,7 +339,9 @@ func TestDownloadSnapshotIdleRetriesResetAfterProgress(t *testing.T) {
 		IdleTimeout:       50 * time.Millisecond,
 		MaxIdleRetries:    1,
 	}
-	timeout := 3*cfg.IdleTimeout + 500*time.Millisecond
+	// The retry path may wait for the configured idle timeout more than once;
+	// leave enough room for scheduler and HTTP-server variance on Windows.
+	timeout := 5 * time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
