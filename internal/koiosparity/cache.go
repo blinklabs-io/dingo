@@ -295,6 +295,21 @@ type CheckMismatch struct {
 type Cache struct {
 	db     *sql.DB
 	logger *slog.Logger
+
+	// claimedSources maps network to the Koios API root this handle recorded
+	// for it, and is empty for a handle that never recorded one (every
+	// read-only command). Bulk writes verify it inside their own transaction
+	// so a second writer that re-pointed the cache at another oracle cannot
+	// have this one keep appending the old oracle's answers under the new
+	// marker. Keyed by network because the root is resolved per network, so a
+	// claim on one says nothing about another.
+	//
+	// Written only by RecordKoiosSource and PinRecordedSource, which every
+	// caller runs before starting the goroutines that read it (Fetch before
+	// its epoch fetchers, Observer.Start before its run goroutine, Check
+	// before its workers). Claiming on a handle already in concurrent use
+	// would need a lock added here.
+	claimedSources map[string]string
 }
 
 // OpenCache opens (or creates) the SQLite cache at path, running migrations.
@@ -471,6 +486,11 @@ func (c *Cache) CommitEpochData(
 			return err
 		}
 	}
+	// Verified last so the writes above take SQLite's writer slot first;
+	// see withClaimedSource. A refusal rolls them back.
+	if err = c.assertClaimedSource(tx, info.Network); err != nil {
+		return err
+	}
 	err = tx.Commit()
 	return err
 }
@@ -564,32 +584,34 @@ const epochParamsColumns = `network, epoch, era, min_fee_a, min_fee_b, max_block
 // re-fetched. The reverse order could advance fetched_at with no parameter
 // row, which GetEpochsNeedingCheck would then never revisit.
 func (c *Cache) UpsertEpochParams(p KoiosEpochParams) error {
-	_, err := c.db.Exec(
-		`INSERT INTO koios_epoch_params (`+epochParamsColumns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(network, epoch) DO UPDATE SET
-		 era=excluded.era, min_fee_a=excluded.min_fee_a, min_fee_b=excluded.min_fee_b,
-		 max_block_body_size=excluded.max_block_body_size, max_tx_size=excluded.max_tx_size,
-		 max_block_header_size=excluded.max_block_header_size, key_deposit=excluded.key_deposit,
-		 pool_deposit=excluded.pool_deposit, max_epoch=excluded.max_epoch, n_opt=excluded.n_opt,
-		 a0=excluded.a0, rho=excluded.rho, tau=excluded.tau, protocol_major=excluded.protocol_major,
-		 protocol_minor=excluded.protocol_minor, min_pool_cost=excluded.min_pool_cost,
-		 price_mem=excluded.price_mem, price_step=excluded.price_step, max_tx_ex_mem=excluded.max_tx_ex_mem,
-		 max_tx_ex_steps=excluded.max_tx_ex_steps, max_block_ex_mem=excluded.max_block_ex_mem,
-		 max_block_ex_steps=excluded.max_block_ex_steps, max_value_size=excluded.max_value_size,
-		 collateral_percentage=excluded.collateral_percentage,
-		 max_collateral_inputs=excluded.max_collateral_inputs, cost_models=excluded.cost_models,
-		 decentralisation=excluded.decentralisation,
-		 min_utxo_value=excluded.min_utxo_value, coins_per_utxo_size=excluded.coins_per_utxo_size,
-		 fetched_at=excluded.fetched_at`,
-		p.Network, p.Epoch, p.Era, p.MinFeeA, p.MinFeeB, p.MaxBlockBodySize, p.MaxTxSize,
-		p.MaxBlockHeaderSize, p.KeyDeposit, p.PoolDeposit, p.MaxEpoch, p.NOpt, p.A0, p.Rho, p.Tau,
-		p.ProtocolMajor, p.ProtocolMinor, p.MinPoolCost, p.PriceMem, p.PriceStep, p.MaxTxExMem,
-		p.MaxTxExSteps, p.MaxBlockExMem, p.MaxBlockExSteps, p.MaxValueSize, p.CollateralPercentage,
-		p.MaxCollateralInputs, p.CostModels, p.Decentralisation, p.MinUtxoValue, p.CoinsPerUtxoSize,
-		p.FetchedAt,
-	)
-	return err
+	return c.withClaimedSource(p.Network, func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`INSERT INTO koios_epoch_params (`+epochParamsColumns+`)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(network, epoch) DO UPDATE SET
+			 era=excluded.era, min_fee_a=excluded.min_fee_a, min_fee_b=excluded.min_fee_b,
+			 max_block_body_size=excluded.max_block_body_size, max_tx_size=excluded.max_tx_size,
+			 max_block_header_size=excluded.max_block_header_size, key_deposit=excluded.key_deposit,
+			 pool_deposit=excluded.pool_deposit, max_epoch=excluded.max_epoch, n_opt=excluded.n_opt,
+			 a0=excluded.a0, rho=excluded.rho, tau=excluded.tau, protocol_major=excluded.protocol_major,
+			 protocol_minor=excluded.protocol_minor, min_pool_cost=excluded.min_pool_cost,
+			 price_mem=excluded.price_mem, price_step=excluded.price_step, max_tx_ex_mem=excluded.max_tx_ex_mem,
+			 max_tx_ex_steps=excluded.max_tx_ex_steps, max_block_ex_mem=excluded.max_block_ex_mem,
+			 max_block_ex_steps=excluded.max_block_ex_steps, max_value_size=excluded.max_value_size,
+			 collateral_percentage=excluded.collateral_percentage,
+			 max_collateral_inputs=excluded.max_collateral_inputs, cost_models=excluded.cost_models,
+			 decentralisation=excluded.decentralisation,
+			 min_utxo_value=excluded.min_utxo_value, coins_per_utxo_size=excluded.coins_per_utxo_size,
+			 fetched_at=excluded.fetched_at`,
+			p.Network, p.Epoch, p.Era, p.MinFeeA, p.MinFeeB, p.MaxBlockBodySize, p.MaxTxSize,
+			p.MaxBlockHeaderSize, p.KeyDeposit, p.PoolDeposit, p.MaxEpoch, p.NOpt, p.A0, p.Rho, p.Tau,
+			p.ProtocolMajor, p.ProtocolMinor, p.MinPoolCost, p.PriceMem, p.PriceStep, p.MaxTxExMem,
+			p.MaxTxExSteps, p.MaxBlockExMem, p.MaxBlockExSteps, p.MaxValueSize, p.CollateralPercentage,
+			p.MaxCollateralInputs, p.CostModels, p.Decentralisation, p.MinUtxoValue, p.CoinsPerUtxoSize,
+			p.FetchedAt,
+		)
+		return err
+	})
 }
 
 // DeleteEpochParams invalidates a parameter row after a later epoch commit
@@ -725,6 +747,11 @@ func (c *Cache) CommitAccountRewardsForEpoch(
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
 		network, epoch, requestedCount, len(rows), complete, fetchedAt,
 		zeroReward.Count, string(zeroRewardSample)); err != nil {
+		return err
+	}
+	// Verified last so the writes above take SQLite's writer slot first;
+	// see withClaimedSource. A refusal rolls them back.
+	if err = c.assertClaimedSource(tx, network); err != nil {
 		return err
 	}
 	err = tx.Commit()
@@ -886,7 +913,6 @@ func (c *Cache) SaveAccountFetchChunkProgress(
 			_ = tx.Rollback()
 		}
 	}()
-
 	if _, err = tx.Exec(
 		`DELETE FROM koios_account_fetch_staged_rows WHERE network = ? AND epoch = ? AND chunk_hash = ?`,
 		network, epoch, chunkHash,
@@ -937,6 +963,12 @@ func (c *Cache) SaveAccountFetchChunkProgress(
 		); err != nil {
 			return err
 		}
+	}
+
+	// Verified last so the writes above take SQLite's writer slot first;
+	// see withClaimedSource. A refusal rolls them back.
+	if err = c.assertClaimedSource(tx, network); err != nil {
+		return err
 	}
 
 	err = tx.Commit()
@@ -1492,39 +1524,87 @@ func (c *Cache) GetUncachedEpochs(
 
 // UpsertCheckEpochStatus idempotently stores a check result for an epoch.
 func (c *Cache) UpsertCheckEpochStatus(status CheckEpochStatus) error {
-	_, err := c.db.Exec(
-		`INSERT INTO check_epoch_status
+	return c.withClaimedSource(status.Network, func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`INSERT INTO check_epoch_status
 		(network, epoch, last_checked_at, status, mismatch_count, dingo_pool_count, koios_pool_count, only_dingo_pools, only_koios_pools)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(network, epoch) DO UPDATE SET last_checked_at=excluded.last_checked_at, status=excluded.status,
 		mismatch_count=excluded.mismatch_count, dingo_pool_count=excluded.dingo_pool_count,
 		koios_pool_count=excluded.koios_pool_count, only_dingo_pools=excluded.only_dingo_pools,
 		only_koios_pools=excluded.only_koios_pools`,
-		status.Network,
-		status.Epoch,
-		status.LastCheckedAt,
-		status.Status,
-		status.MismatchCount,
-		status.DingoPoolCount,
-		status.KoiosPoolCount,
-		status.OnlyDingoPools,
-		status.OnlyKoiosPools,
-	)
-	return err
+			status.Network,
+			status.Epoch,
+			status.LastCheckedAt,
+			status.Status,
+			status.MismatchCount,
+			status.DingoPoolCount,
+			status.KoiosPoolCount,
+			status.OnlyDingoPools,
+			status.OnlyKoiosPools,
+		)
+		return err
+	})
 }
 
 // InsertCheckRun appends a check run record.
 func (c *Cache) InsertCheckRun(run CheckRun) error {
-	_, err := c.db.Exec(
-		`INSERT INTO check_runs (network, run_at, epochs_checked, pools_checked, mismatch_count, report_path) VALUES (?, ?, ?, ?, ?, ?)`,
-		run.Network,
-		run.RunAt,
-		run.EpochsChecked,
-		run.PoolsChecked,
-		run.MismatchCount,
-		run.ReportPath,
-	)
-	return err
+	return c.withClaimedSource(run.Network, func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`INSERT INTO check_runs (network, run_at, epochs_checked, pools_checked, mismatch_count, report_path) VALUES (?, ?, ?, ?, ?, ?)`,
+			run.Network,
+			run.RunAt,
+			run.EpochsChecked,
+			run.PoolsChecked,
+			run.MismatchCount,
+			run.ReportPath,
+		)
+		return err
+	})
+}
+
+// withClaimedSource runs fn in a transaction that verifies, before
+// committing, this handle still owns the cache's Koios source, for the small
+// writers that would otherwise have no transaction of their own.
+//
+// fn runs before assertClaimedSource, not after: a SELECT run first, under an
+// otherwise-deferred BEGIN, opens the transaction as a reader and only
+// upgrades to a writer once fn's write statement runs. Under WAL, another
+// connection committing in that window turns the upgrade attempt into
+// SQLITE_BUSY (specifically SQLITE_BUSY_SNAPSHOT) — a stale-snapshot failure
+// database/sql's busy_timeout cannot wait out, because no amount of waiting
+// makes an already-taken snapshot current again; only starting a fresh
+// transaction does. Running fn's write first makes it the transaction's own
+// first statement, so the deferred BEGIN takes the write lock immediately
+// instead of a read snapshot, which is the ordinary contention case
+// busy_timeout does handle by waiting. Once that write lock is held, no other
+// connection can commit until this transaction ends, so assertClaimedSource's
+// read afterward is still exactly as atomic against a concurrent
+// RecordKoiosSource as before — nothing can repoint the source between it and
+// the commit below. A caller-visible refusal still rolls the write back via
+// the deferred tx.Rollback(), same as when the check ran first —
+// TestRefusedWriteLeavesNoRows asserts that on the rows, not on the error.
+// TestCacheWritesNeverUpgradeAReadSnapshot pins the order itself; it fails
+// with SQLITE_BUSY_SNAPSHOT when the check runs first. Every other Cache
+// transaction holds the same order for the same reason, including
+// RecordKoiosSource, whose read cannot move after its writes and which takes
+// the writer slot with a no-op UPDATE instead.
+func (c *Cache) withClaimedSource(
+	network string,
+	fn func(tx *sql.Tx) error,
+) error {
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := c.assertClaimedSource(tx, network); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // CommitEpochMismatches atomically replaces all mismatch rows for an epoch:
@@ -1576,6 +1656,11 @@ func (c *Cache) CommitEpochMismatches(
 				return err
 			}
 		}
+	}
+	// Verified last so the writes above take SQLite's writer slot first;
+	// see withClaimedSource. A refusal rolls them back.
+	if err = c.assertClaimedSource(tx, network); err != nil {
+		return err
 	}
 	err = tx.Commit()
 	return err
@@ -1679,6 +1764,11 @@ ON CONFLICT (network) DO UPDATE SET
 	); err != nil {
 		return fmt.Errorf("save account universe: state: %w", err)
 	}
+	// Verified last so the writes above take SQLite's writer slot first;
+	// see withClaimedSource. A refusal rolls them back.
+	if err := c.assertClaimedSource(tx, network); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("save account universe: commit: %w", err)
 	}
@@ -1733,6 +1823,284 @@ func (c *Cache) GetAccountUniverse(
 		)
 	}
 	return addrs, fetchedAt, true, nil
+}
+
+// koiosSourcedTables holds every table whose rows came from a Koios
+// deployment, or were derived by comparing Dingo against one. All are keyed by
+// network, so a host change invalidates exactly the network that changed.
+//
+// The derived check tables belong here as much as the fetched ones: a
+// mismatch row records a verdict reached against a particular oracle, and
+// keeping it after the oracle changed would leave the report asserting
+// something the new reference data was never asked about.
+var koiosSourcedTables = []string{
+	"koios_epoch_info",
+	"koios_pool_epoch",
+	"koios_totals",
+	"koios_epoch_params",
+	"koios_account_rewards",
+	"koios_account_coverage",
+	"koios_account_fetch_staged_rows",
+	"koios_account_checked",
+	"koios_account_universe",
+	"koios_account_universe_state",
+	"check_epoch_status",
+	"check_runs",
+	"check_mismatches",
+}
+
+// koiosSourceChanged decides whether network's cached rows came from a
+// different oracle than baseURL, given the recorded root (present only when
+// recorded is true).
+//
+// The unrecorded case is the subtle one. A cache written before koios_source
+// existed is unattributed, but "unattributed" is not "unknown": no build
+// without this column had an override to apply, so those rows can only have
+// come from the built-in public root. Claiming them for whatever root is in
+// use now is only correct when that root is the same one. A first run after
+// upgrading that also points at a self-hosted host would otherwise adopt the
+// public host's rows as its own — mixing two oracles on the exact path this
+// guard exists to close.
+func koiosSourceChanged(network, previous, baseURL string, recorded bool) bool {
+	return attributedKoiosSource(network, previous, recorded) != baseURL
+}
+
+// attributedKoiosSource is the root network's existing rows are taken to have
+// come from: the recorded one, or the built-in public root when nothing was
+// recorded. Reporting the attribution rather than an empty string is what
+// lets the invalidation log name the oracle whose rows were discarded.
+func attributedKoiosSource(network, previous string, recorded bool) string {
+	if !recorded {
+		return koiosBaseURLs[network]
+	}
+	return previous
+}
+
+// PendingKoiosSourceChange reports whether calling RecordKoiosSource with
+// baseURL would discard network's cached rows, without changing anything.
+//
+// It exists so a caller can confirm the new oracle actually answers before
+// anything is destroyed: a mistyped host would otherwise cost a full
+// historical refetch to recover from. RecordKoiosSource re-evaluates the same
+// rule inside its transaction, so a racing writer cannot turn a "no" here into
+// a silent mix.
+func (c *Cache) PendingKoiosSourceChange(
+	network, baseURL string,
+) (bool, string, error) {
+	previous, recorded, err := c.GetKoiosSource(network)
+	if err != nil {
+		return false, "", err
+	}
+	attributed := attributedKoiosSource(network, previous, recorded)
+	return attributed != baseURL, attributed, nil
+}
+
+// PinRecordedSource claims the root network's cache is currently attributed
+// to, without recording or discarding anything.
+//
+// It is for a run that writes verdicts derived from the cache but has no Koios
+// client of its own to name a source — Check. Pinning at the start makes its
+// writes fail if another process re-points the cache mid-run, rather than
+// letting it repopulate check evidence that RecordKoiosSource just discarded,
+// now stamped with a source the verdicts were never computed against.
+//
+// A cache with nothing recorded pins the public root it is attributed to, not
+// nothing: that is the very cache a first custom-host run discards, so pinning
+// nothing would leave the case this exists for unguarded. Since
+// assertClaimedSource compares attributions rather than raw rows, such a check
+// still writes freely while the cache stays unstamped, and stops only once
+// another process stamps it with a different host.
+func (c *Cache) PinRecordedSource(network string) error {
+	recordedURL, recorded, err := c.GetKoiosSource(network)
+	if err != nil {
+		return err
+	}
+	if c.claimedSources == nil {
+		c.claimedSources = make(map[string]string, 1)
+	}
+	// An unstamped cache pins the public root it is attributed to, not
+	// nothing. Pinning nothing would leave the one case this is for — a
+	// legacy cache another process switches to a custom host mid-check —
+	// unguarded, letting the check repopulate verdicts over rows that were
+	// just discarded.
+	c.claimedSources[network] = attributedKoiosSource(
+		network, recordedURL, recorded,
+	)
+	return nil
+}
+
+// KoiosSourceChange describes what RecordKoiosSource found and did.
+type KoiosSourceChange struct {
+	// Previous is the API root network's discarded rows are taken to have come
+	// from: the recorded one, or — when nothing was recorded — the built-in
+	// public root the rows are attributed to. PreviousInferred says which,
+	// since "the host we recorded" and "the host a legacy cache must have
+	// used" are different strengths of claim and the discard log should not
+	// present the second as the first.
+	Previous string
+	// PreviousInferred is true when Previous is the legacy attribution rather
+	// than a root this cache actually recorded.
+	PreviousInferred bool
+	// Changed is true when a different root was already recorded and this
+	// network's cached rows were therefore discarded.
+	Changed bool
+	// RowsDiscarded counts the rows removed by that invalidation.
+	RowsDiscarded int64
+}
+
+// RecordKoiosSource stamps the Koios API root this cache's rows for network
+// came from, and discards them when it differs from the one already recorded.
+//
+// Every Koios table is keyed by (network, epoch) and records nothing about
+// which deployment answered. Without this, pointing --koios-parity-base-url at
+// a self-hosted mirror and then running again without it silently compares
+// Dingo against a mixture of two oracles, and the report is indistinguishable
+// from one produced against either alone. That is the failure mode the base
+// URL option introduces, so the option carries the guard.
+//
+// Invalidation is deliberately destructive rather than advisory: the rows are
+// a cache of another system's answers, rebuildable by fetching again, and any
+// weaker response leaves the mixed-oracle report reachable. Callers gate it on
+// a reachable endpoint (see PendingKoiosSourceChange) so a mistyped host does
+// not cost a refetch. baseURL must already be redacted
+// (KoiosClient.ResolvedBaseURL) — a credential has no business in the cache
+// file, and comparing redacted roots correctly treats a rotated key against
+// the same host as the same oracle.
+func (c *Cache) RecordKoiosSource(
+	network, baseURL string,
+	now time.Time,
+) (KoiosSourceChange, error) {
+	var change KoiosSourceChange
+	tx, err := c.db.Begin()
+	if err != nil {
+		return change, fmt.Errorf("begin koios source tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// Claim the writer slot before reading. This UPDATE assigns network to
+	// itself and so changes nothing, but SQLite treats any UPDATE as
+	// write-intending, which is what the deferred BEGIN needs to open as a
+	// writer rather than as a reader the INSERT below would have to upgrade.
+	// Unlike the gated writers, the read here decides what the writes are,
+	// so it cannot simply be moved after them. See withClaimedSource for why
+	// that upgrade is the failure and not the wait.
+	if _, err = tx.Exec(
+		"UPDATE koios_source SET network = network WHERE network = ?",
+		network,
+	); err != nil {
+		return change, fmt.Errorf("claim koios source write: %w", err)
+	}
+
+	var previous string
+	err = tx.QueryRow(
+		"SELECT base_url FROM koios_source WHERE network = ?",
+		network,
+	).Scan(&previous)
+	switch {
+	case err != nil && !errors.Is(err, sql.ErrNoRows):
+		return change, fmt.Errorf("read koios source: %w", err)
+	case koiosSourceChanged(network, previous, baseURL, err == nil):
+		change.Previous = attributedKoiosSource(network, previous, err == nil)
+		change.PreviousInferred = err != nil
+		change.Changed = true
+		for _, table := range koiosSourcedTables {
+			// #nosec G202 -- table comes from koiosSourcedTables, a
+			// package-level literal slice; no caller-supplied value reaches
+			// this string. TestKoiosSourcedTablesAreBareIdentifiers keeps
+			// that true. The network value stays a bound parameter.
+			res, delErr := tx.Exec(
+				"DELETE FROM "+table+" WHERE network = ?",
+				network,
+			)
+			if delErr != nil {
+				return change, fmt.Errorf(
+					"discard %s for changed koios source: %w", table, delErr,
+				)
+			}
+			if n, rowsErr := res.RowsAffected(); rowsErr == nil {
+				change.RowsDiscarded += n
+			}
+		}
+	}
+
+	if _, err = tx.Exec(
+		`INSERT INTO koios_source (network, base_url, recorded_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(network) DO UPDATE SET
+			base_url = excluded.base_url,
+			recorded_at = excluded.recorded_at`,
+		network, baseURL, now.UTC(),
+	); err != nil {
+		return change, fmt.Errorf("record koios source: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return change, fmt.Errorf("commit koios source: %w", err)
+	}
+	if c.claimedSources == nil {
+		c.claimedSources = make(map[string]string, 1)
+	}
+	c.claimedSources[network] = baseURL
+	return change, nil
+}
+
+// assertClaimedSource fails a write whose cache has since been re-pointed at
+// a different oracle by another process.
+//
+// The cache path is shared by default across the standalone commands and the
+// in-process observer, so an observer on one host and a `fetch --koios-url`
+// on another are a reachable pair. RecordKoiosSource only invalidates the rows
+// present when it runs; without this the older client would go on appending
+// its host's answers under the newer host's marker, which is the mixed-oracle
+// state the marker exists to make impossible.
+//
+// A handle that never claimed a source does not enforce one — that is every
+// read-only command (check, status, explain), which must keep working against
+// a cache written by someone else. Callers run this inside their own
+// transaction so the check is atomic against a concurrent RecordKoiosSource.
+func (c *Cache) assertClaimedSource(tx *sql.Tx, network string) error {
+	claimed, ok := c.claimedSources[network]
+	if !ok {
+		return nil
+	}
+	var recorded string
+	err := tx.QueryRow(
+		"SELECT base_url FROM koios_source WHERE network = ?",
+		network,
+	).Scan(&recorded)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("verify koios source: %w", err)
+	}
+	// Compared as attributions, not as raw rows, so the unstamped cache is
+	// judged by the same rule everything else uses: no row means the public
+	// root. A handle that pinned an unstamped cache therefore keeps writing
+	// while it stays unstamped, and starts failing the moment another process
+	// stamps it with a different host — which is the case that would otherwise
+	// slip through, since pinning nothing enforces nothing.
+	current := attributedKoiosSource(network, recorded, err == nil)
+	if current != claimed {
+		return fmt.Errorf(
+			"koios source for %q changed from %q to %q while this run was writing; refusing to write another host's answers into this cache",
+			network, claimed, current,
+		)
+	}
+	return nil
+}
+
+// GetKoiosSource returns the API root recorded for network, and whether one
+// has been recorded at all.
+func (c *Cache) GetKoiosSource(network string) (string, bool, error) {
+	var baseURL string
+	err := c.db.QueryRow(
+		"SELECT base_url FROM koios_source WHERE network = ?",
+		network,
+	).Scan(&baseURL)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read koios source: %w", err)
+	}
+	return baseURL, true, nil
 }
 
 func createCacheSchema(db *sql.DB) error {
@@ -1862,6 +2230,18 @@ func createCacheSchema(db *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS koios_account_universe_state (
 			network TEXT PRIMARY KEY, fetched_at DATETIME NOT NULL,
 			address_count INTEGER NOT NULL)`,
+
+		// The oracle this cache's Koios rows came from. Every other table is
+		// keyed by (network, epoch) and says nothing about which deployment
+		// answered, so rows fetched from a self-hosted mirror and rows fetched
+		// from the public host are indistinguishable once written — and a run
+		// against the wrong oracle produces a report indistinguishable from a
+		// run against the right one. Recording the resolved root makes a host
+		// change detectable, and RecordKoiosSource invalidates on one rather
+		// than silently mixing two oracles in a single comparison.
+		`CREATE TABLE IF NOT EXISTS koios_source (
+			network TEXT PRIMARY KEY, base_url TEXT NOT NULL,
+			recorded_at DATETIME NOT NULL)`,
 	}
 	for _, stmt := range statements {
 		if _, err := db.Exec(stmt); err != nil {

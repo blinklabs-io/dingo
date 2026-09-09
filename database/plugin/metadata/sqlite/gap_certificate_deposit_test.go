@@ -130,7 +130,7 @@ func (f *gapDepositFixture) applyGap(
 // pool whose most recent registration was ingested from a Mithril gap block.
 //
 // GetPoolsRetiringAtEpoch takes the retiring pool's latest pool_registration
-// row and applyPoolRetirements credits that row's deposit_amount as the refund.
+// row and applyPoolRetirements credits that row's deposit_held as the refund.
 // A gap block replays from raw CBOR with no ledger delta, so nothing upstream
 // calculates its deposits; mithril's gapCertDeposits derives them from the
 // block's era and the epoch's protocol parameters and passes them in here.
@@ -191,7 +191,7 @@ func TestGapBlockPoolRegistrationRefundsItsDeposit(t *testing.T) {
 			require.Equal(t, f.poolKey, refunds[0].PoolKeyHash)
 			require.Equal(t,
 				test.want,
-				uint64(refunds[0].DepositAmount),
+				uint64(refunds[0].DepositHeld),
 				"the refund must be the deposit the pool actually paid",
 			)
 		})
