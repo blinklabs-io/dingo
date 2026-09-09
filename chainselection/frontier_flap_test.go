@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 // These tests pin the transport-frontier flapping reproduction from Preview
@@ -74,24 +75,66 @@ func itoa(v uint64) string {
 	return string(buf[i:])
 }
 
-// drainChainSwitchEvents collects every ChainSwitchEvent already delivered to
-// the subscriber channel. The selector publishes synchronously from
-// EvaluateAndSwitch, so anything it decided has already been buffered by the
-// time the driving update call returns.
-func drainChainSwitchEvents(
+// chainSwitchBarrierTimeout bounds the wait for the barrier below. It is a
+// deadlock bound, not a settling delay: the barrier is already queued behind
+// whatever the selector decided by the time the wait starts, so the normal
+// cost is one lane hand-off.
+const chainSwitchBarrierTimeout = 30 * time.Second
+
+// chainSwitchBarrier is a sentinel published through the chain-switch ordered
+// lane so a test can tell "no switch was decided" from "the switch has not
+// been delivered yet".
+//
+// ChainSelector.publishSelection routes chain switches through
+// EventBus.PublishOrdered (blinklabs-io/dingo#3550), so the call that drove
+// the decision returns before the lane worker has handed the event to any
+// subscriber. A lane is a FIFO drained by exactly one worker, so a sentinel
+// enqueued after those switches is delivered after them: receiving it back is
+// proof that every switch published earlier on this goroutine has already
+// reached the subscription. Its Data type is not ChainSwitchEvent, so it is
+// skipped rather than counted as a decision. Same construction as
+// switchBarrier in ouroboros/consensus_conformance_test.go.
+type chainSwitchBarrier struct{}
+
+// collectChainSwitchEvents returns every ChainSwitchEvent the selector has
+// published so far, bounded by the barrier above. A non-blocking drain is not
+// a bound: it reports a switch that has been published but not yet delivered
+// as no switch at all, which turns this file's assertions into a race against
+// the lane worker.
+func collectChainSwitchEvents(
 	t *testing.T,
+	bus *event.EventBus,
 	ch <-chan event.Event,
 ) []ChainSwitchEvent {
 	t.Helper()
+	require.True(
+		t,
+		bus.PublishOrdered(
+			ChainSwitchEventType,
+			event.NewEvent(ChainSwitchEventType, chainSwitchBarrier{}),
+		),
+		"event bus refused the chain-switch barrier",
+	)
 	var out []ChainSwitchEvent
 	for {
-		select {
-		case evt := <-ch:
-			switchEvent, ok := evt.Data.(ChainSwitchEvent)
-			require.True(t, ok, "unexpected event payload on switch channel")
-			out = append(out, switchEvent)
-		default:
+		evt := testutil.RequireReceive(
+			t,
+			ch,
+			chainSwitchBarrierTimeout,
+			"chain-switch barrier",
+		)
+		switch data := evt.Data.(type) {
+		case chainSwitchBarrier:
 			return out
+		case ChainSwitchEvent:
+			out = append(out, data)
+		default:
+			// Only the selector and the barrier above publish on this
+			// lane, so anything else is a bug in one of them. Skipping it
+			// would still terminate -- the barrier is behind it in the
+			// same FIFO -- but it would drop a switch decision the
+			// assertions below then read as "never switched".
+			t.Fatalf("unexpected %T on the chain_switch lane", evt.Data)
 		}
 	}
 }
@@ -249,7 +292,7 @@ func TestCanonicalPeersWithCrossingFrontiersDoNotFlap(t *testing.T) {
 		)
 	}
 
-	switchEvents := drainChainSwitchEvents(t, switchCh)
+	switchEvents := collectChainSwitchEvents(t, eventBus, switchCh)
 	require.Len(
 		t,
 		switchEvents,

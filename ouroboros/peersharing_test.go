@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/peergov"
+	"github.com/blinklabs-io/dingo/topology"
 	opeersharing "github.com/blinklabs-io/gouroboros/protocol/peersharing"
 	"github.com/stretchr/testify/require"
 )
@@ -152,6 +153,41 @@ func TestPeerSharingShareRequestBoundsValidPeers(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPeerSharingShareRequestDropsAdvertisedPrivateTopologyPeer(
+	t *testing.T,
+) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	peerGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+		Logger: logger,
+	})
+	peerGov.LoadTopologyConfig(&topology.TopologyConfig{
+		LocalRoots: []topology.TopologyConfigP2PLocalRoot{{
+			Advertise: true,
+			AccessPoints: []topology.TopologyConfigP2PAccessPoint{{
+				Address: "10.0.0.1",
+				Port:    3001,
+			}},
+		}},
+		PublicRoots: []topology.TopologyConfigP2PPublicRoot{{
+			Advertise: true,
+			AccessPoints: []topology.TopologyConfigP2PAccessPoint{{
+				Address: "44.0.0.1",
+				Port:    3001,
+			}},
+		}},
+	})
+
+	o := newOuroboros(OuroborosConfig{Logger: logger})
+	o.peerGov = peerGov
+	peers, err := o.peersharingShareRequest(opeersharing.CallbackContext{}, 10)
+	require.NoError(t, err)
+	got := make([]string, 0, len(peers))
+	for _, peer := range peers {
+		got = append(got, peer.IP.String())
+	}
+	require.Equal(t, []string{"44.0.0.1"}, got)
 }
 
 // TestPeerSharingConfigRegistersShareRequestFuncOnce verifies that
@@ -384,4 +420,19 @@ func TestPeerSharingReplyEmitsResolvableLiterals(t *testing.T) {
 			addr,
 		)
 	}
+}
+
+func TestPeerSharingReplyCollectsRequestedValidAddresses(t *testing.T) {
+	o := newOuroboros(OuroborosConfig{})
+
+	addrs := o.peerSharingReplyAddresses([]opeersharing.PeerAddress{
+		{IP: net.ParseIP("10.0.0.1"), Port: 3001},
+		mkPeerAddr("44.0.0.1", 3001),
+		mkPeerAddr("2001:4860:4860::8888", 3002),
+	}, 2)
+
+	require.Equal(t, []string{
+		"44.0.0.1:3001",
+		"[2001:4860:4860::8888]:3002",
+	}, addrs)
 }
