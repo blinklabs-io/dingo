@@ -79,8 +79,6 @@ repeatable-read snapshots. All three return `*sqlstore.Store`; metadata
 business behavior is implemented once in `sqlstore` and dialect translation is
 limited to SQL mechanics.
 
-## Metadata JSON/CBOR boundary
-
 Metadata indexing treats raw CBOR as the lossless storage and API JSON as an
 optional representation. A label whose map keys collide after JSON
 stringification keeps its label and CBOR row but has no JSON representation;
