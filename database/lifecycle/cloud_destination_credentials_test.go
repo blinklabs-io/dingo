@@ -98,6 +98,8 @@ func hasGCSCredentials() bool {
 // SnapshotLister/CloudManifestFetcher/CloudDeleter method this package
 // actually calls in production.
 func TestCloudDestinationS3RoundTrip(t *testing.T) {
+	t.Parallel()
+
 	if !hasS3Credentials() {
 		t.Skip("S3 credentials not found, skipping test")
 	}
@@ -111,6 +113,8 @@ func TestCloudDestinationS3RoundTrip(t *testing.T) {
 // TestCloudDestinationGCSRoundTrip is TestCloudDestinationS3RoundTrip's
 // GCS counterpart, against gcsDestination.
 func TestCloudDestinationGCSRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	if !hasGCSCredentials() {
 		t.Skip("GCS credentials not found, skipping test")
 	}

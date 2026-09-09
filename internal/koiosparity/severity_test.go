@@ -22,6 +22,8 @@ import (
 // definition never the reason. Preview epoch 198 failed on 3 mismatches and
 // reported 12.
 func TestCountSignificantExcludesInformational(t *testing.T) {
+	t.Parallel()
+
 	mismatches := []CheckMismatch{
 		{Category: CategoryAcctOnlyDingo},
 		{Category: CategoryAcctOnlyDingo},
@@ -42,6 +44,8 @@ func TestCountSignificantExcludesInformational(t *testing.T) {
 // TestCountSignificantCountsErrors keeps the error categories significant:
 // they drive StatusError, so they are a reason too.
 func TestCountSignificantCountsErrors(t *testing.T) {
+	t.Parallel()
+
 	mismatches := []CheckMismatch{
 		{Category: CategoryDBError},
 		{Category: CategoryReferenceLag},
@@ -61,6 +65,8 @@ func TestCountSignificantCountsErrors(t *testing.T) {
 // here would omit exactly the category a contributor also forgot to add to
 // severityOf, and the guard would pass on the case it exists to catch.
 func TestCountSignificantAgreesWithDetermineStatus(t *testing.T) {
+	t.Parallel()
+
 	for _, cat := range AllCategories {
 		t.Run(cat, func(t *testing.T) {
 			ms := []CheckMismatch{{Category: cat}}
@@ -80,6 +86,8 @@ func TestCountSignificantAgreesWithDetermineStatus(t *testing.T) {
 // same set: a new category constant that never reaches AllCategories fails
 // here rather than sliding past a guard that simply never sees it.
 func TestAllCategoriesCoversEveryConstant(t *testing.T) {
+	t.Parallel()
+
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
 		return !strings.HasSuffix(fi.Name(), "_test.go")

@@ -30,6 +30,8 @@ import (
 // constructed with a configuration that would hand the Musashi prototype's
 // consensus/ledger trust bypasses to preview, preprod, or mainnet.
 func TestPrototypeTrustBypassesRejectedOnStandardNetworks(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		opts    []ConfigOptionFunc
@@ -121,6 +123,8 @@ func TestPrototypeTrustBypassesRejectedOnStandardNetworks(t *testing.T) {
 // never runs startup validation still must not get the bypasses on a standard
 // network.
 func TestPrototypeTrustBypassesEnabledOnlyForMusashi(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name         string
 		network      string
@@ -180,6 +184,8 @@ func TestPrototypeTrustBypassesEnabledOnlyForMusashi(t *testing.T) {
 // TestPrototypeTrustBypassesOffWithoutConfig guards the nil-config path used by
 // zero-value Config values in tests and embedders.
 func TestPrototypeTrustBypassesOffWithoutConfig(t *testing.T) {
+	t.Parallel()
+
 	c := &Config{}
 	assert.False(t, c.prototypeTrustBypassesEnabled())
 }
@@ -208,6 +214,8 @@ func TestPrototypeTrustBypassesOffWithoutConfig(t *testing.T) {
 // and it should be classified here — prototype-only or not — rather than
 // picking up a network default silently.
 func TestMusashiProfileTrustBypassScope(t *testing.T) {
+	t.Parallel()
+
 	// Settings that relax validation, and whether the Musashi network profile
 	// is permitted to enable them on its own.
 	knownTrustSettings := map[string]bool{
@@ -255,6 +263,8 @@ func TestMusashiProfileTrustBypassScope(t *testing.T) {
 // strict decode and silently stall chain replay -- see configValidate's
 // BlockPipelineEnabled/isMusashiNetwork check.
 func TestBlockPipelineRejectedOnMusashi(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name                 string
 		network              string
@@ -306,6 +316,8 @@ func TestBlockPipelineRejectedOnMusashi(t *testing.T) {
 // phase 3) enabled unless the block pipeline itself is also enabled -- see
 // configValidate's BlockPipelineValidateEnabled check.
 func TestBlockPipelineValidateRequiresPipelineEnabled(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name                         string
 		blockPipelineEnabled         bool

@@ -28,6 +28,8 @@ import (
 // a paired listen/dial and assert the helper does not return an error.
 // The semantic effect (RST on close) is exercised by integration paths.
 func TestEnableTCPLingerZeroOnTCP(t *testing.T) {
+	t.Parallel()
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer ln.Close()
@@ -62,6 +64,8 @@ func TestEnableTCPLingerZeroOnTCP(t *testing.T) {
 // without a filesystem path — important on macOS where t.TempDir
 // paths exceed the unix-socket sun_path length limit.
 func TestEnableTCPLingerZeroOnNonTCPIsNoop(t *testing.T) {
+	t.Parallel()
+
 	srv, cli := net.Pipe()
 	defer srv.Close()
 	defer cli.Close()
@@ -73,5 +77,7 @@ func TestEnableTCPLingerZeroOnNonTCPIsNoop(t *testing.T) {
 // TestEnableTCPLingerZeroOnNilIsNoop covers the defensive path where
 // a caller passes a nil connection (e.g. dial error path).
 func TestEnableTCPLingerZeroOnNilIsNoop(t *testing.T) {
+	t.Parallel()
+
 	assert.NoError(t, enableTCPLingerZero(nil))
 }
