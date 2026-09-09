@@ -929,6 +929,9 @@ func ComparePoolEpoch(
 	// the grace window it may simply not be computed yet (reference_lag,
 	// ERROR); past it, it's a genuine gap in Dingo's own computation
 	// (dingo_db_missing, ERROR). Neither case can produce a PASS.
+	// RewardsPending is the chain-position form of the same timing check and
+	// takes precedence over the wall-clock grace window, including during
+	// replay where the epoch's close time may be years in the past.
 	if koiosPool.MemberRewards != "" {
 		switch {
 		case !dingoPool.MemberRewardPresent,
@@ -943,12 +946,6 @@ func ComparePoolEpoch(
 			// simply not be computed yet (reference_lag, ERROR); past it, it
 			// is a genuine gap in what Dingo can answer (dingo_db_missing,
 			// ERROR).
-			// RewardsPending is the chain-position form of the same question
-			// the grace window asks, and it is the one that survives a replay:
-			// the wall-clock window compares against the epoch's real close
-			// time, which for a from-genesis replay is years ago, so it can
-			// never fire and a row Dingo has not written yet reads as a hard
-			// gap (issue #3857).
 			cat := CategoryDBMissing
 			if dingoPool.RewardsPending {
 				cat = CategoryReferenceLag
@@ -976,10 +973,6 @@ func ComparePoolEpoch(
 				dingoValue = dingoPool.MemberRewardTotal
 			}
 			if dingoValue != koiosPool.MemberRewards {
-				// Before the rewards are applied the spendable flags are
-				// provisional, so Dingo reads high by the forfeitures that
-				// have not happened yet. That is a timing statement, not a
-				// divergence, and must not be reported as one (dingo #3852).
 				cat := CategoryValueMismatch
 				if dingoPool.RewardsPending {
 					cat = CategoryReferenceLag

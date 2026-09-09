@@ -24,13 +24,13 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
@@ -127,7 +127,7 @@ func (ls *LedgerState) querySystemStart() (any, error) {
 		int64(utc.Nanosecond())*1000
 	ret := olocalstatequery.SystemStartResult{
 		Year:        *big.NewInt(int64(utc.Year())),
-		Day:         utc.YearDay(),
+		Day:         int64(utc.YearDay()),
 		Picoseconds: *big.NewInt(dayPicoseconds),
 	}
 	return ret, nil
@@ -943,12 +943,20 @@ func (ls *LedgerState) queryShelleyDRepState(
 	result := make(olocalstatequery.DRepStateResult)
 	var dreps []*models.Drep
 	var allDelegators map[string][]olocalstatequery.StakeCredential
+	// Deposits recorded against the listed DReps' registrations, for the
+	// unrestricted form. The restricted form reads them one at a time
+	// below, bounded by the query item limit checked above.
+	var allDeposits map[string]uint64
 	if len(creds) == 0 {
 		all, err := ls.db.GetActiveDreps(nil)
 		if err != nil {
 			return nil, err
 		}
 		allDelegators, err = ls.allDRepDelegators()
+		if err != nil {
+			return nil, err
+		}
+		allDeposits, err = ls.db.GetDrepLastRegistrationDeposits(nil)
 		if err != nil {
 			return nil, err
 		}
@@ -974,11 +982,22 @@ func (ls *LedgerState) queryShelleyDRepState(
 			dreps = append(dreps, drep)
 		}
 	}
-	// Every DRep locks the dRepDeposit protocol parameter at registration.
-	deposit := ls.drepDeposit()
 	for _, drep := range dreps {
 		if drep == nil {
 			continue
+		}
+		// Report the deposit recorded against the DRep's own
+		// registration, not the current dRepDeposit parameter. A DRep
+		// locks the parameter as it stood when its registration
+		// certificate was applied, and dRepDeposit is governable, so the
+		// current value is wrong for every DRep that registered before
+		// the last change to it. cardano-ledger stores the amount in
+		// DRepState.drepDeposit and `query drep-state` serialises that
+		// stored field; nothing on the reference query path consults
+		// ppDRepDeposit.
+		deposit, err := ls.drepRecordedDeposit(drep, allDeposits)
+		if err != nil {
+			return nil, err
 		}
 		var delegators []olocalstatequery.StakeCredential
 		if allDelegators != nil {
@@ -1008,6 +1027,45 @@ func (ls *LedgerState) queryShelleyDRepState(
 	// expects (verified against cardano-node: an empty result is the CBOR
 	// `81 a0`, i.e. [ {} ]).
 	return []any{result}, nil
+}
+
+// drepRecordedDeposit returns the deposit recorded against the DRep's most
+// recent registration certificate, for the GetDRepState wire result.
+//
+// deposits is the batched read the unrestricted form makes; when it is nil
+// the deposit is read for this DRep alone.
+//
+// DRepStateEntry.Deposit is a plain uint64 with no representation for an
+// unknown amount, so an absent record is reported as 0. This is the same
+// choice queryShelleyStakeDelegDeposits documents for a NULL deposit on a
+// stake registration row, and for the same reason: preserving the existing
+// local-state-query wire shape. It is not a claim that the DRep paid
+// nothing. cardano-ledger's DRepState carries a non-optional deposit, so a
+// registered DRep without one is a state the reference cannot hold;
+// validation reads the same row through LedgerView.DRepRegistration, which
+// reports the same recorded amount.
+func (ls *LedgerState) drepRecordedDeposit(
+	drep *models.Drep,
+	deposits map[string]uint64,
+) (uint64, error) {
+	if deposits != nil {
+		return deposits[models.DrepDepositKey(
+			drep.CredentialTag,
+			drep.Credential,
+		)], nil
+	}
+	recorded, err := ls.db.GetDrepLastRegistrationDeposit(
+		drep.CredentialTag,
+		drep.Credential,
+		nil,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if recorded == nil {
+		return 0, nil
+	}
+	return *recorded, nil
 }
 
 // allDRepDelegators loads active accounts in batches and groups their voting
@@ -1118,17 +1176,6 @@ func (ls *LedgerState) queryShelleyAccountState() (any, error) {
 	}, nil
 }
 
-// drepDeposit returns the current dRepDeposit protocol parameter, which is the
-// deposit every DRep locks at registration. Returns 0 outside Conway.
-func (ls *LedgerState) drepDeposit() uint64 {
-	pparams := ls.loadConsensusSnapshot().currentPParams
-	if cpp, ok := pparams.(*conway.ConwayProtocolParameters); ok &&
-		cpp != nil {
-		return cpp.DRepDeposit
-	}
-	return 0
-}
-
 // drepDelegators returns the stake credentials currently delegating their
 // voting power to the given DRep, as the wire type, in canonical (tag, hash)
 // order so the resulting CBOR set (tag 258) is canonical — cardano clients
@@ -1192,7 +1239,11 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 	if len(addrs) == 0 {
 		return []any{ret}, nil
 	}
-	utxos, err := ls.db.UtxosByAddress(addrs, nil)
+	utxos, err := ls.db.UtxosByAddress(
+		addrs,
+		database.MaxUtxosByAddressResults,
+		nil,
+	)
 	if err != nil {
 		return nil, err
 	}

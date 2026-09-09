@@ -27,6 +27,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -105,6 +107,8 @@ func seedTestChain(
 // legal K-bounded rollback by construction no matter how far the chain has
 // advanced since the rewind began.
 func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
+	t.Parallel()
+
 	const (
 		securityParam = 8
 		blockCount    = 240
@@ -148,9 +152,7 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 	// re-reads the live tip still converges.
 	stop := make(chan struct{})
 	var appender sync.WaitGroup
-	appender.Add(1)
-	go func() {
-		defer appender.Done()
+	appender.Go(func() {
 		lastPoint := pc.Tip().Point
 		for seq := 0; ; seq++ {
 			select {
@@ -180,7 +182,7 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 			}
 			lastPoint = ocommon.NewPoint(next.Slot, next.Hash)
 		}
-	}()
+	})
 
 	target := ocommon.NewPoint(raw[0].Slot, raw[0].Hash)
 	rewindErr := ls.rollbackPrimaryChainInSecurityParamWindows(target)
@@ -209,6 +211,8 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 // stuck-pipeline watchdog correctly announcing that the failure was
 // deterministic while the node kept retrying anyway.
 func TestDeterministicTxRecoveryHaltsOnUnreachableRewind(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -275,6 +279,8 @@ func TestDeterministicTxRecoveryHaltsOnUnreachableRewind(t *testing.T) {
 // different one and must start with a fresh budget rather than inherit a tally
 // that has nothing to do with it.
 func TestRecoveryRewindHaltBudgetResetsOnTipProgress(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -334,6 +340,8 @@ func TestRecoveryRewindHaltBudgetResetsOnTipProgress(t *testing.T) {
 // a different step target against a larger gap, and the halt must still
 // arrive.
 func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
+	t.Parallel()
+
 	const (
 		chainK        = 4
 		ledgerWindow  = 8
@@ -399,6 +407,9 @@ func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
 			validationErr,
 		)
 		require.ErrorIs(t, lastErr, chain.ErrRollbackExceedsSecurityParam)
+		// require.ErrorIs above fails the test on a nil lastErr, which nilaway
+		// does not model.
+		//nolint:nilaway // non-nil per the require.ErrorIs above
 		seenTargets[lastErr.Error()] = struct{}{}
 		if errors.Is(lastErr, errHaltLedgerPipeline) {
 			halted = true
@@ -443,6 +454,9 @@ func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
 	)
 	require.Greater(
 		t,
+		// maxAttempts is a positive constant, so the loop above appended at
+		// least one tip; nilaway does not reason about the loop bound.
+		//nolint:nilaway // the loop above appends at least one entry
 		chainTips[len(chainTips)-1],
 		chainTips[0],
 		"the fork must extend while the applied ledger tip stays pinned",
@@ -452,5 +466,133 @@ func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
 		slices.IsSorted(chainTips),
 		"required rollback depth must only grow across attempts: %v",
 		chainTips,
+	)
+}
+
+// TestWindowedRewindRefusesRecoveryTargetTheChainDoesNotHold pins that the
+// entry check on rollbackPrimaryChainInSecurityParamWindows establishes
+// primary-chain membership, not store presence.
+//
+// The descent commits each step as it goes, so a target it can never reach
+// has to be refused before the first truncation. The check used to be a
+// database.BlockByPoint lookup, which a target the store still holds but the
+// chain has abandoned passes -- the retained-index shape rollbackPointBlock
+// documents. The descent then truncated every intermediate step and
+// Chain.Rollback refused the final one with ErrRollbackPointNotOnChain,
+// leaving the chain shortened for a rewind that never happened.
+//
+// The target below is written straight into the block store at an index above
+// the chain tip, so it is present by point and absent from the chain: the
+// store lookup accepts it and the chain's own membership check does not.
+func TestWindowedRewindRefusesRecoveryTargetTheChainDoesNotHold(t *testing.T) {
+	t.Parallel()
+
+	const (
+		securityParam = 8
+		blockCount    = 60
+	)
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		cm.SetLedger(testSecurityParamLedger{securityParam: securityParam}),
+	)
+	pc := cm.PrimaryChain()
+	raw := seedTestChain(t, pc, "target-not-on-chain", blockCount)
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, securityParam),
+		EventBus:          bus,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.currentEra = eras.ShelleyEraDesc
+
+	// A block the store holds at an index the chain does not: its slot falls
+	// inside the chain's span, so the descent would start, and its index sits
+	// above the chain tip, so no chain block occupies it.
+	orphan := models.Block{
+		ID:       blockCount + 5,
+		Slot:     raw[0].Slot + 5,
+		Hash:     testHashBytes("target-not-on-chain-orphan"),
+		Number:   raw[0].BlockNumber,
+		Type:     1,
+		PrevHash: raw[0].Hash,
+		Cbor:     []byte{0x80},
+	}
+	require.NoError(t, db.BlockCreate(orphan, nil))
+	target := ocommon.NewPoint(orphan.Slot, orphan.Hash)
+	_, err = database.BlockByPoint(db, target)
+	require.NoError(t, err, "the store must hold the target for this to test anything")
+
+	tipBefore := pc.Tip()
+	err = ls.rollbackPrimaryChainInSecurityParamWindows(target)
+	require.ErrorIs(t, err, chain.ErrRollbackPointNotOnChain)
+	require.Equal(
+		t,
+		tipBefore,
+		pc.Tip(),
+		"a target the chain does not hold must be refused before any step is committed",
+	)
+}
+
+// TestWindowedRewindRefusesSlotZeroTargetTheStoreDoesNotHold covers the one
+// target shape Chain.ValidateRollback cannot speak for.
+//
+// ValidateRollback reads every slot-zero point as origin and skips its
+// membership check there, and Chain.Rollback does the same: it truncates to
+// index zero and sets currentTip to the point it was given. A slot-zero point
+// carrying a hash would therefore pass the entry check and take the descent
+// all the way down, leaving the chain empty and its tip naming a block the
+// store need not hold, so the entry check keeps the store lookup for it.
+func TestWindowedRewindRefusesSlotZeroTargetTheStoreDoesNotHold(t *testing.T) {
+	t.Parallel()
+
+	const (
+		securityParam = 8
+		blockCount    = 30
+	)
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		cm.SetLedger(testSecurityParamLedger{securityParam: securityParam}),
+	)
+	pc := cm.PrimaryChain()
+	seedTestChain(t, pc, "slot-zero-target", blockCount)
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, securityParam),
+		EventBus:          bus,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.currentEra = eras.ShelleyEraDesc
+
+	target := ocommon.NewPoint(0, testHashBytes("slot-zero-target-absent"))
+	tipBefore := pc.Tip()
+	err = ls.rollbackPrimaryChainInSecurityParamWindows(target)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+	require.Equal(
+		t,
+		tipBefore,
+		pc.Tip(),
+		"a slot-zero target the store does not hold must not truncate the chain",
 	)
 }

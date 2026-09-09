@@ -21,6 +21,8 @@ import (
 )
 
 func TestTxBodyProducedOutputRangeIgnoresNonOutputMatch(t *testing.T) {
+	t.Parallel()
+
 	bodyCbor := []byte{
 		0xa2,
 		0x00, 0x43, 0x82, 0x01, 0x02,
@@ -42,6 +44,8 @@ func TestTxBodyProducedOutputRangeIgnoresNonOutputMatch(t *testing.T) {
 }
 
 func TestTxBodyProducedOutputRangeDuplicateOutputs(t *testing.T) {
+	t.Parallel()
+
 	bodyCbor := []byte{
 		0xa1,
 		0x01, 0x82,
@@ -81,6 +85,8 @@ func TestTxBodyProducedOutputRangeDuplicateOutputs(t *testing.T) {
 }
 
 func TestTxBodyProducedOutputRangeCollateralReturn(t *testing.T) {
+	t.Parallel()
+
 	bodyCbor := []byte{
 		0xa2,
 		0x01, 0x81,

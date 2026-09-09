@@ -16,11 +16,11 @@ package ledger
 
 import (
 	"database/sql"
+	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -56,6 +56,8 @@ VALUES (?, TRUE, '0')`, credential)
 // an epoch-boundary reconstruction has to retain them exactly like the delayed
 // reward update.
 func TestBoundaryCreditVisibility_MIRIsIncludedInSnapshot(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	const (
@@ -72,7 +74,7 @@ func TestBoundaryCreditVisibility_MIRIsIncludedInSnapshot(t *testing.T) {
 		0,
 		epochStartSlot+1,
 		[]models.MoveInstantaneousRewardsReward{
-			{Credential: credential, Amount: types.Uint64(amount)},
+			{Credential: credential, Amount: new(big.Int).SetUint64(amount)},
 		},
 	)
 
@@ -89,6 +91,8 @@ func TestBoundaryCreditVisibility_MIRIsIncludedInSnapshot(t *testing.T) {
 // deposit refunds as post-SNAP: cardano-ledger's EPOCH rule runs SNAP before
 // POOLREAP, so the refund is not part of the mark snapshot.
 func TestBoundaryCreditVisibility_PoolReapIsExcludedFromSnapshot(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newPoolreapTestLedger(t)
 
 	const (
@@ -118,6 +122,8 @@ func TestBoundaryCreditVisibility_PoolReapIsExcludedFromSnapshot(t *testing.T) {
 func TestBoundaryCreditVisibility_StakeRewardIsIncludedInSnapshot(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	_, db, gdb := newPoolreapTestLedger(t)
 
 	credential := reapCred28(0x53)

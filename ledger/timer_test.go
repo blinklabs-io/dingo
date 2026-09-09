@@ -24,6 +24,8 @@ import (
 )
 
 func TestScheduler_RegistersAndRunsTask(t *testing.T) {
+	t.Parallel()
+
 	var counter atomic.Int32
 
 	// Create a Scheduler with 10ms tick interval
@@ -45,6 +47,8 @@ func TestScheduler_RegistersAndRunsTask(t *testing.T) {
 }
 
 func TestScheduler_ChangeInterval(t *testing.T) {
+	t.Parallel()
+
 	var counter atomic.Int32
 
 	// Create a Scheduler with 50ms tick interval
@@ -91,6 +95,8 @@ func TestScheduler_ChangeInterval(t *testing.T) {
 }
 
 func TestSchedulerRunFailFunc(t *testing.T) {
+	t.Parallel()
+
 	var failCounter atomic.Int32
 
 	// Create a Scheduler with 50ms tick interval
@@ -123,6 +129,8 @@ func TestSchedulerRunFailFunc(t *testing.T) {
 }
 
 func TestScheduler_Config(t *testing.T) {
+	t.Parallel()
+
 	// Test default configuration
 	defaultScheduler := NewScheduler(100 * time.Millisecond)
 	if defaultScheduler.workerPoolSize != 10 {
@@ -235,6 +243,8 @@ func TestScheduler_Config(t *testing.T) {
 }
 
 func TestScheduler_ChangeInterval_RejectsInvalidDuration(t *testing.T) {
+	t.Parallel()
+
 	timer := NewScheduler(50 * time.Millisecond)
 
 	// Validation happens before the channel send, so we do not need
@@ -265,6 +275,8 @@ func TestScheduler_ChangeInterval_RejectsInvalidDuration(t *testing.T) {
 // Stop must tolerate being called from both without double-closing its
 // quit channel.
 func TestScheduler_StopIsIdempotent(t *testing.T) {
+	t.Parallel()
+
 	timer := NewScheduler(10 * time.Millisecond)
 	timer.Start()
 	require.NotPanics(t, func() {
@@ -279,6 +291,8 @@ func TestScheduler_StopIsIdempotent(t *testing.T) {
 // non-nil, regardless of whether dev-mode forging ever actually started
 // ticking.
 func TestScheduler_StopWithoutStartIsSafe(t *testing.T) {
+	t.Parallel()
+
 	timer := NewScheduler(10 * time.Millisecond)
 	require.NotPanics(t, func() {
 		timer.Stop()
@@ -290,6 +304,8 @@ func TestScheduler_StopWithoutStartIsSafe(t *testing.T) {
 // Stop can guarantee a concurrent Start does not create workers after Stop
 // has already returned.
 func TestScheduler_StopBeforeStartPreventsLaterStart(t *testing.T) {
+	t.Parallel()
+
 	timer := NewScheduler(10 * time.Millisecond)
 
 	timer.Stop()
@@ -301,6 +317,8 @@ func TestScheduler_StopBeforeStartPreventsLaterStart(t *testing.T) {
 }
 
 func TestScheduler_ConcurrentStartStopLeavesNoWorkers(t *testing.T) {
+	t.Parallel()
+
 	for range 100 {
 		timer := NewScheduler(time.Hour)
 		var callers sync.WaitGroup
@@ -344,6 +362,8 @@ func TestScheduler_ConcurrentStartStopLeavesNoWorkers(t *testing.T) {
 // this must never report a race between the ChangeInterval goroutine's
 // write and Stop's read of st.ticker.
 func TestScheduler_StopDoesNotRaceChangeInterval(t *testing.T) {
+	t.Parallel()
+
 	timer := NewScheduler(1 * time.Millisecond)
 	timer.Start()
 

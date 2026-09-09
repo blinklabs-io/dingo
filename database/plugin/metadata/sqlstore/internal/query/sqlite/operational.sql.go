@@ -641,6 +641,46 @@ func (q *Queries) DeleteEpochsAfterSlot(ctx context.Context, startSlot sql.NullI
 	return err
 }
 
+const deleteImportedEpochBlockTotalForEpoch = `-- name: DeleteImportedEpochBlockTotalForEpoch :exec
+DELETE FROM imported_epoch_block_total
+WHERE epoch = ?
+`
+
+func (q *Queries) DeleteImportedEpochBlockTotalForEpoch(ctx context.Context, epoch int64) error {
+	_, err := q.db.ExecContext(ctx, deleteImportedEpochBlockTotalForEpoch, epoch)
+	return err
+}
+
+const deleteImportedEpochBlockTotalsAfterSlot = `-- name: DeleteImportedEpochBlockTotalsAfterSlot :exec
+DELETE FROM imported_epoch_block_total
+WHERE captured_slot > ?
+`
+
+func (q *Queries) DeleteImportedEpochBlockTotalsAfterSlot(ctx context.Context, capturedSlot int64) error {
+	_, err := q.db.ExecContext(ctx, deleteImportedEpochBlockTotalsAfterSlot, capturedSlot)
+	return err
+}
+
+const deleteImportedPoolBlockCountsAfterSlot = `-- name: DeleteImportedPoolBlockCountsAfterSlot :exec
+DELETE FROM imported_pool_block_count
+WHERE captured_slot > ?
+`
+
+func (q *Queries) DeleteImportedPoolBlockCountsAfterSlot(ctx context.Context, capturedSlot int64) error {
+	_, err := q.db.ExecContext(ctx, deleteImportedPoolBlockCountsAfterSlot, capturedSlot)
+	return err
+}
+
+const deleteImportedPoolBlockCountsForEpoch = `-- name: DeleteImportedPoolBlockCountsForEpoch :exec
+DELETE FROM imported_pool_block_count
+WHERE epoch = ?
+`
+
+func (q *Queries) DeleteImportedPoolBlockCountsForEpoch(ctx context.Context, epoch int64) error {
+	_, err := q.db.ExecContext(ctx, deleteImportedPoolBlockCountsForEpoch, epoch)
+	return err
+}
+
 const deleteMidnightAriadneParamsByEpoch = `-- name: DeleteMidnightAriadneParamsByEpoch :exec
 DELETE FROM midnight_ariadne_params WHERE epoch = ?
 `
@@ -1792,6 +1832,83 @@ func (q *Queries) GetDrepByHash(ctx context.Context, credential []byte) (Drep, e
 	return i, err
 }
 
+const getDrepLastRegistrationDeposit = `-- name: GetDrepLastRegistrationDeposit :one
+SELECT deposit_amount
+FROM registration_drep
+WHERE credential_tag = ? AND drep_credential = ?
+ORDER BY added_slot DESC
+LIMIT 1
+`
+
+type GetDrepLastRegistrationDepositParams struct {
+	CredentialTag  int64
+	DrepCredential []byte
+}
+
+// Unlike GetDrepLastRegistrationSlot, this does not exclude certificate_id
+// = 0 rows: those are the Mithril ledger-state import's bootstrap-slot
+// registrations (see ImportDrepRegistration), and their deposit_amount is
+// the real amount owed on deregistration. On a bootstrapped node such a
+// row is often a DRep's only registration, so excluding it here would
+// compute a refund of 0 for a deposit that was actually paid.
+func (q *Queries) GetDrepLastRegistrationDeposit(ctx context.Context, arg GetDrepLastRegistrationDepositParams) (sql.NullString, error) {
+	row := q.db.QueryRowContext(ctx, getDrepLastRegistrationDeposit, arg.CredentialTag, arg.DrepCredential)
+	var deposit_amount sql.NullString
+	err := row.Scan(&deposit_amount)
+	return deposit_amount, err
+}
+
+const getDrepLastRegistrationDeposits = `-- name: GetDrepLastRegistrationDeposits :many
+SELECT r.credential_tag, r.drep_credential, r.deposit_amount
+FROM drep d
+JOIN registration_drep r
+  ON r.id = (
+      SELECT reg.id
+      FROM registration_drep reg
+      WHERE reg.credential_tag = d.credential_tag
+        AND reg.drep_credential = d.credential
+      ORDER BY reg.added_slot DESC, reg.id DESC
+      LIMIT 1
+  )
+WHERE d.active = TRUE
+`
+
+type GetDrepLastRegistrationDepositsRow struct {
+	CredentialTag  int64
+	DrepCredential []byte
+	DepositAmount  sql.NullString
+}
+
+// The set form of GetDrepLastRegistrationDeposit, for reading the deposits
+// of the active DReps GetActiveDreps returns in one round trip instead of
+// one query per DRep. Same certificate_id treatment: bootstrap-slot import
+// rows count, because their deposit_amount is the real amount owed.
+// Drive this lookup from active drep rows. The correlated lookup uses the
+// registration credential index for each active DRep, so history left behind
+// by DReps that have since deregistered does not become the outer scan.
+func (q *Queries) GetDrepLastRegistrationDeposits(ctx context.Context) ([]GetDrepLastRegistrationDepositsRow, error) {
+	rows, err := q.db.QueryContext(ctx, getDrepLastRegistrationDeposits)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []GetDrepLastRegistrationDepositsRow{}
+	for rows.Next() {
+		var i GetDrepLastRegistrationDepositsRow
+		if err := rows.Scan(&i.CredentialTag, &i.DrepCredential, &i.DepositAmount); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getDrepLastRegistrationSlot = `-- name: GetDrepLastRegistrationSlot :one
 SELECT CAST(COALESCE(MAX(added_slot), 0) AS INTEGER)
 FROM registration_drep
@@ -2077,6 +2194,53 @@ func (q *Queries) GetImportCheckpoint(ctx context.Context, importKey string) (Im
 	var i ImportCheckpoint
 	err := row.Scan(&i.ID, &i.ImportKey, &i.Phase)
 	return i, err
+}
+
+const getImportedEpochBlockTotal = `-- name: GetImportedEpochBlockTotal :one
+SELECT total_blocks
+FROM imported_epoch_block_total
+WHERE epoch = ?
+`
+
+func (q *Queries) GetImportedEpochBlockTotal(ctx context.Context, epoch int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, getImportedEpochBlockTotal, epoch)
+	var total_blocks int64
+	err := row.Scan(&total_blocks)
+	return total_blocks, err
+}
+
+const getImportedPoolBlockCounts = `-- name: GetImportedPoolBlockCounts :many
+SELECT pool_key_hash, blocks_produced
+FROM imported_pool_block_count
+WHERE epoch = ?
+`
+
+type GetImportedPoolBlockCountsRow struct {
+	PoolKeyHash    []byte
+	BlocksProduced int64
+}
+
+func (q *Queries) GetImportedPoolBlockCounts(ctx context.Context, epoch int64) ([]GetImportedPoolBlockCountsRow, error) {
+	rows, err := q.db.QueryContext(ctx, getImportedPoolBlockCounts, epoch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []GetImportedPoolBlockCountsRow{}
+	for rows.Next() {
+		var i GetImportedPoolBlockCountsRow
+		if err := rows.Scan(&i.PoolKeyHash, &i.BlocksProduced); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getLastBlockNonceInRange = `-- name: GetLastBlockNonceInRange :one
@@ -3453,9 +3617,12 @@ SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
        deleted_slot, amount, output_idx, payment_script
 FROM utxo
 WHERE added_slot > ?
-ORDER BY id DESC
+ORDER BY added_slot DESC, id DESC
 `
 
+// Order by added_slot before id so the sort is the reverse of
+// idx_utxo_added_slot's own order; ordering by id alone costs a full table
+// scan. See the Store wrapper for the full rationale.
 func (q *Queries) GetUtxosAddedAfterSlot(ctx context.Context, addedSlot sql.NullInt64) ([]Utxo, error) {
 	rows, err := q.db.QueryContext(ctx, getUtxosAddedAfterSlot, addedSlot)
 	if err != nil {
@@ -3953,6 +4120,52 @@ func (q *Queries) SaveEpochSummary(ctx context.Context, arg SaveEpochSummaryPara
 	var id int64
 	err := row.Scan(&id)
 	return id, err
+}
+
+const saveImportedEpochBlockTotal = `-- name: SaveImportedEpochBlockTotal :exec
+INSERT INTO imported_epoch_block_total (
+    epoch, total_blocks, captured_slot
+) VALUES (?, ?, ?)
+ON CONFLICT (epoch) DO UPDATE SET
+    total_blocks = excluded.total_blocks,
+    captured_slot = excluded.captured_slot
+`
+
+type SaveImportedEpochBlockTotalParams struct {
+	Epoch        int64
+	TotalBlocks  int64
+	CapturedSlot int64
+}
+
+func (q *Queries) SaveImportedEpochBlockTotal(ctx context.Context, arg SaveImportedEpochBlockTotalParams) error {
+	_, err := q.db.ExecContext(ctx, saveImportedEpochBlockTotal, arg.Epoch, arg.TotalBlocks, arg.CapturedSlot)
+	return err
+}
+
+const saveImportedPoolBlockCount = `-- name: SaveImportedPoolBlockCount :exec
+INSERT INTO imported_pool_block_count (
+    epoch, pool_key_hash, blocks_produced, captured_slot
+) VALUES (?, ?, ?, ?)
+ON CONFLICT (epoch, pool_key_hash) DO UPDATE SET
+    blocks_produced = excluded.blocks_produced,
+    captured_slot = excluded.captured_slot
+`
+
+type SaveImportedPoolBlockCountParams struct {
+	Epoch          int64
+	PoolKeyHash    []byte
+	BlocksProduced int64
+	CapturedSlot   int64
+}
+
+func (q *Queries) SaveImportedPoolBlockCount(ctx context.Context, arg SaveImportedPoolBlockCountParams) error {
+	_, err := q.db.ExecContext(ctx, saveImportedPoolBlockCount,
+		arg.Epoch,
+		arg.PoolKeyHash,
+		arg.BlocksProduced,
+		arg.CapturedSlot,
+	)
+	return err
 }
 
 const savePoolStakeSnapshot = `-- name: SavePoolStakeSnapshot :one

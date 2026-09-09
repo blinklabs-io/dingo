@@ -114,6 +114,8 @@ func leiosPersistQueueState(o *Ouroboros) (entries, bytes, reserved int) {
 // Absence case for the byte budget: an endorser block that fits is admitted
 // normally, holding exactly its own size against the budget and leaving no
 // in-flight reservation behind.
+// Not t.Parallel: withLowerLeiosPersistQueueBudget swaps the package-level
+// leiosPersistMaxQueueBytes.
 func TestLeiosPersistQueueAdmitsEntryWithinByteBudget(t *testing.T) {
 	o := newTestOuroborosWithPausedLeiosPersistWriter(t)
 	point, blockRaw, data, size := leiosPersistTestEntry(t, 40, 4, 512)

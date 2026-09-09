@@ -59,6 +59,8 @@ func sourceSQLDB(t *testing.T, db *database.Database) *testDB {
 }
 
 func TestNewDatabaseSourceRejectsNilDatabase(t *testing.T) {
+	t.Parallel()
+
 	_, err := NewDatabaseSource(nil)
 	require.Error(t, err)
 }
@@ -69,6 +71,8 @@ func TestNewDatabaseSourceRejectsNilDatabase(t *testing.T) {
 // (a separate read-only transaction against the same live database, not a
 // second connection) and confirms every field lands exactly as committed.
 func TestDatabaseSourceGetEpochData(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 
@@ -106,6 +110,8 @@ func TestDatabaseSourceGetEpochData(t *testing.T) {
 // write Dingo will repair later) -- both must read back as (nil, nil), never
 // an error and never a spurious zero-value comparison.
 func TestDatabaseSourceGetEpochDataMissingOrNotReady(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	source, err := NewDatabaseSource(db)
@@ -131,6 +137,8 @@ func TestDatabaseSourceGetEpochDataMissingOrNotReady(t *testing.T) {
 // false (a real dingo_db_missing mismatch upstream), not as legitimately
 // empty/zero pots.
 func TestDatabaseSourceGetEpochDataRewardAdaPotsAbsent(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	require.NoError(t, sqlDB.Create(&models.EpochSummary{
@@ -154,6 +162,8 @@ func TestDatabaseSourceGetEpochDataRewardAdaPotsAbsent(t *testing.T) {
 // MemberRewardTotal from stakeEpoch's reward_pool_output -- each field
 // group's *Present flag reflects only whether its own row existed.
 func TestDatabaseSourceGetPoolEpochDataMap(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	poolKeyHash := []byte("POOLKEYHASH-28-BYTES-LONG!!!")
@@ -213,6 +223,8 @@ func TestDatabaseSourceGetPoolEpochDataMap(t *testing.T) {
 // *Present flag must reflect only whether its own row actually exists, not
 // whether any row exists for the pool at all.
 func TestDatabaseSourceGetPoolEpochDataMapPartialPresence(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	poolKeyHash := []byte("POOLKEYHASH-28-BYTES-LONG!!!")
@@ -246,6 +258,8 @@ func TestDatabaseSourceGetPoolEpochDataMapPartialPresence(t *testing.T) {
 }
 
 func TestDatabaseSourceGetLatestEpoch(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -264,6 +278,8 @@ func TestDatabaseSourceGetLatestEpoch(t *testing.T) {
 }
 
 func TestDatabaseSourceGetRewardAccountOutputs(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	stakingKey := []byte("STAKING-KEY-28-BYTES-LONG!!!")
@@ -304,6 +320,8 @@ func TestDatabaseSourceGetRewardAccountOutputs(t *testing.T) {
 // late is indistinguishable from reading an epoch that was simply never
 // computed.
 func TestDatabaseSourceCoreModePruningTiming(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	poolKeyHash := []byte("POOLKEYHASH-28-BYTES-LONG!!!")
@@ -356,6 +374,8 @@ func TestDatabaseSourceCoreModePruningTiming(t *testing.T) {
 func TestDatabaseSourceGetPoolEpochDataMapTracksChangingPoolParams(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -487,52 +507,6 @@ func TestDatabaseSourceReportsRewardsPendingForMissingRow(t *testing.T) {
 	})
 }
 
-// TestDatabaseSourceUnreadableBoundaryComparesStrictly is the DatabaseSource
-// half of the absent-versus-unreadable split. GetEpoch reports "no such epoch"
-// as (nil, nil), so a non-nil error is a genuinely different claim: the
-// boundary could not be established at all, and per
-// DingoPoolEpochData.RewardsPending that must leave the comparison strict
-// rather than downgrade a real divergence to a lag.
-//
-// Dropping the table is the cheapest way to make the read fail while leaving
-// every other read in GetPoolEpochDataMap intact — only the applying-epoch
-// lookup touches it.
-func TestDatabaseSourceUnreadableBoundaryComparesStrictly(t *testing.T) {
-	const (
-		stakeEpoch = uint64(9)
-		paramEpoch = uint64(10)
-	)
-	poolHash := bytes.Repeat([]byte{0x42}, 28)
-
-	db := newTestDatabaseSourceDB(t)
-	sqlDB := sourceSQLDB(t, db)
-	// A reward_pool_input row so the pool is in the map, and no
-	// reward_pool_output row, so the epoch-level lookup is what decides.
-	require.NoError(t, sqlDB.Exec(
-		`INSERT INTO reward_pool_input
-		 (pool_key_hash, epoch, pledge, delegated_stake, owner_stake,
-		  cost, delegator_count, captured_slot, boundary_slot)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		poolHash, stakeEpoch, "0", "1000", "0", "0", 1, 0, 0).Error)
-	require.NoError(t, sqlDB.Exec(
-		`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
-		[]byte{0x01}, 100, 1).Error)
-	require.NoError(t, sqlDB.Exec(`DROP TABLE epoch`).Error)
-
-	source, err := NewDatabaseSource(db)
-	require.NoError(t, err)
-	m, err := source.GetPoolEpochDataMap(
-		context.Background(), stakeEpoch, paramEpoch,
-	)
-	require.NoError(t, err)
-	data, ok := m[hex.EncodeToString(poolHash)]
-	require.True(t, ok, "pool missing from the map")
-	require.False(t, data.MemberRewardPresent,
-		"fixture must have no reward_pool_output row")
-	assert.False(t, data.RewardsPending,
-		"a failed read establishes no boundary, so it must not downgrade")
-}
-
 // TestDatabaseSourceGetPoolsRetiredByEpoch proves the in-process source
 // resolves departure the same way DingoDB's raw-SQL twin does, including the
 // case that makes "a retirement certificate exists" the wrong predicate: a
@@ -540,6 +514,8 @@ func TestDatabaseSourceUnreadableBoundaryComparesStrictly(t *testing.T) {
 // asserted from one seeding, so a query that simply returned every pool with
 // a retirement row would fail on the re-registered pool.
 func TestDatabaseSourceGetPoolsRetiredByEpoch(t *testing.T) {
+	t.Parallel()
+
 	const (
 		queryEpoch   = uint64(7)
 		boundarySlot = uint64(1_000)
@@ -710,6 +686,8 @@ INSERT INTO pool_retirement (
 // slot — would have the standalone CLI and the in-process observer classify
 // the same pool differently.
 func TestGetPoolsRetiredByEpochImplementationsAgree(t *testing.T) {
+	t.Parallel()
+
 	const (
 		queryEpoch   = uint64(7)
 		boundarySlot = uint64(1_000)

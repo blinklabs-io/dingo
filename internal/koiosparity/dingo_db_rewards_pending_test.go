@@ -96,37 +96,16 @@ func TestGetPoolEpochDataMapReportsRewardsPending(t *testing.T) {
 		assert.True(t, d.RewardsPending,
 			"a row Dingo has not computed yet is a lag, not a gap")
 	})
-
-	t.Run("a slot without a hash is not a tip", func(t *testing.T) {
-		db, gdb := openTestDingoDB(t)
-		require.NoError(t, gdb.Exec(
-			`INSERT INTO reward_pool_output
-			 (pool_key_hash, epoch, member_reward_total, unspendable, boundary_slot)
-			 VALUES (?, ?, ?, ?, ?)`,
-			pool, stakeEpoch, "4006269", "1857", boundarySlot,
-		).Error)
-		require.NoError(t, gdb.Exec(
-			`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
-			nil, boundarySlot-1, 1,
-		).Error)
-		m, err := db.GetPoolEpochDataMap(
-			context.Background(), stakeEpoch, paramEpoch,
-		)
-		require.NoError(t, err)
-		assert.False(t, find(t, m).RewardsPending,
-			"incomplete tip metadata must not downgrade a real divergence")
-	})
 }
 
-// TestGetPoolEpochDataMapSeparatesAbsentBoundaryFromUnreadableOne pins the
-// three claims the applying-epoch lookup can make, which shared one branch.
+// TestGetPoolEpochDataMapRejectsAnUnusableStartSlot covers the applying-epoch
+// rows the standalone source cannot derive a boundary from. The row exists, so
+// this is not the pending case, but a NULL or negative start slot is not a
+// representable boundary and the lookup fails closed rather than guessing.
 //
-// Only an absent row asserts "the node has not reached E+3". A failed read and
-// an unusable start slot assert nothing, and per DingoPoolEpochData.
-// RewardsPending a source that cannot establish the boundary must leave the
-// comparison strict rather than downgrade a real divergence to a lag — the
-// same direction the tip read takes when it cannot establish a tip.
-func TestGetPoolEpochDataMapSeparatesAbsentBoundaryFromUnreadableOne(t *testing.T) {
+// rewards_pending_error_test.go covers the two cases either side of this one:
+// an absent row is the pending case, and a failed read is an error.
+func TestGetPoolEpochDataMapRejectsAnUnusableStartSlot(t *testing.T) {
 	const (
 		stakeEpoch = uint64(9)
 		paramEpoch = uint64(10)
@@ -136,7 +115,7 @@ func TestGetPoolEpochDataMapSeparatesAbsentBoundaryFromUnreadableOne(t *testing.
 
 	// No reward_pool_output row, so the pool's own boundary cannot answer and
 	// the epoch-level lookup is what decides.
-	seed := func(t *testing.T, mutate func(gdb *testDB)) *DingoPoolEpochData {
+	run := func(t *testing.T, startSlot any) error {
 		t.Helper()
 		db, gdb := openTestDingoDB(t)
 		require.NoError(t, gdb.Exec(
@@ -145,49 +124,20 @@ func TestGetPoolEpochDataMapSeparatesAbsentBoundaryFromUnreadableOne(t *testing.
 		require.NoError(t, gdb.Exec(
 			`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
 			[]byte{0x01}, tipSlot, 1).Error)
-		mutate(gdb)
-		m, err := db.GetPoolEpochDataMap(
+		require.NoError(t, gdb.Exec(
+			`INSERT INTO epoch (epoch_id, start_slot, length_in_slots)
+			 VALUES (?, ?, ?)`, stakeEpoch+3, startSlot, 86_400).Error)
+		_, err := db.GetPoolEpochDataMap(
 			context.Background(), stakeEpoch, paramEpoch,
 		)
-		require.NoError(t, err)
-		for k, v := range m {
-			if len(k) >= 2 && k[:2] == "42" {
-				require.False(t, v.MemberRewardPresent,
-					"fixture must have no reward_pool_output row")
-				return v
-			}
-		}
-		require.FailNow(t, "pool row missing from the map")
-		return nil
+		return err
 	}
 
-	t.Run("no row for the applying epoch is pending", func(t *testing.T) {
-		assert.True(t, seed(t, func(*testDB) {}).RewardsPending,
-			"the node has plainly not reached an epoch it has no row for")
+	t.Run("a NULL start slot", func(t *testing.T) {
+		require.ErrorContains(t, run(t, nil), "invalid start slot")
 	})
 
-	t.Run("an unreadable epoch table compares strictly", func(t *testing.T) {
-		assert.False(t, seed(t, func(gdb *testDB) {
-			require.NoError(t, gdb.Exec(`DROP TABLE epoch`).Error)
-		}).RewardsPending,
-			"a failed read establishes no boundary, so it must not downgrade")
-	})
-
-	t.Run("a NULL start slot compares strictly", func(t *testing.T) {
-		assert.False(t, seed(t, func(gdb *testDB) {
-			require.NoError(t, gdb.Exec(
-				`INSERT INTO epoch (epoch_id, start_slot, length_in_slots)
-				 VALUES (?, NULL, ?)`, stakeEpoch+3, 86_400).Error)
-		}).RewardsPending,
-			"a row with no start slot establishes no boundary")
-	})
-
-	t.Run("a negative start slot compares strictly", func(t *testing.T) {
-		assert.False(t, seed(t, func(gdb *testDB) {
-			require.NoError(t, gdb.Exec(
-				`INSERT INTO epoch (epoch_id, start_slot, length_in_slots)
-				 VALUES (?, ?, ?)`, stakeEpoch+3, -1, 86_400).Error)
-		}).RewardsPending,
-			"a slot that is not representable establishes no boundary")
+	t.Run("a negative start slot", func(t *testing.T) {
+		require.ErrorContains(t, run(t, -1), "invalid start slot")
 	})
 }

@@ -285,10 +285,28 @@ func validateKoiosNetwork(network string) error {
 
 // NewKoiosClient creates a client for the given network.
 func NewKoiosClient(network, apiKey string) (*KoiosClient, error) {
+	return newKoiosClient(network, apiKey, "")
+}
+
+// newKoiosClient is NewKoiosClient with an optional base-URL override.
+// The network is still validated, so an unsupported network is rejected
+// whether or not an override is supplied.
+//
+// The override exists because the alternative -- rewriting the entry for
+// this network in the process-wide koiosBaseURLs map and restoring it
+// afterwards -- is a global that every concurrently constructed client in
+// the process reads through validateKoiosNetwork, which is what kept this
+// package's tests from running in parallel.
+func newKoiosClient(
+	network, apiKey, baseOverride string,
+) (*KoiosClient, error) {
 	if err := validateKoiosNetwork(network); err != nil {
 		return nil, err
 	}
 	base := koiosBaseURLs[network]
+	if baseOverride != "" {
+		base = baseOverride
+	}
 	return &KoiosClient{
 		baseURL: base,
 		apiKey:  apiKey,

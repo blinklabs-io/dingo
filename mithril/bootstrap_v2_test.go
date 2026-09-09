@@ -190,8 +190,14 @@ func minimalLedgerState(t *testing.T, slot uint64, hash []byte) []byte {
 		cbor.RawMessage(emptyMap),
 	})
 	require.NoError(t, err)
+	// nesBprev and nesBcur are BlocksMade, which the reference encodes as a
+	// bare map of pool key hash to count; an empty one is a map with no
+	// entries, not an empty array.
 	newEpochState, err := cbor.Encode([]any{
-		uint64(0), []any{}, []any{}, cbor.RawMessage(epochState),
+		uint64(0),
+		cbor.RawMessage(emptyMap),
+		cbor.RawMessage(emptyMap),
+		cbor.RawMessage(epochState),
 		[]any{}, cbor.RawMessage(emptyMap), []any{},
 	})
 	require.NoError(t, err)
@@ -674,6 +680,8 @@ func (f *v2Fixture) bootstrapConfig(downloadDir string) BootstrapConfig {
 }
 
 func TestBootstrapV2(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 2})
 	downloadDir := t.TempDir()
 
@@ -727,6 +735,8 @@ func TestBootstrapV2(t *testing.T) {
 }
 
 func TestBootstrapV2NoCertVerification(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
 	cfg := fixture.bootstrapConfig(t.TempDir())
 	cfg.VerifyCertificateChain = false
@@ -739,6 +749,8 @@ func TestBootstrapV2NoCertVerification(t *testing.T) {
 }
 
 func TestSyncV2NoCertVerificationUsesExtractDirLedgerState(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		missingAncillary:    true,
 		validImmutable:      true,
@@ -759,6 +771,8 @@ func TestSyncV2NoCertVerificationUsesExtractDirLedgerState(t *testing.T) {
 }
 
 func TestBootstrapV2DigestsAggregatorFallback(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		immutableFileNumber: 1,
 		digestsCloud404:     true,
@@ -772,6 +786,8 @@ func TestBootstrapV2DigestsAggregatorFallback(t *testing.T) {
 }
 
 func TestBootstrapV2DigestsMerkleMismatchFallsBack(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		immutableFileNumber: 1,
 		digestsCloudBadRoot: true,
@@ -785,6 +801,8 @@ func TestBootstrapV2DigestsMerkleMismatchFallsBack(t *testing.T) {
 }
 
 func TestBootstrapV2MerkleRootMismatch(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		immutableFileNumber: 1,
 		tamperDigestList:    true,
@@ -798,6 +816,8 @@ func TestBootstrapV2MerkleRootMismatch(t *testing.T) {
 }
 
 func TestBootstrapV2ArtifactHashMismatch(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		immutableFileNumber: 1,
 		tamperArtifactHash:  true,
@@ -811,6 +831,8 @@ func TestBootstrapV2ArtifactHashMismatch(t *testing.T) {
 }
 
 func TestBootstrapV2CertLeafMerkleRootMismatch(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		immutableFileNumber:  1,
 		tamperCertMerkleRoot: true,
@@ -824,6 +846,8 @@ func TestBootstrapV2CertLeafMerkleRootMismatch(t *testing.T) {
 }
 
 func TestBootstrapV2ImmutableDigestMismatch(t *testing.T) {
+	t.Parallel()
+
 	for _, tamperImmutable := range []uint64{0, 1} {
 		t.Run(
 			fmt.Sprintf("immutable_%05d", tamperImmutable),
@@ -859,6 +883,8 @@ func TestBootstrapV2ImmutableDigestMismatch(t *testing.T) {
 }
 
 func TestBootstrapV2ImmutableValidationFallsBackToMirror(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		immutableFileNumber: 1,
 		immutableBadMirror:  true,
@@ -877,6 +903,8 @@ func TestBootstrapV2ImmutableValidationFallsBackToMirror(t *testing.T) {
 }
 
 func TestBootstrapV2AncillaryBadSignature(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		immutableFileNumber: 1,
 		badAncillarySig:     true,
@@ -891,6 +919,8 @@ func TestBootstrapV2AncillaryBadSignature(t *testing.T) {
 }
 
 func TestBootstrapV2RejectsNetworkMismatchBeforeDownload(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
 	cfg := fixture.bootstrapConfig(t.TempDir())
 	cfg.Network = "preview"
@@ -907,6 +937,8 @@ func TestBootstrapV2RejectsNetworkMismatchBeforeDownload(t *testing.T) {
 // downloaded — artifact.Hash alone isn't enough to trust the metadata,
 // since Network is a separate, unconstrained field.
 func TestBootstrapV2RejectsPathTraversalInArtifactNetwork(t *testing.T) {
+	t.Parallel()
+
 	// Use the full fixture (real digest/immutable/ancillary/cert wiring) so
 	// that, if validateSnapshotIdentity were removed, the bootstrap would
 	// actually reach and attempt the immutable download this test guards
@@ -931,6 +963,8 @@ func TestBootstrapV2RejectsPathTraversalInArtifactNetwork(t *testing.T) {
 }
 
 func TestBootstrapV2VerifiedRequiresAncillaryKey(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
 	cfg := fixture.bootstrapConfig(t.TempDir())
 	cfg.AncillaryVerificationKey = ""
@@ -941,6 +975,8 @@ func TestBootstrapV2VerifiedRequiresAncillaryKey(t *testing.T) {
 }
 
 func TestBootstrapV2ResumeVerifiesCachedAncillary(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
 	downloadDir := t.TempDir()
 	candidateDir := filepath.Join(
@@ -1012,6 +1048,8 @@ func TestBootstrapV2ResumeVerifiesCachedAncillary(t *testing.T) {
 // different tree, which is only safe for as long as every one of those steps
 // happens to re-check the signature.
 func TestVerifyAncillaryExtractionIsAboutTheInspectedTree(t *testing.T) {
+	t.Parallel()
+
 	pub, priv, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
 	cfg := BootstrapConfig{
@@ -1097,6 +1135,8 @@ func TestVerifyAncillaryExtractionIsAboutTheInspectedTree(t *testing.T) {
 }
 
 func TestBootstrapV2Resume(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 2})
 	downloadDir := t.TempDir()
 	cfg := fixture.bootstrapConfig(downloadDir)
@@ -1118,6 +1158,8 @@ func TestBootstrapV2Resume(t *testing.T) {
 }
 
 func TestBootstrapEmptyBackendDefaultsToV2(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
 	cfg := fixture.bootstrapConfig(t.TempDir())
 	cfg.Backend = ""
@@ -1128,6 +1170,8 @@ func TestBootstrapEmptyBackendDefaultsToV2(t *testing.T) {
 }
 
 func TestBootstrapUnsupportedBackend(t *testing.T) {
+	t.Parallel()
+
 	_, err := Bootstrap(context.Background(), BootstrapConfig{
 		Network: "preprod",
 		Backend: "v3",
@@ -1220,6 +1264,8 @@ func (t *swapDirOnDownloadCompleteTransport) RoundTrip(
 func TestFetchImmutableArchiveSurvivesArchiveDirSwapAfterDownload(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	probeLink := filepath.Join(t.TempDir(), "probe")
 	requireSymlinkSupport(t, t.TempDir(), probeLink)
 	// The response-body callback stages the swap synchronously through io.Copy
@@ -1328,6 +1374,8 @@ func TestFetchImmutableArchiveSurvivesArchiveDirSwapAfterDownload(
 func TestFetchImmutableArchiveCleansUpThroughRootOnExtractionFailure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	probeLink := filepath.Join(t.TempDir(), "probe")
 	requireSymlinkSupport(t, t.TempDir(), probeLink)
 	// The response-body callback stages the swap synchronously through io.Copy
@@ -1407,6 +1455,8 @@ func TestFetchImmutableArchiveCleansUpThroughRootOnExtractionFailure(
 // somebody else's files as the cost of a failed download, so the symlink is
 // refused up front instead.
 func TestOpenImmutableRootRefusesSymlinkedDir(t *testing.T) {
+	t.Parallel()
+
 	root := t.TempDir()
 	outside := filepath.Join(root, "outside")
 	require.NoError(t, os.MkdirAll(outside, 0o750))
@@ -1429,6 +1479,8 @@ func TestOpenImmutableRootRefusesSymlinkedDir(t *testing.T) {
 // resolves through the immutable directory's handle, so it can only unlink
 // files in the directory the download wrote into.
 func TestRemoveImmutableTrioStaysInsideRoot(t *testing.T) {
+	t.Parallel()
+
 	root := t.TempDir()
 	outside := filepath.Join(root, "outside")
 	require.NoError(t, os.MkdirAll(outside, 0o750))
@@ -1479,6 +1531,8 @@ func TestRemoveImmutableTrioStaysInsideRoot(t *testing.T) {
 // root was created through the symlink first, and only the later extraction
 // noticed.
 func TestOpenImmutableRootRefusesSymlinkedExtractDir(t *testing.T) {
+	t.Parallel()
+
 	root := t.TempDir()
 	outside := filepath.Join(root, "outside")
 	require.NoError(t, os.MkdirAll(outside, 0o750))
@@ -1503,6 +1557,8 @@ func TestOpenImmutableRootRefusesSymlinkedExtractDir(t *testing.T) {
 // be carried as AncillaryVerified while nothing had verified it — the flag
 // would be a claim about a directory the check never saw.
 func TestBootstrapV2CarriesTheVerifiedAncillaryHandle(t *testing.T) {
+	t.Parallel()
+
 	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
 	downloadDir := t.TempDir()
 

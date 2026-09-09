@@ -79,6 +79,8 @@ func seedFreshStatus(
 // produced an empty CheckResult — silently dropping the persisted failure
 // because nothing was freshly (re)checked this run.
 func TestCheckSurfacesPersistedFailWhenNothingNeedsRechecking(t *testing.T) {
+	t.Parallel()
+
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
 	cache, err := OpenCache(cachePath, nil)
 	require.NoError(t, err)
@@ -113,6 +115,8 @@ func TestCheckSurfacesPersistedFailWhenNothingNeedsRechecking(t *testing.T) {
 // TestCheckSurfacesPersistedErrorWhenNothingNeedsRechecking is the ERROR-status
 // counterpart to TestCheckSurfacesPersistedFailWhenNothingNeedsRechecking.
 func TestCheckSurfacesPersistedErrorWhenNothingNeedsRechecking(t *testing.T) {
+	t.Parallel()
+
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
 	cache, err := OpenCache(cachePath, nil)
 	require.NoError(t, err)
@@ -156,6 +160,8 @@ func TestCheckSurfacesPersistedErrorWhenNothingNeedsRechecking(t *testing.T) {
 // PASS would be reported forever with zero account-level validation ever
 // attempted.
 func TestCheckReselectsPoolOnlyEpochMissingAccountCoverage(t *testing.T) {
+	t.Parallel()
+
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
 	cache, err := OpenCache(cachePath, nil)
 	require.NoError(t, err)
@@ -270,6 +276,8 @@ func TestCheckReselectsPoolOnlyEpochMissingAccountCoverage(t *testing.T) {
 // same effective-status computation Check performs must respect the caller's
 // requested scope, not just the whole network's cache.
 func TestCheckScopesPersistedOutcomeToFromThroughEpoch(t *testing.T) {
+	t.Parallel()
+
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
 	cache, err := OpenCache(cachePath, nil)
 	require.NoError(t, err)
@@ -315,6 +323,8 @@ func TestCheckScopesPersistedOutcomeToFromThroughEpoch(t *testing.T) {
 // EpochsChecked stays 0 — as opposed to some other "nothing to do" reason
 // that would also need distinguishing.
 func TestCheckAllReturnsZeroEpochsCheckedForUnfetchedEpoch(t *testing.T) {
+	t.Parallel()
+
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
 	cache, err := OpenCache(cachePath, nil)
 	require.NoError(t, err)
@@ -372,6 +382,8 @@ func newTestDingoDB(t *testing.T) (dataDir string, gdb *testDB) {
 // data exactly, so a fully correct field-level epoch mapping is the only way
 // Check reports PASS.
 func TestCheckAlignsRewardScheduleEpochsEndToEnd(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(10)
 	poolHash := testPoolKeyHash(t, 0x03)
@@ -503,6 +515,8 @@ func TestCheckAlignsRewardScheduleEpochsEndToEnd(t *testing.T) {
 // a clean PASS despite treasury/reserves/fees never actually being validated.
 // This confirms Check now surfaces it as ERROR instead.
 func TestCheckDetectsMissingKoiosTotalsOnUpgradedCache(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(10)
 
@@ -604,6 +618,8 @@ func TestCheckDetectsMissingKoiosTotalsOnUpgradedCache(t *testing.T) {
 func TestCheckEpochPreservesPriorMismatchEvidenceOnLaterReadFailure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(10)
 
@@ -702,6 +718,8 @@ func TestCheckEpochPreservesPriorMismatchEvidenceOnLaterReadFailure(
 // compareEpochAccounts must consult before treating koios_account_rewards as
 // a complete reference set.
 func TestCheckAccountsCoverageIncompleteIsError(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(10)
 
@@ -770,6 +788,8 @@ func TestCheckAccountsCoverageIncompleteIsError(t *testing.T) {
 func TestCheckAccountsCoverageDBErrorIsNotConflatedWithIncompleteCoverage(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(10)
 
@@ -845,6 +865,8 @@ func TestCheckAccountsCoverageDBErrorIsNotConflatedWithIncompleteCoverage(
 // coverage gate, StakeAddressFromCredential resolution, and
 // CompareAccountEpoch.
 func TestCheckAccountsEndToEndExactMatchAndMismatch(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(10)
 	const stakeEpoch = uint64(9) // K-1, per koiosStakeEpoch
@@ -949,6 +971,8 @@ func TestCheckAccountsEndToEndExactMatchAndMismatch(t *testing.T) {
 }
 
 func TestEffectiveCheckOutcome(t *testing.T) {
+	t.Parallel()
+
 	statuses := []CheckEpochStatus{
 		{Epoch: 1, Status: StatusPass},
 		{Epoch: 2, Status: StatusFail},
@@ -1101,6 +1125,8 @@ func seedPoolPresenceFixture(
 // where two pools registered mid-epoch failed the strict observer (dingo
 // #3483).
 func TestCheckIgnoresParamEpochOnlyPoolForPresence(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(10)
 	newPoolHash := testPoolKeyHash(t, 0x07)
@@ -1136,6 +1162,8 @@ func TestCheckIgnoresParamEpochOnlyPoolForPresence(t *testing.T) {
 // divergence and must still be flagged, so the fix above cannot be widened
 // into suppressing genuine pool_only_dingo findings.
 func TestCheckFlagsStakeEpochPoolMissingFromKoios(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(10)
 	newPoolHash := testPoolKeyHash(t, 0x07)
@@ -1183,6 +1211,8 @@ func TestCheckFlagsStakeEpochPoolMissingFromKoios(t *testing.T) {
 // the pool left the pool set, so the epoch must still report PASS rather than
 // halting a strict-mode node (dingo #3485).
 func TestCheckDepartedPoolDoesNotErrorEpoch(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(14)
 
@@ -1373,6 +1403,8 @@ func seedDepartureFixtureWithCount(
 // per-pool pool_stake_snapshot membership rather than from
 // epoch_summary.SnapshotReady (dingo #3485).
 func TestCheckDegradedActivePoolStillErrors(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(14)
 
@@ -1410,6 +1442,8 @@ func TestCheckDegradedActivePoolStillErrors(t *testing.T) {
 //
 // The pool set at K+1 still lists them, so each stays an ERROR.
 func TestCheckMissingRewardBundleStillErrors(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(14)
 
@@ -1441,6 +1475,8 @@ func TestCheckMissingRewardBundleStillErrors(t *testing.T) {
 // when the number of readable mark rows equals the count the summary declares,
 // both being written from the same StakeDistribution (dingo #3485).
 func TestCheckIncompleteParamEpochPoolSetStillErrors(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(14)
 
@@ -1487,6 +1523,8 @@ func TestCheckIncompleteParamEpochPoolSetStillErrors(t *testing.T) {
 // accounts for every pool in that pool set. A pool missing from a complete set
 // left it (dingo #3795).
 func TestCheckDepartedPoolSurvivesSnapshotRetentionPrune(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(14)
 
@@ -1522,6 +1560,8 @@ func TestCheckDepartedPoolSurvivesSnapshotRetentionPrune(t *testing.T) {
 // declared pool count, some pool in that pool set has no reward-input row, so
 // absence proves nothing and the strict classification has to stand.
 func TestCheckIncompleteRewardInputSetStillErrorsAfterPrune(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(14)
 
@@ -1743,6 +1783,8 @@ func TestCheckAccountRewardsPendingWiring(t *testing.T) {
 // divergence into a PASS, which is the one outcome a parity checker must
 // never produce.
 func TestCheckUncreditedDingoRowStillFailsAgainstKoios(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(10)
 	const stakeEpoch = koiosEpoch - 1
@@ -1840,6 +1882,8 @@ func TestCheckUncreditedDingoRowStillFailsAgainstKoios(t *testing.T) {
 // reported it — so a filter applied before decoding would drop the row and
 // silently disable the diff with it.
 func TestCheckAccountDecodeErrorReachesOutput(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(10)
 	const stakeEpoch = koiosEpoch - 1
@@ -1981,6 +2025,8 @@ VALUES (?, ?, ?, ?)`,
 // cancelled by a later registration is direct per-pool evidence that the pool
 // left, needing no argument about whether some *set* was completely recorded.
 func TestCheckRetiredPoolIsDepartedWithoutAnyPoolSetEvidence(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(14)
 
@@ -2025,6 +2071,8 @@ func TestCheckRetiredPoolIsDepartedWithoutAnyPoolSetEvidence(t *testing.T) {
 // the param epoch — which is what GetPoolsRetiringAtEpoch does for POOLREAP —
 // would fix the first epoch and leave every later one an ERROR.
 func TestCheckRetiredPoolStaysDepartedInLaterEpochs(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(14)
 
@@ -2071,6 +2119,8 @@ func TestCheckRetiredPoolStaysDepartedInLaterEpochs(t *testing.T) {
 // the pool set, so its absent K+1 reward-input row is genuine missing input,
 // and downgrading it would turn a real ERROR into a PASS.
 func TestCheckReregisteredPoolStillErrors(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(14)
 

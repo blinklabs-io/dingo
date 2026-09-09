@@ -96,6 +96,8 @@ func seedEpochTxn(
 // database/epoch.go: the swap to GetEpochBySlot is behavior-preserving
 // for every slot a caller can legitimately pass.
 func TestEpochBySlot_MatchesLegacyLinearScan(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	// Three contiguous epochs: [0,100), [100,250), [250,450).
@@ -142,6 +144,8 @@ func TestEpochBySlot_MatchesLegacyLinearScan(t *testing.T) {
 // TestEpochBySlot_BeforeKnownRange confirms both implementations agree
 // that a slot preceding every persisted epoch is an error.
 func TestEpochBySlot_BeforeKnownRange(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	seedEpoch(t, db, 5, 10, 100)
 
@@ -168,6 +172,8 @@ func TestEpochBySlot_BeforeKnownRange(t *testing.T) {
 // regression -- recorded here so the difference is explicit rather than
 // silently swallowed by only testing the well-formed range.
 func TestEpochBySlot_BeyondDeclaredRangeDivergesFromLegacy(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	seedEpoch(t, db, 0, 0, 100)
 
@@ -196,6 +202,8 @@ func TestEpochBySlot_BeyondDeclaredRangeDivergesFromLegacy(t *testing.T) {
 // contrasting with GetEpochs (used by the old implementation), whose
 // result set size grows with the number of persisted epochs.
 func TestGetEpochBySlot_IsBoundedQuery(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	const epochCount = 50
@@ -222,6 +230,8 @@ func TestGetEpochBySlot_IsBoundedQuery(t *testing.T) {
 // fixed EpochBySlot relies on rather than leaking a driver-specific
 // sql.ErrNoRows value to callers.
 func TestGetEpochBySlot_NotFoundReturnsNilError(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	seedEpoch(t, db, 0, 0, 100)
 
