@@ -272,6 +272,15 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
+			name: "mesh uses API bind address for port collision checks",
+			modify: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.BindAddr = "127.0.0.2"
+				c.APIBindAddr = "127.0.0.1"
+				c.MetricsPort = APIPluginPort(c.Plugins.API.Mesh)
+			},
+		},
+		{
 			name: "bark on distinct bind address may share a port",
 			modify: func(c *Config) {
 				c.BindAddr = "127.0.0.1"

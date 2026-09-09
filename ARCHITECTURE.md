@@ -5702,7 +5702,6 @@ loopback-only APIs may remain unauthenticated for local clients. An operator
 who intentionally exposes an API must configure token authentication (or put
 an authenticated reverse proxy in front and keep the Dingo listener on
 loopback).
-without one.
 
 - **Policy types (`internal/apiconfig`).** `TLSPolicy` (`mode`,
   `certFilePath`, `keyFilePath`) and `AuthPolicy` (`mode`, `token`,

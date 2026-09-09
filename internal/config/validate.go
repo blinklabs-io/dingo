@@ -320,7 +320,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		},
 		{
 			"plugins.api.mesh.config.port",
-			c.BindAddr,
+			c.APIBindAddr,
 			meshPort,
 			apiListeners,
 			false,
