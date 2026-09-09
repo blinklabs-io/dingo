@@ -442,9 +442,6 @@ func (c *Cache) CommitEpochData(
 			_ = tx.Rollback()
 		}
 	}()
-	if err = c.assertClaimedSource(tx, info.Network); err != nil {
-		return err
-	}
 	if _, err = tx.Exec("DELETE FROM koios_pool_epoch WHERE network = ? AND epoch = ?", info.Network, info.Epoch); err != nil {
 		return err
 	}
@@ -488,6 +485,11 @@ func (c *Cache) CommitEpochData(
 			totals.TreasuryDonation, totals.TreasuryWithdrawal, totals.ReservesWithdrawal); err != nil {
 			return err
 		}
+	}
+	// Verified last so the writes above take SQLite's writer slot first;
+	// see withClaimedSource. A refusal rolls them back.
+	if err = c.assertClaimedSource(tx, info.Network); err != nil {
+		return err
 	}
 	err = tx.Commit()
 	return err
@@ -707,9 +709,6 @@ func (c *Cache) CommitAccountRewardsForEpoch(
 			_ = tx.Rollback()
 		}
 	}()
-	if err = c.assertClaimedSource(tx, network); err != nil {
-		return err
-	}
 	if _, err = tx.Exec("DELETE FROM koios_account_rewards WHERE network = ? AND epoch = ?", network, epoch); err != nil {
 		return err
 	}
@@ -748,6 +747,11 @@ func (c *Cache) CommitAccountRewardsForEpoch(
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
 		network, epoch, requestedCount, len(rows), complete, fetchedAt,
 		zeroReward.Count, string(zeroRewardSample)); err != nil {
+		return err
+	}
+	// Verified last so the writes above take SQLite's writer slot first;
+	// see withClaimedSource. A refusal rolls them back.
+	if err = c.assertClaimedSource(tx, network); err != nil {
 		return err
 	}
 	err = tx.Commit()
@@ -909,10 +913,6 @@ func (c *Cache) SaveAccountFetchChunkProgress(
 			_ = tx.Rollback()
 		}
 	}()
-	if err = c.assertClaimedSource(tx, network); err != nil {
-		return err
-	}
-
 	if _, err = tx.Exec(
 		`DELETE FROM koios_account_fetch_staged_rows WHERE network = ? AND epoch = ? AND chunk_hash = ?`,
 		network, epoch, chunkHash,
@@ -963,6 +963,12 @@ func (c *Cache) SaveAccountFetchChunkProgress(
 		); err != nil {
 			return err
 		}
+	}
+
+	// Verified last so the writes above take SQLite's writer slot first;
+	// see withClaimedSource. A refusal rolls them back.
+	if err = c.assertClaimedSource(tx, network); err != nil {
+		return err
 	}
 
 	err = tx.Commit()
@@ -1576,11 +1582,13 @@ func (c *Cache) InsertCheckRun(run CheckRun) error {
 // read afterward is still exactly as atomic against a concurrent
 // RecordKoiosSource as before — nothing can repoint the source between it and
 // the commit below. A caller-visible refusal still rolls the write back via
-// the deferred tx.Rollback(), same as when the check ran first.
-// See TestObserverBackfillsParamsForAPreExistingCache: it reproduces only
-// inside the full package suite, where the test's own require.Eventually
-// polling repeatedly reopens the same cache file and can advance the WAL
-// between a SELECT and a later write on this handle.
+// the deferred tx.Rollback(), same as when the check ran first —
+// TestRefusedWriteLeavesNoRows asserts that on the rows, not on the error.
+// TestCacheWritesNeverUpgradeAReadSnapshot pins the order itself; it fails
+// with SQLITE_BUSY_SNAPSHOT when the check runs first. Every other Cache
+// transaction holds the same order for the same reason, including
+// RecordKoiosSource, whose read cannot move after its writes and which takes
+// the writer slot with a no-op UPDATE instead.
 func (c *Cache) withClaimedSource(
 	network string,
 	fn func(tx *sql.Tx) error,
@@ -1625,9 +1633,6 @@ func (c *Cache) CommitEpochMismatches(
 			_ = tx.Rollback()
 		}
 	}()
-	if err = c.assertClaimedSource(tx, network); err != nil {
-		return err
-	}
 	if _, err = tx.Exec(
 		"DELETE FROM check_mismatches WHERE network = ? AND epoch = ?",
 		network,
@@ -1651,6 +1656,11 @@ func (c *Cache) CommitEpochMismatches(
 				return err
 			}
 		}
+	}
+	// Verified last so the writes above take SQLite's writer slot first;
+	// see withClaimedSource. A refusal rolls them back.
+	if err = c.assertClaimedSource(tx, network); err != nil {
+		return err
 	}
 	err = tx.Commit()
 	return err
@@ -1720,9 +1730,6 @@ func (c *Cache) SaveAccountUniverse(
 		return fmt.Errorf("save account universe: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := c.assertClaimedSource(tx, network); err != nil {
-		return err
-	}
 	if _, err := tx.Exec(
 		`DELETE FROM koios_account_universe WHERE network = ?`,
 		network,
@@ -1756,6 +1763,11 @@ ON CONFLICT (network) DO UPDATE SET
 		network, fetchedAt.UTC(), saved,
 	); err != nil {
 		return fmt.Errorf("save account universe: state: %w", err)
+	}
+	// Verified last so the writes above take SQLite's writer slot first;
+	// see withClaimedSource. A refusal rolls them back.
+	if err := c.assertClaimedSource(tx, network); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("save account universe: commit: %w", err)
@@ -1964,6 +1976,20 @@ func (c *Cache) RecordKoiosSource(
 		return change, fmt.Errorf("begin koios source tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
+
+	// Claim the writer slot before reading. This UPDATE assigns network to
+	// itself and so changes nothing, but SQLite treats any UPDATE as
+	// write-intending, which is what the deferred BEGIN needs to open as a
+	// writer rather than as a reader the INSERT below would have to upgrade.
+	// Unlike the gated writers, the read here decides what the writes are,
+	// so it cannot simply be moved after them. See withClaimedSource for why
+	// that upgrade is the failure and not the wait.
+	if _, err = tx.Exec(
+		"UPDATE koios_source SET network = network WHERE network = ?",
+		network,
+	); err != nil {
+		return change, fmt.Errorf("claim koios source write: %w", err)
+	}
 
 	var previous string
 	err = tx.QueryRow(

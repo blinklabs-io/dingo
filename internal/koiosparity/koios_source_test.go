@@ -777,3 +777,170 @@ func TestUnclaimedCacheStillWritesEpochParams(t *testing.T) {
 		Era:     "conway",
 	}))
 }
+
+// gatedCacheWrite is one Cache writer the claimed-source gate covers, kept
+// callable so the refusal and rollback assertions below run over the whole
+// set rather than over a list that drifts from cache.go.
+type gatedCacheWrite struct {
+	name string
+	call func(*Cache) error
+}
+
+// gatedCacheWrites covers every gated writer, chosen so that running the set
+// once populates all of koiosSourcedTables.
+func gatedCacheWrites(network string, now time.Time) []gatedCacheWrite {
+	const epoch = uint64(7)
+	const addr = "stake_test1first"
+	reward := []KoiosAccountRewards{{
+		StakeAddress: addr, RewardType: "member", Earned: "1", FetchedAt: now,
+	}}
+	return []gatedCacheWrite{
+		{"CommitEpochData", func(c *Cache) error {
+			return c.CommitEpochData(
+				KoiosEpochInfo{
+					Network:      network,
+					Epoch:        epoch,
+					ActiveStake:  "1",
+					Fees:         "1",
+					TotalRewards: "1",
+					EpochEndTime: now,
+					FetchedAt:    now,
+				},
+				[]KoiosPoolEpoch{{
+					PoolBech32: "pool1first", ActiveStake: "1", FetchedAt: now,
+				}},
+				&KoiosTotals{
+					Treasury:  "1",
+					Reserves:  "1",
+					Fees:      "1",
+					Reward:    "1",
+					FetchedAt: now,
+				},
+			)
+		}},
+		{"UpsertEpochParams", func(c *Cache) error {
+			return c.UpsertEpochParams(KoiosEpochParams{
+				Network: network, Epoch: epoch, Era: "alonzo", FetchedAt: now,
+			})
+		}},
+		{"SaveAccountUniverse", func(c *Cache) error {
+			return c.SaveAccountUniverse(network, []string{addr}, now)
+		}},
+		{"SaveAccountFetchChunkProgress", func(c *Cache) error {
+			return c.SaveAccountFetchChunkProgress(
+				network, epoch, "chunk-first", reward, []string{addr}, now,
+			)
+		}},
+		{"CommitAccountRewardsForEpoch", func(c *Cache) error {
+			return c.CommitAccountRewardsForEpoch(
+				network, epoch, reward, 1, true, now,
+			)
+		}},
+		{"CommitEpochMismatches", func(c *Cache) error {
+			return c.CommitEpochMismatches(network, epoch, []CheckMismatch{{
+				PoolBech32: "pool1first",
+				Field:      "active_stake",
+				DingoValue: "1",
+				KoiosValue: "2",
+				Category:   "pool",
+				CheckedAt:  now,
+			}})
+		}},
+		{"UpsertCheckEpochStatus", func(c *Cache) error {
+			return c.UpsertCheckEpochStatus(CheckEpochStatus{
+				Network:       network,
+				Epoch:         epoch,
+				LastCheckedAt: now,
+				Status:        "FAIL",
+			})
+		}},
+		{"InsertCheckRun", func(c *Cache) error {
+			return c.InsertCheckRun(CheckRun{Network: network, RunAt: now})
+		}},
+	}
+}
+
+// sourcedTableCounts is network's row count in every table
+// RecordKoiosSource discards, keyed by table.
+func sourcedTableCounts(
+	t *testing.T,
+	c *Cache,
+	network string,
+) map[string]int {
+	t.Helper()
+	counts := make(map[string]int, len(koiosSourcedTables))
+	for _, table := range koiosSourcedTables {
+		var n int
+		// #nosec G202 -- table comes from koiosSourcedTables, a package-level
+		// literal slice; TestKoiosSourcedTablesAreBareIdentifiers keeps it so.
+		require.NoError(t, c.db.QueryRow(
+			"SELECT COUNT(*) FROM "+table+" WHERE network = ?", network,
+		).Scan(&n), table)
+		counts[table] = n
+	}
+	return counts
+}
+
+// TestRefusedWriteLeavesNoRows is the rollback half of the claimed-source
+// gate. Every gated writer runs its statements before assertClaimedSource, so
+// a refusal now depends on the transaction rolling those statements back
+// rather than on their never having been issued. A statement that survived a
+// refusal would be exactly the mixed-oracle row the gate exists to prevent —
+// the first host's answer, committed under the second host's marker.
+//
+// The assertion is over koiosSourcedTables as a set, so a table added to the
+// discard list is covered here without editing this test.
+func TestRefusedWriteLeavesNoRows(t *testing.T) {
+	const network = "preview"
+	path := filepath.Join(t.TempDir(), "cache.db")
+	now := time.Now().UTC()
+	writes := gatedCacheWrites(network, now)
+
+	first, err := OpenCache(path, nil)
+	require.NoError(t, err)
+	defer first.Close() //nolint:errcheck
+	_, err = first.RecordKoiosSource(
+		network, "https://first.example/api/v1", now,
+	)
+	require.NoError(t, err)
+
+	// While the first handle still owns the cache every gated write lands,
+	// so the emptiness asserted at the end is a rollback rather than a test
+	// that never wrote anything.
+	for _, w := range writes {
+		require.NoErrorf(t, w.call(first), "%s while still the owner", w.name)
+	}
+	for table, n := range sourcedTableCounts(t, first, network) {
+		require.NotZerof(t, n, "%s holds no rows to roll back", table)
+	}
+
+	// A second process re-points the cache, discarding those rows.
+	second, err := OpenCache(path, nil)
+	require.NoError(t, err)
+	defer second.Close() //nolint:errcheck
+	_, err = second.RecordKoiosSource(
+		network, "https://second.example/api/v1", now,
+	)
+	require.NoError(t, err)
+	for table, n := range sourcedTableCounts(t, second, network) {
+		require.Zerof(t, n, "%s survived the re-point", table)
+	}
+
+	// The first handle must refuse every gated write...
+	for _, w := range writes {
+		err := w.call(first)
+		require.Errorf(t, err, "%s must refuse after the re-point", w.name)
+		assert.Containsf(
+			t, err.Error(), "refusing to write", "%s", w.name,
+		)
+	}
+
+	// ...and must leave nothing behind when it does.
+	for table, n := range sourcedTableCounts(t, second, network) {
+		assert.Zerof(t, n,
+			"%s holds rows a refused write left behind: the first host's "+
+				"answers are readable from a cache re-pointed at another host",
+			table,
+		)
+	}
+}
