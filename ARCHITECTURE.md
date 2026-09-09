@@ -7133,13 +7133,16 @@ never the reverse.
   `NewObserver` because the probe needs a context and a startup the caller can
   fail — because the node's config dump names the configured value only for
   the in-process observer and says nothing on the `fetch`/`run`/`watch` paths.
-  Recording alone only invalidates the rows present when it runs, so all seven
-  writes that touch a Koios-sourced table also verify, inside their own
-  transaction, that the cache still holds the root this handle claimed:
+  Recording alone only invalidates the rows present when it runs, so the seven
+  writes that carry the check verify, inside their own transaction, that the
+  cache still holds the root this handle claimed:
   `CommitEpochData`, `CommitAccountRewardsForEpoch`,
   `SaveAccountFetchChunkProgress` and `SaveAccountUniverse` on the fetch side,
   and `CommitEpochMismatches`, `UpsertCheckEpochStatus` and `InsertCheckRun` on
-  the check side. The default cache path is shared across the standalone commands and
+  the check side. That is the set the check is on, not every statement that
+  reaches a Koios-sourced table: retention pruning and the schema backfill
+  delete or recompute rows already present rather than importing another
+  host's answers. The default cache path is shared across the standalone commands and
   the in-process observer, so an observer on one host and a `fetch
   --koios-url` on another are a reachable pair; without the check the older
   client would go on appending its host's answers under the newer host's
