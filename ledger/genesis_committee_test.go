@@ -46,6 +46,8 @@ const musashiGenesisCommitteeExpiry = 293
 // "not a CC member" even though the real chain has recognized it since the
 // hard fork.
 func TestCreateGenesisBlockSeedsCommittee(t *testing.T) {
+	t.Parallel()
+
 	ls, _ := genesisConstitutionTestState(t)
 	require.NoError(t, ls.createGenesisBlock())
 
@@ -73,6 +75,8 @@ func TestCreateGenesisBlockSeedsCommittee(t *testing.T) {
 // genesis-creation transaction. Seeding only from that transaction would
 // therefore fix new nodes and leave every existing one broken.
 func TestCreateGenesisBlockSeedsCommitteeOnExistingDatabase(t *testing.T) {
+	t.Parallel()
+
 	ls, db := genesisConstitutionTestState(t)
 
 	// Stand in for a database written by a build with no committee seed:
@@ -110,6 +114,8 @@ func TestCreateGenesisBlockSeedsCommitteeOnExistingDatabase(t *testing.T) {
 // leaves a single row per member rather than a duplicate soft-delete/insert
 // pair.
 func TestCreateGenesisBlockCommitteeReplayIdempotent(t *testing.T) {
+	t.Parallel()
+
 	ls, db := genesisConstitutionTestState(t)
 	require.NoError(t, ls.createGenesisBlock())
 	require.NoError(t, ls.createGenesisBlock())
@@ -123,6 +129,8 @@ func TestCreateGenesisBlockCommitteeReplayIdempotent(t *testing.T) {
 // genesis term -- the hazard a naive unconditional reseed on every startup
 // would create.
 func TestCreateGenesisBlockCommitteeEnactmentWins(t *testing.T) {
+	t.Parallel()
+
 	ls, db := genesisConstitutionTestState(t)
 	require.NoError(t, ls.createGenesisBlock())
 
@@ -168,6 +176,8 @@ func TestCreateGenesisBlockCommitteeEnactmentWins(t *testing.T) {
 // TestParseGenesisCommitteeCredential exercises both credential prefixes and
 // the rejection paths for malformed genesis committee member keys.
 func TestParseGenesisCommitteeCredential(t *testing.T) {
+	t.Parallel()
+
 	keyHash := bytes.Repeat([]byte{0xab}, 28)
 	tag, hash, err := parseGenesisCommitteeCredential(
 		"keyHash-" + hex.EncodeToString(keyHash),
@@ -203,6 +213,8 @@ func TestParseGenesisCommitteeCredential(t *testing.T) {
 // store's unsigned epoch would wrap it to a near-maximum uint64 -- a term no
 // epoch boundary would ever expire -- so the seed must refuse it outright.
 func TestEnsureGenesisCommitteeRejectsNegativeExpiry(t *testing.T) {
+	t.Parallel()
+
 	ls, db := genesisConstitutionTestState(t)
 
 	// The embedded config is parsed fresh on every load, so mutating this
@@ -241,6 +253,8 @@ func TestEnsureGenesisCommitteeRejectsNegativeExpiry(t *testing.T) {
 func TestEnsureGenesisCommitteeRejectsNegativeExpiryWhenAlreadySeeded(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := genesisConstitutionTestState(t)
 	require.NoError(t, ls.createGenesisBlock())
 	seeded := committeeMemberRowCount(t, db)
@@ -266,6 +280,8 @@ func TestEnsureGenesisCommitteeRejectsNegativeExpiryWhenAlreadySeeded(
 // directly, including the most negative int, which is the value a straight
 // conversion wraps furthest.
 func TestGenesisCommitteeExpiryEpoch(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		expiry  int

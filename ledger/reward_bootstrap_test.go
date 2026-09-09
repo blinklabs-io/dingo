@@ -32,6 +32,8 @@ import (
 // nothing. Byron-prefix networks are suppressed by applyStakeRewards' Byron
 // performance-epoch guard, not by this helper.
 func TestStakeRewardEpochsForInitialApplication(t *testing.T) {
+	t.Parallel()
+
 	_, ok := stakeRewardEpochsForApplication(0)
 	require.False(t, ok, "epoch 0 is not a boundary and applies no rewards")
 
@@ -65,6 +67,8 @@ func TestStakeRewardEpochsForInitialApplication(t *testing.T) {
 func TestSuppressBootstrapStakeRewardsReturnsAvailableRewardsToReserves(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	result := &rewards.Result{
 		PoolRewards:      []rewards.PoolReward{{PoolReward: 600}},
 		AccountRewards:   []rewards.AccountReward{{Amount: 600}},
@@ -101,6 +105,8 @@ func TestSuppressBootstrapStakeRewardsReturnsAvailableRewardsToReserves(
 }
 
 func TestBootstrapStakeRewardsRejectStalePrecompute(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	require.NoError(t, db.Metadata().SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:   1,

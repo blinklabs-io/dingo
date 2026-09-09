@@ -31,6 +31,8 @@ import (
 func TestBlockfetchSubscriptionRemainsLosslessPastDeliveryTimeout(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Stop()
 
