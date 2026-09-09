@@ -267,13 +267,22 @@ type v2FixtureOptions struct {
 	digestsCloud404      bool
 	digestsCloudBadRoot  bool
 	immutableBadMirror   bool
+	// signedImmutableQuery appends a pre-signed-style query string to the
+	// immutable location templates, the way cloud-storage locations carry
+	// their credentials. The mux routes on path only, so it changes nothing
+	// but what an error is at risk of quoting.
+	signedImmutableQuery bool
 	missingAncillary     bool
 	validImmutable       bool
 	fallbackLedgerState  bool
 }
 
 type v2Fixture struct {
-	server               *httptest.Server
+	server *httptest.Server
+	// artifactsByHash serves the artifact detail endpoint. It starts holding
+	// only the fixture's own artifact; publishNewerArtifact adds to it so a
+	// test can make the aggregator advance mid-run the way a live one does.
+	artifactsByHash      map[string]*CardanoDatabaseSnapshot
 	artifact             *CardanoDatabaseSnapshot
 	listItems            []CardanoDatabaseSnapshotListItem
 	certs                map[string]Certificate
@@ -296,6 +305,7 @@ type v2Fixture struct {
 func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 	t.Helper()
 	fixture := &v2Fixture{
+		artifactsByHash:      map[string]*CardanoDatabaseSnapshot{},
 		certs:                map[string]Certificate{},
 		immutableArchives:    map[uint64][]byte{},
 		badImmutableArchives: map[uint64][]byte{},
@@ -421,13 +431,17 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 	ancillaryFiles[ancillaryManifestFilename] = manifestJSON
 	fixture.ancillaryArchive = buildTarZst(t, ancillaryFiles)
 
+	signedQuery := ""
+	if opts.signedImmutableQuery {
+		signedQuery = "?X-Amz-Credential=AKIAFIXTURE&X-Amz-Signature=deadbeef"
+	}
 	immutableLocations := []CardanoDatabaseLocation{}
 	if opts.immutableBadMirror {
 		immutableLocations = append(
 			immutableLocations,
 			CardanoDatabaseLocation{
 				Type:                 locationTypeCloudStorage,
-				URITemplate:          baseURL + "/files/imm-bad/{immutable_file_number}.tar.zst",
+				URITemplate:          baseURL + "/files/imm-bad/{immutable_file_number}.tar.zst" + signedQuery,
 				CompressionAlgorithm: "zstandard",
 			},
 		)
@@ -436,7 +450,7 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 		immutableLocations,
 		CardanoDatabaseLocation{
 			Type:                 locationTypeCloudStorage,
-			URITemplate:          baseURL + "/files/imm/{immutable_file_number}.tar.zst",
+			URITemplate:          baseURL + "/files/imm/{immutable_file_number}.tar.zst" + signedQuery,
 			CompressionAlgorithm: "zstandard",
 		},
 	)
@@ -491,6 +505,7 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 		artifact.Hash = strings.Repeat("d", 64)
 	}
 	fixture.artifact = artifact
+	fixture.artifactsByHash[artifact.Hash] = artifact
 
 	// Certificate chain (genesis <- leaf), full STM verification
 	genesisVKey, genesisPrivateKey := testGenesisKeyPair(t)
@@ -579,8 +594,14 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 				writeJSON(w, fixture.listItems)
 			case p == "/artifact/cardano-database/digests":
 				writeJSON(w, fixture.digestEntries)
-			case p == "/artifact/cardano-database/"+artifact.Hash:
-				writeJSON(w, fixture.artifact)
+			case strings.HasPrefix(p, "/artifact/cardano-database/"):
+				hash := strings.TrimPrefix(p, "/artifact/cardano-database/")
+				detail, ok := fixture.artifactsByHash[hash]
+				if !ok {
+					http.NotFound(w, r)
+					return
+				}
+				writeJSON(w, detail)
 			case p == "/files/digests.tar.zst":
 				if opts.digestsCloud404 {
 					http.NotFound(w, r)
@@ -664,6 +685,34 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 	)
 
 	return fixture
+}
+
+// publishNewerArtifact advertises a newer artifact for the same chain content
+// and returns it, the way a live aggregator does between one sync run and the
+// next. It reuses the fixture's certified digest list, merkle root, locations
+// and ancillary archive, changing only the beacon epoch — so the new artifact
+// hash (sha256(epoch || merkle root)) is genuinely different. Certificate
+// verification is disabled by callers of this fixture because the reused
+// certificate belongs to the original beacon.
+func (f *v2Fixture) publishNewerArtifact(
+	t *testing.T,
+) *CardanoDatabaseSnapshot {
+	t.Helper()
+	newer := *f.artifact
+	newer.Beacon.Epoch = f.artifact.Beacon.Epoch + 1
+	newer.Hash = newer.ComputeHash()
+	require.NotEqual(t, f.artifact.Hash, newer.Hash)
+	f.artifactsByHash[newer.Hash] = &newer
+	f.listItems = append(f.listItems, CardanoDatabaseSnapshotListItem{
+		Hash:                    newer.Hash,
+		MerkleRoot:              newer.MerkleRoot,
+		Beacon:                  newer.Beacon,
+		CertificateHash:         newer.CertificateHash,
+		TotalDbSizeUncompressed: newer.TotalDbSizeUncompressed,
+		CardanoNodeVersion:      newer.CardanoNodeVersion,
+		CreatedAt:               newer.CreatedAt,
+	})
+	return &newer
 }
 
 func (f *v2Fixture) bootstrapConfig(downloadDir string) BootstrapConfig {

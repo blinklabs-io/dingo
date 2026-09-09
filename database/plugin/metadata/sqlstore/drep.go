@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -649,6 +650,13 @@ func (s *Store) UpdateDRepActivity(
 	activity, err := checkedInt64(activityEpoch)
 	if err != nil {
 		return err
+	}
+	if inactivityPeriod > math.MaxUint64-activityEpoch {
+		return fmt.Errorf(
+			"drep expiry epoch overflows uint64: %d + %d",
+			activityEpoch,
+			inactivityPeriod,
+		)
 	}
 	expiry, err := checkedInt64(activityEpoch + inactivityPeriod)
 	if err != nil {

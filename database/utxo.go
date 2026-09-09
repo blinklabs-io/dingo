@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -80,22 +81,14 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
 	}
 
 	var deleteErrors int
-	for start := 0; start < len(utxos); start += batchSize {
-		end := min(start+batchSize, len(utxos))
-		batchTxn := NewBlobOnlyTxn(d, true)
-		// Take the store from the batch's own transaction rather than
-		// from the database once up front: each batch commits separately,
-		// so a replacement between batches would otherwise leave later
-		// batches deleting through a store that no longer owns their
-		// transaction handles.
-		blob := batchTxn.BlobStore()
-		if blob == nil {
-			batchTxn.Release()
-			return types.ErrBlobStoreUnavailable
-		}
+	deleteBatch := func(
+		store blob.BlobStore,
+		blobTxn types.Txn,
+		batch []models.Utxo,
+	) int {
 		var batchDeleteErrors int
-		for _, utxo := range utxos[start:end] {
-			if err := blob.DeleteUtxo(batchTxn.Blob(), utxo.TxId, utxo.OutputIdx); err != nil {
+		for _, utxo := range batch {
+			if err := store.DeleteUtxo(blobTxn, utxo.TxId, utxo.OutputIdx); err != nil {
 				deleteErrors++
 				batchDeleteErrors++
 				d.logger.Warn(
@@ -108,16 +101,55 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
 				)
 			}
 		}
-		if err := batchTxn.Commit(); err != nil {
-			deleteErrors += (end - start) - batchDeleteErrors
-			_ = batchTxn.Rollback()
-			d.logger.Warn(
-				"UTxO blob delete batch commit failed",
-				"batch_start", start,
-				"batch_end", end,
-				"batch_size", end-start,
-				"error", err,
-			)
+		return batchDeleteErrors
+	}
+
+	// The store used for each delete comes from whichever transaction owns
+	// the handle that delete runs through, so a concurrent SetBlobStore
+	// cannot leave a handle from one store being deleted through another.
+	if txn != nil && txn.Blob() != nil {
+		// Stage the deletes in the caller's transaction so they commit or
+		// roll back with the metadata delete they accompany. Committing
+		// them separately let a successful blob delete survive the
+		// caller's rollback, leaving metadata that points at blob data
+		// which is already gone.
+		blob := txn.BlobStore()
+		if blob == nil {
+			return types.ErrBlobStoreUnavailable
+		}
+		deleteBatch(blob, txn.Blob(), utxos)
+	} else {
+		for start := 0; start < len(utxos); start += batchSize {
+			end := min(start+batchSize, len(utxos))
+			batch := utxos[start:end]
+			batchTxn := NewBlobOnlyTxn(d, true)
+			// Take the store from the batch's own transaction rather than
+			// from the database once up front: each batch commits
+			// separately, so a replacement between batches would otherwise
+			// leave later batches deleting through a store that no longer
+			// owns their transaction handles.
+			blob := batchTxn.BlobStore()
+			if blob == nil {
+				batchTxn.Release()
+				return types.ErrBlobStoreUnavailable
+			}
+			batchBlobTxn := batchTxn.Blob()
+			if batchBlobTxn == nil {
+				batchTxn.Release()
+				return types.ErrNilTxn
+			}
+			batchDeleteErrors := deleteBatch(blob, batchBlobTxn, batch)
+			if err := batchTxn.Commit(); err != nil {
+				deleteErrors += len(batch) - batchDeleteErrors
+				_ = batchTxn.Rollback()
+				d.logger.Warn(
+					"UTxO blob delete batch commit failed",
+					"batch_start", start,
+					"batch_end", end,
+					"batch_size", len(batch),
+					"error", err,
+				)
+			}
 		}
 	}
 	if deleteErrors > 0 {

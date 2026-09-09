@@ -281,7 +281,7 @@ func TestMarkEmbeddedExcludesEb(t *testing.T) {
 	f.slot.slot = slot + 5
 	require.Len(t, f.mgr.EligibleCertifiedEbs(), 1)
 
-	f.mgr.MarkEmbedded(hash)
+	f.mgr.MarkEmbedded(slot, hash)
 	assert.Empty(t, f.mgr.EligibleCertifiedEbs())
 }
 
@@ -379,7 +379,7 @@ func TestEbCertifiedMetricCountsEbOnceAcrossAnnouncementContexts(t *testing.T) {
 		"certification is an EB-level transition, not a certificate count",
 	)
 	mgr.mu.Lock()
-	eb := mgr.byHash[hash]
+	eb := mgr.occurrenceLocked(300, hash)
 	if eb == nil {
 		mgr.mu.Unlock()
 		t.Fatal("certified EB is not tracked")
@@ -421,7 +421,7 @@ func TestEbQuorumPastCertifyDeadlineRejected(t *testing.T) {
 	})
 	assert.Empty(t, late.mgr.EligibleCertifiedEbs())
 	late.mgr.mu.Lock()
-	eb := late.mgr.byHash[hash]
+	eb := late.mgr.occurrenceLocked(slot, hash)
 	late.mgr.mu.Unlock()
 	require.NotNil(t, eb, "a late-certified EB stays tracked")
 	assert.False(t, eb.certified, "a late certificate must not certify the EB")
@@ -642,7 +642,7 @@ func TestStaleQuorumAfterRollbackRejected(t *testing.T) {
 
 	f.mgr.mu.Lock()
 	_, recreatedInstance := f.mgr.instances[ebSlot]
-	_, recreatedByHash := f.mgr.byHash[orphanedEb]
+	recreatedOccurrence := f.mgr.occurrenceLocked(ebSlot, orphanedEb) != nil
 	f.mgr.mu.Unlock()
 	assert.False(
 		t,
@@ -651,8 +651,8 @@ func TestStaleQuorumAfterRollbackRejected(t *testing.T) {
 	)
 	assert.False(
 		t,
-		recreatedByHash,
-		"a quorum event stale across rollback must not recreate the hash index",
+		recreatedOccurrence,
+		"a quorum event stale across rollback must not recreate the occurrence",
 	)
 	assert.Equal(
 		t,
@@ -726,11 +726,11 @@ func TestQuorumThenRollbackLeavesInstancePruned(t *testing.T) {
 
 	f.mgr.mu.Lock()
 	_, hasInstance := f.mgr.instances[ebSlot]
-	_, hasByHash := f.mgr.byHash[ebHash]
+	hasOccurrence := f.mgr.occurrenceLocked(ebSlot, ebHash) != nil
 	_, hasRb := f.mgr.canonicalRbs[rbHash]
 	f.mgr.mu.Unlock()
 	assert.False(t, hasInstance, "rollback must prune the instance")
-	assert.False(t, hasByHash, "rollback must prune the hash index")
+	assert.False(t, hasOccurrence, "rollback must prune the occurrence")
 	assert.False(
 		t,
 		hasRb,
@@ -882,7 +882,7 @@ func TestLateQuorumForUnobservedEbCreatesNoState(t *testing.T) {
 
 	f.mgr.mu.Lock()
 	_, hasInstance := f.mgr.instances[ebSlot]
-	_, hasByHash := f.mgr.byHash[ebHash]
+	hasOccurrence := f.mgr.occurrenceLocked(ebSlot, ebHash) != nil
 	f.mgr.mu.Unlock()
 	assert.False(
 		t,
@@ -891,8 +891,8 @@ func TestLateQuorumForUnobservedEbCreatesNoState(t *testing.T) {
 	)
 	assert.False(
 		t,
-		hasByHash,
-		"a past-deadline certificate must not create a hash index entry",
+		hasOccurrence,
+		"a past-deadline certificate must not create an occurrence",
 	)
 	assert.Equal(
 		t,
@@ -982,7 +982,6 @@ func TestPruneExpiredInstances(t *testing.T) {
 
 	f.mgr.mu.Lock()
 	assert.Empty(t, f.mgr.instances)
-	assert.Empty(t, f.mgr.byHash)
 	f.mgr.mu.Unlock()
 }
 
@@ -1015,4 +1014,30 @@ func TestPipelineLifecycleAndEventDispatch(t *testing.T) {
 	testutil.WaitForCondition(t, func() bool {
 		return len(f.mgr.EligibleCertifiedEbs()) == 1
 	}, 2*time.Second, "eb becomes eligible after quorum event is dispatched")
+}
+
+func TestMarkEmbeddedPreservesOtherOccurrence(t *testing.T) {
+	f := newPipelineFixture(t, DefaultPipelineTiming())
+	defer f.eventBus.Stop()
+	hash := ebHashFor("same-content")
+	for _, slot := range []uint64{100, 101} {
+		f.slot.slot = slot
+		f.mgr.ObserveEndorserBlock(slot, hash)
+		f.mgr.handleEbQuorum(
+			EbQuorumEvent{
+				SlotNo:            slot,
+				EndorserBlockHash: hash,
+				Certificate:       &lcommon.LeiosEbCertificate{},
+			},
+		)
+	}
+	require.Len(t, f.mgr.EligibleCertifiedEbs(), 2)
+	f.mgr.MarkEmbedded(100, hash)
+	eligible := f.mgr.EligibleCertifiedEbs()
+	require.Len(t, eligible, 1)
+	require.Equal(t, uint64(101), eligible[0].SlotNo)
+	f.mgr.MarkEmbedded(999, hash)
+	require.Len(t, f.mgr.EligibleCertifiedEbs(), 1)
+	f.mgr.MarkEmbedded(101, hash)
+	require.Empty(t, f.mgr.EligibleCertifiedEbs())
 }
