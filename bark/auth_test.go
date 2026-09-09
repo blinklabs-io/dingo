@@ -51,6 +51,8 @@ import (
 func TestDestructiveDatabaseProcedures_CoversEveryGeneratedMethod(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fd := databasev1alpha1.File_v1alpha1_database_database_proto
 	services := fd.Services()
 	var svcIdx int
@@ -94,6 +96,8 @@ func TestDestructiveDatabaseProcedures_CoversEveryGeneratedMethod(
 func TestOperatorAuthInterceptor_FailsClosedForUnclassifiedProcedure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const unclassified = "/bark.v1alpha1.database.DatabaseService/SomeFutureRPC"
 	const operatorFingerprint = "operator"
 	require.False(t, destructiveDatabaseProcedures[unclassified])
@@ -132,6 +136,8 @@ func TestOperatorAuthInterceptor_FailsClosedForUnclassifiedProcedure(
 func TestOperatorAuthInterceptorEnforcesTwoStagesForEveryProcedure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const operatorFingerprint = "operator"
 	interceptor := &operatorAuthInterceptor{
 		logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -182,6 +188,8 @@ func TestOperatorAuthInterceptorEnforcesTwoStagesForEveryProcedure(
 // middleware with a non-empty PeerCertificates and an empty VerifiedChains,
 // and that is exactly the case that must resolve to Verified: false.
 func TestPeerCertContextMiddleware_KeysOffVerifiedChains(t *testing.T) {
+	t.Parallel()
+
 	leaf, _, _ := writeTestCA(
 		t,
 	) // any in-memory *x509.Certificate works as a stand-in leaf here
@@ -277,6 +285,8 @@ func newTestLifecycleService(t *testing.T) *dblifecycle.Service {
 // destructive RPCs to anonymous callers. This lives at Start, not NewBark —
 // see Start's doc comment for why.
 func TestStart_RejectsLifecycleWithoutClientCA(t *testing.T) {
+	t.Parallel()
+
 	serverCertPath, serverKeyPath := writeTestTLSCertKey(t)
 
 	b, err := NewBark(BarkConfig{
@@ -300,6 +310,8 @@ func TestStart_RejectsLifecycleWithoutClientCA(t *testing.T) {
 // invariant: a configured client CA alone isn't enough — mTLS has no
 // meaning without the server's own TLS listener underneath it.
 func TestStart_RejectsLifecycleWithoutTLS(t *testing.T) {
+	t.Parallel()
+
 	_, _, caCertPath := writeTestCA(t)
 
 	b, err := NewBark(BarkConfig{
@@ -323,6 +335,8 @@ func TestStart_RejectsLifecycleWithoutTLS(t *testing.T) {
 }
 
 func TestStartRejectsLifecycleWithoutOperatorAllowlist(t *testing.T) {
+	t.Parallel()
+
 	serverCertPath, serverKeyPath := writeTestTLSCertKey(t)
 	_, _, caCertPath := writeTestCA(t)
 
@@ -343,6 +357,8 @@ func TestStartRejectsLifecycleWithoutOperatorAllowlist(t *testing.T) {
 }
 
 func TestNewBarkNormalizesOperatorCertificateFingerprints(t *testing.T) {
+	t.Parallel()
+
 	b, err := NewBark(BarkConfig{
 		DB: newTestDB(t),
 		OperatorCertificateFingerprints: []string{
@@ -364,6 +380,8 @@ func TestNewBarkNormalizesOperatorCertificateFingerprints(t *testing.T) {
 // DatabaseService at all (Archive-only) must not silently ignore a
 // misconfigured TlsClientCAFilePath set without TLS cert/key.
 func TestStart_RejectsClientCAWithoutTLS_NoLifecycle(t *testing.T) {
+	t.Parallel()
+
 	_, _, caCertPath := writeTestCA(t)
 
 	b, err := NewBark(BarkConfig{

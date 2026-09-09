@@ -1314,7 +1314,7 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 	// store — the matching ledger rollback must be explicit. Match on rule
 	// names rather than their numeric positions because upstream changes the
 	// validation-rule slice between releases.
-	if err := ls.rollbackWithOptions(rewindPoint, true); err != nil {
+	if err := ls.rollbackWithOptions(rewindPoint, true, true); err != nil {
 		return false, fmt.Errorf(
 			"rollback ledger state after validation failure: %w",
 			err,

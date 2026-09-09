@@ -114,6 +114,8 @@ func insertTestDijkstraBlock(
 // ChainEqual for a Dijkstra local tip (GetPraosTiebreakerView returned
 // ok=false), silently disarming the VRF tiebreaker in exactly this path.
 func TestCompareIncomingHeaderToLocalTip_Dijkstra(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })

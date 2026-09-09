@@ -34,6 +34,8 @@ import (
 func TestValidateChainSelectionHeaderCryptoAcceptsVerifiedHeader(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{70}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	seedBlockPoolRegistration(t, db, tb.block)
@@ -59,6 +61,8 @@ func TestValidateChainSelectionHeaderCryptoAcceptsVerifiedHeader(
 func TestValidateChainSelectionHeaderCryptoRejectsTamperedProof(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{71}, 0, tamperVRFProof)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	// Behind the block's slot, same as the deferred-eligibility fixtures
@@ -85,6 +89,8 @@ func TestValidateChainSelectionHeaderCryptoRejectsTamperedProof(
 func TestValidateChainSelectionHeaderCryptoDefersAheadOfLocalState(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{72}, 0, tamperNone)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.currentTip.Point.Slot = tb.block.SlotNumber() - 1
@@ -107,6 +113,8 @@ func TestValidateChainSelectionHeaderCryptoDefersAheadOfLocalState(
 func TestValidateChainSelectionHeaderCryptoDoesNotAdvanceEpochCache(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const futureSlot = uint64(1001)
 	ls := &LedgerState{
 		currentEra: eras.ConwayEraDesc,
@@ -146,6 +154,8 @@ func TestValidateChainSelectionHeaderCryptoDoesNotAdvanceEpochCache(
 func TestShouldVerifyChainSelectionHeaderCryptoMatchesChainsyncGate(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{73}, 0, tamperNone)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	slot := tb.block.SlotNumber()

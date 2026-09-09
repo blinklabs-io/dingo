@@ -39,6 +39,8 @@ import (
 // sequence. This test locks the read point; TestProcessEpochRollover_RewardOrdering
 // and TestProcessEpochRollover_OrderingInvariant lock the rest of the sequence.
 func TestProcessEpochRollover_SnapStakeReadOrdering(t *testing.T) {
+	t.Parallel()
+
 	const targetFunc = "processEpochRollover"
 
 	wantOrder := []string{
@@ -83,6 +85,8 @@ func TestProcessEpochRollover_SnapStakeReadOrdering(t *testing.T) {
 // hook receives the same boundary identity the persist hook later builds from the
 // new epoch record, so the two phases of one capture can be matched.
 func TestCaptureEpochBoundarySnapshotStakeHookInvoked(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newHookTestLedger(t)
 
 	var called bool
@@ -114,6 +118,8 @@ func TestCaptureEpochBoundarySnapshotStakeHookInvoked(t *testing.T) {
 // SNAP-point read neither aborts the rollover nor leaves its writes behind: the
 // persist half then reads the stake itself.
 func TestCaptureEpochBoundarySnapshotStakeHookFailureDeferred(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newHookTestLedger(t)
 
 	ls.SetEpochBoundarySnapshotStakeHook(

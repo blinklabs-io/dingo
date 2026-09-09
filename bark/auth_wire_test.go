@@ -35,6 +35,8 @@ import (
 // verified client identity, while destructive methods additionally require an
 // explicitly allowed certificate fingerprint.
 func TestDatabaseServiceAuthenticationAndOperatorAuthorization(t *testing.T) {
+	t.Parallel()
+
 	block1 := testBlock(1, 0x01)
 
 	barkDataDir := t.TempDir()
