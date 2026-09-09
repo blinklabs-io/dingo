@@ -23,6 +23,8 @@ import (
 
 // A restart that made progress is not backed off at all, and is never stuck.
 func TestLedgerPipelineBackoffProgressResets(t *testing.T) {
+	t.Parallel()
+
 	for _, consecutive := range []int{0, -1} {
 		backoff, stuck := ledgerPipelineBackoff(consecutive)
 		require.Zero(t, backoff)
@@ -34,6 +36,8 @@ func TestLedgerPipelineBackoffProgressResets(t *testing.T) {
 // pipeline restarting a handful of times is normal (a rollback racing the
 // iterator, a peer dropping mid-batch) and must not raise an operator alarm.
 func TestLedgerPipelineBackoffTransientFailuresAreNotStuck(t *testing.T) {
+	t.Parallel()
+
 	prev := time.Duration(0)
 	for consecutive := 1; consecutive < noProgressStuckThreshold; consecutive++ {
 		backoff, stuck := ledgerPipelineBackoff(consecutive)
@@ -56,6 +60,8 @@ func TestLedgerPipelineBackoffTransientFailuresAreNotStuck(t *testing.T) {
 // pipeline is declared stuck and the wait escalates well beyond the transient
 // ceiling.
 func TestLedgerPipelineBackoffDeterministicFailureEscalates(t *testing.T) {
+	t.Parallel()
+
 	_, stuck := ledgerPipelineBackoff(noProgressStuckThreshold)
 	require.True(t, stuck, "the stuck threshold should report stuck")
 
@@ -75,6 +81,8 @@ func TestLedgerPipelineBackoffDeterministicFailureEscalates(t *testing.T) {
 
 // Monotonic across the transient/stuck boundary: the escalation must not dip.
 func TestLedgerPipelineBackoffIsMonotonic(t *testing.T) {
+	t.Parallel()
+
 	prev := time.Duration(0)
 	for consecutive := range noProgressStuckThreshold + 64 {
 		backoff, _ := ledgerPipelineBackoff(consecutive)
@@ -89,6 +97,8 @@ func TestLedgerPipelineBackoffIsMonotonic(t *testing.T) {
 // escalating cap; otherwise a deterministic rejection can spin forever at its
 // fixed cadence.
 func TestLedgerPipelineRetryDelayIsBounded(t *testing.T) {
+	t.Parallel()
+
 	minimum := 250 * time.Millisecond
 	previous := time.Duration(0)
 	for consecutive := range noProgressStuckThreshold + 64 {

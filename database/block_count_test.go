@@ -23,6 +23,8 @@ import (
 // TestCountBlocksAndOldestSlot_EmptyDatabase verifies that a database
 // with no blocks reports a zero count and a zero oldest slot.
 func TestCountBlocksAndOldestSlot_EmptyDatabase(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	count, oldestSlot, err := db.CountBlocksAndOldestSlot(nil)
@@ -34,6 +36,8 @@ func TestCountBlocksAndOldestSlot_EmptyDatabase(t *testing.T) {
 // TestCountBlocksAndOldestSlot_CountsAndFindsOldest verifies that blocks
 // inserted out of slot order still report the correct count and oldest slot.
 func TestCountBlocksAndOldestSlot_CountsAndFindsOldest(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	// Inserted out of slot order on purpose: the oldest slot must be
@@ -55,6 +59,8 @@ func TestCountBlocksAndOldestSlot_CountsAndFindsOldest(t *testing.T) {
 // actually retained, so counting it would overstate how much history is
 // available and understate how far back retained history actually goes.
 func TestCountBlocksAndOldestSlot_ExcludesTombstonedBlocks(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	oldestHash := randomHash(t)

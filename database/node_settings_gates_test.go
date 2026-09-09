@@ -25,6 +25,8 @@ import (
 )
 
 func TestPhase1PersistsNetworkMagicOnFirstStart(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db, err := newTestDatabase(t, &Config{
 		DataDir:      dataDir,
@@ -40,6 +42,8 @@ func TestPhase1PersistsNetworkMagicOnFirstStart(t *testing.T) {
 }
 
 func TestPhase1RejectsNetworkMagicChange(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db, err := newTestDatabase(t, &Config{
 		DataDir:      dataDir,
@@ -72,6 +76,8 @@ func TestPhase1RejectsNetworkMagicChange(t *testing.T) {
 // restore.go's partial reopen) must now persist nodesettings.NoStartEra
 // instead, so the comparison actually happens on the next open.
 func TestPhase1RecordsNoStartEraAndRejectsLaterDijkstra(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db, err := newTestDatabase(t, &Config{
 		DataDir:        dataDir,
@@ -100,6 +106,8 @@ func TestPhase1RecordsNoStartEraAndRejectsLaterDijkstra(t *testing.T) {
 }
 
 func TestPhase1RejectsCoreToAPI(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db, err := newTestDatabase(t, &Config{
 		DataDir:     dataDir,
@@ -129,6 +137,8 @@ func TestPhase1RejectsCoreToAPI(t *testing.T) {
 // which is the behavior the whole test is meant to pin and which nothing
 // here previously asserted.
 func TestPhase1AllowsAPIToCore(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db, err := newTestDatabase(t, &Config{
 		DataDir:     dataDir,
@@ -170,6 +180,8 @@ func TestPhase1AllowsAPIToCore(t *testing.T) {
 // in the legacy row or (in an earlier version of this fix) in
 // node_settings_gate.
 func TestPhase1LatchAndNetworkFillTogether(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db, err := newTestDatabase(t, &Config{
 		DataDir:     dataDir,
@@ -211,6 +223,8 @@ func TestPhase1LatchAndNetworkFillTogether(t *testing.T) {
 // TestPhase1SkipsHistoryExpiryGateOnPartialReopen for the regression this
 // specifically guards for history_expiry_active).
 func TestPhase1SkipsPartialConfigWithoutTripping(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db, err := newTestDatabase(t, &Config{
 		DataDir:              dataDir,
@@ -248,6 +262,8 @@ func TestPhase1SkipsPartialConfigWithoutTripping(t *testing.T) {
 // "cannot be turned off once enabled" mismatch, which is exactly the
 // regression this guards.
 func TestPhase1SkipsHistoryExpiryGateOnPartialReopen(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db, err := newTestDatabase(t, &Config{
 		DataDir:     dataDir,
@@ -304,6 +320,8 @@ func openForRecoveryTest(
 func TestPhase1SkippedOnRecoveryPathButCatchesMismatchOnceReCheckable(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db, err := newTestDatabase(t, &Config{
 		DataDir:        dataDir,
@@ -391,6 +409,8 @@ func TestPhase1SkippedOnRecoveryPathButCatchesMismatchOnceReCheckable(
 // write; the other must observe the winner's value and fail loudly on its
 // own now-conflicting configuration, never silently adopt or overwrite it.
 func TestPhase1ConcurrentFirstOpenOneWinnerOneMismatch(t *testing.T) {
+	t.Parallel()
+
 	for i := range 5 {
 		t.Run(fmt.Sprintf("iteration_%d", i), func(t *testing.T) {
 			metaDir := t.TempDir()

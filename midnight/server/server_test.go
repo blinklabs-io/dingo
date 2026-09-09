@@ -36,6 +36,11 @@ import (
 )
 
 // freePort returns a currently-free TCP port on the loopback interface.
+//
+// The port is only free at the moment it is returned: learning the number
+// requires closing the listener, so nothing owns the port until the caller
+// binds it again. Callers must therefore tolerate losing that gap -- see
+// startServerOnFreePort.
 func freePort(t *testing.T) uint {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -55,20 +60,66 @@ func startTestServerConfig(t *testing.T, cfg server.Config) string {
 	return startTestServerWithConfig(t, cfg)
 }
 
+// startServerOnFreePortAttempts bounds how many times startServerOnFreePort
+// re-draws a port. The race it covers is rare and independent per attempt, so
+// a small bound is enough; a genuine misconfiguration fails every attempt and
+// is reported rather than retried away.
+const startServerOnFreePortAttempts = 5
+
+// startServerOnFreePort starts a server on a free loopback port, re-drawing the
+// port if it was taken between freePort releasing it and Start binding it.
+//
+// freePort must close its listener to learn the port number, so the port is
+// unowned until Start binds it. Windows reuses the ephemeral range aggressively
+// enough to lose that gap in CI, failing with "Only one usage of each socket
+// address (protocol/network address/port) is normally permitted"; the same race
+// exists on other platforms but is far less likely to be lost.
+//
+// The returned cancel function shuts the server down and is registered for
+// cleanup, so callers that do not need to cancel early may ignore it. Stopping
+// the server is left to the caller, whose ordering requirements differ.
+func startServerOnFreePort(
+	t *testing.T,
+	cfg server.Config,
+) (*server.Server, uint, context.CancelFunc) {
+	t.Helper()
+	for attempt := 1; ; attempt++ {
+		port := freePort(t)
+		cfg.Host = "127.0.0.1"
+		cfg.Port = port
+		srv, err := server.New(cfg)
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		err = srv.Start(ctx)
+		if err == nil {
+			t.Cleanup(cancel)
+			return srv, port, cancel
+		}
+		cancel()
+		if attempt == startServerOnFreePortAttempts {
+			require.NoErrorf(
+				t,
+				err,
+				"server did not start on a free port after %d attempt(s)",
+				attempt,
+			)
+		}
+		t.Logf(
+			"retrying on a new port, attempt %d/%d lost the bind: %v",
+			attempt,
+			startServerOnFreePortAttempts,
+			err,
+		)
+	}
+}
+
 // startTestServerWithConfig is like startTestServer but lets the caller
 // supply Database/SlotTimer (and any other Config field); Host and Port are
 // always overridden to a free loopback address.
 func startTestServerWithConfig(t *testing.T, cfg server.Config) string {
 	t.Helper()
-	port := freePort(t)
-	cfg.Host = "127.0.0.1"
-	cfg.Port = port
-	srv, err := server.New(cfg)
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	require.NoError(t, srv.Start(ctx))
+	srv, port, _ := startServerOnFreePort(t, cfg)
 	t.Cleanup(func() {
 		stopCtx, stopCancel := context.WithTimeout(
 			context.Background(),
@@ -288,17 +339,23 @@ func TestReflectionDisabledByDefault(t *testing.T) {
 	defer cancel()
 	stream, err := client.ServerReflectionInfo(ctx)
 	require.NoError(t, err)
-	err = stream.Send(&reflectionpb.ServerReflectionRequest{
+	// With reflection unregistered the server terminates this stream as soon
+	// as it sees it, so Send races that rejection. grpc documents SendMsg as
+	// returning once "the stream is done" and directs callers to take the
+	// real status from RecvMsg rather than from Send, so io.EOF here is a
+	// valid outcome rather than a failure. Requiring NoError made the test
+	// fail whenever the rejection won, which the race detector's slower
+	// scheduling makes markedly more likely -- observed on the
+	// go-test (Linux, race) job while the same commit passed unraced.
+	if err := stream.Send(&reflectionpb.ServerReflectionRequest{
 		MessageRequest: &reflectionpb.ServerReflectionRequest_ListServices{
 			ListServices: "*",
 		},
-	})
-	if err != nil {
-		// When reflection is not registered, grpc-go may reject the stream
-		// during Send rather than during Recv, depending on the platform.
+	}); err != nil {
 		require.ErrorIs(t, err, io.EOF)
-		return
 	}
+	// The status is asserted here either way: this is the check that actually
+	// proves reflection is disabled.
 	_, err = stream.Recv()
 	require.Error(t, err)
 	require.Equal(t, codes.Unimplemented, status.Code(err))
@@ -339,16 +396,7 @@ func TestNewAllowsExplicitRemotePolicy(t *testing.T) {
 
 // Cancelling the context passed to Start must shut the server down.
 func TestShutdownOnContextCancel(t *testing.T) {
-	port := freePort(t)
-	srv, err := server.New(server.Config{
-		Host: "127.0.0.1",
-		Port: port,
-	})
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	require.NoError(t, srv.Start(ctx))
+	srv, port, cancel := startServerOnFreePort(t, server.Config{})
 	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
 	addr := net.JoinHostPort("127.0.0.1", strconv.FormatUint(uint64(port), 10))
 
@@ -359,7 +407,7 @@ func TestShutdownOnContextCancel(t *testing.T) {
 		2*time.Second,
 	)
 	defer callCancel()
-	_, err = client.GetAssetCreates(callCtx, &midnight.AssetCreatesRequest{})
+	_, err := client.GetAssetCreates(callCtx, &midnight.AssetCreatesRequest{})
 	require.Equal(t, codes.Unimplemented, status.Code(err))
 
 	// Cancellation triggers graceful shutdown; once stopped a fresh call no
