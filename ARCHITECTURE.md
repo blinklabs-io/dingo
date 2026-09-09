@@ -4852,6 +4852,16 @@ requires the same validated interval; `PoolCredentials.KESSign` remains the
 lower-level cryptographic primitive used by credential tooling and tests that
 may not have Shelley genesis context.
 
+### Leios Announcement Admission (`ouroboros/`)
+
+After header validation, at most two distinct ranking-block announcements are
+retained for each slot/issuer election within the announcement retention window.
+The election budget is shared across relay sources and reconnects; a connection
+identifier does not create a new election. An already-recorded header remains
+an idempotent duplicate even after the budget is full. Another slot or issuer
+has an independent budget. Rejected third headers are neither retained nor added
+to the relay log.
+
 ### Leios Voting (`ledger/leios/`)
 
 Experimental CIP-0164 stake-truncated committee voting, active only under the Dijkstra/Leios gate. `VoteManager` collects, validates, serves, and emits Leios votes:
