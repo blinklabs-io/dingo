@@ -14,7 +14,11 @@
 
 package ledger
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/blinklabs-io/dingo/database"
+)
 
 // queryShelleyCurrentProtocolParams answers GetCurrentPParams.
 //
@@ -31,22 +35,36 @@ import "fmt"
 // (blinklabs-io/dingo#382). Building real historical-by-epoch pparams
 // storage (or replaying governance enactments) to lift this restriction is
 // a materially larger, not-yet-attempted piece of work.
+//
+// The live epoch and the returned parameters both come from one
+// loadConsensusSnapshot() call, not two separate reads: an earlier version
+// compared the live epoch (from txn's database transaction) against
+// targetEpoch, then separately called GetCurrentPParamsForReporting (which
+// loads its own, possibly later, published snapshot). An epoch-boundary
+// commit landing between those two reads could pass targetEpoch == liveEpoch
+// while returning the parameters of the epoch that had already replaced it.
+// Deriving both from the same snapshot value closes that window.
 func (ls *LedgerState) queryShelleyCurrentProtocolParams(
 	asOfSlot uint64,
+	txn *database.Txn,
 ) (any, error) {
+	snapshot := ls.loadConsensusSnapshot()
 	if asOfSlot == 0 {
-		return []any{ls.GetCurrentPParamsForReporting()}, nil
+		return []any{withoutSyntheticV2CostModel(
+			snapshot.currentPParams,
+			snapshot.syntheticV2CostModelInEffect,
+			ls.config.Logger,
+		)}, nil
 	}
-	txn := ls.db.Transaction(false)
-	defer txn.Release()
-	liveEpoch, err := ls.resolveAsOfEpoch(txn, 0)
-	if err != nil {
-		return nil, err
+	if txn == nil {
+		txn = ls.db.Transaction(false)
+		defer txn.Release()
 	}
 	targetEpoch, err := ls.resolveAsOfEpoch(txn, asOfSlot)
 	if err != nil {
 		return nil, err
 	}
+	liveEpoch := snapshot.currentEpoch.EpochId
 	if targetEpoch != liveEpoch {
 		return nil, fmt.Errorf(
 			"%w: protocol parameters at slot %d (epoch %d) cannot be "+
@@ -59,5 +77,9 @@ func (ls *LedgerState) queryShelleyCurrentProtocolParams(
 			liveEpoch,
 		)
 	}
-	return []any{ls.GetCurrentPParamsForReporting()}, nil
+	return []any{withoutSyntheticV2CostModel(
+		snapshot.currentPParams,
+		snapshot.syntheticV2CostModelInEffect,
+		ls.config.Logger,
+	)}, nil
 }

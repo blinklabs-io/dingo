@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"connectrpc.com/connect"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -75,6 +76,7 @@ func (s *readStateLedgerStub) GetBlock(ocommon.Point) (models.Block, error) {
 func (s *readStateLedgerStub) PoolStakeDistribution(
 	poolFilter []lcommon.PoolKeyHash,
 	_ uint64,
+	_ *database.Txn,
 ) (*ledger.PoolStakeDistribution, error) {
 	s.calls++
 	s.gotFilter = poolFilter

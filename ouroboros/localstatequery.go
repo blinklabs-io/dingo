@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/ledger"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
@@ -125,4 +126,46 @@ func (o *Ouroboros) localstatequeryServerRelease(
 	delete(o.localstatequeryAcquiredPoints, ctx.ConnectionId)
 	o.localstatequeryAcquireMutex.Unlock()
 	return nil
+}
+
+// ReleaseLocalStateQueryAcquiredPoint clears connId's pinned point, the same
+// cleanup localstatequeryServerRelease performs for a clean client Release.
+// A NtC client that disconnects without ever calling Release skips that
+// callback entirely, so without this the map entry would otherwise persist
+// until this Ouroboros instance itself is discarded -- a one-entry-per-
+// pinned-client leak. Called from the node's NtC connection-closed callback
+// (handleConnManagerClosed), the NtC counterpart to HandleConnClosedEvent's
+// equivalent cleanup for NtN closes.
+func (o *Ouroboros) ReleaseLocalStateQueryAcquiredPoint(
+	connId ouroboros.ConnectionId,
+) {
+	o.localstatequeryAcquireMutex.Lock()
+	delete(o.localstatequeryAcquiredPoints, connId)
+	o.localstatequeryAcquireMutex.Unlock()
+}
+
+// SetLocalStateQueryAcquiredPointForTesting seeds connId's pinned point
+// directly, bypassing a real Acquire callback, so the root package can prove
+// its NtC connection-closed callback actually clears this map -- the same
+// two-package split RegisterLeiosServeWaiterForTesting exists for.
+func (o *Ouroboros) SetLocalStateQueryAcquiredPointForTesting(
+	connId ouroboros.ConnectionId,
+	point ledger.QueryPoint,
+) {
+	o.localstatequeryAcquireMutex.Lock()
+	o.localstatequeryAcquiredPoints[connId] = point
+	o.localstatequeryAcquireMutex.Unlock()
+}
+
+// HasLocalStateQueryAcquiredPointForTesting reports whether connId currently
+// has a map entry, regardless of whether the recorded point is the pinned
+// or the live/cleared zero value -- the presence of the entry itself is
+// what a leak looks like, so this checks membership, not QueryPoint.pinned().
+func (o *Ouroboros) HasLocalStateQueryAcquiredPointForTesting(
+	connId ouroboros.ConnectionId,
+) bool {
+	o.localstatequeryAcquireMutex.Lock()
+	defer o.localstatequeryAcquireMutex.Unlock()
+	_, ok := o.localstatequeryAcquiredPoints[connId]
+	return ok
 }

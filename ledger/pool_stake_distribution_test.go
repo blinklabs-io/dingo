@@ -98,7 +98,7 @@ func TestPoolStakeDistribution_OrdersPoolsByKeyHash(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	dist, err := ls.PoolStakeDistribution(nil, 0)
+	dist, err := ls.PoolStakeDistribution(nil, 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, dist)
 	require.Len(t, dist.Pools, 3)
@@ -115,7 +115,7 @@ func TestPoolStakeDistribution_OrdersPoolsByKeyHash(t *testing.T) {
 
 	// Repeating the read must produce the same order. A single call cannot
 	// distinguish a real sort from a map that happened to range in order.
-	again, err := ls.PoolStakeDistribution(nil, 0)
+	again, err := ls.PoolStakeDistribution(nil, 0, nil)
 	require.NoError(t, err)
 	require.Equal(t, dist.Pools, again.Pools)
 }
@@ -142,7 +142,7 @@ func TestPoolStakeDistribution_ReportsStakeFractionAndVrf(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	dist, err := ls.PoolStakeDistribution(nil, 0)
+	dist, err := ls.PoolStakeDistribution(nil, 0, nil)
 	require.NoError(t, err)
 	require.Len(t, dist.Pools, 2)
 
@@ -197,7 +197,7 @@ func TestPoolStakeDistribution_CarriesTheTipItWasReadAt(t *testing.T) {
 	}
 	require.NoError(t, db.SetTip(first, nil))
 
-	dist, err := ls.PoolStakeDistribution(nil, 0)
+	dist, err := ls.PoolStakeDistribution(nil, 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, dist)
 	assert.Equal(t, first.Point.Slot, dist.Tip.Point.Slot)
@@ -210,7 +210,7 @@ func TestPoolStakeDistribution_CarriesTheTipItWasReadAt(t *testing.T) {
 	}
 	require.NoError(t, db.SetTip(second, nil))
 
-	again, err := ls.PoolStakeDistribution(nil, 0)
+	again, err := ls.PoolStakeDistribution(nil, 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, again)
 	assert.Equal(t, second.Point.Slot, again.Tip.Point.Slot)
@@ -243,7 +243,7 @@ func TestPoolStakeDistribution_FilterReportsOnlyRequestedPools(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	dist, err := ls.PoolStakeDistribution([]lcommon.PoolKeyHash{pkhA}, 0)
+	dist, err := ls.PoolStakeDistribution([]lcommon.PoolKeyHash{pkhA}, 0, nil)
 	require.NoError(t, err)
 	require.Len(t, dist.Pools, 1)
 	assert.Equal(t, pkhA, dist.Pools[0].PoolKeyHash)
@@ -277,7 +277,7 @@ func TestPoolStakeDistribution_OmitsPoolWithoutRegistration(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	dist, err := ls.PoolStakeDistribution(nil, 0)
+	dist, err := ls.PoolStakeDistribution(nil, 0, nil)
 	require.NoError(t, err)
 	require.Len(t, dist.Pools, 1, "the unregistered pool is omitted")
 	assert.Equal(t, pkhA, dist.Pools[0].PoolKeyHash)
@@ -294,7 +294,7 @@ func TestPoolStakeDistribution_EmptySnapshotDoesNotDivide(t *testing.T) {
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 
-	dist, err := ls.PoolStakeDistribution(nil, 0)
+	dist, err := ls.PoolStakeDistribution(nil, 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, dist)
 	assert.Empty(t, dist.Pools)

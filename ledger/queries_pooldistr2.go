@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -39,6 +40,7 @@ import (
 func (ls *LedgerState) queryShelleyPoolDistr2(
 	q *olocalstatequery.ShelleyPoolDistr2Query,
 	asOfSlot uint64,
+	txn *database.Txn,
 ) (any, error) {
 	// PoolFilter reports all=true with a nil pool list when the query's
 	// StrictMaybe was SNothing, and all=false otherwise -- including for an
@@ -55,7 +57,7 @@ func (ls *LedgerState) queryShelleyPoolDistr2(
 		}
 	}
 
-	dist, err := ls.PoolStakeDistribution(poolFilter, asOfSlot)
+	dist, err := ls.PoolStakeDistribution(poolFilter, asOfSlot, txn)
 	if err != nil {
 		return nil, err
 	}

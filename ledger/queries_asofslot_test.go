@@ -63,9 +63,15 @@ func TestPoolStakeDistribution_AsOfSlot_ReadsHistoricalEpochSnapshot(t *testing.
 		nil,
 	))
 
-	// Epoch 3's mark snapshot (praos.StakeSnapshotEpoch(3) == 2).
+	// Epoch 4's mark snapshot (praos.StakeSnapshotEpoch(4) == 3) -- exactly
+	// the retained-boundary case: at live epoch 6, cleanupOldSnapshots'
+	// default window deletes snapshot epochs below 6-3=3, so epoch 3 is the
+	// oldest surviving row. Epoch 3, one epoch older still (its own
+	// snapshot would be epoch 2), is already pruned -- see
+	// TestPoolStakeDistribution_AsOfSlot_TooOldRejected's sibling case
+	// below and checkAsOfEpochRecency's doc comment for the exact shift.
 	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(&models.PoolStakeSnapshot{
-		Epoch: 2, SnapshotType: snapshotTypeMark,
+		Epoch: 3, SnapshotType: snapshotTypeMark,
 		PoolKeyHash: pkh.Bytes(), TotalStake: dbtypes.Uint64(1_000_000),
 		CapturedSlot: 1,
 	}, nil))
@@ -76,19 +82,21 @@ func TestPoolStakeDistribution_AsOfSlot_ReadsHistoricalEpochSnapshot(t *testing.
 		CapturedSlot: 1,
 	}, nil))
 
-	seedEpochs(t, ls, map[uint64]uint64{300: 3, 600: 6})
+	seedEpochs(t, ls, map[uint64]uint64{300: 3, 400: 4, 600: 6})
+	ls.currentEpoch = models.Epoch{EpochId: 6}
+	ls.publishSnapshotsLocked()
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(650, repeatedBytes(32, 0x0B)),
 	}, nil))
 
-	// asOfSlot 350 falls inside epoch 3's range: exactly 3 epochs behind the
-	// live epoch (6), the edge of the retention window (still allowed).
-	hist, err := ls.PoolStakeDistribution(nil, 350)
+	// asOfSlot 450 falls inside epoch 4's range: exactly the
+	// retained-boundary case (see the snapshot comment above).
+	hist, err := ls.PoolStakeDistribution(nil, 450, nil)
 	require.NoError(t, err)
 	require.Len(t, hist.Pools, 1)
 	assert.Equal(t, uint64(1_000_000), hist.Pools[0].Stake)
 
-	live, err := ls.PoolStakeDistribution(nil, 0)
+	live, err := ls.PoolStakeDistribution(nil, 0, nil)
 	require.NoError(t, err)
 	require.Len(t, live.Pools, 1)
 	assert.Equal(t, uint64(9_000_000), live.Pools[0].Stake)
@@ -112,7 +120,7 @@ func TestPoolStakeDistribution_AsOfSlot_TooOldRejected(t *testing.T) {
 
 	// Epoch 3 is 7 epochs behind the live epoch (10) -- outside the 3-epoch
 	// retention window.
-	_, err := ls.PoolStakeDistribution(nil, 350)
+	_, err := ls.PoolStakeDistribution(nil, 350, nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
@@ -133,7 +141,7 @@ func TestPoolStakeDistribution_AsOfSlot_AheadOfLiveRejected(t *testing.T) {
 	}, nil))
 
 	// asOfSlot 650 resolves to epoch 6, ahead of the live tip's epoch 3.
-	_, err := ls.PoolStakeDistribution(nil, 650)
+	_, err := ls.PoolStakeDistribution(nil, 650, nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
@@ -150,6 +158,12 @@ func TestQueryShelleyCurrentProtocolParams_SameEpochAsLive_Succeeds(t *testing.T
 	ls := newPoolDistr2Ledger(t, db)
 	ls.currentEra = eras.ConwayEraDesc
 	ls.currentPParams = conwayPParamsWithCostModels(map[uint][]int64{0: {1, 1, 1}})
+	// The live epoch this handler compares against comes from the published
+	// consensus snapshot (loadConsensusSnapshot), not from a database read
+	// -- see queryShelleyCurrentProtocolParams' doc comment for why. So the
+	// in-memory epoch has to match the database epoch record seeded below,
+	// the same way production code keeps both in step on every transition.
+	ls.currentEpoch = models.Epoch{EpochId: 3}
 	ls.publishSnapshotsLocked()
 
 	seedEpochs(t, ls, map[uint64]uint64{300: 3})
@@ -157,7 +171,7 @@ func TestQueryShelleyCurrentProtocolParams_SameEpochAsLive_Succeeds(t *testing.T
 		Point: ocommon.NewPoint(350, repeatedBytes(32, 0x0B)),
 	}, nil))
 
-	result, err := ls.queryShelleyCurrentProtocolParams(320)
+	result, err := ls.queryShelleyCurrentProtocolParams(320, nil)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 }
@@ -176,6 +190,12 @@ func TestQueryShelleyCurrentProtocolParams_DifferentEpochFromLive_Rejected(
 	ls := newPoolDistr2Ledger(t, db)
 	ls.currentEra = eras.ConwayEraDesc
 	ls.currentPParams = conwayPParamsWithCostModels(map[uint][]int64{0: {1, 1, 1}})
+	// See the same-epoch test's comment: the live epoch this handler
+	// compares against comes from the published consensus snapshot, so it
+	// has to match the database epoch record seeded below for this test to
+	// exercise a real epoch 3 vs. epoch 6 mismatch rather than an
+	// incidental one against an unset in-memory epoch.
+	ls.currentEpoch = models.Epoch{EpochId: 6}
 	ls.publishSnapshotsLocked()
 
 	seedEpochs(t, ls, map[uint64]uint64{300: 3, 600: 6})
@@ -183,7 +203,7 @@ func TestQueryShelleyCurrentProtocolParams_DifferentEpochFromLive_Rejected(
 		Point: ocommon.NewPoint(650, repeatedBytes(32, 0x0B)),
 	}, nil))
 
-	_, err := ls.queryShelleyCurrentProtocolParams(350)
+	_, err := ls.queryShelleyCurrentProtocolParams(350, nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
@@ -207,14 +227,14 @@ func TestQueryShelleyEpochNo_AsOfSlot_ReadsHistoricalEpoch(t *testing.T) {
 		Point: ocommon.NewPoint(650, repeatedBytes(32, 0x0B)),
 	}, nil))
 
-	hist, err := ls.queryShelleyEpochNo(350)
+	hist, err := ls.queryShelleyEpochNo(350, nil)
 	require.NoError(t, err)
 	arr, ok := hist.([]any)
 	require.True(t, ok)
 	require.Len(t, arr, 1)
 	assert.Equal(t, uint64(3), arr[0])
 
-	live, err := ls.queryShelleyEpochNo(0)
+	live, err := ls.queryShelleyEpochNo(0, nil)
 	require.NoError(t, err)
 	arr, ok = live.([]any)
 	require.True(t, ok)

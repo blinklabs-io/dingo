@@ -20,6 +20,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -56,10 +57,12 @@ type UtxorpcLedgerState interface {
 	) (lcommon.ProtocolParameters, error)
 	// PoolStakeDistribution reports the active stake distribution across
 	// block-producing pools. A nil filter asks for every pool; see the method
-	// on ledger.LedgerState for why an empty non-nil filter differs.
+	// on ledger.LedgerState for why an empty non-nil filter differs. txn is
+	// nil here -- this RPC handler always answers live, never pinned.
 	PoolStakeDistribution(
 		poolFilter []lcommon.PoolKeyHash,
 		asOfSlot uint64,
+		txn *database.Txn,
 	) (*ledger.PoolStakeDistribution, error)
 	SlotToTime(slot uint64) (time.Time, error)
 	SystemStart() (time.Time, error)

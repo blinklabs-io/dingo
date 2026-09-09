@@ -15,8 +15,10 @@
 package ledger
 
 import (
+	"fmt"
 	"math/big"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -50,11 +52,33 @@ type stakeDistributionEntry = struct {
 // -- see totalCirculatingSupply's doc comment (blinklabs-io/dingo#3824) for
 // the full story and why GetPoolDistr2 must not make the same change.
 //
-// asOfSlot is Query's pinned point (0 = live); PoolStakeDistribution resolves
-// it to the historical epoch whose mark snapshot governed that slot
-// (blinklabs-io/dingo#382).
-func (ls *LedgerState) queryShelleyStakeDistribution(asOfSlot uint64) (any, error) {
-	dist, err := ls.PoolStakeDistribution(nil, asOfSlot)
+// asOfSlot is Query's pinned point (0 = live), but a pinned (non-zero)
+// asOfSlot is rejected here rather than answered: unlike GetPoolDistr2 (which
+// uses TotalActiveStake, itself a historical, per-epoch snapshot total),
+// this query's denominator is TotalCirculatingSupply, computed from
+// GetNetworkState's reserves row -- and GetNetworkState only ever returns
+// the latest row, with no historical-by-epoch or historical-by-slot lookup
+// yet. Answering a pinned point here would silently mix a correct
+// historical numerator (the pinned epoch's pool stakes) with the current
+// live reserves as the denominator, which is wrong whenever reserves have
+// moved between the pinned point and now (MIR, treasury donations,
+// monetary expansion). Rejecting with ErrHistoricalStateUnavailable until a
+// historical NetworkState lookup exists is safer than a plausible-looking
+// wrong fraction (blinklabs-io/dingo#382).
+func (ls *LedgerState) queryShelleyStakeDistribution(
+	asOfSlot uint64,
+	txn *database.Txn,
+) (any, error) {
+	if asOfSlot != 0 {
+		return nil, fmt.Errorf(
+			"%w: GetStakeDistribution pinned to slot %d is not yet "+
+				"supported -- its circulating-supply denominator has no "+
+				"historical-by-slot record",
+			ErrHistoricalStateUnavailable,
+			asOfSlot,
+		)
+	}
+	dist, err := ls.PoolStakeDistribution(nil, asOfSlot, txn)
 	if err != nil {
 		return nil, err
 	}

@@ -99,8 +99,11 @@ type QueryPoint struct {
 }
 
 // pinned reports whether p names a historical point rather than "live."
+// Only the origin sentinel (Slot 0, empty Hash) is unpinned -- a slot-0
+// point with a nonempty Hash is a real chain point, not the origin, and
+// must still be validated rather than silently treated as "live."
 func (p QueryPoint) pinned() bool {
-	return p.Slot != 0
+	return p.Slot != 0 || len(p.Hash) != 0
 }
 
 // ErrHistoricalStateUnavailable indicates a caller pinned a Query to a point
@@ -127,8 +130,33 @@ var ErrPointNotOnChain = errors.New("acquired point is not on the current chain"
 // block at at.Slot whose hash is at.Hash, so a pinned query can't silently
 // reconstruct against a fork the caller never acquired
 // (blinklabs-io/dingo#382). Only called when at.pinned().
-func (ls *LedgerState) verifyPointOnChain(at QueryPoint) error {
-	block, err := database.BlockBySlot(ls.db, at.Slot)
+//
+// txn bounds both the tip read and the block lookup to one transaction, so
+// the two describe the same moment: database.BlockBySlot on its own has no
+// notion of "applied tip" at all -- it scans the blob store's slot-keyed
+// block index directly, which can retain a block slotted ahead of what has
+// actually been applied to ledger state (e.g. a header-ahead-of-ledger
+// buffer entry). Without the tip bound, such a block could satisfy both the
+// slot and hash check here while the ledger state this query is about to
+// read from has not incorporated it at all. Rejecting at.Slot above the
+// transaction-consistent tip closes that gap.
+func (ls *LedgerState) verifyPointOnChain(
+	txn *database.Txn,
+	at QueryPoint,
+) error {
+	tip, err := ls.db.GetTip(txn)
+	if err != nil {
+		return err
+	}
+	if at.Slot > tip.Point.Slot {
+		return fmt.Errorf(
+			"%w: point at slot %d is ahead of the current tip (slot %d)",
+			ErrPointNotOnChain,
+			at.Slot,
+			tip.Point.Slot,
+		)
+	}
+	block, err := database.BlockBySlotTxn(txn, at.Slot)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return fmt.Errorf(
@@ -190,12 +218,23 @@ func (ls *LedgerState) resolveAsOfEpoch(
 // point, unlike stake distribution or protocol parameters: epoch records
 // are never pruned and carry no other coupled state, so resolving which
 // epoch covered a historical slot has no retention window to violate.
-func (ls *LedgerState) queryShelleyEpochNo(asOfSlot uint64) (any, error) {
+//
+// txn is Query's point-validation transaction, non-nil whenever asOfSlot is
+// non-zero -- reusing it rather than opening a fresh one keeps this read
+// inside the same snapshot verifyPointOnChain already validated at.Slot
+// against, so a rollback landing between validation and this read cannot
+// make the two disagree about which chain they're describing.
+func (ls *LedgerState) queryShelleyEpochNo(
+	asOfSlot uint64,
+	txn *database.Txn,
+) (any, error) {
 	if asOfSlot == 0 {
 		return []any{ls.loadConsensusSnapshot().currentEpoch.EpochId}, nil
 	}
-	txn := ls.db.Transaction(false)
-	defer txn.Release()
+	if txn == nil {
+		txn = ls.db.Transaction(false)
+		defer txn.Release()
+	}
 	epoch, err := ls.resolveAsOfEpoch(txn, asOfSlot)
 	if err != nil {
 		return nil, err
@@ -222,14 +261,25 @@ func (ls *LedgerState) queryShelleyEpochNo(asOfSlot uint64) (any, error) {
 // full scope (every query pinnable at any historical point) remains out of
 // scope for what cross-node validation via node-parity actually needs.
 func (ls *LedgerState) Query(query any, at QueryPoint) (any, error) {
+	// txn is nil on the live (unpinned) path -- every handler below falls
+	// back to opening its own transaction in that case, unchanged from
+	// before this point-pinning existed. When pinned, this one transaction
+	// is reused for both verifyPointOnChain and whichever handler below
+	// honors at, so the validated point and the historical read it guards
+	// come from the same consistent snapshot: a rollback committing between
+	// the two cannot make the handler answer for a point that already left
+	// the canonical chain.
+	var txn *database.Txn
 	if at.pinned() {
-		if err := ls.verifyPointOnChain(at); err != nil {
+		txn = ls.db.Transaction(false)
+		defer txn.Release()
+		if err := ls.verifyPointOnChain(txn, at); err != nil {
 			return nil, err
 		}
 	}
 	switch q := query.(type) {
 	case *olocalstatequery.BlockQuery:
-		return ls.queryBlock(q, at)
+		return ls.queryBlock(q, at, txn)
 	case *olocalstatequery.SystemStartQuery:
 		return ls.querySystemStart()
 	case *olocalstatequery.ChainBlockNoQuery:
@@ -244,12 +294,13 @@ func (ls *LedgerState) Query(query any, at QueryPoint) (any, error) {
 func (ls *LedgerState) queryBlock(
 	query *olocalstatequery.BlockQuery,
 	at QueryPoint,
+	txn *database.Txn,
 ) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkQuery:
 		return ls.queryHardFork(q)
 	case *olocalstatequery.ShelleyQuery:
-		return ls.queryShelley(q, at)
+		return ls.queryShelley(q, at, txn)
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
 	}
@@ -279,6 +330,12 @@ func (ls *LedgerState) querySystemStart() (any, error) {
 	return ret, nil
 }
 
+// dispatch switch, which is what lets that switch return each case's
+// result directly; this handler happens to never fail, unlike its
+// siblings, but a special-cased signature here would break that
+// uniformity for no real benefit.
+//
+//nolint:unparam // (any, error) matches every other case in Query's
 func (ls *LedgerState) queryChainBlockNo() (any, error) {
 	tip := ls.loadTipSnapshot().currentTip
 	// WithOrigin BlockNo: [0] at genesis, [1, blockNo] once a block exists.
@@ -288,6 +345,7 @@ func (ls *LedgerState) queryChainBlockNo() (any, error) {
 	return []any{1, tip.BlockNumber}, nil
 }
 
+//nolint:unparam // see queryChainBlockNo's identical note just above.
 func (ls *LedgerState) queryChainPoint() (any, error) {
 	return cloneTip(ls.loadTipSnapshot().currentTip).Point, nil
 }
@@ -615,8 +673,9 @@ func picosecondsToDuration(p *big.Int) time.Duration {
 func (ls *LedgerState) queryShelley(
 	query *olocalstatequery.ShelleyQuery,
 	at QueryPoint,
+	txn *database.Txn,
 ) (any, error) {
-	return ls.queryShelleyLeaf(query.Query, at)
+	return ls.queryShelleyLeaf(query.Query, at, txn)
 }
 
 // queryShelleyLeaf dispatches a decoded Shelley block-query leaf and returns
@@ -680,14 +739,18 @@ func (ls *LedgerState) queryShelley(
 //
 // Not applicable: ShelleyCborQuery (a combinator, not a leaf query --
 // forwards at to whatever it wraps).
-func (ls *LedgerState) queryShelleyLeaf(query any, at QueryPoint) (any, error) {
+func (ls *LedgerState) queryShelleyLeaf(
+	query any,
+	at QueryPoint,
+	txn *database.Txn,
+) (any, error) {
 	switch q := query.(type) {
 	case *olocalstatequery.ShelleyCborQuery:
-		return ls.queryShelleyCbor(q, at)
+		return ls.queryShelleyCbor(q, at, txn)
 	case *olocalstatequery.ShelleyEpochNoQuery:
-		return ls.queryShelleyEpochNo(at.Slot)
+		return ls.queryShelleyEpochNo(at.Slot, txn)
 	case *olocalstatequery.ShelleyCurrentProtocolParamsQuery:
-		return ls.queryShelleyCurrentProtocolParams(at.Slot)
+		return ls.queryShelleyCurrentProtocolParams(at.Slot, txn)
 	case *olocalstatequery.ShelleyGenesisConfigQuery:
 		return ls.queryShelleyGenesisConfig()
 	case *olocalstatequery.ShelleyUtxoByAddressQuery:
@@ -717,9 +780,9 @@ func (ls *LedgerState) queryShelleyLeaf(query any, at QueryPoint) (any, error) {
 	case *olocalstatequery.ShelleyDebugChainDepStateQuery:
 		return ls.queryShelleyDebugChainDepState()
 	case *olocalstatequery.ShelleyPoolDistr2Query:
-		return ls.queryShelleyPoolDistr2(q, at.Slot)
+		return ls.queryShelleyPoolDistr2(q, at.Slot, txn)
 	case *olocalstatequery.ShelleyStakeDistributionQuery:
-		return ls.queryShelleyStakeDistribution(at.Slot)
+		return ls.queryShelleyStakeDistribution(at.Slot, txn)
 	case *olocalstatequery.ShelleyUtxoWholeQuery:
 		// Always live: pinning a point only matters for a query slow enough
 		// that the live tip could move underneath it before it finishes
@@ -752,8 +815,9 @@ func (ls *LedgerState) queryShelleyLeaf(query any, at QueryPoint) (any, error) {
 func (ls *LedgerState) queryShelleyCbor(
 	q *olocalstatequery.ShelleyCborQuery,
 	at QueryPoint,
+	txn *database.Txn,
 ) (any, error) {
-	inner, err := ls.queryShelleyLeaf(q.Query, at)
+	inner, err := ls.queryShelleyLeaf(q.Query, at, txn)
 	if err != nil {
 		return nil, err
 	}

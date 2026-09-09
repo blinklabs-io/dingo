@@ -22,6 +22,7 @@ import (
 	"slices"
 
 	"github.com/blinklabs-io/dingo/consensus/praos"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -42,6 +43,16 @@ const stakeSnapshotRetentionEpochs = 3
 // checkAsOfEpochRecency rejects a historical epoch already outside the pool
 // mark-snapshot retention window, or ahead of the live epoch
 // (blinklabs-io/dingo#382).
+//
+// The window is checked on the derived mark-snapshot epoch
+// (praos.StakeSnapshotEpoch(targetEpoch), i.e. targetEpoch-1), not on
+// targetEpoch itself: cleanupOldSnapshots' default retention floor
+// (liveEpoch-stakeSnapshotRetentionEpochs) is a floor on snapshot epochs,
+// and the snapshot a query at targetEpoch needs is one epoch further back
+// than targetEpoch. Comparing targetEpoch directly against that floor is
+// off by the same one-epoch shift: at liveEpoch 6, targetEpoch 3 resolves
+// to snapshot epoch 2, which the floor (6-3=3) has already pruned, but
+// 6-3=3 is not > 3 so the un-shifted comparison wrongly accepted it.
 func checkAsOfEpochRecency(targetEpoch, liveEpoch uint64) error {
 	if targetEpoch > liveEpoch {
 		return fmt.Errorf(
@@ -51,13 +62,22 @@ func checkAsOfEpochRecency(targetEpoch, liveEpoch uint64) error {
 			liveEpoch,
 		)
 	}
-	if liveEpoch-targetEpoch > stakeSnapshotRetentionEpochs {
+	if liveEpoch < stakeSnapshotRetentionEpochs {
+		// cleanupOldSnapshots itself does nothing below this floor (its own
+		// currentEpoch < 3 guard) -- nothing has ever been pruned yet.
+		return nil
+	}
+	deleteBeforeEpoch := liveEpoch - stakeSnapshotRetentionEpochs
+	snapshotEpoch := praos.StakeSnapshotEpoch(targetEpoch)
+	if snapshotEpoch < deleteBeforeEpoch {
 		return fmt.Errorf(
-			"%w: as-of epoch %d is outside the %d-epoch pool-snapshot "+
-				"retention window behind the live epoch (%d)",
+			"%w: as-of epoch %d (mark snapshot epoch %d) is outside the "+
+				"retained pool-snapshot window (rows below epoch %d have "+
+				"been pruned) behind the live epoch (%d)",
 			ErrHistoricalStateUnavailable,
 			targetEpoch,
-			stakeSnapshotRetentionEpochs,
+			snapshotEpoch,
+			deleteBeforeEpoch,
 			liveEpoch,
 		)
 	}
@@ -139,18 +159,31 @@ type PoolStakeDistribution struct {
 // the mark snapshot is already persisted per-epoch for leader election.
 // checkAsOfEpochRecency rejects a historical epoch already outside the
 // mark-snapshot retention window (ledger/snapshot's pool-snapshot pruning),
-// since those rows are physically gone.
+// since those rows are physically gone. asOfSlot ahead of the transaction
+// tip is rejected directly (not just by epoch): GetEpochBySlot can resolve
+// a future slot within the live epoch to that same live epoch, which would
+// otherwise let a future-slot pin silently pass as "live epoch, therefore
+// fine" despite naming a point that has not happened yet.
+//
+// txn reuses an already-open transaction (Query's point-validation
+// transaction, when called through it) rather than opening a fresh one, so
+// a pinned call's point-validation and this read share one consistent
+// snapshot -- nil opens and releases one internally, for a caller (a
+// direct, unpinned RPC handler) with no such transaction of its own.
 func (ls *LedgerState) PoolStakeDistribution(
 	poolFilter []lcommon.PoolKeyHash,
 	asOfSlot uint64,
+	txn *database.Txn,
 ) (*PoolStakeDistribution, error) {
 	// The per-pool stakes, their total, and the epoch naming the snapshot they
 	// come from all have to come from one view: read separately, an epoch
 	// boundary landing in between would produce fractions that do not sum to
 	// one, or a distribution belonging to an epoch other than the one this
 	// query resolved.
-	txn := ls.db.Transaction(false)
-	defer txn.Release()
+	if txn == nil {
+		txn = ls.db.Transaction(false)
+		defer txn.Release()
+	}
 	metaTxn := txn.Metadata()
 
 	// The tip comes from this transaction rather than the in-memory
@@ -158,6 +191,14 @@ func (ls *LedgerState) PoolStakeDistribution(
 	tip, err := ls.db.GetTip(txn)
 	if err != nil {
 		return nil, err
+	}
+	if asOfSlot != 0 && asOfSlot > tip.Point.Slot {
+		return nil, fmt.Errorf(
+			"%w: as-of slot %d is ahead of the current tip (slot %d)",
+			ErrHistoricalStateUnavailable,
+			asOfSlot,
+			tip.Point.Slot,
+		)
 	}
 	epoch, err := ls.resolveAsOfEpoch(txn, asOfSlot)
 	if err != nil {

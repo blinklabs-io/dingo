@@ -20,6 +20,8 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -47,6 +49,9 @@ func TestQuery_PinnedPointOnChain_Succeeds(t *testing.T) {
 
 	hash := bytes.Repeat([]byte{0xAB}, 32)
 	seedBlockAtSlot(t, ls, 100, hash)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(100, hash),
+	}, nil))
 
 	_, err := ls.Query(utxoWholeQuery(), QueryPoint{Slot: 100, Hash: hash})
 	require.NoError(t, err)
@@ -58,6 +63,9 @@ func TestQuery_PinnedPointOnChain_Succeeds(t *testing.T) {
 // rollback happened between Acquire and Query. Before verifyPointOnChain
 // existed, a purely slot-keyed reconstruction would have silently answered
 // against the new fork's data; it must instead fail with ErrPointNotOnChain.
+// The tip is set at slot 100 (not left at origin) so this exercises the
+// hash-mismatch rejection specifically, not the separate above-the-tip
+// rejection TestQuery_PinnedPointAboveTip_Rejected covers.
 func TestQuery_PinnedPointWrongHash_Rejected(t *testing.T) {
 	t.Parallel()
 
@@ -67,6 +75,9 @@ func TestQuery_PinnedPointWrongHash_Rejected(t *testing.T) {
 	actualHash := bytes.Repeat([]byte{0xAB}, 32)
 	acquiredHash := bytes.Repeat([]byte{0xCD}, 32)
 	seedBlockAtSlot(t, ls, 100, actualHash)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(100, actualHash),
+	}, nil))
 
 	_, err := ls.Query(
 		utxoWholeQuery(),
@@ -79,12 +90,20 @@ func TestQuery_PinnedPointWrongHash_Rejected(t *testing.T) {
 // TestQuery_PinnedPointNoBlockAtSlot_Rejected covers a point naming a slot
 // this node has no block for at all (never seen it, or it was never a real
 // chain point) -- must fail with ErrPointNotOnChain rather than silently
-// treating "no block" as equivalent to "empty state as of that slot".
+// treating "no block" as equivalent to "empty state as of that slot". The
+// tip is set past slot 999 (via a block at a later slot) so this exercises
+// the no-block-found rejection specifically, not the above-the-tip one.
 func TestQuery_PinnedPointNoBlockAtSlot_Rejected(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
+
+	laterHash := bytes.Repeat([]byte{0xAB}, 32)
+	seedBlockAtSlot(t, ls, 1000, laterHash)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(1000, laterHash),
+	}, nil))
 
 	_, err := ls.Query(
 		utxoWholeQuery(),
@@ -92,6 +111,58 @@ func TestQuery_PinnedPointNoBlockAtSlot_Rejected(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrPointNotOnChain))
+}
+
+// TestQuery_PinnedPointAboveTip_Rejected covers the gap a purely
+// slot-keyed lookup left open: database.BlockBySlot has no notion of
+// "applied tip" at all, so a block retained in the blob store at a slot
+// ahead of what has actually been applied to ledger state (e.g. a
+// header-ahead-of-ledger buffer entry) could satisfy both the slot and
+// hash check even though the ledger state a query is about to read from
+// has not incorporated it. A point naming that block must be rejected
+// as not on the (applied) chain, regardless of whether the block itself
+// is retained.
+func TestQuery_PinnedPointAboveTip_Rejected(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+
+	tipHash := bytes.Repeat([]byte{0xAB}, 32)
+	aheadHash := bytes.Repeat([]byte{0xCD}, 32)
+	seedBlockAtSlot(t, ls, 100, tipHash)
+	seedBlockAtSlot(t, ls, 200, aheadHash)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(100, tipHash),
+	}, nil))
+
+	_, err := ls.Query(
+		utxoWholeQuery(),
+		QueryPoint{Slot: 200, Hash: aheadHash},
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrPointNotOnChain)
+}
+
+// TestQuery_SlotZeroWithHashIsPinned_Rejected covers QueryPoint.pinned()'s
+// own predicate: a slot-0 point with a nonempty Hash is a real chain point
+// (a real Byron genesis-adjacent block could sit at slot 0), not the origin
+// sentinel (QueryPoint{}, both fields zero), and must still go through
+// verifyPointOnChain -- not be silently treated as unpinned and answered
+// from live state. This node has no such block, so it must be rejected the
+// same way any other non-existent point would be.
+func TestQuery_SlotZeroWithHashIsPinned_Rejected(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+
+	_, err := ls.Query(
+		utxoWholeQuery(),
+		QueryPoint{Slot: 0, Hash: bytes.Repeat([]byte{0xEE}, 32)},
+	)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrPointNotOnChain)
 }
 
 // TestQuery_UnpinnedSkipsPointValidation covers the live path: a zero-value
