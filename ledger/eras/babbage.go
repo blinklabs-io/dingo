@@ -233,10 +233,6 @@ func ValidateTxBabbage(
 	// Core Babbage transaction validity checks (fees/size/etc.) are covered
 	// by babbage.UtxoValidationRules. Keep additional local validation scoped
 	// to script execution compatibility.
-	// Skip script evaluation if TX is marked as not valid
-	if !tx.IsValid() {
-		return nil
-	}
 	if shouldSkipPhase2Validation(ls) {
 		return nil
 	}
@@ -292,6 +288,7 @@ func ValidateTxBabbage(
 			ls,
 			tx,
 			slices.Concat(resolvedInputs, resolvedRefInputs),
+			script.StrictValidityUpperBoundForTransaction(tx),
 		)
 		if err != nil {
 			return err
@@ -317,6 +314,7 @@ func ValidateTxBabbage(
 				ls,
 				tx,
 				slices.Concat(resolvedInputs, resolvedRefInputs),
+				script.StrictValidityUpperBoundForTransaction(tx),
 			)
 			if err != nil {
 				return err
@@ -349,25 +347,37 @@ func ValidateTxBabbage(
 				evalContext,
 			)
 			if err != nil {
-				return err
+				return validatePlutusOutcome(
+					tx,
+					conway.PlutusScriptFailedError{
+						ScriptHash: tmpScript.Hash(),
+						Tag:        redeemer.Tag,
+						Index:      redeemer.Index,
+						Err:        err,
+					},
+				)
 			}
 			if usedBudgetV1.Steps > redeemer.ExUnits.Steps || usedBudgetV1.Memory > redeemer.ExUnits.Memory {
-				return conway.PlutusScriptFailedError{
-					ScriptHash: tmpScript.Hash(),
-					Tag:        redeemer.Tag,
-					Index:      redeemer.Index,
-					Err: fmt.Errorf(
-						"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
-						usedBudgetV1.Steps, usedBudgetV1.Memory,
-						redeemer.ExUnits.Steps, redeemer.ExUnits.Memory,
-					),
-				}
+				return validatePlutusOutcome(
+					tx,
+					conway.PlutusScriptFailedError{
+						ScriptHash: tmpScript.Hash(),
+						Tag:        redeemer.Tag,
+						Index:      redeemer.Index,
+						Err: fmt.Errorf(
+							"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+							usedBudgetV1.Steps, usedBudgetV1.Memory,
+							redeemer.ExUnits.Steps, redeemer.ExUnits.Memory,
+						),
+					},
+				)
 			}
 		case lcommon.PlutusV2Script:
 			txInfoV2, err := script.NewTxInfoV2FromTransaction(
 				ls,
 				tx,
 				slices.Concat(resolvedInputs, resolvedRefInputs),
+				script.StrictValidityUpperBoundForTransaction(tx),
 			)
 			if err != nil {
 				return err
@@ -400,25 +410,36 @@ func ValidateTxBabbage(
 				evalContext,
 			)
 			if err != nil {
-				return err
+				return validatePlutusOutcome(
+					tx,
+					conway.PlutusScriptFailedError{
+						ScriptHash: tmpScript.Hash(),
+						Tag:        redeemer.Tag,
+						Index:      redeemer.Index,
+						Err:        err,
+					},
+				)
 			}
 			if usedBudgetV2.Steps > redeemer.ExUnits.Steps || usedBudgetV2.Memory > redeemer.ExUnits.Memory {
-				return conway.PlutusScriptFailedError{
-					ScriptHash: tmpScript.Hash(),
-					Tag:        redeemer.Tag,
-					Index:      redeemer.Index,
-					Err: fmt.Errorf(
-						"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
-						usedBudgetV2.Steps, usedBudgetV2.Memory,
-						redeemer.ExUnits.Steps, redeemer.ExUnits.Memory,
-					),
-				}
+				return validatePlutusOutcome(
+					tx,
+					conway.PlutusScriptFailedError{
+						ScriptHash: tmpScript.Hash(),
+						Tag:        redeemer.Tag,
+						Index:      redeemer.Index,
+						Err: fmt.Errorf(
+							"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+							usedBudgetV2.Steps, usedBudgetV2.Memory,
+							redeemer.ExUnits.Steps, redeemer.ExUnits.Memory,
+						),
+					},
+				)
 			}
 		default:
 			return fmt.Errorf("unimplemented script type: %T", tmpScript)
 		}
 	}
-	return nil
+	return validatePlutusOutcome(tx, nil)
 }
 
 var babbageUtxoValidationRules = buildBabbageValidationRules()
@@ -427,9 +448,7 @@ func buildBabbageValidationRules() []indexedUtxoValidationRule {
 	return buildIndexedUtxoValidationRules(
 		babbage.UtxoValidationRuleDescriptors(),
 		babbage.UtxoValidationRules,
-		babbageUtxoValidatePlutusScriptsRuleIndex,
-		babbage.UtxoValidatePlutusScripts,
-		"babbage.UtxoValidatePlutusScripts",
+		lcommon.UtxoValidationRulePlutusScripts,
 	)
 }
 
@@ -497,6 +516,7 @@ func EvaluateTxBabbage(
 			ls,
 			tx,
 			slices.Concat(resolvedInputs, resolvedRefInputs),
+			script.StrictValidityUpperBoundForTransaction(tx),
 		)
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, err
@@ -523,6 +543,7 @@ func EvaluateTxBabbage(
 				ls,
 				tx,
 				slices.Concat(resolvedInputs, resolvedRefInputs),
+				script.StrictValidityUpperBoundForTransaction(tx),
 			)
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
@@ -567,6 +588,7 @@ func EvaluateTxBabbage(
 				ls,
 				tx,
 				slices.Concat(resolvedInputs, resolvedRefInputs),
+				script.StrictValidityUpperBoundForTransaction(tx),
 			)
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err

@@ -426,14 +426,10 @@ func (p *PeerGovernor) addLedgerPeerContext(
 		return false
 	}
 
-	// Track this address as ledger-discovered so peers from other
-	// sources at the same address count toward the ledger target.
-	p.ledgerKnownAddrs[normalized] = struct{}{}
-
 	// Check for existing peer using cached NormalizedAddress. The address
 	// comparison is normalized on both sides, as in AddPeer, so a peer
 	// holding the same hostname under different casing is not duplicated.
-	exists := false
+	var existingPeer *Peer
 	for _, peer := range p.peers {
 		if peer == nil {
 			continue
@@ -441,11 +437,28 @@ func (p *PeerGovernor) addLedgerPeerContext(
 		if peer.NormalizedAddress == normalized ||
 			peer.NormalizedAddress == hostnameNormalized ||
 			p.normalizeAddress(peer.Address) == hostnameNormalized {
-			exists = true
+			existingPeer = peer
 			break
 		}
 	}
-	if exists {
+	if existingPeer != nil {
+		// The candidate is a valid ledger relay backed by a peer we already
+		// retain from another source. Record that retained peer's address so
+		// it counts toward the ledger target without adding a duplicate.
+		//
+		// Keyed on the retained peer's own normalizeAddress(peer.Address)
+		// (matching countLedgerPeersLocked/pruneLedgerKnownAddrsLocked), not
+		// on the candidate's hostnameNormalized form: the two can differ
+		// (e.g. the peer was added under its resolved IP while the ledger
+		// lists a hostname for the same relay), and keying on the candidate
+		// would silently break both the counting lookup and peer-retention
+		// pruning for that peer. The value is hostnameNormalized — the
+		// normalized, pre-DNS form of the candidate, not the verbatim
+		// candidate string — so a later discovery round's
+		// reconcileLedgerKnownAddrs can compare it against the ledger's
+		// fresh relay list (normalized the same way), without re-resolving
+		// every candidate.
+		p.ledgerKnownAddrs[p.normalizeAddress(existingPeer.Address)] = hostnameNormalized
 		p.mu.Unlock()
 		return false
 	}
@@ -461,6 +474,14 @@ func (p *PeerGovernor) addLedgerPeerContext(
 		p.mu.Unlock()
 		return false
 	}
+
+	// Record only admitted ledger addresses. Keeping duplicate or
+	// capacity-rejected candidates would make them count toward the ledger
+	// target even though the governor does not retain them as peers. Keyed
+	// on normalizeAddress(newPeer.Address), matching the existingPeer branch
+	// above; for a brand-new peer Address is exactly address, so this key is
+	// always identical to hostnameNormalized here.
+	p.ledgerKnownAddrs[p.normalizeAddress(address)] = hostnameNormalized
 
 	// Add as new peer
 	newPeer := &Peer{
@@ -531,11 +552,13 @@ func (p *PeerGovernor) ledgerPeerRejectedWithoutDNS(address string) bool {
 			p.normalizeAddress(peer.Address) != hostnameNormalized {
 			continue
 		}
-		// Record the peer's own normalized address rather than a fresh
-		// resolution: countLedgerPeersLocked matches ledgerKnownAddrs
-		// against Peer.NormalizedAddress, so this is what makes a peer
-		// known from another source count toward the ledger target.
-		p.ledgerKnownAddrs[peer.NormalizedAddress] = struct{}{}
+		// This is a valid ledger relay already retained from another source,
+		// not an unusable rejected candidate. Associate the retained peer with
+		// ledger discovery so it contributes to LedgerPeerTarget. Keyed on
+		// the retained peer's own address, matching addLedgerPeerContext;
+		// see that function's existingPeer branch for why keying on the
+		// candidate's hostname form instead would be wrong.
+		p.ledgerKnownAddrs[p.normalizeAddress(peer.Address)] = hostnameNormalized
 		return true
 	}
 	return false

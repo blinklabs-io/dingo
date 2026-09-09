@@ -238,25 +238,20 @@ func ValidateTxConway(
 	); err != nil {
 		return fmt.Errorf("conway plutus redeemer validation: %w", err)
 	}
-	// Skip script evaluation (Phase-2) if TX is marked as not valid.
-	// These transactions failed script validation on-chain; collateral
-	// is consumed instead of regular inputs.
-	if !tx.IsValid() {
-		return nil
-	}
 	if shouldSkipPhase2Validation(ls) {
 		return nil
 	}
-	if err := validateTxPlutusConwayWithContext(
+	phase2Err := validateTxPlutusConwayWithContext(
 		tx,
 		ls,
 		tmpPparams,
 		plutusCtx,
 		false,
-	); err != nil {
-		return fmt.Errorf("conway plutus validation: %w", err)
+	)
+	if phase2Err != nil {
+		phase2Err = fmt.Errorf("conway plutus validation: %w", phase2Err)
 	}
-	return nil
+	return validatePlutusOutcome(tx, phase2Err)
 }
 
 var (
@@ -274,23 +269,24 @@ func conwayValidationRules(
 }
 
 func buildConwayValidationRules() []indexedUtxoValidationRule {
-	skips := []utxoValidationRuleSkip{
-		{
-			index: conwayUtxoValidateConwayFeaturesRuleIndex,
-			validationFunc: conway.
-				UtxoValidateConwayFeaturesWithPlutusV1V2,
-			name: "conway.UtxoValidateConwayFeaturesWithPlutusV1V2",
-		},
-		{
-			index:          conwayUtxoValidateFeeTooSmallRuleIndex,
-			validationFunc: conway.UtxoValidateFeeTooSmallUtxo,
-			name:           "conway.UtxoValidateFeeTooSmallUtxo",
-		},
-		{
-			index:          conwayUtxoValidatePlutusScriptsRuleIndex,
-			validationFunc: conway.UtxoValidatePlutusScripts,
-			name:           "conway.UtxoValidatePlutusScripts",
-		},
+	// Skips are resolved by upstream rule Id, never by validation function.
+	// conway.UtxoValidationRules is composed with
+	// common.ComposeUtxoValidationRules, so every phase-2-gated entry —
+	// committee-certificates and unknown-voters among them — is an anonymous
+	// wrapper closure with no trace of the original function.
+	skipRuleIds := []lcommon.UtxoValidationRuleId{
+		lcommon.UtxoValidationRuleConwayFeaturesWithPlutusV1V2,
+		lcommon.UtxoValidationRuleFeeTooSmall,
+		lcommon.UtxoValidationRulePlutusScripts,
+		lcommon.UtxoValidationRuleCommitteeCertificates,
+		lcommon.UtxoValidationRuleUnknownVoters,
+	}
+	descriptors := conway.UtxoValidationRuleDescriptors()
+	indexes := make([]int, len(skipRuleIds))
+	for i := range skipRuleIds {
+		indexes[i] = resolveUtxoValidationSkipIndex(
+			descriptors, conway.UtxoValidationRules, skipRuleIds[i],
+		)
 	}
 	ret := buildIndexedUtxoValidationRulesWithSkips(
 		descriptors,
@@ -298,9 +294,19 @@ func buildConwayValidationRules() []indexedUtxoValidationRule {
 		skipRuleIds,
 	)
 	ret = append(ret, indexedUtxoValidationRule{
-		index:          conwayUtxoValidateConwayFeaturesRuleIndex,
+		index:          indexes[0],
 		validationFunc: validateConwayFeaturesWithNeededPlutusV1V2,
 	})
+	ret = append(ret,
+		indexedUtxoValidationRule{
+			index:          indexes[3],
+			validationFunc: validateCommitteeCertificates,
+		},
+		indexedUtxoValidationRule{
+			index:          indexes[4],
+			validationFunc: validateUnknownVoters,
+		},
+	)
 	slices.SortFunc(ret, func(a, b indexedUtxoValidationRule) int {
 		return a.index - b.index
 	})
@@ -513,20 +519,18 @@ func validateTxPlutusConway(
 	pp *conway.ConwayProtocolParameters,
 	validateRequiredRedeemers bool,
 ) error {
-	if !tx.IsValid() {
-		return nil
-	}
 	plutusCtx, err := newConwayPlutusValidationContext(tx, ls)
 	if err != nil {
 		return err
 	}
-	return validateTxPlutusConwayWithContext(
+	phase2Err := validateTxPlutusConwayWithContext(
 		tx,
 		ls,
 		pp,
 		plutusCtx,
 		validateRequiredRedeemers,
 	)
+	return validatePlutusOutcome(tx, phase2Err)
 }
 
 func validateTxPlutusConwayWithContext(
@@ -764,7 +768,8 @@ func validateConwayRequiredPlutusRedeemers(
 	}
 	withdrawalAddrs := sortedConwayWithdrawalAddresses(tx.Withdrawals())
 	for idx, addr := range withdrawalAddrs {
-		if (addr.Type() & lcommon.AddressTypeScriptBit) == 0 {
+		stakeCredential, ok := addr.StakeCredential()
+		if !ok || stakeCredential.CredType != lcommon.CredentialTypeScriptHash {
 			continue
 		}
 		key := lcommon.RedeemerKey{
@@ -774,10 +779,7 @@ func validateConwayRequiredPlutusRedeemers(
 		if err := checkRequired(
 			key,
 			script.ScriptPurposeRewarding{
-				StakeCredential: lcommon.Credential{
-					CredType:   lcommon.CredentialTypeScriptHash,
-					Credential: addr.StakeKeyHash(),
-				},
+				StakeCredential: stakeCredential,
 			},
 		); err != nil {
 			return err
@@ -1088,6 +1090,7 @@ func (c *conwayTxInfoCache) v1() (script.TxInfoV1, error) {
 			c.ls,
 			c.tx,
 			c.resolvedInputs,
+			script.StrictValidityUpperBoundForTransaction(c.tx),
 		)
 		if err != nil {
 			return script.TxInfoV1{}, conway.ScriptContextConstructionError{
@@ -1106,6 +1109,7 @@ func (c *conwayTxInfoCache) v2() (script.TxInfoV2, error) {
 			c.ls,
 			c.tx,
 			c.resolvedInputs,
+			script.StrictValidityUpperBoundForTransaction(c.tx),
 		)
 		if err != nil {
 			return script.TxInfoV2{}, conway.ScriptContextConstructionError{
