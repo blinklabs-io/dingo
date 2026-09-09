@@ -176,6 +176,8 @@ var logPlainConfigFields = []string{
 	"Logging.Level",
 	"MaxConnectionsPerIP",
 	"MaxInboundConns",
+	"MaxNtCConns",
+	"MaxNtCConnectionsPerIP",
 	"MaxKESEvolutions",
 	"MetricsPort",
 	"Midnight.AuthTokenAssetName",

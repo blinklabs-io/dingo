@@ -108,10 +108,15 @@ func TestNtCCleanupCollisionReleasesBeforeBlockedCallback(t *testing.T) {
 			finishFirst := sync.OnceFunc(func() { first.ErrorChan() <- nil })
 			finishSecond := sync.OnceFunc(func() { second.ErrorChan() <- nil })
 			added := make(chan bool, 1)
+			addDone := make(chan struct{})
 			t.Cleanup(func() {
 				releaseCallback()
 				finishFirst()
-				finishSecond()
+				select {
+				case <-addDone:
+					finishSecond()
+				case <-time.After(time.Second):
+				}
 				waitForConnectionManagerWatchers(t, manager)
 			})
 			address := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002}
@@ -135,6 +140,7 @@ func TestNtCCleanupCollisionReleasesBeforeBlockedCallback(t *testing.T) {
 					second, testCase.inbound, testCase.inbound,
 					address.String(), "", secondRelease,
 				)
+				close(addDone)
 			}()
 			testutil.RequireReceive(t, entered, time.Second, "replacement callback")
 			requireNtCCleanupCounts(t, manager, testCase.remaining)

@@ -525,6 +525,8 @@ var flagSpecs = []flagSpec{
 		"max simultaneous connections per IP",
 	),
 	intFlag("MaxInboundConns", "max-inbound-conns", "max inbound connections"),
+	intFlag("MaxNtCConns", "max-ntc-conns", "max node-to-client connections"),
+	intFlag("MaxNtCConnectionsPerIP", "max-ntc-connections-per-ip", "max node-to-client connections per IP"),
 
 	// Cache
 	intFlag(

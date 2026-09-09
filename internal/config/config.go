@@ -629,6 +629,8 @@ type Config struct {
 	InboundCooldown          time.Duration `yaml:"inboundCooldown"          envconfig:"DINGO_INBOUND_COOLDOWN"`
 	MaxConnectionsPerIP      int           `yaml:"maxConnectionsPerIP"      envconfig:"DINGO_MAX_CONNECTIONS_PER_IP"`
 	MaxInboundConns          int           `yaml:"maxInboundConns"          envconfig:"DINGO_MAX_INBOUND_CONNS"`
+	MaxNtCConns              int           `yaml:"maxNtCConns"               envconfig:"DINGO_MAX_NTC_CONNS"`
+	MaxNtCConnectionsPerIP   int           `yaml:"maxNtCConnectionsPerIP"    envconfig:"DINGO_MAX_NTC_CONNECTIONS_PER_IP"`
 
 	// Cache configuration for the tiered CBOR cache system
 	Cache CacheConfig `yaml:"cache"`
