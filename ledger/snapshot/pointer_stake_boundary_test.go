@@ -353,3 +353,47 @@ func TestCaptureEpochBoundaryAgreesOnPointerStakeAcrossTheEraCutover(t *testing.
 		})
 	}
 }
+
+// TestMergePointerStakeInputsAttachesToTheSurvivingLiveRow covers a legacy
+// database carrying duplicate reward_live_stake rows for one credential --
+// the shape dedupeStakeInputs exists for, and which did occur before
+// idx_reward_live_stake_cred was unique.
+//
+// mergePointerStakeInputs must add the overlay to the row dedupeStakeInputs
+// will keep. Attaching it to any other duplicate silently drops the pointer
+// stake at aggregation, reinstating dingo#3854 on exactly those nodes.
+func TestMergePointerStakeInputsAttachesToTheSurvivingLiveRow(t *testing.T) {
+	credential := bytes.Repeat([]byte{0x9c}, 28)
+	lowPool := bytes.Repeat([]byte{0x01}, 28)
+	highPool := bytes.Repeat([]byte{0x02}, 28)
+
+	// dedupeStakeInputs orders duplicates by pool before stake, so the
+	// highPool row survives whatever either row's stake is. The lowPool row is
+	// last here, which is the row a last-wins index would select.
+	rawInputs := []*models.RewardStakeInput{
+		{
+			PoolKeyHash: highPool, CredentialTag: 0, StakingKey: credential,
+			Stake: 200, Registered: true,
+		},
+		{
+			PoolKeyHash: lowPool, CredentialTag: 0, StakingKey: credential,
+			Stake: 100, Registered: true,
+		},
+	}
+	pointerInputs := []*models.RewardStakeInput{
+		{
+			PoolKeyHash: highPool, CredentialTag: 0, StakingKey: credential,
+			Stake: 600, Registered: true,
+		},
+	}
+
+	merged, err := mergePointerStakeInputs(rawInputs, pointerInputs)
+	require.NoError(t, err)
+	inputs, err := rewardStakeInputsFromRows(merged)
+	require.NoError(t, err)
+	require.Len(t, inputs, 1, "one credential survives deduplication")
+	require.Equal(t, uint64(800), inputs[0].Stake,
+		"the pointer overlay must survive deduplication of duplicate "+
+			"reward_live_stake rows")
+	require.Equal(t, highPool, inputs[0].PoolKeyHash)
+}

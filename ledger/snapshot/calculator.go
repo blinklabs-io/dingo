@@ -644,7 +644,12 @@ func mergePointerStakeInputs(
 		if in == nil {
 			continue
 		}
-		index[key(in.CredentialTag, in.StakingKey)] = in
+		k := key(in.CredentialTag, in.StakingKey)
+		if existing, ok := index[k]; ok &&
+			!outranksForDedupe(in, existing) {
+			continue
+		}
+		index[k] = in
 	}
 	merged := append([]*models.RewardStakeInput(nil), rawInputs...)
 	for _, p := range pointerInputs {
@@ -668,6 +673,27 @@ func mergePointerStakeInputs(
 		merged = append(merged, &clone)
 	}
 	return merged, nil
+}
+
+// outranksForDedupe reports whether a would be kept over b by
+// dedupeStakeInputs, for two rows that already share a credential: pool first,
+// then stake, then registration state.
+//
+// A legacy database can carry duplicate reward_live_stake rows for one
+// credential -- the shape dedupeStakeInputs exists for. The pointer overlay has
+// to be added to the duplicate that survives that deduplication, or the
+// aggregate keeps a different row and the pointer stake is silently dropped.
+// Adding stake cannot change which row wins: pool is compared before stake, and
+// where the pools are equal the overlay only raises the stake of the row that
+// was already winning.
+func outranksForDedupe(a, b *models.RewardStakeInput) bool {
+	if c := bytes.Compare(a.PoolKeyHash, b.PoolKeyHash); c != 0 {
+		return c > 0
+	}
+	if a.Stake != b.Stake {
+		return a.Stake > b.Stake
+	}
+	return a.Registered && !b.Registered
 }
 
 // rewardStakeInputsFromRows converts and canonically deduplicates reward rows

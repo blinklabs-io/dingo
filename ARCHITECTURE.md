@@ -8721,8 +8721,12 @@ that epoch's row is written, so the persist half discards its distribution
 whenever the boundary changes era and reconstructs historically instead; see
 `GetPointerStakeInputsForPools` in `DATABASE.md`. Every
 other consumer of this aggregate -- `GetStakeByPools`, DRep voting power, and a
-plain live `GetRewardStakeInputsForPools` query -- is unchanged and still
-attributes only base-address stake. That is correct once the live tip has
+`GetRewardStakeInputsForPools` query with `expiryEpoch == 0`, `boundarySlot == 0`
+and no boundary awareness, which is the only shape of that call that reads the
+aggregate at all -- is unchanged and still attributes only base-address stake.
+Any other shape of `GetRewardStakeInputsForPools`, including one with the
+CIP-0163 inactivity gate on, goes through `historicalStakeCTE` and resolves
+pointer stake there. That is correct once the live tip has
 passed the Conway fork, where pointer addresses confer no stake at all, and
 understates a pre-Conway tip. Consumers must not treat `RewardLiveStake` on its
 own as an exact replacement for the ledger stake distribution for eras where
