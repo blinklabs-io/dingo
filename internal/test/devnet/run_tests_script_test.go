@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -242,9 +243,7 @@ func runFakeDevnetWithEnv(
 		),
 		"TMPDIR": tempRoot,
 	}
-	for key, value := range envOverrides {
-		env[key] = value
-	}
+	maps.Copy(env, envOverrides)
 	cmd.Env = cleanRunnerEnv(env)
 	var output bytes.Buffer
 	cmd.Stdout = &output

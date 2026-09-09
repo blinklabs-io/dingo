@@ -27,6 +27,8 @@ import (
 )
 
 func TestValidateGenesisConsistencyNoGenesis(t *testing.T) {
+	t.Parallel()
+
 	// With neither (or only one) genesis loaded there is nothing to
 	// cross-check, so the consistency check must pass.
 	require.NoError(t, (&CardanoNodeConfig{}).validateGenesisConsistency())
@@ -38,6 +40,8 @@ func TestValidateGenesisConsistencyNoGenesis(t *testing.T) {
 }
 
 func TestValidateGenesisConsistencyMatch(t *testing.T) {
+	t.Parallel()
+
 	c := &CardanoNodeConfig{
 		byronGenesis: &byron.ByronGenesis{StartTime: 1666656000},
 		shelleyGenesis: &shelley.ShelleyGenesis{
@@ -48,6 +52,8 @@ func TestValidateGenesisConsistencyMatch(t *testing.T) {
 }
 
 func TestValidateGenesisConsistencyMismatch(t *testing.T) {
+	t.Parallel()
+
 	c := &CardanoNodeConfig{
 		byronGenesis: &byron.ByronGenesis{StartTime: 1506203091},
 		shelleyGenesis: &shelley.ShelleyGenesis{
@@ -62,6 +68,8 @@ func genesisRat(num, denom int64) cbor.Rat {
 }
 
 func TestValidateEpochLengthFitsNonceWindow(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name        string
 		k           int
@@ -151,6 +159,8 @@ func TestValidateEpochLengthFitsNonceWindow(t *testing.T) {
 }
 
 func TestValidateEpochLengthFitsNonceWindowIncompleteGenesis(t *testing.T) {
+	t.Parallel()
+
 	// A genesis missing any input to 4k/f is not one this check can speak
 	// to, so it must pass rather than reject on a zero value.
 	testCases := []struct {
@@ -201,6 +211,8 @@ func TestValidateEpochLengthFitsNonceWindowIncompleteGenesis(t *testing.T) {
 // is the check that the bundled configs themselves satisfy the invariants,
 // not just that the validator computes them correctly.
 func TestEmbeddedConfigsPassGenesisConsistency(t *testing.T) {
+	t.Parallel()
+
 	entries, err := EmbeddedConfigFS.ReadDir(".")
 	require.NoError(t, err)
 	networks := make([]string, 0, len(entries))
@@ -228,6 +240,8 @@ func TestEmbeddedConfigsPassGenesisConsistency(t *testing.T) {
 // second slots, which put an epoch boundary every half second and left the
 // 4k/f window with no room inside the epoch at all.
 func TestDevnetGenesisIsUsable(t *testing.T) {
+	t.Parallel()
+
 	cfg, err := NewCardanoNodeConfigFromEmbedFS(
 		EmbeddedConfigFS,
 		"devnet/config.json",
@@ -265,6 +279,8 @@ func TestDevnetGenesisIsUsable(t *testing.T) {
 // nothing added since Chang was priced and the script data hash a builder
 // computed from current cost models never matched the chain.
 func TestDevnetCostModelsCoverEveryPricedParameter(t *testing.T) {
+	t.Parallel()
+
 	cfg, err := NewCardanoNodeConfigFromEmbedFS(
 		EmbeddedConfigFS,
 		"devnet/config.json",

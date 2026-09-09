@@ -15,7 +15,6 @@
 package badger
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -154,10 +153,6 @@ type badgerItem struct {
 	item *badger.Item
 }
 
-var blockMetadataBinaryMagic = [4]byte{'D', 'B', 'M', '1'}
-
-const blockMetadataPrevHashMaxLen = 32
-
 func buildBlockBlobKey(dst []byte, slot uint64, hash []byte) {
 	copy(dst, types.BlockBlobKeyPrefix)
 	binary.BigEndian.PutUint64(
@@ -180,54 +175,21 @@ func buildBlockBlobMetadataKey(dst []byte, baseKey []byte) {
 	copy(dst[len(baseKey):], types.BlockBlobMetadataKeySuffix)
 }
 
+// marshalBlockMetadataInto and unmarshalBlockMetadata delegate to
+// database/types. The encoding is not private to this plugin: the value
+// sits at a shared BlockBlobMetadataKey that generic database code reads
+// directly, and which of the two encodings is there depends on the
+// writing node's configuration, so the codec has to be shared with every
+// reader.
 func marshalBlockMetadataInto(
 	dst []byte,
 	metadata types.BlockMetadata,
 ) error {
-	prevHashLen := len(metadata.PrevHash)
-	if prevHashLen > blockMetadataPrevHashMaxLen {
-		return fmt.Errorf(
-			"invalid block metadata prev hash length: %d",
-			prevHashLen,
-		)
-	}
-	copy(dst[:4], blockMetadataBinaryMagic[:])
-	binary.BigEndian.PutUint64(dst[4:12], metadata.ID)
-	binary.BigEndian.PutUint64(dst[12:20], uint64(metadata.Type))
-	binary.BigEndian.PutUint64(dst[20:28], metadata.Height)
-	binary.BigEndian.PutUint32(
-		dst[28:32],
-		uint32(prevHashLen),
-	)
-	copy(dst[32:], metadata.PrevHash)
-	return nil
+	return types.MarshalBlockMetadataInto(dst, metadata)
 }
 
 func unmarshalBlockMetadata(data []byte) (types.BlockMetadata, error) {
-	if len(data) >= 32 && bytes.Equal(data[:4], blockMetadataBinaryMagic[:]) {
-		prevHashLen := binary.BigEndian.Uint32(data[28:32])
-		expectedLen := 32 + int(prevHashLen)
-		if len(data) != expectedLen {
-			return types.BlockMetadata{}, fmt.Errorf(
-				"invalid block metadata length: got %d, want %d",
-				len(data),
-				expectedLen,
-			)
-		}
-		prevHash := make([]byte, prevHashLen)
-		copy(prevHash, data[32:])
-		return types.BlockMetadata{
-			ID:       binary.BigEndian.Uint64(data[4:12]),
-			Type:     uint(binary.BigEndian.Uint64(data[12:20])),
-			Height:   binary.BigEndian.Uint64(data[20:28]),
-			PrevHash: prevHash,
-		}, nil
-	}
-	var metadata types.BlockMetadata
-	if _, err := cbor.Decode(data, &metadata); err != nil {
-		return types.BlockMetadata{}, err
-	}
-	return metadata, nil
+	return types.UnmarshalBlockMetadata(data)
 }
 
 func (i *badgerItem) Key() []byte {
@@ -678,7 +640,7 @@ func (d *BlobStoreBadger) SetBlock(
 	hashIndexKeyLen := len(types.BlockHashIndexKeyPrefix) + len(hash)
 	packedLen := keyLen + indexKeyLen + metadataKeyLen + hashIndexKeyLen
 	if d.compactBlockMetadata {
-		packedLen += 32 + len(prevHash)
+		packedLen += types.BlockMetadataBinarySize(prevHash)
 	}
 	packed := make([]byte, packedLen)
 	key := packed[:keyLen]

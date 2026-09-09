@@ -320,6 +320,7 @@ func (b *DefaultBlockBuilder) buildBlock(
 		transactionWitnessSets = []cbor.RawMessage{}
 		transactionMetadataSet = make(map[uint]cbor.RawMessage)
 		blockSize              uint64
+		encodedBodySize        segmentedBodySize
 		totalExUnits           lcommon.ExUnits
 		maxTxSize              = limits.maxTxSize
 		maxBlockSize           = limits.maxBlockSize
@@ -387,20 +388,6 @@ func (b *DefaultBlockBuilder) buildBlock(
 					"max_tx_size", maxTxSize,
 				)
 				continue
-			}
-
-			// Check MaxBlockSize limit. Dijkstra's block body is not the
-			// segmented tx-body/witness/metadata layout, so it gets an exact
-			// candidate block-body size check after tx decoding below.
-			if limits.era != eraDijkstra && blockSize+txSize > maxBlockSize {
-				b.logger.Debug(
-					"block size limit reached",
-					"component", "forging",
-					"current_size", blockSize,
-					"tx_size", txSize,
-					"max_block_size", maxBlockSize,
-				)
-				break
 			}
 
 			// Decode the transaction CBOR into a typed era-specific
@@ -591,6 +578,21 @@ func (b *DefaultBlockBuilder) buildBlock(
 					)
 					break
 				}
+			}
+			if limits.era != eraDijkstra {
+				candidateSize := encodedBodySize.withTransaction(
+					bodyBytes, witnessBytes, metadataCbor,
+				)
+				if candidateSize.size(limits.era) > maxBlockSize {
+					b.logger.Debug(
+						"block body size limit reached",
+						"component", "forging",
+						"candidate_body_size", candidateSize.size(limits.era),
+						"max_block_body_size", maxBlockSize,
+					)
+					break
+				}
+				encodedBodySize = candidateSize
 			}
 			transactionBodies = append(transactionBodies, bodyBytes)
 			transactionWitnessSets = append(

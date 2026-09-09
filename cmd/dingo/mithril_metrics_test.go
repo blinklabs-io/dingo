@@ -33,6 +33,8 @@ import (
 )
 
 func TestMithrilSyncMetricsRecordProgress(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	metrics := newMithrilSyncMetrics(reg)
 
@@ -250,6 +252,8 @@ func TestMithrilSyncMetricsRecordProgress(t *testing.T) {
 }
 
 func TestStartPrometheusMetricsServerWithHandlerServesMetrics(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	gauge := prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "test_mithril_metric",
@@ -286,6 +290,8 @@ func TestStartPrometheusMetricsServerWithHandlerServesMetrics(t *testing.T) {
 }
 
 func TestMithrilSyncMetricsLedgerStateSlotAbsentUntilRecorded(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	newMithrilSyncMetrics(reg)
 

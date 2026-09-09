@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
 )
 
@@ -96,7 +97,8 @@ func openRealDatabase(
 
 	blobStore, err := hostplugin.Resolve[blob.BlobStore](
 		ctx, host,
-		hostplugin.CapabilityStorageBlob, "badger", nil,
+		hostplugin.CapabilityStorageBlob, "badger",
+		testutil.BadgerBlobConfig(),
 		blob.ProviderDependencies{DataDir: opts.dataDir, Logger: logger},
 	)
 	if err != nil {

@@ -33,6 +33,8 @@ import (
 // error here, because a client that ignored the status would sign a
 // transaction whose fee was computed from parameters nobody configured.
 func TestConstructionMetadataByronEraNoFeeSubstitution(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	require.Nil(
 		t,
@@ -68,6 +70,8 @@ func TestConstructionMetadataByronEraNoFeeSubstitution(t *testing.T) {
 // name protocol-parameter availability. Mesh already does this; the test locks
 // it against a future refactor that drops the wrapped error on the floor.
 func TestConstructionMetadataByronEraDescribesCause(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 
 	rec := postJSON(
