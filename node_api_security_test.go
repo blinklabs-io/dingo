@@ -30,6 +30,8 @@ import (
 // with no tls/auth of its own inherits the shared api.tls/api.auth
 // policy.
 func TestAPIProviderConfigMergesTopLevelDefault(t *testing.T) {
+	t.Parallel()
+
 	cfg := Config{
 		apiConfig: internalconfig.APIConfig{
 			TLS: apiconfig.TLSPolicy{
@@ -61,6 +63,8 @@ func TestAPIProviderConfigMergesTopLevelDefault(t *testing.T) {
 // TestAPIProviderConfigProviderOverrideWins asserts an explicit provider
 // field beats the shared top-level default for that field only.
 func TestAPIProviderConfigProviderOverrideWins(t *testing.T) {
+	t.Parallel()
+
 	cfg := Config{
 		apiConfig: internalconfig.APIConfig{
 			TLS: apiconfig.TLSPolicy{
@@ -98,6 +102,8 @@ func TestAPIProviderConfigProviderOverrideWins(t *testing.T) {
 // TestAPIProviderConfigExplicitDisableOverridesInherited asserts a
 // provider can turn off an inherited auth policy explicitly.
 func TestAPIProviderConfigExplicitDisableOverridesInherited(t *testing.T) {
+	t.Parallel()
+
 	cfg := Config{
 		apiConfig: internalconfig.APIConfig{
 			Auth: apiconfig.AuthPolicy{
@@ -131,6 +137,8 @@ func TestAPIProviderConfigExplicitDisableOverridesInherited(t *testing.T) {
 // to TLS on upgrade for any deployment that had set them (see
 // legacyUtxorpcTLSPolicy's own doc comment).
 func TestLegacyUtxorpcTLSPolicyIsUtxorpcOnly(t *testing.T) {
+	t.Parallel()
+
 	cfg := Config{
 		tlsCertFilePath: "/legacy/cert.pem",
 		tlsKeyFilePath:  "/legacy/key.pem",
@@ -172,6 +180,8 @@ func TestLegacyUtxorpcTLSPolicyIsUtxorpcOnly(t *testing.T) {
 // the canonical-over-compatibility precedence used elsewhere (e.g.
 // applyAPIPortCompatibilityEnvironment).
 func TestLegacyUtxorpcTLSPolicyYieldsToExplicitPolicy(t *testing.T) {
+	t.Parallel()
+
 	cfg := Config{
 		tlsCertFilePath: "/legacy/cert.pem",
 		tlsKeyFilePath:  "/legacy/key.pem",
@@ -199,6 +209,8 @@ func TestLegacyUtxorpcTLSPolicyYieldsToExplicitPolicy(t *testing.T) {
 // key pair in the shared api.tls default is rejected at New(), before any
 // listener starts -- not merely logged or deferred to Start() time.
 func TestNewRejectsInvalidMergedAPITLSPolicy(t *testing.T) {
+	t.Parallel()
+
 	cardanoCfg := newNodeTestCardanoNodeCfg(t)
 	_, err := New(NewConfig(
 		WithDatabasePath(t.TempDir()),
@@ -228,6 +240,8 @@ func TestNewRejectsInvalidMergedAPITLSPolicy(t *testing.T) {
 // TestNewRejectsInvalidAPIAuthMode asserts an invalid auth mode is
 // likewise rejected at New().
 func TestNewRejectsInvalidAPIAuthMode(t *testing.T) {
+	t.Parallel()
+
 	cardanoCfg := newNodeTestCardanoNodeCfg(t)
 	_, err := New(NewConfig(
 		WithDatabasePath(t.TempDir()),

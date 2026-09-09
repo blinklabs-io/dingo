@@ -16,6 +16,7 @@ package lifecycle_test
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -161,6 +162,17 @@ var testDestinationRegistry = func() *lifecycle.DestinationRegistry {
 			fakeCloudMu.Lock()
 			base := fakeCloudDir
 			fakeCloudMu.Unlock()
+			if base == "" {
+				// A resolution with no backing directory set would
+				// filepath.Join against "" and write the URI path
+				// relative to the package directory. Fail instead: the
+				// only way to get here is a resolution that outlived the
+				// test that set the fixture, and that should error,
+				// not leave files in the checkout.
+				return nil, errors.New(
+					"faketest: no backing directory set for this test",
+				)
+			}
 			return &fakeCloudDestination{
 				dir: filepath.Join(base, strings.TrimPrefix(uri.Path, "/")),
 			}, nil
@@ -198,6 +210,8 @@ func setFakeCloudBackingDir(t *testing.T, dir string) {
 // loudly. The subtest's t.Cleanup (registered by setFakeCloudBackingDir)
 // runs synchronously before t.Run returns, so fakeCloudDir must already be
 // reset by the time this checks it.
+// Not t.Parallel: this asserts on the package-level fakeCloudDir itself,
+// so it must not observe another test holding the fixture.
 func TestFakeCloudBackingDirResetsBetweenTests(t *testing.T) {
 	t.Run("sets it", func(t *testing.T) {
 		setFakeCloudBackingDir(t, t.TempDir())
@@ -230,6 +244,9 @@ func TestFakeCloudBackingDirResetsBetweenTests(t *testing.T) {
 // second subtest's call to setFakeCloudBackingDir must block until the
 // first subtest actually finishes (its t.Cleanup fires), rather than
 // both proceeding immediately and racing fakeCloudDir between them.
+// Not t.Parallel: this drives setFakeCloudBackingDir concurrently on its
+// own goroutines to prove the fixture serializes; a parallel outer test
+// would be measuring the same lock from two directions.
 func TestSetFakeCloudBackingDirSerializesConcurrentTests(t *testing.T) {
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -279,6 +296,8 @@ func TestSetFakeCloudBackingDirSerializesConcurrentTests(t *testing.T) {
 // TestParseCloudDestinationUnknownScheme verifies that a URI whose scheme
 // has no registered factory returns an error.
 func TestParseCloudDestinationUnknownScheme(t *testing.T) {
+	t.Parallel()
+
 	_, err := lifecycle.ParseCloudDestination(
 		testDestinationRegistry,
 		"s3unknown://bucket/prefix",
@@ -293,6 +312,8 @@ func TestParseCloudDestinationUnknownScheme(t *testing.T) {
 // comment on why — so an error telling an operator to try "gs://..." would
 // send them to a scheme ParseCloudDestination itself rejects).
 func TestParseCloudDestinationMissingHost(t *testing.T) {
+	t.Parallel()
+
 	_, err := lifecycle.ParseCloudDestination(
 		testDestinationRegistry,
 		"faketest:///prefix",
@@ -306,6 +327,8 @@ func TestParseCloudDestinationMissingHost(t *testing.T) {
 // TestParseCloudDestinationMalformed verifies that an unparseable URI
 // string returns an error rather than panicking.
 func TestParseCloudDestinationMalformed(t *testing.T) {
+	t.Parallel()
+
 	_, err := lifecycle.ParseCloudDestination(
 		testDestinationRegistry,
 		"not a uri at all ://",
@@ -316,6 +339,8 @@ func TestParseCloudDestinationMalformed(t *testing.T) {
 // TestParseCloudDestinationRegisteredScheme verifies that a valid URI for
 // a registered scheme resolves to a usable CloudDestination.
 func TestParseCloudDestinationRegisteredScheme(t *testing.T) {
+	t.Parallel()
+
 	setFakeCloudBackingDir(t, t.TempDir())
 	dest, err := lifecycle.ParseCloudDestination(
 		testDestinationRegistry,
@@ -328,6 +353,8 @@ func TestParseCloudDestinationRegisteredScheme(t *testing.T) {
 // TestSnapshotToCloudEmptyDestinationIsLocalOnly verifies that an empty
 // cloudDest skips the upload and only writes the local snapshot.
 func TestSnapshotToCloudEmptyDestinationIsLocalOnly(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
 
@@ -354,6 +381,8 @@ func TestSnapshotToCloudEmptyDestinationIsLocalOnly(t *testing.T) {
 // TestSnapshotToCloudUploadsUnderPerSnapshotSubPath verifies that the
 // cloud copy lands under cloudDest/<snapshotID>, keeping the local copy too.
 func TestSnapshotToCloudUploadsUnderPerSnapshotSubPath(t *testing.T) {
+	t.Parallel()
+
 	backingDir := t.TempDir()
 	setFakeCloudBackingDir(t, backingDir)
 
@@ -410,6 +439,8 @@ func TestSnapshotToCloudUploadsUnderPerSnapshotSubPath(t *testing.T) {
 func TestSnapshotToCloudInvalidDestinationStillErrorsButKeepsLocal(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
 
@@ -435,6 +466,8 @@ func TestSnapshotToCloudInvalidDestinationStillErrorsButKeepsLocal(
 // TestRestoreAcceptsCloudURI verifies that Restore can take a per-snapshot
 // cloud URI directly, downloading it before restoring as normal.
 func TestRestoreAcceptsCloudURI(t *testing.T) {
+	t.Parallel()
+
 	backingDir := t.TempDir()
 	setFakeCloudBackingDir(t, backingDir)
 
@@ -473,6 +506,8 @@ func TestRestoreAcceptsCloudURI(t *testing.T) {
 // TestListCloudSnapshotsReturnsEveryUploadedSnapshot verifies that every
 // snapshot previously uploaded to a cloud destination is listed back.
 func TestListCloudSnapshotsReturnsEveryUploadedSnapshot(t *testing.T) {
+	t.Parallel()
+
 	backingDir := t.TempDir()
 	setFakeCloudBackingDir(t, backingDir)
 	const cloudDest = "faketest://bucket/prefix"
@@ -511,6 +546,8 @@ func TestListCloudSnapshotsReturnsEveryUploadedSnapshot(t *testing.T) {
 // TestListCloudSnapshotsEmptyDestReturnsNotOK verifies that an empty
 // cloudDest returns ok=false and no error, not a failure.
 func TestListCloudSnapshotsEmptyDestReturnsNotOK(t *testing.T) {
+	t.Parallel()
+
 	entries, ok, err := lifecycle.ListCloudSnapshots(
 		context.Background(),
 		nil,
@@ -524,6 +561,8 @@ func TestListCloudSnapshotsEmptyDestReturnsNotOK(t *testing.T) {
 // TestListCloudSnapshotsInvalidDestReturnsError verifies that an
 // unsupported cloud scheme returns a real error, not ok=false.
 func TestListCloudSnapshotsInvalidDestReturnsError(t *testing.T) {
+	t.Parallel()
+
 	_, ok, err := lifecycle.ListCloudSnapshots(
 		context.Background(),
 		testDestinationRegistry,

@@ -75,6 +75,12 @@ func ResolveCommitteeProposal(
 	if selected == nil {
 		return nil, 0, nil
 	}
+	// selectedAction is only ever assigned alongside selected, and only with
+	// a non-nil update: committeeActionMentionsCredential returns false for a
+	// nil action, so a nil update takes the continue in both loops. The
+	// selected == nil return above therefore also rules out a nil
+	// selectedAction, a correlation nilaway cannot make.
+	//nolint:nilaway // non-nil whenever selected is; see above
 	for _, credential := range selectedAction.Credentials {
 		if credential.CredType == coldCredential.CredType &&
 			credential.Credential == coldCredential.Credential {

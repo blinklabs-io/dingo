@@ -1832,6 +1832,83 @@ func (q *Queries) GetDrepByHash(ctx context.Context, credential []byte) (Drep, e
 	return i, err
 }
 
+const getDrepLastRegistrationDeposit = `-- name: GetDrepLastRegistrationDeposit :one
+SELECT deposit_amount
+FROM registration_drep
+WHERE credential_tag = ? AND drep_credential = ?
+ORDER BY added_slot DESC
+LIMIT 1
+`
+
+type GetDrepLastRegistrationDepositParams struct {
+	CredentialTag  int64
+	DrepCredential []byte
+}
+
+// Unlike GetDrepLastRegistrationSlot, this does not exclude certificate_id
+// = 0 rows: those are the Mithril ledger-state import's bootstrap-slot
+// registrations (see ImportDrepRegistration), and their deposit_amount is
+// the real amount owed on deregistration. On a bootstrapped node such a
+// row is often a DRep's only registration, so excluding it here would
+// compute a refund of 0 for a deposit that was actually paid.
+func (q *Queries) GetDrepLastRegistrationDeposit(ctx context.Context, arg GetDrepLastRegistrationDepositParams) (sql.NullString, error) {
+	row := q.db.QueryRowContext(ctx, getDrepLastRegistrationDeposit, arg.CredentialTag, arg.DrepCredential)
+	var deposit_amount sql.NullString
+	err := row.Scan(&deposit_amount)
+	return deposit_amount, err
+}
+
+const getDrepLastRegistrationDeposits = `-- name: GetDrepLastRegistrationDeposits :many
+SELECT r.credential_tag, r.drep_credential, r.deposit_amount
+FROM drep d
+JOIN registration_drep r
+  ON r.id = (
+      SELECT reg.id
+      FROM registration_drep reg
+      WHERE reg.credential_tag = d.credential_tag
+        AND reg.drep_credential = d.credential
+      ORDER BY reg.added_slot DESC, reg.id DESC
+      LIMIT 1
+  )
+WHERE d.active = TRUE
+`
+
+type GetDrepLastRegistrationDepositsRow struct {
+	CredentialTag  int64
+	DrepCredential []byte
+	DepositAmount  sql.NullString
+}
+
+// The set form of GetDrepLastRegistrationDeposit, for reading the deposits
+// of the active DReps GetActiveDreps returns in one round trip instead of
+// one query per DRep. Same certificate_id treatment: bootstrap-slot import
+// rows count, because their deposit_amount is the real amount owed.
+// Drive this lookup from active drep rows. The correlated lookup uses the
+// registration credential index for each active DRep, so history left behind
+// by DReps that have since deregistered does not become the outer scan.
+func (q *Queries) GetDrepLastRegistrationDeposits(ctx context.Context) ([]GetDrepLastRegistrationDepositsRow, error) {
+	rows, err := q.db.QueryContext(ctx, getDrepLastRegistrationDeposits)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []GetDrepLastRegistrationDepositsRow{}
+	for rows.Next() {
+		var i GetDrepLastRegistrationDepositsRow
+		if err := rows.Scan(&i.CredentialTag, &i.DrepCredential, &i.DepositAmount); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getDrepLastRegistrationSlot = `-- name: GetDrepLastRegistrationSlot :one
 SELECT CAST(COALESCE(MAX(added_slot), 0) AS INTEGER)
 FROM registration_drep
@@ -3540,9 +3617,12 @@ SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
        deleted_slot, amount, output_idx, payment_script
 FROM utxo
 WHERE added_slot > ?
-ORDER BY id DESC
+ORDER BY added_slot DESC, id DESC
 `
 
+// Order by added_slot before id so the sort is the reverse of
+// idx_utxo_added_slot's own order; ordering by id alone costs a full table
+// scan. See the Store wrapper for the full rationale.
 func (q *Queries) GetUtxosAddedAfterSlot(ctx context.Context, addedSlot sql.NullInt64) ([]Utxo, error) {
 	rows, err := q.db.QueryContext(ctx, getUtxosAddedAfterSlot, addedSlot)
 	if err != nil {

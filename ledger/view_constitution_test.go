@@ -104,6 +104,8 @@ func constitutionTestGuardrails(
 // mapping existed the view returned an empty common.Constitution, which
 // inverted both verdicts.
 func TestLedgerViewConstitutionWithPolicyHash(t *testing.T) {
+	t.Parallel()
+
 	lv, db := constitutionTestView(t)
 	anchorHash := bytes.Repeat([]byte{0xa1}, lcommon.Blake2b256Size)
 	policyHash := bytes.Repeat([]byte{0xa2}, lcommon.Blake2b224Size)
@@ -138,6 +140,8 @@ func TestLedgerViewConstitutionWithPolicyHash(t *testing.T) {
 // guardrails script maps to a nil ScriptHash, so guardrails validation
 // accepts a proposal that carries no policy hash and rejects one that does.
 func TestLedgerViewConstitutionWithoutPolicyHash(t *testing.T) {
+	t.Parallel()
+
 	lv, db := constitutionTestView(t)
 	anchorHash := bytes.Repeat([]byte{0xb1}, lcommon.Blake2b256Size)
 	require.NoError(t, db.SetConstitution(&models.Constitution{
@@ -174,6 +178,8 @@ func TestLedgerViewConstitutionWithoutPolicyHash(t *testing.T) {
 // most recently enacted constitution, including one that drops the
 // guardrails script a previous constitution carried.
 func TestLedgerViewConstitutionLatestEnactedWins(t *testing.T) {
+	t.Parallel()
+
 	lv, db := constitutionTestView(t)
 	require.NoError(t, db.SetConstitution(&models.Constitution{
 		AnchorURL:  "https://example.invalid/first",
@@ -202,6 +208,8 @@ func TestLedgerViewConstitutionLatestEnactedWins(t *testing.T) {
 // instead of treating "no constitution recorded" as "no guardrails script
 // required".
 func TestLedgerViewConstitutionMissingFailsClosed(t *testing.T) {
+	t.Parallel()
+
 	lv, _ := constitutionTestView(t)
 
 	got, err := lv.Constitution()
@@ -226,6 +234,8 @@ func TestLedgerViewConstitutionMissingFailsClosed(t *testing.T) {
 // wrapped store error and not ErrConstitutionUnavailable, which is reserved
 // for state that was read and found missing or malformed.
 func TestLedgerViewConstitutionUnreadableFailsClosed(t *testing.T) {
+	t.Parallel()
+
 	lv, db := constitutionTestView(t)
 	require.NoError(t, db.SetConstitution(&models.Constitution{
 		AnchorURL:  "https://example.invalid/unreadable",

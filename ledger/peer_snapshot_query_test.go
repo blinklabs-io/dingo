@@ -71,6 +71,8 @@ func atSlot(slot uint64) olocalstatequery.WithOriginSlot {
 // a well-formed empty (V1) result against an empty database, with the slot
 // taken from the current tip.
 func TestQueryLedgerPeerSnapshotDispatch(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{db: newTestDB(t)}
 	// The handler reads the snapshot slot from the same DB transaction as the
 	// pool data, so seed the tip in the database rather than in-memory state.
@@ -101,6 +103,8 @@ func TestQueryLedgerPeerSnapshotDispatch(t *testing.T) {
 // TestQueryLedgerPeerSnapshotEmptyAtOrigin proves a node still at chain origin
 // (tip slot 0) reports a WithOrigin/Origin slot and no pools.
 func TestQueryLedgerPeerSnapshotEmptyAtOrigin(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{db: newTestDB(t)}
 
 	result, err := ls.queryLedgerPeerSnapshot(
@@ -116,6 +120,8 @@ func TestQueryLedgerPeerSnapshotEmptyAtOrigin(t *testing.T) {
 // TestQueryLedgerPeerSnapshotRealSlotZero proves a real slot-0 block (slot 0
 // with a non-empty hash) is reported as At slot 0, not collapsed to Origin.
 func TestQueryLedgerPeerSnapshotRealSlotZero(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{db: newTestDB(t)}
 	require.NoError(t, ls.db.SetTip(
 		ochainsync.Tip{Point: ocommon.NewPoint(0, []byte("genesis-block"))},
@@ -133,6 +139,8 @@ func TestQueryLedgerPeerSnapshotRealSlotZero(t *testing.T) {
 }
 
 func TestAssembleLedgerPeerSnapshotNoStake(t *testing.T) {
+	t.Parallel()
+
 	// Pools exist with relays but no delegated stake -> empty weighted set.
 	pools := []models.Pool{
 		poolWithRelays(poolKeyHash28(0x01), ipv4Relay("1.2.3.4", 3001)),
@@ -154,6 +162,8 @@ func TestAssembleLedgerPeerSnapshotNoStake(t *testing.T) {
 // pool/total, that pools are emitted highest-stake-first, and that the
 // accumulated stake is the running cumulative sum.
 func TestAssembleLedgerPeerSnapshotStakeAndOrdering(t *testing.T) {
+	t.Parallel()
+
 	khSmall := poolKeyHash28(0x0A)
 	khBig := poolKeyHash28(0x0B)
 	pools := []models.Pool{
@@ -192,6 +202,8 @@ func TestAssembleLedgerPeerSnapshotStakeAndOrdering(t *testing.T) {
 // relays is excluded from the result list yet still counts toward the
 // total-stake denominator.
 func TestAssembleLedgerPeerSnapshotRelaylessPoolCounted(t *testing.T) {
+	t.Parallel()
+
 	khRelay := poolKeyHash28(0x01)
 	khNoRelay := poolKeyHash28(0x02)
 	pools := []models.Pool{
@@ -221,6 +233,8 @@ func TestAssembleLedgerPeerSnapshotRelaylessPoolCounted(t *testing.T) {
 // the set at the cumulative-stake quota (0.9) while LedgerPeerKindAll keeps
 // every relay-advertising pool.
 func TestAssembleLedgerPeerSnapshotBigPeerQuota(t *testing.T) {
+	t.Parallel()
+
 	khA := poolKeyHash28(0xA0) // 95%
 	khB := poolKeyHash28(0xB0) // 4%
 	khC := poolKeyHash28(0xC0) // 1%
@@ -253,6 +267,8 @@ func TestAssembleLedgerPeerSnapshotBigPeerQuota(t *testing.T) {
 // pools after it (including same-stake or zero-stake relayed pools) are
 // excluded rather than admitted by an off-by-one boundary.
 func TestAssembleLedgerPeerSnapshotBigPeerExactThreshold(t *testing.T) {
+	t.Parallel()
+
 	khA := poolKeyHash28(0xA0) // 80%
 	khB := poolKeyHash28(0xB0) // 10% -> cumulative exactly 0.9
 	khC := poolKeyHash28(0xC0) // 10% -> must be excluded
@@ -287,6 +303,8 @@ func TestAssembleLedgerPeerSnapshotBigPeerExactThreshold(t *testing.T) {
 // mapped to the correct RelayAccessPoint kind, including multi-host (SRV) and
 // dual-stack single-host-address relays.
 func TestAssembleLedgerPeerSnapshotRelayKinds(t *testing.T) {
+	t.Parallel()
+
 	hostPort := "named.example.com"
 	srvHost := "srv.example.com"
 	dualV4 := net.ParseIP("9.9.9.9").To4()
@@ -356,6 +374,8 @@ func TestAssembleLedgerPeerSnapshotRelayKinds(t *testing.T) {
 // out-of-range (malformed) port narrows to no port and is treated as an SRV
 // (MultiHostName) record rather than a SingleHostName with a bogus port 0.
 func TestAssembleLedgerPeerSnapshotMalformedPort(t *testing.T) {
+	t.Parallel()
+
 	host := "bad-port.example.com"
 	kh := poolKeyHash28(0x01)
 	pool := poolWithRelays(
@@ -385,6 +405,8 @@ func TestAssembleLedgerPeerSnapshotMalformedPort(t *testing.T) {
 // round-trips through the gouroboros CBOR marshaller, i.e. it is a valid
 // wire-format GetLedgerPeerSnapshot response.
 func TestAssembleLedgerPeerSnapshotResultEncodes(t *testing.T) {
+	t.Parallel()
+
 	kh := poolKeyHash28(0x01)
 	pool := poolWithRelays(kh, ipv4Relay("1.2.3.4", 3001))
 	snapshot := assembleLedgerPeerSnapshot(

@@ -64,6 +64,8 @@ func stakeDistributionQuery() *olocalstatequery.BlockQuery {
 // helper as GetPoolDistr2 (queryShelleyPoolDistr2), so the two queries
 // cannot silently disagree about the same chain's stake distribution.
 func TestQueryShelleyStakeDistribution_ReportsFractionAndVrf(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	vrfA := make([]byte, 32)
@@ -138,6 +140,8 @@ func stakeDistributionCborQuery() *olocalstatequery.BlockQuery {
 // StructAsArray result, or whether it strips a wrapping layer the real
 // client-side type still expects.
 func TestQueryShelleyStakeDistribution_ViaGetCBOR(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	vrfA := make([]byte, 32)
@@ -194,6 +198,8 @@ func TestQueryShelleyStakeDistribution_ViaGetCBOR(t *testing.T) {
 func TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	const snapshotEpoch = 0
@@ -256,6 +262,8 @@ func TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal(
 // stake snapshot yet: the query must return an empty, non-nil map rather
 // than failing.
 func TestQueryShelleyStakeDistribution_EmptySnapshot(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 

@@ -61,6 +61,8 @@ func seedCompleteDB(
 // must not mutate the database: an up-to-date core DB is a no-op, and an api-mode
 // DB is rejected (api catch-up is unsupported in this version).
 func TestSyncCatchUpDispatch(t *testing.T) {
+	t.Parallel()
+
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	t.Run("up-to-date core DB returns without syncing", func(t *testing.T) {
@@ -113,6 +115,8 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 // and each later subtest sets sync_status and the import marker to exactly
 // the state it needs. Run the whole function, not individual subtests.
 func TestDecideCatchUp(t *testing.T) {
+	t.Parallel()
+
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctx := context.Background()
 	// Unroutable aggregator: proves decision paths that must not fetch.

@@ -101,6 +101,8 @@ func (failingLedgerReadIterator) Next(bool) (*chain.ChainIteratorResult, error) 
 }
 
 func TestLedgerReadChainIteratorForwardsIteratorError(t *testing.T) {
+	t.Parallel()
+
 	resultCh := make(chan readChainResult, 1)
 	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
 	ls.ledgerReadChainIterator(t.Context(), failingLedgerReadIterator{}, resultCh)
@@ -125,6 +127,8 @@ func (s *scriptedLedgerReadIterator) Next(
 }
 
 func TestTrimReadBatchForRollbackKeepsCanonicalPrefix(t *testing.T) {
+	t.Parallel()
+
 	blocks := []gledger.Block{
 		&readChainMockBlock{slot: 10, hash: testHashBytes("trim-1")},
 		&readChainMockBlock{slot: 20, hash: testHashBytes("trim-2")},
@@ -145,6 +149,8 @@ func TestTrimReadBatchForRollbackKeepsCanonicalPrefix(t *testing.T) {
 func TestTrimReadBatchForRollbackRequestsRollbackWhenPointMissing(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	blocks := []gledger.Block{
 		&readChainMockBlock{slot: 10, hash: testHashBytes("missing-1")},
 		&readChainMockBlock{slot: 20, hash: testHashBytes("missing-2")},
@@ -160,6 +166,8 @@ func TestTrimReadBatchForRollbackRequestsRollbackWhenPointMissing(
 }
 
 func TestLedgerReadChainIteratorWaitsForResultCompletion(t *testing.T) {
+	t.Parallel()
+
 	ctx := t.Context()
 
 	resultCh := make(chan readChainResult)

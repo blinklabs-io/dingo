@@ -15,7 +15,9 @@
 package eras
 
 import (
+	"fmt"
 	"math/big"
+	"slices"
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -80,36 +82,79 @@ func newConwayDivergenceTx(
 	return tx
 }
 
-// TestConwayUtxoValidationRuleIndexesArePinned pins the upstream rule indexes
-// that dingo reports in "conway utxo validation rule %d" (see
-// ValidateTxConway). The indexes are positions in the gouroboros
-// conway.UtxoValidationRules slice, so an upstream insertion silently
-// renumbers every operator-visible diagnostic and every issue report written
-// against the old numbering.
+// conwayUtxoValidationRuleIndex resolves the position of the upstream Conway
+// rule carrying the stable semantic identifier id, exactly as production
+// resolution does in resolveUtxoValidationSkipIndex (ledger/eras/validation.go):
+// by descriptor Id, never by a pinned position.
 //
-// The pinned values are the positions gouroboros actually composes, confirmed
-// against the emitted diagnostic rather than derived by counting: a genuinely
-// missing input reports "conway utxo validation rule 30" and an unbalanced
-// transaction reports "rule 33". They were first committed as 29 and 32, which
-// matched no gouroboros version dingo has used — the composed list is
-// identical at v0.202.8 and v0.202.9 (60 rules) — so the guard failed from the
-// commit that introduced it (issue #3976).
-func TestConwayUtxoValidationRuleIndexesArePinned(t *testing.T) {
-	rules := conway.UtxoValidationRules
-	for idx, want := range map[int]string{
-		30: "UtxoValidateBadInputsUtxo",
-		33: "UtxoValidateValueNotConservedUtxo",
+// Position is not a stable property. gouroboros composes
+// conway.UtxoValidationRules from the ordered descriptor list, so any upstream
+// insertion renumbers every rule after it; the Id does not move. Tests that
+// pinned literal positions broke on the v0.202.5 and v0.202.9 bumps
+// (issues #3764, #3976, #3983), while production, which keys on the Id, did
+// not.
+func conwayUtxoValidationRuleIndex(
+	t *testing.T,
+	id lcommon.UtxoValidationRuleId,
+) int {
+	t.Helper()
+	descriptors := conway.UtxoValidationRuleDescriptors()
+	require.Len(
+		t,
+		conway.UtxoValidationRules,
+		len(descriptors),
+		"upstream descriptor list and composed rule list must agree in length",
+	)
+	index := slices.IndexFunc(
+		descriptors,
+		func(d lcommon.UtxoValidationRuleDescriptor) bool {
+			return d.Id == id
+		},
+	)
+	require.GreaterOrEqual(
+		t,
+		index,
+		0,
+		"upstream Conway must declare validation rule %q",
+		id,
+	)
+	require.NotNil(
+		t,
+		conway.UtxoValidationRules[index],
+		"upstream Conway rule %q must compose to a callable rule",
+		id,
+	)
+	return index
+}
+
+// TestConwayUtxoValidationRulesRemainInProductionRuleSet fails if a rule the
+// tests below depend on silently disappears from the slice Dingo actually
+// runs. buildConwayValidationRules drops upstream rules by Id (the skip list in
+// ledger/eras/conway.go), so a rule added to that list, or removed upstream,
+// would stop firing while the transactions that should be rejected quietly
+// start validating.
+//
+// It asserts presence and reachability, not position: the index each rule
+// occupies is read from the upstream descriptors at run time, so an upstream
+// insertion renumbers the expectation along with the rule.
+func TestConwayUtxoValidationRulesRemainInProductionRuleSet(t *testing.T) {
+	for _, id := range []lcommon.UtxoValidationRuleId{
+		lcommon.UtxoValidationRuleBadInputs,
+		lcommon.UtxoValidationRuleValueNotConserved,
 	} {
-		require.Greater(t, len(rules), idx)
-		name := utxoValidationRuleName(rules[idx])
-		assert.Contains(
+		index := conwayUtxoValidationRuleIndex(t, id)
+		assert.True(
 			t,
-			name,
-			want,
-			"conway rule index %d should resolve to %s, got %s",
-			idx,
-			want,
-			name,
+			slices.ContainsFunc(
+				conwayUtxoValidationRules,
+				func(rule indexedUtxoValidationRule) bool {
+					return rule.index == index &&
+						rule.validationFunc != nil
+				},
+			),
+			"conway rule %q (upstream index %d) must remain in the composed production rule set",
+			id,
+			index,
 		)
 	}
 }
@@ -117,9 +162,13 @@ func TestConwayUtxoValidationRuleIndexesArePinned(t *testing.T) {
 // TestValidateTxConwayGenuinelyMissingInputStillRejected is the negative case
 // for the rollback restore fix in LedgerState.rollback: an input that is
 // genuinely absent from the ledger must still be rejected as a bad input, and
-// must still be reported under rule index 30. A restore fix that made input
-// resolution more permissive would turn this into a consensus hazard.
+// must still be reported under the bad-inputs rule. A restore fix that made
+// input resolution more permissive would turn this into a consensus hazard.
 func TestValidateTxConwayGenuinelyMissingInputStillRejected(t *testing.T) {
+	badInputsIndex := conwayUtxoValidationRuleIndex(
+		t,
+		lcommon.UtxoValidationRuleBadInputs,
+	)
 	tx := newConwayDivergenceTx(t, 0xaa, 200_000, 0)
 
 	err := ValidateTxConway(
@@ -134,14 +183,22 @@ func TestValidateTxConwayGenuinelyMissingInputStillRejected(t *testing.T) {
 	require.ErrorAs(t, err, &badInputs)
 	require.Len(t, badInputs.Inputs, 1)
 	assert.Equal(t, tx.Inputs()[0].String(), badInputs.Inputs[0].String())
-	assert.Contains(t, err.Error(), "conway utxo validation rule 30:")
+	assert.Contains(
+		t,
+		err.Error(),
+		fmt.Sprintf("conway utxo validation rule %d:", badInputsIndex),
+	)
 }
 
 // TestValidateTxConwayGenuinelyUnbalancedStillRejected is the negative case for
 // the value-conservation half of issue #3678: a transaction whose inputs all
 // resolve but whose consumed and produced values genuinely differ must still be
-// rejected, and must still be reported under rule index 33.
+// rejected, and must still be reported under the value-not-conserved rule.
 func TestValidateTxConwayGenuinelyUnbalancedStillRejected(t *testing.T) {
+	notConservedIndex := conwayUtxoValidationRuleIndex(
+		t,
+		lcommon.UtxoValidationRuleValueNotConserved,
+	)
 	tx := newConwayDivergenceTx(t, 0xbb, 200_000, 200_000)
 
 	ls := newMockLedgerState()
@@ -166,7 +223,11 @@ func TestValidateTxConwayGenuinelyUnbalancedStillRejected(t *testing.T) {
 		"consumed should be the resolved input value",
 	)
 	assert.Equal(t, big.NewInt(400_000), notConserved.Produced)
-	assert.Contains(t, err.Error(), "conway utxo validation rule 33:")
+	assert.Contains(
+		t,
+		err.Error(),
+		fmt.Sprintf("conway utxo validation rule %d:", notConservedIndex),
+	)
 
 	// The input resolved, so bad-inputs must NOT also fire. This is what
 	// separates a genuinely unbalanced transaction from the single-cause

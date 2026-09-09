@@ -33,7 +33,7 @@ func TestCommitteeCredentialMigrationPreservesExistingRows(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 11)
+	require.Len(t, registry, 12)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,

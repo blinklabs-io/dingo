@@ -91,6 +91,8 @@ func requireEraDesc(t testing.TB, eraId uint) eras.EraDesc {
 //
 // Expected EraEnd slot: 532_000 (epoch end), epoch number: 501
 func TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone(t *testing.T) {
+	t.Parallel()
+
 	const (
 		tipSlot        = uint64(200_000)
 		epochStartSlot = uint64(100_000)
@@ -159,6 +161,8 @@ func TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone(t *testing.T) {
 }
 
 func TestQueryShelleyUtxoByAddress_EmptySlice(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	result, err := ls.queryShelleyUtxoByAddress(nil)
 	require.NoError(t, err)
@@ -175,6 +179,8 @@ func TestQueryShelleyUtxoByAddress_EmptySlice(t *testing.T) {
 // handler resolves UTxOs for every address in the request, not just the
 // first (#391) -- the wire query already carries the full set via q.Addrs.
 func TestQueryShelleyUtxoByAddress_MultipleAddresses(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	seedAddressUtxo := func(
@@ -237,6 +243,8 @@ func TestQueryShelleyUtxoByAddress_MultipleAddresses(t *testing.T) {
 }
 
 func TestQueryShelleyUtxoByTxIn_EmptySlice(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	result, err := ls.queryShelleyUtxoByTxIn(nil)
 	require.NoError(t, err)
@@ -267,6 +275,8 @@ func TestQueryShelleyUtxoByTxIn_EmptySlice(t *testing.T) {
 // kept; the loop stops as soon as two remain, so no further block storage
 // (and thus no further spends) can happen before they're used below.
 func TestQueryShelleyUtxoByTxIn_MultipleInputs(t *testing.T) {
+	t.Parallel()
+
 	db := newUtxoStorageTestDB(t)
 	iter := newUtxoStorageTestIterator(t)
 
@@ -372,6 +382,8 @@ func poolHash28(b byte) []byte {
 // unsorted set is rejected by cardano-cli ("expected tag" / "Canonicity
 // violation while decoding Set").
 func TestStakePoolsResult_CanonicalEncoding(t *testing.T) {
+	t.Parallel()
+
 	// Deliberately unsorted input.
 	keyHashes := [][]byte{
 		poolHash28(0xCC),
@@ -411,6 +423,8 @@ func TestStakePoolsResult_CanonicalEncoding(t *testing.T) {
 // TestStakePoolsResult_Empty verifies an empty pool set still produces the
 // tagged, wrapped wire shape (an empty set), not a bare/absent value.
 func TestStakePoolsResult_Empty(t *testing.T) {
+	t.Parallel()
+
 	result := stakePoolsResult(nil)
 	require.Len(t, result, 1)
 	set, ok := result[0].(cbor.Set)
@@ -433,6 +447,8 @@ func TestStakePoolsResult_Empty(t *testing.T) {
 // result is a bare CBOR map that round-trips through gouroboros'
 // DRepStateResult (the type cardano clients decode into).
 func TestQueryShelleyDRepState_EmptyDB(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
@@ -466,6 +482,8 @@ func TestQueryShelleyDRepState_EmptyDB(t *testing.T) {
 // null anchor) makes cardano-cli fail with "Size mismatch when decoding Record
 // RecD. Expected 3, but found 4" while balancing a transaction.
 func TestQueryShelleyDRepState_Populated(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	drepCred := stakeCred28(0xC1)
 	delegKey := stakeCred28(0xD2)
@@ -512,6 +530,8 @@ func TestQueryShelleyDRepState_Populated(t *testing.T) {
 // (zeros). The wire shape is [ [treasury, reserves] ] (CBOR 81 82 00 00),
 // verified against cardano-node's GetAccountState reply.
 func TestQueryShelleyAccountState_Empty(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
 
@@ -540,6 +560,8 @@ func TestQueryShelleyAccountState_Empty(t *testing.T) {
 // negative reserves value (Coin is signed; a misconfigured network can drive
 // reserves below zero, as observed on the devnet's cardano-node).
 func TestAccountStateResult_SignedRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	result := []any{
 		olocalstatequery.AccountState{Treasury: 500_000_000, Reserves: -1234},
 	}
@@ -596,6 +618,8 @@ func unwrapFilteredDelegationResult(
 func TestQueryShelleyFilteredDelegationAndRewardAccounts_EmptyCreds(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(nil)
 	require.NoError(t, err)
@@ -607,6 +631,8 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_EmptyCreds(
 func TestQueryShelleyFilteredDelegationAndRewardAccounts_UnknownCred(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
 
@@ -626,6 +652,8 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_UnknownCred(
 func TestQueryShelleyFilteredDelegationAndRewardAccounts_RegisteredUndelegated(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	stakeKey := stakeCred28(0xAA)
 	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
@@ -657,6 +685,8 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_RegisteredUndelegated(
 func TestQueryShelleyFilteredDelegationAndRewardAccounts_AfterWithdrawal(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	stakeKey := stakeCred28(0xAB)
 	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
@@ -693,6 +723,8 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_AfterWithdrawal(
 func TestQueryShelleyFilteredDelegationAndRewardAccounts_RegisteredDelegated(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	stakeKey := stakeCred28(0xBB)
 	poolHash := stakeCred28(0xCC) // 28 bytes is also pool key hash size
@@ -721,6 +753,8 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_RegisteredDelegated(
 }
 
 func TestQueryShelleyFilteredDelegationAndRewardAccounts_Mixed(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	delegatedKey := stakeCred28(0x01)
@@ -775,6 +809,8 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_Mixed(t *testing.T) {
 func TestQueryShelleyFilteredDelegationAndRewardAccounts_TagAware(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	stakeKey := stakeCred28(0x44)
 	keyPool := stakeCred28(0x45)
@@ -818,6 +854,8 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_TagAware(
 }
 
 func TestQueryShelleyStakeDelegDeposits(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	stakeKey := stakeCred28(0x51)
 	cred := lcommon.Credential{
@@ -884,6 +922,8 @@ func TestQueryShelleyStakeDelegDeposits(t *testing.T) {
 }
 
 func TestQueryShelleyFilteredVoteDelegatees(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	stakeKey := stakeCred28(0x61)
 	drepKey := stakeCred28(0x62)
@@ -926,6 +966,8 @@ func TestQueryShelleyFilteredVoteDelegatees(t *testing.T) {
 }
 
 func TestQueryShelleyGetProposalsReturnsDepositProcedure(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	txHash := bytes.Repeat([]byte{0x71}, 32)
 	returnAddressBytes := append(
@@ -979,6 +1021,8 @@ func TestQueryShelleyGetProposalsReturnsDepositProcedure(t *testing.T) {
 }
 
 func TestEpochPicoseconds(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name          string
 		slotLength    uint
@@ -1062,6 +1106,8 @@ func TestEpochPicoseconds(t *testing.T) {
 }
 
 func TestEpochPicoseconds_OverflowSafe(t *testing.T) {
+	t.Parallel()
+
 	// Verify that large values that would overflow uint64
 	// in naive multiplication are handled correctly by
 	// big.Int arithmetic.
@@ -1114,6 +1160,8 @@ func TestEpochPicoseconds_OverflowSafe(t *testing.T) {
 // Expected EraEnd slot: 532_000 (epoch 501's StartSlot — the exact boundary)
 // Without TransitionKnown: EraEnd would be 200_000 + 25_920 = 225_920
 func TestQueryHardForkEraHistory_TransitionKnown(t *testing.T) {
+	t.Parallel()
+
 	const (
 		tipSlot       = uint64(200_000)
 		epoch500Start = uint64(100_000)
@@ -1197,6 +1245,8 @@ func TestQueryHardForkEraHistory_TransitionKnown(t *testing.T) {
 func TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		tipSlot        = uint64(200_000)
 		epochStartSlot = uint64(100_000)
@@ -1267,6 +1317,8 @@ func TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone
 func TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		tipSlot        = uint64(200_000)
 		epochStartSlot = uint64(100_000)
@@ -1341,6 +1393,8 @@ func TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone(
 func TestQueryHardForkEraHistory_TransitionImpossible_ServesEpochEnd(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		epochStartSlot = uint64(100_000)
 		epochLen       = uint(432_000)
@@ -1402,6 +1456,8 @@ func TestQueryHardForkEraHistory_TransitionImpossible_ServesEpochEnd(
 func TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		epochStartSlot = uint64(100_000)
 		epochLen       = uint(432_000)
@@ -1461,6 +1517,8 @@ func TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch(
 func TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		epochStartSlot = uint64(100_000)
 		epochLen       = uint(432_000)
@@ -1524,6 +1582,8 @@ func TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison(
 }
 
 func TestCheckedSlotAdd(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name      string
 		startSlot uint64
@@ -1607,6 +1667,8 @@ func TestCheckedSlotAdd(t *testing.T) {
 // stopped in the window between an epoch-rollover version bump and the first
 // block of the new era.
 func TestReconstructTransitionInfo(t *testing.T) {
+	t.Parallel()
+
 	babbageEra := eras.GetEraById(eras.BabbageEraDesc.Id)
 	require.NotNil(t, babbageEra)
 	conwayEra := eras.GetEraById(eras.ConwayEraDesc.Id)
@@ -1705,6 +1767,8 @@ func TestReconstructTransitionInfo(t *testing.T) {
 //
 // Expected Babbage EraEnd slot: 64_432_000
 func TestQueryHardForkEraHistory_PastEra_NormalEpochEnd(t *testing.T) {
+	t.Parallel()
+
 	const (
 		epochId    = uint64(499)
 		epochStart = uint64(64_000_000)
@@ -1811,6 +1875,8 @@ func TestQueryHardForkEraHistory_PastEra_NormalEpochEnd(t *testing.T) {
 //
 // Expected Babbage EraEnd slot: 64_000_000 (epoch 499's StartSlot)
 func TestQueryHardForkEraHistory_PastEra_TransitionEpoch(t *testing.T) {
+	t.Parallel()
+
 	const (
 		epochId    = uint64(499)
 		epochStart = uint64(64_000_000)
@@ -1933,6 +1999,8 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch(t *testing.T) {
 func TestQueryHardForkEraHistory_PastEra_TransitionEpoch_Contiguity(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		babbageEpochId    = uint64(499)
 		babbageEpochStart = uint64(64_000_000)
@@ -2064,6 +2132,8 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch_Contiguity(
 
 // TestQueryChainBlockNoAtGenesis verifies origin is encoded as WithOrigin [0].
 func TestQueryChainBlockNoAtGenesis(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	ls.publishSnapshotsLocked()
 	result, err := ls.queryChainBlockNo()
@@ -2074,6 +2144,8 @@ func TestQueryChainBlockNoAtGenesis(t *testing.T) {
 
 // TestQueryChainBlockNoAtBlock verifies a non-origin tip is encoded as [1, blockNo].
 func TestQueryChainBlockNoAtBlock(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	ls.currentTip = ochainsync.Tip{
 		Point: ocommon.Point{
@@ -2090,6 +2162,8 @@ func TestQueryChainBlockNoAtBlock(t *testing.T) {
 
 // TestQueryChainBlockNoAtFirstBlock verifies BlockNo 0 is not treated as origin.
 func TestQueryChainBlockNoAtFirstBlock(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	ls.currentTip = ochainsync.Tip{
 		Point: ocommon.Point{

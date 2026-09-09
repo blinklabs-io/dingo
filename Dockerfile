@@ -32,7 +32,7 @@ RUN `go env GOPATH`/bin/antithesis-go-instrumentor /code /antithesis
 WORKDIR /antithesis/customer
 RUN make build
 
-FROM ghcr.io/blinklabs-io/cardano-cli:11.0.0.0-1 AS cardano-cli
+FROM ghcr.io/blinklabs-io/cardano-cli:11.2.3.1-1 AS cardano-cli
 FROM ghcr.io/blinklabs-io/cardano-configs:20260829-1 AS cardano-configs
 FROM ghcr.io/blinklabs-io/nview:0.15.0 AS nview
 FROM ghcr.io/blinklabs-io/txtop:0.16.0 AS txtop

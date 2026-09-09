@@ -314,6 +314,8 @@ INSERT INTO reward_live_stake (
 // This is a regression test for the critical bug where GetStakeByPools
 // returned zero for all pools, blocking block production.
 func TestCalculateStakeDistribution_NonZeroStake(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedSnapshotEpoch(t, db)
 
@@ -399,6 +401,8 @@ func TestCalculateStakeDistribution_NonZeroStake(t *testing.T) {
 func TestCalculateStakeDistribution_UsesHistoricalDelegationAndRegistration(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedSnapshotEpoch(t, db)
 	raw := snapshotSQLDB(t, db)
@@ -556,6 +560,8 @@ func TestCalculateStakeDistribution_UsesHistoricalDelegationAndRegistration(
 // distribution uses UTxO liveness at the snapshot slot rather than today's live
 // UTxO set.
 func TestCalculateStakeDistribution_HistoricalUtxoLiveness(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedSnapshotEpoch(t, db)
 
@@ -627,6 +633,8 @@ func TestCalculateStakeDistribution_HistoricalUtxoLiveness(t *testing.T) {
 // TestCalculateStakeDistribution_InactiveAccountsExcluded verifies that
 // inactive accounts (deregistered) are not counted in the distribution.
 func TestCalculateStakeDistribution_InactiveAccountsExcluded(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedSnapshotEpoch(t, db)
 	raw := snapshotSQLDB(t, db)
@@ -682,6 +690,8 @@ func TestCalculateStakeDistribution_InactiveAccountsExcluded(t *testing.T) {
 // TestCalculateStakeDistribution_SpentUtxosExcluded verifies that spent
 // UTxOs (deleted_slot != 0) are not counted in the stake distribution.
 func TestCalculateStakeDistribution_SpentUtxosExcluded(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedSnapshotEpoch(t, db)
 
@@ -748,6 +758,8 @@ func TestCalculateStakeDistribution_SpentUtxosExcluded(t *testing.T) {
 // TestCalculateStakeDistribution_EmptyDatabase verifies that the calculator
 // handles the case where no pools exist gracefully.
 func TestCalculateStakeDistribution_EmptyDatabase(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedSnapshotEpoch(t, db)
 
@@ -801,6 +813,8 @@ func seedBoundaryPathFixture(
 func TestCalculateEpochBoundaryStakeLivePathExcludesExpiredAccount(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	poolHash, expiredKey := seedBoundaryPathFixture(t, db)
 
@@ -827,6 +841,8 @@ func TestCalculateEpochBoundaryStakeLivePathExcludesExpiredAccount(
 }
 
 func TestCalculateEpochBoundaryStakePathsAgree(t *testing.T) {
+	t.Parallel()
+
 	for _, test := range []struct {
 		name             string
 		expiryEpoch      uint64
@@ -890,6 +906,8 @@ func TestCalculateEpochBoundaryStakePathsAgree(t *testing.T) {
 }
 
 func TestCalculateEpochBoundaryStakeUsesLiveAggregate(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedSnapshotEpoch(t, db)
 
@@ -945,6 +963,8 @@ func TestCalculateEpochBoundaryStakeUsesLiveAggregate(t *testing.T) {
 }
 
 func TestCalculateEpochBoundaryStakeUsesHistoricalFallback(t *testing.T) {
+	t.Parallel()
+
 	for _, test := range []struct {
 		name   string
 		setTip bool
@@ -1014,6 +1034,8 @@ func TestCalculateEpochBoundaryStakeUsesHistoricalFallback(t *testing.T) {
 }
 
 func TestCalculateStakeDistributionRejectsPoolStakeOverflow(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedSnapshotEpoch(t, db)
 
@@ -1056,6 +1078,8 @@ func TestCalculateStakeDistributionRejectsPoolStakeOverflow(t *testing.T) {
 }
 
 func TestCalculateStakeDistributionRejectsTotalStakeOverflow(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	seedSnapshotEpoch(t, db)
 
@@ -1100,6 +1124,8 @@ func TestCalculateStakeDistributionRejectsTotalStakeOverflow(t *testing.T) {
 }
 
 func TestDedupeStakeInputsIsIndependentOfInputOrder(t *testing.T) {
+	t.Parallel()
+
 	poolA := bytes.Repeat([]byte{0x11}, 28)
 	poolB := bytes.Repeat([]byte{0x22}, 28)
 	credential := bytes.Repeat([]byte{0x31}, 28)
@@ -1116,6 +1142,8 @@ func TestDedupeStakeInputsIsIndependentOfInputOrder(t *testing.T) {
 }
 
 func TestDedupeStakeInputsTieBreaks(t *testing.T) {
+	t.Parallel()
+
 	credential := bytes.Repeat([]byte{0x32}, 28)
 	poolA := bytes.Repeat([]byte{0x11}, 28)
 	poolB := bytes.Repeat([]byte{0x22}, 28)

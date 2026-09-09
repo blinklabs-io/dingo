@@ -46,6 +46,8 @@ func txsubmissionWireEncodedItem(
 // bands, which is what makes the observed delta 6 bytes for a 24..255 byte
 // body and 7 bytes for a 256..65535 byte body.
 func TestTxsubmissionWireSizeMatchesWireEncoding(t *testing.T) {
+	t.Parallel()
+
 	for _, bodyLen := range []int{
 		0,     // empty
 		1,     // length header 1 byte
@@ -76,6 +78,8 @@ func TestTxsubmissionWireSizeMatchesWireEncoding(t *testing.T) {
 // TestTxsubmissionWireSizeOverheadBands documents the exact per-band
 // overhead observed against cardano-node peers.
 func TestTxsubmissionWireSizeOverheadBands(t *testing.T) {
+	t.Parallel()
+
 	const conwayEraId = txsubmissionRelayTestEraId
 	for _, tc := range []struct {
 		bodyLen  int
@@ -106,6 +110,8 @@ func TestTxsubmissionWireSizeOverheadBands(t *testing.T) {
 // gouroboros hands Dingo only the unwrapped body, so an equality check
 // against len(TxBody) rejects every batch such a peer offers.
 func TestValidateTxsubmissionReplyAcceptsWireSizeAdvertisement(t *testing.T) {
+	t.Parallel()
+
 	fixtures := txsubmissionTestFixtures(t)
 	requested := make([]txsubmission.TxIdAndSize, 0, len(fixtures))
 	returned := make([]txsubmission.TxBody, 0, len(fixtures))
@@ -137,6 +143,8 @@ func TestValidateTxsubmissionReplyAcceptsWireSizeAdvertisement(t *testing.T) {
 // wire-size allowance does not turn the size check into a range check: only
 // the unwrapped body size and the exact derived wire size are accepted.
 func TestValidateTxsubmissionReplyRejectsGenuineSizeMismatch(t *testing.T) {
+	t.Parallel()
+
 	fixture := txsubmissionTestFixtures(t)[0]
 	returned := []txsubmission.TxBody{
 		{EraId: fixture.txId.EraId, TxBody: fixture.body},
@@ -183,6 +191,8 @@ func TestValidateTxsubmissionReplyRejectsGenuineSizeMismatch(t *testing.T) {
 // wire size, node B stands in for a cardano-node peer: node A must accept
 // and admit the body and count the acceptance under the wire-size outcome.
 func TestTxSubmissionRelayAdmitsWireSizeAdvertisedTransaction(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
 		promRegistryA: reg,
@@ -225,6 +235,8 @@ func TestTxSubmissionRelayAdmitsWireSizeAdvertisedTransaction(t *testing.T) {
 // exported as zero before the first mismatch, so an alert on the counter
 // does not have to tolerate a missing series.
 func TestTxsubmissionReplySizeMetricPreMaterialized(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	o := newOuroboros(OuroborosConfig{PromRegistry: reg})
 	families, err := reg.Gather()
@@ -277,6 +289,8 @@ func TestTxsubmissionReplySizeMetricPreMaterialized(t *testing.T) {
 // TestRecordTxsubmissionReplySizeWithoutMetrics verifies the recorder is a
 // no-op when metrics were never initialized.
 func TestRecordTxsubmissionReplySizeWithoutMetrics(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{})
 	require.Nil(t, o.protocolMetrics)
 	require.NotPanics(t, func() {
@@ -292,6 +306,8 @@ func TestRecordTxsubmissionReplySizeWithoutMetrics(t *testing.T) {
 func TestValidateTxsubmissionReplyUndersizedAdvertisementIsCounted(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := txsubmissionTestFixtures(t)[0]
 	returned := []txsubmission.TxBody{
 		{EraId: fixture.txId.EraId, TxBody: fixture.body},
@@ -332,6 +348,8 @@ func TestValidateTxsubmissionReplyUndersizedAdvertisementIsCounted(
 // reply dropped for a size mismatch adds three to rejected, because the
 // whole reply is dropped.
 func TestRecordTxsubmissionReplyOutcomeCountsBodies(t *testing.T) {
+	t.Parallel()
+
 	fixtures := txsubmissionTestFixtures(t)
 	require.Len(t, fixtures, 3)
 	requested := make([]txsubmission.TxIdAndSize, 0, len(fixtures))

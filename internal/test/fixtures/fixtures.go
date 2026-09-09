@@ -16,6 +16,8 @@
 package fixtures
 
 import (
+	"fmt"
+
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	mockfixtures "github.com/blinklabs-io/ouroboros-mock/fixtures"
@@ -60,32 +62,32 @@ func GenerateConwayChainWithPeriodicTransactions(
 	var previous common.Blake2b256
 	for i := range count {
 		withTransactions := i%(emptyRun+1) == emptyRun
-		var block ledger.Block
+		var generated []ledger.Block
 		var err error
 		if withTransactions {
-			generated, generateErr := mockfixtures.GenerateConwayChainWithTransactions(
+			generated, err = mockfixtures.GenerateConwayChainWithTransactions(
 				uint64(i+1),
 				previous,
 				uint64(2+i*20),
 				20,
 				1,
 			)
-			err = generateErr
-			if len(generated) > 0 {
-				block = generated[0]
-			}
 		} else {
-			generated, generateErr := mockfixtures.GenerateConwayChain(
+			generated, err = mockfixtures.GenerateConwayChain(
 				uint64(i+1), previous, uint64(2+i*20), 20, 1,
 			)
-			err = generateErr
-			if len(generated) > 0 {
-				block = generated[0]
-			}
 		}
 		if err != nil {
 			return nil, err
 		}
+		// Both generators return an empty slice only for a non-positive
+		// count and both calls above ask for one block, so an empty result
+		// means the generator contract changed. Report it instead of
+		// appending a nil Block and panicking on Hash below.
+		if len(generated) == 0 {
+			return nil, fmt.Errorf("no block generated for index %d", i)
+		}
+		block := generated[0]
 		blocks = append(blocks, block)
 		previous = block.Hash()
 	}

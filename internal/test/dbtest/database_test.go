@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 // tempDirTB hands NewDatabaseWithOptions a scratch root the test owns, so what
@@ -171,5 +172,42 @@ func TestNewDatabaseWithOptionsInMemoryMetadata(t *testing.T) {
 	// query that an unmigrated database could not.
 	if _, err := db.Metadata().GetCommitTimestamp(); err != nil {
 		t.Errorf("GetCommitTimestamp on in-memory store: %v", err)
+	}
+}
+
+// TestNewDatabaseReservesASmallValueLog pins the badger value log a test
+// database reserves to testutil.TestBadgerValueLogFileSize.
+//
+// badger truncates the value log to ValueLogFileSize when it opens an
+// on-disk store. That file is sparse on Linux and macOS, so the production
+// 1 GiB default is free there and this assertion is the only thing that
+// notices when the fixture stops asking for a smaller one. On Windows the
+// space is really reserved, and enough concurrent stores -- which is what
+// running the suite's tests in parallel produces -- fill a CI runner's disk
+// and fail every open with "There is not enough space on the disk".
+func TestNewDatabaseReservesASmallValueLog(t *testing.T) {
+	t.Parallel()
+
+	dataDir := t.TempDir()
+	if _, err := NewDatabase(t, &database.Config{DataDir: dataDir}); err != nil {
+		t.Fatalf("NewDatabase: %v", err)
+	}
+
+	vlog := filepath.Join(dataDir, "blob", "000001.vlog")
+	info, err := os.Stat(vlog)
+	if err != nil {
+		t.Fatalf("stat value log: %v", err)
+	}
+	// badger opens the file at twice ValueLogFileSize so the last entry
+	// always fits (badger/v4 value.go:536), so the production 1 GiB
+	// default reserves 2 GiB per store, not 1.
+	want := int64(2 * testutil.TestBadgerValueLogFileSize)
+	if info.Size() > want {
+		t.Fatalf(
+			"value log reserves %d bytes, want at most %d: the badger "+
+				"provider config is not reaching the store",
+			info.Size(),
+			want,
+		)
 	}
 }

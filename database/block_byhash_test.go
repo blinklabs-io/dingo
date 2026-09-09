@@ -36,6 +36,8 @@ func resetBlockByHashStats() {
 // index miss rate from #2105) and returns ErrBlockNotFound directly on
 // the index miss, without any fallback scan.
 func TestBlockByHashTxn_UnknownHashRecordsMissAndNotFound(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	resetBlockByHashStats()
 
@@ -72,6 +74,8 @@ func TestBlockByHashTxn_UnknownHashRecordsMissAndNotFound(t *testing.T) {
 // block written via BlockCreate gets a hash-index entry (#1915), and a
 // lookup must hit it in O(1) and return the block.
 func TestBlockByHashTxn_KnownHashStillResolves(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	resetBlockByHashStats()
 
@@ -94,6 +98,8 @@ func TestBlockByHashTxn_KnownHashStillResolves(t *testing.T) {
 // means the index was written but the pointer is invalid: a local DB
 // problem the operator needs to see, not a fork-resolution miss.
 func TestBlockByHashTxn_EmptyIndexEntryIsCorruption(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	resetBlockByHashStats()
 
@@ -121,6 +127,8 @@ func TestBlockByHashTxn_EmptyIndexEntryIsCorruption(t *testing.T) {
 // passed to RegisterBlockByHashMetrics exposes the hash-index counters, not
 // just the first one in the process, and that reusing a registry is a no-op.
 func TestRegisterBlockByHashMetrics_PerRegistry(t *testing.T) {
+	t.Parallel()
+
 	resetBlockByHashStats()
 	blockByHashIndexMisses.Add(3)
 

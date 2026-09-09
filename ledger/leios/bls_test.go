@@ -39,6 +39,8 @@ import (
 // verification here. This test exists so that regression doesn't happen
 // silently again.
 func TestLeiosVoteDSTMatchesReferenceMinSigPoPDST(t *testing.T) {
+	t.Parallel()
+
 	assert.Equal(
 		t,
 		"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_",
@@ -58,6 +60,8 @@ func testSigningKey(t *testing.T, scalar byte) *VoteSigningKey {
 }
 
 func TestVoteMessageBytes(t *testing.T) {
+	t.Parallel()
+
 	ebHash := lcommon.NewBlake2b256([]byte("endorser block"))
 	msg := VoteMessageBytes(0x0102030405060708, ebHash)
 	require.Len(t, msg, 40)
@@ -74,6 +78,8 @@ func TestVoteMessageBytes(t *testing.T) {
 // byte-string encoding of the 32-byte hash (0x58 0x20 followed by the hash)
 // rather than the bare hash.
 func TestPrototypeVoteMessageBytesIsCborByteString(t *testing.T) {
+	t.Parallel()
+
 	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
 	msg := PrototypeVoteMessageBytes(rbHash)
 	require.Len(t, msg, 34)
@@ -87,6 +93,8 @@ func TestPrototypeVoteMessageBytesIsCborByteString(t *testing.T) {
 }
 
 func TestSignVoteVerifyRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	key := testSigningKey(t, 42)
 	msg := VoteMessageBytes(
 		1234,
@@ -99,6 +107,8 @@ func TestSignVoteVerifyRoundTrip(t *testing.T) {
 }
 
 func TestPrototypeVoteMusashiVector(t *testing.T) {
+	t.Parallel()
+
 	// Fixed MinSig/PoP vector cross-checked with supranational/blst, the
 	// independent BLS12-381 implementation the reference signs with.
 	// Keeping the expected bytes literal makes this test fail if either the
@@ -137,6 +147,8 @@ func TestPrototypeVoteMusashiVector(t *testing.T) {
 }
 
 func TestVerifyVoteSignatureWrongMessage(t *testing.T) {
+	t.Parallel()
+
 	key := testSigningKey(t, 42)
 	msg := VoteMessageBytes(1234, lcommon.NewBlake2b256([]byte("eb")))
 	sig, err := SignVote(key, msg)
@@ -153,6 +165,8 @@ func TestVerifyVoteSignatureWrongMessage(t *testing.T) {
 }
 
 func TestVerifyVoteSignatureWrongKey(t *testing.T) {
+	t.Parallel()
+
 	key := testSigningKey(t, 42)
 	otherKey := testSigningKey(t, 43)
 	msg := VoteMessageBytes(1234, lcommon.NewBlake2b256([]byte("eb")))
@@ -166,6 +180,8 @@ func TestVerifyVoteSignatureWrongKey(t *testing.T) {
 }
 
 func TestVerifyVoteSignatureMalformed(t *testing.T) {
+	t.Parallel()
+
 	key := testSigningKey(t, 42)
 	msg := VoteMessageBytes(1234, lcommon.NewBlake2b256([]byte("eb")))
 	// Wrong size
@@ -183,6 +199,8 @@ func TestVerifyVoteSignatureMalformed(t *testing.T) {
 }
 
 func TestAggregateSignaturesVerify(t *testing.T) {
+	t.Parallel()
+
 	msg := VoteMessageBytes(99, lcommon.NewBlake2b256([]byte("eb")))
 	sigs := make([][]byte, 0, 3)
 	pubs := make([]*bls12381.G2Affine, 0, 3)
@@ -200,6 +218,8 @@ func TestAggregateSignaturesVerify(t *testing.T) {
 }
 
 func TestVerifyAggregateSignatureCorrupted(t *testing.T) {
+	t.Parallel()
+
 	msg := VoteMessageBytes(99, lcommon.NewBlake2b256([]byte("eb")))
 	key1 := testSigningKey(t, 11)
 	key2 := testSigningKey(t, 22)
@@ -228,6 +248,8 @@ func TestVerifyAggregateSignatureCorrupted(t *testing.T) {
 }
 
 func TestAggregateSignaturesInvalidInput(t *testing.T) {
+	t.Parallel()
+
 	_, err := AggregateSignatures(nil)
 	assert.Error(t, err)
 	_, err = AggregateSignatures([][]byte{{1, 2, 3}})
@@ -235,6 +257,8 @@ func TestAggregateSignaturesInvalidInput(t *testing.T) {
 }
 
 func TestVerifyAggregateSignatureNoKeys(t *testing.T) {
+	t.Parallel()
+
 	msg := VoteMessageBytes(99, lcommon.NewBlake2b256([]byte("eb")))
 	key := testSigningKey(t, 11)
 	sig, err := SignVote(key, msg)
@@ -256,14 +280,20 @@ func testLeiosKey(t *testing.T, scalar byte) *lcommon.LeiosKey {
 }
 
 func TestVerifyLeiosKeyProofOfPossession(t *testing.T) {
+	t.Parallel()
+
 	require.NoError(t, VerifyLeiosKeyProofOfPossession(testLeiosKey(t, 7)))
 }
 
 func TestVerifyLeiosKeyProofOfPossessionNil(t *testing.T) {
+	t.Parallel()
+
 	assert.Error(t, VerifyLeiosKeyProofOfPossession(nil))
 }
 
 func TestVerifyLeiosKeyProofOfPossessionWrongPublicKeyLength(t *testing.T) {
+	t.Parallel()
+
 	key := testLeiosKey(t, 7)
 	key.PublicKey = key.PublicKey[:len(key.PublicKey)-1]
 	assert.Error(t, VerifyLeiosKeyProofOfPossession(key))
@@ -273,6 +303,8 @@ func TestVerifyLeiosKeyProofOfPossessionWrongPublicKeyLength(t *testing.T) {
 // possession proof genuinely produced by a different key: upstream's
 // "invalid proofs are treated as absent" rule depends on this failing.
 func TestVerifyLeiosKeyProofOfPossessionMismatchedKeyAndProof(t *testing.T) {
+	t.Parallel()
+
 	honest := testLeiosKey(t, 7)
 	other := testLeiosKey(t, 9)
 	tampered := &lcommon.LeiosKey{
@@ -296,6 +328,8 @@ func TestVerifyLeiosKeyProofOfPossessionMismatchedKeyAndProof(t *testing.T) {
 func TestVerifyLeiosKeyProofOfPossessionRejectsVoteSignatureAsProof(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	key := testSigningKey(t, 7)
 	pub := key.PublicKeyBytes()
 	rbHash := lcommon.NewBlake2b256([]byte("not-a-pubkey-message"))

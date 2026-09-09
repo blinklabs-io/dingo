@@ -24,6 +24,8 @@ import (
 // TestNewBark_RejectsNilDB pins that the constructor returns an error
 // rather than panicking when the required database dependency is nil.
 func TestNewBark_RejectsNilDB(t *testing.T) {
+	t.Parallel()
+
 	b, err := NewBark(BarkConfig{DB: nil})
 	require.Error(t, err)
 	assert.Nil(t, b)
@@ -33,6 +35,8 @@ func TestNewBark_RejectsNilDB(t *testing.T) {
 // TestNewBarkBlobStore_RejectsNilUpstream pins that the constructor returns an
 // error rather than panicking when the required upstream blob store is nil.
 func TestNewBarkBlobStore_RejectsNilUpstream(t *testing.T) {
+	t.Parallel()
+
 	bs, err := NewBarkBlobStore(BlobStoreBarkConfig{}, nil)
 	require.Error(t, err)
 	assert.Nil(t, bs)

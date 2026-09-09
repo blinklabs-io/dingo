@@ -106,6 +106,8 @@ func (t *validityOutcomeStateTx) Produced() []lcommon.Utxo {
 func TestLedgerProcessBlockDijkstraValidityOutcomeStateTransitions(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tests := []struct {
 		name          string
 		declaredValid bool
@@ -440,6 +442,8 @@ func (b *validityOutcomeTestBlock) BlockBodyHash() lcommon.Blake2b256 {
 func TestLedgerProcessBlockEnforcesTransactionValidationOutcomes(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tests := []struct {
 		name          string
 		declaredValid bool

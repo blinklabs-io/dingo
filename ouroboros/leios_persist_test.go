@@ -31,6 +31,8 @@ import (
 // write is harmless. This exercises the asynchronous persistence path and the
 // merged single-commit SetLeiosEB writer.
 func TestLeiosPersistAsyncCoalescesManifestThenComplete(t *testing.T) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 2)
 	txsRaw := []cbor.RawMessage{
 		mustCbor(t, "tx0"),
@@ -87,6 +89,8 @@ func TestLeiosPersistAsyncCoalescesManifestThenComplete(t *testing.T) {
 func TestLeiosPersistTwoOccurrencesOfSameHashPersistIndependently(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 30, 1)
 	second := ocommon.Point{Slot: point.Slot + 1, Hash: point.Hash}
 	txs1 := []cbor.RawMessage{mustCbor(t, "tx0")}
@@ -135,6 +139,8 @@ func TestLeiosPersistTwoOccurrencesOfSameHashPersistIndependently(
 // is a no-op when no endorser block was ever fetched (the writer never started)
 // and is safe to call more than once.
 func TestLeiosPersistWriterStopIsSafeWithoutStart(t *testing.T) {
+	t.Parallel()
+
 	o := newTestOuroborosWithLeiosDB(t)
 	require.NotPanics(t, func() {
 		o.StopLeiosPersistWriter()
@@ -148,6 +154,8 @@ func TestLeiosPersistWriterStopIsSafeWithoutStart(t *testing.T) {
 // returns after the drain timeout instead of blocking graceful shutdown
 // forever, and still closes the stop channel so the writer can exit later.
 func TestLeiosPersistStopDrainTimesOut(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	// Simulate a started writer whose drain never completes.
 	o.leiosPersistStarted.Store(true)
@@ -182,6 +190,8 @@ func TestLeiosPersistStopDrainTimesOut(t *testing.T) {
 // pending map (where no drain would ever pick it up), so shutdown cannot report
 // completion while a freshly fetched endorser block is left unpersisted.
 func TestLeiosPersistEnqueueAfterStopIsRejected(t *testing.T) {
+	t.Parallel()
+
 	o := newTestOuroborosWithLeiosDB(t)
 
 	// Start the writer via a real enqueue, then drain and stop it.
@@ -232,6 +242,8 @@ func TestLeiosPersistEnqueueAfterStopIsRejected(t *testing.T) {
 func TestLeiosPersistPauseForLiveLifecycleOpDrainsOldDBAndRestartsOnNewDB(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	o := newTestOuroborosWithLeiosDB(t)
 	oldDB := o.leiosDatabase()
 	require.NotNil(t, oldDB)
@@ -282,6 +294,7 @@ func TestLeiosPersistPauseForLiveLifecycleOpDrainsOldDBAndRestartsOnNewDB(
 // next enqueue start a second writer against a freshly reset pending map
 // while the old one is still reading and deleting from that same map
 // (now repointed) under the shared mutex.
+// Not t.Parallel: swaps the package-level leiosPersistShutdownDrainTimeout.
 func TestLeiosPersistPauseForLiveLifecycleOpFailsClosedOnUnconfirmedDrain(
 	t *testing.T,
 ) {

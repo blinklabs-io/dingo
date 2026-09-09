@@ -53,6 +53,8 @@ func datumOptionOutput(
 func TestCanonicalUTxOEntry_DistinguishesInlineDatumFromHashOnlyReference(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	addr, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyNone,
 		lcommon.AddressNetworkTestnet,

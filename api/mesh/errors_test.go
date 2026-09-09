@@ -28,6 +28,8 @@ import (
 // Clients branch on these codes, so a change here is a breaking API
 // change and must be deliberate.
 func TestErrorCodesAreStable(t *testing.T) {
+	t.Parallel()
+
 	want := map[int32]struct {
 		message   string
 		retriable bool
@@ -64,6 +66,8 @@ func TestErrorCodesAreStable(t *testing.T) {
 // to. Rosetta clients and proxies key retry behavior off the status as
 // well as the code.
 func TestWriteErrorStatusMapping(t *testing.T) {
+	t.Parallel()
+
 	want := map[*Error]int{
 		ErrNetworkNotSupported: http.StatusNotFound,
 		ErrBlockNotFound:       http.StatusNotFound,
@@ -106,6 +110,8 @@ func TestWriteErrorStatusMapping(t *testing.T) {
 // defined set, which must fail closed as a server error rather than
 // being reported as success.
 func TestWriteErrorUnknownCodeIsInternal(t *testing.T) {
+	t.Parallel()
+
 	rec := httptest.NewRecorder()
 
 	writeError(rec, &Error{Code: 999, Message: "unknown"})
@@ -114,6 +120,8 @@ func TestWriteErrorUnknownCodeIsInternal(t *testing.T) {
 }
 
 func TestWrapErr(t *testing.T) {
+	t.Parallel()
+
 	t.Run("nil detail returns the base error", func(t *testing.T) {
 		require.Same(
 			t, ErrInternal, wrapErr(ErrInternal, nil),
@@ -146,6 +154,8 @@ func TestWrapErr(t *testing.T) {
 // TestErrorJSONShape pins the serialized field names, which are part of
 // the Rosetta response schema.
 func TestErrorJSONShape(t *testing.T) {
+	t.Parallel()
+
 	raw, err := json.Marshal(
 		wrapErr(ErrInvalidRequest, errors.New("bad")),
 	)

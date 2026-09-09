@@ -53,6 +53,15 @@ type ObserverConfig struct {
 	// APIKey is the Koios Bearer token for higher-rate-limit access. Empty
 	// uses Koios's unauthenticated rate limit.
 	APIKey string
+	// BaseURL overrides the public koios.rest host for the network; see
+	// NewKoiosClient. Empty selects the public host. Tests point it at an
+	// httptest server instead of rewriting the process-wide koiosBaseURLs
+	// map, which every concurrently constructed client reads.
+	BaseURL string
+	// AllowInsecureHTTP permits a plain-HTTP BaseURL; see
+	// NewKoiosClient. Local dev and test only, including the httptest
+	// servers this package's own tests point BaseURL at.
+	AllowInsecureHTTP bool
 	// Source is the narrow, Dingo-supplied reward-parity source the
 	// observer compares against — typically a *DatabaseSource wrapping the
 	// live, in-process *database.Database.
@@ -192,7 +201,12 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open koios parity cache: %w", err)
 	}
-	koios, err := NewKoiosClient(cfg.Network, cfg.APIKey)
+	koios, err := NewKoiosClient(
+		cfg.Network,
+		cfg.APIKey,
+		cfg.BaseURL,
+		cfg.AllowInsecureHTTP,
+	)
 	if err != nil {
 		_ = cache.Close()
 		return nil, fmt.Errorf("create koios client: %w", err)
@@ -228,6 +242,16 @@ func (o *Observer) Start(ctx context.Context) error {
 	}
 	o.started = true
 	o.mu.Unlock()
+
+	// Recorded here rather than in NewObserver because a source change is
+	// gated on the new host answering, and that probe needs a context and a
+	// startup the caller can fail. Start is called exactly once per Observer
+	// and before any fetch, so the stamp still lands before the first row.
+	if err := recordKoiosSource(
+		ctx, o.cache, o.cfg.Network, o.koios, o.cfg.Logger,
+	); err != nil {
+		return err
+	}
 
 	latest, err := o.cfg.Source.GetLatestEpoch(ctx)
 	if err != nil {
@@ -497,6 +521,14 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 	}
 	if o.cfg.OnResult != nil {
 		o.cfg.OnResult(result)
+	}
+	if o.cfg.AccountsEnabled {
+		if err := o.cache.PruneAccountCoverage(o.cfg.Network, epoch); err != nil {
+			o.cfg.Logger.Warn(
+				"koiosparity observer: prune account coverage failed",
+				"network", o.cfg.Network, "epoch", epoch, "error", err,
+			)
+		}
 	}
 	if result.Status != StatusPass {
 		significant := CountSignificant(result.Mismatches)

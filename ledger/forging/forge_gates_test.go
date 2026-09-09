@@ -190,48 +190,46 @@ func TestCheckAndForgeProductionEqualSlotDoesNotReForgeOurOwnSlot(
 	)
 }
 
-// TestForgeSkipsLeaderSlotWhenUpstreamTargetUnknownEvenAtTip documents
-// the cost of the upstream-sync gate's `upstreamTip == 0` disjunct on a
-// node that is NOT behind.
+// TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip pins the
+// unknown-upstream-target branch of the sync gate for a node that is NOT
+// behind.
 //
-// LedgerState.UpstreamSyncStatus returns (0, true) for the whole window
-// between an active-connection switch and the new peer's first
-// authenticated, admitted, trusted header: publishActiveUpstream stores
-// the new connection key with targetSlot zero, and only
-// publishAdmittedUpstreamTarget makes it non-zero. A best-peer switch
-// therefore disables forging outright, independent of how fresh the
-// local tip is and independent of forgeSyncToleranceSlots.
+// This test replaces TestForgeSkipsLeaderSlotWhenUpstreamTargetUnknownEvenAtTip
+// and reverses its assertion. That test asserted the behaviour #3955
+// deliberately left in place -- a best-peer switch disabled forging outright,
+// independent of local tip freshness and of forgeSyncToleranceSlots -- and
+// said in as many words that keying the gate on local tip freshness instead
+// would fail it and name the decision being revisited. This is that decision,
+// taken because the old behaviour is self-sealing: LedgerState publishes the
+// zero target for the window before the new peer's first admitted trusted
+// header, and on a network where forging is the only source of headers no node
+// forges, so none is admitted, so nothing lifts the target and the window never
+// closes (issue #4010).
 //
-// The clock below is a healthy steady-state producer: the chain tip is
-// the previous slot's block, i.e. the node is at tip. It is scheduled to
-// lead the current slot. It forges nothing, and the only counter that
-// moves is dingo_forge_sync_skip_total, which is shared with the
-// genuinely-behind case, so the lost leader slot is not recoverable from
-// /metrics.
+// The clock below is a healthy steady-state producer: the tip is the previous
+// slot's block, so the node is at tip and has no evidence it is behind. It is
+// scheduled to lead the current slot, and it must now take it -- the header it
+// produces is what ends the unknown-target window.
 //
-// This test asserts the CURRENT behaviour, which is deliberate and is
-// already pinned by
-// TestCheckAndForgeProductionWaitsForUnknownActiveUpstreamTarget. It is
-// written to make the trade-off concrete and reviewable rather than to
-// change it; the fix is a separate discussion (see the linked issue).
-// If the gate is later keyed on local tip freshness instead of on the
-// upstream target being known, this test fails and names the decision
-// that was revisited.
-func TestForgeSkipsLeaderSlotWhenUpstreamTargetUnknownEvenAtTip(
+// The tolerance cases pin that the branch is compared against the tolerance at
+// all, which the `upstreamTip == 0` disjunct never was.
+func TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip(
 	t *testing.T,
 ) {
 	for _, tc := range []struct {
 		name      string
 		tolerance uint64
 	}{
-		// The tolerance is irrelevant to this branch of the gate: the
-		// `upstreamTip == 0` disjunct is not compared against it.
 		{name: "default tolerance", tolerance: 0},
 		{name: "tolerance far wider than the lag", tolerance: 100000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			leader := &forgerCountingLeader{}
-			builder := &forgerTestBuilder{}
+			block := newForgerTestBlock(10, 2)
+			builder := &forgerTestBuilder{
+				block: block,
+				cbor:  block.cbor,
+			}
 			broadcaster := &forgerTestBroadcaster{}
 			forger, err := NewBlockForger(ForgerConfig{
 				Mode: ModeProduction,
@@ -262,47 +260,79 @@ func TestForgeSkipsLeaderSlotWhenUpstreamTargetUnknownEvenAtTip(
 				forger.checkAndForgeProduction(context.Background()),
 			)
 
-			assert.Zero(
+			assert.Equal(
 				t,
+				1,
 				leader.callCount(),
-				"leader selection is never reached, so the node cannot "+
-					"know it just lost a leader slot",
+				"an unknown upstream target is not evidence that this "+
+					"node is behind, so the slot must reach leader "+
+					"selection",
 			)
-			assert.Zero(t, builder.calls)
-			assert.Zero(t, broadcaster.calls)
-
-			// The loss is invisible in every cardano-node-compatible
-			// counter: about_to_lead moves, nothing else does.
+			assert.Equal(t, 1, builder.calls)
+			assert.Equal(t, 1, broadcaster.calls)
 			assert.Equal(
 				t,
 				float64(1),
-				testutil.ToFloat64(forger.metrics.forgeAboutToLead),
-			)
-			assert.Equal(
-				t,
-				float64(0),
-				testutil.ToFloat64(forger.metrics.forgeNotLeader),
-			)
-			assert.Equal(
-				t,
-				float64(0),
 				testutil.ToFloat64(forger.metrics.forgeNodeIsLeader),
 			)
 			assert.Equal(
 				t,
 				float64(0),
-				testutil.ToFloat64(forger.metrics.forgeCouldNot),
-			)
-			// The one series that does move cannot distinguish "upstream
-			// is ahead of us" from "we have not heard from the peer we
-			// selected a moment ago".
-			assert.Equal(
-				t,
-				float64(1),
 				testutil.ToFloat64(forger.metrics.forgeSyncSkip),
+				"the sync gate must not claim this slot",
 			)
 		})
 	}
+}
+
+// TestForgeStillWaitsForUnknownUpstreamTargetWhileTipIsStale keeps the
+// protection the gate exists for. An unknown target is not evidence that this
+// node is behind, but a tip that lags the wall clock by more than the
+// tolerance is, and a node in that state must not forge on a stale view just
+// because the peer it selected has not spoken yet.
+func TestForgeStillWaitsForUnknownUpstreamTargetWhileTipIsStale(
+	t *testing.T,
+) {
+	leader := &forgerCountingLeader{}
+	builder := &forgerTestBuilder{}
+	broadcaster := &forgerTestBroadcaster{}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    leader,
+		BlockBuilder:     builder,
+		BlockBroadcaster: broadcaster,
+		SlotClock: forgerTestSlotClock{
+			// The tip lags the current slot by more than the tolerance,
+			// which is direct evidence this node is behind.
+			currentSlot:       1000,
+			chainTipSlot:      9,
+			upstreamTipSlot:   0,
+			upstreamActive:    true,
+			slotsPerKESPeriod: 100000,
+		},
+		ForgeSyncToleranceSlots: 100,
+		PromRegistry:            prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+
+	assert.Zero(t, leader.callCount())
+	assert.Zero(t, builder.calls)
+	assert.Zero(t, broadcaster.calls)
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeSyncSkip),
+	)
+	assert.Equal(
+		t,
+		float64(991),
+		testutil.ToFloat64(forger.metrics.tipGapSlots),
+		"unknown upstream targets report the local tip lag",
+	)
 }
 
 // forgerScheduleAwareLeader reports a fixed set of scheduled leader
@@ -390,14 +420,16 @@ func TestForgeGateSkipWarnsOnlyForScheduledLeaderSlots(t *testing.T) {
 			msg: "forge skip: chain tip is ahead of the current slot",
 		},
 		{
-			// The corroborated upstream target is unknown, so the
-			// node is treated as still syncing even though it is at
-			// its own tip.
+			// The corroborated upstream target leads our tip by more
+			// than the tolerance, so the node really is behind.
+			// A target of zero no longer reaches this gate on a node
+			// at tip; see
+			// TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip.
 			name: "upstream syncing",
 			clock: forgerTestSlotClock{
 				currentSlot:       leaderSlot,
 				chainTipSlot:      leaderSlot - 1,
-				upstreamTipSlot:   0,
+				upstreamTipSlot:   leaderSlot + 500,
 				upstreamActive:    true,
 				slotsPerKESPeriod: 100,
 			},

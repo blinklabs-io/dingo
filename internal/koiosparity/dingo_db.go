@@ -160,6 +160,12 @@ type DingoPoolEpochData struct {
 	// by construction.
 	PoolUnspendable uint64
 
+	// RewardsPending reports that the node has not reached the boundary at
+	// which this stake epoch's rewards are applied. The zero value is
+	// deliberately strict: incomplete boundary metadata must not hide a
+	// divergence.
+	RewardsPending bool
+
 	// SpendableMemberRewardPresent reports that reward_account_output rows
 	// exist for the stake epoch at all, which is what makes a per-pool
 	// spendable sum meaningful: a pool with no rows then genuinely earned no
@@ -184,11 +190,6 @@ type DingoPoolEpochData struct {
 	// Subtracting reward_pool_output.unspendable from member_reward_total
 	// would not be equivalent: that column accumulates unspendable leader
 	// rewards too.
-	// RewardsPending reports that the node has not reached the boundary at
-	// which this stake epoch's rewards are applied. The zero value is
-	// deliberately strict: incomplete boundary metadata must not hide a
-	// divergence.
-	RewardsPending             bool
 	SpendableMemberRewardTotal string
 }
 

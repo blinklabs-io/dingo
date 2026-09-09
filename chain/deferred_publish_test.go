@@ -43,6 +43,8 @@ import (
 // block on the stalled subscriber and fail the timeout, or would leak an event
 // onto the subscriber channel and fail the "published nothing" check.
 func TestDeferredAddAndRollbackDoNotPublish(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	t.Cleanup(eventBus.Stop)
 

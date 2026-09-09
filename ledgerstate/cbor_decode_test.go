@@ -260,6 +260,7 @@ func TestParseIndefiniteUTxOMap_AtLimitAccepted(t *testing.T) {
 		},
 		nil,
 		limit,
+		utxoBatchSize,
 	)
 
 	require.NoError(t, err)
@@ -286,6 +287,7 @@ func TestParseIndefiniteUTxOMap_OverLimitRejected(t *testing.T) {
 		},
 		nil,
 		limit,
+		utxoBatchSize,
 	)
 
 	require.Error(t, err)

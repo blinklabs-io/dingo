@@ -27,6 +27,8 @@ import (
 // epochs 0/1 are always in scope by default), so it must not be mistaken for
 // "no minimum recorded yet" and overwritten by the next epoch checked.
 func TestBuildStatusSummaryChecksEpochZero(t *testing.T) {
+	t.Parallel()
+
 	statuses := []CheckEpochStatus{
 		{Epoch: 0, Status: StatusPass},
 		{Epoch: 1, Status: StatusPass},
@@ -39,6 +41,8 @@ func TestBuildStatusSummaryChecksEpochZero(t *testing.T) {
 }
 
 func TestReportsMakeCoverageScopeExplicit(t *testing.T) {
+	t.Parallel()
+
 	report, err := BuildJSONReport("preview", "2026-08-17", nil, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, KoiosCoverageMatrix(), report.Coverage)

@@ -219,9 +219,8 @@ type Ouroboros struct {
 	// review).
 	leiosAnnouncementSlots map[string]map[uint64]struct{}
 	// LeiosNotify permits at most two distinct announcements for one election
-	// (slot plus issuer) from each peer. Keep that bound per source so one
-	// equivocating peer cannot inject an unbounded stream without suppressing
-	// independent observations from other peers.
+	// (slot plus issuer), shared across all sources so relays and reconnects
+	// cannot reset the distinct-announcement budget.
 	leiosAnnouncementElections map[string]map[string]struct{}
 
 	// Asynchronous best-effort persistence of fetched endorser blocks to the

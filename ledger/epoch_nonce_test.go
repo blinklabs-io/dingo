@@ -30,6 +30,8 @@ import (
 // This uses deterministic synthetic inputs to verify the CalculateEpochNonce
 // function produces the correct blake2b_256 hash of the concatenated nonces.
 func TestEpochNonceFormula(t *testing.T) {
+	t.Parallel()
+
 	// Synthetic 32-byte candidateNonce
 	candidateNonce := mustDecodeHex(
 		t,
@@ -66,6 +68,8 @@ func TestEpochNonceFormula(t *testing.T) {
 // CalculateEpochNonce). This mirrors the production code in
 // calculateEpochNonce and computeEpochNonceForSlot.
 func TestEpochNonceNeutralIdentity(t *testing.T) {
+	t.Parallel()
+
 	candidateNonce := mustDecodeHex(
 		t,
 		"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
@@ -98,6 +102,8 @@ func TestEpochNonceNeutralIdentity(t *testing.T) {
 // TestEpochNonceNonCommutative verifies that the nonce semigroup
 // operator is NOT commutative: blake2b_256(a || b) != blake2b_256(b || a).
 func TestEpochNonceNonCommutative(t *testing.T) {
+	t.Parallel()
+
 	a := mustDecodeHex(
 		t,
 		"1111111111111111111111111111111111111111111111111111111111111111",

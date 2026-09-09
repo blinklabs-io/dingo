@@ -102,6 +102,21 @@ type Querier interface {
 	GetDatum(ctx context.Context, hash []byte) (Datum, error)
 	GetDrepByCredential(ctx context.Context, arg GetDrepByCredentialParams) (Drep, error)
 	GetDrepByHash(ctx context.Context, credential []byte) (Drep, error)
+	// Unlike GetDrepLastRegistrationSlot, this does not exclude certificate_id
+	// = 0 rows: those are the Mithril ledger-state import's bootstrap-slot
+	// registrations (see ImportDrepRegistration), and their deposit_amount is
+	// the real amount owed on deregistration. On a bootstrapped node such a
+	// row is often a DRep's only registration, so excluding it here would
+	// compute a refund of 0 for a deposit that was actually paid.
+	GetDrepLastRegistrationDeposit(ctx context.Context, arg GetDrepLastRegistrationDepositParams) (sql.NullString, error)
+	// The set form of GetDrepLastRegistrationDeposit, for reading the deposits
+	// of the active DReps GetActiveDreps returns in one round trip instead of
+	// one query per DRep. Same certificate_id treatment: bootstrap-slot import
+	// rows count, because their deposit_amount is the real amount owed.
+	// Drive this lookup from active drep rows. The correlated lookup uses the
+	// registration credential index for each active DRep, so history left behind
+	// by DReps that have since deregistered does not become the outer scan.
+	GetDrepLastRegistrationDeposits(ctx context.Context) ([]GetDrepLastRegistrationDepositsRow, error)
 	GetDrepLastRegistrationSlot(ctx context.Context, arg GetDrepLastRegistrationSlotParams) (int64, error)
 	GetEpoch(ctx context.Context, epochID sql.NullInt64) (GetEpochRow, error)
 	GetEpochBySlot(ctx context.Context, arg GetEpochBySlotParams) (GetEpochBySlotRow, error)
@@ -157,6 +172,9 @@ type Querier interface {
 	GetUtxoIDByRef(ctx context.Context, arg GetUtxoIDByRefParams) (int64, error)
 	GetUtxoIncludingSpent(ctx context.Context, arg GetUtxoIncludingSpentParams) (Utxo, error)
 	GetUtxoRefsBySlot(ctx context.Context, addedSlot sql.NullInt64) ([]GetUtxoRefsBySlotRow, error)
+	// Order by added_slot before id so the sort is the reverse of
+	// idx_utxo_added_slot's own order; ordering by id alone costs a full table
+	// scan. See the Store wrapper for the full rationale.
 	GetUtxosAddedAfterSlot(ctx context.Context, addedSlot sql.NullInt64) ([]Utxo, error)
 	GetUtxosDeletedBeforeSlot(ctx context.Context, arg GetUtxosDeletedBeforeSlotParams) ([]Utxo, error)
 	ImportAccount(ctx context.Context, arg ImportAccountParams) (int64, error)

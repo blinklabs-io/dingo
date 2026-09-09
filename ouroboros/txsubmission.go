@@ -121,12 +121,28 @@ func validateTxsubmissionReply(
 			len(returned),
 		)
 	}
-	ret := make([]validatedTxsubmissionBody, 0, len(returned))
 	var requestedBytes uint64
 	for _, requestedTx := range requested {
 		requestedBytes += uint64(requestedTx.Size)
 	}
-	var returnedBytes uint64
+	remainingBytes := requestedBytes
+	for index, txBody := range returned {
+		bodySize := uint64(len(txBody.TxBody))
+		if bodySize > remainingBytes {
+			return nil, fmt.Errorf(
+				"%w: reply exceeds byte limit at index %d: advertised total %d, remaining %d, body %d, wire %d, era %d",
+				errTxsubmissionReplySizeMismatch,
+				index,
+				requestedBytes,
+				remainingBytes,
+				bodySize,
+				txsubmissionWireSize(txBody.EraId, len(txBody.TxBody)),
+				txBody.EraId,
+			)
+		}
+		remainingBytes -= bodySize
+	}
+	ret := make([]validatedTxsubmissionBody, 0, len(returned))
 	nextRequested := 0
 	for i, txBody := range returned {
 		tx, err := ledger.NewTransactionFromCbor(
@@ -183,21 +199,6 @@ func validateTxsubmissionReply(
 				bodySize,
 				wireSize,
 				txBody.EraId,
-			)
-		}
-		// The aggregate budget is checked after the per-body size, so an
-		// advertisement smaller than the body it describes is reported and
-		// counted as the size mismatch it is instead of surfacing as an
-		// unattributed batch-budget error. Every accepted body is no larger
-		// than its own advertisement and each advertisement is consumed at
-		// most once, so this is an invariant backstop rather than a check
-		// a size advertisement alone can trip.
-		returnedBytes += bodySize
-		if returnedBytes > requestedBytes {
-			return nil, fmt.Errorf(
-				"txsubmission reply exceeds byte limit: requested %d, received at least %d",
-				requestedBytes,
-				returnedBytes,
 			)
 		}
 		nextRequested = matched + 1

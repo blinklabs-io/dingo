@@ -59,6 +59,8 @@ func futureSystemStartCfg(
 // therefore always `< 5*time.Second`) for any t in the future — so a caller
 // asking about a time one day ahead gets the current slot, not an error.
 func TestTimeToSlot_FutureTimeWithEmptyCacheReturnsError(t *testing.T) {
+	t.Parallel()
+
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"activeSlotsCoeff": 0.05,
@@ -91,6 +93,8 @@ func TestTimeToSlot_FutureTimeWithEmptyCacheReturnsError(t *testing.T) {
 // and `uint64(negative)` produces a near-MaxUint value — bogus and
 // indistinguishable from a valid slot.
 func TestNearNowSlot_FutureSystemStartReturnsZero(t *testing.T) {
+	t.Parallel()
+
 	cfg := futureSystemStartCfg(t, time.Now().Add(time.Hour))
 	got := nearNowSlot(cfg.ShelleyGenesis(), time.Now())
 	assert.Equal(

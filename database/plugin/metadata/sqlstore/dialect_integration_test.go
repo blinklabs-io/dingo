@@ -201,6 +201,61 @@ func testSQLStoreIntegration(
 	require.NoError(t, err)
 	require.Contains(t, batchLoaded, models.NewStakeCredentialRef(0, account.StakingKey).MapKey())
 	require.Equal(t, account.ID, batchLoaded[models.NewStakeCredentialRef(0, account.StakingKey).MapKey()].ID)
+	// GetDrepLastRegistrationDeposits is the other derived-table join in the
+	// shared query set, and a DRep deregistration's refund is validated
+	// against what it returns, so a dialect that resolves the grouped
+	// subquery or its join to drep differently is a consensus difference.
+	// Both rows below carry certificate_id = 0, the shape the Mithril
+	// ledger-state import writes: GetDrepLastRegistrationSlot's
+	// certificate_id filter would drop them, and the deposit queries
+	// deliberately do not copy it.
+	activeDrepCredential := make([]byte, 28)
+	activeDrepCredential[0] = 0x71
+	inactiveDrepCredential := make([]byte, 28)
+	inactiveDrepCredential[0] = 0x72
+	require.NoError(t, store.ImportDrep(
+		&models.Drep{
+			Credential: activeDrepCredential,
+			AddedSlot:  10,
+			Active:     true,
+		},
+		&models.RegistrationDrep{
+			DrepCredential: activeDrepCredential,
+			AddedSlot:      10,
+			DepositAmount:  types.Uint64(500000000),
+		},
+		nil,
+	))
+	require.NoError(t, store.ImportDrep(
+		&models.Drep{
+			Credential: inactiveDrepCredential,
+			AddedSlot:  11,
+			Active:     false,
+		},
+		&models.RegistrationDrep{
+			DrepCredential: inactiveDrepCredential,
+			AddedSlot:      11,
+			DepositAmount:  types.Uint64(200000000),
+		},
+		nil,
+	))
+	drepDeposit, err := store.GetDrepLastRegistrationDeposit(
+		0,
+		activeDrepCredential,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, drepDeposit)
+	require.Equal(t, uint64(500000000), *drepDeposit)
+	drepDeposits, err := store.GetDrepLastRegistrationDeposits(nil)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		map[string]uint64{
+			models.DrepDepositKey(0, activeDrepCredential): 500000000,
+		},
+		drepDeposits,
+	)
 	_, err = db.Exec(dialect.Rebind(`
 INSERT INTO reward_live_stake (
  pool_key_hash, staking_key, credential_tag, utxo_stake, reward_stake,

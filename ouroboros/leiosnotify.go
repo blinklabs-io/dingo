@@ -1742,7 +1742,7 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 	ebHash lcommon.Blake2b256,
 	ebSize uint64,
 	header *gdijkstra.DijkstraBlockHeader,
-	source string,
+	_ string,
 	relay bool,
 ) error {
 	key := string(header.Hash().Bytes())
@@ -1785,7 +1785,9 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 		return nil
 	}
 	issuer := header.IssuerVkey()
-	electionKey := fmt.Sprintf("%s:%d:%x", source, slot, issuer)
+	// An election belongs to its slot and issuer, not the relaying peer.
+	// Changing connections must not reset its distinct-announcement budget.
+	electionKey := fmt.Sprintf("%d:%x", slot, issuer)
 	electionAnnouncements := o.leiosAnnouncementElections[electionKey]
 	if electionAnnouncements == nil {
 		electionAnnouncements = make(map[string]struct{})

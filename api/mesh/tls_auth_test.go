@@ -85,6 +85,8 @@ func postNetworkList(
 // TestServerPlaintextNoAuth is the baseline: no TLS, no auth, matching
 // existing pre-dingo#2996 deployments exactly.
 func TestServerPlaintextNoAuth(t *testing.T) {
+	t.Parallel()
+
 	_, baseURL := startTestServerTLSAuth(
 		t, apiconfig.EffectiveTLS{}, apiconfig.EffectiveAuth{},
 	)
@@ -96,6 +98,8 @@ func TestServerPlaintextNoAuth(t *testing.T) {
 // TestServerTLSNoAuth covers a TLS-enabled, unauthenticated listener: the
 // handshake succeeds and the request is served.
 func TestServerTLSNoAuth(t *testing.T) {
+	t.Parallel()
+
 	certPath, keyPath := testutil.GenerateTestTLSCertKey(t)
 	_, baseURL := startTestServerTLSAuth(
 		t,
@@ -113,6 +117,8 @@ func TestServerTLSNoAuth(t *testing.T) {
 // request with no credential and one with the wrong credential are both
 // rejected with 401; the correct bearer credential is accepted, over TLS.
 func TestServerTLSAuth(t *testing.T) {
+	t.Parallel()
+
 	certPath, keyPath := testutil.GenerateTestTLSCertKey(t)
 	_, baseURL := startTestServerTLSAuth(
 		t,
@@ -146,6 +152,8 @@ func TestServerTLSAuth(t *testing.T) {
 // deployments that terminate TLS upstream must still be able to enable the
 // shared token check on the plaintext listener behind them.
 func TestServerPlaintextAuth(t *testing.T) {
+	t.Parallel()
+
 	_, baseURL := startTestServerTLSAuth(
 		t,
 		apiconfig.EffectiveTLS{},
@@ -170,6 +178,8 @@ func TestServerPlaintextAuth(t *testing.T) {
 // Every non-preflight request, including one with no credential at all,
 // still authenticates normally.
 func TestServerCORSPreflightBypassesAuth(t *testing.T) {
+	t.Parallel()
+
 	const allowed = "https://wallet.example"
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)

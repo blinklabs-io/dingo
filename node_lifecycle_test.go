@@ -311,6 +311,8 @@ func lifecycleSnapshot(
 // pointer and panics before the node ever finishes starting. The handlers are
 // attached separately, once the instance exists, by attachLeiosHandlers.
 func TestInitLeiosManagersDoNotRequireOuroboros(t *testing.T) {
+	t.Parallel()
+
 	n, _ := newLiveLifecycleTestNode(t, 2)
 	// Exactly the state Run is in when it reaches the Leios init calls.
 	n.ouroborosRef.Store(nil)
@@ -331,6 +333,8 @@ func TestInitLeiosManagersDoNotRequireOuroboros(t *testing.T) {
 // rebuild that does not carry them across silently drops Leios vote and
 // pipeline handling on a Dijkstra node, while everything else keeps working.
 func TestLiveLifecycleRebuildPreservesLeiosHandlers(t *testing.T) {
+	t.Parallel()
+
 	n, _ := newLiveLifecycleTestNode(t, 4)
 
 	// Zero-value managers: this asserts only that the same handlers survive
@@ -368,6 +372,8 @@ func TestLiveLifecycleRebuildPreservesLeiosHandlers(t *testing.T) {
 // leave n.ctx alone, so the node's normal shutdown signalling is
 // unaffected by having gone through a live truncate.
 func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 20
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -462,6 +468,8 @@ func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 func TestLiveTruncateReinitializationPreservesDelegatorInactivityConfig(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const numBlocks = 20
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -501,6 +509,8 @@ func TestLiveTruncateReinitializationPreservesDelegatorInactivityConfig(
 func TestLiveTruncateReinitializationPreservesSnapshotManagerDelegatorInactivityConfig(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const numBlocks = 20
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -716,6 +726,8 @@ func requireGenesisDeepForkWins(
 // before the truncate against the ledger Run() would have built, and after
 // it against the one the lifecycle path rebuilt.
 func TestLiveTruncatePreservesGenesisForkSelection(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 25
 	n, points := newGenesisSelectionTestNode(t, numBlocks)
 
@@ -740,6 +752,8 @@ func TestLiveTruncatePreservesGenesisForkSelection(t *testing.T) {
 // same live-lifecycle path, which rebuilds the ledger through the same
 // reinitializeCoreStorage call.
 func TestLiveRestorePreservesGenesisForkSelection(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 25
 	n, points := newGenesisSelectionTestNode(t, numBlocks)
 
@@ -768,6 +782,8 @@ func TestLiveRestorePreservesGenesisForkSelection(t *testing.T) {
 // n.liveLifecycleMu: two Truncate calls racing must not interleave their
 // quiesce/rebuild sequences.
 func TestLiveTruncateIsSerializedAgainstConcurrentCalls(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -812,6 +828,8 @@ func TestLiveTruncateIsSerializedAgainstConcurrentCalls(t *testing.T) {
 func TestLiveTruncateRejectsTargetAheadOfTipWithoutTearingDownNode(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -853,6 +871,8 @@ func TestLiveTruncateRejectsTargetAheadOfTipWithoutTearingDownNode(
 func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -903,6 +923,8 @@ func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 // synchronously; the real Badger provider behind it also closes before
 // StopCapability returns.
 func TestLiveTruncateResumesAfterCompletedStorageStopFailure(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -969,6 +991,8 @@ func TestLiveTruncateResumesAfterCompletedStorageStopFailure(t *testing.T) {
 // over: reopening storage while that worker might still be using it would
 // race the new database instance against the old one. Truncate must
 // instead cancel the node for a supervised restart.
+// Not t.Parallel: swaps ledger.CloseDBWorkerPoolShutdownTimeout, a variable
+// in another package that every concurrent LedgerState close would observe.
 func TestLiveTruncateCancelsInsteadOfResumingWhenStorageDrainUnconfirmed(
 	t *testing.T,
 ) {
@@ -1060,6 +1084,8 @@ func TestLiveTruncateCancelsInsteadOfResumingWhenStorageDrainUnconfirmed(
 // fails ("resume also failed"); with the fix, it must succeed and leave
 // the node fully usable.
 func TestLiveTruncateClosesTmpDBBeforeResumingAfterOpenFailure(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -1109,6 +1135,8 @@ func TestLiveTruncateClosesTmpDBBeforeResumingAfterOpenFailure(t *testing.T) {
 // snapshot back onto the running node, and confirm it comes back with the
 // same tip and every subsystem rebuilt and rewired, same as Truncate.
 func TestLiveRestoreRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -1145,6 +1173,8 @@ func TestLiveRestoreRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 }
 
 func TestStopForPendingRestoreRollbackCancelsNode(t *testing.T) {
+	t.Parallel()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	n := &Node{ctx: ctx, cancel: cancel}
 	pendingErr := errors.Join(
@@ -1173,6 +1203,8 @@ func TestStopForPendingRestoreRollbackCancelsNode(t *testing.T) {
 // snapshot must be rejected with the node's original data and tip
 // completely intact and the node still usable.
 func TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -1234,6 +1266,8 @@ func TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss(t *testing.T) {
 // data and tip left completely untouched and the node still usable,
 // rather than the node being torn down (dingo#1651 follow-up).
 func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -1316,6 +1350,8 @@ func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
 func TestQuiesceForLiveLifecycleOpHandlesUninitializedOuroborosAndUnconfirmedConnShutdown(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{
 		Logger: logger,
@@ -1382,6 +1418,8 @@ func requireNoDir(t *testing.T, dir string) {
 // reinitializeAndResume call, or -- across a restart --
 // removeConfirmedRestoreBackup once Run() itself succeeds) may do that.
 func TestSwapInRestoredDataDirRetainsBackupUntilCallerConfirms(t *testing.T) {
+	t.Parallel()
+
 	base := t.TempDir()
 	dataDir := filepath.Join(base, "data")
 	stagingDir := dataDir + restoreStagingSuffix
@@ -1437,6 +1475,8 @@ func withInjectedFirstSyncFailure(
 // assumes it's still in place. swapInRestoredDataDir must roll the first
 // rename back and report a normal (recoverable) error when that rollback
 // succeeds.
+// Not t.Parallel: withInjectedFirstSyncFailure swaps a package-level sync
+// seam that every concurrent restore in this package would observe.
 func TestSwapInRestoredDataDirRollsBackWhenFirstSyncFails(t *testing.T) {
 	base := t.TempDir()
 	dataDir := filepath.Join(base, "data")
@@ -1514,6 +1554,8 @@ func TestSwapInRestoredDataDirUnrecoverableWhenFirstSyncFailsAndRollbackFails(
 func TestReconcileInterruptedLiveRestoreSwapNoOpWithoutInterruption(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	base := t.TempDir()
 	dataDir := filepath.Join(base, "data")
 	writeMarkerFile(t, dataDir, "original")
@@ -1539,6 +1581,8 @@ func TestReconcileInterruptedLiveRestoreSwapNoOpWithoutInterruption(
 func TestReconcileInterruptedLiveRestoreSwapRollsBackWhenInterruptedBetweenRenames(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	base := t.TempDir()
 	dataDir := filepath.Join(base, "data")
 	backupDir := dataDir + preRestoreBackupSuffix
@@ -1567,6 +1611,8 @@ func TestReconcileInterruptedLiveRestoreSwapRollsBackWhenInterruptedBetweenRenam
 func TestReconcileInterruptedLiveRestoreSwapKeepsRestoredDataWhenBothPresent(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	base := t.TempDir()
 	dataDir := filepath.Join(base, "data")
 	backupDir := dataDir + preRestoreBackupSuffix
@@ -1597,6 +1643,8 @@ func TestReconcileInterruptedLiveRestoreSwapKeepsRestoredDataWhenBothPresent(
 func TestReconcileInterruptedLiveRestoreSwapPropagatesRollbackFailure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	if runtime.GOOS == "windows" {
 		t.Skip("directory permission bits don't apply the same way on windows")
 	}
@@ -1682,6 +1730,8 @@ func addBlocksSerially(t *testing.T, n *Node, blocks []gledger.Block) {
 // (epochLength=100, real testdata blocks are 20 slots apart), and confirms
 // the tip actually advances again after each one, not just the first.
 func TestSecondLiveTruncateResumesTipAdvancement(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 20
 	n, points := newLiveLifecycleTestNodeWithGenesis(
 		t, numBlocks, smallEpochGenesisCfgForLifecycleTest(t),

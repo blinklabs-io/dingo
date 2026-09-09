@@ -75,6 +75,8 @@ func testPoolKeyHash(t *testing.T, b byte) []byte {
 // deliberately wrong values in every field, so the test fails loudly if
 // GetPoolEpochDataMap regresses to reading the naive same-numbered epoch.
 func TestGetPoolEpochDataMapAlignsRewardScheduleEpochs(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 
@@ -192,6 +194,8 @@ func TestGetPoolEpochDataMapAlignsRewardScheduleEpochs(t *testing.T) {
 // (and wrong) value. FixedCost/Margin are stake-epoch fields and so are
 // unaffected by the param-epoch row's absence (dingo #3484).
 func TestGetPoolEpochDataMapMissingParamEpochRow(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 
@@ -223,6 +227,8 @@ func TestGetPoolEpochDataMapMissingParamEpochRow(t *testing.T) {
 // freshly registered pool's param-epoch row lands before its stake-epoch row
 // does.
 func TestGetPoolEpochDataMapMissingStakeEpochRow(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 
@@ -268,6 +274,8 @@ func TestGetPoolEpochDataMapMissingStakeEpochRow(t *testing.T) {
 // pool key hash round-trips correctly, guarding the low-level building block
 // koiosStakeEpoch/koiosParamEpoch and check.go's checkEpoch rely on.
 func TestGetEpochDataStakeEpochOffset(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 
@@ -301,6 +309,8 @@ func TestGetEpochDataStakeEpochOffset(t *testing.T) {
 // for an epoch, since #3097's per-account parity check will read either one
 // interchangeably.
 func TestDingoDBGetRewardAccountOutputs(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 	stakingKey := testPoolKeyHash(t, 0x11)
@@ -329,6 +339,8 @@ func TestDingoDBGetRewardAccountOutputs(t *testing.T) {
 // valid pool ID, used implicitly by the boundary tests above via
 // hex.EncodeToString matching GetPoolEpochDataMap's own key format.
 func TestPoolKeyHashRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	h := testPoolKeyHash(t, 0x01)
 	var pid lcommon.PoolId
 	copy(pid[:], h)
@@ -351,6 +363,8 @@ func TestPoolKeyHashRoundTrip(t *testing.T) {
 // while its block count is on the epoch-14 row. Reading cost and margin from
 // the param epoch compared 412000000 against 411000000 and 1/25 against 0.05.
 func TestGetPoolEpochDataMapTracksChangingPoolParams(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 
@@ -431,6 +445,8 @@ func TestGetPoolEpochDataMapTracksChangingPoolParams(t *testing.T) {
 // genuinely zero, and reporting that as a pruned epoch would turn a correct
 // zero into a dingo_db_missing ERROR.
 func TestGetPoolEpochDataMapSpendableMemberPresenceIsEpochWide(t *testing.T) {
+	t.Parallel()
+
 	const stakeEpoch, paramEpoch = uint64(9), uint64(11)
 	db, gdb := openTestDingoDB(t)
 	pool := testPoolKeyHash(t, 0x01)
@@ -507,6 +523,8 @@ func TestGetPoolEpochDataMapSpendableMemberPresenceIsEpochWide(t *testing.T) {
 // be formed and presence must stay false so ComparePoolEpoch falls back to the
 // pool total only where that is provably equal.
 func TestGetPoolEpochDataMapSpendableMemberAbsentWhenEpochPruned(t *testing.T) {
+	t.Parallel()
+
 	const stakeEpoch, paramEpoch = uint64(9), uint64(11)
 	db, gdb := openTestDingoDB(t)
 	pool := testPoolKeyHash(t, 0x01)

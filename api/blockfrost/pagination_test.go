@@ -25,6 +25,8 @@ import (
 )
 
 func TestParsePaginationDefaultValues(t *testing.T) {
+	t.Parallel()
+
 	req := httptest.NewRequest(http.MethodGet, "/api/v0/test", nil)
 	params, err := ParsePagination(req)
 	require.NoError(t, err)
@@ -35,6 +37,8 @@ func TestParsePaginationDefaultValues(t *testing.T) {
 }
 
 func TestParsePaginationValid(t *testing.T) {
+	t.Parallel()
+
 	req := httptest.NewRequest(
 		http.MethodGet,
 		"/api/v0/test?count=25&page=3&order=DESC",
@@ -49,6 +53,8 @@ func TestParsePaginationValid(t *testing.T) {
 }
 
 func TestParsePaginationClampBounds(t *testing.T) {
+	t.Parallel()
+
 	req := httptest.NewRequest(
 		http.MethodGet,
 		"/api/v0/test?count=999&page=0",
@@ -63,6 +69,8 @@ func TestParsePaginationClampBounds(t *testing.T) {
 }
 
 func TestParsePaginationClampsUnboundedPage(t *testing.T) {
+	t.Parallel()
+
 	// The largest value strconv.Atoi accepts on a 64-bit platform: large
 	// enough to have overflowed a naive offset calculation (page-1)*count
 	// before this was bounded, without itself overflowing int parsing.
@@ -78,6 +86,8 @@ func TestParsePaginationClampsUnboundedPage(t *testing.T) {
 }
 
 func TestParsePaginationClampsPageAboveMax(t *testing.T) {
+	t.Parallel()
+
 	req := httptest.NewRequest(
 		http.MethodGet,
 		"/api/v0/test?page=21474837",
@@ -90,6 +100,8 @@ func TestParsePaginationClampsPageAboveMax(t *testing.T) {
 }
 
 func TestPaginationOffset(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name       string
 		params     PaginationParams
@@ -140,6 +152,8 @@ func TestPaginationOffset(t *testing.T) {
 }
 
 func TestParsePaginationInvalid(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name string
 		url  string
@@ -168,6 +182,8 @@ func TestParsePaginationInvalid(t *testing.T) {
 }
 
 func TestSetPaginationHeaders(t *testing.T) {
+	t.Parallel()
+
 	recorder := httptest.NewRecorder()
 	SetPaginationHeaders(
 		recorder,
@@ -187,6 +203,8 @@ func TestSetPaginationHeaders(t *testing.T) {
 }
 
 func TestSetPaginationHeadersZeroTotals(t *testing.T) {
+	t.Parallel()
+
 	recorder := httptest.NewRecorder()
 	SetPaginationHeaders(
 		recorder,

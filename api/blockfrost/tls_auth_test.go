@@ -102,6 +102,8 @@ func getHealth(
 }
 
 func TestBlockfrostPlaintextNoAuth(t *testing.T) {
+	t.Parallel()
+
 	_, baseURL := startTestServerTLSAuth(
 		t, apiconfig.EffectiveTLS{}, apiconfig.EffectiveAuth{},
 	)
@@ -111,6 +113,8 @@ func TestBlockfrostPlaintextNoAuth(t *testing.T) {
 }
 
 func TestBlockfrostTLSNoAuth(t *testing.T) {
+	t.Parallel()
+
 	certPath, keyPath := testutil.GenerateTestTLSCertKey(t)
 	_, baseURL := startTestServerTLSAuth(
 		t,
@@ -128,6 +132,8 @@ func TestBlockfrostTLSNoAuth(t *testing.T) {
 // both via the standard Authorization header and via the Blockfrost-
 // compatible project_id alias header.
 func TestBlockfrostTLSAuth(t *testing.T) {
+	t.Parallel()
+
 	certPath, keyPath := testutil.GenerateTestTLSCertKey(t)
 	_, baseURL := startTestServerTLSAuth(
 		t,
@@ -174,6 +180,8 @@ func TestBlockfrostTLSAuth(t *testing.T) {
 // TestBlockfrostCORSPreflightBypassesAuth documents and tests the
 // decision that an OPTIONS CORS preflight never needs a credential.
 func TestBlockfrostCORSPreflightBypassesAuth(t *testing.T) {
+	t.Parallel()
+
 	const allowed = "https://wallet.example"
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)

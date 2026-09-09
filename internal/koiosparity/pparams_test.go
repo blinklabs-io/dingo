@@ -128,6 +128,8 @@ func koiosPParamsPreview380() *KoiosEpochParams {
 // Discriminates: replacing the rational comparison with string equality makes
 // this test report a0/rho/tau/price_mem/price_step mismatches.
 func TestCompareEpochProtocolParamsRationalsMatchKoiosDecimals(t *testing.T) {
+	t.Parallel()
+
 	now := time.Now()
 	got := CompareEpochProtocolParams(
 		"preview",
@@ -152,6 +154,8 @@ func TestCompareEpochProtocolParamsRationalsMatchKoiosDecimals(t *testing.T) {
 // wedge-class, so it must be a value_mismatch (FAIL), never an informational
 // or ERROR category that a run could be configured to tolerate.
 func TestCompareEpochProtocolParamsReportsWedgeClassMismatch(t *testing.T) {
+	t.Parallel()
+
 	now := time.Now()
 	dingo := dingoPParamsPreview380()
 	dingo.MaxTxSize = "32768" // the #3928-class wedge: wrong accepted tx size
@@ -181,6 +185,8 @@ func TestCompareEpochProtocolParamsReportsWedgeClassMismatch(t *testing.T) {
 // pins the execution-unit parameters the issue calls out as the sharper
 // silent-failure case.
 func TestCompareEpochProtocolParamsReportsEveryDivergingField(t *testing.T) {
+	t.Parallel()
+
 	now := time.Now()
 	dingo := dingoPParamsPreview380()
 	dingo.MaxBlockExSteps = "40000000000" // the pre-epoch-107 value
@@ -215,6 +221,8 @@ func TestCompareEpochProtocolParamsReportsEveryDivergingField(t *testing.T) {
 // which validation rules run at all, so a disagreement about it is at least
 // as serious as any single parameter.
 func TestCompareEpochProtocolParamsReportsEraMismatch(t *testing.T) {
+	t.Parallel()
+
 	now := time.Now()
 	dingo := dingoPParamsPreview380()
 	dingo.EraName = "Alonzo"
@@ -240,6 +248,8 @@ func TestCompareEpochProtocolParamsReportsEraMismatch(t *testing.T) {
 // is a disagreement about the shape of the ledger state, not something to
 // skip quietly. Skipping it is what would let an era-gating bug read as PASS.
 func TestCompareEpochProtocolParamsPresenceDisagreementIsAMismatch(t *testing.T) {
+	t.Parallel()
+
 	now := time.Now()
 
 	dingoAbsent := dingoPParamsPreview380()
@@ -267,6 +277,8 @@ func TestCompareEpochProtocolParamsPresenceDisagreementIsAMismatch(t *testing.T)
 // era neither side defines the execution-unit parameters, and both agreeing
 // that a parameter does not exist is agreement, not divergence.
 func TestCompareEpochProtocolParamsBothAbsentIsNotAMismatch(t *testing.T) {
+	t.Parallel()
+
 	now := time.Now()
 	dingo := dingoPParamsPreview380()
 	koios := koiosPParamsPreview380()
@@ -298,6 +310,8 @@ func TestCompareEpochProtocolParamsBothAbsentIsNotAMismatch(t *testing.T) {
 // silent PASS either. Inside the grace window after epoch close it is
 // reference_lag; past it, dingo_db_missing. Both are ERROR.
 func TestCompareEpochProtocolParamsMissingDingoRow(t *testing.T) {
+	t.Parallel()
+
 	now := time.Now()
 	closed := now.Add(-2 * time.Hour)
 
@@ -330,6 +344,8 @@ func TestCompareEpochProtocolParamsMissingDingoRow(t *testing.T) {
 // (fetched before this comparison existed, or a --skip-fetch run) must be
 // reported, never treated as "nothing to compare" and folded into a PASS.
 func TestCompareEpochProtocolParamsMissingKoiosRow(t *testing.T) {
+	t.Parallel()
+
 	now := time.Now()
 	got := CompareEpochProtocolParams(
 		"preview", 380, nil, dingoPParamsPreview380(), nil, now, 0, time.Time{},
@@ -344,6 +360,8 @@ func TestCompareEpochProtocolParamsMissingKoiosRow(t *testing.T) {
 // dingo_db_error, distinct from an absent row, and must suppress the
 // field comparisons rather than compare against a zero value.
 func TestCompareEpochProtocolParamsFetchError(t *testing.T) {
+	t.Parallel()
+
 	now := time.Now()
 	got := CompareEpochProtocolParams(
 		"preview",
@@ -376,6 +394,8 @@ func TestCompareEpochProtocolParamsFetchError(t *testing.T) {
 // Discriminates: an exact-epoch lookup returns nil here; a lookup ordered the
 // wrong way returns 40000000000.
 func TestDingoDBGetProtocolParamsResolvesEffectiveRow(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 
@@ -418,6 +438,8 @@ func TestDingoDBGetProtocolParamsResolvesEffectiveRow(t *testing.T) {
 // Discriminates: an era-unfiltered "latest row wins" lookup picks the
 // Babbage row (id 2 below) and reports protocol_major 7, not Alonzo's 6.
 func TestDingoDBGetProtocolParamsUsesTheEpochsOwnEra(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 
@@ -449,6 +471,8 @@ func TestDingoDBGetProtocolParamsUsesTheEpochsOwnEra(t *testing.T) {
 // CompareEpochProtocolParams classifies it as a missing row (ERROR) instead
 // of a DB failure.
 func TestDingoDBGetProtocolParamsAbsent(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 
@@ -560,6 +584,8 @@ func seedKoiosBabbageProtocolParams(
 // mismatches for reasons unrelated to what it is testing, so the drift is
 // caught here instead.
 func TestSeededProtocolParamsFixturesAgree(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 	seedDingoBabbageProtocolParams(t, gdb, 10)
@@ -586,6 +612,8 @@ func TestSeededProtocolParamsFixturesAgree(t *testing.T) {
 // effective row identically — the property source.go's doc comment requires
 // of every implementation.
 func TestDatabaseSourceGetProtocolParams(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	sqlDB := sourceSQLDB(t, db)
 	source, err := NewDatabaseSource(db)
@@ -708,6 +736,8 @@ func runProtocolParamsCheck(
 // below: with both sides present and agreeing, the new comparison contributes
 // nothing, so any finding they report is attributable to what they changed.
 func TestCheckPassesWithMatchingProtocolParams(t *testing.T) {
+	t.Parallel()
+
 	const network, koiosEpoch = "preview", uint64(10)
 	dingoDir, cachePath := seedProtocolParamsCheckFixture(
 		t, network, koiosEpoch, true, nil,
@@ -725,6 +755,8 @@ func TestCheckPassesWithMatchingProtocolParams(t *testing.T) {
 // with the network is the #3928 wedge, and before this change the parity run
 // reported PASS for exactly this database.
 func TestCheckDetectsWedgeClassProtocolParamDivergence(t *testing.T) {
+	t.Parallel()
+
 	const network, koiosEpoch = "preview", uint64(10)
 	dingoDir, cachePath := seedProtocolParamsCheckFixture(
 		t, network, koiosEpoch, true,
@@ -779,6 +811,8 @@ func TestCheckDetectsWedgeClassProtocolParamDivergence(t *testing.T) {
 // koios_epoch_info row but no koios_epoch_params row, and that must surface
 // as ERROR rather than a PASS that validated no parameters at all.
 func TestCheckDetectsMissingKoiosEpochParamsOnUpgradedCache(t *testing.T) {
+	t.Parallel()
+
 	const network, koiosEpoch = "preview", uint64(10)
 	dingoDir, cachePath := seedProtocolParamsCheckFixture(
 		t, network, koiosEpoch, false, nil,
@@ -797,6 +831,8 @@ func TestCheckDetectsMissingKoiosEpochParamsOnUpgradedCache(t *testing.T) {
 // parameter row for the epoch has nothing to compare, which is an ERROR
 // (dingo_db_missing) and specifically not a FAIL — no divergence was shown.
 func TestCheckDetectsMissingDingoProtocolParams(t *testing.T) {
+	t.Parallel()
+
 	const network, koiosEpoch = "preview", uint64(10)
 	dingoDir, cachePath := seedProtocolParamsCheckFixture(
 		t, network, koiosEpoch, true,
@@ -844,6 +880,8 @@ func koiosCostModelsJSON(t *testing.T, models map[string][]int64) string {
 // map[uint][]int64 (0 = PlutusV1, 1 = PlutusV2) and from Koios's
 // name-keyed dict, are entry-for-entry identical and must compare clean.
 func TestCompareEpochProtocolParamsCostModelsMatch(t *testing.T) {
+	t.Parallel()
+
 	models := costModelFixture(t)
 	dingo := dingoPParamsPreview380()
 	dingo.CostModels = models
@@ -860,6 +898,8 @@ func TestCompareEpochProtocolParamsCostModelsMatch(t *testing.T) {
 // name the language and the entry — dumping 166 integers into a mismatch row
 // would be unusable.
 func TestCompareEpochProtocolParamsCostModelEntryDiverges(t *testing.T) {
+	t.Parallel()
+
 	models := costModelFixture(t)
 	dingo := dingoPParamsPreview380()
 	dingo.CostModels = models
@@ -895,6 +935,8 @@ func TestCompareEpochProtocolParamsCostModelEntryDiverges(t *testing.T) {
 // wrong number of operations prices every later operation wrongly, so the
 // entry count is reported on its own rather than as a first-index diff.
 func TestCompareEpochProtocolParamsCostModelLengthDiverges(t *testing.T) {
+	t.Parallel()
+
 	models := costModelFixture(t)
 	fullV1 := models["PlutusV1"]
 	if len(fullV1) != 166 {
@@ -922,6 +964,8 @@ func TestCompareEpochProtocolParamsCostModelLengthDiverges(t *testing.T) {
 // run at all, and must not be skipped just because the key is absent from one
 // map.
 func TestCompareEpochProtocolParamsCostModelLanguagePresence(t *testing.T) {
+	t.Parallel()
+
 	models := costModelFixture(t)
 
 	dingo := dingoPParamsPreview380()
@@ -955,6 +999,8 @@ func TestCompareEpochProtocolParamsCostModelLanguagePresence(t *testing.T) {
 // TestCompareEpochProtocolParamsCostModelsAbsentBothSides: pre-Alonzo eras
 // price no scripts at all, and both sides agreeing on that is agreement.
 func TestCompareEpochProtocolParamsCostModelsAbsentBothSides(t *testing.T) {
+	t.Parallel()
+
 	dingo := dingoPParamsPreview380()
 	koios := koiosPParamsPreview380()
 	require.Nil(t, dingo.CostModels)
@@ -969,6 +1015,8 @@ func TestCompareEpochProtocolParamsCostModelsAbsentBothSides(t *testing.T) {
 // models that will not parse must surface, never silently drop the whole
 // cost-model comparison and let the epoch read as PASS.
 func TestCompareEpochProtocolParamsRejectsMalformedKoiosCostModels(t *testing.T) {
+	t.Parallel()
+
 	models := costModelFixture(t)
 	dingo := dingoPParamsPreview380()
 	dingo.CostModels = models
@@ -990,6 +1038,8 @@ func TestCompareEpochProtocolParamsRejectsMalformedKoiosCostModels(t *testing.T)
 // PlutusV1/PlutusV2, and the preview epoch-107 row carries 166 and 175
 // entries respectively.
 func TestDingoDBGetProtocolParamsDecodesCostModels(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 	seedDingoBabbageProtocolParams(t, gdb, 107)

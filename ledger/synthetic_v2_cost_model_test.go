@@ -101,6 +101,8 @@ func conwayPParamsWithCostModels(
 func TestInjectedSyntheticV2CostModel_DetectsHardForkBabbagesDefault(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	prev := &alonzo.AlonzoProtocolParameters{
 		CostModels: map[uint][]int64{0: {1, 2, 3}},
 	}
@@ -115,6 +117,8 @@ func TestInjectedSyntheticV2CostModel_DetectsHardForkBabbagesDefault(
 // the transition -- HardForkBabbage's own guard (`if _, hasV2 :=
 // ret.CostModels[1]; !hasV2`) leaves it untouched, so nothing was injected.
 func TestInjectedSyntheticV2CostModel_FalseWhenAlreadyPresent(t *testing.T) {
+	t.Parallel()
+
 	realV2 := []int64{9, 9, 9}
 	prev := &alonzo.AlonzoProtocolParameters{
 		CostModels: map[uint][]int64{0: {1, 2, 3}, 1: realV2},
@@ -132,6 +136,8 @@ func TestInjectedSyntheticV2CostModel_FalseWhenAlreadyPresent(t *testing.T) {
 func TestInjectedSyntheticV2CostModel_FalseWhenValueIsNotTheKnownDefault(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	before := &babbage.BabbageProtocolParameters{
 		CostModels: map[uint][]int64{0: {1, 2, 3}},
 	}
@@ -149,6 +155,8 @@ func TestInjectedSyntheticV2CostModel_FalseWhenValueIsNotTheKnownDefault(
 func TestWithoutSyntheticV2CostModel_RemovesKeyWithoutMutatingOriginal(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	original := &conway.ConwayProtocolParameters{
 		CostModels: map[uint][]int64{
 			0: {1, 1, 1},
@@ -177,6 +185,8 @@ func TestWithoutSyntheticV2CostModel_RemovesKeyWithoutMutatingOriginal(
 // (Alonzo, Babbage, Conway, Dijkstra), not just Conway -- a regression in
 // any branch would otherwise pass the suite silently.
 func TestWithoutSyntheticV2CostModel_CoversEveryEraType(t *testing.T) {
+	t.Parallel()
+
 	costModels := map[uint][]int64{0: {1}, 1: {2}, 2: {3}}
 
 	t.Run("Alonzo", func(t *testing.T) {
@@ -233,6 +243,8 @@ func cloneMap(m map[uint][]int64) map[uint][]int64 {
 // still matches its type's case in the switch, so each case must guard
 // against nil before dereferencing rather than panicking.
 func TestWithoutSyntheticV2CostModel_NilPointerDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
 	var nilConway *conway.ConwayProtocolParameters
 	var pp lcommon.ProtocolParameters = nilConway
 
@@ -248,6 +260,8 @@ func TestWithoutSyntheticV2CostModel_NilPointerDoesNotPanic(t *testing.T) {
 // so a caller reading it sees the exact same struct internal validation
 // uses.
 func TestWithoutSyntheticV2CostModel_NoOpWhenNotSynthetic(t *testing.T) {
+	t.Parallel()
+
 	pp := &conway.ConwayProtocolParameters{
 		CostModels: map[uint][]int64{0: {1}, 1: {2}, 2: {3}},
 	}
@@ -273,6 +287,8 @@ type unknownProtocolParameters struct {
 func TestWithoutSyntheticV2CostModel_UnknownTypeLogsAndReturnsUnfiltered(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 	pp := &unknownProtocolParameters{}
@@ -296,6 +312,8 @@ func TestWithoutSyntheticV2CostModel_UnknownTypeLogsAndReturnsUnfiltered(
 // detect a Dijkstra-era injection even though the filter it feeds covers
 // that era.
 func TestExtractRawCostModels_CoversDijkstra(t *testing.T) {
+	t.Parallel()
+
 	pp := &dijkstra.DijkstraProtocolParameters{
 		ConwayProtocolParameters: conway.ConwayProtocolParameters{
 			CostModels: map[uint][]int64{0: {1}, 1: {2}},
@@ -314,6 +332,8 @@ func TestExtractRawCostModels_CoversDijkstra(t *testing.T) {
 // dereferencing rather than panicking -- mirroring the guard
 // withoutSyntheticV2CostModel already has for the identical hazard.
 func TestExtractRawCostModels_NilPointerDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		name string
 		pp   lcommon.ProtocolParameters
@@ -346,6 +366,8 @@ func TestExtractRawCostModels_NilPointerDoesNotPanic(t *testing.T) {
 func TestQueryShelleyCurrentProtocolParams_OmitsSyntheticV2CostModel(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := newPoolDistr2Ledger(t, newTestDB(t))
 	ls.currentEra = eras.ConwayEraDesc
 	ls.currentPParams = conwayPParamsWithCostModels(map[uint][]int64{
@@ -402,6 +424,8 @@ func TestQueryShelleyCurrentProtocolParams_OmitsSyntheticV2CostModel(
 func TestQueryShelleyCurrentProtocolParams_IncludesRealV2CostModel(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := newPoolDistr2Ledger(t, newTestDB(t))
 	ls.currentEra = eras.ConwayEraDesc
 	ls.currentPParams = conwayPParamsWithCostModels(map[uint][]int64{
@@ -447,6 +471,8 @@ func TestQueryShelleyCurrentProtocolParams_IncludesRealV2CostModel(
 // accessor all of those now use; this proves its filtering behavior
 // directly, independent of which specific API surface calls it.
 func TestGetCurrentPParamsForReporting_OmitsSyntheticV2CostModel(t *testing.T) {
+	t.Parallel()
+
 	ls := newPoolDistr2Ledger(t, newTestDB(t))
 	ls.currentEra = eras.ConwayEraDesc
 	ls.currentPParams = conwayPParamsWithCostModels(map[uint][]int64{
@@ -477,6 +503,8 @@ func TestGetCurrentPParamsForReporting_OmitsSyntheticV2CostModel(t *testing.T) {
 // half: once the synthetic marker is cleared, the reporting accessor must
 // return the same value GetCurrentPParams does.
 func TestGetCurrentPParamsForReporting_IncludesRealV2CostModel(t *testing.T) {
+	t.Parallel()
+
 	ls := newPoolDistr2Ledger(t, newTestDB(t))
 	ls.currentEra = eras.ConwayEraDesc
 	ls.currentPParams = conwayPParamsWithCostModels(map[uint][]int64{
@@ -500,6 +528,8 @@ func TestGetCurrentPParamsForReporting_IncludesRealV2CostModel(t *testing.T) {
 // not silently reconstruct as false (the zero value) regardless of the
 // chain's real history.
 func TestSyntheticV2CostModelPersistence_RoundTripsAcrossRestart(t *testing.T) {
+	t.Parallel()
+
 	ls := newPoolDistr2Ledger(t, newTestDB(t))
 
 	// Not yet persisted: a fresh database reads back false, same as an
@@ -531,6 +561,8 @@ func TestSyntheticV2CostModelPersistence_RoundTripsAcrossRestart(t *testing.T) {
 func TestResolveSyntheticV2CostModel_BootstrapsFromValueWhenMarkerAbsent(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	stillSynthetic := &conway.ConwayProtocolParameters{
 		CostModels: map[uint][]int64{1: eras.DefaultPlutusV2CostModel},
 	}
@@ -560,6 +592,8 @@ func TestResolveSyntheticV2CostModel_BootstrapsFromValueWhenMarkerAbsent(
 // an explicitly persisted marker value is trusted directly, regardless of
 // what pp happens to contain.
 func TestResolveSyntheticV2CostModel_ExplicitValueWins(t *testing.T) {
+	t.Parallel()
+
 	realData := &conway.ConwayProtocolParameters{
 		CostModels: map[uint][]int64{1: eras.DefaultPlutusV2CostModel},
 	}
@@ -578,6 +612,8 @@ func TestResolveSyntheticV2CostModel_ExplicitValueWins(t *testing.T) {
 func TestMarkRealV2CostModelObserved_KeepsEarliestConfirmationAcrossMultipleUpdates(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := newExpiryRollbackTestLedger(t, false, 0)
 
 	// First real update confirmed at epoch 5 (slot 500).
@@ -635,6 +671,8 @@ func TestMarkRealV2CostModelObserved_KeepsEarliestConfirmationAcrossMultipleUpda
 func TestRollbackRestore_LeavesRealPreExistingModelCorrectlyResolvedAsNotSynthetic(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	// differs from eras.DefaultPlutusV2CostModel
 	realNonDefaultV2 := []int64{1, 2, 3}
@@ -689,6 +727,8 @@ func TestRollbackRestore_LeavesRealPreExistingModelCorrectlyResolvedAsNotSynthet
 func TestTransitionToEraFrom_PersistsSyntheticMarkerInSameTransactionAsPParams(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 

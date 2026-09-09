@@ -102,6 +102,8 @@ func (t collateralReturnTx) Produced() []lcommon.Utxo {
 // must not warn; only losing declared outputs is worth an operator's
 // attention.
 func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
+	t.Parallel()
+
 	candidate := findGapConsumeCandidateWithoutCertificates(t)
 
 	// newStagedDB stages the consumer's producers so the consumed inputs

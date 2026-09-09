@@ -36,6 +36,8 @@ import (
 // registered with one manager would collide (see ntc_conn_closed_test.go).
 
 func TestConnClosedFunc_ReceivesIsNtCTrueForNtCClose(t *testing.T) {
+	t.Parallel()
+
 	type call struct {
 		isNtC bool
 		err   error
@@ -67,6 +69,8 @@ func TestConnClosedFunc_ReceivesIsNtCTrueForNtCClose(t *testing.T) {
 }
 
 func TestConnClosedFunc_ReceivesIsNtCFalseForNtNClose(t *testing.T) {
+	t.Parallel()
+
 	type call struct {
 		isNtC bool
 		err   error

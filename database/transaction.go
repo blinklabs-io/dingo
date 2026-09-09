@@ -1147,8 +1147,8 @@ func (d *Database) SetGenesisTransaction(
 	); err != nil {
 		return fmt.Errorf(
 			"SetGenesisTransaction failed for tx %x block %x: %w",
-			txHash[:8],
-			blockHash[:8],
+			bytePrefix(txHash),
+			bytePrefix(blockHash),
 			err,
 		)
 	}

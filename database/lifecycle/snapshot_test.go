@@ -32,6 +32,8 @@ import (
 // TestSnapshotWritesManifestAndBackupFiles verifies that Snapshot writes
 // a manifest plus blob/metadata backup files with matching commit timestamps.
 func TestSnapshotWritesManifestAndBackupFiles(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
 
@@ -62,6 +64,8 @@ func TestSnapshotWritesManifestAndBackupFiles(t *testing.T) {
 // TestSnapshotRefusesExistingDirectory verifies that Snapshot errors when
 // the target directory already exists.
 func TestSnapshotRefusesExistingDirectory(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	dir := t.TempDir() // already exists
 
@@ -91,6 +95,8 @@ func TestSnapshotRefusesExistingDirectory(t *testing.T) {
 func TestSnapshotRefusingExistingDirectoryDoesNotDeleteItsContents(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	dir := filepath.Join(t.TempDir(), "snap-contested")
@@ -130,6 +136,8 @@ func TestSnapshotRefusingExistingDirectoryDoesNotDeleteItsContents(
 // output is a complete, valid, undamaged snapshot, with every other
 // caller failing immediately without touching dir's contents at all.
 func TestSnapshotConcurrentCallsToSameDirLeaveWinnersFilesIntact(t *testing.T) {
+	t.Parallel()
+
 	const attempts = 8
 
 	db := newTestDB(t)
@@ -197,6 +205,8 @@ func TestSnapshotConcurrentCallsToSameDirLeaveWinnersFilesIntact(t *testing.T) {
 // rather than tied to Snapshot's own completion, so this test's worst-case
 // runtime doesn't depend on how long the snapshot happens to take.
 func TestSnapshotConsistentUnderConcurrentWrites(t *testing.T) {
+	t.Parallel()
+
 	const concurrentCommits = 200
 
 	db := newTestDB(t)
@@ -255,6 +265,8 @@ func TestSnapshotConsistentUnderConcurrentWrites(t *testing.T) {
 // TestSnapshotCleansUpOnFailure verifies that a Snapshot failure (here, a
 // pre-cancelled context) removes the partially-created directory.
 func TestSnapshotCleansUpOnFailure(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	dir := filepath.Join(t.TempDir(), "snap-fail")
 

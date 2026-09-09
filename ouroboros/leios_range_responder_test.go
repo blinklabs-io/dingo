@@ -54,6 +54,8 @@ func newLeiosFetchServerPeer(t *testing.T, o *Ouroboros) *muxerServerPeer {
 // connection-level protocol error. That error is what this asserts, bounded by
 // a timeout because the defect being fixed is a park.
 func TestLeiosFetchBlockRangeRequestIsDeclined(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	peer := newLeiosFetchServerPeer(t, o)
 
@@ -78,6 +80,8 @@ func TestLeiosFetchBlockRangeRequestIsDeclined(t *testing.T) {
 // answered on the wire, not escalated into a connection error. This keeps the
 // range fix from being read as "decline anything unavailable".
 func TestLeiosFetchUnavailableBlockTxsAnswersNoBlockTxs(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	peer := newLeiosFetchServerPeer(t, o)
 

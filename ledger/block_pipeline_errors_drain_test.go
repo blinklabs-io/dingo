@@ -81,6 +81,8 @@ func buildNoNonceValidateBatch(t *testing.T, numBlocks int) []models.Block {
 func TestDecodeReadChainBatchDoesNotDeadlockOnManyValidationErrors(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	// gouroboros pipeline.DefaultPipelineConfig's PrefetchBufferSize is 1000
 	// (submitChan/decodedChan/validatedChan/resultsChan/errorsChan are each
 	// that size). Without a permanent errorsChan reader, a full deadlock
@@ -186,6 +188,8 @@ func TestDecodeReadChainBatchDoesNotDeadlockOnManyValidationErrors(
 func TestRecordBlockPipelineErrorClassificationDeferredIsNotUnexpected(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		config: LedgerStateConfig{Logger: testLogger()},
 	}
@@ -238,6 +242,8 @@ func TestRecordBlockPipelineErrorClassificationDeferredIsNotUnexpected(
 // (errBlockPipelineEta0Unavailable) from every other error, incrementing the
 // matching counter for each.
 func TestRecordBlockPipelineErrorClassification(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		config: LedgerStateConfig{Logger: testLogger()},
 	}

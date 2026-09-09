@@ -47,6 +47,8 @@ var productionValidateVerifyConfig = lcommon.VerifyConfig{
 func TestNewLedgerStateRejectsPipelineValidationWithoutKesConfig(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
@@ -173,6 +175,8 @@ func loadRealByronMainBlock(t *testing.T) models.Block {
 }
 
 func TestDecodeReadChainBatchAcceptsRealByronWithValidation(t *testing.T) {
+	t.Parallel()
+
 	block := loadRealByronMainBlock(t)
 	ls := &LedgerState{
 		validationEnabled: true,
@@ -214,6 +218,8 @@ func TestDecodeReadChainBatchAcceptsRealByronWithValidation(t *testing.T) {
 func TestVerifyBlockHeaderStatelessCryptoRejectsTamperedByronSignature(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	stored := loadRealByronMainBlock(t)
 	block, err := stored.Decode()
 	require.NoError(t, err)
@@ -238,6 +244,8 @@ func TestVerifyBlockHeaderStatelessCryptoRejectsTamperedByronSignature(
 }
 
 func TestDecodeReadChainBatchRejectsInvalidOpCertWhenEnabled(t *testing.T) {
+	t.Parallel()
+
 	var seed [32]byte
 	seed[0] = 91
 	vb := testutil.BuildValidatedConwayBlockBytesWithInvalidOpCert(
@@ -265,6 +273,8 @@ func TestDecodeReadChainBatchRejectsInvalidOpCertWhenEnabled(t *testing.T) {
 }
 
 func TestDecodeReadChainBatchReturnsRecoverableValidationError(t *testing.T) {
+	t.Parallel()
+
 	var seed [32]byte
 	seed[0] = 94
 	vb := testutil.BuildValidatedConwayBlockBytesWithInvalidOpCert(
@@ -297,6 +307,8 @@ func TestDecodeReadChainBatchReturnsRecoverableValidationError(t *testing.T) {
 }
 
 func TestDecodeReadChainBatchRejectsExpiredOpCertWhenEnabled(t *testing.T) {
+	t.Parallel()
+
 	var seed [32]byte
 	seed[0] = 92
 	const slotsPerKesPeriod = uint64(129600)
@@ -321,6 +333,8 @@ func TestDecodeReadChainBatchRejectsExpiredOpCertWhenEnabled(t *testing.T) {
 func TestDecodeReadChainBatchSkipsValidationWithoutCachedNonce(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	var seed [32]byte
 	seed[0] = 93
 	block, vb := buildValidatedTestModelsBlock(t, seed, 19, 100, 1)
@@ -354,6 +368,8 @@ func TestDecodeReadChainBatchSkipsValidationWithoutCachedNonce(
 }
 
 func TestDecodeReadChainBatchMirrorsSerialValidationGates(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name   string
 		mutate func(*LedgerState, models.Block)
@@ -407,6 +423,8 @@ func TestDecodeReadChainBatchMirrorsSerialValidationGates(t *testing.T) {
 }
 
 func TestDecodeReadChainBatchValidatesBlocksWhenEnabled(t *testing.T) {
+	t.Parallel()
+
 	var seed1, seed2 [32]byte
 	seed1[0], seed2[0] = 1, 2
 	const nonceSeed = 7
@@ -442,6 +460,8 @@ func TestDecodeReadChainBatchValidatesBlocksWhenEnabled(t *testing.T) {
 func TestDecodeReadChainBatchValidatesBlockAcrossKesPeriodBoundary(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	var seed [32]byte
 	seed[0] = 9
 	const nonceSeed = 11
@@ -467,6 +487,8 @@ func TestDecodeReadChainBatchValidatesBlockAcrossKesPeriodBoundary(
 }
 
 func TestDecodeReadChainBatchRejectsFailedValidationWhenEnabled(t *testing.T) {
+	t.Parallel()
+
 	var seed [32]byte
 	seed[0] = 3
 	block, vb := buildValidatedTestModelsBlock(t, seed, 7, 100, 1)
@@ -508,6 +530,8 @@ func TestDecodeReadChainBatchRejectsFailedValidationWhenEnabled(t *testing.T) {
 func TestDecodeReadChainBatchDrainsRemainingResultsAfterEarlyFailure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const correctNonceSeed = 20
 	const wrongNonceSeed = 21
 
@@ -576,6 +600,8 @@ func TestDecodeReadChainBatchDrainsRemainingResultsAfterEarlyFailure(
 func TestDecodeReadChainBatchIgnoresValidationOutcomeWhenDisabled(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	var seed [32]byte
 	seed[0] = 4
 	block, vb := buildValidatedTestModelsBlock(t, seed, 7, 100, 1)
@@ -615,6 +641,8 @@ func TestDecodeReadChainBatchIgnoresValidationOutcomeWhenDisabled(
 // serial path -- the acceptance criterion that the resulting chain tip must
 // match between modes for a legitimately valid chain.
 func TestLedgerReadChainIteratorPipelineValidateMatchesSerial(t *testing.T) {
+	t.Parallel()
+
 	var seed1, seed2, seed3 [32]byte
 	seed1[0], seed2[0], seed3[0] = 10, 11, 12
 	const nonceSeed = 42
@@ -696,6 +724,8 @@ func TestLedgerReadChainIteratorPipelineValidateMatchesSerial(t *testing.T) {
 }
 
 func TestBlockPipelineEta0Provider_ReturnsNonceHex(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			{
@@ -723,6 +753,8 @@ func TestBlockPipelineEta0Provider_ReturnsNonceHex(t *testing.T) {
 // state does not cover the slot at all, so it must be classified as deferred
 // rather than as the distinct "covered epoch has no nonce" case.
 func TestBlockPipelineEta0Provider_EmptyCache(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		config: LedgerStateConfig{
 			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
@@ -746,6 +778,8 @@ func TestBlockPipelineEta0Provider_EmptyCache(t *testing.T) {
 // be transient later; the provider must fail rather than inventing a nonce,
 // while preserving the sentinel that lets enforcement defer to admission.
 func TestBlockPipelineEta0Provider_NoNonceForEpoch(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			{

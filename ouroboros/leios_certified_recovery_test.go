@@ -244,6 +244,8 @@ func poisonLeiosFetchBlockTxsSlot(
 func TestFetchEndorserBlockByPointRecyclesDeadConnectionAndFailsOver(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tx, manifestRaw, point, bitmap := leiosCertifiedRecoveryFixture(t, 0x52, 376038)
 	// A second, still-incomplete endorser block, so the duplicate-recycle
 	// assertion below drives a real second fetch after the dead connection is
@@ -410,6 +412,8 @@ func TestFetchEndorserBlockByPointRecyclesDeadConnectionAndFailsOver(
 // be told, because it is the difference between "our peers are broken" and "the
 // certified endorser block is not obtainable from anyone we are connected to".
 func TestFetchEndorserBlockByPointDeclinedByEveryPeer(t *testing.T) {
+	t.Parallel()
+
 	_, _, point, _ := leiosCertifiedRecoveryFixture(t, 0x53, 376039)
 
 	// MsgNoBlock, not MsgNoBlockTxs: only a declined manifest request is a
@@ -508,6 +512,8 @@ func TestFetchEndorserBlockByPointDeclinedByEveryPeer(t *testing.T) {
 // derive from the caller would fall back to the two-minute total budget and
 // park there.
 func TestFetchEndorserBlockByPointHonoursCallerBudget(t *testing.T) {
+	t.Parallel()
+
 	_, manifestRaw, point, _ := leiosCertifiedRecoveryFixture(t, 0x54, 376040)
 
 	stalledConn, _ := newLeiosFetchConversation(
@@ -573,6 +579,80 @@ func TestFetchEndorserBlockByPointHonoursCallerBudget(t *testing.T) {
 		"by-point fetch ignored the cancelled caller context",
 	)
 	require.ErrorIs(t, err, context.Canceled)
+	guard := o.leiosFetchGuardFor(stalledConn.Id())
+	require.Zero(t, guard.consecutiveFailures.Load())
+	require.False(t, guard.inCooldown(time.Now()))
+}
+
+// TestFetchEndorserBlockByPointDeadlineDoesNotCoolDownPeer verifies that a
+// caller deadline is not mistaken for a peer failure. Ledger apply uses
+// deadline-bounded contexts, so this must be covered separately from explicit
+// cancellation: context.DeadlineExceeded is not context.Canceled.
+func TestFetchEndorserBlockByPointDeadlineDoesNotCoolDownPeer(t *testing.T) {
+	t.Parallel()
+
+	_, manifestRaw, point, _ := leiosCertifiedRecoveryFixture(t, 0x56, 376042)
+	stalledConn, _ := newLeiosFetchConversation(
+		t,
+		append(
+			leiosFetchHandshake(),
+			ouroboros_mock.ConversationEntryInput{
+				ProtocolId:  leiosfetch.ProtocolId,
+				MessageType: leiosfetch.MessageTypeBlockRequest,
+			},
+			ouroboros_mock.ConversationEntryOutput{
+				ProtocolId: leiosfetch.ProtocolId,
+				IsResponse: true,
+				Messages: []protocol.Message{
+					leiosfetch.NewMsgBlock(cbor.RawMessage(manifestRaw)),
+				},
+			},
+			ouroboros_mock.ConversationEntryInput{
+				ProtocolId:  leiosfetch.ProtocolId,
+				MessageType: leiosfetch.MessageTypeBlockTxsRequest,
+			},
+		),
+	)
+	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
+	require.True(t, cm.AddConnection(stalledConn, false, "stalled"))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, cm.Stop(ctx))
+	})
+
+	o := newOuroboros(OuroborosConfig{
+		ConnManager: cm,
+		EnableLeios: true,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- o.FetchEndorserBlockByPoint(ctx, point.Slot, point.Hash)
+	}()
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+			return ok && !data.completeTxCache()
+		},
+		2*time.Second,
+		"by-point fetch never reached the stalled transaction request",
+	)
+	testutil.RequireReceive(t, ctx.Done(), 3*time.Second, "caller deadline did not expire")
+
+	err := testutil.RequireReceive(
+		t,
+		done,
+		5*time.Second,
+		"by-point fetch ignored the caller deadline",
+	)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	guard := o.leiosFetchGuardFor(stalledConn.Id())
+	require.Zero(t, guard.consecutiveFailures.Load())
+	require.False(t, guard.inCooldown(time.Now()))
 }
 
 // TestFetchEndorserBlockByPointTxsUnavailableIsNotAnAllPeerDecline covers the
@@ -583,6 +663,8 @@ func TestFetchEndorserBlockByPointHonoursCallerBudget(t *testing.T) {
 func TestFetchEndorserBlockByPointTxsUnavailableIsNotAnAllPeerDecline(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	_, manifestRaw, point, _ := leiosCertifiedRecoveryFixture(t, 0x55, 376041)
 
 	conn, connDone := newLeiosFetchConversation(
@@ -642,6 +724,8 @@ func TestFetchEndorserBlockByPointTxsUnavailableIsNotAnAllPeerDecline(
 func TestFetchEndorserBlockByPointBusyCandidateSuppressesDeclineVerdict(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	_, _, point, _ := leiosCertifiedRecoveryFixture(t, 0x56, 376042)
 
 	decliningConn, decliningDone := newLeiosFetchConversation(
@@ -712,6 +796,8 @@ func TestFetchEndorserBlockByPointBusyCandidateSuppressesDeclineVerdict(
 func TestFetchEndorserBlockByPointDeclineDoesNotEscalateCooldown(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const declines = 3
 	conversation := leiosFetchHandshake()
 	points := make([]ocommon.Point, 0, declines)
