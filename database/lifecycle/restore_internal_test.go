@@ -66,6 +66,9 @@ func newRestoreInternalTestBlock() models.Block {
 // TestSyncDirTreeSyncsEveryDirectory verifies syncDirTree calls syncDir
 // for every directory in a nested tree, including the root itself, and
 // does not call it for regular files.
+// Not t.Parallel: this and the two tests below swap the package-level
+// syncDir seam, which every concurrent Restore in this package would
+// otherwise observe.
 func TestSyncDirTreeSyncsEveryDirectory(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "a", "b"), 0o755))

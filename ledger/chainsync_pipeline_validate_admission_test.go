@@ -33,6 +33,8 @@ import (
 func TestShouldVerifyChainsyncHeaderCryptoKeepsAdmissionGate(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{60}, 0, tamperNone)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.validationEnabled = true
@@ -73,6 +75,8 @@ func TestShouldVerifyChainsyncHeaderCryptoKeepsAdmissionGate(
 func TestHandleEventBlockfetchBlockKeepsAdmissionCryptoWhenPipelineValidates(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{61}, 0, tamperVRFProof)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.validationEnabled = true
@@ -119,6 +123,8 @@ func TestHandleEventBlockfetchBlockKeepsAdmissionCryptoWhenPipelineValidates(
 func TestHandleEventBlockfetchBlockRejectsInvalidOpCertWhenPipelineValidates(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{62}, 0, tamperOpCertSig)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.validationEnabled = true

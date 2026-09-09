@@ -11,6 +11,8 @@ import (
 )
 
 func TestCalculateCertificateDepositUsesPublishedPParams(t *testing.T) {
+	t.Parallel()
+
 	const (
 		firstDeposit  = 2_000_000
 		secondDeposit = 4_000_000

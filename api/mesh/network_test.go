@@ -28,6 +28,8 @@ import (
 )
 
 func TestNetworkList(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 
 	rec := postJSON(t, h, "/network/list", MetadataRequest{})
@@ -45,6 +47,8 @@ func TestNetworkList(t *testing.T) {
 // TestNetworkListMalformedBody documents that /network/list rejects a
 // body that is not a JSON object rather than treating it as empty.
 func TestNetworkListMalformedBody(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 
 	rec := postRaw(t, h, "/network/list", "{not json")
@@ -55,6 +59,8 @@ func TestNetworkListMalformedBody(t *testing.T) {
 }
 
 func TestNetworkOptions(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 
 	rec := postJSON(t, h, "/network/options", NetworkRequest{
@@ -86,6 +92,8 @@ func TestNetworkOptions(t *testing.T) {
 // /network/options enumerates every error a client can encounter, so
 // stable codes stay discoverable.
 func TestNetworkOptionsAdvertisesEveryError(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 
 	rec := postJSON(t, h, "/network/options", NetworkRequest{
@@ -111,6 +119,8 @@ func TestNetworkOptionsAdvertisesEveryError(t *testing.T) {
 }
 
 func TestNetworkStatus(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	tipHash := testHash(0xab)
 	deps.chain.tip = ochainsync.Tip{
@@ -146,7 +156,8 @@ func TestNetworkStatus(t *testing.T) {
 	)
 	require.NotNil(t, resp.SyncStatus)
 	require.NotNil(t, resp.SyncStatus.Synced)
-	require.True(t, *resp.SyncStatus.Synced)
+	// This ledger double does not expose sync progress.
+	require.False(t, *resp.SyncStatus.Synced)
 	require.NotNil(t, resp.Peers)
 	require.Empty(t, resp.Peers)
 }
@@ -155,6 +166,8 @@ func TestNetworkStatus(t *testing.T) {
 // cache is not yet populated: the handler must still return a timestamp
 // derived from genesis rather than failing the request.
 func TestNetworkStatusSlotToTimeFallback(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	deps.ledger.slotToTime = func(uint64) (time.Time, error) {
 		return time.Time{}, errors.New("epoch cache empty")
@@ -183,6 +196,8 @@ func TestNetworkStatusSlotToTimeFallback(t *testing.T) {
 // carries a network identifier: an identifier for another chain or
 // network must fail with a stable 404 rather than being ignored.
 func TestNetworkValidationRejectsUnknownNetwork(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 
 	for _, path := range networkValidatedRoutes() {
@@ -210,6 +225,8 @@ func TestNetworkValidationRejectsUnknownNetwork(t *testing.T) {
 // TestNetworkValidationRequiresIdentifier asserts a missing
 // network_identifier is rejected before any handler-specific work.
 func TestNetworkValidationRequiresIdentifier(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 
 	for _, path := range networkValidatedRoutes() {
@@ -228,6 +245,8 @@ func TestNetworkValidationRequiresIdentifier(t *testing.T) {
 // TestNetworkValidationRejectsMalformedBody asserts malformed JSON is
 // reported as an invalid request on every network-validated route.
 func TestNetworkValidationRejectsMalformedBody(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 
 	for _, path := range networkValidatedRoutes() {

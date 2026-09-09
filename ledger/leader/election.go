@@ -250,26 +250,16 @@ type Election struct {
 	schedules      map[uint64]*Schedule // epoch -> schedule
 	running        bool
 	cancel         context.CancelFunc
-	stopCh         chan struct{} // signals the monitoring goroutine to exit
+	lifecycleCtx   context.Context
+	lifecycleDone  chan struct{} // closes after the generation has drained
 	computeCh      chan uint64   // requests background schedule computation
 	subscriptionId event.EventSubscriberId
 	nonceReadySub  event.EventSubscriberId
 	metrics        *electionMetrics
 
-	// wg tracks epochTransitionLoop, epochNonceReadyLoop,
-	// scheduleComputeLoop, and the ctx-monitor goroutine, so Stop can
-	// actually wait for all of them to exit rather than merely signaling
-	// them (closing stopCh/computeCh, cancelling ctx, unsubscribing) and
-	// returning immediately. A plain signal-and-return was fine when the
-	// only caller was a full process shutdown, but the live database
-	// restore/truncate path (node_lifecycle.go) calls Stop and then
-	// closes/reopens the node's *database.Database/*ledger.LedgerState
-	// while the process keeps running: RefreshScheduleForEpoch (driven by
-	// any of these goroutines) reads stakeProvider/epochProvider, both
-	// bound to whatever ledgerState existed at construction time
-	// (initBlockForger), so a goroutine still in flight when Stop returns
-	// can keep running against it after that ledgerState has already been
-	// closed and replaced.
+	// wg owns only the three worker loops. The cancellation coordinator joins
+	// them before closing lifecycleDone; it must never join itself. Start
+	// cannot reuse this group until the previous generation has drained.
 	wg sync.WaitGroup
 }
 
@@ -323,17 +313,44 @@ func (e *Election) SetPromRegistry(reg prometheus.Registerer) {
 // slot-aligned loop without delay. The next epoch is queued later, once the
 // ledger reports that its nonce has reached the stability cutoff.
 func (e *Election) Start(ctx context.Context) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	return e.start(ctx, nil)
+}
 
-	if e.running {
-		return nil
+// start accepts a test scheduling hook after generation completion, before
+// reacquiring the lifecycle mutex. Production callers always pass nil.
+func (e *Election) start(ctx context.Context, afterWait func()) error {
+	e.mu.Lock()
+	for e.lifecycleDone != nil {
+		if e.running && e.lifecycleCtx.Err() == nil {
+			e.mu.Unlock()
+			return nil
+		}
+		done := e.lifecycleDone
+		e.mu.Unlock()
+		select {
+		case <-done:
+			if afterWait != nil {
+				afterWait()
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		e.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			e.mu.Unlock()
+			return err
+		}
+	}
+	defer e.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	e.cancel = cancel
 	e.running = true
-	e.stopCh = make(chan struct{})
+	e.lifecycleCtx = ctx
+	e.lifecycleDone = make(chan struct{})
 	e.schedules = make(map[uint64]*Schedule)
 	e.computeCh = make(chan uint64, 4)
 
@@ -404,44 +421,15 @@ func (e *Election) Start(ctx context.Context) error {
 		)
 	}
 
-	// Monitor context cancellation to automatically stop.
-	// The goroutine exits when either the context is canceled or Stop() is called.
-	//
-	// Tracked in e.wg (like the three loops above), not left to dangle:
-	// otherwise a completed Stop() could return with this goroutine still
-	// alive, watching the now-defunct ctx/stopCh from this Start generation.
-	// A later Start() on the same *Election creates a new ctx/stopCh, but
-	// does nothing about a stale monitor from a previous generation still
-	// running -- if THAT ctx's parent is ever cancelled afterward, the
-	// stale goroutine would call e.Stop() on the new, currently-running
-	// generation it has no business touching.
-	stopCh := e.stopCh
-	e.wg.Go(func() {
-		select {
-		case <-stopCh:
-			// Stop() was called directly, goroutine should exit.
-			return
-		case <-ctx.Done():
-			// ctx can be canceled either because Stop() itself was called
-			// directly (which always closes stopCh strictly before its
-			// own e.cancel() call below) or because the caller's parent
-			// context died externally -- and since both channels can be
-			// simultaneously ready by the time this select actually runs,
-			// Go may have picked this case even though stopCh is also
-			// already closed. Re-check stopCh, non-blockingly: if it's
-			// already closed, a direct Stop() is the reason ctx died and
-			// must not be re-entered here -- a second, concurrent Stop()
-			// call would deadlock waiting on e.wg for this very goroutine
-			// (now tracked above). Only a genuinely external cancellation
-			// (stopCh still open) should trigger our own Stop() call.
-			select {
-			case <-stopCh:
-				return
-			default:
-			}
-			_ = e.Stop()
-		}
-	})
+	// This coordinator is deliberately outside the worker wait group. It
+	// owns teardown for this generation on either parent cancellation or
+	// Stop, and makes the completion barrier visible only after all workers
+	// have stopped accessing their providers.
+	done := e.lifecycleDone
+	go func() {
+		<-ctx.Done()
+		e.finishStop(done)
+	}()
 
 	e.logger.Info(
 		"leader election started",
@@ -591,45 +579,39 @@ func (e *Election) scheduleComputeLoop(
 	}
 }
 
-// Stop stops the leader election manager, waiting for epochTransitionLoop,
-// epochNonceReadyLoop, and scheduleComputeLoop to actually exit before
-// returning -- not just signaling them to stop. A plain signal-and-return
-// was fine when the only caller was a full process shutdown, but the live
-// database restore/truncate path (node_lifecycle.go) calls Stop and then
-// closes/reopens the node's storage while the process keeps running: see
-// the wg field's doc comment for why a goroutine still in flight when Stop
-// returns is a real use-after-close risk here, not just a benign leak.
+// Stop cancels the current generation and waits for its workers to drain.
+// Every concurrent caller joins the same completion barrier, including after
+// parent cancellation has already marked the generation as stopped.
 func (e *Election) Stop() error {
 	e.mu.Lock()
-
-	if !e.running {
-		e.mu.Unlock()
-		return nil
-	}
-
-	// Signal the monitoring goroutine to exit before canceling context.
-	// This prevents the goroutine from calling Stop() again.
-	if e.stopCh != nil {
-		close(e.stopCh)
-		e.stopCh = nil
-	}
-	// Nil out computeCh so ShouldProduceBlock cannot send after Stop.
-	e.computeCh = nil
-	if e.cancel != nil {
+	done := e.lifecycleDone
+	if done != nil {
+		e.running = false
+		e.computeCh = nil
+		e.schedules = nil
 		e.cancel()
 	}
+	e.mu.Unlock()
+	if done != nil {
+		<-done
+	}
+	return nil
+}
+
+// finishStop belongs exclusively to the captured generation. Start waits for
+// done before replacing any lifecycle state or adding to the worker group.
+func (e *Election) finishStop(done chan struct{}) {
+	e.mu.Lock()
+	e.running = false
+	e.computeCh = nil
+	e.schedules = nil
 	subscriptionId := e.subscriptionId
 	nonceReadySub := e.nonceReadySub
 	e.subscriptionId = 0
 	e.nonceReadySub = 0
-	e.running = false
-	e.schedules = nil
-
 	e.mu.Unlock()
 
-	// Must run with e.mu released: RefreshScheduleForEpoch and
-	// scheduleComputeLoop both take e.mu (RLock), so waiting for them to
-	// exit while still holding the write lock here would deadlock.
+	// Workers take e.mu while refreshing schedules, so join without it.
 	if subscriptionId != 0 {
 		e.eventBus.UnsubscribeAndWait(
 			event.EpochTransitionEventType,
@@ -643,9 +625,13 @@ func (e *Election) Stop() error {
 		)
 	}
 	e.wg.Wait()
-
 	e.logger.Info("leader election stopped", "component", "leader")
-	return nil
+	e.mu.Lock()
+	e.lifecycleDone = nil
+	e.lifecycleCtx = nil
+	e.cancel = nil
+	close(done)
+	e.mu.Unlock()
 }
 
 // RefreshSchedule recalculates the leader schedule for the current epoch.

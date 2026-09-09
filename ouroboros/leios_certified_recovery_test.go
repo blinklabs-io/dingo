@@ -244,6 +244,8 @@ func poisonLeiosFetchBlockTxsSlot(
 func TestFetchEndorserBlockByPointRecyclesDeadConnectionAndFailsOver(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tx, manifestRaw, point, bitmap := leiosCertifiedRecoveryFixture(t, 0x52, 376038)
 	// A second, still-incomplete endorser block, so the duplicate-recycle
 	// assertion below drives a real second fetch after the dead connection is
@@ -410,6 +412,8 @@ func TestFetchEndorserBlockByPointRecyclesDeadConnectionAndFailsOver(
 // be told, because it is the difference between "our peers are broken" and "the
 // certified endorser block is not obtainable from anyone we are connected to".
 func TestFetchEndorserBlockByPointDeclinedByEveryPeer(t *testing.T) {
+	t.Parallel()
+
 	_, _, point, _ := leiosCertifiedRecoveryFixture(t, 0x53, 376039)
 
 	// MsgNoBlock, not MsgNoBlockTxs: only a declined manifest request is a
@@ -508,6 +512,8 @@ func TestFetchEndorserBlockByPointDeclinedByEveryPeer(t *testing.T) {
 // derive from the caller would fall back to the two-minute total budget and
 // park there.
 func TestFetchEndorserBlockByPointHonoursCallerBudget(t *testing.T) {
+	t.Parallel()
+
 	_, manifestRaw, point, _ := leiosCertifiedRecoveryFixture(t, 0x54, 376040)
 
 	stalledConn, _ := newLeiosFetchConversation(
@@ -583,6 +589,8 @@ func TestFetchEndorserBlockByPointHonoursCallerBudget(t *testing.T) {
 // deadline-bounded contexts, so this must be covered separately from explicit
 // cancellation: context.DeadlineExceeded is not context.Canceled.
 func TestFetchEndorserBlockByPointDeadlineDoesNotCoolDownPeer(t *testing.T) {
+	t.Parallel()
+
 	_, manifestRaw, point, _ := leiosCertifiedRecoveryFixture(t, 0x56, 376042)
 	stalledConn, _ := newLeiosFetchConversation(
 		t,
@@ -655,6 +663,8 @@ func TestFetchEndorserBlockByPointDeadlineDoesNotCoolDownPeer(t *testing.T) {
 func TestFetchEndorserBlockByPointTxsUnavailableIsNotAnAllPeerDecline(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	_, manifestRaw, point, _ := leiosCertifiedRecoveryFixture(t, 0x55, 376041)
 
 	conn, connDone := newLeiosFetchConversation(
@@ -714,6 +724,8 @@ func TestFetchEndorserBlockByPointTxsUnavailableIsNotAnAllPeerDecline(
 func TestFetchEndorserBlockByPointBusyCandidateSuppressesDeclineVerdict(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	_, _, point, _ := leiosCertifiedRecoveryFixture(t, 0x56, 376042)
 
 	decliningConn, decliningDone := newLeiosFetchConversation(
@@ -784,6 +796,8 @@ func TestFetchEndorserBlockByPointBusyCandidateSuppressesDeclineVerdict(
 func TestFetchEndorserBlockByPointDeclineDoesNotEscalateCooldown(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const declines = 3
 	conversation := leiosFetchHandshake()
 	points := make([]ocommon.Point, 0, declines)

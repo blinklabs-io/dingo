@@ -50,6 +50,8 @@ func b32(fill byte) []byte { return bytes.Repeat([]byte{fill}, 32) }
 // DReps go Active=false, and pools get a retirement. Rows present in the
 // snapshot are untouched.
 func TestReconcileStaleLedgerState(t *testing.T) {
+	t.Parallel()
+
 	db := newReconcileTestDB(t)
 	store := db.Metadata()
 
@@ -194,6 +196,8 @@ func TestReconcileStaleLedgerState(t *testing.T) {
 // cannot mass-deactivate live state. Completed entities still reconcile in the
 // same pass.
 func TestReconcileSkipsEntitiesWithIncompleteRecording(t *testing.T) {
+	t.Parallel()
+
 	db := newReconcileTestDB(t)
 	store := db.Metadata()
 
@@ -290,6 +294,8 @@ func TestReconcileSkipsEntitiesWithIncompleteRecording(t *testing.T) {
 // This is the small/private-chain case where all rows of that type were spent,
 // deregistered, or retired by the snapshot tip.
 func TestReconcileCompletedEmptyKeySetsAreAuthoritative(t *testing.T) {
+	t.Parallel()
+
 	db := newReconcileTestDB(t)
 	store := db.Metadata()
 
@@ -370,6 +376,8 @@ func TestReconcileCompletedEmptyKeySetsAreAuthoritative(t *testing.T) {
 // TestReconcileStaleLedgerStateEmptyIsNoop ensures reconcile against an empty
 // database (the fresh-bootstrap case) does nothing and does not error.
 func TestReconcileStaleLedgerStateEmptyIsNoop(t *testing.T) {
+	t.Parallel()
+
 	db := newReconcileTestDB(t)
 	keys := newReconcileKeys()
 	require.NoError(t, reconcileStaleLedgerState(
@@ -379,6 +387,8 @@ func TestReconcileStaleLedgerStateEmptyIsNoop(t *testing.T) {
 }
 
 func TestReconcileKeysRejectsMalformedUtxoKey(t *testing.T) {
+	t.Parallel()
+
 	keys := newReconcileKeys()
 	err := keys.addUtxo(bytes.Repeat([]byte{0x11}, 31), 0)
 	require.ErrorContains(t, err, "malformed UTxO reconcile key")
@@ -388,6 +398,8 @@ func TestReconcileKeysRejectsMalformedUtxoKey(t *testing.T) {
 func TestReconcileStaleLedgerStateCanceledBeforeMarkersDoesNotMutate(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newReconcileTestDB(t)
 	store := db.Metadata()
 	staleStake := b28(0xbb)
@@ -416,6 +428,8 @@ func TestReconcileStaleLedgerStateCanceledBeforeMarkersDoesNotMutate(
 }
 
 func TestValidateReconcileImportConfigRequiresCompleteInputs(t *testing.T) {
+	t.Parallel()
+
 	base := ImportConfig{
 		State: &RawLedgerState{
 			Tip:           &SnapshotTip{Slot: 1, BlockHash: b32(0x01)},

@@ -73,6 +73,8 @@ func testIndexedBlock(slot, id uint64, hashByte byte) models.Block {
 }
 
 func TestBlockBySlotReturnsHighestIndexedBlockForSlot(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	const slot = uint64(42)
 
@@ -88,6 +90,8 @@ func TestBlockBySlotReturnsHighestIndexedBlockForSlot(t *testing.T) {
 }
 
 func TestBlockBySlotSkipsStaleSameSlotIndex(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	const slot = uint64(42)
 
@@ -112,6 +116,8 @@ func TestBlockBySlotSkipsStaleSameSlotIndex(t *testing.T) {
 }
 
 func TestBlockPointByIndexDoesNotReadBlockContent(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	block := testIndexedBlock(42, 7, 0x42)
 	require.NoError(t, db.BlockCreate(block, nil))
@@ -131,6 +137,8 @@ func TestBlockPointByIndexDoesNotReadBlockContent(t *testing.T) {
 }
 
 func TestBlockIDByPointLocalBypassesArchiveFallback(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	block := testIndexedBlock(42, 7, 0x42)
 	require.NoError(t, db.BlockCreate(block, nil))
@@ -187,6 +195,8 @@ func TestBlockIDByPointLocalBypassesArchiveFallback(t *testing.T) {
 }
 
 func TestBlockAtOrAfterIndexSkipsSparseIndexes(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	blocks := []models.Block{
 		testIndexedBlock(10, 1, 0x01),
@@ -206,6 +216,8 @@ func TestBlockAtOrAfterIndexSkipsSparseIndexes(t *testing.T) {
 }
 
 func TestBlockAtOrAfterIndexSkipsInvalidIndexMappings(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	olderBlock := testIndexedBlock(10, 1, 0x01)
 	nextBlock := testIndexedBlock(30, 300, 0x03)
@@ -244,6 +256,8 @@ func TestBlockAtOrAfterIndexSkipsInvalidIndexMappings(t *testing.T) {
 // lookup also saved an empty lastEpochBlockNonce here, collapsing the new
 // epoch's nonce to the NeutralNonce identity and failing leader-VRF checks.
 func TestBlockBeforeSlotSkipsSyntheticBlobs(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	realBlock := models.Block{
@@ -285,6 +299,8 @@ func TestBlockBeforeSlotSkipsSyntheticBlobs(t *testing.T) {
 // blobs precede the slot (no real ranking block), BlockBeforeSlot reports
 // ErrBlockNotFound rather than returning a synthetic blob.
 func TestBlockBeforeSlotSyntheticOnlyNotFound(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	ebHash := bytes.Repeat([]byte{0xcc}, 32)
@@ -299,6 +315,8 @@ func TestBlockBeforeSlotSyntheticOnlyNotFound(t *testing.T) {
 // the blob store, so the resolution is a binary search over the block-ID
 // space and every number in the chain must come back as its own block.
 func TestBlockByNumberResolvesEveryIndexedBlock(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	blocks := make([]models.Block, 0, 5)
 	for i := uint64(1); i <= 5; i++ {
@@ -323,6 +341,8 @@ func TestBlockByNumberResolvesEveryIndexedBlock(t *testing.T) {
 // shrinks the upper bound on a missing probe converges into the low range
 // and never finds it.
 func TestBlockByNumberSkipsSparseIndexGap(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ids := []uint64{1, 2, 3, 1000, 1001, 1002}
 	blocks := make([]models.Block, 0, len(ids))
@@ -349,6 +369,8 @@ func TestBlockByNumberSkipsSparseIndexGap(t *testing.T) {
 // object in the bucket, so the bound is resolved by the caller and carried
 // into each search.
 func TestResolveBlockNumberBoundIsSeparableFromTheSearch(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	empty, err := ResolveBlockNumberBound(db)
@@ -389,6 +411,8 @@ func TestResolveBlockNumberBoundIsSeparableFromTheSearch(t *testing.T) {
 // height lookup and every bound resolution on exactly the configurations
 // a production node runs.
 func TestBlockByNumberResolvesCompactBlockMetadata(t *testing.T) {
+	t.Parallel()
+
 	db, err := newTestDatabaseWithRunMode(
 		t,
 		&Config{DataDir: "", StorageMode: types.StorageModeCore},
@@ -440,6 +464,8 @@ func TestBlockByNumberResolvesCompactBlockMetadata(t *testing.T) {
 // rather than a search over an ID space the bound says is empty, which
 // would report the same thing for the wrong reason.
 func TestBlockByNumberBoundedRejectsUnresolvedBound(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	for i := uint64(1); i <= 3; i++ {
 		block := testIndexedBlock(i*10, i, byte(i))
@@ -455,6 +481,8 @@ func TestBlockByNumberBoundedRejectsUnresolvedBound(t *testing.T) {
 // is what lets the bark archive service classify it as a not_found
 // reference instead of failing the whole batch.
 func TestBlockByNumberReportsMissingNumbersAsNotFound(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	_, err := BlockByNumber(db, 1)
