@@ -77,6 +77,8 @@ func testLogger() *slog.Logger {
 }
 
 func TestDecodeReadChainBatchEmptyBatch(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
 	decoded, ok := ls.decodeReadChainBatch(t.Context(), nil)
 	assert.True(t, ok)
@@ -84,6 +86,8 @@ func TestDecodeReadChainBatchEmptyBatch(t *testing.T) {
 }
 
 func TestDecodeReadChainBatchSerialAndPipelineAgree(t *testing.T) {
+	t.Parallel()
+
 	ctx := t.Context()
 	rawBatch := make([]models.Block, 0, 3)
 	for i, slot := range []uint64{10, 20, 30} {
@@ -128,6 +132,8 @@ func TestDecodeReadChainBatchSerialAndPipelineAgree(t *testing.T) {
 }
 
 func TestDecodeReadChainBatchPropagatesDecodeErrorBothModes(t *testing.T) {
+	t.Parallel()
+
 	ctx := t.Context()
 	good, _ := buildDecodableTestBlock(t, 10, 1)
 	bad := models.Block{
@@ -155,6 +161,8 @@ func TestDecodeReadChainBatchPropagatesDecodeErrorBothModes(t *testing.T) {
 }
 
 func TestLedgerReadChainIteratorForwardsDecodeError(t *testing.T) {
+	t.Parallel()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	badPoint := ocommon.Point{
@@ -201,6 +209,8 @@ func TestLedgerReadChainIteratorForwardsDecodeError(t *testing.T) {
 // chain tip (and everything upstream of it) must match with the pipeline
 // enabled and disabled.
 func TestLedgerReadChainIteratorPipelineMatchesSerial(t *testing.T) {
+	t.Parallel()
+
 	block1, point1 := buildDecodableTestBlock(t, 10, 1)
 	block2, point2 := buildDecodableTestBlock(t, 20, 2)
 	block3, point3 := buildDecodableTestBlock(t, 30, 3)
@@ -271,6 +281,8 @@ func TestLedgerReadChainIteratorPipelineMatchesSerial(t *testing.T) {
 // canonical prefix identically whether or not the block-decode pipeline is
 // enabled.
 func TestLedgerReadChainIteratorRollbackTrimMatchesBothModes(t *testing.T) {
+	t.Parallel()
+
 	block1, point1 := buildDecodableTestBlock(t, 10, 1)
 	block2, point2 := buildDecodableTestBlock(t, 20, 2)
 
@@ -339,6 +351,8 @@ func TestLedgerReadChainIteratorRollbackTrimMatchesBothModes(t *testing.T) {
 // noisy. A genuine per-cycle leak, in contrast, grows roughly linearly with
 // the iteration count and is easily distinguished from that noise over many
 // cycles.
+// Not t.Parallel: runtime.NumGoroutine is a process-wide measurement that
+// concurrent tests perturb.
 func TestBlockPipelineLifecycleNoGoroutineLeak(t *testing.T) {
 	const iterations = 20
 
@@ -445,6 +459,8 @@ func buildTaggedRawBlocks(
 // test methodology) rather than depending on a single lucky (or unlucky)
 // scheduling outcome.
 func TestLedgerProcessBlocksRetryDoesNotMixBlocksAcrossAttempts(t *testing.T) {
+	t.Parallel()
+
 	const iterations = 25
 	const attempt1Base, attempt1Size = 100_000, 150
 	const stragglerBase, stragglerSize = 200_000, 300
@@ -598,6 +614,8 @@ func TestLedgerProcessBlocksRetryDoesNotMixBlocksAcrossAttempts(t *testing.T) {
 // actually runs real crypto and its worker goroutines actually do work
 // across the whole Start/Submit/Stop cycle, rather than the pipeline
 // silently skipping validation.
+// Not t.Parallel: runtime.NumGoroutine is a process-wide measurement that
+// concurrent tests perturb.
 func TestBlockPipelineLifecycleNoGoroutineLeakWithValidation(t *testing.T) {
 	const iterations = 20
 
@@ -672,6 +690,8 @@ func TestBlockPipelineLifecycleNoGoroutineLeakWithValidation(t *testing.T) {
 func TestLedgerReadChainIteratorRollbackTrimMatchesValidateEnabled(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	var seed1, seed2 [32]byte
 	seed1[0], seed2[0] = 21, 22
 	const nonceSeed = 55
@@ -756,6 +776,8 @@ func TestLedgerReadChainIteratorRollbackTrimMatchesValidateEnabled(
 // disabled or ManualBlockProcessing), matching every other
 // pipeline-conditional code path in this file.
 func TestDrainBlockPipelineBeforeRollbackNilPipelineNoOp(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
 
 	done := make(chan struct{})
@@ -790,6 +812,8 @@ func TestDrainBlockPipelineBeforeRollbackNilPipelineNoOp(t *testing.T) {
 // drainBlockPipelineBeforeRollback to `if ls.blockPipeline == nil { return
 // } ` (dropping the WaitForDrain call) makes this test fail.
 func TestDrainBlockPipelineBeforeRollbackWaitsForPendingWork(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 25
 
 	var seed0 [32]byte
@@ -877,6 +901,8 @@ func TestDrainBlockPipelineBeforeRollbackWaitsForPendingWork(t *testing.T) {
 func TestProcessChainIteratorRollbackMatchesWithAndWithoutBlockPipeline(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	type outcome struct {
 		err        error
 		chainTip   ochainsync.Tip

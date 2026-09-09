@@ -161,6 +161,8 @@ func createAndAwaitSnapshot(
 // TestCreateSnapshotAndGetSnapshotStatus verifies that CreateSnapshot
 // completes and GetSnapshotStatus reports the same snapshot ID and a real manifest.
 func TestCreateSnapshotAndGetSnapshotStatus(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
@@ -211,6 +213,8 @@ func TestCreateSnapshotAndGetSnapshotStatus(t *testing.T) {
 // TestGetSnapshotStatusUnknownOperationReturnsNotFound verifies that an
 // unrecognized operation ID returns CodeNotFound.
 func TestGetSnapshotStatusUnknownOperationReturnsNotFound(t *testing.T) {
+	t.Parallel()
+
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
 	_, err := h.GetSnapshotStatus(
 		context.Background(),
@@ -225,6 +229,8 @@ func TestGetSnapshotStatusUnknownOperationReturnsNotFound(t *testing.T) {
 // TestCreateSnapshotRejectsConcurrentOperation verifies that
 // CreateSnapshot refuses to start while another operation is already in flight.
 func TestCreateSnapshotRejectsConcurrentOperation(t *testing.T) {
+	t.Parallel()
+
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
 	// Deterministically simulate an in-flight operation rather than
 	// racing a real one, which a tiny test database could complete
@@ -248,6 +254,8 @@ func TestCreateSnapshotRejectsConcurrentOperation(t *testing.T) {
 // TestCreateSnapshotRejectsConcurrentOperation) rather than racing a real
 // one.
 func TestDeleteSnapshotRejectsConcurrentOperation(t *testing.T) {
+	t.Parallel()
+
 	snapshotDir := t.TempDir()
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
 	h.bark.config.SnapshotDir = snapshotDir
@@ -283,6 +291,8 @@ func TestDeleteSnapshotRejectsConcurrentOperation(t *testing.T) {
 // h.busy. Simulates the in-flight operation deterministically, the same
 // way TestDeleteSnapshotRejectsConcurrentOperation does.
 func TestRestoreClaimsBusyBeforeResolvingSource(t *testing.T) {
+	t.Parallel()
+
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
 	h.busy = true
 
@@ -300,6 +310,8 @@ func TestRestoreClaimsBusyBeforeResolvingSource(t *testing.T) {
 // TestRestoreClaimsBusyBeforeResolvingSource's counterpart for
 // VerifySnapshot, which shares the same reordering fix.
 func TestVerifySnapshotClaimsBusyBeforeResolvingSource(t *testing.T) {
+	t.Parallel()
+
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
 	h.busy = true
 
@@ -318,6 +330,8 @@ func TestVerifySnapshotClaimsBusyBeforeResolvingSource(t *testing.T) {
 // claimed, rather than leaking it and permanently blocking every later
 // operation.
 func TestRestoreReleasesBusyWhenSourceResolutionFails(t *testing.T) {
+	t.Parallel()
+
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
 
 	_, err := h.Restore(
@@ -343,6 +357,8 @@ func TestRestoreReleasesBusyWhenSourceResolutionFails(t *testing.T) {
 // TestRestoreReleasesBusyWhenSourceResolutionFails's counterpart for
 // VerifySnapshot, which shares the same reordering fix.
 func TestVerifySnapshotReleasesBusyWhenSourceResolutionFails(t *testing.T) {
+	t.Parallel()
+
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
 
 	_, err := h.VerifySnapshot(
@@ -372,6 +388,8 @@ func TestVerifySnapshotReleasesBusyWhenSourceResolutionFails(t *testing.T) {
 // combination of fields at the RPC level and deferring agreement-checking
 // to dblifecycle.ResolveTarget (dingo#1651 follow-up).
 func TestTruncateRejectsInvalidTarget(t *testing.T) {
+	t.Parallel()
+
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
 
 	_, err := h.Truncate(
@@ -388,6 +406,8 @@ func TestTruncateRejectsInvalidTarget(t *testing.T) {
 // block — per the proto's documented BlockRef contract ("When multiple
 // fields are set, all must agree").
 func TestTruncateAcceptsConsistentCombinedFields(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	var last models.Block
@@ -450,6 +470,8 @@ func TestTruncateAcceptsConsistentCombinedFields(t *testing.T) {
 func TestTruncateRejectsInconsistentCombinedFieldsAsFailedOperation(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	var last models.Block
@@ -502,6 +524,8 @@ func TestTruncateRejectsInconsistentCombinedFieldsAsFailedOperation(
 // TestTruncateAndGetTruncateStatus verifies that Truncate completes and
 // reports the correct number of blocks removed via GetTruncateStatus.
 func TestTruncateAndGetTruncateStatus(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	var last models.Block
@@ -565,6 +589,8 @@ func TestTruncateAndGetTruncateStatus(t *testing.T) {
 // TestGetDatabaseInfoReturnsTipSizeBytesAndBlockCount verifies that
 // GetDatabaseInfo reports the real tip, on-disk size, block count, and oldest slot.
 func TestGetDatabaseInfoReturnsTipSizeBytesAndBlockCount(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	for id := uint64(1); id <= 3; id++ {
@@ -599,6 +625,8 @@ func TestGetDatabaseInfoReturnsTipSizeBytesAndBlockCount(t *testing.T) {
 // TestListSnapshotsReturnsCreatedSnapshotWithLabel verifies that
 // ListSnapshots surfaces a created snapshot's name, description, size, and checksum.
 func TestListSnapshotsReturnsCreatedSnapshotWithLabel(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
@@ -631,6 +659,8 @@ func TestListSnapshotsReturnsCreatedSnapshotWithLabel(t *testing.T) {
 // TestListSnapshotsEmptyWhenNoneTaken verifies that ListSnapshots returns
 // an empty list and no page token when no snapshot has been taken.
 func TestListSnapshotsEmptyWhenNoneTaken(t *testing.T) {
+	t.Parallel()
+
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
 	listResp, err := h.ListSnapshots(
 		context.Background(),
@@ -644,6 +674,8 @@ func TestListSnapshotsEmptyWhenNoneTaken(t *testing.T) {
 // TestListSnapshotsPaginates verifies that ListSnapshots splits results
 // across pages and the second page's token/results are correct.
 func TestListSnapshotsPaginates(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
@@ -681,6 +713,8 @@ func TestListSnapshotsPaginates(t *testing.T) {
 // per-entry problem, discarding the valid entries it had already
 // collected instead of using them.
 func TestListSnapshotsSkipsCorruptedEntryButReturnsOthers(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
@@ -728,6 +762,8 @@ func TestListSnapshotsSkipsCorruptedEntryButReturnsOthers(t *testing.T) {
 func TestListAvailableSnapshotsSkipsCorruptedEntryButReturnsOthers(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
@@ -770,6 +806,8 @@ func TestListAvailableSnapshotsSkipsCorruptedEntryButReturnsOthers(
 // destination-configured case: see database_cloud_test.go for the actual
 // local+cloud merge behavior this RPC exists for.
 func TestListAvailableSnapshotsMirrorsListSnapshots(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
@@ -798,6 +836,8 @@ func TestListAvailableSnapshotsMirrorsListSnapshots(t *testing.T) {
 // TestDeleteSnapshotRemovesItFromTheCatalog verifies that a deleted
 // snapshot no longer appears in a subsequent ListSnapshots call.
 func TestDeleteSnapshotRemovesItFromTheCatalog(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
@@ -830,6 +870,8 @@ func TestDeleteSnapshotRemovesItFromTheCatalog(t *testing.T) {
 // TestDeleteSnapshotUnknownIDReturnsNotFound verifies that deleting a
 // nonexistent snapshot ID returns CodeNotFound.
 func TestDeleteSnapshotUnknownIDReturnsNotFound(t *testing.T) {
+	t.Parallel()
+
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
 	_, err := h.DeleteSnapshot(
 		context.Background(),
@@ -844,6 +886,8 @@ func TestDeleteSnapshotUnknownIDReturnsNotFound(t *testing.T) {
 // TestDeleteSnapshotRejectsPathTraversal verifies that snapshot IDs
 // containing path-traversal or non-leaf segments are rejected as invalid.
 func TestDeleteSnapshotRejectsPathTraversal(t *testing.T) {
+	t.Parallel()
+
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
 	for _, id := range []string{"../../etc", "..", ".", "a/b", ""} {
 		_, err := h.DeleteSnapshot(
@@ -860,6 +904,8 @@ func TestDeleteSnapshotRejectsPathTraversal(t *testing.T) {
 // TestVerifySnapshotSucceedsForValidSnapshot verifies that verifying a
 // freshly created, uncorrupted snapshot completes successfully.
 func TestVerifySnapshotSucceedsForValidSnapshot(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
@@ -914,6 +960,8 @@ func TestVerifySnapshotSucceedsForValidSnapshot(t *testing.T) {
 // TestVerifySnapshotFailsForCorruptedSnapshot verifies that verifying a
 // snapshot with a corrupted blob backup reports a FAILED operation.
 func TestVerifySnapshotFailsForCorruptedSnapshot(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
@@ -995,6 +1043,8 @@ func tamperManifestChecksum(t *testing.T, manifestPath string) {
 // now checks errors.Is against lifecycle.ErrManifestCorrupted first, so a
 // snapshot that IS there but unusable is reported as such.
 func TestVerifySnapshotOfTamperedManifestReturnsDataLoss(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
@@ -1029,6 +1079,8 @@ func TestVerifySnapshotOfTamperedManifestReturnsDataLoss(t *testing.T) {
 // operator could never clean up a corrupted local snapshot directory
 // through this API even though it was still sitting on disk.
 func TestDeleteSnapshotRemovesLocalSnapshotWithCorruptedManifest(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
@@ -1063,6 +1115,8 @@ func TestDeleteSnapshotRemovesLocalSnapshotWithCorruptedManifest(t *testing.T) {
 // TestVerifySnapshotUnknownIDReturnsNotFound verifies that verifying a
 // nonexistent snapshot ID returns CodeNotFound.
 func TestVerifySnapshotUnknownIDReturnsNotFound(t *testing.T) {
+	t.Parallel()
+
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
 	_, err := h.VerifySnapshot(
 		context.Background(),
@@ -1077,6 +1131,8 @@ func TestVerifySnapshotUnknownIDReturnsNotFound(t *testing.T) {
 // TestGetOperationHistoryReturnsPastOperations verifies that a completed
 // snapshot operation appears in the history with the right type and status.
 func TestGetOperationHistoryReturnsPastOperations(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
@@ -1119,6 +1175,8 @@ func TestGetOperationHistoryReturnsPastOperations(t *testing.T) {
 // work) so the cap can be exercised without hundreds of real disk
 // operations.
 func TestOperationsArePrunedOnceOverCap(t *testing.T) {
+	t.Parallel()
+
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
 
 	const total = maxRetainedOperations + 50
@@ -1146,6 +1204,8 @@ func TestOperationsArePrunedOnceOverCap(t *testing.T) {
 // TestGetOperationHistoryFiltersByTypeAndStatus verifies that filtering
 // by a type or status that doesn't match the recorded operation returns nothing.
 func TestGetOperationHistoryFiltersByTypeAndStatus(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
@@ -1178,6 +1238,8 @@ func TestGetOperationHistoryFiltersByTypeAndStatus(t *testing.T) {
 // TestGetOperationHistoryPaginates verifies that operation-history
 // records split across pages the same way ListSnapshots does.
 func TestGetOperationHistoryPaginates(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
@@ -1213,6 +1275,8 @@ func TestGetOperationHistoryPaginates(t *testing.T) {
 // TestCancelOperationUnknownIDReturnsNotFound verifies that cancelling a
 // nonexistent operation ID returns CodeNotFound.
 func TestCancelOperationUnknownIDReturnsNotFound(t *testing.T) {
+	t.Parallel()
+
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
 	_, err := h.CancelOperation(
 		context.Background(),
@@ -1232,6 +1296,8 @@ func TestCancelOperationUnknownIDReturnsNotFound(t *testing.T) {
 // observed deterministically instead of depending on catching the
 // operation mid-flight.
 func TestCancelOperationCancelsContextAndMarksCancelled(t *testing.T) {
+	t.Parallel()
+
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
 	op, ctx, err := h.startOperation(
 		databasev1alpha1.OperationType_OPERATION_TYPE_SNAPSHOT,
@@ -1270,6 +1336,8 @@ func TestCancelOperationCancelsContextAndMarksCancelled(t *testing.T) {
 // storage-driver errors which do not wrap context.Canceled still reflect an
 // accepted cancellation request instead of being mislabeled as failures.
 func TestCancelOperationMarksDriverCancellationErrorCancelled(t *testing.T) {
+	t.Parallel()
+
 	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
 	op, _, err := h.startOperation(
 		databasev1alpha1.OperationType_OPERATION_TYPE_SNAPSHOT,
@@ -1298,6 +1366,8 @@ func TestCancelOperationMarksDriverCancellationErrorCancelled(t *testing.T) {
 // TestCancelOperationOnAlreadyCompletedOperationIsANoOp verifies that
 // cancelling an already-completed operation just reports its COMPLETED status.
 func TestCancelOperationOnAlreadyCompletedOperationIsANoOp(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))

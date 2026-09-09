@@ -33,6 +33,8 @@ import (
 // TestPublishDeliversEveryEventUnderBackpressure is the headline regression:
 // a producer far faster than its subscriber loses nothing.
 func TestPublishDeliversEveryEventUnderBackpressure(t *testing.T) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.nodrop.publish"
 	const eventCount = 5000
 
@@ -79,6 +81,8 @@ func TestPublishDeliversEveryEventUnderBackpressure(t *testing.T) {
 // TestPublishAsyncDeliversEveryEventUnderBackpressure covers the second drop
 // site: the shared async queue. This is the ledger.tx shape from the issue.
 func TestPublishAsyncDeliversEveryEventUnderBackpressure(t *testing.T) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.nodrop.async"
 	const eventCount = 5000
 
@@ -123,6 +127,8 @@ func TestPublishAsyncDeliversEveryEventUnderBackpressure(t *testing.T) {
 // TestPublishAsyncBlocksWhenQueueFull verifies PublishAsync waits for queue
 // capacity instead of returning false and discarding the event.
 func TestPublishAsyncBlocksWhenQueueFull(t *testing.T) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.async.full"
 
 	eb := event.NewEventBus(nil, nil)
@@ -192,6 +198,8 @@ func TestPublishAsyncBlocksWhenQueueFull(t *testing.T) {
 // TestPublishUnblocksOnStop is the shutdown-deadlock regression: a producer
 // parked on a full subscriber must not prevent Stop from completing.
 func TestPublishUnblocksOnStop(t *testing.T) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.backpressure.stop"
 
 	eb := event.NewEventBus(nil, nil)
@@ -234,6 +242,8 @@ func TestPublishUnblocksOnStop(t *testing.T) {
 // TestPublishUnblocksOnUnsubscribe verifies a backpressured producer is
 // released when the slow subscriber goes away.
 func TestPublishUnblocksOnUnsubscribe(t *testing.T) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.backpressure.unsubscribe"
 
 	eb := event.NewEventBus(nil, nil)
@@ -268,6 +278,8 @@ func TestPublishUnblocksOnUnsubscribe(t *testing.T) {
 // TestPublishAsyncUnblocksOnStop covers the same shutdown property for a
 // producer parked on a full async queue.
 func TestPublishAsyncUnblocksOnStop(t *testing.T) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.async.stop.unblock"
 
 	eb := event.NewEventBus(nil, nil)
@@ -320,6 +332,8 @@ func TestPublishAsyncUnblocksOnStop(t *testing.T) {
 // TestCloseCompletesWithBlockedProducers checks the permanent-shutdown path as
 // well as the reusable Stop path.
 func TestCloseCompletesWithBlockedProducers(t *testing.T) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.backpressure.close"
 
 	eb := event.NewEventBus(nil, nil)
@@ -361,6 +375,8 @@ func TestCloseCompletesWithBlockedProducers(t *testing.T) {
 // TestBackpressureMetrics asserts the drop counter is gone and replaced by
 // counters that report waiting instead of loss.
 func TestBackpressureMetrics(t *testing.T) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.metrics.backpressure"
 
 	reg := prometheus.NewRegistry()
@@ -420,6 +436,8 @@ func TestBackpressureMetrics(t *testing.T) {
 // TestAsyncEnqueueBlockedMetric asserts a saturated async queue is reported as
 // waiting rather than as a dropped event.
 func TestAsyncEnqueueBlockedMetric(t *testing.T) {
+	t.Parallel()
+
 	const testEvtType event.EventType = "test.metrics.async"
 
 	reg := prometheus.NewRegistry()

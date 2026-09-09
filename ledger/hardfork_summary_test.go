@@ -38,6 +38,8 @@ func minimalShelleyGenesisCfg(t *testing.T) *cardano.CardanoNodeConfig {
 // TestHardForkSummary_SingleEra verifies the simple case: one era spanning
 // multiple contiguous epochs, built from epochCache alone.
 func TestHardForkSummary_SingleEra(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			{
@@ -99,6 +101,8 @@ func TestHardForkSummary_SingleEra(t *testing.T) {
 // TestHardForkSummary_TwoEras verifies two contiguous eras produce a Summary
 // with the first era bounded and the second (current) era safe-zone bounded.
 func TestHardForkSummary_TwoEras(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			// Byron-ish: EraId=0, 20s slots, 100 slots/epoch
@@ -178,6 +182,8 @@ func TestHardForkSummary_TwoEras(t *testing.T) {
 
 // TestHardForkSummary_EmptyCache errors.
 func TestHardForkSummary_EmptyCache(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		config: LedgerStateConfig{
 			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
@@ -194,6 +200,8 @@ func TestHardForkSummary_EmptyCache(t *testing.T) {
 // genesis, but epoch-cache-only callers (like SlotToEpoch) can still get a
 // meaningful Summary.
 func TestHardForkSummary_MissingShelleyGenesis(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			{
@@ -219,6 +227,8 @@ func TestHardForkSummary_MissingShelleyGenesis(t *testing.T) {
 // TestHardForkSummary_CarriesTransitionInfo ensures the current transitionInfo
 // is reflected in the returned Summary.
 func TestHardForkSummary_CarriesTransitionInfo(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			{
@@ -292,6 +302,8 @@ func TestHardForkSummary_CarriesTransitionInfo(t *testing.T) {
 // first post-boundary epoch stays within the forecast horizon. Reproduces the
 // musashi epoch 6 to 7 wedge in miniature.
 func TestHardForkSummary_KnownTransitionExtendsHeaderHorizon(t *testing.T) {
+	t.Parallel()
+
 	const (
 		epochSize    = uint64(100)
 		startEpoch   = uint64(4)
@@ -373,6 +385,8 @@ func TestHardForkSummary_KnownTransitionExtendsHeaderHorizon(t *testing.T) {
 func TestHardForkSummary_KnownTransitionSuccessorBoundedBySafeZone(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		epochSize     = uint64(100)
 		safeZoneSlots = uint64(250)
@@ -451,6 +465,8 @@ func TestHardForkSummary_KnownTransitionSuccessorBoundedBySafeZone(
 // A shape with non-contiguous era IDs would otherwise fail the successor lookup
 // and silently reuse the current era's ID and params.
 func TestHardForkSummary_KnownTransitionSuccessorByShapeOrder(t *testing.T) {
+	t.Parallel()
+
 	const (
 		knownEpoch   = uint64(7)
 		boundarySlot = uint64(700)
@@ -523,6 +539,8 @@ func TestHardForkSummary_KnownTransitionSuccessorByShapeOrder(t *testing.T) {
 // at or ahead of the tip), one successor already reaches at least tip+safeZone,
 // so there is no gap; a slot beyond the deterministic window is still rejected.
 func TestHardForkSummary_KnownTransitionCoversStabilityWindow(t *testing.T) {
+	t.Parallel()
+
 	const (
 		epochSize  = uint64(100)
 		safeZone   = uint64(250) // spans 2.5 epochs
@@ -599,6 +617,8 @@ func TestHardForkSummary_KnownTransitionCoversStabilityWindow(t *testing.T) {
 func TestHardForkSummary_KnownTransitionRejectsPastSuccessorBound(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		epochSize  = uint64(100)
 		safeZone   = uint64(250)
@@ -667,6 +687,8 @@ func TestHardForkSummary_KnownTransitionRejectsPastSuccessorBound(
 }
 
 func TestHardForkSummary_RejectsSlotPastSafeZone(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			{
@@ -706,6 +728,8 @@ func TestHardForkSummary_RejectsSlotPastSafeZone(t *testing.T) {
 // peer pool during catch-up and deadlocks at epoch boundaries. The error must
 // still carry ErrPastHorizon so the no-apply-past-horizon guard is unchanged.
 func TestHeaderVerificationEpoch_PastHorizonDeferred(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: []models.Epoch{{
 			EpochId:       500,
@@ -734,6 +758,8 @@ func TestHeaderVerificationEpoch_PastHorizonDeferred(t *testing.T) {
 }
 
 func TestHardForkSummary_MainnetForecastBoundary(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name          string
 		tipSlot       uint64
@@ -818,6 +844,8 @@ func TestHardForkSummary_MainnetForecastBoundary(t *testing.T) {
 }
 
 func TestEpochInfoUsesMaterializedEpochPastForecast(t *testing.T) {
+	t.Parallel()
+
 	cfg := minimalShelleyGenesisCfg(t)
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
@@ -867,6 +895,8 @@ func TestEpochInfoUsesMaterializedEpochPastForecast(t *testing.T) {
 func TestHardForkSummary_TransitionImpossibleKeepsLiveForecastRolling(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			{
@@ -898,4 +928,51 @@ func TestHardForkSummary_TransitionImpossibleKeepsLiveForecastRolling(
 	_, err = sum.SlotToEpoch(500)
 	require.NoError(t, err,
 		"a known same-era epoch boundary must remain forecastable")
+}
+
+// TestHardForkSummary_HorizonAnchoredAtAppliedParent is the summary half of the
+// dingo #3844 fix. HardForkSummary measures the safe zone from the published
+// tip, which only advances when a whole block batch commits; the reference
+// implementation measures it from the applied block's immediate predecessor.
+// Because applySafeZone snaps up to an epoch boundary, that difference is not
+// proportional to the staleness: on Preview, 46 slots of lag cost a full epoch
+// of horizon and rejected a canonical Plutus transaction.
+func TestHardForkSummary_HorizonAnchoredAtAppliedParent(t *testing.T) {
+	t.Parallel()
+
+	ls := previewWedgeLedgerState(t)
+
+	sum, err := ls.HardForkSummary()
+	require.NoError(t, err)
+	require.Len(t, sum.Eras, 1)
+	require.NotNil(t, sum.Eras[0].End)
+	assert.Equal(
+		t,
+		uint64(previewTipHorizonSlot),
+		sum.Eras[0].End.Slot,
+		"the published tip must still produce the horizon that wedged the "+
+			"replay; if it does not, the fixture no longer reproduces #3844",
+	)
+
+	anchored, err := ls.hardForkSummaryAnchoredAt(previewParentSlot)
+	require.NoError(t, err)
+	require.Len(t, anchored.Eras, 1)
+	require.NotNil(t, anchored.Eras[0].End)
+	assert.Equal(
+		t,
+		uint64(previewParentHorizon),
+		anchored.Eras[0].End.Slot,
+		"anchoring at the applied block's predecessor must extend the "+
+			"horizon by the epoch the stale tip lost",
+	)
+
+	behind, err := ls.hardForkSummaryAnchoredAt(previewEraStartSlot)
+	require.NoError(t, err)
+	require.NotNil(t, behind.Eras[0].End)
+	assert.Equal(
+		t,
+		uint64(previewTipHorizonSlot),
+		behind.Eras[0].End.Slot,
+		"an anchor behind the published tip must not shrink the horizon",
+	)
 }

@@ -151,6 +151,15 @@ type DingoStateManager struct {
 	// state_manager_mysql.go.
 	wipeMetadata func() error
 
+	// wipeBlob, when set, empties the local blob store in place. It pairs
+	// with wipeMetadata: database.New checks that the blob store's commit
+	// timestamp and the metadata store's agree, so a Reset that emptied one
+	// side and not the other would leave a pairing neither side caused.
+	// Only the sqlite backend sets it -- the remote backends deliberately
+	// share one process-wide blob directory across every vector (see
+	// state_manager_postgres.go's postgresProcessBlobDir).
+	wipeBlob func() error
+
 	// closeExtra, when set, releases backend-scoped resources the manager
 	// owns beyond its database -- currently the long-lived admin connection
 	// backendResetter holds so Reset does not reconnect per vector (see
@@ -205,11 +214,18 @@ func NewDingoStateManager() (*DingoStateManager, error) {
 // survives a restart (see state_manager_backend_test.go); NewDingoStateManager
 // uses it with a manager-owned temp directory.
 func newDingoStateManagerAt(dataDir string) (*DingoStateManager, error) {
-	return newDingoStateManager(realBackendOptions{
+	m, err := newDingoStateManager(realBackendOptions{
 		dataDir:          dataDir,
 		metadataName:     "sqlite",
 		registerMetadata: sqlite.RegisterProvider,
 	})
+	if err != nil {
+		return nil, err
+	}
+	if err := installSqliteResetHooks(m, dataDir); err != nil {
+		return nil, errors.Join(err, m.Close())
+	}
+	return m, nil
 }
 
 // Close releases state-manager resources: the database, its provider host,
@@ -258,18 +274,40 @@ func (m *DingoStateManager) Reset() error {
 	// database/plugin/metadata/postgres's own concurrently running
 	// tests' tables in the shared dingo_test database.
 	//
-	// wipeMetadata (postgres/mysql) truncates every table in this
-	// suite's own schema/database in place, over the live connection
-	// pool, and does not close/reopen the store: a full close-and-reopen
-	// (re-running real migrations) against a remote server is correct
-	// but, at one vector per Reset call across the whole vector suite,
-	// far too slow -- each migration statement is a real network round
-	// trip. sqlite has no wipeMetadata (its Resettable.Reset is a
-	// documented no-op and there's no live schema/database name to
-	// truncate against a shared server), so it always takes the
-	// close-and-reopen path, which is cheap for a local file store.
-	if m.wipeMetadata != nil {
-		return m.wipeMetadata()
+	// wipeMetadata truncates every dirty table in this suite's own
+	// schema/database in place, over the live connection pool, and does not
+	// close/reopen the store: a full close-and-reopen re-runs real
+	// migrations, and at one Reset per vector across the whole corpus that
+	// is far too slow. For postgres/mysql each migration statement is a real
+	// network round trip; for sqlite it is ~260 local DDL statements (80
+	// CREATE TABLE, 180 CREATE INDEX). Measured under -race before this
+	// path existed, sqlite's Reset averaged 712ms with a CPU profile
+	// attributing 76.9% to migrations.Run/execDDL; in place it averages
+	// 12ms, and the package fell from 656s to 178s.
+	//
+	// sqlite pairs wipeMetadata with wipeBlob because it owns its blob
+	// store: the two must be emptied together or database.New's
+	// blob-versus-metadata commit-timestamp check sees a pairing neither
+	// side caused. The remote backends set no wipeBlob -- they share one
+	// process-wide blob directory across every vector by design (see
+	// state_manager_postgres.go).
+	//
+	// reopenBackend remains the fallback for any future backend that sets
+	// neither hook.
+	// The two hooks are checked independently: a backend that sets only one
+	// still gets that half emptied, rather than silently skipping it because
+	// its partner is nil.
+	if m.wipeMetadata != nil || m.wipeBlob != nil {
+		var errs []error
+		if m.wipeMetadata != nil {
+			errs = append(errs, m.wipeMetadata())
+		}
+		// Runs even when wipeMetadata failed: leaving the blob store
+		// populated as well would compound a half-cleared backend.
+		if m.wipeBlob != nil {
+			errs = append(errs, m.wipeBlob())
+		}
+		return errors.Join(errs...)
 	}
 	return m.reopenBackend()
 }
@@ -332,14 +370,33 @@ func (m *DingoStateManager) LoadInitialState(
 	txn := m.db.Transaction(true)
 	defer txn.Release()
 
+	// A vector's initial-state registration has no registration certificate
+	// in this database, which is exactly what an import baseline stands in
+	// for. Seeding it through ImportAccount rather than CreateAccount records
+	// the deposit alongside the account row, so
+	// DingoStateProvider.StakeCredentialDeposit can report the deposit the
+	// credential registered with instead of returning absence and sending
+	// UtxoValidateValueNotConservedUtxo down its KeyDeposit fallback for
+	// every vector.
+	//
+	// The vector's parsed initial state does not carry a per-credential
+	// deposit (ouroboros-mock's state parser keeps only the reward half of
+	// the UMap pair), so the deposit is the KeyDeposit in effect for this
+	// vector -- what a registration at that initial state would have paid,
+	// and the value the corpus documents for these credentials.
+	initialDeposit := m.initialStakeDepositLocked()
 	for credential, balance := range resolveInitialStakeRegistrations(state) {
 		account := &models.Account{
 			StakingKey:    credential.Credential[:],
 			CredentialTag: conformanceCredentialTag(credential.AsCredential()),
 			Active:        true,
 			Reward:        types.Uint64(balance),
+			ImportDeposit: initialDeposit,
 		}
-		if err := m.db.CreateAccount(txn, account); err != nil {
+		if err := m.db.Metadata().ImportAccount(
+			account,
+			txn.Metadata(),
+		); err != nil {
 			return fmt.Errorf("seed account: %w", err)
 		}
 	}
@@ -603,7 +660,9 @@ func (m *DingoStateManager) createUtxo(
 	if err := m.db.CreateUtxo(txn, &utxoModel); err != nil {
 		return fmt.Errorf("create utxo metadata: %w", err)
 	}
-	if blobStore := m.db.Blob(); blobStore != nil {
+	// The transaction's own store, so the handle and the store it is used
+	// with always come from the same installation.
+	if blobStore := txn.BlobStore(); blobStore != nil {
 		if err := blobStore.SetUtxo(
 			txn.Blob(), utxoModel.TxId, utxoModel.OutputIdx,
 			utxo.Output.Cbor(),
@@ -677,6 +736,26 @@ func (m *DingoStateManager) certDepositsFor(
 		}
 	}
 	return deposits
+}
+
+// initialStakeDepositLocked returns the deposit to record for a credential a
+// vector declares as already registered, as *types.Uint64 for
+// models.Account.ImportDeposit. It is the KeyDeposit from the vector's own
+// protocol parameters, or nil when those parameters do not expose one -- nil
+// meaning the recorded deposit is unknown, which correctly sends value
+// conservation back to its KeyDeposit fallback rather than inventing a zero.
+func (m *DingoStateManager) initialStakeDepositLocked() *types.Uint64 {
+	// A typed-nil *conway.ConwayProtocolParameters satisfies the assertion,
+	// so guard the pointer as well -- the same "!ok || nil" shape
+	// ledger/eras uses before dereferencing era parameters. Reporting nil
+	// here is the correct answer anyway: with no usable parameters the
+	// deposit is unknown.
+	conwayPP, ok := m.protocolParams.(*conway.ConwayProtocolParameters)
+	if !ok || conwayPP == nil {
+		return nil
+	}
+	deposit := types.Uint64(conwayPP.KeyDeposit)
+	return &deposit
 }
 
 // depositAmount converts a certificate's signed deposit amount (gouroboros
@@ -1010,6 +1089,8 @@ func (m *DingoStateManager) ProcessEpochBoundary(newEpoch uint64) error {
 		}
 	}
 
+	m.pruneCommitteeResignations()
+
 	// Phase 2: ratify proposals that meet threshold requirements.
 	if err := m.ratifyProposals(txn, newEpoch, boundarySlot); err != nil {
 		return fmt.Errorf("ratify proposals: %w", err)
@@ -1030,6 +1111,37 @@ func (m *DingoStateManager) ProcessEpochBoundary(newEpoch uint64) error {
 	}
 
 	return txn.Commit()
+}
+
+// pruneCommitteeResignations drops the resignation recorded for a cold
+// credential that holds no committee seat in the pre-validation govState
+// mirror.
+//
+// cardano-ledger keeps resignations and hot-key authorizations in one
+// committee credential map and intersects that map with the current
+// committee at every epoch boundary
+// (eras/conway/impl/src/Cardano/Ledger/Conway/Rules/Epoch.hs
+// updateCommitteeState), so a resignation lives exactly as long as the seat
+// it was filed against: a member an UpdateCommittee action removed carries
+// none forward, and a later re-election seats a member that may authorize a
+// hot key again. Without this, a cold credential that resigns once is
+// treated as resigned for the rest of the vector, which rejects that second
+// authorization.
+//
+// Only the resignation is pruned. Hot-key authorizations are left alone
+// because this mirror's simplified ratification (see the ProcessEpochBoundary
+// doc comment) does not seat every member the vectors elect, so intersecting
+// those as well would withdraw voting rights a vector still exercises.
+func (m *DingoStateManager) pruneCommitteeResignations() {
+	for coldKey := range m.govState.CommitteeResignations {
+		if _, ok := m.govState.CommitteeMembersByCredential[coldKey]; ok {
+			continue
+		}
+		if _, ok := m.govState.CommitteeMembers[coldKey.Credential]; ok {
+			continue
+		}
+		delete(m.govState.CommitteeResignations, coldKey)
+	}
 }
 
 // ratifyProposals performs the harness's simplified proposal ratification

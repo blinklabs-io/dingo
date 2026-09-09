@@ -35,6 +35,8 @@ import (
 // a page; reversing only the requested window must produce the identical
 // ordering for a large result set (see dingo/3520).
 func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
+	t.Parallel()
+
 	adapter, raw, db := newDBBackedAdapter(t)
 
 	payment := bytes.Repeat([]byte{0x99}, lcommon.AddressHashSize)
@@ -110,6 +112,8 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 // just the requested page via UtxosByRefs, a different path than before
 // (see dingo/3520) that must not drop asset data along the way.
 func TestNodeAdapterAddressUTXOsAssetsSurviveRefFetch(t *testing.T) {
+	t.Parallel()
+
 	adapter, store, db := newDBBackedAdapter(t)
 
 	payment := bytes.Repeat([]byte{0x33}, lcommon.AddressHashSize)

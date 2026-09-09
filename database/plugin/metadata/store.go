@@ -518,6 +518,33 @@ type GovernanceStore interface {
 		types.Txn,
 	) (uint64, error)
 
+	// GetDrepLastRegistrationDeposit returns the deposit amount recorded
+	// against the most recent registration certificate for the DRep
+	// credential, or 0 when no registration certificate history exists.
+	// The live drep row does not carry a deposit amount (registration and
+	// deregistration certificates supply/refund it, but nothing persists
+	// it on the current-state row), so deregistration-refund validation
+	// must read it from the registration_drep history instead.
+	GetDrepLastRegistrationDeposit(
+		uint8, // credentialTag
+		[]byte, // credential
+		types.Txn,
+	) (*uint64, error)
+
+	// GetDrepLastRegistrationDeposits is the set form of
+	// GetDrepLastRegistrationDeposit over the active DRep set: it returns
+	// the most recent registration deposit of every DRep GetActiveDreps
+	// reports, keyed by models.DrepDepositKey. Credentials with no
+	// registration_drep row are absent from the map, which reads back as
+	// the same 0 the singular form returns. Restricting it to the active
+	// set matches the callers, which are all listing exactly that set, and
+	// keeps the scan from growing with the registration history of DReps
+	// that have since deregistered. Listing them one at a time otherwise
+	// costs one query per DRep.
+	GetDrepLastRegistrationDeposits(
+		types.Txn,
+	) (map[string]uint64, error)
+
 	// CreateDrep inserts a Drep row directly. Used by callers (e.g.
 	// fixture seeding from outside the plugin packages) that already
 	// have a fully-populated model and want a single-row insert without
@@ -609,9 +636,13 @@ type UtxoStore interface {
 	// GetUtxosByAddressWithOrdering). The database layer performs full
 	// exact-address CBOR filtering when ExactAddress is set. An empty
 	// patterns slice returns (nil, nil), matching the coordinated
-	// Database.UtxosByAddress's empty-input handling.
+	// Database.UtxosByAddress's empty-input handling. maxResults is a
+	// required, positive bound on the number of candidate rows returned;
+	// exceeding it yields models.ErrTooManyUtxoResults instead of an
+	// unbounded or silently truncated result.
 	GetUtxosByAddress(
 		[]models.UtxoAddressPattern,
+		int,
 		types.Txn,
 	) ([]models.Utxo, error)
 
@@ -905,7 +936,7 @@ type TransactionStore interface {
 		lcommon.Transaction,
 		ocommon.Point,
 		uint32, // idx
-		map[int]uint64, // certDeposits: indexed by certificate position in tx.Certificates(); absent keys are treated as zero/no deposit
+		map[int]uint64, // certDeposits: indexed by certificate position in tx.Certificates(); an absent key means the deposit is unknown and is stored as NULL, not zero
 		bool, // skipWithdrawalWitness: elide the CIP-0163 account_withdrawal_witness insert (see BatchedTxIngestOpts.SkipWithdrawalWitnessWrite)
 		types.Txn,
 	) error
@@ -1790,6 +1821,16 @@ type MetadataStore interface {
 	// for the requested slot. Callers should use errors.Is() to check.
 	GetActivePoolKeyHashesAtSlot(uint64, types.Txn) ([][]byte, error)
 
+	// GetPoolVrfKeyHashAtSlot returns the VRF key hash the pool had
+	// registered as of a slot, using the same latest-certificate-wins
+	// ordering as GetActivePoolKeyHashesAtSlot. The bool reports whether any
+	// registration exists at or before that slot.
+	GetPoolVrfKeyHashAtSlot(
+		[]byte, // poolKeyHash
+		uint64, // slot
+		types.Txn,
+	) ([]byte, bool, error)
+
 	// GetPoolsRetiringAtEpoch returns the pools whose effective retirement
 	// (the latest retirement not cancelled by a later re-registration, as of
 	// the boundary slot) takes effect at the given epoch, along with the
@@ -1800,6 +1841,37 @@ type MetadataStore interface {
 		boundarySlot uint64,
 		txn types.Txn,
 	) ([]models.PoolRetirementRefund, error)
+
+	// GetPoolEarliestVrfKeyHashAtSlot returns the VRF key hash from the
+	// pool's earliest registration at or before the given slot, which is what
+	// cardano-ledger's psStakePools holds for a pool that first registered
+	// inside the captured epoch: the POOL rule inserts a first registration
+	// directly and defers only a re-registration through
+	// psFutureStakePoolParams. Contrast GetPoolVrfKeyHashAtSlot, which
+	// returns the latest such registration.
+	GetPoolEarliestVrfKeyHashAtSlot(
+		[]byte, // poolKeyHash
+		uint64, // slot
+		types.Txn,
+	) ([]byte, bool, error)
+
+	// GetPoolKeyHashesRetiredByEpoch returns the key hashes of pools whose
+	// effective retirement takes effect at or *before* the given epoch,
+	// under the same cancellation rule GetPoolsRetiringAtEpoch applies: the
+	// pool's latest certificate as of the boundary slot must be a
+	// retirement, so a later re-registration puts the pool back and excludes
+	// it. Where GetPoolsRetiringAtEpoch answers "which pools leave at this
+	// exact boundary" for POOLREAP deposit refunds, this answers "which
+	// pools had already left by this epoch" -- the question the Koios parity
+	// checker asks about an epoch it reaches long after the fact.
+	// pool_registration/pool_retirement are retained for the life of the
+	// database, so this evidence outlives the pool_stake_snapshot retention
+	// window a trailing observer runs behind (dingo #3925).
+	GetPoolKeyHashesRetiredByEpoch(
+		epoch uint64,
+		boundarySlot uint64,
+		txn types.Txn,
+	) ([][]byte, error)
 
 	// GetStakeByPool returns the total delegated stake and delegator count for a pool.
 	// This aggregates all accounts delegated to the pool and sums their UTxO values.
@@ -1945,9 +2017,10 @@ type MetadataStore interface {
 		txn types.Txn,
 	) ([]byte, error)
 
-	// GetLatestBlockNonce returns the block_nonce row with the highest slot.
+	// GetLatestBlockNonce returns the block_nonce row with the highest slot,
+	// using its ID to preserve application order for same-slot rows.
 	// block_nonce is written in the same metadata transaction as a block's
-	// UTxO/certificate effects and the ledger tip, so the maximum slot is the
+	// UTxO/certificate effects and the ledger tip, so the latest row is the
 	// authoritative high-water mark of durably applied ledger state. The bool
 	// is false (with a zero row and nil error) when the table is empty.
 	GetLatestBlockNonce(
@@ -2036,7 +2109,9 @@ type MetadataStore interface {
 	) (int, error)
 
 	// GetAccountSumsByCredential retrieves the aggregated withdrawal, reserves,
-	// and treasury lovelace totals for a stake credential tag/hash pair.
+	// and treasury lovelace totals for a stake credential tag/hash pair. The
+	// withdrawal total is coin and unsigned; the two MIR pot totals are
+	// delta_coin and signed, and are never returned nil.
 	GetAccountSumsByCredential(
 		uint8, // credentialTag
 		[]byte, // stakingKey
@@ -2218,6 +2293,42 @@ type MetadataStore interface {
 		string, // snapshotType
 		types.Txn,
 	) (*models.RewardSnapshot, error)
+
+	// SaveRewardSeedFailure records why an imported reward basis could not be
+	// persisted, allowing the later reward boundary to report the durable cause.
+	SaveRewardSeedFailure(uint64, string, string, uint64, types.Txn) error
+
+	// GetRewardSeedFailure returns the durable imported reward-basis failure,
+	// or an empty string when no failure was recorded.
+	GetRewardSeedFailure(uint64, string, types.Txn) (string, error)
+
+	// DeleteRewardSeedFailure clears a failure after successful seeding or when
+	// the corresponding imported snapshot is rolled back.
+	DeleteRewardSeedFailure(uint64, string, types.Txn) error
+
+	// SaveImportedPoolBlockCounts records the per-pool block counts a bootstrap
+	// snapshot carries for one epoch, which is the only source of pool
+	// performance for an epoch that ended below the trust anchor.
+	SaveImportedPoolBlockCounts([]models.ImportedPoolBlockCount, types.Txn) error
+
+	// SaveImportedEpochBlockTotal records that an epoch's block counts came
+	// from a bootstrap snapshot and the total its per-pool rows sum to. It is
+	// what tells a certified zero-block epoch from an epoch nothing was
+	// imported for, which the per-pool rows alone cannot.
+	SaveImportedEpochBlockTotal(uint64, uint64, uint64, types.Txn) error
+
+	// GetImportedPoolBlockCounts returns an epoch's imported per-pool block
+	// counts keyed by pool key hash, and the epoch total. The bool reports
+	// whether counts were imported for the epoch at all; false means unknown,
+	// which is distinct from every pool minting nothing.
+	GetImportedPoolBlockCounts(
+		uint64,
+		types.Txn,
+	) (map[string]uint64, uint64, bool, error)
+
+	// DeleteImportedPoolBlockCountsForEpoch removes an epoch's imported counts
+	// so a re-import replaces rather than merges into a stale set.
+	DeleteImportedPoolBlockCountsForEpoch(uint64, types.Txn) error
 
 	// DeleteProvisionalRewardSnapshot deletes a non-authoritative reward
 	// snapshot for an epoch and type. Authoritative boundary state is retained.

@@ -62,6 +62,8 @@ import (
 func TestLedgerProcessBlocksFromSourceReturnsNilWhenReaderCloses(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		validationEnabled: true,
 		config: LedgerStateConfig{
@@ -80,6 +82,8 @@ func TestLedgerProcessBlocksFromSourceReturnsNilWhenReaderCloses(
 }
 
 func TestLedgerProcessBlocksFromSourceReturnsReadChainError(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		validationEnabled: true,
 		config: LedgerStateConfig{
@@ -107,6 +111,8 @@ func TestLedgerProcessBlocksFromSourceReturnsReadChainError(t *testing.T) {
 func TestHandleLedgerProcessBlocksErrorLogsPersistentValidationFailure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	haltErr := fmt.Errorf("process block batch: %w", errHaltLedgerPipeline)
 	fatalCalled := false
 	ls := &LedgerState{
@@ -125,6 +131,8 @@ func TestHandleLedgerProcessBlocksErrorLogsPersistentValidationFailure(
 func TestHandleLedgerProcessBlocksErrorDoesNotReportFatalErrors(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fatalCalled := false
 	ls := &LedgerState{
 		config: LedgerStateConfig{
@@ -145,6 +153,8 @@ func TestHandleLedgerProcessBlocksErrorDoesNotReportFatalErrors(
 // It verifies that calculating the stability window is synchronized with
 // concurrent currentEra updates from block processing.
 func TestCalculateStabilityWindowConcurrentCurrentEraAccess(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		currentEra: eras.ShelleyEraDesc,
 		config: LedgerStateConfig{
@@ -189,6 +199,8 @@ func TestCalculateStabilityWindowConcurrentCurrentEraAccess(t *testing.T) {
 }
 
 func TestSecurityParamConcurrentCurrentEraAccess(t *testing.T) {
+	t.Parallel()
+
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 3
@@ -244,6 +256,8 @@ func TestSecurityParamConcurrentCurrentEraAccess(t *testing.T) {
 }
 
 func TestShouldSkipPhase2ValidationForBlockUsesSecurityParam(t *testing.T) {
+	t.Parallel()
+
 	const securityParam uint64 = 37
 	cfg := newTestShelleyGenesisCfg(t)
 	cfg.ShelleyGenesis().SecurityParam = int(securityParam)
@@ -276,6 +290,8 @@ func TestShouldSkipPhase2ValidationForBlockUsesSecurityParam(t *testing.T) {
 }
 
 func TestShouldSkipPhase2ValidationForBlockRequiresSecurityParam(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -348,6 +364,8 @@ func TestShouldSkipConfiguredPhase2ValidationHonorsHistoricalValidation(
 func TestShouldSkipPhase2ValidationForBlockAtCurrentTipRefreshesChainTip(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const securityParam uint64 = 2
 	cfg := newTestShelleyGenesisCfg(t)
 	cfg.ShelleyGenesis().SecurityParam = int(securityParam)
@@ -406,6 +424,8 @@ func TestShouldSkipPhase2ValidationForBlockAtCurrentTipRefreshesChainTip(
 
 // TestCalculateStabilityWindow_ByronEra tests the stability window calculation for Byron era
 func TestCalculateStabilityWindow_ByronEra(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name           string
 		k              int
@@ -480,6 +500,8 @@ func TestCalculateStabilityWindow_ByronEra(t *testing.T) {
 
 // TestCalculateStabilityWindow_ShelleyEra tests the stability window calculation for Shelley+ eras
 func TestCalculateStabilityWindow_ShelleyEra(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name             string
 		k                int
@@ -577,6 +599,8 @@ func TestCalculateStabilityWindow_ShelleyEra(t *testing.T) {
 
 // TestCalculateStabilityWindow_EdgeCases tests edge cases and error conditions
 func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
+	t.Parallel()
+
 	t.Run("Missing Byron genesis returns default", func(t *testing.T) {
 		cfg := &cardano.CardanoNodeConfig{}
 		shelleyGenesisJSON := `{
@@ -719,6 +743,8 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 func TestCalculateStabilityWindow_ActiveSlotsCoefficientEdgeCases(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	t.Run("Very small active slots coefficient", func(t *testing.T) {
 		byronGenesisJSON := `{
 			"protocolConsts": {
@@ -844,6 +870,8 @@ func TestCalculateStabilityWindow_ActiveSlotsCoefficientEdgeCases(
 
 // TestCalculateStabilityWindow_AllEras tests calculation across different eras
 func TestCalculateStabilityWindow_AllEras(t *testing.T) {
+	t.Parallel()
+
 	byronGenesisJSON := `{
 		"protocolConsts": {
 			"k": 432,
@@ -933,6 +961,8 @@ func TestCalculateStabilityWindow_AllEras(t *testing.T) {
 
 // TestCalculateStabilityWindow_Integration tests the function in realistic scenarios
 func TestCalculateStabilityWindow_Integration(t *testing.T) {
+	t.Parallel()
+
 	t.Run("Mainnet-like configuration", func(t *testing.T) {
 		byronGenesisJSON := `{
 			"protocolConsts": {
@@ -1038,6 +1068,8 @@ func TestCalculateStabilityWindow_Integration(t *testing.T) {
 
 // TestCalculateStabilityWindow_LargeValues tests with large but valid values
 func TestCalculateStabilityWindow_LargeValues(t *testing.T) {
+	t.Parallel()
+
 	byronGenesisJSON := `{
 		"protocolConsts": {
 			"k": 432,
@@ -1138,6 +1170,8 @@ func newNonceReadyTestLedgerState(
 }
 
 func TestLedgerStateIsNearTipUsesStabilityWindow(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		config: LedgerStateConfig{
 			CardanoNodeConfig: newNonceReadyTestConfig(t),
@@ -1164,6 +1198,8 @@ func TestLedgerStateIsNearTipUsesStabilityWindow(t *testing.T) {
 func TestSyncProgressDoesNotUseAdmittedQueueAsNetworkHeadAfterRestart(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	activeConnID := testChainsyncConnId(6000, 3091)
 	ls := &LedgerState{
 		config: LedgerStateConfig{
@@ -1202,6 +1238,8 @@ func TestSyncProgressDoesNotUseAdmittedQueueAsNetworkHeadAfterRestart(
 func TestUpstreamSyncTargetRequiresTrustedAdmissionAndActiveGeneration(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connA := testChainsyncConnId(6000, 3092)
 	connB := testChainsyncConnId(6000, 3093)
 	activeConn := connA
@@ -1262,6 +1300,8 @@ func TestUpstreamSyncTargetRequiresTrustedAdmissionAndActiveGeneration(
 }
 
 func TestNextEpochNonceReadyCutoffSlot(t *testing.T) {
+	t.Parallel()
+
 	byronGenesisJSON := `{
 		"protocolConsts": {
 			"k": 432,
@@ -1306,6 +1346,8 @@ func TestNextEpochNonceReadyCutoffSlot(t *testing.T) {
 }
 
 func TestNextEpochNonceReadyEpoch(t *testing.T) {
+	t.Parallel()
+
 	byronGenesisJSON := `{
 		"protocolConsts": {
 			"k": 432,
@@ -1375,6 +1417,8 @@ func TestNextEpochNonceReadyEpoch(t *testing.T) {
 }
 
 func TestComputeNextEpochNonceUsesImportedTipAnchor(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	tipNonce := bytes.Repeat([]byte{0x22}, 32)
@@ -1421,6 +1465,8 @@ func TestComputeNextEpochNonceUsesImportedTipAnchor(t *testing.T) {
 }
 
 func TestNextEpochNonceReadyEpochNotReadyBeforeCutoff(t *testing.T) {
+	t.Parallel()
+
 	byronGenesisJSON := `{
 		"protocolConsts": {
 			"k": 432,
@@ -1490,6 +1536,8 @@ func TestNextEpochNonceReadyEpochNotReadyBeforeCutoff(t *testing.T) {
 }
 
 func TestEmitNextEpochNonceReadyRequiresLedgerTipAtCutoff(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
 
@@ -1514,6 +1562,8 @@ func TestEmitNextEpochNonceReadyRequiresLedgerTipAtCutoff(t *testing.T) {
 }
 
 func TestResetNextEpochNonceReadyAllowsReEmit(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	defer eventBus.Stop()
 
@@ -1542,6 +1592,8 @@ func TestResetNextEpochNonceReadyAllowsReEmit(t *testing.T) {
 }
 
 func TestNextEpochNonceReadyCutoffSlotShortEpoch(t *testing.T) {
+	t.Parallel()
+
 	byronGenesisJSON := `{
 		"protocolConsts": {
 			"k": 432,
@@ -1586,6 +1638,8 @@ func TestNextEpochNonceReadyCutoffSlotShortEpoch(t *testing.T) {
 
 // TestDatabaseWorkerPoolBasic tests basic worker pool functionality
 func TestDatabaseWorkerPoolBasic(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultDatabaseWorkerPoolConfig()
 	config.WorkerPoolSize = 1
 	config.TaskQueueSize = 5
@@ -1618,8 +1672,63 @@ func TestDatabaseWorkerPoolBasic(t *testing.T) {
 	pool.Shutdown(5 * time.Second)
 }
 
+// TestDatabaseWorkerPoolOpFuncPanicReturnsWrappedError proves
+// executeOperation follows the same panic contract as database.Txn.Do: a
+// panic in OpFunc is recovered and delivered on ResultChan as an error
+// wrapping database.ErrTxnPanic, rather than crashing the worker goroutine
+// or leaving the submitter's ResultChan waiting forever.
+func TestDatabaseWorkerPoolOpFuncPanicReturnsWrappedError(t *testing.T) {
+	t.Parallel()
+
+	config := DefaultDatabaseWorkerPoolConfig()
+	config.WorkerPoolSize = 1
+	config.TaskQueueSize = 5
+
+	pool := NewDatabaseWorkerPool(nil, config)
+	require.NotNil(t, pool)
+
+	resultChan := make(chan DatabaseResult, 1)
+	pool.Submit(DatabaseOperation{
+		OpFunc: func(db *database.Database) error {
+			panic("opfunc boom")
+		},
+		ResultChan: resultChan,
+	})
+
+	select {
+	case result := <-resultChan:
+		require.ErrorIs(t, result.Error, database.ErrTxnPanic)
+		require.ErrorContains(t, result.Error, "opfunc boom")
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for operation result")
+	}
+
+	// The pool itself must still be usable after a worker recovers a panic:
+	// its goroutine must have kept running rather than dying with the panic.
+	var executedCount atomic.Int32
+	okResultChan := make(chan DatabaseResult, 1)
+	pool.Submit(DatabaseOperation{
+		OpFunc: func(db *database.Database) error {
+			executedCount.Add(1)
+			return nil
+		},
+		ResultChan: okResultChan,
+	})
+	select {
+	case result := <-okResultChan:
+		require.NoError(t, result.Error)
+		require.Equal(t, int32(1), executedCount.Load())
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for post-panic operation result")
+	}
+
+	pool.Shutdown(5 * time.Second)
+}
+
 // TestDatabaseWorkerPoolInFlightOperations tests that shutdown waits for in-flight operations
 func TestDatabaseWorkerPoolInFlightOperations(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultDatabaseWorkerPoolConfig()
 	config.WorkerPoolSize = 2
 	config.TaskQueueSize = 10
@@ -1676,6 +1785,8 @@ func TestDatabaseWorkerPoolInFlightOperations(t *testing.T) {
 
 // TestDatabaseWorkerPoolShutdownWithErrors tests error handling during shutdown
 func TestDatabaseWorkerPoolShutdownWithErrors(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultDatabaseWorkerPoolConfig()
 	config.WorkerPoolSize = 2
 	config.TaskQueueSize = 10
@@ -1724,6 +1835,8 @@ func TestDatabaseWorkerPoolShutdownWithErrors(t *testing.T) {
 
 // TestDatabaseWorkerPoolQueueFull tests behavior when queue is full
 func TestDatabaseWorkerPoolQueueFull(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultDatabaseWorkerPoolConfig()
 	config.WorkerPoolSize = 1
 	config.TaskQueueSize = 1 // Very small queue
@@ -1752,6 +1865,8 @@ func TestDatabaseWorkerPoolQueueFull(t *testing.T) {
 
 // TestDatabaseWorkerPoolSubmitAfterShutdown tests that submitting after shutdown fails
 func TestDatabaseWorkerPoolSubmitAfterShutdown(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultDatabaseWorkerPoolConfig()
 	config.WorkerPoolSize = 1
 	config.TaskQueueSize = 5
@@ -1785,6 +1900,8 @@ func TestDatabaseWorkerPoolSubmitAfterShutdown(t *testing.T) {
 func TestDatabaseWorkerPoolShutdownDoesNotPanicWithInFlightOperations(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	config := DefaultDatabaseWorkerPoolConfig()
 	config.WorkerPoolSize = 2
 	config.TaskQueueSize = 20
@@ -1836,6 +1953,8 @@ func TestDatabaseWorkerPoolShutdownDoesNotPanicWithInFlightOperations(
 
 // TestDatabaseWorkerPoolConcurrency tests the pool under concurrent load
 func TestDatabaseWorkerPoolConcurrency(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultDatabaseWorkerPoolConfig()
 	config.WorkerPoolSize = 5
 	config.TaskQueueSize = 50
@@ -1872,6 +1991,8 @@ func TestDatabaseWorkerPoolConcurrency(t *testing.T) {
 
 // TestDatabaseWorkerPoolMultipleShutdowns tests that multiple shutdown calls are safe
 func TestDatabaseWorkerPoolMultipleShutdowns(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultDatabaseWorkerPoolConfig()
 	config.WorkerPoolSize = 1
 	config.TaskQueueSize = 5
@@ -1901,6 +2022,8 @@ func TestDatabaseWorkerPoolMultipleShutdowns(t *testing.T) {
 // indefinitely, when an in-flight operation runs longer than the requested
 // drain timeout.
 func TestDatabaseWorkerPoolShutdownTimesOutOnSlowOperation(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultDatabaseWorkerPoolConfig()
 	config.WorkerPoolSize = 1
 	config.TaskQueueSize = 5
@@ -1960,6 +2083,8 @@ func TestDatabaseWorkerPoolShutdownTimesOutOnSlowOperation(t *testing.T) {
 // The current implementation tracks in-flight operations with a
 // mutex-guarded counter and a drained channel Shutdown selects directly, so
 // no goroutine is ever spawned by the timeout path.
+// Not t.Parallel: runtime.NumGoroutine is a process-wide measurement that
+// concurrent tests perturb.
 func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 	t *testing.T,
 ) {
@@ -2031,6 +2156,8 @@ func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 
 // TestDatabaseWorkerPoolResultChannelFull tests handling of full result channels
 func TestDatabaseWorkerPoolResultChannelFull(t *testing.T) {
+	t.Parallel()
+
 	config := DefaultDatabaseWorkerPoolConfig()
 	config.WorkerPoolSize = 1
 	config.TaskQueueSize = 5
@@ -2067,6 +2194,8 @@ func TestDatabaseWorkerPoolResultChannelFull(t *testing.T) {
 // TestTransitionToEra_ReturnsResultWithoutMutating tests that transitionToEra
 // returns computed state without mutating LedgerState fields
 func TestTransitionToEra_ReturnsResultWithoutMutating(t *testing.T) {
+	t.Parallel()
+
 	// Setup: Create genesis configs for the transition
 	byronGenesisJSON := `{
 		"protocolConsts": {
@@ -2171,6 +2300,8 @@ func TestTransitionToEra_ReturnsResultWithoutMutating(t *testing.T) {
 
 // TestTransitionToEra_ChainedTransitions tests multiple era transitions in sequence
 func TestTransitionToEra_ChainedTransitions(t *testing.T) {
+	t.Parallel()
+
 	byronGenesisJSON := `{
 		"protocolConsts": {
 			"k": 432,
@@ -2268,6 +2399,8 @@ func TestTransitionToEra_ChainedTransitions(t *testing.T) {
 func TestTransitionToEraTranslatesConwayGovernanceWhenProtocolAlreadyDijkstra(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	fee := uint(1234)
@@ -2373,6 +2506,8 @@ func TestTransitionToEraTranslatesConwayGovernanceWhenProtocolAlreadyDijkstra(
 // TestEpochRolloverResult_FieldsPopulated tests that EpochRolloverResult
 // contains all expected fields after processEpochRollover
 func TestEpochRolloverResult_FieldsPopulated(t *testing.T) {
+	t.Parallel()
+
 	byronGenesisJSON := `{
 		"protocolConsts": {
 			"k": 432,
@@ -2472,6 +2607,8 @@ func TestEpochRolloverResult_FieldsPopulated(t *testing.T) {
 // does not hold LedgerState lock during database operations.
 // This simulates the scenario that caused the original deadlock.
 func TestEpochRollover_NoDeadlockDuringTransaction(t *testing.T) {
+	t.Parallel()
+
 	byronGenesisJSON := `{
 		"protocolConsts": {
 			"k": 432,
@@ -2601,6 +2738,8 @@ func TestEpochRollover_NoDeadlockDuringTransaction(t *testing.T) {
 // TestEpochRollover_ConcurrentReaders tests that the epoch rollover pattern
 // allows concurrent readers during the transaction phase
 func TestEpochRollover_ConcurrentReaders(t *testing.T) {
+	t.Parallel()
+
 	byronGenesisJSON := `{
 		"protocolConsts": {
 			"k": 432,
@@ -2767,6 +2906,8 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 
 // TestTransitionToEra_ErrorHandling tests error conditions in transitionToEra
 func TestTransitionToEra_ErrorHandling(t *testing.T) {
+	t.Parallel()
+
 	t.Run("invalid era ID returns error", func(t *testing.T) {
 		db, err := dbtest.NewDatabase(t, &database.Config{
 			DataDir: "",
@@ -2819,6 +2960,8 @@ func makeTestPoint(block models.Block) pcommon.Point {
 // blob store, and database.New now requires a non-nil blob store, so a
 // no-blob-store database is no longer constructible.
 func TestCleanupOrphanedBlobs_EmptyBlobStore(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		db: nil, // No database
 		config: LedgerStateConfig{
@@ -2841,6 +2984,8 @@ func TestCleanupOrphanedBlobs_EmptyBlobStore(t *testing.T) {
 
 // TestCleanupOrphanedBlobs_NoOrphans tests cleanup when there are no orphaned blocks
 func TestCleanupOrphanedBlobs_NoOrphans(t *testing.T) {
+	t.Parallel()
+
 	// Create an in-memory database
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: "",
@@ -2874,6 +3019,8 @@ func TestCleanupOrphanedBlobs_NoOrphans(t *testing.T) {
 
 // TestCleanupOrphanedBlobs_WithOrphans tests cleanup when orphaned blocks exist
 func TestCleanupOrphanedBlobs_WithOrphans(t *testing.T) {
+	t.Parallel()
+
 	// Create an in-memory database
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: "",
@@ -2914,6 +3061,8 @@ func TestCleanupOrphanedBlobs_WithOrphans(t *testing.T) {
 
 // TestCleanupOrphanedBlobs_SlotZero tests cleanup behavior when tip is at slot 0
 func TestCleanupOrphanedBlobs_SlotZero(t *testing.T) {
+	t.Parallel()
+
 	// Create an in-memory database
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: "",
@@ -2943,6 +3092,8 @@ func TestCleanupOrphanedBlobs_SlotZero(t *testing.T) {
 func TestIntersectPointsReturnsNoPointsWhenLedgerTipIsEmpty(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -2967,6 +3118,8 @@ func TestIntersectPointsReturnsNoPointsWhenLedgerTipIsEmpty(
 }
 
 func TestLoadMithrilTrustBoundaryLoadsPersistedHash(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	boundaryHash := bytes.Repeat([]byte{0x42}, 32)
 	require.NoError(t, db.SetSyncState(
@@ -2995,6 +3148,8 @@ func TestLoadMithrilTrustBoundaryLoadsPersistedHash(t *testing.T) {
 func TestIntersectPointsIncludesPersistedMithrilBoundaryWhenRecentPointsEmpty(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	boundaryHash := bytes.Repeat([]byte{0x24}, 32)
 	ls := &LedgerState{
@@ -3011,6 +3166,8 @@ func TestIntersectPointsIncludesPersistedMithrilBoundaryWhenRecentPointsEmpty(
 }
 
 func TestIntersectPointsUsesPrimaryChainWhenPrimaryChainIsAhead(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: "",
 	})
@@ -3053,6 +3210,8 @@ func TestIntersectPointsUsesPrimaryChainWhenPrimaryChainIsAhead(t *testing.T) {
 }
 
 func TestIntersectPointsUsesSparseLedgerTipSamples(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: "",
 	})
@@ -3094,6 +3253,8 @@ func TestIntersectPointsUsesSparseLedgerTipSamples(t *testing.T) {
 }
 
 func TestIntersectPointsIncludesMithrilTrustBoundary(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: "",
 	})
@@ -3136,6 +3297,8 @@ func TestIntersectPointsIncludesMithrilTrustBoundary(t *testing.T) {
 }
 
 func TestIntersectPointsSkipsZeroMithrilTrustBoundary(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	blocks := make([]models.Block, 0, 10)
@@ -3165,6 +3328,8 @@ func TestIntersectPointsSkipsZeroMithrilTrustBoundary(t *testing.T) {
 }
 
 func TestIntersectPointsSkipsFutureMithrilTrustBoundary(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	blocks := make([]models.Block, 0, 10)
@@ -3197,6 +3362,8 @@ func TestIntersectPointsSkipsFutureMithrilTrustBoundary(t *testing.T) {
 func TestIntersectPointsSkipsMissingMithrilTrustBoundaryBlock(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	var blocks []models.Block
@@ -3233,6 +3400,8 @@ func TestIntersectPointsSkipsMissingMithrilTrustBoundaryBlock(
 func TestIntersectPointsSkipsMithrilTrustBoundaryOnLookupError(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	blocks := make([]models.Block, 0, 10)
@@ -3272,6 +3441,8 @@ func TestIntersectPointsSkipsMithrilTrustBoundaryOnLookupError(
 }
 
 func TestIntersectPointsUsesCanonicalMithrilTrustBoundary(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	blocks := make([]models.Block, 0, 64)
@@ -3330,6 +3501,8 @@ func TestIntersectPointsUsesCanonicalMithrilTrustBoundary(t *testing.T) {
 func TestAuthoritativeLedgerBlockAtSlotDoesNotRequireMonotonicBlockIDs(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	blocks := make([]models.Block, 0, 64)
@@ -3364,6 +3537,8 @@ func TestAuthoritativeLedgerBlockAtSlotDoesNotRequireMonotonicBlockIDs(
 func TestIntersectPointsKeepsMithrilTrustBoundaryWhenPointListIsFull(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	blocks := make([]models.Block, 0, 10)
@@ -3407,6 +3582,8 @@ func assertNoIntersectPointAtSlot(
 }
 
 func TestIntersectPointsSkipsMissingDenseBlockIndex(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	blocks := make([]models.Block, 0, 40)
@@ -3458,6 +3635,8 @@ func TestIntersectPointsSkipsMissingDenseBlockIndex(t *testing.T) {
 }
 
 func TestChainDensityUsesCardanoNodeFragment(t *testing.T) {
+	t.Parallel()
+
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 3
@@ -3514,6 +3693,8 @@ func TestChainDensityUsesCardanoNodeFragment(t *testing.T) {
 }
 
 func TestLoadTipSeedsChainDensityFromPersistedFragment(t *testing.T) {
+	t.Parallel()
+
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 3
@@ -3569,12 +3750,16 @@ func TestLoadTipSeedsChainDensityFromPersistedFragment(t *testing.T) {
 }
 
 func TestFragmentDensityIgnoresByronEbbBlockNumber(t *testing.T) {
+	t.Parallel()
+
 	assert.InDelta(t, 9.0/100.0, fragmentDensity(100, 10, 0, 0), 1e-12)
 }
 
 func TestReconcilePrimaryChainTipWithLedgerTipPreservesSelectedChain(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: "",
 	})
@@ -3639,6 +3824,8 @@ func babbagePParams(major uint) *babbage.BabbageProtocolParameters {
 }
 
 func TestNewLedgerStateHardForkTransitionUsesConfiguredEraList(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name           string
 		enableDijkstra bool
@@ -3678,6 +3865,8 @@ func TestNewLedgerStateHardForkTransitionUsesConfiguredEraList(t *testing.T) {
 }
 
 func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
+	t.Parallel()
+
 	byronGenesisJSON := `{
 		"protocolConsts": {"k": 432, "protocolMagic": 2},
 		"blockVersionData": {"slotDuration": "20000"}
@@ -3807,6 +3996,8 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 }
 
 func TestPrepareEpochCacheForStartupUsesEmbeddedMainnetConfig(t *testing.T) {
+	t.Parallel()
+
 	cardanoConfig, err := cardano.LoadCardanoNodeConfigWithFallback(
 		"mainnet/config.json",
 		"mainnet",
@@ -3866,6 +4057,8 @@ func newTestEpoch(
 func TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		epochStart = uint64(100_000)
 		epochLen   = uint(432_000)
@@ -3905,6 +4098,8 @@ func TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd(
 func TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		epochStart = uint64(100_000)
 		epochLen   = uint(432_000)
@@ -3942,6 +4137,8 @@ func TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd(
 func TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		epochStart = uint64(100_000)
 		epochLen   = uint(432_000)
@@ -3977,6 +4174,8 @@ func TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch(
 // TestEvaluateTransitionImpossible_NoOpWhenTransitionKnown verifies that
 // evaluateTransitionImpossible does not override a confirmed TransitionKnown.
 func TestEvaluateTransitionImpossible_NoOpWhenTransitionKnown(t *testing.T) {
+	t.Parallel()
+
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
 		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
@@ -4007,6 +4206,8 @@ func TestEvaluateTransitionImpossible_NoOpWhenTransitionKnown(t *testing.T) {
 // TestEvaluateTransitionImpossible_NoOpAlreadyImpossible verifies that the
 // call is idempotent when TransitionImpossible is already set.
 func TestEvaluateTransitionImpossible_NoOpAlreadyImpossible(t *testing.T) {
+	t.Parallel()
+
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
 		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
@@ -4034,6 +4235,8 @@ func TestEvaluateTransitionImpossible_NoOpAlreadyImpossible(t *testing.T) {
 // TestEvaluateTransitionImpossible_NoOpWhenEpochLengthZero verifies that a
 // zero LengthInSlots (uninitialized epoch) is skipped safely.
 func TestEvaluateTransitionImpossible_NoOpWhenEpochLengthZero(t *testing.T) {
+	t.Parallel()
+
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
 		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
@@ -4106,6 +4309,8 @@ func newTestLedgerStateWithTrigger(
 // TestShelleyHardForkAtEpoch=5, and the current epoch before 5, the
 // TransitionInfo is surfaced as TransitionKnown(5).
 func TestEvaluateTriggerAtEpoch_SetsTransitionKnown(t *testing.T) {
+	t.Parallel()
+
 	target := uint64(5)
 	ls := newTestLedgerStateWithTrigger(
 		t,
@@ -4120,6 +4325,8 @@ func TestEvaluateTriggerAtEpoch_SetsTransitionKnown(t *testing.T) {
 
 // Without ExperimentalHardForksEnabled, the override is inert.
 func TestEvaluateTriggerAtEpoch_InertWithoutExperimentalFlag(t *testing.T) {
+	t.Parallel()
+
 	target := uint64(5)
 	ls := newTestLedgerStateWithTrigger(
 		t,
@@ -4135,6 +4342,8 @@ func TestEvaluateTriggerAtEpoch_InertWithoutExperimentalFlag(t *testing.T) {
 // When currentEpoch.EpochId >= target epoch, the trigger is not applied
 // (the transition should have already occurred).
 func TestEvaluateTriggerAtEpoch_NotSetWhenEpochReached(t *testing.T) {
+	t.Parallel()
+
 	target := uint64(5)
 	ls := newTestLedgerStateWithTrigger(
 		t,
@@ -4149,6 +4358,8 @@ func TestEvaluateTriggerAtEpoch_NotSetWhenEpochReached(t *testing.T) {
 // The last known era has no successor: the call is a no-op even if
 // Test<Next>HardForkAtEpoch happens to be set (not meaningful).
 func TestEvaluateTriggerAtEpoch_NoOpOnFinalEra(t *testing.T) {
+	t.Parallel()
+
 	target := uint64(100)
 	ls := newTestLedgerStateWithTrigger(
 		t,
@@ -4166,6 +4377,8 @@ func TestEvaluateTriggerAtEpoch_NoOpOnFinalEra(t *testing.T) {
 // authoritative info about a known upcoming transition and must override the
 // safe-zone-derived "no transition in this epoch" verdict.
 func TestEvaluateTriggerAtEpoch_OverridesTransitionImpossible(t *testing.T) {
+	t.Parallel()
+
 	target := uint64(10)
 	ls := newTestLedgerStateWithTrigger(
 		t,
@@ -4182,6 +4395,8 @@ func TestEvaluateTriggerAtEpoch_OverridesTransitionImpossible(t *testing.T) {
 // Mirrors Haskell's shelleyTriggerHardFork short-circuit: the AtEpoch config
 // is the truth and bypasses pparams-vote inspection entirely.
 func TestEvaluateTriggerAtEpoch_ReplacesDifferentKnownEpoch(t *testing.T) {
+	t.Parallel()
+
 	target := uint64(10)
 	ls := newTestLedgerStateWithTrigger(
 		t,
@@ -4197,6 +4412,8 @@ func TestEvaluateTriggerAtEpoch_ReplacesDifferentKnownEpoch(t *testing.T) {
 
 // Idempotent when already TransitionKnown at the same epoch.
 func TestEvaluateTriggerAtEpoch_IdempotentOnSameEpoch(t *testing.T) {
+	t.Parallel()
+
 	target := uint64(10)
 	ls := newTestLedgerStateWithTrigger(
 		t,
@@ -4211,6 +4428,8 @@ func TestEvaluateTriggerAtEpoch_IdempotentOnSameEpoch(t *testing.T) {
 
 // No override configured at all: evaluateTriggerAtEpoch is a no-op.
 func TestEvaluateTriggerAtEpoch_NoOpWithoutOverride(t *testing.T) {
+	t.Parallel()
+
 	ls := newTestLedgerStateWithTrigger(
 		t,
 		eras.ByronEraDesc.Id, 3,
@@ -4225,6 +4444,8 @@ func TestEvaluateTriggerAtEpoch_NoOpWithoutOverride(t *testing.T) {
 // rollover (no HardFork, no era transition) resets TransitionImpossible to
 // TransitionUnknown so the new epoch starts fresh.
 func TestRolloverCommit_ResetsTransitionImpossible(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		currentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		currentPParams: babbagePParams(9),
@@ -4280,6 +4501,8 @@ func TestRolloverCommit_ResetsTransitionImpossible(t *testing.T) {
 // when called outside of any epoch-rollover context (the "standalone
 // era-transition block" case).
 func TestApplyEraTransition_ClearsTransitionKnown(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		currentEra:     requireEraDesc(t, eras.BabbageEraDesc.Id),
 		currentPParams: babbagePParams(8),
@@ -4306,6 +4529,8 @@ func TestApplyEraTransition_ClearsTransitionKnown(t *testing.T) {
 // applyEraTransition when transitionInfo is already TransitionUnknown is a
 // no-op for the State field (still TransitionUnknown).
 func TestApplyEraTransition_ClearsTransitionUnknown(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		currentEra:     requireEraDesc(t, eras.BabbageEraDesc.Id),
 		currentPParams: babbagePParams(8),
@@ -4328,6 +4553,8 @@ func TestApplyEraTransition_ClearsTransitionUnknown(t *testing.T) {
 // applyEraTransition correctly rotates currentPParams → prevEraPParams
 // and installs result.NewPParams / result.NewEra.
 func TestApplyEraTransition_PreservesAndUpdatesFields(t *testing.T) {
+	t.Parallel()
+
 	oldPParams := babbagePParams(8)
 	newPParams := babbagePParams(9)
 
@@ -4360,6 +4587,8 @@ func TestApplyEraTransition_PreservesAndUpdatesFields(t *testing.T) {
 // transition case (e.g. jumping two eras at once): each step clears
 // transitionInfo, and the final state is TransitionUnknown.
 func TestApplyEraTransition_MultipleSteps_AllCleared(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		currentEra:     requireEraDesc(t, eras.AlonzoEraDesc.Id),
 		currentPParams: babbagePParams(6),
@@ -4393,6 +4622,8 @@ func TestApplyEraTransition_MultipleSteps_AllCleared(t *testing.T) {
 // precedence: TransitionKnown is cleared even when rolloverResult.HardFork
 // is also set (should not happen in practice, but the logic must be safe).
 func TestRolloverCommit_EraTransitionClearsTransitionInfo(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		currentEra:     requireEraDesc(t, eras.BabbageEraDesc.Id),
 		currentPParams: babbagePParams(8),
@@ -4444,6 +4675,8 @@ func TestRolloverCommit_EraTransitionClearsTransitionInfo(t *testing.T) {
 // TransitionKnown is set when rolloverResult.HardFork is non-nil and no era
 // transition happened (the normal epoch-boundary version-bump window).
 func TestRolloverCommit_HardForkWithoutEraTransition(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		currentEra:     requireEraDesc(t, eras.BabbageEraDesc.Id),
 		currentPParams: babbagePParams(8),
@@ -4489,6 +4722,8 @@ func TestRolloverCommit_HardForkWithoutEraTransition(t *testing.T) {
 // TestRolloverCommit_NoHardFork_TransitionInfoUnchanged verifies that a plain
 // epoch rollover (no HardFork, no era transition) leaves transitionInfo alone.
 func TestRolloverCommit_NoHardFork_TransitionInfoUnchanged(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		currentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		currentPParams: babbagePParams(9),
@@ -4524,6 +4759,8 @@ func TestRolloverCommit_NoHardFork_TransitionInfoUnchanged(t *testing.T) {
 }
 
 func TestLatestOpCertSequenceTracksHighestObservedAndRollback(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
 
@@ -4569,6 +4806,8 @@ func TestLatestOpCertSequenceTracksHighestObservedAndRollback(t *testing.T) {
 }
 
 func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
 
@@ -4634,6 +4873,8 @@ func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
 func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	certified, err := cbor.Encode(true)
 	require.NoError(t, err)
@@ -4693,6 +4934,8 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	txCbor, err := cbor.Encode([]any{
 		map[uint]any{2: uint64(0)},
@@ -4784,6 +5027,8 @@ func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
 // its own. Without it that transition batch could still recover an unapplied
 // producer from the blob store.
 func TestStrictConsumedInputsEnabled(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name           string
 		shouldValidate bool
@@ -4839,6 +5084,8 @@ func TestStrictConsumedInputsEnabled(t *testing.T) {
 func TestLogLeiosEndorserBlockApplyResultDistinguishesEmptyBlock(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		applyTxs bool
@@ -4979,6 +5226,8 @@ func TestCloseReturnsErrorWhenBlockProcessingPipelineDoesNotStopInTime(
 // The invariant is asserted directly -- the mutex must be acquirable *while*
 // Close is parked in the wait -- rather than by having a queued worker finish,
 // which passes whether or not Close ever held the mutex.
+// Not t.Parallel: this and the other Close* tests below swap the package-level
+// Close*Timeout tunables.
 func TestCloseDoesNotHoldBlockfetchContinuationMutexWhileWaiting(t *testing.T) {
 	origTimeout := CloseBlockfetchDrainTimeout
 	// Generous: the worker is released only after the assertion below, so this
@@ -5051,6 +5300,8 @@ func TestCloseDoesNotHoldBlockfetchContinuationMutexWhileWaiting(t *testing.T) {
 // processBlocksCancel's child context, not ctx directly, is what Start
 // wires ledgerProcessBlocks to run against.
 func TestCloseWaitsForBlockProcessingPipelineToActuallyStop(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := &LedgerState{
 		db:         db,
@@ -5078,6 +5329,17 @@ func TestCloseWaitsForBlockProcessingPipelineToActuallyStop(t *testing.T) {
 	default:
 		t.Fatal("Close returned without processCtx actually being cancelled")
 	}
+}
+
+func TestCloseReplayReturnsWhenPreviousCloseIsStillRunning(t *testing.T) {
+	origTimeout := CloseResultReplayTimeout
+	CloseResultReplayTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { CloseResultReplayTimeout = origTimeout })
+
+	ls := &LedgerState{closeDone: make(chan struct{})}
+	err := ls.Close()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "previous ledger state close still in progress")
 }
 
 // TestCloseStopsDecodePipelineBeforeWaitingForBlockProcessing covers the
@@ -5126,6 +5388,8 @@ func TestCloseStopsDecodePipelineBeforeWaitingForBlockProcessing(t *testing.T) {
 func TestReconstructTransitionInfoIgnoresStaleShelleyPParamsUnderByron(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	shelleyPParams := &shelley.ShelleyProtocolParameters{
 		ProtocolMajor: 2,
 		ProtocolMinor: 0,
@@ -5156,6 +5420,8 @@ func TestReconstructTransitionInfoIgnoresStaleShelleyPParamsUnderByron(
 // carries the fix. The warning is the only signal, so it needs to fire exactly
 // on that shape.
 func TestWarnOnPreByronPrefixEpochCache(t *testing.T) {
+	t.Parallel()
+
 	byronGenesisJSON := `{
 		"protocolConsts": {"k": 432, "protocolMagic": 2},
 		"blockVersionData": {"slotDuration": "20000"}

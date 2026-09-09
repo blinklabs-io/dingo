@@ -91,6 +91,8 @@ func newHandleConnManagerClosedTestNode(t *testing.T) *Node {
 func TestHandleConnManagerClosed_NtC_ReleasesChainsyncClientState(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	n := newHandleConnManagerClosedTestNode(t)
 	connId := newNtCTestConnId(1)
 
@@ -116,6 +118,8 @@ func TestHandleConnManagerClosed_NtC_ReleasesChainsyncClientState(
 // for isNtC=false, an NtN close would race two independent RemoveClient
 // calls instead of exactly one.
 func TestHandleConnManagerClosed_NtN_LeavesStateForEventBusPath(t *testing.T) {
+	t.Parallel()
+
 	n := newHandleConnManagerClosedTestNode(t)
 	connId := newNtCTestConnId(2)
 
@@ -136,6 +140,8 @@ func TestHandleConnManagerClosed_NtN_LeavesStateForEventBusPath(t *testing.T) {
 // window (node_lifecycle.go nils n.chainsyncState while rebuilding it) so a
 // late NtC close callback cannot panic.
 func TestHandleConnManagerClosed_NilChainsyncState(t *testing.T) {
+	t.Parallel()
+
 	n := &Node{}
 	require.NotPanics(t, func() {
 		n.handleConnManagerClosed(newNtCTestConnId(3), true, nil)
@@ -155,6 +161,8 @@ func TestHandleConnManagerClosed_NilChainsyncState(t *testing.T) {
 // manager, so the waiter passes the liveness check the same way a live serve
 // does.
 func TestHandleConnManagerClosed_NtC_ReleasesLeiosServeWaiters(t *testing.T) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	n := newHandleConnManagerClosedTestNode(t)
 	bus := event.NewEventBus(nil, logger)
@@ -228,6 +236,8 @@ func TestHandleConnManagerClosed_NtC_ReleasesLeiosServeWaiters(t *testing.T) {
 // TestHandleConnManagerClosed_NilChainsyncState for the added ouroboros
 // dereference: n.ouroboros() is nil before Run wires it.
 func TestHandleConnManagerClosed_NilOuroboros(t *testing.T) {
+	t.Parallel()
+
 	n := newHandleConnManagerClosedTestNode(t)
 	require.Nil(t, n.ouroboros())
 	require.NotPanics(t, func() {

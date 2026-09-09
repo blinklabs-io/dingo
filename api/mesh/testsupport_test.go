@@ -126,6 +126,10 @@ func (f *fakeLedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
 	return f.pparams
 }
 
+func (f *fakeLedgerState) GetCurrentPParamsForReporting() lcommon.ProtocolParameters {
+	return f.pparams
+}
+
 func (f *fakeLedgerState) SlotToTime(
 	slot uint64,
 ) (time.Time, error) {

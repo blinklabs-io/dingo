@@ -23,6 +23,8 @@ import (
 )
 
 func TestWithSocketDeadlinesOnlyWrapsTCP(t *testing.T) {
+	t.Parallel()
+
 	left, right := net.Pipe()
 	defer left.Close()
 	defer right.Close()
@@ -33,6 +35,8 @@ func TestWithSocketDeadlinesOnlyWrapsTCP(t *testing.T) {
 }
 
 func TestDeadlineConnRefreshesWriteDeadline(t *testing.T) {
+	t.Parallel()
+
 	base := &recordingConn{}
 	wrapped := &deadlineConn{Conn: base, timeout: socketIdleTimeout}
 	before := time.Now()
@@ -58,6 +62,8 @@ func TestDeadlineConnRefreshesWriteDeadline(t *testing.T) {
 // that protocol-managed deadline and let a peer dribbling bytes hold a segment
 // read open forever, so the wrapper must not touch read deadlines.
 func TestDeadlineConnLeavesReadDeadlineToTheMuxer(t *testing.T) {
+	t.Parallel()
+
 	base := &recordingConn{}
 	wrapped := &deadlineConn{Conn: base, timeout: socketIdleTimeout}
 
@@ -84,6 +90,8 @@ func TestDeadlineConnLeavesReadDeadlineToTheMuxer(t *testing.T) {
 }
 
 func TestHandshakeDeadlineConnCapsMuxerReadDeadline(t *testing.T) {
+	t.Parallel()
+
 	base := &recordingConn{}
 	wrapped := withHandshakeDeadline(base)
 	handshakeDeadline := time.Now().Add(time.Second)
@@ -118,6 +126,8 @@ func TestHandshakeDeadlineConnCapsMuxerReadDeadline(t *testing.T) {
 // accepted connections and reintroduce TIME_WAIT saturation of the reused
 // outbound source port.
 func TestEnableTCPLingerZeroThroughDeadlineWrapper(t *testing.T) {
+	t.Parallel()
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -154,6 +164,8 @@ func TestEnableTCPLingerZeroThroughDeadlineWrapper(t *testing.T) {
 }
 
 func TestUnwrapConnReachesBaseConn(t *testing.T) {
+	t.Parallel()
+
 	base := &recordingConn{}
 	if got := unwrapConn(base); got != net.Conn(base) {
 		t.Fatal("an unwrapped connection should be returned as-is")

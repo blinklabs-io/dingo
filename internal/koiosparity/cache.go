@@ -126,6 +126,59 @@ type KoiosTotals struct {
 	ReservesWithdrawal string
 }
 
+// KoiosEpochParams holds the Koios /epoch_params reference row for one epoch
+// (dingo #3931). Every value is stored as the literal text Koios published,
+// with "" meaning the parameter is not defined in that epoch's era — never
+// zero. Rationals therefore keep Koios's decimal/exponent form ("0.0577",
+// "7.21e-05") and are reconciled against Dingo's exact num/denom form by
+// rationalsEqual in CompareEpochProtocolParams, so neither side is rounded.
+type KoiosEpochParams struct {
+	ID      uint
+	Network string
+	Epoch   uint64
+	Era     string
+
+	MinFeeA            string
+	MinFeeB            string
+	MaxBlockBodySize   string // Koios max_block_size
+	MaxTxSize          string
+	MaxBlockHeaderSize string // Koios max_bh_size
+	KeyDeposit         string
+	PoolDeposit        string
+	MaxEpoch           string
+	NOpt               string // Koios optimal_pool_count
+	A0                 string // Koios influence
+	Rho                string // Koios monetary_expand_rate
+	Tau                string // Koios treasury_growth_rate
+	ProtocolMajor      string
+	ProtocolMinor      string
+	MinPoolCost        string
+
+	PriceMem             string
+	PriceStep            string
+	MaxTxExMem           string
+	MaxTxExSteps         string
+	MaxBlockExMem        string
+	MaxBlockExSteps      string
+	MaxValueSize         string // Koios max_val_size
+	CollateralPercentage string // Koios collateral_percent
+	MaxCollateralInputs  string
+
+	// CostModels is the per-language Plutus operation prices as canonical
+	// JSON ({"PlutusV1":[...],"PlutusV2":[...]}, keys sorted by
+	// encoding/json). "" means Koios published none, which is what every
+	// pre-Alonzo era reports.
+	CostModels string
+
+	FetchedAt time.Time
+
+	// Remaining fields are stored for reference but are NOT compared — see
+	// CompareEpochProtocolParams for each exclusion and its reason.
+	Decentralisation string
+	MinUtxoValue     string
+	CoinsPerUtxoSize string
+}
+
 // KoiosAccountRewards holds one Koios /account_reward_history reference row
 // for (network, epoch, stake_address, reward_type) — issue #3097's
 // per-account exact-parity comparison consumes this. RewardType is part of
@@ -241,6 +294,27 @@ func OpenCache(path string, logger *slog.Logger) (*Cache, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open cache db: %w", err)
 	}
+	// Every Cache write path opens its transaction with c.db.Begin(), which
+	// is DEFERRED: SQLite still treats the very first statement of a write
+	// transaction as write-intending even when it matches zero rows (e.g.
+	// SaveAccountFetchChunkProgress's opening DELETEs on a brand-new chunk),
+	// and grabs SQLite's single per-database WAL writer slot right there —
+	// for the rest of the transaction, not just its final COMMIT. Left
+	// unbounded, database/sql hands accountFetchConcurrency's concurrent
+	// chunk workers (fetch_accounts.go) distinct connections that genuinely
+	// contend for that one slot; busy_timeout=5000 only covers a wait
+	// shorter than 5s; five real chunk workers' large-chunk Prepare/Exec
+	// work can collectively outlast that and fail with SQLITE_BUSY /
+	// "database is locked" (dingo #4091). Restricting the pool to one
+	// connection makes database/sql itself queue every caller for that
+	// single connection with no fixed budget, so a writer already in
+	// progress is always waited out rather than timed out on. This also
+	// serializes the cache's own reads behind any in-flight write — the
+	// cache is a process-local comparison scratch file, not a
+	// high-throughput read service, so that tradeoff is preferred over a
+	// second unbounded connection. It has no effect on dingo_db.go's
+	// separate *sql.DB against Dingo's own node database.
+	db.SetMaxOpenConns(1)
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping cache db: %w", err)
@@ -250,8 +324,11 @@ func OpenCache(path string, logger *slog.Logger) (*Cache, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("enable WAL: %w", err)
 	}
-	// Busy timeout prevents concurrent writers from failing immediately with
-	// "database is locked"; 5 s is sufficient for the parallel check workers.
+	// busy_timeout remains as a defensive backstop (e.g. a lingering
+	// external reader/writer against the same file), not the mechanism this
+	// package relies on for its own internal write concurrency — that is
+	// now SetMaxOpenConns(1) above, since a single-connection pool never
+	// gives SQLite two callers to contend with in the first place.
 	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("set busy timeout: %w", err)
@@ -448,6 +525,93 @@ func (c *Cache) GetTotals(network string, epoch uint64) (*KoiosTotals, error) {
 		return nil, err
 	}
 	return &totals, nil
+}
+
+// epochParamsColumns is the column list shared by UpsertEpochParams and
+// GetEpochParams so the two can never drift out of positional agreement.
+const epochParamsColumns = `network, epoch, era, min_fee_a, min_fee_b, max_block_body_size, max_tx_size,
+	max_block_header_size, key_deposit, pool_deposit, max_epoch, n_opt, a0, rho, tau, protocol_major,
+	protocol_minor, min_pool_cost, price_mem, price_step, max_tx_ex_mem, max_tx_ex_steps, max_block_ex_mem,
+	max_block_ex_steps, max_value_size, collateral_percentage, max_collateral_inputs, cost_models,
+	decentralisation, min_utxo_value, coins_per_utxo_size, fetched_at`
+
+// UpsertEpochParams idempotently inserts or updates the Koios /epoch_params
+// reference row for one epoch.
+//
+// This is written separately from CommitEpochData rather than inside its
+// transaction, and fetchEpoch calls it BEFORE that commit. That ordering is
+// what keeps the freshness marker honest: koios_epoch_info.fetched_at only
+// advances once the parameter row is already durable, so a process killed
+// between the two writes leaves the epoch looking unfetched and it is simply
+// re-fetched. The reverse order could advance fetched_at with no parameter
+// row, which GetEpochsNeedingCheck would then never revisit.
+func (c *Cache) UpsertEpochParams(p KoiosEpochParams) error {
+	_, err := c.db.Exec(
+		`INSERT INTO koios_epoch_params (`+epochParamsColumns+`)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(network, epoch) DO UPDATE SET
+		 era=excluded.era, min_fee_a=excluded.min_fee_a, min_fee_b=excluded.min_fee_b,
+		 max_block_body_size=excluded.max_block_body_size, max_tx_size=excluded.max_tx_size,
+		 max_block_header_size=excluded.max_block_header_size, key_deposit=excluded.key_deposit,
+		 pool_deposit=excluded.pool_deposit, max_epoch=excluded.max_epoch, n_opt=excluded.n_opt,
+		 a0=excluded.a0, rho=excluded.rho, tau=excluded.tau, protocol_major=excluded.protocol_major,
+		 protocol_minor=excluded.protocol_minor, min_pool_cost=excluded.min_pool_cost,
+		 price_mem=excluded.price_mem, price_step=excluded.price_step, max_tx_ex_mem=excluded.max_tx_ex_mem,
+		 max_tx_ex_steps=excluded.max_tx_ex_steps, max_block_ex_mem=excluded.max_block_ex_mem,
+		 max_block_ex_steps=excluded.max_block_ex_steps, max_value_size=excluded.max_value_size,
+		 collateral_percentage=excluded.collateral_percentage,
+		 max_collateral_inputs=excluded.max_collateral_inputs, cost_models=excluded.cost_models,
+		 decentralisation=excluded.decentralisation,
+		 min_utxo_value=excluded.min_utxo_value, coins_per_utxo_size=excluded.coins_per_utxo_size,
+		 fetched_at=excluded.fetched_at`,
+		p.Network, p.Epoch, p.Era, p.MinFeeA, p.MinFeeB, p.MaxBlockBodySize, p.MaxTxSize,
+		p.MaxBlockHeaderSize, p.KeyDeposit, p.PoolDeposit, p.MaxEpoch, p.NOpt, p.A0, p.Rho, p.Tau,
+		p.ProtocolMajor, p.ProtocolMinor, p.MinPoolCost, p.PriceMem, p.PriceStep, p.MaxTxExMem,
+		p.MaxTxExSteps, p.MaxBlockExMem, p.MaxBlockExSteps, p.MaxValueSize, p.CollateralPercentage,
+		p.MaxCollateralInputs, p.CostModels, p.Decentralisation, p.MinUtxoValue, p.CoinsPerUtxoSize,
+		p.FetchedAt,
+	)
+	return err
+}
+
+// DeleteEpochParams invalidates a parameter row after a later epoch commit
+// fails. This forces the next fetch to refresh the complete epoch instead of
+// treating new parameters with stale pool data as complete.
+func (c *Cache) DeleteEpochParams(network string, epoch uint64) error {
+	_, err := c.db.Exec(
+		`DELETE FROM koios_epoch_params WHERE network = ? AND epoch = ?`,
+		network,
+		epoch,
+	)
+	return err
+}
+
+// GetEpochParams retrieves the cached Koios /epoch_params row, returning
+// sql.ErrNoRows when absent — e.g. an epoch cached before protocol-parameter
+// fetching was added and not yet re-fetched. Callers must treat that as an
+// incomplete reference row (see CompareEpochProtocolParams's
+// "koios_epoch_params" CategoryDBMissing mismatch), never as a reason to skip
+// the parameter comparison silently.
+func (c *Cache) GetEpochParams(
+	network string,
+	epoch uint64,
+) (*KoiosEpochParams, error) {
+	var p KoiosEpochParams
+	err := c.db.QueryRow(
+		`SELECT `+epochParamsColumns+` FROM koios_epoch_params WHERE network = ? AND epoch = ?`,
+		network, epoch,
+	).Scan(
+		&p.Network, &p.Epoch, &p.Era, &p.MinFeeA, &p.MinFeeB, &p.MaxBlockBodySize, &p.MaxTxSize,
+		&p.MaxBlockHeaderSize, &p.KeyDeposit, &p.PoolDeposit, &p.MaxEpoch, &p.NOpt, &p.A0, &p.Rho, &p.Tau,
+		&p.ProtocolMajor, &p.ProtocolMinor, &p.MinPoolCost, &p.PriceMem, &p.PriceStep, &p.MaxTxExMem,
+		&p.MaxTxExSteps, &p.MaxBlockExMem, &p.MaxBlockExSteps, &p.MaxValueSize, &p.CollateralPercentage,
+		&p.MaxCollateralInputs, &p.CostModels, &p.Decentralisation, &p.MinUtxoValue, &p.CoinsPerUtxoSize,
+		&p.FetchedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
 }
 
 // GetAllPoolsForEpoch retrieves all cached pool rows for (network, epoch).
@@ -1081,8 +1245,60 @@ func (c *Cache) GetEpochsMissingAccountCoverage(
 	return result, rows.Err()
 }
 
+// GetEpochsMissingParams returns epoch numbers in [from, through] that have
+// fresh pool-level Koios data but no /epoch_params row.
+//
+// It exists for the same reason as GetEpochsMissingAccountCoverage: an epoch
+// cached before parameter comparison existed would otherwise look complete to
+// GetUncachedEpochs forever and never gain a parameter row. Requiring the
+// parameter row inside GetUncachedEpochs instead would work, but at the cost
+// of re-fetching /epoch_info, /totals and every pool-history row for that
+// epoch just to obtain one parameter row — and would break the guarantee that
+// an account backfill does not re-fetch pool-level data.
+func (c *Cache) GetEpochsMissingParams(
+	network string,
+	from, through uint64,
+) ([]uint64, error) {
+	// pre_staking = 0 excludes epochs <= preStakingThroughEpoch for the same
+	// reason GetEpochsMissingAccountCoverage does: fetchEpoch commits the
+	// PreStaking marker and returns before ever requesting /epoch_params, so
+	// those epochs carry a koios_epoch_info row and never a
+	// koios_epoch_params row. Koios has no parameter row for them either — on
+	// preprod /epoch_params?_epoch_no=0 and _epoch_no=1 both return [] — so
+	// without this filter they would be selected for parameter backfill on
+	// every run forever, fail the fetch as a transient error, and land in
+	// FailedEpochs permanently, which cmd/koios-parity turns into a hard
+	// error that skips the check phase.
+	rows, err := c.db.Query(
+		`SELECT i.epoch FROM koios_epoch_info i
+		 WHERE i.network = ? AND i.epoch >= ? AND i.epoch <= ?
+		   AND i.pre_staking = 0
+		   AND NOT EXISTS (
+			SELECT 1 FROM koios_epoch_params p
+			WHERE p.network = i.network AND p.epoch = i.epoch
+		 )
+		 ORDER BY i.epoch`,
+		network,
+		from,
+		through,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []uint64
+	for rows.Next() {
+		var e uint64
+		if err := rows.Scan(&e); err != nil {
+			return nil, err
+		}
+		result = append(result, e)
+	}
+	return result, rows.Err()
+}
+
 // GetUncachedEpochs returns epoch numbers in [from, through] (inclusive) that
-// are NOT yet in koios_epoch_info for the given network. This is used by Fetch
+// are NOT yet complete in the cache for the given network. This is used by Fetch
 // to fill holes left by prior failed or interrupted runs rather than naively
 // resuming from max(fetched) + 1.
 func (c *Cache) GetUncachedEpochs(
@@ -1096,7 +1312,8 @@ func (c *Cache) GetUncachedEpochs(
 	}
 
 	rows, err := c.db.Query(
-		"SELECT epoch FROM koios_epoch_info WHERE network = ? AND epoch >= ? AND epoch <= ?",
+		`SELECT i.epoch FROM koios_epoch_info i
+		 WHERE i.network = ? AND i.epoch >= ? AND i.epoch <= ?`,
 		network,
 		from,
 		through,
@@ -1399,6 +1616,23 @@ func createCacheSchema(db *sql.DB) error {
 			deposits_drep TEXT NOT NULL DEFAULT '', deposits_proposal TEXT NOT NULL DEFAULT '', treasury_donation TEXT NOT NULL DEFAULT '',
 			treasury_withdrawal TEXT NOT NULL DEFAULT '', reserves_withdrawal TEXT NOT NULL DEFAULT '')`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_kt_net_epoch ON koios_totals(network, epoch)`,
+		`CREATE TABLE IF NOT EXISTS koios_epoch_params (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
+			era TEXT NOT NULL DEFAULT '', min_fee_a TEXT NOT NULL DEFAULT '', min_fee_b TEXT NOT NULL DEFAULT '',
+			max_block_body_size TEXT NOT NULL DEFAULT '', max_tx_size TEXT NOT NULL DEFAULT '',
+			max_block_header_size TEXT NOT NULL DEFAULT '', key_deposit TEXT NOT NULL DEFAULT '',
+			pool_deposit TEXT NOT NULL DEFAULT '', max_epoch TEXT NOT NULL DEFAULT '', n_opt TEXT NOT NULL DEFAULT '',
+			a0 TEXT NOT NULL DEFAULT '', rho TEXT NOT NULL DEFAULT '', tau TEXT NOT NULL DEFAULT '',
+			protocol_major TEXT NOT NULL DEFAULT '', protocol_minor TEXT NOT NULL DEFAULT '',
+			min_pool_cost TEXT NOT NULL DEFAULT '', price_mem TEXT NOT NULL DEFAULT '', price_step TEXT NOT NULL DEFAULT '',
+			max_tx_ex_mem TEXT NOT NULL DEFAULT '', max_tx_ex_steps TEXT NOT NULL DEFAULT '',
+			max_block_ex_mem TEXT NOT NULL DEFAULT '', max_block_ex_steps TEXT NOT NULL DEFAULT '',
+			max_value_size TEXT NOT NULL DEFAULT '', collateral_percentage TEXT NOT NULL DEFAULT '',
+			max_collateral_inputs TEXT NOT NULL DEFAULT '', cost_models TEXT NOT NULL DEFAULT '',
+			decentralisation TEXT NOT NULL DEFAULT '',
+			min_utxo_value TEXT NOT NULL DEFAULT '', coins_per_utxo_size TEXT NOT NULL DEFAULT '',
+			fetched_at DATETIME NOT NULL)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_kep_net_epoch ON koios_epoch_params(network, epoch)`,
 		`CREATE TABLE IF NOT EXISTS koios_account_rewards (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, network TEXT NOT NULL, epoch INTEGER NOT NULL,
 			stake_address TEXT NOT NULL, reward_type TEXT NOT NULL DEFAULT '', earned TEXT NOT NULL,
@@ -1488,22 +1722,11 @@ func createCacheSchema(db *sql.DB) error {
 	}
 	// Older cache files may contain columns that the current structs no longer write.
 	for _, item := range [][2]string{{"koios_epoch_info", "pool_cnt"}, {"koios_epoch_info", "delegator_cnt"}, {"koios_totals", "deposits_d_rep"}} {
-		rows, err := db.Query(
-			"SELECT 1 FROM pragma_table_info(?) WHERE name = ?",
-			item[0],
-			item[1],
-		)
-		if err != nil {
+		present, err := columnExists(db, item[0], item[1])
+		if err != nil || !present {
 			continue
 		}
-		defer rows.Close()
-		present := rows.Next()
-		if err := rows.Err(); err != nil {
-			continue
-		}
-		if present {
-			_, _ = db.Exec("ALTER TABLE " + item[0] + " DROP COLUMN " + item[1])
-		}
+		_, _ = db.Exec("ALTER TABLE " + item[0] + " DROP COLUMN " + item[1])
 	}
 
 	// A cache written before koios_account_universe_state existed carries the
@@ -1582,17 +1805,8 @@ GROUP BY network`); err != nil {
 // against an older cache.db is idempotent and never errors on a column that
 // already exists.
 func addColumnIfMissing(db *sql.DB, table, column, columnDDL string) error {
-	rows, err := db.Query(
-		"SELECT 1 FROM pragma_table_info(?) WHERE name = ?",
-		table,
-		column,
-	)
+	present, err := columnExists(db, table, column)
 	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	present := rows.Next()
-	if err := rows.Err(); err != nil {
 		return err
 	}
 	if present {
@@ -1602,6 +1816,32 @@ func addColumnIfMissing(db *sql.DB, table, column, columnDDL string) error {
 		"ALTER TABLE " + table + " ADD COLUMN " + column + " " + columnDDL,
 	)
 	return err
+}
+
+// columnExists reports whether table already has a column named column.
+//
+// The pragma_table_info probe is confined to this function so its *sql.Rows is
+// always closed before the caller runs its next statement. OpenCache bounds the
+// pool to a single connection, and an open *sql.Rows holds that connection: a
+// caller that issued its ALTER TABLE while the probe was still open would wait
+// for a connection only it could release, hanging inside OpenCache with no
+// error and no timeout (the migration paths use the context-free Exec, so there
+// is nothing to cancel it either).
+func columnExists(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(
+		"SELECT 1 FROM pragma_table_info(?) WHERE name = ?",
+		table,
+		column,
+	)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	present := rows.Next()
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return present, nil
 }
 
 func scanPool(rows *sql.Rows, p *KoiosPoolEpoch) error {

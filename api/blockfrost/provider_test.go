@@ -100,6 +100,8 @@ func resolveOnFreePortWithDeps(
 }
 
 func TestRegisterProviderDescriptor(t *testing.T) {
+	t.Parallel()
+
 	host := newProviderHost(t)
 
 	var found *plugin.Descriptor
@@ -116,10 +118,14 @@ func TestRegisterProviderDescriptor(t *testing.T) {
 }
 
 func TestRegisterProviderRejectsNilHost(t *testing.T) {
+	t.Parallel()
+
 	require.Error(t, RegisterProvider(nil))
 }
 
 func TestProviderRejectsPartialTLSPair(t *testing.T) {
+	t.Parallel()
+
 	host := newProviderHost(t)
 
 	_, err := plugin.Resolve[*Blockfrost](
@@ -143,6 +149,8 @@ func TestProviderRejectsPartialTLSPair(t *testing.T) {
 }
 
 func TestProviderRejectsInvalidAuthMode(t *testing.T) {
+	t.Parallel()
+
 	host := newProviderHost(t)
 
 	_, err := plugin.Resolve[*Blockfrost](
@@ -163,6 +171,8 @@ func TestProviderRejectsInvalidAuthMode(t *testing.T) {
 }
 
 func TestProviderPropagatesTLSAndAuth(t *testing.T) {
+	t.Parallel()
+
 	host := newProviderHost(t)
 	certPath, keyPath := testutil.GenerateTestTLSCertKey(t)
 

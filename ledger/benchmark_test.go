@@ -185,7 +185,11 @@ func BenchmarkUtxoLookupByAddressNoData(b *testing.B) {
 
 	// Benchmark lookup (on empty database for now)
 	for b.Loop() {
-		_, err := db.UtxosByAddress([]ledger.Address{testAddr}, nil)
+		_, err := db.UtxosByAddress(
+			[]ledger.Address{testAddr},
+			database.MaxUtxosByAddressResults,
+			nil,
+		)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -225,7 +229,11 @@ func BenchmarkUtxoLookupByAddressRealData(b *testing.B) {
 
 	// Benchmark lookup against real seeded data
 	for b.Loop() {
-		_, err := db.UtxosByAddress([]ledger.Address{testAddr}, nil)
+		_, err := db.UtxosByAddress(
+			[]ledger.Address{testAddr},
+			database.MaxUtxosByAddressResults,
+			nil,
+		)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -2365,7 +2373,7 @@ func BenchmarkVerifyBlockHeader(b *testing.B) {
 				CardanoNodeConfig: newTestShelleyGenesisCfg(b),
 				Logger:            benchmarkDiscardLogger,
 			},
-			epochNonceHexCache: make(map[uint64]string),
+			epochNonceHexCache: make(map[uint64]epochNonceHexCacheEntry),
 		}
 		// The epoch cache is read through the published consensus snapshot,
 		// not the raw field, so it must be published before use even for
@@ -2915,7 +2923,11 @@ func BenchmarkConcurrentQueries(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				res, err := db.UtxosByAddress([]ledger.Address{testAddr}, nil)
+				res, err := db.UtxosByAddress(
+					[]ledger.Address{testAddr},
+					database.MaxUtxosByAddressResults,
+					nil,
+				)
 				_ = res
 				_ = err // Ignore errors for benchmark
 

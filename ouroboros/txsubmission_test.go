@@ -96,6 +96,7 @@ type txsubmissionCorruptingConsumer struct {
 	mempool.Consumer
 	corruptHash string
 	omitHash    string
+	corruptAll  bool
 }
 
 func (c *txsubmissionCorruptingConsumer) GetTxFromCache(
@@ -105,7 +106,7 @@ func (c *txsubmissionCorruptingConsumer) GetTxFromCache(
 		return nil
 	}
 	tx := c.Consumer.GetTxFromCache(hash)
-	if tx == nil || hash != c.corruptHash {
+	if tx == nil || (!c.corruptAll && hash != c.corruptHash) {
 		return tx
 	}
 	corrupted := *tx
@@ -117,6 +118,7 @@ type txsubmissionCorruptingService struct {
 	mempool.Service
 	corruptHash string
 	omitHash    string
+	corruptAll  bool
 	mu          sync.Mutex
 	consumers   map[ouroboros.ConnectionId]mempool.Consumer
 }
@@ -143,6 +145,7 @@ func (s *txsubmissionCorruptingService) NewConsumer(
 		Consumer:    consumer,
 		corruptHash: s.corruptHash,
 		omitHash:    s.omitHash,
+		corruptAll:  s.corruptAll,
 	}
 	s.consumers[connId] = wrapped
 	return wrapped
@@ -166,6 +169,8 @@ func (s *txsubmissionCorruptingService) RemoveConsumer(
 }
 
 func TestRetryTxsubmissionAdmissionBoundsContention(t *testing.T) {
+	t.Parallel()
+
 	var addCalls int
 	var waitCalls int
 	var retryStreaks []int
@@ -197,6 +202,8 @@ func TestRetryTxsubmissionAdmissionBoundsContention(t *testing.T) {
 }
 
 func TestRetryTxsubmissionAdmissionSucceedsAfterContention(t *testing.T) {
+	t.Parallel()
+
 	var addCalls int
 	var waitCalls int
 
@@ -223,6 +230,8 @@ func TestRetryTxsubmissionAdmissionSucceedsAfterContention(t *testing.T) {
 // TestTxSubmissionClientRequestTxIds verifies empty, partial, and capped
 // TxId responses when a peer asks what transactions this node can relay.
 func TestTxSubmissionClientRequestTxIds(t *testing.T) {
+	t.Parallel()
+
 	fixtures := txsubmissionTestFixtures(t)
 	tests := []struct {
 		name      string
@@ -273,9 +282,20 @@ func TestTxSubmissionClientRequestTxIds(t *testing.T) {
 					uint16(txsubmissionRelayTestEraId),
 					id.TxId.EraId,
 				)
+				// The advertised size is the wrapped wire size, which is
+				// what cardano-node advertises and what a peer reads off
+				// the wire, not the unwrapped body length.
 				require.Equal(
 					t,
-					uint32(len(fixtures[idx].body)),
+					uint32( // #nosec G115 -- test fixture
+						len(
+							txsubmissionWireEncodedItem(
+								t,
+								uint16(txsubmissionRelayTestEraId),
+								fixtures[idx].body,
+							),
+						),
+					),
 					id.Size,
 				)
 				require.Equal(
@@ -291,6 +311,8 @@ func TestTxSubmissionClientRequestTxIds(t *testing.T) {
 // TestTxSubmissionClientRequestTxIdsClearsConsumerCacheOnAck verifies that
 // peer acknowledgements discard previously advertised transaction bodies.
 func TestTxSubmissionClientRequestTxIdsClearsConsumerCacheOnAck(t *testing.T) {
+	t.Parallel()
+
 	// Arrange one cached transaction for a peer consumer.
 	fixture := txsubmissionTestFixtures(t)[0]
 	o, connId := newTxSubmissionTestOuroboros(t)
@@ -325,6 +347,8 @@ func TestTxSubmissionClientRequestTxIdsClearsConsumerCacheOnAck(t *testing.T) {
 // cleared the entire offered cache and silently dropped unacknowledged
 // bodies.
 func TestTxSubmissionClientRequestTxIdsPartialAck(t *testing.T) {
+	t.Parallel()
+
 	// Arrange two cached transactions for a peer consumer.
 	fixtures := txsubmissionTestFixtures(t)[:2]
 	o, connId := newTxSubmissionTestOuroboros(t)
@@ -368,6 +392,8 @@ func TestTxSubmissionClientRequestTxIdsPartialAck(t *testing.T) {
 // that mix acknowledging older offers with advertising new ones in the same
 // call, matching the sliding FIFO window the TxSubmission protocol uses.
 func TestTxSubmissionClientRequestTxIdsAckAcrossMixedBatches(t *testing.T) {
+	t.Parallel()
+
 	// Arrange three cached transactions for a peer consumer.
 	fixtures := txsubmissionTestFixtures(t)
 	o, connId := newTxSubmissionTestOuroboros(t)
@@ -413,6 +439,8 @@ func TestTxSubmissionClientRequestTxIdsAckAcrossMixedBatches(t *testing.T) {
 // TestTxSubmissionClientRequestTxs verifies that known cached TxIds return
 // bodies while unknown or already-served TxIds are ignored.
 func TestTxSubmissionClientRequestTxs(t *testing.T) {
+	t.Parallel()
+
 	// Arrange one known tx and one unknown tx id for the peer request.
 	fixture := txsubmissionTestFixtures(t)[0]
 	o, connId := newTxSubmissionTestOuroboros(t)
@@ -450,6 +478,8 @@ func TestTxSubmissionClientRequestTxs(t *testing.T) {
 // TestTxSubmissionClientRequestCallbacksMissingConsumer verifies that both
 // client callbacks fail cleanly when no mempool consumer exists.
 func TestTxSubmissionClientRequestCallbacksMissingConsumer(t *testing.T) {
+	t.Parallel()
+
 	// Arrange a connection id without registering a mempool consumer.
 	o, connId := newTxSubmissionTestOuroboros(t)
 	ctx := txsubmission.CallbackContext{ConnectionId: connId}
@@ -470,6 +500,8 @@ func TestTxSubmissionClientRequestCallbacksMissingConsumer(t *testing.T) {
 // TestTxSubmissionClientRequestTxsUnknownZeroTxId verifies malformed or
 // impossible peer TxId requests return no bodies instead of panicking.
 func TestTxSubmissionClientRequestTxsUnknownZeroTxId(t *testing.T) {
+	t.Parallel()
+
 	// Arrange a valid consumer without advertising any txs to its cache.
 	o, connId := newTxSubmissionTestOuroboros(t)
 	o.mempool.NewConsumer(connId)
@@ -488,6 +520,8 @@ func TestTxSubmissionClientRequestTxsUnknownZeroTxId(t *testing.T) {
 // TestTxSubmissionClientRequestTxIdsZeroRequestDoesNotAdvance verifies a
 // zero-count peer request leaves the consumer positioned on the next tx.
 func TestTxSubmissionClientRequestTxIdsZeroRequestDoesNotAdvance(t *testing.T) {
+	t.Parallel()
+
 	// Arrange one available tx for the peer consumer.
 	fixture := txsubmissionTestFixtures(t)[0]
 	o, connId := newTxSubmissionTestOuroboros(t)
@@ -510,6 +544,8 @@ func TestTxSubmissionClientRequestTxIdsZeroRequestDoesNotAdvance(t *testing.T) {
 // TestTxSubmissionServerInitMissingConnectionReturnsCleanly verifies server
 // init exits without error when the connection is already gone.
 func TestTxSubmissionServerInitMissingConnectionReturnsCleanly(t *testing.T) {
+	t.Parallel()
+
 	// Arrange an Ouroboros instance whose connection manager has no such peer.
 	o, connId := newTxSubmissionTestOuroboros(t)
 
@@ -525,6 +561,8 @@ func TestTxSubmissionServerInitMissingConnectionReturnsCleanly(t *testing.T) {
 func TestTxSubmissionClientStartMissingConnectionDoesNotAddConsumer(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	o, connId := newTxSubmissionTestOuroboros(t)
 
 	err := o.txsubmissionClientStart(connId)
@@ -535,6 +573,8 @@ func TestTxSubmissionClientStartMissingConnectionDoesNotAddConsumer(
 }
 
 func TestTxSubmissionClientStartIsIdempotent(t *testing.T) {
+	t.Parallel()
+
 	h := newTxSubmissionRelayHarness(t)
 	defer h.close(t)
 	connId := h.connB.Id()
@@ -550,6 +590,8 @@ func TestTxSubmissionClientStartIsIdempotent(t *testing.T) {
 // TestTxSubmissionConnectionClosedCleanup verifies connection close handling
 // removes txsubmission consumer and rate-limiter state for that peer.
 func TestTxSubmissionConnectionClosedCleanup(t *testing.T) {
+	t.Parallel()
+
 	// Arrange per-peer mempool and rate-limiter state.
 	o, connId := newTxSubmissionTestOuroboros(t)
 	o.mempool.NewConsumer(connId)
@@ -659,6 +701,8 @@ func txsubmissionTestFixtures(t *testing.T) []txsubmissionTestFixture {
 }
 
 func TestValidateTxsubmissionReply(t *testing.T) {
+	t.Parallel()
+
 	fixtures := txsubmissionTestFixtures(t)[:2]
 	requested := make([]txsubmission.TxIdAndSize, 0, len(fixtures))
 	returned := make([]txsubmission.TxBody, 0, len(fixtures))
@@ -741,6 +785,71 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 	}
 }
 
+func TestValidateTxsubmissionReplyChecksByteBudgetBeforeDecode(t *testing.T) {
+	t.Parallel()
+	testCases := []struct {
+		name      string
+		sizes     []uint32
+		bodies    [][]byte
+		overLimit bool
+	}{
+		{
+			name:      "single body exceeds budget",
+			sizes:     []uint32{1},
+			bodies:    [][]byte{{0xff, 0xff}},
+			overLimit: true,
+		},
+		{
+			name:      "later body exceeds aggregate before first decode",
+			sizes:     []uint32{1, 1},
+			bodies:    [][]byte{{0xff}, {0xff, 0xff}},
+			overLimit: true,
+		},
+		{
+			name:      "zero budget",
+			sizes:     []uint32{0},
+			bodies:    [][]byte{{0xff}},
+			overLimit: true,
+		},
+		{
+			name:   "exact budget still decodes",
+			sizes:  []uint32{1},
+			bodies: [][]byte{{0xff}},
+		},
+		{
+			name:   "below budget still decodes",
+			sizes:  []uint32{2},
+			bodies: [][]byte{{0xff}},
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			requested := make([]txsubmission.TxIdAndSize, len(testCase.sizes))
+			returned := make([]txsubmission.TxBody, len(testCase.bodies))
+			for index, size := range testCase.sizes {
+				requested[index] = txsubmission.TxIdAndSize{
+					TxId: txsubmission.TxId{EraId: txsubmissionRelayTestEraId},
+					Size: size,
+				}
+				returned[index] = txsubmission.TxBody{
+					EraId:  txsubmissionRelayTestEraId,
+					TxBody: testCase.bodies[index],
+				}
+			}
+			validated, err := validateTxsubmissionReply(requested, returned)
+			require.Nil(t, validated)
+			if testCase.overLimit {
+				require.ErrorIs(t, err, errTxsubmissionReplySizeMismatch)
+				require.ErrorContains(t, err, "exceeds byte limit")
+			} else {
+				require.ErrorContains(t, err, "decode failed")
+				require.NotErrorIs(t, err, errTxsubmissionReplySizeMismatch)
+			}
+		})
+	}
+}
+
 func addTxSubmissionTestFixtures(
 	t *testing.T,
 	m mempool.Service,
@@ -810,7 +919,11 @@ type txSubmissionRelayHarnessOpts struct {
 	dagA             bool
 	corruptOfferHash string
 	omitOfferHash    string
+	corruptAllOffers bool
 	batchRequestsA   bool
+	// promRegistryA installs protocol metrics on node A, whose
+	// txsubmission server runs the relay pull loop under test.
+	promRegistryA prometheus.Registerer
 }
 
 func newTxSubmissionRelayHarnessWithOpts(
@@ -875,15 +988,21 @@ func newTxSubmissionRelayHarnessWithOpts(
 		connmanager.ConnectionManagerConfig{Logger: logger},
 	)
 
-	nodeA := newOuroboros(OuroborosConfig{ConnManager: cmA, Logger: logger})
+	nodeA := newOuroboros(OuroborosConfig{
+		ConnManager:  cmA,
+		Logger:       logger,
+		PromRegistry: opts.promRegistryA,
+	})
 	nodeA.mempool = nodeAMempool
 	nodeB := newOuroboros(OuroborosConfig{ConnManager: cmB, Logger: logger})
 	nodeBMempool := mempool.Service(&mempool.FIFO{Mempool: mB})
-	if opts.corruptOfferHash != "" || opts.omitOfferHash != "" {
+	if opts.corruptOfferHash != "" || opts.omitOfferHash != "" ||
+		opts.corruptAllOffers {
 		nodeBMempool = &txsubmissionCorruptingService{
 			Service:     nodeBMempool,
 			corruptHash: opts.corruptOfferHash,
 			omitHash:    opts.omitOfferHash,
+			corruptAll:  opts.corruptAllOffers,
 			consumers: make(
 				map[ouroboros.ConnectionId]mempool.Consumer,
 			),
@@ -987,6 +1106,8 @@ func (h *txSubmissionRelayHarness) close(t *testing.T) {
 // mempool. This is the happy-path relay loop that the direct callback tests
 // cannot reach.
 func TestTxSubmissionServerInitRelaysMempoolTransactionEndToEnd(t *testing.T) {
+	t.Parallel()
+
 	h := newTxSubmissionRelayHarness(t)
 	defer h.close(t)
 
@@ -1021,6 +1142,8 @@ func TestTxSubmissionServerInitRelaysMempoolTransactionEndToEnd(t *testing.T) {
 }
 
 func TestTxSubmissionDAGBackpressureResumesAfterRemoval(t *testing.T) {
+	t.Parallel()
+
 	fixtures := txsubmissionTestFixtures(t)
 	seed := fixtures[2]
 	offered := fixtures[0]
@@ -1068,6 +1191,8 @@ func TestTxSubmissionDAGBackpressureResumesAfterRemoval(t *testing.T) {
 // harness is built, rather than using goleak, since goleak inspects the
 // whole process and would also trip on unrelated pre-existing leaks
 // elsewhere in this package's test suite.
+// Not t.Parallel: runtime.NumGoroutine is a process-wide measurement that
+// concurrent tests perturb.
 func TestTxSubmissionServerInitExitsCleanlyOnPeerDisconnect(t *testing.T) {
 	baseline := runtime.NumGoroutine()
 
@@ -1114,6 +1239,8 @@ func TestTxSubmissionServerInitExitsCleanlyOnPeerDisconnect(t *testing.T) {
 // from the mempool beforehand must fall straight through to "not found"
 // rather than erroring or panicking.
 func TestTxSubmissionClientRequestTxsExpiredTransactionNotServed(t *testing.T) {
+	t.Parallel()
+
 	o, connId := newTxSubmissionTestOuroboros(
 		t,
 		func(cfg *mempool.MempoolConfig) {
@@ -1163,6 +1290,8 @@ func TestTxSubmissionClientRequestTxsExpiredTransactionNotServed(t *testing.T) {
 func TestTxSubmissionServerInitContinuesAfterMempoolRejection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixtures := txsubmissionTestFixtures(t)
 	rejected := fixtures[0]
 	accepted := fixtures[1]
@@ -1218,8 +1347,12 @@ func TestTxSubmissionServerInitContinuesAfterMempoolRejection(
 }
 
 // TestTxSubmissionServerInitRejectsMalformedReply verifies a mismatched reply
-// stops the pull loop before a later request could acknowledge it.
+// is dropped in full and that the per-peer pull loop keeps running, so one
+// bad reply cannot end tx ingest from that peer for the life of the
+// connection.
 func TestTxSubmissionServerInitRejectsMalformedReply(t *testing.T) {
+	t.Parallel()
+
 	fixtures := txsubmissionTestFixtures(t)
 	malformed := fixtures[0]
 	accepted := fixtures[1]
@@ -1254,19 +1387,68 @@ func TestTxSubmissionServerInitRejectsMalformedReply(t *testing.T) {
 	)
 	require.Contains(t, logBuf.String(), "decode failed")
 	require.Contains(t, logBuf.String(), h.connA.Id().String())
+	_, admitted := h.mA.GetTransaction(malformed.hash)
+	require.False(t, admitted, "mismatched body was admitted")
 
-	// A subsequent offer must not be requested, because doing so would
-	// acknowledge and advance beyond the rejected reply.
+	// The pull loop must survive the rejection and admit the next offer.
 	addTxSubmissionTestFixtures(t, h.mB, accepted)
-	require.Never(
+	require.Eventually(
 		t,
 		func() bool {
 			_, ok := h.mA.GetTransaction(accepted.hash)
 			return ok
 		},
-		250*time.Millisecond,
+		5*time.Second,
 		10*time.Millisecond,
-		"pull loop advanced after rejecting a mismatched reply",
+		"pull loop stopped after rejecting a single mismatched reply",
+	)
+	require.NotContains(
+		t,
+		logBuf.String(),
+		"stopping tx ingest after repeated mismatched txsubmission replies",
+	)
+}
+
+// TestTxSubmissionServerInitStopsAfterRepeatedMismatches verifies a peer
+// that returns nothing but mismatched replies is eventually given up on,
+// so continuing the pull loop cannot become an unbounded hot loop.
+func TestTxSubmissionServerInitStopsAfterRepeatedMismatches(t *testing.T) {
+	t.Parallel()
+
+	fixtures := txsubmissionTestFixtures(t)
+	require.GreaterOrEqual(
+		t,
+		len(fixtures),
+		txsubmissionMaxConsecutiveReplyMismatches,
+	)
+	logBuf := &lockedBuffer{}
+	logger := slog.New(
+		slog.NewJSONHandler(
+			logBuf,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		),
+	)
+
+	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
+		logger:           logger,
+		corruptAllOffers: true,
+	})
+	defer h.close(t)
+
+	addTxSubmissionTestFixtures(t, h.mB, fixtures...)
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+
+	require.Eventually(
+		t,
+		func() bool {
+			return strings.Contains(
+				logBuf.String(),
+				"stopping tx ingest after repeated mismatched txsubmission replies",
+			)
+		},
+		10*time.Second,
+		10*time.Millisecond,
+		"expected tx ingest to stop after repeated mismatched replies",
 	)
 }
 
@@ -1275,6 +1457,8 @@ func TestTxSubmissionServerInitRejectsMalformedReply(t *testing.T) {
 func TestTxSubmissionServerInitRejectsBatchAtomically(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixtures := txsubmissionTestFixtures(t)
 	omitted := fixtures[0]
 	malformed := fixtures[1]
@@ -1318,6 +1502,8 @@ func TestTxSubmissionServerInitRejectsBatchAtomically(
 // transaction that disappeared after advertisement while still returning a
 // later requested transaction.
 func TestTxSubmissionServerInitAcceptsOrderedSubset(t *testing.T) {
+	t.Parallel()
+
 	fixtures := txsubmissionTestFixtures(t)
 	omitted := fixtures[0]
 	returned := fixtures[1]

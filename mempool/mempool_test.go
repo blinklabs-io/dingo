@@ -15,6 +15,7 @@
 package mempool
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -311,6 +312,29 @@ func getTestTxBytes(t *testing.T) []byte {
 	txBytes, err := hex.DecodeString(testTxHex)
 	require.NoError(t, err, "failed to decode test tx hex")
 	return txBytes
+}
+
+func TestUtxoOverlayUsesConsensusConsumedInputsForInvalidTx(t *testing.T) {
+	tx, err := gledger.NewTransactionFromCbor(
+		uint(conway.EraIdConway),
+		getTestTxBytes(t),
+	)
+	require.NoError(t, err)
+	require.False(t, tx.IsValid())
+	require.NotEmpty(t, tx.Inputs())
+	require.NotEmpty(t, tx.Collateral())
+	overlay := newUtxoOverlay()
+	overlay.applyTx(tx.Hash().String(), uint(conway.EraIdConway), tx.Cbor(), tx)
+	for _, input := range tx.Inputs() {
+		key := fmt.Sprintf("%s:%d", input.Id().String(), input.Index())
+		assert.NotContains(t, overlay.consumed, key,
+			"invalid transaction regular inputs must remain available")
+	}
+	for _, input := range tx.Collateral() {
+		key := fmt.Sprintf("%s:%d", input.Id().String(), input.Index())
+		assert.Contains(t, overlay.consumed, key,
+			"invalid transaction collateral must be consumed")
+	}
 }
 
 // =============================================================================
@@ -3562,6 +3586,31 @@ func TestMempool_RemovalsContinueDuringRevalidation(t *testing.T) {
 			assert.Empty(t, m.overlay.applied)
 		})
 	}
+}
+
+func TestMempool_ConfirmedTransactionLogVisibleAtInfoLevel(t *testing.T) {
+	var buf bytes.Buffer
+	m, err := NewMempool(MempoolConfig{
+		Logger: slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{
+			Level: slog.LevelInfo,
+		})),
+		EventBus:        event.NewEventBus(nil, nil),
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       newMockValidator(),
+		MempoolCapacity: 1024 * 1024,
+	})
+	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
+	defer m.Stop(context.Background())
+
+	require.NoError(
+		t,
+		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+	)
+	hash := m.Transactions()[0].Hash
+	m.RemoveTxsByHash([]string{hash})
+
+	assert.Contains(t, buf.String(), "confirmed transaction")
 }
 
 func TestMempool_EvictionIsReconciledDuringRevalidation(t *testing.T) {

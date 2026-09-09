@@ -95,7 +95,7 @@ type cborRejectReason interface {
 }
 
 type hardForkApplyTxError struct {
-	era uint8
+	era uint16
 	err error
 }
 
@@ -107,7 +107,7 @@ func newLocalTxSubmissionRejectReason(
 		return err
 	}
 	return &hardForkApplyTxError{
-		era: uint8(eraId), //nolint:gosec // Cardano era IDs fit in uint8
+		era: eraId,
 		err: err,
 	}
 }
