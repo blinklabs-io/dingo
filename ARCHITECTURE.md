@@ -7,6 +7,10 @@ domain packages do not self-register during package initialization. The host
 erases types only at its registry boundary while typed factories retain their
 provider configuration, service, and dependency bundles.
 
+`Node.New` validates plugin selections and node configuration before registering
+metrics or starting EventBus workers. Configuration failure leaves the caller
+metrics registry unchanged, so corrected construction can reuse it.
+
 Startup resolves storage, constructs database and ledger, resolves mempool,
 then resolves the enabled API capabilities. Each API provider (Blockfrost,
 Mesh, UTxO RPC) is resolved only in API storage mode and only when its
@@ -412,6 +416,15 @@ graph LR
 
 How blocks flow from the network through validation and into storage.
 
+The Ouroboros block-fetch and chain-sync decoders initialize the decoded
+block/header hash before returning to the shared decode cache. This includes
+Musashi dispatch and the legacy full-Byron-EBB header fallback. The cache's
+mutex and waiter channels publish the initialized hash before another peer
+can use the same object; computing it in the receiving handler is too late.
+Consumers must treat cached decoded objects as immutable. Hash initialization
+remains inside the cache's panic-recovery boundary, and failed decodes retain
+their existing error, TTL, and eviction behavior.
+
 ```mermaid
 sequenceDiagram
     participant Peer
@@ -467,6 +480,12 @@ sequenceDiagram
     LS->>LS: reload epoch cache, repair lab nonces
     LS->>EB: publish TransactionEvent(rollback: true) per tx
 ```
+
+An admitted ChainSync rollback atomically refreshes the tracked client's
+cursor, advertised tip, activity, and syncing status before chain selection
+observes it and before the ledger apply gate runs. This bookkeeping does not
+count a rollback as a delivered header or record it in the header deduplication
+cache. A callback for a removed client does not recreate its tracked state.
 
 `ledger.tx` is published with `PublishOrdered`, not `PublishAsync`, so a
 subscriber deriving state from it sees a block's transactions in index order
@@ -731,6 +750,15 @@ graph TB
 ### Block Forging
 
 The block production pipeline from leader election through broadcast.
+
+For Shelley through Conway, transaction selection accounts incrementally for
+the exact encoded body components: raw bodies and witnesses, array headers,
+auxiliary data with its transaction-index keys and map header, and the era's
+empty invalid-transaction list. Each candidate adds constant-time accounting;
+previously selected transactions are not re-encoded or hashed during selection.
+Selection stops before the first candidate that exceeds `MaxBlockBodySize`,
+preserving the accepted prefix. The final encoding and body hash still provide
+an independent size check. Dijkstra retains its separate inline-body sizing.
 
 Two invariants keep the forger from advertising or repeating a block it has
 not durably adopted:
@@ -1255,7 +1283,28 @@ completes or has unwound its LIFO rollback stack. Normal shutdown takes the
 same gate before its phase-ordered teardown begins. A SIGINT/SIGTERM received
 while components are still starting can therefore cancel startup without
 letting `Node.Stop` concurrently close a partially initialized component; the
-normal shutdown waits until rollback has finished.
+normal shutdown waits until rollback has finished. Shutdown cancels the node
+context before waiting for the live-lifecycle and snapshot gates, then takes
+those gates in that order, matching `Restore` and `Truncate`, before closing
+storage. A stop request that arrives during either operation therefore gives
+the operation a chance to unwind without racing its storage teardown. The
+configured shutdown timeout is one absolute deadline shared by gate waits and
+phase-ordered teardown. If a lifecycle gate still has not been released when
+that deadline expires, `Node.Stop` returns the gate timeout after cancellation;
+that failure remains retryable so a later stop can acquire the gates and finish
+teardown once the live operation releases them.
+
+The ledger fatal-error callback records its cause before cancelling the node.
+`Node.Run` returns that cause on normal shutdown and cancellation-shaped startup
+exits, preserving the first fatal cause across repeated callbacks. This wiring
+is shared by initial ledger construction and live ledger reconstruction.
+
+Midnight indexer startup and live reconstruction share their enablement gate
+and configuration builder. Both require indexing to be enabled in API storage
+mode, bound backfill using the current database's persisted ledger tip, and
+record the first fatal cause before cancelling the node. This is independent
+of Midnight server enablement; callbacks resolve replaced node components when
+invoked.
 
 The node creates one shutdown context from the configured `shutdownTimeout`
 and passes it through every phase. PeerGovernor shutdown cancels its internal
@@ -1353,6 +1402,36 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `peergov.bootstrap_exited` | PeerGov | Exited bootstrap mode |
 | `peergov.bootstrap_recovery` | PeerGov | Bootstrap recovery |
 
+The six topics the ChainSelector publishes itself —
+`chainselection.chain_switch`, `selection`, `peer_evicted`,
+`genesis_corroboration_failed`, `genesis_mode_exited` and `selected_none` —
+go through `ChainSelector.publishSelection`, which uses `PublishOrdered` rather
+than `Publish`. The selector's producers are all goroutines that have to keep
+making progress — the EventBus dispatch goroutines for the internal
+`chainselection.peer_activity`, `chainselection.peer_tip_update` and
+`connmanager.conn_closed` subscriptions, plus the selector's own evaluation
+loop — and an inline `Publish` parks its caller on any subscriber that has
+stopped draining. Routing every selector publication through the same per-type
+lanes keeps delivery and per-topic publisher order while confining a blocked
+subscriber to that lane's worker. Publishing one of these six directly would
+reintroduce the hazard, because a queued chain switch could then be overtaken
+by one published inline.
+
+That order is the order publications reach `PublishOrdered`, not the order the
+selector decided the switches in. Every producer decides under `cs.mutex` and
+publishes after releasing it, so two goroutines can decide A then B and enqueue
+B then A, and a subscriber sees B before A. The window is unchanged from the
+inline `Publish` the lanes replaced; closing it would mean publishing under the
+lock, which is what the EventBus rule below forbids. A consumer that must not
+act on a superseded switch has to reconcile against the selector's current best
+peer rather than rely on arrival order.
+
+The other three `chainselection.*` topics are not on ordered lanes and are not
+covered by that guarantee: `chainselection.peer_tip_update` is published inline
+by the ouroboros chainsync path and by node wiring, not by the selector, and
+the two panic topics are published inline from the selector's own recovery
+paths, where the point is to report before the goroutine unwinds.
+
 ### EventBus Features
 
 - Asynchronous delivery via worker pool (4 workers, 1000-entry async queue)
@@ -1388,6 +1467,21 @@ All event types follow the `subsystem.snake_case_name` convention.
   delivery, and reports how many publishers are parked on it — every parked
   publisher observes the same stall, so a per-delivery limit made the log
   volume scale with publisher count rather than with time
+- **Handler-progress watchdog** (`event/handler_progress.go`). The stalled
+  warning above is raised by a publisher that had to wait for capacity, so it
+  cannot fire until the buffer is already full: its time to first signal is a
+  function of buffer size and event rate, not of the fault. One bus-wide
+  goroutine additionally samples every `SubscribeFunc` dispatch goroutine and
+  logs `event subscriber handler not making progress` (with `stuck_for`,
+  `queued`, `buffer`) for any handler that has not returned for
+  `handlerProgressWarnInterval` (30s), counting it in
+  `event_subscriber_handler_stalled_total` and repeating at most once per
+  interval while it stays there. Sampling runs twice per interval, so the
+  first report lands within 45s of the handler ceasing to return. Registering
+  a `SubscribeFunc` subscription materializes that counter's series at zero,
+  so "nothing has stalled" is distinguishable from "no handler was ever
+  registered for this type". `EventBus.StuckHandlerCount()` exposes the same
+  condition programmatically
 - **Never `Publish`, `PublishAsync`, `PublishOrdered`, or `PublishBlocking`
   while holding a lock that a subscriber of that event acquires.** All four can
   wait for capacity, and a subscriber that is merely slow is still allowed the
@@ -1456,7 +1550,9 @@ All event types follow the `subsystem.snake_case_name` convention.
   on the `connmanager.conn_closed` subscription above
 - Prometheus metrics for event delivery tracking and latency, including
   `event_delivery_blocked_total{type,kind}` and
-  `event_async_enqueue_blocked_total{type}` for backpressure
+  `event_async_enqueue_blocked_total{type}` for backpressure, and
+  `event_subscriber_handler_stalled_total{type}` for a handler that has
+  stopped returning
 - `Unsubscribe` only stops *future* deliveries to a `SubscribeFunc`
   subscriber; a handler already dequeued before the call can still be
   executing concurrently after it returns. `UnsubscribeAndWait` additionally
@@ -1539,6 +1635,121 @@ tip. Rollback and held replay recovery use that floor when it is on the current
 primary chain, while same-slot hash mismatches are repaired rather than treated
 as already covered. A floor from an abandoned fork is ignored so chain
 selection can recover the canonical branch.
+
+When the ledger tip is not on the primary chain at all (the fork-beyond-the-
+ledger shape, as opposed to the blob-behind-metadata shape above),
+reconciliation instead prunes the primary chain back to their common
+ancestor with `ChainManager.RewindPrimaryChainToPoint`, once
+`ChainManager.SecurityParamConfigured()` reports K is set. That call shares
+its bound and side effects with a live `Chain.Rollback` rather than deleting
+blocks directly: it is rejected outright, without touching any state, when
+the ancestor sits more than the security parameter K behind the chain tip,
+and a rewind it does perform publishes `ChainRollbackEvent`/`ChainForkEvent`
+and wakes/marks chain iterators exactly once — the same rollback and
+iterator signal NtC clients rely on for a live rollback, rather than
+truncating the chain out from under them silently. `reconcileLivePrimaryChainLedgerDivergence`
+treats that rejection the same as "no divergence found," leaving the caller's
+existing over-K handling (chainsync re-sync, or connection recycling from the
+plateau watchdog above) to recover instead (issue #3516).
+
+This same reconciliation also runs from `NewLedgerState` at startup, before
+`node.go` (or `internal/node/load.go`'s load-mode composition) has called
+`ChainManager.SetLedger` — the state load that constructs `LedgerState`
+runs first, and `SetLedger` needs that constructed value to read
+`SecurityParam()` from, so it necessarily runs after. Before that call
+`SecurityParamConfigured()` is false, and `RewindPrimaryChainToPoint` would
+return `ErrSecurityParamNotConfigured` rather than silently pruning without
+a bound — which would fail node startup outright over a local,
+already-durable divergence that has nothing to do with an untrusted peer.
+For that case reconciliation instead calls
+`ChainManager.RewindPrimaryChainAtStartup` (`Chain.RollbackUnbounded`
+underneath), which skips only the K-configured and K-exceeded checks and
+otherwise behaves identically — same header/block deletion, same
+`ChainRollbackEvent`/`ChainForkEvent` publish, same iterator wake. Nothing
+reachable from an untrusted peer may ever call the unbounded path: every
+chainsync-driven caller of this reconciliation runs after `SetLedger`, since
+`node.go` constructs the ouroboros layer — and every chainsync-reachable
+goroutine with it — only once `SetLedger` has already returned (issue #3516
+review).
+
+A third caller, `ledgerReadChain`'s own retry loop (used when the reader's
+next chain iterator can't find its start point), reaches this same
+reconciliation and can hit the same over-K rejection — a case
+`RewindPrimaryChainToPoint` could never previously produce, since it had no
+bound at all. Unlike `reconcileLivePrimaryChainLedgerDivergence`'s callers,
+this reader has no `ChainsyncEvent`/connection to fall back on, so on an
+over-K rejection it publishes the same `ChainsyncResyncEventType`/
+`ChainsyncResyncReasonRollbackExceedsK` those callers use directly. It
+handles a rewind below the Mithril trust boundary
+(`ErrRollbackExceedsMithrilBoundary`) the same way, publishing
+`ChainsyncResyncReasonRollbackExceedsMithril` — the reason
+`handleEventChainsyncRollback` uses for a peer-driven rollback that hits
+the same boundary (Cubic review, PR #3611). This reader has no peer or
+advertised tip to distinguish "peer merely behind the boundary" from
+"genuinely diverges below it" the way that handler's own Mithril branch
+does, so it always reports the latter, the safer default.
+
+Every other give-up path in `ledgerReadChain`/`ledgerReadChainIterator`
+returns without ever sending a `readChainResult` on `resultCh`, which
+`ledgerProcessBlocksFromSource`'s closed-channel-with-nothing-sent case
+turns into a nil error — `ledgerProcessBlocksWithAttempt`'s `err == nil`
+branch then exits its retry loop for good, and since `ledgerProcessBlocks`
+is started once, from `Start`, with no supervisor restarting it, this
+permanently and silently stops all ledger block processing. That is a
+pre-existing pattern spanning multiple give-up paths, tracked separately in
+issue #3776 rather than fixed here. These two branches are different: this
+PR is what makes them reachable at all, so neither joins that deferred
+list. Instead each sends a non-nil `readChainResult` (wrapping the
+originating error) on `resultCh` before returning.
+`tryRecoverFromHeaderValidationError` declines it (neither is a
+`*headerValidationError`), so `ledgerProcessBlocksFromSource` returns it as
+a real error, and `ledgerProcessBlocksWithAttempt` treats it like any other
+recoverable read-chain failure: back off (`ledgerPipelineBackoff`) and start
+a fresh reader attempt, rather than exiting for good. Each retry
+re-reconciles from the (possibly by-then-advanced) tip; until connection
+management acts on the resync event and the primary chain is rewound within
+K and above the Mithril boundary, every retry fails the same way and backs
+off further like any other deterministic no-progress restart, surfacing
+the existing stuck-pipeline signal instead of a silent halt.
+
+The shared `reconcileLivePrimaryChainLedgerDivergence` helper (called
+directly by `handleEventChainsyncRollback` and `tryResolveFork`; called
+through the `ReconcileLivePrimaryChainLedgerDivergence` exported wrapper
+by the plateau watchdog) only special-cases `ErrRollbackExceedsSecurityParam`
+itself — returning `(false, nil)` so the caller's own existing over-K
+resync handling fires, rather than a generic propagated error a caller's
+classification does not expect. It propagates `ErrRollbackExceedsMithrilBoundary`
+as a plain error instead of also special-casing it the same way: a naive
+matching special-case, also returning `(false, nil)`, would misclassify it
+through that same over-K fallthrough, since the caller's over-K branch
+publishes `ChainsyncResyncReasonRollbackExceedsK` unconditionally once
+reconciliation declines, reproducing the exact reason-misclassification
+class issue #3035 already fixed elsewhere (wolf31o2 review, PR #3611).
+
+Each of the three live callers classifies that propagated error itself,
+using whatever context it has available:
+
+- `handleEventChainsyncRollback` and `tryResolveFork` each already handle
+  a *direct* `ErrRollbackExceedsMithrilBoundary` (from their own initial
+  rollback attempt, before ever calling the reconciler) via the
+  peer-tip-based `ChainsyncResyncReasonRollbackExceedsMithril`/
+  `ChainsyncResyncReasonPeerTipBehindMithril` classification described
+  above. That logic is now the shared `handleMithrilBoundaryRollback(e,
+  pending)` helper, and each caller's over-K branch calls it too when
+  `reconcileLivePrimaryChainLedgerDivergence` returns this error — the
+  identical resync as a direct rollback hitting the same boundary.
+- The plateau watchdog (`internal/chainsyncrecycler`) has no pending
+  event batch or peer rollback handler of its own to classify this with,
+  and deliberately does not import `ledger` to inspect the error type
+  (see that package's own doc comment on staying constructible without a
+  node). Its only path to the reconciler is the exported
+  `ReconcileLivePrimaryChainLedgerDivergence` wrapper, so that wrapper
+  classifies `ErrRollbackExceedsMithrilBoundary` and publishes
+  `ChainsyncResyncReasonRollbackExceedsMithril` itself, swallowing the
+  error back to `(false, nil)` afterward — the same self-classifying
+  shape `reconcileLivePrimaryChainLedgerDivergence` itself used to have
+  for every caller, narrowed to just this one wrapper now that the other
+  two callers classify it with richer, peer-aware context of their own.
 
 Ordering the commits is not sufficient on its own: a commit is not durable.
 SQLite fsyncs at WAL checkpoints while Badger buffers committed writes in a
@@ -1913,8 +2124,11 @@ fallback:
 
 - An archive node uses a signed-URL-capable object-storage blob plugin (`s3` or
   `gcs`) and enables the Bark server with `barkPort`. Bark's archive service
-  maps a requested `(slot, hash)` to the blob store's `GetBlockURL`, returning
-  a signed object URL plus compact block metadata.
+  resolves each requested block reference -- by hash, slot, height, or a
+  consistent combination of them -- to a `(slot, hash)` point, maps that to the
+  blob store's `GetBlockURL`, and returns a signed object URL plus compact
+  block metadata. A reference the node does not hold comes back under
+  `not_found` without discarding the rest of the batch.
 - A node with `historyExpiry.enabled` keeps its local blob plugin and starts
   `internal/historyexpiry.Pruner`. The worker derives its safety window from
   `LedgerState.StabilityWindow()` and scans only blocks older than that window.
@@ -2061,11 +2275,48 @@ reinitialization, then calls `Commit`; a later swap failure can still call
 
 `Txn.Commit` owns its transaction lock and shared barrier hold through one
 function-scope cleanup. A storage-provider panic releases both before `Txn.Do`
-recovers, allowing its rollback to reacquire the transaction lock, finish the
-underlying stores, and re-panic instead of self-deadlocking. Successful commits
-also release both before `AfterCommit` callbacks run, while still draining those
-callbacks before `Commit` returns; failed commits and rollbacks never dispatch
-them.
+recovers, allowing its rollback to reacquire the transaction lock and finish
+the underlying stores before `Do` returns the converted error described below,
+rather than self-deadlocking. Successful commits also release both before
+`AfterCommit` callbacks run, while still draining those callbacks before
+`Commit` returns; failed commits and rollbacks never dispatch them.
+
+`database/txn.go` documents one panic contract shared by every transaction
+worker: `Txn.Do`, the after-commit dispatch loop (`runAfterCommitCallback`),
+and `ledger.DatabaseWorkerPool.executeOperation`. All three always recover a
+panic and log it (message, value, and stack trace); `Do` and
+`executeOperation` additionally convert it into an error wrapping
+`database.ErrTxnPanic` (via `database.NewTxnPanicError`) instead of letting it
+escape, so `errors.Is(err, database.ErrTxnPanic)` identifies a recovered panic
+the same way regardless of which of the two produced it. What differs,
+deliberately, is what each worker does with that outcome: `Do` attempts to
+roll back before returning it, since a synchronous caller is still on the
+stack waiting on the return value; `executeOperation` returns it on
+`DatabaseResult.Error` for the same reason, since its submitter is
+synchronously waiting on `ResultChan`. `runAfterCommitCallback` is the one
+exception with nowhere to put an error return: it runs detached on the
+dispatch loop after the registering caller has already moved on and the
+transaction has already durably committed, and it may be only one of
+several callbacks in the current drain — returning or re-panicking there
+would drop every other callback
+already dequeued for the current drain and strand every callback registered
+afterward, so it logs and continues instead.
+
+`Do`'s own recovery defer has already consumed the original panic by the
+time it calls `Rollback`, so a second, unrelated panic from `Rollback` (or
+the underlying blob/metadata store's `Rollback` it calls) would otherwise
+propagate straight out of that already-executing deferred function — the
+outermost frame in `Do` — and crash the goroutine instead of returning.
+`Do` calls `Rollback` through a nested `safeRollback` helper that recovers
+that second panic too, folding it into the returned `ErrTxnPanic`-wrapped
+error alongside the original one rather than ever re-panicking.
+`(*Txn).rollback` itself releases the transaction's terminal state and
+commit barrier hold (`finishLocked`) via a `defer`, not a plain trailing
+call, for the matching reason: a panicking provider `Rollback` would
+otherwise skip past it entirely, leaking the commit barrier hold for the
+process's lifetime exactly as an unreleased hold does after a normal
+terminal path (see `finishLocked`'s own doc comment) — the `defer` still
+runs during the panic unwind through `rollback`'s stack frame regardless.
 
 Truncate reuses `database.TruncateAfterSlot`, the same metadata+blob-referenced-UTxO/tx sweep `ledger.LedgerState.rollback` uses for ordinary in-bounds rollback, extended with a bulk blob-block-delete path for ranges too large for the one-transaction-per-block pattern `Chain.Rollback` uses. Unlike `Chain.Rollback`, it does not reject a target beyond the configured security parameter, since an operator explicitly invoking it (the CIP-0135 disaster-recovery case) is the informed-consent replacement for that guard.
 
@@ -2075,7 +2326,7 @@ Scheduler startup and shutdown share one lifecycle mutex, and a Stop request
 is latched even before startup. A concurrent Start therefore cannot create a
 ticker or worker pool after Stop has already returned.
 
-Stopping a component during quiesce is not by itself enough — the caller (`quiesceForLiveLifecycleOp`) proceeds straight to `closeStorageForLiveLifecycleOp` right after, so a `Stop()` that only signals its background goroutines to exit and returns immediately (rather than waiting for them to actually finish) leaves a real window for one of them to still be reading `n.db`/`n.ledgerState`-backed state after it's closed and replaced. `peergov.PeerGovernor.Stop`, `leader.Election.Stop`, and `midnightindexer.Indexer.Stop` all wait for their own in-flight work before returning, for this reason: `PeerGovernor` and `Election` each track their background goroutines with a `sync.WaitGroup` (releasing their own mutex first, since those goroutines take it internally — waiting while still holding it would deadlock), and all three use `EventBus.UnsubscribeAndWait` rather than plain `Unsubscribe` for the same reason `node_lifecycle.go`'s own subscriptions do above. `Election`'s ctx-monitor goroutine is the one deliberate exception: it only forwards `ctx` cancellation into a `Stop()` call and never reads `ledgerState`-backed state itself, and tracking it in the same `WaitGroup` `Stop()` waits on would deadlock `Stop()` against itself when cancellation (not an external `Stop()` call) is what triggered it.
+Stopping a component during quiesce is not by itself enough — the caller (`quiesceForLiveLifecycleOp`) proceeds straight to `closeStorageForLiveLifecycleOp` right after, so a `Stop()` that only signals its background goroutines to exit and returns immediately (rather than waiting for them to actually finish) leaves a real window for one of them to still be reading `n.db`/`n.ledgerState`-backed state after it's closed and replaced. `peergov.PeerGovernor.Stop`, `leader.Election.Stop`, and `midnightindexer.Indexer.Stop` all wait for their own in-flight work before returning, for this reason: `PeerGovernor` and `Election` each track their background goroutines with a `sync.WaitGroup` (releasing their own mutex first, since those goroutines take it internally — waiting while still holding it would deadlock), and all three use `EventBus.UnsubscribeAndWait` rather than plain `Unsubscribe` for the same reason `node_lifecycle.go`'s own subscriptions do above. `Election` uses a separate cancellation coordinator outside its worker wait group. Both parent cancellation and explicit `Stop` signal that coordinator; it unsubscribes and joins the workers before closing a per-generation completion channel. Every concurrent `Stop` waits for that channel, and `Start` waits for a canceled generation to drain before reusing its worker group or replacing its channels. A waiting `Start` can be canceled by its own caller. Direct external schedule-refresh calls remain the caller's lifecycle responsibility; the completion channel joins the election-owned loops.
 
 A handful of narrower gaps in this same quiesce/reinit path were found by a
 follow-up audit and fixed the same way. `LedgerState.Close`'s two bounded
@@ -2362,16 +2613,16 @@ from-genesis replay must tolerate that, and the eras that follow are unaffected
 because the transition installs Shelley parameters before the first
 post-Byron block is validated.
 
-That ordering is what lets the block-size envelope check stay strict. The first
-block of the fork epoch is a Shelley block on both networks that have a Byron
-prefix, so `ledgerProcessBlocksFromSource` ends its batch at that block, reads
-Shelley from its era, and runs the transition before the block is processed. A
-Byron epoch boundary block would not do this — it carries the Byron era and its
-parent's block number — but no EBB sits at either fork boundary: preprod block
-45 at slot 84242 is followed directly by Shelley block 46 at slot 86400, and
-mainnet block 4490510 at slot 4492799 by Shelley block 4490511 at slot
-4492800. `TestByronShelleyBoundaryHasNoEpochBoundaryBlock` pins both from the
-on-chain bytes in `ledger/testdata/`.
+That ordering is what lets the Shelley block-size envelope check stay strict.
+The first block of the fork epoch is a Shelley block on both networks that have
+a Byron prefix, so `ledgerProcessBlocksFromSource` ends its batch at that
+block, reads Shelley from its era, and runs the transition before the block is
+processed. A Byron epoch boundary block would not do this — it carries the
+Byron era and its parent's block number — but no EBB sits at either fork
+boundary: preprod block 45 at slot 84242 is followed directly by Shelley block
+46 at slot 86400, and mainnet block 4490510 at slot 4492799 by Shelley block
+4490511 at slot 4492800. `TestByronShelleyBoundaryHasNoEpochBoundaryBlock` pins
+both from the on-chain bytes in `ledger/testdata/`.
 
 Consequently `validateInboundBlockEnvelope` requires protocol parameters for
 every non-Byron block, including the first Shelley one. Exempting it would drop
@@ -2383,8 +2634,11 @@ Both validation steps in `ledgerProcessBlock` key that decision on the block or
 header in hand rather than on the ledger's era plus a nil check, so the two stay
 consistent as the boundary is crossed:
 
-- `validateInboundBlockEnvelope` returns before the size checks when
-  `block.Era().Id` is Byron.
+- `validateInboundBlockEnvelope` validates decoded Byron main and epoch
+  boundary blocks against the body proof in their header and the
+  `maxHeaderSize` and `maxBlockSize` limits in Byron genesis. It does not need
+  Shelley protocol parameters. Structured test or embedding block types with no
+  complete wire CBOR remain outside those wire-level checks.
 - `validateBlockHeaderProtocolVersion` returns before reading pparams when
   `HeaderProtocolMajor` reports no version, which is Byron -- headers there have
   no `ProtVer` field. This matters because the Byron prefix is the one era
@@ -2535,6 +2789,15 @@ revoke handling.
 The experimental N2N Leios protocols (`Config.experimentalLeiosNetworkingEnabled`) are enabled on the `musashi` network as well as under `runMode: "leios"` or `startEra: "dijkstra"`, so `dingo -n musashi` runs leios-notify and leios-fetch alongside base chainsync/blockfetch. Earlier prototype interop reset every connection within ~100ms: dingo initiated the standalone leios-votes mini-protocol (protocol 20), which the prototype Haskell node does not run, so the prototype's muxer tore down the whole bearer on the unknown protocol ID (taking chainsync/blockfetch with it). That protocol is now gated off for the prototype network (`OuroborosConfig.EnableLeiosVotes`, wired in `node.go`); the prototype diffuses votes inline over leios-notify (`MsgVotesOffer`, tag 4) instead. dingo is ahead of the prototype on the wire, so the leios-notify and leios-fetch codecs accept the prototype's dialect leniently: notify tag 4 decodes either offered vote IDs or full pushed votes (`FullVotes`); leios-fetch `MsgBlock` decodes the endorser block as either dingo's array-wrapped form or the prototype's bare `{txhash => size}` manifest map; and `MsgBlockTxs`/`MsgBlockTxsRequest` carry the prototype's `[point, bitmaps, tx_list]` shape with an indefinite-length bitmaps map. On a notify block offer, `ouroboros/` fetches the endorser-block manifest over leios-fetch, decodes and hash-validates it, rejects it if the fetched body's length does not match the offer's declared size (`MsgBlockOffer.Size`) or if caching it would exceed the cache's per-entry byte budget, caches it, queues the manifest and complete transaction set for asynchronous persistence to the blob store (a single background writer, off the fetch hot path; see "Era-Specific Validation"), and hands it to the vote and pipeline managers. The relay offers each endorser block on every connection, so the manifest fetch is skipped once this exact (slot, hash) occurrence is already cached, mirroring the same guard on the transactions offer; the cache (`Ouroboros.leiosEndorserBlocks`) is keyed by slot and hash together (`leiosBlockKey`), not hash alone, because the manifest is content-addressed and the same hash can be a live, independently required occurrence at more than one slot at once (two elections producing an identical transaction-reference set) -- a hash-only key could hold only one of them at a time, silently masking or evicting the other (issue #3513 review; wolf31o2 review). `leiosFetchInProgress`, which dedups an in-flight transactions-offer fetch across connections, uses the same composite key, so a claim held for one occurrence cannot suppress dispatch for another. Because the cache key already encodes the slot, a lookup for one occurrence can never return a different occurrence's entry, so no separate slot-comparison or eviction logic is needed anywhere the cache is read: `storeLeiosEndorserBlock`, `bindLeiosEndorserBlockSlot`, `FetchEndorserBlockByPoint`, and `fetchEndorserBlockOnConn` all simply look up (or store into) the specific key their own point names, and a store for one occurrence never disturbs another's entry. `storeLeiosEndorserBlock` never regresses a cached entry's transaction set: a manifest-only store for an occurrence whose transactions are already cached retains them. Without that invariant a redundant manifest arriving after the transactions dropped them, and the complete endorser block reported itself unavailable again — stalling ledger application of the certified closure ("certified Leios endorser block unavailable") and failing `MsgBlockTxsRequest` for downstream peers until some peer happened to redeliver the transactions. Each store carries a `leiosStoreOrigin` (`leiosStoreAuthoritative` for a slot dingo established itself -- a locally forged block, or a by-point backfill whose point came from the ranking block being applied -- and `leiosStorePeerOffered` for a leios-notify offer) that decides only whether the entry is trusted immediately, never whether it is accepted: a peer-offered store is verified immediately when a live announcement already vouches for that exact (slot, hash) pair (`leiosAnnouncementBindsSlotLocked`), and left cached-but-unverified otherwise -- including when a *different* slot of the same hash is already announced or cached, since that is a second, independently legitimate occurrence, not a conflict (issue #3513 review; wolf31o2 review). Because the relay — and dingo's own forge path, which queues the block offer before the announcement — routinely offer a block before announcing it, an unannounced peer-offered store is cached but marked unverified (`leiosEndorserBlockData.slotVerified`) rather than rejected, which would drop endorser blocks on the normal ordering; a store under a genuinely fabricated slot behaves identically -- it simply never receives a corroborating announcement, so it sits inert until its own TTL prunes it, exactly as inert as an eviction would have made it, without needing one. Everything keyed on the slot is withheld while unverified: vote emission, pipeline observation, blob persistence, and every in-memory cache consumer that hands a slot to a caller outside the cache lock — `EndorserBlockTxsByHash` and `EndorserBlockTxHashesByHash` (the ledger provider and the forge loop's post-certificate mempool exclusion list, both of which now take the caller's expected slot as a required parameter and resolve exactly that occurrence), `resolveCertifiedEndorserTxs` (the node-to-client CertRB merge path, using the slot `certifiedEndorserBlockHash` derives structurally from the certifying parent block), and `leiosClosureCompleteLocked`/`waitForLeiosEndorserClosure` (the closure wait that path blocks on, now also keyed by slot and hash) — all report a complete-but-unverified entry as unavailable rather than only checking completeness (issue #3513 review). `bindLeiosEndorserBlockSlot` promotes the entry once an authority arrives — a validated announcement, or the chain-derived point passed to `FetchEndorserBlockByPoint` — via the same composite lookup, so it can only ever promote the exact occurrence the authority names. Because a closure that was already complete when it was stored is left unsignaled (the store path itself only signals waiters once slotVerified, for the same reason), `bindLeiosEndorserBlockSlot`'s promotion also wakes any closure waiter parked on it directly — otherwise a waiter would sit until its wait window timed out instead of waking on the closure it already holds, once the promotion made it available. The reconciliation this and storeLeiosEndorserBlock's own announcement check perform is made atomic against each other: storeLeiosEndorserBlock holds `leiosAnnouncementsMu` from its announcement check through the cache insertion, and `recordLeiosAnnouncement` holds the same lock across recording an announcement and calling `bindLeiosEndorserBlockSlot` -- since that reconciliation runs at most once per distinct announcement, a store that checked "not yet announced" racing a record-then-reconcile that ran against a cache not yet holding the entry would otherwise leave it unverified with nothing left to bind it (issue #3513 review; lock order is always announcements before the endorser-block cache). Only the reconciliation itself needs that lock held, not the publication that follows a promotion: `bindLeiosEndorserBlockSlot` returns the publish step as a closure instead of invoking it inline, so `recordLeiosAnnouncement` can release `leiosAnnouncementsMu` before running it. Publishing calls into the vote handler, pipeline manager, and persistence enqueue -- external code that must not run under a mutex shared by every concurrent announcement, since a slow handler would then stall them all and a handler that itself needed the announcement lock (to cross-check announcement state, say) would deadlock (cubic review). The two backfill callers (`FetchEndorserBlockByPoint`, `fetchEndorserBlockOnConn`) hold no such outer lock, so they just invoke the returned closure immediately, same as before. `bindLeiosEndorserBlockSlot` promotes by replacing the cached entry with a verified copy rather than mutating the shared one in place, the same pattern `retainLeiosPartialTxs` already uses, since `lookupLeiosEndorserBlock` hands out its pointer for callers to read without the lock held. `leiosAnnouncementSlots` records, per announced endorser-block hash, the *set* of slots a live (unexpired) announcement currently vouches for, not a single scalar -- recording a second, independently live announcement of the same hash at a different slot is always accepted and added to the set, never rejected as "inconsistent", since that is exactly the legitimate two-occurrences-at-once case (cubic review; wolf31o2 review). `leiosAnnouncementBindsSlotLocked(hash, slot)` is therefore a membership check, not a comparison: a slot is treated as expired, and so not authoritative, once it ages past the same acceptance window `pruneLeiosAnnouncements` enforces -- that map is only actively pruned as a side effect of a *new* announcement being accepted, so an idle node can otherwise retain a stale binding indefinitely, and the presence of one binding's expiry must not affect any other slot's entry in the same hash's set. A blob-store reload (`loadLeiosEBFromDB`) reconstructs its entry as already verified, since the store is only ever written from a verified entry in the first place; reconstructing it as unverified would withhold an already-trustworthy historical block from the ledger provider until something happened to re-verify a hash whose announcement may have long since left the acceptance window. The persistent blob store (`em`/`et` keys, below) is keyed by (hash, slot) together, the same as the in-memory cache: `types.LeiosEBManifestKey`/`LeiosEBTxsKey` append the slot after the hash, so `Database.SetLeiosEB`/`GetLeiosEBManifest`/`GetLeiosEBTxs` persist and reload each occurrence independently, and a second live occurrence of a recurring hash no longer silently overwrites the first once its in-memory entry ages out (cubic review; issue #3513 review). The asynchronous persistence writer's job-coalescing map (`ouroboros/leios_persist.go`) uses the same composite key, so a manifest-only job for one occurrence cannot be superseded by (or accidentally suppress) a complete job for a different occurrence of the same hash. `loadLeiosEBFromDB` passes the caller's own expected slot straight through to the blob-store read, so a lookup for one occurrence can only ever return that occurrence -- there is no longer a separate post-read slot comparison to get wrong. `GetLeiosEBManifest`/`GetLeiosEBTxs` fall back to the pre-issue-#3513 legacy hash-only key on a miss (validating the legacy record's own embedded slot before trusting it), so upgrading a node does not silently orphan manifests and transaction bodies it persisted under the old key format (cubic review). The transaction bodies (gated by `OuroborosConfig.EnableLeiosTxFetch`) are fetched when the peer sends the corresponding transactions offer (`MsgBlockTxsOffer`), not immediately after the manifest — requesting before that offer makes the prototype relay reset the connection. They are requested in batches of up to eight 64-transaction windows per request, re-requesting the still-missing transactions (learned from the `MsgBlockTxs` response bitmaps, with a prefix fallback) until the set is complete, because the relay caps a single response. A response bitmap is validated against the endorser block's known transaction count before its indices are expanded, so a relay cannot force a disproportionately large decode by echoing bitmap windows beyond what the requested block's size could ever need (issue #3523). Near the live tip the relay diffuses an endorser block's transactions over several seconds, so a fetch commonly runs out of served transactions before the set is whole. What that attempt gathered is retained against the cached endorser block as a sparse set whose gaps are the still-missing transactions (`leiosEndorserBlockData.partialTxs`, the same representation the request bitmap is built from), and the next fetch for that block — driven by the relay's next transactions offer, on this or any other connection — is seeded from it and requests only the missing tail. The per-connection fetch slot is therefore released between attempts rather than held open across the diffusion gap, and the block completes across re-offers without re-fetching transactions dingo already holds; previously the partial result was discarded and the block was re-fetched from scratch, so a fraction of the endorser blocks in an active window were never completed and their outputs were missing from the UTxO set near tip (issue #2629). Retention is a union, so two connections that each fetch part of a block contribute to one set; it survives the redundant manifest stores every connection's block offer produces (the same no-regression rule as above), is cleared once the transaction set is complete, and is bounded by the same TTL, entry cap, and per-entry/aggregate byte budget as any other cached endorser block. Because a manifest-only store rebuilds the cache entry, carrying a partial across one deliberately keeps the original insertion timestamp while the block is still incomplete: the relay re-offers each endorser block on every connection, so refreshing it would let a never-completing block stay resident — holding transaction bodies, not just a manifest — for as long as any peer keeps offering it. A store that completes the set does take the fresh timestamp, having become a servable entry. The diffusion-window bound on a single fetch attempt is unchanged, and a block completed this way is stored and applied through the existing path. The request bitmap is numbered MSB-first — the transaction at window offset 0 is the most-significant bit of its 64-bit word — to match the relay; an LSB-first numbering round-tripped against a dingo peer but made the relay serve only the high-index transactions of a partial window (and nothing at all for a final window of 32 or fewer transactions), so a from-genesis sync stalled mid-epoch with an incomplete UTxO set (issue #2656). The leios-fetch client response budget is raised from the protocol default to 30s, because under concurrent blockfetch the default deadline expired mid-window; it is capped at the by-point backfill attempt budget so any single unresponsive request adds at most one attempt window before peer failover. It is applied as the per-request context deadline (`leiosFetchRequestContext`), not as a protocol state timeout, which gouroboros does not wire for the `Block`/`BlockTxs` states. For the same reason the keep-alive client's wait-for-pong timeout is raised on Musashi from the gouroboros 10s default to the keep-alive spec maximum (`ServerTimeout`, 60s) via `OuroborosConfig.KeepAliveTimeout` (wired in `node.go`, clamped to the spec maximum in `keepaliveConnOpts`): on the single-relay prototype network, block/EB traffic on the shared muxer can delay the relay's pong past 10s, and dropping the only relay then costs a reconnect and fork rollback, so dingo tolerates a slow-but-alive relay instead. It is left unset (0) on other networks, where the 10s default still evicts genuinely dead peers quickly. Tip prefetch on leios-notify offers is suppressed while the node is far behind the chain tip (`SlotsBehindHead` beyond a small lag bound), so a deep catch-up does not contend the connection fetching current-tip endorser blocks it will not apply for hours; the historical references it actually needs are driven by the backfiller (see "Era-Specific Validation"). A complete endorser block is then available to the ledger for application (see "Era-Specific Validation"). The leios-fetch server uses the same lookup path for downstream `MsgBlockRequest` and `MsgBlockTxsRequest`: it serves from the in-memory cache when present, and on cache miss or expired-entry eviction reloads the manifest and complete tx list from the durable `em`/`et` blob keys so historical EBs can be re-served after the cache TTL. A missing endorser block or incomplete transaction set is declined with the protocol's typed `ErrBlockNotFound` or `ErrBlockTxsNotFound`, while malformed transaction bitmaps retain their validation error. `MsgBlockRangeRequest` is not served, and is declined with an explicit error rather than by returning nil from the callback: gouroboros reads a nil return as "an async range send was started", so returning nil left dingo holding leios-fetch server agency in `StateBlockRange` forever, permanently wedging the requesting peer's client — its protocol send loop waits for agency that only the missing response returns — with no way for that peer to detect it. There is no absence reply for a range request, so declining necessarily fails the leios-fetch connection, which the peer can at least observe and recover from (issue #3623). Pushed votes (notify `MsgVotesOffer` tag 4) are forwarded to the `ledger/leios` vote manager. The LeiosVotes and LeiosFetch vote handlers delegate vote collection, serving, and emission to the `ledger/leios` vote manager (see "Leios Voting"); LeiosFetch vote requests return a valid empty `MsgVotes` when that optional manager is absent, while standalone LeiosVotes remains unavailable and returns its explicit error. A cached or reloaded endorser block is also handed to the `ledger/leios` pipeline manager (see "Leios Pipeline") for stage/timing tracking and equivocation detection. LeiosVotes pull requests remain outstanding while no servable votes exist and complete when new vote material arrives or the protocol shuts down, so an empty relay store is not treated as a mini-protocol error. Durable vote storage is still future work; CertRB production uses the current gouroboros/Dijkstra prototype certificate shape.
 
 For the current respun prototype, the notify vote dialect is specifically the three-field `(announcing_rb_hash, voter_id, signature)` form. The selected-chain `chain.update` path records an announcement only after its ranking block is adopted; merely observing an eligible ChainSync header cannot make a local vote eligible. A bounded TTL queue holds votes that race ahead of adoption and retains a bounded set of alternate signatures per voter, so an invalid first candidate cannot suppress a later valid vote. Local votes use that same LeiosNotify stream; each outbound response reserves its log entry and commits the per-peer cursor only after gouroboros reports a successful send. Failed or aborted sends release the reservation into a counted retry set retained across reconnects; a reconnect advances through every pending retry on its stream rather than clearing only the first failed entry. The transitional offered-ID and four-field forms remain decode-compatible only.
+
+Configured LeiosFetch vote serving accepts at most 1,000 requested IDs per
+request, including duplicate and unknown IDs. Larger requests fail before
+dispatch to the vote manager, bounding lookup and response-cloning work under
+its shared lock. This is a local serving limit; clients must split larger
+queries into batches. An over-limit configured request produces a protocol
+error and terminates the requesting connection. If the optional vote manager
+is absent, requests still receive the empty `MsgVotes` response. The limit is
+per request, not a per-peer rate limit or a decoder allocation bound.
 
 Before header cryptography or body deltas run, the inbound consensus-envelope
 validator enforces the era's block body/header limits and, for Alonzo and later,
@@ -2973,10 +3236,12 @@ and go stake are all zero are omitted; without a pool filter, the result
 contains the union of pools present in those snapshots and the corresponding
 totals.
 
-Query paths that retain database work per resolved item are bounded by
-`ledger.MaxLocalStateQueryItems` (currently 1000). This applies to
-`GetDRepState` and `GetStakeDelegDeposits`. Explicit oversized filters are
-rejected before database or consensus-state access. The empty `GetDRepState`
+Credential filters are bounded by `ledger.MaxLocalStateQueryItems` (currently
+1000) for `GetDRepState`, `GetStakeDelegDeposits`,
+`GetFilteredDelegationsAndRewardAccounts`, and `GetFilteredVoteDelegatees`.
+Explicit oversized filters, including duplicate entries, are rejected before
+database or consensus-state access. Accepted results are never truncated.
+The empty `GetDRepState`
 form remains unrestricted: it loads active DReps once and obtains their
 delegators through chunked account reads instead of one read per DRep.
 `allDRepDelegators` (`ledger/queries.go`) additionally hydrates those
@@ -2988,11 +3253,12 @@ temporary hydrated-`Account`-row memory — the `GetAccountsByCredential`
 result map, the larger share of retained memory since it holds full rows
 rather than the two fields (`Drep`, `DrepType`) actually read — is bounded
 to the batch size instead of the active-account count. Filtered
-`GetStakeSnapshots` and
-`GetFilteredVoteDelegatees` likewise use existing batch database operations,
-removing their per-item read
-amplification without a client-visible item limit. Existing result
-ordering and partial-result behavior remain unchanged.
+`GetStakeSnapshots` uses existing batch database operations without a
+client-visible item limit. `GetFilteredVoteDelegatees` and
+`GetFilteredDelegationsAndRewardAccounts` retain their batch database reads
+within the credential-filter limit, bounding temporary account maps as well
+as query work. Existing result ordering and unknown/inactive credential
+filtering remain unchanged.
 
 Both the empty `GetDRepState` form and `GetFilteredVoteDelegatees` batch
 through `MetadataStore.GetAccountsByCredential`, which groups the requested
@@ -3232,6 +3498,22 @@ documented delivered-frontier gate below. A RollBackward restores the
 delivered frontier from a bounded `k+1` header history; if the point is no longer retained, the
 selector uses the rollback point with a conservative zero block number and
 never promotes the accompanying advertised tip into the observed frontier.
+
+The delivered frontier measures how many headers a peer has served US, not what
+chain it holds, so the behind-peer filter treats a gap between two peers that
+advertise the IDENTICAL tip as delivery speed rather than chain quality
+(`sameCanonicalChain` in `chainselection/selector.go`). Without that
+distinction, two canonical public roots on the same chain whose frontiers
+differed by more than `k` made each other ineligible; the incumbent's exclusion
+then skipped the anti-flap pin, and each resulting switch triggered the
+fresh-cursor close above, which reset the newly selected peer's cursor and
+handed the frontier lead back to the other peer. Because the advertised tip is
+untrusted, the same-chain allowance is checked against delivered evidence: it is
+withdrawn when either peer's retained `k+1` header history holds a different
+block at the other's frontier slot. The allowance only keeps a peer in the
+candidate pool and holds the incumbent's pin; Praos comparison, the
+implausible-frontier bound, the `k`-behind-the-applied-local-tip check, and
+Genesis corroboration are all unchanged.
 
 A queued header range that no peer will serve is bounded by a failure count,
 `blockfetchRangeFailure`, capped at `blockfetchMaxSameRangeFailures`. Failing
@@ -3572,7 +3854,17 @@ pin to a dead/minority peer:
   implausibly behind).
 - Longer-chain escape: the challenger is genuinely taller than the incumbent by
   more than `catchUpPinHeadMargin` (= 2 blocks) — a real longer chain, not a
-  head micro-fork.
+  head micro-fork. Height here is the delivered frontier, so this escape does
+  not fire when the two peers advertise the identical tip: they are TREATED AS
+  the same chain unless either one's retained `k+1` delivered history holds a
+  different block at the other's frontier slot, and the challenger is then read
+  as only further along in serving that chain, which is transport speed rather
+  than a longer chain. The classification is an allowance, not proof: a frontier
+  slot outside the retained window cannot be checked, so the allowance can rest
+  on the advertisement alone. The progress-stall escape below is evaluated
+  first and still releases an incumbent that stops driving local tip progress,
+  which is what bounds a peer that copies an advertisement it cannot be
+  contradicted on.
 - Progress-stall escape: the applied local tip has stopped advancing for at
   least `catchUpPinStallTimeout` (= 20s wall-clock, not 20 slots). `SetLocalTip`
   records the timestamp of the last FORWARD progress (block number advancing);
@@ -3698,7 +3990,7 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
 - Stall detection with configurable timeout
 - Grace period before recycling stalled connections
 - Cooldown to prevent rapid reconnection flapping
-- Plateau detection: if the local tip stops advancing while peers are ahead, the recycler first asks ledger to reconcile any live primary-chain/ledger divergence (`ReconcileLivePrimaryChainLedgerDivergence`). When that local repair succeeds, connection-level recovery is skipped so ledger replay can resume from the repaired tip. If no divergence is found, the active chainsync connection is recycled — except when the primary (header) chain has already caught up to the peer and the gap is dominated by downloaded-but-not-yet-applied blocks (`isLedgerApplicationBacklog`, `internal/chainsyncrecycler/recycler.go`). That plateau is a ledger-application backlog, not a chainsync stall, so the healthy connection is left running and the condition is logged at INFO instead of recycling (recycling cannot advance the applied tip and only churns the connection)
+- Plateau detection: if the local tip stops advancing while peers are ahead, the recycler first asks ledger to reconcile any live primary-chain/ledger divergence (`ReconcileLivePrimaryChainLedgerDivergence`). When that local repair succeeds, connection-level recovery is skipped so ledger replay can resume from the repaired tip. If no divergence is found, or the divergence's common ancestor sits more than the security parameter K behind the primary chain tip — a rewind that far is declined rather than forced through, per the bound below — the active chainsync connection is recycled — except when the primary (header) chain has already caught up to the peer and the gap is dominated by downloaded-but-not-yet-applied blocks (`isLedgerApplicationBacklog`, `internal/chainsyncrecycler/recycler.go`). That plateau is a ledger-application backlog, not a chainsync stall, so the healthy connection is left running and the condition is logged at INFO instead of recycling (recycling cannot advance the applied tip and only churns the connection)
 - The recycler itself is `internal/chainsyncrecycler.Recycler`, a `Start`/`Stop` background component that owns only the stall/plateau decision logic. It never reads node fields: the node passes a `ComponentProvider` (`nodeRecyclerComponents`, `node_chainsync_recycler.go`) that hands each tick the live `LedgerSource`, `ChainsyncState`, and `ChainSelector`, plus an `EventPublisher` for the recycle/resync/client-remove requests it decides on. Those are interfaces defined in the recycler package and satisfied structurally by `ledger.LedgerState`, `chainsync.State`, `chainselection.ChainSelector`, and the `EventBus`, so the dependency only goes one way and the whole component is exercised against fakes without constructing a node
 - Every tick `TryLock`s `n.liveLifecycleMu` (the mutex a live Restore/Truncate holds for its entire quiesce-through-reinitialize duration, since those calls actually nil/rebuild `n.ledgerState`/`n.chainsyncState`) (in the provider, for the whole callback) and skips entirely on contention, rather than just nil-checking those fields once up front: they are plain, unsynchronized fields a live restore/truncate reassigns, and the tick dereferences them many more times after any initial check, so holding the lock for the whole tick — not only the check — is what actually closes the race rather than merely narrowing its window. Snapshot deliberately does *not* hold `liveLifecycleMu` (it takes a separate `snapshotMu` instead, excluding a concurrent Restore/Truncate without contending with this tick) — see `snapshotMu`'s doc comment (`node.go`) — since Snapshot never touches either field and blocking this tick for its whole local-copy-plus-cloud-upload duration would contradict Snapshot's own documented "keeps syncing normally" behavior
 - Ledger callbacks that need the replaceable chainsync state use the same lock through `withLiveChainsyncState`. Both `Run()`'s initial publication and a Restore/Truncate's replacement hold that lock while constructing and assigning the state. Callbacks skip while the lock is held instead of blocking: the lifecycle operation can be waiting for the ledger goroutine to stop, so a blocking lock would deadlock quiesce.
@@ -3709,10 +4001,10 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
 A configurable strategy (`chainsync.HeaderSyncStrategy`, `chainsync/strategy.go`) decides which eligible peer is permitted to drive ledger ingress when several peers offer valid next headers. The Ouroboros roll-forward handler first records the delivered cursor, tip, activity, and header count in the per-peer registry, then synchronously observes the tip when Genesis corroboration is active. This ordering lets an immediate `ChainSwitchEvent` distinguish the delivering client from a reused zero-tip connection ID. After the resulting apply-eligibility decision, admitted headers enter cross-peer deduplication and fork detection, then `State.ShouldPublishHeader` applies the strategy before a `ChainsyncEvent` is published into the ledger:
 
 - **primary** (default) — a single active peer drives ingress; new headers from any eligible peer publish, and the active peer replays a header first observed from another peer so it stays the contiguous driver. `ChainSelector` exclusively chooses replacements after a peer delivers a selectable tip; registry insertion never selects a peer, while eligibility demotion and connection removal may clear an invalid active peer but never promote a connected zero-tip fallback independently. A fallback's first valid new header can still enter the ledger queue and chain selection, whose switch event then makes that peer active. This keeps the ledger and blockfetch source aligned with the selector's liveness, eligibility, and Genesis-corroboration gates.
-- **parallel** — every eligible peer may supply headers concurrently. The first peer to report a header drives it; duplicates from other peers are deduplicated before ledger ingress (no replay), so a header never enters ledger processing twice.
+- **parallel** — every eligible peer may supply headers concurrently. The first peer to report a header drives it; duplicates from other peers are deduplicated before ledger ingress (no replay), while its identity remains in the bounded cache.
 - **round-robin** — a single ingress-driving peer that rotates across the eligible peers; the rotation advances on the stall-check cadence (`AdvanceHeaderSyncRotation`).
 
-Under every strategy, all ingress-eligible peers still update tip tracking and observed-header history (for blockfetch peer discovery). Only headers admitted by the post-observation apply gate enter the shared deduplication and fork-detection cache; this prevents an uncorroborated Genesis source from suppressing a later corroborated delivery of the same point. Divergent admitted headers still produce fork/candidate-chain handling rather than silent suppression. The strategy is set via `chainsync.strategy` (YAML), `DINGO_CHAINSYNC_STRATEGY` (env), or `--chainsync-strategy` (CLI).
+Under every strategy, all ingress-eligible peers still update tip tracking and observed-header history (for blockfetch peer discovery). Only headers admitted by the post-observation apply gate enter the shared deduplication and fork-detection cache; this prevents an uncorroborated Genesis source from suppressing a later corroborated delivery of the same point. Divergent admitted headers still produce fork/candidate-chain handling rather than silent suppression. Each retained slot holds at most 32 deduplication records and emits at most 31 fork notifications before pruning or recovery clears it. At saturation, the first 31 records remain stable and the final record tracks the latest alternative. Cache misses remain eligible for ledger validation; repeated evicted alternatives can therefore be processed again. This per-slot limit does not replace slot-age pruning or bound the total number of retained slots. The strategy is set via `chainsync.strategy` (YAML), `DINGO_CHAINSYNC_STRATEGY` (env), or `--chainsync-strategy` (CLI).
 
 Chain selection's selected-to-none transition is one-shot, so the node cannot discard it when a live Restore/Truncate holds `liveLifecycleMu`. On contention, one node-owned, context-cancellable worker retains only the newest pending transition and retries `TryLock` with exponential backoff from 10 milliseconds to a one-second cap, resetting after each successful acquisition. A burst therefore consumes one pending slot and one worker rather than creating a detached waiter per event or a tight poll loop. After the lifecycle operation completes, the handler rechecks current selector state: a newer selection makes the transition obsolete, while a still-empty selection clears the registry's current active connection even if a dropped intermediate switch means it differs from the coalesced event's previous ID. Shutdown cancels and joins this worker before tearing down chain-selection or chainsync state.
 
@@ -3736,6 +4028,8 @@ When full-block header verification needs an epoch nonce that is not cached yet,
 When Leios is enabled, a certifying ranking block (CertRB) carries a Leios certificate and empty transaction segments; the certified endorser block's (EB) transactions live in the EB's transaction closure, fetched asynchronously from peers over the leiosnotify / leiosfetch client protocols and cached in `Ouroboros.leiosEndorserBlocks` (keyed by slot and hash together, TTL-, entry-, and byte-bounded — a mismatched offer size or an over-budget entry is rejected rather than cached, including one reloaded from the blob-store spillover used for historical serving, which is served to the caller but left uncached when it exceeds the per-entry budget). Before retaining any fetched transaction, Dingo checks it in its received manifest position against that reference's body hash and full-transaction size; substituted, reordered, and malformed or trailing wire values are rejected. Before serving a Dijkstra block over node-to-client chainsync, `chainsyncServerBlockCbor` resolves the certified EB (`certifiedEndorserBlockHash` reads the parent block's `leios_announcement` via the header prev-hash) and splices the cached closure into the block's empty transaction segment (`spliceEndorserTxsIntoDijkstraBlock`) so clients receive complete transactions. The header is preserved byte-for-byte, so the served block's hash is unchanged; its `block_body_hash` intentionally no longer matches, which is acceptable over NtC because local clients do not re-verify the body hash.
 
 If the closure is not yet cached when the block is served, the server waits a bounded window for the async client path to populate it — `storeLeiosEndorserBlock` wakes waiters via per-EB channels under `leiosMu`. The window is the same one ledger application uses to gate a ranking block on its endorser block: the Leios pipeline timing's `EndorserBlockWaitSlots` (the certify-by deadline) converted to wall-clock via the Shelley slot length (`LedgerState.EndorserBlockWaitDuration`), not an independent constant; `OuroborosConfig.LeiosClosureWaitTimeout` can override it. The wait is additionally bounded by the serving connection's own lifetime: `serveLeiosCertRbWithWait` registers a per-connection waiter (`registerLeiosServeWaiter`, keyed by `ConnectionId` in `Ouroboros.leiosServeWaiters`) and derives its context from `leiosConnDoneContext` wrapping that waiter's channel, so a client that disconnects while the wait is pending releases it immediately rather than leaving it parked for the rest of the window.
+
+Historical by-point backfill receives the ledger apply context through `EndorserBlockFetcherFunc`. Every manifest and transaction request, the per-connection attempt, the connection-admission wait, and the tail retry wait inherit that context; cancelling a pipeline attempt or shutting down the node therefore releases the fetch instead of leaving it to contend with the next apply attempt. A direct fetch without a caller deadline is additionally capped at two minutes, matching the ledger-side certified-closure wait.
 
 The release signal deliberately does **not** come from the chainsync server's own `Protocol.DoneChan()`. A server callback runs inside gouroboros's `recvLoop`, which closes `recvDoneChan` only in its deferred exit, and `doneChan` closes only after `recvDoneChan` does — so for as long as the callback is parked, `DoneChan()` cannot close, and binding the wait to it would leave the timeout as the only effective bound. The waiter is instead released by `Ouroboros.ReleaseLeiosServeWaiters`, called from the node's `handleConnManagerClosed`, which the connection manager drives from its per-connection `ErrorChan` watcher goroutine — independent of the protocol callback, and (unlike the NtN-only `ConnectionClosedEventType`) the only close notification an NtC connection receives. `registerLeiosServeWaiter` re-checks connection liveness after registering, so a connection whose close already ran does not produce a wait nothing will release.
 
@@ -3825,6 +4119,14 @@ unreachable even once is almost certainly dead and endless redials to it waste
 dial capacity; local-root and bootstrap peers, and any peer that has connected
 at least once, keep retrying, and the drop is suppressed while the node has no
 eligible upstream so its last leads back onto the network are never discarded.
+
+Peer sharing is an address-validation boundary in both directions. The server
+callback exports only sharable, nonzero-port IP literals accepted by the shared
+peer-governor routability policy; operator-configured private peers remain
+usable locally but are not advertised. A received reply is capped to the
+requested count and is rechecked for valid, routable, non-reserved IP and port
+values before it reaches peer admission, so malformed or internal targets do
+not trigger DNS or outbound dialing.
 
 Ledger-peer discovery is demand-driven so the pool never collapses in the
 first place. While the node has fewer chain-selection-eligible upstreams than
@@ -4328,6 +4630,12 @@ trip, which can reduce inbound throughput on high-latency peer links. This is
 required because gouroboros acknowledges every ID returned by a peer; support
 for acknowledging only the fetched prefix would permit batched requests.
 
+TxSubmission checks reply counts and aggregate body bytes against the
+outstanding request before decoding any transaction. Replies exceeding the
+advertised byte budget are classified and counted as size mismatches. Replies
+within that budget still require ordered hash/era matching and an exact body
+or wrapped-wire size match for each transaction before any mempool admission.
+
 The selected pool manages pending transactions:
 
 ```
@@ -4479,7 +4787,7 @@ When running as a stake pool operator, Dingo can produce blocks. This involves t
 
 ### Leader Election (`ledger/leader/`)
 
-`Election` subscribes to epoch transition events and pre-computes a leader schedule for each epoch. The epoch provider supplies the era-aware absolute slot range for the epoch from `LedgerState.EpochInfo`, which is backed by the hard-fork summary; leader schedules must not derive the range as `epoch * slotsPerEpoch`, because Byron-era prefixes make that value wrong on preprod and mainnet. For each slot in the resolved range, it checks whether the pool's VRF output meets the threshold determined by the pool's relative stake as of the end of epoch E-2 (the reference node's active `set`/`nesPd` distribution). dingo captures `mark[K]` at the boundary into epoch K, holding stake as of the end of K-1, so that distribution is the Mark row for epoch E-1: `praos.StakeSnapshotEpoch(E)` returns E-1 (see "dingo storage indexing" under Stake Snapshots). Header validation uses the same Mark row except for the epoch imported from a Mithril snapshot, where it uses the imported active `pool-distr` stake fraction. Mark snapshots are captured from slot-aware delegation and UTxO state at the boundary slot; threshold failures are hard validation rejects once the decentralization parameter is inactive, and a pool absent from the epoch's Mark distribution is a hard reject mirroring the reference node's `VRFKeyUnknown`. Because that reject is hard while the stake feeding it is reconstructed locally rather than taken from the reference node, every eligibility decision — not only the failures — records `(threshold - leaderValue) / threshold` in the `dingo_ledger_leader_threshold_margin` histogram, and rejections also carry that margin in the error message and increment `dingo_ledger_leader_threshold_rejections_total`. A threshold comparison turns a relative stake error of eps into a flipped decision with probability about eps per block, so the margin distribution is what makes that error measurable: decisions clustering just above zero mean the local stake distribution is close enough to the boundary for a small discrepancy to reject a canonical block, whereas a rejection whose margin is not marginal indicates a genuinely ineligible producer or a derivation bug rather than a stake gap. While TPraos decentralization is still active (`d > 0`), header validation resolves the overlay schedule from Shelley genesis, checks that a genesis-delegate header is assigned to that overlay slot, and uses the latest on-chain genesis-key delegation row before the block slot before falling back to Shelley genesis. For Byron-prefixed networks, the first post-Byron overlay epoch's absolute start is repaired from the preceding era's end when a stale forecast row points earlier; this keeps preprod's first Shelley epoch anchored at slot 86400 without adding a network-specific hard-fork field to config. Normal pool headers still bind the header VRF key to the registered pool; local stake-threshold checks remain skipped until `d` is inactive. An epoch whose Mark row is entirely empty instead signals a dingo-side storage or computation gap (corrupt DB, incomplete Mithril import, pruned history) rather than pool ineligibility, and the reject message says so. Post-Mithril historical Mark rows captured at or after the target snapshot epoch's start slot are treated as import artifacts and skip only the stake-threshold eligibility check.
+`Election` subscribes to epoch transition events and pre-computes a leader schedule for each epoch. The epoch provider supplies the era-aware absolute slot range for the epoch from `LedgerState.EpochInfo`, which is backed by the hard-fork summary; leader schedules must not derive the range as `epoch * slotsPerEpoch`, because Byron-era prefixes make that value wrong on preprod and mainnet. For each slot in the resolved range, it checks whether the pool's VRF output meets the threshold determined by the pool's relative stake as of the end of epoch E-2 (the reference node's active `set`/`nesPd` distribution). dingo captures `mark[K]` at the boundary into epoch K, holding stake as of the end of K-1, so that distribution is the Mark row for epoch E-1: `praos.StakeSnapshotEpoch(E)` returns E-1 (see "dingo storage indexing" under Stake Snapshots). Header validation uses the same Mark row except for the epoch imported from a Mithril snapshot, where it uses the imported active `pool-distr` stake fraction. Mark snapshots are captured from slot-aware delegation and UTxO state at the boundary slot; threshold failures are hard validation rejects once the decentralization parameter is inactive, and a pool absent from the epoch's Mark distribution is a hard reject mirroring the reference node's `VRFKeyUnknown`. Because that reject is hard while the stake feeding it is reconstructed locally rather than taken from the reference node, every eligibility decision — not only the failures — records `(threshold - leaderValue) / threshold` in the `dingo_ledger_leader_threshold_margin` histogram, and rejections also carry that margin in the error message and increment `dingo_ledger_leader_threshold_rejections_total`. A threshold comparison turns a relative stake error of eps into a flipped decision with probability about eps per block, so the margin distribution is what makes that error measurable: decisions clustering just above zero mean the local stake distribution is close enough to the boundary for a small discrepancy to reject a canonical block, whereas a rejection whose margin is not marginal indicates a genuinely ineligible producer or a derivation bug rather than a stake gap. While TPraos decentralization is still active (`d > 0`), header validation resolves the overlay schedule from Shelley genesis, checks that a genesis-delegate header is assigned to that overlay slot, and uses the latest on-chain genesis-key delegation row before the block slot before falling back to Shelley genesis. For Byron-prefixed networks, the first post-Byron overlay epoch's absolute start is repaired from the preceding era's end when a stale forecast row points earlier; this keeps preprod's first Shelley epoch anchored at slot 86400 without adding a network-specific hard-fork field to config. Normal pool headers still bind the header VRF key to the registered pool; local stake-threshold checks remain skipped until `d` is inactive. An epoch whose Mark row is entirely empty instead signals a dingo-side storage or computation gap (corrupt DB, incomplete Mithril import, pruned history) rather than pool ineligibility, and the reject message says so. Post-Mithril historical Mark rows captured at or after the target snapshot epoch's start slot are treated as import artifacts whose stake-threshold eligibility cannot be evaluated: a standard profile rejects (deferring while the ledger apply cursor is still catching up), and only the explicitly selected prototype profile (`SkipLeaderStakeThresholdCheck`) skips the check and trusts the block.
 
 Both halves of sigma come from the same Mark row set for the same snapshot epoch, and the active slot coefficient `f` comes from the exact Shelley genesis rational (`LedgerState.ActiveSlotCoeffRat`), never from `ActiveSlotCoeff()`'s float64 form. `epochInfoAdapter` supplies it through the optional `leader.ActiveSlotCoeffRatProvider` interface, which `computeSchedule` prefers over the float64 accessor; header validation already used the exact rational, so the two paths now derive identical thresholds. The float64 round trip is one-sided: the nearest binary64 value to a genesis `0.05` is strictly greater than 1/20, so a threshold derived from it strictly contains the reference node's acceptance region and can only over-claim leader slots. `ScheduleFormatVersion` is bumped whenever the compute path changes, because `validatePersistedSchedule` re-checks the epoch nonce and both sigma inputs but not `f`. Each computed schedule logs one `leader schedule calculated` record carrying every leader-check input — snapshot epoch and type, epoch slot range, epoch nonce, pool and total stake, `f`, consensus mode, and the certified-natural threshold — so a schedule that disagrees with `cardano-cli query leadership-schedule` can be diffed against the reference node's `query stake-snapshot` and `query protocol-state` from logs alone.
 
@@ -4679,6 +4987,16 @@ requires the same validated interval; `PoolCredentials.KESSign` remains the
 lower-level cryptographic primitive used by credential tooling and tests that
 may not have Shelley genesis context.
 
+### Leios Announcement Admission (`ouroboros/`)
+
+After header validation, at most two distinct ranking-block announcements are
+retained for each slot/issuer election within the announcement retention window.
+The election budget is shared across relay sources and reconnects; a connection
+identifier does not create a new election. An already-recorded header remains
+an idempotent duplicate even after the budget is full. Another slot or issuer
+has an independent budget. Rejected third headers are neither retained nor added
+to the relay log.
+
 ### Leios Voting (`ledger/leios/`)
 
 Experimental CIP-0164 stake-truncated committee voting, active only under the Dijkstra/Leios gate. `VoteManager` collects, validates, serves, and emits Leios votes:
@@ -4700,8 +5018,8 @@ Experimental CIP-0164 Linear Leios stage/timing orchestration, active only under
 - **Stages and timing**: an endorser block advances `produce → diffuse → vote → certify → eligible → expired`, derived purely from the distance between its produce slot and the current slot (plus whether a certificate has been observed) by the single `stageFor` function. The per-phase window lengths live in one provisional `PipelineTiming` struct (off-chain, overridable via `WithLeiosPipelineTiming`) because CIP-0164 has not finalized them; they are not protocol parameters. Window decisions are slot-driven via `SlotProvider.CurrentOrTipSlot` (the `SlotClock` is private to `LedgerState`), mirroring how `VoteManager` advances. The pipeline's `VoteWindowSlots` is the single source for `VoteManager`'s vote-acceptance past bound (a vote is rejected once its slot is `VoteWindowSlots` or more behind the current slot), passed via `VoteManagerConfig` so the two components admit votes over the same window. Each EB's current stage is surfaced via the `pipeline_ebs_by_stage` gauge and the read-only `StageOf` query.
 - **EB equivocation**: a second distinct endorser block observed for the same slot flags *all* of that slot's blocks as equivocated and excludes them from ranking-block eligibility. Because the CIP-0164 endorser block carries no producer identity yet, the pipeline keys equivocation on slot and cannot pick a winner — distinct from `VoteManager`'s `(slot, voter_id)` first-vote-wins, which protects the tally rather than inclusion.
 - **Certification and inclusion (Stage 3)**: on `leios.eb_quorum` the pipeline marks the matching block certified, capturing the built certificate verbatim (never rebuilt). A certificate arriving at or past `CertifyByDeadlineSlots` is rejected (counted under `pipeline_certs_rejected_total{reason="late"}`): an already-tracked EB stays tracked but is never certified, so it cannot become eligible, and an untracked one is not created at all. A quorum event for an endorser block the pipeline is not tracking creates state only while its `AnnouncingRbHash` is still a ranking block on our chain; otherwise it is discarded under `pipeline_certs_rejected_total{reason="non_canonical_announcement"}`. `VoteManager` builds the quorum event under its own lock and publishes it after releasing it, and the pipeline consumes quorum and chain updates on separate subscriptions, so a rollback can be handled in between: without that check the stale event resurrected the instance the rollback had dropped, which made the replacement chain's endorser block for the same produce slot look like equivocation and made `MayProduceEndorserBlock` deny the local producer for that slot (issue #3600). `EligibleCertifiedEbs` returns the certified, non-equivocated, not-yet-embedded blocks within their inclusion window; `MarkEmbedded` records inclusion after the forger's CertRB is adopted. A Dijkstra ranking block references its endorser block through the Leios header extension `[eb_hash, eb_size]` (`DijkstraBlockHeader.LeiosAnnouncement`), while a CertRB carries the prototype's block-body `leios_certificate` and certifies the endorser block announced by its parent. For ledger application the endorser transactions are not spliced into the ranking-block CBOR — the header's `block_body_hash` covers only the ranking block's own body, so an on-chain spliced block would fail body-hash verification — and are instead applied (on the CIP-conformant path; see "Era-Specific Validation") by `ledgerProcessBlock` as a ledger-internal side delta when the referencing ranking block is processed, ahead of the ranking block's own transactions (which spend the endorser-resident outputs). The node-to-client serve path is the deliberate exception: matching the prototype, `mergedLeiosRankingBlockCbor` (`ouroboros/leios_merged.go`) inlines a certifying ranking block's endorser transactions into the served block via `spliceEndorserTxsIntoDijkstraBlock`, resolving the endorser block from the immediately-preceding block's `leios_announcement` (the prototype's prevAnn mechanism). It preserves the header verbatim, so the served block's `block_body_hash` is deliberately stale — acceptable over node-to-client because local clients trust the node and do not re-verify the body hash. Historical endorser blocks are fetched by point during catch-up and persisted for later serving, so a synced dingo relay can re-serve EBs it has already fetched even after the pipeline's in-memory observation state has expired.
-- **Producer seam**: `MayProduceEndorserBlock(slot)` reports whether an EB may be forged for a slot at the current slot. Node wiring adapts the same pipeline manager to `forging.LeiosCertificateProvider`, and adapts the primary chain tip to `forging.LeiosParentAnnouncementProvider`, so the forge loop filters `EligibleCertifiedEbs` to the EB announced by the parent ranking block and calls `MarkEmbedded` only after adoption.
-- **State lifecycle**: all state is in-memory — pipeline instances keyed by produce slot, indexed by EB hash, plus the slot of every ranking block seen added to the chain (the canonicality check above; the pipeline takes `chain.ChainBlockEvent` and `chain.ChainRollbackEvent` off the same `chain.update` subscription, so both are applied in the order the chain produced them). Instances are lazily pruned past their TTL on each query/observation, flushed at epoch transitions (older than the previous epoch), and dropped past the rollback point on chain rollbacks so a re-produced EB is not mistaken for equivocation; ranking-block records are dropped on the same two paths, which bounds them to one instance-TTL window of canonical blocks. Committee/stake-snapshot rotation needs no pipeline logic: it consumes already-built certificates and inherits `VoteManager`'s epoch-2 snapshot selection.
+- **Producer seam**: `MayProduceEndorserBlock(slot)` reports whether an EB may be forged for a slot at the current slot. Node wiring adapts the same pipeline manager to `forging.LeiosCertificateProvider`, and adapts the primary chain tip to `forging.LeiosParentAnnouncementProvider`, so the forge loop filters `EligibleCertifiedEbs` to the EB announced by the parent ranking block and calls `MarkEmbedded(slot, hash)` only after adoption, using the selected certificate’s produce slot. Identical EB content observed at another slot remains a separate occurrence. Custom `LeiosCertificateProvider` implementations must accept the selected EB slot in `MarkEndorserBlockEmbedded(hash, slot)`; direct pipeline callers must supply both arguments to `MarkEmbedded(slot, hash)`.
+- **State lifecycle**: all state is in-memory — pipeline instances keyed by produce slot, each containing an EB-hash map used by quorum, stage and embedding lookups, plus the slot of every ranking block seen added to the chain (the canonicality check above; the pipeline takes `chain.ChainBlockEvent` and `chain.ChainRollbackEvent` off the same `chain.update` subscription, so both are applied in the order the chain produced them). Instances are lazily pruned past their TTL on each query/observation, flushed at epoch transitions (older than the previous epoch), and dropped past the rollback point on chain rollbacks so a re-produced EB is not mistaken for equivocation; ranking-block records are dropped on the same two paths, which bounds them to one instance-TTL window of canonical blocks. Committee/stake-snapshot rotation needs no pipeline logic: it consumes already-built certificates and inherits `VoteManager`'s epoch-2 snapshot selection.
 
 The manager implements the `ouroboros.LeiosPipelineHandler` interface (`ObserveEndorserBlock`) and is assigned to the Ouroboros component post-construction, alongside the vote handler; `storeLeiosEndorserBlock` notifies it after the vote manager. In node startup it is constructed and started after `VoteManager` and torn down before it (LIFO), since it depends on the vote manager's `leios.eb_quorum` output.
 
@@ -5305,7 +5623,8 @@ the database state alone, so the operator never needs to know it:
 
 - empty database -> full bootstrap
 - non-empty `sync_status` (`in_progress`, `backfill`, or an unknown future
-  value) -> resume the existing path, except an interrupted v2 core catch-up
+  value) -> resume the existing path against the pinned artifact (below),
+  except an interrupted v2 core catch-up
   (import marker present, or the ephemeral `mithril_catchup_active` flag for a
   markerless catch-up) re-runs as a catch-up so the reconcile pass repairs the
   partial import
@@ -5344,6 +5663,60 @@ deleted. Complete API-mode databases with an immutable marker are rejected
 because incremental metadata replacement is not implemented; markerless API
 databases and the v1 backend use the bootstrap path. The marker is written
 after sync completion clears `sync_status`, so it survives across runs.
+
+### Artifact pinning across interrupted imports
+
+A sync run records the artifact it selected in `sync_state`
+(`mithril_pinned_artifact`: backend, network, digest/hash, beacon, certificate
+hash, and — once the certified ImmutableDB is open — the certified tip slot).
+The pin is written from `BootstrapConfig.OnArtifactSelected`, which both
+backends invoke after the artifact is identity-checked and, when enabled,
+certificate-verified, and before the first byte is downloaded. It is ephemeral:
+`ClearSyncState` on sync completion wipes it, so its presence means a run is
+mid-flight against that artifact.
+
+A resuming run (`sync_status` non-empty) passes the pinned digest to
+`BootstrapConfig.PinnedDigest`, which resolves that exact artifact
+(`GetCardanoDatabaseSnapshot` for v2, `GetSnapshot` for v1) instead of the
+aggregator's latest. Without the pin, `Bootstrap` re-resolves the latest
+artifact on every run: if the aggregator advanced during the interruption, the
+resume imports a second snapshot's ledger state over the first's partially
+imported rows. The bootstrap path imports with `ImportConfig.Reconcile` off and
+the metadata import is insert-if-absent, so nothing removes the first
+snapshot's rows — the database keeps the union of both snapshots' live sets
+(UTxOs spent between the two artifacts stay unspent, and accounts, pools and
+DReps the newer snapshot dropped stay active). The ledger-state phase
+checkpoints do not catch this either: they are keyed `"{digest}:{slot}"`, so a
+different artifact simply reads as a fresh import.
+
+The resume is fail-closed rather than best-effort. It aborts with an explicit
+recovery instruction when the pin is absent (an in-progress marker written by a
+build without pinning), when the pin names another backend or network, when the
+aggregator no longer serves the pinned artifact or answers it with a different
+beacon, or when the reused extraction cache produces a certified ImmutableDB tip
+other than the one recorded. The one exception is an interrupted *catch-up*
+without a pin: catch-up imports with `Reconcile` on, which marks every live row
+absent from the newly selected snapshot inactive, so re-selecting a newer
+artifact cannot leave the interrupted one's rows behind. A fresh bootstrap
+(clear `sync_status`) always takes the latest artifact.
+
+### Immutable archive digest diagnosis
+
+Every immutable trio is checked against the artifact's digest list, which is
+itself verified against the certificate's merkle root before any archive is
+fetched, so bytes that disagree with it are refused and never imported. When no
+source produces a matching trio, `downloadImmutables` returns an
+`ImmutableArchiveError` carrying the artifact hash and beacon, the immutable
+file number, and one `ImmutableArchiveAttempt` per source tried — the local
+extraction cache (recorded separately, and the trio removed, so a rejected
+cache is never confused with a replica) and each published location, by
+redacted URI. Location URIs are reduced to scheme, host and path, because
+cloud-storage locations are pre-signed and carry credentials in the query
+string. When every published location was rejected for a digest mismatch on the
+same file with the same observed digest, the error says so explicitly: the
+archive as published disagrees with its own certificate, rather than one
+replica being stale, and that is what an operator reports to the aggregator
+operator. None of this relaxes the check.
 
 The `mithril/` package itself has no internal Dingo imports. Database import,
 ledger-state import, ImmutableDB loading, and API-mode metadata backfill are
@@ -5420,7 +5793,10 @@ retains the exact certified import anchor; existing databases from the older
 importer carry that same anchor. Inbound header validation recognizes this
 anchor provenance as the same certified bundle. Only historical Mark rows
 reconstructed from current live state after their target boundary remain
-unsuitable for hard stake-threshold rejection and keep the conservative bypass.
+unsuitable for a hard stake-threshold comparison. Inbound header validation
+treats that state as unevaluable rather than automatically eligible: a standard
+profile rejects (deferring while the ledger apply cursor is still catching up),
+and only the explicitly selected prototype profile skips the check.
 
 Mithril sync only uses a ledger state as the local trust anchor when its point
 is at or below the certificate-backed ImmutableDB tip. Ancillary archives can
@@ -5793,10 +6169,13 @@ transaction content/CBOR/metadata/UTxOs/certificates/redeemers/required
 signers, and account/delegation/registration/reward/UTxOs/withdrawals/
 transactions endpoints. It uses an adapter pattern to translate between
 Dingo's internal state and Blockfrost response types and supports
-Blockfrost-style pagination headers. The root document is served only at the
-literal `/` path (`GET /{$}`); any other unregistered path falls through to a
-catch-all `404` handler instead of the root document, matching real
-Blockfrost's behavior for unimplemented routes.
+Blockfrost-style pagination headers. Pool and account list routes reject
+out-of-range count and page values before calling the adapter, using the
+shared strict pagination parser (count 1–100, page 1–21474836).
+The root document is served only at the literal `/` path (`GET /{$}`); any
+other unregistered path falls through to a catch-all `404` handler instead
+of the root document, matching real Blockfrost's behavior for unimplemented
+routes.
 
 The account UTxOs, withdrawals, and transactions endpoints resolve everything
 by stake credential rather than a single address. Account UTxOs reuse the
@@ -5910,10 +6289,21 @@ above. CIP-68 datum metadata is not yet sourced and returns `null`.
 
 ### Mesh API (`api/mesh/`)
 
+Construction requests reject null operation, public-key, and signature elements
+before dereferencing them. Input indices must fit both the constructor's native
+integer and the serialized uint32 field; invalid inputs return the existing
+request error instead of panicking inside the handler.
+
 TLS and token authentication are configured through
 `plugins.api.mesh.config.tls`/`config.auth`; see "API security" above.
 
 Implements the Mesh (formerly Rosetta) API specification for wallet integration and chain analysis. Provides endpoints for network status, account balances, block queries, transaction construction, and mempool access.
+
+Mesh `network/status` reports `synced` only when the optional ledger sync
+progress capability reports 1: the applied ledger has caught up with its known
+upstream target. Missing or unknown progress reports false. This is not a
+peer-freshness or node-readiness check; the response retains its current block
+identifier independently of the applied-ledger progress.
 
 Request bodies are bounded in two dimensions, because either bound alone
 leaves a handler goroutine reachable indefinitely. `maxRequestBody` (1 MiB)
@@ -5957,6 +6347,11 @@ Two contracts follow from that boundary:
 
 ### UTxO RPC (`api/utxorpc/`)
 
+Transaction `MintsAsset` predicates inspect nonzero signed quantities in the
+transaction mint field, matching both minting and burning. A policy-only pattern
+matches any nonzero asset under that policy. Transfers alone do not satisfy this
+predicate; `MovesAsset` retains its output and resolved-input matching behavior.
+
 Each Connect message is bounded to `DefaultMaxRequestBody` (1 MiB) with
 Connect's `WithReadMaxBytes` option. The limit applies to both compressed wire
 bytes and decompressed message bytes before unary decoding reaches the
@@ -5964,6 +6359,11 @@ authentication interceptor; streaming RPCs retain per-message rather than
 whole-stream bounds.
 
 A gRPC server implementing the UTxO RPC specification with query, submit, sync, and watch services. The same listener exposes both the `utxorpc.v1alpha` and `utxorpc.v1beta` service namespaces. Every method other than v1beta's additional `QueryService.ReadState` is wire-compatible across the two, so the beta routes rewrite the service path onto the alpha handlers; `ReadState` is served by `betaQueryServiceServer` (`api/utxorpc/readstate.go`) instead. It answers the one Cardano state query v1beta defines, `GetStakePoolDistribution`, from `ledger.LedgerState.PoolStakeDistribution` — the same read that backs the node-to-client `GetPoolDistr2` query. The `ledger_tip` it reports is the tip that read took inside its own transaction, carried back on the result, rather than one sampled while building the reply: the two can straddle an epoch boundary, and a later tip would name an epoch whose stake snapshot is not the one the reply carries. Its `height` comes from that same carried tip's block number rather than from a separate lookup of the tip's stored block, as it does for every tip this listener reports (`ReadTip` already did; `ReadParams`, `ReadUtxos`, `SearchUtxos`, `ReadData`, `ReadTx`, and `ReadState` were brought in line): the height is already known at the point the slot and hash are, and `height` is a plain proto3 `uint64` with no encoding for "unknown", so a zero — whether from a failed lookup or from never populating the field — asserts that the tip is the origin block rather than admitting the height could not be read. Chain points that name something other than a tip, such as the `block_ref` on a returned transaction, still come from that block's own stored model. `LedgerState` is an optional dependency that `Utxorpc.Start` admits as an untyped nil, so the handler checks it per request and reports `Unavailable` rather than panicking. The `pool_keyhashes` filter is capped by `MaxPoolFilter` (default 1000), like the `ReadUtxos` and `ReadData` key lists, since it sizes the snapshot and registration reads it drives; asking for every pool is an empty filter and one bulk read. An empty `pool_keyhashes` means every pool, per the proto; a filter entry that is not 28 bytes is rejected as `InvalidArgument` rather than padded or truncated into a different pool. Because the protobuf `RationalNumber` is an int32 over a uint32, a stake fraction whose exact ratio does not fit — the normal case on a real network, where the denominator is total active stake in lovelace — is rescaled onto a fixed denominator of 1e9 rather than failing. `newServeMux` is the single wiring site for the routing table, and one service-name list (`servedServiceNames`) feeds the `grpc_health_v1` checker and both reflection wire versions, so `grpc.reflection.v1` and `grpc.reflection.v1alpha` clients discover the same services — v1alpha is an older reflection protocol, not an older API surface. TLS and token authentication are configured through the shared `plugins.api.utxorpc.config.tls`/`config.auth` surface described in "API security" above (applied to every Connect/gRPC handler this listener serves, including health and reflection), not a UTxO RPC-specific mechanism; the legacy process-level `tlsCertFilePath`/`tlsKeyFilePath` fields remain a supported, UTxO RPC-only default for that same `tls` policy.
+
+`WaitForTx` rejects references that are not exactly 32 bytes before logging,
+allocating pending state, subscribing, or looking up transactions. Empty
+reference lists remain a no-op. Duplicate references are deduplicated in
+first-request order for committed-state lookup.
 
 `WaitForTx` reports `STAGE_CONFIRMED` from current active-chain transaction
 metadata or a forward `ledger.tx` `TransactionEvent`. Persisted metadata is
@@ -5979,6 +6379,11 @@ for a later committed apply. Event delivery is ordered, so a committed apply
 already queued ahead of an undo may still produce a confirmation; the undo is
 ignored because the UTxO RPC stage stream has no reversal message and does not
 retract a confirmation already sent.
+
+`FollowTip` and `WatchTx` reject intersection lists longer than `MaxBlockRefs`
+(default 100), using the same invalid-argument error as `FetchBlock`. The cap
+applies before logging, point allocation, or ledger lookup, including duplicate
+references. Empty lists retain the current-tip fallback.
 
 `WatchTx` retains up to 256 forward blocks in a per-stream undo history. A
 rollback within that history builds its `Undo` responses without reading
@@ -6327,7 +6732,39 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   either: within `--grace-hours` of the epoch closing it is `reference_lag`
   (reward calculation may simply not have finished yet); past that window it is
   `dingo_db_missing` (a genuine gap in Dingo's own computation). Both are
-  `ERROR`, never a silent `PASS`. `ComparePoolEpoch` applies the identical
+  `ERROR`, never a silent `PASS`.
+
+  **Reward timing (dingo #3852/#3857).** `reference_lag` has a second trigger
+  that is a chain position rather than a wall clock:
+  `DingoPoolEpochData.RewardsPending`, set when the node's tip has not yet
+  reached the boundary at which stake epoch E's rewards are applied (the
+  boundary into E+3, or the pool's own `reward_pool_output.boundary_slot`).
+  Before that point Dingo's reward figures are still provisional — the
+  spendable flags are not final, so Dingo reads high by forfeitures that have
+  not happened yet — and a row it has not written yet is absent for a reason
+  that is not a divergence. Both `ComparePoolEpoch` and `CompareAccountEpoch`
+  fold that into `reference_lag`, for presence and for amount alike.
+
+  The wall-clock window alone is not enough because it compares against the
+  epoch's real close time: during a from-genesis replay that is years in the
+  past, so the grace window can never fire and every not-yet-computed row
+  reads as a hard gap. The chain-position form is the one that survives a
+  replay.
+
+  A source that cannot establish the boundary must never set the flag. Only a
+  genuinely absent applying-epoch row asserts that the node has not reached it;
+  an absent or hashless `tip` row leaves the comparison strict, and a failed
+  epoch lookup or an epoch row whose start slot is NULL or negative fails the
+  whole read closed so the epoch is reported `dingo_db_error` rather than
+  silently compared against a boundary nobody established. At account
+  granularity,
+  `checkEpoch`'s `accountRewardsPending` requires *every* pool entry to report
+  pending before it downgrades the epoch's account comparison, so one pool
+  sitting before its own boundary cannot waive the rest, and an empty or
+  nil-bearing map claims nothing.
+
+  Both categories stay `ERROR`, so this only ever moves a `FAIL` to an
+  `ERROR` — never to a `PASS`. `ComparePoolEpoch` applies the identical
   presence/grace split to `reward_pool_input`'s param-epoch field
   (`blocks_produced` alone, reported as `reward_pool_input_params` when
   absent) via `DingoPoolEpochData.ParamsPresent`, for the same reason: a
@@ -6426,8 +6863,10 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
 
 **Mismatch categories:** `value_mismatch`, `pool_only_dingo`, `pool_only_koios`,
 `dingo_db_missing` (epoch/pool row not yet computed by Dingo), `dingo_db_error`
-(DB query failed), `reference_lag` (epoch closed within --grace-hours; absence
-may be transient), `pool_departed` (informational: the pool left the pool set
+(DB query failed), `reference_lag` (absence may be transient — either the epoch
+closed within --grace-hours, or the chain tip has not yet reached the boundary
+that applies this stake epoch's rewards; see "Reward timing" below),
+`pool_departed` (informational: the pool left the pool set
 at K+1, so its epoch-K block count has no row to live on), plus #3097's
 per-account categories: `acct_only_dingo`,
 `acct_only_koios`, `acct_duplicate` (a genuine duplicate (stake_address,
@@ -6745,6 +7184,108 @@ never the reverse.
   long crawl is distinguishable from a stalled one; the logger is a parameter
   rather than a client field because the same client serves the concurrent
   chunk fetchers.
+- **Koios host.** `koiosBaseURLs` maps the network to the public
+  `*.koios.rest` v1 root, and `KoiosParityConfig.BaseURL`
+  (`--koios-parity-base-url`, `DINGO_KOIOS_PARITY_BASE_URL`, and `--koios-url`
+  / `KOIOS_URL` on the standalone CLI) overrides it for a self-hosted or
+  mirrored instance. A custom host also drops the burst cap:
+  `koiosBurstLimitSafe` describes koios.rest's own published Public/Free
+  window and says nothing about another deployment, so applying it there would
+  throttle against a limit that does not exist. Per-request retry, timeout and
+  429 backoff are unchanged, so a host that *does* rate-limit still behaves
+  correctly. `NewKoiosClient` runs `validateKoiosNetwork` before it applies the
+  override, so an override cannot be used to reach a network the tool does not
+  support — that check is what keeps `StakeAddressFromCredential`, which
+  hardcodes the testnet address network ID, from being handed a network it
+  would silently generate wrong-network stake addresses for. The override
+  itself is validated too: a custom host must be `https`, since `get` and
+  `post` attach the API key as a Bearer token to every request and forged
+  reference data can make a comparison report a false PASS. `AllowInsecureHTTP` is the local dev/test escape
+  hatch, mirroring `Mithril.AllowInsecureHTTP` —
+  `--koios-parity-allow-insecure-http` on the node, and
+  `--koios-allow-insecure-http` / `KOIOS_ALLOW_INSECURE_HTTP` on the standalone
+  CLI, where an explicitly-set flag beats the environment per CLAUDE.md's
+  CLI > env rule. A custom root must also carry no query string or fragment,
+  since `get` and `post` append an endpoint path and their own query to it and
+  would otherwise reach a different endpoint than intended. Validation errors
+  never echo the URL, because the value they describe is the one
+  `logURIConfigFields` exists to keep out of logs. `KoiosParity.BaseURL` is classified as
+  a URI field for logging (`logURIConfigFields`), not a plain one, because an
+  operator can embed credentials in it.
+- **Koios source provenance.** Every Koios table is keyed by `(network,
+  epoch)` and records nothing about which deployment answered, so once a row is
+  written a self-hosted mirror's answer and the public host's answer are the
+  same row. Left alone, that makes a run against the wrong oracle produce a
+  report indistinguishable from a run against the right one — the failure mode
+  the override introduces. `koios_source` records the resolved API root per
+  network, and `Cache.RecordKoiosSource` discards that network's Koios and
+  derived check rows (`koiosSourcedTables`) when the root changes, rather than
+  silently mixing two oracles in one comparison. Invalidation is destructive on
+  purpose: the rows are a cache of another system's answers and are rebuildable
+  by fetching again, whereas anything weaker leaves the mixed-oracle report
+  reachable. It is scoped to the network whose source changed, since the root
+  is resolved per network. The recorded value is
+  `KoiosClient.ResolvedBaseURL()`, which strips userinfo — validation already
+  rejects a query and a fragment, so that is the only place a credential can
+  survive — which also makes a rotated key against the same host read as the
+  same oracle. A cache with nothing recorded is attributed to the built-in
+  public root rather than to whatever root is in use now, since no build
+  without the column had an override to apply: an upgraded cache is adopted by
+  a public-host run and discarded by a custom-host one, instead of the
+  mirror silently inheriting the public host's answers. The destructive step is
+  gated on the new host answering `/tip`, so a mistyped host fails with the
+  cache intact rather than costing a full historical refetch; only a run that
+  would actually discard pays for that probe. `Fetch` and `Observer.Start`
+  both record and log the resolved root once at startup — `Start` rather than
+  `NewObserver` because the probe needs a context and a startup the caller can
+  fail — because the node's config dump names the configured value only for
+  the in-process observer and says nothing on the `fetch`/`run`/`watch` paths.
+  Recording alone only invalidates the rows present when it runs, so the eight
+  writes that carry the check verify, inside their own transaction, that the
+  cache still holds the root this handle claimed: `CommitEpochData`,
+  `CommitAccountRewardsForEpoch`, `SaveAccountFetchChunkProgress`,
+  `SaveAccountUniverse` and `UpsertEpochParams` on the fetch side, and
+  `CommitEpochMismatches`, `UpsertCheckEpochStatus` and `InsertCheckRun` on the
+  check side. `UpsertEpochParams` carries it because `fetchEpochParamsOnly`
+  reaches it without going through `CommitEpochData`, making the parameter
+  backfill a second way Koios answers enter the cache.
+  Each verifies after its own writes and immediately before `COMMIT` rather
+  than on entry: a transaction whose first statement is a read opens as a WAL
+  reader, and its first write must then upgrade to a writer, which a
+  concurrent commit from any other handle on the same file turns into
+  `SQLITE_BUSY_SNAPSHOT` — a stale snapshot rather than lock contention, so
+  `busy_timeout` cannot wait it out. Writing first takes SQLite's writer slot
+  immediately, and the check then reads under a lock no other connection can
+  commit against, so the refusal is no less atomic against a concurrent
+  `RecordKoiosSource` and a refused write is still rolled back.
+  `RecordKoiosSource` itself has to read the previous root before it can
+  decide what to discard, so its read cannot move after its writes; it claims
+  the slot with a no-op `UPDATE` first instead. No `Cache` transaction reads
+  before it writes.
+  That is the set the check is on, not every statement that reaches a
+  Koios-sourced table. `PruneAccountCoverage` and
+  `InvalidateStaleAccountChunks` only delete rows, `DeleteEpochParams` and
+  `MarkAccountCoverageIncomplete` delete or flag one, and
+  `backfillZeroRewardSummaries` recomputes a derived column from rows already
+  present, during `createCacheSchema` and so before any handle has claimed a
+  source; none of them can carry a second host's answers. `UpsertEpochInfo` and
+  `UpsertPoolEpoch` would, but have no callers, so wiring either up means
+  giving it the check.
+  The default cache path is shared across the standalone commands and the
+  in-process observer, so an observer on one host and a `fetch --koios-url` on
+  another are a reachable pair; without the check the older
+  client would go on appending its host's answers under the newer host's
+  marker. A handle that never recorded a source enforces nothing, which keeps
+  `status` and `explain` working against a cache someone else stamped. `Check`
+  writes verdicts derived from the cache but has no client to name a source, so
+  it calls `PinRecordedSource` at startup and claims whatever is recorded: the
+  same re-point that discards check evidence then fails that run's three of
+  those eight writes instead of letting it repopulate them under a source its
+  verdicts never saw. An
+  unstamped cache pins the public root it is attributed to rather than pinning
+  nothing, and `assertClaimedSource` compares attributions rather than raw
+  rows, so a legacy cache keeps writing while it stays unstamped and stops the
+  moment another process stamps it with a different host.
 - **Koios endpoint.** `/account_rewards` is deprecated; `/account_reward_
   history` is the replacement (`KoiosClient.GetAccountRewardHistory`), taking
   the same `stake_addresses_with_epoch_no` POST body shape via a new `post()`
@@ -6916,9 +7457,14 @@ never the reverse.
   lag in publishing `/account_reward_history` for a just-closed epoch the
   same way it can lag on any other endpoint) both fall back to
   `reference_lag` within the grace window rather than only the
-  Koios-side direction. The zero-value test runs first and wins: a one-sided
-  row worth zero is `acct_zero_reward_row` even inside the grace window,
-  because a zero row is not a value the other side can still publish later.
+  Koios-side direction. Three tests apply, in this order. The zero-value test
+  runs first and wins: a one-sided row worth zero is `acct_zero_reward_row`
+  even inside the grace window, because a zero row is not a value the other
+  side can still publish later. Next is the chain-position trigger described
+  under "Reward timing" above, for presence and amount alike, via
+  `checkEpoch`'s `accountRewardsPending`; it precedes the wall-clock grace
+  window because it is the form that survives a replay, where the epoch's real
+  close time is years in the past and the window can never fire.
 - **Strict-mode propagation.** An account-level `FAIL` flows through
   `DetermineStatus` (any `acct_only_dingo`/`acct_only_koios`/`acct_duplicate`
   forces `FAIL`, exactly like the pool-level categories — except a one-sided
@@ -6995,17 +7541,19 @@ every one of #3097's own tests passes unmodified.
   them and only re-fetches whatever never completed, instead of redoing the
   whole epoch from scratch. Once every chunk in the current plan is
   checkpointed, `Cache.GetStagedAccountRows` reads them all back and calls
-  the existing, unmodified `Cache.CommitAccountRewardsForEpoch` exactly
+  `Cache.CommitAccountRewardsForEpoch` exactly
   once — the same atomic replace-and-gate #3097 always used, now fed from
-  durable staging instead of an in-memory slice. **Neither staging table is
-  ever bulk-cleared after a successful commit** — `koios_account_checked`
-  must persist indefinitely since the zero-reward/lifecycle reporting below
-  reads it long after the fetch completes, and `koios_account_fetch_staged_rows`
-  must persist too so a later idempotent re-run of an already-complete epoch
-  with an unchanged universe finds real rows to re-commit instead of
-  committing an empty set over the correct one; the two tables grow at the
-  same rate `koios_account_rewards` itself already does, which is an accepted
-  characteristic of this cache, not a new problem. `--force-refresh`
+  durable staging instead of an in-memory slice. The two checkpoint tables
+  are retained through the successful commit so a same-epoch idempotent
+  retry can reuse them, then `Cache.PruneAccountCoverage` evicts both tables
+  outside the rolling four-epoch account checkpoint window after the batch
+  worker group has joined (or after the observer's sequential epoch check).
+  An evicted incomplete epoch is correct to refetch from scratch; retaining
+  failed checkpoints forever would make repeated backfills unbounded.
+  `koios_account_rewards` and `koios_account_coverage` are not evicted: the
+  former remains the authoritative exact-comparison input, and the latter
+  stores the exact zero-reward count plus a capped sample for historical
+  lifecycle reporting. `--force-refresh`
   (`FetchConfig.ForceRefresh`, threaded to `fetchAccountRewardsForEpoch` as
   `forceRefresh`) is the one caller that deliberately bypasses the "trust an
   already-checkpointed chunk" behavior — without it, an unchanged address
@@ -7127,10 +7675,12 @@ every one of #3097's own tests passes unmodified.
   compares keys present in at least one side's row map, so a
   confirmed-zero-reward address (Koios answered, no reward, so no row is
   ever emitted for it) never enters that comparison at all — this half is
-  read from `koios_account_checked` (`Cache.GetZeroRewardAccountsForEpoch`).
-  That is a distinct case from a row Koios *does* emit whose amount is zero,
-  which reaches `CompareAccountEpoch` normally and is reported as
-  `acct_zero_reward_row`; preview publishes zero-earned leader rows.
+  read from the coverage row's exact count and capped sample
+  (`Cache.GetZeroRewardSummary`), with a bounded legacy fallback to
+  `koios_account_checked` (`Cache.GetZeroRewardAccountsForEpoch`). That is a
+  distinct case from a row Koios *does* emit whose amount is zero, which reaches
+  `CompareAccountEpoch` normally and is reported as `acct_zero_reward_row`;
+  preview publishes zero-earned leader rows.
   Newly-registered/deregistered accounts are diffed from **Dingo's own
   epoch-scoped `reward_account_output` rows** at the current and previous
   stake epoch (`dingo.GetRewardAccountOutputs`, decoded via
@@ -7335,15 +7885,63 @@ services. It exposes archive access over Connect/gRPC and supplies the remote
 archive adapter used by nodes that want historical fallback.
 
 The server side (`bark.Bark`) registers the archive service, health endpoint,
-and gRPC reflection. Archive fetches validate the requested block hash, ask the
-active blob plugin for a signed block URL, and return that URL with block type,
-height, and previous-hash metadata. In practice this makes `s3` and `gcs` the
-archive-node blob backends because they can sign object-storage URLs.
+and gRPC reflection. Archive fetches ask the active blob plugin for a signed
+block URL and return it with block type, height, and previous-hash metadata. In
+practice this makes `s3` and `gcs` the archive-node blob backends because they
+can sign object-storage URLs.
+
+`FetchBlock` resolves each `BlockRef` in the batch by hash and slot together,
+then hash, then slot, then height. Hash and slot together already are the blob
+store's block key, so that case needs no index read and still resolves a block
+written before the hash index existed -- the historical range an archive
+serves. Hash alone is the only identifier unique across forks and resolves
+through the O(1) hash index; slot alone needs a bounded prefix scan; height
+alone is last because block numbers are not indexed at all and resolving one is
+a binary search over the block-ID space (`database.BlockByNumberBounded`).
+Because the point is built from the identifiers the client supplied, hash and
+slot agree with the answer by construction; height is checked against the block
+metadata afterwards.
+
+That binary search is bounded above by the highest indexed block, and reading
+that bound is a reverse iteration over the block index, which `s3` and `gcs`
+answer by listing every block-index object in the bucket. `ArchiveService` is
+registered without the operator auth interceptor, so `FetchBlock` resolves the
+bound once for the whole batch and only when the batch actually contains a
+height-only reference — resolving it per reference would let one anonymous
+request carrying `DefaultMaxFetchBlockRefs` height-only references cost that
+many full-bucket enumerations. A batch of hash+slot references touches no index
+at all.
+
+The batch is answered as a whole. A reference that names no stored block --
+absent, or carrying a height belonging to a different block -- is returned in
+`FetchBlockResponse.not_found` carrying exactly the identifiers the client
+supplied, and every other reference in the batch is still served. Each returned
+`SignedUrl.block` echoes the supplied identifiers verbatim and fills in the
+ones the client omitted, so a hash-only or height-only caller learns the full
+identity. Only a malformed request (no identifier at all, or a hash that is not
+32 hex-encoded bytes) or a genuine storage failure fails the whole call, the
+former with `InvalidArgument`.
+
+A resolved-but-unservable block is the exception to batching, and fails the
+whole call. When a reference resolved through a lookup -- hash alone, slot
+alone, or height alone -- and the blob store then reports the block missing on
+`GetBlockURL`, the index and the blob store disagree, which is a storage
+inconsistency rather than an absent block. The cloud plugins cannot express
+that difference in the error: `s3` and `gcs` return `types.ErrBlobKeyNotFound`
+both for a block that was never written and for a block whose metadata object
+was lost, so the lookup having already read the block is the only evidence
+available. The hash+slot case resolves without a lookup and so carries no such
+evidence; it is reported as an ordinary `not_found`, as is a reference that
+misses at resolution.
 
 The client side (`bark.BlobStoreBark`) wraps the configured local blob store.
 `GetBlock` and block iterators pass through local values, but resolve
 `types.ErrHistoryExpired` or missing historical block CBOR by calling the
-remote Bark archive and downloading the signed URL. Bark does not decide which
+remote Bark archive and downloading the signed URL. A block the archive answers
+under `not_found` surfaces as `types.ErrBlobKeyNotFound`, the same error a
+local blob store reports for a missing block, but only when the echoed
+reference is the `(slot, hash)` that was requested: a returned block is
+re-verified against the request, so an absence must be too. Bark does not decide which
 local blocks expire; `internal/historyexpiry.Pruner` owns that lifecycle when
 `historyExpiry.enabled` is configured.
 
@@ -8141,9 +8739,11 @@ on by the network profile itself rather than by operator configuration:
 
 - `SkipLeaderStakeThresholdCheck` downgrades a failed Praos stake-derived
   leader-eligibility check from a header rejection to a logged warning. Needed
-  because dingo's leadership stake is delegated UTxO only — staking rewards are
-  not yet computed — which spuriously rejects the dominant pool's eligible
-  blocks on Musashi's concentrated topology. Every cryptographic header check
+  because the check rejected the dominant pool's eligible blocks on Musashi's
+  concentrated topology and wedged the chain. The leadership stake itself
+  includes reward-account balances (`reward_live_stake.total_stake =
+  utxo_stake + reward_stake`), so the bypass is not compensating for an omitted
+  reward term. Every cryptographic header check
   (KES, VRF proof, registered-VRF-key binding, opcert) still applies. The same
   flag is also the only bypass for the two states in which the threshold cannot
   be computed at all — a zero total active stake while the producing pool holds
@@ -9301,7 +9901,14 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    `TestProcessEpochRollover_SnapStakeReadOrdering`.
 4. Shelley-style protocol-parameter updates (`ComputeAndApplyPParamUpdates`).
 5. Embedded POOLREAP (`applyPoolRetirements`): refund the deposits of pools
-   whose retirement epoch is the new epoch. Each deposit is credited to the
+   whose retirement epoch is the new epoch. The refunded amount is the deposit
+   the pool's effective registration retains
+   (`pool_registration.deposit_held`), not what the current protocol parameters
+   would charge: a re-registration of a pool that is still registered pays no
+   new pool deposit, so a `poolDeposit` change after the registration that paid
+   neither mints nor burns the difference here. A registration made after the
+   pool's retirement was reaped is a first registration again and pays the
+   deposit in force at its own slot. Each deposit is credited to the
    pool's registered, active reward account, or added to the treasury when that
    account is missing or inactive. The `EPOCH` rule runs it after SNAP, so these
    deposits are deliberately outside the mark snapshot read at step 3. Active
@@ -9641,32 +10248,6 @@ embedder that builds a `LedgerStateConfig` directly and skips validation.
 This is phase 1 of issue #1894 (decode parallelism only, no ledger
 validation change).
 
-**Phase 2 (apply-stage wiring) is not implemented as literally described,
-by design, and is tracked separately.** The pipeline's own `ApplyStage`/
-`ApplyFunc` remains `nil` in every phase implemented so far (see "apply
-stage is a no-op" above) — real ledger apply (`chain.AddBlock`, error
-handling, event publishing, sync progress logging) continues to run
-entirely in `ledgerProcessBlocksFromSource`, fed by the pipeline's
-decoded/validated output, exactly as before the pipeline existed. This is
-not a throughput gap: decode and VRF/KES validation are the parallelizable,
-CPU-heavy work the pipeline targets; ledger-state application is inherently
-sequential regardless of which abstraction runs it, since each block's
-state depends on the one before it. Wiring the real apply logic into
-`gouroboros/pipeline.ApplyFunc`, as phase 2 literally asks, was investigated
-and found not safely achievable without a disproportionate redesign:
-`ApplyFunc` (`func(*BlockItem) error`) is called one block at a time by a
-single goroutine, with no batching and no mechanism to signal "restart the
-whole pipeline" back to a caller, while `ledgerProcessBlocksFromSource` is a
-stateful, whole-batch, multi-transaction loop (`SubmitAsyncDBTxn`,
-`deltaBatch` accumulation, mid-batch epoch-rollover handling) whose retry
-loop depends on sentinel restart errors (`errRestartLedgerPipeline`,
-`errStaleChainIterator`) propagating synchronously back to
-`ledgerProcessBlocks`. Closing this gap for real needs its own scoped
-design — either extending gouroboros' `pipeline` package with a
-batch-oriented apply contract or a restart-signal mechanism, or redesigning
-dingo's apply loop to be per-block and restart-tolerant — tracked
-separately in #3227, not folded into #1894's decode/validate phases.
-
 **Phase 3: parallel header-crypto validation.**
 `LedgerStateConfig.BlockPipelineValidateEnabled` (config
 `blockPipelineValidateEnabled` / `DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED` /
@@ -9868,6 +10449,174 @@ Emitting before truncating matters for the opposite reason (see
 goroutine can start applying the post-rollback chain, and publish forward
 events on the same `ledger.tx` lane, the moment `ls.chain.Rollback` lands.
 
+`reconcilePrimaryChainTipWithLedgerTip`'s common-ancestor rewind (used by
+startup reconciliation and by the live primary-chain/ledger divergence
+reconciler, see "Ledger/chain reconciliation") follows the same
+`blockPipelineGatherMutex`, then `drainBlockPipelineBeforeRollback`, then
+`transactionEventMutex` shape `rollbackChainAndState` uses, so it excludes
+an in-flight gathered block the same way rather than truncating silently
+(issue #3516). Taking `blockPipelineGatherMutex`'s write lock here is safe
+even though this reconciler is reachable from `ledgerReadChain` itself (the
+reader's own goroutine, on a missing chain-iterator start point): that call
+happens before `ledgerReadChain` ever creates the iterator
+`ledgerReadChainIterator` reads under the read lock, and `ledgerReadChain`
+returns immediately afterward without looping back, so the reader never
+holds that read lock while this runs.
+
+Unlike `rollbackChainAndState`, it does not pair a dry-run
+`ValidateRollback` with a separately-locked `RewindPrimaryChainToPoint`
+call: it resolves what to undo (`reconciliationUndoBlocks`, below) only
+after taking `transactionEventMutex`, then calls `RewindPrimaryChainToPoint`
+directly with no earlier check, and only calls
+`emitRollbackTransactionEvents` after that single call returns success. A
+validate-then-separately-truncate pairing leaves a real gap
+open in between the two locked calls: `AddBlock`/`AddBlockWithPoint`
+(blockfetch delivering a new block) takes only the chain's own
+`c.mutex`/`c.manager.mutex`, independent of `transactionEventMutex`, so the
+primary chain can grow enough between the two calls to invalidate what
+`ValidateRollback` found, letting a two-call caller publish undo events for
+a rewind that a moment later gets rejected as exceeding the security
+parameter (issue #3516 review). `RewindPrimaryChainToPoint`'s own K-check
+and truncation already run under one continuous hold of those locks (see
+`Chain.rollbackLocked`), so calling it alone, with nothing external to
+invalidate, is already atomic — no second, separately-timed check is
+needed, and none is taken.
+
+The emit is deliberately placed after that call returns, not threaded into
+it as a callback run while still holding `c.mutex`/`c.manager.mutex`: an
+earlier version of this fix did exactly that, and `emitRollbackTransactionEvents`
+can publish `LedgerErrorEventType` via `EventBus.Publish`, which invokes
+subscribers synchronously on the caller's own goroutine — precisely the
+reentrancy `Chain.Rollback` itself avoids by publishing its own
+`ChainRollbackEvent`/`ChainForkEvent` only after releasing those locks
+(see the comment on that publish). A future `LedgerErrorEventType`
+subscriber calling back into any chain method taking those locks would
+deadlock against a callback run from inside them. Emitting strictly after
+`RewindPrimaryChainToPoint` returns keeps this call symmetric with
+`rollbackChainAndState`'s own emit, which likewise runs after
+`ValidateRollback` has already released the chain's locks. Both still
+share `transactionEventMutex` with `submitBlockApplyDBTxn`'s forward-apply
+commit, which is what keeps the undo ahead of any forward `ledger.tx` event
+on the same ordered lane, regardless of this internal before/after
+ordering relative to the truncation itself.
+
+The emit still runs before `ls.rollback` — the separate call, made outside
+this closure, that durably updates `ls.currentTip` and the ledger's own
+metadata — so a failure in that later call leaves a narrow inconsistency:
+subscribers already believe these blocks are undone while durable ledger
+metadata still shows them applied (Cubic and wolf31o2 review, PR #3611).
+This is not a shape unique to this reconciler: `rollbackChainAndState` —
+the pre-existing, far-more-frequently exercised peer-driven rollback path
+— has the identical structure (`validateAndEmitRollbackUndo`'s emit inside
+`transactionEventMutex`, `ls.rollback` as a separate call afterward that
+can fail), and `validateAndEmitRollbackUndo`'s own doc comment already
+accepts this exact class of window: "an I/O failure mid-truncation is not
+predictable at all ... leaves the chain needing recovery regardless."
+Closing it here alone, differently from that canonical path, would leave
+the two rollback contracts inconsistent for no benefit.
+
+Neither alternative ordering is free of its own hazard, either: running
+`ls.rollback` inside this closure, before the emit, would risk a real
+reentrancy hazard the placement above already avoids — `ls.rollback` can
+publish `ChainsyncResyncEventType`/`ChainsyncResyncReasonLocalLedgerRollback`
+synchronously via `EventBus.Publish`, and `Ouroboros.SubscribeChainsyncResync`
+(`ouroboros/chainsync.go`) subscribes to exactly that reason and calls the
+substantial `LedgerState.RecoverAfterLocalRollback`, whose own locking has
+not been audited for safety under `transactionEventMutex` — while
+deferring the emit until after `ls.rollback` returns (outside
+`transactionEventMutex`) would let a concurrent forward apply's
+`ledger.tx` event land first on the same ordered lane, reopening exactly
+what holding `transactionEventMutex` across the emit prevents.
+
+The window is narrowed, not merely bounded: both branches now pre-check
+the one deterministic rejection `ls.rollback` could otherwise hit — the
+Mithril boundary — before ever resolving or emitting an undo, the same way
+`rollbackChainAndState` checks it before calling
+`validateAndEmitRollbackUndo` at all. Proven by
+`TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmitting`:
+a target below the boundary is declined immediately, with no undo
+published and no primary-chain truncation attempted either. That leaves
+`ls.rollback`'s only remaining failure mode a genuine, unpredictable DB
+error, logged at ERROR with the inconsistency called out if it happens; the
+next reconciliation attempt then lands in the "ledger tip ahead of primary
+chain tip" branch below (see its own doc comment), which retries both the
+(idempotent) undo notification and this same rollback — proven by
+`TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewindAndEmit`.
+A true durable, atomic handoff across every rollback path in this file,
+not a fix scoped to this one reconciler, is tracked as issue #3817.
+
+That resolution is also where the reconciler's undo events diverge from
+`blocksAboveSlot`'s: by the time this rewind runs, chain selection has
+already replaced the primary chain's content between the ancestor and the
+ledger's old tip with a different, competing branch, so reading whatever
+the blob store currently holds at those slots (`blocksAboveSlot`) would
+build undo events for blocks the ledger never applied. `reconciliationUndoBlocks`
+(`ledger/block_event.go`) instead reads the ledger's own `block_nonce`
+rows for the applied points in that range and resolves each one via
+`ChainManager.BlockByPoint`, which checks the manager's retained
+block-cache before the database — so an abandoned block chain selection
+already removed from the active index still resolves as long as the cache
+still holds it.
+
+The upper bound of that range must itself be read fresh, under
+`transactionEventMutex`, not taken from the `ledgerTip` snapshotted at the
+top of this function with no lock held: `submitBlockApplyDBTxn`'s
+forward-apply commit also takes `transactionEventMutex` around updating
+`ls.currentTip` and its own `block_nonce` write, so a commit landing in the
+otherwise-unguarded window between that early snapshot and this
+resolution advances the ledger's applied tip and writes a row the stale
+snapshot's upper bound would never query for — yet the primary chain
+extends together with that same apply, so the rewind still removes the
+newly-applied block, with no undo ever published for it (issue #3516
+review). Re-reading `ls.currentTip.Point.Slot` after `transactionEventMutex`
+is already held closes this the same way the chain-growth fix above does:
+nothing that also needs that mutex can advance the applied tip again until
+this section releases it, so the fresh read stays valid through the
+`RewindPrimaryChainToPoint` call that follows. `beforeReconciliationUndoSnapshot`
+(`ledger/state.go`) is a test-only hook, run right after the top-of-function
+snapshot, that lets a test force this interleaving deterministically rather
+than relying on goroutine scheduling.
+
+A crash between `RewindPrimaryChainToPoint` returning success (primary
+chain truncated, durable) and `emitRollbackTransactionEvents` completing
+(an in-memory `EventBus` publish, not durable on its own) loses that undo
+notification for good if nothing else attempts it again (wolf31o2 review,
+PR #3611). Recovery does not happen by re-entering this same branch: after
+such a crash, `ls.currentTip` is still the stale pre-crash value (this
+closure's caller only calls `ls.rollback(ancestor)`, which updates it,
+after the closure returns), while `ls.chain.Tip()` already reports the
+truncated point, so the next reconciliation attempt instead takes the
+earlier `chainTip.Point.Slot < ledgerTip.Point.Slot` branch ("ledger tip
+ahead of primary chain tip"). That branch now runs the same
+`reconciliationUndoBlocks`/`emitRollbackTransactionEvents` sequence, under
+the same `blockPipelineGatherMutex`/drain/`transactionEventMutex`
+protections, before calling `ls.rollback`, so a crash-interrupted attempt's
+undo notification is retried on the very next reconciliation attempt
+(startup or live — this branch is reachable from all three callers, the
+same as the common-ancestor branch), subject to the same block-cache-
+eviction resolution limits `reconciliationUndoBlocks` already documents and
+counts via `reconciliationUndoUnresolved`, rather than being silently and
+permanently lost. This also fixes that branch's ordinary, non-crash case:
+it previously called `ls.rollback` directly with no undo emission at all,
+live or at startup, whenever the primary chain was simply behind the
+ledger tip for any reason.
+
+`reconciliationUndoBlocks` also detects, and counts separately via
+`reconciliationUndoMissingRecord`, an applied block with no `block_nonce`
+row at all in its undo range — the shape of a Byron-era block, since
+Byron's BFT/PoA consensus writes no VRF nonce — distinct from
+`reconciliationUndoUnresolved`'s "has a row, content unreachable" gap
+(issue #3778, wolf31o2 review). It cannot name or resolve that block (there
+is no row to read a hash from, and falling back to whatever the primary
+chain's blob store currently holds at that slot would risk resolving the
+wrong branch's block, the exact failure mode this function exists to
+avoid), but it can detect that one is missing: it resolves the ancestor's
+own block for its `BlockNumber` and compares the resulting
+`ledgerTipBlockNumber - ancestorBlockNumber` delta — independent of
+`block_nonce` entirely — against how many nonce rows accounted for it. A
+shortfall means the reconciler had no durable record of that many applied
+blocks' existence at all, not merely of their content.
+
 `blockPipelineGatherMutex` (`ledger/state.go`) closes a narrower, earlier
 gap in the same window: `drainBlockPipelineBeforeRollback` only accounts
 for work already *submitted* to `blockPipeline` (`PendingCount`) — raw
@@ -9900,12 +10649,14 @@ combined with `blockPipelineGatherMutex`) only waits for `ls.blockPipeline`'s
 own decode/validate stages plus the reader's own not-yet-submitted gather,
 not for `ledgerProcessBlocksFromSource`'s subsequent DB-apply of a batch
 already drained from the pipeline before the wait started — that step runs
-entirely outside `blockPipeline` (phase 2, wiring real ledger apply into
-`gouroboros/pipeline.ApplyFunc`, is deliberately deferred to #3227, as
-described above). A rollback landing exactly in that narrower window can
-still leave `ls.currentTip` transiently re-advanced onto an abandoned
-block. This is not a new failure mode introduced by the pipeline or by
-this phase: `processChainIteratorRollback`'s stale-tip detection (see
+entirely outside `blockPipeline` by decision, not by omission (see "Why
+dingo's ledger apply is not wired into `pipeline.ApplyFunc`" at the end of
+this section, issue #3227; moving it inside would make this drain wait a
+bounded wait on database work, which is worse here, not better). A rollback
+landing exactly in that narrower window can still leave `ls.currentTip`
+transiently re-advanced onto an abandoned block. This is not a new failure
+mode introduced by the pipeline or by this phase:
+`processChainIteratorRollback`'s stale-tip detection (see
 below) already exists specifically to self-heal exactly this class of lag
 between chain-selection and ledger apply, independent of whether the
 pipeline is enabled, and remains the backstop here regardless of how the
@@ -9926,6 +10677,104 @@ versus pipeline-disabled), all in `ledger/read_chain_pipeline_test.go`; and
 `blockPipelineGatherMutex`'s write lock cannot be obtained while the reader
 is mid-gather with a raw block already collected, and can be obtained again
 once the batch is delivered.
+
+#### Why dingo's ledger apply is not wired into `pipeline.ApplyFunc`
+
+**Phase 2 of issue #1894 ("wire apply stage — chain add, error handling,
+event publishing, sync progress logging") is closed as a decision not to
+wire it, not as unfinished work (issue #3227).** The pipeline's own
+`ApplyStage`/`ApplyFunc` is `nil` in every phase, and stays that way. Real
+ledger apply continues to run in `ledgerProcessBlocksFromSource`, fed by the
+pipeline's re-sequenced decoded/validated output. The re-sequencing *is* the
+job dingo needs from the apply stage; running ledger mutation there would
+change observable behavior for no throughput gain.
+
+This is not a throughput gap. Decode and VRF/KES validation are the
+parallelizable, CPU-heavy per-block work the pipeline targets, and they are
+wired (phases 1 and 3). Ledger-state application is inherently sequential
+whichever abstraction runs it, because each block's state depends on the one
+before it, and `ApplyStage` is itself single-goroutine and strictly ordered
+— so moving the same serial work behind the same serial barrier buys
+nothing.
+
+Five facts about the two sides make the wiring unsafe rather than merely
+awkward. The first three are properties of
+`gouroboros/pipeline.ApplyStage` at the pinned version and are pinned by
+contract tests in `ledger/block_pipeline_apply_contract_test.go`, so a
+gouroboros bump that changes any of them fails CI instead of silently
+invalidating this decision.
+
+1. **`ApplyFunc` does not stop on failure.** `ApplyStage.maybeApply` records
+   a failing item's error on the item and pushes it onto the errors channel,
+   then applies every following block regardless. There is no option to halt
+   the sequence. A ledger must stop: block N+1's validation and delta apply
+   read state that block N was supposed to have written.
+   (`TestPipelineApplyFuncErrorDoesNotStopLaterBlocks`.)
+2. **A skipped item still consumes its sequence slot.** An item that failed
+   decode or validation is not applied, but `nextSequence` advances and the
+   *next* block is applied normally. `decodeReadChainBatchWithError` does the
+   opposite on purpose: any decode or enforced-validation failure discards
+   the whole batch, so a partially-decoded batch is never handed downstream.
+   Wiring apply would replace batch-discard with apply-the-rest, a
+   chain-continuity violation.
+   (`TestPipelineApplyFuncSkipsUndecodableBlockButAppliesTheNext`.)
+3. **The failure never reaches the submitter synchronously.** An
+   `ApplyFunc` error reaches `BlockItem.ApplyError()` and
+   `BlockPipeline.Errors()`, which `drainBlockPipelineErrors` reads for
+   logging and counters only. Dingo's retry contract requires
+   `errRestartLedgerPipeline` and `errStaleChainIterator` to return
+   synchronously up to `ledgerProcessBlocks`, which then waits for the
+   attempt's reader goroutine to fully exit before starting the next attempt
+   (`runLedgerReadChainAttempt`; regression test
+   `TestLedgerProcessBlocksRetryDoesNotMixBlocksAcrossAttempts`). That
+   invariant cannot be expressed through a per-item error field.
+4. **The transaction boundary is a batch, not a block.** Apply runs one
+   `submitBlockApplyDBTxn` per `batchSize` (50) chunk, accumulating a
+   `LedgerDeltaBatch` across blocks and flushing it mid-chunk before the
+   first validated block. An epoch or era boundary ends the chunk early,
+   defers the remainder to `cachedNextBatch`, and runs its rollover in a
+   *separate* `SubmitAsyncDBTxn`. `ApplyFunc`'s `func(*BlockItem) error`
+   shape has no begin-batch/end-batch hook to carry any of that.
+5. **`chain.AddBlock` is upstream of the pipeline, not downstream.** Blocks
+   enter `chain.Chain` from the blockfetch handler in `ledger/chainsync.go`;
+   `ledgerReadChainIterator` reads them back *out* of the chain and is the
+   pipeline's only submitter. Phase 2's "chain add" therefore cannot move
+   into `ApplyFunc` at all — it happens before the pipeline sees the block.
+
+**Ordering and rollback risk (issues #3718, #3771/#3840).** Those two fixes
+constrain the *upstream* path — `chain.update` publication deferred past
+`chainsyncBlockfetchMutex` (#3718) and blockfetch batches bound to a
+chain-rollback generation (#3840) — so neither is touched by leaving apply
+where it is. Wiring apply into the pipeline would put both back in play.
+`drainBlockPipelineBeforeRollback` bounds `WaitForDrain` at
+`BlockPipelineRollbackDrainTimeout` (5s) and, on timeout, logs and proceeds
+with the rollback anyway. That is safe today precisely because a nil
+`ApplyFunc` means the barrier only covers decode and re-sequencing, while
+the real apply stays behind the reader goroutine's in-order
+`readChainResult` handshake, which the rollback path holds via
+`blockPipelineGatherMutex`. `WaitForDrain` does cover `ApplyFunc`
+(`TestPipelineWaitForDrainCoversApplyFunc`), so with real apply wired in,
+that same timeout would be a bounded wait on database work — and expiring
+it would let a rollback run while blocks were still being applied to the
+ledger, which is the "mutation survives a rollback" class of #3771/#3840.
+Ledger events (`EpochTransitionEventType`, `HardForkEventType`) and sync
+progress logging would likewise move onto the pipeline's apply goroutine,
+where they would interleave with the rollback's deferred `chain.update`
+outside the ordering #3718 established. Rollbacks are also not
+representable in the pipeline's sequence at all: `Submit` takes only
+`(blockType, rawCbor, tip)`, so the in-band rollback markers that
+`ledgerReadChainIterator` currently forwards in order with blocks would have
+to be re-serialized out of band by exactly that fence.
+
+**What would reopen this.** Either (a) `gouroboros/pipeline` grows a
+batch-oriented apply contract with begin/end hooks and a caller-visible
+"halt and restart" signal, released as a tagged gouroboros version, or
+(b) dingo's apply loop is redesigned to be per-block, per-transaction and
+restart-tolerant — a consensus-critical rewrite of transaction boundaries,
+epoch rollover and retry semantics. Neither is warranted by throughput,
+since the parallelizable work is already parallel. If a contract test in
+`ledger/block_pipeline_apply_contract_test.go` starts failing after a
+gouroboros bump, revisit this decision rather than the test.
 
 ### Ledger-Tip/Chain-Iterator Rollback Synchronization
 

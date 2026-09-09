@@ -41,8 +41,8 @@ const (
 	HeaderSyncStrategyPrimary HeaderSyncStrategy = iota
 	// HeaderSyncStrategyParallel lets every eligible peer drive ledger
 	// ingress concurrently. The first peer to report a header drives it;
-	// duplicates from other peers are deduplicated before ledger ingress, so
-	// a header never enters ledger processing twice.
+	// duplicates from other peers are suppressed before ledger ingress while
+	// the header remains in the bounded deduplication cache.
 	HeaderSyncStrategyParallel
 	// HeaderSyncStrategyRoundRobin rotates a single ingress-driving peer
 	// across the eligible peers. The rotation advances via
@@ -122,9 +122,8 @@ func (s *State) ShouldPublishHeader(
 ) bool {
 	switch s.config.HeaderSyncStrategy {
 	case HeaderSyncStrategyParallel:
-		// The first peer to report a header drives it. Duplicates are never
-		// replayed, so a header enters ledger processing exactly once even
-		// when several eligible peers offer it.
+		// The first peer to report a header drives it. Cached duplicates are
+		// not replayed; evicted alternatives can enter ledger processing again.
 		return isNew
 	case HeaderSyncStrategyRoundRobin:
 		if !s.isRoundRobinDriver(connId) {

@@ -96,6 +96,8 @@ func newMusashiOuroboros(t *testing.T, eventBus *event.EventBus) *Ouroboros {
 // decode dispatch with the real bytes for both Musashi block wire types, and
 // asserts each decodes to the hash chain-sync computed for the same block.
 func TestDecodeBlockfetchBlockMusashiWireTypes(t *testing.T) {
+	t.Parallel()
+
 	o := newMusashiOuroboros(t, nil)
 	for _, tc := range []struct {
 		name       string
@@ -148,6 +150,8 @@ func TestDecodeBlockfetchBlockMusashiWireTypes(t *testing.T) {
 // TestDecodeBlockfetchBlockRejectsMalformed proves the Musashi dispatch still
 // fails on input it cannot read, rather than silently accepting it.
 func TestDecodeBlockfetchBlockRejectsMalformed(t *testing.T) {
+	t.Parallel()
+
 	o := newMusashiOuroboros(t, nil)
 	valid := readHexFixture(t, musashiType7BlockFixture)
 	for _, tc := range []struct {
@@ -174,6 +178,8 @@ func TestDecodeBlockfetchBlockRejectsMalformed(t *testing.T) {
 // a real Conway network, where accepting them would weaken the decoder every
 // mainnet block relies on.
 func TestDecodeBlockfetchBlockLeavesOtherNetworksStrict(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		NetworkMagic: 764824073, // mainnet
@@ -532,6 +538,8 @@ func runMusashiBlockfetchClientDelivery(
 // these bytes correctly and always did. The failure was in the dispatch that
 // never reached it, so this test drives the real client.
 func TestBlockfetchClientDeliversMusashiType7Block(t *testing.T) {
+	t.Parallel()
+
 	requireRawDeliverySupport(t)
 	block, header, blockRaw := runMusashiBlockfetchClientDelivery(
 		t,
@@ -555,6 +563,8 @@ func TestBlockfetchClientDeliversMusashiType7Block(t *testing.T) {
 // the strict decoder for type 8 is the Dijkstra decoder. The error #3798
 // quotes names conway.tmpConwayBlock, which only the type-7 route can produce.
 func TestBlockfetchClientDeliversMusashiType8Block(t *testing.T) {
+	t.Parallel()
+
 	block, header, blockRaw := runMusashiBlockfetchClientDelivery(
 		t,
 		gledger.BlockTypeDijkstra,
@@ -572,6 +582,8 @@ func TestBlockfetchClientDeliversMusashiType8Block(t *testing.T) {
 // Musashi fallback only runs after the strict decode fails, so a genuine
 // Conway block must never reach it.
 func TestDecodeBlockfetchBlockKeepsGenuineConwayBlocks(t *testing.T) {
+	t.Parallel()
+
 	blockRaw := testutil.BuildDecodableConwayBlockBytes(t, 42, 7)
 	for _, tc := range []struct {
 		name  string
@@ -605,6 +617,8 @@ func TestDecodeBlockfetchBlockKeepsGenuineConwayBlocks(t *testing.T) {
 // widening models.hasDijkstraLeiosShape, would change nothing here except to
 // loosen a decoder for no observed input.
 func TestDecodeBlockfetchBlockType8NeedsNoMusashiScope(t *testing.T) {
+	t.Parallel()
+
 	blockRaw := readHexFixture(t, musashiType8BlockFixture)
 	var hashes []string
 	for _, magic := range []uint32{musashiNetworkMagic, 764824073} {
@@ -621,6 +635,9 @@ func TestDecodeBlockfetchBlockType8NeedsNoMusashiScope(t *testing.T) {
 		require.EqualValues(t, dijkstra.EraIdDijkstra, block.Era().Id)
 		hashes = append(hashes, block.Hash().String())
 	}
+	// The loop above ranges a two-element literal and appends once per
+	// iteration, so both indexes exist; nilaway does not track that.
+	//nolint:nilaway // the loop above appends exactly two entries
 	require.Equal(t, hashes[0], hashes[1])
 }
 
@@ -645,6 +662,8 @@ func TestDecodeBlockfetchBlockType8NeedsNoMusashiScope(t *testing.T) {
 // transaction-validation bypasses are unaffected. The trap is a future gate
 // keying on the block's own era, which would disagree with them.
 func TestMusashiDispatchEraAgreement(t *testing.T) {
+	t.Parallel()
+
 	o := newMusashiOuroboros(t, nil)
 	for _, tc := range []struct {
 		name         string

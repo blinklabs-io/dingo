@@ -67,6 +67,8 @@ func (b *lockedBuffer) String() string {
 // own restore reaches that lock first is scheduling, so rounds repeat until
 // the add wins -- what the assertion pins is that when it does, the skip is on
 // the record.
+// Not t.Parallel: swaps slog.SetDefault, so a concurrent test's
+// slog.Default() calls would be redirected into this test's buffer.
 func TestSkippedBatchRestoreIsRecorded(t *testing.T) {
 	const (
 		securityParam = 100
@@ -131,9 +133,7 @@ func TestSkippedBatchRestoreIsRecorded(t *testing.T) {
 		applying := make(chan struct{})
 		release := make(chan struct{})
 		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			err := pc.AddRawBlocksWithCallback(
 				[]chain.RawBlock{doomed},
 				func(_ chain.RawBlock, txn *database.Txn) error {
@@ -149,7 +149,7 @@ func TestSkippedBatchRestoreIsRecorded(t *testing.T) {
 			if err == nil {
 				t.Errorf("round %d: expected a commit failure", round)
 			}
-		}()
+		})
 		<-applying
 		if err := db.BlockCreate(models.Block{
 			ID:     conflictIndex,
@@ -162,11 +162,9 @@ func TestSkippedBatchRestoreIsRecorded(t *testing.T) {
 			t.Fatalf("round %d: conflicting write: %v", round, err)
 		}
 		moved := make(chan error, 1)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			moved <- pc.AddBlock(mover, nil)
-		}()
+		})
 		// Release the batch only once the add is queued on the chain lock it
 		// holds, so the add runs before the batch's restore reacquires it.
 		waitUntilParkedIn(t, "chain.(*Chain).addBlockInternal")

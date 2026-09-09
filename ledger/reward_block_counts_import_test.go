@@ -36,6 +36,8 @@ import (
 // have to come from the snapshot's own BlocksMade rather than from a floor of
 // zero.
 func TestRewardBlockCountsMergesImportedCountsAcrossTheAnchor(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 
@@ -126,6 +128,8 @@ func TestRewardBlockCountsMergesImportedCountsAcrossTheAnchor(t *testing.T) {
 // as zero gives every pool zero performance and credits every delegator
 // nothing while reporting a completed round.
 func TestRewardBlockCountsUnknownWhenAnchorHidesTheEpoch(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 
@@ -172,6 +176,8 @@ func TestRewardBlockCountsUnknownWhenAnchorHidesTheEpoch(t *testing.T) {
 // covers. A node that never bootstrapped counts its own blocks exactly as it
 // did before.
 func TestRewardBlockCountsIgnoresImportedCountsAboveTheAnchor(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 
@@ -234,6 +240,8 @@ func TestRewardBlockCountsIgnoresImportedCountsAboveTheAnchor(t *testing.T) {
 // blocks for the single pool inside performance epoch 2; putting the anchor
 // past that epoch removes every one of them from the node's reach.
 func TestStakeRewardRoundDeclinedWhenAnchorHidesTheBlockCounts(t *testing.T) {
+	t.Parallel()
+
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	var logs bytes.Buffer
 	ls.config.Logger = slog.New(slog.NewTextHandler(&logs, nil))
@@ -268,6 +276,8 @@ func TestStakeRewardRoundDeclinedWhenAnchorHidesTheBlockCounts(t *testing.T) {
 // since NEWEPOCH's initialRules construct the genesis state with BlocksMade
 // Map.empty. This pins that, rather than proving a fix.
 func TestBootstrapStakeRewardRoundSurvivesAMithrilAnchor(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 
@@ -326,6 +336,8 @@ func TestBootstrapStakeRewardRoundSurvivesAMithrilAnchor(t *testing.T) {
 func TestStakeRewardRoundFromImportedBlockCountsMatchesObservedHistory(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	observed := stakeRewardApplicationForTest(t, false)
 	imported := stakeRewardApplicationForTest(t, true)
 

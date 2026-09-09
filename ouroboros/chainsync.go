@@ -763,89 +763,195 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 	if conn == nil {
 		return fmt.Errorf("connection %s not found", ctx.ConnectionId.String())
 	}
+	go o.chainsyncServerAwaitNext(ctx, conn, clientState)
+	return nil
+}
+
+// chainsyncServerConnection is the connection surface the post-AwaitReply
+// ChainSync server waiter needs: the error channel it watches while the peer is
+// parked in MustReply, and the Close that is the only thing that releases it.
+//
+// It is an interface for the same reason blockfetchConnection is: conn's error
+// channel is a single buffered channel shared with blockfetch, tx-submission
+// and the connection manager's teardown watcher, and delivery goes to whichever
+// consumer the runtime picks, so a test cannot address this waiter on the real
+// one. Taking the two methods the waiter actually uses keeps that seam in the
+// signature instead of in a production field only tests write.
+//
+// *ouroboros.Connection satisfies it, and the RequestNext callback above passes
+// exactly that.
+type chainsyncServerConnection interface {
+	ErrorChan() chan error
+	Close() error
+}
+
+// chainsyncServerAwaitNext is the post-AwaitReply waiter. It runs as its own
+// goroutine once the server has parked the peer in MustReply, and either serves
+// the block the iterator eventually yields or drops the transport.
+func (o *Ouroboros) chainsyncServerAwaitNext(
+	ctx ochainsync.CallbackContext,
+	conn chainsyncServerConnection,
+	clientState *chainsync.ChainsyncClientState,
+) {
+	// Wait for next block in a separate goroutine so we can
+	// also monitor the connection for errors. This avoids
+	// leaking the monitor goroutine when Next returns first.
+	done := make(chan struct{})
+	var next *chain.ChainIteratorResult
+	var nextErr error
 	go func() {
-		// Wait for next block in a separate goroutine so we can
-		// also monitor the connection for errors. This avoids
-		// leaking the monitor goroutine when Next returns first.
-		done := make(chan struct{})
-		var next *chain.ChainIteratorResult
-		var nextErr error
-		go func() {
-			defer close(done)
-			next, nextErr = clientState.ChainIter.Next(true)
-		}()
-		select {
-		case <-done:
-			// Iterator returned
-		case <-conn.ErrorChan():
-			clientState.ChainIter.Cancel()
-			return
-		}
-		if nextErr != nil {
-			// Don't log context.Canceled errors as they're
-			// expected during connection closure.
-			if !errors.Is(nextErr, context.Canceled) {
-				o.config.Logger.Debug(
-					"failed to get next block from chain iterator",
-					"error", nextErr,
-				)
-			}
-			return
-		}
-		if next == nil {
+		defer close(done)
+		next, nextErr = clientState.ChainIter.Next(true)
+	}()
+	select {
+	case <-done:
+		// Iterator returned
+	case connErr := <-conn.ErrorChan():
+		// Abandoning the wait here leaves the peer parked in MustReply
+		// with the server holding agency, so the transport has to be
+		// dropped: an error-channel send alone does not unpark it. See
+		// closeChainsyncServerConn.
+		//
+		// conn.ErrorChan() is one buffered channel shared with blockfetch,
+		// tx-submission and the connection manager's own teardown watcher,
+		// so the error taken here may belong to another mini-protocol --
+		// in which case the manager never sees it and would not tear the
+		// connection down at all. Closing is correct either way: it is
+		// what the manager would have done with that error, and it wakes
+		// the manager's watcher through the closed error channel.
+		//
+		// A closed channel delivers a nil error and is the ordinary way in:
+		// gouroboros' Connection.shutdown closes the channel it owns, so
+		// every consumer wakes at once. orErrConnectionClosed keeps the
+		// logged reason meaningful in that case.
+		clientState.ChainIter.Cancel()
+		o.closeChainsyncServerConn(
+			conn,
+			ctx.ConnectionId.String(),
+			fmt.Errorf(
+				"connection error while peer awaited a reply: %w",
+				orErrConnectionClosed(connErr),
+			),
+		)
+		return
+	}
+	o.chainsyncServerServeAwaited(ctx, conn, next, nextErr)
+}
+
+// errChainsyncAwaitConnectionClosed stands in for the nil value a closed
+// conn.ErrorChan() yields, so the reason logged for the teardown is never an
+// empty error.
+var errChainsyncAwaitConnectionClosed = errors.New("connection closed")
+
+// orErrConnectionClosed substitutes a non-nil error for the nil a closed
+// error channel delivers.
+func orErrConnectionClosed(err error) error {
+	if err == nil {
+		return errChainsyncAwaitConnectionClosed
+	}
+	return err
+}
+
+// chainsyncServerServeAwaited delivers the chain iterator result that resolved
+// a post-AwaitReply wait, or drops the transport when there is nothing to
+// deliver.
+//
+// Once MsgAwaitReply is on the wire the server holds agency in MustReply. A
+// peer parked there cannot make progress and cannot detect abandonment except
+// through gouroboros' randomized MustReply timer (135-269s), after which it
+// tears the connection down, reconnects, re-intersects, receives one
+// MsgRollBackward and parks again -- a stable loop that keeps a node pinned
+// behind a healthy upstream with no ERROR logged on either side. So every path
+// out of here either sends a reply or closes the connection; returning
+// silently is not a third option.
+func (o *Ouroboros) chainsyncServerServeAwaited(
+	ctx ochainsync.CallbackContext,
+	conn chainsyncServerConnection,
+	next *chain.ChainIteratorResult,
+	nextErr error,
+) {
+	if nextErr != nil {
+		if errors.Is(nextErr, context.Canceled) {
+			// The only cancellations of a server client's iterator come from
+			// chainsync.State.RemoveClient (driven by connection-closed
+			// handling) and from the error-channel exit above, both of which
+			// have already dropped the transport. There is no parked peer left
+			// to unpark, so this stays a quiet, expected unwind.
 			o.config.Logger.Debug(
-				"chainsync server: goroutine got nil block",
+				"chainsync server: await unwound by connection teardown",
 				"connection_id", ctx.ConnectionId.String(),
 			)
 			return
 		}
-		tip := o.refreshTip(next)
-		if next.Rollback {
-			if err := ctx.Server.RollBackward(
-				next.Point,
-				tip,
-			); err != nil {
-				o.reportChainsyncServerAsyncError(
-					conn,
-					ctx.ConnectionId.String(),
-					"RollBackward",
-					err,
-				)
-			}
-		} else {
-			blockCbor, blockErr := o.chainsyncServerBlockCbor(ctx, next.Block)
-			if blockErr != nil {
-				// Do not RollForward an incomplete CertRB. This runs after the
-				// callback returned AwaitReply, so actively close the transport
-				// (an error-channel send alone does not) to unpark the client
-				// from AwaitReply so it reconnects and retries the point once
-				// the endorser closure is available.
-				o.closeChainsyncServerConn(
-					conn,
-					ctx.ConnectionId.String(),
-					blockErr,
-				)
-				return
-			}
-			if err := ctx.Server.RollForward(
-				next.Block.Type,
-				blockCbor,
-				tip,
-			); err != nil {
-				o.reportChainsyncServerAsyncError(
-					conn,
-					ctx.ConnectionId.String(),
-					"RollForward",
-					err,
-				)
-			}
+		o.closeChainsyncServerConn(
+			conn,
+			ctx.ConnectionId.String(),
+			fmt.Errorf(
+				"chain iterator failed while peer awaited a reply: %w",
+				nextErr,
+			),
+		)
+		return
+	}
+	if next == nil {
+		// Defensive: ChainIterator.Next maps an empty non-error result to
+		// ErrIteratorChainTip, so this is not reachable through the real
+		// iterator. Should it ever become reachable, dropping the transport is
+		// still the only way to release the parked peer.
+		o.closeChainsyncServerConn(
+			conn,
+			ctx.ConnectionId.String(),
+			errors.New(
+				"chain iterator returned no block while peer awaited a reply",
+			),
+		)
+		return
+	}
+	tip := o.refreshTip(next)
+	if next.Rollback {
+		if err := ctx.Server.RollBackward(
+			next.Point,
+			tip,
+		); err != nil {
+			o.reportChainsyncServerAsyncError(
+				conn,
+				ctx.ConnectionId.String(),
+				"RollBackward",
+				err,
+			)
 		}
-	}()
-	return nil
+		return
+	}
+	blockCbor, blockErr := o.chainsyncServerBlockCbor(ctx, next.Block)
+	if blockErr != nil {
+		// Do not RollForward an incomplete CertRB. This runs after the
+		// callback returned AwaitReply, so actively close the transport
+		// (an error-channel send alone does not) to unpark the client
+		// from AwaitReply so it reconnects and retries the point once
+		// the endorser closure is available.
+		o.closeChainsyncServerConn(
+			conn,
+			ctx.ConnectionId.String(),
+			blockErr,
+		)
+		return
+	}
+	if err := ctx.Server.RollForward(
+		next.Block.Type,
+		blockCbor,
+		tip,
+	); err != nil {
+		o.reportChainsyncServerAsyncError(
+			conn,
+			ctx.ConnectionId.String(),
+			"RollForward",
+			err,
+		)
+	}
 }
 
 func (o *Ouroboros) reportChainsyncServerAsyncError(
-	conn *ouroboros.Connection,
+	conn chainsyncServerConnection,
 	connectionID string,
 	operation string,
 	err error,
@@ -881,7 +987,7 @@ func (o *Ouroboros) reportChainsyncServerAsyncError(
 // point. It also closes the gouroboros-owned error channel, which wakes the
 // connmanager watcher without racing a Dingo send against channel closure.
 func (o *Ouroboros) closeChainsyncServerConn(
-	conn *ouroboros.Connection,
+	conn chainsyncServerConnection,
 	connectionID string,
 	err error,
 ) {
@@ -907,6 +1013,11 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	if !o.reconcileChainsyncIngressAdmission(
 		ctx.ConnectionId,
 		o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
+	) {
+		return nil
+	}
+	if o.chainsyncState != nil && !o.chainsyncState.UpdateClientRollback(
+		ctx.ConnectionId, point, tip,
 	) {
 		return nil
 	}
@@ -1797,12 +1908,17 @@ func (o *Ouroboros) instrumentChainsyncRollBackward(
 func (o *Ouroboros) decodeChainsyncHeader(
 	blockType uint,
 	raw []byte,
-) (gledger.BlockHeader, error) {
+) (header gledger.BlockHeader, err error) {
+	defer func() {
+		if err == nil && header != nil {
+			header.Hash()
+		}
+	}()
 	if o.config.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic &&
 		blockType == gledger.BlockTypeConway {
 		return gdijkstra.NewDijkstraBlockHeaderFromCbor(raw)
 	}
-	header, err := gledger.NewBlockHeaderFromCbor(blockType, raw)
+	header, err = gledger.NewBlockHeaderFromCbor(blockType, raw)
 	if err == nil || blockType != gledger.BlockTypeByronEbb {
 		return header, err
 	}

@@ -33,6 +33,8 @@ func networkReq() NetworkRequest {
 }
 
 func TestMempool(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	deps.mempool.txs = []mempool.MempoolTransaction{
 		{Hash: hexString(testHash(0xe1))},
@@ -56,6 +58,8 @@ func TestMempool(t *testing.T) {
 // TestMempoolEmpty asserts an empty mempool serializes as an empty list
 // rather than JSON null, which Mesh clients reject.
 func TestMempoolEmpty(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 
 	rec := postJSON(t, h, "/mempool", networkReq())
@@ -69,6 +73,8 @@ func TestMempoolEmpty(t *testing.T) {
 }
 
 func TestMempoolTransaction(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	addr := testAddress(
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x0d), nil,
@@ -111,6 +117,8 @@ func TestMempoolTransaction(t *testing.T) {
 }
 
 func TestMempoolTransactionNotFound(t *testing.T) {
+	t.Parallel()
+
 	h := newTestHandler(t, newTestDeps())
 
 	req := MempoolTransactionRequest{
@@ -129,6 +137,8 @@ func TestMempoolTransactionNotFound(t *testing.T) {
 }
 
 func TestMempoolTransactionMissingIdentifier(t *testing.T) {
+	t.Parallel()
+
 	for name, req := range map[string]MempoolTransactionRequest{
 		"nil identifier": {
 			networkIdentifierField: networkIdentifierField{
@@ -159,6 +169,8 @@ func TestMempoolTransactionMissingIdentifier(t *testing.T) {
 // cannot be parsed: the endpoint must report an internal error rather
 // than panicking or returning an empty transaction.
 func TestMempoolTransactionUndecodable(t *testing.T) {
+	t.Parallel()
+
 	deps := newTestDeps()
 	hash := hexString(testHash(0xe4))
 	deps.mempool.txs = []mempool.MempoolTransaction{
