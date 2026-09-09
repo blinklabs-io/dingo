@@ -68,12 +68,14 @@ func TestStartupOpCertCounterAtEraBoundary(t *testing.T) {
 }
 
 func TestStartupOpCertCounterRequiresEraParameters(t *testing.T) {
+	var typedNilProvider *mockPParamsProvider
 	for _, testCase := range []struct {
 		name      string
 		provider  ProtocolParamsProvider
 		wantError string
 	}{
 		{"missing provider", nil, "provider is nil"},
+		{"typed nil provider", typedNilProvider, "provider is nil"},
 		{
 			"missing parameters",
 			&mockPParamsProvider{},

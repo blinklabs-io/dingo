@@ -64,6 +64,8 @@ func withLowerLeiosEndorserBlockCacheBudgets(
 // Valid case: the fetched manifest's length matches what the offer declared,
 // so the fetch is accepted and the bytes are returned unchanged.
 func TestFetchAndValidateLeiosEbManifestAcceptsMatchingSize(t *testing.T) {
+	t.Parallel()
+
 	_, blockRaw := testLeiosEndorserBlockRaw(t, 1)
 	client := &fixedBlockRequester{blockRaw: blockRaw}
 
@@ -81,6 +83,8 @@ func TestFetchAndValidateLeiosEbManifestAcceptsMatchingSize(t *testing.T) {
 // Mismatched case: a peer that declares one size in its offer and serves a
 // body of a different length is rejected rather than cached.
 func TestFetchAndValidateLeiosEbManifestRejectsSizeMismatch(t *testing.T) {
+	t.Parallel()
+
 	_, blockRaw := testLeiosEndorserBlockRaw(t, 1)
 	client := &fixedBlockRequester{blockRaw: blockRaw}
 
@@ -97,6 +101,8 @@ func TestFetchAndValidateLeiosEbManifestRejectsSizeMismatch(t *testing.T) {
 // Oversized case: an entry whose retained bytes (manifest plus transaction
 // bodies) exceed the per-entry budget is rejected rather than cached, and any
 // previously cached (smaller) entry for the same hash is left untouched.
+// Not t.Parallel: withLowerLeiosEndorserBlockCacheBudgets swaps the
+// package-level cache budgets, which every concurrent Leios test observes.
 func TestStoreLeiosEndorserBlockRejectsOversizedEntry(t *testing.T) {
 	withLowerLeiosEndorserBlockCacheBudgets(t, 1<<10, 1<<20) // 1 KiB / 1 MiB
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 7000, 1)

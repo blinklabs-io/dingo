@@ -24,6 +24,7 @@ import (
 	"io"
 	"math"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sync"
 
@@ -1085,7 +1086,7 @@ func (pc *PoolCredentials) ValidateAgainstLedgerAtSlot(
 	params ProtocolParamsProvider,
 	slot uint64,
 ) (registered, vrfMatched bool, err error) {
-	if params == nil {
+	if params == nil || isNilProtocolParamsProvider(params) {
 		return false, false, errors.New("protocol parameters provider is nil")
 	}
 	pparams := params.ProtocolParamsForSlot(slot)
@@ -1100,6 +1101,17 @@ func (pc *PoolCredentials) ValidateAgainstLedgerAtSlot(
 		return false, false, fmt.Errorf("resolve era for opcert counter rule: %w", err)
 	}
 	return pc.validateAgainstLedger(view, !limits.era.isTPraos())
+}
+
+func isNilProtocolParamsProvider(provider ProtocolParamsProvider) bool {
+	value := reflect.ValueOf(provider)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map,
+		reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 func (pc *PoolCredentials) validateAgainstLedger(

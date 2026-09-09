@@ -107,6 +107,8 @@ func seedTestChain(
 // legal K-bounded rollback by construction no matter how far the chain has
 // advanced since the rewind began.
 func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
+	t.Parallel()
+
 	const (
 		securityParam = 8
 		blockCount    = 240
@@ -209,6 +211,8 @@ func TestWindowedRewindConvergesWhilePrimaryChainExtends(t *testing.T) {
 // stuck-pipeline watchdog correctly announcing that the failure was
 // deterministic while the node kept retrying anyway.
 func TestDeterministicTxRecoveryHaltsOnUnreachableRewind(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -275,6 +279,8 @@ func TestDeterministicTxRecoveryHaltsOnUnreachableRewind(t *testing.T) {
 // different one and must start with a fresh budget rather than inherit a tally
 // that has nothing to do with it.
 func TestRecoveryRewindHaltBudgetResetsOnTipProgress(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -334,6 +340,8 @@ func TestRecoveryRewindHaltBudgetResetsOnTipProgress(t *testing.T) {
 // a different step target against a larger gap, and the halt must still
 // arrive.
 func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
+	t.Parallel()
+
 	const (
 		chainK        = 4
 		ledgerWindow  = 8
@@ -477,6 +485,8 @@ func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
 // the chain tip, so it is present by point and absent from the chain: the
 // store lookup accepts it and the chain's own membership check does not.
 func TestWindowedRewindRefusesRecoveryTargetTheChainDoesNotHold(t *testing.T) {
+	t.Parallel()
+
 	const (
 		securityParam = 8
 		blockCount    = 60
@@ -544,6 +554,8 @@ func TestWindowedRewindRefusesRecoveryTargetTheChainDoesNotHold(t *testing.T) {
 // all the way down, leaving the chain empty and its tip naming a block the
 // store need not hold, so the entry check keeps the store lookup for it.
 func TestWindowedRewindRefusesSlotZeroTargetTheStoreDoesNotHold(t *testing.T) {
+	t.Parallel()
+
 	const (
 		securityParam = 8
 		blockCount    = 30

@@ -115,6 +115,8 @@ func resolveOnFreePortWithConfig(
 // TestRegisterProviderDescriptor asserts the provider is advertised
 // under the capability and name the node's configuration selects.
 func TestRegisterProviderDescriptor(t *testing.T) {
+	t.Parallel()
+
 	host := newProviderHost(t)
 
 	var found *plugin.Descriptor
@@ -133,12 +135,16 @@ func TestRegisterProviderDescriptor(t *testing.T) {
 // TestRegisterProviderRejectsNilHost asserts registration fails loudly
 // rather than silently leaving the capability unavailable.
 func TestRegisterProviderRejectsNilHost(t *testing.T) {
+	t.Parallel()
+
 	require.Error(t, RegisterProvider(nil))
 }
 
 // TestProviderBuildsListenAddress covers the host/port composition: the
 // server must listen on the address the node's config asks for.
 func TestProviderBuildsListenAddress(t *testing.T) {
+	t.Parallel()
+
 	host := newProviderHost(t)
 	deps := newTestDeps()
 
@@ -163,6 +169,8 @@ func TestProviderBuildsListenAddress(t *testing.T) {
 // passes providerDefaults itself, so a change to the default port is a
 // change to what this asserts.
 func TestProviderDefaultPort(t *testing.T) {
+	t.Parallel()
+
 	require.Equal(t, uint(8080), defaultProviderPort)
 	require.Equal(
 		t,
@@ -175,6 +183,8 @@ func TestProviderDefaultPort(t *testing.T) {
 // identity and CORS policy reach the server rather than being dropped
 // in the provider wiring.
 func TestProviderPropagatesDependencies(t *testing.T) {
+	t.Parallel()
+
 	host := newProviderHost(t)
 	deps := newTestDeps()
 	pd := providerDeps(deps)
@@ -204,6 +214,8 @@ func TestProviderPropagatesDependencies(t *testing.T) {
 // TestProviderRejectsInvalidDependencies asserts a misconfigured node
 // fails at plugin resolution, before a listener is opened.
 func TestProviderRejectsInvalidDependencies(t *testing.T) {
+	t.Parallel()
+
 	host := newProviderHost(t)
 	pd := providerDeps(newTestDeps())
 	pd.GenesisHash = ""
@@ -225,6 +237,8 @@ func TestProviderRejectsInvalidDependencies(t *testing.T) {
 // TestProviderStopClosesListener asserts the host's shutdown path stops
 // the Mesh listener, so a capability restart can rebind the port.
 func TestProviderStopClosesListener(t *testing.T) {
+	t.Parallel()
+
 	host := plugin.NewHost()
 	require.NoError(t, RegisterProvider(host))
 	deps := newTestDeps()
@@ -243,6 +257,8 @@ func TestProviderStopClosesListener(t *testing.T) {
 // resolution -- before any listener is opened -- with an error naming
 // the full provider config path, not just "tls".
 func TestProviderRejectsPartialTLSPair(t *testing.T) {
+	t.Parallel()
+
 	host := newProviderHost(t)
 
 	_, err := plugin.Resolve[*Server](
@@ -269,6 +285,8 @@ func TestProviderRejectsPartialTLSPair(t *testing.T) {
 // rejected at resolution, with an error naming the full provider config
 // path.
 func TestProviderRejectsInvalidAuthMode(t *testing.T) {
+	t.Parallel()
+
 	host := newProviderHost(t)
 
 	_, err := plugin.Resolve[*Server](
@@ -292,6 +310,8 @@ func TestProviderRejectsInvalidAuthMode(t *testing.T) {
 // config reaches the server's resolved (EffectiveTLS/EffectiveAuth)
 // settings.
 func TestProviderPropagatesTLSAndAuth(t *testing.T) {
+	t.Parallel()
+
 	host := newProviderHost(t)
 	certPath, keyPath := testutil.GenerateTestTLSCertKey(t)
 

@@ -51,6 +51,8 @@ func (h nonByronTestHeader) Era() gledger.Era {
 func TestChainsyncClientRollForwardExcludesHeaderFailingCryptoVerification(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -125,6 +127,8 @@ func TestChainsyncClientRollForwardExcludesHeaderFailingCryptoVerification(
 func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 
@@ -206,6 +210,8 @@ func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 func TestChainsyncClientRollForwardCompetingPeersOnlyVerifiedHeaderCounted(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	defer bus.Close()
 

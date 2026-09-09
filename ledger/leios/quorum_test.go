@@ -24,18 +24,24 @@ import (
 )
 
 func TestMeetsStakeQuorumExactBoundary(t *testing.T) {
+	t.Parallel()
+
 	met, err := MeetsStakeQuorum(75, 100, big.NewRat(3, 4))
 	require.NoError(t, err)
 	assert.True(t, met, "exactly tau * total must meet quorum")
 }
 
 func TestMeetsStakeQuorumOneUnder(t *testing.T) {
+	t.Parallel()
+
 	met, err := MeetsStakeQuorum(74, 100, big.NewRat(3, 4))
 	require.NoError(t, err)
 	assert.False(t, met, "one lovelace under tau * total must fail")
 }
 
 func TestMeetsStakeQuorumRationalThreshold(t *testing.T) {
+	t.Parallel()
+
 	// tau = 2/3 of 100: 66.67 -> 66 fails, 67 passes
 	met, err := MeetsStakeQuorum(66, 100, big.NewRat(2, 3))
 	require.NoError(t, err)
@@ -46,12 +52,16 @@ func TestMeetsStakeQuorumRationalThreshold(t *testing.T) {
 }
 
 func TestMeetsStakeQuorumZeroThreshold(t *testing.T) {
+	t.Parallel()
+
 	met, err := MeetsStakeQuorum(0, 100, big.NewRat(0, 1))
 	require.NoError(t, err)
 	assert.True(t, met, "tau = 0 is met by zero voted stake")
 }
 
 func TestMeetsStakeQuorumLargeValuesNoOverflow(t *testing.T) {
+	t.Parallel()
+
 	met, err := MeetsStakeQuorum(
 		math.MaxUint64, math.MaxUint64, big.NewRat(1, 1),
 	)
@@ -66,6 +76,8 @@ func TestMeetsStakeQuorumLargeValuesNoOverflow(t *testing.T) {
 }
 
 func TestMeetsStakeQuorumInvalidThreshold(t *testing.T) {
+	t.Parallel()
+
 	for _, tau := range []*big.Rat{
 		nil,
 		big.NewRat(-1, 4),
@@ -79,6 +91,8 @@ func TestMeetsStakeQuorumInvalidThreshold(t *testing.T) {
 }
 
 func TestMeetsStakeQuorumZeroTotalStake(t *testing.T) {
+	t.Parallel()
+
 	_, err := MeetsStakeQuorum(50, 0, big.NewRat(3, 4))
 	assert.ErrorIs(t, err, ErrZeroTotalActiveStake)
 }

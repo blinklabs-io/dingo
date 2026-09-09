@@ -848,8 +848,9 @@ func (a *leiosPipelineAdapter) CertifiedEndorserBlockTxHashes(
 
 func (a *leiosPipelineAdapter) MarkEndorserBlockEmbedded(
 	ebHash lcommon.Blake2b256,
+	ebSlot uint64,
 ) {
-	a.mgr.MarkEmbedded(ebHash)
+	a.mgr.MarkEmbedded(ebSlot, ebHash)
 }
 
 func (a *leiosPipelineAdapter) ParentLeiosAnnouncement() (

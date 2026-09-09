@@ -22,6 +22,8 @@ import (
 )
 
 func TestSameConnectionIdHandlesPartialNilAddrs(t *testing.T) {
+	t.Parallel()
+
 	remoteAddr := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001}
 	remoteOnly := ouroboros.ConnectionId{RemoteAddr: remoteAddr}
 	remoteOnlySame := ouroboros.ConnectionId{
@@ -67,6 +69,8 @@ func TestSameConnectionIdHandlesPartialNilAddrs(t *testing.T) {
 }
 
 func TestConnIdKeyHandlesPartialNilAddrs(t *testing.T) {
+	t.Parallel()
+
 	remoteOnly := ouroboros.ConnectionId{
 		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
 	}
