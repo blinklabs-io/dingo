@@ -113,12 +113,24 @@ func TestScheduler_ChangeInterval(t *testing.T) {
 		"timer did not respect interval change: ran too frequently",
 	)
 
-	// Anchor the lower bound at the post-change reading. Comparing
-	// against a pre-change reading is satisfied by ticks the old interval
-	// delivered while the change was being confirmed, so it passes even
-	// when ticking stopped outright at the change.
+	// A lower bound on counter is not attributable to the new interval at
+	// any anchor. tick() enqueues onto taskQueue and the worker pool
+	// drains it asynchronously, so a closure enqueued by the last
+	// pre-change tick can increment counter after the reading above was
+	// taken -- satisfying "counter grew" on a scheduler that stopped
+	// ticking outright at the change.
+	//
+	// Register a second task instead. Register appends under the same
+	// mutex tick() holds, and run() stopped and discarded the old ticker
+	// before publishing st.interval, so no tick predating the confirmed
+	// change can reach this task: every execution of it is driven by a
+	// tick the new ticker delivered.
+	var postChange atomic.Int32
+	timer.Register(1, func() {
+		postChange.Add(1)
+	}, nil)
 	require.Eventually(t, func() bool {
-		return counter.Load() > afterChangeReq
+		return postChange.Load() > 0
 	}, 10*time.Second, 10*time.Millisecond,
 		"expected ticking to continue after interval change",
 	)
