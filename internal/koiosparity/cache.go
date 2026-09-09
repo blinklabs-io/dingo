@@ -1557,9 +1557,30 @@ func (c *Cache) InsertCheckRun(run CheckRun) error {
 	})
 }
 
-// withClaimedSource runs fn in a transaction that first verifies this handle
-// still owns the cache's Koios source, for the small writers that would
-// otherwise have no transaction of their own.
+// withClaimedSource runs fn in a transaction that verifies, before
+// committing, this handle still owns the cache's Koios source, for the small
+// writers that would otherwise have no transaction of their own.
+//
+// fn runs before assertClaimedSource, not after: a SELECT run first, under an
+// otherwise-deferred BEGIN, opens the transaction as a reader and only
+// upgrades to a writer once fn's write statement runs. Under WAL, another
+// connection committing in that window turns the upgrade attempt into
+// SQLITE_BUSY (specifically SQLITE_BUSY_SNAPSHOT) — a stale-snapshot failure
+// database/sql's busy_timeout cannot wait out, because no amount of waiting
+// makes an already-taken snapshot current again; only starting a fresh
+// transaction does. Running fn's write first makes it the transaction's own
+// first statement, so the deferred BEGIN takes the write lock immediately
+// instead of a read snapshot, which is the ordinary contention case
+// busy_timeout does handle by waiting. Once that write lock is held, no other
+// connection can commit until this transaction ends, so assertClaimedSource's
+// read afterward is still exactly as atomic against a concurrent
+// RecordKoiosSource as before — nothing can repoint the source between it and
+// the commit below. A caller-visible refusal still rolls the write back via
+// the deferred tx.Rollback(), same as when the check ran first.
+// See TestObserverBackfillsParamsForAPreExistingCache: it reproduces only
+// inside the full package suite, where the test's own require.Eventually
+// polling repeatedly reopens the same cache file and can advance the WAL
+// between a SELECT and a later write on this handle.
 func (c *Cache) withClaimedSource(
 	network string,
 	fn func(tx *sql.Tx) error,
@@ -1569,10 +1590,10 @@ func (c *Cache) withClaimedSource(
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
-	if err := c.assertClaimedSource(tx, network); err != nil {
+	if err := fn(tx); err != nil {
 		return err
 	}
-	if err := fn(tx); err != nil {
+	if err := c.assertClaimedSource(tx, network); err != nil {
 		return err
 	}
 	return tx.Commit()
