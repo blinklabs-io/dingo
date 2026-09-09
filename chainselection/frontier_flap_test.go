@@ -91,8 +91,8 @@ var chainSwitchDrainSentinelConnId = newTestConnectionId(50000)
 // subscriber channel immediately after the driving calls return can therefore
 // observe zero events even though the selector already decided to publish
 // one: nothing has forced the delivery goroutine to run yet. That assumption
-// -- reading the channel is exactly what made this scenario's regression test
-// flake under full-package parallelism, where CPU contention widens the gap
+// is exactly what made this scenario's regression test flake under
+// full-package parallelism, where CPU contention widens the gap
 // between "enqueued" and "delivered" (blinklabs-io/dingo#4145).
 //
 // The fix is a handshake, not a wait: publish a sentinel ChainSwitchEvent
