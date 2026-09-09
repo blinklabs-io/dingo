@@ -84,6 +84,8 @@ func seedCache(
 }
 
 func TestPoolRelayProviderNewErrors(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
 
@@ -101,6 +103,8 @@ func TestPoolRelayProviderNewErrors(t *testing.T) {
 }
 
 func TestPoolRelayProviderCacheHit(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	// Use a long TTL so the cache never expires during the test
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
@@ -129,6 +133,8 @@ func TestPoolRelayProviderCacheHit(t *testing.T) {
 }
 
 func TestPoolRelayProviderCacheTTLExpiry(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	adapter := newTestAdapter(t, db, nil, 10*time.Millisecond)
 
@@ -160,6 +166,8 @@ func TestPoolRelayProviderCacheTTLExpiry(t *testing.T) {
 }
 
 func TestPoolRelayProviderInvalidateCache(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
 
@@ -191,6 +199,8 @@ func TestPoolRelayProviderInvalidateCache(t *testing.T) {
 }
 
 func TestPoolRelayProviderEventDrivenInvalidation(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
@@ -231,6 +241,8 @@ func TestPoolRelayProviderEventDrivenInvalidation(t *testing.T) {
 }
 
 func TestPoolRelayProviderDeepCopy(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
 
@@ -293,6 +305,8 @@ func TestPoolRelayProviderDeepCopy(t *testing.T) {
 }
 
 func TestPoolRelayProviderDeepCopyIPv6(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
 
@@ -325,6 +339,8 @@ func TestPoolRelayProviderDeepCopyIPv6(t *testing.T) {
 }
 
 func TestPoolRelayProviderNilEventBus(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
 
@@ -343,6 +359,8 @@ func TestPoolRelayProviderNilEventBus(t *testing.T) {
 }
 
 func TestPoolRelayProviderCacheMissFetchesFromDB(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
 
@@ -359,6 +377,8 @@ func TestPoolRelayProviderCacheMissFetchesFromDB(t *testing.T) {
 }
 
 func TestPoolRelayProviderCurrentSlot(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
@@ -371,6 +391,8 @@ func TestPoolRelayProviderCurrentSlot(t *testing.T) {
 }
 
 func TestPoolRelayProviderInvalidateCacheIdempotent(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
 
@@ -387,6 +409,8 @@ func TestPoolRelayProviderInvalidateCacheIdempotent(t *testing.T) {
 }
 
 func TestPoolRelayProviderConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
@@ -437,6 +461,8 @@ func TestPoolRelayProviderConcurrentAccess(t *testing.T) {
 }
 
 func TestPoolRelayProviderCacheNilIPFields(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
 
@@ -461,6 +487,8 @@ func TestPoolRelayProviderCacheNilIPFields(t *testing.T) {
 }
 
 func TestPoolRelayProviderDefaultTTL(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
 
@@ -475,6 +503,8 @@ func TestPoolRelayProviderDefaultTTL(t *testing.T) {
 }
 
 func TestCopyPoolRelaysEmpty(t *testing.T) {
+	t.Parallel()
+
 	result := copyPoolRelays(nil)
 	require.Empty(t, result)
 
@@ -484,6 +514,8 @@ func TestCopyPoolRelaysEmpty(t *testing.T) {
 }
 
 func TestCopyPoolRelaysFull(t *testing.T) {
+	t.Parallel()
+
 	ipv4 := net.ParseIP("10.0.0.1").To4()
 	ipv6 := net.ParseIP("fe80::1")
 	original := []PoolRelay{
@@ -518,6 +550,8 @@ func TestCopyPoolRelaysFull(t *testing.T) {
 // way to unsubscribe the old one -- leaks one more permanently-active
 // EventBus subscription per cycle.
 func TestPoolRelayProviderCloseUnsubscribes(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })

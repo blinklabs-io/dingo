@@ -32,6 +32,8 @@ import (
 // TestSnapshotRestoreRoundTrip verifies that a snapshotted database
 // restores into a fresh directory with the same blocks and tip.
 func TestSnapshotRestoreRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	src := newTestDB(t)
 	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
 	require.NoError(t, src.BlockCreate(testBlock(2, 0x02), nil))
@@ -77,6 +79,8 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 // TestRestoreRefusesNonEmptyTargetDirectory verifies that Restore errors
 // when the target directory already contains a file.
 func TestRestoreRefusesNonEmptyTargetDirectory(t *testing.T) {
+	t.Parallel()
+
 	src := newTestDB(t)
 	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
 
@@ -124,6 +128,8 @@ func TestRestoreRefusesNonEmptyTargetDirectory(t *testing.T) {
 func TestRestoreRejectsConfiguredDataDirOverrideWithoutTouchingTarget(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	src := newTestDB(t)
 	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
 
@@ -161,6 +167,8 @@ func TestRestoreRejectsConfiguredDataDirOverrideWithoutTouchingTarget(
 }
 
 func TestRestoreRejectsNonStringDataDirOverride(t *testing.T) {
+	t.Parallel()
+
 	src := newTestDB(t)
 	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
 	snapshotDir := filepath.Join(t.TempDir(), "snapshot")
@@ -198,6 +206,8 @@ func TestRestoreRejectsNonStringDataDirOverride(t *testing.T) {
 // hook, via lifecycle.RestoreValidated) that actually enforces it during a
 // restore.
 func TestManifestCheckPluginMatch(t *testing.T) {
+	t.Parallel()
+
 	src := newTestDB(t)
 	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
 
@@ -229,6 +239,8 @@ func TestManifestCheckPluginMatch(t *testing.T) {
 func TestRestoreValidatedRejectsPluginMismatchWithoutTouchingTarget(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	src := newTestDB(t)
 	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
 
@@ -274,6 +286,8 @@ func TestRestoreValidatedRejectsPluginMismatchWithoutTouchingTarget(
 // only comparing block number as well as slot/hash catches a restored
 // database whose recorded chain height disagrees with its own tip point.
 func TestRestoreRejectsMismatchedTipBlockNumber(t *testing.T) {
+	t.Parallel()
+
 	src := newTestDB(t)
 	require.NoError(t, src.BlockCreate(testBlock(1, 0x01), nil))
 	require.NoError(t, src.BlockCreate(testBlock(2, 0x02), nil))
@@ -372,6 +386,8 @@ var manifestOnlyFixture = lifecycle.Manifest{
 // the lightweight FetchCloudManifest path and never called DownloadDir
 // at all.
 func TestPeekManifestUsesLightweightCloudFetchWithoutDownloading(t *testing.T) {
+	t.Parallel()
+
 	m, err := lifecycle.PeekManifest(
 		context.Background(),
 		testDestinationRegistry,
@@ -422,6 +438,17 @@ func init() {
 			fakeCloudMu.Lock()
 			base := fakeCloudDir
 			fakeCloudMu.Unlock()
+			if base == "" {
+				// A resolution with no backing directory set would
+				// filepath.Join against "" and write the URI path
+				// relative to the package directory. Fail instead: the
+				// only way to get here is a resolution that outlived the
+				// test that set the fixture, and that should error,
+				// not leave files in the checkout.
+				return nil, errors.New(
+					"faketest-nomanifestfetcher: no backing directory set for this test",
+				)
+			}
 			return &noManifestFetcherCloudDestination{
 				inner: &fakeCloudDestination{
 					dir: filepath.Join(base, strings.TrimPrefix(uri.Path, "/")),
@@ -442,6 +469,8 @@ func init() {
 func TestPeekManifestFallsBackToDownloadWhenCloudDestinationLacksManifestFetcher(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
 

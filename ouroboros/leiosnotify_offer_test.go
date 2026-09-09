@@ -29,6 +29,8 @@ import (
 // protocol state Busy"), so the EB is never offered, fetched, voted on, or
 // certified.
 func TestLeiosForgedEBOfferSetsBlockOfferType(t *testing.T) {
+	t.Parallel()
+
 	point := ocommon.Point{Slot: 42, Hash: []byte("eb-hash")}
 	entry := &leiosForgedEBEntry{point: &point, size: 1234}
 
@@ -44,6 +46,8 @@ func TestLeiosForgedEBOfferSetsBlockOfferType(t *testing.T) {
 
 // A locally emitted vote must be offered as a MsgVotesOffer with its type set.
 func TestLeiosForgedEBOfferSetsVotesOfferType(t *testing.T) {
+	t.Parallel()
+
 	vote := lcommon.LeiosPrototypeVote{
 		AnnouncingRbHash: lcommon.NewBlake2b256([]byte("announcing-rb")),
 		VoterId:          7,
@@ -62,10 +66,14 @@ func TestLeiosForgedEBOfferSetsVotesOfferType(t *testing.T) {
 
 // An empty entry yields no offer.
 func TestLeiosForgedEBOfferEmptyEntryNil(t *testing.T) {
+	t.Parallel()
+
 	require.Nil(t, leiosForgedEBOffer(&leiosForgedEBEntry{}))
 }
 
 func TestLeiosForgedEBOfferAnnouncement(t *testing.T) {
+	t.Parallel()
+
 	raw := []byte{0x82, 0x01, 0x02}
 	msg := leiosForgedEBOffer(&leiosForgedEBEntry{announcement: raw})
 	require.NotNil(t, msg)

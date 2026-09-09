@@ -142,6 +142,8 @@ func testCreateEncodedSTMProof(
 }
 
 func TestParseSTMSignerVerificationKeyGolden(t *testing.T) {
+	t.Parallel()
+
 	encoded := hex.EncodeToString([]byte(stmGoldenSignerVerificationKeyJSON))
 	vkBytes, err := parseSTMSignerVerificationKey(encoded)
 	require.NoError(t, err)
@@ -149,6 +151,8 @@ func TestParseSTMSignerVerificationKeyGolden(t *testing.T) {
 }
 
 func TestVerifySTMSignatureGolden(t *testing.T) {
+	t.Parallel()
+
 	msg := make([]byte, 16)
 	encodedAVK := hex.EncodeToString(
 		[]byte(stmGoldenAggregateVerificationKeyJSON),
@@ -164,6 +168,8 @@ func TestVerifySTMSignatureGolden(t *testing.T) {
 }
 
 func TestVerifySTMSignatureRejectsWrongMessage(t *testing.T) {
+	t.Parallel()
+
 	msg := make([]byte, 16)
 	msg[0] = 1
 	encodedAVK := hex.EncodeToString(
@@ -181,6 +187,8 @@ func TestVerifySTMSignatureRejectsWrongMessage(t *testing.T) {
 }
 
 func TestVerifySTMSignatureRejectsTamperedBatchProof(t *testing.T) {
+	t.Parallel()
+
 	var sigObj map[string]any
 	require.NoError(
 		t,
@@ -211,6 +219,8 @@ func TestVerifySTMSignatureRejectsTamperedBatchProof(t *testing.T) {
 }
 
 func TestVerifySTMSignatureRejectsZeroK(t *testing.T) {
+	t.Parallel()
+
 	msg := make([]byte, 16)
 	encodedAVK := hex.EncodeToString(
 		[]byte(stmGoldenAggregateVerificationKeyJSON),
@@ -229,6 +239,8 @@ func TestVerifySTMSignatureRejectsZeroK(t *testing.T) {
 }
 
 func TestParseSTMAggregateVerificationKeyRejectsZeroLeaves(t *testing.T) {
+	t.Parallel()
+
 	// Build a binary-format AVK: 8 bytes nrLeaves + 32 bytes root + 8 bytes totalStake.
 	var buf [48]byte
 	// nrLeaves = 0 (first 8 bytes already zero).

@@ -32,6 +32,8 @@ import (
 )
 
 func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {
+	t.Parallel()
+
 	// Create temp directory for database
 	tmpDir, err := os.MkdirTemp("", "genesis_utxo_test")
 	require.NoError(t, err)

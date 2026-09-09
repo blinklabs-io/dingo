@@ -20,6 +20,8 @@ func (m *mockSubscriber) Close() {
 }
 
 func TestDeliverFailureUnregisters(t *testing.T) {
+	t.Parallel()
+
 	// Create a bus without metrics
 	eb := NewEventBus(nil, nil)
 	// Register mock subscriber
@@ -50,6 +52,8 @@ func TestDeliverFailureUnregisters(t *testing.T) {
 // event. Regression test for blinklabs-io/dingo#2932: the non-blocking send
 // this replaces silently discarded events under sustained load.
 func TestChannelSubscriberDeliverWaitsForCapacity(t *testing.T) {
+	t.Parallel()
+
 	const bufferSize = 5
 	sub := newChannelSubscriber("test", bufferSize, nil)
 
@@ -111,6 +115,8 @@ func TestChannelSubscriberDeliverWaitsForCapacity(t *testing.T) {
 // TestChannelSubscriberDeliverAfterClose verifies that Deliver to a closed
 // subscriber returns nil (not a panic) and does not block.
 func TestChannelSubscriberDeliverAfterClose(t *testing.T) {
+	t.Parallel()
+
 	sub := newChannelSubscriber("test", 5, nil)
 	sub.Close()
 

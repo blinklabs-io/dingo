@@ -75,6 +75,8 @@ func sendBarkProtoRequest(
 func TestBarkConnectLimitRejectsOversizedDecompressedMessageBeforeAuth(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	serverCertPath, serverKeyPath := writeTestTLSCertKey(t)
 	_, _, clientCAPath := writeTestCA(t)
 	b, err := NewBark(BarkConfig{
@@ -115,6 +117,8 @@ func TestBarkConnectLimitRejectsOversizedDecompressedMessageBeforeAuth(
 }
 
 func TestBarkConnectLimitRejectsOversizedCompressedWireMessage(t *testing.T) {
+	t.Parallel()
+
 	b, err := NewBark(BarkConfig{
 		DB:   newTestDB(t),
 		Host: "127.0.0.1",
@@ -148,6 +152,8 @@ func TestBarkConnectLimitRejectsOversizedCompressedWireMessage(t *testing.T) {
 }
 
 func TestArchiveFetchBlockRejectsInvalidBatchSizes(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	handler := &archiveServiceHandler{bark: newTestBark(t, db)}
 
