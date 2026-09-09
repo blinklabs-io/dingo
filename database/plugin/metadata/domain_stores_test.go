@@ -85,6 +85,8 @@ var governanceStoreMethods = []string{
 	"GetDreps",
 	"GetPredefinedDrepFirstSeenSlots",
 	"GetDrepLastRegistrationSlot",
+	"GetDrepLastRegistrationDeposit",
+	"GetDrepLastRegistrationDeposits",
 	"InsertDrepIfAbsent",
 	"GetDRepVotingPower",
 	"GetDRepDelegators",

@@ -142,6 +142,8 @@ INSERT INTO address_transaction (
 }
 
 func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	raw := rawSQLiteMetadataFixture(t, db)
 
@@ -203,7 +205,11 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 		{name: "pointer two", addr: pointerTwo, want: [][]byte{seeded[2].TxId}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := db.UtxosByAddress([]lcommon.Address{tc.addr}, nil)
+			got, err := db.UtxosByAddress(
+				[]lcommon.Address{tc.addr},
+				MaxUtxosByAddressResults,
+				nil,
+			)
 			require.NoError(t, err)
 			gotIDs := make([][]byte, len(got))
 			for i := range got {
@@ -216,6 +222,7 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 	t.Run("multiple addresses", func(t *testing.T) {
 		got, err := db.UtxosByAddress(
 			[]lcommon.Address{enterprise, base},
+			MaxUtxosByAddressResults,
 			nil,
 		)
 		require.NoError(t, err)
@@ -561,6 +568,8 @@ INSERT INTO utxo (
 // LIMIT/OFFSET fetch are the entire answer, matching how NodeAdapter.AccountUTXOs
 // (api/blockfrost) now queries a stake credential's UTxOs.
 func TestCountAndPageUtxosByAddressWithOrderingCoarseMatch(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	raw := rawSQLiteMetadataFixture(t, db)
 
@@ -644,6 +653,8 @@ func TestCountAndPageUtxosByAddressWithOrderingCoarseMatch(t *testing.T) {
 // the concrete case), so a plain COUNT(*) against it would silently report
 // too many UTxOs instead of failing loudly.
 func TestCountUtxosByAddressWithOrderingRejectsExactAddress(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	payment := bytes.Repeat([]byte{0x11}, lcommon.AddressHashSize)
@@ -672,6 +683,8 @@ func TestCountUtxosByAddressWithOrderingRejectsExactAddress(t *testing.T) {
 // candidates, not exact matches, so the skipped count would not equal
 // Offset for an address whose coarse predicate over-matches.
 func TestUtxosByAddressWithOrderingRejectsOffsetOnExactAddress(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	payment := bytes.Repeat([]byte{0x22}, lcommon.AddressHashSize)
@@ -702,6 +715,8 @@ func TestUtxosByAddressWithOrderingRejectsOffsetOnExactAddress(t *testing.T) {
 // would return rows in the wrong direction from the cursor instead of
 // failing loudly.
 func TestUtxosByAddressWithOrderingRejectsDescendingKeyset(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	_, err := db.UtxosByAddressWithOrdering(
@@ -722,6 +737,8 @@ func TestUtxosByAddressWithOrderingRejectsDescendingKeyset(t *testing.T) {
 // filtered set, silently returning a page shifted by both controls instead
 // of the single, well-defined page either one alone describes.
 func TestUtxosByAddressWithOrderingRejectsOffsetKeyset(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	_, err := db.UtxosByAddressWithOrdering(
@@ -744,6 +761,8 @@ func TestUtxosByAddressWithOrderingRejectsOffsetKeyset(t *testing.T) {
 // (what the adapter now does) must keep them on the same snapshot even
 // when a conflicting write commits in between.
 func TestCountAndFetchShareSnapshotWithinOneTxn(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	raw := rawSQLiteMetadataFixture(t, db)
 
@@ -813,6 +832,8 @@ func TestCountAndFetchShareSnapshotWithinOneTxn(t *testing.T) {
 func TestMatchingUtxoRefsByAddressWithOrderingExcludesPointerSiblings(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	raw := rawSQLiteMetadataFixture(t, db)
 
@@ -866,6 +887,8 @@ func TestMatchingUtxoRefsByAddressWithOrderingExcludesPointerSiblings(
 func TestMatchingUtxoRefsByAddressWithOrderingCrossesBatchBoundary(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	raw := rawSQLiteMetadataFixture(t, db)
 
@@ -951,6 +974,8 @@ INSERT INTO utxo (
 // re-matches (duplicating) or excludes (dropping) every tied row instead of
 // resuming after the one already returned.
 func TestMatchingUtxoRefsByAddressWithOrderingSnapshotTieBreak(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	raw := rawSQLiteMetadataFixture(t, db)
 
@@ -1023,6 +1048,8 @@ func TestMatchingUtxoRefsByAddressWithOrderingSnapshotTieBreak(t *testing.T) {
 func TestMatchingUtxoRefsByAddressWithOrderingExceedsOldCandidateScanLimit(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	raw := rawSQLiteMetadataFixture(t, db)
 
@@ -1105,6 +1132,8 @@ INSERT INTO utxo (
 // keyset cursor can only resume past that boundary without revisiting it by
 // carrying the last row's tx_id.
 func TestUtxosByAddressWithOrderingSnapshotTieBreak(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	raw := rawSQLiteMetadataFixture(t, db)
 
@@ -1188,6 +1217,8 @@ func TestUtxosByAddressWithOrderingSnapshotTieBreak(t *testing.T) {
 // asset loading (assets are now loaded once on the deduplicated result set
 // instead of once per chunk -- see GetUtxosByAddress).
 func TestUtxosByAddressLoadsAssets(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	payment := bytes.Repeat([]byte{0x55}, lcommon.AddressHashSize)
@@ -1226,7 +1257,11 @@ func TestUtxosByAddressLoadsAssets(t *testing.T) {
 		return db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded)
 	}))
 
-	got, err := db.UtxosByAddress([]lcommon.Address{addr}, nil)
+	got, err := db.UtxosByAddress(
+		[]lcommon.Address{addr},
+		MaxUtxosByAddressResults,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	require.Len(t, got[0].Assets, 1)
@@ -1306,7 +1341,11 @@ INSERT INTO utxo (
 		return nil
 	}))
 
-	got, err := db.UtxosByAddress(addrs, nil)
+	got, err := db.UtxosByAddress(
+		addrs,
+		MaxUtxosByAddressResults,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Len(t, got, numAddrs)
 
@@ -1325,6 +1364,8 @@ INSERT INTO utxo (
 // and a larger count fails on the 999 bound-parameter limit instead. Every
 // address's UTxO must still come back exactly once from the chunked query.
 func TestUtxosByAddressExceedsSQLiteParameterLimit(t *testing.T) {
+	t.Parallel()
+
 	seedManyUtxoAddressesAndAssertRoundTrip(
 		t, 2000, func(i int) lcommon.Address {
 			payment := make([]byte, lcommon.AddressHashSize)
@@ -1356,6 +1397,8 @@ func TestUtxosByAddressExceedsSQLiteParameterLimit(t *testing.T) {
 // every chunk, which must be deduplicated before its CBOR is exactly matched
 // against the requested addresses.
 func TestUtxosByAddressManyZeroArgBranches(t *testing.T) {
+	t.Parallel()
+
 	const patternCount = 1_000
 
 	db := openTestDB(t)
@@ -1384,7 +1427,11 @@ func TestUtxosByAddressManyZeroArgBranches(t *testing.T) {
 	}
 
 	want := seedExactAddressUtxo(t, db, raw, addrs[0], 1, 0x42)
-	got, err := db.UtxosByAddress(addrs, nil)
+	got, err := db.UtxosByAddress(
+		addrs,
+		MaxUtxosByAddressResults,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, want.TxId, got[0].TxId)

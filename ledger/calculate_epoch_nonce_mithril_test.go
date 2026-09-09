@@ -60,6 +60,8 @@ import (
 func TestCalculateEpochNonce_PostMithrilBootstrapFreezesCandidateAtCutoff(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -226,6 +228,8 @@ func TestCalculateEpochNonce_PostMithrilBootstrapFreezesCandidateAtCutoff(
 func TestCalculateEpochNonce_PostMithrilBootstrapNoBlocksBeforeCutoff(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -352,6 +356,8 @@ func TestCalculateEpochNonce_PostMithrilBootstrapNoBlocksBeforeCutoff(
 func TestCalculateEpochNonce_PostMithrilBootstrapWithoutCheckpoint(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
@@ -485,6 +491,8 @@ func TestCalculateEpochNonce_PostMithrilBootstrapWithoutCheckpoint(
 func TestComputeEpochNonceForSlot_PostMithrilBootstrapMatchesRollover(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
