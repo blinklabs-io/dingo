@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
@@ -50,7 +51,7 @@ func newAdapterDatabase(t *testing.T) *database.Database {
 		host,
 		plugin.CapabilityStorageBlob,
 		"badger",
-		nil,
+		testutil.BadgerBlobConfig(),
 		blob.ProviderDependencies{
 			DataDir: dataDir,
 			Logger:  logger,
@@ -92,6 +93,8 @@ func newAdapterDatabase(t *testing.T) *database.Database {
 // height to that index -- the same translation the Blockfrost adapter
 // documents and applies.
 func TestMeshDatabaseAdapterBlockByIndexUsesChainHeight(t *testing.T) {
+	t.Parallel()
+
 	db := newAdapterDatabase(t)
 	meshDB := NewMeshDatabase(db)
 
@@ -129,6 +132,8 @@ func TestMeshDatabaseAdapterBlockByIndexUsesChainHeight(t *testing.T) {
 // surfaces the shared not-found error, which the /block handler maps to
 // the Mesh block-not-found code.
 func TestMeshDatabaseAdapterBlockByIndexNotFound(t *testing.T) {
+	t.Parallel()
+
 	db := newAdapterDatabase(t)
 	meshDB := NewMeshDatabase(db)
 
@@ -140,6 +145,8 @@ func TestMeshDatabaseAdapterBlockByIndexNotFound(t *testing.T) {
 // TestMeshDatabaseAdapterBlockByHash asserts hash lookups reach the
 // blob store's hash index rather than the height index.
 func TestMeshDatabaseAdapterBlockByHash(t *testing.T) {
+	t.Parallel()
+
 	db := newAdapterDatabase(t)
 	meshDB := NewMeshDatabase(db)
 	hash := testHash(0x5a)
@@ -163,6 +170,8 @@ func TestMeshDatabaseAdapterBlockByHash(t *testing.T) {
 // methods reach the metadata store and report a miss as an empty
 // result, which the handlers translate into transaction-not-found.
 func TestMeshDatabaseAdapterTransactionLookups(t *testing.T) {
+	t.Parallel()
+
 	db := newAdapterDatabase(t)
 	meshDB := NewMeshDatabase(db)
 
@@ -179,6 +188,8 @@ func TestMeshDatabaseAdapterTransactionLookups(t *testing.T) {
 // overflow the storage index is reported as not found rather than
 // wrapping around to a valid index.
 func TestMeshDatabaseAdapterBlockIndexOverflow(t *testing.T) {
+	t.Parallel()
+
 	db := newAdapterDatabase(t)
 	meshDB := NewMeshDatabase(db)
 

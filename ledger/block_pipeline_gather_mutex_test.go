@@ -82,6 +82,8 @@ func (p *pausingLedgerReadIterator) Next(
 // takes) must fail. Once the reader delivers its batch and the mutex is no
 // longer needed, TryLock must succeed.
 func TestLedgerReadChainIteratorHoldsGatherMutexAcrossGather(t *testing.T) {
+	t.Parallel()
+
 	block1, point1 := buildDecodableTestBlock(t, 10, 1)
 	block2, point2 := buildDecodableTestBlock(t, 20, 2)
 

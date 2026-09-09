@@ -83,6 +83,8 @@ func newForkChainFixture(
 // deletion loop onto the fork point itself, where the in-memory buffer holds
 // no entry for the block; computing a buffer index there yields -1.
 func TestChainRollbackEphemeralAtAndBeforeForkPoint(t *testing.T) {
+	t.Parallel()
+
 	const (
 		primaryCount = 6
 		forkIdx      = 2 // primary block index 3

@@ -16,6 +16,7 @@ package config
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"reflect"
 	"slices"
@@ -986,5 +987,37 @@ func TestClassedValueURIShapeFailsClosed(t *testing.T) {
 				t.Errorf("plain %s dropped its value: %s", shape, plain)
 			}
 		})
+	}
+}
+
+// TestKoiosParityBaseURLIsRedactedAsURI pins that the self-hosted Koios host is
+// classified as a URI rather than a plain field.
+//
+// An operator can put credentials in it — as userinfo, or as a credential-shaped
+// query parameter — exactly as they can in Mithril.AggregatorURL. A plain
+// classification renders the field unchanged, which would write those
+// credentials into the log (CWE-532).
+func TestKoiosParityBaseURLIsRedactedAsURI(t *testing.T) {
+	t.Parallel()
+
+	if !slices.Contains(logURIConfigFields, "KoiosParity.BaseURL") {
+		t.Fatal("KoiosParity.BaseURL must be classified as a URI field")
+	}
+	if slices.Contains(logPlainConfigFields, "KoiosParity.BaseURL") {
+		t.Fatal("KoiosParity.BaseURL must not also be a plain field")
+	}
+
+	cfg := Config{}
+	cfg.KoiosParity.BaseURL =
+		"https://dingo:SENTINEL-KOIOS-PASSWORD@koios.example/api/v1"
+	rendered := fmt.Sprint(cfg.LogValue())
+	if strings.Contains(rendered, "SENTINEL-KOIOS-PASSWORD") {
+		t.Errorf("KoiosParity.BaseURL leaks its credential: %s", rendered)
+	}
+	if !strings.Contains(rendered, "koios.example") {
+		t.Errorf(
+			"KoiosParity.BaseURL should still show its host: %s",
+			rendered,
+		)
 	}
 }

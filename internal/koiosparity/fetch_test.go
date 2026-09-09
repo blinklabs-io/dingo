@@ -31,17 +31,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// withTestKoiosBaseURL points koiosBaseURLs["preview"] — the map NewKoiosClient
-// resolves a network to its base URL through — at a test server for the
-// duration of the test, restoring the original value afterward. This is the
-// only seam available for exercising Fetch's dispatcher end-to-end against a
-// fake Koios server, since NewKoiosClient's base URL isn't otherwise
-// injectable from FetchConfig.
-func withTestKoiosBaseURL(t *testing.T, url string) {
+// seedKoiosSource stamps a cache with the API root the test is about to fetch
+// from. A cache carrying no koios_source row is attributed to the public host,
+// so a test that writes rows directly and then fetches from an httptest server
+// reads as a source change and has those rows discarded. That is the
+// anti-mixing guard doing its job rather than the behaviour under test.
+//
+// Call it before writing the rows, not after: stamping a custom host onto an
+// unstamped cache is itself the change that discards, so a stamp that follows
+// the seed deletes the seed.
+func seedKoiosSource(t *testing.T, cache *Cache, network, baseURL string) {
 	t.Helper()
-	orig := koiosBaseURLs["preview"]
-	koiosBaseURLs["preview"] = url
-	t.Cleanup(func() { koiosBaseURLs["preview"] = orig })
+	_, err := cache.RecordKoiosSource(network, baseURL, time.Now().UTC())
+	require.NoError(t, err)
 }
 
 const validEpochInfoTmpl = `[{"epoch_no":%s,"era":"conway","out_sum":"100","fees":"10",` +
@@ -61,6 +63,8 @@ var validEpochParamsTmpl = previewBabbageEpochParamsTmpl
 // Fetch run with a hard error instead of being recorded in FailedEpochs and
 // letting the dispatcher continue through the remaining epoch range.
 func TestFetchAbortsOnPermanentEpochInfoError(t *testing.T) {
+	t.Parallel()
+
 	var epochInfoAttempts atomic.Int32
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -102,18 +106,19 @@ func TestFetchAbortsOnPermanentEpochInfoError(t *testing.T) {
 		}),
 	)
 	defer srv.Close()
-	withTestKoiosBaseURL(t, srv.URL)
 
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
 	result, err := Fetch(context.Background(), FetchConfig{
-		Network:      "preview",
-		CachePath:    filepath.Join(t.TempDir(), "cache.db"),
-		Concurrency:  1,
-		FromEpoch:    10,
-		ThroughEpoch: 15,
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           "preview",
+		CachePath:         filepath.Join(t.TempDir(), "cache.db"),
+		Concurrency:       1,
+		FromEpoch:         10,
+		ThroughEpoch:      15,
 	}, slog.New(slog.DiscardHandler))
 	require.Error(
 		t,
@@ -137,6 +142,8 @@ func TestFetchAbortsOnPermanentEpochInfoError(t *testing.T) {
 // before — recorded in FailedEpochs with Fetch returning (result, nil) rather
 // than aborting the whole run.
 func TestFetchTransient503LandsInFailedEpochs(t *testing.T) {
+	t.Parallel()
+
 	srv := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
@@ -176,18 +183,19 @@ func TestFetchTransient503LandsInFailedEpochs(t *testing.T) {
 		}),
 	)
 	defer srv.Close()
-	withTestKoiosBaseURL(t, srv.URL)
 
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
 	result, err := Fetch(context.Background(), FetchConfig{
-		Network:      "preview",
-		CachePath:    filepath.Join(t.TempDir(), "cache.db"),
-		Concurrency:  3,
-		FromEpoch:    20,
-		ThroughEpoch: 22,
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           "preview",
+		CachePath:         filepath.Join(t.TempDir(), "cache.db"),
+		Concurrency:       3,
+		FromEpoch:         20,
+		ThroughEpoch:      22,
 	}, slog.New(slog.DiscardHandler))
 	require.NoError(
 		t,
@@ -207,6 +215,8 @@ func TestFetchTransient503LandsInFailedEpochs(t *testing.T) {
 // every other pool in the epoch before the epoch as a whole was marked
 // failed.
 func TestFetchEpochStopsSchedulingPoolsAfterPermanentError(t *testing.T) {
+	t.Parallel()
+
 	const poolTotal = 20
 	var poolHistoryAttempts atomic.Int32
 	srv := httptest.NewServer(
@@ -268,18 +278,19 @@ func TestFetchEpochStopsSchedulingPoolsAfterPermanentError(t *testing.T) {
 		}),
 	)
 	defer srv.Close()
-	withTestKoiosBaseURL(t, srv.URL)
 
 	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
 	result, err := Fetch(context.Background(), FetchConfig{
-		Network:      "preview",
-		CachePath:    filepath.Join(t.TempDir(), "cache.db"),
-		Concurrency:  1,
-		FromEpoch:    30,
-		ThroughEpoch: 30,
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           "preview",
+		CachePath:         filepath.Join(t.TempDir(), "cache.db"),
+		Concurrency:       1,
+		FromEpoch:         30,
+		ThroughEpoch:      30,
 	}, slog.New(slog.DiscardHandler))
 	require.Error(t, err)
 	require.Nil(t, result)
@@ -306,6 +317,8 @@ func TestFetchEpochStopsSchedulingPoolsAfterPermanentError(t *testing.T) {
 // pool data is already fresh — only the account backfill runs — so
 // /epoch_info and /totals must never be re-requested for this epoch.
 func TestFetchBackfillsAccountsForPreExistingCache(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const epoch = uint64(50)
 	const koiosAddr = "stake1uzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
@@ -386,11 +399,11 @@ func TestFetchBackfillsAccountsForPreExistingCache(t *testing.T) {
 		}),
 	)
 	defer srv.Close()
-	withTestKoiosBaseURL(t, srv.URL)
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
 	cache, err := OpenCache(cachePath, nil)
 	require.NoError(t, err)
+	seedKoiosSource(t, cache, network, srv.URL)
 
 	fetchedAt := time.Now().Add(-time.Hour).UTC()
 	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
@@ -415,12 +428,14 @@ func TestFetchBackfillsAccountsForPreExistingCache(t *testing.T) {
 	require.NoError(t, cache.Close())
 
 	result, err := Fetch(context.Background(), FetchConfig{
-		Network:         network,
-		CachePath:       cachePath,
-		Concurrency:     1,
-		FromEpoch:       epoch,
-		ThroughEpoch:    epoch,
-		AccountsEnabled: true,
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           network,
+		CachePath:         cachePath,
+		Concurrency:       1,
+		FromEpoch:         epoch,
+		ThroughEpoch:      epoch,
+		AccountsEnabled:   true,
 	}, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	require.NotNil(t, result)
@@ -498,6 +513,8 @@ func TestFetchBackfillsAccountsForPreExistingCache(t *testing.T) {
 // /totals and every pool-history row to obtain it, and would break the same
 // guarantee TestFetchBackfillsAccountsForPreExistingCache makes for accounts.
 func TestFetchBackfillsParamsWithoutRefetchingPoolData(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const epoch = uint64(50)
 
@@ -533,11 +550,11 @@ func TestFetchBackfillsParamsWithoutRefetchingPoolData(t *testing.T) {
 		}),
 	)
 	defer srv.Close()
-	withTestKoiosBaseURL(t, srv.URL)
 
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
 	cache, err := OpenCache(cachePath, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
+	seedKoiosSource(t, cache, network, srv.URL)
 	fetchedAt := time.Now().UTC()
 	// Pool-level data present and fresh; no koios_epoch_params row.
 	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
@@ -556,11 +573,13 @@ func TestFetchBackfillsParamsWithoutRefetchingPoolData(t *testing.T) {
 	require.NoError(t, cache.Close())
 
 	_, err = Fetch(context.Background(), FetchConfig{
-		Network:      network,
-		CachePath:    cachePath,
-		Concurrency:  1,
-		FromEpoch:    epoch,
-		ThroughEpoch: epoch,
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           network,
+		CachePath:         cachePath,
+		Concurrency:       1,
+		FromEpoch:         epoch,
+		ThroughEpoch:      epoch,
 	}, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 

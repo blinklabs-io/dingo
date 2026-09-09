@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -76,6 +77,8 @@ func testBlock(id uint64, hashByte byte) models.Block {
 // TestDeleteBlocksAfterRemovesOnlyBlocksAboveThreshold verifies that
 // blocks at or below afterID survive and every block above it is deleted.
 func TestDeleteBlocksAfterRemovesOnlyBlocksAboveThreshold(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	for id := uint64(1); id <= 5; id++ {
@@ -104,6 +107,8 @@ func TestDeleteBlocksAfterRemovesOnlyBlocksAboveThreshold(t *testing.T) {
 // TestDeleteBlocksAfterNoopWhenTipAtOrBelowThreshold verifies that a
 // threshold at or above the current tip deletes nothing.
 func TestDeleteBlocksAfterNoopWhenTipAtOrBelowThreshold(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
 
@@ -126,6 +131,8 @@ func TestDeleteBlocksAfterNoopWhenTipAtOrBelowThreshold(t *testing.T) {
 // below afterID here and must survive; a bounded context turns a
 // reintroduced wraparound into a fast, clear failure instead of a hang.
 func TestDeleteBlocksAfterStopsAtMaxUint64TipWithoutWrapping(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
 
@@ -146,6 +153,8 @@ func TestDeleteBlocksAfterStopsAtMaxUint64TipWithoutWrapping(t *testing.T) {
 // TestDeleteBlocksAfterRespectsSmallBatchSize verifies that a batch size
 // forcing multiple transactions still deletes exactly the same blocks.
 func TestDeleteBlocksAfterRespectsSmallBatchSize(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	for id := uint64(1); id <= 10; id++ {
 		require.NoError(t, db.BlockCreate(testBlock(id, byte(id)), nil))
@@ -184,6 +193,8 @@ func TestDeleteBlocksAfterRespectsSmallBatchSize(t *testing.T) {
 // first block inside the batch observes the cancellation, so the whole
 // batch's transaction rolls back and no blocks are deleted at all.
 func TestDeleteBlocksAfterNoticesCancellationMidBatch(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	const numBlocks = 20
 	for id := uint64(1); id <= numBlocks; id++ {
@@ -214,6 +225,8 @@ func TestDeleteBlocksAfterNoticesCancellationMidBatch(t *testing.T) {
 // TestDeleteBlocksAfterCanceledContext verifies that a pre-cancelled
 // context is caught before any batch runs, returning context.Canceled.
 func TestDeleteBlocksAfterCanceledContext(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
 	require.NoError(t, db.BlockCreate(testBlock(2, 0x02), nil))
@@ -278,7 +291,7 @@ func newCountingTestDB(t *testing.T) (*database.Database, *countingBlobStore) {
 
 	realBlob, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
-		plugin.CapabilityStorageBlob, "badger", nil,
+		plugin.CapabilityStorageBlob, "badger", testutil.BadgerBlobConfig(),
 		blob.ProviderDependencies{DataDir: config.DataDir},
 	)
 	require.NoError(t, err)
@@ -314,6 +327,8 @@ func newCountingTestDB(t *testing.T) (*database.Database, *countingBlobStore) {
 // so cost must track the handful of blocks really stored, not the width
 // of the gap between them.
 func TestDeleteBlocksAfterSkipsSparseGapWithoutPerIDLookups(t *testing.T) {
+	t.Parallel()
+
 	db, counting := newCountingTestDB(t)
 
 	// A huge never-imported gap between id 3 and id 100_000, mirroring the
@@ -405,7 +420,7 @@ func newErroringIteratorTestDB(
 
 	realBlob, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
-		plugin.CapabilityStorageBlob, "badger", nil,
+		plugin.CapabilityStorageBlob, "badger", testutil.BadgerBlobConfig(),
 		blob.ProviderDependencies{DataDir: config.DataDir},
 	)
 	require.NoError(t, err)
@@ -448,6 +463,8 @@ func newErroringIteratorTestDB(
 func TestDeleteBlocksAfterSurfacesIteratorErrorInsteadOfTreatingItAsEmptyRange(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	sentinel := errors.New("simulated cloud list failure")
 	db := newErroringIteratorTestDB(t, sentinel)
 	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
@@ -529,7 +546,7 @@ func newMidWalkErrorTestDB(
 
 	realBlob, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
-		plugin.CapabilityStorageBlob, "badger", nil,
+		plugin.CapabilityStorageBlob, "badger", testutil.BadgerBlobConfig(),
 		blob.ProviderDependencies{DataDir: config.DataDir},
 	)
 	require.NoError(t, err)
@@ -573,6 +590,8 @@ func newMidWalkErrorTestDB(
 func TestDeleteBlocksAfterSurfacesIteratorErrorPartwayThroughWalk(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	sentinel := errors.New("simulated mid-listing cloud failure")
 	// n=2: the iterator behaves normally for the first two entries (blocks
 	// 1 and 2), then reports "no more keys" while Err() reveals the
@@ -816,7 +835,7 @@ func newCloudLikeTestDB(t *testing.T) *database.Database {
 
 	realBlob, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
-		plugin.CapabilityStorageBlob, "badger", nil,
+		plugin.CapabilityStorageBlob, "badger", testutil.BadgerBlobConfig(),
 		blob.ProviderDependencies{DataDir: config.DataDir},
 	)
 	require.NoError(t, err)
@@ -860,6 +879,8 @@ func newCloudLikeTestDB(t *testing.T) *database.Database {
 func TestDeleteBlocksAfterHonestlyReportsProgressOnCloudLikeMidBatchFailureAndResumeIsSafe(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newCloudLikeTestDB(t)
 	const numBlocks = 5
 	for id := uint64(1); id <= numBlocks; id++ {
@@ -993,7 +1014,7 @@ func newPartialCommitTestDB(
 
 	realBlob, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
-		plugin.CapabilityStorageBlob, "badger", nil,
+		plugin.CapabilityStorageBlob, "badger", testutil.BadgerBlobConfig(),
 		blob.ProviderDependencies{DataDir: config.DataDir},
 	)
 	require.NoError(t, err)
@@ -1031,6 +1052,8 @@ func newPartialCommitTestDB(
 // over-claim (adding the failed batch) and an under-claim (dropping the clean
 // one).
 func TestDeleteBlocksAfterDoesNotClaimExactCountOnPartialCommit(t *testing.T) {
+	t.Parallel()
+
 	db, blobStore := newPartialCommitTestDB(t)
 	const numBlocks = 4
 	for id := uint64(1); id <= numBlocks; id++ {

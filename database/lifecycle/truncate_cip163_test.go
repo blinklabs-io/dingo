@@ -69,6 +69,8 @@ func seedCip163Certificate(
 func TestTruncateRecomputesCip163ExpirationForWitnessAfterTruncatePoint(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		inactivity = uint64(90)
 		// 100 slots per epoch: epoch 0 = [0,100), epoch 1 = [100,200), ...

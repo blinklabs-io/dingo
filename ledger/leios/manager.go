@@ -1110,6 +1110,12 @@ func (m *VoteManager) CommitteeForEpoch(epoch uint64) (*Committee, error) {
 	if err != nil {
 		return nil, err
 	}
+	// committeeAndParamsForEpoch returns a nil entry only alongside a
+	// non-nil error: computeCommitteeEntry's nil-entry returns are all error
+	// returns, and completeCommitteeComputation memoizes an entry only when
+	// err is nil. The err check above therefore rules out a nil entry, which
+	// nilaway cannot correlate.
+	//nolint:nilaway // entry is non-nil whenever err is nil
 	return entry.committee, nil
 }
 
