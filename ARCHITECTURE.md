@@ -7116,11 +7116,13 @@ never the reverse.
   `NewObserver` because the probe needs a context and a startup the caller can
   fail — because the node's config dump names the configured value only for
   the in-process observer and says nothing on the `fetch`/`run`/`watch` paths.
-  Recording alone only invalidates the rows present when it runs, so the four
-  bulk writes (`CommitEpochData`, `CommitAccountRewardsForEpoch`,
-  `SaveAccountFetchChunkProgress`, `SaveAccountUniverse`) also verify, inside
-  their own transaction, that the cache still holds the root this handle
-  claimed. The default cache path is shared across the standalone commands and
+  Recording alone only invalidates the rows present when it runs, so all seven
+  writes that touch a Koios-sourced table also verify, inside their own
+  transaction, that the cache still holds the root this handle claimed:
+  `CommitEpochData`, `CommitAccountRewardsForEpoch`,
+  `SaveAccountFetchChunkProgress` and `SaveAccountUniverse` on the fetch side,
+  and `CommitEpochMismatches`, `UpsertCheckEpochStatus` and `InsertCheckRun` on
+  the check side. The default cache path is shared across the standalone commands and
   the in-process observer, so an observer on one host and a `fetch
   --koios-url` on another are a reachable pair; without the check the older
   client would go on appending its host's answers under the newer host's
@@ -7128,9 +7130,9 @@ never the reverse.
   `status` and `explain` working against a cache someone else stamped. `Check`
   writes verdicts derived from the cache but has no client to name a source, so
   it calls `PinRecordedSource` at startup and claims whatever is recorded: the
-  same re-point that discards check evidence then fails the in-flight run's
-  `CommitEpochMismatches`/`UpsertCheckEpochStatus`/`InsertCheckRun` instead of
-  letting it repopulate them under a source its verdicts never saw. An
+  same re-point that discards check evidence then fails that run's three of
+  those seven writes instead of letting it repopulate them under a source its
+  verdicts never saw. An
   unstamped cache pins the public root it is attributed to rather than pinning
   nothing, and `assertClaimedSource` compares attributions rather than raw
   rows, so a legacy cache keeps writing while it stays unstamped and stops the
