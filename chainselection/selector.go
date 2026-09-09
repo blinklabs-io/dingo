@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
@@ -170,6 +171,43 @@ type ChainSelector struct {
 	// held (on a best-peer → none transition) for publishing outside the lock.
 	// Guarded by mutex.
 	pendingSelectedNone *ChainSelectedNoneEvent
+
+	// genesisSelection caches the pair GenesisSelectionState returns.
+	// GenesisSelectionState is a narrow query injected as a callback into
+	// other subsystems' hot paths (chainsync.State.RecordObservedHeader,
+	// LedgerState.recordPeerHeaderHistory), which each hold their own lock
+	// while calling it. Deriving the pair from cs.mode/cs.securityParam under
+	// cs.mutex.RLock() on every call created a lock-order inversion with
+	// chainsync.State.clientConnIdMutex: see #4070. This atomic lets
+	// GenesisSelectionState answer without cs.mutex at all. It is refreshed
+	// under cs.mutex (refreshGenesisSelectionSnapshotLocked) at every point
+	// that can change cs.mode or the derived Genesis window -- construction,
+	// the one-way Genesis-to-Praos transition, and SetSecurityParam -- so a
+	// lock-free read never observes a stale pair for longer than one such
+	// update.
+	genesisSelection atomic.Pointer[genesisSelectionSnapshot]
+}
+
+// genesisSelectionSnapshot is the immutable pair GenesisSelectionState
+// returns. It is published by whole-value replacement and never mutated in
+// place, so a lock-free reader always sees an active/window pair that existed
+// together: publishing the two halves as separate atomics would let a reader
+// load the old active flag and the new window across one refresh.
+type genesisSelectionSnapshot struct {
+	active bool
+	window uint64
+}
+
+// refreshGenesisSelectionSnapshotLocked recomputes the cached
+// GenesisSelectionState pair from cs.mode and genesisWindowSlotsLocked().
+// Callers must hold cs.mutex (or run before cs is shared across goroutines,
+// as NewChainSelector does) and must call this every time cs.mode or a
+// genesisWindowSlotsLocked() input (cs.securityParam) changes.
+func (cs *ChainSelector) refreshGenesisSelectionSnapshotLocked() {
+	cs.genesisSelection.Store(&genesisSelectionSnapshot{
+		active: cs.mode == SelectionModeGenesis,
+		window: cs.genesisWindowSlotsLocked(),
+	})
 }
 
 // NewChainSelector creates a new ChainSelector with the given configuration.
@@ -214,6 +252,7 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 	if cfg.GenesisMode {
 		cs.mode = SelectionModeGenesis
 	}
+	cs.refreshGenesisSelectionSnapshotLocked()
 	if cfg.EventBus != nil && !cfg.DisableEventSubscriptions {
 		// SubscribeFuncStrict, not SubscribeFunc: HandlePeerRollbackEvent
 		// mutates chain-selection state machine state (per-peer observed
@@ -338,6 +377,7 @@ func (cs *ChainSelector) advanceSelectionModeLocked() bool {
 	bestSlot := cs.bestKnownGenesisSlotLocked()
 	window := cs.genesisWindowSlotsLocked()
 	cs.mode = SelectionModePraos
+	cs.refreshGenesisSelectionSnapshotLocked()
 	// Corroboration no longer applies in Praos; drop the per-peer hash
 	// frontier so it does not linger for the full window on every tracked peer.
 	for _, peerTip := range cs.peerTips {
@@ -854,6 +894,11 @@ func (cs *ChainSelector) SetSecurityParam(k uint64) {
 		defer cs.mutex.Unlock()
 		cs.securityParam = k
 		shouldEvaluate = cs.advanceSelectionModeLocked()
+		// advanceSelectionModeLocked already refreshes the snapshot when it
+		// transitions the mode. Refresh again unconditionally: the window it
+		// caches also depends on securityParam, which just changed here, even
+		// when the mode does not transition.
+		cs.refreshGenesisSelectionSnapshotLocked()
 	}()
 	if shouldEvaluate {
 		cs.EvaluateAndSwitch()
@@ -878,10 +923,26 @@ func (cs *ChainSelector) GenesisWindowSlots() uint64 {
 // selection is active and the density window it is using. Composition code
 // injects this narrow state query into fork resolution so the authoritative
 // local decision follows the selector's one-way Genesis-to-Praos transition.
+//
+// This deliberately does not take cs.mutex. Callers are function-valued
+// callbacks wired into other subsystems' hot paths
+// (chainsync.State.RecordObservedHeader, LedgerState.recordPeerHeaderHistory),
+// which hold their own lock (chainsync.State.clientConnIdMutex) across the
+// call. Taking cs.mutex.RLock() here previously created a lock-order
+// inversion against a separate path that holds cs.mutex (write) and calls
+// back into chainsync.State.BlockfetchLatency (clientConnIdMutex.RLock),
+// which deadlocked chain sync under real peer traffic: see #4070. The
+// snapshot below is kept current by refreshGenesisSelectionSnapshotLocked,
+// called under cs.mutex at every point that can change it.
 func (cs *ChainSelector) GenesisSelectionState() (bool, uint64) {
-	cs.mutex.RLock()
-	defer cs.mutex.RUnlock()
-	return cs.mode == SelectionModeGenesis, cs.genesisWindowSlotsLocked()
+	snapshot := cs.genesisSelection.Load()
+	if snapshot == nil {
+		// A ChainSelector that did not come from NewChainSelector has never
+		// published a snapshot. Answer as the pre-cache implementation did
+		// for that zero value: Praos, and the default window.
+		return false, defaultGenesisWindowSlots
+	}
+	return snapshot.active, snapshot.window
 }
 
 // GetBestPeer returns the connection ID of the peer with the best chain, or
