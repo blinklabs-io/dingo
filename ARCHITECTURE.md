@@ -1216,6 +1216,11 @@ while components are still starting can therefore cancel startup without
 letting `Node.Stop` concurrently close a partially initialized component; the
 normal shutdown waits until rollback has finished.
 
+The ledger fatal-error callback records its cause before cancelling the node.
+`Node.Run` returns that cause on normal shutdown and cancellation-shaped startup
+exits, preserving the first fatal cause across repeated callbacks. This wiring
+is shared by initial ledger construction and live ledger reconstruction.
+
 The node creates one shutdown context from the configured `shutdownTimeout`
 and passes it through every phase. PeerGovernor shutdown cancels its internal
 run context, which interrupts ledger-peer DNS discovery and outbound work,
