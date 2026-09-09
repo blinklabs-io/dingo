@@ -75,3 +75,60 @@ func BuildDecodableConwayBlockBytes(
 	require.NoError(t, err)
 	return raw
 }
+
+// ExtendConwayHeaderWithLeios rewrites a standard (10-field header) Conway
+// block so its header body carries the two trailing Musashi/Leios fields
+// (leios_certified = false, leios_announcement = nil), producing a 12-field
+// header body. The transaction components (and therefore the block body
+// hash) are left untouched.
+func ExtendConwayHeaderWithLeios(t *testing.T, standardRaw []byte) []byte {
+	t.Helper()
+	return ExtendConwayHeaderBody(
+		t,
+		standardRaw,
+		cbor.RawMessage{0xf4},
+		cbor.RawMessage{0xf6},
+	)
+}
+
+// ExtendConwayHeaderBody rewrites a standard (10-field header) Conway block
+// so its header body carries extraFields appended after the 10 standard
+// Babbage fields, for constructing malformed-extension fixtures (a field
+// count other than the real 12-field Musashi/Leios extension) as well as
+// the genuine extension itself.
+func ExtendConwayHeaderBody(
+	t *testing.T,
+	standardRaw []byte,
+	extraFields ...cbor.RawMessage,
+) []byte {
+	t.Helper()
+	var comps []cbor.RawMessage
+	_, err := cbor.Decode(standardRaw, &comps)
+	require.NoError(t, err)
+	require.Len(t, comps, 5)
+	var headerParts []cbor.RawMessage
+	_, err = cbor.Decode(comps[0], &headerParts)
+	require.NoError(t, err)
+	require.Len(t, headerParts, 2)
+	var bodyElems []cbor.RawMessage //nolint:prealloc
+	_, err = cbor.Decode(headerParts[0], &bodyElems)
+	require.NoError(t, err)
+	require.Len(t, bodyElems, 10)
+	extendedElems := append(bodyElems, extraFields...)
+	extendedBody, err := cbor.Encode(extendedElems)
+	require.NoError(t, err)
+	extendedHeader, err := cbor.Encode([]any{
+		cbor.RawMessage(extendedBody),
+		headerParts[1],
+	})
+	require.NoError(t, err)
+	extendedRaw, err := cbor.Encode([]any{
+		cbor.RawMessage(extendedHeader),
+		comps[1],
+		comps[2],
+		comps[3],
+		comps[4],
+	})
+	require.NoError(t, err)
+	return extendedRaw
+}

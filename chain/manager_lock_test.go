@@ -26,12 +26,15 @@ import (
 )
 
 func TestRewindPrimaryChainToPointDoesNotDeadlockWithIterator(t *testing.T) {
+	t.Parallel()
+
 	cm, err := NewManager(nil, nil)
 	if err != nil {
 		t.Fatalf("NewManager: %s", err)
 	}
 	primaryChain := cm.PrimaryChain()
 	primaryChain.persistent = true
+	cm.securityParam = 10
 
 	cm.mutex.Lock()
 	iter := &ChainIterator{

@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
@@ -164,6 +165,8 @@ func newRemoteRestoreHost(
 				badger.WithDataDir(blobDir),
 				badger.WithDeferOpen(),
 				badger.WithGc(false),
+				badger.WithValueLogFileSize(testutil.TestBadgerValueLogFileSize),
+				badger.WithMemTableSize(testutil.TestBadgerMemTableSize),
 			)
 			if err != nil {
 				return nil, nil, err
@@ -196,6 +199,8 @@ func openRemoteTestDatabase(
 	blobStore, err := badger.New(
 		badger.WithDataDir(filepath.Join(dataRoot, "blob")),
 		badger.WithGc(false),
+		badger.WithValueLogFileSize(testutil.TestBadgerValueLogFileSize),
+		badger.WithMemTableSize(testutil.TestBadgerMemTableSize),
 	)
 	require.NoError(t, err)
 	metadataStore, err := sqlite.NewSQLStore(
@@ -223,6 +228,11 @@ func (d *remoteTestDatabase) close(t *testing.T) {
 
 func readBlobContents(t *testing.T, db *database.Database) map[string][]byte {
 	t.Helper()
+	// db.Blob() is non-nil: database.New rejects a nil or typed-nil blob
+	// store (database/database.go), so the nil-receiver branch of
+	// blobStoreRef.blobStore that nilaway traces is unreachable for any
+	// constructed database.
+	//nolint:nilaway // database.New requires a non-nil blob store
 	txn := db.Blob().NewTransaction(false)
 	defer txn.Rollback() //nolint:errcheck
 	it := db.Blob().NewIterator(txn, types.BlobIteratorOptions{})
@@ -329,6 +339,8 @@ func runRemoteRestoreFailureRollback(
 func TestRestoreRecoverableRetainsHandleWhenAutomaticRollbackFails(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ctx := context.Background()
 	remoteDir := filepath.Join(t.TempDir(), "remote")
 	original := openRemoteTestDatabase(t, remoteDir)
@@ -377,6 +389,8 @@ func TestRestoreRecoverableRetainsHandleWhenAutomaticRollbackFails(
 }
 
 func TestRestoreFailureRollsBackPopulatedRemoteStoresExactly(t *testing.T) {
+	t.Parallel()
+
 	t.Run("provider failure", func(t *testing.T) {
 		runRemoteRestoreFailureRollback(
 			t,
@@ -417,6 +431,8 @@ func TestRestoreFailureRollsBackPopulatedRemoteStoresExactly(t *testing.T) {
 func TestRestoreSuccessfulRemoteReplacementRemainsRecoverableUntilCommit(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ctx := context.Background()
 	remoteDir := filepath.Join(t.TempDir(), "remote")
 	original := openRemoteTestDatabase(t, remoteDir)

@@ -68,6 +68,8 @@ type batchedCrossBlockSpendCandidate struct {
 func TestSetGapBlockTransactionRestoresConsumedInputsOnRollback(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := newTestDatabase(t, &Config{
 		DataDir: t.TempDir(),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -148,6 +150,8 @@ func TestSetGapBlockTransactionRestoresConsumedInputsOnRollback(
 func TestSetTransactionRecoversMissingConsumedInputsFromBlob(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := newTestDatabase(t, &Config{
 		DataDir: t.TempDir(),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -201,6 +205,8 @@ func TestSetTransactionRecoversMissingConsumedInputsFromBlob(
 func TestSetTransactionBatchedSpendsPreviousBlockOutputInSameBatch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := newTestDatabase(t, &Config{
 		DataDir: t.TempDir(),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -776,6 +782,8 @@ func findBatchedCrossBlockSpendCandidate(
 // skipped existing UTxO rows, leaving outputs produced by earlier gap
 // blocks live forever even after a later gap block consumed them.
 func TestSetGapBlockTransactionSpendsLiveProducedInputs(t *testing.T) {
+	t.Parallel()
+
 	db, err := newTestDatabase(t, &Config{
 		DataDir: t.TempDir(),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),

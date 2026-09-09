@@ -54,6 +54,8 @@ func testConwayProtocolParameters() *conway.ConwayProtocolParameters {
 }
 
 func TestEpochContainsSlot(t *testing.T) {
+	t.Parallel()
+
 	epoch := models.Epoch{EpochId: 1, StartSlot: 100, LengthInSlots: 100}
 	require.False(t, epochContainsSlot(epoch, 99))
 	require.True(t, epochContainsSlot(epoch, 100))
@@ -62,12 +64,16 @@ func TestEpochContainsSlot(t *testing.T) {
 }
 
 func TestEpochContainsSlotZeroLengthRejectsAll(t *testing.T) {
+	t.Parallel()
+
 	epoch := models.Epoch{EpochId: 1, StartSlot: 100, LengthInSlots: 0}
 	require.False(t, epochContainsSlot(epoch, 100))
 	require.False(t, epochContainsSlot(epoch, 200))
 }
 
 func TestMapVoterType(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		input    uint8
@@ -110,6 +116,8 @@ func TestMapVoterType(t *testing.T) {
 }
 
 func TestProcessDRepActivityCertificates(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -177,6 +185,8 @@ func TestProcessDRepActivityCertificates(t *testing.T) {
 }
 
 func TestExtractGovActionInfo_ParameterChange(t *testing.T) {
+	t.Parallel()
+
 	parentId := &lcommon.GovActionId{
 		TransactionId: [32]byte{1, 2, 3},
 		GovActionIdx:  5,
@@ -203,6 +213,8 @@ func TestExtractGovActionInfo_ParameterChange(t *testing.T) {
 }
 
 func TestExtractGovActionInfo_ParameterChangeNoParent(t *testing.T) {
+	t.Parallel()
+
 	action := &conway.ConwayParameterChangeGovAction{}
 
 	actionType, parentTxHash, parentActionIdx, policyHash, err := extractGovActionInfo(
@@ -221,6 +233,8 @@ func TestExtractGovActionInfo_ParameterChangeNoParent(t *testing.T) {
 }
 
 func TestExtractGovActionInfo_HardForkInitiation(t *testing.T) {
+	t.Parallel()
+
 	parentId := &lcommon.GovActionId{
 		TransactionId: [32]byte{4, 5, 6},
 		GovActionIdx:  2,
@@ -245,6 +259,8 @@ func TestExtractGovActionInfo_HardForkInitiation(t *testing.T) {
 }
 
 func TestExtractGovActionInfo_TreasuryWithdrawal(t *testing.T) {
+	t.Parallel()
+
 	action := &lcommon.TreasuryWithdrawalGovAction{
 		PolicyHash: []byte{0x01, 0x02, 0x03},
 	}
@@ -265,6 +281,8 @@ func TestExtractGovActionInfo_TreasuryWithdrawal(t *testing.T) {
 }
 
 func TestExtractGovActionInfo_NoConfidence(t *testing.T) {
+	t.Parallel()
+
 	parentId := &lcommon.GovActionId{
 		TransactionId: [32]byte{7, 8, 9},
 		GovActionIdx:  0,
@@ -289,6 +307,8 @@ func TestExtractGovActionInfo_NoConfidence(t *testing.T) {
 }
 
 func TestExtractGovActionInfo_UpdateCommittee(t *testing.T) {
+	t.Parallel()
+
 	action := &lcommon.UpdateCommitteeGovAction{}
 
 	actionType, parentTxHash, parentActionIdx, policyHash, err := extractGovActionInfo(
@@ -307,6 +327,8 @@ func TestExtractGovActionInfo_UpdateCommittee(t *testing.T) {
 }
 
 func TestExtractGovActionInfo_NewConstitution(t *testing.T) {
+	t.Parallel()
+
 	parentId := &lcommon.GovActionId{
 		TransactionId: [32]byte{10, 11, 12},
 		GovActionIdx:  3,
@@ -331,6 +353,8 @@ func TestExtractGovActionInfo_NewConstitution(t *testing.T) {
 }
 
 func TestExtractGovActionInfo_Info(t *testing.T) {
+	t.Parallel()
+
 	action := &lcommon.InfoGovAction{}
 
 	actionType, parentTxHash, parentActionIdx, policyHash, err := extractGovActionInfo(
@@ -345,6 +369,8 @@ func TestExtractGovActionInfo_Info(t *testing.T) {
 }
 
 func TestProcessVotesRepairsMissingDRepRow(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -425,6 +451,8 @@ func TestProcessVotesRepairsMissingDRepRow(t *testing.T) {
 }
 
 func TestProcessVotesRepairsMissingGovernanceProposal(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -623,6 +651,8 @@ func TestProcessVotesRepairsMissingGovernanceProposal(t *testing.T) {
 }
 
 func TestProcessVotesRepairsMissingDijkstraGovernanceProposal(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: tmpDir,
@@ -805,6 +835,8 @@ func TestProcessVotesRepairsMissingDijkstraGovernanceProposal(t *testing.T) {
 }
 
 func TestProposalRepairRejectsUnknownGovernanceEra(t *testing.T) {
+	t.Parallel()
+
 	db, _ := newTallyTestDB(t)
 	cache := &proposalRepairCache{}
 	_, err := cache.govActionValidityPeriod(
