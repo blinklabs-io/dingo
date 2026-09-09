@@ -959,6 +959,10 @@ again.
 
 ### DReps, Governance, and Committee
 
+DRep activity updates reject epoch-plus-inactivity overflow before addition and
+reject activity or expiry values outside the signed SQL integer domain. Rejected
+updates preserve the previous activity and expiry epochs.
+
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
 | `drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | PK `id`; unique `(credential_tag, credential)`; indexes `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | Current DRep state. `credential_tag`: 0 key-hash, 1 script-hash. The composite unique key distinguishes same-hash key and script DReps. The `active` index supports reconcile scans for live DReps. A DRep vote, registration, or update certificate sets `last_activity_epoch` to the containing epoch and `expiry_epoch` to that epoch plus the active Conway/Dijkstra `dRepInactivityPeriod`; certificate persistence and the activity refresh commit atomically. |
