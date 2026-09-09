@@ -163,11 +163,12 @@ func sentinelSecretConfig() *Config {
 		},
 		Mithril: MithrilConfig{
 			AggregatorURL: "https://aggregator.example/aggregator" +
-				"?apiKey=SENTINEL-MITHRIL-KEY&network=preview",
+				"?apiKey='prefix'SENTINEL-MITHRIL-KEY&network=preview",
 		},
 		TokenRegistry: TokenRegistryConfig{
 			SourceURL: "https://reg:SENTINEL-TOKEN-REGISTRY-PASSWORD" +
-				"@registry.example/registry.tar.gz",
+				"@registry.example/registry.tar.gz" +
+				"?apiKey='prefix'SENTINEL-TOKEN-REGISTRY-PASSWORD",
 		},
 		OffchainMetadata: OffchainMetadataConfig{
 			IPFSGatewayURL: "https://ipfs:SENTINEL-IPFS-PASSWORD" +
@@ -194,8 +195,9 @@ func sentinelSecretConfig() *Config {
 						"database": "dingo",
 						"sslMode":  "require",
 						"password": "SENTINEL-PG-PASSWORD",
-						"dsn": "postgres://dingo:SENTINEL-DSN-PASSWORD" +
-							"@db.example:5432/dingo?sslmode=require",
+						"dsn": "host=db.example port=5432 dbname=dingo " +
+							"password='SENTINEL-DSN-PASSWORD?part' " +
+							"sslmode=require",
 						"futureKey": "SENTINEL-UNKNOWN-PROVIDER-KEY",
 					},
 				},
@@ -358,10 +360,50 @@ func TestRedactURICredentials(t *testing.T) {
 				redactedPlaceholder + " dbname=dingo",
 		},
 		{
+			name: "keyword dsn question mark in password",
+			in:   "host=db.example password='secret?part' dbname=dingo",
+			want: "host=db.example password=" + redactedPlaceholder +
+				" dbname=dingo",
+		},
+		{
+			name: "keyword dsn leading whitespace and query-shaped password",
+			in:   "  password = 'prefix?apiKey=secret' dbname=dingo",
+			want: "  password = " + redactedPlaceholder + " dbname=dingo",
+		},
+		{
+			name: "relative query retains credential boundary",
+			in:   "path?apiKey=secret&page=2",
+			want: "path?apiKey=" + redactedPlaceholder + "&page=2",
+		},
+		{
+			name: "ambiguous relative query still redacts credentials",
+			in:   "path=value?apiKey=secret&page=2",
+			want: "path=value?apiKey=" + redactedPlaceholder + "&page=2",
+		},
+		{
+			name: "mysql query and userinfo",
+			in:   "dingo:secret@tcp(db.example:3306)/db?apiKey=key&parseTime=true",
+			want: "dingo:" + redactedPlaceholder +
+				"@tcp(db.example:3306)/db?apiKey=" +
+				redactedPlaceholder + "&parseTime=true",
+		},
+		{
 			name: "credential query parameter",
 			in:   "https://aggregator.example/x?apiKey=abc123&network=preview",
 			want: "https://aggregator.example/x?apiKey=" +
 				redactedPlaceholder + "&network=preview",
+		},
+		{
+			name: "query quotes are literal",
+			in:   "https://api.example/v1?apiKey='prefix'credential&page=2",
+			want: "https://api.example/v1?apiKey=" +
+				redactedPlaceholder + "&page=2",
+		},
+		{
+			name: "query quotes do not hide following parameter",
+			in:   "https://api.example/v1?apiKey='credential&page=2",
+			want: "https://api.example/v1?apiKey=" +
+				redactedPlaceholder + "&page=2",
 		},
 		{
 			name: "quoted keyword dsn password containing whitespace",

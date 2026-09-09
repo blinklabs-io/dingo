@@ -8765,7 +8765,13 @@ port, path, and non-credential parameters and loses only its userinfo
 password and the value of every credential-named parameter, because "which
 host and database was this node pointed at" is most of the reason the
 configuration is logged at all; the same handling covers both URL-form and
-keyword-form database DSNs. A provider-config field (`plugins.*.config`, a
+keyword-form database DSNs. Quotes delimit keyword-form DSN values but are
+literal data in URI query values, whose boundaries remain query separators.
+Inputs beginning with a keyword assignment are sanitized as keyword DSNs
+before scanning any remaining query, so a question mark inside a password
+cannot leave its prefix exposed. Remaining queries are still scanned because
+a relative URI can also begin with an assignment-shaped path.
+A provider-config field (`plugins.*.config`, a
 free-form `map[string]any` whose keys belong to the selected provider, not
 to `Config`) is walked recursively and classified per key name, so a
 secret nested at any depth under a provider section is still redacted;
