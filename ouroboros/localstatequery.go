@@ -17,6 +17,7 @@ package ouroboros
 import (
 	"time"
 
+	"github.com/blinklabs-io/dingo/ledger"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
@@ -74,12 +75,36 @@ func (o *Ouroboros) instrumentLocalstatequeryRelease(
 	}
 }
 
+// localstatequeryServerAcquire records the point the client asked to pin
+// this connection's LocalStateQuery session to (blinklabs-io/dingo#382).
+// AcquireSpecificPoint's slot AND hash are both recorded -- hash matters
+// because identifying a point by slot alone is ambiguous across a rollback
+// (a fork switch can leave a different block at the same slot than the one
+// the caller acquired); LedgerState.Query.verifyPointOnChain checks the
+// recorded hash against this node's current chain before answering any
+// pinned query. AcquireVolatileTip and AcquireImmutableTip both clear any
+// previous pin, since only a specific point makes sense to hold stable
+// across a slow query -- both tip kinds are, by construction, "whatever is
+// live/immutable right now", the same thing querying with no pin at all
+// (a zero-value ledger.QueryPoint) already means.
+//
+// Not every query type honors the recorded point yet -- see
+// ledger.LedgerState.Query's doc comment for which ones do.
 func (o *Ouroboros) localstatequeryServerAcquire(
 	ctx olocalstatequery.CallbackContext,
 	acquireTarget olocalstatequery.AcquireTarget,
 	reAcquire bool,
 ) error {
-	// TODO: create "view" from ledger state (#382)
+	o.localstatequeryAcquireMutex.Lock()
+	defer o.localstatequeryAcquireMutex.Unlock()
+	if specific, ok := acquireTarget.(olocalstatequery.AcquireSpecificPoint); ok {
+		o.localstatequeryAcquiredPoints[ctx.ConnectionId] = ledger.QueryPoint{
+			Slot: specific.Point.Slot,
+			Hash: specific.Point.Hash,
+		}
+	} else {
+		delete(o.localstatequeryAcquiredPoints, ctx.ConnectionId)
+	}
 	return nil
 }
 
@@ -87,12 +112,17 @@ func (o *Ouroboros) localstatequeryServerQuery(
 	ctx olocalstatequery.CallbackContext,
 	query olocalstatequery.QueryWrapper,
 ) (any, error) {
-	return o.ledgerState.Query(query.Query)
+	o.localstatequeryAcquireMutex.Lock()
+	at := o.localstatequeryAcquiredPoints[ctx.ConnectionId]
+	o.localstatequeryAcquireMutex.Unlock()
+	return o.ledgerState.Query(query.Query, at)
 }
 
 func (o *Ouroboros) localstatequeryServerRelease(
 	ctx olocalstatequery.CallbackContext,
 ) error {
-	// TODO: release "view" from ledger state (#382)
+	o.localstatequeryAcquireMutex.Lock()
+	delete(o.localstatequeryAcquiredPoints, ctx.ConnectionId)
+	o.localstatequeryAcquireMutex.Unlock()
 	return nil
 }

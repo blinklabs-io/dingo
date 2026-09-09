@@ -49,8 +49,12 @@ type stakeDistributionEntry = struct {
 // denominator instead, confirmed against real cardano-node's raw wire bytes
 // -- see totalCirculatingSupply's doc comment (blinklabs-io/dingo#3824) for
 // the full story and why GetPoolDistr2 must not make the same change.
-func (ls *LedgerState) queryShelleyStakeDistribution() (any, error) {
-	dist, err := ls.PoolStakeDistribution(nil)
+//
+// asOfSlot is Query's pinned point (0 = live); PoolStakeDistribution resolves
+// it to the historical epoch whose mark snapshot governed that slot
+// (blinklabs-io/dingo#382).
+func (ls *LedgerState) queryShelleyStakeDistribution(asOfSlot uint64) (any, error) {
+	dist, err := ls.PoolStakeDistribution(nil, asOfSlot)
 	if err != nil {
 		return nil, err
 	}

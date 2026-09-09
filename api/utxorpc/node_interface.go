@@ -59,6 +59,7 @@ type UtxorpcLedgerState interface {
 	// on ledger.LedgerState for why an empty non-nil filter differs.
 	PoolStakeDistribution(
 		poolFilter []lcommon.PoolKeyHash,
+		asOfSlot uint64,
 	) (*ledger.PoolStakeDistribution, error)
 	SlotToTime(slot uint64) (time.Time, error)
 	SystemStart() (time.Time, error)

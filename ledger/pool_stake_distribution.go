@@ -17,6 +17,7 @@ package ledger
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt"
 	"math/big"
 	"slices"
 
@@ -27,6 +28,41 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
+
+// stakeSnapshotRetentionEpochs mirrors ledger/snapshot/rotation.go's pool
+// mark-snapshot pruning window (cleanupOldSnapshots' currentEpoch-3 default
+// window): rows older than that are physically deleted, so a historical
+// stake-distribution query pinned further back than this cannot be
+// reconstructed. Not shared as an exported constant from ledger/snapshot
+// because that package does not itself export it; kept in sync by comment
+// reference rather than by import to avoid coupling this query path to
+// snapshot rotation internals.
+const stakeSnapshotRetentionEpochs = 3
+
+// checkAsOfEpochRecency rejects a historical epoch already outside the pool
+// mark-snapshot retention window, or ahead of the live epoch
+// (blinklabs-io/dingo#382).
+func checkAsOfEpochRecency(targetEpoch, liveEpoch uint64) error {
+	if targetEpoch > liveEpoch {
+		return fmt.Errorf(
+			"%w: as-of epoch %d is ahead of the live epoch (%d)",
+			ErrHistoricalStateUnavailable,
+			targetEpoch,
+			liveEpoch,
+		)
+	}
+	if liveEpoch-targetEpoch > stakeSnapshotRetentionEpochs {
+		return fmt.Errorf(
+			"%w: as-of epoch %d is outside the %d-epoch pool-snapshot "+
+				"retention window behind the live epoch (%d)",
+			ErrHistoricalStateUnavailable,
+			targetEpoch,
+			stakeSnapshotRetentionEpochs,
+			liveEpoch,
+		)
+	}
+	return nil
+}
 
 // PoolStakeShare is one pool's entry in the active stake distribution.
 type PoolStakeShare struct {
@@ -94,8 +130,19 @@ type PoolStakeDistribution struct {
 // rather than reported with a zero VRF key hash, which would read as a real
 // key. Its stake stays in TotalActiveStake, so every reported pool's own
 // fraction is unaffected by the omission.
+//
+// asOfSlot pins the distribution to the historical point instead of
+// live-right-now (blinklabs-io/dingo#382): 0 means live (the existing
+// default). A non-zero asOfSlot resolves to the epoch that governed that
+// slot and uses that epoch's mark snapshot instead of the live tip's --
+// this is a real historical reconstruction, not an approximation, because
+// the mark snapshot is already persisted per-epoch for leader election.
+// checkAsOfEpochRecency rejects a historical epoch already outside the
+// mark-snapshot retention window (ledger/snapshot's pool-snapshot pruning),
+// since those rows are physically gone.
 func (ls *LedgerState) PoolStakeDistribution(
 	poolFilter []lcommon.PoolKeyHash,
+	asOfSlot uint64,
 ) (*PoolStakeDistribution, error) {
 	// The per-pool stakes, their total, and the epoch naming the snapshot they
 	// come from all have to come from one view: read separately, an epoch
@@ -106,17 +153,24 @@ func (ls *LedgerState) PoolStakeDistribution(
 	defer txn.Release()
 	metaTxn := txn.Metadata()
 
-	// The epoch comes from the tip inside this transaction rather than from the
-	// in-memory consensus snapshot; see epochAtTip for why. A chain that has
-	// applied no blocks has no epoch record covering its tip, and epoch zero is
-	// the right answer there.
-	tip, current, err := ls.epochAtTip(txn)
+	// The tip comes from this transaction rather than the in-memory
+	// consensus snapshot; see epochAtTip for why.
+	tip, err := ls.db.GetTip(txn)
 	if err != nil {
 		return nil, err
 	}
-	var epoch uint64
-	if current != nil {
-		epoch = current.EpochId
+	epoch, err := ls.resolveAsOfEpoch(txn, asOfSlot)
+	if err != nil {
+		return nil, err
+	}
+	if asOfSlot != 0 {
+		liveEpoch, err := ls.resolveAsOfEpoch(txn, 0)
+		if err != nil {
+			return nil, err
+		}
+		if err := checkAsOfEpochRecency(epoch, liveEpoch); err != nil {
+			return nil, err
+		}
 	}
 	snapshotEpoch := praos.StakeSnapshotEpoch(epoch)
 

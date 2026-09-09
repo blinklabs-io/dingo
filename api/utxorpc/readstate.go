@@ -128,7 +128,7 @@ func (s *betaQueryServiceServer) readStakePoolDistribution(
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 
-	dist, err := s.utxorpc.config.LedgerState.PoolStakeDistribution(poolFilter)
+	dist, err := s.utxorpc.config.LedgerState.PoolStakeDistribution(poolFilter, 0)
 	if err != nil {
 		return nil, connect.NewError(
 			connect.CodeInternal,

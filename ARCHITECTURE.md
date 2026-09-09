@@ -3177,6 +3177,41 @@ and go stake are all zero are omitted; without a pool filter, the result
 contains the union of pools present in those snapshots and the corresponding
 totals.
 
+**Acquiring a specific historical point (blinklabs-io/dingo#382).** A real
+NtC client can `Acquire` LocalStateQuery at a specific past point, not just
+the live tip -- `ouroboros/localstatequery.go`'s server-side `Acquire`
+callback previously ignored this entirely and always answered every query
+at the live tip regardless of what was requested. It now records the
+acquired point per connection (`ledger.QueryPoint{Slot, Hash}`, keyed by
+connection ID; cleared on `Release` or on re-`Acquire`ing the live/immutable
+tip instead of a specific point) and threads it into every
+`LedgerState.Query` call as `at`. Both slot and hash are recorded, not slot
+alone, because a fork switch can leave a different block at the same slot
+than the one the caller acquired; `Query` calls `verifyPointOnChain` first
+whenever `at` is pinned, rejecting with `ErrPointNotOnChain` if this node's
+current chain no longer has `at.Hash` at `at.Slot` (the block was rolled
+back after acquisition, or was never on this node's view of the chain in
+the first place) before dispatching to any handler -- one fork-safety check
+shared by every point-sensitive query type rather than one per handler.
+
+Only some query types honor a pinned point today: `GetStakeDistribution`/
+`GetPoolDistr2` (`PoolStakeDistribution`, resolving the pinned slot to the
+epoch that governed it and reading that epoch's already-persisted mark
+snapshot -- rejecting a point outside the pool-snapshot retention window or
+ahead of the live epoch with `ErrHistoricalStateUnavailable`),
+`GetCurrentProtocolParams` (safe only when the pinned point's epoch matches
+the live tip's, since protocol parameters have no persisted
+historical-by-epoch record -- a pin spanning an epoch boundary fails
+clearly rather than silently answering with the wrong epoch's value), and
+`GetEpochNo` (unconditionally safe: epoch records are never pruned and
+carry no other coupled state). `ledger/queries.go`'s `queryShelleyLeaf`
+carries a full audit of every remaining query type, classified as
+intentionally live-only, or a real gap left for a caller that needs it.
+`GetUTxOWhole` is not yet one of the honoring types -- pinning only matters
+for a query slow enough that the live tip could move underneath it before
+finishing, and a paginated form built to actually need that is tracked
+separately as blinklabs-io/dingo#4082.
+
 Credential filters are bounded by `ledger.MaxLocalStateQueryItems` (currently
 1000) for `GetDRepState`, `GetStakeDelegDeposits`,
 `GetFilteredDelegationsAndRewardAccounts`, and `GetFilteredVoteDelegatees`.
