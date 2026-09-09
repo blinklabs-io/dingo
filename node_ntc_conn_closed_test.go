@@ -102,6 +102,8 @@ func TestHandleConnManagerClosed_NtC_ReleasesChainsyncClientState(t *testing.T) 
 // for isNtC=false, an NtN close would race two independent RemoveClient
 // calls instead of exactly one.
 func TestHandleConnManagerClosed_NtN_LeavesStateForEventBusPath(t *testing.T) {
+	t.Parallel()
+
 	n := newHandleConnManagerClosedTestNode(t)
 	connId := newNtCTestConnId(2)
 
@@ -122,6 +124,8 @@ func TestHandleConnManagerClosed_NtN_LeavesStateForEventBusPath(t *testing.T) {
 // window (node_lifecycle.go nils n.chainsyncState while rebuilding it) so a
 // late NtC close callback cannot panic.
 func TestHandleConnManagerClosed_NilChainsyncState(t *testing.T) {
+	t.Parallel()
+
 	n := &Node{}
 	require.NotPanics(t, func() {
 		n.handleConnManagerClosed(newNtCTestConnId(3), true, nil)

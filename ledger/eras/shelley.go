@@ -190,6 +190,7 @@ var shelleyUtxoValidationRules = buildShelleyValidationRules()
 // of silently leaving the upstream rule in place.
 func buildShelleyValidationRules() []indexedUtxoValidationRule {
 	return buildIndexedUtxoValidationRulesWithSkips(
+		shelley.UtxoValidationRuleDescriptors(),
 		shelley.UtxoValidationRules,
 		[]utxoValidationRuleSkip{
 			{

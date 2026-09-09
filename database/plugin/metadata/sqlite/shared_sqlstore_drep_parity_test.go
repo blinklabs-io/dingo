@@ -55,6 +55,8 @@ type drepStore interface {
 	UpdateDRepActivity(uint8, []byte, uint64, uint64, types.Txn) error
 	GetExpiredDReps(uint64, types.Txn) ([]*models.Drep, error)
 	GetDrepLastRegistrationSlot(uint8, []byte, types.Txn) (uint64, error)
+	GetDrepLastRegistrationDeposit(uint8, []byte, types.Txn) (*uint64, error)
+	GetDrepLastRegistrationDeposits(types.Txn) (map[string]uint64, error)
 	GetDRepVotingPower(uint8, []byte, uint64, types.Txn) (uint64, error)
 	GetDRepVotingPowerBatch(
 		[]models.StakeCredentialRef,
@@ -89,6 +91,12 @@ type drepState struct {
 	Expired                 []*models.Drep
 	LastRegistrationSlot    uint64
 	MissingRegistrationSlot uint64
+	CertifiedDeposit        *uint64
+	ImportedDeposit         *uint64
+	LatestDeposit           *uint64
+	InactiveDeposit         *uint64
+	MissingDeposit          *uint64
+	Deposits                map[string]uint64
 	MissingActivityError    string
 	VotingPower             uint64
 	VotingPowerBatch        map[string]uint64
@@ -113,6 +121,22 @@ func exerciseDrepStore(t *testing.T, store drepStore) drepState {
 	createdCredential := bytes.Repeat([]byte{0x41}, 28)
 	importedCredential := bytes.Repeat([]byte{0x42}, 28)
 	missingCredential := bytes.Repeat([]byte{0x43}, 28)
+	// A registration row shaped the way ledger-state import and genesis
+	// seeding write it: a real deposit but no certificate, so
+	// certificate_id lands at 0. This is the case that motivates the
+	// deposit queries existing separately from
+	// GetDrepLastRegistrationSlot, whose certificate_id filter drops
+	// exactly these rows. Copying that filter across is the natural
+	// mistake, and it would show up here as a refund of 0 rather than as
+	// a missing method.
+	importOnlyCredential := bytes.Repeat([]byte{0x44}, 28)
+	// Two registration rows for one credential, so the latest-row rule is
+	// exercised rather than assumed from a single row.
+	rereggedCredential := bytes.Repeat([]byte{0x45}, 28)
+	// Registered, with a real deposit, but no longer active. Readable
+	// through the singular form and excluded from the batched one, which
+	// is scoped to the active set its callers list.
+	inactiveCredential := bytes.Repeat([]byte{0x46}, 28)
 
 	created := &models.Drep{
 		Credential: createdCredential, AddedSlot: 10,
@@ -149,6 +173,57 @@ func exerciseDrepStore(t *testing.T, store drepStore) drepState {
 		AnchorHash: []byte("registration-hash"), DepositAmount: 500,
 	}
 	require.NoError(t, store.ImportDrep(imported, registration, nil))
+	require.NoError(t, store.ImportDrep(
+		&models.Drep{
+			Credential: importOnlyCredential, AddedSlot: 22,
+			AnchorURL: "import-only", Active: true,
+		},
+		&models.RegistrationDrep{
+			DrepCredential: importOnlyCredential,
+			AddedSlot:      22,
+			AnchorURL:      "import-only",
+			DepositAmount:  500000000,
+		},
+		nil,
+	))
+	require.NoError(t, store.ImportDrep(
+		&models.Drep{
+			Credential: rereggedCredential, AddedSlot: 23,
+			Active: true,
+		},
+		&models.RegistrationDrep{
+			DrepCredential: rereggedCredential,
+			AddedSlot:      23,
+			DepositAmount:  400000000,
+		},
+		nil,
+	))
+	require.NoError(t, store.ImportDrep(
+		&models.Drep{
+			Credential: rereggedCredential, AddedSlot: 44,
+			Active: true,
+		},
+		&models.RegistrationDrep{
+			DrepCredential: rereggedCredential,
+			AddedSlot:      44,
+			CertificateID:  11,
+			DepositAmount:  300000000,
+		},
+		nil,
+	))
+	require.NoError(t, store.ImportDrep(
+		&models.Drep{
+			Credential: inactiveCredential, AddedSlot: 24,
+			Active: false,
+		},
+		&models.RegistrationDrep{
+			DrepCredential: inactiveCredential,
+			AddedSlot:      24,
+			CertificateID:  12,
+			DepositAmount:  200000000,
+		},
+		nil,
+	))
 	require.NoError(t, store.UpdateDRepActivity(
 		1,
 		importedCredential,
@@ -229,6 +304,90 @@ func exerciseDrepStore(t *testing.T, store drepStore) drepState {
 		nil,
 	)
 	require.NoError(t, err)
+
+	// The deposit queries, which deregistration-refund validation reads.
+	// The import-shaped row is the load-bearing assertion: it carries no
+	// certificate, so a certificate_id filter here would return 0 and a
+	// refund would be validated against the wrong amount.
+	ret.ImportedDeposit, err = store.GetDrepLastRegistrationDeposit(
+		0,
+		importOnlyCredential,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, ret.ImportedDeposit)
+	require.Equal(t, uint64(500000000), *ret.ImportedDeposit)
+	// A row that does carry a certificate must still be found, so the
+	// query is not merely inverting the filter.
+	ret.CertifiedDeposit, err = store.GetDrepLastRegistrationDeposit(
+		1,
+		importedCredential,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, ret.CertifiedDeposit)
+	require.Equal(t, uint64(500), *ret.CertifiedDeposit)
+	// Two registration rows for one credential: the later one wins, so an
+	// earlier import placeholder cannot shadow a real re-registration.
+	ret.LatestDeposit, err = store.GetDrepLastRegistrationDeposit(
+		0,
+		rereggedCredential,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, ret.LatestDeposit)
+	require.Equal(t, uint64(300000000), *ret.LatestDeposit)
+	// A registered but inactive credential is still readable through the
+	// singular form, which does not consult drep.active.
+	ret.InactiveDeposit, err = store.GetDrepLastRegistrationDeposit(
+		0,
+		inactiveCredential,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, ret.InactiveDeposit)
+	require.Equal(t, uint64(200000000), *ret.InactiveDeposit)
+	// No registration history at all reports 0 rather than erroring.
+	ret.MissingDeposit, err = store.GetDrepLastRegistrationDeposit(
+		0,
+		missingCredential,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Nil(t, ret.MissingDeposit)
+
+	// The batched form must agree with the singular one on both rows.
+	// This is the only thing that executes its derived-table join.
+	ret.Deposits, err = store.GetDrepLastRegistrationDeposits(nil)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		uint64(500000000),
+		ret.Deposits[models.DrepDepositKey(0, importOnlyCredential)],
+	)
+	require.Equal(
+		t,
+		uint64(500),
+		ret.Deposits[models.DrepDepositKey(1, importedCredential)],
+	)
+	require.NotContains(
+		t,
+		ret.Deposits,
+		models.DrepDepositKey(0, missingCredential),
+	)
+	// The batched form is scoped to the active set, so the exact map is
+	// what pins that down: the inactive credential is excluded even though
+	// it has a registration row with a real deposit, and the created
+	// credential is excluded because it has none.
+	require.Equal(
+		t,
+		map[string]uint64{
+			models.DrepDepositKey(1, importedCredential):   500,
+			models.DrepDepositKey(0, importOnlyCredential): 500000000,
+			models.DrepDepositKey(0, rereggedCredential):   300000000,
+		},
+		ret.Deposits,
+	)
 	err = store.UpdateDRepActivity(0, missingCredential, 1, 1, nil)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, models.ErrDrepActivityNotUpdated))

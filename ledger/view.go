@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"math/big"
 	"time"
@@ -32,6 +33,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
 // ErrNilDecodedOutput is returned when a decoded UTxO output is nil.
@@ -55,6 +57,18 @@ type LedgerView struct {
 	// skipPhase2Validation is set for accepted block replay, where
 	// the producer's isValid flag is authoritative for Phase-2 results.
 	skipPhase2Validation bool
+	// horizonAnchorSlot is the slot the era forecast horizon is measured
+	// from when this view converts slots to time. Block application sets it
+	// to the applied block's immediate predecessor, which is what the
+	// reference implementation ticks from; the published tip trails that by
+	// up to a whole block batch during replay. Zero leaves the published tip
+	// in charge, which is correct for every caller with no applied block in
+	// hand (mempool validation, standalone evaluation).
+	horizonAnchorSlot uint64
+}
+
+func uint64Ptr(value uint64) *uint64 {
+	return &value
 }
 
 func (lv *LedgerView) SkipPhase2Validation() bool {
@@ -91,6 +105,16 @@ var _ lcommon.DRepDelegationState = (*LedgerView)(nil)
 // ByronProtocolMagic would reject every Byron transaction carrying those
 // witnesses rather than fail to build.
 var _ eras.ByronProtocolMagicProvider = (*LedgerView)(nil)
+
+// UtxoValidateValueNotConservedUtxo discovers this capability with a runtime
+// type assertion and, unlike the assertions above, degrades rather than fails
+// when it misses: a failed assertion silently refunds a legacy stake
+// deregistration at the current KeyDeposit instead of the deposit actually
+// recorded at registration. Value conservation then passes on the wrong
+// number for every credential registered under a different KeyDeposit, with
+// no error anywhere. A missed assertion is therefore invisible at runtime,
+// which is exactly why it has to be a compile error here.
+var _ lcommon.StakeCredentialDepositState = (*LedgerView)(nil)
 
 func (lv *LedgerView) NetworkId() uint {
 	genesis := lv.ls.config.CardanoNodeConfig.ShelleyGenesis()
@@ -307,6 +331,24 @@ func (lv *LedgerView) PoolCurrentState(
 	return currentReg, pendingEpoch, nil
 }
 
+// EpochForSlot returns the epoch containing the given slot, satisfying
+// gouroboros' optional common.EpochState capability.
+//
+// Several ledger rules are expressed relative to the current epoch and degrade
+// to a weaker check when the ledger state cannot supply one. Without this the
+// pool-deposit decision cannot tell a retired pool from a registered one, so a
+// registration for an already-retired pool is charged no deposit and the
+// transaction fails value conservation by exactly that amount
+// (issue #3908); the retirement-epoch bound on pool retirement certificates is
+// skipped for the same reason.
+func (lv *LedgerView) EpochForSlot(slot uint64) (uint64, error) {
+	epoch, err := lv.ls.epochForSlot(slot)
+	if err != nil {
+		return 0, err
+	}
+	return epoch.EpochId, nil
+}
+
 // IsPoolRegistered checks if a pool is currently registered
 func (lv *LedgerView) IsPoolRegistered(pkh lcommon.PoolKeyHash) bool {
 	reg, _, err := lv.PoolCurrentState(pkh)
@@ -336,9 +378,16 @@ func (lv *LedgerView) IsVrfKeyInUse(
 	), nil
 }
 
-// SlotToTime returns the current time for a given slot based on known epochs
+// SlotToTime returns the current time for a given slot based on known epochs.
+//
+// This is the converter transaction validation sees, and a Plutus script
+// context must convert the transaction's validity interval through it. The
+// forecast horizon stays in force, matching cardano-ledger's
+// TimeTranslationPastHorizon failure, but it is measured from this view's
+// horizon anchor so a block being applied is judged against its own
+// predecessor rather than a tip that has not been published yet (issue #3844).
 func (lv *LedgerView) SlotToTime(slot uint64) (time.Time, error) {
-	return lv.ls.SlotToTime(slot)
+	return lv.ls.SlotToTimeWithHorizonFrom(lv.horizonAnchorSlot, slot)
 }
 
 // TimeToSlot returns the slot number for a given time based on known epochs
@@ -358,8 +407,9 @@ func (lv *LedgerView) CalculateRewards(
 }
 
 // GetAdaPots returns the current Ada pots.
-// TODO: implement Ada pots retrieval. Requires tracking of treasury, reserves,
-// fees, and rewards pots which are not yet stored in the database.
+// TODO: implement the complete Ada pots retrieval. Treasury and reserves are
+// tracked in network_state, but this interface also needs the current fee and
+// reward pots as one coherent validation snapshot.
 func (lv *LedgerView) GetAdaPots() lcommon.AdaPots {
 	panic(ErrNotImplemented)
 }
@@ -507,6 +557,10 @@ func extractCostModelsFromPParams(
 // extractRawCostModels retrieves the raw cost model data from
 // protocol parameters. It tries the costModelsProvider interface
 // first, then falls back to type assertions for known era types.
+//
+// A concrete-typed nil (pp holding e.g. a nil *conway.ConwayProtocolParameters)
+// still matches its type's case below; every case guards against nil before
+// dereferencing, matching withoutSyntheticV2CostModel's identical guard.
 func extractRawCostModels(
 	pp lcommon.ProtocolParameters,
 ) map[uint][]int64 {
@@ -520,10 +574,24 @@ func extractRawCostModels(
 	// Fall back to concrete era type assertions.
 	switch p := pp.(type) {
 	case *alonzo.AlonzoProtocolParameters:
+		if p == nil {
+			return nil
+		}
 		return p.CostModels
 	case *babbage.BabbageProtocolParameters:
+		if p == nil {
+			return nil
+		}
 		return p.CostModels
 	case *conway.ConwayProtocolParameters:
+		if p == nil {
+			return nil
+		}
+		return p.CostModels
+	case *dijkstra.DijkstraProtocolParameters:
+		if p == nil {
+			return nil
+		}
 		return p.CostModels
 	default:
 		return nil
@@ -651,8 +719,17 @@ func (lv *LedgerView) DRepRegistration(
 		}
 		return nil, fmt.Errorf("get drep: %w", err)
 	}
+	deposit, err := lv.ls.db.GetDrepLastRegistrationDeposit(
+		drep.CredentialTag,
+		credential[:],
+		lv.txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get drep last registration deposit: %w", err)
+	}
 	reg := &lcommon.DRepRegistration{
 		Credential: credential,
+		Deposit:    deposit,
 	}
 	if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 		if len(drep.AnchorHash) != 32 {
@@ -677,10 +754,36 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get active dreps: %w", err)
 	}
+	// One batched read rather than a deposit query per DRep, because
+	// mainnet has thousands of active DReps, and scoped to the same active
+	// credential set fetched above so registration history left behind by
+	// DReps that have since deregistered cannot grow this. A credential
+	// with no registration row is absent from the map and reads back as
+	// the zero value, matching the singular form above.
+	//
+	// This method is not itself on the validation path: gouroboros
+	// declares it on common.DRepState but the Conway rules reach DRep
+	// state only through the singular DRepRegistration, and nothing in
+	// either tree calls the plural form outside gouroboros's own test
+	// mocks. The batching bounds the cost of a caller that does appear
+	// rather than one that exists today.
+	deposits, err := lv.ls.db.GetDrepLastRegistrationDeposits(lv.txn)
+	if err != nil {
+		return nil, fmt.Errorf("get drep last registration deposits: %w", err)
+	}
 	registrations := make([]lcommon.DRepRegistration, 0, len(dreps))
 	for _, drep := range dreps {
+		deposit, ok := deposits[models.DrepDepositKey(
+			drep.CredentialTag,
+			drep.Credential,
+		)]
+		var depositPtr *uint64
+		if ok {
+			depositPtr = uint64Ptr(deposit)
+		}
 		reg := lcommon.DRepRegistration{
 			Credential: lcommon.NewBlake2b224(drep.Credential),
+			Deposit:    depositPtr,
 		}
 		if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 			if len(drep.AnchorHash) != 32 {
@@ -762,12 +865,33 @@ func (lv *LedgerView) Constitution() (*lcommon.Constitution, error) {
 	return &lcommon.Constitution{}, nil
 }
 
-// TreasuryValue returns the current treasury value.
-// TODO: implement treasury value retrieval. Requires Ada pots tracking
-// which is not yet stored in the database. The treasury value is part of
-// the Ada pots (reserves, treasury, fees, rewards).
+// TreasuryValue returns the treasury value visible to this ledger view. A view
+// used for transaction validation carries the same database transaction as the
+// rest of that validation, so epoch-boundary pot changes and rollback are read
+// from one atomic ledger snapshot.
 func (lv *LedgerView) TreasuryValue() (uint64, error) {
-	return 0, ErrNotImplemented
+	if lv == nil || lv.ls == nil || lv.ls.db == nil {
+		return 0, errors.New(
+			"treasury network state is unavailable: ledger view is not initialized",
+		)
+	}
+
+	var (
+		state *models.NetworkState
+		err   error
+	)
+	if lv.txn == nil {
+		state, err = lv.ls.db.Metadata().GetNetworkState(nil)
+	} else {
+		state, err = lv.ls.db.Metadata().GetNetworkState(lv.txn.Metadata())
+	}
+	if err != nil {
+		return 0, fmt.Errorf("get treasury network state: %w", err)
+	}
+	if state == nil {
+		return 0, errors.New("treasury network state is unavailable")
+	}
+	return uint64(state.Treasury), nil
 }
 
 // GovActionById returns a governance action by its ID.

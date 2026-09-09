@@ -31,8 +31,13 @@ func peerSnapshotTopology(snapshotMagic uint32) *topology.TopologyConfig {
 			{Address: "backup.example", Port: 3001},
 		},
 		PeerSnapshot: &topology.PeerSnapshotConfig{
-			NetworkMagic: snapshotMagic,
-			LedgerPools: []topology.PeerSnapshotLedgerPool{
+			NetworkMagic:        snapshotMagic,
+			NodeToClientVersion: 23,
+			Point: topology.PeerSnapshotPoint{
+				BlockPointHash: "d6792f8031323804b7ac44a67747de78ed70fd307bb5ffddc5147844d9363b30",
+				BlockPointSlot: 110741160,
+			},
+			AllLedgerPools: []topology.PeerSnapshotLedgerPool{
 				{
 					Relays: []topology.TopologyConfigP2PAccessPoint{
 						{Address: "relay.example", Port: 3001},
@@ -54,6 +59,8 @@ func peerSnapshotTopology(snapshotMagic uint32) *topology.TopologyConfig {
 // bootstrap list — a failure that looks like a network outage rather than the
 // misconfiguration it is.
 func TestPeerSnapshotFromAnotherNetworkRejected(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name          string
 		network       string
@@ -64,13 +71,13 @@ func TestPeerSnapshotFromAnotherNetworkRejected(t *testing.T) {
 			name:          "preview node given a mainnet snapshot",
 			network:       "preview",
 			snapshotMagic: 764824073,
-			wantErr:       "peer snapshot network mismatch",
+			wantErr:       "network magic 764824073 does not match configured network magic 2",
 		},
 		{
 			name:          "mainnet node given a preprod snapshot",
 			network:       "mainnet",
 			snapshotMagic: 1,
-			wantErr:       "peer snapshot network mismatch",
+			wantErr:       "network magic 1 does not match configured network magic 764824073",
 		},
 	}
 	for _, tt := range tests {
@@ -93,6 +100,8 @@ func TestPeerSnapshotFromAnotherNetworkRejected(t *testing.T) {
 // the node's own network must still start, or the check would break every
 // Genesis bootstrap it is meant to protect.
 func TestPeerSnapshotMatchingNetworkAccepted(t *testing.T) {
+	t.Parallel()
+
 	n, err := New(NewConfig(
 		WithPrometheusRegistry(prometheus.NewRegistry()),
 		WithListeners(ListenerConfig{
@@ -106,12 +115,10 @@ func TestPeerSnapshotMatchingNetworkAccepted(t *testing.T) {
 	require.NotNil(t, n)
 }
 
-// TestPeerSnapshotWithoutNetworkMagicAccepted covers a snapshot that omits the
-// field. Zero is "unspecified" rather than a network, and no real network uses
-// it, so a hand-written or older snapshot must not be rejected on the strength
-// of an absent field.
-func TestPeerSnapshotWithoutNetworkMagicAccepted(t *testing.T) {
-	n, err := New(NewConfig(
+func TestPeerSnapshotWithoutNetworkMagicRejected(t *testing.T) {
+	t.Parallel()
+
+	_, err := New(NewConfig(
 		WithPrometheusRegistry(prometheus.NewRegistry()),
 		WithListeners(ListenerConfig{
 			ListenNetwork: "tcp",
@@ -120,6 +127,5 @@ func TestPeerSnapshotWithoutNetworkMagicAccepted(t *testing.T) {
 		WithNetwork("preview"),
 		WithTopologyConfig(peerSnapshotTopology(0)),
 	))
-	require.NoError(t, err)
-	require.NotNil(t, n)
+	require.ErrorContains(t, err, "network magic must be specified")
 }

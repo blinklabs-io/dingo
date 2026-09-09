@@ -58,6 +58,8 @@ func newUnwiredOuroboros() *Ouroboros {
 // GetConnectionById locks a mutex on its receiver, so a nil ConnManager
 // panics rather than producing a diagnosable error.
 func TestUnwiredHandleOutboundConnEventDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
 	o := newUnwiredOuroboros()
 	evt := event.NewEvent(
 		peergov.OutboundConnectionEventType,
@@ -72,6 +74,8 @@ func TestUnwiredHandleOutboundConnEventDoesNotPanic(t *testing.T) {
 // same hazard: node.go subscribes this handler to the EventBus before the
 // connection manager is wired, so it must tolerate an unwired instance.
 func TestUnwiredHandleInboundConnEventDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
 	o := newUnwiredOuroboros()
 	evt := event.NewEvent(
 		connmanager.InboundConnectionEventType,
@@ -137,6 +141,8 @@ func newWiringTestEventBus(t *testing.T) *event.EventBus {
 // rather than returning an instance whose only symptom is a nil dereference at
 // first protocol use.
 func TestNewOuroborosRejectsMissingRequiredDependency(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name  string
 		clear func(*OuroborosConfig)
@@ -162,6 +168,8 @@ func TestNewOuroborosRejectsMissingRequiredDependency(t *testing.T) {
 // TestNewOuroborosExposesDependencies checks the happy path, and that the
 // optional Leios handlers start unset.
 func TestNewOuroborosExposesDependencies(t *testing.T) {
+	t.Parallel()
+
 	cfg := newWiringTestDeps(t)
 	o, err := NewOuroboros(cfg)
 	require.NoError(t, err)
@@ -181,6 +189,8 @@ func TestNewOuroborosExposesDependencies(t *testing.T) {
 // the dependency invariant, so no protocol handler can observe a half-built
 // one.
 func TestNewOuroborosIsFullyWired(t *testing.T) {
+	t.Parallel()
+
 	o, err := NewOuroboros(newWiringTestDeps(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, o.Close()) })
@@ -192,6 +202,8 @@ func TestNewOuroborosIsFullyWired(t *testing.T) {
 // across live restore cycles, so a nil there is a wiring bug, not a request
 // to disable Leios.
 func TestSetLeiosHandlersRejectNil(t *testing.T) {
+	t.Parallel()
+
 	o := newWiringTestOuroboros(t)
 	require.Error(t, o.SetLeiosVotes(nil))
 	require.Error(t, o.SetLeiosPipeline(nil))
@@ -213,6 +225,8 @@ func (*leiosPipelineHandlerStub) ObserveEndorserBlock(
 // panics on the first method call -- far from the wiring mistake that caused
 // it. The plain-nil cases are covered above; these are the typed ones.
 func TestRejectsTypedNilDependencies(t *testing.T) {
+	t.Parallel()
+
 	t.Run("Mempool", func(t *testing.T) {
 		cfg := newWiringTestDeps(t)
 		var typedNil *mempool.FIFO

@@ -21,6 +21,8 @@ import (
 )
 
 func TestPeerSharingConfigSetsLocalDisabledFromNodeConfig(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name              string
 		peerSharing       bool

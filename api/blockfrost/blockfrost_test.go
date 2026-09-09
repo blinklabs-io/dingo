@@ -43,6 +43,8 @@ func intPtr(v int) *int {
 }
 
 func TestRedeemerExecutionFee(t *testing.T) {
+	t.Parallel()
+
 	fee := redeemerExecutionFee(
 		lcommon.ExUnitPrice{
 			MemPrice:  &cbor.Rat{Rat: big.NewRat(577, 10000)},
@@ -556,6 +558,8 @@ func newTestBlockfrost(
 }
 
 func TestStartStop(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -579,6 +583,8 @@ func TestStartStop(t *testing.T) {
 }
 
 func TestStartAlreadyStarted(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -601,6 +607,8 @@ func TestStartAlreadyStarted(t *testing.T) {
 }
 
 func TestHandleRoot(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -629,6 +637,8 @@ func TestHandleRoot(t *testing.T) {
 }
 
 func TestRouterRootServesRootDocument(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 	handler := b.handler()
@@ -646,6 +656,8 @@ func TestRouterRootServesRootDocument(t *testing.T) {
 }
 
 func TestRouterUnimplementedRouteReturns404(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 	handler := b.handler()
@@ -675,6 +687,8 @@ func TestRouterUnimplementedRouteReturns404(t *testing.T) {
 }
 
 func TestRouterImplementedRouteStillWorks(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 	handler := b.handler()
@@ -687,6 +701,8 @@ func TestRouterImplementedRouteStillWorks(t *testing.T) {
 }
 
 func TestHandleHealth(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -705,6 +721,8 @@ func TestHandleHealth(t *testing.T) {
 }
 
 func TestHandleLatestBlock(t *testing.T) {
+	t.Parallel()
+
 	blockVRF := "vrf_vk1abc"
 	opCert := "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100"
 	opCertCounter := "7"
@@ -770,6 +788,8 @@ func TestHandleLatestBlock(t *testing.T) {
 }
 
 func TestHandleBlockByHashOrNumber(t *testing.T) {
+	t.Parallel()
+
 	nextBlock := "nexthash"
 	mock := &mockNode{
 		blockByID: BlockInfo{
@@ -818,6 +838,8 @@ func TestHandleBlockByHashOrNumber(t *testing.T) {
 }
 
 func TestHandleBlockNotFound(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{blockByIDErr: ErrBlockNotFound}
 	b := newTestBlockfrost(mock)
 
@@ -834,6 +856,8 @@ func TestHandleBlockNotFound(t *testing.T) {
 }
 
 func TestHandleAsset(t *testing.T) {
+	t.Parallel()
+
 	onchain := any(map[string]any{"name": "Test Token", "decimals": float64(6)})
 	standard := "CIP25v2"
 	mock := &mockNode{
@@ -885,6 +909,8 @@ func TestHandleAsset(t *testing.T) {
 }
 
 func TestHandleAssetInvalidIdentifier(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -908,6 +934,8 @@ func TestHandleAssetInvalidIdentifier(t *testing.T) {
 }
 
 func TestHandleAssetNotFound(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		assetErr: ErrAssetNotFound,
 	}
@@ -936,6 +964,8 @@ func TestHandleAssetNotFound(t *testing.T) {
 }
 
 func TestHandleAssetAddresses(t *testing.T) {
+	t.Parallel()
+
 	const assetID = "00112233445566778899aabbccddeeff00112233445566778899aabb746f6b656e"
 	mock := &mockNode{
 		assetHolders: []AssetHolderInfo{
@@ -981,6 +1011,8 @@ func TestHandleAssetAddresses(t *testing.T) {
 }
 
 func TestHandleAssetAddressesInvalidIdentifier(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -1004,6 +1036,8 @@ func TestHandleAssetAddressesInvalidIdentifier(t *testing.T) {
 }
 
 func TestHandleAssetAddressesNotFound(t *testing.T) {
+	t.Parallel()
+
 	const assetID = "00112233445566778899aabbccddeeff00112233445566778899aabb"
 	mock := &mockNode{
 		assetAddressesErr: ErrAssetNotFound,
@@ -1030,6 +1064,8 @@ func TestHandleAssetAddressesNotFound(t *testing.T) {
 }
 
 func TestHandleAssetAddressesNoHolders(t *testing.T) {
+	t.Parallel()
+
 	const assetID = "00112233445566778899aabbccddeeff00112233445566778899aabb"
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
@@ -1054,6 +1090,8 @@ func TestHandleAssetAddressesNoHolders(t *testing.T) {
 }
 
 func TestAssetHoldersFromUtxosPreservesPointerAddress(t *testing.T) {
+	t.Parallel()
+
 	paymentHash := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
 	policyID := bytes.Repeat([]byte{0xcd}, lcommon.AddressHashSize)
 	assetName := []byte("TOKEN")
@@ -1094,6 +1132,8 @@ func TestAssetHoldersFromUtxosPreservesPointerAddress(t *testing.T) {
 }
 
 func TestHandlePoolsRetiring(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		poolsRetiringTotal: 1,
 		poolsRetiring: []PoolRetiringInfo{
@@ -1119,6 +1159,8 @@ func TestHandlePoolsRetiring(t *testing.T) {
 }
 
 func TestHandlePoolsRetiringInvalidPagination(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{})
 	req := httptest.NewRequest(
 		http.MethodGet, "/api/v0/pools/retiring?order=a", nil,
@@ -1137,6 +1179,8 @@ func TestHandlePoolsRetiringInvalidPagination(t *testing.T) {
 }
 
 func TestHandlePoolMetadata(t *testing.T) {
+	t.Parallel()
+
 	url := "https://example.com/pool.json"
 	hash := "18c2dcb8d69024dbe95beebcef4a49a2bdc3f0b1c60e5e669007e5e39edd4a7f"
 	ticker := "TEST"
@@ -1173,6 +1217,8 @@ func TestHandlePoolMetadata(t *testing.T) {
 }
 
 func TestHandlePoolMetadataNoAnchor(t *testing.T) {
+	t.Parallel()
+
 	// A pool without registered metadata answers with an empty JSON
 	// object, matching hosted Blockfrost.
 	b := newTestBlockfrost(&mockNode{
@@ -1198,6 +1244,8 @@ func TestHandlePoolMetadataNoAnchor(t *testing.T) {
 }
 
 func TestOffchainFetchErrorClassification(t *testing.T) {
+	t.Parallel()
+
 	url := "https://example.com/meta.json"
 	expected := bytes.Repeat([]byte{0x01}, 32)
 	stale := bytes.Repeat([]byte{0x02}, 32)
@@ -1243,6 +1291,8 @@ func TestOffchainFetchErrorClassification(t *testing.T) {
 }
 
 func TestHandlePoolMetadataInvalidID(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{poolMetadataErr: ErrInvalidPoolID})
 	req := httptest.NewRequest(
 		http.MethodGet, "/api/v0/pools/pool1stonks/metadata", nil,
@@ -1258,6 +1308,8 @@ func TestHandlePoolMetadataInvalidID(t *testing.T) {
 }
 
 func TestHandlePoolMetadataNotFound(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		poolMetadataErr: fmt.Errorf("get pool: %w", models.ErrPoolNotFound),
 	})
@@ -1277,6 +1329,8 @@ func TestHandlePoolMetadataNotFound(t *testing.T) {
 }
 
 func TestParsePoolID(t *testing.T) {
+	t.Parallel()
+
 	hash, err := parsePoolID(
 		"pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec",
 	)
@@ -1303,6 +1357,8 @@ func TestParsePoolID(t *testing.T) {
 }
 
 func TestHandleDRep(t *testing.T) {
+	t.Parallel()
+
 	const drepHex = "00000000000000000000000000000000000000000000000000000000"
 	const drepID = drepHex
 
@@ -1351,6 +1407,8 @@ func TestHandleDRep(t *testing.T) {
 }
 
 func TestHandleDReps(t *testing.T) {
+	t.Parallel()
+
 	lastActive := uint64(680)
 	mock := &mockNode{
 		drepListTotal: 42,
@@ -1407,6 +1465,8 @@ func TestHandleDReps(t *testing.T) {
 }
 
 func TestHandleDRepsInvalidParams(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		query   string
 		message string
@@ -1457,6 +1517,8 @@ func TestHandleDRepsInvalidParams(t *testing.T) {
 // is at or before the registration slot, and a slot equal to a start slot
 // belongs to the epoch it starts.
 func TestNodeAdapterDRepsEpochForSlot(t *testing.T) {
+	t.Parallel()
+
 	adapter, store, _ := newDBBackedAdapter(t)
 
 	for _, epoch := range []models.Epoch{
@@ -1515,6 +1577,8 @@ INSERT INTO drep (
 }
 
 func TestParseDRepIdentifierSpecial(t *testing.T) {
+	t.Parallel()
+
 	cred, err := parseDRepIdentifier("drep_always_abstain")
 	require.NoError(t, err)
 	require.NotNil(t, cred.Predefined)
@@ -1529,6 +1593,8 @@ func TestParseDRepIdentifierSpecial(t *testing.T) {
 // TestHandleDRepCIP129ScriptIdentifier verifies script DRep IDs keep their
 // credential type when the HTTP handler passes them to the node adapter.
 func TestHandleDRepCIP129ScriptIdentifier(t *testing.T) {
+	t.Parallel()
+
 	const drepID = "drep1yvqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq770f95"
 	const drepHex = "00000000000000000000000000000000000000000000000000000000"
 
@@ -1563,6 +1629,8 @@ func TestHandleDRepCIP129ScriptIdentifier(t *testing.T) {
 // TestParseDRepIdentifierCIP129CredentialType verifies CIP-129 DRep IDs
 // decode the credential type from the bech32 payload header.
 func TestParseDRepIdentifierCIP129CredentialType(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		name          string
 		id            string
@@ -1599,6 +1667,8 @@ func TestParseDRepIdentifierCIP129CredentialType(t *testing.T) {
 // TestParseDRepIdentifierHexIsAmbiguous verifies raw hash identifiers remain
 // untyped so lookup can deliberately fall back across key/script tags.
 func TestParseDRepIdentifierHexIsAmbiguous(t *testing.T) {
+	t.Parallel()
+
 	const drepHex = "00000000000000000000000000000000000000000000000000000000"
 
 	credential, err := parseDRepIdentifier(drepHex)
@@ -1610,6 +1680,8 @@ func TestParseDRepIdentifierHexIsAmbiguous(t *testing.T) {
 }
 
 func TestHandleDRepInvalidIdentifier(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -1633,6 +1705,8 @@ func TestHandleDRepInvalidIdentifier(t *testing.T) {
 }
 
 func TestHandleDRepNotFound(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		drepErr: ErrDRepNotFound,
 	}
@@ -1661,6 +1735,8 @@ func TestHandleDRepNotFound(t *testing.T) {
 }
 
 func TestHandleLatestBlockError(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		blockErr: assert.AnError,
 	}
@@ -1692,6 +1768,8 @@ func TestHandleLatestBlockError(t *testing.T) {
 }
 
 func TestHandlePoolsExtended(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		pools: []PoolExtendedInfo{
 			{
@@ -1801,6 +1879,8 @@ func TestHandlePoolsExtended(t *testing.T) {
 }
 
 func TestHandlePoolsExtendedInvalidPagination(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -1827,6 +1907,8 @@ func TestHandlePoolsExtendedInvalidPagination(t *testing.T) {
 }
 
 func TestHandlePoolsExtendedError(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		poolsErr: assert.AnError,
 	}
@@ -1858,6 +1940,8 @@ func TestHandlePoolsExtendedError(t *testing.T) {
 }
 
 func TestHandleLatestBlockTxs(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		txHashes: []string{"tx1", "tx2", "tx3"},
 	}
@@ -1884,6 +1968,8 @@ func TestHandleLatestBlockTxs(t *testing.T) {
 }
 
 func TestHandleLatestBlockTxsEmpty(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		txHashes: nil,
 	}
@@ -1908,6 +1994,8 @@ func TestHandleLatestBlockTxsEmpty(t *testing.T) {
 }
 
 func TestHandleTransaction(t *testing.T) {
+	t.Parallel()
+
 	invalidBefore := "100"
 	invalidHereafter := "200"
 	mock := &mockNode{
@@ -1971,6 +2059,8 @@ func TestHandleTransaction(t *testing.T) {
 }
 
 func TestHandleTransactionInvalidHash(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{})
 	req := httptest.NewRequest(
 		http.MethodGet,
@@ -1989,6 +2079,8 @@ func TestHandleTransactionInvalidHash(t *testing.T) {
 }
 
 func TestHandleTransactionNotFound(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		transactionErr: ErrTransactionNotFound,
 	})
@@ -2012,6 +2104,8 @@ func TestHandleTransactionNotFound(t *testing.T) {
 }
 
 func TestHandleTransactionSubmitMempoolUnavailable(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		transactionSubmitErr: ErrMempoolUnavailable,
 	})
@@ -2034,6 +2128,8 @@ func TestHandleTransactionSubmitMempoolUnavailable(t *testing.T) {
 }
 
 func TestHandleTransactionSubmitMempoolFull(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		transactionSubmitErr: ErrMempoolFull,
 	})
@@ -2056,6 +2152,8 @@ func TestHandleTransactionSubmitMempoolFull(t *testing.T) {
 }
 
 func TestHandleTransactionSubmitErrors(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name        string
 		contentType string
@@ -2126,6 +2224,8 @@ func TestHandleTransactionSubmitErrors(t *testing.T) {
 }
 
 func TestHandleTransactionCBOR(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		transactionCBOR: []byte{0x84, 0x01, 0x02, 0xf5, 0xf6},
 	})
@@ -2149,6 +2249,8 @@ func TestHandleTransactionCBOR(t *testing.T) {
 }
 
 func TestHandleTransactionSubEndpointNotFound(t *testing.T) {
+	t.Parallel()
+
 	const hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	tests := []struct {
 		name      string
@@ -2272,6 +2374,8 @@ func TestHandleTransactionSubEndpointNotFound(t *testing.T) {
 }
 
 func TestHandleTransactionMetadata(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		transactionMetadata: []TransactionMetadataInfo{
 			{
@@ -2302,6 +2406,8 @@ func TestHandleTransactionMetadata(t *testing.T) {
 }
 
 func TestHandleTransactionMetadataCBOR(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		transactionMetadataCBOR: []TransactionMetadataCBORInfo{
 			{Label: "721", CBORMetadata: "a1646e616d65636e6674"},
@@ -2331,6 +2437,8 @@ func TestHandleTransactionMetadataCBOR(t *testing.T) {
 }
 
 func TestHandleTransactionUTXOs(t *testing.T) {
+	t.Parallel()
+
 	ref := true
 	b := newTestBlockfrost(&mockNode{
 		transactionUTXOs: TransactionUTXOsInfo{
@@ -2384,6 +2492,8 @@ func TestHandleTransactionUTXOs(t *testing.T) {
 }
 
 func TestHandleTransactionDelegations(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		transactionDelegations: []TransactionDelegationInfo{
 			{
@@ -2420,6 +2530,8 @@ func TestHandleTransactionDelegations(t *testing.T) {
 }
 
 func TestHandleTransactionRedeemers(t *testing.T) {
+	t.Parallel()
+
 	datumHash := "923918e403bf43c34b4ef6b48eb2ee04babed17320d8d1b9ff9ad086e86f44ec"
 	b := newTestBlockfrost(&mockNode{
 		transactionRedeemers: []TransactionRedeemerInfo{
@@ -2472,6 +2584,8 @@ func TestHandleTransactionRedeemers(t *testing.T) {
 }
 
 func TestHandleTransactionStakeAddresses(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		transactionStakes: []TransactionStakeAddressInfo{
 			{
@@ -2503,6 +2617,8 @@ func TestHandleTransactionStakeAddresses(t *testing.T) {
 }
 
 func TestHandleLatestEpoch(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		epoch: EpochInfo{
 			Epoch:          100,
@@ -2537,6 +2653,8 @@ func TestHandleLatestEpoch(t *testing.T) {
 }
 
 func TestHandleLatestEpochParams(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		params: ProtocolParamsInfo{
 			Epoch:               100,
@@ -2595,6 +2713,8 @@ func TestHandleLatestEpochParams(t *testing.T) {
 }
 
 func TestHandleEpochParams(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		epochParams: ProtocolParamsInfo{
 			Epoch:               42,
@@ -2648,6 +2768,8 @@ func TestHandleEpochParams(t *testing.T) {
 }
 
 func TestHandleEpochParamsInvalidEpoch(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -2671,6 +2793,8 @@ func TestHandleEpochParamsInvalidEpoch(t *testing.T) {
 }
 
 func TestHandleEpochParamsNotFound(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		epochParamsErr: ErrEpochNotFound,
 	}
@@ -2695,6 +2819,8 @@ func TestHandleEpochParamsNotFound(t *testing.T) {
 }
 
 func TestHandleAccount(t *testing.T) {
+	t.Parallel()
+
 	drepID := "drep1xyz"
 	mock := &mockNode{
 		account: AccountInfo{
@@ -2773,6 +2899,8 @@ func assertJSONKeys(t *testing.T, v any, want []string) {
 }
 
 func TestHandleAccountInvalidStakeAddress(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		accountErr: ErrInvalidStakeAddress,
 	}
@@ -2797,6 +2925,8 @@ func TestHandleAccountInvalidStakeAddress(t *testing.T) {
 }
 
 func TestHandleAccountNotFound(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		accountErr: models.ErrAccountNotFound,
 	}
@@ -2815,6 +2945,8 @@ func TestHandleAccountNotFound(t *testing.T) {
 }
 
 func TestHandleAccountAssociatedAddresses(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		addresses: []AccountAssociatedAddressInfo{
 			{Address: "addr_test1"},
@@ -2844,6 +2976,8 @@ func TestHandleAccountAssociatedAddresses(t *testing.T) {
 }
 
 func TestHandleAccountDelegationHistory(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		delegations: []AccountDelegationHistoryInfo{
 			{
@@ -2903,6 +3037,8 @@ func TestHandleAccountDelegationHistory(t *testing.T) {
 }
 
 func TestHandleAccountRegistrationHistory(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		regs: []AccountRegistrationHistoryInfo{
 			{
@@ -2959,6 +3095,8 @@ func TestHandleAccountRegistrationHistory(t *testing.T) {
 }
 
 func TestHandleAccountRewardHistory(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		rewards: []AccountRewardHistoryInfo{
 			{Epoch: 3, Amount: "12", PoolID: "pool1"},
@@ -2986,6 +3124,8 @@ func TestHandleAccountRewardHistory(t *testing.T) {
 }
 
 func TestHandleNetwork(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		network: NetworkInfo{
 			Supply: NetworkSupplyInfo{
@@ -3030,6 +3170,8 @@ func TestHandleNetwork(t *testing.T) {
 }
 
 func TestHandleNetworkEras(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		networkEras: []NetworkEraInfo{
 			{
@@ -3080,6 +3222,8 @@ func TestHandleNetworkEras(t *testing.T) {
 }
 
 func TestHandleGenesis(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		genesis: GenesisInfo{
 			ActiveSlotsCoefficient: 0.05,
@@ -3115,6 +3259,8 @@ func TestHandleGenesis(t *testing.T) {
 }
 
 func TestStopIdempotent(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 
@@ -3129,6 +3275,8 @@ func TestStopIdempotent(t *testing.T) {
 }
 
 func TestNilLogger(t *testing.T) {
+	t.Parallel()
+
 	b := New(
 		BlockfrostConfig{ListenAddress: ":0"},
 		&mockNode{},
@@ -3138,6 +3286,8 @@ func TestNilLogger(t *testing.T) {
 }
 
 func TestDefaultListenAddress(t *testing.T) {
+	t.Parallel()
+
 	b := New(
 		BlockfrostConfig{},
 		&mockNode{},
@@ -3147,6 +3297,8 @@ func TestDefaultListenAddress(t *testing.T) {
 }
 
 func TestParseAddressOrPaymentCred(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		name  string
 		input string
@@ -3227,6 +3379,8 @@ func TestParseAddressOrPaymentCred(t *testing.T) {
 // and the parse-failure path, which must keep ErrInvalidAddress for the HTTP
 // 400 mapping while retaining the underlying parse diagnostics.
 func TestNodeAdapterAddressRejectsInvalidInput(t *testing.T) {
+	t.Parallel()
+
 	adapter, _, _ := newDBBackedAdapter(t)
 	paymentKey := bytes.Repeat([]byte{0x11}, lcommon.AddressHashSize)
 
@@ -3295,6 +3449,8 @@ func TestNodeAdapterAddressRejectsInvalidInput(t *testing.T) {
 // UTxOs are all spent must still resolve with a zero balance, because the
 // synthetic enterprise address alone would not match base-address history.
 func TestNodeAdapterAddressPaymentCredTransactionFallback(t *testing.T) {
+	t.Parallel()
+
 	adapter, store, _ := newDBBackedAdapter(t)
 
 	paymentKey := bytes.Repeat([]byte{0x22}, lcommon.AddressHashSize)
@@ -3331,6 +3487,8 @@ INSERT INTO address_transaction (
 }
 
 func TestKeyScriptStakeAddressDerivation(t *testing.T) {
+	t.Parallel()
+
 	// gouroboros StakeAddress() returns nil for type-2 base addresses
 	// (key payment / script staking); the adapter derives the script
 	// stake address from the staking credential instead.
@@ -3361,6 +3519,8 @@ func TestKeyScriptStakeAddressDerivation(t *testing.T) {
 }
 
 func TestHandleAddress(t *testing.T) {
+	t.Parallel()
+
 	stakeAddress := "stake_test1upwlsqc..."
 	mock := &mockNode{
 		addressInfo: AddressInfo{
@@ -3402,6 +3562,8 @@ func TestHandleAddress(t *testing.T) {
 }
 
 func TestHandleAddressNotFound(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		addressInfoErr: ErrAddressNotFound,
 	})
@@ -3426,6 +3588,8 @@ func TestHandleAddressNotFound(t *testing.T) {
 }
 
 func TestHandleAddressInvalidAddress(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		addressInfoErr: ErrInvalidAddress,
 	})
@@ -3442,6 +3606,8 @@ func TestHandleAddressInvalidAddress(t *testing.T) {
 }
 
 func TestHandleAddressUTXOs(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		addressUTXOsTotal: 2,
 		addressUTXOs: []AddressUTXOInfo{
@@ -3485,6 +3651,8 @@ func TestHandleAddressUTXOs(t *testing.T) {
 }
 
 func TestHandleAddressUTXOsInvalidPagination(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{})
 	req := httptest.NewRequest(
 		http.MethodGet,
@@ -3503,6 +3671,8 @@ func TestHandleAddressUTXOsInvalidPagination(t *testing.T) {
 }
 
 func TestHandleAddressUTXOsInvalidAddress(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{
 		addressUTXOsErr: ErrInvalidAddress,
 	})
@@ -3519,6 +3689,8 @@ func TestHandleAddressUTXOsInvalidAddress(t *testing.T) {
 }
 
 func TestHandleAddressTransactions(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		addressTxsTotal: 3,
 		addressTransactions: []AddressTransactionInfo{
@@ -3556,6 +3728,8 @@ func TestHandleAddressTransactions(t *testing.T) {
 }
 
 func TestHandleMetadataTransactions(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		metadataJSONTotal: 2,
 		metadataJSON: []MetadataTransactionJSONInfo{
@@ -3589,6 +3763,8 @@ func TestHandleMetadataTransactions(t *testing.T) {
 }
 
 func TestHandleMetadataTransactionsCBOR(t *testing.T) {
+	t.Parallel()
+
 	mock := &mockNode{
 		metadataCBORTotal: 1,
 		metadataCBOR: []MetadataTransactionCBORInfo{
@@ -3624,6 +3800,8 @@ func TestHandleMetadataTransactionsCBOR(t *testing.T) {
 }
 
 func TestHandleMetadataTransactionsInvalidPagination(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{})
 	req := httptest.NewRequest(
 		http.MethodGet,
@@ -3642,6 +3820,8 @@ func TestHandleMetadataTransactionsInvalidPagination(t *testing.T) {
 }
 
 func TestHandleMetadataTransactionsInvalidLabel(t *testing.T) {
+	t.Parallel()
+
 	b := newTestBlockfrost(&mockNode{})
 	req := httptest.NewRequest(
 		http.MethodGet,

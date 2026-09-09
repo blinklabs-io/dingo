@@ -32,6 +32,8 @@ import (
 // configured metadata plugin name -- without this, internal/settingsresolve's
 // pre-open check would have nothing to read on any real database.
 func TestWriteDBInfoSidecarOnFirstStart(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db, err := newTestDatabase(t, &Config{
 		DataDir:        dataDir,
@@ -55,6 +57,8 @@ func TestWriteDBInfoSidecarOnFirstStart(t *testing.T) {
 // poison the pre-open check for every later, complete start against the
 // same directory.
 func TestWriteDBInfoSidecarSkippedOnPartialConfig(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	db, err := newTestDatabase(t, &Config{
 		DataDir:     dataDir,
@@ -76,6 +80,8 @@ func TestWriteDBInfoSidecarSkippedOnPartialConfig(t *testing.T) {
 // overwriting it would erase the exact mismatch signal the file exists to
 // carry.
 func TestWriteDBInfoSidecarNeverOverwritesExisting(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	require.NoError(t, dbinfo.Write(dataDir, dbinfo.Info{
 		FormatVersion:  dbinfo.CurrentFormatVersion,
@@ -111,6 +117,8 @@ func TestWriteDBInfoSidecarNeverOverwritesExisting(t *testing.T) {
 // steady-state start, silently disabling internal/settingsresolve's
 // pre-open metadata-plugin check from then on.
 func TestWriteDBInfoSidecarRecreatedOnSteadyStateStart(t *testing.T) {
+	t.Parallel()
+
 	dataDir := t.TempDir()
 	cfg := &Config{
 		DataDir:        dataDir,
@@ -165,6 +173,8 @@ func sidecarTrapPath(t *testing.T) string {
 // failing to establish it here must fail the open instead of warning and
 // continuing.
 func TestNewDatabaseFailsWhenSidecarCannotBeEstablished(t *testing.T) {
+	t.Parallel()
+
 	metaDir := t.TempDir()
 	blobDir := t.TempDir()
 
@@ -180,6 +190,8 @@ func TestNewDatabaseFailsWhenSidecarCannotBeEstablished(t *testing.T) {
 }
 
 func TestSidecarFailureDoesNotLatchMetadataPluginGate(t *testing.T) {
+	t.Parallel()
+
 	metaDir := t.TempDir()
 	blobDir := t.TempDir()
 	trapDataDir := sidecarTrapPath(t)
@@ -230,6 +242,8 @@ func TestSidecarFailureDoesNotLatchMetadataPluginGate(t *testing.T) {
 // still warn and continue, not fail the open -- node_settings_gate's own
 // metadata_plugin gate is already the real enforcement for it by then.
 func TestExistingDatabaseSidecarFailureIsNonFatal(t *testing.T) {
+	t.Parallel()
+
 	metaDir := t.TempDir()
 	blobDir := t.TempDir()
 	realDataDir := t.TempDir()

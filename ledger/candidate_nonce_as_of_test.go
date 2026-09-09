@@ -50,6 +50,8 @@ import (
 // `block.Slot < cutoffSlot`. The two bounds are separable on the fast path,
 // where the lookups are independent seeks, which is where that case is covered.
 func TestComputeCandidateNonceAsOf_SlowPathStopsAtFoldEnd(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	// Conway's window is 4k/f = 4*6/0.4 = 60, so with the epoch running
@@ -146,6 +148,8 @@ func TestComputeCandidateNonceAsOf_SlowPathStopsAtFoldEnd(t *testing.T) {
 // an off-by-one -- it folds no blocks at all, so the reply would carry the
 // epoch's opening nonces while claiming to describe the tip.
 func TestFoldEndSlotForTip(t *testing.T) {
+	t.Parallel()
+
 	assert.Equal(t, uint64(1), foldEndSlotForTip(0),
 		"the origin's own block is inside the fold")
 	assert.Equal(t, uint64(1201), foldEndSlotForTip(1200),

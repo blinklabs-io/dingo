@@ -95,6 +95,8 @@ type refPool struct {
 // makes a correct derivation look like an off-by-one bug -- it did here on
 // the first run -- so the offset is stated rather than assumed.
 func TestDerivedRewardInputsMatchReferenceStakeSnapshot(t *testing.T) {
+	t.Parallel()
+
 	snapshotPath := os.Getenv("DINGO_REF_LEDGER_SNAPSHOT")
 	referencePath := os.Getenv("DINGO_REF_STAKE_SNAPSHOT")
 	if snapshotPath == "" || referencePath == "" {

@@ -54,6 +54,8 @@ func (o *Ouroboros) chainsyncClientRollForward(
 }
 
 func TestChainsyncClientRollForwardRecordsHeaderArrival(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
 	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
@@ -93,6 +95,8 @@ func TestChainsyncClientRollForwardRecordsHeaderArrival(t *testing.T) {
 func TestChainsyncClientRollForwardRawRecordsArrivalBeforeDecodeWait(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
 	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
@@ -171,6 +175,8 @@ func TestChainsyncClientRollForwardRawRecordsArrivalBeforeDecodeWait(
 }
 
 func TestChainsyncHeaderAdmissionIsPreObservationAndPeerLocal(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
 	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
@@ -285,6 +291,8 @@ func TestChainsyncHeaderAdmissionIsPreObservationAndPeerLocal(t *testing.T) {
 }
 
 func TestChainsyncFarFutureDropHasNoStateOrConnectionPenalty(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
 	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
@@ -414,6 +422,8 @@ func TestChainsyncFarFutureDropHasNoStateOrConnectionPenalty(t *testing.T) {
 }
 
 func TestFutureHeaderResyncCoalescesEarliestOnset(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
@@ -466,6 +476,8 @@ func TestFutureHeaderResyncCoalescesEarliestOnset(t *testing.T) {
 }
 
 func TestFutureHeaderResyncImmediateOnsetArmsBeforePublish(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
@@ -496,6 +508,8 @@ func TestFutureHeaderResyncImmediateOnsetArmsBeforePublish(t *testing.T) {
 }
 
 func TestFutureHeaderResyncSuppressesConnectionRemovedDuringArm(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
@@ -551,6 +565,8 @@ func TestFutureHeaderResyncSuppressesConnectionRemovedDuringArm(t *testing.T) {
 func TestFutureHeaderResyncSuppressedAfterConnectionCloseAndClose(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	for _, test := range []struct {
 		name string
 		stop func(*Ouroboros, ouroboros.ConnectionId)
@@ -611,6 +627,8 @@ func TestFutureHeaderResyncSuppressedAfterConnectionCloseAndClose(
 func TestChainsyncHeaderAdmissionErrorFailsClosedBeforeObservation(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
 	_, observedCh := bus.Subscribe(chainselection.PeerTipUpdateEventType)

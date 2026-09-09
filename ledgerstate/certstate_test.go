@@ -35,6 +35,8 @@ type testPtr struct {
 }
 
 func TestParseCredentialMapConwayAccountState(t *testing.T) {
+	t.Parallel()
+
 	stakingKey := bytes.Repeat([]byte{0x11}, 28)
 	poolHash := bytes.Repeat([]byte{0x22}, 28)
 	drepHash := bytes.Repeat([]byte{0x33}, 28)
@@ -83,6 +85,8 @@ func TestParseCredentialMapConwayAccountState(t *testing.T) {
 }
 
 func TestParseCredentialMapShelleyAccountState(t *testing.T) {
+	t.Parallel()
+
 	stakingKey := bytes.Repeat([]byte{0x44}, 28)
 	poolHash := bytes.Repeat([]byte{0x55}, 28)
 
@@ -121,6 +125,8 @@ func TestParseCredentialMapShelleyAccountState(t *testing.T) {
 }
 
 func TestParseCredentialMapLegacyUMElem(t *testing.T) {
+	t.Parallel()
+
 	stakingKey := bytes.Repeat([]byte{0x66}, 28)
 	poolHash := bytes.Repeat([]byte{0x77}, 28)
 
@@ -161,6 +167,8 @@ func TestParseCredentialMapLegacyUMElem(t *testing.T) {
 }
 
 func TestParsePStateSelectsUTxOHDPoolMap(t *testing.T) {
+	t.Parallel()
+
 	poolHash := bytes.Repeat([]byte{0x11}, 28)
 	vrfHash := bytes.Repeat([]byte{0x22}, 32)
 	rewardHash := bytes.Repeat([]byte{0x33}, 28)
@@ -263,6 +271,8 @@ func TestParsePStateSelectsUTxOHDPoolMap(t *testing.T) {
 }
 
 func TestParsePStateDijkstraLeiosKeyField(t *testing.T) {
+	t.Parallel()
+
 	poolHash := bytes.Repeat([]byte{0x61}, 28)
 	vrfHash := bytes.Repeat([]byte{0x62}, 32)
 	rewardHash := bytes.Repeat([]byte{0x63}, 28)
@@ -367,6 +377,8 @@ func TestParsePStateDijkstraLeiosKeyField(t *testing.T) {
 // TestParseRewardAccountNormalizesAddressBytes verifies full reward
 // addresses are stored as 28-byte hashes plus their credential tag.
 func TestParseRewardAccountNormalizesAddressBytes(t *testing.T) {
+	t.Parallel()
+
 	rewardHash := bytes.Repeat([]byte{0x62}, 28)
 
 	cases := []struct {

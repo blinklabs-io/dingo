@@ -54,6 +54,17 @@ type EnactmentContext struct {
 type EnactmentResult struct {
 	UpdatedPParams lcommon.ProtocolParameters
 	PParamsChanged bool
+	// PlutusV2CostModelWritten is true when the enacted ParamUpdate itself
+	// explicitly specified a PlutusV2 cost model (map key 1), independent of
+	// what value it wrote. Checking the enacted update's own map -- rather
+	// than comparing the merged result's value before and after -- is the
+	// only correct signal here: HardForkBabbage's synthetic default
+	// (ledger/eras/babbage.go) is the real, canonical mainnet PlutusV2 cost
+	// model, so a real governance enactment writing that exact value is the
+	// common case on any real network, not a rare coincidence a
+	// value-comparison could dismiss as "unchanged, therefore not written."
+	// See blinklabs-io/dingo#3825's PR review.
+	PlutusV2CostModelWritten bool
 }
 
 // EnactProposal applies the side effects of a ratified governance
@@ -88,6 +99,9 @@ func EnactProposal(
 		}
 		result.UpdatedPParams = updated
 		result.PParamsChanged = true
+		if _, ok := a.ParamUpdate.CostModels[1]; ok {
+			result.PlutusV2CostModelWritten = true
+		}
 
 	case *gdijkstra.DijkstraParameterChangeGovAction:
 		updated, err := ctx.UpdateFn(ctx.PParams, a.ParamUpdate)
@@ -96,6 +110,9 @@ func EnactProposal(
 		}
 		result.UpdatedPParams = updated
 		result.PParamsChanged = true
+		if _, ok := a.ParamUpdate.CostModels[1]; ok {
+			result.PlutusV2CostModelWritten = true
+		}
 
 	case *lcommon.HardForkInitiationGovAction:
 		updated, err := setProtocolVersion(

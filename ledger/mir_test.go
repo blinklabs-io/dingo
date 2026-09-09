@@ -16,12 +16,12 @@ package ledger
 
 import (
 	"database/sql"
+	"math/big"
 	"strconv"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -69,7 +69,7 @@ INSERT INTO move_instantaneous_rewards_reward (
 			mirID,
 			rewards[i].Credential,
 			rewards[i].CredentialTag,
-			strconv.FormatUint(uint64(rewards[i].Amount), 10),
+			rewards[i].Amount.String(),
 		)
 		require.NoError(t, err)
 	}
@@ -125,6 +125,8 @@ func applyMIRCertsErr(
 func TestApplyMIRCerts_DistributionFromReserves_RegisteredAccount(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	const (
@@ -139,7 +141,7 @@ func TestApplyMIRCerts_DistributionFromReserves_RegisteredAccount(
 		mirPotReserves,
 		500,
 		[]models.MoveInstantaneousRewardsReward{
-			{Credential: cred, Amount: types.Uint64(mirAmount)},
+			{Credential: cred, Amount: new(big.Int).SetUint64(mirAmount)},
 		},
 	)
 	require.NoError(t, db.CreateAccount(nil, &models.Account{
@@ -166,10 +168,13 @@ func TestApplyMIRCerts_DistributionFromReserves_RegisteredAccount(
 		"treasury untouched for reserves distribution")
 }
 
-// TestApplyMIRCerts_MultipleDistributionsSameAccount verifies that distinct
-// MIR certs crediting the same account at one epoch boundary remain distinct
-// reward journal events.
+// TestApplyMIRCerts_MultipleDistributionsSameAccount verifies that distinct MIR
+// certs crediting the same account from the same pot at one epoch boundary are
+// folded into the single credit cardano-ledger's InstantaneousRewards map
+// produces, rather than one journal event per certificate.
 func TestApplyMIRCerts_MultipleDistributionsSameAccount(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	const (
@@ -185,7 +190,7 @@ func TestApplyMIRCerts_MultipleDistributionsSameAccount(t *testing.T) {
 		mirPotReserves,
 		200,
 		[]models.MoveInstantaneousRewardsReward{
-			{Credential: cred, Amount: types.Uint64(firstAmount)},
+			{Credential: cred, Amount: new(big.Int).SetUint64(firstAmount)},
 		},
 	)
 	seedMIRDistribution(
@@ -194,7 +199,7 @@ func TestApplyMIRCerts_MultipleDistributionsSameAccount(t *testing.T) {
 		mirPotReserves,
 		400,
 		[]models.MoveInstantaneousRewardsReward{
-			{Credential: cred, Amount: types.Uint64(secondAmount)},
+			{Credential: cred, Amount: new(big.Int).SetUint64(secondAmount)},
 		},
 	)
 	require.NoError(t, db.CreateAccount(nil, &models.Account{
@@ -216,11 +221,87 @@ func TestApplyMIRCerts_MultipleDistributionsSameAccount(t *testing.T) {
 	require.NotNil(t, state)
 	assert.Equal(t, uint64(9_250), uint64(state.Reserves))
 
+	require.Len(
+		t,
+		boundaryRewardSourceHashes(t, gdb, cred, boundarySlot),
+		1,
+	)
+}
+
+// TestApplyMIRCerts_ReservesAndTreasuryStayDistinct verifies that a reserves
+// credit and a treasury credit to the same account at one epoch boundary remain
+// distinct journal events. cardano-ledger keeps iRReserves and iRTreasury as
+// separate maps, so folding is per pot and both credits must survive the
+// journal's (tx_hash, credential, slot) idempotency key.
+func TestApplyMIRCerts_ReservesAndTreasuryStayDistinct(t *testing.T) {
+	t.Parallel()
+
+	ls, db, gdb := newMIRTestLedger(t)
+
+	const (
+		epochStartSlot = uint64(0)
+		boundarySlot   = uint64(1_000)
+		reservesAmount = uint64(300)
+		treasuryAmount = uint64(450)
+	)
+	cred := mirCred28(0x1A)
+	seedMIRDistribution(
+		t,
+		gdb,
+		mirPotReserves,
+		200,
+		[]models.MoveInstantaneousRewardsReward{
+			{Credential: cred, Amount: new(big.Int).SetUint64(reservesAmount)},
+		},
+	)
+	seedMIRDistribution(
+		t,
+		gdb,
+		mirPotTreasury,
+		400,
+		[]models.MoveInstantaneousRewardsReward{
+			{Credential: cred, Amount: new(big.Int).SetUint64(treasuryAmount)},
+		},
+	)
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: cred,
+		Reward:     0,
+		Active:     true,
+	}))
+	require.NoError(t, db.Metadata().SetNetworkState(1_000, 10_000, 50, nil))
+
+	runApplyMIRCerts(t, ls, db, epochStartSlot, boundarySlot)
+
+	account, err := db.GetAccountByCredential(0, cred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, reservesAmount+treasuryAmount, uint64(account.Reward))
+
+	state, err := db.Metadata().GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, uint64(10_000-reservesAmount), uint64(state.Reserves))
+	assert.Equal(t, uint64(1_000-treasuryAmount), uint64(state.Treasury))
+
+	hashes := boundaryRewardSourceHashes(t, gdb, cred, boundarySlot)
+	require.Len(t, hashes, 2)
+	assert.NotEqual(t, string(hashes[0]), string(hashes[1]))
+}
+
+// boundaryRewardSourceHashes returns the reward journal discriminators written
+// for a credential at one boundary slot, in insertion order.
+func boundaryRewardSourceHashes(
+	t *testing.T,
+	gdb *sql.DB,
+	credential []byte,
+	boundarySlot uint64,
+) [][]byte {
+	t.Helper()
 	rows, err := gdb.Query(`
 SELECT tx_hash FROM account_reward_delta
 WHERE credential_tag = ? AND staking_key = ? AND added_slot = ?
 ORDER BY id ASC`,
-		0, cred, boundarySlot,
+		0, credential, boundarySlot,
 	)
 	require.NoError(t, err)
 	defer rows.Close()
@@ -231,11 +312,17 @@ ORDER BY id ASC`,
 		hashes = append(hashes, hash)
 	}
 	require.NoError(t, rows.Err())
-	require.Len(t, hashes, 2)
-	assert.NotEqual(t, string(hashes[0]), string(hashes[1]))
+	return hashes
 }
 
-func TestApplyMIRCerts_DistributionTotalOverflowRollsBack(t *testing.T) {
+// TestApplyMIRCerts_DistributionTotalBeyondEveryPotIsNoOp verifies that folded
+// credits whose per-pot total no longer fits uint64 discard the boundary rather
+// than failing it. cardano-ledger folds over unbounded Coin, so a total larger
+// than the pot reaches its no-op branch; failing would wedge the node, since
+// the stored certificates are re-read and re-fail on every retry.
+func TestApplyMIRCerts_DistributionTotalBeyondEveryPotIsNoOp(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	maxUint := ^uint64(0)
@@ -247,8 +334,8 @@ func TestApplyMIRCerts_DistributionTotalOverflowRollsBack(t *testing.T) {
 		mirPotReserves,
 		200,
 		[]models.MoveInstantaneousRewardsReward{
-			{Credential: credA, Amount: types.Uint64(maxUint)},
-			{Credential: credB, Amount: types.Uint64(1)},
+			{Credential: credA, Amount: new(big.Int).SetUint64(maxUint)},
+			{Credential: credB, Amount: new(big.Int).SetUint64(1)},
 		},
 	)
 	require.NoError(t, db.CreateAccount(nil, &models.Account{
@@ -261,8 +348,8 @@ func TestApplyMIRCerts_DistributionTotalOverflowRollsBack(t *testing.T) {
 	}))
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, maxUint, 50, nil))
 
-	err := applyMIRCertsErr(ls, db, 0, 1_000)
-	require.ErrorContains(t, err, "MIR distribution total overflow")
+	require.NoError(t, applyMIRCertsErr(ls, db, 0, 1_000),
+		"a total larger than every pot must not fail the epoch boundary")
 
 	accountA, err := db.GetAccountByCredential(0, credA, false, nil)
 	require.NoError(t, err)
@@ -281,6 +368,8 @@ func TestApplyMIRCerts_DistributionTotalOverflowRollsBack(t *testing.T) {
 func TestApplyMIRCerts_DistributionFromTreasury_RegisteredAccount(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	const (
@@ -295,7 +384,7 @@ func TestApplyMIRCerts_DistributionFromTreasury_RegisteredAccount(
 		mirPotTreasury,
 		500,
 		[]models.MoveInstantaneousRewardsReward{
-			{Credential: cred, Amount: types.Uint64(mirAmount)},
+			{Credential: cred, Amount: new(big.Int).SetUint64(mirAmount)},
 		},
 	)
 	require.NoError(t, db.CreateAccount(nil, &models.Account{
@@ -325,6 +414,8 @@ func TestApplyMIRCerts_DistributionFromTreasury_RegisteredAccount(
 // TestApplyMIRCerts_DistributionUnregisteredAccount verifies that an
 // unregistered credential is silently skipped — no pot debit, no error.
 func TestApplyMIRCerts_DistributionUnregisteredAccount(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	cred := mirCred28(0x33) // no Account row seeded
@@ -334,7 +425,7 @@ func TestApplyMIRCerts_DistributionUnregisteredAccount(t *testing.T) {
 		mirPotReserves,
 		500,
 		[]models.MoveInstantaneousRewardsReward{
-			{Credential: cred, Amount: types.Uint64(400)},
+			{Credential: cred, Amount: new(big.Int).SetUint64(400)},
 		},
 	)
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
@@ -355,6 +446,8 @@ func TestApplyMIRCerts_DistributionUnregisteredAccount(t *testing.T) {
 // TestApplyMIRCerts_PotTransferReservesToTreasury verifies that a pot-to-pot
 // MIR with sourcePot=Reserves moves coins from reserves to treasury.
 func TestApplyMIRCerts_PotTransferReservesToTreasury(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	const transfer = uint64(2_000)
@@ -375,6 +468,8 @@ func TestApplyMIRCerts_PotTransferReservesToTreasury(t *testing.T) {
 // TestApplyMIRCerts_PotTransferTreasuryToReserves verifies sourcePot=Treasury
 // moves coins from treasury to reserves.
 func TestApplyMIRCerts_PotTransferTreasuryToReserves(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	const transfer = uint64(1_500)
@@ -393,6 +488,8 @@ func TestApplyMIRCerts_PotTransferTreasuryToReserves(t *testing.T) {
 }
 
 func TestApplyMIRCerts_PotTransferOverflow(t *testing.T) {
+	t.Parallel()
+
 	maxUint := ^uint64(0)
 
 	t.Run("reserves to treasury", func(t *testing.T) {
@@ -427,6 +524,8 @@ func TestApplyMIRCerts_PotTransferOverflow(t *testing.T) {
 // TestApplyMIRCerts_OutsideEpochRange verifies that a MIR cert submitted
 // before epochStartSlot or at/after boundarySlot is not applied.
 func TestApplyMIRCerts_OutsideEpochRange(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	cred := mirCred28(0x44)
@@ -437,7 +536,7 @@ func TestApplyMIRCerts_OutsideEpochRange(t *testing.T) {
 		mirPotReserves,
 		50,
 		[]models.MoveInstantaneousRewardsReward{
-			{Credential: cred, Amount: types.Uint64(500)},
+			{Credential: cred, Amount: new(big.Int).SetUint64(500)},
 		},
 	)
 	// addedSlot=1000 equals boundarySlot — excluded (half-open interval)
@@ -447,7 +546,7 @@ func TestApplyMIRCerts_OutsideEpochRange(t *testing.T) {
 		mirPotReserves,
 		1_000,
 		[]models.MoveInstantaneousRewardsReward{
-			{Credential: cred, Amount: types.Uint64(300)},
+			{Credential: cred, Amount: new(big.Int).SetUint64(300)},
 		},
 	)
 	require.NoError(t, db.CreateAccount(nil, &models.Account{
@@ -475,6 +574,8 @@ func TestApplyMIRCerts_OutsideEpochRange(t *testing.T) {
 // reversed by deleting AccountRewardDelta and NetworkState rows after slot,
 // and re-application produces the same outcome.
 func TestApplyMIRCerts_Rollback(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newMIRTestLedger(t)
 
 	const (
@@ -490,7 +591,7 @@ func TestApplyMIRCerts_Rollback(t *testing.T) {
 		mirPotReserves,
 		200,
 		[]models.MoveInstantaneousRewardsReward{
-			{Credential: cred, Amount: types.Uint64(mirAmount)},
+			{Credential: cred, Amount: new(big.Int).SetUint64(mirAmount)},
 		},
 	)
 	require.NoError(t, db.CreateAccount(nil, &models.Account{
@@ -537,6 +638,8 @@ func TestApplyMIRCerts_Rollback(t *testing.T) {
 // TestApplyMIRCerts_NoOp verifies that an epoch with no MIR certs leaves
 // state completely untouched.
 func TestApplyMIRCerts_NoOp(t *testing.T) {
+	t.Parallel()
+
 	ls, db, _ := newMIRTestLedger(t)
 
 	require.NoError(t, db.Metadata().SetNetworkState(2_000, 9_000, 50, nil))

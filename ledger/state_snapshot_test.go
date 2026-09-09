@@ -25,6 +25,8 @@ import (
 // TestLedgerStateSnapshotPublicationIsImmutable verifies that publishing a
 // replacement snapshot does not mutate snapshots retained by existing readers.
 func TestLedgerStateSnapshotPublicationIsImmutable(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		currentEpoch: models.Epoch{
 			EpochId: 7,
@@ -67,6 +69,8 @@ func TestLedgerStateSnapshotPublicationIsImmutable(t *testing.T) {
 // accidental append must allocate instead of extending storage shared with a
 // snapshot retained by a concurrent reader.
 func TestLedgerStatePublishedEpochCacheRejectsInPlaceAppend(t *testing.T) {
+	t.Parallel()
+
 	cache := make([]models.Epoch, 1, 2)
 	cache[0] = models.Epoch{EpochId: 7}
 	ls := &LedgerState{epochCache: cache}
@@ -84,6 +88,8 @@ func TestLedgerStatePublishedEpochCacheRejectsInPlaceAppend(t *testing.T) {
 // TestSetEpochCachePublishesPartialStateOnError verifies that startup cache
 // mutations are published even when validation returns an error afterward.
 func TestSetEpochCachePublishesPartialStateOnError(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	ls.publishSnapshotsLocked()
 	previousGeneration := ls.consensus.Load().generation
@@ -108,6 +114,8 @@ func TestSetEpochCachePublishesPartialStateOnError(t *testing.T) {
 // TestAdvanceEpochCachePreservesPublishedSnapshot exercises the production
 // writer and verifies that extending the cache cannot alter a retained view.
 func TestAdvanceEpochCachePreservesPublishedSnapshot(t *testing.T) {
+	t.Parallel()
+
 	// An empty nonce selects the deterministic initial-epoch path, allowing the
 	// production writer to run without seeding block-nonce database records.
 	initialEpoch := models.Epoch{
@@ -149,6 +157,8 @@ func TestAdvanceEpochCachePreservesPublishedSnapshot(t *testing.T) {
 // TestEpochRolloverPParamsClonePreservesPublishedSnapshot verifies that epoch
 // updates mutate a transaction-owned parameter value, not a retained snapshot.
 func TestEpochRolloverPParamsClonePreservesPublishedSnapshot(t *testing.T) {
+	t.Parallel()
+
 	rat := func() *cbor.Rat { return &cbor.Rat{Rat: big.NewRat(1, 2)} }
 	original := &shelley.ShelleyProtocolParameters{
 		MinFeeA:          44,
@@ -192,6 +202,8 @@ func TestEpochRolloverPParamsClonePreservesPublishedSnapshot(t *testing.T) {
 // parameter pointer in place. A previously published snapshot's pparams must
 // stay untouched; only cloneProtocolParametersForEra's copy may change.
 func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
+	t.Parallel()
+
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
 		"securityParam": 432,
@@ -311,6 +323,8 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 // TestLedgerStateTipGetterReturnsDefensiveHashCopy verifies that callers cannot
 // mutate the published tip hash through the value returned by Tip.
 func TestLedgerStateTipGetterReturnsDefensiveHashCopy(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{currentTip: ochainsync.Tip{
 		Point: ocommon.Point{Slot: 1, Hash: []byte{1, 2, 3}},
 	}}
@@ -330,6 +344,8 @@ func TestLedgerStateTipGetterReturnsDefensiveHashCopy(t *testing.T) {
 func TestLedgerStateSnapshotLoadersDoNotRaceWithWriters(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	ls.publishSnapshotsLocked()
 
@@ -399,6 +415,8 @@ func TestLedgerStateSnapshotLoadersDoNotRaceWithWriters(
 // combine consensus and tip fields never observe adjacent publications while a
 // writer is between the two atomic stores.
 func TestLedgerStatePairedSnapshotsUseOneGeneration(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	ls.publishSnapshotsLocked()
 

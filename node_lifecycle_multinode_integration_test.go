@@ -397,6 +397,8 @@ func requireInboundListenerAcceptsConnections(t *testing.T, ln net.Listener) {
 // storage in isolation (already proven by node_lifecycle_test.go), but do
 // so while a real peer connection is live and blocks keep arriving.
 func TestLiveTruncateUnderRealForgingAndNetworking(t *testing.T) {
+	t.Parallel()
+
 	_, syncer, syncerLn := startTwoNodeDevnet(t)
 	waitForTipSlotAtLeast(t, syncer, 10)
 
@@ -446,6 +448,8 @@ func TestLiveTruncateUnderRealForgingAndNetworking(t *testing.T) {
 // same snapshot back onto it mid-flight, and confirm it keeps syncing
 // from the still-forging peer afterward.
 func TestLiveRestoreUnderRealForgingAndNetworking(t *testing.T) {
+	t.Parallel()
+
 	_, syncer, syncerLn := startTwoNodeDevnet(t)
 	waitForTipSlotAtLeast(t, syncer, 10)
 

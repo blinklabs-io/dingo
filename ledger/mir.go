@@ -18,6 +18,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"math/big"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/ledger/governance"
@@ -120,17 +121,63 @@ func (ls *LedgerState) applyMIRCerts(
 			); err != nil {
 				return err
 			}
+			key := mirPendingKey{
+				pot:        effect.Pot,
+				tag:        reward.CredentialTag,
+				credential: string(reward.Credential),
+			}
+			total, ok := pending[key]
+			if !ok {
+				total = new(big.Int)
+				pending[key] = total
+				order = append(order, key)
+			}
+			total.Add(total, reward.Amount)
+		}
+	}
+	for _, key := range order {
+		net := pending[key]
+		if net.Sign() == 0 {
+			continue
+		}
+		if net.Sign() < 0 {
+			boundary.discard = fmt.Sprintf(
+				"MIR deltas for pot %d credential %x net to %s, "+
+					"which no reward account can carry",
+				key.pot,
+				key.credential,
+				net,
+			)
+			return boundary, nil
+		}
+		if !net.IsUint64() {
+			boundary.discard = fmt.Sprintf(
+				"MIR deltas for pot %d credential %x net to %s, which exceeds any Ada pot",
+				key.pot,
+				key.credential,
+				net,
+			)
+			return boundary, nil
+		}
+		boundary.addCredit(mirCredit{
+			pot:           key.pot,
+			credentialTag: key.tag,
+			credential:    []byte(key.credential),
+			amount:        net.Uint64(),
+		})
+		if boundary.discard != "" {
+			return boundary, nil
 		}
 	}
 	return nil
 }
 
-func mirRewardSourceHash(mirID uint) []byte {
+func mirRewardSourceHash(pot uint) []byte {
 	out := make([]byte, len(mirRewardSourcePrefix)+8)
 	copy(out, mirRewardSourcePrefix)
 	binary.BigEndian.PutUint64(
 		out[len(mirRewardSourcePrefix):],
-		uint64(mirID),
+		uint64(pot),
 	)
 	return out
 }

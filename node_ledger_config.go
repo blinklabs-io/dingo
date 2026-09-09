@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"context"
 	"time"
 
 	"github.com/blinklabs-io/dingo/ledger"
@@ -72,16 +73,25 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// BlockfetchRequestRangeFunc below.
 		EndorserBlockProvider: func(
 			ebHash []byte,
-		) (uint64, []cbor.RawMessage, bool) {
-			return n.ouroboros().EndorserBlockTxsByHash(ebHash)
+			ebSlot uint64,
+		) ([]cbor.RawMessage, bool) {
+			return n.ouroboros().EndorserBlockTxsByHash(ebHash, ebSlot)
 		},
 		// Actively fetches a referenced endorser block by point and caches
 		// it. Used during historical catch-up: the prototype relay serves
 		// any endorser block by point on demand, so a from-scratch sync can
 		// backfill older ranking blocks' endorser-resident outputs and build
 		// a complete UTxO set instead of trusting the chain.
-		EndorserBlockFetcher: func(ebSlot uint64, ebHash []byte) error {
-			return n.ouroboros().FetchEndorserBlockByPoint(ebSlot, ebHash)
+		EndorserBlockFetcher: func(
+			ctx context.Context,
+			ebSlot uint64,
+			ebHash []byte,
+		) error {
+			return n.ouroboros().FetchEndorserBlockByPoint(
+				ctx,
+				ebSlot,
+				ebHash,
+			)
 		},
 		// Wait, at the tip, for a ranking block's referenced endorser block
 		// to arrive before applying it. Sourced from the pipeline timing
@@ -100,14 +110,13 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// dingo's forward path applies the current announcement normally
 		// (CIP-conformant).
 		LeiosApplyEndorserBlockTxs: !n.config.isMusashiNetwork(),
-		// dingo's leadership stake omits reward-account balances (staking
-		// rewards are not yet computed), which spuriously rejects the
-		// dominant pool's eligible blocks on Musashi's concentrated
-		// topology and wedges the chain. Trust rather than reject there
-		// until reward calculation lands; enforce on real networks where
-		// the omission is negligible. TPraos bootstrap pool-threshold
-		// checks are waived separately inside header validation after
-		// genesis overlay slots are handled.
+		// The leadership stake includes reward-account balances; see
+		// LedgerStateConfig.SkipLeaderStakeThresholdCheck. The check
+		// rejected the dominant pool's eligible blocks on Musashi's
+		// concentrated topology and wedged the chain, so it is downgraded
+		// to a warning there and enforced on real networks. TPraos
+		// bootstrap pool-threshold checks are waived separately inside
+		// header validation after genesis overlay slots are handled.
 		SkipLeaderStakeThresholdCheck: n.config.prototypeTrustBypassesEnabled(),
 		// On Musashi, certified endorser txs and Dijkstra ranking-block txs are
 		// trusted by the prototype; skip dingo's per-tx validation to match it
@@ -248,7 +257,7 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 				"fatal ledger error, initiating shutdown",
 				"error", err,
 			)
-			n.cancel()
+			n.cancelForFatal(err)
 		},
 	}
 }

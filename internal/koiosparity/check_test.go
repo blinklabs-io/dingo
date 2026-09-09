@@ -25,6 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -77,6 +78,8 @@ func seedFreshStatus(
 // produced an empty CheckResult — silently dropping the persisted failure
 // because nothing was freshly (re)checked this run.
 func TestCheckSurfacesPersistedFailWhenNothingNeedsRechecking(t *testing.T) {
+	t.Parallel()
+
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
 	cache, err := OpenCache(cachePath, nil)
 	require.NoError(t, err)
@@ -111,6 +114,8 @@ func TestCheckSurfacesPersistedFailWhenNothingNeedsRechecking(t *testing.T) {
 // TestCheckSurfacesPersistedErrorWhenNothingNeedsRechecking is the ERROR-status
 // counterpart to TestCheckSurfacesPersistedFailWhenNothingNeedsRechecking.
 func TestCheckSurfacesPersistedErrorWhenNothingNeedsRechecking(t *testing.T) {
+	t.Parallel()
+
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
 	cache, err := OpenCache(cachePath, nil)
 	require.NoError(t, err)
@@ -154,6 +159,8 @@ func TestCheckSurfacesPersistedErrorWhenNothingNeedsRechecking(t *testing.T) {
 // PASS would be reported forever with zero account-level validation ever
 // attempted.
 func TestCheckReselectsPoolOnlyEpochMissingAccountCoverage(t *testing.T) {
+	t.Parallel()
+
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
 	cache, err := OpenCache(cachePath, nil)
 	require.NoError(t, err)
@@ -268,6 +275,8 @@ func TestCheckReselectsPoolOnlyEpochMissingAccountCoverage(t *testing.T) {
 // same effective-status computation Check performs must respect the caller's
 // requested scope, not just the whole network's cache.
 func TestCheckScopesPersistedOutcomeToFromThroughEpoch(t *testing.T) {
+	t.Parallel()
+
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
 	cache, err := OpenCache(cachePath, nil)
 	require.NoError(t, err)
@@ -313,6 +322,8 @@ func TestCheckScopesPersistedOutcomeToFromThroughEpoch(t *testing.T) {
 // EpochsChecked stays 0 — as opposed to some other "nothing to do" reason
 // that would also need distinguishing.
 func TestCheckAllReturnsZeroEpochsCheckedForUnfetchedEpoch(t *testing.T) {
+	t.Parallel()
+
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
 	cache, err := OpenCache(cachePath, nil)
 	require.NoError(t, err)
@@ -369,6 +380,8 @@ func newTestDingoDB(t *testing.T) (dataDir string, gdb *testDB) {
 // data exactly, so a fully correct field-level epoch mapping is the only way
 // Check reports PASS.
 func TestCheckAlignsRewardScheduleEpochsEndToEnd(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(10)
 	poolHash := testPoolKeyHash(t, 0x03)
@@ -426,6 +439,8 @@ func TestCheckAlignsRewardScheduleEpochsEndToEnd(t *testing.T) {
 		Fees:     types.Uint64(300),
 	}).Error)
 
+	seedDingoBabbageProtocolParams(t, gdb, koiosEpoch)
+
 	sqlDB, err := gdb.DB()
 	require.NoError(t, err)
 	require.NoError(t, sqlDB.Close())
@@ -465,6 +480,7 @@ func TestCheckAlignsRewardScheduleEpochsEndToEnd(t *testing.T) {
 			FetchedAt: fetchedAt,
 		},
 	))
+	seedKoiosBabbageProtocolParams(t, cache, network, koiosEpoch)
 
 	result, err := Check(context.Background(), CheckConfig{
 		Network:   network,
@@ -494,6 +510,8 @@ func TestCheckAlignsRewardScheduleEpochsEndToEnd(t *testing.T) {
 // a clean PASS despite treasury/reserves/fees never actually being validated.
 // This confirms Check now surfaces it as ERROR instead.
 func TestCheckDetectsMissingKoiosTotalsOnUpgradedCache(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(10)
 
@@ -526,6 +544,12 @@ func TestCheckDetectsMissingKoiosTotalsOnUpgradedCache(t *testing.T) {
 		Fees:     types.Uint64(300),
 	}).Error)
 
+	// Protocol parameters are seeded on both sides so the ONE mismatch this
+	// test asserts on stays the missing /totals row. The equivalent
+	// upgraded-cache case for /epoch_params has its own test:
+	// TestCheckDetectsMissingKoiosEpochParamsOnUpgradedCache.
+	seedDingoBabbageProtocolParams(t, gdb, koiosEpoch)
+
 	sqlDB, err := gdb.DB()
 	require.NoError(t, err)
 	require.NoError(t, sqlDB.Close())
@@ -549,6 +573,7 @@ func TestCheckDetectsMissingKoiosTotalsOnUpgradedCache(t *testing.T) {
 		nil,
 		nil,
 	))
+	seedKoiosBabbageProtocolParams(t, cache, network, koiosEpoch)
 
 	result, err := Check(context.Background(), CheckConfig{
 		Network:   network,
@@ -679,6 +704,8 @@ func TestCheckEpochPreservesPriorMismatchEvidenceOnLaterReadFailure(t *testing.T
 // compareEpochAccounts must consult before treating koios_account_rewards as
 // a complete reference set.
 func TestCheckAccountsCoverageIncompleteIsError(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(10)
 
@@ -747,6 +774,8 @@ func TestCheckAccountsCoverageIncompleteIsError(t *testing.T) {
 func TestCheckAccountsCoverageDBErrorIsNotConflatedWithIncompleteCoverage(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(10)
 
@@ -822,6 +851,8 @@ func TestCheckAccountsCoverageDBErrorIsNotConflatedWithIncompleteCoverage(
 // coverage gate, StakeAddressFromCredential resolution, and
 // CompareAccountEpoch.
 func TestCheckAccountsEndToEndExactMatchAndMismatch(t *testing.T) {
+	t.Parallel()
+
 	const network = "preview"
 	const koiosEpoch = uint64(10)
 	const stakeEpoch = uint64(9) // K-1, per koiosStakeEpoch
@@ -926,6 +957,8 @@ func TestCheckAccountsEndToEndExactMatchAndMismatch(t *testing.T) {
 }
 
 func TestEffectiveCheckOutcome(t *testing.T) {
+	t.Parallel()
+
 	statuses := []CheckEpochStatus{
 		{Epoch: 1, Status: StatusPass},
 		{Epoch: 2, Status: StatusFail},

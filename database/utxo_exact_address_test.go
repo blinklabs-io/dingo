@@ -125,6 +125,8 @@ INSERT INTO address_transaction (
 }
 
 func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 	raw := rawSQLiteMetadataFixture(t, db)
 
@@ -186,7 +188,11 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 		{name: "pointer two", addr: pointerTwo, want: [][]byte{seeded[2].TxId}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := db.UtxosByAddress([]lcommon.Address{tc.addr}, nil)
+			got, err := db.UtxosByAddress(
+				[]lcommon.Address{tc.addr},
+				MaxUtxosByAddressResults,
+				nil,
+			)
 			require.NoError(t, err)
 			gotIDs := make([][]byte, len(got))
 			for i := range got {
@@ -199,6 +205,7 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 	t.Run("multiple addresses", func(t *testing.T) {
 		got, err := db.UtxosByAddress(
 			[]lcommon.Address{enterprise, base},
+			MaxUtxosByAddressResults,
 			nil,
 		)
 		require.NoError(t, err)
@@ -317,6 +324,8 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 // asset loading (assets are now loaded once on the deduplicated result set
 // instead of once per chunk -- see GetUtxosByAddress).
 func TestUtxosByAddressLoadsAssets(t *testing.T) {
+	t.Parallel()
+
 	db := openTestDB(t)
 
 	payment := bytes.Repeat([]byte{0x55}, lcommon.AddressHashSize)
@@ -355,7 +364,11 @@ func TestUtxosByAddressLoadsAssets(t *testing.T) {
 		return db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded)
 	}))
 
-	got, err := db.UtxosByAddress([]lcommon.Address{addr}, nil)
+	got, err := db.UtxosByAddress(
+		[]lcommon.Address{addr},
+		MaxUtxosByAddressResults,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	require.Len(t, got[0].Assets, 1)
@@ -435,7 +448,11 @@ INSERT INTO utxo (
 		return nil
 	}))
 
-	got, err := db.UtxosByAddress(addrs, nil)
+	got, err := db.UtxosByAddress(
+		addrs,
+		MaxUtxosByAddressResults,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Len(t, got, numAddrs)
 
@@ -454,6 +471,8 @@ INSERT INTO utxo (
 // and a larger count fails on the 999 bound-parameter limit instead. Every
 // address's UTxO must still come back exactly once from the chunked query.
 func TestUtxosByAddressExceedsSQLiteParameterLimit(t *testing.T) {
+	t.Parallel()
+
 	seedManyUtxoAddressesAndAssertRoundTrip(
 		t, 2000, func(i int) lcommon.Address {
 			payment := make([]byte, lcommon.AddressHashSize)
@@ -485,6 +504,8 @@ func TestUtxosByAddressExceedsSQLiteParameterLimit(t *testing.T) {
 // every chunk, which must be deduplicated before its CBOR is exactly matched
 // against the requested addresses.
 func TestUtxosByAddressManyZeroArgBranches(t *testing.T) {
+	t.Parallel()
+
 	const patternCount = 1_000
 
 	db := openTestDB(t)
@@ -513,7 +534,11 @@ func TestUtxosByAddressManyZeroArgBranches(t *testing.T) {
 	}
 
 	want := seedExactAddressUtxo(t, db, raw, addrs[0], 1, 0x42)
-	got, err := db.UtxosByAddress(addrs, nil)
+	got, err := db.UtxosByAddress(
+		addrs,
+		MaxUtxosByAddressResults,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, want.TxId, got[0].TxId)

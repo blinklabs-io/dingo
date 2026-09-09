@@ -210,6 +210,8 @@ func writeTestClientCert(
 // regardless -- proving the serving goroutine never touches the files
 // again after the preflight load inside Start.
 func TestTLSServerReusesPreloadedCertAfterFilesChange(t *testing.T) {
+	t.Parallel()
+
 	certPath, keyPath := writeTestTLSCertKey(t)
 
 	db := newTestDB(t)
@@ -267,6 +269,8 @@ func TestTLSServerReusesPreloadedCertAfterFilesChange(t *testing.T) {
 // Addr() would keep reporting a real-looking address for a server that
 // wasn't actually running.
 func TestHandleServeExitClearsStateOnError(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	b := newTestBark(t, db)
 
@@ -313,6 +317,8 @@ func TestHandleServeExitClearsStateOnError(t *testing.T) {
 // that another Bark instance's startServer call may have since installed
 // in b.server/b.listenerAddr.
 func TestHandleServeExitIgnoresServerClosed(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	b := newTestBark(t, db)
 

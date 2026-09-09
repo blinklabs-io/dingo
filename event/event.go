@@ -145,6 +145,11 @@ type EventBus struct {
 	stopSeq         uint64
 	stopMu          sync.RWMutex
 	stopOpMu        sync.Mutex // Serializes Stop() calls to prevent duplicate worker pools
+
+	// handlerProgressInterval is this bus's snapshot of
+	// handlerProgressWarnInterval, taken once at construction. See
+	// handler_progress.go.
+	handlerProgressInterval time.Duration
 }
 
 // NewEventBus creates a new EventBus with async worker pool
@@ -161,6 +166,8 @@ func NewEventBus(
 		Logger:              logger,
 		asyncQueue:          make(chan asyncEvent, AsyncQueueSize),
 		stopCh:              make(chan struct{}),
+
+		handlerProgressInterval: handlerProgressWarnInterval,
 	}
 	if promRegistry != nil {
 		e.initMetrics(promRegistry)
@@ -170,6 +177,8 @@ func NewEventBus(
 		e.asyncWg.Add(1)
 		go e.asyncWorker()
 	}
+	e.asyncWg.Add(1)
+	go e.handlerProgressWatchdog(e.stopCh)
 	return e
 }
 
@@ -276,6 +285,25 @@ type channelSubscriber struct {
 	// of with time. See TestDeliverStallWarningIsRateLimitedPerSubscriber.
 	stallNextWarn   time.Time
 	stallSuppressed int
+
+	// handlerStartedAt is the unix-nano time the dispatch goroutine entered
+	// its handler, or 0 when no handler is running. It is written only by
+	// that dispatch goroutine.
+	//
+	// handlerWarnedAt and handlerWarnedFor are handlerProgressWatchdog's
+	// rate limiter: when it last reported this subscription, and the
+	// handlerStartedAt value that report was about. They are written only by
+	// the watchdog, of which a bus runs exactly one at a time. Keying the
+	// stamp to the invocation, rather than clearing it on each new one, is
+	// what stops a report that raced the handler's return from landing on
+	// the next invocation and suppressing its own first report.
+	//
+	// All three stay zero for subscribers with no dispatch goroutine
+	// (Subscribe/SubscribeWithBuffer), whose read loop the bus does not own
+	// and therefore cannot observe. See handler_progress.go.
+	handlerStartedAt atomic.Int64
+	handlerWarnedAt  atomic.Int64
+	handlerWarnedFor atomic.Int64
 }
 
 // warnStalled reports a subscriber that is not draining, at most once per
@@ -585,6 +613,7 @@ func (e *EventBus) SubscribeFuncWithBuffer(
 	subId, chSub := e.subscribeInternal(eventType, buffer, true)
 	e.subscriberWg.Add(1)
 	e.stopMu.RUnlock()
+	e.observeHandlerProgress(eventType)
 
 	go func(evtCh <-chan Event, handlerFunc EventHandlerFunc, done chan struct{}) {
 		defer close(done)
@@ -821,7 +850,17 @@ func (e *EventBus) deliverWithTimeout(
 	}
 }
 
-// Publish allows a producer to send an event of a particular type to all subscribers
+// Publish allows a producer to send an event of a particular type to all
+// subscribers.
+//
+// Delivery is inline: Publish hands the event to every subscriber on the
+// caller's goroutine, returning once each has taken it or been unsubscribed
+// for failing to. A stopped or closed bus delivers nothing.
+//
+// PublishOrdered and PublishAsync are the opposite: they return once the event
+// is queued and deliver it from another goroutine afterwards. A caller that
+// reads a subscriber channel expecting the event to already be there can rely
+// on that only with the inline paths, Publish and PublishBlocking.
 func (e *EventBus) Publish(eventType EventType, evt Event) {
 	e.stopMu.RLock()
 	if e.stopped || e.closed {
@@ -1172,6 +1211,7 @@ func (e *EventBus) shutdown(restart bool) {
 	}
 	e.asyncQueue = make(chan asyncEvent, AsyncQueueSize)
 	e.stopCh = make(chan struct{})
+	restartStopCh := e.stopCh
 	e.stopped = false
 	e.stopMu.Unlock()
 
@@ -1180,6 +1220,8 @@ func (e *EventBus) shutdown(restart bool) {
 		e.asyncWg.Add(1)
 		go e.asyncWorker()
 	}
+	e.asyncWg.Add(1)
+	go e.handlerProgressWatchdog(restartStopCh)
 }
 
 func (e *EventBus) refreshSubscriberSnapshotLocked(eventType EventType) {

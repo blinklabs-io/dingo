@@ -78,10 +78,12 @@ func (p *pausingLedgerReadIterator) Next(
 // reader actually holds it there (not just after Submit): while the
 // scripted iterator's second Next call is deliberately paused -- i.e. one
 // raw block already gathered, mid-way through gathering the next -- a
-// concurrent TryLock for the write side (the lock rollbackChainAndState
+// concurrent TryLock for the write side (the lock rollbackChainAndStateDeferred
 // takes) must fail. Once the reader delivers its batch and the mutex is no
 // longer needed, TryLock must succeed.
 func TestLedgerReadChainIteratorHoldsGatherMutexAcrossGather(t *testing.T) {
+	t.Parallel()
+
 	block1, point1 := buildDecodableTestBlock(t, 10, 1)
 	block2, point2 := buildDecodableTestBlock(t, 20, 2)
 
@@ -117,7 +119,7 @@ func TestLedgerReadChainIteratorHoldsGatherMutexAcrossGather(t *testing.T) {
 	)
 
 	// The reader is mid-gather with one raw block already collected. The
-	// write-side lock rollbackChainAndState takes must not be obtainable
+	// write-side lock rollbackChainAndStateDeferred takes must not be obtainable
 	// right now.
 	require.False(
 		t,

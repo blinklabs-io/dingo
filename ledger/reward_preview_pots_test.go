@@ -142,6 +142,8 @@ func newPreviewRewardPotsTestLedger(
 // distribution. Skipping that round leaves the treasury at 0 and the reserves
 // at their genesis value, which is what dingo #3381 observed on Preview.
 func TestApplyStakeRewardsPreviewEpoch1Pots(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newPreviewRewardPotsTestLedger(t)
 	meta := db.Metadata()
 
@@ -171,6 +173,8 @@ func TestApplyStakeRewardsPreviewEpoch1Pots(t *testing.T) {
 // boundary must produce, so it isolates the epoch-2 arithmetic from the
 // epoch-1 seeding defect.
 func TestApplyStakeRewardsPreviewEpoch2Pots(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newPreviewRewardPotsTestLedger(t)
 	meta := db.Metadata()
 
@@ -206,6 +210,8 @@ func TestApplyStakeRewardsPreviewEpoch2Pots(t *testing.T) {
 // This is the unit-level counterpart of dingo #3381's reproduction: the
 // epoch-2 treasury and reserves must equal the Koios Preview reference values.
 func TestApplyStakeRewardsPreviewGenesisToEpoch2(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newPreviewRewardPotsTestLedger(t)
 	meta := db.Metadata()
 

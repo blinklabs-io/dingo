@@ -26,6 +26,8 @@ import (
 )
 
 func TestDefaultAccountChunkPlanFitsKoiosPublicRequestLimit(t *testing.T) {
+	t.Parallel()
+
 	const koiosPublicRequestLimit = 5 * 1024
 
 	addrs := make([]string, koiosAccountChunkSize)
@@ -56,6 +58,8 @@ func TestDefaultAccountChunkPlanFitsKoiosPublicRequestLimit(t *testing.T) {
 // TestChunkAddressesByCountAndSizeEmptyInput proves an empty or nil address
 // list produces no chunks at all, rather than one spurious empty chunk.
 func TestChunkAddressesByCountAndSizeEmptyInput(t *testing.T) {
+	t.Parallel()
+
 	require.Nil(t, chunkAddressesByCountAndSize(nil, 100, 1000))
 	require.Nil(t, chunkAddressesByCountAndSize([]string{}, 100, 1000))
 }
@@ -64,6 +68,8 @@ func TestChunkAddressesByCountAndSizeEmptyInput(t *testing.T) {
 // bound splits evenly-sized groups with a smaller leftover final chunk,
 // with no byte bound in play.
 func TestChunkAddressesByCountAndSizeCountBoundary(t *testing.T) {
+	t.Parallel()
+
 	addrs := make([]string, 25)
 	for i := range addrs {
 		addrs[i] = strings.Repeat("a", 5)
@@ -86,6 +92,8 @@ func TestChunkAddressesByCountAndSizeCountBoundary(t *testing.T) {
 // unlimited, matching dingo #3099's "shape requests by encoded size too"
 // requirement.
 func TestChunkAddressesByCountAndSizeByteBoundary(t *testing.T) {
+	t.Parallel()
+
 	// Each address encodes as `"aaaaaaaaaa"` — 10 chars + 3 overhead bytes =
 	// 13 bytes. maxBytes=40 fits 3 addresses per chunk (39 bytes), not 4
 	// (52 bytes) — count (1_000_000) is never the limiting factor here.
@@ -120,6 +128,8 @@ func TestChunkAddressesByCountAndSizeByteBoundary(t *testing.T) {
 func TestChunkAddressesByCountAndSizeSingleOversizedAddressNotDropped(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	huge := strings.Repeat("x", 500)
 	addrs := []string{huge, "short1", "short2"}
 	chunks := chunkAddressesByCountAndSize(addrs, 100, 40)
@@ -141,6 +151,8 @@ func TestChunkAddressesByCountAndSizeSingleOversizedAddressNotDropped(
 // falls back to koiosAccountChunkSize rather than producing one giant chunk
 // or erroring.
 func TestChunkAddressesByCountAndSizeZeroMaxCountUsesDefault(t *testing.T) {
+	t.Parallel()
+
 	addrs := make([]string, koiosAccountChunkSize+1)
 	for i := range addrs {
 		addrs[i] = "addr"
@@ -166,6 +178,8 @@ func TestChunkAddressesByCountAndSizeZeroMaxCountUsesDefault(t *testing.T) {
 func TestChunkAddressesByCountAndSizeDeterministicAcrossRepeatedCalls(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	addrs := make([]string, 237)
 	for i := range addrs {
 		addrs[i] = strings.Repeat("z", (i%7)+1) + fmt.Sprintf("%03d", i)
@@ -210,6 +224,8 @@ func TestChunkAddressesByCountAndSizeDeterministicAcrossRepeatedCalls(
 // addresses large enough that a byte bound would otherwise split them
 // further.
 func TestChunkAddressesByCountAndSizeNoByteBoundIsCountOnly(t *testing.T) {
+	t.Parallel()
+
 	addrs := make([]string, 15)
 	for i := range addrs {
 		addrs[i] = strings.Repeat("a", 1000)

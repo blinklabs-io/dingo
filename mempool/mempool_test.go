@@ -15,6 +15,7 @@
 package mempool
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -301,6 +302,29 @@ func getTestTxBytes(t *testing.T) []byte {
 	txBytes, err := hex.DecodeString(testTxHex)
 	require.NoError(t, err, "failed to decode test tx hex")
 	return txBytes
+}
+
+func TestUtxoOverlayUsesConsensusConsumedInputsForInvalidTx(t *testing.T) {
+	tx, err := gledger.NewTransactionFromCbor(
+		uint(conway.EraIdConway),
+		getTestTxBytes(t),
+	)
+	require.NoError(t, err)
+	require.False(t, tx.IsValid())
+	require.NotEmpty(t, tx.Inputs())
+	require.NotEmpty(t, tx.Collateral())
+	overlay := newUtxoOverlay()
+	overlay.applyTx(tx.Hash().String(), uint(conway.EraIdConway), tx.Cbor(), tx)
+	for _, input := range tx.Inputs() {
+		key := fmt.Sprintf("%s:%d", input.Id().String(), input.Index())
+		assert.NotContains(t, overlay.consumed, key,
+			"invalid transaction regular inputs must remain available")
+	}
+	for _, input := range tx.Collateral() {
+		key := fmt.Sprintf("%s:%d", input.Id().String(), input.Index())
+		assert.Contains(t, overlay.consumed, key,
+			"invalid transaction collateral must be consumed")
+	}
 }
 
 // =============================================================================
@@ -1253,9 +1277,19 @@ func TestMempoolConsumer_CacheIsBounded(t *testing.T) {
 	assert.NotNil(t, consumer.GetTxFromCache(txs[0].Hash))
 	assert.NotNil(t, consumer.GetTxFromCache(txs[1].Hash))
 
-	// Serving (or the peer acknowledging) frees a slot and the window reopens,
-	// so the third tx is advertised rather than lost.
+	// Serving frees the body's bytes but not its offered slot: the id stays
+	// outstanding until the peer acknowledges it, so the window stays closed
+	// and the third tx is still declined.
 	consumer.RemoveTxFromCache(txs[0].Hash)
+	assert.Nil(
+		t,
+		consumer.NextTx(false),
+		"serving a body must not reopen the window on its own",
+	)
+
+	// Acknowledging the served tx frees its offered slot and the window
+	// reopens, so the third tx is advertised rather than lost.
+	consumer.AcknowledgeOffered(1)
 	third := consumer.NextTx(false)
 	require.NotNil(t, third)
 	assert.Equal(t, txs[2].Hash, third.Hash)
@@ -1323,6 +1357,7 @@ func TestMempoolConsumer_NilReceiver(t *testing.T) {
 	// These should not panic
 	consumer.ClearCache()
 	consumer.RemoveTxFromCache("any")
+	consumer.AcknowledgeOffered(1)
 }
 
 func TestMempool_ConsumerAfterStop(t *testing.T) {
@@ -3230,6 +3265,31 @@ func TestMempool_RemovalsContinueDuringRevalidation(t *testing.T) {
 	}
 }
 
+func TestMempool_ConfirmedTransactionLogVisibleAtInfoLevel(t *testing.T) {
+	var buf bytes.Buffer
+	m, err := NewMempool(MempoolConfig{
+		Logger: slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{
+			Level: slog.LevelInfo,
+		})),
+		EventBus:        event.NewEventBus(nil, nil),
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       newMockValidator(),
+		MempoolCapacity: 1024 * 1024,
+	})
+	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
+	defer m.Stop(context.Background())
+
+	require.NoError(
+		t,
+		m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t)),
+	)
+	hash := m.Transactions()[0].Hash
+	m.RemoveTxsByHash([]string{hash})
+
+	assert.Contains(t, buf.String(), "confirmed transaction")
+}
+
 func TestMempool_EvictionIsReconciledDuringRevalidation(t *testing.T) {
 	validator := newBlockingSessionValidator()
 	firstTx := getTestTxBytes(t)
@@ -3955,10 +4015,19 @@ func TestMempoolConsumer_BlockingNextTxWaitsForCacheSlot(t *testing.T) {
 		"blocking NextTx must not answer while the cache is full",
 	)
 
-	// Serving the cached body frees the slot and releases the waiter.
+	// Serving the cached body frees its bytes but not its offered slot, so
+	// the waiter must stay parked: the id is still outstanding until acked.
 	consumer.RemoveTxFromCache(txs[0].Hash)
+	dingotestutil.RequireNoReceive(
+		t, got, 100*time.Millisecond,
+		"serving a body must not release a waiter on its own",
+	)
+
+	// Acknowledging the served tx frees its offered slot and releases the
+	// waiter.
+	consumer.AcknowledgeOffered(1)
 	second := dingotestutil.RequireReceive(
-		t, got, 2*time.Second, "blocking NextTx after a slot freed",
+		t, got, 2*time.Second, "blocking NextTx after an ack freed a slot",
 	)
 	require.NotNil(t, second)
 	assert.Equal(t, txs[1].Hash, second.Hash)

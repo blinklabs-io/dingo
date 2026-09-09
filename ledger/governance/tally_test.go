@@ -30,6 +30,8 @@ import (
 )
 
 func TestTallyDRepVotesIncludesAlwaysAbstain(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	drepCred := testBytes(28, 1)
 	stakeCred := testBytes(28, 2)
@@ -70,6 +72,8 @@ func TestTallyDRepVotesIncludesAlwaysAbstain(t *testing.T) {
 }
 
 func TestTallyDRepVotesIncludesAlwaysNoConfidence(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	stakeCred := testBytes(28, 4)
 	seedDRepStake(
@@ -122,6 +126,8 @@ func TestTallyDRepVotesIncludesAlwaysNoConfidence(t *testing.T) {
 }
 
 func TestTallyDRepVotesSeparatesSameHashByCredentialTag(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	drepCred := testBytes(28, 9)
 	keyStakeCred := testBytes(28, 10)
@@ -179,6 +185,8 @@ func TestTallyDRepVotesSeparatesSameHashByCredentialTag(t *testing.T) {
 // boundary: maxUint64-1 plus 1 is the largest sum that fits, plus 2
 // overflows.
 func TestAddUint64Overflow(t *testing.T) {
+	t.Parallel()
+
 	maxUint64 := ^uint64(0)
 
 	sum, err := addUint64(maxUint64-1, 1)
@@ -194,6 +202,8 @@ func TestAddUint64Overflow(t *testing.T) {
 // accumulation in tallyDRepVotes to the exact uint64 max boundary via two
 // synthetic DReps, bypassing the database entirely.
 func TestTallyDRepVotesTotalStakeOverflow(t *testing.T) {
+	t.Parallel()
+
 	maxUint64 := ^uint64(0)
 	credA := models.StakeCredentialRef{Key: testBytes(28, 1)}
 	credB := models.StakeCredentialRef{Key: testBytes(28, 2)}
@@ -230,6 +240,8 @@ func TestTallyDRepVotesTotalStakeOverflow(t *testing.T) {
 // AlwaysNoConfidence combination in tallyDRepVotes to the exact uint64 max
 // boundary.
 func TestTallyDRepVotesVirtualPowerOverflow(t *testing.T) {
+	t.Parallel()
+
 	maxUint64 := ^uint64(0)
 
 	newState := func(noConfidence uint64) *DRepVotingState {
@@ -258,6 +270,8 @@ func TestTallyDRepVotesVirtualPowerOverflow(t *testing.T) {
 // accumulation in tallySPOVotes to the exact uint64 max boundary via two
 // synthetic pool snapshot rows, bypassing the database entirely.
 func TestTallySPOVotesYesStakeOverflow(t *testing.T) {
+	t.Parallel()
+
 	maxUint64 := ^uint64(0)
 	poolA := testBytes(28, 1)
 	poolB := testBytes(28, 2)
@@ -294,6 +308,8 @@ func TestTallySPOVotesYesStakeOverflow(t *testing.T) {
 // SPONoStake and SPOAbstainStake accumulations in tallySPOVotes to the exact
 // uint64 max boundary via two synthetic pool snapshot rows.
 func TestTallySPOVotesExplicitNoAndAbstainStakeOverflow(t *testing.T) {
+	t.Parallel()
+
 	maxUint64 := ^uint64(0)
 	poolA := testBytes(28, 1)
 	poolB := testBytes(28, 2)
@@ -350,6 +366,8 @@ func TestTallySPOVotesExplicitNoAndAbstainStakeOverflow(t *testing.T) {
 // SPOAbstainStake and SPONoStake accumulations in tallySPOVotes to the exact
 // uint64 max boundary, via resolved snapshot rows carrying no explicit vote.
 func TestTallySPOVotesAutoVoteOverflow(t *testing.T) {
+	t.Parallel()
+
 	maxUint64 := ^uint64(0)
 	poolA := testBytes(28, 1)
 	poolB := testBytes(28, 2)
@@ -446,6 +464,8 @@ func TestTallySPOVotesAutoVoteOverflow(t *testing.T) {
 // total-stake accumulation to the exact uint64 max boundary via two real
 // "mark" snapshot rows persisted through the database.
 func TestLoadSPOVotingStateTotalStakeOverflow(t *testing.T) {
+	t.Parallel()
+
 	maxUint64 := ^uint64(0)
 
 	newDB := func(stakeB uint64) *database.Database {
@@ -473,6 +493,8 @@ func TestLoadSPOVotingStateTotalStakeOverflow(t *testing.T) {
 }
 
 func TestTallyProposalRequiresSeatedAuthorizedCommitteeMembers(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	coldA := testBytes(28, 10)
 	hotA := testBytes(28, 11)
@@ -534,6 +556,8 @@ func TestTallyProposalRequiresSeatedAuthorizedCommitteeMembers(t *testing.T) {
 func TestLoadCommitteeVotingStateExcludesSeatedMembersWithoutHotAuth(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	coldA := testBytes(28, 21)
 	hotA := testBytes(28, 22)
@@ -573,6 +597,8 @@ func TestLoadCommitteeVotingStateExcludesSeatedMembersWithoutHotAuth(
 // cannot vote, so including them in the denominator per CIP-1694 would
 // make them act as implicit No votes.
 func TestLoadCommitteeVotingStateExcludesResignedMembers(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	activeCold := testBytes(28, 30)
 	activeHot := testBytes(28, 31)
@@ -613,6 +639,8 @@ func TestLoadCommitteeVotingStateExcludesResignedMembers(t *testing.T) {
 // resigned member is not counted in CCTotalCount when tallying votes,
 // so the yes-ratio uses only active members as the denominator.
 func TestTallyCCVotesExcludesResignedFromDenominator(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	yesCold := testBytes(28, 40)
 	yesHot := testBytes(28, 41)
@@ -659,6 +687,8 @@ func TestTallyCCVotesExcludesResignedFromDenominator(t *testing.T) {
 }
 
 func TestTallyCCVotesExcludesExpiredCommitteeMembers(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	cold := testBytes(28, 15)
 	hot := testBytes(28, 16)
@@ -690,6 +720,8 @@ func TestTallyCCVotesExcludesExpiredCommitteeMembers(t *testing.T) {
 }
 
 func TestTallyProposalCommitteeTermEpochIsInclusive(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		name         string
 		currentEpoch uint64
@@ -765,6 +797,8 @@ func TestTallyProposalCommitteeTermEpochIsInclusive(t *testing.T) {
 // any vote must contribute to CCTotalCount but to none of the
 // Yes/No/Abstain bucket counts.
 func TestTallyCCVotesNonVotingMembersAreNotCountedAsNo(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	voterCold := testBytes(28, 17)
 	voterHot := testBytes(28, 18)
@@ -999,6 +1033,8 @@ WHERE id = ?`,
 // machinery even when their reward account is delegated to
 // AlwaysNoConfidence.
 func TestTallySPOVotesExplicitVoteWins(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	poolKeyHash := testBytes(28, 50)
 	rewardAccount := testBytes(28, 51)
@@ -1034,6 +1070,8 @@ func TestTallySPOVotesExplicitVoteWins(t *testing.T) {
 // its stake bucketed as abstain (and thus excluded from the SPO yes
 // ratio denominator).
 func TestTallySPOVotesAlwaysAbstainDelegation(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	poolKeyHash := testBytes(28, 60)
 	rewardAccount := testBytes(28, 61)
@@ -1063,6 +1101,8 @@ func TestTallySPOVotesAlwaysAbstainDelegation(t *testing.T) {
 }
 
 func TestResolvePoolRewardAccountAutoVotesIsCredentialTagAware(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	poolKeyHash := testBytes(28, 62)
 	rewardAccount := testBytes(28, 63)
@@ -1119,6 +1159,8 @@ func TestResolvePoolRewardAccountAutoVotesIsCredentialTagAware(t *testing.T) {
 // NoConfidence actions and an auto-No on non-NoConfidence actions,
 // mirroring the AlwaysNoConfidence DRep handling.
 func TestTallySPOVotesAlwaysNoConfidenceFlipsByActionType(t *testing.T) {
+	t.Parallel()
+
 	noConfidencePoolKey := testBytes(28, 70)
 	noConfidenceRewardAcct := testBytes(28, 71)
 
@@ -1177,6 +1219,8 @@ func TestTallySPOVotesAlwaysNoConfidenceFlipsByActionType(t *testing.T) {
 // NOT auto-vote: their stake stays in SPOTotalStake (implicit no) and
 // is not added to any bucket.
 func TestTallySPOVotesOrdinaryDRepNoAutoVote(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	poolKeyHash := testBytes(28, 80)
 	rewardAccount := testBytes(28, 81)
@@ -1209,6 +1253,8 @@ func TestTallySPOVotesOrdinaryDRepNoAutoVote(t *testing.T) {
 // pool whose reward account is not registered at all, both contribute
 // only to SPOTotalStake (implicit no).
 func TestTallySPOVotesNoRewardAccountDelegation(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	registeredPool := testBytes(28, 90)
 	registeredRewardAcct := testBytes(28, 91)
@@ -1254,6 +1300,8 @@ func TestTallySPOVotesNoRewardAccountDelegation(t *testing.T) {
 // SPOTotalStake. Protects against the active-filter regression flagged
 // in code review.
 func TestTallySPOVotesDeregisteredRewardAccountDoesNotAutoVote(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	abstainPool := testBytes(28, 110)
 	abstainAcct := testBytes(28, 111)
@@ -1309,6 +1357,8 @@ func TestTallySPOVotesDeregisteredRewardAccountDoesNotAutoVote(t *testing.T) {
 // up so SPOYesRatio reflects only the explicit Yes against the
 // active-stake denominator.
 func TestTallySPOVotesMixedExplicitAndAutoVotes(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 
 	explicitYesPool := testBytes(28, 100)
@@ -1366,6 +1416,8 @@ func TestTallySPOVotesMixedExplicitAndAutoVotes(t *testing.T) {
 // stale or never-resolved Abstain/NoConfidence value would silently
 // flip the tally.
 func TestTallySPOVotesUnresolvedSnapshotRowFallsBackToImplicitNo(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	poolKeyHash := testBytes(28, 130)
 	rewardAccount := testBytes(28, 131)
@@ -1421,6 +1473,8 @@ func TestTallySPOVotesUnresolvedSnapshotRowFallsBackToImplicitNo(t *testing.T) {
 // shift the tally for that epoch. Mirrors the cardano-ledger
 // ssDelegations/ssDReps semantics flagged in the PR review.
 func TestTallySPOVotesSnapshotIsFrozenAgainstLiveStateChanges(t *testing.T) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 	poolKeyHash := testBytes(28, 120)
 	originalRewardAcct := testBytes(28, 121)

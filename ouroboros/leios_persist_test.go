@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,6 +31,8 @@ import (
 // write is harmless. This exercises the asynchronous persistence path and the
 // merged single-commit SetLeiosEB writer.
 func TestLeiosPersistAsyncCoalescesManifestThenComplete(t *testing.T) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 2)
 	txsRaw := []cbor.RawMessage{
 		mustCbor(t, "tx0"),
@@ -40,8 +43,24 @@ func TestLeiosPersistAsyncCoalescesManifestThenComplete(t *testing.T) {
 
 	// First the manifest only (no txs yet), as the backfiller's manifest fetch
 	// does; then the complete block once its txs are fetched.
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, txsRaw))
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			txsRaw,
+			leiosStoreAuthoritative,
+		),
+	)
 
 	// Drain the async writer so all queued persistence has committed.
 	o.StopLeiosPersistWriter()
@@ -49,20 +68,79 @@ func TestLeiosPersistAsyncCoalescesManifestThenComplete(t *testing.T) {
 	db := o.leiosDatabase()
 	require.NotNil(t, db)
 
-	slot, manifest, err := db.GetLeiosEBManifest(point.Hash)
+	manifest, err := db.GetLeiosEBManifest(point.Hash, point.Slot)
 	require.NoError(t, err)
-	require.Equal(t, point.Slot, slot)
 	require.Equal(t, []byte(blockRaw), manifest)
 
-	gotTxs, err := db.GetLeiosEBTxs(point.Hash)
+	gotTxs, err := db.GetLeiosEBTxs(point.Hash, point.Slot)
 	require.NoError(t, err)
 	require.Equal(t, txsRaw, gotTxs)
+}
+
+// TestLeiosPersistTwoOccurrencesOfSameHashPersistIndependently is the cubic
+// P2 regression: the durable blob store used to be keyed by hash alone, so
+// when two live occurrences of the same content-addressed hash existed at
+// different slots, the second persist silently overwrote the first --
+// making it permanently unavailable for historical re-serving once its
+// in-memory entry expired, even though both remained legitimately cached in
+// memory. The blob store (SetLeiosEB/GetLeiosEBManifest/GetLeiosEBTxs) is now
+// keyed by (slot, hash), so both occurrences persist and reload
+// independently.
+func TestLeiosPersistTwoOccurrencesOfSameHashPersistIndependently(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 30, 1)
+	second := ocommon.Point{Slot: point.Slot + 1, Hash: point.Hash}
+	txs1 := []cbor.RawMessage{mustCbor(t, "tx0")}
+	txs2 := []cbor.RawMessage{mustCbor(t, "tx1")}
+
+	o := newTestOuroborosWithLeiosDB(t)
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			txs1,
+			leiosStoreAuthoritative,
+		),
+	)
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			second,
+			blockRaw,
+			txs2,
+			leiosStoreAuthoritative,
+		),
+	)
+
+	o.StopLeiosPersistWriter()
+	db := o.leiosDatabase()
+	require.NotNil(t, db)
+
+	manifest1, err := db.GetLeiosEBManifest(point.Hash, point.Slot)
+	require.NoError(t, err)
+	require.Equal(t, []byte(blockRaw), manifest1)
+	gotTxs1, err := db.GetLeiosEBTxs(point.Hash, point.Slot)
+	require.NoError(t, err)
+	require.Equal(t, txs1, gotTxs1)
+
+	manifest2, err := db.GetLeiosEBManifest(second.Hash, second.Slot)
+	require.NoError(t, err)
+	require.Equal(t, []byte(blockRaw), manifest2)
+	gotTxs2, err := db.GetLeiosEBTxs(second.Hash, second.Slot)
+	require.NoError(t, err)
+	require.Equal(t, txs2, gotTxs2)
 }
 
 // TestLeiosPersistWriterStopIsSafeWithoutStart verifies StopLeiosPersistWriter
 // is a no-op when no endorser block was ever fetched (the writer never started)
 // and is safe to call more than once.
 func TestLeiosPersistWriterStopIsSafeWithoutStart(t *testing.T) {
+	t.Parallel()
+
 	o := newTestOuroborosWithLeiosDB(t)
 	require.NotPanics(t, func() {
 		o.StopLeiosPersistWriter()
@@ -76,6 +154,8 @@ func TestLeiosPersistWriterStopIsSafeWithoutStart(t *testing.T) {
 // returns after the drain timeout instead of blocking graceful shutdown
 // forever, and still closes the stop channel so the writer can exit later.
 func TestLeiosPersistStopDrainTimesOut(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	// Simulate a started writer whose drain never completes.
 	o.leiosPersistStarted.Store(true)
@@ -110,11 +190,21 @@ func TestLeiosPersistStopDrainTimesOut(t *testing.T) {
 // pending map (where no drain would ever pick it up), so shutdown cannot report
 // completion while a freshly fetched endorser block is left unpersisted.
 func TestLeiosPersistEnqueueAfterStopIsRejected(t *testing.T) {
+	t.Parallel()
+
 	o := newTestOuroborosWithLeiosDB(t)
 
 	// Start the writer via a real enqueue, then drain and stop it.
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 1)
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
 	o.StopLeiosPersistWriter()
 
 	// The drained map must be empty now.
@@ -152,6 +242,8 @@ func TestLeiosPersistEnqueueAfterStopIsRejected(t *testing.T) {
 func TestLeiosPersistPauseForLiveLifecycleOpDrainsOldDBAndRestartsOnNewDB(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	o := newTestOuroborosWithLeiosDB(t)
 	oldDB := o.leiosDatabase()
 	require.NotNil(t, oldDB)
@@ -164,7 +256,7 @@ func TestLeiosPersistPauseForLiveLifecycleOpDrainsOldDBAndRestartsOnNewDB(
 	// quiesce step pausing right before the database closes.
 	require.NoError(t, o.PauseLeiosPersistWriterForLiveLifecycleOp())
 
-	_, manifest1, err := oldDB.GetLeiosEBManifest(point1.Hash)
+	manifest1, err := oldDB.GetLeiosEBManifest(point1.Hash, point1.Slot)
 	require.NoError(t, err)
 	require.Equal(t, []byte(blockRaw1), manifest1)
 
@@ -183,12 +275,12 @@ func TestLeiosPersistPauseForLiveLifecycleOpDrainsOldDBAndRestartsOnNewDB(
 	o.enqueueLeiosPersist(point2, blockRaw2, nil)
 	o.StopLeiosPersistWriter()
 
-	_, manifest2, err := newDB.GetLeiosEBManifest(point2.Hash)
+	manifest2, err := newDB.GetLeiosEBManifest(point2.Hash, point2.Slot)
 	require.NoError(t, err)
 	require.Equal(t, []byte(blockRaw2), manifest2)
 
 	// And it must not have leaked into the old database.
-	_, _, err = oldDB.GetLeiosEBManifest(point2.Hash)
+	_, err = oldDB.GetLeiosEBManifest(point2.Hash, point2.Slot)
 	require.Error(t, err)
 }
 
@@ -202,6 +294,7 @@ func TestLeiosPersistPauseForLiveLifecycleOpDrainsOldDBAndRestartsOnNewDB(
 // next enqueue start a second writer against a freshly reset pending map
 // while the old one is still reading and deleting from that same map
 // (now repointed) under the shared mutex.
+// Not t.Parallel: swaps the package-level leiosPersistShutdownDrainTimeout.
 func TestLeiosPersistPauseForLiveLifecycleOpFailsClosedOnUnconfirmedDrain(
 	t *testing.T,
 ) {

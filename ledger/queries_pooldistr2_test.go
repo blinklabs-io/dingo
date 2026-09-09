@@ -108,6 +108,8 @@ func seedPoolDistr2Fixture(
 // they lead slots they do not. Both are therefore read from the mark snapshot
 // at praos.StakeSnapshotEpoch rather than from live stake.
 func TestQueryShelleyPoolDistr2_ReportsStakeFractionAndVrf(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	vrfA := make([]byte, 32)
@@ -198,6 +200,8 @@ func poolDistr2QueryFor(
 // than one -- renormalising them over the requested pools would tell a caller
 // their pool leads more slots than the node will grant it.
 func TestQueryShelleyPoolDistr2_FilterReportsOnlyRequestedPools(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	vrfA := make([]byte, 32)
@@ -300,6 +304,8 @@ func TestQueryShelleyPoolDistr2_FilterOmitsPoolAbsentFromSnapshot(t *testing.T) 
 // snapshot holds no stake at all, which is the state a fresh chain is in
 // before its first snapshot is taken. Dividing by the total would panic.
 func TestQueryShelleyPoolDistr2_ZeroTotalStakeDoesNotDivide(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 
@@ -338,6 +344,8 @@ func TestQueryShelleyPoolDistr2_ZeroTotalStakeDoesNotDivide(t *testing.T) {
 func TestQueryShelleyPoolDistr2_OmitsPoolWithoutRegistrationRatherThanAborting(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	orphan := make([]byte, 28)
@@ -409,6 +417,8 @@ func TestQueryShelleyPoolDistr2_OmitsPoolWithoutRegistrationRatherThanAborting(
 // against a key the producer no longer uses, so the registration in force is
 // what the reply carries.
 func TestQueryShelleyPoolDistr2_PrefersRegistrationVrfKey(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	staleVrf := make([]byte, 32)
@@ -478,8 +488,12 @@ func TestQueryShelleyPoolDistr2_PrefersRegistrationVrfKey(t *testing.T) {
 // calls -- asserting against that helper would only restate the query's own
 // implementation and would hold even if the helper returned the wrong key.
 func TestQueryShelleyPoolDistr2_VrfKeyMatchesHeaderValidation(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{91}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.epochCache = previewEpochs(0, 5, tb.epochNonce)
+	ls.publishSnapshotsLocked()
 
 	headerVrfKey, ok, err := headerVrfKeyFromBodyCbor(tb.block.Header())
 	require.NoError(t, err)
@@ -511,9 +525,22 @@ func TestQueryShelleyPoolDistr2_VrfKeyMatchesHeaderValidation(t *testing.T) {
 		nil,
 	))
 
+	// Save the mark snapshot used by epoch 5 before validation. The non-zero
+	// capture slot forces the snapshot-aligned historical lookup.
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:        4,
+			SnapshotType: snapshotTypeMark,
+			PoolKeyHash:  pkh.Bytes(),
+			TotalStake:   dbtypes.Uint64(2_000_000),
+			CapturedSlot: 4_000_100,
+		},
+		nil,
+	))
+
 	// The premise: this block passes the validator. Whatever key that took is
 	// the key an operator's schedule has to be computed against.
-	require.NoError(t, ls.verifyRegisteredVrfKey(tb.block),
+	require.NoError(t, ls.verifyRegisteredVrfKey(tb.block, blockEpochId(t, ls, tb.block)),
 		"fixture must be a block the validator accepts")
 
 	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
@@ -561,6 +588,8 @@ func TestQueryShelleyPoolDistr2_VrfKeyMatchesHeaderValidation(t *testing.T) {
 func TestQueryShelleyPoolDistr2_EpochComesFromTheTransactionNotTheSnapshot(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	const (
@@ -670,6 +699,8 @@ func TestQueryShelleyPoolDistr2_EpochComesFromTheTransactionNotTheSnapshot(
 func TestQueryShelleyPoolDistr2_TotalMatchesRowsWhenSummaryIsReady(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	vrfA := make([]byte, 32)

@@ -81,6 +81,20 @@ type RawLedgerState struct {
 	// PoolDistrData is the deferred CBOR for the active consensus pool
 	// distribution in NewEpochState.pool-distr.
 	PoolDistrData cbor.RawMessage
+	// BlocksPrev and BlocksCur are NewEpochState.nesBprev and
+	// NewEpochState.nesBcur: the blocks each pool minted during the epoch
+	// before the snapshot's epoch, and during the snapshot's epoch up to and
+	// including the anchor block. Keys are 28-byte pool cold-key hashes
+	// encoded as strings; a pool absent from a map minted nothing.
+	//
+	// The ledger keeps both because pool performance for a reward round is
+	// beta/sigma_a with beta the pool's share of the blocks minted in the
+	// performance epoch, and a node that reconstructs its state from a
+	// snapshot has no local history for those epochs to count. nesBprev is
+	// the performance epoch of the first reward round the node crosses after
+	// the import, and nesBcur is the pre-anchor half of the second one.
+	BlocksPrev map[string]uint64
+	BlocksCur  map[string]uint64
 	// EraBounds holds the start boundaries of all eras extracted
 	// from the telescope. Each entry gives the (Slot, Epoch) at
 	// which that era began. Used to generate the full epoch

@@ -27,6 +27,8 @@ import (
 )
 
 func TestChainsyncFindIntersectRateLimiter_NormalUse(t *testing.T) {
+	t.Parallel()
+
 	rl := newChainsyncFindIntersectRateLimiter(200, 1000)
 	peer := testConnIdWithPort(4001)
 
@@ -38,6 +40,8 @@ func TestChainsyncFindIntersectRateLimiter_NormalUse(t *testing.T) {
 }
 
 func TestChainsyncFindIntersectRateLimiter_BoundaryAtBurst(t *testing.T) {
+	t.Parallel()
+
 	rl := newChainsyncFindIntersectRateLimiter(200, 1000)
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	rl.nowFunc = func() time.Time { return now }
@@ -62,6 +66,8 @@ func TestChainsyncFindIntersectRateLimiter_BoundaryAtBurst(t *testing.T) {
 func TestChainsyncFindIntersectRateLimiter_RepeatedRequestsExhaustBudget(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	rl := newChainsyncFindIntersectRateLimiter(200, 1000)
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	rl.nowFunc = func() time.Time { return now }
@@ -85,6 +91,8 @@ func TestChainsyncFindIntersectRateLimiter_RepeatedRequestsExhaustBudget(
 }
 
 func TestChainsyncFindIntersectRateLimiter_PerPeerIsolation(t *testing.T) {
+	t.Parallel()
+
 	rl := newChainsyncFindIntersectRateLimiter(200, 1000)
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	rl.nowFunc = func() time.Time { return now }
@@ -101,6 +109,8 @@ func TestChainsyncFindIntersectRateLimiter_PerPeerIsolation(t *testing.T) {
 }
 
 func TestChainsyncFindIntersectRateLimiter_Recovery(t *testing.T) {
+	t.Parallel()
+
 	rl := newChainsyncFindIntersectRateLimiter(200, 1000)
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	rl.nowFunc = func() time.Time { return now }
@@ -126,6 +136,8 @@ func TestChainsyncFindIntersectRateLimiter_Recovery(t *testing.T) {
 func TestChainsyncFindIntersectRateLimiter_ZeroPointRequestAlwaysAllowed(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	rl := newChainsyncFindIntersectRateLimiter(200, 1000)
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	rl.nowFunc = func() time.Time { return now }
@@ -143,6 +155,8 @@ func TestChainsyncFindIntersectRateLimiter_ZeroPointRequestAlwaysAllowed(
 }
 
 func TestChainsyncFindIntersectRateLimiter_RemovePeer(t *testing.T) {
+	t.Parallel()
+
 	rl := newChainsyncFindIntersectRateLimiter(200, 1000)
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	rl.nowFunc = func() time.Time { return now }
@@ -163,6 +177,8 @@ func TestChainsyncFindIntersectRateLimiter_RemovePeer(t *testing.T) {
 }
 
 func TestNewOuroboros_ChainsyncFindIntersectLimiterAlwaysEnabled(t *testing.T) {
+	t.Parallel()
+
 	// Unlike TxSubmission, FindIntersect is entirely peer-driven rather than
 	// paced by our own request loop, so this limiter is not configurable
 	// off; it must always be present.
@@ -188,6 +204,8 @@ func TestNewOuroboros_ChainsyncFindIntersectLimiterAlwaysEnabled(t *testing.T) {
 func TestHandleConnClosedEvent_CleansUpChainsyncFindIntersectLimiter(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,

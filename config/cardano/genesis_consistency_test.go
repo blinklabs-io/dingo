@@ -24,6 +24,8 @@ import (
 )
 
 func TestValidateGenesisConsistencyNoGenesis(t *testing.T) {
+	t.Parallel()
+
 	// With neither (or only one) genesis loaded there is nothing to
 	// cross-check, so the consistency check must pass.
 	require.NoError(t, (&CardanoNodeConfig{}).validateGenesisConsistency())
@@ -35,6 +37,8 @@ func TestValidateGenesisConsistencyNoGenesis(t *testing.T) {
 }
 
 func TestValidateGenesisConsistencyMatch(t *testing.T) {
+	t.Parallel()
+
 	c := &CardanoNodeConfig{
 		byronGenesis: &byron.ByronGenesis{StartTime: 1666656000},
 		shelleyGenesis: &shelley.ShelleyGenesis{
@@ -45,6 +49,8 @@ func TestValidateGenesisConsistencyMatch(t *testing.T) {
 }
 
 func TestValidateGenesisConsistencyMismatch(t *testing.T) {
+	t.Parallel()
+
 	c := &CardanoNodeConfig{
 		byronGenesis: &byron.ByronGenesis{StartTime: 1506203091},
 		shelleyGenesis: &shelley.ShelleyGenesis{

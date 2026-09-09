@@ -81,6 +81,8 @@ func (m mockHeader) BlockBodyHash() lcommon.Blake2b256 { return lcommon.Blake2b2
 func TestDetectConnectionSwitchHandsOffQueuedHeadersToNewActiveConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	err := testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("hdr-1")),
@@ -160,6 +162,8 @@ func TestDetectConnectionSwitchHandsOffQueuedHeadersToNewActiveConnection(
 func TestHandleConnectionClosedEventClearsUpstreamTipWhenActiveUnavailable(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	closedConnId := testChainsyncConnId(6000, 3001)
 	equivalentClosedConnId := testChainsyncConnId(6000, 3001)
 	otherConnId := testChainsyncConnId(6000, 3002)
@@ -211,6 +215,8 @@ func TestHandleConnectionClosedEventClearsUpstreamTipWhenActiveUnavailable(
 func TestHandoffPipelineOnSwitchDropsStaleQueuedHeadersForNewBufferedPeer(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	err := testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("hdr-1")),
@@ -268,6 +274,8 @@ func TestHandoffPipelineOnSwitchDropsStaleQueuedHeadersForNewBufferedPeer(
 }
 
 func TestHandleEventBlockfetchBlockAllowsBlocksFromActiveBatch(t *testing.T) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -290,17 +298,19 @@ func TestHandleEventBlockfetchBlockAllowsBlocksFromActiveBatch(t *testing.T) {
 		},
 	}
 
-	err := ls.handleEventBlockfetchBlock(BlockfetchEvent{
+	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
 		ConnectionId: connId1,
 		Block:        &mockBabbageBlock{slot: 2},
 		Point:        ocommon.Point{Slot: 2, Hash: []byte("block-2")},
-	})
+	}, nil)
 	require.NoError(t, err)
 	require.Len(t, ls.pendingBlockfetchEvents, 1)
 	assert.Equal(t, connId1, ls.pendingBlockfetchEvents[0].ConnectionId)
 }
 
 func TestHandleEventChainsyncIgnoresClosedConnection(t *testing.T) {
+	t.Parallel()
+
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -353,6 +363,8 @@ func TestHandleEventChainsyncIgnoresClosedConnection(t *testing.T) {
 }
 
 func TestHandleEventBlockfetchBlockAllowsEquivalentConnectionId(t *testing.T) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -381,11 +393,11 @@ func TestHandleEventBlockfetchBlockAllowsEquivalentConnectionId(t *testing.T) {
 		},
 	}
 
-	err := ls.handleEventBlockfetchBlock(BlockfetchEvent{
+	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
 		ConnectionId: connId1Dup,
 		Block:        &mockBabbageBlock{slot: 2},
 		Point:        ocommon.Point{Slot: 2, Hash: []byte("block-2")},
-	})
+	}, nil)
 	require.NoError(t, err)
 	require.Len(t, ls.pendingBlockfetchEvents, 1)
 	assert.True(
@@ -397,6 +409,8 @@ func TestHandleEventBlockfetchBlockAllowsEquivalentConnectionId(t *testing.T) {
 func TestHandleEventBlockfetchBlockDropsBlocksFromStaleConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -423,11 +437,11 @@ func TestHandleEventBlockfetchBlockDropsBlocksFromStaleConnection(
 		},
 	}
 
-	err := ls.handleEventBlockfetchBlock(BlockfetchEvent{
+	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
 		ConnectionId: connId1,
 		Block:        &mockBabbageBlock{slot: 2},
 		Point:        ocommon.Point{Slot: 2, Hash: []byte("block-2")},
-	})
+	}, nil)
 	require.NoError(t, err)
 	require.Empty(t, ls.pendingBlockfetchEvents)
 }
@@ -435,6 +449,8 @@ func TestHandleEventBlockfetchBlockDropsBlocksFromStaleConnection(
 func TestHandleEventBlockfetchBatchDoneUsesSelectedConnectionAfterSwitch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	err := testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("hdr-1")),
@@ -497,6 +513,8 @@ func TestHandleEventBlockfetchBatchDoneUsesSelectedConnectionAfterSwitch(
 func TestHandleEventBlockfetchBatchDoneFallsBackToCurrentConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	err := testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("hdr-1")),
@@ -547,6 +565,8 @@ func TestHandleEventBlockfetchBatchDoneFallsBackToCurrentConnection(
 }
 
 func TestHandleChainSwitchEventUpdatesSelectedBlockfetchConnId(t *testing.T) {
+	t.Parallel()
+
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -568,6 +588,8 @@ func TestHandleChainSwitchEventUpdatesSelectedBlockfetchConnId(t *testing.T) {
 func TestHandleChainSwitchEventRequestsFreshCursorWhenPeerAheadWithoutHeaders(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
@@ -618,6 +640,8 @@ func TestHandleChainSwitchEventRequestsFreshCursorWhenPeerAheadWithoutHeaders(
 func TestChainSwitchNeedsFreshCursorUsesObservedTip(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	chainManager, err := chain.NewManager(nil, nil)
 	require.NoError(t, err)
 	testChain := chainManager.PrimaryChain()
@@ -660,6 +684,8 @@ func TestChainSwitchNeedsFreshCursorUsesObservedTip(
 func TestChainSwitchNeedsFreshCursorIgnoresFailedTargetFrontier(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	chainManager, err := chain.NewManager(nil, nil)
 	require.NoError(t, err)
 	testChain := chainManager.PrimaryChain()
@@ -796,6 +822,8 @@ func (f chainSwitchFallbackFixture) handleChainSwitchEvent() {
 func TestHandleChainSwitchEventFallbackResyncUsesActiveConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainSwitchFallbackFixture(t)
 	fixture.handleChainSwitchEvent()
 
@@ -819,6 +847,8 @@ func TestHandleChainSwitchEventFallbackResyncUsesActiveConnection(
 func TestHandleChainSwitchEventFallbackReplaysBufferedActiveHeaders(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bufferedHeaderHash := lcommon.NewBlake2b256([]byte("active-hdr"))
 	fixture := newChainSwitchFallbackFixture(t)
 
@@ -869,6 +899,8 @@ func TestHandleChainSwitchEventFallbackReplaysBufferedActiveHeaders(
 func TestHandleChainSwitchEventDoesNotResyncInitialPeerSelection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
@@ -906,6 +938,8 @@ func TestHandleChainSwitchEventDoesNotResyncInitialPeerSelection(
 func TestShouldBufferHeaderEventDoesNotPreserveIdleSelectedConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -950,6 +984,8 @@ func TestShouldBufferHeaderEventDoesNotPreserveIdleSelectedConnection(
 func TestShouldBufferHeaderEventDoesNotRaceDiscardBufferedPeerHeaders(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -986,9 +1022,104 @@ func TestShouldBufferHeaderEventDoesNotRaceDiscardBufferedPeerHeaders(
 	wg.Wait()
 }
 
+// TestDiscardBufferedPeerHeadersDoesNotRaceBufferedHeaderIteration guards the
+// bufferedHeaderEvents map itself, which is a different field from the
+// headerPipelineConnId race above.
+//
+// handleEventBlockfetch holds chainsyncBlockfetchMutex for its whole batch-done
+// path, and nextBufferedHeaderConnId ranges over bufferedHeaderEvents inside
+// it. discardBufferedPeerHeaders runs on handleEventChainsync's dispatch
+// goroutine, which holds only chainsyncMutex, and used to delete from that same
+// map before taking chainsyncBlockfetchMutex -- a concurrent map iteration and
+// map write, which is fatal at runtime rather than merely racy. It was observed
+// killing a mainnet block producer inside nextBufferedHeaderConnId.
+//
+// This runs both paths concurrently under go test -race; a clean run is the
+// pass condition, so there is nothing else to assert.
+func TestDiscardBufferedPeerHeadersDoesNotRaceBufferedHeaderIteration(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	// Several connections so the range in nextBufferedHeaderConnId has real
+	// work to do and overlaps the concurrent deletes.
+	const conns = 50
+	connIds := make([]ouroboros.ConnectionId, conns)
+	for i := range connIds {
+		connIds[i] = ouroboros.ConnectionId{
+			LocalAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+			RemoteAddr: &net.TCPAddr{
+				IP:   net.ParseIP("127.0.0.1"),
+				Port: 3001 + i,
+			},
+		}
+		ls.bufferHeaderEvent(ChainsyncEvent{
+			ConnectionId: connIds[i],
+			Point:        ocommon.NewPoint(uint64(i), []byte("hdr")),
+		})
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(4)
+	// Mirrors handleEventBlockfetch: the read side holds
+	// chainsyncBlockfetchMutex across the iteration.
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			ls.chainsyncBlockfetchMutex.Lock()
+			ls.nextBufferedHeaderConnId()
+			ls.chainsyncBlockfetchMutex.Unlock()
+		}
+	}()
+	// Mirrors handleEventChainsync's dispatch goroutine.
+	go func() {
+		defer wg.Done()
+		for i := range 200 {
+			ls.discardBufferedPeerHeaders(connIds[i%conns])
+		}
+	}()
+	// The buffering write path, which bufferedHeaderMutex alone protects.
+	// claimHeaderPipelineOwnership releases chainsyncBlockfetchMutex on
+	// return, so this write never holds that lock -- it is the case the
+	// previous, narrower fix missed, and it fails here without the
+	// dedicated mutex.
+	go func() {
+		defer wg.Done()
+		for i := range 200 {
+			ls.bufferHeaderEvent(ChainsyncEvent{
+				ConnectionId: connIds[i%conns],
+				Point:        ocommon.NewPoint(uint64(i), []byte("hdr")),
+			})
+		}
+	}()
+	// The resync delete path, which reaches the map from callers that do
+	// not all hold chainsyncBlockfetchMutex.
+	go func() {
+		defer wg.Done()
+		var pending pendingPublishes
+		for i := range 200 {
+			ls.requestChainsyncResync(
+				connIds[i%conns],
+				"race probe",
+				&pending,
+			)
+		}
+	}()
+	wg.Wait()
+}
+
 func TestHandleChainSwitchEventReplaysBufferedHeadersForSelectedConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1052,6 +1183,8 @@ func TestHandleChainSwitchEventReplaysBufferedHeadersForSelectedConnection(
 func TestHandleEventChainsyncBlockHeaderAcceptsCompatibleNonOwnerConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1113,6 +1246,8 @@ func TestHandleEventChainsyncBlockHeaderAcceptsCompatibleNonOwnerConnection(
 func TestHandleEventChainsyncBlockHeaderBuffersIncompatibleNonOwnerConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1177,6 +1312,8 @@ func TestHandleEventChainsyncBlockHeaderBuffersIncompatibleNonOwnerConnection(
 func TestHandleEventChainsyncBlockHeader_ProcessesEligibleNonActivePeer(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1229,6 +1366,8 @@ func TestHandleEventChainsyncBlockHeader_ProcessesEligibleNonActivePeer(
 func TestHandleEventChainsyncBlockHeaderBuffersMinimumBatchWhenBehind(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1275,6 +1414,8 @@ func TestHandleEventChainsyncBlockHeaderBuffersMinimumBatchWhenBehind(
 }
 
 func TestHandleEventChainsyncBlockHeaderScalesBatchWhenFarBehind(t *testing.T) {
+	t.Parallel()
+
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1339,6 +1480,8 @@ func TestHandleEventChainsyncBlockHeaderScalesBatchWhenFarBehind(t *testing.T) {
 func TestHandleEventChainsyncBlockHeaderAcceptsEquivalentOwnerConnectionId(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1399,6 +1542,8 @@ func TestHandleEventChainsyncBlockHeaderAcceptsEquivalentOwnerConnectionId(
 func TestHandleEventBlockfetchBatchDoneReplaysBufferedHeadersAfterDrain(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1452,6 +1597,8 @@ func TestHandleEventBlockfetchBatchDoneReplaysBufferedHeadersAfterDrain(
 }
 
 func TestHandleEventChainsyncBlockHeaderKeepsActiveBatchOwner(t *testing.T) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1513,6 +1660,8 @@ func TestHandleEventChainsyncBlockHeaderKeepsActiveBatchOwner(t *testing.T) {
 func TestHandleEventChainsyncBlockHeaderIgnoresIdleSelectedOwner(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1554,6 +1703,8 @@ func TestHandleEventChainsyncBlockHeaderIgnoresIdleSelectedOwner(
 func TestHandleEventChainsyncBlockHeaderIgnoresStaleHeaderBehindChainTip(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	fixture.ls.currentTip = fixture.ancestorTip
 	staleHash := lcommon.NewBlake2b256([]byte("stale-header"))
@@ -1590,6 +1741,8 @@ func TestHandleEventChainsyncBlockHeaderIgnoresStaleHeaderBehindChainTip(
 func TestHandleEventChainsyncBlockHeaderSkipsMithrilBoundaryHeaderVerification(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	fixture.ls.validationEnabled = true
 	fixture.ls.mithrilLedgerSlot = fixture.currentTip.Point.Slot
@@ -1628,6 +1781,8 @@ func TestHandleEventChainsyncBlockHeaderSkipsMithrilBoundaryHeaderVerification(
 func TestHandleEventChainsyncRollbackClearsBufferedHeadersForNonActivePeer(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	activeConn := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1673,6 +1828,8 @@ func TestHandleEventChainsyncRollbackClearsBufferedHeadersForNonActivePeer(
 func TestHandleEventChainsyncBlockHeaderStartsBlockfetchForSmallBlockGap(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1730,6 +1887,8 @@ func TestHandleEventChainsyncBlockHeaderStartsBlockfetchForSmallBlockGap(
 func TestHandleEventChainsyncBlockHeaderStartsBlockfetchForSparseBlockGap(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1794,6 +1953,8 @@ func TestHandleEventChainsyncBlockHeaderStartsBlockfetchForSparseBlockGap(
 func TestHandleEventChainsyncAwaitReplyStartsBlockfetchForActiveConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -1852,6 +2013,8 @@ func TestHandleEventChainsyncAwaitReplyStartsBlockfetchForActiveConnection(
 func TestHandleEventBlockfetchBatchDoneEmptyBatchRetriesAlternateConnection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	err := testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("hdr-1")),
@@ -1910,6 +2073,8 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchRetriesAlternateConnection(
 func TestHandleEventBlockfetchBatchDoneEmptyBatchNearTipRetries(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	err := testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("near-tip-header")),
@@ -1959,6 +2124,8 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchNearTipRetries(
 func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -2015,6 +2182,8 @@ func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
 func TestHandleBlockfetchTimeoutLocked_RetryRetargetsSelection(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -2067,6 +2236,8 @@ func TestHandleBlockfetchTimeoutLocked_RetryRetargetsSelection(
 func TestHandleBlockfetchTimeoutLocked_ClearsActiveConnectionWithoutHeaders(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -2092,6 +2263,8 @@ func TestHandleBlockfetchTimeoutLocked_ClearsActiveConnectionWithoutHeaders(
 func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId1 := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
@@ -2161,6 +2334,8 @@ func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
 // keys on NewObservedTipSet, which every producer in chainselection sets, so
 // only a producer that never populated the field reaches the advertised tip.
 func TestChainSwitchNewObservedTipKeysOnPresenceNotZeroValue(t *testing.T) {
+	t.Parallel()
+
 	advertised := ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 9_000, Hash: []byte{0xaa}},
 		BlockNumber: 900,

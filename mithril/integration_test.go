@@ -29,6 +29,8 @@ import (
 //
 // Skipped unless MITHRIL_INTEGRATION=1 is set.
 func TestIntegrationVerifyCertificateChainPreview(t *testing.T) {
+	t.Parallel()
+
 	if os.Getenv("MITHRIL_INTEGRATION") == "" {
 		t.Skip("set MITHRIL_INTEGRATION=1 to run")
 	}

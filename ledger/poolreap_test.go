@@ -112,6 +112,8 @@ func runApplyPoolRetirements(
 // the new epoch with a registered, active reward account has its deposit
 // refunded to that account; the treasury is untouched.
 func TestApplyPoolRetirements_CreditsRegisteredRewardAccount(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newPoolreapTestLedger(t)
 
 	const (
@@ -158,6 +160,8 @@ func TestApplyPoolRetirements_CreditsRegisteredRewardAccount(t *testing.T) {
 // no reward account, and one with an inactive account, both route their
 // deposit to the treasury.
 func TestApplyPoolRetirements_UnregisteredAccountToTreasury(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newPoolreapTestLedger(t)
 
 	const (
@@ -224,6 +228,8 @@ func TestApplyPoolRetirements_UnregisteredAccountToTreasury(t *testing.T) {
 // TestApplyPoolRetirements_WrongEpoch: a pool whose retirement epoch is not the
 // new epoch is left untouched.
 func TestApplyPoolRetirements_WrongEpoch(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newPoolreapTestLedger(t)
 
 	rewardAccount := reapCred28(0x11)
@@ -253,6 +259,8 @@ func TestApplyPoolRetirements_WrongEpoch(t *testing.T) {
 // rolling back past the boundary restores the prior reward balance and
 // treasury so re-application is deterministic.
 func TestApplyPoolRetirements_Rollback(t *testing.T) {
+	t.Parallel()
+
 	ls, db, gdb := newPoolreapTestLedger(t)
 
 	const (

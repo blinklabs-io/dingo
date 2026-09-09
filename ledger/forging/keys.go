@@ -27,6 +27,7 @@ import (
 
 	"github.com/blinklabs-io/bursa"
 	"github.com/blinklabs-io/dingo/keystore"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/kes"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -588,6 +589,20 @@ type LedgerView interface {
 // registration is not fatal because operators commonly stage their keys
 // before submitting the registration certificate.
 //
+// The opcert counter check here is staleness-only (candidate below the
+// last observed value), not the full era-scoped no-gap rule the forge
+// loop's checkOpCertSequence and block application enforce. Startup
+// cannot apply that rule safely: the era for "now" would have to come
+// from a wall-clock slot, while the observed baseline
+// (LatestOpCertSequence) only reflects the applied chain, and those two
+// can disagree on a node whose applied tip is behind wall-clock time (an
+// interrupted sync, a resume after downtime, a restore to an older
+// snapshot) -- a pool several rotations into its life would look gapped
+// against a baseline that just hasn't caught up yet, and refusing
+// startup for it would prevent the node from ever syncing to the point
+// that makes the baseline correct. The forge loop's own gate does not
+// have this problem, since it runs near the chain tip.
+//
 // Three return values describe the outcome:
 //   - registered: true if the pool registration was found on chain.
 //   - vrfMatched: true if registered AND the on-chain VRF key hash
@@ -640,10 +655,21 @@ func (pc *PoolCredentials) ValidateAgainstLedger(
 	if err != nil {
 		return true, vrfMatched, fmt.Errorf("opcert sequence lookup: %w", err)
 	}
-	if seqFound && pc.opCert.IssueNumber < latestSeq {
+	// enforceNoGap is always false here; see the doc comment above for why
+	// startup cannot safely apply the era-scoped no-gap half of this rule.
+	// validateOpCertSequence rather than eras.ValidateOpCertCounter so this
+	// check and the forge loop's share the persistable-counter bound as well
+	// as the era rule.
+	if seqErr := validateOpCertSequence(
+		latestSeq,
+		seqFound,
+		pc.opCert.IssueNumber,
+		false,
+	); seqErr != nil {
 		return true, vrfMatched, fmt.Errorf(
-			"opcert sequence %d is stale: ledger has observed %d for this pool",
-			pc.opCert.IssueNumber, latestSeq,
+			"opcert sequence %d invalid: %w",
+			pc.opCert.IssueNumber,
+			seqErr,
 		)
 	}
 	return true, vrfMatched, nil

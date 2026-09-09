@@ -48,6 +48,7 @@ func (forgerTestLeader) NextLeaderSlot(
 type forgerTestSlotClock struct {
 	currentSlot       uint64
 	chainTipSlot      uint64
+	chainTipHash      []byte
 	upstreamTipSlot   uint64
 	slotsPerKESPeriod uint64
 }
@@ -66,6 +67,13 @@ func (c forgerTestSlotClock) ChainTipSlot() uint64 {
 
 func (forgerTestSlotClock) NextSlotTime() (time.Time, error) {
 	return time.Now(), nil
+}
+
+// ChainTipHash satisfies the optional ChainTipHashProvider. It returns
+// nil unless a test sets chainTipHash, so every existing test keeps the
+// fence-only behaviour.
+func (c forgerTestSlotClock) ChainTipHash() []byte {
+	return c.chainTipHash
 }
 
 func (c forgerTestSlotClock) UpstreamTipSlot() uint64 {
@@ -261,10 +269,13 @@ func (p forgerTestMempoolProvider) Transactions() []MempoolTransaction {
 }
 
 type forgerTestLeiosCerts struct {
-	eligible   []LeiosCertifiedEndorserBlock
-	txHashes   []string
-	txHashesOK bool
-	marked     []lcommon.Blake2b256
+	eligible       []LeiosCertifiedEndorserBlock
+	txHashes       []string
+	txHashesOK     bool
+	marked         []lcommon.Blake2b256
+	markedSlots    []uint64
+	gotEbSlot      uint64
+	gotEbSlotCalls int
 }
 
 func (p *forgerTestLeiosCerts) EligibleCertifiedEndorserBlocks() []LeiosCertifiedEndorserBlock {
@@ -272,15 +283,20 @@ func (p *forgerTestLeiosCerts) EligibleCertifiedEndorserBlocks() []LeiosCertifie
 }
 
 func (p *forgerTestLeiosCerts) CertifiedEndorserBlockTxHashes(
-	lcommon.Blake2b256,
+	_ lcommon.Blake2b256,
+	ebSlot uint64,
 ) ([]string, bool) {
+	p.gotEbSlot = ebSlot
+	p.gotEbSlotCalls++
 	return p.txHashes, p.txHashesOK
 }
 
 func (p *forgerTestLeiosCerts) MarkEndorserBlockEmbedded(
 	ebHash lcommon.Blake2b256,
+	ebSlot uint64,
 ) {
 	p.marked = append(p.marked, ebHash)
+	p.markedSlots = append(p.markedSlots, ebSlot)
 }
 
 type forgerTestLeiosParentAnnouncement struct {
@@ -721,7 +737,16 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 				require.Empty(t, leiosCaster.hash)
 			}
 			require.Equal(t, []lcommon.Blake2b256{ebHash}, leiosCerts.marked)
+			require.Equal(t, []uint64{9}, leiosCerts.markedSlots)
 			require.Equal(t, 1, parent.calls)
+			// CertifiedEndorserBlockTxHashes must be called with the
+			// eligible certificate's own slot (9, from eb.SlotNo above), not
+			// the forged ranking block's slot (10) or zero: the manifest is
+			// content-addressed, so the same hash could be a distinct,
+			// unrelated occurrence at another slot, and the wrong slot here
+			// would resolve the wrong occurrence (issue #3513 review).
+			require.Equal(t, 1, leiosCerts.gotEbSlotCalls)
+			require.Equal(t, uint64(9), leiosCerts.gotEbSlot)
 		})
 	}
 }
@@ -806,5 +831,6 @@ func TestCheckAndForgeProductionCertifiesOnlyParentAnnouncedLeiosEB(
 	require.Nil(t, builder.leiosData.Announcement)
 	require.Same(t, parentCert, builder.leiosData.Certificate)
 	require.Equal(t, []lcommon.Blake2b256{parentHash}, leiosCerts.marked)
+	require.Equal(t, []uint64{9}, leiosCerts.markedSlots)
 	require.Equal(t, 1, parent.calls)
 }

@@ -26,6 +26,8 @@ import (
 )
 
 func TestBlockBroadcasterAddsWithoutEventSubscriber(t *testing.T) {
+	t.Parallel()
+
 	blocks, err := fixtures.GenerateConwayChain(
 		0,
 		lcommon.Blake2b256{},
@@ -46,6 +48,8 @@ func TestBlockBroadcasterAddsWithoutEventSubscriber(t *testing.T) {
 }
 
 func TestBlockBroadcasterRejectsUnavailableChain(t *testing.T) {
+	t.Parallel()
+
 	blocks, err := fixtures.GenerateConwayChain(
 		0,
 		lcommon.Blake2b256{},

@@ -43,6 +43,8 @@ func encodeTestNonce(t *testing.T, hash []byte) []byte {
 // `lastEpochBlockNonce` (index 7), so picking up `labNonce` (index 6)
 // yields the wrong eta0 and every header in the next epoch fails VRF.
 func TestExtractPraosNonces_LastEpochBlockNonceIs8FieldShape(t *testing.T) {
+	t.Parallel()
+
 	evolving := bytes.Repeat([]byte{0xee}, 32)
 	candidate := bytes.Repeat([]byte{0xcc}, 32)
 	epoch := bytes.Repeat([]byte{0xee, 0x09}, 16)
@@ -89,6 +91,8 @@ func TestExtractPraosNonces_LastEpochBlockNonceIs8FieldShape(t *testing.T) {
 // older PraosState shape (no `previousEpochNonce`), where
 // `lastEpochBlockNonce` is at index 6.
 func TestExtractPraosNonces_LastEpochBlockNonceIs7FieldShape(t *testing.T) {
+	t.Parallel()
+
 	evolving := bytes.Repeat([]byte{0xee}, 32)
 	candidate := bytes.Repeat([]byte{0xcc}, 32)
 	epoch := bytes.Repeat([]byte{0xee, 0x09}, 16)

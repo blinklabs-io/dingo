@@ -16,6 +16,7 @@ package eras
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -43,12 +44,19 @@ var ConwayEraDesc = EraDesc{
 	DecodePParamsFunc:       DecodePParamsConway,
 	DecodePParamsUpdateFunc: DecodePParamsUpdateConway,
 	PParamsUpdateFunc:       PParamsUpdateConway,
-	HardForkFunc:            HardForkConway,
-	EpochLengthFunc:         EpochLengthShelley,
-	CalculateEtaVFunc:       CalculateEtaVConway,
-	CertDepositFunc:         CertDepositConway,
-	ValidateTxFunc:          ValidateTxConway,
-	EvaluateTxFunc:          EvaluateTxConway,
+	ParamUpdateHasPlutusV2CostModelFunc: func(u any) bool {
+		upd, ok := u.(conway.ConwayProtocolParameterUpdate)
+		if !ok {
+			return false
+		}
+		return paramUpdateHasPlutusV2CostModel(upd.CostModels)
+	},
+	HardForkFunc:      HardForkConway,
+	EpochLengthFunc:   EpochLengthShelley,
+	CalculateEtaVFunc: CalculateEtaVConway,
+	CertDepositFunc:   CertDepositConway,
+	ValidateTxFunc:    ValidateTxConway,
+	EvaluateTxFunc:    EvaluateTxConway,
 }
 
 func DecodePParamsConway(data []byte) (lcommon.ProtocolParameters, error) {
@@ -285,8 +293,9 @@ func buildConwayValidationRules() []indexedUtxoValidationRule {
 		},
 	}
 	ret := buildIndexedUtxoValidationRulesWithSkips(
+		descriptors,
 		conway.UtxoValidationRules,
-		skips,
+		skipRuleIds,
 	)
 	ret = append(ret, indexedUtxoValidationRule{
 		index:          conwayUtxoValidateConwayFeaturesRuleIndex,
@@ -322,8 +331,7 @@ func validateConwayFeaturesWithNeededPlutusV1V2(
 		return nil
 	}
 
-	if treasury := tx.CurrentTreasuryValue(); treasury != nil &&
-		treasury.Sign() > 0 {
+	if conwayCurrentTreasuryValuePresent(tx) {
 		return conway.CurrentTreasuryValueWithPlutusV1V2Error{
 			PlutusVersion: plutusVersion,
 		}
@@ -372,6 +380,57 @@ func validateConwayFeaturesWithNeededPlutusV1V2(
 	}
 
 	return nil
+}
+
+// conwayCurrentTreasuryValuePresent reports whether transaction-body key 21
+// is present, preserving the distinction between an absent value and an
+// explicitly encoded zero. A declared zero is a real assertion about the
+// treasury and must reach validation; collapsing it into "absent" would let a
+// transaction assert a zero treasury for free.
+//
+// Maintained gouroboros exposes the distinction through a nil value and the
+// CurrentTreasuryValuePresent capability. The pinned release stores key 21 in
+// an int64 with omitempty and returns a non-nil zero for both cases, so
+// decoded or constructed Conway transactions fall back to inspecting the
+// transaction-body map. The fallback treats an undecodable body as present:
+// this rule only rejects, so failing closed cannot admit a transaction.
+func conwayCurrentTreasuryValuePresent(tx lcommon.Transaction) bool {
+	if tx == nil {
+		return false
+	}
+	treasury := tx.CurrentTreasuryValue()
+	if treasury == nil {
+		return false
+	}
+	if treasury.Sign() != 0 {
+		return true
+	}
+	conwayTx, ok := tx.(*conway.ConwayTransaction)
+	if !ok || conwayTx == nil {
+		// CurrentTreasuryValue's nil/non-nil contract is authoritative for
+		// implementations that do not need the pinned-release compatibility
+		// path.
+		return true
+	}
+	if presence, ok := any(&conwayTx.Body).(interface {
+		CurrentTreasuryValuePresent() bool
+	}); ok {
+		return presence.CurrentTreasuryValuePresent()
+	}
+	bodyCbor := conwayTx.Body.Cbor()
+	if len(bodyCbor) == 0 {
+		var err error
+		bodyCbor, err = cbor.Encode(&conwayTx.Body)
+		if err != nil {
+			return true
+		}
+	}
+	var fields map[uint]cbor.RawMessage
+	if _, err := cbor.Decode(bodyCbor, &fields); err != nil {
+		return true
+	}
+	_, ok = fields[21]
+	return ok
 }
 
 func neededPlutusV1V2Version(view script.TxScriptView) string {
@@ -818,13 +877,37 @@ func sortedConwayWithdrawalAddresses(
 	for addr := range withdrawals {
 		ret = append(ret, addr)
 	}
+	// cardano-ledger keys withdrawals by RewardAccount, whose derived Ord
+	// compares Network then Credential, and whose Credential constructors are
+	// declared ScriptHashObj before KeyHashObj
+	// (libs/cardano-ledger-core/src/Cardano/Ledger/Credential.hs). Reward
+	// address bytes carry the credential type in the header nibble, so raw
+	// byte order puts key-hash (0xe0/0xe1) before script-hash (0xf0/0xf1) and
+	// inverts the ledger's order whenever a transaction withdraws from both
+	// credential types. The Rewarding redeemer index is this position, so the
+	// comparator has to match script.BuildScriptPurpose, which maps an index
+	// back to a credential using the same order.
 	slices.SortFunc(ret, func(a, b *lcommon.Address) int {
-		aBytes, aErr := a.Bytes()
-		bBytes, bErr := b.Bytes()
+		if a == nil {
+			return -1
+		}
+		if b == nil {
+			return 1
+		}
+		aCred, aErr := a.RewardAccountCredential()
+		bCred, bErr := b.RewardAccountCredential()
 		if aErr != nil || bErr != nil {
 			return strings.Compare(a.String(), b.String())
 		}
-		return bytes.Compare(aBytes, bBytes)
+		if c := cmp.Compare(a.NetworkId(), b.NetworkId()); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(aCred.CredType, bCred.CredType); c != 0 {
+			// Credential's numeric order is key before script, while
+			// cardano-ledger's Ord instance places ScriptHashObj first.
+			return -c
+		}
+		return bytes.Compare(aCred.Credential[:], bCred.Credential[:])
 	})
 	return ret
 }
@@ -1338,8 +1421,10 @@ func EvaluateTxConway(
 		if execErr != nil {
 			return 0, lcommon.ExUnits{}, nil, execErr
 		}
-		retTotalExUnits.Steps += usedBudget.Steps
-		retTotalExUnits.Memory += usedBudget.Memory
+		retTotalExUnits, err = SafeAddExUnits(retTotalExUnits, usedBudget)
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, fmt.Errorf("aggregate execution units: %w", err)
+		}
 		retRedeemerExUnits[lcommon.RedeemerKey{
 			Tag:   redeemer.Tag,
 			Index: redeemer.Index,

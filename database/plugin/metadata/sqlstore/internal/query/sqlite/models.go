@@ -151,6 +151,19 @@ type ImportCheckpoint struct {
 	Phase     string
 }
 
+type ImportedEpochBlockTotal struct {
+	Epoch        int64
+	TotalBlocks  int64
+	CapturedSlot int64
+}
+
+type ImportedPoolBlockCount struct {
+	Epoch          int64
+	PoolKeyHash    []byte
+	BlocksProduced int64
+	CapturedSlot   int64
+}
+
 type MidnightAriadneParam struct {
 	ID    int64
 	Epoch int64
@@ -381,6 +394,13 @@ type RewardPoolOutput struct {
 	Unspendable         string
 	CapturedSlot        int64
 	BoundarySlot        int64
+}
+
+type RewardSeedFailure struct {
+	Epoch         int64
+	SnapshotType  string
+	FailureReason string
+	CapturedSlot  int64
 }
 
 type RewardSnapshot struct {

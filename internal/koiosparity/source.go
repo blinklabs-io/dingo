@@ -217,6 +217,32 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 	defer txn.Release()
 	meta := s.db.Metadata()
 
+	var tipSlot uint64
+	tipKnown := false
+	tip, tipErr := s.db.GetTip(txn)
+	if tipErr != nil {
+		return nil, fmt.Errorf("tip lookup: %w", tipErr)
+	}
+	if len(tip.Point.Hash) > 0 && tip.Point.Slot > 0 {
+		tipSlot = tip.Point.Slot
+		tipKnown = true
+	}
+
+	epochRewardsPending := false
+	if tipKnown {
+		applyEpoch, err := meta.GetEpoch(stakeEpoch+3, txn.Metadata())
+		if err != nil {
+			return nil, fmt.Errorf(
+				"epoch lookup %d: %w", stakeEpoch+3, err,
+			)
+		}
+		if applyEpoch == nil {
+			epochRewardsPending = true
+		} else {
+			epochRewardsPending = tipSlot < applyEpoch.StartSlot
+		}
+	}
+
 	stakeInputs, err := meta.GetRewardPoolInputs(stakeEpoch, txn.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -280,7 +306,57 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 			10,
 		)
 	}
+	if epochRewardsPending {
+		for _, data := range m {
+			if !data.MemberRewardPresent {
+				data.RewardsPending = true
+			}
+		}
+	}
 	return m, nil
+}
+
+// GetProtocolParams implements RewardParitySource against the live,
+// in-process metadata store. It mirrors DingoDB.GetProtocolParams exactly:
+// resolve the epoch's era from the `epoch` row first, then let
+// MetadataStore.GetPParams pick the latest parameter row at or before the
+// epoch within that era (its query is already `epoch <= ? AND era_id = ?`
+// ordered newest-first), then decode with that era's decoder. Both reads run
+// under one read transaction so a rollover committing between them cannot
+// hand back a row whose era disagrees with the era that selected it.
+func (s *DatabaseSource) GetProtocolParams(
+	ctx context.Context,
+	epoch uint64,
+) (*DingoProtocolParams, error) {
+	// See GetLatestEpoch's comment: no context-aware transaction/accessor
+	// exists to thread ctx into further, so this only guards against
+	// starting new work after ctx is already done.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	txn := s.db.Transaction(false)
+	defer txn.Release()
+	meta := s.db.Metadata()
+
+	epochRow, err := meta.GetEpoch(epoch, txn.Metadata())
+	if err != nil {
+		return nil, fmt.Errorf("epoch %d: %w", epoch, err)
+	}
+	if epochRow == nil {
+		return nil, nil
+	}
+	rows, err := meta.GetPParams(epoch, epochRow.EraId, txn.Metadata())
+	if err != nil {
+		return nil, fmt.Errorf("pparams epoch %d: %w", epoch, err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	return decodeProtocolParams(
+		rows[0].Cbor,
+		epochRow.EraId,
+		rows[0].Epoch,
+	)
 }
 
 // GetRewardAccountOutputs returns every per-account reward calculation

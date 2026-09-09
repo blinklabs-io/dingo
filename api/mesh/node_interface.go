@@ -44,6 +44,7 @@ type MeshDatabase interface {
 // MeshLedgerState is the subset of ledger.LedgerState needed by the Mesh server.
 type MeshLedgerState interface {
 	GetCurrentPParams() lcommon.ProtocolParameters
+	GetCurrentPParamsForReporting() lcommon.ProtocolParameters
 	SlotToTime(slot uint64) (time.Time, error)
 	UtxosByAddress(addrs []lcommon.Address) ([]models.Utxo, error)
 	// UtxosByAddressAtSlot returns the UTxOs the address held at the
@@ -53,6 +54,14 @@ type MeshLedgerState interface {
 		addr lcommon.Address,
 		slot uint64,
 	) ([]models.Utxo, error)
+}
+
+// MeshSyncProgress is an optional ledger capability for network/status.
+// Progress is between 0 (unknown) and 1 (applied ledger caught up with the
+// known upstream target), matching ledger.LedgerState.SyncProgress.
+// It does not establish peer freshness or node readiness.
+type MeshSyncProgress interface {
+	SyncProgress() float64
 }
 
 // MeshMempool is the subset of mempool.Mempool needed by the Mesh server.

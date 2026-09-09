@@ -76,6 +76,8 @@ func newChainDepStateLedger(
 // cardano-cli reports only a closed bearer — which is what `query
 // leadership-schedule` hits, since it reads the epoch nonce from this state.
 func TestQueryShelleyDebugChainDepState_Dispatches(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := newChainDepStateLedger(t, db)
 
@@ -95,6 +97,8 @@ func TestQueryShelleyDebugChainDepState_Dispatches(t *testing.T) {
 // last-epoch-block nonces in that order. Getting the arity or order wrong
 // still produces valid CBOR, so the shape is pinned by decoding it.
 func TestQueryShelleyDebugChainDepState_DecodesAsPraosState(t *testing.T) {
+	t.Parallel()
+
 	// The ledger state under test reports epoch 0, so the record has to sit
 	// there for the query to find it.
 	const epochID = 0
@@ -381,6 +385,8 @@ func TestQueryShelleyDebugChainDepState_LayoutFollowsConsensusMode(t *testing.T)
 func TestQueryShelleyDebugChainDepState_NoncesTrackTipNotEpochCheckpoint(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	// Conway's window is 4k/f = 4*6/0.4 = 60 slots, so with the epoch running
@@ -501,6 +507,8 @@ func TestQueryShelleyDebugChainDepState_NoncesTrackTipNotEpochCheckpoint(
 func TestQueryShelleyDebugChainDepState_NoncesStopAtTipNotAtStoredBlocks(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	// Conway's window is 4k/f = 4*6/0.4 = 60 slots, so with the epoch running
@@ -618,6 +626,8 @@ func TestQueryShelleyDebugChainDepState_NoncesStopAtTipNotAtStoredBlocks(
 // block of the epoch lands; after that, reporting the carried value in the lab
 // field is a stale answer for a field the chain has already moved on from.
 func TestQueryShelleyDebugChainDepState_LabNonceTracksTipParent(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	carriedLab := bytes.Repeat([]byte{0x31}, 32)
@@ -717,6 +727,8 @@ func TestQueryShelleyDebugChainDepState_LabNonceTracksTipParent(t *testing.T) {
 // carried value and report a stale lab. The tip's slot and hash together
 // address the block directly, so the index is not needed to find it.
 func TestQueryShelleyDebugChainDepState_LabNonceWithoutHashIndex(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	carriedLab := bytes.Repeat([]byte{0x51}, 32)
@@ -934,6 +946,8 @@ func TestQueryShelleyDebugChainDepState_ReportsPreviousEpochNonce(t *testing.T) 
 // half of the reply: the operational-certificate counters the chain has
 // accepted, keyed by each pool's cold-key hash.
 func TestQueryShelleyDebugChainDepState_ReportsOpCertCounters(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	poolKeyHash := make([]byte, 28)
 	for i := range poolKeyHash {
@@ -1051,6 +1065,8 @@ func TestQueryShelleyDebugChainDepState_CountersOutliveRegistration(t *testing.T
 // highest already accepted, so the reply has to carry that highest number
 // rather than whichever row happens to come back first.
 func TestQueryShelleyDebugChainDepState_HighestCounterPerPool(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	require.NoError(t, db.SetTip(
 		ochainsync.Tip{Point: ocommon.NewPoint(100, []byte("tip"))},

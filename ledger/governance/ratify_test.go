@@ -83,6 +83,8 @@ func ratifyInputs(
 }
 
 func TestShouldRatify_BootstrapDRepOnlyDoesNotSubstituteForSPO(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(9)
 	tally := &ProposalTally{
 		ActionType:     uint8(lcommon.GovActionTypeHardForkInitiation),
@@ -94,6 +96,8 @@ func TestShouldRatify_BootstrapDRepOnlyDoesNotSubstituteForSPO(t *testing.T) {
 }
 
 func TestShouldRatify_BootstrapMissingCommitteeDoesNotRatify(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(9)
 	tally := &ProposalTally{
 		ActionType: uint8(lcommon.GovActionTypeParameterChange),
@@ -109,6 +113,8 @@ func TestShouldRatify_BootstrapMissingCommitteeDoesNotRatify(t *testing.T) {
 }
 
 func TestShouldRatify_BootstrapPerBodyRequirements(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(9)
 	quorum := big.NewRat(2, 3)
 	securityValue := uint(1)
@@ -211,6 +217,8 @@ func TestShouldRatify_BootstrapPerBodyRequirements(t *testing.T) {
 }
 
 func TestShouldRatify_BootstrapUnsupportedActionsDoNotRatify(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(9)
 	unsupported := []lcommon.GovActionType{
 		lcommon.GovActionTypeTreasuryWithdrawal,
@@ -242,6 +250,8 @@ func TestShouldRatify_BootstrapUnsupportedActionsDoNotRatify(t *testing.T) {
 }
 
 func TestShouldRatify_ActionBodyMatrixAcrossBootstrapBoundary(t *testing.T) {
+	t.Parallel()
+
 	securityValue := uint(1)
 	securityUpdate := &conway.ConwayProtocolParameterUpdate{
 		MaxTxSize: &securityValue,
@@ -400,6 +410,8 @@ func TestShouldRatify_ActionBodyMatrixAcrossBootstrapBoundary(t *testing.T) {
 }
 
 func TestShouldRatify_BootstrapCCChecksRemainRequired(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(9)
 	tally := &ProposalTally{
 		ActionType:    uint8(lcommon.GovActionTypeHardForkInitiation),
@@ -425,6 +437,8 @@ func TestShouldRatify_BootstrapCCChecksRemainRequired(t *testing.T) {
 }
 
 func TestShouldRatify_InfoActionCannotRatify(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(10)
 	tally := &ProposalTally{
 		ActionType: uint8(lcommon.GovActionTypeInfo),
@@ -436,6 +450,8 @@ func TestShouldRatify_InfoActionCannotRatify(t *testing.T) {
 }
 
 func TestShouldRatify_DRepOnlyActionPasses(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(10)
 	// TreasuryWithdrawal: CC-gated, no SPO. threshold 67/100.
 	tally := &ProposalTally{
@@ -454,6 +470,8 @@ func TestShouldRatify_DRepOnlyActionPasses(t *testing.T) {
 }
 
 func TestShouldRatify_DRepBelowThreshold(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(10)
 	tally := &ProposalTally{
 		ActionType:     uint8(lcommon.GovActionTypeTreasuryWithdrawal),
@@ -472,6 +490,8 @@ func TestShouldRatify_DRepBelowThreshold(t *testing.T) {
 }
 
 func TestShouldRatify_NoActiveDRepsRejectsNonZeroThreshold(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(10)
 	tally := &ProposalTally{
 		ActionType:   uint8(lcommon.GovActionTypeTreasuryWithdrawal),
@@ -487,6 +507,8 @@ func TestShouldRatify_NoActiveDRepsRejectsNonZeroThreshold(t *testing.T) {
 }
 
 func TestShouldRatify_NoActiveDRepsApprovesZeroThreshold(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(10)
 	pparams.DRepVotingThresholds.TreasuryWithdrawal = newRat(0, 1)
 	tally := &ProposalTally{
@@ -503,6 +525,8 @@ func TestShouldRatify_NoActiveDRepsApprovesZeroThreshold(t *testing.T) {
 }
 
 func TestShouldRatify_NoAuthorizedCCFails(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(10)
 	pparams.MinCommitteeSize = 0
 	tally := &ProposalTally{
@@ -520,6 +544,8 @@ func TestShouldRatify_NoAuthorizedCCFails(t *testing.T) {
 }
 
 func TestShouldRatify_CCBelowMinimumSizeFails(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(10)
 	pparams.MinCommitteeSize = 6
 	tally := &ProposalTally{
@@ -539,6 +565,8 @@ func TestShouldRatify_CCBelowMinimumSizeFails(t *testing.T) {
 }
 
 func TestShouldRatify_NoConfidenceSkipsCCCheck(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(10)
 	tally := &ProposalTally{
 		ActionType:     uint8(lcommon.GovActionTypeNoConfidence),
@@ -557,6 +585,8 @@ func TestShouldRatify_NoConfidenceSkipsCCCheck(t *testing.T) {
 }
 
 func TestShouldRatify_HardForkRequiresAllThree(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(10)
 	tally := &ProposalTally{
 		ActionType:     uint8(lcommon.GovActionTypeHardForkInitiation),
@@ -586,6 +616,8 @@ func TestShouldRatify_HardForkRequiresAllThree(t *testing.T) {
 }
 
 func TestValidateParentChain_NoParentNoRoot(t *testing.T) {
+	t.Parallel()
+
 	proposal := &models.GovernanceProposal{
 		ActionType: uint8(lcommon.GovActionTypeParameterChange),
 	}
@@ -593,6 +625,8 @@ func TestValidateParentChain_NoParentNoRoot(t *testing.T) {
 }
 
 func TestValidateParentChain_ParentRequiredButMissing(t *testing.T) {
+	t.Parallel()
+
 	proposal := &models.GovernanceProposal{
 		ActionType: uint8(lcommon.GovActionTypeParameterChange),
 	}
@@ -604,6 +638,8 @@ func TestValidateParentChain_ParentRequiredButMissing(t *testing.T) {
 }
 
 func TestValidateParentChain_MatchingParent(t *testing.T) {
+	t.Parallel()
+
 	idx := uint32(0)
 	proposal := &models.GovernanceProposal{
 		ActionType:      uint8(lcommon.GovActionTypeParameterChange),
@@ -618,6 +654,8 @@ func TestValidateParentChain_MatchingParent(t *testing.T) {
 }
 
 func TestValidateParentChain_MismatchedParent(t *testing.T) {
+	t.Parallel()
+
 	idx := uint32(0)
 	proposal := &models.GovernanceProposal{
 		ActionType:      uint8(lcommon.GovActionTypeParameterChange),
@@ -632,6 +670,8 @@ func TestValidateParentChain_MismatchedParent(t *testing.T) {
 }
 
 func TestValidateParentChain_TreasuryWithdrawalNoChain(t *testing.T) {
+	t.Parallel()
+
 	proposal := &models.GovernanceProposal{
 		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
 	}
@@ -644,6 +684,8 @@ func TestValidateParentChain_TreasuryWithdrawalNoChain(t *testing.T) {
 }
 
 func TestProposalTally_DRepYesRatio(t *testing.T) {
+	t.Parallel()
+
 	tally := &ProposalTally{
 		DRepYesStake: 70,
 		DRepNoStake:  30,
@@ -656,12 +698,16 @@ func TestProposalTally_DRepYesRatio(t *testing.T) {
 }
 
 func TestProposalTally_DRepYesRatioZeroParticipation(t *testing.T) {
+	t.Parallel()
+
 	tally := &ProposalTally{}
 	ratio := tally.DRepYesRatio()
 	assert.Equal(t, 0, ratio.Sign())
 }
 
 func TestGetDRepThreshold_ParameterGroupSelection(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(10)
 	// Update touches both economic (MinFeeA) and gov (GovActionDeposit).
 	fee := uint(100)
@@ -678,6 +724,8 @@ func TestGetDRepThreshold_ParameterGroupSelection(t *testing.T) {
 }
 
 func TestGetDRepThreshold_NilUpdateTakesMaxAcrossGroups(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(10)
 	// Make technical the strictest so we can observe max behaviour
 	// rather than the fixture's implicit gov-is-highest ordering.
@@ -689,12 +737,16 @@ func TestGetDRepThreshold_NilUpdateTakesMaxAcrossGroups(t *testing.T) {
 }
 
 func TestGetSPOThreshold_InfoReturnsNil(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(10)
 	got := getSPOThreshold(lcommon.GovActionTypeInfo, pparams, nil, false)
 	assert.Nil(t, got)
 }
 
 func TestGetSPOThreshold_NoConfidenceUsesMotionNoConfidence(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(10)
 	// Distinguish MotionNoConfidence from CommitteeNoConfidence so we
 	// can assert the correct field is used for NoConfidence actions.
@@ -707,6 +759,8 @@ func TestGetSPOThreshold_NoConfidenceUsesMotionNoConfidence(t *testing.T) {
 }
 
 func TestGetDRepThreshold_NoConfidenceUsesMotionNoConfidence(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(10)
 	pparams.DRepVotingThresholds.MotionNoConfidence = newRat(40, 100)
 	pparams.DRepVotingThresholds.CommitteeNoConfidence = newRat(90, 100)
@@ -717,6 +771,8 @@ func TestGetDRepThreshold_NoConfidenceUsesMotionNoConfidence(t *testing.T) {
 }
 
 func TestGetSPOThreshold_ParameterChangeSecurityGroup(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(10)
 	// An update that touches only technical-group (A0) should not
 	// trigger an SPO vote.
@@ -761,6 +817,8 @@ func TestGetSPOThreshold_ParameterChangeSecurityGroup(t *testing.T) {
 }
 
 func TestGetDRepThreshold_UpdateCommitteeNoConfidenceState(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(10)
 	// Fixture sets CommitteeNormal=67/100, CommitteeNoConfidence=60/100.
 	normal := getDRepThreshold(
@@ -774,6 +832,8 @@ func TestGetDRepThreshold_UpdateCommitteeNoConfidenceState(t *testing.T) {
 }
 
 func TestGetSPOThreshold_UpdateCommitteeNoConfidenceState(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(10)
 	// Distinguish the two thresholds so the switch is observable.
 	pparams.PoolVotingThresholds.CommitteeNormal = newRat(51, 100)
@@ -789,6 +849,8 @@ func TestGetSPOThreshold_UpdateCommitteeNoConfidenceState(t *testing.T) {
 }
 
 func TestShouldRatify_CCQuorumMissingFailsSafe(t *testing.T) {
+	t.Parallel()
+
 	pparams := conwayPParamsFixture(10)
 	tally := &ProposalTally{
 		// CC-gated action (TreasuryWithdrawal); passes DRep threshold
@@ -818,6 +880,8 @@ func TestShouldRatify_CCQuorumMissingFailsSafe(t *testing.T) {
 }
 
 func TestConwayRatifyQuorum_FromGenesis(t *testing.T) {
+	t.Parallel()
+
 	threshold := cbor.Rat{Rat: big.NewRat(3, 5)}
 	genesis := &conway.ConwayGenesis{
 		Committee: conway.ConwayGenesisCommittee{
@@ -830,12 +894,16 @@ func TestConwayRatifyQuorum_FromGenesis(t *testing.T) {
 }
 
 func TestConwayRatifyQuorum_FallbackWhenGenesisNil(t *testing.T) {
+	t.Parallel()
+
 	got, err := conwayRatifyQuorum(nil, nil, nil, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, big.NewRat(2, 3), got)
 }
 
 func TestConwayRatifyQuorum_FallbackWhenThresholdMissing(t *testing.T) {
+	t.Parallel()
+
 	genesis := &conway.ConwayGenesis{}
 	got, err := conwayRatifyQuorum(nil, nil, nil, genesis)
 	assert.NoError(t, err)
@@ -843,6 +911,8 @@ func TestConwayRatifyQuorum_FallbackWhenThresholdMissing(t *testing.T) {
 }
 
 func TestConwayRatifyQuorum_PrefersDBOverGenesis(t *testing.T) {
+	t.Parallel()
+
 	db, _ := newTallyTestDB(t)
 
 	// An enacted quorum must win over the Conway genesis default so
@@ -864,6 +934,8 @@ func TestConwayRatifyQuorum_PrefersDBOverGenesis(t *testing.T) {
 func TestConwayRatifyQuorum_FallsBackToGenesisAfterClear(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, _ := newTallyTestDB(t)
 
 	// Enact then immediately clear. Ratify must fall back to Conway

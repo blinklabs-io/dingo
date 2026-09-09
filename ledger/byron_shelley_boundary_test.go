@@ -23,10 +23,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -111,6 +113,8 @@ func loadBoundaryBlock(
 // parameters. Both shipped networks with a Byron prefix rule that out: the
 // Shelley block links directly to the last Byron block.
 func TestByronShelleyBoundaryHasNoEpochBoundaryBlock(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range boundaryFixtures {
 		t.Run(tc.name, func(t *testing.T) {
 			last := loadBoundaryBlock(t, tc.byronFile, tc.byronType)
@@ -155,22 +159,34 @@ func TestByronShelleyBoundaryHasNoEpochBoundaryBlock(t *testing.T) {
 // ahead of this block precisely because the block above is Shelley, which
 // TestByronShelleyBoundaryHasNoEpochBoundaryBlock pins.
 func TestByronShelleyBoundaryEnvelopeRequiresProtocolParameters(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range boundaryFixtures {
 		t.Run(tc.name, func(t *testing.T) {
 			last := loadBoundaryBlock(t, tc.byronFile, tc.byronType)
 			first := loadBoundaryBlock(t, tc.shelleyFile, tc.shelleyType)
 			parent := envelopeParentFromBlock(last)
 
-			// The Byron parent itself needs no parameters: Byron returns
-			// before the size checks.
+			byronConfig := newByronEnvelopeNodeConfig(
+				t,
+				len(last.Cbor()),
+				len(last.Header().Cbor()),
+			)
+			// The Byron parent itself needs no protocol parameters: its
+			// limits come from Byron genesis instead.
 			require.NoError(
 				t,
-				validateInboundBlockEnvelope(last, nil, envelopeParent{
-					origin: true,
-				}),
+				validateInboundBlockEnvelope(
+					last,
+					nil,
+					byronConfig,
+					envelopeParent{
+						origin: true,
+					},
+				),
 			)
 
-			err := validateInboundBlockEnvelope(first, nil, parent)
+			err := validateInboundBlockEnvelope(first, nil, nil, parent)
 			require.Error(t, err)
 			assert.Contains(
 				t,
@@ -182,7 +198,10 @@ func TestByronShelleyBoundaryEnvelopeRequiresProtocolParameters(t *testing.T) {
 				MaxBlockBodySize:   tc.maxBlockBodySize,
 				MaxBlockHeaderSize: tc.maxHeaderSize,
 			}
-			assert.NoError(t, validateInboundBlockEnvelope(first, pp, parent))
+			assert.NoError(
+				t,
+				validateInboundBlockEnvelope(first, pp, nil, parent),
+			)
 
 			// The block's declared body size is what the size check measures,
 			// so a limit one byte below it must reject. This keeps the
@@ -194,7 +213,7 @@ func TestByronShelleyBoundaryEnvelopeRequiresProtocolParameters(t *testing.T) {
 			}
 			assert.ErrorContains(
 				t,
-				validateInboundBlockEnvelope(first, tooSmall, parent),
+				validateInboundBlockEnvelope(first, tooSmall, nil, parent),
 				"exceeds maxBlockBodySize",
 			)
 		})
@@ -216,6 +235,8 @@ func TestByronShelleyBoundaryEnvelopeRequiresProtocolParameters(t *testing.T) {
 // do carry a version, which is the case validateInboundBlockEnvelope also
 // rejects.
 func TestByronBlockHeaderProtocolVersionSkippedWithoutPParams(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range boundaryFixtures {
 		t.Run(tc.name, func(t *testing.T) {
 			ls := newLedgerStateForNetwork(t, "Testnet", 42)
@@ -400,6 +421,8 @@ func newByronShelleyBoundaryLedger(
 func TestByronShelleyBoundaryProcessesFirstShelleyBlockWithPParams(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, _, firstShelley := newByronShelleyBoundaryLedger(t)
 	require.True(t, ls.validationEnabled)
 
@@ -425,6 +448,8 @@ func TestByronShelleyBoundaryProcessesFirstShelleyBlockWithPParams(
 func TestRollbackChainAndStateClearsShelleyPParamsInsideByronPrefix(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, lastByron, firstShelley := newByronShelleyBoundaryLedger(t)
 
 	const shelleyEpoch = uint64(208)
@@ -481,7 +506,7 @@ func TestRollbackChainAndStateClearsShelleyPParamsInsideByronPrefix(
 		lastByron.SlotNumber(),
 		lastByron.Hash().Bytes(),
 	)
-	require.NoError(t, ls.rollbackChainAndState(byronPoint))
+	require.NoError(t, ls.rollbackChainAndStateDeferred(byronPoint, nil))
 
 	assert.Equal(t, byronPoint, ls.currentTip.Point)
 	assert.Equal(t, eras.ByronEraDesc.Id, ls.currentEra.Id)

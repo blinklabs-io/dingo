@@ -33,6 +33,8 @@ import (
 // TestDeliverWaitsForCapacityThenDelivers is the core no-loss property: a
 // delivery into a full buffer parks until a slot frees, then lands.
 func TestDeliverWaitsForCapacityThenDelivers(t *testing.T) {
+	t.Parallel()
+
 	sub := newChannelSubscriber("test", 1, nil)
 	require.NoError(t, sub.Deliver(NewEvent("test", "first")))
 
@@ -63,6 +65,8 @@ func TestDeliverWaitsForCapacityThenDelivers(t *testing.T) {
 // Deliver holds mu.RLock while waiting, so Close has to signal waiters before
 // it takes mu.Lock.
 func TestDeliverUnblocksOnClose(t *testing.T) {
+	t.Parallel()
+
 	sub := newChannelSubscriber("test", 1, nil)
 	require.NoError(t, sub.Deliver(NewEvent("test", "fill")))
 
@@ -104,6 +108,8 @@ func TestDeliverUnblocksOnClose(t *testing.T) {
 // PublishBlocking uses, which must surface the closed error so PublishBlocking
 // can report ErrEventBusStopped.
 func TestDeliverBlockingUnblocksOnClose(t *testing.T) {
+	t.Parallel()
+
 	sub := newChannelSubscriber("test", 1, nil)
 	require.NoError(t, sub.DeliverBlocking(NewEvent("test", "fill")))
 
@@ -131,6 +137,8 @@ func TestDeliverBlockingUnblocksOnClose(t *testing.T) {
 // TestCloseRaceWithBlockedDelivers stresses the window between a waiting send
 // and close(ch). A send that resumes after the channel is closed would panic.
 func TestCloseRaceWithBlockedDelivers(t *testing.T) {
+	t.Parallel()
+
 	const iters = 500
 	const senders = 8
 	for range iters {
@@ -167,6 +175,9 @@ func TestCloseRaceWithBlockedDelivers(t *testing.T) {
 // subscriber stops draining. Backpressure is normal under load, so the warning
 // is emitted only after a delivery has been parked for a full interval, and it
 // repeats at most once per interval rather than once per event.
+// Not t.Parallel: this and the other tests here swap the package-level
+// deliveryStallWarnInterval / channelDeliveryTimeout tunables, which every
+// concurrently running event-bus test in this package would observe.
 func TestDeliverStallWarning(t *testing.T) {
 	origInterval := deliveryStallWarnInterval
 	deliveryStallWarnInterval = 20 * time.Millisecond
@@ -225,6 +236,8 @@ func TestDeliverDoesNotWarnWhenCapacityIsAvailable(t *testing.T) {
 // TestDeliverAfterCloseReturnsClosed keeps the post-close contract explicit:
 // DeliverBlocking reports the closed subscriber, Deliver swallows it.
 func TestDeliverAfterCloseReturnsClosed(t *testing.T) {
+	t.Parallel()
+
 	sub := newChannelSubscriber("test", 1, nil)
 	sub.Close()
 

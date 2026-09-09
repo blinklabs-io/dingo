@@ -58,6 +58,17 @@ type Manager struct {
 	loopWg         sync.WaitGroup
 	metrics        *managerMetrics
 
+	// retentionGuard, when set, runs the pool-stake snapshot prune under the
+	// deferred-header lock so the retention-floor selection and the prune are
+	// atomic with respect to deferred-header admission (issue #3727 race).
+	// cleanupOldSnapshots passes its default currentEpoch-3 boundary and a
+	// prune closure that deletes+commits pool snapshots below the boundary the
+	// guard hands back (lowered to keep snapshots a queued/deferred header
+	// still needs). A nil guard (the default) preserves the original pruning
+	// behaviour exactly. Guarded by mu; wired by the node to
+	// LedgerState.PrunePoolSnapshotsWithRetentionFloor.
+	retentionGuard PoolSnapshotRetentionGuard
+
 	// pendingBoundary holds the stake distribution computed at the SNAP point of
 	// an in-flight epoch rollover, waiting for the same rollover transaction to
 	// persist it once the new epoch row (nonce, boundary slot, protocol version)
@@ -219,6 +230,43 @@ func (m *Manager) SetPromRegistry(reg prometheus.Registerer) {
 	if m.metrics == nil {
 		m.metrics = initManagerMetrics(reg)
 	}
+}
+
+// PoolSnapshotRetentionGuard runs the caller's pool-snapshot prune with the
+// deferred-header set held stable, returning the boundary to prune below.
+// defaultBefore is cleanup's default currentEpoch-3 pool boundary; the guard
+// lowers it to the retention floor a queued/deferred header still requires
+// (or to 0 = retain everything while any deferred slot is unmappable), then
+// clamps it UP to minBefore, a hard backstop bounding how many historical
+// epochs the pin can ever hold. All of this — plus eviction of deferred
+// headers the apply cursor has passed — happens under one lock so admission
+// cannot interleave (issue #3727). prune must delete AND commit before
+// returning.
+type PoolSnapshotRetentionGuard func(
+	defaultBefore uint64,
+	minBefore uint64,
+	prune func(before uint64) error,
+) error
+
+// SetPoolSnapshotRetentionGuard installs the guard cleanupOldSnapshots uses to
+// prune pool snapshots atomically with the deferred-header retention floor, so
+// a snapshot a queued/deferred header still needs is retained beyond the
+// default currentEpoch-3 window until the header resolves (issue #3727). Pass
+// nil to clear it. It should be set before Start; a nil guard (the default)
+// preserves the original pruning behaviour exactly.
+func (m *Manager) SetPoolSnapshotRetentionGuard(g PoolSnapshotRetentionGuard) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.retentionGuard = g
+}
+
+// poolSnapshotRetentionGuard returns the installed guard, if any. Read under mu
+// so a guard installed via SetPoolSnapshotRetentionGuard races safely with the
+// manager's epoch-transition goroutine.
+func (m *Manager) poolSnapshotRetentionGuard() PoolSnapshotRetentionGuard {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.retentionGuard
 }
 
 // Start begins listening for epoch transitions and capturing

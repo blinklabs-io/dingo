@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	_ "github.com/glebarez/go-sqlite"
 )
@@ -130,6 +131,13 @@ func NewDatabaseWithOptions(
 	if blobRegister == nil {
 		blobRegister = badger.RegisterProvider
 	}
+	blobConfig := opts.Blob.Config
+	if blobConfig == nil && blobName == "badger" {
+		// Keep the on-disk files a test's badger store reserves small;
+		// see testutil.BadgerBlobConfig. A caller that supplies its own
+		// config owns the sizing.
+		blobConfig = testutil.BadgerBlobConfig()
+	}
 	metadataName := opts.Metadata.Name
 	if metadataName == "" {
 		metadataName = "sqlite"
@@ -147,7 +155,7 @@ func NewDatabaseWithOptions(
 	}
 	blobStore, err := plugin.Resolve[blob.BlobStore](
 		context.Background(), host,
-		plugin.CapabilityStorageBlob, blobName, opts.Blob.Config,
+		plugin.CapabilityStorageBlob, blobName, blobConfig,
 		blob.ProviderDependencies{
 			DataDir: config.DataDir, RunMode: opts.RunMode,
 			StorageMode: config.StorageMode,

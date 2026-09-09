@@ -71,6 +71,8 @@ func testPoolKeyHash(t *testing.T, b byte) []byte {
 // deliberately wrong values in every field, so the test fails loudly if
 // GetPoolEpochDataMap regresses to reading the naive same-numbered epoch.
 func TestGetPoolEpochDataMapAlignsRewardScheduleEpochs(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 
@@ -174,6 +176,8 @@ func TestGetPoolEpochDataMapAlignsRewardScheduleEpochs(t *testing.T) {
 // zero-value BlocksProduced/FixedCost/Margin that ComparePoolEpoch could
 // mistake for a real (and wrong) value.
 func TestGetPoolEpochDataMapMissingParamEpochRow(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 
@@ -205,6 +209,8 @@ func TestGetPoolEpochDataMapMissingParamEpochRow(t *testing.T) {
 // freshly registered pool's param-epoch row lands before its stake-epoch row
 // does.
 func TestGetPoolEpochDataMapMissingStakeEpochRow(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 
@@ -250,6 +256,8 @@ func TestGetPoolEpochDataMapMissingStakeEpochRow(t *testing.T) {
 // pool key hash round-trips correctly, guarding the low-level building block
 // koiosStakeEpoch/koiosParamEpoch and check.go's checkEpoch rely on.
 func TestGetEpochDataStakeEpochOffset(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 
@@ -283,6 +291,8 @@ func TestGetEpochDataStakeEpochOffset(t *testing.T) {
 // for an epoch, since #3097's per-account parity check will read either one
 // interchangeably.
 func TestDingoDBGetRewardAccountOutputs(t *testing.T) {
+	t.Parallel()
+
 	dingo, gdb := openTestDingoDB(t)
 	defer dingo.Close() //nolint:errcheck
 	stakingKey := testPoolKeyHash(t, 0x11)
@@ -311,6 +321,8 @@ func TestDingoDBGetRewardAccountOutputs(t *testing.T) {
 // valid pool ID, used implicitly by the boundary tests above via
 // hex.EncodeToString matching GetPoolEpochDataMap's own key format.
 func TestPoolKeyHashRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	h := testPoolKeyHash(t, 0x01)
 	var pid lcommon.PoolId
 	copy(pid[:], h)

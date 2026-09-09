@@ -63,25 +63,14 @@ jobs:
         ports:
           - 9000:9000
           - 9001:9001
-    env:
-      POSTGRES_HOST: localhost
-      POSTGRES_PORT: '5432'
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DATABASE: dingo_test
-      MYSQL_HOST: localhost
-      MYSQL_PORT: '3306'
-      MYSQL_USER: mysql
-      MYSQL_PASSWORD: mysql
-      MYSQL_DATABASE: dingo_test
-      MYSQL_ROOT_PASSWORD: mysql
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
-      AWS_ENDPOINT: "http://127.0.0.1:9000/"
-      AWS_REGION: us-east-1
-      DINGO_TEST_S3_BUCKET: dingo-test
     steps:
       - name: setup-s3-bucket
+        env:
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+          AWS_ENDPOINT: "http://127.0.0.1:9000/"
+          AWS_REGION: us-east-1
+          DINGO_TEST_S3_BUCKET: dingo-test
         run: |
           curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
           unzip -q awscliv2.zip

@@ -146,6 +146,9 @@ type Node struct {
 
 	// liveLifecycleMu serializes live database Restore/Truncate calls
 	// (node_lifecycle.go) so two can never quiesce/rebuild concurrently.
+	// Shutdown takes this mutex before cancelling components or closing
+	// storage, so it cannot tear down a live operation in progress. The lock
+	// order with snapshotMu is always liveLifecycleMu, then snapshotMu.
 	// Deliberately NOT held by Snapshot (see snapshotMu): Snapshot never
 	// nils/rebuilds n.ledgerState or n.chainsyncState the way Restore/
 	// Truncate do, so a background reader like the chainsync recycler
@@ -154,12 +157,24 @@ type Node struct {
 	// running, which this mutex would otherwise make indistinguishable.
 	liveLifecycleMu sync.Mutex
 
+	// A selected-to-none transition cannot be dropped while a live database
+	// lifecycle operation holds liveLifecycleMu. One node-owned worker retains
+	// only the latest contended transition and retries until the lifecycle lock
+	// is available or the node context is cancelled, bounding both queued work
+	// and goroutine count.
+	chainSelectedNoneMu         sync.Mutex
+	chainSelectedNonePending    chainselection.ChainSelectedNoneEvent
+	chainSelectedNonePendingSet bool
+	chainSelectedNoneWake       chan struct{}
+	chainSelectedNoneWorkerDone chan struct{}
+
 	// snapshotMu serializes Snapshot calls against each other and against
 	// a concurrent Restore/Truncate (which closes n.db out from under an
 	// in-progress Snapshot if not excluded), and is what enforces bark
 	// DatabaseService's "one operation at a time" invariant for Snapshot
-	// specifically. Restore/Truncate take both this and liveLifecycleMu;
-	// Snapshot takes only this one -- so a long-running Snapshot (a full
+	// specifically. Restore/Truncate take both this and liveLifecycleMu, and
+	// shutdown takes both in that same order; Snapshot takes only this one --
+	// so a long-running Snapshot (a full
 	// local copy plus cloud upload) never blocks a background reader that
 	// only cares about liveLifecycleMu, such as the chainsync recycler
 	// tick's stall-detection/plateau-recovery check, matching Snapshot's
@@ -219,15 +234,17 @@ func New(cfg Config) (*Node, error) {
 	if err := n.configPopulateNetworkMagic(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
+	// Invalid configuration must not leave collectors in a caller-owned
+	// registry: callers may correct it and retry construction with that registry.
+	if err := n.configValidate(); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
 	// Wrap the prometheus registry with a "network" label so all metrics
 	// registered by subsystems carry the network name automatically.
 	// This must happen before any component registers metrics.
 	n.configWrapPromRegistry()
 	n.registerBuildInfo()
 	n.registerRTSMetrics()
-	if err := n.configValidate(); err != nil {
-		return nil, fmt.Errorf("invalid configuration: %w", err)
-	}
 	// NewEventBus starts background async-worker goroutines, so create the bus
 	// only after configuration validates. If it were created earlier, a
 	// validation failure would return a nil Node while leaving those goroutines
@@ -509,6 +526,19 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// the async-worker pool, leaking those goroutines.
 	started = append(started, func() { n.eventBus.Close() })
 	started = append(started, func() {
+		// Skipped on an unconfirmed ledger state drain for the same reason
+		// the db.Close LIFO stop above is: storage plugins can be backed by
+		// the same n.db a still-running background goroutine may be using.
+		// This closure is registered before (so stops after) both the
+		// ledgerState.Close and db.Close stops below, so it observes
+		// ledgerStateDrainConfirmed's final value -- mirrors
+		// node_shutdown.go's shutdown() phase 3 guard on pluginHost.Stop.
+		if !ledgerStateDrainConfirmed {
+			n.config.logger.Error(
+				"skipping plugin host shutdown during startup-failure cleanup because ledger state drain was not confirmed",
+			)
+			return
+		}
 		if err := n.pluginHost.Stop(context.Background()); err != nil {
 			n.config.logger.Error(
 				"failed to stop plugin host during cleanup",
@@ -589,7 +619,19 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return errors.New("empty database returned")
 	}
 	n.db = db
-	started = append(started, func() { n.db.Close() })
+	// ledgerStateDrainConfirmed (declared above) is set false by the
+	// ledgerState.Close LIFO stop below on an unconfirmed drain; this
+	// closure runs after that one in LIFO order (registered first, so
+	// stopped last), so it observes the flag's final value.
+	started = append(started, func() {
+		if !ledgerStateDrainConfirmed {
+			n.config.logger.Error(
+				"skipping database close during startup-failure cleanup because ledger state drain was not confirmed",
+			)
+			return
+		}
+		n.db.Close()
+	})
 	if err != nil {
 		if _, ok := errors.AsType[database.CommitTimestampError](err); !ok {
 			return fmt.Errorf("failed to open database: %w", err)
@@ -706,6 +748,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		if err != nil {
 			return fmt.Errorf("failed to create bark blob store: %w", err)
 		}
+		// The wrapper's upstream is the store it replaces and its Close
+		// forwards there, so the replaced store stays in use: there is
+		// nothing to drain and nothing to close. Both results are
+		// deliberately discarded.
 		n.db.SetBlobStore(barkBlobStore)
 	}
 
@@ -774,68 +820,14 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// are required: the indexer depends on the api-mode indexes to function,
 	// and storage mode alone is no longer sufficient to start it (an api-mode
 	// deployment may not want Midnight indexing at all).
-	if n.config.midnight.Enabled && n.config.storageMode.IsAPI() {
+	if midnightIndexerActive(n.config.storageMode, n.config.midnight) {
 		if err := n.ledgerState.PrepareEpochCacheForStartup(); err != nil {
 			return fmt.Errorf(
 				"load epoch cache before Midnight indexer start: %w",
 				err,
 			)
 		}
-		midnightIdx, err := midnightindexer.New(midnightindexer.Config{
-			EventBus:                n.eventBus,
-			Metadata:                n.db.Metadata(),
-			SlotTimer:               n.ledgerState,
-			Logger:                  n.config.logger,
-			PromRegistry:            n.config.promRegistry,
-			CNightPolicyID:          n.config.midnight.CNightPolicyID,
-			CNightAssetName:         n.config.midnight.CNightAssetName,
-			MappingValidatorAddress: n.config.midnight.MappingValidatorAddress,
-			AuthTokenPolicyID:       n.config.midnight.AuthTokenPolicyID,
-			AuthTokenAssetName:      n.config.midnight.AuthTokenAssetName,
-			// Governance / Ariadne / candidate scanning
-			TechnicalCommitteeAddress:   n.config.midnight.TechnicalCommitteeAddress,
-			TechnicalCommitteePolicyID:  n.config.midnight.TechnicalCommitteePolicyID,
-			CouncilAddress:              n.config.midnight.CouncilAddress,
-			CouncilPolicyID:             n.config.midnight.CouncilPolicyID,
-			PermissionedCandidatePolicy: n.config.midnight.PermissionedCandidatePolicy,
-			CommitteeCandidateAddress:   n.config.midnight.CommitteeCandidateAddress,
-			SlotToEpoch: func(slot uint64) (uint64, error) {
-				epoch, err := n.ledgerState.SlotToEpoch(slot)
-				if err != nil {
-					return 0, err
-				}
-				return epoch.EpochId, nil
-			},
-			BlockIterator: func(startSlot, endSlot uint64, fn func(models.Block) error) error {
-				return database.ForEachBlockInRangeDB(
-					n.db,
-					startSlot,
-					endSlot,
-					fn,
-				)
-			},
-			// Read the applied ledger tip straight from metadata rather than
-			// from n.ledgerState.Tip(): LedgerState only loads its in-memory
-			// tip inside Start, which runs after this indexer has already
-			// backfilled, so Tip() would still be the zero value here. Blocks
-			// stored above this slot -- the whole post-snapshot suffix on a
-			// Mithril-bootstrapped node -- are replayed by LedgerState.Start
-			// and reach the indexer as live block events instead.
-			LedgerTipSlot: func() (uint64, error) {
-				tip, err := n.db.GetTip(nil)
-				if err != nil {
-					return 0, err
-				}
-				return tip.Point.Slot, nil
-			},
-			FatalErrorFunc: func(err error) {
-				n.config.logger.Error(
-					"fatal midnight indexer error, initiating shutdown",
-					"error", err,
-				)
-				n.cancel()
-			},
-		})
+		midnightIdx, err := midnightindexer.New(n.midnightIndexerConfig())
 		if err != nil {
 			return fmt.Errorf("creating midnight indexer: %w", err)
 		}
@@ -873,6 +865,14 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("configuring snapshot manager: %w", err)
 	}
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
+	// Prune pool snapshots through the deferred-header retention guard, so a
+	// snapshot a queued/deferred header still needs for leader validation is
+	// never pruned out from under it and misread as pool absence, and the
+	// floor selection is atomic with deferred-header admission (issue #3727).
+	// Set before Start; the pin is released automatically as headers resolve.
+	n.snapshotMgr.SetPoolSnapshotRetentionGuard(
+		n.ledgerState.PrunePoolSnapshotsWithRetentionFloor,
+	)
 	// Wire the authoritative epoch-boundary capture before block sync begins so
 	// each epoch rollover stages its mark snapshot atomically at the SNAP point.
 	// Set before CaptureGenesisSnapshot/sync; a nil hook (never set) would leave
@@ -922,7 +922,24 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start ledger: %w", err)
 	}
-	started = append(started, func() { n.ledgerState.Close() })
+	started = append(started, func() {
+		// Close returns a non-nil error only when a bounded wait
+		// (rollback-event goroutines, dbWorkerPool shutdown) could not
+		// confirm every background goroutine had actually exited before
+		// giving up -- unlike an ordinary cleanup failure, that means a
+		// goroutine may still be reading or writing n.db. Setting
+		// ledgerStateDrainConfirmed false makes the earlier-registered (so
+		// later-run) db.Close LIFO stop skip closing it out from under that
+		// goroutine, the same guard node_shutdown.go's shutdown() applies
+		// on the normal signal-driven path.
+		if err := n.ledgerState.Close(); err != nil {
+			ledgerStateDrainConfirmed = false
+			n.config.logger.Error(
+				"ledger state did not fully shut down; skipping database close because a background goroutine may still be using it",
+				"error", err,
+			)
+		}
+	})
 	// Register midnight indexer cleanup after LedgerState so it is torn down
 	// first (reverse order): midnight.Stop() → ledgerState.Close().
 	if n.midnightIndexer != nil {
@@ -1098,7 +1115,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			"min_corroborating_peers", n.config.genesisCorroborationPeers,
 		)
 	}
-	// Wire chain-selector event subscriptions.
+	// Wire chain-selector event subscriptions. Start the selected-to-none
+	// deferral worker first so a contended one-shot transition is never lost.
+	n.startChainSelectedNoneWorker(n.ctx)
+	started = append(started, n.waitChainSelectedNoneWorker)
 	n.subscribeChainSelectorEvents()
 	// Start the chain selector
 	if err := n.chainSelector.Start(n.ctx); err != nil { //nolint:contextcheck
@@ -1772,23 +1792,41 @@ func (n *Node) handleConnManagerClosed(
 	}
 }
 
-// subscribeConnectionEvents wires the connection-manager side of the EventBus:
-// recycle requests, connection-closed and inbound-connection delivery to
-// ouroboros, and the ledger<->connmanager event translation that keeps ledger/
-// from importing connmanager/. Subscriptions are registered before listeners
-// start so inbound connections from peers that connect immediately are not
-// lost.
-func (n *Node) subscribeConnectionEvents() {
-	// Subscriber ID captured for the same reason as chainManager's above —
-	// n.connManager is rebuilt during a live database restore/truncate.
-	n.connManagerRecycleSubId = n.eventBus.SubscribeFunc(
+// subscribeConnectionRecycleRequests subscribes handler to
+// connmanager.ConnectionRecycleRequestedEventType with lossless delivery.
+//
+// Every recycle publisher (the chainsync stall recycler, peer governance, the
+// ledger translation below) ends here, and a recycle request cannot be
+// replayed: each publisher raises exactly one request per connection and then
+// keeps its own "already asked" flag set. The leios-fetch backfill is the
+// clearest case -- a connection whose leios-fetch request slot is permanently
+// abandoned can never answer again, so dropping its single recycle request
+// leaves that connection in the pool for the rest of its life and the by-point
+// fetch keeps re-trying a corpse (dingo #3552). Detaching this subscriber under
+// backpressure would do exactly that, so it stays attached until it drains or
+// node shutdown closes it.
+func (n *Node) subscribeConnectionRecycleRequests(
+	handler event.EventHandlerFunc,
+) event.EventSubscriberId {
+	return n.eventBus.SubscribeFuncWithBufferPolicy(
 		connmanager.ConnectionRecycleRequestedEventType,
-		n.connManager.HandleConnectionRecycleRequestedEvent,
+		event.DefaultSubscriberBuffer,
+		event.SubscriberBackpressureBlock,
+		handler,
 	)
-	// Translate ledger-owned recycle events to connmanager recycle events so
-	// ledger/ does not import connmanager/.
-	n.eventBus.SubscribeFunc(
+}
+
+// subscribeLedgerConnectionRecycleTranslation translates ledger-owned recycle
+// events to connmanager recycle events so ledger/ does not import connmanager/.
+// It is the first hop of the same one-request-per-connection stream as
+// subscribeConnectionRecycleRequests above and is lossless for the same reason:
+// a detached translator silently strips every ledger- and ouroboros-side
+// recycle request out of the stream.
+func (n *Node) subscribeLedgerConnectionRecycleTranslation() {
+	n.eventBus.SubscribeFuncWithBufferPolicy(
 		ledger.ConnectionRecycleRequestedEventType,
+		event.DefaultSubscriberBuffer,
+		event.SubscriberBackpressureBlock,
 		func(evt event.Event) {
 			e, ok := evt.Data.(ledger.ConnectionRecycleRequestedEvent)
 			if !ok {
@@ -1808,6 +1846,21 @@ func (n *Node) subscribeConnectionEvents() {
 			)
 		},
 	)
+}
+
+// subscribeConnectionEvents wires the connection-manager side of the EventBus:
+// recycle requests, connection-closed and inbound-connection delivery to
+// ouroboros, and the ledger<->connmanager event translation that keeps ledger/
+// from importing connmanager/. Subscriptions are registered before listeners
+// start so inbound connections from peers that connect immediately are not
+// lost.
+func (n *Node) subscribeConnectionEvents() {
+	// Subscriber ID captured for the same reason as chainManager's above —
+	// n.connManager is rebuilt during a live database restore/truncate.
+	n.connManagerRecycleSubId = n.subscribeConnectionRecycleRequests(
+		n.connManager.HandleConnectionRecycleRequestedEvent,
+	)
+	n.subscribeLedgerConnectionRecycleTranslation()
 	// Subscribe to connection events BEFORE starting listeners so that
 	// inbound connections from peers that connect immediately are not lost.
 	//
@@ -1886,9 +1939,8 @@ func (n *Node) subscribeChainSelectorEvents() {
 		n.handleChainSwitchEvent,
 	)
 	// Subscribe to selected-to-none transitions (selection stalled, e.g. an
-	// uncorroborated Genesis fast source). Enforcement that the stalled source
-	// stops feeding the ledger is handled by the ChainsyncApplyEligible gate;
-	// this handler surfaces the stall for observability.
+	// uncorroborated Genesis fast source). The handler clears the ledger's active
+	// connection so it cannot retain a source ChainSelector no longer accepts.
 	n.eventBus.SubscribeFunc(
 		chainselection.ChainSelectedNoneEventType,
 		n.handleChainSelectedNoneEvent,

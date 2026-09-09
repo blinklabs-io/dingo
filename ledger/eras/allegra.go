@@ -162,6 +162,7 @@ var allegraUtxoValidationRules = buildAllegraValidationRules()
 // components is sized the same 210 bytes too large.
 func buildAllegraValidationRules() []indexedUtxoValidationRule {
 	return buildIndexedUtxoValidationRulesWithSkips(
+		allegra.UtxoValidationRuleDescriptors(),
 		allegra.UtxoValidationRules,
 		[]utxoValidationRuleSkip{
 			{

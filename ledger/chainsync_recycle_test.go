@@ -42,6 +42,8 @@ func testRecycleConnId() ouroboros.ConnectionId {
 // a header crypto verification failure on the chainsync path publishes a
 // ledger.ConnectionRecycleRequestedEvent with reason "header_verification_failure".
 func TestChainsyncHeaderVerificationFailurePublishesRecycleEvent(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
@@ -94,6 +96,8 @@ func TestChainsyncHeaderVerificationFailurePublishesRecycleEvent(t *testing.T) {
 func TestChainsyncHeaderVerificationMissingEpochDefersToBlockfetch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
@@ -156,6 +160,8 @@ func TestChainsyncHeaderVerificationMissingEpochDefersToBlockfetch(
 func TestChainsyncHeaderVerificationEmptyEpochNonceDefersToBlockfetch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
@@ -237,6 +243,8 @@ func TestChainsyncHeaderVerificationEmptyEpochNonceDefersToBlockfetch(
 func TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
@@ -286,6 +294,8 @@ func TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent(
 func TestBlockfetchStatefulHeaderVerificationDefersUntilLedgerApply(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId := testRecycleConnId()
 	tb := createTestBlock(t, [32]byte{47}, 0, tamperNone)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
@@ -295,11 +305,11 @@ func TestBlockfetchStatefulHeaderVerificationDefersUntilLedgerApply(
 	ls.chain = &chain.Chain{}
 
 	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
-	err := ls.handleEventBlockfetchBlock(BlockfetchEvent{
+	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
 		ConnectionId: connId,
 		Block:        tb.block,
 		Point:        point,
-	})
+	}, nil)
 	require.NoError(t, err)
 	require.Len(t, ls.pendingBlockfetchEvents, 1)
 	assert.True(t, ls.consumeDeferredHeaderValidation(point))

@@ -124,6 +124,8 @@ func TestStopWithDeadlineIgnoresCallerCancellation(t *testing.T) {
 // calling Stop directly would drop out of this list and escape the bound —
 // which is exactly what happened to the database lifecycle manager before.
 func TestQuiesceComponentStopsCoverEveryUnboundedStop(t *testing.T) {
+	t.Parallel()
+
 	n := &Node{
 		blockForger:          &forging.BlockForger{},
 		kesAgentClient:       &kesagent.Client{},
@@ -153,6 +155,8 @@ func TestQuiesceComponentStopsCoverEveryUnboundedStop(t *testing.T) {
 // built the optional components, which is the ordinary case for a
 // non-block-producing or non-Leios node.
 func TestQuiesceComponentStopsSkipsAbsentComponents(t *testing.T) {
+	t.Parallel()
+
 	n := &Node{snapshotMgr: &snapshot.Manager{}}
 
 	stops := n.quiesceComponentStops()
@@ -169,6 +173,7 @@ func TestQuiesceComponentStopsSkipsAbsentComponents(t *testing.T) {
 // errStorageDrainUnconfirmed to force a supervised restart instead of
 // reopening storage, so a quiesce that swallowed or never reached it would let
 // them resume on a database a live goroutine may still be using.
+// Not t.Parallel: swaps the package-level componentStopsForQuiesce seam.
 func TestQuiesceEscalatesAStopThatNeverReturns(t *testing.T) {
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })

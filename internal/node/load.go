@@ -1390,7 +1390,7 @@ func storeRawBlockUtxoOffsets(
 	if txn == nil || txn.Blob() == nil {
 		return 0, errors.New("blob transaction not available")
 	}
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return 0, errors.New("blob store not available")
 	}

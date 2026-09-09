@@ -17,6 +17,8 @@ package ledger
 import (
 	"testing"
 
+	"github.com/blinklabs-io/dingo/ledger/eras"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -26,6 +28,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestSkipDijkstraTxValidationScope documents the accepted non-validating
@@ -40,6 +43,8 @@ import (
 // pre-Dijkstra era began skipping validation, the prototype bypass has widened
 // beyond its justification.
 func TestSkipDijkstraTxValidationScope(t *testing.T) {
+	t.Parallel()
+
 	preDijkstraEras := []struct {
 		name string
 		id   uint
@@ -91,6 +96,8 @@ func TestSkipDijkstraTxValidationScope(t *testing.T) {
 // Musashi prototype may skip and trust Dijkstra transaction validation, while
 // a standard Leios profile must reject the same failure.
 func TestDijkstraTxValidationErrorsArePrototypeOnly(t *testing.T) {
+	t.Parallel()
+
 	for _, profile := range []struct {
 		name      string
 		skip      bool
@@ -123,4 +130,15 @@ func TestDijkstraTxValidationErrorsArePrototypeOnly(t *testing.T) {
 			)
 		})
 	}
+}
+
+func TestDijkstraEraGateUsesCurrentEra(t *testing.T) {
+	t.Parallel()
+
+	raw := newTestDijkstraBlockCbor(t, 100, 1, 1, 0, []byte{1})
+	block, err := gledger.NewBlockFromCbor(gledger.BlockTypeDijkstra, raw)
+	require.NoError(t, err)
+	assert.Equal(t, uint8(dijkstra.EraIdDijkstra), block.Era().Id)
+	assert.False(t, dijkstraEraGate(eras.ConwayEraDesc))
+	assert.True(t, dijkstraEraGate(eras.DijkstraEraDesc))
 }

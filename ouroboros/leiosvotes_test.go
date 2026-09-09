@@ -136,6 +136,8 @@ func testLeiosVote(voterId uint64) lcommon.LeiosVote {
 }
 
 func TestLeiosVotesServerRequestNextUnavailableWithoutHandler(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	votes, err := o.leiosvotesServerRequestNext(
 		oleiosvotes.CallbackContext{},
@@ -146,6 +148,8 @@ func TestLeiosVotesServerRequestNextUnavailableWithoutHandler(t *testing.T) {
 }
 
 func TestLeiosVotesServerRequestNextDelegates(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	handler := &fakeLeiosVoteHandler{
 		nextVotes: []lcommon.LeiosVote{
@@ -167,6 +171,8 @@ func TestLeiosVotesServerRequestNextDelegates(t *testing.T) {
 }
 
 func TestLeiosVotesClientVoteDelegates(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	handler := &fakeLeiosVoteHandler{}
 	o.leiosVotes = handler
@@ -181,6 +187,8 @@ func TestLeiosVotesClientVoteDelegates(t *testing.T) {
 }
 
 func TestLeiosNotifyPrototypeVoteDelegates(t *testing.T) {
+	t.Parallel()
+
 	cm := connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{},
 	)
@@ -219,6 +227,8 @@ func TestLeiosNotifyPrototypeVoteDelegates(t *testing.T) {
 }
 
 func TestLeiosVotesClientVoteWithoutHandlerLogsOnly(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(
 		t,
@@ -230,6 +240,8 @@ func TestLeiosVotesClientVoteWithoutHandlerLogsOnly(t *testing.T) {
 }
 
 func TestLeiosFetchServerVotesRequestDelegates(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	raw := mustCbor(t, "vote-cbor")
 	handler := &fakeLeiosVoteHandler{
@@ -253,6 +265,8 @@ func TestLeiosFetchServerVotesRequestDelegates(t *testing.T) {
 }
 
 func TestLeiosFetchServerVotesRequestWithoutHandler(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	msg, err := o.leiosfetchServerVotesRequest(
 		oleiosfetch.CallbackContext{},
@@ -263,48 +277,109 @@ func TestLeiosFetchServerVotesRequestWithoutHandler(t *testing.T) {
 }
 
 func TestStoreLeiosEndorserBlockNotifiesVoteHandler(t *testing.T) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	handler := &fakeLeiosVoteHandler{}
 	o.leiosVotes = handler
 
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
 	require.Len(t, handler.ebs, 1)
 	assert.Equal(t, uint64(10), handler.ebs[0].slot)
 	assert.Equal(t, point.Hash, handler.ebs[0].ebHash.Bytes())
 }
 
 // A peer must not be able to make us vote for the same EB hash under a
-// different slot by replaying the same EB bytes with a different point.
-func TestStoreLeiosEndorserBlockRejectsSlotMismatchBeforeVote(
+// different slot by replaying the same EB bytes with a different point. An
+// authoritative source (unlike a peer) may still override a mismatched entry
+// -- covered separately in leios_eb_announced_point_test.go -- since the
+// manifest is content-addressed and the same hash can legitimately recur at
+// a different slot; this guards the peer-offered side of that distinction.
+// TestStoreLeiosEndorserBlockDifferentSlotOfSameHashStaysUnverifiedBeforeVote
+// is the multi-slot-aware successor to the old
+// "...RejectsSlotMismatchBeforeVote" test: a peer-offered store for the same
+// hash at a different, unannounced slot is no longer rejected -- the
+// manifest is content-addressed, so that occurrence can be independently
+// legitimate (issue #3513 review) -- but it must stay unverified and must
+// not trigger a second vote for a slot nothing has corroborated.
+func TestStoreLeiosEndorserBlockDifferentSlotOfSameHashStaysUnverifiedBeforeVote(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	handler := &fakeLeiosVoteHandler{}
 	o.leiosVotes = handler
 
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
-
-	mismatchedPoint := point
-	mismatchedPoint.Slot++
-	err := o.storeLeiosEndorserBlock(mismatchedPoint, blockRaw, nil)
-	require.ErrorContains(
+	require.NoError(
 		t,
-		err,
-		"leios endorser block cache: point slot mismatch",
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
 	)
-	require.Len(t, handler.ebs, 1)
+
+	otherSlotPoint := point
+	otherSlotPoint.Slot++
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			otherSlotPoint,
+			blockRaw,
+			nil,
+			leiosStorePeerOffered,
+		),
+	)
+	data, ok := o.lookupLeiosEndorserBlock(
+		otherSlotPoint.Slot,
+		otherSlotPoint.Hash,
+	)
+	require.True(t, ok)
+	require.False(
+		t,
+		data.slotVerified,
+		"an unannounced occurrence at a different slot must not be trusted",
+	)
+	require.Len(
+		t,
+		handler.ebs,
+		1,
+		"the unverified second occurrence must not trigger a second vote",
+	)
 	assert.Equal(t, uint64(10), handler.ebs[0].slot)
 }
 
 func TestStoreLeiosEndorserBlockWithoutHandler(t *testing.T) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 11)
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
 }
 
 func TestLeiosVotesClientRequestSizeIsIncremental(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	cfg := oleiosvotes.NewConfig(o.leiosvotesClientConnOpts()...)
 	require.Equal(t, uint64(1), cfg.RequestNextCount)

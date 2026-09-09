@@ -33,16 +33,99 @@ import (
 
 // StakeDistributionProvider provides stake distribution data for leader election.
 type StakeDistributionProvider interface {
-	// GetPoolStake returns the stake for a specific pool in the given epoch.
-	// For leader election, this should query the mark snapshot selected by
-	// praos.StakeSnapshotEpoch.
-	GetPoolStake(epoch uint64, poolKeyHash []byte) (uint64, error)
-
-	// GetTotalActiveStake returns the total active stake for the given epoch.
-	// For leader election, this should query the mark snapshot selected by
-	// praos.StakeSnapshotEpoch.
-	GetTotalActiveStake(epoch uint64) (uint64, error)
+	// GetPoolAndTotalActiveStake returns the sigma numerator (this pool's
+	// stake) and the sigma denominator (total active stake) for the given
+	// snapshot epoch, which callers select with praos.StakeSnapshotEpoch.
+	//
+	// Both values MUST be read from a single consistent view of the
+	// snapshot. Reading them through two separate transactions lets a
+	// snapshot re-capture land between them and yields a sigma whose
+	// numerator and denominator come from different writes -- a leader
+	// schedule that is not reproducible from either snapshot alone
+	// (dingo #3815). The pair is returned by one method precisely so that
+	// no implementation can express the torn read.
+	//
+	// The denominator MUST come from the same store accessor the header
+	// verification path resolves it through
+	// (Metadata().GetTotalActiveStake), so that a node cannot forge against
+	// one denominator and validate against another (dingo #3814). See the
+	// reference-rule commentary below this interface for what that value
+	// is and why it must not be re-derived per code path.
+	GetPoolAndTotalActiveStake(
+		epoch uint64,
+		poolKeyHash []byte,
+	) (poolStake uint64, totalActiveStake uint64, err error)
 }
+
+// The sigma denominator, per the cardano-ledger reference implementation
+// (IntersectMBO/cardano-ledger@9bac33a, master, 2026-09-03). Written down
+// here because two prior investigations (dingo #2798 and #3626) were sent to
+// the wrong cause by a stale comment that called this "the sum of all pool
+// stakes".
+//
+// The reference computes the denominator as a sum over resolved stake
+// CREDENTIALS, not over the per-pool distribution:
+//
+//	total = sum { utxoStake(c) + accountBalance(c)
+//	            | c is a REGISTERED credential
+//	              and c delegates to SOME pool id }
+//
+//   - Cardano/Ledger/State/Stake.hs:156-160 (sumAllActiveStake; an empty
+//     credential set floors at 1 lovelace, not 0)
+//   - Cardano/Ledger/State/SnapShots.hs:419-426 (mkSnapShot, the sole
+//     production construction: ssTotalActiveStake = sumAllActiveStake
+//     ssActiveStake)
+//   - Cardano/Ledger/State/SnapShots.hs:472,486 (pdTotalActiveStake is that
+//     value verbatim; it is never recomputed from the pool map)
+//
+// The resolution predicate checks exactly two things -- the credential is in
+// the accounts map, and its stake-pool delegation is Just -- and does NOT
+// check that the target pool is registered; the pool map is not even in
+// scope (Cardano/Ledger/State/Stake.hs:217-246,
+// resolveActiveInstantStakeCredentials; Conway/State/Stake.hs:123-130,
+// which Dijkstra reuses).
+//
+// Numerators come only from REGISTERED pools, keyed by psStakePools
+// (Cardano/Ledger/State/SnapShots.hs:206-207,237,429-438,471-488,
+// calculatePoolDistr').
+//
+// It is tempting to read that asymmetry as "stake delegated to a retired or
+// unregistered pool belongs in the denominator and in no numerator". That
+// state is UNREACHABLE in the reference, so the sum of the numerators does
+// equal the denominator. Two rules keep it so, and neither lives in the
+// stake computation:
+//
+//   - DELEG rejects a delegation naming an unregistered pool
+//     (Conway/Rules/Deleg.hs:218-233,
+//     DelegateeStakePoolNotRegisteredDELEG).
+//   - POOLREAP clears the delegations of a retiring pool in the SAME state
+//     update that drops it from psStakePools
+//     (Shelley/Rules/PoolReap.hs:214-228,238-240,
+//     removeStakePoolDelegations . delegsToClear), so those credentials
+//     leave the denominator too rather than lingering in it.
+//   - An assertion enforces the pair
+//     (Shelley/Rules/Ledger.hs:274-279,453-468, "Reverse stake pool
+//     delegations must match").
+//
+// Dingo relies on the same invariant, maintained at the same point: see
+// ledger/poolreap.go, which calls ClearDelegationsToRetiredPool for each
+// reaped pool (dingo #3794 -- failing to clear inflates the total active
+// stake above the network's and makes every other pool's threshold too
+// small). Dingo also runs its SNAP stake read before POOLREAP, matching
+// EPOCH's sub-rule order (Conway/Rules/Epoch.hs:289-294; dingo
+// ledger/chainsync.go epoch-rollover step list).
+//
+// Consequences for this package: summing the numerators is the correct
+// denominator ONLY while that invariant holds. It is therefore not a safe
+// thing to derive independently in a second code path -- hence the single
+// accessor required below (dingo #3814).
+//
+// One thing the reference does NOT do: there is no stake-credential
+// inactivity gate. CIP-0163-style inactivity in the reference is DRep
+// expiry, applied only to the DRep voting ratio in RATIFY
+// (Conway/Rules/Ratify.hs:258-281); it never touches ActiveStake,
+// ssTotalActiveStake, or PoolDistr, and accounts carry no activity field
+// (Conway/State/Account.hs:60-80).
 
 // EpochInfoProvider provides epoch-related information.
 type EpochInfoProvider interface {
@@ -167,26 +250,16 @@ type Election struct {
 	schedules      map[uint64]*Schedule // epoch -> schedule
 	running        bool
 	cancel         context.CancelFunc
-	stopCh         chan struct{} // signals the monitoring goroutine to exit
+	lifecycleCtx   context.Context
+	lifecycleDone  chan struct{} // closes after the generation has drained
 	computeCh      chan uint64   // requests background schedule computation
 	subscriptionId event.EventSubscriberId
 	nonceReadySub  event.EventSubscriberId
 	metrics        *electionMetrics
 
-	// wg tracks epochTransitionLoop, epochNonceReadyLoop,
-	// scheduleComputeLoop, and the ctx-monitor goroutine, so Stop can
-	// actually wait for all of them to exit rather than merely signaling
-	// them (closing stopCh/computeCh, cancelling ctx, unsubscribing) and
-	// returning immediately. A plain signal-and-return was fine when the
-	// only caller was a full process shutdown, but the live database
-	// restore/truncate path (node_lifecycle.go) calls Stop and then
-	// closes/reopens the node's *database.Database/*ledger.LedgerState
-	// while the process keeps running: RefreshScheduleForEpoch (driven by
-	// any of these goroutines) reads stakeProvider/epochProvider, both
-	// bound to whatever ledgerState existed at construction time
-	// (initBlockForger), so a goroutine still in flight when Stop returns
-	// can keep running against it after that ledgerState has already been
-	// closed and replaced.
+	// wg owns only the three worker loops. The cancellation coordinator joins
+	// them before closing lifecycleDone; it must never join itself. Start
+	// cannot reuse this group until the previous generation has drained.
 	wg sync.WaitGroup
 }
 
@@ -240,17 +313,44 @@ func (e *Election) SetPromRegistry(reg prometheus.Registerer) {
 // slot-aligned loop without delay. The next epoch is queued later, once the
 // ledger reports that its nonce has reached the stability cutoff.
 func (e *Election) Start(ctx context.Context) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	return e.start(ctx, nil)
+}
 
-	if e.running {
-		return nil
+// start accepts a test scheduling hook after generation completion, before
+// reacquiring the lifecycle mutex. Production callers always pass nil.
+func (e *Election) start(ctx context.Context, afterWait func()) error {
+	e.mu.Lock()
+	for e.lifecycleDone != nil {
+		if e.running && e.lifecycleCtx.Err() == nil {
+			e.mu.Unlock()
+			return nil
+		}
+		done := e.lifecycleDone
+		e.mu.Unlock()
+		select {
+		case <-done:
+			if afterWait != nil {
+				afterWait()
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		e.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			e.mu.Unlock()
+			return err
+		}
+	}
+	defer e.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	e.cancel = cancel
 	e.running = true
-	e.stopCh = make(chan struct{})
+	e.lifecycleCtx = ctx
+	e.lifecycleDone = make(chan struct{})
 	e.schedules = make(map[uint64]*Schedule)
 	e.computeCh = make(chan uint64, 4)
 
@@ -321,44 +421,15 @@ func (e *Election) Start(ctx context.Context) error {
 		)
 	}
 
-	// Monitor context cancellation to automatically stop.
-	// The goroutine exits when either the context is canceled or Stop() is called.
-	//
-	// Tracked in e.wg (like the three loops above), not left to dangle:
-	// otherwise a completed Stop() could return with this goroutine still
-	// alive, watching the now-defunct ctx/stopCh from this Start generation.
-	// A later Start() on the same *Election creates a new ctx/stopCh, but
-	// does nothing about a stale monitor from a previous generation still
-	// running -- if THAT ctx's parent is ever cancelled afterward, the
-	// stale goroutine would call e.Stop() on the new, currently-running
-	// generation it has no business touching.
-	stopCh := e.stopCh
-	e.wg.Go(func() {
-		select {
-		case <-stopCh:
-			// Stop() was called directly, goroutine should exit.
-			return
-		case <-ctx.Done():
-			// ctx can be canceled either because Stop() itself was called
-			// directly (which always closes stopCh strictly before its
-			// own e.cancel() call below) or because the caller's parent
-			// context died externally -- and since both channels can be
-			// simultaneously ready by the time this select actually runs,
-			// Go may have picked this case even though stopCh is also
-			// already closed. Re-check stopCh, non-blockingly: if it's
-			// already closed, a direct Stop() is the reason ctx died and
-			// must not be re-entered here -- a second, concurrent Stop()
-			// call would deadlock waiting on e.wg for this very goroutine
-			// (now tracked above). Only a genuinely external cancellation
-			// (stopCh still open) should trigger our own Stop() call.
-			select {
-			case <-stopCh:
-				return
-			default:
-			}
-			_ = e.Stop()
-		}
-	})
+	// This coordinator is deliberately outside the worker wait group. It
+	// owns teardown for this generation on either parent cancellation or
+	// Stop, and makes the completion barrier visible only after all workers
+	// have stopped accessing their providers.
+	done := e.lifecycleDone
+	go func() {
+		<-ctx.Done()
+		e.finishStop(done)
+	}()
 
 	e.logger.Info(
 		"leader election started",
@@ -508,45 +579,39 @@ func (e *Election) scheduleComputeLoop(
 	}
 }
 
-// Stop stops the leader election manager, waiting for epochTransitionLoop,
-// epochNonceReadyLoop, and scheduleComputeLoop to actually exit before
-// returning -- not just signaling them to stop. A plain signal-and-return
-// was fine when the only caller was a full process shutdown, but the live
-// database restore/truncate path (node_lifecycle.go) calls Stop and then
-// closes/reopens the node's storage while the process keeps running: see
-// the wg field's doc comment for why a goroutine still in flight when Stop
-// returns is a real use-after-close risk here, not just a benign leak.
+// Stop cancels the current generation and waits for its workers to drain.
+// Every concurrent caller joins the same completion barrier, including after
+// parent cancellation has already marked the generation as stopped.
 func (e *Election) Stop() error {
 	e.mu.Lock()
-
-	if !e.running {
-		e.mu.Unlock()
-		return nil
-	}
-
-	// Signal the monitoring goroutine to exit before canceling context.
-	// This prevents the goroutine from calling Stop() again.
-	if e.stopCh != nil {
-		close(e.stopCh)
-		e.stopCh = nil
-	}
-	// Nil out computeCh so ShouldProduceBlock cannot send after Stop.
-	e.computeCh = nil
-	if e.cancel != nil {
+	done := e.lifecycleDone
+	if done != nil {
+		e.running = false
+		e.computeCh = nil
+		e.schedules = nil
 		e.cancel()
 	}
+	e.mu.Unlock()
+	if done != nil {
+		<-done
+	}
+	return nil
+}
+
+// finishStop belongs exclusively to the captured generation. Start waits for
+// done before replacing any lifecycle state or adding to the worker group.
+func (e *Election) finishStop(done chan struct{}) {
+	e.mu.Lock()
+	e.running = false
+	e.computeCh = nil
+	e.schedules = nil
 	subscriptionId := e.subscriptionId
 	nonceReadySub := e.nonceReadySub
 	e.subscriptionId = 0
 	e.nonceReadySub = 0
-	e.running = false
-	e.schedules = nil
-
 	e.mu.Unlock()
 
-	// Must run with e.mu released: RefreshScheduleForEpoch and
-	// scheduleComputeLoop both take e.mu (RLock), so waiting for them to
-	// exit while still holding the write lock here would deadlock.
+	// Workers take e.mu while refreshing schedules, so join without it.
 	if subscriptionId != 0 {
 		e.eventBus.UnsubscribeAndWait(
 			event.EpochTransitionEventType,
@@ -560,9 +625,13 @@ func (e *Election) Stop() error {
 		)
 	}
 	e.wg.Wait()
-
 	e.logger.Info("leader election stopped", "component", "leader")
-	return nil
+	e.mu.Lock()
+	e.lifecycleDone = nil
+	e.lifecycleCtx = nil
+	e.cancel = nil
+	close(done)
+	e.mu.Unlock()
 }
 
 // RefreshSchedule recalculates the leader schedule for the current epoch.
@@ -702,25 +771,22 @@ func (e *Election) validatePersistedSchedule(
 	}
 
 	snapshotEpoch := praos.StakeSnapshotEpoch(epoch)
-	poolStake, err := e.stakeProvider.GetPoolStake(snapshotEpoch, e.poolId[:])
+	// One atomic read: revalidating a persisted schedule against a torn
+	// (numerator, denominator) pair could accept a schedule that matches
+	// neither snapshot, or discard a still-valid one (dingo #3815).
+	poolStake, totalStake, err := e.stakeProvider.GetPoolAndTotalActiveStake(
+		snapshotEpoch,
+		e.poolId[:],
+	)
 	if err != nil {
 		return false, "", fmt.Errorf(
-			"get pool stake for epoch %d: %w",
+			"get pool and total active stake for epoch %d: %w",
 			snapshotEpoch,
 			err,
 		)
 	}
 	if poolStake != schedule.PoolStake {
 		return false, "pool stake changed", nil
-	}
-
-	totalStake, err := e.stakeProvider.GetTotalActiveStake(snapshotEpoch)
-	if err != nil {
-		return false, "", fmt.Errorf(
-			"get total stake for epoch %d: %w",
-			snapshotEpoch,
-			err,
-		)
 	}
 	if totalStake != schedule.TotalStake {
 		return false, "total stake changed", nil
@@ -768,16 +834,23 @@ func (e *Election) computeSchedule(
 	// Leader election uses the mark snapshot that is active for the epoch.
 	snapshotEpoch := praos.StakeSnapshotEpoch(currentEpoch)
 
-	// Get pool stake from the active snapshot.
+	// Read the sigma numerator and denominator together. Two separate
+	// reads let a snapshot re-capture land between them, producing a
+	// schedule computed from a sigma that exists in no single snapshot
+	// (dingo #3815). The zero-stake short circuit below therefore happens
+	// after the pair is in hand rather than between the two reads.
 	stakeLookupStart := time.Now()
-	poolStake, err := e.stakeProvider.GetPoolStake(snapshotEpoch, e.poolId[:])
+	poolStake, totalStake, err := e.stakeProvider.GetPoolAndTotalActiveStake(
+		snapshotEpoch,
+		e.poolId[:],
+	)
+	if e.metrics != nil {
+		e.metrics.stakeLookupDuration.Observe(
+			time.Since(stakeLookupStart).Seconds(),
+		)
+	}
 	if err != nil {
-		if e.metrics != nil {
-			e.metrics.stakeLookupDuration.Observe(
-				time.Since(stakeLookupStart).Seconds(),
-			)
-		}
-		return nil, fmt.Errorf("get pool stake: %w", err)
+		return nil, fmt.Errorf("get pool and total active stake: %w", err)
 	}
 
 	e.logger.Info(
@@ -798,17 +871,6 @@ func (e *Election) computeSchedule(
 			snapshotEpoch,
 		)
 		return nil, nil
-	}
-
-	// Get total stake from the active snapshot.
-	totalStake, err := e.stakeProvider.GetTotalActiveStake(snapshotEpoch)
-	if e.metrics != nil {
-		e.metrics.stakeLookupDuration.Observe(
-			time.Since(stakeLookupStart).Seconds(),
-		)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get total stake: %w", err)
 	}
 
 	e.logger.Info(

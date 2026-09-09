@@ -24,6 +24,8 @@ import (
 )
 
 func TestEnforceNodeSettingsPersistsGenesisHashesOnFirstStart(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	db, err := newTestDatabase(t, &Config{
 		DataDir: dir, StorageMode: "core", Network: "preprod",
@@ -41,6 +43,8 @@ func TestEnforceNodeSettingsPersistsGenesisHashesOnFirstStart(t *testing.T) {
 }
 
 func TestEnforceNodeSettingsRejectsGenesisHashChange(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	db, err := newTestDatabase(t, &Config{
 		DataDir: dir, StorageMode: "core", Network: "preprod",
@@ -60,6 +64,8 @@ func TestEnforceNodeSettingsRejectsGenesisHashChange(t *testing.T) {
 }
 
 func TestEnforceNodeSettingsFillsHashLearnedLater(t *testing.T) {
+	t.Parallel()
+
 	// An earlier dingo did not know the dijkstra hash; a later one does.
 	dir := t.TempDir()
 	db, err := newTestDatabase(t, &Config{
@@ -80,6 +86,8 @@ func TestEnforceNodeSettingsFillsHashLearnedLater(t *testing.T) {
 }
 
 func TestEnforceNodeSettingsLedgerGateActivationRecordsEpoch(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	db, err := newTestDatabase(t, &Config{
 		DataDir: dir, StorageMode: "core", Network: "preprod",
@@ -101,6 +109,8 @@ func TestEnforceNodeSettingsLedgerGateActivationRecordsEpoch(t *testing.T) {
 }
 
 func TestEnforceNodeSettingsRecordsValidationTaintOnFirstStart(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	db, err := newTestDatabase(t, &Config{
 		DataDir: dir, StorageMode: "core", Network: "preprod",
@@ -123,6 +133,8 @@ func TestEnforceNodeSettingsRecordsValidationTaintOnFirstStart(t *testing.T) {
 func TestEnforceNodeSettingsRejectsRelaxingValidationOnStrictDatabase(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	db, err := newTestDatabase(t, &Config{
 		DataDir: dir, StorageMode: "core", Network: "preprod",
@@ -141,6 +153,8 @@ func TestEnforceNodeSettingsRejectsRelaxingValidationOnStrictDatabase(
 }
 
 func TestEnforceNodeSettingsKeepsTaintWhenValidationTightens(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	db, err := newTestDatabase(t, &Config{
 		DataDir: dir, StorageMode: "core", Network: "preprod",
@@ -165,6 +179,8 @@ func TestEnforceNodeSettingsKeepsTaintWhenValidationTightens(t *testing.T) {
 }
 
 func TestEnforceNodeSettingsRejectsDisablingLedgerGate(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	db, err := newTestDatabase(t, &Config{
 		DataDir: dir, StorageMode: "core", Network: "preprod",
@@ -195,6 +211,8 @@ func TestEnforceNodeSettingsRejectsDisablingLedgerGate(t *testing.T) {
 // reopening with only the fields those two partial callers set must
 // succeed.
 func TestEnforceNodeSettingsPhase2GatesDoNotLeakIntoPhase1(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	db, err := newTestDatabase(t, &Config{

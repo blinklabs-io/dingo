@@ -28,6 +28,26 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 )
 
+// fixedFloorGuard builds a PoolSnapshotRetentionGuard that lowers the prune
+// boundary to a fixed floor, standing in for
+// LedgerState.PrunePoolSnapshotsWithRetentionFloor in snapshot-package tests.
+func fixedFloorGuard(floor uint64, ok bool) PoolSnapshotRetentionGuard {
+	return func(
+		defaultBefore uint64,
+		minBefore uint64,
+		prune func(before uint64) error,
+	) error {
+		before := defaultBefore
+		if ok && floor < before {
+			before = floor
+		}
+		if before < minBefore {
+			before = minBefore
+		}
+		return prune(before)
+	}
+}
+
 // seedRetentionRows writes one row per epoch in [0, throughEpoch] into every
 // table cleanupOldSnapshots touches, all describing the same pool, so a
 // retention pass can be observed table by table.
@@ -138,6 +158,8 @@ func seedRetentionRows(
 // per-epoch aggregates and a per-pool reward basis to compare against (and a
 // missing summary keeps meaning "never captured").
 func TestCleanupOldSnapshotsRetainsEpochSummaries(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
 	meta := db.Metadata()
@@ -295,6 +317,8 @@ func TestCleanupOldSnapshotsRetainsEpochSummaries(t *testing.T) {
 // TestCleanupOldSnapshotsBelowWindowKeepsEverything covers the early-sync case
 // where there is not yet enough history to prune anything.
 func TestCleanupOldSnapshotsBelowWindowKeepsEverything(t *testing.T) {
+	t.Parallel()
+
 	db := setupTestDB(t)
 	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
 	meta := db.Metadata()

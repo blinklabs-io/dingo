@@ -95,6 +95,79 @@ func (p *DingoStateProvider) IsStakeCredentialRegistered(
 	return exists
 }
 
+// StakeCredentialDeposit returns the deposit recorded when the stake
+// credential registered, or nil when the credential is not registered or the
+// recorded deposit is unknown.
+//
+// Without this method the harness does not satisfy
+// common.StakeCredentialDepositState, so
+// UtxoValidateValueNotConservedUtxo's optional type assertion misses and
+// every legacy stake deregistration in the corpus is refunded at the current
+// KeyDeposit. The corpus then cannot distinguish a correct recorded refund
+// from the fallback, which is the gap #3831 covers.
+//
+// This mirrors ledger.LedgerView.StakeCredentialDeposit: the account lookup
+// gates on the same live registration state as
+// IsStakeCredentialRegistered above, the registration history carries the
+// deposit actually paid, and the import baseline stands in for a credential
+// established by a vector's initial state rather than by a certificate in
+// that vector. A nil return is preserved rather than coerced to zero, because
+// the rule treats any non-nil value as authoritative.
+func (p *DingoStateProvider) StakeCredentialDeposit(
+	cred common.Credential,
+) (*uint64, error) {
+	credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+	if err != nil {
+		return nil, err
+	}
+	account, err := withBadConnRetry(func() (*models.Account, error) {
+		return p.manager.db.GetAccountByCredential(
+			credentialTag, cred.Credential[:], false, nil,
+		)
+	})
+	if errors.Is(err, models.ErrAccountNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lookup stake credential deposit: %w", err)
+	}
+	if account == nil || !account.Active {
+		return nil, nil
+	}
+	history, err := withBadConnRetry(
+		func() ([]models.AccountRegistrationHistoryRow, error) {
+			return p.manager.db.GetAccountRegistrationHistoryByCredential(
+				credentialTag, cred.Credential[:], 1, 0, "desc", nil,
+			)
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("lookup stake registration history: %w", err)
+	}
+	importRegistration, err := withBadConnRetry(
+		func() (*models.AccountImportRegistration, error) {
+			return p.manager.db.GetAccountImportRegistrationByCredential(
+				credentialTag, cred.Credential[:], nil,
+			)
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("lookup stake import registration: %w", err)
+	}
+	// A vector's initial-state registration is seeded as an import baseline,
+	// so it wins unless the vector's own certificates registered the
+	// credential more recently.
+	if importRegistration != nil &&
+		(len(history) == 0 ||
+			importRegistration.AddedSlot >= history[0].AddedSlot) {
+		return importRegistration.Deposit, nil
+	}
+	if len(history) == 0 || history[0].Action != "registered" {
+		return nil, nil
+	}
+	return history[0].Deposit, nil
+}
+
 // ========== common.SlotState ==========
 
 // SlotToTime converts a slot number to a time
@@ -345,9 +418,30 @@ func (p *DingoStateProvider) Constitution() (*common.Constitution, error) {
 	return &common.Constitution{}, nil
 }
 
-// TreasuryValue returns the current treasury value
+// TreasuryValue returns the treasury value from the real backend, in the same
+// shape production's ledger.LedgerView.TreasuryValue reports.
+//
+// It never answers a synthetic zero. The harness does not seed treasury/pot
+// accounting (see DingoStateManager.persistEnactment), so an unseeded backend
+// has no network-state row at all. Returning 0 for that would make a provider
+// that cannot answer look healthy: the upstream current-treasury-value rule
+// only queries this method once a transaction body actually carries key 21,
+// and it compares for equality, so a synthetic zero silently rejects every
+// vector that declares a non-zero value and silently accepts one declaring
+// zero. Failing closed reports the missing harness state instead.
 func (p *DingoStateProvider) TreasuryValue() (uint64, error) {
-	return 0, nil
+	state, err := withBadConnRetry(func() (*models.NetworkState, error) {
+		return p.manager.db.Metadata().GetNetworkState(nil)
+	})
+	if err != nil {
+		return 0, fmt.Errorf("lookup treasury network state: %w", err)
+	}
+	if state == nil {
+		return 0, errors.New(
+			"treasury network state is unavailable: conformance harness does not seed treasury state",
+		)
+	}
+	return uint64(state.Treasury), nil
 }
 
 // GovActionById looks up a governance action by its ID
@@ -428,3 +522,11 @@ var _ conformance.StateProvider = (*DingoStateProvider)(nil)
 // and stop exercising the protocol-version 10/11 withdrawal rule it exists to
 // cover, matching ledger.LedgerView's guard for the production path.
 var _ common.DRepDelegationState = (*DingoStateProvider)(nil)
+
+// conformance.StateProvider does not include StakeCredentialDepositState
+// either. UtxoValidateValueNotConservedUtxo discovers it with an optional type
+// assertion and silently falls back to the current KeyDeposit when it misses,
+// so a signature drift here would not fail a vector -- it would quietly stop
+// exercising the recorded-deposit refund the corpus is supposed to cover.
+// Mirrors ledger.LedgerView's guard for the production path.
+var _ common.StakeCredentialDepositState = (*DingoStateProvider)(nil)

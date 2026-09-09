@@ -37,12 +37,14 @@ import (
 func TestVerifyRegisteredVrfKey_RejectsUnregisteredOrMismatchedKey(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{71}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 
 	// No pool registration seeded for this block's issuer, so the header's VRF
 	// key is not bound to any registered VRF key.
-	err := ls.verifyRegisteredVrfKey(tb.block)
+	err := ls.verifyRegisteredVrfKey(tb.block, blockEpochId(t, ls, tb.block))
 	require.Error(
 		t,
 		err,
@@ -77,7 +79,7 @@ func TestVerifyRegisteredVrfKey_RejectsUnregisteredOrMismatchedKey(
 	)
 	require.NoError(t, err)
 
-	err = ls.verifyRegisteredVrfKey(tb.block)
+	err = ls.verifyRegisteredVrfKey(tb.block, blockEpochId(t, ls, tb.block))
 	require.Error(
 		t,
 		err,
@@ -85,6 +87,64 @@ func TestVerifyRegisteredVrfKey_RejectsUnregisteredOrMismatchedKey(
 			"the header VRF key",
 	)
 	assert.Contains(t, err.Error(), "registered VRF key hash unavailable")
+}
+
+// TestVerifyRegisteredVrfKeyAcceptsAFirstRegistrationInsideTheCapturedEpoch
+// pins the reference behaviour for a pool that has only ever registered once,
+// inside the epoch the electing snapshot was captured in.
+//
+// cardano-ledger's POOL rule inserts a first registration into psStakePools
+// immediately and defers only a re-registration through
+// psFutureStakePoolParams (Shelley/Rules/Pool.hs), so such a pool is already
+// in psStakePools when SNAP runs and the snapshot carries its VRF key. The
+// parameter cutoff predates that registration, so resolving strictly at the
+// cutoff finds nothing — and rejecting there would reject a canonical block
+// from every pool for its first epochs, which is what this test previously
+// asserted.
+func TestVerifyRegisteredVrfKeyAcceptsAFirstRegistrationInsideTheCapturedEpoch(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{76}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	blockSlot := tb.block.SlotNumber()
+	ls.epochCache = []models.Epoch{
+		{EpochId: 4, StartSlot: 0, LengthInSlots: uint(blockSlot)},
+		{EpochId: 5, StartSlot: blockSlot, LengthInSlots: 1_000_000},
+	}
+	ls.publishSnapshotsLocked()
+
+	vrfKey, ok, err := headerVrfKeyFromBodyCbor(tb.block.Header())
+	require.NoError(t, err)
+	require.True(t, ok)
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	require.NoError(t, db.Metadata().ImportPool(
+		&models.Pool{
+			PoolKeyHash: poolKeyHash[:],
+			VrfKeyHash:  lcommon.Blake2b256Hash(vrfKey).Bytes(),
+		},
+		&models.PoolRegistration{
+			PoolKeyHash: poolKeyHash[:],
+			VrfKeyHash:  lcommon.Blake2b256Hash(vrfKey).Bytes(),
+			AddedSlot:   blockSlot,
+		},
+		nil,
+	))
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:        4,
+			SnapshotType: models.PoolStakeSnapshotTypeMark,
+			PoolKeyHash:  poolKeyHash[:],
+			TotalStake:   1,
+			CapturedSlot: blockSlot,
+		},
+		nil,
+	))
+
+	require.NoError(t, ls.verifyRegisteredVrfKey(tb.block, 5),
+		"a pool whose only registration lands inside the captured epoch is "+
+			"in psStakePools when SNAP runs, so the snapshot carries its key")
 }
 
 // TestVerifyRegisteredVrfKey_AcceptsMatchingKeyRejectsMismatch is the
@@ -97,6 +157,8 @@ func TestVerifyRegisteredVrfKey_RejectsUnregisteredOrMismatchedKey(
 func TestVerifyRegisteredVrfKey_AcceptsMatchingKeyRejectsMismatch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	// --- Matching registered VRF key is accepted ---
 	tbMatch := createTestBlock(t, [32]byte{72}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tbMatch.epochNonce)
@@ -116,7 +178,7 @@ func TestVerifyRegisteredVrfKey_AcceptsMatchingKeyRejectsMismatch(
 
 	require.NoError(
 		t,
-		ls.verifyRegisteredVrfKey(tbMatch.block),
+		ls.verifyRegisteredVrfKey(tbMatch.block, blockEpochId(t, ls, tbMatch.block)),
 		"block whose header VRF key hashes to the pool's registered "+
 			"VRF key hash must be accepted",
 	)
@@ -143,7 +205,7 @@ func TestVerifyRegisteredVrfKey_AcceptsMatchingKeyRejectsMismatch(
 	mismatchPoolKeyHash := tbMismatch.block.IssuerVkey().Hash()
 	seedPoolRegistration(t, db, mismatchPoolKeyHash[:], wrongVrfKeyHash)
 
-	err = ls.verifyRegisteredVrfKey(tbMismatch.block)
+	err = ls.verifyRegisteredVrfKey(tbMismatch.block, blockEpochId(t, ls, tbMismatch.block))
 	require.Error(
 		t,
 		err,
@@ -156,6 +218,8 @@ func TestVerifyRegisteredVrfKey_AcceptsMatchingKeyRejectsMismatch(
 func TestVerifyRegisteredVrfKey_AcceptsRetiredPoolRegistration(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{74}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 
@@ -220,7 +284,7 @@ VALUES (?, ?, 2, 2)`,
 
 	require.NoError(
 		t,
-		ls.verifyRegisteredVrfKey(tb.block),
+		ls.verifyRegisteredVrfKey(tb.block, blockEpochId(t, ls, tb.block)),
 		"registered VRF-key binding must not depend on current-tip "+
 			"active pool filtering",
 	)
@@ -229,6 +293,8 @@ VALUES (?, ?, 2, 2)`,
 func TestVerifyRegisteredVrfKey_UsesLatestRegistrationBeforePoolRowHash(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{75}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 
@@ -261,7 +327,7 @@ func TestVerifyRegisteredVrfKey_UsesLatestRegistrationBeforePoolRowHash(
 
 	require.NoError(
 		t,
-		ls.verifyRegisteredVrfKey(tb.block),
+		ls.verifyRegisteredVrfKey(tb.block, blockEpochId(t, ls, tb.block)),
 		"latest registration VRF hash should take precedence over stale "+
 			"denormalized pool VRF hash",
 	)

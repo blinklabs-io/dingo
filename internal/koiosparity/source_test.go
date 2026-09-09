@@ -15,6 +15,7 @@
 package koiosparity
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -53,6 +55,8 @@ func sourceGormDB(t *testing.T, db *database.Database) *testDB {
 }
 
 func TestNewDatabaseSourceRejectsNilDatabase(t *testing.T) {
+	t.Parallel()
+
 	_, err := NewDatabaseSource(nil)
 	require.Error(t, err)
 }
@@ -63,12 +67,15 @@ func TestNewDatabaseSourceRejectsNilDatabase(t *testing.T) {
 // (a separate read-only transaction against the same live database, not a
 // second connection) and confirms every field lands exactly as committed.
 func TestDatabaseSourceGetEpochData(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	gormDB := sourceGormDB(t, db)
 
 	require.NoError(t, gormDB.Create(&models.EpochSummary{
 		Epoch:            5,
 		TotalActiveStake: types.Uint64(123_456_789),
+		BoundarySlot:     4_320_000,
 		SnapshotReady:    true,
 	}).Error)
 	require.NoError(t, gormDB.Create(&models.RewardAdaPots{
@@ -91,6 +98,7 @@ func TestDatabaseSourceGetEpochData(t *testing.T) {
 	require.Equal(t, "2000", data.Reserves)
 	require.Equal(t, "3000", data.Fees)
 	require.Equal(t, "4000", data.TotalRewards)
+	require.Equal(t, uint64(4_320_000), data.BoundarySlot)
 }
 
 // TestDatabaseSourceGetEpochDataMissingOrNotReady covers both "no row at
@@ -98,6 +106,8 @@ func TestDatabaseSourceGetEpochData(t *testing.T) {
 // write Dingo will repair later) -- both must read back as (nil, nil), never
 // an error and never a spurious zero-value comparison.
 func TestDatabaseSourceGetEpochDataMissingOrNotReady(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	gormDB := sourceGormDB(t, db)
 	source, err := NewDatabaseSource(db)
@@ -123,6 +133,8 @@ func TestDatabaseSourceGetEpochDataMissingOrNotReady(t *testing.T) {
 // false (a real dingo_db_missing mismatch upstream), not as legitimately
 // empty/zero pots.
 func TestDatabaseSourceGetEpochDataRewardAdaPotsAbsent(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	gormDB := sourceGormDB(t, db)
 	require.NoError(t, gormDB.Create(&models.EpochSummary{
@@ -146,6 +158,8 @@ func TestDatabaseSourceGetEpochDataRewardAdaPotsAbsent(t *testing.T) {
 // MemberRewardTotal from stakeEpoch's reward_pool_output -- each field
 // group's *Present flag reflects only whether its own row existed.
 func TestDatabaseSourceGetPoolEpochDataMap(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	gormDB := sourceGormDB(t, db)
 	poolKeyHash := []byte("POOLKEYHASH-28-BYTES-LONG!!!")
@@ -202,6 +216,8 @@ func TestDatabaseSourceGetPoolEpochDataMap(t *testing.T) {
 // *Present flag must reflect only whether its own row actually exists, not
 // whether any row exists for the pool at all.
 func TestDatabaseSourceGetPoolEpochDataMapPartialPresence(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	gormDB := sourceGormDB(t, db)
 	poolKeyHash := []byte("POOLKEYHASH-28-BYTES-LONG!!!")
@@ -235,6 +251,8 @@ func TestDatabaseSourceGetPoolEpochDataMapPartialPresence(t *testing.T) {
 }
 
 func TestDatabaseSourceGetLatestEpoch(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	source, err := NewDatabaseSource(db)
 	require.NoError(t, err)
@@ -253,6 +271,8 @@ func TestDatabaseSourceGetLatestEpoch(t *testing.T) {
 }
 
 func TestDatabaseSourceGetRewardAccountOutputs(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	gormDB := sourceGormDB(t, db)
 	stakingKey := []byte("STAKING-KEY-28-BYTES-LONG!!!")
@@ -293,6 +313,8 @@ func TestDatabaseSourceGetRewardAccountOutputs(t *testing.T) {
 // late is indistinguishable from reading an epoch that was simply never
 // computed.
 func TestDatabaseSourceCoreModePruningTiming(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDatabaseSourceDB(t)
 	gormDB := sourceGormDB(t, db)
 	poolKeyHash := []byte("POOLKEYHASH-28-BYTES-LONG!!!")

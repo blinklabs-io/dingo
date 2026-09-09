@@ -187,6 +187,8 @@ func seedHardForkCommitteeAndSPOVotes(
 func TestEvaluateRatifiableHardForkInitiation_PreConway_ReturnsNil(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, _ := newTallyTestDB(t)
 	// pre-Conway: no governance state machine yet
 	in := NewStabilityCheckInputs(
@@ -206,6 +208,8 @@ func TestEvaluateRatifiableHardForkInitiation_PreConway_ReturnsNil(
 func TestEvaluateRatifiableHardForkInitiation_NoActiveProposals_ReturnsNil(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, _ := newTallyTestDB(t)
 	in := NewStabilityCheckInputs(
 		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
@@ -218,6 +222,8 @@ func TestEvaluateRatifiableHardForkInitiation_NoActiveProposals_ReturnsNil(
 func TestEvaluateRatifiableHardForkInitiation_OnlyOtherActionType_ReturnsNil(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, _ := newTallyTestDB(t)
 
 	// A TreasuryWithdrawal — active but not a HardForkInitiation, so
@@ -253,6 +259,8 @@ func TestEvaluateRatifiableHardForkInitiation_OnlyOtherActionType_ReturnsNil(
 func TestEvaluateRatifiableHardForkInitiation_BootstrapRequiresCommitteeAndSPO(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 
 	const targetMajor uint = 11
@@ -276,6 +284,8 @@ func TestEvaluateRatifiableHardForkInitiation_BootstrapRequiresCommitteeAndSPO(
 func TestEvaluateRatifiableHardForkInitiation_DelegatorInactivityParity(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 
 	proposal := seedHardForkInitiationProposal(
@@ -319,6 +329,8 @@ func TestEvaluateRatifiableHardForkInitiation_DelegatorInactivityParity(
 func TestEvaluateRatifiableHardForkInitiation_BootstrapDRepOnly_NotRatifiable(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, _ := newTallyTestDB(t)
 	proposal := seedHardForkInitiationProposal(
 		t,
@@ -347,6 +359,8 @@ func TestEvaluateRatifiableHardForkInitiation_BootstrapDRepOnly_NotRatifiable(
 func TestEvaluateRatifiableHardForkInitiation_MultipleRatifiable_PicksLowestAddedSlot(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, store := newTallyTestDB(t)
 
 	const (

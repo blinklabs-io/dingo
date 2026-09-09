@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -625,6 +626,13 @@ func (s *Store) UpdateDRepActivity(
 	if err != nil {
 		return err
 	}
+	if inactivityPeriod > math.MaxUint64-activityEpoch {
+		return fmt.Errorf(
+			"drep expiry epoch overflows uint64: %d + %d",
+			activityEpoch,
+			inactivityPeriod,
+		)
+	}
 	expiry, err := checkedInt64(activityEpoch + inactivityPeriod)
 	if err != nil {
 		return err
@@ -695,6 +703,39 @@ func (s *Store) GetDrepLastRegistrationSlot(
 		return 0, fmt.Errorf("get drep last registration slot: %w", err)
 	}
 	return uint64(slot), nil
+}
+
+func (s *Store) GetDrepLastRegistrationDeposit(
+	credentialTag uint8,
+	credential []byte,
+	txn types.Txn,
+) (*uint64, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	q := s.operationalQueries(db)
+	raw, err := q.GetDrepLastRegistrationDeposit(
+		ctx,
+		sqlitequery.GetDrepLastRegistrationDepositParams{
+			CredentialTag:  int64(credentialTag),
+			DrepCredential: credential,
+		},
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get drep last registration deposit: %w", err)
+	}
+	if !raw.Valid {
+		return nil, nil
+	}
+	deposit, err := parseUint64("drep last registration deposit", raw.String)
+	if err != nil {
+		return nil, err
+	}
+	return &deposit, nil
 }
 
 func (s *Store) GetDreps(
@@ -997,4 +1038,42 @@ func validString(value string) sql.NullString {
 
 func validBool(value bool) sql.NullBool {
 	return sql.NullBool{Bool: value, Valid: true}
+}
+
+// GetDrepLastRegistrationDeposits returns the most recent registration
+// deposit of every active DRep in one query, keyed by
+// models.DrepDepositKey. Credentials with no registration_drep row are
+// absent from the map. See GetDrepLastRegistrationDeposit for why
+// bootstrap-slot import rows are not filtered out.
+func (s *Store) GetDrepLastRegistrationDeposits(
+	txn types.Txn,
+) (map[string]uint64, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	q := s.operationalQueries(db)
+	rows, err := q.GetDrepLastRegistrationDeposits(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get drep last registration deposits: %w", err)
+	}
+	deposits := make(map[string]uint64, len(rows))
+	for _, row := range rows {
+		if !row.DepositAmount.Valid {
+			continue
+		}
+		deposit, err := parseUint64(
+			"drep last registration deposit",
+			row.DepositAmount.String,
+		)
+		if err != nil {
+			return nil, err
+		}
+		tag, err := checkedUint8(row.CredentialTag)
+		if err != nil {
+			return nil, err
+		}
+		deposits[models.DrepDepositKey(tag, row.DrepCredential)] = deposit
+	}
+	return deposits, nil
 }
