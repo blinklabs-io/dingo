@@ -151,6 +151,12 @@ func TestComparePoolEpochMissingRewardsBeforeApplication(t *testing.T) {
 // divergence, and at replay speed it dominates everything else: a Preview run
 // produced 15879 acct_only_koios entries, and the epochs carrying them were
 // exactly the epochs with no reward row.
+//
+// The Dingo-only direction is the same statement read the other way (dingo
+// #4130): before the boundary a reward computed for a credential that
+// deregisters in the meantime is still marked spendable, so Dingo holds a row
+// Koios will never publish. That is timing too, and the branch claimed to be
+// symmetric with the Koios-only one while omitting the guard.
 func TestCompareAccountEpochPendingRewardsAreALag(t *testing.T) {
 	koios := []KoiosAccountRewards{
 		{StakeAddress: "stake_test1a", RewardType: "member", Earned: "1000000"},
@@ -219,6 +225,33 @@ func TestCompareAccountEpochPendingRewardsAreALag(t *testing.T) {
 			}
 		}
 		assert.True(t, found, "a differing amount must still be reported")
+	})
+
+	t.Run("a Dingo-only row while pending is a lag", func(t *testing.T) {
+		dingoRows := []DingoAccountReward{
+			{StakeAddress: "stake_test1c", RewardType: "member", Amount: "1857"},
+		}
+		ms := CompareAccountEpoch(
+			"preview", 100, nil, dingoRows, now, 24, longClosed, true,
+		)
+		got := categories(ms)
+		require.Len(t, got, 1,
+			"the Dingo-only row must still be reported, as a lag")
+		assert.Equal(t, CategoryReferenceLag, got[0],
+			"a reward whose spendable flag is still provisional is timing")
+	})
+
+	t.Run("a Dingo-only row once applied is a real finding", func(t *testing.T) {
+		dingoRows := []DingoAccountReward{
+			{StakeAddress: "stake_test1c", RewardType: "member", Amount: "1857"},
+		}
+		ms := CompareAccountEpoch(
+			"preview", 100, nil, dingoRows, now, 24, longClosed, false,
+		)
+		got := categories(ms)
+		require.Len(t, got, 1)
+		assert.Equal(t, CategoryAcctOnlyDingo, got[0],
+			"once applied, a row Koios never credited is worth reporting")
 	})
 
 	t.Run("computed and still absent is a real finding", func(t *testing.T) {

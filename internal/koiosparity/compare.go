@@ -1071,10 +1071,13 @@ type accountRewardKey struct {
 //
 // graceHours/epochEndTime/now/network/epoch all mirror ComparePoolEpoch's
 // identical parameters and meaning.
-// rewardsPending reports that Dingo has not yet computed this epoch's rewards,
-// in which case every account Koios has a reward for is absent on the Dingo side
-// for a reason that is not a divergence. See DingoPoolEpochData.RewardsPending;
-// this is the account-granularity half of the same guard (issue #3857).
+// rewardsPending reports that the boundary applying this epoch's rewards has
+// not been reached, so a one-sided row on either side is timing rather than
+// divergence: Dingo has not computed the epoch, so every account Koios has a
+// reward for looks absent, and the spendable flags Dingo has computed are still
+// provisional, so a row it will later forfeit has no Koios counterpart. See
+// DingoPoolEpochData.RewardsPending; this is the account-granularity half of
+// the same guard (dingo #3857, #4130).
 func CompareAccountEpoch(
 	network string,
 	epoch uint64,
@@ -1224,6 +1227,14 @@ func CompareAccountEpoch(
 			case isZeroRewardAmount(dr.Amount):
 				// Symmetric with the koiosOK && !dingoOK case above.
 				cat = CategoryAcctZeroRewardRow
+			case rewardsPending:
+				// Also symmetric: before the boundary a reward computed
+				// for a credential that deregisters in the meantime is
+				// still marked spendable, so Dingo holds a row Koios will
+				// never publish. That is timing, not divergence, and the
+				// branch above already says so in the other direction
+				// (dingo #4130).
+				cat = CategoryReferenceLag
 			case graceHours > 0 && !epochEndTime.IsZero() &&
 				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour:
 				cat = CategoryReferenceLag
