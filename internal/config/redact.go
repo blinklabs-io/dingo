@@ -642,6 +642,15 @@ func redactCredentialParams(s string) string {
 	// If the assignment itself is credential-named, its entire DSN value
 	// stays secret; a '?' suffix cannot safely be assumed to be a URL query.
 	if startsParam(s, skipParamSpace(s, 0), keywordDSNSyntax) {
+		// A relative URL can begin with an assignment-shaped path. When its
+		// suffix has URI separators and no whitespace, keep that suffix as a
+		// query instead of treating it as part of the DSN value.
+		if query := strings.IndexByte(s, '?'); query > 0 &&
+			strings.Contains(s[query+1:], "&") &&
+			!strings.ContainsAny(s[query+1:], " \t\r\n") {
+			return redactParams(s[:query], keywordDSNSyntax) +
+				"?" + redactParams(s[query+1:], uriQuerySyntax)
+		}
 		s = redactParams(s, keywordDSNSyntax)
 	}
 	if start, end, ok := uriQuerySpan(s); ok {

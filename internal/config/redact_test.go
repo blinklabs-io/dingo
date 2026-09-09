@@ -378,7 +378,8 @@ func TestRedactURICredentials(t *testing.T) {
 		{
 			name: "ambiguous unquoted dsn keeps query-shaped suffix secret",
 			in:   "password=secret?network=preview&apiKey=key",
-			want: "password=" + redactedPlaceholder,
+			want: "password=" + redactedPlaceholder +
+				"?network=preview&apiKey=" + redactedPlaceholder,
 		},
 		{
 			name: "unquoted dsn retains whitespace-delimited database",
