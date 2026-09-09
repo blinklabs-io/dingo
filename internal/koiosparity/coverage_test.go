@@ -26,6 +26,8 @@ import (
 // until the new field is assigned an explicit coverage class. This prevents a
 // report from continuing to say PASS while silently omitting a new field.
 func TestKoiosCoverageMatrixIsComplete(t *testing.T) {
+	t.Parallel()
+
 	matrix := KoiosCoverageMatrix()
 	byKey := make(map[string]KoiosFieldCoverage, len(matrix))
 	validClasses := map[CoverageClass]bool{
@@ -141,6 +143,8 @@ func requireResponseFieldsCovered(
 }
 
 func TestKoiosCoverageMatrixReturnsCopy(t *testing.T) {
+	t.Parallel()
+
 	first := KoiosCoverageMatrix()
 	require.NotEmpty(t, first)
 	first[0].Field = "mutated"

@@ -151,9 +151,11 @@ func TestDecodeConwayBlockRejectsUnextendedDijkstraShape(t *testing.T) {
 	_, err := cbor.Decode(raw, &components)
 	require.NoError(t, err)
 	var headerParts []cbor.RawMessage
+	require.Len(t, components, 2)
 	_, err = cbor.Decode(components[0], &headerParts)
 	require.NoError(t, err)
 	var bodyElems []cbor.RawMessage
+	require.Len(t, headerParts, 2)
 	_, err = cbor.Decode(headerParts[0], &bodyElems)
 	require.NoError(t, err)
 	require.Len(t, bodyElems, 12)

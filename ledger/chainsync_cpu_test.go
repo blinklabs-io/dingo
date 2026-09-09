@@ -18,6 +18,8 @@ import (
 // chainsyncMutex was held, producing quadratic block-hash lookups when the
 // requested rollback point was not present in that peer's history.
 func TestRecoverPeerHeaderHistoryPathWorkIsLinear(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	fixture.ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
 		return true, ^uint64(0)
@@ -61,6 +63,8 @@ func TestRecoverPeerHeaderHistoryPathWorkIsLinear(t *testing.T) {
 // non-cyclic chain. Memoization must not turn a bounded recovery walk into an
 // unbounded one.
 func TestRecoverPeerHeaderHistoryPathWorkHonorsDepthLimit(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	lookupCalls := 0
 	fixture.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
@@ -108,6 +112,8 @@ func TestRecoverPeerHeaderHistoryPathWorkHonorsDepthLimit(t *testing.T) {
 func TestFindPeerForkPathCachedTreatsMalformedRetainedRecordAsMissing(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	fixture.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
 		return models.Block{}, models.ErrBlockNotFound
@@ -155,6 +161,8 @@ func TestFindPeerForkPathCachedTreatsMalformedRetainedRecordAsMissing(
 func TestFindPeerForkPathCachedPreservesShorterSuffixAfterDepthLimit(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	limit := fixture.ls.peerHeaderHistoryLimit()
 	lookupCalls := 0
@@ -219,6 +227,8 @@ func TestFindPeerForkPathCachedPreservesShorterSuffixAfterDepthLimit(
 func TestFindPeerForkPathCachedChargesAndPropagatesCachedSuffix(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	limit := fixture.ls.peerHeaderHistoryLimit()
 	lookupCalls := 0
@@ -299,6 +309,8 @@ func TestFindPeerForkPathCachedChargesAndPropagatesCachedSuffix(
 }
 
 func TestFindPeerForkPathCachedPropagatesMismatchedAncestor(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	lookupCalls := 0
 	fixture.ls.lookupBlockByHash = func(hash []byte) (models.Block, error) {
@@ -401,6 +413,8 @@ func peerHistoryLookupForTest(
 }
 
 func TestRecoverPeerHeaderHistoryIncompleteLookupReintersects(t *testing.T) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 	missingHash := testHashBytes("incomplete-lookup")
 	headerHash := testHashBytes("incomplete-lookup-head")

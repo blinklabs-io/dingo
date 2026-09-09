@@ -433,6 +433,7 @@ func CompareEpochProtocolParams(
 	now time.Time,
 	graceHours int,
 	epochEndTime time.Time,
+	_ ...bool,
 ) []CheckMismatch {
 	mismatch := func(field, dingoValue, koiosValue, category string) CheckMismatch {
 		return CheckMismatch{
@@ -1075,6 +1076,13 @@ type accountRewardKey struct {
 //
 // graceHours/epochEndTime/now/network/epoch all mirror ComparePoolEpoch's
 // identical parameters and meaning.
+// rewardsPending reports that the boundary applying this epoch's rewards has
+// not been reached, so a one-sided row on either side is timing rather than
+// divergence: Dingo has not computed the epoch, so every account Koios has a
+// reward for looks absent, and the spendable flags Dingo has computed are still
+// provisional, so a row it will later forfeit has no Koios counterpart. See
+// DingoPoolEpochData.RewardsPending; this is the account-granularity half of
+// the same guard (dingo #3857, #4130).
 func CompareAccountEpoch(
 	network string,
 	epoch uint64,
@@ -1083,7 +1091,9 @@ func CompareAccountEpoch(
 	now time.Time,
 	graceHours int,
 	epochEndTime time.Time,
+	rewardsPendingArg ...bool,
 ) []CheckMismatch {
+	rewardsPending := len(rewardsPendingArg) > 0 && rewardsPendingArg[0]
 	var out []CheckMismatch
 
 	koiosByKey := make(map[accountRewardKey]KoiosAccountRewards, len(koiosRows))
@@ -1179,12 +1189,20 @@ func CompareAccountEpoch(
 		dr, dingoOK := dingoByKey[k]
 		switch {
 		case koiosOK && !dingoOK:
+			// The chain-position form of the same question the grace window
+			// asks, and the one that survives a replay: an epoch Dingo has not
+			// computed yet makes every Koios reward look absent here, which is
+			// a statement about timing rather than a divergence (issue #3857).
 			cat := CategoryAcctOnlyKoios
 			switch {
 			case isZeroRewardAmount(kr.Earned):
 				// Both sides credited nothing; see
-				// CategoryAcctZeroRewardRow.
+				// CategoryAcctZeroRewardRow. This outranks either timing
+				// case: a zero row is not a value the other side can
+				// publish later, so waiting cannot change the answer.
 				cat = CategoryAcctZeroRewardRow
+			case rewardsPending:
+				cat = CategoryReferenceLag
 			case graceHours > 0 && !epochEndTime.IsZero() &&
 				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour:
 				cat = CategoryReferenceLag
@@ -1215,6 +1233,14 @@ func CompareAccountEpoch(
 			case isZeroRewardAmount(dr.Amount):
 				// Symmetric with the koiosOK && !dingoOK case above.
 				cat = CategoryAcctZeroRewardRow
+			case rewardsPending:
+				// Also symmetric: before the boundary a reward computed
+				// for a credential that deregisters in the meantime is
+				// still marked spendable, so Dingo holds a row Koios will
+				// never publish. That is timing, not divergence, and the
+				// branch above already says so in the other direction
+				// (dingo #4130).
+				cat = CategoryReferenceLag
 			case graceHours > 0 && !epochEndTime.IsZero() &&
 				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour:
 				cat = CategoryReferenceLag
@@ -1235,6 +1261,17 @@ func CompareAccountEpoch(
 			})
 		default:
 			if !lovelaceEqual(dr.Amount, kr.Earned) {
+				// Guarded the same way the presence case above is, and the
+				// same way ComparePoolEpoch guards its own value comparison:
+				// before the applying boundary the amount can still change,
+				// so a difference is a statement about timing rather than a
+				// divergence (issue #3857). Leaving this strict while the
+				// presence check is not would report the same epoch as both
+				// a lag and a mismatch.
+				cat := CategoryValueMismatch
+				if rewardsPending {
+					cat = CategoryReferenceLag
+				}
 				out = append(out, CheckMismatch{
 					Network:      network,
 					Epoch:        epoch,
@@ -1242,7 +1279,7 @@ func CompareAccountEpoch(
 					Field:        "account_reward_amount",
 					DingoValue:   dr.Amount,
 					KoiosValue:   kr.Earned,
-					Category:     CategoryValueMismatch,
+					Category:     cat,
 					CheckedAt:    now,
 				})
 			}

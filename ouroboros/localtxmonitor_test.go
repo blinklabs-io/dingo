@@ -25,6 +25,8 @@ import (
 )
 
 func TestLocaltxmonitorServerGetMempoolReportsConfiguredCapacity(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		capacity int64
@@ -61,6 +63,8 @@ func TestLocaltxmonitorServerGetMempoolReportsConfiguredCapacity(t *testing.T) {
 func TestLocaltxmonitorServerGetMempoolRejectsUnrepresentableCapacity(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	o, _ := newTxSubmissionTestOuroboros(t, func(cfg *mempool.MempoolConfig) {
 		cfg.MempoolCapacity = int64(math.MaxUint32) + 1
 	})

@@ -60,6 +60,8 @@ func loadFirstImmutableBlock(t *testing.T) ledger.Block {
 }
 
 func TestValidateBlockCheckpointRealBlockMatch(t *testing.T) {
+	t.Parallel()
+
 	block := loadFirstImmutableBlock(t)
 	ls := &LedgerState{
 		checkpoints: map[uint64]string{
@@ -70,6 +72,8 @@ func TestValidateBlockCheckpointRealBlockMatch(t *testing.T) {
 }
 
 func TestValidateBlockCheckpointRealBlockMismatch(t *testing.T) {
+	t.Parallel()
+
 	block := loadFirstImmutableBlock(t)
 	ls := &LedgerState{
 		checkpoints: map[uint64]string{
@@ -84,12 +88,16 @@ func TestValidateBlockCheckpointRealBlockMismatch(t *testing.T) {
 }
 
 func TestValidateBlockCheckpointNoCheckpointsConfiguredForBlock(t *testing.T) {
+	t.Parallel()
+
 	block := loadFirstImmutableBlock(t)
 	ls := &LedgerState{} // nil checkpoints map
 	require.NoError(t, ls.validateBlockCheckpoint(block))
 }
 
 func TestValidateBlockCheckpointSkipsByronEbb(t *testing.T) {
+	t.Parallel()
+
 	// A Byron EBB shares the preceding block's number. Even if that number
 	// is checkpointed with a different hash, the EBB itself must be skipped
 	// so it cannot be falsely rejected. The skip happens before any block

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package immutable_test
+package immutable
 
 import (
 	"encoding/binary"
@@ -26,11 +26,7 @@ import (
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-
-	"github.com/blinklabs-io/dingo/database/immutable"
 )
-
-const secondaryIndexEntrySize = 56
 
 type immutableIndexFixture struct {
 	dir    string
@@ -48,26 +44,57 @@ func writeImmutableIndexFixture(
 		t.Fatal("fixture requires at least one block")
 	}
 	dir := t.TempDir()
+	points := make([]ocommon.Point, len(blockOffsets))
+	for idx := range blockOffsets {
+		hash := make([]byte, 32)
+		for hashIdx := range hash {
+			hash[hashIdx] = byte(idx + 1)
+		}
+		points[idx] = ocommon.NewPoint(uint64(100+idx), hash)
+	}
+	writeImmutableChunkTrio(
+		t,
+		dir,
+		"00000",
+		version,
+		primaryOffsets,
+		blockOffsets,
+		points,
+	)
+	return immutableIndexFixture{dir: dir, points: points}
+}
+
+func writeImmutableChunkTrio(
+	t *testing.T,
+	dir string,
+	name string,
+	version byte,
+	primaryOffsets []uint32,
+	blockOffsets []uint64,
+	points []ocommon.Point,
+) {
+	t.Helper()
+	if blockOffsets != nil && len(blockOffsets) != len(points) {
+		t.Fatalf(
+			"fixture has %d block offsets for %d points",
+			len(blockOffsets),
+			len(points),
+		)
+	}
 	primary := make([]byte, 1+4*len(primaryOffsets))
 	primary[0] = version
 	for i, offset := range primaryOffsets {
 		binary.BigEndian.PutUint32(primary[1+i*4:], offset)
 	}
-	secondary := make([]byte, secondaryIndexEntrySize*len(blockOffsets))
+	secondary := make([]byte, secondaryIndexEntrySize*len(points))
 	var chunk []byte
-	points := make([]ocommon.Point, 0, len(blockOffsets))
-	for i, blockOffset := range blockOffsets {
-		base := i * secondaryIndexEntrySize
-		binary.BigEndian.PutUint64(secondary[base:], blockOffset)
-		hash := make([]byte, 32)
-		for j := range hash {
-			hash[j] = byte(i + 1)
+	for idx, point := range points {
+		if len(point.Hash) != 32 {
+			t.Fatalf(
+				"fixture point hash has length %d, want 32",
+				len(point.Hash),
+			)
 		}
-		copy(secondary[base+16:base+48], hash)
-		slot := uint64(100 + i)
-		binary.BigEndian.PutUint64(secondary[base+48:], slot)
-		points = append(points, ocommon.NewPoint(slot, hash))
-
 		block, err := cbor.Encode([]any{
 			uint64(1),
 			cbor.RawMessage{0x80},
@@ -75,24 +102,36 @@ func writeImmutableIndexFixture(
 		if err != nil {
 			t.Fatalf("encode fixture block: %s", err)
 		}
+		blockOffset := uint64(len(chunk))
+		if blockOffsets != nil {
+			blockOffset = blockOffsets[idx]
+		}
+
+		base := idx * secondaryIndexEntrySize
+		binary.BigEndian.PutUint64(secondary[base:], blockOffset)
+		copy(secondary[base+16:base+48], point.Hash)
+		binary.BigEndian.PutUint64(secondary[base+48:], point.Slot)
 		chunk = append(chunk, block...)
 	}
-	for name, data := range map[string][]byte{
-		"00000.chunk":     chunk,
-		"00000.primary":   primary,
-		"00000.secondary": secondary,
+	for suffix, data := range map[string][]byte{
+		chunkFileExtension:     chunk,
+		primaryFileExtension:   primary,
+		secondaryFileExtension: secondary,
 	} {
-		if err := os.WriteFile(filepath.Join(dir, name), data, 0o640); err != nil {
-			t.Fatalf("write %s: %s", name, err)
+		if err := os.WriteFile(
+			filepath.Join(dir, name+suffix),
+			data,
+			0o640,
+		); err != nil {
+			t.Fatalf("write %s%s: %s", name, suffix, err)
 		}
 	}
-	return immutableIndexFixture{dir: dir, points: points}
 }
 
 func getBlockRecoveringPanic(
-	imm *immutable.ImmutableDb,
+	imm *ImmutableDb,
 	point ocommon.Point,
-) (block *immutable.Block, err error, panicValue any) {
+) (block *Block, err error, panicValue any) {
 	defer func() {
 		panicValue = recover()
 	}()
@@ -106,7 +145,7 @@ func requireGetBlockError(
 	want string,
 ) {
 	t.Helper()
-	imm, err := immutable.New(fixture.dir)
+	imm, err := New(fixture.dir)
 	if err != nil {
 		t.Fatalf("open immutable DB: %s", err)
 	}
@@ -132,7 +171,7 @@ func requireGetBlockErrorIs(
 	wantSubstr string,
 ) {
 	t.Helper()
-	imm, err := immutable.New(fixture.dir)
+	imm, err := New(fixture.dir)
 	if err != nil {
 		t.Fatalf("open immutable DB: %s", err)
 	}
@@ -181,7 +220,7 @@ func TestImmutableIndexAcceptsValidSingleAndMultipleBlockChunks(t *testing.T) {
 			fixture := writeImmutableIndexFixture(
 				t, 1, test.primaryOffsets, test.blockOffsets,
 			)
-			imm, err := immutable.New(fixture.dir)
+			imm, err := New(fixture.dir)
 			if err != nil {
 				t.Fatalf("open immutable DB: %s", err)
 			}
@@ -237,7 +276,7 @@ func TestImmutableIndexRejectsLastBlockOffsetBeyondChunk(t *testing.T) {
 		t, 1, []uint32{0, secondaryIndexEntrySize}, []uint64{1000},
 	)
 	requireGetBlockErrorIs(
-		t, fixture, immutable.ErrInvalidChunkOffset, "beyond chunk size",
+		t, fixture, ErrInvalidChunkOffset, "beyond chunk size",
 	)
 }
 
@@ -251,7 +290,7 @@ func TestImmutableIndexRejectsDescendingBlockOffsets(t *testing.T) {
 	requireGetBlockErrorIs(
 		t,
 		fixture,
-		immutable.ErrInvalidChunkOffset,
+		ErrInvalidChunkOffset,
 		"does not follow current block offset",
 	)
 }
@@ -284,7 +323,7 @@ func TestImmutableIndexRejectsBlockOffsetOverflow(t *testing.T) {
 				t, 1, primaryOffsets, test.blockOffsets,
 			)
 			requireGetBlockErrorIs(
-				t, fixture, immutable.ErrInvalidChunkOffset, "overflows int64",
+				t, fixture, ErrInvalidChunkOffset, "overflows int64",
 			)
 		})
 	}

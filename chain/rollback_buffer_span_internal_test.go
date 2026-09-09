@@ -30,6 +30,8 @@ import (
 // short buffer detected part-way through would leave the rollback half
 // applied. Drive it directly rather than leaving the branch unexecuted.
 func TestCheckEphemeralBufferSpan(t *testing.T) {
+	t.Parallel()
+
 	points := func(n int) []ocommon.Point {
 		out := make([]ocommon.Point, n)
 		for i := range out {
