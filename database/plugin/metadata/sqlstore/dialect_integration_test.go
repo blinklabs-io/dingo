@@ -111,6 +111,7 @@ func testSQLStoreIntegration(
 	store, err := New(Config{
 		WriteDB:         db,
 		Dialect:         dialect,
+		StorageMode:     types.StorageModeAPI,
 		Migrations:      registry,
 		MigrationLocker: locker,
 	})
@@ -435,4 +436,7 @@ INSERT INTO redeemer (
 	pending, err = store.HasDeferredIndexesPending()
 	require.NoError(t, err)
 	require.False(t, pending)
+
+	// Exercise the many-to-many collateral contract on this dialect.
+	collateralProductionFlow(t, store, db)
 }

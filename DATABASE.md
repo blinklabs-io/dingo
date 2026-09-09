@@ -131,6 +131,18 @@ used by the new store. `v1alpha1` also creates the `node_settings_gate` table
 described below: the schema is unreleased, so a new table belongs in the
 initial version rather than in a version of its own.
 
+Collateral inputs are stored in the `utxo_collateral_input` association table,
+keyed by `(utxo_id, transaction_hash)`. This is the authoritative many-to-many
+relationship: one output can be collateral for multiple transactions, and
+rollback removes only the association belonging to the rolled-back
+transaction. Migration `v13` copies non-NULL legacy
+`utxo.collateral_by_tx_id` markers before new writes use the association table;
+the copy is idempotent and applies equally to SQLite, PostgreSQL, and MySQL.
+Because the legacy scalar overwrote earlier owners, `v13` cannot reconstruct
+those discarded edges. The blob store may still retain transaction/block CBOR,
+but migrations do not parse it; recovering such history requires an explicit
+chain reindex/resync before it can be represented in this table.
+
 The v1alpha1 schema also includes
 `idx_pool_opcert_sequence_pool_sequence` (see `pool_opcert_sequence` below).
 It is created as part of the initial schema on fresh databases.
@@ -524,6 +536,8 @@ erDiagram
     TRANSACTION ||..o{ UTXO : "hash = spent_at_tx_id"
     TRANSACTION ||..o{ UTXO : "hash = referenced_by_tx_id"
     TRANSACTION ||..o{ UTXO : "hash = collateral_by_tx_id"
+    TRANSACTION ||..o{ UTXO_COLLATERAL_INPUT : "transaction_hash"
+    UTXO ||..o{ UTXO_COLLATERAL_INPUT : "utxo_id"
 ```
 
 ### Certificates, Accounts, and Pools
@@ -744,6 +758,7 @@ post-Mithril-boundary strictness (see below).
 |---|---|---|---|
 | `transaction` | `id`, `hash`, `block_hash`, `slot`, `block_index`, `type`, `fee`, `collateral_fee`, `ttl`, `valid`, `metadata` | PK `id`; unique `hash`; indexes `block_hash`, `slot` | One row per transaction. `block_hash` and `slot` point to the blob block. `fee` is the declared body fee; `collateral_fee` is the collateral consumed into the fee pot by a phase-2-invalid transaction (collateral inputs minus collateral return) and zero for valid transactions. The epoch fee pot sums `fee` for valid rows plus `collateral_fee` for invalid rows. `metadata` is populated only in API mode. |
 | `utxo` | `id`, `transaction_id`, `collateral_return_for_tx_id`, `tx_id`, `output_idx`, `payment_key`, `credential_tag`, `staking_key`, `datum_hash`, `spent_at_tx_id`, `referenced_by_tx_id`, `collateral_by_tx_id`, `added_slot`, `deleted_slot`, `amount`, `payment_script` | PK `id`; unique `(tx_id, output_idx)`; unique `collateral_return_for_tx_id`; indexes `transaction_id`, `payment_key`, `staking_key`, spend/reference/collateral tx hashes, and `added_slot`; composites `idx_utxo_deleted_staking_amount` (`deleted_slot`, `credential_tag`, `staking_key`, `amount`), `idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key`, `deleted_slot`, `amount`), and `idx_utxo_deleted_payment_script` (`deleted_slot`, `payment_script`, `amount`) | Produced outputs use `transaction_id -> transaction.id`. Collateral returns use `collateral_return_for_tx_id -> transaction.id`. Inputs/reference/collateral joins are logical: `spent_at_tx_id`, `referenced_by_tx_id`, and `collateral_by_tx_id` store transaction hashes. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. The `(credential_tag, staking_key, deleted_slot, amount)` composite backs stake-credential live UTxO sums such as DRep voting-power tallying. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
+| `utxo_collateral_input` | `utxo_id`, `transaction_hash` | PK `(utxo_id, transaction_hash)`; index `transaction_hash` | Authoritative many-to-many collateral relationship. Migration `v13` backfills one edge from each non-NULL legacy `utxo.collateral_by_tx_id`; apply and rollback maintain edges independently. |
 | `asset` | `id`, `utxo_id`, `policy_id`, `name`, `name_hex`, `fingerprint`, `amount` | PK `id`; unique `(name, policy_id, utxo_id)`; named index `idx_asset_policy_id` on `policy_id`; indexes `name_hex`, `fingerprint`, `amount` | Multi-asset quantities attached to `utxo.id`. The unique key backs ledger-state import `ON CONFLICT`; the policy-id query index can be deferred during bulk load. Use `utxo.deleted_slot = 0` for live balances. |
 | `asset_mint_burn` | `id`, `tx_hash`, `policy_id`, `name`, `fingerprint`, `slot`, `quantity`, `tx_index` | PK `id`; unique `(tx_hash, policy_id, name)` (`idx_asset_mint_burn_unique`); composite `(policy_id, name, slot)` (`idx_asset_mint_burn_lookup`); indexes `fingerprint`, `slot` | API-mode-only mint/burn history: one row per `(transaction, asset)` for every tx that mints or burns the asset. Populated from `tx.AssetMint()` during indexing; `quantity` is a signed decimal string (negative for burns). Unlike `asset` (live holdings), this preserves full history so Blockfrost `/assets/{asset}` can derive `initial_mint_tx_hash` (earliest event by `(slot, tx_index, id)`) and `mint_or_burn_count` (row count). The unique key makes re-applying a transaction after a rollback idempotent. Rows with `slot > rollback_slot` are deleted alongside `transaction` on rollback. |
 | `address_transaction` | `id`, `payment_key`, `credential_tag`, `staking_key`, `transaction_id`, `slot`, `tx_index` | PK `id`; indexes `payment_key`, `transaction_id`, `slot`; composite `(credential_tag, staking_key, slot, tx_index, payment_key)` | API-mode address-to-transaction index. Join to `transaction.id`. `credential_tag`: 0 key hash, 1 script hash for stake-bearing addresses. The composite index supports credential-scoped pagination and its leading columns cover simple credential lookups. |
