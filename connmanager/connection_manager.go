@@ -247,7 +247,7 @@ func (c *ConnectionManager) releaseInboundSlot() {
 // consumeInboundSlot converts a reserved inbound slot into an actual
 // connection entry via AddConnection. The reservation is consumed
 // (decremented) since the connection itself now occupies the slot.
-func (c *ConnectionManager) consumeInboundSlot() {
+func (c *ConnectionManager) consumeInboundSlot() { //nolint:unused // used by direct connection-manager tests
 	c.connectionsMutex.Lock()
 	defer c.connectionsMutex.Unlock()
 	c.inboundReserved--
@@ -674,25 +674,41 @@ func (c *ConnectionManager) AddConnection(
 	isInbound bool,
 	peerAddr string,
 ) bool {
-	return c.addConnectionImpl(conn, isInbound, false, peerAddr, "")
+	return c.addConnectionImpl(conn, isInbound, false, peerAddr, "", false)
 }
 
-func (c *ConnectionManager) addConnectionWithIPKey(
+func (c *ConnectionManager) addConnectionWithIPKey( //nolint:unused // used by direct connection-manager tests
 	conn *ouroboros.Connection,
 	isInbound bool,
 	peerAddr string,
 	ipKey string,
 ) bool {
-	return c.addConnectionImpl(conn, isInbound, false, peerAddr, ipKey)
+	return c.addConnectionImpl(conn, isInbound, false, peerAddr, ipKey, false)
 }
 
-func (c *ConnectionManager) addNtCConnectionWithIPKey(
+func (c *ConnectionManager) addConnectionWithInboundSlot(
+	conn *ouroboros.Connection,
+	peerAddr string,
+	ipKey string,
+) bool {
+	return c.addConnectionImpl(conn, true, false, peerAddr, ipKey, true)
+}
+
+func (c *ConnectionManager) addNtCConnectionWithIPKey( //nolint:unused // used by direct connection-manager tests
 	conn *ouroboros.Connection,
 	isInbound bool,
 	peerAddr string,
 	ipKey string,
 ) bool {
-	return c.addConnectionImpl(conn, isInbound, true, peerAddr, ipKey)
+	return c.addConnectionImpl(conn, isInbound, true, peerAddr, ipKey, false)
+}
+
+func (c *ConnectionManager) addNtCConnectionWithInboundSlot(
+	conn *ouroboros.Connection,
+	peerAddr string,
+	ipKey string,
+) bool {
+	return c.addConnectionImpl(conn, true, true, peerAddr, ipKey, true)
 }
 
 func (c *ConnectionManager) addConnectionImpl(
@@ -701,6 +717,7 @@ func (c *ConnectionManager) addConnectionImpl(
 	isNtC bool,
 	peerAddr string,
 	ipKey string,
+	inboundSlotReserved bool,
 ) bool {
 	// Check if shutting down before adding to WaitGroup to prevent panic
 	// during Stop()'s Wait() call. Must hold the same lock used to set closing.
@@ -709,6 +726,9 @@ func (c *ConnectionManager) addConnectionImpl(
 		c.listenersMutex.Unlock()
 		// Shutting down - release IP slot and close connection
 		c.releaseIPSlot(ipKey)
+		if inboundSlotReserved {
+			c.releaseInboundSlot()
+		}
 		if conn != nil {
 			closeConnAndLog(
 				c.config.Logger,
@@ -737,6 +757,9 @@ func (c *ConnectionManager) addConnectionImpl(
 			// Outbound connections carry the chainsync client (chain
 			// truth source). Matches cardano-node dedup behavior.
 			c.connectionsMutex.Unlock()
+			if inboundSlotReserved {
+				c.releaseInboundSlot()
+			}
 			c.config.Logger.Warn(
 				"closing inbound connection that collides with existing outbound",
 				"peer_addr",
@@ -845,6 +868,11 @@ func (c *ConnectionManager) addConnectionImpl(
 		isNtC:     isNtC,
 		peerAddr:  peerAddr,
 		ipKey:     ipKey,
+	}
+	if inboundSlotReserved {
+		// Consume the reservation while holding connectionsMutex so admission
+		// and registration are one atomic operation.
+		c.inboundReserved--
 	}
 	info := c.connections[connId]
 	if isInbound && !isNtC && c.tracksInboundPeerAddresses() {

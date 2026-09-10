@@ -448,6 +448,11 @@ func TestNtCAdmissionLimitsPendingConnections(t *testing.T) {
 			second := newBlockingMockConn("192.0.2.10", 4002)
 			listener.ProvideConnection(second)
 			require.Eventually(t, func() bool {
+				return second.isClosed()
+			}, time.Second, time.Millisecond,
+				"second NtC connection should be rejected at the inbound limit",
+			)
+			require.Eventually(t, func() bool {
 				cm.connectionsMutex.Lock()
 				defer cm.connectionsMutex.Unlock()
 				return inboundAdmissionCountForTest(cm)+cm.inboundReserved == 1

@@ -262,22 +262,6 @@ func (c *ConnectionManager) startListener(
 				continue
 			}
 
-			// Reserve admission before moving any handshake off the accept loop.
-			// This covers NtC as well as NtN: a peer that never completes its
-			// handshake must not consume unbounded setup goroutines.
-			if !c.tryReserveInboundSlot() {
-				c.config.Logger.Warn(
-					fmt.Sprintf(
-						"listener: inbound connection limit reached (%d), rejecting connection from %s",
-						c.config.MaxInboundConns,
-						conn.RemoteAddr(),
-					),
-				)
-				_ = conn.Close()
-				c.untrackPendingConnection(conn)
-				continue
-			}
-
 			// When source-port reuse is in use, force RST
 			// on close so the 4-tuple does not get stuck in TIME_WAIT
 			// and block a subsequent outbound dial to the same peer
@@ -293,6 +277,18 @@ func (c *ConnectionManager) startListener(
 						),
 					)
 				}
+			}
+			if !c.tryReserveInboundSlot() {
+				c.config.Logger.Warn(
+					fmt.Sprintf(
+						"listener: inbound connection limit reached (%d), rejecting connection from %s",
+						c.config.MaxInboundConns,
+						conn.RemoteAddr(),
+					),
+				)
+				_ = conn.Close()
+				c.untrackPendingConnection(conn)
+				continue
 			}
 
 			c.goroutineWg.Go(func() {
@@ -455,14 +451,12 @@ func (c *ConnectionManager) setupAcceptedConnection(
 			"remote_addr",
 			peerAddr,
 		)
-		c.consumeInboundSlot()
-		if !c.addNtCConnectionWithIPKey(oConn, true, peerAddr, ipKey) {
+		if !c.addNtCConnectionWithInboundSlot(oConn, peerAddr, ipKey) {
 			return
 		}
 	} else {
 		c.config.Logger.Info("listener: inbound connection", "remote_addr", peerAddr)
-		c.consumeInboundSlot()
-		if !c.addConnectionWithIPKey(oConn, true, peerAddr, ipKey) {
+		if !c.addConnectionWithInboundSlot(oConn, peerAddr, ipKey) {
 			return
 		}
 	}
