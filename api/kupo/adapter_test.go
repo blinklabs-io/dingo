@@ -15,11 +15,36 @@
 package kupo
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
+
+func TestIsMetadataBlockUnavailable(t *testing.T) {
+	t.Parallel()
+
+	for name, err := range map[string]error{
+		"block not found":         models.ErrBlockNotFound,
+		"wrapped block not found": fmt.Errorf("lookup: %w", models.ErrBlockNotFound),
+		"history expired":         types.ErrHistoryExpired,
+		"wrapped history expired": errors.Join(errors.New("lookup"), types.ErrHistoryExpired),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if !isMetadataBlockUnavailable(err) {
+				t.Fatalf("isMetadataBlockUnavailable(%v) = false", err)
+			}
+		})
+	}
+
+	if isMetadataBlockUnavailable(errors.New("database unavailable")) {
+		t.Fatal("unrelated database errors must remain internal errors")
+	}
+}
 
 func TestSpendingTransactionDetailsUseCanonicalInputOrder(t *testing.T) {
 	inputA1 := models.Utxo{TxId: repeatedByte(0x11), OutputIdx: 1}

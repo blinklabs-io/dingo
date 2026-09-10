@@ -3699,6 +3699,11 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
 		return ErrRollbackExceedsMithrilBoundary
 	}
+	finishDestructiveTransition := func() {}
+	if ls.db != nil {
+		finishDestructiveTransition = ls.db.BeginDestructiveTransition()
+		defer finishDestructiveTransition()
+	}
 	// Exclude ledgerReadChainIterator's gather-then-submit cycle for the
 	// entire remainder of this function -- see blockPipelineGatherMutex's
 	// doc comment on the LedgerState struct for why drainBlockPipelineBeforeRollback

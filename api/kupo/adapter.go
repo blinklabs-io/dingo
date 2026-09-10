@@ -29,11 +29,17 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
+
+func isMetadataBlockUnavailable(err error) bool {
+	return errors.Is(err, models.ErrBlockNotFound) ||
+		errors.Is(err, types.ErrHistoryExpired)
+}
 
 // NodeAdapter translates Kupo's package-local API contract into narrow
 // LedgerState and coordinated database calls.
@@ -669,11 +675,11 @@ func (a *NodeAdapter) Metadata(
 		return []Metadata{}, "", snapshotTip, nil
 	}
 	block, err := database.BlockBySlotTxn(txn, slot)
-	if errors.Is(err, models.ErrBlockNotFound) {
+	if isMetadataBlockUnavailable(err) {
 		block, err = database.BlockBeforeSlotTxn(txn, slot)
 	}
 	if err != nil {
-		if errors.Is(err, models.ErrBlockNotFound) {
+		if isMetadataBlockUnavailable(err) {
 			return nil, "", Point{}, fmt.Errorf(
 				"%w: no indexed ancestor for slot %d",
 				ErrInvalidRequest,

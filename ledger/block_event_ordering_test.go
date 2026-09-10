@@ -372,6 +372,43 @@ func TestRollbackWaitsForCommittedApplyPublication(t *testing.T) {
 	require.Equal(t, fixture.ancestorTip, ls.chain.Tip())
 }
 
+// TestRollbackWaitsForDestructiveTransitionBarrier ensures a deferred
+// rollback cannot delete chain data while a coordinated destructive database
+// transition is in progress.
+func TestRollbackWaitsForDestructiveTransitionBarrier(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	finish := fixture.ls.db.BeginDestructiveTransition()
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(finish) }
+	defer release()
+
+	rollbackDone := make(chan error, 1)
+	go func() {
+		rollbackDone <- fixture.ls.rollbackChainAndStateDeferred(
+			fixture.ancestorTip.Point,
+			nil,
+		)
+	}()
+
+	testutil.RequireNoReceive(
+		t,
+		rollbackDone,
+		100*time.Millisecond,
+		"rollback must wait for the destructive transition barrier",
+	)
+	require.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+
+	release()
+	require.NoError(t, testutil.RequireReceive(
+		t,
+		rollbackDone,
+		2*time.Second,
+		"rollback after destructive transition",
+	))
+}
+
 func TestBlockApplyCandidatePointUsesLastExaminedBlock(t *testing.T) {
 	t.Parallel()
 

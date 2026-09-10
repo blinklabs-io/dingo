@@ -65,6 +65,25 @@ func TestParsePatternFamilies(t *testing.T) {
 	}
 }
 
+func TestParseReferencePatternUsesOutputIndexBeforeTransactionID(t *testing.T) {
+	t.Parallel()
+
+	transactionID := strings.Repeat("cd", 32)
+	pattern, err := parsePattern("3@" + transactionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pattern.kind != patternReference {
+		t.Fatalf("pattern kind = %d, want reference", pattern.kind)
+	}
+	if pattern.output == nil || *pattern.output != 3 {
+		t.Fatalf("output index = %v, want 3", pattern.output)
+	}
+	if !strings.EqualFold(hex.EncodeToString(pattern.txID), transactionID) {
+		t.Fatalf("transaction ID = %x, want %s", pattern.txID, transactionID)
+	}
+}
+
 func TestAssetPatternRequiresPolicyID(t *testing.T) {
 	for _, value := range []string{"*.01", "*.*"} {
 		if _, err := parsePattern(value); err == nil {

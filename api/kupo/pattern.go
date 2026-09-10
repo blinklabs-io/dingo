@@ -63,8 +63,8 @@ func parsePattern(value string) (parsedPattern, error) {
 	if value == "*/*" {
 		return parsedPattern{kind: patternShelley}, nil
 	}
-	if transactionID, outputIndex, ok := strings.Cut(value, "@"); ok {
-		return parseReferencePattern(transactionID, outputIndex)
+	if outputIndex, transactionID, ok := strings.Cut(value, "@"); ok {
+		return parseReferencePattern(outputIndex, transactionID)
 	}
 	if policyID, assetName, ok := strings.Cut(value, "."); ok {
 		return parseAssetPattern(policyID, assetName)
