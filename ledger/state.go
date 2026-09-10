@@ -631,25 +631,37 @@ type LedgerStateConfig struct {
 	// logged warning (the block is trusted). It defaults to false so the check
 	// is enforced everywhere unless explicitly disabled.
 	//
-	// dingo derives a pool's leadership stake from delegated UTxO only; it does
-	// not yet compute staking rewards (CalculateRewards/GetAdaPots/
-	// RewardAccountBalance are unimplemented), so reward-account balances are
-	// omitted from the stake distribution. On real networks (many diffuse
-	// pools) this omission is proportionally negligible and the check catches
-	// genuine ineligibility, so it stays enforced. On the concentrated
-	// prototype-2026w29 musashi topology the dominant pool's reward accrual
-	// drifts its true relative stake above the UTxO-only figure, so enforcing
-	// the threshold falsely rejects that pool's legitimately-eligible blocks and
-	// wedges the chain — so it is skipped there. All other header checks (KES,
-	// VRF proof, registered-VRF-key binding, opcert) still apply regardless.
+	// The leadership stake includes reward-account balances.
+	// refreshRewardLiveStakeAggregate stores total_stake =
+	// utxo_stake + reward_stake, with reward_stake read from account.reward,
+	// and GetLiveStakeInputsForPools selects total_stake; the historical
+	// reconstruction adds the same term in getStakeByPoolsAtSlot.
+	// LedgerView.CalculateRewards and LedgerView.GetAdaPots are still
+	// unimplemented, but RewardAccountBalance is not, and neither gates the
+	// reward term above. An earlier version of this comment said the stake
+	// was delegated UTxO only; that claim was stale, and #3165 was diagnosed
+	// from it rather than from the code. Verified on preview: the epoch
+	// 17-20 mark totals equal cardano-node's active stake for epochs 18-21
+	// exactly (see #3626).
+	//
+	// The check stays enforced on real networks. On the concentrated
+	// prototype-2026w29 musashi topology it rejected the dominant pool's
+	// legitimately-eligible blocks and wedged the chain, so it is skipped
+	// there. All other header checks (KES, VRF proof,
+	// registered-VRF-key binding, opcert) still apply regardless.
 	// Separately, TPraos bootstrap epochs with decentralization still active
 	// validate genesis overlay assignment in verify_header.go, then skip only
 	// the local pool stake-threshold check while d remains active.
-	// Interim measure until reward calculation lands and reward balances can be
-	// included in the leadership stake. Set from the network in node.go (true
-	// on musashi, false otherwise) via Config.prototypeTrustBypassesEnabled,
-	// which requires an unambiguous Musashi identity so this can never be
-	// reached from a preview/preprod/mainnet configuration.
+	// Set from the network in node.go (true on musashi, false otherwise) via
+	// Config.prototypeTrustBypassesEnabled, which requires an unambiguous
+	// Musashi identity so this can never be reached from a
+	// preview/preprod/mainnet configuration.
+	// The same flag also gates every other path where the stake-derived
+	// threshold cannot be evaluated at all (zero total active stake, a
+	// missing/nonpositive active-slot coefficient, a post-Mithril mark
+	// snapshot reconstructed after its target boundary): standard profiles
+	// reject rather than trust an unevaluated producer, and this flag is the
+	// only way to bypass that.
 	SkipLeaderStakeThresholdCheck bool
 	// SkipDijkstraTxValidation, when true, skips the Dijkstra per-transaction
 	// validation rule set entirely. On the Haskell-conformant Musashi path,
@@ -1400,11 +1412,26 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	// altogether, so no pipeline is constructed for that mode -- leaving
 	// blockPipeline non-nil but permanently unstarted otherwise.
 	if cfg.BlockPipelineEnabled && !cfg.ManualBlockProcessing {
-		// ApplyFunc is left nil in every case -- actual ledger apply
-		// continues to happen downstream in ledgerProcessBlocksFromSource
-		// exactly as it does today; the pipeline's apply stage here only
-		// re-sequences decoded (and, if enabled, validated) results back
-		// into submission order.
+		// ApplyFunc is deliberately left nil in every case -- actual
+		// ledger apply continues to happen downstream in
+		// ledgerProcessBlocksFromSource exactly as it does today; the
+		// pipeline's apply stage here only re-sequences decoded (and, if
+		// enabled, validated) results back into submission order, which
+		// is the whole job dingo needs from it.
+		//
+		// This is a recorded decision, not an unfinished phase of #1894:
+		// see ARCHITECTURE.md, "Why dingo's ledger apply is not wired into
+		// pipeline.ApplyFunc" (issue #3227). In short, pipeline.ApplyStage
+		// applies one block at a time and keeps going after a failure --
+		// a failed or undecodable block only records its own error and
+		// consumes its sequence slot, and every later block is applied
+		// anyway. A ledger cannot do that, and the failure never reaches
+		// the submitter synchronously, so errRestartLedgerPipeline /
+		// errStaleChainIterator cannot be expressed through it. Those
+		// upstream properties are pinned by the contract tests in
+		// ledger/block_pipeline_apply_contract_test.go; if a gouroboros
+		// bump makes any of them fail, revisit the decision rather than
+		// the test.
 		pipelineOpts := []pipeline.PipelineOption{
 			pipeline.WithDecodeWorkers(blockPipelineDecodeWorkers),
 		}
@@ -6912,6 +6939,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 		if err := validateInboundBlockEnvelope(
 			block,
 			pparams,
+			ls.config.CardanoNodeConfig,
 			parent,
 		); err != nil {
 			return nil, err
@@ -11199,6 +11227,9 @@ func (ls *LedgerState) forgeBlock() {
 			"tx_count", len(mempoolTxs),
 		)
 
+		consumedInputs := make(map[string]struct{})
+		createdOutputs := make(map[string]lcommon.Utxo)
+
 		// Iterate through transactions and add them until we hit limits
 		for _, mempoolTx := range mempoolTxs {
 			// Use raw CBOR from the mempool transaction
@@ -11234,6 +11265,20 @@ func (ls *LedgerState) forgeBlock() {
 				ls.config.Logger.Debug(
 					"failed to decode full transaction, skipping",
 					"component", "ledger",
+					"error", err,
+				)
+				continue
+			}
+
+			if err := ls.ValidateTxWithOverlay(
+				fullTx,
+				consumedInputs,
+				createdOutputs,
+			); err != nil {
+				ls.config.Logger.Debug(
+					"skipping transaction - failed re-validation",
+					"component", "ledger",
+					"tx_hash", mempoolTx.Hash,
 					"error", err,
 				)
 				continue
@@ -11323,6 +11368,22 @@ func (ls *LedgerState) forgeBlock() {
 				transactionMetadataSet[uint(len(transactionBodies))-1] = metadataCbor
 			}
 			blockSize += txSize
+			for _, input := range fullTx.Consumed() {
+				key := fmt.Sprintf(
+					"%s:%d",
+					input.Id().String(),
+					input.Index(),
+				)
+				consumedInputs[key] = struct{}{}
+			}
+			for _, output := range fullTx.Produced() {
+				key := fmt.Sprintf(
+					"%s:%d",
+					output.Id.Id().String(),
+					output.Id.Index(),
+				)
+				createdOutputs[key] = output
+			}
 			// Safe to assign: overflow was already checked
 			// via SafeAddExUnits when computing
 			// candidateExUnits above.

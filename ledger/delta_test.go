@@ -37,6 +37,8 @@ import (
 )
 
 func TestProcessGovernanceAcceptsDijkstraProtocolParameters(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: "",
 	})
@@ -106,6 +108,8 @@ func TestProcessGovernanceAcceptsDijkstraProtocolParameters(t *testing.T) {
 func TestLedgerDeltaPersistsMultipleCertificateDepositsFromOneSnapshot(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		keyDeposit = uint64(2_000_000)
 		certCount  = 64
@@ -216,6 +220,8 @@ ORDER BY c.cert_index`)
 }
 
 func TestProcessGovernanceRenewsDRepFromCertificateOnly(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: "",
 	})
@@ -266,6 +272,8 @@ func TestProcessGovernanceRenewsDRepFromCertificateOnly(t *testing.T) {
 }
 
 func TestConwayProtocolParametersDijkstra(t *testing.T) {
+	t.Parallel()
+
 	pparams := &dijkstra.DijkstraProtocolParameters{
 		ConwayProtocolParameters: conway.ConwayProtocolParameters{
 			GovActionValidityPeriod: 42,
@@ -281,12 +289,16 @@ func TestConwayProtocolParametersDijkstra(t *testing.T) {
 }
 
 func TestConwayProtocolParametersNilDijkstra(t *testing.T) {
+	t.Parallel()
+
 	var pparams *dijkstra.DijkstraProtocolParameters
 
 	require.Nil(t, conwayProtocolParameters(pparams))
 }
 
 func TestConwayProtocolParametersTypedNil(t *testing.T) {
+	t.Parallel()
+
 	var conwayPParams *conway.ConwayProtocolParameters
 	var dijkstraPParams *dijkstra.DijkstraProtocolParameters
 
@@ -295,6 +307,8 @@ func TestConwayProtocolParametersTypedNil(t *testing.T) {
 }
 
 func TestProcessGovernanceTypedNilPParams(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		pparams lcommon.ProtocolParameters

@@ -73,6 +73,8 @@ func seedUnregisteredPoolStake(
 // Sorting by pool key hash is what makes the reply a function of the state
 // alone.
 func TestPoolStakeDistribution_OrdersPoolsByKeyHash(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	const snapshotEpoch = 0
@@ -123,6 +125,8 @@ func TestPoolStakeDistribution_OrdersPoolsByKeyHash(t *testing.T) {
 // VRF key hash is the one block validation will hold the pool to, both
 // inherited from queryShelleyPoolDistr2 rather than recomputed here.
 func TestPoolStakeDistribution_ReportsStakeFractionAndVrf(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	vrfA := repeatedBytes(32, 0xAA)
@@ -177,6 +181,8 @@ func TestPoolStakeDistribution_ReportsStakeFractionAndVrf(t *testing.T) {
 // layer, where TestReadState_LedgerTipComesFromTheDistributionRead checks the
 // handler renders this point and never samples the live tip.
 func TestPoolStakeDistribution_CarriesTheTipItWasReadAt(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	seedPoolDistr2Fixture(
 		t, db,
@@ -219,6 +225,8 @@ func TestPoolStakeDistribution_CarriesTheTipItWasReadAt(t *testing.T) {
 // read. The filter selects which pools are reported; it does not change what
 // they are a share of, so a filtered reply's fractions sum to less than one.
 func TestPoolStakeDistribution_FilterReportsOnlyRequestedPools(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	const snapshotEpoch = 0
@@ -249,6 +257,8 @@ func TestPoolStakeDistribution_FilterReportsOnlyRequestedPools(t *testing.T) {
 // no registration on record: it cannot be given a VRF key hash, so it is left
 // out and the rest of the distribution is still served.
 func TestPoolStakeDistribution_OmitsPoolWithoutRegistration(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	const snapshotEpoch = 0
@@ -279,6 +289,8 @@ func TestPoolStakeDistribution_OmitsPoolWithoutRegistration(t *testing.T) {
 // snapshot holds no stake at all, the state a fresh chain is in before its
 // first snapshot is taken. Dividing by the total would panic.
 func TestPoolStakeDistribution_EmptySnapshotDoesNotDivide(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 

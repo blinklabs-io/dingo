@@ -136,6 +136,8 @@ func requireInvalidRequest(
 // The byte cap cannot fire here, because the client never sends enough
 // bytes to reach it.
 func TestRequestBodyStalledClientIsBounded(t *testing.T) {
+	t.Parallel()
+
 	_, baseURL := startTestServer(
 		t, newTestDeps(), withRequestBodyTimeout(testBodyTimeout),
 	)
@@ -165,6 +167,8 @@ func TestRequestBodyStalledClientIsBounded(t *testing.T) {
 // stalling. The read ends in an unexpected EOF rather than a deadline,
 // and must produce the same invalid-request error.
 func TestRequestBodyTruncatedIsRejected(t *testing.T) {
+	t.Parallel()
+
 	_, baseURL := startTestServer(
 		t, newTestDeps(), withRequestBodyTimeout(testBodyTimeout),
 	)
@@ -187,6 +191,8 @@ func TestRequestBodyTruncatedIsRejected(t *testing.T) {
 // request served under the same short deadline must still succeed, so
 // the bound cannot be satisfied by rejecting everything.
 func TestRequestBodyNormalRequestUnaffected(t *testing.T) {
+	t.Parallel()
+
 	_, baseURL := startTestServer(
 		t, newTestDeps(), withRequestBodyTimeout(testBodyTimeout),
 	)
@@ -208,4 +214,15 @@ func TestRequestBodyNormalRequestUnaffected(t *testing.T) {
 		t, json.NewDecoder(resp.Body).Decode(&decoded),
 	)
 	require.Len(t, decoded.NetworkIdentifiers, 1)
+}
+
+// A complete first value does not complete the declared HTTP body.
+func TestRequestBodyStalledAfterJSONIsRejected(t *testing.T) {
+	_, baseURL := startTestServer(
+		t, newTestDeps(), withRequestBodyTimeout(testBodyTimeout),
+	)
+	conn := dialTestServer(t, baseURL)
+	writePartialRequest(t, conn, "/network/list", 4096, "{}")
+	resp, body := readMeshResponse(t, conn, respondWithin)
+	requireInvalidRequest(t, resp, body)
 }

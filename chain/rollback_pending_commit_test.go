@@ -56,6 +56,8 @@ func pendingCommitHash(label string) []byte {
 // be a regression test rather than a lottery: without the batch-commit
 // barrier this reports a not-found index in roughly half of the rounds below.
 func TestRollbackDoesNotResolveUncommittedBlockIndex(t *testing.T) {
+	t.Parallel()
+
 	const (
 		// Larger than any chain this test builds, so a rollback to origin is
 		// never refused for exceeding K and every round exercises the
@@ -153,6 +155,8 @@ func TestRollbackDoesNotResolveUncommittedBlockIndex(t *testing.T) {
 // The first three blocks fit; the fourth has a mismatched parent, so the
 // transaction rolls back after the chain has already advanced in memory.
 func TestAddBlocksRestoresMemoryAfterBatchFailure(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	if err != nil {
