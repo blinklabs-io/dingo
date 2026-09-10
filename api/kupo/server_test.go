@@ -653,3 +653,27 @@ func TestStartStop(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestStopWaitsForInProgressStart(t *testing.T) {
+	server := newTestServer(&mockNode{})
+	startDone, err := server.beginStart()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- server.Stop(t.Context())
+	}()
+
+	select {
+	case err := <-stopDone:
+		t.Fatalf("Stop returned before Start completed: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	server.endStart(startDone)
+	if err := <-stopDone; err != nil {
+		t.Fatal(err)
+	}
+}

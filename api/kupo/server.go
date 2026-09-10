@@ -16,6 +16,7 @@ package kupo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -37,6 +38,7 @@ type Server struct {
 	verifier  *apiauth.Verifier
 	mu        sync.Mutex
 	lifecycle *serverLifecycle
+	startDone chan struct{}
 }
 
 // serverLifecycle ties a cancellation function to the server it owns. A
@@ -128,6 +130,12 @@ func registerRoutes(mux *http.ServeMux, prefix string, s *Server) {
 
 // Start binds the configured HTTP listener and serves in the background.
 func (s *Server) Start(ctx context.Context) error {
+	startDone, err := s.beginStart()
+	if err != nil {
+		return err
+	}
+	defer s.endStart(startDone)
+
 	serveCtx, cancel := context.WithCancel(ctx)
 	verifier, err := apiauth.NewVerifier(s.config.Auth)
 	if err != nil {
@@ -184,20 +192,64 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Stop gracefully stops the API and waits until its socket is released.
 func (s *Server) Stop(ctx context.Context) error {
+	for {
+		s.mu.Lock()
+		startDone := s.startDone
+		if startDone != nil {
+			s.mu.Unlock()
+			if err := waitForStart(ctx, startDone); err != nil {
+				return err
+			}
+			continue
+		}
+		lifecycle := s.lifecycle
+		if lifecycle != nil {
+			s.lifecycle = nil
+		}
+		s.mu.Unlock()
+		if lifecycle != nil {
+			lifecycle.cancel()
+		}
+		job, inFlight := s.listener.Take()
+		if job == nil {
+			return s.listener.AwaitTeardown(ctx, inFlight)
+		}
+		return s.listener.Shutdown(ctx, job, apilistener.Graceful)
+	}
+}
+
+func (s *Server) beginStart() (chan struct{}, error) {
 	s.mu.Lock()
-	lifecycle := s.lifecycle
-	if lifecycle != nil {
-		s.lifecycle = nil
+	defer s.mu.Unlock()
+	if s.startDone != nil {
+		return nil, errors.New("kupo: server start already in progress")
 	}
-	s.mu.Unlock()
-	if lifecycle != nil {
-		lifecycle.cancel()
+	done := make(chan struct{})
+	s.startDone = done
+	return done, nil
+}
+
+func (s *Server) endStart(done chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.startDone == done {
+		s.startDone = nil
+		close(done)
 	}
-	job, inFlight := s.listener.Take()
-	if job == nil {
-		return s.listener.AwaitTeardown(ctx, inFlight)
+}
+
+func waitForStart(ctx context.Context, done chan struct{}) error {
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		select {
+		case <-done:
+			return nil
+		default:
+		}
+		return fmt.Errorf("timed out waiting for Kupo API server start: %w", ctx.Err())
 	}
-	return s.listener.Shutdown(ctx, job, apilistener.Graceful)
 }
 
 func (s *Server) clearLifecycle(server *http.Server) {
