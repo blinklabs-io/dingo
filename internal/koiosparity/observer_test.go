@@ -297,7 +297,8 @@ func newTestObserver(
 ) *Observer {
 	t.Helper()
 	o, err := NewObserver(ObserverConfig{
-		baseURL:            baseURL,
+		BaseURL:            baseURL,
+		AllowInsecureHTTP:  true,
 		Network:            "preview",
 		CachePath:          filepath.Join(t.TempDir(), "cache.db"),
 		Source:             source,
@@ -518,8 +519,9 @@ func TestObserverRestartResumesBacklogWithoutReprocessingOrSkipping(
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
 
 	first, err := NewObserver(ObserverConfig{
-		baseURL: srv.URL,
-		Network: "preview", CachePath: cachePath, Source: source, Strict: false,
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           "preview", CachePath: cachePath, Source: source, Strict: false,
 		Logger: slog.New(slog.DiscardHandler),
 	})
 	require.NoError(t, err)
@@ -562,8 +564,9 @@ func TestObserverRestartResumesBacklogWithoutReprocessingOrSkipping(
 	// tracking.)
 	seedDingoEpochAggregate(t, source, 6, 2_000_000, 11, 21, 31)
 	second, err := NewObserver(ObserverConfig{
-		baseURL: srv.URL,
-		Network: "preview", CachePath: cachePath, Source: source, Strict: false,
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           "preview", CachePath: cachePath, Source: source, Strict: false,
 		Logger: slog.New(slog.DiscardHandler),
 	})
 	require.NoError(t, err)
@@ -688,8 +691,9 @@ func TestObserverStrictModeCancelsOnFirstMismatch(t *testing.T) {
 	var fatalErr error
 	var mu sync.Mutex
 	o, err := NewObserver(ObserverConfig{
-		baseURL: srv.URL,
-		Network: "preview", CachePath: filepath.Join(t.TempDir(), "cache.db"),
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           "preview", CachePath: filepath.Join(t.TempDir(), "cache.db"),
 		Source: source, Strict: true, Logger: slog.New(slog.DiscardHandler),
 		FatalFunc: func(err error) {
 			fatalCount.Add(1)
@@ -785,14 +789,15 @@ func TestObserverStrictModeCancelsOnAccountMismatch(t *testing.T) {
 
 	var fatalCount atomic.Int32
 	o, err := NewObserver(ObserverConfig{
-		baseURL:         srv.URL,
-		Network:         "preview",
-		CachePath:       filepath.Join(t.TempDir(), "cache.db"),
-		Source:          source,
-		Strict:          true,
-		AccountsEnabled: true,
-		Logger:          slog.New(slog.DiscardHandler),
-		FatalFunc:       func(error) { fatalCount.Add(1) },
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           "preview",
+		CachePath:         filepath.Join(t.TempDir(), "cache.db"),
+		Source:            source,
+		Strict:            true,
+		AccountsEnabled:   true,
+		Logger:            slog.New(slog.DiscardHandler),
+		FatalFunc:         func(error) { fatalCount.Add(1) },
 	})
 	require.NoError(t, err)
 	defer func() { _ = o.Stop(context.Background()) }()
@@ -852,8 +857,9 @@ func TestObserverNonStrictModeContinuesAfterFailure(t *testing.T) {
 
 	var fatalCount atomic.Int32
 	o, err := NewObserver(ObserverConfig{
-		baseURL: srv.URL,
-		Network: "preview", CachePath: filepath.Join(t.TempDir(), "cache.db"),
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           "preview", CachePath: filepath.Join(t.TempDir(), "cache.db"),
 		Source: source, Strict: false, Logger: slog.New(slog.DiscardHandler),
 		FatalFunc: func(error) { fatalCount.Add(1) },
 	})
@@ -1054,6 +1060,7 @@ func TestObserverStartSeedsBacklogForMissingAccountCoverage(t *testing.T) {
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
 	cache, err := OpenCache(cachePath, nil)
 	require.NoError(t, err)
+	seedKoiosSource(t, cache, "preview", srv.URL)
 
 	fetchedAt := time.Now().Add(-time.Hour).UTC()
 	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
@@ -1146,7 +1153,8 @@ func TestObserverStartSeedsBacklogForMissingAccountCoverage(t *testing.T) {
 
 	results := make(chan *EpochCompareResult, 4)
 	o, err := NewObserver(ObserverConfig{
-		baseURL:            srv.URL,
+		BaseURL:            srv.URL,
+		AllowInsecureHTTP:  true,
 		Network:            "preview",
 		CachePath:          cachePath,
 		Source:             source,
@@ -1208,8 +1216,9 @@ func TestObserverFetchIfNeededRetriesTransientThenSucceeds(t *testing.T) {
 	})
 
 	o, err := NewObserver(ObserverConfig{
-		baseURL: srv.URL,
-		Network: "preview", CachePath: filepath.Join(t.TempDir(), "cache.db"),
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           "preview", CachePath: filepath.Join(t.TempDir(), "cache.db"),
 		Source: source, Logger: slog.New(slog.DiscardHandler),
 		FetchRetryAttempts: 5, FetchRetryDelay: 5 * time.Millisecond,
 	})
@@ -1246,7 +1255,8 @@ func TestObserverFetchAccountsIfNeededPropagatesCoverageDBError(t *testing.T) {
 	srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{})
 
 	o, err := NewObserver(ObserverConfig{
-		baseURL:            srv.URL,
+		BaseURL:            srv.URL,
+		AllowInsecureHTTP:  true,
 		Network:            "preview",
 		CachePath:          filepath.Join(t.TempDir(), "cache.db"),
 		Source:             source,
@@ -1285,8 +1295,9 @@ func TestObserverFetchIfNeededSurfacesPermanentErrorImmediately(t *testing.T) {
 	srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{})
 
 	o, err := NewObserver(ObserverConfig{
-		baseURL: srv.URL,
-		Network: "preview", CachePath: filepath.Join(t.TempDir(), "cache.db"),
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           "preview", CachePath: filepath.Join(t.TempDir(), "cache.db"),
 		Source: source, Logger: slog.New(slog.DiscardHandler),
 		FetchRetryAttempts: 5, FetchRetryDelay: 5 * time.Millisecond,
 	})
@@ -1352,6 +1363,7 @@ func TestObserverBackfillsParamsForAPreExistingCache(t *testing.T) {
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
 	cache, err := OpenCache(cachePath, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
+	seedKoiosSource(t, cache, network, srv.URL)
 	fetchedAt := time.Now().UTC().Add(-time.Hour)
 	for e := uint64(0); e <= epoch; e++ {
 		// The upgraded-cache shape: pool-level data present, no parameter
@@ -1388,7 +1400,8 @@ func TestObserverBackfillsParamsForAPreExistingCache(t *testing.T) {
 	seedDingoEpochAggregate(t, source, 4, 1_000_000, 10, 20, 30)
 
 	o, err := NewObserver(ObserverConfig{
-		baseURL:            srv.URL,
+		BaseURL:            srv.URL,
+		AllowInsecureHTTP:  true,
 		Network:            network,
 		CachePath:          cachePath,
 		Source:             source,
@@ -1472,13 +1485,14 @@ func TestObserverFailureReportsSignificantMismatchCount(t *testing.T) {
 	var fatalErr error
 	var results []EpochCompareResult
 	o, err := NewObserver(ObserverConfig{
-		baseURL:         srv.URL,
-		Network:         "preview",
-		CachePath:       filepath.Join(t.TempDir(), "cache.db"),
-		Source:          source,
-		Strict:          true,
-		AccountsEnabled: true,
-		Logger:          slog.New(slog.DiscardHandler),
+		BaseURL:           srv.URL,
+		AllowInsecureHTTP: true,
+		Network:           "preview",
+		CachePath:         filepath.Join(t.TempDir(), "cache.db"),
+		Source:            source,
+		Strict:            true,
+		AccountsEnabled:   true,
+		Logger:            slog.New(slog.DiscardHandler),
 		OnResult: func(r *EpochCompareResult) {
 			mu.Lock()
 			results = append(results, *r)
