@@ -54,6 +54,16 @@ func leiosFetchRequestContext(
 		parent = context.Background()
 	}
 	if !deadline.IsZero() {
+		// WithDeadline creates an independent timer when the requested deadline
+		// is equal to the parent's deadline (it uses a strict Before check).
+		// That timer can win while parent.Err is still nil, making a caller
+		// deadline look like a peer timeout. Reuse the parent's cancellation
+		// whenever it is no later than the requested attempt deadline; only
+		// create a child timer when the attempt is genuinely earlier.
+		if parentDeadline, ok := parent.Deadline(); ok &&
+			!parentDeadline.After(deadline) {
+			return context.WithCancel(parent)
+		}
 		return context.WithDeadline(parent, deadline)
 	}
 	return context.WithTimeout(
