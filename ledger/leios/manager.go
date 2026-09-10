@@ -2445,6 +2445,28 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 		m.noteVoteNotEmitted(voteNotEmittedNoKey)
 		return
 	}
+	entry, err := m.committeeAndParamsForEpoch(record.epoch)
+	if err != nil {
+		m.noteVoteNotEmitted(voteNotEmittedCommitteeUnavailable)
+		m.logger.Debug(
+			"leios committee unavailable, not voting",
+			"slot", record.slot,
+			"epoch", record.epoch,
+			"error", err,
+		)
+		return
+	}
+	committee := entry.committee
+	voterId, ok := committee.VoterIdFor(votingPool)
+	if !ok {
+		m.noteVoteNotEmitted(voteNotEmittedNotSeated)
+		m.logger.Debug(
+			"local pool is not a leios committee member, not voting",
+			"slot", record.slot,
+			"epoch", record.epoch,
+		)
+		return
+	}
 	if err := m.slotWindowCheck(record.slot); err != nil {
 		m.noteVoteNotEmitted(voteNotEmittedSlotWindow)
 		// A seated node holding a key that never votes is otherwise
@@ -2472,28 +2494,6 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 				"error", err,
 			)
 		}
-		return
-	}
-	entry, err := m.committeeAndParamsForEpoch(record.epoch)
-	if err != nil {
-		m.noteVoteNotEmitted(voteNotEmittedCommitteeUnavailable)
-		m.logger.Debug(
-			"leios committee unavailable, not voting",
-			"slot", record.slot,
-			"epoch", record.epoch,
-			"error", err,
-		)
-		return
-	}
-	committee := entry.committee
-	voterId, ok := committee.VoterIdFor(votingPool)
-	if !ok {
-		m.noteVoteNotEmitted(voteNotEmittedNotSeated)
-		m.logger.Debug(
-			"local pool is not a leios committee member, not voting",
-			"slot", record.slot,
-			"epoch", record.epoch,
-		)
 		return
 	}
 	member, ok := committee.Member(voterId)

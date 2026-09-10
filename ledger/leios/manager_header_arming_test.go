@@ -16,6 +16,7 @@ package leios
 
 import (
 	"bytes"
+	"encoding/hex"
 	"log/slog"
 	"strings"
 	"sync"
@@ -338,6 +339,37 @@ func TestVoteManagerSlotWindowDeclineIsCountedAndWarned(t *testing.T) {
 		"the decline is logged at warn level, got: %s",
 		logBuf.String(),
 	)
+}
+
+// TestVoteManagerNonSeatedOutsideWindowUsesNotSeatedReason ensures committee
+// membership is classified before the slot-window shortcut. A configured pool
+// that is not selected should not be reported as merely late to vote.
+func TestVoteManagerNonSeatedOutsideWindowUsesNotSeatedReason(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	slots := &fakeSlotProvider{slot: 1000}
+	fixture := newManagerFixture(t, func(_ *managerFixture, cfg *VoteManagerConfig) {
+		cfg.SlotProvider = slots
+		cfg.VoteWindowSlots = headerArmingVoteWindow
+		cfg.PromRegistry = reg
+	})
+	var poolHash lcommon.PoolKeyHash
+	decoded, err := hex.DecodeString(testPoolHash(99))
+	require.NoError(t, err)
+	copy(poolHash[:], decoded)
+	require.NoError(t, fixture.mgr.EnableVoting(poolHash, fixture.keys[headerArmingSeatedVoterId]))
+
+	ebHash := lcommon.NewBlake2b256([]byte("unseated-eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("unseated-rb"))
+	staleSlot := uint64(1000 - headerArmingVoteWindow - 100)
+	fixture.mgr.HandleEndorserBlock(staleSlot, ebHash)
+	fixture.mgr.ObserveAnnouncement(staleSlot, rbHash, ebHash)
+
+	assert.Equal(t, float64(1), promtestutil.ToFloat64(
+		fixture.mgr.metrics.votesNotEmittedTotal.WithLabelValues(voteNotEmittedNotSeated),
+	))
+	assert.Equal(t, float64(0), promtestutil.ToFloat64(
+		fixture.mgr.metrics.votesNotEmittedTotal.WithLabelValues(voteNotEmittedSlotWindow),
+	))
 }
 
 // TestVoteManagerVotesNotEmittedCountsMissingKey pins a second reason label so
