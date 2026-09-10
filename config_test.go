@@ -117,6 +117,19 @@ func TestNewConfigMempoolCapacityDefaultsFromRunMode(t *testing.T) {
 	}
 }
 
+func TestNewConfigAPIBindAddressDefaultsToLoopback(t *testing.T) {
+	cfg := NewConfig(
+		WithRunMode(string(internalconfig.RunModeDev)),
+		WithBindAddr("0.0.0.0"),
+	)
+
+	assert.Equal(t, "0.0.0.0", cfg.BindAddr())
+	assert.Equal(t, internalconfig.DefaultAPIBindAddr, cfg.APIBindAddr())
+
+	cfg = NewConfig(WithAPIBindAddr("192.0.2.10"))
+	assert.Equal(t, "192.0.2.10", cfg.APIBindAddr())
+}
+
 func TestNewConfigPreservesExplicitMempoolCapacity(t *testing.T) {
 	t.Parallel()
 

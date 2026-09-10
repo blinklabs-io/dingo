@@ -5865,8 +5865,14 @@ Blockfrost, Mesh, and UTxO RPC share one TLS/authentication contract
 (dingo#2996/#2998), rather than each exposing its own ad hoc surface. A
 reverse proxy or API gateway in front of these listeners remains fully
 supported — TLS/auth here is additive, not a replacement requirement — but
-an operator can now also secure any subset of the three in-process,
-without one.
+an operator can now also secure any subset of the three in-process. Startup validation
+also refuses an enabled API on a non-loopback bind address
+when its effective authentication policy is disabled. This guard evaluates
+the shared `api.auth` policy after each provider override is merged, while
+loopback-only APIs may remain unauthenticated for local clients. An operator
+who intentionally exposes an API must configure token authentication (or put
+an authenticated reverse proxy in front and keep the Dingo listener on
+loopback).
 
 - **Policy types (`internal/apiconfig`).** `TLSPolicy` (`mode`,
   `certFilePath`, `keyFilePath`) and `AuthPolicy` (`mode`, `token`,
@@ -5983,10 +5989,11 @@ without one.
   upgrade for any deployment that had set them only for UTxO RPC, which
   they never protected. An operator opting Blockfrost/Mesh into TLS does so
   explicitly, through `api.tls` or their own `plugins.api.<name>.config.tls`.
-  `bindAddr`, `debugBindAddr`, and `corsAllowedOrigins` are unaffected by any
-  of this and stay at the `Config` root: `bindAddr` is not API-specific (the
-  relay/NtN and metrics listeners use it too), `debugBindAddr` controls the
-  separate pprof listener, and `corsAllowedOrigins`'s single shared value
+  `bindAddr`, `apiBindAddr`, `debugBindAddr`, and `corsAllowedOrigins` are
+  unaffected by any of this and stay at the `Config` root: `bindAddr` is not
+  API-specific (the relay/NtN and metrics listeners use it too), `apiBindAddr`
+  is the separate loopback-by-default bind for the three API listeners,
+  `debugBindAddr` controls the separate pprof listener, and `corsAllowedOrigins`'s single shared value
   already applies uniformly to all three API providers today. Duplicating
   these fields under `api:` would only add a second source of truth with no
   behavioral gain.
