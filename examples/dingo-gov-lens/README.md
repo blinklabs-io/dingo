@@ -179,17 +179,11 @@ from a Secret in your own chart overlay.
 
 ### Dingo version
 
-Use 0.68.0 or newer. DRep activity renewal from certificates landed in 0.68.0,
-and without it `drep.expiry_epoch` is not maintained from vote and update
-certificates, so the expiry column and the `expiry` filter report stale
-answers rather than wrong-looking ones. CIP-0163 account expiry columns need
-0.67.0, and the reward metadata tables need 0.65.0.
-
-The Epochs tab reaches only the last four epochs on a released node. Retaining
-`epoch_summary` and the per-epoch reward tables for the life of the database is
-newer than 0.68.0 and not in a tagged release yet; before it, those rows were
-pruned to `epoch < current-3` at every epoch transition. The tab works either
-way, it just shows a short window until you run a node built from `main`.
+Use 0.70.0 or newer. DRep activity renewal from certificates landed in 0.68.0,
+the historical epoch/reward retention used by the Epochs tab landed in 0.69.0,
+and the current CIP-0163 withdrawal witness behavior landed in 0.70.0. Older
+nodes can therefore leave fields stale, show only the short retained epoch
+window, or omit withdrawal history.
 
 ## Read-Only Database User
 

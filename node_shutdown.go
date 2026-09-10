@@ -18,16 +18,58 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/plugin"
 )
 
+var errShutdownLifecycleGate = errors.New("shutdown lifecycle gate")
+
 func (n *Node) Stop() error {
-	n.shutdownOnce.Do(func() {
-		n.shutdownErr = n.shutdown()
-	})
-	return n.shutdownErr
+	n.shutdownMu.Lock()
+	if n.shutdownDone {
+		err := n.shutdownErr
+		n.shutdownMu.Unlock()
+		return err
+	}
+	if n.shutdownRunning {
+		wait := n.shutdownWait
+		n.shutdownMu.Unlock()
+		<-wait
+		return n.Stop()
+	}
+	n.shutdownRunning = true
+	n.shutdownWait = make(chan struct{})
+	wait := n.shutdownWait
+	n.shutdownMu.Unlock()
+
+	err := n.shutdown()
+
+	n.shutdownMu.Lock()
+	n.shutdownErr = err
+	n.shutdownRunning = false
+	if !errors.Is(err, errShutdownLifecycleGate) {
+		n.shutdownDone = true
+	}
+	close(wait)
+	n.shutdownMu.Unlock()
+	return err
+}
+
+func lockMutexContext(ctx context.Context, mutex *sync.Mutex) error {
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if mutex.TryLock() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (n *Node) closeWithShutdownTimeout(
@@ -87,13 +129,41 @@ func (n *Node) configuredShutdownTimeout() time.Duration {
 }
 
 func (n *Node) shutdown() error {
-	shutdownStart := time.Now()
 	shutdownTimeout := n.configuredShutdownTimeout()
-	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	deadline := time.Now().Add(shutdownTimeout)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
+	shutdownStart := time.Now()
+
+	// Signal the node before waiting on lifecycle gates. A live restore,
+	// truncate, or snapshot may need the node context to be cancelled before
+	// it can release its gate; waiting first would strand cancellation and
+	// leave the node running when the shutdown deadline expires.
 	if n.cancel != nil {
 		n.cancel()
 	}
+
+	// Run holds this gate until startup has either completed or rolled back.
+	// In particular, a signal can reach Stop while Run is still unwinding a
+	// failed startup; waiting here keeps the phase-ordered shutdown from
+	// concurrently closing a component the startup stack is stopping.
+	if err := lockMutexContext(ctx, &n.startupLifecycleMu); err != nil {
+		return fmt.Errorf("shutdown startup lifecycle lock: %w: %w", errShutdownLifecycleGate, err)
+	}
+	defer n.startupLifecycleMu.Unlock()
+	// Restore and Truncate hold these gates while quiescing, closing, and
+	// rebuilding storage-dependent components. Shutdown must take the same
+	// gates, in the same order, before cancelling those components or closing
+	// their storage; otherwise a concurrent live operation can use a resource
+	// while shutdown tears it down.
+	if err := lockMutexContext(ctx, &n.liveLifecycleMu); err != nil {
+		return fmt.Errorf("shutdown live lifecycle lock: %w: %w", errShutdownLifecycleGate, err)
+	}
+	defer n.liveLifecycleMu.Unlock()
+	if err := lockMutexContext(ctx, &n.snapshotMu); err != nil {
+		return fmt.Errorf("shutdown snapshot lock: %w: %w", errShutdownLifecycleGate, err)
+	}
+	defer n.snapshotMu.Unlock()
 
 	var err error
 
@@ -108,6 +178,9 @@ func (n *Node) shutdown() error {
 	// n.cancel() above asks the stall recycler to stop; wait here so it cannot
 	// race later shutdown phases that close connection, ledger, or DB state.
 	n.waitChainsyncStallRecycler()
+	// The selected-to-none worker is also context-owned. Wait for it before
+	// tearing down the selector or the chainsync state it reads.
+	n.waitChainSelectedNoneWorker()
 
 	// Stop block forger first to prevent new blocks
 	if n.blockForger != nil {
@@ -130,7 +203,10 @@ func (n *Node) shutdown() error {
 
 	if n.peerGov != nil {
 		if stopErr := n.peerGov.Stop(ctx); stopErr != nil {
-			err = errors.Join(err, fmt.Errorf("peer governor shutdown: %w", stopErr))
+			err = errors.Join(
+				err,
+				fmt.Errorf("peer governor shutdown: %w", stopErr),
+			)
 		}
 	}
 

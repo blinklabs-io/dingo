@@ -193,6 +193,17 @@ func writeTestClientCert(
 	return certPath, keyPath
 }
 
+func testCertificateFingerprint(t *testing.T, certPath string) string {
+	t.Helper()
+	pemBytes, err := os.ReadFile(certPath)
+	require.NoError(t, err)
+	block, _ := pem.Decode(pemBytes)
+	require.NotNil(t, block)
+	cert, err := x509.ParseCertificate(block.Bytes)
+	require.NoError(t, err)
+	return certFingerprint(cert)
+}
+
 // TestTLSServerReusesPreloadedCertAfterFilesChange guards against a real
 // bug: startServer's TLS path used to hand server.ServeTLS the same
 // on-disk cert/key paths it had just preflight-loaded, causing ServeTLS to
@@ -210,6 +221,8 @@ func writeTestClientCert(
 // regardless -- proving the serving goroutine never touches the files
 // again after the preflight load inside Start.
 func TestTLSServerReusesPreloadedCertAfterFilesChange(t *testing.T) {
+	t.Parallel()
+
 	certPath, keyPath := writeTestTLSCertKey(t)
 
 	db := newTestDB(t)
@@ -267,6 +280,8 @@ func TestTLSServerReusesPreloadedCertAfterFilesChange(t *testing.T) {
 // Addr() would keep reporting a real-looking address for a server that
 // wasn't actually running.
 func TestHandleServeExitClearsStateOnError(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	b := newTestBark(t, db)
 
@@ -313,6 +328,8 @@ func TestHandleServeExitClearsStateOnError(t *testing.T) {
 // that another Bark instance's startServer call may have since installed
 // in b.server/b.listenerAddr.
 func TestHandleServeExitIgnoresServerClosed(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	b := newTestBark(t, db)
 

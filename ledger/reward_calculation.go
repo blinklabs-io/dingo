@@ -24,6 +24,7 @@ import (
 	"math/big"
 	"slices"
 	"sort"
+	"strconv"
 	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -229,9 +230,23 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	}
 	if rewardSnapshot == nil {
 		if reportSkips {
+			reason := "missing reward snapshot"
+			failure, failureErr := meta.GetRewardSeedFailure(
+				rewardSnapshotEpoch, "mark", metaTxn,
+			)
+			if failureErr != nil {
+				return nil, false, fmt.Errorf(
+					"get reward seed failure for epoch %d: %w",
+					rewardSnapshotEpoch,
+					failureErr,
+				)
+			}
+			if failure != "" {
+				reason = "imported reward basis seeding failed: " + failure
+			}
 			ls.reportSkippedStakeRewards(
 				newEpoch,
-				"missing reward snapshot",
+				reason,
 				"reward_snapshot_epoch",
 				rewardSnapshotEpoch,
 			)
@@ -292,7 +307,7 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	if err != nil {
 		return nil, false, err
 	}
-	blockCounts, totalBlocks, err := ls.rewardBlockCounts(
+	blockCounts, totalBlocks, blockCountsKnown, err := ls.rewardBlockCounts(
 		meta,
 		metaTxn,
 		performanceEpoch,
@@ -301,6 +316,24 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	)
 	if err != nil {
 		return nil, false, err
+	}
+	// The performance epoch ended below this node's Mithril trust anchor and
+	// the snapshot's own block counts for it were not imported, so beta is
+	// unknown for every pool. Distributing the zero that an uncounted epoch
+	// yields would credit nothing and report a completed round; decline it
+	// instead, so the shortfall is visible here rather than at the first
+	// withdrawal the node then rejects (issue #3767).
+	if !blockCountsKnown {
+		if reportSkips {
+			ls.reportSkippedStakeRewards(
+				newEpoch,
+				"no block counts for the performance epoch: it ended below the"+
+					" Mithril trust anchor and the snapshot carried none",
+				"performance_epoch",
+				performanceEpoch,
+			)
+		}
+		return nil, false, nil
 	}
 	prefilterSlot, err := ls.rewardPrefilterSlot(meta, metaTxn, potsEpoch)
 	if err != nil {
@@ -491,7 +524,7 @@ func (ls *LedgerState) applyStakeRewardApplication(
 		"reward_snapshot_epoch", app.epochs.snapshot,
 		"performance_epoch", app.epochs.performance,
 		"pots_epoch", app.epochs.pots,
-		"pparams_type", fmt.Sprintf("%T", app.pparams),
+		"performance_pparams_type", fmt.Sprintf("%T", app.pparams),
 		"precomputed", app.precomputed,
 		"total_reward_pot", app.totalRewardPot,
 		"available_rewards", app.availableRewards,
@@ -841,7 +874,7 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 		return nil, false, nil
 	}
 	totalCirculation := params.MaxLovelaceSupply - uint64(pots.Reserves)
-	blockCounts, totalBlocks, err := ls.rewardBlockCounts(
+	blockCounts, totalBlocks, blockCountsKnown, err := ls.rewardBlockCounts(
 		meta,
 		metaTxn,
 		epochs.performance,
@@ -850,6 +883,12 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 	)
 	if err != nil {
 		return nil, false, err
+	}
+	// Without the performance epoch's block counts there is nothing to
+	// re-derive the stored pool rewards from, so the precomputed outputs
+	// cannot be shown to match their inputs and are not reused.
+	if !blockCountsKnown {
+		return nil, false, nil
 	}
 	poolRewardsMatch, err := precomputedRewardPoolRewardsMatchInputs(
 		poolInputs,
@@ -1392,7 +1431,10 @@ func precomputedRewardPoolInputsMatchSnapshot(
 			)
 		}
 	}
-	if totalDelegated != uint64(snapshot.TotalActiveStake) {
+	// Same bound as validateRewardCalculatorInputs: pools excluded for degraded
+	// registration data keep their stake in the snapshot's sigma_a denominator
+	// but contribute no reward_pool_input row.
+	if totalDelegated > uint64(snapshot.TotalActiveStake) {
 		return false, nil
 	}
 	if totalDelegators != snapshot.TotalDelegators {
@@ -2594,10 +2636,9 @@ func (ls *LedgerState) rewardParameters(
 			performanceEpochRow.EraId, performanceEpoch,
 		)
 	}
-	performancePParams, err := ls.db.GetPParams(
+	performancePParams, err := ls.loadPersistedProtocolParameters(
 		performanceEpoch,
-		performanceEraDesc.Id,
-		performanceEraDesc.DecodePParamsFunc,
+		*performanceEraDesc,
 		txn,
 	)
 	if err != nil {
@@ -2610,15 +2651,6 @@ func (ls *LedgerState) rewardParameters(
 		return nil, rewards.Parameters{}, nil, fmt.Errorf(
 			"missing pparams for reward performance epoch %d",
 			performanceEpoch,
-		)
-	}
-	performanceDecentralization, err := rewardDecentralizationFromPParams(
-		performancePParams,
-	)
-	if err != nil {
-		return nil, rewards.Parameters{}, nil, fmt.Errorf(
-			"get decentralization for reward performance epoch %d: %w",
-			performanceEpoch, err,
 		)
 	}
 	calculationEpochRow, err := ls.db.Metadata().GetEpoch(
@@ -2638,33 +2670,27 @@ func (ls *LedgerState) rewardParameters(
 			calculationEpoch,
 		)
 	}
-	eraDesc, ok := ls.eraById(calculationEpochRow.EraId)
-	if !ok || eraDesc == nil {
-		return nil, rewards.Parameters{}, nil, fmt.Errorf(
-			"unknown era ID %d for reward calculation epoch %d",
-			calculationEpochRow.EraId, calculationEpoch,
-		)
-	}
-	pparams, err := ls.db.GetPParams(
-		calculationEpoch,
-		eraDesc.Id,
-		eraDesc.DecodePParamsFunc,
-		txn,
-	)
-	if err != nil {
-		return nil, rewards.Parameters{}, nil, fmt.Errorf(
-			"get pparams for reward calculation epoch %d: %w",
-			calculationEpoch, err,
-		)
-	}
-	if pparams == nil {
-		return nil, rewards.Parameters{}, nil, fmt.Errorf(
-			"missing pparams for reward calculation epoch %d",
-			calculationEpoch,
-		)
-	}
+	// Every protocol-parameter input to the reward calculation comes from the
+	// performance epoch, not the calculation epoch. cardano-ledger's startStep
+	// (LedgerState/PulsingReward.hs) binds `pr = es ^. prevPParamsEpochStateL`
+	// and reads d, rho and tau from it, then hands that same `pr` to
+	// mkPoolRewardInfo for the pool-level parameters; updateRewards reads the
+	// protocol version from it too. `prevPParams` during the epoch that
+	// computes the update is the parameter set in force over the epoch whose
+	// blocks are being counted, which is exactly this round's performance
+	// epoch.
+	//
+	// Only the epoch length is the calculation epoch's, matching the
+	// slotsPerEpoch the RUPD rule passes for the epoch it runs in.
+	//
+	// The two agree whenever the parameters did not change across the
+	// boundary, which is why reading the calculation epoch's went unnoticed.
+	// They diverge on preview at the 2->3 round: d is 1 at the performance
+	// epoch (1) and 0 at the calculation epoch (2), and taking 0 dropped the
+	// d >= 0.8 short circuit, leaving eta at 0 and suppressing that epoch's
+	// entire monetary expansion (dingo #3481).
 	params, err := rewardParametersFromPParams(
-		pparams,
+		performancePParams,
 		ls.config.CardanoNodeConfig,
 		uint64(calculationEpochRow.LengthInSlots),
 	)
@@ -2690,7 +2716,7 @@ func (ls *LedgerState) rewardParameters(
 			params.MaxLovelaceSupply,
 		)
 	}
-	return pparams, params, performanceDecentralization, nil
+	return performancePParams, params, params.Decentralization, nil
 }
 
 // applyFullPotConfig copies the CIP-0163 full-pot feature gate from the ledger
@@ -2701,22 +2727,37 @@ func applyFullPotConfig(params *rewards.Parameters, cfg LedgerStateConfig) {
 	params.FullPotRewardsEnabled = cfg.FullPotRewardsEnabled
 }
 
+// rewardBlockCounts resolves the per-pool and total block counts for a reward
+// round's performance epoch.
+//
+// The bool reports whether the counts are known. It is false only when part of
+// the performance epoch lies at or below the Mithril trust anchor -- where this
+// node applied no block and therefore counted none -- and the snapshot's own
+// BlocksMade for that epoch was not imported. Zero counts and unknown counts
+// are not the same answer: pool performance is beta/sigma_a with beta the
+// pool's share of the epoch's blocks, so reading an uncountable epoch as zero
+// blocks gives every pool zero performance, credits every delegator nothing,
+// and reports a completed round. The chain then contradicts that state at the
+// first withdrawal of the rewards the reference did credit.
+//
+// A node that never imported a snapshot has no trust anchor and reaches none of
+// this: its counts come from its own block history exactly as before.
 func (ls *LedgerState) rewardBlockCounts(
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
 	performanceEpoch uint64,
 	poolInputs []*models.RewardPoolInput,
 	decentralization *big.Rat,
-) (map[string]uint64, uint64, error) {
+) (map[string]uint64, uint64, bool, error) {
 	epoch, err := meta.GetEpoch(performanceEpoch, metaTxn)
 	if err != nil {
-		return nil, 0, fmt.Errorf(
+		return nil, 0, false, fmt.Errorf(
 			"get reward block-count epoch %d: %w",
 			performanceEpoch, err,
 		)
 	}
 	if epoch == nil || epoch.LengthInSlots == 0 {
-		return nil, 0, nil
+		return nil, 0, true, nil
 	}
 	startSlot := epoch.StartSlot
 	endSlot := startSlot + uint64(epoch.LengthInSlots) - 1
@@ -2731,10 +2772,12 @@ func (ls *LedgerState) rewardBlockCounts(
 		poolKeys = append(poolKeys, poolKey)
 	}
 	if len(poolKeys) == 0 {
-		return nil, 0, nil
+		return nil, 0, true, nil
 	}
+	var counts map[string]uint64
+	var total uint64
 	if decentralization != nil && decentralization.Sign() > 0 {
-		return rewardBlockCountsExcludingOverlaySlots(
+		counts, total, err = rewardBlockCountsExcludingOverlaySlots(
 			meta,
 			metaTxn,
 			poolKeys,
@@ -2742,20 +2785,124 @@ func (ls *LedgerState) rewardBlockCounts(
 			endSlot,
 			decentralization,
 		)
+	} else {
+		counts, total, err = meta.CountPoolBlocksInSlotRange(
+			poolKeys,
+			startSlot,
+			endSlot,
+			metaTxn,
+		)
+		if err != nil {
+			err = fmt.Errorf(
+				"count reward pool blocks in epoch %d: %w",
+				performanceEpoch, err,
+			)
+		}
 	}
-	counts, total, err := meta.CountPoolBlocksInSlotRange(
-		poolKeys,
+	if err != nil {
+		return nil, 0, false, err
+	}
+	return ls.mergeImportedBlockCounts(
+		meta,
+		metaTxn,
+		performanceEpoch,
 		startSlot,
-		endSlot,
+		counts,
+		total,
+	)
+}
+
+// mergeImportedBlockCounts adds the block counts carried by a bootstrap
+// snapshot to the counts this node observed for the same epoch, and reports
+// whether the epoch's counts are known at all.
+//
+// The two sources are disjoint by construction. A bootstrap applies no block at
+// or below its anchor, and CountPoolBlocksInSlotRange raises its start slot past
+// the recorded anchor for exactly that reason, so the observed counts cover
+// (anchor, epochEnd] and the imported nesBcur covers [epochStart, anchor]. For
+// the epoch before the anchor's the observed side is empty and the imported
+// nesBprev is the whole epoch. Both sides already exclude TPraos overlay slots:
+// the reference's incrBlocks skips them when it increments nesBcur, and
+// rewardBlockCountsExcludingOverlaySlots skips them here.
+//
+// The per-pool counts are merged only for pools the caller asked about, while
+// the epoch total takes every imported pool, because the total is the
+// denominator of every pool's beta and the reference sums the whole BlocksMade
+// map to obtain it.
+func (ls *LedgerState) mergeImportedBlockCounts(
+	meta metadata.MetadataStore,
+	metaTxn types.Txn,
+	performanceEpoch uint64,
+	epochStartSlot uint64,
+	counts map[string]uint64,
+	totalBlocks uint64,
+) (map[string]uint64, uint64, bool, error) {
+	// Read the anchor from the same sync state, in the same transaction, that
+	// CountPoolBlocksInSlotRange raised its start slot with, rather than from
+	// the in-memory copy: the two must agree about which slots the observed
+	// counts cover. A malformed value is an error here for the reason it is
+	// one there -- read as "no anchor" it would restore the uncounted-epoch
+	// zero at exactly the moment the anchor could not be confirmed.
+	value, err := meta.GetSyncState(mithrilLedgerSlotSyncKey, metaTxn)
+	if err != nil {
+		return nil, 0, false, fmt.Errorf(
+			"read Mithril trust boundary: %w",
+			err,
+		)
+	}
+	if value == "" {
+		return counts, totalBlocks, true, nil
+	}
+	mithrilLedgerSlot, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return nil, 0, false, fmt.Errorf(
+			"parse Mithril trust boundary %q: %w",
+			value,
+			err,
+		)
+	}
+	if mithrilLedgerSlot < epochStartSlot {
+		return counts, totalBlocks, true, nil
+	}
+	imported, importedTotal, importedKnown, err := meta.GetImportedPoolBlockCounts(
+		performanceEpoch,
 		metaTxn,
 	)
 	if err != nil {
-		return nil, 0, fmt.Errorf(
-			"count reward pool blocks in epoch %d: %w",
+		return nil, 0, false, fmt.Errorf(
+			"get imported pool block counts for epoch %d: %w",
 			performanceEpoch, err,
 		)
 	}
-	return counts, total, nil
+	if !importedKnown {
+		return nil, 0, false, nil
+	}
+	for poolKey, blocks := range imported {
+		observed, ok := counts[poolKey]
+		if !ok {
+			continue
+		}
+		merged, overflow := addRewardUint64(observed, blocks)
+		if overflow {
+			return nil, 0, false, fmt.Errorf(
+				"imported block count overflow for epoch %d pool %x",
+				performanceEpoch,
+				poolKey,
+			)
+		}
+		counts[poolKey] = merged
+	}
+	// The epoch total takes every imported pool, not only the ones asked
+	// about, because it is the denominator of every pool's beta and the
+	// reference sums the whole BlocksMade map to obtain it.
+	totalBlocks, overflow := addRewardUint64(totalBlocks, importedTotal)
+	if overflow {
+		return nil, 0, false, fmt.Errorf(
+			"imported block total overflow for epoch %d",
+			performanceEpoch,
+		)
+	}
+	return counts, totalBlocks, true, nil
 }
 
 func rewardBlockCountsExcludingOverlaySlots(
@@ -3068,9 +3215,15 @@ func validateRewardCalculatorInputs(
 			return errors.New("reward pool input delegator count overflow")
 		}
 	}
-	if totalPoolStake != uint64(snapshot.TotalActiveStake) {
+	// reward_snapshot.total_active_stake is the sigma_a denominator and covers
+	// every delegating credential observed at the boundary, including those
+	// whose pool was excluded from reward_pool_input for degraded registration
+	// data (see snapshot.buildRewardStateInputs). The rows may therefore sum to
+	// less than it; summing to more means the row set and the snapshot describe
+	// different boundaries.
+	if totalPoolStake > uint64(snapshot.TotalActiveStake) {
 		return fmt.Errorf(
-			"reward pool input total delegated stake %d does not match snapshot active stake %d",
+			"reward pool input total delegated stake %d exceeds snapshot active stake %d",
 			totalPoolStake,
 			uint64(snapshot.TotalActiveStake),
 		)
@@ -3571,45 +3724,6 @@ func rewardParametersFromPParams(
 		return rewards.Parameters{}, err
 	}
 	return params, nil
-}
-
-func rewardDecentralizationFromPParams(
-	pparams lcommon.ProtocolParameters,
-) (*big.Rat, error) {
-	var decentralization *big.Rat
-	switch pp := pparams.(type) {
-	case *shelley.ShelleyProtocolParameters:
-		decentralization = cloneCBORRat(pp.Decentralization)
-	case *mary.MaryProtocolParameters:
-		decentralization = cloneCBORRat(pp.Decentralization)
-	case *alonzo.AlonzoProtocolParameters:
-		decentralization = cloneCBORRat(pp.Decentralization)
-	case *babbage.BabbageProtocolParameters,
-		*conway.ConwayProtocolParameters,
-		*dijkstra.DijkstraProtocolParameters:
-		decentralization = new(big.Rat)
-	default:
-		return nil, fmt.Errorf("unsupported reward pparams type %T", pparams)
-	}
-	if decentralization == nil {
-		return nil, fmt.Errorf(
-			"%w: missing decentralization",
-			rewards.ErrInvalidParameters,
-		)
-	}
-	if decentralization.Sign() < 0 {
-		return nil, fmt.Errorf(
-			"%w: negative decentralization",
-			rewards.ErrInvalidParameters,
-		)
-	}
-	if decentralization.Cmp(big.NewRat(1, 1)) > 0 {
-		return nil, fmt.Errorf(
-			"%w: decentralization greater than one",
-			rewards.ErrInvalidParameters,
-		)
-	}
-	return decentralization, nil
 }
 
 func rewardEpochFees(

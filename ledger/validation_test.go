@@ -144,6 +144,8 @@ func (m *mockRedeemers) Iter() iter.Seq2[lcommon.RedeemerKey, lcommon.RedeemerVa
 }
 
 func TestTxSizeForFee(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		txType   int
@@ -208,6 +210,8 @@ func TestTxSizeForFee(t *testing.T) {
 }
 
 func TestValidateTxSize(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name      string
 		txSize    int
@@ -278,6 +282,8 @@ func TestValidateTxSize(t *testing.T) {
 }
 
 func TestValidateTxExUnits(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name      string
 		total     lcommon.ExUnits
@@ -379,6 +385,8 @@ func TestValidateTxExUnits(t *testing.T) {
 }
 
 func TestCalculateMinFee(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name        string
 		txSize      uint64
@@ -524,6 +532,8 @@ func TestCalculateMinFee(t *testing.T) {
 }
 
 func TestDeclaredExUnits(t *testing.T) {
+	t.Parallel()
+
 	t.Run("no redeemers", func(t *testing.T) {
 		tx := &mockFeeTx{
 			cbor:      make([]byte, 100),
@@ -613,6 +623,8 @@ func TestDeclaredExUnits(t *testing.T) {
 }
 
 func TestValidateTxFee(t *testing.T) {
+	t.Parallel()
+
 	pricesMem := big.NewRat(577, 10000)
 	pricesSteps := big.NewRat(721, 10000000)
 
@@ -721,6 +733,8 @@ func (m *mockEraTx) Type() int     { return m.eraType }
 func (m *mockEraTx) IsValid() bool { return true }
 
 func TestIsCompatibleEra(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name       string
 		txEraId    uint
@@ -768,6 +782,8 @@ func TestIsCompatibleEra(t *testing.T) {
 }
 
 func TestValidateTxEra(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name      string
 		txEra     int

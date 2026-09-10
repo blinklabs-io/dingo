@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -62,7 +63,25 @@ func ebHashFor(s string) lcommon.Blake2b256 {
 	return lcommon.NewBlake2b256([]byte(s))
 }
 
+// observeCanonicalRb records rbHash as a ranking block on the pipeline's own
+// chain at slot. handleEbQuorum requires this before it will create pipeline
+// state for an endorser block it never observed, so a certificate whose
+// announcing ranking block was orphaned by a rollback cannot resurrect it.
+func observeCanonicalRb(
+	t *testing.T,
+	mgr *PipelineManager,
+	slot uint64,
+	rbHash lcommon.Blake2b256,
+) {
+	t.Helper()
+	mgr.handleChainBlock(chain.ChainBlockEvent{
+		Point: ocommon.Point{Slot: slot, Hash: rbHash.Bytes()},
+	})
+}
+
 func TestStageFor(t *testing.T) {
+	t.Parallel()
+
 	// Default timing: produce<1, diffuse<5, vote<10, certify<20,
 	// inclusion<40, ttl<100 (cumulative offsets from the produce slot).
 	tm := DefaultPipelineTiming()
@@ -97,6 +116,8 @@ func TestStageFor(t *testing.T) {
 }
 
 func TestPipelineTimingValidate(t *testing.T) {
+	t.Parallel()
+
 	require.NoError(t, DefaultPipelineTiming().Validate())
 
 	zero := DefaultPipelineTiming()
@@ -110,6 +131,8 @@ func TestPipelineTimingValidate(t *testing.T) {
 }
 
 func TestNewPipelineManagerValidation(t *testing.T) {
+	t.Parallel()
+
 	good := PipelineManagerConfig{
 		EventBus:      event.NewEventBus(nil, nil),
 		SlotProvider:  &fakeSlotProvider{},
@@ -131,6 +154,8 @@ func TestNewPipelineManagerValidation(t *testing.T) {
 }
 
 func TestMayProduceEndorserBlock(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	const slot = 500
 
@@ -165,6 +190,8 @@ func TestMayProduceEndorserBlock(t *testing.T) {
 }
 
 func TestObserveEndorserBlockRejectsFutureSlots(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	f.slot.slot = 1000
 
@@ -201,6 +228,8 @@ func TestObserveEndorserBlockRejectsFutureSlots(t *testing.T) {
 }
 
 func TestObserveAndCertifySingleEb(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	const slot = 300
 	hash := ebHashFor("eb-a")
@@ -237,6 +266,8 @@ func TestObserveAndCertifySingleEb(t *testing.T) {
 }
 
 func TestMarkEmbeddedExcludesEb(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	const slot = 300
 	hash := ebHashFor("eb-a")
@@ -250,11 +281,13 @@ func TestMarkEmbeddedExcludesEb(t *testing.T) {
 	f.slot.slot = slot + 5
 	require.Len(t, f.mgr.EligibleCertifiedEbs(), 1)
 
-	f.mgr.MarkEmbedded(hash)
+	f.mgr.MarkEmbedded(slot, hash)
 	assert.Empty(t, f.mgr.EligibleCertifiedEbs())
 }
 
 func TestEbEquivocationExcludesFromEligibility(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	const slot = 300
 	hashA := ebHashFor("eb-a")
@@ -286,6 +319,8 @@ func TestEbEquivocationExcludesFromEligibility(t *testing.T) {
 }
 
 func TestEbEquivocationMetricCountsOncePerSlot(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	mgr, err := NewPipelineManager(PipelineManagerConfig{
 		EventBus:      event.NewEventBus(nil, nil),
@@ -311,6 +346,8 @@ func TestEbEquivocationMetricCountsOncePerSlot(t *testing.T) {
 }
 
 func TestEbCertifiedMetricCountsEbOnceAcrossAnnouncementContexts(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	mgr, err := NewPipelineManager(PipelineManagerConfig{
 		EventBus:      event.NewEventBus(nil, nil),
@@ -326,6 +363,7 @@ func TestEbCertifiedMetricCountsEbOnceAcrossAnnouncementContexts(t *testing.T) {
 		ebHashFor("announcing-rb-a"),
 		ebHashFor("announcing-rb-b"),
 	} {
+		observeCanonicalRb(t, mgr, 300, rbHash)
 		mgr.handleEbQuorum(EbQuorumEvent{
 			SlotNo:            300,
 			EndorserBlockHash: hash,
@@ -341,7 +379,7 @@ func TestEbCertifiedMetricCountsEbOnceAcrossAnnouncementContexts(t *testing.T) {
 		"certification is an EB-level transition, not a certificate count",
 	)
 	mgr.mu.Lock()
-	eb := mgr.byHash[hash]
+	eb := mgr.occurrenceLocked(300, hash)
 	if eb == nil {
 		mgr.mu.Unlock()
 		t.Fatal("certified EB is not tracked")
@@ -352,6 +390,8 @@ func TestEbCertifiedMetricCountsEbOnceAcrossAnnouncementContexts(t *testing.T) {
 }
 
 func TestEbQuorumPastCertifyDeadlineRejected(t *testing.T) {
+	t.Parallel()
+
 	tm := DefaultPipelineTiming()
 	const slot = 300
 	hash := ebHashFor("eb-late")
@@ -381,13 +421,15 @@ func TestEbQuorumPastCertifyDeadlineRejected(t *testing.T) {
 	})
 	assert.Empty(t, late.mgr.EligibleCertifiedEbs())
 	late.mgr.mu.Lock()
-	eb := late.mgr.byHash[hash]
+	eb := late.mgr.occurrenceLocked(slot, hash)
 	late.mgr.mu.Unlock()
 	require.NotNil(t, eb, "a late-certified EB stays tracked")
 	assert.False(t, eb.certified, "a late certificate must not certify the EB")
 }
 
 func TestLateCertMetricCounted(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	tm := DefaultPipelineTiming()
 	mgr, err := NewPipelineManager(PipelineManagerConfig{
@@ -414,6 +456,8 @@ func TestLateCertMetricCounted(t *testing.T) {
 }
 
 func TestStageGaugesReflectUncertifiedStages(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	mgr, err := NewPipelineManager(PipelineManagerConfig{
 		EventBus:      event.NewEventBus(nil, nil),
@@ -444,6 +488,8 @@ func TestStageGaugesReflectUncertifiedStages(t *testing.T) {
 }
 
 func TestStageOf(t *testing.T) {
+	t.Parallel()
+
 	tm := DefaultPipelineTiming()
 	f := newPipelineFixture(t, tm)
 	const slot = 500
@@ -467,18 +513,23 @@ func TestStageOf(t *testing.T) {
 }
 
 func TestEbQuorumForUnobservedEb(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	const slot = 200
 	hash := ebHashFor("eb-unseen")
+	rbHash := ebHashFor("announcing-rb")
 	cert := &lcommon.LeiosEbCertificate{}
 
 	// A quorum arrives for an EB whose body was never observed (only its
-	// votes). It is still tracked so eligibility reflects every certified
-	// block.
+	// votes), announced by a ranking block that is still on our chain. It is
+	// still tracked so eligibility reflects every certified block.
+	observeCanonicalRb(t, f.mgr, slot, rbHash)
 	f.mgr.handleEbQuorum(EbQuorumEvent{
 		SlotNo:            slot,
 		EndorserBlockHash: hash,
 		Epoch:             0,
+		AnnouncingRbHash:  rbHash,
 		Certificate:       cert,
 	})
 	f.slot.slot = slot
@@ -488,6 +539,8 @@ func TestEbQuorumForUnobservedEb(t *testing.T) {
 }
 
 func TestEpochTransitionFlush(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	// slot 50 -> epoch 0, slot 120 -> epoch 1 (fake epoch provider).
 	f.slot.slot = 50
@@ -511,6 +564,8 @@ func TestEpochTransitionFlush(t *testing.T) {
 }
 
 func TestRollbackFlush(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	f.slot.slot = 80
 	f.mgr.ObserveEndorserBlock(50, ebHashFor("eb-kept"))
@@ -528,7 +583,391 @@ func TestRollbackFlush(t *testing.T) {
 	assert.False(t, hasDropped, "instances past the rollback point are dropped")
 }
 
+// newMetricsPipelineFixture is newPipelineFixture with a Prometheus registry
+// attached, for the tests that assert on rejection counters.
+func newMetricsPipelineFixture(
+	t *testing.T,
+	timing PipelineTiming,
+) *pipelineFixture {
+	t.Helper()
+	eb := event.NewEventBus(nil, nil)
+	sp := &fakeSlotProvider{slot: 0}
+	ep := &fakeEpochProvider{currentEpoch: 0}
+	mgr, err := NewPipelineManager(PipelineManagerConfig{
+		EventBus:      eb,
+		SlotProvider:  sp,
+		EpochProvider: ep,
+		Timing:        timing,
+		PromRegistry:  prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+	return &pipelineFixture{mgr: mgr, eventBus: eb, slot: sp, epoch: ep}
+}
+
+// TestStaleQuorumAfterRollbackRejected covers the rollback-then-quorum order:
+// a quorum event built before a rollback (VoteManager builds it under its own
+// lock and publishes it after releasing it) must not recreate the pipeline
+// state handleRollback dropped, because the replacement chain re-produces an
+// endorser block for the same produce slot (#3600).
+func TestStaleQuorumAfterRollbackRejected(t *testing.T) {
+	t.Parallel()
+
+	f := newMetricsPipelineFixture(t, DefaultPipelineTiming())
+	const (
+		rollbackSlot = 400
+		ebSlot       = 402
+	)
+	orphanedEb := ebHashFor("eb-orphaned")
+	orphanedRb := ebHashFor("rb-orphaned")
+	replacementEb := ebHashFor("eb-replacement")
+	replacementRb := ebHashFor("rb-replacement")
+
+	// The orphaned chain: an announcing ranking block and the endorser block
+	// it announced, both past the eventual rollback point.
+	f.slot.slot = ebSlot
+	observeCanonicalRb(t, f.mgr, ebSlot, orphanedRb)
+	f.mgr.ObserveEndorserBlock(ebSlot, orphanedEb)
+
+	f.mgr.handleRollback(chain.ChainRollbackEvent{
+		Point: ocommon.Point{Slot: rollbackSlot},
+	})
+
+	// The stale quorum event arrives after the rollback has been handled.
+	f.mgr.handleEbQuorum(EbQuorumEvent{
+		SlotNo:            ebSlot,
+		EndorserBlockHash: orphanedEb,
+		AnnouncingRbHash:  orphanedRb,
+		Certificate:       &lcommon.LeiosEbCertificate{},
+	})
+
+	f.mgr.mu.Lock()
+	_, recreatedInstance := f.mgr.instances[ebSlot]
+	recreatedOccurrence := f.mgr.occurrenceLocked(ebSlot, orphanedEb) != nil
+	f.mgr.mu.Unlock()
+	assert.False(
+		t,
+		recreatedInstance,
+		"a quorum event stale across rollback must not recreate the instance",
+	)
+	assert.False(
+		t,
+		recreatedOccurrence,
+		"a quorum event stale across rollback must not recreate the occurrence",
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(
+			f.mgr.metrics.certsRejectedTotal.
+				WithLabelValues("non_canonical_announcement"),
+		),
+	)
+
+	// The local producer for that slot on the replacement chain is not denied.
+	d, err := f.mgr.MayProduceEndorserBlock(ebSlot)
+	require.NoError(t, err)
+	assert.True(
+		t,
+		d.Allowed,
+		"stale quorum state must not deny local production: %s",
+		d.Reason,
+	)
+
+	// The replacement chain's endorser block for the same produce slot is not
+	// treated as equivocation and stays eligible for inclusion.
+	observeCanonicalRb(t, f.mgr, ebSlot, replacementRb)
+	f.mgr.ObserveEndorserBlock(ebSlot, replacementEb)
+	f.mgr.handleEbQuorum(EbQuorumEvent{
+		SlotNo:            ebSlot,
+		EndorserBlockHash: replacementEb,
+		AnnouncingRbHash:  replacementRb,
+		Certificate:       &lcommon.LeiosEbCertificate{},
+	})
+	assert.Equal(
+		t,
+		float64(0),
+		promtestutil.ToFloat64(f.mgr.metrics.ebEquivocationTotal),
+		"the replacement chain's EB must not be counted as equivocation",
+	)
+	f.slot.slot = ebSlot + 5
+	eligible := f.mgr.EligibleCertifiedEbs()
+	require.Len(t, eligible, 1)
+	assert.Equal(t, replacementEb, eligible[0].EndorserBlockHash)
+	assert.Equal(t, replacementRb, eligible[0].AnnouncingRbHash)
+}
+
+// TestQuorumThenRollbackLeavesInstancePruned covers the other event order: a
+// quorum event handled before the rollback certifies the EB, and the rollback
+// then prunes it like any other instance past the rollback point.
+func TestQuorumThenRollbackLeavesInstancePruned(t *testing.T) {
+	t.Parallel()
+
+	f := newPipelineFixture(t, DefaultPipelineTiming())
+	const (
+		rollbackSlot = 400
+		ebSlot       = 402
+	)
+	ebHash := ebHashFor("eb-orphaned")
+	rbHash := ebHashFor("rb-orphaned")
+
+	f.slot.slot = ebSlot
+	observeCanonicalRb(t, f.mgr, ebSlot, rbHash)
+	f.mgr.handleEbQuorum(EbQuorumEvent{
+		SlotNo:            ebSlot,
+		EndorserBlockHash: ebHash,
+		AnnouncingRbHash:  rbHash,
+		Certificate:       &lcommon.LeiosEbCertificate{},
+	})
+	require.Len(t, f.mgr.EligibleCertifiedEbs(), 1)
+
+	f.mgr.handleRollback(chain.ChainRollbackEvent{
+		Point: ocommon.Point{Slot: rollbackSlot},
+	})
+
+	f.mgr.mu.Lock()
+	_, hasInstance := f.mgr.instances[ebSlot]
+	hasOccurrence := f.mgr.occurrenceLocked(ebSlot, ebHash) != nil
+	_, hasRb := f.mgr.canonicalRbs[rbHash]
+	f.mgr.mu.Unlock()
+	assert.False(t, hasInstance, "rollback must prune the instance")
+	assert.False(t, hasOccurrence, "rollback must prune the occurrence")
+	assert.False(
+		t,
+		hasRb,
+		"rollback must drop the orphaned announcing ranking block",
+	)
+	assert.Empty(t, f.mgr.EligibleCertifiedEbs())
+}
+
+// TestQuorumWithCanonicalAnnouncementSurvivesRollback is the positive case: a
+// rollback that does not orphan the announcing ranking block must not stop the
+// certificate that ranking block's votes signed from being honored, even when
+// the endorser block itself was never observed locally.
+func TestQuorumWithCanonicalAnnouncementSurvivesRollback(t *testing.T) {
+	t.Parallel()
+
+	f := newPipelineFixture(t, DefaultPipelineTiming())
+	const (
+		ebSlot       = 300
+		rollbackSlot = 310
+	)
+	ebHash := ebHashFor("eb-kept")
+	rbHash := ebHashFor("rb-kept")
+	cert := &lcommon.LeiosEbCertificate{}
+
+	f.slot.slot = ebSlot
+	observeCanonicalRb(t, f.mgr, ebSlot, rbHash)
+
+	// A rollback to a point above the announcing ranking block leaves it
+	// canonical.
+	f.slot.slot = rollbackSlot + 2
+	f.mgr.handleRollback(chain.ChainRollbackEvent{
+		Point: ocommon.Point{Slot: rollbackSlot},
+	})
+	f.mgr.mu.Lock()
+	_, stillCanonical := f.mgr.canonicalRbs[rbHash]
+	f.mgr.mu.Unlock()
+	require.True(
+		t,
+		stillCanonical,
+		"a ranking block at or before the rollback point stays canonical",
+	)
+
+	f.mgr.handleEbQuorum(EbQuorumEvent{
+		SlotNo:            ebSlot,
+		EndorserBlockHash: ebHash,
+		AnnouncingRbHash:  rbHash,
+		Certificate:       cert,
+	})
+
+	eligible := f.mgr.EligibleCertifiedEbs()
+	require.Len(t, eligible, 1, "certification must survive the rollback")
+	assert.Equal(t, uint64(ebSlot), eligible[0].SlotNo)
+	assert.Equal(t, ebHash, eligible[0].EndorserBlockHash)
+	assert.Same(t, cert, eligible[0].Certificate)
+	assert.Equal(t, rbHash, eligible[0].AnnouncingRbHash)
+}
+
+// TestStaleQuorumRejectedThroughEventLoop drives the same rollback-then-stale-
+// quorum sequence through the running event loop, where the chain updates and
+// the quorum event arrive on separate subscriptions.
+func TestStaleQuorumRejectedThroughEventLoop(t *testing.T) {
+	t.Parallel()
+
+	f := newMetricsPipelineFixture(t, DefaultPipelineTiming())
+	const (
+		rollbackSlot = 400
+		ebSlot       = 402
+	)
+	ebHash := ebHashFor("eb-orphaned")
+	rbHash := ebHashFor("rb-orphaned")
+	f.slot.slot = ebSlot
+	require.NoError(t, f.mgr.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, f.mgr.Stop()) })
+
+	f.eventBus.Publish(chain.ChainUpdateEventType, event.NewEvent(
+		chain.ChainUpdateEventType,
+		chain.ChainBlockEvent{
+			Point: ocommon.Point{Slot: ebSlot, Hash: rbHash.Bytes()},
+		},
+	))
+	testutil.WaitForCondition(t, func() bool {
+		f.mgr.mu.Lock()
+		defer f.mgr.mu.Unlock()
+		_, ok := f.mgr.canonicalRbs[rbHash]
+		return ok
+	}, 2*time.Second, "announcing ranking block recorded")
+
+	f.eventBus.Publish(chain.ChainUpdateEventType, event.NewEvent(
+		chain.ChainUpdateEventType,
+		chain.ChainRollbackEvent{
+			Point:            ocommon.Point{Slot: rollbackSlot},
+			RolledBackBlocks: []models.Block{{Slot: ebSlot}},
+		},
+	))
+	testutil.WaitForCondition(t, func() bool {
+		f.mgr.mu.Lock()
+		defer f.mgr.mu.Unlock()
+		_, ok := f.mgr.canonicalRbs[rbHash]
+		return !ok
+	}, 2*time.Second, "rollback orphans the announcing ranking block")
+
+	f.eventBus.Publish(EbQuorumEventType, event.NewEvent(
+		EbQuorumEventType,
+		EbQuorumEvent{
+			SlotNo:            ebSlot,
+			EndorserBlockHash: ebHash,
+			AnnouncingRbHash:  rbHash,
+			Certificate:       &lcommon.LeiosEbCertificate{},
+		},
+	))
+	testutil.WaitForCondition(t, func() bool {
+		return promtestutil.ToFloat64(
+			f.mgr.metrics.certsRejectedTotal.
+				WithLabelValues("non_canonical_announcement"),
+		) == 1
+	}, 2*time.Second, "stale quorum event rejected")
+
+	f.mgr.mu.Lock()
+	_, recreated := f.mgr.instances[ebSlot]
+	f.mgr.mu.Unlock()
+	assert.False(t, recreated, "stale quorum must not recreate the instance")
+	assert.Empty(t, f.mgr.EligibleCertifiedEbs())
+}
+
+// TestLateQuorumForUnobservedEbCreatesNoState covers the other half of the
+// state-creation path: a certificate past the certification deadline can never
+// make its endorser block eligible, so creating an instance for one the
+// pipeline never observed would only flag the slot as equivocating and deny
+// local production for it. An already-tracked EB still stays tracked (see
+// TestEbQuorumPastCertifyDeadlineRejected).
+func TestLateQuorumForUnobservedEbCreatesNoState(t *testing.T) {
+	t.Parallel()
+
+	tm := DefaultPipelineTiming()
+	f := newMetricsPipelineFixture(t, tm)
+	const ebSlot = 300
+	ebHash := ebHashFor("eb-late-unseen")
+	rbHash := ebHashFor("rb-late")
+
+	f.slot.slot = ebSlot
+	observeCanonicalRb(t, f.mgr, ebSlot, rbHash)
+	f.slot.slot = ebSlot + tm.CertifyByDeadlineSlots
+	f.mgr.handleEbQuorum(EbQuorumEvent{
+		SlotNo:            ebSlot,
+		EndorserBlockHash: ebHash,
+		AnnouncingRbHash:  rbHash,
+		Certificate:       &lcommon.LeiosEbCertificate{},
+	})
+
+	f.mgr.mu.Lock()
+	_, hasInstance := f.mgr.instances[ebSlot]
+	hasOccurrence := f.mgr.occurrenceLocked(ebSlot, ebHash) != nil
+	f.mgr.mu.Unlock()
+	assert.False(
+		t,
+		hasInstance,
+		"a past-deadline certificate must not create an instance",
+	)
+	assert.False(
+		t,
+		hasOccurrence,
+		"a past-deadline certificate must not create an occurrence",
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(
+			f.mgr.metrics.certsRejectedTotal.WithLabelValues("late"),
+		),
+	)
+	assert.Equal(
+		t,
+		float64(0),
+		promtestutil.ToFloat64(
+			f.mgr.metrics.certsRejectedTotal.
+				WithLabelValues("non_canonical_announcement"),
+		),
+		"a canonical announcement is rejected as late, not as non-canonical",
+	)
+}
+
+// TestCanonicalRbsPrunedByTtl bounds the canonical ranking-block record set:
+// entries fall out once they are an instance TTL behind the current slot.
+func TestCanonicalRbsPrunedByTtl(t *testing.T) {
+	t.Parallel()
+
+	tm := DefaultPipelineTiming()
+	f := newPipelineFixture(t, tm)
+	const rbSlot = 500
+	rbHash := ebHashFor("rb-old")
+
+	f.slot.slot = rbSlot
+	observeCanonicalRb(t, f.mgr, rbSlot, rbHash)
+
+	f.slot.slot = rbSlot + tm.InstanceTTLSlots
+	_ = f.mgr.EligibleCertifiedEbs() // any query triggers lazy pruning
+	f.mgr.mu.Lock()
+	pruned := len(f.mgr.canonicalRbs) == 0
+	f.mgr.mu.Unlock()
+	assert.True(t, pruned, "canonical ranking-block records are TTL-bounded")
+}
+
+// TestChainBlockWithShortHashIgnored keeps a truncated or absent point hash
+// out of the canonical set: NewBlake2b256 zero-extends, which would otherwise
+// register the zero hash that legacy (non-prototype) quorum events carry as
+// their announcing ranking block.
+func TestChainBlockWithShortHashIgnored(t *testing.T) {
+	t.Parallel()
+
+	f := newPipelineFixture(t, DefaultPipelineTiming())
+	f.slot.slot = 600
+	f.mgr.handleChainBlock(chain.ChainBlockEvent{
+		Point: ocommon.Point{Slot: 600, Hash: []byte{0x01, 0x02}},
+	})
+	f.mgr.mu.Lock()
+	empty := len(f.mgr.canonicalRbs) == 0
+	f.mgr.mu.Unlock()
+	require.True(t, empty, "a short point hash must not be recorded")
+
+	f.mgr.handleEbQuorum(EbQuorumEvent{
+		SlotNo:            600,
+		EndorserBlockHash: ebHashFor("eb-legacy"),
+		Certificate:       &lcommon.LeiosEbCertificate{},
+	})
+	f.mgr.mu.Lock()
+	_, created := f.mgr.instances[600]
+	f.mgr.mu.Unlock()
+	assert.False(
+		t,
+		created,
+		"a zero announcing ranking block hash is never canonical",
+	)
+}
+
 func TestPruneExpiredInstances(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	f.slot.slot = 10
 	f.mgr.ObserveEndorserBlock(10, ebHashFor("eb"))
@@ -543,11 +982,12 @@ func TestPruneExpiredInstances(t *testing.T) {
 
 	f.mgr.mu.Lock()
 	assert.Empty(t, f.mgr.instances)
-	assert.Empty(t, f.mgr.byHash)
 	f.mgr.mu.Unlock()
 }
 
 func TestPipelineLifecycleAndEventDispatch(t *testing.T) {
+	t.Parallel()
+
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	require.NoError(t, f.mgr.Start(context.Background()))
 	// Start is idempotent.
@@ -574,4 +1014,30 @@ func TestPipelineLifecycleAndEventDispatch(t *testing.T) {
 	testutil.WaitForCondition(t, func() bool {
 		return len(f.mgr.EligibleCertifiedEbs()) == 1
 	}, 2*time.Second, "eb becomes eligible after quorum event is dispatched")
+}
+
+func TestMarkEmbeddedPreservesOtherOccurrence(t *testing.T) {
+	f := newPipelineFixture(t, DefaultPipelineTiming())
+	defer f.eventBus.Stop()
+	hash := ebHashFor("same-content")
+	for _, slot := range []uint64{100, 101} {
+		f.slot.slot = slot
+		f.mgr.ObserveEndorserBlock(slot, hash)
+		f.mgr.handleEbQuorum(
+			EbQuorumEvent{
+				SlotNo:            slot,
+				EndorserBlockHash: hash,
+				Certificate:       &lcommon.LeiosEbCertificate{},
+			},
+		)
+	}
+	require.Len(t, f.mgr.EligibleCertifiedEbs(), 2)
+	f.mgr.MarkEmbedded(100, hash)
+	eligible := f.mgr.EligibleCertifiedEbs()
+	require.Len(t, eligible, 1)
+	require.Equal(t, uint64(101), eligible[0].SlotNo)
+	f.mgr.MarkEmbedded(999, hash)
+	require.Len(t, f.mgr.EligibleCertifiedEbs(), 1)
+	f.mgr.MarkEmbedded(101, hash)
+	require.Empty(t, f.mgr.EligibleCertifiedEbs())
 }

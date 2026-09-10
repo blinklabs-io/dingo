@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -50,6 +51,8 @@ import (
 func TestDestructiveDatabaseProcedures_CoversEveryGeneratedMethod(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fd := databasev1alpha1.File_v1alpha1_database_database_proto
 	services := fd.Services()
 	var svcIdx int
@@ -74,8 +77,7 @@ func TestDestructiveDatabaseProcedures_CoversEveryGeneratedMethod(
 			"procedure %q is not classified as destructive (auth.go's "+
 				"destructiveDatabaseProcedures) or read-only (this test's "+
 				"readOnlyDatabaseProcedures) -- a new DatabaseService RPC "+
-				"must be explicitly added to one of those, not silently "+
-				"left unauthenticated by default", procedure)
+				"must be explicitly added to one of those", procedure)
 		assert.Falsef(
 			t,
 			isDestructive && isReadOnly,
@@ -89,17 +91,15 @@ func TestDestructiveDatabaseProcedures_CoversEveryGeneratedMethod(
 // runtime property that makes readOnlyDatabaseProcedures an allowlist
 // rather than destructiveDatabaseProcedures a denylist: a procedure name
 // present in NEITHER map -- standing in for a new DatabaseService RPC added
-// to the proto without updating either one -- must still require a
-// verified client certificate, exactly like a known destructive procedure,
-// not be silently let through the way "allow unless listed as destructive"
-// would. TestDestructiveDatabaseProcedures_CoversEveryGeneratedMethod is
-// what keeps that situation from actually arising in practice, but this
-// test pins that authorize itself does not depend on that check having
-// run.
+// without updating either one -- must still require authentication and
+// operator authorization exactly like a known destructive procedure.
 func TestOperatorAuthInterceptor_FailsClosedForUnclassifiedProcedure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const unclassified = "/bark.v1alpha1.database.DatabaseService/SomeFutureRPC"
+	const operatorFingerprint = "operator"
 	require.False(t, destructiveDatabaseProcedures[unclassified])
 	require.False(t, readOnlyDatabaseProcedures[unclassified])
 
@@ -107,11 +107,71 @@ func TestOperatorAuthInterceptor_FailsClosedForUnclassifiedProcedure(
 		logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		destructive: destructiveDatabaseProcedures,
 		readOnly:    readOnlyDatabaseProcedures,
+		operatorFingerprints: map[string]struct{}{
+			operatorFingerprint: {},
+		},
 	}
 
 	err := interceptor.authorize(context.Background(), unclassified)
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err))
+
+	err = interceptor.authorize(
+		withPeerIdentity(t.Context(), peerIdentity{
+			Verified:    true,
+			Fingerprint: "reader",
+		}),
+		unclassified,
+	)
+	require.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
+	require.NoError(t, interceptor.authorize(
+		withPeerIdentity(t.Context(), peerIdentity{
+			Verified:    true,
+			Fingerprint: operatorFingerprint,
+		}),
+		unclassified,
+	))
+}
+
+func TestOperatorAuthInterceptorEnforcesTwoStagesForEveryProcedure(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const operatorFingerprint = "operator"
+	interceptor := &operatorAuthInterceptor{
+		logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		destructive: destructiveDatabaseProcedures,
+		readOnly:    readOnlyDatabaseProcedures,
+		operatorFingerprints: map[string]struct{}{
+			operatorFingerprint: {},
+		},
+	}
+	readerCtx := withPeerIdentity(t.Context(), peerIdentity{
+		Verified:    true,
+		Fingerprint: "reader",
+	})
+	operatorCtx := withPeerIdentity(t.Context(), peerIdentity{
+		Verified:    true,
+		Fingerprint: operatorFingerprint,
+	})
+
+	for procedure := range readOnlyDatabaseProcedures {
+		t.Run("read-only "+procedure, func(t *testing.T) {
+			err := interceptor.authorize(t.Context(), procedure)
+			require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err))
+			require.NoError(t, interceptor.authorize(readerCtx, procedure))
+		})
+	}
+	for procedure := range destructiveDatabaseProcedures {
+		t.Run("destructive "+procedure, func(t *testing.T) {
+			err := interceptor.authorize(t.Context(), procedure)
+			require.Equal(t, connect.CodeUnauthenticated, connect.CodeOf(err))
+			err = interceptor.authorize(readerCtx, procedure)
+			require.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
+			require.NoError(t, interceptor.authorize(operatorCtx, procedure))
+		})
+	}
 }
 
 // TestPeerCertContextMiddleware_KeysOffVerifiedChains pins the exact bug
@@ -128,6 +188,8 @@ func TestOperatorAuthInterceptor_FailsClosedForUnclassifiedProcedure(
 // middleware with a non-empty PeerCertificates and an empty VerifiedChains,
 // and that is exactly the case that must resolve to Verified: false.
 func TestPeerCertContextMiddleware_KeysOffVerifiedChains(t *testing.T) {
+	t.Parallel()
+
 	leaf, _, _ := writeTestCA(
 		t,
 	) // any in-memory *x509.Certificate works as a stand-in leaf here
@@ -136,6 +198,9 @@ func TestPeerCertContextMiddleware_KeysOffVerifiedChains(t *testing.T) {
 		logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		destructive: destructiveDatabaseProcedures,
 		readOnly:    readOnlyDatabaseProcedures,
+		operatorFingerprints: map[string]struct{}{
+			certFingerprint(leaf): {},
+		},
 	}
 
 	cases := []struct {
@@ -220,6 +285,8 @@ func newTestLifecycleService(t *testing.T) *dblifecycle.Service {
 // destructive RPCs to anonymous callers. This lives at Start, not NewBark —
 // see Start's doc comment for why.
 func TestStart_RejectsLifecycleWithoutClientCA(t *testing.T) {
+	t.Parallel()
+
 	serverCertPath, serverKeyPath := writeTestTLSCertKey(t)
 
 	b, err := NewBark(BarkConfig{
@@ -243,6 +310,8 @@ func TestStart_RejectsLifecycleWithoutClientCA(t *testing.T) {
 // invariant: a configured client CA alone isn't enough — mTLS has no
 // meaning without the server's own TLS listener underneath it.
 func TestStart_RejectsLifecycleWithoutTLS(t *testing.T) {
+	t.Parallel()
+
 	_, _, caCertPath := writeTestCA(t)
 
 	b, err := NewBark(BarkConfig{
@@ -265,11 +334,54 @@ func TestStart_RejectsLifecycleWithoutTLS(t *testing.T) {
 	)
 }
 
+func TestStartRejectsLifecycleWithoutOperatorAllowlist(t *testing.T) {
+	t.Parallel()
+
+	serverCertPath, serverKeyPath := writeTestTLSCertKey(t)
+	_, _, caCertPath := writeTestCA(t)
+
+	b, err := NewBark(BarkConfig{
+		DB:                  newTestDB(t),
+		Lifecycle:           newTestLifecycleService(t),
+		SnapshotDir:         t.TempDir(),
+		Host:                "127.0.0.1",
+		Port:                freeTCPPort(t),
+		TlsCertFilePath:     serverCertPath,
+		TlsKeyFilePath:      serverKeyPath,
+		TlsClientCAFilePath: caCertPath,
+	})
+	require.NoError(t, err)
+
+	err = b.Start(context.Background())
+	require.ErrorContains(t, err, "OperatorCertificateFingerprint")
+}
+
+func TestNewBarkNormalizesOperatorCertificateFingerprints(t *testing.T) {
+	t.Parallel()
+
+	b, err := NewBark(BarkConfig{
+		DB: newTestDB(t),
+		OperatorCertificateFingerprints: []string{
+			strings.Repeat("AB:", 31) + "AB",
+		},
+	})
+	require.NoError(t, err)
+	require.Contains(t, b.operatorFingerprints, strings.Repeat("ab", 32))
+
+	_, err = NewBark(BarkConfig{
+		DB:                              newTestDB(t),
+		OperatorCertificateFingerprints: []string{"invalid"},
+	})
+	require.ErrorContains(t, err, "invalid operator certificate fingerprint")
+}
+
 // TestStart_RejectsClientCAWithoutTLS_NoLifecycle exercises startServer's
 // own, Lifecycle-independent guard: even a bark instance with no
 // DatabaseService at all (Archive-only) must not silently ignore a
 // misconfigured TlsClientCAFilePath set without TLS cert/key.
 func TestStart_RejectsClientCAWithoutTLS_NoLifecycle(t *testing.T) {
+	t.Parallel()
+
 	_, _, caCertPath := writeTestCA(t)
 
 	b, err := NewBark(BarkConfig{

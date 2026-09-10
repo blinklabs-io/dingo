@@ -366,6 +366,18 @@ type ErrorResponse struct {
 	Message    string `json:"message"`
 }
 
+// TransactionEvaluationResponse contains the execution units calculated for
+// each redeemer in a transaction. Keys use redeemer pointers such as
+// "spend:0" and "mint:0".
+type TransactionEvaluationResponse map[string]ExecutionUnitsResponse
+
+// ExecutionUnitsResponse contains the execution units consumed by a
+// redeemer.
+type ExecutionUnitsResponse struct {
+	Memory uint64 `json:"memory"`
+	Steps  uint64 `json:"steps"`
+}
+
 // PoolExtendedResponse represents an extended stake pool list item,
 // following the Blockfrost OpenAPI 0.1.90 pool_list_extended schema
 // exactly. Neither vrf_key nor relays is part of that schema (vrf_key

@@ -138,22 +138,25 @@ func TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 		"script exceeded declared budget: used (112100 cpu, 800 mem)",
 	)
 
-	t.Run("restrictive evaluation is capped by protocol transaction budget", func(t *testing.T) {
-		err := ValidateTxConway(
-			tx,
-			0,
-			newMockLedgerState(),
-			&conway.ConwayProtocolParameters{
-				ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
-					Major: 9,
+	t.Run(
+		"restrictive evaluation is capped by protocol transaction budget",
+		func(t *testing.T) {
+			err := ValidateTxConway(
+				tx,
+				0,
+				newMockLedgerState(),
+				&conway.ConwayProtocolParameters{
+					ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+						Major: 9,
+					},
+					MaxTxExUnits: lcommon.ExUnits{
+						Steps:  1_000,
+						Memory: 100,
+					},
 				},
-				MaxTxExUnits: lcommon.ExUnits{
-					Steps:  1_000,
-					Memory: 100,
-				},
-			},
-		)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "out of budget")
-	})
+			)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "out of budget")
+		},
+	)
 }

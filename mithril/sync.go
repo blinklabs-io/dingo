@@ -352,7 +352,10 @@ func markSyncInProgress(db *database.Database, storageMode string) error {
 // download + verify + extract a snapshot, import ledger state and immutable
 // blocks, close the volatile gap, backfill metadata, and mark the sync
 // complete. The resulting database is servable by dingo.Node.Run.
-func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
+func Sync(
+	ctx context.Context,
+	cfg SyncConfig,
+) (syncResult SyncResult, syncErr error) {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -479,6 +482,53 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	catchUp = dec.engage
 	catchUpStart = dec.start
 
+	// Artifact pin. A run that was interrupted after it began mutating the
+	// database must import the artifact those partial rows and ledger-state
+	// phase checkpoints belong to. Re-selecting the aggregator's latest
+	// artifact instead imports a second snapshot's live set over the first's
+	// partially imported one, and the fresh-bootstrap import neither
+	// reconciles nor diverges-checks, so both snapshots' UTxOs, accounts,
+	// pools and DReps are left live.
+	pinnedDigest := ""
+	var resumePin pinnedArtifact
+	if mode == syncModeResume {
+		pin, hasPin, pinErr := getPinnedArtifact(db)
+		if pinErr != nil {
+			return SyncResult{}, pinErr
+		}
+		switch {
+		case hasPin:
+			if err := pin.validateForRun(cfg.Backend, network); err != nil {
+				return SyncResult{}, err
+			}
+			pinnedDigest = pin.Digest
+			resumePin = pin
+			logger.Info(
+				"resuming interrupted Mithril sync against its pinned "+
+					"artifact",
+				"component", "mithril",
+				"snapshot_hash", pin.Digest,
+				"snapshot_epoch", pin.Epoch,
+				"snapshot_immutable_file_number", pin.ImmutableFileNumber,
+				"certified_tip_slot", pin.CertifiedTipSlot,
+			)
+		case catchUp:
+			// A catch-up import runs with Reconcile enabled: every live row
+			// absent from the newly selected snapshot's live set is marked
+			// inactive after the import pass, so selecting a newer artifact
+			// cannot leave the interrupted artifact's rows behind. Interrupted
+			// catch-ups from builds without artifact pinning therefore stay
+			// resumable; this run records a pin for the next one.
+			logger.Warn(
+				"interrupted Mithril catch-up recorded no artifact pin; "+
+					"selecting the latest artifact and reconciling",
+				"component", "mithril",
+			)
+		default:
+			return SyncResult{}, errNoArtifactPin
+		}
+	}
+
 	// The sync-in-progress marker and the API backfill checkpoint are NOT set
 	// here: setting them before bootstrap would leave an existing healthy
 	// database permanently marked incomplete (blocking `dingo serve`) if the
@@ -576,10 +626,35 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	}
 
 	cfg.emit(SyncProgress{Phase: PhaseBootstrap, Active: true})
-	result, err := Bootstrap(
+	bootstrapResult, err := Bootstrap(
 		ctx,
 		BootstrapConfig{
-			OnChunkContiguous:      chunkHook,
+			OnChunkContiguous: chunkHook,
+			OnArtifactSelected: func(sel SelectedArtifact) error {
+				if pinnedDigest != "" {
+					if (resumePin.Backend != "" &&
+						normalizeBackend(sel.Backend) != resumePin.Backend) ||
+						(resumePin.Network != "" && sel.Network != resumePin.Network) ||
+						sel.Digest != resumePin.Digest ||
+						sel.Beacon.Epoch != resumePin.Epoch ||
+						sel.Beacon.ImmutableFileNumber != resumePin.ImmutableFileNumber ||
+						(resumePin.CertificateHash != "" &&
+							sel.CertificateHash != resumePin.CertificateHash) {
+						return fmt.Errorf("resuming pinned Mithril artifact %s: selected artifact changed", pinnedDigest)
+					}
+				}
+				return setPinnedArtifact(db, pinnedArtifact{
+					Backend:             normalizeBackend(sel.Backend),
+					Network:             sel.Network,
+					Digest:              sel.Digest,
+					Epoch:               sel.Beacon.Epoch,
+					ImmutableFileNumber: sel.Beacon.ImmutableFileNumber,
+					CertificateHash:     sel.CertificateHash,
+					CertifiedTipSlot:    resumePin.CertifiedTipSlot,
+					CertifiedTipSlotSet: resumePin.CertifiedTipSlotSet,
+				})
+			},
+			PinnedDigest:           pinnedDigest,
 			StartImmutable:         catchUpStart,
 			Network:                network,
 			Backend:                cfg.Backend,
@@ -648,6 +723,17 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("mithril bootstrap failed: %w", err)
 	}
+	// A resumed run must have landed on the artifact it pinned. The aggregator
+	// answering the pinned digest with different content (a republished
+	// beacon) is a recovery decision for the operator, not something to import
+	// over the partial rows.
+	if pinnedDigest != "" {
+		if err := resumePin.verifyResolved(
+			bootstrapResult.Snapshot,
+		); err != nil {
+			return SyncResult{}, err
+		}
+	}
 
 	// Every read of the bootstrapped ImmutableDB below goes through this one
 	// handle-bound open. Bootstrap vetted the directory and held the handle
@@ -658,8 +744,8 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	// a run that keeps the tree for a later sync still must not leak the
 	// descriptors. This runs after the import errgroup is joined, which is what
 	// makes clearing the fields safe against the goroutines that read them.
-	defer result.CloseHandles()
-	certifiedImmutable, err := openBootstrappedImmutable(result)
+	defer bootstrapResult.CloseHandles()
+	certifiedImmutable, err := openBootstrappedImmutable(bootstrapResult)
 	if err != nil {
 		return SyncResult{}, err
 	}
@@ -671,8 +757,8 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	// database incomplete.
 	if catchUp {
 		targetImmutable := uint64(0)
-		if result.Snapshot != nil {
-			targetImmutable = result.Snapshot.Beacon.ImmutableFileNumber
+		if bootstrapResult.Snapshot != nil {
+			targetImmutable = bootstrapResult.Snapshot.Beacon.ImmutableFileNumber
 		}
 		// A resuming run (sync_status still in_progress) never maps
 		// local-ahead to up-to-date: it must fall through to the import so the
@@ -689,7 +775,14 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		}
 		if upToDate {
 			if cfg.CleanupAfterLoad {
-				result.Cleanup(logger)
+				bootstrapResult.Cleanup(logger)
+			}
+			// Nothing was imported and the database stays complete, so the pin
+			// this run recorded before downloading has nothing to describe.
+			// (verifyCatchupBeforeImport never reports up-to-date for a
+			// resuming run, so this never drops a pin a later resume needs.)
+			if err := clearPinnedArtifact(db); err != nil {
+				return SyncResult{}, err
 			}
 			return SyncResult{}, nil
 		}
@@ -718,6 +811,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 				"sync did not complete; "+
 					"re-run 'dingo mithril sync' to resume",
 				"component", "mithril",
+				"error", syncErr,
 			)
 		}
 	}()
@@ -753,6 +847,16 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 			"certified ImmutableDB has no tip",
 		)
 	}
+	// The certified tip is the artifact identity the ledger-state import
+	// actually depends on: the extraction cache is reused across runs, so a
+	// pinned artifact whose cache no longer yields the recorded tip must not
+	// be imported on top of the rows the interrupted run wrote.
+	if err := resumePin.verifyCertifiedTip(certifiedTip.Slot); err != nil {
+		return SyncResult{}, err
+	}
+	if err := recordPinnedCertifiedTip(db, certifiedTip.Slot); err != nil {
+		return SyncResult{}, err
+	}
 
 	// Import ledger state and copy blocks in parallel.
 	// Ledger state goes to metadata (SQLite), blocks go to the blob
@@ -766,7 +870,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		cfg.emit(SyncProgress{Phase: PhaseLedgerImport, Active: true})
 		defer cfg.emit(SyncProgress{Phase: PhaseLedgerImport, Active: false})
 		slot, hash, importErr := importLedgerState(
-			gctx, db, logger, nodeCfg, result, catchUp,
+			gctx, db, logger, nodeCfg, bootstrapResult, catchUp,
 			certifiedTip.Slot,
 			func(p ledgerstate.ImportProgress) {
 				cfg.emit(SyncProgress{
@@ -802,11 +906,11 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		logger.Info(
 			"loading ImmutableDB blocks into blob store",
 			"component", "mithril",
-			"immutable_dir", result.ImmutableDir,
+			"immutable_dir", bootstrapResult.ImmutableDir,
 		)
 		var loadErr error
 		loadResult, loadErr = node.LoadBlobsWithDB(
-			gctx, nil, logger, result.ImmutableDir, db,
+			gctx, nil, logger, bootstrapResult.ImmutableDir, db,
 			node.WithImmutableDB(certifiedImmutable),
 			node.WithLoadBlobsProgress(func(p node.LoadBlobsProgress) {
 				cfg.emit(SyncProgress{
@@ -1199,9 +1303,9 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	// skip already-present archives and anchor its intersection check. Written
 	// after updateMithrilReadyState clears sync_state, so it survives. Set on
 	// both bootstrap and catch-up. Non-fatal.
-	if result.Snapshot != nil {
+	if bootstrapResult.Snapshot != nil {
 		if markerErr := setImmutableImportMarker(
-			db, result.Snapshot.Beacon.ImmutableFileNumber,
+			db, bootstrapResult.Snapshot.Beacon.ImmutableFileNumber,
 		); markerErr != nil {
 			logger.Warn(
 				"failed to record Mithril immutable-import marker",
@@ -1214,20 +1318,25 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 
 	// Clean up temporary files after a successful complete load.
 	if cfg.CleanupAfterLoad {
-		result.Cleanup(logger)
+		bootstrapResult.Cleanup(logger)
 	}
 
 	logger.Info(
 		"Mithril bootstrap complete",
-		"component", "mithril",
-		"epoch", result.Snapshot.Beacon.Epoch,
-		"immutable_file_number", result.Snapshot.Beacon.ImmutableFileNumber,
-		"index_rebuild_elapsed", indexRebuildElapsed,
-		"lazy_index_rebuild_mode", "maintenance",
+		"component",
+		"mithril",
+		"epoch",
+		bootstrapResult.Snapshot.Beacon.Epoch,
+		"immutable_file_number",
+		bootstrapResult.Snapshot.Beacon.ImmutableFileNumber,
+		"index_rebuild_elapsed",
+		indexRebuildElapsed,
+		"lazy_index_rebuild_mode",
+		"maintenance",
 	)
 
 	return SyncResult{
-		Snapshot:   result.Snapshot,
+		Snapshot:   bootstrapResult.Snapshot,
 		LedgerSlot: ledgerStateSlot,
 	}, nil
 }

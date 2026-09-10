@@ -50,6 +50,8 @@ import (
 // `block.Slot < cutoffSlot`. The two bounds are separable on the fast path,
 // where the lookups are independent seeks, which is where that case is covered.
 func TestComputeCandidateNonceAsOf_SlowPathStopsAtFoldEnd(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 
 	// Conway's window is 4k/f = 4*6/0.4 = 60, so with the epoch running
@@ -146,6 +148,8 @@ func TestComputeCandidateNonceAsOf_SlowPathStopsAtFoldEnd(t *testing.T) {
 // an off-by-one -- it folds no blocks at all, so the reply would carry the
 // epoch's opening nonces while claiming to describe the tip.
 func TestFoldEndSlotForTip(t *testing.T) {
+	t.Parallel()
+
 	assert.Equal(t, uint64(1), foldEndSlotForTip(0),
 		"the origin's own block is inside the fold")
 	assert.Equal(t, uint64(1201), foldEndSlotForTip(1200),
@@ -153,4 +157,24 @@ func TestFoldEndSlotForTip(t *testing.T) {
 	assert.Equal(t, ^uint64(0), foldEndSlotForTip(^uint64(0)),
 		"the maximum slot saturates rather than wrapping to zero, which "+
 			"would fold nothing and report the epoch's opening values")
+}
+
+func TestComputeCandidateNonceFastRejectsMalformedNonceRows(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	hash := bytes.Repeat([]byte{0x71}, 32)
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot: 100, Hash: hash, PrevHash: bytes.Repeat([]byte{0x72}, 32),
+		Cbor: []byte{0x80}, Number: 1, Type: byron.BlockTypeByronMain,
+	}, nil))
+	require.NoError(t, db.SetBlockNonce(hash, 100, []byte{0x01}, false, nil))
+	ls := &LedgerState{db: db}
+	err := db.Transaction(false).Do(func(txn *database.Txn) error {
+		_, _, err := ls.computeCandidateNonceFast(txn,
+			bytes.Repeat([]byte{0x73}, 32), bytes.Repeat([]byte{0x74}, 32),
+			0, 101, 101)
+		return err
+	})
+	require.ErrorIs(t, err, errNoncesMissing)
 }

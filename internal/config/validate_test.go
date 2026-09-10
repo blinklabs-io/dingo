@@ -19,9 +19,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/assert"
@@ -46,6 +48,7 @@ func validTestConfig() *Config {
 		Chainsync:            DefaultChainsyncConfig(),
 		HistoryExpiry:        DefaultHistoryExpiryConfig(),
 		Midnight:             DefaultMidnightConfig(),
+		APIBindAddr:          DefaultAPIBindAddr,
 		Mithril: MithrilConfig{
 			Enabled: true,
 			Backend: "v2",
@@ -66,6 +69,55 @@ func setMempoolSetting(c *Config, name string, value any) {
 func TestValidateDefaultsPass(t *testing.T) {
 	cfg := validTestConfig()
 	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+}
+
+func TestValidateAPIExposureRequiresAuthOnRemoteBind(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.StorageMode = storageModeAPI
+	cfg.APIBindAddr = "0.0.0.0"
+
+	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "without authentication")
+	assert.Contains(t, err.Error(), "blockfrost")
+}
+
+func TestValidateAPIExposureAllowsUnauthenticatedLoopback(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.StorageMode = storageModeAPI
+	cfg.APIBindAddr = "127.0.0.1"
+
+	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+}
+
+func TestValidateAPIExposureAllowsAuthenticatedRemoteBind(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.StorageMode = storageModeAPI
+	cfg.APIBindAddr = "192.0.2.10"
+	mode := string(apiconfig.AuthModeToken)
+	tokenPath := "/run/secrets/api-token"
+	cfg.API.Auth.Mode = &mode
+	cfg.API.Auth.TokenFilePath = &tokenPath
+
+	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+}
+
+func TestValidateAPIExposureHonorsProviderAuthOverride(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.StorageMode = storageModeAPI
+	cfg.APIBindAddr = "192.0.2.10"
+	mode := string(apiconfig.AuthModeToken)
+	tokenPath := "/run/secrets/api-token"
+	cfg.API.Auth.Mode = &mode
+	cfg.API.Auth.TokenFilePath = &tokenPath
+	cfg.Plugins.API.Mesh.Config["auth"] = map[string]any{
+		"mode": "disabled",
+	}
+
+	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plugins.api.mesh.config")
+	assert.Contains(t, err.Error(), "without authentication")
 }
 
 func TestValidate(t *testing.T) {
@@ -217,6 +269,15 @@ func TestValidate(t *testing.T) {
 				c.DebugPort = 13000
 				c.Midnight.Host = "127.0.0.2"
 				c.Midnight.Port = 13000
+			},
+		},
+		{
+			name: "mesh uses API bind address for port collision checks",
+			modify: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.BindAddr = "127.0.0.2"
+				c.APIBindAddr = "127.0.0.1"
+				c.MetricsPort = APIPluginPort(c.Plugins.API.Mesh)
 			},
 		},
 		{
@@ -946,6 +1007,9 @@ func TestValidateDatabaseLifecycleSnapshotDirWritability(t *testing.T) {
 			cfg.DatabaseLifecycle.SnapshotDir = dir
 			cfg.BarkPort = 8091
 			cfg.BarkClientCAFilePath = "/certs/ca.crt"
+			cfg.BarkOperatorCertificateFingerprints = []string{
+				strings.Repeat("00", 32),
+			}
 			cfg.TlsCertFilePath = "/certs/tls.crt"
 			cfg.TlsKeyFilePath = "/certs/tls.key"
 			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
@@ -956,6 +1020,58 @@ func TestValidateDatabaseLifecycleSnapshotDirWritability(t *testing.T) {
 			}
 		},
 	)
+}
+
+func TestValidateBarkDatabaseServiceSecurity(t *testing.T) {
+	newConfig := func(t *testing.T) *Config {
+		t.Helper()
+		cfg := validTestConfig()
+		cfg.BarkPort = 8091
+		cfg.DatabaseLifecycle.SnapshotDir = t.TempDir()
+		cfg.BarkClientCAFilePath = "/certs/ca.crt"
+		cfg.BarkOperatorCertificateFingerprints = []string{
+			strings.Repeat("AB:", 31) + "AB",
+		}
+		cfg.TlsCertFilePath = "/certs/tls.crt"
+		cfg.TlsKeyFilePath = "/certs/tls.key"
+		return cfg
+	}
+
+	t.Run("complete policy", func(t *testing.T) {
+		require.NoError(
+			t,
+			newConfig(t).validate(RunModeServe, minUnprivilegedPort),
+		)
+	})
+
+	t.Run("missing client CA", func(t *testing.T) {
+		cfg := newConfig(t)
+		cfg.BarkClientCAFilePath = ""
+		err := cfg.validate(RunModeServe, minUnprivilegedPort)
+		require.ErrorContains(t, err, "barkClientCaFilePath is required")
+	})
+
+	t.Run("missing operator allowlist", func(t *testing.T) {
+		cfg := newConfig(t)
+		cfg.BarkOperatorCertificateFingerprints = nil
+		err := cfg.validate(RunModeServe, minUnprivilegedPort)
+		require.ErrorContains(
+			t,
+			err,
+			"barkOperatorCertificateFingerprints requires at least one",
+		)
+	})
+
+	t.Run("invalid operator fingerprint", func(t *testing.T) {
+		cfg := newConfig(t)
+		cfg.BarkOperatorCertificateFingerprints = []string{"not-a-fingerprint"}
+		err := cfg.validate(RunModeServe, minUnprivilegedPort)
+		require.ErrorContains(
+			t,
+			err,
+			"must be a 32-byte SHA-256 certificate fingerprint",
+		)
+	})
 }
 
 func TestValidateDatabaseLifecycleSnapshotCloudDestinationPrefix(t *testing.T) {

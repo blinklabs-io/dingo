@@ -15,10 +15,23 @@
 # conformance tests authenticate as root (not the mysql/mysql user) because
 # they need CREATE DATABASE privileges to isolate themselves from
 # database/plugin/metadata/mysql's own tests -- see state_manager_mysql.go.
+# The conformance suite resets its own schema/database between every
+# vector (TRUNCATE, an implicit-commit DDL statement, once per table --
+# see state_manager_postgres.go/state_manager_mysql.go's wipeMetadata), so
+# a single suite run issues thousands of committing statements. On a
+# native Linux disk (e.g. CI's ubuntu-latest runners) that's cheap. Under
+# Docker Desktop's virtualized filesystem (macOS/Windows), each commit's
+# fsync can cost tens to hundreds of milliseconds, which at that
+# statement volume turns a suite that finishes in well under a minute on
+# CI into one that takes many minutes locally. fsync/durability guarantees
+# are pointless for these throwaway, disposable containers -- nothing here
+# survives a `down -v` -- so both services disable them for local runs
+# only; CI does not use this compose file (see .github/workflows/go-test.yml).
 services:
   postgres:
     image: postgres:16
     restart: unless-stopped
+    command: ["-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off"]
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -34,6 +47,7 @@ services:
   mysql:
     image: mysql:8
     restart: unless-stopped
+    command: ["--innodb-flush-log-at-trx-commit=0", "--sync-binlog=0", "--skip-log-bin"]
     environment:
       MYSQL_ROOT_PASSWORD: mysql
       MYSQL_USER: mysql

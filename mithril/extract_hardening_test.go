@@ -104,6 +104,8 @@ func requireDirectorySwapSupport(t *testing.T) {
 // archive contents can never be merged with files placed there by someone
 // else.
 func TestExtractArchiveRefusesNonEmptyDestination(t *testing.T) {
+	t.Parallel()
+
 	archivePath := writeTestArchive(t, map[string]string{
 		"immutable/00000.chunk": "chunk0",
 	})
@@ -128,6 +130,8 @@ func TestExtractArchiveRefusesNonEmptyDestination(t *testing.T) {
 // path: re-extracting over a stale or partial destination replaces it
 // wholesale rather than merging into it.
 func TestExtractArchiveReplaceSwapsDestination(t *testing.T) {
+	t.Parallel()
+
 	archivePath := writeTestArchive(t, map[string]string{
 		"immutable/00000.chunk": "chunk0",
 	})
@@ -160,6 +164,8 @@ func TestExtractArchiveReplaceSwapsDestination(t *testing.T) {
 // a directory in the archive, must not redirect extracted writes outside the
 // destination.
 func TestExtractArchiveDoesNotWriteThroughPreExistingSymlink(t *testing.T) {
+	t.Parallel()
+
 	archivePath := writeTestArchive(t, map[string]string{
 		"immutable/00000.chunk": "chunk0",
 	})
@@ -202,6 +208,8 @@ func TestExtractArchiveDoesNotWriteThroughPreExistingSymlink(t *testing.T) {
 func TestExtractArchiveMergeDoesNotWriteThroughPreExistingSymlink(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	archivePath := writeTestArchive(t, map[string]string{
 		"immutable/00000.chunk": "chunk0",
 	})
@@ -236,6 +244,8 @@ func TestExtractArchiveMergeDoesNotWriteThroughPreExistingSymlink(
 // every temporary path resolves through /var, which is a symlink to
 // /private/var.
 func TestExtractArchiveAllowsSymlinkedAncestor(t *testing.T) {
+	t.Parallel()
+
 	archivePath := writeTestArchive(t, map[string]string{
 		"immutable/00000.chunk": "chunk0",
 	})
@@ -262,6 +272,8 @@ func TestExtractArchiveAllowsSymlinkedAncestor(t *testing.T) {
 // itself being a symlink, which would otherwise relocate the whole
 // extraction.
 func TestExtractArchiveRefusesSymlinkedDestination(t *testing.T) {
+	t.Parallel()
+
 	archivePath := writeTestArchive(t, map[string]string{
 		"immutable/00000.chunk": "chunk0",
 	})
@@ -290,6 +302,8 @@ func TestExtractArchiveRefusesSymlinkedDestination(t *testing.T) {
 // extraction publishes nothing, rather than leaving a half-populated
 // destination for a later run to mistake for a complete one.
 func TestExtractArchiveLeavesNoDestinationOnFailure(t *testing.T) {
+	t.Parallel()
+
 	// A traversal entry fails partway through extraction.
 	archivePath := writeTestArchive(t, map[string]string{
 		"immutable/00000.chunk": "chunk0",
@@ -313,6 +327,8 @@ func TestExtractArchiveLeavesNoDestinationOnFailure(t *testing.T) {
 // directory extraction started in regardless of what the pathname now resolves
 // to. Publication is refused separately, but by then nothing has leaked.
 func TestExtractRootWritesSurviveParentSwap(t *testing.T) {
+	t.Parallel()
+
 	root := t.TempDir()
 	parent := filepath.Join(root, "downloads")
 	require.NoError(t, os.MkdirAll(parent, 0o750))
@@ -385,6 +401,8 @@ func TestExtractRootWritesSurviveParentSwap(t *testing.T) {
 // refuses it rather than relying on a prior path inspection that a writer
 // could invalidate between check and open.
 func TestExtractRootRefusesEscapingEntry(t *testing.T) {
+	t.Parallel()
+
 	root := t.TempDir()
 	outside := filepath.Join(root, "outside")
 	require.NoError(t, os.MkdirAll(outside, 0o750))
@@ -417,6 +435,8 @@ func TestExtractRootRefusesEscapingEntry(t *testing.T) {
 // the directory extraction started in: the tree lands where it belongs and the
 // substituted directory receives nothing, with no window to lose.
 func TestExtractPublishFollowsParentHandle(t *testing.T) {
+	t.Parallel()
+
 	root := t.TempDir()
 	parent := filepath.Join(root, "downloads")
 	require.NoError(t, os.MkdirAll(parent, 0o750))
@@ -456,6 +476,8 @@ func TestExtractPublishFollowsParentHandle(t *testing.T) {
 // re-check that removal would silently delete another writer's files even
 // though this caller never asked to replace anything.
 func TestExtractPublishRefusesConcurrentDestinationContent(t *testing.T) {
+	t.Parallel()
+
 	root := t.TempDir()
 	parent := filepath.Join(root, "downloads")
 	require.NoError(t, os.MkdirAll(parent, 0o750))
@@ -490,6 +512,8 @@ func TestExtractPublishRefusesConcurrentDestinationContent(t *testing.T) {
 // outright — but publishing an attacker's tree under the destination can be,
 // by confirming afterwards that what landed is the directory that was filled.
 func TestExtractPublishRefusesSubstitutedStaging(t *testing.T) {
+	t.Parallel()
+
 	root := t.TempDir()
 	parent := filepath.Join(root, "downloads")
 	require.NoError(t, os.MkdirAll(parent, 0o750))
@@ -525,6 +549,8 @@ func TestExtractPublishRefusesSubstitutedStaging(t *testing.T) {
 // with a symlink rather than a directory, which a rename would otherwise
 // relocate to the destination intact.
 func TestExtractPublishRefusesSymlinkedStaging(t *testing.T) {
+	t.Parallel()
+
 	root := t.TempDir()
 	parent := filepath.Join(root, "downloads")
 	require.NoError(t, os.MkdirAll(parent, 0o750))
@@ -561,6 +587,8 @@ func TestExtractPublishRefusesSymlinkedStaging(t *testing.T) {
 // asked to replace. Only directories are removed; anything else is refused
 // where it stands.
 func TestExtractPublishRefusesNonDirectoryDestination(t *testing.T) {
+	t.Parallel()
+
 	root := t.TempDir()
 	parent := filepath.Join(root, "downloads")
 	require.NoError(t, os.MkdirAll(parent, 0o750))
@@ -589,6 +617,8 @@ func TestExtractPublishRefusesNonDirectoryDestination(t *testing.T) {
 // a caller that explicitly asked to replace the destination still does so,
 // since that is the documented recovery path.
 func TestExtractPublishReplacesConcurrentDestinationContent(t *testing.T) {
+	t.Parallel()
+
 	root := t.TempDir()
 	parent := filepath.Join(root, "downloads")
 	require.NoError(t, os.MkdirAll(parent, 0o750))
@@ -622,6 +652,8 @@ func TestExtractPublishReplacesConcurrentDestinationContent(t *testing.T) {
 // identity instead: a symlink that still resolves to the same directory is
 // fine, and only a genuine substitution is refused.
 func TestExtractPublishAllowsStableSymlinkedParent(t *testing.T) {
+	t.Parallel()
+
 	root := t.TempDir()
 	real := filepath.Join(root, "volume", "downloads")
 	require.NoError(t, os.MkdirAll(real, 0o750))
@@ -647,6 +679,8 @@ func TestExtractPublishAllowsStableSymlinkedParent(t *testing.T) {
 // immutable-archive download depends on: successive archives extracted into
 // one shared destination add to it rather than replacing it.
 func TestExtractArchiveMergeAccumulates(t *testing.T) {
+	t.Parallel()
+
 	first := writeTestArchive(t, map[string]string{
 		"immutable/00000.chunk": "chunk0",
 	})
@@ -668,7 +702,12 @@ func TestExtractArchiveMergeAccumulates(t *testing.T) {
 		"immutable/00001.chunk": "chunk1",
 	} {
 		data, err := os.ReadFile(filepath.Join(destDir, name))
-		require.NoError(t, err, "%s should have survived both extractions", name)
+		require.NoError(
+			t,
+			err,
+			"%s should have survived both extractions",
+			name,
+		)
 		assert.Equal(t, want, string(data))
 	}
 }
@@ -681,6 +720,8 @@ func TestExtractArchiveMergeAccumulates(t *testing.T) {
 // directory ahead of time, or a previous run cleaning up after itself — and
 // refusing it would turn a documented, supported arrangement into a failure.
 func TestExtractArchiveAcceptsEmptyDestination(t *testing.T) {
+	t.Parallel()
+
 	archivePath := writeTestArchive(t, map[string]string{
 		"immutable/00000.chunk": "chunk0",
 	})
@@ -710,6 +751,8 @@ func TestExtractArchiveAcceptsEmptyDestination(t *testing.T) {
 // rather than lose their files. That is what separates this case from a
 // populated destination, which is refused.
 func TestExtractPublishAcceptsDestinationEmptiedConcurrently(t *testing.T) {
+	t.Parallel()
+
 	root := t.TempDir()
 	parent := filepath.Join(root, "downloads")
 	require.NoError(t, os.MkdirAll(parent, 0o750))
@@ -742,6 +785,8 @@ func TestExtractPublishAcceptsDestinationEmptiedConcurrently(t *testing.T) {
 // 0750 the extracted tree carried before staging was introduced, dropping
 // group traversal for deployments that separate the downloader from the node.
 func TestExtractPublishesDestinationWithGroupTraversal(t *testing.T) {
+	t.Parallel()
+
 	if runtime.GOOS == "windows" {
 		t.Skip("unix permission bits are not meaningful on windows")
 	}
@@ -774,6 +819,8 @@ func TestExtractPublishesDestinationWithGroupTraversal(t *testing.T) {
 // `immutable` goes unnoticed while a write to `immutable/sub/00000.chunk`
 // follows it.
 func TestExtractRefusesSymlinkInsideDestination(t *testing.T) {
+	t.Parallel()
+
 	for _, tt := range []struct {
 		name  string
 		entry string
@@ -819,6 +866,8 @@ func TestExtractRefusesSymlinkInsideDestination(t *testing.T) {
 // The symlink is relative so that it is refused for escaping rather than for
 // being absolute, which os.Root rejects on sight.
 func TestExtractRootRefusesEntrySubstitutedDuringExtraction(t *testing.T) {
+	t.Parallel()
+
 	root := t.TempDir()
 	outside := filepath.Join(root, "outside")
 	require.NoError(t, os.MkdirAll(outside, 0o750))
@@ -859,6 +908,8 @@ func TestExtractRootRefusesEntrySubstitutedDuringExtraction(t *testing.T) {
 // the parent handle's containment nor os.Root's refusal of absolute links can
 // be what rejects it.
 func TestOpenExtractRootRefusesSubstitutedDestination(t *testing.T) {
+	t.Parallel()
+
 	parent := t.TempDir()
 	sibling := filepath.Join(parent, "sibling")
 	require.NoError(t, os.MkdirAll(sibling, 0o750))
@@ -881,6 +932,8 @@ func TestOpenExtractRootRefusesSubstitutedDestination(t *testing.T) {
 // openExtractRoot: an absent destination is created, since merge mode has no
 // staging directory to fall back on.
 func TestOpenExtractRootCreatesMissingDestination(t *testing.T) {
+	t.Parallel()
+
 	parent := t.TempDir()
 
 	parentRoot, err := os.OpenRoot(parent)
@@ -908,6 +961,8 @@ func TestOpenExtractRootCreatesMissingDestination(t *testing.T) {
 // the removal itself must be unable to act on a file: a directory-only removal
 // fails where a general one would unlink whatever it found.
 func TestRemoveEmptyExtractDirRefusesFile(t *testing.T) {
+	t.Parallel()
+
 	parent := t.TempDir()
 	require.NoError(t, os.WriteFile(
 		filepath.Join(parent, "theirs"), []byte("keep"), 0o640,
@@ -917,8 +972,15 @@ func TestRemoveEmptyExtractDirRefusesFile(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = parentRoot.Close() })
 
-	require.Error(t, removeEmptyExtractDir(parentRoot, "theirs", filepath.Join(parent, "theirs")),
-		"a directory-only removal must refuse a file")
+	require.Error(
+		t,
+		removeEmptyExtractDir(
+			parentRoot,
+			"theirs",
+			filepath.Join(parent, "theirs"),
+		),
+		"a directory-only removal must refuse a file",
+	)
 
 	data, err := os.ReadFile(filepath.Join(parent, "theirs"))
 	require.NoError(t, err, "the file must not have been unlinked")
@@ -929,6 +991,8 @@ func TestRemoveEmptyExtractDirRefusesFile(t *testing.T) {
 // removal is the emptiness test, so a writer who populated the destination
 // first makes it fail rather than lose their content.
 func TestRemoveEmptyExtractDirRefusesPopulatedDir(t *testing.T) {
+	t.Parallel()
+
 	parent := t.TempDir()
 	dir := filepath.Join(parent, "theirs")
 	require.NoError(t, os.MkdirAll(dir, 0o750))
@@ -940,7 +1004,14 @@ func TestRemoveEmptyExtractDirRefusesPopulatedDir(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = parentRoot.Close() })
 
-	require.Error(t, removeEmptyExtractDir(parentRoot, "theirs", filepath.Join(parent, "theirs")))
+	require.Error(
+		t,
+		removeEmptyExtractDir(
+			parentRoot,
+			"theirs",
+			filepath.Join(parent, "theirs"),
+		),
+	)
 
 	data, err := os.ReadFile(filepath.Join(dir, "keep.txt"))
 	require.NoError(t, err)
@@ -949,6 +1020,8 @@ func TestRemoveEmptyExtractDirRefusesPopulatedDir(t *testing.T) {
 
 // TestRemoveEmptyExtractDirRemovesEmptyDir pins that it still does its job.
 func TestRemoveEmptyExtractDirRemovesEmptyDir(t *testing.T) {
+	t.Parallel()
+
 	parent := t.TempDir()
 	dir := filepath.Join(parent, "stale")
 	require.NoError(t, os.MkdirAll(dir, 0o750))
@@ -957,7 +1030,14 @@ func TestRemoveEmptyExtractDirRemovesEmptyDir(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = parentRoot.Close() })
 
-	require.NoError(t, removeEmptyExtractDir(parentRoot, "stale", filepath.Join(parent, "stale")))
+	require.NoError(
+		t,
+		removeEmptyExtractDir(
+			parentRoot,
+			"stale",
+			filepath.Join(parent, "stale"),
+		),
+	)
 	_, statErr := os.Stat(dir)
 	assert.True(t, os.IsNotExist(statErr))
 }
@@ -969,6 +1049,8 @@ func TestRemoveEmptyExtractDirRemovesEmptyDir(t *testing.T) {
 // replace swaps it wholesale — and merge silently won, so a caller that meant
 // to replace would have quietly kept the old files instead.
 func TestExtractArchiveRefusesConflictingDestinationOptions(t *testing.T) {
+	t.Parallel()
+
 	archivePath := writeTestArchive(t, map[string]string{
 		"immutable/00000.chunk": "chunk0",
 	})
@@ -998,6 +1080,8 @@ func TestExtractArchiveRefusesConflictingDestinationOptions(t *testing.T) {
 // The removal is what has to hold here. It cannot be told the destination
 // changed, so it must be incapable of acting on the thing it changed into.
 func TestExtractPublishSurvivesDestinationToFileSubstitution(t *testing.T) {
+	t.Parallel()
+
 	parent := t.TempDir()
 	destName := "extracted"
 	destPath := filepath.Join(parent, destName)
@@ -1033,6 +1117,8 @@ func TestExtractPublishSurvivesDestinationToFileSubstitution(t *testing.T) {
 // a layout decision. Following it hands back a directory somebody else chose
 // and skips the extraction that would have replaced it.
 func TestOpenVerifiedDirRefusesSymlinkedDir(t *testing.T) {
+	t.Parallel()
+
 	parent := t.TempDir()
 	outside := filepath.Join(parent, "outside")
 	require.NoError(t, os.MkdirAll(outside, 0o750))
@@ -1046,6 +1132,8 @@ func TestOpenVerifiedDirRefusesSymlinkedDir(t *testing.T) {
 // TestOpenVerifiedDirOpensRealDir pins that an ordinary directory still opens,
 // and that the handle refers to it.
 func TestOpenVerifiedDirOpensRealDir(t *testing.T) {
+	t.Parallel()
+
 	parent := t.TempDir()
 	candidate := filepath.Join(parent, "extracted")
 	require.NoError(t, os.MkdirAll(candidate, 0o750))
@@ -1065,6 +1153,8 @@ func TestOpenVerifiedDirOpensRealDir(t *testing.T) {
 // directory is returned, under the name that denotes it, with the handle still
 // open so the consumer reads that directory rather than that name.
 func TestVettedNamesInspectedDirectory(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	candidate := filepath.Join(dir, "immutable")
 	require.NoError(t, os.MkdirAll(candidate, 0o750))
@@ -1100,6 +1190,8 @@ func TestVettedNamesInspectedDirectory(t *testing.T) {
 // interference, and the lookup refuses rather than reporting a cached snapshot
 // under a name somebody else has taken.
 func TestVettedRefusesSwappedDirectory(t *testing.T) {
+	t.Parallel()
+
 	parent := t.TempDir()
 	dir := filepath.Join(parent, "extracted")
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "immutable"), 0o750))
@@ -1130,6 +1222,8 @@ func TestVettedRefusesSwappedDirectory(t *testing.T) {
 // where a concurrent writer would land it: the candidate is opened, its chunk
 // files are read, and only then is the name bound.
 func TestVettedRefusesCandidateSwappedAfterInspection(t *testing.T) {
+	t.Parallel()
+
 	base := t.TempDir()
 	ours := filepath.Join(base, "immutable")
 	require.NoError(t, os.MkdirAll(ours, 0o750))
@@ -1164,6 +1258,8 @@ func TestVettedRefusesCandidateSwappedAfterInspection(t *testing.T) {
 // tree. The manifest check and the ledger-state import both go through that
 // handle, so neither can end up describing a different tree.
 func TestLedgerDir(t *testing.T) {
+	t.Parallel()
+
 	t.Run("returns the inspected directory", func(t *testing.T) {
 		dir := t.TempDir()
 		state := filepath.Join(dir, "ledger", "42")
@@ -1208,6 +1304,8 @@ func TestLedgerDir(t *testing.T) {
 // operator, and rejecting them would break ordinary layouts rather than
 // attackers.
 func TestOpenVerifiedDirAllowsSymlinkedAncestor(t *testing.T) {
+	t.Parallel()
+
 	root := t.TempDir()
 	real := filepath.Join(root, "real")
 	require.NoError(t, os.MkdirAll(filepath.Join(real, "extracted"), 0o750))
@@ -1242,6 +1340,8 @@ func TestOpenVerifiedDirAllowsSymlinkedAncestor(t *testing.T) {
 // the descriptor open also pins the old inode, so the reuse cannot happen and
 // the test is deterministic rather than dependent on the allocator.
 func TestExtractDoesNotAdoptAPreExistingFile(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	root, err := os.OpenRoot(dir)
 	require.NoError(t, err)
@@ -1307,6 +1407,8 @@ func TestExtractDoesNotAdoptAPreExistingFile(t *testing.T) {
 // and a writer between the two turns "refuse the directory" into "unlink their
 // file".
 func TestExtractRefusesADirectoryAtAFileName(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	root, err := os.OpenRoot(dir)
 	require.NoError(t, err)
@@ -1333,6 +1435,8 @@ func TestExtractRefusesADirectoryAtAFileName(t *testing.T) {
 // opened through its parent and confirmed to be the entry the name denotes,
 // which rejects a symlink and a substitution with one check.
 func TestRemoveExtractedFileRefusesASymlinkedParent(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(dir, "real"), 0o750))
 	victim := filepath.Join(dir, "real", "00000.chunk")

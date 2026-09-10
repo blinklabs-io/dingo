@@ -78,6 +78,8 @@ func requireTip(t *testing.T, imm *immutable.ImmutableDb) ocommon.Point {
 // bootstrap performs, in order, with the substitution placed exactly where a
 // concurrent writer would land it.
 func TestBootstrapImmutableSurvivesHandoffSwap(t *testing.T) {
+	t.Parallel()
+
 	// The two lookups that produce a BootstrapResult's ImmutableDir: v1 walks
 	// the extracted layouts, v2 knows the archives land in `immutable`.
 	lookups := map[string]func(extractDir string) *vettedDir{
@@ -152,6 +154,8 @@ func mustOpenBootstrapped(
 // nothing vetted — so the absence of a handle has to be an error, not a
 // slower path.
 func TestOpenBootstrappedImmutableRefusesUnvettedResult(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	requireChunkTrio(t, "00000", dir)
 
@@ -164,6 +168,8 @@ func TestOpenBootstrappedImmutableRefusesUnvettedResult(t *testing.T) {
 // released once and that a second release — Cleanup after an explicit close, or
 // the deferred close after Cleanup — is not an error.
 func TestBootstrapResultCloseHandlesIsIdempotent(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	openRoot := func() *os.Root {
 		root, err := os.OpenRoot(dir)
@@ -196,6 +202,8 @@ func TestBootstrapResultCloseHandlesIsIdempotent(t *testing.T) {
 // pathname search would succeed while describing a tree nothing checked — and
 // for the ancillary tree that check is a signature.
 func TestImportLedgerStateRefusesUnvettedResult(t *testing.T) {
+	t.Parallel()
+
 	_, _, err := importLedgerState(
 		t.Context(),
 		nil,
@@ -226,6 +234,8 @@ func TestImportLedgerStateRefusesUnvettedResult(t *testing.T) {
 // distinctively. That is what makes the control case below prove its point: the
 // tree is reachable and would have been read, were the entry not a symlink.
 func TestImportLedgerStateRefusesSymlinkedState(t *testing.T) {
+	t.Parallel()
+
 	build := func(t *testing.T, symlink bool) *BootstrapResult {
 		t.Helper()
 		dir := t.TempDir()
@@ -286,6 +296,8 @@ func TestImportLedgerStateRefusesSymlinkedState(t *testing.T) {
 // A tree with genuinely no ledger state still falls through — that is the
 // v1 layout, where the state lives in the main archive's db/ledger.
 func TestImportLedgerStateRefusesUnsafeAncillaryTree(t *testing.T) {
+	t.Parallel()
+
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// The extraction directory holds a readable state throughout, so a
@@ -370,6 +382,8 @@ func TestImportLedgerStateRefusesUnsafeAncillaryTree(t *testing.T) {
 // v1 layout works, its ledger state living in the main archive, and it also
 // covers an ancillary tree holding only states newer than the certified tip.
 func TestImportLedgerStateWillNotLookPastAVerifiedTree(t *testing.T) {
+	t.Parallel()
+
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	run := func(t *testing.T, verified bool) error {
@@ -440,6 +454,8 @@ func TestImportLedgerStateWillNotLookPastAVerifiedTree(t *testing.T) {
 // and losing it would leave the download behind in an operator-supplied
 // directory, where no temp-dir removal sweeps it up.
 func TestDownloadAncillaryReportsArchiveWhenTreeUnusable(t *testing.T) {
+	t.Parallel()
+
 	// An ancillary archive whose payload has no ledger state at all.
 	archive := writeTestArchive(t, map[string]string{
 		"immutable/00000.chunk": "not ledger state",
@@ -487,6 +503,8 @@ func TestDownloadAncillaryReportsArchiveWhenTreeUnusable(t *testing.T) {
 // is a temp dir that gets removed wholesale, and a leak when the operator
 // supplied one.
 func TestDownloadAncillaryReportsArchiveOnFailure(t *testing.T) {
+	t.Parallel()
+
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 	snapshot := func(locations ...string) *SnapshotListItem {
 		return &SnapshotListItem{
@@ -577,7 +595,11 @@ func TestDownloadAncillaryReportsArchiveOnFailure(t *testing.T) {
 // name would name a different file for a network like "../../etc" — one outside
 // the download directory, and Cleanup calls os.RemoveAll on whatever it is
 // given. So the reported path has to stay inside, whatever the aggregator says.
-func TestDownloadAncillaryKeepsTheReportedArchiveInsideDownloadDir(t *testing.T) {
+func TestDownloadAncillaryKeepsTheReportedArchiveInsideDownloadDir(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	srv := httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "nope", http.StatusInternalServerError)
@@ -589,8 +611,10 @@ func TestDownloadAncillaryKeepsTheReportedArchiveInsideDownloadDir(t *testing.T)
 	_, archPath, err := downloadAncillary(
 		t.Context(),
 		BootstrapConfig{
-			AllowInsecureHTTP:           true,
-			Logger:                      slog.New(slog.NewTextHandler(io.Discard, nil)),
+			AllowInsecureHTTP: true,
+			Logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
 			DownloadMaxTransientRetries: -1,
 		},
 		&SnapshotListItem{
@@ -625,6 +649,8 @@ func TestDownloadAncillaryKeepsTheReportedArchiveInsideDownloadDir(t *testing.T)
 // ancillary download in an operator-supplied directory, which nothing
 // afterwards sweeps.
 func TestDownloadAncillaryV2ReportsArchiveWhenManifestUnverified(t *testing.T) {
+	t.Parallel()
+
 	// Ledger state present, so the tree gets past the usability check and the
 	// missing manifest is what fails — the case this test is about.
 	archive := writeTestArchive(t, map[string]string{
@@ -683,6 +709,8 @@ func TestDownloadAncillaryV2ReportsArchiveWhenManifestUnverified(t *testing.T) {
 // Both downloaders, because the two reached this branch by different routes and
 // only one of them removed.
 func TestDownloadAncillaryRemovesAnUnusableExtraction(t *testing.T) {
+	t.Parallel()
+
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 	// No ledger state anywhere in it, which is what makes the tree unusable.
 	archive := writeTestArchive(t, map[string]string{
@@ -806,6 +834,8 @@ func requireTrioDigests(t *testing.T, dir string) map[string]string {
 func TestBootstrappedImmutableRefusesAFileSubstitutedAfterVerification(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	// Which file is taken decides which read notices, so both the tip read and
 	// the block copy are covered.
 	for _, tc := range []struct {
@@ -892,7 +922,11 @@ func TestBootstrappedImmutableRefusesAFileSubstitutedAfterVerification(
 // parsed are then not the bytes the ancillary key signed. So the manifest
 // travels with the handle and the selected files are re-checked from the
 // descriptors the import reads through.
-func TestImportLedgerStateRefusesStateSubstitutedAfterTheManifest(t *testing.T) {
+func TestImportLedgerStateRefusesStateSubstitutedAfterTheManifest(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 	// A one-element CBOR array: parses far enough to fail distinctively, so a
 	// tree that is read reports "parsing ledger state" rather than anything
@@ -977,6 +1011,8 @@ func TestImportLedgerStateRefusesStateSubstitutedAfterTheManifest(t *testing.T) 
 // a file nothing signed has to fail at the point of use too, or an entry
 // planted afterwards is refused only by a check that already ran.
 func TestImportLedgerStateRefusesAStateTheManifestDoesNotCover(t *testing.T) {
+	t.Parallel()
+
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 	dir := t.TempDir()
 	slotDir := filepath.Join(dir, "ledger", "200")
@@ -1012,6 +1048,8 @@ func TestImportLedgerStateRefusesAStateTheManifestDoesNotCover(t *testing.T) {
 // mismatch a repointed name causes would be reported as a corrupt download,
 // sending the pool round the locations again and deleting a trio it wrote.
 func TestCheckImmutableTrioHashesThroughTheHandle(t *testing.T) {
+	t.Parallel()
+
 	parent := t.TempDir()
 	ours := filepath.Join(parent, "immutable")
 	requireChunkTrio(t, "00000", ours)
@@ -1062,6 +1100,8 @@ func TestCheckImmutableTrioHashesThroughTheHandle(t *testing.T) {
 // leave the parser re-reading a file that can change under it, so the shape of
 // this signature is the guarantee.
 func TestVerifySignedStateChecksTheBytesItIsGiven(t *testing.T) {
+	t.Parallel()
+
 	signed := []byte("the signed ledger state")
 	sum := sha256.Sum256(signed)
 	digests := map[string]string{
@@ -1092,6 +1132,8 @@ func TestVerifySignedStateChecksTheBytesItIsGiven(t *testing.T) {
 // not cover must fail rather than travel down with no digest, because an empty
 // digest is how an unsigned tree is decoded unchecked.
 func TestSignedTableDigestRefusesAnUncoveredTable(t *testing.T) {
+	t.Parallel()
+
 	digests := map[string]string{"ledger/100/tables": "abc123"}
 	snapshot := &ledgerstate.SnapshotFiles{
 		StatePath: "ledger/100/state",
@@ -1133,6 +1175,8 @@ func TestSignedTableDigestRefusesAnUncoveredTable(t *testing.T) {
 // unverified, which is the one outcome nothing should be able to reach by
 // removing something.
 func TestOpenBootstrappedImmutableRefusesAnEmptyDigestMap(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	requireChunkTrio(t, "00000", dir)
 	root, err := os.OpenRoot(dir)

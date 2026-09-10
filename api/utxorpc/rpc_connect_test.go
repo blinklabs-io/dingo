@@ -97,6 +97,7 @@ type utxorpcConnectHarness struct {
 
 type utxorpcHarnessOptions struct {
 	numBlocks       int
+	blocks          []models.Block
 	maxHistoryItems int
 	serverTimeout   time.Duration
 	skipIndexTxHash []byte
@@ -173,7 +174,10 @@ func newUtxorpcConnectHarness(
 	})
 	require.NoError(t, err)
 
-	blocks := loadTestChainBlocks(t, opts.numBlocks)
+	blocks := opts.blocks
+	if len(blocks) == 0 {
+		blocks = loadTestChainBlocks(t, opts.numBlocks)
+	}
 	require.NotEmpty(t, blocks)
 	for i := range blocks {
 		require.NoError(t, db.BlockCreate(blocks[i], nil))
@@ -1164,7 +1168,7 @@ func TestConnect_WatchTx_IdleEmptyForwardBlock(t *testing.T) {
 	// Load a long prefix to locate an empty block, then trim the harness chain
 	// so that empty block is the tip. Otherwise WatchTx keeps iterating forward
 	// and may hit transactions that panic in gouroboros Utxorpc().
-	scan := loadTestChainBlocks(t, 80)
+	scan := loadTestChainBlocksWithPeriodicTransactions(t, 80)
 	var cut int
 	found := false
 	for j := 6; j < len(scan); j++ {
@@ -1181,11 +1185,8 @@ func TestConnect_WatchTx_IdleEmptyForwardBlock(t *testing.T) {
 	if cut < 2 {
 		t.Fatalf("empty block cut must include a parent, got %d", cut)
 	}
-	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: cut})
-	blocks := loadTestChainBlocks(t, cut)
-	if len(blocks) < cut {
-		t.Fatalf("expected at least %d blocks, got %d", cut, len(blocks))
-	}
+	blocks := scan[:cut]
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{blocks: blocks})
 	parent := blocks[cut-2]
 	emptyChild := blocks[cut-1]
 	require.Equal(t, emptyChild.Slot, h.LS.Tip().Point.Slot)
@@ -1232,10 +1233,18 @@ func TestConnect_WaitForTx_ConfirmsOnlyCommittedApply(t *testing.T) {
 	committedHash := committedTx.Hash().Bytes()
 	committedRecord, err := h.LS.TransactionByHash(committedHash)
 	require.NoError(t, err)
-	require.NotNil(t, committedRecord, "committed fixture transaction must be indexed")
+	require.NotNil(
+		t,
+		committedRecord,
+		"committed fixture transaction must be indexed",
+	)
 	pendingRecord, err := h.LS.TransactionByHash(pendingTx.Hash().Bytes())
 	require.NoError(t, err)
-	require.Nil(t, pendingRecord, "pending fixture transaction must not be indexed")
+	require.Nil(
+		t,
+		pendingRecord,
+		"pending fixture transaction must not be indexed",
+	)
 	blk, err := gledger.NewBlockFromCbor(eventBlock.Type, eventBlock.Cbor)
 	require.NoError(t, err)
 	requestedInBlock := false
@@ -1245,7 +1254,11 @@ func TestConnect_WaitForTx_ConfirmsOnlyCommittedApply(t *testing.T) {
 			break
 		}
 	}
-	require.True(t, requestedInBlock, "raw blockfetch must contain the pending transaction")
+	require.True(
+		t,
+		requestedInBlock,
+		"raw blockfetch must contain the pending transaction",
+	)
 
 	cli := submitconnect.NewSubmitServiceClient(
 		h.Client,
@@ -1398,7 +1411,11 @@ func TestConnect_WaitForTx_AlreadyCommittedTransaction(t *testing.T) {
 	require.NotNil(t, resp)
 	require.Equal(t, submit.Stage_STAGE_CONFIRMED, resp.GetStage())
 	require.Equal(t, txHash, resp.GetRef())
-	require.False(t, stream.Receive(), "handler returns after confirming all refs")
+	require.False(
+		t,
+		stream.Receive(),
+		"handler returns after confirming all refs",
+	)
 	require.NoError(t, stream.Err())
 }
 

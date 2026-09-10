@@ -64,6 +64,7 @@ var flagSpecs = []flagSpec{
 		"data directory for all storage plugins (overrides CARDANO_DATABASE_PATH)",
 	),
 	stringFlag("BindAddr", "bind-addr", "", "public bind address"),
+	stringFlag("APIBindAddr", "api-bind-addr", "", "API bind address (remote exposure requires authentication)"),
 	stringFlag("SocketPath", "socket-path", "", "path to UNIX socket file"),
 	transformStringFlag(
 		"RunMode",
@@ -370,7 +371,12 @@ var flagSpecs = []flagSpec{
 		"BarkClientCAFilePath",
 		"bark-client-ca-file-path",
 		"",
-		"path to a PEM CA bundle; client certs verified against it authenticate Bark's destructive DatabaseService RPCs (required whenever the database lifecycle service is enabled)",
+		"path to a PEM CA bundle; client certs verified against it authenticate every Bark DatabaseService RPC (required whenever the database lifecycle service is enabled)",
+	),
+	stringSliceFlag(
+		"BarkOperatorCertificateFingerprints",
+		"bark-operator-certificate-fingerprints",
+		"SHA-256 client certificate fingerprints authorized for destructive Bark DatabaseService RPCs",
 	),
 
 	// History expiry
@@ -409,6 +415,17 @@ var flagSpecs = []flagSpec{
 		"koios-parity-api-key",
 		"",
 		"Koios Bearer token for rate-limited access",
+	),
+	stringFlag(
+		"KoiosParity.BaseURL",
+		"koios-parity-base-url",
+		"",
+		"Koios v1 API root override for a self-hosted instance (default: the public host for --koios-parity-network)",
+	),
+	boolFlag(
+		"KoiosParity.AllowInsecureHTTP",
+		"koios-parity-allow-insecure-http",
+		"allow a plain-HTTP --koios-parity-base-url (local dev/test only; the API key is sent as a Bearer token)",
 	),
 	boolFlag(
 		"KoiosParity.Strict",
@@ -729,12 +746,6 @@ var flagSpecs = []flagSpec{
 		"",
 		"path to Cardano text-envelope BLS12-381 Leios vote signing key or legacy raw hex scalar",
 	),
-	stringToStringFlag(
-		"LeiosVoterPublicKeys",
-		"leios-voter-public-keys",
-		"Leios voter public key registry: pool key hash hex=public key hex",
-	),
-
 	// Mithril
 	boolFlag(
 		"Mithril.Enabled",
@@ -921,29 +932,6 @@ func stringSliceFlag(field, name, help string) flagSpec {
 				return nil
 			}
 			v, err := f.GetStringSlice(name)
-			if err != nil {
-				return err
-			}
-			targetValue(cfg, field).Set(reflect.ValueOf(v))
-			return nil
-		},
-	}
-}
-
-func stringToStringFlag(field, name, help string) flagSpec {
-	return flagSpec{
-		field: field,
-		name:  name,
-		register: func(f *pflag.FlagSet, defaults *Config) {
-			def, _ := defaultValue(defaults, field).
-				Interface().(map[string]string)
-			f.StringToString(name, def, help)
-		},
-		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
-			v, err := f.GetStringToString(name)
 			if err != nil {
 				return err
 			}

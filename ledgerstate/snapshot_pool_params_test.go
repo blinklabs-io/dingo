@@ -39,6 +39,8 @@ import (
 // describe must agree, or the field mapping below is wrong somewhere it
 // happens not to show.
 func TestSnapshotPoolParamsMatchCertState(t *testing.T) {
+	t.Parallel()
+
 	state, err := ParseSnapshot(testdataLedgerSnapshot)
 	require.NoError(t, err)
 	snapshots, err := ParseSnapShots(state.SnapShotsData)
@@ -64,7 +66,13 @@ func TestSnapshotPoolParamsMatchCertState(t *testing.T) {
 				continue
 			}
 			compared++
-			require.Equal(t, want.VrfKeyHash, got.VrfKeyHash, "pool %s vrf", key)
+			require.Equal(
+				t,
+				want.VrfKeyHash,
+				got.VrfKeyHash,
+				"pool %s vrf",
+				key,
+			)
 			require.Equal(t, want.Pledge, got.Pledge, "pool %s pledge", key)
 			require.Equal(t, want.Cost, got.Cost, "pool %s cost", key)
 			require.Equal(t, want.MarginNum, got.MarginNum,
@@ -100,6 +108,8 @@ func TestSnapshotPoolParamsMatchCertState(t *testing.T) {
 //
 //	ZZ_PREVIEW_SNAPSHOT=<path to a cardano-node ledger state file>
 func TestSnapshotPoolParamsMatchCertStateOnRealNetwork(t *testing.T) {
+	t.Parallel()
+
 	path := os.Getenv("ZZ_PREVIEW_SNAPSHOT")
 	if path == "" {
 		t.Skip("set ZZ_PREVIEW_SNAPSHOT to cross-check against a real network")
@@ -136,8 +146,20 @@ func TestSnapshotPoolParamsMatchCertStateOnRealNetwork(t *testing.T) {
 		require.Equal(t, want.VrfKeyHash, got.VrfKeyHash, "pool %s vrf", key)
 		require.Equal(t, want.Pledge, got.Pledge, "pool %s pledge", key)
 		require.Equal(t, want.Cost, got.Cost, "pool %s cost", key)
-		require.Equal(t, want.MarginNum, got.MarginNum, "pool %s margin num", key)
-		require.Equal(t, want.MarginDen, got.MarginDen, "pool %s margin den", key)
+		require.Equal(
+			t,
+			want.MarginNum,
+			got.MarginNum,
+			"pool %s margin num",
+			key,
+		)
+		require.Equal(
+			t,
+			want.MarginDen,
+			got.MarginDen,
+			"pool %s margin den",
+			key,
+		)
 		require.Equal(t, want.RewardAccount, got.RewardAccount,
 			"pool %s reward account", key)
 		requireOwnersConsistent(t, key, want, got, &snapshots.Mark)
@@ -222,6 +244,8 @@ func requireOwnersConsistent(
 //
 //	ZZ_PREVIEW_SNAPSHOT=<path to a cardano-node ledger state file>
 func TestEveryDelegatedPoolIsAttributableFromTheSnapshot(t *testing.T) {
+	t.Parallel()
+
 	path := os.Getenv("ZZ_PREVIEW_SNAPSHOT")
 	if path == "" {
 		t.Skip("set ZZ_PREVIEW_SNAPSHOT to check against a real network")

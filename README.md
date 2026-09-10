@@ -22,6 +22,7 @@ A high-performance Cardano blockchain node implementation in Go by Blink Labs. D
 - Peer governance with dynamic peer selection, ledger peers, and topology support
 - Chain rollback support for handling forks with automatic state restoration
 - Fast bootstrapping via built-in Mithril client
+- Optional Midnight event indexing and MidnightState gRPC service
 - Multiple external interfaces: general-purpose APIs (UTxO RPC, Blockfrost-compatible REST, Mesh/Rosetta) plus Bark for Dingo-to-Dingo C2 and archive services
 
 Note: On Windows systems, named pipes are used instead of Unix sockets for node-to-client communication.
@@ -102,6 +103,11 @@ The following environment variables modify Dingo's behavior:
   - Comma-separated HTTPS hostnames additionally allowed for Bark-supplied
     block download URLs. The allowlist always includes the
     `DINGO_BARK_BASE_URL` hostname.
+- `DINGO_BARK_CLIENT_CA_FILE_PATH`
+  - PEM CA bundle used to authenticate every Bark DatabaseService caller.
+- `DINGO_BARK_OPERATOR_CERTIFICATE_FINGERPRINTS`
+  - Comma-separated SHA-256 client certificate fingerprints authorized for
+    destructive Bark DatabaseService RPCs.
 - `DINGO_DEBUG_BIND_ADDR`
   - IP address to bind for unauthenticated pprof endpoints (default:
     `127.0.0.1`)
@@ -183,6 +189,40 @@ CARDANO_NETWORK=preprod CARDANO_CONFIG=path/to/preprod/config.json ./dingo
 Dingo creates a `dingo.socket` file that speaks Ouroboros node-to-client and is compatible with `cardano-cli`, `adder`, `kupo`, and other Cardano client tools.
 
 Cardano configuration files are bundled in the Docker image. For local builds, you can find them at [docker-cardano-configs](https://github.com/blinklabs-io/docker-cardano-configs/tree/main/config).
+
+### Runtime resource requirements
+
+Dingo's resource needs depend on the network, storage mode, and whether it is
+bootstrapping or serving near the chain tip. The following measurements were
+captured on September 4, 2026 from nine process samples at 30-second intervals
+(about four minutes) on otherwise shared 32 GiB hosts. CPU values below are
+derived from the recorded process percentages (`%CPU / 100`) and represent
+core-equivalents, not a new sampling run. They are observations, not capacity
+guarantees; the mainnet sample was on released `v0.70.5`, while the Preprod
+and Preview samples used an `origin/main` build.
+
+| Network and mode | Average CPU cores | Peak CPU cores | Average RSS | Peak RSS |
+| --- | ---: | ---: | ---: | ---: |
+| Mainnet, `core` | 0.863 | 0.864 | 4.3 GiB | 4.5 GiB |
+| Preprod, `core` | 0.545 | 0.547 | 1.5 GiB | 1.5 GiB |
+| Preview, `core` | 0.095 | 0.096 | 1.3 GiB | 1.4 GiB |
+
+For a practical starting point, provision at least 2 vCPUs and 8 GiB RAM for
+a `core` node. This leaves CPU and memory headroom above the observed mainnet
+serve sample and allows for variation from peer activity, compaction, upgrades,
+and catch-up. A node that serves APIs or uses `storageMode: api` should use at
+least 4 vCPUs and 16 GiB RAM until longer production-like measurements are
+available. Disk capacity must also cover the selected storage mode and its
+temporary bootstrap peak.
+
+API-mode Mithril bootstrap is a separate workload and needs more resources than
+near-tip serving. An in-progress Preview sample averaged 0.932 CPU cores
+(0.972 peak, derived from the recorded percentages) and grew from 0.3 GiB to
+3.0 GiB RSS in about four minutes while importing a snapshot; the
+run had reached 1.8% ledger/UTxO import, so its eventual peak was not measured.
+The same run used about 17.9 GB of host `/data` at the time of sampling. Treat
+these API bootstrap values as preliminary and leave substantial additional CPU,
+RAM, and disk headroom until a complete bootstrap measurement is available.
 
 ## Docker
 
@@ -578,6 +618,49 @@ Performance (preview network, ~4M blocks):
 | Backfill historical metadata | — | ~varies |
 | Total | ~50 min | ~50 min + backfill |
 
+### Observed Mithril Bootstrap Timings
+
+The following timings were measured during profiled `core`-mode validation
+runs on 2026-08-26 and 2026-08-28, from bootstrap start through completion:
+
+| Network | Snapshot ready | Bootstrap complete |
+|---------|-----------------|--------------------|
+| mainnet | 41m 51s | 9h 10m 56s |
+| preprod | 4m 07s | 37m 56s |
+| preview | 12m 11s | 46m 22s |
+
+Mainnet's total includes its index rebuild; subsequent restarts reused the
+completed database rather than repeating the bootstrap.
+
+A profiled Preview `api`-mode run completed snapshot bootstrap and historical
+metadata backfill with these timings:
+
+| Phase | Duration |
+|-------|----------|
+| Mithril snapshot bootstrap | 39m 13s |
+| Historical metadata backfill | 19h 57m 46s |
+| Post-backfill index finalization | ~16m 30s |
+| Total through bootstrap completion | ~20h 53m 19s |
+
+The finalization phase is approximate; the total is the end-to-end
+measurement and should not be reconstructed by summing the rounded phase
+durations.
+
+The API-mode measurement was taken on 2026-08-30/31 against approximately
+4.6M Preview blocks. The backfill processed 6.86M transactions at roughly
+64 blocks per second.
+
+The Preview API path was also measured in a profiled run on 2026-08-31/09-01
+using the SQLite bulk-load pragmas and a temporary Mithril artifact cache. It
+completed in **7h 36m 07s** end-to-end, including the historical metadata
+backfill (24,547s) and deferred index rebuild (16m). The earlier Preview API
+baseline was approximately 20h 53m, so this run used 63.6% less elapsed time.
+The approximately 30 GB Mithril cache is temporary and can be removed after
+the snapshot is imported. Peak bootstrap space was approximately 76 GB while
+the cache was present (46 GB database plus 30 GB cache); after cleanup, the
+database requires approximately 46 GB and a fresh bootstrap needs approximately
+61 GB for the database plus the 15 GB snapshot.
+
 ### Disk Space Requirements
 
 Bootstrapping requires temporary disk space for both the downloaded snapshot and the Dingo database:
@@ -587,6 +670,7 @@ Bootstrapping requires temporary disk space for both the downloaded snapshot and
 | mainnet |      ~180 GB | ~200+ GB |      ~400 GB |
 | preprod |       ~60 GB |   ~80 GB |      ~150 GB |
 | preview |       ~15 GB |   ~25 GB |       ~50 GB |
+| preview (API mode) | ~15 GB | ~46 GB | ~61 GB minimum (~76 GB peak during bootstrap) |
 
 These are approximate values that grow over time. The snapshot can be deleted after import, but you need sufficient space for both during the load process.
 
@@ -615,9 +699,13 @@ a target beyond the security parameter, because it exists for disaster-recovery
 scenarios (see CIP-0135) where the chain must be rewound further than Ouroboros
 Praos allows. The resulting database is resync-ready from the target point.
 
-The same operations are also exposed remotely through the Bark
-`DatabaseService`. Bark has no built-in authentication, so do not expose its
-port outside a trusted network.
+The same operations are also exposed remotely through Bark's
+`DatabaseService`. Every `DatabaseService` RPC requires a client certificate
+verified against `barkClientCaFilePath`; destructive RPCs also require the
+certificate's SHA-256 fingerprint in
+`barkOperatorCertificateFingerprints`. Bark's read-only `ArchiveService`
+remains public on the same listener, so expose the Bark port only to the
+intended network.
 
 ## Database Plugins
 
@@ -652,6 +740,11 @@ API Plugins:
 - `blockfrost` - Blockfrost-compatible REST API
 - `mesh` - Mesh (Coinbase Rosetta) REST API
 - `utxorpc` - UTxO RPC gRPC API (serves both v1alpha and v1beta)
+
+Badger value-log GC runs every five minutes at a 0.5 discard ratio by default.
+Operators may set `gc: false` for a controlled bulk load, but should re-enable
+GC for steady-state operation. GC activity and measurement guidance are
+documented in [`docs/badger-gc.md`](docs/badger-gc.md).
 
 ### Plugin Selection
 
@@ -870,6 +963,7 @@ validation record.
   - [ ] WIP Blockfrost-compatible REST API (required endpoint families are
         implemented; compatibility hardening and reward parity are ongoing)
   - [x] Mesh (Coinbase Rosetta) API
+  - [x] Optional Midnight event indexer and MidnightState gRPC service
 - [x] Mithril Bootstrap
   - [x] Built-in Mithril client
   - [x] Ledger state import (UTxOs, accounts, pools, DReps, epochs)
@@ -911,8 +1005,7 @@ network and epoch.
 Metadata storage uses typed `database/sql` code generated by
 [sqlc](https://sqlc.dev) from `sqlc.yaml`. Regenerate it with `make sql` after
 changing a query, and `make sql-check` fails when the checked-in output is
-stale. The former ORM has been removed; `make gorm-check` fails if it returns
-to the source tree or the dependency graph.
+stale.
 
 ### Testing
 
@@ -923,7 +1016,6 @@ make bench                                   # Benchmarks
 make bench-mempool                           # Compare FIFO and DAG mempools
 make docs-parity                             # Docs agree with go.mod, Makefile, compose
 make sql-check                               # Generated sqlc output is current
-make gorm-check                              # The removed ORM has not returned
 ```
 
 ### Profiling
@@ -979,7 +1071,11 @@ container generates fresh pool keys and genesis files for either profile.
 
 ### Running the Automated Tests
 
-The test suite builds the Dingo Docker image, starts all containers, waits for health checks, and runs Go integration tests tagged with `//go:build devnet`:
+The test suite builds the Dingo Docker image, starts all containers, waits for
+health checks, and runs Linux-only Go integration tests tagged with
+`//go:build linux && devnet`. Conformance-only scenarios additionally require
+`devnet_conformance`, while Dingo-only scenarios require
+`!devnet_conformance`:
 
 ```bash
 cd internal/test/devnet/
@@ -1039,4 +1135,8 @@ For quick iteration without Docker, `devmode.sh` runs Dingo directly against a l
 DEBUG=true ./devmode.sh
 ```
 
-This stores state in `.devnet/` and uses genesis configs from `config/cardano/devnet/`. It runs a single Dingo node (no cardano-node counterpart), which is useful for testing startup, epoch transitions, and block production in isolation.
+This stores state in `.devnet/` and uses genesis configs from `config/cardano/devnet/`. It runs a single Dingo node (no cardano-node counterpart), which is useful for testing startup, block production, and transaction submission in isolation.
+
+The bundled devnet parameters track [Yaci DevKit](https://github.com/bloxbean/yaci-devkit)'s default local cluster, so a dApp developer moving between the two sees the same chain shape: 1-second slots with `activeSlotsCoeff=1.0`, so the single producer forges a block every slot, and a 600-slot (10-minute) epoch. `securityParam (k)=100` follows Yaci's derivation, which sizes k so the randomness stabilisation window is a fraction of the epoch rather than a multiple of it. Byron `k=60` keeps a Byron epoch (10k slots) at the same 600 slots, with a 1-second Byron slot.
+
+These same files ship in the release image as `/opt/cardano/config/devnet` (from [docker-cardano-configs](https://github.com/blinklabs-io/docker-cardano-configs)) and are what downstream tooling copies to generate a single-node devnet.

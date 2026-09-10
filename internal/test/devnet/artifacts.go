@@ -1,3 +1,5 @@
+//go:build linux
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,10 +24,10 @@ import (
 	"strings"
 )
 
-// This file carries no build tag on purpose. What a failed scenario
-// preserves, and where, is decided here so it is covered by an ordinary
-// `go test ./...` run; only the Docker calls that supply the evidence
-// need the devnet tag and a live network.
+// This file carries the package-wide Linux constraint but does not require
+// the devnet tag. What a failed scenario preserves, and where, is therefore
+// covered by an ordinary Linux `go test ./...` run; only the Docker calls
+// that supply the evidence need the devnet tag and a live network.
 
 // ArtifactDir returns the directory failure evidence is written to, and
 // whether one is configured. run-tests.sh creates it and preserves it on

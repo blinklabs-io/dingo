@@ -90,7 +90,11 @@ func TestShouldPublishHeader_Primary_PreservesReplay(t *testing.T) {
 	connB := newTestConnId(2)
 	require.True(t, s.AddClientConnId(connA))
 	require.True(t, s.AddClientConnId(connB))
-	s.SetClientConnId(connA) // A is the active/primary peer
+	selectedPoint := ocommon.NewPoint(99, []byte("selected-a"))
+	s.UpdateClientTipWithoutDedup(
+		connA, selectedPoint, ochainsync.Tip{Point: selectedPoint},
+	)
+	require.True(t, s.TrySetClientConnId(connA))
 
 	point := ocommon.NewPoint(100, []byte("hash-1"))
 	tip := ochainsync.Tip{Point: point}
@@ -128,7 +132,11 @@ func TestShouldPublishHeader_Parallel_MultiPeerNoDoubleIngress(t *testing.T) {
 	connB := newTestConnId(2)
 	require.True(t, s.AddClientConnId(connA))
 	require.True(t, s.AddClientConnId(connB))
-	s.SetClientConnId(connA)
+	selectedPoint := ocommon.NewPoint(99, []byte("selected-a"))
+	s.UpdateClientTipWithoutDedup(
+		connA, selectedPoint, ochainsync.Tip{Point: selectedPoint},
+	)
+	require.True(t, s.TrySetClientConnId(connA))
 
 	pointA := ocommon.NewPoint(100, []byte("hash-100"))
 	pointB := ocommon.NewPoint(101, []byte("hash-101"))
@@ -260,8 +268,8 @@ func TestShouldPublishHeader_DivergenceKeepsForkHandling(t *testing.T) {
 
 // --- Failover does not strand ingestion ---
 
-// When the active/primary peer disconnects, the remaining eligible peer is
-// promoted and can drive ingestion (primary replays apply to the new active).
+// When the active/primary peer disconnects, an unselected remaining peer can
+// still publish a new header so ChainSelector can evaluate and select it.
 func TestShouldPublishHeader_PrimaryFailoverDoesNotStrand(t *testing.T) {
 	bus := newTestEventBus(t)
 	cfg := chainsync.DefaultConfig()
@@ -272,13 +280,17 @@ func TestShouldPublishHeader_PrimaryFailoverDoesNotStrand(t *testing.T) {
 	connB := newTestConnId(2)
 	require.True(t, s.AddClientConnId(connA))
 	require.True(t, s.AddClientConnId(connB))
-	s.SetClientConnId(connA)
+	selectedPoint := ocommon.NewPoint(99, []byte("selected-a"))
+	s.UpdateClientTipWithoutDedup(
+		connA, selectedPoint, ochainsync.Tip{Point: selectedPoint},
+	)
+	require.True(t, s.TrySetClientConnId(connA))
 
-	// The active peer disconnects; B should be promoted.
+	// The active peer disconnects; B remains unselected until ChainSelector has
+	// observed a tip from it.
 	s.RemoveClientConnId(connA)
 	active := s.GetClientConnId()
-	require.NotNil(t, active)
-	require.Equal(t, connB, *active)
+	require.Nil(t, active)
 
 	// Ingestion continues from the remaining peer.
 	point := ocommon.NewPoint(200, []byte("hash-2"))
@@ -363,7 +375,11 @@ func TestShouldPublishHeader_PartialNilConnIdDoesNotPanic(t *testing.T) {
 		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
 	}
 	require.True(t, s.AddClientConnId(partial))
-	s.SetClientConnId(partial)
+	selectedPoint := ocommon.NewPoint(99, []byte("selected"))
+	s.UpdateClientTipWithoutDedup(
+		partial, selectedPoint, ochainsync.Tip{Point: selectedPoint},
+	)
+	require.True(t, s.TrySetClientConnId(partial))
 
 	point := ocommon.NewPoint(100, []byte("hash-1"))
 	require.NotPanics(t, func() {

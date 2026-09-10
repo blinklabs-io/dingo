@@ -22,11 +22,29 @@ import "github.com/blinklabs-io/dingo/database/types"
 // membership changes from on-chain certificates. This table captures
 // the committee composition at the time of the snapshot.
 type CommitteeMember struct {
-	ID           uint
-	ColdCredHash []byte // 28-byte credential hash
-	ExpiresEpoch uint64
-	AddedSlot    uint64  // Slot when imported/registered
-	DeletedSlot  *uint64 // For rollback support
+	ID                uint
+	ColdCredentialTag uint8
+	ColdCredHash      []byte // 28-byte credential hash
+	ExpiresEpoch      uint64
+	TermStartSlot     uint64 // Slot from which credentials apply to this term
+	// TermStartSlotSet distinguishes an explicit slot-zero term start from a
+	// legacy caller that leaves TermStartSlot unset and expects AddedSlot.
+	TermStartSlotSet bool
+	AddedSlot        uint64  // Slot when imported/registered
+	DeletedSlot      *uint64 // For rollback support
+}
+
+// CommitteeCredential preserves a committee credential's key/script tag with
+// its hash across storage APIs.
+type CommitteeCredential struct {
+	CredentialTag uint8
+	Credential    []byte
+	TermStartSlot uint64
+}
+
+// Key returns a collision-free map key for the tagged credential.
+func (c CommitteeCredential) Key() string {
+	return string([]byte{c.CredentialTag}) + string(c.Credential)
 }
 
 // CommitteeQuorum records the quorum threshold enacted with a committee.

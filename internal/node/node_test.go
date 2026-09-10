@@ -21,6 +21,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"reflect"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -95,6 +99,8 @@ func TestServeAuxiliaryListenerBindFailureIsNonFatal(t *testing.T) {
 }
 
 func TestPprofDebugServerUsesDedicatedBindAddress(t *testing.T) {
+	t.Parallel()
+
 	cfg := &config.Config{
 		BindAddr:      "0.0.0.0",
 		DebugBindAddr: "127.0.0.1",
@@ -248,6 +254,43 @@ func TestBuildDingoConfigWiresAPIConfig(t *testing.T) {
 	}
 }
 
+// TestBuildDingoConfigWiresBarkOperatorFingerprints pins the production
+// composition boundary between loaded YAML/env/CLI configuration and the root
+// configuration that Run passes to dingo.New and, in turn, Bark.
+func TestBuildDingoConfigWiresBarkOperatorFingerprints(t *testing.T) {
+	t.Parallel()
+
+	want := []string{
+		strings.Repeat("ab", 32),
+		strings.Repeat("cd", 32),
+	}
+	cfg := &config.Config{
+		BarkOperatorCertificateFingerprints: want,
+	}
+
+	built := buildDingoConfig(
+		cfg,
+		slog.New(slog.NewTextHandler(new(bytes.Buffer), nil)),
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+
+	if got := built.BarkOperatorCertificateFingerprints(); !slices.Equal(
+		got,
+		want,
+	) {
+		t.Fatalf(
+			"expected Bark operator fingerprints to flow through, got %v",
+			got,
+		)
+	}
+}
+
 // TestBuildDingoConfigWiresMidnightServerPolicy pins the composition boundary
 // between YAML/env/CLI configuration and the root node configuration used by
 // both initial startup and live API reinitialization.
@@ -330,4 +373,79 @@ func TestRootPeerTargetComposition(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestKoiosParityConfigForwardsEveryField pins that the serve path hands the
+// node every KoiosParity setting.
+//
+// internal/node builds the dingo.KoiosParityConfig by hand, so a field added to
+// internal/config is silently dropped until someone remembers to add it here —
+// which is exactly what happened to AccountChunkSize and AccountChunkMaxBytes,
+// and then to BaseURL. A dropped field does not fail: the option keeps its
+// package default and the operator's setting is ignored with no diagnostic,
+// which for BaseURL meant a run aimed at a self-hosted host silently querying
+// the public one.
+func TestKoiosParityConfigForwardsEveryField(t *testing.T) {
+	src := reflect.TypeOf(config.KoiosParityConfig{})
+	dst := reflect.TypeOf(dingo.KoiosParityConfig{})
+
+	for i := range src.NumField() {
+		name := src.Field(i).Name
+		if _, ok := dst.FieldByName(name); !ok {
+			continue // not part of the node-facing config
+		}
+		// Match the assignment, not just the field name: checking only that
+		// the name appears would accept a cross-wiring such as
+		// "AccountChunkSize: cfg.KoiosParity.AccountChunkMaxBytes".
+		assign := regexp.MustCompile(
+			`\b` + regexp.QuoteMeta(name) +
+				`:\s*&?cfg\.KoiosParity\.` + regexp.QuoteMeta(name) + `\b`,
+		)
+		if !assign.MatchString(nodeSourceForKoiosParity(t)) {
+			t.Errorf(
+				"internal/config KoiosParityConfig.%s is not forwarded from "+
+					"cfg.KoiosParity.%s in WithKoiosParity; the operator's "+
+					"setting would be silently ignored or cross-wired",
+				name, name,
+			)
+		}
+	}
+}
+
+// TestKoiosParityForwardingGuardCatchesCrossWiring proves the guard checks the
+// assignment rather than the field name. Matching only the name would accept a
+// field wired from the wrong source, which fails exactly as silently as a field
+// left out entirely.
+func TestKoiosParityForwardingGuardCatchesCrossWiring(t *testing.T) {
+	crossWired := `dingo.WithKoiosParity(dingo.KoiosParityConfig{
+		AccountChunkSize: cfg.KoiosParity.AccountChunkMaxBytes,
+	`
+	assign := regexp.MustCompile(
+		`\bAccountChunkSize:\s*&?cfg\.KoiosParity\.AccountChunkSize\b`,
+	)
+	if assign.MatchString(crossWired) {
+		t.Error("guard accepted a cross-wired assignment")
+	}
+	if !strings.Contains(crossWired, "AccountChunkSize:") {
+		t.Error("the weaker name-only check would have accepted it")
+	}
+}
+
+// nodeSourceForKoiosParity returns the WithKoiosParity call site's source.
+func nodeSourceForKoiosParity(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile("node.go")
+	if err != nil {
+		t.Fatalf("read node.go: %v", err)
+	}
+	s := string(b)
+	start := strings.Index(s, "dingo.WithKoiosParity(")
+	if start < 0 {
+		t.Fatal("WithKoiosParity call not found in node.go")
+	}
+	end := strings.Index(s[start:], "}),")
+	if end < 0 {
+		t.Fatal("WithKoiosParity call not terminated")
+	}
+	return s[start : start+end]
 }

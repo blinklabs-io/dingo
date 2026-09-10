@@ -25,6 +25,8 @@ import (
 )
 
 func TestParsePaginationDefaultValues(t *testing.T) {
+	t.Parallel()
+
 	req := httptest.NewRequest(http.MethodGet, "/api/v0/test", nil)
 	params, err := ParsePagination(req)
 	require.NoError(t, err)
@@ -35,6 +37,8 @@ func TestParsePaginationDefaultValues(t *testing.T) {
 }
 
 func TestParsePaginationValid(t *testing.T) {
+	t.Parallel()
+
 	req := httptest.NewRequest(
 		http.MethodGet,
 		"/api/v0/test?count=25&page=3&order=DESC",
@@ -49,6 +53,8 @@ func TestParsePaginationValid(t *testing.T) {
 }
 
 func TestParsePaginationClampBounds(t *testing.T) {
+	t.Parallel()
+
 	req := httptest.NewRequest(
 		http.MethodGet,
 		"/api/v0/test?count=999&page=0",
@@ -62,7 +68,92 @@ func TestParsePaginationClampBounds(t *testing.T) {
 	assert.Equal(t, PaginationOrderAsc, params.Order)
 }
 
+func TestParsePaginationClampsUnboundedPage(t *testing.T) {
+	t.Parallel()
+
+	// The largest value strconv.Atoi accepts on a 64-bit platform: large
+	// enough to have overflowed a naive offset calculation (page-1)*count
+	// before this was bounded, without itself overflowing int parsing.
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/test?page=9223372036854775807",
+		nil,
+	)
+	params, err := ParsePagination(req)
+	require.NoError(t, err)
+
+	assert.Equal(t, MaxPaginationPage, params.Page)
+}
+
+func TestParsePaginationClampsPageAboveMax(t *testing.T) {
+	t.Parallel()
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/test?page=21474837",
+		nil,
+	)
+	params, err := ParsePagination(req)
+	require.NoError(t, err)
+
+	assert.Equal(t, MaxPaginationPage, params.Page)
+}
+
+func TestPaginationOffset(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		params     PaginationParams
+		wantOffset int
+		wantOK     bool
+	}{
+		{
+			name:       "first page",
+			params:     PaginationParams{Page: 1, Count: 100},
+			wantOffset: 0,
+			wantOK:     true,
+		},
+		{
+			name:       "third page",
+			params:     PaginationParams{Page: 3, Count: 25},
+			wantOffset: 50,
+			wantOK:     true,
+		},
+		{
+			name: "max page and count does not overflow",
+			params: PaginationParams{
+				Page:  MaxPaginationPage,
+				Count: MaxPaginationCount,
+			},
+			wantOffset: (MaxPaginationPage - 1) * MaxPaginationCount,
+			wantOK:     true,
+		},
+		{
+			name:   "zero page is invalid",
+			params: PaginationParams{Page: 0, Count: 100},
+			wantOK: false,
+		},
+		{
+			name:   "zero count is invalid",
+			params: PaginationParams{Page: 1, Count: 0},
+			wantOK: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			offset, ok := paginationOffset(test.params)
+			assert.Equal(t, test.wantOK, ok)
+			if test.wantOK {
+				assert.Equal(t, test.wantOffset, offset)
+			}
+		})
+	}
+}
+
 func TestParsePaginationInvalid(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name string
 		url  string
@@ -91,6 +182,8 @@ func TestParsePaginationInvalid(t *testing.T) {
 }
 
 func TestSetPaginationHeaders(t *testing.T) {
+	t.Parallel()
+
 	recorder := httptest.NewRecorder()
 	SetPaginationHeaders(
 		recorder,
@@ -110,6 +203,8 @@ func TestSetPaginationHeaders(t *testing.T) {
 }
 
 func TestSetPaginationHeadersZeroTotals(t *testing.T) {
+	t.Parallel()
+
 	recorder := httptest.NewRecorder()
 	SetPaginationHeaders(
 		recorder,

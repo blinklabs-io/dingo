@@ -1,4 +1,4 @@
-//go:build devnet && devnet_conformance
+//go:build linux && devnet && devnet_conformance
 
 // Copyright 2026 Blink Labs Software
 //
@@ -52,4 +52,37 @@ func LoadEndpoints() []NodeEndpoint {
 			IsReference: true,
 		},
 	}
+}
+
+// DingoProducerNtcAddr returns dingo-producer's host TCP address for the
+// node-to-client (LocalStateQuery) listener. dingo-producer serves NtC on
+// private port 3002 (via DINGO_PRIVATE_BIND_ADDR), mapped to host port
+// 3030 by default (override with DEVNET_DINGO_NTC_ADDR or
+// DEVNET_DINGO_NTC_PORT).
+func DingoProducerNtcAddr() string {
+	if v := os.Getenv("DEVNET_DINGO_NTC_ADDR"); v != "" {
+		return v
+	}
+	port := os.Getenv("DEVNET_DINGO_NTC_PORT")
+	if port == "" {
+		port = "3030"
+	}
+	return "localhost:" + port
+}
+
+// CardanoProducerNtcAddr returns cardano-producer's host TCP address for
+// its node-to-client (LocalStateQuery) listener. cardano-node has no
+// built-in TCP NtC support; the blinklabs-io/docker-cardano-node image
+// bridges it with a background socat process (SOCAT_PORT=3002 forwards
+// TCP to the node's unix socket), mapped to host port 3031 by default
+// (override with DEVNET_CARDANO_NTC_ADDR or DEVNET_CARDANO_NTC_PORT).
+func CardanoProducerNtcAddr() string {
+	if v := os.Getenv("DEVNET_CARDANO_NTC_ADDR"); v != "" {
+		return v
+	}
+	port := os.Getenv("DEVNET_CARDANO_NTC_PORT")
+	if port == "" {
+		port = "3031"
+	}
+	return "localhost:" + port
 }

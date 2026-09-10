@@ -390,10 +390,11 @@ func (q *Queries) CreateMidnightRegistration(ctx context.Context, arg CreateMidn
 const createPoolStakeSnapshot = `-- name: CreatePoolStakeSnapshot :one
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
-    delegator_count, captured_slot, calculation_version,
+    delegator_count, captured_slot, leios_key_public,
+    leios_key_possession_proof, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id
 `
 
@@ -405,6 +406,8 @@ type CreatePoolStakeSnapshotParams struct {
 	StakeDenominator              string
 	DelegatorCount                int64
 	CapturedSlot                  int64
+	LeiosKeyPublic                []byte
+	LeiosKeyPossessionProof       []byte
 	CalculationVersion            int64
 	RewardAccountAutoVote         int64
 	RewardAccountAutoVoteResolved bool
@@ -419,6 +422,8 @@ func (q *Queries) CreatePoolStakeSnapshot(ctx context.Context, arg CreatePoolSta
 		arg.StakeDenominator,
 		arg.DelegatorCount,
 		arg.CapturedSlot,
+		arg.LeiosKeyPublic,
+		arg.LeiosKeyPossessionProof,
 		arg.CalculationVersion,
 		arg.RewardAccountAutoVote,
 		arg.RewardAccountAutoVoteResolved,
@@ -633,6 +638,46 @@ WHERE start_slot > ?
 
 func (q *Queries) DeleteEpochsAfterSlot(ctx context.Context, startSlot sql.NullInt64) error {
 	_, err := q.db.ExecContext(ctx, deleteEpochsAfterSlot, startSlot)
+	return err
+}
+
+const deleteImportedEpochBlockTotalForEpoch = `-- name: DeleteImportedEpochBlockTotalForEpoch :exec
+DELETE FROM imported_epoch_block_total
+WHERE epoch = ?
+`
+
+func (q *Queries) DeleteImportedEpochBlockTotalForEpoch(ctx context.Context, epoch int64) error {
+	_, err := q.db.ExecContext(ctx, deleteImportedEpochBlockTotalForEpoch, epoch)
+	return err
+}
+
+const deleteImportedEpochBlockTotalsAfterSlot = `-- name: DeleteImportedEpochBlockTotalsAfterSlot :exec
+DELETE FROM imported_epoch_block_total
+WHERE captured_slot > ?
+`
+
+func (q *Queries) DeleteImportedEpochBlockTotalsAfterSlot(ctx context.Context, capturedSlot int64) error {
+	_, err := q.db.ExecContext(ctx, deleteImportedEpochBlockTotalsAfterSlot, capturedSlot)
+	return err
+}
+
+const deleteImportedPoolBlockCountsAfterSlot = `-- name: DeleteImportedPoolBlockCountsAfterSlot :exec
+DELETE FROM imported_pool_block_count
+WHERE captured_slot > ?
+`
+
+func (q *Queries) DeleteImportedPoolBlockCountsAfterSlot(ctx context.Context, capturedSlot int64) error {
+	_, err := q.db.ExecContext(ctx, deleteImportedPoolBlockCountsAfterSlot, capturedSlot)
+	return err
+}
+
+const deleteImportedPoolBlockCountsForEpoch = `-- name: DeleteImportedPoolBlockCountsForEpoch :exec
+DELETE FROM imported_pool_block_count
+WHERE epoch = ?
+`
+
+func (q *Queries) DeleteImportedPoolBlockCountsForEpoch(ctx context.Context, epoch int64) error {
+	_, err := q.db.ExecContext(ctx, deleteImportedPoolBlockCountsForEpoch, epoch)
 	return err
 }
 
@@ -904,6 +949,31 @@ DELETE FROM reward_pool_output WHERE epoch = ?
 
 func (q *Queries) DeleteRewardPoolOutputsForEpoch(ctx context.Context, epoch int64) error {
 	_, err := q.db.ExecContext(ctx, deleteRewardPoolOutputsForEpoch, epoch)
+	return err
+}
+
+const deleteRewardSeedFailure = `-- name: DeleteRewardSeedFailure :exec
+DELETE FROM reward_seed_failure
+WHERE epoch = ? AND snapshot_type = ?
+`
+
+type DeleteRewardSeedFailureParams struct {
+	Epoch        int64
+	SnapshotType string
+}
+
+func (q *Queries) DeleteRewardSeedFailure(ctx context.Context, arg DeleteRewardSeedFailureParams) error {
+	_, err := q.db.ExecContext(ctx, deleteRewardSeedFailure, arg.Epoch, arg.SnapshotType)
+	return err
+}
+
+const deleteRewardSeedFailuresAfterSlot = `-- name: DeleteRewardSeedFailuresAfterSlot :exec
+DELETE FROM reward_seed_failure
+WHERE captured_slot > ?
+`
+
+func (q *Queries) DeleteRewardSeedFailuresAfterSlot(ctx context.Context, capturedSlot int64) error {
+	_, err := q.db.ExecContext(ctx, deleteRewardSeedFailuresAfterSlot, capturedSlot)
 	return err
 }
 
@@ -1502,7 +1572,8 @@ func (q *Queries) GetBlockSlotRangeStats(ctx context.Context, arg GetBlockSlotRa
 }
 
 const getCommitteeMembers = `-- name: GetCommitteeMembers :many
-SELECT id, cold_cred_hash, expires_epoch, added_slot, deleted_slot
+SELECT id, cold_credential_tag, cold_cred_hash, expires_epoch, term_start_slot,
+       term_start_slot_set, added_slot, deleted_slot
 FROM committee_member
 WHERE deleted_slot IS NULL
 ORDER BY id
@@ -1519,8 +1590,11 @@ func (q *Queries) GetCommitteeMembers(ctx context.Context) ([]CommitteeMember, e
 		var i CommitteeMember
 		if err := rows.Scan(
 			&i.ID,
+			&i.ColdCredentialTag,
 			&i.ColdCredHash,
 			&i.ExpiresEpoch,
+			&i.TermStartSlot,
+			&i.TermStartSlotSet,
 			&i.AddedSlot,
 			&i.DeletedSlot,
 		); err != nil {
@@ -1538,7 +1612,8 @@ func (q *Queries) GetCommitteeMembers(ctx context.Context) ([]CommitteeMember, e
 }
 
 const getCommitteeMembersIncludeDeleted = `-- name: GetCommitteeMembersIncludeDeleted :many
-SELECT id, cold_cred_hash, expires_epoch, added_slot, deleted_slot
+SELECT id, cold_credential_tag, cold_cred_hash, expires_epoch, term_start_slot,
+       term_start_slot_set, added_slot, deleted_slot
 FROM committee_member
 ORDER BY id
 `
@@ -1554,8 +1629,11 @@ func (q *Queries) GetCommitteeMembersIncludeDeleted(ctx context.Context) ([]Comm
 		var i CommitteeMember
 		if err := rows.Scan(
 			&i.ID,
+			&i.ColdCredentialTag,
 			&i.ColdCredHash,
 			&i.ExpiresEpoch,
+			&i.TermStartSlot,
+			&i.TermStartSlotSet,
 			&i.AddedSlot,
 			&i.DeletedSlot,
 		); err != nil {
@@ -1752,6 +1830,83 @@ func (q *Queries) GetDrepByHash(ctx context.Context, credential []byte) (Drep, e
 		&i.Active,
 	)
 	return i, err
+}
+
+const getDrepLastRegistrationDeposit = `-- name: GetDrepLastRegistrationDeposit :one
+SELECT deposit_amount
+FROM registration_drep
+WHERE credential_tag = ? AND drep_credential = ?
+ORDER BY added_slot DESC
+LIMIT 1
+`
+
+type GetDrepLastRegistrationDepositParams struct {
+	CredentialTag  int64
+	DrepCredential []byte
+}
+
+// Unlike GetDrepLastRegistrationSlot, this does not exclude certificate_id
+// = 0 rows: those are the Mithril ledger-state import's bootstrap-slot
+// registrations (see ImportDrepRegistration), and their deposit_amount is
+// the real amount owed on deregistration. On a bootstrapped node such a
+// row is often a DRep's only registration, so excluding it here would
+// compute a refund of 0 for a deposit that was actually paid.
+func (q *Queries) GetDrepLastRegistrationDeposit(ctx context.Context, arg GetDrepLastRegistrationDepositParams) (sql.NullString, error) {
+	row := q.db.QueryRowContext(ctx, getDrepLastRegistrationDeposit, arg.CredentialTag, arg.DrepCredential)
+	var deposit_amount sql.NullString
+	err := row.Scan(&deposit_amount)
+	return deposit_amount, err
+}
+
+const getDrepLastRegistrationDeposits = `-- name: GetDrepLastRegistrationDeposits :many
+SELECT r.credential_tag, r.drep_credential, r.deposit_amount
+FROM drep d
+JOIN registration_drep r
+  ON r.id = (
+      SELECT reg.id
+      FROM registration_drep reg
+      WHERE reg.credential_tag = d.credential_tag
+        AND reg.drep_credential = d.credential
+      ORDER BY reg.added_slot DESC, reg.id DESC
+      LIMIT 1
+  )
+WHERE d.active = TRUE
+`
+
+type GetDrepLastRegistrationDepositsRow struct {
+	CredentialTag  int64
+	DrepCredential []byte
+	DepositAmount  sql.NullString
+}
+
+// The set form of GetDrepLastRegistrationDeposit, for reading the deposits
+// of the active DReps GetActiveDreps returns in one round trip instead of
+// one query per DRep. Same certificate_id treatment: bootstrap-slot import
+// rows count, because their deposit_amount is the real amount owed.
+// Drive this lookup from active drep rows. The correlated lookup uses the
+// registration credential index for each active DRep, so history left behind
+// by DReps that have since deregistered does not become the outer scan.
+func (q *Queries) GetDrepLastRegistrationDeposits(ctx context.Context) ([]GetDrepLastRegistrationDepositsRow, error) {
+	rows, err := q.db.QueryContext(ctx, getDrepLastRegistrationDeposits)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []GetDrepLastRegistrationDepositsRow{}
+	for rows.Next() {
+		var i GetDrepLastRegistrationDepositsRow
+		if err := rows.Scan(&i.CredentialTag, &i.DrepCredential, &i.DepositAmount); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getDrepLastRegistrationSlot = `-- name: GetDrepLastRegistrationSlot :one
@@ -2039,6 +2194,53 @@ func (q *Queries) GetImportCheckpoint(ctx context.Context, importKey string) (Im
 	var i ImportCheckpoint
 	err := row.Scan(&i.ID, &i.ImportKey, &i.Phase)
 	return i, err
+}
+
+const getImportedEpochBlockTotal = `-- name: GetImportedEpochBlockTotal :one
+SELECT total_blocks
+FROM imported_epoch_block_total
+WHERE epoch = ?
+`
+
+func (q *Queries) GetImportedEpochBlockTotal(ctx context.Context, epoch int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, getImportedEpochBlockTotal, epoch)
+	var total_blocks int64
+	err := row.Scan(&total_blocks)
+	return total_blocks, err
+}
+
+const getImportedPoolBlockCounts = `-- name: GetImportedPoolBlockCounts :many
+SELECT pool_key_hash, blocks_produced
+FROM imported_pool_block_count
+WHERE epoch = ?
+`
+
+type GetImportedPoolBlockCountsRow struct {
+	PoolKeyHash    []byte
+	BlocksProduced int64
+}
+
+func (q *Queries) GetImportedPoolBlockCounts(ctx context.Context, epoch int64) ([]GetImportedPoolBlockCountsRow, error) {
+	rows, err := q.db.QueryContext(ctx, getImportedPoolBlockCounts, epoch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []GetImportedPoolBlockCountsRow{}
+	for rows.Next() {
+		var i GetImportedPoolBlockCountsRow
+		if err := rows.Scan(&i.PoolKeyHash, &i.BlocksProduced); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getLastBlockNonceInRange = `-- name: GetLastBlockNonceInRange :one
@@ -2717,6 +2919,7 @@ func (q *Queries) GetPParams(ctx context.Context, arg GetPParamsParams) ([]Ppara
 const getPoolStakeSnapshot = `-- name: GetPoolStakeSnapshot :one
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
+       leios_key_public, leios_key_possession_proof,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
@@ -2741,6 +2944,8 @@ func (q *Queries) GetPoolStakeSnapshot(ctx context.Context, arg GetPoolStakeSnap
 		&i.StakeDenominator,
 		&i.DelegatorCount,
 		&i.CapturedSlot,
+		&i.LeiosKeyPublic,
+		&i.LeiosKeyPossessionProof,
 		&i.CalculationVersion,
 		&i.RewardAccountAutoVote,
 		&i.RewardAccountAutoVoteResolved,
@@ -2751,6 +2956,7 @@ func (q *Queries) GetPoolStakeSnapshot(ctx context.Context, arg GetPoolStakeSnap
 const getPoolStakeSnapshotsByEpoch = `-- name: GetPoolStakeSnapshotsByEpoch :many
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
+       leios_key_public, leios_key_possession_proof,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
@@ -2781,6 +2987,8 @@ func (q *Queries) GetPoolStakeSnapshotsByEpoch(ctx context.Context, arg GetPoolS
 			&i.StakeDenominator,
 			&i.DelegatorCount,
 			&i.CapturedSlot,
+			&i.LeiosKeyPublic,
+			&i.LeiosKeyPossessionProof,
 			&i.CalculationVersion,
 			&i.RewardAccountAutoVote,
 			&i.RewardAccountAutoVoteResolved,
@@ -2956,6 +3164,24 @@ func (q *Queries) GetRewardPoolOutputs(ctx context.Context, epoch int64) ([]Rewa
 		return nil, err
 	}
 	return items, nil
+}
+
+const getRewardSeedFailure = `-- name: GetRewardSeedFailure :one
+SELECT failure_reason
+FROM reward_seed_failure
+WHERE epoch = ? AND snapshot_type = ?
+`
+
+type GetRewardSeedFailureParams struct {
+	Epoch        int64
+	SnapshotType string
+}
+
+func (q *Queries) GetRewardSeedFailure(ctx context.Context, arg GetRewardSeedFailureParams) (string, error) {
+	row := q.db.QueryRowContext(ctx, getRewardSeedFailure, arg.Epoch, arg.SnapshotType)
+	var failure_reason string
+	err := row.Scan(&failure_reason)
+	return failure_reason, err
 }
 
 const getRewardSnapshot = `-- name: GetRewardSnapshot :one
@@ -3391,9 +3617,12 @@ SELECT transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
        deleted_slot, amount, output_idx, payment_script
 FROM utxo
 WHERE added_slot > ?
-ORDER BY id DESC
+ORDER BY added_slot DESC, id DESC
 `
 
+// Order by added_slot before id so the sort is the reverse of
+// idx_utxo_added_slot's own order; ordering by id alone costs a full table
+// scan. See the Store wrapper for the full rationale.
 func (q *Queries) GetUtxosAddedAfterSlot(ctx context.Context, addedSlot sql.NullInt64) ([]Utxo, error) {
 	rows, err := q.db.QueryContext(ctx, getUtxosAddedAfterSlot, addedSlot)
 	if err != nil {
@@ -3893,18 +4122,67 @@ func (q *Queries) SaveEpochSummary(ctx context.Context, arg SaveEpochSummaryPara
 	return id, err
 }
 
+const saveImportedEpochBlockTotal = `-- name: SaveImportedEpochBlockTotal :exec
+INSERT INTO imported_epoch_block_total (
+    epoch, total_blocks, captured_slot
+) VALUES (?, ?, ?)
+ON CONFLICT (epoch) DO UPDATE SET
+    total_blocks = excluded.total_blocks,
+    captured_slot = excluded.captured_slot
+`
+
+type SaveImportedEpochBlockTotalParams struct {
+	Epoch        int64
+	TotalBlocks  int64
+	CapturedSlot int64
+}
+
+func (q *Queries) SaveImportedEpochBlockTotal(ctx context.Context, arg SaveImportedEpochBlockTotalParams) error {
+	_, err := q.db.ExecContext(ctx, saveImportedEpochBlockTotal, arg.Epoch, arg.TotalBlocks, arg.CapturedSlot)
+	return err
+}
+
+const saveImportedPoolBlockCount = `-- name: SaveImportedPoolBlockCount :exec
+INSERT INTO imported_pool_block_count (
+    epoch, pool_key_hash, blocks_produced, captured_slot
+) VALUES (?, ?, ?, ?)
+ON CONFLICT (epoch, pool_key_hash) DO UPDATE SET
+    blocks_produced = excluded.blocks_produced,
+    captured_slot = excluded.captured_slot
+`
+
+type SaveImportedPoolBlockCountParams struct {
+	Epoch          int64
+	PoolKeyHash    []byte
+	BlocksProduced int64
+	CapturedSlot   int64
+}
+
+func (q *Queries) SaveImportedPoolBlockCount(ctx context.Context, arg SaveImportedPoolBlockCountParams) error {
+	_, err := q.db.ExecContext(ctx, saveImportedPoolBlockCount,
+		arg.Epoch,
+		arg.PoolKeyHash,
+		arg.BlocksProduced,
+		arg.CapturedSlot,
+	)
+	return err
+}
+
 const savePoolStakeSnapshot = `-- name: SavePoolStakeSnapshot :one
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
-    delegator_count, captured_slot, calculation_version,
+    delegator_count, captured_slot, leios_key_public,
+    leios_key_possession_proof, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type, pool_key_hash) DO UPDATE SET
     total_stake = excluded.total_stake,
     stake_denominator = excluded.stake_denominator,
     delegator_count = excluded.delegator_count,
     captured_slot = excluded.captured_slot,
+    leios_key_public = excluded.leios_key_public,
+    leios_key_possession_proof = excluded.leios_key_possession_proof,
     calculation_version = excluded.calculation_version,
     reward_account_auto_vote = excluded.reward_account_auto_vote,
     reward_account_auto_vote_resolved =
@@ -3920,6 +4198,8 @@ type SavePoolStakeSnapshotParams struct {
 	StakeDenominator              string
 	DelegatorCount                int64
 	CapturedSlot                  int64
+	LeiosKeyPublic                []byte
+	LeiosKeyPossessionProof       []byte
 	CalculationVersion            int64
 	RewardAccountAutoVote         int64
 	RewardAccountAutoVoteResolved bool
@@ -3934,6 +4214,8 @@ func (q *Queries) SavePoolStakeSnapshot(ctx context.Context, arg SavePoolStakeSn
 		arg.StakeDenominator,
 		arg.DelegatorCount,
 		arg.CapturedSlot,
+		arg.LeiosKeyPublic,
+		arg.LeiosKeyPossessionProof,
 		arg.CalculationVersion,
 		arg.RewardAccountAutoVote,
 		arg.RewardAccountAutoVoteResolved,
@@ -4143,6 +4425,36 @@ func (q *Queries) SaveRewardPoolOutput(ctx context.Context, arg SaveRewardPoolOu
 	return id, err
 }
 
+const saveRewardSeedFailure = `-- name: SaveRewardSeedFailure :exec
+INSERT INTO reward_seed_failure (
+    epoch, snapshot_type, failure_reason, captured_slot
+) VALUES (?, ?, ?, ?)
+ON CONFLICT (epoch, snapshot_type) DO UPDATE SET
+    failure_reason = CASE
+        WHEN excluded.captured_slot < reward_seed_failure.captured_slot
+        THEN excluded.failure_reason
+        ELSE reward_seed_failure.failure_reason
+    END,
+    captured_slot = MIN(reward_seed_failure.captured_slot, excluded.captured_slot)
+`
+
+type SaveRewardSeedFailureParams struct {
+	Epoch         int64
+	SnapshotType  string
+	FailureReason string
+	CapturedSlot  int64
+}
+
+func (q *Queries) SaveRewardSeedFailure(ctx context.Context, arg SaveRewardSeedFailureParams) error {
+	_, err := q.db.ExecContext(ctx, saveRewardSeedFailure,
+		arg.Epoch,
+		arg.SnapshotType,
+		arg.FailureReason,
+		arg.CapturedSlot,
+	)
+	return err
+}
+
 const saveRewardSnapshot = `-- name: SaveRewardSnapshot :one
 INSERT INTO reward_snapshot (
     epoch, snapshot_type, total_active_stake, total_pool_count,
@@ -4300,26 +4612,35 @@ func (q *Queries) SetBlockNonce(ctx context.Context, arg SetBlockNonceParams) er
 
 const setCommitteeMember = `-- name: SetCommitteeMember :one
 INSERT INTO committee_member (
-    cold_cred_hash, expires_epoch, added_slot, deleted_slot
-) VALUES (?, ?, ?, ?)
-ON CONFLICT (cold_cred_hash) DO UPDATE SET
+    cold_credential_tag, cold_cred_hash, expires_epoch, term_start_slot,
+    term_start_slot_set, added_slot, deleted_slot
+) VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (cold_credential_tag, cold_cred_hash, added_slot) DO UPDATE SET
     expires_epoch = excluded.expires_epoch,
+    term_start_slot = excluded.term_start_slot,
+    term_start_slot_set = excluded.term_start_slot_set,
     added_slot = excluded.added_slot,
     deleted_slot = excluded.deleted_slot
 RETURNING id
 `
 
 type SetCommitteeMemberParams struct {
-	ColdCredHash []byte
-	ExpiresEpoch int64
-	AddedSlot    int64
-	DeletedSlot  sql.NullInt64
+	ColdCredentialTag int64
+	ColdCredHash      []byte
+	ExpiresEpoch      int64
+	TermStartSlot     int64
+	TermStartSlotSet  bool
+	AddedSlot         int64
+	DeletedSlot       sql.NullInt64
 }
 
 func (q *Queries) SetCommitteeMember(ctx context.Context, arg SetCommitteeMemberParams) (int64, error) {
 	row := q.db.QueryRowContext(ctx, setCommitteeMember,
+		arg.ColdCredentialTag,
 		arg.ColdCredHash,
 		arg.ExpiresEpoch,
+		arg.TermStartSlot,
+		arg.TermStartSlotSet,
 		arg.AddedSlot,
 		arg.DeletedSlot,
 	)
@@ -4639,16 +4960,17 @@ func (q *Queries) SoftDeleteAllCommitteeMembers(ctx context.Context, deletedSlot
 const softDeleteCommitteeMember = `-- name: SoftDeleteCommitteeMember :exec
 UPDATE committee_member
 SET deleted_slot = ?
-WHERE cold_cred_hash = ? AND deleted_slot IS NULL
+WHERE cold_credential_tag = ? AND cold_cred_hash = ? AND deleted_slot IS NULL
 `
 
 type SoftDeleteCommitteeMemberParams struct {
-	DeletedSlot  sql.NullInt64
-	ColdCredHash []byte
+	DeletedSlot       sql.NullInt64
+	ColdCredentialTag int64
+	ColdCredHash      []byte
 }
 
 func (q *Queries) SoftDeleteCommitteeMember(ctx context.Context, arg SoftDeleteCommitteeMemberParams) error {
-	_, err := q.db.ExecContext(ctx, softDeleteCommitteeMember, arg.DeletedSlot, arg.ColdCredHash)
+	_, err := q.db.ExecContext(ctx, softDeleteCommitteeMember, arg.DeletedSlot, arg.ColdCredentialTag, arg.ColdCredHash)
 	return err
 }
 

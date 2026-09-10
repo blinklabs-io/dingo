@@ -122,10 +122,14 @@ CREATE TABLE constitution (
 
 CREATE TABLE committee_member (
     id INTEGER PRIMARY KEY,
-    cold_cred_hash BLOB NOT NULL UNIQUE,
+    cold_credential_tag INTEGER NOT NULL DEFAULT 0,
+    cold_cred_hash BLOB NOT NULL,
     expires_epoch INTEGER NOT NULL,
+    term_start_slot INTEGER NOT NULL,
+    term_start_slot_set BOOLEAN NOT NULL DEFAULT FALSE,
     added_slot INTEGER NOT NULL,
-    deleted_slot INTEGER
+    deleted_slot INTEGER,
+    UNIQUE (cold_credential_tag, cold_cred_hash, added_slot)
 );
 
 CREATE TABLE committee_quorum (
@@ -143,6 +147,8 @@ CREATE TABLE pool_stake_snapshot (
     stake_denominator TEXT NOT NULL DEFAULT '0',
     delegator_count INTEGER NOT NULL,
     captured_slot INTEGER NOT NULL,
+    leios_key_public BLOB,
+    leios_key_possession_proof BLOB,
     calculation_version INTEGER NOT NULL DEFAULT 0,
     reward_account_auto_vote INTEGER NOT NULL DEFAULT 0,
     reward_account_auto_vote_resolved BOOLEAN NOT NULL DEFAULT FALSE,
@@ -184,6 +190,29 @@ CREATE TABLE reward_snapshot (
     authoritative BOOLEAN NOT NULL DEFAULT FALSE,
     calculation_version INTEGER NOT NULL DEFAULT 0,
     UNIQUE (epoch, snapshot_type)
+);
+
+CREATE TABLE reward_seed_failure (
+    epoch INTEGER NOT NULL,
+    snapshot_type TEXT NOT NULL,
+    failure_reason TEXT NOT NULL,
+    captured_slot INTEGER NOT NULL,
+    PRIMARY KEY (epoch, snapshot_type)
+);
+
+CREATE TABLE imported_pool_block_count (
+    epoch INTEGER NOT NULL,
+    pool_key_hash BLOB NOT NULL,
+    blocks_produced INTEGER NOT NULL,
+    captured_slot INTEGER NOT NULL,
+    PRIMARY KEY (epoch, pool_key_hash)
+);
+
+CREATE TABLE imported_epoch_block_total (
+    epoch INTEGER NOT NULL,
+    total_blocks INTEGER NOT NULL,
+    captured_slot INTEGER NOT NULL,
+    PRIMARY KEY (epoch)
 );
 
 CREATE TABLE reward_pool_input (

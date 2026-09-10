@@ -121,6 +121,31 @@ func (d *Database) DeleteSyncState(
 	return nil
 }
 
+// ListSyncStateKeysByPrefix returns every sync_state key beginning with prefix.
+func (d *Database) ListSyncStateKeysByPrefix(
+	prefix string,
+	txn *Txn,
+) ([]string, error) {
+	var (
+		keys []string
+		err  error
+	)
+	if txn == nil {
+		keys, err = d.metadata.ListSyncStateKeysByPrefix(prefix, nil)
+	} else {
+		keys, err = d.metadata.ListSyncStateKeysByPrefix(
+			prefix, txn.Metadata(),
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf(
+			"Database.ListSyncStateKeysByPrefix(%q): %w",
+			prefix, err,
+		)
+	}
+	return keys, nil
+}
+
 // ClearSyncState removes all sync state entries.
 func (d *Database) ClearSyncState(txn *Txn) error {
 	var err error

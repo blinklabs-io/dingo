@@ -20,6 +20,8 @@ import (
 )
 
 func TestChainsyncValidationStateConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{
 		chainsyncState:    SyncingChainsyncState,
 		validationEnabled: true,
@@ -33,7 +35,7 @@ func TestChainsyncValidationStateConcurrentAccess(t *testing.T) {
 	for range 2 {
 		wg.Go(func() {
 			for slot := range iterations {
-				_ = ls.shouldVerifyChainsyncHeaderCrypto(uint64(slot))
+				_, _ = ls.chainsyncHeaderCryptoPolicy(uint64(slot))
 				_, _ = ls.validationStateSnapshot()
 				_ = ls.mithrilLedgerSlotSnapshot()
 			}

@@ -34,6 +34,8 @@ import (
 )
 
 func TestEraTransitionPathAllowsPrimeBoundaryPair(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	path, ok := ls.eraTransitionPath(
 		eras.MaryEraDesc.Id,
@@ -49,6 +51,8 @@ func TestEraTransitionPathAllowsPrimeBoundaryPair(t *testing.T) {
 }
 
 func TestEraTransitionsRunAfterSourceEraPParamEnactment(t *testing.T) {
+	t.Parallel()
+
 	path := []uint{eras.BabbageEraDesc.Id}
 	before, after := splitEraTransitionsForRollover(path)
 
@@ -59,6 +63,8 @@ func TestEraTransitionsRunAfterSourceEraPParamEnactment(t *testing.T) {
 }
 
 func TestEraTransitionPathRejectsLargerJump(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	path, ok := ls.eraTransitionPath(
 		eras.MaryEraDesc.Id,
@@ -70,6 +76,8 @@ func TestEraTransitionPathRejectsLargerJump(t *testing.T) {
 }
 
 func TestBoundaryEraForBlockUsesSuccessorHeaderEra(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	target, allowTwoTransitions := ls.boundaryEraForBlock(
 		eras.MaryEraDesc.Id,
@@ -82,6 +90,8 @@ func TestBoundaryEraForBlockUsesSuccessorHeaderEra(t *testing.T) {
 }
 
 func TestBoundaryEraForBlockDoesNotAdvanceFromHeaderAlone(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	target, allowTwoTransitions := ls.boundaryEraForBlock(
 		eras.AlonzoEraDesc.Id,
@@ -89,12 +99,18 @@ func TestBoundaryEraForBlockDoesNotAdvanceFromHeaderAlone(t *testing.T) {
 		eras.BabbageEraDesc.MinMajorVersion,
 		true,
 	)
-	require.Equal(t, eras.AlonzoEraDesc.Id, target,
-		"an Alonzo block remains Alonzo even when its header advertises protocol major 7")
+	require.Equal(
+		t,
+		eras.AlonzoEraDesc.Id,
+		target,
+		"an Alonzo block remains Alonzo even when its header advertises protocol major 7",
+	)
 	require.False(t, allowTwoTransitions)
 }
 
 func TestBoundaryEraForBlockRejectsNonAdjacentHeaderEra(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	target, allowTwoTransitions := ls.boundaryEraForBlock(
 		eras.MaryEraDesc.Id,
@@ -109,6 +125,8 @@ func TestBoundaryEraForBlockRejectsNonAdjacentHeaderEra(t *testing.T) {
 func TestEraAdvancementRejectsRawTwoStepBodyJumpWithoutHeaderElevation(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	target, allowTwoTransitions := ls.boundaryEraForBlock(
 		eras.MaryEraDesc.Id,
@@ -224,6 +242,8 @@ func newBoundaryRolloverLedger(
 func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := newBoundaryRolloverLedger(t)
 
 	var captures []event.EpochTransitionEvent
@@ -301,6 +321,8 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 }
 
 func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newBoundaryRolloverLedger(t)
 
 	sourceEra := ls.currentEra
@@ -337,7 +359,9 @@ func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
 		t.Fatal("epoch rollover returned no result")
 	}
 
-	wantSlotLength, wantEpochLength, err := eras.AllegraEraDesc.EpochLengthFunc(ls.config.CardanoNodeConfig)
+	wantSlotLength, wantEpochLength, err := eras.AllegraEraDesc.EpochLengthFunc(
+		ls.config.CardanoNodeConfig,
+	)
 	require.NoError(t, err)
 	require.Equal(t, wantSlotLength, result.NewCurrentEpoch.SlotLength)
 	require.Equal(t, wantEpochLength, result.NewCurrentEpoch.LengthInSlots)
@@ -365,6 +389,8 @@ func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
 // path: with no era transitions deferred, the rollover still captures the mark
 // snapshot itself, at its own era's protocol version.
 func TestSingleEraBoundaryRolloverCapturesSnapshotInRollover(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newBoundaryRolloverLedger(t)
 
 	var captures []event.EpochTransitionEvent

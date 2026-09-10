@@ -494,12 +494,15 @@ func (c *proposalRepairCache) govActionValidityPeriod(
 			return validity, nil
 		}
 	}
-	if epoch.EraId != conway.EraIdConway {
+	switch epoch.EraId {
+	case conway.EraIdConway, gdijkstra.EraIdDijkstra:
+		// Governance proposal repair is supported for the concrete eras whose
+		// protocol-parameter adapters are handled below.
+	default:
 		return 0, fmt.Errorf(
-			"unexpected era %d for governance proposal tx %s, expected Conway era %d",
+			"unexpected governance era %d for proposal tx %s",
 			epoch.EraId,
 			shortHash(proposalTxHash),
-			conway.EraIdConway,
 		)
 	}
 	era := eras.GetEraById(epoch.EraId)
@@ -520,10 +523,18 @@ func (c *proposalRepairCache) govActionValidityPeriod(
 			err,
 		)
 	}
-	conwayPParams, ok := pparams.(*conway.ConwayProtocolParameters)
-	if !ok {
+	conwayPParams, err := conwayGovernanceProtocolParameters(pparams)
+	if err != nil {
 		return 0, fmt.Errorf(
-			"unexpected protocol params %T for governance proposal tx %s in era %d",
+			"resolve governance protocol params for proposal tx %s in era %d: %w",
+			shortHash(proposalTxHash),
+			epoch.EraId,
+			err,
+		)
+	}
+	if conwayPParams == nil {
+		return 0, fmt.Errorf(
+			"pre-Conway protocol params %T for governance proposal tx %s in era %d",
 			pparams,
 			shortHash(proposalTxHash),
 			epoch.EraId,

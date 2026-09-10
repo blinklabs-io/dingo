@@ -312,7 +312,9 @@ func TestBuildBlockDijkstraAnnouncesLeiosEndorserBlock(t *testing.T) {
 	assert.Equal(t, dblock.BlockBodyHash(), dblock.CalculatedBlockBodyHash())
 }
 
-func TestBuildBlockDijkstraDoesNotMixAnnouncedEndorserTransactions(t *testing.T) {
+func TestBuildBlockDijkstraDoesNotMixAnnouncedEndorserTransactions(
+	t *testing.T,
+) {
 	creds := setupTestCredentials(t)
 	ebTxCbor := makeMinimalTxCbor(t, 0x31, 0)
 	rankingTxCbor := makeMinimalTxCbor(t, 0x32, 0)
@@ -320,7 +322,9 @@ func TestBuildBlockDijkstraDoesNotMixAnnouncedEndorserTransactions(t *testing.T)
 		ConwayProtocolParameters: conway.ConwayProtocolParameters{
 			MaxTxSize:        16384,
 			MaxBlockBodySize: 90112,
-			ProtocolVersion:  lcommon.ProtocolParametersProtocolVersion{Major: 12},
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: 12,
+			},
 			MaxBlockExUnits: lcommon.ExUnits{
 				Memory: 62000000,
 				Steps:  20000000000,

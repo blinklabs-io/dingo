@@ -23,6 +23,7 @@ import (
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -200,7 +201,7 @@ func (d *Database) SetTransactionWithOpts(
 		defer txn.Rollback() //nolint:errcheck
 	}
 
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
@@ -241,12 +242,38 @@ func (d *Database) SetTransactionWithOpts(
 	// transactions (collateral return at index len(Outputs()))
 	// UTxO offsets MUST be available - no fallback to full CBOR storage
 	produced := tx.Produced()
+	// Producing no UTxOs is a legal shape: a valid transaction can spend its
+	// whole input on deposits plus the fee and return no change (issue #3932),
+	// and an invalid transaction without a collateral return produces nothing
+	// either. Produced() is Outputs() for a valid transaction and the
+	// collateral return for an invalid one, so an empty set means outputs were
+	// dropped before storage only when the matching declaration is non-empty.
+	// Each branch reports its own declaration: the two are different fields, so
+	// one shared message would name the wrong one for half the warnings.
 	if len(produced) == 0 {
-		d.logger.Warn(
-			"transaction has no produced outputs",
-			"txHash", hex.EncodeToString(ledgerHashPrefix(txHash)),
-			"slot", point.Slot,
-		)
+		// Each accessor is read once into a local: every era's Outputs()
+		// allocates a fresh slice per call, and reading CollateralReturn()
+		// once closes the gap between the nil test and the dereference.
+		outputs := tx.Outputs()
+		collateralReturn := tx.CollateralReturn()
+		txHashHex := hex.EncodeToString(ledgerHashPrefix(txHash))
+		switch {
+		case tx.IsValid() && len(outputs) > 0:
+			d.logger.Warn(
+				"valid transaction produced no UTxOs despite declaring outputs",
+				"txHash", txHashHex,
+				"outputs", len(outputs),
+				"slot", point.Slot,
+			)
+		case !tx.IsValid() && collateralReturn != nil:
+			d.logger.Warn(
+				"invalid transaction produced no UTxOs despite "+
+					"declaring a collateral return",
+				"txHash", txHashHex,
+				"collateralReturnLovelace", collateralReturn.Amount().String(),
+				"slot", point.Slot,
+			)
+		}
 	}
 	for _, utxo := range produced {
 		txId := ledgerInputIDBytes(utxo.Id)
@@ -280,13 +307,30 @@ func (d *Database) SetTransactionWithOpts(
 	if err := d.ensureTransactionConsumedUtxos(tx, point, txn, nil, opts); err != nil {
 		return err
 	}
-	if err := d.transactionStore().SetTransaction(
-		tx, point, idx, certDeposits,
-		opts.SkipWithdrawalWitnessWrite, txn.Metadata(),
-	); err != nil {
+	// On the Leios endorser-block closure path (SkipConsumedInputRecovery), a
+	// consumed input already spent by a different certified endorser-block
+	// transaction is a no-op, matching the reference ledger's applyLeiosClosure
+	// (ValidateNone), rather than wedging the pipeline with ErrUtxoConflict on a
+	// legitimate cross-EB double-consume. Ranking-block application keeps the
+	// hard conflict check.
+	setTxErr := error(nil)
+	if opts.SkipConsumedInputRecovery {
+		setTxErr = d.transactionStore().SetTransactionLeiosClosure(
+			tx, point, idx, certDeposits,
+			opts.SkipWithdrawalWitnessWrite,
+			txn.Metadata(),
+		)
+	} else {
+		setTxErr = d.transactionStore().SetTransaction(
+			tx, point, idx, certDeposits,
+			opts.SkipWithdrawalWitnessWrite,
+			txn.Metadata(),
+		)
+	}
+	if setTxErr != nil {
 		return fmt.Errorf(
 			"set transaction metadata for tx %s (block idx %d, slot %d): %w",
-			tx.Hash(), idx, point.Slot, err,
+			tx.Hash(), idx, point.Slot, setTxErr,
 		)
 	}
 
@@ -381,7 +425,7 @@ func (d *Database) SetGapBlockTransaction(
 		defer txn.Rollback() //nolint:errcheck
 	}
 
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
@@ -821,7 +865,7 @@ func (d *Database) recoverConsumedUtxo(
 	txn *Txn,
 	enforcePrimaryChain bool,
 ) (*models.Utxo, error) {
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return nil, types.ErrBlobStoreUnavailable
 	}
@@ -986,13 +1030,16 @@ func (d *Database) recoverConsumedUtxo(
 	if err != nil {
 		return nil, fmt.Errorf("decode transaction output: %w", err)
 	}
-	ret := models.UtxoLedgerToModel(
+	ret, err := models.UtxoLedgerToModel(
 		lcommon.Utxo{
 			Id:     input,
 			Output: output,
 		},
 		addedSlot,
 	)
+	if err != nil {
+		return nil, fmt.Errorf("convert recovered utxo: %w", err)
+	}
 	// Populate the producer transaction FK so that joins on
 	// utxo.transaction_id and Preload("Outputs") from the producer
 	// Transaction see this row after a rollback reanimates it. The
@@ -1035,7 +1082,7 @@ func (d *Database) SetGenesisTransaction(
 		defer txn.Rollback() //nolint:errcheck
 	}
 
-	blob := txn.DB().Blob()
+	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
@@ -1079,7 +1126,16 @@ func (d *Database) SetGenesisTransaction(
 		}
 
 		// Build model for metadata store
-		utxoModels[i] = models.UtxoLedgerToModel(utxo, 0)
+		model, err := models.UtxoLedgerToModel(utxo, 0)
+		if err != nil {
+			return fmt.Errorf(
+				"convert genesis utxo %x:%d: %w",
+				bytePrefix(txId),
+				outputIdx,
+				err,
+			)
+		}
+		utxoModels[i] = model
 	}
 
 	// Store transaction in metadata
@@ -1091,8 +1147,8 @@ func (d *Database) SetGenesisTransaction(
 	); err != nil {
 		return fmt.Errorf(
 			"SetGenesisTransaction failed for tx %x block %x: %w",
-			txHash[:8],
-			blockHash[:8],
+			bytePrefix(txHash),
+			bytePrefix(blockHash),
 			err,
 		)
 	}
@@ -1111,6 +1167,7 @@ func (d *Database) SetGenesisTransaction(
 func (d *Database) SetGenesisStaking(
 	pools map[string]lcommon.PoolRegistrationCertificate,
 	stakeDelegations map[string]string,
+	keyDeposit uint64,
 	blockHash []byte,
 	txn *Txn,
 ) error {
@@ -1118,6 +1175,7 @@ func (d *Database) SetGenesisStaking(
 		if err := d.metadata.SetGenesisStaking(
 			pools,
 			stakeDelegations,
+			keyDeposit,
 			blockHash,
 			nil,
 		); err != nil {
@@ -1128,6 +1186,7 @@ func (d *Database) SetGenesisStaking(
 	if err := d.metadata.SetGenesisStaking(
 		pools,
 		stakeDelegations,
+		keyDeposit,
 		blockHash,
 		txn.Metadata(),
 	); err != nil {
@@ -1194,7 +1253,8 @@ func (d *Database) GetTransactionMetadataByHash(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	return d.transactionStore().GetTransactionMetadataByHash(hash, txn.Metadata())
+	return d.transactionStore().
+		GetTransactionMetadataByHash(hash, txn.Metadata())
 }
 
 // GetTransactionsByHashes returns transactions for the provided hashes.
@@ -1717,23 +1777,34 @@ func (d *Database) DeleteTransactionMetadataLabelsAfterSlot(
 	return nil
 }
 
-// deleteTxBlobs attempts to delete blob data for the given transaction hashes.
-// This is a best-effort operation; metadata remains the source of truth. When
-// the caller provides a blob transaction, deletions stay coupled to that outer
-// commit. A temporary blob-only transaction is used only as a fallback when no
-// blob handle is available.
+// deleteTxBlobs deletes blob data for the given transaction hashes. Metadata
+// remains the source of truth. When the caller provides a blob transaction,
+// deletions stay coupled to that outer commit. A temporary blob-only
+// transaction is used only as a fallback when no blob handle is available.
+//
+// Failures do not stop the remaining deletes, but they are counted and
+// reported as [ErrBlobDeleteIncomplete]: the caller goes on to remove the
+// metadata that names these objects, after which nothing can reach them
+// again. The count is deferred to the enclosing transaction's commit for the
+// reason given on deleteUtxoBlobs.
 func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 	const batchSize = 500
-	blob := d.Blob()
-	if blob == nil {
+	// Report an absent blob store up front, so an empty txHashes slice
+	// reports it the same way a populated one does rather than silently
+	// succeeding because the batch loop never ran.
+	if d.Blob() == nil {
 		return types.ErrBlobStoreUnavailable
 	}
 
 	var deleteErrors int
-	deleteBatch := func(blobTxn types.Txn, batch [][]byte) int {
+	deleteBatch := func(
+		store blob.BlobStore,
+		blobTxn types.Txn,
+		batch [][]byte,
+	) int {
 		var batchDeleteErrors int
 		for _, txHash := range batch {
-			if err := blob.DeleteTx(blobTxn, txHash); err != nil {
+			if err := store.DeleteTx(blobTxn, txHash); err != nil {
 				deleteErrors++
 				batchDeleteErrors++
 				d.logger.Warn(
@@ -1746,18 +1817,31 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 		return batchDeleteErrors
 	}
 
+	// The store used for each delete comes from whichever transaction owns
+	// the handle that delete runs through, so a concurrent SetBlobStore
+	// cannot leave a handle from one store being deleted through another.
 	if txn != nil && txn.Blob() != nil {
-		deleteBatch(txn.Blob(), txHashes)
+		blob := txn.BlobStore()
+		if blob == nil {
+			return types.ErrBlobStoreUnavailable
+		}
+		deleteBatch(blob, txn.Blob(), txHashes)
 	} else {
 		for start := 0; start < len(txHashes); start += batchSize {
 			end := min(start+batchSize, len(txHashes))
 			batch := txHashes[start:end]
 			batchTxn := NewBlobOnlyTxn(d, true)
+			blob := batchTxn.BlobStore()
+			if blob == nil {
+				batchTxn.Release()
+				return types.ErrBlobStoreUnavailable
+			}
 			batchBlobTxn := batchTxn.Blob()
 			if batchBlobTxn == nil {
+				batchTxn.Release()
 				return types.ErrNilTxn
 			}
-			batchDeleteErrors := deleteBatch(batchBlobTxn, batch)
+			batchDeleteErrors := deleteBatch(blob, batchBlobTxn, batch)
 			if err := batchTxn.Commit(); err != nil {
 				deleteErrors += len(batch) - batchDeleteErrors
 				_ = batchTxn.Rollback()
@@ -1772,11 +1856,18 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 		}
 	}
 	if deleteErrors > 0 {
+		recordBlobOrphansOnCommit(txn, deleteErrors)
 		d.logger.Warn(
 			"TX blob deletion completed with errors",
 			"failed",
 			deleteErrors,
 			"total",
+			len(txHashes),
+		)
+		return fmt.Errorf(
+			"%w: %d of %d transaction blobs",
+			ErrBlobDeleteIncomplete,
+			deleteErrors,
 			len(txHashes),
 		)
 	}
@@ -1816,7 +1907,17 @@ func (d *Database) TransactionsDeleteRolledback(
 	}
 
 	// Delete blob data first (best effort)
-	_ = deleteTxBlobs(d, txHashes, txn)
+	// A blob delete failure must not stop the metadata cleanup below: a
+	// rolled-back transaction cannot stay addressable. The objects it strands
+	// are counted and logged rather than dropped.
+	if blobErr := deleteTxBlobs(d, txHashes, txn); blobErr != nil {
+		d.logger.Error(
+			"rolled-back transaction blob delete left unreachable objects",
+			"error", blobErr,
+			"slot", slot,
+			"transactions", len(txHashes),
+		)
+	}
 
 	// Then delete metadata (source of truth)
 	if err := d.transactionStore().DeleteAddressTransactionsAfterSlot(

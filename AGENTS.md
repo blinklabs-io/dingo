@@ -19,20 +19,22 @@ The default target formats and builds; tests are a separate target.
 ## Pre-commit
 
 ```
-golangci-lint run ./...
-nilaway ./...
-modernize ./...
-make import-boundaries
+make lint         # import-boundaries, all modules, windows, nilaway, modernize
 make docs-parity
 make golines
 make sql-check    # only when database/sql queries or sqlc.yaml changed
-make gorm-check
 make govulncheck  # reachable Go vulnerabilities; needs network
 ```
 
 ## Testing rules
 
 - No `time.Sleep()` for sync — use `internal/test/testutil/` (`WaitForCondition`, `RequireReceive`, `context.WithTimeout`).
+- Top-level tests call `t.Parallel()` in most packages, including every one that dominates the suite: `ledger`, `database`, `ouroboros`, `mithril`, `ledgerstate`, `internal/koiosparity`, `event`, `bark`, `database/lifecycle`, `internal/node`, `chain`, `ledger/{governance,snapshot,leios}`, `api/{blockfrost,mesh}`, `connmanager`, `cmd/dingo`, `config/cardano` and the root package. A new test there should too.
+- Keep a test sequential — with a `// Not t.Parallel: ...` comment saying why — when it reaches process-global state. The classes seen here: swapping a package-level seam (`syncDir`, `cleanupConsumedUtxosInterval`, `deliveryStallWarnInterval`, `afterDeferredMarkerDeleteHook`, `leiosPersistMaxQueueBytes`); swapping another package's variable (`ledger.Close*Timeout`); replacing a process-global (`slog.SetDefault`, `config.PublishConfig`, which `settingsresolve.Apply` ends in); asserting a delta of a process-wide counter (`BlobOrphanCount`, whose before/after window a concurrent `recordBlobOrphans` lands in); and process-wide measurement (`testing.AllocsPerRun`, `runtime.NumGoroutine`, `testing.Benchmark`, `goleak.VerifyNone`).
+- Sequential tests finish, cleanups included, before any parallel test in the package resumes, so a save/restore around a global is safe only while every test that touches it is sequential. A fixture that instead serializes for the whole test — `database/lifecycle`'s `setFakeCloudBackingDir` holds `fakeCloudFixtureMu` until `t.Cleanup` — is parallel-safe, and its tests do call `t.Parallel()`. `goleak.VerifyNone` additionally sees the runner goroutine parked waiting for the parallel batch, so a goleak test cannot itself be parallel.
+- `internal/settingsresolve` and `bark/database_cloud_test.go` are fully sequential. `settingsresolve.Apply` replaces `internal/config`'s process-global `globalConfig` and the assertions read it back; `barkFakeCloudDir` is a process-global the registered fake scheme resolves against with no such gate, so concurrent tests would see each other's directory.
+- A test that opens an on-disk badger blob store passes `testutil.BadgerBlobConfig()` as the provider config (or `badger.WithValueLogFileSize`/`WithMemTableSize` for a direct `badger.New`); `dbtest.NewDatabase` already does. badger maps the value log at twice `ValueLogFileSize`, so a default store reserves 2 GiB the moment it opens — sparse on Linux and macOS, really reserved on Windows, where enough concurrent stores fill the CI runner's disk. `TestNewDatabaseReservesASmallValueLog` guards the fixture.
+- Live two-node lifecycle integration tests use the shared `dingo_db_integration` build tag; run them with `make test-live-lifecycle`.
 - Integration tests: `internal/integration/` + `database/immutable/testdata/` (real blocks, slots 0–1.3M).
 - Mock fixtures come from `github.com/blinklabs-io/ouroboros-mock` (`fixtures/`, `ledger/`, `conformance/`). Never duplicate mocks inside dingo — extend the shared library so every Blink Labs app (dingo, gouroboros, adder, ...) reuses the same test surface.
 - DevNet end-to-end (`internal/test/devnet/run-tests.sh`): default run is an all-dingo network (three Dingo producers + relay) with `txpump` driving the mempool; it validates the generic consensus and liveness suite dingo-vs-dingo and hosts dingo-only feature tests (CIP-50 pledge leverage) that have no cardano-node reference. Use it for any change touching consensus, block production, header/VRF/KES/OpCert verification, chain selection, mempool, tx submission, NtN/NtC protocols, epoch boundaries, or nonce computation. `./run-tests.sh --conformance` runs Dingo beside `cardano-node` for compatibility and conformance with the reference. Conformance tests in `internal/test/conformance/` are still mandatory after every change.
@@ -56,7 +58,7 @@ make govulncheck  # reachable Go vulnerabilities; needs network
 - Rollbacks: delivered on `chain.update` as a `chain.ChainRollbackEvent` payload (no separate `chain.rollback` topic); also subscribe to `chain.fork_detected` for fork metrics. Check `TransactionEvent.Rollback` for undo.
 - Stake snapshots: mark/set/go rotation at epoch boundaries (Praos). `LedgerView.GetStakeDistribution(epoch)` for leader election. Per-pool stake in `PoolStakeSnapshot`; aggregates in `EpochSummary`.
 - Plugins (`database/plugin/`): blob = `badger` | `gcs` | `s3`; metadata = `sqlite` | `mysql` | `postgres`. Mempool = `fifo` | `dag`; API = `blockfrost` | `mesh` | `utxorpc`. Non-default storage providers build only under `-tags dingo_extra_plugins`.
-- Metadata storage is typed `database/sql` generated by sqlc, not an ORM. Regenerate with `make sql`; `make gorm-check` fails if the removed ORM returns.
+- Metadata storage is typed `database/sql` generated by sqlc, not an ORM. Regenerate with `make sql` after changing queries.
 
 ## Isolation requirements
 

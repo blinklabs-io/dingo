@@ -45,6 +45,22 @@ func blockIndexID(key []byte) (id uint64, ok bool) {
 	), true
 }
 
+// batchEnd returns the inclusive upper bound of the batch starting at start,
+// clamped to tipID. It avoids start+uint64(batchSize)-1 overflowing past
+// math.MaxUint64: that wraparound would silently produce an end below
+// start, corrupting the batch's iteration range instead of failing loudly.
+//
+// batchSize must be positive; DeleteBlocksAfter guarantees this by
+// substituting DefaultBlockDeleteBatchSize for any batchSize <= 0 before
+// calling in.
+func batchEnd(start, tipID uint64, batchSize int) uint64 {
+	size := uint64(batchSize) // #nosec G115 -- batchSize > 0, see doc comment
+	if tipID-start >= size-1 {
+		return start + size - 1
+	}
+	return tipID
+}
+
 // DeleteBlocksAfter removes every block whose internal, sequentially
 // assigned block ID (models.Block.ID — the basis of the blob store's "bi"
 // index, distinct from the chain's Number/height field) falls in
@@ -95,16 +111,12 @@ func DeleteBlocksAfter(
 	if tipID <= afterID {
 		return 0, nil
 	}
-	blob := db.Blob()
-	if blob == nil {
-		return 0, types.ErrBlobStoreUnavailable
-	}
 	indexPrefix := []byte(types.BlockBlobIndexKeyPrefix)
 	for start := afterID + 1; start <= tipID; {
 		if err := ctx.Err(); err != nil {
 			return blocksDeleted, err
 		}
-		end := min(start+uint64(batchSize)-1, tipID)
+		end := batchEnd(start, tipID, batchSize)
 		var batchDeleted uint64
 		var batchIsIrreversible bool
 		txn := db.BlobTxn(true)
@@ -115,6 +127,13 @@ func DeleteBlocksAfter(
 			// discards staged work with no bucket I/O.
 			if irreversible, ok := txn.Blob().(types.IrreversibleTxn); ok {
 				batchIsIrreversible = irreversible.RollbackIsNoop()
+			}
+			// Per batch, from the batch's own transaction: each batch
+			// commits separately, so the store has to be the one that owns
+			// this batch's handles rather than whichever is installed now.
+			blob := txn.BlobStore()
+			if blob == nil {
+				return types.ErrBlobStoreUnavailable
 			}
 			it := blob.NewIterator(
 				txn.Blob(),
@@ -245,6 +264,15 @@ func DeleteBlocksAfter(
 			return blocksDeleted, err
 		}
 		blocksDeleted += batchDeleted
+		// end == tipID marks the final batch. Testing that directly,
+		// rather than relying on the loop's start <= tipID condition to
+		// stop things, matters because tipID can itself be MaxUint64: in
+		// that case start = end + 1 would wrap to 0, which is <= tipID,
+		// and the loop would incorrectly run additional batches below
+		// afterID.
+		if end == tipID {
+			break
+		}
 		start = end + 1
 	}
 	return blocksDeleted, nil

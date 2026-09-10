@@ -72,7 +72,10 @@ geomean,,,,,+0.00%,
 
 // A tiny, non-significant delta must never be flagged.
 func TestReport_NoRegression(t *testing.T) {
-	report, regressed, err := Report(fixtureCSV, []string{"BenchmarkNoRegression"})
+	report, regressed, err := Report(
+		fixtureCSV,
+		[]string{"BenchmarkNoRegression"},
+	)
 	if err != nil {
 		t.Fatalf("Report: %v", err)
 	}
@@ -104,12 +107,18 @@ func TestReport_RegressedAndSignificant_Flagged(t *testing.T) {
 // must not be flagged, since it's most likely CI runner noise rather than a
 // real regression.
 func TestReport_RegressedButNotSignificant_NotFlagged(t *testing.T) {
-	report, regressed, err := Report(fixtureCSV, []string{"BenchmarkNoisyRegression"})
+	report, regressed, err := Report(
+		fixtureCSV,
+		[]string{"BenchmarkNoisyRegression"},
+	)
 	if err != nil {
 		t.Fatalf("Report: %v", err)
 	}
 	if regressed {
-		t.Fatalf("a non-significant delta must not be flagged, report:\n%s", report)
+		t.Fatalf(
+			"a non-significant delta must not be flagged, report:\n%s",
+			report,
+		)
 	}
 }
 
@@ -121,7 +130,10 @@ func TestReport_Improvement_NotFlagged(t *testing.T) {
 		t.Fatalf("Report: %v", err)
 	}
 	if regressed {
-		t.Fatalf("a significant improvement must not be flagged, report:\n%s", report)
+		t.Fatalf(
+			"a significant improvement must not be flagged, report:\n%s",
+			report,
+		)
 	}
 }
 
@@ -141,11 +153,18 @@ func TestReport_MixedSet_OnlyRegressedFlags(t *testing.T) {
 		t.Fatalf("Report: %v", err)
 	}
 	if !regressed {
-		t.Fatalf("expected overall regression=true because BenchmarkRegressed flags, report:\n%s", report)
+		t.Fatalf(
+			"expected overall regression=true because BenchmarkRegressed flags, report:\n%s",
+			report,
+		)
 	}
 	// Exactly one row should be marked flagged.
 	if got := strings.Count(report, "**yes**"); got != 1 {
-		t.Fatalf("expected exactly 1 flagged row, got %d, report:\n%s", got, report)
+		t.Fatalf(
+			"expected exactly 1 flagged row, got %d, report:\n%s",
+			got,
+			report,
+		)
 	}
 	for _, name := range curated {
 		if !strings.Contains(report, name) {
@@ -158,14 +177,18 @@ func TestReport_MixedSet_OnlyRegressedFlags(t *testing.T) {
 // typo) must be reported as a visible "not found" row rather than silently
 // dropped or treated as a false regression.
 func TestReport_UnknownBenchmark_ReportedNotFound(t *testing.T) {
-	report, regressed, err := Report(fixtureCSV, []string{"BenchmarkDoesNotExist"})
+	report, regressed, err := Report(
+		fixtureCSV,
+		[]string{"BenchmarkDoesNotExist"},
+	)
 	if err != nil {
 		t.Fatalf("Report: %v", err)
 	}
 	if regressed {
 		t.Fatalf("a missing benchmark must not be flagged, report:\n%s", report)
 	}
-	if !strings.Contains(report, "BenchmarkDoesNotExist") || !strings.Contains(report, "not found") {
+	if !strings.Contains(report, "BenchmarkDoesNotExist") ||
+		!strings.Contains(report, "not found") {
 		t.Fatalf("report should note the benchmark was not found:\n%s", report)
 	}
 }
@@ -181,7 +204,8 @@ func TestReport_IgnoresNonSecOpTables(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Report: %v", err)
 	}
-	if !strings.Contains(report, "635ns") || !strings.Contains(report, "713ns") {
+	if !strings.Contains(report, "635ns") ||
+		!strings.Contains(report, "713ns") {
 		t.Fatalf("expected sec/op values in report:\n%s", report)
 	}
 }
@@ -225,19 +249,31 @@ geomean,,,,,+0.00%,
 // first one, even though only the first block carries the full metadata
 // header.
 func TestReport_MultiPackageInput(t *testing.T) {
-	curated := []string{"BenchmarkHotCacheGet", "BenchmarkUpdateConnectionMetrics"}
+	curated := []string{
+		"BenchmarkHotCacheGet",
+		"BenchmarkUpdateConnectionMetrics",
+	}
 	report, regressed, err := Report(fixtureMultiPkgCSV, curated)
 	if err != nil {
 		t.Fatalf("Report: %v", err)
 	}
 	if !regressed {
-		t.Fatalf("expected BenchmarkUpdateConnectionMetrics to flag a regression, report:\n%s", report)
+		t.Fatalf(
+			"expected BenchmarkUpdateConnectionMetrics to flag a regression, report:\n%s",
+			report,
+		)
 	}
 	if !strings.Contains(report, "BenchmarkHotCacheGet-8") {
-		t.Fatalf("report missing row from the first package's block:\n%s", report)
+		t.Fatalf(
+			"report missing row from the first package's block:\n%s",
+			report,
+		)
 	}
 	if !strings.Contains(report, "BenchmarkUpdateConnectionMetrics-8") {
-		t.Fatalf("report missing row from the second package's block:\n%s", report)
+		t.Fatalf(
+			"report missing row from the second package's block:\n%s",
+			report,
+		)
 	}
 }
 
@@ -266,12 +302,18 @@ geomean,1.406e-07,,2.293e-07,,+63.09%,
 // high core counts (the actual shape of the lock-contention bug this
 // benchmark family exists to catch) still gets flagged.
 func TestReport_CPUSweep_PerCoreCountRows(t *testing.T) {
-	report, regressed, err := Report(fixtureCPUSweepCSV, []string{"BenchmarkBlockLRUParallelReadHeavy"})
+	report, regressed, err := Report(
+		fixtureCPUSweepCSV,
+		[]string{"BenchmarkBlockLRUParallelReadHeavy"},
+	)
 	if err != nil {
 		t.Fatalf("Report: %v", err)
 	}
 	if !regressed {
-		t.Fatalf("expected the -16 row's contention regression to flag, report:\n%s", report)
+		t.Fatalf(
+			"expected the -16 row's contention regression to flag, report:\n%s",
+			report,
+		)
 	}
 	// The -cpu=1 row carries no suffix at all (see fixtureCPUSweepCSV). Match
 	// on "| <name> |" so the bare-name row can't be satisfied by a
@@ -288,7 +330,11 @@ func TestReport_CPUSweep_PerCoreCountRows(t *testing.T) {
 	}
 	// Only the -16 row should be flagged.
 	if got := strings.Count(report, "**yes**"); got != 1 {
-		t.Fatalf("expected exactly 1 flagged row across the sweep, got %d, report:\n%s", got, report)
+		t.Fatalf(
+			"expected exactly 1 flagged row across the sweep, got %d, report:\n%s",
+			got,
+			report,
+		)
 	}
 }
 
@@ -319,12 +365,18 @@ geomean,1.364e-08,,1.466e-08,,+7.48%,
 // and a curated name with no matching rows at all must still report exactly
 // one not-found row -- not one per swept dimension it could have matched.
 func TestReport_SubBenchmarkFamily(t *testing.T) {
-	report, regressed, err := Report(fixtureSubBenchmarkCSV, []string{"BenchmarkUpdateConnectionMetrics"})
+	report, regressed, err := Report(
+		fixtureSubBenchmarkCSV,
+		[]string{"BenchmarkUpdateConnectionMetrics"},
+	)
 	if err != nil {
 		t.Fatalf("Report: %v", err)
 	}
 	if !regressed {
-		t.Fatalf("expected the /500 sub-benchmark's regression to flag, report:\n%s", report)
+		t.Fatalf(
+			"expected the /500 sub-benchmark's regression to flag, report:\n%s",
+			report,
+		)
 	}
 	for _, sub := range []string{"/10-10", "/100-10", "/500-10", "/1000-10"} {
 		name := "BenchmarkUpdateConnectionMetrics" + sub
@@ -333,16 +385,26 @@ func TestReport_SubBenchmarkFamily(t *testing.T) {
 		}
 	}
 	if got := strings.Count(report, "**yes**"); got != 1 {
-		t.Fatalf("expected exactly 1 flagged sub-benchmark, got %d, report:\n%s", got, report)
+		t.Fatalf(
+			"expected exactly 1 flagged sub-benchmark, got %d, report:\n%s",
+			got,
+			report,
+		)
 	}
 	// A curated name with no sub-benchmark rows at all in the input must
 	// still report a single not-found row, not one per swept dimension.
-	report2, regressed2, err := Report(fixtureSubBenchmarkCSV, []string{"BenchmarkDoesNotExist"})
+	report2, regressed2, err := Report(
+		fixtureSubBenchmarkCSV,
+		[]string{"BenchmarkDoesNotExist"},
+	)
 	if err != nil {
 		t.Fatalf("Report: %v", err)
 	}
 	if regressed2 {
-		t.Fatalf("unrelated missing benchmark must not flag, report:\n%s", report2)
+		t.Fatalf(
+			"unrelated missing benchmark must not flag, report:\n%s",
+			report2,
+		)
 	}
 	if strings.Count(report2, "not found") != 1 {
 		t.Fatalf("expected exactly 1 not-found row, report:\n%s", report2)
@@ -372,10 +434,20 @@ func TestParseDelta(t *testing.T) {
 			continue
 		}
 		if gotSig != c.wantSig {
-			t.Fatalf("parseDelta(%q) significant = %v, want %v", c.in, gotSig, c.wantSig)
+			t.Fatalf(
+				"parseDelta(%q) significant = %v, want %v",
+				c.in,
+				gotSig,
+				c.wantSig,
+			)
 		}
 		if gotPercent != c.wantPercent {
-			t.Fatalf("parseDelta(%q) percent = %v, want %v", c.in, gotPercent, c.wantPercent)
+			t.Fatalf(
+				"parseDelta(%q) percent = %v, want %v",
+				c.in,
+				gotPercent,
+				c.wantPercent,
+			)
 		}
 	}
 }

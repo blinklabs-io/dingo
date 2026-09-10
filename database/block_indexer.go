@@ -27,11 +27,16 @@ import (
 // safeIntToUint32 converts an int to uint32, clamping to math.MaxUint32 on overflow.
 // This is safe because we use this for byte offsets/lengths within blocks that
 // are bounded by Cardano's protocol limits (~90KB max block body).
+//
+// n is compared as int64 rather than directly against the untyped constant
+// math.MaxUint32: on a 32-bit platform int is 32 bits wide, and that
+// constant does not fit in it, so the naive comparison fails to compile.
+// int64 is wide enough to hold both n and math.MaxUint32 on every platform.
 func safeIntToUint32(n int) uint32 {
 	if n < 0 {
 		return 0
 	}
-	if n > math.MaxUint32 {
+	if int64(n) > math.MaxUint32 {
 		return math.MaxUint32
 	}
 	return uint32(n) // #nosec G115: bounds checked above

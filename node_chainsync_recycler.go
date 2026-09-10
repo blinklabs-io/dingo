@@ -26,6 +26,11 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
+const (
+	chainSelectedNoneInitialRetryInterval = 10 * time.Millisecond
+	chainSelectedNoneMaxRetryInterval     = time.Second
+)
+
 // chainsyncObservePeerTip synchronously feeds a peer tip update into chain
 // selection (and peergov) when the Genesis corroboration gate is active, so the
 // ChainsyncApplyEligible check that immediately follows in the roll-forward
@@ -169,10 +174,31 @@ func (n *Node) handleChainSwitchEvent(evt event.Event) {
 	if n.chainsyncState == nil {
 		return
 	}
+	if n.chainSelector != nil {
+		best := n.chainSelector.GetBestPeer()
+		if best == nil || *best != e.NewConnectionId {
+			n.config.logger.Debug(
+				"ignoring stale chain switch superseded by selection",
+				"new_connection", e.NewConnectionId.String(),
+			)
+			return
+		}
+	}
 	prevConn := "(none)"
 	if e.PreviousConnectionId.LocalAddr != nil &&
 		e.PreviousConnectionId.RemoteAddr != nil {
 		prevConn = e.PreviousConnectionId.String()
+	}
+	// Peer switches only change which already-running chainsync stream feeds
+	// the ledger. Restarting chainsync here re-enters FindIntersect and can
+	// race the protocol state machine under load.
+	if !n.chainsyncState.TrySetClientConnId(e.NewConnectionId) {
+		n.config.logger.Debug(
+			"ignoring stale chain switch for unavailable connection",
+			"previous_connection", prevConn,
+			"new_connection", e.NewConnectionId.String(),
+		)
+		return
 	}
 	n.config.logger.Info(
 		"chain switch: updating active connection",
@@ -181,19 +207,34 @@ func (n *Node) handleChainSwitchEvent(evt event.Event) {
 		"new_tip_block", e.NewTip.BlockNumber,
 		"new_tip_slot", e.NewTip.Point.Slot,
 	)
-	// Peer switches only change which already-running chainsync stream feeds
-	// the ledger. Restarting chainsync here re-enters FindIntersect and can
-	// race the protocol state machine under load.
-	n.chainsyncState.SetClientConnId(e.NewConnectionId)
 }
 
-// handleChainSelectedNoneEvent logs a selected-to-none transition. Chain
-// selection has stalled with no eligible/corroborated peer; under Genesis
-// corroboration the stalled source's blocks are already withheld from the ledger
-// by the ChainsyncApplyEligible gate, so this is observability only.
+// handleChainSelectedNoneEvent clears the previous active connection after a
+// selected-to-none transition. This keeps ledger and blockfetch consumers on
+// the same tracked-tip and eligibility decision as ChainSelector.
 func (n *Node) handleChainSelectedNoneEvent(evt event.Event) {
 	e, ok := evt.Data.(chainselection.ChainSelectedNoneEvent)
 	if !ok {
+		return
+	}
+	// Match handleChainSwitchEvent's live-lifecycle guard. A delayed event
+	// rechecks the selector before clearing, so it cannot erase a newer switch.
+	// Unlike a switch, selected-to-none is a one-shot transition and cannot be
+	// dropped on contention. A single
+	// context-owned worker below coalesces contended transitions instead of
+	// detaching an unbounded goroutine for every event.
+	if !n.liveLifecycleMu.TryLock() {
+		n.deferChainSelectedNoneEvent(e)
+		return
+	}
+	defer n.liveLifecycleMu.Unlock()
+	n.handleChainSelectedNoneEventLocked(e)
+}
+
+func (n *Node) handleChainSelectedNoneEventLocked(
+	e chainselection.ChainSelectedNoneEvent,
+) {
+	if n.chainsyncState == nil {
 		return
 	}
 	prevConn := "(none)"
@@ -201,11 +242,157 @@ func (n *Node) handleChainSelectedNoneEvent(evt event.Event) {
 		e.PreviousConnectionId.RemoteAddr != nil {
 		prevConn = e.PreviousConnectionId.String()
 	}
+	if n.chainSelector != nil {
+		if n.chainSelector.GetBestPeer() != nil {
+			n.config.logger.Debug(
+				"ignoring stale selected-to-none event superseded by selection",
+				"previous_connection", prevConn,
+			)
+			return
+		}
+	}
 	n.config.logger.Info(
 		"chain selection stalled: no selectable peer",
 		"previous_connection", prevConn,
 		"genesis_corroboration", e.GenesisCorroboration,
 	)
+	if n.chainSelector == nil {
+		// Direct callers without a selector cannot perform the current-selection
+		// recheck above, so retain the event's compare-and-clear behavior.
+		n.chainsyncState.ClearClientConnId(e.PreviousConnectionId)
+		return
+	}
+	// When the selector still has no best peer, clear whichever connection the
+	// chainsync registry currently considers active. A coalesced newer event may
+	// name a different previous peer after intervening switch events were
+	// skipped during the same lifecycle operation; compare-clearing only the
+	// newest event's ID would leave that older active connection behind.
+	if active := n.chainsyncState.GetClientConnId(); active != nil {
+		n.chainsyncState.ClearClientConnId(*active)
+	}
+}
+
+// startChainSelectedNoneWorker starts the one node-owned retry worker before
+// ChainSelector subscriptions can publish selected-to-none transitions.
+func (n *Node) startChainSelectedNoneWorker(ctx context.Context) {
+	n.chainSelectedNoneMu.Lock()
+	defer n.chainSelectedNoneMu.Unlock()
+	if n.chainSelectedNoneWorkerDone != nil {
+		return
+	}
+	wake := make(chan struct{}, 1)
+	done := make(chan struct{})
+	n.chainSelectedNoneWake = wake
+	n.chainSelectedNoneWorkerDone = done
+	go n.runChainSelectedNoneWorker(ctx, wake, done)
+}
+
+// waitChainSelectedNoneWorker waits for the context-owned worker to exit. The
+// caller must cancel the worker context first.
+func (n *Node) waitChainSelectedNoneWorker() {
+	n.chainSelectedNoneMu.Lock()
+	done := n.chainSelectedNoneWorkerDone
+	n.chainSelectedNoneMu.Unlock()
+	if done != nil {
+		<-done
+	}
+}
+
+func (n *Node) deferChainSelectedNoneEvent(
+	e chainselection.ChainSelectedNoneEvent,
+) {
+	n.chainSelectedNoneMu.Lock()
+	// Retain only the newest transition. The locked handler rechecks current
+	// ChainSelector state, so an older transition cannot erase a later
+	// selection; if selection is still empty, it clears the registry's current
+	// active connection even when a dropped intermediate switch made that differ
+	// from the newest event's previous connection.
+	n.chainSelectedNonePending = e
+	n.chainSelectedNonePendingSet = true
+	wake := n.chainSelectedNoneWake
+	n.chainSelectedNoneMu.Unlock()
+	if wake == nil {
+		n.config.logger.Error(
+			"cannot defer selected-to-none event: worker is not running",
+		)
+		return
+	}
+	select {
+	case wake <- struct{}{}:
+	default:
+		// A queued wake already covers the coalesced pending transition.
+	}
+}
+
+func (n *Node) runChainSelectedNoneWorker(
+	ctx context.Context,
+	wake <-chan struct{},
+	done chan<- struct{},
+) {
+	defer close(done)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-wake:
+		}
+
+		retryInterval := chainSelectedNoneInitialRetryInterval
+		for {
+			n.chainSelectedNoneMu.Lock()
+			hasPending := n.chainSelectedNonePendingSet
+			n.chainSelectedNoneMu.Unlock()
+			if !hasPending {
+				break
+			}
+			if !n.liveLifecycleMu.TryLock() {
+				retry := time.NewTimer(retryInterval)
+				select {
+				case <-ctx.Done():
+					if !retry.Stop() {
+						select {
+						case <-retry.C:
+						default:
+						}
+					}
+					return
+				case <-retry.C:
+				}
+				retryInterval = nextChainSelectedNoneRetryInterval(
+					retryInterval,
+					false,
+				)
+				continue
+			}
+			// A successful acquisition ends this contention period. If another
+			// lifecycle operation takes the lock before a newly queued transition
+			// is drained, ramp that fresh contention from the initial interval.
+			retryInterval = nextChainSelectedNoneRetryInterval(
+				retryInterval,
+				true,
+			)
+
+			n.chainSelectedNoneMu.Lock()
+			pending := n.chainSelectedNonePending
+			n.chainSelectedNonePendingSet = false
+			n.chainSelectedNoneMu.Unlock()
+			n.handleChainSelectedNoneEventLocked(pending)
+			n.liveLifecycleMu.Unlock()
+		}
+	}
+}
+
+func nextChainSelectedNoneRetryInterval(
+	current time.Duration,
+	lockAcquired bool,
+) time.Duration {
+	if lockAcquired {
+		return chainSelectedNoneInitialRetryInterval
+	}
+	if current >= chainSelectedNoneMaxRetryInterval/2 {
+		return chainSelectedNoneMaxRetryInterval
+	}
+	return 2 * current
 }
 
 // nodeRecyclerComponents adapts the node's swappable storage/networking
@@ -218,6 +405,22 @@ type nodeRecyclerComponents struct {
 // components through.
 func (n *Node) recyclerComponents() chainsyncrecycler.ComponentProvider {
 	return nodeRecyclerComponents{node: n}
+}
+
+// withLiveChainsyncState runs fn while the chainsync state is stable across a
+// live database restore or truncate. Callers must tolerate a false result:
+// lifecycle work holds liveLifecycleMu while it discards and rebuilds the
+// state, and blocking a background ledger callback there can deadlock the
+// quiesce that waits for the callback's goroutine to exit.
+func (n *Node) withLiveChainsyncState(fn func(*chainsync.State)) {
+	if !n.liveLifecycleMu.TryLock() {
+		return
+	}
+	defer n.liveLifecycleMu.Unlock()
+	if n.chainsyncState == nil {
+		return
+	}
+	fn(n.chainsyncState)
 }
 
 // WithLiveComponents runs fn against the node's current ledger, chainsync

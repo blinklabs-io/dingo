@@ -124,6 +124,8 @@ func signTestGenesisCertificate(
 }
 
 func TestBootstrap(t *testing.T) {
+	t.Parallel()
+
 	archiveData := createChunkArchive(t)
 
 	snapshots := []SnapshotListItem{
@@ -191,7 +193,11 @@ func TestBootstrap(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.Equal(t, "a123456789abcdef0a123456789abcdef0a123456789abcdef0a123456789abc", result.Snapshot.Digest)
+	require.Equal(
+		t,
+		"a123456789abcdef0a123456789abcdef0a123456789abcdef0a123456789abc",
+		result.Snapshot.Digest,
+	)
 	require.NotEmpty(t, result.ImmutableDir)
 	require.NotEmpty(t, result.ArchivePath)
 	assert.Greater(
@@ -206,6 +212,8 @@ func TestBootstrap(t *testing.T) {
 }
 
 func TestBootstrapUsesDigestSpecificExtractDir(t *testing.T) {
+	t.Parallel()
+
 	archiveData := createChunkArchive(t)
 	digest := "b123456789abcdef0b123456789abcdef0b123456789abcdef0b123456789abc"
 	snapshots := []SnapshotListItem{
@@ -272,6 +280,8 @@ func TestBootstrapUsesDigestSpecificExtractDir(t *testing.T) {
 }
 
 func TestBootstrapCertVerifyNoCertHash(t *testing.T) {
+	t.Parallel()
+
 	genesisVerificationKey, _ := testGenesisKeyPair(t)
 	snapshots := []SnapshotListItem{
 		{
@@ -305,6 +315,8 @@ func TestBootstrapCertVerifyNoCertHash(t *testing.T) {
 }
 
 func TestBootstrapNoSnapshots(t *testing.T) {
+	t.Parallel()
+
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -324,6 +336,8 @@ func TestBootstrapNoSnapshots(t *testing.T) {
 }
 
 func TestBootstrapNoLocations(t *testing.T) {
+	t.Parallel()
+
 	snapshots := []SnapshotListItem{
 		{
 			SnapshotBase: SnapshotBase{
@@ -356,6 +370,8 @@ func TestBootstrapNoLocations(t *testing.T) {
 }
 
 func TestBootstrapInvalidGenesisVerificationKey(t *testing.T) {
+	t.Parallel()
+
 	_, err := Bootstrap(context.Background(), BootstrapConfig{
 		Network:                "preview",
 		GenesisVerificationKey: "not-hex",
@@ -370,6 +386,8 @@ func TestBootstrapInvalidGenesisVerificationKey(t *testing.T) {
 }
 
 func TestBootstrapRequiresGenesisVerificationKey(t *testing.T) {
+	t.Parallel()
+
 	for _, backend := range []string{BackendV1, BackendV2} {
 		for _, testKey := range []struct {
 			name  string
@@ -411,6 +429,8 @@ func TestBootstrapRequiresGenesisVerificationKey(t *testing.T) {
 func TestBootstrapWithoutVerificationAllowsMissingGenesisVerificationKey(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	for _, backend := range []string{BackendV1, BackendV2} {
 		t.Run(backend, func(t *testing.T) {
 			var requests atomic.Int32
@@ -442,6 +462,8 @@ func TestBootstrapWithoutVerificationAllowsMissingGenesisVerificationKey(
 }
 
 func TestBootstrapUnknownNetwork(t *testing.T) {
+	t.Parallel()
+
 	_, err := Bootstrap(context.Background(), BootstrapConfig{
 		Network: "unknown_network",
 	})
@@ -453,6 +475,8 @@ func TestBootstrapUnknownNetwork(t *testing.T) {
 // known networks with a bounded hex digest and rejects everything else,
 // including path-separator/traversal sequences in either field.
 func TestValidateSnapshotIdentity(t *testing.T) {
+	t.Parallel()
+
 	validDigest := "abc123def4567890abc123def4567890abc123def4567890abc123def4567890"
 	tests := []struct {
 		name            string
@@ -521,6 +545,8 @@ func TestValidateSnapshotIdentity(t *testing.T) {
 // snapshot.Network is rejected by Bootstrap before the archive download
 // (and thus any filesystem access derived from that field) is attempted.
 func TestBootstrapRejectsPathTraversalInSnapshotNetwork(t *testing.T) {
+	t.Parallel()
+
 	var downloadHit atomic.Bool
 	snapshots := []SnapshotListItem{
 		{
@@ -575,6 +601,8 @@ func TestBootstrapRejectsPathTraversalInSnapshotNetwork(t *testing.T) {
 // snapshot.Digest containing a path-traversal sequence must be rejected
 // before it can influence the cache-check or download path.
 func TestBootstrapRejectsPathTraversalInSnapshotDigest(t *testing.T) {
+	t.Parallel()
+
 	var downloadHit atomic.Bool
 	snapshots := []SnapshotListItem{
 		{
@@ -625,6 +653,8 @@ func TestBootstrapRejectsPathTraversalInSnapshotDigest(t *testing.T) {
 }
 
 func TestBootstrapResultCleanup(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	archivePath := filepath.Join(tmpDir, "test.tar.zst")
 	err := os.WriteFile(archivePath, []byte("data"), 0o640)
@@ -658,6 +688,8 @@ func TestBootstrapResultCleanup(t *testing.T) {
 }
 
 func TestBootstrapResultCleanupRemovesTempDir(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 	autoTempDir := filepath.Join(tmpDir, "auto-temp")
 	require.NoError(t, os.MkdirAll(autoTempDir, 0o750))
@@ -681,6 +713,8 @@ func TestBootstrapResultCleanupRemovesTempDir(t *testing.T) {
 }
 
 func TestFindImmutableDir(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		setup    func(t *testing.T, baseDir string)
@@ -837,6 +871,8 @@ func TestFindImmutableDir(t *testing.T) {
 }
 
 func TestVerifyCertificateChainAllowsDeepChains(t *testing.T) {
+	t.Parallel()
+
 	const chainDepth = 150
 	const snapshotDigest = "snapshot-digest-123"
 	_, _, g1, g2 := bls12381.Generators()
@@ -927,6 +963,8 @@ func TestVerifyCertificateChainAllowsDeepChains(t *testing.T) {
 func TestVerifyCertificateChainWithModeSTMRejectsContentHashMismatch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	_, _, g1, g2 := bls12381.Generators()
 	g1Bytes := g1.Bytes()
 	g2Bytes := g2.Bytes()
@@ -993,6 +1031,8 @@ func TestVerifyCertificateChainWithModeSTMRejectsContentHashMismatch(
 }
 
 func TestVerifyCertificateChainWithModeReturnsDetails(t *testing.T) {
+	t.Parallel()
+
 	_, _, g1, g2 := bls12381.Generators()
 	certs := map[string]Certificate{
 		"leaf": {
@@ -1091,6 +1131,8 @@ func TestVerifyCertificateChainWithModeReturnsDetails(t *testing.T) {
 }
 
 func TestBootstrapRejectsUnexpectedSignedEntityKind(t *testing.T) {
+	t.Parallel()
+
 	genesisVerificationKey, genesisPrivateKey := testGenesisKeyPair(t)
 	_, _, _, g2 := bls12381.Generators()
 	g2Hex := hex.EncodeToString(g2.Marshal())
@@ -1233,6 +1275,8 @@ func TestBootstrapRejectsUnexpectedSignedEntityKind(t *testing.T) {
 // then skips extraction entirely and loads the chain from the link's target,
 // which is the outcome the symlink refusal exists to prevent.
 func TestFindImmutableDirRefusesSymlinkedExtractDir(t *testing.T) {
+	t.Parallel()
+
 	root := t.TempDir()
 	outside := filepath.Join(root, "outside")
 	require.NoError(t, os.MkdirAll(outside, 0o750))
@@ -1261,6 +1305,8 @@ func TestFindImmutableDirRefusesSymlinkedExtractDir(t *testing.T) {
 // replacement's entries, and a name taken from there is checked against the
 // tree that was opened while resolving into the replacement.
 func TestFindImmutableDirRefusesSwappedExtractDir(t *testing.T) {
+	t.Parallel()
+
 	parent := t.TempDir()
 	extractDir := filepath.Join(parent, "immutable-abc123")
 	ours := filepath.Join(extractDir, "snapshot-data", "immutable")
@@ -1291,6 +1337,8 @@ func TestFindImmutableDirRefusesSwappedExtractDir(t *testing.T) {
 // produced by the lookup that verified it rather than assembled by the caller,
 // so the two cannot disagree.
 func TestChunkDirUnderReturnsVerifiedPath(t *testing.T) {
+	t.Parallel()
+
 	extractDir := t.TempDir()
 	immutable := filepath.Join(extractDir, "immutable")
 	require.NoError(t, os.MkdirAll(immutable, 0o750))
@@ -1308,6 +1356,8 @@ func TestChunkDirUnderReturnsVerifiedPath(t *testing.T) {
 // as the v1 one: the extraction directory is derived inside the download
 // directory, so a symlink there is planted content rather than a layout choice.
 func TestChunkDirUnderRefusesSymlinkedBase(t *testing.T) {
+	t.Parallel()
+
 	root := t.TempDir()
 	outside := filepath.Join(root, "outside", "immutable")
 	require.NoError(t, os.MkdirAll(outside, 0o750))
@@ -1425,6 +1475,8 @@ func chunkDirUnder(base, rel string) *vettedDir {
 // directly in TestValidateSnapshotDigest. What matters here is the property
 // both exist for: the refusal lands before the digest names anything.
 func TestBootstrapRefusesADigestThatNamesSomewhereElse(t *testing.T) {
+	t.Parallel()
+
 	archiveData := createChunkArchive(t)
 
 	for _, digest := range []string{
@@ -1443,9 +1495,12 @@ func TestBootstrapRefusesADigestThatNamesSomewhereElse(t *testing.T) {
 	} {
 		t.Run(digest, func(t *testing.T) {
 			snapshots := []SnapshotListItem{{SnapshotBase: SnapshotBase{
-				Digest:               digest,
-				Network:              "preprod",
-				Beacon:               Beacon{Epoch: 270, ImmutableFileNumber: 5320},
+				Digest:  digest,
+				Network: "preprod",
+				Beacon: Beacon{
+					Epoch:               270,
+					ImmutableFileNumber: 5320,
+				},
 				Size:                 int64(len(archiveData)),
 				CompressionAlgorithm: "zstandard",
 			}}}
@@ -1517,6 +1572,8 @@ func TestBootstrapRefusesADigestThatNamesSomewhereElse(t *testing.T) {
 // rule and say nothing about this one. The guard is the constraint that
 // survives a loosened format rule, so it is worth holding to independently.
 func TestValidateSnapshotDigest(t *testing.T) {
+	t.Parallel()
+
 	for _, digest := range []string{
 		"",
 		"/../..",
@@ -1554,6 +1611,8 @@ func TestValidateSnapshotDigest(t *testing.T) {
 // Absent locations skip the download entirely, which does not exercise the
 // branch that has to decide whether an ancillary error is fatal.
 func TestBootstrapSurvivesAnUnavailableAncillaryArchive(t *testing.T) {
+	t.Parallel()
+
 	assertNoAncillary := func(t *testing.T, result *BootstrapResult) {
 		t.Helper()
 		assert.Nil(t, result.AncillaryRoot,

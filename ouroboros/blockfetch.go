@@ -126,7 +126,12 @@ func (o *Ouroboros) blockfetchClientConnOpts() []blockfetch.BlockFetchOptionFunc
 func (o *Ouroboros) decodeBlockfetchBlock(
 	blockType uint,
 	raw []byte,
-) (gledger.Block, error) {
+) (block gledger.Block, err error) {
+	defer func() {
+		if err == nil && block != nil {
+			block.Hash()
+		}
+	}()
 	if o.config.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic &&
 		blockType == gledger.BlockTypeConway {
 		return models.DecodeConwayBlock(raw)
@@ -196,6 +201,12 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 				err,
 			)
 		}
+		o.blockfetchRecordNoBlocksAndMaybeClose(
+			ctx.ConnectionId,
+			start,
+			"blockfetch: closing stuck peer after repeated inverted range requests",
+			"blockfetch: peer stuck on inverted range",
+		)
 		return nil
 	}
 	// Validate that the requested slot range is not too large

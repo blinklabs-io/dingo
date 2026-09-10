@@ -30,6 +30,11 @@ import (
 // anything else are rejected by the ledger's own reward-input validator.
 const credentialHashSize = 28
 
+const (
+	maxRewardSeedFailurePools       = 16
+	maxRewardSeedFailurePoolKeySize = 64
+)
+
 // rewardInputBundle is one epoch's reward-calculation basis, derived from a
 // single imported stake snapshot.
 type rewardInputBundle struct {
@@ -193,12 +198,14 @@ func deriveRewardInputs(
 					int64(den),            // #nosec G115 -- bounded
 				),
 			},
-			Pledge:                     types.Uint64(pool.Pledge),
-			Cost:                       types.Uint64(pool.Cost),
-			DelegatedStake:             types.Uint64(agg.delegated),
-			OwnerStake:                 types.Uint64(agg.ownerStake),
-			DelegatorCount:             agg.delegators,
-			RewardAccount:              append([]byte(nil), pool.RewardAccount...),
+			Pledge:         types.Uint64(pool.Pledge),
+			Cost:           types.Uint64(pool.Cost),
+			DelegatedStake: types.Uint64(agg.delegated),
+			OwnerStake:     types.Uint64(agg.ownerStake),
+			DelegatorCount: agg.delegators,
+			RewardAccount: append(
+				[]byte(nil),
+				pool.RewardAccount...),
 			RewardAccountCredentialTag: pool.RewardAccountCredentialTag,
 			CapturedSlot:               capturedSlot,
 			BoundarySlot:               boundarySlot,
@@ -275,9 +282,9 @@ func (b *rewardInputBundle) validate() error {
 		missingRewardAccounts = append(
 			missingRewardAccounts,
 			fmt.Sprintf(
-				"derived pool input for %x has no reward account "+
+				"derived pool input for %s has no reward account "+
 					"(%d lovelace delegated stake)",
-				pool.PoolKeyHash,
+				diagnosticRewardPoolKey(pool.PoolKeyHash),
 				uint64(pool.DelegatedStake),
 			),
 		)
@@ -286,8 +293,7 @@ func (b *rewardInputBundle) validate() error {
 		// Parameter maps are unordered. A deterministic aggregate makes a
 		// repeated import report the same complete offender list and avoids
 		// hiding all but whichever pool happened to be visited first.
-		sort.Strings(missingRewardAccounts)
-		return errors.New(strings.Join(missingRewardAccounts, "; "))
+		return errors.New(boundRewardSeedFailureReasons(missingRewardAccounts))
 	}
 
 	poolStake := make(map[string]uint64, len(b.poolInputs))
@@ -383,6 +389,8 @@ func (b *rewardInputBundle) validate() error {
 // rewardInputStore is the slice of the metadata store this seeding needs.
 type rewardInputStore interface {
 	GetRewardSnapshot(uint64, string, types.Txn) (*models.RewardSnapshot, error)
+	SaveRewardSeedFailure(uint64, string, string, uint64, types.Txn) error
+	DeleteRewardSeedFailure(uint64, string, types.Txn) error
 	SaveRewardSnapshot(*models.RewardSnapshot, types.Txn) error
 	DeleteProvisionalRewardSnapshot(uint64, string, types.Txn) error
 	SaveRewardPoolInputs([]*models.RewardPoolInput, types.Txn) error
@@ -456,6 +464,13 @@ func seedImportedRewardInputs(
 			)
 		}
 		if existing != nil && existing.Authoritative {
+			if err := store.DeleteRewardSeedFailure(c.epoch, "mark", txn); err != nil {
+				return fmt.Errorf(
+					"clearing prior reward seed failure for epoch %d: %w",
+					c.epoch,
+					err,
+				)
+			}
 			if logger != nil {
 				logger.Info(
 					"not seeding reward inputs for an imported epoch because an authoritative basis already exists",
@@ -539,9 +554,37 @@ func seedImportedRewardInputs(
 			0,
 		)
 		if bundle == nil || len(bundle.poolInputs) == 0 {
+			reason := emptyRewardSeedFailureReason(c.snap)
+			if saveErr := store.SaveRewardSeedFailure(
+				c.epoch, "mark", reason, capturedSlot, txn,
+			); saveErr != nil {
+				return fmt.Errorf(
+					"saving reward seed failure for epoch %d: %w",
+					c.epoch,
+					saveErr,
+				)
+			}
+			if logger != nil {
+				logger.Warn(
+					"not seeding reward inputs for an imported epoch: the derived basis contains no pool inputs, so that epoch's reward round will be skipped and its rewards never credited",
+					"component", "ledgerstate",
+					"epoch", c.epoch,
+					"snapshot", c.name,
+					"error", reason,
+				)
+			}
 			continue
 		}
 		if err := bundle.validate(); err != nil {
+			if saveErr := store.SaveRewardSeedFailure(
+				c.epoch, "mark", err.Error(), capturedSlot, txn,
+			); saveErr != nil {
+				return fmt.Errorf(
+					"saving reward seed failure for epoch %d: %w",
+					c.epoch,
+					saveErr,
+				)
+			}
 			if logger != nil {
 				logger.Warn(
 					"not seeding reward inputs for an imported epoch: the derived basis does not reconcile, so that epoch's reward round will be skipped and its rewards never credited",
@@ -564,6 +607,15 @@ func seedImportedRewardInputs(
 						"checking protocol parameters for imported reward epoch %d: %w",
 						c.epoch,
 						err,
+					)
+				}
+				if saveErr := store.SaveRewardSeedFailure(
+					c.epoch, "mark", err.Error(), capturedSlot, txn,
+				); saveErr != nil {
+					return fmt.Errorf(
+						"saving reward seed failure for epoch %d: %w",
+						c.epoch,
+						saveErr,
 					)
 				}
 				if logger != nil {
@@ -601,6 +653,13 @@ func seedImportedRewardInputs(
 				"seeding reward stake inputs for epoch %d: %w", c.epoch, err,
 			)
 		}
+		if err := store.DeleteRewardSeedFailure(c.epoch, "mark", txn); err != nil {
+			return fmt.Errorf(
+				"clearing reward seed failure for epoch %d: %w",
+				c.epoch,
+				err,
+			)
+		}
 		if logger != nil {
 			logger.Info(
 				"seeded reward inputs for an imported epoch",
@@ -613,6 +672,73 @@ func seedImportedRewardInputs(
 		}
 	}
 	return nil
+}
+
+func emptyRewardSeedFailureReason(snap *ParsedSnapShot) string {
+	const generic = "derived reward basis contains no pool inputs"
+	if snap == nil {
+		return generic
+	}
+	referenced := referencedRewardPools(snap)
+	if len(referenced) == 0 {
+		return generic
+	}
+	pools := make([]string, 0, len(referenced))
+	for pool := range referenced {
+		pools = append(pools, pool)
+	}
+	sort.Strings(pools)
+	reasons := make([]string, 0, len(pools))
+	for _, pool := range pools {
+		pool = boundRewardSeedFailurePoolKey(pool)
+		reasons = append(reasons, fmt.Sprintf("pool %s has no parameters", pool))
+	}
+	return generic + ": " + boundRewardSeedFailureReasons(reasons)
+}
+
+func boundRewardSeedFailureReasons(reasons []string) string {
+	sort.Strings(reasons)
+	shown := min(len(reasons), maxRewardSeedFailurePools)
+	bounded := append([]string(nil), reasons[:shown]...)
+	if omitted := len(reasons) - shown; omitted > 0 {
+		bounded = append(
+			bounded,
+			fmt.Sprintf("%d additional pools omitted", omitted),
+		)
+	}
+	return strings.Join(bounded, "; ")
+}
+
+func boundRewardSeedFailurePoolKey(pool string) string {
+	if len(pool) > maxRewardSeedFailurePoolKeySize {
+		return pool[:maxRewardSeedFailurePoolKeySize] + "..."
+	}
+	return pool
+}
+
+func diagnosticRewardPoolKey(poolKey []byte) string {
+	return boundRewardSeedFailurePoolKey(hex.EncodeToString(poolKey))
+}
+
+// referencedRewardPools returns the distinct pools with positive delegated
+// stake in a snapshot. Keeping this selection in one place prevents the
+// parameter resolver and diagnostics from drifting apart.
+func referencedRewardPools(snap *ParsedSnapShot) map[string]struct{} {
+	referenced := make(map[string]struct{})
+	if snap == nil {
+		return referenced
+	}
+	for credential, stake := range snap.Stake {
+		if stake == 0 {
+			continue
+		}
+		poolKey := snap.Delegations[credential]
+		if len(poolKey) == 0 {
+			continue
+		}
+		referenced[hex.EncodeToString(poolKey)] = struct{}{}
+	}
+	return referenced
 }
 
 // errRewardParamsWindowUnknown marks an epoch whose parameter lookup window
@@ -682,13 +808,17 @@ func rewardPoolParamsFromRegistrations(
 			owners = append(owners, append([]byte(nil), owner.KeyHash...))
 		}
 		params[hex.EncodeToString(pool.PoolKeyHash)] = &ParsedPool{
-			PoolKeyHash:                append([]byte(nil), pool.PoolKeyHash...),
-			VrfKeyHash:                 append([]byte(nil), pool.VrfKeyHash...),
-			Pledge:                     uint64(pool.Pledge),
-			Cost:                       uint64(pool.Cost),
-			MarginNum:                  num,
-			MarginDen:                  den,
-			RewardAccount:              append([]byte(nil), pool.RewardAccount...),
+			PoolKeyHash: append(
+				[]byte(nil),
+				pool.PoolKeyHash...),
+			VrfKeyHash: append([]byte(nil), pool.VrfKeyHash...),
+			Pledge:     uint64(pool.Pledge),
+			Cost:       uint64(pool.Cost),
+			MarginNum:  num,
+			MarginDen:  den,
+			RewardAccount: append(
+				[]byte(nil),
+				pool.RewardAccount...),
 			RewardAccountCredentialTag: pool.RewardAccountCredentialTag,
 			Owners:                     owners,
 		}
@@ -724,17 +854,7 @@ func effectiveRewardPoolParams(
 	snap *ParsedSnapShot,
 	registered map[string]*ParsedPool,
 ) map[string]*ParsedPool {
-	referenced := make(map[string]struct{}, len(snap.Delegations))
-	for credential, stake := range snap.Stake {
-		if stake == 0 {
-			continue
-		}
-		poolKey := snap.Delegations[credential]
-		if len(poolKey) == 0 {
-			continue
-		}
-		referenced[hex.EncodeToString(poolKey)] = struct{}{}
-	}
+	referenced := referencedRewardPools(snap)
 
 	effective := make(map[string]*ParsedPool, len(referenced))
 	for key := range referenced {

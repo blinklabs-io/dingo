@@ -530,18 +530,30 @@ func buildDingoConfig(
 		dingo.WithBarkPort(cfg.BarkPort),
 		dingo.WithBarkHost(cfg.BarkHost),
 		dingo.WithBarkClientCAFilePath(cfg.BarkClientCAFilePath),
+		dingo.WithBarkOperatorCertificateFingerprints(
+			cfg.BarkOperatorCertificateFingerprints,
+		),
 		dingo.WithHistoryExpiry(dingo.HistoryExpiryConfig{
 			Enabled:   cfg.HistoryExpiry.Enabled,
 			Frequency: cfg.HistoryExpiry.Frequency,
 		}),
 		dingo.WithKoiosParity(dingo.KoiosParityConfig{
-			Enabled:    cfg.KoiosParity.Enabled,
-			Network:    cfg.KoiosParity.Network,
-			CachePath:  cfg.KoiosParity.CachePath,
-			APIKey:     cfg.KoiosParity.APIKey,
-			Strict:     cfg.KoiosParity.Strict,
-			GraceHours: cfg.KoiosParity.GraceHours,
-			Accounts:   &cfg.KoiosParity.Accounts,
+			Enabled:           cfg.KoiosParity.Enabled,
+			Network:           cfg.KoiosParity.Network,
+			CachePath:         cfg.KoiosParity.CachePath,
+			APIKey:            cfg.KoiosParity.APIKey,
+			BaseURL:           cfg.KoiosParity.BaseURL,
+			AllowInsecureHTTP: cfg.KoiosParity.AllowInsecureHTTP,
+			Strict:            cfg.KoiosParity.Strict,
+			GraceHours:        cfg.KoiosParity.GraceHours,
+			Accounts:          &cfg.KoiosParity.Accounts,
+			// AccountChunkSize and AccountChunkMaxBytes were omitted here
+			// while every other KoiosParity field was forwarded, so
+			// --koios-parity-account-chunk-size and
+			// --koios-parity-account-chunk-max-bytes silently did nothing on
+			// the serve path and the package defaults always won.
+			AccountChunkSize:     cfg.KoiosParity.AccountChunkSize,
+			AccountChunkMaxBytes: cfg.KoiosParity.AccountChunkMaxBytes,
 		}),
 		dingo.WithCORSAllowedOrigins(cfg.CORSAllowedOrigins),
 		dingo.WithOffchainMetadataConfig(
@@ -694,6 +706,5 @@ func buildDingoConfig(
 		dingo.WithLeiosVoteSigningKeyFile(
 			cfg.LeiosVoteSigningKeyFile,
 		),
-		dingo.WithLeiosVoterPublicKeys(cfg.LeiosVoterPublicKeys),
 	)
 }

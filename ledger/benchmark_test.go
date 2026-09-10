@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 
@@ -183,7 +185,11 @@ func BenchmarkUtxoLookupByAddressNoData(b *testing.B) {
 
 	// Benchmark lookup (on empty database for now)
 	for b.Loop() {
-		_, err := db.UtxosByAddress([]ledger.Address{testAddr}, nil)
+		_, err := db.UtxosByAddress(
+			[]ledger.Address{testAddr},
+			database.MaxUtxosByAddressResults,
+			nil,
+		)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -223,7 +229,11 @@ func BenchmarkUtxoLookupByAddressRealData(b *testing.B) {
 
 	// Benchmark lookup against real seeded data
 	for b.Loop() {
-		_, err := db.UtxosByAddress([]ledger.Address{testAddr}, nil)
+		_, err := db.UtxosByAddress(
+			[]ledger.Address{testAddr},
+			database.MaxUtxosByAddressResults,
+			nil,
+		)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -2103,12 +2113,12 @@ func BenchmarkBlockfetchNearTipThroughput(b *testing.B) {
 			Type:  block.Type,
 		}
 
-		if err := ledgerState.handleEventBlockfetchBlock(evt); err != nil {
+		if err := ledgerState.handleEventBlockfetchBlockDeferred(evt, nil); err != nil {
 			b.Fatalf("handleEventBlockfetchBlock failed: %v", err)
 		}
 		// Flush after each block to simulate near-tip behavior where
 		// blocks are committed individually rather than batched.
-		if err := ledgerState.flushPendingBlockfetchBlocks(); err != nil {
+		if err := ledgerState.flushPendingBlockfetchBlocksDeferred(nil); err != nil {
 			b.Fatalf("flushPendingBlockfetchBlocks failed: %v", err)
 		}
 
@@ -2168,10 +2178,10 @@ func BenchmarkBlockfetchNearTipThroughputPredecoded(b *testing.B) {
 		}
 		blockIdx++
 
-		if err := ledgerState.handleEventBlockfetchBlock(evt); err != nil {
+		if err := ledgerState.handleEventBlockfetchBlockDeferred(evt, nil); err != nil {
 			b.Fatalf("handleEventBlockfetchBlock failed: %v", err)
 		}
-		if err := ledgerState.flushPendingBlockfetchBlocks(); err != nil {
+		if err := ledgerState.flushPendingBlockfetchBlocksDeferred(nil); err != nil {
 			b.Fatalf("flushPendingBlockfetchBlocks failed: %v", err)
 		}
 
@@ -2234,7 +2244,7 @@ func BenchmarkBlockfetchNearTipFlushOnlyPredecoded(b *testing.B) {
 		)
 		blockIdx++
 
-		if err := ledgerState.flushPendingBlockfetchBlocks(); err != nil {
+		if err := ledgerState.flushPendingBlockfetchBlocksDeferred(nil); err != nil {
 			b.Fatalf("flushPendingBlockfetchBlocks failed: %v", err)
 		}
 
@@ -2302,10 +2312,10 @@ func BenchmarkBlockfetchNearTipQueuedHeaderPredecoded(b *testing.B) {
 			Type:  uint(block.Type()),
 		}
 
-		if err := ledgerState.handleEventBlockfetchBlock(evt); err != nil {
+		if err := ledgerState.handleEventBlockfetchBlockDeferred(evt, nil); err != nil {
 			b.Fatalf("handleEventBlockfetchBlock failed: %v", err)
 		}
-		if err := ledgerState.flushPendingBlockfetchBlocks(); err != nil {
+		if err := ledgerState.flushPendingBlockfetchBlocksDeferred(nil); err != nil {
 			b.Fatalf("flushPendingBlockfetchBlocks failed: %v", err)
 		}
 
@@ -2363,15 +2373,27 @@ func BenchmarkVerifyBlockHeader(b *testing.B) {
 				CardanoNodeConfig: newTestShelleyGenesisCfg(b),
 				Logger:            benchmarkDiscardLogger,
 			},
-			epochNonceHexCache: make(map[uint64]string),
+			epochNonceHexCache: make(map[uint64]epochNonceHexCacheEntry),
 		}
+		// The epoch cache is read through the published consensus snapshot,
+		// not the raw field, so it must be published before use even for
+		// this single-threaded literal construction.
+		ledgerState.publishSnapshotsLocked()
 
 		b.ReportAllocs()
 		b.ResetTimer()
 
 		for i := 0; b.Loop(); i++ {
-			if err := ledgerState.verifyBlockHeaderCrypto(
+			// verifyBlockHeaderStatelessCrypto isolates the cryptographic
+			// path this benchmark measures. Keep epoch cache advancement
+			// disabled because it also requires ls.db, which this literal
+			// LedgerState intentionally does not provide. Likewise,
+			// verifyBlockHeaderCrypto runs verifyBlockHeaderState, which
+			// looks up the pool's registered VRF key and stake snapshot
+			// through ls.db.
+			if _, err := ledgerState.verifyBlockHeaderStatelessCrypto(
 				testBlocks[i%len(testBlocks)].block,
+				false,
 			); err != nil {
 				b.Fatal(err)
 			}
@@ -2445,7 +2467,7 @@ func BenchmarkBlockfetchVerifiedHeaderDispatch(b *testing.B) {
 	b.ResetTimer()
 
 	for b.Loop() {
-		if err := ledgerState.handleEventBlockfetchBlock(evt); err != nil {
+		if err := ledgerState.handleEventBlockfetchBlockDeferred(evt, nil); err != nil {
 			b.Fatal(err)
 		}
 		ledgerState.pendingBlockfetchEvents = ledgerState.pendingBlockfetchEvents[:0]
@@ -2632,6 +2654,19 @@ func loadBatchProcessingFixture(
 	return seedModels, batchBlocks, rawBlocks, batchSize
 }
 
+// blockNumberFollowsParent mirrors chain.blockNumberContiguous, which is
+// unexported: a block number must be exactly parent+1, except a Byron-era
+// epoch boundary block which legitimately repeats its parent's number.
+func blockNumberFollowsParent(
+	eraId uint8,
+	blockNumber, parentNumber uint64,
+) bool {
+	if blockNumber == parentNumber+1 {
+		return true
+	}
+	return eraId == byron.EraIdByron && blockNumber == parentNumber
+}
+
 func loadBlockProcessingFixture(
 	b *testing.B,
 ) ([]models.Block, []*immutable.Block) {
@@ -2646,6 +2681,10 @@ func loadBlockProcessingFixture(
 
 	const seedCount = 5
 	const blockCount = blockProcessingBenchmarkFixtureBlockCount
+
+	var prevHash []byte
+	var prevNumber uint64
+	var havePrev bool
 
 	seedModels := make([]models.Block, 0, seedCount)
 	for len(seedModels) < seedCount {
@@ -2662,15 +2701,42 @@ func loadBlockProcessingFixture(
 		if err != nil {
 			continue
 		}
+		blockNumber := ledgerBlock.BlockNumber()
+		prevHashBytes := ledgerBlock.PrevHash().Bytes()
+		if havePrev {
+			if !bytes.Equal(prevHashBytes, prevHash) {
+				b.Fatalf(
+					"seed block %x has prev hash %x that does not match parent hash %x",
+					block.Hash,
+					prevHashBytes,
+					prevHash,
+				)
+			}
+			if !blockNumberFollowsParent(
+				ledgerBlock.Era().Id,
+				blockNumber,
+				prevNumber,
+			) {
+				b.Fatalf(
+					"seed block %x claims block number %d that is not contiguous with parent %d",
+					block.Hash,
+					blockNumber,
+					prevNumber,
+				)
+			}
+		}
 		seedModels = append(seedModels, models.Block{
 			ID:       uint64(len(seedModels) + 1),
 			Slot:     block.Slot,
 			Hash:     slices.Clone(block.Hash),
-			Number:   0,
+			Number:   blockNumber,
 			Type:     uint(ledgerBlock.Type()),
-			PrevHash: ledgerBlock.PrevHash().Bytes(),
+			PrevHash: prevHashBytes,
 			Cbor:     slices.Clone(block.Cbor),
 		})
+		prevHash = slices.Clone(block.Hash)
+		prevNumber = blockNumber
+		havePrev = true
 	}
 
 	blocks := make([]*immutable.Block, 0, blockCount)
@@ -2682,6 +2748,32 @@ func loadBlockProcessingFixture(
 		if block == nil {
 			b.Skip("insufficient blocks available for throughput benchmark")
 		}
+		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		if err != nil {
+			continue
+		}
+		blockNumber := ledgerBlock.BlockNumber()
+		prevHashBytes := ledgerBlock.PrevHash().Bytes()
+		if !bytes.Equal(prevHashBytes, prevHash) {
+			b.Fatalf(
+				"timed block %x has prev hash %x that does not match parent hash %x",
+				block.Hash,
+				prevHashBytes,
+				prevHash,
+			)
+		}
+		if !blockNumberFollowsParent(
+			ledgerBlock.Era().Id,
+			blockNumber,
+			prevNumber,
+		) {
+			b.Fatalf(
+				"timed block %x claims block number %d that is not contiguous with parent %d",
+				block.Hash,
+				blockNumber,
+				prevNumber,
+			)
+		}
 		tmpBlock := &immutable.Block{
 			Slot: block.Slot,
 			Type: block.Type,
@@ -2689,6 +2781,8 @@ func loadBlockProcessingFixture(
 			Hash: slices.Clone(block.Hash),
 		}
 		blocks = append(blocks, tmpBlock)
+		prevHash = slices.Clone(block.Hash)
+		prevNumber = blockNumber
 	}
 
 	return seedModels, blocks
@@ -2829,7 +2923,11 @@ func BenchmarkConcurrentQueries(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				res, err := db.UtxosByAddress([]ledger.Address{testAddr}, nil)
+				res, err := db.UtxosByAddress(
+					[]ledger.Address{testAddr},
+					database.MaxUtxosByAddressResults,
+					nil,
+				)
 				_ = res
 				_ = err // Ignore errors for benchmark
 

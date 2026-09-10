@@ -54,6 +54,17 @@ func (e *erroringMetadata) SetTransaction(
 	return e.injectErr
 }
 
+func (e *erroringMetadata) SetTransactionLeiosClosure(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	idx uint32,
+	certDeposits map[int]uint64,
+	skipWithdrawalWitness bool,
+	txn types.Txn,
+) error {
+	return e.injectErr
+}
+
 func (e *erroringMetadata) SetTransactionBatched(
 	tx lcommon.Transaction,
 	point ocommon.Point,
@@ -90,6 +101,8 @@ func (e *erroringMetadata) SetTransactionBatched(
 // fmt.Errorf calls that mirrored the production strings, so drift in the
 // production strings could not be detected.)
 func TestSetTransactionMetadataErrorWrap_ProductionPaths(t *testing.T) {
+	t.Parallel()
+
 	// Inner error mimics the real #2976 failure that motivated the wrap.
 	inner := errors.New(
 		"pool reward account: pool cert reward_account: got 2 bytes, want 29",

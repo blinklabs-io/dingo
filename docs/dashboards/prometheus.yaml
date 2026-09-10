@@ -14,3 +14,24 @@ scrape_configs:
     scrape_interval: 15s
     static_configs:
       - targets: ['localhost:9100']
+
+  # node-parity (blinklabs-io/dingo#1900): cross-node ledger-state
+  # comparison against a reference cardano-node. Scrape both this tool's own
+  # /metrics (node_parity_* counters, already network-labeled by the tool
+  # itself) and the reference cardano-node's own :12798/metrics under a
+  # distinct job so a same-height check (job="dingo" vs
+  # job="cardano-node-reference") needs no new Go code.
+  - job_name: node-parity
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['localhost:9464']
+
+  # The reference cardano-node runs on a separate host from the dingo node
+  # scraped above -- both nodes default to the same port (12798), so
+  # 'localhost:12798' here would silently re-scrape the dingo job instead
+  # of the reference node if the two were colocated. Point this at your
+  # actual reference cardano-node's host.
+  - job_name: cardano-node-reference
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['cardano-node-reference-host:12798']

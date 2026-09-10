@@ -32,12 +32,11 @@ By default Compose builds Dingo from this checkout as
 `dingo-examples-dingo:local`. Set `DINGO_IMAGE=ghcr.io/blinklabs-io/dingo:<tag>`
 if you explicitly want to use a published image.
 
-Building from the checkout is the recommended path, because the examples track
-API work that reaches `main` before it reaches a release. If you do pin a
-published image, use 0.68.0 or newer: the address summary endpoint, the DRep
-list endpoint, and exact-address UTxO matching all landed in 0.68.0. The
-explorer's retiring-pools and pool-metadata views need a build newer than
-0.68.0 and report themselves as unavailable on anything older.
+Building from the checkout is the recommended path when exercising the current
+source tree. Published images are compatible with the full shared stack from
+0.70.0 onward. The explorer's address summary, DRep list, exact-address UTxO
+matching, retiring-pools, and pool-metadata views are available from 0.69.0
+onward.
 
 The shipped database credentials are local-development defaults. Change
 `POSTGRES_PASSWORD` and `DINGO_GOV_LENS_PASSWORD` before exposing the stack

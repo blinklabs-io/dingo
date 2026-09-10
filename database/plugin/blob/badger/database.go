@@ -15,7 +15,6 @@
 package badger
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -154,10 +153,6 @@ type badgerItem struct {
 	item *badger.Item
 }
 
-var blockMetadataBinaryMagic = [4]byte{'D', 'B', 'M', '1'}
-
-const blockMetadataPrevHashMaxLen = 32
-
 func buildBlockBlobKey(dst []byte, slot uint64, hash []byte) {
 	copy(dst, types.BlockBlobKeyPrefix)
 	binary.BigEndian.PutUint64(
@@ -180,54 +175,21 @@ func buildBlockBlobMetadataKey(dst []byte, baseKey []byte) {
 	copy(dst[len(baseKey):], types.BlockBlobMetadataKeySuffix)
 }
 
+// marshalBlockMetadataInto and unmarshalBlockMetadata delegate to
+// database/types. The encoding is not private to this plugin: the value
+// sits at a shared BlockBlobMetadataKey that generic database code reads
+// directly, and which of the two encodings is there depends on the
+// writing node's configuration, so the codec has to be shared with every
+// reader.
 func marshalBlockMetadataInto(
 	dst []byte,
 	metadata types.BlockMetadata,
 ) error {
-	prevHashLen := len(metadata.PrevHash)
-	if prevHashLen > blockMetadataPrevHashMaxLen {
-		return fmt.Errorf(
-			"invalid block metadata prev hash length: %d",
-			prevHashLen,
-		)
-	}
-	copy(dst[:4], blockMetadataBinaryMagic[:])
-	binary.BigEndian.PutUint64(dst[4:12], metadata.ID)
-	binary.BigEndian.PutUint64(dst[12:20], uint64(metadata.Type))
-	binary.BigEndian.PutUint64(dst[20:28], metadata.Height)
-	binary.BigEndian.PutUint32(
-		dst[28:32],
-		uint32(prevHashLen),
-	)
-	copy(dst[32:], metadata.PrevHash)
-	return nil
+	return types.MarshalBlockMetadataInto(dst, metadata)
 }
 
 func unmarshalBlockMetadata(data []byte) (types.BlockMetadata, error) {
-	if len(data) >= 32 && bytes.Equal(data[:4], blockMetadataBinaryMagic[:]) {
-		prevHashLen := binary.BigEndian.Uint32(data[28:32])
-		expectedLen := 32 + int(prevHashLen)
-		if len(data) != expectedLen {
-			return types.BlockMetadata{}, fmt.Errorf(
-				"invalid block metadata length: got %d, want %d",
-				len(data),
-				expectedLen,
-			)
-		}
-		prevHash := make([]byte, prevHashLen)
-		copy(prevHash, data[32:])
-		return types.BlockMetadata{
-			ID:       binary.BigEndian.Uint64(data[4:12]),
-			Type:     uint(binary.BigEndian.Uint64(data[12:20])),
-			Height:   binary.BigEndian.Uint64(data[20:28]),
-			PrevHash: prevHash,
-		}, nil
-	}
-	var metadata types.BlockMetadata
-	if _, err := cbor.Decode(data, &metadata); err != nil {
-		return types.BlockMetadata{}, err
-	}
-	return metadata, nil
+	return types.UnmarshalBlockMetadata(data)
 }
 
 func (i *badgerItem) Key() []byte {
@@ -265,6 +227,7 @@ type BlobStoreBadger struct {
 	runValueLogGC        func(float64) error
 	dataDir              string
 	gcWg                 sync.WaitGroup
+	gcMetrics            *badgerGCMetrics
 	closeOnce            sync.Once
 	closeDone            chan struct{}
 	closeErr             error
@@ -421,8 +384,25 @@ func (d *BlobStoreBadger) blobGc(
 			default:
 			}
 			for {
+				var beforeLSM, beforeVlog int64
+				if d.gcMetrics != nil {
+					d.gcMetrics.attempts.Inc()
+					beforeLSM, beforeVlog = d.DB().Size()
+				}
+				gcStarted := time.Now()
 				err := d.runValueLogGC(0.5)
+				if d.gcMetrics != nil {
+					d.gcMetrics.duration.Observe(time.Since(gcStarted).Seconds())
+				}
 				if err != nil {
+					if d.gcMetrics != nil {
+						if errors.Is(err, badger.ErrNoRewrite) {
+							d.gcMetrics.noRewrite.Inc()
+						} else {
+							d.gcMetrics.errors.Inc()
+						}
+						d.gcMetrics.consecutive.Set(0)
+					}
 					// Log any actual errors
 					if !errors.Is(err, badger.ErrNoRewrite) {
 						d.logger.Warn(
@@ -431,6 +411,21 @@ func (d *BlobStoreBadger) blobGc(
 						)
 					}
 					break
+				}
+				if d.gcMetrics != nil {
+					d.gcMetrics.successes.Inc()
+					afterLSM, afterVlog := d.DB().Size()
+					d.gcMetrics.lsmBytes.Set(float64(afterLSM))
+					d.gcMetrics.vlogBytes.Set(float64(afterVlog))
+					beforeSize := beforeLSM + beforeVlog
+					afterSize := afterLSM + afterVlog
+					if beforeSize > afterSize {
+						d.gcMetrics.reclaimedBytes.Set(float64(beforeSize - afterSize))
+					} else {
+						d.gcMetrics.reclaimedBytes.Set(0)
+					}
+					d.gcMetrics.consecutive.Inc()
+					d.gcMetrics.lastSuccess.SetToCurrentTime()
 				}
 				// A successful rewrite normally starts another pass. Check the
 				// stop signal first so shutdown bounds the cycle to the rewrite
@@ -486,6 +481,9 @@ func (d *BlobStoreBadger) CloseContext(ctx context.Context) error {
 		}
 		go func() {
 			d.gcWg.Wait()
+			if d.gcMetrics != nil && d.gcMetrics.cleanup != nil {
+				d.gcMetrics.cleanup()
+			}
 			if db := d.DB(); db != nil {
 				d.closeErr = db.Close()
 			}
@@ -535,9 +533,28 @@ func (d *BlobStoreBadger) Sync() error {
 	return nil
 }
 
-// NewTransaction creates a new badger transaction
+// NewTransaction creates a new badger transaction. A store that is closed or
+// not yet open yields a transaction reporting types.ErrBlobStoreUnavailable
+// from every operation, rather than one built from a closed *badger.DB.
+//
+// Building one from a closed DB can hang forever. badger.DB.NewTransaction
+// takes a read timestamp through oracle.readTs, which waits on the commit
+// watermark with context.Background(). Close stops that watermark's process
+// goroutine, and a Done mark still queued when the close signal arrives can
+// be dropped, because y/watermark.go selects between the mark channel and the
+// close signal and Go picks randomly when both are ready. doneUntil then
+// stays behind nextTxnTs-1 permanently and the wait has no context to cancel
+// it. See #3609.
+//
+// IsClosed narrows this window rather than eliminating it. A store closed
+// concurrently with this call already breaks the database.New contract, which
+// requires the stores to outlive Database.Close.
 func (d *BlobStoreBadger) NewTransaction(update bool) types.Txn {
-	return newBadgerTxn(d, d.DB().NewTransaction(update))
+	db := d.DB()
+	if db == nil || db.IsClosed() {
+		return newBadgerTxn(d, nil)
+	}
+	return newBadgerTxn(d, db.NewTransaction(update))
 }
 
 // Get retrieves a value from badger within a transaction
@@ -659,7 +676,7 @@ func (d *BlobStoreBadger) SetBlock(
 	hashIndexKeyLen := len(types.BlockHashIndexKeyPrefix) + len(hash)
 	packedLen := keyLen + indexKeyLen + metadataKeyLen + hashIndexKeyLen
 	if d.compactBlockMetadata {
-		packedLen += 32 + len(prevHash)
+		packedLen += types.BlockMetadataBinarySize(prevHash)
 	}
 	packed := make([]byte, packedLen)
 	key := packed[:keyLen]

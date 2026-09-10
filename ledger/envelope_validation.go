@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -54,7 +56,8 @@ func envelopeParentFromTip(
 		slot:        slot,
 		blockNumber: blockNumber,
 		origin:      origin,
-		byronEbb:    !origin && blockTypeLoaded && blockType == uint(gledger.BlockTypeByronEbb),
+		byronEbb: !origin && blockTypeLoaded &&
+			blockType == uint(gledger.BlockTypeByronEbb),
 	}
 }
 
@@ -72,6 +75,7 @@ func envelopeParentFromBlock(block gledger.Block) envelopeParent {
 func validateInboundBlockEnvelope(
 	block gledger.Block,
 	pparams lcommon.ProtocolParameters,
+	nodeConfig *cardano.CardanoNodeConfig,
 	parent envelopeParent,
 ) error {
 	if block == nil {
@@ -87,9 +91,78 @@ func validateInboundBlockEnvelope(
 		return err
 	}
 	if block.Era().Id == byron.EraIdByron {
+		// Byron does not carry the Shelley-style body-size field, but its
+		// header carries a separate proof over every body payload. Verify it
+		// before admitting the block so a genuine header cannot be paired with
+		// a substituted body.
+		// Decoded inbound blocks preserve their complete CBOR. Synthetic
+		// blocks used by callers that do not carry wire bytes cannot provide a
+		// body proof to verify and are handled by the normal structural path.
+		if len(block.Cbor()) == 0 {
+			return nil
+		}
+		switch byronBlock := block.(type) {
+		case *byron.ByronMainBlock:
+			if err := byronBlock.ValidateBodyProof(); err != nil {
+				return fmt.Errorf("validate Byron main block body proof: %w", err)
+			}
+		case *byron.ByronEpochBoundaryBlock:
+			if err := byronBlock.ValidateBodyProof(); err != nil {
+				return fmt.Errorf("validate Byron epoch boundary body proof: %w", err)
+			}
+		default:
+			return nil
+		}
+		return validateByronBlockSizes(block, nodeConfig)
+	}
+	if err := validateBlockSizes(block, pparams); err != nil {
+		return err
+	}
+	return validateBlockExUnits(block, pparams)
+}
+
+// validateBlockExUnits enforces the aggregate execution-unit budget for all
+// transactions in an inbound block. Per-transaction validation checks
+// MaxTxExUnits, but the protocol also bounds the sum at MaxBlockExUnits.
+// This runs before ledger deltas are created or applied.
+func validateBlockExUnits(
+	block gledger.Block,
+	pparams lcommon.ProtocolParameters,
+) error {
+	limits, ok := protocolBlockLimits(pparams)
+	if !ok {
+		// Byron through Mary have no Plutus execution-unit budget.
 		return nil
 	}
-	return validateBlockSizes(block, pparams)
+	if !limits.hasMaxBlockExUnits {
+		return nil
+	}
+	var total lcommon.ExUnits
+	for index, tx := range block.Transactions() {
+		declared, err := eras.DeclaredExUnits(tx)
+		if err != nil {
+			return fmt.Errorf(
+				"transaction %d declared execution units: %w",
+				index,
+				err,
+			)
+		}
+		total, err = eras.SafeAddExUnits(total, declared)
+		if err != nil {
+			return fmt.Errorf("block declared execution units: %w", err)
+		}
+		if total.Memory > limits.maxBlockExUnits.Memory ||
+			total.Steps > limits.maxBlockExUnits.Steps {
+			return fmt.Errorf(
+				"block declared execution units %d memory/%d steps exceed maxBlockExUnits %d memory/%d steps",
+				total.Memory,
+				total.Steps,
+				limits.maxBlockExUnits.Memory,
+				limits.maxBlockExUnits.Steps,
+			)
+		}
+	}
+	return nil
 }
 
 func isNilBlockHeader(header lcommon.BlockHeader) bool {
@@ -189,7 +262,7 @@ func validateBlockSizes(
 	block gledger.Block,
 	pparams lcommon.ProtocolParameters,
 ) error {
-	maxBodySize, maxHeaderSize, ok := protocolBlockSizeLimits(pparams)
+	limits, ok := protocolBlockLimits(pparams)
 	if !ok {
 		return fmt.Errorf(
 			"block size validation unsupported for protocol parameters %T",
@@ -197,11 +270,11 @@ func validateBlockSizes(
 		)
 	}
 	headerCbor := block.Header().Cbor()
-	if uint64(len(headerCbor)) > maxHeaderSize {
+	if uint64(len(headerCbor)) > limits.maxHeaderSize {
 		return fmt.Errorf(
 			"block header size %d exceeds maxBlockHeaderSize %d",
 			len(headerCbor),
-			maxHeaderSize,
+			limits.maxHeaderSize,
 		)
 	}
 	actualBodySize, err := serializedBlockBodySize(block)
@@ -216,11 +289,41 @@ func validateBlockSizes(
 			actualBodySize,
 		)
 	}
-	if actualBodySize > maxBodySize {
+	if actualBodySize > limits.maxBodySize {
 		return fmt.Errorf(
 			"block body size %d exceeds maxBlockBodySize %d",
 			actualBodySize,
-			maxBodySize,
+			limits.maxBodySize,
+		)
+	}
+	return nil
+}
+
+// validateByronBlockSizes enforces the limits carried by Byron genesis. Byron
+// does not put a body-size declaration in its header, so the encoded block
+// size is the value checked against maxBlockSize.
+func validateByronBlockSizes(
+	block gledger.Block,
+	config *cardano.CardanoNodeConfig,
+) error {
+	if config == nil || config.ByronGenesis() == nil {
+		return errors.New("byron genesis is required for block size validation")
+	}
+	genesis := config.ByronGenesis()
+	version := genesis.BlockVersionData
+	if version.MaxBlockSize <= 0 || version.MaxHeaderSize <= 0 {
+		return errors.New("byron genesis has invalid block size limits")
+	}
+	if uint64(len(block.Header().Cbor())) > uint64(version.MaxHeaderSize) {
+		return fmt.Errorf(
+			"byron block header size %d exceeds maxHeaderSize %d",
+			len(block.Header().Cbor()), version.MaxHeaderSize,
+		)
+	}
+	if uint64(len(block.Cbor())) > uint64(version.MaxBlockSize) {
+		return fmt.Errorf(
+			"byron block size %d exceeds maxBlockSize %d",
+			len(block.Cbor()), version.MaxBlockSize,
 		)
 	}
 	return nil
@@ -259,43 +362,75 @@ func serializedBlockBodySize(block gledger.Block) (uint64, error) {
 	return size, nil
 }
 
-// protocolBlockSizeLimits extracts max block body/header size protocol
-// parameters from eras whose inbound block sizes can be validated here.
-func protocolBlockSizeLimits(
-	pparams lcommon.ProtocolParameters,
-) (maxBodySize, maxHeaderSize uint64, ok bool) {
+type blockProtocolLimits struct {
+	maxBodySize        uint64
+	maxHeaderSize      uint64
+	maxBlockExUnits    lcommon.ExUnits
+	hasMaxBlockExUnits bool
+}
+
+// protocolBlockLimits extracts the inbound block limits for a protocol era.
+// Keeping the era mapping here ensures size and execution-unit validation use
+// the same protocol-parameter type coverage.
+func protocolBlockLimits(pparams lcommon.ProtocolParameters) (blockProtocolLimits, bool) {
 	switch pp := pparams.(type) {
 	case *shelley.ShelleyProtocolParameters:
 		if pp == nil {
-			return 0, 0, false
+			return blockProtocolLimits{}, false
 		}
-		return uint64(pp.MaxBlockBodySize), uint64(pp.MaxBlockHeaderSize), true
+		return blockProtocolLimits{
+			maxBodySize:   uint64(pp.MaxBlockBodySize),
+			maxHeaderSize: uint64(pp.MaxBlockHeaderSize),
+		}, true
 	case *mary.MaryProtocolParameters:
 		if pp == nil {
-			return 0, 0, false
+			return blockProtocolLimits{}, false
 		}
-		return uint64(pp.MaxBlockBodySize), uint64(pp.MaxBlockHeaderSize), true
+		return blockProtocolLimits{
+			maxBodySize:   uint64(pp.MaxBlockBodySize),
+			maxHeaderSize: uint64(pp.MaxBlockHeaderSize),
+		}, true
 	case *alonzo.AlonzoProtocolParameters:
 		if pp == nil {
-			return 0, 0, false
+			return blockProtocolLimits{}, false
 		}
-		return uint64(pp.MaxBlockBodySize), uint64(pp.MaxBlockHeaderSize), true
+		return blockProtocolLimits{
+			maxBodySize:        uint64(pp.MaxBlockBodySize),
+			maxHeaderSize:      uint64(pp.MaxBlockHeaderSize),
+			maxBlockExUnits:    pp.MaxBlockExUnits,
+			hasMaxBlockExUnits: true,
+		}, true
 	case *babbage.BabbageProtocolParameters:
 		if pp == nil {
-			return 0, 0, false
+			return blockProtocolLimits{}, false
 		}
-		return uint64(pp.MaxBlockBodySize), uint64(pp.MaxBlockHeaderSize), true
+		return blockProtocolLimits{
+			maxBodySize:        uint64(pp.MaxBlockBodySize),
+			maxHeaderSize:      uint64(pp.MaxBlockHeaderSize),
+			maxBlockExUnits:    pp.MaxBlockExUnits,
+			hasMaxBlockExUnits: true,
+		}, true
 	case *conway.ConwayProtocolParameters:
 		if pp == nil {
-			return 0, 0, false
+			return blockProtocolLimits{}, false
 		}
-		return uint64(pp.MaxBlockBodySize), uint64(pp.MaxBlockHeaderSize), true
+		return blockProtocolLimits{
+			maxBodySize:        uint64(pp.MaxBlockBodySize),
+			maxHeaderSize:      uint64(pp.MaxBlockHeaderSize),
+			maxBlockExUnits:    pp.MaxBlockExUnits,
+			hasMaxBlockExUnits: true,
+		}, true
 	case *dijkstra.DijkstraProtocolParameters:
 		if pp == nil {
-			return 0, 0, false
+			return blockProtocolLimits{}, false
 		}
-		return uint64(pp.MaxBlockBodySize), uint64(pp.MaxBlockHeaderSize), true
+		return blockProtocolLimits{
+			maxBodySize:        uint64(pp.MaxBlockBodySize),
+			maxHeaderSize:      uint64(pp.MaxBlockHeaderSize),
+			maxBlockExUnits:    pp.MaxBlockExUnits,
+			hasMaxBlockExUnits: true,
+		}, true
 	default:
-		return 0, 0, false
+		return blockProtocolLimits{}, false
 	}
 }

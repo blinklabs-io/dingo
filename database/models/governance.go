@@ -95,10 +95,11 @@ type GovernanceVote struct {
 // ResignCommitteeCold represents a resignation certificate for a
 // Constitutional Committee cold credential.
 type ResignCommitteeCold struct {
-	AnchorURL      string
-	ColdCredential []byte
-	AnchorHash     []byte
-	ID             uint
-	CertificateID  uint
-	AddedSlot      uint64
+	AnchorURL         string
+	ColdCredentialTag uint8
+	ColdCredential    []byte
+	AnchorHash        []byte
+	ID                uint
+	CertificateID     uint
+	AddedSlot         uint64
 }

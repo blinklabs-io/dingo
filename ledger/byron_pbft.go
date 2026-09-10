@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	byronconsensus "github.com/blinklabs-io/gouroboros/consensus/byron"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	ledgerbyron "github.com/blinklabs-io/gouroboros/ledger/byron"
@@ -414,10 +415,18 @@ func (ls *LedgerState) advanceByronPBFTState(
 			block,
 		)
 	}
-	state.delegationState, err = state.delegationState.ApplyPayload(
+	dlgPayload, err := byronDelegationPayload(mainBlock)
+	if err != nil {
+		return byronPBFTState{}, fmt.Errorf(
+			"apply Byron PBFT delegation payload at slot %d: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	state.delegationState, err = state.delegationState.ApplyPayloadCbor(
 		epoch,
 		block.SlotNumber(),
-		mainBlock.Body.DlgPayload,
+		dlgPayload,
 	)
 	if err != nil {
 		return byronPBFTState{}, fmt.Errorf(
@@ -427,6 +436,34 @@ func (ls *LedgerState) advanceByronPBFTState(
 		)
 	}
 	return state, nil
+}
+
+// byronDelegationPayload returns the block's delegation certificates as the
+// CBOR they arrived in. A certificate's signature covers the wire encoding of
+// its epoch field, so re-encoding a decoded certificate can produce bytes the
+// issuer never signed; the preserved payload is what PBFTDelegationState needs
+// to verify them.
+func byronDelegationPayload(
+	block *ledgerbyron.ByronMainBlock,
+) ([]cbor.RawMessage, error) {
+	raw := block.Body.DlgPayloadCbor()
+	if len(raw) == 0 {
+		// A body that never round-tripped through the CBOR decoder has no
+		// preserved payload. That is only consistent with an empty payload;
+		// anything else would mean silently dropping delegation certificates.
+		if len(block.Body.DlgPayload) > 0 {
+			return nil, fmt.Errorf(
+				"block body has %d delegation certificate(s) but no preserved CBOR",
+				len(block.Body.DlgPayload),
+			)
+		}
+		return nil, nil
+	}
+	var payload []cbor.RawMessage
+	if _, err := cbor.Decode(raw, &payload); err != nil {
+		return nil, fmt.Errorf("decode delegation payload: %w", err)
+	}
+	return payload, nil
 }
 
 func byronBlockEpoch(block ledger.Block) (uint64, error) {

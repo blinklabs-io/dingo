@@ -1,16 +1,18 @@
 # Dingo Mithril API Backfill Benchmark Results
 
 Focused Mithril API-mode metadata backfill results are tracked here separately
-from the broader ledger and database benchmark table.
+from the broader ledger and database benchmark table. This is a historical
+snapshot, not a measurement of the current branch or current releases.
 
 ## May 29-30, 2026 Preview Backfill
 
-The latest local Kubernetes preview run measured `origin/main` commit
-`d73407b6`. Clean current `main` failed during Mithril ledger-state UTxO asset
-import because deferred SQLite index handling drops the asset uniqueness needed
-by `ON CONFLICT (utxo_id, policy_id, name) DO NOTHING`; that blocker is tracked
-as #2457. The completed measurement used only a local diagnostic workaround for
-#2457, keeping `asset.policy_id` out of the deferred-index manifest.
+This local Kubernetes Preview run measured commit `d73407b6`. At that revision,
+Mithril ledger-state UTxO asset import required a local diagnostic workaround:
+the deferred-index manifest dropped the asset uniqueness required by the
+import's `ON CONFLICT` target. The
+[deferred asset index fix](https://github.com/blinklabs-io/dingo/pull/2461)
+removed that index from the deferred manifest; this historical blocker is
+resolved in the current source and released builds.
 
 | Metric | Value |
 |--------|-------|

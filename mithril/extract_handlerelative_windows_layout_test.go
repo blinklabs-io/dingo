@@ -37,6 +37,8 @@ import (
 // 64-bit target, RootDirectory (pointer-sized), FileNameLength (4 bytes,
 // little-endian), then FileName immediately after with no further padding.
 func TestBuildRenameInformationLayout(t *testing.T) {
+	t.Parallel()
+
 	const destDir = windows.Handle(0x1234)
 	buf, err := buildRenameInformation(destDir, "dest.tmp", true)
 	require.NoError(t, err)
@@ -61,8 +63,12 @@ func TestBuildRenameInformationLayout(t *testing.T) {
 	nameLen := binary.LittleEndian.Uint32(buf[rootDirOffset+handleSize:])
 	assert.Equal(t, uint32(len("dest.tmp")*2), nameLen,
 		"FileNameLength must count UTF-16 bytes, excluding any terminator")
-	assert.Len(t, buf, nameOffset+int(nameLen),
-		"the buffer must hold exactly the header plus the encoded name, no extra padding")
+	assert.Len(
+		t,
+		buf,
+		nameOffset+int(nameLen),
+		"the buffer must hold exactly the header plus the encoded name, no extra padding",
+	)
 
 	gotName := windows.UTF16ToString(
 		unsafe.Slice((*uint16)(unsafe.Pointer(&buf[nameOffset])), nameLen/2),
@@ -71,12 +77,16 @@ func TestBuildRenameInformationLayout(t *testing.T) {
 }
 
 func TestBuildRenameInformationReplaceIfExistsFalse(t *testing.T) {
+	t.Parallel()
+
 	buf, err := buildRenameInformation(windows.Handle(1), "x", false)
 	require.NoError(t, err)
 	assert.Equal(t, byte(0), buf[0], "ReplaceIfExists must be FALSE")
 }
 
 func TestBuildRenameInformationEmptyName(t *testing.T) {
+	t.Parallel()
+
 	handleSize := int(unsafe.Sizeof(windows.Handle(0)))
 	rootDirOffset := handleSize
 	nameOffset := rootDirOffset + handleSize + 4
@@ -84,6 +94,8 @@ func TestBuildRenameInformationEmptyName(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, buf, nameOffset)
 	assert.Equal(
-		t, uint32(0), binary.LittleEndian.Uint32(buf[rootDirOffset+handleSize:]),
+		t,
+		uint32(0),
+		binary.LittleEndian.Uint32(buf[rootDirOffset+handleSize:]),
 	)
 }

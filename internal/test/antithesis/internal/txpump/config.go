@@ -221,8 +221,9 @@ func LoadConfig() (*Config, error) {
 			return nil, fmt.Errorf("TXPUMP_GENESIS_FILE: %w", loadErr)
 		}
 		if gcfg.EpochLength == 0 {
-			return nil, fmt.Errorf(
-				"TXPUMP_GENESIS_FILE: genesis has epochLength=0, which is invalid",
+			return nil, errors.New(
+				"TXPUMP_GENESIS_FILE: genesis has epochLength=0, " +
+					"which is invalid",
 			)
 		}
 		cfg.EpochLength = gcfg.EpochLength
@@ -248,7 +249,8 @@ func (c *Config) confirmationDelay() time.Duration {
 	if c.ConfirmationSlots > uint64(math.MaxInt64)/slotNanos {
 		return time.Duration(math.MaxInt64)
 	}
-	return time.Duration(c.ConfirmationSlots * slotNanos)
+	// The guard above bounds the product at math.MaxInt64.
+	return time.Duration(c.ConfirmationSlots * slotNanos) //nolint:gosec
 }
 
 func parseStartupTimeout(value string) (time.Duration, error) {
@@ -307,14 +309,12 @@ func (c *Config) validate() error {
 		if _, err := decodeConfiguredHash(
 			"TXPUMP_DELEGATION_STAKE_KEY_HASH",
 			c.DelegationStakeKeyHash,
-			28,
 		); err != nil {
 			return err
 		}
 		if _, err := decodeConfiguredHash(
 			"TXPUMP_DELEGATION_POOL_KEY_HASH",
 			c.DelegationPoolKeyHash,
-			28,
 		); err != nil {
 			return err
 		}
@@ -351,19 +351,22 @@ func splitComma(s string) []string {
 	return out
 }
 
+// credentialHashLen is the length of a Cardano credential hash
+// (Blake2b-224), which is what every configured stake and pool key hash is.
+const credentialHashLen = 28
+
 func decodeConfiguredHash(
 	name string,
 	value string,
-	expectedLen int,
 ) ([]byte, error) {
 	decoded, err := hex.DecodeString(value)
 	if err != nil {
 		return nil, fmt.Errorf("%s: invalid hex %q: %w", name, value, err)
 	}
-	if len(decoded) != expectedLen {
+	if len(decoded) != credentialHashLen {
 		return nil, fmt.Errorf(
 			"%s: expected %d bytes, got %d",
-			name, expectedLen, len(decoded),
+			name, credentialHashLen, len(decoded),
 		)
 	}
 	return decoded, nil

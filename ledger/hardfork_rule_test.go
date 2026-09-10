@@ -80,6 +80,8 @@ func seedPlominFixtures(t *testing.T, db *database.Database) plominFixtureKeys {
 // accounts with credential-backed delegations to unregistered DReps are
 // cleared; accounts delegating to registered DReps are preserved.
 func TestApplyIntraEraHardForkRule_Pv10_ClearsDangling(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	keys := seedPlominFixtures(t, db)
 
@@ -110,6 +112,8 @@ func TestApplyIntraEraHardForkRule_Pv10_ClearsDangling(t *testing.T) {
 // Verified against a representative sample of values below and above the
 // handled pv10 case.
 func TestApplyIntraEraHardForkRule_UnknownMajor_NoOp(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	keys := seedPlominFixtures(t, db)
 
@@ -221,6 +225,8 @@ func seedByronUtxoWithAmount(
 // classification path — IterateLiveUtxos, loadCbor, address decode,
 // AddressTypeByron + ByronAddressTypeRedeem check, MarkUtxosDeletedAtSlot.
 func TestApplyIntraEraHardForkRule_Pv3_RemovesAvvm(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	avvmTxId, pubkeyTxId := seedByronAvvmFixtures(t, db)
 
@@ -250,6 +256,8 @@ func TestApplyIntraEraHardForkRule_Pv3_RemovesAvvm(t *testing.T) {
 }
 
 func TestApplyIntraEraHardForkRule_Pv3_CreditsAvvmToReserves(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	avvmTxId, pubkeyTxId := seedByronAvvmFixtures(t, db)
 	const (
@@ -292,6 +300,8 @@ func TestApplyIntraEraHardForkRule_Pv3_CreditsAvvmToReserves(t *testing.T) {
 }
 
 func TestApplyIntraEraHardForkRule_Pv3_CreditsOnlyAvvmValue(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	redeemAddr, err := lcommon.NewByronAddressRedeem(
 		bytes.Repeat([]byte{0x42}, 32),
@@ -326,6 +336,8 @@ func TestApplyIntraEraHardForkRule_Pv3_CreditsOnlyAvvmValue(t *testing.T) {
 func TestApplyIntraEraHardForkRule_Pv3_RollbackRestoresReserveAndAvvm(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	avvmTxID, _ := seedByronAvvmFixtures(t, db)
 	require.NoError(t, db.Metadata().SetNetworkState(7_000, 5_000, 100, nil))
@@ -346,6 +358,8 @@ func TestApplyIntraEraHardForkRule_Pv3_RollbackRestoresReserveAndAvvm(
 }
 
 func TestApplyIntraEraHardForkRule_Pv3_RejectsOverflow(t *testing.T) {
+	t.Parallel()
+
 	t.Run("sum", func(t *testing.T) {
 		db := newTestDB(t)
 		redeemAddr, err := lcommon.NewByronAddressRedeem(
@@ -353,9 +367,18 @@ func TestApplyIntraEraHardForkRule_Pv3_RejectsOverflow(t *testing.T) {
 			lcommon.ByronAddressAttributes{},
 		)
 		require.NoError(t, err)
-		first := seedByronUtxoWithAmount(t, db, 0xAA, redeemAddr, math.MaxUint64)
+		first := seedByronUtxoWithAmount(
+			t,
+			db,
+			0xAA,
+			redeemAddr,
+			math.MaxUint64,
+		)
 		second := seedByronUtxoWithAmount(t, db, 0xBB, redeemAddr, 1)
-		require.NoError(t, db.Metadata().SetNetworkState(7_000, 5_000, 100, nil))
+		require.NoError(
+			t,
+			db.Metadata().SetNetworkState(7_000, 5_000, 100, nil),
+		)
 
 		ls := newTestLSForHardForkRule(t, db)
 		err = ls.applyIntraEraHardForkRule(nil, 3, 200, 1)
@@ -378,7 +401,10 @@ func TestApplyIntraEraHardForkRule_Pv3_RejectsOverflow(t *testing.T) {
 		)
 		require.NoError(t, err)
 		txID := seedByronUtxoWithAmount(t, db, 0xCC, redeemAddr, 1)
-		require.NoError(t, db.Metadata().SetNetworkState(7_000, math.MaxUint64, 100, nil))
+		require.NoError(
+			t,
+			db.Metadata().SetNetworkState(7_000, math.MaxUint64, 100, nil),
+		)
 
 		ls := newTestLSForHardForkRule(t, db)
 		err = ls.applyIntraEraHardForkRule(nil, 3, 200, 1)
@@ -397,6 +423,8 @@ func TestApplyIntraEraHardForkRule_Pv3_RejectsOverflow(t *testing.T) {
 // TestApplyIntraEraHardForkRule_UnknownMajor_NoOp (pv10-shaped
 // fixtures), this pins both sides of the dispatcher's switch.
 func TestApplyIntraEraHardForkRule_NonPv3_PreservesAvvm(t *testing.T) {
+	t.Parallel()
+
 	db := newTestDB(t)
 	avvmTxId, _ := seedByronAvvmFixtures(t, db)
 

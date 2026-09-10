@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"maps"
 	"math/big"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -70,16 +71,127 @@ func (f *fakeStakeProvider) setError(err error) {
 }
 
 type fakeLeiosKeyProvider struct {
-	mu   sync.Mutex
-	keys map[string]*lcommon.LeiosKey
-	err  error
+	mu            sync.Mutex
+	keys          map[string]*lcommon.LeiosKey
+	err           error
+	failOnCall    int
+	failErr       error
+	calls         int
+	snapshotEpoch uint64
+}
+
+type blockingInitialLeiosKeyProvider struct {
+	blockedSnapshot uint64
+	blockedKeys     map[string]*lcommon.LeiosKey
+	blockedErr      error
+	currentKeys     map[string]*lcommon.LeiosKey
+	currentErr      error
+	currentFailCall int
+	currentCalls    int
+	blockCurrent    bool
+	entered         chan struct{}
+	release         chan struct{}
+	currentEntered  chan struct{}
+	currentRelease  chan struct{}
+	enteredOnce     sync.Once
+	releaseOnce     sync.Once
+	currentOnce     sync.Once
+	currentRelOnce  sync.Once
+	mu              sync.Mutex
+}
+
+type blockingFirstLeiosKeyProvider struct {
+	keys        map[string]*lcommon.LeiosKey
+	err         error
+	entered     chan struct{}
+	release     chan struct{}
+	enteredOnce sync.Once
+	releaseOnce sync.Once
+	mu          sync.Mutex
+	calls       int
+}
+
+func newBlockingFirstLeiosKeyProvider() *blockingFirstLeiosKeyProvider {
+	return &blockingFirstLeiosKeyProvider{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (f *blockingFirstLeiosKeyProvider) GetLeiosKeys(
+	uint64,
+	[]string,
+) (map[string]*lcommon.LeiosKey, error) {
+	f.mu.Lock()
+	f.calls++
+	first := f.calls == 1
+	keys := maps.Clone(f.keys)
+	err := f.err
+	f.mu.Unlock()
+	if first {
+		f.enteredOnce.Do(func() { close(f.entered) })
+		<-f.release
+	}
+	return keys, err
+}
+
+func (f *blockingFirstLeiosKeyProvider) releaseFirstLookup() {
+	f.releaseOnce.Do(func() { close(f.release) })
+}
+
+func newBlockingInitialLeiosKeyProvider(
+	blockedSnapshot uint64,
+) *blockingInitialLeiosKeyProvider {
+	return &blockingInitialLeiosKeyProvider{
+		blockedSnapshot: blockedSnapshot,
+		entered:         make(chan struct{}),
+		release:         make(chan struct{}),
+		currentEntered:  make(chan struct{}),
+		currentRelease:  make(chan struct{}),
+	}
+}
+
+func (f *blockingInitialLeiosKeyProvider) GetLeiosKeys(
+	snapshotEpoch uint64,
+	_ []string,
+) (map[string]*lcommon.LeiosKey, error) {
+	if snapshotEpoch == f.blockedSnapshot {
+		f.enteredOnce.Do(func() { close(f.entered) })
+		<-f.release
+		return maps.Clone(f.blockedKeys), f.blockedErr
+	}
+	if f.blockCurrent {
+		f.currentOnce.Do(func() { close(f.currentEntered) })
+		<-f.currentRelease
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.currentCalls++
+	if f.currentFailCall == f.currentCalls {
+		return nil, errors.New("current snapshot temporarily unavailable")
+	}
+	return maps.Clone(f.currentKeys), f.currentErr
+}
+
+func (f *blockingInitialLeiosKeyProvider) releaseInitialLookup() {
+	f.releaseOnce.Do(func() { close(f.release) })
+}
+
+func (f *blockingInitialLeiosKeyProvider) releaseCurrentLookup() {
+	f.currentRelOnce.Do(func() { close(f.currentRelease) })
 }
 
 func (f *fakeLeiosKeyProvider) GetLeiosKeys(
+	snapshotEpoch uint64,
 	_ []string,
 ) (map[string]*lcommon.LeiosKey, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.calls++
+	f.snapshotEpoch = snapshotEpoch
+	if f.calls == f.failOnCall {
+		return nil, f.failErr
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -286,6 +398,8 @@ func startNextVotes(
 }
 
 func TestNewVoteManagerValidatesConfig(t *testing.T) {
+	t.Parallel()
+
 	registry, err := NewVoterRegistry(nil)
 	require.NoError(t, err)
 	valid := VoteManagerConfig{
@@ -315,6 +429,8 @@ func TestNewVoteManagerValidatesConfig(t *testing.T) {
 }
 
 func TestVoteManagerHandleVoteAndServe(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	vote := fixture.makeVote(t, 0, 577, ebHash)
@@ -340,6 +456,8 @@ func TestVoteManagerHandleVoteAndServe(t *testing.T) {
 }
 
 func TestVoteManagerDoesNotEchoToOrigin(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	require.NoError(
@@ -369,6 +487,8 @@ func TestVoteManagerDoesNotEchoToOrigin(t *testing.T) {
 }
 
 func TestVoteManagerNextVotesCursorAdvances(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	require.NoError(
@@ -408,6 +528,8 @@ func TestVoteManagerNextVotesCursorAdvances(t *testing.T) {
 }
 
 func TestVoteManagerRemoveConnectionResetsCursor(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	require.NoError(
@@ -441,6 +563,8 @@ func TestVoteManagerRemoveConnectionResetsCursor(t *testing.T) {
 }
 
 func TestVoteManagerNextVotesAccumulatesAcrossInserts(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	done := make(chan struct{})
@@ -480,6 +604,8 @@ func TestVoteManagerNextVotesAccumulatesAcrossInserts(t *testing.T) {
 }
 
 func TestVoteManagerStopUnblocksNextVotes(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	done := make(chan struct{})
 	defer close(done)
@@ -501,6 +627,8 @@ func TestVoteManagerStopUnblocksNextVotes(t *testing.T) {
 }
 
 func TestVoteManagerDedupIgnoresResubmission(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	vote := fixture.makeVote(t, 0, 577, ebHash)
@@ -529,6 +657,8 @@ func TestVoteManagerDedupIgnoresResubmission(t *testing.T) {
 }
 
 func TestVoteManagerEquivocationFirstWins(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	ebHashA := lcommon.NewBlake2b256([]byte("eb-a"))
 	ebHashB := lcommon.NewBlake2b256([]byte("eb-b"))
@@ -561,6 +691,8 @@ func TestVoteManagerEquivocationFirstWins(t *testing.T) {
 }
 
 func TestVoteManagerRejectsInvalidVotes(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 
@@ -588,6 +720,8 @@ func TestVoteManagerRejectsInvalidVotes(t *testing.T) {
 }
 
 func TestVoteManagerLenientUnknownPubkey(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(
 		t,
 		func(f *managerFixture, cfg *VoteManagerConfig) {
@@ -624,6 +758,8 @@ func TestVoteManagerLenientUnknownPubkey(t *testing.T) {
 }
 
 func TestVoteManagerQuorumBuildsCertificate(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	subId, quorumCh := fixture.eventBus.Subscribe(EbQuorumEventType)
 	defer fixture.eventBus.Unsubscribe(EbQuorumEventType, subId)
@@ -683,6 +819,8 @@ func TestVoteManagerQuorumBuildsCertificate(t *testing.T) {
 }
 
 func TestVoteManagerQuorumRequiresVerifiedStake(t *testing.T) {
+	t.Parallel()
+
 	// Registry missing voter 0's key: their stake (100) is observed but
 	// not verified.
 	fixture := newManagerFixture(
@@ -754,6 +892,8 @@ func TestVoteManagerQuorumRequiresVerifiedStake(t *testing.T) {
 }
 
 func TestVoteManagerOwnVoteEmission(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
 	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
@@ -827,7 +967,134 @@ func TestVoteManagerOwnVoteEmission(t *testing.T) {
 	assert.Equal(t, uint64(3), result.votes[0].VoterId)
 }
 
+func TestVoteManagerDoesNotEmitVoteAfterVotingReconfiguredDuringSigning(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	keyProvider := &fakeLeiosKeyProvider{}
+	var member CommitteeMember
+	var key *VoteSigningKey
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			key = f.keys[member.VoterId]
+			proof, err := SignVote(key, key.PublicKeyBytes())
+			require.NoError(t, err)
+			keyProvider.keys = map[string]*lcommon.LeiosKey{
+				hex.EncodeToString(member.PoolKeyHash): {
+					PublicKey:       key.PublicKeyBytes(),
+					PossessionProof: proof,
+				},
+			}
+			cfg.KeyProvider = keyProvider
+		},
+	)
+	require.NotNil(t, key)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+	status, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
+	require.NoError(t, err)
+	require.Equal(t, VotingConfigurationEnabled, status)
+
+	subID, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subID)
+	signingEntered := make(chan struct{})
+	releaseSigningCh := make(chan struct{})
+	var signingEnteredOnce sync.Once
+	var releaseSigningOnce sync.Once
+	releaseSigning := func() {
+		releaseSigningOnce.Do(func() { close(releaseSigningCh) })
+	}
+	defer releaseSigning()
+	fixture.mgr.signVote = func(
+		signingKey *VoteSigningKey,
+		msg []byte,
+	) ([]byte, error) {
+		signingEnteredOnce.Do(func() { close(signingEntered) })
+		<-releaseSigningCh
+		return SignVote(signingKey, msg)
+	}
+
+	fixture.mgr.mu.Lock()
+	initialGeneration := fixture.mgr.votingLookupGeneration
+	fixture.mgr.mu.Unlock()
+	ebHash := lcommon.NewBlake2b256([]byte("reconfigured-signing-eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("reconfigured-signing-rb"))
+	fixture.mgr.HandleEndorserBlock(501, ebHash)
+	observeDone := make(chan struct{})
+	go func() {
+		fixture.mgr.ObserveAnnouncement(501, rbHash, ebHash)
+		close(observeDone)
+	}()
+	testutil.RequireReceive(
+		t,
+		signingEntered,
+		2*time.Second,
+		"local vote signing",
+	)
+
+	replacementKey := testSigningKey(t, 214)
+	var replacementPool lcommon.PoolKeyHash
+	replacementPool[0] = 0xfe
+	type configureResult struct {
+		status VotingConfigurationStatus
+		err    error
+	}
+	configuredCh := make(chan configureResult, 1)
+	go func() {
+		configuredStatus, configureErr := fixture.mgr.ConfigureVoting(
+			replacementPool,
+			replacementKey,
+		)
+		configuredCh <- configureResult{
+			status: configuredStatus,
+			err:    configureErr,
+		}
+	}()
+	testutil.WaitForCondition(t, func() bool {
+		fixture.mgr.mu.Lock()
+		defer fixture.mgr.mu.Unlock()
+		return fixture.mgr.votingLookupGeneration > initialGeneration &&
+			fixture.mgr.votingKey == nil &&
+			fixture.mgr.deferredVotingKey == replacementKey &&
+			slices.Equal(fixture.mgr.deferredVotingPool, replacementPool[:])
+	}, 2*time.Second, "replacement voting configuration installed")
+
+	releaseSigning()
+	testutil.RequireReceive(
+		t,
+		observeDone,
+		2*time.Second,
+		"vote emission return",
+	)
+	result := testutil.RequireReceive(
+		t,
+		configuredCh,
+		2*time.Second,
+		"replacement voting configuration",
+	)
+	require.NoError(t, result.err)
+	require.Equal(t, VotingConfigurationAwaitingKey, result.status)
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		100*time.Millisecond,
+		"stale signed vote must not be published",
+	)
+	assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+		SlotNo: 501, VoterId: member.VoterId,
+	}}))
+	fixture.mgr.mu.Lock()
+	_, voted := fixture.mgr.votedAnnouncements[rbHash]
+	fixture.mgr.mu.Unlock()
+	assert.False(t, voted, "stale signed vote must not mutate vote state")
+}
+
 func TestVoteManagerQueuesPrototypeVoteUntilAnnouncement(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
@@ -858,6 +1125,8 @@ func TestVoteManagerQueuesPrototypeVoteUntilAnnouncement(t *testing.T) {
 // (node_leios.go's subscriber feeds this into the origin-aware Ouroboros
 // enqueue path) with the exact signed fields and connection key the peer sent.
 func TestVoteManagerPeerPrototypeVoteRequeuedForRelay(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	subId, receivedCh := fixture.eventBus.Subscribe(VoteReceivedEventType)
 	defer fixture.eventBus.Unsubscribe(VoteReceivedEventType, subId)
@@ -886,6 +1155,8 @@ func TestVoteManagerPeerPrototypeVoteRequeuedForRelay(t *testing.T) {
 func TestVoteManagerQueuedPeerPrototypeVoteRequeuedForRelayAfterAnnouncement(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	subId, receivedCh := fixture.eventBus.Subscribe(VoteReceivedEventType)
 	defer fixture.eventBus.Unsubscribe(VoteReceivedEventType, subId)
@@ -919,7 +1190,11 @@ func TestVoteManagerQueuedPeerPrototypeVoteRequeuedForRelayAfterAnnouncement(
 // requeue is gated by insertVote's dedup check, not fired unconditionally --
 // a resubmission of a vote already on record must not cause a second
 // diffusion round trip.
-func TestVoteManagerDuplicatePeerPrototypeVoteNotRequeuedForRelay(t *testing.T) {
+func TestVoteManagerDuplicatePeerPrototypeVoteNotRequeuedForRelay(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	subId, receivedCh := fixture.eventBus.Subscribe(VoteReceivedEventType)
 	defer fixture.eventBus.Unsubscribe(VoteReceivedEventType, subId)
@@ -946,6 +1221,8 @@ func TestVoteManagerDuplicatePeerPrototypeVoteNotRequeuedForRelay(t *testing.T) 
 func TestVoteManagerQueuedInvalidPrototypeVoteDoesNotSuppressValidVote(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
@@ -973,6 +1250,8 @@ func TestVoteManagerQueuedInvalidPrototypeVoteDoesNotSuppressValidVote(
 }
 
 func TestVoteManagerPendingPrototypeVotesFairAtCapacity(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	fixture.mgr.maxRecords = 4
 	for i := range 4 {
@@ -1000,6 +1279,8 @@ func TestVoteManagerPendingPrototypeVotesFairAtCapacity(t *testing.T) {
 }
 
 func TestVoteManagerPrototypeQuorumPreservesSigningContext(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	subId, quorumCh := fixture.eventBus.Subscribe(EbQuorumEventType)
 	defer fixture.eventBus.Unsubscribe(EbQuorumEventType, subId)
@@ -1053,6 +1334,8 @@ func TestVoteManagerPrototypeQuorumPreservesSigningContext(t *testing.T) {
 func TestVoteManagerPrototypeTalliesAreSeparatedByAnnouncingBlock(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	subId, quorumCh := fixture.eventBus.Subscribe(EbQuorumEventType)
 	defer fixture.eventBus.Unsubscribe(EbQuorumEventType, subId)
@@ -1089,6 +1372,8 @@ func TestVoteManagerPrototypeTalliesAreSeparatedByAnnouncingBlock(
 }
 
 func TestVoteManagerPrototypeRecordRetainedWhileContextTallyLive(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	base := time.Now()
 	offset := time.Duration(0)
@@ -1127,6 +1412,8 @@ func TestVoteManagerPrototypeRecordRetainedWhileContextTallyLive(t *testing.T) {
 }
 
 func TestVoteManagerPrototypeUsesRegisteredKey(t *testing.T) {
+	t.Parallel()
+
 	key, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 999))
 	require.NoError(t, err)
 	fixture := newManagerFixture(
@@ -1205,6 +1492,8 @@ func TestVoteManagerPrototypeUsesRegisteredKey(t *testing.T) {
 func TestVoteManagerValidatesAndEnablesVotingForPoolOutsideCommittee(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	key := testSigningKey(t, 210)
 	proof, err := SignVote(key, key.PublicKeyBytes())
 	require.NoError(t, err)
@@ -1226,7 +1515,11 @@ func TestVoteManagerValidatesAndEnablesVotingForPoolOutsideCommittee(
 	committee, err := fixture.mgr.CommitteeForEpoch(5)
 	require.NoError(t, err)
 	_, isMember := committee.VoterIdFor(poolKeyHash[:])
-	require.False(t, isMember, "test setup: pool must have no stake and no committee seat")
+	require.False(
+		t,
+		isMember,
+		"test setup: pool must have no stake and no committee seat",
+	)
 
 	require.NoError(t, fixture.mgr.ValidateVotingKey(poolKeyHash, key))
 	require.NoError(t, fixture.mgr.EnableVoting(poolKeyHash, key))
@@ -1243,10 +1536,13 @@ func TestVoteManagerValidatesAndEnablesVotingForPoolOutsideCommittee(
 // PoP-valid registered key verifies through KeyProvider alone, with no
 // Registry entry and no derivation fallback involved.
 func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
+	t.Parallel()
+
 	key := testSigningKey(t, 123)
 	proof, err := SignVote(key, key.PublicKeyBytes())
 	require.NoError(t, err)
 	var member CommitteeMember
+	var keyProvider *fakeLeiosKeyProvider
 	fixture := newManagerFixture(
 		t,
 		func(f *managerFixture, cfg *VoteManagerConfig) {
@@ -1254,7 +1550,7 @@ func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
 			emptyRegistry, regErr := NewVoterRegistry(nil)
 			require.NoError(t, regErr)
 			cfg.Registry = emptyRegistry
-			cfg.KeyProvider = &fakeLeiosKeyProvider{
+			keyProvider = &fakeLeiosKeyProvider{
 				keys: map[string]*lcommon.LeiosKey{
 					hex.EncodeToString(member.PoolKeyHash): {
 						PublicKey:       key.PublicKeyBytes(),
@@ -1262,6 +1558,7 @@ func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
 					},
 				},
 			}
+			cfg.KeyProvider = keyProvider
 		},
 	)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
@@ -1273,6 +1570,18 @@ func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
 		VoterId:           member.VoterId,
 		VoteSignature:     sig,
 	}))
+	// keyProvider is assigned by the customize closure the fixture builder
+	// above invokes synchronously; nilaway does not follow that callback.
+	//nolint:nilaway // assigned by the fixture closure above
+	keyProvider.mu.Lock()
+	resolvedSnapshotEpoch := keyProvider.snapshotEpoch
+	keyProvider.mu.Unlock()
+	require.Equal(
+		t,
+		CommitteeSnapshotEpoch(5),
+		resolvedSnapshotEpoch,
+		"key lookup must use the same snapshot epoch as committee stake",
+	)
 	fixture.mgr.mu.Lock()
 	stored, ok := fixture.mgr.votesById[lcommon.LeiosVoteId{
 		SlotNo: 577, VoterId: member.VoterId,
@@ -1282,12 +1591,156 @@ func TestVoteManagerResolvesOnChainKeyWithoutRegistryEntry(t *testing.T) {
 	assert.True(t, stored.verified)
 }
 
+// TestVoteManagerReferenceModeIgnoresStaticRegistryForKeylessSeat proves a
+// production-shaped manager (non-nil ledger key provider) never promotes a
+// keyless seat through the private-harness static registry. The vote remains
+// observable for membership/stake diagnostics, but it is not verified and
+// cannot contribute to a certificate.
+func TestVoteManagerReferenceModeIgnoresStaticRegistryForKeylessSeat(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	var member CommitteeMember
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			// Keep the fixture's populated Registry while wiring the same
+			// non-nil key-provider shape production composition uses. The
+			// provider deliberately has no registration for member.
+			cfg.KeyProvider = &fakeLeiosKeyProvider{}
+		},
+	)
+	rbHash := lcommon.NewBlake2b256([]byte("keyless-static-fallback-rb"))
+	ebHash := lcommon.NewBlake2b256([]byte("keyless-static-fallback-eb"))
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+
+	require.NoError(t, fixture.mgr.HandlePrototypeVote(
+		"peer",
+		fixture.makePrototypeVote(t, member.VoterId, rbHash),
+	))
+	voteID := lcommon.LeiosVoteId{SlotNo: 577, VoterId: member.VoterId}
+	fixture.mgr.mu.Lock()
+	stored := fixture.mgr.votesById[voteID]
+	tally := fixture.mgr.tallies[tallyKey{
+		slotNo:           577,
+		ebHash:           ebHash,
+		announcingRbHash: rbHash,
+	}]
+	fixture.mgr.mu.Unlock()
+
+	require.NotNil(t, stored)
+	assert.False(
+		t,
+		stored.verified,
+		"static registry must not verify a keyless on-chain seat in reference mode",
+	)
+	require.NotNil(t, tally)
+	assert.Zero(
+		t,
+		tally.verifiedStake,
+		"a static fallback vote must not contribute certificate stake",
+	)
+}
+
+// TestVoteManagerReferenceModeRejectsLocalStaticFallback proves production
+// composition cannot auto-register the local signing key when the pool has no
+// usable on-chain registration. Registry-based local voting remains available
+// only to managers constructed without a KeyProvider (the private test seam).
+func TestVoteManagerReferenceModeRejectsLocalStaticFallback(t *testing.T) {
+	t.Parallel()
+
+	var member CommitteeMember
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			cfg.KeyProvider = &fakeLeiosKeyProvider{}
+		},
+	)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+	key := fixture.keys[member.VoterId]
+
+	err := fixture.mgr.ValidateVotingKey(poolKeyHash, key)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "on-chain")
+	err = fixture.mgr.EnableVoting(poolKeyHash, key)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "on-chain")
+
+	fixture.mgr.mu.Lock()
+	votingKey := fixture.mgr.votingKey
+	fixture.mgr.mu.Unlock()
+	assert.Nil(t, votingKey, "a keyless pool must remain non-voting")
+}
+
+// TestVoteManagerReferenceModeUsesOnChainKeyOverStaticMismatch exercises both
+// sides of the production trust boundary: a configured static key cannot
+// verify a vote when it differs from the PoP-verified on-chain registration,
+// while the registered key is accepted for the same committee seat.
+func TestVoteManagerReferenceModeUsesOnChainKeyOverStaticMismatch(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	onChainKey := testSigningKey(t, 203)
+	proof, err := SignVote(onChainKey, onChainKey.PublicKeyBytes())
+	require.NoError(t, err)
+	var member CommitteeMember
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			cfg.KeyProvider = &fakeLeiosKeyProvider{
+				keys: map[string]*lcommon.LeiosKey{
+					hex.EncodeToString(member.PoolKeyHash): {
+						PublicKey:       onChainKey.PublicKeyBytes(),
+						PossessionProof: proof,
+					},
+				},
+			}
+		},
+	)
+	rbHash := lcommon.NewBlake2b256([]byte("on-chain-authority-rb"))
+	ebHash := lcommon.NewBlake2b256([]byte("on-chain-authority-eb"))
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+
+	// The fixture's default key is still present in Registry, but conflicts
+	// with the on-chain registration and therefore must be rejected.
+	require.NoError(t, fixture.mgr.HandlePrototypeVote(
+		"peer-static",
+		fixture.makePrototypeVote(t, member.VoterId, rbHash),
+	))
+	voteID := lcommon.LeiosVoteId{SlotNo: 577, VoterId: member.VoterId}
+	assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{voteID}))
+
+	sig, err := SignVote(onChainKey, PrototypeVoteMessageBytes(rbHash))
+	require.NoError(t, err)
+	require.NoError(t, fixture.mgr.HandlePrototypeVote(
+		"peer-on-chain",
+		lcommon.LeiosPrototypeVote{
+			AnnouncingRbHash: rbHash,
+			VoterId:          member.VoterId,
+			VoteSignature:    sig,
+		},
+	))
+	fixture.mgr.mu.Lock()
+	stored := fixture.mgr.votesById[voteID]
+	fixture.mgr.mu.Unlock()
+	require.NotNil(t, stored)
+	assert.True(t, stored.verified)
+}
+
 // TestVoteManagerTreatsInvalidPoPOnChainKeyAsAbsent proves an on-chain
 // key whose proof of possession does not verify is excluded entirely,
 // matching upstream's "invalid proofs are treated as absent" rule: the
 // member's vote is still accepted (membership-valid) but stays
 // unverified, exactly like a genuinely keyless committee seat.
 func TestVoteManagerTreatsInvalidPoPOnChainKeyAsAbsent(t *testing.T) {
+	t.Parallel()
+
 	key := testSigningKey(t, 124)
 	wrongKey := testSigningKey(t, 125)
 	badProof, err := SignVote(wrongKey, key.PublicKeyBytes())
@@ -1333,7 +1786,11 @@ func TestVoteManagerTreatsInvalidPoPOnChainKeyAsAbsent(t *testing.T) {
 // keyless" for the epoch: committeeAndParamsForEpoch must fail outright
 // (not cache an empty onChainKeys map) so a later, successful call can
 // still resolve keys normally once the failure clears.
-func TestVoteManagerRetriesOnChainKeyResolutionAfterTransientFailure(t *testing.T) {
+func TestVoteManagerRetriesOnChainKeyResolutionAfterTransientFailure(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	key := testSigningKey(t, 126)
 	proof, err := SignVote(key, key.PublicKeyBytes())
 	require.NoError(t, err)
@@ -1375,6 +1832,8 @@ func TestVoteManagerRetriesOnChainKeyResolutionAfterTransientFailure(t *testing.
 }
 
 func TestVoteManagerValidateConfiguredVotingKey(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	member := fixture.members[3]
 	var poolKeyHash lcommon.PoolKeyHash
@@ -1397,16 +1856,1128 @@ func TestVoteManagerValidateConfiguredVotingKey(t *testing.T) {
 	assert.Error(t, fixture.mgr.ValidateVotingKey(missingPool, wrongKey))
 }
 
-// TestVoteManagerEnableVotingIgnoresStaleRegistryWhenOnChainKeyMatches
-// proves a real on-chain key rotation is not blocked by a peer's or this
-// operator's own leios-voter-public-keys entry still holding the
-// pre-rotation key: EnableVoting must not fail just because
-// RegisterPublicKey's conflict check would, since the on-chain key is
-// already the stronger, PoP-verified trust source ValidateVotingKey
-// resolved against.
+func TestVoteManagerDeferredVotingReplaysCurrentEpochAnnouncementsInOrder(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	keyProvider := &fakeLeiosKeyProvider{}
+	fixture := newManagerFixture(
+		t,
+		func(_ *managerFixture, cfg *VoteManagerConfig) {
+			cfg.KeyProvider = keyProvider
+		},
+	)
+	member := fixture.members[3]
+	key := fixture.keys[member.VoterId]
+	require.NotNil(t, key)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+
+	status, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
+	require.NoError(t, err)
+	assert.Equal(t, VotingConfigurationAwaitingKey, status)
+	subID, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subID)
+	fixture.mgr.mu.Lock()
+	assert.Nil(t, fixture.mgr.votingKey)
+	assert.Equal(t, member.PoolKeyHash, fixture.mgr.deferredVotingPool)
+	fixture.mgr.mu.Unlock()
+	staleEB := lcommon.NewBlake2b256([]byte("stale-eb"))
+	staleRB := lcommon.NewBlake2b256([]byte("stale-rb"))
+	fixture.mgr.HandleEndorserBlock(599, staleEB)
+	fixture.mgr.ObserveAnnouncement(599, staleRB, staleEB)
+
+	// Record eligible announcements in inverse slot order so replay cannot
+	// accidentally inherit the announcements map's iteration order.
+	laterEB := lcommon.NewBlake2b256([]byte("later-eb"))
+	laterRB := lcommon.NewBlake2b256([]byte("later-rb"))
+	fixture.mgr.HandleEndorserBlock(602, laterEB)
+	fixture.mgr.ObserveAnnouncement(602, laterRB, laterEB)
+	earlierEB := lcommon.NewBlake2b256([]byte("earlier-eb"))
+	earlierRB := lcommon.NewBlake2b256([]byte("earlier-rb"))
+	fixture.mgr.HandleEndorserBlock(601, earlierEB)
+	fixture.mgr.ObserveAnnouncement(601, earlierRB, earlierEB)
+
+	unacquiredEB := lcommon.NewBlake2b256([]byte("unacquired-eb"))
+	unacquiredRB := lcommon.NewBlake2b256([]byte("unacquired-rb"))
+	fixture.mgr.ObserveAnnouncement(603, unacquiredRB, unacquiredEB)
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		100*time.Millisecond,
+		"a deferred signing key must not emit a vote",
+	)
+
+	proof, err := SignVote(key, key.PublicKeyBytes())
+	require.NoError(t, err)
+	keyProvider.mu.Lock()
+	keyProvider.keys = map[string]*lcommon.LeiosKey{
+		hex.EncodeToString(member.PoolKeyHash): {
+			PublicKey:       key.PublicKeyBytes(),
+			PossessionProof: proof,
+		},
+	}
+	keyProvider.mu.Unlock()
+
+	fixture.eventBus.Publish(
+		event.EpochTransitionEventType,
+		event.NewEvent(
+			event.EpochTransitionEventType,
+			event.EpochTransitionEvent{NewEpoch: 6},
+		),
+	)
+	for _, expectedRbHash := range []lcommon.Blake2b256{earlierRB, laterRB} {
+		emittedEvent := testutil.RequireReceive(
+			t,
+			emittedCh,
+			2*time.Second,
+			"replayed vote emission after on-chain key resolution",
+		)
+		emitted, ok := emittedEvent.Data.(VoteEmittedEvent)
+		require.True(t, ok)
+		assert.Equal(t, expectedRbHash, emitted.Vote.AnnouncingRbHash)
+		assert.Equal(t, member.VoterId, emitted.Vote.VoterId)
+	}
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		100*time.Millisecond,
+		"stale and unacquired announcements must not be replayed",
+	)
+	fixture.mgr.mu.Lock()
+	assert.Same(t, key, fixture.mgr.votingKey)
+	assert.True(
+		t,
+		slices.Equal(fixture.mgr.votingPool, member.PoolKeyHash),
+	)
+	assert.Nil(t, fixture.mgr.deferredVotingKey)
+	fixture.mgr.mu.Unlock()
+	keyProvider.mu.Lock()
+	assert.Equal(t, CommitteeSnapshotEpoch(6), keyProvider.snapshotEpoch)
+	keyProvider.mu.Unlock()
+
+	fixture.mgr.HandleEndorserBlock(603, unacquiredEB)
+	emittedEvent := testutil.RequireReceive(
+		t,
+		emittedCh,
+		2*time.Second,
+		"vote after the deferred announcement becomes acquired",
+	)
+	emitted, ok := emittedEvent.Data.(VoteEmittedEvent)
+	require.True(t, ok)
+	assert.Equal(t, unacquiredRB, emitted.Vote.AnnouncingRbHash)
+	assert.Equal(t, member.VoterId, emitted.Vote.VoterId)
+}
+
+func TestVoteManagerConfigureVotingReplaysPreloadedAnnouncements(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	var member CommitteeMember
+	var key *VoteSigningKey
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			key = f.keys[member.VoterId]
+			proof, err := SignVote(key, key.PublicKeyBytes())
+			require.NoError(t, err)
+			cfg.KeyProvider = &fakeLeiosKeyProvider{
+				keys: map[string]*lcommon.LeiosKey{
+					hex.EncodeToString(member.PoolKeyHash): {
+						PublicKey:       key.PublicKeyBytes(),
+						PossessionProof: proof,
+					},
+				},
+			}
+		},
+	)
+	require.NotNil(t, key)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+
+	subID, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subID)
+	ebHash := lcommon.NewBlake2b256([]byte("preloaded-eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("preloaded-rb"))
+	fixture.mgr.HandleEndorserBlock(501, ebHash)
+	fixture.mgr.ObserveAnnouncement(501, rbHash, ebHash)
+
+	status, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
+	require.NoError(t, err)
+	require.Equal(t, VotingConfigurationEnabled, status)
+	emittedEvent := testutil.RequireReceive(
+		t,
+		emittedCh,
+		2*time.Second,
+		"preloaded announcement replay during voting configuration",
+	)
+	emitted, ok := emittedEvent.Data.(VoteEmittedEvent)
+	require.True(t, ok)
+	assert.Equal(t, rbHash, emitted.Vote.AnnouncingRbHash)
+	assert.Equal(t, member.VoterId, emitted.Vote.VoterId)
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		100*time.Millisecond,
+		"preloaded announcement must be replayed exactly once",
+	)
+}
+
+func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterActivation(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	testCases := []struct {
+		name        string
+		staleResult string
+	}{
+		{name: "absence", staleResult: "absence"},
+		{name: "mismatch", staleResult: "mismatch"},
+		{name: "provider error", staleResult: "error"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			keyProvider := newBlockingInitialLeiosKeyProvider(
+				CommitteeSnapshotEpoch(5),
+			)
+			defer keyProvider.releaseInitialLookup()
+			var member CommitteeMember
+			var key *VoteSigningKey
+			fixture := newManagerFixture(
+				t,
+				func(f *managerFixture, cfg *VoteManagerConfig) {
+					member = f.members[3]
+					key = f.keys[member.VoterId]
+					proof, err := SignVote(key, key.PublicKeyBytes())
+					require.NoError(t, err)
+					keyProvider.currentKeys = map[string]*lcommon.LeiosKey{
+						hex.EncodeToString(member.PoolKeyHash): {
+							PublicKey:       key.PublicKeyBytes(),
+							PossessionProof: proof,
+						},
+					}
+					cfg.KeyProvider = keyProvider
+				},
+			)
+			require.NotNil(t, key)
+			var poolKeyHash lcommon.PoolKeyHash
+			copy(poolKeyHash[:], member.PoolKeyHash)
+
+			switch testCase.staleResult {
+			case "mismatch":
+				staleKey := testSigningKey(t, 212)
+				proof, err := SignVote(
+					staleKey,
+					staleKey.PublicKeyBytes(),
+				)
+				require.NoError(t, err)
+				keyProvider.blockedKeys = map[string]*lcommon.LeiosKey{
+					hex.EncodeToString(member.PoolKeyHash): {
+						PublicKey:       staleKey.PublicKeyBytes(),
+						PossessionProof: proof,
+					},
+				}
+			case "error":
+				keyProvider.blockedErr = errors.New(
+					"stale snapshot temporarily unavailable",
+				)
+			}
+
+			subID, emittedCh := fixture.eventBus.Subscribe(
+				VoteEmittedEventType,
+			)
+			defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subID)
+			ebHash := lcommon.NewBlake2b256([]byte("overlap-eb"))
+			rbHash := lcommon.NewBlake2b256([]byte("overlap-rb"))
+			fixture.mgr.HandleEndorserBlock(601, ebHash)
+			fixture.mgr.ObserveAnnouncement(601, rbHash, ebHash)
+
+			type configureResult struct {
+				status VotingConfigurationStatus
+				err    error
+			}
+			configuredCh := make(chan configureResult, 1)
+			go func() {
+				status, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
+				configuredCh <- configureResult{status: status, err: err}
+			}()
+			testutil.RequireReceive(
+				t,
+				keyProvider.entered,
+				2*time.Second,
+				"initial epoch key lookup",
+			)
+
+			fixture.mgr.retryDeferredVoting(6)
+			emittedEvent := testutil.RequireReceive(
+				t,
+				emittedCh,
+				2*time.Second,
+				"newer epoch voting activation",
+			)
+			emitted, ok := emittedEvent.Data.(VoteEmittedEvent)
+			require.True(t, ok)
+			assert.Equal(t, rbHash, emitted.Vote.AnnouncingRbHash)
+
+			keyProvider.releaseInitialLookup()
+			result := testutil.RequireReceive(
+				t,
+				configuredCh,
+				2*time.Second,
+				"configuration after stale lookup release",
+			)
+			require.NoError(t, result.err)
+			assert.Equal(t, VotingConfigurationSuperseded, result.status)
+			testutil.RequireNoReceive(
+				t,
+				emittedCh,
+				100*time.Millisecond,
+				"stale lookup release must not emit a duplicate vote",
+			)
+		})
+	}
+}
+
+func TestVoteManagerConfigureVotingReportsSupersededDifferentPoolReplacement(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	testCases := []struct {
+		name           string
+		replacement    string
+		expectedStatus VotingConfigurationStatus
+		expectError    string
+	}{
+		{
+			name:           "success",
+			replacement:    "success",
+			expectedStatus: VotingConfigurationEnabled,
+		},
+		{
+			name:           "absence",
+			replacement:    "absence",
+			expectedStatus: VotingConfigurationAwaitingKey,
+		},
+		{
+			name:           "invalid proof",
+			replacement:    "invalid-proof",
+			expectedStatus: VotingConfigurationAwaitingKey,
+		},
+		{
+			name:           "mismatch",
+			replacement:    "mismatch",
+			expectedStatus: VotingConfigurationFailed,
+			expectError:    "does not match",
+		},
+		{
+			name:           "provider error",
+			replacement:    "provider-error",
+			expectedStatus: VotingConfigurationFailed,
+			expectError:    "store temporarily unavailable",
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			keyProvider := newBlockingFirstLeiosKeyProvider()
+			defer keyProvider.releaseFirstLookup()
+			fixture := newManagerFixture(
+				t,
+				func(_ *managerFixture, cfg *VoteManagerConfig) {
+					cfg.KeyProvider = keyProvider
+				},
+			)
+			originalMember := fixture.members[3]
+			originalKey := fixture.keys[originalMember.VoterId]
+			replacementMember := fixture.members[4]
+			replacementKey := fixture.keys[replacementMember.VoterId]
+			require.NotNil(t, originalKey)
+			require.NotNil(t, replacementKey)
+			var originalPool lcommon.PoolKeyHash
+			copy(originalPool[:], originalMember.PoolKeyHash)
+			var replacementPool lcommon.PoolKeyHash
+			copy(replacementPool[:], replacementMember.PoolKeyHash)
+			require.NotEqual(t, originalPool, replacementPool)
+
+			switch testCase.replacement {
+			case "success":
+				proof, err := SignVote(
+					replacementKey,
+					replacementKey.PublicKeyBytes(),
+				)
+				require.NoError(t, err)
+				keyProvider.keys = map[string]*lcommon.LeiosKey{
+					hex.EncodeToString(replacementPool[:]): {
+						PublicKey:       replacementKey.PublicKeyBytes(),
+						PossessionProof: proof,
+					},
+				}
+			case "invalid-proof":
+				keyProvider.keys = map[string]*lcommon.LeiosKey{
+					hex.EncodeToString(replacementPool[:]): {
+						PublicKey: replacementKey.PublicKeyBytes(),
+						PossessionProof: make(
+							[]byte,
+							lcommon.LeiosBlsSignatureSize,
+						),
+					},
+				}
+			case "mismatch":
+				mismatchedKey := testSigningKey(t, 215)
+				proof, err := SignVote(
+					mismatchedKey,
+					mismatchedKey.PublicKeyBytes(),
+				)
+				require.NoError(t, err)
+				keyProvider.keys = map[string]*lcommon.LeiosKey{
+					hex.EncodeToString(replacementPool[:]): {
+						PublicKey:       mismatchedKey.PublicKeyBytes(),
+						PossessionProof: proof,
+					},
+				}
+			case "provider-error":
+				keyProvider.err = errors.New(
+					"store temporarily unavailable",
+				)
+			}
+
+			type configureResult struct {
+				status VotingConfigurationStatus
+				err    error
+			}
+			originalResultCh := make(chan configureResult, 1)
+			go func() {
+				status, err := fixture.mgr.ConfigureVoting(
+					originalPool,
+					originalKey,
+				)
+				originalResultCh <- configureResult{status: status, err: err}
+			}()
+			testutil.RequireReceive(
+				t,
+				keyProvider.entered,
+				2*time.Second,
+				"original voting key lookup",
+			)
+
+			replacementStatus, replacementErr := fixture.mgr.ConfigureVoting(
+				replacementPool,
+				replacementKey,
+			)
+			assert.Equal(t, testCase.expectedStatus, replacementStatus)
+			if testCase.expectError == "" {
+				require.NoError(t, replacementErr)
+			} else {
+				require.ErrorContains(
+					t,
+					replacementErr,
+					testCase.expectError,
+				)
+			}
+
+			keyProvider.releaseFirstLookup()
+			originalResult := testutil.RequireReceive(
+				t,
+				originalResultCh,
+				2*time.Second,
+				"superseded original voting configuration",
+			)
+			require.NoError(t, originalResult.err)
+			assert.Equal(
+				t,
+				VotingConfigurationSuperseded,
+				originalResult.status,
+			)
+		})
+	}
+}
+
+func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterDeferredRetry(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	testCases := []struct {
+		name   string
+		result string
+	}{
+		{
+			name:   "absence",
+			result: "absence",
+		},
+		{
+			name:   "invalid proof",
+			result: "invalid-proof",
+		},
+		{
+			name:   "provider error",
+			result: "error",
+		},
+		{
+			name:   "mismatch",
+			result: "mismatch",
+		},
+		{
+			name:   "replay preparation failure",
+			result: "replay-failure",
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			keyProvider := newBlockingInitialLeiosKeyProvider(
+				CommitteeSnapshotEpoch(5),
+			)
+			defer keyProvider.releaseInitialLookup()
+			var member CommitteeMember
+			var key *VoteSigningKey
+			fixture := newManagerFixture(
+				t,
+				func(f *managerFixture, cfg *VoteManagerConfig) {
+					member = f.members[3]
+					key = f.keys[member.VoterId]
+					cfg.KeyProvider = keyProvider
+				},
+			)
+			require.NotNil(t, key)
+			var poolKeyHash lcommon.PoolKeyHash
+			copy(poolKeyHash[:], member.PoolKeyHash)
+			poolHash := hex.EncodeToString(member.PoolKeyHash)
+			validProof, err := SignVote(key, key.PublicKeyBytes())
+			require.NoError(t, err)
+			validKeys := map[string]*lcommon.LeiosKey{
+				poolHash: {
+					PublicKey:       key.PublicKeyBytes(),
+					PossessionProof: validProof,
+				},
+			}
+			keyProvider.blockedErr = errors.New("stale initial lookup failure")
+			switch testCase.result {
+			case "invalid-proof":
+				keyProvider.currentKeys = map[string]*lcommon.LeiosKey{
+					poolHash: {
+						PublicKey: key.PublicKeyBytes(),
+						PossessionProof: make(
+							[]byte,
+							lcommon.LeiosBlsSignatureSize,
+						),
+					},
+				}
+			case "error":
+				keyProvider.currentErr = errors.New(
+					"newer snapshot temporarily unavailable",
+				)
+			case "mismatch":
+				otherKey := testSigningKey(t, 213)
+				otherProof, signErr := SignVote(
+					otherKey,
+					otherKey.PublicKeyBytes(),
+				)
+				require.NoError(t, signErr)
+				keyProvider.currentKeys = map[string]*lcommon.LeiosKey{
+					poolHash: {
+						PublicKey:       otherKey.PublicKeyBytes(),
+						PossessionProof: otherProof,
+					},
+				}
+			case "replay-failure":
+				keyProvider.currentKeys = validKeys
+				keyProvider.currentFailCall = 2
+				ebHash := lcommon.NewBlake2b256([]byte("overlap-deferred-eb"))
+				rbHash := lcommon.NewBlake2b256([]byte("overlap-deferred-rb"))
+				fixture.mgr.HandleEndorserBlock(601, ebHash)
+				fixture.mgr.ObserveAnnouncement(601, rbHash, ebHash)
+			}
+
+			type configureResult struct {
+				status VotingConfigurationStatus
+				err    error
+			}
+			configuredCh := make(chan configureResult, 1)
+			go func() {
+				status, configureErr := fixture.mgr.ConfigureVoting(
+					poolKeyHash,
+					key,
+				)
+				configuredCh <- configureResult{
+					status: status,
+					err:    configureErr,
+				}
+			}()
+			testutil.RequireReceive(
+				t,
+				keyProvider.entered,
+				2*time.Second,
+				"initial epoch key lookup",
+			)
+
+			fixture.mgr.retryDeferredVoting(6)
+			keyProvider.releaseInitialLookup()
+			result := testutil.RequireReceive(
+				t,
+				configuredCh,
+				2*time.Second,
+				"configuration after stale lookup release",
+			)
+			require.NoError(t, result.err)
+			assert.Equal(t, VotingConfigurationSuperseded, result.status)
+			fixture.mgr.mu.Lock()
+			assert.Nil(t, fixture.mgr.votingKey)
+			assert.Same(t, key, fixture.mgr.deferredVotingKey)
+			fixture.mgr.mu.Unlock()
+
+			keyProvider.mu.Lock()
+			keyProvider.currentErr = nil
+			keyProvider.currentFailCall = 0
+			keyProvider.currentKeys = validKeys
+			keyProvider.mu.Unlock()
+			fixture.mgr.retryDeferredVoting(7)
+			fixture.mgr.mu.Lock()
+			assert.Same(t, key, fixture.mgr.votingKey)
+			assert.Nil(t, fixture.mgr.deferredVotingKey)
+			fixture.mgr.mu.Unlock()
+		})
+	}
+}
+
+func TestVoteManagerConfigureVotingDoesNotBeatNewerInFlightRetry(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	keyProvider := newBlockingInitialLeiosKeyProvider(
+		CommitteeSnapshotEpoch(5),
+	)
+	keyProvider.blockCurrent = true
+	defer keyProvider.releaseInitialLookup()
+	defer keyProvider.releaseCurrentLookup()
+	var member CommitteeMember
+	var key *VoteSigningKey
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			key = f.keys[member.VoterId]
+			cfg.KeyProvider = keyProvider
+		},
+	)
+	require.NotNil(t, key)
+	proof, err := SignVote(key, key.PublicKeyBytes())
+	require.NoError(t, err)
+	keyProvider.blockedKeys = map[string]*lcommon.LeiosKey{
+		hex.EncodeToString(member.PoolKeyHash): {
+			PublicKey:       key.PublicKeyBytes(),
+			PossessionProof: proof,
+		},
+	}
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+
+	type configureResult struct {
+		status VotingConfigurationStatus
+		err    error
+	}
+	configuredCh := make(chan configureResult, 1)
+	go func() {
+		status, configureErr := fixture.mgr.ConfigureVoting(poolKeyHash, key)
+		configuredCh <- configureResult{status: status, err: configureErr}
+	}()
+	testutil.RequireReceive(
+		t,
+		keyProvider.entered,
+		2*time.Second,
+		"initial epoch key lookup",
+	)
+	retryDone := make(chan struct{})
+	go func() {
+		fixture.mgr.retryDeferredVoting(6)
+		close(retryDone)
+	}()
+	testutil.RequireReceive(
+		t,
+		keyProvider.currentEntered,
+		2*time.Second,
+		"newer retry key lookup",
+	)
+
+	keyProvider.releaseInitialLookup()
+	result := testutil.RequireReceive(
+		t,
+		configuredCh,
+		2*time.Second,
+		"configuration while newer retry remains in flight",
+	)
+	require.NoError(t, result.err)
+	assert.Equal(t, VotingConfigurationSuperseded, result.status)
+	fixture.mgr.mu.Lock()
+	assert.Nil(t, fixture.mgr.votingKey)
+	assert.Same(t, key, fixture.mgr.deferredVotingKey)
+	fixture.mgr.mu.Unlock()
+
+	keyProvider.releaseCurrentLookup()
+	testutil.RequireReceive(t, retryDone, 2*time.Second, "newer deferred retry")
+	fixture.mgr.mu.Lock()
+	assert.Nil(t, fixture.mgr.votingKey)
+	assert.Same(t, key, fixture.mgr.deferredVotingKey)
+	fixture.mgr.mu.Unlock()
+}
+
+func TestVoteManagerConfigureVotingReportsReplayPreparationFailure(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	keyProvider := &fakeLeiosKeyProvider{failOnCall: 2}
+	var member CommitteeMember
+	var key *VoteSigningKey
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			key = f.keys[member.VoterId]
+			proof, err := SignVote(key, key.PublicKeyBytes())
+			require.NoError(t, err)
+			keyProvider.keys = map[string]*lcommon.LeiosKey{
+				hex.EncodeToString(member.PoolKeyHash): {
+					PublicKey:       key.PublicKeyBytes(),
+					PossessionProof: proof,
+				},
+			}
+			keyProvider.failErr = errors.New(
+				"committee keys temporarily unavailable",
+			)
+			cfg.KeyProvider = keyProvider
+		},
+	)
+	require.NotNil(t, key)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+
+	subID, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subID)
+	ebHash := lcommon.NewBlake2b256([]byte("failed-preparation-eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("failed-preparation-rb"))
+	fixture.mgr.HandleEndorserBlock(501, ebHash)
+	fixture.mgr.ObserveAnnouncement(501, rbHash, ebHash)
+
+	status, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
+	require.NoError(t, err)
+	assert.Equal(t, VotingConfigurationRetryPending, status)
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		100*time.Millisecond,
+		"failed replay preparation must leave voting disabled",
+	)
+	fixture.mgr.mu.Lock()
+	assert.Nil(t, fixture.mgr.votingKey)
+	assert.Same(t, key, fixture.mgr.deferredVotingKey)
+	fixture.mgr.mu.Unlock()
+}
+
+func TestVoteManagerDeferredVotingRetriesFailedReplayLookup(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	keyProvider := &fakeLeiosKeyProvider{}
+	fixture := newManagerFixture(
+		t,
+		func(_ *managerFixture, cfg *VoteManagerConfig) {
+			cfg.KeyProvider = keyProvider
+		},
+	)
+	member := fixture.members[3]
+	key := fixture.keys[member.VoterId]
+	require.NotNil(t, key)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+
+	status, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
+	require.NoError(t, err)
+	require.Equal(t, VotingConfigurationAwaitingKey, status)
+	subID, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subID)
+	ebHash := lcommon.NewBlake2b256([]byte("replay-provider-eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("replay-provider-rb"))
+	fixture.mgr.HandleEndorserBlock(501, ebHash)
+	fixture.mgr.ObserveAnnouncement(501, rbHash, ebHash)
+
+	proof, err := SignVote(key, key.PublicKeyBytes())
+	require.NoError(t, err)
+	keyProvider.mu.Lock()
+	keyProvider.keys = map[string]*lcommon.LeiosKey{
+		hex.EncodeToString(member.PoolKeyHash): {
+			PublicKey:       key.PublicKeyBytes(),
+			PossessionProof: proof,
+		},
+	}
+	// ConfigureVoting made call 1. The deferred authorization lookup below
+	// is call 2; fail call 3, when replay resolves the full committee.
+	keyProvider.failOnCall = 3
+	keyProvider.failErr = errors.New(
+		"committee key store temporarily unavailable",
+	)
+	keyProvider.mu.Unlock()
+	fixture.mgr.retryDeferredVoting(5)
+
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		100*time.Millisecond,
+		"failed replay lookup must not emit a vote",
+	)
+	fixture.mgr.mu.Lock()
+	assert.Nil(t, fixture.mgr.votingKey)
+	assert.Same(t, key, fixture.mgr.deferredVotingKey)
+	assert.True(
+		t,
+		slices.Equal(fixture.mgr.deferredVotingPool, member.PoolKeyHash),
+	)
+	fixture.mgr.mu.Unlock()
+
+	keyProvider.mu.Lock()
+	keyProvider.failOnCall = 0
+	keyProvider.failErr = nil
+	keyProvider.mu.Unlock()
+	fixture.mgr.retryDeferredVoting(5)
+
+	emittedEvent := testutil.RequireReceive(
+		t,
+		emittedCh,
+		2*time.Second,
+		"announcement replay after committee provider recovery",
+	)
+	emitted, ok := emittedEvent.Data.(VoteEmittedEvent)
+	require.True(t, ok)
+	assert.Equal(t, rbHash, emitted.Vote.AnnouncingRbHash)
+	assert.Equal(t, member.VoterId, emitted.Vote.VoterId)
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		100*time.Millisecond,
+		"recovered replay must emit the announcement exactly once",
+	)
+	fixture.mgr.mu.Lock()
+	assert.Same(t, key, fixture.mgr.votingKey)
+	assert.Nil(t, fixture.mgr.deferredVotingKey)
+	fixture.mgr.mu.Unlock()
+}
+
+func TestVoteManagerDeferredVotingRejectsInvalidAuthorization(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	keyProvider := &fakeLeiosKeyProvider{}
+	fixture := newManagerFixture(
+		t,
+		func(_ *managerFixture, cfg *VoteManagerConfig) {
+			cfg.KeyProvider = keyProvider
+		},
+	)
+	member := fixture.members[3]
+	key := fixture.keys[member.VoterId]
+	require.NotNil(t, key)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+
+	status, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
+	require.NoError(t, err)
+	require.Equal(t, VotingConfigurationAwaitingKey, status)
+
+	keyProvider.mu.Lock()
+	keyProvider.keys = map[string]*lcommon.LeiosKey{
+		hex.EncodeToString(member.PoolKeyHash): {
+			PublicKey:       key.PublicKeyBytes(),
+			PossessionProof: make([]byte, lcommon.LeiosBlsSignatureSize),
+		},
+	}
+	keyProvider.mu.Unlock()
+	fixture.mgr.retryDeferredVoting(6)
+
+	fixture.mgr.mu.Lock()
+	assert.Nil(t, fixture.mgr.votingKey)
+	assert.Same(t, key, fixture.mgr.deferredVotingKey)
+	fixture.mgr.mu.Unlock()
+
+	validProof, err := SignVote(key, key.PublicKeyBytes())
+	require.NoError(t, err)
+	keyProvider.mu.Lock()
+	keyProvider.keys = map[string]*lcommon.LeiosKey{
+		hex.EncodeToString(member.PoolKeyHash): {
+			PublicKey:       key.PublicKeyBytes(),
+			PossessionProof: validProof,
+		},
+	}
+	keyProvider.mu.Unlock()
+	fixture.mgr.retryDeferredVoting(7)
+
+	fixture.mgr.mu.Lock()
+	assert.Same(t, key, fixture.mgr.votingKey)
+	assert.Nil(t, fixture.mgr.deferredVotingKey)
+	fixture.mgr.mu.Unlock()
+}
+
+func TestVoteManagerDeferredVotingRetryRetainsMismatchedKeyUntilRecovery(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	keyProvider := &fakeLeiosKeyProvider{}
+	fixture := newManagerFixture(
+		t,
+		func(_ *managerFixture, cfg *VoteManagerConfig) {
+			cfg.KeyProvider = keyProvider
+		},
+	)
+	member := fixture.members[3]
+	key := fixture.keys[member.VoterId]
+	require.NotNil(t, key)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+	status, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
+	require.NoError(t, err)
+	require.Equal(t, VotingConfigurationAwaitingKey, status)
+
+	subID, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subID)
+	firstEB := lcommon.NewBlake2b256([]byte("mismatch-first-eb"))
+	firstRB := lcommon.NewBlake2b256([]byte("mismatch-first-rb"))
+	fixture.mgr.HandleEndorserBlock(601, firstEB)
+	fixture.mgr.ObserveAnnouncement(601, firstRB, firstEB)
+
+	mismatchedKey := testSigningKey(t, 211)
+	mismatchedProof, err := SignVote(
+		mismatchedKey,
+		mismatchedKey.PublicKeyBytes(),
+	)
+	require.NoError(t, err)
+	keyProvider.mu.Lock()
+	keyProvider.keys = map[string]*lcommon.LeiosKey{
+		hex.EncodeToString(member.PoolKeyHash): {
+			PublicKey:       mismatchedKey.PublicKeyBytes(),
+			PossessionProof: mismatchedProof,
+		},
+	}
+	keyProvider.mu.Unlock()
+	fixture.mgr.retryDeferredVoting(6)
+
+	fixture.mgr.mu.Lock()
+	assert.Nil(t, fixture.mgr.votingKey)
+	assert.Same(t, key, fixture.mgr.deferredVotingKey)
+	assert.True(
+		t,
+		slices.Equal(fixture.mgr.deferredVotingPool, member.PoolKeyHash),
+	)
+	fixture.mgr.mu.Unlock()
+	assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+		SlotNo: 601, VoterId: member.VoterId,
+	}}))
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		100*time.Millisecond,
+		"a mismatched deferred key must not emit a vote",
+	)
+
+	secondEB := lcommon.NewBlake2b256([]byte("mismatch-recovery-eb"))
+	secondRB := lcommon.NewBlake2b256([]byte("mismatch-recovery-rb"))
+	fixture.mgr.HandleEndorserBlock(701, secondEB)
+	fixture.mgr.ObserveAnnouncement(701, secondRB, secondEB)
+	validProof, err := SignVote(key, key.PublicKeyBytes())
+	require.NoError(t, err)
+	keyProvider.mu.Lock()
+	keyProvider.keys = map[string]*lcommon.LeiosKey{
+		hex.EncodeToString(member.PoolKeyHash): {
+			PublicKey:       key.PublicKeyBytes(),
+			PossessionProof: validProof,
+		},
+	}
+	keyProvider.mu.Unlock()
+	fixture.mgr.retryDeferredVoting(7)
+
+	emittedEvent := testutil.RequireReceive(
+		t,
+		emittedCh,
+		2*time.Second,
+		"vote emission after mismatched registration recovers",
+	)
+	emitted, ok := emittedEvent.Data.(VoteEmittedEvent)
+	require.True(t, ok)
+	assert.Equal(t, secondRB, emitted.Vote.AnnouncingRbHash)
+	fixture.mgr.mu.Lock()
+	assert.Same(t, key, fixture.mgr.votingKey)
+	assert.Nil(t, fixture.mgr.deferredVotingKey)
+	fixture.mgr.mu.Unlock()
+}
+
+func TestVoteManagerDeferredVotingRetryRetainsProviderFailureUntilRecovery(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	keyProvider := &fakeLeiosKeyProvider{}
+	fixture := newManagerFixture(
+		t,
+		func(_ *managerFixture, cfg *VoteManagerConfig) {
+			cfg.KeyProvider = keyProvider
+		},
+	)
+	member := fixture.members[3]
+	key := fixture.keys[member.VoterId]
+	require.NotNil(t, key)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+	status, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
+	require.NoError(t, err)
+	require.Equal(t, VotingConfigurationAwaitingKey, status)
+
+	subID, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subID)
+	firstEB := lcommon.NewBlake2b256([]byte("provider-first-eb"))
+	firstRB := lcommon.NewBlake2b256([]byte("provider-first-rb"))
+	fixture.mgr.HandleEndorserBlock(601, firstEB)
+	fixture.mgr.ObserveAnnouncement(601, firstRB, firstEB)
+	keyProvider.mu.Lock()
+	keyProvider.err = errors.New("store temporarily unavailable")
+	keyProvider.mu.Unlock()
+	fixture.mgr.retryDeferredVoting(6)
+
+	fixture.mgr.mu.Lock()
+	assert.Nil(t, fixture.mgr.votingKey)
+	assert.Same(t, key, fixture.mgr.deferredVotingKey)
+	assert.True(
+		t,
+		slices.Equal(fixture.mgr.deferredVotingPool, member.PoolKeyHash),
+	)
+	fixture.mgr.mu.Unlock()
+	assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+		SlotNo: 601, VoterId: member.VoterId,
+	}}))
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		100*time.Millisecond,
+		"a failed deferred provider lookup must not emit a vote",
+	)
+
+	secondEB := lcommon.NewBlake2b256([]byte("provider-recovery-eb"))
+	secondRB := lcommon.NewBlake2b256([]byte("provider-recovery-rb"))
+	fixture.mgr.HandleEndorserBlock(701, secondEB)
+	fixture.mgr.ObserveAnnouncement(701, secondRB, secondEB)
+	validProof, err := SignVote(key, key.PublicKeyBytes())
+	require.NoError(t, err)
+	keyProvider.mu.Lock()
+	keyProvider.err = nil
+	keyProvider.keys = map[string]*lcommon.LeiosKey{
+		hex.EncodeToString(member.PoolKeyHash): {
+			PublicKey:       key.PublicKeyBytes(),
+			PossessionProof: validProof,
+		},
+	}
+	keyProvider.mu.Unlock()
+	fixture.mgr.retryDeferredVoting(7)
+
+	emittedEvent := testutil.RequireReceive(
+		t,
+		emittedCh,
+		2*time.Second,
+		"vote emission after deferred provider recovery",
+	)
+	emitted, ok := emittedEvent.Data.(VoteEmittedEvent)
+	require.True(t, ok)
+	assert.Equal(t, secondRB, emitted.Vote.AnnouncingRbHash)
+	fixture.mgr.mu.Lock()
+	assert.Same(t, key, fixture.mgr.votingKey)
+	assert.Nil(t, fixture.mgr.deferredVotingKey)
+	fixture.mgr.mu.Unlock()
+}
+
+func TestVoteManagerConfigureVotingRejectsResolvedMismatch(t *testing.T) {
+	t.Parallel()
+
+	onChainKey := testSigningKey(t, 210)
+	proof, err := SignVote(onChainKey, onChainKey.PublicKeyBytes())
+	require.NoError(t, err)
+	var member CommitteeMember
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			cfg.KeyProvider = &fakeLeiosKeyProvider{
+				keys: map[string]*lcommon.LeiosKey{
+					hex.EncodeToString(member.PoolKeyHash): {
+						PublicKey:       onChainKey.PublicKeyBytes(),
+						PossessionProof: proof,
+					},
+				},
+			}
+		},
+	)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+	key := fixture.keys[member.VoterId]
+	require.NotNil(t, key)
+
+	status, err := fixture.mgr.ConfigureVoting(
+		poolKeyHash,
+		key,
+	)
+	require.Error(t, err)
+	assert.Equal(t, VotingConfigurationFailed, status)
+	assert.Contains(t, err.Error(), "does not match")
+	fixture.mgr.mu.Lock()
+	assert.Nil(t, fixture.mgr.votingKey)
+	assert.Nil(t, fixture.mgr.deferredVotingKey)
+	fixture.mgr.mu.Unlock()
+}
+
+func TestVoteManagerConfigureVotingPropagatesKeyProviderFailure(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	member := CommitteeMember{}
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			member = f.members[3]
+			cfg.KeyProvider = &fakeLeiosKeyProvider{
+				err: errors.New("store temporarily unavailable"),
+			}
+		},
+	)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+	key := fixture.keys[member.VoterId]
+	require.NotNil(t, key)
+
+	status, err := fixture.mgr.ConfigureVoting(
+		poolKeyHash,
+		key,
+	)
+	require.Error(t, err)
+	assert.Equal(t, VotingConfigurationFailed, status)
+	assert.Contains(t, err.Error(), "store temporarily unavailable")
+	fixture.mgr.mu.Lock()
+	assert.Nil(t, fixture.mgr.votingKey)
+	assert.Nil(t, fixture.mgr.deferredVotingKey)
+	fixture.mgr.mu.Unlock()
+}
+
+// TestVoteManagerEnableVotingIgnoresStaleRegistryWhenOnChainKeyMatches proves
+// a real on-chain key rotation is not blocked by a private-harness Registry
+// entry still holding the pre-rotation key: a non-nil KeyProvider is the
+// authoritative, PoP-verified trust source.
 func TestVoteManagerEnableVotingIgnoresStaleRegistryWhenOnChainKeyMatches(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	rotatedKey := testSigningKey(t, 200)
 	proof, err := SignVote(rotatedKey, rotatedKey.PublicKeyBytes())
 	require.NoError(t, err)
@@ -1454,6 +3025,8 @@ func TestVoteManagerEnableVotingIgnoresStaleRegistryWhenOnChainKeyMatches(
 func TestVoteManagerEnableVotingRejectsKeyMismatchingOnChainRegistration(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	onChainKey := testSigningKey(t, 201)
 	proof, err := SignVote(onChainKey, onChainKey.PublicKeyBytes())
 	require.NoError(t, err)
@@ -1491,7 +3064,11 @@ func TestVoteManagerEnableVotingRejectsKeyMismatchingOnChainRegistration(
 // found": treating the two the same would make ValidateVotingKey silently
 // fall back to the static registry during exactly the kind of outage that
 // should instead block startup until it clears.
-func TestVoteManagerValidateVotingKeyPropagatesKeyProviderFailure(t *testing.T) {
+func TestVoteManagerValidateVotingKeyPropagatesKeyProviderFailure(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	member := CommitteeMember{}
 	fixture := newManagerFixture(
 		t,
@@ -1504,7 +3081,10 @@ func TestVoteManagerValidateVotingKeyPropagatesKeyProviderFailure(t *testing.T) 
 	)
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], member.PoolKeyHash)
-	err := fixture.mgr.ValidateVotingKey(poolKeyHash, fixture.keys[member.VoterId])
+	err := fixture.mgr.ValidateVotingKey(
+		poolKeyHash,
+		fixture.keys[member.VoterId],
+	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "store temporarily unavailable")
 }
@@ -1517,6 +3097,8 @@ func TestVoteManagerValidateVotingKeyPropagatesKeyProviderFailure(t *testing.T) 
 // and every subsequent emission would then silently reject it once the
 // outage clears and the real key resolves.
 func TestVoteManagerEnableVotingPropagatesKeyProviderFailure(t *testing.T) {
+	t.Parallel()
+
 	member := CommitteeMember{}
 	fixture := newManagerFixture(
 		t,
@@ -1540,6 +3122,8 @@ func TestVoteManagerEnableVotingPropagatesKeyProviderFailure(t *testing.T) {
 }
 
 func TestVoteManagerOwnVoteRequiresCommitteeMembership(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	var poolKeyHash lcommon.PoolKeyHash
 	poolKeyHash[0] = 0xee // not a committee member
@@ -1558,6 +3142,8 @@ func TestVoteManagerOwnVoteRequiresCommitteeMembership(t *testing.T) {
 }
 
 func TestVoteManagerNoVoteWithoutVotingEnabled(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	fixture.mgr.HandleEndorserBlock(577, ebHash)
@@ -1570,6 +3156,8 @@ func TestVoteManagerNoVoteWithoutVotingEnabled(t *testing.T) {
 }
 
 func TestVoteManagerVotesByIdsSubset(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	require.NoError(
@@ -1598,6 +3186,8 @@ func TestVoteManagerVotesByIdsSubset(t *testing.T) {
 }
 
 func TestVoteManagerRollbackPrunesVotes(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	require.NoError(
@@ -1647,6 +3237,8 @@ func TestVoteManagerRollbackPrunesVotes(t *testing.T) {
 }
 
 func TestVoteManagerEpochTransitionPrunes(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	// Epoch 3 vote (slot 350) and epoch 5 vote (slot 577)
@@ -1692,6 +3284,8 @@ func TestVoteManagerEpochTransitionPrunes(t *testing.T) {
 }
 
 func TestVoteManagerEpochTransitionPrunesPrototypeStateAndCounts(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	oldRb := lcommon.NewBlake2b256([]byte("old-rb"))
 	oldEb := lcommon.NewBlake2b256([]byte("old-eb"))
@@ -1735,6 +3329,8 @@ func TestVoteManagerEpochTransitionPrunesPrototypeStateAndCounts(t *testing.T) {
 }
 
 func TestVoteManagerTTLPrune(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	base := time.Now()
 	var offsetMu sync.Mutex
@@ -1781,6 +3377,8 @@ func TestVoteManagerTTLPrune(t *testing.T) {
 }
 
 func TestVoteManagerSizePrune(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	fixture.mgr.maxVotes = 2
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
@@ -1811,6 +3409,8 @@ func TestVoteManagerSizePrune(t *testing.T) {
 }
 
 func TestVoteManagerCommitteeMemoized(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	first, err := fixture.mgr.CommitteeForEpoch(5)
 	require.NoError(t, err)
@@ -1828,6 +3428,8 @@ func TestVoteManagerCommitteeMemoized(t *testing.T) {
 }
 
 func TestVoteManagerCommitteeUnavailableNotMemoized(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	fixture.stake.setError(errors.New("snapshot not ready"))
 	_, err := fixture.mgr.CommitteeForEpoch(5)
@@ -1841,6 +3443,8 @@ func TestVoteManagerCommitteeUnavailableNotMemoized(t *testing.T) {
 }
 
 func TestVoteManagerParamsValidationFailureSurfaces(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(
 		t,
 		func(f *managerFixture, cfg *VoteManagerConfig) {
@@ -1890,6 +3494,8 @@ func TestVoteManagerParamsValidationFailureSurfaces(t *testing.T) {
 }
 
 func TestVoteManagerExpiredVoteIdCanBeReplaced(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	base := time.Now()
 	var offsetMu sync.Mutex
@@ -1932,6 +3538,8 @@ func TestVoteManagerExpiredVoteIdCanBeReplaced(t *testing.T) {
 }
 
 func TestVoteManagerNextVotesAbortDoesNotSkipVotes(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	require.NoError(
@@ -1975,6 +3583,8 @@ func TestVoteManagerNextVotesAbortDoesNotSkipVotes(t *testing.T) {
 }
 
 func TestVoteManagerEvictedVoteDoesNotRecount(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	fixture.mgr.maxVotes = 3
 	subId, quorumCh := fixture.eventBus.Subscribe(EbQuorumEventType)
@@ -2050,6 +3660,8 @@ func TestVoteManagerEvictedVoteDoesNotRecount(t *testing.T) {
 }
 
 func TestVoteManagerEvictedVoteEquivocationStillDetected(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	fixture.mgr.maxVotes = 1
 	subId, quorumCh := fixture.eventBus.Subscribe(EbQuorumEventType)
@@ -2110,6 +3722,8 @@ func TestVoteManagerEvictedVoteEquivocationStillDetected(t *testing.T) {
 }
 
 func TestVoteManagerRecordsRetainedWhileTallyLive(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	base := time.Now()
 	var offsetMu sync.Mutex
@@ -2224,6 +3838,8 @@ func partialRegistryOpt(
 }
 
 func TestVoteManagerRecordCapacityRejectsNewVotes(t *testing.T) {
+	t.Parallel()
+
 	// Voters 0..2 have no registered keys: their votes are unverified
 	// and subject to the record admission cap.
 	fixture := newManagerFixture(t, partialRegistryOpt(t, 0, 1, 2))
@@ -2266,6 +3882,8 @@ func TestVoteManagerRecordCapacityRejectsNewVotes(t *testing.T) {
 }
 
 func TestVoteManagerVerifiedVoteBypassesRecordCapacity(t *testing.T) {
+	t.Parallel()
+
 	// Voters 0..2 have no registered keys; voter 3 stays registered.
 	fixture := newManagerFixture(t, partialRegistryOpt(t, 0, 1, 2))
 	fixture.mgr.maxRecords = 2
@@ -2316,6 +3934,8 @@ func TestVoteManagerVerifiedVoteBypassesRecordCapacity(t *testing.T) {
 }
 
 func TestVoteManagerLocalVoteBypassesRecordCapacity(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	fixture.mgr.maxRecords = 1
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
@@ -2352,6 +3972,8 @@ func TestVoteManagerLocalVoteBypassesRecordCapacity(t *testing.T) {
 }
 
 func TestVoteManagerSlotWindowRejects(t *testing.T) {
+	t.Parallel()
+
 	// The past bound is the vote window (offset after the EB produce slot at
 	// which voting closes); the future bound is the clock-skew tolerance.
 	const voteWindow = 10
@@ -2411,6 +4033,8 @@ func TestVoteManagerSlotWindowRejects(t *testing.T) {
 }
 
 func TestVoteManagerRollbackAllowsReVoteForNewChain(t *testing.T) {
+	t.Parallel()
+
 	fixture := newManagerFixture(t)
 	ebHashA := lcommon.NewBlake2b256([]byte("eb-a"))
 	ebHashB := lcommon.NewBlake2b256([]byte("eb-b"))
@@ -2458,6 +4082,8 @@ func TestVoteManagerRollbackAllowsReVoteForNewChain(t *testing.T) {
 }
 
 func TestVoteManagerRollbackRejectsInFlightLocalPrototypeVote(t *testing.T) {
+	t.Parallel()
+
 	params := newBlockingParamsProvider()
 	fixture := newManagerFixture(
 		t,
@@ -2510,6 +4136,8 @@ func TestVoteManagerRollbackRejectsInFlightLocalPrototypeVote(t *testing.T) {
 }
 
 func TestVoteManagerRollbackRejectsInFlightResolvedPrototypeVote(t *testing.T) {
+	t.Parallel()
+
 	params := newBlockingParamsProvider()
 	fixture := newManagerFixture(
 		t,

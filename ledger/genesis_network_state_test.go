@@ -28,6 +28,8 @@ import (
 )
 
 func TestCreateGenesisBlockInitializesMusashiNetworkState(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -63,9 +65,12 @@ func TestCreateGenesisBlockInitializesMusashiNetworkState(t *testing.T) {
 		uint64(14_999_999_100_000_000),
 		uint64(state.Reserves),
 	)
+	requireTreasuryValue(t, ls, nil, 0)
 }
 
 func TestCreateGenesisBlockPersistsMusashiExtraConfigStaking(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -111,6 +116,17 @@ func TestCreateGenesisBlockPersistsMusashiExtraConfigStaking(t *testing.T) {
 		},
 	}
 	require.NoError(t, ls.createGenesisBlock())
+	expectedDeposit := uint64(
+		nodeCfg.ShelleyGenesis().ProtocolParameters.KeyDeposit,
+	)
+	view := &LedgerView{ls: ls}
+	deposit, err := view.StakeCredentialDeposit(lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: delegatorHash,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, deposit)
+	require.Equal(t, expectedDeposit, *deposit)
 
 	pool, err := db.GetPool(lcommon.PoolKeyHash(poolKeyHash), false, nil)
 	require.NoError(t, err)
@@ -121,6 +137,8 @@ func TestCreateGenesisBlockPersistsMusashiExtraConfigStaking(t *testing.T) {
 }
 
 func TestGenesisStakeDelegationsRejectsConflictingPools(t *testing.T) {
+	t.Parallel()
+
 	delegator, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyKey,
 		lcommon.AddressNetworkTestnet,
@@ -137,6 +155,8 @@ func TestGenesisStakeDelegationsRejectsConflictingPools(t *testing.T) {
 }
 
 func TestCreateGenesisBlockBackfillsMissingNetworkState(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -184,6 +204,8 @@ func TestCreateGenesisBlockBackfillsMissingNetworkState(t *testing.T) {
 }
 
 func TestGenesisReserveBalanceRejectsInvalidInputs(t *testing.T) {
+	t.Parallel()
+
 	_, err := genesisReserveBalance(1, []lcommon.Utxo{{}})
 	require.ErrorContains(t, err, "has no output")
 
@@ -207,6 +229,8 @@ func TestGenesisReserveBalanceRejectsInvalidInputs(t *testing.T) {
 // monetary expansion is skipped (dingo #3381). Fees are 0 because no epoch
 // precedes epoch 0.
 func TestCreateGenesisBlockSeedsEpochZeroRewardAdaPots(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -249,7 +273,11 @@ func TestCreateGenesisBlockSeedsEpochZeroRewardAdaPots(t *testing.T) {
 // TestCreateGenesisBlockBackfillsMissingEpochZeroRewardAdaPots covers the
 // pre-existing-genesis-database path, which reaches ensureGenesisNetworkState
 // instead of the full genesis write.
-func TestCreateGenesisBlockBackfillsMissingEpochZeroRewardAdaPots(t *testing.T) {
+func TestCreateGenesisBlockBackfillsMissingEpochZeroRewardAdaPots(
+	t *testing.T,
+) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})

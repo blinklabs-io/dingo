@@ -35,6 +35,9 @@ func TestLegacyDecentralizationUpdateUsesSourceEraShape(t *testing.T) {
 	require.Equal(t, 0, update.Decentralization.Cmp(big.NewRat(0, 1)))
 
 	_, err = eras.DecodePParamsUpdateBabbage(legacyUpdate)
-	require.Error(t, err,
-		"Babbage must reject the removed legacy decentralization field; the update must be enacted before the era transition")
+	require.Error(
+		t,
+		err,
+		"Babbage must reject the removed legacy decentralization field; the update must be enacted before the era transition",
+	)
 }

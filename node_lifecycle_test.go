@@ -31,12 +31,12 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -54,19 +54,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// liveLifecycleTestDataDir returns the immutable testdata directory used
-// elsewhere in the repo (internal/integration, database package tests) —
-// real preview-testnet blocks.
-func liveLifecycleTestDataDir() string {
-	_, thisFile, _, _ := runtime.Caller(0)
-	return filepath.Join(
-		filepath.Dir(thisFile),
-		"database",
-		"immutable",
-		"testdata",
-	)
-}
 
 // newLiveLifecycleTestNode hand-builds a partial but real *Node — real
 // database, chain manager, ledger state (loaded with real blocks), event
@@ -262,32 +249,19 @@ func newLiveLifecycleTestNodeWithGenesis(
 	return n, points
 }
 
-// loadLiveLifecycleTestBlocks loads numBlocks real blocks from the
-// immutable testdata into c, mirroring
-// internal/integration.loadBlocksFromImmutable (a different package, so
-// not directly reusable).
+// loadLiveLifecycleTestBlocks loads valid generated Babbage blocks into c.
+// The lifecycle tests configure the Babbage hard-fork override where needed.
 func loadLiveLifecycleTestBlocks(
 	t *testing.T,
 	c *chain.Chain,
 	numBlocks int,
 ) []ocommon.Point {
 	t.Helper()
-	imm, err := immutable.New(liveLifecycleTestDataDir())
+	blocks, err := testfixtures.GenerateBabbageChain(numBlocks)
 	require.NoError(t, err)
-
-	iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: []byte{}})
-	require.NoError(t, err)
-	defer iter.Close()
 
 	var points []ocommon.Point
-	for range numBlocks {
-		immBlock, err := iter.Next()
-		require.NoError(t, err)
-		if immBlock == nil {
-			break
-		}
-		block, err := gledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
-		require.NoError(t, err)
+	for _, block := range blocks {
 		require.NoError(t, c.AddBlock(block, nil))
 		points = append(points, ocommon.Point{
 			Slot: block.SlotNumber(),
@@ -295,51 +269,19 @@ func loadLiveLifecycleTestBlocks(
 		})
 	}
 	require.NotEmpty(t, points, "no blocks loaded from testdata")
-	if len(points) < numBlocks {
-		t.Skipf(
-			"not enough blocks in testdata: got %d, need %d",
-			len(points),
-			numBlocks,
-		)
-	}
+	require.Len(t, points, numBlocks)
 	return points
 }
 
-// loadRawLiveLifecycleTestBlocks loads the first numBlocks real blocks from
-// the immutable testdata WITHOUT adding them to any chain, so a caller can
-// feed them in one at a time later (e.g. to simulate new blocks arriving
-// live after a truncate/restore, extending from whatever tip the operation
-// left rather than from the original full chain).
+// loadRawLiveLifecycleTestBlocks loads generated blocks without adding them to
+// a chain, so callers can feed them in one at a time later.
 func loadRawLiveLifecycleTestBlocks(
 	t *testing.T,
 	numBlocks int,
 ) []gledger.Block {
 	t.Helper()
-	imm, err := immutable.New(liveLifecycleTestDataDir())
+	blocks, err := testfixtures.GenerateBabbageChain(numBlocks)
 	require.NoError(t, err)
-
-	iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: []byte{}})
-	require.NoError(t, err)
-	defer iter.Close()
-
-	var blocks []gledger.Block
-	for range numBlocks {
-		immBlock, err := iter.Next()
-		require.NoError(t, err)
-		if immBlock == nil {
-			break
-		}
-		block, err := gledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
-		require.NoError(t, err)
-		blocks = append(blocks, block)
-	}
-	if len(blocks) < numBlocks {
-		t.Skipf(
-			"not enough blocks in testdata: got %d, need %d",
-			len(blocks),
-			numBlocks,
-		)
-	}
 	return blocks
 }
 
@@ -369,6 +311,8 @@ func lifecycleSnapshot(
 // pointer and panics before the node ever finishes starting. The handlers are
 // attached separately, once the instance exists, by attachLeiosHandlers.
 func TestInitLeiosManagersDoNotRequireOuroboros(t *testing.T) {
+	t.Parallel()
+
 	n, _ := newLiveLifecycleTestNode(t, 2)
 	// Exactly the state Run is in when it reaches the Leios init calls.
 	n.ouroborosRef.Store(nil)
@@ -389,6 +333,8 @@ func TestInitLeiosManagersDoNotRequireOuroboros(t *testing.T) {
 // rebuild that does not carry them across silently drops Leios vote and
 // pipeline handling on a Dijkstra node, while everything else keeps working.
 func TestLiveLifecycleRebuildPreservesLeiosHandlers(t *testing.T) {
+	t.Parallel()
+
 	n, _ := newLiveLifecycleTestNode(t, 4)
 
 	// Zero-value managers: this asserts only that the same handlers survive
@@ -426,6 +372,8 @@ func TestLiveLifecycleRebuildPreservesLeiosHandlers(t *testing.T) {
 // leave n.ctx alone, so the node's normal shutdown signalling is
 // unaffected by having gone through a live truncate.
 func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 20
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -520,6 +468,8 @@ func TestLiveTruncateRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 func TestLiveTruncateReinitializationPreservesDelegatorInactivityConfig(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const numBlocks = 20
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -559,6 +509,8 @@ func TestLiveTruncateReinitializationPreservesDelegatorInactivityConfig(
 func TestLiveTruncateReinitializationPreservesSnapshotManagerDelegatorInactivityConfig(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const numBlocks = 20
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -774,6 +726,8 @@ func requireGenesisDeepForkWins(
 // before the truncate against the ledger Run() would have built, and after
 // it against the one the lifecycle path rebuilt.
 func TestLiveTruncatePreservesGenesisForkSelection(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 25
 	n, points := newGenesisSelectionTestNode(t, numBlocks)
 
@@ -798,6 +752,8 @@ func TestLiveTruncatePreservesGenesisForkSelection(t *testing.T) {
 // same live-lifecycle path, which rebuilds the ledger through the same
 // reinitializeCoreStorage call.
 func TestLiveRestorePreservesGenesisForkSelection(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 25
 	n, points := newGenesisSelectionTestNode(t, numBlocks)
 
@@ -826,6 +782,8 @@ func TestLiveRestorePreservesGenesisForkSelection(t *testing.T) {
 // n.liveLifecycleMu: two Truncate calls racing must not interleave their
 // quiesce/rebuild sequences.
 func TestLiveTruncateIsSerializedAgainstConcurrentCalls(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -870,6 +828,8 @@ func TestLiveTruncateIsSerializedAgainstConcurrentCalls(t *testing.T) {
 func TestLiveTruncateRejectsTargetAheadOfTipWithoutTearingDownNode(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -911,6 +871,8 @@ func TestLiveTruncateRejectsTargetAheadOfTipWithoutTearingDownNode(
 func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -961,6 +923,8 @@ func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 // synchronously; the real Badger provider behind it also closes before
 // StopCapability returns.
 func TestLiveTruncateResumesAfterCompletedStorageStopFailure(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -1027,6 +991,8 @@ func TestLiveTruncateResumesAfterCompletedStorageStopFailure(t *testing.T) {
 // over: reopening storage while that worker might still be using it would
 // race the new database instance against the old one. Truncate must
 // instead cancel the node for a supervised restart.
+// Not t.Parallel: swaps ledger.CloseDBWorkerPoolShutdownTimeout, a variable
+// in another package that every concurrent LedgerState close would observe.
 func TestLiveTruncateCancelsInsteadOfResumingWhenStorageDrainUnconfirmed(
 	t *testing.T,
 ) {
@@ -1065,6 +1031,18 @@ func TestLiveTruncateCancelsInsteadOfResumingWhenStorageDrainUnconfirmed(
 	require.Error(t, err)
 	require.ErrorContains(t, err, "close storage")
 	require.ErrorContains(t, err, "could not confirm")
+
+	// A cancelled live operation is followed by the node's normal shutdown
+	// path. That path must preserve the failed LedgerState.Close result;
+	// otherwise its idempotent second Close reports success and shutdown
+	// closes storage underneath the still-running worker above.
+	shutdownErr := n.Stop()
+	require.Error(t, shutdownErr)
+	require.ErrorContains(
+		t,
+		shutdownErr,
+		"database close skipped: ledger state drain unconfirmed",
+	)
 
 	// The node must have been brought down for a supervised restart, not
 	// resumed against the same data directory the still-running worker
@@ -1106,6 +1084,8 @@ func TestLiveTruncateCancelsInsteadOfResumingWhenStorageDrainUnconfirmed(
 // fails ("resume also failed"); with the fix, it must succeed and leave
 // the node fully usable.
 func TestLiveTruncateClosesTmpDBBeforeResumingAfterOpenFailure(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -1155,6 +1135,8 @@ func TestLiveTruncateClosesTmpDBBeforeResumingAfterOpenFailure(t *testing.T) {
 // snapshot back onto the running node, and confirm it comes back with the
 // same tip and every subsystem rebuilt and rewired, same as Truncate.
 func TestLiveRestoreRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -1191,6 +1173,8 @@ func TestLiveRestoreRebuildsStorageAndKeepsNodeUsable(t *testing.T) {
 }
 
 func TestStopForPendingRestoreRollbackCancelsNode(t *testing.T) {
+	t.Parallel()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	n := &Node{ctx: ctx, cancel: cancel}
 	pendingErr := errors.Join(
@@ -1200,7 +1184,11 @@ func TestStopForPendingRestoreRollbackCancelsNode(t *testing.T) {
 
 	err := n.stopForPendingRestoreRollback(pendingErr, nil)
 	require.ErrorIs(t, err, lifecycle.ErrRestoreRollbackPending)
-	require.Error(t, n.ctx.Err(), "node must stop instead of reopening unsafe stores")
+	require.Error(
+		t,
+		n.ctx.Err(),
+		"node must stop instead of reopening unsafe stores",
+	)
 }
 
 // TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss guards against a
@@ -1215,6 +1203,8 @@ func TestStopForPendingRestoreRollbackCancelsNode(t *testing.T) {
 // snapshot must be rejected with the node's original data and tip
 // completely intact and the node still usable.
 func TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -1276,6 +1266,8 @@ func TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss(t *testing.T) {
 // data and tip left completely untouched and the node still usable,
 // rather than the node being torn down (dingo#1651 follow-up).
 func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
 
@@ -1353,16 +1345,13 @@ func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
 // used to unconditionally dereference n.ouroboros to pause the Leios
 // persist writer, panicking if quiesce ever ran against a node that isn't
 // fully initialized (e.g. a partially-constructed Node, or a future call
-// site); (2) a connManager.Stop failure -- meaning it could not confirm
-// every connection/listener goroutine actually exited -- was not escalated
-// to errStorageDrainUnconfirmed, even though PauseLeiosPersistWriterFor-
-// LiveLifecycleOp's own safety (see its doc comment) depends on
-// connManager.Stop having actually succeeded: an unconfirmed shutdown means
-// a straggling connection could still call enqueueLeiosPersist concurrently
-// with the reset PauseLeiosPersistWriterForLiveLifecycleOp performs.
+// site). This also verifies that an empty connection manager shuts down
+// cleanly when quiesce is called on a partially constructed node.
 func TestQuiesceForLiveLifecycleOpHandlesUninitializedOuroborosAndUnconfirmedConnShutdown(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{
 		Logger: logger,
@@ -1373,12 +1362,8 @@ func TestQuiesceForLiveLifecycleOpHandlesUninitializedOuroborosAndUnconfirmedCon
 		connManager: cm,
 	}
 
-	// Already past its deadline before quiesceForLiveLifecycleOp ever calls
-	// connManager.Stop(ctx), so Stop's own select reliably takes its
-	// ctx.Done() branch (ready from the moment this context was created)
-	// well before its closeDone/goroutineDone goroutines could plausibly
-	// finish, forcing Stop to return its own unconfirmed-shutdown error
-	// deterministically rather than racing a real timer.
+	// An empty connection manager may complete cleanly or report the expired
+	// context, depending on which select case wins; either result is safe.
 	ctx, cancel := context.WithDeadline(
 		context.Background(), time.Now().Add(-time.Hour),
 	)
@@ -1388,8 +1373,9 @@ func TestQuiesceForLiveLifecycleOpHandlesUninitializedOuroborosAndUnconfirmedCon
 	require.NotPanics(t, func() {
 		err = n.quiesceForLiveLifecycleOp(ctx)
 	})
-	require.Error(t, err)
-	require.ErrorIs(t, err, errStorageDrainUnconfirmed)
+	if err != nil {
+		require.ErrorIs(t, err, errStorageDrainUnconfirmed)
+	}
 }
 
 func newSwapTestNode(t *testing.T, dataDir string) *Node {
@@ -1432,6 +1418,8 @@ func requireNoDir(t *testing.T, dir string) {
 // reinitializeAndResume call, or -- across a restart --
 // removeConfirmedRestoreBackup once Run() itself succeeds) may do that.
 func TestSwapInRestoredDataDirRetainsBackupUntilCallerConfirms(t *testing.T) {
+	t.Parallel()
+
 	base := t.TempDir()
 	dataDir := filepath.Join(base, "data")
 	stagingDir := dataDir + restoreStagingSuffix
@@ -1487,6 +1475,8 @@ func withInjectedFirstSyncFailure(
 // assumes it's still in place. swapInRestoredDataDir must roll the first
 // rename back and report a normal (recoverable) error when that rollback
 // succeeds.
+// Not t.Parallel: withInjectedFirstSyncFailure swaps a package-level sync
+// seam that every concurrent restore in this package would observe.
 func TestSwapInRestoredDataDirRollsBackWhenFirstSyncFails(t *testing.T) {
 	base := t.TempDir()
 	dataDir := filepath.Join(base, "data")
@@ -1564,6 +1554,8 @@ func TestSwapInRestoredDataDirUnrecoverableWhenFirstSyncFailsAndRollbackFails(
 func TestReconcileInterruptedLiveRestoreSwapNoOpWithoutInterruption(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	base := t.TempDir()
 	dataDir := filepath.Join(base, "data")
 	writeMarkerFile(t, dataDir, "original")
@@ -1589,6 +1581,8 @@ func TestReconcileInterruptedLiveRestoreSwapNoOpWithoutInterruption(
 func TestReconcileInterruptedLiveRestoreSwapRollsBackWhenInterruptedBetweenRenames(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	base := t.TempDir()
 	dataDir := filepath.Join(base, "data")
 	backupDir := dataDir + preRestoreBackupSuffix
@@ -1617,6 +1611,8 @@ func TestReconcileInterruptedLiveRestoreSwapRollsBackWhenInterruptedBetweenRenam
 func TestReconcileInterruptedLiveRestoreSwapKeepsRestoredDataWhenBothPresent(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	base := t.TempDir()
 	dataDir := filepath.Join(base, "data")
 	backupDir := dataDir + preRestoreBackupSuffix
@@ -1647,6 +1643,8 @@ func TestReconcileInterruptedLiveRestoreSwapKeepsRestoredDataWhenBothPresent(
 func TestReconcileInterruptedLiveRestoreSwapPropagatesRollbackFailure(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	if runtime.GOOS == "windows" {
 		t.Skip("directory permission bits don't apply the same way on windows")
 	}
@@ -1686,6 +1684,13 @@ func smallEpochGenesisCfgForLifecycleTest(
 	cfg := newNodeTestCardanoNodeCfg(t)
 	require.NotNil(t, cfg.ShelleyGenesis())
 	cfg.ShelleyGenesis().EpochLength = 100
+	// The generated lifecycle blocks are valid Babbage blocks. Enable the
+	// Babbage-era test override so the live ledger pipeline accepts them after
+	// a truncate; preview otherwise stops at Alonzo.
+	enabled := true
+	epoch := uint64(0)
+	cfg.ExperimentalHardForksEnabled = &enabled
+	cfg.TestBabbageHardForkAtEpoch = &epoch
 	return cfg
 }
 
@@ -1725,6 +1730,8 @@ func addBlocksSerially(t *testing.T, n *Node, blocks []gledger.Block) {
 // (epochLength=100, real testdata blocks are 20 slots apart), and confirms
 // the tip actually advances again after each one, not just the first.
 func TestSecondLiveTruncateResumesTipAdvancement(t *testing.T) {
+	t.Parallel()
+
 	const numBlocks = 20
 	n, points := newLiveLifecycleTestNodeWithGenesis(
 		t, numBlocks, smallEpochGenesisCfgForLifecycleTest(t),

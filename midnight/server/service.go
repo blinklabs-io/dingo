@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -26,6 +27,17 @@ import (
 	midnightindexer "github.com/blinklabs-io/dingo/midnight/indexer"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+)
+
+// errAsOfTimestampOutOfRange marks a client-supplied
+// as_of_timestamp_unix_millis that resolveTipBlock cannot convert to a
+// non-negative int64 millisecond value. Converting it anyway (int64(v))
+// would silently wrap into a negative timestamp and resolve to a bogus
+// slot. GetStableBlock and GetLatestStableBlock check for this sentinel to
+// return InvalidArgument instead of masking it as an internal failure or a
+// "no such block" empty response.
+var errAsOfTimestampOutOfRange = errors.New(
+	"as_of_timestamp_unix_millis exceeds the supported range",
 )
 
 // The service struct is declared in server.go, where its db/slotTimer fields
@@ -67,6 +79,19 @@ func (s *service) checkBlockBackends() error {
 	return nil
 }
 
+// internalError logs err's full detail server-side and returns a stable,
+// generic codes.Internal status naming only op. Handlers must route every
+// backend/decode/conversion failure through this rather than interpolating
+// err into the client-facing message: %v on a raw error can carry
+// driver-specific SQL text, file paths, or CBOR diagnostics that should
+// never leave the process.
+func (s *service) internalError(op string, err error) error {
+	if s.logger != nil {
+		s.logger.Error("midnight grpc: internal error", "op", op, "error", err)
+	}
+	return status.Errorf(codes.Internal, "%s failed", op)
+}
+
 // GetTechnicalCommitteeDatum returns the newest Technical Committee datum at
 // or before the requested block number.
 func (s *service) GetTechnicalCommitteeDatum(
@@ -81,11 +106,7 @@ func (s *service) GetTechnicalCommitteeDatum(
 		req.GetBlockNumber(),
 	)
 	if err != nil {
-		return nil, status.Errorf(
-			codes.Internal,
-			"get technical committee datum: %v",
-			err,
-		)
+		return nil, s.internalError("get technical committee datum", err)
 	}
 	if datum == nil {
 		return nil, status.Error(
@@ -113,11 +134,7 @@ func (s *service) GetCouncilDatum(
 		req.GetBlockNumber(),
 	)
 	if err != nil {
-		return nil, status.Errorf(
-			codes.Internal,
-			"get council datum: %v",
-			err,
-		)
+		return nil, s.internalError("get council datum", err)
 	}
 	if datum == nil {
 		return nil, status.Error(
@@ -142,11 +159,7 @@ func (s *service) GetAriadneParameters(
 	}
 	params, err := s.db.GetMidnightAriadneParamsAtOrBeforeEpoch(req.GetEpoch())
 	if err != nil {
-		return nil, status.Errorf(
-			codes.Internal,
-			"get ariadne parameters: %v",
-			err,
-		)
+		return nil, s.internalError("get ariadne parameters", err)
 	}
 	if params == nil {
 		return nil, status.Error(
@@ -170,7 +183,7 @@ func (s *service) GetEpochNonce(
 	}
 	epoch, err := s.db.GetEpoch(req.GetEpoch())
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "get epoch: %v", err)
+		return nil, s.internalError("get epoch", err)
 	}
 	if epoch == nil {
 		return nil, status.Error(codes.NotFound, "epoch not found")
@@ -191,11 +204,7 @@ func (s *service) GetEpochCandidates(
 	epoch := req.GetEpoch()
 	snapshot, err := s.db.GetMidnightEpochCandidatesByEpoch(epoch)
 	if err != nil {
-		return nil, status.Errorf(
-			codes.Internal,
-			"get epoch candidates: %v",
-			err,
-		)
+		return nil, s.internalError("get epoch candidates", err)
 	}
 	if snapshot == nil {
 		return nil, status.Error(
@@ -207,17 +216,12 @@ func (s *service) GetEpochCandidates(
 		snapshot.CandidatesCbor,
 	)
 	if err != nil {
-		return nil, status.Errorf(
-			codes.Internal,
-			"decode candidate snapshot: %v",
-			err,
-		)
+		return nil, s.internalError("decode candidate snapshot", err)
 	}
 	registrations, err := s.candidateRegistrationsFor(entries)
 	if err != nil {
-		return nil, status.Errorf(
-			codes.Internal,
-			"get committee candidate registrations: %v",
+		return nil, s.internalError(
+			"get committee candidate registrations",
 			err,
 		)
 	}
@@ -248,11 +252,7 @@ func (s *service) GetEpochCandidates(
 			reg.TxInputsCbor,
 		)
 		if err != nil {
-			return nil, status.Errorf(
-				codes.Internal,
-				"decode candidate tx inputs: %v",
-				err,
-			)
+			return nil, s.internalError("decode candidate tx inputs", err)
 		}
 		txInputs := make([]*midnight.UtxoId, len(inputs))
 		for j, ref := range inputs {
@@ -266,11 +266,7 @@ func (s *service) GetEpochCandidates(
 		models.PoolStakeSnapshotTypeMark,
 	)
 	if err != nil {
-		return nil, status.Errorf(
-			codes.Internal,
-			"get pool stake snapshots: %v",
-			err,
-		)
+		return nil, s.internalError("get pool stake snapshots", err)
 	}
 	// GetPoolStakeSnapshotsByEpoch does not guarantee row order; sort by pool
 	// key hash so the response is deterministic across calls and backends.
@@ -352,29 +348,37 @@ func (s *service) GetBlockByHash(
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return nil, status.Error(codes.NotFound, "block not found")
 		}
-		return nil, status.Errorf(codes.Internal, "get block by hash: %v", err)
+		return nil, s.internalError("get block by hash", err)
 	}
 	decoded, err := blk.Decode()
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "decode block: %v", err)
+		return nil, s.internalError("decode block", err)
 	}
 	epoch, err := s.epochForSlot(blk.Slot)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "%v", err)
+		return nil, s.internalError("resolve epoch", err)
 	}
 	ts, err := s.slotTimer.SlotToTime(blk.Slot)
 	if err != nil {
-		return nil, status.Errorf(
-			codes.Internal,
-			"resolve block timestamp: %v",
-			err,
-		)
+		return nil, s.internalError("resolve block timestamp", err)
+	}
+	blockNumber, err := checkedUint32(blk.Number)
+	if err != nil {
+		return nil, s.internalError("convert block number", err)
+	}
+	txCount, err := checkedUint32(uint64(len(decoded.Transactions())))
+	if err != nil {
+		return nil, s.internalError("convert tx count", err)
+	}
+	epochNumber, err := checkedUint32(epoch.EpochId)
+	if err != nil {
+		return nil, s.internalError("convert epoch number", err)
 	}
 	return &midnight.BlockByHashResponse{
-		BlockNumber:        checkedUint32(blk.Number),
-		TxCount:            checkedUint32(uint64(len(decoded.Transactions()))),
+		BlockNumber:        blockNumber,
+		TxCount:            txCount,
 		BlockTimestampUnix: ts.Unix(),
-		EpochNumber:        checkedUint32(epoch.EpochId),
+		EpochNumber:        epochNumber,
 		SlotNumber:         blk.Slot,
 	}, nil
 }
@@ -389,14 +393,14 @@ func (s *service) GetLatestBlock(
 	}
 	blocks, err := s.db.BlocksRecent(1)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "get latest block: %v", err)
+		return nil, s.internalError("get latest block", err)
 	}
 	if len(blocks) == 0 {
 		return nil, status.Error(codes.NotFound, "no blocks in chain yet")
 	}
 	pb, err := s.buildBlock(blocks[0])
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "%v", err)
+		return nil, s.internalError("build block", err)
 	}
 	return &midnight.LatestBlockResponse{Block: pb}, nil
 }
@@ -416,14 +420,18 @@ func (s *service) GetStableBlock(
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return nil, status.Error(codes.NotFound, "block not found")
 		}
-		return nil, status.Errorf(codes.Internal, "get block by hash: %v", err)
+		return nil, s.internalError("get block by hash", err)
 	}
 	tip, err := s.resolveTipBlock(req.GetAsOfTimestampUnixMillis())
 	if err != nil {
-		if errors.Is(err, models.ErrBlockNotFound) {
+		switch {
+		case errors.Is(err, models.ErrBlockNotFound):
 			return &midnight.StableBlockResponse{}, nil
+		case errors.Is(err, errAsOfTimestampOutOfRange):
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		default:
+			return nil, s.internalError("resolve chain tip", err)
 		}
-		return nil, status.Errorf(codes.Internal, "resolve chain tip: %v", err)
 	}
 	if tip.Number < blk.Number ||
 		tip.Number-blk.Number < uint64(req.GetStabilityOffset()) {
@@ -431,7 +439,7 @@ func (s *service) GetStableBlock(
 	}
 	pb, err := s.buildBlock(blk)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "%v", err)
+		return nil, s.internalError("build block", err)
 	}
 	return &midnight.StableBlockResponse{Block: pb}, nil
 }
@@ -449,10 +457,14 @@ func (s *service) GetLatestStableBlock(
 	}
 	tip, err := s.resolveTipBlock(req.GetAsOfTimestampUnixMillis())
 	if err != nil {
-		if errors.Is(err, models.ErrBlockNotFound) {
+		switch {
+		case errors.Is(err, models.ErrBlockNotFound):
 			return &midnight.LatestStableBlockResponse{}, nil
+		case errors.Is(err, errAsOfTimestampOutOfRange):
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		default:
+			return nil, s.internalError("resolve chain tip", err)
 		}
-		return nil, status.Errorf(codes.Internal, "resolve chain tip: %v", err)
 	}
 	offset := uint64(req.GetStabilityOffset())
 	if tip.Number < offset {
@@ -463,15 +475,11 @@ func (s *service) GetLatestStableBlock(
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return &midnight.LatestStableBlockResponse{}, nil
 		}
-		return nil, status.Errorf(
-			codes.Internal,
-			"get block by number: %v",
-			err,
-		)
+		return nil, s.internalError("get block by number", err)
 	}
 	pb, err := s.buildBlock(blk)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "%v", err)
+		return nil, s.internalError("build block", err)
 	}
 	return &midnight.LatestStableBlockResponse{Block: pb}, nil
 }
@@ -489,7 +497,14 @@ func (s *service) resolveTipBlock(asOfMillis uint64) (models.Block, error) {
 		}
 		return blocks[0], nil
 	}
-	// #nosec G115 -- millisecond unix timestamps fit in int64 until year 292277026596
+	// asOfMillis is client-supplied and unsigned: a value above
+	// math.MaxInt64 would wrap to a negative int64 below and resolve to a
+	// bogus slot instead of the far-future time it actually encodes. Reject
+	// it rather than let it wrap; the wire domain otherwise fits int64
+	// until year 292277026596.
+	if asOfMillis > math.MaxInt64 {
+		return models.Block{}, errAsOfTimestampOutOfRange
+	}
 	asOf := time.UnixMilli(int64(asOfMillis))
 	slot, err := s.slotTimer.TimeToSlot(asOf)
 	if err != nil {
@@ -516,12 +531,24 @@ func (s *service) buildBlock(blk models.Block) (*midnight.Block, error) {
 			err,
 		)
 	}
+	blockNumber, err := checkedUint32(blk.Number)
+	if err != nil {
+		return nil, fmt.Errorf("convert block number: %w", err)
+	}
+	epochNumber, err := checkedUint32(epoch.EpochId)
+	if err != nil {
+		return nil, fmt.Errorf("convert epoch number: %w", err)
+	}
+	timestampUnix, err := checkedUint64(ts.Unix())
+	if err != nil {
+		return nil, fmt.Errorf("convert block timestamp: %w", err)
+	}
 	return &midnight.Block{
-		BlockNumber:        checkedUint32(blk.Number),
+		BlockNumber:        blockNumber,
 		BlockHash:          blk.Hash,
-		EpochNumber:        checkedUint32(epoch.EpochId),
+		EpochNumber:        epochNumber,
 		SlotNumber:         blk.Slot,
-		BlockTimestampUnix: checkedUint64(ts.Unix()),
+		BlockTimestampUnix: timestampUnix,
 	}, nil
 }
 
@@ -538,14 +565,25 @@ func (s *service) epochForSlot(slot uint64) (*models.Epoch, error) {
 	return epoch, nil
 }
 
-// checkedUint32 truncates a uint64 to uint32. Block, epoch, and transaction
-// counts stay well under 2^32 for any real Cardano chain.
-func checkedUint32(v uint64) uint32 {
-	return uint32(v) // #nosec G115
+// checkedUint32 converts a uint64 to the Midnight protocol's fixed uint32
+// wire representation, rejecting a value that would silently wrap. Block,
+// epoch, and transaction counts stay well under 2^32 for any real Cardano
+// chain; a value that doesn't fit means the source counter is corrupt, not
+// that this check is overly cautious.
+func checkedUint32(v uint64) (uint32, error) {
+	if v > math.MaxUint32 {
+		return 0, fmt.Errorf("value %d exceeds uint32 range", v)
+	}
+	return uint32(v), nil
 }
 
-// checkedUint64 converts a unix-seconds timestamp (always non-negative for
-// any post-genesis block) to uint64.
-func checkedUint64(v int64) uint64 {
-	return uint64(v) // #nosec G115
+// checkedUint64 converts a unix-seconds timestamp to uint64, rejecting a
+// negative value rather than letting it silently wrap into a huge unsigned
+// number. Every post-genesis Cardano block has a non-negative timestamp; a
+// negative value here means slotTimer returned bad data.
+func checkedUint64(v int64) (uint64, error) {
+	if v < 0 {
+		return 0, fmt.Errorf("timestamp %d is negative", v)
+	}
+	return uint64(v), nil
 }

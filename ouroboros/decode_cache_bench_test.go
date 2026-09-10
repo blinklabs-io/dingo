@@ -18,8 +18,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 )
 
 // benchConwayBlockFixture and benchConwayHeaderFixture mirror
@@ -28,52 +28,26 @@ import (
 // functions.
 func benchConwayBlockFixture(b *testing.B) (blockType uint, raw []byte) {
 	b.Helper()
-	root, err := fixtures.ExtractEmbeddedFixtures(b.TempDir())
+	blocks, err := testfixtures.GenerateConwayChain(1)
 	if err != nil {
-		b.Fatalf("extract fixtures: %v", err)
+		b.Fatalf("generate fixture: %v", err)
 	}
-	fixture, err := fixtures.NewFixture(
-		root,
-		root+"/ouroboros-consensus/ouroboros-consensus-cardano/golden/"+
-			"cardano/CardanoNodeToNodeVersion2/Block_Conway",
-	)
-	if err != nil {
-		b.Fatalf("load fixture: %v", err)
+	if len(blocks) != 1 {
+		b.Fatalf("expected one generated block, got %d", len(blocks))
 	}
-	blockType, err = fixture.LedgerBlockType()
-	if err != nil {
-		b.Fatalf("block type: %v", err)
-	}
-	raw, err = fixture.LedgerBlockBytes()
-	if err != nil {
-		b.Fatalf("block bytes: %v", err)
-	}
-	return blockType, raw
+	return uint(blocks[0].Type()), blocks[0].Cbor()
 }
 
 func benchConwayHeaderFixture(b *testing.B) (headerType uint, raw []byte) {
 	b.Helper()
-	root, err := fixtures.ExtractEmbeddedFixtures(b.TempDir())
+	blocks, err := testfixtures.GenerateConwayChain(1)
 	if err != nil {
-		b.Fatalf("extract fixtures: %v", err)
+		b.Fatalf("generate fixture: %v", err)
 	}
-	fixture, err := fixtures.NewFixture(
-		root,
-		root+"/ouroboros-consensus/ouroboros-consensus-cardano/golden/"+
-			"cardano/CardanoNodeToNodeVersion2/Header_Conway",
-	)
-	if err != nil {
-		b.Fatalf("load fixture: %v", err)
+	if len(blocks) != 1 {
+		b.Fatalf("expected one generated block, got %d", len(blocks))
 	}
-	headerType, err = fixture.LedgerHeaderType()
-	if err != nil {
-		b.Fatalf("header type: %v", err)
-	}
-	raw, err = fixture.LedgerHeaderBytes()
-	if err != nil {
-		b.Fatalf("header bytes: %v", err)
-	}
-	return headerType, raw
+	return uint(blocks[0].Type()), blocks[0].Header().Cbor()
 }
 
 // --- Blocks -----------------------------------------------------------

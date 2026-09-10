@@ -51,23 +51,48 @@ type orderedLane struct {
 // producer sequence -- a ledger rollback's transaction undo events followed by
 // the next block's transaction events -- is exactly the case this is for.
 //
-// Like PublishAsync it does not drop: a full lane makes the publisher wait for
-// capacity rather than discarding the event, and only shutdown releases that
+// Like PublishAsync it does not drop for a live subscriber: a full lane makes
+// the publisher wait for capacity rather than discarding the event. A stalled
+// ordinary subscriber is detached after the delivery timeout, which lets its
+// lane make progress for healthy subscribers; a lossless subscription instead
+// remains blocked until lifecycle cancellation. Shutdown also releases the
 // wait. Returns false when the EventBus is stopped or closed.
 //
 // Each event type gets its own lane, so a slow subscriber delays only its own
 // event type instead of holding up every async event as it would on the shared
 // pool.
+//
+// It returns once the event is enqueued on the lane, not once it has been
+// delivered: the lane's worker calls Publish afterwards, on its own schedule.
+// A true return means the event was accepted for delivery, and says nothing
+// about whether the worker has delivered it yet. Publish, by contrast, hands
+// the event to every subscriber before it returns.
+//
+// A caller that must observe the result of a publish cannot do so by reading
+// the subscriber channel non-blockingly -- with a select/default, a len(ch)
+// check, or a drain loop that stops at the first empty read. Those report an
+// event that is enqueued but not yet delivered as no event at all, which in a
+// test turns an assertion into a race against the worker. Publish a barrier
+// event through the same lane and block until it comes back instead: the lane
+// is a FIFO drained by exactly one worker, so receiving the barrier proves
+// every event enqueued before it has already reached the subscriber. Every
+// subscriber on that lane receives the barrier too, so give it a Data type
+// they skip rather than act on.
+//
+// See switchBarrier in ouroboros/consensus_conformance_test.go for the
+// pattern, and blinklabs-io/dingo#4145 for the failures a non-blocking drain
+// produced.
 func (e *EventBus) PublishOrdered(eventType EventType, evt Event) bool {
 	return e.PublishOrderedContext(context.Background(), eventType, evt)
 }
 
 // PublishOrderedContext is PublishOrdered that also abandons the publish when
-// ctx is done. Only shutdown otherwise releases a publisher waiting on a full
-// lane, so a caller on a shutdown-critical goroutine -- one something else
-// waits for before the EventBus itself stops, such as a LedgerState the node
-// closes while keeping the bus running for a live restore -- must pass a
-// context it cancels, or that wait is unbounded.
+// ctx is done. An ordinary stalled subscriber is detached after the delivery
+// timeout, while a lossless subscriber waits for lifecycle cancellation. A
+// caller on a shutdown-critical goroutine -- one something else waits for
+// before the EventBus itself stops, such as a LedgerState the node closes while
+// keeping the bus running for a live restore -- must pass a context it cancels
+// when it needs a shorter bound.
 //
 // Abandoning is not a drop in the delivery-guarantee sense: the event was
 // never accepted, and the false return says so.

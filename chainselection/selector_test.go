@@ -16,9 +16,13 @@ package chainselection
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"math"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -288,6 +292,34 @@ func TestChainSelectorRemoveBestPeer(t *testing.T) {
 	assert.Nil(t, cs.GetBestPeer())
 }
 
+// drainChainSwitchesUntilBest consumes chain switch events up to and including
+// the one that selects wantConn.
+//
+// ChainSelector.publishSelection hands events to an EventBus ordered lane
+// instead of delivering them inline, so "whatever is queued at this instant"
+// is not a barrier: a drain written as len(ch) can run ahead of the setup
+// switches and then read one of them as the event under test. The switch to
+// the peer the test has just asserted is best is a real barrier.
+func drainChainSwitchesUntilBest(
+	t *testing.T,
+	evtCh <-chan event.Event,
+	wantConn ouroboros.ConnectionId,
+) {
+	t.Helper()
+	for {
+		evt := testutil.RequireReceive(
+			t,
+			evtCh,
+			5*time.Second,
+			"chain switch event selecting the expected best peer",
+		)
+		data, ok := evt.Data.(ChainSwitchEvent)
+		if ok && data.NewConnectionId.String() == wantConn.String() {
+			return
+		}
+	}
+}
+
 func TestChainSelectorRemoveBestPeerEmitsChainSwitchEvent(t *testing.T) {
 	eventBus := event.NewEventBus(nil, nil)
 	cs := NewChainSelector(ChainSelectorConfig{
@@ -316,10 +348,8 @@ func TestChainSelectorRemoveBestPeerEmitsChainSwitchEvent(t *testing.T) {
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, connId1, *cs.GetBestPeer())
 
-	// Drain any events from the initial selection
-	for len(evtCh) > 0 {
-		<-evtCh
-	}
+	// Drain the events from the initial selection
+	drainChainSwitchesUntilBest(t, evtCh, connId1)
 
 	// Remove the best peer - this should emit ChainSwitchEvent
 	cs.RemovePeer(connId1)
@@ -329,16 +359,17 @@ func TestChainSelectorRemoveBestPeerEmitsChainSwitchEvent(t *testing.T) {
 	assert.Equal(t, connId2, *cs.GetBestPeer())
 
 	// Verify ChainSwitchEvent was emitted
-	select {
-	case evt := <-evtCh:
-		switchEvt, ok := evt.Data.(ChainSwitchEvent)
-		require.True(t, ok, "expected ChainSwitchEvent")
-		assert.Equal(t, connId1, switchEvt.PreviousConnectionId)
-		assert.Equal(t, connId2, switchEvt.NewConnectionId)
-		assert.Equal(t, tip2.BlockNumber, switchEvt.NewTip.BlockNumber)
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("expected ChainSwitchEvent was not emitted")
-	}
+	evt := testutil.RequireReceive(
+		t,
+		evtCh,
+		5*time.Second,
+		"expected ChainSwitchEvent was not emitted",
+	)
+	switchEvt, ok := evt.Data.(ChainSwitchEvent)
+	require.True(t, ok, "expected ChainSwitchEvent")
+	assert.Equal(t, connId1, switchEvt.PreviousConnectionId)
+	assert.Equal(t, connId2, switchEvt.NewConnectionId)
+	assert.Equal(t, tip2.BlockNumber, switchEvt.NewTip.BlockNumber)
 }
 
 func TestChainSelectorSelectBestChain(t *testing.T) {
@@ -899,10 +930,8 @@ func TestChainSelectorStalePeerCleanupEmitsChainSwitchEvent(t *testing.T) {
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, connId1, *cs.GetBestPeer())
 
-	// Drain any events from the initial selection
-	for len(evtCh) > 0 {
-		<-evtCh
-	}
+	// Drain the events from the initial selection
+	drainChainSwitchesUntilBest(t, evtCh, connId1)
 
 	// Wait for peer1 to become "very stale" (2x threshold = 100ms)
 	// cleanupStalePeers uses 2x StaleTipThreshold for removal
@@ -913,11 +942,6 @@ func TestChainSelectorStalePeerCleanupEmitsChainSwitchEvent(t *testing.T) {
 
 	// Keep peer2 fresh
 	cs.UpdatePeerTip(connId2, tip2, nil)
-
-	// Drain any events from tip update
-	for len(evtCh) > 0 {
-		<-evtCh
-	}
 
 	// Trigger cleanup - this should emit ChainSwitchEvent when best peer is
 	// removed
@@ -930,16 +954,17 @@ func TestChainSelectorStalePeerCleanupEmitsChainSwitchEvent(t *testing.T) {
 	assert.Equal(t, connId2, *cs.GetBestPeer())
 
 	// Verify ChainSwitchEvent was emitted
-	select {
-	case evt := <-evtCh:
-		switchEvt, ok := evt.Data.(ChainSwitchEvent)
-		require.True(t, ok, "expected ChainSwitchEvent")
-		assert.Equal(t, connId1, switchEvt.PreviousConnectionId)
-		assert.Equal(t, connId2, switchEvt.NewConnectionId)
-		assert.Equal(t, tip2.BlockNumber, switchEvt.NewTip.BlockNumber)
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("expected ChainSwitchEvent was not emitted")
-	}
+	evt := testutil.RequireReceive(
+		t,
+		evtCh,
+		5*time.Second,
+		"expected ChainSwitchEvent was not emitted",
+	)
+	switchEvt, ok := evt.Data.(ChainSwitchEvent)
+	require.True(t, ok, "expected ChainSwitchEvent")
+	assert.Equal(t, connId1, switchEvt.PreviousConnectionId)
+	assert.Equal(t, connId2, switchEvt.NewConnectionId)
+	assert.Equal(t, tip2.BlockNumber, switchEvt.NewTip.BlockNumber)
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
 	_, eligibleFound := cs.eligible[connId1]
@@ -1164,9 +1189,7 @@ func TestChainSelectorTouchPeerActivityEmitsChainSwitchEvent(t *testing.T) {
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, revivedConn, *cs.GetBestPeer())
 
-	for len(evtCh) > 0 {
-		<-evtCh
-	}
+	drainChainSwitchesUntilBest(t, evtCh, revivedConn)
 
 	require.Eventually(t, func() bool {
 		peerTip := cs.GetPeerTip(revivedConn)
@@ -1178,29 +1201,21 @@ func TestChainSelectorTouchPeerActivityEmitsChainSwitchEvent(t *testing.T) {
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, incumbentConn, *cs.GetBestPeer())
 
-	for len(evtCh) > 0 {
-		<-evtCh
-	}
+	drainChainSwitchesUntilBest(t, evtCh, incumbentConn)
 
 	cs.TouchPeerActivity(revivedConn)
 
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, revivedConn, *cs.GetBestPeer())
 
-	var switchEvt ChainSwitchEvent
-	require.Eventually(t, func() bool {
-		select {
-		case evt := <-evtCh:
-			data, ok := evt.Data.(ChainSwitchEvent)
-			if !ok {
-				return false
-			}
-			switchEvt = data
-			return true
-		default:
-			return false
-		}
-	}, time.Second, 5*time.Millisecond, "activity-driven switch should emit event")
+	activityEvt := testutil.RequireReceive(
+		t,
+		evtCh,
+		5*time.Second,
+		"activity-driven switch should emit event",
+	)
+	switchEvt, ok := activityEvt.Data.(ChainSwitchEvent)
+	require.True(t, ok, "expected ChainSwitchEvent")
 
 	assert.Equal(t, incumbentConn, switchEvt.PreviousConnectionId)
 	assert.Equal(t, revivedConn, switchEvt.NewConnectionId)
@@ -2519,4 +2534,233 @@ func TestOmittedObservedFrontierIsNotPromotedToAdvertisedTip(t *testing.T) {
 		*bestPeer,
 		"a peer that delivered no headers must not hold selection on its advertised tip",
 	)
+}
+
+// panicLogHandler is an slog.Handler that panics on every Handle call, used
+// to inject a deterministic panic into a locked section that logs. It
+// otherwise delegates to inner, including WithAttrs/WithGroup, so a wrapped
+// child logger (e.g. from Logger.With) still panics on Handle.
+type panicLogHandler struct {
+	inner slog.Handler
+}
+
+func (h *panicLogHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.inner.Enabled(ctx, level)
+}
+
+func (h *panicLogHandler) Handle(context.Context, slog.Record) error {
+	panic("intentional logger panic")
+}
+
+func (h *panicLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &panicLogHandler{inner: h.inner.WithAttrs(attrs)}
+}
+
+func (h *panicLogHandler) WithGroup(name string) slog.Handler {
+	return &panicLogHandler{inner: h.inner.WithGroup(name)}
+}
+
+// TestChainSelectorSetLocalTipUnlocksOnPanic is a regression test for a bug
+// where SetLocalTip (and SetSecurityParam, HandlePeerRollbackEvent) took
+// cs.mutex.Lock() and called cs.mutex.Unlock() as a bare statement after the
+// locked work instead of via defer. advanceSelectionModeLocked logs on a
+// Genesis-mode exit while the lock is held; if that log call panics (a
+// misbehaving Logger, but the same failure mode as any other panic in code
+// reachable from inside the lock), the bare Unlock() was skipped and
+// cs.mutex stayed locked forever -- deadlocking every future ChainSelector
+// call, not just dropping the one event. This test drives a real Genesis
+// exit with a Logger that panics on every Handle call and then verifies
+// cs.mutex is still acquirable afterward.
+func TestChainSelectorSetLocalTipUnlocksOnPanic(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: 10,
+	})
+
+	connId := newTestConnectionId(1)
+	cs.UpdatePeerTip(connId, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("peer-100")},
+		BlockNumber: 100,
+	}, nil)
+	require.Equal(t, SelectionModeGenesis, cs.SelectionMode())
+
+	// Installed under cs.mutex, after the setup UpdatePeerTip call above
+	// (which itself logs), matching how every production read of
+	// cs.config.Logger is itself guarded by cs.mutex.
+	cs.mutex.Lock()
+	cs.config.Logger = slog.New(
+		&panicLogHandler{inner: slog.NewTextHandler(io.Discard, nil)},
+	)
+	cs.mutex.Unlock()
+
+	func() {
+		defer func() {
+			require.NotNil(
+				t,
+				recover(),
+				"expected the Genesis-exit log call to panic",
+			)
+		}()
+		// Drives the local tip to within the Genesis window of the peer's
+		// advertised tip (100), triggering advanceSelectionModeLocked's
+		// Genesis-exit log call while cs.mutex is held.
+		cs.SetLocalTip(ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 75, Hash: []byte("local-75")},
+			BlockNumber: 75,
+		})
+	}()
+
+	// If SetLocalTip's locked section left cs.mutex locked, this blocks
+	// forever instead of closing unlocked.
+	unlocked := make(chan struct{})
+	go func() {
+		cs.mutex.Lock()
+		cs.mutex.Unlock()
+		close(unlocked)
+	}()
+	select {
+	case <-unlocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal(
+			"cs.mutex is still locked after the panic; " +
+				"SetLocalTip must unlock via defer",
+		)
+	}
+}
+
+// TestChainSelectorOnPeerRollbackPanicPublishesEvent verifies onPeerRollbackPanic,
+// the SubscribeFuncStrict onPanic hook NewChainSelector registers for
+// PeerRollbackEventType: it must publish PeerRollbackHandlerPanicEventType
+// carrying the recovered panic value, so a component that lost its rollback
+// subscription to a handler panic (event.EventBus.SubscribeFuncStrict tears
+// the subscription down) has a durable, observable signal instead of a
+// generic log line.
+func TestChainSelectorOnPeerRollbackPanicPublishesEvent(t *testing.T) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus:                  bus,
+		DisableEventSubscriptions: true,
+	})
+
+	var received atomic.Value
+	bus.SubscribeFunc(
+		PeerRollbackHandlerPanicEventType,
+		func(evt event.Event) {
+			received.Store(evt.Data)
+		},
+	)
+
+	cs.onPeerRollbackPanic(
+		event.NewEvent(PeerRollbackEventType, PeerRollbackEvent{
+			ConnectionId: newTestConnectionId(1),
+		}),
+		"intentional rollback handler panic",
+	)
+
+	require.Eventually(
+		t,
+		func() bool {
+			return received.Load() != nil
+		},
+		2*time.Second,
+		10*time.Millisecond,
+		"a rollback handler panic must publish PeerRollbackHandlerPanicEventType",
+	)
+	got, ok := received.Load().(PeerRollbackHandlerPanicEvent)
+	require.True(t, ok)
+	assert.Equal(t, "intentional rollback handler panic", got.Panic)
+}
+
+// TestChainSelectorEvaluationPanicSurfacedAndLoopContinues verifies that a
+// panic during a triggered evaluation is surfaced via
+// EvaluationPanicEventType instead of silently dropping the failed
+// transition, and that the evaluation loop remains usable for the next
+// evaluation afterward -- runTriggeredEvaluation is the same panic-recovery
+// wrapper the background evaluationLoop's triggered path uses, called
+// directly here to keep the test deterministic instead of racing a
+// ticker/channel.
+func TestChainSelectorEvaluationPanicSurfacedAndLoopContinues(t *testing.T) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	var received atomic.Value
+	bus.SubscribeFunc(EvaluationPanicEventType, func(evt event.Event) {
+		received.Store(evt.Data)
+	})
+
+	cs := NewChainSelector(ChainSelectorConfig{EventBus: bus})
+
+	tip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 10, Hash: []byte("slot-10")},
+		BlockNumber: 10,
+	}
+	connA := newTestConnectionId(1)
+	connB := newTestConnectionId(2)
+	cs.UpdatePeerTip(connA, tip, nil)
+	cs.UpdatePeerTip(connB, tip, nil)
+
+	// Installed under cs.mutex, matching comparePeerTipsPraos's locked read
+	// of cs.config.BlockfetchLatency. Reached only once both peers compare
+	// as the same chain (equal tip and priority), which the two identical
+	// UpdatePeerTip calls above set up.
+	cs.mutex.Lock()
+	cs.config.BlockfetchLatency = func(ouroboros.ConnectionId) (time.Duration, bool) {
+		panic("blockfetch latency boom")
+	}
+	cs.mutex.Unlock()
+
+	cs.runTriggeredEvaluation()
+
+	require.Eventually(t, func() bool {
+		return received.Load() != nil
+	}, 2*time.Second, 10*time.Millisecond,
+		"a panic during evaluation must publish EvaluationPanicEventType",
+	)
+	got, ok := received.Load().(EvaluationPanicEvent)
+	require.True(t, ok)
+	assert.Equal(t, "blockfetch latency boom", got.Panic)
+	assert.True(t, got.Triggered)
+
+	// The evaluation loop keeps running after a panic: clearing the
+	// panicking latency func and evaluating again must succeed normally
+	// rather than the earlier panic having wedged the selector.
+	cs.mutex.Lock()
+	cs.config.BlockfetchLatency = nil
+	cs.mutex.Unlock()
+	require.NotPanics(t, func() {
+		cs.runTriggeredEvaluation()
+	})
+	require.NotNil(t, cs.GetBestPeer())
+}
+
+// TestChainSelectorRecoverEvaluationPanicToleratesPanickingLogger is a
+// regression test for a bug where recoverEvaluationPanic's own logging call
+// was not panic-safe: it runs after this function's own recover() has
+// already consumed the evaluation panic, so nothing further up the stack
+// could catch a second one. A misbehaving Logger panicking there would
+// propagate out of the deferred call as a fresh, unrecovered panic --
+// runTriggeredEvaluation/runEvaluationTick would never return, crashing the
+// whole process once it unwound past evaluationLoop's for/select with
+// nothing left to catch it, over what should have been one dropped
+// transition. This drives a real evaluation panic with a Logger that panics
+// on every Handle call and verifies the panic is fully contained.
+func TestChainSelectorRecoverEvaluationPanicToleratesPanickingLogger(t *testing.T) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	cs := NewChainSelector(ChainSelectorConfig{EventBus: bus})
+	cs.mutex.Lock()
+	cs.config.Logger = slog.New(
+		&panicLogHandler{inner: slog.NewTextHandler(io.Discard, nil)},
+	)
+	cs.mutex.Unlock()
+
+	require.NotPanics(t, func() {
+		func() {
+			defer cs.recoverEvaluationPanic(true)
+			panic("evaluation boom")
+		}()
+	}, "a panicking Logger must not escape recoverEvaluationPanic")
 }

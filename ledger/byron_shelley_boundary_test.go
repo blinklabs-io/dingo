@@ -23,10 +23,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -111,6 +113,8 @@ func loadBoundaryBlock(
 // parameters. Both shipped networks with a Byron prefix rule that out: the
 // Shelley block links directly to the last Byron block.
 func TestByronShelleyBoundaryHasNoEpochBoundaryBlock(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range boundaryFixtures {
 		t.Run(tc.name, func(t *testing.T) {
 			last := loadBoundaryBlock(t, tc.byronFile, tc.byronType)
@@ -155,22 +159,34 @@ func TestByronShelleyBoundaryHasNoEpochBoundaryBlock(t *testing.T) {
 // ahead of this block precisely because the block above is Shelley, which
 // TestByronShelleyBoundaryHasNoEpochBoundaryBlock pins.
 func TestByronShelleyBoundaryEnvelopeRequiresProtocolParameters(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range boundaryFixtures {
 		t.Run(tc.name, func(t *testing.T) {
 			last := loadBoundaryBlock(t, tc.byronFile, tc.byronType)
 			first := loadBoundaryBlock(t, tc.shelleyFile, tc.shelleyType)
 			parent := envelopeParentFromBlock(last)
 
-			// The Byron parent itself needs no parameters: Byron returns
-			// before the size checks.
+			byronConfig := newByronEnvelopeNodeConfig(
+				t,
+				len(last.Cbor()),
+				len(last.Header().Cbor()),
+			)
+			// The Byron parent itself needs no protocol parameters: its
+			// limits come from Byron genesis instead.
 			require.NoError(
 				t,
-				validateInboundBlockEnvelope(last, nil, envelopeParent{
-					origin: true,
-				}),
+				validateInboundBlockEnvelope(
+					last,
+					nil,
+					byronConfig,
+					envelopeParent{
+						origin: true,
+					},
+				),
 			)
 
-			err := validateInboundBlockEnvelope(first, nil, parent)
+			err := validateInboundBlockEnvelope(first, nil, nil, parent)
 			require.Error(t, err)
 			assert.Contains(
 				t,
@@ -182,7 +198,10 @@ func TestByronShelleyBoundaryEnvelopeRequiresProtocolParameters(t *testing.T) {
 				MaxBlockBodySize:   tc.maxBlockBodySize,
 				MaxBlockHeaderSize: tc.maxHeaderSize,
 			}
-			assert.NoError(t, validateInboundBlockEnvelope(first, pp, parent))
+			assert.NoError(
+				t,
+				validateInboundBlockEnvelope(first, pp, nil, parent),
+			)
 
 			// The block's declared body size is what the size check measures,
 			// so a limit one byte below it must reject. This keeps the
@@ -194,7 +213,7 @@ func TestByronShelleyBoundaryEnvelopeRequiresProtocolParameters(t *testing.T) {
 			}
 			assert.ErrorContains(
 				t,
-				validateInboundBlockEnvelope(first, tooSmall, parent),
+				validateInboundBlockEnvelope(first, tooSmall, nil, parent),
 				"exceeds maxBlockBodySize",
 			)
 		})
@@ -216,6 +235,8 @@ func TestByronShelleyBoundaryEnvelopeRequiresProtocolParameters(t *testing.T) {
 // do carry a version, which is the case validateInboundBlockEnvelope also
 // rejects.
 func TestByronBlockHeaderProtocolVersionSkippedWithoutPParams(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range boundaryFixtures {
 		t.Run(tc.name, func(t *testing.T) {
 			ls := newLedgerStateForNetwork(t, "Testnet", 42)
@@ -400,6 +421,8 @@ func newByronShelleyBoundaryLedger(
 func TestByronShelleyBoundaryProcessesFirstShelleyBlockWithPParams(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, _, firstShelley := newByronShelleyBoundaryLedger(t)
 	require.True(t, ls.validationEnabled)
 
@@ -422,9 +445,293 @@ func TestByronShelleyBoundaryProcessesFirstShelleyBlockWithPParams(
 	assert.Equal(t, firstShelley.SlotNumber(), ls.currentTip.Point.Slot)
 }
 
+// TestByronShelleyBoundaryDefersReadResultDoneUntilCachedBatchApplied is a
+// regression test for issue #3533: ledgerProcessBlocksFromSource must not
+// signal a readChainResult's done channel until the whole result has been
+// applied, including any post-boundary remainder deferred through
+// cachedNextBatch.
+//
+// firstShelley alone crosses the Byron/Shelley epoch boundary (see
+// newByronShelleyBoundaryLedger), so processing this one-block batch takes
+// two outer-loop passes: the first discovers the boundary and defers the
+// entire block to cachedNextBatch without applying it (blocksProcessed stays
+// 0); the second runs the epoch/era rollover and then actually applies
+// firstShelley. Signalling done at the end of the first pass -- before
+// firstShelley is ever applied -- previously told the reader goroutine this
+// result was fully consumed while the tip was still at the pre-boundary
+// block, letting it start gathering and decoding the next raw batch early.
+//
+// firstShelley carries no transactions, so the existing
+// beforeTransactionApplyPublish hook (gated on having transaction events to
+// publish) never fires for it and can't be used to pin this timing. Instead
+// this test uses the dedicated beforeReadResultDoneSignal hook, which fires
+// unconditionally once per outer-loop pass, to deterministically pause the
+// pipeline goroutine at each pass boundary and assert on done's state there
+// -- rather than racing a separate observer goroutine against the
+// pipeline's own progress after done closes.
+func TestByronShelleyBoundaryDefersReadResultDoneUntilCachedBatchApplied(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, _, firstShelley := newByronShelleyBoundaryLedger(t)
+	require.True(t, ls.validationEnabled)
+
+	results := make(chan readChainResult, 1)
+	done := make(chan struct{})
+	results <- readChainResult{
+		blocks: []gledger.Block{firstShelley},
+		done:   done,
+	}
+	close(results)
+
+	requireDoneNotYetClosed := func(msg string) {
+		t.Helper()
+		select {
+		case <-done:
+			t.Fatal(msg)
+		default:
+		}
+	}
+
+	// passReached/releasePass rendezvous with the pipeline goroutine inside
+	// beforeReadResultDoneSignal: once a receive on passReached completes,
+	// the pipeline goroutine's only next step is to block on releasePass
+	// (see beforeReadResultDoneSignal's body below), so it is guaranteed to
+	// not yet have run completeReadResult() for this pass.
+	passReached := make(chan struct{})
+	releasePass := make(chan struct{})
+	ls.beforeReadResultDoneSignal = func() {
+		passReached <- struct{}{}
+		<-releasePass
+	}
+
+	processDone := make(chan error, 1)
+	go func() {
+		processDone <- ls.ledgerProcessBlocksFromSource(
+			context.Background(),
+			results,
+		)
+	}()
+
+	// Pass 1: discovers the epoch boundary and defers firstShelley into
+	// cachedNextBatch without applying it.
+	testutil.RequireReceive(
+		t, passReached, 2*time.Second,
+		"pass 1 (boundary discovery) never reached the done-signal hook",
+	)
+	requireDoneNotYetClosed(
+		"done must not fire after only the boundary-discovery pass",
+	)
+	releasePass <- struct{}{}
+
+	// Pass 2: runs the epoch/era rollover and then actually applies
+	// firstShelley.
+	testutil.RequireReceive(
+		t, passReached, 2*time.Second,
+		"pass 2 (cached-batch apply) never reached the done-signal hook",
+	)
+	ls.RLock()
+	appliedSlot := ls.currentTip.Point.Slot
+	ls.RUnlock()
+	require.Equal(
+		t,
+		firstShelley.SlotNumber(),
+		appliedSlot,
+		"firstShelley must already be applied by the time the second "+
+			"pass reaches the done-signal hook",
+	)
+	requireDoneNotYetClosed(
+		"done must not fire until the pass that actually applied the " +
+			"deferred block finishes",
+	)
+	releasePass <- struct{}{}
+
+	require.NoError(t, <-processDone)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("readChainResult.done was never closed")
+	}
+}
+
+// TestByronShelleyBoundaryClosesReadResultDoneOnEpochRolloverFailure is a
+// regression test for a deadlock the cachedNextBatch fix above could
+// otherwise introduce: once a boundary-crossing batch defers its remainder
+// to cachedNextBatch, currentReadResultDone is deliberately left open (not
+// closed) across the pass boundary -- see the "cachedNextBatch != nil"
+// branch and the completeReadResult() guard in
+// ledgerProcessBlocksFromSource. If the epoch/era rollover that runs at the
+// top of the next pass then fails, the function returns before that guard
+// ever runs, and would leave the read-chain reader goroutine blocked on
+// <-result.done forever.
+//
+// This forces that exact rollover failure (by clearing CardanoNodeConfig,
+// which processEpochRollover checks first) after firstShelley's boundary
+// crossing has already deferred it to cachedNextBatch, and asserts that
+// ledgerProcessBlocksFromSource still signals done before returning its
+// error.
+func TestByronShelleyBoundaryClosesReadResultDoneOnEpochRolloverFailure(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, _, firstShelley := newByronShelleyBoundaryLedger(t)
+	require.True(t, ls.validationEnabled)
+
+	results := make(chan readChainResult, 1)
+	done := make(chan struct{})
+	results <- readChainResult{
+		blocks: []gledger.Block{firstShelley},
+		done:   done,
+	}
+	close(results)
+
+	passReached := make(chan struct{})
+	releasePass := make(chan struct{})
+	ls.beforeReadResultDoneSignal = func() {
+		passReached <- struct{}{}
+		<-releasePass
+	}
+
+	processDone := make(chan error, 1)
+	go func() {
+		processDone <- ls.ledgerProcessBlocksFromSource(
+			context.Background(),
+			results,
+		)
+	}()
+
+	// Pass 1: discovers the epoch boundary and defers firstShelley into
+	// cachedNextBatch. Break processEpochRollover for the pass that
+	// follows, right before releasing it -- ensureReferencedEndorserBlocks
+	// and the rest of pass 1 don't touch CardanoNodeConfig for this
+	// single-block batch, so clearing it here only affects pass 2.
+	testutil.RequireReceive(
+		t, passReached, 2*time.Second,
+		"pass 1 (boundary discovery) never reached the done-signal hook",
+	)
+	ls.config.CardanoNodeConfig = nil
+	releasePass <- struct{}{}
+
+	err := testutil.RequireReceive(
+		t, processDone, 2*time.Second,
+		"ledgerProcessBlocksFromSource never returned after the forced "+
+			"epoch-rollover failure",
+	)
+	require.ErrorContains(t, err, "process epoch rollover")
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal(
+			"readChainResult.done was left open after an epoch-rollover " +
+				"failure, which would block the read-chain reader goroutine " +
+				"forever",
+		)
+	}
+}
+
+// TestByronShelleyBoundarySeedsEpochNonceOnProductionPath pins the fix for
+// #3559 through the same production path as
+// TestByronShelleyBoundaryProcessesFirstShelleyBlockWithPParams: without the
+// post-Byron nonce seeding in applyBoundaryEraTransitions (ledger/state.go),
+// calculateEpochNonce returns a nil nonce for any rollover whose source era is
+// Byron, regardless of the destination era, and the transitioned epoch is
+// persisted with no nonce at all. That existing test only asserts on era,
+// pparams, and tip, so it still passes with the nonce-seeding block deleted;
+// this test asserts on the nonce itself, in all three places a caller can
+// observe it — the in-memory current epoch, the epoch cache, and the
+// persisted database row — and fails without the fix.
+func TestByronShelleyBoundarySeedsEpochNonceOnProductionPath(t *testing.T) {
+	t.Parallel()
+
+	ls, _, firstShelley := newByronShelleyBoundaryLedger(t)
+	require.True(t, ls.validationEnabled)
+
+	results := make(chan readChainResult, 1)
+	results <- readChainResult{blocks: []gledger.Block{firstShelley}}
+	close(results)
+
+	require.NoError(t, ls.ledgerProcessBlocksFromSource(
+		context.Background(),
+		results,
+	))
+	require.Equal(t, eras.ShelleyEraDesc.Id, ls.currentEra.Id)
+
+	// The fix seeds the nonce/evolving/candidate nonce from the Shelley
+	// genesis hash, which newByronShelleyBoundaryLedger sets to 32 bytes of
+	// 0x42 (ShelleyGenesisHash: strings.Repeat("42", 32)).
+	expectedNonce := bytes.Repeat([]byte{0x42}, 32)
+	transitionedEpoch := ls.currentEpoch.EpochId
+
+	// In-memory current epoch.
+	assert.Equal(
+		t,
+		expectedNonce,
+		[]byte(ls.currentEpoch.Nonce),
+		"in-memory epoch must carry the seeded nonce",
+	)
+	assert.Equal(
+		t,
+		expectedNonce,
+		[]byte(ls.currentEpoch.EvolvingNonce),
+	)
+	assert.Equal(
+		t,
+		expectedNonce,
+		[]byte(ls.currentEpoch.CandidateNonce),
+	)
+
+	// Epoch cache.
+	var cached *models.Epoch
+	for i := range ls.epochCache {
+		if ls.epochCache[i].EpochId == transitionedEpoch {
+			cached = &ls.epochCache[i]
+			break
+		}
+	}
+	require.NotNil(
+		t,
+		cached,
+		"epoch cache must contain the transitioned epoch",
+	)
+	assert.Equal(
+		t,
+		expectedNonce,
+		[]byte(cached.Nonce),
+		"epoch cache entry must carry the seeded nonce",
+	)
+
+	// Persisted epoch row.
+	epochs, err := ls.db.GetEpochs(nil)
+	require.NoError(t, err)
+	var persisted *models.Epoch
+	for i := range epochs {
+		if epochs[i].EpochId == transitionedEpoch {
+			persisted = &epochs[i]
+			break
+		}
+	}
+	require.NotNil(
+		t,
+		persisted,
+		"the transitioned epoch must be persisted",
+	)
+	assert.Equal(
+		t,
+		expectedNonce,
+		[]byte(persisted.Nonce),
+		"persisted epoch row must carry the seeded nonce",
+	)
+}
+
 func TestRollbackChainAndStateClearsShelleyPParamsInsideByronPrefix(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, lastByron, firstShelley := newByronShelleyBoundaryLedger(t)
 
 	const shelleyEpoch = uint64(208)
@@ -481,7 +788,7 @@ func TestRollbackChainAndStateClearsShelleyPParamsInsideByronPrefix(
 		lastByron.SlotNumber(),
 		lastByron.Hash().Bytes(),
 	)
-	require.NoError(t, ls.rollbackChainAndState(byronPoint))
+	require.NoError(t, ls.rollbackChainAndStateDeferred(byronPoint, nil))
 
 	assert.Equal(t, byronPoint, ls.currentTip.Point)
 	assert.Equal(t, eras.ByronEraDesc.Id, ls.currentEra.Id)

@@ -52,7 +52,11 @@ func removeEmptyExtractDir(root *os.Root, name, fullPath string) error {
 	}
 	defer dirFile.Close()
 
-	handle, err := openRelativeForDeletion(dir, name, windows.FILE_DIRECTORY_FILE)
+	handle, err := openRelativeForDeletion(
+		dir,
+		name,
+		windows.FILE_DIRECTORY_FILE,
+	)
 	if err != nil {
 		return &os.PathError{Op: "rmdir", Path: fullPath, Err: err}
 	}

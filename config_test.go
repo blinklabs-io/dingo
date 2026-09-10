@@ -32,6 +32,8 @@ import (
 )
 
 func TestStorageModeValid(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		mode  StorageMode
 		valid bool
@@ -47,11 +49,15 @@ func TestStorageModeValid(t *testing.T) {
 }
 
 func TestStorageModeIsAPI(t *testing.T) {
+	t.Parallel()
+
 	assert.False(t, StorageModeCore.IsAPI())
 	assert.True(t, StorageModeAPI.IsAPI())
 }
 
 func TestWithStorageMode(t *testing.T) {
+	t.Parallel()
+
 	cfg := &Config{}
 
 	// Default should be zero value (empty string)
@@ -69,6 +75,8 @@ func TestWithStorageMode(t *testing.T) {
 // TestWithRootPeerTarget verifies the public option preserves default,
 // explicit, and unlimited root-peer target representations.
 func TestWithRootPeerTarget(t *testing.T) {
+	t.Parallel()
+
 	for _, target := range []int{0, 12, -1} {
 		cfg := NewConfig(WithRootPeerTarget(target))
 		if got := cfg.TargetNumberOfRootPeers(); got != target {
@@ -78,6 +86,8 @@ func TestWithRootPeerTarget(t *testing.T) {
 }
 
 func TestNewConfigMempoolCapacityDefaultsFromRunMode(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		runMode  string
@@ -107,7 +117,22 @@ func TestNewConfigMempoolCapacityDefaultsFromRunMode(t *testing.T) {
 	}
 }
 
+func TestNewConfigAPIBindAddressDefaultsToLoopback(t *testing.T) {
+	cfg := NewConfig(
+		WithRunMode(string(internalconfig.RunModeDev)),
+		WithBindAddr("0.0.0.0"),
+	)
+
+	assert.Equal(t, "0.0.0.0", cfg.BindAddr())
+	assert.Equal(t, internalconfig.DefaultAPIBindAddr, cfg.APIBindAddr())
+
+	cfg = NewConfig(WithAPIBindAddr("192.0.2.10"))
+	assert.Equal(t, "192.0.2.10", cfg.APIBindAddr())
+}
+
 func TestNewConfigPreservesExplicitMempoolCapacity(t *testing.T) {
+	t.Parallel()
+
 	const capacity = int64(42)
 	cfg := NewConfig(
 		WithRunMode(string(internalconfig.RunModeLeios)),
@@ -122,6 +147,8 @@ func TestNewConfigPreservesExplicitMempoolCapacity(t *testing.T) {
 }
 
 func TestNewConfigDefaultsBuiltInMempoolCapacity(t *testing.T) {
+	t.Parallel()
+
 	for _, provider := range []string{"default", "fifo", "dag"} {
 		t.Run(provider, func(t *testing.T) {
 			cfg := NewConfig(WithPluginSelection(
@@ -139,6 +166,8 @@ func TestNewConfigDefaultsBuiltInMempoolCapacity(t *testing.T) {
 }
 
 func TestNewConfigDoesNotDefaultCustomMempoolConfig(t *testing.T) {
+	t.Parallel()
+
 	cfg := NewConfig(
 		WithRunMode(string(internalconfig.RunModeLeios)),
 		WithPluginSelection(plugin.CapabilityMempool, plugin.Selection{
@@ -152,6 +181,8 @@ func TestNewConfigDoesNotDefaultCustomMempoolConfig(t *testing.T) {
 }
 
 func TestWithPluginSelectionSnapshotsConfig(t *testing.T) {
+	t.Parallel()
+
 	const originalCapacity = int64(2)
 	values := []any{"original"}
 	nested := map[string]any{"values": values}
@@ -178,6 +209,8 @@ func TestWithPluginSelectionSnapshotsConfig(t *testing.T) {
 }
 
 func TestNewValidatesMinPoolMargin(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		margin  uint
@@ -211,6 +244,8 @@ func TestNewValidatesMinPoolMargin(t *testing.T) {
 }
 
 func TestWithMidnightConfig(t *testing.T) {
+	t.Parallel()
+
 	cfg := &Config{}
 	midnightCfg := MidnightConfig{
 		Enabled:                     true,
@@ -242,6 +277,8 @@ func TestWithMidnightConfig(t *testing.T) {
 // leaving it permanently false and silently disabling the Midnight indexer
 // even with midnight.enabled: true configured.
 func TestSyncCompatFieldsMidnightEnabled(t *testing.T) {
+	t.Parallel()
+
 	cfg := NewConfig()
 	cfg.cfg.Midnight.Enabled = true
 
@@ -261,6 +298,8 @@ func TestSyncCompatFieldsMidnightEnabled(t *testing.T) {
 // MidnightConfig was left at its zero value. This is what should have
 // caught the missing Enabled field before it shipped.
 func TestSyncCompatFieldsMidnightAllFieldsMirrored(t *testing.T) {
+	t.Parallel()
+
 	src := internalconfig.MidnightConfig{
 		Enabled:                     true,
 		ServerEnabled:               true,
@@ -322,6 +361,8 @@ func TestSyncCompatFieldsMidnightAllFieldsMirrored(t *testing.T) {
 }
 
 func TestConfigValidatePledgeLeverage(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		enabled  bool
@@ -369,6 +410,8 @@ func TestConfigValidatePledgeLeverage(t *testing.T) {
 }
 
 func TestWithFullPotRewards(t *testing.T) {
+	t.Parallel()
+
 	cfg := &Config{}
 	WithFullPotRewards(true)(cfg)
 	assert.True(t, cfg.fullPotRewardsEnabled)
@@ -377,6 +420,8 @@ func TestWithFullPotRewards(t *testing.T) {
 }
 
 func TestFullPotRewardsStandardNetworkValidation(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		opts    []ConfigOptionFunc
@@ -443,6 +488,8 @@ func TestFullPotRewardsStandardNetworkValidation(t *testing.T) {
 }
 
 func TestWithDelegatorInactivity(t *testing.T) {
+	t.Parallel()
+
 	cfg := &Config{}
 	WithDelegatorInactivity(true, 90)(cfg)
 	assert.True(t, cfg.delegatorInactivityEnabled)
@@ -453,6 +500,8 @@ func TestWithDelegatorInactivity(t *testing.T) {
 }
 
 func TestExperimentalDijkstraEnabled(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		cfg      Config
@@ -527,6 +576,8 @@ func TestExperimentalDijkstraEnabled(t *testing.T) {
 // opens leios-notify / leios-fetch. The standalone leios-votes protocol stays
 // gated off for prototype interop.
 func TestExperimentalLeiosNetworkingEnabled(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name              string
 		cfg               Config
@@ -595,6 +646,8 @@ func TestExperimentalLeiosNetworkingEnabled(t *testing.T) {
 }
 
 func TestPeerGovernorOptionsIgnoreNonPositiveValues(t *testing.T) {
+	t.Parallel()
+
 	cfg := &Config{cfg: &internalconfig.Config{}}
 
 	WithMinHotPeers(-1)(cfg)
@@ -611,6 +664,8 @@ func TestPeerGovernorOptionsIgnoreNonPositiveValues(t *testing.T) {
 }
 
 func TestPeerGovernorOptionsApplyPositiveValues(t *testing.T) {
+	t.Parallel()
+
 	cfg := &Config{cfg: &internalconfig.Config{}}
 
 	WithMinHotPeers(3)(cfg)
@@ -633,6 +688,8 @@ func TestPeerGovernorOptionsApplyPositiveValues(t *testing.T) {
 // TestGenesisNegativeCorroborationFailsClosed. node.go passes this field to
 // ChainSelectorConfig.MinCorroboratingPeers.
 func TestWithGenesisCorroborationPeers(t *testing.T) {
+	t.Parallel()
+
 	cfg := &Config{cfg: &internalconfig.Config{}}
 	WithGenesisCorroborationPeers(3)(cfg)
 	assert.Equal(t, 3, cfg.cfg.GenesisBootstrap.CorroborationPeers)
@@ -649,6 +706,8 @@ func TestWithGenesisCorroborationPeers(t *testing.T) {
 // Specifically exercises the NumGC - NumForcedGC subtraction so a future
 // typo that inverts the operands is caught immediately.
 func TestUpdateRTSMetrics(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	factory := promauto.With(reg)
 	m := &rtsMetrics{
@@ -686,6 +745,8 @@ func TestUpdateRTSMetrics(t *testing.T) {
 // populates the gauges after its initial prime and exits cleanly when
 // the context is cancelled.
 func TestRunRTSMetricsUpdater_Lifecycle(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	n := &Node{config: Config{promRegistry: reg}}
 	n.registerRTSMetrics()
@@ -718,26 +779,12 @@ func TestRunRTSMetricsUpdater_Lifecycle(t *testing.T) {
 }
 
 func TestWithLeiosVoteSigningKeyFile(t *testing.T) {
+	t.Parallel()
+
 	cfg := &Config{cfg: &internalconfig.Config{}}
 	assert.Equal(t, "", cfg.cfg.LeiosVoteSigningKeyFile)
 	WithLeiosVoteSigningKeyFile("/keys/leios-vote.skey")(cfg)
 	assert.Equal(t, "/keys/leios-vote.skey", cfg.cfg.LeiosVoteSigningKeyFile)
-}
-
-func TestWithLeiosVoterPublicKeys(t *testing.T) {
-	cfg := &Config{cfg: &internalconfig.Config{}}
-	assert.Nil(t, cfg.cfg.LeiosVoterPublicKeys)
-	keys := map[string]string{"aabbcc": "ddeeff"}
-	WithLeiosVoterPublicKeys(keys)(cfg)
-	assert.Equal(
-		t,
-		map[string]string{"aabbcc": "ddeeff"},
-		cfg.cfg.LeiosVoterPublicKeys,
-	)
-	// The option copies the map: later caller mutations must not
-	// change live config
-	keys["aabbcc"] = "mutated"
-	assert.Equal(t, "ddeeff", cfg.cfg.LeiosVoterPublicKeys["aabbcc"])
 }
 
 // TestWithKoiosParityAccountsNilDefaultsToEnabled locks in
@@ -747,6 +794,8 @@ func TestWithLeiosVoterPublicKeys(t *testing.T) {
 // plain bool field here would make "caller never set this" indistinguishable
 // from an explicit opt-out, silently disabling #3097's per-account checking.
 func TestWithKoiosParityAccountsNilDefaultsToEnabled(t *testing.T) {
+	t.Parallel()
+
 	cfg := NewConfig(WithKoiosParity(KoiosParityConfig{
 		Enabled:  true,
 		Accounts: nil,
@@ -774,6 +823,8 @@ func TestWithKoiosParityAccountsNilDefaultsToEnabled(t *testing.T) {
 // node_koiosparity.go's startKoiosParityObserver reads (with its own
 // defensive nil-check, per KoiosParityConfig's doc comment).
 func TestWithKoiosParityAccountsExplicitFalseDisablesEndToEnd(t *testing.T) {
+	t.Parallel()
+
 	disabled := false
 	cfg := NewConfig(WithKoiosParity(KoiosParityConfig{
 		Enabled:  true,

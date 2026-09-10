@@ -21,7 +21,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -138,6 +140,66 @@ type KoiosPoolHistoryItem struct {
 	EpochRos       float64  `json:"epoch_ros"`
 }
 
+// KoiosEpochParamsResp is the Koios /epoch_params response shape for the
+// per-epoch protocol parameters (dingo #3931). A wrong stored protocol
+// parameter changes what the node accepts, so it is wedge-class in exactly
+// the way a wrong validation rule is (#3928) — and nothing else in this
+// checker looked at it.
+//
+// Every numeric field is a json.Number rather than a concrete Go numeric
+// type. Koios publishes rationals as decimals, sometimes in exponent form
+// (price_step is "7.21e-05"), while Dingo stores them as exact rationals
+// ("721/10000000"). Keeping Koios's literal text means the value reaching
+// the comparison has been through no float round-trip at all, and
+// rationalsEqual reconciles the two forms exactly.
+//
+// Pointers mark fields Koios returns as null on eras that do not define the
+// parameter (everything from price_mem down is null before Alonzo). "" in the
+// cached KoiosEpochParams means exactly that "not defined", never zero.
+//
+// Deliberately not modeled: the Conway governance parameters
+// (pvt_*/dvt_*/committee_*/gov_action_*/drep_*/min_fee_ref_script_cost_per_byte),
+// and nonce/block_hash/extra_entropy. Both are classified explicitly in
+// koiosCoverageMatrix; see CompareEpochProtocolParams for why each is left to
+// follow-up work rather than compared unverified.
+type KoiosEpochParamsResp struct {
+	EpochNo uint64 `json:"epoch_no"`
+	Era     string `json:"era"`
+
+	MinFeeA            *json.Number `json:"min_fee_a"`
+	MinFeeB            *json.Number `json:"min_fee_b"`
+	MaxBlockSize       *json.Number `json:"max_block_size"`
+	MaxTxSize          *json.Number `json:"max_tx_size"`
+	MaxBhSize          *json.Number `json:"max_bh_size"`
+	KeyDeposit         *string      `json:"key_deposit"`
+	PoolDeposit        *string      `json:"pool_deposit"`
+	MaxEpoch           *json.Number `json:"max_epoch"`
+	OptimalPoolCount   *json.Number `json:"optimal_pool_count"`
+	Influence          *json.Number `json:"influence"`
+	MonetaryExpandRate *json.Number `json:"monetary_expand_rate"`
+	TreasuryGrowthRate *json.Number `json:"treasury_growth_rate"`
+	Decentralisation   *json.Number `json:"decentralisation"`
+	ProtocolMajor      *json.Number `json:"protocol_major"`
+	ProtocolMinor      *json.Number `json:"protocol_minor"`
+	MinUtxoValue       *string      `json:"min_utxo_value"`
+	MinPoolCost        *string      `json:"min_pool_cost"`
+	// CostModels is Koios's name-keyed dict of per-language Plutus operation
+	// prices ("PlutusV1", "PlutusV2", ...). Kept as a raw map of arrays so
+	// the fetch layer can normalise it without committing to a language set.
+	CostModels map[string][]int64 `json:"cost_models"`
+
+	PriceMem            *json.Number `json:"price_mem"`
+	PriceStep           *json.Number `json:"price_step"`
+	MaxTxExMem          *json.Number `json:"max_tx_ex_mem"`
+	MaxTxExSteps        *json.Number `json:"max_tx_ex_steps"`
+	MaxBlockExMem       *json.Number `json:"max_block_ex_mem"`
+	MaxBlockExSteps     *json.Number `json:"max_block_ex_steps"`
+	MaxValSize          *json.Number `json:"max_val_size"`
+	CollateralPercent   *json.Number `json:"collateral_percent"`
+	MaxCollateralInputs *json.Number `json:"max_collateral_inputs"`
+	CoinsPerUtxoSize    *string      `json:"coins_per_utxo_size"`
+}
+
 // KoiosTipResp is the shape of /tip.
 type KoiosTipResp struct {
 	EpochNo uint64 `json:"epoch_no"`
@@ -223,11 +285,48 @@ func validateKoiosNetwork(network string) error {
 }
 
 // NewKoiosClient creates a client for the given network.
-func NewKoiosClient(network, apiKey string) (*KoiosClient, error) {
+//
+// baseURL overrides the public koios.rest host for the network, for a
+// self-hosted or mirrored Koios instance. It is the full v1 API root, e.g.
+// "https://preview-koios.example.com/api/v1"; a trailing slash is trimmed so
+// the caller does not have to care. Empty selects the public host.
+//
+// The override is a parameter rather than a rewrite of this network's entry
+// in the process-wide koiosBaseURLs map, because that map is a global every
+// concurrently constructed client reads through validateKoiosNetwork. Tests
+// point a client at an httptest server through this parameter, which is what
+// lets this package's tests run in parallel.
+//
+// The network is validated before baseURL is consulted, so an unsupported
+// network is rejected whether or not an override is supplied.
+//
+// A custom host also drops the burst cap. koiosBurstLimitSafe describes
+// koios.rest's own published Public/Free tier window and says nothing about
+// another deployment, so applying it there would throttle against a limit that
+// does not exist. The per-request retry and timeout handling is unchanged, so a
+// host that does rate-limit still backs off correctly on 429.
+func NewKoiosClient(
+	network, apiKey, baseURL string,
+	allowInsecureHTTP bool,
+) (*KoiosClient, error) {
 	if err := validateKoiosNetwork(network); err != nil {
 		return nil, err
 	}
 	base := koiosBaseURLs[network]
+	burstLimit := koiosBurstLimitSafe
+	if trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/"); trimmed != "" {
+		if err := validateKoiosBaseURL(trimmed, allowInsecureHTTP); err != nil {
+			return nil, err
+		}
+		base = trimmed
+		// The cap is dropped for a custom deployment, not for a custom
+		// spelling of the public one. An override naming a koios.rest host is
+		// still subject to that host's published window, and dropping the cap
+		// there would earn avoidable 429 cooldowns.
+		if !isPublicKoiosHost(trimmed) {
+			burstLimit = 0
+		}
+	}
 	return &KoiosClient{
 		baseURL: base,
 		apiKey:  apiKey,
@@ -236,9 +335,123 @@ func NewKoiosClient(network, apiKey string) (*KoiosClient, error) {
 		},
 		// Public and Free tiers share the 100/10s burst cap; Pro/Premium are
 		// higher, but we don't learn the tier from the key alone, so stay at
-		// the Free-safe ceiling for every client.
-		limiter: newBurstLimiter(koiosBurstLimitSafe, koiosBurstWindow),
+		// the Free-safe ceiling for every client on the public host.
+		limiter: newBurstLimiter(burstLimit, koiosBurstWindow),
 	}, nil
+}
+
+// ResolvedBaseURL reports the API root this client actually queries, with any
+// userinfo removed so it is safe to log or persist.
+//
+// The resolved host is the identity of the oracle a parity run is judging
+// Dingo against, and it is not otherwise visible anywhere: an override that
+// silently failed to apply produces a run indistinguishable from one against
+// the intended host. Callers record it (Cache.RecordKoiosSource) and log it
+// once at startup for exactly that reason.
+func (c *KoiosClient) ResolvedBaseURL() string {
+	return redactKoiosBaseURL(c.baseURL)
+}
+
+// redactKoiosBaseURL strips userinfo from a Koios API root.
+//
+// validateKoiosBaseURL already rejects a query string and a fragment, so
+// userinfo is the only place a credential can survive into a validated base
+// URL, and dropping it leaves scheme, host and path — the parts that identify
+// the oracle — intact. An unparseable value is reported as a placeholder
+// rather than echoed, on the same rule redactURLError follows.
+func redactKoiosBaseURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "invalid URL"
+	}
+	parsed.User = nil
+	return parsed.String()
+}
+
+// isPublicKoiosHost reports whether a base URL names a koios.rest deployment,
+// whose published tier window applies however the URL was spelled -- as a
+// built-in default or as an override naming the same host.
+func isPublicKoiosHost(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		// Unparseable never reaches here (validateKoiosBaseURL runs first),
+		// but treat it as public so an unexpected shape keeps the cap rather
+		// than losing it.
+		return true
+	}
+	// A single terminal dot is a valid DNS spelling of the same name, so
+	// "preview.koios.rest." must not read as a different, non-public host and
+	// lose the cap.
+	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	return host == "koios.rest" || strings.HasSuffix(host, ".koios.rest")
+}
+
+// validateKoiosBaseURL rejects a custom host this client must not send an API
+// key to, or trust reference data from.
+//
+// get and post attach APIKey as a Bearer token to every request, so plain HTTP
+// puts the token on the wire in cleartext. It also leaves the reference data
+// this tool compares Dingo against tamperable in flight, and a comparison
+// against forged reference data can report a false PASS -- the one outcome a
+// parity checker must never produce. allowInsecureHTTP is the local dev/test
+// escape hatch, mirroring Mithril.AllowInsecureHTTP.
+func validateKoiosBaseURL(rawURL string, allowInsecureHTTP bool) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		// rawURL is never echoed: an operator can put credentials in it as
+		// userinfo or as a credential-shaped query parameter, and a validation
+		// error is written to the same log the URI redaction protects.
+		return fmt.Errorf("parse koios base URL: %w", redactURLError(err))
+	}
+	if parsed.Host == "" {
+		return errors.New(
+			"koios base URL has no host; give the full v1 API root, e.g. https://host/api/v1",
+		)
+	}
+	// get and post build an endpoint by appending a path and its own query to
+	// this root. A root that already carries a query or fragment would put the
+	// appended path after that delimiter, so the request would silently reach
+	// a different endpoint than intended.
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		return errors.New(
+			"koios base URL must not carry a query string; give the bare v1 API root, e.g. https://host/api/v1",
+		)
+	}
+	// url.URL has no ForceFragment counterpart to ForceQuery, so a bare "#"
+	// parses to an empty Fragment and would otherwise be accepted — and the
+	// appended endpoint path would still land after the delimiter.
+	if parsed.Fragment != "" || strings.Contains(rawURL, "#") {
+		return errors.New(
+			"koios base URL must not carry a fragment; give the bare v1 API root, e.g. https://host/api/v1",
+		)
+	}
+	switch parsed.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if allowInsecureHTTP {
+			return nil
+		}
+		return errors.New(
+			"koios base URL uses plain HTTP, which would send the API key in cleartext and leave the reference data tamperable; use https or set allowInsecureHttp for local dev/test",
+		)
+	default:
+		return fmt.Errorf(
+			"koios base URL must use http or https, got scheme %q",
+			parsed.Scheme,
+		)
+	}
+}
+
+// redactURLError strips the URL from a *url.Error so a parse failure cannot
+// carry credentials into a log. url.Parse wraps the offending string in the
+// error it returns, which is exactly the value being kept out of logs.
+func redactURLError(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return fmt.Errorf("%s: %w", urlErr.Op, urlErr.Err)
+	}
+	return errors.New("invalid URL")
 }
 
 // burstLimiter enforces a sliding-window request budget matching Koios's
@@ -762,6 +975,48 @@ func (k *KoiosClient) GetTotals(
 	return &items[0], nil
 }
 
+// GetEpochParams fetches the protocol parameters in force for a specific
+// epoch. Mirrors GetTotals' single-row contract exactly: a response that is
+// empty, has more than one row, or names a different epoch is an error rather
+// than something silently accepted, so a cached parameter set can never
+// belong to the wrong epoch.
+func (k *KoiosClient) GetEpochParams(
+	ctx context.Context,
+	epoch uint64,
+) (*KoiosEpochParamsResp, error) {
+	path := fmt.Sprintf("/epoch_params?_epoch_no=%d", epoch)
+	resp, err := k.get(ctx, path, -1, -1)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf(
+			"koios /epoch_params: status %d body: %s",
+			resp.StatusCode,
+			resp.Body,
+		)
+	}
+	var items []KoiosEpochParamsResp
+	if err := json.Unmarshal(resp.Body, &items); err != nil {
+		return nil, fmt.Errorf("koios /epoch_params decode: %w", err)
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf(
+			"koios /epoch_params: no data for epoch %d",
+			epoch,
+		)
+	}
+	if len(items) != 1 || items[0].EpochNo != epoch {
+		return nil, fmt.Errorf(
+			"koios /epoch_params: requested epoch %d, got %d row(s) beginning with epoch %d",
+			epoch,
+			len(items),
+			items[0].EpochNo,
+		)
+	}
+	return &items[0], nil
+}
+
 // GetAllHistoricalPoolIDs returns the bech32 ID of every pool known to Koios,
 // including pools that have since retired (pool_status = "retired").
 //
@@ -942,11 +1197,31 @@ func (k *KoiosClient) GetPoolEpochHistory(
 func (k *KoiosClient) GetAllAccountAddresses(
 	ctx context.Context,
 ) ([]string, error) {
+	return k.getAllAccountAddresses(ctx, nil)
+}
+
+// GetAllAccountAddressesWithProgress is GetAllAccountAddresses with a progress
+// line every accountListLogEveryPages pages. The logger is a parameter rather
+// than a client field because the same client serves the concurrent chunk
+// fetchers, and a field written here would be read by them (dingo #3796).
+func (k *KoiosClient) GetAllAccountAddressesWithProgress(
+	ctx context.Context,
+	logger *slog.Logger,
+) ([]string, error) {
+	return k.getAllAccountAddresses(ctx, logger)
+}
+
+func (k *KoiosClient) getAllAccountAddresses(
+	ctx context.Context,
+	logger *slog.Logger,
+) ([]string, error) {
 	type listItem struct {
 		StakeAddress string `json:"stake_address"`
 	}
 	seen := make(map[string]bool)
 	var addrs []string
+	total := 0
+	pages := 0
 	for start := 0; ; start += koiosPageSize {
 		end := start + koiosPageSize - 1
 		resp, err := k.get(
@@ -958,6 +1233,7 @@ func (k *KoiosClient) GetAllAccountAddresses(
 		if err != nil {
 			return nil, err
 		}
+
 		if resp.StatusCode != http.StatusOK &&
 			resp.StatusCode != http.StatusPartialContent {
 			return nil, fmt.Errorf(
@@ -979,16 +1255,34 @@ func (k *KoiosClient) GetAllAccountAddresses(
 				addrs = append(addrs, item.StakeAddress)
 			}
 		}
+		// Preview answers 303k accounts in 304 sequential pages. Without a
+		// progress line the whole walk is silent, which is indistinguishable
+		// from a stalled fetch (dingo #3796). Emitted after the page is
+		// folded in, so a crawl ending on exactly a milestone page still
+		// reports it before the loop breaks below.
+		pages++
+		if logger != nil && pages%accountListLogEveryPages == 0 {
+			logger.Info(
+				"koiosparity: crawling Koios account list",
+				"pages", pages,
+				"fetched", len(addrs),
+				"total", total,
+			)
+		}
 		if len(page) < koiosPageSize {
 			break
 		}
-		total := parseTotalFromContentRange(resp.Header.Get("Content-Range"))
+		total = parseTotalFromContentRange(resp.Header.Get("Content-Range"))
 		if total > 0 && start+len(page) >= total {
 			break
 		}
 	}
 	return addrs, nil
 }
+
+// accountListLogEveryPages is how many /account_list pages pass between
+// progress lines during the universe crawl.
+const accountListLogEveryPages = 50
 
 // KoiosAccountRewardHistoryItem is one row from /account_reward_history,
 // covering every documented field. PoolIDBech32 is null for reward types with

@@ -330,6 +330,8 @@ func newByronPBFTTestNodeConfig(
 }
 
 func TestAdvanceByronPBFTStateEnforcesIssuerWindow(t *testing.T) {
+	t.Parallel()
+
 	stored := loadRealByronMainBlock(t)
 	block, err := stored.Decode()
 	require.NoError(t, err)
@@ -364,6 +366,8 @@ func TestAdvanceByronPBFTStateEnforcesIssuerWindow(t *testing.T) {
 func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		protocolMagic = uint32(42)
 		securityParam = uint64(100)
@@ -447,7 +451,11 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 		genesisCertificate,
 		nil,
 	)
-	require.Greater(t, beforeActivation.SlotNumber(), scheduleActivation.SlotNumber())
+	require.Greater(
+		t,
+		beforeActivation.SlotNumber(),
+		scheduleActivation.SlotNumber(),
+	)
 	require.Equal(t, scheduleActivation.Hash(), beforeActivation.PrevHash())
 	state, err = ls.advanceByronPBFTState(state, beforeActivation, true)
 	require.NoError(t, err)
@@ -566,6 +574,8 @@ func TestAdvanceByronPBFTStateTracksDelegationActivationAndRevocation(
 func TestAdvanceByronPBFTStateRevocationRejectsSupersededDelegate(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		protocolMagic = uint32(43)
 		securityParam = uint64(100)
@@ -676,6 +686,8 @@ func TestAdvanceByronPBFTStateRevocationRejectsSupersededDelegate(
 }
 
 func TestByronPBFTStateAtOriginDoesNotRequireChain(t *testing.T) {
+	t.Parallel()
+
 	block, err := loadRealByronMainBlock(t).Decode()
 	require.NoError(t, err)
 	ls := &LedgerState{config: LedgerStateConfig{
@@ -689,6 +701,8 @@ func TestByronPBFTStateAtOriginDoesNotRequireChain(t *testing.T) {
 }
 
 func TestByronPBFTStateAtTipRebuildsAfterRestartAndRollback(t *testing.T) {
+	t.Parallel()
+
 	const (
 		protocolMagic = uint32(44)
 		securityParam = 10
@@ -945,11 +959,15 @@ func TestByronPBFTStateAtTipRebuildsAfterRestartAndRollback(t *testing.T) {
 }
 
 func TestValidateByronPBFTSlotRejectsFuture(t *testing.T) {
+	t.Parallel()
+
 	require.NoError(t, validateByronPBFTSlot(42, 42))
 	require.ErrorContains(t, validateByronPBFTSlot(43, 42), "current slot")
 }
 
 func TestByronPBFTCurrentSlotFailureIsNotAHeaderRejection(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	err := ls.validateByronPBFTCurrentSlot(&mockByronBlock{})
 	require.ErrorIs(t, err, errByronPBFTCurrentSlotUnavailable)
@@ -964,6 +982,8 @@ func TestByronPBFTCurrentSlotFailureIsNotAHeaderRejection(t *testing.T) {
 }
 
 func TestByronPBFTConsensusFailureIsAHeaderRejection(t *testing.T) {
+	t.Parallel()
+
 	cause := errors.New("invalid signature")
 	err := classifyByronPBFTApplyError(
 		ocommon.NewPoint(100, []byte{0x01}),
@@ -976,6 +996,8 @@ func TestByronPBFTConsensusFailureIsAHeaderRejection(t *testing.T) {
 }
 
 func TestValidateByronPBFTHeaderRejectsFutureEbb(t *testing.T) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 	ls.slotClock = NewSlotClock(
 		newMockSlotTimeProvider(

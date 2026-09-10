@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"math"
 	"net/http"
 	"runtime"
@@ -96,6 +95,11 @@ type KoiosParityConfig struct {
 	// CachePath is the Koios reference cache.db path. Empty defaults to
 	// {DatabasePath}/.koios/cache.db.
 	CachePath string
+	// BaseURL overrides the public koios.rest host for the network, for a
+	// self-hosted or mirrored Koios instance. Empty selects the public host.
+	BaseURL string
+	// AllowInsecureHTTP permits a plain-HTTP BaseURL. Local dev/test only.
+	AllowInsecureHTTP bool
 	// APIKey is the Koios Bearer token for higher-rate-limit access.
 	APIKey string
 	// Strict stops/cancels the node on the first Koios/tool error or exact
@@ -207,6 +211,7 @@ type Config struct {
 	// canonical loaded configuration; these are refreshed by syncCompatFields.
 	dataDir                         string
 	bindAddr                        string
+	apiBindAddr                     string
 	pluginSelections                map[hostplugin.Capability]hostplugin.Selection
 	network                         string
 	tlsCertFilePath, tlsKeyFilePath string
@@ -220,6 +225,7 @@ type Config struct {
 	barkBlockDownloadHosts                                                              []string
 	barkHost                                                                            string
 	barkClientCAFilePath                                                                string
+	barkOperatorCertificateFingerprints                                                 []string
 	databaseLifecycle                                                                   internalconfig.DatabaseLifecycleConfig
 	historyExpiry                                                                       HistoryExpiryConfig
 	koiosParity                                                                         KoiosParityConfig
@@ -258,7 +264,6 @@ type Config struct {
 	delegatorInactivityEnabled                                                          bool
 	delegatorInactivity                                                                 uint64
 	leiosVoteSigningKeyFile                                                             string
-	leiosVoterPublicKeys                                                                map[string]string
 	midnight                                                                            MidnightConfig
 	chainsyncMaxClients                                                                 int
 	chainsyncStrategy                                                                   chainsync.HeaderSyncStrategy
@@ -514,6 +519,12 @@ func (n *Node) configValidate() error {
 			StorageModeAPI,
 		)
 	}
+	if err := internalconfig.ValidateAPIExposure(
+		n.config.cfg,
+		internalconfig.RunMode(n.config.cfg.RunMode),
+	); err != nil {
+		return fmt.Errorf("invalid API exposure: %w", err)
+	}
 	if !n.config.cfg.StartEra.Valid() {
 		return fmt.Errorf(
 			"invalid start era %q: must be empty or %q",
@@ -558,6 +569,20 @@ func (n *Node) configValidate() error {
 			ouroboros.NetworkCardanoMusashi.Name,
 			ouroboros.NetworkCardanoMusashi.NetworkMagic,
 		)
+	}
+	// Peer snapshot relays replace the configured bootstrap peers during
+	// Genesis selection. Validate the snapshot as one contract before any of
+	// its endpoints can suppress those known-good peers.
+	if n.config.topologyConfig != nil &&
+		n.config.topologyConfig.PeerSnapshot != nil {
+		if err := n.config.topologyConfig.PeerSnapshot.Validate(
+			n.config.cfg.NetworkMagic,
+		); err != nil {
+			return fmt.Errorf(
+				"invalid peer snapshot: %w",
+				err,
+			)
+		}
 	}
 	// The block-decode pipeline's vendored decode stage
 	// (gouroboros/pipeline.DecodeStage) calls ledger.NewBlockFromCbor
@@ -647,6 +672,7 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 	c := Config{
 		cfg: &internalconfig.Config{
 			BindAddr:           "0.0.0.0",
+			APIBindAddr:        internalconfig.DefaultAPIBindAddr,
 			StorageMode:        string(StorageModeCore),
 			RunMode:            internalconfig.RunModeServe,
 			Cache:              internalconfig.DefaultCacheConfig(),
@@ -708,12 +734,19 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 
 func (c *Config) syncCompatFields() {
 	c.dataDir, c.bindAddr = c.cfg.DatabasePath, c.cfg.BindAddr
+	c.apiBindAddr = c.cfg.APIBindAddr
+	if c.apiBindAddr == "" {
+		c.apiBindAddr = internalconfig.DefaultAPIBindAddr
+	}
 	c.network, c.networkMagic = c.cfg.Network, c.cfg.NetworkMagic
 	c.tlsCertFilePath, c.tlsKeyFilePath = c.cfg.TlsCertFilePath, c.cfg.TlsKeyFilePath
 	c.apiConfig = c.cfg.API
 	c.barkBaseUrl, c.barkPort, c.barkBlockDownloadHosts = c.cfg.BarkBaseUrl, c.cfg.BarkPort, c.cfg.BarkBlockDownloadHosts
 	c.barkHost = c.cfg.BarkHost
 	c.barkClientCAFilePath = c.cfg.BarkClientCAFilePath
+	c.barkOperatorCertificateFingerprints = slices.Clone(
+		c.cfg.BarkOperatorCertificateFingerprints,
+	)
 	c.databaseLifecycle = c.cfg.DatabaseLifecycle
 	c.corsAllowedOrigins, c.intersectTip = c.cfg.CORSAllowedOrigins, c.cfg.IntersectTip
 	c.peerSharing = c.cfg.PeerSharing != nil && *c.cfg.PeerSharing
@@ -744,6 +777,8 @@ func (c *Config) syncCompatFields() {
 		Network:              c.cfg.KoiosParity.Network,
 		CachePath:            c.cfg.KoiosParity.CachePath,
 		APIKey:               c.cfg.KoiosParity.APIKey,
+		BaseURL:              c.cfg.KoiosParity.BaseURL,
+		AllowInsecureHTTP:    c.cfg.KoiosParity.AllowInsecureHTTP,
 		Strict:               c.cfg.KoiosParity.Strict,
 		GraceHours:           c.cfg.KoiosParity.GraceHours,
 		Accounts:             &koiosParityAccounts,
@@ -813,7 +848,7 @@ func (c *Config) syncCompatFields() {
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
-	c.leiosVoteSigningKeyFile, c.leiosVoterPublicKeys = c.cfg.LeiosVoteSigningKeyFile, c.cfg.LeiosVoterPublicKeys
+	c.leiosVoteSigningKeyFile = c.cfg.LeiosVoteSigningKeyFile
 	c.cacheBlockLRUEntries, c.cacheHotUtxoEntries, c.cacheHotTxEntries, c.cacheHotTxMaxBytes = c.cfg.Cache.BlockLRUEntries, c.cfg.Cache.HotUtxoEntries, c.cfg.Cache.HotTxEntries, c.cfg.Cache.HotTxMaxBytes
 	c.pluginSelections = map[hostplugin.Capability]hostplugin.Selection{
 		hostplugin.CapabilityStorageBlob: c.cfg.Plugins.Storage.Blob, hostplugin.CapabilityStorageMetadata: c.cfg.Plugins.Storage.Metadata,
@@ -977,11 +1012,19 @@ func WithCardanoNodeConfig(
 	}
 }
 
-// WithBindAddr specifies the IP address used for API listeners
-// (Blockfrost, Mesh, UTxO RPC). The default is "0.0.0.0" (all interfaces).
+// WithBindAddr specifies the IP address used by relay and metrics listeners.
+// API listeners use WithAPIBindAddr.
 func WithBindAddr(addr string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BindAddr = addr
+	}
+}
+
+// WithAPIBindAddr specifies the IP address used by the Blockfrost, Mesh, and
+// UTxO RPC listeners. It defaults to loopback; remote binds require API auth.
+func WithAPIBindAddr(addr string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.APIBindAddr = addr
 	}
 }
 
@@ -1413,18 +1456,6 @@ func WithLeiosVoteSigningKeyFile(path string) ConfigOptionFunc {
 	}
 }
 
-// WithLeiosVoterPublicKeys specifies the static Leios voter public key
-// registry (DINGO_LEIOS_VOTER_PUBLIC_KEYS): hex pool key hash to
-// hex-encoded BLS12-381 public key. Stands in for CIP-0164 key
-// registration, which is not yet specified. Experimental, leios runMode
-// only.
-func WithLeiosVoterPublicKeys(keys map[string]string) ConfigOptionFunc {
-	return func(c *Config) {
-		// Copy so later caller mutations cannot change live config
-		c.cfg.LeiosVoterPublicKeys = maps.Clone(keys)
-	}
-}
-
 // WithLeiosPipelineTiming overrides the provisional Leios pipeline stage
 // timing windows. CIP-0164 has not finalized these parameters, so they are
 // kept off-chain and overridable here rather than as protocol parameters.
@@ -1502,14 +1533,24 @@ func WithBarkHost(host string) ConfigOptionFunc {
 	}
 }
 
-// WithBarkClientCAFilePath sets the PEM CA bundle Bark verifies client
-// certificates (mTLS) against. Required whenever the database lifecycle
-// service is mounted — see BarkConfig.TlsClientCAFilePath's doc comment in
-// bark/bark.go for what this gates.
+// WithBarkClientCAFilePath sets the PEM CA bundle Bark uses to authenticate
+// every DatabaseService caller. Destructive methods additionally require an
+// allowlisted fingerprint set by WithBarkOperatorCertificateFingerprints.
 func WithBarkClientCAFilePath(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkClientCAFilePath = path
 		c.barkClientCAFilePath = path
+	}
+}
+
+// WithBarkOperatorCertificateFingerprints sets the SHA-256 client certificate
+// fingerprints authorized to invoke destructive DatabaseService RPCs.
+func WithBarkOperatorCertificateFingerprints(
+	fingerprints []string,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkOperatorCertificateFingerprints = slices.Clone(fingerprints)
+		c.barkOperatorCertificateFingerprints = slices.Clone(fingerprints)
 	}
 }
 
@@ -1546,6 +1587,8 @@ func WithKoiosParity(cfg KoiosParityConfig) ConfigOptionFunc {
 			Network:              cfg.Network,
 			CachePath:            cfg.CachePath,
 			APIKey:               cfg.APIKey,
+			BaseURL:              cfg.BaseURL,
+			AllowInsecureHTTP:    cfg.AllowInsecureHTTP,
 			Strict:               cfg.Strict,
 			GraceHours:           cfg.GraceHours,
 			Accounts:             accounts,
@@ -1746,9 +1789,18 @@ func (c *Config) MetadataPlugin() string {
 	return c.cfg.Plugins.Storage.Metadata.Provider
 }
 
-// BindAddr returns the IP address for API listeners.
+// BindAddr returns the IP address for relay and metrics listeners.
 func (c *Config) BindAddr() string {
 	return c.cfg.BindAddr
+}
+
+// APIBindAddr returns the IP address for the Blockfrost, Mesh, and UTxO RPC
+// listeners.
+func (c *Config) APIBindAddr() string {
+	if c.cfg.APIBindAddr == "" {
+		return internalconfig.DefaultAPIBindAddr
+	}
+	return c.cfg.APIBindAddr
 }
 
 // PrivateBindAddr returns the IP address for the private NtC listener.
@@ -1804,6 +1856,12 @@ func (c *Config) BarkBaseUrl() string {
 // BarkBlockDownloadHosts returns the list of allowed hosts for block downloads via Bark.
 func (c *Config) BarkBlockDownloadHosts() []string {
 	return c.cfg.BarkBlockDownloadHosts
+}
+
+// BarkOperatorCertificateFingerprints returns the SHA-256 client certificate
+// fingerprints authorized to invoke destructive Bark DatabaseService RPCs.
+func (c *Config) BarkOperatorCertificateFingerprints() []string {
+	return slices.Clone(c.cfg.BarkOperatorCertificateFingerprints)
 }
 
 // TlsCertFilePath returns the path to the TLS certificate for gRPC APIs.
@@ -2179,11 +2237,6 @@ func (c *Config) ValidateForgedBlock() bool {
 // LeiosVoteSigningKeyFile returns the path to the Leios vote signing key.
 func (c *Config) LeiosVoteSigningKeyFile() string {
 	return c.cfg.LeiosVoteSigningKeyFile
-}
-
-// LeiosVoterPublicKeys returns the Leios voter public key registry.
-func (c *Config) LeiosVoterPublicKeys() map[string]string {
-	return c.cfg.LeiosVoterPublicKeys
 }
 
 // PeerSharing returns the peer sharing configuration.

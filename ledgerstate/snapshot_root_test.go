@@ -73,6 +73,8 @@ func openTree(t *testing.T, dir string) *os.Root {
 // hands back the state and its UTxO table already open, from one slot
 // directory.
 func TestOpenSnapshotAtOrBeforeReturnsOpenFiles(t *testing.T) {
+	t.Parallel()
+
 	dir := writeUTxOHDSnapshot(t, "100", "state bytes", "table bytes")
 
 	files, err := OpenSnapshotAtOrBefore(openTree(t, dir), ^uint64(0))
@@ -112,6 +114,8 @@ func TestOpenSnapshotAtOrBeforeReturnsOpenFiles(t *testing.T) {
 // replacement dropped in afterwards is not what gets parsed. The swap is
 // staged rather than raced because the window is interior to the import.
 func TestOpenSnapshotAtOrBeforeSurvivesFileSwap(t *testing.T) {
+	t.Parallel()
+
 	dir := writeUTxOHDSnapshot(t, "100", "ours", "our table")
 
 	files, err := OpenSnapshotAtOrBefore(openTree(t, dir), ^uint64(0))
@@ -162,7 +166,10 @@ func TestOpenSnapshotAtOrBeforeSurvivesFileSwap(t *testing.T) {
 	}
 	if runtime.GOOS == "windows" {
 		if string(byName) != "ours" {
-			t.Fatalf("open-file sharing must preserve the selected name: got %q", byName)
+			t.Fatalf(
+				"open-file sharing must preserve the selected name: got %q",
+				byName,
+			)
 		}
 	} else if string(byName) != "theirs" {
 		t.Fatal("the substitution must be observable through the name")
@@ -198,6 +205,8 @@ func TestOpenSnapshotAtOrBeforeSurvivesFileSwap(t *testing.T) {
 // extracted tree is evidence of tampering, and following it would import a
 // ledger state somebody else selected.
 func TestOpenSnapshotAtOrBeforeRefusesSymlinks(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name  string
 		build func(t *testing.T) string
@@ -264,6 +273,8 @@ func TestOpenSnapshotAtOrBeforeRefusesSymlinks(t *testing.T) {
 // same footing as the state: a snapshot whose table is planted is refused
 // outright rather than imported without its UTxO set.
 func TestOpenSnapshotAtOrBeforeRefusesSymlinkedTable(t *testing.T) {
+	t.Parallel()
+
 	dir := writeUTxOHDSnapshot(t, "100", "ours", "theirs")
 	slotDir := filepath.Join(dir, "ledger", "100")
 	if err := os.Rename(
@@ -287,6 +298,8 @@ func TestOpenSnapshotAtOrBeforeRefusesSymlinkedTable(t *testing.T) {
 // TestOpenSnapshotAtOrBeforeHonoursMaxSlot pins that the trust boundary still
 // applies: a ledger state above the certified immutable tip is not selected.
 func TestOpenSnapshotAtOrBeforeHonoursMaxSlot(t *testing.T) {
+	t.Parallel()
+
 	dir := writeUTxOHDSnapshot(t, "100", "older", "older table")
 	newer := filepath.Join(dir, "ledger", "200")
 	if err := os.MkdirAll(newer, 0o750); err != nil {
@@ -315,6 +328,8 @@ func TestOpenSnapshotAtOrBeforeHonoursMaxSlot(t *testing.T) {
 // TestOpenSnapshotAtOrBeforeReadsLegacyTvarTable pins the older UTxO-HD layout,
 // where the table is ledger/<slot>/tables/tvar rather than a file at tables.
 func TestOpenSnapshotAtOrBeforeReadsLegacyTvarTable(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	tablesDir := filepath.Join(dir, "ledger", "100", "tables")
 	if err := os.MkdirAll(tablesDir, 0o750); err != nil {
@@ -349,6 +364,8 @@ func TestOpenSnapshotAtOrBeforeReadsLegacyTvarTable(t *testing.T) {
 // TestOpenSnapshotAtOrBeforeLegacyStateHasNoTable pins that a snapshot with no
 // table at all is not an error: legacy states embed their UTxO set.
 func TestOpenSnapshotAtOrBeforeLegacyStateHasNoTable(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	ledgerDir := filepath.Join(dir, "ledger")
 	if err := os.MkdirAll(ledgerDir, 0o750); err != nil {
@@ -382,6 +399,8 @@ func TestOpenSnapshotAtOrBeforeLegacyStateHasNoTable(t *testing.T) {
 // as we select has to keep that behaviour: it is what the old predicate pass
 // decided, and a run of incomplete slot directories is ordinary.
 func TestOpenSnapshotAtOrBeforeSkipsStatelessSlotDir(t *testing.T) {
+	t.Parallel()
+
 	dir := writeUTxOHDSnapshot(t, "100", "older", "older table")
 	// A newer slot directory that was never finished.
 	if err := os.MkdirAll(
@@ -412,6 +431,8 @@ func TestOpenSnapshotAtOrBeforeSkipsStatelessSlotDir(t *testing.T) {
 // making the newest unusable is then enough to pick which state gets imported,
 // which is a decision no attacker should get to make.
 func TestOpenSnapshotAtOrBeforeRefusesRatherThanFallingBack(t *testing.T) {
+	t.Parallel()
+
 	dir := writeUTxOHDSnapshot(t, "100", "older", "older table")
 	newer := filepath.Join(dir, "ledger", "200")
 	if err := os.MkdirAll(newer, 0o750); err != nil {
@@ -446,6 +467,8 @@ func TestOpenSnapshotAtOrBeforeRefusesRatherThanFallingBack(t *testing.T) {
 // at nothing — the fallback does the rest. Whether the entry exists is settled
 // by lstat, which describes the link rather than its missing target.
 func TestOpenSnapshotAtOrBeforeRefusesDanglingNewestState(t *testing.T) {
+	t.Parallel()
+
 	dir := writeUTxOHDSnapshot(t, "100", "older", "older table")
 	newer := filepath.Join(dir, "ledger", "200")
 	if err := os.MkdirAll(newer, 0o750); err != nil {
@@ -471,6 +494,8 @@ func TestOpenSnapshotAtOrBeforeRefusesDanglingNewestState(t *testing.T) {
 // malformed, and skipping it would again let the newest slot be made unusable
 // on purpose.
 func TestOpenSnapshotAtOrBeforeRefusesMalformedNewestTable(t *testing.T) {
+	t.Parallel()
+
 	dir := writeUTxOHDSnapshot(t, "100", "older", "older table")
 	newer := filepath.Join(dir, "ledger", "200")
 	if err := os.MkdirAll(filepath.Join(newer, "tables"), 0o750); err != nil {
@@ -515,6 +540,8 @@ func writeDBLedgerSnapshot(t *testing.T, dir, slot, state string) {
 // cannot write a convincing ledger/ can make the real one unopenable and have
 // their db/ledger/ read instead. Only an absent ledger/ moves on.
 func TestOpenSnapshotAtOrBeforeRefusesUnsafePreferredLayout(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name    string
 		plant   func(t *testing.T, dir string)
@@ -573,6 +600,8 @@ func TestOpenSnapshotAtOrBeforeRefusesUnsafePreferredLayout(t *testing.T) {
 // is what makes the refusals above about planted content rather than about the
 // fallback being unreachable.
 func TestOpenSnapshotAtOrBeforeUsesDBLedgerWhenLedgerAbsent(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	writeDBLedgerSnapshot(t, dir, "100", "fallback")
 
@@ -594,6 +623,8 @@ func TestOpenSnapshotAtOrBeforeUsesDBLedgerWhenLedgerAbsent(t *testing.T) {
 // wrong kind is refused where it is found, rather than opening cleanly and
 // failing later somewhere that cannot say why.
 func TestOpenSnapshotAtOrBeforeRefusesDirectoryState(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	// ledger/100/state as a directory: opens fine, reads as nothing useful.
 	if err := os.MkdirAll(
@@ -634,6 +665,8 @@ func TestOpenSnapshotAtOrBeforeRefusesDirectoryState(t *testing.T) {
 // it would buy nothing anyway — a writer who can put a file at ledger/200 can
 // put a directory at ledger/200/state instead.
 func TestOpenSnapshotAtOrBeforeRefusesADemotedNewestSlot(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name  string
 		plant func(t *testing.T, ledger string)
@@ -690,6 +723,8 @@ func TestOpenSnapshotAtOrBeforeRefusesADemotedNewestSlot(t *testing.T) {
 // down. Only that case is skippable; the entry being present but the wrong kind
 // of thing is not.
 func TestOpenSnapshotAtOrBeforeStillSkipsAStatelessNewestSlot(t *testing.T) {
+	t.Parallel()
+
 	dir := writeUTxOHDSnapshot(t, "100", "older", "older-tables")
 	if err := os.MkdirAll(
 		filepath.Join(dir, "ledger", "200"), 0o750,
@@ -720,6 +755,8 @@ func TestOpenSnapshotAtOrBeforeStillSkipsAStatelessNewestSlot(t *testing.T) {
 // among the legacy candidates, which are only consulted once the directories
 // have all been tried and one of them has already won.
 func TestOpenSnapshotAtOrBeforePrefersTheNewestAcrossFormats(t *testing.T) {
+	t.Parallel()
+
 	dir := writeUTxOHDSnapshot(t, "100", "older", "older-tables")
 	if err := os.WriteFile(
 		filepath.Join(dir, "ledger", "200"), []byte("newer"), 0o640,
@@ -752,6 +789,8 @@ func TestOpenSnapshotAtOrBeforePrefersTheNewestAcrossFormats(t *testing.T) {
 // file leaves it to re-read, and the file may have changed in between; handing
 // it the buffer removes the question.
 func TestParseSnapshotBytesParsesWhatTheCallerHolds(t *testing.T) {
+	t.Parallel()
+
 	// A one-element CBOR array: enough structure to reach the snapshot
 	// decoder and fail there rather than earlier.
 	if _, err := ParseSnapshotBytes([]byte{0x81, 0x00}); err == nil {
@@ -771,6 +810,8 @@ func TestParseSnapshotBytesParsesWhatTheCallerHolds(t *testing.T) {
 // mapped bytes the decoder then walks, so there is no second read of the file
 // between the check and the parse.
 func TestParseUTxOsFromOpenFileChecksTheMappedBytes(t *testing.T) {
+	t.Parallel()
+
 	path := filepath.Join(t.TempDir(), "tables")
 	// A one-element outer array holding an empty map: the smallest tvar the
 	// decoder accepts.

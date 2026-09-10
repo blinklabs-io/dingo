@@ -1,3 +1,5 @@
+//go:build linux
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,9 +19,10 @@ package devnet
 // NodeEndpoint describes a node that the test harness can connect to
 // using the Ouroboros Node-to-Node mini-protocol over TCP.
 //
-// This is plain data and carries no build tag, so the failure-capture
-// planning in artifacts.go stays testable without a running DevNet. The
-// code that dials an endpoint lives in the devnet-tagged files.
+// This is plain data and carries only the package-wide Linux constraint, so
+// the failure-capture planning in artifacts.go stays testable without a
+// running DevNet. The code that dials an endpoint additionally requires the
+// devnet tag.
 type NodeEndpoint struct {
 	Name        string
 	Address     string // host:port

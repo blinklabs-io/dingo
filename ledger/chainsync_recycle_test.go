@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -42,6 +43,8 @@ func testRecycleConnId() ouroboros.ConnectionId {
 // a header crypto verification failure on the chainsync path publishes a
 // ledger.ConnectionRecycleRequestedEvent with reason "header_verification_failure".
 func TestChainsyncHeaderVerificationFailurePublishesRecycleEvent(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
@@ -94,6 +97,8 @@ func TestChainsyncHeaderVerificationFailurePublishesRecycleEvent(t *testing.T) {
 func TestChainsyncHeaderVerificationMissingEpochDefersToBlockfetch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
@@ -140,6 +145,13 @@ func TestChainsyncHeaderVerificationMissingEpochDefersToBlockfetch(
 		ConnectionId: connId,
 		BlockHeader:  header,
 		Point:        point,
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				point.Slot+1,
+				[]byte("unbound-tip"),
+			),
+			BlockNumber: header.BlockNumber() + 1,
+		},
 	})
 	require.NoError(t, err)
 
@@ -151,11 +163,14 @@ func TestChainsyncHeaderVerificationMissingEpochDefersToBlockfetch(
 	)
 	assert.True(t, testChain.FirstHeaderMatchesPoint(point))
 	assert.False(t, testChain.FirstVerifiedHeaderMatchesPoint(point))
+	assert.Zero(t, ls.syncUpstreamTipSlot.Load())
 }
 
 func TestChainsyncHeaderVerificationEmptyEpochNonceDefersToBlockfetch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
@@ -211,6 +226,13 @@ func TestChainsyncHeaderVerificationEmptyEpochNonceDefersToBlockfetch(
 		ConnectionId: connId,
 		BlockHeader:  header,
 		Point:        point,
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				point.Slot+1,
+				[]byte("unbound-tip"),
+			),
+			BlockNumber: header.BlockNumber() + 1,
+		},
 	})
 	require.NoError(t, err)
 
@@ -229,6 +251,41 @@ func TestChainsyncHeaderVerificationEmptyEpochNonceDefersToBlockfetch(
 	)
 	assert.True(t, testChain.FirstHeaderMatchesPoint(point))
 	assert.False(t, testChain.FirstVerifiedHeaderMatchesPoint(point))
+	assert.Zero(t, ls.syncUpstreamTipSlot.Load())
+}
+
+func TestChainsyncHeaderVerificationMithrilCoverageAdvancesFrontier(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	header := mockHeader{slot: 1000, blockNumber: 100}
+	point := ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes())
+	testChain := &chain.Chain{}
+	ls := &LedgerState{
+		validationEnabled:            true,
+		mithrilLedgerSlot:            point.Slot,
+		chain:                        testChain,
+		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: testRecycleConnId(),
+		BlockHeader:  header,
+		Point:        point,
+		Tip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(point.Slot+1, []byte("peer-tip")),
+			BlockNumber: header.BlockNumber() + 1,
+		},
+	}))
+
+	assert.True(t, testChain.FirstHeaderMatchesPoint(point))
+	assert.False(t, testChain.FirstVerifiedHeaderMatchesPoint(point))
+	assert.Equal(t, point.Slot, ls.syncUpstreamTipSlot.Load())
 }
 
 // TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent verifies that
@@ -237,6 +294,8 @@ func TestChainsyncHeaderVerificationEmptyEpochNonceDefersToBlockfetch(
 func TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
@@ -286,6 +345,8 @@ func TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent(
 func TestBlockfetchStatefulHeaderVerificationDefersUntilLedgerApply(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	connId := testRecycleConnId()
 	tb := createTestBlock(t, [32]byte{47}, 0, tamperNone)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
@@ -295,11 +356,11 @@ func TestBlockfetchStatefulHeaderVerificationDefersUntilLedgerApply(
 	ls.chain = &chain.Chain{}
 
 	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
-	err := ls.handleEventBlockfetchBlock(BlockfetchEvent{
+	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
 		ConnectionId: connId,
 		Block:        tb.block,
 		Point:        point,
-	})
+	}, nil)
 	require.NoError(t, err)
 	require.Len(t, ls.pendingBlockfetchEvents, 1)
 	assert.True(t, ls.consumeDeferredHeaderValidation(point))

@@ -54,6 +54,8 @@ func (o *Ouroboros) chainsyncClientRollForward(
 }
 
 func TestChainsyncClientRollForwardRecordsHeaderArrival(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
 	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
@@ -90,9 +92,45 @@ func TestChainsyncClientRollForwardRecordsHeaderArrival(t *testing.T) {
 	require.False(t, data.ArrivalTime.After(after))
 }
 
+func TestChainsyncClientRollForwardCarriesPolicyTargetWithAdmittedEvent(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+	connID := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	header := newTestBlockHeader(100, 1, 0xaa)
+	advertised := ochainsync.Tip{
+		Point:       ocommon.NewPoint(200, []byte("corroborated-target")),
+		BlockNumber: 2,
+	}
+	o := newOuroboros(OuroborosConfig{
+		EventBus:                 bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool { return true },
+		ChainsyncSyncTarget: func(update chainselection.PeerTipUpdateEvent) (ochainsync.Tip, bool) {
+			require.Equal(t, uint64(100), update.ObservedTip.Point.Slot)
+			require.Equal(t, advertised, update.Tip)
+			return advertised, true
+		},
+	})
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: connID}, 0, header, advertised,
+	))
+	evt := testutil.RequireReceive(t, ledgerCh, 2*time.Second, "ledger event")
+	data, ok := evt.Data.(ledger.ChainsyncEvent)
+	require.True(t, ok)
+	require.True(t, data.SyncTargetTrusted)
+	require.Equal(t, uint64(100), data.Point.Slot)
+	require.Equal(t, advertised, data.SyncTarget)
+}
+
 func TestChainsyncClientRollForwardRawRecordsArrivalBeforeDecodeWait(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
 	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
@@ -171,6 +209,8 @@ func TestChainsyncClientRollForwardRawRecordsArrivalBeforeDecodeWait(
 }
 
 func TestChainsyncHeaderAdmissionIsPreObservationAndPeerLocal(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
 	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
@@ -285,6 +325,8 @@ func TestChainsyncHeaderAdmissionIsPreObservationAndPeerLocal(t *testing.T) {
 }
 
 func TestChainsyncFarFutureDropHasNoStateOrConnectionPenalty(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
 	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
@@ -414,6 +456,8 @@ func TestChainsyncFarFutureDropHasNoStateOrConnectionPenalty(t *testing.T) {
 }
 
 func TestFutureHeaderResyncCoalescesEarliestOnset(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
@@ -466,6 +510,8 @@ func TestFutureHeaderResyncCoalescesEarliestOnset(t *testing.T) {
 }
 
 func TestFutureHeaderResyncImmediateOnsetArmsBeforePublish(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
@@ -496,6 +542,8 @@ func TestFutureHeaderResyncImmediateOnsetArmsBeforePublish(t *testing.T) {
 }
 
 func TestFutureHeaderResyncSuppressesConnectionRemovedDuringArm(t *testing.T) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
@@ -551,6 +599,8 @@ func TestFutureHeaderResyncSuppressesConnectionRemovedDuringArm(t *testing.T) {
 func TestFutureHeaderResyncSuppressedAfterConnectionCloseAndClose(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	for _, test := range []struct {
 		name string
 		stop func(*Ouroboros, ouroboros.ConnectionId)
@@ -611,6 +661,8 @@ func TestFutureHeaderResyncSuppressedAfterConnectionCloseAndClose(
 func TestChainsyncHeaderAdmissionErrorFailsClosedBeforeObservation(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
 	_, observedCh := bus.Subscribe(chainselection.PeerTipUpdateEventType)

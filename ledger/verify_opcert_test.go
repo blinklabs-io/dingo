@@ -18,17 +18,74 @@ import (
 	"encoding/hex"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+type leiosOCINChainBlock struct {
+	*mockBabbageBlock
+	number uint64
+	hash   lcommon.Blake2b256
+	prev   lcommon.Blake2b256
+}
+
+func (b *leiosOCINChainBlock) BlockNumber() uint64 { return b.number }
+func (b *leiosOCINChainBlock) Hash() lcommon.Blake2b256 {
+	return b.hash
+}
+func (b *leiosOCINChainBlock) PrevHash() lcommon.Blake2b256 {
+	return b.prev
+}
+
+func addLeiosOCINChainBlocks(
+	t *testing.T,
+	c *chain.Chain,
+	count int,
+) {
+	t.Helper()
+	var prev lcommon.Blake2b256
+	for i := 1; i <= count; i++ {
+		var hash lcommon.Blake2b256
+		hash[0] = byte(i)
+		block := &leiosOCINChainBlock{
+			mockBabbageBlock: &mockBabbageBlock{slot: uint64(i * 10)},
+			number:           uint64(i),
+			hash:             hash,
+			prev:             prev,
+		}
+		require.NoError(t, c.AddBlock(block, nil))
+		prev = hash
+	}
+}
+
+func leiosOCINHeader(
+	issuer lcommon.IssuerVkey,
+	sequence uint64,
+) *dijkstra.DijkstraBlockHeader {
+	header := &dijkstra.DijkstraBlockHeader{
+		BabbageBlockHeader: babbage.BabbageBlockHeader{
+			Body: babbage.BabbageBlockHeaderBody{
+				IssuerVkey: issuer,
+			},
+		},
+	}
+	setOpCertSequenceNumber(&header.Body.OpCert.SequenceNumber, sequence)
+	return header
+}
+
 // TestOpCertFromHeader_Babbage verifies the per-era extractor pulls the opcert
 // fields off a Babbage-family header body.
 func TestOpCertFromHeader_Babbage(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{10}, 9, tamperNone)
 	opCert, ok := opCertFromHeader(tb.block.Header())
 	require.True(t, ok)
@@ -44,6 +101,8 @@ func TestOpCertFromHeader_Babbage(t *testing.T) {
 // TestOpCertFromHeader_NonPraosReturnsFalse verifies headers without an opcert
 // (Byron) report ok=false so they are skipped by opcert validation.
 func TestOpCertFromHeader_NonPraosReturnsFalse(t *testing.T) {
+	t.Parallel()
+
 	opCert, ok := opCertFromHeader(&byron.ByronMainBlockHeader{})
 	assert.False(t, ok)
 	assert.Nil(t, opCert)
@@ -53,12 +112,14 @@ func TestOpCertFromHeader_NonPraosReturnsFalse(t *testing.T) {
 // pins the opcert signable representation to real cardano output. The values
 // are taken from a real cardano-cli NodeOperationalCertificate
 // (config/cardano/devnet/keys/opcert.cert). The signature verifies only under
-// the raw 48-byte OCertSignable representation (KES vkey || counter || period);
-// gouroboros' CBOR-based VerifyOpCertSignature rejects it, which is exactly why
-// verifyOpCertColdSignature does not call that function. If this test ever
-// fails, the inbound check has drifted from real cardano and would stall the
-// chain by rejecting valid blocks.
+// the raw 48-byte OCertSignable representation (KES vkey || counter || period),
+// which is what verifyOpCertColdSignature now verifies by delegating directly
+// to gouroboros' ledger.VerifyOpCertSignature. If this test ever fails, either
+// the inbound check or its upstream dependency has drifted from real cardano
+// and would stall the chain by rejecting valid blocks.
 func TestVerifyOpCertColdSignature_RealCardanoCliCert(t *testing.T) {
+	t.Parallel()
+
 	mustHex := func(s string) []byte {
 		b, err := hex.DecodeString(s)
 		require.NoError(t, err)
@@ -95,6 +156,8 @@ func TestVerifyOpCertColdSignature_RealCardanoCliCert(t *testing.T) {
 // TestVerifyOpCertHeaderCrypto_Valid verifies a well-formed opcert passes the
 // inbound cold-signature and KES-period checks.
 func TestVerifyOpCertHeaderCrypto_Valid(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{11}, 13, tamperNone)
 	err := verifyOpCertHeaderCrypto(
 		tb.block.Header(),
@@ -109,6 +172,8 @@ func TestVerifyOpCertHeaderCrypto_Valid(t *testing.T) {
 // cold-key signature is now rejected at header verification — this is the
 // behavior gap issue #2608 closes.
 func TestVerifyOpCertHeaderCrypto_TamperedColdSignature(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{12}, 14, tamperOpCertSig)
 	err := verifyOpCertHeaderCrypto(
 		tb.block.Header(),
@@ -125,6 +190,8 @@ func TestVerifyOpCertHeaderCrypto_TamperedColdSignature(t *testing.T) {
 // period 0, so evaluating it five KES periods later with a max of three
 // evolutions is expired.
 func TestVerifyOpCertHeaderCrypto_ExpiredKESPeriod(t *testing.T) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{13}, 15, tamperNone)
 	const slotsPerKesPeriod = uint64(100)
 	err := verifyOpCertHeaderCrypto(
@@ -144,6 +211,8 @@ func TestVerifyOpCertHeaderCrypto_ExpiredKESPeriod(t *testing.T) {
 func TestVerifyOpCertHeaderCrypto_MaxKESEvolutionsZeroSkipsExpiry(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	tb := createTestBlock(t, [32]byte{14}, 16, tamperNone)
 	const slotsPerKesPeriod = uint64(100)
 	err := verifyOpCertHeaderCrypto(
@@ -161,6 +230,8 @@ func TestVerifyOpCertHeaderCrypto_MaxKESEvolutionsZeroSkipsExpiry(
 // enforceNoGap: a TPraos block (enforceNoGap=false) accepts a jump, a Praos
 // block (enforceNoGap=true) rejects it.
 func TestValidateOpCertCounter(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name         string
 		stored       uint64
@@ -220,6 +291,13 @@ func TestValidateOpCertCounter(t *testing.T) {
 			candidate:    7,
 			enforceNoGap: false,
 		},
+		{
+			name:         "equal counters at max uint64 do not wrap into a gap",
+			stored:       ^uint64(0),
+			found:        true,
+			candidate:    ^uint64(0),
+			enforceNoGap: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -239,9 +317,146 @@ func TestValidateOpCertCounter(t *testing.T) {
 	}
 }
 
+func TestLeiosAnnouncementOCINStalenessUsesImmutableTip(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(nil, nil)
+	require.NoError(t, err)
+	addLeiosOCINChainBlocks(t, cm.PrimaryChain(), 5)
+
+	cfg := newTestShelleyGenesisCfg(t)
+	cfg.ShelleyGenesis().SecurityParam = 2
+	ls := &LedgerState{
+		db:         db,
+		chain:      cm.PrimaryChain(),
+		currentEra: eras.DijkstraEraDesc,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+		},
+	}
+	var issuer lcommon.IssuerVkey
+	issuer[0] = 0xA1
+	pkh := lcommon.PoolKeyHash(issuer.Hash())
+	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 3, 20, nil))
+	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 5, 40, nil))
+
+	tests := []struct {
+		name      string
+		issuer    lcommon.IssuerVkey
+		candidate uint64
+		want      LeiosAnnouncementOCINStaleness
+	}{
+		{
+			name:      "lower counter is stale",
+			issuer:    issuer,
+			candidate: 2,
+			want:      LeiosAnnouncementStaleOCIN,
+		},
+		{
+			name:      "equal counter is fresh",
+			issuer:    issuer,
+			candidate: 3,
+			want:      LeiosAnnouncementFreshOCIN,
+		},
+		{
+			name:      "arbitrarily ahead counter is fresh",
+			issuer:    issuer,
+			candidate: 99,
+			want:      LeiosAnnouncementFreshOCIN,
+		},
+		{
+			name: "unknown issuer is stale",
+			issuer: func() lcommon.IssuerVkey {
+				var unknown lcommon.IssuerVkey
+				unknown[0] = 0xB2
+				return unknown
+			}(),
+			candidate: 0,
+			want:      LeiosAnnouncementStaleOCIN,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ls.leiosAnnouncementOCINStaleness(
+				leiosOCINHeader(tt.issuer, tt.candidate),
+			)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestLeiosAnnouncementOCINStalenessTreatsPreKChainAsOrigin(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(nil, nil)
+	require.NoError(t, err)
+	addLeiosOCINChainBlocks(t, cm.PrimaryChain(), 2)
+
+	cfg := newTestShelleyGenesisCfg(t)
+	cfg.ShelleyGenesis().SecurityParam = 2
+	ls := &LedgerState{
+		db:         db,
+		chain:      cm.PrimaryChain(),
+		currentEra: eras.DijkstraEraDesc,
+		config:     LedgerStateConfig{CardanoNodeConfig: cfg},
+	}
+	var issuer lcommon.IssuerVkey
+	issuer[0] = 0xC3
+	pkh := lcommon.PoolKeyHash(issuer.Hash())
+	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 0, 10, nil))
+
+	got, err := ls.leiosAnnouncementOCINStaleness(
+		leiosOCINHeader(issuer, 0),
+	)
+	require.NoError(t, err)
+	require.Equal(t, LeiosAnnouncementStaleOCIN, got)
+}
+
+func TestValidateLeiosAnnouncementHeaderRunsCryptoBeforeOCINClassification(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{0xD4}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	seedBlockPoolRegistration(t, db, tb.block)
+	pkh := lcommon.PoolKeyHash(tb.block.IssuerVkey().Hash())
+	seedPoolStakeSnapshot(t, db, 4, pkh.Bytes(), 1_000_000_000)
+
+	cm, err := chain.NewManager(nil, nil)
+	require.NoError(t, err)
+	addLeiosOCINChainBlocks(t, cm.PrimaryChain(), 5)
+	ls.chain = cm.PrimaryChain()
+	ls.currentEra = eras.BabbageEraDesc
+	ls.config.CardanoNodeConfig.ShelleyGenesis().SecurityParam = 2
+	ls.publishSnapshotsLocked()
+	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 0, 20, nil))
+
+	staleness, err := ls.ValidateLeiosAnnouncementHeader(tb.block.Header())
+	require.NoError(t, err)
+	require.Equal(t, LeiosAnnouncementFreshOCIN, staleness)
+
+	bad := createTestBlock(t, [32]byte{0xD5}, 0, tamperOpCertSig)
+	staleness, err = ls.ValidateLeiosAnnouncementHeader(bad.block.Header())
+	require.ErrorContains(t, err, "cold-key signature")
+	require.Equal(
+		t,
+		LeiosAnnouncementFreshOCIN,
+		staleness,
+		"an invalid header must fail before receiving a meaningful OCIN verdict",
+	)
+}
+
 // TestOpCertNoGapRuleApplies pins the TPraos→Praos boundary: the opcert no-gap
 // rule is off through Alonzo (TPraos) and on from Babbage onward (Praos).
 func TestOpCertNoGapRuleApplies(t *testing.T) {
+	t.Parallel()
+
 	assert.False(
 		t,
 		opCertNoGapRuleApplies(alonzo.EraIdAlonzo),

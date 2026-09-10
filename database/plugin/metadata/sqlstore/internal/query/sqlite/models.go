@@ -80,11 +80,14 @@ type CommitTimestamp struct {
 }
 
 type CommitteeMember struct {
-	ID           int64
-	ColdCredHash []byte
-	ExpiresEpoch int64
-	AddedSlot    int64
-	DeletedSlot  sql.NullInt64
+	ID                int64
+	ColdCredentialTag int64
+	ColdCredHash      []byte
+	ExpiresEpoch      int64
+	TermStartSlot     int64
+	TermStartSlotSet  bool
+	AddedSlot         int64
+	DeletedSlot       sql.NullInt64
 }
 
 type CommitteeQuorum struct {
@@ -149,6 +152,19 @@ type ImportCheckpoint struct {
 	ID        int64
 	ImportKey string
 	Phase     string
+}
+
+type ImportedEpochBlockTotal struct {
+	Epoch        int64
+	TotalBlocks  int64
+	CapturedSlot int64
+}
+
+type ImportedPoolBlockCount struct {
+	Epoch          int64
+	PoolKeyHash    []byte
+	BlocksProduced int64
+	CapturedSlot   int64
 }
 
 type MidnightAriadneParam struct {
@@ -293,6 +309,8 @@ type PoolStakeSnapshot struct {
 	StakeDenominator              string
 	DelegatorCount                int64
 	CapturedSlot                  int64
+	LeiosKeyPublic                []byte
+	LeiosKeyPossessionProof       []byte
 	CalculationVersion            int64
 	RewardAccountAutoVote         int64
 	RewardAccountAutoVoteResolved bool
@@ -381,6 +399,13 @@ type RewardPoolOutput struct {
 	Unspendable         string
 	CapturedSlot        int64
 	BoundarySlot        int64
+}
+
+type RewardSeedFailure struct {
+	Epoch         int64
+	SnapshotType  string
+	FailureReason string
+	CapturedSlot  int64
 }
 
 type RewardSnapshot struct {

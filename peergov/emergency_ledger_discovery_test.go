@@ -279,7 +279,9 @@ func TestDiscoverLedgerPeers_SlowProviderRemainsSingleFlight(t *testing.T) {
 		release: release,
 	}
 	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger:                             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
 		UseLedgerAfterSlot:                 0,
 		MinHotPeers:                        2,
 		LedgerPeerTarget:                   1,

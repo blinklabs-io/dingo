@@ -262,9 +262,17 @@ func (c *ConnectionManager) startListener(
 				continue
 			}
 
-			// NtC connections bypass the inbound slot budget and per-IP
-			// limiting. Their handshake is still moved off the accept loop.
 			if l.UseNtC {
+				releaseNtCSlot := c.reserveNtCSlot(conn.RemoteAddr())
+				if releaseNtCSlot == nil {
+					closeConnAndLog(
+						c.config.Logger,
+						conn,
+						"listener: close rejected NtC connection failed",
+					)
+					c.untrackPendingConnection(conn)
+					continue
+				}
 				c.goroutineWg.Go(func() {
 					c.setupAcceptedConnection(
 						ctx,
@@ -272,6 +280,7 @@ func (c *ConnectionManager) startListener(
 						l,
 						defaultConnOpts,
 						false,
+						releaseNtCSlot,
 					)
 				})
 				continue
@@ -316,6 +325,7 @@ func (c *ConnectionManager) startListener(
 					l,
 					defaultConnOpts,
 					true,
+					nil,
 				)
 			})
 		}
@@ -357,9 +367,15 @@ func (c *ConnectionManager) setupAcceptedConnection(
 	l ListenerConfig,
 	defaultConnOpts []ouroboros.ConnectionOptionFunc,
 	inboundSlotReserved bool,
+	releaseNtCSlot func(),
 ) {
 	pendingConn := conn
 	defer c.untrackPendingConnection(pendingConn)
+	defer func() {
+		if releaseNtCSlot != nil {
+			releaseNtCSlot()
+		}
+	}()
 	stopOnCancel := context.AfterFunc(ctx, func() {
 		_ = pendingConn.Close()
 	})
@@ -391,7 +407,11 @@ func (c *ConnectionManager) setupAcceptedConnection(
 				"remote_addr", conn.RemoteAddr(),
 				"limit", c.config.MaxConnectionsPerIP,
 			)
-			closeConnAndLog(c.config.Logger, conn, "listener: close rejected connection failed")
+			closeConnAndLog(
+				c.config.Logger,
+				conn,
+				"listener: close rejected connection failed",
+			)
 			c.releaseInboundSlot()
 			return
 		}
@@ -399,7 +419,11 @@ func (c *ConnectionManager) setupAcceptedConnection(
 
 	deadlineConn := withHandshakeDeadline(conn)
 	if err := deadlineConn.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
-		c.config.Logger.Info("listener: failed to set handshake deadline", "error", err)
+		c.config.Logger.Info(
+			"listener: failed to set handshake deadline",
+			"error",
+			err,
+		)
 		closeConnAndLog(c.config.Logger, conn, "listener: close failed")
 		if ipKey != "" {
 			c.releaseIPSlot(ipKey)
@@ -415,7 +439,11 @@ func (c *ConnectionManager) setupAcceptedConnection(
 	oConn, err := ouroboros.NewConnection(connOpts...)
 	if err != nil {
 		if l.UseNtC {
-			c.config.Logger.Error("listener: failed to setup NtC connection", "error", err)
+			c.config.Logger.Error(
+				"listener: failed to setup NtC connection",
+				"error",
+				err,
+			)
 		} else {
 			c.config.Logger.Info("listener: inbound connection failed", "error", err)
 		}
@@ -432,7 +460,11 @@ func (c *ConnectionManager) setupAcceptedConnection(
 	// The handshake is complete; return the bearer to normal protocol-managed
 	// deadlines before registering it with the connection manager.
 	if err := conn.SetDeadline(time.Time{}); err != nil {
-		c.config.Logger.Warn("listener: failed to clear handshake deadline", "error", err)
+		c.config.Logger.Warn(
+			"listener: failed to clear handshake deadline",
+			"error",
+			err,
+		)
 		closeConnAndLog(c.config.Logger, oConn, "listener: close failed")
 		if ipKey != "" {
 			c.releaseIPSlot(ipKey)
@@ -448,10 +480,22 @@ func (c *ConnectionManager) setupAcceptedConnection(
 		peerAddr = conn.RemoteAddr().String()
 	}
 	if l.UseNtC {
-		c.config.Logger.Info("listener: accepted NtC connection", "remote_addr", peerAddr)
-		if !c.addNtCConnectionWithIPKey(oConn, true, peerAddr, "") {
+		c.config.Logger.Info(
+			"listener: accepted NtC connection",
+			"remote_addr",
+			peerAddr,
+		)
+		if !c.addConnectionImpl(
+			oConn,
+			true,
+			true,
+			peerAddr,
+			"",
+			releaseNtCSlot,
+		) {
 			return
 		}
+		releaseNtCSlot = nil
 	} else {
 		c.config.Logger.Info("listener: inbound connection", "remote_addr", peerAddr)
 		c.consumeInboundSlot()

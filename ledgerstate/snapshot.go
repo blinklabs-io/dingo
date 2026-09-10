@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // ErrLedgerDirNotFound is returned when the ledger directory cannot
@@ -401,15 +402,18 @@ func parseSnapshotData(data []byte) (*RawLedgerState, error) {
 	// HeaderState = [WithOrigin AnnTip, ChainDepState telescope]
 	nonces, nonceErr := parsePraosNonces(outer[1])
 	if nonceErr != nil {
-		slog.Debug(
-			"nonce extraction failed (non-fatal)",
-			"error", nonceErr,
-		)
+		if result.EraIndex >= EraShelley {
+			return nil, fmt.Errorf(
+				"extracting Praos HeaderState: %w", nonceErr,
+			)
+		}
+		slog.Debug("nonce extraction skipped for pre-Praos state")
 	} else if nonces != nil {
 		result.EpochNonce = nonces.EpochNonce
 		result.EvolvingNonce = nonces.EvolvingNonce
 		result.CandidateNonce = nonces.CandidateNonce
 		result.LastEpochBlockNonce = nonces.LastEpochBlockNonce
+		result.OpCertCounters = nonces.OpCertCounters
 	}
 
 	return result, nil
@@ -536,6 +540,19 @@ func parseCurrentEra(
 		return nil, fmt.Errorf("decoding epoch: %w", err)
 	}
 
+	// nesBprev and nesBcur. Both are mandatory strict fields of
+	// NewEpochState, so the length check above already guarantees they are
+	// present, and a map that will not decode means this is not a
+	// NewEpochState rather than a snapshot that omits them.
+	blocksPrev, err := parseBlocksMade(nes[1])
+	if err != nil {
+		return nil, fmt.Errorf("decoding blocks made in previous epoch: %w", err)
+	}
+	blocksCur, err := parseBlocksMade(nes[2])
+	if err != nil {
+		return nil, fmt.Errorf("decoding blocks made in current epoch: %w", err)
+	}
+
 	// EpochState = [AccountState, LedgerState, SnapShots, NonMyopic]
 	es, err := decodeRawArray(nes[3])
 	if err != nil {
@@ -624,6 +641,8 @@ func parseCurrentEra(
 		UTxOData:      utxoState[0], // The UTxO map
 		CertStateData: ls[0],        // [VState, PState, DState]
 		SnapShotsData: es[2],        // mark/set/go
+		BlocksPrev:    blocksPrev,
+		BlocksCur:     blocksCur,
 	}
 	if len(nes) > 5 {
 		result.PoolDistrData = nes[5]
@@ -772,6 +791,9 @@ func parseBound(data []byte) (uint64, uint64, error) {
 // praosNonces holds the nonces extracted from the PraosState in the
 // HeaderState's ChainDepState telescope.
 type praosNonces struct {
+	// OpCertCounters is the certified per-pool operational-certificate counter
+	// state. Keys are 28-byte pool cold-key hashes encoded as strings.
+	OpCertCounters map[string]uint64
 	// EvolvingNonce is the rolling nonce (eta_v) updated with each
 	// block's VRF output. This is needed as the starting nonce for
 	// block processing after a mithril snapshot restore.
@@ -927,7 +949,12 @@ func extractPraosNonces(praosState [][]byte) (*praosNonces, error) {
 		)
 	}
 
-	result := &praosNonces{}
+	opCertCounters, err := decodeOpCertCounters(praosState[1])
+	if err != nil {
+		return nil, fmt.Errorf("decoding opcert counters: %w", err)
+	}
+
+	result := &praosNonces{OpCertCounters: opCertCounters}
 
 	evolvingNonce, err := decodeNonce(praosState[2])
 	if err != nil {
@@ -987,6 +1014,39 @@ func extractPraosNonces(praosState [][]byte) (*praosNonces, error) {
 	}
 	result.LastEpochBlockNonce = lastEpochBlockNonce
 
+	return result, nil
+}
+
+// decodeOpCertCounters decodes the Praos ocertCounters map. Every key is a
+// BlockIssuer key hash and must therefore be a 28-byte byte string. Rejecting
+// malformed and duplicate entries keeps the certified HeaderState an
+// unambiguous baseline for subsequent block validation.
+func decodeOpCertCounters(data []byte) (map[string]uint64, error) {
+	entries, err := decodeMapEntries(data)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]uint64, len(entries))
+	for i, entry := range entries {
+		var poolKeyHash []byte
+		if _, err := cbor.Decode(entry.KeyRaw, &poolKeyHash); err != nil {
+			return nil, fmt.Errorf("decoding key %d: %w", i, err)
+		}
+		if len(poolKeyHash) != 28 {
+			return nil, fmt.Errorf(
+				"key %d has length %d, expected 28", i, len(poolKeyHash),
+			)
+		}
+		var counter uint64
+		if _, err := cbor.Decode(entry.ValueRaw, &counter); err != nil {
+			return nil, fmt.Errorf("decoding value %d: %w", i, err)
+		}
+		key := string(poolKeyHash)
+		if _, exists := result[key]; exists {
+			return nil, fmt.Errorf("duplicate pool key at entry %d", i)
+		}
+		result[key] = counter
+	}
 	return result, nil
 }
 
@@ -1191,7 +1251,8 @@ func parseSnapShot(
 }
 
 // ParseActivePoolDistribution decodes NewEpochState.pool-distr:
-// map[PoolKeyHash][UnitInterval, VrfKeyHash]. The UnitInterval is the exact
+// map[PoolKeyHash][UnitInterval, active stake, VrfKeyHash, LeiosKey]. Older
+// states omit active stake and/or LeiosKey. The UnitInterval is the exact
 // active stake fraction (sigma) used by Praos leader eligibility.
 func ParseActivePoolDistribution(
 	data cbor.RawMessage,
@@ -1237,9 +1298,9 @@ func ParseActivePoolDistribution(
 				err,
 			)
 		}
-		if len(fields) != 2 && len(fields) != 3 {
+		if len(fields) < 2 || len(fields) > 4 {
 			return nil, fmt.Errorf(
-				"active pool distribution entry %d: value has %d fields, expected 2 or 3",
+				"active pool distribution entry %d: value has %d fields, expected 2, 3, or 4",
 				idx,
 				len(fields),
 			)
@@ -1254,7 +1315,7 @@ func ParseActivePoolDistribution(
 		}
 
 		vrfFieldIdx := 1
-		if len(fields) == 3 {
+		if len(fields) >= 3 {
 			vrfFieldIdx = 2
 			var activeStake uint64
 			if _, err := cbor.Decode(fields[1], &activeStake); err != nil {
@@ -1300,11 +1361,32 @@ func ParseActivePoolDistribution(
 			)
 		}
 
+		var leiosKey *lcommon.LeiosKey
+		if len(fields) == 4 {
+			leiosKey, err = decodeOptionalLeiosKey(fields[3])
+			if err != nil {
+				return nil, fmt.Errorf(
+					"active pool distribution entry %d: %w",
+					idx,
+					err,
+				)
+			}
+		}
+		var leiosKeyPublic, leiosKeyPossessionProof []byte
+		if leiosKey != nil {
+			leiosKeyPublic = append([]byte(nil), leiosKey.PublicKey...)
+			leiosKeyPossessionProof = append(
+				[]byte(nil), leiosKey.PossessionProof...,
+			)
+		}
+
 		result = append(result, ParsedActivePoolStake{
-			PoolKeyHash:      slices.Clone(poolKeyHash),
-			StakeNumerator:   stakeNumerator,
-			StakeDenominator: stakeDenominator,
-			VrfKeyHash:       slices.Clone(vrfKeyHash),
+			PoolKeyHash:             slices.Clone(poolKeyHash),
+			StakeNumerator:          stakeNumerator,
+			StakeDenominator:        stakeDenominator,
+			VrfKeyHash:              slices.Clone(vrfKeyHash),
+			LeiosKeyPublic:          leiosKeyPublic,
+			LeiosKeyPossessionProof: leiosKeyPossessionProof,
 		})
 	}
 	return result, nil
@@ -1483,6 +1565,52 @@ func parseStakeWithPoolMap(
 // parseDelegationMap decodes a credential -> pool key hash map.
 // Handles both definite and indefinite-length maps. Returns a
 // warning if any entries were skipped due to decode errors.
+// parseBlocksMade decodes a NewEpochState BlocksMade field: a CBOR map from a
+// 28-byte pool cold-key hash to the number of blocks that pool minted in the
+// epoch the field describes.
+//
+// Unlike the stake and delegation maps, a malformed entry is an error rather
+// than a skipped one. Those maps drop an entry the node then simply does not
+// pay; dropping a block count instead lowers one pool's beta and the epoch
+// total that every other pool's beta divides by, so a silently partial map
+// yields a complete-looking reward distribution at the wrong amounts for every
+// pool at once. An absent map is not representable in the reference either:
+// nesBprev and nesBcur are strict, non-optional fields.
+func parseBlocksMade(data cbor.RawMessage) (map[string]uint64, error) {
+	entries, err := decodeMapEntries(data)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]uint64, len(entries))
+	for i, entry := range entries {
+		var poolKeyHash []byte
+		if _, err := cbor.Decode(entry.KeyRaw, &poolKeyHash); err != nil {
+			return nil, fmt.Errorf("entry %d: decoding pool key hash: %w", i, err)
+		}
+		if len(poolKeyHash) != credentialHashSize {
+			return nil, fmt.Errorf(
+				"entry %d: pool key hash is %d bytes, expected %d",
+				i, len(poolKeyHash), credentialHashSize,
+			)
+		}
+		var blocks uint64
+		if _, err := cbor.Decode(entry.ValueRaw, &blocks); err != nil {
+			return nil, fmt.Errorf(
+				"entry %d: decoding block count for pool %x: %w",
+				i, poolKeyHash, err,
+			)
+		}
+		key := string(poolKeyHash)
+		if _, dup := result[key]; dup {
+			return nil, fmt.Errorf(
+				"entry %d: duplicate pool key hash %x", i, poolKeyHash,
+			)
+		}
+		result[key] = blocks
+	}
+	return result, nil
+}
+
 func parseDelegationMap(
 	data cbor.RawMessage,
 ) (map[string][]byte, error) {
@@ -1632,14 +1760,25 @@ func AggregatePoolStake(
 			continue
 		}
 
+		pool := snap.PoolParams[poolHex]
+		var leiosKeyPublic, leiosKeyPossessionProof []byte
+		if pool != nil {
+			leiosKeyPublic = append([]byte(nil), pool.LeiosKeyPublic...)
+			leiosKeyPossessionProof = append(
+				[]byte(nil), pool.LeiosKeyPossessionProof...,
+			)
+		}
+
 		snapshots = append(snapshots, &models.PoolStakeSnapshot{
-			Epoch:              epoch,
-			SnapshotType:       snapshotType,
-			PoolKeyHash:        poolKeyHash,
-			TotalStake:         types.Uint64(agg.totalStake),
-			DelegatorCount:     agg.delegatorCount,
-			CapturedSlot:       capturedSlot,
-			CalculationVersion: models.RewardStakeCalculationVersion,
+			Epoch:                   epoch,
+			SnapshotType:            snapshotType,
+			PoolKeyHash:             poolKeyHash,
+			TotalStake:              types.Uint64(agg.totalStake),
+			DelegatorCount:          agg.delegatorCount,
+			CapturedSlot:            capturedSlot,
+			LeiosKeyPublic:          leiosKeyPublic,
+			LeiosKeyPossessionProof: leiosKeyPossessionProof,
+			CalculationVersion:      models.RewardStakeCalculationVersion,
 		})
 	}
 

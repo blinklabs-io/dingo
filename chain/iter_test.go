@@ -24,8 +24,8 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	mockfixtures "github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -36,6 +36,8 @@ import (
 func TestPersistentIteratorDrainsAlreadyAheadPrimaryChainAcrossSparseIndex(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -112,6 +114,8 @@ func TestPersistentIteratorDrainsAlreadyAheadPrimaryChainAcrossSparseIndex(
 func TestPersistentIteratorRejectsSparseIndexWithHashDiscontinuity(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
 	})
@@ -168,6 +172,8 @@ func TestPersistentIteratorRejectsSparseIndexWithHashDiscontinuity(
 }
 
 func TestIteratorCancelRemovesFromChain(t *testing.T) {
+	t.Parallel()
+
 	// Create a chain manager without a database (in-memory only)
 	eventBus := event.NewEventBus(nil, nil)
 	cm, err := NewManager(nil, eventBus)
@@ -205,6 +211,8 @@ func TestIteratorCancelRemovesFromChain(t *testing.T) {
 }
 
 func TestIteratorCancelMultiple(t *testing.T) {
+	t.Parallel()
+
 	// Create a chain manager without a database (in-memory only)
 	eventBus := event.NewEventBus(nil, nil)
 	cm, err := NewManager(nil, eventBus)
@@ -247,6 +255,8 @@ func TestIteratorCancelMultiple(t *testing.T) {
 }
 
 func TestIteratorCancelIdempotent(t *testing.T) {
+	t.Parallel()
+
 	// Create a chain manager without a database (in-memory only)
 	eventBus := event.NewEventBus(nil, nil)
 	cm, err := NewManager(nil, eventBus)
@@ -272,6 +282,8 @@ func TestIteratorCancelIdempotent(t *testing.T) {
 // TestIteratorParentContextCancelUnblocksNext verifies that a blocking
 // iterator created with a parent context exits when that parent is canceled.
 func TestIteratorParentContextCancelUnblocksNext(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	cm, err := NewManager(nil, eventBus)
 	require.NoError(t, err)
@@ -329,6 +341,8 @@ func TestIteratorParentContextCancelUnblocksNext(t *testing.T) {
 // overflow the goroutine stack. The iterative loop fix makes
 // this safe regardless of wake-up count.
 func TestIterNextSpuriousWakeups(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	cm, err := NewManager(nil, eventBus)
 	require.NoError(t, err)
@@ -417,6 +431,8 @@ func TestIterNextSpuriousWakeups(t *testing.T) {
 }
 
 func TestIterNextRegistersWaitBeforeChainUpdateCanCommit(t *testing.T) {
+	t.Parallel()
+
 	eventBus := event.NewEventBus(nil, nil)
 	cm, err := NewManager(nil, eventBus)
 	require.NoError(t, err)
@@ -456,15 +472,10 @@ func TestIterNextRegistersWaitBeforeChainUpdateCanCommit(t *testing.T) {
 		return true
 	}, 2*time.Second, "iterator should hold chain lock at tip")
 
-	blockFixture, err := mockfixtures.NewHarness(
-		mockfixtures.HarnessConfig{},
-	).Fixture(
-		"ouroboros-consensus/ouroboros-consensus-cardano/" +
-			"golden/cardano/CardanoNodeToNodeVersion2/Block_Conway",
-	)
+	blocks, err := testfixtures.GenerateConwayChain(1)
 	require.NoError(t, err)
-	block, err := blockFixture.DecodeLedgerBlock()
-	require.NoError(t, err)
+	require.Len(t, blocks, 1)
+	block := blocks[0]
 	blockHash := block.Hash().Bytes()
 
 	go func() {

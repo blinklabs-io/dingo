@@ -141,6 +141,277 @@ func (s *Store) SaveRewardSnapshot(
 	return nil
 }
 
+func (s *Store) SaveRewardSeedFailure(
+	epoch uint64,
+	snapshotType string,
+	reason string,
+	capturedSlot uint64,
+	txn types.Txn,
+) error {
+	db, ctx, err := s.dbFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return err
+	}
+	sqlSlot, err := checkedInt64(capturedSlot)
+	if err != nil {
+		return err
+	}
+	if err := s.operationalQueries(db).SaveRewardSeedFailure(
+		ctx,
+		sqlitequery.SaveRewardSeedFailureParams{
+			Epoch:         sqlEpoch,
+			SnapshotType:  snapshotType,
+			FailureReason: reason,
+			CapturedSlot:  sqlSlot,
+		},
+	); err != nil {
+		return fmt.Errorf("save reward seed failure: %w", err)
+	}
+	return nil
+}
+
+// SaveImportedPoolBlockCounts records the per-pool block counts a bootstrap
+// snapshot carries for one epoch. The rows are the node's only source of pool
+// performance for an epoch that ended below its trust anchor.
+func (s *Store) SaveImportedPoolBlockCounts(
+	counts []models.ImportedPoolBlockCount,
+	txn types.Txn,
+) error {
+	if len(counts) == 0 {
+		return nil
+	}
+	db, ctx, err := s.dbFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	queries := s.operationalQueries(db)
+	for _, count := range counts {
+		sqlEpoch, err := checkedInt64(count.Epoch)
+		if err != nil {
+			return err
+		}
+		sqlBlocks, err := checkedInt64(count.BlocksProduced)
+		if err != nil {
+			return err
+		}
+		sqlSlot, err := checkedInt64(count.CapturedSlot)
+		if err != nil {
+			return err
+		}
+		if err := queries.SaveImportedPoolBlockCount(
+			ctx,
+			sqlitequery.SaveImportedPoolBlockCountParams{
+				Epoch:          sqlEpoch,
+				PoolKeyHash:    count.PoolKeyHash,
+				BlocksProduced: sqlBlocks,
+				CapturedSlot:   sqlSlot,
+			},
+		); err != nil {
+			return fmt.Errorf("save imported pool block count: %w", err)
+		}
+	}
+	return nil
+}
+
+// SaveImportedEpochBlockTotal records that an epoch's block counts came from a
+// bootstrap snapshot, and the total the per-pool rows sum to. The row is what
+// distinguishes a certified zero-block epoch from an epoch nothing was
+// imported for; the per-pool rows alone cannot, because a BlocksMade map with
+// no entries writes none.
+func (s *Store) SaveImportedEpochBlockTotal(
+	epoch uint64,
+	totalBlocks uint64,
+	capturedSlot uint64,
+	txn types.Txn,
+) error {
+	db, ctx, err := s.dbFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return err
+	}
+	sqlTotal, err := checkedInt64(totalBlocks)
+	if err != nil {
+		return err
+	}
+	sqlSlot, err := checkedInt64(capturedSlot)
+	if err != nil {
+		return err
+	}
+	if err := s.operationalQueries(db).SaveImportedEpochBlockTotal(
+		ctx,
+		sqlitequery.SaveImportedEpochBlockTotalParams{
+			Epoch:        sqlEpoch,
+			TotalBlocks:  sqlTotal,
+			CapturedSlot: sqlSlot,
+		},
+	); err != nil {
+		return fmt.Errorf("save imported epoch block total: %w", err)
+	}
+	return nil
+}
+
+// GetImportedPoolBlockCounts returns an epoch's imported per-pool block counts
+// keyed by pool key hash, and the epoch total they sum to. The bool reports
+// whether block counts were imported for the epoch at all; false means the
+// counts are unknown, which is not the same answer as a zero-block epoch.
+//
+// The stored total is compared against the rows rather than derived from them.
+// A per-pool set truncated by a partial write would otherwise present as a
+// smaller but self-consistent epoch, which raises every surviving pool's share
+// of the blocks and over-credits its rewards.
+func (s *Store) GetImportedPoolBlockCounts(
+	epoch uint64,
+	txn types.Txn,
+) (map[string]uint64, uint64, bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	queries := s.operationalQueries(db)
+	storedTotal, err := queries.GetImportedEpochBlockTotal(ctx, sqlEpoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, 0, false, nil
+	}
+	if err != nil {
+		return nil, 0, false, fmt.Errorf(
+			"get imported epoch block total: %w",
+			err,
+		)
+	}
+	if storedTotal < 0 {
+		return nil, 0, false, fmt.Errorf(
+			"imported block total for epoch %d is negative: %d",
+			epoch,
+			storedTotal,
+		)
+	}
+	rows, err := queries.GetImportedPoolBlockCounts(ctx, sqlEpoch)
+	if err != nil {
+		return nil, 0, false, fmt.Errorf(
+			"get imported pool block counts: %w",
+			err,
+		)
+	}
+	ret := make(map[string]uint64, len(rows))
+	var rowTotal uint64
+	for _, row := range rows {
+		if row.BlocksProduced < 0 {
+			return nil, 0, false, fmt.Errorf(
+				"imported pool block count for epoch %d pool %x is negative: %d",
+				epoch,
+				row.PoolKeyHash,
+				row.BlocksProduced,
+			)
+		}
+		ret[string(row.PoolKeyHash)] = uint64(row.BlocksProduced)
+		rowTotal += uint64(row.BlocksProduced)
+	}
+	if rowTotal != uint64(storedTotal) {
+		return nil, 0, false, fmt.Errorf(
+			"imported pool block counts for epoch %d sum to %d, recorded total is %d",
+			epoch,
+			rowTotal,
+			storedTotal,
+		)
+	}
+	return ret, uint64(storedTotal), true, nil
+}
+
+// DeleteImportedPoolBlockCountsForEpoch removes an epoch's imported counts, so
+// a re-import replaces them rather than merging into a stale set.
+func (s *Store) DeleteImportedPoolBlockCountsForEpoch(
+	epoch uint64,
+	txn types.Txn,
+) error {
+	db, ctx, err := s.dbFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return err
+	}
+	queries := s.operationalQueries(db)
+	if err := queries.DeleteImportedPoolBlockCountsForEpoch(
+		ctx,
+		sqlEpoch,
+	); err != nil {
+		return fmt.Errorf("delete imported pool block counts: %w", err)
+	}
+	if err := queries.DeleteImportedEpochBlockTotalForEpoch(
+		ctx,
+		sqlEpoch,
+	); err != nil {
+		return fmt.Errorf("delete imported epoch block total: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetRewardSeedFailure(
+	epoch uint64,
+	snapshotType string,
+	txn types.Txn,
+) (string, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return "", err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return "", err
+	}
+	reason, err := s.operationalQueries(db).GetRewardSeedFailure(
+		ctx,
+		sqlitequery.GetRewardSeedFailureParams{
+			Epoch:        sqlEpoch,
+			SnapshotType: snapshotType,
+		},
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get reward seed failure: %w", err)
+	}
+	return reason, nil
+}
+
+func (s *Store) DeleteRewardSeedFailure(
+	epoch uint64,
+	snapshotType string,
+	txn types.Txn,
+) error {
+	db, ctx, err := s.dbFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return err
+	}
+	if err := s.operationalQueries(db).DeleteRewardSeedFailure(
+		ctx,
+		sqlitequery.DeleteRewardSeedFailureParams{
+			Epoch:        sqlEpoch,
+			SnapshotType: snapshotType,
+		},
+	); err != nil {
+		return fmt.Errorf("delete reward seed failure: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) DeleteProvisionalRewardSnapshot(
 	epoch uint64,
 	snapshotType string,
@@ -713,10 +984,29 @@ boundary_slot = excluded.boundary_slot`
 	// Multi-row upserts do not expose all generated IDs portably. Resolve them
 	// by their natural key in one bounded query and assign IDs only after the
 	// write succeeds.
-	predicates := make([]string, len(params))
+	//
+	// Looked up via a join against a derived table of literal
+	// (epoch, credential_tag, staking_key, pool_key_hash, reward_type) rows,
+	// not an OR-chain of five-way equality predicates -- the same
+	// GetAccountsByCredential planner limitation applies here:
+	// idx_reward_account_output_epoch_cred_pool_type exists on exactly these
+	// five columns, but a long OR-chain over it is not reliably compiled into
+	// per-term index seeks, and this runs on every epoch boundary for every
+	// account earning a reward.
+	rowSelectTemplate := "SELECT ? AS epoch, ? AS credential_tag, ? AS staking_key, ? AS pool_key_hash, ? AS reward_type"
+	if s.dialect.Name() == "postgres" {
+		// See GetAccountsByCredential's identical cast for why: an otherwise
+		// untyped derived-table parameter resolves to text on Postgres rather
+		// than being inferred from the joined columns, which fails the join
+		// once compared against epoch/credential_tag (BIGINT) or
+		// staking_key/pool_key_hash (BYTEA). reward_type (VARCHAR) needs no
+		// cast: Postgres's text default already matches it.
+		rowSelectTemplate = "SELECT CAST(? AS BIGINT) AS epoch, CAST(? AS BIGINT) AS credential_tag, CAST(? AS BYTEA) AS staking_key, CAST(? AS BYTEA) AS pool_key_hash, ? AS reward_type"
+	}
+	rowSelects := make([]string, len(params))
 	lookupArgs := make([]any, 0, len(params)*5)
 	for index, value := range params {
-		predicates[index] = "(epoch = ? AND credential_tag = ? AND staking_key = ? AND pool_key_hash = ? AND reward_type = ?)"
+		rowSelects[index] = rowSelectTemplate
 		lookupArgs = append(
 			lookupArgs,
 			value.Epoch,
@@ -726,14 +1016,14 @@ boundary_slot = excluded.boundary_slot`
 			value.RewardType,
 		)
 	}
-	rows, err := db.QueryContext(
-		ctx,
-		`SELECT id, epoch, credential_tag, staking_key, pool_key_hash, reward_type
-FROM reward_account_output WHERE `+strings.Join(
-			predicates,
-			" OR ",
-		),
-		lookupArgs...)
+	lookupQuery := s.dialect.Rebind(
+		`SELECT o.id, o.epoch, o.credential_tag, o.staking_key, o.pool_key_hash, o.reward_type
+FROM reward_account_output o JOIN (` + strings.Join(rowSelects, " UNION ALL ") + `) v
+ON o.epoch = v.epoch AND o.credential_tag = v.credential_tag AND
+   o.staking_key = v.staking_key AND o.pool_key_hash = v.pool_key_hash AND
+   o.reward_type = v.reward_type`,
+	)
+	rows, err := db.QueryContext(ctx, lookupQuery, lookupArgs...)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"lookup reward account output batch IDs: %w",
@@ -951,6 +1241,24 @@ func (s *Store) DeleteRewardStateAfterSlot(
 			if err := q.DeleteRewardSnapshotsAfterSlot(
 				ctx,
 				pair,
+			); err != nil {
+				return err
+			}
+			if err := q.DeleteRewardSeedFailuresAfterSlot(
+				ctx,
+				sqlSlot,
+			); err != nil {
+				return err
+			}
+			if err := q.DeleteImportedPoolBlockCountsAfterSlot(
+				ctx,
+				sqlSlot,
+			); err != nil {
+				return err
+			}
+			if err := q.DeleteImportedEpochBlockTotalsAfterSlot(
+				ctx,
+				sqlSlot,
 			); err != nil {
 				return err
 			}

@@ -40,6 +40,7 @@ func TestPostgresSQLStoreIntegration(t *testing.T) {
 		"pgx",
 		postgresDSNWithSearchPath(t, dsn, schema),
 		"postgres",
+		schema,
 	)
 }
 
@@ -63,6 +64,7 @@ func TestMySQLSQLStoreIntegration(t *testing.T) {
 		"mysql",
 		mysqlDSNWithDatabase(t, dsn, database),
 		"mysql",
+		database,
 	)
 }
 
@@ -84,7 +86,10 @@ func mysqlDSNWithDatabase(t *testing.T, dsn, database string) string {
 	return parsed.FormatDSN()
 }
 
-func testSQLStoreIntegration(t *testing.T, driver, dsn, dialectName string) {
+func testSQLStoreIntegration(
+	t *testing.T,
+	driver, dsn, dialectName, lockNamespace string,
+) {
 	t.Helper()
 	db, err := OpenDB(driver, dsn, dialectName)
 	require.NoError(t, err)
@@ -96,19 +101,11 @@ func testSQLStoreIntegration(t *testing.T, driver, dsn, dialectName string) {
 	case "postgres":
 		dialect = PostgresDialect()
 		registry, err = migrations.PostgresRegistry()
-		locker = migrations.NewAdvisoryLocker(
-			"postgres",
-			0x64696e676f6d6574,
-			time.Second,
-		)
+		locker = integrationMigrationLocker("postgres", lockNamespace)
 	case "mysql":
 		dialect = MySQLDialect()
 		registry, err = migrations.MySQLRegistry()
-		locker = migrations.NewAdvisoryLocker(
-			"mysql",
-			0x64696e676f6d6574,
-			time.Second,
-		)
+		locker = integrationMigrationLocker("mysql", lockNamespace)
 	}
 	require.NoError(t, err)
 	store, err := New(Config{
@@ -189,6 +186,76 @@ func testSQLStoreIntegration(t *testing.T, driver, dsn, dialectName string) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, account.ID, loaded.ID)
+	// GetAccountsByCredential's derived-table UNION ALL join binds its
+	// credential_tag/staking_key parameters untyped: PostgreSQL resolves
+	// them to text rather than inferring account's BIGINT/BYTEA column
+	// types from the join, which the SQLite benchmark alone can't catch
+	// (issue: "operator does not exist: bytea = text").
+	batchLoaded, err := store.GetAccountsByCredential(
+		[]models.StakeCredentialRef{
+			models.NewStakeCredentialRef(0, account.StakingKey),
+		},
+		false,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Contains(t, batchLoaded, models.NewStakeCredentialRef(0, account.StakingKey).MapKey())
+	require.Equal(t, account.ID, batchLoaded[models.NewStakeCredentialRef(0, account.StakingKey).MapKey()].ID)
+	// GetDrepLastRegistrationDeposits is the other derived-table join in the
+	// shared query set, and a DRep deregistration's refund is validated
+	// against what it returns, so a dialect that resolves the grouped
+	// subquery or its join to drep differently is a consensus difference.
+	// Both rows below carry certificate_id = 0, the shape the Mithril
+	// ledger-state import writes: GetDrepLastRegistrationSlot's
+	// certificate_id filter would drop them, and the deposit queries
+	// deliberately do not copy it.
+	activeDrepCredential := make([]byte, 28)
+	activeDrepCredential[0] = 0x71
+	inactiveDrepCredential := make([]byte, 28)
+	inactiveDrepCredential[0] = 0x72
+	require.NoError(t, store.ImportDrep(
+		&models.Drep{
+			Credential: activeDrepCredential,
+			AddedSlot:  10,
+			Active:     true,
+		},
+		&models.RegistrationDrep{
+			DrepCredential: activeDrepCredential,
+			AddedSlot:      10,
+			DepositAmount:  types.Uint64(500000000),
+		},
+		nil,
+	))
+	require.NoError(t, store.ImportDrep(
+		&models.Drep{
+			Credential: inactiveDrepCredential,
+			AddedSlot:  11,
+			Active:     false,
+		},
+		&models.RegistrationDrep{
+			DrepCredential: inactiveDrepCredential,
+			AddedSlot:      11,
+			DepositAmount:  types.Uint64(200000000),
+		},
+		nil,
+	))
+	drepDeposit, err := store.GetDrepLastRegistrationDeposit(
+		0,
+		activeDrepCredential,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, drepDeposit)
+	require.Equal(t, uint64(500000000), *drepDeposit)
+	drepDeposits, err := store.GetDrepLastRegistrationDeposits(nil)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		map[string]uint64{
+			models.DrepDepositKey(0, activeDrepCredential): 500000000,
+		},
+		drepDeposits,
+	)
 	_, err = db.Exec(dialect.Rebind(`
 INSERT INTO reward_live_stake (
  pool_key_hash, staking_key, credential_tag, utxo_stake, reward_stake,

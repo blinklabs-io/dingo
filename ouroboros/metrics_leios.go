@@ -30,7 +30,8 @@ type leiosMetrics struct {
 	//   unresolved        - closure did not arrive; connection closed (not served)
 	certRbOutcomes *prometheus.CounterVec
 	// certRbWaitSeconds records how long the server waited for a missing
-	// closure, labelled resolved (closure arrived) or timeout.
+	// closure, labelled resolved (closure arrived), timeout (the wait window
+	// elapsed), or cancelled (the serving connection ended first).
 	certRbWaitSeconds *prometheus.HistogramVec
 }
 

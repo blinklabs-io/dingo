@@ -101,15 +101,25 @@ RETURNING id`,
 				err,
 			)
 		}
-		deposit, found := deposits[certIndex]
+		// An absent key means the deposit is unknown, not zero: the
+		// producers omit an index whose deposit could not be computed
+		// (ledger.calculateCertificateDeposit and
+		// backfill.calculateCertDeposits both do). Defaulting it to zero
+		// records an authoritative zero, and a later legacy deregistration
+		// is then refunded zero by
+		// UtxoValidateValueNotConservedUtxo instead of falling back to the
+		// current KeyDeposit, failing value conservation on a valid
+		// transaction. Pass nil through so the column is stored NULL. A
+		// recorded zero stays a non-nil zero.
+		var deposit *uint64
+		if value, found := deposits[certIndex]; found {
+			deposit = &value
+		}
 		if certificateRequiresDeposit(certificate) && deposits == nil {
 			return nil, fmt.Errorf(
 				"missing certDeposits for deposit-bearing certificate at index %d",
 				certIndex,
 			)
-		}
-		if !found {
-			deposit = 0
 		}
 		specializedID, ref, err := s.applySpecializedCertificate(
 			ctx,
@@ -147,7 +157,11 @@ UPDATE certs SET certificate_id = ? WHERE id = ?`,
 	return ret, nil
 }
 
-func deleteSpecializedCertificates(ctx context.Context, db queryer, transactionID int64) error {
+func deleteSpecializedCertificates(
+	ctx context.Context,
+	db queryer,
+	transactionID int64,
+) error {
 	if _, err := db.ExecContext(ctx, `
 DELETE FROM pool_registration_owner
 WHERE pool_registration_id IN (
@@ -274,7 +288,7 @@ func (s *Store) applySpecializedCertificate(
 	slot uint64,
 	blockIndex uint32,
 	certIndex uint,
-	deposit uint64,
+	deposit *uint64,
 ) (uint, *models.StakeCredentialRef, error) {
 	switch cert := certificate.(type) {
 	case *lcommon.PoolRegistrationCertificate:
@@ -283,7 +297,11 @@ func (s *Store) applySpecializedCertificate(
 			db,
 			cert,
 			certificateID,
-			slot,
+			poolCertPosition{
+				slot:       slot,
+				blockIndex: uint64(blockIndex),
+				certIndex:  uint64(certIndex),
+			},
 			deposit,
 		)
 		return id, nil, err
@@ -323,13 +341,18 @@ RETURNING id`,
 		)
 		return id, nil, err
 	case *lcommon.DeregistrationDrepCertificate:
+		// A DRep deregistration carries its refund in the certificate
+		// itself, so this amount is always known. The pointer below is
+		// never nil, so this deposit never takes nullableDecimalUint64's
+		// NULL path, which exists for a deposit the ingest never knew.
+		amount := uint64(cert.Amount)
 		id, err := applyDrepDeregistrationCertificate(
 			ctx,
 			db,
 			cert,
 			certificateID,
 			slot,
-			uint64(cert.Amount),
+			&amount,
 		)
 		return id, nil, err
 	case *lcommon.UpdateDrepCertificate:
@@ -342,12 +365,30 @@ RETURNING id`,
 		)
 		return id, nil, err
 	case *lcommon.AuthCommitteeHotCertificate:
+		// CredType is decoded from CBOR without a range check. Storing it raw
+		// would write a tag the validated uint8 writers can never match, so
+		// the member would silently drop out of the active committee.
+		coldTag, err := models.CredentialTagFromUint(
+			cert.ColdCredential.CredType,
+		)
+		if err != nil {
+			return 0, nil, err
+		}
+		hotTag, err := models.CredentialTagFromUint(
+			cert.HotCredential.CredType,
+		)
+		if err != nil {
+			return 0, nil, err
+		}
 		id, err := insertCertificateRow(ctx, db, `
 INSERT INTO auth_committee_hot (
-    cold_credential, host_credential, certificate_id, added_slot
-) VALUES (?, ?, ?, ?)
+    cold_credential_tag, cold_credential, hot_credential_tag,
+    host_credential, certificate_id, added_slot
+) VALUES (?, ?, ?, ?, ?, ?)
 RETURNING id`,
+			coldTag,
 			cert.ColdCredential.Credential[:],
+			hotTag,
 			cert.HotCredential.Credential[:],
 			certificateID,
 			slot,
@@ -360,12 +401,20 @@ RETURNING id`,
 			anchorURL = cert.Anchor.Url
 			anchorHash = cert.Anchor.DataHash[:]
 		}
+		coldTag, err := models.CredentialTagFromUint(
+			cert.ColdCredential.CredType,
+		)
+		if err != nil {
+			return 0, nil, err
+		}
 		id, err := insertCertificateRow(ctx, db, `
 INSERT INTO resign_committee_cold (
-    anchor_url, cold_credential, anchor_hash, certificate_id, added_slot
-) VALUES (?, ?, ?, ?, ?)
+    anchor_url, cold_credential_tag, cold_credential, anchor_hash,
+    certificate_id, added_slot
+) VALUES (?, ?, ?, ?, ?, ?)
 RETURNING id`,
 			anchorURL,
+			coldTag,
 			cert.ColdCredential.Credential[:],
 			anchorHash,
 			certificateID,
@@ -392,13 +441,26 @@ RETURNING id`,
 	)
 }
 
+// nullableDecimalUint64 renders a deposit for a TEXT column that must
+// distinguish an unknown deposit from a recorded zero. A nil pointer binds as
+// a nil interface, which the driver writes as SQL NULL; a non-nil zero binds
+// as "0". This mirrors the account_import_baseline.deposit_amount binding,
+// whose migration states the rule: substituting today's protocol parameter for
+// a value the ingest never knew would invent history.
+func nullableDecimalUint64(value *uint64) any {
+	if value == nil {
+		return nil
+	}
+	return decimalUint64(types.Uint64(*value))
+}
+
 func applyAccountCertificate(
 	ctx context.Context,
 	db queryer,
 	certificate lcommon.Certificate,
 	certificateID uint,
 	slot uint64,
-	deposit uint64,
+	deposit *uint64,
 ) (uint, *models.StakeCredentialRef, error) {
 	var (
 		stakeCredential lcommon.Credential
@@ -507,7 +569,7 @@ func applyAccountCertificate(
 	switch cert := certificate.(type) {
 	case *lcommon.StakeRegistrationCertificate,
 		*lcommon.RegistrationCertificate:
-		args = []any{key, tag, slot, decimalUint64(types.Uint64(deposit)), certificateID}
+		args = []any{key, tag, slot, nullableDecimalUint64(deposit), certificateID}
 	case *lcommon.StakeDeregistrationCertificate:
 		args = []any{key, tag, slot, certificateID}
 	case *lcommon.DeregistrationCertificate:
@@ -515,13 +577,13 @@ func applyAccountCertificate(
 	case *lcommon.StakeDelegationCertificate:
 		args = []any{key, tag, state.pool, slot, certificateID}
 	case *lcommon.StakeRegistrationDelegationCertificate:
-		args = []any{key, tag, state.pool, slot, decimalUint64(types.Uint64(deposit)), certificateID}
+		args = []any{key, tag, state.pool, slot, nullableDecimalUint64(deposit), certificateID}
 	case *lcommon.StakeVoteDelegationCertificate:
 		args = []any{key, tag, state.pool, state.drep, state.drepType, slot, certificateID}
 	case *lcommon.StakeVoteRegistrationDelegationCertificate:
-		args = []any{key, tag, state.pool, state.drep, state.drepType, slot, decimalUint64(types.Uint64(deposit)), certificateID}
+		args = []any{key, tag, state.pool, state.drep, state.drepType, slot, nullableDecimalUint64(deposit), certificateID}
 	case *lcommon.VoteRegistrationDelegationCertificate:
-		args = []any{key, tag, state.drep, state.drepType, slot, decimalUint64(types.Uint64(deposit)), certificateID}
+		args = []any{key, tag, state.drep, state.drepType, slot, nullableDecimalUint64(deposit), certificateID}
 	case *lcommon.VoteDelegationCertificate:
 		args = []any{key, tag, state.drep, state.drepType, slot, certificateID}
 	}
@@ -628,9 +690,10 @@ func applyPoolRegistrationCertificate(
 	db queryer,
 	cert *lcommon.PoolRegistrationCertificate,
 	certificateID uint,
-	slot uint64,
-	deposit uint64,
+	at poolCertPosition,
+	deposit *uint64,
 ) (uint, error) {
+	slot := at.slot
 	rewardTag, rewardAccount, err := certutil.PoolRewardAccount(cert)
 	if err != nil {
 		return 0, err
@@ -685,6 +748,14 @@ RETURNING id`,
 		metadataURL = cert.PoolMetadata.Url
 		metadataHash = cert.PoolMetadata.Hash[:]
 	}
+	// The pool row above is upserted before this, but it carries no deposit
+	// and no history, so the held amount is derived from the registration and
+	// retirement rows strictly before this certificate's position rather than
+	// from live pool state.
+	held, err := poolRegistrationDepositHeld(ctx, db, poolID, at, deposit)
+	if err != nil {
+		return 0, err
+	}
 	registrationID, err := insertPoolRegistration(ctx, db, []any{
 		margin,
 		metadataURL,
@@ -698,7 +769,8 @@ RETURNING id`,
 		certificateID,
 		poolID,
 		slot,
-		decimalUint64(types.Uint64(deposit)),
+		nullableDecimalUint64(deposit),
+		nullableDecimalUint64(held),
 		nullBytes(leiosKeyPublic),
 		nullBytes(leiosKeyPoP),
 	}, poolID, slot)
@@ -794,7 +866,7 @@ func applyDrepRegistrationCertificate(
 	cert *lcommon.RegistrationDrepCertificate,
 	certificateID uint,
 	slot uint64,
-	deposit uint64,
+	deposit *uint64,
 ) (uint, error) {
 	tag, err := models.CredentialTagFromUint(
 		cert.DrepCredential.CredType,
@@ -838,7 +910,7 @@ RETURNING id`,
 		certificateID,
 		tag,
 		slot,
-		decimalUint64(types.Uint64(deposit)),
+		nullableDecimalUint64(deposit),
 	)
 }
 
@@ -848,7 +920,7 @@ func applyDrepDeregistrationCertificate(
 	cert *lcommon.DeregistrationDrepCertificate,
 	certificateID uint,
 	slot uint64,
-	deposit uint64,
+	deposit *uint64,
 ) (uint, error) {
 	tag, err := models.CredentialTagFromUint(
 		cert.DrepCredential.CredType,
@@ -879,7 +951,7 @@ RETURNING id`,
 		certificateID,
 		tag,
 		slot,
-		decimalUint64(types.Uint64(deposit)),
+		nullableDecimalUint64(deposit),
 	)
 }
 
@@ -1003,10 +1075,25 @@ RETURNING id`,
 	if err != nil {
 		return 0, err
 	}
-	for credential, amount := range cert.Reward.Rewards {
+	// A MIR reward is delta_coin, so the amount column carries its own sign
+	// and the delta is persisted as written. Whether a negative delta is
+	// permitted, and whether the deltas for one credential net to a
+	// creditable amount, are decided by the DELEG and INSTANT rules, not
+	// here. RewardsAmount projects the reward map to *big.Int on every
+	// gouroboros release, so the sign survives regardless of the width of
+	// the underlying field.
+	for credential, amount := range cert.Reward.RewardsAmount() {
 		tag, err := models.CredentialTagFromUint(credential.CredType)
 		if err != nil {
 			return 0, err
+		}
+		delta, err := signedDecimal("MIR reward delta", amount)
+		if err != nil {
+			return 0, fmt.Errorf(
+				"%w for credential %x",
+				err,
+				credential.Credential[:],
+			)
 		}
 		if _, err := db.ExecContext(ctx, `
 INSERT INTO move_instantaneous_rewards_reward (
@@ -1014,7 +1101,7 @@ INSERT INTO move_instantaneous_rewards_reward (
 ) VALUES (?, ?, ?, ?)`,
 			credential.Credential[:],
 			tag,
-			decimalUint64(types.Uint64(amount)),
+			delta,
 			id,
 		); err != nil {
 			return 0, err

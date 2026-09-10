@@ -362,6 +362,9 @@ type mockLedgerState struct {
 	protocolMagic        uint32
 	skipPhase2Validation bool
 	utxoLookups          int
+	// slotToTime, when set, replaces the zero-time default so a test can
+	// supply a real network's slot-to-time mapping.
+	slotToTime func(uint64) (time.Time, error)
 }
 
 func newMockLedgerState() *mockLedgerState {
@@ -419,8 +422,11 @@ func (m *mockLedgerState) IsStakeCredentialRegistered(
 }
 
 func (m *mockLedgerState) SlotToTime(
-	_ uint64,
+	slot uint64,
 ) (time.Time, error) {
+	if m.slotToTime != nil {
+		return m.slotToTime(slot)
+	}
 	return time.Time{}, nil
 }
 

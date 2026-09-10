@@ -577,8 +577,12 @@ func newBenchmarkPluginPool(
 		plugin.CapabilityMempool,
 		string(implementation),
 		map[string]any{
-			"capacity":           benchmarkCapacity,
-			"evictionWatermark":  1,
+			"capacity": benchmarkCapacity,
+			// Mempool construction requires evictionWatermark strictly
+			// below rejectionWatermark. 0 resolves to
+			// DefaultEvictionWatermark (disabled) and 1 is the maximum
+			// valid rejectionWatermark.
+			"evictionWatermark":  0,
 			"rejectionWatermark": 1,
 		},
 		ProviderDependencies{

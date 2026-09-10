@@ -95,7 +95,11 @@ type operationalStore interface {
 	GetCommitteeMembersIncludeDeleted(
 		types.Txn,
 	) ([]*models.CommitteeMember, error)
-	SoftDeleteCommitteeMembers([][]byte, uint64, types.Txn) error
+	SoftDeleteCommitteeMembers(
+		[]models.CommitteeCredential,
+		uint64,
+		types.Txn,
+	) error
 	DeleteCommitteeMembersAfterSlot(uint64, types.Txn) error
 }
 
@@ -345,7 +349,9 @@ func exerciseOperationalStore(
 	))
 	require.NoError(t, store.ClearCommitteeQuorum(50, txn))
 	require.NoError(t, store.SoftDeleteCommitteeMembers(
-		[][]byte{[]byte("committee-two")},
+		[]models.CommitteeCredential{{
+			Credential: []byte("committee-two"),
+		}},
 		60,
 		txn,
 	))

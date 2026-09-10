@@ -22,12 +22,12 @@ import (
 	"testing"
 	"time"
 
+	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ouroboros_conn "github.com/blinklabs-io/gouroboros/connection"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
-	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
@@ -100,6 +100,8 @@ func countingDecoder(
 // decode something once, then ask for the same thing again, and confirm the
 // second time reuses the answer instead of doing the work again.
 func TestDecodeCacheHitAvoidsRedecode(t *testing.T) {
+	t.Parallel()
+
 	c := newDecodeCache[int]()
 	key := decodeCacheKey{0x01}
 	decodeFn, calls := countingDecoder(42, nil, 0)
@@ -128,6 +130,8 @@ func TestDecodeCacheHitAvoidsRedecode(t *testing.T) {
 // pieces of data never get mixed up with each other: each one is decoded
 // and remembered on its own, with no cross-contamination between them.
 func TestDecodeCacheDifferentKeysDecodeIndependently(t *testing.T) {
+	t.Parallel()
+
 	c := newDecodeCache[int]()
 	keyA := decodeCacheKey{0xAA}
 	keyB := decodeCacheKey{0xBB}
@@ -155,6 +159,8 @@ func TestDecodeCacheDifferentKeysDecodeIndependently(t *testing.T) {
 // data must not be retried -- it should just remember "this one failed" and
 // return the same answer again without redoing the work.
 func TestDecodeCacheFailureIsCachedAndNotRetried(t *testing.T) {
+	t.Parallel()
+
 	c := newDecodeCache[int]()
 	key := decodeCacheKey{0x02}
 	wantErr := errors.New("malformed input")
@@ -178,6 +184,8 @@ func TestDecodeCacheFailureIsCachedAndNotRetried(t *testing.T) {
 // cleared out after enough time passes, so the cache doesn't just grow
 // forever.
 func TestDecodeCachePrunesExpiredEntries(t *testing.T) {
+	t.Parallel()
+
 	c := newDecodeCache[int]()
 	key := decodeCacheKey{0x03}
 	decodeCacheInsertForTest(
@@ -204,6 +212,8 @@ func TestDecodeCachePrunesExpiredEntries(t *testing.T) {
 // and falls through to a genuine fresh decode instead of returning the
 // past-TTL cached value.
 func TestDecodeCacheExpiredEntryIsNotServedOnLookup(t *testing.T) {
+	t.Parallel()
+
 	c := newDecodeCache[int]()
 	key := decodeCacheKey{0x09}
 	decodeCacheInsertForTest(
@@ -237,6 +247,8 @@ func TestDecodeCacheExpiredEntryIsNotServedOnLookup(t *testing.T) {
 // rule: if the cache gets too full, it removes the oldest entries to make
 // room, instead of growing without limit.
 func TestDecodeCachePrunesBySizeWhenOverCapacity(t *testing.T) {
+	t.Parallel()
+
 	c := newDecodeCache[int]()
 	now := time.Now()
 	// Insert one more than the cap, all fresh (no TTL pruning triggers),
@@ -279,6 +291,8 @@ func TestDecodeCachePrunesBySizeWhenOverCapacity(t *testing.T) {
 // ran the decode, hit the cache, or waited on the in-flight attempt -- must
 // receive the identical, correct result. Run with -race.
 func TestDecodeCacheConcurrentCallersShareOneDecode(t *testing.T) {
+	t.Parallel()
+
 	c := newDecodeCache[int]()
 	key := decodeCacheKey{0x04}
 	const wantValue = 123
@@ -320,6 +334,8 @@ func TestDecodeCacheConcurrentCallersShareOneDecode(t *testing.T) {
 // functions each block until released must be able to be in flight at the
 // same time, not forced one-after-another by a shared lock.
 func TestDecodeCacheConcurrentDifferentKeysDoNotSerialize(t *testing.T) {
+	t.Parallel()
+
 	c := newDecodeCache[int]()
 	keyA := decodeCacheKey{0xA1}
 	keyB := decodeCacheKey{0xB1}
@@ -370,6 +386,8 @@ func TestDecodeCacheConcurrentDifferentKeysDoNotSerialize(t *testing.T) {
 // discussed for #489: when N callers are waiting on one in-flight decode and
 // it fails, every waiter must be woken with that failure, not left hanging.
 func TestDecodeCacheNoGoroutineLeakOnFailure(t *testing.T) {
+	t.Parallel()
+
 	c := newDecodeCache[int]()
 	key := decodeCacheKey{0x05}
 	wantErr := errors.New("bad bytes")
@@ -427,18 +445,21 @@ func TestDecodeCacheNoGoroutineLeakOnFailure(t *testing.T) {
 }
 
 // TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey is the regression
-// test for a real bug found by proactively auditing this file for remaining
-// gaps: decodeFn panicking (CBOR decode on adversarial bytes can, in
-// principle, panic instead of erroring) used to leave the key's in-flight
-// claim held and any concurrent waiters parked forever, since nothing ever
-// closed their channels or released the claim. This confirms the fix: the
-// leader's own panic still propagates to its immediate caller (unchanged
-// crash-or-recover behavior for that goroutine), but every concurrent
-// waiter is woken with a normal error instead of hanging, the in-flight
-// claim is released, and -- since the panic is now a cached failure like
-// any other -- a later call for the identical bytes fails fast without
-// invoking decodeFn (and therefore without panicking) again.
+// test for dingo #3511: decodeFn panicking (CBOR decode on adversarial bytes
+// can, in principle, panic instead of erroring) used to leave the key's
+// in-flight claim held and any concurrent waiters parked forever, since
+// nothing ever closed their channels or released the claim; a later fix made
+// getOrDecode recover and release waiters but still re-raised the panic to
+// the leader's own caller, letting a decoder panic escape uncontained into
+// the calling protocol worker. This confirms the current behavior: every
+// caller -- the leader that actually ran decodeFn included -- gets back a
+// normal error instead of a panic, the in-flight claim is released, and --
+// since the panic is now a cached failure like any other -- a later call for
+// the identical bytes fails fast without invoking decodeFn (and therefore
+// without panicking) again.
 func TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey(t *testing.T) {
+	t.Parallel()
+
 	c := newDecodeCache[int]()
 	key := decodeCacheKey{0x06}
 	release := make(chan struct{})
@@ -449,20 +470,9 @@ func TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey(t *testing.T) {
 	results := make([]error, numWaiters)
 	var wg sync.WaitGroup
 	wg.Add(numWaiters)
-	leaderPanicked := make(chan struct{})
 	for i := range numWaiters {
 		go func(idx int) {
 			defer wg.Done()
-			defer func() {
-				// Only the leader (the one goroutine that actually calls
-				// decodeFn) observes the panic here; recovering it mimics
-				// whatever, if anything, sits upstream of the cache in
-				// production, and lets this test assert on the effect on
-				// the OTHER waiters without crashing the test binary.
-				if r := recover(); r != nil {
-					close(leaderPanicked)
-				}
-			}()
 			_, err, _ := c.getOrDecode(key, func() (int, error) {
 				leaderOnce.Do(func() { close(leaderStarted) })
 				<-release
@@ -488,21 +498,13 @@ func TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("a waiter never woke up after the in-flight decode panicked")
+		t.Fatal("a caller never returned after the in-flight decode panicked")
 	}
-	<-leaderPanicked
 
-	nonLeaderErrs := 0
 	for _, err := range results {
-		if err != nil {
-			nonLeaderErrs++
-			require.Contains(t, err.Error(), "decode panicked")
-		}
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "decode panicked")
 	}
-	require.Equal(
-		t, numWaiters-1, nonLeaderErrs,
-		"every non-leader waiter must be woken with the recorded panic error",
-	)
 	require.Zero(
 		t,
 		len(c.inFlight),
@@ -529,28 +531,27 @@ func TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey(t *testing.T) {
 // completion -- the recovery branch would never run, this key's in-flight
 // claim would never be released, and every current and future waiter for
 // these exact bytes would block forever. This confirms a panic(nil)
-// decodeFn is still detected, still finishes the entry and wakes waiters,
-// and still re-raises to the caller, exactly like panicking with any other
-// value.
+// decodeFn is still detected and still finishes the entry and wakes waiters,
+// exactly like panicking with any other value, and (dingo #3511) that
+// getOrDecode itself returns a normal error instead of re-raising.
 func TestDecodeCachePanicNilDuringDecodeDoesNotStrandWaitersOrKey(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	c := newDecodeCache[int]()
 	key := decodeCacheKey{0x0E}
 
-	func() {
-		defer func() {
-			// recover() here returns the runtime's substituted, non-nil
-			// *runtime.PanicNilError on modern Go rather than literal nil,
-			// but the fix does not depend on that: it is unconditional on
-			// completed, not on recover()'s value, so this holds either way.
-			_ = recover()
-		}()
-		_, _, _ = c.getOrDecode(key, func() (int, error) {
-			panic(nil)
-		})
-		t.Fatal("getOrDecode must still panic for a panic(nil) decodeFn")
-	}()
+	_, err, decoded := c.getOrDecode(key, func() (int, error) {
+		panic(nil)
+	})
+	require.True(t, decoded)
+	require.Error(
+		t,
+		err,
+		"a panic(nil) decodeFn must be detected and returned as a normal error, not left undetected",
+	)
+	require.Contains(t, err.Error(), "decode panicked")
 
 	require.Zero(
 		t,
@@ -558,50 +559,45 @@ func TestDecodeCachePanicNilDuringDecodeDoesNotStrandWaitersOrKey(
 		"the in-flight claim must be released even when decodeFn panics with nil",
 	)
 
-	_, err, decoded := c.getOrDecode(key, func() (int, error) {
+	_, err2, decoded2 := c.getOrDecode(key, func() (int, error) {
 		t.Fatal("decodeFn must not run again for an already-cached panic")
 		return 0, nil
 	})
-	require.False(t, decoded)
+	require.False(t, decoded2)
 	require.Error(
 		t,
-		err,
+		err2,
 		"the panic(nil) must still be recorded as a cached failure",
 	)
-	require.Contains(t, err.Error(), "decode panicked")
+	require.Contains(t, err2.Error(), "decode panicked")
 }
 
 // TestDecodeWithPanicSafeMetricsRecordsMissOnPanic is the regression test for
-// a real bug found in code review: getOrDecode's own panic recovery
-// re-raises after cleaning up the cache (see
-// TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey above), so it
-// never returns normally to blockfetchClientBlockRaw/
-// chainsyncClientRollForwardRaw -- their usual "record the outcome based on
-// the returned decoded bool" line never runs, and a genuine decode attempt
-// (a miss) that happened to panic went uncounted in the hit/miss metrics.
-// This confirms decodeWithPanicSafeMetrics -- the helper both wrappers now
-// call through -- invokes recordOutcome(true) exactly once before
-// re-raising the panic, and that the panic still propagates to the caller
-// unchanged.
+// dingo #3511: a decodeFn panic must be fully contained by getOrDecode (see
+// TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey above), so
+// decodeWithPanicSafeMetrics returns normally to
+// blockfetchClientBlockRaw/chainsyncClientRollForwardRaw with a plain error
+// instead of letting the panic escape into the calling protocol worker, and
+// still records the outcome as a miss.
 func TestDecodeWithPanicSafeMetricsRecordsMissOnPanic(t *testing.T) {
+	t.Parallel()
+
 	c := newDecodeCache[int]()
 	key := decodeCacheKey{0x08}
 	var outcomes []bool
 
-	func() {
-		defer func() {
-			r := recover()
-			require.NotNil(t, r, "the panic must still propagate to the caller")
-			require.Equal(t, "simulated decode panic", r)
-		}()
-		_, _ = decodeWithPanicSafeMetrics(
-			c,
-			key,
-			func() (int, error) { panic("simulated decode panic") },
-			func(isMiss bool) { outcomes = append(outcomes, isMiss) },
-		)
-		t.Fatal("decodeWithPanicSafeMetrics must not return normally on panic")
-	}()
+	_, err := decodeWithPanicSafeMetrics(
+		c,
+		key,
+		func() (int, error) { panic("simulated decode panic") },
+		func(isMiss bool) { outcomes = append(outcomes, isMiss) },
+	)
+	require.Error(
+		t,
+		err,
+		"a decodeFn panic must be returned as a normal error, not propagated",
+	)
+	require.Contains(t, err.Error(), "decode panicked")
 
 	require.Equal(
 		t,
@@ -615,7 +611,7 @@ func TestDecodeWithPanicSafeMetricsRecordsMissOnPanic(t *testing.T) {
 	// call for the same key must not invoke decodeFn again, but must still
 	// be recorded as a miss (not a hit) -- see
 	// TestDecodeWithPanicSafeMetricsNeverRecordsAFailureAsAHit.
-	_, err := decodeWithPanicSafeMetrics(
+	_, err = decodeWithPanicSafeMetrics(
 		c,
 		key,
 		func() (int, error) {
@@ -640,6 +636,8 @@ func TestDecodeWithPanicSafeMetricsRecordsMissOnPanic(t *testing.T) {
 // failing decode, or a repeat hit on that same now-cached failure), and
 // still reports a genuine successful hit as a hit.
 func TestDecodeWithPanicSafeMetricsNeverRecordsAFailureAsAHit(t *testing.T) {
+	t.Parallel()
+
 	c := newDecodeCache[int]()
 	failKey := decodeCacheKey{0x0C}
 	okKey := decodeCacheKey{0x0D}
@@ -710,6 +708,8 @@ func TestDecodeWithPanicSafeMetricsNeverRecordsAFailureAsAHit(t *testing.T) {
 func TestDecodeCacheWaiterGetsResultEvenIfItsEntryIsEvictedBeforeItWakes(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	c := newDecodeCache[int]()
 	key := decodeCacheKey{0x77}
 	release := make(chan struct{})
@@ -794,6 +794,8 @@ func TestDecodeCacheWaiterGetsResultEvenIfItsEntryIsEvictedBeforeItWakes(
 // key could ever have decoded to, so a silently wrong result (not just a
 // hang or panic) would fail the test.
 func TestDecodeCacheStressConcurrentChurnWithSharedKeys(t *testing.T) {
+	t.Parallel()
+
 	c := newDecodeCache[int]()
 	const numSharedKeys = 8
 	sharedKeys := make([]decodeCacheKey, numSharedKeys)
@@ -882,39 +884,23 @@ func testOuroborosForDecodeCache(tb testing.TB) *Ouroboros {
 
 func conwayBlockFixtureBytes(t *testing.T) (blockType uint, raw []byte) {
 	t.Helper()
-	root, err := fixtures.ExtractEmbeddedFixtures(t.TempDir())
+	blocks, err := testfixtures.GenerateConwayChain(1)
 	require.NoError(t, err)
-	fixture, err := fixtures.NewFixture(
-		root,
-		root+"/ouroboros-consensus/ouroboros-consensus-cardano/golden/"+
-			"cardano/CardanoNodeToNodeVersion2/Block_Conway",
-	)
-	require.NoError(t, err)
-	blockType, err = fixture.LedgerBlockType()
-	require.NoError(t, err)
-	raw, err = fixture.LedgerBlockBytes()
-	require.NoError(t, err)
-	return blockType, raw
+	require.Len(t, blocks, 1)
+	return uint(blocks[0].Type()), blocks[0].Cbor()
 }
 
 func conwayHeaderFixtureBytes(t *testing.T) (headerType uint, raw []byte) {
 	t.Helper()
-	root, err := fixtures.ExtractEmbeddedFixtures(t.TempDir())
+	blocks, err := testfixtures.GenerateConwayChain(1)
 	require.NoError(t, err)
-	fixture, err := fixtures.NewFixture(
-		root,
-		root+"/ouroboros-consensus/ouroboros-consensus-cardano/golden/"+
-			"cardano/CardanoNodeToNodeVersion2/Header_Conway",
-	)
-	require.NoError(t, err)
-	headerType, err = fixture.LedgerHeaderType()
-	require.NoError(t, err)
-	raw, err = fixture.LedgerHeaderBytes()
-	require.NoError(t, err)
-	return headerType, raw
+	require.Len(t, blocks, 1)
+	return uint(blocks[0].Type()), blocks[0].Header().Cbor()
 }
 
 func TestBlockDecodeCacheIntegrationRealConwayBlock(t *testing.T) {
+	t.Parallel()
+
 	o := testOuroborosForDecodeCache(t)
 	blockType, raw := conwayBlockFixtureBytes(t)
 	key := hashDecodeInput(blockType, raw)
@@ -942,6 +928,8 @@ func TestBlockDecodeCacheIntegrationRealConwayBlock(t *testing.T) {
 }
 
 func TestHeaderDecodeCacheIntegrationRealConwayHeader(t *testing.T) {
+	t.Parallel()
+
 	o := testOuroborosForDecodeCache(t)
 	headerType, raw := conwayHeaderFixtureBytes(t)
 	key := hashDecodeInput(headerType, raw)
@@ -976,6 +964,8 @@ func TestHeaderDecodeCacheIntegrationRealConwayHeader(t *testing.T) {
 func TestBlockDecodeCacheCorruptedDeliveryDoesNotContaminateGoodEntry(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	o := testOuroborosForDecodeCache(t)
 	blockType, goodRaw := conwayBlockFixtureBytes(t)
 	badRaw := make([]byte, len(goodRaw))
@@ -1037,6 +1027,8 @@ func TestBlockDecodeCacheCorruptedDeliveryDoesNotContaminateGoodEntry(
 func TestHeaderDecodeCacheCorruptedDeliveryDoesNotContaminateGoodEntry(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	o := testOuroborosForDecodeCache(t)
 	headerType, goodRaw := conwayHeaderFixtureBytes(t)
 	badRaw := make([]byte, len(goodRaw))
@@ -1100,6 +1092,8 @@ func TestHeaderDecodeCacheCorruptedDeliveryDoesNotContaminateGoodEntry(
 // cache (wrong key, skipped call, wrong metric), which none of the other
 // tests in this file can see since they all call the pieces separately.
 func TestBlockfetchClientBlockRawRoutesThroughSharedCache(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{PromRegistry: prometheus.NewRegistry()})
 	blockType, raw := conwayBlockFixtureBytes(t)
 	ctx := blockfetch.CallbackContext{}
@@ -1121,6 +1115,8 @@ func TestBlockfetchClientBlockRawRoutesThroughSharedCache(t *testing.T) {
 // TestBlockfetchClientBlockRawRoutesThroughSharedCache's header/ChainSync
 // counterpart, covering the real chainsyncClientRollForwardRaw entry point.
 func TestChainsyncClientRollForwardRawRoutesThroughSharedCache(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{PromRegistry: prometheus.NewRegistry()})
 	headerType, raw := conwayHeaderFixtureBytes(t)
 	ctx := ochainsync.CallbackContext{ConnectionId: decodeCacheTestConnId()}
@@ -1158,11 +1154,11 @@ func TestChainsyncClientRollForwardRawRoutesThroughSharedCache(t *testing.T) {
 func TestBlockfetchClientBlockRawRecordsRepeatedFailureAsMissesNotHits(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{PromRegistry: prometheus.NewRegistry()})
-	blockType, raw := conwayBlockFixtureBytes(t)
-	badRaw := make([]byte, len(raw))
-	copy(badRaw, raw)
-	badRaw[len(badRaw)/2] ^= 0xFF
+	blockType, _ := conwayBlockFixtureBytes(t)
+	badRaw := []byte{0x00}
 	ctx := blockfetch.CallbackContext{}
 
 	require.Error(t, o.blockfetchClientBlockRaw(ctx, blockType, badRaw))
@@ -1190,6 +1186,8 @@ func TestBlockfetchClientBlockRawRecordsRepeatedFailureAsMissesNotHits(
 func TestDecodeCacheConcurrentWaitersOnFailureAreAllRecordedAsMisses(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	c := newDecodeCache[int]()
 	key := decodeCacheKey{0x0A}
 	wantErr := errors.New("bad bytes")
@@ -1248,6 +1246,8 @@ func TestDecodeCacheConcurrentWaitersOnFailureAreAllRecordedAsMisses(
 // this confirms the cache works correctly when that branch is the one
 // actually running.
 func TestBlockDecodeCacheWorksWithMusashiLeiosDecodeBranch(t *testing.T) {
+	t.Parallel()
+
 	o := testOuroborosForDecodeCache(t)
 	o.config.NetworkMagic = ouroboros.NetworkCardanoMusashi.NetworkMagic
 	blockType, raw := conwayBlockFixtureBytes(t)
@@ -1286,6 +1286,8 @@ func TestBlockDecodeCacheWorksWithMusashiLeiosDecodeBranch(t *testing.T) {
 // confirms blockfetchClientBlockRaw returns an error instead of silently
 // passing a nil block down to the rest of the pipeline.
 func TestBlockfetchClientBlockRawRejectsNilBlockWithNoError(t *testing.T) {
+	t.Parallel()
+
 	o := testOuroborosForDecodeCache(t)
 	blockType, raw := conwayBlockFixtureBytes(t)
 	key := hashDecodeInput(blockType, raw)
@@ -1311,6 +1313,8 @@ func TestBlockfetchClientBlockRawRejectsNilBlockWithNoError(t *testing.T) {
 func TestChainsyncClientRollForwardRawRejectsNilHeaderWithNoError(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	o := testOuroborosForDecodeCache(t)
 	headerType, raw := conwayHeaderFixtureBytes(t)
 	key := hashDecodeInput(headerType, raw)
@@ -1339,6 +1343,8 @@ func TestChainsyncClientRollForwardRawRejectsNilHeaderWithNoError(
 // doc comment directly: identical bytes under two different block types
 // must never collide to the same cache key.
 func TestHashDecodeInputMixesInBlockType(t *testing.T) {
+	t.Parallel()
+
 	_, raw := conwayBlockFixtureBytes(t)
 	keyA := hashDecodeInput(1, raw)
 	keyB := hashDecodeInput(2, raw)
@@ -1357,6 +1363,8 @@ func TestHashDecodeInputMixesInBlockType(t *testing.T) {
 // hit -- if the decoded flag were ever recorded backwards, this would catch
 // it, which nothing else in the suite checks.
 func TestDecodeCacheOutcomeMetricsCountHitsAndMissesCorrectly(t *testing.T) {
+	t.Parallel()
+
 	o := newOuroboros(OuroborosConfig{PromRegistry: prometheus.NewRegistry()})
 	require.NotNil(t, o.decodeCacheMetrics)
 
@@ -1388,6 +1396,8 @@ func TestDecodeCacheOutcomeMetricsCountHitsAndMissesCorrectly(t *testing.T) {
 // the actual gouroboros decode function and a real Conway block, so the
 // race guarantee is also demonstrated on genuine chain data end to end.
 func TestBlockDecodeCacheConcurrentCallersShareOneRealDecode(t *testing.T) {
+	t.Parallel()
+
 	o := testOuroborosForDecodeCache(t)
 	blockType, raw := conwayBlockFixtureBytes(t)
 	key := hashDecodeInput(blockType, raw)
@@ -1432,6 +1442,8 @@ func TestBlockDecodeCacheConcurrentCallersShareOneRealDecode(t *testing.T) {
 // just once at the end, guarding against an eviction bug that only shows up
 // under sustained churn.
 func TestDecodeCacheNeverExceedsCapDuringSustainedChurn(t *testing.T) {
+	t.Parallel()
+
 	c := newDecodeCache[int]()
 	decodeFn := func() (int, error) { return 1, nil }
 
@@ -1455,6 +1467,8 @@ func TestDecodeCacheNeverExceedsCapDuringSustainedChurn(t *testing.T) {
 // input, not panic, and the failure must still be cached like any other
 // result.
 func TestBlockDecodeCacheHandlesEmptyInputWithoutPanicking(t *testing.T) {
+	t.Parallel()
+
 	o := testOuroborosForDecodeCache(t)
 	key := hashDecodeInput(0, nil)
 	decodeFn := func() (gledger.Block, error) {

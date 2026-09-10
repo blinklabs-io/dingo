@@ -107,6 +107,9 @@ func seedDatabase(t *testing.T, gates map[string]string) string {
 	return dir
 }
 
+// No test in this package calls t.Parallel: settingsresolve.Apply ends in
+// config.PublishConfig, which replaces internal/config's process-global
+// globalConfig, and the assertions here read it back.
 func TestApplyResumesNetworkFromDefault(t *testing.T) {
 	isolateConfigSnapshot(t)
 	dir := seedDatabase(t, map[string]string{"network": "preprod"})
@@ -123,9 +126,21 @@ func TestApplyRejectsMalformedCarriedGateValues(t *testing.T) {
 		gate  string
 		value string
 	}{
-		{name: "pledge leverage", gate: "pledge_leverage", value: "on:not-a-number"},
-		{name: "delegator inactivity", gate: "delegator_inactivity", value: "on:not-a-number"},
-		{name: "minimum pool margin", gate: "min_pool_margin", value: "on:not-a-number"},
+		{
+			name:  "pledge leverage",
+			gate:  "pledge_leverage",
+			value: "on:not-a-number",
+		},
+		{
+			name:  "delegator inactivity",
+			gate:  "delegator_inactivity",
+			value: "on:not-a-number",
+		},
+		{
+			name:  "minimum pool margin",
+			gate:  "min_pool_margin",
+			value: "on:not-a-number",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

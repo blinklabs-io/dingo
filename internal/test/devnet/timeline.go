@@ -1,3 +1,5 @@
+//go:build linux
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");

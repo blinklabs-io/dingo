@@ -44,6 +44,8 @@ import (
 // blake2b(frozenCandidate || epoch1347.LastEpochBlockNonce); eta_1349 lab =
 // prevHash(94d3083a) = 08a8dd12.
 func TestEpochNonceStoresClosingEpochLastBlockPrevHashAsLab(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -209,6 +211,8 @@ func TestEpochNonceStoresClosingEpochLastBlockPrevHashAsLab(t *testing.T) {
 // returned as-is — NOT converted to the boundary block's own hash (the old
 // "normalize PrevHash -> Hash" behavior was the eta_1349 off-by-one regression).
 func TestEpochLabNonceEmptyEpochCarriesPrevNonceForward(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -251,6 +255,8 @@ func TestEpochLabNonceEmptyEpochCarriesPrevNonceForward(t *testing.T) {
 func TestEpochLabNonceUsesCanonicalChainWhenForkBlobHasHigherSlot(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 
@@ -314,6 +320,8 @@ func TestEpochLabNonceUsesCanonicalChainWhenForkBlobHasHigherSlot(
 // block and wedges every following epoch at the tip. koios preview:
 // eta_1349 lab = prevHash(94d3083a, last block of 1347) = 08a8dd12.
 func TestEpochLabNonceReturnsPrevHashNotHash(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 

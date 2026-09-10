@@ -26,6 +26,8 @@ import (
 )
 
 func TestBlockBroadcasterAddsWithoutEventSubscriber(t *testing.T) {
+	t.Parallel()
+
 	blocks, err := fixtures.GenerateConwayChain(
 		0,
 		lcommon.Blake2b256{},
@@ -42,10 +44,16 @@ func TestBlockBroadcasterAddsWithoutEventSubscriber(t *testing.T) {
 	}
 
 	require.NoError(t, broadcaster.AddBlock(blocks[0], blocks[0].Cbor()))
-	require.Equal(t, blocks[0].Hash().Bytes(), cm.PrimaryChain().Tip().Point.Hash)
+	require.Equal(
+		t,
+		blocks[0].Hash().Bytes(),
+		cm.PrimaryChain().Tip().Point.Hash,
+	)
 }
 
 func TestBlockBroadcasterRejectsUnavailableChain(t *testing.T) {
+	t.Parallel()
+
 	blocks, err := fixtures.GenerateConwayChain(
 		0,
 		lcommon.Blake2b256{},

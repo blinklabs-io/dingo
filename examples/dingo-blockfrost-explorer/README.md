@@ -48,19 +48,10 @@ asset, metadata, account, DRep, and pool data from Dingo's API indexes.
 
 ### Dingo version
 
-Use 0.68.0 or newer. The address summary, DRep list, and the aligned DRep
-response landed in 0.68.0, so against an older node those views return 404 or
-render empty fields.
-
-Two views need a Dingo built from `main` newer than 0.68.0, because the
-endpoints behind them are not in a tagged release yet:
-
-- Pending Retirements, from `GET /api/v0/pools/retiring`
-- Pool Metadata, from `GET /api/v0/pools/{pool_id}/metadata`
-
-Against 0.68.0 those two sections report the endpoint as unavailable and the
-rest of the explorer works normally. The Compose stack in `examples/` builds
-Dingo from this checkout, so it has both.
+Use 0.69.0 or newer. The address summary, DRep list, and aligned DRep response
+landed in 0.68.0. Pending Retirements (`GET /api/v0/pools/retiring`) and Pool
+Metadata (`GET /api/v0/pools/{pool_id}/metadata`) landed in 0.69.0. Against an
+older node, those views can return 404 or render unavailable fields.
 
 ### Kubernetes
 

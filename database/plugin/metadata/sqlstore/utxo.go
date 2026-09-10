@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -144,6 +145,19 @@ func (s *Store) DeleteUtxos(
 	)
 }
 
+// utxoStakeRefsAddedAfterSlotQuery and utxoStakeRefsDeletedAfterSlotQuery
+// collect the stake credentials whose live stake a rollback sweep has to
+// recompute. They are deliberately free of SQL DISTINCT so the planner keeps
+// using the index that answers the slot predicate; see
+// queryStakeRefsDeduped. TestRollbackStakeRefQueriesUseSlotIndexes pins the
+// resulting SQLite query plans.
+const (
+	utxoStakeRefsAddedAfterSlotQuery = "SELECT credential_tag, staking_key " +
+		"FROM utxo WHERE added_slot > ?"
+	utxoStakeRefsDeletedAfterSlotQuery = "SELECT credential_tag, staking_key " +
+		"FROM utxo WHERE deleted_slot > ?"
+)
+
 func (s *Store) DeleteUtxosAfterSlot(
 	slot uint64,
 	txn types.Txn,
@@ -155,11 +169,19 @@ func (s *Store) DeleteUtxosAfterSlot(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			refs, err := queryStakeRefs(
+			// No SQL DISTINCT here: it makes SQLite prefer
+			// idx_utxo_staking_deleted_amount (which already yields
+			// (credential_tag, staking_key) order, so the temp B-tree can
+			// be skipped) over the purpose-built idx_utxo_added_slot. That
+			// index has no added_slot column, so the scan is not covering
+			// and every entry costs a row lookup just to test the
+			// predicate -- a full pass over the utxo table on every
+			// rollback. Dedupe in Go instead, which also keeps the plan
+			// stable across the MySQL and Postgres dialects.
+			refs, err := queryStakeRefsDeduped(
 				ctx,
 				db,
-				"SELECT DISTINCT credential_tag, staking_key FROM utxo "+
-					"WHERE added_slot > ?",
+				utxoStakeRefsAddedAfterSlotQuery,
 				slotValue,
 			)
 			if err != nil {
@@ -260,11 +282,13 @@ func (s *Store) SetUtxosNotDeletedAfterSlot(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			refs, err := queryStakeRefs(
+			// See DeleteUtxosAfterSlot: SQL DISTINCT costs a full index
+			// scan here too, in place of a range search on
+			// idx_utxo_deleted_staking_amount.
+			refs, err := queryStakeRefsDeduped(
 				ctx,
 				db,
-				"SELECT DISTINCT credential_tag, staking_key FROM utxo "+
-					"WHERE deleted_slot > ?",
+				utxoStakeRefsDeletedAfterSlotQuery,
 				slotValue,
 			)
 			if err != nil {
@@ -339,7 +363,15 @@ func (s *Store) AddUtxos(
 	}
 	items := make([]models.Utxo, len(utxos))
 	for i := range utxos {
-		items[i] = models.UtxoLedgerToModel(utxos[i].Utxo, utxos[i].Slot)
+		item, err := models.UtxoLedgerToModel(utxos[i].Utxo, utxos[i].Slot)
+		if err != nil {
+			return fmt.Errorf(
+				"convert utxo %d: %w",
+				utxos[i].Utxo.Id.Index(),
+				err,
+			)
+		}
+		items[i] = item
 	}
 	return s.importUtxos(items, txn, false)
 }
@@ -703,6 +735,43 @@ func queryStakeRefs(
 	return ret, rows.Err()
 }
 
+// queryStakeRefsDeduped runs query and returns its stake credential
+// references with duplicates removed, preserving the order of first
+// occurrence. It exists so range-scan queries over utxo can be written
+// without a SQL DISTINCT: DISTINCT over (credential_tag, staking_key)
+// pushes SQLite onto an index that supplies that ordering rather than onto
+// the index that satisfies the WHERE clause, turning a bounded range search
+// into a full table pass. queryStakeRefs already materialises every row, so
+// deduping in Go costs one map insert per row.
+//
+// Neither the result nor the seen set is presized from len(rows): the callers
+// are rollback sweeps, where a window of thousands of rows routinely collapses
+// to a handful of credentials, so sizing for the input would reserve orders of
+// magnitude more than the output needs.
+func queryStakeRefsDeduped(
+	ctx context.Context,
+	db queryer,
+	query string,
+	args ...any,
+) ([]models.StakeCredentialRef, error) {
+	rows, err := queryStakeRefs(ctx, db, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	ret := []models.StakeCredentialRef{}
+	seen := make(map[string]struct{})
+	for _, ref := range rows {
+		// MapKey allocates, so compute it once per row.
+		key := ref.MapKey()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		ret = append(ret, ref)
+	}
+	return ret, nil
+}
+
 func utxoIDPredicate(ids []models.UtxoId) (string, []any) {
 	parts := make([]string, len(ids))
 	args := make([]any, 0, len(ids)*2)
@@ -817,6 +886,22 @@ func dedupeUtxoIDs(ids []models.UtxoId) []models.UtxoId {
 	return ret
 }
 
+// GetUtxosAddedAfterSlot returns every UTxO added after slot, newest first.
+//
+// The rollback sweep calls this (through UtxosDeleteRolledback) immediately
+// before DeleteUtxosAfterSlot, to hand the blob store the objects it has to
+// drop. The statement used to end in "ORDER BY id DESC". id is the rowid, so
+// SQLite satisfied that by walking the table backwards -- a full SCAN, with
+// readahead defeated by the descending direction -- rather than
+// range-searching idx_utxo_added_slot, and the sweep read the entire utxo
+// table to return the handful of rows a rollback actually touches.
+//
+// Ordering by added_slot first fixes it without giving up a deterministic
+// order: idx_utxo_added_slot is (added_slot, rowid) and id is the rowid, so
+// "ORDER BY added_slot DESC, id DESC" is exactly that index's reverse order.
+// SQLite walks the matching range backwards and needs no sorter, at every
+// table size and whether or not ANALYZE has run.
+// TestGetUtxosAddedAfterSlotUsesSlotIndex pins the plan.
 func (s *Store) GetUtxosAddedAfterSlot(
 	slot uint64,
 	txn types.Txn,
@@ -939,18 +1024,61 @@ func (s *Store) GetUtxosDeletedBeforeSlot(
 // every chunk it appears in -- before assets are loaded once on the final
 // deduplicated set, so asset-loading cost is bounded by the result size
 // rather than chunk count times candidate-set size.
+//
+// maxResults must be positive: it is an explicit, caller-supplied bound on
+// the number of candidate rows this call may materialize, since a broad
+// pattern set (or an address with an unusually large UTxO set) would
+// otherwise force an unbounded result. Exceeding it returns
+// models.ErrTooManyUtxoResults rather than silently truncating the answer.
 func (s *Store) GetUtxosByAddress(
 	patterns []models.UtxoAddressPattern,
+	maxResults int,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
 	if len(patterns) == 0 {
 		return nil, nil
 	}
+	if maxResults <= 0 {
+		return nil, fmt.Errorf(
+			"GetUtxosByAddress: maxResults must be positive, got %d",
+			maxResults,
+		)
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
 	}
-	limit := s.dialect.ParameterLimit()
+	paramLimit := s.dialect.ParameterLimit()
+	// chunkQueryLimit is a fixed per-chunk SQL LIMIT, one more than
+	// maxResults, computed once rather than shrunk by the deduplicated
+	// count already collected (len(ret)). A shrinking limit is unsound
+	// across overlapping chunks: chunk A's coarse branch and chunk B's
+	// exact-address branch can both match the same physical row, so a
+	// chunk full of already-seen duplicates would leave no budget left
+	// to see a chunk's own, still-unseen matches, silently returning an
+	// incomplete answer instead of detecting the overflow. A fixed
+	// maxResults+1 per chunk avoids that: by construction, at most
+	// maxResults of a chunk's returned rows can already be in ret
+	// (ret's own length is checked against maxResults after every
+	// insertion below), so whenever a chunk's true match count exceeds
+	// maxResults+1, at least one of its returned rows is guaranteed to
+	// be new, which is what actually proves the overflow. 0 means
+	// unbounded, guarding maxResults+1 against overflow when the caller
+	// passes math.MaxInt (a query-level LIMIT would be moot at that
+	// bound regardless).
+	chunkQueryLimit := 0
+	if maxResults < math.MaxInt {
+		chunkQueryLimit = maxResults + 1
+	}
+	// queryUtxos appends one extra bind parameter for the LIMIT clause
+	// whenever chunkQueryLimit > 0. That parameter must be reserved here
+	// too, or a chunk that fills exactly to paramLimit on WHERE-clause
+	// args alone produces a statement with paramLimit+1 total parameters,
+	// which the dialect may reject.
+	limitParamReserve := 0
+	if chunkQueryLimit > 0 {
+		limitParamReserve = 1
+	}
 	type utxoKey struct {
 		txId string
 		idx  uint32
@@ -968,6 +1096,7 @@ func (s *Store) GetUtxosByAddress(
 			"utxo.deleted_slot = 0 AND ("+strings.Join(branches, " OR ")+")",
 			args,
 			"",
+			chunkQueryLimit,
 		)
 		if err != nil {
 			return err
@@ -979,6 +1108,13 @@ func (s *Store) GetUtxosByAddress(
 			}
 			seen[key] = struct{}{}
 			ret = append(ret, utxos[i])
+			if len(ret) > maxResults {
+				return fmt.Errorf(
+					"GetUtxosByAddress: %w (maxResults=%d)",
+					models.ErrTooManyUtxoResults,
+					maxResults,
+				)
+			}
 		}
 		branches = nil
 		args = nil
@@ -995,8 +1131,8 @@ func (s *Store) GetUtxosByAddress(
 			return nil, err
 		}
 		if len(branches) > 0 &&
-			(len(args)+len(branchArgs) > limit ||
-				len(branches)+len(branchOrs) >= max(1, limit/2)) {
+			(len(args)+len(branchArgs)+limitParamReserve > paramLimit ||
+				len(branches)+len(branchOrs) >= max(1, paramLimit/2)) {
 			if err := runQuery(); err != nil {
 				return nil, err
 			}
@@ -1017,20 +1153,13 @@ func (s *Store) GetUtxosByAddress(
 	return ret, nil
 }
 
-func (s *Store) GetUtxosByAddressWithOrdering(
+// utxoOrderingPredicate builds the WHERE predicate shared by
+// GetUtxosByAddressWithOrdering and CountUtxosByAddressWithOrdering. The
+// returned predicate excludes any keyset (query.After) bound, which only
+// GetUtxosByAddressWithOrdering applies.
+func utxoOrderingPredicate(
 	query *models.UtxoWithOrderingQuery,
-	txn types.Txn,
-) ([]models.UtxoWithOrdering, error) {
-	if query == nil {
-		return nil, fmt.Errorf(
-			"GetUtxosByAddressWithOrdering: %w",
-			models.ErrNilUtxoWithOrderingQuery,
-		)
-	}
-	db, ctx, err := s.readDBFromTxn(txn)
-	if err != nil {
-		return nil, err
-	}
+) (string, []any, error) {
 	predicate := "utxo.deleted_slot = 0"
 	args := []any{}
 	switch {
@@ -1045,10 +1174,7 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 				&args,
 				pattern,
 			); err != nil {
-				return nil, fmt.Errorf(
-					"GetUtxosByAddressWithOrdering: %w",
-					err,
-				)
+				return "", nil, err
 			}
 		}
 		if len(branches) == 0 {
@@ -1059,11 +1185,7 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 	}
 	if query.FilterByAsset {
 		if len(query.AssetPolicyID) == 0 {
-			return nil, fmt.Errorf(
-				"GetUtxosByAddressWithOrdering: "+
-					"asset filter requires non-empty policy id: %w",
-				models.ErrEmptyAssetPolicyID,
-			)
+			return "", nil, models.ErrEmptyAssetPolicyID
 		}
 		predicate += `
  AND EXISTS (
@@ -1075,6 +1197,46 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 			args = append(args, query.AssetName)
 		}
 		predicate += ")"
+	}
+	return predicate, args, nil
+}
+
+func (s *Store) GetUtxosByAddressWithOrdering(
+	query *models.UtxoWithOrderingQuery,
+	txn types.Txn,
+) ([]models.UtxoWithOrdering, error) {
+	if query == nil {
+		return nil, fmt.Errorf(
+			"GetUtxosByAddressWithOrdering: %w",
+			models.ErrNilUtxoWithOrderingQuery,
+		)
+	}
+	if query.After != nil && query.Descending {
+		return nil, fmt.Errorf(
+			"GetUtxosByAddressWithOrdering: %w",
+			models.ErrDescendingKeysetUnsupported,
+		)
+	}
+	if query.After != nil && query.Offset > 0 {
+		return nil, fmt.Errorf(
+			"GetUtxosByAddressWithOrdering: %w",
+			models.ErrOffsetKeysetUnsupported,
+		)
+	}
+	if query.Offset > 0 &&
+		models.RequiresExactAddressFilter(query.AddressPatterns) {
+		return nil, fmt.Errorf(
+			"GetUtxosByAddressWithOrdering: %w",
+			models.ErrOffsetRequiresCoarseMatch,
+		)
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	predicate, args, err := utxoOrderingPredicate(query)
+	if err != nil {
+		return nil, fmt.Errorf("GetUtxosByAddressWithOrdering: %w", err)
 	}
 	slotExpr := `COALESCE("transaction".slot, utxo.added_slot)`
 	blockIndexExpr := `COALESCE("transaction".block_index, 0)`
@@ -1102,18 +1264,19 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 			query.After.TxId,
 		)
 	}
+	orderDir := "ASC"
+	if query.Descending {
+		orderDir = "DESC"
+	}
 	statement := `
 SELECT ` + qualifiedSQLiteUtxoColumns + `,
        ` + slotExpr + `, ` + blockIndexExpr + `
 FROM utxo
 LEFT JOIN "transaction" ON utxo.transaction_id = "transaction".id
 WHERE ` + predicate + `
-ORDER BY ` + slotExpr + ` ASC, ` + blockIndexExpr + ` ASC,
-         utxo.output_idx ASC, utxo.tx_id ASC`
-	if query.Limit > 0 {
-		statement += " LIMIT ?"
-		args = append(args, query.Limit)
-	}
+ORDER BY ` + slotExpr + ` ` + orderDir + `, ` + blockIndexExpr + ` ` + orderDir + `,
+         utxo.output_idx ` + orderDir + `, utxo.tx_id ` + orderDir
+	statement, args = addLimitOffset(statement, args, query.Limit, query.Offset)
 	rows, err := db.QueryContext(
 		ctx,
 		s.dialect.Rebind(statement),
@@ -1135,6 +1298,9 @@ ORDER BY ` + slotExpr + ` ASC, ` + blockIndexExpr + ` ASC,
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if query.SkipAssets {
+		return ret, nil
+	}
 	for i := range ret {
 		pointers = append(pointers, &ret[i].Utxo)
 	}
@@ -1142,6 +1308,51 @@ ORDER BY ` + slotExpr + ` ASC, ` + blockIndexExpr + ` ASC,
 		return nil, err
 	}
 	return ret, nil
+}
+
+// CountUtxosByAddressWithOrdering returns the number of live UTxOs matching
+// query's coarse SQL predicate (address patterns and asset filter), without
+// materializing rows. It rejects a query whose address patterns require
+// CBOR-based exact-address filtering (see RequiresExactAddressFilter):
+// the coarse predicate alone over-matches address forms that share a
+// payment/delegation credential (for example pointer addresses), so a count
+// against it would not equal the exact-match total.
+func (s *Store) CountUtxosByAddressWithOrdering(
+	query *models.UtxoWithOrderingQuery,
+	txn types.Txn,
+) (int, error) {
+	if query == nil {
+		return 0, fmt.Errorf(
+			"CountUtxosByAddressWithOrdering: %w",
+			models.ErrNilUtxoWithOrderingQuery,
+		)
+	}
+	if models.RequiresExactAddressFilter(query.AddressPatterns) {
+		return 0, fmt.Errorf(
+			"CountUtxosByAddressWithOrdering: %w",
+			models.ErrExactAddressRequiresCbor,
+		)
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return 0, err
+	}
+	predicate, args, err := utxoOrderingPredicate(query)
+	if err != nil {
+		return 0, fmt.Errorf("CountUtxosByAddressWithOrdering: %w", err)
+	}
+	var count int
+	err = db.QueryRowContext(
+		ctx,
+		s.dialect.Rebind(
+			"SELECT COUNT(*) FROM utxo WHERE "+predicate,
+		),
+		args...,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count utxos by address: %w", err)
+	}
+	return count, nil
 }
 
 func (s *Store) GetUtxosByAddressAtSlot(
@@ -1348,12 +1559,15 @@ func (s *Store) IterateLiveUtxos(
 // matching rows without loading assets -- callers that need to deduplicate
 // candidates across multiple queries (e.g. chunked GetUtxosByAddress) should
 // use this and load assets once on the final deduplicated set, rather than
-// paying the asset-load cost once per query.
+// paying the asset-load cost once per query. limit <= 0 means unbounded; a
+// positive limit appends a SQL LIMIT clause so a broad predicate cannot
+// force an unbounded result set to be materialized.
 func (s *Store) queryUtxos(
 	txn types.Txn,
 	predicate string,
 	args []any,
 	order string,
+	limit int,
 ) ([]models.Utxo, error) {
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
@@ -1362,6 +1576,10 @@ func (s *Store) queryUtxos(
 	query := "SELECT " + sqliteUtxoColumns + " FROM utxo WHERE " + predicate
 	if order != "" {
 		query += " ORDER BY " + order
+	}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
 	}
 	rows, err := db.QueryContext(
 		ctx,
@@ -1400,7 +1618,7 @@ func (s *Store) queryUtxosWithAssets(
 	if err != nil {
 		return nil, err
 	}
-	ret, err := s.queryUtxos(txn, predicate, args, order)
+	ret, err := s.queryUtxos(txn, predicate, args, order, 0)
 	if err != nil {
 		return nil, err
 	}

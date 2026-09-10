@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+package dingo
+
 // This file implements live database restore/truncate against an
 // already-running Node, in-process, without a full process restart.
 //
@@ -55,7 +57,6 @@
 // replacement from the retained n.ouroborosConfig. Callbacks the node handed
 // to other components resolve n.ouroboros when they fire rather than binding
 // an instance, so they follow the replacement automatically.
-package dingo
 
 import (
 	"context"
@@ -106,37 +107,142 @@ import (
 // n.ouroboros exactly once, to pause its Leios persistence writer — see
 // this file's top doc comment for why that one piece of n.ouroboros can't
 // simply be left running like everything else on it.
+// namedStop pairs a component's Stop with the name quiesce reports it under.
+type namedStop struct {
+	name string
+	stop func() error
+}
+
+// quiesceComponentStops is every component quiesceForLiveLifecycleOp stops
+// whose own Stop cancels a context and then waits on a sync.WaitGroup with no
+// deadline of its own. Each is therefore bounded by stopWithDeadline rather
+// than called directly.
+//
+// Ordering is preserved from the inline calls it replaced: the Leios pipeline
+// manager stops before the vote manager because it consumes that manager's
+// EbQuorumEvent, matching the dependency order Run()'s startup-failure cleanup
+// stack already uses (see node.go). The database lifecycle manager stops last,
+// as it did inline, after the koios parity observer.
+func (n *Node) quiesceComponentStops() []namedStop {
+	var stops []namedStop
+	if n.blockForger != nil {
+		stops = append(stops, namedStop{
+			name: "block forger",
+			stop: func() error { n.blockForger.Stop(); return nil },
+		})
+	}
+	if n.leaderElection != nil {
+		stops = append(stops, namedStop{
+			name: "leader election",
+			stop: n.leaderElection.Stop,
+		})
+	}
+	if n.leiosPipelineManager != nil {
+		stops = append(stops, namedStop{
+			name: "leios pipeline manager",
+			stop: n.leiosPipelineManager.Stop,
+		})
+	}
+	if n.leiosVoteManager != nil {
+		stops = append(stops, namedStop{
+			name: "leios vote manager",
+			stop: n.leiosVoteManager.Stop,
+		})
+	}
+	if n.snapshotMgr != nil {
+		stops = append(stops, namedStop{
+			name: "snapshot manager",
+			stop: n.snapshotMgr.Stop,
+		})
+	}
+	if n.dbLifecycleMgr != nil {
+		stops = append(stops, namedStop{
+			name: "database lifecycle manager",
+			stop: n.dbLifecycleMgr.Stop,
+		})
+	}
+	return stops
+}
+
+// componentStopsForQuiesce is (*Node).quiesceComponentStops, indirected
+// through a variable so a quiesce-level test can inject a stop that blocks
+// until released -- the same indirection syncDataDirParent uses for fsync
+// failures. None of these components can be made to block from outside, so
+// without it the escalation path could only be exercised below quiesce.
+var componentStopsForQuiesce = (*Node).quiesceComponentStops
+
+// stopWithDeadline runs a component's Stop and waits at most d for it to
+// return.
+//
+// The component Stop calls in quiesceForLiveLifecycleOp cancel their own
+// context and then wait on a WaitGroup with no bound of their own, so a
+// goroutine that does not observe the cancellation wedges the entire live
+// restore or truncate — well past the configured shutdown timeout, with no
+// error for the caller to act on. Bounding the wait turns that hang into a
+// decision.
+//
+// An unfinished wait escalates to errStorageDrainUnconfirmed rather than being
+// reported as an ordinary failure, matching connManager.Stop, the leios
+// persist writer's drain, and the storage providers below. The distinction is
+// what the caller does next: a component that reports a failure has stopped,
+// while one that never returned may still be reading or writing n.db, so
+// Restore/Truncate must abandon the operation and force a supervised restart
+// instead of reopening storage underneath it.
+//
+// The abandoned goroutine is deliberately left running. It cannot be
+// interrupted from here, and the escalation brings the process down anyway, so
+// leaking it for that window is strictly safer than proceeding to close the
+// database it may still be using.
+//
+// The caller's context deliberately does not shorten this wait. Cancelling a
+// restore should not escalate a component that would have stopped cleanly into
+// a supervised restart, and a cancelled context is no reason to abandon a stop
+// mid-flight: the deadline alone decides, so the wait is bounded either way.
+func stopWithDeadline(
+	d time.Duration,
+	name string,
+	stop func() error,
+) error {
+	done := make(chan error, 1)
+	go func() { done <- stop() }()
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case stopErr := <-done:
+		if stopErr != nil {
+			return fmt.Errorf("%s shutdown: %w", name, stopErr)
+		}
+		return nil
+	case <-timer.C:
+		return errors.Join(
+			errStorageDrainUnconfirmed,
+			fmt.Errorf("%s did not stop within %s", name, d),
+		)
+	}
+}
+
 func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	var err error
 
-	if n.blockForger != nil {
-		n.blockForger.Stop()
-	}
-	if n.leaderElection != nil {
-		if stopErr := n.leaderElection.Stop(); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("leader election shutdown: %w", stopErr),
-			)
-		}
-	}
-	// Pipeline manager stopped before vote manager: it consumes the vote
-	// manager's EbQuorumEvent, matching the dependency order Run()'s
-	// startup-failure cleanup stack already uses (see node.go).
-	if n.leiosPipelineManager != nil {
-		if stopErr := n.leiosPipelineManager.Stop(); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("leios pipeline manager shutdown: %w", stopErr),
-			)
-		}
-	}
-	if n.leiosVoteManager != nil {
-		if stopErr := n.leiosVoteManager.Stop(); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("leios vote manager shutdown: %w", stopErr),
-			)
+	// Every component whose Stop cancels its own context and then waits on a
+	// WaitGroup with no deadline of its own is bounded here -- see
+	// stopWithDeadline for why an unfinished wait escalates to
+	// errStorageDrainUnconfirmed rather than being reported as an ordinary
+	// stop failure. The budget is the configured shutdown timeout, the same
+	// one the koios parity observer below uses.
+	//
+	// They are stopped as one ordered list rather than inline so the set is
+	// visible in one place and testable as a set: quiesceComponentStops is
+	// what a quiesce-level test asserts against, and a call site that went
+	// back to a direct Stop would drop out of it.
+	stopTimeout := n.configuredShutdownTimeout()
+	for _, cs := range componentStopsForQuiesce(n) {
+		if stopErr := stopWithDeadline(
+			stopTimeout, cs.name, cs.stop,
+		); stopErr != nil {
+			err = errors.Join(err, stopErr)
 		}
 	}
 	if n.peerGov != nil {
@@ -156,14 +262,6 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	if n.poolRelayProvider != nil {
 		n.poolRelayProvider.Close()
 		n.poolRelayProvider = nil
-	}
-	if n.snapshotMgr != nil {
-		if stopErr := n.snapshotMgr.Stop(); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("snapshot manager shutdown: %w", stopErr),
-			)
-		}
 	}
 	// The Koios parity observer (dingo #3098) reads Dingo's committed reward
 	// state through a RewardParitySource backed directly by n.db, the same
@@ -197,14 +295,6 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 			n.koiosParitySubId,
 		)
 		n.koiosParitySubId = 0
-	}
-	if n.dbLifecycleMgr != nil {
-		if stopErr := n.dbLifecycleMgr.Stop(); stopErr != nil {
-			err = errors.Join(
-				err,
-				fmt.Errorf("database lifecycle manager shutdown: %w", stopErr),
-			)
-		}
 	}
 	// utxorpc/blockfrost/mesh are API-capability plugin providers with no
 	// service kept on Node (see node.go's Run()) -- StopCapability is a
@@ -538,8 +628,9 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	n.chainManager = cm
 	// The contextcheck exemption below covers ledgerStateConfig's
 	// EndorserBlockFetcher callback: it is driven by the ledger's own later
-	// call, exactly as the method value it replaced was, and only defers
-	// resolving n.ouroboros() -- it does not inherit this function's ctx.
+	// call and receives that call's fetch context. The closure only defers
+	// resolving n.ouroboros() until the callback fires; it does not inherit this
+	// reinitialization function's ctx.
 	state, err := ledger.NewLedgerState(
 		n.ledgerStateConfig(), //nolint:contextcheck
 	)
@@ -567,6 +658,10 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to recreate bark blob store: %w", err)
 		}
+		// The wrapper's upstream is the store it replaces and its Close
+		// forwards there, so the replaced store stays in use: there is
+		// nothing to drain and nothing to close. Both results are
+		// deliberately discarded.
 		n.db.SetBlobStore(barkBlobStore)
 	}
 
@@ -601,13 +696,13 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	return nil
 }
 
-// reinitializeMidnightIndexer recreates the Midnight indexer (if API
-// storage mode) before n.ledgerState.Start, for the same race-avoidance
+// reinitializeMidnightIndexer recreates the enabled Midnight indexer in API
+// storage mode before n.ledgerState.Start, for the same race-avoidance
 // reason Run() creates it before starting the ledger: the synchronous
 // backfill must run while no new blocks can arrive, and the EventBus
 // subscription must exist before any BlockActionApply event can fire.
 func (n *Node) reinitializeMidnightIndexer() error {
-	if !n.config.storageMode.IsAPI() {
+	if !midnightIndexerActive(n.config.storageMode, n.config.midnight) {
 		return nil
 	}
 	if err := n.ledgerState.PrepareEpochCacheForStartup(); err != nil {
@@ -616,41 +711,7 @@ func (n *Node) reinitializeMidnightIndexer() error {
 			err,
 		)
 	}
-	midnightIdx, err := midnightindexer.New(midnightindexer.Config{
-		EventBus:                    n.eventBus,
-		Metadata:                    n.db.Metadata(),
-		SlotTimer:                   n.ledgerState,
-		Logger:                      n.config.logger,
-		PromRegistry:                n.config.promRegistry,
-		CNightPolicyID:              n.config.midnight.CNightPolicyID,
-		CNightAssetName:             n.config.midnight.CNightAssetName,
-		MappingValidatorAddress:     n.config.midnight.MappingValidatorAddress,
-		AuthTokenPolicyID:           n.config.midnight.AuthTokenPolicyID,
-		AuthTokenAssetName:          n.config.midnight.AuthTokenAssetName,
-		TechnicalCommitteeAddress:   n.config.midnight.TechnicalCommitteeAddress,
-		TechnicalCommitteePolicyID:  n.config.midnight.TechnicalCommitteePolicyID,
-		CouncilAddress:              n.config.midnight.CouncilAddress,
-		CouncilPolicyID:             n.config.midnight.CouncilPolicyID,
-		PermissionedCandidatePolicy: n.config.midnight.PermissionedCandidatePolicy,
-		CommitteeCandidateAddress:   n.config.midnight.CommitteeCandidateAddress,
-		SlotToEpoch: func(slot uint64) (uint64, error) {
-			epoch, err := n.ledgerState.SlotToEpoch(slot)
-			if err != nil {
-				return 0, err
-			}
-			return epoch.EpochId, nil
-		},
-		BlockIterator: func(startSlot, endSlot uint64, fn func(models.Block) error) error {
-			return database.ForEachBlockInRangeDB(n.db, startSlot, endSlot, fn)
-		},
-		FatalErrorFunc: func(err error) {
-			n.config.logger.Error(
-				"fatal midnight indexer error, initiating shutdown",
-				"error", err,
-			)
-			n.cancel()
-		},
-	})
+	midnightIdx, err := midnightindexer.New(n.midnightIndexerConfig())
 	if err != nil {
 		return fmt.Errorf("recreating midnight indexer: %w", err)
 	}
@@ -686,6 +747,14 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 		return fmt.Errorf("configuring snapshot manager: %w", err)
 	}
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
+	// Prune pool snapshots through the deferred-header retention guard, so a
+	// snapshot a queued/deferred header still needs for leader validation is
+	// never pruned out from under it and misread as pool absence, and the
+	// floor selection is atomic with deferred-header admission (issue #3727).
+	// Set before Start; the pin is released automatically as headers resolve.
+	n.snapshotMgr.SetPoolSnapshotRetentionGuard(
+		n.ledgerState.PrunePoolSnapshotsWithRetentionFloor,
+	)
 	// Reinstall both epoch-boundary hooks, in the same order and with the
 	// same bodies as Run() (node.go): the stake hook first, so the
 	// authoritative SNAP-point stake read (after MIR, before POOLREAP/
@@ -833,10 +902,10 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 			PromRegistry:        n.config.promRegistry,
 			MaxConnectionsPerIP: n.config.maxConnectionsPerIP,
 			MaxInboundConns:     n.config.maxInboundConns,
+			ConnClosedFunc:      n.handleConnManagerClosed,
 		},
 	)
-	n.connManagerRecycleSubId = n.eventBus.SubscribeFunc(
-		connmanager.ConnectionRecycleRequestedEventType,
+	n.connManagerRecycleSubId = n.subscribeConnectionRecycleRequests(
 		n.connManager.HandleConnectionRecycleRequestedEvent,
 	)
 
@@ -904,6 +973,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	}
 	ouroborosCfg := n.ouroborosConfig
 	ouroborosCfg.LedgerState = n.ledgerState
+	ouroborosCfg.LeiosAnnouncementLedger = n.ledgerState
 	ouroborosCfg.Mempool = n.mempool
 	ouroborosCfg.ChainsyncState = n.chainsyncState
 	ouroborosCfg.ConnManager = n.connManager

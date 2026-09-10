@@ -1147,8 +1147,18 @@ func TestTokenRegistrySyncIgnoresETagFromADifferentSource(t *testing.T) {
 // it still has.
 func TestTokenRegistrySyncDefersPruneWhenMappingsSkipped(t *testing.T) {
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
-		"mappings/" + syncSubjectNut + ".json":  mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
-		"mappings/" + syncSubjectDjed + ".json": mappingJSON(syncSubjectDjed, "Djed USD", "DJED", ""),
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"nutcoin",
+			"NUT",
+			"",
+		),
+		"mappings/" + syncSubjectDjed + ".json": mappingJSON(
+			syncSubjectDjed,
+			"Djed USD",
+			"DJED",
+			"",
+		),
 	}))
 	store := newFakeTokenRegistryStore()
 	sync := newTestSync(t, store, server.URL, nil)
@@ -1159,7 +1169,12 @@ func TestTokenRegistrySyncDefersPruneWhenMappingsSkipped(t *testing.T) {
 
 	// DJED's mapping goes bad; NUT's is unchanged.
 	server.setBody(tarballOf(t, map[string]string{
-		"mappings/" + syncSubjectNut + ".json":  mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"nutcoin",
+			"NUT",
+			"",
+		),
 		"mappings/" + syncSubjectDjed + ".json": `{"subject": `,
 	}), `"etag2"`)
 
@@ -1195,9 +1210,14 @@ func TestTokenRegistrySyncKeysETagByLogoMode(t *testing.T) {
 	server.notModifiedOnTag = true
 	store := newFakeTokenRegistryStore()
 
-	withLogos := newTestSync(t, store, server.URL, func(c *TokenRegistryConfig) {
-		c.StoreLogos = true
-	})
+	withLogos := newTestSync(
+		t,
+		store,
+		server.URL,
+		func(c *TokenRegistryConfig) {
+			c.StoreLogos = true
+		},
+	)
 	_, err := withLogos.SyncOnce(t.Context())
 	require.NoError(t, err)
 	require.NotEmpty(t, store.snapshot()[syncSubjectNut].Logo)
@@ -1228,8 +1248,18 @@ func TestTokenRegistrySyncKeysETagByLogoMode(t *testing.T) {
 // prune's `updated_at < cutoff` preserve subjects the newer snapshot dropped.
 func TestTokenRegistrySyncStampsAreStrictlyIncreasing(t *testing.T) {
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
-		"mappings/" + syncSubjectNut + ".json":  mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
-		"mappings/" + syncSubjectDjed + ".json": mappingJSON(syncSubjectDjed, "Djed USD", "DJED", ""),
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"nutcoin",
+			"NUT",
+			"",
+		),
+		"mappings/" + syncSubjectDjed + ".json": mappingJSON(
+			syncSubjectDjed,
+			"Djed USD",
+			"DJED",
+			"",
+		),
 	}))
 	store := newFakeTokenRegistryStore()
 	sync := newTestSync(t, store, server.URL, nil)
@@ -1243,7 +1273,12 @@ func TestTokenRegistrySyncStampsAreStrictlyIncreasing(t *testing.T) {
 	first := store.snapshot()[syncSubjectNut].UpdatedAt
 
 	server.setBody(tarballOf(t, map[string]string{
-		"mappings/" + syncSubjectNut + ".json": mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"nutcoin",
+			"NUT",
+			"",
+		),
 	}), `"etag2"`)
 
 	_, err = sync.SyncOnce(t.Context())
@@ -1349,9 +1384,14 @@ func TestTokenRegistrySyncStopNotBlockedByExternalSync(t *testing.T) {
 			<-release
 		})
 	}
-	registrySync := newTestSync(t, store, server.URL, func(c *TokenRegistryConfig) {
-		c.Interval = time.Hour
-	})
+	registrySync := newTestSync(
+		t,
+		store,
+		server.URL,
+		func(c *TokenRegistryConfig) {
+			c.Interval = time.Hour
+		},
+	)
 
 	// An external caller, with a context the node's shutdown cannot cancel.
 	external := make(chan error, 1)
@@ -1499,9 +1539,14 @@ func TestTokenRegistrySyncForcesFullApplyWhenLogoModeReturns(t *testing.T) {
 	store := newFakeTokenRegistryStore()
 	clock := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 
-	withLogos := newTestSync(t, store, server.URL, func(c *TokenRegistryConfig) {
-		c.StoreLogos = true
-	})
+	withLogos := newTestSync(
+		t,
+		store,
+		server.URL,
+		func(c *TokenRegistryConfig) {
+			c.StoreLogos = true
+		},
+	)
 	withLogos.now = func() time.Time { return clock }
 	_, err := withLogos.SyncOnce(t.Context())
 	require.NoError(t, err)
@@ -1514,9 +1559,14 @@ func TestTokenRegistrySyncForcesFullApplyWhenLogoModeReturns(t *testing.T) {
 	require.Empty(t, store.snapshot()[syncSubjectNut].Logo)
 
 	// Back on, same registry bytes.
-	logosAgain := newTestSync(t, store, server.URL, func(c *TokenRegistryConfig) {
-		c.StoreLogos = true
-	})
+	logosAgain := newTestSync(
+		t,
+		store,
+		server.URL,
+		func(c *TokenRegistryConfig) {
+			c.StoreLogos = true
+		},
+	)
 	logosAgain.now = func() time.Time { return clock.Add(2 * time.Minute) }
 
 	_, err = logosAgain.SyncOnce(t.Context())
@@ -1536,8 +1586,18 @@ func TestTokenRegistrySyncForcesFullApplyWhenLogoModeReturns(t *testing.T) {
 // would spare exactly the subjects the new snapshot dropped.
 func TestTokenRegistrySyncStampSurvivesRestart(t *testing.T) {
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
-		"mappings/" + syncSubjectNut + ".json":  mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
-		"mappings/" + syncSubjectDjed + ".json": mappingJSON(syncSubjectDjed, "Djed USD", "DJED", ""),
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"nutcoin",
+			"NUT",
+			"",
+		),
+		"mappings/" + syncSubjectDjed + ".json": mappingJSON(
+			syncSubjectDjed,
+			"Djed USD",
+			"DJED",
+			"",
+		),
 	}))
 	store := newFakeTokenRegistryStore()
 	// One frozen instant shared by both runs: the restart lands inside the
@@ -1552,7 +1612,12 @@ func TestTokenRegistrySyncStampSurvivesRestart(t *testing.T) {
 
 	// Restart: a brand-new instance over the same store, no in-memory state.
 	server.setBody(tarballOf(t, map[string]string{
-		"mappings/" + syncSubjectNut + ".json": mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"nutcoin",
+			"NUT",
+			"",
+		),
 	}), `"etag2"`)
 	afterRestart := newTestSync(t, store, server.URL, nil)
 	afterRestart.now = func() time.Time { return frozen }
@@ -1651,8 +1716,18 @@ func TestTokenRegistrySyncPersistsETagBeforeIdentity(t *testing.T) {
 // spare the subjects the interrupted snapshot dropped.
 func TestTokenRegistrySyncCrashAfterApplyStillRetires(t *testing.T) {
 	server := newRegistryServer(t, tarballOf(t, map[string]string{
-		"mappings/" + syncSubjectNut + ".json":  mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
-		"mappings/" + syncSubjectDjed + ".json": mappingJSON(syncSubjectDjed, "Djed USD", "DJED", ""),
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"nutcoin",
+			"NUT",
+			"",
+		),
+		"mappings/" + syncSubjectDjed + ".json": mappingJSON(
+			syncSubjectDjed,
+			"Djed USD",
+			"DJED",
+			"",
+		),
 	}))
 	store := newFakeTokenRegistryStore()
 	frozen := time.Date(2026, 8, 20, 12, 0, 0, 400000000, time.UTC)
@@ -1667,7 +1742,12 @@ func TestTokenRegistrySyncCrashAfterApplyStillRetires(t *testing.T) {
 	store.failSyncState(TokenRegistrySyncStateKey, errors.New("crash"))
 	store.failSyncState(tokenRegistrySnapshotIDKey, errors.New("crash"))
 	server.setBody(tarballOf(t, map[string]string{
-		"mappings/" + syncSubjectNut + ".json": mappingJSON(syncSubjectNut, "nutcoin", "NUT", ""),
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut,
+			"nutcoin",
+			"NUT",
+			"",
+		),
 	}), `"etag2"`)
 
 	restarted := newTestSync(t, store, server.URL, nil)

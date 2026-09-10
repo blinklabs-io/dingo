@@ -28,7 +28,7 @@ import (
 // RewardParitySource is the read-only view of Dingo's committed reward state
 // that the parity checker needs, independent of how that view is obtained.
 //
-// DingoDB (dingo_db.go) implements this by opening its own read-only GORM
+// DingoDB (dingo_db.go) implements this by opening its own read-only SQL
 // connection to a separate metadata.sqlite/postgres/mysql instance — the
 // shipped, standalone-CLI design (dingo #2684). DatabaseSource (this file)
 // implements it by reading directly from a live, in-process
@@ -69,6 +69,49 @@ type RewardParitySource interface {
 		ctx context.Context,
 		stakeEpoch, paramEpoch uint64,
 	) (map[string]*DingoPoolEpochData, error)
+	// GetPoolStakeSnapshotMembers returns the set of pool key hashes (hex)
+	// present in the mark pool_stake_snapshot for epoch, which is written on
+	// every epoch transition regardless of reward-input availability (see
+	// ledger/snapshot/rotation.go's saveSnapshotInTxn). It is therefore the
+	// per-pool evidence of whether a pool was still in the pool set at that
+	// epoch, which epoch_summary.SnapshotReady cannot provide: that flag is
+	// epoch-level and is set even when the whole reward-input bundle was
+	// skipped, and buildRewardStateInputs deliberately omits a degraded
+	// active pool from reward_pool_input while keeping it here.
+	GetPoolStakeSnapshotMembers(
+		ctx context.Context,
+		epoch uint64,
+	) (map[string]struct{}, error)
+	// GetPoolsRetiredByEpoch returns the set of pool key hashes (hex) whose
+	// effective retirement, resolved as of boundarySlot, takes effect at or
+	// before epoch. It is the second, independent route to the departure
+	// proof GetPoolStakeSnapshotMembers provides: pool_stake_snapshot is
+	// pruned to currentEpoch-3, while pool_registration/pool_retirement are
+	// retained for the life of the database, so an observer trailing the
+	// node has only this one left (dingo #3925).
+	//
+	// Membership in this set is positive per-pool evidence rather than
+	// absence from a set, so it needs no completeness argument. Both
+	// implementations must apply the same cancellation rule
+	// MetadataStore.GetPoolKeyHashesRetiredByEpoch documents: a registration
+	// filed after the retirement puts the pool back, and treating a bare
+	// "retirement certificate exists" as departure would downgrade a real
+	// missing-input ERROR to informational.
+	GetPoolsRetiredByEpoch(
+		ctx context.Context,
+		epoch uint64,
+		boundarySlot uint64,
+	) (map[string]struct{}, error)
+	// GetProtocolParams returns the protocol parameters in force for epoch,
+	// resolved from the `pparams` row that actually applies to it and
+	// decoded as the era the `epoch` table records for that epoch — see
+	// DingoDB.GetProtocolParams for why neither the epoch nor the era can be
+	// matched naively. Returns nil, nil when no row resolves, which the
+	// comparison reports rather than treating as nothing to compare.
+	GetProtocolParams(
+		ctx context.Context,
+		epoch uint64,
+	) (*DingoProtocolParams, error)
 	// GetRewardAccountOutputs returns every per-account reward calculation
 	// output row Dingo committed for epoch. Not yet consumed by any
 	// comparison (that is #3097's scope); exposed now so the source
@@ -184,6 +227,8 @@ func (s *DatabaseSource) GetEpochData(
 			uint64(summary.TotalActiveStake),
 			10,
 		),
+		TotalPoolCount: summary.TotalPoolCount,
+		BoundarySlot:   summary.BoundarySlot,
 	}
 
 	pots, err := meta.GetRewardAdaPots(epoch, txn.Metadata())
@@ -203,6 +248,79 @@ func (s *DatabaseSource) GetEpochData(
 // GetPoolEpochDataMap returns per-pool reward data assembled for Koios
 // reporting epoch koiosEpoch — see DingoDB.GetPoolEpochDataMap's doc comment
 // for the stakeEpoch/paramEpoch derivation this mirrors exactly.
+// GetPoolStakeSnapshotMembers implements RewardParitySource by reading the
+// mark pool_stake_snapshot rows for epoch.
+// snapshotTypeMark is the pool_stake_snapshot/reward_snapshot type the parity
+// comparison reads; Dingo writes the boundary capture under this name.
+const snapshotTypeMark = "mark"
+
+func (s *DatabaseSource) GetPoolStakeSnapshotMembers(
+	ctx context.Context,
+	epoch uint64,
+) (map[string]struct{}, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	txn := s.db.Transaction(false)
+	defer txn.Release()
+	rows, err := s.db.Metadata().GetPoolStakeSnapshotsByEpoch(
+		epoch,
+		snapshotTypeMark,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"pool_stake_snapshot epoch %d: %w",
+			epoch,
+			err,
+		)
+	}
+	members := make(map[string]struct{}, len(rows))
+	for _, row := range rows {
+		if row == nil {
+			continue
+		}
+		members[hex.EncodeToString(row.PoolKeyHash)] = struct{}{}
+	}
+	return members, nil
+}
+
+// GetPoolsRetiredByEpoch implements RewardParitySource through the metadata
+// store's own GetPoolKeyHashesRetiredByEpoch, so the in-process observer and
+// the standalone CLI resolve departure from one shared query rather than two
+// copies of the certificate-ordering rules.
+func (s *DatabaseSource) GetPoolsRetiredByEpoch(
+	ctx context.Context,
+	epoch uint64,
+	boundarySlot uint64,
+) (map[string]struct{}, error) {
+	// See GetLatestEpoch's comment: no context-aware transaction/accessor
+	// exists to thread ctx into further, so this only guards against
+	// starting new work after ctx is already done.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	txn := s.db.Transaction(false)
+	defer txn.Release()
+	keyHashes, err := s.db.Metadata().GetPoolKeyHashesRetiredByEpoch(
+		epoch,
+		boundarySlot,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"pool_retirement through epoch %d: %w",
+			epoch,
+			err,
+		)
+	}
+	retired := make(map[string]struct{}, len(keyHashes))
+	for _, keyHash := range keyHashes {
+		retired[hex.EncodeToString(keyHash)] = struct{}{}
+	}
+	return retired, nil
+}
+
 func (s *DatabaseSource) GetPoolEpochDataMap(
 	ctx context.Context,
 	stakeEpoch, paramEpoch uint64,
@@ -217,6 +335,32 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 	defer txn.Release()
 	meta := s.db.Metadata()
 
+	var tipSlot uint64
+	tipKnown := false
+	tip, tipErr := s.db.GetTip(txn)
+	if tipErr != nil {
+		return nil, fmt.Errorf("tip lookup: %w", tipErr)
+	}
+	if len(tip.Point.Hash) > 0 && tip.Point.Slot > 0 {
+		tipSlot = tip.Point.Slot
+		tipKnown = true
+	}
+
+	epochRewardsPending := false
+	if tipKnown {
+		applyEpoch, err := meta.GetEpoch(stakeEpoch+3, txn.Metadata())
+		if err != nil {
+			return nil, fmt.Errorf(
+				"epoch lookup %d: %w", stakeEpoch+3, err,
+			)
+		}
+		if applyEpoch == nil {
+			epochRewardsPending = true
+		} else {
+			epochRewardsPending = tipSlot < applyEpoch.StartSlot
+		}
+	}
+
 	stakeInputs, err := meta.GetRewardPoolInputs(stakeEpoch, txn.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -227,11 +371,16 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 	}
 	m := make(map[string]*DingoPoolEpochData, len(stakeInputs))
 	for _, inp := range stakeInputs {
-		m[hex.EncodeToString(inp.PoolKeyHash)] = &DingoPoolEpochData{
+		data := &DingoPoolEpochData{
 			StakePresent:   true,
 			DelegatedStake: strconv.FormatUint(uint64(inp.DelegatedStake), 10),
 			DelegatorCount: inp.DelegatorCount,
+			FixedCost:      strconv.FormatUint(uint64(inp.Cost), 10),
 		}
+		if inp.Margin != nil && inp.Margin.Rat != nil {
+			data.Margin = inp.Margin.String()
+		}
+		m[hex.EncodeToString(inp.PoolKeyHash)] = data
 	}
 
 	paramInputs, err := meta.GetRewardPoolInputs(paramEpoch, txn.Metadata())
@@ -252,10 +401,6 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 		data.ParamsPresent = true
 		if inp.BlocksProduced != nil {
 			data.BlocksProduced = *inp.BlocksProduced
-		}
-		data.FixedCost = strconv.FormatUint(uint64(inp.Cost), 10)
-		if inp.Margin != nil && inp.Margin.Rat != nil {
-			data.Margin = inp.Margin.String()
 		}
 	}
 
@@ -279,8 +424,105 @@ func (s *DatabaseSource) GetPoolEpochDataMap(
 			uint64(out.MemberRewardTotal),
 			10,
 		)
+		data.PoolUnspendable = uint64(out.Unspendable)
+		data.RewardsPending = tipKnown && tipSlot < out.BoundarySlot
+	}
+
+	// The comparable member-reward quantity, formed the same way DingoDB
+	// forms it — see DingoDB.addSpendableMemberRewards for why
+	// reward_pool_output.member_reward_total is not it, and why presence is
+	// established epoch-wide rather than per pool.
+	accountOutputs, err := meta.GetRewardAccountOutputs(
+		stakeEpoch,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"reward_account_output epoch %d: %w",
+			stakeEpoch,
+			err,
+		)
+	}
+	if len(accountOutputs) > 0 {
+		totals := make(map[string]uint64, len(m))
+		for _, out := range accountOutputs {
+			if out == nil || out.RewardType != rewardTypeMember {
+				continue
+			}
+			// applyStakeRewards credits a reward only when it is spendable
+			// and not guarded by CIP-0163 expiry; anything else was computed
+			// and withheld, and Koios never reports it.
+			if !out.Spendable || out.Guarded {
+				continue
+			}
+			totals[hex.EncodeToString(out.PoolKeyHash)] += uint64(out.Amount)
+		}
+		for key, total := range totals {
+			data, ok := m[key]
+			if !ok {
+				data = &DingoPoolEpochData{}
+				m[key] = data
+			}
+			data.SpendableMemberRewardTotal = strconv.FormatUint(total, 10)
+		}
+		for _, data := range m {
+			data.SpendableMemberRewardPresent = true
+			if data.SpendableMemberRewardTotal == "" {
+				data.SpendableMemberRewardTotal = "0"
+			}
+		}
+	}
+	if epochRewardsPending {
+		for _, data := range m {
+			if !data.MemberRewardPresent {
+				data.RewardsPending = true
+			}
+		}
 	}
 	return m, nil
+}
+
+// GetProtocolParams implements RewardParitySource against the live,
+// in-process metadata store. It mirrors DingoDB.GetProtocolParams exactly:
+// resolve the epoch's era from the `epoch` row first, then let
+// MetadataStore.GetPParams pick the latest parameter row at or before the
+// epoch within that era (its query is already `epoch <= ? AND era_id = ?`
+// ordered newest-first), then decode with that era's decoder. Both reads run
+// under one read transaction so a rollover committing between them cannot
+// hand back a row whose era disagrees with the era that selected it.
+func (s *DatabaseSource) GetProtocolParams(
+	ctx context.Context,
+	epoch uint64,
+) (*DingoProtocolParams, error) {
+	// See GetLatestEpoch's comment: no context-aware transaction/accessor
+	// exists to thread ctx into further, so this only guards against
+	// starting new work after ctx is already done.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	txn := s.db.Transaction(false)
+	defer txn.Release()
+	meta := s.db.Metadata()
+
+	epochRow, err := meta.GetEpoch(epoch, txn.Metadata())
+	if err != nil {
+		return nil, fmt.Errorf("epoch %d: %w", epoch, err)
+	}
+	if epochRow == nil {
+		return nil, nil
+	}
+	rows, err := meta.GetPParams(epoch, epochRow.EraId, txn.Metadata())
+	if err != nil {
+		return nil, fmt.Errorf("pparams epoch %d: %w", epoch, err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	return decodeProtocolParams(
+		rows[0].Cbor,
+		epochRow.EraId,
+		rows[0].Epoch,
+	)
 }
 
 // GetRewardAccountOutputs returns every per-account reward calculation

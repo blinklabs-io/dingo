@@ -33,6 +33,8 @@ import (
 )
 
 func TestCalculateAcceptBackoff(t *testing.T) {
+	t.Parallel()
+
 	cm := NewConnectionManager(ConnectionManagerConfig{})
 
 	tests := []struct {
@@ -508,6 +510,8 @@ func TestInboundConnectionLimit_AcceptsWithinLimit(t *testing.T) {
 }
 
 func TestInboundConnectionLimit_DefaultValue(t *testing.T) {
+	t.Parallel()
+
 	// Verify that a zero MaxInboundConns defaults to DefaultMaxInboundConnections
 	cm := NewConnectionManager(ConnectionManagerConfig{})
 	assert.Equal(
@@ -622,7 +626,10 @@ func TestAcceptLoopDoesNotBlockOnSilentHandshake(t *testing.T) {
 
 	// Stop must close pending handshakes instead of waiting for the production
 	// timeout. The accept worker is tracked and must exit cleanly.
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	stopCtx, stopCancel := context.WithTimeout(
+		context.Background(),
+		2*time.Second,
+	)
 	defer stopCancel()
 	require.NoError(t, cm.Stop(stopCtx))
 }
@@ -845,6 +852,8 @@ func (m *concurrentMockListener) Addr() net.Addr {
 }
 
 func TestTryReserveInboundSlot_Concurrent(t *testing.T) {
+	t.Parallel()
+
 	// This test verifies that tryReserveInboundSlot is atomic:
 	// many goroutines racing to reserve slots should never exceed
 	// MaxInboundConns total (existing connections + reservations).
@@ -932,6 +941,8 @@ func TestTryReserveInboundSlot_Concurrent(t *testing.T) {
 }
 
 func TestTryReserveInboundSlot_ConsumeAndRelease(t *testing.T) {
+	t.Parallel()
+
 	// Verify that consumeInboundSlot correctly decrements the reservation
 	// counter, allowing the slot to be tracked by the actual connection
 	// in the connections map instead.

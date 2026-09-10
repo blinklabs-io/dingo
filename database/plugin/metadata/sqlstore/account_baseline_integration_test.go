@@ -56,6 +56,7 @@ func TestPostgresAccountBaselineBackfill(t *testing.T) {
 		postgresDSNWithSearchPath(t, dsn, schema),
 		"postgres",
 		registry,
+		schema,
 	)
 }
 
@@ -82,6 +83,7 @@ func TestMySQLAccountBaselineBackfill(t *testing.T) {
 		mysqlDSNWithDatabase(t, dsn, database),
 		"mysql",
 		registry,
+		database,
 	)
 }
 
@@ -91,6 +93,7 @@ func testAccountBaselineBackfill(
 	dsn string,
 	dialectName string,
 	registry []migrations.Migration,
+	lockNamespace string,
 ) {
 	t.Helper()
 	ctx := context.Background()
@@ -102,15 +105,11 @@ func testAccountBaselineBackfill(
 			DB:       db,
 			Dialect:  dialectName,
 			Registry: versions,
-			Locker: migrations.NewAdvisoryLocker(
-				dialectName,
-				0x64696e676f6261,
-				time.Second,
-			),
+			Locker:   integrationMigrationLocker(dialectName, lockNamespace),
 		}
 		require.NoError(t, runner.Run(ctx))
 	}
-	require.Len(t, registry, 4)
+	require.GreaterOrEqual(t, len(registry), 4)
 	// The schema that predates the baseline table, so the rows below are the
 	// legacy state the backfill reads.
 	runTo(registry[:3])
@@ -147,7 +146,9 @@ func testAccountBaselineBackfill(
 ) VALUES (NULL, 0, 400, 0, TRUE)`)
 	require.NoError(t, err)
 
-	runTo(registry)
+	// Keep this regression scoped to the v4 baseline migration as later
+	// migrations are appended to the registry.
+	runTo(registry[:4])
 
 	baselineKeys := func() [][]byte {
 		rows, err := db.QueryContext(ctx, `

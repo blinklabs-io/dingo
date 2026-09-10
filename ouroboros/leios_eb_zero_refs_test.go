@@ -23,6 +23,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type recordingLeiosPipelineHandler struct {
+	observed int
+}
+
+func (h *recordingLeiosPipelineHandler) ObserveEndorserBlock(
+	uint64,
+	lcommon.Blake2b256,
+) {
+	h.observed++
+}
+
 // Investigation for dingo #2729.
 //
 // A from-genesis musashi Leios sync stalls in the epoch-15 endorser-block
@@ -79,6 +90,8 @@ func bareRefMapFromArrayWrapped(t *testing.T, arrayWrapped []byte) []byte {
 // parsing dropped or mis-counted refs for large maps (the #2729 "decode to zero"
 // hypothesis), these would fail.
 func TestLeiosEndorserBlockLargeMapDecodesAllRefs(t *testing.T) {
+	t.Parallel()
+
 	for _, refCount := range []int{24, 256, 300, 715, 1200, 1604} {
 		_, arrayWrapped := testLeiosEndorserBlockRawWithRefs(t, 42, refCount)
 
@@ -114,6 +127,8 @@ func TestLeiosEndorserBlockLargeMapDecodesAllRefs(t *testing.T) {
 // "must contain at least one transaction reference" error is emitted only for a
 // genuinely empty references map, and never for a large non-empty manifest.
 func TestLeiosEndorserBlockZeroRefsErrorOnlyFromEmptyManifest(t *testing.T) {
+	t.Parallel()
+
 	const zeroRefsMsg = "must contain at least one transaction reference"
 
 	// Empty bare map: 0xa0.
@@ -149,6 +164,8 @@ func TestLeiosEndorserBlockZeroRefsErrorOnlyFromEmptyManifest(t *testing.T) {
 // reference" that made the fetch problem look like a decode/consensus defect and
 // wedged the ledger.
 func TestStoreLeiosEndorserBlockEmptyManifestIsHashMismatch(t *testing.T) {
+	t.Parallel()
+
 	// The point identifies a real, non-empty endorser block (1000 refs).
 	point, _ := testLeiosEndorserBlockRawWithRefs(t, 15, 1000)
 
@@ -156,7 +173,12 @@ func TestStoreLeiosEndorserBlockEmptyManifestIsHashMismatch(t *testing.T) {
 	emptyManifest := []byte{0xa0}
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	err := o.storeLeiosEndorserBlock(point, emptyManifest, nil)
+	err := o.storeLeiosEndorserBlock(
+		point,
+		emptyManifest,
+		nil,
+		leiosStoreAuthoritative,
+	)
 	require.Error(t, err)
 	require.ErrorContains(
 		t,
@@ -172,7 +194,7 @@ func TestStoreLeiosEndorserBlockEmptyManifestIsHashMismatch(t *testing.T) {
 	)
 
 	// Nothing was cached for the point.
-	_, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	_, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.False(t, ok)
 }
 
@@ -182,30 +204,55 @@ func TestStoreLeiosEndorserBlockEmptyManifestIsHashMismatch(t *testing.T) {
 // violation, not a wrong peer response) is still rejected by the decode
 // invariant.
 func TestStoreLeiosEndorserBlockGenuinelyEmptyEbStillRejected(t *testing.T) {
+	t.Parallel()
+
 	emptyManifest := []byte{0xa0}
 	hash := lcommon.Blake2b256Hash(emptyManifest)
 	point := ocommon.NewPoint(15, hash.Bytes())
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	err := o.storeLeiosEndorserBlock(point, emptyManifest, nil)
+	votes := &fakeLeiosVoteHandler{}
+	pipeline := &recordingLeiosPipelineHandler{}
+	o.leiosVotes = votes
+	o.leiosPipeline = pipeline
+	err := o.storeLeiosEndorserBlock(
+		point,
+		emptyManifest,
+		nil,
+		leiosStoreAuthoritative,
+	)
 	require.Error(t, err)
 	require.ErrorContains(
 		t,
 		err,
 		"must contain at least one transaction reference",
 	)
+	_, cached := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	require.False(t, cached)
+	require.Empty(t, votes.ebs)
+	require.Zero(t, pipeline.observed)
 }
 
 // TestStoreLeiosEndorserBlockValidManifestStillStores confirms the reordered
 // checks do not regress the happy path: a valid, hash-matching manifest is
 // decoded and cached.
 func TestStoreLeiosEndorserBlockValidManifestStillStores(t *testing.T) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 15, 300)
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			nil,
+			leiosStoreAuthoritative,
+		),
+	)
 
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	require.True(t, ok)
 	require.Equal(t, 300, data.txCount)
 	require.Equal(t, []byte(cbor.RawMessage(blockRaw)), data.blockRaw)

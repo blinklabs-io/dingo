@@ -282,6 +282,7 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 			return plugins
 		}(),
 		BindAddr:             "0.0.0.0",
+		APIBindAddr:          DefaultAPIBindAddr,
 		CardanoConfig:        "", // Resolved by consumers using cfg.Network
 		DatabasePath:         ".dingo",
 		SocketPath:           "dingo.socket",
@@ -852,6 +853,7 @@ func TestWatermarkDefaultingAndValidation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			resetGlobalConfig()
+			globalConfig.APIBindAddr = DefaultAPIBindAddr
 			globalConfig.Plugins.Mempool.Config["evictionWatermark"] = tt.eviction
 			globalConfig.Plugins.Mempool.Config["rejectionWatermark"] = tt.rejection
 			globalConfig.RunMode = RunModeDev
@@ -1409,7 +1411,10 @@ network: "preview"
 	}
 	if !cfg.Midnight.ServerEnabled || !cfg.Midnight.ReflectionEnabled ||
 		!cfg.Midnight.AllowInsecureRemote {
-		t.Fatalf("expected environment to enable Midnight server policy: %+v", cfg.Midnight)
+		t.Fatalf(
+			"expected environment to enable Midnight server policy: %+v",
+			cfg.Midnight,
+		)
 	}
 	if cfg.Midnight.Host != "127.0.0.3" {
 		t.Fatalf(
@@ -1776,8 +1781,6 @@ func TestLoad_WithLeiosVotingConfig(t *testing.T) {
 runMode: "leios"
 network: "preview"
 leiosVoteSigningKeyFile: "/keys/leios-vote.skey"
-leiosVoterPublicKeys:
-  "aabbcc": "ddeeff"
 `
 
 	tmpDir := t.TempDir()
@@ -1799,19 +1802,12 @@ leiosVoterPublicKeys:
 			cfg.LeiosVoteSigningKeyFile,
 		)
 	}
-	if cfg.LeiosVoterPublicKeys["aabbcc"] != "ddeeff" {
-		t.Errorf(
-			"expected LeiosVoterPublicKeys['aabbcc'] to be 'ddeeff', got: %v",
-			cfg.LeiosVoterPublicKeys,
-		)
-	}
 }
 
 func TestLoad_LeiosVotingEnvVars(t *testing.T) {
 	resetGlobalConfig()
 
 	t.Setenv("DINGO_LEIOS_VOTE_SIGNING_KEY_FILE", "/env/leios-vote.skey")
-	t.Setenv("DINGO_LEIOS_VOTER_PUBLIC_KEYS", "aabbcc:ddeeff")
 
 	cfg, err := LoadConfig("")
 	if err != nil {
@@ -1824,12 +1820,34 @@ func TestLoad_LeiosVotingEnvVars(t *testing.T) {
 			cfg.LeiosVoteSigningKeyFile,
 		)
 	}
-	if cfg.LeiosVoterPublicKeys["aabbcc"] != "ddeeff" {
-		t.Errorf(
-			"expected LeiosVoterPublicKeys['aabbcc'] to be 'ddeeff', got: %v",
-			cfg.LeiosVoterPublicKeys,
-		)
-	}
+}
+
+func TestLoad_RejectsRetiredLeiosVoterPublicKeysYAML(t *testing.T) {
+	resetGlobalConfig()
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "retired-leios-voter-keys.yaml")
+	require.NoError(t, os.WriteFile(tmpFile, []byte(`
+runMode: "leios"
+leiosVoterPublicKeys:
+  "aabbcc": "ddeeff"
+`), 0o600))
+
+	_, err := LoadConfig(tmpFile)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "field leiosVoterPublicKeys not found")
+}
+
+func TestLoad_RejectsRetiredLeiosVoterPublicKeysEnv(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("DINGO_LEIOS_VOTER_PUBLIC_KEYS", "aabbcc:ddeeff")
+
+	_, err := LoadConfig("")
+	require.Error(t, err)
+	assert.Contains(
+		t,
+		err.Error(),
+		"DINGO_LEIOS_VOTER_PUBLIC_KEYS is no longer supported",
+	)
 }
 
 // GetConfig hands out snapshots, so nested plugin config values must be

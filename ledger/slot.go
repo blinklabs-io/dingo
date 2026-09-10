@@ -44,7 +44,7 @@ func (ls *LedgerState) timeConv() *SlotTimeConverter {
 // era history (via HardForkSummary) and genesis config.
 func (ls *LedgerState) newTimeConverter() *SlotTimeConverter {
 	return NewSlotTimeConverter(SlotTimeConverterDeps{
-		HardForkSummary: ls.HardForkSummary,
+		HardForkSummary: ls.hardForkSummaryAnchoredAt,
 		ShelleyGenesis: func() *shelley.ShelleyGenesis {
 			if ls.config.CardanoNodeConfig == nil {
 				return nil
@@ -61,6 +61,16 @@ func (ls *LedgerState) newTimeConverter() *SlotTimeConverter {
 // SlotTimeConverter.SlotToTime for details.
 func (ls *LedgerState) SlotToTime(slot uint64) (time.Time, error) {
 	return ls.timeConv().SlotToTime(slot)
+}
+
+// SlotToTimeWithHorizonFrom returns the wall-clock start time of the given
+// slot with the forecast horizon measured from horizonAnchorSlot. See
+// SlotTimeConverter.SlotToTimeWithHorizonFrom.
+func (ls *LedgerState) SlotToTimeWithHorizonFrom(
+	horizonAnchorSlot uint64,
+	slot uint64,
+) (time.Time, error) {
+	return ls.timeConv().SlotToTimeWithHorizonFrom(horizonAnchorSlot, slot)
 }
 
 // TimeToSlot returns the slot containing the given wall-clock time. See

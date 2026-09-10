@@ -35,6 +35,7 @@ phase then opens Dingo's metadata database read-only (see --metadata-plugin/
 	}
 
 	cmd.Flags().String("api-key", "", "Koios Bearer token (or KOIOS_API_KEY)")
+	addKoiosURLFlag(cmd)
 	cmd.Flags().Int("concurrency", 5, "parallel fetch workers")
 	cmd.Flags().
 		Uint64("from-epoch", 0, "start epoch (gaps in [from, through] are filled; add --force-refresh to overwrite cached rows)")
@@ -84,7 +85,7 @@ func fetchRun(cmd *cobra.Command, _ []string) error {
 		// #3097's address universe unions Koios's own list with Dingo's known
 		// addresses (see koiosparity.BuildAccountAddressUniverse) — open a
 		// read-only connection to Dingo's metadata DB for that purpose only;
-		// this is still the same direct, read-only GORM-backed query this
+		// this is still the same direct, read-only SQL query this
 		// tool has always used for the Dingo side, never an HTTP call to
 		// Dingo's own API.
 		dingo, dingoErr := koiosparity.OpenDingoDB(resolveDingoDB(cmd))
@@ -101,6 +102,8 @@ func fetchRun(cmd *cobra.Command, _ []string) error {
 	result, err := koiosparity.Fetch(cmd.Context(), koiosparity.FetchConfig{
 		Network:              network,
 		APIKey:               koiosAPIKey(cmd),
+		BaseURL:              koiosBaseURL(cmd),
+		AllowInsecureHTTP:    koiosAllowInsecureHTTP(cmd),
 		CachePath:            resolveCachePath(),
 		Concurrency:          concurrency,
 		FromEpoch:            fromEpoch,

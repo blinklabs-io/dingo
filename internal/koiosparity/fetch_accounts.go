@@ -57,6 +57,85 @@ func ResolveKoiosAccountUniverse(
 	return addrs, nil
 }
 
+// ResolveKoiosAccountUniverseCached is ResolveKoiosAccountUniverse backed by
+// the cache, for a caller that resolves the universe once per epoch rather
+// than once per run. The crawl is 304 sequential /account_list requests for
+// Preview's 303k accounts, and paying it per epoch is why the in-process
+// observer could not keep pace with a syncing node (dingo #3796).
+//
+// notBefore is the point the cached crawl has to be no older than — the end of
+// the epoch being checked. An account that earned a reward in a closed epoch
+// registered before that epoch ended, so a crawl taken after it is complete
+// for that epoch no matter how much later the check runs. A crawl taken before
+// it may be missing an account that registered in between, so it is refused
+// and re-crawled.
+//
+// A zero notBefore — an epoch whose end time the cache does not carry, which
+// old cache rows do not — is not a licence to reuse whatever is cached. There
+// is then no bound to measure the crawl against, so it re-crawls: a universe
+// short by one account silently skips it, and a skipped account reads as a
+// pass. For the same reason a refresh that fails is an error rather than a
+// fallback to the stale set.
+func ResolveKoiosAccountUniverseCached(
+	ctx context.Context,
+	koios *KoiosClient,
+	cache *Cache,
+	network string,
+	notBefore time.Time,
+	logger *slog.Logger,
+) ([]string, error) {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	if cache != nil {
+		addrs, fetchedAt, cached, err := cache.GetAccountUniverse(network)
+		if err != nil {
+			return nil, err
+		}
+		if cached && accountUniverseFresh(fetchedAt, notBefore) {
+			logger.Debug(
+				"koiosparity: reusing cached Koios account universe",
+				"network", network,
+				"addresses", len(addrs),
+				"fetched_at", fetchedAt,
+			)
+			return addrs, nil
+		}
+	}
+	logger.Info(
+		"koiosparity: crawling Koios account universe",
+		"network", network,
+	)
+	started := time.Now()
+	addrs, err := koios.GetAllAccountAddressesWithProgress(ctx, logger)
+	if err != nil {
+		return nil, fmt.Errorf("get all koios account addresses: %w", err)
+	}
+	logger.Info(
+		"koiosparity: Koios account universe crawled",
+		"network", network,
+		"addresses", len(addrs),
+		"elapsed", time.Since(started),
+	)
+	if cache != nil {
+		if err := cache.SaveAccountUniverse(
+			network, addrs, started,
+		); err != nil {
+			return nil, err
+		}
+	}
+	return addrs, nil
+}
+
+// accountUniverseFresh reports whether a crawl taken at fetchedAt covers an
+// epoch that ended at notBefore. See ResolveKoiosAccountUniverseCached.
+func accountUniverseFresh(fetchedAt, notBefore time.Time) bool {
+	if fetchedAt.IsZero() || notBefore.IsZero() {
+		return false
+	}
+	return !fetchedAt.Before(notBefore)
+}
+
 // BuildAccountAddressUniverse returns the union of koiosAddrs (Koios's full
 // historical account list — see ResolveKoiosAccountUniverse) and Dingo's own
 // committed reward-account addresses at stakeEpoch (the koiosStakeEpoch(K-1)
@@ -585,17 +664,12 @@ outer:
 		)
 	}
 	// koios_account_fetch_staged_rows/koios_account_checked are deliberately
-	// NOT cleared here, even once complete=true: koios_account_checked is
-	// the durable ledger accountLifecycleMismatches (check.go) reads later
-	// to report zero-reward/newly-registered/deregistered accounts, and
-	// koios_account_fetch_staged_rows must survive so a later idempotent
-	// re-run of this same, already-complete epoch with an unchanged universe
-	// finds every chunk already done AND still has real staged rows to
-	// re-commit — clearing either table here would make that re-run commit
-	// an empty reward set over the correct one. --force-refresh instead goes
-	// through the forceRefresh path above, which unconditionally invalidates
-	// every existing chunk before dispatch so it always re-fetches from
-	// Koios rather than relying on this retained state.
+	// retained here, even once complete=true, so a later idempotent re-run of
+	// this same epoch can reuse its checkpointed chunks. Fetch and Observer
+	// evict rows outside the rolling accountCheckpointRetentionEpochs window
+	// only after their account workers have joined. The coverage row retains
+	// the exact zero-reward count/sample after those per-address rows age out,
+	// and --force-refresh still bypasses retained checkpoints as before.
 
 	logger.Info("koiosparity: epoch account rewards fetched",
 		"network", network,
