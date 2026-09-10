@@ -6305,6 +6305,10 @@ Two contracts follow from that boundary:
 
 ### UTxO RPC (`api/utxorpc/`)
 
+Plutus datum and redeemer integer projections use the signed `int` variant
+within int64, positive magnitude bytes above it, and CBOR tag-3 magnitude
+`-1-n` for larger negative values. Projection does not mutate the source data.
+
 Transaction `MintsAsset` predicates inspect nonzero signed quantities in the
 transaction mint field, matching both minting and burning. A policy-only pattern
 matches any nonzero asset under that policy. Transfers alone do not satisfy this
