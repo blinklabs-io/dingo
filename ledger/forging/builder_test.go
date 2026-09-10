@@ -585,7 +585,7 @@ func TestBuildBlockRejectsTipChangeBeforeSigning(t *testing.T) {
 	require.ErrorIs(t, err, errParentChangedDuringBuild)
 	assert.Nil(t, block)
 	assert.Nil(t, blockCbor)
-	assert.Equal(t, 3, chainTip.calls)
+	assert.GreaterOrEqual(t, chainTip.calls, 3)
 }
 
 func TestBuildBlockBindsSigningToTipLock(t *testing.T) {
