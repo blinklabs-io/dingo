@@ -79,6 +79,12 @@ repeatable-read snapshots. All three return `*sqlstore.Store`; metadata
 business behavior is implemented once in `sqlstore` and dialect translation is
 limited to SQL mechanics.
 
+Transaction application records collateral through the durable
+`utxo_collateral_input` association table. Hydration joins that table per
+transaction, so shared collateral remains visible to every owner; rollback
+deletes only the rolled-back transaction's edges. The legacy scalar marker is
+kept solely for compatibility and migration.
+
 The public compatibility interface is decomposing into narrow capabilities so
 components need not inherit the full historical metadata surface. Three are
 cross-cutting -- `LifecycleStore`, `SettingsStore`, and `TxnStore` (which
@@ -108,12 +114,14 @@ fixtures when schema seeding or assertions require raw SQL.
 Startup reserves the write connection, acquires the backend migration lock,
 rejects unversioned metadata tables (users must delete the data directory,
 including metadata and blob stores, and resync), and validates/resumes versioned expand/backfill/contract work before
-advertising readiness. The current registry has migrations 1 through 10:
+advertising readiness. The current registry has migrations 1 through 13:
 `v1alpha1`, `leios-key-registration`, `token-registry-metadata`,
 `account-import-baseline`, `leios-snapshot-keys`,
 `governance-ratification-history`, `account-import-deposit`,
-`committee-credential-tags`, `committee-term-start-presence`, and
-`reward-seed-failure`. `DATABASE.md` is the source of truth for their schema
+`committee-credential-tags`, `committee-term-start-presence`,
+`reward-seed-failure`, `imported-pool-block-count`,
+`pool-registration-deposit-held`, and `collateral-input-associations`.
+`DATABASE.md` is the source of truth for their schema
 changes and upgrade behavior. It then checks the read pool. File-backed
 SQLite uses a
 cross-process lock file; isolated in-memory databases use a process lock. A

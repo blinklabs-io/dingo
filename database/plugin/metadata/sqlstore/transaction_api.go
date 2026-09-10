@@ -169,23 +169,25 @@ func markTransactionUtxoReferences(
 		return fmt.Errorf("unsupported UTxO reference column %q", column)
 	}
 	for _, input := range inputs {
+		associationTable := "utxo_collateral_input"
 		if column == "referenced_by_tx_id" {
-			if _, err := db.ExecContext(
-				ctx,
-				`INSERT INTO utxo_reference_input (utxo_id, transaction_hash)
+			associationTable = "utxo_reference_input"
+		}
+		if _, err := db.ExecContext(
+			ctx,
+			`INSERT INTO `+associationTable+` (utxo_id, transaction_hash)
 SELECT u.id, ? FROM utxo AS u
 WHERE u.tx_id = ? AND u.output_idx = ?
   AND NOT EXISTS (
-      SELECT 1 FROM utxo_reference_input AS r
+      SELECT 1 FROM `+associationTable+` AS r
       WHERE r.utxo_id = u.id AND r.transaction_hash = ?
   )`,
-				hash,
-				input.Id().Bytes(),
-				input.Index(),
-				hash,
-			); err != nil {
-				return err
-			}
+			hash,
+			input.Id().Bytes(),
+			input.Index(),
+			hash,
+		); err != nil {
+			return err
 		}
 		query := "UPDATE utxo SET " + column +
 			" = ? WHERE tx_id = ? AND output_idx = ?"

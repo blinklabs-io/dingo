@@ -649,6 +649,11 @@ DELETE FROM utxo_reference_input
 WHERE transaction_hash IN (`+bindPlaceholders(len(args))+`)`, args...); err != nil {
 					return err
 				}
+				if _, err := db.ExecContext(ctx, `
+DELETE FROM utxo_collateral_input
+WHERE transaction_hash IN (`+bindPlaceholders(len(args))+`)`, args...); err != nil {
+					return err
+				}
 			}
 			if _, err := db.ExecContext(ctx, `
 DELETE FROM transaction_metadata_label WHERE slot > ?`,
