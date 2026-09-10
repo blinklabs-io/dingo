@@ -655,11 +655,16 @@ func (o *Ouroboros) publishLeiosEndorserBlock(
 // LIFECYCLE. The watermark has no lifecycle beyond that monotonic advance, and
 // the two ends fail in opposite directions, so a consumer must handle both:
 //
-//   - It is restored from authoritative persisted manifests at startup. A
-//     cache eviction can also restore it when the manifest is loaded from the
-//     blob store. If the store is unavailable, the cold watermark fails OPEN:
-//     it under-reports chain progress, so a consumer that uses it as evidence
-//     simply sees no evidence.
+//   - It is raised at startup, to the maximum slot over authoritative
+//     persisted manifests (restoreLeiosVerifiedEbSlot, from newOuroboros). If
+//     that read fails the watermark stays cold, which fails OPEN: it
+//     under-reports chain progress, so a consumer that uses it as evidence
+//     simply sees no evidence. Reloading an evicted manifest from the blob
+//     store does not raise it, and cannot need to: the startup restore
+//     already takes the maximum over every persisted manifest, and every
+//     manifest persisted after that went through publishLeiosEndorserBlock,
+//     which advances the watermark first -- so within a process the watermark
+//     is always at least the maximum persisted slot.
 //
 //   - It is NEVER lowered. An endorser block corroborated for a chain this
 //     node does not adopt leaves the watermark above the local tip
@@ -693,8 +698,12 @@ func (o *Ouroboros) advanceLeiosVerifiedEbSlot(slot uint64) {
 }
 
 // restoreLeiosVerifiedEbSlot restores the monotonic Leios evidence watermark
-// from authoritative persisted manifests during startup. This keeps the
-// optional forge staleness gate effective across restart and cache eviction.
+// from authoritative persisted manifests during startup, so the optional
+// forge staleness gate is still effective after a restart rather than reading
+// 0 until the next verification. It is the only path that raises the
+// watermark from persisted state; a cache eviction needs none, because the
+// watermark within a process is always at least the maximum persisted slot
+// (see MaxVerifiedEndorserBlockSlot).
 func (o *Ouroboros) restoreLeiosVerifiedEbSlot() {
 	if !o.config.EnableLeios || o.ledgerState == nil {
 		return

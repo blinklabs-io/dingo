@@ -101,6 +101,38 @@ func TestLeiosVerifiedEbSlotRestoresFromPersistedManifest(t *testing.T) {
 	require.Equal(t, point.Slot, o.MaxVerifiedEndorserBlockSlot())
 }
 
+// TestLeiosVerifiedEbSlotRestoredByNewOuroboros pins the call site rather
+// than the helper. The test above calls restoreLeiosVerifiedEbSlot directly,
+// so deleting the o.restoreLeiosVerifiedEbSlot() line from newOuroboros
+// leaves ./ouroboros/ fully green and the restore ships inert -- the same
+// class TestBuildDingoConfigWiresForgeTolerances was added for on the config
+// knobs (chrisguiney review). Constructing a second Ouroboros over the same
+// database and reading the exported watermark is what closes it.
+func TestLeiosVerifiedEbSlotRestoredByNewOuroboros(t *testing.T) {
+	t.Parallel()
+
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 4242, 1)
+	first := newTestOuroborosWithLeiosDB(t)
+	require.NoError(t, first.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{mustCbor(t, "tx0")},
+		leiosStoreAuthoritative,
+	))
+	first.StopLeiosPersistWriter()
+
+	// A restart: a brand-new Ouroboros over the same database, with nothing
+	// carried over in process and nothing called on it but the constructor.
+	second := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LedgerState:             first.ledgerState,
+		LeiosAnnouncementLedger: first.ledgerState,
+	})
+	t.Cleanup(second.StopLeiosPersistWriter)
+
+	require.Equal(t, point.Slot, second.MaxVerifiedEndorserBlockSlot())
+}
+
 // TestLeiosPersistTwoOccurrencesOfSameHashPersistIndependently is the cubic
 // P2 regression: the durable blob store used to be keyed by hash alone, so
 // when two live occurrences of the same content-addressed hash existed at

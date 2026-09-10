@@ -4888,10 +4888,20 @@ bound below must be opt-in:
   refuse leader slots for as long as the local chain sits below that slot --
   with the applied tip and the primary chain tip in agreement and `gap_slots`
   reading 0, i.e. every local indicator healthy while the producer goes quiet.
-  The watermark is restored from authoritative persisted manifests at startup
-  and when an evicted manifest is reloaded. If that read fails, it fails open
-  and the signal is temporarily absent. Operators enabling it should set it
-  well above the expected announcement-to-apply lag.
+  The watermark is restored at startup from the maximum slot over
+  authoritative persisted manifests; if that read fails it fails open and the
+  signal is temporarily absent. Reloading an evicted manifest does not raise
+  it and does not need to -- within a process the watermark is always at least
+  the maximum persisted slot.
+
+  That startup restore is what makes the bound survive a restart, and it
+  changes the recovery from the hazard above. A watermark left above the local
+  tip by an endorser block corroborated for a chain this node does not adopt
+  used to be cleared by restarting, because the value was in-process only. It
+  is now restored from persisted manifests, so a producer refused with
+  `eb_manifest_ahead` stays refused across restarts, and the way out is to set
+  the bound back to 0. Operators enabling it should therefore set it well
+  above the expected announcement-to-apply lag.
   `TestForgeEndorserBlockStalenessIsOffByDefault` pins the default;
   `TestForgeProceedsWhenEndorserBlockIsWithinItsBound` pins the negative case.
 

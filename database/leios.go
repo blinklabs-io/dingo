@@ -106,7 +106,18 @@ func (d *Database) GetLeiosEBManifest(
 
 // MaxLeiosEBSlot returns the highest slot represented by a persisted Leios
 // endorser-block manifest. Current records encode the slot in the key; legacy
-// records encode it in the first eight bytes of the value.
+// records (pre-issue-#3513, "em"+hash with no slot) encode it in the first
+// eight bytes of the value.
+//
+// COST. The full prefix scan is inherent, not an oversight: the current key
+// layout is "em"+hash+slot, so keys sort by hash and no bounded reverse seek
+// can find the maximum slot. The scan runs synchronously from newOuroboros at
+// startup. On badger it is key-only -- the iterator options leave
+// PrefetchValues false and only the legacy branch copies a value -- while on
+// the S3 and GCS blob plugins the same call is a paginated object listing
+// over the whole prefix, with no deadline on the startup path. Ordering the
+// keys by slot, or maintaining the maximum as its own record, is what would
+// make it bounded.
 func (d *Database) MaxLeiosEBSlot() (uint64, error) {
 	txn := d.BlobTxn(false)
 	defer txn.Rollback() //nolint:errcheck
