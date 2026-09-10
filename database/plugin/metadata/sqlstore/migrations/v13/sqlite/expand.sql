@@ -16,9 +16,8 @@ CREATE INDEX IF NOT EXISTS `idx_utxo_collateral_input_tx`
 -- safe and ignores NULL markers.
 INSERT INTO `utxo_collateral_input` (`utxo_id`, `transaction_hash`)
 SELECT `id`, `collateral_by_tx_id` FROM `utxo`
-WHERE `collateral_by_tx_id` IS NOT NULL
-  AND NOT EXISTS (
-      SELECT 1 FROM `utxo_collateral_input` AS c
-      WHERE c.`utxo_id` = `utxo`.`id`
-        AND c.`transaction_hash` = `utxo`.`collateral_by_tx_id`
-  );
+LEFT JOIN `utxo_collateral_input` AS c
+  ON c.`utxo_id` = `utxo`.`id`
+ AND c.`transaction_hash` = `utxo`.`collateral_by_tx_id`
+WHERE `utxo`.`collateral_by_tx_id` IS NOT NULL
+  AND c.`utxo_id` IS NULL;
