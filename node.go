@@ -826,68 +826,14 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// are required: the indexer depends on the api-mode indexes to function,
 	// and storage mode alone is no longer sufficient to start it (an api-mode
 	// deployment may not want Midnight indexing at all).
-	if n.config.midnight.Enabled && n.config.storageMode.IsAPI() {
+	if midnightIndexerActive(n.config.storageMode, n.config.midnight) {
 		if err := n.ledgerState.PrepareEpochCacheForStartup(); err != nil {
 			return fmt.Errorf(
 				"load epoch cache before Midnight indexer start: %w",
 				err,
 			)
 		}
-		midnightIdx, err := midnightindexer.New(midnightindexer.Config{
-			EventBus:                n.eventBus,
-			Metadata:                n.db.Metadata(),
-			SlotTimer:               n.ledgerState,
-			Logger:                  n.config.logger,
-			PromRegistry:            n.config.promRegistry,
-			CNightPolicyID:          n.config.midnight.CNightPolicyID,
-			CNightAssetName:         n.config.midnight.CNightAssetName,
-			MappingValidatorAddress: n.config.midnight.MappingValidatorAddress,
-			AuthTokenPolicyID:       n.config.midnight.AuthTokenPolicyID,
-			AuthTokenAssetName:      n.config.midnight.AuthTokenAssetName,
-			// Governance / Ariadne / candidate scanning
-			TechnicalCommitteeAddress:   n.config.midnight.TechnicalCommitteeAddress,
-			TechnicalCommitteePolicyID:  n.config.midnight.TechnicalCommitteePolicyID,
-			CouncilAddress:              n.config.midnight.CouncilAddress,
-			CouncilPolicyID:             n.config.midnight.CouncilPolicyID,
-			PermissionedCandidatePolicy: n.config.midnight.PermissionedCandidatePolicy,
-			CommitteeCandidateAddress:   n.config.midnight.CommitteeCandidateAddress,
-			SlotToEpoch: func(slot uint64) (uint64, error) {
-				epoch, err := n.ledgerState.SlotToEpoch(slot)
-				if err != nil {
-					return 0, err
-				}
-				return epoch.EpochId, nil
-			},
-			BlockIterator: func(startSlot, endSlot uint64, fn func(models.Block) error) error {
-				return database.ForEachBlockInRangeDB(
-					n.db,
-					startSlot,
-					endSlot,
-					fn,
-				)
-			},
-			// Read the applied ledger tip straight from metadata rather than
-			// from n.ledgerState.Tip(): LedgerState only loads its in-memory
-			// tip inside Start, which runs after this indexer has already
-			// backfilled, so Tip() would still be the zero value here. Blocks
-			// stored above this slot -- the whole post-snapshot suffix on a
-			// Mithril-bootstrapped node -- are replayed by LedgerState.Start
-			// and reach the indexer as live block events instead.
-			LedgerTipSlot: func() (uint64, error) {
-				tip, err := n.db.GetTip(nil)
-				if err != nil {
-					return 0, err
-				}
-				return tip.Point.Slot, nil
-			},
-			FatalErrorFunc: func(err error) {
-				n.config.logger.Error(
-					"fatal midnight indexer error, initiating shutdown",
-					"error", err,
-				)
-				n.cancel()
-			},
-		})
+		midnightIdx, err := midnightindexer.New(n.midnightIndexerConfig())
 		if err != nil {
 			return fmt.Errorf("creating midnight indexer: %w", err)
 		}
@@ -1450,7 +1396,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			utxorpc.ProviderDependencies{
 				Logger: n.config.logger, EventBus: n.eventBus,
 				LedgerState: n.ledgerState, Mempool: n.mempool,
-				Host:               n.config.bindAddr,
+				Host:               n.config.apiBindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
 		)
@@ -1591,7 +1537,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			n.ctx, n.pluginHost, plugin.CapabilityAPIBlockfrost,
 			blockfrostSelection.Provider, blockfrostSelection.Config,
 			blockfrost.ProviderDependencies{
-				Node: adapter, Logger: n.config.logger, Host: n.config.bindAddr,
+				Node: adapter, Logger: n.config.logger, Host: n.config.apiBindAddr,
 				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
 		)
@@ -1634,7 +1580,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 				Database:            mesh.NewMeshDatabase(n.db),
 				Chain:               n.ledgerState.Chain(),
 				Mempool:             n.mempool,
-				Host:                n.config.bindAddr,
+				Host:                n.config.apiBindAddr,
 				Network:             n.config.network,
 				NetworkMagic:        n.config.networkMagic,
 				GenesisHash:         genesisHash,
