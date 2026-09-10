@@ -707,6 +707,11 @@ API Plugins:
 - `mesh` - Mesh (Coinbase Rosetta) REST API
 - `utxorpc` - UTxO RPC gRPC API (serves both v1alpha and v1beta)
 
+Badger value-log GC runs every five minutes at a 0.5 discard ratio by default.
+Operators may set `gc: false` for a controlled bulk load, but should re-enable
+GC for steady-state operation. GC activity and measurement guidance are
+documented in [`docs/badger-gc.md`](docs/badger-gc.md).
+
 ### Plugin Selection
 
 Plugins can be selected via command-line flags, environment variables, or configuration file:
