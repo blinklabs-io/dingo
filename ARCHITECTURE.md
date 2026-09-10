@@ -6028,7 +6028,12 @@ loopback).
   that precedence, called both by `internal/config.APIPluginHost` (so
   `Validate`'s port-conflict check sees the address the listener will really
   bind) and by each provider's own `RegisterProvider` factory (so the
-  listener and the validation cannot disagree). `corsAllowedOrigins`
+  listener and the validation cannot disagree). `ValidateAPIExposure` reads
+  the same per-provider address rather than `apiBindAddr` alone, so the
+  authentication requirement above follows the override in both directions:
+  a provider widened by its own `host` must authenticate even when
+  `apiBindAddr` is loopback, and a provider pinned to loopback by its own
+  `host` need not even when `apiBindAddr` is remote. `corsAllowedOrigins`
   likewise defaults to an empty list — no `Access-Control-Allow-Origin`
   header at all — rather than to `["*"]`. Both are breaking changes for a
   deployment that relied on the previous wildcard defaults, and the README's

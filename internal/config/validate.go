@@ -834,13 +834,6 @@ func ValidateAPIExposure(c *Config, effectiveMode RunMode) error {
 }
 
 func validateAPIExposure(c *Config) []error {
-	bindAddr := c.APIBindAddr
-	if bindAddr == "" {
-		bindAddr = DefaultAPIBindAddr
-	}
-	if isLoopbackAddr(bindAddr) {
-		return nil
-	}
 	providers := []struct {
 		name      string
 		selection hostplugin.Selection
@@ -852,6 +845,16 @@ func validateAPIExposure(c *Config) []error {
 	var errs []error
 	for _, provider := range providers {
 		if APIPluginPort(provider.selection) == 0 {
+			continue
+		}
+		// Per provider, not once for c.APIBindAddr: a
+		// plugins.api.<name>.config.host override widens or narrows a
+		// single listener independently of the shared address, so the
+		// policy has to be applied to the address that listener really
+		// binds. APIListenHost is the same resolution the provider
+		// factories and the port-conflict check use.
+		bindAddr := c.APIListenHost(provider.selection)
+		if isLoopbackAddr(bindAddr) {
 			continue
 		}
 		merged, err := apiconfig.MergeProviderConfig(

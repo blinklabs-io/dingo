@@ -120,6 +120,49 @@ func TestValidateAPIExposureHonorsProviderAuthOverride(t *testing.T) {
 	assert.Contains(t, err.Error(), "without authentication")
 }
 
+// TestValidateAPIExposureUsesPerProviderHost pins the interaction between
+// the per-provider plugins.api.<name>.config.host override and the
+// authentication requirement for a remote API bind. The override is what
+// widens a single listener while apiBindAddr stays on loopback, so a policy
+// that reads only apiBindAddr lets an unauthenticated wildcard listener
+// through.
+func TestValidateAPIExposureUsesPerProviderHost(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.StorageMode = storageModeAPI
+	cfg.APIBindAddr = "127.0.0.1"
+	cfg.Plugins.API.Utxorpc.Config["host"] = "0.0.0.0"
+
+	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plugins.api.utxorpc.config")
+	assert.Contains(t, err.Error(), "without authentication")
+	assert.Contains(t, err.Error(), "0.0.0.0")
+	assert.NotContains(t, err.Error(), "plugins.api.mesh.config binds")
+	assert.NotContains(t, err.Error(), "plugins.api.blockfrost.config binds")
+}
+
+// TestValidateAPIExposureAllowsProviderPinnedToLoopback is the same
+// interaction in the other direction: a provider that pins itself to
+// loopback is not exposed by a remote apiBindAddr and must not be required
+// to authenticate.
+func TestValidateAPIExposureAllowsProviderPinnedToLoopback(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.StorageMode = storageModeAPI
+	cfg.APIBindAddr = "192.0.2.10"
+	mode := string(apiconfig.AuthModeToken)
+	tokenPath := "/run/secrets/api-token"
+	cfg.API.Auth.Mode = &mode
+	cfg.API.Auth.TokenFilePath = &tokenPath
+	// Only this provider drops authentication, and only this provider
+	// stays on loopback, so the remote apiBindAddr never reaches it.
+	cfg.Plugins.API.Mesh.Config["host"] = "127.0.0.1"
+	cfg.Plugins.API.Mesh.Config["auth"] = map[string]any{
+		"mode": "disabled",
+	}
+
+	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+}
+
 func TestValidate(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -346,12 +346,18 @@ Their dedicated `apiBindAddr` is independent of `bindAddr`, so widening the
 public bind address the relay/NtN and metrics listeners use does not widen
 the APIs with it — the same rule `debugBindAddr` already follows for the
 pprof listener. Authentication is `disabled` by default (see below), so an
-API listener reachable off-box is an explicit operator decision:
+API listener reachable off-box is an explicit operator decision — and
+startup refuses one whose effective authentication is still disabled:
 
 ```yaml
-# Expose every API listener. Pair this with api.auth, TLS, a firewall, or
-# a reverse proxy.
+# Expose every API listener. A non-loopback bind requires authentication;
+# add TLS, a firewall, or a reverse proxy as well.
 apiBindAddr: "0.0.0.0"
+
+api:
+  auth:
+    mode: token
+    tokenFilePath: /run/secrets/dingo-api-token
 
 plugins:
   api:
@@ -365,7 +371,10 @@ plugins:
 
 `plugins.api.<name>.config.host` overrides `apiBindAddr` for that provider
 alone; the CLI (`--api-bind-addr`) and environment
-(`DINGO_API_BIND_ADDR`) set the shared default.
+(`DINGO_API_BIND_ADDR`) set the shared default. The authentication
+requirement is evaluated per provider against that same effective address,
+so widening one listener through its own `host` requires authentication for
+that listener, and a provider pinned back to loopback does not.
 
 `corsAllowedOrigins` likewise defaults to an empty list, which sends no CORS
 headers at all. Set it explicitly — to specific origins, or to `["*"]` — to
@@ -385,7 +394,8 @@ allow browser access.
 > therefore needs `DINGO_API_BIND_ADDR=0.0.0.0` — or a per-provider `host` —
 > set *inside* the container, however the host-side mapping is written.
 > Restricting exposure is then the host mapping's job
-> (`-p 127.0.0.1:9090:9090`), or a NetworkPolicy's, plus `api.auth`.
+> (`-p 127.0.0.1:9090:9090`), or a NetworkPolicy's. `api.auth` is required
+> either way, because a container bind is a non-loopback bind.
 
 ### API TLS and Authentication
 
