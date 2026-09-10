@@ -134,6 +134,7 @@ func TestDebugBindAddressDefaultsToLoopback(t *testing.T) {
 	require.NoError(t, err)
 	cfg.ApplyDefaults()
 	require.Equal(t, "0.0.0.0", cfg.BindAddr)
+	require.Equal(t, DefaultAPIBindAddr, cfg.APIBindAddr)
 	require.Equal(t, DefaultDebugBindAddr, cfg.DebugBindAddr)
 	require.Equal(t, "127.0.0.1:0", cfg.DebugListenAddress())
 	require.Equal(
@@ -832,7 +833,7 @@ func TestPipeline_EmptyMidnightHostUsesLoopbackDefault(t *testing.T) {
 
 	cfg, err := loadConfigThroughPipeline(
 		t,
-		"storageMode: \"api\"\n",
+		"apiBindAddr: 127.0.0.1\nstorageMode: \"api\"\n",
 		nil,
 	)
 	if err != nil {

@@ -637,6 +637,18 @@ peer credentials) unwrap through the wrapper, so wrapping an accepted connection
 never silently disables them. Cancellation closes an in-flight bearer, and failed
 setup releases its reserved inbound and per-IP slots.
 
+Node-to-client listeners share a separate admission budget across all their
+transports: `ConnectionManagerConfig.MaxNtCConns` defaults to 100 pending or
+established sessions. TCP clients also share a separate per-source budget,
+`MaxNtCConnectionsPerIP`, defaulting to five sessions per IPv4 address or IPv6
+/64. Nonpositive settings use these defaults. Unix sockets and named pipes
+consume the total NtC budget without per-IP accounting. NtC admission never
+consumes N2N slots or N2N per-IP capacity. Admission reserves both budgets
+before launching a handshake worker; failed setup releases the reservation,
+and successful setup transfers its release to the connection's close watcher.
+The `cardano_node_metrics_connectionManager_ntcRejectedConns_total` counter
+records rejections with `total_limit` or `per_ip_limit` as its `reason` label.
+
 ```mermaid
 graph TB
     subgraph "Peer Governor"
@@ -3939,7 +3951,7 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
 - Stall detection with configurable timeout
 - Grace period before recycling stalled connections
 - Cooldown to prevent rapid reconnection flapping
-- Plateau detection: if the local tip stops advancing while peers are ahead, the recycler first asks ledger to reconcile any live primary-chain/ledger divergence (`ReconcileLivePrimaryChainLedgerDivergence`). When that local repair succeeds, connection-level recovery is skipped so ledger replay can resume from the repaired tip. If no divergence is found, or the divergence's common ancestor sits more than the security parameter K behind the primary chain tip — a rewind that far is declined rather than forced through, per the bound below — the active chainsync connection is recycled — except when the primary (header) chain has already caught up to the peer and the gap is dominated by downloaded-but-not-yet-applied blocks (`isLedgerApplicationBacklog`, `internal/chainsyncrecycler/recycler.go`). That plateau is a ledger-application backlog, not a chainsync stall, so the healthy connection is left running and the condition is logged at INFO instead of recycling (recycling cannot advance the applied tip and only churns the connection)
+- Plateau detection: if the applied tip does not advance and the downloaded primary-chain tip does not change while peers are ahead, the recycler first asks ledger to reconcile any live primary-chain/ledger divergence (`ReconcileLivePrimaryChainLedgerDivergence`). Primary-chain movement, including rollback, resets the plateau clock even when ledger application is temporarily behind, avoiding a resync of an active catch-up stream. When the local repair succeeds, connection-level recovery is skipped so ledger replay can resume from the repaired tip. If no divergence is found, or the divergence's common ancestor sits more than the security parameter K behind the primary chain tip — a rewind that far is declined rather than forced through, per the bound below — the active chainsync connection is recycled — except when the primary (header) chain has already caught up to the peer and the gap is dominated by downloaded-but-not-yet-applied blocks (`isLedgerApplicationBacklog`, `internal/chainsyncrecycler/recycler.go`). That plateau is a ledger-application backlog, not a chainsync stall, so the healthy connection is left running and the condition is logged at INFO instead of recycling (recycling cannot advance the applied tip and only churns the connection)
 - The recycler itself is `internal/chainsyncrecycler.Recycler`, a `Start`/`Stop` background component that owns only the stall/plateau decision logic. It never reads node fields: the node passes a `ComponentProvider` (`nodeRecyclerComponents`, `node_chainsync_recycler.go`) that hands each tick the live `LedgerSource`, `ChainsyncState`, and `ChainSelector`, plus an `EventPublisher` for the recycle/resync/client-remove requests it decides on. Those are interfaces defined in the recycler package and satisfied structurally by `ledger.LedgerState`, `chainsync.State`, `chainselection.ChainSelector`, and the `EventBus`, so the dependency only goes one way and the whole component is exercised against fakes without constructing a node
 - Every tick `TryLock`s `n.liveLifecycleMu` (the mutex a live Restore/Truncate holds for its entire quiesce-through-reinitialize duration, since those calls actually nil/rebuild `n.ledgerState`/`n.chainsyncState`) (in the provider, for the whole callback) and skips entirely on contention, rather than just nil-checking those fields once up front: they are plain, unsynchronized fields a live restore/truncate reassigns, and the tick dereferences them many more times after any initial check, so holding the lock for the whole tick — not only the check — is what actually closes the race rather than merely narrowing its window. Snapshot deliberately does *not* hold `liveLifecycleMu` (it takes a separate `snapshotMu` instead, excluding a concurrent Restore/Truncate without contending with this tick) — see `snapshotMu`'s doc comment (`node.go`) — since Snapshot never touches either field and blocking this tick for its whole local-copy-plus-cloud-upload duration would contradict Snapshot's own documented "keeps syncing normally" behavior
 - Ledger callbacks that need the replaceable chainsync state use the same lock through `withLiveChainsyncState`. Both `Run()`'s initial publication and a Restore/Truncate's replacement hold that lock while constructing and assigning the state. Callbacks skip while the lock is held instead of blocking: the lifecycle operation can be waiting for the ledger goroutine to stop, so a blocking lock would deadlock quiesce.
@@ -5873,8 +5885,14 @@ Blockfrost, Mesh, and UTxO RPC share one TLS/authentication contract
 (dingo#2996/#2998), rather than each exposing its own ad hoc surface. A
 reverse proxy or API gateway in front of these listeners remains fully
 supported — TLS/auth here is additive, not a replacement requirement — but
-an operator can now also secure any subset of the three in-process,
-without one.
+an operator can now also secure any subset of the three in-process. Startup validation
+also refuses an enabled API on a non-loopback bind address
+when its effective authentication policy is disabled. This guard evaluates
+the shared `api.auth` policy after each provider override is merged, while
+loopback-only APIs may remain unauthenticated for local clients. An operator
+who intentionally exposes an API must configure token authentication (or put
+an authenticated reverse proxy in front and keep the Dingo listener on
+loopback).
 
 - **Policy types (`internal/apiconfig`).** `TLSPolicy` (`mode`,
   `certFilePath`, `keyFilePath`) and `AuthPolicy` (`mode`, `token`,
@@ -5991,10 +6009,11 @@ without one.
   upgrade for any deployment that had set them only for UTxO RPC, which
   they never protected. An operator opting Blockfrost/Mesh into TLS does so
   explicitly, through `api.tls` or their own `plugins.api.<name>.config.tls`.
-  `bindAddr`, `debugBindAddr`, and `corsAllowedOrigins` are unaffected by any
-  of this and stay at the `Config` root: `bindAddr` is not API-specific (the
-  relay/NtN and metrics listeners use it too), `debugBindAddr` controls the
-  separate pprof listener, and `corsAllowedOrigins`'s single shared value
+  `bindAddr`, `apiBindAddr`, `debugBindAddr`, and `corsAllowedOrigins` are
+  unaffected by any of this and stay at the `Config` root: `bindAddr` is not
+  API-specific (the relay/NtN and metrics listeners use it too), `apiBindAddr`
+  is the separate loopback-by-default bind for the three API listeners,
+  `debugBindAddr` controls the separate pprof listener, and `corsAllowedOrigins`'s single shared value
   already applies uniformly to all three API providers today. Duplicating
   these fields under `api:` would only add a second source of truth with no
   behavioral gain.
@@ -6230,6 +6249,11 @@ no entry or the sync is disabled. See the CIP-26 Token Registry Sync section
 above. CIP-68 datum metadata is not yet sourced and returns `null`.
 
 ### Mesh API (`api/mesh/`)
+
+Mesh requests contain exactly one JSON value followed only by optional
+whitespace. Complete body consumption shares the existing byte cap and read
+deadline; additional values, trailing garbage, and oversized padding return the
+stable invalid-request response before the handler processes the request.
 
 Construction requests reject null operation, public-key, and signature elements
 before dereferencing them. Input indices must fit both the constructor's native
@@ -8923,7 +8947,18 @@ port, path, and non-credential parameters and loses only its userinfo
 password and the value of every credential-named parameter, because "which
 host and database was this node pointed at" is most of the reason the
 configuration is logged at all; the same handling covers both URL-form and
-keyword-form database DSNs. A provider-config field (`plugins.*.config`, a
+keyword-form database DSNs. Quotes delimit keyword-form DSN values but are
+literal data in URI query values, whose boundaries remain query separators.
+Inputs beginning with a keyword assignment are sanitized as keyword DSNs
+before scanning any remaining query, so a question mark inside a password
+cannot leave its prefix exposed. Remaining queries are still scanned because
+a relative URI can also begin with an assignment-shaped path.
+When that assignment is credential-named, the input is indistinguishable from
+an unquoted keyword DSN: `password=secret?network=preview` can have the entire
+`secret?network=preview` as its password. The whole value is therefore redacted,
+including its query-looking suffix. A question mark does not end a DSN value;
+preserving an apparent benign URL parameter here could disclose a password.
+A provider-config field (`plugins.*.config`, a
 free-form `map[string]any` whose keys belong to the selected provider, not
 to `Config`) is walked recursively and classified per key name, so a
 secret nested at any depth under a provider section is still redacted;
@@ -10297,13 +10332,14 @@ the same investigation; the validate stage's extra CPU cost (two dedicated
 VRF/KES workers) makes the underlying throughput mismatch easier to hit in
 practice, but is not what causes it. The outage is bounded, not permanent:
 `internal/chainsyncrecycler`'s local-tip-plateau watchdog
-(`shouldRecycleLocalTipPlateau`, threshold `max(2*StallTimeout, 4m)`, ~20
-minutes with default config) eventually detects the stalled local tip and
+(`shouldRecycleLocalTipPlateau`, threshold `max(2*StallTimeout, 4m)`,
+four minutes with default config) eventually detects the stalled local tip and
 forces a chainsync resync (`ChainsyncResyncReasonLocalTipPlateau`), which
 re-selects a peer and re-runs `FindIntersect`, incidentally recovering the
 node — this is exactly what happened in all three live-preview instances
-during this investigation, each recovering ~20 minutes after its freeze with
-no operator intervention. But a ~20-minute total-sync stall per occurrence,
+during this investigation, each recovering ~20 minutes after its freeze at the
+then-current, catch-up-scaled threshold with no operator intervention. But a
+~20-minute total-sync stall per occurrence,
 with nothing logged above `WARN` in the interim, is still a real liveness
 defect worth fixing directly rather than relying on that fallback.
 `ensureBlockfetchDrainingAfterForkQueueFailure` (`ledger/chainsync.go`)
