@@ -155,6 +155,7 @@ func TestLegacyUtxorpcTLSPolicyIsUtxorpcOnly(t *testing.T) {
 	}{
 		{plugin.CapabilityAPIUtxorpc, true, "/legacy/cert.pem"},
 		{plugin.CapabilityAPIBlockfrost, false, ""},
+		{plugin.CapabilityAPIKupo, false, ""},
 		{plugin.CapabilityAPIMesh, false, ""},
 	} {
 		merged, err := cfg.apiProviderConfig(tc.capability, selection)

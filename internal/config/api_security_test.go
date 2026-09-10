@@ -303,7 +303,7 @@ func TestLoad_APIProviderConfigInvalidMergedTLSPair(t *testing.T) {
 // TestValidate_InvalidAPITLSMode covers the fail-fast top-level mode
 // enum check: a typo in api.tls.mode is rejected once, with a clear
 // message, by Validate rather than only surfacing later from each of the
-// three API providers that would otherwise inherit it.
+// four API providers that would otherwise inherit it.
 func TestValidate_InvalidAPITLSMode(t *testing.T) {
 	resetGlobalConfig()
 	cfg := GetConfig()

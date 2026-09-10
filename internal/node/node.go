@@ -319,11 +319,13 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		storageMode = dingo.StorageModeAPI
 	}
 	blockfrostPort := config.APIPluginPort(cfg.Plugins.API.Blockfrost)
+	kupoPort := config.APIPluginPort(cfg.Plugins.API.Kupo)
 	utxorpcPort := config.APIPluginPort(cfg.Plugins.API.Utxorpc)
 	meshPort := config.APIPluginPort(cfg.Plugins.API.Mesh)
 	logger.Info("storage mode",
 		"mode", string(storageMode),
 		"blockfrost", storageMode.IsAPI() && blockfrostPort > 0,
+		"kupo", storageMode.IsAPI() && kupoPort > 0,
 		"utxorpc", storageMode.IsAPI() && utxorpcPort > 0,
 		"mesh", storageMode.IsAPI() && meshPort > 0,
 		"midnight_indexing", cfg.Midnight.Enabled && storageMode.IsAPI(),
@@ -507,6 +509,10 @@ func buildDingoConfig(
 		dingo.WithPluginSelection(
 			plugin.CapabilityAPIBlockfrost,
 			cfg.Plugins.API.Blockfrost,
+		),
+		dingo.WithPluginSelection(
+			plugin.CapabilityAPIKupo,
+			cfg.Plugins.API.Kupo,
 		),
 		dingo.WithPluginSelection(
 			plugin.CapabilityAPIMesh,

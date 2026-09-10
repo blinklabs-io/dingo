@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/api/blockfrost"
+	"github.com/blinklabs-io/dingo/api/kupo"
 	"github.com/blinklabs-io/dingo/api/mesh"
 	"github.com/blinklabs-io/dingo/api/utxorpc"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
@@ -48,6 +49,9 @@ func NewHost() (*plugin.Host, error) {
 	}
 	if err := blockfrost.RegisterProvider(host); err != nil {
 		return nil, fmt.Errorf("register blockfrost provider: %w", err)
+	}
+	if err := kupo.RegisterProvider(host); err != nil {
+		return nil, fmt.Errorf("register kupo provider: %w", err)
 	}
 	if err := mesh.RegisterProvider(host); err != nil {
 		return nil, fmt.Errorf("register mesh provider: %w", err)
