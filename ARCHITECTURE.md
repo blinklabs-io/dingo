@@ -4888,9 +4888,10 @@ bound below must be opt-in:
   refuse leader slots for as long as the local chain sits below that slot --
   with the applied tip and the primary chain tip in agreement and `gap_slots`
   reading 0, i.e. every local indicator healthy while the producer goes quiet.
-  The opposite end fails open: after a restart the watermark reads 0 until the
-  next verification, so the signal is simply absent. Operators enabling it
-  should set it well above the expected announcement-to-apply lag.
+  The watermark is restored from authoritative persisted manifests at startup
+  and when an evicted manifest is reloaded. If that read fails, it fails open
+  and the signal is temporarily absent. Operators enabling it should set it
+  well above the expected announcement-to-apply lag.
   `TestForgeEndorserBlockStalenessIsOffByDefault` pins the default;
   `TestForgeProceedsWhenEndorserBlockIsWithinItsBound` pins the negative case.
 

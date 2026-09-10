@@ -77,6 +77,30 @@ func TestLeiosPersistAsyncCoalescesManifestThenComplete(t *testing.T) {
 	require.Equal(t, txsRaw, gotTxs)
 }
 
+func TestLeiosVerifiedEbSlotRestoresFromPersistedManifest(t *testing.T) {
+	t.Parallel()
+
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 42, 1)
+	o := newTestOuroborosWithLeiosDB(t)
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{mustCbor(t, "tx0")},
+		leiosStoreAuthoritative,
+	))
+	o.StopLeiosPersistWriter()
+
+	// Simulate a restart: the persisted manifest remains, while the process
+	// watermark and in-memory cache are rebuilt from zero.
+	o.leiosMaxVerifiedEbSlot.Store(0)
+	o.leiosMu.Lock()
+	o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
+	o.leiosMu.Unlock()
+	o.restoreLeiosVerifiedEbSlot()
+
+	require.Equal(t, point.Slot, o.MaxVerifiedEndorserBlockSlot())
+}
+
 // TestLeiosPersistTwoOccurrencesOfSameHashPersistIndependently is the cubic
 // P2 regression: the durable blob store used to be keyed by hash alone, so
 // when two live occurrences of the same content-addressed hash existed at

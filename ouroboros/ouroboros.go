@@ -522,6 +522,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		o.initDecodeCacheMetrics()
 	}
 	o.subscribeLeiosAnnouncementRetries()
+	o.restoreLeiosVerifiedEbSlot()
 	return o
 }
 

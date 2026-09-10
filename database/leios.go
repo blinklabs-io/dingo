@@ -104,6 +104,60 @@ func (d *Database) GetLeiosEBManifest(
 	return legacyVal[8:], nil
 }
 
+// MaxLeiosEBSlot returns the highest slot represented by a persisted Leios
+// endorser-block manifest. Current records encode the slot in the key; legacy
+// records encode it in the first eight bytes of the value.
+func (d *Database) MaxLeiosEBSlot() (uint64, error) {
+	txn := d.BlobTxn(false)
+	defer txn.Rollback() //nolint:errcheck
+	blob := txn.BlobStore()
+	if blob == nil {
+		return 0, types.ErrBlobStoreUnavailable
+	}
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return 0, types.ErrNilTxn
+	}
+
+	prefix := []byte(types.LeiosEBManifestKeyPrefix)
+	it := blob.NewIterator(blobTxn, types.BlobIteratorOptions{Prefix: prefix})
+	if it == nil {
+		return 0, types.ErrBlobStoreUnavailable
+	}
+	defer it.Close()
+
+	var maxSlot uint64
+	for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+		item := it.Item()
+		if item == nil {
+			continue
+		}
+		key := item.Key()
+		switch len(key) {
+		case len(types.LeiosEBManifestKeyPrefix) + 32 + 8:
+			slot := binary.BigEndian.Uint64(key[len(key)-8:])
+			if slot > maxSlot {
+				maxSlot = slot
+			}
+		case len(types.LeiosEBManifestKeyPrefix) + 32:
+			value, err := item.ValueCopy(nil)
+			if err != nil {
+				return 0, err
+			}
+			if len(value) >= 8 {
+				slot := binary.BigEndian.Uint64(value[:8])
+				if slot > maxSlot {
+					maxSlot = slot
+				}
+			}
+		}
+	}
+	if err := it.Err(); err != nil {
+		return 0, err
+	}
+	return maxSlot, nil
+}
+
 // SetLeiosEBTxs persists the complete raw transaction bodies of a Leios
 // endorser block to the blob store, keyed by the exact (slot, hash)
 // occurrence. txsRaw is the CBOR-in-CBOR wrapped tx list from leios-fetch
