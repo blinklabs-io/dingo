@@ -1213,6 +1213,7 @@ func (b *Blockfrost) handleTransactionSubmit(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
+	b.setRequestBodyDeadline(w)
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/cbor" {
 		writeError(

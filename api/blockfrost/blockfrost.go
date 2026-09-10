@@ -407,21 +407,25 @@ func (b *Blockfrost) readRequestBody(
 	r *http.Request,
 	limit int64,
 ) ([]byte, error) {
-	rc := http.NewResponseController(w)
-	setDeadline := func(deadline time.Time) {
-		if err := rc.SetReadDeadline(deadline); err != nil &&
-			!errors.Is(err, http.ErrNotSupported) {
-			b.logger.Debug("could not bound request body read", "error", err)
-		}
-	}
-	setDeadline(time.Now().Add(b.requestBodyTimeout))
+	b.setRequestBodyDeadline(w)
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	body, err := io.ReadAll(r.Body)
 	if err == nil {
 		// A completed read must not expire during transaction processing or
 		// a later request. Preserve failed-read deadlines: net/http can still
 		// drain the unread body before sending the error response.
-		setDeadline(time.Time{})
+		if err := http.NewResponseController(w).SetReadDeadline(time.Time{}); err != nil &&
+			!errors.Is(err, http.ErrNotSupported) {
+			b.logger.Debug("could not clear request body deadline", "error", err)
+		}
 	}
 	return body, err
+}
+
+func (b *Blockfrost) setRequestBodyDeadline(w http.ResponseWriter) {
+	if err := http.NewResponseController(w).SetReadDeadline(
+		time.Now().Add(b.requestBodyTimeout),
+	); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		b.logger.Debug("could not bound request body read", "error", err)
+	}
 }

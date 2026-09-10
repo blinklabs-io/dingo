@@ -135,6 +135,7 @@ func (b *Blockfrost) handleTransactionEvaluate(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
+	b.setRequestBodyDeadline(w)
 	if !requireContentType(w, r, "application/cbor") {
 		return
 	}
@@ -155,6 +156,7 @@ func (b *Blockfrost) handleTransactionEvaluateUtxos(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
+	b.setRequestBodyDeadline(w)
 	if !requireContentType(w, r, "application/json") {
 		return
 	}
