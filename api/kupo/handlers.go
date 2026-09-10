@@ -434,6 +434,10 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 		s.writeNodeError(w, err)
 		return
 	}
+	if point == nil {
+		writeError(w, http.StatusNotFound, ErrNotFound)
+		return
+	}
 	if notModifiedAt(w, r, tip) {
 		return
 	}
@@ -507,11 +511,11 @@ func (s *Server) handleHealthResponse(
 	setTipHeaders(w, tip)
 	accept := r.Header.Get("Accept")
 	switch {
+	case accept == "", strings.Contains(accept, "application/json"):
+		writeJSON(w, status, health)
 	case strings.Contains(accept, "text/plain"),
 		strings.Contains(accept, "*/*"):
 		writeMetrics(w, status, health)
-	case accept == "", strings.Contains(accept, "application/json"):
-		writeJSON(w, status, health)
 	default:
 		writeError(
 			w,
@@ -642,6 +646,8 @@ func (s *Server) writeNodeError(w http.ResponseWriter, err error) {
 	}
 	if status == http.StatusInternalServerError {
 		s.logger.Error("Kupo request failed", "error", err)
+		writeError(w, status, errors.New("internal server error"))
+		return
 	}
 	writeError(w, status, err)
 }

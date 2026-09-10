@@ -20,6 +20,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/apiauth"
@@ -29,12 +30,21 @@ import (
 
 // Server is a Kupo-compatible HTTP API backed by Dingo's complete index.
 type Server struct {
-	config   Config
-	logger   *slog.Logger
-	node     KupoNode
-	listener *apilistener.Listener
-	verifier *apiauth.Verifier
-	cancel   context.CancelFunc
+	config    Config
+	logger    *slog.Logger
+	node      KupoNode
+	listener  *apilistener.Listener
+	verifier  *apiauth.Verifier
+	mu        sync.Mutex
+	lifecycle *serverLifecycle
+}
+
+// serverLifecycle ties a cancellation function to the server it owns. A
+// Start that loses a concurrent publication race must not replace the active
+// server's cancellation function.
+type serverLifecycle struct {
+	server *http.Server
+	cancel context.CancelFunc
 }
 
 // New creates a Kupo-compatible server.
@@ -119,28 +129,34 @@ func registerRoutes(mux *http.ServeMux, prefix string, s *Server) {
 // Start binds the configured HTTP listener and serves in the background.
 func (s *Server) Start(ctx context.Context) error {
 	serveCtx, cancel := context.WithCancel(ctx)
-	s.cancel = cancel
 	verifier, err := apiauth.NewVerifier(s.config.Auth)
 	if err != nil {
 		cancel()
 		return fmt.Errorf("kupo: %w", err)
 	}
+	s.mu.Lock()
 	server, bindDone, err := s.listener.Publish(func() *http.Server {
 		s.verifier = verifier
 		return &http.Server{
 			Addr:              s.config.ListenAddress,
 			Handler:           s.handler(),
 			ReadHeaderTimeout: 60 * time.Second,
+			ReadTimeout:       60 * time.Second,
 			WriteTimeout:      0,
 			IdleTimeout:       120 * time.Second,
 		}
 	})
 	if err != nil {
+		s.mu.Unlock()
+		cancel()
 		return err
 	}
+	s.lifecycle = &serverLifecycle{server: server, cancel: cancel}
+	s.mu.Unlock()
 	go func() { //nolint:gosec // graceful shutdown intentionally outlives ctx
 		<-serveCtx.Done()
 		job, _ := s.listener.TakeIf(server)
+		s.clearLifecycle(server)
 		if job == nil {
 			return
 		}
@@ -157,6 +173,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		cancel()
 		s.listener.Unpublish(server)
+		s.clearLifecycle(server)
 		return err
 	}
 	if served {
@@ -167,13 +184,26 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Stop gracefully stops the API and waits until its socket is released.
 func (s *Server) Stop(ctx context.Context) error {
-	if s.cancel != nil {
-		s.cancel()
-		s.cancel = nil
+	s.mu.Lock()
+	lifecycle := s.lifecycle
+	if lifecycle != nil {
+		s.lifecycle = nil
+	}
+	s.mu.Unlock()
+	if lifecycle != nil {
+		lifecycle.cancel()
 	}
 	job, inFlight := s.listener.Take()
 	if job == nil {
 		return s.listener.AwaitTeardown(ctx, inFlight)
 	}
 	return s.listener.Shutdown(ctx, job, apilistener.Graceful)
+}
+
+func (s *Server) clearLifecycle(server *http.Server) {
+	s.mu.Lock()
+	if s.lifecycle != nil && s.lifecycle.server == server {
+		s.lifecycle = nil
+	}
+	s.mu.Unlock()
 }

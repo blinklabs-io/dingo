@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -393,6 +394,7 @@ func TestV1RouteAliases(t *testing.T) {
 		healthCode:  http.StatusOK,
 		datum:       &Datum{Datum: "d87980"},
 		script:      &Script{Language: "native", Script: "00"},
+		checkpoint:  &Point{SlotNo: 42},
 	}
 	server := newTestServer(node)
 	for _, test := range []struct {
@@ -482,6 +484,38 @@ func TestDatumAndScriptNotFound(t *testing.T) {
 	}
 }
 
+func TestCheckpointNotFound(t *testing.T) {
+	tipHash := strings.Repeat("aa", 32)
+	server := newTestServer(&mockNode{
+		snapshotTip: Point{SlotNo: 42, HeaderHash: tipHash},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/checkpoints/42", nil)
+	req.Header.Set("If-None-Match", tipHash)
+	recorder := httptest.NewRecorder()
+	server.handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", recorder.Code)
+	}
+}
+
+func TestInternalErrorsDoNotLeakDetails(t *testing.T) {
+	secret := errors.New("database password=secret")
+	server := newTestServer(&mockNode{err: secret})
+	response := serve(
+		t,
+		server,
+		http.MethodGet,
+		"/datums/"+strings.Repeat("11", 32),
+		nil,
+	)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", response.Code)
+	}
+	if strings.Contains(response.Body.String(), secret.Error()) {
+		t.Fatalf("response leaked internal error: %q", response.Body.String())
+	}
+}
+
 func TestHealthAndMetricsNegotiation(t *testing.T) {
 	checkpoint, nodeTip, seconds, sync := uint64(40), uint64(50), uint64(2), 0.8
 	health := Health{
@@ -555,6 +589,18 @@ func TestHealthAndMetricsNegotiation(t *testing.T) {
 		}
 	}
 
+	req = httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.Header.Set("Accept", "text/plain, application/json, */*")
+	recorder = httptest.NewRecorder()
+	server.handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusAccepted ||
+		!strings.HasPrefix(
+			recorder.Header().Get("Content-Type"),
+			"application/json",
+		) {
+		t.Fatalf("mixed Accept header = %d %q", recorder.Code, recorder.Body.String())
+	}
+
 	req = httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	req.Header.Set("Accept", "text/plain")
 	recorder = httptest.NewRecorder()
@@ -594,6 +640,9 @@ func TestStartStop(t *testing.T) {
 	server := newTestServer(&mockNode{})
 	if err := server.Start(t.Context()); err != nil {
 		t.Fatal(err)
+	}
+	if got := server.listener.Server().ReadTimeout; got <= 0 {
+		t.Fatalf("ReadTimeout = %s, want nonzero", got)
 	}
 	stopCtx, stopCancel := context.WithTimeout(
 		context.Background(),
