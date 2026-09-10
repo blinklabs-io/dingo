@@ -34,12 +34,12 @@ import (
 // stops the two surfaces reporting different VRF keys or different snapshots
 // for the same chain.
 //
-// asOfSlot is Query's pinned point (0 = live); PoolStakeDistribution resolves
-// it to the historical epoch whose mark snapshot governed that slot
-// (blinklabs-io/dingo#382).
+// at is Query's pinned point (unpinned = live); PoolStakeDistribution
+// resolves it to the historical epoch whose mark snapshot governed that
+// slot (blinklabs-io/dingo#382).
 func (ls *LedgerState) queryShelleyPoolDistr2(
 	q *olocalstatequery.ShelleyPoolDistr2Query,
-	asOfSlot uint64,
+	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
 	// PoolFilter reports all=true with a nil pool list when the query's
@@ -57,7 +57,7 @@ func (ls *LedgerState) queryShelleyPoolDistr2(
 		}
 	}
 
-	dist, err := ls.PoolStakeDistribution(poolFilter, asOfSlot, txn)
+	dist, err := ls.PoolStakeDistribution(poolFilter, at, txn)
 	if err != nil {
 		return nil, err
 	}

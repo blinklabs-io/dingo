@@ -179,20 +179,25 @@ func (ls *LedgerState) verifyPointOnChain(
 	return nil
 }
 
-// resolveAsOfEpoch resolves asOfSlot to the epoch that governed it -- 0
-// means live, resolving the live tip's own epoch instead (the same "0
-// accepts the live/published value" convention QueryPoint itself uses).
-// Shared by every query handler that reconstructs epoch-keyed historical
-// state (blinklabs-io/dingo#382) -- PoolStakeDistribution,
+// resolveAsOfEpoch resolves at to the epoch that governed it -- unpinned
+// (at.pinned() false) means live, resolving the live tip's own epoch
+// instead. Shared by every query handler that reconstructs epoch-keyed
+// historical state (blinklabs-io/dingo#382) -- PoolStakeDistribution,
 // queryShelleyCurrentProtocolParams, queryShelleyEpochNo -- so the
 // live-vs-pinned epoch lookup is written once rather than once per handler.
 // A slot with no covering epoch record (a chain that has applied no blocks
 // yet) resolves to epoch 0, matching epochAtTip's existing convention.
+//
+// Takes the whole QueryPoint, not a bare slot: a point pinned at slot 0
+// (a real, validated chain point -- see QueryPoint.pinned()'s own doc
+// comment on why slot 0 alone doesn't mean "live") must still resolve
+// against that slot rather than falling through to the live branch the
+// way comparing a bare uint64 against zero would.
 func (ls *LedgerState) resolveAsOfEpoch(
 	txn *database.Txn,
-	asOfSlot uint64,
+	at QueryPoint,
 ) (uint64, error) {
-	if asOfSlot == 0 {
+	if !at.pinned() {
 		_, current, err := ls.epochAtTip(txn)
 		if err != nil {
 			return 0, err
@@ -202,7 +207,7 @@ func (ls *LedgerState) resolveAsOfEpoch(
 		}
 		return current.EpochId, nil
 	}
-	epoch, err := ls.db.GetEpochBySlot(asOfSlot, txn)
+	epoch, err := ls.db.GetEpochBySlot(at.Slot, txn)
 	if err != nil {
 		return 0, err
 	}
@@ -212,30 +217,35 @@ func (ls *LedgerState) resolveAsOfEpoch(
 	return epoch.EpochId, nil
 }
 
-// queryShelleyEpochNo answers GetEpochNo: the epoch containing asOfSlot (0 =
-// live, using the fast in-memory consensus snapshot rather than paying for
-// a transaction on the common unpinned path). Safe to pin at any retained
-// point, unlike stake distribution or protocol parameters: epoch records
-// are never pruned and carry no other coupled state, so resolving which
-// epoch covered a historical slot has no retention window to violate.
+// queryShelleyEpochNo answers GetEpochNo: the epoch containing at (unpinned
+// = live, using the fast in-memory consensus snapshot rather than paying
+// for a transaction on the common unpinned path). Safe to pin at any
+// retained point, unlike stake distribution or protocol parameters: epoch
+// records are never pruned and carry no other coupled state, so resolving
+// which epoch covered a historical slot has no retention window to
+// violate.
 //
-// txn is Query's point-validation transaction, non-nil whenever asOfSlot is
-// non-zero -- reusing it rather than opening a fresh one keeps this read
-// inside the same snapshot verifyPointOnChain already validated at.Slot
+// Takes the whole QueryPoint, not a bare slot -- see resolveAsOfEpoch's
+// doc comment for why a bare uint64 would silently mistreat a real point
+// pinned at slot 0 as live.
+//
+// txn is Query's point-validation transaction, non-nil whenever at is
+// pinned -- reusing it rather than opening a fresh one keeps this read
+// inside the same snapshot verifyPointOnChain already validated at
 // against, so a rollback landing between validation and this read cannot
 // make the two disagree about which chain they're describing.
 func (ls *LedgerState) queryShelleyEpochNo(
-	asOfSlot uint64,
+	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
-	if asOfSlot == 0 {
+	if !at.pinned() {
 		return []any{ls.loadConsensusSnapshot().currentEpoch.EpochId}, nil
 	}
 	if txn == nil {
 		txn = ls.db.Transaction(false)
 		defer txn.Release()
 	}
-	epoch, err := ls.resolveAsOfEpoch(txn, asOfSlot)
+	epoch, err := ls.resolveAsOfEpoch(txn, at)
 	if err != nil {
 		return nil, err
 	}
@@ -748,9 +758,9 @@ func (ls *LedgerState) queryShelleyLeaf(
 	case *olocalstatequery.ShelleyCborQuery:
 		return ls.queryShelleyCbor(q, at, txn)
 	case *olocalstatequery.ShelleyEpochNoQuery:
-		return ls.queryShelleyEpochNo(at.Slot, txn)
+		return ls.queryShelleyEpochNo(at, txn)
 	case *olocalstatequery.ShelleyCurrentProtocolParamsQuery:
-		return ls.queryShelleyCurrentProtocolParams(at.Slot, txn)
+		return ls.queryShelleyCurrentProtocolParams(at, txn)
 	case *olocalstatequery.ShelleyGenesisConfigQuery:
 		return ls.queryShelleyGenesisConfig()
 	case *olocalstatequery.ShelleyUtxoByAddressQuery:
@@ -780,9 +790,9 @@ func (ls *LedgerState) queryShelleyLeaf(
 	case *olocalstatequery.ShelleyDebugChainDepStateQuery:
 		return ls.queryShelleyDebugChainDepState()
 	case *olocalstatequery.ShelleyPoolDistr2Query:
-		return ls.queryShelleyPoolDistr2(q, at.Slot, txn)
+		return ls.queryShelleyPoolDistr2(q, at, txn)
 	case *olocalstatequery.ShelleyStakeDistributionQuery:
-		return ls.queryShelleyStakeDistribution(at.Slot, txn)
+		return ls.queryShelleyStakeDistribution(at, txn)
 	case *olocalstatequery.ShelleyUtxoWholeQuery:
 		// Always live: pinning a point only matters for a query slow enough
 		// that the live tip could move underneath it before it finishes

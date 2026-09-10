@@ -22,6 +22,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -163,6 +165,56 @@ func TestQuery_SlotZeroWithHashIsPinned_Rejected(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrPointNotOnChain)
+}
+
+// epochNoQuery wraps the leaf query the way the wire delivers GetEpochNo.
+func epochNoQuery() *olocalstatequery.BlockQuery {
+	return &olocalstatequery.BlockQuery{
+		Query: &olocalstatequery.ShelleyQuery{
+			Query: &olocalstatequery.ShelleyEpochNoQuery{},
+		},
+	}
+}
+
+// TestQuery_SlotZeroPinned_DispatchesHistorically goes one step past
+// TestQuery_SlotZeroWithHashIsPinned_Rejected: this node genuinely has a
+// block at slot 0 matching the acquired hash, so verifyPointOnChain accepts
+// it -- proving pinned-ness survives all the way through dispatch to the
+// handler is the real point of this test. Every point-aware handler was
+// passed a bare `asOfSlot uint64` derived from at.Slot, and every one of
+// them treated asOfSlot == 0 as "live" -- so a point genuinely pinned at
+// slot 0 passed validation only to have the handler silently ignore the
+// pin and answer with the live epoch (6) instead of slot 0's own epoch
+// (0). Handlers now take the whole QueryPoint and check at.pinned()
+// instead of comparing a bare slot against zero.
+func TestQuery_SlotZeroPinned_DispatchesHistorically(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.currentEpoch = models.Epoch{EpochId: 6}
+	ls.publishSnapshotsLocked()
+
+	genesisHash := bytes.Repeat([]byte{0xAB}, 32)
+	seedBlockAtSlot(t, ls, 0, genesisHash)
+	seedEpochs(t, ls, map[uint64]uint64{0: 0, 600: 6})
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(650, repeatedBytes(32, 0x0B)),
+	}, nil))
+
+	result, err := ls.Query(
+		epochNoQuery(),
+		QueryPoint{Slot: 0, Hash: genesisHash},
+	)
+	require.NoError(t, err)
+	arr, ok := result.([]any)
+	require.True(t, ok)
+	require.Len(t, arr, 1)
+	assert.Equal(
+		t, uint64(0), arr[0],
+		"a point pinned at slot 0 must resolve slot 0's own epoch, not "+
+			"silently fall through to the live epoch",
+	)
 }
 
 // TestQuery_UnpinnedSkipsPointValidation covers the live path: a zero-value

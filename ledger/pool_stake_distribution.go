@@ -151,15 +151,15 @@ type PoolStakeDistribution struct {
 // key. Its stake stays in TotalActiveStake, so every reported pool's own
 // fraction is unaffected by the omission.
 //
-// asOfSlot pins the distribution to the historical point instead of
-// live-right-now (blinklabs-io/dingo#382): 0 means live (the existing
-// default). A non-zero asOfSlot resolves to the epoch that governed that
+// at pins the distribution to the historical point instead of
+// live-right-now (blinklabs-io/dingo#382): unpinned means live (the
+// existing default). A pinned at resolves to the epoch that governed that
 // slot and uses that epoch's mark snapshot instead of the live tip's --
 // this is a real historical reconstruction, not an approximation, because
 // the mark snapshot is already persisted per-epoch for leader election.
 // checkAsOfEpochRecency rejects a historical epoch already outside the
 // mark-snapshot retention window (ledger/snapshot's pool-snapshot pruning),
-// since those rows are physically gone. asOfSlot ahead of the transaction
+// since those rows are physically gone. at.Slot ahead of the transaction
 // tip is rejected directly (not just by epoch): GetEpochBySlot can resolve
 // a future slot within the live epoch to that same live epoch, which would
 // otherwise let a future-slot pin silently pass as "live epoch, therefore
@@ -172,7 +172,7 @@ type PoolStakeDistribution struct {
 // direct, unpinned RPC handler) with no such transaction of its own.
 func (ls *LedgerState) PoolStakeDistribution(
 	poolFilter []lcommon.PoolKeyHash,
-	asOfSlot uint64,
+	at QueryPoint,
 	txn *database.Txn,
 ) (*PoolStakeDistribution, error) {
 	// The per-pool stakes, their total, and the epoch naming the snapshot they
@@ -192,20 +192,20 @@ func (ls *LedgerState) PoolStakeDistribution(
 	if err != nil {
 		return nil, err
 	}
-	if asOfSlot != 0 && asOfSlot > tip.Point.Slot {
+	if at.pinned() && at.Slot > tip.Point.Slot {
 		return nil, fmt.Errorf(
 			"%w: as-of slot %d is ahead of the current tip (slot %d)",
 			ErrHistoricalStateUnavailable,
-			asOfSlot,
+			at.Slot,
 			tip.Point.Slot,
 		)
 	}
-	epoch, err := ls.resolveAsOfEpoch(txn, asOfSlot)
+	epoch, err := ls.resolveAsOfEpoch(txn, at)
 	if err != nil {
 		return nil, err
 	}
-	if asOfSlot != 0 {
-		liveEpoch, err := ls.resolveAsOfEpoch(txn, 0)
+	if at.pinned() {
+		liveEpoch, err := ls.resolveAsOfEpoch(txn, QueryPoint{})
 		if err != nil {
 			return nil, err
 		}

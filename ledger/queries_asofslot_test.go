@@ -91,12 +91,12 @@ func TestPoolStakeDistribution_AsOfSlot_ReadsHistoricalEpochSnapshot(t *testing.
 
 	// asOfSlot 450 falls inside epoch 4's range: exactly the
 	// retained-boundary case (see the snapshot comment above).
-	hist, err := ls.PoolStakeDistribution(nil, 450, nil)
+	hist, err := ls.PoolStakeDistribution(nil, QueryPoint{Slot: 450}, nil)
 	require.NoError(t, err)
 	require.Len(t, hist.Pools, 1)
 	assert.Equal(t, uint64(1_000_000), hist.Pools[0].Stake)
 
-	live, err := ls.PoolStakeDistribution(nil, 0, nil)
+	live, err := ls.PoolStakeDistribution(nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	require.Len(t, live.Pools, 1)
 	assert.Equal(t, uint64(9_000_000), live.Pools[0].Stake)
@@ -120,7 +120,7 @@ func TestPoolStakeDistribution_AsOfSlot_TooOldRejected(t *testing.T) {
 
 	// Epoch 3 is 7 epochs behind the live epoch (10) -- outside the 3-epoch
 	// retention window.
-	_, err := ls.PoolStakeDistribution(nil, 350, nil)
+	_, err := ls.PoolStakeDistribution(nil, QueryPoint{Slot: 350}, nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
@@ -141,7 +141,7 @@ func TestPoolStakeDistribution_AsOfSlot_AheadOfLiveRejected(t *testing.T) {
 	}, nil))
 
 	// asOfSlot 650 resolves to epoch 6, ahead of the live tip's epoch 3.
-	_, err := ls.PoolStakeDistribution(nil, 650, nil)
+	_, err := ls.PoolStakeDistribution(nil, QueryPoint{Slot: 650}, nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
@@ -171,7 +171,7 @@ func TestQueryShelleyCurrentProtocolParams_SameEpochAsLive_Succeeds(t *testing.T
 		Point: ocommon.NewPoint(350, repeatedBytes(32, 0x0B)),
 	}, nil))
 
-	result, err := ls.queryShelleyCurrentProtocolParams(320, nil)
+	result, err := ls.queryShelleyCurrentProtocolParams(QueryPoint{Slot: 320}, nil)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 }
@@ -203,7 +203,7 @@ func TestQueryShelleyCurrentProtocolParams_DifferentEpochFromLive_Rejected(
 		Point: ocommon.NewPoint(650, repeatedBytes(32, 0x0B)),
 	}, nil))
 
-	_, err := ls.queryShelleyCurrentProtocolParams(350, nil)
+	_, err := ls.queryShelleyCurrentProtocolParams(QueryPoint{Slot: 350}, nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
@@ -227,14 +227,14 @@ func TestQueryShelleyEpochNo_AsOfSlot_ReadsHistoricalEpoch(t *testing.T) {
 		Point: ocommon.NewPoint(650, repeatedBytes(32, 0x0B)),
 	}, nil))
 
-	hist, err := ls.queryShelleyEpochNo(350, nil)
+	hist, err := ls.queryShelleyEpochNo(QueryPoint{Slot: 350}, nil)
 	require.NoError(t, err)
 	arr, ok := hist.([]any)
 	require.True(t, ok)
 	require.Len(t, arr, 1)
 	assert.Equal(t, uint64(3), arr[0])
 
-	live, err := ls.queryShelleyEpochNo(0, nil)
+	live, err := ls.queryShelleyEpochNo(QueryPoint{}, nil)
 	require.NoError(t, err)
 	arr, ok = live.([]any)
 	require.True(t, ok)

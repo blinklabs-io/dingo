@@ -3191,9 +3191,15 @@ connection-closed fan-out deliberately excludes NtC from) clear it, so a
 disconnecting client can't leak a map entry) and threads it into every
 `LedgerState.Query` call as `at`. `QueryPoint.pinned()` treats only the
 all-zero value as unpinned -- a slot-0 point with a nonempty hash is a real
-chain point, not the origin sentinel, and still goes through validation.
-Both slot and hash are recorded, not slot alone, because a fork switch can
-leave a different block at the same slot than the one the caller acquired.
+chain point, not the origin sentinel, and still goes through validation
+*and* dispatch: every point-aware handler takes the whole `QueryPoint` and
+checks `at.pinned()`, not a bare `asOfSlot uint64` compared against zero --
+an earlier version derived `asOfSlot` from `at.Slot` before dispatching,
+which correctly validated a slot-0 pin but then had every handler treat
+that same zero as "live," silently discarding the pin one layer down from
+where it was checked. Both slot and hash are recorded, not slot alone,
+because a fork switch can leave a different block at the same slot than the
+one the caller acquired.
 `Query` opens one read transaction whenever `at` is pinned and reuses it for
 both `verifyPointOnChain` and whichever handler below honors `at`, so the
 validated point and the historical read it guards describe the same

@@ -22,6 +22,7 @@ import (
 	"math/big"
 
 	"connectrpc.com/connect"
+	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	betacardano "github.com/utxorpc/go-codegen/utxorpc/v1beta/cardano"
@@ -130,7 +131,7 @@ func (s *betaQueryServiceServer) readStakePoolDistribution(
 
 	dist, err := s.utxorpc.config.LedgerState.PoolStakeDistribution(
 		poolFilter,
-		0,
+		ledger.QueryPoint{},
 		nil,
 	)
 	if err != nil {

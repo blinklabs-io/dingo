@@ -52,10 +52,10 @@ type stakeDistributionEntry = struct {
 // -- see totalCirculatingSupply's doc comment (blinklabs-io/dingo#3824) for
 // the full story and why GetPoolDistr2 must not make the same change.
 //
-// asOfSlot is Query's pinned point (0 = live), but a pinned (non-zero)
-// asOfSlot is rejected here rather than answered: unlike GetPoolDistr2 (which
-// uses TotalActiveStake, itself a historical, per-epoch snapshot total),
-// this query's denominator is TotalCirculatingSupply, computed from
+// at is Query's pinned point (unpinned = live), but a pinned at is rejected
+// here rather than answered: unlike GetPoolDistr2 (which uses
+// TotalActiveStake, itself a historical, per-epoch snapshot total), this
+// query's denominator is TotalCirculatingSupply, computed from
 // GetNetworkState's reserves row -- and GetNetworkState only ever returns
 // the latest row, with no historical-by-epoch or historical-by-slot lookup
 // yet. Answering a pinned point here would silently mix a correct
@@ -66,19 +66,19 @@ type stakeDistributionEntry = struct {
 // historical NetworkState lookup exists is safer than a plausible-looking
 // wrong fraction (blinklabs-io/dingo#382).
 func (ls *LedgerState) queryShelleyStakeDistribution(
-	asOfSlot uint64,
+	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
-	if asOfSlot != 0 {
+	if at.pinned() {
 		return nil, fmt.Errorf(
 			"%w: GetStakeDistribution pinned to slot %d is not yet "+
 				"supported -- its circulating-supply denominator has no "+
 				"historical-by-slot record",
 			ErrHistoricalStateUnavailable,
-			asOfSlot,
+			at.Slot,
 		)
 	}
-	dist, err := ls.PoolStakeDistribution(nil, asOfSlot, txn)
+	dist, err := ls.PoolStakeDistribution(nil, at, txn)
 	if err != nil {
 		return nil, err
 	}

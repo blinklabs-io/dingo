@@ -267,7 +267,7 @@ func TestQueryShelleyStakeDistribution_EmptySnapshot(t *testing.T) {
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.queryShelleyStakeDistribution(0, nil)
+	result, err := ls.queryShelleyStakeDistribution(QueryPoint{}, nil)
 	require.NoError(t, err)
 	dist := decodeStakeDistributionResult(t, result)
 	assert.Empty(t, dist.Results)

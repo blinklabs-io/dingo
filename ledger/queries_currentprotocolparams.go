@@ -22,19 +22,23 @@ import (
 
 // queryShelleyCurrentProtocolParams answers GetCurrentPParams.
 //
-// asOfSlot is Query's pinned point (0 = live). Unlike stake distribution,
+// at is Query's pinned point (unpinned = live). Unlike stake distribution,
 // there is no persisted historical record of protocol parameters by
 // epoch -- currentPParams is a single in-memory value, overwritten in place
 // on every governance/epoch transition. So a pinned point can only be
 // answered safely when it names a slot in the same epoch the live tip is
 // currently in: protocol parameters only change at epoch boundaries, so
-// within one epoch "as of asOfSlot" and "live right now" are the same
-// value. A pin spanning an epoch boundary since asOfSlot returns
-// ErrHistoricalStateUnavailable rather than silently answering with a live
-// value that may no longer match what was true at asOfSlot
-// (blinklabs-io/dingo#382). Building real historical-by-epoch pparams
-// storage (or replaying governance enactments) to lift this restriction is
-// a materially larger, not-yet-attempted piece of work.
+// within one epoch "as of at" and "live right now" are the same value. A
+// pin spanning an epoch boundary since at returns ErrHistoricalStateUnavailable
+// rather than silently answering with a live value that may no longer
+// match what was true at that point (blinklabs-io/dingo#382). Building
+// real historical-by-epoch pparams storage (or replaying governance
+// enactments) to lift this restriction is a materially larger,
+// not-yet-attempted piece of work.
+//
+// Takes the whole QueryPoint, not a bare slot -- see resolveAsOfEpoch's
+// doc comment for why a bare uint64 would silently mistreat a real point
+// pinned at slot 0 as live.
 //
 // The live epoch and the returned parameters both come from one
 // loadConsensusSnapshot() call, not two separate reads: an earlier version
@@ -45,11 +49,11 @@ import (
 // while returning the parameters of the epoch that had already replaced it.
 // Deriving both from the same snapshot value closes that window.
 func (ls *LedgerState) queryShelleyCurrentProtocolParams(
-	asOfSlot uint64,
+	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
 	snapshot := ls.loadConsensusSnapshot()
-	if asOfSlot == 0 {
+	if !at.pinned() {
 		return []any{withoutSyntheticV2CostModel(
 			snapshot.currentPParams,
 			snapshot.syntheticV2CostModelInEffect,
@@ -60,7 +64,7 @@ func (ls *LedgerState) queryShelleyCurrentProtocolParams(
 		txn = ls.db.Transaction(false)
 		defer txn.Release()
 	}
-	targetEpoch, err := ls.resolveAsOfEpoch(txn, asOfSlot)
+	targetEpoch, err := ls.resolveAsOfEpoch(txn, at)
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +76,7 @@ func (ls *LedgerState) queryShelleyCurrentProtocolParams(
 				"historical protocol-parameter values across an epoch "+
 				"boundary are not yet supported",
 			ErrHistoricalStateUnavailable,
-			asOfSlot,
+			at.Slot,
 			targetEpoch,
 			liveEpoch,
 		)
