@@ -45,7 +45,8 @@ func TestValidateGenesisConsistencyMatch(t *testing.T) {
 	c := &CardanoNodeConfig{
 		byronGenesis: &byron.ByronGenesis{StartTime: 1666656000},
 		shelleyGenesis: &shelley.ShelleyGenesis{
-			SystemStart: time.Unix(1666656000, 0).UTC(),
+			SystemStart:      time.Unix(1666656000, 0).UTC(),
+			MaxKESEvolutions: 62,
 		},
 	}
 	require.NoError(t, c.validateGenesisConsistency())
@@ -57,10 +58,57 @@ func TestValidateGenesisConsistencyMismatch(t *testing.T) {
 	c := &CardanoNodeConfig{
 		byronGenesis: &byron.ByronGenesis{StartTime: 1506203091},
 		shelleyGenesis: &shelley.ShelleyGenesis{
-			SystemStart: time.Unix(1666656000, 0).UTC(),
+			SystemStart:      time.Unix(1666656000, 0).UTC(),
+			MaxKESEvolutions: 62,
 		},
 	}
 	require.Error(t, c.validateGenesisConsistency())
+}
+
+// TestValidateGenesisConsistencyRejectsMissingMaxKESEvolutions is a
+// regression test for a human-review finding: nothing rejected a Shelley
+// genesis with a missing or non-positive maxKESEvolutions at load time,
+// so the failure only surfaced once header verification ran -- on every
+// single header, since issue #3528 made header crypto verification
+// unconditional -- with nothing naming the genesis field as the cause.
+func TestValidateGenesisConsistencyRejectsMissingMaxKESEvolutions(t *testing.T) {
+	t.Parallel()
+
+	t.Run("zero maxKESEvolutions is rejected", func(t *testing.T) {
+		t.Parallel()
+		c := &CardanoNodeConfig{
+			shelleyGenesis: &shelley.ShelleyGenesis{},
+		}
+		err := c.validateGenesisConsistency()
+		require.Error(t, err)
+		require.ErrorContains(t, err, "maxKESEvolutions must be positive")
+	})
+
+	t.Run("negative maxKESEvolutions is rejected", func(t *testing.T) {
+		t.Parallel()
+		c := &CardanoNodeConfig{
+			shelleyGenesis: &shelley.ShelleyGenesis{MaxKESEvolutions: -1},
+		}
+		err := c.validateGenesisConsistency()
+		require.Error(t, err)
+		require.ErrorContains(t, err, "maxKESEvolutions must be positive")
+	})
+
+	t.Run("positive maxKESEvolutions is accepted", func(t *testing.T) {
+		t.Parallel()
+		c := &CardanoNodeConfig{
+			shelleyGenesis: &shelley.ShelleyGenesis{MaxKESEvolutions: 62},
+		}
+		require.NoError(t, c.validateGenesisConsistency())
+	})
+
+	t.Run("no shelley genesis is not this check's concern", func(t *testing.T) {
+		t.Parallel()
+		require.NoError(
+			t,
+			(&CardanoNodeConfig{}).validateGenesisConsistency(),
+		)
+	})
 }
 
 func genesisRat(num, denom int64) cbor.Rat {

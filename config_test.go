@@ -182,14 +182,19 @@ func TestNewConfigDoesNotDefaultCustomMempoolConfig(t *testing.T) {
 
 // TestNewConfigDefaultsValidateForgedBlock is a regression test for issue
 // #3528: NewConfig builds its own internalconfig.Config literal rather than
-// starting from internalconfig.DefaultConfig, so the fail-closed
+// starting from internalconfig's own package-level default (globalConfig,
+// built by its unexported newDefaultConfig), so the fail-closed
 // ValidateForgedBlock=true default had to be set in both places. A caller
 // using the programmatic/library API (NewConfig) rather than the
 // YAML/env-loaded path must still get self-validation of forged blocks
-// enabled by default.
+// enabled by default -- checked on both cfg.cfg.ValidateForgedBlock (the
+// loaded internal config) and cfg.validateForgedBlock (the compat mirror
+// syncCompatFields populates from it, which node_forging.go actually
+// reads); a human reviewer found this test only checked the former.
 func TestNewConfigDefaultsValidateForgedBlock(t *testing.T) {
 	cfg := NewConfig()
 	assert.True(t, cfg.cfg.ValidateForgedBlock)
+	assert.True(t, cfg.validateForgedBlock)
 }
 
 func TestWithPluginSelectionSnapshotsConfig(t *testing.T) {

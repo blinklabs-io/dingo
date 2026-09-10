@@ -342,6 +342,83 @@ func TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent(
 	assert.Equal(t, "block_header_verification_failure", got.Reason)
 }
 
+// TestBlockfetchHeaderVerificationRunsRegardlessOfValidationEnabled is a
+// regression test for a human-review finding: no test failed if
+// handleEventBlockfetchBlockDeferred's Mithril-slot gate were reverted to
+// the previous validationEnabled check. Issue #3528 made header crypto
+// verification unconditional -- before it, an entire
+// ValidateHistorical=false bulk-sync run skipped VRF/KES/opcert
+// verification and stake-derived leader eligibility for every block. This
+// proves the fail-closed behavior directly: with validationEnabled=false
+// on a non-Mithril slot, a block with unverifiable header crypto still
+// returns a definite (non-deferred) error instead of being silently
+// accepted.
+func TestBlockfetchHeaderVerificationRunsRegardlessOfValidationEnabled(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	connId := testRecycleConnId()
+	ls := &LedgerState{
+		validationEnabled:            false,
+		activeBlockfetchConnId:       connId,
+		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		chain:                        &chain.Chain{},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+		ConnectionId: connId,
+		Block:        &mockBabbageBlock{slot: 500},
+		Point:        ocommon.Point{Slot: 500, Hash: []byte("fake-hash")},
+	}, nil)
+
+	require.Error(t, err)
+	assert.False(t, IsHeaderVerificationDeferred(err))
+	assert.Contains(t, err.Error(), "block header crypto verification failed")
+}
+
+// TestBlockfetchHeaderVerificationSkippedForMithrilCoveredSlot is the
+// companion regression test to the one above: verification must still be
+// skipped for a slot an imported Mithril snapshot already covers,
+// regardless of validationEnabled -- that is the one exemption
+// slotCoveredByMithril preserves. A block with unverifiable header crypto
+// at a Mithril-covered slot must be accepted without error.
+func TestBlockfetchHeaderVerificationSkippedForMithrilCoveredSlot(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const targetSlot = uint64(500)
+	connId := testRecycleConnId()
+	ls := &LedgerState{
+		validationEnabled:            false,
+		mithrilLedgerSlot:            targetSlot,
+		activeBlockfetchConnId:       connId,
+		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		chain:                        &chain.Chain{},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	err := ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+		ConnectionId: connId,
+		Block:        &mockBabbageBlock{slot: targetSlot},
+		Point: ocommon.Point{
+			Slot: targetSlot,
+			Hash: []byte("fake-hash"),
+		},
+	}, nil)
+
+	require.NoError(t, err)
+	require.Len(t, ls.pendingBlockfetchEvents, 1)
+}
+
 func TestBlockfetchStatefulHeaderVerificationDefersUntilLedgerApply(
 	t *testing.T,
 ) {

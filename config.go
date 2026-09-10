@@ -693,9 +693,10 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			RunMode:     internalconfig.RunModeServe,
 			// Fail closed: self-validate locally-forged blocks before
 			// adoption and diffusion unless an operator explicitly opts
-			// out. Mirrors internalconfig.DefaultConfig's forging default
+			// out. Mirrors internalconfig's own package-level default
+			// (globalConfig, built by its unexported newDefaultConfig)
 			// -- this literal is a separate default source, not backfilled
-			// from DefaultConfig, so it must be set here too.
+			// from that one, so it must be set here too.
 			ValidateForgedBlock: true,
 			Cache:               internalconfig.DefaultCacheConfig(),
 			Chainsync:           internalconfig.DefaultChainsyncConfig(),

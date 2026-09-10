@@ -2546,9 +2546,12 @@ that declaration before applying the transaction delta. A transaction marked
 valid must execute every Plutus script successfully; a transaction marked
 invalid must produce a local script-execution failure. Either mismatch rejects
 the block transaction before its regular-input or collateral effects can commit.
-Historical blocks already at least `k` deep retain the explicit replay-only
-phase-2 skip; their declared outcomes are trusted only inside that immutable
-replay window.
+Phase 2 now always evaluates independently of block depth, whenever per-tx
+validation runs at all (issue #3528). A historical block already at least
+`k` deep no longer gets a replay-only phase-2 skip that trusts its declared
+outcome: that shortcut fired on ordinary `ValidateHistorical=false`
+catch-up, not only a trusted-chain-dump import, so it was removed rather
+than narrowed to the trusted-import case its name implied.
 
 Era transitions run the target era's `HardForkFunc` to translate protocol parameters before persisting the new pparams. At an epoch boundary, the rollover enacts pending protocol-parameter updates in the source era first and applies the successor transitions afterward. This is required because an update submitted in the source era can contain a field removed by the successor era (for example, Alonzo's decentralization field in the Babbage update shape). The boundary block body's era is authoritative for ordinary advancement: a source-era block can advertise the next protocol major in its header without activating that successor. Header elevation is used only after the body itself advances, where it can validate the exceptional two-consecutive-era boundary path. Transitions can also rewrite ratified-but-not-yet-enacted governance action payloads into the target era's CBOR shape; the Conway to Dijkstra path translates parameter-change proposals so the Dijkstra enactment update function receives `DijkstraProtocolParameterUpdate` rather than a stale Conway update.
 
@@ -2763,7 +2766,7 @@ selector uses the same transaction-wide declared-budget helper, so it cannot
 construct a candidate that inbound envelope validation would reject on that
 block-wide budget.
 
-During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution is skipped only for blocks at or before the immutable tip (`tipBlockNo - securityParam`), where the block producer's `isValid` flag is treated as authoritative until the local Plutus VM is consensus-equivalent. Volatile block replay, local transaction validation for mempool submission, and forging continue to run Plutus execution.
+During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution now always runs whenever per-tx validation runs at all (issue #3528), including for blocks at or before the immutable tip: the previous shortcut that trusted the block producer's `isValid` flag as authoritative for those blocks fired more broadly than intended -- on ordinary `ValidateHistorical=false` catch-up, not only a trusted-chain-dump import -- and was removed rather than narrowed. Volatile block replay, local transaction validation for mempool submission, and forging continue to run Plutus execution as before.
 
 Restrictive Phase 2 validation runs the CEK machine against the protocol's
 per-transaction `MaxTxExUnits` limit and compares the complete measured cost
@@ -2987,7 +2990,10 @@ dependency across two points in the pipeline:
   array that does not match real opcerts), and `ledger.ValidateKesPeriod`
   (against `maxKESEvolutions` from Shelley genesis) checks expiry. Running
   here rejects forged or expired opcerts before the block body is fetched.
-  These checks share the existing skip-during-historical-sync gating.
+  These checks now run unconditionally except for the same single
+  exemption header verification uses elsewhere in this document: a slot
+  an imported Mithril snapshot already covers (issue #3528). A coarse
+  historical-sync toggle no longer skips them.
 - **Counter monotonicity at block apply** (`validateOpCertCounter`, invoked
   from `ledgerProcessBlock` under `shouldValidate`, before the block's
   transactions are validated): a read-before-write of the pool's stored opcert

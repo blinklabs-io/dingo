@@ -61,6 +61,19 @@ type LedgerView struct {
 	consumedUtxos map[string]struct{}
 	// skipPhase2Validation is set for accepted block replay, where
 	// the producer's isValid flag is authoritative for Phase-2 results.
+	// Currently unreachable from production: ledgerProcessBlock's sole
+	// caller (ledger/state.go) hardcodes skipPhase2Validation=false,
+	// because issue #3528 made Phase 2 always evaluate whenever per-tx
+	// validation runs at all. Retained rather than deleted because it is
+	// a narrower, more targeted mechanism than the coarse
+	// shouldValidateBlock=false gate TrustedReplay currently uses to skip
+	// per-tx validation (phase 1 and phase 2 together): a future
+	// TrustedReplay caller that wants phase-1 UTXO checks re-run while
+	// still trusting the producer's isValid flag for phase 2 has this
+	// already built, wired through every era's phase2ValidationSkipper
+	// call site, and tested (TestLedgerViewSkipPhase2Validation and the
+	// per-era skip tests) -- only the production call site's hardcoded
+	// false needs to change to use it.
 	skipPhase2Validation bool
 	// horizonAnchorSlot is the slot the era forecast horizon is measured
 	// from when this view converts slots to time. Block application sets it

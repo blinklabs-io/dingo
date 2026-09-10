@@ -457,6 +457,18 @@ intersectTip: false
 forgeSyncToleranceSlots: 0
 forgeStaleGapThresholdSlots: 0
 
+# validateForgedBlock re-validates a locally-forged block (header crypto,
+# body hash, per-tx ledger rules including Plutus phase-2 evaluation)
+# before it is adopted and diffused, catching a bug that would otherwise
+# forge and diffuse an invalid block. Enabled by default (fail closed).
+# This re-validation runs synchronously inside the forging deadline with
+# no separate time budget, so on a block producer with heavy Plutus
+# traffic it adds real latency to every forged block; set to false only
+# if that cost is unacceptable and the risk of forging an invalid block
+# is understood and accepted.
+# CLI: --validate-forged-block  Env: DINGO_VALIDATE_FORGED_BLOCK
+# validateForgedBlock: true
+
 # Application-wide operational mode for a bare dingo invocation:
 # "serve" (default), "load", "dev", or "leios"
 # - serve: Full node with network connectivity (default)

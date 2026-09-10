@@ -4578,9 +4578,17 @@ func (ls *LedgerState) securityParamForCurrentEraSnapshot() int {
 // unreachable; that dead 4-way form, not the original mechanism, is what
 // got removed. Phase 2 now always evaluates whenever per-tx validation runs
 // at all, which is the safer contract issue #3528 asks for, but it has a
-// real cost worth naming plainly: an operator running
-// ValidateHistorical=false now pays Plutus phase-2 evaluation on every deep
-// historical block, where it was previously skipped.
+// real cost worth naming plainly -- narrower than "every deep historical
+// block", though: historicalBlockValidationDecision's !validationEnabled
+// branch only returns shouldValidate=true once blockSlot reaches the
+// near-tip stability-window cutoff, so anything below that cutoff never
+// entered per-tx validation and never paid for phase 2 either way. The
+// removed shortcut only fired on blocks that were simultaneously at or
+// above that cutoff (by slot) and more than the security parameter behind
+// the tip (by block number, deepHistoricalBlock's own dimension) -- an
+// operator running ValidateHistorical=false now pays Plutus phase-2
+// evaluation on exactly that intersection, where it was previously
+// skipped.
 
 // StabilityWindow returns the Ouroboros security stability window for the
 // current era in slots. For Byron the window is 2k; for Shelley+ it is 3k/f.
@@ -6539,7 +6547,12 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						// issue #3528 removal note above
 						// historicalBlockValidationDecision for why the old
 						// historical-sync/TrustedReplay phase-2 shortcut was
-						// deleted rather than reworked.
+						// deleted rather than reworked. This is the only
+						// production caller of ledgerProcessBlock, so hardcoding
+						// false here makes LedgerView.skipPhase2Validation and
+						// every era's phase2ValidationSkipper call site dead in
+						// production; see LedgerView's field doc comment for
+						// why that plumbing is retained rather than deleted.
 						const skipPhase2Validation = false
 						delta, err = ls.ledgerProcessBlock(
 							txn,
