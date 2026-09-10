@@ -50,8 +50,10 @@ collateral_by_tx_id) VALUES (X'01', 0, 0, '1', X'02')`)
 	require.NoError(t, db.Close())
 	db, err = sql.Open("sqlite", "file:"+dbPath)
 	require.NoError(t, err)
-	// A restart must be able to rerun the completed registry without changing
-	// the migrated association or unrelated legacy rows.
+	// Force v13 back to pending while retaining its schema/data so the runner
+	// re-executes the backfill on restart.
+	_, err = db.Exec("DELETE FROM schema_migrations WHERE version = 13")
+	require.NoError(t, err)
 	run(registry)
 	var count int
 	require.NoError(t, db.QueryRow(

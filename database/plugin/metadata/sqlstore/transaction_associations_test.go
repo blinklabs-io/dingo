@@ -32,6 +32,13 @@ func TestCollateralProductionApplyHydrateRollback(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.Start(t.Context()))
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	collateralProductionFlow(t, store, db)
+}
+
+// collateralProductionFlow runs against an already-migrated provider store;
+// integration tests use it to exercise the same contract on every dialect.
+func collateralProductionFlow(t *testing.T, store *Store, db *sql.DB) {
+	t.Helper()
 	input, err := mockledger.NewSimpleTransactionInput(bytes.Repeat([]byte{0xaa}, 32), 0)
 	require.NoError(t, err)
 	_, err = db.Exec(store.dialect.Rebind("INSERT INTO utxo (tx_id, output_idx, credential_tag, amount, payment_script) VALUES (?, 0, 0, '1', FALSE)"), input.Id().Bytes())
@@ -59,52 +66,10 @@ func TestCollateralProductionApplyHydrateRollback(t *testing.T) {
 	}
 	require.NoError(t, store.DeleteTransactionsAfterSlot(10, nil))
 	var associationCount int
-	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM utxo_collateral_input WHERE transaction_hash = ?", txA.Hash().Bytes()).Scan(&associationCount))
+	require.NoError(t, db.QueryRow(store.dialect.Rebind("SELECT COUNT(*) FROM utxo_collateral_input WHERE transaction_hash = ?"), txA.Hash().Bytes()).Scan(&associationCount))
 	require.Equal(t, 1, associationCount)
-	require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM utxo_collateral_input WHERE transaction_hash = ?", txB.Hash().Bytes()).Scan(&associationCount))
+	require.NoError(t, db.QueryRow(store.dialect.Rebind("SELECT COUNT(*) FROM utxo_collateral_input WHERE transaction_hash = ?"), txB.Hash().Bytes()).Scan(&associationCount))
 	require.Equal(t, 0, associationCount)
-	got, err := store.GetTransactionByHash(txA.Hash().Bytes(), nil)
-	require.NoError(t, err)
-	require.NotNil(t, got)
-	require.Len(t, got.Collateral, 1)
-	gone, err := store.GetTransactionByHash(txB.Hash().Bytes(), nil)
-	require.NoError(t, err)
-	require.Nil(t, gone)
-}
-
-// collateralProductionFlow runs against an already-migrated provider store;
-// integration tests use it to exercise the same contract on every dialect.
-func collateralProductionFlow(t *testing.T, store *Store, db *sql.DB) {
-	t.Helper()
-	input, err := mockledger.NewSimpleTransactionInput(bytes.Repeat([]byte{0xdd}, 32), 0)
-	require.NoError(t, err)
-	_, err = db.Exec(store.dialect.Rebind("INSERT INTO utxo (tx_id, output_idx, credential_tag, amount, payment_script) VALUES (?, 0, 0, '1', FALSE)"), input.Id().Bytes())
-	require.NoError(t, err)
-	makeTx := func(first byte) lcommon.Transaction {
-		builder := mockledger.NewTransactionBuilder()
-		builder.WithId(bytes.Repeat([]byte{first}, 32))
-		builder.WithCollateral(input).WithValid(true)
-		return builder
-	}
-	txA, txB := makeTx(0xee), makeTx(0xff)
-	for _, item := range []struct {
-		tx   lcommon.Transaction
-		slot uint64
-	}{{txA, 10}, {txB, 20}} {
-		require.NoError(t, store.SetTransaction(item.tx, ocommon.Point{Slot: item.slot, Hash: item.tx.Hash().Bytes()}, 0, nil, false, nil))
-	}
-	for _, hash := range [][]byte{txA.Hash().Bytes(), txB.Hash().Bytes()} {
-		got, err := store.GetTransactionByHash(hash, nil)
-		require.NoError(t, err)
-		require.NotNil(t, got)
-		require.Len(t, got.Collateral, 1)
-	}
-	require.NoError(t, store.DeleteTransactionsAfterSlot(10, nil))
-	var count int
-	require.NoError(t, db.QueryRow(store.dialect.Rebind("SELECT COUNT(*) FROM utxo_collateral_input WHERE transaction_hash = ?"), txA.Hash().Bytes()).Scan(&count))
-	require.Equal(t, 1, count)
-	require.NoError(t, db.QueryRow(store.dialect.Rebind("SELECT COUNT(*) FROM utxo_collateral_input WHERE transaction_hash = ?"), txB.Hash().Bytes()).Scan(&count))
-	require.Equal(t, 0, count)
 	got, err := store.GetTransactionByHash(txA.Hash().Bytes(), nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)
