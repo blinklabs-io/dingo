@@ -11248,6 +11248,9 @@ func (ls *LedgerState) forgeBlock() {
 			"tx_count", len(mempoolTxs),
 		)
 
+		consumedInputs := make(map[string]struct{})
+		createdOutputs := make(map[string]lcommon.Utxo)
+
 		// Iterate through transactions and add them until we hit limits
 		for _, mempoolTx := range mempoolTxs {
 			// Use raw CBOR from the mempool transaction
@@ -11283,6 +11286,20 @@ func (ls *LedgerState) forgeBlock() {
 				ls.config.Logger.Debug(
 					"failed to decode full transaction, skipping",
 					"component", "ledger",
+					"error", err,
+				)
+				continue
+			}
+
+			if err := ls.ValidateTxWithOverlay(
+				fullTx,
+				consumedInputs,
+				createdOutputs,
+			); err != nil {
+				ls.config.Logger.Debug(
+					"skipping transaction - failed re-validation",
+					"component", "ledger",
+					"tx_hash", mempoolTx.Hash,
 					"error", err,
 				)
 				continue
@@ -11372,6 +11389,22 @@ func (ls *LedgerState) forgeBlock() {
 				transactionMetadataSet[uint(len(transactionBodies))-1] = metadataCbor
 			}
 			blockSize += txSize
+			for _, input := range fullTx.Consumed() {
+				key := fmt.Sprintf(
+					"%s:%d",
+					input.Id().String(),
+					input.Index(),
+				)
+				consumedInputs[key] = struct{}{}
+			}
+			for _, output := range fullTx.Produced() {
+				key := fmt.Sprintf(
+					"%s:%d",
+					output.Id.Id().String(),
+					output.Id.Index(),
+				)
+				createdOutputs[key] = output
+			}
 			// Safe to assign: overflow was already checked
 			// via SafeAddExUnits when computing
 			// candidateExUnits above.

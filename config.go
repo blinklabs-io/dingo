@@ -53,7 +53,7 @@ const (
 	// are skipped. Suitable for block producers with no APIs.
 	StorageModeCore StorageMode = "core"
 	// StorageModeAPI stores everything needed for API queries
-	// (blockfrost, kupo, utxorpc, mesh) in addition to core data.
+	// (blockfrost, utxorpc, mesh) in addition to core data.
 	StorageModeAPI StorageMode = "api"
 )
 
@@ -211,6 +211,7 @@ type Config struct {
 	// canonical loaded configuration; these are refreshed by syncCompatFields.
 	dataDir                         string
 	bindAddr                        string
+	apiBindAddr                     string
 	pluginSelections                map[hostplugin.Capability]hostplugin.Selection
 	network                         string
 	tlsCertFilePath, tlsKeyFilePath string
@@ -518,6 +519,12 @@ func (n *Node) configValidate() error {
 			StorageModeAPI,
 		)
 	}
+	if err := internalconfig.ValidateAPIExposure(
+		n.config.cfg,
+		internalconfig.RunMode(n.config.cfg.RunMode),
+	); err != nil {
+		return fmt.Errorf("invalid API exposure: %w", err)
+	}
 	if !n.config.cfg.StartEra.Valid() {
 		return fmt.Errorf(
 			"invalid start era %q: must be empty or %q",
@@ -665,6 +672,7 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 	c := Config{
 		cfg: &internalconfig.Config{
 			BindAddr:           "0.0.0.0",
+			APIBindAddr:        internalconfig.DefaultAPIBindAddr,
 			StorageMode:        string(StorageModeCore),
 			RunMode:            internalconfig.RunModeServe,
 			Cache:              internalconfig.DefaultCacheConfig(),
@@ -701,10 +709,6 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 						Provider: "builtin",
 						Config:   map[string]any{"port": uint(3000)},
 					},
-					Kupo: hostplugin.Selection{
-						Provider: "builtin",
-						Config:   map[string]any{"port": uint(0)},
-					},
 					Mesh: hostplugin.Selection{
 						Provider: "builtin",
 						Config:   map[string]any{"port": uint(8080)},
@@ -730,6 +734,10 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 
 func (c *Config) syncCompatFields() {
 	c.dataDir, c.bindAddr = c.cfg.DatabasePath, c.cfg.BindAddr
+	c.apiBindAddr = c.cfg.APIBindAddr
+	if c.apiBindAddr == "" {
+		c.apiBindAddr = internalconfig.DefaultAPIBindAddr
+	}
 	c.network, c.networkMagic = c.cfg.Network, c.cfg.NetworkMagic
 	c.tlsCertFilePath, c.tlsKeyFilePath = c.cfg.TlsCertFilePath, c.cfg.TlsKeyFilePath
 	c.apiConfig = c.cfg.API
@@ -845,8 +853,7 @@ func (c *Config) syncCompatFields() {
 	c.pluginSelections = map[hostplugin.Capability]hostplugin.Selection{
 		hostplugin.CapabilityStorageBlob: c.cfg.Plugins.Storage.Blob, hostplugin.CapabilityStorageMetadata: c.cfg.Plugins.Storage.Metadata,
 		hostplugin.CapabilityMempool: c.cfg.Plugins.Mempool, hostplugin.CapabilityAPIBlockfrost: c.cfg.Plugins.API.Blockfrost,
-		hostplugin.CapabilityAPIKupo: c.cfg.Plugins.API.Kupo, hostplugin.CapabilityAPIMesh: c.cfg.Plugins.API.Mesh,
-		hostplugin.CapabilityAPIUtxorpc: c.cfg.Plugins.API.Utxorpc,
+		hostplugin.CapabilityAPIMesh: c.cfg.Plugins.API.Mesh, hostplugin.CapabilityAPIUtxorpc: c.cfg.Plugins.API.Utxorpc,
 	}
 }
 
@@ -878,8 +885,6 @@ func WithPluginSelection(
 			c.cfg.Plugins.Mempool = selection
 		case hostplugin.CapabilityAPIBlockfrost:
 			c.cfg.Plugins.API.Blockfrost = selection
-		case hostplugin.CapabilityAPIKupo:
-			c.cfg.Plugins.API.Kupo = selection
 		case hostplugin.CapabilityAPIMesh:
 			c.cfg.Plugins.API.Mesh = selection
 		case hostplugin.CapabilityAPIUtxorpc:
@@ -1007,11 +1012,19 @@ func WithCardanoNodeConfig(
 	}
 }
 
-// WithBindAddr specifies the IP address used for API listeners
-// (Blockfrost, Kupo, Mesh, UTxO RPC). The default is "0.0.0.0" (all interfaces).
+// WithBindAddr specifies the IP address used by relay and metrics listeners.
+// API listeners use WithAPIBindAddr.
 func WithBindAddr(addr string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BindAddr = addr
+	}
+}
+
+// WithAPIBindAddr specifies the IP address used by the Blockfrost, Mesh, and
+// UTxO RPC listeners. It defaults to loopback; remote binds require API auth.
+func WithAPIBindAddr(addr string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.APIBindAddr = addr
 	}
 }
 
@@ -1107,7 +1120,7 @@ func WithUtxorpcPort(port uint) ConfigOptionFunc {
 }
 
 // WithAPIConfig sets the shared api.tls/api.auth policy applied to every
-// selected plugins.api.* provider (Blockfrost, Kupo, Mesh, UTxORPC) unless that
+// selected plugins.api.* provider (Blockfrost, Mesh, UTxORPC) unless that
 // provider's own plugins.api.<name>.config.tls/auth overrides a field.
 // See internal/apiconfig and ARCHITECTURE.md's "API security" section.
 func WithAPIConfig(cfg internalconfig.APIConfig) ConfigOptionFunc {
@@ -1492,14 +1505,6 @@ func WithBlockfrostPort(port uint) ConfigOptionFunc {
 	}
 }
 
-// WithKupoPort specifies the port for the Kupo-compatible REST API server.
-// The server binds to the node's bindAddr on this port. 0 disables it.
-func WithKupoPort(port uint) ConfigOptionFunc {
-	return func(c *Config) {
-		c.cfg.Plugins.API.Kupo.Config["port"] = port
-	}
-}
-
 func WithBarkBaseUrl(baseUrl string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkBaseUrl = baseUrl
@@ -1784,9 +1789,18 @@ func (c *Config) MetadataPlugin() string {
 	return c.cfg.Plugins.Storage.Metadata.Provider
 }
 
-// BindAddr returns the IP address for API listeners.
+// BindAddr returns the IP address for relay and metrics listeners.
 func (c *Config) BindAddr() string {
 	return c.cfg.BindAddr
+}
+
+// APIBindAddr returns the IP address for the Blockfrost, Mesh, and UTxO RPC
+// listeners.
+func (c *Config) APIBindAddr() string {
+	if c.cfg.APIBindAddr == "" {
+		return internalconfig.DefaultAPIBindAddr
+	}
+	return c.cfg.APIBindAddr
 }
 
 // PrivateBindAddr returns the IP address for the private NtC listener.
@@ -1817,11 +1831,6 @@ func (c *Config) DebugPort() uint {
 // BlockfrostPort returns the Blockfrost API port. 0 disables the server.
 func (c *Config) BlockfrostPort() uint {
 	return internalconfig.APIPluginPort(c.cfg.Plugins.API.Blockfrost)
-}
-
-// KupoPort returns the Kupo API port. 0 disables the server.
-func (c *Config) KupoPort() uint {
-	return internalconfig.APIPluginPort(c.cfg.Plugins.API.Kupo)
 }
 
 // UtxorpcPort returns the UTxO RPC gRPC API port. 0 disables the server.

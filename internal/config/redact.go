@@ -109,6 +109,7 @@ var logPlainConfigFields = []string{
 	"API.Auth.TokenFilePath",
 	"API.TLS.CertFilePath",
 	"API.TLS.KeyFilePath",
+	"APIBindAddr",
 	"API.TLS.Mode",
 	"ActivePeersGossipQuota",
 	"ActivePeersLedgerQuota",
@@ -619,6 +620,8 @@ func sortedStringKeys(v reflect.Value) []string {
 // operational value of knowing which host and database the node was
 // pointed at, which is most of the reason the configuration is logged at
 // all.
+// Ambiguous assignment-shaped inputs follow DSN value boundaries: a query-like
+// suffix inside a credential value is redacted too, since it may be secret.
 func redactURICredentials(s string) string {
 	if s == "" {
 		return s
@@ -637,6 +640,15 @@ func redactURICredentials(s string) string {
 // has no query string: its pairs are whitespace separated, whitespace
 // around '=' is optional, and a value containing whitespace is quoted.
 func redactCredentialParams(s string) string {
+	// net/url also accepts keyword DSNs as relative URLs. Sanitize their
+	// values first so a '?' inside a password cannot hide its prefix.
+	// Still scan any remaining query: a relative URI can also start with
+	// "name=value", so that shape alone must not disable query redaction.
+	// If the assignment itself is credential-named, its entire DSN value
+	// stays secret; a '?' suffix cannot safely be assumed to be a URL query.
+	if startsParam(s, skipParamSpace(s, 0), keywordDSNSyntax) {
+		s = redactParams(s, keywordDSNSyntax)
+	}
 	if start, end, ok := uriQuerySpan(s); ok {
 		return s[:start] +
 			redactParams(s[start:end], uriQuerySyntax) +
@@ -656,6 +668,8 @@ type paramSyntax struct {
 	// without them "api%5Fkey" scans as the two fragments "api" and
 	// "5Fkey", and neither of those reads as a credential.
 	encoded bool
+	// quoted reports whether quotes delimit values rather than being data.
+	quoted bool
 }
 
 var (
@@ -665,7 +679,7 @@ var (
 	// keywordDSNSyntax is the keyword-form database DSN: whitespace
 	// separates the pairs and the keywords are literal, because no DSN
 	// parser percent-decodes them.
-	keywordDSNSyntax = paramSyntax{delims: " \t\r\n"}
+	keywordDSNSyntax = paramSyntax{delims: " \t\r\n", quoted: true}
 )
 
 // isNameByte reports whether b belongs to a parameter name written in this
@@ -678,8 +692,8 @@ func (syntax paramSyntax) isNameByte(b byte) bool {
 }
 
 // uriQuerySpan returns the bounds of s's URI query string, if it has one.
-// net/url does the parsing, so a keyword DSN -- which is not a URI -- does
-// not get its whitespace-separated keywords treated as query parameters.
+// net/url does the parsing after any leading keyword-DSN form has been
+// sanitized, since net/url also accepts that form as a relative URI.
 // The span is verified against RawQuery before it is used, so a URI whose
 // '?' net/url located differently is left to the keyword scanner instead
 // of being spliced at the wrong offset.
@@ -766,9 +780,10 @@ func paramValueStart(s string, nameEnd int, syntax paramSyntax) (int, bool) {
 // paramValueEnd returns the index one past the value beginning at i. A
 // quoted value ends at its closing quote, so a keyword DSN password
 // containing whitespace is redacted whole rather than up to its first
-// space; an unquoted value ends at the first byte in delims.
+// space; URI query quotes are literal data. Other values end at the first
+// byte in delims.
 func paramValueEnd(s string, i int, syntax paramSyntax) int {
-	if i < len(s) && (s[i] == '\'' || s[i] == '"') {
+	if syntax.quoted && i < len(s) && (s[i] == '\'' || s[i] == '"') {
 		quote := s[i]
 		for j := i + 1; j < len(s); {
 			switch s[j] {
