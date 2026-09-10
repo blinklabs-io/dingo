@@ -90,6 +90,8 @@ func bareRefMapFromArrayWrapped(t *testing.T, arrayWrapped []byte) []byte {
 // parsing dropped or mis-counted refs for large maps (the #2729 "decode to zero"
 // hypothesis), these would fail.
 func TestLeiosEndorserBlockLargeMapDecodesAllRefs(t *testing.T) {
+	t.Parallel()
+
 	for _, refCount := range []int{24, 256, 300, 715, 1200, 1604} {
 		_, arrayWrapped := testLeiosEndorserBlockRawWithRefs(t, 42, refCount)
 
@@ -125,6 +127,8 @@ func TestLeiosEndorserBlockLargeMapDecodesAllRefs(t *testing.T) {
 // "must contain at least one transaction reference" error is emitted only for a
 // genuinely empty references map, and never for a large non-empty manifest.
 func TestLeiosEndorserBlockZeroRefsErrorOnlyFromEmptyManifest(t *testing.T) {
+	t.Parallel()
+
 	const zeroRefsMsg = "must contain at least one transaction reference"
 
 	// Empty bare map: 0xa0.
@@ -160,6 +164,8 @@ func TestLeiosEndorserBlockZeroRefsErrorOnlyFromEmptyManifest(t *testing.T) {
 // reference" that made the fetch problem look like a decode/consensus defect and
 // wedged the ledger.
 func TestStoreLeiosEndorserBlockEmptyManifestIsHashMismatch(t *testing.T) {
+	t.Parallel()
+
 	// The point identifies a real, non-empty endorser block (1000 refs).
 	point, _ := testLeiosEndorserBlockRawWithRefs(t, 15, 1000)
 
@@ -198,6 +204,8 @@ func TestStoreLeiosEndorserBlockEmptyManifestIsHashMismatch(t *testing.T) {
 // violation, not a wrong peer response) is still rejected by the decode
 // invariant.
 func TestStoreLeiosEndorserBlockGenuinelyEmptyEbStillRejected(t *testing.T) {
+	t.Parallel()
+
 	emptyManifest := []byte{0xa0}
 	hash := lcommon.Blake2b256Hash(emptyManifest)
 	point := ocommon.NewPoint(15, hash.Bytes())
@@ -229,6 +237,8 @@ func TestStoreLeiosEndorserBlockGenuinelyEmptyEbStillRejected(t *testing.T) {
 // checks do not regress the happy path: a valid, hash-matching manifest is
 // decoded and cached.
 func TestStoreLeiosEndorserBlockValidManifestStillStores(t *testing.T) {
+	t.Parallel()
+
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 15, 300)
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})

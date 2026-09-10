@@ -72,6 +72,10 @@ type LedgerView struct {
 	horizonAnchorSlot uint64
 }
 
+func uint64Ptr(value uint64) *uint64 {
+	return &value
+}
+
 func (lv *LedgerView) pinCommitteeState(
 	epoch uint64,
 	pparams lcommon.ProtocolParameters,
@@ -1241,8 +1245,17 @@ func (lv *LedgerView) DRepRegistration(
 		}
 		return nil, fmt.Errorf("get drep: %w", err)
 	}
+	deposit, err := lv.ls.db.GetDrepLastRegistrationDeposit(
+		drep.CredentialTag,
+		credential[:],
+		lv.txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get drep last registration deposit: %w", err)
+	}
 	reg := &lcommon.DRepRegistration{
 		Credential: credential,
+		Deposit:    deposit,
 	}
 	if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 		if len(drep.AnchorHash) != 32 {
@@ -1267,10 +1280,36 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get active dreps: %w", err)
 	}
+	// One batched read rather than a deposit query per DRep, because
+	// mainnet has thousands of active DReps, and scoped to the same active
+	// credential set fetched above so registration history left behind by
+	// DReps that have since deregistered cannot grow this. A credential
+	// with no registration row is absent from the map and reads back as
+	// the zero value, matching the singular form above.
+	//
+	// This method is not itself on the validation path: gouroboros
+	// declares it on common.DRepState but the Conway rules reach DRep
+	// state only through the singular DRepRegistration, and nothing in
+	// either tree calls the plural form outside gouroboros's own test
+	// mocks. The batching bounds the cost of a caller that does appear
+	// rather than one that exists today.
+	deposits, err := lv.ls.db.GetDrepLastRegistrationDeposits(lv.txn)
+	if err != nil {
+		return nil, fmt.Errorf("get drep last registration deposits: %w", err)
+	}
 	registrations := make([]lcommon.DRepRegistration, 0, len(dreps))
 	for _, drep := range dreps {
+		deposit, ok := deposits[models.DrepDepositKey(
+			drep.CredentialTag,
+			drep.Credential,
+		)]
+		var depositPtr *uint64
+		if ok {
+			depositPtr = uint64Ptr(deposit)
+		}
 		reg := lcommon.DRepRegistration{
 			Credential: lcommon.NewBlake2b224(drep.Credential),
+			Deposit:    depositPtr,
 		}
 		if drep.AnchorURL != "" || len(drep.AnchorHash) > 0 {
 			if len(drep.AnchorHash) != 32 {

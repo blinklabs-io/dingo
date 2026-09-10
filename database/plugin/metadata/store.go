@@ -518,6 +518,33 @@ type GovernanceStore interface {
 		types.Txn,
 	) (uint64, error)
 
+	// GetDrepLastRegistrationDeposit returns the deposit amount recorded
+	// against the most recent registration certificate for the DRep
+	// credential, or 0 when no registration certificate history exists.
+	// The live drep row does not carry a deposit amount (registration and
+	// deregistration certificates supply/refund it, but nothing persists
+	// it on the current-state row), so deregistration-refund validation
+	// must read it from the registration_drep history instead.
+	GetDrepLastRegistrationDeposit(
+		uint8, // credentialTag
+		[]byte, // credential
+		types.Txn,
+	) (*uint64, error)
+
+	// GetDrepLastRegistrationDeposits is the set form of
+	// GetDrepLastRegistrationDeposit over the active DRep set: it returns
+	// the most recent registration deposit of every DRep GetActiveDreps
+	// reports, keyed by models.DrepDepositKey. Credentials with no
+	// registration_drep row are absent from the map, which reads back as
+	// the same 0 the singular form returns. Restricting it to the active
+	// set matches the callers, which are all listing exactly that set, and
+	// keeps the scan from growing with the registration history of DReps
+	// that have since deregistered. Listing them one at a time otherwise
+	// costs one query per DRep.
+	GetDrepLastRegistrationDeposits(
+		types.Txn,
+	) (map[string]uint64, error)
+
 	// CreateDrep inserts a Drep row directly. Used by callers (e.g.
 	// fixture seeding from outside the plugin packages) that already
 	// have a fully-populated model and want a single-row insert without
@@ -609,9 +636,13 @@ type UtxoStore interface {
 	// GetUtxosByAddressWithOrdering). The database layer performs full
 	// exact-address CBOR filtering when ExactAddress is set. An empty
 	// patterns slice returns (nil, nil), matching the coordinated
-	// Database.UtxosByAddress's empty-input handling.
+	// Database.UtxosByAddress's empty-input handling. maxResults is a
+	// required, positive bound on the number of candidate rows returned;
+	// exceeding it yields models.ErrTooManyUtxoResults instead of an
+	// unbounded or silently truncated result.
 	GetUtxosByAddress(
 		[]models.UtxoAddressPattern,
+		int,
 		types.Txn,
 	) ([]models.Utxo, error)
 
@@ -1804,8 +1835,11 @@ type MetadataStore interface {
 	// GetPoolsRetiringAtEpoch returns the pools whose effective retirement
 	// (the latest retirement not cancelled by a later re-registration, as of
 	// the boundary slot) takes effect at the given epoch, along with the
-	// reward account and deposit from their active registration. Used to apply
-	// POOLREAP deposit refunds at the epoch boundary.
+	// reward account from their active registration and the deposit that
+	// registration holds -- the amount paid by the first registration since
+	// the pool's most recent completed reap, not what the current protocol
+	// parameters would charge. Used to apply POOLREAP deposit refunds at the
+	// epoch boundary.
 	GetPoolsRetiringAtEpoch(
 		epoch uint64,
 		boundarySlot uint64,

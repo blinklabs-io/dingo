@@ -37,6 +37,7 @@ type utxoReadStore interface {
 	) ([]models.Utxo, error)
 	GetUtxosByAddress(
 		[]models.UtxoAddressPattern,
+		int,
 		types.Txn,
 	) ([]models.Utxo, error)
 	GetUtxosByAddressAtSlot(
@@ -79,7 +80,7 @@ func TestSharedSQLStoreUtxoReadParity(t *testing.T) {
 func TestGetUtxosByAddressEmptyPatterns(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
-	got, err := store.GetUtxosByAddress(nil, nil)
+	got, err := store.GetUtxosByAddress(nil, 100, nil)
 	require.NoError(t, err)
 	require.Nil(t, got)
 }
@@ -149,6 +150,7 @@ func exerciseUtxoReadStore(t *testing.T, store utxoReadStore) utxoReadState {
 	pattern := models.UtxoAddressPattern{PaymentPart: paymentKey}
 	ret.byAddress, err = store.GetUtxosByAddress(
 		[]models.UtxoAddressPattern{pattern},
+		100,
 		nil,
 	)
 	require.NoError(t, err)

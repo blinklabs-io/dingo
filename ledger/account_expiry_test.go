@@ -17,6 +17,8 @@ package ledger
 import "testing"
 
 func TestAccountExpiredAtEpoch(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		exp, cur uint64
 		expired  bool

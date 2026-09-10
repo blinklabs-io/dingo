@@ -60,6 +60,8 @@ func testPoolKeyHash(value []byte) lcommon.PoolKeyHash {
 }
 
 func TestImportOpCertCountersStoresCertifiedBaseline(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
@@ -84,6 +86,8 @@ func TestImportOpCertCountersStoresCertifiedBaseline(t *testing.T) {
 }
 
 func TestSnapshotImportTargetsAlignWithRotation(t *testing.T) {
+	t.Parallel()
+
 	snapshots := &ParsedSnapShots{}
 
 	targets := snapshotImportTargets(1237, snapshots)
@@ -121,6 +125,8 @@ func TestSnapshotImportTargetsAlignWithRotation(t *testing.T) {
 }
 
 func TestSnapshotImportTargetsSkipNegativeEpochs(t *testing.T) {
+	t.Parallel()
+
 	snapshots := &ParsedSnapShots{}
 
 	targets0 := snapshotImportTargets(0, snapshots)
@@ -144,6 +150,8 @@ func TestSnapshotImportTargetsSkipNegativeEpochs(t *testing.T) {
 }
 
 func TestSnapshotImportTargetsNilSnapshots(t *testing.T) {
+	t.Parallel()
+
 	targets := snapshotImportTargets(7, nil)
 	if targets != nil {
 		t.Fatalf("expected nil targets, got %+v", targets)
@@ -151,6 +159,8 @@ func TestSnapshotImportTargetsNilSnapshots(t *testing.T) {
 }
 
 func TestImportSnapShotsPreservesBoundaryCaptureProvenance(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
@@ -209,6 +219,8 @@ func TestImportSnapShotsPreservesBoundaryCaptureProvenance(t *testing.T) {
 }
 
 func TestImportedEpochSummaryUsesCurrentEpochMetadata(t *testing.T) {
+	t.Parallel()
+
 	nonce := []byte{0x01, 0x02, 0x03}
 
 	summary := importedEpochSummary(
@@ -244,6 +256,8 @@ func TestImportedEpochSummaryUsesCurrentEpochMetadata(t *testing.T) {
 }
 
 func TestImportedEpochSummaryLeavesHistoricalMetadataUnknown(t *testing.T) {
+	t.Parallel()
+
 	summary := importedEpochSummary(
 		nil,
 		1237,
@@ -270,6 +284,8 @@ func TestImportedEpochSummaryLeavesHistoricalMetadataUnknown(t *testing.T) {
 }
 
 func TestImportedEpochSummaryPreservesExistingMetadata(t *testing.T) {
+	t.Parallel()
+
 	existing := &models.EpochSummary{
 		Epoch:        1235,
 		EpochNonce:   []byte{0xaa, 0xbb, 0xcc},
@@ -312,6 +328,8 @@ func TestImportedEpochSummaryPreservesExistingMetadata(t *testing.T) {
 func TestImportedEpochSummaryKeepsCurrentEpochMetadataWhenExisting(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	existing := &models.EpochSummary{
 		Epoch:        1237,
 		EpochNonce:   []byte{0xaa, 0xbb, 0xcc},
@@ -346,6 +364,8 @@ func TestImportedEpochSummaryKeepsCurrentEpochMetadataWhenExisting(
 }
 
 func TestPersistImportedSnapshotClearsEpochWhenEmpty(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -419,6 +439,8 @@ func TestPersistImportedSnapshotClearsEpochWhenEmpty(t *testing.T) {
 }
 
 func TestPersistImportedActivePoolDistribution(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -468,6 +490,8 @@ func TestPersistImportedActivePoolDistribution(t *testing.T) {
 }
 
 func TestPersistImportedMarkSnapshotPreservesLeiosKey(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -535,6 +559,8 @@ func TestPersistImportedMarkSnapshotPreservesLeiosKey(t *testing.T) {
 // fallback treats them as implicit no rather than freezing today's
 // delegation map into a historical boundary.
 func TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -640,6 +666,8 @@ func TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark(t *testing.T) {
 // main correctness invariant from issue #2440: a missing pool row must not
 // produce an authoritative Resolved=true, AutoVote=None entry.
 func TestPersistImportedSnapshotMissingPoolsNotResolved(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
@@ -699,6 +727,8 @@ func TestPersistImportedSnapshotMissingPoolsNotResolved(t *testing.T) {
 //   - reward account present and active, delegated to AlwaysNoConfidence →
 //     Resolved=true, AutoVote=NoConfidence.
 func TestPersistImportedSnapshotPoolPresentAccountStates(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
@@ -828,6 +858,8 @@ func TestPersistImportedSnapshotPoolPresentAccountStates(t *testing.T) {
 // persist a value that was changed after the boundary, so the row is left
 // unresolved and the tally treats it as implicit no.
 func TestPersistImportedSnapshotHistoricalLeftUnresolved(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
@@ -901,6 +933,8 @@ func TestPersistImportedSnapshotHistoricalLeftUnresolved(t *testing.T) {
 // Mark-era params win. The fallback import feeds the current-epoch auto-vote
 // resolver, which must read the current (Mark) reward account.
 func TestCollectPoolsFromSnapshotsMarkWins(t *testing.T) {
+	t.Parallel()
+
 	poolKeyHash := bytes.Repeat([]byte{0x42}, 28)
 	markReward := bytes.Repeat([]byte{0x01}, 28)
 	goReward := bytes.Repeat([]byte{0x02}, 28)
@@ -936,6 +970,8 @@ func TestCollectPoolsFromSnapshotsMarkWins(t *testing.T) {
 // an empty pool key set in the reconcile pass and retire the very pools the
 // fallback just imported.
 func TestImportSnapShotsFallbackPopulatesReconcileKeys(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
@@ -993,6 +1029,8 @@ func TestImportSnapShotsFallbackPopulatesReconcileKeys(t *testing.T) {
 // (importPools runs before persistImportedSnapshot), the current-epoch snapshot
 // is correctly resolved rather than left with a false Resolved=true, AutoVote=None.
 func TestImportSnapShotsFallbackPoolsResolveCurrentEpoch(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
@@ -1064,6 +1102,8 @@ func TestImportSnapShotsFallbackPoolsResolveCurrentEpoch(t *testing.T) {
 }
 
 func TestImportPParamsAnchorsAddedSlotToCurrentEpochStart(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -1099,6 +1139,8 @@ func TestImportPParamsAnchorsAddedSlotToCurrentEpochStart(t *testing.T) {
 }
 
 func TestImportAccountsPreservesCredentialTag(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -1214,6 +1256,8 @@ func TestImportAccountsPreservesCredentialTag(t *testing.T) {
 // TestImportPoolsPreservesRewardAccountCredentialTag verifies snapshot
 // pool import stores reward account tags on Pool and PoolRegistration.
 func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -1275,6 +1319,8 @@ func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
 // corrupted data is replaced) reapplies the same rows without duplicating
 // them, converging to exactly one row per UTxO.
 func TestIndefiniteUTxOMapPartialCommitIsSafeToRetry(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -1283,10 +1329,20 @@ func TestIndefiniteUTxOMapPartialCommitIsSafeToRetry(t *testing.T) {
 
 	const (
 		// One more entry than the cap below, so the running check
-		// rejects the map — but only after two full utxoBatchSize
-		// (10,000-entry) batches were already committed.
-		totalEntries = 20001
-		limit        = 20000
+		// rejects the map -- but only after two full batches were
+		// already committed.
+		//
+		// batchSize is the production utxoBatchSize (10,000) scaled
+		// down. What this proves is that the running check cannot fire
+		// before whole batches have reached the callback, which is a
+		// property of the batch boundary rather than of its size; every
+		// assertion below is unchanged. At the production size the two
+		// committed batches plus the retry put 40,002 UTxO rows through
+		// SQLite under -race, and that one test cost 45.4s of the
+		// ledgerstate package's 49.1s.
+		batchSize    = 10
+		totalEntries = 2*batchSize + 1
+		limit        = 2 * batchSize
 		slot         = uint64(500)
 	)
 	data := buildIndefiniteUTxOMapCbor(t, totalEntries)
@@ -1306,7 +1362,7 @@ func TestIndefiniteUTxOMapPartialCommitIsSafeToRetry(t *testing.T) {
 	}
 
 	_, err = parseIndefiniteUTxOMapWithProgressLimit(
-		data, importBatch, nil, limit,
+		data, importBatch, nil, limit, batchSize,
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "exceeded max entries")
@@ -1325,7 +1381,7 @@ func TestIndefiniteUTxOMapPartialCommitIsSafeToRetry(t *testing.T) {
 	// covers every entry must converge without duplicating the rows
 	// the first pass already committed.
 	total, err := parseIndefiniteUTxOMapWithProgressLimit(
-		data, importBatch, nil, totalEntries,
+		data, importBatch, nil, totalEntries, batchSize,
 	)
 	require.NoError(t, err)
 	require.Equal(t, totalEntries, total)
@@ -1346,6 +1402,8 @@ func TestIndefiniteUTxOMapPartialCommitIsSafeToRetry(t *testing.T) {
 // but still leads the current epoch's fixed schedule, whose header VRF-key
 // binding check would otherwise fail on a Mithril-imported node.
 func TestSynthesizeRetiredScheduledPoolsResolvesVrfKey(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -1448,6 +1506,8 @@ func TestSynthesizeRetiredScheduledPoolsResolvesVrfKey(t *testing.T) {
 }
 
 func TestImportGovStateAnchorsProposalAndConstitutionSlots(t *testing.T) {
+	t.Parallel()
+
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -1498,6 +1558,8 @@ func TestImportGovStateAnchorsProposalAndConstitutionSlots(t *testing.T) {
 }
 
 func TestSnapshotEpochAnchorSlotUsesMatchingEraBound(t *testing.T) {
+	t.Parallel()
+
 	cfg := ImportConfig{
 		Logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
@@ -1528,6 +1590,8 @@ func TestSnapshotEpochAnchorSlotUsesMatchingEraBound(t *testing.T) {
 }
 
 func TestSnapshotEpochAnchorSlotWarnsOnFallback(t *testing.T) {
+	t.Parallel()
+
 	var logBuf bytes.Buffer
 	cfg := ImportConfig{
 		Logger: slog.New(
@@ -1555,6 +1619,8 @@ func TestSnapshotEpochAnchorSlotWarnsOnFallback(t *testing.T) {
 }
 
 func TestSnapshotEpochAnchorSlotWarnsOnMissingEpochLength(t *testing.T) {
+	t.Parallel()
+
 	var logBuf bytes.Buffer
 	cfg := ImportConfig{
 		Logger: slog.New(
@@ -1577,6 +1643,8 @@ func TestSnapshotEpochAnchorSlotWarnsOnMissingEpochLength(t *testing.T) {
 }
 
 func TestSnapshotEpochAnchorSlotWarnsOnEpochLengthError(t *testing.T) {
+	t.Parallel()
+
 	var logBuf bytes.Buffer
 	cfg := ImportConfig{
 		Logger: slog.New(

@@ -44,6 +44,8 @@ func newHookTestLedger(t *testing.T) (*LedgerState, *database.Database) {
 // no-op (and does not error) when no hook is installed — preserving the
 // event-driven fallback-only behavior.
 func TestCaptureEpochBoundarySnapshotHookNil(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newHookTestLedger(t)
 
 	result := &EpochRolloverResult{
@@ -60,6 +62,8 @@ func TestCaptureEpochBoundarySnapshotHookNil(t *testing.T) {
 // TestCaptureEpochBoundarySnapshotHookInvoked verifies the hook is called inside
 // the rollover transaction with an event derived from the new/previous epoch.
 func TestCaptureEpochBoundarySnapshotHookInvoked(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newHookTestLedger(t)
 
 	var called bool
@@ -98,6 +102,8 @@ func TestCaptureEpochBoundarySnapshotHookInvoked(t *testing.T) {
 // failure is swallowed (the rollover is not aborted) and that the failed
 // capture's writes are rolled back to the savepoint rather than committed.
 func TestCaptureEpochBoundarySnapshotHookFailureDeferred(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newHookTestLedger(t)
 
 	ls.SetEpochBoundarySnapshotHook(

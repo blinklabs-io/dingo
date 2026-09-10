@@ -26,6 +26,8 @@ import (
 // math.MaxUint64 and wrapping to a value below start, which would corrupt
 // the batch's iteration range instead of clamping to tipID.
 func TestBatchEndDoesNotWrapNearMaxUint64(t *testing.T) {
+	t.Parallel()
+
 	tipID := uint64(math.MaxUint64)
 	start := tipID - 5
 	end := batchEnd(start, tipID, 10_000)
@@ -34,16 +36,22 @@ func TestBatchEndDoesNotWrapNearMaxUint64(t *testing.T) {
 }
 
 func TestBatchEndClampsToTipIDWhenBatchSizeExceedsRemainder(t *testing.T) {
+	t.Parallel()
+
 	end := batchEnd(100, 105, 10_000)
 	assert.Equal(t, uint64(105), end)
 }
 
 func TestBatchEndStopsAtBatchSizeWhenTipIDIsFarther(t *testing.T) {
+	t.Parallel()
+
 	end := batchEnd(100, 1_000_000, 10_000)
 	assert.Equal(t, uint64(100+10_000-1), end)
 }
 
 func TestBatchEndSingleBlockBatch(t *testing.T) {
+	t.Parallel()
+
 	end := batchEnd(42, 1_000, 1)
 	assert.Equal(t, uint64(42), end)
 }
