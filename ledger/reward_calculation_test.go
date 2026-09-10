@@ -39,6 +39,8 @@ import (
 )
 
 func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 
@@ -565,6 +567,8 @@ func applyGuardExpiredLeaderScenario(
 // reproduced by the reviewer against real database rows and has no unit-level
 // fixture here.
 func TestStakeRewardEpochHelpersDivergeAtBootstrapRound(t *testing.T) {
+	t.Parallel()
+
 	for _, newEpoch := range []uint64{1, 2} {
 		_, ok := stakeRewardEpochsForNewEpoch(newEpoch)
 		require.False(
@@ -617,6 +621,8 @@ func TestStakeRewardEpochHelpersDivergeAtBootstrapRound(t *testing.T) {
 func TestApplyStakeRewardsSkipsBootstrapRoundWithByronPerformanceEpoch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 
@@ -670,6 +676,8 @@ func TestApplyStakeRewardsSkipsBootstrapRoundWithByronPerformanceEpoch(
 func TestApplyStakeRewardsSkipsEpochOneRoundWithByronPerformanceEpoch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 
@@ -716,6 +724,8 @@ func TestApplyStakeRewardsSkipsEpochOneRoundWithByronPerformanceEpoch(
 // reserves so the ADA pots reconcile exactly. Gate off is byte-identical to the
 // pre-CIP behavior (both accounts credited).
 func TestApplyStakeRewardsGuardsExpiredRewardAccount(t *testing.T) {
+	t.Parallel()
+
 	const initialReserves = uint64(100_000_000)
 
 	// Gate off: the expired reward account is still credited (pre-CIP
@@ -772,6 +782,8 @@ func TestApplyStakeRewardsGuardsExpiredRewardAccount(t *testing.T) {
 func TestGuardedExpiredRewardCredentialsUsesSnapshotWitnessHistory(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const inactivity = uint64(90)
 	ls, db := newExpiryRollbackTestLedger(t, true, inactivity)
 	cred := renewTestCred(0x71)
@@ -807,6 +819,8 @@ func TestGuardedExpiredRewardCredentialsUsesSnapshotWitnessHistory(
 }
 
 func TestApplyStakeRewardsAggregatesSharedRewardAccountBalance(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 
@@ -989,6 +1003,8 @@ func TestApplyStakeRewardsAggregatesSharedRewardAccountBalance(t *testing.T) {
 }
 
 func TestCalculateStakeRewardsRejectsPersistedStakeInputMismatch(t *testing.T) {
+	t.Parallel()
+
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	poolKey := rewardCalcHash(0x4a)
 	rewardAccount := rewardCalcHash(0x5a)
@@ -1022,6 +1038,8 @@ WHERE epoch = ? AND pool_key_hash = ? AND staking_key = ?`,
 func TestCalculateStakeRewardsRejectsPersistedOwnerStakeInputMismatch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	poolKey := rewardCalcHash(0x4a)
 
@@ -1053,6 +1071,8 @@ WHERE epoch = ? AND pool_key_hash = ?`,
 func TestCalculateStakeRewardsRejectsPersistedDelegatorCountMismatch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	poolKey := rewardCalcHash(0x4a)
 
@@ -1082,6 +1102,8 @@ WHERE epoch = ? AND pool_key_hash = ?`,
 }
 
 func TestCalculateStakeRewardsRejectsPersistedPoolCountMismatch(t *testing.T) {
+	t.Parallel()
+
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 
 	rows := rewardCalcExecRows(
@@ -1112,6 +1134,8 @@ WHERE epoch = ? AND snapshot_type = ?`,
 func TestCalculateStakeRewardsRejectsPersistedPoolInputSnapshotSlotMismatch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	poolKey := rewardCalcHash(0x4a)
 
@@ -1143,6 +1167,8 @@ WHERE epoch = ? AND pool_key_hash = ?`,
 func TestCalculateStakeRewardsRejectsPersistedStakeInputSnapshotSlotMismatch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	poolKey := rewardCalcHash(0x4a)
 	member := rewardCalcHash(0x6a)
@@ -1174,6 +1200,8 @@ WHERE epoch = ? AND pool_key_hash = ? AND staking_key = ?`,
 }
 
 func TestValidateRewardCalculatorInputsRejectsMalformedPoolInput(t *testing.T) {
+	t.Parallel()
+
 	poolKey := rewardCalcHash(0x4a)
 	rewardAccount := rewardCalcHash(0x5a)
 	member := rewardCalcHash(0x6a)
@@ -1278,6 +1306,8 @@ func TestValidateRewardCalculatorInputsRejectsMalformedPoolInput(t *testing.T) {
 func TestCalculateStakeRewardsRejectsUnknownPersistedStakeInputPool(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	unknownPool := rewardCalcHash(0x7a)
 	stakingKey := rewardCalcHash(0x8a)
@@ -1307,6 +1337,8 @@ INSERT INTO reward_stake_input (
 }
 
 func TestApplyStakeRewardsUsesPrecomputedOutputs(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 
@@ -1513,6 +1545,8 @@ func TestApplyStakeRewardsUsesPrecomputedOutputs(t *testing.T) {
 func TestApplyPrecomputedStakeRewardsChecksFinalAccountRegistration(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 
@@ -1729,6 +1763,8 @@ func TestApplyPrecomputedStakeRewardsChecksFinalAccountRegistration(
 }
 
 func TestApplyStakeRewardsDoesNotMergeCredentialTags(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 
@@ -1904,6 +1940,8 @@ func TestApplyStakeRewardsDoesNotMergeCredentialTags(t *testing.T) {
 func TestPrecomputedStakeRewardsFinalEligibilityDoesNotMergeCredentialTags(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	meta := db.Metadata()
 
@@ -2060,6 +2098,8 @@ WHERE epoch = ? AND snapshot_type = 'mark'`,
 }
 
 func TestPrecomputedStakeRewardsRequireCompletePoolOutputs(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 
@@ -2100,6 +2140,8 @@ func TestPrecomputedStakeRewardsRequireCompletePoolOutputs(t *testing.T) {
 }
 
 func TestPrecomputedStakeRewardsRejectOutputsWithoutStakeInputs(t *testing.T) {
+	t.Parallel()
+
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	meta := db.Metadata()
 
@@ -2148,6 +2190,8 @@ func TestPrecomputedStakeRewardsRejectOutputsWithoutStakeInputs(t *testing.T) {
 }
 
 func TestPrecomputedStakeRewardsRejectOutputsWithoutPoolInputs(t *testing.T) {
+	t.Parallel()
+
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	meta := db.Metadata()
 
@@ -2195,6 +2239,8 @@ func TestPrecomputedStakeRewardsRejectOutputsWithoutPoolInputs(t *testing.T) {
 }
 
 func TestPrecomputedStakeRewardsRejectExtraPoolOutputs(t *testing.T) {
+	t.Parallel()
+
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	meta := db.Metadata()
 
@@ -2247,6 +2293,8 @@ func TestPrecomputedStakeRewardsRejectExtraPoolOutputs(t *testing.T) {
 func TestPrecomputedStakeRewardsRejectPoolOutputOutsideSnapshotInputs(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	meta := db.Metadata()
 
@@ -2290,6 +2338,8 @@ func TestPrecomputedStakeRewardsRejectPoolOutputOutsideSnapshotInputs(
 func TestPrecomputedStakeRewardsRejectPoolOutputOwnerStakeMismatch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	meta := db.Metadata()
 
@@ -2332,6 +2382,8 @@ func TestPrecomputedStakeRewardsRejectPoolOutputOwnerStakeMismatch(
 }
 
 func TestPrecomputedStakeRewardsRequireCompleteAccountOutputs(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 
@@ -2385,6 +2437,8 @@ func TestPrecomputedStakeRewardsRequireCompleteAccountOutputs(t *testing.T) {
 func TestPrecomputedStakeRewardsRejectOutputsOutsideApplicationBoundary(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		newEpoch            = uint64(4)
 		rewardSnapshotEpoch = uint64(1)
@@ -2487,6 +2541,8 @@ func TestPrecomputedStakeRewardsRejectOutputsOutsideApplicationBoundary(
 }
 
 func TestPrecomputedRewardOutputsRequirePerPoolAccountTotals(t *testing.T) {
+	t.Parallel()
+
 	poolA := rewardCalcHash(0x19)
 	poolB := rewardCalcHash(0x1a)
 	accountA := rewardCalcHash(0x1b)
@@ -2597,6 +2653,8 @@ func TestPrecomputedRewardOutputsRequirePerPoolAccountTotals(t *testing.T) {
 }
 
 func TestPrecomputedRewardOutputsRequirePoolBreakdownTotals(t *testing.T) {
+	t.Parallel()
+
 	poolA := rewardCalcHash(0x19)
 	leaderA := rewardCalcHash(0x1b)
 	memberA := rewardCalcHash(0x1c)
@@ -2677,6 +2735,8 @@ func TestPrecomputedRewardOutputsRequirePoolBreakdownTotals(t *testing.T) {
 }
 
 func TestPrecomputedRewardOutputsRejectMalformedRows(t *testing.T) {
+	t.Parallel()
+
 	poolA := rewardCalcHash(0x19)
 	accountA := rewardCalcHash(0x1b)
 
@@ -2765,6 +2825,8 @@ func TestPrecomputedRewardOutputsRejectMalformedRows(t *testing.T) {
 func TestPrecomputedRewardOutputsRejectDuplicateAccountIdentities(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	poolA := rewardCalcHash(0x19)
 	accountA := rewardCalcHash(0x1b)
 
@@ -2796,6 +2858,8 @@ func TestPrecomputedRewardOutputsRejectDuplicateAccountIdentities(
 }
 
 func TestPrecomputedRewardAccountOutputsMatchPoolInputs(t *testing.T) {
+	t.Parallel()
+
 	poolA := rewardCalcHash(0x19)
 	poolB := rewardCalcHash(0x1a)
 	rewardAccount := rewardCalcHash(0x1b)
@@ -2863,6 +2927,8 @@ func TestPrecomputedRewardAccountOutputsMatchPoolInputs(t *testing.T) {
 }
 
 func TestPrecomputedRewardAccountOutputsMatchStakeInputs(t *testing.T) {
+	t.Parallel()
+
 	poolA := rewardCalcHash(0x19)
 	rewardAccount := rewardCalcHash(0x1b)
 	memberAccount := rewardCalcHash(0x1c)
@@ -2943,6 +3009,8 @@ func TestPrecomputedRewardAccountOutputsMatchStakeInputs(t *testing.T) {
 }
 
 func TestPrecomputedRewardAccountAmountsMatchInputs(t *testing.T) {
+	t.Parallel()
+
 	poolA := rewardCalcHash(0x40)
 	rewardAccount := rewardCalcHash(0x41)
 	memberA := rewardCalcHash(0x42)
@@ -3112,6 +3180,8 @@ func TestPrecomputedRewardAccountAmountsMatchInputs(t *testing.T) {
 }
 
 func TestPrecomputedRewardPoolRewardsMatchInputs(t *testing.T) {
+	t.Parallel()
+
 	poolKey := rewardCalcHash(0x51)
 	poolID, err := rewards.NewPoolID(poolKey)
 	require.NoError(t, err)
@@ -3213,6 +3283,8 @@ func TestPrecomputedRewardPoolRewardsMatchInputs(t *testing.T) {
 // every pre-existing reuse check but is rejected because the stored reward does
 // not match the value re-derived from the frozen inputs.
 func TestPrecomputedStakeRewardsRejectPoolRewardMismatch(t *testing.T) {
+	t.Parallel()
+
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	meta := db.Metadata()
 
@@ -3325,6 +3397,8 @@ func TestPrecomputedStakeRewardsRejectPoolRewardMismatch(t *testing.T) {
 }
 
 func TestSaveStakeRewardOutputsReplacesEpochRows(t *testing.T) {
+	t.Parallel()
+
 	_, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 	const rewardSnapshotEpoch = uint64(9)
@@ -3415,6 +3489,8 @@ func TestSaveStakeRewardOutputsReplacesEpochRows(t *testing.T) {
 func TestPrecomputedStakeRewardsRejectPoolOutputsAboveAvailableRewards(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		newEpoch            = uint64(4)
 		rewardSnapshotEpoch = uint64(1)
@@ -3551,6 +3627,8 @@ func TestPrecomputedStakeRewardsRejectPoolOutputsAboveAvailableRewards(
 func TestPrecomputedStakeRewardsRejectPoolInputsMismatchingSnapshot(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		newEpoch            = uint64(4)
 		rewardSnapshotEpoch = uint64(1)
@@ -3599,6 +3677,8 @@ func TestPrecomputedStakeRewardsRejectPoolInputsMismatchingSnapshot(
 }
 
 func TestPrecomputedRewardPoolInputsRejectMalformedRows(t *testing.T) {
+	t.Parallel()
+
 	poolKey := rewardCalcHash(0x4a)
 	rewardAccount := rewardCalcHash(0x5a)
 	snapshot := &models.RewardSnapshot{
@@ -3716,6 +3796,8 @@ func TestPrecomputedRewardPoolInputsRejectMalformedRows(t *testing.T) {
 }
 
 func TestPrecomputedStakeRewardsRejectImpossibleRewardPot(t *testing.T) {
+	t.Parallel()
+
 	const (
 		newEpoch            = uint64(4)
 		rewardSnapshotEpoch = uint64(1)
@@ -3780,6 +3862,8 @@ func TestPrecomputedStakeRewardsRejectImpossibleRewardPot(t *testing.T) {
 }
 
 func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
+	t.Parallel()
+
 	const (
 		newEpoch            = uint64(4)
 		rewardSnapshotEpoch = uint64(1)
@@ -3934,6 +4018,8 @@ func TestPrecomputeStakeRewardsWaitsForPreBabbagePrefilterSlot(t *testing.T) {
 func TestRewardPrecomputeEpochTransitionStoresNextBoundaryOutputs(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	meta := db.Metadata()
 
@@ -3983,6 +4069,8 @@ func TestRewardPrecomputeEpochTransitionStoresNextBoundaryOutputs(
 }
 
 func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
+	t.Parallel()
+
 	const (
 		newEpoch            = uint64(4)
 		rewardSnapshotEpoch = uint64(1)
@@ -4151,6 +4239,8 @@ func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
 }
 
 func TestPrecomputedStakeRewardsRejectMissingBabbageLeaderOutput(t *testing.T) {
+	t.Parallel()
+
 	ls, db := seedRewardPrecomputeTimingState(t, 7)
 	meta := db.Metadata()
 
@@ -4214,6 +4304,8 @@ func TestPrecomputedStakeRewardsRejectMissingBabbageLeaderOutput(t *testing.T) {
 func TestPrecomputedStakeRewardsCheckPreBabbageMissingLeaderPrefilter(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		newEpoch            = uint64(4)
 		rewardSnapshotEpoch = uint64(1)
@@ -4326,6 +4418,8 @@ func TestPrecomputedStakeRewardsCheckPreBabbageMissingLeaderPrefilter(
 func TestApplyStakeRewardsUsesRewardUpdatePrefilterAccountHistory(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 
@@ -4533,6 +4627,8 @@ func TestApplyStakeRewardsUsesRewardUpdatePrefilterAccountHistory(
 }
 
 func TestApplyStakeRewardsPrefilterUsesBeginningOfRUPDSlot(t *testing.T) {
+	t.Parallel()
+
 	ls, db := seedRewardPrecomputeTimingState(t, 6)
 	meta := db.Metadata()
 
@@ -4600,6 +4696,8 @@ func TestApplyStakeRewardsPrefilterUsesBeginningOfRUPDSlot(t *testing.T) {
 }
 
 func TestApplyStakeRewardsAccountsEmptySnapshotPots(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 
@@ -4693,6 +4791,8 @@ func TestApplyStakeRewardsAccountsEmptySnapshotPots(t *testing.T) {
 }
 
 func TestStakeRewardEpochsForNewEpochMatchDelayedUpdate(t *testing.T) {
+	t.Parallel()
+
 	for _, newEpoch := range []uint64{0, 1, 2} {
 		_, ok := stakeRewardEpochsForNewEpoch(newEpoch)
 		require.False(t, ok, "epoch %d has no delayed reward update", newEpoch)
@@ -4729,6 +4829,8 @@ func TestStakeRewardEpochsForNewEpochMatchDelayedUpdate(t *testing.T) {
 func TestRewardParametersSplitCalculationAndPerformanceEpochInputs(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 
@@ -4837,6 +4939,8 @@ func TestRewardParametersSplitCalculationAndPerformanceEpochInputs(
 func TestRewardParametersBabbageDefaultsDecentralizationAndForgoesPrefilter(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, _ := newRewardCalculationTestLedger(t)
 	pparams := &babbage.BabbageProtocolParameters{
 		NOpt:          10,
@@ -4860,6 +4964,8 @@ func TestRewardParametersBabbageDefaultsDecentralizationAndForgoesPrefilter(
 }
 
 func TestRewardParametersRejectIncompletePParams(t *testing.T) {
+	t.Parallel()
+
 	ls, _ := newRewardCalculationTestLedger(t)
 	pparams := &shelley.ShelleyProtocolParameters{
 		NOpt:             10,
@@ -4880,6 +4986,8 @@ func TestRewardParametersRejectIncompletePParams(t *testing.T) {
 }
 
 func TestApplyPledgeLeverageConfigEnabledSetsRationalL(t *testing.T) {
+	t.Parallel()
+
 	params := rewards.Parameters{}
 	applyPledgeLeverageConfig(&params, LedgerStateConfig{
 		PledgeLeverageEnabled: true,
@@ -4890,6 +4998,8 @@ func TestApplyPledgeLeverageConfigEnabledSetsRationalL(t *testing.T) {
 }
 
 func TestApplyPledgeLeverageConfigDisabledClearsL(t *testing.T) {
+	t.Parallel()
+
 	params := rewards.Parameters{
 		PledgeLeverageEnabled: true,
 		PledgeLeverage:        big.NewRat(50, 1),
@@ -4903,6 +5013,8 @@ func TestApplyPledgeLeverageConfigDisabledClearsL(t *testing.T) {
 }
 
 func TestRewardBlockCountsTotalIncludesPoolsOutsideSnapshot(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 
@@ -4959,6 +5071,8 @@ func TestRewardBlockCountsTotalIncludesPoolsOutsideSnapshot(t *testing.T) {
 }
 
 func TestRewardBlockCountsSkipsOverlaySlots(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 
@@ -5019,6 +5133,8 @@ func TestRewardBlockCountsSkipsOverlaySlots(t *testing.T) {
 }
 
 func TestRewardPrefilterSlotUsesRUPDRandomnessWindow(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 	require.NoError(t, meta.SetEpoch(
@@ -5046,6 +5162,8 @@ func TestRewardPrefilterSlotUsesRUPDRandomnessWindow(t *testing.T) {
 }
 
 func TestProcessEpochRolloverSnapshotEventUsesProtocolMajor(t *testing.T) {
+	t.Parallel()
+
 	ls, db := newRewardCalculationTestLedger(t)
 	pparams := &shelley.ShelleyProtocolParameters{
 		NOpt:             10,
@@ -5110,6 +5228,8 @@ func TestProcessEpochRolloverSnapshotEventUsesProtocolMajor(t *testing.T) {
 func TestPrecomputeStakeRewardsAsyncPathMatchesSingleTransactionPath(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		rewardSnapshotEpoch = uint64(1)
 		potsEpoch           = uint64(3)
@@ -5233,6 +5353,8 @@ func rewardCalcNormalizeAccountOutputs(
 // never persists a stale result -- while still accepting a matching,
 // unchanged snapshot.
 func TestStakeRewardPrecomputeSnapshotGuardOK(t *testing.T) {
+	t.Parallel()
+
 	const (
 		rewardSnapshotEpoch = uint64(1)
 		newEpoch            = uint64(4)
@@ -5415,6 +5537,8 @@ func TestStakeRewardPrecomputeSnapshotGuardOK(t *testing.T) {
 }
 
 func TestRewardPrefilterAccountsSkipsHistoryWhenNotRequired(t *testing.T) {
+	t.Parallel()
+
 	activeAccounts := map[string]struct{}{"active": {}}
 	accounts, err := rewardPrefilterAccounts(
 		rewardAccountHistoryMustNotRun{},
@@ -5448,6 +5572,8 @@ func (rewardAccountHistoryMustNotRun) GetAccountsActiveAtSlot(
 func TestStakeRewardPrecomputeSnapshotGuardRejectsSameSlotContentChange(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const (
 		rewardSnapshotEpoch = uint64(1)
 		newEpoch            = uint64(4)
@@ -5797,6 +5923,8 @@ INSERT INTO stake_deregistration (
 // --- CIP-23 minimum pool margin wiring ---
 
 func TestMinPoolMarginRat(t *testing.T) {
+	t.Parallel()
+
 	require.Nil(t, minPoolMarginRat(0))
 	require.Zero(t, big.NewRat(150, 10_000).Cmp(minPoolMarginRat(150)))
 	require.Zero(t, big.NewRat(1, 1).Cmp(minPoolMarginRat(10_000)))
@@ -5805,6 +5933,8 @@ func TestMinPoolMarginRat(t *testing.T) {
 // applyMinPoolMarginConfig sets the floor only when the value is nonzero AND the
 // calculation is for Dijkstra (major >= 12); otherwise it leaves the field nil.
 func TestApplyMinPoolMarginConfig(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name    string
 		bp      uint
@@ -5844,6 +5974,8 @@ func TestApplyMinPoolMarginConfig(t *testing.T) {
 }
 
 func TestLedgerStateMinPoolMargin(t *testing.T) {
+	t.Parallel()
+
 	ls, _ := newRewardCalculationTestLedger(t)
 	require.Nil(t, ls.MinPoolMargin())
 	ls.config.MinPoolMargin = 150
@@ -5853,12 +5985,16 @@ func TestLedgerStateMinPoolMargin(t *testing.T) {
 // --- CIP-0163 full-pot reward distribution -------------------------------
 
 func TestApplyFullPotConfigEnabled(t *testing.T) {
+	t.Parallel()
+
 	params := rewards.Parameters{}
 	applyFullPotConfig(&params, LedgerStateConfig{FullPotRewardsEnabled: true})
 	require.True(t, params.FullPotRewardsEnabled)
 }
 
 func TestApplyFullPotConfigDisabled(t *testing.T) {
+	t.Parallel()
+
 	params := rewards.Parameters{FullPotRewardsEnabled: true}
 	applyFullPotConfig(&params, LedgerStateConfig{FullPotRewardsEnabled: false})
 	require.False(t, params.FullPotRewardsEnabled)
@@ -5872,6 +6008,8 @@ func TestApplyFullPotConfigDisabled(t *testing.T) {
 // off the same apportioned totals are rejected because the disabled path
 // expects each pool's base reward.
 func TestPrecomputedRewardPoolRewardsMatchInputsFullPot(t *testing.T) {
+	t.Parallel()
+
 	keyA := rewardCalcHash(0x51)
 	keyB := rewardCalcHash(0x52)
 
@@ -6019,4 +6157,83 @@ func TestPrecomputedRewardPoolRewardsMatchInputsFullPot(t *testing.T) {
 	paramsOff := params
 	paramsOff.FullPotRewardsEnabled = false
 	require.False(t, check(paramsOff, apportioned))
+}
+
+// TestRewardCalculatorInputsAllowExcludedPoolStake covers the reward-input
+// shape snapshot capture writes when a pool is excluded for degraded
+// registration data: reward_pool_input holds only the surviving pools, while
+// reward_snapshot.total_active_stake still carries the excluded pool's
+// delegated stake because that stake belongs in the sigma_a denominator (see
+// snapshot.buildRewardStateInputs). Requiring the rows to sum to exactly the
+// snapshot total forced the denominator down to the surviving pool set, which
+// under-credits every reward the node reconstructs.
+func TestRewardCalculatorInputsAllowExcludedPoolStake(t *testing.T) {
+	t.Parallel()
+
+	poolKey := rewardCalcHash(0x4a)
+	rewardAccount := rewardCalcHash(0x5a)
+	member := rewardCalcHash(0x6a)
+	snapshot := func(totalActiveStake uint64) *models.RewardSnapshot {
+		return &models.RewardSnapshot{
+			TotalActiveStake: types.Uint64(totalActiveStake),
+			TotalPoolCount:   1,
+			TotalDelegators:  1,
+			CapturedSlot:     10,
+			BoundarySlot:     20,
+		}
+	}
+	poolInputs := []*models.RewardPoolInput{
+		{
+			PoolKeyHash:                poolKey,
+			RewardAccount:              rewardAccount,
+			RewardAccountCredentialTag: 0,
+			Margin:                     &types.Rat{Rat: big.NewRat(1, 10)},
+			DelegatedStake:             100,
+			OwnerStake:                 0,
+			DelegatorCount:             1,
+			CapturedSlot:               10,
+			BoundarySlot:               20,
+		},
+	}
+	stakeInputs := []*models.RewardStakeInput{
+		{
+			PoolKeyHash:  poolKey,
+			StakingKey:   member,
+			Stake:        100,
+			CapturedSlot: 10,
+			BoundarySlot: 20,
+		},
+	}
+
+	// 40 lovelace of the boundary's active stake belongs to an excluded pool.
+	require.NoError(t, validateRewardCalculatorInputs(
+		snapshot(140),
+		poolInputs,
+		stakeInputs,
+	))
+	match, err := precomputedRewardPoolInputsMatchSnapshot(
+		snapshot(140),
+		poolInputs,
+	)
+	require.NoError(t, err)
+	require.True(t, match)
+
+	// Rows summing to more than the declared active stake still fail: the row
+	// set and the snapshot then describe different boundaries.
+	err = validateRewardCalculatorInputs(
+		snapshot(99),
+		poolInputs,
+		stakeInputs,
+	)
+	require.ErrorContains(
+		t,
+		err,
+		"reward pool input total delegated stake 100 exceeds snapshot active stake 99",
+	)
+	match, err = precomputedRewardPoolInputsMatchSnapshot(
+		snapshot(99),
+		poolInputs,
+	)
+	require.NoError(t, err)
+	require.False(t, match)
 }

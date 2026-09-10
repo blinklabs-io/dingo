@@ -64,6 +64,8 @@ func requireAscending(t *testing.T, got []int) {
 // Publish; a single 200-event run reordered 3-8 of them. See
 // blinklabs-io/dingo#2287.
 func TestPublishOrderedPreservesPublisherOrder(t *testing.T) {
+	t.Parallel()
+
 	const n = 500
 	eb := NewEventBus(nil, nil)
 	t.Cleanup(eb.Close)
@@ -88,6 +90,8 @@ func TestPublishOrderedPreservesPublisherOrder(t *testing.T) {
 func TestPublishOrderedPreservesOrderUnderConcurrentAsyncTraffic(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	const n = 500
 	eb := NewEventBus(nil, nil)
 	t.Cleanup(eb.Close)
@@ -119,6 +123,8 @@ func TestPublishOrderedPreservesOrderUnderConcurrentAsyncTraffic(
 // guarantee documented for the rest of the bus: a full ordered lane
 // backpressures its publisher instead of discarding events.
 func TestPublishOrderedWaitsForCapacityRatherThanDropping(t *testing.T) {
+	t.Parallel()
+
 	// More events than the lane buffer can hold, with a subscriber that
 	// only starts draining once the publisher is demonstrably parked.
 	total := OrderedQueueSize + 64
@@ -180,6 +186,8 @@ func TestPublishOrderedWaitsForCapacityRatherThanDropping(t *testing.T) {
 // a stopped or closed bus reports the failed publish rather than accepting an
 // event nothing will deliver.
 func TestPublishOrderedReturnsFalseWhenStopped(t *testing.T) {
+	t.Parallel()
+
 	eb := NewEventBus(nil, nil)
 	eb.Close()
 	if eb.PublishOrdered("ordered.stopped", NewEvent("ordered.stopped", 0)) {
@@ -191,6 +199,8 @@ func TestPublishOrderedReturnsFalseWhenStopped(t *testing.T) {
 // path: Stop tears the lanes down, and the next publish must rebuild them
 // bound to the new stop channel rather than to the torn-down one.
 func TestPublishOrderedPreservesOrderAfterStopRestart(t *testing.T) {
+	t.Parallel()
+
 	const n = 200
 	eb := NewEventBus(nil, nil)
 	t.Cleanup(eb.Close)
@@ -230,6 +240,8 @@ func TestPublishOrderedPreservesOrderAfterStopRestart(t *testing.T) {
 // cannot stall an unrelated lane. Per-type lanes are what make this true; the
 // shared async pool explicitly does not promise it.
 func TestPublishOrderedIsolatesEventTypes(t *testing.T) {
+	t.Parallel()
+
 	const n = 100
 	eb := NewEventBus(nil, nil)
 	t.Cleanup(eb.Close)
@@ -262,6 +274,8 @@ func TestPublishOrderedIsolatesEventTypes(t *testing.T) {
 func TestPublishOrderedContextRejectsCancelledContextWithRoomInLane(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	eb := NewEventBus(nil, nil)
 	t.Cleanup(eb.Close)
 

@@ -16,7 +16,9 @@ package config
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
+	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -24,6 +26,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/stretchr/testify/require"
 )
 
 // configLeafFieldPaths returns the dotted Go field path of every exported
@@ -163,11 +167,12 @@ func sentinelSecretConfig() *Config {
 		},
 		Mithril: MithrilConfig{
 			AggregatorURL: "https://aggregator.example/aggregator" +
-				"?apiKey=SENTINEL-MITHRIL-KEY&network=preview",
+				"?apiKey='prefix'SENTINEL-MITHRIL-KEY&network=preview",
 		},
 		TokenRegistry: TokenRegistryConfig{
 			SourceURL: "https://reg:SENTINEL-TOKEN-REGISTRY-PASSWORD" +
-				"@registry.example/registry.tar.gz",
+				"@registry.example/registry.tar.gz" +
+				"?apiKey='prefix'SENTINEL-TOKEN-REGISTRY-PASSWORD",
 		},
 		OffchainMetadata: OffchainMetadataConfig{
 			IPFSGatewayURL: "https://ipfs:SENTINEL-IPFS-PASSWORD" +
@@ -194,8 +199,9 @@ func sentinelSecretConfig() *Config {
 						"database": "dingo",
 						"sslMode":  "require",
 						"password": "SENTINEL-PG-PASSWORD",
-						"dsn": "postgres://dingo:SENTINEL-DSN-PASSWORD" +
-							"@db.example:5432/dingo?sslmode=require",
+						"dsn": "host=db.example port=5432 dbname=dingo " +
+							"password='SENTINEL-DSN-PASSWORD?part' " +
+							"sslmode=require",
 						"futureKey": "SENTINEL-UNKNOWN-PROVIDER-KEY",
 					},
 				},
@@ -358,10 +364,60 @@ func TestRedactURICredentials(t *testing.T) {
 				redactedPlaceholder + " dbname=dingo",
 		},
 		{
+			name: "keyword dsn question mark in password",
+			in:   "host=db.example password='secret?part' dbname=dingo",
+			want: "host=db.example password=" + redactedPlaceholder +
+				" dbname=dingo",
+		},
+		{
+			name: "keyword dsn leading whitespace and query-shaped password",
+			in:   "  password = 'prefix?apiKey=secret' dbname=dingo",
+			want: "  password = " + redactedPlaceholder + " dbname=dingo",
+		},
+		{
+			name: "relative query retains credential boundary",
+			in:   "path?apiKey=secret&page=2",
+			want: "path?apiKey=" + redactedPlaceholder + "&page=2",
+		},
+		{
+			name: "ambiguous unquoted dsn keeps query-shaped suffix secret",
+			in:   "password=secret?network=preview&apiKey=key",
+			want: "password=" + redactedPlaceholder,
+		},
+		{
+			name: "unquoted dsn retains whitespace-delimited database",
+			in:   "password=secret?network=preview dbname=dingo",
+			want: "password=" + redactedPlaceholder + " dbname=dingo",
+		},
+		{
+			name: "ambiguous relative query still redacts credentials",
+			in:   "path=value?apiKey=secret&page=2",
+			want: "path=value?apiKey=" + redactedPlaceholder + "&page=2",
+		},
+		{
+			name: "mysql query and userinfo",
+			in:   "dingo:secret@tcp(db.example:3306)/db?apiKey=key&parseTime=true",
+			want: "dingo:" + redactedPlaceholder +
+				"@tcp(db.example:3306)/db?apiKey=" +
+				redactedPlaceholder + "&parseTime=true",
+		},
+		{
 			name: "credential query parameter",
 			in:   "https://aggregator.example/x?apiKey=abc123&network=preview",
 			want: "https://aggregator.example/x?apiKey=" +
 				redactedPlaceholder + "&network=preview",
+		},
+		{
+			name: "query quotes are literal",
+			in:   "https://api.example/v1?apiKey='prefix'credential&page=2",
+			want: "https://api.example/v1?apiKey=" +
+				redactedPlaceholder + "&page=2",
+		},
+		{
+			name: "query quotes do not hide following parameter",
+			in:   "https://api.example/v1?apiKey='credential&page=2",
+			want: "https://api.example/v1?apiKey=" +
+				redactedPlaceholder + "&page=2",
 		},
 		{
 			name: "quoted keyword dsn password containing whitespace",
@@ -490,6 +546,35 @@ func TestRedactURICredentials(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRedactKeywordDSNMatchesPgxValueBoundary(t *testing.T) {
+	const dsn = "host=localhost user=dingo dbname=dingo sslmode=disable " +
+		"connect_timeout=5 password=secret?network=preview&apiKey=key"
+
+	for _, name := range []string{
+		"PGSERVICE", "PGSERVICEFILE", "PGPASSFILE", "PGTARGETSESSIONATTRS",
+		"PGSSLMODE", "PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGOPTIONS",
+		"PGCONNECT_TIMEOUT",
+	} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("PGSERVICEFILE", os.DevNull)
+	t.Setenv("PGPASSFILE", os.DevNull)
+	parsed, err := pgconn.ParseConfig(dsn)
+	require.NoError(t, err)
+	require.Equal(t, "secret?network=preview&apiKey=key", parsed.Password)
+	require.Equal(
+		t,
+		"host=localhost user=dingo dbname=dingo sslmode=disable "+
+			"connect_timeout=5 password="+redactedPlaceholder,
+		redactURICredentials(dsn),
+	)
+	require.Equal(
+		t,
+		"path=value?network=preview&apiKey="+redactedPlaceholder,
+		redactURICredentials("path=value?network=preview&apiKey=key"),
+	)
 }
 
 // TestProviderConfigUnknownKeyIsRedacted pins the fail-safe default for a
@@ -986,5 +1071,37 @@ func TestClassedValueURIShapeFailsClosed(t *testing.T) {
 				t.Errorf("plain %s dropped its value: %s", shape, plain)
 			}
 		})
+	}
+}
+
+// TestKoiosParityBaseURLIsRedactedAsURI pins that the self-hosted Koios host is
+// classified as a URI rather than a plain field.
+//
+// An operator can put credentials in it — as userinfo, or as a credential-shaped
+// query parameter — exactly as they can in Mithril.AggregatorURL. A plain
+// classification renders the field unchanged, which would write those
+// credentials into the log (CWE-532).
+func TestKoiosParityBaseURLIsRedactedAsURI(t *testing.T) {
+	t.Parallel()
+
+	if !slices.Contains(logURIConfigFields, "KoiosParity.BaseURL") {
+		t.Fatal("KoiosParity.BaseURL must be classified as a URI field")
+	}
+	if slices.Contains(logPlainConfigFields, "KoiosParity.BaseURL") {
+		t.Fatal("KoiosParity.BaseURL must not also be a plain field")
+	}
+
+	cfg := Config{}
+	cfg.KoiosParity.BaseURL =
+		"https://dingo:SENTINEL-KOIOS-PASSWORD@koios.example/api/v1"
+	rendered := fmt.Sprint(cfg.LogValue())
+	if strings.Contains(rendered, "SENTINEL-KOIOS-PASSWORD") {
+		t.Errorf("KoiosParity.BaseURL leaks its credential: %s", rendered)
+	}
+	if !strings.Contains(rendered, "koios.example") {
+		t.Errorf(
+			"KoiosParity.BaseURL should still show its host: %s",
+			rendered,
+		)
 	}
 }

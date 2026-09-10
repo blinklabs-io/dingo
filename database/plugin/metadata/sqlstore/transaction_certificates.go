@@ -297,7 +297,11 @@ func (s *Store) applySpecializedCertificate(
 			db,
 			cert,
 			certificateID,
-			slot,
+			poolCertPosition{
+				slot:       slot,
+				blockIndex: uint64(blockIndex),
+				certIndex:  uint64(certIndex),
+			},
 			deposit,
 		)
 		return id, nil, err
@@ -338,7 +342,9 @@ RETURNING id`,
 		return id, nil, err
 	case *lcommon.DeregistrationDrepCertificate:
 		// A DRep deregistration carries its refund in the certificate
-		// itself, so this amount is always known and never NULL.
+		// itself, so this amount is always known. The pointer below is
+		// never nil, so this deposit never takes nullableDecimalUint64's
+		// NULL path, which exists for a deposit the ingest never knew.
 		amount := uint64(cert.Amount)
 		id, err := applyDrepDeregistrationCertificate(
 			ctx,
@@ -684,9 +690,10 @@ func applyPoolRegistrationCertificate(
 	db queryer,
 	cert *lcommon.PoolRegistrationCertificate,
 	certificateID uint,
-	slot uint64,
+	at poolCertPosition,
 	deposit *uint64,
 ) (uint, error) {
+	slot := at.slot
 	rewardTag, rewardAccount, err := certutil.PoolRewardAccount(cert)
 	if err != nil {
 		return 0, err
@@ -741,6 +748,14 @@ RETURNING id`,
 		metadataURL = cert.PoolMetadata.Url
 		metadataHash = cert.PoolMetadata.Hash[:]
 	}
+	// The pool row above is upserted before this, but it carries no deposit
+	// and no history, so the held amount is derived from the registration and
+	// retirement rows strictly before this certificate's position rather than
+	// from live pool state.
+	held, err := poolRegistrationDepositHeld(ctx, db, poolID, at, deposit)
+	if err != nil {
+		return 0, err
+	}
 	registrationID, err := insertPoolRegistration(ctx, db, []any{
 		margin,
 		metadataURL,
@@ -755,6 +770,7 @@ RETURNING id`,
 		poolID,
 		slot,
 		nullableDecimalUint64(deposit),
+		nullableDecimalUint64(held),
 		nullBytes(leiosKeyPublic),
 		nullBytes(leiosKeyPoP),
 	}, poolID, slot)
@@ -1059,10 +1075,25 @@ RETURNING id`,
 	if err != nil {
 		return 0, err
 	}
-	for credential, amount := range cert.Reward.Rewards {
+	// A MIR reward is delta_coin, so the amount column carries its own sign
+	// and the delta is persisted as written. Whether a negative delta is
+	// permitted, and whether the deltas for one credential net to a
+	// creditable amount, are decided by the DELEG and INSTANT rules, not
+	// here. RewardsAmount projects the reward map to *big.Int on every
+	// gouroboros release, so the sign survives regardless of the width of
+	// the underlying field.
+	for credential, amount := range cert.Reward.RewardsAmount() {
 		tag, err := models.CredentialTagFromUint(credential.CredType)
 		if err != nil {
 			return 0, err
+		}
+		delta, err := signedDecimal("MIR reward delta", amount)
+		if err != nil {
+			return 0, fmt.Errorf(
+				"%w for credential %x",
+				err,
+				credential.Credential[:],
+			)
 		}
 		if _, err := db.ExecContext(ctx, `
 INSERT INTO move_instantaneous_rewards_reward (
@@ -1070,7 +1101,7 @@ INSERT INTO move_instantaneous_rewards_reward (
 ) VALUES (?, ?, ?, ?)`,
 			credential.Credential[:],
 			tag,
-			decimalUint64(types.Uint64(amount)),
+			delta,
 			id,
 		); err != nil {
 			return 0, err

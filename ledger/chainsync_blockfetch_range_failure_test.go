@@ -112,6 +112,8 @@ func handleBlockfetchTimeoutForTest(
 // the request callback must therefore be able to run while that mutex is
 // available even when the caller started the batch under the lock.
 func TestStartQueuedBlockfetchReleasesMutexAroundRequest(t *testing.T) {
+	t.Parallel()
+
 	ls, _, _ := newNoBlocksLedgerState(t, "hdr-lock-cycle")
 	defer ls.config.EventBus.Stop()
 	ls.config.BlockfetchRequestRangeFunc = func(
@@ -155,6 +157,8 @@ func TestStartQueuedBlockfetchReleasesMutexAroundRequest(t *testing.T) {
 func TestStartQueuedBlockfetchCancelsPriorRequestWaitDuringShutdown(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	require.NoError(t, testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("shutdown-header")),
@@ -218,6 +222,8 @@ func TestStartQueuedBlockfetchCancelsPriorRequestWaitDuringShutdown(
 func TestStartQueuedBlockfetchDrainsPriorRequestBeforeConnectionReuse(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	require.NoError(t, testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("reuse-header")),
@@ -293,6 +299,8 @@ func TestStartQueuedBlockfetchDrainsPriorRequestBeforeConnectionReuse(
 // from this subscriber deadlocks once the subscriber buffer fills with the
 // next batch's blocks.
 func TestBlockfetchBatchDoneDoesNotBlockSubscriberOnContinuation(t *testing.T) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	for blockNumber := uint64(1); blockNumber <= 2; blockNumber++ {
 		prevHash := lcommon.NewBlake2b256(nil)
@@ -367,6 +375,8 @@ func TestBlockfetchBatchDoneDoesNotBlockSubscriberOnContinuation(t *testing.T) {
 // connection. So a selection left behind here sends the following batch back to
 // the connection the continuation just moved away from.
 func TestBlockfetchContinuationRetargetsSelection(t *testing.T) {
+	t.Parallel()
+
 	for _, test := range []struct {
 		name string
 		// fail reports whether a request on this connection should fail,
@@ -487,6 +497,8 @@ func TestBlockfetchContinuationRetargetsSelection(t *testing.T) {
 // its choice is the current one and has to win. The request callback stands in
 // for that concurrent writer, since it runs with the mutex released.
 func TestBlockfetchRetargetPreservesConcurrentSelection(t *testing.T) {
+	t.Parallel()
+
 	stale := testChainsyncConnId(6300, 3001)
 	starting := testChainsyncConnId(6300, 3002)
 	switched := testChainsyncConnId(6300, 3003)
@@ -588,6 +600,8 @@ func newNoBlocksLedgerState(
 // header queue must still be dropped, because a latched header blocks local
 // forging for as long as it is queued.
 func TestStartQueuedBlockfetchDropsHeadersAfterRepeatedNoBlocks(t *testing.T) {
+	t.Parallel()
+
 	ls, requestCount, resyncChan := newNoBlocksLedgerState(t, "hdr-no-blocks")
 	connId := testChainsyncConnId(6102, 3001)
 
@@ -631,6 +645,8 @@ func TestStartQueuedBlockfetchDropsHeadersAfterRepeatedNoBlocks(t *testing.T) {
 // record untouched. A reconnecting peer can return these errors repeatedly
 // for the same queued range while the range remains servable.
 func TestStartQueuedBlockfetchTransientErrorsDoNotAccumulate(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name         string
 		err          error
@@ -707,6 +723,8 @@ func TestStartQueuedBlockfetchTransientErrorsDoNotAccumulate(t *testing.T) {
 func TestRestartQueuedBlockfetchAfterForkDropsHeadersOnRepeatedNoBlocks(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, requestCount, resyncChan := newNoBlocksLedgerState(
 		t,
 		"hdr-fork-restart",
@@ -746,6 +764,8 @@ func TestRestartQueuedBlockfetchAfterForkDropsHeadersOnRepeatedNoBlocks(
 // arrives, its failure record is discarded, so earlier misses cannot combine
 // with a later unrelated miss to drop a healthy queue.
 func TestBlockfetchRangeFailureClearedWhenRangeIsDelivered(t *testing.T) {
+	t.Parallel()
+
 	ls, _, _ := newNoBlocksLedgerState(t, "hdr-delivered")
 	connId := testChainsyncConnId(6104, 3001)
 	stuckStart, _ := ls.chain.HeaderRange(blockfetchBatchSize)
@@ -780,6 +800,8 @@ func TestBlockfetchRangeFailureClearedWhenRangeIsDelivered(t *testing.T) {
 func TestBlockfetchRangeFailuresAccumulatePerRangeDespiteInterleavedActivity(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, requestCount, resyncChan := newNoBlocksLedgerState(t, "hdr-interleaved")
 	connId := testChainsyncConnId(6105, 3001)
 	stuckHeader := mockHeader{
@@ -843,6 +865,8 @@ func TestBlockfetchRangeFailuresAccumulatePerRangeDespiteInterleavedActivity(
 func TestBlockfetchRangeFailuresDoNotAccumulateAcrossDifferentRanges(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls, _, resyncChan := newNoBlocksLedgerState(t, "hdr-distinct-0")
 	connId := testChainsyncConnId(6106, 3001)
 
@@ -890,6 +914,8 @@ func TestBlockfetchRangeFailuresDoNotAccumulateAcrossDifferentRanges(
 func TestHandleEventBlockfetchBatchDoneStopsRepeatingEmptyBatches(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	require.NoError(t, testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("hdr-empty-batch")),
@@ -986,6 +1012,8 @@ func TestHandleEventBlockfetchBatchDoneStopsRepeatingEmptyBatches(
 func TestHandleEventBlockfetchBatchDoneEmptyBatchStreakResetsOnProgress(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	require.NoError(t, testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("hdr-streak-reset")),
@@ -1075,6 +1103,8 @@ func TestHandleEventBlockfetchBatchDoneEmptyBatchStreakResetsOnProgress(
 func TestStartQueuedBlockfetchSkipsDispatchWhenCanceledBeforeDispatch(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	testChain := &chain.Chain{}
 	require.NoError(t, testChain.AddBlockHeader(mockHeader{
 		hash:        lcommon.NewBlake2b256([]byte("pre-dispatch-header")),

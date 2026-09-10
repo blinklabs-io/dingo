@@ -498,7 +498,19 @@ func (s *Server) decodeRequest(
 	body := http.MaxBytesReader(w, r.Body, maxRequestBody)
 	defer body.Close()
 	decoder := json.NewDecoder(body)
-	return decoder.Decode(dst)
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+	// Decode again to require complete consumption, including any trailing
+	// whitespace, under the same byte and time limits.
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return err
+		}
+		return errors.New("request body must contain only one JSON value")
+	}
+	return nil
 }
 
 // setBodyReadDeadline applies a read deadline to the connection behind

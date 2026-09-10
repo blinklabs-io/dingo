@@ -26,6 +26,8 @@ import (
 )
 
 func TestAdaCurrency(t *testing.T) {
+	t.Parallel()
+
 	c := adaCurrency()
 	require.Equal(t, "ADA", c.Symbol)
 	require.Equal(t, int32(6), c.Decimals)
@@ -33,6 +35,8 @@ func TestAdaCurrency(t *testing.T) {
 }
 
 func TestNativeAssetCurrency(t *testing.T) {
+	t.Parallel()
+
 	policy := hexString(testKeyHash(0xaa))
 	name := hexString([]byte("token"))
 
@@ -45,6 +49,8 @@ func TestNativeAssetCurrency(t *testing.T) {
 }
 
 func TestConvertAmount(t *testing.T) {
+	t.Parallel()
+
 	require.Equal(t, "0", convertAmount(0).Value)
 	require.Equal(
 		t,
@@ -54,6 +60,8 @@ func TestConvertAmount(t *testing.T) {
 }
 
 func TestConvertAssetAmount(t *testing.T) {
+	t.Parallel()
+
 	policy := testKeyHash(0xab)
 	name := []byte("tok")
 
@@ -67,6 +75,8 @@ func TestConvertAssetAmount(t *testing.T) {
 }
 
 func TestTxStatus(t *testing.T) {
+	t.Parallel()
+
 	require.Equal(t, StatusSuccess, *txStatus(true))
 	require.Equal(t, StatusInvalid, *txStatus(false))
 }
@@ -75,6 +85,8 @@ func TestTxStatus(t *testing.T) {
 // reconstructed from the payment/staking credentials stored with a UTxO.
 // A wrong mapping here silently reports coins under the wrong address.
 func TestUtxoAddressCredentialCombinations(t *testing.T) {
+	t.Parallel()
+
 	paymentKey := testKeyHash(0x30)
 	stakingKey := testKeyHash(0x31)
 
@@ -162,6 +174,8 @@ func TestUtxoAddressCredentialCombinations(t *testing.T) {
 // no payment key hash: the Mesh spec requires a non-empty address, so a
 // distinguishable placeholder is returned instead.
 func TestUtxoAddressByronPlaceholder(t *testing.T) {
+	t.Parallel()
+
 	txID := testHash(0x32)
 
 	got := utxoAddress(
@@ -176,6 +190,8 @@ func TestUtxoAddressByronPlaceholder(t *testing.T) {
 // TestUtxoAddressFallbackOnInvalidCredential covers a malformed payment
 // key: the converter must degrade to the hex hash rather than panic.
 func TestUtxoAddressFallbackOnInvalidCredential(t *testing.T) {
+	t.Parallel()
+
 	short := []byte{0x01, 0x02}
 
 	got := utxoAddress(
@@ -190,6 +206,8 @@ func TestUtxoAddressFallbackOnInvalidCredential(t *testing.T) {
 // the bech32 prefix, so mainnet coins are never reported under testnet
 // addresses.
 func TestUtxoAddressNetworkPrefix(t *testing.T) {
+	t.Parallel()
+
 	utxo := models.Utxo{PaymentKey: testKeyHash(0x33)}
 
 	testnet := utxoAddress(
@@ -205,6 +223,8 @@ func TestUtxoAddressNetworkPrefix(t *testing.T) {
 }
 
 func TestConvertBlockGenesisParent(t *testing.T) {
+	t.Parallel()
+
 	hash := testHash(0x34)
 
 	block := convertBlock(
@@ -227,6 +247,8 @@ func TestConvertBlockGenesisParent(t *testing.T) {
 }
 
 func TestConvertBlockParent(t *testing.T) {
+	t.Parallel()
+
 	hash := testHash(0x35)
 	prev := testHash(0x36)
 
@@ -251,6 +273,8 @@ func TestConvertBlockParent(t *testing.T) {
 // operation must carry the "invalid" status so clients do not credit
 // balances from a failed transaction.
 func TestConvertTransactionInvalidStatus(t *testing.T) {
+	t.Parallel()
+
 	txHash := testHash(0x37)
 	paymentKey := testKeyHash(0x38)
 
@@ -282,6 +306,8 @@ func TestConvertTransactionInvalidStatus(t *testing.T) {
 // asset becomes its own operation with a sub-coin identifier, and the
 // operation indices stay contiguous across ADA and asset entries.
 func TestConvertTransactionAssetOperations(t *testing.T) {
+	t.Parallel()
+
 	txHash := testHash(0x3a)
 	inputTxID := testHash(0x3b)
 	paymentKey := testKeyHash(0x3c)
@@ -352,6 +378,8 @@ func TestConvertTransactionAssetOperations(t *testing.T) {
 // without sorting the operation indices would differ between calls for
 // the same transaction.
 func TestConvertBodyToOpsWithdrawalsAreSorted(t *testing.T) {
+	t.Parallel()
+
 	addrs := make([]*lcommon.Address, 0, 3)
 	for _, b := range []byte{0x03, 0x01, 0x02} {
 		addr, err := lcommon.NewAddressFromParts(
@@ -469,6 +497,8 @@ func certFixtures() map[lcommon.CertificateType]gledger.Certificate {
 // certificates must map to the empty string so they are dropped rather
 // than reported under a wrong type.
 func TestCertToOpType(t *testing.T) {
+	t.Parallel()
+
 	want := map[lcommon.CertificateType]string{
 		lcommon.CertificateTypeStakeRegistration:   OpStakeKeyRegistration,
 		lcommon.CertificateTypeRegistration:        OpStakeKeyRegistration,
@@ -493,6 +523,8 @@ func TestCertToOpType(t *testing.T) {
 // TestCertToOpTypeUnknown covers a certificate type outside the known
 // range, which must not be reported as an operation.
 func TestCertToOpTypeUnknown(t *testing.T) {
+	t.Parallel()
+
 	require.Equal(
 		t,
 		"",
@@ -506,6 +538,8 @@ func TestCertToOpTypeUnknown(t *testing.T) {
 // the certificate mapping can produce is advertised by
 // /network/options, so clients can recognize it.
 func TestOperationTypesCoverCertificateMapping(t *testing.T) {
+	t.Parallel()
+
 	advertised := make(map[string]struct{})
 	for _, opType := range OperationTypes() {
 		advertised[opType] = struct{}{}
@@ -530,6 +564,8 @@ func TestOperationTypesCoverCertificateMapping(t *testing.T) {
 // without a Mesh operation type produce no operation and do not consume
 // an operation index, keeping indices contiguous.
 func TestConvertBodyToOpsSkipsUnmappedCertificates(t *testing.T) {
+	t.Parallel()
+
 	fixtures := certFixtures()
 	certs := []gledger.Certificate{
 		fixtures[lcommon.CertificateTypeStakeRegistration],
@@ -547,6 +583,8 @@ func TestConvertBodyToOpsSkipsUnmappedCertificates(t *testing.T) {
 }
 
 func TestDecodeTxCborErrors(t *testing.T) {
+	t.Parallel()
+
 	tests := map[string]string{
 		"non-hex":     "zz",
 		"empty":       "",
@@ -569,6 +607,8 @@ func TestDecodeTxCborErrors(t *testing.T) {
 }
 
 func TestDecodeTxCborSuccess(t *testing.T) {
+	t.Parallel()
+
 	addr := testAddress(
 		t, lcommon.AddressTypeKeyNone, testKeyHash(0x3d), nil,
 	)

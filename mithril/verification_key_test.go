@@ -21,6 +21,8 @@ import (
 )
 
 func TestParseVerificationKeyTextEnvelope(t *testing.T) {
+	t.Parallel()
+
 	key, err := ParseVerificationKey(`{
   "type": "PaymentVerificationKeyShelley_ed25519",
   "description": "Payment Verification Key",
@@ -37,6 +39,8 @@ func TestParseVerificationKeyTextEnvelope(t *testing.T) {
 }
 
 func TestParseVerificationKeyRawHex(t *testing.T) {
+	t.Parallel()
+
 	key, err := ParseVerificationKey(
 		"ce13cd433cdcb3dfb00c04e216956aeb622dcd7f282b03304d9fc9de804723b2",
 	)
@@ -49,6 +53,8 @@ func TestParseVerificationKeyRawHex(t *testing.T) {
 }
 
 func TestParseVerificationKeyMithrilJSONHex(t *testing.T) {
+	t.Parallel()
+
 	// Hex-encoded JSON byte array that decodes to the same
 	// ed25519 key used in the other test cases.
 	const mithrilHexJSON = "5b3230362c31392c323035" +
@@ -69,6 +75,8 @@ func TestParseVerificationKeyMithrilJSONHex(t *testing.T) {
 }
 
 func TestParseVerificationKeyInvalid(t *testing.T) {
+	t.Parallel()
+
 	_, err := ParseVerificationKey("not-hex")
 	require.Error(t, err)
 }
