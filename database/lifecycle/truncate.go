@@ -757,6 +757,28 @@ func finishPendingTruncate(
 				err,
 			)
 		}
+		// A truncate below the consumed-UTxO prune floor leaves the
+		// recorded floor above the new tip, which would make
+		// ledger.LedgerState.rollback refuse every rollback until the node
+		// resynced past it -- wedging the recovery this truncate was run to
+		// enable. Clear it, and say plainly which range's consumed UTxOs the
+		// sweep already removed: TruncateAfterSlot restores spent UTxOs with
+		// an UPDATE, so rows swept in that range did not come back here
+		// either (issue #3766).
+		oldFloor, cleared, floorErr := db.ClearConsumedUtxoPruneFloorAbove(
+			point.Slot,
+			txn,
+		)
+		if floorErr != nil {
+			return floorErr
+		}
+		if cleared {
+			db.Logger().Warn(
+				"truncate target is below the consumed UTxO prune floor; UTxOs consumed in the crossed range were hard-deleted and are not restored by this truncate",
+				"target_slot", point.Slot,
+				"utxo_prune_floor_slot", oldFloor,
+			)
+		}
 		if err := database.RecomputeSyntheticV2CostModelMarkerAfterTruncate(
 			db,
 			txn,
