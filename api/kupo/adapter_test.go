@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 func TestIsMetadataBlockUnavailable(t *testing.T) {
@@ -43,6 +44,49 @@ func TestIsMetadataBlockUnavailable(t *testing.T) {
 
 	if isMetadataBlockUnavailable(errors.New("database unavailable")) {
 		t.Fatal("unrelated database errors must remain internal errors")
+	}
+}
+
+func TestMetadataBlockBeforeSlotSkipsExpiredAncestors(t *testing.T) {
+	points := []ocommon.Point{
+		{Slot: 30, Hash: []byte{30}},
+		{Slot: 20, Hash: []byte{20}},
+		{Slot: 10, Hash: []byte{10}},
+	}
+	blocks := map[uint64]struct {
+		block models.Block
+		err   error
+	}{
+		30: {err: types.ErrHistoryExpired},
+		20: {err: types.ErrHistoryExpired},
+		10: {block: models.Block{Slot: 10, Hash: []byte{10}}},
+	}
+	var requested []uint64
+	block, err := metadataBlockBeforeSlot(
+		40,
+		func(slot uint64) (ocommon.Point, error) {
+			requested = append(requested, slot)
+			for _, point := range points {
+				if point.Slot <= slot {
+					return point, nil
+				}
+			}
+			return ocommon.Point{}, models.ErrBlockNotFound
+		},
+		func(point ocommon.Point) (models.Block, error) {
+			entry := blocks[point.Slot]
+			return entry.block, entry.err
+		},
+	)
+	if err != nil {
+		t.Fatalf("metadataBlockBeforeSlot returned error: %v", err)
+	}
+	if block.Slot != 10 {
+		t.Fatalf("readable ancestor slot = %d, want 10", block.Slot)
+	}
+	wantRequested := []uint64{39, 29, 19}
+	if fmt.Sprint(requested) != fmt.Sprint(wantRequested) {
+		t.Fatalf("point lookup slots = %v, want %v", requested, wantRequested)
 	}
 }
 

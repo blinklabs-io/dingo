@@ -36,6 +36,28 @@ type orderedSnapshotMetadata struct {
 	tipErr error
 }
 
+type anchorRollbackTxn struct {
+	anchorErr   error
+	rollbackErr error
+}
+
+func (t *anchorRollbackTxn) Commit() error { return nil }
+
+func (t *anchorRollbackTxn) Rollback() error { return t.rollbackErr }
+
+type anchorRollbackMetadata struct {
+	metadata.MetadataStore
+	txn *anchorRollbackTxn
+}
+
+func (m *anchorRollbackMetadata) ReadTransaction(context.Context) types.Txn {
+	return m.txn
+}
+
+func (m *anchorRollbackMetadata) GetTip(types.Txn) (ochainsync.Tip, error) {
+	return ochainsync.Tip{}, m.txn.anchorErr
+}
+
 func (s *orderedSnapshotMetadata) ReadTransaction(context.Context) types.Txn {
 	*s.events = append(*s.events, "metadata transaction")
 	return &commitFailingTxn{}
@@ -116,6 +138,23 @@ func TestNewReadSnapshotContextReleasesBarrierOnAnchorError(t *testing.T) {
 	)
 	requireCommitBarrierFree(t, db)
 	requireDestructiveTransitionBarrierFree(t, db)
+}
+
+func TestNewReadSnapshotContextJoinsAnchorAndRollbackErrors(t *testing.T) {
+	anchorErr := errors.New("tip unavailable")
+	rollbackErr := errors.New("rollback unavailable")
+	db := &Database{
+		metadata: &anchorRollbackMetadata{
+			txn: &anchorRollbackTxn{
+				anchorErr: anchorErr, rollbackErr: rollbackErr,
+			},
+		},
+	}
+
+	txn, _, err := NewReadSnapshotContext(t.Context(), db)
+	require.Nil(t, txn)
+	require.ErrorIs(t, err, anchorErr)
+	require.ErrorIs(t, err, rollbackErr)
 }
 
 type destructiveReadSnapshotState struct {

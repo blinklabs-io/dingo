@@ -41,6 +41,37 @@ func isMetadataBlockUnavailable(err error) bool {
 		errors.Is(err, types.ErrHistoryExpired)
 }
 
+// metadataBlockBeforeSlot finds the newest readable canonical block before
+// slot. Point and block lookups are separate because the point index survives
+// history expiry while the block CBOR does not.
+func metadataBlockBeforeSlot(
+	slot uint64,
+	pointAtOrBefore func(uint64) (ocommon.Point, error),
+	blockAtPoint func(ocommon.Point) (models.Block, error),
+) (models.Block, error) {
+	if slot == 0 {
+		return models.Block{}, models.ErrBlockNotFound
+	}
+	for slot > 0 {
+		point, err := pointAtOrBefore(slot - 1)
+		if err != nil {
+			return models.Block{}, err
+		}
+		block, err := blockAtPoint(point)
+		if err == nil {
+			return block, nil
+		}
+		if !errors.Is(err, types.ErrHistoryExpired) {
+			return models.Block{}, err
+		}
+		if point.Slot == 0 {
+			break
+		}
+		slot = point.Slot
+	}
+	return models.Block{}, models.ErrBlockNotFound
+}
+
 // NodeAdapter translates Kupo's package-local API contract into narrow
 // LedgerState and coordinated database calls.
 type NodeAdapter struct {
@@ -676,7 +707,15 @@ func (a *NodeAdapter) Metadata(
 	}
 	block, err := database.BlockBySlotTxn(txn, slot)
 	if isMetadataBlockUnavailable(err) {
-		block, err = database.BlockBeforeSlotTxn(txn, slot)
+		block, err = metadataBlockBeforeSlot(
+			slot,
+			func(before uint64) (ocommon.Point, error) {
+				return database.BlockPointAtOrBeforeSlotTxn(txn, before)
+			},
+			func(point ocommon.Point) (models.Block, error) {
+				return database.BlockByPointTxn(txn, point)
+			},
+		)
 	}
 	if err != nil {
 		if isMetadataBlockUnavailable(err) {

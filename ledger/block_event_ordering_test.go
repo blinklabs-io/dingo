@@ -19,7 +19,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -392,12 +394,14 @@ func TestRollbackWaitsForDestructiveTransitionBarrier(t *testing.T) {
 		)
 	}()
 
-	testutil.RequireNoReceive(
-		t,
-		rollbackDone,
-		100*time.Millisecond,
-		"rollback must wait for the destructive transition barrier",
-	)
+	testutil.WaitForCondition(t, func() bool {
+		buf := make([]byte, 128<<10)
+		n := runtime.Stack(buf, true)
+		return strings.Contains(
+			string(buf[:n]),
+			"github.com/blinklabs-io/dingo/database.(*cancellableBarrier).lockContext",
+		)
+	}, 2*time.Second, "rollback must be parked on the destructive transition barrier")
 	require.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
 
 	release()

@@ -226,16 +226,14 @@ func NewReadSnapshotContext(
 	if ms := db.Metadata(); ms != nil {
 		t.metadataTxn = ms.ReadTransaction(ctx)
 		if t.metadataTxn == nil {
-			_ = t.Rollback()
-			return nil, tip, types.ErrNilTxn
+			return nil, tip, errors.Join(types.ErrNilTxn, t.Rollback())
 		}
 		var err error
 		tip, err = ms.GetTip(t.metadataTxn)
 		if err != nil {
-			_ = t.Rollback()
 			return nil, tip, fmt.Errorf(
 				"anchor metadata read snapshot: %w",
-				err,
+				errors.Join(err, t.Rollback()),
 			)
 		}
 	}
