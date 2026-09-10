@@ -706,11 +706,11 @@ func gapCertificateDeposits(
 	if len(certificates) == 0 {
 		return nil
 	}
+	deposits := make(map[int]uint64, len(certificates))
 	era := eras.GetEraById(eraId)
 	if era == nil {
-		return nil
+		return deposits
 	}
-	deposits := make(map[int]uint64, len(certificates))
 	if era.CertDepositFunc == nil {
 		return deposits
 	}
