@@ -95,6 +95,11 @@ type KoiosParityConfig struct {
 	// CachePath is the Koios reference cache.db path. Empty defaults to
 	// {DatabasePath}/.koios/cache.db.
 	CachePath string
+	// BaseURL overrides the public koios.rest host for the network, for a
+	// self-hosted or mirrored Koios instance. Empty selects the public host.
+	BaseURL string
+	// AllowInsecureHTTP permits a plain-HTTP BaseURL. Local dev/test only.
+	AllowInsecureHTTP bool
 	// APIKey is the Koios Bearer token for higher-rate-limit access.
 	APIKey string
 	// Strict stops/cancels the node on the first Koios/tool error or exact
@@ -514,6 +519,12 @@ func (n *Node) configValidate() error {
 			StorageModeAPI,
 		)
 	}
+	if err := internalconfig.ValidateAPIExposure(
+		n.config.cfg,
+		internalconfig.RunMode(n.config.cfg.RunMode),
+	); err != nil {
+		return fmt.Errorf("invalid API exposure: %w", err)
+	}
 	if !n.config.cfg.StartEra.Valid() {
 		return fmt.Errorf(
 			"invalid start era %q: must be empty or %q",
@@ -774,6 +785,8 @@ func (c *Config) syncCompatFields() {
 		Network:              c.cfg.KoiosParity.Network,
 		CachePath:            c.cfg.KoiosParity.CachePath,
 		APIKey:               c.cfg.KoiosParity.APIKey,
+		BaseURL:              c.cfg.KoiosParity.BaseURL,
+		AllowInsecureHTTP:    c.cfg.KoiosParity.AllowInsecureHTTP,
 		Strict:               c.cfg.KoiosParity.Strict,
 		GraceHours:           c.cfg.KoiosParity.GraceHours,
 		Accounts:             &koiosParityAccounts,
@@ -1021,8 +1034,9 @@ func WithBindAddr(addr string) ConfigOptionFunc {
 // and UTxO RPC listeners. The default is "127.0.0.1": these listeners have
 // authentication disabled unless an operator configures api.auth, so they
 // are not exposed beyond loopback without an explicit decision, and they
-// do not inherit a wildcard WithBindAddr. A single provider can be widened
-// on its own through plugins.api.<name>.config.host instead.
+// do not inherit a wildcard WithBindAddr. A non-loopback address requires
+// authentication; see internalconfig.ValidateAPIExposure. A single provider
+// can be widened on its own through plugins.api.<name>.config.host instead.
 func WithAPIBindAddr(addr string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.APIBindAddr = addr
@@ -1588,6 +1602,8 @@ func WithKoiosParity(cfg KoiosParityConfig) ConfigOptionFunc {
 			Network:              cfg.Network,
 			CachePath:            cfg.CachePath,
 			APIKey:               cfg.APIKey,
+			BaseURL:              cfg.BaseURL,
+			AllowInsecureHTTP:    cfg.AllowInsecureHTTP,
 			Strict:               cfg.Strict,
 			GraceHours:           cfg.GraceHours,
 			Accounts:             accounts,
@@ -1799,6 +1815,9 @@ func (c *Config) BindAddr() string {
 // APIBindAddr returns the IP address for the Blockfrost, Mesh, and UTxO
 // RPC listeners.
 func (c *Config) APIBindAddr() string {
+	if c.cfg.APIBindAddr == "" {
+		return internalconfig.DefaultAPIBindAddr
+	}
 	return c.cfg.APIBindAddr
 }
 

@@ -15,6 +15,7 @@
 package koiosparity
 
 import (
+	"errors"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	sqlite "github.com/glebarez/go-sqlite"
 	"github.com/stretchr/testify/require"
 )
 
@@ -284,6 +286,148 @@ func TestOpenCacheLegacyColumnMigrationDoesNotDeadlock(t *testing.T) {
 				"legacy columns: createCacheSchema's DROP COLUMN Exec is " +
 				"waiting for a second connection while its pragma_table_info " +
 				"rows still hold the only one",
+		)
+	}
+}
+
+// sqliteBusySnapshot is SQLITE_BUSY_SNAPSHOT, SQLite's extended result code
+// for a deferred transaction that took a read snapshot and then could not
+// upgrade to a writer because another connection committed in between
+// (SQLITE_BUSY | 2<<8).
+const sqliteBusySnapshot = 517
+
+// TestCacheWritesNeverUpgradeAReadSnapshot guards the statement order inside
+// every Cache transaction that writes.
+//
+// c.db.Begin() is DEFERRED, so a transaction whose first statement is a
+// SELECT opens as a reader and only upgrades to a writer when a write
+// statement runs. Under WAL, any other connection that commits in that window
+// makes the upgrade fail with SQLITE_BUSY_SNAPSHOT — a stale snapshot rather
+// than lock contention, so busy_timeout's retry cannot wait it out: no amount
+// of waiting makes an already-taken snapshot current, only a new transaction
+// does. Issuing a write first takes the writer slot immediately, so the
+// transaction never holds a snapshot it has to upgrade, and any read that
+// follows runs under a lock no other connection can commit against.
+//
+// The window is microseconds wide and the real functions expose no seam to
+// pause inside, so this drives it by volume rather than by interleaving: one
+// connection committing continuously while another performs 3000 writes.
+//
+// The assertion is on SQLITE_BUSY_SNAPSHOT specifically rather than on any
+// error, because only that code is structurally impossible once a write runs
+// first. A plain SQLITE_BUSY stays reachable — it is ordinary writer-slot
+// contention against busy_timeout, the dingo #4091 class — and a starved
+// machine can produce one without the ordering having regressed: measured
+// under six concurrent copies of this package's suite, the fixed order
+// produced 1 plain SQLITE_BUSY in 3000 on three runs and zero
+// SQLITE_BUSY_SNAPSHOT anywhere.
+//
+// This is the shape TestObserverBackfillsParamsForAPreExistingCache hit on
+// CI, where the test's own require.Eventually polling supplied the second
+// connection by reopening the same cache file every 10ms while the observer
+// backfilled.
+func TestCacheWritesNeverUpgradeAReadSnapshot(t *testing.T) {
+	const network = "preview"
+	const sourceURL = "https://first.example/api/v1"
+	now := time.Now().UTC()
+
+	cases := []struct {
+		name string
+		// write performs one call of the path under test. Pre-fix
+		// measurements are the SQLITE_BUSY_SNAPSHOT count per 3000 calls on
+		// an unloaded machine.
+		write func(*testing.T, *Cache, int)
+	}{
+		{
+			// assertClaimedSource's SELECT used to run before the caller's
+			// write. Pre-fix: 891 to 1321 of 3000 on 8 of 8 runs.
+			name: "gated write via withClaimedSource",
+			write: func(t *testing.T, c *Cache, i int) {
+				t.Helper()
+				recordSnapshotBusy(t, c.UpsertEpochParams(KoiosEpochParams{
+					Network:   network,
+					Epoch:     uint64(i),
+					Era:       "alonzo",
+					FetchedAt: now,
+				}))
+			},
+		},
+		{
+			// RecordKoiosSource has to read the previous root before it can
+			// decide what to discard, so its read cannot move after its
+			// writes; it claims the writer slot with a no-op UPDATE instead.
+			// Pre-fix: 30 to 55 of 3000 on 4 of 4 runs.
+			name: "RecordKoiosSource",
+			write: func(t *testing.T, c *Cache, _ int) {
+				t.Helper()
+				_, err := c.RecordKoiosSource(network, sourceURL, now)
+				recordSnapshotBusy(t, err)
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const iterations = 3000
+			path := filepath.Join(t.TempDir(), "cache.db")
+
+			writer, err := OpenCache(path, nil)
+			require.NoError(t, err)
+			defer writer.Close() //nolint:errcheck
+			_, err = writer.RecordKoiosSource(network, sourceURL, now)
+			require.NoError(t, err)
+
+			// A second connection to the same file, committing continuously
+			// so the WAL keeps advancing under the writer's transactions. It
+			// writes another network, so nothing it does can legitimately
+			// trip the claimed-source gate.
+			other, err := OpenCache(path, nil)
+			require.NoError(t, err)
+			defer other.Close() //nolint:errcheck
+			stop := make(chan struct{})
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				for epoch := uint64(0); ; epoch++ {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					_ = other.UpsertEpochInfo(KoiosEpochInfo{
+						Network:      "wal-churn",
+						Epoch:        epoch % 8,
+						ActiveStake:  "1",
+						Fees:         "1",
+						TotalRewards: "1",
+						EpochEndTime: now,
+						FetchedAt:    now,
+					})
+				}
+			}()
+
+			for i := range iterations {
+				tc.write(t, writer, i)
+			}
+			close(stop)
+			<-done
+		})
+	}
+}
+
+// recordSnapshotBusy fails the test when err is SQLITE_BUSY_SNAPSHOT, and
+// tolerates every other error: only the snapshot code says a transaction
+// read before it wrote. See TestCacheWritesNeverUpgradeAReadSnapshot.
+func recordSnapshotBusy(t *testing.T, err error) {
+	t.Helper()
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) &&
+		sqliteErr.Code() == sqliteBusySnapshot {
+		t.Fatalf(
+			"write failed with SQLITE_BUSY_SNAPSHOT against a concurrently "+
+				"committing connection, so the transaction is taking a read "+
+				"snapshot before its first write again: %v",
+			err,
 		)
 	}
 }

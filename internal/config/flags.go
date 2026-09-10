@@ -68,7 +68,7 @@ var flagSpecs = []flagSpec{
 		"APIBindAddr",
 		"api-bind-addr",
 		"",
-		"bind address for the Blockfrost, Mesh, and UTxO RPC listeners (loopback by default; wildcard exposure requires an explicit override)",
+		"bind address for the Blockfrost, Mesh, and UTxO RPC listeners (loopback by default; a remote bind requires API authentication)",
 	),
 	stringFlag("SocketPath", "socket-path", "", "path to UNIX socket file"),
 	transformStringFlag(
@@ -420,6 +420,17 @@ var flagSpecs = []flagSpec{
 		"koios-parity-api-key",
 		"",
 		"Koios Bearer token for rate-limited access",
+	),
+	stringFlag(
+		"KoiosParity.BaseURL",
+		"koios-parity-base-url",
+		"",
+		"Koios v1 API root override for a self-hosted instance (default: the public host for --koios-parity-network)",
+	),
+	boolFlag(
+		"KoiosParity.AllowInsecureHTTP",
+		"koios-parity-allow-insecure-http",
+		"allow a plain-HTTP --koios-parity-base-url (local dev/test only; the API key is sent as a Bearer token)",
 	),
 	boolFlag(
 		"KoiosParity.Strict",
