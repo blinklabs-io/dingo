@@ -49,6 +49,8 @@ func newPipelineLoopLedger(t *testing.T) *LedgerState {
 // loop must then stop rather than restart into the same block forever, and must
 // leave a terminal signal behind for an operator.
 func TestLedgerProcessBlocksStopsRetryingOnUnrepairableFailure(t *testing.T) {
+	t.Parallel()
+
 	ls := newPipelineLoopLedger(t)
 
 	var attempts atomic.Int64
@@ -91,6 +93,8 @@ func TestLedgerProcessBlocksStopsRetryingOnUnrepairableFailure(t *testing.T) {
 // an ordinary failure must keep restarting the pipeline. Treating every failure
 // as terminal would turn a transient database or peer problem into an outage.
 func TestLedgerProcessBlocksKeepsRetryingRecoverableFailures(t *testing.T) {
+	t.Parallel()
+
 	ls := newPipelineLoopLedger(t)
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -133,6 +137,8 @@ func TestLedgerProcessBlocksKeepsRetryingRecoverableFailures(t *testing.T) {
 // at WARN, so a node that had stopped following the chain looked quiet to
 // log-level alerting for as long as it stayed wedged.
 func TestPipelineStuckAnnouncementStaysVisible(t *testing.T) {
+	t.Parallel()
+
 	for consecutive := range noProgressStuckThreshold {
 		assert.False(
 			t,
@@ -169,6 +175,8 @@ func TestPipelineStuckAnnouncementStaysVisible(t *testing.T) {
 func TestResetMithrilBoundaryRejectionsRequiresAppliedTipProgress(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	ls := &LedgerState{}
 
 	rejections, exhausted := ls.observeMithrilBoundaryRejection(500)
@@ -210,6 +218,8 @@ func TestResetMithrilBoundaryRejectionsRequiresAppliedTipProgress(
 func TestResetAtTipRecoveryDescentClearsSameFailureOnProgress(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	failure := &txValidationError{
 		BlockPoint: ocommon.NewPoint(510, []byte("failure-block")),
 		TxHash:     []byte("failure-tx"),

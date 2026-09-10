@@ -25,6 +25,8 @@ import (
 )
 
 func TestBlockForgedEventType(t *testing.T) {
+	t.Parallel()
+
 	assert.Equal(
 		t,
 		event.EventType("block.forged"),
@@ -33,6 +35,8 @@ func TestBlockForgedEventType(t *testing.T) {
 }
 
 func TestBlockForgedEventPublishSubscribe(t *testing.T) {
+	t.Parallel()
+
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 
@@ -73,6 +77,8 @@ func TestBlockForgedEventPublishSubscribe(t *testing.T) {
 }
 
 func TestBlockForgedEventSubscribeFunc(t *testing.T) {
+	t.Parallel()
+
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 
@@ -113,6 +119,8 @@ func TestBlockForgedEventSubscribeFunc(t *testing.T) {
 }
 
 func TestBlockForgedEventMultipleSubscribers(t *testing.T) {
+	t.Parallel()
+
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 
@@ -157,6 +165,8 @@ func TestBlockForgedEventMultipleSubscribers(t *testing.T) {
 }
 
 func TestBlockForgedEventZeroValues(t *testing.T) {
+	t.Parallel()
+
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 

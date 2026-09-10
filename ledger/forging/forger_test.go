@@ -170,11 +170,29 @@ func (c forgerTestSlotClock) UpstreamSyncStatus() (uint64, bool) {
 	return c.upstreamTipSlot, c.upstreamActive || c.upstreamTipSlot > 0
 }
 
+// TestCheckAndForgeProductionWaitsForUnknownActiveUpstreamTarget pins that an
+// active upstream whose target is not yet known still stops a forge -- but now
+// only while the local tip is itself stale.
+//
+// It previously asserted that the wait happened regardless of local tip
+// freshness, with a tip one slot behind the current slot. That was deliberate
+// (see #3955) and it was also self-sealing: LedgerState publishes the zero
+// target for the whole window before the newly selected peer's first admitted
+// trusted header, so on a network where forging is the only source of headers
+// no node forges, none is admitted, and nothing ever lifts the target
+// (issue #4010).
+//
+// What it asserts instead is the part that carries evidence. A tip lagging the
+// wall clock by more than forgeSyncToleranceSlots says this node is behind
+// whatever the peer has or has not told it, and forging there would build on a
+// stale view -- which is the protection this gate exists for. The at-tip case
+// it used to cover is now
+// TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip.
 func TestCheckAndForgeProductionWaitsForUnknownActiveUpstreamTarget(
 	t *testing.T,
 ) {
 	creds := setupTestCredentials(t)
-	block := newForgerTestBlock(10, 2)
+	block := newForgerTestBlock(1000, 2)
 	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
 	broadcaster := &forgerTestBroadcaster{}
 	forger, err := NewBlockForger(ForgerConfig{
@@ -185,10 +203,12 @@ func TestCheckAndForgeProductionWaitsForUnknownActiveUpstreamTarget(
 		BlockBuilder:     builder,
 		BlockBroadcaster: broadcaster,
 		SlotClock: forgerTestSlotClock{
-			currentSlot:       10,
+			// The tip lags the current slot by 991 slots, well past the
+			// tolerance below, so this node is behind on its own reckoning.
+			currentSlot:       1000,
 			chainTipSlot:      9,
 			upstreamActive:    true,
-			slotsPerKESPeriod: 100,
+			slotsPerKESPeriod: 100000,
 		},
 		ForgeSyncToleranceSlots: 99,
 		PromRegistry:            prometheus.NewRegistry(),
@@ -1046,6 +1066,7 @@ type forgerTestLeiosCerts struct {
 	txHashes       []string
 	txHashesOK     bool
 	marked         []lcommon.Blake2b256
+	markedSlots    []uint64
 	gotEbSlot      uint64
 	gotEbSlotCalls int
 }
@@ -1065,8 +1086,10 @@ func (p *forgerTestLeiosCerts) CertifiedEndorserBlockTxHashes(
 
 func (p *forgerTestLeiosCerts) MarkEndorserBlockEmbedded(
 	ebHash lcommon.Blake2b256,
+	ebSlot uint64,
 ) {
 	p.marked = append(p.marked, ebHash)
+	p.markedSlots = append(p.markedSlots, ebSlot)
 }
 
 type forgerTestLeiosParentAnnouncement struct {
@@ -1585,6 +1608,7 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 				require.Empty(t, leiosCaster.hash)
 			}
 			require.Equal(t, []lcommon.Blake2b256{ebHash}, leiosCerts.marked)
+			require.Equal(t, []uint64{9}, leiosCerts.markedSlots)
 			require.Equal(t, 1, parent.calls)
 			// CertifiedEndorserBlockTxHashes must be called with the
 			// eligible certificate's own slot (9, from eb.SlotNo above), not
@@ -1678,5 +1702,6 @@ func TestCheckAndForgeProductionCertifiesOnlyParentAnnouncedLeiosEB(
 	require.Nil(t, builder.leiosData.Announcement)
 	require.Same(t, parentCert, builder.leiosData.Certificate)
 	require.Equal(t, []lcommon.Blake2b256{parentHash}, leiosCerts.marked)
+	require.Equal(t, []uint64{9}, leiosCerts.markedSlots)
 	require.Equal(t, 1, parent.calls)
 }

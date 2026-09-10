@@ -95,6 +95,11 @@ type KoiosParityConfig struct {
 	// CachePath is the Koios reference cache.db path. Empty defaults to
 	// {DatabasePath}/.koios/cache.db.
 	CachePath string
+	// BaseURL overrides the public koios.rest host for the network, for a
+	// self-hosted or mirrored Koios instance. Empty selects the public host.
+	BaseURL string
+	// AllowInsecureHTTP permits a plain-HTTP BaseURL. Local dev/test only.
+	AllowInsecureHTTP bool
 	// APIKey is the Koios Bearer token for higher-rate-limit access.
 	APIKey string
 	// Strict stops/cancels the node on the first Koios/tool error or exact
@@ -206,6 +211,7 @@ type Config struct {
 	// canonical loaded configuration; these are refreshed by syncCompatFields.
 	dataDir                         string
 	bindAddr                        string
+	apiBindAddr                     string
 	pluginSelections                map[hostplugin.Capability]hostplugin.Selection
 	network                         string
 	tlsCertFilePath, tlsKeyFilePath string
@@ -515,6 +521,12 @@ func (n *Node) configValidate() error {
 			StorageModeAPI,
 		)
 	}
+	if err := internalconfig.ValidateAPIExposure(
+		n.config.cfg,
+		internalconfig.RunMode(n.config.cfg.RunMode),
+	); err != nil {
+		return fmt.Errorf("invalid API exposure: %w", err)
+	}
 	if !n.config.cfg.StartEra.Valid() {
 		return fmt.Errorf(
 			"invalid start era %q: must be empty or %q",
@@ -662,6 +674,7 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 	c := Config{
 		cfg: &internalconfig.Config{
 			BindAddr:           "0.0.0.0",
+			APIBindAddr:        internalconfig.DefaultAPIBindAddr,
 			StorageMode:        string(StorageModeCore),
 			RunMode:            internalconfig.RunModeServe,
 			Cache:              internalconfig.DefaultCacheConfig(),
@@ -723,6 +736,10 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 
 func (c *Config) syncCompatFields() {
 	c.dataDir, c.bindAddr = c.cfg.DatabasePath, c.cfg.BindAddr
+	c.apiBindAddr = c.cfg.APIBindAddr
+	if c.apiBindAddr == "" {
+		c.apiBindAddr = internalconfig.DefaultAPIBindAddr
+	}
 	c.network, c.networkMagic = c.cfg.Network, c.cfg.NetworkMagic
 	c.tlsCertFilePath, c.tlsKeyFilePath = c.cfg.TlsCertFilePath, c.cfg.TlsKeyFilePath
 	c.apiConfig = c.cfg.API
@@ -762,6 +779,8 @@ func (c *Config) syncCompatFields() {
 		Network:              c.cfg.KoiosParity.Network,
 		CachePath:            c.cfg.KoiosParity.CachePath,
 		APIKey:               c.cfg.KoiosParity.APIKey,
+		BaseURL:              c.cfg.KoiosParity.BaseURL,
+		AllowInsecureHTTP:    c.cfg.KoiosParity.AllowInsecureHTTP,
 		Strict:               c.cfg.KoiosParity.Strict,
 		GraceHours:           c.cfg.KoiosParity.GraceHours,
 		Accounts:             &koiosParityAccounts,
@@ -997,11 +1016,19 @@ func WithCardanoNodeConfig(
 	}
 }
 
-// WithBindAddr specifies the IP address used for API listeners
-// (Blockfrost, Mesh, UTxO RPC). The default is "0.0.0.0" (all interfaces).
+// WithBindAddr specifies the IP address used by relay and metrics listeners.
+// API listeners use WithAPIBindAddr.
 func WithBindAddr(addr string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BindAddr = addr
+	}
+}
+
+// WithAPIBindAddr specifies the IP address used by the Blockfrost, Mesh, and
+// UTxO RPC listeners. It defaults to loopback; remote binds require API auth.
+func WithAPIBindAddr(addr string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.APIBindAddr = addr
 	}
 }
 
@@ -1590,6 +1617,8 @@ func WithKoiosParity(cfg KoiosParityConfig) ConfigOptionFunc {
 			Network:              cfg.Network,
 			CachePath:            cfg.CachePath,
 			APIKey:               cfg.APIKey,
+			BaseURL:              cfg.BaseURL,
+			AllowInsecureHTTP:    cfg.AllowInsecureHTTP,
 			Strict:               cfg.Strict,
 			GraceHours:           cfg.GraceHours,
 			Accounts:             accounts,
@@ -1790,9 +1819,18 @@ func (c *Config) MetadataPlugin() string {
 	return c.cfg.Plugins.Storage.Metadata.Provider
 }
 
-// BindAddr returns the IP address for API listeners.
+// BindAddr returns the IP address for relay and metrics listeners.
 func (c *Config) BindAddr() string {
 	return c.cfg.BindAddr
+}
+
+// APIBindAddr returns the IP address for the Blockfrost, Mesh, and UTxO RPC
+// listeners.
+func (c *Config) APIBindAddr() string {
+	if c.cfg.APIBindAddr == "" {
+		return internalconfig.DefaultAPIBindAddr
+	}
+	return c.cfg.APIBindAddr
 }
 
 // PrivateBindAddr returns the IP address for the private NtC listener.

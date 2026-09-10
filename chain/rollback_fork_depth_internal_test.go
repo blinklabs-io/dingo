@@ -32,6 +32,8 @@ import (
 // point above the tip must get zero, not a wrapped-around uint64 that reads as
 // a fork deeper than any security parameter and denies every peer.
 func TestRollbackForkDepthSaturates(t *testing.T) {
+	t.Parallel()
+
 	c := &Chain{
 		tipBlockIndex: 4,
 		currentTip: ochainsync.Tip{

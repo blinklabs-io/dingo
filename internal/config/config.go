@@ -84,6 +84,7 @@ func FromContext(ctx context.Context) *Config {
 }
 
 const (
+	DefaultAPIBindAddr                 = "127.0.0.1"
 	DefaultBlobPlugin                  = "badger"
 	DefaultDebugBindAddr               = "127.0.0.1"
 	DefaultMetadataPlugin              = "sqlite"
@@ -313,6 +314,18 @@ type KoiosParityConfig struct {
 	// APIKey is the Koios Bearer token for higher-rate-limit access. Empty
 	// uses Koios's unauthenticated rate limit.
 	APIKey string `yaml:"apiKey"               envconfig:"DINGO_KOIOS_PARITY_API_KEY"`
+	// BaseURL overrides the public koios.rest host for the network, for a
+	// self-hosted or mirrored Koios instance. Full v1 API root, e.g.
+	// "https://preview-koios.example.com/api/v1". Empty selects the public
+	// host. A custom host is not subject to the public tier's burst cap; see
+	// koiosparity.NewKoiosClient.
+	BaseURL string `yaml:"baseUrl"              envconfig:"DINGO_KOIOS_PARITY_BASE_URL"`
+	// AllowInsecureHTTP permits a plain-HTTP BaseURL. The client attaches the
+	// APIKey as a Bearer token to every request, so cleartext transport would
+	// expose it, and the reference data this tool compares against would be
+	// tamperable in flight -- a MITM could induce a false PASS. Local dev and
+	// test only, mirroring Mithril.AllowInsecureHTTP.
+	AllowInsecureHTTP bool `yaml:"allowInsecureHttp"    envconfig:"DINGO_KOIOS_PARITY_ALLOW_INSECURE_HTTP"`
 	// Strict stops/cancels the node on the first Koios/tool error or exact
 	// parity mismatch, rather than logging it and continuing normal node
 	// operation.
@@ -536,24 +549,28 @@ type Config struct {
 	Plugins PluginsConfig `yaml:"plugins"`
 	// API holds shared TLS/auth policy defaults for every selected
 	// plugins.api.* provider. See APIConfig's own doc comment.
-	API                    APIConfig `yaml:"api"`
-	TlsKeyFilePath         string    `yaml:"tlsKeyFilePath"                      envconfig:"TLS_KEY_FILE_PATH"`
-	Topology               string    `yaml:"topology"`
-	CardanoConfig          string    `yaml:"cardanoConfig"                       envconfig:"config"`
-	DatabasePath           string    `yaml:"databasePath"                                                                                 split_words:"true"`
-	SocketPath             string    `yaml:"socketPath"                                                                                   split_words:"true"`
-	TlsCertFilePath        string    `yaml:"tlsCertFilePath"                     envconfig:"TLS_CERT_FILE_PATH"`
-	BindAddr               string    `yaml:"bindAddr"                                                                                     split_words:"true"`
-	PrivateBindAddr        string    `yaml:"privateBindAddr"                                                                              split_words:"true"`
-	ShutdownTimeout        string    `yaml:"shutdownTimeout"                                                                              split_words:"true"`
-	LedgerCatchupTimeout   string    `yaml:"ledgerCatchupTimeout"                envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
-	Network                string    `yaml:"network"`
-	NetworkMagic           uint32    `yaml:"networkMagic"                                                                                 split_words:"true"`
-	PrivatePort            uint      `yaml:"privatePort"                                                                                  split_words:"true"`
-	RelayPort              uint      `yaml:"relayPort"                           envconfig:"port"`
-	BarkBaseUrl            string    `yaml:"barkBaseUrl"                         envconfig:"DINGO_BARK_BASE_URL"`
-	BarkBlockDownloadHosts []string  `yaml:"barkBlockDownloadHosts"              envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
-	BarkPort               uint      `yaml:"barkPort"                            envconfig:"DINGO_BARK_PORT"`
+	API             APIConfig `yaml:"api"`
+	TlsKeyFilePath  string    `yaml:"tlsKeyFilePath"                      envconfig:"TLS_KEY_FILE_PATH"`
+	Topology        string    `yaml:"topology"`
+	CardanoConfig   string    `yaml:"cardanoConfig"                       envconfig:"config"`
+	DatabasePath    string    `yaml:"databasePath"                                                                                 split_words:"true"`
+	SocketPath      string    `yaml:"socketPath"                                                                                   split_words:"true"`
+	TlsCertFilePath string    `yaml:"tlsCertFilePath"                     envconfig:"TLS_CERT_FILE_PATH"`
+	BindAddr        string    `yaml:"bindAddr"                                                                                     split_words:"true"`
+	// APIBindAddr is the interface used by the Blockfrost, Mesh, and UTxO
+	// RPC listeners. It is separate from BindAddr because the latter also
+	// serves the relay and metrics listeners.
+	APIBindAddr            string   `yaml:"apiBindAddr"                       envconfig:"DINGO_API_BIND_ADDR"`
+	PrivateBindAddr        string   `yaml:"privateBindAddr"                                                                              split_words:"true"`
+	ShutdownTimeout        string   `yaml:"shutdownTimeout"                                                                              split_words:"true"`
+	LedgerCatchupTimeout   string   `yaml:"ledgerCatchupTimeout"                envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
+	Network                string   `yaml:"network"`
+	NetworkMagic           uint32   `yaml:"networkMagic"                                                                                 split_words:"true"`
+	PrivatePort            uint     `yaml:"privatePort"                                                                                  split_words:"true"`
+	RelayPort              uint     `yaml:"relayPort"                           envconfig:"port"`
+	BarkBaseUrl            string   `yaml:"barkBaseUrl"                         envconfig:"DINGO_BARK_BASE_URL"`
+	BarkBlockDownloadHosts []string `yaml:"barkBlockDownloadHosts"              envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
+	BarkPort               uint     `yaml:"barkPort"                            envconfig:"DINGO_BARK_PORT"`
 	// BarkHost is the interface Bark binds to. Left empty, node.go defaults
 	// it to loopback-only (127.0.0.1) whenever the database lifecycle
 	// service (Restore/Truncate and friends — gated on BarkClientCAFilePath,
@@ -811,9 +828,10 @@ type APIPluginsConfig struct {
 // internal/apiconfig for the merge/validation rules; composition (node.go)
 // performs the actual per-provider merge, not this package.
 //
-// bindAddr, debugBindAddr, and corsAllowedOrigins deliberately stay at the
-// Config root rather than moving under this section: bindAddr is not
-// API-specific (the relay/NtN and metrics listeners use it too),
+// bindAddr, apiBindAddr, debugBindAddr, and corsAllowedOrigins deliberately
+// stay at the Config root rather than moving under this section: bindAddr is
+// not API-specific (the relay/NtN and metrics listeners use it too),
+// apiBindAddr is the separate safe bind for the API listeners,
 // debugBindAddr controls the separate pprof listener, and corsAllowedOrigins
 // already applies uniformly to all three API providers
 // today with no override need identified by dingo#2996/#2998, so
@@ -1091,6 +1109,7 @@ var configMu sync.RWMutex
 var globalConfig = &Config{
 	Plugins:                             defaultPluginsConfig(),
 	BindAddr:                            "0.0.0.0",
+	APIBindAddr:                         DefaultAPIBindAddr,
 	CardanoConfig:                       "", // Will be set dynamically based on network
 	DatabasePath:                        ".dingo",
 	SocketPath:                          "dingo.socket",
@@ -1486,6 +1505,9 @@ func (c *Config) ApplyDefaults() {
 	// This also keeps manually constructed Config values fail-safe.
 	if c.DebugBindAddr == "" {
 		c.DebugBindAddr = DefaultDebugBindAddr
+	}
+	if c.APIBindAddr == "" {
+		c.APIBindAddr = DefaultAPIBindAddr
 	}
 	// Match the Midnight server's safe default before validation so an
 	// explicitly empty YAML or environment value does not look like a remote

@@ -56,6 +56,8 @@ import (
 func TestHandleEventChainsyncBlockHeaderRoutesSlotBattleToForkResolution(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	fixture := newChainsyncRollbackFixture(t)
 
 	// Competing forge at the same slot as fixture.currentTip but a

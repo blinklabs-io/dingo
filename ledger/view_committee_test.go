@@ -198,6 +198,8 @@ INSERT INTO resign_committee_cold (
 }
 
 func TestLedgerViewProposedCommitteeMemberPreservesCertificateState(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name         string
 		seed         func(*testing.T, *database.Database, lcommon.Credential)
@@ -252,6 +254,8 @@ func TestLedgerViewProposedCommitteeMemberPreservesCertificateState(t *testing.T
 }
 
 func TestLedgerViewCommitteeCredentialsDoNotAliasByHash(t *testing.T) {
+	t.Parallel()
+
 	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
 	hash := committeeTestCredential(0x81).Credential
 	keyCold := lcommon.Credential{
@@ -301,6 +305,8 @@ func TestLedgerViewCommitteeCredentialsDoNotAliasByHash(t *testing.T) {
 }
 
 func TestLedgerViewCommitteeHotCredentialSelection(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name       string
 		expiries   []uint64
@@ -448,6 +454,8 @@ func TestLedgerViewCommitteeHotCredentialSelection(t *testing.T) {
 }
 
 func TestLedgerViewCommitteeProposalUsesPinnedSnapshot(t *testing.T) {
+	t.Parallel()
+
 	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
 	cold := committeeTestCredential(0x91)
 	storeCommitteeUpdateProposal(t, db, 0x92, cold, 90)
@@ -465,6 +473,8 @@ func TestLedgerViewCommitteeProposalUsesPinnedSnapshot(t *testing.T) {
 }
 
 func TestCommitteeCredentialStorageRollbackPreservesTags(t *testing.T) {
+	t.Parallel()
+
 	_, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
 	hash := committeeTestCredential(0xa1).Credential
 	members := []*models.CommitteeMember{
@@ -511,6 +521,8 @@ func TestCommitteeCredentialStorageRollbackPreservesTags(t *testing.T) {
 }
 
 func TestCommitteeTermStartPresenceSurvivesStorageRollback(t *testing.T) {
+	t.Parallel()
+
 	_, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
 	cold := committeeTestCredential(0xa2)
 	require.NoError(t, db.SetCommitteeMembers(
@@ -553,6 +565,8 @@ func TestCommitteeTermStartPresenceSurvivesStorageRollback(t *testing.T) {
 }
 
 func TestLedgerViewCommitteeMember(t *testing.T) {
+	t.Parallel()
+
 	t.Run("seated", func(t *testing.T) {
 		lv, db := committeeTestView(
 			t,
@@ -672,6 +686,8 @@ func TestLedgerViewCommitteeMember(t *testing.T) {
 func TestLedgerViewPendingCommitteeCertificateValidationSameTransaction(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	pparams := &conway.ConwayProtocolParameters{}
 	initialView, db := committeeTestView(t, pparams)
 	seated := committeeTestCredential(0x61)
@@ -772,6 +788,8 @@ func certificateName(certificate lcommon.Certificate) string {
 func TestLedgerViewCommitteeHotCredentialMemberRejectsUnsupportedTag(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	lv, _ := committeeTestView(t, &conway.ConwayProtocolParameters{})
 	unsupported := lcommon.Credential{
 		CredType:   99,
@@ -791,6 +809,8 @@ func TestLedgerViewCommitteeHotCredentialMemberRejectsUnsupportedTag(
 // A re-elected member has several committee_member rows for one credential.
 // Counting hashes alone dropped it from the seated list entirely.
 func TestLedgerViewCommitteeMembersIncludesReelectedMember(t *testing.T) {
+	t.Parallel()
+
 	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
 	cold := committeeTestCredential(0x91)
 	seedCommitteeMemberTerm(t, db, cold, 100, 10)
@@ -848,6 +868,8 @@ INSERT INTO committee_member (
 func TestLedgerViewProposedCommitteeMemberChainsFromNoConfidenceRoot(
 	t *testing.T,
 ) {
+	t.Parallel()
+
 	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
 	cold := committeeTestCredential(0x81)
 
@@ -919,6 +941,8 @@ func TestLedgerViewProposedCommitteeMemberChainsFromNoConfidenceRoot(
 // committee was seated and is now authoritatively empty, as after a
 // NoConfidence enactment, which must still reject a former member.
 func TestLedgerViewCommitteeStateAvailableTracksSeatedMembers(t *testing.T) {
+	t.Parallel()
+
 	lv, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
 
 	// A reachable store with no committee rows at all is not authoritative.
