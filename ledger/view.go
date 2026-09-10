@@ -401,7 +401,7 @@ func (lv *LedgerView) PoolCurrentState(
 			tmp.PoolMetadata = &lcommon.PoolMetadata{
 				Url: reg.MetadataUrl,
 				Hash: lcommon.PoolMetadataHash(
-					lcommon.NewBlake2b256(reg.MetadataHash),
+					lcommon.NewBlake2b256(reg.MetadataHash).Bytes(),
 				),
 			}
 		}

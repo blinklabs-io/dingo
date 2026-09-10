@@ -2109,7 +2109,7 @@ ORDER BY p.id DESC`,
 			certificate.PoolMetadata = &lcommon.PoolMetadata{
 				Url: registration.MetadataUrl,
 				Hash: lcommon.PoolMetadataHash(
-					lcommon.NewBlake2b256(registration.MetadataHash),
+					lcommon.NewBlake2b256(registration.MetadataHash).Bytes(),
 				),
 			}
 		}
