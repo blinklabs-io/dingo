@@ -1060,17 +1060,20 @@ func TestBuildBlockBlockSizeLimit(t *testing.T) {
 	)
 }
 
-// TestBuildBlockRejectsExactBodySizeAboveApproximateLimit exercises the
-// boundary the in-loop approximate accounting cannot see: the loop sums each
-// mempool transaction's own raw CBOR length, but the assembled block body
+// TestBuildBlockExcludesTransactionWhoseExactAssembledBodyExceedsLimit
+// exercises the boundary a raw-CBOR-size approximation cannot see: a single
+// minimal Conway tx's raw CBOR is 52 bytes, but the assembled block body
 // re-wraps decoded fields into separate transaction-body/witness-set arrays,
-// which is not guaranteed to be the same size as the sum of raw tx CBOR. A
-// single minimal Conway tx's raw CBOR is 52 bytes while its exact assembled
-// body is 53 bytes, so a MaxBlockBodySize set to exactly the raw size passes
-// the in-loop check (which only compares raw sums) but must still be
-// rejected by the final exact-size check before the block is adopted or
-// diffused.
-func TestBuildBlockRejectsExactBodySizeAboveApproximateLimit(t *testing.T) {
+// which is one byte larger (53) and not the same size as the raw tx CBOR. A
+// MaxBlockBodySize set to exactly the raw size would pass a raw-sum
+// approximation, but the build loop's segmented body-size accounting
+// (segmentedBodySize) tracks the real assembled size per candidate
+// transaction, so the transaction is excluded from the block before it is
+// ever added rather than only being caught by the final assembled-size
+// safety net after the whole block is built.
+func TestBuildBlockExcludesTransactionWhoseExactAssembledBodyExceedsLimit(
+	t *testing.T,
+) {
 	creds := setupTestCredentials(t)
 
 	txCbor := makeMinimalTxCbor(t, 0x01, 0)
@@ -1083,8 +1086,8 @@ func TestBuildBlockRejectsExactBodySizeAboveApproximateLimit(t *testing.T) {
 	}
 
 	// MaxBlockBodySize equals the transaction's raw CBOR length exactly, so
-	// the in-loop approximate check (blockSize+txSize > maxBlockSize) admits
-	// it, but the exact assembled body is one byte larger.
+	// a raw-sum approximation would admit it, but the exact assembled body
+	// is one byte larger and must be excluded.
 	pparams := &conway.ConwayProtocolParameters{
 		MaxTxSize:        rawSize,
 		MaxBlockBodySize: rawSize,
@@ -1116,13 +1119,13 @@ func TestBuildBlockRejectsExactBodySizeAboveApproximateLimit(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, _, err = builder.BuildBlock(1001, 0)
-	require.Error(
+	block, _, err := builder.BuildBlock(1001, 0)
+	require.NoError(t, err)
+	assert.Empty(
 		t,
-		err,
-		"exact assembled body size exceeding MaxBlockBodySize must be rejected even though the approximate in-loop sum stayed within budget",
+		block.Transactions(),
+		"the only mempool transaction's exact assembled body exceeds MaxBlockBodySize and must be excluded, not silently included",
 	)
-	assert.Contains(t, err.Error(), "exceeds MaxBlockBodySize")
 }
 
 // mockTxValidator implements TxValidator for testing. It rejects
