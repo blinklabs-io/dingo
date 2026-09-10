@@ -34,6 +34,20 @@ import (
 // model-specific error when the public method contract requires one.
 var ErrNotFound = errors.New("metadata not found")
 
+// The interfaces below are the compiled-in metadata provider contract
+// (database/plugin/PLUGIN_DEVELOPMENT.md). A provider maintained outside this
+// repository builds against a pinned module version, so adding a method or a
+// parameter here breaks it at compile time on the version bump that carries
+// the change.
+//
+// That break is the intended behaviour, not an oversight to be smoothed over.
+// Several of these methods feed consensus-visible stake and reward
+// arithmetic, where a provider that silently kept an older, narrower
+// implementation would return an answer that is wrong rather than absent. A
+// runtime capability probe or a defaulted shim would produce exactly that, so
+// changes are made to the interface directly and a provider is required to
+// fail the build until it implements them.
+
 // LifecycleStore is the narrow lifecycle capability used by composition code.
 type LifecycleStore interface {
 	// Close closes the metadata store and releases all resources.
