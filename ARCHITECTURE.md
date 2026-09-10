@@ -4836,11 +4836,16 @@ without moving `Forge_node_is_leader`, `Forge_node_not_leader` or
 `Forge_could_not_forge` -- so it is counted from the precomputed VRF schedule
 (`isScheduledLeaderSlot`), the same read that raises its log line to `WARN`
 with `leader_slot=true`. That read fails quiet when no schedule is cached for
-the epoch, so the series can under-count and never over-counts. It exists
-because one real-world event splits across two paths purely on pipeline
-timing: a rival block at our leader slot that the ledger has applied is
-counted as a slot battle and a could-not-forge, while the same rival still
-unapplied is refused here.
+the epoch, so the series can under-count. It does not count this node's own
+block: before counting, the refusal identifies the unapplied block at the
+primary chain tip by hash against the forged-block tracker, falling back to
+the forge fence, and a block of ours is skipped at `DEBUG` with no increment,
+because that slot produced a block rather than losing one. Only an
+inconclusive identification is counted, so a slot lost while neither signal
+was available is still reported. It exists because one real-world event splits
+across two paths purely on pipeline timing: a rival block at our leader slot
+that the ledger has applied is counted as a slot battle and a could-not-forge,
+while the same rival still unapplied is refused here.
 
 KES periods are computed from the era-aware absolute slot (`currentSlot / slotsPerKESPeriod`) for both startup opcert validation and forge-time signing, so networks with Byron-era prefixes do not skew the current KES period by converting wall-clock duration directly through the Shelley slot length.
 Successful startup validation captures Shelley genesis `MaxKESEvolutions` on
