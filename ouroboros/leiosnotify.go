@@ -1887,7 +1887,7 @@ func (o *Ouroboros) leiosnotifyServerRequestNext(
 	connKey := leiosConnectionIdString(ctx.ConnectionId)
 	// Protocol completion waits for this callback to return. Use the
 	// connection manager's independent close notification instead.
-	done, cancel := o.registerLeiosServeWaiter(ctx.ConnectionId)
+	done, cancel := o.registerLeiosNotifyServeWaiter(ctx.ConnectionId)
 	protocolDone := ctx.Server.DoneChan()
 	defer cancel()
 

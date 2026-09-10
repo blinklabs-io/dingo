@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/protocol"
@@ -113,6 +114,30 @@ func TestLeiosNotifyCompletedProtocolReturnsWithoutCursor(t *testing.T) {
 	testutil.RequireReceive(t, finished, time.Second, "completed protocol callback to return")
 	require.Empty(t, o.leiosEBLog.cursors)
 	require.Empty(t, o.leiosServeWaiters)
+}
+
+func TestLeiosNotifyUnregisteredConnectionWaitsForProtocolCompletion(t *testing.T) {
+	o := newOuroboros(OuroborosConfig{})
+	o.connManager = connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
+	server := leiosnotify.NewServer(protocol.ProtocolOptions{}, nil)
+	finished := make(chan error, 1)
+	go func() {
+		_, err := o.leiosnotifyServerRequestNext(leiosnotify.CallbackContext{
+			Server:       server,
+			ConnectionId: gouroboros.ConnectionId{},
+		})
+		finished <- err
+	}()
+	t.Cleanup(server.Stop)
+	testutil.RequireNoReceive(t, finished, 50*time.Millisecond,
+		"an unregistered connection must not be treated as a live-protocol disconnect")
+	server.Stop()
+	select {
+	case err := <-finished:
+		require.Error(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("protocol completion must release the callback")
+	}
 }
 
 // next lets log-only tests reserve entries without a connection lifecycle.
