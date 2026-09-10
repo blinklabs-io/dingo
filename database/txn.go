@@ -221,10 +221,12 @@ func NewReadSnapshotContext(
 	defer resume()
 
 	t := &Txn{db: db}
+	pinBlobStoreForTxn(t, db)
 	var tip ochainsync.Tip
 	if ms := db.Metadata(); ms != nil {
 		t.metadataTxn = ms.ReadTransaction(ctx)
 		if t.metadataTxn == nil {
+			_ = t.Rollback()
 			return nil, tip, types.ErrNilTxn
 		}
 		var err error
@@ -237,7 +239,7 @@ func NewReadSnapshotContext(
 			)
 		}
 	}
-	if bs := db.Blob(); bs != nil {
+	if bs := t.blobStore; bs != nil {
 		t.blobTxn = bs.NewTransaction(false)
 	}
 	return t, tip, nil

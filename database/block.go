@@ -334,7 +334,7 @@ func BlockPointBySlotTxn(txn *Txn, slot uint64) (ocommon.Point, error) {
 	if txn == nil || txn.Blob() == nil {
 		return ocommon.Point{}, types.ErrNilTxn
 	}
-	store := txn.DB().Blob()
+	store := txn.BlobStore()
 	if store == nil {
 		return ocommon.Point{}, types.ErrBlobStoreUnavailable
 	}
@@ -407,7 +407,7 @@ func BlockPointAtOrBeforeSlotTxn(
 	if txn == nil || txn.Blob() == nil {
 		return ocommon.Point{}, types.ErrNilTxn
 	}
-	store := txn.DB().Blob()
+	store := txn.BlobStore()
 	if store == nil {
 		return ocommon.Point{}, types.ErrBlobStoreUnavailable
 	}

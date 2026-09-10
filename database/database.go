@@ -197,6 +197,9 @@ func (d *Database) PauseCommitsContext(
 // from opening while a logical destructive update spans multiple physical
 // transactions. The returned finish function must be called exactly once after
 // both the blob deletion and corresponding metadata rollback have completed.
+// This operation is non-nesting: a nested call blocks until the outer
+// transition finishes, but the outer finish function cannot run until the
+// nested call returns. Call it only for the outermost logical transition.
 //
 // The transition barrier is deliberately separate from commitBarrier. A
 // rollback must open a normal combined write transaction after its blob-only

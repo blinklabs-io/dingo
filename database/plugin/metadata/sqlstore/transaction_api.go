@@ -608,9 +608,6 @@ func storeTransactionIndexedScripts(
 		outputs,
 		lcommon.SubTransactionOutputsFromTransaction(transaction)...,
 	)
-	if collateralReturn := transaction.CollateralReturn(); collateralReturn != nil {
-		outputs = append(outputs, collateralReturn)
-	}
 	for _, output := range outputs {
 		if output == nil {
 			continue
