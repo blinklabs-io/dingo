@@ -250,7 +250,7 @@ RETURNING id`,
 					point,
 					index,
 					certDeposits,
-					false,
+					requireKnownDeposits,
 				)
 				if err != nil {
 					return err
@@ -474,7 +474,7 @@ RETURNING id`,
 			if transaction.IsValid() {
 				certificateRefs, err := s.applyTransactionCertificates(
 					ctx, db, transactionID, transaction.Certificates(),
-					point, index, certDeposits, true,
+					point, index, certDeposits, allowUnknownDeposits,
 				)
 				if err != nil {
 					return err
