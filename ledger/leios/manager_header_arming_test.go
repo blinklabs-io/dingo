@@ -344,13 +344,23 @@ func TestVoteManagerSlotWindowDeclineIsCountedAndWarned(t *testing.T) {
 // TestVoteManagerNonSeatedOutsideWindowUsesNotSeatedReason ensures committee
 // membership is classified before the slot-window shortcut. A configured pool
 // that is not selected should not be reported as merely late to vote.
+//
+// This ordering is also what makes the slot-window branch's seating check
+// unnecessary: that branch is only reachable once VoterIdFor has already
+// succeeded, so the "this node is seated" warning cannot be attached to a
+// pool that holds no seat. The log assertion below pins that half.
 func TestVoteManagerNonSeatedOutsideWindowUsesNotSeatedReason(t *testing.T) {
 	reg := prometheus.NewRegistry()
+	logBuf := &syncBuffer{}
 	slots := &fakeSlotProvider{slot: 1000}
 	fixture := newManagerFixture(t, func(_ *managerFixture, cfg *VoteManagerConfig) {
 		cfg.SlotProvider = slots
 		cfg.VoteWindowSlots = headerArmingVoteWindow
 		cfg.PromRegistry = reg
+		cfg.Logger = slog.New(slog.NewJSONHandler(
+			logBuf,
+			&slog.HandlerOptions{Level: slog.LevelWarn},
+		))
 	})
 	var poolHash lcommon.PoolKeyHash
 	decoded, err := hex.DecodeString(testPoolHash(99))
@@ -370,6 +380,12 @@ func TestVoteManagerNonSeatedOutsideWindowUsesNotSeatedReason(t *testing.T) {
 	assert.Equal(t, float64(0), promtestutil.ToFloat64(
 		fixture.mgr.metrics.votesNotEmittedTotal.WithLabelValues(voteNotEmittedSlotWindow),
 	))
+	assert.NotContains(
+		t,
+		logBuf.String(),
+		"seated on the leios committee",
+		"an unseated pool must never take the seated-but-not-voting warning",
+	)
 }
 
 // TestVoteManagerVotesNotEmittedCountsMissingKey pins a second reason label so

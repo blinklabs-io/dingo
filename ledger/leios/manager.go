@@ -2469,17 +2469,15 @@ func (m *VoteManager) emitPrototypeVoteLocked(
 	}
 	if err := m.slotWindowCheck(record.slot); err != nil {
 		m.noteVoteNotEmitted(voteNotEmittedSlotWindow)
-		// A seated node holding a key that never votes is otherwise
-		// silently green: committee size, key loaded, EBs observed and
-		// certificates built all read healthy. Warn in that case, but
-		// throttle it -- catch-up replays every announcement it passes
-		// -- and let the counter carry the true rate.
-		//
-		// The throttle is checked before the seating lookup: computing a
-		// committee can hit the stake provider, and a failed lookup is
-		// deliberately not memoized.
-		if m.slotWindowWarnDue() &&
-			m.seatedForEpoch(record.epoch, votingPool) {
+		// Reaching here means seating is already established: the
+		// committee resolved above and VoterIdFor returned this node's
+		// voter id, or the declination would have been classified as
+		// not-seated. So this is the seated-node case, which is
+		// otherwise silently green -- committee size, key loaded, EBs
+		// observed and certificates built all read healthy. Warn on it,
+		// but throttle it -- catch-up replays every announcement it
+		// passes -- and let the counter carry the true rate.
+		if m.slotWindowWarnDue() {
 			m.markSlotWindowWarned()
 			m.logger.Warn(
 				"announcing ranking block outside vote window, not voting; this node is seated on the leios committee and holds a voting key",
@@ -2583,29 +2581,13 @@ func (m *VoteManager) noteVoteNotEmitted(reason string) {
 	m.metrics.votesNotEmittedTotal.WithLabelValues(reason).Inc()
 }
 
-// seatedForEpoch reports whether votingPool holds a seat on the epoch's
-// committee. It is used only to decide log severity, so any lookup failure is
-// reported as "not seated" rather than surfaced.
-func (m *VoteManager) seatedForEpoch(epoch uint64, votingPool []byte) bool {
-	if len(votingPool) == 0 {
-		return false
-	}
-	entry, err := m.committeeAndParamsForEpoch(epoch)
-	if err != nil || entry == nil || entry.committee == nil {
-		return false
-	}
-	_, ok := entry.committee.VoterIdFor(votingPool)
-	return ok
-}
-
 // slotWindowWarnDue rate-limits the seated-but-not-voting warning. Catching up
 // replays every announcement between the local tip and the network tip, and
 // every one of those is legitimately outside the vote window.
 //
-// Peek and commit are separate so the seating lookup, which can reach the
-// stake provider, only runs for a declination that is actually going to be
-// logged. Two emissions racing between the two calls costs at most an extra
-// warning line.
+// Peek and commit are separate rather than one test-and-set so the window is
+// only marked warned on the branch that actually logs. Two emissions racing
+// between the two calls costs at most an extra warning line.
 func (m *VoteManager) slotWindowWarnDue() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
