@@ -27,11 +27,11 @@ import (
 
 // newStaleTipTestForger builds a production forger whose leader check always
 // says "leader", so the only thing that can stop it forging is a gate.
-// frontierSlot is this node's own primary chain tip; chainTipSlot is the
+// primaryTipSlot is this node's own primary chain tip; chainTipSlot is the
 // ledger-applied tip a forged block would be built on.
 func newStaleTipTestForger(
 	t *testing.T,
-	currentSlot, chainTipSlot, frontierSlot uint64,
+	currentSlot, chainTipSlot, primaryTipSlot uint64,
 	logs *bytes.Buffer,
 ) (*BlockForger, *forgerTestBuilder, *forgerTestBroadcaster) {
 	t.Helper()
@@ -48,11 +48,11 @@ func newStaleTipTestForger(
 		BlockBuilder:     builder,
 		BlockBroadcaster: broadcaster,
 		SlotClock: forgerTestSlotClock{
-			currentSlot:       currentSlot,
-			chainTipSlot:      chainTipSlot,
-			frontierExplicit:  true,
-			frontierSlot:      frontierSlot,
-			slotsPerKESPeriod: 100,
+			currentSlot:        currentSlot,
+			chainTipSlot:       chainTipSlot,
+			primaryTipExplicit: true,
+			primaryTipSlot:     primaryTipSlot,
+			slotsPerKESPeriod:  100,
 		},
 		PromRegistry: prometheus.NewRegistry(),
 	})
@@ -72,7 +72,7 @@ func newStaleTipTestForger(
 // Before the fix the forger built and broadcast the block regardless.
 func TestForgeSkipsWhenLedgerTipTrailsPrimaryChainTip(t *testing.T) {
 	var logs bytes.Buffer
-	// Applied tip 83 slots behind the frontier: the field case.
+	// Applied tip 83 slots behind the primary chain tip: the field case.
 	forger, builder, broadcaster := newStaleTipTestForger(
 		t,
 		200, // current slot
@@ -183,13 +183,13 @@ func TestForgeStaleTipToleranceIsConfigurable(t *testing.T) {
 			// Explicit, not merely non-zero: this test's whole verdict is
 			// that a 20-slot gap is tolerated at a 50-slot bound, so it must
 			// not depend on the double's value-based opt-in rule. If that
-			// rule were ever tightened back to frontierExplicit alone the
-			// frontier would mirror the applied tip, the gap would collapse
-			// to 0, and this test would still pass while the tolerance knob
-			// had stopped being honoured.
-			frontierExplicit:  true,
-			frontierSlot:      120,
-			slotsPerKESPeriod: 100,
+			// rule were ever tightened back to primaryTipExplicit alone the
+			// primary tip would mirror the applied tip, the gap would
+			// collapse to 0, and this test would still pass while the
+			// tolerance knob had stopped being honoured.
+			primaryTipExplicit: true,
+			primaryTipSlot:     120,
+			slotsPerKESPeriod:  100,
 		},
 		ForgePrimaryChainTipToleranceSlots: 50,
 		PromRegistry:                       prometheus.NewRegistry(),
@@ -202,8 +202,9 @@ func TestForgeStaleTipToleranceIsConfigurable(t *testing.T) {
 // TestTipGapGaugeReportsApplyBacklogOnEveryLeaderCheck is the observability
 // half of the regression. dingo_forge_tip_gap_slots was reset to 0 at the top
 // of every leader check and only set non-zero on the skip paths, so a producer
-// forging tens of slots behind its own frontier reported a gap of exactly 0 --
-// the one case where the gauge mattered was the one case it could not show.
+// forging tens of slots behind its own primary tip reported a gap of exactly
+// 0 -- the one case where the gauge mattered was the one case it could not
+// show.
 func TestTipGapGaugeReportsApplyBacklogOnEveryLeaderCheck(t *testing.T) {
 	var logs bytes.Buffer
 
@@ -237,7 +238,7 @@ func TestTipGapGaugeReportsApplyBacklogOnEveryLeaderCheck(t *testing.T) {
 // primary chain tip sit at the SAME slot but carry the given hashes.
 func newEqualSlotForkTestForger(
 	t *testing.T,
-	appliedHash, frontierHash []byte,
+	appliedHash, primaryTipHash []byte,
 	logs *bytes.Buffer,
 ) (*BlockForger, *forgerTestBuilder, *forgerTestBroadcaster) {
 	t.Helper()
@@ -254,13 +255,13 @@ func newEqualSlotForkTestForger(
 		BlockBuilder:     builder,
 		BlockBroadcaster: broadcaster,
 		SlotClock: forgerTestSlotClock{
-			currentSlot:       200,
-			chainTipSlot:      100,
-			chainTipHash:      appliedHash,
-			frontierExplicit:  true,
-			frontierSlot:      100,
-			frontierHash:      frontierHash,
-			slotsPerKESPeriod: 100,
+			currentSlot:        200,
+			chainTipSlot:       100,
+			chainTipHash:       appliedHash,
+			primaryTipExplicit: true,
+			primaryTipSlot:     100,
+			primaryTipHash:     primaryTipHash,
+			slotsPerKESPeriod:  100,
 		},
 		PromRegistry: prometheus.NewRegistry(),
 	})
@@ -268,14 +269,14 @@ func newEqualSlotForkTestForger(
 	return forger, builder, broadcaster
 }
 
-// TestForgeSkipsOnEqualSlotFrontierDivergence is the equal-slot fork the slot
-// gap cannot see. Chain selection replaced the block at the applied tip's slot
-// with a competing one at the SAME slot that the ledger has not applied, so
-// the gap is 0 while the ledger state still describes the block that was
+// TestForgeSkipsOnEqualSlotPrimaryTipDivergence is the equal-slot fork the
+// slot gap cannot see. Chain selection replaced the block at the applied tip's
+// slot with a competing one at the SAME slot that the ledger has not applied,
+// so the gap is 0 while the ledger state still describes the block that was
 // replaced -- the builder would parent the block on one chain position while
 // its transactions, protocol parameters and leader eligibility came from
 // another.
-func TestForgeSkipsOnEqualSlotFrontierDivergence(t *testing.T) {
+func TestForgeSkipsOnEqualSlotPrimaryTipDivergence(t *testing.T) {
 	var logs bytes.Buffer
 	forger, builder, broadcaster := newEqualSlotForkTestForger(
 		t,
@@ -310,9 +311,9 @@ func TestForgeSkipsOnEqualSlotFrontierDivergence(t *testing.T) {
 	require.Zero(t, testutil.ToFloat64(forger.metrics.tipGapSlots))
 }
 
-// TestForgeProceedsWhenFrontierMatchesAppliedTip pins the other side: the same
-// slot with the same hash is the normal caught-up state and must forge.
-func TestForgeProceedsWhenFrontierMatchesAppliedTip(t *testing.T) {
+// TestForgeProceedsWhenPrimaryTipMatchesAppliedTip pins the other side: the
+// same slot with the same hash is the normal caught-up state and must forge.
+func TestForgeProceedsWhenPrimaryTipMatchesAppliedTip(t *testing.T) {
 	var logs bytes.Buffer
 	hash := bytes.Repeat([]byte{0xAA}, 32)
 	forger, builder, broadcaster := newEqualSlotForkTestForger(
@@ -342,24 +343,24 @@ func TestForgeProceedsWhenFrontierMatchesAppliedTip(t *testing.T) {
 // wedge a fresh node into never forging.
 func TestForgeProceedsWhenEitherTipHashIsEmpty(t *testing.T) {
 	for name, tc := range map[string]struct {
-		applied, frontier []byte
+		applied, primaryTip []byte
 	}{
-		"frontier hash unknown": {
-			applied:  bytes.Repeat([]byte{0xAA}, 32),
-			frontier: []byte{},
+		"primary chain tip hash unknown": {
+			applied:    bytes.Repeat([]byte{0xAA}, 32),
+			primaryTip: []byte{},
 		},
 		"applied hash unknown": {
-			applied:  []byte{},
-			frontier: bytes.Repeat([]byte{0xBB}, 32),
+			applied:    []byte{},
+			primaryTip: bytes.Repeat([]byte{0xBB}, 32),
 		},
-		"both at genesis": {applied: []byte{}, frontier: []byte{}},
+		"both at genesis": {applied: []byte{}, primaryTip: []byte{}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var logs bytes.Buffer
 			forger, builder, _ := newEqualSlotForkTestForger(
 				t,
 				tc.applied,
-				tc.frontier,
+				tc.primaryTip,
 				&logs,
 			)
 			require.NoError(
@@ -419,8 +420,8 @@ func (forgeStaleTipTestNonLeader) NextLeaderSlot(
 func newStaleTipTestForgerWithLeader(
 	t *testing.T,
 	leader LeaderChecker,
-	currentSlot, chainTipSlot, frontierSlot uint64,
-	appliedHash, frontierHash []byte,
+	currentSlot, chainTipSlot, primaryTipSlot uint64,
+	appliedHash, primaryTipHash []byte,
 	logs *bytes.Buffer,
 ) (*BlockForger, *forgerTestBuilder, *forgerTestBroadcaster) {
 	t.Helper()
@@ -437,13 +438,13 @@ func newStaleTipTestForgerWithLeader(
 		BlockBuilder:     builder,
 		BlockBroadcaster: broadcaster,
 		SlotClock: forgerTestSlotClock{
-			currentSlot:       currentSlot,
-			chainTipSlot:      chainTipSlot,
-			chainTipHash:      appliedHash,
-			frontierExplicit:  true,
-			frontierSlot:      frontierSlot,
-			frontierHash:      frontierHash,
-			slotsPerKESPeriod: 100,
+			currentSlot:        currentSlot,
+			chainTipSlot:       chainTipSlot,
+			chainTipHash:       appliedHash,
+			primaryTipExplicit: true,
+			primaryTipSlot:     primaryTipSlot,
+			primaryTipHash:     primaryTipHash,
+			slotsPerKESPeriod:  100,
 		},
 		PromRegistry: prometheus.NewRegistry(),
 	})
@@ -451,23 +452,23 @@ func newStaleTipTestForgerWithLeader(
 	return forger, builder, broadcaster
 }
 
-// TestForgeSkipsWhenFrontierAlreadyHasTheCurrentSlot covers the guard that
+// TestForgeSkipsWhenPrimaryTipAlreadyHasTheCurrentSlot covers the guard that
 // asks "does a block already exist at this slot". It compared the current slot
-// against the LEDGER-APPLIED tip, but the parent comes from the frontier, so
-// inside the frontier tolerance a peer's block at the current slot could
-// already be on the frontier while still unapplied. Forging then parents a
+// against the LEDGER-APPLIED tip, but the parent comes from the primary tip,
+// so inside the primary tip tolerance a peer's block at the current slot could
+// already be on the primary tip while still unapplied. Forging then parents a
 // block for slot S on a tip already at slot S -- a non-increasing slot,
 // admitted locally and broadcast.
 //
 // The gap here is 2 slots, well inside the tolerance, so the stale-tip gate
 // does not fire and this guard is the only thing that can catch it.
-func TestForgeSkipsWhenFrontierAlreadyHasTheCurrentSlot(t *testing.T) {
+func TestForgeSkipsWhenPrimaryTipAlreadyHasTheCurrentSlot(t *testing.T) {
 	var logs bytes.Buffer
 	forger, builder, broadcaster := newStaleTipTestForger(
 		t,
 		200, // current slot
 		198, // ledger-applied tip, still behind
-		200, // frontier already carries a block at the current slot
+		200, // primary chain tip already carries a block at the current slot
 		&logs,
 	)
 	require.LessOrEqual(
@@ -482,7 +483,7 @@ func TestForgeSkipsWhenFrontierAlreadyHasTheCurrentSlot(t *testing.T) {
 	require.Zero(
 		t,
 		builder.calls,
-		"must not forge a non-increasing slot on top of the frontier",
+		"must not forge a non-increasing slot on top of the primary chain tip",
 	)
 	require.Zero(t, broadcaster.calls)
 	require.Contains(
@@ -495,20 +496,20 @@ func TestForgeSkipsWhenFrontierAlreadyHasTheCurrentSlot(t *testing.T) {
 	require.Contains(t, logs.String(), `"level":"WARN"`)
 }
 
-// TestForgeSkipsWhenFrontierIsAheadOfTheCurrentSlot covers the case that
+// TestForgeSkipsWhenPrimaryTipIsAheadOfTheCurrentSlot covers the case that
 // falls through every other gate: the applied tip is behind the current slot,
-// so the applied-tip comparison passes, but the FRONTIER is ahead of it. The
-// builder parents on the frontier, so forging would produce a block for slot
-// 200 whose parent already sits at slot 201 -- a block earlier than its own
-// parent. Comparing the current slot against the applied tip alone cannot see
-// this; comparing against max(applied, frontier) can.
-func TestForgeSkipsWhenFrontierIsAheadOfTheCurrentSlot(t *testing.T) {
+// so the applied-tip comparison passes, but the PRIMARY CHAIN TIP is ahead of
+// it. The builder parents on the primary tip, so forging would produce a block
+// for slot 200 whose parent already sits at slot 201 -- a block earlier than
+// its own parent. Comparing the current slot against the applied tip alone
+// cannot see this; comparing against max(applied, primaryTip) can.
+func TestForgeSkipsWhenPrimaryTipIsAheadOfTheCurrentSlot(t *testing.T) {
 	var logs bytes.Buffer
 	forger, builder, broadcaster := newStaleTipTestForger(
 		t,
 		200, // current slot
 		199, // applied tip, behind the current slot
-		201, // frontier AHEAD of the current slot
+		201, // primary chain tip AHEAD of the current slot
 		&logs,
 	)
 
@@ -538,7 +539,7 @@ func TestForgeSkipsWhenAppliedTipAlreadyHasTheCurrentSlot(t *testing.T) {
 		t,
 		200, // current slot
 		200, // applied tip already at this slot
-		200, // frontier agrees
+		200, // primary chain tip agrees
 		&logs,
 	)
 
@@ -622,20 +623,20 @@ func TestForgeStaleTipSkipCountsLostBlocksNotLeaderChecks(t *testing.T) {
 	})
 }
 
-// TestForgeSkipsWhenFrontierIsBehindTheAppliedTip covers the third disagreement
-// shape. applyGap is 0 (the frontier is not ahead) and the equal-slot hash
-// check does not apply (the slots differ), so neither existing case sees it,
-// yet the ledger describes a chain position ahead of the parent the builder
-// would use. The ledger itself recognises this state and reconciles it at
-// startup by rolling its tip back to the chain tip.
-func TestForgeSkipsWhenFrontierIsBehindTheAppliedTip(t *testing.T) {
+// TestForgeSkipsWhenPrimaryTipIsBehindTheAppliedTip covers the third
+// disagreement shape. applyGap is 0 (the primary tip is not ahead) and the
+// equal-slot hash check does not apply (the slots differ), so neither existing
+// case sees it, yet the ledger describes a chain position ahead of the parent
+// the builder would use. The ledger itself recognises this state and
+// reconciles it at startup by rolling its tip back to the chain tip.
+func TestForgeSkipsWhenPrimaryTipIsBehindTheAppliedTip(t *testing.T) {
 	var logs bytes.Buffer
 	forger, builder, broadcaster := newStaleTipTestForgerWithLeader(
 		t,
 		forgerTestLeader{},
 		300, // current slot
 		200, // ledger-applied tip
-		190, // frontier BEHIND the applied tip
+		190, // primary chain tip BEHIND the applied tip
 		bytes.Repeat([]byte{0xAA}, 32),
 		bytes.Repeat([]byte{0xBB}, 32),
 		&logs,
@@ -658,17 +659,17 @@ func TestForgeSkipsWhenFrontierIsBehindTheAppliedTip(t *testing.T) {
 	require.Contains(t, logs.String(), `"level":"WARN"`)
 }
 
-// TestForgeProceedsWhenFrontierIsUninitialised pins that a node whose primary
-// chain has no tip yet -- zero slot, empty hash -- is not caught by the
-// frontier-behind case and can still forge.
-func TestForgeProceedsWhenFrontierIsUninitialised(t *testing.T) {
+// TestForgeProceedsWhenPrimaryTipIsUninitialised pins that a node whose
+// primary chain has no tip yet -- zero slot, empty hash -- is not caught by
+// the primary-tip-behind case and can still forge.
+func TestForgeProceedsWhenPrimaryTipIsUninitialised(t *testing.T) {
 	var logs bytes.Buffer
 	forger, builder, _ := newStaleTipTestForgerWithLeader(
 		t,
 		forgerTestLeader{},
 		300, 200, 0,
 		bytes.Repeat([]byte{0xAA}, 32),
-		nil, // no frontier hash: chain not initialised
+		nil, // no primary chain tip hash: chain not initialised
 		&logs,
 	)
 

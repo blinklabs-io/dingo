@@ -333,7 +333,7 @@ func TestForgeStillWaitsForUnknownUpstreamTargetWhileTipIsStale(
 	// dingo_forge_tip_gap_slots non-zero on this branch. This PR gives that
 	// gauge a single meaning -- the ledger-apply backlog, primary chain tip
 	// minus applied tip -- and sets it once per leader check instead, so the
-	// skip paths no longer overwrite it. The frontier mirrors the applied tip
+	// skip paths no longer overwrite it. The primary tip mirrors the applied tip
 	// on this fixture, so the backlog is 0 and the gauge says so.
 	//
 	// The lag itself is not lost: ledger exports it continuously as
@@ -816,9 +816,9 @@ func (c *forgerMovingTipSlotClock) ChainTip() ocommon.Point {
 
 // PrimaryChainTip is pinned to the ORIGINAL tip and never moves. This double
 // exists to model the applied tip shifting between the two reads
-// tipBlockOwnership makes; letting the frontier follow it would put the
-// frontier ahead of the current slot and trip the past-slot guard before the
-// contested-slot branch this test is about.
+// tipBlockOwnership makes; letting the primary tip follow it would put the
+// primary tip ahead of the current slot and trip the past-slot guard before
+// the contested-slot branch this test is about.
 func (c *forgerMovingTipSlotClock) PrimaryChainTip() ocommon.Point {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -106,16 +106,16 @@ type forgerTestSlotClock struct {
 	currentSlot  uint64
 	chainTipSlot uint64
 	chainTipHash []byte
-	// frontierExplicit selects whether frontierSlot/frontierHash are used
-	// verbatim. When false the frontier mirrors the applied tip, which is the
-	// caught-up steady state and what every test that does not care about the
-	// distinction wants.
-	frontierExplicit  bool
-	frontierSlot      uint64
-	frontierHash      []byte
-	upstreamTipSlot   uint64
-	upstreamActive    bool
-	slotsPerKESPeriod uint64
+	// primaryTipExplicit selects whether primaryTipSlot/primaryTipHash are
+	// used verbatim. When false the primary tip mirrors the applied tip,
+	// which is the caught-up steady state and what every test that does not
+	// care about the distinction wants.
+	primaryTipExplicit bool
+	primaryTipSlot     uint64
+	primaryTipHash     []byte
+	upstreamTipSlot    uint64
+	upstreamActive     bool
+	slotsPerKESPeriod  uint64
 }
 
 func (c forgerTestSlotClock) CurrentSlot() (uint64, error) {
@@ -130,25 +130,26 @@ func (c forgerTestSlotClock) ChainTip() ocommon.Point {
 	return ocommon.Point{Slot: c.chainTipSlot, Hash: c.chainTipHash}
 }
 
-// PrimaryChainTip mirrors the applied tip unless the test describes a frontier
-// of its own. Mirroring is the caught-up steady state, so a test that sets no
-// frontier field observes no backlog and no divergence.
+// PrimaryChainTip mirrors the applied tip unless the test describes a primary
+// tip of its own. Mirroring is the caught-up steady state, so a test that sets
+// no primary chain tip field observes no backlog and no divergence.
 //
-// Setting frontierSlot or frontierHash is itself enough to opt in: a test that
-// set frontierSlot but forgot frontierExplicit would otherwise silently get the
-// mirrored applied tip, so its gap would read 0 and it would pass no matter
-// what the forger did -- which is exactly what happened to the configurable
-// tolerance test. frontierExplicit remains for the one case the values cannot
-// express on their own: an explicitly empty frontier (slot 0, no hash), which
-// is an uninitialised primary chain.
+// Setting primaryTipSlot or primaryTipHash is itself enough to opt in: a test
+// that set primaryTipSlot but forgot primaryTipExplicit would otherwise
+// silently get the mirrored applied tip, so its gap would read 0 and it would
+// pass no matter what the forger did -- which is exactly what happened to the
+// configurable tolerance test. primaryTipExplicit remains for the one case the
+// values cannot express on their own: an explicitly empty primary tip (slot 0,
+// no hash), which is an uninitialised primary chain.
 //
-// The values are used verbatim, including a frontier BEHIND the applied tip,
-// which is a real state the forger must handle and which a clamp would hide.
+// The values are used verbatim, including a primary tip BEHIND the applied
+// tip, which is a real state the forger must handle and which a clamp would
+// hide.
 func (c forgerTestSlotClock) PrimaryChainTip() ocommon.Point {
-	if !c.frontierExplicit && c.frontierSlot == 0 && c.frontierHash == nil {
+	if !c.primaryTipExplicit && c.primaryTipSlot == 0 && c.primaryTipHash == nil {
 		return ocommon.Point{Slot: c.chainTipSlot, Hash: c.chainTipHash}
 	}
-	return ocommon.Point{Slot: c.frontierSlot, Hash: c.frontierHash}
+	return ocommon.Point{Slot: c.primaryTipSlot, Hash: c.primaryTipHash}
 }
 
 func (forgerTestSlotClock) NextSlotTime() (time.Time, error) {
