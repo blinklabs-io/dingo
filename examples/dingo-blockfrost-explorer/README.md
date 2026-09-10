@@ -68,7 +68,10 @@ kubectl apply -f k8s/blockfrost-loadbalancer.yaml
 The LoadBalancer manifest exposes Blockfrost `3000`, UTxO RPC `9090`, Mesh
 `8080`, and metrics `12798`. The values set `DINGO_API_BIND_ADDR=0.0.0.0`
 because a Service reaches the pod's own IP rather than its loopback, and the
-API listeners bind `127.0.0.1` by default.
+API listeners bind `127.0.0.1` by default. A Dingo release that refuses an
+unauthenticated non-loopback API bind additionally needs `api.auth`
+configured against a mounted token file, which the pinned `0.70.0` image
+predates.
 
 ### Docker Compose
 
@@ -89,7 +92,10 @@ published on; set either to `127.0.0.1` before `docker compose up` for
 local-only bindings. Neither is the address Dingo binds inside its
 container: the API listeners bind `127.0.0.1` by default and a container's
 loopback is reachable only from inside that container, so the stack sets
-`DINGO_API_BIND_ADDR=0.0.0.0` in the shared Dingo environment.
+`DINGO_API_BIND_ADDR=0.0.0.0` in the shared Dingo environment. That bind is
+refused without authentication, so the stack also sets `DINGO_API_TOKEN`; the
+Vite dev server attaches it as `Authorization: Bearer` on proxied requests
+and the browser never sees it.
 
 ## Frontend
 

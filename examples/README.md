@@ -59,6 +59,19 @@ container, so the stack sets `DINGO_API_BIND_ADDR=0.0.0.0` in the shared
 Dingo environment — without it neither the published ports nor the
 `blockfrost-explorer` and `sundae-preview` services could reach the API.
 
+Dingo refuses a non-loopback API bind whose authentication is disabled, so
+the stack also configures token authentication. `DINGO_API_TOKEN` is a
+local-development shared secret: Compose writes it to
+`/run/secrets/dingo-api-token` in the Dingo containers, and the two frontend
+dev servers attach it as `Authorization: Bearer` on the requests they proxy,
+so it never reaches the browser. Change it in `.env` before exposing the
+stack, and send it yourself when calling the published ports directly:
+
+```sh
+curl -H "Authorization: Bearer dingo-local-development-token" \
+  http://127.0.0.1:3000/health
+```
+
 Reset the shared Dingo/Postgres state:
 
 ```sh

@@ -23,8 +23,10 @@ services:
   # needed: those listeners bind loopback by default, and a container's
   # loopback is reachable only from inside that container, so neither a
   # published port nor a sibling container on the same Docker network reaches
-  # a listener still on 127.0.0.1. examples/docker-compose.yml is a working
-  # API node with all three listeners wired up.
+  # a listener still on 127.0.0.1. A container-side wildcard is a
+  # non-loopback bind, so it also needs api.auth configured -- startup
+  # refuses an unauthenticated one. examples/docker-compose.yml is a working
+  # API node with all three listeners and a token wired up.
   # --------------------------------------------------------------------------
   dingo:
     build:

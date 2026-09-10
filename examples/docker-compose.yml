@@ -53,9 +53,20 @@ services:
       # either. Host-side exposure stays under DINGO_BIND_ADDR in the ports
       # list, which is the host address the ports are published on.
       DINGO_API_BIND_ADDR: "0.0.0.0"
+      # A non-loopback API bind is refused at startup unless authentication
+      # is configured, so the stack ships a development token. It reaches
+      # Dingo as a file rather than a variable because api.auth.token has no
+      # environment binding by design -- an inline secret would otherwise end
+      # up in the container's env dump.
+      DINGO_API_AUTH_MODE: token
+      DINGO_API_AUTH_TOKEN_FILE_PATH: /run/secrets/dingo-api-token
       DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT: "${DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT:-9090}"
       DINGO_PLUGINS_API_BLOCKFROST_CONFIG_PORT: "${DINGO_PLUGINS_API_BLOCKFROST_CONFIG_PORT:-3000}"
       DINGO_PLUGINS_API_MESH_CONFIG_PORT: "${DINGO_PLUGINS_API_MESH_CONFIG_PORT:-8080}"
+    configs:
+      - source: dingo-api-token
+        target: /run/secrets/dingo-api-token
+        mode: 0440
     volumes:
       - dingo-data:/data/db
       - dingo-ipc:/ipc
@@ -81,6 +92,10 @@ services:
       - "${DINGO_BIND_ADDR:-0.0.0.0}:${DINGO_PLUGINS_API_MESH_CONFIG_PORT:-8080}:${DINGO_PLUGINS_API_MESH_CONFIG_PORT:-8080}"
       - "${DINGO_BIND_ADDR:-0.0.0.0}:${DINGO_METRICS_PORT:-12798}:12798"
       - "${DINGO_BIND_ADDR:-0.0.0.0}:${DINGO_RELAY_PORT:-3001}:3001"
+    configs:
+      - source: dingo-api-token
+        target: /run/secrets/dingo-api-token
+        mode: 0440
     volumes:
       - dingo-data:/data/db
       - dingo-ipc:/ipc
@@ -113,6 +128,9 @@ services:
     environment:
       DINGO_BLOCKFROST_URL: http://dingo:${DINGO_PLUGINS_API_BLOCKFROST_CONFIG_PORT:-3000}
       DINGO_METRICS_URL: http://dingo:12798
+      # The Vite dev server attaches this to proxied requests; the browser
+      # never sees it. Metrics is not an API listener and needs no token.
+      DINGO_API_TOKEN: ${DINGO_API_TOKEN:-dingo-local-development-token}
     ports:
       - "${BLOCKFROST_EXPLORER_BIND_ADDR:-0.0.0.0}:${BLOCKFROST_EXPLORER_PORT:-5173}:5173"
     volumes:
@@ -129,11 +147,18 @@ services:
     command: ["sh", "-c", "npm ci && npm run dev"]
     environment:
       DINGO_UTXORPC_URL: http://dingo:${DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT:-9090}
+      DINGO_API_TOKEN: ${DINGO_API_TOKEN:-dingo-local-development-token}
     ports:
       - "${SUNDAE_PREVIEW_BIND_ADDR:-0.0.0.0}:${SUNDAE_PREVIEW_PORT:-5174}:5173"
     volumes:
       - ./dingo-sundae-preview:/app
       - sundae-preview-node-modules:/app/node_modules
+
+configs:
+  # Local-development shared secret, not a credential to reuse anywhere
+  # else. Override DINGO_API_TOKEN in .env before exposing the stack.
+  dingo-api-token:
+    content: "${DINGO_API_TOKEN:-dingo-local-development-token}"
 
 volumes:
   postgres-data:

@@ -29,7 +29,10 @@ cd examples/dingo-sundae-preview
 The example values pin Dingo `0.70.0`. The chart uses a `LoadBalancer` service
 and enables only `DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT`. They also set
 `DINGO_API_BIND_ADDR=0.0.0.0`, because a Service reaches the pod's own IP
-rather than its loopback and the API listeners bind `127.0.0.1` by default.
+rather than its loopback and the API listeners bind `127.0.0.1` by default. A
+Dingo release that refuses an unauthenticated non-loopback API bind
+additionally needs `api.auth` configured against a mounted token file, which
+the pinned `0.70.0` image predates.
 If the load balancer is not reachable from the dev host, keep the port-forward
 open while running the frontend.
 

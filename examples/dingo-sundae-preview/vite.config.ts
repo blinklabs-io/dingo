@@ -8,10 +8,17 @@ const messageSigningShim = fileURLToPath(
 
 const dingoTarget = process.env.DINGO_UTXORPC_URL ?? "http://127.0.0.1:9090";
 
+// Attached by the dev server to proxied requests, so the shared secret
+// stays server-side and never reaches the browser. Dingo refuses a
+// non-loopback API bind without authentication, which is what a container
+// bind is, so the Compose stack always sets this.
+const dingoToken = process.env.DINGO_API_TOKEN;
+
 const rpcProxy = {
   target: dingoTarget,
   changeOrigin: true,
   ws: false,
+  headers: dingoToken ? { Authorization: `Bearer ${dingoToken}` } : undefined,
 };
 
 export default defineConfig({
